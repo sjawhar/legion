@@ -287,6 +287,16 @@ type server struct {
 	// leaves them, keeps those. Only a test sets them, so a handler that outlives its lease or its
 	// limit is the test's choice rather than minutes of wall clock.
 	requestKeyLease, requestKeyRenewal, requestKeyRunLimit time.Duration
+	// drainReadLimit replaces how long a drain waits for the rest of a request's body
+	// (bodyDrainLimit, a minute); zero, which every server the deployment builds leaves it, keeps
+	// that. Only a test sets it, so a body that stalls is the test's choice rather than a minute of
+	// wall clock.
+	drainReadLimit time.Duration
+	// repeatFoundInFlight is called when the keyed layer finds a repeat's key held by a first
+	// request still running, before it reads a byte of the repeat's body; nil, which every server
+	// the deployment builds leaves it, calls nothing. Only a test sets it, to send the rest of a
+	// body it held back once the repeat is waiting on it.
+	repeatFoundInFlight func()
 	// slowWrites is the slow-write test hook's delay for each keyed method and path it was armed
 	// for (POST /api/v1/writes/_test/slow), by "METHOD path"; it holds nothing on a server without
 	// TestHooksEnabled, which mounts no hook.
@@ -468,7 +478,19 @@ func register(mux *http.ServeMux, deps Deps) *server {
 		handler = s.refuseUnstorableParameters(route.Pattern, handler)
 		if route.Method != http.MethodGet {
 			// Every layer above may answer before the body is read; the answer waits for the body.
-			handler = drainBeforeAnswer(route.Method, route.Pattern, handler)
+			//
+			// A client that asked to be told to continue before it sends its body (Expect:
+			// 100-continue) and is answered early sends none of it, and its connection closes after
+			// the answer, as long as nothing reads that body: net/http sends 100 Continue at the
+			// body's first read, and otherwise closes the connection once the answer begins rather
+			// than wait on a body that never comes. It decides from the expect-continue reader its
+			// own response keeps (go1.27's response.ecReader and reqBody), not from the request's
+			// Body, so it is not that trackTransactions hands this layer a copy of the request: the
+			// handling holds with the drain's body put on net/http's own request. What keeps the body
+			// unread is the drain's guard (drainingWriter.askedContinue) and the keyed layer's
+			// (answerDrainedRepeat), which TestAnEarlyAnswerToAClientWaitingToContinueAsksForNoBody
+			// pins: without either, the client is told to continue and the answer waits on its body.
+			handler = s.drainBeforeAnswer(route.Method, route.Pattern, handler)
 		}
 		mux.HandleFunc(route.Method+" "+route.Pattern, trackTransactions(handler))
 	}

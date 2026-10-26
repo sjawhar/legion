@@ -40,10 +40,12 @@ import (
 //     context the client's cancellation does not reach. A repeat that finds it answers from it
 //     instead: a different request under the key is 422 KEY_REUSED, naming the request that used
 //     it; a first request still running (its lease, IdempotencyLease, renewed every
-//     keyedLeaseRenewal while it runs) is 409 KEY_IN_FLIGHT with Retry-After: 1, answered before
-//     the repeat's body is spooled (requestKeyInFlight), once that body is read off the
-//     connection and discarded (drainBeforeAnswer); a finished one is replayed, its stored
-//     status and body with Idempotency-Replayed: ?1, and the handler does not run again.
+//     keyedLeaseRenewal while it runs) is 409 KEY_IN_FLIGHT with Retry-After: 1; a finished one is
+//     replayed, its stored status and body with Idempotency-Replayed: ?1, and the handler does not
+//     run again. A repeat that arrives while its first request still runs is never spooled
+//     (requestKeyInFlight): its body is read off the connection and discarded, and the repeat is
+//     judged by its digest once that body has arrived, by what the key holds then
+//     (answerDrainedRepeat).
 //   - The handler finishes whatever its client does: it runs on the request's context with the
 //     client's cancellation taken off, bounded by keyedHandlerLimit and counted in the server's
 //     background wait, so a client that gives up and asks again waits on the first run rather than
@@ -253,16 +255,20 @@ func (s *server) keyedWrites(method, pattern string, handler http.HandlerFunc, r
 			return
 		}
 		login := requestKeyLogin(actor, human)
-		// A repeat whose first request still runs is told so before its body is spooled: a slow
-		// upload's repeats would each be written to disk again only to be told to wait. Its body
-		// is still read off the connection, and discarded, before the answer (drainBeforeAnswer).
-		if inFlight, err := s.requestKeyInFlight(r.Context(), login, key); err != nil || inFlight {
+		// A repeat whose first request still runs is not spooled: a slow upload's repeats would
+		// each be written to disk again only to be told to wait. Its body is read off the
+		// connection and discarded, and the repeat is judged once it has arrived.
+		inFlight, err := s.requestKeyInFlight(r.Context(), login, key)
+		if err != nil {
 			w.Header().Set(contracts.IdempotencyKeyHeader, key)
-			if err != nil {
-				s.writeHandlerError(w, err)
-			} else {
-				writeKeyInFlight(w, key)
+			s.writeHandlerError(w, err)
+			return
+		}
+		if inFlight {
+			if s.repeatFoundInFlight != nil {
+				s.repeatFoundInFlight()
 			}
+			s.answerDrainedRepeat(w, r, method, pattern, wildcards, login, key, replay)
 			return
 		}
 		digest := sha256.New()
@@ -539,18 +545,12 @@ func (w spillWriter) Write(p []byte) (int, error) {
 }
 
 // readKeyedBody reads body into a keyedBody, at most one byte past limit, the route's own
-// (routeBodyLimit), writing it to digest as it goes; for a multipart contentType, with its boundary
-// masked (boundaryMask). A body that fits in keyedBodyInMemory never touches the disk: a route
-// whose limit is no more than that holds even its one byte past the limit in memory.
+// (routeBodyLimit), writing it to digest as it goes (bodyDigest). A body that fits in
+// keyedBodyInMemory never touches the disk: a route whose limit is no more than that holds even its
+// one byte past the limit in memory.
 func readKeyedBody(body io.Reader, digest io.Writer, contentType string, limit int64) (*keyedBody, error) {
 	read := &keyedBody{}
-	target := digest
-	var mask *boundaryMask
-	if mediaType, parameters, err := mime.ParseMediaType(contentType); err == nil &&
-		strings.HasPrefix(mediaType, "multipart/") && parameters["boundary"] != "" {
-		mask = &boundaryMask{w: digest, boundary: []byte(parameters["boundary"])}
-		target = mask
-	}
+	target, flush := bodyDigest(digest, contentType)
 	source := io.TeeReader(io.LimitReader(body, limit+1), target)
 	inMemory := int64(keyedBodyInMemory)
 	if limit <= inMemory {
@@ -575,10 +575,33 @@ func readKeyedBody(body io.Reader, digest io.Writer, contentType string, limit i
 			return read, err
 		}
 	}
-	if mask != nil {
-		mask.flush()
-	}
+	flush()
 	return read, nil
+}
+
+// digestKeyedBody reads body to its end, at most one byte past limit, writing it to digest as
+// readKeyedBody does and keeping none of it, and answers how much it read: a repeat judged by its
+// digest alone (answerDrainedRepeat).
+func digestKeyedBody(body io.Reader, digest io.Writer, contentType string, limit int64) (int64, error) {
+	target, flush := bodyDigest(digest, contentType)
+	n, err := io.Copy(io.Discard, io.TeeReader(io.LimitReader(body, limit+1), target))
+	if err != nil {
+		return n, err
+	}
+	flush()
+	return n, nil
+}
+
+// bodyDigest is what a keyed body is written to for its digest: digest itself, or for a multipart
+// contentType a boundaryMask over it, whose flush writes the tail it holds back once the body has
+// ended.
+func bodyDigest(digest io.Writer, contentType string) (target io.Writer, flush func()) {
+	if mediaType, parameters, err := mime.ParseMediaType(contentType); err == nil &&
+		strings.HasPrefix(mediaType, "multipart/") && parameters["boundary"] != "" {
+		mask := &boundaryMask{w: digest, boundary: []byte(parameters["boundary"])}
+		return mask, mask.flush
+	}
+	return digest, func() {}
 }
 
 // reader is the body again, from its first byte.
@@ -706,8 +729,8 @@ func (held heldRequestKey) storedSuccess() []byte {
 
 // requestKeyInFlight reports whether login's key is held by a first request still running: a row
 // inside the key's window, unanswered, its lease live - the KEY_IN_FLIGHT claimRequestKey would
-// answer, judged before the request's body is spooled. It names no digest, so a different request
-// under a key still in flight is told to wait too, and KEY_REUSED once the first has answered.
+// answer, looked up before the request's body is spooled. It names no digest: the repeat it finds
+// is judged by its digest once its body has arrived (answerDrainedRepeat).
 func (s *server) requestKeyInFlight(ctx context.Context, login, key string) (bool, error) {
 	var inFlight bool
 	err := s.deps.Store.Pool.QueryRow(ctx, `
@@ -761,7 +784,6 @@ func (s *server) claimRequestKey(
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), keyedBookkeeping)
 	defer cancel()
 	pool := s.deps.Store.Pool
-	lease, ttl := s.keyLease().Seconds(), contracts.IdempotencyKeyTTL.Seconds()
 	for range keyedClaimTries {
 		claim = requestKeyClaim{login: login, key: key}
 		err := pool.QueryRow(ctx, `
@@ -777,55 +799,27 @@ func (s *server) claimRequestKey(
 			s.writeHandlerError(w, fmt.Errorf("claim an idempotency key: %w", err))
 			return claim, true
 		}
-		var held heldRequestKey
-		err = pool.QueryRow(ctx, `
-			select request_digest, method, path, attempt, status, headers, response,
-			       response is not null, recovery, committed_at is not null,
-			       leased_at is null or leased_at < now() - make_interval(secs => $3),
-			       created_at < now() - make_interval(secs => $4)
-			from request_keys where login = $1 and idempotency_key = $2
-		`, login, key, lease, ttl).Scan(
-			&held.digest, &held.method, &held.path, &held.attempt, &held.status, &held.headers,
-			&held.response, &held.kept, &held.recovery, &held.committed, &held.lapsed, &held.expired,
-		)
-		if errors.Is(err, pgx.ErrNoRows) {
-			continue
-		}
+		held, found, err := s.readHeldRequestKey(ctx, login, key)
 		if err != nil {
-			s.writeHandlerError(w, fmt.Errorf("read an idempotency key: %w", err))
+			s.writeHandlerError(w, err)
 			return claim, true
 		}
-		switch held.state(digest, replay != nil) {
-		case keyExpired:
+		if !found {
+			continue
+		}
+		state := held.state(digest, replay != nil)
+		if answerHeldKey(w, r, key, held, state, replay) {
+			return claim, true
+		}
+		if state == keyExpired {
 			if _, err := pool.Exec(ctx, `
 				delete from request_keys
 				where login = $1 and idempotency_key = $2 and created_at < now() - make_interval(secs => $3)
-			`, login, key, ttl); err != nil {
+			`, login, key, contracts.IdempotencyKeyTTL.Seconds()); err != nil {
 				s.writeHandlerError(w, fmt.Errorf("expire an idempotency key: %w", err))
 				return claim, true
 			}
 			continue
-		case keyReused:
-			writeError(w, contracts.IdempotencyKeyReused, http.StatusUnprocessableEntity, fmt.Sprintf(
-				"%s %q was already used for %s %s with different content; this request was not run: a changed request needs a new key",
-				contracts.IdempotencyKeyHeader, key, held.method, held.path))
-			return claim, true
-		case keyRecovered:
-			w.Header().Set(contracts.IdempotencyReplayedHeader, "?1")
-			replay(w, r, held.recovery, held.storedSuccess())
-			return claim, true
-		case keyAnswered:
-			replayStoredAnswer(w, held)
-			return claim, true
-		case keyInFlight:
-			writeKeyInFlight(w, key)
-			return claim, true
-		case keyCommitted:
-			// The holder committed its write and its process died, or it failed, before its answer
-			// was kept: running the request again would make the write twice.
-			writeKeyCommitted(w, key, held)
-			return claim, true
-		case keyAbandoned:
 		}
 		// The holder's lease lapsed with nothing committed: its process died before its write did,
 		// so this attempt takes the key over and runs the request.
@@ -845,6 +839,123 @@ func (s *server) claimRequestKey(
 	}
 	writeKeyInFlight(w, key)
 	return claim, true
+}
+
+// readHeldRequestKey reads the row login's key holds; found is false when it holds none.
+func (s *server) readHeldRequestKey(ctx context.Context, login, key string) (held heldRequestKey, found bool, err error) {
+	err = s.deps.Store.Pool.QueryRow(ctx, `
+		select request_digest, method, path, attempt, status, headers, response,
+		       response is not null, recovery, committed_at is not null,
+		       leased_at is null or leased_at < now() - make_interval(secs => $3),
+		       created_at < now() - make_interval(secs => $4)
+		from request_keys where login = $1 and idempotency_key = $2
+	`, login, key, s.keyLease().Seconds(), contracts.IdempotencyKeyTTL.Seconds()).Scan(
+		&held.digest, &held.method, &held.path, &held.attempt, &held.status, &held.headers,
+		&held.response, &held.kept, &held.recovery, &held.committed, &held.lapsed, &held.expired,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return held, false, nil
+	}
+	if err != nil {
+		return held, false, fmt.Errorf("read an idempotency key: %w", err)
+	}
+	return held, true, nil
+}
+
+// answerHeldKey answers a repeat from the row its key holds, in state, and reports that it did: a
+// different request under the key is refused, a recovery point replayed by its route, an answer
+// replayed, a first request still running told so, and a write that landed and lost its answer said
+// to have landed. A key past its window and one whose holder died with nothing committed answer
+// nothing: the repeat runs the request there.
+func answerHeldKey(w http.ResponseWriter, r *http.Request, key string, held heldRequestKey, state keyState, replay keyedReplay) bool {
+	switch state {
+	case keyReused:
+		writeError(w, contracts.IdempotencyKeyReused, http.StatusUnprocessableEntity, fmt.Sprintf(
+			"%s %q was already used for %s %s with different content; this request was not run: a changed request needs a new key",
+			contracts.IdempotencyKeyHeader, key, held.method, held.path))
+	case keyRecovered:
+		w.Header().Set(contracts.IdempotencyReplayedHeader, "?1")
+		replay(w, r, held.recovery, held.storedSuccess())
+	case keyAnswered:
+		replayStoredAnswer(w, held)
+	case keyInFlight:
+		writeKeyInFlight(w, key)
+	case keyCommitted:
+		// The holder committed its write and its process died, or it failed, before its answer
+		// was kept: running the request again would make the write twice.
+		writeKeyCommitted(w, key, held)
+	default:
+		return false
+	}
+	return true
+}
+
+// answerDrainedRepeat answers a repeat whose key a first request still running held when it
+// arrived (requestKeyInFlight). Its body is read off the connection and discarded, never spooled,
+// and written on the way into the digest any keyed request is judged by; then the key is read again
+// and the repeat judged by that digest as claimRequestKey judges one (answerHeldKey), since a body
+// that takes a while to arrive outlives what the key held when it began: a first request that
+// answered meanwhile is replayed, a request whose body differs is 422 KEY_REUSED whether the first
+// has answered or not, and a first still running is 409 KEY_IN_FLIGHT. A key its first request
+// gave up meanwhile - released after a 5xx, its holder dead with nothing committed, its window past
+// - would run the request, which this one cannot, its body gone: it is told to ask again
+// (writeKeyFreed), and that ask runs it.
+//
+// A client that asked to be told to continue before it sends its body (Expect: 100-continue) is
+// answered 409 KEY_IN_FLIGHT at once, with nothing read: it has sent nothing, so the answer is as
+// fresh as the key, and a read would ask it for its whole body only to judge it.
+//
+// The body is read for at most drainTime (readFor): one that stops arriving is answered 409
+// KEY_IN_FLIGHT, which is what the key said, and the connection closes after it. A body past the
+// route's limit is answered as its route answers one (bodyTooLarge), unkeyed, as a request whose
+// body is past the limit runs unkeyed.
+func (s *server) answerDrainedRepeat(
+	w http.ResponseWriter, r *http.Request, method, pattern string, wildcards []string, login, key string, replay keyedReplay,
+) {
+	if expectsContinue(r) {
+		w.Header().Set(contracts.IdempotencyKeyHeader, key)
+		writeKeyInFlight(w, key)
+		return
+	}
+	limit := routeBodyLimit(method, pattern)
+	digest := sha256.New()
+	writeRequestFields(digest, r, method, pattern, wildcards)
+	lift := s.readFor(w)
+	size, err := digestKeyedBody(r.Body, digest, r.Header.Get("Content-Type"), limit)
+	lift()
+	switch {
+	case err != nil:
+		w.Header().Set("Connection", "close")
+		w.Header().Set(contracts.IdempotencyKeyHeader, key)
+		writeKeyInFlight(w, key)
+		return
+	case size > limit:
+		tooLarge := bodyTooLarge(method, pattern)
+		writeError(w, tooLarge.code, tooLarge.status, tooLarge.message)
+		return
+	}
+	w.Header().Set(contracts.IdempotencyKeyHeader, key)
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), keyedBookkeeping)
+	defer cancel()
+	held, found, err := s.readHeldRequestKey(ctx, login, key)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	if found && answerHeldKey(w, r, key, held, held.state(hex.EncodeToString(digest.Sum(nil)), replay != nil), replay) {
+		return
+	}
+	writeKeyFreed(w, key)
+}
+
+// writeKeyFreed answers a repeat whose body was read and not kept while its first request gave the
+// key up (answerDrainedRepeat): it was not run, and is told to ask again under the key, as a repeat
+// whose first request still runs is, so the client's retry runs it.
+func writeKeyFreed(w http.ResponseWriter, key string) {
+	w.Header().Set("Retry-After", "1")
+	writeError(w, contracts.IdempotencyKeyInFlight, http.StatusConflict, fmt.Sprintf(
+		"the first request under %s %q ended while this one's body arrived, and this one, whose body was not kept, was not run: ask again under the same key",
+		contracts.IdempotencyKeyHeader, key))
 }
 
 // writeKeyInFlight answers a repeat whose first request still holds the key.

@@ -569,8 +569,14 @@ type sentUpload struct {
 // multipart body of its own - a boundary of its own, as every attempt of a client's has.
 func sendBigUpload(t *testing.T, handler http.Handler, issueKey, key string) sentUpload {
 	t.Helper()
+	return sendUpload(t, handler, issueKey, key, bytes.Repeat([]byte("a"), 4<<20))
+}
+
+// sendUpload posts file to the issue as big.bin, as sendBigUpload posts its 4 MiB.
+func sendUpload(t *testing.T, handler http.Handler, issueKey, key string, file []byte) sentUpload {
+	t.Helper()
 	body, bodyType, err := apitest.MultipartUpload(map[string]string{"name": "big.bin"}, "big.bin",
-		"application/octet-stream", bytes.Repeat([]byte("a"), 4<<20))
+		"application/octet-stream", file)
 	if err != nil {
 		t.Fatal(err)
 	}

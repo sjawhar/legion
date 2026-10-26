@@ -5,12 +5,15 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -18,6 +21,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/api/apitest"
 	"github.com/sjawhar/envoy/internal/dispatch/files/filestest"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
 // sendWholeBodyThenRead posts body to target over a connection of its own, sending all of it
@@ -25,16 +29,32 @@ import (
 // writes while body is still unread, and closes the connection after, never reaches such a client.
 func sendWholeBodyThenRead(t *testing.T, address, target string, header http.Header, body []byte) (*http.Response, []byte) {
 	t.Helper()
+	return sendPartOfBody(t, address, target, header, len(body), body).answer()
+}
+
+// heldBackBody is a POST over a connection of its own whose head and the first part of whose body
+// are sent, the rest held back until the test sends it: a body still arriving over a slow link, or
+// one that has stopped.
+type heldBackBody struct {
+	t          *testing.T
+	connection net.Conn
+	reader     *bufio.Reader
+}
+
+// sendPartOfBody posts a body of size bytes to target, sending its head and first, and none of
+// the rest. The connection gives up on the server after 30 s.
+func sendPartOfBody(t *testing.T, address, target string, header http.Header, size int, first []byte) *heldBackBody {
+	t.Helper()
 	connection, err := net.Dial("tcp", address)
 	if err != nil {
 		t.Fatalf("dial %s: %v", address, err)
 	}
-	defer connection.Close()
-	if err := connection.SetDeadline(time.Now().Add(60 * time.Second)); err != nil {
+	t.Cleanup(func() { connection.Close() })
+	if err := connection.SetDeadline(time.Now().Add(30 * time.Second)); err != nil {
 		t.Fatal(err)
 	}
 	var head bytes.Buffer
-	fmt.Fprintf(&head, "POST %s HTTP/1.1\r\nHost: %s\r\nContent-Length: %d\r\n", target, address, len(body))
+	fmt.Fprintf(&head, "POST %s HTTP/1.1\r\nHost: %s\r\nContent-Length: %d\r\n", target, address, size)
 	if err := header.Write(&head); err != nil {
 		t.Fatal(err)
 	}
@@ -42,19 +62,54 @@ func sendWholeBodyThenRead(t *testing.T, address, target string, header http.Hea
 	if _, err := connection.Write(head.Bytes()); err != nil {
 		t.Fatalf("send the request's head: %v", err)
 	}
-	if _, err := connection.Write(body); err != nil {
-		t.Fatalf("send the whole %d-byte body before reading the answer: %v", len(body), err)
+	if _, err := connection.Write(first); err != nil {
+		t.Fatalf("send %d bytes of the %d-byte body before reading the answer: %v", len(first), size, err)
 	}
-	response, err := http.ReadResponse(bufio.NewReader(connection), nil)
+	return &heldBackBody{t: t, connection: connection, reader: bufio.NewReader(connection)}
+}
+
+// finish sends the rest of the body and reads the answer.
+func (b *heldBackBody) finish(rest []byte) (*http.Response, []byte) {
+	b.t.Helper()
+	if _, err := b.connection.Write(rest); err != nil {
+		b.t.Fatalf("send the rest of the body: %v", err)
+	}
+	return b.answer()
+}
+
+// answer reads the first answer the server writes, an interim 1xx included.
+func (b *heldBackBody) answer() (*http.Response, []byte) {
+	b.t.Helper()
+	response, err := http.ReadResponse(b.reader, nil)
 	if err != nil {
-		t.Fatalf("read the answer once the body was sent: %v", err)
+		b.t.Fatalf("read the answer: %v", err)
 	}
 	defer response.Body.Close()
 	answer, err := io.ReadAll(response.Body)
 	if err != nil {
-		t.Fatalf("read the answer's body: %v", err)
+		b.t.Fatalf("read the answer's body: %v", err)
 	}
 	return response, answer
+}
+
+// closedByServer reports whether the server closed the connection after its answer: the next read
+// meets the connection's end.
+func (b *heldBackBody) closedByServer() bool {
+	b.t.Helper()
+	if err := b.connection.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		b.t.Fatal(err)
+	}
+	_, err := b.reader.ReadByte()
+	return errors.Is(err, io.EOF) || errors.Is(err, syscall.ECONNRESET)
+}
+
+// refusalCode is the code of a JSON refusal's body, or "" for any other body.
+func refusalCode(body []byte) string {
+	var refusal struct {
+		Code string `json:"code"`
+	}
+	_ = json.Unmarshal(body, &refusal)
+	return refusal.Code
 }
 
 // createClosedIssue creates an issue in the project createArtifactIssue made, and closes it.
@@ -74,7 +129,9 @@ func createClosedIssue(t *testing.T, handler http.Handler) model.Issue {
 // closed issue - reaches the client as that answer over a real connection: a client that sends its
 // whole multi-megabyte body before it reads, as WebKit and Firefox do, and net/http's own client,
 // which reads while it sends. Without the drain net/http writes the answer with the body unread and
-// closes the connection under the client still sending, which resets it.
+// closes the connection under the client still sending, which resets it. The repeat is the first
+// upload sent again, its file the same and its boundary its own, since a repeat is judged by its
+// body once it has arrived (TestARepeatFoundInFlightIsJudgedOnceItsBodyHasArrived).
 func TestAnEarlyAnswerToAnUploadReachesAClientThatSendsItsWholeBodyFirst(t *testing.T) {
 	held := &heldFileStore{Memory: filestest.NewMemory(), reached: make(chan struct{})}
 	handler, _, _ := newTestServer(t, testServerOptions{files: held})
@@ -87,8 +144,9 @@ func TestAnEarlyAnswerToAnUploadReachesAClientThatSendsItsWholeBodyFirst(t *test
 
 	// The first upload under the key runs in this process and stops at the file store, so the key
 	// stays in flight while the repeats below arrive.
+	file := bytes.Repeat([]byte("a"), 24<<20)
 	first := make(chan sentUpload, 1)
-	go func() { first <- sendBigUpload(t, handler, running.Key, "running-upload") }()
+	go func() { first <- sendUpload(t, handler, running.Key, "running-upload", file) }()
 	select {
 	case <-held.reached:
 	case <-time.After(10 * time.Second):
@@ -104,7 +162,7 @@ func TestAnEarlyAnswerToAnUploadReachesAClientThatSendsItsWholeBodyFirst(t *test
 	})
 
 	body, bodyType, err := apitest.MultipartUpload(map[string]string{"name": "big.bin"}, "big.bin",
-		"application/octet-stream", bytes.Repeat([]byte("a"), 24<<20))
+		"application/octet-stream", file)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -185,13 +243,13 @@ func TestAnEarlyAnswerDrainsTheBodyUpToTheRoutesLimit(t *testing.T) {
 	handler, database, _ := newTestServer(t, testServerOptions{files: filestest.NewMemory()})
 	open := createArtifactIssue(t, handler)
 	closed := createClosedIssue(t, handler)
-	// A first upload under the key that is still running: a row in flight, inside its lease.
-	if _, err := database.Pool.Exec(context.Background(), `
-		insert into request_keys (login, idempotency_key, request_digest, method, path)
-		values ('alice', 'held', 'digest', 'POST', $1)
-	`, "/api/v1/issues/"+open.Key+"/artifacts"); err != nil {
-		t.Fatalf("hold a key in flight: %v", err)
-	}
+	// A first upload under the key that is still running: a row in flight, inside its lease, held
+	// for the request the repeat inside the limit sends again.
+	const uploadPattern = "/api/v1/issues/{key}/artifacts"
+	repeated := httptest.NewRequest(http.MethodPost, "/api/v1/issues/"+open.Key+"/artifacts", endlessBody(keyedBodyMax))
+	repeated.Header.Set("Content-Type", "multipart/form-data; boundary=x")
+	repeated.SetPathValue("key", open.Key)
+	holdKeyInFlight(t, database, "held", repeated.URL.Path, requestDigestOf(t, repeated, uploadPattern))
 
 	multipartBody := map[string]string{"Content-Type": "multipart/form-data; boundary=x"}
 	keyed := func(key string, header map[string]string) map[string]string {
@@ -280,6 +338,274 @@ func TestAnEarlyAnswerDrainsTheBodyUpToTheRoutesLimit(t *testing.T) {
 				if !strings.Contains(response.Header().Get("Content-Type"), "application/json") {
 					t.Fatalf("the 413's Content-Type = %q, want JSON", response.Header().Get("Content-Type"))
 				}
+			}
+		})
+	}
+}
+
+// holdKeyInFlight leaves alice's key held by a first request to path that is still running: a row
+// in flight, inside its lease, judged by digest.
+func holdKeyInFlight(t *testing.T, database *store.Store, key, path, digest string) {
+	t.Helper()
+	if _, err := database.Pool.Exec(context.Background(), `
+		insert into request_keys (login, idempotency_key, request_digest, method, path)
+		values ('alice', $1, $2, 'POST', $3)
+	`, key, digest, path); err != nil {
+		t.Fatalf("hold the key %s in flight: %v", key, err)
+	}
+}
+
+// heldFirstRun is a key's first run in TestARepeatFoundInFlightIsJudgedOnceItsBodyHasArrived: it
+// says it is running, waits for its release, and answers 201, or 503 when it fails. A later run of
+// the key answers at once.
+type heldFirstRun struct {
+	running chan struct{}
+	release chan struct{}
+	fails   bool
+	once    sync.Once
+}
+
+// keyedAnswered is what a client read back from a keyed write.
+type keyedAnswered struct {
+	status int
+	body   string
+	err    error
+}
+
+// INFRA-258 (FinalReview5 L3, gate-fixes S21). A repeat whose key a first request still holds when
+// it arrives is judged once its body has arrived, by that body's digest, as a fresh repeat is - not
+// by what the key held before the body came, which a slow upload outlives. A first request that
+// answered while the repeat's body arrived is replayed that answer; a request whose body differs
+// from the first's is 422 KEY_REUSED, whether the first has answered or still runs; a first still
+// running is 409 KEY_IN_FLIGHT; and one that released its key meanwhile (a 5xx) leaves the repeat
+// to ask again, 409 KEY_IN_FLIGHT, since the repeat's body was read and not kept: that ask runs the
+// request.
+func TestARepeatFoundInFlightIsJudgedOnceItsBodyHasArrived(t *testing.T) {
+	cases := []struct {
+		name        string
+		key         string
+		repeat      string
+		finishFirst bool
+		firstFails  bool
+		status      int
+		code        string
+	}{
+		{
+			name: "a repeat whose first request answers while its body arrives is replayed that answer", key: "answered",
+			repeat: `{"n":1}`, finishFirst: true, status: http.StatusCreated,
+		},
+		{
+			name: "a different request under a key whose first request answers while its body arrives", key: "answered-other",
+			repeat: `{"n":2}`, finishFirst: true, status: http.StatusUnprocessableEntity, code: contracts.IdempotencyKeyReused,
+		},
+		{
+			name: "a different request under a key whose first request still runs", key: "running-other",
+			repeat: `{"n":2}`, status: http.StatusUnprocessableEntity, code: contracts.IdempotencyKeyReused,
+		},
+		{
+			name: "a repeat whose first request still runs once its body has arrived", key: "running",
+			repeat: `{"n":1}`, status: http.StatusConflict, code: contracts.IdempotencyKeyInFlight,
+		},
+		{
+			name: "a repeat whose first request failed while its body arrived", key: "failed",
+			repeat: `{"n":1}`, finishFirst: true, firstFails: true, status: http.StatusConflict, code: contracts.IdempotencyKeyInFlight,
+		},
+	}
+	firsts := map[string]*heldFirstRun{}
+	for _, judged := range cases {
+		firsts[judged.key] = &heldFirstRun{running: make(chan struct{}), release: make(chan struct{}), fails: judged.firstFails}
+	}
+	rig := newKeyedRig(t, func(run int32, w http.ResponseWriter, r *http.Request) {
+		first := firsts[r.Header.Get(contracts.IdempotencyKeyHeader)]
+		held := false
+		first.once.Do(func() { held = true })
+		if held {
+			close(first.running)
+			<-first.release
+			if first.fails {
+				writeError(w, "BROKEN", http.StatusServiceUnavailable, "the first run failed")
+				return
+			}
+		}
+		answerRun(run, w, r)
+	})
+	found := make(chan struct{}, 1)
+	rig.server.repeatFoundInFlight = func() { found <- struct{}{} }
+	server := httptest.NewServer(rig.handler)
+	t.Cleanup(server.Close)
+	const path = "/test/a/writes"
+
+	for _, judged := range cases {
+		t.Run(judged.name, func(t *testing.T) {
+			first := firsts[judged.key]
+			release := sync.OnceFunc(func() { close(first.release) })
+			t.Cleanup(release)
+			firstAnswer := make(chan keyedAnswered, 1)
+			go func() {
+				status, body, _, err := keyedPost(server, path, `{"n":1}`, judged.key, 30*time.Second)
+				firstAnswer <- keyedAnswered{status: status, body: body, err: err}
+			}()
+			select {
+			case <-first.running:
+			case <-time.After(10 * time.Second):
+				t.Fatal("the first request never ran")
+			}
+			header := http.Header{}
+			header.Set("Content-Type", "application/json")
+			header.Set("X-Dispatch-User", "alice")
+			header.Set(contracts.IdempotencyKeyHeader, judged.key)
+			repeat := sendPartOfBody(t, server.Listener.Addr().String(), path, header, len(judged.repeat), []byte(judged.repeat[:5]))
+			select {
+			case <-found:
+			case <-time.After(10 * time.Second):
+				t.Fatal("the repeat never found its key in flight")
+			}
+			finishFirst := func() keyedAnswered {
+				t.Helper()
+				release()
+				select {
+				case answered := <-firstAnswer:
+					if answered.err != nil {
+						t.Fatalf("the first request: %v", answered.err)
+					}
+					return answered
+				case <-time.After(10 * time.Second):
+					t.Fatal("the first request never answered once released")
+				}
+				return keyedAnswered{}
+			}
+			var firstGot keyedAnswered
+			if judged.finishFirst {
+				firstGot = finishFirst()
+			}
+			response, body := repeat.finish([]byte(judged.repeat[5:]))
+			if !judged.finishFirst {
+				firstGot = finishFirst()
+			}
+
+			if response.StatusCode != judged.status || refusalCode(body) != judged.code {
+				t.Fatalf("the repeat: status=%d body=%s, want %d %s", response.StatusCode, body, judged.status, judged.code)
+			}
+			if echoed := response.Header.Get(contracts.IdempotencyKeyHeader); echoed != judged.key {
+				t.Fatalf("the repeat's answer echoes the key as %q, want %q", echoed, judged.key)
+			}
+			if judged.status == http.StatusConflict && response.Header.Get("Retry-After") != "1" {
+				t.Fatalf("the repeat's 409 carries Retry-After %q, want 1", response.Header.Get("Retry-After"))
+			}
+			if judged.status == http.StatusCreated &&
+				(response.Header.Get(contracts.IdempotencyReplayedHeader) != "?1" || string(body) != firstGot.body) {
+				t.Fatalf("the repeat answered %s replayed=%q, want the first request's answer %s replayed",
+					body, response.Header.Get(contracts.IdempotencyReplayedHeader), firstGot.body)
+			}
+			if judged.firstFails {
+				if firstGot.status != http.StatusServiceUnavailable {
+					t.Fatalf("the first request answered %d %s, want its 503", firstGot.status, firstGot.body)
+				}
+				status, again, header, err := keyedPost(server, path, judged.repeat, judged.key, 10*time.Second)
+				if err != nil || status != http.StatusCreated || header.Get(contracts.IdempotencyReplayedHeader) != "" {
+					t.Fatalf("the ask after the 409: %d %s replayed=%q (%v), want the request run",
+						status, again, header.Get(contracts.IdempotencyReplayedHeader), err)
+				}
+			}
+		})
+	}
+}
+
+// INFRA-258 (FinalReview5 L3, gate-fixes S21). A drain is bounded in time as well as in bytes: a
+// body that stops arriving is waited for at most bodyDrainLimit, and then the answer goes out as it
+// stood, with the connection closed after it, rather than the request held open for as long as its
+// client cares to. Both drains: the one every early answer waits behind (drainBeforeAnswer), here
+// an upload to a closed issue, and the keyed layer's reading of a repeat found in flight.
+func TestADrainStopsWaitingForABodyThatStalls(t *testing.T) {
+	handler, database, _, served := newRegisteredTestServer(t, testServerOptions{files: filestest.NewMemory()})
+	served.drainReadLimit = time.Second
+	server := httptest.NewServer(handler)
+	t.Cleanup(server.Close)
+	open := createArtifactIssue(t, handler)
+	closed := createClosedIssue(t, handler)
+	toOpen := "/api/v1/issues/" + open.Key + "/artifacts"
+	holdKeyInFlight(t, database, "held", toOpen, "digest")
+	for _, stalled := range []struct {
+		name, target, key, code string
+	}{
+		{name: "an upload to a closed issue", target: "/api/v1/issues/" + closed.Key + "/artifacts", code: "ISSUE_CLOSED"},
+		{name: "a repeat whose first upload still runs", target: toOpen, key: "held", code: contracts.IdempotencyKeyInFlight},
+	} {
+		t.Run(stalled.name, func(t *testing.T) {
+			header := http.Header{}
+			header.Set("Content-Type", "multipart/form-data; boundary=x")
+			header.Set("X-Dispatch-User", "alice")
+			if stalled.key != "" {
+				header.Set(contracts.IdempotencyKeyHeader, stalled.key)
+			}
+			started := time.Now()
+			body := sendPartOfBody(t, server.Listener.Addr().String(), stalled.target, header, 4<<20, []byte("--x\r\n"))
+			response, answer := body.answer()
+			elapsed := time.Since(started)
+			if response.StatusCode != http.StatusConflict || refusalCode(answer) != stalled.code {
+				t.Fatalf("status=%d body=%s, want 409 %s", response.StatusCode, answer, stalled.code)
+			}
+			if elapsed < time.Second || elapsed > 10*time.Second {
+				t.Fatalf("answered %v after the body stalled, want once the drain's second was up", elapsed)
+			}
+			if !response.Close || !body.closedByServer() {
+				t.Fatalf("the answer to a stalled body left the connection open (Connection: %q)", response.Header.Get("Connection"))
+			}
+		})
+	}
+}
+
+// INFRA-258 (FinalReview5 L5, gate-fixes S22). A client that asks to be told to continue before it
+// sends its body (Expect: 100-continue) and is refused early gets the refusal with none of its body
+// sent and no 100 Continue ahead of it, and the connection closes after it. Nothing of Dispatch
+// reads such a body: the drain leaves it (drainBeforeAnswer), and the keyed layer answers a repeat
+// found in flight at once rather than reading it to judge its digest. A read would have net/http
+// send 100 Continue and wait for the whole body before the refusal went out.
+func TestAnEarlyAnswerToAClientWaitingToContinueAsksForNoBody(t *testing.T) {
+	handler, database, _ := newTestServer(t, testServerOptions{files: filestest.NewMemory()})
+	server := httptest.NewServer(handler)
+	t.Cleanup(server.Close)
+	open := createArtifactIssue(t, handler)
+	closed := createClosedIssue(t, handler)
+	toOpen := "/api/v1/issues/" + open.Key + "/artifacts"
+	holdKeyInFlight(t, database, "held", toOpen, "digest")
+	for _, early := range []struct {
+		name, target, key, contentType, login, code string
+	}{
+		{
+			name: "an upload to a closed issue", target: "/api/v1/issues/" + closed.Key + "/artifacts",
+			contentType: "multipart/form-data; boundary=x", code: "ISSUE_CLOSED",
+		},
+		{
+			name: "a repeat whose first upload still runs", target: toOpen, key: "held",
+			contentType: "multipart/form-data; boundary=x", code: contracts.IdempotencyKeyInFlight,
+		},
+		{
+			name: "a message pressed by another login", target: "/api/v1/issues/" + open.Key + "/messages",
+			contentType: "application/json", login: "bob", code: contracts.DispatchLoginChanged,
+		},
+	} {
+		t.Run(early.name, func(t *testing.T) {
+			header := http.Header{}
+			header.Set("Content-Type", early.contentType)
+			header.Set("X-Dispatch-User", "alice")
+			header.Set("Expect", "100-continue")
+			if early.key != "" {
+				header.Set(contracts.IdempotencyKeyHeader, early.key)
+			}
+			if early.login != "" {
+				header.Set(contracts.DispatchLoginHeader, early.login)
+			}
+			body := sendPartOfBody(t, server.Listener.Addr().String(), early.target, header, 4<<20, nil)
+			response, answer := body.answer()
+			if response.StatusCode == http.StatusContinue {
+				t.Fatal("the server asked for the body (100 Continue) instead of answering")
+			}
+			if response.StatusCode != http.StatusConflict || refusalCode(answer) != early.code {
+				t.Fatalf("status=%d body=%s, want 409 %s", response.StatusCode, answer, early.code)
+			}
+			if !response.Close || !body.closedByServer() {
+				t.Fatalf("the refusal left open a connection whose body was never sent (Connection: %q)", response.Header.Get("Connection"))
 			}
 		})
 	}

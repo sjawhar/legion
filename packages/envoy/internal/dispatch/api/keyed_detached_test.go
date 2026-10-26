@@ -318,13 +318,14 @@ func (b *countingBody) Read(p []byte) (int, error) {
 	return n, err
 }
 
-// INFRA-258. A repeat of a keyed write whose first request still runs is answered 409
-// KEY_IN_FLIGHT before the keyed layer reads any of its body: the key is looked up by its login and
-// key first, so a slow upload's repeats - the page asks again about once a second - are never
-// spooled again only to be told to wait. The rig mounts the layer alone; register's
-// drainBeforeAnswer then reads the body off the connection and discards it before the answer is
-// written (TestAnEarlyAnswerToAnUploadReachesAClientThatSendsItsWholeBodyFirst).
-func TestAnInFlightRepeatIsAnsweredBeforeItsBodyIsRead(t *testing.T) {
+// INFRA-258 (FinalReview5 L3, gate-fixes S21). A repeat of a keyed write whose first request still
+// runs is never spooled: the key is looked up by its login and key before the body is read, so a
+// slow upload's repeats - the page asks again about once a second - are never written to disk again
+// only to be told to wait. Its body is read to its end, discarded and written only to the digest it
+// is judged by once it has arrived (TestARepeatFoundInFlightIsJudgedOnceItsBodyHasArrived); here
+// the first still runs, so it is 409 KEY_IN_FLIGHT. With the temporary directory gone, a spool
+// would answer 500.
+func TestAnInFlightRepeatIsJudgedWithoutSpoolingItsBody(t *testing.T) {
 	const pattern = "/api/v1/issues/{key}/artifacts"
 	rig := newKeyedRigAt(t, pattern, answerRun)
 	body := `{"name":"big.bin","content":"` + strings.Repeat("a", 2<<20) + `"}`
@@ -339,14 +340,14 @@ func TestAnInFlightRepeatIsAnsweredBeforeItsBodyIsRead(t *testing.T) {
 	repeat.Header.Set("X-Dispatch-User", "alice")
 	repeat.Header.Set(contracts.IdempotencyKeyHeader, "slow-upload")
 	response := httptest.NewRecorder()
-	rig.handler.ServeHTTP(response, repeat)
+	unspooled(t, func() { rig.handler.ServeHTTP(response, repeat) })
 	if code, _ := refusalOf(t, response); response.Code != http.StatusConflict || code != contracts.IdempotencyKeyInFlight ||
 		response.Header().Get("Retry-After") != "1" || response.Header().Get(contracts.IdempotencyKeyHeader) != "slow-upload" {
-		t.Fatalf("a repeat while the first upload runs: status=%d headers=%v body=%s, want 409 %s naming its key",
+		t.Fatalf("a repeat while the first upload runs: status=%d headers=%v body=%s, want 409 %s naming its key, unspooled",
 			response.Code, response.Header(), response.Body.String(), contracts.IdempotencyKeyInFlight)
 	}
-	if read := sent.read.Load(); read != 0 {
-		t.Fatalf("the repeat's body was read (%d bytes) before it was told the first still runs, want none read", read)
+	if read := sent.read.Load(); read != int64(len(body)) {
+		t.Fatalf("the repeat was judged with %d of its %d bytes read, want all of them", read, len(body))
 	}
 	if runs := rig.runs.Load(); runs != 0 {
 		t.Fatalf("the handler ran %d times, want none", runs)

@@ -1,9 +1,11 @@
 package api
 
 import (
+	"errors"
 	"io"
 	"net/http"
 	"strings"
+	"time"
 )
 
 // An answer given before a request's body is read reaches some clients as a failed connection
@@ -11,9 +13,49 @@ import (
 // body before it reads the answer - WebKit and Firefox uploading a file - is still sending when
 // net/http, finding the body unread, writes the answer and closes the connection; the close resets
 // it, and the client drops the answer with it. So every layer's early answer - the keyed layer's
-// KEY_IN_FLIGHT and KEY_INVALID, the closed-issue refusal of an upload, LOGIN_CHANGED, a refused
-// path parameter, a handler's refusal made before it decodes - waits until the body is off the
-// connection, read and discarded, never spooled, up to the route's own limit (routeBodyLimit).
+// KEY_INVALID, the closed-issue refusal of an upload, LOGIN_CHANGED, a refused path parameter, a
+// handler's refusal made before it decodes - waits until the body is off the connection, read and
+// discarded, never spooled, up to the route's own limit (routeBodyLimit) and for at most
+// bodyDrainLimit. The keyed layer reads a repeat's body itself when it finds the key held by a
+// first request still running, and judges the repeat once that body has arrived
+// (answerDrainedRepeat).
+
+// bodyDrainLimit is the longest a drain waits for the rest of a request's body, counted from when
+// the drain begins: a minute carries a whole upload (routeBodyLimit) over a link of 450 KB/s or
+// more. A body still arriving then is not waited for: its answer goes out as it stood, and the
+// connection closes after it, so a client that stopped sending does not hold its request open - nor
+// whatever the layer that answered it holds - for as long as it cares to.
+const bodyDrainLimit = time.Minute
+
+// drainTime is how long a drain waits for a body (bodyDrainLimit; drainReadLimit in a test).
+func (s *server) drainTime() time.Duration {
+	if s.drainReadLimit > 0 {
+		return s.drainReadLimit
+	}
+	return bodyDrainLimit
+}
+
+// readFor bounds a drain of the body of the request w answers to drainTime from now, a read
+// deadline on its connection (http.ResponseController.SetReadDeadline), past which a read fails
+// and the drain ends; it answers what lifts the bound once the drain is done. Lifted, the body has
+// no deadline, which is what a request's body has on this server, whose http.Server sets no
+// ReadTimeout (cmd/dispatch); a deadline left in place would end the read net/http keeps on an idle
+// connection once the body has ended, and cancel the request's context under its answer. A writer
+// with no connection of its own (a test's recorder) bounds nothing.
+func (s *server) readFor(w http.ResponseWriter) (lift func()) {
+	controller := http.NewResponseController(w)
+	if err := controller.SetReadDeadline(time.Now().Add(s.drainTime())); err != nil {
+		return func() {}
+	}
+	return func() { _ = controller.SetReadDeadline(time.Time{}) }
+}
+
+// expectsContinue reports whether r's client asked to be told to continue before it sends its body
+// (Expect: 100-continue). net/http tells it so at the body's first read, so a layer that answers
+// such a request without reading the body asks the client for none of it.
+func expectsContinue(r *http.Request) bool {
+	return strings.EqualFold(strings.TrimSpace(r.Header.Get("Expect")), "100-continue")
+}
 
 // errUploadTooLarge is an upload route's answer to a body past its limit (routeBodyLimit), and
 // errJSONTooLarge every other route's (decodeJSON).
@@ -34,17 +76,19 @@ func bodyTooLarge(method, pattern string) *apiError {
 // drainBeforeAnswer serves a route whose requests carry a body - every route but a GET - so that
 // whatever layer answers a request, and however little of its body that layer read, the answer
 // is written only once the rest of the body is read and discarded: at most the route's limit and
-// one byte more, in io.Discard's buffer. A body that runs past the limit is answered as the limit
-// answers it, 413 with the route's own refusal, in place of the answer the layer gave, since no
-// such request is taken whoever answers it; the connection then closes, as net/http closes one
-// whose body runs past what it will discard. The one answer the limit does not replace is a 401:
-// a caller that resolves to nobody is refused before any limit is judged
-// (TestUnauthenticatedLargeIssueBodyIsRejectedBeforeDecoding), and a page whose session lapsed
-// under a write reads that 401 as the cue to sign in again. A body a layer already read to its
-// end, or past the limit itself (its handler's 413), is left as it is, and so is the body of a
-// client that asked to be told to continue before sending it (Expect: 100-continue) and was never
-// told: it sends nothing, and reading would ask it for all of it.
-func drainBeforeAnswer(method, pattern string, handler http.HandlerFunc) http.HandlerFunc {
+// one byte more, in io.Discard's buffer, for at most drainTime (readFor). A body that runs past the
+// limit is answered as the limit answers it, 413 with the route's own refusal, in place of the
+// answer the layer gave, since no such request is taken whoever answers it; the connection then
+// closes, as net/http closes one whose body runs past what it will discard. The one answer the
+// limit does not replace is a 401: a caller that resolves to nobody is refused before any limit is
+// judged (TestUnauthenticatedLargeIssueBodyIsRejectedBeforeDecoding), and a page whose session
+// lapsed under a write reads that 401 as the cue to sign in again. A body that stops arriving - its
+// time up, its client gone - leaves the answer as the layer gave it, and the connection closes
+// after it. A body a layer already read to its end, or past the limit itself (its handler's 413),
+// is left as it is, and so is the body of a client that asked to be told to continue before
+// sending it (Expect: 100-continue) and was never told: it sends nothing, and the first read would
+// tell it to send all of it.
+func (s *server) drainBeforeAnswer(method, pattern string, handler http.HandlerFunc) http.HandlerFunc {
 	limit := routeBodyLimit(method, pattern)
 	tooLarge := bodyTooLarge(method, pattern)
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -59,7 +103,8 @@ func drainBeforeAnswer(method, pattern string, handler http.HandlerFunc) http.Ha
 			body:           body,
 			limit:          limit,
 			tooLarge:       tooLarge,
-			askedContinue:  strings.EqualFold(strings.TrimSpace(r.Header.Get("Expect")), "100-continue"),
+			askedContinue:  expectsContinue(r),
+			readFor:        s.readFor,
 		}, r)
 	}
 }
@@ -90,13 +135,15 @@ type drainingWriter struct {
 	limit         int64
 	tooLarge      *apiError
 	askedContinue bool
+	readFor       func(http.ResponseWriter) (lift func())
 	begun         bool
 	replaced      bool
 }
 
 // begin drains what is left of the body, once, before the first byte of the answer, whose status
-// is status. A read that fails - the client gone, a connection that broke - leaves the answer to be
-// written as it was.
+// is status. A read that fails - the drain's time up, the client gone, a connection that broke -
+// leaves the answer to be written as it was, and the connection to close after it, the rest of the
+// body unread: net/http would otherwise read on for it once the answer is written.
 func (w *drainingWriter) begin(status int) {
 	if w.begun {
 		return
@@ -106,7 +153,17 @@ func (w *drainingWriter) begin(status int) {
 	if body.ended || body.read > w.limit || (w.askedContinue && !body.touched) {
 		return
 	}
-	if _, err := io.CopyN(io.Discard, body, w.limit-body.read+1); err != nil || status == http.StatusUnauthorized {
+	lift := w.readFor(w.ResponseWriter)
+	_, err := io.CopyN(io.Discard, body, w.limit-body.read+1)
+	lift()
+	switch {
+	case errors.Is(err, io.EOF):
+		// The body ended inside the limit: the answer stands.
+		return
+	case err != nil:
+		w.ResponseWriter.Header().Set("Connection", "close")
+		return
+	case status == http.StatusUnauthorized:
 		return
 	}
 	// The body runs past the limit: the answer is the limit's.
