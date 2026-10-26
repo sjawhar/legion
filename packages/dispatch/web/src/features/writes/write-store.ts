@@ -427,9 +427,7 @@ export class Writes {
       return;
     }
     this.#lapsed = false;
-    for (const entry of [...this.#entries.values()]) {
-      if (entry.write.login !== login) this.#drop(entry);
-    }
+    this.#take([...this.#entries.values()].filter((entry) => entry.write.login !== login));
     void this.#files.keepOnly(login);
     const targets = new Set([...this.#entries.values()].map((entry) => entry.write.target));
     for (const target of targets) this.#advance(target);
@@ -438,7 +436,7 @@ export class Writes {
   /** Lets every write go, out or refused, and everything kept with them, every kept file
    *  included: the person who made them signed out. */
   clear(): void {
-    for (const entry of [...this.#entries.values()]) this.#drop(entry);
+    this.#take([...this.#entries.values()]);
     this.#resetKinds();
     void this.#files.keepOnly(undefined);
     this.#kept.clear();
@@ -448,9 +446,7 @@ export class Writes {
    *  of it, its file included: that person signed out in another tab of this browser, which
    *  discards their writes in every tab (`app.tsx`). */
   dropLogin(login: string): void {
-    for (const entry of [...this.#entries.values()]) {
-      if (entry.write.login === login) this.#drop(entry);
-    }
+    this.#drop([...this.#entries.values()].filter((entry) => entry.write.login === login));
   }
 
   /** Has every kind let go of what it remembered of the person signed in until now. */
@@ -551,7 +547,7 @@ export class Writes {
     entry.turn = { from, settled };
     if (entry.write.presentation === "quiet" && entry.expiry === undefined) {
       const left = entry.write.pressedAt + KEPT_SEND_RESUME_MS - Date.now();
-      entry.expiry = setTimeout(() => this.#drop(entry), Math.max(0, left));
+      entry.expiry = setTimeout(() => this.#drop([entry]), Math.max(0, left));
     }
     this.#update(entry, entry.write);
     kinds
@@ -648,7 +644,7 @@ export class Writes {
    *  asked. */
   #hold(entry: Entry): void {
     if (entry.endsWithSession) {
-      this.#drop(entry);
+      this.#take([entry]);
       return;
     }
     const { write } = entry;
@@ -699,9 +695,8 @@ export class Writes {
       refusal.status === 409 &&
       refusal.code === DISPATCH_LOGIN_CHANGED
     ) {
-      for (const other of [...this.#entries.values()]) {
-        if (other.write.login === entry.write.login) this.#drop(other);
-      }
+      const login = entry.write.login;
+      this.#drop([...this.#entries.values()].filter((other) => other.write.login === login));
       void this.#client.invalidateQueries({ queryKey: ["whoami"] });
       return;
     }
@@ -713,18 +708,31 @@ export class Writes {
     this.#advance(write.target);
   }
 
-  /** Drops `entry` wherever it stands: its trying stops, its press is refused, nothing of it is
-   *  kept, and its kind undoes what it showed of it. */
-  #drop(entry: Entry): void {
-    if (this.#entries.get(entry.write.id) !== entry) return;
-    entry.stop.abort();
-    entry.press?.reject(new SendStoppedError());
-    entry.press = undefined;
-    entry.turn?.settled.reject(new SendStoppedError());
-    entry.turn = undefined;
-    this.#remove(entry);
-    kinds.get(entry.write.kind)?.undone?.(this.#client, entry.write);
-    this.#advance(entry.write.target);
+  /** Drops every one of `entries` wherever it stands (`#take`), and only then starts the writes
+   *  whose turn that gives, each line once: a write waiting behind a dropped one is either
+   *  dropped with it or still holds its place, and is never started on the way. */
+  #drop(entries: readonly Entry[]): void {
+    for (const target of this.#take(entries)) this.#advance(target);
+  }
+
+  /** Takes every one of `entries` out of the store first, then lets each go wherever it stood: its
+   *  trying stops, its press is refused, nothing of it is kept, and its kind undoes what it showed
+   *  of it. Starts nothing, and answers the targets whose lines it took writes from. */
+  #take(entries: readonly Entry[]): Set<string | undefined> {
+    const taken = entries.filter((entry) => this.#entries.get(entry.write.id) === entry);
+    for (const entry of taken) this.#entries.delete(entry.write.id);
+    for (const entry of taken) {
+      clearTimeout(entry.expiry);
+      entry.stop.abort();
+      entry.press?.reject(new SendStoppedError());
+      entry.press = undefined;
+      entry.turn?.settled.reject(new SendStoppedError());
+      entry.turn = undefined;
+      this.#forget(entry);
+      kinds.get(entry.write.kind)?.undone?.(this.#client, entry.write);
+    }
+    if (taken.length > 0) this.#publish();
+    return new Set(taken.map((entry) => entry.write.target));
   }
 
   #remove(entry: Entry): void {

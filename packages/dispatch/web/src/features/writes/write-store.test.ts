@@ -603,6 +603,46 @@ test("LOGIN_CHANGED drops every write of its login and reads whoami again", asyn
   });
 });
 
+// W42. Dropping writes never starts another: a sign-out (`clear`), a sign-out in another tab
+// (`dropLogin`), someone else's sign-in (`signedIn`) and Dispatch's `409 LOGIN_CHANGED` each take
+// every write they drop out of the store before any line moves on. So a write waiting its turn
+// behind one of them - behind one out, or one a lapse holds - goes with it and is never sent.
+test("dropping a line of writes starts none of the writes it drops", async () => {
+  await onFakeClock(async () => {
+    const loginChanged = new ApiError(409, { code: "LOGIN_CHANGED", error: "signed in as bob" });
+    const paths: Record<string, (writes: Writes, first: PromiseWithResolvers<never>) => void> = {
+      clear: (writes) => writes.clear(),
+      dropLogin: (writes) => writes.dropLogin("alice"),
+      loginChanged: (_writes, first) => first.reject(loginChanged),
+      signedIn: (writes) => writes.signedIn("bob"),
+    };
+    const started: string[] = [];
+    for (const held of [false, true]) {
+      for (const [name, path] of Object.entries(paths)) {
+        const { writes } = storeOf();
+        const first = Promise.withResolvers<never>();
+        void statusWrite(writes, () => first.promise, { target: "issue:CORE-1" }).catch(() => {});
+        const second = statusWrite(
+          writes,
+          async () => {
+            started.push(`${name}${held ? " (held)" : ""}`);
+            return {};
+          },
+          { label: "second", target: "issue:CORE-1" }
+        ).catch((error: unknown) => error);
+        await settle();
+        expect(writes.rows().map((write) => write.status)).toEqual(["sending", "queued"]);
+        if (held) writes.signedIn(undefined);
+        path(writes, first);
+        await tick(60_000);
+        expect(await second).toBeInstanceOf(SendStoppedError);
+        expect(writes.rows()).toEqual([]);
+      }
+    }
+    expect(started).toEqual([]);
+  });
+});
+
 // W25. Writes to one target go out in press order: a later one waits while an earlier one is still
 // being tried, a refused one no longer holds the line, and its Retry joins at the back.
 test("writes to one target go in press order, and a refused one does not hold the line", async () => {
