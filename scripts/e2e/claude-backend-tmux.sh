@@ -9,18 +9,17 @@
 # earlier turns intact and in its context.
 #
 # Run it as `LEGION_E2E_CLAUDE_KEY_FILE=<file> LEGION_E2E_MODEL_GATEWAY_URL=<gateway>/anthropic
-# LEGION_E2E_IMPLEMENT_APP_ID=<id> LEGION_E2E_IMPLEMENT_APP_KEY_NAME=<secret-store key>
-# LEGION_E2E_REVIEW_APP_ID=<id> LEGION_E2E_REVIEW_APP_KEY_NAME=<secret-store key>
 # bash scripts/e2e/claude-backend-tmux.sh`. LEGION_E2E_CLAUDE_KEY_FILE is a file holding the
 # Anthropic API key the Claude Code implementer reaches its model with: the run copies it once into
 # its work directory (0600), and the implementer's claim directory names a key command that prints
 # that copy (Claude Code's apiKeyHelper), so the key reaches no pane's environment, no argv and no
 # transcript. The Oh My Pi agents reach their model through the Hawk model gateway, as Stage 3's do
 # (lib/install-model-gateway.sh). The rig is Stage 3's without its GitHub ingress bridge: scratch
-# Postgres, NATS, Envoy listener and Dispatch, Legion's role Apps through `secrets` (the four App
-# inputs name each App's id and its agent-tier secret-store key, lib/github-apps.sh; each key is
-# resolved by the daemon's private_key_command and once by lib/app-logins.ts, which proves it is its
-# id's App before the run writes anything, never in this shell), and the smoke repository
+# Postgres, NATS, Envoy listener and Dispatch, Legion's role Apps through `secrets` (this
+# deployment's own pair unless the four LEGION_E2E_*_APP_* inputs name another deployment's,
+# lib/github-apps.sh; each key is resolved by the daemon's private_key_command and once by
+# lib/app-logins.ts, which proves it is its id's App before the run writes anything, never in this
+# shell), and the smoke repository
 # sjawhar/legion-smoke, where the implementer pushes a branch and opens no pull request.
 set -Eeuo pipefail
 
@@ -152,8 +151,7 @@ start_listener() {
     offset=$(log_size listener)
     ENVOY_API_TOKEN="$token" PORT="$port_listener" ENVOY_LISTEN_HOST=127.0.0.1 \
       ENVOY_MACHINE_ID="legion-e2ecc-$$" NATS_URLS="nats://127.0.0.1:$port_nats" \
-      start_process listener env -u NATS_NKEY_SEED -u NATS_NKEY_SEED_FILE -u GH_PUBLIC_REPO_PAT -u "$implement_app_key_name" \
-        -u GH_AGENT_APP_PRIVATE_KEY_B64 -u "$review_app_key_name" "$work/envoy-listener"
+      start_process listener env -u NATS_NKEY_SEED -u NATS_NKEY_SEED_FILE -u GH_PUBLIC_REPO_PAT "${app_key_unsets[@]}" "$work/envoy-listener"
     result=0
     await_start listener "$listener_pid" "$offset" 60 "the Envoy listener to answer /v1/sessions" \
       curl -fsS -H "@$work/envoy-auth-header" "http://127.0.0.1:$port_listener/v1/sessions" || result=$?
@@ -181,8 +179,7 @@ start_dispatch() {
       DISPATCH_LISTEN_HOST=127.0.0.1 DISPATCH_PORT="$port_dispatch" \
       DISPATCH_SERVER_URL="http://127.0.0.1:$port_dispatch" NATS_URLS="nats://127.0.0.1:$port_nats" \
       ENVOY_URL="http://127.0.0.1:$port_listener" \
-      start_process dispatch env -u NATS_NKEY_SEED -u NATS_NKEY_SEED_FILE -u GH_PUBLIC_REPO_PAT -u "$implement_app_key_name" \
-        -u GH_AGENT_APP_PRIVATE_KEY_B64 -u "$review_app_key_name" "$work/envoy-dispatch"
+      start_process dispatch env -u NATS_NKEY_SEED -u NATS_NKEY_SEED_FILE -u GH_PUBLIC_REPO_PAT "${app_key_unsets[@]}" "$work/envoy-dispatch"
     result=0
     await_start dispatch "$dispatch_pid" "$offset" 60 "the scratch Dispatch server" \
       curl -fsS "http://127.0.0.1:$port_dispatch/api/v1" || result=$?
@@ -237,8 +234,8 @@ start_daemon() {
     HOME="$omp_home" OMP_PROFILE="$profile" PATH="$realbin:$PATH" \
       LEGION_CLAUDE_PATH="$claude_bin" LEGION_BUN_PATH="$realbin/bun" LEGION_CLAUDE_PLUGIN_DIR="$root/packages/claude-envoy" \
       env -u NATS_NKEY_SEED -u NATS_NKEY_SEED_FILE -u NATS_DAEMON_NKEY_SEED -u NATS_DAEMON_NKEY_SEED_FILE \
-      -u GH_PUBLIC_REPO_PAT -u "$implement_app_key_name" -u GH_AGENT_APP_PRIVATE_KEY_B64 \
-      -u "$review_app_key_name" -u ANTHROPIC_API_KEY \
+      -u GH_PUBLIC_REPO_PAT "${app_key_unsets[@]}" \
+      -u ANTHROPIC_API_KEY \
       "$work/legion" start --config "$work/legion.yaml" >>"$evidence/logs/daemon.log" 2>&1 &
     daemon_pid=$!
     result=0

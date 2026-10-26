@@ -29,8 +29,6 @@ through `scripts/e2e/.shellcheckrc`.
 
 ```sh
 LEGION_REAL_GITHUB=1 LEGION_TEST_PG_DSN=postgres://… \
-LEGION_E2E_IMPLEMENT_APP_ID=<id> LEGION_E2E_IMPLEMENT_APP_KEY_NAME=<secret-store key> \
-LEGION_E2E_REVIEW_APP_ID=<id> LEGION_E2E_REVIEW_APP_KEY_NAME=<secret-store key> \
   go -C packages/daemon test -count=1 ./internal/api \
     -run '^TestRealGitHubCredentialSurface$' -v
 ```
@@ -47,8 +45,6 @@ the GitHub operations are read-only except for locally cloning the smoke reposit
 
 ```sh
 LEGION_REAL_GITHUB=1 LEGION_TEST_PG_DSN=postgres://… \
-LEGION_E2E_IMPLEMENT_APP_ID=<id> LEGION_E2E_IMPLEMENT_APP_KEY_NAME=<secret-store key> \
-LEGION_E2E_REVIEW_APP_ID=<id> LEGION_E2E_REVIEW_APP_KEY_NAME=<secret-store key> \
 LEGION_READY_SCOPE_REPO=<owner>/<repo> LEGION_READY_SCOPE_PR=<n> LEGION_READY_SCOPE_ISSUE=<KEY> \
 LEGION_READY_SCOPE_APPROVED=<approved sha> LEGION_READY_SCOPE_HEAD=<head sha> \
 [LEGION_READY_SCOPE_REFUSE=<path>] \
@@ -284,12 +280,8 @@ Three things the run had to learn about its surface:
 ## stage3-devbox-workflow.sh
 
 ```sh
-LEGION_E2E_IMPLEMENT_APP_ID=<id> LEGION_E2E_IMPLEMENT_APP_KEY_NAME=<secret-store key> \
-LEGION_E2E_REVIEW_APP_ID=<id> LEGION_E2E_REVIEW_APP_KEY_NAME=<secret-store key> \
 LEGION_E2E_MODEL_ROUTE=gateway LEGION_E2E_MODEL_GATEWAY_URL=<gateway>/anthropic SMOKE_UPSTREAM_NATS=nats://<host>.<tailnet>.ts.net:4222 \
   bash scripts/e2e/stage3-devbox-workflow.sh     # → "stage 3 e2e: PASS", exit 0
-LEGION_E2E_IMPLEMENT_APP_ID=<id> LEGION_E2E_IMPLEMENT_APP_KEY_NAME=<secret-store key> \
-LEGION_E2E_REVIEW_APP_ID=<id> LEGION_E2E_REVIEW_APP_KEY_NAME=<secret-store key> \
 LEGION_E2E_MODEL_ROUTE=key-file LEGION_E2E_ANTHROPIC_KEY_FILE=<0600 file> SMOKE_UPSTREAM_NATS=nats://<host>.<tailnet>.ts.net:4222 \
   bash scripts/e2e/stage3-devbox-workflow.sh     # the same, for a devbox with no Hawk gateway
 ```
@@ -300,9 +292,7 @@ submission on its accepted READY: the repository allows no auto-merge, so the da
 GitHub reports it mergeable, and the proof only reads it (`await_ready_merge`), never merging it by
 hand.
 The run needs `go`, `docker`, `jq`, `curl`, `ss`, `tmux`, `bun`, `mise`, `gh`, `shellcheck`, the
-`secrets` CLI, the four inputs that name Legion's two role Apps
-([`lib/github-apps.sh`](#libgithub-appssh): each App's id and the agent-tier secret-store key
-holding its private key, all required, never literals of this repository), and
+`secrets` CLI holding this deployment's two role App keys, and
 `LEGION_E2E_MODEL_ROUTE` (required, `gateway` or `key-file`), which picks how
 the agents reach Anthropic, independently of which devbox this runs on:
 - `gateway`: the operator's model gateway access — `LEGION_E2E_MODEL_GATEWAY_URL` naming the
@@ -342,11 +332,11 @@ starts there: a plain shell's `gh`, a tmux window's included, is the user's own 
 pane's is one of Legion's Apps, and a personal `GH_TOKEN` in the environment makes any session's
 `gh` that token's owner. `prerequisites` refuses to start, before the run's first write to GitHub,
 unless `gh` acts as `sjawhar-agent[bot]` ([`require_proof_human`](#libworkflowsh)). The daemon
-resolves the two App keys the inputs name itself through `private_key_command`, both agent tier,
+resolves the two role App keys itself through `private_key_command`, both agent tier,
 and `prerequisites` first runs [`read_app_logins`](#libworkflowsh), which runs the same two
 commands once, in `lib/app-logins.ts`, to prove each key is its id's App (GitHub's `GET /app` must
-answer that id) and read each App's bot login, the login every check that names an App compares
-with, before the run's first write anywhere. The agents'
+answer that id and the role's write permission) and read each App's bot login, the login every
+check that names an App compares with, before the run's first write anywhere. The agents'
 model is Anthropic through the configured route:
 [`lib/install-model-gateway.sh`](#libinstall-model-gatewaysh) (`gateway`) or
 [`lib/install-key-file-model-route.sh`](#libinstall-key-file-model-routesh) (`key-file`) routes the
@@ -619,8 +609,9 @@ ACCEPT_PG_CONTAINER=<postgres container> ACCEPT_PG_PORT=<its host port> ACCEPT_N
 ```
 
 **Devbox only; CI does not run this script.** The live acceptance of LEGION-208 task 4b.13b. It
-stands up the Stage 3 rig from the same `lib/rig.sh` and `lib/workflow.sh`, with the same two
-required inputs and the same proof human as
+stands up the Stage 3 rig from the same `lib/rig.sh` and `lib/workflow.sh`, with the same inputs
+(the model gateway, the production NATS, and the optional App inputs of
+[`lib/github-apps.sh`](#libgithub-appssh)) and the same proof human as
 [`stage3-devbox-workflow.sh`](#stage3-devbox-workflowsh) — the Hawk gateway route only, since this
 script has not taken Stage 3's own `LEGION_E2E_MODEL_ROUTE` — so it too runs from the operator's
 own Oh My Pi session and refuses to start in `prerequisites` when `gh` acts as anyone but
@@ -655,8 +646,6 @@ so the script opens the transcript on fd 8 and calls `transcript_to /dev/fd/8`
 ## claude-backend-tmux.sh
 
 ```sh
-LEGION_E2E_IMPLEMENT_APP_ID=<id> LEGION_E2E_IMPLEMENT_APP_KEY_NAME=<secret-store key> \
-LEGION_E2E_REVIEW_APP_ID=<id> LEGION_E2E_REVIEW_APP_KEY_NAME=<secret-store key> \
 LEGION_E2E_CLAUDE_KEY_FILE=<file holding an Anthropic API key> LEGION_E2E_MODEL_GATEWAY_URL=<gateway>/anthropic \
   bash scripts/e2e/claude-backend-tmux.sh     # → "claude backend e2e: PASS", exit 0
 ```
@@ -691,8 +680,8 @@ pane. The checks:
   NUL-delimited; an environment it cannot read is not checked, never clean, and is recorded with
   why in the evidence's `pane-endpoints-unchecked.txt`, which this check's failure names.
 
-Inputs. The four App inputs ([`lib/github-apps.sh`](#libgithub-appssh), all required) name Legion's
-two role Apps; `prerequisites` refuses a run without one, naming it, before anything else.
+Inputs. The App inputs ([`lib/github-apps.sh`](#libgithub-appssh), optional) name another
+deployment's two role Apps; a run here sets none and takes this deployment's own.
 `LEGION_E2E_CLAUDE_KEY_FILE` (required) names a file holding the Anthropic API key the
 Claude Code implementer reaches its model with. `prerequisites` refuses a run without it, naming
 the variable, before it writes anything, and refuses a key Anthropic's `GET /v1/models` does not accept
@@ -767,8 +756,6 @@ LEGION_E2E_MODEL_GATEWAY_AUDIENCE=<gateway audience> \
 LEGION_E2E_STORAGE_CLASS=gp2 \
 LEGION_E2E_SESSION_DB_PORT=<port> \
 LEGION_E2E_REPO_SECOND_OWNER=<owner>/<name> \
-LEGION_E2E_IMPLEMENT_APP_ID=<id> \
-LEGION_E2E_IMPLEMENT_APP_KEY_NAME=<secret-store key> \
   bash scripts/e2e/stage4a-sandbox-runtime.sh     # → "stage 4a e2e: PASS", exit 0
 
 # A cluster whose pods cannot reach the devbox at all (GKE's shape), with no model gateway:
@@ -781,8 +768,6 @@ LEGION_E2E_MODEL_ROUTE=key-file \
 LEGION_E2E_STORAGE_CLASS=standard-rwo \
 LEGION_E2E_SESSION_DB_PORT=<port> \
 LEGION_E2E_REPO_SECOND_OWNER=<owner>/<name> \
-LEGION_E2E_IMPLEMENT_APP_ID=<id> \
-LEGION_E2E_IMPLEMENT_APP_KEY_NAME=<secret-store key> \
   bash scripts/e2e/stage4a-sandbox-runtime.sh     # → "stage 4a e2e: PASS", exit 0
 ```
 
@@ -803,9 +788,10 @@ gateway in front of Anthropic). The script needs `go`, `kubectl`, `curl`, `ss`,
 get-token`), and the `secrets` CLI holding the implement App's key under the name
 `LEGION_E2E_IMPLEMENT_APP_KEY_NAME` gives (agent tier: no YubiKey touch), with
 `LEGION_E2E_IMPLEMENT_APP_ID` that App's id ([`lib/github-apps.sh`](#libgithub-appssh); both
-required, refused by name when unset). Stage 4a acts as the implement App alone, so it takes no
-review App inputs. `prerequisites` proves the key is that id's App (`check_github_apps implement`:
-GitHub's `GET /app` under the key's JWT must answer that id) before the run writes anything. The
+optional, this deployment's own by default, and each refused by name when it is set and
+malformed). Stage 4a acts as the implement App alone, so it reads no
+review App input. `prerequisites` proves the key is that id's App (`check_github_apps implement`:
+GitHub's `GET /app` under the key's JWT must answer that id and `contents: write`) before the run writes anything. The
 harness runs `secrets <KEY> -- sh -c 'printf %s "$<KEY>"'`: the `secrets` CLI
 decrypts the key and puts it in the environment of that one `sh` child, which prints it to a pipe
 the harness reads into memory. The harness decodes it there and mints the implement App's
@@ -926,6 +912,8 @@ that reachability with a reverse tunnel, entirely of the run's own:
 | `LEGION_E2E_WORKER_STREAM_PORT` | `13373` | the port the harness binds for the worker stream; the same name and default Stage 4b reads for its own worker-stream port, so two runs — two Stage 4a's, or a Stage 4a and a Stage 4b — collide on it by default and need distinct values to run at once |
 | `LEGION_E2E_SESSION_DB_PORT` | required | a port the scratch session database listens on, reachable everywhere the worker-stream port is (under `aws-private-ip`, one the devbox's security group admits from the Legion nodes; under `bridge`, forwarded through the same tunnel); refused when it is not a number, is the worker stream's port, or is taken |
 | `LEGION_E2E_REPO_SECOND_OWNER` | required | `<owner>/<name>`, a repository under an owner other than `sjawhar` on which both Legion Apps are installed, where `second-owner` provisions an issue; refused when unset, not `<owner>/<name>`, or under `sjawhar`. Nothing is pushed to it |
+| `LEGION_E2E_IMPLEMENT_APP_ID` | this deployment's implement App | the App's numeric id, which GitHub's `GET /app` must answer for its key ([`lib/github-apps.sh`](#libgithub-appssh)) |
+| `LEGION_E2E_IMPLEMENT_APP_KEY_NAME` | this deployment's implement App key | the agent-tier secret-store key the `secrets` CLI resolves to that App's private key; `prerequisites` proves it is that id's App, and the harness mints the App's installation tokens from it |
 | `STAGE4A_FROM` | unset | a development entry point: any check after `identity` except `stale-incarnation`, which rides `kill-launcher`'s relaunch; the harness refuses any other name at `identity`, before it creates anything. `identity` always runs; the checks before the entry point are skipped, and each later check first puts the claims it needs where the full run would have left them, through the same runtime calls. The run ends `stage 4a e2e: every check from <check> passed — a development run, never the proof`, and is never cited as the proof |
 | `STAGE4A_EVIDENCE_DIR` | a fresh `/tmp/legion-e2e4a-evidence.XXXXXXXX` | kept on every outcome and printed at exit: `transcript.log` (the whole run), `runtime.log` (the runtime's and the listener's JSON log lines), and the two namespace snapshots |
 | `LEGION_E2E_AGENT_SECRETS_URL` | unset (the `secrets-*` checks report `SKIPPED-BLOCKED`) | the agent-secrets broker the run enrolls pods with — the **production** broker (Plan D, the broker design's AWS deployment plan), never a development slot (below) |
@@ -1163,8 +1151,6 @@ LEGION_E2E_RUNTIME_CONTEXT=<restricted context> LEGION_E2E_IMAGE=ghcr.io/sjawhar
   LEGION_E2E_MODEL_GATEWAY_URL=<gateway>/anthropic LEGION_E2E_MODEL_GATEWAY_AUDIENCE=<gateway audience> \
   LEGION_E2E_DISPATCH_URL=https://<dispatch> LEGION_E2E_ENVOY_URL=http://<listener>:<port> LEGION_E2E_NATS_URL=nats://<nats>:4222 \
   LEGION_E2E_DISPATCH_TOKEN_FILE=<0600 file> LEGION_E2E_ENVOY_TOKEN_SECRET_ID=<secret id> \
-  LEGION_E2E_IMPLEMENT_APP_ID=<id> LEGION_E2E_IMPLEMENT_APP_KEY_NAME=<secret-store key> \
-  LEGION_E2E_REVIEW_APP_ID=<id> LEGION_E2E_REVIEW_APP_KEY_NAME=<secret-store key> \
   bash scripts/e2e/stage4b-sandbox-tree.sh        # → "stage 4b e2e: PASS", exit 0
 STAGE4B_UNTIL=<checkpoint> …                      # a development run: stops after that checkpoint, never PASS
 STAGE4B_DESIGN_GATE=root-issues STAGE4B_UNTIL=spec-posted …   # the design gate, armed, on tree 1 alone
@@ -1200,10 +1186,10 @@ unset or malformed (the audience through
 value. `preflight` reads Dispatch's `whoami` with the run's bearer and requires an agent session;
 the same read with an invalid bearer, its negative control, must be refused 401.
 
-The four App inputs ([`lib/github-apps.sh`](#libgithub-appssh), all required) name Legion's two
-role Apps: `prerequisites` refuses a run without one, naming it, and proves each key is its id's App
-([`read_app_logins`](#libworkflowsh)) before `ensure_project`, the run's first write anywhere. The
-daemon's `github_apps` is the block it proved.
+The App inputs ([`lib/github-apps.sh`](#libgithub-appssh), optional) name another deployment's two
+role Apps; `prerequisites` proves each key is its id's App
+([`read_app_logins`](#libworkflowsh)), default or input, before `ensure_project`, the run's first
+write anywhere. The daemon's `github_apps` is the block it proved.
 
 `STAGE4B_UNTIL` must name a checkpoint below; any other value is refused. `STAGE4B_SKIP_CONTROLLER=1`,
 refused without `STAGE4B_UNTIL`, runs none of the checks of `controller`, `full-agent-negative` or `controller-walk` and only takes
@@ -2721,10 +2707,12 @@ name another App takes over later is never mistaken for Legion's. It runs
 (run with `sh -c`, as the daemon runs it, the key held in that process alone) and reads the App's id
 and slug from `GET /app`, so the login is `<slug>[bot]`, the one the daemon reads at boot for the
 identity each role commits, pushes and reviews as. The two Apps resolving to one login fail it, as
-the daemon refuses at boot, and so does a read of either App whose answer names another App id or
-gives no slug, the run failing with the reason the helper names by the App's role and id: a GitHub
+the daemon refuses at boot, and so does a read of either App whose answer names another App id,
+lacks the write permission the role's work needs, or gives no slug, the run failing with the
+reason the helper names by the App's role and id: a GitHub
 that never answered, an answer that is not 2xx (GitHub's 401 for a key that is not the id's App),
-an answer naming another id (both ids named, never the key), or one with no slug. A stage proof
+an answer naming another id (both ids named, never the key), one without the role's permission
+(which refuses the two Apps configured the other way round), or one with no slug. A stage proof
 calls it once in `prerequisites`, after `require_app_inputs` and `write_github_apps` and before its
 first write anywhere and any check that needs a login. `role_app ROLE` then prints the login of the App the role
 acts as (the implement App's for the implementer and the merger, the review App's for every other
@@ -2818,23 +2806,37 @@ literal of this repository:
 | `LEGION_E2E_IMPLEMENT_APP_ID`, `LEGION_E2E_REVIEW_APP_ID` | the App's numeric id |
 | `LEGION_E2E_IMPLEMENT_APP_KEY_NAME`, `LEGION_E2E_REVIEW_APP_KEY_NAME` | the secret-store key the `secrets` CLI resolves to the App's private key (base64-encoded PEM) |
 
-`require_app_inputs ROLE...` reads them for each role and fails, naming the variable, when one is
-unset, an id is not a number, or a key name is not letters, digits and underscores (so it is safe
-in a shell command and as a variable name); with both roles read it also refuses one id or one key
+Each defaults to this repository's own deployment's value, which the lib holds in one place
+(`default_<role>_app_id`, `default_<role>_app_key_name`), so a run here sets none of them and acts
+as it always has, and a deployment with its own Apps sets all four.
+
+`require_app_inputs ROLE...` reads each role's pair, taking the default for an input that is
+unset, and fails naming the input that is set but malformed: an id that is not a number of at most
+12 digits, or a key name that is not letters, digits and underscores of at most 64 (so it is safe
+in a shell command and as a variable name, and a pasted key is refused by its length). A refusal
+never prints the value. With both roles read it also refuses one id or one key
 name for both Apps. `write_github_apps ROLE...` writes `$work/github-apps.yaml`, the `github_apps`
 block a run's `legion.yaml` includes as it is: each App's `app_id` and a `private_key_command` that
-runs `secrets <name> -- sh -c …` to decode the store's Node-style base64 into the PEM on stdout.
+runs `secrets <name> -- sh -c …` to decode the store's Node-style base64 into the PEM on stdout. It
+refuses, writing nothing, a role the last `require_app_inputs` did not read.
 `check_github_apps ROLE...` runs [`lib/app-logins.ts`](#libworkflowsh) `--roles` over that file and
 fails the check unless GitHub's `GET /app`, under a JWT each key signs with its id as issuer,
-answers that id: a key of another App is refused by GitHub's 401, and an answer naming another id
-is refused naming both ids. The key never enters the script's shell, an argv or a file. A run
+answers that id and the write permission the role's work needs (the implement role's `contents`,
+the review role's `checks`): a key of another App is refused by GitHub's 401, an answer naming
+another id is refused naming both ids, and the two Apps configured the other way round are refused
+by the permission, since the implement App holds `checks: read` alone. The key never enters the
+script's shell, an argv or a file. A run
 refuses before its first write anywhere: Stage 3, 4b.13b, the Claude Code backend and Stage 4b
 check both Apps (`read_app_logins`), Stage 4a, which acts as the implement App alone, checks that
 one. `TestRealGitHubCredentialSurface` and `TestRealGitHubReadyHoldsTheHeadToRetrosCommits` read the
-same four inputs and fail naming one that is unset. `lib/app-logins.test.ts` drives the three
-functions under a stage script's shell options against a stand-in GitHub: a missing input refused by
-name before anything is written, an answer naming another App id refused naming both ids, and a
-match accepted.
+same four inputs with the same defaults. `require_app_inputs` also fills `app_key_unsets`, the
+`env` argument list (`-u NAME` …) every proof passes to a process it starts, which strips each
+role's key name, this deployment's own two, and every exported variable whose name holds
+`PRIVATE_KEY`, the proof human's App key included. `lib/app-logins.test.ts` drives the three
+functions under a stage script's shell options against a stand-in GitHub: an unset input taking its
+default, a malformed one refused by name with its value unprinted, `write_github_apps` refusing an
+unread role, `app_key_unsets` leaving no App key in a child's environment, an answer naming another
+App id refused naming both ids, a role's missing write permission refused, and a match accepted.
 
 ## lib/namespace-rig.sh
 

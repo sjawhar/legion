@@ -14,8 +14,9 @@ import { join } from "node:path";
 import { appJWT, appKeySources } from "./app-logins";
 
 // lib/app-logins.ts run as the stage proofs run it, against a stand-in GitHub that answers GET /app
-// with the id and slug of the App whose key signed the JWT (no slug for an App that has none, and
-// another App's id for the one App whose answer names one), and refuses any other request.
+// with the id, slug and permissions of the App whose key signed the JWT (no slug for an App that
+// has none, and another App's id for the one App whose answer names one), and refuses any other
+// request. The implement App holds checks: read alone, as the real one does.
 const dir = mkdtempSync(join(tmpdir(), "app-logins-test."));
 const script = join(import.meta.dir, "app-logins.ts");
 
@@ -30,13 +31,16 @@ interface StandInApp {
   slug?: string;
   /** The App id GET /app answers, when it is not the JWT's issuer. */
   answers?: number;
+  permissions: Record<string, string>;
   key: { publicKey: string; privateKey: string };
 }
+const implementPermissions = { contents: "write", checks: "read", pull_requests: "write" };
+const reviewPermissions = { contents: "write", checks: "write", pull_requests: "write" };
 const apps: Record<string, StandInApp> = {
-  "101": { slug: "example-implement", key: appKey() },
-  "202": { slug: "example-review", key: appKey() },
-  "303": { key: appKey() },
-  "404": { slug: "example-other", answers: 405, key: appKey() },
+  "101": { slug: "example-implement", permissions: implementPermissions, key: appKey() },
+  "202": { slug: "example-review", permissions: reviewPermissions, key: appKey() },
+  "303": { permissions: reviewPermissions, key: appKey() },
+  "404": { slug: "example-other", answers: 405, permissions: reviewPermissions, key: appKey() },
 };
 for (const id of Object.keys(apps))
   writeFileSync(join(dir, `key-${id}.pem`), apps[id].key.privateKey);
@@ -59,7 +63,11 @@ const github = Bun.serve({
     if (path !== "/app" || !signed) {
       return Response.json({ message: "A JSON web token could not be decoded" }, { status: 401 });
     }
-    return Response.json({ id: app.answers ?? Number(decoded.iss), slug: app.slug });
+    return Response.json({
+      id: app.answers ?? Number(decoded.iss),
+      slug: app.slug,
+      permissions: app.permissions,
+    });
   },
 });
 const standIn = `http://127.0.0.1:${github.port}/`;
@@ -205,6 +213,14 @@ describe("app-logins.ts", () => {
     expect(stderr).toMatch(namesApp("review", "404"));
     expect(stderr).toContain("answered App id 405, want 404");
     expect(stderr).not.toContain("PRIVATE KEY");
+  });
+
+  test("an App without its role's write permission is refused, the two Apps swapped whole too", async () => {
+    const { code, stdout, stderr } = await run(config(app("202"), app("101")));
+    expect(code).toBe(1);
+    expect(stdout).toBe("");
+    expect(stderr).toMatch(namesApp("review", "101"));
+    expect(stderr).toContain('answered permissions.checks "read", want write');
   });
 
   test("--roles reads only the roles it names, and refuses one it does not know", async () => {
@@ -359,19 +375,56 @@ write_github_apps implement review
 check_github_apps implement review
 echo "logins $github_app_logins"`;
 
-  test("each missing input is refused by name before anything is written or GitHub is asked", async () => {
-    for (const name of Object.keys(appInputs)) {
-      seen.length = 0;
-      const { code, stdout, stderr, work } = await githubApps(
-        { ...appInputs, [name]: undefined },
-        proveBoth
-      );
-      expect(code).toBe(1);
-      expect(stderr).toMatch(new RegExp(`^FAIL prerequisites: ${name} is unset`));
-      expect(stdout).not.toContain("logins");
-      expect(existsSync(join(work, "github-apps.yaml"))).toBe(false);
-      expect(seen).toEqual([]);
-    }
+  test("an input left unset takes this deployment's documented default, and sets no other role's", async () => {
+    seen.length = 0;
+    const { code, stdout, stderr, work } = await githubApps(
+      {
+        LEGION_E2E_IMPLEMENT_APP_ID: undefined,
+        LEGION_E2E_IMPLEMENT_APP_KEY_NAME: undefined,
+        LEGION_E2E_REVIEW_APP_ID: "202",
+        LEGION_E2E_REVIEW_APP_KEY_NAME: "REVIEW_KEY",
+      },
+      `require_app_inputs implement review
+write_github_apps implement review
+echo "defaults $default_implement_app_id $default_implement_app_key_name"`
+    );
+    expect(stderr).toBe("");
+    expect(code).toBe(0);
+    // No input named the implement App, so the block must carry the lib's own default pair, which
+    // this test never spells out: the lib is the one place this deployment's values live.
+    const defaults = (stdout.split("\n").find((l) => l.startsWith("defaults ")) ?? "").split(" ");
+    const sources = appKeySources(readFileSync(join(work, "github-apps.yaml"), "utf8"));
+    expect(sources.implement?.appId).toBe(defaults[1]);
+    expect(sources.implement?.privateKeyCommand).toStartWith(`secrets ${defaults[2]} -- sh -c '`);
+    expect(sources.review?.appId).toBe("202");
+    // The default pair is never asked of GitHub by this test: check_github_apps did not run.
+    expect(seen).toEqual([]);
+  });
+
+  test("write_github_apps refuses a role require_app_inputs did not read, and writes nothing", async () => {
+    const { code, stdout, stderr, work } = await githubApps(
+      appInputs,
+      `require_app_inputs implement
+write_github_apps implement review
+echo "wrote the block"`
+    );
+    expect(code).toBe(1);
+    expect(stdout).not.toContain("wrote the block");
+    expect(stderr).toContain(
+      "the review App's inputs are unread: require_app_inputs review has not run"
+    );
+    expect(existsSync(join(work, "github-apps.yaml"))).toBe(false);
+  });
+
+  test("app_key_unsets strips each role's key, this deployment's own two, and every PRIVATE_KEY variable", async () => {
+    const { code, stdout, stderr } = await githubApps(
+      { ...appInputs, SOME_OTHER_APP_PRIVATE_KEY_B64: "irrelevant" },
+      `require_app_inputs implement review
+env "\${app_key_unsets[@]}" sh -c 'echo "left $(env | grep -c -E "^(IMPLEMENT_KEY|REVIEW_KEY|SOME_OTHER_APP_PRIVATE_KEY_B64|$default_implement_app_key_name|$default_review_app_key_name)=" || true)"'`
+    );
+    expect(stderr).toBe("");
+    expect(code).toBe(0);
+    expect(stdout).toContain("left 0");
   });
 
   test("an id that is not a number, a key name unsafe in a shell, or one App for both is refused", async () => {
@@ -382,10 +435,22 @@ echo "logins $github_app_logins"`;
       [{ LEGION_E2E_REVIEW_APP_KEY_NAME: "IMPLEMENT_KEY" }, "are both IMPLEMENT_KEY"],
     ];
     for (const [inputs, want] of cases) {
-      const { code, stderr } = await githubApps({ ...appInputs, ...inputs }, proveBoth);
+      const { code, stderr, work } = await githubApps({ ...appInputs, ...inputs }, proveBoth);
       expect(code).toBe(1);
       expect(stderr).toContain(want);
+      expect(existsSync(join(work, "github-apps.yaml"))).toBe(false);
     }
+  });
+
+  test("a malformed input is refused without printing its value", async () => {
+    const pem = readFileSync(join(store, "IMPLEMENT_KEY"), "utf8");
+    const { code, stderr } = await githubApps(
+      { ...appInputs, LEGION_E2E_IMPLEMENT_APP_KEY_NAME: pem },
+      proveBoth
+    );
+    expect(code).toBe(1);
+    expect(stderr).toContain("LEGION_E2E_IMPLEMENT_APP_KEY_NAME must be");
+    expect(stderr).not.toContain(pem.slice(0, 40));
   });
 
   test("a key GitHub answers for another App id fails the check, naming both ids and never the key", async () => {

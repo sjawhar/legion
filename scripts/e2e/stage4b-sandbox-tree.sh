@@ -71,10 +71,11 @@
 # - LEGION_E2E_ENVOY_TOKEN_SECRET_ID (required) is the Secrets Manager id of the production Envoy
 #   listener's API token. The repository carries neither credential.
 # - LEGION_E2E_IMPLEMENT_APP_ID, LEGION_E2E_IMPLEMENT_APP_KEY_NAME, LEGION_E2E_REVIEW_APP_ID and
-#   LEGION_E2E_REVIEW_APP_KEY_NAME (all required) name Legion's two role Apps: each App's numeric id
+#   LEGION_E2E_REVIEW_APP_KEY_NAME name another deployment's two role Apps: each App's numeric id
 #   and the secret-store key the `secrets` CLI resolves to its private key (lib/github-apps.sh).
-#   prerequisites proves each key is its id's App against GitHub's GET /app before the run's first
-#   write anywhere; the daemon's github_apps is the block proved.
+#   Each defaults to this deployment's own, so a run here sets none. prerequisites proves each key
+#   is its id's App against GitHub's GET /app before the run's first write anywhere; the daemon's
+#   github_apps is the block proved.
 # - LEGION_E2E_PROJECT (default LEGSMOKE, a Dispatch project key: [A-Z][A-Z0-9]{1,9}, exactly
 #   Dispatch's own projectKeyPattern, checked in prerequisites) names a run's identity;
 #   everything else derives from it, so a second lane sets only this and the two ports below.
@@ -1288,8 +1289,8 @@ start_daemon() {
   # would answer /healthz in the run's daemon's place.
   ports_free
   record_stream
-  env -u GH_PUBLIC_REPO_PAT -u "$implement_app_key_name" -u GH_AGENT_APP_PRIVATE_KEY_B64 \
-    -u "$review_app_key_name" "$work/legion" start --config "$work/legion.yaml" >>"$daemon_log" 2>&1 9>&- 7>&- &
+  env -u GH_PUBLIC_REPO_PAT "${app_key_unsets[@]}" \
+    "$work/legion" start --config "$work/legion.yaml" >>"$daemon_log" 2>&1 9>&- 7>&- &
   daemon_pid=$!
   timeout_hook=report_boot
   # A daemon that exits (a refused image probe, a config it will not run) ends the wait at once.

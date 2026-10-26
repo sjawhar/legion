@@ -77,16 +77,20 @@ func TestRealGitHubCredentialSurface(t *testing.T) {
 	t.Log("clone through gh auth git-credential: succeeded")
 }
 
-// realGitHubApps is Legion's real implement and review Apps, named by the operator's four inputs
-// (scripts/e2e/lib/github-apps.sh reads the same four for the stage proofs): each App's id and the
-// secrets-store key the devbox's `secrets` CLI resolves to its private key. A gated run without
-// one of them, or with a malformed one, fails naming it rather than guess an App.
+// realGitHubApps is Legion's implement and review Apps: this repository's own deployment by
+// default, another deployment's through the same four inputs the stage proofs read
+// (scripts/e2e/lib/github-apps.sh) — each App's id and the secrets-store key the devbox's
+// `secrets` CLI resolves to its private key. A malformed input fails the run naming it, never its
+// value.
 func realGitHubApps(t *testing.T) config.GitHubApps {
 	t.Helper()
-	input := func(name string, valid *regexp.Regexp) string {
+	input := func(name, fallback string, valid *regexp.Regexp) string {
 		value := os.Getenv(name)
+		if value == "" {
+			return fallback
+		}
 		if !valid.MatchString(value) {
-			t.Fatalf("%s is unset or malformed (%q, want %s): the real GitHub proofs name Legion's Apps only through it", name, value, valid)
+			t.Fatalf("%s is malformed (want %s; the value is not printed): it names this deployment's App, not another's", name, valid)
 		}
 		return value
 	}
@@ -94,12 +98,16 @@ func realGitHubApps(t *testing.T) config.GitHubApps {
 	key := regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 	apps, err := config.ResolveGitHubApps(config.GitHubApps{
 		Implement: config.GitHubApp{
-			AppID:             input("LEGION_E2E_IMPLEMENT_APP_ID", id),
-			PrivateKeyCommand: privateKeyCommand(input("LEGION_E2E_IMPLEMENT_APP_KEY_NAME", key)),
+			AppID: input("LEGION_E2E_IMPLEMENT_APP_ID", "3202636", id),
+			PrivateKeyCommand: privateKeyCommand(
+				input("LEGION_E2E_IMPLEMENT_APP_KEY_NAME", "LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64", key),
+			),
 		},
 		Review: config.GitHubApp{
-			AppID:             input("LEGION_E2E_REVIEW_APP_ID", id),
-			PrivateKeyCommand: privateKeyCommand(input("LEGION_E2E_REVIEW_APP_KEY_NAME", key)),
+			AppID: input("LEGION_E2E_REVIEW_APP_ID", "3202653", id),
+			PrivateKeyCommand: privateKeyCommand(
+				input("LEGION_E2E_REVIEW_APP_KEY_NAME", "GH_REVIEW_APP_PRIVATE_KEY_B64", key),
+			),
 		},
 	})
 	if err != nil {

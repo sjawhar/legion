@@ -30,7 +30,7 @@ symptoms:
 
 Until LEGION-74 the daemon built each pane's environment as *its own environment minus a short
 list of secret names*. The list never named the two GitHub App private keys the launcher
-supplies (`GH_AGENT_APP_PRIVATE_KEY_B64` and the review App's key), so every controller,
+supplies (`GH_AGENT_APP_PRIVATE_KEY_B64`, `GH_REVIEW_APP_PRIVATE_KEY_B64`), so every controller,
 architect, and worker pane on the production box could read them from its own environment and
 mint installation tokens as either App. A strip-list fails open: every variable nobody thought of
 is inherited, and the list is only as complete as the last person's memory of what the launcher

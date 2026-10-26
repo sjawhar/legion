@@ -82,10 +82,10 @@
 # a repository under an owner other than sjawhar on which both Legion Apps are installed, where
 # second-owner provisions an issue and proves its pod's gh and git read sjawhar/legion-smoke with
 # read-only tokens (nothing is pushed to it); LEGION_E2E_IMPLEMENT_APP_ID and
-# LEGION_E2E_IMPLEMENT_APP_KEY_NAME (both required) the implement App's numeric id and the
-# secret-store key the `secrets` CLI resolves to its private key (agent tier: no YubiKey touch), which
-# prerequisites proves is that id's App against GitHub's GET /app before the run writes anything
-# (lib/github-apps.sh; the run acts as no other App); STAGE4A_FROM a development entry point, which is
+# LEGION_E2E_IMPLEMENT_APP_KEY_NAME (this deployment's implement App by default) the App's numeric
+# id and the secret-store key the `secrets` CLI resolves to its private key (agent tier: no YubiKey
+# touch), which prerequisites proves is that id's App against GitHub's GET /app before the run
+# writes anything (lib/github-apps.sh; the run acts as no other App); STAGE4A_FROM a development entry point, which is
 # never the proof; STAGE4A_EVIDENCE_DIR where the transcript and the runtime's log go (default a
 # fresh /tmp directory, kept and printed).
 #

@@ -12,7 +12,8 @@
 //     default) and exits 0, or names what it could not read or prove on stderr and exits 1; without
 //     <legion.yaml>, or with a --roles it does not know, it exits 2 with its usage. The API URL
 //     defaults to https://api.github.com, the one the daemon calls. An answer whose App id is not
-//     the configured app_id is refused, naming both ids.
+//     the configured app_id is refused, naming both ids, and so is an App without the write
+//     permission its role's work needs (roleWrites), which also refuses the two Apps swapped whole.
 //
 // Each App's key comes from its `github_apps.<role>.private_key_command`, run as the daemon runs it
 // (internal/config, executePrivateKeyCommand): `sh -c`, stdin closed, the environment less the NATS
@@ -28,6 +29,11 @@ import { readFileSync } from "node:fs";
 export type AppRole = "implement" | "review";
 export type AppLogins = Partial<Record<AppRole, string>>;
 const appRoles: readonly AppRole[] = ["implement", "review"];
+/** The App permission each role's work cannot run without: the implement App pushes the issue's
+ * branch, and the review App posts the tester's and architect's check runs. The implement App
+ * holds `checks: read` alone, so the review role configured with it, the two swapped whole, is
+ * refused here rather than hours later at the first check run. */
+const roleWrites: Record<AppRole, string> = { implement: "contents", review: "checks" };
 
 /** One App of `github_apps`: its id and the command that prints its PEM private key. */
 export interface AppKeySource {
@@ -112,7 +118,7 @@ function runKeyCommand(role: AppRole, command: string): string {
 /** The bot login GitHub gives the App `source` names: `<slug>[bot]`, the slug read from
  * `GET <api>/app` under the App's own JWT. Every failure names the App by its role and id: a
  * GitHub that never answered, an answer that is not 2xx, one whose App id is not `source.appId`
- * (naming both ids), and one with no slug. */
+ * (naming both ids), one without its role's write permission (roleWrites), and one with no slug. */
 export async function appLogin(
   role: AppRole,
   source: AppKeySource,
@@ -152,6 +158,13 @@ export async function appLogin(
   if (String(id) !== source.appId) {
     throw new Error(
       `${read} answered App id ${id}, want ${source.appId}: the key is another App's`
+    );
+  }
+  const permission = roleWrites[role];
+  const granted = member(member(answer, "permissions"), permission);
+  if (granted !== "write" && granted !== "admin") {
+    throw new Error(
+      `${read} answered permissions.${permission} ${JSON.stringify(granted ?? null)}, want write: the ${role} role's work needs it, so the key is not the ${role} App's`
     );
   }
   const slug = member(answer, "slug");

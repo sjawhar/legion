@@ -20,14 +20,14 @@
 # sjawhar-agent App), never a Legion App, so run the script from the operator's own Oh My Pi
 # session, not a Legion pane, with no personal GH_TOKEN in its environment: `prerequisites` refuses
 # to start otherwise (require_proof_human, lib/workflow.sh).
-# Legion's two role Apps are four more required inputs, never literals of this repository:
-# LEGION_E2E_IMPLEMENT_APP_ID and LEGION_E2E_REVIEW_APP_ID, each App's numeric id, and
+# Legion's two role Apps are this deployment's own by default, and four inputs for another
+# deployment's: LEGION_E2E_IMPLEMENT_APP_ID and LEGION_E2E_REVIEW_APP_ID, each App's numeric id, and
 # LEGION_E2E_IMPLEMENT_APP_KEY_NAME and LEGION_E2E_REVIEW_APP_KEY_NAME, the secret-store keys holding
 # their private keys (lib/github-apps.sh). `prerequisites` proves each key is its id's App before the
-# run writes anything. The App private keys are resolved through private_key_command by the daemon,
-# and by lib/app-logins.ts once to prove each App and read its bot login from GitHub
-# (read_app_logins, lib/workflow.sh); they never enter this shell, a pane, an argv, or this
-# transcript.
+# run writes anything, whichever pair it took. The App private keys are resolved through
+# private_key_command by the daemon, and by lib/app-logins.ts once to prove each App and read its bot
+# login from GitHub (read_app_logins, lib/workflow.sh); they never enter this shell, a pane, an argv,
+# or this transcript.
 set -Eeuo pipefail
 
 root=$(cd "$(dirname "$0")/../.." && pwd)
@@ -184,8 +184,7 @@ start_listener() {
     offset=$(log_size listener)
     ENVOY_API_TOKEN="$token" PORT="$port_listener" ENVOY_LISTEN_HOST=127.0.0.1 \
       ENVOY_MACHINE_ID="legion-e2e3-$$" NATS_URLS="nats://127.0.0.1:$port_nats" \
-      start_process listener env -u NATS_NKEY_SEED -u NATS_NKEY_SEED_FILE -u GH_PUBLIC_REPO_PAT -u "$implement_app_key_name" \
-        -u GH_AGENT_APP_PRIVATE_KEY_B64 -u "$review_app_key_name" "$work/envoy-listener"
+      start_process listener env -u NATS_NKEY_SEED -u NATS_NKEY_SEED_FILE -u GH_PUBLIC_REPO_PAT "${app_key_unsets[@]}" "$work/envoy-listener"
     result=0
     await_start listener "$listener_pid" "$offset" 60 "the Envoy listener to answer /v1/sessions" \
       curl -fsS -H "@$work/envoy-auth-header" "http://127.0.0.1:$port_listener/v1/sessions" || result=$?
@@ -215,8 +214,7 @@ start_dispatch() {
       DISPATCH_LISTEN_HOST=127.0.0.1 DISPATCH_PORT="$port_dispatch" \
       DISPATCH_SERVER_URL="http://127.0.0.1:$port_dispatch" NATS_URLS="nats://127.0.0.1:$port_nats" \
       ENVOY_URL="http://127.0.0.1:$port_listener" \
-      start_process dispatch env -u NATS_NKEY_SEED -u NATS_NKEY_SEED_FILE -u GH_PUBLIC_REPO_PAT -u "$implement_app_key_name" \
-        -u GH_AGENT_APP_PRIVATE_KEY_B64 -u "$review_app_key_name" "$work/envoy-dispatch"
+      start_process dispatch env -u NATS_NKEY_SEED -u NATS_NKEY_SEED_FILE -u GH_PUBLIC_REPO_PAT "${app_key_unsets[@]}" "$work/envoy-dispatch"
     result=0
     await_start dispatch "$dispatch_pid" "$offset" 60 "the scratch Dispatch server" \
       curl -fsS "http://127.0.0.1:$port_dispatch/api/v1" || result=$?
@@ -276,8 +274,7 @@ start_daemon() {
     # paneEnvAllowList), so the real binaries' directory goes first, ahead of this box's own
     # shims for both (prerequisites, real_bin_path).
     HOME="$omp_home" OMP_PROFILE="$profile" PATH="$realbin:$PATH" env -u NATS_NKEY_SEED -u NATS_NKEY_SEED_FILE \
-      -u NATS_DAEMON_NKEY_SEED -u NATS_DAEMON_NKEY_SEED_FILE -u GH_PUBLIC_REPO_PAT -u "$implement_app_key_name" \
-      -u GH_AGENT_APP_PRIVATE_KEY_B64 -u "$review_app_key_name" \
+      -u NATS_DAEMON_NKEY_SEED -u NATS_DAEMON_NKEY_SEED_FILE -u GH_PUBLIC_REPO_PAT "${app_key_unsets[@]}" \
       "$work/legion" start --config "$work/legion.yaml" >>"$evidence/logs/daemon.log" 2>&1 &
     daemon_pid=$!
     result=0
@@ -689,8 +686,7 @@ dispatch_human PUT "settings/repo-projects/$repo" "$(jq -cn --arg project "$proj
 # are observed, never manufactured, and only the smoke repository is forwarded to this run's NATS.
 SMOKE_REPO="$repo" SMOKE_RIG_NATS="nats://127.0.0.1:$port_nats" \
   SMOKE_UPSTREAM_NATS="$upstream_nats" \
-  start_process bridge env -u GH_PUBLIC_REPO_PAT -u "$implement_app_key_name" \
-    -u GH_AGENT_APP_PRIVATE_KEY_B64 -u "$review_app_key_name" \
+  start_process bridge env -u GH_PUBLIC_REPO_PAT "${app_key_unsets[@]}" \
     bun run "$root/scripts/e2e/lib/envoy-bridge.ts"
 until_true 90 "the GitHub ingress bridge to report ready" grep -q 'BRIDGE READY' "$evidence/logs/bridge.log"
 (cd "$root" && bun install --frozen-lockfile >/dev/null)
