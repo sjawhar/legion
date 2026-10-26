@@ -89,17 +89,32 @@ func (n *GitHubNarrowing) narrowsToken() bool {
 
 // accessTokensBody is narrowing as GitHub's access_tokens body, nil for a narrowing that names
 // neither repositories nor read-only (it narrows to its owner alone) and for none, whose tokens
-// are asked for with no body, as before narrowing existed.
-func (n *GitHubNarrowing) accessTokensBody() ([]byte, error) {
+// are asked for with no body, as before narrowing existed. Marshalling a struct of a string slice
+// and a string map cannot fail, so its error is dropped.
+func (n *GitHubNarrowing) accessTokensBody() []byte {
 	if !n.narrowsToken() {
-		return nil, nil
+		return nil
 	}
 	body := githubAccessTokensBody{Repositories: n.Repositories}
 	if n.ReadOnly {
 		body.Permissions = readOnlyPermissions
 	}
-	return json.Marshal(body)
+	encoded, _ := json.Marshal(body)
+	return encoded
 }
+
+// githubRepositoryAnswerBound is more than any one repository object GitHub's access_tokens answer
+// can hold: measured objects are 4.9 to 5.3 KB, and a 100-character name repeated in every URL, a
+// 350-character description escaped six bytes a character and a 39-character login repeated in
+// the owner's URLs add under 10 KB more.
+const githubRepositoryAnswerBound = 64 << 10
+
+// accessTokensResponseLimit caps what Mint reads of a token answer, which names every repository
+// a narrowed token reaches: the common cap plus githubRepositoryAnswerBound for each of
+// MaxNarrowedRepositories. GitHub has minted the token by the time the answer arrives, and an
+// answer read in part cannot be released or revoked, so the cap admits whole every answer a
+// narrowing within the maximum can get.
+const accessTokensResponseLimit = mintResponseLimit + MaxNarrowedRepositories*githubRepositoryAnswerBound
 
 // refusal is err, GitHub's answer to the token request for owner, unless it is the 422 GitHub
 // gives a narrowed token it cannot mint: that is the caller's narrowing (ErrMintNarrowingRefused),
@@ -181,7 +196,7 @@ func (m GitHubApp) revokeInstallationToken(ctx context.Context, token string) er
 	if err != nil {
 		return fmt.Errorf("%w: %s: %w", ErrMintUpstream, what, err)
 	}
-	_, err = mintCall(m.HTTP, request, what, "GitHub", http.StatusNoContent)
+	_, err = mintCall(m.HTTP, request, what, "GitHub", http.StatusNoContent, mintResponseLimit)
 	return err
 }
 
@@ -217,10 +232,7 @@ func (m GitHubApp) Mint(ctx context.Context, req MintRequest) (string, error) {
 		}
 		owners = []string{owner}
 	}
-	body, err := narrowing.accessTokensBody()
-	if err != nil {
-		return "", fmt.Errorf("%w: encode the narrowing as GitHub's access_tokens body: %w", ErrMintUpstream, err)
-	}
+	body := narrowing.accessTokensBody()
 	key, err := githubappjwt.ParseKey(secret.PrivateKey)
 	if err != nil {
 		return "", fmt.Errorf("%w: parse GitHub App private key: %w", ErrMintStoredValue, err)
@@ -315,7 +327,7 @@ func (m GitHubApp) installations(ctx context.Context, jwt string) ([]githubInsta
 		if err != nil {
 			return nil, fmt.Errorf("%w: %s: %w", ErrMintUpstream, what, err)
 		}
-		payload, err := mintCall(m.HTTP, request, what, "GitHub", http.StatusOK)
+		payload, err := mintCall(m.HTTP, request, what, "GitHub", http.StatusOK, mintResponseLimit)
 		if err != nil {
 			return nil, err
 		}
@@ -338,7 +350,7 @@ func (m GitHubApp) installationToken(ctx context.Context, jwt string, installati
 	if err != nil {
 		return githubInstallationToken{}, fmt.Errorf("%w: %s: %w", ErrMintUpstream, what, err)
 	}
-	payload, err := mintCall(m.HTTP, request, what, "GitHub", http.StatusCreated)
+	payload, err := mintCall(m.HTTP, request, what, "GitHub", http.StatusCreated, accessTokensResponseLimit)
 	if err != nil {
 		return githubInstallationToken{}, err
 	}

@@ -2448,10 +2448,14 @@ that release's alone: the grant records none (each release's `grant.used` audit 
 broker keeps no token, so its next release without one mints the owner-wide tokens, and no
 approval, record, request object or grant changes, since the session holding the grant can always
 have the owner-wide token. `policy.ParseGitHubNarrowing` checks the body (one login by
-`policy.ParseGitHubLogin`, at most 500 repository names GitHub can hold) and the handler refuses
-any other `400 INVALID_NARROWING`; it answers `policy.CanonicalGitHubNarrowing`'s form, the one the
-CLI builds its request in too, so the CLI's comparison of the answer with its request cannot
-drift from the broker's. `Values` refuses, releasing nothing and running no minter, a narrowing
+`policy.ParseGitHubLogin`; repositories, when present, at least one and at most
+`secrets.MaxNarrowedRepositories` (100) names GitHub can hold, since GitHub's answer carries about
+5 KB per repository and `GitHubApp.Mint` reads it to `accessTokensResponseLimit`, sized for that
+many: an answer read in part leaves a minted token neither released nor revoked) and answers its
+canonical form or a `*policy.NarrowingError` naming the field, which the handler answers
+`400 INVALID_NARROWING` as `github_app.<field>`. The CLI runs the same function before it sends
+any request (exit 2), so the two cannot drift and its comparison of the answer with its request
+compares like with like. `Values` refuses, releasing nothing and running no minter, a narrowing
 of a grant that holds no github-app secret (`400 NARROWING_NOT_APPLICABLE`) and one to an account
 a github-app secret of the grant does not list in the snapshot it mints from
 (`403 NARROWING_OWNER_NOT_LISTED`); `GitHubApp.Mint` refuses that account again before it asks
@@ -2463,8 +2467,9 @@ narrowing asked (`GitHubNarrowing.heldBy`: the repositories selected, the permis
 the narrowing the answer echoes as `github_app` is true by construction. A token it refuses it
 revokes at GitHub first (`DELETE /installation/token`, as the token), logging a WARN when GitHub
 does not confirm the revoke, and the refusal names the rule the answer failed, never a value from
-it. A 422 that says it is a rate limit (`X-RateLimit-Remaining: 0`, or a rate-limit message) is
-the upstream's class, never the narrowing's. The CLI's exec form (`--github-owner`,
+it. A rate-limited answer from any minter call (a 429, `X-RateLimit-Remaining: 0`, or a body
+naming a rate limit, GitHub's or Google's) is the upstream's class, never `refused` or the
+narrowing's: a rate limit is not the App owner's to fix. The CLI's exec form (`--github-owner`,
 `--github-repo`, `--github-read-only`) requires that echo before it runs anything, since a broker
 from before narrowing ignores the body and releases the owner-wide token.
 Once its reads are done, `Values` checks every name whose frozen source is a stored one against the

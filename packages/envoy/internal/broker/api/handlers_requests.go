@@ -159,8 +159,8 @@ type githubNarrowing struct {
 	// The one GitHub account whose installation the token is minted for: a login the secret's
 	// github-owners lists, compared without regard to case. The answer names it lowercased.
 	Owner string `json:"owner"`
-	// Optional: names of the account's repositories, without the account, at most 500: the token
-	// reaches those repositories alone, but keeps every permission the App holds, its
+	// Optional: names of the account's repositories, without the account, at least one and at most
+	// 100: the token reaches those repositories alone, but keeps every permission the App holds, its
 	// organization permissions among them, unless read_only is set too. The answer names them
 	// sorted, each once.
 	Repositories []string `json:"repositories,omitempty"`
@@ -249,9 +249,9 @@ func (s *server) grantValues(w http.ResponseWriter, r *http.Request, enrollmentI
 	var narrowing *secrets.GitHubNarrowing
 	var applied *githubNarrowing
 	if body.GitHubApp != nil {
-		n, err := policy.ParseGitHubNarrowing(body.GitHubApp.Owner, body.GitHubApp.Repositories, body.GitHubApp.ReadOnly)
-		if err != nil {
-			writeError(w, http.StatusBadRequest, "INVALID_NARROWING", "github_app."+err.Error())
+		n, refusal := policy.ParseGitHubNarrowing(body.GitHubApp.Owner, body.GitHubApp.Repositories, body.GitHubApp.ReadOnly)
+		if refusal != nil {
+			writeError(w, http.StatusBadRequest, "INVALID_NARROWING", "github_app."+refusal.Field+" "+refusal.Reason)
 			return
 		}
 		narrowing = &n

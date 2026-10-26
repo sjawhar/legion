@@ -196,13 +196,14 @@ secret:
 - `--github-owner <owner>` gives a token for the installation on that account only. The account
   must be in the `github-owners` tag of the secret.
 - `--github-repo <repository>` limits the token to that repository of the account. Use the flag
-  one time for each repository. Give the repository name without the account. The token keeps
-  every permission the App holds, its organization permissions too, unless you also give
-  `--github-read-only`.
+  one time for each repository, at most 100 times. Give the repository name without the account.
+  The token keeps every permission the App holds, its organization permissions too, unless you
+  also give `--github-read-only`.
 - `--github-read-only` limits the token to `contents: read` and `metadata: read`. A machine that
   must only read needs it, with or without `--github-repo`.
 
-`--github-repo` and `--github-read-only` need `--github-owner`.
+`--github-repo` and `--github-read-only` need `--github-owner`. `agent-secrets` checks the flags
+before it asks for the secret: a flag the broker would refuse exits 2, and nothing is sent.
 
 ```sh
 agent-secrets --reason "read <repository> on <machine>" GITHUB_APP_<PERSON> \

@@ -138,30 +138,21 @@ func TestAReleaseNarrowsAGitHubAppToken(t *testing.T) {
 	}
 }
 
-// TestABadNarrowingIs400AndMintsNothing: a github_app narrowing names one GitHub login and only
-// repository names GitHub can hold, at most GitHub's 500, and nothing else, or the release is
-// refused 400 INVALID_NARROWING; a narrowing of a grant that holds no github-app secret is refused
-// 400 NARROWING_NOT_APPLICABLE. Neither runs a minter.
+// TestABadNarrowingIs400AndMintsNothing: a github_app narrowing policy.ParseGitHubNarrowing refuses
+// (its own test holds the rules) or one holding a field the broker does not read is refused 400
+// INVALID_NARROWING, naming the field as github_app.<field>; a repositories list present but empty
+// is refused rather than read as every repository, which only JSON's [] against an absent field
+// shows; a narrowing of a grant that holds no github-app secret is refused 400
+// NARROWING_NOT_APPLICABLE. None runs a minter.
 func TestABadNarrowingIs400AndMintsNothing(t *testing.T) {
 	s := newNarrowingServer(t)
-	tooMany := make([]string, 501)
-	for i := range tooMany {
-		tooMany[i] = fmt.Sprintf("repo-%d", i)
-	}
 	for _, tc := range []struct {
 		name      string
 		narrowing map[string]any
 		mentions  string
 	}{
-		{"no owner", map[string]any{"read_only": true}, "owner"},
-		{"two owners", map[string]any{"owner": "ada acme"}, "owner"},
-		{"one owner twice", map[string]any{"owner": "ada ada"}, "owner"},
-		{"an owner no login can be", map[string]any{"owner": "-ada"}, "owner"},
-		{"a repository with its owner", map[string]any{"owner": "ada", "repositories": []string{"ada/proofs"}}, "ada/proofs"},
-		{"a repository named ..", map[string]any{"owner": "ada", "repositories": []string{".."}}, ".."},
-		{"a repository named .", map[string]any{"owner": "ada", "repositories": []string{"."}}, `"."`},
-		{"an empty repository name", map[string]any{"owner": "ada", "repositories": []string{""}}, "repositor"},
-		{"501 repositories", map[string]any{"owner": "ada", "repositories": tooMany}, "500"},
+		{"a repository with its owner", map[string]any{"owner": "ada", "repositories": []string{"ada/proofs"}}, "github_app.repositories names ada's repositories by name alone"},
+		{"an empty repository list", map[string]any{"owner": "ada", "repositories": []string{}}, "github_app.repositories is empty"},
 		{"a field the broker does not read", map[string]any{"owner": "ada", "permissions": map[string]string{"administration": "write"}}, "permissions"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

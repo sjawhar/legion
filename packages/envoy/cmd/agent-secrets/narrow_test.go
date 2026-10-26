@@ -20,8 +20,9 @@ import (
 type narrowBroker struct {
 	srv *httptest.Server
 
-	mu     sync.Mutex
-	bodies []string // each release's body, "" for none
+	mu       sync.Mutex
+	requests int      // each POST /v1/requests
+	bodies   []string // each release's body, "" for none
 }
 
 func newNarrowBroker(t *testing.T) *narrowBroker {
@@ -29,6 +30,9 @@ func newNarrowBroker(t *testing.T) *narrowBroker {
 	b := &narrowBroker{}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /v1/requests", func(w http.ResponseWriter, r *http.Request) {
+		b.mu.Lock()
+		b.requests++
+		b.mu.Unlock()
 		var body struct {
 			Request string `json:"request"`
 		}
@@ -90,6 +94,16 @@ func (b *narrowBroker) take() []string {
 	bodies := b.bodies
 	b.bodies = nil
 	return bodies
+}
+
+// takeRequests returns how many requests the broker received since the last call, and forgets
+// them.
+func (b *narrowBroker) takeRequests() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	requests := b.requests
+	b.requests = 0
+	return requests
 }
 
 // TestTheGitHubFlagsNarrowTheRelease: the exec form's --github-owner, --github-repo and
@@ -160,22 +174,34 @@ func TestANarrowingTheBrokerAppliedOtherwiseRunsNothing(t *testing.T) {
 	}
 }
 
-// TestAGitHubNarrowingWithoutAnOwnerExitsTwo: --github-repo or --github-read-only narrows one
+// TestAGitHubNarrowingTheBrokerWouldRefuseExitsTwo: --github-repo or --github-read-only narrows one
 // account's token, so without --github-owner it is a usage error, and so is a --github-owner that
 // names no account (an unset variable a helper passed), which would otherwise send no narrowing at
-// all; nothing reaches the broker.
-func TestAGitHubNarrowingWithoutAnOwnerExitsTwo(t *testing.T) {
+// all, and any narrowing the broker's parser refuses (policy.ParseGitHubNarrowing): the CLI runs
+// that parser itself, so nothing reaches the broker, not even the request a person would approve.
+func TestAGitHubNarrowingTheBrokerWouldRefuseExitsTwo(t *testing.T) {
 	binary := buildAgentSecrets(t)
 	b := newNarrowBroker(t)
 	keyDir := newKeyDir(t)
-	for _, flags := range [][]string{{"--github-repo", "widgets"}, {"--github-read-only"}, {"--github-owner", ""}, {"--github-owner="}, {"--github-owner", "  ", "--github-read-only"}} {
-		args := append(append([]string{"APP"}, flags...), "--", "sh", "-c", "echo ran-the-child")
+	for _, tc := range []struct {
+		flags []string
+		names string
+	}{
+		{[]string{"--github-repo", "widgets"}, "--github-owner"},
+		{[]string{"--github-read-only"}, "--github-owner"},
+		{[]string{"--github-owner", ""}, "--github-owner"},
+		{[]string{"--github-owner="}, "--github-owner"},
+		{[]string{"--github-owner", "  ", "--github-read-only"}, "--github-owner"},
+		{[]string{"--github-owner", "ada acme"}, "--github-owner"},
+		{[]string{"--github-owner", "ada", "--github-repo", "acme/widgets"}, "--github-repo"},
+	} {
+		args := append(append([]string{"APP"}, tc.flags...), "--", "sh", "-c", "echo ran-the-child")
 		stdout, stderr, exit := runAgentSecrets(t, binary, b.srv.URL, keyDir, nil, args...)
-		if exit != 2 || strings.Contains(stdout, "ran-the-child") || !strings.Contains(stderr, "--github-owner") {
-			t.Fatalf("%v: exit %d, stdout %q, stderr %q; want exit 2 naming --github-owner", flags, exit, stdout, stderr)
+		if exit != 2 || strings.Contains(stdout, "ran-the-child") || !strings.Contains(stderr, tc.names) {
+			t.Fatalf("%v: exit %d, stdout %q, stderr %q; want exit 2 naming %s", tc.flags, exit, stdout, stderr, tc.names)
 		}
-		if bodies := b.take(); len(bodies) != 0 {
-			t.Fatalf("%v: the broker was asked for a release: %q", flags, bodies)
+		if requests, bodies := b.takeRequests(), b.take(); requests != 0 || len(bodies) != 0 {
+			t.Fatalf("%v: the broker was asked %d requests and %d releases, want none", tc.flags, requests, len(bodies))
 		}
 	}
 }

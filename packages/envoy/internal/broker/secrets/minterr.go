@@ -33,6 +33,13 @@ type GitHubNarrowing struct {
 	ReadOnly bool
 }
 
+// MaxNarrowedRepositories is the most repositories a GitHubNarrowing names. GitHub's
+// access_tokens body takes 500, but its answer carries a full repository object for each one,
+// about 5 KB, and the minter reads that answer to a cap sized for this many
+// (accessTokensResponseLimit): a token GitHub minted whose answer the minter cannot read whole
+// cannot be released or revoked.
+const MaxNarrowedRepositories = 100
+
 // The classes of a minter's failure (GitHubApp.Mint, GoogleLogin.Mint). Every error a minter
 // returns wraps exactly one, so the broker's log names the class an operator acts on without
 // reading the message, which never holds the stored value or a token.

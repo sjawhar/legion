@@ -3,6 +3,7 @@ package secrets_test
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -467,5 +468,40 @@ func TestGitHubAppMintStillRefusesWhenGitHubDoesNotRevoke(t *testing.T) {
 	}
 	if line := logged.String(); !strings.Contains(line, "level=WARN") || !strings.Contains(line, "did not revoke") || strings.Contains(line, "token-2") {
 		t.Fatalf("log = %q, want a WARN line that GitHub did not revoke the token, without the token", line)
+	}
+}
+
+// TestGitHubAppMintReadsTheAnswerToANarrowingAtTheMaximum: GitHub's answer to a narrowed token
+// carries a full repository object for each repository, about 5 KB, and GitHub has minted the
+// token by the time it answers, so an answer Mint could not read whole would leave a token neither
+// released nor revoked. At secrets.MaxNarrowedRepositories, with each object eight times GitHub's
+// size (an answer over 4 MiB, past the 1 MiB other calls read to), Mint reads it, checks it and
+// releases the token.
+func TestGitHubAppMintReadsTheAnswerToANarrowingAtTheMaximum(t *testing.T) {
+	key, err := testAppKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	github := newNarrowingGitHub(t)
+	github.setAnswer(func(installation string, body []byte) (int, any) {
+		status, answer := asGitHubAnswers(installation, body)
+		repositories := answer.(map[string]any)["repositories"].([]map[string]string)
+		for _, repository := range repositories {
+			repository["description"] = strings.Repeat("x", 40<<10)
+		}
+		return status, answer
+	})
+	app := secrets.GitHubApp{Base: github.server.URL, HTTP: github.server.Client()}
+	names := make([]string, secrets.MaxNarrowedRepositories)
+	for i := range names {
+		names[i] = fmt.Sprintf("repo-%03d", i)
+	}
+
+	release, err := app.Mint(t.Context(), secrets.MintRequest{Value: githubAppValue(t, "123456", key), GitHubOwners: []string{"acme-org", "ada"}, GitHubNarrowing: &secrets.GitHubNarrowing{Owner: "ada", Repositories: names, ReadOnly: true}})
+	if err != nil || !strings.Contains(release, "token-2") {
+		t.Fatalf("Mint narrowed to %d repositories = %q, %v; want ada's token", len(names), release, err)
+	}
+	if revoked := github.takeRevoked(); len(revoked) != 0 {
+		t.Fatalf("revokes at GitHub = %q, want none", revoked)
 	}
 }
