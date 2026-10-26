@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-442",
+  "completed": "2026-10-26T03:54:46Z",
+  "decision": "changes_requested",
+  "reviewedCodeHead": "404c8295e2c9bc3b3355eac849078dac71c7216e",
+  "ci": "Required set (ruleset): lint, typecheck, test, pr-title, all completed success at CI head 404c8295e2c9 (newest pull_request run); compare 404c8295e2c9...c9607a12d3cd touches only .legion/. Non-required `dispatch` job of Legion Envoy and Contracts still in_progress at read time.",
+  "thermo": "thermonuclear-deep-review at 404c8295e2c9: no critical or important; minor: hint line ignores `sending`, test gap A->B->A with a send out. thermonuclear-code-quality at 404c8295e2c9: keyboard.md misstates Ctrl+Enter; a second per-session send store beside held-sends (recorded plan decision D6, not a defect against the plan); ownSendCount/onScreen placement (structure, not a defect).",
+  "critical": 0,
+  "important": 2,
+  "minor": 0,
+  "keyFindings": [
+    {
+      "severity": "important",
+      "file": "docs/site/src/content/docs/dispatch/keyboard.md",
+      "description": "Line 166 says the live view's box is the exception to the first two rows (Ctrl+Enter Send, Enter New line). Ctrl+Enter still sends there: assistant-ui ComposerInput.tsx:263-268 submits on any non-Shift Enter in submitMode 'enter'. Only the Enter row differs; the prose also repeats the two new table rows. AC11 asks the docs to describe the live view's keys correctly."
+    },
+    {
+      "severity": "important",
+      "file": "packages/dispatch/web/src/features/agent-view/AgentThread.tsx",
+      "description": "Line 479: while this session's send is out (button 'Sending…') and the box holds text, the line under the box says 'Enter to send · Shift+Enter for a new line', but Enter does nothing: requestSubmit reaches ComposerRoot, and send() returns because canSend is false under isSendDisabled. The on-screen instruction is false for the whole send; say what holds Enter instead, and pin it."
+    }
+  ]
+}
