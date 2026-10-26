@@ -75,19 +75,26 @@
 # - LEGION_E2E_STORAGE_CLASS (required) is the StorageClass of the issue pod's disk, the pod's own
 #   generic ephemeral volume (runtime.kubernetes.storage_class): the cluster has no default to fall
 #   back on.
-# - LEGION_E2E_CLAUDE_KEY_FILE (required) names a file holding the Anthropic API key the Claude Code
-#   implementer reaches its model with. The run copies it once (0600) and creates the providers
-#   Secret the runtime names for the project with it, which `provider_keys: {ANTHROPIC_API_KEY:
+# - LEGION_E2E_CLAUDE_KEY_FILE, or LEGION_E2E_PROVIDERS_SECRET with LEGION_E2E_PROVIDERS_SECRET_KEY
+#   (exactly one of the two sources is required), is where the Anthropic API key the Claude Code
+#   implementer reaches its model with comes from. LEGION_E2E_CLAUDE_KEY_FILE names a file on the
+#   devbox, which the run copies once (0600). LEGION_E2E_PROVIDERS_SECRET names a Secret that already
+#   exists in the namespace, and LEGION_E2E_PROVIDERS_SECRET_KEY (default ANTHROPIC_API_KEY) its key
+#   holding the Anthropic key: the operator context reads that key and the value passes through the
+#   devbox's memory alone, in a pipe from `kubectl get` to `kubectl create`, never on an argv, in a
+#   shell variable, on disk or in the evidence. Either way the key goes into the providers Secret the
+#   runtime names for the run's project, which `provider_keys: {ANTHROPIC_API_KEY:
 #   ANTHROPIC_API_KEY}` hands the pod: the key travels as a mounted Secret the shim exports into the
 #   agent's environment, never in the pod's spec, since runtime.kubernetes.pod.env refuses a
-#   credential-shaped name.
+#   credential-shaped name. A pod mounts only its own project's providers Secret
+#   (sandbox.ProvidersSecretName), so a named Secret is copied from, never mounted.
 # - LEGION_E2E_CLAUDE_MODEL (required) is the model id that pod's Claude Code runs, carried as the
 #   non-credential ANTHROPIC_MODEL in runtime.kubernetes.pod.env.
 # - LEGION_E2E_CLAUDE_BASE_URL (optional) is the Anthropic endpoint it calls, carried as the
 #   non-credential ANTHROPIC_BASE_URL in the same pod.env, for a devbox whose route to Anthropic is
 #   a gateway. Unset, the pod calls Anthropic's own endpoint, which is where the key's preflight
-#   reads too. Whichever it is, the key in LEGION_E2E_CLAUDE_KEY_FILE must be one that endpoint
-#   accepts; the preflight below holds it to that before anything is created.
+#   reads too. Whichever it is, the key must be one that endpoint accepts; the preflight below holds
+#   it to that before anything is created.
 # - LEGION_E2E_MODEL_ROUTE (required, `gateway` or `key-file`) is the route the pod's *Oh My Pi*
 #   roles take, the architect and the planner, which is the operator route's own
 #   (deploy/kubernetes/operator-route) as Stage 4a takes it: under `gateway`,
@@ -165,6 +172,8 @@ storage_class=${LEGION_E2E_STORAGE_CLASS:-}
 pod_reachability=${LEGION_E2E_POD_REACHABILITY:-}
 model_route=${LEGION_E2E_MODEL_ROUTE:-}
 claude_key_file=${LEGION_E2E_CLAUDE_KEY_FILE:-}
+source_secret=${LEGION_E2E_PROVIDERS_SECRET:-}
+source_secret_key=${LEGION_E2E_PROVIDERS_SECRET_KEY:-ANTHROPIC_API_KEY}
 claude_model=${LEGION_E2E_CLAUDE_MODEL:-}
 claude_base_url=${LEGION_E2E_CLAUDE_BASE_URL:-}
 port_daemon=${LEGION_E2E_DAEMON_PORT:-}
@@ -598,15 +607,46 @@ create_route_configmap() {
 # create_providers_secret is the one Secret of the run, under the name the runtime gives the
 # project's providers Secret: the Anthropic key, under the name provider_keys hands the pods, and the
 # session database's pod-facing URL, under the key session_dsn_secret names, which every pod keeps
-# its sessions through. Each reaches kubectl from the run's 0600 file, never an argument, and
-# neither is printed.
+# its sessions through. The URL reaches kubectl from the run's 0600 file; the key from the run's
+# 0600 copy of LEGION_E2E_CLAUDE_KEY_FILE, or, under LEGION_E2E_PROVIDERS_SECRET, straight from that
+# Secret's own data in a pipe (secret_key_pipe), never an argument, a variable or a file. Neither
+# is printed.
 create_providers_secret() {
   [ -s "$work/session-dsn" ] || fail "the session database's URL file $work/session-dsn is missing: start the session database before the providers Secret"
+  if [ -n "$source_secret" ]; then
+    # The named Secret's data is base64 already, so its key's value goes into the run's Secret as it
+    # is, never decoded; the URL file is read by jq, never by this shell.
+    op get secret "$source_secret" -o json |
+      jq -e --arg key "$source_secret_key" --arg name "$providers_secret" --arg label "$run_label" \
+        --arg dsn_key "$session_dsn_key" --rawfile dsn "$work/session-dsn" \
+        'select(.data[$key] != null) | {apiVersion: "v1", kind: "Secret", type: "Opaque",
+          metadata: {name: $name, labels: {"legion.dev/project": $label}},
+          data: ({ANTHROPIC_API_KEY: .data[$key]} + {($dsn_key): ($dsn | @base64)})}' |
+      op create -f - >/dev/null ||
+      fail "the operator could not create Secret $providers_secret from Secret $source_secret's key $source_secret_key"
+    note "[operator] Secret $providers_secret: ANTHROPIC_API_KEY (Secret $source_secret's key $source_secret_key, not printed) and $session_dsn_key (the scratch session database's URL, not printed), label legion.dev/project=$run_label"
+    return
+  fi
   op create secret generic "$providers_secret" --from-file=ANTHROPIC_API_KEY="$work/claude-model-key" \
     --from-file="$session_dsn_key=$work/session-dsn" \
     --dry-run=client -o yaml | op label --local -f - "legion.dev/project=$run_label" -o yaml | op create -f - >/dev/null ||
     fail "the operator could not create Secret $providers_secret"
   note "[operator] Secret $providers_secret: ANTHROPIC_API_KEY (the run's own key, not printed) and $session_dsn_key (the scratch session database's URL, not printed), label legion.dev/project=$run_label"
+}
+# model_key_answers prints the HTTP status GET /v1/models answers the run's Anthropic key with, at
+# the endpoint the pod's Claude Code will call: the header reaches curl on its stdin (`-H @-`), from
+# the run's 0600 key copy or, under LEGION_E2E_PROVIDERS_SECRET, from that Secret's data in a pipe,
+# so the key is in no argv, variable or file of this shell.
+model_key_answers() {
+  local endpoint=${claude_base_url:-https://api.anthropic.com}/v1/models
+  if [ -n "$source_secret" ]; then
+    op get secret "$source_secret" -o json |
+      jq -er --arg key "$source_secret_key" '"x-api-key: " + (.data[$key] | @base64d)' |
+      curl -sS --max-time 30 -o /dev/null -w '%{http_code}' -H @- -H 'anthropic-version: 2023-06-01' "$endpoint"
+  else
+    printf 'x-api-key: %s\n' "$(cat "$work/claude-model-key")" |
+      curl -sS --max-time 30 -o /dev/null -w '%{http_code}' -H @- -H 'anthropic-version: 2023-06-01' "$endpoint"
+  fi
 }
 
 # ---- the daemon ------------------------------------------------------------------------------------
@@ -836,10 +876,21 @@ case "$image" in
 esac
 [ -n "$storage_class" ] ||
   fail "LEGION_E2E_STORAGE_CLASS is unset: name the StorageClass of the issue pod's disk (the cluster has no default to fall back on)"
-[ -n "$claude_key_file" ] ||
-  fail "LEGION_E2E_CLAUDE_KEY_FILE is unset: name a file holding the Anthropic API key the Claude Code implementer reaches its model with"
-[ -f "$claude_key_file" ] && [ -r "$claude_key_file" ] ||
-  fail "LEGION_E2E_CLAUDE_KEY_FILE names $claude_key_file, which is not a readable file"
+# The Anthropic key's one source: a file on the devbox, or a key of a Secret already in the namespace.
+case "${claude_key_file:+file}${source_secret:+secret}" in
+  file)
+    [ -f "$claude_key_file" ] && [ -r "$claude_key_file" ] ||
+      fail "LEGION_E2E_CLAUDE_KEY_FILE names $claude_key_file, which is not a readable file"
+    ;;
+  secret)
+    [[ "$source_secret" =~ ^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$ && ${#source_secret} -le 253 ]] ||
+      fail "LEGION_E2E_PROVIDERS_SECRET must be a Secret's name in namespace $namespace, not '$source_secret'"
+    [[ "$source_secret_key" =~ ^[-._a-zA-Z0-9]+$ && ${#source_secret_key} -le 253 ]] ||
+      fail "LEGION_E2E_PROVIDERS_SECRET_KEY must be a Secret key's name, not '$source_secret_key'"
+    ;;
+  filesecret) fail "LEGION_E2E_CLAUDE_KEY_FILE and LEGION_E2E_PROVIDERS_SECRET are both set: name one source of the Anthropic key the Claude Code implementer reaches its model with" ;;
+  *) fail "LEGION_E2E_CLAUDE_KEY_FILE and LEGION_E2E_PROVIDERS_SECRET are both unset: name a file holding the Anthropic API key the Claude Code implementer reaches its model with, or an existing Secret of namespace $namespace (and LEGION_E2E_PROVIDERS_SECRET_KEY, its key) to copy it from" ;;
+esac
 [ -n "$claude_model" ] ||
   fail "LEGION_E2E_CLAUDE_MODEL is unset: name the model id the pod's Claude Code runs, which travels as ANTHROPIC_MODEL in runtime.kubernetes.pod.env"
 case "$claude_base_url" in
@@ -887,17 +938,24 @@ refuse_leftovers legion-e2eccs
 ports_free "$port_daemon" "$port_worker_stream" "$port_dispatch" "$port_listener" "$port_nats" "$port_session_db"
 mkdir -p "$state"
 chmod 0700 "$state"
-(umask 077 && tr -d '[:space:]' <"$claude_key_file" >"$work/claude-model-key")
-[ -s "$work/claude-model-key" ] || fail "LEGION_E2E_CLAUDE_KEY_FILE ($claude_key_file) holds no key"
+if [ -n "$source_secret" ]; then
+  # By name alone: the Secret and its key exist, read as the list of the Secret's key names.
+  keys=$(op get secret "$source_secret" -o json 2>&1 | jq -r '.data // {} | keys[]' 2>/dev/null) ||
+    fail "the operator context cannot read Secret $source_secret in namespace $namespace (LEGION_E2E_PROVIDERS_SECRET): it is missing or unreadable"
+  grep -qxF -- "$source_secret_key" <<<"$keys" ||
+    fail "Secret $source_secret in namespace $namespace holds no key $source_secret_key (LEGION_E2E_PROVIDERS_SECRET, LEGION_E2E_PROVIDERS_SECRET_KEY); its keys are: $(tr '\n' ' ' <<<"$keys")"
+  key_source="Secret $source_secret's key $source_secret_key"
+else
+  (umask 077 && tr -d '[:space:]' <"$claude_key_file" >"$work/claude-model-key")
+  [ -s "$work/claude-model-key" ] || fail "LEGION_E2E_CLAUDE_KEY_FILE ($claude_key_file) holds no key"
+  key_source="$claude_key_file"
+fi
 # The key's preflight, against the endpoint the pod's Claude Code will call: it lists its models to
-# a key it accepts. The header goes by file, so the key is in no argv.
-(umask 077 && printf 'x-api-key: %s\n' "$(cat "$work/claude-model-key")" >"$work/claude-key-header")
-code=$(curl -sS --max-time 30 -o /dev/null -w '%{http_code}' -H "@$work/claude-key-header" -H 'anthropic-version: 2023-06-01' \
-  "${claude_base_url:-https://api.anthropic.com}/v1/models") || code="unreachable (curl exited $?)"
-rm -f "$work/claude-key-header"
+# a key it accepts.
+code=$(model_key_answers) || code="unreachable (exit $?)"
 [ "$code" = 200 ] ||
-  fail "the model endpoint ${claude_base_url:-https://api.anthropic.com} refuses the key in LEGION_E2E_CLAUDE_KEY_FILE ($claude_key_file): GET /v1/models answered $code"
-note "the Claude Code implementer's key from $claude_key_file: ${claude_base_url:-https://api.anthropic.com} accepts it, and it runs $claude_model"
+  fail "the model endpoint ${claude_base_url:-https://api.anthropic.com} refuses the Anthropic key from $key_source: GET /v1/models answered $code"
+note "the Claude Code implementer's key from $key_source: ${claude_base_url:-https://api.anthropic.com} accepts it, and it runs $claude_model"
 # Legion's two role Apps proved against GitHub before the run writes anything (lib/github-apps.sh):
 # each App's key command runs as the daemon runs it, and GET /app under the key's JWT must answer
 # the App's id and the write permission its role needs. legion.yaml's github_apps is the block
