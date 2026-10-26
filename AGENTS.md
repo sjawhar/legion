@@ -165,7 +165,7 @@ Triage ──┬──► Icebox ──► Backlog ──► Todo ──► In P
 **Acceptance:** the reviewer's approval moves the issue to `accepting` (Dispatch status `needs_review`), where no worker runs: the tree's architect reads the tester's handoff, the pull request body's two `E2E` lines and the reviewer's approval of the head by SHA, then accepts with the `legion` tool's `sign_off` (→ `retro`; refused in every other phase, `SIGNOFF_OUTSIDE_ACCEPTING`, and refused 409 `SIGNOFF_CHILD_IN_WORKFLOW` while any issue beneath this one — its children, their children — is still in the workflow, the refusal naming each of them: the daemon keeps that order, so the architect accepts once the last of them is done or parked, or takes one out with `park_child`) or sends the issue back to `implementing` or `testing` with `request_backward_move`, which counts a review round. An architect's `handoff_complete` there is refused (`ACCEPTANCE_IS_SIGN_OFF`); CI red there returns the issue to `implementing`.
 **Retro:** runs after the architect's acceptance and before the merger completes with its `READY` packet.
 **The merge closes the issue:** a pull request merged while the issue is in `awaiting_merge` writes `done`. A child's close tells its architect `child-closed`, retires five of its six claims and hands the implementer the production check's first look in its live session; a root's close frees the slot and lingers the tree. A root whose pull request merges while any other issue of its tree is still in the workflow records the merge and stays in `awaiting_merge` — no suspension, no linger, no slot freed, and its architect gets one `pr-merged` notice naming the pull request and every issue the close is waiting for — and closes that way once the last open member of the tree is done or parked. A person's own close of a root from the Dispatch dashboard lingers the tree at once, children and all. The architect does nothing after the merge.
-**Production check:** work after the close. The implementer — the agent that developed the change — gets a task whose first line is `Production check of <KEY>: <title>.`, reaches the deploy as the deployment instructions say (the merge commit published to the deploy role, no reply awaited), reads whether production carries the merge, and reports with `handoff_complete` and a `verdict`, no commit: `pass` once it drove the changed path in production and wrote the pull request's `Production:` line (naming the merge commit and what woke the look); `pending` when production does not carry the merge yet (the daemon suspends the implementer's claim with its session, the issue's pod goes and takes the disk it owns, and the daemon wakes the check on Dispatch's `issue.deployed` for the pull request; when the project's `projects.<KEY>.deploys` names the repository's deploy workflow and step, at each completed run of that workflow on the default branch whose step succeeded after the merge, once per such job, read from GitHub as the implement App on the run's `workflow_run` webhook through Envoy, the task naming `the deploy workflow's run: <repo> <workflow> run <id> attempt <n>, job <job name>: <step> succeeded at <time>`, and never for a pull-request run, a skipped or failed step, or a step that finished before the merge; or, for `sjawhar/legion`, on a Legion daemon's boot or Dispatch's start on a build containing the merge; a wake while a look is open is kept for the next look); `fail` for a defect, a `dispatch ask` and never an issue the implementer files, on the controller's report issue, naming the issue, the pull request, the merge commit, what was driven and what failed, its reference published to the controller, with the `Production:` line naming the ask. Each look is bounded at 2 hours and the check at `production_check_hours` (336 by default), whose wake is the last look. The record lives on the pull request alone, since Dispatch refuses a write on a closed issue; `legion state` prints `open production checks: …`.
+**Production check:** work after the close. The implementer — the agent that developed the change — gets a task whose first line is `Production check of <KEY>: <title>.`, reaches the deploy as the deployment instructions say (the merge commit published to the deploy role, no reply awaited), reads whether production carries the merge, and reports with `handoff_complete` and a `verdict`, no commit: `pass` once it drove the changed path in production and wrote the pull request's `Production:` line (naming the merge commit and what woke the look); `pending` when production does not carry the merge yet (the daemon suspends the implementer's claim with its session, the issue's pod goes and takes the disk it owns, and the daemon wakes the check on Dispatch's `issue.deployed` for the pull request; when the project's `projects.<KEY>.deploys` names the repository's deploy workflow and step, at each completed run of that workflow on the default branch whose step succeeded after the merge, once per such job, read from GitHub as the implement App on the run's `workflow_run` webhook through Envoy, the task naming `the deploy workflow's run: <repo> <workflow> run <id> attempt <n>, job <job name>: <step> succeeded at <time>`, and never for a pull-request run, a skipped or failed step, or a step that finished before the merge; or, for `sjawhar/legion`, on a Legion daemon's boot or Dispatch's start on a build containing the merge; a wake while a look is open is kept for the next look); `fail` for a defect, never an issue the implementer files: a defect with a clear fix goes to the controller, which gives it to the running tree whose code it is and files a Legion root only when none does, and one that needs a decision is a `dispatch ask` on the controller's report issue whose reference goes to the controller; either names the issue, the pull request, the merge commit, what was driven and what failed, and the `Production:` line names the message or the ask. Each look is bounded at 2 hours and the check at `production_check_hours` (336 by default), whose wake is the last look. The record lives on the pull request alone, since Dispatch refuses a write on a closed issue; `legion state` prints `open production checks: …`.
 
 Statuses above are native Dispatch issue statuses, not GitHub labels — the daemon writes
 `in_progress`/`testing`/`needs_review`/`retro` through its outbox (a `dispatch_status` row it delivers to Dispatch) for the issues it
@@ -176,14 +176,21 @@ close an issue into `done` and reopen it into `backlog` from the Dispatch dashbo
 
 **Handover:** the daemon (`packages/daemon`) works only the issues handed to it with the
 Dispatch label `legion` (in any case), so it can share a Dispatch project with humans and other
-agents; a dedicated project hands its issues over the same way. Work reaches Legion only by a
-person's decision: a human sets the label from the issue header in the Dispatch dashboard, or asks
-the controller to (a direct message, a Slack request, or the answer to a finding ask), and the
-controller sets it with `dispatch issue` or `dispatch issue-update`. The controller starts no work
-on its own: a free admission slot is no reason to label or admit an issue
-(`skills/legion-controller/SKILL.md`, "Free slots"), and no Legion agent files an issue for a
-finding outside its own issue: it opens a Dispatch ask, and a person decides whether it needs one
-(`skills/legion-worker/references/findings.md`).
+agents; a dedicated project hands its issues over the same way. Work reaches Legion by a person's
+decision or as a clear defect a Legion role reported: a human sets the label from the issue header
+in the Dispatch dashboard, or asks the controller to (a direct message, a Slack request, or the
+answer to a finding ask), and the controller sets it with `dispatch issue` or `dispatch
+issue-update`. The controller starts no other work on its own: a free admission slot is no reason
+to label or admit an issue (`skills/legion-controller/SKILL.md`, "Free slots"). No other Legion
+agent files an issue for a finding outside its own issue. A defect with a clear fix in code a
+tree touches or depends on is fixed in that tree's own pull request, while the role is there. Any
+other defect with a clear fix goes to the controller with its evidence, and the controller gives
+it to the running tree whose code it is. Only when no tree owns that code does it file a Legion
+root, with the label and a `Filed for Legion from <role> on <issue>: <evidence>` line, which its
+triage admits (the operator's answer on one such case: a clear defect is fixed, not asked
+about). A finding that needs a person's
+authority, taste or risk appetite is a Dispatch ask, and a person decides whether it needs an
+issue (`skills/legion-worker/references/findings.md`).
 A root in `todo` without the label is never admitted, and a root in `triage` without it never wakes
 the controller. A child needs none: it runs under its tree's architect once its root is admitted,
 and its architect's `release_children` records it in the tree even when Dispatch already showed it
@@ -252,11 +259,49 @@ daemon reads the approval; it never writes one). A later spec version closes the
 someone approves the new version, which Dispatch does in the human's own name when the version is
 his answer to a decision block and that answer is the whole change since the version he approved
 (it records an `approved` review pinned to the new version and emits `artifact.approved`, and the
-gate reopens on that event), and a `changes_requested` review closes it with the reviewer's
-reason. `gates.design: off` is the only way past the gate without a human review — Legion has no
-operator approve command; with `off` the root architect is told so in its system prompt and adds
-no approval step. Whether a human must approve a pull request before it merges is the repository's
-own branch-protection or CODEOWNERS rule: Legion neither reads nor writes it. Only retro's commits
+gate reopens on that event), and a `changes_requested` review closes it with the reviewer's reason.
+
+register_gate reads the issue's Dispatch event sequence, then the document's approval, and refuses
+a version above the latest one Dispatch shows (`VERSION_NOT_IN_DISPATCH`), since no person's review
+could open a gate on a version Dispatch never wrote; the gate is registered at the newer of the
+caller's version and Dispatch's. A registration Dispatch already shows approved at its latest
+version opens the gate at registration, and the root starts planning; one Dispatch shows changes
+requested at its latest version closes it with the architect told. A registration that finds the
+gate of its document already open at that version tells the architect nothing again. A
+registration older than the gate's newest version changes nothing but still queues the gate seed
+at the gate's version, and one whose read of Dispatch began before the review the gate already
+holds at that version is the older reader — the person acted after that read — so the gate keeps
+the review it holds: a told changes request is not told again and an approval is not rolled back.
+A gate seed that reads the document below the version it was queued at finds a gate above every
+version Dispatch wrote (a daemon that did not check the caller's version could record one), and
+resets the gate to Dispatch's version with the review it read there. The daemon identifies a
+review by its version, its reason and where Dispatch recorded it: the sequence of its `artifact.*`
+event on the issue (Dispatch's approval read gives it as `seq`), or Dispatch's time of it (`at`)
+when a read gives no sequence — a review Dispatch recorded before it kept the sequence, or a read
+of a Dispatch that does not give it. Two reads of one review are merged, so the gate keeps the
+sequence once any read gave it. The gate records where Dispatch put the review it last applied —
+the approval it holds (`approved_seq`, `approved_at`) or the changes request it records as told
+(`told_changes_seq`, `told_changes_at`), never both, since each clears the other — and a review of
+that version delivered after a newer one changes no gate state: an approval that arrives after the
+changes request which superseded it, and a changes request that arrives after a newer approval.
+Neither does a review of a version below the gate's latest. Such a changes request is still the
+person's words, so it is told to the architect with its own version and reason unless an approval
+came after it; that is a request of an older version delivered after the next one, and one a newer
+request at its version superseded. Each changes request reaches the architect once per generation,
+whichever of the live event, a registration's read or the gate seed's read carries it and in
+whatever order: the notice's transaction marks the review processed by its issue, generation,
+document, version and Dispatch's time of it (`at`, which the live event and every read carry), and
+a review already marked is not told again; a later review that repeats an earlier one's version
+and wording is a new act and is told. A registration of a newer version keeps the gate's approval
+of an older one, as a version event does, so a late request that approval answered stays answered.
+
+`gates.design: off` is the only way past the gate without a human review — Legion has no operator
+approve command; with `off` the root architect is told so in its system prompt and adds no approval
+step, a registration approves the gate whatever it held, and no artifact event moves the gate, so
+an approval does not open a carried copy that was closed before the switch either; a changes
+request is still told to the architect, once, without closing the gate. Whether a human
+must approve a pull request before it merges is the repository's own branch-protection or
+CODEOWNERS rule: Legion neither reads nor writes it. Only retro's commits
 may sit above the reviewer's approved head, those that change `docs/solutions/` and its removal of
 `.legion/<issue>/`: READY compares the review round's recorded approved head with READY's head on
 GitHub, as the implement App, and refuses anything else above it (`READY_UNREVIEWED_CHANGE`, naming

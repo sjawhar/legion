@@ -62,14 +62,20 @@ reaches it through Dispatch. The daemon wakes it when something needs a judgment
 The daemon also wakes it when an admission slot frees and on a timer, every
 `controller_wake_interval_seconds` (an hour by default), and on its first turn of each UTC day the
 controller posts a report on what Legion finished, closed and is running. A free slot is never a
-reason for the controller to take an issue: it starts no work a person did not hand over.
+reason for the controller to take an issue: it takes only what a person hands over and the clear
+defects Legion's agents report.
 
-No Legion agent files an issue for a problem it finds outside its own issue. It opens a Dispatch ask
-on Legion's daily report issue instead, naming the issue it came from and where the fix belongs
-(the repository or layer, and saying so when it is not Legion), with its evidence and a
-recommendation, and you decide whether it needs an issue. The controller files that issue, with the
-`legion` label only when your answer asks Legion to work it. The issues an agent still files on
-its own are an architect's children of its own tree.
+No Legion agent files an issue for a problem it finds outside its own issue. A defect with a clear
+fix in code the agent's own tree touches or depends on is fixed in that tree's pull request, while
+the agent is there. Any other goes to the controller with its evidence, and the controller gives it
+to the running tree whose code it is. Only when no tree owns that code does it file the issue with
+the `legion` label, so Legion works it without asking you. A problem that needs a decision of
+yours goes into a Dispatch ask on
+Legion's daily report issue instead, naming the issue it came from and where the fix belongs (the
+repository or layer, and saying so when it is not Legion), with its evidence and a recommendation,
+and you decide whether it needs an issue. The controller files that issue, with the `legion` label
+only when your answer asks Legion to work it. An architect also files the children of its own
+tree.
 
 The only statuses the controller sets are `todo`, `backlog` and `icebox` (`triage` is set by
 whoever files an issue). It reads pull requests as the review App, and never touches a tree's work.
@@ -131,13 +137,16 @@ the label, is in `todo`, and a slot is free. The number of slots is `admission_c
 configuration, four by default; a labelled `todo` root that finds no free slot waits in line, in the
 project board's order, and takes the next one.
 
-An issue gets the label only by a person's decision:
+An issue gets the label in one of three ways:
 
 - **A person hands it over**, from the issue header in the Dispatch dashboard.
 - **A person asks the controller to**, in a message, a Slack request, or the answer to one of its
   asks, and the controller sets the label for them.
+- **A Legion agent reports a clear defect** no running tree owns, one whose fix needs no choice of
+  yours, and the controller files it with the label.
 
-A free slot stays free until a person hands Legion an issue: the controller never takes one.
+A free slot stays free until an issue gets the label one of these ways: the controller never takes
+one on its own.
 
 A child issue needs no label: it runs under its tree once the root is admitted. Taking the label
 off a waiting root takes it out of line; taking it off a running tree does not stop the tree.
@@ -322,9 +331,11 @@ deployment instructions say (the merge commit published to your deploy role, wit
 awaited), reads whether production carries the merge, and ends one of three ways: `pass`, once
 the implementer drove the change in production through a user's own access path and wrote the
 pull request's `Production:` line, naming the merge commit and what woke the look; `pending`,
-when production does not carry the merge yet; or `fail`, a defect, which the implementer asks you
-about in a Dispatch ask on Legion's daily report issue, naming the issue, the pull request, the
-merge commit, what it drove and what failed, so you decide whether it needs an issue.
+when production does not carry the merge yet; or `fail`, a defect, naming the issue, the pull
+request, the merge commit, what it drove and what failed. A defect with a clear fix goes to the
+controller, which gives it to the tree that owns that code and files an issue only when none does.
+One that needs a decision is a Dispatch ask on Legion's
+daily report issue, so you decide whether it needs an issue.
 The record lives on the pull request alone: Dispatch refuses a write on a closed issue.
 
 Nothing waits for the deploy: a `pending` look ends, the implementer's pod goes — and its disk

@@ -261,30 +261,157 @@ func TestPostMessageSendsBodyWithoutAnUnsupportedIdempotencyKey(t *testing.T) {
 	}
 }
 
+// The artifact read carries the approval Dispatch derives, the latest review's time and its event's
+// sequence (none from a Dispatch that predates the sequence).
 func TestApprovalReturnsCurrentDocumentApproval(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet || r.URL.Path != "/api/v1/artifacts/artifact-6" {
-			t.Fatalf("request = %s %s, want GET /api/v1/artifacts/artifact-6", r.Method, r.URL.Path)
-		}
 		assertBearer(t, r)
-		writeJSON(t, w, map[string]any{
-			"id":        "artifact-6",
-			"issue_key": "LEGION-6",
-			"approval": map[string]any{
-				"state":          "approved",
-				"latest_version": 3,
-				"version":        3,
-			},
-		})
+		if r.Method != http.MethodGet {
+			t.Fatalf("request = %s %s, want GET", r.Method, r.URL.Path)
+		}
+		switch r.URL.Path {
+		case "/api/v1/artifacts/artifact-6":
+			writeJSON(t, w, map[string]any{"id": "artifact-6", "issue_key": "LEGION-6", "approval": map[string]any{
+				"state": "approved", "latest_version": 3, "version": 3, "at": "2026-10-23T18:00:00.123456Z", "seq": 12}})
+		case "/api/v1/artifacts/artifact-7":
+			writeJSON(t, w, map[string]any{"id": "artifact-7", "issue_key": "LEGION-7", "approval": map[string]any{
+				"state": "awaiting", "latest_version": 4, "version": 3, "at": "2026-10-23T17:00:00Z"}})
+		case "/api/v1/artifacts/artifact-8":
+			writeJSON(t, w, map[string]any{"id": "artifact-8", "issue_key": "LEGION-8", "approval": map[string]any{"state": "draft", "latest_version": 1}})
+		default:
+			t.Fatalf("request = %s %s", r.Method, r.URL.Path)
+		}
 	}))
 	defer server.Close()
+	client := New(server.URL, dispatchToken)
 
-	approval, err := New(server.URL, dispatchToken).Approval(context.Background(), "artifact-6")
+	approval, err := client.Approval(context.Background(), "artifact-6")
 	if err != nil {
 		t.Fatalf("read approval: %v", err)
 	}
-	if approval.IssueKey != "LEGION-6" || approval.State != "approved" || approval.LatestVersion != 3 || approval.Version == nil || *approval.Version != 3 {
-		t.Fatalf("approval = %#v, want LEGION-6's document approved at version 3", approval)
+	if approval.IssueKey != "LEGION-6" || approval.State != "approved" || approval.LatestVersion != 3 || approval.Version == nil || *approval.Version != 3 || approval.ApprovedLatest() != 3 ||
+		!approval.At.Equal(time.Date(2026, 10, 23, 18, 0, 0, 123456000, time.UTC)) || approval.Seq != 12 {
+		t.Fatalf("approval = %#v, want LEGION-6's document approved at version 3 by the review at sequence 12", approval)
+	}
+	awaiting, err := client.Approval(context.Background(), "artifact-7")
+	if err != nil {
+		t.Fatalf("read awaiting approval: %v", err)
+	}
+	if awaiting.State != "awaiting" || awaiting.ApprovedLatest() != 0 ||
+		!awaiting.At.Equal(time.Date(2026, 10, 23, 17, 0, 0, 0, time.UTC)) || awaiting.Seq != 0 {
+		t.Fatalf("awaiting approval = %#v, want an open request, its review's time and no sequence", awaiting)
+	}
+	draft, err := client.Approval(context.Background(), "artifact-8")
+	if err != nil {
+		t.Fatalf("read draft approval: %v", err)
+	}
+	if !draft.At.IsZero() || draft.Seq != 0 {
+		t.Fatalf("draft approval = %#v, want no review time or sequence", draft)
+	}
+}
+
+// While an approval request is open the artifact read names it and whose turn it waits on; once a
+// review answered it, the ask Dispatch still names is no open request, and the read names none.
+func TestApprovalNamesOnlyAnOpenRequest(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/artifacts/artifact-7":
+			writeJSON(t, w, map[string]any{"id": "artifact-7", "issue_key": "LEGION-7", "approval": map[string]any{
+				"state": "awaiting", "latest_version": 4, "ask_id": "ask-approval", "waiting_on": "agent"}})
+		case "/api/v1/artifacts/artifact-9":
+			writeJSON(t, w, map[string]any{"id": "artifact-9", "issue_key": "LEGION-9", "approval": map[string]any{
+				"state": "changes_requested", "latest_version": 4, "version": 4, "reason": "why", "ask_id": "ask-answered"}})
+		default:
+			t.Fatalf("request = %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	client := New(server.URL, dispatchToken)
+	awaiting, err := client.Approval(context.Background(), "artifact-7")
+	if err != nil {
+		t.Fatalf("read awaiting approval: %v", err)
+	}
+	if awaiting.AskID != "ask-approval" || awaiting.WaitingOn != "agent" {
+		t.Fatalf("awaiting approval = %#v, want the open request ask-approval waiting on the agent", awaiting)
+	}
+	answered, err := client.Approval(context.Background(), "artifact-9")
+	if err != nil {
+		t.Fatalf("read answered approval: %v", err)
+	}
+	if answered.AskID != "" || answered.WaitingOn != "" {
+		t.Fatalf("answered approval = %#v, want no open request named", answered)
+	}
+}
+
+// The list and the detail carry the issue's claim, which the daemon keeps as `<kind>:<id>`; null
+// reads as nobody. A claim naming no actor is unread, as the decoder takes it on an issue event:
+// not nobody, but a claim the daemon cannot name.
+func TestReadsCarryTheClaimHolder(t *testing.T) {
+	claimed := map[string]any{"actor": map[string]any{"kind": "user", "id": "alice"}, "at": "2026-10-23T18:00:00Z"}
+	actorless := map[string]any{"actor": map[string]any{"kind": "user"}}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/issues":
+			writeJSON(t, w, []map[string]any{
+				{"key": "LEGION-1", "status": "todo", "rank": "a", "claim": claimed},
+				{"key": "LEGION-2", "status": "todo", "rank": "b", "claim": nil},
+				{"key": "LEGION-3", "status": "todo", "rank": "c", "claim": actorless},
+			})
+		case "/api/v1/issues/LEGION-1":
+			writeJSON(t, w, map[string]any{"key": "LEGION-1", "status": "todo", "rank": "a", "claim": claimed})
+		case "/api/v1/issues/LEGION-2":
+			writeJSON(t, w, map[string]any{"key": "LEGION-2", "status": "todo", "rank": "b", "claim": nil})
+		case "/api/v1/issues/LEGION-3":
+			writeJSON(t, w, map[string]any{"key": "LEGION-3", "status": "todo", "rank": "c", "claim": actorless})
+		default:
+			t.Fatalf("request = %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	client := New(server.URL, dispatchToken)
+
+	listed, err := client.ListIssues(context.Background(), "LEGION", nil)
+	if err != nil {
+		t.Fatalf("list issues: %v", err)
+	}
+	if len(listed) != 3 || listed[0].ClaimedBy != "user:alice" || listed[0].ClaimUnread || listed[1].ClaimedBy != "" || listed[1].ClaimUnread ||
+		listed[2].ClaimedBy != "" || !listed[2].ClaimUnread {
+		t.Fatalf("listed claims = %#v, want user:alice, then nobody, then an unread claim", listed)
+	}
+	detail, err := client.GetIssue(context.Background(), "LEGION-1")
+	if err != nil {
+		t.Fatalf("get issue: %v", err)
+	}
+	if got := detail.Claim.Holder(); got != "user:alice" || detail.ClaimUnread {
+		t.Fatalf("detail claim = %q (unread %t), want user:alice", got, detail.ClaimUnread)
+	}
+	unclaimed, err := client.GetIssue(context.Background(), "LEGION-2")
+	if err != nil {
+		t.Fatalf("get issue: %v", err)
+	}
+	if unclaimed.Claim != nil || unclaimed.ClaimUnread {
+		t.Fatalf("detail claim = %#v (unread %t), want nobody", unclaimed.Claim, unclaimed.ClaimUnread)
+	}
+	unread, err := client.GetIssue(context.Background(), "LEGION-3")
+	if err != nil {
+		t.Fatalf("get issue: %v", err)
+	}
+	if unread.Claim != nil || !unread.ClaimUnread {
+		t.Fatalf("detail claim = %#v (unread %t), want an unread claim", unread.Claim, unread.ClaimUnread)
+	}
+}
+
+// A changes request counts only on Dispatch's latest version: a newer version supersedes it.
+func TestChangesRequestedLatestNamesOnlyTheLatestVersion(t *testing.T) {
+	reason := "name the rollback path"
+	if version, got := (Approval{State: "changes_requested", LatestVersion: 4, Version: new(4), Reason: &reason}).ChangesRequestedLatest(); version != 4 || got != reason {
+		t.Fatalf("changes requested on the latest version = %d %q, want 4 with the reason", version, got)
+	}
+	if version, _ := (Approval{State: "changes_requested", LatestVersion: 5, Version: new(4)}).ChangesRequestedLatest(); version != 0 {
+		t.Fatalf("changes requested on an older version = %d, want 0", version)
+	}
+	if version, got := (Approval{State: "changes_requested", LatestVersion: 4, Version: new(4)}).ChangesRequestedLatest(); version != 4 || got == "" {
+		t.Fatalf("changes requested with no reason = %d %q, want 4 with Dispatch's default reason", version, got)
 	}
 }
 

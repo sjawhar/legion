@@ -35,11 +35,14 @@ to `in_progress`; when every slot is taken, the issue waits in `todo` and takes 
 in the board's order. A labelled issue in `triage` goes to the controller first, which admits it,
 parks it, or leaves it for you.
 
-The controller never takes an issue on its own, whatever slots are free: Legion works only what a
-person hands it. You can also ask the controller to hand an issue over for you, in a message or in
-Slack, and when an agent finds a problem outside its own issue it asks you in a Dispatch ask whether
-to file one, rather than filing it; answer with `File it for Legion` and the controller files it
-labelled `legion`.
+The controller never takes an issue on its own, whatever slots are free: Legion works what a person
+hands it, and the clear defects its own agents report. You can also ask the controller to hand an
+issue over for you, in a message or in Slack. An agent that finds a defect outside its own issue
+whose fix needs no choice of yours fixes it in its own tree's pull request when that tree touches
+or depends on the code. Otherwise the controller gives it to the tree that owns the code, and files it labelled
+`legion` only when no tree does. When the problem
+needs a decision, the agent asks you in a Dispatch ask whether to file one, rather than filing it.
+Answer with `File it for Legion` and the controller files it labelled `legion`.
 
 Do not label child issues: a child runs under its tree once the root is admitted.
 

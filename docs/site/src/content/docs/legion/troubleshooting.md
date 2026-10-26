@@ -446,14 +446,13 @@ is queued for it, since the next phase start or re-admission resumes it as befor
   kubectl -n legion logs <pod> -c workspace-init
   ```
 
-  Nothing is registered before a refusal, so every later attempt in that pod refuses the same way
-  until the repository is fixed. Run the commands it names from a shell in the issue's running pod
-  (`kubectl -n legion exec -it <pod> -c roles -- sh`, then
-  `export XDG_CONFIG_HOME=/var/run/legion/home/.config` so jj reads the
-  clone's per-repository configuration). When no pod of the issue runs there is
-  nothing to reach — the disk went with the pod — and the issue's next launch provisions a fresh
-  clone and workspace from its pushed branch on a disk of its own (`docs/kubernetes.md` in the
-  repository, "A shell on an issue's disk").
+  Nothing is registered before a refusal, so every later attempt in that pod refuses the same way.
+  A pod whose `workspace-init` refuses runs no `roles` container, so there is no shell in which to
+  run the commands it names; the remedy is letting the pod be replaced, and the issue's next launch
+  provisions a fresh clone and workspace from its pushed branch on a disk of its own. Run no `jj`,
+  `git` or `omp` in a running issue pod either: any role can plant configuration in its clone or
+  workspace that starts a program with every role's credentials in reach (`docs/kubernetes.md` in
+  the repository, "A shell on an issue's disk").
 - **An issue's work is gone after its pod was replaced.** That is the shape of the runtime, not a
   failure: an issue's disk is its pod's own and is deleted with the pod, so a stop, a close, a
   node loss or a launch that replaces the pod takes the workspace with it. What survives is what

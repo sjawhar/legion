@@ -1237,15 +1237,35 @@ func (r *outbox) seedGate(ctx context.Context, row record.OutboxRow, payload rec
 		return fmt.Errorf("read Dispatch approval %s: %w", payload.ArtifactID, err)
 	}
 	// The version Dispatch holds is the current one, even one the architect did not see: approved
-	// there, the gate opens at it; otherwise a later version still moves the gate to it, closed.
+	// there, the gate opens at it; changes requested on it, the gate closes with the reason, which
+	// tells the architect unless the gate already records that review as told; otherwise a later
+	// version still moves the gate to it, closed. A review carries its place in the issue's Dispatch
+	// event log (Seq, At), which identifies it in the told record and names it in the fact's id, so a
+	// second registration of one version in one generation, whose seed reads a newer review, is not
+	// dropped as the first seed's. A document Dispatch shows below the version the seed was queued
+	// at has a gate above any version Dispatch wrote (a daemon that registered the caller's version
+	// unchecked could record one), so the seed resets the gate to Dispatch's version with what it
+	// read there (intake.GateAboveDispatch).
 	fact := intake.DispatchArtifact{Key: row.Issue, ArtifactID: payload.ArtifactID, Kind: intake.DispatchArtifactVersion, Version: approval.LatestVersion}
+	review := record.EventMark{Seq: approval.Seq, At: approval.At}
+	changes, reason := approval.ChangesRequestedLatest()
 	switch {
-	case approval.State == "approved" && approval.Version != nil && *approval.Version == approval.LatestVersion:
-		fact.Kind = intake.DispatchArtifactApproved
-	case approval.LatestVersion <= payload.Version:
+	case approval.ApprovedLatest() != 0:
+		fact.Kind, fact.Mark = intake.DispatchArtifactApproved, review
+	case changes != 0:
+		fact.Kind, fact.Reason, fact.Mark = intake.DispatchArtifactChangesRequested, reason, review
+	case approval.LatestVersion == payload.Version:
 		return nil
 	}
-	_, err = intake.ApplyFact(ctx, r.pool, "outbox", fmt.Sprintf("gate-seed:%s:%d:%s:%s:%d", row.Issue, payload.Generation, payload.ArtifactID, fact.Kind, fact.Version), fact, r.handlers...)
+	if approval.LatestVersion < payload.Version {
+		id := fmt.Sprintf("gate-above:%s:%d:%s:%d:%s:%d:%d", row.Issue, payload.Generation, payload.ArtifactID, payload.Version, fact.Kind, fact.Version, fact.Mark.ID())
+		if _, err := intake.ApplyFact(ctx, r.pool, "outbox", id, intake.GateAboveDispatch{Generation: payload.Generation, Above: payload.Version, Read: fact}, r.handlers...); err != nil {
+			return fmt.Errorf("reset the gate of %s to the version Dispatch holds: %w", row.Issue, err)
+		}
+		return nil
+	}
+	id := fmt.Sprintf("gate-seed:%s:%d:%s:%s:%d:%d", row.Issue, payload.Generation, payload.ArtifactID, fact.Kind, fact.Version, fact.Mark.ID())
+	_, err = intake.ApplyFact(ctx, r.pool, "outbox", id, fact, r.handlers...)
 	if err != nil {
 		return fmt.Errorf("apply approved gate seed for %s: %w", row.Issue, err)
 	}
