@@ -1,10 +1,79 @@
 package config
 
 import (
+	"net"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 )
+
+// listeningDescriptor opens a listening loopback socket and returns its descriptor number and
+// address, for ENVOY_LISTEN_FD to name in this process.
+func listeningDescriptor(t *testing.T) (string, *net.TCPAddr) {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	file, err := listener.(*net.TCPListener).File()
+	_ = listener.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = file.Close() })
+	return strconv.Itoa(int(file.Fd())), listener.Addr().(*net.TCPAddr)
+}
+
+// With ENVOY_LISTEN_FD and neither ENVOY_LISTEN_HOST nor PORT given (empty is not given), the
+// listener's address is the socket's own, not 127.0.0.1 on the default port.
+func TestLoadTakesTheInheritedSocketsAddress(t *testing.T) {
+	descriptor, addr := listeningDescriptor(t)
+	t.Setenv("ENVOY_MACHINE_ID", "test-machine")
+	t.Setenv("NATS_URLS", "nats://127.0.0.1:4222")
+	t.Setenv("ENVOY_LISTEN_HOST", "")
+	t.Setenv("PORT", "")
+	t.Setenv("ENVOY_LISTEN_FD", descriptor)
+
+	service, err := Load(9020)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if service.ListenSocket == nil || service.ListenAddress() != addr.String() {
+		t.Fatalf("Load gave socket %v at %s, want the inherited socket at %s", service.ListenSocket, service.ListenAddress(), addr)
+	}
+}
+
+// ENVOY_LISTEN_HOST and PORT, when given beside ENVOY_LISTEN_FD, must name the socket's address.
+func TestLoadRefusesASettingThatIsNotTheInheritedSocketsAddress(t *testing.T) {
+	descriptor, addr := listeningDescriptor(t)
+	other := strconv.Itoa(addr.Port%65535 + 1)
+	for _, test := range []struct{ host, port, refused string }{
+		{host: "127.0.0.1", port: strconv.Itoa(addr.Port), refused: ""},
+		{host: "0.0.0.0", port: strconv.Itoa(addr.Port), refused: "ENVOY_LISTEN_HOST=0.0.0.0"},
+		{host: "127.0.0.1", port: "0", refused: "PORT=0"},
+		{host: "127.0.0.1", port: other, refused: "PORT=" + other},
+	} {
+		t.Run(test.host+" "+test.port, func(t *testing.T) {
+			t.Setenv("ENVOY_MACHINE_ID", "test-machine")
+			t.Setenv("NATS_URLS", "nats://127.0.0.1:4222")
+			t.Setenv("ENVOY_LISTEN_HOST", test.host)
+			t.Setenv("PORT", test.port)
+			t.Setenv("ENVOY_LISTEN_FD", descriptor)
+
+			_, err := Load(9020)
+			if test.refused == "" {
+				if err != nil {
+					t.Fatalf("Load refused settings that name the socket: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), test.refused) || !strings.Contains(err.Error(), "ENVOY_LISTEN_FD="+descriptor) {
+				t.Fatalf("Load error = %v, want a refusal naming %s and ENVOY_LISTEN_FD=%s", err, test.refused, descriptor)
+			}
+		})
+	}
+}
 
 func TestLoadReadsAllowedHosts(t *testing.T) {
 	t.Setenv("ENVOY_MACHINE_ID", "test-machine")

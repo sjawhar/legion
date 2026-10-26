@@ -133,11 +133,18 @@ func describeListenerAPIHosts(token string, verifier *oidc.Verifier, allowedHost
 	return "loopback, " + strings.Join(allowedHosts, ", ")
 }
 
-func validateListenerAPIAuth(listenHost, token, allowUnauthenticated string, verifier *oidc.Verifier) error {
-	if token != "" || verifier != nil || allowUnauthenticated == "1" || isLoopbackHost(listenHost) {
+// validateListenerAPIAuth refuses a listener that would serve /v1 with no credential on an address
+// other than loopback. It judges cfg.ListenHost, which with ENVOY_LISTEN_FD is the inherited
+// socket's own address, so a socket on every interface is refused as ENVOY_LISTEN_HOST=0.0.0.0 is.
+func validateListenerAPIAuth(cfg config.Service, token, allowUnauthenticated string, verifier *oidc.Verifier) error {
+	if token != "" || verifier != nil || allowUnauthenticated == "1" || isLoopbackHost(cfg.ListenHost) {
 		return nil
 	}
-	return fmt.Errorf("ENVOY_API_TOKEN or the ENVOY_OIDC_ISSUER/ENVOY_OIDC_AUDIENCE pair is required when ENVOY_LISTEN_HOST=%q is not loopback; set ENVOY_API_ALLOW_UNAUTHENTICATED=1 only during the Fargate transition", listenHost)
+	listen := fmt.Sprintf("ENVOY_LISTEN_HOST=%q is not loopback", cfg.ListenHost)
+	if cfg.ListenSocket != nil {
+		listen = cfg.ListenSocket.String() + ", is not on loopback"
+	}
+	return fmt.Errorf("ENVOY_API_TOKEN or the ENVOY_OIDC_ISSUER/ENVOY_OIDC_AUDIENCE pair is required when %s; set ENVOY_API_ALLOW_UNAUTHENTICATED=1 only during the Fargate transition", listen)
 }
 
 func isLoopbackHost(host string) bool {

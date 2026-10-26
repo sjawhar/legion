@@ -13,6 +13,17 @@
   its place, and `DISPATCH_DEV_SIGNIN=1` refuses a socket that is not on a loopback address. The
   `dispatch: listening` line names the address the server is bound to, in both modes: a server on
   every interface logs `addr=[::]:8766` where it logged `addr=:8766`.
+- `envoy-listener` serves on an inherited listening TCP socket that `ENVOY_LISTEN_FD` names by its
+  descriptor number, and binds nothing, for a process a test harness starts (not a container:
+  Docker cannot pass a host descriptor in). `ENVOY_LISTEN_HOST` and `PORT`, when set, must name the
+  socket's address, and `PORT=0` names none; a descriptor that is not a listening TCP socket, or a
+  setting that names another address, refuses startup naming the variable, with nothing bound in
+  its place. The API auth rule judges the socket's own address, so a socket on every interface
+  needs `ENVOY_API_TOKEN`, the OIDC pair or `ENVOY_API_ALLOW_UNAUTHENTICATED=1` as
+  `ENVOY_LISTEN_HOST=0.0.0.0` does, though an unset `ENVOY_LISTEN_HOST` means loopback. The
+  `envoy-listener listening` line's `addr` is the address the listener is bound to, in both modes:
+  `PORT=0` logs the port the kernel chose where it logged port 0, and a listener on every interface
+  logs `[::]:9020` where it logged `0.0.0.0:9020`.
 - A project's default assignee, the last step of an issue create's assignee chain: an issue created
   with no assignee, by nobody (the shared token), under no parent or under a parent with nobody on
   it, goes to the person the project names; nothing already filed, and no create that names an

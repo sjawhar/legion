@@ -170,7 +170,8 @@ to its clients as `PGPASSWORD` alone. `compose/dispatch.env.example`'s URL is in
 | `ENVOY_NATS_SOCKS5_PROXY` | no | A SOCKS5 proxy, as `host:port`, every NATS connection goes through (reconnects included), each server's host name handed to it unresolved. A value that is not `host:port`, or that holds an nkey seed, refuses startup naming the variable, without printing the value; a set proxy also needs `ENVOY_ALLOW_REMOTE_NATS=1`. Unset dials NATS directly. |
 | `ENVOY_LISTENER_PORT` | no | Defaults to `9020`. |
 | `ENVOY_LISTEN_HOST` | no | Defaults to `127.0.0.1`. |
-| `ENVOY_API_TOKEN` | conditional | Required when `ENVOY_LISTEN_HOST` is not loopback and no OIDC pair is set; matching bearer token for Listener API requests. Empty no longer opens `/v1` while a verifier is configured. |
+| `ENVOY_LISTEN_FD` | no | An inherited listening TCP socket, by descriptor number, the listener serves on instead of binding, for a process a test harness starts: the harness opens the socket on port 0 and holds the port the kernel chose until the listener serves on it. Not for a container, since Docker cannot pass a host descriptor into one. `ENVOY_LISTEN_HOST` and the listener's `PORT` (which the compose files set from `ENVOY_LISTENER_PORT`), when set, must name the socket's address (`PORT=0` never does); a descriptor that is not a listening TCP socket, or a setting that names another address, refuses startup naming the variable, with nothing bound in its place. The API auth rule below judges the socket's own address. |
+| `ENVOY_API_TOKEN` | conditional | Required when the listen address (`ENVOY_LISTEN_HOST`, or the `ENVOY_LISTEN_FD` socket's) is not loopback and no OIDC pair is set; matching bearer token for Listener API requests. Empty no longer opens `/v1` while a verifier is configured. |
 | `ENVOY_OIDC_ISSUER` | conditional | OIDC issuer whose projected service-account tokens authenticate to `/v1` beside `ENVOY_API_TOKEN`. Set with `ENVOY_OIDC_AUDIENCE` or not at all; half the pair refuses to boot naming the missing one, as does an issuer that does not answer discovery. |
 | `ENVOY_OIDC_AUDIENCE` | conditional | Audience those tokens must carry (`envoy`). Set with `ENVOY_OIDC_ISSUER` or not at all. |
 | `ENVOY_ALLOWED_HOSTS` | conditional | Comma-separated host names or addresses (no port) an unauthenticated listener serves `/v1` to beside loopback; required for each name clients reach it by when neither `ENVOY_API_TOKEN` nor the OIDC pair is set and they do not dial loopback. Any other `Host` gets a JSON 421. Unused when a bearer is required. |
@@ -181,6 +182,11 @@ to its clients as `PGPASSWORD` alone. `compose/dispatch.env.example`'s URL is in
 | `ENVOY_GITHUB_MENTION_TRIGGER` | no | Defaults to `@legion`. |
 | `ENVOY_SLACK_SIGNING_SECRET` | conditional | Required when Slack webhooks are enabled. |
 | `ENVOY_GHOSTWISPR_SIGNING_SECRET` | optional | Empty skips Ghost Wispr signature verification. |
+
+Once it serves, the listener logs one JSON line `"msg":"envoy-listener listening"` whose `addr` is
+the address it is bound to, in either mode: the port the kernel chose for `PORT=0` or for an
+inherited socket, and `[::]:<port>` for a listener on every interface (`ENVOY_LISTEN_HOST=0.0.0.0`).
+A harness reads its port there, with `jq -r 'select(.msg == "envoy-listener listening") | .addr'`.
 
 A process is given a NATS nkey seed only after its NATS server has nkey users (the server's stage 1,
 which keeps a `no_auth_user` fallback): a server with no users sends no nonce, and the Go client
