@@ -12,7 +12,8 @@
 // again); a root that ran as a tree of its own is never held, and keeps queueing as its own; and a
 // child recorded in another tree is refused by name.
 // scripts/e2e/child-adoption.sh builds this driver with `-tags e2e` and owns the nats-server and
-// the PostgreSQL it runs against.
+// the PostgreSQL it runs against, through the run lib/live-daemon-proof.sh makes around every
+// whole-daemon live proof.
 //
 // The daemon is the whole daemon: run, the function `legion start` calls, through this package's
 // whole-daemon harness (startDaemonWithin), so the proof exercises the real configuration load,
@@ -28,9 +29,11 @@
 // the old linger queued, which no route shows either.
 //
 // What the proof stands in for lies outside the change. The broker is a native nats-server the
-// script starts and names in LEGION_E2E_NATS_URL. Dispatch is childAdoptionBoard: it holds each
-// issue's status, parent and labels as Dispatch's board does, answers the issue reads the release
-// and the event preparation make, and records every status and message the daemon writes. Envoy's
+// script starts and names in LEGION_E2E_NATS_URL. Dispatch is liveDispatch, the board the
+// package's whole-daemon live proofs share (live_proof_test.go): it holds each issue's status,
+// parent and labels as Dispatch's board does, answers the issue reads the release (its walk up the
+// parent chain) and the event preparation (its walk to the nearest recorded ancestor) make, 404s
+// an issue it does not hold, and records every status and message the daemon writes. Envoy's
 // listener is the package's noticeListener. GitHub is childAdoptionGitHub, which knows each
 // repository's default branch and takes each issue branch the workflow creates. No agent runs:
 // every claim is launched by the package's fake runtime, which provisions each claim's workspace in
@@ -46,37 +49,28 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log/slog"
 	"maps"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"slices"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/nats-io/nats.go/jetstream"
 
 	"github.com/sjawhar/legion/daemon/internal/api"
 	"github.com/sjawhar/legion/daemon/internal/claim"
-	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
-	"github.com/sjawhar/legion/daemon/internal/notify"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
-	"github.com/sjawhar/legion/daemon/internal/store"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 	"github.com/sjawhar/legion/daemon/internal/testwait"
 	"github.com/sjawhar/legion/daemon/internal/treelifecycle"
 )
 
 const (
-	// childAdoptionRepo is the repository the project's Dispatch mapping serves (servedMapping).
-	childAdoptionRepo = "acme/widgets"
 	// childAdoptionCap is the admission cap: the live tree holds one slot and a second tree the
 	// other, so a queued root waits in the line until step 5 frees the second slot.
 	childAdoptionCap = 2
@@ -84,8 +78,6 @@ const (
 	// 4 to release a root inside its linger, as INFRA-214's release came, and short enough for the
 	// step to wait the linger out.
 	childAdoptionLinger = 8 * time.Second
-	// childAdoptionSettle is how long a step that must see nothing happen watches for it.
-	childAdoptionSettle = 3 * time.Second
 	// childAdoptionOutboxPoll is the margin past a row's due time a step allows the outbox lane
 	// that wakes for it (outbox_lanes.go arms a timer at the row's next_at) to run it.
 	childAdoptionOutboxPoll = 2 * time.Second
@@ -96,17 +88,9 @@ const (
 // childAdoptionLive is one run of the proof: the booted daemon, the live tree it runs, and the
 // stand-ins the steps read the daemon's writes back from.
 type childAdoptionLive struct {
-	t       *testing.T
-	cfg     config.Config
-	rt      *fake.Runtime
-	built   *built
-	d       *daemon
-	js      jetstream.JetStream
-	board   *childAdoptionBoard
-	notices *noticeListener
-	st      *store.Store
-	records record.Store
-	project string
+	liveProof
+	rt    *fake.Runtime
+	built *built
 	// tree is the live tree's root, T, which holds a slot and whose design gate is approved, so a
 	// todo child that joins it starts planning at once; filler, X, is a second tree holding the
 	// cap's other slot until step 5 parks it.
@@ -120,11 +104,7 @@ type childAdoptionLive struct {
 // TestAQueuedRootUnderALiveTreeJoinsItLive drives the ten steps of the proof against one booted
 // daemon.
 func TestAQueuedRootUnderALiveTreeJoinsItLive(t *testing.T) {
-	natsURL := os.Getenv(mergedRootWaitsNATSURL)
-	if natsURL == "" {
-		t.Skipf("%s is unset, so there is no broker to drive the daemon's intake through; scripts/e2e/child-adoption.sh starts a nats-server and sets it", mergedRootWaitsNATSURL)
-	}
-	r := newChildAdoptionLive(t, natsURL)
+	r := newChildAdoptionLive(t)
 	r.step("queued-root-leaves-the-line", r.queuedRootLeavesTheLine)
 	r.step("release-adopts-from-todo", r.releaseAdoptsFromTodo)
 	r.step("release-adopts-from-backlog", r.releaseAdoptsFromBacklog)
@@ -137,40 +117,18 @@ func TestAQueuedRootUnderALiveTreeJoinsItLive(t *testing.T) {
 	r.step("release-refuses", r.releaseRefuses)
 }
 
-// newChildAdoptionLive boots the daemon over natsURL with the live tree and the second slotted
-// tree recorded, and registers the live tree's architect.
-func newChildAdoptionLive(t *testing.T, natsURL string) *childAdoptionLive {
+// newChildAdoptionLive boots the daemon over the script's broker with the live tree and the second
+// slotted tree recorded, and registers the live tree's architect.
+func newChildAdoptionLive(t *testing.T) *childAdoptionLive {
 	t.Helper()
-	cfg := workflowConfig(t, natsURL)
-	cfg.AdmissionCap = childAdoptionCap
-	cfg.Linger = childAdoptionLinger
-	board := newChildAdoptionBoard(t, cfg.Project)
-	dispatchServer := httptest.NewServer(board)
-	t.Cleanup(dispatchServer.Close)
-	cfg.DispatchURL = dispatchServer.URL
-	notices := newNoticeListener()
-	envoyServer := httptest.NewServer(notices)
-	t.Cleanup(envoyServer.Close)
-	cfg.EnvoyURL = envoyServer.URL
-
-	project, err := claim.ProjectToken(cfg.Project)
-	if err != nil {
-		t.Fatal(err)
-	}
+	proof := newLiveProof(t, "scripts/e2e/child-adoption.sh")
+	proof.cfg.AdmissionCap = childAdoptionCap
+	proof.cfg.Linger = childAdoptionLinger
 	rt := fake.NewRuntime()
 	rt.InPod = true
 	r := &childAdoptionLive{
-		t: t, cfg: cfg, rt: rt, built: &built{}, board: board, notices: notices, records: record.NewStore(), project: project,
-		tree: cfg.Project + "-1", filler: cfg.Project + "-2", seq: 1,
-	}
-	r.js = mergedRootWaitsStream(t, natsURL)
-	ctx := context.Background()
-	if r.st, err = store.Open(ctx, cfg.PostgresDSN); err != nil {
-		t.Fatalf("open the store: %v", err)
-	}
-	t.Cleanup(r.st.Close)
-	if _, err := r.st.Migrate(ctx); err != nil {
-		t.Fatalf("migrate the store: %v", err)
+		liveProof: proof, rt: rt, built: &built{},
+		tree: proof.cfg.Project + "-1", filler: proof.cfg.Project + "-2", seq: 1,
 	}
 	r.seedTrees()
 	o := fakeRuntime(r.rt, r.built)
@@ -218,21 +176,21 @@ func (r *childAdoptionLive) seedTrees() {
 	t.Helper()
 	ctx := context.Background()
 	for _, key := range []string{r.tree, r.filler} {
-		r.board.show(key, "in_progress", "", true)
+		r.board.show(key, "in_progress")
 	}
 	approved := 1
 	r.write("the live tree and the second slotted tree", func(tx pgx.Tx) error {
 		for i, key := range []string{r.tree, r.filler} {
 			if err := r.records.PutIssue(ctx, tx, record.Issue{
-				Key: key, Repo: childAdoptionRepo, DefaultBranch: "main", GitHubRepo: childAdoptionRepo, Tree: key, Project: r.cfg.Project,
+				Key: key, Repo: liveRepo, DefaultBranch: "main", GitHubRepo: liveRepo, Tree: key, Project: r.cfg.Project,
 				Title: key, Phase: phase.Planning, Generation: 1, Status: "in_progress", DispatchStatus: "in_progress", Rank: fmt.Sprintf("A%d", i),
 				LastDispatchSeq: r.seq, HandedOver: true,
 			}); err != nil {
 				return err
 			}
-			if err := r.putSlot(ctx, tx, key); err != nil {
-				return err
-			}
+		}
+		if err := r.admit(ctx, tx, r.tree, r.filler); err != nil {
+			return err
 		}
 		return r.records.PutGate(ctx, tx, record.DesignGate{Issue: r.tree, ArtifactID: childAdoptionGate, LatestVersion: 1, ApprovedVersion: &approved})
 	})
@@ -249,36 +207,6 @@ func (r *childAdoptionLive) seedTrees() {
 		t.Fatalf("record the architect's unfinished launch: %v", err)
 	}
 	writePrompt(t, r.cfg, architect)
-}
-
-// putSlot gives key the next free admission slot: slot indexes are unique across the shared
-// database, so a tree takes the next one free.
-func (r *childAdoptionLive) putSlot(ctx context.Context, tx pgx.Tx, key string) error {
-	taken, err := r.records.Slots(ctx, tx)
-	if err != nil {
-		return err
-	}
-	index := 0
-	for _, slot := range taken {
-		index = max(index, slot.Index+1)
-	}
-	return r.records.PutSlot(ctx, tx, record.Slot{Issue: key, Index: index, AdmittedAt: time.Now()})
-}
-
-// log is where the booted daemon writes its own log: the file mergedRootWaitsLog names, and
-// nowhere when it names none.
-func (r *childAdoptionLive) log() *slog.Logger {
-	r.t.Helper()
-	path := os.Getenv(mergedRootWaitsLog)
-	if path == "" {
-		return quietLogger()
-	}
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
-	if err != nil {
-		r.t.Fatalf("open the daemon's log %s: %v", path, err)
-	}
-	r.t.Cleanup(func() { file.Close() })
-	return slog.New(slog.NewTextHandler(file, &slog.HandlerOptions{Level: slog.LevelDebug}))
 }
 
 // childAdoptionArchitect is T's architect session as its agent holds it: the session its
@@ -397,20 +325,6 @@ func (r *childAdoptionLive) stopped(issue string) []string {
 	return got
 }
 
-// step runs one of the proof's steps between its `== name` and `ok name (<s>s)` lines.
-func (r *childAdoptionLive) step(name string, body func()) {
-	r.t.Helper()
-	started := time.Now()
-	fmt.Printf("== %s\n", name)
-	body()
-	fmt.Printf("ok %s (%ds)\n", name, int(time.Since(started).Seconds()))
-}
-
-// note prints what a step drove or read, under its heading.
-func (r *childAdoptionLive) note(format string, args ...any) {
-	fmt.Printf("   "+format+"\n", args...)
-}
-
 // write runs body in one transaction against the daemon's own database, failing the test with
 // what it was seeding on an error.
 func (r *childAdoptionLive) write(what string, body func(tx pgx.Tx) error) {
@@ -452,16 +366,6 @@ func (r *childAdoptionLive) inTree(key, tree string) record.Issue {
 func (r *childAdoptionLive) state() api.State {
 	r.t.Helper()
 	return r.d.state()
-}
-
-// issue is key as GET /legion/v1/state shows it now.
-func (r *childAdoptionLive) issue(key string) api.Issue {
-	r.t.Helper()
-	issue, ok := r.state().Issues[key]
-	if !ok {
-		r.t.Fatalf("the state records no issue %s", key)
-	}
-	return issue
 }
 
 // waiting says whether key is in GET /legion/v1/state's admission.waiting now.
@@ -544,8 +448,8 @@ func (r *childAdoptionLive) runsInTree(key string) api.Issue {
 
 // statusWrites is every status write the daemon made to the Dispatch stand-in after the first
 // since writes.
-func (r *childAdoptionLive) statusWrites(since int) []childAdoptionWrite {
-	var got []childAdoptionWrite
+func (r *childAdoptionLive) statusWrites(since int) []liveDispatchWrite {
+	var got []liveDispatchWrite
 	for _, write := range r.board.writes()[since:] {
 		if write.Status != "" {
 			got = append(got, write)
@@ -575,25 +479,6 @@ func (r *childAdoptionLive) outboxRows(key string, mark int64, where string) int
 	return n
 }
 
-// told is every child-status notice the daemon published to T's architect topic, by its reason.
-func (r *childAdoptionLive) told() []string {
-	r.t.Helper()
-	var reasons []string
-	for _, published := range r.notices.acceptedOn(notify.RoleTopicPrefix + string(r.token(r.tree, claim.RoleArchitect))) {
-		var payload struct {
-			Kind   string `json:"kind"`
-			Reason string `json:"reason"`
-		}
-		if err := json.Unmarshal([]byte(published.Payload), &payload); err != nil {
-			r.t.Fatalf("decode the notice payload %q: %v", published.Payload, err)
-		}
-		if payload.Kind == "child-status" {
-			reasons = append(reasons, payload.Reason)
-		}
-	}
-	return reasons
-}
-
 // key is this run's issue n.
 func (r *childAdoptionLive) key(n int) string { return fmt.Sprintf("%s-%d", r.cfg.Project, n) }
 
@@ -615,19 +500,21 @@ func (r *childAdoptionLive) queuedRootLeavesTheLine() {
 		t.Fatalf("the state shows %s at generation %d and the record at %d", c, got.Generation, recorded.Generation)
 	}
 	architect := r.token(c, claim.RoleArchitect)
-	deadline := time.Now().Add(childAdoptionSettle)
+	deadline := time.Now().Add(liveSettle)
 	for time.Now().Before(deadline) {
 		if r.launched(architect) {
 			t.Fatalf("the fake runtime was asked to launch %s, want no architect of %s's own", architect, c)
 		}
 		if got := r.issue(c); got.Slot != nil || got.Architect != nil || r.waiting(c) {
-			t.Fatalf("within %s of joining, %s took a slot, an architect or a place in the line: %+v", childAdoptionSettle, c, got)
+			t.Fatalf("within %s of joining, %s took a slot, an architect or a place in the line: %+v", liveSettle, c, got)
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-	r.note("read back over %s: the fake runtime was asked to launch no %s, and %s took no slot", childAdoptionSettle, architect, c)
+	r.note("read back over %s: the fake runtime was asked to launch no %s, and %s took no slot", liveSettle, architect, c)
 	want := fmt.Sprintf("%s joined the tree of %s from the admission queue", c, r.tree)
-	testwait.Eventually(t, "the child-status notice to the architect of "+r.tree, func() bool { return slices.Contains(r.told(), want) })
+	testwait.Eventually(t, "the child-status notice to the architect of "+r.tree, func() bool {
+		return slices.ContainsFunc(r.architectNotices(r.tree, "child-status"), func(told listenerPublish) bool { return told.Payload == want })
+	})
 	r.note("read back: a child-status notice on %s's architect topic — %s", r.tree, want)
 }
 
@@ -641,7 +528,7 @@ func (r *childAdoptionLive) releaseAdoptsFromTodo() {
 	r.publishIssue(d, "todo", "", true, false)
 	r.note("drove %s labelled todo with no parent: an issue.updated envelope", d)
 	r.waitWaiting(d)
-	r.board.show(d, "todo", r.tree, true)
+	r.board.place(d, "todo", r.tree, true)
 	r.note("the Dispatch stand-in shows %s todo under %s; no envelope of the re-parent is published", d, r.tree)
 	writes := len(r.board.writes())
 	status, failure := r.release(d)
@@ -684,7 +571,7 @@ func (r *childAdoptionLive) releaseAdoptsFromBacklog() {
 		t.Fatalf("%s left the workflow without lingering", f)
 	}
 	r.note("read back: %s is %s, phase %s, out of admission.waiting, its record lingering", f, left.Status, left.Phase)
-	r.board.show(f, "backlog", r.tree, true)
+	r.board.place(f, "backlog", r.tree, true)
 	r.note("the Dispatch stand-in shows %s backlog under %s; no envelope of the re-parent is published", f, r.tree)
 	writes := len(r.board.writes())
 	status, failure := r.release(f)
@@ -737,7 +624,7 @@ func (r *childAdoptionLive) releaseAdoptsInfra214State() {
 		t.Fatalf("%s is in %s (waiting %v) after its unlabelled todo, want done and out of the line, as INFRA-214 stood", e, got.Phase, r.waiting(e))
 	}
 	r.note("read back: %s is todo, phase done, not in admission.waiting — INFRA-214's state", e)
-	r.board.show(e, "todo", r.tree, false)
+	r.board.place(e, "todo", r.tree, false)
 	r.note("the Dispatch stand-in shows %s todo under %s; no envelope of the re-parent is published", e, r.tree)
 	mark := r.outboxMark()
 	status, failure := r.release(e)
@@ -787,7 +674,7 @@ func (r *childAdoptionLive) releaseAdoptsInfra214State() {
 func (r *childAdoptionLive) heldUnderAnUnreleasedChild() {
 	t := r.t
 	p, h := r.key(7), r.key(8)
-	r.board.show(p, "backlog", r.tree, false)
+	r.board.place(p, "backlog", r.tree, false)
 	r.note("the Dispatch stand-in shows %s backlog under %s; the daemon has no event of it", p, r.tree)
 	r.publishIssue(h, "todo", p, true, false)
 	r.note("drove %s labelled todo under %s: an issue.updated envelope", h, p)
@@ -808,7 +695,7 @@ func (r *childAdoptionLive) heldUnderAnUnreleasedChild() {
 	r.publishIssue(r.filler, "backlog", "", true, false)
 	r.note("drove %s, the second slotted tree, to backlog: an issue.updated envelope", r.filler)
 	r.waitFor(r.filler+"'s slot freed", r.filler, func(got api.Issue) bool { return got.Slot == nil })
-	deadline := time.Now().Add(childAdoptionSettle)
+	deadline := time.Now().Add(liveSettle)
 	for time.Now().Before(deadline) {
 		held("with a slot free")
 		time.Sleep(100 * time.Millisecond)
@@ -818,7 +705,7 @@ func (r *childAdoptionLive) heldUnderAnUnreleasedChild() {
 		t.Fatalf("admission.active is %v, want %s's slot alone", state.Admission.Active, r.tree)
 	}
 	r.note("read back over %s: admission.active %v of cap %d, admission.waiting %v, and %s holds no slot and no architect",
-		childAdoptionSettle, state.Admission.Active, state.Admission.Cap, state.Admission.Waiting, h)
+		liveSettle, state.Admission.Active, state.Admission.Cap, state.Admission.Waiting, h)
 
 	status, failure := r.release(h)
 	if status != http.StatusOK {
@@ -839,7 +726,7 @@ func (r *childAdoptionLive) heldUnderAnUnreleasedChild() {
 func (r *childAdoptionLive) childOfAHeldRootWaitsWithIt() {
 	t := r.t
 	p, h, k := r.key(13), r.key(14), r.key(15)
-	r.board.show(p, "backlog", r.tree, false)
+	r.board.place(p, "backlog", r.tree, false)
 	r.note("the Dispatch stand-in shows %s backlog under %s; the daemon has no event of it", p, r.tree)
 	r.publishIssue(h, "todo", p, true, false)
 	r.note("drove %s labelled todo under %s: an issue.updated envelope", h, p)
@@ -873,7 +760,7 @@ func (r *childAdoptionLive) childOfAHeldRootWaitsWithIt() {
 func (r *childAdoptionLive) heldRootQueuesOnceItsParentLeaves() {
 	t := r.t
 	p, h := r.key(9), r.key(10)
-	r.board.show(p, "backlog", r.tree, false)
+	r.board.place(p, "backlog", r.tree, false)
 	r.note("the Dispatch stand-in shows %s backlog under %s; the daemon has no event of it", p, r.tree)
 	r.publishIssue(h, "todo", p, true, false)
 	r.note("drove %s labelled todo under %s: an issue.updated envelope", h, p)
@@ -901,7 +788,7 @@ func (r *childAdoptionLive) aRootThatRanKeepsQueueing() {
 		r.t.Fatalf("open the lifecycle of %s: %v", root, err)
 	}
 	r.note("seeded: a tree lifecycle under %s, opened by the workflow as a promotion opens one; the daemon records no %s", root, root)
-	r.board.show(p, "backlog", r.tree, false)
+	r.board.place(p, "backlog", r.tree, false)
 	r.note("the Dispatch stand-in shows %s backlog under %s; the daemon has no event of it", p, r.tree)
 	r.publishIssue(root, "todo", p, true, false)
 	r.note("drove %s labelled todo under %s: an issue.updated envelope", root, p)
@@ -919,16 +806,16 @@ func (r *childAdoptionLive) heldRootQueuesOnceARecordedAncestorLeaves() {
 	r.frees(r.key(17), r.key(16), "the root step 8 slotted")
 	ctx := context.Background()
 	tree := r.tree
-	r.board.show(q, "backlog", tree, false)
+	r.board.place(q, "backlog", tree, false)
 	r.write(fmt.Sprintf("%s, a member of the tree of %s parked in backlog", q, tree), func(tx pgx.Tx) error {
 		return r.records.PutIssue(ctx, tx, record.Issue{
-			Key: q, Repo: childAdoptionRepo, DefaultBranch: "main", GitHubRepo: childAdoptionRepo, Tree: tree, Project: r.cfg.Project,
+			Key: q, Repo: liveRepo, DefaultBranch: "main", GitHubRepo: liveRepo, Tree: tree, Project: r.cfg.Project,
 			Title: q, Parent: &tree, Phase: phase.Done, Generation: 1, Status: "backlog", DispatchStatus: "backlog", Rank: "D",
 			LastDispatchSeq: r.seq,
 		})
 	})
 	r.inTree(q, tree)
-	r.board.show(p, "backlog", q, false)
+	r.board.place(p, "backlog", q, false)
 	r.note("the Dispatch stand-in shows %s backlog under %s, under %s; the daemon has no event of %s", p, q, tree, p)
 	r.publishIssue(h, "todo", p, true, false)
 	r.note("drove %s labelled todo under %s: an issue.updated envelope", h, p)
@@ -956,13 +843,13 @@ func (r *childAdoptionLive) recordedAsHeld(key string) {
 	r.note("read back: the daemon records %s as a root of its own, its recorded ancestor %s", key, recorded.RecordedAncestor)
 }
 
-// heldWithASlotFree requires each of keys, over childAdoptionSettle, out of admission.waiting with
+// heldWithASlotFree requires each of keys, over liveSettle, out of admission.waiting with
 // no slot, no architect and no launch of an architect of its own, while the cap's other slot
 // stands free: admission.active is T's slot alone.
 func (r *childAdoptionLive) heldWithASlotFree(keys ...string) {
 	t := r.t
 	t.Helper()
-	deadline := time.Now().Add(childAdoptionSettle)
+	deadline := time.Now().Add(liveSettle)
 	for time.Now().Before(deadline) {
 		for _, key := range keys {
 			got := r.issue(key)
@@ -977,7 +864,7 @@ func (r *childAdoptionLive) heldWithASlotFree(keys ...string) {
 		t.Fatalf("admission.active is %v of cap %d, want %s's slot alone of %d, so a slot stands free", state.Admission.Active, state.Admission.Cap, r.tree, childAdoptionCap)
 	}
 	r.note("read back over %s: admission.active %v of cap %d, admission.waiting %v, and %s: no slot, no architect, no launch of one",
-		childAdoptionSettle, state.Admission.Active, state.Admission.Cap, state.Admission.Waiting, strings.Join(keys, ", "))
+		liveSettle, state.Admission.Active, state.Admission.Cap, state.Admission.Waiting, strings.Join(keys, ", "))
 }
 
 // takesTheFreeSlot requires key, within the bounded wait, to hold the free slot with its
@@ -1022,20 +909,20 @@ func (r *childAdoptionLive) releaseRefuses() {
 	u, g := r.key(11), r.key(12)
 	r.frees(r.key(20), r.key(19), "the root step 9 slotted")
 	ctx := context.Background()
-	r.board.show(u, "in_progress", "", true)
+	r.board.show(u, "in_progress")
 	r.write(fmt.Sprintf("%s, a second tree holding the free slot, and %s, its child parked in backlog", u, g), func(tx pgx.Tx) error {
 		if err := r.records.PutIssue(ctx, tx, record.Issue{
-			Key: u, Repo: childAdoptionRepo, DefaultBranch: "main", GitHubRepo: childAdoptionRepo, Tree: u, Project: r.cfg.Project,
+			Key: u, Repo: liveRepo, DefaultBranch: "main", GitHubRepo: liveRepo, Tree: u, Project: r.cfg.Project,
 			Title: u, Phase: phase.Planning, Generation: 1, Status: "in_progress", DispatchStatus: "in_progress", Rank: "B",
 			LastDispatchSeq: r.seq, HandedOver: true,
 		}); err != nil {
 			return err
 		}
-		if err := r.putSlot(ctx, tx, u); err != nil {
+		if err := r.admit(ctx, tx, u); err != nil {
 			return err
 		}
 		return r.records.PutIssue(ctx, tx, record.Issue{
-			Key: g, Repo: childAdoptionRepo, DefaultBranch: "main", GitHubRepo: childAdoptionRepo, Tree: u, Project: r.cfg.Project,
+			Key: g, Repo: liveRepo, DefaultBranch: "main", GitHubRepo: liveRepo, Tree: u, Project: r.cfg.Project,
 			Title: g, Parent: &u, Phase: phase.Done, Generation: 1, Status: "backlog", DispatchStatus: "backlog", Rank: "C",
 			LastDispatchSeq: r.seq,
 		})
@@ -1047,7 +934,7 @@ func (r *childAdoptionLive) releaseRefuses() {
 	if got := r.issue(u); got.Slot == nil {
 		t.Fatalf("%s holds no slot", u)
 	}
-	r.board.show(g, "backlog", r.tree, false)
+	r.board.place(g, "backlog", r.tree, false)
 	r.note("the Dispatch stand-in shows %s backlog under %s", g, r.tree)
 	writes := len(r.board.writes())
 	status, failure := r.release(g)
@@ -1079,7 +966,7 @@ func (r *childAdoptionLive) releaseRefuses() {
 // for a write already on Dispatch's board, so the board shows it first.
 func (r *childAdoptionLive) publishIssue(key, status, parent string, handed, daemon bool) {
 	r.t.Helper()
-	r.board.show(key, status, parent, handed)
+	r.board.place(key, status, parent, handed)
 	r.seq++
 	actor := map[string]string{"kind": "user", "id": "operator"}
 	if daemon {
@@ -1094,159 +981,11 @@ func (r *childAdoptionLive) publishIssue(key, status, parent string, handed, dae
 		"actor": actor, "notify": true, "created_at": time.Now().UTC().Format(time.RFC3339Nano),
 		"payload": map[string]any{
 			"key": key, "status": status, "title": key, "parent": parentKey, "rank": "M",
-			"labels": childAdoptionLabels(handed), "last_seq": r.seq, "project": r.cfg.Project, "resolved_repo": childAdoptionRepo,
+			"labels": liveDispatchLabels(handed), "last_seq": r.seq, "project": r.cfg.Project, "resolved_repo": liveRepo,
 		},
 	})
 	if err != nil {
 		r.t.Fatalf("encode the Dispatch event: %v", err)
 	}
-	subject := "notifications.dispatch.issue." + key + ".issue.updated"
-	eventID := fmt.Sprintf("%s-%s-%s-%d", r.cfg.Project, key, status, r.seq)
-	envelope, err := json.Marshal(map[string]any{
-		"event_id": eventID, "source": "dispatch", "source_event_id": eventID, "topic": subject, "dedupe_key": eventID,
-		"issued_at": time.Now().UnixMilli(), "payload_summary": subject, "payload": string(payload), "trace_id": eventID,
-	})
-	if err != nil {
-		r.t.Fatalf("encode the %s envelope: %v", subject, err)
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	if _, err := r.js.Publish(ctx, subject, envelope); err != nil {
-		r.t.Fatalf("publish %s: %v", subject, err)
-	}
-}
-
-// childAdoptionLabels is an issue's labels: Legion's when it is handed to Legion, none otherwise.
-func childAdoptionLabels(handed bool) []string {
-	if handed {
-		return []string{dispatch.LegionLabel}
-	}
-	return []string{}
-}
-
-// childAdoptionBoard is the Dispatch stand-in of this proof: it holds each issue's status, parent
-// and labels as Dispatch's board does, answers the issue reads the release (its walk up the parent
-// chain) and the event preparation (its walk to the nearest recorded ancestor) make, and records
-// every status and message the daemon writes, so a step can read back what the daemon told Dispatch
-// and tell a write that never came from one it cannot see. The issue list the boot reads is empty,
-// as workflowConfig's stand-in answers it. Anything else is a call this proof does not expect, and
-// fails the test.
-type childAdoptionBoard struct {
-	t       *testing.T
-	project string
-	mu      sync.Mutex
-	issues  map[string]childAdoptionIssue
-	posted  []childAdoptionWrite
-}
-
-// childAdoptionIssue is one issue as the board holds it.
-type childAdoptionIssue struct {
-	status, parent string
-	handed         bool
-}
-
-// childAdoptionWrite is one write the daemon made to Dispatch: a status it set on an issue, or a
-// message it posted on one.
-type childAdoptionWrite struct {
-	Issue  string
-	Status string
-	Body   string
-}
-
-func newChildAdoptionBoard(t *testing.T, project string) *childAdoptionBoard {
-	return &childAdoptionBoard{t: t, project: project, issues: map[string]childAdoptionIssue{}}
-}
-
-// show puts key on the board at status under parent ("" for none), labelled for Legion when
-// handed.
-func (b *childAdoptionBoard) show(key, status, parent string, handed bool) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	b.issues[key] = childAdoptionIssue{status: status, parent: parent, handed: handed}
-}
-
-func (b *childAdoptionBoard) ServeHTTP(w http.ResponseWriter, req *http.Request) {
-	if servedMapping(b.t, w, req, b.project) {
-		return
-	}
-	w.Header().Set("Content-Type", "application/json")
-	path := req.URL.Path
-	key := issueOfDispatchPath(path)
-	switch {
-	case req.Method == http.MethodGet && path == "/api/v1/issues":
-		_, _ = io.WriteString(w, `[]`)
-	case req.Method == http.MethodGet && path == "/healthz":
-		_, _ = io.WriteString(w, `{"status":"ok","commit":null}`)
-	case req.Method == http.MethodGet && strings.HasSuffix(path, "/events"):
-		_, _ = io.WriteString(w, `[]`)
-	case req.Method == http.MethodGet && strings.HasPrefix(path, "/api/v1/issues/") && key != "":
-		b.showIssue(key, w)
-	case req.Method == http.MethodPost && strings.HasSuffix(path, "/messages"):
-		b.record(childAdoptionWrite{Issue: key, Body: b.decode(req, w)}, w)
-	case req.Method == http.MethodPatch && strings.HasPrefix(path, "/api/v1/issues/"):
-		write := childAdoptionWrite{Issue: key, Status: b.decode(req, w)}
-		b.mu.Lock()
-		issue := b.issues[key]
-		issue.status = write.Status
-		b.issues[key] = issue
-		b.mu.Unlock()
-		b.record(write, w)
-	default:
-		b.t.Errorf("Dispatch request = %s %s", req.Method, path)
-		http.Error(w, "unavailable", http.StatusServiceUnavailable)
-	}
-}
-
-// showIssue answers Dispatch's issue detail of key from the board, and 404 for an issue it does
-// not hold.
-func (b *childAdoptionBoard) showIssue(key string, w http.ResponseWriter) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	issue, ok := b.issues[key]
-	if !ok {
-		w.WriteHeader(http.StatusNotFound)
-		_, _ = io.WriteString(w, `{"code":"NOT_FOUND","error":"no such issue"}`)
-		return
-	}
-	var parent any
-	if issue.parent != "" {
-		parent = issue.parent
-	}
-	if err := json.NewEncoder(w).Encode(map[string]any{
-		"key": key, "project": b.project, "title": key, "status": issue.status, "parent": parent, "rank": "M",
-		"labels": childAdoptionLabels(issue.handed), "last_seq": 1, "resolved_repo": childAdoptionRepo,
-	}); err != nil {
-		b.t.Errorf("write the Dispatch issue %s: %v", key, err)
-	}
-}
-
-// decode is the write's status or body, whichever the daemon sent.
-func (b *childAdoptionBoard) decode(req *http.Request, w http.ResponseWriter) string {
-	var write struct {
-		Status string `json:"status"`
-		Body   string `json:"body"`
-	}
-	if err := json.NewDecoder(req.Body).Decode(&write); err != nil {
-		b.t.Errorf("decode the Dispatch write to %s: %v", req.URL.Path, err)
-		http.Error(w, "bad request", http.StatusBadRequest)
-		return ""
-	}
-	if write.Status != "" {
-		return write.Status
-	}
-	return write.Body
-}
-
-func (b *childAdoptionBoard) record(write childAdoptionWrite, w http.ResponseWriter) {
-	b.mu.Lock()
-	b.posted = append(b.posted, write)
-	b.mu.Unlock()
-	_, _ = io.WriteString(w, `{}`)
-}
-
-// writes is every status the daemon has set and every message it has posted, oldest first.
-func (b *childAdoptionBoard) writes() []childAdoptionWrite {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return append([]childAdoptionWrite(nil), b.posted...)
+	r.publish("notifications.dispatch.issue."+key+".issue.updated", "dispatch", fmt.Sprintf("%s-%s-%d", key, status, r.seq), string(payload))
 }
