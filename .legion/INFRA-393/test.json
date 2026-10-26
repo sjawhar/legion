@@ -2,20 +2,40 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-393",
-  "completed": "2026-10-25T20:58:00Z",
-  "headTested": "2135849104505c182a700291ae8546ce8d0843fb",
+  "completed": "2026-10-26T00:03:30Z",
+  "headTested": "55eb49eb71c11bf1b4f5c05566a01a04204ffa78",
+  "round": 2,
   "implementerProof": {
     "verdict": "verified",
-    "how": "Drove the same surface independently on my own database (infra393_test, migrated by the head's binary): the real envoy-dispatch built at 21358491 on Postgres 17.11 + pgvector 0.8.0 in the issue pod, DISPATCH_EMBEDDER=azure keyless (the pod's projected token exchanged at Entra) against the live embed-v-4-0 deployment, with my own content. Settings rows, every boot refusal, the default boot unchanged, the identity filter, coverage without a command, input_type, a 32,000-character body embedded whole, the outage and recovery, and the gcp:Dispatch goldens' environment booting the binary all held, as the proof array below records."
+    "how": "Drove the same surface independently with my own seed and databases: 2,000 comments inserted with triggers off plus the 50 dense CJK comments at boot (proof 1), a misnamed deployment then the right one (proof 2), and the per-call bytes of the 50 CJK comments under the head's binary and under the pre-fix binary (proof 3); each reproduced the implementer's observation, the byte counts exactly (17 calls, at most 3 bodies and 287,988 bytes; pre-fix 1 call of 50 bodies, 4,799,720 bytes)."
   },
-  "failed": 1,
-  "failures": [
-    {
-      "criterion": "The server itself embeds everything it holds after boot, including items written before the embedding triggers existed, with no command run by a person (spec line 4; plan Decision 8: the coverage pass at start and every 10 minutes beside the scan loop)",
-      "evidence": "Run (packages/envoy/internal/dispatch/embedqueue/queue.go:76-80) marks one context with store.WithTransactionTracking and hands it to both runCoverage (its own goroutine) and the scan loop. The pool's hold mark lives in that context (store/pool.go:79-91), so while one loop has a cursor open the other loop's next statement is refused as a nested acquire; store.ForConcurrentRead's doc (pool.go:93-99) names exactly this ('Reads sharing one mark would refuse each other'). Live: booting the head's binary on Azure with 50 pending 32,000-character comments logged 'dispatch: second pooled connection requested while one is held' and 'dispatch embedqueue: coverage pass failed; the next one runs on schedule error=\"coverage pass: issue: this caller already holds a connection of the pool: a second one would deadlock it\"' (stack: Cover coverage.go:217 <- runCoverage <- Run queue.go:78), so the pass that adds pre-trigger items, repairs stale rows and drops foreign vectors stopped and waits 10 minutes; a large production backlog keeps the scan loop's cursors open often, so passes keep failing. The reverse also holds: the pass's Coverage cursor refuses the scan loop's statements, and one loop's release clears the mark the other still needs, so the guard stops protecting either. Red test (commit f2d360158d8bee04cff0a8e158a24c6be6bf6a5e): TestRunsCoveragePassIsNotRefusedWhileTheScanLoopHoldsACursor in packages/envoy/internal/dispatch/embedqueue/coverage_test.go holds the scan loop's claim cursor open through a protocol-pausing proxy while the pass runs. Command: cd packages/envoy && DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:55393/postgres?sslmode=disable go test ./internal/dispatch/embedqueue/ -run TestRunsCoveragePassIsNotRefusedWhileTheScanLoopHoldsACursor -count=1 -v -> FAIL: 'coverage pass failed ... this caller already holds a connection of the pool' then 'after Run: items 3 current 2 lacking 1 failed 0, want all 3 current'. With each loop given its own mark (a throwaway change, reverted: runCoverage on store.ForConcurrentRead(ctx)) the same test passed 3 of 3 runs. No existing test runs Cover beside the scan loop on Run's shared context; the coverage tests call Cover with a context of their own."
-    }
-  ],
+  "failed": 0,
+  "failures": [],
   "proof": [
+    {
+      "criterion": "The server itself embeds everything it holds after boot, including items written before the embedding triggers existed, with no command run by a person (round 1's failure: the coverage pass refused while the scan loop holds a cursor)",
+      "surface": "real envoy-dispatch built at 55eb49eb71c11bf1b4f5c05566a01a04204ffa78 on copies of the tester's round-1 database (Postgres 17.11 + pgvector 0.8.0 in the issue pod), DISPATCH_EMBEDDER=azure keyless (the pod's projected token exchanged at Entra) against the live embed-v-4-0 deployment",
+      "command": "createdb t2a template infra393_test; psql -f cjk-burst.sql (50 pending 32,000-character CJK comments); 2,000 comments inserted with session_replication_role = replica; serve.sh EMBED_MODE=azure BIN=envoy-dispatch-r2; poll curl -H 'Authorization: Bearer e2e-token' 127.0.0.1:8794/api/v1/search/coverage | jq .total; grep -c 'level=(ERROR|WARN)' the log",
+      "observed": "boot: 'coverage pass … added=2000 … identityStepsSkipped=false items=2145 current=95 lacking=2050' beside the scan loop, no ERROR line and no 'second pooled connection' line; about 3 minutes later items 2145 current 2145 lacking 0 failed 0 oldest null; no row with attempt_count, confirmed_failures or dead",
+      "headSha": "55eb49eb71c11bf1b4f5c05566a01a04204ffa78",
+      "negativeControl": "the pre-fix binary (2135849104505c182a700291ae8546ce8d0843fb) on the same seed (t2g) → 'second pooled connection requested while one is held' and 'coverage pass failed; the next one runs on schedule'"
+    },
+    {
+      "criterion": "Each vector records the model and place that made it; the queue embeds another identity's items again — and an identity whose embedder cannot answer (misnamed deployment, wrong key, wrong keyless client, missing AWS credentials) drops nothing",
+      "surface": "real envoy-dispatch built at 55eb49eb71c11bf1b4f5c05566a01a04204ffa78 on copies of the tester's round-1 database (Postgres 17.11 + pgvector 0.8.0 in the issue pod), DISPATCH_EMBEDDER=azure keyless (the pod's projected token exchanged at Entra) against the live embed-v-4-0 deployment; four copies each holding one row dead under another identity and one pending comment, one of them with 10 vectors relabelled us.cohere.embed-v4:0",
+      "command": "scen.sh per copy: DEPLOYMENT_OVERRIDE=embed-v-4-0-typo; DISPATCH_AZURE_EMBED_KEY_FILE holding 32 random bytes; CLIENT_ID_OVERRIDE=00000000-0000-0000-0000-000000000000; EMBED_ENV=AWS_REGION=us-east-1 with no AWS credentials; then the right keyless configuration; psql group by model, dead, dead_model, has vector before and after; then a healthy and a misnamed process (ports 8794/8795) started together on t2f with 20 relabelled vectors",
+      "observed": "each broken configuration logged the WARN 'coverage pass left other identities' vectors and dead rows in place' naming the canary's error (404 DeploymentNotFound; 401; entra token exchange 400 unauthorized_client; EC2 IMDS no role) and 'identityStepsSkipped=true'; the table before and after was identical in every case and no row died; the wrong key's bytes appear 0 times in the log; two processes together: the healthy one 'foreignVectorsDropped=20' and all 95 items ended current under its identity, the misnamed one dropped nothing and killed no row",
+      "headSha": "55eb49eb71c11bf1b4f5c05566a01a04204ffa78",
+      "negativeControl": "the right configuration on the copy with 10 relabelled vectors → 'foreignVectorsDropped=10 … foreignDeadReadmitted=1 identityStepsSkipped=false', coverage 96/96 current, the dead row re-embedded"
+    },
+    {
+      "criterion": "Each place has its own batch size and budget: an Azure background call carries at most 96 texts and 320,000 bytes, so dense text finishes inside the 60 s request timeout",
+      "surface": "real envoy-dispatch built at 55eb49eb71c11bf1b4f5c05566a01a04204ffa78 on copies of the tester's round-1 database (Postgres 17.11 + pgvector 0.8.0 in the issue pod), DISPATCH_EMBEDDER=azure keyless (the pod's projected token exchanged at Entra) against the live embed-v-4-0 deployment",
+      "command": "psql on t2a: group the rows embedded this run by embedded_at (one value per committed call), count calls, texts and summed body bytes per call; throwaway Go test (removed) comparing embed.BoundedBytes with len(text.HeadRunes(s, 32000)) on 3,000 random valid UTF-8 strings of 0 to 70,000 runes (ASCII, é, CJK, emoji, combining marks)",
+      "observed": "38 calls for the 2,050 rows, at most 96 texts and 287,988 bytes a call; the 50 CJK bodies in 17 calls of at most 3 bodies, all current on the first attempt; BoundedBytes equalled the truncated text's bytes for every string",
+      "headSha": "55eb49eb71c11bf1b4f5c05566a01a04204ffa78",
+      "negativeControl": "the pre-fix binary on the same 50 CJK bodies (t2g) → one call of 50 bodies, 4,799,720 bytes; BoundedBytes on invalid UTF-8 differs from HeadRunes' re-encoded bytes, which no stored text can reach (server_encoding UTF8 rejects invalid bytes)"
+    },
     {
       "criterion": "A setting chooses the place: Bedrock unchanged for a deployment that sets nothing new, or Azure AI Foundry with endpoint and credential as settings",
       "surface": "real envoy-dispatch built at the head, on its own migrated Postgres 17.11 + pgvector database in the issue pod",
@@ -81,9 +101,23 @@
       "negativeControl": "the old binary's backfill-embeddings fails on the new schema (person-run, removed with this release)"
     }
   ],
+  "round1": {
+    "headTested": "2135849104505c182a700291ae8546ce8d0843fb",
+    "failures": [
+      {
+        "criterion": "The server itself embeds everything it holds after boot, including items written before the embedding triggers existed, with no command run by a person (spec line 4; plan Decision 8: the coverage pass at start and every 10 minutes beside the scan loop)",
+        "evidence": "Run (packages/envoy/internal/dispatch/embedqueue/queue.go:76-80) marks one context with store.WithTransactionTracking and hands it to both runCoverage (its own goroutine) and the scan loop. The pool's hold mark lives in that context (store/pool.go:79-91), so while one loop has a cursor open the other loop's next statement is refused as a nested acquire; store.ForConcurrentRead's doc (pool.go:93-99) names exactly this ('Reads sharing one mark would refuse each other'). Live: booting the head's binary on Azure with 50 pending 32,000-character comments logged 'dispatch: second pooled connection requested while one is held' and 'dispatch embedqueue: coverage pass failed; the next one runs on schedule error=\"coverage pass: issue: this caller already holds a connection of the pool: a second one would deadlock it\"' (stack: Cover coverage.go:217 <- runCoverage <- Run queue.go:78), so the pass that adds pre-trigger items, repairs stale rows and drops foreign vectors stopped and waits 10 minutes; a large production backlog keeps the scan loop's cursors open often, so passes keep failing. The reverse also holds: the pass's Coverage cursor refuses the scan loop's statements, and one loop's release clears the mark the other still needs, so the guard stops protecting either. Red test (commit f2d360158d8bee04cff0a8e158a24c6be6bf6a5e): TestRunsCoveragePassIsNotRefusedWhileTheScanLoopHoldsACursor in packages/envoy/internal/dispatch/embedqueue/coverage_test.go holds the scan loop's claim cursor open through a protocol-pausing proxy while the pass runs. Command: cd packages/envoy && DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:55393/postgres?sslmode=disable go test ./internal/dispatch/embedqueue/ -run TestRunsCoveragePassIsNotRefusedWhileTheScanLoopHoldsACursor -count=1 -v -> FAIL: 'coverage pass failed ... this caller already holds a connection of the pool' then 'after Run: items 3 current 2 lacking 1 failed 0, want all 3 current'. With each loop given its own mark (a throwaway change, reverted: runCoverage on store.ForConcurrentRead(ctx)) the same test passed 3 of 3 runs. No existing test runs Cover beside the scan loop on Run's shared context; the coverage tests call Cover with a context of their own."
+      }
+    ],
+    "risks": [
+      "A misnamed deployment (or any identity change) drops every vector at the first pass, before a single embedding proves the new place works: live, DISPATCH_AZURE_EMBED_DEPLOYMENT=embed-v-4-0-typo logged foreignVectorsDropped=41 and Azure answered 404 DeploymentNotFound; reverting re-embedded all 42 items. This is plan Decision 8 as approved; the architect decides whether it stays.",
+      "azureRequestTimeout (60 s) is shorter than Azure's time for a dense batch: one direct request of 40 CJK bodies (1,049,910 tokens) took 65.0 s and succeeded. Through the server, 50 pending CJK comments timed out once, were bisected and all became current in about 2 minutes, none dead; the timed-out request still spent its tokens.",
+      "embed.EstimateTokens (4 characters a token) under-counts dense text: a 32,000-character CJK body is 26,255 tokens and a 32,000-character hex body 28,207, against an estimate of 8,000, so background pacing can exceed the quota and meet Azure's 429, which the queue treats as a throttle."
+    ],
+    "note": "round 1's proof entries (headSha 2135849104505c182a700291ae8546ce8d0843fb) follow round 2's in proof; this round's diff touches only embedqueue's Run and coverage pass, the Azure byte budget and their docs, so they stand"
+  },
+  "ci": "Tests 40235645045, PR Title 40235645075, Legion Envoy and Contracts 40235645038, Docs 40235645041, Worker Image 40235645108 — all success at 55eb49eb71c11bf1b4f5c05566a01a04204ffa78 (gh run list --commit); not re-run",
   "risks": [
-    "A misnamed deployment (or any identity change) drops every vector at the first pass, before a single embedding proves the new place works: live, DISPATCH_AZURE_EMBED_DEPLOYMENT=embed-v-4-0-typo logged foreignVectorsDropped=41 and Azure answered 404 DeploymentNotFound; reverting re-embedded all 42 items. This is plan Decision 8 as approved; the architect decides whether it stays.",
-    "azureRequestTimeout (60 s) is shorter than Azure's time for a dense batch: one direct request of 40 CJK bodies (1,049,910 tokens) took 65.0 s and succeeded. Through the server, 50 pending CJK comments timed out once, were bisected and all became current in about 2 minutes, none dead; the timed-out request still spent its tokens.",
-    "embed.EstimateTokens (4 characters a token) under-counts dense text: a 32,000-character CJK body is 26,255 tokens and a 32,000-character hex body 28,207, against an estimate of 8,000, so background pacing can exceed the quota and meet Azure's 429, which the queue treats as a throttle."
+    "round 1's risk 3 stands as documented and accepted: EstimateTokens under-counts dense text about 3.5x, so background pacing of dense text can pass the Azure quota and meet 429s, which the queue retries as throttles; not exercised against a full quota here"
   ]
 }
