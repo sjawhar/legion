@@ -1322,17 +1322,23 @@ function nestedWrite(
   bodies: readonly string[],
   depth: number
 ): FoundWrite | undefined {
+  let unknownSubcommand: FoundWrite | undefined;
   for (const words of segments)
     for (const [index, word] of words.entries()) {
       const name = words[index + 1];
-      if (
-        word.value.split("/").at(-1) === "dispatch" &&
-        name !== undefined &&
-        mayBeReviewedWrite(name.value, words.slice(index + 2))
-      )
-        return writeNamed(name.value);
+      if (word.value.split("/").at(-1) !== "dispatch" || name === undefined) continue;
+      if (mayBeReviewedWrite(name.value, words.slice(index + 2))) return writeNamed(name.value);
+      // `xargs -I{} dispatch $SUB …`: the runner takes the words as they are, and the word after
+      // `dispatch` may name any subcommand, a write among them.
+      const subcommand = unresolvedCharacters(name);
+      if (subcommand.length > 0)
+        unknownSubcommand ??= {
+          tool: "dispatch_unknown",
+          label: "dispatch",
+          subcommand: { unread: subcommand },
+        };
     }
-  if (depth >= NESTED_DEPTH) return undefined;
+  if (depth >= NESTED_DEPTH) return unknownSubcommand;
   const scripts = [...bodies];
   for (const words of segments)
     for (const [index, word] of words.entries()) {
@@ -1352,7 +1358,7 @@ function nestedWrite(
     const { wrapped: _, ...write } = found;
     return write;
   }
-  return undefined;
+  return unknownSubcommand;
 }
 
 /** Runs `script` under bash in a process group of its own, which is killed at the limit or on the signal. */

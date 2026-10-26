@@ -1994,6 +1994,29 @@ console.log(JSON.stringify(args, null, 2));
       `bash <<'EOF'\ndispatch "comment" --issue X-1 --body hi\nEOF`,
       "dispatch_comment",
     ],
+    // The second re-gate of #2159 at 31c5cca3b, its one blocking finding: a wrapper whose
+    // subcommand is an expansion. The text pattern needs a literal subcommand, and the
+    // command-position scan sees only `bash`, so this passed with no review and no entry.
+    [
+      "bash -c whose subcommand is an expansion",
+      'SUB=comment; bash -c "dispatch $SUB --issue DSP-1 --body hi"',
+      "dispatch_unknown",
+    ],
+    [
+      "sh -c whose subcommand is an expansion",
+      'SUB=comment; sh -c "dispatch $SUB --issue DSP-1 --body hi"',
+      "dispatch_unknown",
+    ],
+    [
+      "eval whose subcommand is an expansion",
+      'SUB=comment; eval "dispatch $SUB --issue DSP-1 --body hi"',
+      "dispatch_unknown",
+    ],
+    [
+      "xargs whose subcommand is an expansion",
+      "SUB=comment; echo DSP-1 | xargs -I{} dispatch $SUB --issue {} --body hi",
+      "dispatch_unknown",
+    ],
   ];
   for (const [form, command, tool] of QUOTED_WRAPPED)
     test(`F2: a quoted write another command would run is unreadable: ${form}`, async () => {
