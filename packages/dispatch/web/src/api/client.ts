@@ -44,6 +44,7 @@ import type {
   DeliverySettings,
   DeliverySettingsInput,
   DispatchUser,
+  DocumentReferenceSummary,
   EditCommentInput,
   Event,
   GraphReferences,
@@ -52,6 +53,7 @@ import type {
   IssueAskRow,
   IssueAskThreadRow,
   IssueDetails,
+  IssueReferenceSummary,
   IssueReferences,
   IssueSummary,
   ListUsersResponse,
@@ -442,6 +444,12 @@ export class DispatchApiClient {
     return this.json<IssueDetails>(`/api/v1/issues/${pathSegment(key)}`);
   }
 
+  /** What a reference to the issue or one of its documents shows: title, status and each
+   *  document's name, kind and latest version, without the full issue read. */
+  getIssueSummary(key: string): Promise<IssueReferenceSummary> {
+    return this.json<IssueReferenceSummary>(`/api/v1/issues/${pathSegment(key)}/summary`);
+  }
+
   patchIssue(key: string, input: UpdateIssueInput): Promise<Issue> {
     return this.send<Issue>("PATCH", `/api/v1/issues/${pathSegment(key)}`, input);
   }
@@ -680,6 +688,14 @@ export class DispatchApiClient {
   getProjectArtifact(key: string, slug: string): Promise<Artifact> {
     return this.json<Artifact>(
       `/api/v1/projects/${pathSegment(key)}/artifacts/${pathSegment(slug)}`
+    );
+  }
+
+  /** What a reference to a project document shows: name, kind and latest version, without its
+   *  versions. */
+  getProjectDocumentSummary(key: string, slug: string): Promise<DocumentReferenceSummary> {
+    return this.json<DocumentReferenceSummary>(
+      `/api/v1/projects/${pathSegment(key)}/artifacts/${pathSegment(slug)}/summary`
     );
   }
 

@@ -429,6 +429,42 @@ export interface IssueSummaryPage {
   readonly offset: number;
 }
 
+/**
+ * One artifact of an `IssueReferenceSummary`: what a reference to an issue's document shows.
+ * `latest_version` is its greatest version number, null only for an artifact with no version,
+ * which no committed write leaves.
+ */
+export interface IssueReferenceSummaryDocument {
+  readonly id: string;
+  readonly slug: string;
+  readonly name: string;
+  readonly kind: Artifact["kind"];
+  readonly latest_version: number | null;
+}
+
+/**
+ * `GET /api/v1/issues/{key}/summary`: what a reference to an issue shows, read without the full
+ * issue (`IssueDetails`). `documents` is every artifact of the issue, in the order the full read
+ * lists its `artifacts`, so an issue reference and its documents' references share one read.
+ * 404 `NOT_FOUND` for no such issue.
+ */
+export interface IssueReferenceSummary {
+  readonly key: string;
+  readonly project: string;
+  readonly title: string;
+  readonly status: string;
+  readonly documents: IssueReferenceSummaryDocument[];
+}
+
+/**
+ * `GET /api/v1/projects/{key}/artifacts/{slug}/summary`: what a reference to a project document
+ * shows, read without its versions. The slug or unambiguous filename resolves as the project
+ * document read resolves it (404 `ARTIFACT_NOT_FOUND`, 400 `ARTIFACT_REFERENCE_AMBIGUOUS`).
+ */
+export interface DocumentReferenceSummary extends IssueReferenceSummaryDocument {
+  readonly project: string;
+}
+
 export interface IssueChild {
   readonly key: string;
   readonly title: string;
@@ -1021,17 +1057,44 @@ export interface ReferenceChangesPayload {
   readonly references_changed_truncated?: boolean;
 }
 
+/** Whose Replies count a write can have moved, mirroring the server's `ThreadLogins` payload
+ *  field: every login with a Replies row (the server's `user_threads`) on the write's thread once
+ *  the write is in, sorted, `[]` when nobody has one. Each payload family names the event types
+ *  that carry it; it is absent from every other type and from every event written before the
+ *  field existed, which a reader takes as "anyone's count may have moved". */
+export interface ThreadLoginsPayload {
+  readonly thread_logins?: string[];
+}
+
+/** What an `issue.created`, `issue.updated` or `issue.closed` write changed, read in its own
+ *  transaction. Each field is absent from every other `issue.*` type and from an event written
+ *  before the fields existed, which a reader takes as "anything may have changed". */
+export interface IssueEventChanges {
+  /** Each field whose value the write moved, of `title`, `status`, `rank`, `priority`,
+   *  `assignee`, `parent`, `labels`, `route`, `repo`, `components`, `blocked_by` and
+   *  `external_links`; for `issue.created`, every field the new issue holds a value in. */
+  readonly changed?: string[];
+  /** The issue's parent chain after the write, parent first up to the root; `[]` for a root. */
+  readonly ancestors?: string[];
+  /** Present only when the status moved: for a close or a reopen every login with a Replies row
+   *  on one of the issue's open asks, for any other status move `[]`. */
+  readonly thread_logins?: string[];
+}
+
 /** Every `issue.*` event payload is the issue row, flat, plus what the write moved in the
  *  reference graph: a new issue's spec text is indexed in the creating transaction. */
-export type IssueEventPayload = Issue & ReferenceChangesPayload;
+export type IssueEventPayload = Issue & ReferenceChangesPayload & IssueEventChanges;
 
 /** Every `ask.*` event payload is the ask row, flat, plus what the write moved in the reference
  *  graph. `restored` is true on the `ask.opened` or `ask.answered` settlement appends when an edit
  *  restores a decision block it retracted: the ask returns to the state it had, and no one answered
  *  anything new. A restore the release before Dispatch kept the mark writes - every one already in
  *  the event log, and one written during a rollout or an image rollback - carries no mark, so a
- *  missing `restored` does not prove an event is a new answer. */
-export type AskEventPayload = Ask & ReferenceChangesPayload & { readonly restored?: boolean };
+ *  missing `restored` does not prove an event is a new answer. `thread_logins` (the ask's own
+ *  thread) is carried by `ask.opened`, `ask.answered` and `ask.resolved`. */
+export type AskEventPayload = Ask &
+  ReferenceChangesPayload &
+  ThreadLoginsPayload & { readonly restored?: boolean };
 
 /** An `ask.answered` payload. `previous_answer` is present when the answer replaced an earlier
  *  one; the asker and every follower receive it as they received the first. */
@@ -1162,11 +1225,13 @@ export interface AcceptSuggestionResponse extends Comment {
  * The payload of every `comment.*` event. It is the comment row as it stood when the event was
  * written, and events are retained verbatim, so the row's later additions are optional here:
  * `mentions` and `deliveries` were added on 2026-09-18 (#1188), and every comment event recorded
- * before that day carries neither. A read row (`Comment`) always has both.
+ * before that day carries neither. A read row (`Comment`) always has both. `thread_logins` (the
+ * comment's ask, else its root) is carried by `comment.created` and `comment.answered`.
  */
 export interface CommentEventPayload
   extends Omit<Comment, "mentions" | "deliveries">,
-    ReferenceChangesPayload {
+    ReferenceChangesPayload,
+    ThreadLoginsPayload {
   readonly mentions?: CommentMention[];
   readonly deliveries?: CommentDelivery[];
   readonly artifact_name: string;
@@ -1352,7 +1417,10 @@ export interface ChangedReference {
   readonly artifact_id?: string | null;
 }
 
-export interface MessageEventPayload extends Message, ReferenceChangesPayload {
+/** `thread_logins` (the message's thread root, up `in_reply_to`) is carried by an issue message's
+ *  `message.created` and `message.answered`; a direct (issue-less) conversation has no Replies
+ *  thread, so its messages carry none. */
+export interface MessageEventPayload extends Message, ReferenceChangesPayload, ThreadLoginsPayload {
   /** First 160 characters of the reply target's body; empty otherwise. */
   readonly reply_body?: string;
   /** The target of a reply's thread root: the conversation the reply lands in, for a consumer
@@ -1801,6 +1869,11 @@ export interface ArchitectureSyncFailedEventPayload {
 export interface UserStateUpdatedEventPayload {
   readonly login: string;
   readonly state: UserIssueState;
+  /** Which of `pinned`, `last_read_seq` and `dismissed` the write moved from the row it read
+   *  (`[]` when it moved none), so another tab refreshes its pinned list for a pin and not for a
+   *  read mark. Absent from an event written before the field existed, which a reader takes as
+   *  "any of them may have moved". */
+  readonly changed?: string[];
 }
 
 /** `user_agent_state.updated`: one viewer's Clear or read mark on one session's conversation
@@ -2550,6 +2623,9 @@ export const IssueEventPayloadSchema = z.object({
   priority: z.number().int().min(0).max(3).nullable().optional(),
   rank: z.string().optional(),
   route: z.string().nullish(),
+  changed: z.array(z.string()).optional(),
+  ancestors: z.array(z.string()).optional(),
+  thread_logins: z.array(z.string()).optional(),
 });
 
 export const ArtifactCreatedEventPayloadSchema = z.object({
@@ -2621,6 +2697,7 @@ const askEventPayloadFields = {
       at: z.string().optional(),
     })
     .nullish(),
+  thread_logins: z.array(z.string()).optional(),
 };
 
 export const AskEventPayloadSchema = z.intersection(
@@ -2696,6 +2773,7 @@ export const CommentEventPayloadSchema = z
     created_at: z.string().optional(),
     mentions: z.array(CommentMentionSchema).optional(),
     deliveries: z.array(CommentDeliverySchema).optional(),
+    thread_logins: z.array(z.string()).optional(),
   })
   // Bus frames are untrusted and this schema declares only the fields Dispatch
   // clients are known to read today, but the wire payload always carries every
@@ -2713,6 +2791,7 @@ export const MessageEventPayloadSchema = z.object({
   reply_body: z.string().optional(),
   thread_target: z.string().optional(),
   author: z.object({ kind: z.string(), id: z.string() }).optional(),
+  thread_logins: z.array(z.string()).optional(),
 });
 
 export const DispatchTargetedResourceIDSchema = z.uuid();

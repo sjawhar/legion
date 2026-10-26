@@ -98,6 +98,31 @@ test("preserves a coarse priority on an issue update event payload", () => {
   expect(IssueEventPayloadSchema.parse({ priority: null })).toEqual({ priority: null });
 });
 
+test("keeps what an issue write changed, its ancestors and its thread logins, and accepts an event without them", () => {
+  const payload = {
+    status: "done",
+    changed: ["status"],
+    ancestors: ["CORE-2", "CORE-1"],
+    thread_logins: ["alice@example.com"],
+  };
+  expect(IssueEventPayloadSchema.parse(payload)).toEqual(payload);
+  expect(IssueEventPayloadSchema.parse({ title: "Older event" })).toEqual({ title: "Older event" });
+});
+
+test("keeps the thread logins on comment, message and ask event payloads", () => {
+  const thread_logins = ["alice@example.com", "bob@example.com"];
+  expect(CommentEventPayloadSchema.parse({ id: "comment-1", thread_logins })).toMatchObject({
+    thread_logins,
+  });
+  expect(MessageEventPayloadSchema.parse({ id: "message-1", thread_logins })).toMatchObject({
+    thread_logins,
+  });
+  expect(AskEventPayloadSchema.parse({ opened_event_id: 3, thread_logins })).toMatchObject({
+    thread_logins,
+  });
+  expect(MessageEventPayloadSchema.parse({ id: "message-2" }).thread_logins).toBeUndefined();
+});
+
 test("models the deployed event exactly as the delivery timeline writes it", () => {
   const payload = {
     completed_at: "2024-01-01T02:10:00Z",

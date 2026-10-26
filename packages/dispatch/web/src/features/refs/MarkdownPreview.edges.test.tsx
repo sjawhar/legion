@@ -5,43 +5,19 @@ import type { ReactNode } from "react";
 import { Link, MemoryRouter, Route, Routes } from "react-router-dom";
 
 import { api } from "../../api/client";
-import type { AskRead, IssueDetails } from "../../api/types";
+import type { AskRead, IssueReferenceSummary } from "../../api/types";
 import { MarkdownBody } from "./MarkdownBody";
 import { MarkdownPreview } from "./MarkdownPreview";
 import { useMarkdownHeadline } from "./markdown-engine";
 import { Unfurl } from "./Unfurl";
 
-const issue: IssueDetails = {
-  route_status: null,
-  route_holder: null,
-  artifacts: [],
-  children: [],
-  closed_at: null,
-  created_at: "2026-09-09T00:00:00Z",
-  created_by: { id: "alice", kind: "user" },
-  external_links: [],
+/** CORE-1's summary read, which a reference to it shows. */
+const issue: IssueReferenceSummary = {
+  documents: [],
   key: "CORE-1",
-  labels: [],
-  last_seq: 1,
-  number: 1,
-  open_asks: [],
-  progress: { tasks: null, children: null },
-  parent: null,
-  blocked_by: [],
-  assignee: null,
-  claim: null,
-  components: { mode: "inherit", ids: [], unknown: [], reason: null, inherited_from: null },
-  primary_artifact_id: "artifact-none",
-  priority: null,
   project: "CORE",
-  rank: "U",
-  referenced_by_count: 0,
-  route: null,
-  repo: null,
-  resolved_repo: null,
   status: "in_progress",
   title: "Design decision",
-  updated_at: "2026-09-09T00:00:00Z",
 };
 
 function askRead(question: string): AskRead {
@@ -111,7 +87,7 @@ test("a preview's clamp is its own display: no display utility that outranks lin
 // preview and in a full body: every character stays in its source order, the marks land on the
 // words the author marked, and no syntax survives.
 test("right-to-left text keeps its characters in order, its marks on the words marked, and no syntax", async () => {
-  const getIssue = spyOn(api, "getIssue").mockResolvedValue(issue);
+  const getIssueSummary = spyOn(api, "getIssueSummary").mockResolvedValue(issue);
   const source = "שלום **עולם**, ראה `kubectl get pods` ו-dispatch://CORE-1. مرحبا *بالعالم*";
   const view = render(
     <Providers>
@@ -137,12 +113,12 @@ test("right-to-left text keeps its characters in order, its marks on the words m
     }
   } finally {
     view.unmount();
-    getIssue.mockRestore();
+    getIssueSummary.mockRestore();
   }
 });
 
 test("a preview inside a link holds no link of its own, and a click on its reference follows the host", async () => {
-  const getIssue = spyOn(api, "getIssue").mockResolvedValue(issue);
+  const getIssueSummary = spyOn(api, "getIssueSummary").mockResolvedValue(issue);
   const view = render(
     <Providers>
       <Routes>
@@ -183,12 +159,12 @@ test("a preview inside a link holds no link of its own, and a click on its refer
     expect(screen.queryByText("Reference page")).toBeNull();
   } finally {
     view.unmount();
-    getIssue.mockRestore();
+    getIssueSummary.mockRestore();
   }
 });
 
 test("search hits mark whole words in any case, and a reference the server matched is marked whole", async () => {
-  const getIssue = spyOn(api, "getIssue").mockResolvedValue(issue);
+  const getIssueSummary = spyOn(api, "getIssueSummary").mockResolvedValue(issue);
   // What the server's ts_headline marks for `port CORE-1` over this body: `port` as a word (not
   // the `port` in `Report`, `support` or `export`), and the reference's two lexemes.
   const view = render(
@@ -211,7 +187,7 @@ test("search hits mark whole words in any case, and a reference the server match
     expect(element.textContent).not.toContain("dispatch://");
   } finally {
     view.unmount();
-    getIssue.mockRestore();
+    getIssueSummary.mockRestore();
   }
 });
 
@@ -269,7 +245,6 @@ test("a headline writes a reference as its short form, keeps one in code as writ
 
 test("an ask's unfurl card shows its question once, even when the question ends in an ellipsis", async () => {
   const getAsk = spyOn(api, "getAsk").mockResolvedValue(askRead("Should we wait for **CORE-2**…"));
-  const getIssue = spyOn(api, "getIssue").mockResolvedValue(issue);
   const view = render(
     <Providers>
       <Unfurl body="dispatch://CORE-1/ask/ask-1" />
@@ -284,36 +259,38 @@ test("an ask's unfurl card shows its question once, even when the question ends 
   } finally {
     view.unmount();
     getAsk.mockRestore();
-    getIssue.mockRestore();
   }
 });
 
-test("an ask's unfurl card never borrows its issue's status while the ask loads", async () => {
+test("an ask's unfurl card never borrows its issue's status, and reads no issue, while the ask loads", async () => {
   const getAsk = spyOn(api, "getAsk").mockReturnValue(Promise.withResolvers<AskRead>().promise);
-  const getIssue = spyOn(api, "getIssue").mockResolvedValue(issue);
+  const getIssue = spyOn(api, "getIssue");
+  const getIssueSummary = spyOn(api, "getIssueSummary").mockResolvedValue(issue);
   const view = render(
     <Providers>
       <Unfurl body="dispatch://CORE-1/ask/ask-1" />
     </Providers>
   );
   try {
-    await waitFor(() => expect(getIssue).toHaveBeenCalledWith("CORE-1"));
-    // The issue answered and the ask has not: the card says what it is, not the issue's status.
+    await waitFor(() => expect(getAsk).toHaveBeenCalledWith("ask-1"));
+    // The ask has not answered: the card says what it is, not the issue's status.
     await Bun.sleep(20);
     const card = within(view.container).getByRole("link");
     expect(card.textContent).toBe("dispatch://CORE-1/ask/ask-1");
     expect(card.textContent).not.toContain("in_progress");
+    expect(getIssue).not.toHaveBeenCalled();
+    expect(getIssueSummary).not.toHaveBeenCalled();
   } finally {
     view.unmount();
     getAsk.mockRestore();
     getIssue.mockRestore();
+    getIssueSummary.mockRestore();
   }
 });
 
 test("a long ask's unfurl card shows the whole question under its cut title, formatted", async () => {
   const question = `**Which** of these ${"options ".repeat(10)}ships first?`;
   const getAsk = spyOn(api, "getAsk").mockResolvedValue(askRead(question));
-  const getIssue = spyOn(api, "getIssue").mockResolvedValue(issue);
   const view = render(
     <Providers>
       <Unfurl body="dispatch://CORE-1/ask/ask-1" />
@@ -329,6 +306,5 @@ test("a long ask's unfurl card shows the whole question under its cut title, for
   } finally {
     view.unmount();
     getAsk.mockRestore();
-    getIssue.mockRestore();
   }
 });

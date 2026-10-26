@@ -5,7 +5,11 @@ import type { Window as HappyDOMWindow } from "happy-dom";
 import type { ReactNode } from "react";
 
 import { api } from "../../api/client";
-import type { Artifact, AskRead } from "../../api/types";
+import type {
+  AskRead,
+  IssueReferenceSummary,
+  IssueReferenceSummaryDocument,
+} from "../../api/types";
 import { MarkdownBody } from "./MarkdownBody";
 
 function withQueries(children: ReactNode): ReactNode {
@@ -13,25 +17,19 @@ function withQueries(children: ReactNode): ReactNode {
   return <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>;
 }
 
-/** An image artifact of CORE-1 with two versions, as the issue read lists it. */
-const picture: Artifact = {
-  created_at: "2026-10-04T00:00:00Z",
-  created_by: { id: "alice", kind: "user" },
+/** An image document of CORE-1 whose latest version is 2, as the issue summary lists it. */
+const picture: IssueReferenceSummaryDocument = {
   id: "artifact-shot",
-  issue_key: "CORE-1",
   kind: "image",
+  latest_version: 2,
   name: "shot.png",
-  primary: false,
-  project: "CORE",
   slug: "shot-png",
-  versions: [1, 2].map((number) => ({
-    authors: [{ id: "alice", kind: "user" as const }],
-    created_at: "2026-10-04T00:00:00Z",
-    named: false,
-    number,
-    summary: null,
-  })),
 };
+
+/** CORE-1's summary read, the one read behind a reference to it or to its documents. */
+function issueSummary(documents: IssueReferenceSummaryDocument[]): IssueReferenceSummary {
+  return { documents, key: "CORE-1", project: "CORE", status: "in_progress", title: "Core one" };
+}
 
 // The dashboard is served from an origin, where a picture's same-origin bytes route resolves.
 // happy-dom's page starts at `about:blank`, where no relative `src` resolves and every picture
@@ -133,11 +131,9 @@ describe("Dispatch pictures", () => {
   });
 
   test("a Dispatch picture that pins no version reads as its reference, with the image's thumbnail", async () => {
-    const getIssue = spyOn(api, "getIssue").mockResolvedValue({
-      artifacts: [picture],
-      key: "CORE-1",
-      title: "Core one",
-    } as never);
+    const getIssueSummary = spyOn(api, "getIssueSummary").mockResolvedValue(
+      issueSummary([picture])
+    );
     const view = render(
       withQueries(<MarkdownBody markdown="![shot.png](dispatch://CORE-1/artifact/shot-png)" />)
     );
@@ -154,17 +150,15 @@ describe("Dispatch pictures", () => {
       );
       expect(link.querySelector("img")?.className.split(" ")).toContain("h-10");
     } finally {
-      getIssue.mockRestore();
+      getIssueSummary.mockRestore();
       view.unmount();
     }
   });
 
   test("a plain reference whose thumbnail cannot load drops it and keeps the title", async () => {
-    const getIssue = spyOn(api, "getIssue").mockResolvedValue({
-      artifacts: [picture],
-      key: "CORE-1",
-      title: "Core one",
-    } as never);
+    const getIssueSummary = spyOn(api, "getIssueSummary").mockResolvedValue(
+      issueSummary([picture])
+    );
     // A hand-written or stale reference can pin a version the server does not serve; the
     // thumbnail's load then fails, and the reference reads as its title with no broken glyph.
     const view = render(
@@ -185,17 +179,15 @@ describe("Dispatch pictures", () => {
       expect(link.textContent).toBe("shot.png");
       expect(link.getAttribute("href")).toBe("/issues/CORE-1/artifacts/shot-png?v=99");
     } finally {
-      getIssue.mockRestore();
+      getIssueSummary.mockRestore();
       view.unmount();
     }
   });
 
   test("a plain reference to a non-image artifact shows no thumbnail", async () => {
-    const getIssue = spyOn(api, "getIssue").mockResolvedValue({
-      artifacts: [{ ...picture, kind: "file", name: "notes.pdf", slug: "notes-pdf" }],
-      key: "CORE-1",
-      title: "Core one",
-    } as never);
+    const getIssueSummary = spyOn(api, "getIssueSummary").mockResolvedValue(
+      issueSummary([{ ...picture, kind: "file", name: "notes.pdf", slug: "notes-pdf" }])
+    );
     const view = render(
       withQueries(<MarkdownBody markdown="See dispatch://CORE-1/artifact/notes-pdf" />)
     );
@@ -204,17 +196,15 @@ describe("Dispatch pictures", () => {
       const link = await within(view.container).findByRole("link", { name: "notes.pdf" });
       expect(link.querySelector("img")).toBeNull();
     } finally {
-      getIssue.mockRestore();
+      getIssueSummary.mockRestore();
       view.unmount();
     }
   });
 
   test("a version that is no picture falls back to the reference's title", async () => {
-    const getIssue = spyOn(api, "getIssue").mockResolvedValue({
-      artifacts: [{ ...picture, kind: "file", name: "notes.pdf", slug: "notes-pdf" }],
-      key: "CORE-1",
-      title: "Core one",
-    } as never);
+    const getIssueSummary = spyOn(api, "getIssueSummary").mockResolvedValue(
+      issueSummary([{ ...picture, kind: "file", name: "notes.pdf", slug: "notes-pdf" }])
+    );
     const view = render(
       withQueries(<MarkdownBody markdown="![notes](dispatch://CORE-1/artifact/notes-pdf@v1)" />)
     );
@@ -226,7 +216,7 @@ describe("Dispatch pictures", () => {
       expect(link.getAttribute("href")).toBe("/issues/CORE-1/artifacts/notes-pdf?v=1");
       expect(within(view.container).queryByRole("img")).toBeNull();
     } finally {
-      getIssue.mockRestore();
+      getIssueSummary.mockRestore();
       view.unmount();
     }
   });
@@ -374,7 +364,7 @@ test("an external URL unrelated to the app renders as an ordinary link", async (
   }
 });
 
-test("two references in one body each resolve their own inline link and title", async () => {
+test("two references in one body each resolve their own inline link and title, reading only what each shows", async () => {
   const askRead: AskRead = {
     ask: {
       id: "ask-1",
@@ -397,21 +387,18 @@ test("two references in one body each resolve their own inline link and title", 
     followers: [],
     replies: [],
   };
-  const projectArtifact: Artifact = {
-    created_at: "2026-09-09T00:00:00Z",
-    created_by: { id: "alice", kind: "user" },
-    id: "artifact-1",
-    issue_key: null,
-    kind: "doc",
-    name: "Runbook.md",
-    primary: false,
-    project: "CORE",
-    ref_key: "CORE/runbook-md",
-    slug: "runbook-md",
-    versions: [],
-  };
   const getAsk = spyOn(api, "getAsk").mockResolvedValue(askRead);
-  const getProjectArtifact = spyOn(api, "getProjectArtifact").mockResolvedValue(projectArtifact);
+  const getProjectDocumentSummary = spyOn(api, "getProjectDocumentSummary").mockResolvedValue({
+    id: "artifact-1",
+    kind: "doc",
+    latest_version: 4,
+    name: "Runbook.md",
+    project: "CORE",
+    slug: "runbook-md",
+  });
+  const getIssue = spyOn(api, "getIssue");
+  const getIssueSummary = spyOn(api, "getIssueSummary");
+  const getArtifactText = spyOn(api, "getArtifactText");
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const view = render(
     <QueryClientProvider client={queryClient}>
@@ -425,8 +412,16 @@ test("two references in one body each resolve their own inline link and title", 
     expect(askLink.getAttribute("href")).toBe("/issues/CORE-1/asks/ask-1");
     expect(documentLink.getAttribute("href")).toBe("/projects/CORE/documents/runbook-md");
     expect(within(view.container).getAllByRole("link")).toHaveLength(2);
+    expect(getProjectDocumentSummary).toHaveBeenCalledWith("CORE", "runbook-md");
+    // An ask link reads its ask alone, and an inline document link shows no text, so reads none.
+    expect(getIssue).not.toHaveBeenCalled();
+    expect(getIssueSummary).not.toHaveBeenCalled();
+    expect(getArtifactText).not.toHaveBeenCalled();
   } finally {
-    getProjectArtifact.mockRestore();
+    getArtifactText.mockRestore();
+    getIssueSummary.mockRestore();
+    getIssue.mockRestore();
+    getProjectDocumentSummary.mockRestore();
     getAsk.mockRestore();
     view.unmount();
   }

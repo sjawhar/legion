@@ -29,11 +29,12 @@ export const pictureThumbnailClassName = `not-prose inline-block h-10 w-10 shrin
 
 /** Portal content for an inline reference anchor: the resolved title once
  * `useReferenceTarget` has it, the ref's short form until then, and beside it the picture's
- * thumbnail when the reference names an image artifact. A thumbnail the browser cannot draw (a
- * pinned version the server does not serve) is dropped, leaving the title alone, so a stale or
- * hand-written reference never shows a broken-image glyph. */
+ * thumbnail when the reference names an image artifact. It shows no document text, so it reads
+ * none. A thumbnail the browser cannot draw (a pinned version the server does not serve) is
+ * dropped, leaving the title alone, so a stale or hand-written reference never shows a
+ * broken-image glyph. */
 export function RefLink({ route }: { route: DispatchReferenceRoute }): ReactNode {
-  const { picture, title } = useReferenceTarget(route);
+  const { picture, title } = useReferenceTarget(route, { text: false });
   // The address that failed, not a flag: a plain reference names the latest version, so a version
   // uploaded since gets its own load instead of inheriting the last one's failure.
   const [failedPicture, setFailedPicture] = useState<string>();

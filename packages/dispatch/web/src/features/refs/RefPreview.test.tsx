@@ -598,6 +598,56 @@ test("an ask's card heads with its question formatted, not its source", async ()
   }
 });
 
+test("a document's card shows its owner, name, latest version and text from its summary and text reads", async () => {
+  const getIssue = mockIssues();
+  const getProjectDocumentSummary = spyOn(api, "getProjectDocumentSummary").mockResolvedValue({
+    id: "doc-9",
+    kind: "doc",
+    latest_version: 4,
+    name: "Runbook.md",
+    project: "CORE",
+    slug: "runbook-md",
+  });
+  const getArtifactText = spyOn(api, "getArtifactText").mockResolvedValue({
+    markdown: "Restart the **pod** first.",
+    token: "sha256:runbook",
+    version: null,
+  });
+  const getProjectArtifact = spyOn(api, "getProjectArtifact");
+  jest.useFakeTimers();
+  const view = render(
+    <Harness>
+      <Link
+        to="/projects/CORE/documents/runbook-md"
+        {...referenceTriggerProps({ kind: "document", project: "CORE", slug: "runbook-md" })}
+      >
+        the runbook
+      </Link>
+    </Harness>
+  );
+  try {
+    fireEvent.pointerOver(screen.getByRole("link", { name: "the runbook" }), {
+      pointerType: "mouse",
+    });
+    act(() => {
+      jest.advanceTimersByTime(REF_PREVIEW_OPEN_DELAY_MS);
+    });
+    const card = screen.getByRole("tooltip");
+    jest.useRealTimers();
+    await waitFor(() => expect(card.querySelector("strong")?.textContent).toBe("pod"));
+    expect(card.textContent).toContain("CORE · Runbook.md");
+    expect(card.textContent).toContain("v4");
+    expect(getArtifactText).toHaveBeenCalledWith("doc-9");
+    expect(getProjectArtifact).not.toHaveBeenCalled();
+  } finally {
+    view.unmount();
+    getProjectArtifact.mockRestore();
+    getArtifactText.mockRestore();
+    getProjectDocumentSummary.mockRestore();
+    getIssue.mockRestore();
+  }
+});
+
 // INFRA-440 (exclusion E1). The card is a tooltip inside one link to the reference, so the
 // comment's agent is named by its current registry title and marked running, with no link of
 // its own: the reference link stays the card's only anchor.

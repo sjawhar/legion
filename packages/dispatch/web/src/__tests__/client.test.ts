@@ -274,6 +274,8 @@ test("API client reaches project artifact and owner-scoped document endpoints", 
     { content: "# Design notes\n", name: "Design notes" }
   );
   await api.getProjectArtifact("CORE", "design-notes");
+  await api.getProjectDocumentSummary("CORE", "design notes.md");
+  await api.getIssueSummary("CORE-1");
   await api.listArtifactAsks("artifact-1", "open");
   await api.createArtifactAsk("artifact-1", { question: "Ship?" });
   await api.listArtifactComments("artifact-1");
@@ -286,6 +288,8 @@ test("API client reaches project artifact and owner-scoped document endpoints", 
     ["GET", "/api/v1/projects/CORE/artifacts?unlinked=true"],
     ["POST", "/api/v1/projects/CORE/artifacts"],
     ["GET", "/api/v1/projects/CORE/artifacts/design-notes"],
+    ["GET", "/api/v1/projects/CORE/artifacts/design%20notes.md/summary"],
+    ["GET", "/api/v1/issues/CORE-1/summary"],
     ["GET", "/api/v1/artifacts/artifact-1/asks?state=open"],
     ["POST", "/api/v1/artifacts/artifact-1/asks"],
     ["GET", "/api/v1/artifacts/artifact-1/comments"],

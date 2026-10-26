@@ -18,7 +18,12 @@ import { type IssueStatus, statusLabel } from "../project/board-model";
 import { AgentName } from "./AgentName";
 import { MarkdownPreview } from "./MarkdownPreview";
 import { REF_PREVIEW_CLOSE_DELAY_MS, REF_PREVIEW_OPEN_DELAY_MS } from "./ref-preview-timing";
-import { artifactTextQuery, prefetchReference, useReferenceData } from "./reference-target";
+import {
+  artifactTextQuery,
+  issueQuery,
+  prefetchReference,
+  useReferenceData,
+} from "./reference-target";
 import {
   buildDispatchReference,
   buildReferencePath,
@@ -241,8 +246,11 @@ function Body({ markdown }: { markdown: string }): ReactNode {
   );
 }
 
+/** The issue's full read, not the summary its links share: the card shows priority, labels, open
+ *  asks and the spec, and holds that read only while it is shown. */
 function IssuePreview({ route }: { route: DispatchReferenceRoute }): ReactNode {
-  const { issue } = useReferenceData(route);
+  const key = "key" in route ? route.key : undefined;
+  const { data: issue } = useQuery({ ...issueQuery(key), enabled: key !== undefined });
   const spec = primarySpec(issue);
   const specText = useQuery({
     ...artifactTextQuery(spec?.id, undefined),
@@ -288,7 +296,7 @@ function IssuePreview({ route }: { route: DispatchReferenceRoute }): ReactNode {
 }
 
 function DocumentPreview({ route }: { route: DispatchReferenceRoute }): ReactNode {
-  const { artifact, markdown } = useReferenceData(route);
+  const { artifact, markdown } = useReferenceData(route, { text: true });
   if (artifact === undefined) {
     return <Heading>{shortForm(route)}</Heading>;
   }
@@ -304,14 +312,14 @@ function DocumentPreview({ route }: { route: DispatchReferenceRoute }): ReactNod
     ) : (
       route.key
     );
-  const latest = artifact.versions.at(-1)?.number;
+  const latest = artifact.latest_version;
   return (
     <>
       <Heading>
         <span className={`font-normal ${textMutedOnSurface}`}>{owner} · </span>
         {artifact.name}
       </Heading>
-      {latest === undefined ? null : (
+      {latest === null ? null : (
         <span className={`mt-1 block text-xs ${textMutedOnSurface}`}>v{latest}</span>
       )}
       {markdown === undefined || markdown.trim() === "" ? null : <Body markdown={markdown} />}
@@ -320,7 +328,7 @@ function DocumentPreview({ route }: { route: DispatchReferenceRoute }): ReactNod
 }
 
 function AskPreview({ route }: { route: DispatchReferenceRoute }): ReactNode {
-  const { ask } = useReferenceData(route);
+  const { ask } = useReferenceData(route, { text: false });
   if (ask === undefined) {
     return <Heading>{shortForm(route)}</Heading>;
   }
@@ -339,7 +347,7 @@ function AskPreview({ route }: { route: DispatchReferenceRoute }): ReactNode {
 }
 
 function CommentPreview({ route }: { route: DispatchReferenceRoute }): ReactNode {
-  const { comment } = useReferenceData(route);
+  const { comment } = useReferenceData(route, { text: false });
   if (comment === undefined) {
     return <Heading>{shortForm(route)}</Heading>;
   }
@@ -354,7 +362,7 @@ function CommentPreview({ route }: { route: DispatchReferenceRoute }): ReactNode
 }
 
 function MessagePreview({ route }: { route: DispatchReferenceRoute }): ReactNode {
-  const { message } = useReferenceData(route);
+  const { message } = useReferenceData(route, { text: false });
   if (message === undefined) {
     return <Heading>{shortForm(route)}</Heading>;
   }

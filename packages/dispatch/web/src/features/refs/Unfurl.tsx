@@ -37,7 +37,7 @@ function Body({ markdown }: { markdown: string }): ReactNode {
 
 function DispatchUnfurl({ reference }: { reference: ComposerReference }): ReactNode {
   const route = parseDispatchReference(reference.reference);
-  const { title, description } = useReferenceTarget(route);
+  const { title, description } = useReferenceTarget(route, { text: true });
 
   return (
     <a

@@ -5,7 +5,7 @@ import { render, screen, waitFor, within } from "@testing-library/react";
 
 import { commentDeliveryFields } from "../../__tests__/comment-fixture";
 import { api } from "../../api/client";
-import type { Artifact, AskRead, CommentRead, IssueDetails } from "../../api/types";
+import type { AskRead, CommentRead, IssueReferenceSummary } from "../../api/types";
 import { isBareReferenceBody, Unfurl } from "./Unfurl";
 
 test("Unfurl trims terminal punctuation before resolving a GitHub reference", async () => {
@@ -34,52 +34,46 @@ test("Unfurl trims terminal punctuation before resolving a GitHub reference", as
   }
 });
 
+/** CORE-1's summary read, with its spec `design`. */
+const coreSummary: IssueReferenceSummary = {
+  documents: [
+    { id: "artifact-1", kind: "doc", latest_version: 3, name: "design.md", slug: "design" },
+  ],
+  key: "CORE-1",
+  project: "CORE",
+  status: "testing",
+  title: "Design decision",
+};
+
+test("Unfurl shows an issue's title and status from its summary, without the full issue read", async () => {
+  const getIssueSummary = spyOn(api, "getIssueSummary").mockResolvedValue({
+    ...coreSummary,
+    documents: [],
+  });
+  const getIssue = spyOn(api, "getIssue");
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+
+  const view = render(
+    <QueryClientProvider client={queryClient}>
+      <Unfurl body="See dispatch://CORE-1" />
+    </QueryClientProvider>
+  );
+
+  try {
+    await within(view.container).findByText("Design decision");
+    await within(view.container).findByText("testing");
+    expect(getIssueSummary).toHaveBeenCalledWith("CORE-1");
+    expect(getIssue).not.toHaveBeenCalled();
+  } finally {
+    getIssue.mockRestore();
+    getIssueSummary.mockRestore();
+    view.unmount();
+  }
+});
+
 test("Unfurl reads the immutable document version named by a reference", async () => {
-  const artifact: Artifact = {
-    created_at: "2026-09-09T00:00:00Z",
-    created_by: { id: "alice", kind: "user" },
-    id: "artifact-1",
-    issue_key: "CORE-1",
-    project: "CORE",
-    kind: "doc",
-    name: "design.md",
-    primary: true,
-    slug: "design",
-    versions: [],
-  };
-  const issue: IssueDetails = {
-    route_status: null,
-    route_holder: null,
-    artifacts: [artifact],
-    children: [],
-    closed_at: null,
-    created_at: "2026-09-09T00:00:00Z",
-    created_by: { id: "alice", kind: "user" },
-    external_links: [],
-    key: "CORE-1",
-    labels: [],
-    last_seq: 1,
-    number: 1,
-    parent: null,
-    blocked_by: [],
-    assignee: null,
-    claim: null,
-    components: { mode: "inherit", ids: [], unknown: [], reason: null, inherited_from: null },
-    primary_artifact_id: artifact.id,
-    project: "CORE",
-    referenced_by_count: 0,
-    route: null,
-    repo: null,
-    resolved_repo: null,
-    status: "testing",
-    priority: null,
-    rank: "U",
-    title: "Design decision",
-    open_asks: [],
-    progress: { tasks: null, children: null },
-    updated_at: "2026-09-09T00:00:00Z",
-  };
-  const getIssue = spyOn(api, "getIssue").mockResolvedValue(issue);
+  const getIssueSummary = spyOn(api, "getIssueSummary").mockResolvedValue(coreSummary);
+  const getIssue = spyOn(api, "getIssue");
   const getArtifactText = spyOn(api, "getArtifactText").mockResolvedValue({
     markdown: "Live document",
     version: null,
@@ -105,32 +99,29 @@ test("Unfurl reads the immutable document version named by a reference", async (
     );
 
     await screen.findByText("Version three");
+    expect(screen.getByText("design.md")).toBeDefined();
     expect(getArtifactVersion).toHaveBeenCalledWith("artifact-1", 3);
     expect(getArtifactText).not.toHaveBeenCalled();
+    expect(getIssue).not.toHaveBeenCalled();
     view.unmount();
   } finally {
     getArtifactVersion.mockRestore();
     getArtifactText.mockRestore();
     getIssue.mockRestore();
+    getIssueSummary.mockRestore();
   }
 });
 
 test("Unfurl unfurls a dispatch project document reference with its name and document link", async () => {
-  const artifact: Artifact = {
-    created_at: "2026-09-10T00:00:00Z",
-    created_by: { id: "alice", kind: "user" },
+  const getProjectDocumentSummary = spyOn(api, "getProjectDocumentSummary").mockResolvedValue({
     id: "artifact-1",
-    issue_key: null,
-    project: "CORE",
     kind: "doc",
+    latest_version: 3,
     name: "Design notes",
-    primary: false,
+    project: "CORE",
     slug: "design-notes",
-    versions: [],
-  };
-  const getProjectArtifact = spyOn(api, "getProjectArtifact").mockResolvedValue({
-    ...artifact,
   });
+  const getProjectArtifact = spyOn(api, "getProjectArtifact");
   const getArtifactVersion = spyOn(api, "getArtifactVersion").mockResolvedValue({
     authors: [],
     created_at: "2026-09-10T00:00:00Z",
@@ -139,7 +130,8 @@ test("Unfurl unfurls a dispatch project document reference with its name and doc
     number: 3,
     summary: "Version three",
   });
-  const getIssue = spyOn(api, "getIssue").mockResolvedValue(undefined as never);
+  const getIssue = spyOn(api, "getIssue");
+  const getIssueSummary = spyOn(api, "getIssueSummary");
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   });
@@ -152,52 +144,24 @@ test("Unfurl unfurls a dispatch project document reference with its name and doc
     );
 
     await screen.findByText("Project version three");
-    expect(getProjectArtifact).toHaveBeenCalledWith("CORE", "design-notes");
+    expect(getProjectDocumentSummary).toHaveBeenCalledWith("CORE", "design-notes");
+    expect(getProjectArtifact).not.toHaveBeenCalled();
     expect(getIssue).not.toHaveBeenCalled();
+    expect(getIssueSummary).not.toHaveBeenCalled();
     expect(screen.getByRole("link", { name: /Design notes/ }).getAttribute("href")).toBe(
       "/projects/CORE/documents/design-notes?version=3"
     );
     view.unmount();
   } finally {
+    getIssueSummary.mockRestore();
     getIssue.mockRestore();
     getArtifactVersion.mockRestore();
     getProjectArtifact.mockRestore();
+    getProjectDocumentSummary.mockRestore();
   }
 });
 
-test("Unfurl unfurls a dispatch ask reference with the question, not the issue title", async () => {
-  const issue: IssueDetails = {
-    route_status: null,
-    route_holder: null,
-    artifacts: [],
-    children: [],
-    closed_at: null,
-    created_at: "2026-09-09T00:00:00Z",
-    created_by: { id: "alice", kind: "user" },
-    external_links: [],
-    key: "CORE-1",
-    labels: [],
-    last_seq: 1,
-    number: 1,
-    parent: null,
-    blocked_by: [],
-    assignee: null,
-    claim: null,
-    components: { mode: "inherit", ids: [], unknown: [], reason: null, inherited_from: null },
-    primary_artifact_id: "artifact-none",
-    project: "CORE",
-    referenced_by_count: 0,
-    route: null,
-    repo: null,
-    resolved_repo: null,
-    status: "testing",
-    priority: null,
-    rank: "U",
-    title: "Design decision",
-    open_asks: [],
-    progress: { tasks: null, children: null },
-    updated_at: "2026-09-09T00:00:00Z",
-  };
+test("Unfurl unfurls a dispatch ask reference with the question, reading no issue", async () => {
   const askRead: AskRead = {
     ask: {
       id: "ask-1",
@@ -220,7 +184,8 @@ test("Unfurl unfurls a dispatch ask reference with the question, not the issue t
     followers: [],
     replies: [],
   };
-  const getIssue = spyOn(api, "getIssue").mockResolvedValue(issue);
+  const getIssue = spyOn(api, "getIssue");
+  const getIssueSummary = spyOn(api, "getIssueSummary");
   const getAsk = spyOn(api, "getAsk").mockResolvedValue(askRead);
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
 
@@ -234,48 +199,18 @@ test("Unfurl unfurls a dispatch ask reference with the question, not the issue t
     await within(view.container).findByText(
       "Should we ship this on Friday or wait for the review to land…"
     );
-    expect(within(view.container).queryByText("Design decision")).toBeNull();
     expect(getAsk).toHaveBeenCalledWith("ask-1");
+    expect(getIssue).not.toHaveBeenCalled();
+    expect(getIssueSummary).not.toHaveBeenCalled();
   } finally {
     getAsk.mockRestore();
+    getIssueSummary.mockRestore();
     getIssue.mockRestore();
     view.unmount();
   }
 });
 
-test("Unfurl unfurls a dispatch comment reference with its own words, not the issue title", async () => {
-  const issue: IssueDetails = {
-    route_status: null,
-    route_holder: null,
-    artifacts: [],
-    children: [],
-    closed_at: null,
-    created_at: "2026-09-09T00:00:00Z",
-    created_by: { id: "alice", kind: "user" },
-    external_links: [],
-    key: "CORE-1",
-    labels: [],
-    last_seq: 1,
-    number: 1,
-    parent: null,
-    blocked_by: [],
-    assignee: null,
-    claim: null,
-    components: { mode: "inherit", ids: [], unknown: [], reason: null, inherited_from: null },
-    primary_artifact_id: "artifact-none",
-    project: "CORE",
-    referenced_by_count: 0,
-    route: null,
-    repo: null,
-    resolved_repo: null,
-    status: "testing",
-    priority: null,
-    rank: "U",
-    title: "Design decision",
-    open_asks: [],
-    progress: { tasks: null, children: null },
-    updated_at: "2026-09-09T00:00:00Z",
-  };
+test("Unfurl unfurls a dispatch comment reference with its own words, reading no issue", async () => {
   const commentRead: CommentRead = {
     comment: {
       id: "comment-1",
@@ -296,7 +231,8 @@ test("Unfurl unfurls a dispatch comment reference with its own words, not the is
     },
     replies: [],
   };
-  const getIssue = spyOn(api, "getIssue").mockResolvedValue(issue);
+  const getIssue = spyOn(api, "getIssue");
+  const getIssueSummary = spyOn(api, "getIssueSummary");
   const getComment = spyOn(api, "getComment").mockResolvedValue(commentRead);
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
 
@@ -310,10 +246,12 @@ test("Unfurl unfurls a dispatch comment reference with its own words, not the is
     // The title is the comment projected to plain words: the soft-wrapped line is one
     // paragraph (as the editor reads it), and the bold is dropped, not shown as `**`.
     await within(view.container).findByText("Looks good overall. One nit below.");
-    expect(within(view.container).queryByText("Design decision")).toBeNull();
     expect(getComment).toHaveBeenCalledWith("comment-1");
+    expect(getIssue).not.toHaveBeenCalled();
+    expect(getIssueSummary).not.toHaveBeenCalled();
   } finally {
     getComment.mockRestore();
+    getIssueSummary.mockRestore();
     getIssue.mockRestore();
     view.unmount();
   }
