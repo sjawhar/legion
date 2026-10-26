@@ -2,64 +2,48 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-439",
-  "completed": "2026-10-26T06:45:00Z",
+  "completed": "2026-10-26T08:45:00Z",
   "pr": "https://github.com/sjawhar/legion/pull/2228",
-  "round": "Answers the tester's two failures at 4202727e (test.json failures): a card omp withdrew unwritten by an interrupt stayed pending for the life of the process; after a switch away and back, frames omp never wrote were recorded shown.",
+  "round": "Answers review round 1 at 19cadc8d (code head 2aef017d), the six findings and the minor line, and the reviewer's structural item, which the architect's NARROW decision (dispatch://INFRA-439) puts in this PR. Seven threads answered and resolved; main forward-merged once on a GitHub-reported conflict (docs and CHANGELOG text only).",
   "proof": [
     {
-      "criterion": "A message the plugin cannot inject is delivered on a later attempt, never only caught: cards omp withdrew unwritten by an interrupt (tester failure 1)",
-      "surface": "real `omp --mode rpc` session (workspace pi-envoy via -e, scratch HOME, file sessions), real nats-server with JetStream (packages/envoy/internal/testnats/cmd/natsd -js) and the listener built from this head, the session's NATS behind a socat proxy",
-      "command": "bash packages/pi-envoy/scripts/smoke-replay.sh, leg 4 (output: https://github.com/sjawhar/legion/pull/2228#issuecomment-6409916888)",
-      "observed": "dispatch-1792996362004..006 held by a streaming turn (queuedMessageCount 3, card=0); RPC abort_and_restore_queue answered {\"steering\":[],\"followUp\":[]}, idle with card=0 for all three; 2 s later card=1 each in the same process, still 1 once idle and three heartbeats later",
-      "headSha": "2aef017d87b732a154c54ff0645d9fabd19925a9",
-      "negativeControl": "the released plugin 10.17.7 through the same path (control-interrupt): dispatch-1792996362013..015 card=0 five heartbeats after the interrupt, the session idle"
+      "criterion": "Finding 4 (security authz): /v1/replay must not let a wildcard session_id read every session's inbox",
+      "surface": "a real listener and natsd built from this head, called over HTTP",
+      "command": "/legion/scratch/tmp/infra439/f4live/run.sh (output in https://github.com/sjawhar/legion/pull/2228#issuecomment-6411765212)",
+      "observed": "session_id '>', '*' and 'a.b' with subject notifications.agent.> each answered 400 {\"error\":\"session_id must be one NATS subject token: …\",\"expected\":[\"session_id\"]}; session_id ses_ok answered 200 (its own subject; notifications.agent.> refused not_followed)",
+      "headSha": "466c24da87a097f7d26958ce121fed242851cd8e",
+      "negativeControl": "before the fix (2aef017d) the reviewer's request {session_id:'>', subject notifications.agent.>, after 0} passed replayFollowed's equality and returned every stored inbox message (replay.go 121, 200-211)"
     },
     {
-      "criterion": "An event reaches the session once when it comes back under the same session id: cards held when the host switched away and back (tester failure 2)",
-      "surface": "same real omp session and stack",
-      "command": "bash packages/pi-envoy/scripts/smoke-replay.sh, leg 6 (same run)",
-      "observed": "dispatch-1792996362010..012 held by a streaming turn; new_session: the new session holds none three heartbeats after its first answer; switch_session back to the same session id; cards held again by a new turn; session file card=0 for each; SIGKILL; resume: card=1 each once idle, still 1 three heartbeats later",
-      "headSha": "2aef017d87b732a154c54ff0645d9fabd19925a9",
-      "negativeControl": "before the fix the tester's r4 run (/legion/scratch/tmp/adv/r4.log, L6) left dispatch-1792994074139 and -140 with a ledger entry and no card after the switch back"
+      "criterion": "Outcome and the injection criterion on a real session after this round's changes (shared host policy, unwritten-frame module, refused BTW, removal unregister, receive-time notice, TOON notices)",
+      "surface": "real `omp --mode rpc` session (workspace pi-envoy via -e, scratch HOME, file sessions), real nats-server with JetStream and the listener built from this head, the session's NATS behind a socat proxy",
+      "command": "bash packages/pi-envoy/scripts/smoke-replay.sh (output: https://github.com/sjawhar/legion/pull/2228#issuecomment-6411765212)",
+      "observed": "leg 1 dispatch-1793003578700 one entry 2 s after the proxy restart; leg 2 -701 one entry after --resume; leg 3 -704..707 held through a SIGKILL, one each; leg 4 -710..712 after abort_and_restore_queue (card=0 right after), one each in the same process; leg 5 -713..715 plain abort, one each; leg 6 -716..718 new_session, switch back, SIGKILL, resume, one each; each still one three heartbeats later",
+      "headSha": "466c24da87a097f7d26958ce121fed242851cd8e",
+      "negativeControl": "released plugin 10.17.7: no entry for -702 published while its connection was down; -708 and -709 lost through a SIGKILL; -719..721 not shown after abort_and_restore_queue"
     },
     {
-      "criterion": "No card shown twice when omp itself writes queued cards after a plain abort",
-      "surface": "same real omp session and stack",
-      "command": "bash packages/pi-envoy/scripts/smoke-replay.sh, leg 5 (same run)",
-      "observed": "dispatch-1792996362007..009 held; RPC abort; omp's next run wrote them: card=1 each 2 s after the abort, still exactly one each three heartbeats later",
-      "headSha": "2aef017d87b732a154c54ff0645d9fabd19925a9",
-      "negativeControl": "the hand-back fires only while ctx.hasPendingMessages() is false; at the plain abort's agent_end it is true (measured on omp 18.8.9), so no second card"
-    },
-    {
-      "criterion": "Live proof: a real session's NATS connection broken, an event published to its own topic, the connection restored, the event once in the transcript; and once after a stop and resume; and a card held behind a turn through a SIGKILL once",
-      "surface": "same real omp session and stack",
-      "command": "bash packages/pi-envoy/scripts/smoke-replay.sh, legs 1-3 (same run)",
-      "observed": "leg 1 dispatch-1792996361994 one entry 1 s after the proxy restart; leg 2 dispatch-1792996361995 one entry after --resume; leg 3 four held cards card=0 at SIGKILL, card=1 each after resume; each still one three heartbeats later",
-      "headSha": "2aef017d87b732a154c54ff0645d9fabd19925a9",
-      "negativeControl": "released plugin 10.17.7: no entry for an event published while its connection was down; its two held cards lost through a SIGKILL"
-    },
-    {
-      "criterion": "Automated: the tester's red tests and the surrounding cases",
-      "surface": "pi-envoy extension under the mocked host (its context now models isIdle/hasPendingMessages from the held cards and turn state)",
-      "command": "cd packages/pi-envoy && bun test extensions/envoy.test.ts -t \"a card the host withdrew\" (2 pass; block and helpers identical to ae9db3a6); cd packages/pi-envoy && bun test (948 pass)",
-      "observed": "the interrupted cards are handed again once; the switch-withdrawn card is not recorded shown and the restarted session shows it once; new test: a plain abort's queued cards are not handed again",
-      "headSha": "2aef017d87b732a154c54ff0645d9fabd19925a9",
-      "negativeControl": "at 4202727e (before the fix) the two red tests fail (2 fail)"
+      "criterion": "Findings 1-3, 5, 6, the minor line and the withdrawn typed turn, as behaviour",
+      "surface": "the repository's own checks and suites",
+      "command": "bash .github/scripts/check-heartbeat-margin.sh; bash .github/scripts/check-heartbeat-margin.test.sh (99 passed); cd packages/envoy-client && bun test (893 pass); cd packages/pi-envoy && bun test (965 pass); cd packages/claude-envoy && bun test (210 pass) && bun run check-dist; bunx biome check . (no errors); cd packages/envoy && go test ./cmd/listener -run Replay",
+      "observed": "all pass at the merged tree; new tests: 'a BTW refused live > whose side turn failed is not shown by a sweep, and its Retry still runs the side turn', 'a removal replayed after a resume re-registered the topic takes it out of the registry…', 'a live frame received before its subject's cursor started gets one notice when it fails', 'a notice's text keeps a sender's multi-line summary inside its own field', 'a person's Send run as a turn through typed input > one a person's interrupt withdrew unwritten is shown as a card that runs nothing, once', unwritten-frames.test.ts (13), replay-host-policy.test.ts (7)",
+      "headSha": "466c24da87a097f7d26958ce121fed242851cd8e",
+      "negativeControl": "at 2aef017d CI's required lint and test failed on check-heartbeat-margin.sh (run 40281287850), which now passes locally"
     }
   ],
   "filesChanged": [
-    "packages/pi-envoy/extensions/envoy.ts: `handBackWithdrawnCards` at each heartbeat re-hands a current-session card still unwritten while ctx.isIdle() is true and ctx.hasPendingMessages() is false, if handed before the last host moment (a tick, or an aborted agent_end); a switch releases (not settles) the left session's unwritten claims; `showReplayCard` never answers `shown` for a card that waits on a write (claim-less waiting card)",
-    "packages/pi-shared/src/pi-types.ts: optional SessionContext.isIdle and hasPendingMessages (both present on omp 18.8.9)",
-    "packages/pi-envoy/extensions/envoy.test.ts: mock context models isIdle/hasPendingMessages; `abort` helper; two new tests; red block untouched",
-    "packages/pi-envoy/scripts/smoke-replay.sh and README.md: legs 4-6 and the interrupt control",
-    "packages/pi-envoy/AGENTS.md, CHANGELOG.md"
-  ],
-  "trickyParts": [
-    "Measured on omp 18.8.9: after abort_and_restore_queue, agent_end (aborted) arrives idle with no pending message and nothing follows; after a plain abort, agent_end arrives idle with pending messages and a new run starts 3 ms later and writes them; pi.sendMessage returns while the host still reads idle and empty, so a card handed since the last host moment is never re-handed."
+    "packages/envoy/cmd/listener/replay.go, replay_test.go: session_id must be one literal NATS token (400)",
+    "packages/envoy-client/src/transport.ts: the `attempts` declaration the margin check reads; `tries` per request",
+    "packages/envoy-client/src/replay.ts: cursorStarts and liveFailed(…, receivedAt); envoyNoticeText (TOON); replayFollowedSubjects, rememberedTopics, closeReplayedRemoval, routeReplayNotice; tests incl. replay-host-policy.test.ts",
+    "packages/envoy-client/src/delivery.ts: comment cites pending()",
+    "packages/pi-envoy/src/unwritten-frames.ts (+ test): UnwrittenFrames owns unwritten cards and turns, their claims, the hand-back and the switch release",
+    "packages/pi-envoy/extensions/envoy.ts: refuseBTW; replayed removal unregisters; receive time to liveFailed; shared host policy; withdrawn turns released",
+    "packages/claude-envoy/src: shared notice renderer and host policy, receive time; missed-messages.ts deleted; dist rebuilt",
+    "docs: pi-envoy and claude-envoy AGENTS.md, envoy AGENTS.md (session_id rule), envoy-client README, CHANGELOGs"
   ],
   "deviations": [
-    "Withdrawn cards are handed again at the next heartbeat (90 s default), not at agent_end.",
-    "A live frame on a topic the stream does not keep (team or ad-hoc), held when the host switches away from its session, is not shown after the switch back: the switch releases its claim for a sweep that cannot see it. Keeping it pending instead would block another session's sweep of a shared retained topic in the same process. Team topics are documented live only.",
-    "A person's turn omp withdraws on an interrupt is handed back to the editor or RPC caller by omp itself and is not re-sent."
+    "One existing pi-envoy test changed: 'runs a BTW side turn again for a Retry of one whose side turn failed' sent its Retry with the first copy's event id; the listener mints a new event id per send (internal/dispatch/envoy/client.go, api/message_delivery.go), so the Retry now carries its own event id under the same dedupe key.",
+    "On a host without sendUserInput (older omp), a sendUserMessage turn is still recorded at the run's end, so one an interrupt withdrew is not shown again; real omp 18.8.9 has sendUserInput, whose withdrawn turn is released and shown as a card.",
+    "Two pre-existing timing tests fail intermittently under load on this pod (envoy-client envoy-config.test.ts 'still running after 10 s', claude-envoy session-title.test.ts 'queryTmux is bounded'); both pass alone; neither file is touched."
   ]
 }
