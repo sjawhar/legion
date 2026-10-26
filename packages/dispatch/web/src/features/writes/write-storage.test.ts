@@ -109,8 +109,10 @@ test("a kept refusal is rebuilt as the error it was", () => {
   expect(refusalFrom(keptRefusal(new SendStoppedError()))).toBeInstanceOf(SendStoppedError);
   const interrupted = refusalFrom(keptRefusal(new SendInterruptedError()));
   expect(interrupted).toBeInstanceOf(SendInterruptedError);
+  // A Retry under the same key is made once only while Dispatch still knows the key: one later
+  // than its 24 hours is a new write, and the text says so.
   expect(interrupted.message).toBe(
-    "Not sent: this page was closed before Dispatch confirmed it. Retry sends it under the same key, so it is delivered at most once."
+    "Not sent: this page was closed before Dispatch confirmed it. Retry asks again under the same key, so it is delivered at most once if you retry within 24 hours of the first try. After that Dispatch no longer knows the key: a Retry is a new write and may be delivered twice."
   );
   expect(refusalFrom(keptRefusal(new Error("no route")))).toMatchObject({ message: "no route" });
 });

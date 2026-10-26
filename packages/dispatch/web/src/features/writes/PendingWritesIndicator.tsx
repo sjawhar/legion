@@ -9,17 +9,17 @@ import {
   secondaryButtonCompact,
   textSecondaryOnSurface,
 } from "../../theme/classes";
-import { SendInterruptedError, SendStoppedError } from "./keyed-write";
+import { SendInterruptedError, SendStoppedError, sameKeyRetryNote } from "./keyed-write";
 import { StopTrying } from "./StopTrying";
 import { useWriteSelection, useWrites, type Write } from "./write-store";
 
 /** Why the refused write was not saved, in the reader's words. */
 function refusalReason(refusal: Error): string {
   if (refusal instanceof SendInterruptedError) {
-    return "this page was closed before Dispatch confirmed it. Retry asks again under the same key, so it is saved at most once.";
+    return `this page was closed before Dispatch confirmed it. ${sameKeyRetryNote("saved")}`;
   }
   if (refusal instanceof SendStoppedError) {
-    return "Dispatch has not confirmed it. Retry asks again under the same key, so it is saved at most once.";
+    return `Dispatch has not confirmed it. ${sameKeyRetryNote("saved")}`;
   }
   return apiErrorMessage(refusal, "Dispatch could not be reached");
 }

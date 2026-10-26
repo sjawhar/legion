@@ -1,4 +1,4 @@
-import { retriesUnderKey } from "@legion/contracts";
+import { IDEMPOTENCY_KEY_TTL_MS, retriesUnderKey } from "@legion/contracts";
 
 import {
   AnswerNotKeptError,
@@ -33,12 +33,24 @@ export const KEYED_SEND_ATTEMPT_MS = 15_000;
 export const FIRST_BACKOFF_MS = 1_000;
 export const MAX_BACKOFF_MS = 30_000;
 
+/**
+ * What a Retry under a write's own key promises, and where that promise ends: Dispatch keeps a key
+ * `IDEMPOTENCY_KEY_TTL_MS` from its first request, so a Retry later than that is a new write to
+ * Dispatch, which may make it a second time. `made` is what the write does once it lands
+ * (`delivered`, `saved`).
+ */
+export function sameKeyRetryNote(made: string): string {
+  const hours = IDEMPOTENCY_KEY_TTL_MS / 3_600_000;
+  return `Retry asks again under the same key, so it is ${made} at most once if you retry within ${hours} hours of the first try. After that Dispatch no longer knows the key: a Retry is a new write and may be ${made} twice.`;
+}
+
 /** A write that stopped trying before Dispatch confirmed it: the reader pressed Stop trying. Not
  *  Dispatch's refusal: the write may have reached it, and a Retry under the same key is answered
- *  with what that first one did rather than done a second time. */
+ *  with what that first one did rather than done a second time - within the key's lifetime
+ *  (`sameKeyRetryNote`). */
 export class SendStoppedError extends Error {
   constructor(
-    message = "Dispatch has not confirmed this message. Retry sends it again under the same key, so it is delivered at most once."
+    message = `Dispatch has not confirmed this message. ${sameKeyRetryNote("delivered")}`
   ) {
     super(message);
     this.name = "SendStoppedError";
@@ -52,7 +64,7 @@ export class SendStoppedError extends Error {
 export class SendInterruptedError extends SendStoppedError {
   constructor() {
     super(
-      "Not sent: this page was closed before Dispatch confirmed it. Retry sends it under the same key, so it is delivered at most once."
+      `Not sent: this page was closed before Dispatch confirmed it. ${sameKeyRetryNote("delivered")}`
     );
     this.name = "SendInterruptedError";
   }
