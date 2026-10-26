@@ -165,6 +165,16 @@ install path (`mise which gh` or `asdf which gh` prints it). The check reads scr
 shim is compiled and passes, and where mise has no gh for the directory it runs the next `gh` on
 `PATH`, which in a pane is the pane's own `legion gh`, so a shims directory is no real gh either.
 
+With `answers` set in `legion.yaml`, the daemon's answer loop, which answers a question to a stopped
+agent in its name, runs this same real gh on the daemon's own host as its `gh` tool: boot resolves
+it as above under either runtime (`answersGH`) and refuses to start without one, naming `gh` and
+`LEGION_GH_PATH`. The tool is not a pane: it runs only an allow list of commands, adds the agent's
+Legion footer to every comment and review itself, and runs gh with a scrubbed environment and a
+per-answer copy of the agent's gh bundle under `<state_dir>/answers/`
+(docs/kubernetes.md, "The answer loop"). The same section covers `runtime.tmux.session_store:
+postgres`, which keeps every pane's Oh My Pi sessions in a Postgres database instead of files on
+this host.
+
 The daemon runs tmux itself: the first `tmux` on its `PATH`, with the pane environment, whose XDG
 directories are under the state directory. A mise shim, or a wrapper script that hands the call to
 one, then does not read the operator's mise config as its global config. Started from a directory

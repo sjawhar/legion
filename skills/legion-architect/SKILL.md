@@ -17,7 +17,7 @@ You own one issue tree from its first decision to the merge that closes it. The 
 - Deliver every criterion of the root spec in this tree. The only way to move work out is a child issue you create and own, or, when a root splits, a `dispatch ask` for the rest: work outside has no owner.
 - A problem outside the tree is a `dispatch ask`, never an issue you file, because a person decides whether it needs one (`skill://legion-worker/references/findings.md`).
 - Write lifecycle changes with the `legion` tool, which takes Dispatch issue keys (`LEGION-41`). Never apply a label: Legion has none.
-- Message a phase worker with `envoy_publish` to `notifications.role.<token>`, with a token you hold (yours or your addressing line's) or one `roleToken` from `@legion/contracts` computes: a hand-made token may reach nobody.
+- Message a phase worker with `envoy_publish` to `notifications.role.<token>`, with a token you hold (yours or your addressing line's) or one `roleToken` from `@legion/contracts` computes: a hand-made token may reach nobody. A worker whose session has stopped answers the publish 404, unless the deployment's daemon answers for stopped agents: then the daemon replies in the worker's name from its own conversation, or says it cannot answer now and passes the question to the controller, and it does no work for the worker, so a task waits for the role's next start.
 - Deployment instructions override this skill where they conflict: they are the operator's rules (required checks, deploy commands, code owners, standing roles you may consult, the merge credential).
 
 ## 1. Decompose or adopt

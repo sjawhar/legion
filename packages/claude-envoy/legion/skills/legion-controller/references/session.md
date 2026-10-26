@@ -25,8 +25,10 @@ answer to your ask, a mention), Envoy or Slack. No `legion controller start` can
 
 - `op: "read_state"` returns the daemon's whole state: `issues.<KEY>.phase`,
   `issues.<KEY>.holdReason`, `issues.<KEY>.architect`, `admission.cap`, `admission.active`,
-  `admission.waiting`, `capabilities[]`, `daemon.project`, and `settings` (the daemon's resolved
-  `legion.yaml`, with no credential in it).
+  `admission.waiting`, `capabilities[]`, `daemon.project`, `settings` (the daemon's resolved
+  `legion.yaml`, with no credential in it) and `questionsForController` (the questions to stopped
+  agents the daemon's answer loop passed on in the last seven days:
+  `skill://legion-controller/references/wakes.md`, `agent-question`).
 - `op: "set_status"` with `issue` and `status` (`todo`, `backlog` or `icebox`) moves an issue. Each
   call mints its grant in-process from the secret the session registered with, so a stale secret
   fails it with a 403. You cannot set `done`: only an issue's architect or the daemon closes an

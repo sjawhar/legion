@@ -76,6 +76,49 @@ architect's last message on the root issue. When you find none, or it is gone, r
 fresh budgets). When it stays, park the tree (`set_status` the root to `backlog`) and say why on
 the issue, because a relaunch would fail the same way.
 
+## `agent-question on <KEY>` (`{kind: "agent-question", role, reason, question}`)
+
+Where the deployment configures the daemon's answer loop (`settings.answers` in `read_state`), the
+daemon answers a question to an agent that is not running, in the agent's name, from the agent's
+own conversation. This wake is a question that answer did not settle, sent once per question:
+`question` is `{id, issue, session, asker, ref, text}`, the agent is the `role` of `question.issue`
+in `question.session`, and the asker already has a reply in the agent's name saying the question
+was passed to you. `reason` says why:
+
+- `not_answered` (the agent could not answer from its conversation and what `gh` reads) or
+  `needs_work` (the question asks for work it cannot do while stopped): the agent's own reply;
+- `answer_seconds`, `model_calls`, `length`, `refusal`, `malformed` or `provider_error`: the
+  answer failed;
+- `over_limit` (the project's daily spend), `no_provider`, `no_price`, `unknown_format`,
+  `no_conversation` or `post_refused`: the deployment could not answer it or post the reply.
+
+`question.asker` is `user:<login>`, or `session:<id>` with the asking session's title when known.
+`question.ref` is where it was asked: `dispatch://<KEY>/message/<id>`, `dispatch://<KEY>/comment/<id>`,
+`dispatch message <id>` (the agent's own conversation page), or `envoy:<event id>` (an agent's
+Envoy message). `question.text` is the question, cut at 2,000 characters with a note naming where
+the whole is.
+
+Read `read_state` and the issue (`dispatch read`), then take the first of these that fits:
+
+- **The issue's tree runs** (its root's `architect.locator.claim` is in `read_state`):
+  `envoy_publish` the question, its asker and its `ref` to `notifications.role.` followed by that
+  claim, because the tree's architect owns the work.
+- **`read_state` or Dispatch holds the answer:** answer the asker where it asked: `dispatch comment
+  --issue <KEY> --reply-to <comment id>` for a comment, `dispatch message --issue <KEY> --in-reply-to
+  <ref>` for an issue's message, `dispatch message --issue <KEY>` naming the asker for a message on
+  the agent's own page, and `envoy_send` to the asking session for an `envoy:` ref.
+- **It asks for work on an issue Legion does not run now:** tell the asker the same way that the
+  work needs the issue running again, which a person decides (`todo` with the `legion` label), and
+  re-admit nothing for it.
+
+A reason the deployment causes (`over_limit`, `no_provider`, `no_price`, `unknown_format`,
+`no_conversation`, `post_refused`) also goes in the next daily report, because the operator's
+`answers` configuration fixes it. Act on a question once: one you already answered, by your reply
+on its `ref` thread or your message to the asker, needs nothing, whether it reaches you as this
+wake or in `questionsForController`. An entry of `questionsForController` carries no `text`: read
+the question at its `dispatch://` ref, and for an `envoy:` ref ask the asking session to send it
+again.
+
 ## GitHub mentions
 
 Read the mention and its artifact. Answer a mention that asks you for triage or for information

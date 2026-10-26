@@ -67,6 +67,11 @@ every issue by its key and title, every pull request by its URL.
   name, its `detail`, and a deployment row's `configLine`. Say who acts on it, as
   `skill://legion-controller/references/wakes.md` says for `tick`. With none open, say nothing of
   them.
+- **Questions the deployment could not answer.** Each entry of `read_state`'s
+  `questionsForController` since the previous report whose `reason` is `over_limit`,
+  `no_provider`, `no_price`, `unknown_format`, `no_conversation` or `post_refused`: its issue, role
+  and reason, for the operator, whose `answers` configuration fixes it. With none, say nothing of
+  them.
 
 A day with nothing finished says so in one sentence. When the lists do not fit, give each list's
 count and name its issues of `--priority 0` and `--priority 1`, in board rank order.

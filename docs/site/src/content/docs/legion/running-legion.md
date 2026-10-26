@@ -319,6 +319,25 @@ What each part is for:
   `LEGION_BUN_PATH` (else `PATH`), and a built `packages/claude-envoy` from
   `LEGION_CLAUDE_PLUGIN_DIR`, and refuses to boot without any of them. The repository's
   `docs/deployment.md` ("Phase workers on Claude Code") covers the rest.
+- **`answers`** (optional) turns on the daemon's answer loop: a question to an agent that is not
+  running (a Dispatch message to it, a mention of it, a reply on its ask, another agent's Envoy
+  message) is answered by the daemon in the agent's name, from the agent's own conversation, on the
+  model that conversation last ran on, and the exchange is added to the conversation; what it
+  cannot answer, it says so in the agent's name and passes to the controller. `providers` names
+  each provider it may call (`anthropic`, `openai`) with its `base_url` and exactly one of
+  `api_key_file` and `api_key_command`, read again for every model call; `prices` gives each model
+  its USD per million tokens (`input`, `output`, `cache_write`, `cache_read`, all required), and a
+  model with none is never answered on; `conversation_store` is the daemon's own way into the
+  session database (`dsn_file` under `session_store: postgres`, `user`, its IAM login, under
+  `cloudsql-iam`); and `bounds` defaults to 180 seconds, 8 model calls of at most 4,000 output
+  tokens, 20 `gh` calls of at most 30 seconds and 60,000 characters each, 4 conversations at once
+  and $50 a UTC day per project. Its one tool is `gh`, run on the daemon's host with an allow list
+  and the agent's own GitHub access, so the daemon needs the real gh (`LEGION_GH_PATH`, else `PATH`,
+  never a script; in the worker image, `LEGION_GH_PATH=/usr/local/bin/gh`) and refuses to boot
+  without one. Unset, the daemon answers nothing. The
+  Envoy listener's and Dispatch's halves, which hand the daemon a message for a stopped agent, land
+  with their own changes. The repository's `docs/kubernetes.md` ("The answer loop") covers the
+  rest.
 
 The loader refuses any key it does not know, naming it, and refuses `omp_invocation` and
 `omp_launch_prefix` under Kubernetes, since every pod runs the image's Oh My Pi.
@@ -345,7 +364,8 @@ The loader refuses any key it does not know, naming it, and refuses `omp_invocat
 
 ## The model route
 
-Legion names no model and no provider: how an agent reaches a model is yours. The repository's
+Legion names no model and no provider for its agents: how an agent reaches a model is yours. (The
+daemon's own answer loop calls the providers `answers` names, [above](#legionyaml).) The repository's
 `deploy/kubernetes/operator-route/` is a working example, rendered in the
 [configuration reference](/legion/legion/reference/config/):
 

@@ -24,7 +24,7 @@ You work one phase of one issue in a jj workspace every role of the issue shares
 - **Never start another Legion role**: the daemon starts every phase worker.
 - **Never end your turn blocked on a decision someone else owns.** Send a product, scope, design, lifecycle or cross-phase decision to the owning architect as your role prompt says, with the issue, phase, verified observation, what you tried and the decision needed; a human-only to-do is a `dispatch ask`. Otherwise proceed: a phase that stops silently holds its issue until someone notices.
 - **No surface reaches the changed path** is a report to the architect, never a reason to complete (`skill://legion-worker/references/pr-body.md#when-no-surface-reaches-the-changed-path`).
-- **Asking another role**: if its topic answers 404, read its committed handoff instead.
+- **Asking another role**: when its session has stopped, a publish to its topic answers 404, unless the deployment's daemon answers for stopped agents (its answer loop): then the publish succeeds, and the reply is a direct message in that role's name, the daemon's answer from the role's own conversation or its word that the role cannot answer now and the question went to the controller. On a 404, or a reply that it cannot answer, read its committed handoff instead.
 
 ## References
 

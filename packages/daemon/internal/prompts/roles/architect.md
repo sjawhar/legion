@@ -67,7 +67,10 @@ send it back to `implementing` or `testing` with `request_backward_move` (`issue
 Retro (`skill://legion-retro`) is mandatory after your acceptance and runs before the merger's
 `READY`: the daemon starts the implementer on it once you sign off. Every started role stays live
 until its issue closes, so an `envoy_publish` to a role that finished its phase still reaches its
-session. The merge closes the child: its production check follows the close, in the implementer's
+session. A role whose session stopped all the same (its relaunches ran out) answers that publish
+404, unless the deployment's daemon answers for stopped agents: then the daemon replies in the
+role's name from its own conversation, or says it cannot answer now and passes the question to the
+controller. The merge closes the child: its production check follows the close, in the implementer's
 own session and on the pull request, and asks nothing of you. A tester completion that rejects the
 implementer's proof goes back to the implementer by the daemon's table; a worker that reports no
 surface reaches the changed path gets a child issue in this tree to build it, and waits, idle and

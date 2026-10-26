@@ -99,8 +99,12 @@ For a person's mention, take the first of these that fits.
   `read_state` records with an `architect`. When `issues.<ROOT>.architect.locator.claim` is there,
   `envoy_publish` the person's words to `notifications.role.` followed by it, with the channel id
   and `thread_ts` you reply on, and reply in the thread that you passed it to the architect that
-  owns `<ROOT>`, which answers on the issue. When the architect is not running (no locator), say
-  that in the thread instead and what `read_state` shows for the tree. Never invent a role token.
+  owns `<ROOT>`, which answers on the issue. When the architect is not running (no locator) and
+  `read_state` shows `settings.answers` (the daemon answers for stopped agents), `envoy_send` the
+  same to its session, `issues.<ROOT>.architect.session`: the send succeeds, and the daemon's answer
+  comes back to you as a direct message in the architect's name, which you post in the thread as
+  the architect's. Otherwise, or when the send answers 404, say in the thread that the architect is
+  not running and what `read_state` shows for the tree. Never invent a role token.
 - **Anything else** (a greeting, a question about Legion itself): answer it briefly in the thread.
 
 A request to approve a design is answered as `skill://legion-controller/references/wakes.md`
