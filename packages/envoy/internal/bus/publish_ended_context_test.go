@@ -27,9 +27,9 @@ import (
 // Each case subscribes before it publishes and flushes the publisher's connection after, so a
 // message that was sent has reached the server, and been handed on, before the subscriber is read.
 // A context ends two ways, and both are refused: a deadline already past, the case above, and a
-// cancel with the deadline still ahead, which only the check at publishCoreTo's entry catches,
-// since publishConfirmed's own check reads the deadline alone. The control is the same call with a
-// live context, which must publish and be received.
+// cancel with the deadline still ahead, which only publishCoreTo's own reads of the context catch
+// (the one at its entry first), since publishConfirmed's own check reads the deadline alone. The
+// control is the same call with a live context, which must publish and be received.
 func TestAPublishWithAnEndedContextSendsNothing(t *testing.T) {
 	for _, tc := range []struct {
 		name  string

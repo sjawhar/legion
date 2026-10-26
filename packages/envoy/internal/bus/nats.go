@@ -25,6 +25,7 @@ type connectOpts struct {
 	publishAcknowledgementClock AcknowledgementClock
 	reconnectErrClock           func() time.Time
 	environment                 func(string) (string, bool)
+	reconnectWaitTick           func()
 }
 
 // parseConnectOptions applies options over the defaults every connect starts from.
@@ -132,7 +133,12 @@ type Client struct {
 	dialer                      *socks5Dialer
 	publishAcknowledgementClock AcknowledgementClock
 	reconnectErrClock           func() time.Time
-	mu                          sync.Mutex
+	// reconnectWaitTick, when not nil, runs after each tick of ensureConnWithContext's wait for a
+	// reconnect, before the connection is read again. It is nil outside tests: a test sets it
+	// (WithReconnectWaitTick, export_test.go) to know a publish is inside that wait, or to act at
+	// the moment the wait ends.
+	reconnectWaitTick func()
+	mu                sync.Mutex
 
 	// subscriptionsMu guards subscriptions and stopMode. It is held to read and write them, never
 	// across a bind's request to the server, so a reconnect's restore, the health reads and Drain
@@ -238,6 +244,7 @@ func newClient(urls []string, ownsStream bool, opts connectOpts) (*Client, error
 		dialer:                      dialer,
 		publishAcknowledgementClock: opts.publishAcknowledgementClock,
 		reconnectErrClock:           opts.reconnectErrClock,
+		reconnectWaitTick:           opts.reconnectWaitTick,
 		stopCh:                      make(chan struct{}),
 	}
 	nc, err := connect(c.name, urls, credential, dialer, c.onReconnect, c.onClosed, c.reconnectErrClock)
@@ -645,6 +652,9 @@ func (c *Client) ensureConnWithContext(ctx context.Context) error {
 				return errStopped
 			case <-time.After(10 * time.Millisecond):
 			}
+			if c.reconnectWaitTick != nil {
+				c.reconnectWaitTick()
+			}
 			continue
 		}
 
@@ -845,9 +855,11 @@ func (c *Client) PublishReportingDuplicateWithin(ctx context.Context, item contr
 // the dependency's rather than this repository's: js.Publish under nats.Context is a request, and
 // nats.go's requestWithContext returns ctx.Err() before it sends anything (nats.go v1.50.0,
 // context.go), on the first attempt, on each of its no-responders retries and on the reconnect
-// retry below alike. So the core path's own check (publishConfirmed) has no counterpart here, and
-// it is not redundant with this one: a change that stopped passing nats.Context(ctx), or a nats.go
-// that stopped checking first, would reopen the case on this path silently.
+// retry below alike. That read comes after ensureConnWithContext has returned, so it also refuses
+// a ctx cancelled as a reconnect wait ends. So the core path's own checks (publishCoreTo's reads
+// of ctx, publishConfirmed's of the deadline) have no counterpart here, and they are not
+// redundant with this one: a change that stopped passing nats.Context(ctx), or a nats.go that
+// stopped checking first, would reopen the case on this path silently.
 // TestAPublishWithAnEndedContextSendsNothing pins it, so either change fails that test instead of
 // reaching the wire. What a context that ends during the acknowledgement wait leaves is a message
 // the stream may hold while the caller is answered failure; that is the acknowledgement's own
@@ -908,15 +920,21 @@ func (c *Client) PublishCoreTo(subject string, item contracts.Envelope) error {
 // keeps the parent's deadline when that is the earlier one; publishBound is what bounds a caller
 // that passed none.
 //
-// A ctx that has ended puts nothing on the wire, and it takes two checks rather than one because
-// they see different things. publishConfirmed refuses a deadline already spent, immediately
-// before it publishes, and that is where the class is closed for every caller of it at once:
-// ensureConnWithContext returns on a healthy connection without consulting ctx, so no earlier
-// step can be trusted to have caught it. But publishConfirmed is given a deadline and not a
-// context, so a ctx cancelled while its deadline is still in the future is invisible there; only
-// a holder of the context can see that, which is this function. What makes a spent deadline
-// reachable at all is publishHandler (cmd/listener/api.go), whose holder lookup does not take the
-// route's own context and can spend it on a slow bus before the publish begins.
+// A ctx that has ended puts nothing on the wire, and it takes three checks rather than one because
+// they see different things. ensureConnWithContext cannot be trusted to have caught it: it returns
+// on a healthy connection without consulting ctx, and its wait for a reconnect consults ctx only
+// between its ticks, so a cancel that lands as the reconnect completes comes back nil. So ctx is
+// read here twice: at entry, so an ended ctx neither waits for a reconnect nor dials one, and
+// again once the connection is usable, immediately before publishConfirmed, which is what catches
+// a cancel during that wait. publishConfirmed refuses a deadline already spent, immediately before
+// it publishes, which closes the class for every caller of it at once; but it is given a deadline
+// and not a context, so a ctx cancelled while its deadline is still in the future is invisible
+// there, and only a holder of the context can see that, which is this function. What remains is a
+// cancel that lands after the second read here: the publish goes ahead and is answered as if ctx
+// were still live, since a core publish is on its way the moment it is made and no answer can
+// recall it. What makes a spent deadline reachable at all is publishHandler
+// (cmd/listener/api.go), whose holder lookup does not take the route's own context and can spend
+// it on a slow bus before the publish begins.
 func (c *Client) publishCoreTo(ctx context.Context, subject string, item contracts.Envelope) error {
 	if err := checkSubject(subject); err != nil {
 		return err
@@ -932,6 +950,9 @@ func (c *Client) publishCoreTo(ctx context.Context, subject string, item contrac
 	}
 	if err := c.ensureConnWithContext(ctx); err != nil {
 		return err
+	}
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("%w: %w", errWindowElapsed(subject), err)
 	}
 	deadline, _ := ctx.Deadline()
 	conn := c.Conn
