@@ -2,10 +2,34 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-158",
-  "completed": "2026-10-26T11:02:30Z",
+  "completed": "2026-10-26T13:56:43Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2233",
-  "head": "39c12172d83472555b3c339617b1d6cbc2bdce59",
+  "head": "bc5dcfe9a7a7d467e6a4b9f3ffb707bcc225cb74",
   "proof": [
+    {
+      "criterion": "Round 2 (tester failure 1): a closed issue's read-only document names no unsent edit to a person who typed nothing",
+      "surface": "Dispatch's browser suite (Playwright, chromium and iphone) on the real Go server, the production SPA bundle and real Postgres in the issue pod",
+      "command": "cd packages/dispatch && bun run e2e -- close-withdraws-asks.e2e.ts -g \"names no unsent edit\" --repeat-each 3 (the tester's red test from 501ea1a3, unmodified); then the whole file and offline-edits.e2e.ts; quoted at https://github.com/sjawhar/legion/pull/2233#issuecomment-6417193697",
+      "observed": "Before the fix (954d1778): 6 failed, each 'Expected: \"connected\" Received: \"connected · 1 edit saved in this browser can't be sent: this document is read-only.\"'. After the fix (a05ec43d): 6 passed. close-withdraws-asks.e2e.ts 8 passed at da0dc24e; offline-edits.e2e.ts (real unsent edits named, read-only admission keeps a person's edits until a writable reload) 10 passed.",
+      "headSha": "da0dc24e483cc6369d3ce8327316a0db52fb1a2a",
+      "negativeControl": "The same unmodified test at 954d1778, before the pending-sync fix, fails 6 of 6 with the unsent-edit notice"
+    },
+    {
+      "criterion": "Round 2 (tester failure 2): a document write whose transaction changes nothing appends no update and marks no settlement, for every writer",
+      "surface": "dispatch:local: the real Go server (run-server.sh) on Postgres 17, driven over its HTTP API",
+      "command": "POST /api/v1/artifacts/<id>/edits {ops:[{op:replace, find:'Context paragraph stays.', with:'Context paragraph stays.'}]} as a session, with SQL snapshots of doc_updates, artifact_versions and doc_settlements_pending before, right after and 15 s after; then the same request with a real change (log /legion/scratch/infra158-proof/r2-3-writer.log)",
+      "observed": "No-op: 200 {\"changed\":false,\"version\":null}; doc_updates 1, artifact_versions 1, no pending row, before and after. The real change appended v2 (positive control). A second no-op after it again added nothing.",
+      "headSha": "da0dc24e483cc6369d3ce8327316a0db52fb1a2a",
+      "negativeControl": "The same server built with mutation.go and ask_lifecycle.go as before 954d1778 answered the identical no-op by appending a 2-byte update and marking the document owing a settlement (r2-3b-negctl.log)"
+    },
+    {
+      "criterion": "The asks already open on closed issues are withdrawn naming each closer, and later repair passes write nothing (now relying on the general applyLive check, the writer-specific guard removed)",
+      "surface": "dispatch:local: 400 issues closed in SQL as a release before this change closes, the server booted on that database, and api.RepairIssueAsks run as the interval runs it",
+      "command": "r2-step4/seed.ts into r2_repair; boot run-server.sh; repairpass twice (SINCE unset, SINCE=now-10min) with snapshots of every marked_at, doc_updates, artifact_versions and events (logs r2-1-repair.log, r2-2-passes.log)",
+      "observed": "Boot: 'withdrawn=400 restored=0 swept=400' (27.5 s under a concurrent Go test suite; 30 s bound); 0 open asks on closed issues; 400 withdrawn each naming its issue's latest closer; every block state=\"resolved\". Both later passes 'withdrawn=0 restored=0 swept=0', snapshots identical (doc_updates 400, artifact_versions 800, events 2001).",
+      "headSha": "da0dc24e483cc6369d3ce8327316a0db52fb1a2a",
+      "negativeControl": "At 15181b69, before any no-op guard, the same later passes appended an update to every owed document and moved every mark (infra158-proof/4-repair.log)"
+    },
     {
       "criterion": "Close by a person, an agent session and the Legion daemon, over a decision block, a plain ask and an approval request: no ask reads waiting (Open asks, issue page data, the block, the approval), and each record says withdrawn by the close naming the closer",
       "surface": "dispatch:local in the issue pod: the real Go server (packages/dispatch/e2e/run-server.sh), real Postgres 17, the production SPA bundle, and the branch's dispatch CLI (packages/pi-envoy/dist/dispatch.js)",
@@ -48,6 +72,9 @@
     }
   ],
   "filesChanged": [
+    "round 2: packages/envoy/internal/dispatch/docs/mutation.go (applyLive drops a write whose fork did not move, via forkHeld), docs/ask_lifecycle.go (writer-specific guard removed), docs/mutation_test.go (new test)",
+    "round 2: packages/dispatch/web/src/features/doc/pending-sync.ts (a read-only admission records no local update and drops stored rows that change nothing, per client) and pending-sync.test.ts",
+    "round 2: packages/envoy/CHANGELOG.md; fourth forward merge of main (bc5dcfe9, claude-envoy CHANGELOG conflict only)",
     "packages/envoy/internal/dispatch/docs/ask_lifecycle.go: pre-close settlement retries (3 attempts / 3 s; a refused room reloaded by #2212's reloadRoomBehindHead); repeated block ids marked by position; answered copies written without the answer; a write that changes nothing opens no transaction",
     "packages/envoy/internal/dispatch/api/issue_ask_lifecycle.go, issue_ask_repair.go: one shared sweep (sweepIssueAskBlocksTx) over resolved and answered block asks; withdrawnAsk predicate; issueOpenStatus; one-UPDATE restore",
     "packages/envoy/internal/dispatch/api/ask_transitions.go: resolve's 400 names the kinds it takes",
@@ -59,16 +86,21 @@
     "three forward merges of main (cf81b3ba, 15181b69, 517e10a4), each after GitHub reported CONFLICTING"
   ],
   "trickyParts": [
+    "pending-sync drops old rows per browser client, never row by row: a writable load whose socket was down stores the heading-id stamp as its first row and the typing after it; dropping the stamp row alone parks the typing (offline-edits.e2e.ts caught it).",
+    "applyLive judges a change by the fork's state vector and delete set (a deletion advances no clock), not by the updates ygo emits.",
     "#2212 merged mid-run and removed evictInstance; the pre-close settlement now relies on its reloadRoomBehindHead, and its retry settles from the reloaded room (plan decision 18). TestClosingAnIssueWithdrawsADecisionBlockWhoseRoomAnotherProcessLeftBehind covers that path.",
     "ygo emits an update for every transaction, a no-op one included, and applyLive appends it: a WriteIssueAskStates that changed nothing appended an empty update and moved the document's settlement mark, which made every interval repair pass sweep every closed issue's documents. writeDocumentAskStates now checks each write against the tree first and opens no transaction when none changes.",
     "A resolve or answer committing between the close's settlement and its transaction leaves the decision's copies owed a settlement that never runs on a closed issue; both sweeps write those copies from their rows (an answered copy without the answer's bytes, since WriteIssueAskStates is not weighed for size)."
   ],
   "deviations": [
+    "Round 2 local runs at da0dc24e (git archive): api ok (2093 s), store ok, cmd/dispatch ok, -tags multiprocess cmd/dispatch ok (401 s); docs failed only TestAHealthyRoomUnderWritesIsNeverRefused ('too few to say anything' under load, as at 39c12172), which passes 3/3 alone. packages/dispatch typecheck clean; pending-sync, connection and pending-edits unit tests pass; biome clean. -race not run locally (no C compiler).",
+    "Round 2 unresolved residuals of the old-row cleanup, judged rare: a stamp row stored by an earlier read-only visit stays counted if the heading text changed on the server since; another client's rows that build on a dropped client's items could park.",
     "Plan R2's evictInstance path is replaced by #2212's reloadRoomBehindHead (the plan's own fallback in decision 18).",
     "Beyond the plan: the answered/resolved copy race (found by the R4 race test), the repair no-op write (found by the R8 proof), the lease pool size, and resolve's 400 message, each fixed here with a test.",
     "R7 local runs at 39c12172 (from a git archive of the head): api ok (1562 s), store ok, cmd/dispatch ok, -tags multiprocess cmd/dispatch ok (350 s); docs failed only TestAHealthyRoomUnderWritesIsNeverRefused ('too few to say anything' under load), which passes alone (ok 6.6 s) and is not in the diff; pmdoc failed only its timing tests and the differential tests that need the workspace's @legion/proof-editor link absent from the archive (pmdoc is not in the diff). bun test packages/contracts packages/envoy-client: one envoy-config timing test failed under load and passes alone. packages/dispatch: typecheck clean; bun test 2388 pass on the re-run (the first run under load had 2 failures not reproduced). biome check of contracts, dispatch, claude-envoy, envoy-client: no errors. claude-envoy check-dist passes. -race was not run locally (the pod has no C compiler); CI's envoy-go-race lane runs it."
   ],
   "openQuestions": [
-    "applyLive (docs/mutation.go) appends the update ygo emits for a transaction that changes nothing, for every writer, not only WriteIssueAskStates (fixed here at that caller). Another writer that opens a no-op transaction appends an empty update and marks its document owing a settlement. A general fix (a state-vector check in applyLive) touches the shared write path; named to the architect rather than widened here."
-  ]
+    "Milkdown's syncHeadingIdPlugin also stamps a heading's id from \"\" to its slug when a writable editor loads a heading the server wrote without one, and that update reaches the server through the document's room like any edit. Not changed here (packages/proof-editor); named to the architect."
+  ],
+  "round": 2
 }
