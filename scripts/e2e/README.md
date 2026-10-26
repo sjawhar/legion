@@ -2212,14 +2212,15 @@ and OMP's `logs/`).
 
 ### The natives download
 
-OMP's native modules (`pi_natives.linux-x64-{baseline,modern}.node`, ~350 MB) live in
+OMP's native module (`pi_natives.linux-x64-modern.node` or `…-baseline.node`, the one the CPU
+selects, 111 MiB at the pin; builds before 18.11.0 wrote every variant they embed, about twice that) lives in
 `$HOME/.omp/natives/<omp version>/` — `$XDG_DATA_HOME/omp/natives/` when `$XDG_DATA_HOME/omp`
-exists — and every profile under that `HOME` shares them (`getNativesDir`,
-`@oh-my-pi/pi-natives/native/loader-state.js`); a profile has no natives of its own. OMP writes them
+exists — and every profile under that `HOME` shares it (`getNativesDir`,
+`@oh-my-pi/pi-natives/native/loader-state.js`); a profile has no natives of its own. OMP writes it
 on its first run under a `HOME` that has not run this OMP version, and in this script that run is
 `omp plugin install`. The run's own home links `.omp/natives` to the operator's
 ([`lib/omp-home.sh`](#libomp-homesh)), so a fresh CI runner, a container, or a newly bumped OMP pin
-pays ~350 MB there, once, into the operator's cache; on a box where the pinned OMP has already run,
+pays that once, into the operator's cache; on a box where the pinned OMP has already run,
 a fresh profile pays nothing. Measured on the
 devbox with OMP 18.2.2: build, pack, install and verify took 2 s into a new profile, the profile got
 no `natives/` directory, and `~/.omp/natives/18.2.2/` was untouched.

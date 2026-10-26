@@ -15,6 +15,9 @@ import (
 	"io/fs"
 	"os"
 	"strconv"
+	"strings"
+
+	"github.com/sjawhar/envoy/internal/githubappjwt"
 )
 
 // AppConfig is the persisted Envoy App credentials. The client ID names the App in its JWT and
@@ -77,10 +80,15 @@ func ReadApp(path string) (*AppConfig, error) {
 //
 // Optional:
 //
-//	DISPATCH_APP_PEM_B64           (base64-encoded PEM — multiline PEM is
-//	                                 awkward to ship through most container
-//	                                 env interfaces, so we accept base64; without
-//	                                 it the App signs no App call)
+//	DISPATCH_APP_PEM_B64           (the App's PEM private key, or the base64 of
+//	                                 that PEM: a value holding "-----BEGIN" is
+//	                                 the PEM as is, so GKE Secret Sync's copy of
+//	                                 a Secret Manager PEM works unchanged, and
+//	                                 any other is base64-decoded. The key is
+//	                                 parsed here, and a key that does not parse
+//	                                 is refused naming the form it came in,
+//	                                 never quoting it. Without it the App signs
+//	                                 no App call)
 //	DISPATCH_APP_ID                (integer)
 //	DISPATCH_APP_SLUG
 //	DISPATCH_APP_NAME
@@ -94,12 +102,19 @@ func LoadAppFromEnv(getenv func(string) string) (*AppConfig, error) {
 	}
 
 	pem := ""
-	if b64 := getenv("DISPATCH_APP_PEM_B64"); b64 != "" {
-		decoded, err := base64.StdEncoding.DecodeString(b64)
-		if err != nil {
-			return nil, fmt.Errorf("DISPATCH_APP_PEM_B64: %w", err)
+	if value := getenv("DISPATCH_APP_PEM_B64"); value != "" {
+		form := "plain PEM"
+		pem = value
+		if !strings.Contains(value, "-----BEGIN") {
+			decoded, err := base64.StdEncoding.DecodeString(value)
+			if err != nil {
+				return nil, fmt.Errorf("DISPATCH_APP_PEM_B64: %w", err)
+			}
+			form, pem = "base64 of a PEM", string(decoded)
 		}
-		pem = string(decoded)
+		if _, err := githubappjwt.ParseKey(pem); err != nil {
+			return nil, fmt.Errorf("DISPATCH_APP_PEM_B64: %s: %w", form, err)
+		}
 	}
 	var appID int64
 	if raw := getenv("DISPATCH_APP_ID"); raw != "" {
