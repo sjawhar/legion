@@ -62,7 +62,9 @@ The implement App cannot create a check run, and a review never comes from the A
 change. `gh api /apps/<app slug> --jq .permissions` shows what an App holds. The daemon itself reads
 GitHub with the implement App too: every two minutes it reads each open pull request's base branch
 and the checks that branch requires (its rulesets and its branch protection), since only those
-decide whether CI is red at a head, and so where Legion sends the issue. Whether the merge happens
+decide whether CI is red at a head, and so where Legion sends the issue. The same read follows a
+pull request's head when its push webhook is lost or late, and the daemon looks up the open pull
+request of an issue whose implementer completed with none recorded. Whether the merge happens
 is GitHub's to decide, under those same rules.
 
 `scripts/github-apps/create.ts` registers all three from the manifests beside it:

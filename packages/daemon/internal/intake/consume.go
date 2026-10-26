@@ -253,7 +253,9 @@ func (c *Consumers) Run(ctx context.Context, pool *pgxpool.Pool, handlers ...Han
 }
 
 func consumeConsumer(ctx context.Context, consumer jetstream.Consumer, spec ConsumerSpec, repositories func() []ghrepo.Repository, pool *pgxpool.Pool, handlers []Handler) error {
+	lag := &lagWatch{consumer: consumer.CachedInfo().Name, logger: spec.Logger, now: time.Now}
 	consuming, err := consumer.Consume(func(message jetstream.Msg) {
+		lag.observe(message)
 		consumeMessage(ctx, message, spec, repositories(), pool, handlers)
 	})
 	if err != nil {
@@ -270,6 +272,53 @@ func consumeConsumer(ctx context.Context, consumer jetstream.Consumer, spec Cons
 		}
 		return fmt.Errorf("durable consumer %s stopped unexpectedly", consumer.CachedInfo().Name)
 	}
+}
+
+const (
+	// consumerLagWarn is how long after its publish a message may reach its durable consumer before
+	// lagWatch says the consumer is behind: well past the seconds a healthy consumer takes, and well
+	// short of the hours a backlog of no-op events once held phase moves and pull request records
+	// back with nothing in the daemon's log to say so.
+	consumerLagWarn = 5 * time.Minute
+	// consumerLagEvery bounds lagWatch to one line a minute per consumer, however many messages a
+	// backlog delivers.
+	consumerLagEvery = time.Minute
+)
+
+// lagWatch tells, at most once every consumerLagEvery, that its durable consumer is handling a
+// message JetStream stored more than consumerLagWarn before: how far behind the consumer is, and
+// how many messages still wait behind that one. Every event a consumer has not reached waits for
+// it - a pull request's opened or synchronize, a Dispatch status change - so the line is the
+// operator's sign that the daemon acts on old news. Nothing else watches the GitHub consumer's
+// position; the Dispatch consumer's is watched only while admission holds roots for it.
+type lagWatch struct {
+	consumer string
+	logger   *slog.Logger
+	now      func() time.Time
+	mu       sync.Mutex
+	last     time.Time
+}
+
+func (l *lagWatch) observe(message jetstream.Msg) {
+	metadata, err := message.Metadata()
+	if err != nil {
+		return
+	}
+	now := l.now()
+	behind := now.Sub(metadata.Timestamp)
+	if behind < consumerLagWarn {
+		return
+	}
+	l.mu.Lock()
+	if !l.last.IsZero() && now.Sub(l.last) < consumerLagEvery {
+		l.mu.Unlock()
+		return
+	}
+	l.last = now
+	l.mu.Unlock()
+	l.logger.Warn("intake: a durable consumer is behind its stream; every event it has not reached yet waits for it",
+		"consumer", l.consumer, "behindSeconds", int64(behind/time.Second), "pending", metadata.NumPending,
+		"subject", message.Subject(), "stream_seq", metadata.Sequence.Stream, "published_at", metadata.Timestamp.UTC().Format(time.RFC3339))
 }
 
 func consumeMessage(ctx context.Context, message jetstream.Msg, spec ConsumerSpec, repositories []ghrepo.Repository, pool *pgxpool.Pool, handlers []Handler) {

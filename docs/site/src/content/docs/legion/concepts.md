@@ -231,7 +231,11 @@ Legion uses GitHub's own review mechanisms rather than labels:
   code head's own would. The daemon reads each open pull request's required set with the implement
   App as it starts and every two minutes after, with the required workflows' runs on the head;
   until a read succeeds, no verdict stands for the head, and a read GitHub refuses is logged with
-  the repository and the HTTP status.
+  the repository and the HTTP status. The same read follows the pull request's head: when GitHub
+  shows a head the daemon has not recorded, the daemon takes it as the push webhook would, so a
+  lost or late webhook leaves the record behind for at most one read. It also looks up the open
+  pull request of each issue whose implementer completed while no pull request is recorded, and
+  records it as the opened webhook would, which moves the issue to testing.
 - **Review threads** close one by one, and only once the thread's opener (or, for a thread a bot
   opened, Legion's reviewer) accepts the reply.
 - Two limits flag a loop: after `review_round_cap` rounds (three by default), or once

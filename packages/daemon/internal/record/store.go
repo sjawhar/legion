@@ -126,6 +126,13 @@ func (s *Postgres) UnnamedIssues(ctx context.Context, tx pgx.Tx, project string)
 	return s.issuesWhere(ctx, tx, "project = $1 and repo <> '' and github_repo = ''", project, "with no GitHub spelling of their repository")
 }
 
+func (s *Postgres) HandedOffWithoutPullRequest(ctx context.Context, tx pgx.Tx, project string) ([]Issue, error) {
+	return s.issuesWhere(ctx, tx, "project = $1 and phase = '"+string(phase.Implementing)+"'"+
+		" and key in (select issue from phases where role = '"+string(claim.RoleImplementer)+"' and handoff_commit <> '')"+
+		" and key not in (select issue from pull_requests where state = '"+string(PullRequestOpen)+"')",
+		project, "in implementing with a recorded handoff and no open pull request")
+}
+
 // issuesWhere is every record of project the condition selects, by key; what names them in an
 // error.
 func (s *Postgres) issuesWhere(ctx context.Context, tx pgx.Tx, condition, project, what string) ([]Issue, error) {
