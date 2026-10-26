@@ -9,6 +9,13 @@
   listener call's budget (10 250 ms: two 5 000 ms attempts and the 250 ms retry delay between
   them) fit inside that lifetime — 3 × 90 000 + 10 250 = 280 250 ms — so two whole refreshes may
   fail and the third still completes before a live session's record is dropped.
+- The `envoy_publish` description says who receives a team topic (any `notifications.` topic the
+  stream does not store): every session subscribed to it when it is published, and it is not
+  retained. A session holding its own NATS connection receives it directly, the publisher's own
+  included; a session on a serve port, such as an OpenCode agent, receives it through its
+  machine's listener when that listener subscribes to every topic (`ENVOY_SUBSCRIBE_ALL_TOPICS=1`;
+  the shared hub's listener does not), where the description said such a session received nothing
+  (INFRA-122).
 
 ### Added
 

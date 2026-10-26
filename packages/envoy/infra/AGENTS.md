@@ -299,13 +299,18 @@ tag, so a plain `go test ./...`, as that `build` job runs it, starts none. Each 
 on a real server: its users connect, a client with no credential is refused, the grants hold),
 `seed/seed_live_test.go` (a generated seed connects, and a client without it is refused) and
 `core/permissions_live_test.go` (the listener, built from `packages/envoy/cmd/listener` under the
-root `go.work`, reaches `"status":"healthy"` as one user holding `HostPermissions`, a session as the
-same user receives a send, a role message and a publish to an ad-hoc topic, and the server refuses
-nothing the set allows; without the durable's consumer create, the listener never reaches
-`"status":"healthy"`; and, as a hub with a listener renders its users, the listener reaches
+root `go.work`, reaches `"status":"healthy"` as one user holding `HostPermissions` with
+`SubscribeAllTopics` on, a session as the same user receives a send, a role message and a publish
+to an ad-hoc topic, a session on a serving port at `127.0.0.1` receives that topic, published over
+NATS by another session, through the listener's subscription to every notification topic, and the
+server refuses nothing the set allows; without the durable's consumer create, the listener never
+reaches `"status":"healthy"`; as a hub with a listener renders its users, the listener reaches
 `"status":"healthy"` as a user holding `ListenerPermissions` while a session with no credential,
 the server's `no_auth_user` holding `SessionPermissions`, registers, receives a send, a role
-message and a publish to an ad-hoc topic, and is refused a publish to another session's subject; and a
+message and a publish to an ad-hoc topic, and is refused a publish to another session's subject;
+the listener holding `ListenerPermissions` with `SubscribeAllTopics` on exits 1 at its start with
+an ERROR naming `ENVOY_SUBSCRIBE_ALL_TOPICS`, the server's one refusal its subscription to
+`notifications.>` (`TestListenerPermissionsRefuseTheSubscriptionToEveryTopicOnRealServers`); and a
 user holding `SessionPermissions` alone publishes a reply and is refused a subscribe to `_INBOX.>`).
 `core/dispatch_permissions_live_test.go` also starts `testpg.Image`, builds and runs the real
 `envoy-dispatch` against `DispatchPermissions`, with the test client connected as a second user of

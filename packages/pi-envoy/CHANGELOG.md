@@ -105,6 +105,12 @@
 
 ### Changed
 
+- The `envoy` skill this plugin ships and the `envoy_publish` description say a team topic, any
+  `notifications.` topic the stream does not store, reaches a session on a serve port through its
+  machine's listener when that listener subscribes to every topic (`ENVOY_SUBSCRIBE_ALL_TOPICS=1`;
+  the shared hub's listener does not), where they said such a session received none. A session of
+  this plugin holds its own NATS connection and receives such a topic as before (INFRA-122).
+
 - The `envoy` skill is rewritten to the minimum text that carries its instructions (INFRA-353),
   from 21,146 bytes to about 7,500, with the delivery fields, role-claim lifetime, Legion lanes,
   Slack, Ghost Wispr and WhatsApp topics and the check-settlement contract moved whole to
