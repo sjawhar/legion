@@ -2,44 +2,56 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-487",
-  "completed": "2026-10-26T21:17:55Z",
-  "round": 4,
-  "scope": "Narrowed by the INFRA-115 architect at review_round_cap=3 (Envoy 6178bd5861f5ba6bceeb96feb72d70b7): check the give-back deletion and its 401, 401, 429 test, re-run the real-binary outage test once, read the first full CI run on the PR.",
-  "headTested": "7dcf3ff9a18cb79a369529fbc3cfe574bed0980b (code head fa1312aac8e9)",
+  "completed": "2026-10-26T22:23:30Z",
+  "round": 5,
+  "headTested": "24da304f68928a72de33e7e2652d5bdd752cd460 (code head 301addfdb1bd: review round 1 fixes; serving clock redesigned to one broker_serving row per process, a bounded beat, an advisory lock for the give-back, and the clock started beside srv.Serve; migration 0019 rewritten)",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Read fa1312aa: handlers_launcher.go now calls writeTokenLoginRefusal(w, err) with no give-back when VerifyServiceToken fails; giveBackAddress is called only after a verified token's TokenLogin answers 5xx (with giveBackAccount). Ran the new TestATokenThatDoesNotVerifySpendsItsAddressBucketWhileTheDatabaseIsAway with every token-login limit test: `cd packages/envoy && BROKER_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:54488/postgres?sslmode=disable go test -count=1 -v -run 'TestATokenThatDoesNotVerify|TestATokenLogin|TestARefusedTokenLogin|TestAForgedTokenFlood|TestAVerifiedAccountSpends' ./internal/broker/api` -> 9 PASS, ok. The new test is the architect's shape: store closed, tokens claiming the daemon's account signed by an unpublished key, PerAddress burst 2, expects 401, 401, 429. Re-ran the real-binary outage test once at the head (proof below)."
+    "how": "Re-ran the implementer's commands at the head on the tester's Postgres 16: `cd packages/envoy && BROKER_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:54488/postgres?sslmode=disable go test -count=1 -v -run 'TestABrokerOutageLongerThanALease|TestABrokerThatDiesBeforeServingRecordsNoServingBeat' ./cmd/broker` -> both PASS, 0 SKIP; `go test -count=1 -v ./internal/broker/enroll` -> ok, TestAHeldServingLockFailsTheBeatAndAnotherBrokerKeepsTheGuardOff and TestTwoBeatsAtOnceGiveTheTimeBackOnce PASS. Drove both review findings end to end on the real broker binary (proofs below), each with a negative control. Read the PR body's Contract change census and drove its one person-invoked entry, the config refusal, through the real binary at its boundary."
   },
   "failures": [],
   "failed": 0,
-  "ci": "First full CI run at 7dcf3ff9 (Tests 40402742456, Legion Envoy and Contracts 40402741229, Docs 40402741064, Worker Image 40402740955) was queued or pending at 21:17:47Z; read as queued, not waited for. Every earlier head's Tests and Legion Envoy and Contracts runs were cancelled by a later push before they ran. This handoff push carries skip-checks: true, so it starts no run and cancels none.",
-  "limits": [
-    "The new 401, 401, 429 test passes with or without the deleted give-back on today's code, since VerifyServiceToken maps every verify error to 4xx (machine/token.go:63-85); it locks the behaviour against a later change that answers a verify failure 5xx, as the architect asked."
-  ],
+  "ci": "At 24da304f, Tests 40410278188, Docs 40410278039, Legion Envoy and Contracts 40410278041, Worker Image 40410278086 and the PR Title runs were queued or pending at 22:23Z; read as queued, not waited for. 7dcf3ff9's Tests and Legion Envoy and Contracts were cancelled by the 24da304f push before they ran (its Docs and PR Title succeeded). This handoff push carries skip-checks: true, so it starts and cancels no run.",
   "proof": [
     {
       "criterion": "After an outage longer than the lease, a pod fetches again within one renewal interval of the broker serving, with no relaunch and no person; an ended enrollment stays ended",
-      "surface": "the real broker binary twice on one real Postgres 16 database and the real agent-secrets binary (keygen, renew --pod-token-file, NAME -- cmd) behind one forwarded address",
+      "surface": "the real broker binary twice on one real Postgres 16 database and the real agent-secrets binary behind one forwarded address",
       "command": "cd packages/envoy && BROKER_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:54488/postgres?sslmode=disable go test -count=1 -v -run TestABrokerOutageLongerThanALease ./cmd/broker",
-      "observed": "--- PASS (85.94s), 0 '--- SKIP'; survivor held 39.949s at the stop; first fetch served 89ms after the second broker listened; renewer (never exited) renewed to 44.915s past now 5.987s after; 'gave back the time no broker was serving ... gap=58.359271s ... enrollments=2'; revoked and lapsed pods refused 401, mismatch pod refused 403 with its lease unmoved",
-      "headSha": "7dcf3ff9a18cb79a369529fbc3cfe574bed0980b",
-      "negativeControl": "round 1: the same test on a git-archive export of eee16056 failed 'agent-secrets: proof invalid: not live (PROOF_INVALID)'"
+      "observed": "--- PASS (83.84s), 0 SKIP; survivor held 39.948s at the stop; fetch served 121ms after the second broker listened; renewer (never exited) renewed to 44.952s past now 5.917s after; 'gave back ... gap=58.355207s ... enrollments=2'; revoked and lapsed pods refused 401, mismatch renewals 403",
+      "headSha": "24da304f68928a72de33e7e2652d5bdd752cd460",
+      "negativeControl": "round 1: the same test on eee16056 failed 'agent-secrets: proof invalid: not live (PROOF_INVALID)'"
     },
     {
-      "criterion": "A token that does not verify always spends its address's token-login bucket, even while the database is away and verified logins are refunded",
-      "surface": "the broker's api.Register on an httptest server with its real pod verifier against a local OIDC issuer, store closed",
-      "command": "cd packages/envoy && BROKER_TEST_DATABASE_URL=... go test -count=1 -v -run TestATokenThatDoesNotVerifySpendsItsAddressBucketWhileTheDatabaseIsAway ./internal/broker/api",
-      "observed": "--- PASS: forged tokens answered 401, 401, then 429 at PerAddress burst 2",
-      "headSha": "7dcf3ff9a18cb79a369529fbc3cfe574bed0980b",
-      "negativeControl": "in the same run TestATokenLoginTheBrokerCouldNotCompleteSpendsNoAddressBucket passes: verified logins with the store closed answer 5xx four times past the same burst of 2, so the 429 above is the unverified token's spend, not a closed store"
+      "criterion": "Review finding 1: a broker crash-looping before it serves during an outage does not count as serving, so a lease that runs out meanwhile is given back, not swept",
+      "surface": "real broker binaries on real Postgres: a serving broker stopped, then a broker whose GitHub exchange issuer answers discovery 404 after 3 s booted again and again for 30 s (each binds, then fatals before srv.Serve), then a good broker",
+      "command": "throwaway cmd/broker TestZZCrashLoopingBrokerDuringOutage (removed after the run)",
+      "observed": "PASS: 10 crash-looping boots over 31.072s left broker_serving at the stopped broker's one row (981f9df2@22:17:32.745); the pod's lease ran out during the loop; the good broker logged 'gave back ... gap=31.474329s ... enrollments=1', the pod was not ended, its lease ran 3.2s past now and it was granted and served its secret",
+      "headSha": "24da304f68928a72de33e7e2652d5bdd752cd460",
+      "negativeControl": "the same rig on a git-archive export of 7dcf3ff9's packages/envoy (clock started before the boot's failing steps), GOWORK=off: --- FAIL, 'the pod whose lease ran out during the crash loop was ended' (revoked=true after the good broker's first sweep)"
     },
     {
-      "criterion": "The daemon logs in again within about 10 s of the broker answering (front door 502; database away 500)",
-      "surface": "the daemon's agentsecrets.Client against the real broker binary behind a reverse-proxy front door, real Postgres 16 (rounds 2 and 3; daemon client unchanged since, broker change this round touches only unverified tokens)",
-      "command": "rounds 2-3 throwaway TestZZDaemonLoginThroughFrontDoorWhileBrokerDown and TestZZDaemonLoginWhileBrokerDatabaseDown (ZZ_OUTAGE=170s)",
-      "observed": "front door: issued 3.4 s after the broker listened (at 7d770fb5); database: 19x500, no 429, issued 3.792 s after Postgres was back (at 0accff8e)",
-      "headSha": "0accff8e67e3cc0bfba44ff9b0d3dd5086d13d6f",
-      "negativeControl": "b7e7ff14's client: issued 49.25 s after the broker listened; 7d770fb5's broker: 429 after five 500s, login 17.8 s after Postgres was back"
+      "criterion": "Review finding 2: a beat held on its row fails within its bound and says so, another broker keeps beating, and the guard stays off",
+      "surface": "two real broker binaries on one schema; a separate session holds broker A's broker_serving row FOR UPDATE for 8 s",
+      "command": "throwaway TestZZHeldServingRow",
+      "observed": "PASS: A logged once 'WARN broker: the serving clock could not beat ... error=\"timeout: context deadline exceeded\" timed_out=true' and 'the serving clock beats again' after the release; B's row moved from 22:18:18.591 to 22:18:26.595 while A's stayed at 22:18:18.985; B logged no clock line; a pod whose lease ran out 2 s into the hold was not live and the sweeper ended it at 22:18:21; no time was given back by either broker",
+      "headSha": "24da304f68928a72de33e7e2652d5bdd752cd460",
+      "negativeControl": "the lapsing pod itself: with B serving, its lapsed lease is refused (live=false) and ended, so the guard did not switch on"
+    },
+    {
+      "criterion": "Break attempts on the redesigned clock: a database outage while the broker runs; two brokers both stopped and started at once with a revoke written during the outage; outages below and above the threshold",
+      "surface": "real broker and agent-secrets binaries on the tester's Postgres 16 (stopped with pg_ctl -m fast for the database outage)",
+      "command": "throwaway TestZZDatabaseOutageWhileBrokerRuns, TestZZTwoBrokersBothStoppedAndStarted, TestZZShortAndMediumOutages",
+      "observed": "all PASS. Database 58.2 s away: broker stayed up, one WARN timed_out=false, 'gave back ... gap=1m0.051035s ... enrollments=2', survivor fetch 952 ms and renewal 3.979 s after the database came back, renewer never exited, idle pod whose lease ran out not swept and served. Two brokers: 'gave back' once across both (p1=1, p2=0), lease moved 30.53 s (the gap once), later lapsed and ended 19.151 s after the restart. Below threshold (0.5 s stop, sweep 2): nothing given back, lease unmoved. 12 s stop: gap=13.096093s given back, not revoked",
+      "headSha": "24da304f68928a72de33e7e2652d5bdd752cd460",
+      "negativeControl": "a pod revoked by its launcher before the database outage, and one revoked by SQL during the two-broker outage: each refused fetch 401 PROOF_INVALID not live and renew 401 ENROLLMENT_NOT_LIVE, the latter's lease unmoved by the beat"
+    },
+    {
+      "criterion": "Contract change census entry: config.Load refuses 2*BROKER_LEASE_SECONDS <= 9*BROKER_SWEEP_SECONDS, an immediate refusal",
+      "surface": "the real broker binary's start",
+      "command": "throwaway TestZZConfigBoundary",
+      "observed": "lease=23 sweep=5 and lease=14 sweep=3 listen; lease=22 sweep=5 and lease=13 sweep=3 exit 1 'BROKER_LEASE_SECONDS (22) must be more than four and a half times BROKER_SWEEP_SECONDS (5) ...'",
+      "headSha": "24da304f68928a72de33e7e2652d5bdd752cd460",
+      "negativeControl": "lease=22 sweep=5 refused at start, exit 1, naming both settings"
     }
   ]
 }
