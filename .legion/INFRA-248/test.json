@@ -2,55 +2,55 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-248",
-  "completed": "2026-10-26T16:53:55Z",
-  "round": 5,
-  "testedHead": "4209950d91931087e4e4913f42972076274f80f1",
-  "prHead": "73477ac419c04d0f786818abbdda7818f41c4819",
-  "fingerprint": "8951bec20fe9 e8f0ff487f7e2690245511d5f141e545efac8eba6abb77c7620b9ee5821df5a9 -> 4209950d9193 8e53a11e9c988fb11256600c3f49c84f3f39b9731cbf300da0a83c8e1451a01c: changed (the thermonuclear fix and the merge of main 0587774a), so a full round",
-  "mergeable": "gh pr view 2219: MERGEABLE (BLOCKED on review) at 73477ac4",
+  "completed": "2026-10-26T19:01:14Z",
+  "round": 6,
+  "testedHead": "efde11adb5a8dae6b837df51cc8f22e3139c496b",
+  "prHead": "29cfa051bf28e476db72778b033afe81a75d8685",
+  "scope": "Narrowed by the architect (Envoy 2026-10-26T17:11Z): review round 2's fixes and the spec's acceptance lines; rounds 1-5's passes not reopened. The workspace was recreated before this round; round 5's handoff (3fa9abe9) is an ancestor of the head, and the scratch scripts were rebuilt.",
+  "mergeable": "gh pr view 2219: MERGEABLE at 29cfa051",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran the round-4 failure's check myself: real Claude Code 2.1.310 ($TMPDIR/claude-cc) with --plugin-dir at a copy of packages/claude-envoy/legion from the head loads all three formerly hidden skills, and refuses one with the flag put back. Round 4's red test passes unmodified apart from a7f72b00's type-only `?? \"\"` (accepted: split always returns at least one element). Drove A1 and A2 on the head's image sha256:de6098dd11e1e12a039d931671862c89cea89f71f54205f3414be20d45db5975 (Worker Image run 40350572969) with my own Jobs (gVisor, uid 1000). A3-A6 are the settled experiment records (architect's ruling)."
+    "how": "Drove the same claims independently: the skill listing Oh My Pi actually sends a model, captured in the head's image (not the implementer's loadSkills probe test), and real Claude Code 2.1.310 loads of all three skills with hide: true. A1 and A2 re-driven on the head's image sha256:eee8fadfce84a7dc4a23bb0a0314a69cc90a6915c656cf1ea031a67821bb8358 (Worker Image run 40368294581). The implementer's new skills-guard test runs in CI's pi-legion job (Legion Envoy and Contracts 40368294303, queued); the recreated workspace has no node_modules, so I ran no bun suite."
   },
   "failed": 0,
   "failures": [],
   "proof": [
     {
-      "criterion": "Round 4's failure: every skill Legion's prompts name loads on a phase worker running Claude Code (thermonuclear-deep-review, thermonuclear-code-quality, ce-dogfood)",
-      "surface": "real Claude Code 2.1.310 (npm @anthropic-ai/claude-code) with --plugin-dir at a copy of packages/claude-envoy/legion from 73477ac4; every assistant turn in the stream-json transcript reports model claude-opus-5-5",
-      "command": "CLAUDE_CONFIG_DIR=$TMPDIR/claude-cc/cfg claude -p --plugin-dir <copy> --output-format stream-json --verbose --allowedTools Skill --max-turns 4 \"Use the Skill tool to load the skill legion:<name>. Then reply with only its first '# ' heading line, or the exact error the Skill tool returned.\" for each name; cd packages/claude-envoy && bun test tests/legion-plugin-fresh.test.ts",
-      "observed": "thermonuclear-deep-review: 'Launching skill: legion:thermonuclear-deep-review', result '# Thermonuclear Deep Review'; thermonuclear-code-quality: 'Launching skill …', result '# Thermonuclear Code Quality'; ce-dogfood: 'Launching skill …', result '# Dogfood'. legion-plugin-fresh.test.ts: 5 pass, 0 fail (round 4's red test among them). grep finds disable-model-invocation only in skills/AGENTS.md prose, in no SKILL.md.",
-      "headSha": "4209950d91931087e4e4913f42972076274f80f1",
-      "negativeControl": "the same copy with `disable-model-invocation: true` put back into thermonuclear-code-quality -> tool_result is_error true: 'Skill legion:thermonuclear-code-quality cannot be used with Skill tool due to disable-model-invocation'; the red test failed at 0459804d naming both thermonuclear skills (round 4)"
+      "criterion": "Review round 2: ce-dogfood, thermonuclear-deep-review and thermonuclear-code-quality stay hidden from Oh My Pi's skill listing",
+      "surface": "the head's worker image in a Job in namespace <namespace> (runtimeClassName gvisor, uid 1000): Oh My Pi loading /opt/legion/pi-envoy and /opt/legion/pi-legion by --extension as a pod does, its request to a loopback stand-in provider recorded",
+      "command": "bash /legion/scratch/tmp/infra-248-test/job-r6.sh <image> r6 (log r6-job.log there): omp -p --model operator/probe-test --extension /opt/legion/pi-envoy --extension /opt/legion/pi-legion \"say hi\", provider baseUrl http://127.0.0.1:18991 answering 400; the '- <name>: ' lines of the captured request parsed",
+      "observed": "listed: asd-ste100, ce-simplify-code, dispatch, dispatch-brainstorming, dispatch-first, envoy, legion-architect, legion-controller, legion-oracle, legion-retro, legion-worker; ce-dogfood, thermonuclear-deep-review, thermonuclear-code-quality absent. In the image each of the three SKILL.md files has 'hide: true' (count 1) and no disable-model-invocation (count 0).",
+      "headSha": "efde11adb5a8dae6b837df51cc8f22e3139c496b",
+      "negativeControl": "the same run with a pi-legion copy whose ce-dogfood SKILL.md has its 'hide: true' line removed -> ce-dogfood appears in the listing (the two thermonuclear skills still absent)"
     },
     {
-      "criterion": "A2 The worker image builds; in a worker pod (gVisor, uid 1000) agent-browser --version prints the pin and agent-browser open https://example.com loads the page with its title read back",
-      "surface": "a Job in namespace <namespace>, runtimeClassName gvisor, runAsUser 1000, image ghcr.io/sjawhar/legion-worker@sha256:de6098dd11e1e12a039d931671862c89cea89f71f54205f3414be20d45db5975",
-      "command": "bash /legion/scratch/tmp/infra-248-test/job.sh <image> r5 (log r5-job.log there)",
-      "observed": "pod Succeeded, gvisor, imageID the digest; uid 1000, 4.19.0-gvisor; agent-browser 0.39.2; open https://example.com -> '✓ Example Domain'; get title -> 'Example Domain'; screenshot; second session on a local page; THIRD_PARTY_NOTICES:50214 'agent-browser: the npm packages of the dashboard it embeds'; disable-model-invocation count 0 in both thermonuclear SKILL.md files in the image",
-      "headSha": "4209950d91931087e4e4913f42972076274f80f1",
-      "negativeControl": "agent-browser open http://127.0.0.1:1/ -> '✗ Navigation failed: net::ERR_UNSAFE_PORT' rc 1; main's image (round 1) -> agent-browser not found rc 127"
+      "criterion": "Review round 2 and round 4's failure: all three skills load through Claude Code's Skill tool with hide: true",
+      "surface": "real Claude Code 2.1.310 (npm @anthropic-ai/claude-code) with --plugin-dir at a copy of packages/claude-envoy/legion from 29cfa051; every assistant turn in each transcript reports model claude-opus-5-5 (2 turns per load run, 3 in the refusal run)",
+      "command": "CLAUDE_CONFIG_DIR=$TMPDIR/claude-cc/cfg claude -p --plugin-dir <copy> --output-format stream-json --verbose --allowedTools Skill --max-turns 4 \"Use the Skill tool to load the skill legion:<name>. Then reply with only its first '# ' heading line, or the exact error the Skill tool returned.\"",
+      "observed": "thermonuclear-deep-review: 'Launching skill: legion:thermonuclear-deep-review', '# Thermonuclear Deep Review'; thermonuclear-code-quality: 'Launching skill …', '# Thermonuclear Code Quality'; ce-dogfood: 'Launching skill …', '# Dogfood'",
+      "headSha": "efde11adb5a8dae6b837df51cc8f22e3139c496b",
+      "negativeControl": "thermonuclear-deep-review with 'hide: true' changed back to 'disable-model-invocation: true' -> tool_result is_error true: 'Skill legion:thermonuclear-deep-review cannot be used with Skill tool due to disable-model-invocation'"
     },
     {
-      "criterion": "A1 The Legion skills guard passes with ce-dogfood in pi-legion",
-      "surface": "the head's image under gVisor, uid 1000: the real Oh My Pi loading the image's packed plugins as a pod does",
-      "command": "legion probe-image --plugin-root /opt/legion/pi-legion --envoy-plugin-root /opt/legion/pi-envoy --skip-agent-models (job-probe.sh, log r5-probe.log)",
+      "criterion": "A1 The Legion skills guard passes with ce-dogfood in pi-legion (hidden skills still resolve by name)",
+      "surface": "the head's image under gVisor, uid 1000",
+      "command": "legion probe-image --plugin-root /opt/legion/pi-legion --envoy-plugin-root /opt/legion/pi-envoy --skip-agent-models (job-r6.sh)",
       "observed": "probe-image: OK … daemon-api-version=38, rc 0",
-      "headSha": "4209950d91931087e4e4913f42972076274f80f1",
+      "headSha": "efde11adb5a8dae6b837df51cc8f22e3139c496b",
       "negativeControl": "a copy without dist/skills/ce-dogfood -> 'finds no skill ce-dogfood (loaded by dist/skills/legion-worker/references/dogfood.md, …)', rc 1"
     },
     {
-      "criterion": "The shipped skill text matches the approved spec v4; no person's name in any skill",
-      "surface": "the image's dist/skills against the files verified in rounds 1 and 4; the branch's skills/ and Claude mirror",
-      "command": "sha256sum in the image (r5-job.log); grep -rnE 'Sami|Jawhar|sami@' skills/ packages/claude-envoy/legion/ packages/daemon/internal/prompts/; diff -r skills/ce-dogfood packages/claude-envoy/legion/skills/ce-dogfood",
-      "observed": "dispatch-brainstorming 563735f2… = round 1 (approved v4 step verbatim with only 'Sami' -> 'the person' and 'he picks' -> 'the person picks'); ce-dogfood 87126167… and dogfood.md afc5e29d… = round 4; grep rc 1 (no name); mirror identical",
-      "headSha": "4209950d91931087e4e4913f42972076274f80f1",
-      "negativeControl": "the approved text with 'Sami' left in is not a substring of the shipped bullet (round 1)"
+      "criterion": "A2 The worker image builds; in a worker pod (gVisor, uid 1000) agent-browser --version prints the pin and agent-browser open https://example.com loads the page with its title read back",
+      "surface": "the same Job: image ghcr.io/sjawhar/legion-worker@sha256:eee8fadfce84a7dc4a23bb0a0314a69cc90a6915c656cf1ea031a67821bb8358, runtimeClassName gvisor, uid 1000",
+      "command": "agent-browser --version; agent-browser open https://example.com; agent-browser get title; agent-browser close (job-r6.sh)",
+      "observed": "pod Succeeded, gvisor, imageID the digest; uid=1000, 4.19.0-gvisor; 'agent-browser 0.39.2'; '✓ Example Domain'; 'Example Domain'; '✓ Browser closed'",
+      "headSha": "efde11adb5a8dae6b837df51cc8f22e3139c496b",
+      "negativeControl": "agent-browser open http://127.0.0.1:1/ after the close -> '✗ Invalid response: EOF …', rc 1 (rounds 1-5 got ERR_UNSAFE_PORT with a live session); main's image (round 1) -> agent-browser not found rc 127"
     }
   ],
-  "ci": "4209950d9193: Tests 40350573001, PR Title 40350572892, Docs 40350572820, Worker Image 40350572969 success; Legion Envoy and Contracts 40350572891 queued (read as queued, not waited for)",
+  "ci": "efde11adb5a8: Tests 40368294287, PR Title 40368294291, Docs 40368294263, Worker Image 40368294581 success; Legion Envoy and Contracts 40368294303 queued (read as queued, not waited for)",
   "notes": [
-    "Nothing in CI launches the browser: the image build runs only `agent-browser --version`.",
-    "With disable-model-invocation gone from three skills, Oh My Pi and Claude Code list them to every Legion worker's model; their descriptions keep upstream's wording."
+    "The dogfood.md and changelog edits of efde11ad are text only; read in the diff, no contradiction with what rounds 1-5 verified.",
+    "Nothing in CI launches the browser: the image build runs only `agent-browser --version`."
   ]
 }
