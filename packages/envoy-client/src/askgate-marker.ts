@@ -12,7 +12,7 @@ import {
   unlinkSync,
   writeFileSync,
 } from "node:fs";
-import { join } from "node:path";
+import { isAbsolute, join, resolve } from "node:path";
 import { hasErrnoCode, messageFor } from "./errors";
 
 /**
@@ -29,13 +29,17 @@ import { hasErrnoCode, messageFor } from "./errors";
  * The marker. For each literal `dispatch` call it lets run, the gate mints one file in the store,
  * `<store>/markers/<sha256 of the argv>.<32 random hex>`, created owner-only and exclusively,
  * bound to the exact argument vector the CLI receives and, for a reviewed write, to the digest of
- * the arguments its dry run printed. Nothing of it is in the command the agent sees.
+ * the arguments its dry run printed and to the sha256 of each file the argv names
+ * (`fileOperands`), as the gate read it for the review. Nothing of it is in the command the agent
+ * sees.
  *
- * The CLI. Before a gated write posts, with a live record, it consumes one matching marker by
- * unlinking it: exactly one process wins an unlink, so a marker posts one write and a replay finds
- * none. A record that is there but cannot be read, or names a store that is gone, is a refusal.
- * The store's `mode` file holds the gate's mode: `warn` lets an unmarked write post with a
- * warning, anything else refuses it.
+ * The CLI. Before a gated write posts, with a live record, it reads each file the argv names once,
+ * and consumes one matching marker by unlinking it: exactly one process wins an unlink, so a
+ * marker posts one write and a replay finds none. A file whose bytes differ from the reviewed ones
+ * matches no marker. An upload's `--path` sends the bytes the CLI read for that check. A record
+ * that is there but cannot be read, or names a store that is gone, is a refusal. The store's
+ * `mode` file holds the gate's mode: `warn` lets an unmarked write post with a warning, anything
+ * else refuses it.
  */
 
 /** The record's name in a session's state directory. */
@@ -114,6 +118,56 @@ export function argvDigest(argv: readonly string[]): string {
 /** The digest a reviewed marker binds: of the arguments the call's dry run printed. */
 export function argsDigest(args: Readonly<Record<string, unknown>>): string {
   return digest(args);
+}
+
+/** One file a `dispatch` call makes the CLI read, as its argv names it. */
+export interface FileOperand {
+  /** The flag that names it: a `--<field>-file`, or an upload's `--path`. */
+  readonly flag: string;
+  /** The operand as written. */
+  readonly operand: string;
+}
+
+/** One file of a reviewed call: its operand, and the sha256 of its bytes; null when it was not read. */
+export interface FileDigest extends FileOperand {
+  readonly sha256: string | null;
+}
+
+/**
+ * The files a `dispatch` argv (the words after the program) makes the CLI read, in argv order: the
+ * operand of each `--<field>-file` but `-` (standard input), and an `artifact` upload's `--path`.
+ * A flag's operand is the word after it, or the text after its `=`. The gate and the CLI both use
+ * this list, so the digests a marker binds and the ones the CLI computes name the same files.
+ */
+export function fileOperands(argv: readonly string[]): FileOperand[] {
+  const [command, ...flags] = argv;
+  const files: FileOperand[] = [];
+  for (let index = 0; index < flags.length; index++) {
+    const word = flags[index] as string;
+    const eq = word.indexOf("=");
+    const flag = eq === -1 ? word : word.slice(0, eq);
+    const named = flag.startsWith("--") && flag.endsWith("-file");
+    if (!named && !(command === "artifact" && flag === "--path")) continue;
+    const operand = eq === -1 ? flags[index + 1] : word.slice(eq + 1);
+    if (operand !== undefined && operand !== "-") files.push({ flag, operand });
+  }
+  return files;
+}
+
+/**
+ * The path the CLI opens for a file operand, from its working directory `cwd`. A `--<field>-file`
+ * goes to `readFileSync` as written, so the kernel resolves it and a `..` after a symbolic link
+ * leaves the link's target; an upload's `--path` goes through `resolve` (dispatch-execute.ts),
+ * which removes a `..` first.
+ */
+export function operandPath(cwd: string, file: FileOperand): string {
+  if (file.flag === "--path") return resolve(cwd, file.operand);
+  return isAbsolute(file.operand) ? file.operand : `${cwd}/${file.operand}`;
+}
+
+/** The sha256 of a file's bytes, as a marker binds it. */
+export function bytesDigest(bytes: Uint8Array): string {
+  return createHash("sha256").update(bytes).digest("hex");
 }
 
 /** Field 22 of `/proc/<pid>/stat`, the process's start in clock ticks since boot; null without one. */
@@ -276,10 +330,16 @@ export function askgateState(dir: string): AskgateState {
   };
 }
 
-/** What one marker binds. `args` null: an argv-only marker, minted for a call no review stands behind. */
+/**
+ * What one marker binds. `args` null: an argv-only marker, minted for a call no review stands
+ * behind, which binds no file either.
+ */
 export interface MarkerInput {
   readonly argv: readonly string[];
+  /** The arguments the call's dry run printed. */
   readonly args: Readonly<Record<string, unknown>> | null;
+  /** Each file the argv names (`fileOperands`), with the digest of the bytes AskGate reviewed. */
+  readonly files: readonly FileDigest[];
   readonly toolCallId: string;
   /** The gate's outcome for the call, or `subagent` for a task subagent's call. */
   readonly outcome: string;
@@ -288,8 +348,16 @@ export interface MarkerInput {
 interface Marker {
   readonly argv: string;
   readonly args: string | null;
+  readonly files: readonly FileDigest[];
   readonly createdAt: number;
 }
+
+const isFileDigest = (value: unknown): value is FileDigest =>
+  typeof value === "object" &&
+  value !== null &&
+  typeof (value as FileDigest).flag === "string" &&
+  typeof (value as FileDigest).operand === "string" &&
+  typeof (value as FileDigest).sha256 === "string";
 
 /** Removes the markers and temporary files older than MARKER_MAX_AGE_MS from a markers directory. */
 function sweepMarkers(dir: string, now: number): void {
@@ -314,9 +382,10 @@ export function mintMarker(store: string, input: MarkerInput, now: number): stri
   writeFileSync(
     temporary,
     JSON.stringify({
-      v: 1,
+      v: 2,
       argv: key,
       args: input.args === null ? null : argsDigest(input.args),
+      files: input.args === null ? [] : input.files,
       toolCallId: input.toolCallId,
       outcome: input.outcome,
       createdAt: now,
@@ -345,32 +414,41 @@ function readMarker(file: string): Marker | undefined {
   try {
     const data: unknown = JSON.parse(text);
     if (typeof data !== "object" || data === null) return undefined;
-    const { v, argv, args, createdAt } = data as Record<string, unknown>;
-    if (v !== 1 || typeof argv !== "string" || typeof createdAt !== "number") return undefined;
+    const { v, argv, args, files, createdAt } = data as Record<string, unknown>;
+    if (v !== 2 || typeof argv !== "string" || typeof createdAt !== "number") return undefined;
     if (args !== null && typeof args !== "string") return undefined;
-    return { argv, args, createdAt };
+    if (!Array.isArray(files) || !files.every(isFileDigest)) return undefined;
+    return { argv, args, files, createdAt };
   } catch {
     return undefined;
   }
 }
 
-/** Whether the CLI may post: one marker consumed, or why none was. */
-export type Consumed = { readonly ok: true } | { readonly ok: false; readonly why: string };
+/**
+ * Whether the CLI may post: one marker consumed, or why none was. `changed` names the first file
+ * whose bytes differ from the ones AskGate reviewed, when that is why.
+ */
+export type Consumed =
+  | { readonly ok: true }
+  | { readonly ok: false; readonly why: string; readonly changed?: FileOperand };
 
 /**
- * Consumes one marker for `argv` from `stores`: a marker bound to `args` first, else an argv-only
- * one. A marker past MARKER_MAX_AGE_MS is removed and never used; one bound to other arguments is
- * left for the call it was minted for. A lost race for a marker (another process unlinked it
- * first) goes on to the next.
+ * Consumes one marker for `argv` from `stores`: a marker bound to `args` and to `files` (each file
+ * the argv names, as the CLI read it) first, else an argv-only one. A marker past
+ * MARKER_MAX_AGE_MS is removed and never used; one bound to other files or other arguments is left
+ * for the call it was minted for. A lost race for a marker (another process unlinked it first)
+ * goes on to the next.
  */
 export function consumeMarker(
   stores: readonly string[],
   argv: readonly string[],
   args: Readonly<Record<string, unknown>>,
+  files: readonly FileDigest[],
   now: number
 ): Consumed {
   const key = argvDigest(argv);
   const reviewed = argsDigest(args);
+  let changed: FileOperand | undefined;
   let mismatched = false;
   let expired = false;
   const usable: Array<{ file: string; bound: boolean }> = [];
@@ -386,9 +464,23 @@ export function consumeMarker(
         rmSync(file, { force: true });
         continue;
       }
-      if (marker.args !== null && marker.args !== reviewed) {
-        mismatched = true;
-        continue;
+      if (marker.args !== null) {
+        // The argv keys the marker, so both lists name the same files; a file whose bytes differ
+        // says more than the arguments it changed with it.
+        const differs = marker.files.find(
+          (bound, index) =>
+            bound.flag !== files[index]?.flag ||
+            bound.operand !== files[index]?.operand ||
+            bound.sha256 !== files[index]?.sha256
+        );
+        if (differs !== undefined) {
+          changed ??= { flag: differs.flag, operand: differs.operand };
+          continue;
+        }
+        if (marker.files.length !== files.length || marker.args !== reviewed) {
+          mismatched = true;
+          continue;
+        }
       }
       usable.push({ file, bound: marker.args !== null });
     }
@@ -402,6 +494,12 @@ export function consumeMarker(
       if (!hasErrnoCode(error, "ENOENT")) throw error;
     }
   }
+  if (changed !== undefined)
+    return {
+      ok: false,
+      why: `a file this write posts changed after AskGate reviewed it (\`${changed.flag} ${changed.operand}\`)`,
+      changed,
+    };
   return {
     ok: false,
     why: mismatched

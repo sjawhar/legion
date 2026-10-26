@@ -149,6 +149,11 @@ export interface ExecuteDispatchToolInput {
   readonly tool: string;
   readonly args: ToolArguments;
   readonly cwd: string;
+  /**
+   * The bytes of an upload's `--path` file as the CLI already read them for AskGate's check, sent
+   * in place of a fresh read, so the upload sends exactly the bytes that check digested.
+   */
+  readonly uploadBytes?: Uint8Array;
   readonly host: DispatchHost;
   readonly sessionId?: string;
   readonly sessionTitle?: string;
@@ -3825,7 +3830,13 @@ export async function executeDispatchTool(
         content === undefined
           ? {
               name,
-              file: Bun.file(resolvePath(input.cwd, stringArg(args, "path"))),
+              // The bytes AskGate's check read, when it read them, typed as Bun types the path.
+              file:
+                input.uploadBytes === undefined
+                  ? Bun.file(resolvePath(input.cwd, stringArg(args, "path")))
+                  : new Blob([input.uploadBytes], {
+                      type: Bun.file(resolvePath(input.cwd, stringArg(args, "path"))).type,
+                    }),
               ...(summary === undefined ? {} : { summary }),
               actor,
             }

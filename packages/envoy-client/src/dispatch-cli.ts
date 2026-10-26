@@ -1,4 +1,13 @@
-import { askgateState, consumeMarker, gatedWrite } from "./askgate-marker";
+import { closeSync, constants, fstatSync, openSync, readFileSync } from "node:fs";
+import {
+  askgateState,
+  bytesDigest,
+  consumeMarker,
+  type FileDigest,
+  fileOperands,
+  gatedWrite,
+  operandPath,
+} from "./askgate-marker";
 import {
   commandHelp,
   commandName,
@@ -54,6 +63,10 @@ const HOSTS = ["omp", "claude", "opencode"] as const satisfies readonly Dispatch
  *  (`BASH_MAX_OUTPUT_LENGTH`). The whole output stays under this, with room to spare, every line
  *  the CLI adds counted (`fitOutput`). */
 const CLAUDE_OUTPUT_MAX = 25_000;
+
+/** Why a file that changed after AskGate's review is refused or posts unreviewed. */
+const SAME_MESSAGE =
+  "AskGate reviews the calls of a message before any of them runs, so it did not review that change.";
 
 /** What the CLI prints when the call reached Dispatch but its local record could not be written. */
 const STATE_WRITE_FAILED = "dispatch: Dispatch took the call, but this session's state";
@@ -303,9 +316,10 @@ export async function runDispatchCli(
   }
   const config: ActiveDispatchConfig = resolution;
 
-  // AskGate: a session a live Oh My Pi process records with its gate bound (`askgate.json` in
+  // AskGate: a session a live Oh My Pi process records with its gate bound (its AskGate record in
   // this directory) posts a gated write only with one marker the gate minted for this exact argv,
   // whatever ran the CLI. A session no live process records needs none.
+  let uploadBytes: Uint8Array | undefined;
   if (gatedWrite(parsed.tool, parsed.args)) {
     const notCalled = `dispatch ${commandName(parsed.tool)} was not called:`;
     try {
@@ -319,10 +333,32 @@ export async function runDispatchCli(
         );
       }
       if (gate.kind === "on") {
-        const spent = consumeMarker(gate.stores, argv, parsed.args, Date.now());
+        // Each file the argv names, read once: its digest for the check, and an upload's bytes,
+        // which are then the bytes the upload sends, so nothing changes between the check and
+        // the send. Only a regular file is read; any other file has no digest, which matches no
+        // reviewed marker.
+        const files: FileDigest[] = [];
+        for (const file of fileOperands(argv)) {
+          let bytes: Buffer | undefined;
+          try {
+            const fd = openSync(operandPath(io.cwd, file), constants.O_RDONLY | constants.O_NONBLOCK);
+            try {
+              if (fstatSync(fd).isFile()) bytes = readFileSync(fd);
+            } finally {
+              closeSync(fd);
+            }
+          } catch {
+            // Not there, or not this process's to open: no digest.
+          }
+          files.push({ ...file, sha256: bytes === undefined ? null : bytesDigest(bytes) });
+          if (file.flag === "--path" && file.operand === parsed.args.path) uploadBytes = bytes;
+        }
+        const spent = consumeMarker(gate.stores, argv, parsed.args, files, Date.now());
         if (!spent.ok && gate.mode === "block") {
           return refuse(
-            `${notCalled} AskGate is on for this session, and ${spent.why}. ${LITERAL_FORM} Send the write again in that form, as a bash call of its own.`,
+            spent.changed === undefined
+              ? `${notCalled} AskGate is on for this session, and ${spent.why}. ${LITERAL_FORM} Send the write again in that form, as a bash call of its own.`
+              : `${notCalled} AskGate is on for this session, and ${spent.why}. ${SAME_MESSAGE} Send the call again in a later message.`,
             REFUSED,
             parsed.tool,
             { mode: "block", why: spent.why }
@@ -342,7 +378,9 @@ export async function runDispatchCli(
             );
           }
           print(
-            `dispatch: warning: AskGate is on for this session in warn mode, and ${spent.why}, so this write posts unreviewed. ${LITERAL_FORM} Send the next one in that form.`
+            spent.changed === undefined
+              ? `dispatch: warning: AskGate is on for this session in warn mode, and ${spent.why}, so this write posts unreviewed. ${LITERAL_FORM} Send the next one in that form.`
+              : `dispatch: warning: AskGate is on for this session in warn mode, and ${spent.why}, so this write posts unreviewed. ${SAME_MESSAGE} Send a write in a later message than the call that changes its file.`
           );
         }
       }
@@ -402,6 +440,7 @@ export async function runDispatchCli(
       tool,
       args,
       cwd: io.cwd,
+      ...(uploadBytes === undefined ? {} : { uploadBytes }),
       host,
       sessionId,
       sessionTitle: env.DISPATCH_SESSION_TITLE ?? readSessionTitle(dir),

@@ -11,7 +11,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { mintMarker } from "../askgate-marker";
 import { cliRefusals, runDispatchCli } from "../dispatch-cli";
 import { resetAdviceMemory } from "../dispatch-execute";
@@ -106,19 +106,27 @@ function writeRecord(
   if (mode !== undefined) writeFileSync(join(owner.store, "mode"), mode);
 }
 
-/** One marker as the gate mints it: keyed by the argv's digest, bound to the arguments' digest. */
+/** The sha256 of a file's bytes, as a marker binds each file it names. */
+const fileSha = (file: string) => createHash("sha256").update(readFileSync(file)).digest("hex");
+
+/**
+ * One marker as the gate mints it: keyed by the argv's digest, bound to the arguments' digest and
+ * to each file the argv names, with the digest of its bytes as the gate read them.
+ */
 function mint(
   argv: readonly string[],
   args: Record<string, unknown> | null,
-  createdAt = Date.now()
+  createdAt = Date.now(),
+  files: ReadonlyArray<{ flag: string; operand: string; sha256: string }> = []
 ): string {
   const file = join(markers(), `${sha(argv)}.${randomBytes(16).toString("hex")}`);
   writeFileSync(
     file,
     JSON.stringify({
-      v: 1,
+      v: 2,
       argv: sha(argv),
       args: args === null ? null : sha(args),
+      files,
       toolCallId: "call-1",
       outcome: "verdict",
       createdAt,
@@ -143,7 +151,8 @@ function environment(
 async function run(
   argv: readonly string[],
   extra: Record<string, string | undefined> = omp,
-  stdin = ""
+  stdin = "",
+  fetchImpl?: typeof fetch
 ): Promise<{ code: number; stdout: string; stderr: string }> {
   let stdout = "";
   let stderr = "";
@@ -154,8 +163,9 @@ async function run(
     stderr: (text) => {
       stderr += text;
     },
-    readText: (path) => (path === "-" ? stdin : readFileSync(path, "utf-8")),
+    readText: (path) => (path === "-" ? stdin : readFileSync(resolve(stateDir, path), "utf-8")),
     cwd: stateDir,
+    ...(fetchImpl === undefined ? {} : { fetchImpl }),
   });
   return { code, stdout, stderr };
 }
@@ -246,6 +256,117 @@ describe("AskGate at the dispatch CLI", () => {
     expect(existsSync(marker)).toBe(false);
   });
 
+  // The review of the marker design at cf3f1e021, C1, and its attack, B1 and B2: the gate reviews
+  // each file a write posts in place, and its marker binds the digest of the bytes it read. The CLI
+  // reads each file the argv names once before it posts, and a file that changed since the review
+  // is refused with what to do, since its call is literal already.
+  describe("a file the write posts", () => {
+    const CHANGED = "a file this write posts changed after AskGate reviewed it";
+    /** The marker the gate mints for `argv` once it reviewed `file`, which `flag` names. */
+    const reviewed = async (argv: readonly string[], flag: string, file: string) =>
+      mint(argv, await dryArgs(argv), Date.now(), [
+        { flag, operand: file, sha256: fileSha(resolve(stateDir, file)) },
+      ]);
+    const note = () => join(stateDir, "note.md");
+    const comment = () => ["comment", "--issue", "DSP-1", "--body-file", note()];
+    const upload = (file: string) => [
+      "artifact",
+      "--issue",
+      "DSP-1",
+      "--name",
+      "brief.md",
+      "--path",
+      file,
+    ];
+
+    test("a --body-file that AskGate reviewed posts once", async () => {
+      writeRecord();
+      writeFileSync(note(), "The reviewed text.\n");
+      const marker = await reviewed(comment(), "--body-file", note());
+      expect((await run(comment())).code).toBe(0);
+      expect(postsTo(COMMENTS).map((p) => p.sent)).toMatchObject([
+        { body: "The reviewed text.\n" },
+      ]);
+      expect(existsSync(marker)).toBe(false);
+    });
+
+    test("a --body-file changed after the review is refused with what to do, and nothing posts", async () => {
+      writeRecord();
+      writeFileSync(note(), "The reviewed text.\n");
+      const marker = await reviewed(comment(), "--body-file", note());
+      writeFileSync(note(), "Text an edit of the same message wrote.\n");
+      const { code, stdout } = await run(comment());
+      expect(code).toBe(1);
+      expect(stdout).toStartWith("dispatch comment was not called: AskGate is on for this session");
+      expect(stdout).toContain(`${CHANGED} (\`--body-file ${note()}\`)`);
+      expect(stdout).toContain("Send the call again in a later message.");
+      expect(stdout).not.toContain("literal words");
+      expect(posts).toHaveLength(0);
+      expect(existsSync(marker)).toBe(true);
+      expect(ledger()).toMatchObject([
+        {
+          tool: "dispatch_comment",
+          askgate: { mode: "block", why: expect.stringContaining(CHANGED) },
+        },
+      ]);
+    });
+
+    test("a markdown upload by a relative --path that AskGate reviewed posts its bytes once", async () => {
+      writeRecord();
+      writeFileSync(join(stateDir, "brief.md"), "# Brief\n");
+      await reviewed(upload("brief.md"), "--path", "brief.md");
+      expect((await run(upload("brief.md"))).code).toBe(0);
+      expect(postsTo(ARTIFACTS).map((p) => p.sent)).toEqual(["# Brief\n"]);
+    });
+
+    test("an upload by --path changed after the review is refused, and nothing posts", async () => {
+      writeRecord();
+      const brief = join(stateDir, "brief.md");
+      writeFileSync(brief, "# Brief\n");
+      await reviewed(upload(brief), "--path", brief);
+      writeFileSync(brief, "# Brief, edited in the same message\n");
+      const { code, stdout } = await run(upload(brief));
+      expect(code).toBe(1);
+      expect(stdout).toContain(`${CHANGED} (\`--path ${brief}\`)`);
+      expect(stdout).toContain("Send the call again in a later message.");
+      expect(posts).toHaveLength(0);
+    });
+
+    test("an upload by --path sends the bytes the check read, though the file changes before the send", async () => {
+      writeRecord();
+      const brief = join(stateDir, "brief.md");
+      writeFileSync(brief, "# Brief\n");
+      await reviewed(upload(brief), "--path", brief);
+      // The file changes after the check, as the request goes out: a fresh read would send it.
+      const changing = (async (url: string | URL | Request, init?: RequestInit) => {
+        writeFileSync(brief, "# Brief, changed after the check\n");
+        return fetch(url, init);
+      }) as typeof fetch;
+      expect((await run(upload(brief), omp, "", changing)).code).toBe(0);
+      expect(postsTo(ARTIFACTS).map((p) => p.sent)).toEqual(["# Brief\n"]);
+    });
+
+    test("in warn mode a changed file posts with a warning and is logged first", async () => {
+      writeRecord("ses-1", undefined, "warn");
+      writeFileSync(note(), "The reviewed text.\n");
+      await reviewed(comment(), "--body-file", note());
+      writeFileSync(note(), "Text an edit of the same message wrote.\n");
+      const { code, stdout } = await run(comment());
+      expect(code).toBe(0);
+      expect(stdout).toContain(
+        `dispatch: warning: AskGate is on for this session in warn mode, and ${CHANGED}`
+      );
+      expect(stdout).toContain(
+        "Send a write in a later message than the call that changes its file."
+      );
+      expect(postsTo(COMMENTS)).toHaveLength(1);
+      expect(ledger()[0]).toMatchObject({
+        tool: "dispatch_comment",
+        askgate: { mode: "warn", why: expect.stringContaining(CHANGED) },
+      });
+    });
+  });
+
   // The attack on the marker design at cf3f1e021, N1: the gate mints a marker when it prepares the
   // calls of a message, and a call can wait there behind an exclusive call of the same message for
   // up to that call's limit (an eval cell's is 3,600 s). The age limit bounds only a marker its call
@@ -276,7 +397,11 @@ describe("AskGate at the dispatch CLI", () => {
     const old = (Date.now() - 121 * 60_000) / 1000;
     utimesSync(waiting, hour, hour);
     utimesSync(left, old, old);
-    mintMarker(store(), { argv: MESSAGE, args: null, toolCallId: "call-2", outcome: "verdict" }, Date.now());
+    mintMarker(
+      store(),
+      { argv: MESSAGE, args: null, files: [], toolCallId: "call-2", outcome: "verdict" },
+      Date.now()
+    );
     expect(existsSync(waiting)).toBe(true);
     expect(existsSync(left)).toBe(false);
   });
