@@ -774,8 +774,9 @@ func roleEnvironment(role claim.Role) []corev1.EnvVar {
 // Pi reads the variable only where that directory exists. It is on the issue's volume, which is
 // neither the pod's memory nor the pod's ephemeral storage, so Oh My Pi's logs, Chromium's
 // `browser-profiles` and the plugin generation an installing launch puts there (plugins.go) are
-// charged to neither — and, unlike both, the state home outlives a restart of the `roles`
-// container, though not the pod, whose own ephemeral volume the issue's disk is.
+// charged to neither — and, unlike the container's own filesystem, the state home outlives a
+// restart of the `roles` container, though not the pod, whose own ephemeral volume the issue's
+// disk is.
 func roleStateHome(role claim.Role) string {
 	return scratchRoot + "/state/" + string(role)
 }
