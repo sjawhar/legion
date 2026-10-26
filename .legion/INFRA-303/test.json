@@ -2,25 +2,25 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-303",
-  "completed": "2026-10-26T05:00:30Z",
-  "round": 3,
+  "completed": "2026-10-26T06:38:30Z",
+  "round": 4,
   "testedHead": "a5a1d3850cead76b83304302e79d53b2a5ffa40a",
-  "ci": "At 26bb37f6d3f2 (the push's head), read 2026-10-26T04:59:32Z: Tests run 40270870455, Docs run 40270870415, Legion Envoy and Contracts run 40270870435 and PR Title runs 40270883744 to 40270924865 all queued (PR Title run 40270870470 cancelled, superseded). Round 2's runs at bf43ea0d: Tests, Docs and PR Title success.",
-  "scope": "Review round 1's three findings, all in tests: the three INFRA-303 rows moved to packages/dispatch/e2e/phone-landing.e2e.ts with one helper each for the seed, the asks-thread read, the newest turn and the phone page, and two comments corrected. Runtime unchanged: `jj diff --from 01a0a9d3 --to 26bb37f6 -- packages/dispatch/web` is empty, and phone-conversation.e2e.ts is byte-identical to base 2be97d63. Read side by side, the moved rows keep each step and assertion of the rows I wrote and the implementer's row. My round-2 break rows (restore of a scrolled list, return while loading, restore after the first landing, a failed read during the leave, desktop) ran on this same runtime at f62bbb19.",
+  "scope": "Re-check after an implementing round that changed only .legion/: `jj diff --from 2179f97c --to ccee75e7 -- packages` is empty, so the code is the same a5a1d385 I verified fully in round 3 (12 of 12 passed, and each row failed under its mutation). This was not a rebase. The round only re-ran CI that had failed for reasons outside the code, so I ran the bare gates: CI green at the head, and one smoke run.",
+  "ci": "Red at 26bb37f6, cause read from the log: `gh run view 40270870455 --attempt 1 --log-failed` shows 'unknown blob' three times in the step 'Pull the NATS test container images' (job test 121403183789), then exit 1 before any test ran; run 40270870435 attempt 1 failed in the same way in dispatch 121407558241 and envoy-smoke 121407558351. After the reruns, read via `gh api .../actions/runs/<id>`: Tests run 40270870455 attempt 2 success; Legion Envoy and Contracts run 40270870435 attempt 2 success (includes the dispatch browser job with WebKit); Docs run 40270870415 success; PR Title run 40270924865 success, all at 26bb37f6d3f2. ccee75e7 is a handoff-only push and starts no runs.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran its command in my own lane (ports 18800-18807, database dispatch_test_e2e) at a5a1d385 with --repeat-each=2: `cd packages/dispatch && source /legion/harness/env.sh && bun run e2e -- --project=chromium --project=iphone --repeat-each=2 phone-landing.e2e.ts` → 12 passed (6.6m)."
+    "how": "Its round-4 proof cites the same local run at a5a1d385 I re-ran in round 3 (12 passed), plus CI at 26bb37f6, which I read myself on GitHub (above). Smoke at this head: `cd packages/dispatch && source /legion/harness/env.sh && bun run e2e -- --project=chromium --project=iphone phone-landing.e2e.ts` → 6 passed (3.0m)."
   },
   "failures": [],
   "failed": 0,
   "proof": [
     {
-      "criterion": "Every INFRA-303 row still catches its fault after the move to phone-landing.e2e.ts (forced order and 20 unforced opens, a failed read then a refetch, leaving while it loads then coming back)",
-      "surface": "Real Chromium (chromium and iphone projects) at 390x664 against the production web build bun run e2e makes, the Go Dispatch server and Postgres 17 in the issue pod (tester lane)",
-      "command": "cd packages/dispatch && source /legion/harness/env.sh && bun run e2e -- --project=chromium --project=iphone --repeat-each=2 phone-landing.e2e.ts",
-      "observed": "12 passed (6.6m)",
+      "criterion": "Every INFRA-303 row passes at the head after the CI re-run (forced order and 20 unforced opens, a failed read then a refetch, leaving while it loads then coming back)",
+      "surface": "Real Chromium (chromium and iphone projects) at 390x664 against the production web build bun run e2e makes, the Go Dispatch server and Postgres 17 in the issue pod (tester lane); WebKit in CI's dispatch job",
+      "command": "cd packages/dispatch && source /legion/harness/env.sh && bun run e2e -- --project=chromium --project=iphone phone-landing.e2e.ts; CI run 40270870435 attempt 2",
+      "observed": "6 passed (3.0m) locally; CI Tests run 40270870455 and Legion Envoy and Contracts run 40270870435 (attempt 2 of each) succeeded at 26bb37f6",
       "headSha": "a5a1d3850cead76b83304302e79d53b2a5ffa40a",
-      "negativeControl": "Mutation tests, each undone afterwards. (1) ConversationTab.tsx:956 changed to `const newestShown = shown.at(0);` (the pre-fix landing): the forced-order and failed-read rows failed 4 of 4, at 'forced open' and 'after the refetch: the newest card shares a point with the composer'. (2) `onFirstPlacement={forgetConversationScroll}` removed from IssuePage.tsx: the leave-while-loading row failed 2 of 2 at 'back on the Conversation: the newest card shares a point with the composer ... {x:24,y:494,...}'."
+      "negativeControl": "Round 3 mutation tests, on code this round does not change: ConversationTab.tsx:956 as `shown.at(0)` → forced-order and failed-read rows 4 of 4 failed; onFirstPlacement wiring removed from IssuePage.tsx → leave-while-loading row 2 of 2 failed, all at the composer assertion"
     }
   ]
 }
