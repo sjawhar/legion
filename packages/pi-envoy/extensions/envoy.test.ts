@@ -3918,6 +3918,30 @@ console.log(JSON.stringify(args));
       ]);
       expect(notifications).toEqual([]);
     }, 30_000);
+    // The second re-gate of #2159, non-blocking: at the host's default handler limit of 30 s the
+    // review deadline is 25 s, which measured reviews often pass, and the warning that says so
+    // went only to the log. A profile that sets nothing is the case this gate is for.
+    test("a review deadline under 30 s is said at session start, not only logged", async () => {
+      writeFileSync(process.env.ENVOY_CONFIG_FILE ?? "", "{}\n");
+      process.env.DISPATCH_URL = "http://dispatch.test";
+      process.env.DISPATCH_TOKEN = "dispatch-token";
+      standInHost();
+      // The host's own default for a tool_call handler, which a profile that sets nothing gets.
+      mock.module("@oh-my-pi/pi-coding-agent/extensibility/settings", () => ({
+        cfgDisabledExtensions: { get: () => [] },
+        cfgSkills: { get: () => ({}) },
+        cfgExtensionHandlersToolCallTimeoutMs: { get: () => 30_000 },
+      }));
+      const { default: envoyExtension } = await import("./envoy.ts?askgate-short-deadline");
+      const fixture = createPi();
+      envoyExtension(fixture.pi);
+      const notifications: string[] = [];
+      await fixture.handlers.get("session_start")?.({}, gateContext(notifications));
+
+      expect(notifications).toHaveLength(1);
+      expect(notifications[0]).toContain("the review deadline is 25000 ms");
+      expect(notifications[0]).toContain("extensionHandlers.toolCallTimeoutMs");
+    }, 30_000);
     test("astra 6: a checkout dispatch disable does not suppress the session's AskGate", async () => {
       const checkout = mkdtempSync(join(tmpdir(), "askgate-checkout-"));
       const originalCwd = process.cwd();

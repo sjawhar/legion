@@ -3157,6 +3157,52 @@ describe("sessions", () => {
     expect(g.entries.map((e) => e.outcome)).toEqual(["verdict", "verdict", "verdict", "verdict"]);
     expect(g.calls[2].user).not.toContain("You answered revise");
   });
+  // The second re-gate of #2159, non-blocking: a backgrounded call's snapshot was released only
+  // by a result naming that call, which the next session never emits, so it lived until the
+  // session shut down or the day-old sweep.
+  test("a session switch removes the snapshots of the session before it", async () => {
+    const work = fs.mkdtempSync(path.join(tmpdir(), "askgate-switch-"));
+    fs.writeFileSync(path.join(work, "note.txt"), "Body from the session before.\n");
+    const g = bind({ env: { PATH: "/usr/bin:/bin" }, cwd: work });
+    const before = snapshotDirs().length;
+    await g.bash("bg", "dispatch comment --issue X-1 --body-file note.txt");
+    await g.handlers.get("tool_result")?.(
+      { type: "tool_result", toolCallId: "bg", details: { async: { state: "running" } } },
+      {}
+    );
+    expect(snapshotDirs().length).toBe(before + 1);
+    g.event("session_switch", { reason: "new" });
+    expect(snapshotDirs().length).toBe(before);
+    fs.rmSync(work, { recursive: true, force: true });
+  }, 30_000);
+  // The second re-gate of #2159, non-blocking: `./dispatch` is the literal grammar, and reading
+  // the call runs that program once with `--dry-run`. A refusal that says nothing ran would not
+  // be true of a checkout's own `./dispatch`.
+  test("a refusal of a command names the dry run that already ran it", async () => {
+    const work = fs.mkdtempSync(path.join(tmpdir(), "askgate-claim-"));
+    fs.writeFileSync(
+      path.join(work, "dispatch"),
+      `#!${process.execPath}\nconsole.log(JSON.stringify({ issue: "X-1", body: "hi" }));\n`,
+      { mode: 0o755 }
+    );
+    const g = bind({
+      env: { PATH: "/usr/bin:/bin", OMP_ASKGATE: "block" },
+      cwd: work,
+      complete: async () => ({ text: REVISE }),
+    });
+    const result = await g.bash("claim", "./dispatch comment --issue X-1 --body hi");
+    expect(result?.block).toBe(true);
+    expect(result?.reason).toContain("AskGate ran the command it names with `--dry-run`");
+    expect(result?.reason).toContain("the write itself was not sent");
+    expect(g.dryRuns.map((run) => run.script)).toEqual([
+      "./dispatch comment --dry-run --issue X-1 --body hi",
+    ]);
+    // A device call runs no command, so its refusal says nothing about a dry run.
+    expect((await g.device("device", "dispatch_comment", COMMENT))?.reason).not.toContain(
+      "--dry-run"
+    );
+    fs.rmSync(work, { recursive: true, force: true });
+  }, 30_000);
 });
 
 describe("data routing", () => {

@@ -32,11 +32,14 @@
 //     JSON it prints. A dry-run that fails, times out or prints no JSON object is recorded as
 //     `error` and the call runs (the CLI refuses arguments it cannot parse, before it sends
 //     anything). A `dispatch` command with `--dry-run` or `--help` sends nothing and is not
-//     reviewed. An upload given with `--path` prints the path, not the text. Every file the
-//     write posts, that path and each `--<field>-file`, is copied
+//     reviewed. An upload given with `--path` prints the path, not the text. Every file whose
+//     text the write posts, that path and each `--<field>-file`, is copied
 //     into a private snapshot the gate owns before the model is asked. The gate reviews the
 //     snapshot's bytes as `content` and rewrites the call to post the snapshot, so the bytes that
-//     post are the bytes reviewed. It reads a regular file alone: a missing file, a directory, a
+//     post are the bytes reviewed. An `--image` file is no part of that: the model reads its path
+//     and not its bytes, and the gate takes no snapshot of it, since the CLI names the upload
+//     after the file it opens when it sends (`localPicture`, the basename of the resolved path),
+//     which a snapshot would rename. It reads a regular file alone: a missing file, a directory, a
 //     device, a FIFO and `/dev/stdin` are refused as `unreadable` before any read.
 //     The arguments are cut at 64 KiB as one JSON block, so the document gets less than 64 KiB of
 //     it. A relative path resolves where the CLI resolves it, against its
@@ -1829,8 +1832,15 @@ const FILE_OVERRIDE: Override = {
   ...COMMAND_OVERRIDE,
   note: "AskGate read the file this command names before any other call in the same batch ran, so a change made to it in that batch was not reviewed. Change a file in one step, then send the command in the next.",
 };
+/**
+ * A `dispatch` command's arguments are read by running that command with `--dry-run`, so the
+ * program the call names has run once by the time a revise comes back. The refusal says so: for
+ * a checkout's own `./dispatch`, "nothing ran" would not be true.
+ */
+const DRY_RUN_RAN =
+  "To read this call AskGate ran the command it names with `--dry-run`, which sends nothing; the write itself was not sent.";
 const renderRevise = (reason: string, second: boolean, override: Override) =>
-  `AskGate did not send this call.\n${agentFacing(reason)}\nSend the corrected call, or resend this one unchanged with ${override.how} to override; an override is always sent and recorded, and the ${override.what} is removed before sending.${override.note ? `\n${override.note}` : ""}${second ? `\n${SECOND_REVISE}` : ""}`;
+  `AskGate did not send this call.\n${agentFacing(reason)}\nSend the corrected call, or resend this one unchanged with ${override.how} to override; an override is always sent and recorded, and the ${override.what} is removed before sending.${override.what === "flag" ? `\n${DRY_RUN_RAN}` : ""}${override.note ? `\n${override.note}` : ""}${second ? `\n${SECOND_REVISE}` : ""}`;
 /** The refusal block mode returns for a call given up without a verdict, by cause. */
 const NO_VERDICT_REFUSAL: Record<"abandoned" | "shutdown", string> = {
   abandoned:
@@ -1913,8 +1923,15 @@ function renderUnreadable(
   const ending = ran ? "The call ran unreviewed." : "Nothing in the call ran.";
   if (file !== undefined) {
     const { stdin, regular } = resendFlags(file.flag);
+    // The file refusals come after AskGate read the call: to find where a relative operand
+    // resolves it ran the command's own `cd` and `pwd -P`, and for an upload the command with
+    // `--dry-run`. Neither sends anything, and nothing else in the call ran, so the claim here
+    // says that and not "nothing ran".
+    const read = ran
+      ? "The call ran unreviewed."
+      : "The write was not sent. To read the call AskGate ran the command's own `cd` and `pwd -P`, and the command with `--dry-run`, which send nothing; nothing else in the call ran.";
     return note(
-      `AskGate ${ran ? "did not review" : "did not run"} this call: \`${file.flag}\` names ${JSON.stringify(file.path)}, which ${file.reason}. AskGate reads and posts only a regular file it captured before review. Send the text with \`${stdin} -\` and a quoted here-document (\`<<'EOF'\`), or name a regular file with ${regular}. ${ending}`
+      `AskGate ${ran ? "did not review" : "did not send"} this call: \`${file.flag}\` names ${JSON.stringify(file.path)}, which ${file.reason}. AskGate reads and posts only a regular file it captured before review. Send the text with \`${stdin} -\` and a quoted here-document (\`<<'EOF'\`), or name a regular file with ${regular}. ${read}`
     );
   }
   // `$D $S …`: neither the program nor its subcommand is known, so either may be a write.
@@ -2050,14 +2067,6 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
     // Set once the session starts shutting down (only dispose emits session_shutdown): a scoped call
     // that reaches the gate after that asks no model and takes the shutdown branch at once.
     let closing = false;
-    const reset = () => {
-      rebuttals.clear();
-      breaker.clear();
-      failures = 0;
-      halted = false;
-    };
-    pi.on("session_switch", reset);
-    pi.on("session_branch", reset);
     // A gate still waiting when its tool's execution ends was abandoned: the runner gave up on the
     // handler (a user abort, or its ceiling) and the call already went its way. Cancel the model call.
     // An eval-bridged write never shows its own id on a loop tool_execution_end, so a run the user
@@ -2096,6 +2105,22 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
       notices.delete(event.toolCallId);
       return { content: [...(event.content ?? []), { type: "text", text: notice }] };
     };
+    /**
+     * The session changed, so nothing of the one before it stands: its halt, its count, its
+     * revise reasons, its unspent rebuttals, the notes its calls are owed, and the snapshots of
+     * its calls, which only a result carrying one of those call ids would have released. Nothing
+     * in the new session names them, so they would live until shutdown or the day-old sweep.
+     */
+    const reset = () => {
+      rebuttals.clear();
+      breaker.clear();
+      notices.clear();
+      for (const toolCallId of [...snapshots.keys()]) releaseSnapshots(toolCallId);
+      failures = 0;
+      halted = false;
+    };
+    pi.on("session_switch", reset);
+    pi.on("session_branch", reset);
     // A snapshot goes only once the command that reads it has run. A result that reports a
     // backgrounded job's start comes before the shell runs it (`startedInBackground`), and nothing
     // later names that call's id, so its snapshot is kept until `session_shutdown`; a new gated

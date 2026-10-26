@@ -224,11 +224,15 @@ The gate reads the arguments from the command's own `--dry-run`. An upload that 
 from a file (`--name-file`) is decided from the name the dry run prints. `--path-file` is refused:
 its content names a file the gate cannot capture before Dispatch opens it. An upload whose name or
 path holds an expansion (`"$NAME"`) is unreadable, as any write the gate cannot read is. The gate
-copies each file that the write posts into a private snapshot. It reviews the snapshot and changes
-the command to post that snapshot. The file must be a regular file. The gate refuses a missing
-file, a directory, a device and a FIFO before it reads them, and a path that names a file
+copies each file whose text the write posts, a `--<field>-file` operand and an upload's `--path`,
+into a private snapshot. It reviews the snapshot and changes
+the command to post that snapshot. An `--image` file is not one of them: the model reads the
+path, not the picture, and the gate takes no snapshot of it, because the CLI names the upload
+after the file it opens at send time. The file must be a regular file. The gate refuses a missing
+file, a directory, a device and a FIFO before it reads them, and a path that reaches a file
 descriptor of whichever process opens it (`/dev/stdin`, `/dev/fd/N`, `/proc/self/fd/N`,
-`/proc/<n>/fd/N`): AskGate would open it in Oh My Pi's process and the command in its shell. For
+`/proc/thread-self/fd/N`, `/proc/<n>/fd/N`, and any link to one): AskGate would open it in Oh My
+Pi's process and the command in its shell. For
 text from standard input, use `--<field>-file -` with a quoted here-document. For an upload, that
 is `--content-file -`: the CLI reads `--path -` as a file named `-`. The gate cuts all arguments
 at 64 KiB as one JSON block, so it reviews only part of a long document. It judges an upload
