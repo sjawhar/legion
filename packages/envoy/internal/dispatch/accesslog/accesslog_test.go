@@ -84,7 +84,8 @@ func TestAPanickingHandlerStillWritesItsLine(t *testing.T) {
 	carries(t, line(t, logged), `caller_kind=user`, `caller=alice`, `status=200`, `bytes=7`, `aborted=true`)
 }
 
-// A handler that panics before it writes anything is logged as the 500 net/http answers it with.
+// A handler that panics before it writes anything is logged as 500, though the client gets a
+// closed connection rather than a status.
 func TestAHandlerThatPanicsBeforeWritingIsLoggedAsA500(t *testing.T) {
 	logged := capture(t)
 	handler := Handler("/r", http.HandlerFunc(func(http.ResponseWriter, *http.Request) { panic("boom") }))
@@ -182,7 +183,7 @@ func TestTheLineNamesTheAddressAndUserAgentAndKeepsThePathEscaped(t *testing.T) 
 	Handler("/api/v1/issues/{key}", http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})).
 		ServeHTTP(httptest.NewRecorder(), request)
 	got := line(t, logged)
-	carries(t, got, `path=/api/v1/issues/a%2Fb%3Ftoken%3Dsecret `, `address=203.0.113.9`, `user_agent=dispatch-cli/1.0`)
+	carries(t, got, `path=/api/v1/issues/a%2Fb%3Ftoken%3Dsecret `, `address=203.0.113.9`, `peer=192.0.2.1 `, `user_agent=dispatch-cli/1.0`)
 	for _, forbidden := range []string{"hidden-query", "token=secret"} {
 		if strings.Contains(got, forbidden) {
 			t.Fatalf("access-log line %q carries %q", got, forbidden)

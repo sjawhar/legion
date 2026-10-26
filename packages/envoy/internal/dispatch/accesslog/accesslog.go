@@ -43,7 +43,8 @@ const (
 	KindAnonymous = "anonymous"
 )
 
-// Message is the line every served request writes, so a log reader greps one string.
+// Message is the line every served request writes. Match it whole (msg="dispatch: request"):
+// the previous-shared-token warning's message starts with the same words.
 const Message = "dispatch: request"
 
 // fieldBytes bounds the caller-written text the line keeps (the request path and a named
@@ -193,8 +194,9 @@ func (rec *recorder) write(route string, r *http.Request, elapsed time.Duration,
 	rec.mu.Unlock()
 	status := rec.status
 	if status == 0 {
-		// A handler that wrote nothing answered 200 with an empty body, unless it panicked,
-		// in which case net/http answers 500 or drops the connection.
+		// A handler that wrote nothing answered 200 with an empty body. One that panicked is
+		// logged as 500, though net/http writes no status: it closes the connection (HTTP/1)
+		// or resets the stream (HTTP/2).
 		status = http.StatusOK
 		if aborted {
 			status = http.StatusInternalServerError
@@ -207,6 +209,7 @@ func (rec *recorder) write(route string, r *http.Request, elapsed time.Duration,
 		"caller_kind", kind,
 		"caller", clip(id),
 		"address", clip(auth.ForwardedAddress(r)),
+		"peer", peerAddress(r),
 		"user_agent", clip(r.UserAgent()),
 		"status", status,
 		"elapsed_ms", elapsed.Milliseconds(),
@@ -219,6 +222,15 @@ func (rec *recorder) write(route string, r *http.Request, elapsed time.Duration,
 		attrs = append(attrs, "aborted", true)
 	}
 	slog.Info(Message, attrs...)
+}
+
+// peerAddress is the connection's own address without its port: the hop that reached Dispatch,
+// which a caller cannot forge as it can an X-Forwarded-For header on a direct path.
+func peerAddress(r *http.Request) string {
+	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+		return host
+	}
+	return clip(r.RemoteAddr)
 }
 
 // clip cuts caller-written text to fieldBytes, dropping a rune the cut splits.
