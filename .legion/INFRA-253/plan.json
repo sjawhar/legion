@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "plan",
   "issue": "INFRA-253",
-  "completed": "2026-10-26T01:27:08Z",
+  "completed": "2026-10-26T18:48:23Z",
   "requiredSkills": {
     "implement": [
       "legion-worker: its push, pull-request, PR-body and proof rules (an E2E line on a production-like surface with a negative control) govern every phase-2/3 change and the proof workflow",
@@ -129,5 +129,6 @@
         "scope": "The scope grows beyond packages/envoy to packages/daemon, packages/dispatch/e2e, packages/claude-envoy, packages/pi-legion's skill-scenarios rig, docs/site/media and scripts/e2e. The spec's Acceptance holds as written and is applied to these sites too. The architect decided no spec edit is needed."
       }
     }
-  ]
+  ],
+  "readmission": "Generation 3 (re-admitted after the contract-37 drain): the plan is unchanged from generation 2's (commit 8bdbd765, dispatch://INFRA-253/artifact/plan-md v1); spec still approved at v6. Re-planned nothing, per the architect and dispatch://INFRA-419. PR #2229 carries the implementation through test round 6 at 76d1daad."
 }
