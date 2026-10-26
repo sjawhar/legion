@@ -3,6 +3,7 @@ package outbox
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"reflect"
 	"slices"
 	"testing"
@@ -84,7 +85,12 @@ func TestClaimantRouteReachesTheSessionHoldingTheIssue(t *testing.T) {
 		// forceNotify marks the event notifying whatever the broker's rule says, for an
 		// agent's event that notifies as child.* events do.
 		forceNotify bool
-		want        []string
+		// deliveries is the outcome of the comment's mention of each session
+		// (seedMentionDelivery).
+		deliveries map[string]string
+		want       []string
+		// wantErr is what publish returns; nil when every destination was decided.
+		wantErr error
 	}{
 		{
 			name:  "a person's answer to an ask another session opened reaches the asker and the claimant",
@@ -248,14 +254,59 @@ func TestClaimantRouteReachesTheSessionHoldingTheIssue(t *testing.T) {
 			want: []string{issueTopic + "comment.created", claimantTopic},
 		},
 		{
-			name:  "a person's new comment mentioning the claimant is left to the mention",
+			name:  "a person's new comment mentioning the claimant is left to the mention that reached it",
 			claim: &claimant,
 			arrange: func(t *testing.T, database *store.Store) (model.Event, string) {
 				return commentEvent("comment.created", alice, model.Comment{
 					Body: "@session-claimant ship it.", Mentions: mentionOf(claimant.ID),
 				}, claimant.ID), ""
 			},
-			want: []string{issueTopic + "comment.created"},
+			deliveries: map[string]string{claimant.ID: "sent"},
+			want:       []string{issueTopic + "comment.created"},
+		},
+		{
+			name:  "a person's new comment whose mention of the claimant failed reaches the claimant",
+			claim: &claimant,
+			arrange: func(t *testing.T, database *store.Store) (model.Event, string) {
+				return commentEvent("comment.created", alice, model.Comment{
+					Body: "@session-claimant ship it.", Mentions: mentionOf(claimant.ID),
+				}, claimant.ID), ""
+			},
+			deliveries: map[string]string{claimant.ID: "failed"},
+			want:       []string{issueTopic + "comment.created", claimantTopic},
+		},
+		{
+			name:  "a person's new comment whose mention of the claimant is being sent holds the claimant's copy back",
+			claim: &claimant,
+			arrange: func(t *testing.T, database *store.Store) (model.Event, string) {
+				return commentEvent("comment.created", alice, model.Comment{
+					Body: "@session-claimant ship it.", Mentions: mentionOf(claimant.ID),
+				}, claimant.ID), ""
+			},
+			deliveries: map[string]string{claimant.ID: "pending"},
+			want:       []string{issueTopic + "comment.created"},
+			wantErr:    errMentionPending,
+		},
+		{
+			name:  "a person's new comment whose mention of the claimant was abandoned reaches the claimant",
+			claim: &claimant,
+			arrange: func(t *testing.T, database *store.Store) (model.Event, string) {
+				return commentEvent("comment.created", alice, model.Comment{
+					Body: "@session-claimant ship it.", Mentions: mentionOf(claimant.ID),
+				}, claimant.ID), ""
+			},
+			deliveries: map[string]string{claimant.ID: "abandoned"},
+			want:       []string{issueTopic + "comment.created", claimantTopic},
+		},
+		{
+			name:  "a person's new comment whose mention of the claimant recorded no attempt reaches the claimant",
+			claim: &claimant,
+			arrange: func(t *testing.T, database *store.Store) (model.Event, string) {
+				return commentEvent("comment.created", alice, model.Comment{
+					Body: "@session-claimant ship it.", Mentions: mentionOf(claimant.ID),
+				}, claimant.ID), ""
+			},
+			want: []string{issueTopic + "comment.created", claimantTopic},
 		},
 		{
 			name:  "a person's thread reply mentioning the claimant is left to the mention",
@@ -266,7 +317,8 @@ func TestClaimantRouteReachesTheSessionHoldingTheIssue(t *testing.T) {
 					Body: "@session-claimant is it?", ReplyTo: &root, Mentions: mentionOf(claimant.ID),
 				}), ""
 			},
-			want: []string{issueTopic + "comment.created"},
+			deliveries: map[string]string{claimant.ID: "sent"},
+			want:       []string{issueTopic + "comment.created"},
 		},
 		{
 			name:  "a person's ask reply mentioning the claimant is left to the mention",
@@ -277,7 +329,8 @@ func TestClaimantRouteReachesTheSessionHoldingTheIssue(t *testing.T) {
 					Body: "@session-claimant yes.", AskID: &askID, Mentions: mentionOf(claimant.ID),
 				}), ""
 			},
-			want: []string{issueTopic + "comment.created", askerTopic},
+			deliveries: map[string]string{claimant.ID: "sent"},
+			want:       []string{issueTopic + "comment.created", askerTopic},
 		},
 		{
 			name:  "a person's ask reply mentioning a claimant that follows the ask reaches only the other follower",
@@ -289,7 +342,45 @@ func TestClaimantRouteReachesTheSessionHoldingTheIssue(t *testing.T) {
 					Body: "@session-claimant yes.", AskID: &askID, Mentions: mentionOf(claimant.ID),
 				}), ""
 			},
-			want: []string{issueTopic + "comment.created", askerTopic},
+			deliveries: map[string]string{claimant.ID: "sent"},
+			want:       []string{issueTopic + "comment.created", askerTopic},
+		},
+		{
+			name:  "a person's ask reply mentioning the asker is left to the mention that reached it",
+			claim: &claimant,
+			arrange: func(t *testing.T, database *store.Store) (model.Event, string) {
+				askID := seedAsk(t, database, "T-1", asker, "Ship it?")
+				return commentEvent("comment.created", alice, model.Comment{
+					Body: "@session-asker yes.", AskID: &askID, Mentions: mentionOf(asker.ID),
+				}), ""
+			},
+			deliveries: map[string]string{asker.ID: "sent"},
+			want:       []string{issueTopic + "comment.created", claimantTopic},
+		},
+		{
+			name:  "a person's ask reply whose mention of the asker failed reaches the asker as a follower",
+			claim: &claimant,
+			arrange: func(t *testing.T, database *store.Store) (model.Event, string) {
+				askID := seedAsk(t, database, "T-1", asker, "Ship it?")
+				return commentEvent("comment.created", alice, model.Comment{
+					Body: "@session-asker yes.", AskID: &askID, Mentions: mentionOf(asker.ID),
+				}), ""
+			},
+			deliveries: map[string]string{asker.ID: "failed"},
+			want:       []string{issueTopic + "comment.created", claimantTopic, askerTopic},
+		},
+		{
+			name:  "a person's ask reply whose mention of the asker is being sent holds the asker's copy back",
+			claim: &claimant,
+			arrange: func(t *testing.T, database *store.Store) (model.Event, string) {
+				askID := seedAsk(t, database, "T-1", asker, "Ship it?")
+				return commentEvent("comment.created", alice, model.Comment{
+					Body: "@session-asker yes.", AskID: &askID, Mentions: mentionOf(asker.ID),
+				}), ""
+			},
+			deliveries: map[string]string{asker.ID: "pending"},
+			want:       []string{issueTopic + "comment.created", claimantTopic},
+			wantErr:    errMentionPending,
 		},
 		{
 			name:  "a person's edit of an ask reply mentioning the claimant reaches it",
@@ -301,7 +392,8 @@ func TestClaimantRouteReachesTheSessionHoldingTheIssue(t *testing.T) {
 					Body: "@session-claimant yes, Tuesday.", AskID: &askID, Mentions: mentionOf(claimant.ID),
 				}), ""
 			},
-			want: []string{issueTopic + "comment.edited", claimantTopic, askerTopic},
+			deliveries: map[string]string{claimant.ID: "sent"},
+			want:       []string{issueTopic + "comment.edited", claimantTopic, askerTopic},
 		},
 		{
 			name:  "a person's issue update does not reach the claimant",
@@ -351,9 +443,21 @@ func TestClaimantRouteReachesTheSessionHoldingTheIssue(t *testing.T) {
 			if err := json.Unmarshal(raw, &event.Payload); err != nil {
 				t.Fatalf("decode payload: %v", err)
 			}
+			for sessionID, outcome := range tc.deliveries {
+				seedMentionDelivery(t, database, payloadString(event.Payload, "id"), sessionID, outcome)
+			}
+			// The claimant as the scan reads it: a session's claim, never a person's.
+			var holder string
+			if tc.claim != nil && tc.claim.Kind == "session" {
+				holder = tc.claim.ID
+			}
 			publisher := &recordingPublisher{}
-			if err := publish(context.Background(), Deps{Store: database, Publisher: publisher}, event, slug, tc.route, map[string]struct{}{}); err != nil {
+			err = publish(context.Background(), Deps{Store: database, Publisher: publisher}, event, slug, routing{route: tc.route, claimant: holder}, map[string]struct{}{})
+			if tc.wantErr == nil && err != nil {
 				t.Fatalf("publish %s: %v", event.Type, err)
+			}
+			if tc.wantErr != nil && !errors.Is(err, tc.wantErr) {
+				t.Fatalf("publish %s returned %v, want %v", event.Type, err, tc.wantErr)
 			}
 			if got := topicsOf(publisher.all()); !reflect.DeepEqual(got, tc.want) {
 				t.Fatalf("topics = %#v, want %#v", got, tc.want)

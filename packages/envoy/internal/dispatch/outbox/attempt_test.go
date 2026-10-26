@@ -124,7 +124,7 @@ func publishOnce(t *testing.T, database *store.Store, publisher Publisher, event
 		t.Fatalf("decode payload: %v", err)
 	}
 	route := "role:reviewer"
-	return publish(context.Background(), Deps{Store: database, Publisher: publisher}, event, "", &route, map[string]struct{}{})
+	return publish(context.Background(), Deps{Store: database, Publisher: publisher}, event, "", routing{route: &route}, map[string]struct{}{})
 }
 
 func denial(subject string) error {

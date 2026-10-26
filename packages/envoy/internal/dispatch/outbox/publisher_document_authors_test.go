@@ -89,7 +89,9 @@ func TestACommentOnADocumentReachesTheSessionsThatWroteIt(t *testing.T) {
 		name string
 		// arrange seeds what the event is about and returns it with the slug of its document
 		// owner, empty for an issue's event.
-		arrange    func(t *testing.T, database *store.Store) (model.Event, string)
+		arrange func(t *testing.T, database *store.Store) (model.Event, string)
+		// deliveries is the outcome of the comment's mention of each session (seedMentionDelivery).
+		deliveries map[string]string
 		wantAgents []string
 	}{
 		{
@@ -186,15 +188,28 @@ func TestACommentOnADocumentReachesTheSessionsThatWroteIt(t *testing.T) {
 			wantAgents: []string{"notifications.agent.session-writer"},
 		},
 		{
-			name: "an author the comment mentions is left to the mention, the other authors reached",
+			name: "an author the comment mentions is left to the mention that reached it, the other authors reached",
 			arrange: func(t *testing.T, database *store.Store) (model.Event, string) {
 				doc := seedDocument(t, database, new("T-1"), "notes", writer, []model.Actor{writer, editor})
 				return model.Event{IssueKey: new("T-1"), Type: "comment.created", Actor: alice, Payload: map[string]any{
 					"id": "00000000-0000-0000-0000-000000000007", "anchor": anchorOn(doc),
-					"suppressed_authors": []any{"session-writer"},
+					"mentions": mentionsOf("session-writer"), "suppressed_authors": []any{"session-writer"},
 				}}, ""
 			},
+			deliveries: map[string]string{"session-writer": "sent"},
 			wantAgents: []string{"notifications.agent.session-editor"},
+		},
+		{
+			name: "an author whose mention failed is reached by the author route",
+			arrange: func(t *testing.T, database *store.Store) (model.Event, string) {
+				doc := seedDocument(t, database, new("T-1"), "notes", writer, []model.Actor{writer, editor})
+				return model.Event{IssueKey: new("T-1"), Type: "comment.created", Actor: alice, Payload: map[string]any{
+					"id": "00000000-0000-0000-0000-000000000015", "anchor": anchorOn(doc),
+					"mentions": mentionsOf("session-writer"), "suppressed_authors": []any{"session-writer"},
+				}}, ""
+			},
+			deliveries: map[string]string{"session-writer": "failed"},
+			wantAgents: []string{"notifications.agent.session-writer", "notifications.agent.session-editor"},
 		},
 		{
 			name: "a reply on a project document reaches its thread's author, not the document's",
@@ -253,11 +268,14 @@ func TestACommentOnADocumentReachesTheSessionsThatWroteIt(t *testing.T) {
 			database := storetest.Open(t)
 			seedIssue(t, database, "T-1", nil)
 			event, slug := tc.arrange(t, database)
+			for sessionID, outcome := range tc.deliveries {
+				seedMentionDelivery(t, database, payloadString(event.Payload, "id"), sessionID, outcome)
+			}
 			event.ID = 100
 			event.CreatedAt = time.Now()
 			event.Notify = events.NewBroker().Notify(event)
 			publisher := &recordingPublisher{}
-			if err := publish(context.Background(), Deps{Store: database, Publisher: publisher}, event, slug, nil, map[string]struct{}{}); err != nil {
+			if err := publish(context.Background(), Deps{Store: database, Publisher: publisher}, event, slug, routing{}, map[string]struct{}{}); err != nil {
 				t.Fatalf("publish %s: %v", event.Type, err)
 			}
 			topics := topicsOf(publisher.all())
