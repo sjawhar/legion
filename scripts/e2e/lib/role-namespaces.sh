@@ -19,12 +19,15 @@
 # refuses a PID namespace entered through the shim's user namespace, so the two hops are in that
 # order (measured in a gVisor pod of the worker image, 2026-10-24). No role-init of ROLE, or two of
 # them (a generation still ending as the next starts), is exit 1 naming why, as a wait expects.
+# Every program here reads `${proc_root:-/proc}`: the container's own /proc, unless a test points
+# proc_root at a fake tree, since a test scanning the host's /proc would find the worker-shim and
+# Oh My Pi of any Legion role running on that host.
 # shellcheck disable=SC2016  # expanded by the pod's shell
 role_enter_sh='
 role=$1
 shift
 init=
-for d in /proc/[0-9]*; do
+for d in "${proc_root:-/proc}"/[0-9]*; do
   tr "\0" "\n" 2>/dev/null <"$d/cmdline" | awk -v role="$role" "
     NR == 2 && \$0 != \"launcher\" { bad = 1; exit }
     NR == 3 && \$0 != \"role-init\" { bad = 1; exit }
@@ -33,10 +36,10 @@ for d in /proc/[0-9]*; do
     { after = (\$0 == \"--role\") }
     END { exit bad || !found }" || continue
   if [ -n "$init" ]; then
-    echo "two role-init processes of $role run in this container: ${init} and ${d#/proc/}" >&2
+    echo "two role-init processes of $role run in this container: ${init} and ${d##*/}" >&2
     exit 1
   fi
-  init=${d#/proc/}
+  init=${d##*/}
 done
 if [ -z "$init" ]; then
   echo "no role-init of $role runs in this container" >&2
@@ -44,14 +47,14 @@ if [ -z "$init" ]; then
 fi
 exec nsenter -t "$init" -U -m -p -i --preserve-credentials -- sh -c "
   shim=
-  for d in /proc/[0-9]*; do
+  for d in \"\${proc_root:-/proc}\"/[0-9]*; do
     [ \"\$(sed -n \"s/^PPid:[[:space:]]*//p\" \"\$d/status\" 2>/dev/null)\" = 1 ] || continue
     [ \"\$(tr \"\\\\0\" \"\\\\n\" 2>/dev/null <\"\$d/cmdline\" | sed -n 2p)\" = worker-shim ] || continue
     if [ -n \"\$shim\" ]; then
-      echo \"two worker-shims run in the namespaces of $role: \$shim and \${d#/proc/}\" >&2
+      echo \"two worker-shims run in the namespaces of $role: \$shim and \${d##*/}\" >&2
       exit 1
     fi
-    shim=\${d#/proc/}
+    shim=\${d##*/}
   done
   if [ -z \"\$shim\" ]; then
     echo \"no worker-shim runs in the namespaces of $role\" >&2
@@ -69,14 +72,14 @@ exec nsenter -t "$init" -U -m -p -i --preserve-credentials -- sh -c "
 # is refused rather than signalled, since that group would be someone else's.
 # shellcheck disable=SC2016  # expanded by the pod's shell
 role_kill_sh='
-init=$1 shim=
-for d in /proc/[0-9]*; do
+init=$1 shim= proc=${proc_root:-/proc}
+for d in "$proc"/[0-9]*; do
   [ "$(sed -n "s/^PPid:[[:space:]]*//p" "$d/status" 2>/dev/null)" = "$init" ] || continue
   [ "$(tr "\0" "\n" 2>/dev/null <"$d/cmdline" | sed -n 2p)" = worker-shim ] || continue
-  [ -z "$shim" ] || { echo "role-init $init runs two worker-shims: $shim and ${d#/proc/}" >&2; exit 1; }
-  shim=${d#/proc/}
+  [ -z "$shim" ] || { echo "role-init $init runs two worker-shims: $shim and ${d##*/}" >&2; exit 1; }
+  shim=${d##*/}
 done
 [ -n "$shim" ] || { echo "role-init $init runs no worker-shim" >&2; exit 1; }
-group=$(sed "s/.*) //" "/proc/$shim/stat" | cut -d" " -f3)
+group=$(sed "s/.*) //" "$proc/$shim/stat" | cut -d" " -f3)
 [ "$group" = "$shim" ] || { echo "the shim $shim of role-init $init is in process group $group, not its own" >&2; exit 1; }
 kill -s KILL -- "-$group"'

@@ -155,9 +155,7 @@ shape_problems`,
 }
 // connectProblems is shape_problems' --connect lines alone.
 function connectProblems(object: object, run: Run = {}): string[] {
-  return shapeProblemLines(object, run).filter(
-    (line) => line.includes("launcher dials") || line.includes("launchers dial")
-  );
+  return shapeProblemLines(object, run).filter((line) => line.includes("launcher dials"));
 }
 // reservationProblems is shape_problems' reservation lines alone: a container's reservation or
 // disk bound, the pod's QoS class, or an affinity.

@@ -61,6 +61,28 @@ describe("nameMissingHelpers", () => {
     expect(() => expectNoMissingHelpers(run.out, run.err)).not.toThrow();
   });
 
+  test("names a helper the extracted function calls with its stdout and stderr silenced", () => {
+    const result = Bun.spawnSync([
+      "bash",
+      "-c",
+      `${nameMissingHelpers(path)}\nquiet() { one_line >/dev/null 2>&1 || echo "code $?"; }\nquiet`,
+    ]);
+    expect(result.stdout.toString()).toBe("code 127\n");
+    expect(result.stderr.toString()).toBe("harness: no definition for one_line\n");
+  });
+
+  test("names a helper a library the script sources defines", () => {
+    const sourcing = join(dir, "sourcing.sh");
+    writeFileSync(sourcing, '#!/usr/bin/env bash\n. "$root/scripts/e2e/lib/rig.sh"\n');
+    const result = Bun.spawnSync([
+      "bash",
+      "-c",
+      `${nameMissingHelpers(sourcing)}\nuntil_true 1 x true 2>/dev/null; echo "code $?"`,
+    ]);
+    expect(result.stdout.toString()).toBe("code 127\n");
+    expect(result.stderr.toString()).toBe("harness: no definition for until_true\n");
+  });
+
   test("leaves a missing command the script does not define as it was: exit 127, unnamed", () => {
     const result = Bun.spawnSync([
       "bash",

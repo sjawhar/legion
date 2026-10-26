@@ -1045,26 +1045,39 @@ assert_claim_endpoints() {
 # worker-shim` - the parent whose argv[1] is worker-shim, as every other reader of a pod's processes
 # takes it (lib/role-namespaces.sh), never a process naming it in a later argv word. It exits 1
 # naming both pids when two such processes run and saying so when none
-# does; otherwise it leaves the pid in $pid for the line each caller appends.
+# does; otherwise it leaves the pid in $pid for the line each caller appends, and the /proc it read
+# in $proc: `${proc_root:-/proc}`, the pod's own unless a test points proc_root at a fake tree (a
+# test reading the host's /proc would find the Oh My Pi of any Legion role running there).
 # shellcheck disable=SC2016  # expanded by the pod's shell
 agent_pid_sh='
+    proc=${proc_root:-/proc}
     found=
-    for d in /proc/[0-9]*; do
+    for d in "$proc"/[0-9]*; do
       argv0=$(tr "\0" "\n" 2>/dev/null <"$d/cmdline" | sed -n 1p)
       [ "${argv0##*/}" = omp ] || continue
       parent=$(sed -n "s/^PPid:[[:space:]]*//p" "$d/status" 2>/dev/null)
-      [ "$(tr "\0" "\n" 2>/dev/null <"/proc/$parent/cmdline" | sed -n 2p)" = worker-shim ] || continue
+      [ "$(tr "\0" "\n" 2>/dev/null <"$proc/$parent/cmdline" | sed -n 2p)" = worker-shim ] || continue
       if [ -n "$found" ]; then
-        echo "more than one Oh My Pi under a legion worker-shim: pids ${found#/proc/} and ${d#/proc/}" >&2
+        echo "more than one Oh My Pi under a legion worker-shim: pids $found and ${d##*/}" >&2
         exit 1
       fi
-      found=$d
+      found=${d##*/}
     done
     if [ -z "$found" ]; then
       echo "no Oh My Pi under a legion worker-shim" >&2
       exit 1
     fi
-    pid=${found#/proc/}'
+    pid=$found'
+# role_shims_sh is the POSIX sh that prints the pid of every worker-shim (argv[1] worker-shim) in
+# the /proc it runs against, one a line: `${proc_root:-/proc}`, the role's own unless a test points
+# proc_root at a fake tree.
+# shellcheck disable=SC2016  # expanded by the pod's shell
+role_shims_sh='
+proc=${proc_root:-/proc}
+for d in "$proc"/[0-9]*; do
+  [ "$(tr "\0" "\n" 2>/dev/null <"$d/cmdline" | sed -n 2p)" = worker-shim ] && echo "${d##*/}"
+done
+true'
 # pod_env POD ROLE prints the environment of ROLE's Oh My Pi in POD (agent_pid_sh), one NAME=value a
 # line, from the /proc of the role's namespaces. The container's spec is not where a role's
 # environment is: it carries only what the kubelet resolves (POD_UID, the operator's Secret
@@ -1072,7 +1085,7 @@ agent_pid_sh='
 pod_env() {
   # shellcheck disable=SC2016  # expanded by the pod's shell
   pod_exec "$1" "$2" sh -c "$agent_pid_sh"'
-    tr "\0" "\n" <"/proc/$pid/environ"'
+    tr "\0" "\n" <"$proc/$pid/environ"'
 }
 pod_endpoint_mismatch() {
   local pod=$1 role=$2 env name want got
@@ -1369,11 +1382,12 @@ driver_action() {
 # role_inits_sh is the POSIX sh, run in an issue pod's `roles` container, that prints one line
 # `ROLE GENERATION PID` for each role generation running there: each `legion launcher role-init`
 # process, its --role and --generation read before the shim's `--`, and its pid as the container
-# sees it. role_inits POD prints POD's, sorted.
+# sees it, read from `${proc_root:-/proc}` (a test's fake tree, else the container's own). role_inits
+# POD prints POD's, sorted.
 # shellcheck disable=SC2016  # expanded by the pod's shell
 role_inits_sh='
-for d in /proc/[0-9]*; do
-  tr "\0" "\n" 2>/dev/null <"$d/cmdline" | awk -v pid="${d#/proc/}" "
+for d in "${proc_root:-/proc}"/[0-9]*; do
+  tr "\0" "\n" 2>/dev/null <"$d/cmdline" | awk -v pid="${d##*/}" "
     NR == 2 && \$0 != \"launcher\" { exit }
     NR == 3 && \$0 != \"role-init\" { exit }
     NR == 3 { ok = 1 }
@@ -4095,8 +4109,7 @@ for role in implementer reviewer; do
   [ -z "$seen" ] || fail "the $role's namespaces of $gh_pod see $roles_dir holding: $(tr '\n' ' ' <<<"$seen")"
   # /proc in the role's namespaces lists its own processes alone: one worker-shim, its own, so no
   # /proc/<pid>/root of a sibling's process is there to read through.
-  # shellcheck disable=SC2016  # expanded by the pod's shell
-  shims=$(pod_exec "$gh_pod" "$role" sh -c 'for d in /proc/[0-9]*; do [ "$(tr "\0" "\n" 2>/dev/null <"$d/cmdline" | sed -n 2p)" = worker-shim ] && echo "${d#/proc/}"; done; true') ||
+  shims=$(pod_exec "$gh_pod" "$role" sh -c "$role_shims_sh") ||
     fail "could not read /proc in the $role's namespaces of $gh_pod"
   [ "$(grep -c . <<<"$shims")" = 1 ] || fail "the $role's namespaces of $gh_pod list worker-shims $(tr '\n' ' ' <<<"$shims"), want its own alone"
 done
@@ -4957,7 +4970,7 @@ for token in $(jq -r '.[].token' <<<"$live_after"); do
   pod=$(jq -r .pod <<<"$claim")
   uid=$(op get pod "$pod" -o jsonpath='{.metadata.uid}') || fail "the operator could not read pod $pod"
   [ "$uid" = "$(jq -r .podUid <<<"$claim")" ] || fail "$token's pod $pod is uid $uid, not its recorded $(jq -r .podUid <<<"$claim")"
-  note "$token: issue pod $pod uid $uid and generation $(jq -r .generation <<<"$claim") unchanged across the restart, its launchers dialling $(pod_connect "$pod")"
+  note "$token: issue pod $pod uid $uid and generation $(jq -r .generation <<<"$claim") unchanged across the restart, its launcher dialling $(pod_connect "$pod")"
 done
 stale=$(log_lines "$stale_msg" | wc -l)
 [ "$stale" = "$stale_before" ] || fail "the restart at the same addresses logged $((stale - stale_before)) stale-address replacements"
@@ -4972,7 +4985,7 @@ begin address-moved-env-same-pod
 # (annotation legion.dev/addresses-<role>), so the runtime reports every live role stale_address
 # naming ENVOY_URL alone, and its claim's supervisor relaunches it at once through its launch path
 # (docs/kubernetes.md, "A pod whose address moved"): its next generation in the same issue pod, whose
-# launchers dial the unchanged stream, resuming the same session, told the new spelling, with no
+# launcher dials the unchanged stream, resuming the same session, told the new spelling, with no
 # launch charged. restart-mid-tree, at the same addresses, relaunched nothing. The respelling stays
 # for the rest of the run.
 live_before=$(live_claims) || fail "legion claims could not be read"
@@ -5003,7 +5016,7 @@ for token in $(jq -r --arg t "$tree1" '.[] | select(.tree == $t) | .token' <<<"$
   [ "$(jq -r .locator.sandbox.podUid <<<"$judged")" = "$(jq -r .podUid <<<"$was")" ] ||
     fail "$token's $role runs in pod uid $(jq -r .locator.sandbox.podUid <<<"$judged"): the respelling replaced its issue pod $(jq -r .podUid <<<"$was")"
   on_handed_addresses "$pod" "$role" "$token's $role in pod $pod"
-  note "$token: generation $(jq -r .generation <<<"$was") → $(jq -r .generation <<<"$judged") in issue pod $pod, uid $(jq -r .podUid <<<"$was") unchanged, $(jq -r .state <<<"$judged"); its launchers dial the unmoved stream; its $role is told ENVOY_URL with the host upper-cased and the run's other services; ${judged_resume:-no --resume (no session recorded)}; budgets $(jq -c .budgets <<<"$judged"); one stale-address replacement logged, naming ENVOY_URL alone"
+  note "$token: generation $(jq -r .generation <<<"$was") → $(jq -r .generation <<<"$judged") in issue pod $pod, uid $(jq -r .podUid <<<"$was") unchanged, $(jq -r .state <<<"$judged"); its launcher dials the unmoved stream; its $role is told ENVOY_URL with the host upper-cased and the run's other services; ${judged_resume:-no --resume (no session recorded)}; budgets $(jq -c .budgets <<<"$judged"); one stale-address replacement logged, naming ENVOY_URL alone"
 done
 # Every other tree's claims move too, though their own workflow may end a phase meanwhile: once each
 # has left the generation it ran, none has left its issue pod, and every claim of the run is on the
@@ -5022,7 +5035,7 @@ pass
 
 begin address-moved-stream-new-pod
 # The daemon restarts with its API and worker-stream ports swapped, the rigs' pair the devbox admits
-# from the Legion nodes, so every role launcher dials a worker stream the daemon no longer serves and
+# from the Legion nodes, so every issue pod's launcher dials a worker stream the daemon no longer serves and
 # every role generation was handed a LEGION_DAEMON_URL it no longer serves. A launcher's --connect is
 # in the issue pod's spec, fixed for the pod's life, and a launcher never redials elsewhere, so the
 # runtime reports every live role stale_address naming --connect, before it reads the role's
@@ -5054,9 +5067,9 @@ for token in $(jq -r --arg t "$tree1" '.[] | select(.tree == $t) | .token' <<<"$
   pod=$(jq -r .locator.sandbox.name <<<"$judged")
   role=$(jq -r .role <<<"$judged")
   [ "$(jq -r .locator.sandbox.podUid <<<"$judged")" != "$(jq -r .podUid <<<"$was")" ] ||
-    fail "$token's $role still runs in issue pod uid $(jq -r .podUid <<<"$was"), whose launchers dial the stream the daemon moved from"
+    fail "$token's $role still runs in issue pod uid $(jq -r .podUid <<<"$was"), whose launcher dials the stream the daemon moved from"
   on_handed_addresses "$pod" "$role" "$token's $role in its new pod $pod"
-  note "$token: issue pod $pod uid $(jq -r .podUid <<<"$was") → $(jq -r .locator.sandbox.podUid <<<"$judged") at generation $(jq -r .generation <<<"$was") → $(jq -r .generation <<<"$judged"), $(jq -r .state <<<"$judged"); its launchers dial $new_stream; its $role is told LEGION_DAEMON_URL $new_daemon_url and the run's services; ${judged_resume:-no --resume (no session recorded)}; budgets $(jq -c .budgets <<<"$judged"); one stale-address replacement logged, naming --connect alone"
+  note "$token: issue pod $pod uid $(jq -r .podUid <<<"$was") → $(jq -r .locator.sandbox.podUid <<<"$judged") at generation $(jq -r .generation <<<"$was") → $(jq -r .generation <<<"$judged"), $(jq -r .state <<<"$judged"); its launcher dials $new_stream; its $role is told LEGION_DAEMON_URL $new_daemon_url and the run's services; ${judged_resume:-no --resume (no session recorded)}; budgets $(jq -c .budgets <<<"$judged"); one stale-address replacement logged, naming --connect alone"
 done
 # An issue's roles share its one pod, so each of tree 1's issues runs every role in the one pod that
 # replaced its stale one.

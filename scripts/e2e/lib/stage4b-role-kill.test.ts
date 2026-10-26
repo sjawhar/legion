@@ -230,65 +230,151 @@ describe("role entry", () => {
   });
 });
 
-// agent_pid_sh finds a role's Oh My Pi by the same rule: the process whose argv[0] is omp under a
-// parent whose argv[1] is worker-shim. It runs here on real processes this test starts, since the
-// host's own /proc is what it reads in a pod.
-describe("agent_pid_sh", () => {
-  const agentPidSh = /^agent_pid_sh='[\s\S]*?'$/m.exec(readFileSync(stage4b, "utf8"))?.[0] ?? "";
-  // The shim stand-in is a bash whose script file is named worker-shim, so its argv is
-  // `<argv0> worker-shim`; its child execs sleep under the name omp, as a pod's agent runs. It
-  // lives in a directory of its own, since role_kill_sh's own stand-in makes a FIFO of that name.
-  const shimDir = join(dir, "agent-pid");
-  mkdirSync(shimDir);
-  writeFileSync(join(shimDir, "worker-shim"), 'exec -a omp sleep 300 &\necho "agent $!"\nwait\n');
-
-  // parent is the bash command line that becomes the agent's parent process.
-  async function agentPid(parent: string) {
-    const started = Bun.spawn(["bash", "-c", `cd ${JSON.stringify(shimDir)} && ${parent}`], {
-      stdout: "pipe",
-    });
-    const reader = started.stdout.getReader();
-    let out = "";
-    while (!/agent \d+/.test(out)) {
-      const { value, done } = await reader.read();
-      if (done) throw new Error(`the stand-in shim ended early: ${out}`);
-      out += new TextDecoder().decode(value);
-    }
-    const agent = Number(/agent (\d+)/.exec(out)?.[1]);
-    try {
-      // The agent's exec may not have happened yet; agent_pid_sh reads argv[0].
-      for (let i = 0; i < 100; i++) {
-        if (readFileSync(`/proc/${agent}/cmdline`, "utf8").split("\0")[0] === "omp") break;
-        await Bun.sleep(20);
-      }
-      const probe = Bun.spawnSync([
-        "bash",
-        "-c",
-        `${agentPidSh}\nsh -c "$agent_pid_sh"'\n    echo "$pid"'`,
-      ]);
-      return {
-        found: probe.stdout.toString().trim(),
-        err: probe.stderr.toString().trim(),
-        agent: String(agent),
-      };
-    } finally {
-      process.kill(agent, "SIGKILL");
-      started.kill("SIGKILL");
-      await started.exited;
-    }
+// The pod-side /proc readers run here against a fake /proc tree (proc_root), never the host's: a
+// Legion role running on the host has a real `legion worker-shim` with an `omp` child, which a scan
+// of the host's /proc would find.
+interface FakeProc {
+  pid: number;
+  ppid: number;
+  argv: string[];
+  pgrp?: number;
+}
+function fakeProc(name: string, procs: FakeProc[]): string {
+  const root = join(dir, `proc-${name}`);
+  for (const p of procs) {
+    const d = join(root, String(p.pid));
+    mkdirSync(d, { recursive: true });
+    writeFileSync(join(d, "cmdline"), `${p.argv.join("\0")}\0`);
+    writeFileSync(join(d, "status"), `Name:\t${p.argv[0]}\nPid:\t${p.pid}\nPPid:\t${p.ppid}\n`);
+    writeFileSync(join(d, "stat"), `${p.pid} (${p.argv[0]}) S ${p.ppid} ${p.pgrp ?? p.pid} 0\n`);
   }
+  return root;
+}
+function snippet(file: string, name: string) {
+  return new RegExp(`^${name}='[\\s\\S]*?'$`, "m").exec(readFileSync(file, "utf8"))?.[0] ?? "";
+}
+function runSnippet(definition: string, call: string, root: string) {
+  const r = Bun.spawnSync(["bash", "-c", `${definition}\n${call}`], {
+    env: { ...process.env, proc_root: root },
+  });
+  return { out: r.stdout.toString().trim(), err: r.stderr.toString().trim(), code: r.exitCode };
+}
 
-  test("finds the one Oh My Pi whose parent's argv[1] is worker-shim", async () => {
-    const run = await agentPid("exec -a legion bash worker-shim");
-    expect(run.err).toBe("");
-    expect(run.found).toBe(run.agent);
-  }, 120_000);
+// agent_pid_sh finds a role's Oh My Pi by the same rule: the process whose argv[0] is omp under a
+// parent whose argv[1] is worker-shim.
+describe("agent_pid_sh", () => {
+  const def = snippet(stage4b, "agent_pid_sh");
+  const probe = (root: string) =>
+    runSnippet(def, `sh -c "$agent_pid_sh"'\n    echo "$pid $proc"'`, root);
 
-  test("a parent naming worker-shim in a later argv word holds no agent", async () => {
-    const run = await agentPid(
-      "exec -a legion bash -c 'exec -a omp sleep 300 &\necho \"agent $!\"\nwait' launcher --role worker-shim"
-    );
-    expect(run.err).toContain("no Oh My Pi under a legion worker-shim");
-    expect(run.found).toBe("");
-  }, 120_000);
+  test("finds the one Oh My Pi whose parent's argv[1] is worker-shim, in the proc root it is given", () => {
+    const root = fakeProc("agent-one", [
+      { pid: 1, ppid: 0, argv: ["legion", "launcher", "role-init", "--role", "planner"] },
+      { pid: 7, ppid: 1, argv: ["/opt/legion/bin/legion", "worker-shim", "--", "omp"] },
+      { pid: 9, ppid: 7, argv: ["omp", "--mode", "rpc"] },
+      { pid: 12, ppid: 9, argv: ["bash", "-c", "omp"] },
+    ]);
+    expect(probe(root)).toEqual({ out: `9 ${root}`, err: "", code: 0 });
+  });
+
+  test("a parent naming worker-shim in a later argv word holds no agent", () => {
+    const root = fakeProc("agent-later", [
+      { pid: 1, ppid: 0, argv: ["legion", "launcher", "--role", "worker-shim"] },
+      { pid: 9, ppid: 1, argv: ["omp"] },
+    ]);
+    const run = probe(root);
+    expect(run.err).toBe("no Oh My Pi under a legion worker-shim");
+    expect(run.code).toBe(1);
+  });
+
+  test("two Oh My Pi processes under worker-shims are refused, both named", () => {
+    const root = fakeProc("agent-two", [
+      { pid: 7, ppid: 1, argv: ["legion", "worker-shim"] },
+      { pid: 9, ppid: 7, argv: ["/usr/bin/omp"] },
+      { pid: 17, ppid: 1, argv: ["legion", "worker-shim"] },
+      { pid: 19, ppid: 17, argv: ["omp"] },
+    ]);
+    const run = probe(root);
+    expect(run.err).toMatch(/^more than one Oh My Pi under a legion worker-shim: pids (9 and 19|19 and 9)$/);
+    expect(run.code).toBe(1);
+  });
+});
+
+describe("role_shims_sh", () => {
+  test("lists every argv[1] worker-shim of the proc root it is given, and no later-word one", () => {
+    const root = fakeProc("shims", [
+      { pid: 7, ppid: 1, argv: ["legion", "worker-shim"] },
+      { pid: 8, ppid: 1, argv: ["bash", "-c", "x", "worker-shim"] },
+      { pid: 17, ppid: 1, argv: ["legion", "worker-shim"] },
+    ]);
+    const run = runSnippet(snippet(stage4b, "role_shims_sh"), 'sh -c "$role_shims_sh"', root);
+    expect(run.out.split("\n").sort()).toEqual(["17", "7"]);
+    expect(run.code).toBe(0);
+  });
+});
+
+describe("role_inits_sh", () => {
+  test("prints ROLE GENERATION PID for each role-init of the proc root it is given", () => {
+    const root = fakeProc("inits", [
+      { pid: 1, ppid: 0, argv: ["legion", "launcher", "--roles-dir", "/r", "--role", "planner"] },
+      {
+        pid: 20,
+        ppid: 1,
+        argv: ["legion", "launcher", "role-init", "--role", "planner", "--generation", "3", "--", "x"],
+      },
+      {
+        pid: 30,
+        ppid: 1,
+        argv: ["legion", "launcher", "role-init", "--generation", "1", "--", "--role", "tester"],
+      },
+    ]);
+    const run = runSnippet(snippet(stage4b, "role_inits_sh"), 'sh -c "$role_inits_sh"', root);
+    expect(run).toEqual({ out: "planner 3 20", err: "", code: 0 });
+  });
+});
+
+// role_enter_sh's first hop, read from a fake tree: the nsenter it then runs needs a real pod, so
+// only the refusals before it run here.
+describe("role_enter_sh finds the role-init in the proc root it is given", () => {
+  const def = `. ${JSON.stringify(lib)}`;
+  test("none of the role is refused, a --role after the shim's -- not counted", () => {
+    const root = fakeProc("enter-none", [
+      { pid: 20, ppid: 1, argv: ["legion", "launcher", "role-init", "--role", "tester", "--", "--role", "planner"] },
+    ]);
+    const run = runSnippet(def, 'sh -c "$role_enter_sh" role-enter planner true', root);
+    expect(run).toEqual({ out: "", err: "no role-init of planner runs in this container", code: 1 });
+  });
+
+  test("two of the role are refused, both named", () => {
+    const root = fakeProc("enter-two", [
+      { pid: 20, ppid: 1, argv: ["legion", "launcher", "role-init", "--role", "planner"] },
+      { pid: 30, ppid: 1, argv: ["legion", "launcher", "role-init", "--role", "planner"] },
+    ]);
+    const run = runSnippet(def, 'sh -c "$role_enter_sh" role-enter planner true', root);
+    expect(run.err).toBe("two role-init processes of planner run in this container: 20 and 30");
+    expect(run.code).toBe(1);
+  });
+});
+
+describe("role_kill_sh reads the proc root it is given", () => {
+  const def = `. ${JSON.stringify(lib)}`;
+  test("two worker-shims of the role-init are refused, nothing signalled", () => {
+    const root = fakeProc("kill-two", [
+      { pid: 7, ppid: 5, argv: ["legion", "worker-shim"] },
+      { pid: 17, ppid: 5, argv: ["legion", "worker-shim"] },
+    ]);
+    const run = runSnippet(def, 'sh -c "$role_kill_sh" role-kill 5', root);
+    // The shell's glob lists 17 before 7.
+    expect(run).toEqual({ out: "", err: "role-init 5 runs two worker-shims: 17 and 7", code: 1 });
+  });
+
+  test("a shim outside a process group of its own is refused, nothing signalled", () => {
+    const root = fakeProc("kill-group", [{ pid: 7, ppid: 5, pgrp: 4, argv: ["legion", "worker-shim"] }]);
+    const run = runSnippet(def, 'sh -c "$role_kill_sh" role-kill 5', root);
+    expect(run).toEqual({
+      out: "",
+      err: "the shim 7 of role-init 5 is in process group 4, not its own",
+      code: 1,
+    });
+  });
 });
