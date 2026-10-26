@@ -2,10 +2,18 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-253",
-  "completed": "2026-10-26T11:55:41Z",
+  "completed": "2026-10-26T12:40:31Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2229",
-  "codeHead": "c432d8ef102884a3e7751707556ec8f03fe38a4e",
+  "codeHead": "b5139e26d69c6ad4528be7da037867b8cfea8348",
   "proof": [
+    {
+      "criterion": "Round 4 (review round 2): a misparsed --list (Playwright reads it as --grep's value, a real run) cannot get past the DISPATCH_E2E_REUSE_SERVERS refusal; a genuine listing still needs no harness",
+      "surface": "pod, real Playwright CLI evaluating e2e/playwright.config.ts; the harness through bun e2e/run.ts with Chromium and a scratch pgvector database",
+      "command": "cd packages/dispatch && bunx playwright test --config e2e/playwright.config.ts --project=webkit-iphone --list; FAKE_ENVOY_PORT=45999 bunx playwright test --config e2e/playwright.config.ts --grep-invert --list; bunx playwright test --config e2e/playwright.config.ts --grep --list; DATABASE_URL=<scratch> bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts --project=chromium --project=chromium-plain-http e2e/fake-envoy.e2e.ts e2e/plain-http-proxy.e2e.ts e2e/plain-http-origin.e2e.ts e2e/smoke.e2e.ts",
+      "observed": "bare listing: 'Total: 11 tests in 4 files'; --grep --list with no port fails at preflight (ECONNREFUSED), targeting nothing; --list with every port and DISPATCH_E2E_REUSE_SERVERS=1 lists; the harness run: 7 passed",
+      "headSha": "b5139e26d69c6ad4528be7da037867b8cfea8348",
+      "negativeControl": "FAKE_ENVOY_PORT=45999 … --grep-invert --list → 'Error: This config starts no server, so it would run against whatever listens on 45999 (FAKE_ENVOY_PORT), …' (at c432d8ef the same argv skipped this refusal and reached preflight)"
+    },
     {
       "criterion": "Round 3 (review): a Playwright listing needs no harness; a non-listing bare run still refuses",
       "surface": "pod, real Playwright CLI evaluating e2e/playwright.config.ts with no harness ports set",
@@ -101,7 +109,8 @@
     "packages/dispatch/e2e: harness-start.ts, run.ts, OS-chosen fake/server/proxy ports, run-server.sh (held socket, DISPATCH_E2E_LISTEN_FROM), playwright.config.ts; docs/site/media harness and rigs; packages/pi-legion skill-scenarios rig; packages/claude-envoy smoke",
     "docs: AGENTS.md, docs/deployment.md, docs/kubernetes.md, READMEs, CHANGELOGs, skills/legion-worker/references/tools.md (+ generated mirror), dated notes in docs/solutions",
     "round 2: scripts/e2e/lib/smoke-cleanup.test.ts and stage3-4b13b-notes.test.ts declare the keeper pids; scripts/e2e/stage2-tmux-supervision.sh expects the gate's current loader lists; docs/site/media/walkthroughs/legion-operator/record-casts.sh resolves LEGION_GH_PATH",
-    "round 3: .github/workflows/envoy-and-contracts.yaml (held-port.py in both trigger lists; dispatch filter adds listenfd, githubappjwt, id); packages/dispatch/e2e/playwright.config.ts and AGENTS.md (listing needs no harness); scripts/e2e/lib/held-port.py (darwin --from); cleanup commit 9a26a4a6 (daemon listen path, Dispatch empty listen settings, cmdtest.CloseExtraFiles, startListenerConfig, scripts/e2e/lib/port-file.sh)"
+    "round 3: .github/workflows/envoy-and-contracts.yaml (held-port.py in both trigger lists; dispatch filter adds listenfd, githubappjwt, id); packages/dispatch/e2e/playwright.config.ts and AGENTS.md (listing needs no harness); scripts/e2e/lib/held-port.py (darwin --from); cleanup commit 9a26a4a6 (daemon listen path, Dispatch empty listen settings, cmdtest.CloseExtraFiles, startListenerConfig, scripts/e2e/lib/port-file.sh)",
+    "round 4: packages/dispatch/e2e/playwright.config.ts and AGENTS.md (listing exempt only from the unset-ports refusal); scripts/e2e/stage2-tmux-supervision.sh and verifiers-staging-token.sh wait through lib/port-file.sh (port_of); packages/daemon/cmd/legion/main_test.go heldSocket comment"
   ],
   "trickyParts": [
     "A held socket accepts and queues connections before the server serves, so every readiness poll against one carries a timeout and waits for the server's own listening line (dispatch and listener launchers, memory harness, search scripts, Stage 1).",
@@ -122,7 +131,9 @@
     "Round 3: the dispatch path filter also gained packages/envoy/internal/githubappjwt/** and internal/id/**, which go list -deps ./cmd/dispatch names and the filter lacked.",
     "Round 3: overrides.inherited folded into overrides.listen (a handed() listen) rather than a bare listener field, because ~100 test call sites hand a listener through fakeRuntime/heldListen without cfg.",
     "Round 3: the reviewer's six fast-follow items were done in this PR (9a26a4a6), not deferred; the search scripts' port-file wait is now 30 s (shared bound) instead of 10 s.",
-    "Round 3: a third forward merge of main for a GitHub-reported conflict (packages/envoy/CHANGELOG.md); fingerprint unchanged."
+    "Round 3: a third forward merge of main for a GitHub-reported conflict (packages/envoy/CHANGELOG.md); fingerprint unchanged.",
+    "Round 4: the three Minor items were done in this PR (stage2 and verifiers share lib/port-file.sh's wait, which stops on a dead keeper or binary; the heldSocket comment); the Fast-follow line stays none.",
+    "Round 4: a fourth forward merge of main for a GitHub-reported conflict: #2188 gave the scratch-Dispatch start a NATS form, now carried on the held-socket start; the four scratch-Dispatch tests pass."
   ],
   "openQuestions": [
     "envoy-smoke at the code head is the first run of SCM_RIGHTS into a host-network container (plan risk 6); if it fails the plan says report to the architect, no fallback.",
@@ -132,7 +143,7 @@
     "The Dispatch memory tests that reset peak memory need write access to /proc/<pid>/clear_refs, which gVisor pods refuse; CI's dispatch-memory job is their surface (the same failure on the base harness).",
     "WebKit and Firefox Playwright projects cannot launch in the pod (missing system libraries, no root); CI's dispatch job runs them."
   ],
-  "round": 3,
+  "round": 4,
   "notRunEndToEnd": [
     "stage3-devbox-workflow.sh, stage3-4b13b-acceptance.sh, claude-backend-tmux.sh, dispatch-user-turns.sh, and stage2-tmux-supervision.sh from model-turn-through-the-route on: the devbox has no working model route. Their changed functions ran against real processes: rig.sh start_held/keep_port/start_kept/report_port/held_only_by with the real envoy-listener, envoy-dispatch (env -i, DISPATCH_LISTEN_FD=3), run-server.sh, nats-server -p -1 and legion start on a keeper, in the pod; the keeper daemon path is Stage 1's (pod and CI PASS); the stage3/4b13b cleanup with keeper stops runs in smoke-cleanup.test.ts and stage3-4b13b-notes.test.ts (pod, CI); stage2's gate checks, architect-registers-and-is-ready and envoy-role-held passed on the devbox with the two gate strings patched.",
     "lib/bridge-tunnel.sh (stage4a bridge mode): no cluster with pods/portforward and no devbox result; ran in the pod against a stub kubectl that binds :0 and stub chisel (port read from the Forwarding line, port-forward and chisel restarted on a new port, bridge_stop leaves nothing).",
