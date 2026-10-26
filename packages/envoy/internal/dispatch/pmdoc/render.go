@@ -37,11 +37,6 @@ type renderer struct {
 	// bareEmptyCode writes an empty code block in a typed block in a list item as its fences alone,
 	// and wroteBlankEmptyCode records one written with a line between them (emptyCodeWrittenBare).
 	bareEmptyCode, wroteBlankEmptyCode bool
-	// rawTitles is every image this render wrote with a title or link title holding a line feed
-	// written as it is (rawTitleLinesHold), and escapedTitles every image whose titles' line feeds
-	// are written `&#10;` regardless, set where render found the document misread so written. Each
-	// is a set: a run can be written more than once (inlineWithEscapes).
-	rawTitles, escapedTitles map[*Node]bool
 	// spanBudget is how many more empty cells the tables' spans may add: maxSpanCells, or none in
 	// a spanless render (renderSpanless).
 	spanBudget   int
@@ -134,106 +129,34 @@ func render(doc *Node, spanCells int) (r *renderer, err error) {
 		return &renderer{spanBudget: spanCells}, nil
 	}
 	labels := definedFootnoteLabels(doc)
-	r = renderBlocks(doc, labels, false, spanCells, nil)
+	r = renderBlocks(doc, labels, false, spanCells)
 	// An empty code block in a typed block in a spread list item is written with a line between its
 	// fences, as main wrote it, except in a document holding a shape this parser reads only as the
 	// browser editor does, where that line is refused (emptyCodeWrittenBare): there the document is
 	// written again with the fences alone.
 	if r.err == nil && r.wroteBlankEmptyCode && holdsBrowserOnlyShape(r.b.Bytes()) {
-		r = renderBlocks(doc, labels, true, spanCells, nil)
+		r = renderBlocks(doc, labels, true, spanCells)
 	}
 	// An image's title or link title holding a line feed is written as the server has always
-	// written it, the line feed as it is, wherever that reads back as held in the document around
-	// it: in a paragraph, a list item or a block quote the next line is the paragraph's
-	// continuation, lazy or not, so a title the server already stores keeps its bytes. Elsewhere
-	// both titles' line feeds are written `&#10;`, which reads back as the line feed anywhere: in a
-	// heading and a table cell, whose line a line feed ends, and where a line the title creates
-	// would end the paragraph, open a block or lose its indentation. That is judged as the image is
-	// written, one created line at a time (rawTitleLinesHold), not by reading the document back:
-	// whether a line continues an open paragraph turns only on its own start and, for a table's
-	// delimiter row, the line before it, and a lazy continuation, written without its container's
-	// prefix, opens a block wherever a prefixed line would; the reading differs only in what a lazy
-	// line cannot be, a setext underline or a table row, which the judgement reads lazily. Reading
-	// the whole document back for each such image, and writing it again with one more title
-	// `&#10;` for each it found misread, cost a read and a render of the whole document per image,
-	// quadratic in them (INFRA-190). The judgement is checked once, bounded: when a title was
-	// written raw, the document is read back, and if an image at or after one so written does not
-	// read back as held (rawTitleMisread), the document is written again, once, with every title
-	// `&#10;`, so a wrong judgement costs the raw titles their bytes rather than the write.
-	if r.err == nil && len(r.rawTitles) > 0 {
-		if images := documentImages(doc); rawTitleMisread(images, r.b.String(), r.rawTitles) {
-			escaped := make(map[*Node]bool, len(images))
-			for _, image := range images {
-				escaped[image] = true
-			}
-			r = renderBlocks(doc, labels, r.bareEmptyCode, spanCells, escaped)
-		}
-	}
+	// written it, the line feed as it is, wherever both readers read that back as held - Go's and
+	// the browser editor's engine, which draws the past-version view - so a title the server
+	// already stores keeps its bytes. Elsewhere both titles' line feeds are written `&#10;`, which
+	// reads back as the line feed anywhere. That is judged as the image is written, one line the
+	// title creates at a time (rawTitleLinesHold), never by reading the document back: reading it
+	// back once for each such image was quadratic in them, and even once costs Go's parse of the
+	// whole document, superlinear in a long title, and a second render where it disagrees
+	// (INFRA-190).
 	if r.err != nil {
 		return nil, r.err
 	}
 	return r, nil
 }
 
-// rawTitleMisread reports whether markdown, written with written, doc's images in document order,
-// fails to read back with them as held at or after an image whose titles' line feeds were written
-// as they are (rawTitles), which only a title's line feed written so can cause: each is compared by
-// its source, alt, title, link and link title, and a title's line feed can only change what is read
-// after it. Markdown that does not read at all is misread.
-func rawTitleMisread(written []*Node, markdown string, rawTitles map[*Node]bool) bool {
-	back, err := Parse(markdown)
-	if err != nil {
-		return true
-	}
-	read := documentImages(back)
-	misread := min(len(written), len(read))
-	for index := range misread {
-		if !sameImageFields(written[index], read[index]) {
-			misread = index
-			break
-		}
-	}
-	if misread == len(written) && len(written) == len(read) {
-		return false
-	}
-	for index := min(misread, len(written)-1); index >= 0; index-- {
-		if rawTitles[written[index]] {
-			return true
-		}
-	}
-	return false
-}
-
-// documentImages is doc's images in document order.
-func documentImages(doc *Node) []*Node {
-	var images []*Node
-	Walk(doc, func(node *Node) bool {
-		if node.Type == "image" {
-			images = append(images, node)
-		}
-		return true
-	})
-	return images
-}
-
-// sameImageFields reports whether two images hold the same source, alt, title, link and link
-// title, an absent one the same as an empty one.
-func sameImageFields(a, b *Node) bool {
-	for _, field := range []string{"src", "alt", "title", "link", "linkTitle"} {
-		first, _ := a.Attrs[field].(string)
-		second, _ := b.Attrs[field].(string)
-		if first != second {
-			return false
-		}
-	}
-	return true
-}
-
 // renderBlocks writes doc's blocks, an empty code block in a typed block in a spread list item as
-// its fences alone when bareEmptyCode says so, its tables' spans adding at most spanCells cells,
-// and the titles of each image escapedTitles holds with their line feeds `&#10;`.
-func renderBlocks(doc *Node, labels footnoteLabelSet, bareEmptyCode bool, spanCells int, escapedTitles map[*Node]bool) *renderer {
-	r := &renderer{footnoteLabels: labels, bareEmptyCode: bareEmptyCode, spanBudget: spanCells, escapedTitles: escapedTitles}
+// its fences alone when bareEmptyCode says so, and its tables' spans adding at most spanCells
+// cells.
+func renderBlocks(doc *Node, labels footnoteLabelSet, bareEmptyCode bool, spanCells int) *renderer {
+	r := &renderer{footnoteLabels: labels, bareEmptyCode: bareEmptyCode, spanBudget: spanCells}
 	r.blocks(doc.Children, "")
 	if r.err != nil {
 		return r

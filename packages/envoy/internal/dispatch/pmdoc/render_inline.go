@@ -516,19 +516,15 @@ func (r *renderer) writeInlineRun(nodes []*Node, prefix string, context inlineCo
 			alt, _ := n.Attrs["alt"].(string)
 			writtenAlt := imageAlt(alt, context)
 			// A title's line feed is written as it is, so a title the server already stores keeps
-			// its bytes, wherever every line it creates reads as the paragraph's continuation
-			// (rawTitleLinesHold), and as `&#10;` in both titles elsewhere: in a heading or a table
-			// cell, whose line it would end, where a line it creates would end the paragraph or
-			// open a block, and in an image render's check of the whole document found misread so
-			// written (render).
+			// its bytes, wherever both Go's reader and the browser editor's engine read every line
+			// it creates as the paragraph's continuation (rawTitleLinesHold), and as `&#10;` in
+			// both titles elsewhere: in a heading or a table cell, whose line it would end, and
+			// where a line it creates would end the paragraph, open a block or lose its
+			// indentation in either reader.
 			image := imageSyntax(n, writtenAlt, escapePipes, false)
-			if !context.tableCell && !context.heading && !r.escapedTitles[n] && (strings.Contains(title, "\n") || strings.Contains(linkTitle, "\n")) {
+			if !context.tableCell && !context.heading && (strings.Contains(title, "\n") || strings.Contains(linkTitle, "\n")) {
 				if raw := imageSyntax(n, writtenAlt, escapePipes, true); r.rawTitleLinesHold(raw, prefix) {
 					image = raw
-					if r.rawTitles == nil {
-						r.rawTitles = map[*Node]bool{}
-					}
-					r.rawTitles[n] = true
 				}
 			}
 			r.writeSyntax(image)
@@ -598,18 +594,31 @@ func (r *renderer) endLine(continues bool) {
 
 // rawTitleLinesHold reports whether raw, an image written with its titles' line feeds as they are,
 // keeps every line those line feeds create in the paragraph the image stands in, as the line
-// before's continuation, so that the image reads back as held. It judges each line by itself, never
-// reading the document back: whether a line continues an open paragraph turns on the line's own
-// start, and, for a table's delimiter row, on the line before, its header. A line that is blank,
-// other than raw's last, ends the paragraph; one opening with a space or a tab loses them to the
-// paragraph, which strips them; one opening with `>` opens a quote or, in a quote, loses the `>` to
-// it; a lone `:::` closes the typed block around it; and a line that opens any other block ends the
-// paragraph (continuesParagraph). A container's prefix is not written on these lines, so in a list
-// item, a quote or a footnote definition (prefix) each is the paragraph's lazy continuation, which
-// opens a block wherever a prefixed line would, reads no `=` line as a setext underline and makes
-// no table; a typed block behind such a prefix takes no lazy line at all, and ends before it. Each
-// line costs a read of itself after one short line, and a delimiter row a scan of its header, at
-// most maxTableHeaderRead bytes, so the judgement is linear in the document.
+// before's continuation, in both Go's reader and the browser editor's engine, so that the image
+// reads back as held in both. It judges each line by itself, never reading the document back, so
+// the judgement is linear in the document. A line that is blank, other than raw's last, ends the
+// paragraph; one opening with a space or a tab loses them to the paragraph, which strips them; one
+// opening with `>` opens a quote or, in a quote, loses the `>` to it; and a lone `:::` closes the
+// typed block around it.
+//
+// In a top-level paragraph or a typed block (no prefix) each line follows a line of the paragraph
+// in the same container, and both readers read it as CommonMark reads such a line: it ends the
+// paragraph only where it opens a block that can interrupt one (continuesParagraph), or a table's
+// delimiter row makes the paragraph a table (makesTable). An HTML block of type 7 (`<span>`), an
+// ordered list item not starting at 1 or a link reference definition cannot, and continues it.
+//
+// A container's prefix is not written on these lines, so in a list item, a quote or a footnote
+// definition (prefix) each is the paragraph's lazy continuation, and there the readers differ: a
+// lazy line is no setext underline and makes no table in either, but the engine's open container
+// there is the list item or the quote, not the paragraph, so it opens any block the line starts,
+// those that cannot interrupt a paragraph too, which Go's reader takes as the paragraph's text.
+// The line read alone as a document, whose container is no paragraph either, stands in for the
+// engine's reading (readsAloneAsContinuation); it opens every block a prefixed line could, so Go's
+// reader holds what it holds. A typed block behind such a prefix takes no lazy line at all, and
+// ends before it.
+//
+// Each line costs a read of itself, and for no prefix a read after one short line and a delimiter
+// row a scan of its header, at most maxTableHeaderRead bytes.
 func (r *renderer) rawTitleLinesHold(raw, prefix string) bool {
 	typed := r.scope().typed
 	if typed != nil && typed.prefix != "" {
@@ -629,9 +638,14 @@ func (r *renderer) rawTitleLinesHold(raw, prefix string) bool {
 			return false
 		case typed != nil && strings.TrimSpace(line) == ":::":
 			return false
+		case lazy:
+			if !readsAloneAsContinuation(line) {
+				return false
+			}
+			continue
 		}
 		header := "x"
-		if width, ok := delimiterRowWidth(line); ok && !lazy {
+		if width, ok := delimiterRowWidth(line); ok {
 			if r.makesTable(lines, index+1, width) {
 				return false
 			}
@@ -639,7 +653,7 @@ func (r *renderer) rawTitleLinesHold(raw, prefix string) bool {
 			// other block it opens.
 			header = strings.Repeat("x|", width) + "x"
 		}
-		if !continuesParagraph(header, line, lazy) {
+		if !continuesParagraph(header, line) {
 			return false
 		}
 	}
@@ -682,14 +696,24 @@ func delimiterRowWidth(line string) (int, bool) {
 }
 
 // continuesParagraph reports whether line, written with no prefix after header, a line of an open
-// paragraph, reads as the paragraph's next line as a line of plain text does, lazily where lazy:
-// the paragraph is read inside a quote, whose prefix line does not carry.
-func continuesParagraph(header, line string, lazy bool) bool {
+// paragraph, reads as the paragraph's next line as a line of plain text does.
+func continuesParagraph(header, line string) bool {
 	opener := header + "\n"
-	if lazy {
-		opener = "> " + opener
-	}
 	return slices.Equal(blockKinds(opener+line), blockKinds(opener+"x"))
+}
+
+// paragraphKinds is the blocks a line of plain text read alone as a document makes: a paragraph.
+// definitionKinds is those a link reference definition alone makes: none, the document's alone.
+var paragraphKinds, definitionKinds = blockKinds("x"), blockKinds("[l]: /u")
+
+// readsAloneAsContinuation reports whether line, a lazy continuation line of a paragraph, is read
+// by both readers as the paragraph's text, judged by how it reads alone as a document: as a
+// paragraph and nothing else, as a line of plain text does, or as link reference definitions and
+// nothing else. Both readers read definitions only at a paragraph's start, which a lazy line never
+// is, so there it is text whatever it reads as alone.
+func readsAloneAsContinuation(line string) bool {
+	kinds := blockKinds(line)
+	return slices.Equal(kinds, paragraphKinds) || slices.Equal(kinds, definitionKinds)
 }
 
 func (r *renderer) closeMarks(marks []Mark, escapePipes bool) {

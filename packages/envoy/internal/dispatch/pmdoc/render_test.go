@@ -502,15 +502,19 @@ func TestRenderWritesALinkedImageInsideItsLink(t *testing.T) {
 // take the rendering as the tree, and the editor's engine reads the same image, for references
 // with a name an HTML entity has and without one, numeric ones, backslashes, angle brackets,
 // parentheses, spaces, quotes, control characters, non-ASCII text, pipes and line breaks whose
-// next line could open a block, in every block the writer writes an image in: a paragraph, a level
-// 1 and a level 2 heading (written ATX), a table cell, a bullet and an ordered list item, a block
-// quote, a list item in a block quote, a typed block and a footnote definition.
+// next line could open a block - those that can interrupt a paragraph and those that cannot (an
+// HTML block of type 7 such as `<span>`, an ordered list item not starting at 1, an empty list
+// item, a link reference definition), which a lazy continuation line opens in the engine but not
+// in Go - in every block the writer writes an image in: a paragraph, a level 1 and a level 2
+// heading (written ATX), a table cell, a bullet and an ordered list item, a block quote, a list
+// item in a block quote, a typed block and a footnote definition.
 //
 // And a document the base wrote is not churned: wherever the base's spelling of the same
 // document - its image written by escapeLinkDestination and titleSuffix, the base's own writers,
-// a title's line feed as it is - reads back as held, the writer writes those bytes. A title's line
-// feed is so written as it is in a paragraph, a list item or a block quote, as the server stores
-// it, and as `&#10;` in a heading, a table cell, and wherever the raw line feed does not read back.
+// a title's line feed as it is - reads back as held in Go and in the engine both, the writer
+// writes those bytes. A title's line feed is so written as it is in a paragraph, a list item or a
+// block quote, as the server stores it, and as `&#10;` in a heading, a table cell, and wherever
+// the raw line feed does not read back as held in either reader.
 func TestRenderWritesEachImageFieldSoItReadsBackAsHeld(t *testing.T) {
 	common := []string{
 		"&amp;", "i&amp;.png", "&copy;", "a&copy;b", "&foo;", "a&foo;b", "&#", "a&#b", "&#65;", "&#x41;", "&#X41;x",
@@ -520,6 +524,8 @@ func TestRenderWritesEachImageFieldSoItReadsBackAsHeld(t *testing.T) {
 		"https://u.com/?a=1&amp;b=2&c=3", "javascript&#58;x",
 		"a\n\nb", "\n", "a\n", "\na", "a\n  b", "a\n\tb", "a \nb", "a\n# b", "a\n===", "a\n---", "a\n- b",
 		"a\n1. b", "a\n> b", "a\n```", "a\n|b", "a\n\n\nb",
+		"a\n<span>\nz", "a\n</span>\nz", "a\n<b>", "a\n<x-y>\nz", "a\n<div>\nz", "a\n<!-- c -->\nz",
+		"a\n2. b", "a\n10) b", "a\n-\nb", "a\n+ b", "a\n* b", "a\n[l]: /u", "a\n[l]: /u\nz", "a\n~~~", "a\n***",
 	}
 	titles := []string{`"`, `say "hi"`, `\"`, `a\"b`, "'", `"\`, `a"`}
 	image := func(src string, title any, link, linkTitle any) *Node {
@@ -1353,4 +1359,29 @@ func TestRenderWritesALazyHTMLTagTitleLineSoTheEngineReadsItBack(t *testing.T) {
 			t.Errorf("the engine reads %q as %s, want its linked image %v", markdowns[index], got, held[index][0].Attrs)
 		}
 	}
+}
+
+// documentImages is doc's images in document order.
+func documentImages(doc *Node) []*Node {
+	var images []*Node
+	Walk(doc, func(node *Node) bool {
+		if node.Type == "image" {
+			images = append(images, node)
+		}
+		return true
+	})
+	return images
+}
+
+// sameImageFields reports whether two images hold the same source, alt, title, link and link
+// title, an absent one the same as an empty one.
+func sameImageFields(a, b *Node) bool {
+	for _, field := range []string{"src", "alt", "title", "link", "linkTitle"} {
+		first, _ := a.Attrs[field].(string)
+		second, _ := b.Attrs[field].(string)
+		if first != second {
+			return false
+		}
+	}
+	return true
 }
