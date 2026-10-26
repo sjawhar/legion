@@ -2,46 +2,35 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-141",
-  "completed": "2026-10-26T11:25:00Z",
+  "completed": "2026-10-26T11:55:00Z",
   "generation": 3,
-  "round": "review 5650773083's round: fix f804579e (an interest read counts as answered only for its named answers), head 31173bae",
+  "round": "review 5651306714's round: comment fix f7d39001 on writeBusUnavailable, head e739b034",
   "verdictProvenance": "provider not verified: written in my own session, no subagent ran; the model in my configuration is the one requested, not one read from the run's transcript",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Drove its named-answer and stopped-bus cases on my own rig (real binary, real natsd, my own nats.go writer, curl), widened to four bus-failure modes and to every malformed-record read and write path from the last two rounds. Re-ran its overlay control myself: TestAnInterestReadFailingWithARawSocketErrorIsTheBusNotAnswering passes at this head and fails on /v1/sessions with api.go from 1476cbdc."
+    "how": "The round changes no compiled code: jj diff --name-only 8a84f45c..f7d39001 lists packages/envoy/cmd/listener/api.go and .legion/INFRA-141/review.json, and api.go's comment-stripped form (go/parser mode 0, go/printer, sha256) is 8e2e8858b98ad73b29887e0837276410ce7992ca9728c5eb8d6e1f2982891dd2 at both commits. The binary is built from the source I drove last round at 31173bae (commit 8a84f45c's test.json), and that evidence carries. I checked the corrected sentence against the code and drove the three refusals it names on the real binary."
   },
   "failures": [],
   "failed": 0,
   "proof": [
     {
-      "criterion": "Review 5650773083: an interest read counts as answered only for its named answers (no key, a key the bucket refuses, a record this build cannot decode); every other error refuses GET /v1/sessions with the bus-unavailable 503",
-      "surface": "the real envoy-listener binary at this head against a real NATS (internal/testnats/cmd/natsd); a 3,987-byte legacy id, ses_miss (no interest record) and ses_ok (subscribed) in envoy_sessions; four bus-failure modes",
-      "command": "GET /v1/sessions, /v1/registry/<id> with the bus up; then (a) freeze a TCP relay with the connection open, (b) SIGTERM natsd, (c) SIGKILL natsd, (d) delete KV_envoy_interests under the listener, and GET /v1/sessions, /v1/registry/ses_miss, /v1/registry/ses_ok",
-      "observed": "bus up: sessions 200 [{<3987-byte id>, null}, {ses_miss, null}, {ses_ok, [notifications.agent.ses_ok, notifications.role.r7]}]; registry and interests of the long id 413 with no Retry-After. (a) 503 in 1.002 s 'read ses_miss's interest record: context deadline exceeded'; (b) and (c) 503 'nats: outbound buffer limit exceeded'; (d) 503 'nats: no responders available for request'; every 503 Retry-After: 1 with the busUnansweredPrefix body; registry/ses_ok (cached interest) 200 in every mode",
-      "headSha": "31173bae89574840119b6b56a5a2043f7e680081",
-      "negativeControl": "every request answered 200 or 413 before each failure; the implementer's broken-pipe test re-run with 1476cbdc's api.go (go test -overlay) fails 'GET /v1/sessions with the interest read failing on a broken pipe: status 200 ... topics null'"
+      "criterion": "The delta is a comment: no statement of the shipped code moved",
+      "surface": "the diff from my last verified head 8a84f45c to f7d39001, and api.go parsed with its comments discarded",
+      "command": "jj diff --name-only --from 8a84f45cb5ce --to f7d39001d5df; go/parser (mode 0) + go/printer + sha256 of api.go at both commits; go build ./... && go vet ./cmd/listener && gofmt -l cmd internal",
+      "observed": "changed: .legion/INFRA-141/review.json, packages/envoy/cmd/listener/api.go; the comment-stripped hash 8e2e8858...91dd2 on both sides; build, vet and gofmt clean",
+      "headSha": "e739b0344a822678b20f320f76cbfedf131c1c0d",
+      "negativeControl": "the AST hash is the control for the prose claim: a moved statement would change it"
     },
     {
-      "criterion": "Unreadable interest records keep the answers of the last two rounds",
-      "surface": "the same real binary; 'not json at all' and a wrong-typed record written into envoy_interests; a fake session server counting prompt_async posts",
-      "command": "the unreadable-record driver of the previous round: reads, a send to such a session, DELETE, subscribe, role claim and unsubscribe over such records, and the frozen bus with one present",
-      "observed": "sessions 200 listing the four unreadable sessions with topics null; registry/interests 500 'envoy: the interest record of session <id> is unreadable: malformed interest record: ...' with no Retry-After; send pushed once; DELETE 204 then 404; subscribe 200 and the record decodes; role claim 200 and the role resolves; unsubscribe 200 with the record left; frozen: 503 in 1.003 s with Retry-After: 1",
-      "headSha": "31173bae89574840119b6b56a5a2043f7e680081",
-      "negativeControl": "the readable session ses_sub is served 200 with its topics on the same rig"
-    },
-    {
-      "criterion": "Earlier behaviour unchanged: frozen send/publish/lookup, unreadable role claims, A1-A6 and A6'",
-      "surface": "the real binary on the frozen-relay rig; scripts/e2e-local.sh; go test of the named tests",
-      "command": "the round-four roles driver; bash scripts/e2e-local.sh and the A6' jq; go test ./cmd/listener of my four tests, the implementer's interest tests and the A1/A2 cold-cache tests",
-      "observed": "frozen: sends, publishes and lookups 503 within 3.53 s, 20 concurrent sends and 20 concurrent lookups all 503; unreadable role claims 500; e2e exit 0, both PASS lines, client EnvoyApiError 503; A6' three WARN bus_unavailable records (11:11:57.687Z, 11:12:01.617Z, 11:12:05.373Z) after 'Initiating Shutdown...' at 11:11:54.150Z; every named test --- PASS, ok 21.642 s. My test files, delivery.go, unplaceable_delivery.go and internal/ have no diff since ce91be67",
-      "headSha": "31173bae89574840119b6b56a5a2043f7e680081",
-      "negativeControl": "the e2e send answered 200 before NATS was stopped; the frozen-rig requests answered 200 before the freeze"
+      "criterion": "The corrected comment is true: every member of bus.ErrRefused is answered by writeNATSError as what it is (ErrTooLarge 413; ErrInvalidSubject and ErrInvalidKey 400), and writeBusUnavailable's guard keeps Retry-After off every bus.ErrRefused",
+      "surface": "packages/envoy/internal/bus/nats.go:803-833 and cmd/listener/api.go:207-263 at this head; the real envoy-listener binary at this head against a real NATS, with curl",
+      "command": "read ErrRefused and its three refusal values, writeNATSError and writeBusUnavailable; GET /v1/interests/ses:bad, GET /v1/registry/ses:bad, GET /v1/interests/<3987-byte id>, GET /v1/interests/ses_absent",
+      "observed": "nats.go: ErrRefused 'is ErrTooLarge, ErrInvalidSubject or ErrInvalidKey', each a refusal whose Is matches ErrRefused; writeNATSError maps ErrTooLarge to 413 and any other ErrRefused to 400; writeBusUnavailable sets Retry-After only when !errors.Is(err, bus.ErrRefused). Binary: interests/ses:bad 400 'not a key nats.go accepts: key \"ses:bad\": nats: invalid key' with no Retry-After; registry/ses:bad 400 with no Retry-After; interests/<3987-byte id> 413 'too large to publish whole: a key of 3987 bytes, past 3974' with no Retry-After",
+      "headSha": "e739b0344a822678b20f320f76cbfedf131c1c0d",
+      "negativeControl": "GET /v1/interests/ses_absent on the same binary answered 404 'nats: key not found', so the 400 and 413 come from the key refusals and not from the route refusing everything"
     }
   ],
-  "notes": [
-    "I could not produce a raw socket write error (*net.OpError) from outside nats.go on the real binary; that case rests on the implementer's fault-injected test, whose control I re-ran.",
-    "PR body is 54,750 characters (GitHub's limit 65,536)."
-  ],
-  "ci": "At 31173bae: Tests 40312870357, Legion Envoy and Contracts 40312870299 and Docs 40312870108 queued, Worker Image 40312870355 pending when read, cited unsettled and not waited for.",
+  "carriedEvidence": "Real-binary proof of every behaviour at the identical compiled source 31173bae (commit 8a84f45c's .legion/INFRA-141/test.json): named interest answers list or give 413/500, four bus-failure modes give 503 with Retry-After, unreadable-record writes, frozen send/publish/lookup, unreadable role claims, e2e-local and A6'.",
+  "ci": "At e739b034: Docs 40316229170 and Worker Image 40316229146 pending, Legion Envoy and Contracts 40316229147 and Tests 40316229156 queued when read, cited unsettled and not waited for. The runs at 31173bae were cancelled by this head, so this code's first settled CI is these runs.",
   "regressionLocksAdded": []
 }
