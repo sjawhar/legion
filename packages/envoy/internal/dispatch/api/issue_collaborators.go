@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"context"
 	"fmt"
+	"maps"
 	"net/http"
 	"slices"
 	"strings"
@@ -53,14 +54,7 @@ var collaboratorEventReasons = map[string]collaboratorReason{
 
 // collaboratorEventTypes is collaboratorEventReasons' keys, the type list the one events read
 // binds.
-var collaboratorEventTypes = func() []string {
-	types := make([]string, 0, len(collaboratorEventReasons))
-	for eventType := range collaboratorEventReasons {
-		types = append(types, eventType)
-	}
-	slices.Sort(types)
-	return types
-}()
+var collaboratorEventTypes = slices.Sorted(maps.Keys(collaboratorEventReasons))
 
 // legionDaemonSessionPrefix starts the session id the Legion daemon writes an issue's status and
 // lifecycle messages under (legion-daemon:<PROJECT>, packages/daemon's DaemonSession). It holds no
@@ -300,7 +294,7 @@ func (s *server) collaboratorAgents(
 		return nil, fmt.Errorf("resolve collaborator titles: %w", err)
 	}
 	for index := range agents {
-		if title, ok := titles[agents[index].SessionID]; ok && agents[index].Title == nil {
+		if title, ok := titles[agents[index].SessionID]; ok {
 			agents[index].Title = &title
 		}
 	}
@@ -322,11 +316,7 @@ func newCollaboratorAgent(id string, tally *collaboratorTally) collaboratorAgent
 // collaboratorPeople is one row per login, newest last_at first, an assignee who did nothing else
 // last, ties by login.
 func collaboratorPeople(people map[string]*collaboratorTally) []collaboratorPerson {
-	logins := make([]string, 0, len(people))
-	for login := range people {
-		logins = append(logins, login)
-	}
-	slices.SortFunc(logins, func(left, right string) int {
+	logins := slices.SortedFunc(maps.Keys(people), func(left, right string) int {
 		leftAt, rightAt := people[left].lastAt, people[right].lastAt
 		switch {
 		case leftAt == nil && rightAt != nil:

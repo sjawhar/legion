@@ -85,7 +85,7 @@ var (
 	// issueKeyPattern is a Dispatch issue key (claim.IsIssueKey, DISPATCH_KEY_PATTERN).
 	issueKeyPattern = regexp.MustCompile(`^[A-Z][A-Z0-9]*-[0-9]+$`)
 	// roleTokenPattern is a workflow role's token: legion-<project>-<issue project>-<number>-<role>.
-	roleTokenPattern = regexp.MustCompile(`^legion-[a-z0-9]+-[a-z0-9]+-[0-9]+-(architect|planner|implementer|tester|reviewer|merger)$`)
+	roleTokenPattern = regexp.MustCompile(`^legion-[a-z0-9]+-[a-z0-9]+-[0-9]+-(` + strings.Join(Roles, "|") + `)$`)
 )
 
 // ErrInvalid is a session id, issue key, role token or entry the registry refuses. Each refusal
