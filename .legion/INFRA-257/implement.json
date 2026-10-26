@@ -2,23 +2,31 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-257",
-  "completed": "2026-10-26T02:40:00Z",
+  "completed": "2026-10-26T03:12:00Z",
   "proof": [
     {
       "criterion": "In a worker pod, `CGO_ENABLED=1 go test -race` runs on a package of `packages/envoy` and reports its result.",
-      "surface": "The PR head's published worker image ghcr.io/sjawhar/legion-worker@sha256:5b858d65b8cc9d7adcfd2e999ac257732dbc65aabb278b99b58041c03b8b9a40 (revision de0e5936, Worker Image run 40256332533) run as Kubernetes Job infra-257-race-head-cjf6l in the role's projected namespace: gVisor, uid/gid 1000, no privilege escalation, every capability dropped, RuntimeDefault seccomp, the image's own ENV and PATH, scratch on an emptyDir. Log: https://github.com/sjawhar/legion/pull/2222#issuecomment-6406947554",
-      "command": "kubectl create -f <the plan's Job manifest with the plan's proof script, image H, HEAD_SHA=de0e5936662c83461242354472f5bca85fcf8d18>; inside: CGO_ENABLED=1 go -C /scratch/src/packages/envoy test -race -count=1 -timeout 30m ./internal/bus/ ; CGO_ENABLED=1 go build -race -o canary canary.go; ./canary",
-      "observed": "No CC, CXX, CGO_LDFLAGS, GOFLAGS or GOTOOLCHAIN set; /usr/bin/gcc is gcc (Debian 14.2.0-19) 14.2.0. `ok github.com/sjawhar/envoy/internal/bus 196.489s` (CHECK race-bus 0). The racy canary printed `WARNING: DATA RACE` and `Found 1 data race(s)` and exited 66. JOB-RESULT pass; Job Complete; pod imageID = H's digest.",
-      "headSha": "de0e5936662c83461242354472f5bca85fcf8d18",
-      "negativeControl": "The same Job and script on the before image sha256:816f592cdfebfbf6175e84ec22b97eb7b71cea11108baafc90f420152d588f0b (revision 0af6288a, newest published ancestor of base 81a3b5ef; inputs differ only by two package.json version bumps), Job infra-257-race-before-tcqlc: `gcc: command not found`; race-bus `cgo: C compiler \"gcc\" not found` / `[build failed]`; no canary binary (exit 127); JOB-RESULT fail, Job Failed."
+      "surface": "The merged head's published worker image ghcr.io/sjawhar/legion-worker@sha256:505405525c32649158381ec297546cc65d1c3fe0981783eb776e6aaffc4d0f1b (revision 1e49b223, Worker Image run 40260507266) run as Kubernetes Job infra-257-race-merged-9vkl2 in the role's projected namespace: gVisor, uid/gid 1000, no privilege escalation, every capability dropped, RuntimeDefault seccomp, the image's own ENV and PATH, scratch on an emptyDir. Log: https://github.com/sjawhar/legion/pull/2222#issuecomment-6407323721",
+      "command": "kubectl create -f <the plan's Job manifest with the plan's proof script plus notices checks, image above, HEAD_SHA=1e49b22397faf9a0ef280f046560901e0b9b1d39>; inside: CGO_ENABLED=1 go -C /scratch/src/packages/envoy test -race -count=1 -timeout 30m ./internal/bus/ ; CGO_ENABLED=1 go build -race -o canary canary.go; ./canary",
+      "observed": "No CC, CXX, CGO_LDFLAGS, GOFLAGS or GOTOOLCHAIN set; /usr/bin/gcc is gcc (Debian 14.2.0-19) 14.2.0. `ok github.com/sjawhar/envoy/internal/bus 197.536s`. The racy canary printed `WARNING: DATA RACE` and exited 66. JOB-RESULT pass; Job Complete; pod imageID = the head image. (Pre-merge head de0e5936 also passed on sha256:5b858d65…, Job infra-257-race-head-cjf6l.)",
+      "headSha": "1e49b22397faf9a0ef280f046560901e0b9b1d39",
+      "negativeControl": "The same Job and script on main's image after #2216, sha256:cae86927eb87e4b0d51d1bd680973a91ecda21169c359b239f4c65047ceb6357 (revision 06170c71; its inputs differ from main@135d22e0 only by two package.json version bumps), Job infra-257-race-main-2mlk7: `gcc: command not found`; race-bus `cgo: C compiler \"gcc\" not found`; no canary binary (exit 127); JOB-RESULT fail, Job Failed."
     },
     {
       "criterion": "Default Go builds in the pod still use `CGO_ENABLED=0`.",
-      "surface": "Same Job infra-257-race-head-cjf6l on image H (sha256:5b858d65…), image ENV and PATH, uid 1000, gVisor.",
+      "surface": "Same Job infra-257-race-merged-9vkl2 on ghcr.io/sjawhar/legion-worker@sha256:505405525c32649158381ec297546cc65d1c3fe0981783eb776e6aaffc4d0f1b, image ENV and PATH, uid 1000, gVisor. Log: https://github.com/sjawhar/legion/pull/2222#issuecomment-6407323721",
       "command": "go env CGO_ENABLED; go build -o def def.go && go version -m def; env -i PATH=$PATH HOME=$HOME GOCACHE=$GOCACHE go env CGO_ENABLED; GOTOOLCHAIN=go1.26.8 go env GOVERSION CGO_ENABLED; go -C /scratch/src/packages/daemon test -count=1 ./internal/supervise/ -run '^TestTheTableHasARowOrANamedIgnoreForEveryEventInEveryState$'",
-      "observed": "env CGO_ENABLED=0 (image ENV); /opt/go/go.env line 13 CGO_ENABLED=0; go env CGO_ENABLED 0; default build records CGO_ENABLED=0; env -i keeps 0 (go.env); GOTOOLCHAIN=go1.26.8 prints `go1.26.8 0` (ENV reaches the switched toolchain); the supervise table test (a go/build reader) `ok` with no override. Image config ENV lists CGO_ENABLED=0; layer count 24 and history 33 entries unchanged from B.",
-      "headSha": "de0e5936662c83461242354472f5bca85fcf8d18",
-      "negativeControl": "Within H: `CGO_ENABLED=1 go build` records CGO_ENABLED=1, and a copy of /opt/go with the go.env line removed, run under env -i, prints 1 — stock Go with gcc present defaults cgo on, so the 0 is held by this change. On B the supervise table test fails with `go tool cgo: exit status 2` (no ENV, go/build defaults cgo on)."
+      "observed": "env CGO_ENABLED=0 (image ENV); /opt/go/go.env line 13 CGO_ENABLED=0; go env 0; default build records CGO_ENABLED=0; env -i keeps 0; GOTOOLCHAIN=go1.26.8 prints `go1.26.8 0`; supervise table test `ok` with no override. Image: 24 layers, 33 history entries, same as main.",
+      "headSha": "1e49b22397faf9a0ef280f046560901e0b9b1d39",
+      "negativeControl": "Within the head image: `CGO_ENABLED=1 go build` records CGO_ENABLED=1, and a copy of /opt/go with the go.env line removed, under env -i, prints 1, so the 0 is held by this change. The same Job and script on main's image after #2216, sha256:cae86927eb87e4b0d51d1bd680973a91ecda21169c359b239f4c65047ceb6357 (revision 06170c71; its inputs differ from main@135d22e0 only by two package.json version bumps), Job infra-257-race-main-2mlk7: the supervise table test fails with `go tool cgo: exit status 2`."
+    },
+    {
+      "criterion": "Spec Fix: add the C compiler to the image's licence inventory (INFRA-255's generated Debian list after the merge).",
+      "surface": "Same Job infra-257-race-merged-9vkl2 on ghcr.io/sjawhar/legion-worker@sha256:505405525c32649158381ec297546cc65d1c3fe0981783eb776e6aaffc4d0f1b, reading /usr/share/doc/legion/THIRD_PARTY_NOTICES as the image ships it. Log: https://github.com/sjawhar/legion/pull/2222#issuecomment-6407323721",
+      "command": "for pkg in gcc libc6-dev gcc-14 cpp-14 binutils linux-libc-dev; do grep -cx \"$pkg\" /usr/share/doc/legion/THIRD_PARTY_NOTICES; done; test -s /usr/share/doc/gcc/copyright; test -s /usr/share/doc/libc6-dev/copyright",
+      "observed": "Each of gcc, libc6-dev, gcc-14, cpp-14, binutils and linux-libc-dev appears exactly once as a line of the generated Debian list; both copyright files are present.",
+      "headSha": "1e49b22397faf9a0ef280f046560901e0b9b1d39",
+      "negativeControl": "The same Job and script on main's image after #2216, sha256:cae86927eb87e4b0d51d1bd680973a91ecda21169c359b239f4c65047ceb6357 (revision 06170c71; its inputs differ from main@135d22e0 only by two package.json version bumps), Job infra-257-race-main-2mlk7: each of the six packages appears 0 times in the notices list and neither copyright file exists."
     }
   ],
   "filesChanged": [
@@ -34,13 +42,12 @@
   ],
   "trickyParts": [
     "Two cgo-off mechanisms: ENV CGO_ENABLED=0 (same instruction as COREPACK_DEFAULT_TO_LATEST, no new history entry) reaches inheriting processes, go/build readers and switched toolchains; the /opt/go/go.env line covers scrubbed environments. The boundary (scrubbed env plus toolchain switch, or a go/build reader under a scrubbed env) gets Go's default and is documented.",
-    "Image size: +73,262,571 bytes (+69.9 MiB), all in the runtime apt layer (335,441,775 → 408,702,160); later layers only rebuilt."
+    "Image size against main after #2216: +73,278,694 bytes (+69.9 MiB), +73,261,947 of it in the runtime-base apt layer."
   ],
   "deviations": [
-    "Before image B is the disclosed fallback (revision 0af6288a, release run 40229898168): main had moved past the base 81a3b5ef before a like-for-like base build could be dispatched.",
-    "The simplify pass applied one comment-only edit (de0e5936) before the proof ran, so the proof ran once, on the final head."
+    "Forward merge of main after #2216 (INFRA-255): this branch's hand edit of the notices intro string is dropped for #2216's generated list; the apt words and their comment paragraph moved into #2216's runtime-base stage; the toolchain comment names runtime-base. Fingerprint b123c2a1… → cd0bb48c…, changed (https://github.com/sjawhar/legion/pull/2222#issuecomment-6407052777).",
+    "The before image for the merged round is main's own image after #2216 (sha256:cae86927…, revision 06170c71); the pre-merge round's was the disclosed fallback sha256:816f592c… (revision 0af6288a).",
+    "The simplify pass applied one comment-only edit (de0e5936) in the first round; this round runs no second pass."
   ],
-  "openQuestions": [
-    "INFRA-255 (PR #2216) edits the same notices intro string; if it merges first, a forward merge keeps its generated list and the proof reruns on the merged head's image."
-  ]
+  "openQuestions": []
 }
