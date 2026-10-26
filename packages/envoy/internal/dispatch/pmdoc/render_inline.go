@@ -3,6 +3,7 @@ package pmdoc
 import (
 	"bytes"
 	"fmt"
+	"regexp"
 	"slices"
 	"strings"
 	"unicode/utf8"
@@ -710,10 +711,29 @@ var paragraphKinds, definitionKinds = blockKinds("x"), blockKinds("[l]: /u")
 // by both readers as the paragraph's text, judged by how it reads alone as a document: as a
 // paragraph and nothing else, as a line of plain text does, or as link reference definitions and
 // nothing else. Both readers read definitions only at a paragraph's start, which a lazy line never
-// is, so there it is text whatever it reads as alone.
+// is, so there it is text whatever it reads as alone. The one line the readers' HTML block rules
+// disagree on is held apart (closesRawElement).
 func readsAloneAsContinuation(line string) bool {
+	if closesRawElement(line) {
+		return false
+	}
 	kinds := blockKinds(line)
 	return slices.Equal(kinds, paragraphKinds) || slices.Equal(kinds, definitionKinds)
+}
+
+// rawElementClose is a line holding only the closing tag of a raw element - `script`, `pre`,
+// `style` or `textarea`, in any case - and whitespace after it.
+var rawElementClose = regexp.MustCompile(`(?i)^</(script|pre|style|textarea)[ \t]*>[ \t]*$`)
+
+// closesRawElement reports whether line is the closing tag of a raw element alone
+// (rawElementClose). CommonMark opens no HTML block at such a line - a raw element's tag opens one
+// only as an opening tag, and the complete-tag kind leaves those four names out - so Go's reader
+// reads it alone as a paragraph; the browser editor's engine reads it as a complete closing tag,
+// which on a lazy line opens an HTML block that ends the paragraph, the link around an image
+// before it lost (INFRA-190). Every other line that is one complete tag both readers read as an
+// HTML block alone, and readsAloneAsContinuation refuses it for that.
+func closesRawElement(line string) bool {
+	return rawElementClose.MatchString(line)
 }
 
 func (r *renderer) closeMarks(marks []Mark, escapePipes bool) {

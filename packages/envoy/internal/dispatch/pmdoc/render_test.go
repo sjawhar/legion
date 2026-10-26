@@ -526,6 +526,9 @@ func TestRenderWritesEachImageFieldSoItReadsBackAsHeld(t *testing.T) {
 		"a\n1. b", "a\n> b", "a\n```", "a\n|b", "a\n\n\nb",
 		"a\n<span>\nz", "a\n</span>\nz", "a\n<b>", "a\n<x-y>\nz", "a\n<div>\nz", "a\n<!-- c -->\nz",
 		"a\n2. b", "a\n10) b", "a\n-\nb", "a\n+ b", "a\n* b", "a\n[l]: /u", "a\n[l]: /u\nz", "a\n~~~", "a\n***",
+		"a\n</script>\nz", "a\n</pre>\nz", "a\n</style>\nz", "a\n</SCRIPT>\nz", "a\n</textarea>\nz", "a\n<script>\nz",
+		"a\n<pre>\nz", "a\n<?x?>\nz", "a\n<!DOCTYPE x>\nz", "a\n<![CDATA[x]]>\nz", "a\n<a href=\"u\">\nz", "a\n<b>c\nz",
+		"a\n<http://x.test>\nz", "a\n<1>\nz", "a\n$$\nz", "a\n[^1]: x\nz", "a\n:::note\nz", "a\n- [ ] b",
 	}
 	titles := []string{`"`, `say "hi"`, `\"`, `a\"b`, "'", `"\`, `a"`}
 	image := func(src string, title any, link, linkTitle any) *Node {
