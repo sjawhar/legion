@@ -1060,7 +1060,10 @@ describe("a write that passes unreviewed is recorded and said", () => {
       text: ack?.additionalContext ?? "",
     });
     // A call the gate refused carries no note: its refusal is the result.
-    const blocked = bind({ env: { OMP_ASKGATE: "block" }, complete: async () => ({ text: REVISE }) });
+    const blocked = bind({
+      env: { OMP_ASKGATE: "block" },
+      complete: async () => ({ text: REVISE }),
+    });
     expect((await blocked.device("js-bash-4", "dispatch_comment", COMMENT))?.block).toBe(true);
     expect(
       await blocked.event("tool_result", { toolCallId: "js-bash-4", content: [] })
@@ -1748,10 +1751,10 @@ console.log(JSON.stringify(args, null, 2));
       );
       for (const [index, command] of [...hidden.map(([, c]) => c), ...quoted].entries())
         expect(
-          refuse(
-            { toolName: "bash", toolCallId: `l${index}`, input: { command } },
-            { agent: { kind: "main" }, sessionManager: { getEntries: () => [] } } as never
-          )?.block
+          refuse({ toolName: "bash", toolCallId: `l${index}`, input: { command } }, {
+            agent: { kind: "main" },
+            sessionManager: { getEntries: () => [] },
+          } as never)?.block
         ).toBe(true);
       expect(entries.map((e) => [e.tool, e.outcome])).toEqual(
         Array(hidden.length + quoted.length).fill(["dispatch_comment", "load-failed"])
@@ -2034,10 +2037,10 @@ console.log(JSON.stringify(args, null, 2));
         { appendEntry: () => {} }
       );
       expect(
-        refuse(
-          { toolName: "bash", toolCallId: "l", input: { command } },
-          { agent: { kind: "main" }, sessionManager: { getEntries: () => [] } } as never
-        )?.block
+        refuse({ toolName: "bash", toolCallId: "l", input: { command } }, {
+          agent: { kind: "main" },
+          sessionManager: { getEntries: () => [] },
+        } as never)?.block
       ).toBe(true);
     });
   // Outside review of #2159 at 31c5cca3b, finding 3: a word whose value only bash knows was taken
@@ -2770,17 +2773,34 @@ console.log(JSON.stringify(args, null, 2));
       fs.symlinkSync(plain, plainLink);
       try {
         const refused: Array<[string, string]> = [
-          ["a file that is a link to /proc/self/fd", "dispatch ask --issue DSP-1 --question-file f5-link.txt"],
-          ["a link to /proc in the middle of the path", `dispatch comment --issue DSP-1 --body-file f5-dir/fd/${fd}`],
-          ["the /proc/thread-self spelling", "dispatch comment --issue DSP-1 --body-file /proc/thread-self/fd/0"],
-          ["a task's descriptor directory", `dispatch comment --issue DSP-1 --body-file /proc/${process.pid}/task/${process.pid}/fd/0`],
-          ["a /dev/fd path under a directory", "dispatch comment --issue DSP-1 --body-file /dev/fd/1/../0"],
+          [
+            "a file that is a link to /proc/self/fd",
+            "dispatch ask --issue DSP-1 --question-file f5-link.txt",
+          ],
+          [
+            "a link to /proc in the middle of the path",
+            `dispatch comment --issue DSP-1 --body-file f5-dir/fd/${fd}`,
+          ],
+          [
+            "the /proc/thread-self spelling",
+            "dispatch comment --issue DSP-1 --body-file /proc/thread-self/fd/0",
+          ],
+          [
+            "a task's descriptor directory",
+            `dispatch comment --issue DSP-1 --body-file /proc/${process.pid}/task/${process.pid}/fd/0`,
+          ],
+          [
+            "a /dev/fd path under a directory",
+            "dispatch comment --issue DSP-1 --body-file /dev/fd/1/../0",
+          ],
         ];
         const g = bind({ env: { ...STUB, OMP_ASKGATE: "block" }, cwd: work });
         for (const [index, [, command]] of refused.entries()) {
           const result = await g.bash(`f5-${index}`, command);
           expect(result?.block).toBe(true);
-          expect(result?.reason).toMatch(/file descriptor of the process that opens it|a symbolic link/);
+          expect(result?.reason).toMatch(
+            /file descriptor of the process that opens it|a symbolic link/
+          );
         }
         expect(g.calls).toHaveLength(0);
         expect(g.entries.map((e) => e.outcome)).toEqual(Array(refused.length).fill("unreadable"));
@@ -2835,7 +2855,9 @@ console.log(JSON.stringify(args, null, 2));
         stderr: "ignore",
       });
       expect(await child.exited).toBe(0);
-      expect(JSON.parse(fs.readFileSync(posted, "utf8")).body).toBe("The file the CLI would post.\n");
+      expect(JSON.parse(fs.readFileSync(posted, "utf8")).body).toBe(
+        "The file the CLI would post.\n"
+      );
     }, 30_000);
 
     test("an unreadable --path is told to send the text with --content-file -, never --path -, which the CLI opens as a file named -", async () => {

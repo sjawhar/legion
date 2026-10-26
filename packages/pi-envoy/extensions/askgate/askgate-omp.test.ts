@@ -79,9 +79,7 @@ async function runSession(options: {
         });
       turns += 1;
       const blocks =
-        turns === 1
-          ? [options.firstTurn(dispatch)]
-          : [{ type: "text" as const, text: "Asked." }];
+        turns === 1 ? [options.firstTurn(dispatch)] : [{ type: "text" as const, text: "Asked." }];
       return new Response(messageStream(blocks, `turn_${turns}`), {
         headers: { "content-type": "text/event-stream" },
       });

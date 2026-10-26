@@ -216,7 +216,12 @@ export function computeStats(records: GateRecord[]): Stats {
   // Every gated call of the tool, not its reviews alone: a call the gate could not read, and one
   // a gate that did not load refused, was sent back without any review.
   for (const record of records) {
-    const share = byTool.get(record.tool) ?? { tool: record.tool, calls: 0, reviews: 0, sentBack: 0 };
+    const share = byTool.get(record.tool) ?? {
+      tool: record.tool,
+      calls: 0,
+      reviews: 0,
+      sentBack: 0,
+    };
     share.calls += 1;
     if (isReview(record)) share.reviews += 1;
     if (isSentBack(record)) share.sentBack += 1;
