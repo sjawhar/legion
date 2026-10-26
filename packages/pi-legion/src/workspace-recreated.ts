@@ -33,8 +33,9 @@ export function workspaceRecreatedNotice(
     content:
       `Your workspace was recreated since your last turn: it holds what was pushed to legion/${issue} ` +
       "(the repository's default branch if nothing was), and anything you had not pushed is gone. " +
-      "Before you continue, check the workspace against what you remember doing and re-read your " +
-      "last handoff.",
+      "Before you continue, check the workspace against what you remember doing and re-read the " +
+      `last handoff recorded on ${issue} with \`dispatch handoff-read --issue ${issue} --phase <phase>\` ` +
+      "(plan, implement, test or review); Dispatch keeps it, whatever the workspace lost.",
   };
 }
 

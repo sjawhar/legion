@@ -44,7 +44,7 @@ import {
   mergeInterestSources,
 } from "@legion/envoy-client/transport"
 import { createLegionDaemonClient } from "@legion/pi-shared/daemon-client"
-import { findHandoffCommit } from "@legion/pi-shared/handoff-commit"
+import { findHandoffReport, paneLatestHandoff } from "@legion/pi-shared/handoff-record"
 import { Server } from "@modelcontextprotocol/sdk/server/index.js"
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js"
@@ -1209,7 +1209,15 @@ export async function runEnvoyChannelServer(): Promise<void> {
       const legionRuntime: LegionToolRuntime = {
         daemon,
         claim: () => claim?.capability(),
-        handoffCommit: (phase, role) => findHandoffCommit({ phase, role, env: process.env }),
+        // The pane's own environment and PATH's jj, and the Dispatch this session's envoy.json
+        // names, which the pane's `dispatch handoff-write` wrote the record to.
+        handoffReport: (phase, role) =>
+          findHandoffReport({
+            phase,
+            role,
+            env: process.env,
+            latestHandoff: paneLatestHandoff(configFile, process.env, directory),
+          }),
       }
       return mcpResult(await executeLegionTool(legionRuntime, request.params.arguments))
     }

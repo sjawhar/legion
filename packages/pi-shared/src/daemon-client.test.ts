@@ -186,12 +186,21 @@ test("posts every Stage 3 workflow request through its matching route", async ()
       { sessionId: "ses_208", secret: "claim-secret", tree: "LEGION-208", issue: "LEGION-209" },
       "grant.json",
     ],
-    // The completion names the pushed commit carrying the handoff, which the legion tool found
-    // in the pane; the daemon answers the note READY leaves for a pull request already merged.
+    // An implementing round's completion names the Dispatch handoff record and the pushed tip,
+    // which the legion tool found in the pane; the daemon answers the note READY leaves for a pull
+    // request already merged.
     [
       "handoffComplete",
       "/legion/v1/handoff/complete",
-      { grantId: "grant-208", summary: "done", verdict: "", ready: false, commit: "abc123" },
+      {
+        grantId: "grant-208",
+        summary: "done",
+        verdict: "",
+        ready: false,
+        commit: "abc123",
+        handoffId: "5b1f0c2e-9d7a-4c3b-8e61-2f4a9d0c7b13",
+        handoffVersion: 2,
+      },
       "handoff-complete.json",
     ],
     [

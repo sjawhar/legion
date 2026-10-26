@@ -1,7 +1,12 @@
 import { expect, test } from "bun:test";
 import type { LegionRole } from "@legion/contracts";
 import type { LegionPhase } from "@legion/contracts/legion-api";
-import { findHandoffCommit, type JjRunner } from "@legion/pi-shared/handoff-commit";
+import { DispatchServiceError } from "@legion/envoy-client/dispatch-http";
+import {
+  findHandoffReport,
+  type JjRunner,
+  type LatestHandoff,
+} from "@legion/pi-shared/handoff-record";
 import type { PiApi, SessionContext } from "@legion/pi-shared/pi-types";
 import { z } from "zod";
 import { createLegionTool, type LegionToolSession } from "./tools";
@@ -44,9 +49,9 @@ const noControllerGrant = async (sessionId: string): Promise<never> => {
   throw new Error(`no controller grant expected for ${sessionId}`);
 };
 
-/** The handoff-commit lookup of a tool that must never complete a phase. */
-const noHandoffCommit = async (phase: LegionPhase, role: LegionRole): Promise<never> => {
-  throw new Error(`no handoff-commit lookup expected for the ${role} at ${phase}`);
+/** The handoff report of a tool that must never complete a phase. */
+const noHandoffReport = async (phase: LegionPhase, role: LegionRole): Promise<never> => {
+  throw new Error(`no handoff report expected for the ${role} at ${phase}`);
 };
 
 /** A claim's session on LEGION-208: a root architect's, a sub-architect's (its issue is not its
@@ -113,13 +118,16 @@ const OMP_LEGION_TOOL_DESCRIPTION =
   "and the implementer's report on a look of its closed issue's production check) reports this phase complete: `summary` (two sentences for the " +
   "architect, or the merger's READY packet), `verdict` pass|fail from the tester alone on a phase completion (the daemon refuses a verdict from " +
   "any other role there) and pass|pending|fail from the implementer on a production check report (pending: production does not carry the merge " +
-  "yet), `ready: true` for the merger's READY. A handoff is a committed " +
-  "file, `.legion/<issue>/<phase>.json`: the pushed commit carrying it is found here, with the pane's jj, and reported, so write it, commit it and " +
-  "push the branch (`jj git push`) before calling; this call refuses, posting nothing, a handoff still in the working copy, missing, not committed " +
-  "on this branch, carried by another pane's commit, or not yet on `legion/<issue>@origin`, each naming the remedy. A production check report " +
+  "yet), `ready: true` for the merger's READY. A planning, implementing, testing or reviewing phase ends with a handoff record on the " +
+  "Dispatch issue: write it with `dispatch handoff-write --issue <issue> --phase <plan|implement|test|review> --body-file <file>` before " +
+  "calling. This call reads the phase's newest record from Dispatch and reports it; the implementer's round also reports the commit " +
+  "`legion/<issue>@origin` names, so push the branch first; retro and the merger's READY report the commit the workspace stands on. It " +
+  "refuses, posting nothing, a phase with no record, a Dispatch that does not answer, or an implementer's `@-` not yet on " +
+  "`legion/<issue>@origin`, each naming the remedy. A production check report " +
   "(the task whose first line is `Production check of <KEY>`, handed to the implementer once the merge closed its issue) needs no handoff and no " +
   "commit: it carries its verdict and summary alone, and the daemon refuses it when no check is open (CHECK_NOT_OPEN). The daemon refuses " +
-  "HANDOFF_NOT_NEW (the commit is the one you reported for your previous phase: write and commit this phase's handoff) and, for READY, each " +
+  "HANDOFF_SESSION_MISMATCH (another session wrote the record), HANDOFF_NOT_NEW (the record is the one you named for your previous phase: " +
+  "write this phase's handoff) and, for READY, each " +
   "refusal the merger's role names; a refused completion changed nothing, so fix what it names and complete again. An accepted READY whose `note` " +
   "begins MANUAL_MERGE_REQUIRED: is one a person merges: arm nothing. request_backward_move returns an issue to an earlier phase (`to`, `reason`): " +
   "a phase worker moves its own issue; the tree's architect moves an issue in accepting, named by `issue`, back to implementing or testing, which " +
@@ -146,7 +154,7 @@ const toolFor = (active: LegionToolSession) =>
     daemon: recordingDaemon({}).daemon,
     controllerGrant: noControllerGrant,
     onPhaseCompleted: () => undefined,
-    handoffCommit: noHandoffCommit,
+    handoffReport: noHandoffReport,
     resolveDocument: noDocumentLookup,
     session: () => active,
   });
@@ -267,7 +275,7 @@ test("the legion tool exposes only the workflow operations each role owns", asyn
       daemon,
       controllerGrant: noControllerGrant,
       onPhaseCompleted: () => undefined,
-      handoffCommit: noHandoffCommit,
+      handoffReport: noHandoffReport,
       resolveDocument: noDocumentLookup,
       session: () => session,
     }).execute("", parameters, undefined, undefined, context());
@@ -278,7 +286,7 @@ test("the legion tool exposes only the workflow operations each role owns", asyn
     daemon,
     controllerGrant: noControllerGrant,
     onPhaseCompleted: () => undefined,
-    handoffCommit: noHandoffCommit,
+    handoffReport: noHandoffReport,
     resolveDocument: noDocumentLookup,
     session: () => worker,
   });
@@ -442,7 +450,7 @@ test("the legion tool's description gives a verdict to the tester alone", () => 
     daemon: recordingDaemon({}).daemon,
     controllerGrant: noControllerGrant,
     onPhaseCompleted: () => undefined,
-    handoffCommit: noHandoffCommit,
+    handoffReport: noHandoffReport,
     resolveDocument: noDocumentLookup,
     session: () => claimSession("reviewer"),
   });
@@ -468,7 +476,7 @@ test("a workflow refusal tells the agent both its code and message", async () =>
     })) as never,
     controllerGrant: noControllerGrant,
     onPhaseCompleted: () => undefined,
-    handoffCommit: noHandoffCommit,
+    handoffReport: noHandoffReport,
     resolveDocument: noDocumentLookup,
     session: () => claimSession("architect"),
   });
@@ -500,7 +508,7 @@ test("register_gate takes the document reference the Dispatch tools take, and re
       daemon,
       controllerGrant: noControllerGrant,
       onPhaseCompleted: () => undefined,
-      handoffCommit: noHandoffCommit,
+      handoffReport: noHandoffReport,
       resolveDocument: async (issue: string, reference: string) => {
         resolved.push([issue, reference]);
         if (reference === "notes") throw new Error(`No document "notes" on ${issue}`);
@@ -542,38 +550,32 @@ test("register_gate takes the document reference the Dispatch tools take, and re
   ]);
 });
 
-/** The pane a completion runs in: its workspace and issue, and the implement App's identity. */
-const paneEnv = {
-  LEGION_WORKSPACE: "/workspaces/LEGION-208",
-  LEGION_ISSUE: "LEGION-208",
-  JJ_USER: "legion-implementer[bot]",
-  JJ_EMAIL: "271566630+legion-implementer[bot]@users.noreply.github.com",
-};
-const CARRYING = "210d53a9d1b109df97fbb5dd5041d659dbab1323";
+/** The pane a completion runs in: its workspace and issue. */
+const paneEnv = { LEGION_WORKSPACE: "/workspaces/LEGION-208", LEGION_ISSUE: "LEGION-208" };
+const TIP = "210d53a9d1b109df97fbb5dd5041d659dbab1323";
 const STANDING = "c0de0000000000000000000000000000000000ff";
+/** The newest handoff record the pane's Dispatch holds for the phase. */
+const RECORD = { id: "5b1f0c2e-9d7a-4c3b-8e61-2f4a9d0c7b13", version: 2 };
 
-/** A jj that answers the lookup's commands for a handoff committed, authored by this pane and
- * pushed, unless `answers` says otherwise for one of them. */
-function paneJj(answers: {
-  readonly uncommitted?: string;
-  readonly listed?: string;
-  readonly carrying?: string;
-  readonly author?: string;
-  readonly pushed?: string;
-}): JjRunner {
+/** A jj whose `@-` is on `legion/LEGION-208@origin`, whose tip is `TIP`, unless `pushed` is empty. */
+function paneJj(pushed = STANDING): JjRunner {
   return async (args) => {
-    const [command, , revision] = args;
-    if (command === "log" && revision === "@-") return STANDING;
-    if (command === "diff") return answers.uncommitted ?? "";
-    if (command === "file") return answers.listed ?? ".legion/LEGION-208/implement.json";
-    if (command === "log" && revision?.startsWith("latest(")) return answers.carrying ?? CARRYING;
-    if (command === "log" && revision === CARRYING) {
-      return answers.author ?? `${paneEnv.JJ_USER}\n${paneEnv.JJ_EMAIL}`;
-    }
-    if (command === "log" && revision?.includes("remote_bookmarks")) {
-      return answers.pushed ?? CARRYING;
-    }
+    const revision = args[2] ?? "";
+    if (revision === "@-") return STANDING;
+    if (revision.startsWith(`${STANDING} & ::remote_bookmarks(`)) return pushed;
+    if (revision.startsWith("remote_bookmarks(")) return TIP;
     throw new Error(`unexpected jj ${args.join(" ")}`);
+  };
+}
+
+/** A Dispatch answering `answer` for every phase's newest record, recording each read in `reads`. */
+function paneDispatch(
+  reads: string[] = [],
+  answer: () => Promise<{ id: string; version: number }> = async () => RECORD
+): LatestHandoff {
+  return async (issue, word) => {
+    reads.push(`${issue} ${word}`);
+    return answer();
   };
 }
 
@@ -585,8 +587,9 @@ const stateAt = (phase: LegionPhase) => ({
   },
 });
 
-test("handoff_complete finds the pushed commit carrying the handoff, posts it with a fresh grant, closes the phase on success, and answers the daemon's note", async () => {
+test("handoff_complete finds the phase's handoff record and the pushed tip, posts them with a fresh grant, closes the phase on success, and answers the daemon's note", async () => {
   const completed: string[] = [];
+  const reads: string[] = [];
   const { calls, daemon } = recordingDaemon({
     state: stateAt("implementing"),
     answers: {
@@ -598,21 +601,23 @@ test("handoff_complete finds the pushed commit carrying the handoff, posts it wi
   const run = (
     session: LegionToolSession,
     parameters: Record<string, unknown>,
-    jj: JjRunner = paneJj({})
+    jj: JjRunner = paneJj(),
+    latestHandoff: LatestHandoff = paneDispatch(reads)
   ) =>
     createLegionTool({
       pi,
       daemon,
       controllerGrant: noControllerGrant,
       onPhaseCompleted: (ctx) => completed.push(ctx.sessionManager.getSessionId()),
-      handoffCommit: (phase, role) => findHandoffCommit({ phase, role, env: paneEnv, jj }),
+      handoffReport: (phase, role) =>
+        findHandoffReport({ phase, role, env: paneEnv, jj, latestHandoff }),
       resolveDocument: noDocumentLookup,
       session: () => session,
     }).execute("", parameters, undefined, undefined, context());
 
-  // The implementer at implementing: the issue's phase is read from the daemon's state, the
-  // commit carrying .legion/LEGION-208/implement.json is found in the pane, and the request
-  // carries it with the wire's zero values for the verdict and READY.
+  // The implementer at implementing: the issue's phase is read from the daemon's state, the newest
+  // implement record is read from the pane's Dispatch and the pushed tip from its jj, and the
+  // request carries both with the wire's zero values for the verdict and READY.
   await expect(
     run(claimSession("implementer"), { op: "handoff_complete", summary: "Done." })
   ).resolves.toEqual({
@@ -634,14 +639,23 @@ test("handoff_complete finds the pushed commit carrying the handoff, posts it wi
     ],
     [
       "handoffComplete",
-      { grantId: "grant-208", summary: "Done.", verdict: "", ready: false, commit: CARRYING },
+      {
+        grantId: "grant-208",
+        summary: "Done.",
+        verdict: "",
+        ready: false,
+        commit: TIP,
+        handoffId: RECORD.id,
+        handoffVersion: RECORD.version,
+      },
     ],
   ]);
+  expect(reads).toEqual(["LEGION-208 implement"]);
   expect(completed).toEqual(["ses_208"]);
 
-  // A role that does not work the issue's phase reports the commit the workspace stands on, and
-  // the daemon refuses it naming whose phase it is: the tester at implementing, the merger's
-  // READY, and a sub-architect, each posting @-. The verdict and READY travel as given.
+  // A role that does not work the issue's phase reports the commit the workspace stands on and no
+  // record, and the daemon refuses it naming whose phase it is: the tester at implementing, the
+  // merger's READY, and a sub-architect, each posting @-. The verdict and READY travel as given.
   await run(claimSession("tester"), { op: "handoff_complete", summary: "Red.", verdict: "fail" });
   expect(calls.at(-1)).toEqual([
     "handoffComplete",
@@ -667,6 +681,7 @@ test("handoff_complete finds the pushed commit carrying the handoff, posts it wi
     },
   ]);
   expect(completed).toEqual(["ses_208", "ses_208", "ses_208", "ses_208"]);
+  expect(reads).toEqual(["LEGION-208 implement"]);
 
   // Refused before any daemon call: a root architect, which runs no phase; a missing summary; a
   // verdict or a ready of the wrong shape; and a phase, which the daemon knows from the grant.
@@ -707,41 +722,93 @@ test("handoff_complete finds the pushed commit carrying the handoff, posts it wi
   expect(calls.at(-1)).toEqual(["state", undefined]);
   expect(completed).toHaveLength(4);
 
-  // Each lookup refusal is the tool's error, naming the remedy: the state is read, and then
-  // nothing is minted or posted, and the phase stays open.
-  const lookupRefusals = [
+  // Each refusal of the report is the tool's error, naming the remedy: the state is read, and
+  // then nothing is minted or posted, and the phase stays open.
+  const reportRefusals = [
     [
-      paneJj({ uncommitted: ".legion/LEGION-208/implement.json" }),
-      ".legion/LEGION-208/implement.json has changes in the working copy that are not committed: commit this phase's handoff before completing",
+      paneJj(),
+      paneDispatch([], async () => {
+        throw new DispatchServiceError("HANDOFF_NOT_FOUND", 404, "no implement handoff");
+      }),
+      "LEGION-208 has no implement handoff in Dispatch: write it with `dispatch handoff-write --issue LEGION-208 --phase implement --body-file <file>`, then complete again",
     ],
     [
-      paneJj({ listed: "" }),
-      ".legion/LEGION-208/implement.json is missing from the workspace: write this phase's handoff, then commit and push it before completing",
+      paneJj(),
+      paneDispatch([], async () => {
+        throw new DispatchServiceError("UNAVAILABLE", 503, "database is starting");
+      }),
+      "handoff_complete could not read LEGION-208's newest implement handoff from Dispatch: 503 UNAVAILABLE: database is starting; complete again once Dispatch answers",
     ],
     [
-      paneJj({ carrying: "" }),
-      ".legion/LEGION-208/implement.json is not committed on this issue's branch (only the base branch carries it): write and commit this phase's handoff",
-    ],
-    [
-      paneJj({ author: "legion-reviewer[bot]\nr@example.invalid" }),
-      `.legion/LEGION-208/implement.json is carried by commit ${CARRYING}, authored by legion-reviewer[bot] <r@example.invalid>, not this pane's legion-implementer[bot]: run jj new, then write and commit this phase's handoff again`,
-    ],
-    [
-      paneJj({ pushed: "" }),
-      `.legion/LEGION-208/implement.json is carried by commit ${CARRYING}, which is not on legion/LEGION-208@origin: push the issue branch, then complete again`,
+      paneJj(""),
+      paneDispatch(),
+      `the commit this workspace stands on, ${STANDING}, is not on legion/LEGION-208@origin: push it with \`jj bookmark set legion/LEGION-208 -r @- && jj git push --bookmark legion/LEGION-208\`, then complete again`,
     ],
   ] as const;
-  for (const [jj, message] of lookupRefusals) {
+  for (const [jj, latestHandoff, message] of reportRefusals) {
     const result = await run(
       claimSession("implementer"),
       { op: "handoff_complete", summary: "Done." },
-      jj
+      jj,
+      latestHandoff
     );
     expect(result.isError).toBe(true);
     expect(result.content).toEqual([{ type: "text", text: message }]);
     expect(calls.at(-1)).toEqual(["state", undefined]);
   }
   expect(completed).toHaveLength(4);
+});
+
+test("the planner, the tester and the reviewer post their phase's handoff record and no commit", async () => {
+  for (const [phase, role, word] of [
+    ["planning", "planner", "plan"],
+    ["testing", "tester", "test"],
+    ["reviewing", "reviewer", "review"],
+  ] as const) {
+    const reads: string[] = [];
+    const { calls, daemon } = recordingDaemon({ state: stateAt(phase) });
+    const result = await createLegionTool({
+      pi,
+      daemon,
+      controllerGrant: noControllerGrant,
+      onPhaseCompleted: () => undefined,
+      handoffReport: (issuePhase, claimRole) =>
+        findHandoffReport({
+          phase: issuePhase,
+          role: claimRole,
+          env: paneEnv,
+          jj: async (args) => {
+            throw new Error(`no jj expected for the ${role}: ${args.join(" ")}`);
+          },
+          latestHandoff: paneDispatch(reads),
+        }),
+      resolveDocument: noDocumentLookup,
+      session: () => claimSession(role),
+    }).execute(
+      "",
+      {
+        op: "handoff_complete",
+        summary: "Done.",
+        ...(role === "tester" ? { verdict: "pass" } : {}),
+      },
+      undefined,
+      undefined,
+      context()
+    );
+    expect(result.isError).toBeUndefined();
+    expect(reads).toEqual([`LEGION-208 ${word}`]);
+    expect(calls.at(-1)).toEqual([
+      "handoffComplete",
+      {
+        grantId: "grant-208",
+        summary: "Done.",
+        verdict: role === "tester" ? "pass" : "",
+        ready: false,
+        handoffId: RECORD.id,
+        handoffVersion: RECORD.version,
+      },
+    ]);
+  }
 });
 
 /** LEGION-208 closed by its merge, with its production check open on its second look. */
@@ -776,8 +843,8 @@ test("the implementer's report on its closed issue's production check carries a 
       daemon,
       controllerGrant: noControllerGrant,
       onPhaseCompleted: (ctx) => completed.push(ctx.sessionManager.getSessionId()),
-      // A check report resolves no commit: the lookup is never asked.
-      handoffCommit: noHandoffCommit,
+      // A check report resolves no record and no commit: the report is never asked.
+      handoffReport: noHandoffReport,
       resolveDocument: noDocumentLookup,
       session: () => session,
     }).execute("", parameters, undefined, undefined, context());
@@ -840,7 +907,7 @@ test("the implementer's report on its closed issue's production check carries a 
     daemon: testerDaemon,
     controllerGrant: noControllerGrant,
     onPhaseCompleted: () => undefined,
-    handoffCommit: noHandoffCommit,
+    handoffReport: noHandoffReport,
     resolveDocument: noDocumentLookup,
     session: () => claimSession("tester"),
   }).execute(
@@ -852,7 +919,7 @@ test("the implementer's report on its closed issue's production check carries a 
   );
   expect(testerAtDone.isError).toBe(true);
   expect(testerAtDone.content).toEqual([
-    { type: "text", text: "no handoff-commit lookup expected for the tester at done" },
+    { type: "text", text: "no handoff report expected for the tester at done" },
   ]);
 
   // The implementer's completion on a done issue is a check report whatever the record shows, as
@@ -866,7 +933,7 @@ test("the implementer's report on its closed issue's production check carries a 
     daemon: closedDaemon,
     controllerGrant: noControllerGrant,
     onPhaseCompleted: () => undefined,
-    handoffCommit: noHandoffCommit,
+    handoffReport: noHandoffReport,
     resolveDocument: noDocumentLookup,
     session: () => claimSession("implementer"),
   }).execute("", { op: "handoff_complete", summary: "Looked." }, undefined, undefined, context());
@@ -880,7 +947,7 @@ test("the implementer's report on its closed issue's production check carries a 
 test("a refused completion surfaces the daemon's code and leaves the phase open", async () => {
   const refusal = Object.assign(
     new Error(
-      `POST /legion/v1/handoff/complete failed with 409 HANDOFF_NOT_NEW: the implementer reported commit ${CARRYING} for its previous phase of LEGION-208; write and commit this phase's handoff before completing`
+      `POST /legion/v1/handoff/complete failed with 409 HANDOFF_NOT_NEW: the implementer named handoff record ${RECORD.id} for its previous phase of LEGION-208; write this phase's handoff with \`dispatch handoff-write --issue LEGION-208 --phase implement --body-file <file>\` before completing`
     ),
     { code: "HANDOFF_NOT_NEW" }
   );
@@ -894,8 +961,14 @@ test("a refused completion surfaces the daemon's code and leaves the phase open"
     daemon,
     controllerGrant: noControllerGrant,
     onPhaseCompleted: (ctx) => completed.push(ctx.sessionManager.getSessionId()),
-    handoffCommit: (phase, role) =>
-      findHandoffCommit({ phase, role, env: paneEnv, jj: paneJj({}) }),
+    handoffReport: (phase, role) =>
+      findHandoffReport({
+        phase,
+        role,
+        env: paneEnv,
+        jj: paneJj(),
+        latestHandoff: paneDispatch(),
+      }),
     resolveDocument: noDocumentLookup,
     session: () => claimSession("implementer"),
   });
@@ -928,7 +1001,7 @@ test("the controller reads the whole state without a grant and sets an issue's s
     onPhaseCompleted: () => {
       throw new Error("a controller completes no phase");
     },
-    handoffCommit: noHandoffCommit,
+    handoffReport: noHandoffReport,
     resolveDocument: noDocumentLookup,
     session: () => ({ kind: "controller", sessionID: "ses_controller" }),
   });

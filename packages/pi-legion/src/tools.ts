@@ -5,6 +5,7 @@ import {
   type LegionPhase,
 } from "@legion/contracts/legion-api";
 import type { LegionDaemonClient } from "@legion/pi-shared/daemon-client";
+import type { HandoffReport } from "@legion/pi-shared/handoff-record";
 import {
   type ClaimCapability,
   executePhaseOp,
@@ -123,8 +124,8 @@ function assertOperationInput(parameters: Record<string, unknown>, operation: st
  * that writes mints its own grant in-process and posts it with the request; nothing is written
  * to the pane. The phase ops run on the executor every harness shares (`executePhaseOp`):
  * `handoff_complete` belongs to every session but the root architect's (a phase worker, and a
- * sub-architect: an architect whose issue is not its tree), and finds the commit it reports in the
- * pane first (`handoffCommit`); `read_state` and `set_status` belong to the controller. */
+ * sub-architect: an architect whose issue is not its tree), and finds what it reports in the pane
+ * first (`handoffReport`); `read_state` and `set_status` belong to the controller. */
 export function createLegionTool(deps: {
   readonly pi: PiApi;
   readonly daemon: () => LegionDaemonClient;
@@ -133,17 +134,18 @@ export function createLegionTool(deps: {
   readonly controllerGrant: (sessionId: string) => Promise<LegionGrant>;
   /** Told of each `handoff_complete` that succeeded: the session's phase is complete. */
   readonly onPhaseCompleted: (context: SessionContext) => void;
-  /** The commit a completion of `phase` by `role` reports: for a file-backed phase the role
-   * works, the pushed commit carrying `.legion/<issue>/<phase>.json`, found with the pane's jj
-   * (`findHandoffCommit`); otherwise the commit the workspace stands on. Throws naming the remedy
-   * when the handoff is uncommitted, missing, not on this branch, another pane's, or unpushed. */
-  readonly handoffCommit: (phase: LegionPhase, role: LegionRole) => Promise<string>;
+  /** What a completion of `phase` by `role` reports beside its summary (`findHandoffReport`): for
+   * a file-backed phase the role works, the newest Dispatch handoff record of the phase, with the
+   * pushed tip of `legion/<issue>@origin` for the implementer; otherwise the commit the workspace
+   * stands on. Throws naming the remedy when the phase has no record, Dispatch does not answer, or
+   * the implementer's work is not pushed. */
+  readonly handoffReport: (phase: LegionPhase, role: LegionRole) => Promise<HandoffReport>;
   /** The id of the document `issue` carries under `reference` (`spec`, a slug, or a filename),
    * looked up in Dispatch as a `dispatch` command's `--artifact` is; throws naming the reference
    * when none matches, or when it names two documents. */
   readonly resolveDocument: (issue: string, reference: string) => Promise<string>;
 }): RegisteredTool {
-  const { pi, daemon, session, controllerGrant, onPhaseCompleted, handoffCommit, resolveDocument } =
+  const { pi, daemon, session, controllerGrant, onPhaseCompleted, handoffReport, resolveDocument } =
     deps;
   return {
     name: "legion",
@@ -172,7 +174,7 @@ export function createLegionTool(deps: {
         }
         if (active.kind !== "controller" && isPhaseOp(operation)) {
           const answer = await executePhaseOp(
-            { daemon: daemon(), claim: active, handoffCommit },
+            { daemon: daemon(), claim: active, handoffReport },
             parameters
           );
           if (operation === "handoff_complete") onPhaseCompleted(context);

@@ -37,9 +37,9 @@
       "types": "./src/daemon-client.ts",
       "bun": "./src/daemon-client.ts"
     },
-    "./handoff-commit": {
-      "types": "./src/handoff-commit.ts",
-      "bun": "./src/handoff-commit.ts"
+    "./handoff-record": {
+      "types": "./src/handoff-record.ts",
+      "bun": "./src/handoff-record.ts"
     },
     "./git-lock": {
       "types": "./src/git-lock.ts",

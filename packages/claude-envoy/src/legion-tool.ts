@@ -1,6 +1,7 @@
 import type { LegionRole } from "@legion/contracts"
 import type { LegionPhase } from "@legion/contracts/legion-api"
 import type { LegionDaemonClient } from "@legion/pi-shared/daemon-client"
+import type { HandoffReport } from "@legion/pi-shared/handoff-record"
 import {
   type ClaimCapability,
   executePhaseOp,
@@ -32,9 +33,10 @@ export interface LegionToolRuntime {
   readonly daemon: LegionDaemonClient
   /** The pane's registered claim, or undefined while its boot is still registering. */
   readonly claim: () => ClaimCapability | undefined
-  /** The commit a completion of `phase` by `role` reports (`findHandoffCommit` with the pane's
-   * environment): throws naming the remedy when the handoff is not committed and pushed. */
-  readonly handoffCommit: (phase: LegionPhase, role: LegionRole) => Promise<string>
+  /** What a completion of `phase` by `role` reports beside its summary (`findHandoffReport` with
+   * the pane's environment and Dispatch): throws naming the remedy when the phase has no handoff
+   * record, Dispatch does not answer, or the implementer's work is not pushed. */
+  readonly handoffReport: (phase: LegionPhase, role: LegionRole) => Promise<HandoffReport>
 }
 
 /** Runs one call of the `legion` tool and answers its JSON result; a refusal throws its reason. */
@@ -49,7 +51,7 @@ export async function executeLegionTool(
     )
   }
   return executePhaseOp(
-    { daemon: runtime.daemon, claim, handoffCommit: runtime.handoffCommit },
+    { daemon: runtime.daemon, claim, handoffReport: runtime.handoffReport },
     input,
   )
 }

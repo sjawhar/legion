@@ -36253,6 +36253,11 @@ var IssueDeployedEventPayloadSchema = exports_external.strictObject({
   run_id: exports_external.number().int().positive(),
   completed_at: exports_external.iso.datetime()
 });
+var HandoffRecordedPayloadSchema = exports_external.strictObject({
+  handoff_id: exports_external.string(),
+  phase: exports_external.string(),
+  version: exports_external.number().int().positive()
+});
 var DispatchServerStartedPayloadSchema = exports_external.strictObject({
   commit: exports_external.string().min(1),
   started_at: exports_external.iso.datetime()
@@ -36702,6 +36707,38 @@ function imagesArgument(z2, owner, cap) {
 var ASK_URGENCIES = ["low", "med", "high", "blocking"];
 var ASK_QUESTION_MAX = 800;
 var DISPATCH_BODY_MAX = 32000;
+var DISPATCH_HANDOFF_BODY_MAX = 262144;
+var HANDOFF_PHASE_PATTERN = /^[a-z][a-z0-9-]{0,31}$/;
+var HANDOFF_PHASE_RULE = "phase is not a handoff phase: a lowercase letter, then up to 31 lowercase letters, digits or hyphens, such as implement";
+function isJsonObjectText(text) {
+  try {
+    const parsed = JSON.parse(text);
+    return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed);
+  } catch {
+    return false;
+  }
+}
+function handoffProblem(value) {
+  const { phase, body } = value;
+  if (typeof phase === "string" && !HANDOFF_PHASE_PATTERN.test(phase))
+    return HANDOFF_PHASE_RULE;
+  if (typeof body !== "string")
+    return;
+  const bytes = new TextEncoder().encode(body).length;
+  if (bytes > DISPATCH_HANDOFF_BODY_MAX) {
+    return `body is ${bytes - DISPATCH_HANDOFF_BODY_MAX} bytes over the ${DISPATCH_HANDOFF_BODY_MAX}-byte limit (${bytes}/${DISPATCH_HANDOFF_BODY_MAX})`;
+  }
+  if (!isJsonObjectText(body)) {
+    return 'body is not one JSON object: a handoff body is a JSON object such as {"schemaVersion":1}';
+  }
+  return;
+}
+var HANDOFF_RULE = `${HANDOFF_PHASE_RULE}; the body is one JSON object of at most ${DISPATCH_HANDOFF_BODY_MAX} bytes.`;
+var handoffValidation = {
+  check: (value) => handoffProblem(value) === undefined,
+  message: HANDOFF_RULE,
+  refusal: (value) => handoffProblem(value) ?? HANDOFF_RULE
+};
 var SEARCH_QUERY_MAX = 1000;
 var SEARCH_QUERY_HINT = "search with a short phrase of a few words, not a passage";
 var SEARCH_KIND_DEPTH = 100;
@@ -37135,6 +37172,34 @@ var dispatchToolSpecs = [
     example: {},
     description: "Who Dispatch takes this session for: {session, owner}. owner is the lowercase email of the person whose personal token you run under (the first choice of assignee for issues you create), or null under the shared token, in which case a create with no assignee falls back to the parent's assignee and then to the project's default assignee.",
     arguments: () => ({}),
+    strict: true
+  },
+  {
+    name: "dispatch_handoff_write",
+    example: {
+      issue: "DSP-1",
+      phase: "implement",
+      body: '{"schemaVersion":1,"phase":"implement","issue":"DSP-1"}'
+    },
+    description: "Record this session's handoff for one phase of an issue: the body, one JSON object, is " + "stored on the issue exactly as sent, under this session, and read back byte for byte. Each " + "write is the next version (1, 2, ...) of that phase's handoff; earlier versions stay. Write " + "the body to a file outside your workspace and pass it with --body-file (- reads stdin). A " + "closed issue refuses it with 409 ISSUE_CLOSED, and a body over " + `${DISPATCH_HANDOFF_BODY_MAX} bytes with 413 CAP_EXCEEDED. Read it back with dispatch ` + `handoff-read. ${ISSUE_REFERENCE}`,
+    arguments: (z2) => ({
+      issue: z2.string().describe(ISSUE_REFERENCE),
+      phase: z2.string().describe("The phase the handoff ends: a lowercase slug such as plan, implement, test or review."),
+      body: z2.string({ min: 1 }).describe(`The handoff: one JSON object, at most ${DISPATCH_HANDOFF_BODY_MAX} bytes, stored and read back exactly as sent.`)
+    }),
+    validation: handoffValidation,
+    strict: true
+  },
+  {
+    name: "dispatch_handoff_read",
+    example: { issue: "DSP-1", phase: "implement" },
+    description: "Read the newest handoff recorded for one phase of an issue, or the version you name: one " + "line naming the phase, version, id, the session that wrote it and when, then the body " + "exactly as stored. A closed issue's handoffs read too. A phase with no handoff, or no " + `such version, is 404 HANDOFF_NOT_FOUND. ${ISSUE_REFERENCE}`,
+    arguments: (z2) => ({
+      issue: z2.string().describe(ISSUE_REFERENCE),
+      phase: z2.string().describe("The handoff's phase: a lowercase slug such as plan, implement, test or review."),
+      version: z2.number({ int: true, min: 1 }).describe("The version to read, from 1; omit it to read the newest.").optional()
+    }),
+    validation: handoffValidation,
     strict: true
   }
 ];
@@ -39618,6 +39683,26 @@ class DispatchClient {
   }
   async getComments(issue2, artifact) {
     return this.#json("GET", ["api", "v1", "issues", await this.#resolveIssue(issue2), "comments"], undefined, artifact ? { artifact } : undefined);
+  }
+  async writeHandoff(issue2, phase, input) {
+    return this.#json("POST", ["api", "v1", "issues", await this.#resolveIssue(issue2), "handoffs", phase], input);
+  }
+  async listHandoffs(issue2) {
+    return this.#json("GET", ["api", "v1", "issues", await this.#resolveIssue(issue2), "handoffs"]);
+  }
+  async latestHandoff(issue2, phase) {
+    return this.#json("GET", [
+      "api",
+      "v1",
+      "issues",
+      await this.#resolveIssue(issue2),
+      "handoffs",
+      phase,
+      "latest"
+    ]);
+  }
+  async handoff(id) {
+    return this.#json("GET", ["api", "v1", "handoffs", id]);
   }
   async getIssueReferences(issue2) {
     return this.#json("GET", [
@@ -42586,6 +42671,61 @@ ${trailer.join(`
         details: await followedAskDetails(client, read.ask)
       };
     }
+    case "dispatch_handoff_write": {
+      if (!input.sessionId?.trim()) {
+        throw new Error("host session id is required for dispatch handoff-write");
+      }
+      let recorded;
+      try {
+        recorded = await client.writeHandoff(issue2(), stringArg(args, "phase"), {
+          actor,
+          body: stringArg(args, "body")
+        });
+      } catch (error48) {
+        throw refusalWithCode(error48);
+      }
+      return {
+        text: `Recorded the ${recorded.phase} handoff of ${recorded.issue_key}, version ${recorded.version} (id ${recorded.id})`,
+        details: {
+          issue: recorded.issue_key,
+          phase: recorded.phase,
+          version: recorded.version,
+          handoff: recorded.id
+        }
+      };
+    }
+    case "dispatch_handoff_read": {
+      const issueKey = issue2();
+      const phase = stringArg(args, "phase");
+      const version2 = optionalNumber(args, "version");
+      let handoff;
+      try {
+        if (version2 === undefined) {
+          handoff = await client.latestHandoff(issueKey, phase);
+        } else {
+          const listed = await client.listHandoffs(issueKey);
+          const ofPhase = listed.filter((summary) => summary.phase === phase);
+          const match = ofPhase.find((summary) => summary.version === version2);
+          if (match === undefined) {
+            const newest = Math.max(0, ...ofPhase.map((summary) => summary.version));
+            throw new Error(`HANDOFF_NOT_FOUND: issue ${issueKey} has no ${phase} handoff version ${version2}; ${newest === 0 ? `it has no ${phase} handoff at all` : `its newest ${phase} handoff is version ${newest}`}`);
+          }
+          handoff = await client.handoff(match.id);
+        }
+      } catch (error48) {
+        throw refusalWithCode(error48);
+      }
+      return {
+        text: `${handoff.issue_key} ${handoff.phase} handoff, version ${handoff.version} (id ${handoff.id}), written by ${actorText(handoff.author)} at ${handoff.created_at}
+${handoff.body}`,
+        details: {
+          issue: handoff.issue_key,
+          phase: handoff.phase,
+          version: handoff.version,
+          handoff: handoff.id
+        }
+      };
+    }
     case "dispatch_read": {
       const message = optionalString(args, "message");
       const picturesOf = (texts) => readPictures(client, picturesNewestFirst(texts), shown);
@@ -44393,9 +44533,14 @@ var legionClaimView = exports_external.strictObject({
   capabilities: legionCapabilityReportView.optional(),
   pluginContract: exports_external.number().int().nonnegative()
 });
+var legionHandoffRecordView = exports_external.strictObject({
+  id: nonEmptyString,
+  version: exports_external.number().int().positive()
+});
 var legionPhaseView = exports_external.strictObject({
   claim: legionClaimView,
   handoffCommit: nonEmptyString.optional(),
+  handoffRecord: legionHandoffRecordView.optional(),
   rounds: exports_external.number().int().nonnegative()
 });
 var legionPullRequestView = exports_external.strictObject({
@@ -44649,7 +44794,9 @@ var LegionHandoffCompleteRequest = exports_external.strictObject({
   summary: nonEmptyString,
   verdict: exports_external.string(),
   ready: exports_external.boolean(),
-  commit: nonEmptyString.optional()
+  commit: nonEmptyString.optional(),
+  handoffId: nonEmptyString.optional(),
+  handoffVersion: exports_external.number().int().positive().optional()
 });
 var LegionIssueStatusRequest = exports_external.strictObject({
   grantId: nonEmptyString,
@@ -44824,7 +44971,7 @@ function createLegionDaemonClient(baseUrl, fetchFn = fetch) {
   };
 }
 
-// ../pi-shared/src/handoff-commit.ts
+// ../pi-shared/src/handoff-record.ts
 import { execFile as execFile2 } from "child_process";
 import { promisify as promisify2 } from "util";
 
@@ -44865,7 +45012,7 @@ async function staleGitLockNote(output, now = Date.now()) {
 `);
 }
 
-// ../pi-shared/src/handoff-commit.ts
+// ../pi-shared/src/handoff-record.ts
 var FILE_BACKED = {
   planning: { word: "plan", role: "planner" },
   implementing: { word: "implement", role: "implementer" },
@@ -44887,66 +45034,57 @@ var pathJj = async (args, cwd) => {
 ${note}`}`);
   }
 };
+function paneLatestHandoff(file2, env, cwd, fetchImpl = fetch) {
+  return async (issue2, word) => {
+    const { dispatch } = sessionDispatchSettings(file2, env, { cwd });
+    if (!dispatch.enabled) {
+      throw new Error(`Dispatch is off for this pane: ${dispatch.error ?? dispatch.notice}`);
+    }
+    return new DispatchClient(dispatch.url, dispatch.token, fetchImpl).latestHandoff(issue2, word);
+  };
+}
 function requiredVariable(env, name) {
   const value = env[name];
   if (value === undefined || value === "") {
-    throw new Error(`${name} is not set, so handoff_complete cannot find the commit to report`);
+    throw new Error(`${name} is not set, so handoff_complete cannot find what to report`);
   }
   return value;
 }
-async function findHandoffCommit(input) {
+var STANDING = ["log", "-r", "@-", "--no-graph", "-T", "commit_id"];
+async function findHandoffReport(input) {
   const { phase, role, env } = input;
   const jj = input.jj ?? pathJj;
-  const workspace = requiredVariable(env, "LEGION_WORKSPACE");
   const handoff = FILE_BACKED[phase];
   if (handoff === undefined || handoff.role !== role) {
-    return jj(["log", "-r", "@-", "--no-graph", "-T", "commit_id"], workspace);
+    return { commit: await jj(STANDING, requiredVariable(env, "LEGION_WORKSPACE")) };
   }
   const issue2 = requiredVariable(env, "LEGION_ISSUE");
   if (!DISPATCH_KEY_PATTERN.test(issue2)) {
     throw new Error(`LEGION_ISSUE ${JSON.stringify(issue2)} is not a Dispatch issue key like LEGION-1`);
   }
-  const file2 = `.legion/${issue2}/${handoff.word}.json`;
-  const fileset = `root:${JSON.stringify(file2)}`;
-  if (await jj(["diff", "-r", "@", "--name-only", fileset], workspace) !== "") {
-    throw new Error(`${file2} has changes in the working copy that are not committed: commit this phase's handoff before completing`);
-  }
-  if (await jj(["file", "list", "-r", "@", fileset], workspace) === "") {
-    throw new Error(`${file2} is missing from the workspace: write this phase's handoff, then commit and push it before completing`);
-  }
-  const carrying = await jj([
-    "log",
-    "-r",
-    `latest((::@- ~ ::trunk()) & files(${fileset}))`,
-    "--no-graph",
-    "-T",
-    "commit_id"
-  ], workspace);
-  if (carrying === "") {
-    throw new Error(`${file2} is not committed on this issue's branch (only the base branch carries it): write and commit this phase's handoff`);
-  }
-  const user = env["JJ_USER"];
-  if (user !== undefined && user !== "") {
-    const author = await jj(["log", "-r", carrying, "--no-graph", "-T", 'author.name() ++ "\\n" ++ author.email()'], workspace);
-    const [name = "", email3 = ""] = author.split(`
-`, 2);
-    if (name !== user || email3 !== (env["JJ_EMAIL"] ?? "")) {
-      throw new Error(`${file2} is carried by commit ${carrying}, authored by ${name} <${email3}>, not this pane's ${user}: run jj new, then write and commit this phase's handoff again`);
+  let record2;
+  try {
+    record2 = await input.latestHandoff(issue2, handoff.word);
+  } catch (error48) {
+    if (error48 instanceof DispatchServiceError && error48.fromDispatch && error48.code === "HANDOFF_NOT_FOUND") {
+      throw new Error(`${issue2} has no ${handoff.word} handoff in Dispatch: write it with \`dispatch handoff-write --issue ${issue2} --phase ${handoff.word} --body-file <file>\`, then complete again`);
     }
+    const answer = error48 instanceof DispatchServiceError && error48.fromDispatch ? `${error48.status} ${error48.code}: ${error48.message}` : messageFor(error48);
+    throw new Error(`handoff_complete could not read ${issue2}'s newest ${handoff.word} handoff from Dispatch: ${answer}; complete again once Dispatch answers`);
   }
+  const report = { handoffId: record2.id, handoffVersion: record2.version };
+  if (role !== "implementer")
+    return report;
+  const workspace = requiredVariable(env, "LEGION_WORKSPACE");
   const bookmark = `legion/${issue2}`;
-  const pushed = await jj([
-    "log",
-    "-r",
-    `${carrying} & ::remote_bookmarks(exact:${JSON.stringify(bookmark)}, exact:"origin")`,
-    "--no-graph",
-    "-T",
-    "commit_id"
-  ], workspace);
+  const remote = `remote_bookmarks(exact:${JSON.stringify(bookmark)}, exact:"origin")`;
+  const stands = await jj(STANDING, workspace);
+  const pushed = await jj(["log", "-r", `${stands} & ::${remote}`, "--no-graph", "-T", "commit_id"], workspace);
   if (pushed === "") {
-    throw new Error(`${file2} is carried by commit ${carrying}, which is not on ${bookmark}@origin: push the issue branch, then complete again`);
+    throw new Error(`the commit this workspace stands on, ${stands}, is not on ${bookmark}@origin: push it with \`jj bookmark set ${bookmark} -r @- && jj git push --bookmark ${bookmark}\`, then complete again`);
   }
-  return carrying;
+  const tip = await jj(["log", "-r", remote, "--no-graph", "-T", "commit_id"], workspace);
+  return { commit: tip, ...report };
 }
 // ../../node_modules/.bun/@modelcontextprotocol+sdk@1.30.0/node_modules/@modelcontextprotocol/sdk/dist/esm/server/zod-compat.js
 function isZ4Schema(s) {
@@ -47305,7 +47443,7 @@ var import_nats2 = __toESM(require_mod4(), 1);
 // package.json
 var version2 = "1.0.0";
 var legion = {
-  daemonApiVersion: 39
+  daemonApiVersion: 40
 };
 
 // src/channel-forwarder.ts
@@ -48363,7 +48501,7 @@ var PHASE_OP_SENTENCES = {
   requestBackwardMove: "request_backward_move returns an issue to an earlier phase (`to`, `reason`): a phase worker moves its own issue; " + "the tree's architect moves an issue in accepting, named by `issue`, back to implementing or testing, which counts a review round. "
 };
 function legionToolDescription(host) {
-  return "Perform the workflow operation the Legion daemon assigned this role. The daemon advances phases; this tool cannot spawn workers. " + (host.before ?? "") + "handoff_complete (phase workers and sub-architects; the daemon accepts a completion only from the role working the issue's current phase, " + "and the implementer's report on a look of its closed issue's production check) reports this phase complete: `summary` (two sentences for the " + "architect, or the merger's READY packet), `verdict` pass|fail from the tester alone on a phase completion (the daemon refuses a verdict from " + "any other role there) and pass|pending|fail from the implementer on a production check report (pending: production does not carry the merge " + "yet), `ready: true` for the merger's READY. A handoff is a committed " + "file, `.legion/<issue>/<phase>.json`: the pushed commit carrying it is found here, with the pane's jj, and reported, so write it, commit it and " + "push the branch (`jj git push`) before calling; this call refuses, posting nothing, a handoff still in the working copy, missing, not committed " + "on this branch, carried by another pane's commit, or not yet on `legion/<issue>@origin`, each naming the remedy. A production check report " + "(the task whose first line is `Production check of <KEY>`, handed to the implementer once the merge closed its issue) needs no handoff and no " + "commit: it carries its verdict and summary alone, and the daemon refuses it when no check is open (CHECK_NOT_OPEN). The daemon refuses " + "HANDOFF_NOT_NEW (the commit is the one you reported for your previous phase: write and commit this phase's handoff) and, for READY, each " + "refusal the merger's role names; a refused completion changed nothing, so fix what it names and complete again. An accepted READY whose `note` " + "begins MANUAL_MERGE_REQUIRED: is one a person merges: arm nothing. " + (host.after ?? "") + `What a later phase needs goes in your handoff; a question for another live role goes to its role topic with ${host.envoyPublish}.`;
+  return "Perform the workflow operation the Legion daemon assigned this role. The daemon advances phases; this tool cannot spawn workers. " + (host.before ?? "") + "handoff_complete (phase workers and sub-architects; the daemon accepts a completion only from the role working the issue's current phase, " + "and the implementer's report on a look of its closed issue's production check) reports this phase complete: `summary` (two sentences for the " + "architect, or the merger's READY packet), `verdict` pass|fail from the tester alone on a phase completion (the daemon refuses a verdict from " + "any other role there) and pass|pending|fail from the implementer on a production check report (pending: production does not carry the merge " + "yet), `ready: true` for the merger's READY. A planning, implementing, testing or reviewing phase ends with a handoff record on the " + "Dispatch issue: write it with `dispatch handoff-write --issue <issue> --phase <plan|implement|test|review> --body-file <file>` before " + "calling. This call reads the phase's newest record from Dispatch and reports it; the implementer's round also reports the commit " + "`legion/<issue>@origin` names, so push the branch first; retro and the merger's READY report the commit the workspace stands on. It " + "refuses, posting nothing, a phase with no record, a Dispatch that does not answer, or an implementer's `@-` not yet on " + "`legion/<issue>@origin`, each naming the remedy. A production check report " + "(the task whose first line is `Production check of <KEY>`, handed to the implementer once the merge closed its issue) needs no handoff and no " + "commit: it carries its verdict and summary alone, and the daemon refuses it when no check is open (CHECK_NOT_OPEN). The daemon refuses " + "HANDOFF_SESSION_MISMATCH (another session wrote the record), HANDOFF_NOT_NEW (the record is the one you named for your previous phase: " + "write this phase's handoff) and, for READY, each " + "refusal the merger's role names; a refused completion changed nothing, so fix what it names and complete again. An accepted READY whose `note` " + "begins MANUAL_MERGE_REQUIRED: is one a person merges: arm nothing. " + (host.after ?? "") + `What a later phase needs goes in your handoff; a question for another live role goes to its role topic with ${host.envoyPublish}.`;
 }
 async function mintClaimGrant(daemon, claim) {
   const { grantId } = await daemon.grant({
@@ -48419,13 +48557,13 @@ async function executePhaseOp(runtime, input) {
       if (args.verdict === "pending") {
         throw new Error("handoff_complete's verdict is pass or fail on a phase completion; pending is a production check's");
       }
-      const commit = await runtime.handoffCommit(record3.phase, claim.role);
+      const report2 = await runtime.handoffReport(record3.phase, claim.role);
       return daemon.handoffComplete({
         grantId: await mintClaimGrant(daemon, claim),
         summary: args.summary,
         verdict: args.verdict ?? "",
         ready: args.ready ?? false,
-        commit
+        ...report2
       });
     }
     case "request_backward_move": {
@@ -48467,7 +48605,7 @@ async function executeLegionTool(runtime, input) {
   if (claim === undefined) {
     throw new Error("this session has no Legion claim yet: the pane registers with the daemon once its first turn starts");
   }
-  return executePhaseOp({ daemon: runtime.daemon, claim, handoffCommit: runtime.handoffCommit }, input);
+  return executePhaseOp({ daemon: runtime.daemon, claim, handoffReport: runtime.handoffReport }, input);
 }
 
 // src/session-title.ts
@@ -49245,7 +49383,12 @@ async function runEnvoyChannelServer() {
       const legionRuntime = {
         daemon,
         claim: () => claim?.capability(),
-        handoffCommit: (phase, role) => findHandoffCommit({ phase, role, env: process.env })
+        handoffReport: (phase, role) => findHandoffReport({
+          phase,
+          role,
+          env: process.env,
+          latestHandoff: paneLatestHandoff(configFile, process.env, directory)
+        })
       };
       return mcpResult(await executeLegionTool(legionRuntime, request.params.arguments));
     }

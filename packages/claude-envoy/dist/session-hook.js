@@ -13607,6 +13607,11 @@ var IssueDeployedEventPayloadSchema = exports_external.strictObject({
   run_id: exports_external.number().int().positive(),
   completed_at: exports_external.iso.datetime()
 });
+var HandoffRecordedPayloadSchema = exports_external.strictObject({
+  handoff_id: exports_external.string(),
+  phase: exports_external.string(),
+  version: exports_external.number().int().positive()
+});
 var DispatchServerStartedPayloadSchema = exports_external.strictObject({
   commit: exports_external.string().min(1),
   started_at: exports_external.iso.datetime()
@@ -14056,6 +14061,38 @@ function imagesArgument(z2, owner, cap) {
 var ASK_URGENCIES = ["low", "med", "high", "blocking"];
 var ASK_QUESTION_MAX = 800;
 var DISPATCH_BODY_MAX = 32000;
+var DISPATCH_HANDOFF_BODY_MAX = 262144;
+var HANDOFF_PHASE_PATTERN = /^[a-z][a-z0-9-]{0,31}$/;
+var HANDOFF_PHASE_RULE = "phase is not a handoff phase: a lowercase letter, then up to 31 lowercase letters, digits or hyphens, such as implement";
+function isJsonObjectText(text) {
+  try {
+    const parsed = JSON.parse(text);
+    return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed);
+  } catch {
+    return false;
+  }
+}
+function handoffProblem(value) {
+  const { phase, body } = value;
+  if (typeof phase === "string" && !HANDOFF_PHASE_PATTERN.test(phase))
+    return HANDOFF_PHASE_RULE;
+  if (typeof body !== "string")
+    return;
+  const bytes = new TextEncoder().encode(body).length;
+  if (bytes > DISPATCH_HANDOFF_BODY_MAX) {
+    return `body is ${bytes - DISPATCH_HANDOFF_BODY_MAX} bytes over the ${DISPATCH_HANDOFF_BODY_MAX}-byte limit (${bytes}/${DISPATCH_HANDOFF_BODY_MAX})`;
+  }
+  if (!isJsonObjectText(body)) {
+    return 'body is not one JSON object: a handoff body is a JSON object such as {"schemaVersion":1}';
+  }
+  return;
+}
+var HANDOFF_RULE = `${HANDOFF_PHASE_RULE}; the body is one JSON object of at most ${DISPATCH_HANDOFF_BODY_MAX} bytes.`;
+var handoffValidation = {
+  check: (value) => handoffProblem(value) === undefined,
+  message: HANDOFF_RULE,
+  refusal: (value) => handoffProblem(value) ?? HANDOFF_RULE
+};
 var SEARCH_QUERY_MAX = 1000;
 var SEARCH_QUERY_HINT = "search with a short phrase of a few words, not a passage";
 var SEARCH_KIND_DEPTH = 100;
@@ -14489,6 +14526,34 @@ var dispatchToolSpecs = [
     example: {},
     description: "Who Dispatch takes this session for: {session, owner}. owner is the lowercase email of the person whose personal token you run under (the first choice of assignee for issues you create), or null under the shared token, in which case a create with no assignee falls back to the parent's assignee and then to the project's default assignee.",
     arguments: () => ({}),
+    strict: true
+  },
+  {
+    name: "dispatch_handoff_write",
+    example: {
+      issue: "DSP-1",
+      phase: "implement",
+      body: '{"schemaVersion":1,"phase":"implement","issue":"DSP-1"}'
+    },
+    description: "Record this session's handoff for one phase of an issue: the body, one JSON object, is " + "stored on the issue exactly as sent, under this session, and read back byte for byte. Each " + "write is the next version (1, 2, ...) of that phase's handoff; earlier versions stay. Write " + "the body to a file outside your workspace and pass it with --body-file (- reads stdin). A " + "closed issue refuses it with 409 ISSUE_CLOSED, and a body over " + `${DISPATCH_HANDOFF_BODY_MAX} bytes with 413 CAP_EXCEEDED. Read it back with dispatch ` + `handoff-read. ${ISSUE_REFERENCE}`,
+    arguments: (z2) => ({
+      issue: z2.string().describe(ISSUE_REFERENCE),
+      phase: z2.string().describe("The phase the handoff ends: a lowercase slug such as plan, implement, test or review."),
+      body: z2.string({ min: 1 }).describe(`The handoff: one JSON object, at most ${DISPATCH_HANDOFF_BODY_MAX} bytes, stored and read back exactly as sent.`)
+    }),
+    validation: handoffValidation,
+    strict: true
+  },
+  {
+    name: "dispatch_handoff_read",
+    example: { issue: "DSP-1", phase: "implement" },
+    description: "Read the newest handoff recorded for one phase of an issue, or the version you name: one " + "line naming the phase, version, id, the session that wrote it and when, then the body " + "exactly as stored. A closed issue's handoffs read too. A phase with no handoff, or no " + `such version, is 404 HANDOFF_NOT_FOUND. ${ISSUE_REFERENCE}`,
+    arguments: (z2) => ({
+      issue: z2.string().describe(ISSUE_REFERENCE),
+      phase: z2.string().describe("The handoff's phase: a lowercase slug such as plan, implement, test or review."),
+      version: z2.number({ int: true, min: 1 }).describe("The version to read, from 1; omit it to read the newest.").optional()
+    }),
+    validation: handoffValidation,
     strict: true
   }
 ];
@@ -15644,6 +15709,26 @@ class DispatchClient {
   }
   async getComments(issue2, artifact) {
     return this.#json("GET", ["api", "v1", "issues", await this.#resolveIssue(issue2), "comments"], undefined, artifact ? { artifact } : undefined);
+  }
+  async writeHandoff(issue2, phase, input) {
+    return this.#json("POST", ["api", "v1", "issues", await this.#resolveIssue(issue2), "handoffs", phase], input);
+  }
+  async listHandoffs(issue2) {
+    return this.#json("GET", ["api", "v1", "issues", await this.#resolveIssue(issue2), "handoffs"]);
+  }
+  async latestHandoff(issue2, phase) {
+    return this.#json("GET", [
+      "api",
+      "v1",
+      "issues",
+      await this.#resolveIssue(issue2),
+      "handoffs",
+      phase,
+      "latest"
+    ]);
+  }
+  async handoff(id) {
+    return this.#json("GET", ["api", "v1", "handoffs", id]);
   }
   async getIssueReferences(issue2) {
     return this.#json("GET", [
@@ -18742,6 +18827,61 @@ ${trailer.join(`
       return {
         text: `Following ask ${ask}: its answer and replies reach this session directly.`,
         details: await followedAskDetails(client, read.ask)
+      };
+    }
+    case "dispatch_handoff_write": {
+      if (!input.sessionId?.trim()) {
+        throw new Error("host session id is required for dispatch handoff-write");
+      }
+      let recorded;
+      try {
+        recorded = await client.writeHandoff(issue2(), stringArg(args, "phase"), {
+          actor,
+          body: stringArg(args, "body")
+        });
+      } catch (error48) {
+        throw refusalWithCode(error48);
+      }
+      return {
+        text: `Recorded the ${recorded.phase} handoff of ${recorded.issue_key}, version ${recorded.version} (id ${recorded.id})`,
+        details: {
+          issue: recorded.issue_key,
+          phase: recorded.phase,
+          version: recorded.version,
+          handoff: recorded.id
+        }
+      };
+    }
+    case "dispatch_handoff_read": {
+      const issueKey = issue2();
+      const phase = stringArg(args, "phase");
+      const version2 = optionalNumber(args, "version");
+      let handoff;
+      try {
+        if (version2 === undefined) {
+          handoff = await client.latestHandoff(issueKey, phase);
+        } else {
+          const listed = await client.listHandoffs(issueKey);
+          const ofPhase = listed.filter((summary) => summary.phase === phase);
+          const match = ofPhase.find((summary) => summary.version === version2);
+          if (match === undefined) {
+            const newest = Math.max(0, ...ofPhase.map((summary) => summary.version));
+            throw new Error(`HANDOFF_NOT_FOUND: issue ${issueKey} has no ${phase} handoff version ${version2}; ${newest === 0 ? `it has no ${phase} handoff at all` : `its newest ${phase} handoff is version ${newest}`}`);
+          }
+          handoff = await client.handoff(match.id);
+        }
+      } catch (error48) {
+        throw refusalWithCode(error48);
+      }
+      return {
+        text: `${handoff.issue_key} ${handoff.phase} handoff, version ${handoff.version} (id ${handoff.id}), written by ${actorText(handoff.author)} at ${handoff.created_at}
+${handoff.body}`,
+        details: {
+          issue: handoff.issue_key,
+          phase: handoff.phase,
+          version: handoff.version,
+          handoff: handoff.id
+        }
       };
     }
     case "dispatch_read": {

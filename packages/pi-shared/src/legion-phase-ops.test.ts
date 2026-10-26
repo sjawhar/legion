@@ -30,29 +30,39 @@ const implementer: ClaimCapability = {
   secret: "U2VjcmV0",
 };
 
-/** A runtime over a stub daemon answering the golden fixtures, recording each route it is sent. */
-function runtime(claim: ClaimCapability = implementer, commit = "a".repeat(40)) {
+/** What the implementer's round reports in the pane: its record and its pushed tip. */
+const REPORT = {
+  commit: "a".repeat(40),
+  handoffId: "5b1f0c2e-9d7a-4c3b-8e61-2f4a9d0c7b13",
+  handoffVersion: 2,
+};
+
+/** A runtime over a stub daemon answering the golden fixtures, recording each route it is sent
+ * and each body it is posted. */
+function runtime(claim: ClaimCapability = implementer) {
   const routes: string[] = [];
+  const posted: Record<string, unknown>[] = [];
   const lookups: string[] = [];
   const answers: Record<string, Record<string, unknown>> = {
     "/legion/v1/state": daemonFixture("state.json"),
     "/legion/v1/grants": daemonFixture("grant.json"),
     "/legion/v1/handoff/complete": daemonFixture("handoff-complete.json"),
   };
-  const stub = (async (input) => {
+  const stub = (async (input, init) => {
     const route = new URL(input.toString()).pathname;
     routes.push(route);
+    if (typeof init?.body === "string") posted.push(JSON.parse(init.body));
     return Response.json(answers[route] ?? {});
   }) as typeof fetch;
   const ops: PhaseOpRuntime = {
     daemon: createLegionDaemonClient("http://daemon.test", stub),
     claim,
-    handoffCommit: async (phase, role) => {
+    handoffReport: async (phase, role) => {
       lookups.push(`${phase} ${role}`);
-      return commit;
+      return REPORT;
     },
   };
-  return { ops, routes, lookups };
+  return { ops, routes, posted, lookups };
 }
 
 test("the phase ops' fields, as a host declares them, are every field of every op, each optional, from the host's Zod", () => {
@@ -134,13 +144,20 @@ test("each op refuses its arguments whole before any daemon request, naming ever
   expect(routes).toEqual([]);
 });
 
-test("handoff_complete reads the issue's phase, finds the commit for it and the claim's role, then mints its grant and posts", async () => {
-  const { ops, routes, lookups } = runtime();
+test("handoff_complete reads the issue's phase, finds the record and commit for it and the claim's role, then mints its grant and posts them", async () => {
+  const { ops, routes, posted, lookups } = runtime();
   await expect(
     executePhaseOp(ops, { op: "handoff_complete", summary: "Done.", verdict: "pass" })
   ).resolves.toEqual(daemonFixture("handoff-complete.json"));
   expect(lookups).toEqual(["implementing implementer"]);
   expect(routes).toEqual(["/legion/v1/state", "/legion/v1/grants", "/legion/v1/handoff/complete"]);
+  expect(posted.at(-1)).toEqual({
+    grantId: "grant-for-one-command",
+    summary: "Done.",
+    verdict: "pass",
+    ready: false,
+    ...REPORT,
+  });
 });
 
 test("a root architect's handoff_complete is refused as unavailable before its own fields are checked, after any field it never takes", async () => {
@@ -198,8 +215,8 @@ function closedRuntime(claim: ClaimCapability, record: Record<string, unknown>) 
   const ops: PhaseOpRuntime = {
     daemon: createLegionDaemonClient("http://daemon.test", stub),
     claim,
-    handoffCommit: async (phase, role) => {
-      throw new Error(`no handoff-commit lookup expected for the ${role} at ${phase}`);
+    handoffReport: async (phase, role) => {
+      throw new Error(`no handoff report expected for the ${role} at ${phase}`);
     },
   };
   return { ops, posted };
@@ -244,7 +261,7 @@ test("the implementer's report on its closed issue's production check carries a 
   const tester = closedRuntime({ ...implementer, role: "tester" }, { check: openCheck });
   await expect(
     executePhaseOp(tester.ops, { op: "handoff_complete", summary: "Looked.", verdict: "pass" })
-  ).rejects.toThrow(new Error("no handoff-commit lookup expected for the tester at done"));
+  ).rejects.toThrow(new Error("no handoff report expected for the tester at done"));
   expect(tester.posted).toEqual([]);
 
   // The implementer's completion on a done issue is a check report whatever the record shows, as
@@ -287,7 +304,7 @@ test("request_backward_move names the issue an architect returns from accepting,
   const runtimeFor = (claim: ClaimCapability): PhaseOpRuntime => ({
     daemon: createLegionDaemonClient("http://daemon.test", stub),
     claim,
-    handoffCommit: async () => "a".repeat(40),
+    handoffReport: async () => REPORT,
   });
   // The tree's architect (its grant serves the whole tree) names the child it sends back; a
   // sub-architect's role is architect too.

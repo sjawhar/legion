@@ -1871,7 +1871,7 @@ describe("Legion OMP extension", () => {
 
     test("the legion tool has no handoff_message: a call reaches no daemon route, and a message for another role goes through envoy_publish", async () => {
       // Nothing reads a handoff message: no operation or prompt reads `.legion/messages/`, while a
-      // role's live questions go through envoy_publish and a later phase reads the handoff files.
+      // role's live questions go through envoy_publish and a later phase reads the handoff records.
       const worker = await bootStalling({});
       const requestsBefore = worker.requests.length;
       const result = await worker.legionTool.execute(
@@ -3902,6 +3902,10 @@ describe("the recreated-workspace notice", () => {
       },
     ]);
     expect(JSON.stringify(notices(pane))).not.toMatch(/\bmain\b/);
+    // The last handoff is a record on the issue, which the recreation did not touch.
+    expect(JSON.stringify(notices(pane))).toContain(
+      "dispatch handoff-read --issue REPO-43 --phase <phase>"
+    );
   });
 
   test("a resume told false, or nothing, saves no notice", async () => {

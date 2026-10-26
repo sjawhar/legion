@@ -84,16 +84,20 @@ test("declares the three phase-worker operations under one op, and names the Env
   expect(definition.description).toContain("with mcp__legion__envoy_publish.")
 })
 
-test("handoff_complete finds the commit for the issue's phase and the claim's role, then mints its grant and posts", async () => {
+test("handoff_complete finds the record and commit for the issue's phase and the claim's role, then mints its grant and posts them", async () => {
   const { client, requests } = await daemon()
   const lookups: string[] = []
   const answer = await executeLegionTool(
     {
       daemon: client,
       claim: () => implementer,
-      handoffCommit: async (phase: LegionPhase, role: LegionRole) => {
+      handoffReport: async (phase: LegionPhase, role: LegionRole) => {
         lookups.push(`${phase} ${role}`)
-        return "a".repeat(40)
+        return {
+          commit: "a".repeat(40),
+          handoffId: "5b1f0c2e-9d7a-4c3b-8e61-2f4a9d0c7b13",
+          handoffVersion: 2,
+        }
       },
     },
     { op: "handoff_complete", summary: "Implemented it.", verdict: "pass" },
@@ -112,25 +116,29 @@ test("handoff_complete finds the commit for the issue's phase and the claim's ro
         verdict: "pass",
         ready: false,
         commit: "a".repeat(40),
+        handoffId: "5b1f0c2e-9d7a-4c3b-8e61-2f4a9d0c7b13",
+        handoffVersion: 2,
       },
     },
   ])
 })
 
-test("a handoff the lookup refuses posts nothing and mints nothing", async () => {
+test("a handoff report the pane refuses posts nothing and mints nothing", async () => {
   const { client, requests } = await daemon()
   await expect(
     executeLegionTool(
       {
         daemon: client,
         claim: () => implementer,
-        handoffCommit: async () => {
-          throw new Error(".legion/LEGION-208/implement.json is missing from the workspace")
+        handoffReport: async () => {
+          throw new Error(
+            "LEGION-208 has no implement handoff in Dispatch: write it with `dispatch handoff-write --issue LEGION-208 --phase implement --body-file <file>`, then complete again",
+          )
         },
       },
       { op: "handoff_complete", summary: "Done." },
     ),
-  ).rejects.toThrow("is missing from the workspace")
+  ).rejects.toThrow("LEGION-208 has no implement handoff in Dispatch")
   expect(requests.map(({ path }) => path)).toEqual(["/legion/v1/state"])
 })
 
@@ -139,8 +147,8 @@ test("read_record answers the issue's record, and request_backward_move posts wi
   const runtime = {
     daemon: client,
     claim: () => implementer,
-    handoffCommit: async (): Promise<never> => {
-      throw new Error("no lookup expected")
+    handoffReport: async (): Promise<never> => {
+      throw new Error("no handoff report expected")
     },
   }
   const state = (await daemonFixture("state.json")) as { issues: Record<string, unknown> }
@@ -171,14 +179,14 @@ test("read_record answers the issue's record, and request_backward_move posts wi
 
 test("refuses before the claim registered, an operation a phase worker has not, and a field its operation does not take", async () => {
   const { client, requests } = await daemon()
-  const handoffCommit = async (): Promise<string> => "c"
+  const handoffReport = async () => ({ commit: "c" })
   await expect(
     executeLegionTool(
-      { daemon: client, claim: () => undefined, handoffCommit },
+      { daemon: client, claim: () => undefined, handoffReport },
       { op: "read_record", issue: "LEGION-208" },
     ),
   ).rejects.toThrow("this session has no Legion claim yet")
-  const runtime = { daemon: client, claim: () => implementer, handoffCommit }
+  const runtime = { daemon: client, claim: () => implementer, handoffReport }
   await expect(
     executeLegionTool(runtime, { op: "set_status", issue: "LEGION-208" }),
   ).rejects.toThrow("op is one of read_record, handoff_complete, request_backward_move")
