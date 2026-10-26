@@ -996,16 +996,19 @@
   holder listed without its role, and a send's `sender.roles` left out without refusing it. A
   first scan the idle timer ended is scanned again a second later until one completes
   (`kvwatch.WithRescan`). The role claim watcher is the interest registry's second, so `/healthz`
-  now answers `503 unhealthy`, under the `interest KV` dependency, when it stops or the role bucket
-  is recreated under it (`role claims watcher stopped`, `role claims bucket envoy_roles was
-  recreated under its watcher`), where a ping of the role bucket's status was all it read before,
-  and the self-health monitor counts either as a terminal failure and rebuilds it, which refills
-  the view. `POST /v1/roles/set`'s rollback of a claim that did not land and its removal of the
-  role's topic from the old holder are best-effort tidying within the request's budget: a claim
-  that landed answers 200 whatever that cleanup did, a cleanup that failed is logged at WARN, and
-  one the budget's end cut short at INFO. A claim whose lost compare-and-swap is joined with a
-  store call that did not answer is the bus-unavailable 503 with `Retry-After: 1`, not the store's
-  answer.
+  now answers `503 unhealthy` when it stops or the role bucket is recreated under it
+  (`interest KV watcher unavailable: role claims watcher stopped`,
+  `interest KV watcher unavailable: role claims bucket envoy_roles was recreated under its watcher`,
+  or `interest KV unavailable: ...` from the request whose own ping finds the recreate), where a
+  ping of the role bucket's status was all it read before, and the self-health monitor counts
+  either as a terminal failure and rebuilds it, which refills the view. `POST /v1/roles/set`'s
+  rollback of a claim that did not land and its removal of the role's topic from the old holder
+  are best-effort tidying within the request's budget: a claim that landed answers 200 whatever
+  that cleanup did, a cleanup that failed is logged at WARN, and one the budget's end cut short at
+  INFO. A claim whose lost compare-and-swap is joined with a store call that did not answer is the
+  bus-unavailable 503 with `Retry-After: 1`, not the store's answer. The start's warm-up wait
+  covers the role claim view too, and its timeout is logged
+  `interest or role claim cache warm-up timed out`, its error naming the cache.
 - A comment, comment edit, message or broadcast body is at most 32,000 characters
   (`contracts.DispatchBodyMax`, UTF-16 units), up from 2,000 (INFRA-45); a longer one is
   `400 CAP_EXCEEDED` as before, named the way every other cap names its own. The limit is

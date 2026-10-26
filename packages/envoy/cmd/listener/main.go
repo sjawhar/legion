@@ -744,7 +744,7 @@ func main() {
 	// health endpoint exposes the unavailable registry while NATS recovers.
 	cacheReadyCtx, cacheReadyCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	if err := registry.WaitForCacheReady(cacheReadyCtx); err != nil {
-		logger.Warn("interest cache warm-up timed out; serving with possibly empty cache",
+		logger.Warn("interest or role claim cache warm-up timed out; serving with possibly empty cache",
 			slog.String("error", err.Error()))
 	}
 	cacheReadyCancel()

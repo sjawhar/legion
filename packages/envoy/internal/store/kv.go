@@ -516,12 +516,16 @@ func (r *Registry) RolesHeldBy(sessionID string) ([]string, error) {
 // existing subscription in the bucket and RolesHeldBy every claim; a role claim scan nats.go's idle
 // timer ended leaves RolesHeldBy refusing (ErrRoleViewNotReady) until its rescan completes. Callers
 // bound ctx: a watcher that fails to start releases it too, and the caller then serves the
-// write-through path while /healthz exposes the unavailable registry.
+// write-through path while /healthz exposes the unavailable registry. Its error names the cache
+// that was not ready.
 func (r *Registry) WaitForCacheReady(ctx context.Context) error {
 	if err := r.watcher.WaitReady(ctx); err != nil {
-		return err
+		return fmt.Errorf("interest cache: %w", err)
 	}
-	return r.roleWatcher.WaitReady(ctx)
+	if err := r.roleWatcher.WaitReady(ctx); err != nil {
+		return fmt.Errorf("role claim cache: %w", err)
+	}
+	return nil
 }
 
 // Upsert is UpsertWithin with no deadline of its own, for a caller that answers no request.

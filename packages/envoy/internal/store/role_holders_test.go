@@ -31,7 +31,9 @@ func heldRoles(t *testing.T, reg *Registry, sessionID string) []string {
 // stored before Open and one written after give their holders the role, a claim that supersedes
 // one moves the role, a deleted claim leaves the role to nobody, and a claim this build cannot
 // decode gives it to nobody either and is logged at WARN once. A claim this registry writes itself
-// is in the view as soon as its write answers. Interest topics play no part.
+// is in the view as soon as its write answers, and leaves it as soon as its release answers: the
+// watcher's deliveries of that claim are held until the test has asked. Interest topics play no
+// part.
 func TestRolesHeldByFollowsTheRoleClaims(t *testing.T) {
 	logs := captureRegistryLogs(t)
 	conn, cleanup := connectNATS(t)
@@ -96,6 +98,24 @@ func TestRolesHeldByFollowsTheRoleClaims(t *testing.T) {
 		t.Fatalf("one undecodable claim logged %d times, want once:\n%s", n, logs.String())
 	}
 
+	// From here the watcher holds every delivery of planner's claim until the test has asked, so
+	// the view can hold the claim, and lose it, only through the registry's own writes.
+	gate := make(chan struct{})
+	var openOnce sync.Once
+	open := func() { openOnce.Do(func() { close(gate) }) }
+	t.Cleanup(open)
+	reg.roleWatcher.Stop()
+	reg.roleWatcher = kvwatch.New("role claims", reg.roles(), func(entry natsgo.KeyValueEntry) {
+		if entry.Key() == "planner" {
+			<-gate
+		}
+		reg.applyRoleClaim(entry)
+	}, reg.resetRoleHolders)
+	reg.roleWatcher.Start()
+	waitFor(t, 5*time.Second, func() bool {
+		_, complete := reg.roleWatcher.Complete()
+		return complete
+	})
 	if _, err := reg.SetRole("ses_c", "m1", "planner", false); err != nil {
 		t.Fatalf("SetRole: %v", err)
 	}
@@ -106,8 +126,9 @@ func TestRolesHeldByFollowsTheRoleClaims(t *testing.T) {
 		t.Fatalf("release planner: %v", err)
 	}
 	if got := heldRoles(t, reg, "ses_c"); len(got) != 0 {
-		t.Fatalf("a claim this registry released is still in its view: %v", got)
+		t.Fatalf("a claim this registry released is still in its view as the release answers: %v", got)
 	}
+	open()
 }
 
 // A view that cannot answer says so rather than answering that a session holds nothing: the role
@@ -225,7 +246,10 @@ func TestARoleViewWhoseFirstScanTimedOutAnswersOnlyOnceItsRescanCompletes(t *tes
 // it has delivered so far, so it is no answer until its scan completes: RolesHeldBy refuses it as
 // not ready rather than report a holder whose claim the refill has not reached without its role.
 // The refill is held at the holder's claim, after another claim, so the test asks while it is
-// partial.
+// partial. The reset empties the holders and their revisions both: once the refill completes, a
+// claim only the old bucket had (planner's) gives nobody its role, and a claim the new bucket
+// writes at a lower revision than the old bucket's claim of the same role (architect's) gives its
+// holder the role.
 func TestARecreatedRoleBucketsViewAnswersOnlyOnceItsRefillCompletes(t *testing.T) {
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
@@ -237,9 +261,21 @@ func TestARecreatedRoleBucketsViewAnswersOnlyOnceItsRefillCompletes(t *testing.T
 	if _, err := reg.SetRole("ses_holder", "m1", "reviewer", false); err != nil {
 		t.Fatalf("SetRole: %v", err)
 	}
+	js, err := conn.JetStream()
+	if err != nil {
+		t.Fatalf("jetstream: %v", err)
+	}
+	old, err := js.KeyValue(bus.RoleClaimBucket)
+	if err != nil {
+		t.Fatalf("open the role bucket: %v", err)
+	}
+	putRoleClaim(t, old, "planner", "ses_holder")
+	oldArchitect := putRoleClaim(t, old, "architect", "ses_other")
 	waitFor(t, 5*time.Second, func() bool {
-		roles, err := reg.RolesHeldBy("ses_holder")
-		return err == nil && slices.Equal(roles, []string{"reviewer"})
+		holder, errHolder := reg.RolesHeldBy("ses_holder")
+		other, errOther := reg.RolesHeldBy("ses_other")
+		return errHolder == nil && errOther == nil &&
+			slices.Equal(holder, []string{"planner", "reviewer"}) && slices.Equal(other, []string{"architect"})
 	})
 
 	var refilling atomic.Bool
@@ -263,17 +299,15 @@ func TestARecreatedRoleBucketsViewAnswersOnlyOnceItsRefillCompletes(t *testing.T
 	reg.roleWatcher = kvwatch.New("role claims", reg.roles(), apply, reset)
 	reg.roleWatcher.Start()
 	waitFor(t, 5*time.Second, reg.roleWatcher.Ready)
-	heldOnceComplete(t, reg, "ses_holder", []string{"reviewer"})
+	heldOnceComplete(t, reg, "ses_holder", []string{"planner", "reviewer"})
 
-	js, err := conn.JetStream()
-	if err != nil {
-		t.Fatalf("jetstream: %v", err)
-	}
 	if err := js.DeleteKeyValue(bus.RoleClaimBucket); err != nil {
 		t.Fatalf("delete the role bucket: %v", err)
 	}
 	recreated := testnats.RecreateKeyValue(t, js, &natsgo.KeyValueConfig{Bucket: bus.RoleClaimBucket, Replicas: 1, Storage: natsgo.FileStorage})
-	putRoleClaim(t, recreated, "architect", "ses_other")
+	if newArchitect := putRoleClaim(t, recreated, "architect", "ses_other"); newArchitect >= oldArchitect {
+		t.Fatalf("the new bucket's architect claim is at revision %d, the old one's at %d; the test needs the new one lower", newArchitect, oldArchitect)
+	}
 	putRoleClaim(t, recreated, "reviewer", "ses_holder")
 	if err := reg.Rewatch(conn); err != nil {
 		t.Fatalf("Rewatch: %v", err)
@@ -287,9 +321,15 @@ func TestARecreatedRoleBucketsViewAnswersOnlyOnceItsRefillCompletes(t *testing.T
 		t.Fatalf("with the refill short of the holder's claim, RolesHeldBy(ses_holder) = %v, %v; want ErrRoleViewNotReady", roles, err)
 	}
 	release()
-	heldOnceComplete(t, reg, "ses_holder", []string{"reviewer"})
+	waitFor(t, 30*time.Second, func() bool {
+		_, complete := reg.roleWatcher.Complete()
+		return complete
+	})
+	if got := heldRoles(t, reg, "ses_holder"); !slices.Equal(got, []string{"reviewer"}) {
+		t.Fatalf("after the refill ses_holder holds %v, want [reviewer]: a claim only the old bucket had outlived the reset", got)
+	}
 	if got := heldRoles(t, reg, "ses_other"); !slices.Equal(got, []string{"architect"}) {
-		t.Fatalf("after the refill ses_other holds %v, want [architect]", got)
+		t.Fatalf("after the refill ses_other holds %v, want [architect]: the old bucket's revision fenced out the new bucket's claim", got)
 	}
 }
 

@@ -284,7 +284,10 @@ func TestARoleViewWhoseFirstScanTimedOutIsTheBusNotAnsweringOnTheSessionRoutes(t
 // claims one at a time. Until it has delivered them all, GET /v1/registry/<session_id> and GET
 // /v1/sessions answer the holder's roles or the bus-unavailable 503 with Retry-After: 1, never the
 // holder with no roles. The holder's claim is the last of thousands, so the routes are asked while
-// the refill runs.
+// the refill runs. The reset empties the holders and their revisions both: after the refill, a
+// claim only the old bucket had (planner's) gives the holder nothing, and a claim the new bucket
+// writes at a lower revision than the old bucket's claim of the same role (architect's) gives its
+// holder the role.
 func TestARecreatedRoleBucketIsNeverAnsweredAsAHolderWithoutItsRole(t *testing.T) {
 	const (
 		holder = "ses_recreated_roles_holder"
@@ -296,22 +299,36 @@ func TestARecreatedRoleBucketIsNeverAnsweredAsAHolderWithoutItsRole(t *testing.T
 	registry, sessions := setupSessionsTest(t,
 		map[string][]string{holder: nil, target: nil},
 		map[string]int{holder: 1, target: 1})
-	claimRoles(t, registry, holder, "reviewer")
+	claimRoles(t, registry, holder, "reviewer", "planner")
+	claimRoles(t, registry, target, "architect")
 	state := &listenerDeps{client: client, registry: registry, sessions: sessions}
 
 	js := client.JS()
+	old, err := js.KeyValue(bus.RoleClaimBucket)
+	if err != nil {
+		t.Fatalf("open the role bucket: %v", err)
+	}
+	oldArchitect, err := old.Get("architect")
+	if err != nil {
+		t.Fatalf("read architect's claim: %v", err)
+	}
 	if err := js.DeleteKeyValue(bus.RoleClaimBucket); err != nil {
 		t.Fatalf("delete the role bucket: %v", err)
 	}
 	recreated := testnats.RecreateKeyValue(t, js, &natsgo.KeyValueConfig{Bucket: bus.RoleClaimBucket, Replicas: 1, Storage: natsgo.FileStorage})
-	put := func(role, session string) {
+	put := func(role, session string) uint64 {
 		value, err := json.Marshal(store.RoleClaim{HolderSessionID: session, ClaimedAt: time.Now().UnixMilli()})
 		if err != nil {
 			t.Fatalf("encode %s's claim: %v", role, err)
 		}
-		if _, err := recreated.Put(role, value); err != nil {
+		revision, err := recreated.Put(role, value)
+		if err != nil {
 			t.Fatalf("store %s's claim: %v", role, err)
 		}
+		return revision
+	}
+	if revision := put("architect", target); revision >= oldArchitect.Revision() {
+		t.Fatalf("the new bucket's architect claim is at revision %d, the old one's at %d; the test needs the new one lower", revision, oldArchitect.Revision())
 	}
 	for i := range claims {
 		put(fmt.Sprintf("filler-%04d", i), filler)
@@ -359,6 +376,9 @@ func TestARecreatedRoleBucketIsNeverAnsweredAsAHolderWithoutItsRole(t *testing.T
 		time.Sleep(time.Millisecond)
 	}
 	t.Logf("the session routes answered the bus-unavailable 503 %d times while the refill ran", unanswered)
+	if got := decodeSessionInfo(t, sessionEntryRoute(t, state, target)).Roles; !slices.Equal(got, []string{"architect"}) {
+		t.Fatalf("after the refill GET /v1/registry/%s reports roles %v, want [architect]: the old bucket's revision fenced out the new bucket's claim", target, got)
+	}
 	if got := publishedSender(t, state, holder, target).Roles; !slices.Equal(got, want) {
 		t.Fatalf("after the refill a send from %s stamps roles %v, want %v", holder, got, want)
 	}
