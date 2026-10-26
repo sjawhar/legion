@@ -6,17 +6,17 @@ import (
 	"testing"
 )
 
-// 0051 adds awaiting_person and what it waits on, where on Dispatch that wait began, the root's
+// 0052 adds awaiting_person and what it waits on, where on Dispatch that wait began, the root's
 // last handout and earliest hand-back since, the gate columns that record the changes request the
 // architect was told of and where Dispatch recorded its approval, and the mirror of a root's asks.
 // An issue the old daemon left in any phase migrates with no awaiting state, nobody's claim, no
 // handout and no hand-back, and a gate it left with no recorded request. Afterwards a root waits on
 // exactly one of an ask or a gate version, and only in that phase, a wait's start is set only in
 // that phase, the handout and the hand-back are kept in every phase, and a held issue never waits.
-func TestAwaitingPersonArrivesWith0051AndItsShapeIsEnforced(t *testing.T) {
+func TestAwaitingPersonArrivesWith0052AndItsShapeIsEnforced(t *testing.T) {
 	store := emptyStore(t)
 	ctx := context.Background()
-	migrateThrough(t, store, 50)
+	migrateThrough(t, store, 51)
 	if _, err := store.Pool().Exec(ctx, `insert into issues
 		(key, tree, project, title, phase, generation, status, rank, last_dispatch_seq)
 		values ('LEGION-208', 'LEGION-208', 'LEGION', 'admitted root', 'admitted', 1, 'in_progress', 'A', 1)`); err != nil {
@@ -36,7 +36,7 @@ func TestAwaitingPersonArrivesWith0051AndItsShapeIsEnforced(t *testing.T) {
 		t.Fatalf("read the migrated root: %v", err)
 	}
 	if claimedBy != "" || claimSeq != 0 || ask != nil || gateVersion != nil || sinceSeq != nil || since != nil || handout != 0 || declared != nil {
-		t.Fatalf("root after 0051 = claimed_by %q claim_seq %d ask %v gate %v since %v/%v handout %d declared %v, want no claim, no wait, no handout and no hand-back",
+		t.Fatalf("root after 0052 = claimed_by %q claim_seq %d ask %v gate %v since %v/%v handout %d declared %v, want no claim, no wait, no handout and no hand-back",
 			claimedBy, claimSeq, ask, gateVersion, sinceSeq, since, handout, declared)
 	}
 
@@ -85,10 +85,10 @@ func TestAwaitingPersonArrivesWith0051AndItsShapeIsEnforced(t *testing.T) {
 // An old gate migrates with no changes request recorded as told, and the record takes a version
 // with its reason and the review's sequence and time, or nothing: never a version of zero, a
 // sequence of zero, and never a reason, sequence or time without a version.
-func TestTheGatesToldChangesRequestArrivesWith0051(t *testing.T) {
+func TestTheGatesToldChangesRequestArrivesWith0052(t *testing.T) {
 	store := emptyStore(t)
 	ctx := context.Background()
-	migrateThrough(t, store, 50)
+	migrateThrough(t, store, 51)
 	if _, err := store.Pool().Exec(ctx, `insert into issues
 		(key, tree, project, title, phase, generation, status, rank, last_dispatch_seq)
 		values ('LEGION-208', 'LEGION-208', 'LEGION', 'admitted root', 'admitted', 1, 'in_progress', 'A', 1)`); err != nil {
@@ -110,7 +110,7 @@ func TestTheGatesToldChangesRequestArrivesWith0051(t *testing.T) {
 		t.Fatalf("read the migrated gate: %v", err)
 	}
 	if version != nil || reason != "" || seq != nil || at != nil {
-		t.Fatalf("gate after 0051 = told_changes_version %v reason %q seq %v at %v, want none recorded", version, reason, seq, at)
+		t.Fatalf("gate after 0052 = told_changes_version %v reason %q seq %v at %v, want none recorded", version, reason, seq, at)
 	}
 	for _, accepted := range []string{
 		`update design_gates set told_changes_version = 4, told_changes_reason = 'name the rollback path' where issue = 'LEGION-208'`,
@@ -134,13 +134,13 @@ func TestTheGatesToldChangesRequestArrivesWith0051(t *testing.T) {
 	}
 }
 
-// 0051 also records where Dispatch put the approval a gate holds, cleared with the approval
+// 0052 also records where Dispatch put the approval a gate holds, cleared with the approval
 // itself, the approval request a registration read open, and the mirror of each ask of an issue,
 // which goes with the issue.
-func TestTheGatesApprovalMarkAndTheAskMirrorArriveWith0051(t *testing.T) {
+func TestTheGatesApprovalMarkAndTheAskMirrorArriveWith0052(t *testing.T) {
 	store := emptyStore(t)
 	ctx := context.Background()
-	migrateThrough(t, store, 50)
+	migrateThrough(t, store, 51)
 	if _, err := store.Pool().Exec(ctx, `insert into issues
 		(key, tree, project, title, phase, generation, status, rank, last_dispatch_seq)
 		values ('LEGION-208', 'LEGION-208', 'LEGION', 'admitted root', 'admitted', 1, 'in_progress', 'A', 1)`); err != nil {
@@ -159,7 +159,7 @@ func TestTheGatesApprovalMarkAndTheAskMirrorArriveWith0051(t *testing.T) {
 		t.Fatalf("read the migrated gate: %v", err)
 	}
 	if seq != nil || at != nil || request != nil {
-		t.Fatalf("gate after 0051 = approved_seq %v approved_at %v request %v, want the approval it already held placed nowhere and no request", seq, at, request)
+		t.Fatalf("gate after 0052 = approved_seq %v approved_at %v request %v, want the approval it already held placed nowhere and no request", seq, at, request)
 	}
 	for _, accepted := range []string{
 		`update design_gates set approved_seq = 12, approved_at = now(), request_ask = 'ask-approval' where issue = 'LEGION-208'`,

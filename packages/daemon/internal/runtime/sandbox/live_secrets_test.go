@@ -359,10 +359,17 @@ func (r *liveRig) checkSecretsApprovalAsk() error {
 
 // secrets-old-uid-negative and secrets-revoke-on-death: a separate issue pod is deleted and its
 // claim resumed with a new pod UID. The old pod's enrollment is revoked; a key copied before its
-// deletion then fails, and a new pod's identity cannot enroll under the old UID.
+// deletion then fails, and a new pod's identity cannot enroll under the old UID. The deleted pod
+// took its disk with it, so the replacement pod's is a claim of its own under the same name, with
+// a new uid and the new pod as its owner, and the claim comes back from the session the table
+// holds (recordSession) rather than from anything that pod's disk kept.
 func (r *liveRig) checkSecretsOldUIDAndRevocation() error {
 	worker := r.claim("orphan")
 	if err := r.ensureRunning(worker); err != nil {
+		return err
+	}
+	oldDisk, err := r.assertPodOwnedDisk(worker)
+	if err != nil {
 		return err
 	}
 	current, err := r.ensureEnrolled(worker)
@@ -411,7 +418,7 @@ func (r *liveRig) checkSecretsOldUIDAndRevocation() error {
 	note("harness", "devbox: the same copied key after DELETE /v1/enrollments → PROOF_INVALID")
 	worker.state = stateDead
 	since := time.Now()
-	loc, err := r.resume(worker, worker.marker)
+	loc, err := r.resume(worker, worker.session)
 	if err != nil {
 		return err
 	}
@@ -433,11 +440,19 @@ func (r *liveRig) checkSecretsOldUIDAndRevocation() error {
 	if _, err := r.enroll(worker, reg); err != nil {
 		return err
 	}
+	newDisk, err := r.assertPodOwnedDisk(worker)
+	if err != nil {
+		return err
+	}
+	if newDisk.uid == oldDisk.uid {
+		return fmt.Errorf("the replacement pod's disk %s is the deleted pod's own uid %s: a pod's disk goes with the pod", newDisk.name, oldDisk.uid)
+	}
 	out, code, stderr, err := r.agentSecrets(worker, "LEGION_E2E_AUTO", "--", "sh", "-c", `printf %s "$LEGION_E2E_AUTO" | sha256sum | cut -d' ' -f1`)
 	if err != nil || code != 0 || out != r.env.agentSecretsAutoSHA {
 		return fmt.Errorf("the resumed worker (pod uid %s) could not use its new enrollment: exit %d %s %s (%v)", short(loc.Sandbox.PodUID), code, out, stderr, err)
 	}
-	note("runtime", "the resumed worker (pod uid %s) is enrolled anew and gets the automatic secret", short(loc.Sandbox.PodUID))
+	note("runtime", "the resumed worker (pod uid %s), resumed from its recorded session %s, is enrolled anew and gets the automatic secret", short(loc.Sandbox.PodUID), worker.session)
+	note("operator", "the disk %s is uid %s after the replacement, not the deleted pod's %s, and is owned by %s", newDisk.name, short(newDisk.uid), short(oldDisk.uid), newDisk.owner)
 	return nil
 }
 

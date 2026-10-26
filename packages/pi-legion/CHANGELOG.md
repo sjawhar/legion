@@ -7,7 +7,7 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 
 ### Added
 
-- Daemon API contract 37: a root admitted tree that waits only on a person has the phase
+- Daemon API contract 38: a root admitted tree that waits only on a person has the phase
   `awaiting_person`, and its `legion state` and `read_state` issue carries `waitingOn`, the design
   gate version (`kind: "gate"`, `gateVersion`) or the question (`kind: "ask"`, `ask`) that returned
   its admission slot, and `answeredAt` once the person answered. Four things answer that wait: a
@@ -20,9 +20,19 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   version with `register_gate` and end the turn, and that handing the approval request back to the
   person (requesting approval again, or a thread reply that leaves the turn with them) starts the
   next wait and returns the slot; the controller skill reads the new `awaiting-person` notice. The
-  strict state reader refuses a 36 state, and a 36 plugin refuses this one. Install this release
+  strict state reader refuses a 37 state, and a 37 plugin refuses this one. Install this release
   with a `legion` built from the same commit. Dispatch (migration 0118) deploys before that daemon
-  (its migration 0051).
+  (its migration 0052).
+- Daemon API contract 37 (INFRA-80): under the Kubernetes runtime an issue's disk is a generic
+  ephemeral volume its own pod owns, created with the pod and deleted with it, so an issue pod's
+  `workspace-init provision` container is no longer told `LEGION_EXPECT_ISSUE_VOLUME`, and the
+  lost-disk machinery that variable drove is gone with it: `workspace-init`'s exit code 3 for a
+  volume holding neither the clone nor a retained session, the recovery marker a relaunch after
+  that loss wrote, the probe for an issue's retained sessions, and `legion sessions mark-lost`.
+  `runtime.kubernetes.session_store` must name a store that keeps sessions in a database,
+  `postgres` or `cloudsql-iam` (`pvc` and an omitted key are refused), since a session kept as a
+  file on that disk would die with the pod. Install this release with a `legion` built from the
+  same commit.
 - The skill-scenarios rig (`scripts/skill-scenarios/`, not shipped in the package) measures how
   agents write Dispatch specs:
   - `label-comments.ts` labels the comments people wrote on Dispatch in a window with the eleven
