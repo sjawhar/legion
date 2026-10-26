@@ -1,4 +1,4 @@
--- 0056_issue_ancestry.up.sql — the Dispatch chain a queued root waits under, and the tree a root
+-- 0057_issue_ancestry.up.sql — the Dispatch chain a queued root waits under, and the tree a root
 -- left (INFRA-252).
 --
 -- A labelled todo issue under a Dispatch parent that is not recorded, or is recorded as a root of
