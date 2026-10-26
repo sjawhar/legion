@@ -42,7 +42,7 @@ merger — runs from one image, `ghcr.io/sjawhar/legion-worker` (public). It car
   backed by the CodeGraph CLI (`@colbymchenry/codegraph`, pinned) at `/opt/codegraph/bin` (`PATH`) — the
   `codegraph` tool a tester queries for `affected` tests and a reviewer for `impact`/`callers` blast
   radius (`packages/daemon/internal/prompts/roles/core/tester.md`, `core/reviewer.md`). A pod's agent has that tool because its launch loads profile plugins (dispatch://LEGION-629), which the capability report's `codegraph` row says ([The deployment's capability report](#the-deployments-capability-report));
-- OMP's native modules, pre-downloaded into `/home/legion/.omp/natives/<version>/` so a pod never fetches them;
+- OMP's native module, extracted at build into `/home/legion/.omp/natives/<version>/`: from 18.11.0 OMP writes only the variant the CPU selects (AVX2 or not), so this is the build runner's variant, and a pod whose node selects the same one extracts nothing, while a node that selects the other has each role container write that one (111 MiB) into its own writable layer at its first OMP run;
 - pinned Bun, `jj` (Sami's fork, the version the dogfood daemon runs) and `gh` at `/usr/local/bin`, and
   `git` at `/usr/bin/git` from the `debian:trixie-slim` base — jj's git backend requires git >= 2.42
   (bookworm's 2.39.5 made every `jj git clone` in the init container fail), so the build also proves the
