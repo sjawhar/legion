@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Added
+
+- The packaged skills gain `asd-ste100`, which OpenCode finds on the skills path the config hook
+  adds: the ASD-STE100 rules (Simplified Technical English) for text a reader must not misread.
+  It is Legion's copy of the MIT-licensed `danyuchn/asd-ste100-skill` at 32511c69, with its
+  licence and without its linter.
+
 ### Fixed
 
 - `dispatch-first` now says to open a `dispatch ask` the moment a person blocks your work, and to

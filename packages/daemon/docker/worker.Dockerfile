@@ -419,7 +419,7 @@ RUN set -eu; mkdir -p /out; . /in/tags.env; \
       "npm packages inlined into the pi-envoy plugin, /opt/legion/pi-envoy (also its dist/THIRD_PARTY_NOTICES)" /in/pi-envoy-notices \
       "npm packages inlined into the pi-legion plugin, /opt/legion/pi-legion (also its dist/THIRD_PARTY_NOTICES)" /in/pi-legion-notices \
       "Bun ${BUN_VERSION}, /usr/local/bin/bun: LICENSE.md of github.com/oven-sh/bun at bun-v${BUN_VERSION}" /in/bun-LICENSE.md \
-      "Oh My Pi, /opt/omp and the native modules it fetched into /home/legion/.omp/natives: LICENSE of github.com/${omp_repo} at ${omp_tag}" /in/omp-LICENSE \
+      "Oh My Pi, /opt/omp and the native module it extracted into /home/legion/.omp/natives: LICENSE of github.com/${omp_repo} at ${omp_tag}" /in/omp-LICENSE \
       "Oh My Pi: THIRD-PARTY-NOTICES.txt of github.com/${omp_repo} at ${omp_tag}" /in/omp-THIRD-PARTY-NOTICES.txt \
       "jj, /usr/local/bin/jj: LICENSE of github.com/${jj_repo} at ${jj_tag}" /in/jj-LICENSE \
       "jj: the Rust crates it links" /in/jj-crates \
@@ -575,9 +575,13 @@ WORKDIR /home/legion
 #    from the profile instead, as a pane does, would stop the image probe certifying the two roots by
 #    path (bootgate.go's pod lane reads the explicit root's manifest for the contract and holds
 #    pi-envoy to its root): explicit roots and an unlinked profile are one decision. This is OMP's
-#    first run in the image, so the CodeGraph install also downloads OMP's native modules (~345 MB)
-#    into /home/legion/.omp/natives/<version>/ — the build's success is the check; this layer ships
-#    them, a pod never fetches them, and the probes in the final step never wait on the download.
+#    first run in the image, so the CodeGraph install also extracts OMP's native module from the
+#    binary (no network) into /home/legion/.omp/natives/<version>/ — the build's success is the
+#    check. From 18.11.0 OMP writes only the variant the CPU selects, so this is the build runner's
+#    (ubuntu-24.04, AVX2), 111 MiB; this layer ships it, so a pod whose node selects the same
+#    variant extracts nothing, while a node that selects the other has each role container write
+#    that one into its writable layer at its first OMP run. The probes in the final step never
+#    wait on it.
 # Any failure fails the build: a broken image never publishes.
 RUN set -eu; \
     bun --version; omp --version; jj --version; gh --version; git --version; codegraph --version; \
@@ -706,7 +710,7 @@ COPY --chmod=0755 packages/daemon/docker/gh /opt/legion/bin/gh
 # probe naming every missing one. The daemon's probe Sandbox runs it again with its own contract, on
 # the pod baseline and under the operator's pod, resolving every agent's model, and refuses a skipped
 # result, before any claim runs on the image (packages/daemon/internal/runtime/sandbox/probe.go).
-# It needs the natives step 3 fetched, which the cached probe layer above carries. The step leaves no
+# It needs the natives step 3 extracted, which the cached probe layer above carries. The step leaves no
 # residue: Oh My Pi's logs, and the Go telemetry counters the capability check's `go version` writes
 # under HOME (the toolchain step's XDG_CONFIG_HOME does not reach a probe that runs as a pod would).
 ARG LEGION_REVISION

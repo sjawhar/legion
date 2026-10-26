@@ -39,6 +39,14 @@
 
 ### Fixed
 
+- The `dispatch` command logs a refusal it makes before the call reaches Dispatch (an unknown
+  flag or command, a missing or unknown host, a session it cannot name a directory for, a file
+  that turns Dispatch off) to the session's ledger, whenever the call knows its session. A reader
+  of the ledger now sees a call whose output a pipe, `$(…)` or another program swallowed. A call
+  with no session id logs nothing, as before. A `--help` that prints help and a `--dry-run` that
+  passes its checks log nothing; a `--help` of an unknown command and a `--dry-run` with a bad
+  argument are refused, and logged like any other refusal.
+
 - `resolveOrigin` waits at most 1 s for `tmux display-message` to name the session's pane, then
   aborts the lookup and returns the origin without `tmux` and `pane`. An aborted `defaultExec` call
   kills its child with SIGKILL. A tmux client waiting to connect to a tmux server too busy to
@@ -241,6 +249,11 @@
 
 ### Added
 
+- `dispatch-cli` exports `cliRefusals(text)`, which lists each refusal line the `dispatch` CLI
+  printed in `text`, with the command a `was not called` line names (null for a usage refusal).
+  It reads the CLI's output as a transcript holds it, so a refusal counts when a pipe hid the
+  CLI's exit. A warning, the note that the session's state was not written, and the notice of a
+  file that is not read are not refusals. pi-legion's skill-scenario scorer reads refusals with it.
 - `dispatch read --events N` lists an issue's last N events and `--all-events` every one, on an
   issue read and on its `dispatch://KEY/log`; without either the read lists the last 10, as before.
   `DispatchClient.read` takes `{ events: N | "all" }` (`IssueReadOptions`; `DEFAULT_ISSUE_READ_EVENTS`
