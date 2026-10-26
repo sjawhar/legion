@@ -1,0 +1,156 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "INFRA-138",
+  "completed": "2026-10-26T18:03:28Z",
+  "planDocument": "dispatch://INFRA-138/artifact/plan-md",
+  "summary": "Integration-only root: the root PR changes only .legion/INFRA-138/; every root Acceptance bullet (41, spec lines 232-275) is delivered by a named child and proven on main by INFRA-480. The root's own phases prove RC1-RC6 about its own PR and branch.",
+  "requiredSkills": {
+    "implement": [
+      "legion-worker: pr-body.md template and proof rules, default-branch-check.md before the push, skip-checks-trailer.md (this plan's implementer push deliberately omits the trailer), merge-gate.md for the production check RC6",
+      "legion-retro: the root's retro, comment-only once INFRA-174 is deployed",
+      "dispatch: read child statuses for the body's B-table; no writes beyond what the role prompt names"
+    ],
+    "test": [
+      "legion-worker: pr-body.md tester rules (read CI on GitHub, never rerun it; E2E (tester) line in round 1 only), skip-checks-trailer.md for the round-1 handoff push"
+    ],
+    "review": [
+      "legion-worker: merge-gate.md review rules and review-threads.md; the reviewer reads plan.md beside the spec, with section 5's B-table as the RC3 reference"
+    ]
+  },
+  "rootCriteria": [
+    {
+      "id": "RC1",
+      "criterion": "Until INFRA-177's cutover push, the PR changes only .legion/INFRA-138/.",
+      "command": "gh api repos/sjawhar/legion/pulls/<n>/files --paginate --jq '[.[].filename] | all(startswith(\".legion/INFRA-138/\"))' -> true",
+      "negativeControl": "same filter on PR 2239 -> false"
+    },
+    {
+      "id": "RC2",
+      "criterion": "lint, typecheck, test, pr-title success on the implementer's trailerless head H_impl; every later commit touches only .legion/.",
+      "command": "gh api repos/sjawhar/legion/commits/<H_impl>/check-runs --paginate --jq '[.check_runs[] | select(.name | IN(\"lint\",\"typecheck\",\"test\",\"pr-title\")) | {name,conclusion}]'; gh api repos/sjawhar/legion/compare/<H_impl>...<H> --jq '[.files[].filename] | all(startswith(\".legion/\"))'",
+      "negativeControl": "same check-runs query on H_plan (the planner's trailered handoff head) lists none of the four"
+    },
+    {
+      "id": "RC3",
+      "criterion": "PR body has 'Dispatch: INFRA-138', says no product code and merge only after every child and INFRA-480, lists B1-B41 with delivering children.",
+      "command": "gh pr view <n> -R sjawhar/legion --json body --jq .body | grep -cF 'Dispatch: INFRA-138' / 'INFRA-480' / -cE '\\bB41\\b' each >= 1",
+      "negativeControl": "PR 2239's body: grep -cF 'Dispatch: INFRA-138' -> 0"
+    },
+    {
+      "id": "RC4",
+      "criterion": "GitHub squash-merges a PR with commits but zero changed files.",
+      "command": "sjawhar/legion-smoke: base infra-138-empty-base from main, head infra-138-empty-head (add file, delete file); PR head->base; .changed_files 0; gh api -X PUT repos/sjawhar/legion-smoke/pulls/<m>/merge -f merge_method=squash --jq .merged -> true; delete both branches",
+      "negativeControl": "gh pr create from a branch with no commits beyond its base is refused 'No commits between'"
+    },
+    {
+      "id": "RC5",
+      "criterion": "At the merging head after the cutover push: zero changed files, no .legion/ path, four required checks success.",
+      "command": "gh api repos/sjawhar/legion/pulls/<n> --jq .changed_files -> 0; gh api repos/sjawhar/legion/compare/main...<H> --jq '.files | length' -> 0; RC2 check-runs at <H>",
+      "negativeControl": "compare/main...<H_impl>: all files under .legion/INFRA-138/ and more than zero"
+    },
+    {
+      "id": "RC6",
+      "criterion": "Merge commit changes no file; deployed builds carry it.",
+      "command": "gh api repos/sjawhar/legion/commits/<merge> --jq '.files | length' -> 0; contents/.legion/INFRA-138?ref=<merge> -> 404; dispatch-production-check.sh --commit <merge> --page /issues/INFRA-138",
+      "negativeControl": "contents read at a pre-cutover branch head -> 200"
+    }
+  ],
+  "gapAnalysis": {
+    "findings": [
+      {
+        "finding": "41 bullets, not 39 (context miscount).",
+        "answer": "Plan numbers B1-B41 by spec line."
+      },
+      {
+        "finding": "Bullet 1: no child delivers the per-requirement Referenced by list on the issue page.",
+        "answer": "Sent to the architect; now INFRA-176 Design 7, A6."
+      },
+      {
+        "finding": "Bullets 2-3: INFRA-176 contradicted spec:209 (missing-task flag before the plan; approval answer).",
+        "answer": "Sent; INFRA-176 R1, R2, A8 now match."
+      },
+      {
+        "finding": "Bullet 5: teaching texts and document markers unowned.",
+        "answer": "Sent; INFRA-176 Design 8, A7; markers INFRA-176 Design 5, INFRA-174 Design 1."
+      },
+      {
+        "finding": "spec:206 plan-task dependencies missing from INFRA-173.",
+        "answer": "Sent; INFRA-173 'needs', A6."
+      },
+      {
+        "finding": "Bullets 16-17: default-branch currency has no mechanism.",
+        "answer": "Sent; INFRA-174 Design 3, A10."
+      },
+      {
+        "finding": "Bullet 23: Dispatch-down handoff behaviour absent from INFRA-177.",
+        "answer": "Sent; INFRA-177 Design 10, A10."
+      },
+      {
+        "finding": "Bullet 26: nobody removes .legion/ from in-flight branches with no next push; root among them.",
+        "answer": "Sent; INFRA-177 Design 9, A9: cutover command pushes the removal, trailerless, and READY keeps accepting it."
+      },
+      {
+        "finding": "Several bullets rest on child design text with no child acceptance line.",
+        "answer": "Plan section 5 maps each; INFRA-480 is their first machine check; B36's planning case is driven by INFRA-480's script."
+      },
+      {
+        "finding": "Bullet 20: file list not named; dispatch skills have no Acceptance heading today.",
+        "answer": "INFRA-174 A9 names the files; plan B20 records that the dispatch-skill half already holds."
+      },
+      {
+        "finding": "Root PR gets no required checks if every push is trailered.",
+        "answer": "Implementer pushes trailerless (section 4 step 5; recorded departure)."
+      },
+      {
+        "finding": "Root's own phases have nothing to prove.",
+        "answer": "Root criteria RC1-RC6 with commands and negative controls; tester/reviewer told the 41 bullets are INFRA-480's."
+      },
+      {
+        "finding": "After INFRA-177 the approval no longer covers the head; after INFRA-174 the merge head has no checks and carries handoffs.",
+        "answer": "INFRA-177's trailerless cutover push removes the files; the second review round approves the cutover head; RC5 before READY."
+      },
+      {
+        "finding": "Merged root PR is net-empty; no precedent.",
+        "answer": "RC4 proves an empty squash merge on sjawhar/legion-smoke first; implementer stops and reports if refused."
+      },
+      {
+        "finding": "INFRA-480 and INFRA-172 have no-code PR problems.",
+        "answer": "Sent; INFRA-480 lands scripts/e2e/infra-138-acceptance.sh; INFRA-172 told to start required checks."
+      },
+      {
+        "finding": "Nothing in a pod approves as the human; gates off, Dispatch down, unreadable repo need rigs; faults need live runs.",
+        "answer": "Sent; INFRA-174 A11, INFRA-175 A10, INFRA-177 A11 land live proofs with a seeded person; INFRA-480 reruns them (surface S-proof)."
+      },
+      {
+        "finding": "'legion state' is not for agents.",
+        "answer": "Surface S-proof reads a scratch daemon; S-live reads read_record."
+      },
+      {
+        "finding": "INFRA-480 may start before deploy.",
+        "answer": "Sent; released only after every sibling's production check passes."
+      },
+      {
+        "finding": "Negative controls at today's main need old evidence.",
+        "answer": "Left to INFRA-480's plan; its script runs the controls at its commit."
+      },
+      {
+        "finding": "Bullet 17 and INFRA-480 A2 need root checks; writing them has gate consequences.",
+        "answer": "Architect writes the root Verification document after INFRA-174/175 deploy and before INFRA-480, one approval; Acceptance section stays; INFRA-175 A9 carries single-document gates; plan's second round covers the resulting move to testing."
+      },
+      {
+        "finding": "INFRA-172's outcome must not edit the root spec.",
+        "answer": "Architect agreed: it goes into INFRA-173's plan."
+      },
+      {
+        "finding": "Ambiguities: B11 'same session', B26 'nothing reads them', B34 'after that turn'.",
+        "answer": "B11 decided by INFRA-174; B26 by INFRA-177 A9; B34 read from daemon event times."
+      }
+    ]
+  },
+  "planReview": {
+    "verdict": "approved",
+    "rounds": 2
+  },
+  "specDepartures": []
+}
