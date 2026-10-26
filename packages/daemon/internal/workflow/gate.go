@@ -227,16 +227,19 @@ func copyTakes(gate record.DesignGate, fact intake.DispatchArtifact) bool {
 // recorded on the gate, so the registration, the gate seed and the boot catch-up, which all re-read
 // Dispatch, never tell it twice and never stay silent about a request nothing else carried.
 //
-// A review the person has already followed with another at that version changes nothing at all
-// (classify.StaleReview): the daemon applied the newer one first, and this one reached it late, so
-// it neither moves the gate nor tells the architect nor answers a wait. That is an approval
-// delivered after the changes request that superseded it, which would otherwise reopen the gate,
-// and a changes request delivered after a newer approval, which would otherwise close it.
+// A review the person has already followed with another changes nothing at all: one of a version
+// below the gate's latest (the person has a newer version to review), or one at that version whose
+// mark is not past the review the gate applied last (classify.StaleReview). The daemon applied the
+// newer state first, and this review reached it late, so it neither moves the gate nor tells the
+// architect nor answers a wait. That is an approval delivered after the changes request that
+// superseded it, which would otherwise reopen the gate; a changes request delivered after a newer
+// approval, which would otherwise close it; and an approval or changes request of an older
+// version, which would otherwise clear the told record or close a gate open at the newer one.
 func (e *Engine) applyArtifact(ctx context.Context, tx pgx.Tx, gate record.DesignGate, fact intake.DispatchArtifact, carried bool) error {
 	key := gate.Issue
-	if fact.Kind != intake.DispatchArtifactVersion && classify.StaleReview(gate, fact.Version, fact.Mark) {
+	if fact.Kind != intake.DispatchArtifactVersion && (fact.Version < gate.LatestVersion || classify.StaleReview(gate, fact.Version, fact.Mark)) {
 		e.logOnCommit(ctx, "workflow: a review the person has already followed with another changes no gate state", "issue", key,
-			"artifact", fact.ArtifactID, "event", fact.Kind, "version", fact.Version, "review_seq", fact.Mark.Seq)
+			"artifact", fact.ArtifactID, "event", fact.Kind, "version", fact.Version, "gate_version", gate.LatestVersion, "review_seq", fact.Mark.Seq)
 		return nil
 	}
 	wasOpen := classify.DesignGateOpen(gate)

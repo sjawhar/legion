@@ -544,10 +544,10 @@ func (w *workflowRuntime) catchUpAwaitingRoot(ctx context.Context, root awaiting
 
 // catchUpAwaitingGate reads the approval of a root waiting on its design gate: a newer version,
 // whoever wrote it, moves the approval request to the agent and answers it, and an approval or
-// changes request of the version it waits on answers it. A newer version does not end the read:
-// the same approval may show the person's review of that newer version, whose own event the daemon
-// missed too, so the version event is applied and the review after it, which opens the gate rather
-// than resuming the architect to revise a spec the person has already approved. A review carries
+// changes request of the version it waits on answers it. When the same read shows the person
+// approved a newer version, the approval alone is applied, as the gate seed does: it records that
+// version and opens the gate in one fact, so admission resumes the architect with its gate open,
+// never with a task telling it to revise a spec the person has already approved. A review carries
 // its place in the issue's Dispatch event log (dispatch.Approval's Seq and At), which identifies it
 // in the gate's told record, places it against the wait's start, and names it in the fact's id.
 func (w *workflowRuntime) catchUpAwaitingGate(ctx context.Context, root awaitingRoot) error {
@@ -559,15 +559,16 @@ func (w *workflowRuntime) catchUpAwaitingGate(ctx context.Context, root awaiting
 		return fmt.Errorf("read approval of %s for %s: %w", root.gate.ArtifactID, root.issue.Key, err)
 	}
 	review := record.EventMark{Seq: approval.Seq, At: approval.At}
+	approved := approval.ApprovedLatest()
 	// The awaited version, not the gate's: a registration may have recorded a newer version on the
 	// gate whose own event never arrived, and that version is the answer.
-	if approval.LatestVersion > root.issue.Awaiting.GateVersion {
+	if approval.LatestVersion > root.issue.Awaiting.GateVersion && approved == 0 {
 		if err := w.applyAwaitingCatchUp(ctx, fmt.Sprintf("gate-version:%s:%d:%d", root.issue.Key, root.issue.Generation, approval.LatestVersion),
 			intake.DispatchArtifact{Key: root.issue.Key, ArtifactID: root.gate.ArtifactID, Kind: intake.DispatchArtifactVersion, Version: approval.LatestVersion}); err != nil {
 			return err
 		}
 	}
-	if approved := approval.ApprovedLatest(); approved >= root.issue.Awaiting.GateVersion {
+	if approved >= root.issue.Awaiting.GateVersion {
 		return w.applyAwaitingCatchUp(ctx, fmt.Sprintf("gate-approved:%s:%d:%d:%d", root.issue.Key, root.issue.Generation, approved, review.ID()),
 			intake.DispatchArtifact{Key: root.issue.Key, ArtifactID: root.gate.ArtifactID, Kind: intake.DispatchArtifactApproved, Version: approved, Mark: review})
 	}

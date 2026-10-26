@@ -379,8 +379,9 @@ type PullRequestView struct {
 }
 
 // GateView is the design gate: the spec document, the version Dispatch currently holds, and the
-// version a human approved. ApprovedVersion is nil until someone approves one; the gate is open
-// exactly when it equals CurrentVersion.
+// version a human approved. ApprovedVersion is nil until someone approves one, and a changes
+// request clears it; a newer document version keeps it, so it then names the version a human
+// approved below the current one. The gate is open exactly when it equals CurrentVersion.
 type GateView struct {
 	ArtifactID      string `json:"artifactId"`
 	CurrentVersion  int    `json:"currentVersion"`

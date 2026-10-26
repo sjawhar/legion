@@ -1088,3 +1088,53 @@ func storedGate(t *testing.T, pool *pgxpool.Pool, key string) *record.DesignGate
 	}
 	return gate
 }
+
+// A review of a version below the gate's latest changes nothing on the gate that owns the
+// document: the person has a newer version to review. A late approval of an older version does not
+// clear the record that the architect was told the newer version's changes request, so nothing
+// tells it again; a late changes request of an older version does not close a gate open at the
+// newer one, which would refuse READY while Dispatch shows the newer version approved.
+func TestAReviewOfAnOlderVersionChangesNoGateState(t *testing.T) {
+	reviewed := record.EventMark{Seq: 11, At: handedBackAt}
+	late := record.EventMark{Seq: 9, At: handedBackAt.Add(-time.Minute)}
+	for _, tc := range []struct {
+		name string
+		gate record.DesignGate
+		late intake.DispatchArtifact
+		open bool
+	}{
+		{
+			name: "an approval of the older version after the newer one's told changes request",
+			gate: record.DesignGate{Issue: "LEGION-ROOT", ArtifactID: "artifact-root", LatestVersion: 2,
+				ToldChangesVersion: new(2), ToldChangesReason: "name the rollback path", ToldChangesMark: reviewed},
+			late: intake.DispatchArtifact{Key: "LEGION-ROOT", ArtifactID: "artifact-root", Kind: intake.DispatchArtifactApproved, Version: 1, Mark: late},
+		},
+		{
+			name: "a changes request of the older version after the newer one's approval",
+			gate: record.DesignGate{Issue: "LEGION-ROOT", ArtifactID: "artifact-root", LatestVersion: 2, ApprovedVersion: new(2), ApprovedMark: reviewed},
+			late: intake.DispatchArtifact{Key: "LEGION-ROOT", ArtifactID: "artifact-root", Kind: intake.DispatchArtifactChangesRequested,
+				Version: 1, Reason: "name the rollback path", Mark: late},
+			open: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := migratedPool(t)
+			admission := newAdmission(t, 1, nil)
+			seedSlotted(t, pool, "LEGION-ROOT", "A")
+			seedGate(t, pool, tc.gate)
+
+			applyFact(t, pool, admission, "late-older-review", tc.late)
+
+			gate := storedGate(t, pool, "LEGION-ROOT")
+			if classify.DesignGateOpen(*gate) != tc.open || gate.LatestVersion != 2 {
+				t.Fatalf("gate after a late review of version 1 = %#v, want it at version 2 with open=%t", gate, tc.open)
+			}
+			if !tc.open && (gate.ToldChangesVersion == nil || *gate.ToldChangesVersion != 2 || gate.ToldChangesMark != reviewed) {
+				t.Fatalf("gate after a late approval of version 1 = %#v, want the told changes request of version 2 kept", gate)
+			}
+			if told := gateNotices(t, pool, "LEGION-ROOT", "design-changes-requested"); len(told) != 0 {
+				t.Fatalf("design-changes-requested notices = %#v, want none for a review of an older version", told)
+			}
+		})
+	}
+}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"maps"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -412,7 +413,28 @@ func TestCatchUpAppliesTheApprovalOfANewerVersion(t *testing.T) {
 		if got.Phase != phase.Planning || !classify.DesignGateOpen(*gate) {
 			t.Errorf("Dispatch shows version 4 approved; recovered phase=%s gate=%#v, want planning with the gate open", got.Phase, gate)
 		}
-		return nil
+		// The resume task is written once, at the promotion: it must say the spec was approved,
+		// never that the architect should revise it.
+		rows, err := tx.Query(ctx, `select payload->>'task' from outbox where issue = $1 and kind = 'supervise' and payload->>'op' = 'start' and payload->>'role' = 'architect'`, root.Key)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		tasks := 0
+		for rows.Next() {
+			var task *string
+			if err := rows.Scan(&task); err != nil {
+				return err
+			}
+			if task == nil || !strings.Contains(*task, "was approved") {
+				t.Errorf("resume task = %v, want the one saying the spec was approved", task)
+			}
+			tasks++
+		}
+		if tasks != 1 {
+			t.Errorf("architect starts queued = %d, want one", tasks)
+		}
+		return rows.Err()
 	}); err != nil {
 		t.Fatalf("read the recovered root: %v", err)
 	}
