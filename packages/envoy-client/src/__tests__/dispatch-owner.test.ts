@@ -37,7 +37,7 @@ test("a block pinned to a version of its document carries the pin; an encoded @ 
     id: "spec",
     block: "ship-it",
     document: "dispatch://CORE-1/spec",
-    pin: 2,
+    pin: "2",
   });
   expect(parseDispatchRef("dispatch://CORE/artifact/handbook-md#b-d%C3%A9cision%3A1@v12")).toEqual({
     owner: { kind: "project", project: "CORE" },
@@ -46,7 +46,7 @@ test("a block pinned to a version of its document carries the pin; an encoded @ 
     artifact: "handbook-md",
     block: "décision:1",
     document: "dispatch://CORE/artifact/handbook-md",
-    pin: 12,
+    pin: "12",
   });
   expect(parseDispatchRef("dispatch://CORE-1/spec#b-it%40v2")).toEqual({
     owner: { kind: "issue", issue: "CORE-1" },
@@ -70,6 +70,8 @@ test.each([
   "dispatch://CORE-1/spec#b-ship-it@vx",
   "dispatch://CORE-1/spec#b-a@b",
   "dispatch://CORE-1/spec#b-ship-it@v2@v3",
+  // A pin past the largest the server's Go `int` holds.
+  "dispatch://CORE-1/spec#b-ship-it@v9223372036854775808",
   // A versioned document: a version's stored text holds no block ids.
   "dispatch://CORE-1/artifact/spec@v2#b-x",
   "dispatch://CORE/artifact/handbook-md@v2#b-x",

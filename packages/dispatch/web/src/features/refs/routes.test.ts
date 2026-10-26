@@ -107,7 +107,7 @@ test("a pinned block reference round-trips with its pin, and opens the version i
     block: "ship_it",
     key: "CORE-1",
     kind: "artifact",
-    pin: 2,
+    pin: "2",
     slug: "notes-md",
   });
   if (pinned === undefined) throw new Error("the pinned reference did not parse");
@@ -135,6 +135,32 @@ test("a pinned block reference round-trips with its pin, and opens the version i
   if (live === undefined) throw new Error("the block reference did not parse");
   expect(buildReferencePath(live, "core-1-md")).toBe("/issues/CORE-1/spec#b-p1");
   expect(referenceTargetKind(live)).toBe("block");
+});
+
+test("a pin past what a number holds exactly is written back digit for digit, as the server reads it", () => {
+  // 2^63 - 1, the largest pin the server's Go `int` holds; as a number it would print 2^63.
+  const reference = "dispatch://CORE-1/spec#b-p1@v9223372036854775807";
+  const pinned = parseDispatchReference(reference);
+  if (pinned === undefined) throw new Error("the largest pin did not parse");
+  expect(buildDispatchReference(pinned)).toBe(reference);
+  expect(shortForm(pinned)).toBe("CORE-1 spec block v9223372036854775807");
+  expect(buildReferencePath(pinned, "core-1-md")).toBe(
+    "/issues/CORE-1/artifacts/core-1-md?v=9223372036854775807"
+  );
+  const document = parseDispatchReference(
+    "dispatch://CORE/artifact/handbook-md#b-p1@v9223372036854775807"
+  );
+  if (document === undefined) throw new Error("the largest project pin did not parse");
+  expect(buildReferencePath(document)).toBe(
+    "/projects/CORE/documents/handbook-md?version=9223372036854775807"
+  );
+  // One more names nothing, nor does a pin a number would print as `1e+21`.
+  expect(
+    parseDispatchReference("dispatch://CORE-1/spec#b-p1@v9223372036854775808")
+  ).toBeUndefined();
+  expect(
+    parseDispatchReference("dispatch://CORE-1/spec#b-p1@v1000000000000000000000")
+  ).toBeUndefined();
 });
 
 test("a block names nothing on a versioned document, an item, an issue or a malformed pin", () => {

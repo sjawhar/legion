@@ -333,7 +333,7 @@ export function useReferenceTarget(route: DispatchReferenceRoute | undefined): R
  *  opens that version under the spec's own slug, which only the issue names. */
 export function needsSpecSlug(
   route: DispatchReferenceRoute
-): route is Extract<IssueRoute, { kind: "spec" }> & { pin: number } {
+): route is Extract<IssueRoute, { kind: "spec" }> & { pin: string } {
   return route.kind === "spec" && route.pin !== undefined;
 }
 

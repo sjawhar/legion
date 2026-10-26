@@ -652,7 +652,7 @@ test.each([
 ] as const)("a pinned block's card names its document, the version it pins, how it stands since (%s), and that version's text", async (_state, read, standing) => {
   const getIssue = spyOn(api, "getIssue").mockResolvedValue(issueWithSpec());
   const getReferences = spyOn(api, "getReferences").mockResolvedValue(read);
-  const route = { block: "p1", key: "CORE-1", kind: "spec" as const, pin: 2 };
+  const route = { block: "p1", key: "CORE-1", kind: "spec" as const, pin: "2" };
   const view = render(
     <Harness>
       <Link to="/issues/CORE-1/spec" {...referenceTriggerProps(route)}>

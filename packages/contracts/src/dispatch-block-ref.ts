@@ -56,22 +56,30 @@ export function decodeBlockId(encoded: string): string | undefined {
 }
 
 /**
+ * The largest version a block reference's pin (`@v<N>`) may name: Go's `int` on the 64-bit
+ * platforms the server runs on, which `text.parseBlock` reads N into. A pin past it names nothing.
+ */
+const MAX_BLOCK_PIN = 9223372036854775807n;
+
+/**
  * The block a `#b-` fragment (`encoded`, after the `b-`) names, and the version `pin` it pins when
  * it ends in `@v<N>`, as the server's `text.parseBlock` reads it: a raw `@` only as the start of
- * a well-formed pin (`N` a positive integer with no leading zero), and the id before it as
- * `decodeBlockId` reads it. Undefined for any other fragment.
+ * a well-formed pin (`N` a positive integer with no leading zero, at most MAX_BLOCK_PIN), and the
+ * id before it as `decodeBlockId` reads it. Undefined for any other fragment. `pin` is N's decimal
+ * digits as written, so a pin past the integers a JavaScript number holds exactly is carried and
+ * written back unrounded.
  */
-export function parseBlockFragment(encoded: string): { block: string; pin?: number } | undefined {
+export function parseBlockFragment(encoded: string): { block: string; pin?: string } | undefined {
   const at = encoded.indexOf("@");
   const pin = at === -1 ? undefined : encoded.slice(at + 1).match(/^v([1-9][0-9]*)$/)?.[1];
-  if (at !== -1 && pin === undefined) {
+  if (at !== -1 && (pin === undefined || BigInt(pin) > MAX_BLOCK_PIN)) {
     return undefined;
   }
   const block = decodeBlockId(at === -1 ? encoded : encoded.slice(0, at));
   if (block === undefined) {
     return undefined;
   }
-  return pin === undefined ? { block } : { block, pin: Number(pin) };
+  return pin === undefined ? { block } : { block, pin };
 }
 
 export const DISPATCH_BLOCK_ID_ENCODINGS: readonly { id: string; encoded: string }[] = [

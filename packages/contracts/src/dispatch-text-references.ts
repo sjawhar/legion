@@ -200,6 +200,13 @@ export const DISPATCH_TEXT_REFERENCES: readonly {
     body: "see dispatch://CORE-1/artifact/notes-md#b-d%C3%A9cision%3A1@v12.",
     refs: ["dispatch://CORE-1/artifact/notes-md#b-d%C3%A9cision%3A1@v12"],
   },
+  // N up to the largest Go's `int` holds, kept digit for digit past what a JavaScript number holds
+  // exactly; one more names nothing.
+  {
+    body: "dispatch://CORE-1/spec#b-ship-it@v9223372036854775807",
+    refs: ["dispatch://CORE-1/spec#b-ship-it@v9223372036854775807"],
+  },
+  { body: "dispatch://CORE-1/spec#b-ship-it@v9223372036854775808", refs: [] },
   // A malformed pin, or a raw `@` that starts no pin, names nothing.
   { body: "dispatch://CORE-1/spec#b-ship-it@v", refs: [] },
   { body: "dispatch://CORE-1/spec#b-ship-it@v0", refs: [] },

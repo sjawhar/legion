@@ -278,6 +278,16 @@
     ]
   },
   {
+    "body": "dispatch://CORE-1/spec#b-ship-it@v9223372036854775807",
+    "refs": [
+      "dispatch://CORE-1/spec#b-ship-it@v9223372036854775807"
+    ]
+  },
+  {
+    "body": "dispatch://CORE-1/spec#b-ship-it@v9223372036854775808",
+    "refs": []
+  },
+  {
     "body": "dispatch://CORE-1/spec#b-ship-it@v",
     "refs": []
   },

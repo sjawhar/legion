@@ -80,8 +80,9 @@ export interface ParsedDispatchRef {
   readonly block?: string;
   /** The reference of the document a block ref names a block of. */
   readonly document?: string;
-  /** The version of its document a pinned block ref (`#b-<id>@v<N>`) names. */
-  readonly pin?: number;
+  /** The version of its document a pinned block ref (`#b-<id>@v<N>`) names: N's decimal digits as
+   *  written (`parseBlockFragment`), which a number past 2^53 would round. */
+  readonly pin?: string;
 }
 
 /**

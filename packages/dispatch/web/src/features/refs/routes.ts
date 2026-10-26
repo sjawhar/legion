@@ -16,11 +16,12 @@ import { shortSessionId } from "./actor";
 
 /** A block of a document, as a reference to it names one (`<document>#b-<id>[@v<N>]`): `block` is
  *  the block's id as the document writes it, and `pin` the version of the document a pinned
- *  reference names. A route with a block names no version or item of its own; a pin comes only
- *  with a block. */
+ *  reference names, N's decimal digits as written (`parseBlockFragment`), so a pin past what a
+ *  number holds exactly is written back unrounded. A route with a block names no version or item
+ *  of its own; a pin comes only with a block. */
 export interface BlockTarget {
   block?: string;
-  pin?: number;
+  pin?: string;
 }
 
 export type IssueRoute =
@@ -262,7 +263,7 @@ function parseIssueReference(key: string, target: string | undefined): IssueRout
 function withBlock(
   route: DispatchReferenceRoute | undefined,
   block: string,
-  pin?: number
+  pin?: string
 ): DispatchReferenceRoute | undefined {
   if (
     route === undefined ||
@@ -594,7 +595,7 @@ export function blockFragment(blockId: string): string {
  *  or undefined for a reference to anything else. */
 export function blockTarget(
   route: DispatchReferenceRoute
-): { block: string; pin?: number } | undefined {
+): { block: string; pin?: string } | undefined {
   if (!("block" in route) || route.block === undefined) {
     return undefined;
   }
@@ -851,10 +852,10 @@ export function shortForm(route: DispatchReferenceRoute): string {
 
 /** The SPA path a reference navigates to, whichever side of the issue/project split it is on. A
  *  block opens its document at the block (`#b-`); a pinned block opens the version of its document
- *  it pins, since a version's stored text holds no block ids to land on. An issue's spec keeps its
- *  versions under its own slug, which a spec route does not carry: `specSlug` names it once the
- *  issue is read (`useReferencePath`), and until then a pinned block of the spec opens the live
- *  spec at the block. */
+ *  it pins, since a version's stored text holds no block ids to land on, the pin's digits written
+ *  as the reference holds them. An issue's spec keeps its versions under its own slug, which a
+ *  spec route does not carry: `specSlug` names it once the issue is read (`useReferencePath`), and
+ *  until then a pinned block of the spec opens the live spec at the block. */
 export function buildReferencePath(route: DispatchReferenceRoute, specSlug?: string): string {
   if (route.kind === "agent-artifact") {
     const artifact = `/agents/${encodeURIComponent(route.session)}/artifacts/${encodeURIComponent(route.slug)}`;
@@ -870,17 +871,17 @@ export function buildReferencePath(route: DispatchReferenceRoute, specSlug?: str
     return live;
   }
   if (route.kind === "document") {
-    return buildProjectPath({
+    const document = buildProjectPath({
       kind: "document",
       project: route.project,
       slug: route.slug,
-      version: target.pin,
     });
+    return `${document}?version=${target.pin}`;
   }
   const slug = route.kind === "artifact" ? route.slug : specSlug;
   return slug === undefined
     ? live
-    : buildIssuePath({ key: route.key, kind: "artifact", slug, version: target.pin });
+    : `${buildIssuePath({ key: route.key, kind: "artifact", slug })}?v=${target.pin}`;
 }
 
 export function buildIssuePath(route: IssueRoute): string {

@@ -48,8 +48,13 @@ test.each([
   ["d%C3%A9cision%3A1", { block: "décision:1" }],
   ["d%c3%a9", { block: "dé" }],
   ["it%40v2", { block: "it@v2" }],
-  ["ship-it@v2", { block: "ship-it", pin: 2 }],
-  ["d%C3%A9cision%3A1@v12", { block: "décision:1", pin: 12 }],
+  ["ship-it@v2", { block: "ship-it", pin: "2" }],
+  ["d%C3%A9cision%3A1@v12", { block: "décision:1", pin: "12" }],
+  // The largest pin Go's `int` holds, its digits kept past what a number holds exactly; one more
+  // names nothing, as the server reads it.
+  ["ship-it@v9223372036854775807", { block: "ship-it", pin: "9223372036854775807" }],
+  ["ship-it@v9223372036854775808", undefined],
+  ["ship-it@v10000000000000000000000", undefined],
   ["", undefined],
   ["%E0%A4", undefined],
   ["%0A", undefined],
@@ -60,7 +65,7 @@ test.each([
   ["ship-it@vx", undefined],
   ["a@b", undefined],
   ["a@v1@v2", undefined],
-  [`${encodeBlockId(multiByteAtBound)}@v2`, { block: multiByteAtBound, pin: 2 }],
+  [`${encodeBlockId(multiByteAtBound)}@v2`, { block: multiByteAtBound, pin: "2" }],
   [`${encodeBlockId(multiBytePastBound)}@v2`, undefined],
 ])("parses block fragment %p", (fragment, want) => {
   expect(parseBlockFragment(fragment)).toEqual(want);
