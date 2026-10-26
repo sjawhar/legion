@@ -98,7 +98,9 @@ A free slot is no reason to take an issue: a labelled root in `todo` takes the n
 `admission.waiting` without you, and a parked issue (status `backlog` or `icebox`) means "do not
 run now". Move an issue out of `backlog` or `icebox` only on a request or a plan ruling that names
 it, and cite that request. The free slots are `admission.cap` minus the roots in
-`admission.active` and `admission.waiting`. Every move to `todo` you make is one of these:
+`admission.active` and the roots in `admission.waiting` that are not in `admission.blocked`, since
+a blocked root takes no slot until its blockers are done. Every move to `todo` you make is one of
+these:
 
 - a root a person handed over, or a root you filed for a clear defect no tree owns, at triage;
 - an issue a person asks you to start;

@@ -6,6 +6,11 @@
 
 - `dispatch doc-edit --help` says the spec, not every document, holds no progress or status, and that a record of open items or progress is a document of its own.
 
+- `SearchCoverage`, `SearchCoverageKinds` and `SearchCoverageCounts`, the body of
+  `GET /api/v1/search/coverage`: the configured embedder's identity, place (`bedrock` or `azure`)
+  and model, and per kind and in total how many searchable items have a current vector, lack one or
+  failed, with the oldest lacking item's wait (INFRA-393). `SearchResponse.degraded`'s doc names the
+  model service rather than Bedrock.
 - The agent stream's `settings` frame (`AgentStreamSettings`, in `AgentStreamFrame`): the model
   and thinking level an Oh My Pi session runs now, the whole state each time it changes and the
   frame before `commands` in every replay. `AgentStreamSettingsReported` carries `model`
@@ -158,6 +163,12 @@
   --help` says to create a project only when a person asks for one, and that work across projects
   goes in the project that owns most of it.
 
+- The daemon API fixtures (`fixtures/daemon-api/`) are at contract 39 (INFRA-208): `state.json`'s
+  `settings.runtime.kubernetes.resources` is `{issue, controller}`, each pod's six reservation
+  fields, in place of one entry per role, and the `resource-limits` capability row's detail names
+  pods (`no CPU and memory requests and limits under runtime.kubernetes.resources for the issue
+  pod`) rather than roles. `LegionStateResponse` reads `settings` loosely, so its schema is
+  unchanged.
 - **Breaking:** a project's architecture model comes from any number of sources, one per
   repository (INFRA-391). `ArchitectureTree.sources`, each source's sync bookkeeping in the order
   the project added them, replaces `source`; `ArchitectureTreeComponent.source` names the

@@ -62,6 +62,21 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   or risk the person would weigh is now also a reason for a new version of an approved spec. The
   deployment's owner said Legion's architects asked him too many questions that did not need him.
 
+- Daemon API contract 38 (INFRA-225): Legion admits no root and starts no child while Dispatch
+  shows it blocked by an issue that is not `done`, and says what it is waiting for. `legion state`
+  and the controller's `read_state` carry `admission.blocked`, every root and child Legion is
+  waiting to start, each `{issue, blockedBy}` with the keys it waits on that are not done, and
+  `release_children` answers `started` and `held` beside `released`: the children it started,
+  and each child it left held with the issues it waits on. All three required, so a plugin built
+  before it refuses the state and the release answer. Install this release with a `legion` built
+  from the same commit.
+- The skills this plugin ships carry that rule (INFRA-225). The `legion-architect` skill links
+  children that depend on one another with `dispatch issue-update --blocked-by`, releases a child
+  Legion holds all the same, and says a never-started child that still waits is handed over from
+  a finished tree as a root carrying no run; its wake routing's `child-status` row says what
+  cleared a held child's hold. The `legion-controller` skill names the tick's `blocked` waits in
+  the day's report and counts the free slots without the waiting roots in `admission.blocked`,
+  which take none, and its admission reference reads a root both waiting and blocked.
 - Daemon API contract 37 (INFRA-80): under the Kubernetes runtime an issue's disk is a generic
   ephemeral volume its own pod owns, created with the pod and deleted with it, so an issue pod's
   `workspace-init provision` container is no longer told `LEGION_EXPECT_ISSUE_VOLUME`, and the
@@ -109,6 +124,15 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   takes its own next issue, but it changes no admission; the reference used to have the controller
   set priority and rank together so that "highest priority, then board rank" produced the plan's
   order (INFRA-188).
+- Daemon API contract 39 (INFRA-208): under the Kubernetes runtime an issue pod runs one
+  container, `roles`, whose PID 1 is one `legion launcher` in multi-role mode, each role's
+  generation in Linux namespaces of its own (`legion launcher role-init`), and
+  `runtime.kubernetes.resources` takes `issue` and `controller` alone, so `legion state`'s and the
+  controller's `read_state`'s `settings.runtime.kubernetes.resources` is `{issue, controller}` and
+  the `resource-limits` row names the issue pod and the controller's pod rather than roles. The
+  pod's launcher argv is the contract's surface, so a daemon at 39 refuses an image whose
+  `pi-legion` declares another contract: pin the worker image with the daemon release. Nothing this
+  plugin reads or writes moved; install this release with a `legion` built from the same commit.
 - Daemon API contract 35 (LEGION-791): `legion state` and the controller's `read_state` carry
   `settings`, the daemon's resolved `legion.yaml` with every credential, credential source and
   credential file path left out and a URL's userinfo masked as `xxxxx@` (`max_fix_attempts`,

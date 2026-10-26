@@ -386,6 +386,44 @@ func TestStoreRoundTripsEveryRecord(t *testing.T) {
 	})
 }
 
+// The mark that an issue has stood in a phase of its own is what promotion reads when a tree that
+// ran comes up again on a later pass, long after its run, so it has to survive the write: PutIssue
+// stores it and Issue, like every read behind issueColumns, gives it back. The store keeps
+// whatever the record says, both ways — the workflow never clears the mark, but a record written
+// without it, as every issue that never ran is, must read back without it.
+func TestStoreRoundTripsATreeTakenBack(t *testing.T) {
+	ctx := context.Background()
+	st := migratedStore(t)
+	records := NewStore()
+	taken := issueFixture("LEGION-215")
+	taken.Phase, taken.Status, taken.TakenBack = phase.Admitted, "todo", true
+
+	inTx(t, st, func(tx pgx.Tx) {
+		must(t, records.PutIssue(ctx, tx, taken))
+		got, err := records.Issue(ctx, tx, taken.Key)
+		must(t, err)
+		if !reflect.DeepEqual(got, &taken) {
+			t.Fatalf("taken-back issue = %#v, want %#v", got, taken)
+		}
+		issues, err := records.Issues(ctx, tx)
+		must(t, err)
+		if !reflect.DeepEqual(issues, []Issue{taken}) {
+			t.Fatalf("listed issues = %#v, want %#v", issues, []Issue{taken})
+		}
+	})
+
+	cleared := taken
+	cleared.TakenBack = false
+	inTx(t, st, func(tx pgx.Tx) {
+		must(t, records.PutIssue(ctx, tx, cleared))
+		got, err := records.Issue(ctx, tx, cleared.Key)
+		must(t, err)
+		if !reflect.DeepEqual(got, &cleared) {
+			t.Fatalf("issue after a write that carries no mark = %#v, want %#v", got, cleared)
+		}
+	})
+}
+
 // ClaimSession is the session claims records for the token (the workflow reads it for the
 // reviewer's claim to tell the reviewer's own review-App session from another's by the Legion
 // footer each carries). An unknown token answers "" and no error.
@@ -1612,7 +1650,7 @@ func TestRecordMigrationCreatesTheRequiredColumns(t *testing.T) {
 	ctx := context.Background()
 	st := migratedStore(t)
 	want := map[string][]string{
-		"issues":            {"key", "tree", "project", "title", "parent", "phase", "generation", "status", "rank", "handed_over", "linger_until", "held_from", "last_dispatch_seq", "ready_pending_version", "hold_reason", "dispatch_status", "repo", "default_branch", "github_repo"},
+		"issues":            {"key", "tree", "project", "title", "parent", "phase", "generation", "status", "rank", "handed_over", "taken_back", "linger_until", "held_from", "last_dispatch_seq", "ready_pending_version", "hold_reason", "dispatch_status", "repo", "default_branch", "github_repo"},
 		"phases":            {"issue", "role", "claim", "handoff_commit", "rounds", "verdict", "summary", "last_handoff", "decision", "completed_at", "merge_note"},
 		"pull_requests":     {"issue", "repo", "number", "branch", "head_sha", "head_updated_at", "failing", "cancelled", "fix_attempts", "blocked_attempts", "check_runs", "generation", "snapshot", "pushes", "head_counted", "head_counted_before", "planned_red", "review_seen", "review_seen_at", "state", "checked_head", "required", "required_workflows", "required_workflows_head", "mergeability", "merge_sha"},
 		"production_checks": {"issue", "project", "tree", "repo", "pr_number", "merge_sha", "opened_at", "bound_at", "looks", "look_open", "look_wake_at", "last_wake_kind", "last_wake_detail", "last_wake_at", "pending_cause_kind", "pending_cause_detail", "last", "closed_at", "outcome"},

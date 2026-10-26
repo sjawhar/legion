@@ -374,7 +374,11 @@ describe("the model gateway key command", () => {
     mkdirSync(stageBin, { recursive: true });
     writeFileSync(join(stageBin, "docker"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
     const stages: [string, Record<string, string>][] = [
-      ["stage3-devbox-workflow.sh", { STAGE3_EVIDENCE_DIR: evidence }],
+      // Stage 3 checks its model route before anything else, so the run names one.
+      [
+        "stage3-devbox-workflow.sh",
+        { STAGE3_EVIDENCE_DIR: evidence, LEGION_E2E_MODEL_ROUTE: "gateway" },
+      ],
       [
         "stage3-4b13b-acceptance.sh",
         {

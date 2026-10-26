@@ -33,8 +33,9 @@ You own one issue tree from its first decision to the merge that closes it. The 
 
 ## 2. Children in flight
 
-- Release a child only after each child it depends on has closed, because Legion does not order children: `legion({ op: "release_children", issues: ["LEGION-41", "LEGION-42"] })`.
+- Set a child's dependencies in one call naming every issue it waits on: `dispatch issue-update --issue <child> --blocked-by <a> --blocked-by <b>`, or `--blocked-by` on `dispatch issue` at creation. The call replaces the child's whole list, so read its existing links first (`dispatch read`). Release it with the rest: `legion({ op: "release_children", issues: ["LEGION-41", "LEGION-42"] })`. Legion holds a released child that waits on an issue not `done` and starts it itself at its last blocker's close. A child that builds on another repository's merged change is not held this way: release it as `skill://legion-architect/references/decomposition.md` "Across repositories" says.
 - On each `child-closed`, read the child's handoff. Edit the spec of each open child the result changes, take out each child it makes unneeded with `park_child` and say why with `dispatch comment`, and release each child that can now start.
+- Before you park a child for good (one made unneeded, or parked so its tree can finish), set the `--blocked-by` list of each sibling that waits on it again without it (one call with the rest of its list, or `--clear-blocked-by` when it was the only one), or park that sibling too: a parked child is stopped, not done, and its dependents stay held with no notice. A park followed by `rerun_child` keeps its dependents' links: they wait through the rerun and start when the rerun's merge closes the child.
 - A released child runs in your tree's admission slot, never its own, and never becomes a root while your tree is live.
 
 ## 3. Children complete
