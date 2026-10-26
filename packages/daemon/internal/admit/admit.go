@@ -82,54 +82,60 @@ func New(store record.Store, engine *workflow.Engine, cap int, project string, l
 // Legion (a controller notice, not a record), releases slots that the workflow completed, promotes
 // waiting roots while capacity remains, and wakes the controller when a slot it released is still
 // free after that (wakeForFreeSlot). The workflow handler runs first: it records every live-tree
-// child, leaving admission to record only a still-unrecorded root or orphan.
+// child, leaving admission to record only a still-unrecorded root or orphan. A release's adoption
+// of children it cannot adopt (adoptChildren) is the one fact admission refuses.
 func (a *Admission) Apply(ctx context.Context, tx pgx.Tx, fact intake.Fact) (intake.Result, error) {
 	done, err := a.releaseDoneSlots(ctx, tx)
 	if err != nil {
 		return intake.Result{}, err
 	}
-	released, err := a.applyFact(ctx, tx, fact)
+	released, refusal, err := a.applyFact(ctx, tx, fact)
 	if err != nil {
 		return intake.Result{}, err
 	}
-	return intake.Result{}, a.wakeForFreeSlot(ctx, tx, append(done, released...))
+	return intake.Result{Refusal: refusal}, a.wakeForFreeSlot(ctx, tx, append(done, released...))
 }
 
 // applyFact is Apply's work once the workflow's completed slots are released, and reports the
-// issues whose slots it released itself.
-func (a *Admission) applyFact(ctx context.Context, tx pgx.Tx, fact intake.Fact) ([]string, error) {
+// issues whose slots it released itself and the refusal of a release's adoption.
+func (a *Admission) applyFact(ctx context.Context, tx pgx.Tx, fact intake.Fact) ([]string, *intake.Refusal, error) {
+	if adoption, ok := fact.(intake.ChildAdoption); ok {
+		refusal, err := a.adoptChildren(ctx, tx, adoption)
+		return nil, refusal, err
+	}
 	if position, ok := fact.(intake.DispatchConsumerPosition); ok {
-		return a.release(ctx, tx, position)
+		released, err := a.release(ctx, tx, position)
+		return released, nil, err
 	}
 	if _, ok := fact.(intake.ControllerTick); ok {
 		if _, err := a.promote(ctx, tx); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		// The tick wakes the controller whatever the slots: with every slot taken, it is the only
 		// wake a tree waiting on a refused root claim gets, since only the controller's recheck of
 		// that claim moves it, and it is the turn that posts the day's report.
-		return nil, a.wakeController(ctx, tx, record.TickNotice, a.project, a.now())
+		return nil, nil, a.wakeController(ctx, tx, record.TickNotice, a.project, a.now())
 	}
 	if handover, ok := fact.(intake.Handover); ok {
 		if err := a.consumeHandover(ctx, tx, handover); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		_, err := a.promote(ctx, tx)
-		return nil, err
+		return nil, nil, err
 	}
 
 	observation, ok := fact.(intake.DispatchIssue)
 	if !ok {
 		_, err := a.promote(ctx, tx)
-		return nil, err
+		return nil, nil, err
 	}
 
 	stored, err := a.store.Issue(ctx, tx, observation.Key)
 	if err != nil {
-		return nil, fmt.Errorf("read admission issue %s: %w", observation.Key, err)
+		return nil, nil, fmt.Errorf("read admission issue %s: %w", observation.Key, err)
 	}
 	if observation, err = workflow.SettleRetainedRepository(observation, stored); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if stored == nil {
 		handed := observation.HandedOver
@@ -143,7 +149,7 @@ func (a *Admission) applyFact(ctx context.Context, tx pgx.Tx, fact intake.Fact) 
 		// listing reads every status now, but a triage root is never a todo candidate it admits.
 		if observation.Status == "triage" && observation.Parent == "" && handed {
 			if err := a.enqueue(ctx, tx, observation.Key, record.ControllerNotice{Kind: record.TriageNotice}, a.now()); err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 		}
 		// An unrecorded todo issue without the label is someone else's work in a project Legion may
@@ -154,7 +160,7 @@ func (a *Admission) applyFact(ctx context.Context, tx pgx.Tx, fact intake.Fact) 
 		// found it would have release admit on that stale information instead.
 		if observation.Status != "todo" {
 			a.refreshHeldSummary(observation)
-			return nil, nil
+			return nil, nil, nil
 		}
 		if !handed {
 			a.log.Debug("admission: not handed to Legion", "issue", observation.Key, "label", dispatch.LegionLabel)
@@ -165,9 +171,9 @@ func (a *Admission) applyFact(ctx context.Context, tx pgx.Tx, fact intake.Fact) 
 			// events of one edit burst find it pending and fold into it.
 			free, err := a.slotFree(ctx, tx)
 			if err != nil || !free {
-				return nil, err
+				return nil, nil, err
 			}
-			return nil, a.wakeController(ctx, tx, record.TodoNotice, observation.Key, a.now().Add(todoWakeDelay))
+			return nil, nil, a.wakeController(ctx, tx, record.TodoNotice, observation.Key, a.now().Add(todoWakeDelay))
 		}
 		a.mu.Lock()
 		summary, held := a.pending[observation.Key]
@@ -185,23 +191,23 @@ func (a *Admission) applyFact(ctx context.Context, tx pgx.Tx, fact intake.Fact) 
 			// event already acknowledged as processed. promote's own pending membership check —
 			// not this one — is what still holds the freshly recorded candidate back from a slot
 			// until pending is actually clear; a later pass once the hold clears promotes it.
-			return nil, nil
+			return nil, nil, nil
 		}
 		if err := a.putNewRoot(ctx, tx, observation, true); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 	} else if err := a.applyObservation(ctx, tx, *stored, observation); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	released, err := a.releaseInactiveSlots(ctx, tx)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if _, err := a.promote(ctx, tx); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return released, nil
+	return released, nil, nil
 }
 
 // wakeForFreeSlot wakes the controller when this transaction released a slot that promotion left

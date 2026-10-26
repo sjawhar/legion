@@ -250,9 +250,11 @@ func (s *server) documentOfIssue(w http.ResponseWriter, r *http.Request, artifac
 
 // releasableChild accepts an issue of the architect's tree that has not entered the workflow: a
 // triage, backlog, or icebox issue whose Dispatch parent chain reaches tree. The record cannot
-// answer, since it holds a child only once the child is todo; the shipped daemon checks the same
-// membership over its mirrored issue graph. An issue already in the workflow is refused, since
-// writing todo would move an in-progress child back.
+// answer, since it holds a child only once the child is todo, and a root that queued in admission
+// before a person made it a child of tree is recorded in a tree of its own until the release adopts
+// it (adoptReleasedChildren); the shipped daemon checks the same membership over its mirrored issue
+// graph. An issue already in the workflow is refused, since writing todo would move an in-progress
+// child back.
 //
 // A child already todo is neither: todo is what this call writes, so it needs no write. It is
 // accepted, which is what makes the architect's retry of a wave Dispatch failed part way through
@@ -303,8 +305,10 @@ const (
 // would, recorded under the live tree and started once its gate is open, and a live event of it
 // from before the read stops at the sequence fence. The view applies only while the child stays
 // unrecorded (intake.DispatchIssue.Observed): an event that recorded it meanwhile has the record
-// carried on by the child's own events, each with its actor. A child already recorded, which the
-// earlier attempt of a wave this call retries released, has had that observation.
+// carried on by the child's own events, each with its actor. A child already recorded in tree —
+// by the earlier attempt of a wave this call retries, or by the release's adoption of a root that
+// queued in admission (adoptReleasedChildren) — has had that observation. One recorded in any
+// other tree is not tree's, and is answered CHILD_IN_OTHER_TREE; the adoption leaves none.
 //
 // The workflow records a child only under a recorded parent, and a parent this same wave released
 // is recorded only once its own todo event arrives. A child the observation did not record is
@@ -316,6 +320,10 @@ func (s *server) enterTodoChild(w http.ResponseWriter, r *http.Request, tree str
 	recorded, err := s.recordedIssue(r.Context(), child.Key)
 	if err != nil {
 		writeFailure(w, http.StatusInternalServerError, "RECORD_UNAVAILABLE", fmt.Sprintf("could not read the record of %s", child.Key))
+		return false
+	}
+	if recorded != nil && recorded.Tree != tree {
+		writeFailure(w, http.StatusConflict, "CHILD_IN_OTHER_TREE", fmt.Sprintf("%s runs in the tree of %s, not %s", child.Key, recorded.Tree, tree))
 		return false
 	}
 	if recorded != nil {
@@ -449,6 +457,13 @@ func (s *server) dispatchIssue(w http.ResponseWriter, r *http.Request, key strin
 	return issue, true
 }
 
+// waveRelease releases children of the architect's tree into its run. Every child is checked
+// (releasableChild) before anything is written; then a child recorded outside the tree joins it
+// (adoptReleasedChildren), or the release answers why it cannot and writes nothing; then each
+// triage, backlog or icebox child is written todo in Dispatch, whose event starts it, and each
+// child already todo is recorded (enterTodoChild). So a child is in the tree when the release
+// answers it released, except one the release moves to todo that was never recorded, which its
+// todo event records.
 func (s *server) waveRelease(w http.ResponseWriter, r *http.Request) {
 	var req WaveReleaseRequest
 	if !s.readBody(w, r, &req, s.redeemIdentityCheck) || !requireFailureFields(w, field{"grantId", req.GrantID}) {
@@ -469,6 +484,7 @@ func (s *server) waveRelease(w http.ResponseWriter, r *http.Request) {
 	// per child: the reads are cached for the life of this request.
 	read := s.cachedIssueReader()
 	unreleased := make([]string, 0, len(req.Issues))
+	children := make([]dispatch.Issue, 0, len(req.Issues))
 	var todo []dispatch.Issue
 	for _, issue := range req.Issues {
 		if !claim.IsIssueKey(issue) {
@@ -479,11 +495,15 @@ func (s *server) waveRelease(w http.ResponseWriter, r *http.Request) {
 		if !ok {
 			return
 		}
+		children = append(children, child)
 		if write {
 			unreleased = append(unreleased, issue)
 		} else {
 			todo = append(todo, child)
 		}
+	}
+	if !s.adoptReleasedChildren(w, r, grant.Tree, children) {
+		return
 	}
 	for _, issue := range unreleased {
 		if err := s.dispatch.SetStatus(r.Context(), issue, "todo"); err != nil {
@@ -502,6 +522,57 @@ func (s *server) waveRelease(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, http.StatusOK, WaveReleaseResponse{Released: req.Issues})
+}
+
+// adoptReleasedChildren moves into tree each released child recorded in another tree: a root that
+// queued in admission (its own tree) before a person made it a child of tree, which no Dispatch
+// event moves (admit's recordObservation keeps a recorded tree). The children are applied as one
+// ChildAdoption fact, under the Dispatch parent the release read, and admission adopts them all
+// or refuses the fact, writing nothing: a refusal is the release's answer, naming the child and
+// why, and nothing more is written, Dispatch included. A wave with no such child applies no fact.
+func (s *server) adoptReleasedChildren(w http.ResponseWriter, r *http.Request, tree string, children []dispatch.Issue) bool {
+	outside, err := s.recordedOutside(r.Context(), tree, children)
+	if err != nil {
+		writeFailure(w, http.StatusInternalServerError, "RECORD_UNAVAILABLE", "could not read the records of the released children")
+		return false
+	}
+	if len(outside) == 0 {
+		return true
+	}
+	result, err := intake.ApplyFact(r.Context(), s.pool, "api", requestFactID("waves/adopt"), intake.ChildAdoption{Tree: tree, Children: outside}, s.handlers...)
+	if err != nil {
+		writeFailure(w, http.StatusInternalServerError, "FACT_APPLY_FAILED", "could not adopt the released children")
+		return false
+	}
+	if result.Refusal != nil {
+		writeFailure(w, result.Refusal.Status, result.Refusal.Code, result.Refusal.Message)
+		return false
+	}
+	return true
+}
+
+// recordedOutside reads the record of every released child in one read-only transaction, and
+// returns each one recorded in a tree other than tree, with the Dispatch parent the release read.
+func (s *server) recordedOutside(ctx context.Context, tree string, children []dispatch.Issue) ([]intake.AdoptedChild, error) {
+	if s.pool == nil || s.records == nil {
+		return nil, errors.New("record dependencies are unavailable")
+	}
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly})
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	var outside []intake.AdoptedChild
+	for _, child := range children {
+		recorded, err := s.records.Issue(ctx, tx, child.Key)
+		if err != nil {
+			return nil, err
+		}
+		if recorded != nil && recorded.Tree != tree {
+			outside = append(outside, intake.AdoptedChild{Issue: child.Key, Parent: intake.ObservedIssue(child).Parent})
+		}
+	}
+	return outside, tx.Commit(ctx)
 }
 
 // phaseBackward applies a backward move: a phase worker's on its own issue (the grant's), or the
@@ -673,7 +744,8 @@ func (s *server) architectOwns(w http.ResponseWriter, r *http.Request, grant cre
 // that leaves the tree before reaching the grant's issue (no parent on a child, a parent not
 // recorded or recorded in another tree, a cycle) ends at the tree root, whose architect owns the
 // issue: a human's re-parent in Dispatch leaves an issue's tree as it was (admit's
-// recordObservation), and the notice router ends the same walk at the same place
+// recordObservation), except a root that never ran, which joins its parent's live tree
+// (workflow/adopt.go), and the notice router ends the same walk at the same place
 // (owningArchitect, internal/daemon/notice_routing.go), so the architect the reviewer's
 // phase-finished notice reaches is the one that may accept the issue. The walk reads every parent
 // in one read-only transaction, opened only when it has a parent to read.

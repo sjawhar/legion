@@ -96,6 +96,23 @@ type Handover struct {
 
 func (Handover) isFact() {}
 
+// ChildAdoption is an architect's release of children recorded outside its tree Tree, the root
+// key its grant names: each a root that queued in admission before a person made it a child of
+// Tree, under the Dispatch parent the release read. Admission adopts every one into Tree or, when
+// any cannot join it (workflow's AdoptionRefusal), refuses the whole fact and writes nothing.
+type ChildAdoption struct {
+	Tree     string
+	Children []AdoptedChild
+}
+
+// AdoptedChild is one child a ChildAdoption moves into its tree, with its Dispatch parent.
+type AdoptedChild struct {
+	Issue  string
+	Parent string
+}
+
+func (ChildAdoption) isFact() {}
+
 func (DispatchIssue) isFact() {}
 
 // RepoMappingChanged is Dispatch's settings.repo_project.updated on the daemon's own project: a
