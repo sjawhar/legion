@@ -235,7 +235,6 @@ function agentReplyTo(agent: Agent, read: MessageRead, node: Message, text: Agen
     issueKey: read.message.issue_key,
     target: {
       actor: node.author,
-      author: text.label(node.author),
       excerpt: node.body,
       id: node.id,
       parentKind: "message",
@@ -1019,20 +1018,6 @@ function SelectionHeader({
   );
 }
 
-/** `AgentPart`s as one string, each agent named by the rule `AgentName` draws it by: for a line
- *  that can only be text, a button's refusal. */
-function partsText(parts: readonly AgentPart[], text: AgentText): string {
-  return parts
-    .map((part) =>
-      typeof part === "string"
-        ? part
-        : "actor" in part
-          ? text.label(part.actor)
-          : text.sessionText(part.sessionId, part.storedTitle)
-    )
-    .join("");
-}
-
 /**
  * The broadcast a selection is waiting to become: one body, one mode, and one message per
  * recipient. Selection is what the human ticked, so a recipient that a later filter hides is
@@ -1098,7 +1083,7 @@ function BroadcastComposer({
   const sendState = broadcastSendState(plan, delivery, body);
   // The button carries its refusal as text (its `title`, and its own hidden reason line where no
   // line on screen shows it), so a refusal naming agents names them as `AgentName` does.
-  const refusal = sendState.refusal === null ? null : partsText(sendState.refusal, text);
+  const refusal = sendState.refusal === null ? null : sendState.refusal.map(text.part).join("");
   const noticeId = useId();
 
   // On a narrow or short screen (`narrow-or-short`, styles.css) the composer is a compact grid,

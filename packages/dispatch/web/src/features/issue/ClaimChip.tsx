@@ -1,3 +1,4 @@
+import { claimHolds } from "@legion/contracts";
 import type { ReactNode } from "react";
 
 import type { IssueClaim } from "../../api/types";
@@ -9,18 +10,27 @@ import { Timestamp } from "../refs/Timestamp";
 /**
  * Whether a claim's session has lapsed: the registry's latest read succeeded and does not list
  * it (`not-running`), which is exactly when the server lets any agent take the issue. A human's
- * claim never lapses - there is no session to end, and only a human releases or forces it. This
- * is the judgement `claimHolds` in `@legion/contracts` makes, the one the agent tools print as
+ * claim never lapses - there is no session to end, and only a human releases or forces it. The
+ * judgement is `claimHolds` in `@legion/contracts`, the one the agent tools print as
  * "not running" too.
  *
  * The loaded test is the whole point. A chip paints the stamped title before the registry
  * answers, so "the registry has not arrived" and "the holder is gone" look identical to a bare
  * lookup; the registry's `unknown` state (no successful read yet, or the latest read failed) is
  * never lapsed, or every claim on the page would read free for a moment, and free for good
- * whenever the listener is unreachable.
+ * whenever the listener is unreachable. So `claimHolds` gets the registry's titles only once a
+ * read has landed.
  */
-export function claimHasLapsed(claim: IssueClaim, registry: Pick<AgentRegistry, "state">): boolean {
-  return claim.actor.kind === "session" && registry.state(claim.actor.id) === "not-running";
+export function claimHasLapsed(
+  claim: IssueClaim,
+  registry: Pick<AgentRegistry, "state" | "titles">
+): boolean {
+  return (
+    claimHolds(
+      claim,
+      registry.state(claim.actor.id) === "unknown" ? undefined : registry.titles
+    ) === "lapsed"
+  );
 }
 
 /**

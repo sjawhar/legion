@@ -39,7 +39,7 @@ export const EMPTY_AGENTS: readonly Agent[] = [];
 const lookups = new WeakMap<readonly Agent[], RegistryLookup>();
 
 /** The lookup for one registry response, built once and shared by every reader of it. */
-export function registryLookup(agents: readonly Agent[]): RegistryLookup {
+function registryLookup(agents: readonly Agent[]): RegistryLookup {
   let lookup = lookups.get(agents);
   if (lookup === undefined) {
     lookup = {

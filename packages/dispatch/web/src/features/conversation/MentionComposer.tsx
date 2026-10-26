@@ -99,6 +99,9 @@ interface MentionOption {
   readonly capabilities: readonly string[];
   /** Where and when: the session's directory and when it was last seen. */
   readonly detail: string;
+  /** The name of the session the option is, or of the one holding its role, as `useAgentText`
+   *  gives it: the filter matches it, and a role option's detail tooltip names it. */
+  readonly holder: string;
   /** The session the option is, or, for a role, the session holding it: `AgentName` draws it. */
   readonly sessionId: string;
   /** That session's title as the agent list gave it: its name when the registry cache has none. */
@@ -134,7 +137,10 @@ function submittedAskOptions(options: readonly AskOptionDraft[]): AskOption[] {
   return submitted;
 }
 
-function roleOptions(agents: readonly Agent[]): MentionOption[] {
+function roleOptions(
+  agents: readonly Agent[],
+  text: Pick<AgentText, "sessionText">
+): MentionOption[] {
   const byRole = new Map<string, Agent>();
   for (const agent of agents) {
     for (const role of agent.roles) byRole.set(role, agent);
@@ -152,6 +158,7 @@ function roleOptions(agents: readonly Agent[]): MentionOption[] {
     .map(([role, agent]) => ({
       capabilities: agent.capabilities,
       detail: `${agent.dir} · ${new Date(agent.last_seen).toLocaleString()}`,
+      holder: text.sessionText(agent.session_id, agent.title),
       sessionId: agent.session_id,
       sessionTitle: agent.title,
       target: `role:${role}`,
@@ -164,7 +171,7 @@ export function mentionOptions(
   text: Pick<AgentText, "sessionText">
 ): MentionOption[] {
   return [
-    ...roleOptions(agents),
+    ...roleOptions(agents, text),
     ...[...agents]
       .sort(
         (left, right) => right.last_seen - left.last_seen || left.title.localeCompare(right.title)
@@ -172,6 +179,7 @@ export function mentionOptions(
       .map((agent) => ({
         capabilities: agent.capabilities,
         detail: `${agent.dir} · ${new Date(agent.last_seen).toLocaleString()}`,
+        holder: text.sessionText(agent.session_id, agent.title),
         sessionId: agent.session_id,
         sessionTitle: agent.title,
         target: `session:${agent.session_id}`,
@@ -528,13 +536,10 @@ export function MentionComposer({
         query === "" ||
         option.target.toLocaleLowerCase().includes(query) ||
         option.title.toLocaleLowerCase().includes(query) ||
-        text
-          .sessionText(option.sessionId, option.sessionTitle)
-          .toLocaleLowerCase()
-          .includes(query) ||
+        option.holder.toLocaleLowerCase().includes(query) ||
         option.detail.toLocaleLowerCase().includes(query)
     );
-  }, [autocomplete, options, text]);
+  }, [autocomplete, options]);
   const compact = inline || edit !== undefined;
   /** The whole draft, gone - the body, its accepted mentions, a suggestion's replacement and an
    *  ask's options - on a successful send and on Discard alike, in every host, leaving what a fresh
@@ -1135,11 +1140,7 @@ export function MentionComposer({
                 </span>
                 <TruncatedText
                   className={`self-stretch text-xs ${textMutedOnSurface}`}
-                  title={
-                    isRole
-                      ? `${text.sessionText(option.sessionId, option.sessionTitle)} · ${option.detail}`
-                      : option.detail
-                  }
+                  title={isRole ? `${option.holder} · ${option.detail}` : option.detail}
                 >
                   {isRole ? (
                     <>

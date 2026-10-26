@@ -146,20 +146,35 @@ export function composedBroadcast(
   };
 }
 
+/** `Excluded: <session> (<reason>), …`: each session a send leaves out, with its reason, as an
+ *  agent part for `AgentParts` to draw. The composer's Excluded line and the sent broadcast's
+ *  page both start from it. */
+export function excludedParts(
+  excluded: readonly { sessionId: string; storedTitle: string | undefined; reason: string }[]
+): AgentPart[] {
+  const parts: AgentPart[] = ["Excluded: "];
+  excluded.forEach(({ reason, sessionId, storedTitle }, index) => {
+    if (index > 0) parts.push(", ");
+    parts.push({ sessionId, storedTitle }, ` (${reason})`);
+  });
+  return parts;
+}
+
 /**
  * The Excluded line: every selected session the send leaves out, with its reason, and, when the
- * mode is why nobody is reached, the mode that would reach the most of them (`hint`). Each
- * session is an agent part, for `AgentParts` to draw.
+ * mode is why nobody is reached, the mode that would reach the most of them (`hint`).
  */
 function exclusionLine(
   excluded: readonly BroadcastExclusionPlan[],
   hint: string | null
 ): AgentPart[] {
-  const parts: AgentPart[] = ["Excluded: "];
-  excluded.forEach((item, index) => {
-    if (index > 0) parts.push(", ");
-    parts.push({ sessionId: item.sessionID, storedTitle: item.agent?.title }, ` (${item.reason})`);
-  });
+  const parts = excludedParts(
+    excluded.map((item) => ({
+      reason: item.reason,
+      sessionId: item.sessionID,
+      storedTitle: item.agent?.title,
+    }))
+  );
   const tail = ". Nothing is sent to them, and no other mode is substituted.";
   parts.push(hint === null ? tail : `${tail} ${hint}`);
   return parts;

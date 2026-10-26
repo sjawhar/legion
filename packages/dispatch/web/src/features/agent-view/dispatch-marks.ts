@@ -40,8 +40,8 @@ export function dispatchMetadata(marks: DispatchMarks): { custom: Record<string,
 const AUTHOR_KINDS: Record<Actor["kind"], true> = { session: true, system: true, user: true };
 
 /** The `author` mark, when it has the shape `dispatchMetadata` wrote. It is returned as the
- *  very object the metadata holds, never a copy, so a `useAuiState` selector reading it returns
- *  the same reference on every store update (the selector is compared by `Object.is`). */
+ *  very object the metadata holds, never a copy; a rebuild of the transcript writes a new one,
+ *  so a `useAuiState` selector (compared by `Object.is`) reads its fields, not the mark. */
 function readAuthor(value: unknown): DispatchAuthor | undefined {
   if (typeof value !== "object" || value === null) return undefined;
   const { actor, issue } = value as Record<string, unknown>;

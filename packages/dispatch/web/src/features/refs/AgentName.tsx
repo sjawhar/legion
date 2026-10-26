@@ -41,7 +41,7 @@ type AgentVariant =
    *  beside it, outside the host control. */
   | { kind: "control"; control: (name: ReactNode) => ReactNode };
 
-export type AgentNameProps = AgentSubject &
+type AgentNameProps = AgentSubject &
   AgentVariant & {
     className?: string;
     /** Inside a sentence: the link keeps its line box (`.dispatch-inline-link`, `styles.css`). */
@@ -185,7 +185,7 @@ function SessionAgentName({
 
 /** A Conversation avatar's initials: the first letter of the first two words of the agent's
  *  name (never its attribution). */
-export function agentInitials(actor: Actor, titles: ReadonlyMap<string, string>): string {
+function agentInitials(actor: Actor, titles: ReadonlyMap<string, string>): string {
   return actorName(actor, titles)
     .split(/\s+/)
     .filter(Boolean)
@@ -197,8 +197,9 @@ export function agentInitials(actor: Actor, titles: ReadonlyMap<string, string>)
 export interface AgentText {
   /** The full label: name plus ` (for <owner>)` / ` (as ns/name)`. */
   label(actor: Actor): string;
-  /** The name alone, without the attribution. */
-  name(actor: Actor): string;
+  /** An `AgentPart` as text: a text part as is, an agent part by the rule `AgentParts` draws it
+   *  by. */
+  part(part: AgentPart): string;
   /** A bare session id's name: its registry title, else `storedTitle`, else its short id. */
   sessionText(sessionId: string, storedTitle: string | undefined): string;
   /** The Conversation avatar's initials (`agentInitials`). */
@@ -218,7 +219,12 @@ export function useAgentText(): AgentText {
     () => ({
       initials: (actor: Actor) => agentInitials(actor, registry.titles),
       label: (actor: Actor) => actorLabel(actor, registry.titles),
-      name: (actor: Actor) => actorName(actor, registry.titles),
+      part: (part: AgentPart) =>
+        typeof part === "string"
+          ? part
+          : "actor" in part
+            ? actorLabel(part.actor, registry.titles)
+            : sessionLabel(part.sessionId, registry.title(part.sessionId) ?? part.storedTitle),
       sessionText: (sessionId: string, storedTitle: string | undefined) =>
         sessionLabel(sessionId, registry.title(sessionId) ?? storedTitle),
     }),

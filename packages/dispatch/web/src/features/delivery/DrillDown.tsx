@@ -27,6 +27,7 @@ import { useDialog } from "../shell/useDialog";
 import { NO_COMPONENT, NO_ISSUE, NO_PRIORITY, NO_SESSION, PLACEHOLDER_LABELS } from "./lib/facets";
 import { parentAgentLabel } from "./lib/parentAgent";
 import { leadTimeMinutes } from "./lib/prList";
+import { storedSessionTitle } from "./lib/sessionTitles";
 import type { TimelineSelection } from "./Timeline";
 
 const sectionLabel = `mt-2 text-xs uppercase ${textMutedOnSurface}`;
@@ -113,9 +114,7 @@ function PRDetail({
                   className="max-w-full"
                   key={session}
                   sessionId={session}
-                  storedTitle={
-                    sessionTitles[session] === session ? undefined : sessionTitles[session]
-                  }
+                  storedTitle={storedSessionTitle(sessionTitles, session)}
                 />
               ))}
         </dd>

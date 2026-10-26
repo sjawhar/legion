@@ -41,16 +41,10 @@ import { usePinWrites } from "../issue/usePinWrites";
 import { ThreadCard } from "../margin/ThreadCard";
 import { type CommentActionFailure, useCommentActionQueue } from "../margin/useCommentActionQueue";
 import type { Thread as CommentThread } from "../margin/useMarginItems";
-import {
-  AgentName,
-  type AgentPart,
-  AgentParts,
-  type AgentText,
-  useAgentText,
-} from "../refs/AgentName";
+import { AgentName, type AgentPart, AgentParts } from "../refs/AgentName";
 import { CopyRefButton } from "../refs/CopyRefButton";
 import { MarkdownBody } from "../refs/MarkdownBody";
-import { buildIssuePath, documentItemPath } from "../refs/routes";
+import { buildIssuePath, documentItemPath, sessionOfAddress } from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
 import { useMarkThreadRead } from "../replies/useMarkThreadRead";
 import { PHONE_VIEWPORT_QUERY, useDialog, useMediaQuery } from "../shell/useDialog";
@@ -109,9 +103,8 @@ function sessionTitle(sessionId: string | null, agents: readonly Agent[]): strin
  *  by `AgentName`; a role address stays text. */
 function targetPart(target: string | null): AgentPart {
   if (target === null) return "agent";
-  return target.startsWith("session:")
-    ? { sessionId: target.slice("session:".length), storedTitle: undefined }
-    : target;
+  const sessionId = sessionOfAddress(target);
+  return sessionId === undefined ? target : { sessionId, storedTitle: undefined };
 }
 
 /** The session a thread's newest attempt reached, or the target it was aimed at: what the card
@@ -166,13 +159,11 @@ function replyTargetFor(
   message: Message,
   root: MessageConversation,
   issueKey: string,
-  agents: readonly Agent[],
-  text: AgentText
+  agents: readonly Agent[]
 ): ReplyTarget {
   const thread = threadDelivery(root, agents);
   return {
     actor: message.author,
-    author: text.label(message.author),
     excerpt: message.body,
     id: message.id,
     parentKind: "message",
@@ -211,7 +202,6 @@ function ConversationReply({
     mutationFn: (delivery: MessageDeliveryMode) => api.createMessageDelivery(reply.id, delivery),
     onSuccess: () => void queryClient.invalidateQueries({ queryKey: ["issue-messages", issueKey] }),
   });
-  const text = useAgentText();
   const capabilities = capabilitiesForTarget(root.root.target, agents);
   const lastAttempt = reply.deliveries.at(-1);
   const targetName = recipientOf(reply.deliveries, root.root.target);
@@ -245,9 +235,7 @@ function ConversationReply({
               targetName,
             }
       }
-      onReply={
-        isClosed ? undefined : () => onReply(replyTargetFor(reply, root, issueKey, agents, text))
-      }
+      onReply={isClosed ? undefined : () => onReply(replyTargetFor(reply, root, issueKey, agents))}
       quote={{
         author: parent?.author,
         excerpt: parent?.body ?? "",
@@ -356,7 +344,6 @@ function MessageTurn({
   register?: DwellRef;
   replyDisabled: boolean;
 }): ReactNode {
-  const text = useAgentText();
   const author = item.root.author;
   return (
     <li
@@ -380,7 +367,7 @@ function MessageTurn({
           {isClosed ? null : (
             <ReplyButton
               disabled={replyDisabled}
-              onClick={() => onReply(replyTargetFor(item.root, item, issueKey, agents, text))}
+              onClick={() => onReply(replyTargetFor(item.root, item, issueKey, agents))}
             />
           )}
           <TurnPin disabled={disabled} onPin={onPin} pinned={pinned} />
@@ -402,8 +389,7 @@ function MessageTurn({
 function commentReplyTarget(
   comment: Comment,
   agents: readonly Agent[],
-  issueKey: string,
-  text: AgentText
+  issueKey: string
 ): ReplyTarget {
   const author = comment.author;
   const targets =
@@ -419,7 +405,6 @@ function commentReplyTarget(
   }));
   return {
     actor: author,
-    author: text.label(author),
     excerpt: comment.body,
     id: comment.id,
     mentions,
@@ -564,7 +549,6 @@ function CommentTurn({
   viewerLogin: string;
 }): ReactNode {
   const queryClient = useQueryClient();
-  const text = useAgentText();
   const [editingCommentId, setEditingCommentId] = useState<string>();
   const [savingCommentEditId, setSavingCommentEditId] = useState<string>();
   const editComment = useCallback(
@@ -695,7 +679,7 @@ function CommentTurn({
           <ReplyButton
             disabled={replyDisabled}
             onClick={() => {
-              if (onReply(commentReplyTarget(item.root, agents, issueKey, text)) && !isPhone) {
+              if (onReply(commentReplyTarget(item.root, agents, issueKey)) && !isPhone) {
                 setExpanded(true);
               }
             }}
@@ -736,7 +720,6 @@ function TargetedMessageTurn({
   });
   const capabilities = capabilitiesForTarget(item.root.target, agents);
   const targetName = recipientOf(item.root.deliveries, item.root.target);
-  const text = useAgentText();
   const asker = item.root.author;
 
   return (
@@ -760,7 +743,7 @@ function TargetedMessageTurn({
       deliveries={deliveryAttempts(item.root.deliveries, targetName)}
       header={<Avatar actor={asker} />}
       isClosed={isClosed}
-      onReply={() => onReply(replyTargetFor(item.root, item, issueKey, agents, text))}
+      onReply={() => onReply(replyTargetFor(item.root, item, issueKey, agents))}
       onRetry={retry.mutate}
       register={register}
       replyDisabled={replyDisabled}

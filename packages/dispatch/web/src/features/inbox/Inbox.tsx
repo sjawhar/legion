@@ -721,12 +721,7 @@ export function Inbox({
       : agentAuthor === undefined
         ? { sessionId: agent, storedTitle: undefined }
         : { actor: agentAuthor };
-  const agentTitle =
-    agent === undefined
-      ? undefined
-      : agentAuthor === undefined
-        ? agentText.sessionText(agent, undefined)
-        : agentText.label(agentAuthor);
+  const agentTitle = agentSubject === undefined ? undefined : agentText.part(agentSubject);
   // The clear-filter link keeps its own text and name; the agent's live link sits beside it.
   // `whitespace-pre` keeps the space before an attribution suffix, which a flex item would drop.
   const chip =

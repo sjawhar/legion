@@ -36,6 +36,7 @@ import { MarkdownBody } from "../refs/MarkdownBody";
 import { Timestamp } from "../refs/Timestamp";
 
 import { deliveryAttempts } from "./attempts";
+import { excludedParts } from "./broadcast-plan";
 import { useMarkShownRepliesRead } from "./unread";
 
 /** How long the server leaves a delivery claim before another sender may take it
@@ -57,17 +58,6 @@ export function exclusionsFromState(state: unknown): readonly BroadcastExclusion
   if (typeof state !== "object" || state === null) return [];
   const excluded = Reflect.get(state, "excluded");
   return Array.isArray(excluded) ? (excluded as BroadcastExclusion[]) : [];
-}
-
-/** The Excluded line: every session the send left out, with the reason the server gave. Each
- *  session is an agent part, for `AgentParts` to draw. */
-function exclusionParts(excluded: readonly BroadcastExclusion[]): AgentPart[] {
-  const parts: AgentPart[] = ["Excluded: "];
-  excluded.forEach((item, index) => {
-    if (index > 0) parts.push(", ");
-    parts.push({ sessionId: item.session_id, storedTitle: item.title }, ` (${item.reason})`);
-  });
-  return parts;
 }
 
 function BroadcastRecipientRow({
@@ -220,7 +210,16 @@ export function BroadcastPage(): ReactNode {
         </div>
         {excluded.length === 0 ? null : (
           <p className={`mt-2 text-sm ${dangerText}`}>
-            <AgentParts parts={exclusionParts(excluded)} />. Nothing was sent to them.
+            <AgentParts
+              parts={excludedParts(
+                excluded.map((item) => ({
+                  reason: item.reason,
+                  sessionId: item.session_id,
+                  storedTitle: item.title,
+                }))
+              )}
+            />
+            . Nothing was sent to them.
           </p>
         )}
       </header>

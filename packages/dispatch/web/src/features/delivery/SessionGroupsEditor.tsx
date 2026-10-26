@@ -18,6 +18,7 @@ import {
 } from "../../theme/classes";
 import { AgentName, useAgentText } from "../refs/AgentName";
 import { useDialog } from "../shell/useDialog";
+import { storedSessionTitle } from "./lib/sessionTitles";
 
 const sectionLabel = `text-xs tracking-wide uppercase ${textMutedOnSurface}`;
 const fieldClass = `h-8 min-w-0 flex-1 rounded border px-2 text-sm ${inputClasses(true)} ${textPrimaryOnSurface}`;
@@ -149,11 +150,7 @@ export function SessionGroupsEditor({
   });
 
   const text = useAgentText();
-  // The delivery read's titles hold a session's id when it has none: no title to show.
-  const storedTitle = (session: string): string | undefined => {
-    const title = titles[session];
-    return title === session ? undefined : title;
-  };
+  const storedTitle = (session: string): string | undefined => storedSessionTitle(titles, session);
   const groupOf = new Map<string, string>();
   for (const group of groups) {
     for (const session of group.sessions) groupOf.set(session, group.name);

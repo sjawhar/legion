@@ -56,7 +56,7 @@ import { issueStatuses, openIssueStatuses, statusLabel } from "../project/board-
 import { AgentName, useAgentText } from "../refs/AgentName";
 import { CopyRefButton } from "../refs/CopyRefButton";
 import { ReferencedBy, ReferencedByToggle } from "../refs/ReferencedBy";
-import { buildDispatchReference, buildIssuePath } from "../refs/routes";
+import { buildDispatchReference, buildIssuePath, sessionOfAddress } from "../refs/routes";
 import { useKeymap } from "../shell/keymap";
 import { AssigneeControl } from "./AssigneeControl";
 import { ClaimChip } from "./ClaimChip";
@@ -297,9 +297,7 @@ export function IssueHeader({
       : null;
   // A `session:` route is an agent: its button names it as `AgentName` does, with the agent's own
   // live link beside it. A role route is its address.
-  const routeSession = drafts.route.startsWith("session:")
-    ? drafts.route.slice("session:".length)
-    : undefined;
+  const routeSession = sessionOfAddress(drafts.route);
   const routeLabel = `Messages default to ${
     drafts.route === ""
       ? "no route"

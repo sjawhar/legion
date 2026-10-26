@@ -578,6 +578,12 @@ export function isAgentArtifact<T extends Pick<Artifact, "session_id">>(
   return artifact.session_id !== undefined && artifact.session_id !== null;
 }
 
+/** The session id a `session:<id>` delivery address names, or undefined for any other address
+ *  (a `role:` address). */
+export function sessionOfAddress(address: string): string | undefined {
+  return address.startsWith("session:") ? address.slice("session:".length) : undefined;
+}
+
 /** The route a document is referenced and linked by: an issue's primary document is its `spec`,
  *  any other issue artifact is `artifact/<slug>`, a project document sits under its project, and
  *  an artifact of an agent's conversation under that agent's session. `version` pins a historical

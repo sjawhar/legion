@@ -128,11 +128,18 @@ function UserMessage(): ReactNode {
   // A message someone other than the viewer sent the session, stored or taken as its own turn
   // (AgentRuntimeThread names them): it sits on the session's side of the thread with its author,
   // never styled as the viewer's own. Both are text a person or an agent wrote (a broadcast, a
-  // targeted message, a reply), so both render as Markdown, as the session's own turns do. The
-  // mark is the very object the metadata holds, so this selector's result is stable.
-  const author = useAuiState((state) => readDispatchMarks(state.message.metadata.custom).author);
+  // targeted message, a reply), so both render as Markdown, as the session's own turns do.
+  // Two selectors, for the reason `AssistantMessage` gives: the `author` mark is a new object on
+  // every rebuild of the transcript (each streamed frame), but its `actor` is the stored message's
+  // own author, which keeps its identity across frames, and its `issue` is a string.
+  const actor = useAuiState(
+    (state) => readDispatchMarks(state.message.metadata.custom).author?.actor
+  );
+  const issue = useAuiState(
+    (state) => readDispatchMarks(state.message.metadata.custom).author?.issue
+  );
   const turn = useTurnKey();
-  if (author !== undefined) {
+  if (actor !== undefined) {
     return (
       <div
         className={`mt-4 max-w-[80%] rounded-xl border px-3 py-2 text-sm ${borderDefault} ${textPrimaryOnCanvas}`}
@@ -140,8 +147,8 @@ function UserMessage(): ReactNode {
         data-testid="agent-message-other"
       >
         <p className={`mb-1 text-xs font-semibold ${textSecondaryOnCanvas}`}>
-          <AgentName actor={author.actor} inline />
-          {author.issue === undefined ? null : ` · ${author.issue}`}
+          <AgentName actor={actor} inline />
+          {issue === undefined ? null : ` · ${issue}`}
         </p>
         <MessagePrimitive.Parts components={{ Text: MarkdownText }} />
       </div>

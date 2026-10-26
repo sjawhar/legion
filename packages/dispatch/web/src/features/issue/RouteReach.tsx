@@ -3,6 +3,7 @@ import type { ReactNode } from "react";
 import type { IssueRouteReach } from "../../api/types";
 import { calloutWarningBg, calloutWarningBorder, calloutWarningText } from "../../theme/classes";
 import { AgentName, useAgentText } from "../refs/AgentName";
+import { sessionOfAddress } from "../refs/routes";
 
 type RoutedIssue = IssueRouteReach & { readonly route: string | null };
 
@@ -34,7 +35,7 @@ export function UnreachableRouteMarker({
 
 function UnreachableRoute({ route, showRoute }: { route: string; showRoute: boolean }): ReactNode {
   const text = useAgentText();
-  const sessionId = route.startsWith("session:") ? route.slice("session:".length) : undefined;
+  const sessionId = sessionOfAddress(route);
   const explanation = `${sessionId === undefined ? `No running session holds ${route} right now` : `${text.sessionText(sessionId, undefined)} is not running right now`}, so this issue's messages reach nobody at the moment. A session that is restarting or moving between boxes drops out of the listener for minutes and comes back under the same id, so this is a vacancy only when it is still true on a read ten minutes later; then staff the role, re-route it to a live holder, or clear the route and assign it.`;
   return (
     <span

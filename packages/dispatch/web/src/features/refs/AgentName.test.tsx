@@ -341,7 +341,6 @@ test("the text API names agents by the cached registry titles and fetches nothin
     return (
       <ul>
         <li>{text.label(owned)}</li>
-        <li>{text.name(owned)}</li>
         <li>{text.initials(owned)}</li>
         <li>{text.sessionText("0123456789abcdef", undefined)}</li>
         <li>{text.sessionText(LISTED_ID, "Stored")}</li>
@@ -353,7 +352,6 @@ test("the text API names agents by the cached registry titles and fetches nothin
     await act(async () => {});
     expect(screen.getAllByRole("listitem").map((item) => item.textContent)).toEqual([
       "Planner Bot (for alice)",
-      "Planner Bot",
       "PB",
       "session:01234567…",
       "Planner Bot",
