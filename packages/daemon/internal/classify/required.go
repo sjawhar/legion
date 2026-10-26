@@ -168,12 +168,12 @@ func HeadVerdict(pr record.PullRequest) string {
 }
 
 // nothingRequired says whether a settlement stands for the pull request's head and its base branch
-// requires no check and no workflow there (HeadChecks judged nothing). HeadVerdict leaves such a
-// head without a verdict, yet CI sends nothing back from it, so a push on top of it leaves the
-// counted attempt as a push onto a green verdict does (AdvancePullRequestHead).
+// requires no check and no workflow there: what HeadChecks would judge as nothing, read from the
+// record itself. HeadVerdict leaves such a head without a verdict, yet CI sends nothing back from
+// it, so a push on top of it leaves the counted attempt as a push onto a green verdict does
+// (AdvancePullRequestHead).
 func nothingRequired(pr record.PullRequest) bool {
-	checks, ok := HeadChecks(pr)
-	return ok && len(checks) == 0
+	return settled(pr) && pr.Required != nil && len(pr.Required) == 0 && len(pr.Workflows) == 0
 }
 
 // RedOnlyByWorkflows says whether CI is red at the pull request's head only because a workflow its

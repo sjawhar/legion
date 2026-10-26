@@ -7,11 +7,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
-	"github.com/sjawhar/legion/daemon/internal/classify"
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
@@ -299,15 +297,7 @@ func TestAnUnreadRequiredSetLeavesTheHeadUndecided(t *testing.T) {
 			if got := noticeKinds(t, pool, "LEGION-208"); containsNotice(got, "checks-red") != (tc.decidedTo == phase.Implementing) {
 				t.Fatalf("once the required set is read the architect was told %v; want checks-red exactly when the work went back", got)
 			}
-			var verdict string
-			seedRecord(t, pool, func(tx pgx.Tx) error {
-				pr, err := record.NewStore().PullRequest(t.Context(), tx, "LEGION-208")
-				if err == nil {
-					verdict = classify.HeadVerdict(*pr)
-				}
-				return err
-			})
-			if verdict != tc.verdict {
+			if verdict := pullRequestAt(t, pool).verdict; verdict != tc.verdict {
 				t.Fatalf("once the required set is read the head's verdict is %q, want %q", verdict, tc.verdict)
 			}
 		})

@@ -452,21 +452,18 @@ func (r *noRequiredChecksLive) issue(key string) api.Issue {
 func (r *noRequiredChecksLive) rawPullRequest(key string) map[string]json.RawMessage {
 	t := r.t
 	t.Helper()
-	status, body := r.d.request(http.MethodGet, "/legion/v1/state", nil, false)
-	if status != http.StatusOK {
-		t.Fatalf("GET the state = %d; body %s", status, body)
+	state := bootState(t, r.d)
+	var issues map[string]struct {
+		PullRequest map[string]json.RawMessage `json:"pullRequest"`
 	}
-	var state struct {
-		Issues map[string]struct {
-			PullRequest map[string]json.RawMessage `json:"pullRequest"`
-		} `json:"issues"`
+	if raw, ok := state["issues"]; ok {
+		if err := json.Unmarshal(raw, &issues); err != nil {
+			t.Fatalf("decode the state's issues %s: %v", raw, err)
+		}
 	}
-	if err := json.Unmarshal(body, &state); err != nil {
-		t.Fatalf("decode the state %s: %v", body, err)
-	}
-	issue, ok := state.Issues[key]
+	issue, ok := issues[key]
 	if !ok || issue.PullRequest == nil {
-		t.Fatalf("the state shows no pull request for %s: %s", key, body)
+		t.Fatalf("the state shows no pull request for %s: %s", key, r.rawJSON(state))
 	}
 	return issue.PullRequest
 }
