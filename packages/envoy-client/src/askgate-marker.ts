@@ -41,10 +41,13 @@ import { hasErrnoCode, messageFor } from "./errors";
 /** The record's name in a session's state directory. */
 export const ASKGATE_RECORD = "askgate.json";
 /**
- * How old a marker may be when the CLI consumes it. The gate releases each marker when its call
- * ends, so this only bounds one a call left behind: a backgrounded call's, or a killed session's.
+ * How old a marker may be when the CLI consumes it. The gate mints a marker when it prepares the
+ * calls of a message, and the call can then wait behind an exclusive call of the same message for
+ * up to that call's limit (an eval cell's is 3,600 s), so this is above the longest tool limit. The
+ * gate releases each marker when its call ends, so this only bounds one a call left behind: a
+ * backgrounded call's, or a killed session's.
  */
-export const MARKER_MAX_AGE_MS = 10 * 60_000;
+export const MARKER_MAX_AGE_MS = 2 * 60 * 60_000;
 
 const PRIVATE_DIR = 0o700;
 const PRIVATE_FILE = 0o600;

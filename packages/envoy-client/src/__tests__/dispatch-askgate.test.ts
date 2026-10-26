@@ -12,6 +12,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { mintMarker } from "../askgate-marker";
 import { cliRefusals, runDispatchCli } from "../dispatch-cli";
 import { resetAdviceMemory } from "../dispatch-execute";
 import { pruneSessions } from "../dispatch-session-state";
@@ -225,14 +226,39 @@ describe("AskGate at the dispatch CLI", () => {
     expect(existsSync(marker)).toBe(false);
   });
 
-  test("an expired marker is refused and removed", async () => {
+  // The attack on the marker design at cf3f1e021, N1: the gate mints a marker when it prepares the
+  // calls of a message, and a call can wait there behind an exclusive call of the same message for
+  // up to that call's limit (an eval cell's is 3,600 s). The age limit bounds only a marker its call
+  // left behind, since the gate removes each marker when its call ends.
+  test("a marker that waited an hour behind another call of its message still posts", async () => {
     writeRecord();
-    const marker = mint(MESSAGE, null, Date.now() - 11 * 60_000);
+    const marker = mint(MESSAGE, await dryArgs(MESSAGE), Date.now() - 61 * 60_000);
+    expect((await run(MESSAGE)).code).toBe(0);
+    expect(messagePosts()).toHaveLength(1);
+    expect(existsSync(marker)).toBe(false);
+  });
+
+  test("a marker older than the longest tool limit is refused and removed", async () => {
+    writeRecord();
+    const marker = mint(MESSAGE, null, Date.now() - 121 * 60_000);
     const { code, stdout } = await run(MESSAGE);
     expect(code).toBe(1);
     expect(stdout).toContain("expired");
     expect(existsSync(marker)).toBe(false);
     expect(messagePosts()).toHaveLength(0);
+  });
+
+  test("the gate's next mint keeps a marker an hour old, and sweeps one older than the age limit", () => {
+    writeRecord();
+    const waiting = mint(MESSAGE, null);
+    const left = mint(["message", "--issue", "DSP-1", "--body", "left behind"], null);
+    const hour = (Date.now() - 61 * 60_000) / 1000;
+    const old = (Date.now() - 121 * 60_000) / 1000;
+    utimesSync(waiting, hour, hour);
+    utimesSync(left, old, old);
+    mintMarker(store(), { argv: MESSAGE, args: null, toolCallId: "call-2", outcome: "verdict" }, Date.now());
+    expect(existsSync(waiting)).toBe(true);
+    expect(existsSync(left)).toBe(false);
   });
 
   test("in warn mode a write with no marker posts, warns, and is logged for the report", async () => {
