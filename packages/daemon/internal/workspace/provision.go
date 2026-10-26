@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 )
 
@@ -131,8 +132,8 @@ func excludeCodegraphDirectory(cloneDir string) error {
 	return nil
 }
 
-// Bookmark is the jj bookmark an issue's workspace is on: its branch.
-func Bookmark(issue string) string { return "legion/" + issue }
+// Bookmark is the jj bookmark an issue's workspace is on: its branch (claim.IssueBranch).
+func Bookmark(issue string) string { return claim.IssueBranch(issue) }
 
 // layoutDepth is how many directories below the state directory a shared clone and a workspace
 // each sit (Location): repos/<host>/<owner>/<name>, and workspaces/<owner>/<name>/<issue>.

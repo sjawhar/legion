@@ -8,6 +8,13 @@
 // secret forms (secret.go), which call the broker's own store (AWS Secrets Manager or GCP Secret
 // Manager) under the person's own cloud sign-in and then ask the broker to reread what they wrote.
 //
+// Every answer and every refusal about a secret names where it came from (source.go): the broker
+// AGENT_SECRETS_URL names, by host, and that broker's store, where its settings give one. This
+// CLI reads no local secrets file, and another secrets CLI on the same machine can answer the
+// same NAME from a store of its own, so the injection form writes one line to stderr before it
+// execs — the names it injected and their source, never a value — and the status and secret
+// forms print that source beside what they report.
+//
 //	agent-secrets keygen --out <dir>
 //	agent-secrets enroll --helper --runtime-id <id> --thumbprint <tp> [--session-id <id>]
 //	agent-secrets unenroll --helper --enrollment <id>
@@ -65,6 +72,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -124,21 +132,21 @@ var commands = []command{
 	{"renew", "agent-secrets renew [--pod-token-file FILE]",
 		"Keep an agent box's or pod's enrollment lease alive, renewing it until interrupted. A pod\nnames its projected service-account token's file: each renewal sends the token the file holds\nthen, which the broker checks names the pod and service account the enrollment was made for.\nPOD_TOKEN_REQUIRED, ENROLLMENT_NOT_LIVE, or an older broker's PROOF_INVALID saying\n\"not live\" exits 76, naming the enrollment, HTTP status and broker code; every other\nrefusal retries."},
 	{"request", "agent-secrets request NAME... [--reason TEXT] [--ttl DURATION] [--json]",
-		"Request secrets and print the request's id and state, and who approves it and where while\nit waits; exit 75 while it waits for approval and 77 when it is denied. The grant lasts\n--ttl, or until this session ends."},
+		"Request secrets and print the request's id, state and source, and who approves it and\nwhere while it waits; exit 75 while it waits for approval and 77 when it is denied. The\ngrant lasts --ttl, or until this session ends."},
 	{"status", "agent-secrets status <request_id> [--json]",
-		"Print a request's state, who approves it and where while it waits, its grant once\ngranted, and who decided it."},
+		"Print a request's state, the broker and store it is at, who approves it and where while it\nwaits, its grant once granted, and who decided it."},
 	{"cancel", "agent-secrets cancel <request_id>",
 		"Cancel one of this session's pending requests."},
 	{"revoke", "agent-secrets revoke <grant_id>",
 		"End one of this session's grants."},
 	{"self", "agent-secrets self [--json]",
-		"Print this session's enrollment, operator, lease, and live grants."},
+		"Print this session's enrollment, operator, lease, live grants, and the broker and store\nevery secret of this session comes from."},
 	{"whoami", "agent-secrets whoami [--json]",
 		"Print this session's enrollment as the broker's JSON, as self --json does."},
 	{"sign", "agent-secrets sign --method M --url U [--enrollment E]",
 		"Print the proof this session would sign for one broker call, without making the call."},
 	{"", "agent-secrets NAME... [--reason TEXT] [--wait DURATION] [--ttl DURATION] [--github-owner LOGIN [--github-repo NAME]... [--github-read-only]] -- <command> [args...]",
-		"Request secrets, wait up to --wait (default 30m) for a person to decide, and run <command>\nwith each granted secret in its environment under its NAME; nothing runs unless all are\ngranted. The grant lasts --ttl, or until this session ends. --github-owner narrows each\nGitHub App token the grant releases to that account's installation, and --github-repo and\n--github-read-only narrow it further, to those repositories and to read access; a token\nnarrowed to repositories alone keeps every permission the App holds, so a machine that must\nonly read needs --github-read-only too. <command> runs only once the broker answers that it\napplied the narrowing."},
+		"Request secrets, wait up to --wait (default 30m) for a person to decide, and run <command>\nwith each granted secret in its environment under its NAME; nothing runs unless all are\ngranted. One line on stderr names those secrets and the broker and store they came from,\nnever a value. The grant lasts --ttl, or until this session ends. --github-owner narrows each\nGitHub App token the grant releases to that account's installation, and --github-repo and\n--github-read-only narrow it further, to those repositories and to read access; a token\nnarrowed to repositories alone keeps every permission the App holds, so a machine that must\nonly read needs --github-read-only too. <command> runs only once the broker answers that it\napplied the narrowing."},
 }
 
 // usageEnvironment closes usage: the variables every form reads, and the exit codes.
@@ -345,6 +353,38 @@ func reportError(stderr io.Writer, prefix string, err error) {
 	fmt.Fprintf(stderr, "%s: %v\n", prefix, err)
 }
 
+// refuse prints a command's refusal together with where this CLI looked for the secret
+// (source.go): reportError's line with the source named, so a refusal of this CLI's can never be
+// read as another secrets CLI's answer about the same name. The one exception is the helper's
+// no-credential answer, which reportError prints as identity's own line: it already says this
+// machine has no login to the secrets broker, and no broker was asked anything.
+func refuse(stderr io.Writer, prefix string, src source, err error) {
+	if errors.Is(err, errNoCredential) {
+		reportError(stderr, prefix, err)
+		return
+	}
+	fmt.Fprintf(stderr, "%s: %s\n", prefix, refusalText(src, err))
+}
+
+// refusalText is what a refusal says after its prefix: the failure, and where this CLI looked.
+// A call that never reached the broker says so itself - which address it tried, that
+// AGENT_SECRETS_URL named it, and whether the host does not resolve or nothing answered - and
+// takes no source trailer: the broker refused nothing, so a trailer saying it was asked would
+// read as an answer it gave, and the store behind it could not be read either. Likewise, a local
+// helper failure names its socket: no broker request could begin without its signature.
+func refusalText(src source, err error) string {
+	var unreached *unreachableError
+	var helperFailure *helperError
+	switch {
+	case errors.As(err, &unreached):
+		return unreached.Error()
+	case errors.As(err, &helperFailure):
+		return helperFailure.Error()
+	default:
+		return err.Error() + src.asked()
+	}
+}
+
 // splitArgs partitions args into recognized "--flag"/"--flag value" tokens (as declared by
 // takesValue, keyed by flag name without its leading dashes) and every other bare token, so a
 // subcommand can accept secret names or ids before, after, or between its optional flags — the
@@ -441,9 +481,9 @@ func selectSigner(dir string) (string, Signer, error) {
 // subcommand (renew, request, status, cancel, revoke, self, and the exec form) needs, plus the
 // enrollment id buildSigner read from file mode (empty in helper mode).
 func sessionContext() (base, enrollmentID string, signer Signer, err error) {
-	base = strings.TrimSuffix(os.Getenv("AGENT_SECRETS_URL"), "/")
+	base = brokerBaseURL()
 	if base == "" {
-		return "", "", nil, errors.New("AGENT_SECRETS_URL is required")
+		return "", "", nil, fmt.Errorf("%s is required: it names the secrets broker this command reads every secret from, and this command reads no local secrets file", brokerURLVar)
 	}
 	enrollmentID, signer, err = buildSigner()
 	if err != nil {
@@ -595,7 +635,7 @@ func renewLoop(ctx context.Context, c *client, signer Signer, enrollmentID strin
 				if code == "" {
 					code = "UNKNOWN"
 				}
-				fmt.Fprintf(stderr, "agent-secrets renew: enrollment %s permanently refused by broker: HTTP %d %s: %s\n", enrollmentID, refused.Status, code, refused.Message)
+				fmt.Fprintf(stderr, "agent-secrets renew: enrollment %s permanently refused by %s: HTTP %d %s: %s\n", enrollmentID, brokerSource(c.baseURL).brokerAt(), refused.Status, code, refused.Message)
 				return exitRenewRefused
 			}
 			if tokenErr != nil {
@@ -651,20 +691,21 @@ func cmdRequest(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "agent-secrets request: %v\n", err)
 		return exitUsageError
 	}
+	ctx := context.Background()
 	c := newClient(base)
-	result, raw, err := c.CreateRequest(context.Background(), signer, names, *reason, ttl, requestSessionID())
+	result, raw, err := c.CreateRequest(ctx, signer, names, *reason, ttl, requestSessionID())
 	if err != nil {
-		reportError(stderr, "agent-secrets request", err)
+		refuse(stderr, "agent-secrets request", c.source(ctx), err)
 		return 1
 	}
-	if err := grantedLifetime(context.Background(), c, signer, result, ttl); err != nil {
-		fmt.Fprintf(stderr, "agent-secrets request: %v\n", err)
+	if err := grantedLifetime(ctx, c, signer, result, ttl); err != nil {
+		fmt.Fprintf(stderr, "agent-secrets request: %s\n", refusalText(c.source(ctx), err))
 		return 1
 	}
 	if *asJSON {
 		writeVerbatim(stdout, raw)
 	} else {
-		fmt.Fprintf(stdout, "request_id: %s\nstate: %s\n", result.RequestID, result.State)
+		fmt.Fprintf(stdout, "request_id: %s\nstate: %s\nsource: %s\n", result.RequestID, result.State, c.source(ctx))
 		if result.State == "pending" {
 			fmt.Fprintln(stdout, waitingOn(result.Approver, *result.RecordID))
 		}
@@ -699,16 +740,18 @@ func cmdStatus(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "agent-secrets status: %v\n", err)
 		return exitUsageError
 	}
-	result, raw, err := newClient(base).GetRequest(context.Background(), signer, positional[0])
+	ctx := context.Background()
+	c := newClient(base)
+	result, raw, err := c.GetRequest(ctx, signer, positional[0])
 	if err != nil {
-		reportError(stderr, "agent-secrets status", err)
+		refuse(stderr, "agent-secrets status", c.source(ctx), err)
 		return 1
 	}
 	if *asJSON {
 		writeVerbatim(stdout, raw)
 		return 0
 	}
-	fmt.Fprintf(stdout, "state: %s\n", result.State)
+	fmt.Fprintf(stdout, "state: %s\nsource: %s\n", result.State, c.source(ctx))
 	if result.State == "pending" {
 		fmt.Fprintln(stdout, waitingOn(result.Approver, *result.RecordID))
 	}
@@ -739,11 +782,13 @@ func cmdCancel(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "agent-secrets cancel: %v\n", err)
 		return exitUsageError
 	}
-	if err := newClient(base).CancelRequest(context.Background(), signer, positional[0]); err != nil {
-		reportError(stderr, "agent-secrets cancel", err)
+	ctx := context.Background()
+	c := newClient(base)
+	if err := c.CancelRequest(ctx, signer, positional[0]); err != nil {
+		refuse(stderr, "agent-secrets cancel", c.source(ctx), err)
 		return 1
 	}
-	fmt.Fprintln(stdout, "cancelled")
+	fmt.Fprintf(stdout, "cancelled at %s\n", brokerSource(base))
 	return 0
 }
 
@@ -765,11 +810,13 @@ func cmdRevoke(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "agent-secrets revoke: %v\n", err)
 		return exitUsageError
 	}
-	if err := newClient(base).RevokeGrant(context.Background(), signer, positional[0]); err != nil {
-		reportError(stderr, "agent-secrets revoke", err)
+	ctx := context.Background()
+	c := newClient(base)
+	if err := c.RevokeGrant(ctx, signer, positional[0]); err != nil {
+		refuse(stderr, "agent-secrets revoke", c.source(ctx), err)
 		return 1
 	}
-	fmt.Fprintln(stdout, "revoked")
+	fmt.Fprintf(stdout, "revoked at %s\n", brokerSource(base))
 	return 0
 }
 
@@ -794,9 +841,11 @@ func cmdSelf(name string, args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "agent-secrets %s: %v\n", name, err)
 		return exitUsageError
 	}
-	result, raw, err := newClient(base).Self(context.Background(), signer)
+	ctx := context.Background()
+	c := newClient(base)
+	result, raw, err := c.Self(ctx, signer)
 	if err != nil {
-		reportError(stderr, "agent-secrets "+name, err)
+		refuse(stderr, "agent-secrets "+name, c.source(ctx), err)
 		return 1
 	}
 	if *asJSON {
@@ -807,8 +856,8 @@ func cmdSelf(name string, args []string, stdout, stderr io.Writer) int {
 	if result.Operator != nil {
 		operator = *result.Operator
 	}
-	fmt.Fprintf(stdout, "enrollment_id: %s\nkind: %s\noperator: %s\nlease_expires_at: %s\n",
-		result.EnrollmentID, result.Kind, operator, result.LeaseExpiresAt.Format(time.RFC3339))
+	fmt.Fprintf(stdout, "enrollment_id: %s\nkind: %s\noperator: %s\nlease_expires_at: %s\nsource: %s\n",
+		result.EnrollmentID, result.Kind, operator, result.LeaseExpiresAt.Format(time.RFC3339), c.source(ctx))
 	for _, g := range result.Grants {
 		if g.ExpiresAt == nil {
 			fmt.Fprintf(stdout, "grant: %s (request %s, until this session ends)\n", g.GrantID, g.RequestID)
@@ -884,19 +933,23 @@ func cmdExec(args []string, stdout, stderr io.Writer) int {
 	}
 	c := newClient(base)
 	ctx := context.Background()
+	// Every line below names where the values come from, and the broker's store is read once for
+	// all of them: the injection line, and each refusal, whether the request is refused, waits
+	// out its decision, or releases no value.
+	src := sync.OnceValue(func() source { return c.source(ctx) })
 	result, _, err := c.CreateRequest(ctx, signer, names, *reason, ttl, requestSessionID())
 	if err != nil {
-		reportError(stderr, "agent-secrets", err)
+		refuse(stderr, "agent-secrets", src(), err)
 		return 1
 	}
 	if err := grantedLifetime(ctx, c, signer, result, ttl); err != nil {
-		fmt.Fprintf(stderr, "agent-secrets: %v; nothing was run\n", err)
+		fmt.Fprintf(stderr, "agent-secrets: %s; nothing was run\n", refusalText(src(), err))
 		return 1
 	}
 
 	state, grantID, requestID := result.State, result.GrantID, result.RequestID
 	if state == "pending" {
-		reportPending(stderr, requestID, *result.RecordID, result.Approver, *wait)
+		reportPending(stderr, requestID, *result.RecordID, result.Approver, *wait, src())
 		deadline := time.Now().Add(*wait)
 		backoff := 2 * time.Second
 		for state == "pending" {
@@ -907,7 +960,7 @@ func cmdExec(args []string, stdout, stderr io.Writer) int {
 			time.Sleep(minDuration(backoff, remaining))
 			status, _, err := c.GetRequest(ctx, signer, requestID)
 			if err != nil {
-				reportError(stderr, "agent-secrets", err)
+				refuse(stderr, "agent-secrets", src(), err)
 				return 1
 			}
 			state, grantID = status.State, status.GrantID
@@ -917,26 +970,26 @@ func cmdExec(args []string, stdout, stderr io.Writer) int {
 	switch state {
 	case "granted":
 	case "pending":
-		fmt.Fprintf(stderr, "agent-secrets: request %s is still waiting for approval; nothing was run. Check it with: agent-secrets status %s\n", requestID, requestID)
+		fmt.Fprintf(stderr, "agent-secrets: request %s to %s is still waiting for approval; nothing was run. Check it with: agent-secrets status %s\n", requestID, src(), requestID)
 		return exitPending
 	case "denied":
-		fmt.Fprintf(stderr, "agent-secrets: request %s was denied\n", requestID)
+		fmt.Fprintf(stderr, "agent-secrets: request %s to %s was denied\n", requestID, src())
 		return exitDenied
 	case "cancelled", "expired":
-		fmt.Fprintf(stderr, "agent-secrets: request %s was %s\n", requestID, state)
+		fmt.Fprintf(stderr, "agent-secrets: request %s to %s was %s\n", requestID, src(), state)
 		return 1
 	default:
-		fmt.Fprintf(stderr, "agent-secrets: request %s is in unexpected state %q\n", requestID, state)
+		fmt.Fprintf(stderr, "agent-secrets: request %s to %s is in unexpected state %q\n", requestID, src(), state)
 		return 1
 	}
 	if grantID == nil {
-		fmt.Fprintf(stderr, "agent-secrets: request %s was granted but its grant is no longer live; request it again\n", requestID)
+		fmt.Fprintf(stderr, "agent-secrets: request %s was granted but its grant from %s is no longer live; request it again\n", requestID, src())
 		return 1
 	}
 
 	values, err := c.GrantValues(ctx, signer, *grantID, narrowing)
 	if err != nil {
-		reportError(stderr, "agent-secrets", err)
+		refuse(stderr, "agent-secrets", src(), err)
 		return 1
 	}
 	if err := narrowedAsAsked(narrowing, values.GitHubApp); err != nil {
@@ -950,7 +1003,7 @@ func cmdExec(args []string, stdout, stderr io.Writer) int {
 		}
 	}
 	if len(missing) > 0 {
-		fmt.Fprintf(stderr, "agent-secrets: the grant released no value for %s; nothing was run\n", strings.Join(missing, ", "))
+		fmt.Fprintf(stderr, "agent-secrets: the grant from %s released no value for %s; nothing was run\n", src(), strings.Join(missing, ", "))
 		return 1
 	}
 
@@ -959,6 +1012,10 @@ func cmdExec(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "agent-secrets: %v\n", err)
 		return 1
 	}
+	// The one line the injected command's own output is preceded by: which names this process
+	// puts in its environment, and the store they came from, never a value. A reader of the
+	// command's log can tell these values from another secrets CLI's for the same names.
+	fmt.Fprintf(stderr, "agent-secrets: %s from %s\n", strings.Join(names, ", "), src())
 	if err := syscall.Exec(path, command, buildChildEnv(os.Environ(), values.Values)); err != nil {
 		fmt.Fprintf(stderr, "agent-secrets: exec %s: %v\n", command[0], err)
 		return 1
@@ -967,9 +1024,9 @@ func cmdExec(args []string, stdout, stderr io.Writer) int {
 }
 
 // reportPending says, once, before the exec form's wait, that a person must decide the request,
-// who, and where (waitingOn).
-func reportPending(stderr io.Writer, requestID, recordID string, approver *string, wait time.Duration) {
-	fmt.Fprintf(stderr, "agent-secrets: request %s is waiting for approval; waiting up to %s\n", requestID, wait)
+// where the secrets it would inject come from (src), and who decides it and where (waitingOn).
+func reportPending(stderr io.Writer, requestID, recordID string, approver *string, wait time.Duration, src source) {
+	fmt.Fprintf(stderr, "agent-secrets: request %s to %s is waiting for approval; waiting up to %s\n", requestID, src, wait)
 	fmt.Fprintf(stderr, "agent-secrets: %s\n", waitingOn(approver, recordID))
 }
 
