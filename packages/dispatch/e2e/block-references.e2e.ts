@@ -133,6 +133,47 @@ test("two paragraphs of one document version citing an issue are two rows under 
   }
 });
 
+test("a comment citing two blocks of the shown document is two rows, each linked to the block it cites", async ({
+  page,
+}) => {
+  const issue = await createIssue({ project: "CORE", title: "Two blocks cited" });
+  const callout = (id: string, text: string) =>
+    `:::callout{#${id} kind="note" title=""}\n${text}\n:::`;
+  const plan = await createIssueArtifact(issue.key, {
+    content: `${callout("ship_it", "Ship the block graph.")}\n\n${callout("hold_line", "Hold the line.")}\n`,
+    name: "plan.md",
+  });
+  expect(plan.artifact.slug).toBe("plan-md");
+  // `encodeBlockId` writes `_` as %5F, the form the comment cites and each row's link carries.
+  const ship = "#b-ship%5Fit";
+  const hold = "#b-hold%5Fline";
+  const doc = `dispatch://${issue.key}/artifact/plan-md`;
+  await createComment(issue.key, { body: `Ship per ${doc}${ship}, hold per ${doc}${hold}.` });
+
+  await page.goto(`/issues/${issue.key}/artifacts/plan-md`);
+  const references = page.getByRole("region", { name: "Referenced by" });
+  await expect(references.getByRole("heading")).toHaveText("Referenced by (2)");
+  // One source, the comment, holding one row for each block of this document it cites.
+  const sources = references.getByRole("list").first().locator(":scope > li");
+  await expect(sources).toHaveCount(1);
+  await expect(sources.getByRole("link", { name: `Comment · ${issue.key}` })).toBeVisible();
+  const rows = sources.locator(":scope > ul > li");
+  await expect(rows).toHaveCount(2);
+  for (const [id, other, fragment] of [
+    ["ship_it", "hold_line", ship],
+    ["hold_line", "ship_it", hold],
+  ] as const) {
+    const row = rows
+      .filter({ has: page.getByRole("link", { name: `block ${id}`, exact: true }) })
+      .filter({ hasNot: page.getByRole("link", { name: `block ${other}`, exact: true }) });
+    await expect(row).toHaveCount(1);
+    await expect(row.getByRole("link", { name: `block ${id}`, exact: true })).toHaveAttribute(
+      "href",
+      `/issues/${issue.key}/artifacts/plan-md${fragment}`
+    );
+  }
+});
+
 test("a pinned link keeps the text of the version it pins, says how the block stands since, and opens that version", async ({
   page,
 }) => {

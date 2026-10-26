@@ -1,6 +1,6 @@
 import { afterEach, expect, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 
 import { api } from "../../api/client";
@@ -34,18 +34,17 @@ function blockEdge(
   } satisfies GraphEdge;
 }
 
-function renderPanel(read: GraphReferences) {
+function renderPanel(read: GraphReferences, reference = "dispatch://CORE-1") {
   const getReferences = spyOn(api, "getReferences").mockResolvedValue(read);
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const view = render(
     <MemoryRouter>
-      <QueryClientProvider
-        client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}
-      >
-        <ReferencedBy reference="dispatch://CORE-1" />
+      <QueryClientProvider client={client}>
+        <ReferencedBy reference={reference} />
       </QueryClientProvider>
     </MemoryRouter>
   );
-  return { getReferences, view };
+  return { client, getReferences, view };
 }
 
 let restore: (() => void) | undefined;
@@ -132,4 +131,73 @@ test("a source of one citing node links to where its mention is: a block at the 
   );
   // A one-node source's header is its only link.
   expect(within(panel).getAllByRole("link")).toHaveLength(2);
+});
+
+test("one source citing two blocks of the shown document is two rows, each linked to its block and keeping its own state across a refetch", async () => {
+  const spec = "dispatch://CORE-1/spec";
+  const citing = (blockId: string) =>
+    ({
+      block: {
+        block_id: blockId,
+        document: spec,
+        id: `CORE-1/spec#${blockId}`,
+        issue_key: "CORE-1",
+        kind: "block",
+        project: "CORE",
+        ref: `${spec}#b-${blockId}`,
+      },
+      created_at: createdAt,
+      direction: "in",
+      // Long enough that the row clamps it and offers to expand it.
+      excerpt: { text: `Both of these hold: ${"the plan stands as written. ".repeat(12)}` },
+      kind: "mentions",
+      node: {
+        id: "c1",
+        issue_key: "OPS-1",
+        kind: "comment",
+        project: "OPS",
+        ref: "dispatch://OPS-1/comment/c1",
+      },
+      source_seq: 9,
+    }) satisfies GraphEdge;
+  const node = { id: "CORE-1/spec", issue_key: "CORE-1", kind: "artifact", ref: spec } as const;
+  const consoleError = spyOn(console, "error");
+  const { client, getReferences, view } = renderPanel(
+    { edges: [citing("a"), citing("b")], node },
+    spec
+  );
+  restore = () => {
+    getReferences.mockRestore();
+    consoleError.mockRestore();
+    view.unmount();
+  };
+
+  const panel = await screen.findByRole("region", { name: "Referenced by" });
+  await within(panel).findByRole("link", { name: "Comment · OPS-1" });
+  // Each row as [the block it links to, whether its excerpt is expanded].
+  const rows = () =>
+    [...panel.querySelectorAll<HTMLElement>(":scope > ul > li > ul > li")].map((row) => [
+      within(row)
+        .getByRole("link", { name: /^block / })
+        .getAttribute("href"),
+      within(row).getByRole("button").getAttribute("aria-expanded"),
+    ]);
+  expect(rows()).toEqual([
+    ["/issues/CORE-1/spec#b-a", "false"],
+    ["/issues/CORE-1/spec#b-b", "false"],
+  ]);
+
+  // Expand the excerpt of the row citing b only.
+  const showMore = within(panel).getAllByRole("button", { name: "Show more" });
+  fireEvent.click(showMore[1] as HTMLElement);
+  expect(rows()).toEqual([
+    ["/issues/CORE-1/spec#b-a", "false"],
+    ["/issues/CORE-1/spec#b-b", "true"],
+  ]);
+
+  // The comment stops citing a: its row goes, and b's row keeps its link and its expanded excerpt.
+  getReferences.mockResolvedValue({ edges: [citing("b")], node });
+  await act(() => client.refetchQueries());
+  expect(rows()).toEqual([["/issues/CORE-1/spec#b-b", "true"]]);
+  expect(consoleError.mock.calls.some((call) => String(call[0]).includes("same key"))).toBeFalse();
 });

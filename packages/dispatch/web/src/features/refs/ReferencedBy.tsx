@@ -243,8 +243,13 @@ export function ReferencedBy({
                     group.nodes === 1
                       ? undefined
                       : referencePath(edge.node.ref, edge.excerpt?.block_id);
+                  // On a document's read, the block of the document the edge meets: one source
+                  // citing two of its blocks is two rows, each naming and keyed by its block.
+                  const cited = referencePath(edge.block?.ref);
                   return (
-                    <li key={`${edge.node.kind}:${edge.node.id}:${edge.kind}:${edge.direction}`}>
+                    <li
+                      key={`${edge.node.kind}:${edge.node.id}:${edge.kind}:${edge.direction}:${edge.block?.id ?? ""}`}
+                    >
                       <div
                         className={`flex flex-wrap items-center gap-x-1 text-xs ${textMutedOnSurface}`}
                       >
@@ -264,6 +269,18 @@ export function ReferencedBy({
                           >
                             <Timestamp at={edge.created_at} />
                           </Link>
+                        )}
+                        {cited === undefined ? null : (
+                          <>
+                            <span aria-hidden="true">·</span>
+                            <Link
+                              {...referenceTriggerProps(cited.route)}
+                              className={`underline ${linkText} ${linkHoverText}`}
+                              to={cited.href}
+                            >
+                              block {edge.block?.block_id}
+                            </Link>
+                          </>
                         )}
                       </div>
                       {edge.excerpt === undefined ? null : <Excerpt text={edge.excerpt.text} />}
