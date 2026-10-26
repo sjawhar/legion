@@ -55,7 +55,9 @@
 //     link itself, refuses a component that reaches `/proc` or `/dev` (`/proc/self/fd/0`,
 //     `/proc/thread-self/fd/0`, `/dev/fd/0` and every link to one name a descriptor of the
 //     process that opens it, which is Oh My Pi's and not the command's shell), and opens with
-//     `O_NOFOLLOW`, so a link put there after the walk is refused. A directory lookup that fails is
+//     `O_NOFOLLOW`, which guards the last path component only: a link put there after the walk is
+//     refused, but a directory on the path swapped for a link after the walk is followed (a
+//     concurrent process of the same user, the limit above). A directory lookup that fails is
 //     `unreadable`, since a failed lookup is no proof that the write would fail. An upload is
 //     judged against failure 10 alone (askgate-upload.md), since a plan or a report is long by
 //     nature.
@@ -2006,8 +2008,10 @@ function resolveForOpen(source: string): string {
 /**
  * Copies one source into an exclusive owner-only snapshot, reading only a regular file. The source
  * is resolved as the kernel resolves it (`resolveForOpen`), which refuses a descriptor path
- * whatever names it; the open is `O_NOFOLLOW`, so a link put there after that walk is refused and
- * never followed; and `O_NONBLOCK` with an `fstat` on the open descriptor refuses a FIFO, a
+ * whatever names it; the open is `O_NOFOLLOW`, which guards the last path component only, so a
+ * link put in the file's place after that walk is refused and never followed (a directory on the
+ * path swapped for a link after the walk is followed, which needs a concurrent process of the
+ * same user); and `O_NONBLOCK` with an `fstat` on the open descriptor refuses a FIFO, a
  * device, a directory or anything else swapped in, before the first read.
  */
 function captureSnapshot(source: string, directory: string, index: number): string {
