@@ -10,7 +10,7 @@ tags:
   - positive-control
   - mutation
 date: 2026-10-25
-status: active
+status: superseded in part by INFRA-257 — the worker image now carries gcc and libc6-dev with cgo off by default, so a role runs `CGO_ENABLED=1 go test -race …` with no `CC`, zig or linker override, and the zig wrapper applies only to an older pinned image digest without gcc; the three steps stand
 module: packages/daemon
 related_issues:
   - "INFRA-271"
@@ -40,7 +40,8 @@ coverage when it is none.
 The LEGION-694 note says "A worker pod has no cgo, so `-race` runs nowhere but CI". That is no
 longer true. Run `uv pip install ziglang` into a venv under `$TMPDIR`. Write a wrapper,
 `exec <venv>/lib/python3.12/site-packages/ziglang/zig cc -target x86_64-linux-gnu "$@"`, and a
-`c++` twin. Then run `CGO_ENABLED=1 CC=<wrapper> go test -race …` from `packages/daemon`.
+`c++` twin. Then run `CGO_ENABLED=1 CC=<wrapper> go test -race …` from `packages/daemon`. Since
+INFRA-257 the image carries gcc: drop the wrapper and `CC` except on an older pinned image digest.
 
 ## Evidence
 
