@@ -516,7 +516,7 @@ func TestDelivery_UnsubscribeStopsDelivery(t *testing.T) {
 	}
 
 	// Unsubscribe from the broadcast topic
-	if err := env.registry.Remove("ses_unsub", []string{broadcastTopic}); err != nil {
+	if err := env.registry.Remove(context.Background(), "ses_unsub", []string{broadcastTopic}); err != nil {
 		t.Fatalf("failed to remove interest: %v", err)
 	}
 	time.Sleep(500 * time.Millisecond) // allow KV watch to propagate
@@ -796,7 +796,7 @@ func TestDelivery_UnsubscribeEmptyTopicsDeletesAll(t *testing.T) {
 	}
 
 	// Remove with empty topics = delete the entire KV entry
-	if err := env.registry.Remove("ses_emptyunsub", []string{}); err != nil {
+	if err := env.registry.Remove(context.Background(), "ses_emptyunsub", []string{}); err != nil {
 		t.Fatalf("failed to remove all interests: %v", err)
 	}
 	time.Sleep(500 * time.Millisecond) // allow KV watch to propagate

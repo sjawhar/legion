@@ -278,7 +278,7 @@ func (rig *dispatchRig) registerSession(t *testing.T, sessionID, title string) *
 // is left for any listener to read.
 func (rig *dispatchRig) endSession(t *testing.T, sessionID string) {
 	t.Helper()
-	if err := rig.warm.sessions.Delete(sessionID); err != nil {
+	if err := rig.warm.sessions.Delete(context.Background(), sessionID); err != nil {
 		t.Fatalf("end %s: %v", sessionID, err)
 	}
 }

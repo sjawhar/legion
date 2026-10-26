@@ -55,12 +55,13 @@ requires a bearer checks no `Host`.
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/v1/sessions` | GET | Lists all sessions across all machines — joins `envoy_interests` (topics, dir) with `envoy_sessions` (port, self-subscribed delivery mode). A cache view, and a list cannot be made authoritative key by key, so a caller holding one session id asks `/v1/registry/{session_id}` instead. Interest records the cache misses are read from the bucket within one 3.5 s budget. A read counts as answered only for its named answers: no key (the session has no topics), a record this build cannot decode (`store.ErrMalformedInterest`, logged by the registry) or an id the interest bucket refuses as a key (`bus.ErrRefused`: an earlier listener's id past its get bound that `envoy_sessions` still lists, or one outside nats.go's key alphabet, logged at WARN naming it); the last two list that session with no topics and roles. Any other error, a cap or the budget running out, a nats.go connection error or a raw socket error among them, is a read that did not answer: a 503 with `Retry-After: 1`, never a row with no topics |
-| `/v1/interests/subscribe` | POST | Persist a session's subscribed topics; `self_subscribed: true` permits a portless session that consumes its own NATS subscription. A stored record this build cannot decode (`store.ErrMalformedInterest`) is replaced, not merged, logged at WARN by the registry; the session's role claims are kept |
-| `/v1/interests/unsubscribe` | POST | Remove persisted topics for a session. A stored record this build cannot decode is left as it is (it routes none of its topics), logged at WARN; the role claims the topics name are released |
+| `/v1/interests/subscribe` | POST | Persist a session's subscribed topics; `self_subscribed: true` permits a portless session that consumes its own NATS subscription. A stored record this build cannot decode (`store.ErrMalformedInterest`) is replaced, not merged, logged at WARN by the registry; the session's role claims are kept. A write route (see “Write route answers” below) |
+| `/v1/interests/unsubscribe` | POST | Remove persisted topics for a session. A stored record this build cannot decode is left as it is (it routes none of its topics), logged at WARN; the role claims the topics name are released. A write route |
 | `/v1/interests/` | GET | List persisted interests |
-| `/v1/interests/{session_id}` | GET/DELETE | Get or delete a session's persisted interests. A GET reads a cache miss from the bucket within 3.5 s: 404 only for a key the bucket does not hold, `500 {"error":"envoy: the interest record of session <id> is unreadable: <reason>"}` with no `Retry-After` for a record this build cannot decode (`store.ErrMalformedInterest`), 503 with `Retry-After: 1` for a read that did not answer. A DELETE removes a record this build cannot decode too, releasing the session's role claims, with 204 |
-| `/v1/roles/set` | POST | Claim a role for a live session and register its role topic |
-| `/v1/registry/{session_id}` | GET | The authoritative answer for one session — reads through the cache to the session bucket, so a session the cache has not refilled is still found, and returns the same body a `/v1/sessions` row carries. It refuses with 413 or 400 for an id NATS will not take as a key, `404 {"error":"no live session <id>"}` only for a key the bucket does not hold, the unreadable-interest-record 500 `/v1/interests/{session_id}` gives, and 503 with `Retry-After: 1` for a read that did not answer, the session's or, within a 3.5 s budget, its interest record's |
+| `/v1/interests/{session_id}` | GET/DELETE | Get or delete a session's persisted interests. A GET reads a cache miss from the bucket within 3.5 s: 404 only for a key the bucket does not hold, 413 or 400 for an id NATS will not take as a key, `500 {"error":"envoy: the interest record of session <id> is unreadable: <reason>"}` with no `Retry-After` for a record this build cannot decode (`store.ErrMalformedInterest`), 503 with `Retry-After: 1` for a read that did not answer. A DELETE removes a record this build cannot decode too, releasing the session's role claims, with 204; it is a write route |
+| `/v1/roles/set` | POST | Claim a role for a live session and register its role topic. A write route |
+| `/v1/registry/{session_id}` | GET | The authoritative answer for one session — reads through the cache to the session bucket, so a session the cache has not refilled is still found, and returns the same body a `/v1/sessions` row carries. A live session whose id only the interest bucket refuses as a key is a 200 with no topics and roles, as the list shows it, logged at WARN naming it: Dispatch's envoy client reads a 413 or 400 here as a session that cannot exist. It refuses with 413 or 400 for an id the session bucket will not take as a key, `404 {"error":"no live session <id>"}` only for a key the bucket does not hold, the unreadable-interest-record 500 `/v1/interests/{session_id}` gives, and 503 with `Retry-After: 1` for a read that did not answer, the session's or its interest record's, both within a 3.5 s budget |
+| `/v1/sessions/{session_id}` | DELETE | Remove a live session registration. A write route |
 | `/v1/messages/send` | POST | Send a direct agent-to-agent message. The target is read from the session store itself, so a 404 means the store says that session's key is gone; a store read or a publish the bus did not answer is a 503 with `Retry-After: 1` (see “Send and publish answers” below). |
 | `/v1/messages/publish` | POST | Publish an event. Required `message` becomes the human `payload_summary`; optional `payload` is distinct machine data in `payload`. Role topics and ad-hoc topics (any `notifications.` topic the stream does not capture, such as `notifications.team.deploy-squad`) use core NATS and reach the sessions subscribed at that moment; JetStream acknowledgement for every topic the stream captures is bounded to five seconds. A publish the bus did not serve, and a role-holder read that did not answer, are both the 503 below rather than a 500. |
 | `/healthz` | GET | Health check (always available, even during startup) |
@@ -156,6 +157,22 @@ writes, and a request the starting gate turns away while the routes are still op
 | `unplaceable_push_failed` | An agent delivery given up: a record named a serve port and the push did not land on it — an unreachable peer, a session process restarting, a connection refused, or a server that answered with anything but 204 |
 
 `envoy_delivery_duration_seconds` carries the same label for the attempts it times.
+
+## Write route answers
+
+`POST /v1/interests/subscribe`, `POST /v1/interests/unsubscribe`, `POST /v1/roles/set`,
+`DELETE /v1/interests/{session_id}` and `DELETE /v1/sessions/{session_id}` do every store read and
+write inside the same 3.5 s budget taken from the request's own context, where a silent bus held
+each for the 10 s JetStream wait: nats.go's KV reads, writes and deletes take no context, so each
+bucket call waits through `bus.Bounded` (`internal/bus/kv.go`), which stops waiting when the
+context ends. Store work that did not answer, whatever it names, is
+`503 {"error":"envoy: the message bus did not answer: <reason>"}` with `Retry-After: 1`
+(`writeStoreError`, `cmd/listener/api.go`). The store's own answers keep the answers they had: a
+refused key its 413 or 400, a held role its 409, and no key, an undecodable record or a lost
+compare-and-swap the status the route always gave it. A write the budget abandoned may still land
+after the 503: a put rewrites the record the caller's retry writes again, and a delete or a claim
+is conditional on the revision it read (`store.Registry.UpsertWithin`, `Remove`,
+`SetRoleWithPrevious`, `session.SessionRegistry.PutWithin` and `Delete` say why each is safe).
 
 ## Subscription visibility
 

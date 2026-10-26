@@ -727,9 +727,21 @@
   an earlier listener's id past `envoy_interests`' get bound that `envoy_sessions` still lists, or
   one outside nats.go's key alphabet), which the list shows with no topics and roles, logged
   `session listed with no topics: its interest record could not be read` at WARN naming the
-  session, while the two single-session routes answer that id's 413 or 400. Every other error is a
+  session. `GET /v1/registry/<session_id>` answers such a live session the same way, 200 with no
+  topics and roles, logged `session answered with no topics: its interest record could not be
+  read`, where it answered 413 or 400, which Dispatch's envoy client read as a session that cannot
+  exist; `GET /v1/interests/<session_id>`, which asks for the record by that key, and a key the
+  session bucket refuses keep their 413 or 400. Every other error is a
   read that did not answer, whatever it names, a raw socket error from a broken connection among
-  them, and all three routes answer it with the 503 and `Retry-After: 1`. An
+  them, and all three routes answer it with the 503 and `Retry-After: 1`. The routes that write -
+  `POST /v1/interests/subscribe`, `POST /v1/interests/unsubscribe`, `POST /v1/roles/set`,
+  `DELETE /v1/interests/<session_id>` and `DELETE /v1/sessions/<session_id>` - do every store read
+  and write within the same 3.5 s budget, where a silent bus held each for the 10 s JetStream wait
+  (40 s for a claim whose own write met it), and answer store work that did not answer with that
+  503 and `Retry-After: 1`, where they answered a 500 or a 503 with neither the named body nor
+  `Retry-After`; their 409, 413 and 400 are unchanged. A write the budget abandons may still land
+  after the 503: a put writes what the caller's retry writes again, and a delete or a claim is
+  conditional on the revision it read. An
   interest record this build cannot decode no longer locks out the routes that write it, which
   failed on the read and every retry: `DELETE /v1/interests/<session_id>` deletes
   it and releases the session's role claims (204, where it answered 500); `POST

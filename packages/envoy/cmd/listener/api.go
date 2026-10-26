@@ -262,6 +262,32 @@ func writeBusUnavailable(w http.ResponseWriter, err error) int {
 	return writeNATSError(w, err, http.StatusServiceUnavailable, fmt.Sprintf("%s: %s", busUnansweredPrefix, err))
 }
 
+// storeAnswered reports whether err, from the store work of a /v1 route that writes, done within
+// ctx, is the store's own answer: a key NATS refuses (bus.ErrRefused), no key (nats.ErrKeyNotFound),
+// a record this build cannot decode (store.ErrMalformedInterest, store.ErrMalformedRoleClaim), or a
+// conditional write or delete another writer's change beat (nats.ErrKeyExists). Every other error
+// did not answer, whatever it names, and so does any error once ctx has ended: a failure joined
+// with a call the budget ran out on (store.Registry.SetRoleWithPrevious's) did not answer whole.
+func storeAnswered(ctx context.Context, err error) bool {
+	if ctx.Err() != nil {
+		return false
+	}
+	return errors.Is(err, bus.ErrRefused) || errors.Is(err, nats.ErrKeyNotFound) || errors.Is(err, nats.ErrKeyExists) ||
+		errors.Is(err, store.ErrMalformedInterest) || errors.Is(err, store.ErrMalformedRoleClaim)
+}
+
+// writeStoreError answers err from a write route's store work done within ctx: a store answer
+// (storeAnswered) as status naming err, as the route always answered it (a refused key still the
+// 413 or 400 writeNATSError gives it), and anything else as the bus-unavailable 503 with
+// Retry-After: 1 (writeBusUnavailable).
+func writeStoreError(ctx context.Context, w http.ResponseWriter, err error, status int) {
+	if storeAnswered(ctx, err) {
+		writeNATSError(w, err, status, err.Error())
+		return
+	}
+	writeBusUnavailable(w, err)
+}
+
 func validateMessageBody(body messageBody) (string, string) {
 	for _, field := range []struct {
 		name  string
@@ -363,12 +389,14 @@ func senderStamp(ctx context.Context, registry *store.Registry, sessions *sessio
 	return sender
 }
 
-// sendRequestBudget is the bus work a send, a publish or a role lookup does under the request's own
-// context: the send route's read of the target session, the publish route's resolution of a role
-// lane's holder (resolveLiveRoleHolder, every attempt of it), both routes' read of the sender's
-// interest record (senderStamp) and both routes' publish share it, and GET /v1/roles/<role>
-// resolves its holder within it too. GET /v1/sessions, GET /v1/registry/<session_id> and GET
-// /v1/interests/<session_id> read interest records within it as well. The HTTP client gives each
+// sendRequestBudget is the bus work a /v1 route does under the request's own context: the send
+// route's read of the target session, the publish route's resolution of a role lane's holder
+// (resolveLiveRoleHolder, every attempt of it), both routes' read of the sender's interest record
+// (senderStamp) and both routes' publish share it, and GET /v1/roles/<role> resolves its holder
+// within it too. GET /v1/sessions, GET /v1/registry/<session_id> and GET
+// /v1/interests/<session_id> read within it as well, and every route that writes does its store
+// work within it: subscribe, unsubscribe, POST /v1/roles/set, and DELETE of
+// /v1/interests/<session_id> and /v1/sessions/<session_id>. The HTTP client gives each
 // attempt 5 s (packages/envoy-client/src/transport.ts) and this listener's HTTP write timeout is
 // 10 s (main.go), so answering inside 3.5 s leaves the rest for TLS, scheduling and the body: a
 // sender whose bus cannot be reached reads the 503 that names the reason, in time to act on it,
@@ -483,7 +511,9 @@ func sendHandler(d *listenerDeps, logger *logging.Logger) http.HandlerFunc {
 	}
 }
 
-// deleteSessionHandler removes a live session registration at shutdown.
+// deleteSessionHandler removes a live session registration at shutdown. The delete runs within
+// sendRequestBudget of the request's own context, so one the bus does not answer is the
+// bus-unavailable 503 with Retry-After: 1 inside the caller's attempt (writeStoreError).
 func deleteSessionHandler(sessions *session.SessionRegistry) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodDelete {
@@ -495,8 +525,10 @@ func deleteSessionHandler(sessions *session.SessionRegistry) http.HandlerFunc {
 			writeJSONError(w, http.StatusBadRequest, "session_id is required", "session_id")
 			return
 		}
-		if err := sessions.Delete(sessionID); err != nil && !errors.Is(err, nats.ErrKeyNotFound) {
-			writeNATSError(w, err, http.StatusInternalServerError, err.Error())
+		ctx, cancel := context.WithTimeout(r.Context(), sendRequestBudget)
+		defer cancel()
+		if err := sessions.Delete(ctx, sessionID); err != nil && !errors.Is(err, nats.ErrKeyNotFound) {
+			writeStoreError(ctx, w, err, http.StatusInternalServerError)
 			return
 		}
 		w.WriteHeader(http.StatusOK)
@@ -661,7 +693,7 @@ const sessionInterestReadTimeout = 1 * time.Second
 // one shape built one way. A session the interest registry holds no key for keeps its empty topics
 // and roles: a session that registered and subscribed to nothing is not an error here. The other
 // answers about the record (interestReadAnswered) are returned with the session's info, its topics
-// and roles empty, so the list can still show the session while the single read names the error.
+// and roles empty, so the caller can still show the session and name what the read answered.
 // Every other error is a read that did not answer and is returned alone: a caller answers it as
 // the bus-unavailable 503, never as a session with no topics.
 func sessionInfoFor(ctx context.Context, registry *store.Registry, sessionID string, entry session.SessionEntry) (sessionInfo, error) {
@@ -698,12 +730,14 @@ func sessionInfoFor(ctx context.Context, registry *store.Registry, sessionID str
 // a retry reads again: a record this build cannot decode (store.ErrMalformedInterest, the 500
 // writeInterestRecordUnreadable writes), or a key the interest bucket refuses (bus.ErrRefused: a
 // legacy id past envoy_interests' get bound that envoy_sessions still lists, or one outside
-// nats.go's key alphabet, the 413 or 400 writeBusUnavailable writes). Any other error is a read
-// that did not answer, whatever it names. In nats.go v1.50.0 that includes ctx's end
-// (store.Registry.Get's bound, or the JetStream MaxWait context nats.go's direct get always runs
-// under, so it always takes requestWithContext), nats.ErrConnectionClosed, nats.ErrNoResponders,
-// and whatever nats.go's publish returns, the raw *net.OpError of a write buffer flushed onto a
-// broken connection among them; the rule does not rest on that list being complete.
+// nats.go's key alphabet, which GET /v1/interests/<session_id> answers as the 413 or 400
+// writeBusUnavailable writes and the two session routes as a session with no topics). Any other
+// error is a read that did not answer, whatever it names. In nats.go v1.50.0 that includes ctx's
+// end (store.Registry.Get's bound, or the JetStream MaxWait context nats.go's direct get always
+// runs under, so it always takes requestWithContext), nats.ErrConnectionClosed,
+// nats.ErrNoResponders, and whatever nats.go's publish returns, the raw *net.OpError of a write
+// buffer flushed onto a broken connection among them; the rule does not rest on that list being
+// complete.
 func interestReadAnswered(err error) bool {
 	return errors.Is(err, store.ErrMalformedInterest) || errors.Is(err, bus.ErrRefused)
 }
@@ -768,17 +802,20 @@ func sessionsHandler(registry *store.Registry, sessions *session.SessionRegistry
 
 // sessionEntryHandler answers GET /v1/registry/<session_id>, the one question a caller holding a
 // session id asks before it addresses that session: is this session live, and how is it named? The
-// read goes through roleHolderSession, so a session this listener's cache does not hold yet — the
+// read goes through liveSessionEntry, so a session this listener's cache does not hold yet — the
 // session bucket was recreated and the watcher is still refilling it, or another listener
 // registered the session a moment ago — is read from the bucket itself instead of being reported
 // gone. Only the bucket's word that the key is absent is a 404, and its wording is load-bearing:
 // Dispatch classifies a delivery failure on the "no live session " prefix, as the send route's own
-// 404 writes it. An id NATS refuses as a key — the session bucket's, or the interest bucket's
-// (sessionInfoFor), which refuses a legacy id the session bucket still serves — is the caller's to
-// fix, the 413 or 400 writeBusUnavailable writes, and a read that did not answer — the session's,
-// or its interest record's within sendRequestBudget (sessionInfoFor) — is a 503 to retry: never a
-// session a caller may take for ended, nor one with no topics. An interest record this build cannot
-// decode is the 500 writeInterestRecordUnreadable writes: the bus answered it.
+// 404 writes it. An id the session bucket refuses as a key is the caller's to fix, the 413 or 400
+// writeBusUnavailable writes. A live session whose id only the interest bucket refuses (a legacy id
+// past envoy_interests' get bound that envoy_sessions still serves, or one outside nats.go's key
+// alphabet) is answered 200 with no topics and roles, as GET /v1/sessions lists it, and logged at
+// WARN as the list logs it: Dispatch reads a 413 or 400 here as a session that cannot exist. A read
+// that did not answer — the session's, or its interest record's (sessionInfoFor), both within
+// sendRequestBudget — is a 503 to retry: never a session a caller may take for ended, nor one with
+// no topics. An interest record this build cannot decode is the 500 writeInterestRecordUnreadable
+// writes: the bus answered it.
 func sessionEntryHandler(d *listenerDeps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
@@ -792,7 +829,7 @@ func sessionEntryHandler(d *listenerDeps) http.HandlerFunc {
 		}
 		ctx, cancel := context.WithTimeout(r.Context(), sendRequestBudget)
 		defer cancel()
-		entry, err := roleHolderSession(d.sessions, sessionID, registered)
+		entry, err := liveSessionEntry(ctx, d.sessions, sessionID, roleHolderReadTimeout, registered)
 		switch {
 		case errors.Is(err, bus.ErrRefused):
 			// Refresh reports a refused key as a missing one too, so this test comes first:
@@ -811,15 +848,20 @@ func sessionEntryHandler(d *listenerDeps) http.HandlerFunc {
 			writeBusUnavailable(w, err)
 		default:
 			info, err := sessionInfoFor(ctx, d.registry, sessionID, entry)
-			if errors.Is(err, store.ErrMalformedInterest) {
+			switch {
+			case errors.Is(err, store.ErrMalformedInterest):
 				writeInterestRecordUnreadable(w, sessionID, err)
-				return
-			}
-			if err != nil {
+			case errors.Is(err, bus.ErrRefused):
+				d.registry.Logger().Warn("session answered with no topics: its interest record could not be read",
+					slog.String("session_id", sessionID),
+					slog.String("error", err.Error()),
+				)
+				writeJSON(w, http.StatusOK, info)
+			case err != nil:
 				writeBusUnavailable(w, err)
-				return
+			default:
+				writeJSON(w, http.StatusOK, info)
 			}
-			writeJSON(w, http.StatusOK, info)
 		}
 	}
 }
@@ -829,7 +871,8 @@ func sessionEntryHandler(d *listenerDeps) http.HandlerFunc {
 // bucket, the bucket's word that the key is absent is a 404, a record this build cannot decode is
 // the 500 writeInterestRecordUnreadable writes, and a read that did not answer is the
 // bus-unavailable 503 with Retry-After: 1 (a key NATS refuses is still the 413 or 400
-// writeBusUnavailable gives it).
+// writeBusUnavailable gives it). DELETE removes within the same budget, and answers store work that
+// did not answer with that 503 too (writeStoreError).
 func adminInterestsHandler(registry *store.Registry) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		sessionID := strings.TrimPrefix(r.URL.Path, "/v1/interests/")
@@ -864,8 +907,10 @@ func adminInterestsHandler(registry *store.Registry) http.HandlerFunc {
 			}
 			writeJSON(w, http.StatusOK, item)
 		case http.MethodDelete:
-			if err := registry.Remove(sessionID, nil); err != nil && !errors.Is(err, nats.ErrKeyNotFound) {
-				writeNATSError(w, err, http.StatusInternalServerError, err.Error())
+			ctx, cancel := context.WithTimeout(r.Context(), sendRequestBudget)
+			defer cancel()
+			if err := registry.Remove(ctx, sessionID, nil); err != nil && !errors.Is(err, nats.ErrKeyNotFound) {
+				writeStoreError(ctx, w, err, http.StatusInternalServerError)
 				return
 			}
 			w.WriteHeader(http.StatusNoContent)
@@ -875,6 +920,12 @@ func adminInterestsHandler(registry *store.Registry) http.HandlerFunc {
 	}
 }
 
+// roleSetHandler answers POST /v1/roles/set. Its store work - the claimant's registration, a soft
+// claim's read of the role's holder and of that holder's session, and the claim itself
+// (store.Registry.SetRoleWithPrevious) - runs within sendRequestBudget of the request's own
+// context, so a bus that does not answer is the bus-unavailable 503 with Retry-After: 1 inside the
+// caller's attempt (writeStoreError). The store's own answers keep the answers they had: a held
+// role is a 409, a refused key a 413 or 400, and an unreadable claim the 503 or 500 it was.
 func roleSetHandler(d *listenerDeps, machineID string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -915,6 +966,8 @@ func roleSetHandler(d *listenerDeps, machineID string) http.HandlerFunc {
 			writeJSONError(w, http.StatusBadRequest, "role must match "+rolePatternString, "role")
 			return
 		}
+		ctx, cancel := context.WithTimeout(r.Context(), sendRequestBudget)
+		defer cancel()
 		entry, err := d.sessions.Get(body.SessionID)
 		if errors.Is(err, nats.ErrKeyNotFound) {
 			writeJSONError(w, http.StatusNotFound, "session is not registered")
@@ -926,36 +979,37 @@ func roleSetHandler(d *listenerDeps, machineID string) http.HandlerFunc {
 		}
 		entry.MachineID = machineID
 		entry.SelfSubscribed = true
-		if err := d.sessions.Put(body.SessionID, entry); err != nil {
-			writeNATSError(w, err, http.StatusServiceUnavailable, "refresh role claimant registration: "+err.Error())
+		if err := d.sessions.PutWithin(ctx, body.SessionID, entry); err != nil {
+			writeStoreError(ctx, w, fmt.Errorf("refresh role claimant registration: %w", err), http.StatusServiceUnavailable)
 			return
 		}
 		previous := ""
 		var supersedable []string
 		if body.Soft {
 			// The registry sees only interest rows; liveness is the session
-			// bucket's call (roleHolderSession). A holder whose session entry
+			// bucket's call (liveSessionEntry). A holder whose session entry
 			// has aged out (5m TTL) is dead and may be superseded; so may the
 			// claimant's own predecessor, live or not; any other live holder is
 			// protected.
-			holder, err := d.registry.RoleHolder(body.Role)
+			claim, err := d.registry.RoleClaim(ctx, body.Role)
 			if err != nil {
-				writeNATSError(w, err, http.StatusServiceUnavailable, "read role holder: "+err.Error())
+				writeStoreError(ctx, w, fmt.Errorf("read role holder: %w", err), http.StatusServiceUnavailable)
 				return
 			}
+			holder := claim.HolderSessionID
 			previous = strings.TrimSpace(body.PreviousSessionID)
 			if holder != "" && holder != body.SessionID {
 				if previous != "" && holder == previous {
 					supersedable = append(supersedable, holder)
-				} else if _, liveErr := roleHolderSession(d.sessions, holder, registered); errors.Is(liveErr, nats.ErrKeyNotFound) {
+				} else if _, liveErr := liveSessionEntry(ctx, d.sessions, holder, roleHolderReadTimeout, registered); errors.Is(liveErr, nats.ErrKeyNotFound) {
 					supersedable = append(supersedable, holder)
 				} else if liveErr != nil {
-					writeJSONError(w, http.StatusServiceUnavailable, "read role holder liveness: "+liveErr.Error())
+					writeBusUnavailable(w, fmt.Errorf("read role holder liveness: %w", liveErr))
 					return
 				}
 			}
 		}
-		item, err := d.registry.SetRoleWithPrevious(body.SessionID, machineID, body.Role, previous, body.Soft, supersedable...)
+		item, err := d.registry.SetRoleWithPrevious(ctx, body.SessionID, machineID, body.Role, previous, body.Soft, supersedable...)
 		var held *store.ErrRoleHeld
 		if errors.As(err, &held) {
 			writeJSON(w, http.StatusConflict, map[string]string{
@@ -966,7 +1020,7 @@ func roleSetHandler(d *listenerDeps, machineID string) http.HandlerFunc {
 			return
 		}
 		if err != nil {
-			writeNATSError(w, err, http.StatusInternalServerError, err.Error())
+			writeStoreError(ctx, w, err, http.StatusInternalServerError)
 			return
 		}
 		writeJSON(w, http.StatusOK, item)
@@ -1146,6 +1200,11 @@ func unwiredRepositoryWarning(ctx context.Context, d *listenerDeps, topic string
 	return ""
 }
 
+// subscribeHandler answers POST /v1/interests/subscribe. Its store work - the interest record's
+// read and write (store.Registry.UpsertWithin), the session entry's write and the unwired-repository
+// checks - runs within sendRequestBudget of the request's own context, so a bus that does not answer
+// is the bus-unavailable 503 with Retry-After: 1 inside the caller's attempt (writeStoreError); a
+// refused key is still its 413 or 400.
 func subscribeHandler(d *listenerDeps, machineID string, logger *logging.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -1171,7 +1230,9 @@ func subscribeHandler(d *listenerDeps, machineID string, logger *logging.Logger)
 			return
 		}
 		logger.Info("listener subscribe", slog.String("session_id", body.SessionID), slog.Any("topics", body.Topics), slog.Int("port", body.Port), slog.Bool("self_subscribed", body.SelfSubscribed), slog.String("dir", body.Dir))
-		item, err := d.registry.Upsert(store.Interest{
+		ctx, cancel := context.WithTimeout(r.Context(), sendRequestBudget)
+		defer cancel()
+		item, err := d.registry.UpsertWithin(ctx, store.Interest{
 			SessionID: body.SessionID,
 			MachineID: machineID,
 			Dir:       body.Dir,
@@ -1181,17 +1242,17 @@ func subscribeHandler(d *listenerDeps, machineID string, logger *logging.Logger)
 				slog.String("session_id", body.SessionID),
 				slog.Any("topics", body.Topics),
 				slog.String("error", err.Error()))
-			writeNATSError(w, err, http.StatusServiceUnavailable, err.Error())
+			writeStoreError(ctx, w, err, http.StatusServiceUnavailable)
 			return
 		}
 		if body.Port > 0 || body.SelfSubscribed {
-			if err := d.sessions.Put(body.SessionID, sessionEntryFromSubscribe(body, machineID)); err != nil {
+			if err := d.sessions.PutWithin(ctx, body.SessionID, sessionEntryFromSubscribe(body, machineID)); err != nil {
 				logger.Error("listener session registry put failed", slog.String("session_id", body.SessionID), slog.String("error", err.Error()))
-				writeNATSError(w, err, http.StatusServiceUnavailable, "session registry unavailable")
+				writeStoreError(ctx, w, fmt.Errorf("session registry unavailable: %w", err), http.StatusServiceUnavailable)
 				return
 			}
 		}
-		warningCtx, cancelWarnings := context.WithTimeout(r.Context(), unwiredRepositoryWarningTimeout)
+		warningCtx, cancelWarnings := context.WithTimeout(ctx, unwiredRepositoryWarningTimeout)
 		defer cancelWarnings()
 		warnings := make([]string, 0)
 		warnedRepositories := make(map[string]struct{})
@@ -1240,8 +1301,12 @@ func registerV1Routes(v1 *http.ServeMux, d *listenerDeps, machineID string, logg
 			return
 		}
 		logger.Info("listener unsubscribe", slog.String("session_id", body.SessionID), slog.Any("topics", body.Topics))
-		if err := d.registry.Remove(body.SessionID, body.Topics); err != nil {
-			writeNATSError(w, err, http.StatusInternalServerError, err.Error())
+		// The removal runs within sendRequestBudget of the request's own context, as subscribe's
+		// write does, and store work that did not answer is the bus-unavailable 503.
+		ctx, cancel := context.WithTimeout(r.Context(), sendRequestBudget)
+		defer cancel()
+		if err := d.registry.Remove(ctx, body.SessionID, body.Topics); err != nil {
+			writeStoreError(ctx, w, err, http.StatusInternalServerError)
 			return
 		}
 		removed := body.Topics

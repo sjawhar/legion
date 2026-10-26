@@ -175,13 +175,11 @@ func liveSessionEntry(
 }
 
 // roleHolderSession is liveSessionEntry as the role paths that hold no request context ask it: the
-// reaper and role delivery answer no caller at all, and a soft claim keeps the bound it had. They
-// share one bound, so every such decision that can take a role from its holder waits the same
-// roleHolderReadTimeout out of one place rather than out of each call site. The two routes that
-// resolve a role's holder (GET /v1/roles/<role> and a role-lane publish) do not come here:
-// resolveLiveRoleHolder reads under their request's own context. It is also the read behind the
-// per-session route GET /v1/registry/<session_id>, whose caller is likewise about to decide that a
-// session is gone, and which therefore reads through to the bucket for the same reason a send does.
+// reaper and role delivery answer no caller at all. They share one bound, so every such decision
+// that can take a role from its holder waits the same roleHolderReadTimeout out of one place rather
+// than out of each call site. A route does not come here: GET /v1/roles/<role>, a role-lane publish
+// (resolveLiveRoleHolder), a soft claim (POST /v1/roles/set) and GET /v1/registry/<session_id> read
+// through liveSessionEntry under their request's own context, with roleHolderReadTimeout as the cap.
 func roleHolderSession(sessions *session.SessionRegistry, sessionID string, live func(session.SessionEntry) bool) (session.SessionEntry, error) {
 	return liveSessionEntry(context.Background(), sessions, sessionID, roleHolderReadTimeout, live)
 }

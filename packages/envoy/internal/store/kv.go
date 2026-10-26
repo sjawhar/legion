@@ -242,16 +242,24 @@ func (r *Registry) evictCachedInterestLocked(sessionID string, revision uint64) 
 	r.cacheRevisions[sessionID] = revision
 }
 
-// deleteInterest deletes sessionID's interest at the revision it reads (bus.KeyValue.DeleteAtRead).
-func (r *Registry) deleteInterest(sessionID string) error {
+// deleteInterest deletes sessionID's interest at the revision it reads (bus.KeyValue.DeleteAtRead),
+// each bucket call waiting no longer than ctx (bus.Bounded). A delete ctx abandoned may still land
+// after this answer, and that is safe: it deletes only the revision it read, so a write that landed
+// since is kept, and a key it found absent it deletes at none, as DeleteAtRead always has.
+func (r *Registry) deleteInterest(ctx context.Context, sessionID string) error {
 	revision := r.cachedRevision(sessionID)
-	read, err := r.interests().DeleteAtRead(sessionID)
+	interests := r.interests()
+	read, answered, err := bus.Bounded(ctx, func() (uint64, error) { return interests.DeleteAtRead(sessionID) })
+	if !answered {
+		return fmt.Errorf("delete %s's interest record: %w", sessionID, err)
+	}
 	if err != nil {
 		return err
 	}
 	revision = max(revision, read)
 
-	entries, err := r.interests().History(sessionID)
+	// A history that does not answer falls back to the fence below: the delete itself answered.
+	entries, _, err := bus.Bounded(ctx, func() ([]nats.KeyValueEntry, error) { return interests.History(sessionID) })
 	if err == nil && len(entries) > 0 {
 		latest := entries[len(entries)-1]
 		if latest.Operation() == nats.KeyValueDelete || latest.Operation() == nats.KeyValuePurge {
@@ -358,11 +366,20 @@ func (r *Registry) WaitForCacheReady(ctx context.Context) error {
 	return r.watcher.WaitReady(ctx)
 }
 
-// Upsert merges topics into item.SessionID's interest record (mergeForUpsert) and writes it. A
-// record this build cannot decode (ErrMalformedInterest) is replaced by item and topics alone, and
-// the registry logs that at WARN naming the session.
+// Upsert is UpsertWithin with no deadline of its own, for a caller that answers no request.
 func (r *Registry) Upsert(item Interest, topics []string) (Interest, error) {
-	cur, getErr := r.Get(context.Background(), item.SessionID)
+	return r.UpsertWithin(context.Background(), item, topics)
+}
+
+// UpsertWithin merges topics into item.SessionID's interest record (mergeForUpsert) and writes it,
+// each bucket call waiting no longer than ctx (bus.Bounded): an HTTP route passes its request's own
+// context. A record this build cannot decode (ErrMalformedInterest) is replaced by item and topics
+// alone, and the registry logs that at WARN naming the session. A write ctx abandoned may still
+// land after this answer. That is safe: it writes the record the caller's retry writes again, it
+// rides the connection ahead of any write this listener sends on it later, so it cannot undo one,
+// and against another listener's write it is last-writer-wins, as every Put already is.
+func (r *Registry) UpsertWithin(ctx context.Context, item Interest, topics []string) (Interest, error) {
+	cur, getErr := r.Get(ctx, item.SessionID)
 	merged, err := mergeForUpsert(cur, getErr, item, topics, r.now().UnixMilli())
 	if err != nil {
 		return Interest{}, err
@@ -371,7 +388,7 @@ func (r *Registry) Upsert(item Interest, topics []string) (Interest, error) {
 	if err != nil {
 		return Interest{}, err
 	}
-	revision, err := r.interests().Put(merged.SessionID, buf)
+	revision, err := r.putInterest(ctx, merged.SessionID, buf)
 	if err != nil {
 		return Interest{}, err
 	}
@@ -445,41 +462,20 @@ func decodeRoleClaim(value []byte) (RoleClaim, error) {
 	return RoleClaim{HolderSessionID: holder}, nil
 }
 
-// bounded is call, a bucket call that takes no context, as a caller holding ctx waits for it:
-// nats.go's KV reads and deletes take none and wait out the JetStream MaxWait (10 s), so the wait
-// ends at the earlier of call's answer and ctx's end. answered is false when ctx ended first, and
-// err is then ctx's error; the abandoned call runs on to its own end and its answer is dropped. A
-// ctx that has already ended starts no call, and a ctx that can never end (context.Background, as
-// every caller that answers no request passes) is simply call, in this goroutine.
-func bounded[T any](ctx context.Context, call func() (T, error)) (value T, answered bool, err error) {
-	if ctx.Done() == nil {
-		value, err = call()
-		return value, true, err
+// putInterest writes sessionID's interest record, waiting no longer than ctx (bus.Bounded).
+func (r *Registry) putInterest(ctx context.Context, sessionID string, value []byte) (uint64, error) {
+	interests := r.interests()
+	revision, answered, err := bus.Bounded(ctx, func() (uint64, error) { return interests.Put(sessionID, value) })
+	if !answered {
+		return 0, fmt.Errorf("write %s's interest record: %w", sessionID, err)
 	}
-	if err := ctx.Err(); err != nil {
-		return value, false, err
-	}
-	type answer struct {
-		value T
-		err   error
-	}
-	answers := make(chan answer, 1)
-	go func() {
-		value, err := call()
-		answers <- answer{value: value, err: err}
-	}()
-	select {
-	case got := <-answers:
-		return got.value, true, got.err
-	case <-ctx.Done():
-		return value, false, ctx.Err()
-	}
+	return revision, err
 }
 
-// roleClaim reads role's claim from the bucket, waiting no longer than ctx (bounded).
+// roleClaim reads role's claim from the bucket, waiting no longer than ctx (bus.Bounded).
 func (r *Registry) roleClaim(ctx context.Context, role string) (RoleClaim, nats.KeyValueEntry, error) {
 	roles := r.roles()
-	entry, answered, err := bounded(ctx, func() (nats.KeyValueEntry, error) { return roles.Get(role) })
+	entry, answered, err := bus.Bounded(ctx, func() (nats.KeyValueEntry, error) { return roles.Get(role) })
 	if !answered {
 		return RoleClaim{}, nil, fmt.Errorf("read role %s's claim: %w", role, err)
 	}
@@ -496,7 +492,7 @@ func (r *Registry) roleClaim(ctx context.Context, role string) (RoleClaim, nats.
 	return claim, entry, nil
 }
 
-func (r *Registry) releaseRoleClaims(sessionID string, topics []string) error {
+func (r *Registry) releaseRoleClaims(ctx context.Context, sessionID string, topics []string) error {
 	for _, topic := range topics {
 		if !strings.HasPrefix(topic, contracts.RoleTopicPrefix) {
 			continue
@@ -505,18 +501,21 @@ func (r *Registry) releaseRoleClaims(sessionID string, topics []string) error {
 		if role == "" || strings.ContainsAny(role, "*>") {
 			continue
 		}
-		if err := r.releaseRoleClaim(sessionID, role); err != nil {
+		if err := r.releaseRoleClaim(ctx, sessionID, role); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-// releaseRoleClaim deletes role's claim when sessionID holds it. A claim stored under a key NATS
+// releaseRoleClaim deletes role's claim when sessionID holds it, its read and its conditional delete
+// each waiting no longer than ctx (bus.Bounded). A delete ctx abandoned may still land after this
+// answer, and that is safe: it deletes only the revision it read, sessionID's claim, which the
+// caller asked to release, and a claim written since is kept. A claim stored under a key NATS
 // refuses (bus.ErrRefused: too long, or outside its key alphabet) has a holder nothing can tell, so
 // it is left to the role reaper, which deletes it, or skips one no KV call can delete.
-func (r *Registry) releaseRoleClaim(sessionID, role string) error {
-	claim, entry, err := r.roleClaim(context.Background(), role)
+func (r *Registry) releaseRoleClaim(ctx context.Context, sessionID, role string) error {
+	claim, entry, err := r.roleClaim(ctx, role)
 	if errors.Is(err, bus.ErrRefused) {
 		r.logger().Warn("role registry left a stored claim it cannot read to the role reaper", slog.Int("key_bytes", len(role)), slog.String("error", err.Error()))
 		return nil
@@ -527,7 +526,13 @@ func (r *Registry) releaseRoleClaim(sessionID, role string) error {
 	if entry == nil || claim.HolderSessionID != sessionID {
 		return nil
 	}
-	err = r.roles().Delete(role, nats.LastRevision(entry.Revision()))
+	roles := r.roles()
+	_, answered, err := bus.Bounded(ctx, func() (struct{}, error) {
+		return struct{}{}, roles.Delete(role, nats.LastRevision(entry.Revision()))
+	})
+	if !answered {
+		return fmt.Errorf("release role %s's claim held by %s: %w", role, sessionID, err)
+	}
 	if err != nil && !errors.Is(err, nats.ErrKeyExists) && !errors.Is(err, nats.ErrKeyNotFound) {
 		return err
 	}
@@ -543,7 +548,7 @@ func (r *Registry) releaseRoleClaim(sessionID, role string) error {
 // replacement, so callers never report that a lost conditional delete released
 // a claim. A failure is reported retained, its error naming the release.
 //
-// The claim's read and its conditional delete each wait no longer than ctx (bounded): an HTTP
+// The claim's read and its conditional delete each wait no longer than ctx (bus.Bounded): an HTTP
 // route passes its request's own context, role delivery and the reaper context.Background(). A
 // delete ctx abandoned may still land after this answer. That is safe to leave running: it deletes
 // the claim only if the bucket still holds the very revision it read, naming sessionID, whom the
@@ -568,7 +573,7 @@ func (r *Registry) ReleaseExpiredRoleClaim(ctx context.Context, role, sessionID 
 		return ExpiredRoleClaimRetained, nil
 	}
 	roles := r.roles()
-	_, _, err = bounded(ctx, func() (struct{}, error) {
+	_, _, err = bus.Bounded(ctx, func() (struct{}, error) {
 		return struct{}{}, roles.Delete(role, nats.LastRevision(entry.Revision()))
 	})
 	switch {
@@ -583,8 +588,12 @@ func (r *Registry) ReleaseExpiredRoleClaim(ctx context.Context, role, sessionID 
 	}
 }
 
-func (r *Registry) releaseAllRoleClaims(sessionID string) error {
-	roles, err := r.roles().Keys()
+func (r *Registry) releaseAllRoleClaims(ctx context.Context, sessionID string) error {
+	rolesKV := r.roles()
+	roles, answered, err := bus.Bounded(ctx, func() ([]string, error) { return rolesKV.Keys() })
+	if !answered {
+		return fmt.Errorf("list the role claims to release %s's: %w", sessionID, err)
+	}
 	if errors.Is(err, nats.ErrNoKeysFound) {
 		return nil
 	}
@@ -592,7 +601,7 @@ func (r *Registry) releaseAllRoleClaims(sessionID string) error {
 		return err
 	}
 	for _, role := range roles {
-		if err := r.releaseRoleClaim(sessionID, role); err != nil {
+		if err := r.releaseRoleClaim(ctx, sessionID, role); err != nil {
 			return err
 		}
 	}
@@ -600,37 +609,42 @@ func (r *Registry) releaseAllRoleClaims(sessionID string) error {
 }
 
 // Remove releases sessionID's role claims and removes topics from its interest record, or deletes
-// the record when topics is empty. A record this build cannot decode (ErrMalformedInterest) is
-// deleted all the same; removing some topics leaves it as it is (removeInterestTopics).
-func (r *Registry) Remove(sessionID string, topics []string) error {
+// the record when topics is empty, each bucket call waiting no longer than ctx (bus.Bounded): an
+// HTTP route passes its request's own context. A write or delete ctx abandoned may still land after
+// this answer; releaseRoleClaim, deleteInterest and removeInterestTopics each say why that is safe.
+// A record this build cannot decode (ErrMalformedInterest) is deleted all the same; removing some
+// topics leaves it as it is (removeInterestTopics).
+func (r *Registry) Remove(ctx context.Context, sessionID string, topics []string) error {
 	if len(topics) == 0 {
-		item, err := r.Get(context.Background(), sessionID)
+		item, err := r.Get(ctx, sessionID)
 		if err == nil {
-			if err := r.releaseRoleClaims(sessionID, item.Topics); err != nil {
+			if err := r.releaseRoleClaims(ctx, sessionID, item.Topics); err != nil {
 				return err
 			}
 		} else if !errors.Is(err, nats.ErrKeyNotFound) && !errors.Is(err, ErrMalformedInterest) {
 			return err
 		}
-		if err := r.releaseAllRoleClaims(sessionID); err != nil {
+		if err := r.releaseAllRoleClaims(ctx, sessionID); err != nil {
 			return err
 		}
-	} else if err := r.releaseRoleClaims(sessionID, topics); err != nil {
+	} else if err := r.releaseRoleClaims(ctx, sessionID, topics); err != nil {
 		return err
 	}
-	return r.removeInterestTopics(sessionID, topics)
+	return r.removeInterestTopics(ctx, sessionID, topics)
 }
 
 // removeInterestTopics removes topics from sessionID's interest record, deleting it when none is
-// left or topics is empty. A record this build cannot decode routes none of its topics here, so
-// there is nothing to remove from it: it is left for the session's next subscribe to replace or a
-// delete to remove, and the registry logs that at WARN naming the session.
-func (r *Registry) removeInterestTopics(sessionID string, topics []string) error {
+// left or topics is empty, each bucket call waiting no longer than ctx. A write ctx abandoned may
+// still land after this answer, and is safe for the reasons UpsertWithin's is. A record this build
+// cannot decode routes none of its topics here, so there is nothing to remove from it: it is left
+// for the session's next subscribe to replace or a delete to remove, and the registry logs that at
+// WARN naming the session.
+func (r *Registry) removeInterestTopics(ctx context.Context, sessionID string, topics []string) error {
 	// Empty topics = unsubscribe from everything (delete the entry).
 	if len(topics) == 0 {
-		return r.deleteInterest(sessionID)
+		return r.deleteInterest(ctx, sessionID)
 	}
-	item, err := r.Get(context.Background(), sessionID)
+	item, err := r.Get(ctx, sessionID)
 	if errors.Is(err, ErrMalformedInterest) {
 		r.logger().Warn("registry left an interest record it cannot decode unchanged",
 			slog.String("session_id", sessionID),
@@ -643,14 +657,14 @@ func (r *Registry) removeInterestTopics(sessionID string, topics []string) error
 	}
 	item = Remove(item, topics)
 	if len(item.Topics) == 0 {
-		return r.deleteInterest(sessionID)
+		return r.deleteInterest(ctx, sessionID)
 	}
 	item.UpdatedAt = r.now().UnixMilli()
 	buf, err := json.Marshal(item)
 	if err != nil {
 		return err
 	}
-	revision, err := r.interests().Put(sessionID, buf)
+	revision, err := r.putInterest(ctx, sessionID, buf)
 	if err != nil {
 		return err
 	}
@@ -680,15 +694,24 @@ func (e *ErrRoleHeld) Error() string {
 // resumed session can recover a role its dead predecessor held without ever
 // taking one from a live peer.
 func (r *Registry) SetRole(sessionID, machineID, role string, soft bool, supersedable ...string) (Interest, error) {
-	return r.SetRoleWithPrevious(sessionID, machineID, role, "", soft, supersedable...)
+	return r.SetRoleWithPrevious(context.Background(), sessionID, machineID, role, "", soft, supersedable...)
 }
 
 // SetRoleWithPrevious records the session ID that a successful soft claim
 // continues. The predecessor is provenance only after the listener has
 // evaluated the existing soft-claim rules.
-func (r *Registry) SetRoleWithPrevious(sessionID, machineID, role, previousSessionID string, soft bool, supersedable ...string) (Interest, error) {
+//
+// Each bucket call waits no longer than ctx (bus.Bounded): POST /v1/roles/set passes its request's
+// own context. A call ctx abandoned may still land after this answer. The claim's create or update
+// is conditional on the revision the claim was read at, so it lands only if no other claim did
+// since, and makes sessionID the holder it asked to be; the interest write is UpsertWithin's. Once
+// ctx has ended, neither the rollback of a claim that did not answer nor the old holder's interest
+// cleanup is started, so sessionID's record may name a role it does not hold until it claims or
+// unsubscribes again, and the old holder's may keep the role's topic, as a cleanup that failed
+// always left it. Role delivery reads the claim, never the topic, so neither misroutes a message.
+func (r *Registry) SetRoleWithPrevious(ctx context.Context, sessionID, machineID, role, previousSessionID string, soft bool, supersedable ...string) (Interest, error) {
 	roleTopic := contracts.RoleTopicPrefix + role
-	oldClaim, entry, err := r.roleClaim(context.Background(), role)
+	oldClaim, entry, err := r.roleClaim(ctx, role)
 	if err != nil {
 		return Interest{}, err
 	}
@@ -698,7 +721,7 @@ func (r *Registry) SetRoleWithPrevious(sessionID, machineID, role, previousSessi
 		return Interest{}, &ErrRoleHeld{Role: role, Holder: oldSessionID}
 	}
 
-	item, err := r.Upsert(Interest{SessionID: sessionID, MachineID: machineID}, []string{roleTopic})
+	item, err := r.UpsertWithin(ctx, Interest{SessionID: sessionID, MachineID: machineID}, []string{roleTopic})
 	if err != nil {
 		return Interest{}, err
 	}
@@ -715,17 +738,23 @@ func (r *Registry) SetRoleWithPrevious(sessionID, machineID, role, previousSessi
 	if err != nil {
 		return Interest{}, err
 	}
-	if entry == nil {
-		_, err = r.roles().Create(role, data)
-	} else {
-		_, err = r.roles().Update(role, data, entry.Revision())
+	roles := r.roles()
+	_, answered, err := bus.Bounded(ctx, func() (uint64, error) {
+		if entry == nil {
+			return roles.Create(role, data)
+		}
+		return roles.Update(role, data, entry.Revision())
+	})
+	if !answered {
+		err = fmt.Errorf("write role %s's claim: %w", role, err)
 	}
 	if err != nil {
-		holder, holderErr := r.RoleHolder(role)
+		current, holderErr := r.RoleClaim(ctx, role)
+		holder := current.HolderSessionID
 		if holderErr == nil && holder == sessionID {
 			return item, nil
 		}
-		if rollbackErr := r.removeInterestTopics(sessionID, []string{roleTopic}); rollbackErr != nil {
+		if rollbackErr := r.removeInterestTopics(ctx, sessionID, []string{roleTopic}); rollbackErr != nil {
 			return Interest{}, errors.Join(err, holderErr, rollbackErr)
 		}
 		if holderErr != nil {
@@ -740,7 +769,7 @@ func (r *Registry) SetRoleWithPrevious(sessionID, machineID, role, previousSessi
 	}
 
 	if oldSessionID != "" && oldSessionID != sessionID {
-		err := r.removeInterestTopics(oldSessionID, []string{roleTopic})
+		err := r.removeInterestTopics(ctx, oldSessionID, []string{roleTopic})
 		if errors.Is(err, bus.ErrRefused) {
 			// The old holder's id is a key NATS refuses (too long, or outside its key alphabet): an
 			// earlier build registered it, or a stored claim names it. The claim is written and the
@@ -764,7 +793,7 @@ func (r *Registry) SetRoleWithPrevious(sessionID, machineID, role, previousSessi
 	return item, nil
 }
 
-// RoleClaim returns the durable claim for role, read from the bucket within ctx (bounded). An
+// RoleClaim returns the durable claim for role, read from the bucket within ctx (bus.Bounded). An
 // unclaimed role returns a zero-value claim without an error; a record that is not a claim,
 // ErrMalformedRoleClaim.
 func (r *Registry) RoleClaim(ctx context.Context, role string) (RoleClaim, error) {
@@ -772,8 +801,9 @@ func (r *Registry) RoleClaim(ctx context.Context, role string) (RoleClaim, error
 	return claim, err
 }
 
-// RoleHolder returns the authoritative session ID for role. An unclaimed role
-// returns an empty holder without an error.
+// RoleHolder returns the authoritative session ID for role, read with no deadline of its own, for a
+// caller that answers no request; a route reads RoleClaim within its own. An unclaimed role returns
+// an empty holder without an error.
 func (r *Registry) RoleHolder(role string) (string, error) {
 	claim, err := r.RoleClaim(context.Background(), role)
 	if err != nil {
@@ -790,7 +820,7 @@ var ErrMalformedInterest = errors.New("malformed interest record")
 // Get returns the Interest for a session. Cache first, direct KV read on miss.
 // The KV fallback also repopulates the cache, bridging the warm-up window after
 // Open() before watch() has fully populated the cache. A cache hit answers in the
-// caller's goroutine; only the bucket read on a miss waits on ctx (bounded). The cache holds only
+// caller's goroutine; only the bucket read on a miss waits on ctx (bus.Bounded). The cache holds only
 // records it decoded (applyWatched evicts the rest), so only the bucket read can meet a record this
 // build cannot decode: that is ErrMalformedInterest, logged at WARN with the session it belongs to.
 func (r *Registry) Get(ctx context.Context, sessionID string) (Interest, error) {
@@ -801,7 +831,7 @@ func (r *Registry) Get(ctx context.Context, sessionID string) (Interest, error) 
 		return item, nil
 	}
 	interests := r.interests()
-	entry, answered, err := bounded(ctx, func() (nats.KeyValueEntry, error) { return interests.Get(sessionID) })
+	entry, answered, err := bus.Bounded(ctx, func() (nats.KeyValueEntry, error) { return interests.Get(sessionID) })
 	if !answered {
 		return Interest{}, fmt.Errorf("read %s's interest record: %w", sessionID, err)
 	}
@@ -890,7 +920,7 @@ func (r *Registry) Reap(isAlive func(string) bool, graceWindow time.Duration) (i
 
 	reaped := 0
 	for _, sid := range stale {
-		err := r.deleteInterest(sid)
+		err := r.deleteInterest(context.Background(), sid)
 		if errors.Is(err, bus.ErrRefused) {
 			r.logger().Warn("reaper skipped an interest it cannot delete", slog.Int("key_bytes", len(sid)), slog.String("error", err.Error()))
 			continue

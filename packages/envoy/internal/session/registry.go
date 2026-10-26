@@ -278,7 +278,17 @@ func (r *SessionRegistry) WatchErr() error {
 	return r.watcher.Err()
 }
 
+// Put is PutWithin with no deadline of its own, for a caller that answers no request.
 func (r *SessionRegistry) Put(sessionID string, entry SessionEntry) error {
+	return r.PutWithin(context.Background(), sessionID, entry)
+}
+
+// PutWithin writes sessionID's entry, its bucket write waiting no longer than ctx (bus.Bounded): an
+// HTTP route passes its request's own context. A write ctx abandoned may still land after this
+// answer. That is safe: it writes the entry the caller's retry writes again, it rides the
+// connection ahead of any write this listener sends on it later, so it cannot undo one, and
+// against another listener's write it is last-writer-wins, as every Put already is.
+func (r *SessionRegistry) PutWithin(ctx context.Context, sessionID string, entry SessionEntry) error {
 	// Several live processes can hold the same session (shared on-disk state), and
 	// blind last-writer-wins routed deliveries to whichever heartbeated last —
 	// including processes not driving the session. mergeForClaim arbitrates.
@@ -291,7 +301,11 @@ func (r *SessionRegistry) Put(sessionID string, entry SessionEntry) error {
 	if err != nil {
 		return err
 	}
-	revision, err := r.watcher.KV().Put(sessionID, buf)
+	kv := r.watcher.KV()
+	revision, answered, err := bus.Bounded(ctx, func() (uint64, error) { return kv.Put(sessionID, buf) })
+	if !answered {
+		return fmt.Errorf("write session %s to the bucket: %w", sessionID, err)
+	}
 	if err != nil {
 		return err
 	}
@@ -326,31 +340,20 @@ func (r *SessionRegistry) Get(sessionID string) (SessionEntry, error) {
 // alphabet and which an earlier build or a direct bucket write could leave as a role holder. Any
 // other error is a read that did not answer, ctx's end among them: nats.go's KV read takes no
 // context and waits out the JetStream MaxWait (10 s), so Refresh stops waiting when ctx ends and
-// lets that read finish on its own.
+// lets that read finish on its own (bus.Bounded).
 func (r *SessionRegistry) Refresh(ctx context.Context, sessionID string) (SessionEntry, error) {
-	type read struct {
-		entry nats.KeyValueEntry
-		err   error
-	}
-	answered := make(chan read, 1)
 	kv := r.watcher.KV()
-	go func() {
-		entry, err := kv.Get(sessionID)
-		answered <- read{entry: entry, err: err}
-	}()
-	var got read
-	select {
-	case got = <-answered:
-	case <-ctx.Done():
-		return SessionEntry{}, fmt.Errorf("read session %s from the bucket: %w", sessionID, ctx.Err())
+	entry, answered, err := bus.Bounded(ctx, func() (nats.KeyValueEntry, error) { return kv.Get(sessionID) })
+	if !answered {
+		return SessionEntry{}, fmt.Errorf("read session %s from the bucket: %w", sessionID, err)
 	}
-	if errors.Is(got.err, bus.ErrRefused) {
-		return SessionEntry{}, fmt.Errorf("%w: %w", nats.ErrKeyNotFound, got.err)
+	if errors.Is(err, bus.ErrRefused) {
+		return SessionEntry{}, fmt.Errorf("%w: %w", nats.ErrKeyNotFound, err)
 	}
-	if got.err != nil {
-		return SessionEntry{}, got.err
+	if err != nil {
+		return SessionEntry{}, err
 	}
-	r.applyWatched(got.entry)
+	r.applyWatched(entry)
 	return r.Get(sessionID)
 }
 
@@ -368,15 +371,25 @@ func (r *SessionRegistry) LastSeen(sessionID string) int64 {
 	}
 	return entry.lastSeen
 }
-func (r *SessionRegistry) Delete(sessionID string) error {
+
+// Delete deletes sessionID's entry at the revision it reads (bus.KeyValue.DeleteAtRead), each
+// bucket call waiting no longer than ctx (bus.Bounded): DELETE /v1/sessions/<session_id> passes its
+// request's own context. A delete ctx abandoned may still land after this answer, and that is safe:
+// it deletes only the revision it read, so a registration that landed since is kept, and a key it
+// found absent it deletes at none, as DeleteAtRead always has.
+func (r *SessionRegistry) Delete(ctx context.Context, sessionID string) error {
 	revision := r.cachedRevision(sessionID)
 	kv := r.watcher.KV()
-	read, err := kv.DeleteAtRead(sessionID)
+	read, answered, err := bus.Bounded(ctx, func() (uint64, error) { return kv.DeleteAtRead(sessionID) })
+	if !answered {
+		return fmt.Errorf("delete session %s from the bucket: %w", sessionID, err)
+	}
 	if err != nil {
 		return err
 	}
 	revision = max(revision, read)
-	entries, err := kv.History(sessionID)
+	// A history that does not answer falls back to the fence below: the delete itself answered.
+	entries, _, err := bus.Bounded(ctx, func() ([]nats.KeyValueEntry, error) { return kv.History(sessionID) })
 	if err == nil && len(entries) > 0 {
 		latest := entries[len(entries)-1]
 		r.mu.Lock()

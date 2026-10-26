@@ -1,6 +1,7 @@
 package bus
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"time"
@@ -193,6 +194,39 @@ func (kv KeyValue) History(key string, opts ...nats.WatchOpt) ([]nats.KeyValueEn
 	}
 	history, err := kv.KeyValue.History(key, opts...)
 	return history, invalidKey(key, err)
+}
+
+// Bounded is call, a bucket call that takes no context, as a caller holding ctx waits for it:
+// nats.go's KV reads, writes and deletes take none and wait out the JetStream MaxWait (10 s), so
+// the wait ends at the earlier of call's answer and ctx's end. answered is false when ctx ended
+// first, and err is then ctx's error; the abandoned call runs on to its own end and its answer is
+// dropped, so a write or a delete it sent may still land after the caller has answered (each
+// caller says why that is safe). A ctx that has already ended starts no call, and a ctx that can
+// never end (context.Background, as every caller that answers no request passes) is simply call,
+// in this goroutine.
+func Bounded[T any](ctx context.Context, call func() (T, error)) (value T, answered bool, err error) {
+	if ctx.Done() == nil {
+		value, err = call()
+		return value, true, err
+	}
+	if err := ctx.Err(); err != nil {
+		return value, false, err
+	}
+	type answer struct {
+		value T
+		err   error
+	}
+	answers := make(chan answer, 1)
+	go func() {
+		value, err := call()
+		answers <- answer{value: value, err: err}
+	}()
+	select {
+	case got := <-answers:
+		return got.value, true, got.err
+	case <-ctx.Done():
+		return value, false, ctx.Err()
+	}
 }
 
 // StreamState is what one STREAM.INFO read says about the stream behind a KV bucket: its name, the

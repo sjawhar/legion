@@ -672,7 +672,7 @@ func TestRoleHolderNotFoundResponsesIdentifyState(t *testing.T) {
 			if _, err := registry.SetRole("ses_holder", "test-machine", "reviewer", false); err != nil {
 				t.Fatalf("set holder: %v", err)
 			}
-			if err := sessions.Delete("ses_holder"); err != nil {
+			if err := sessions.Delete(context.Background(), "ses_holder"); err != nil {
 				t.Fatalf("expire holder session: %v", err)
 			}
 
@@ -745,7 +745,7 @@ func TestRoleHolderLapsedResponseDoesNotClaimConcurrentRemoval(t *testing.T) {
 	resolver := &racingRoleClaimResolver{
 		Registry: registry,
 		beforeFirstRelease: func() {
-			if err := registry.Remove(sessionID, nil); err != nil {
+			if err := registry.Remove(context.Background(), sessionID, nil); err != nil {
 				t.Fatalf("remove lapsed role claim: %v", err)
 			}
 		},
@@ -865,7 +865,7 @@ func TestARoleLookupWhoseSessionCacheTrailsTheBucketKeepsAFreshClaim(t *testing.
 	}
 
 	claimRole(t, claimant, "ses_gone_holder", "lapsed-claim")
-	if err := claimant.sessions.Delete("ses_gone_holder"); err != nil {
+	if err := claimant.sessions.Delete(context.Background(), "ses_gone_holder"); err != nil {
 		t.Fatalf("end ses_gone_holder's session: %v", err)
 	}
 	if answer := lookup("lapsed-claim"); answer.Code != http.StatusNotFound || !strings.Contains(answer.Body.String(), "claim released") {
@@ -921,7 +921,7 @@ func TestTheRoleReaperWhoseSessionCacheTrailsTheBucketKeepsAFreshClaim(t *testin
 	claimant, observer := trailingListeners(t)
 	claimRole(t, claimant, "ses_fresh_holder", "fresh-claim")
 	claimRole(t, claimant, "ses_gone_holder", "lapsed-claim")
-	if err := claimant.sessions.Delete("ses_gone_holder"); err != nil {
+	if err := claimant.sessions.Delete(context.Background(), "ses_gone_holder"); err != nil {
 		t.Fatalf("end ses_gone_holder's session: %v", err)
 	}
 	live := func(sessionID string) bool {
@@ -1135,7 +1135,7 @@ func TestPublishHandler_ReportsRoleHolderOnlyWhenLive(t *testing.T) {
 	})
 
 	t.Run("stale holder returns 404 from publish and lookup", func(t *testing.T) {
-		if err := sessions.Delete("ses_holder"); err != nil {
+		if err := sessions.Delete(context.Background(), "ses_holder"); err != nil {
 			t.Fatalf("delete holder session: %v", err)
 		}
 		publishRecorder := httptest.NewRecorder()
@@ -1285,7 +1285,7 @@ func TestRoleClaimRestoresWhileHolderIsLiveAndDropsAfterTTL(t *testing.T) {
 		t.Fatalf("restored live role: status = %d, body = %s", response.Code, response.Body.String())
 	}
 
-	if err := restoredSessions.Delete(sessionID); err != nil {
+	if err := restoredSessions.Delete(context.Background(), sessionID); err != nil {
 		t.Fatalf("expire restored holder: %v", err)
 	}
 	if response := get(); response.Code != http.StatusNotFound {
@@ -1352,7 +1352,7 @@ func TestRoleSetHandlerSoftClaim(t *testing.T) {
 	t.Run("dead holder is superseded", func(t *testing.T) {
 		// ses_live's session entry ages out (5m TTL in production); here it is
 		// deleted, which is what the listener observes either way.
-		if err := sessions.Delete("ses_live"); err != nil {
+		if err := sessions.Delete(context.Background(), "ses_live"); err != nil {
 			t.Fatalf("expire holder session: %v", err)
 		}
 		rec := post(`{"session_id":"ses_heir","role":"sre","soft":true}`)
@@ -1658,11 +1658,20 @@ func TestSubscribeHandlerFailsWhenSessionRegistryPutFails(t *testing.T) {
 	}`))
 	subscribeHandler(state, "test-machine", logging.New("test")).ServeHTTP(recorder, request)
 
+	// A put on a closed connection did not answer, so it is the bus-unavailable 503 a caller retries,
+	// still naming the session registry.
 	if recorder.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status = %d, want 503; body = %s", recorder.Code, recorder.Body.String())
 	}
-	if body := recorder.Body.String(); body != "{\"error\":\"session registry unavailable\"}\n" {
-		t.Fatalf("body = %q", body)
+	var refusal apiError
+	if err := json.Unmarshal(recorder.Body.Bytes(), &refusal); err != nil {
+		t.Fatalf("decode the refusal %s: %v", recorder.Body.String(), err)
+	}
+	if want := busUnansweredPrefix + ": session registry unavailable: "; !strings.HasPrefix(refusal.Error, want) {
+		t.Fatalf("body = %q, want it to begin %q", refusal.Error, want)
+	}
+	if got := recorder.Header().Get("Retry-After"); got != "1" {
+		t.Fatalf("Retry-After = %q, want 1", got)
 	}
 }
 

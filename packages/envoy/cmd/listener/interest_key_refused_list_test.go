@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"log/slog"
 	"net/http"
@@ -12,6 +13,8 @@ import (
 
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/contracts"
+	"github.com/sjawhar/envoy/internal/dispatch/envoy"
+	"github.com/sjawhar/envoy/internal/logging"
 	"github.com/sjawhar/envoy/internal/session"
 	"github.com/sjawhar/envoy/internal/store"
 	"github.com/sjawhar/envoy/internal/testnats"
@@ -25,9 +28,12 @@ import (
 // 3,974-byte get bound, so its interest read is bus.ErrTooLarge, while the readable one, 3,969
 // bytes, still fits it and reads as no record. A direct bucket write can also store an id outside
 // nats.go's key alphabet, `ses:bad`, whose interest read is bus.ErrInvalidKey. Each refused one is
-// logged at WARN once per listing, naming the session. The single-session routes still answer the
-// refused key as the caller's own input: 413 for the too-long id and 400 for the invalid one, with
-// no Retry-After, since a retry sends the same key.
+// logged at WARN once per listing, naming the session. GET /v1/registry/<session_id> answers such a
+// live session the same way, 200 with no topics and roles, logged at WARN, and Dispatch's envoy
+// client finds it through that route rather than reading a 413 or 400 as a session that cannot
+// exist. GET /v1/interests/<session_id>, which asks for the interest record by that key, still
+// answers the refused key as the caller's own input: 413 for the too-long id and 400 for the
+// invalid one, with no Retry-After, since a retry sends the same key.
 func TestTheSessionListKeepsASessionWhoseIDTheInterestBucketRefuses(t *testing.T) {
 	const (
 		ordinary   = "ses_refused_list_ordinary"
@@ -148,30 +154,66 @@ func TestTheSessionListKeepsASessionWhoseIDTheInterestBucketRefuses(t *testing.T
 		t.Fatalf("GET /v1/sessions logged WARN lines by session id length %v, want one each for the %d-byte id and %s", counts, len(unreadableLegacy), invalidKey)
 	}
 
-	for _, route := range []struct {
-		name    string
-		handler http.HandlerFunc
-		prefix  string
+	// GET /v1/registry/<session_id> answers each live session the interest bucket refuses as the list
+	// shows it, and logs it once.
+	for _, id := range []string{unreadableLegacy, invalidKey} {
+		t.Run("registry/"+id[:min(len(id), 8)], func(t *testing.T) {
+			before := len(logs.String())
+			recorder := get(sessionEntryHandler(state), "/v1/registry/"+id)
+			if recorder.Code != http.StatusOK {
+				t.Fatalf("GET /v1/registry/<the %d-byte id %.16s>: status %d, body %.300s; want 200 with no topics", len(id), id, recorder.Code, recorder.Body.String())
+			}
+			info := decodeSessionInfo(t, recorder)
+			if info.SessionID != id || info.Title != "refused" || len(info.Topics) != 0 || len(info.Roles) != 0 {
+				t.Fatalf("GET /v1/registry/<the %d-byte id %.16s> = %+v, want it by title with no topics and roles", len(id), id, info)
+			}
+			var warned int
+			for _, line := range strings.Split(strings.TrimSpace(logs.String()[before:]), "\n") {
+				var record map[string]any
+				if json.Unmarshal([]byte(line), &record) == nil && record["level"] == "WARN" && record["session_id"] == id {
+					warned++
+				}
+			}
+			if warned != 1 {
+				t.Fatalf("GET /v1/registry/<the %d-byte id %.16s> logged %d WARN lines naming it, want 1", len(id), id, warned)
+			}
+		})
+	}
+
+	// Dispatch's envoy client reads a 413 or 400 from that route as a session that cannot exist
+	// (envoy.ErrNotFound), so it is asked through the real route too: it must find each session.
+	mux := http.NewServeMux()
+	registerV1Routes(mux, state, "test-machine", logging.New("test"))
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+	dispatch := envoy.New(server.URL)
+	for _, id := range []string{unreadableLegacy, invalidKey} {
+		t.Run("dispatch/"+id[:min(len(id), 8)], func(t *testing.T) {
+			found, err := dispatch.Session(context.Background(), id)
+			if err != nil {
+				t.Fatalf("Dispatch's envoy client asked for the live %d-byte session %.16s: %v; want it found", len(id), id, err)
+			}
+			if found.SessionID != id || found.Title != "refused" || len(found.Roles) != 0 {
+				t.Fatalf("Dispatch's envoy client found %+v for the %d-byte session %.16s, want it by title with no roles", found, len(id), id)
+			}
+		})
+	}
+
+	for _, refused := range []struct {
+		id   string
+		want int
 	}{
-		{"registry", sessionEntryHandler(state), "/v1/registry/"},
-		{"interests", adminInterestsHandler(registry), "/v1/interests/"},
+		{unreadableLegacy, http.StatusRequestEntityTooLarge},
+		{invalidKey, http.StatusBadRequest},
 	} {
-		for _, refused := range []struct {
-			id   string
-			want int
-		}{
-			{unreadableLegacy, http.StatusRequestEntityTooLarge},
-			{invalidKey, http.StatusBadRequest},
-		} {
-			t.Run(route.name+"/"+refused.id[:min(len(refused.id), 8)], func(t *testing.T) {
-				recorder := get(route.handler, route.prefix+refused.id)
-				if recorder.Code != refused.want {
-					t.Fatalf("GET %s<the %d-byte id %.16s>: status %d, body %.300s; want %d", route.prefix, len(refused.id), refused.id, recorder.Code, recorder.Body.String(), refused.want)
-				}
-				if got := recorder.Header().Get("Retry-After"); got != "" {
-					t.Fatalf("Retry-After = %q, want none: a retry sends the same key", got)
-				}
-			})
-		}
+		t.Run("interests/"+refused.id[:min(len(refused.id), 8)], func(t *testing.T) {
+			recorder := get(adminInterestsHandler(registry), "/v1/interests/"+refused.id)
+			if recorder.Code != refused.want {
+				t.Fatalf("GET /v1/interests/<the %d-byte id %.16s>: status %d, body %.300s; want %d", len(refused.id), refused.id, recorder.Code, recorder.Body.String(), refused.want)
+			}
+			if got := recorder.Header().Get("Retry-After"); got != "" {
+				t.Fatalf("Retry-After = %q, want none: a retry sends the same key", got)
+			}
+		})
 	}
 }

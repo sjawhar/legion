@@ -406,7 +406,7 @@ func TestWatch_PropagatesDelete(t *testing.T) {
 	pollMatch(t, reg, "m1", "notifications.test", 1, 5*time.Second)
 
 	// Delete via KV Delete operation (empty topics = delete all)
-	if err := reg.Remove("ses_del", nil); err != nil {
+	if err := reg.Remove(context.Background(), "ses_del", nil); err != nil {
 		t.Fatalf("Remove failed: %v", err)
 	}
 
@@ -698,7 +698,7 @@ func TestRemoveAllDeletesAnUndecodableInterestRecordAndReleasesItsRoles(t *testi
 	reg, kv := coldRegistry(t, conn)
 	const sessionID = "ses_undecodable_remove_all"
 	storeUndecodableInterest(t, reg, kv, sessionID, "reviewer")
-	if err := reg.Remove(sessionID, nil); err != nil {
+	if err := reg.Remove(context.Background(), sessionID, nil); err != nil {
 		t.Fatalf("Remove(%s, nil) over an undecodable record: %v", sessionID, err)
 	}
 	if entry, err := kv.Get(sessionID); !errors.Is(err, natsgo.ErrKeyNotFound) {
@@ -720,7 +720,7 @@ func TestRemoveTopicsLeavesAnUndecodableInterestRecordAndReleasesTheirRoles(t *t
 	reg, kv := coldRegistry(t, conn)
 	const sessionID = "ses_undecodable_remove_topics"
 	storeUndecodableInterest(t, reg, kv, sessionID, "reviewer")
-	if err := reg.Remove(sessionID, []string{"notifications.role.reviewer"}); err != nil {
+	if err := reg.Remove(context.Background(), sessionID, []string{"notifications.role.reviewer"}); err != nil {
 		t.Fatalf("Remove(%s, its role topic) over an undecodable record: %v", sessionID, err)
 	}
 	if holder, err := reg.RoleHolder("reviewer"); err != nil || holder != "" {
@@ -940,7 +940,7 @@ func TestRemove_ColdCacheReadsFromKV(t *testing.T) {
 	putInterest(t, kv, Interest{SessionID: "ses_rm", MachineID: "m1", Topics: []string{"topic.a", "topic.b", "topic.c"}})
 
 	// Remove topic B — cache is cold, must read from KV
-	if err := reg.Remove("ses_rm", []string{"topic.b"}); err != nil {
+	if err := reg.Remove(context.Background(), "ses_rm", []string{"topic.b"}); err != nil {
 		t.Fatalf("Remove failed: %v", err)
 	}
 
@@ -1124,7 +1124,7 @@ func TestRemove_ReleasesRoleClaimAfterSameSessionReplacement(t *testing.T) {
 	if _, err := reg.SetRole("ses_role", "m1", "legion-reviewer", false); err != nil {
 		t.Fatalf("SetRole reviewer: %v", err)
 	}
-	if err := reg.Remove("ses_role", []string{"notifications.role.legion-controller"}); err != nil {
+	if err := reg.Remove(context.Background(), "ses_role", []string{"notifications.role.legion-controller"}); err != nil {
 		t.Fatalf("Remove controller role: %v", err)
 	}
 
@@ -1507,7 +1507,7 @@ func TestRemoveWritesThroughCache(t *testing.T) {
 	); err != nil {
 		t.Fatalf("subscribe failed: %v", err)
 	}
-	if err := reg.Remove(sessionID, []string{"notifications.b"}); err != nil {
+	if err := reg.Remove(context.Background(), sessionID, []string{"notifications.b"}); err != nil {
 		t.Fatalf("unsubscribe failed: %v", err)
 	}
 	if _, err := reg.Upsert(
@@ -1539,7 +1539,7 @@ func TestRemoveAllClearsCache(t *testing.T) {
 	); err != nil {
 		t.Fatalf("subscribe failed: %v", err)
 	}
-	if err := reg.Remove(sessionID, nil); err != nil {
+	if err := reg.Remove(context.Background(), sessionID, nil); err != nil {
 		t.Fatalf("unsubscribe all failed: %v", err)
 	}
 
@@ -1562,7 +1562,7 @@ func TestRemoveAllReleasesRoleClaims(t *testing.T) {
 	if _, err := reg.SetRole(sessionID, "example-host", role, false); err != nil {
 		t.Fatalf("SetRole: %v", err)
 	}
-	if err := reg.Remove(sessionID, nil); err != nil {
+	if err := reg.Remove(context.Background(), sessionID, nil); err != nil {
 		t.Fatalf("Remove all: %v", err)
 	}
 	assertRoleHolder(t, reg, role, "")
@@ -1582,7 +1582,7 @@ func TestRemoveAllReleasesRoleClaimMissingFromInterest(t *testing.T) {
 	if _, err := reg.roleKV.Put(role, []byte(sessionID)); err != nil {
 		t.Fatalf("seed orphaned role claim: %v", err)
 	}
-	if err := reg.Remove(sessionID, nil); err != nil {
+	if err := reg.Remove(context.Background(), sessionID, nil); err != nil {
 		t.Fatalf("Remove all: %v", err)
 	}
 	assertRoleHolder(t, reg, role, "")
@@ -2059,7 +2059,7 @@ func TestRemoveDoesNotOverwriteNewerWatcherValue(t *testing.T) {
 			pollMatch(t, reg, machineID, "notifications.remote", 1, 5*time.Second)
 		},
 	})
-	if err := reg.Remove(sessionID, []string{"notifications.b"}); err != nil {
+	if err := reg.Remove(context.Background(), sessionID, []string{"notifications.b"}); err != nil {
 		t.Fatalf("Remove: %v", err)
 	}
 
@@ -2148,7 +2148,7 @@ func TestDeleteHistoryFailureSuppressesStaleWatcherUpdate(t *testing.T) {
 		KeyValue: kv,
 		err:      errors.New("injected history failure"),
 	})
-	if err := reg.removeInterestTopics(sessionID, nil); err != nil {
+	if err := reg.removeInterestTopics(context.Background(), sessionID, nil); err != nil {
 		t.Fatalf("remove all: %v", err)
 	}
 
