@@ -1,0 +1,58 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-439",
+  "completed": "2026-10-26T04:46:30Z",
+  "headSha": "ac39a6818481897fca2b421dd4e5914bda0e8706",
+  "evidence": "https://github.com/sjawhar/legion/pull/2228#issuecomment-6408420209",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "Re-ran `bash packages/pi-envoy/scripts/smoke-replay.sh` (local mode) at ac39a681: exit 0, SMOKE REPLAY PASS; leg 1 dispatch-1792988829809 and leg 2 dispatch-1792988829810 one entry each and still one three heartbeats later; the released plugin 10.17.7 showed nothing for dispatch-1792988829811 and its live dispatch-1792988829812 at once."
+  },
+  "failed": 1,
+  "failures": [
+    {
+      "criterion": "Outcome: an event reaches the session once, also when published while it was down, as long as the session comes back under the same session id; a message the plugin cannot inject is not silently dropped",
+      "evidence": "A card handed to omp while a turn is streaming is held in omp's memory (deliverAs steer) and written to the session file only when the turn takes it, but the plugin records it shown at once (envoy-replay-delivered entry, and the replay-state cursor moves past it). If the process ends before the turn takes it, the message is lost for good: the resumed session's ledger says shown and its cursor is past it. Live run r2 (real omp, natsd -js, listener from this head; https://github.com/sjawhar/legion/pull/2228#issuecomment-6408420209): live frames 801..805 published while isStreaming=true -> card=0, ledger=Y; SIGKILL; after resume + 4 heartbeats card=0 for all five. Same for 811..815 stored while the connection was down and replayed mid-turn. Leg D: a sweep replayed 40 stored frames, the first card started a turn, SIGKILL 1.5 s later -> 2 cards in the file, 40 ledger entries, cursor 85; after resume the other 38 never showed. An rpc abort instead of a kill does not lose them (821..825 all shown). Red tests (commit 'test(pi-envoy): a card omp still held queued when the process ended is shown again after the restart (red)'): `cd packages/pi-envoy && bun test extensions/envoy.test.ts -t \"a card the host had not written\"` -> 2 fail, each at the held card (expected 1, received 0) while the written sibling stays 0. The fix must tie 'shown' (ledger and cursor) to the card reaching the transcript; the existing test 'a frame delivered live is not shown again when the same envelope arrives after a restart' restores entries without the card's custom_message entry, so it will need that entry once 'shown' is read from the transcript."
+    }
+  ],
+  "proof": [
+    {
+      "criterion": "Live proof: break a real Oh My Pi session's NATS connection, publish to its own topic, restore, show the event once",
+      "surface": "real omp --mode rpc with this checkout's pi-envoy, natsd -js and listener built from this head, NATS behind a socat proxy",
+      "command": "bash packages/pi-envoy/scripts/smoke-replay.sh",
+      "observed": "exit 0; dispatch-1792988829809 one entry 1 s after the proxy restart, still one 15 s later; dispatch-1792988829810 (omp stopped, resumed) one entry",
+      "headSha": "ac39a6818481897fca2b421dd4e5914bda0e8706",
+      "negativeControl": "released plugin 10.17.7: no entry for dispatch-1792988829811 five heartbeats after the restart"
+    },
+    {
+      "criterion": "The same for an issue topic the session subscribed to",
+      "surface": "same stack; the model called envoy_subscribe for notifications.dispatch.issue.SMOKE-9.>",
+      "command": "throwaway adv3.sh leg A/B/C on the smoke harness (comment 6408420209 section 3)",
+      "observed": "issue event published while down shown once after 1 s; one event stored on the agent subject and the issue topic shown once; one event stored twice under two Nats-Msg-Ids shown once; 30 live frames racing the reconnect sweep each once; 5 rapid break/publish/restore cycles, 43 events each once",
+      "headSha": "ac39a6818481897fca2b421dd4e5914bda0e8706",
+      "negativeControl": "POST /v1/replay naming another session's agent subject -> refused not_followed; an unfollowed issue topic -> not_followed; 33 subjects -> 400"
+    },
+    {
+      "criterion": "More than 32 followed subjects and a backlog across pages",
+      "surface": "same stack; 20 PR topics followed (41 subjects)",
+      "command": "throwaway g.sh (comment 6408420209 section 4)",
+      "observed": "41 started cursors; 124 frames on 5 subjects while down all shown once, in stream order",
+      "headSha": "ac39a6818481897fca2b421dd4e5914bda0e8706",
+      "negativeControl": "listener refuses a 33-subject request with 400 (the engine pages them)"
+    },
+    {
+      "criterion": "Claude Code sessions recover the same way",
+      "surface": "real claude-envoy dist/envoy-channel.js over MCP stdio (no claude binary in the pod), same natsd/listener/proxy",
+      "command": "throwaway claude.sh (comment 6408420209 section 5)",
+      "observed": "reconnect, restart, 28 down + 20 live racing, and SIGKILL mid-sweep: each event exactly one channel notification",
+      "headSha": "ac39a6818481897fca2b421dd4e5914bda0e8706",
+      "negativeControl": "frame published while the server was stopped is not emitted until it restarts"
+    }
+  ],
+  "observations": [
+    "/v1/replay trusts a self-asserted session_id, as every /v1 route does: a caller with the listener's access can read 72 h of any listed session's stored agent subject by naming its id. Sessions could already subscribe to notifications.> live; this adds stored history. Not recorded as a failure under the deployment's trust model; the reviewer may judge it.",
+    "After /new, the issue topics the previous session followed stay subscribed and get cursors in the new session (pre-existing subscription carry-over; the old session's agent-subject frame stayed out of the new transcript and showed once on switching back).",
+    "CI at ac39a681 when read: Docs and PR Title success; Tests (typecheck in progress, lint and test queued), Legion Envoy and Contracts queued, Worker Image pending."
+  ]
+}
