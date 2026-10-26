@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-248",
+  "completed": "2026-10-26T03:36:35Z",
+  "round": 1,
+  "reviewedCodeHead": "bba53cf09e7868cfa8d4fb44a4c77436bf14b3de",
+  "ci": "Required set lint, typecheck, test, pr-title (rulesets; no branch protection). CI head bba53cf09e78: Tests 40261400142, PR Title 40261400019/40263359715, Legion Envoy and Contracts 40261399972, Docs 40261399945, Worker Image 40261399959 all completed success; compare bba53cf09e78...6fd38a17 touches only .legion/.",
+  "thermonuclear": "deep-review and code-quality both CHANGES at 6fd38a17 (code identical to bba53cf09e78)",
+  "decision": "changes_requested",
+  "critical": 0,
+  "important": 4,
+  "minor": 4,
+  "keyFindings": [
+    {"severity": "important", "file": "skills/ce-dogfood/SKILL.md", "description": "Upstream's disable-model-invocation: true stays; Claude Code refuses a Skill-tool load of such a skill (code.claude.com/docs/en/skills), and claude-mechanics.md:7 tells a Claude worker to load skill://<name> with the Skill tool, so a tester on worker_backends tester: claude cannot load ce-dogfood. The claude-envoy CHANGELOG claims it can. Also on a tmux host nothing installs agent-browser and dogfood.md says nothing of an absent tool (tools.md: report it to the architect)."},
+    {"severity": "important", "file": "packages/daemon/docker/worker.Dockerfile", "description": "agent-browser v0.39.2 embeds packages/dashboard/out (cli/build.rs, rust-embed): a Next.js export bundling next, react, react-dom, radix-ui, jotai, ai and more, locked in pnpm-lock.yaml. The notices carry only the LICENSE, the crates note and axe-core, while the header claims every third-party piece's licence."},
+    {"severity": "important", "file": "skills/legion-worker/references/dogfood.md", "description": "Diff scope uses the repository default branch (default-branch-check.md), not the pull request's base as conflicts-and-rewrites.md and legion-retro do; on a stacked PR the dogfood scope takes in the parent branch's changes."},
+    {"severity": "important", "file": "skills/legion-worker/references/dogfood.md", "description": "Line 35 makes every contradicted criterion a failures entry (verdict fail) while line 59 sends stale pack rules to the architect; upstream phases.md Phase 5 says a contradiction the branch intends is a decision, not a defect. A deliberate departure would fail testing and send the implementer to undo intended behaviour."},
+    {"severity": "minor", "file": "skills/ce-dogfood/SKILL.md", "description": "The In Legion paragraph says the tester 'fixes and commits nothing', contradicting dogfood.md's red-test and handoff commits, and restates rules dogfood.md owns; reduce it to the pointer and the precedence rule."},
+    {"severity": "minor", "file": "skills/legion-worker/references/dogfood.md", "description": "'unless the report embeds one' gives no mechanism: a Dispatch artifact cannot render a pod path; upload the screenshot with dispatch artifact and link dispatch://KEY/artifact/<slug> (documents.md: an image link shows a thumbnail)."},
+    {"severity": "minor", "file": "skills/legion-worker/references/dogfood.md", "description": "Line 75 repeats the screenshot rule; the Browser section's 'from the release that ships this reference on' and '(measured under gVisor, as uid 1000)' are history, not instruction."},
+    {"severity": "minor", "file": "PR body", "description": "Both E2E lines and the Proven-by line name the deployment's namespace and compute class; docs/solutions/legion/kubectl-output-names-the-namespace-...-INFRA-386.md says to elide both in a public PR body."}
+  ]
+}
