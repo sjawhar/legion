@@ -211,65 +211,122 @@ func orderedMarkerOpens(line string, lazy bool) bool {
 // footnoteDefinitionOpener is a footnote definition's opening `[^label]:`.
 var footnoteDefinitionOpener = regexp.MustCompile(`^\[\^[^\]]*\]:`)
 
-// rawHTMLNames are the tag names whose opening tag opens an HTML block of CommonMark's first kind,
-// raw text up to its closing tag. The engine also reads their closing tag as a complete tag, which
-// Go's does not; like any complete tag it interrupts no paragraph, and opens a block at a lazy line.
-var rawHTMLNames = map[string]bool{"pre": true, "script": true, "style": true, "textarea": true}
-
-// blockHTMLNames are the tag names whose tag, opening or closing, opens an HTML block of
-// CommonMark's sixth kind, which interrupts a paragraph.
-var blockHTMLNames = map[string]bool{
-	"address": true, "article": true, "aside": true, "base": true, "basefont": true, "blockquote": true,
-	"body": true, "caption": true, "center": true, "col": true, "colgroup": true, "dd": true,
-	"details": true, "dialog": true, "dir": true, "div": true, "dl": true, "dt": true, "fieldset": true,
-	"figcaption": true, "figure": true, "footer": true, "form": true, "frame": true, "frameset": true,
-	"h1": true, "h2": true, "h3": true, "h4": true, "h5": true, "h6": true, "head": true,
-	"header": true, "hr": true, "html": true, "iframe": true, "legend": true, "li": true, "link": true,
-	"main": true, "menu": true, "menuitem": true, "nav": true, "noframes": true, "ol": true,
-	"optgroup": true, "option": true, "p": true, "param": true, "search": true, "section": true,
-	"summary": true, "table": true, "tbody": true, "td": true, "tfoot": true, "th": true,
-	"thead": true, "title": true, "tr": true, "track": true, "ul": true,
+// htmlBlockOpens reports whether line, opening with `<`, opens an HTML block in either reader at a
+// later line of a paragraph, lazy or not: the union of Go's reader (goldmarkHTMLBlockOpens) and the
+// browser editor's engine (micromarkHTMLFlowOpens). The two lists of block tag names and the two
+// rules for what may follow a tag name differ, so neither reader's rule alone says a line is text.
+func htmlBlockOpens(line string, lazy bool) bool {
+	return goldmarkHTMLBlockOpens(line) || micromarkHTMLFlowOpens(line, lazy)
 }
 
-// htmlTagName is a tag name after `<` or `</`.
-var htmlTagName = regexp.MustCompile(`^</?([A-Za-z][A-Za-z0-9-]*)`)
+// goldmarkHTMLBlockOpens reports whether Go's reader opens an HTML block at line, a later line of
+// an open paragraph: goldmark v1.8.6 parser/html_block.go, htmlBlockParser.Open, whose patterns
+// below are copied from it. Its kinds 1 to 6 interrupt a paragraph, at a lazy line too, since the
+// paragraph is still the last block opened there; its kind 7 never does. Kind 1 opens on a raw
+// element's opening tag followed by any white space Go's `\s` matches, a form feed included, `>`,
+// `/>` or the line's end; kind 6 on a block tag name in goldmark's list (allowedBlockTags, which
+// holds `meta`, unlike CommonMark's), opening or closing with spaces after the `/`, followed by a
+// space, `>`, `/>` or the end, or as a complete tag whatever white space its attributes hold.
+func goldmarkHTMLBlockOpens(line string) bool {
+	if goldmarkHTMLType1.MatchString(line) || goldmarkHTMLTypes2To5.MatchString(line) {
+		return true
+	}
+	if match := goldmarkHTMLType7.FindStringSubmatch(line); match != nil && goldmarkBlockTags[strings.ToLower(match[2])] {
+		return true
+	}
+	match := goldmarkHTMLType6.FindStringSubmatch(line)
+	return match != nil && goldmarkBlockTags[strings.ToLower(match[1])]
+}
 
-// completeTagLine is a line holding one complete opening or closing tag, as CommonMark defines it,
-// and blanks after it: an HTML block of the seventh kind.
-var completeTagLine = regexp.MustCompile(`^(?:<[A-Za-z][A-Za-z0-9-]*` +
-	`(?:[ \t]+[A-Za-z_:][A-Za-z0-9_.:-]*(?:[ \t]*=[ \t]*(?:[^ \t"'=<>` + "`" + `]+|'[^']*'|"[^"]*"))?)*` +
-	`[ \t]*/?>|</[A-Za-z][A-Za-z0-9-]*[ \t]*>)[ \t]*$`)
+// The patterns of goldmark v1.8.6's parser/html_block.go (htmlBlockType1OpenRegexp, the kinds 2 to
+// 5 openings, htmlBlockType6Regexp, htmlBlockType7Regexp) and parser/raw_html.go's attributePattern,
+// with their leading indentation dropped: a title line opening with a space is never written raw.
+var (
+	goldmarkHTMLType1     = regexp.MustCompile(`(?i)^<(script|pre|style|textarea)(?:\s.*|>.*|/>.*|)$`)
+	goldmarkHTMLTypes2To5 = regexp.MustCompile(`^<(?:!--|\?|![A-Z]+|!\[CDATA\[)`)
+	goldmarkHTMLType6     = regexp.MustCompile(`^<(?:/[ ]*)?([a-zA-Z]+[a-zA-Z0-9\-]*)(?:[ ].*|>.*|/>.*|)$`)
+	goldmarkHTMLType7     = regexp.MustCompile(`^<(/[ ]*)?([a-zA-Z]+[a-zA-Z0-9\-]*)(` + goldmarkAttribute + `*)[ ]*(?:>|/>)[ ]*$`)
+	goldmarkAttribute     = `(?:[\r\n \t]+[a-zA-Z_:][a-zA-Z0-9:._-]*(?:[\r\n \t]*=[\r\n \t]*(?:[^\"'=<>` + "`" + `\x00-\x20]+|'[^']*'|"[^"]*"))?)`
+)
 
-// htmlBlockOpens reports whether line, opening with `<`, opens an HTML block in either reader: a
-// comment, processing instruction, declaration or CDATA (`<!-`, `<?`, `<!` and a letter, `<![`),
-// whose open the engine also takes for a lowercase declaration Go's leaves as text; a raw element's
-// opening tag; any tag of a block element's name; or, at a lazy line, where the engine opens what
-// cannot interrupt a paragraph, a line that is one complete tag, a raw element's closing tag too. A `<` before anything else - a space, a
-// digit, `=` - opens none, nor does a tag with text after it on its line.
-func htmlBlockOpens(line string, lazy bool) bool {
+// goldmarkBlockTags is goldmark v1.8.6's allowedBlockTags (parser/html_block.go): CommonMark's
+// block tag names and `meta`.
+var goldmarkBlockTags = withNames(micromarkBlockNames, "meta")
+
+// micromarkHTMLFlowOpens reports whether the browser editor's engine opens an HTML block at line, a
+// later line of an open paragraph, lazy where lazy: micromark-core-commonmark 2.0.3
+// lib/html-flow.js, tokenizeHtmlFlow. `<!--`, `<?`, `<!` and a letter (any case), `<![CDATA[` open
+// one; so does a tag name, opening or closing with nothing between `</` and the name, of letters,
+// digits and `-`, that ends at the line's end, a space, a tab, `>` or `/`: a raw element's opening
+// tag not followed by `/` (htmlRawNames), any tag of a block element's name (htmlBlockNames), `/`
+// then only as `/>`; and otherwise a line that is one complete tag, which interrupts no paragraph
+// but opens a block at a lazy line, where the engine's open container is the list item or the quote
+// (`self.parser.lazy`), a raw element's closing tag included.
+func micromarkHTMLFlowOpens(line string, lazy bool) bool {
 	rest := line[1:]
 	switch {
-	case rest == "":
-		return false
-	case rest[0] == '?':
+	case strings.HasPrefix(rest, "!--"), strings.HasPrefix(rest, "?"), strings.HasPrefix(rest, "![CDATA["):
 		return true
-	case rest[0] == '!':
-		if len(rest) == 1 {
-			return false
-		}
-		next := rest[1]
-		return strings.HasPrefix(rest, "!--") || next == '[' || next >= 'a' && next <= 'z' || next >= 'A' && next <= 'Z'
+	case strings.HasPrefix(rest, "!"):
+		return len(rest) > 1 && isASCIIAlpha(rest[1])
 	}
-	name := htmlTagName.FindStringSubmatch(line)
-	if name == nil {
+	closing := strings.HasPrefix(rest, "/")
+	name := strings.TrimPrefix(rest, "/")
+	if name == "" || !isASCIIAlpha(name[0]) {
 		return false
 	}
-	// A block or raw element's name opens its kind of block only where the name ends at a blank,
-	// the line's end, `>`, or for a block element `/>`.
-	lower, after := strings.ToLower(name[1]), line[len(name[0]):]
-	ends := blankOrEnd(after) || strings.HasPrefix(after, ">")
-	if blockHTMLNames[lower] && (ends || strings.HasPrefix(after, "/>")) || rawHTMLNames[lower] && rest[0] != '/' && ends {
+	end := 1
+	for end < len(name) && (isASCIIAlphaNumeric(name[end]) || name[end] == '-') {
+		end++
+	}
+	after := name[end:]
+	if after != "" && after[0] != ' ' && after[0] != '\t' && after[0] != '>' && after[0] != '/' {
+		return false
+	}
+	lower := strings.ToLower(name[:end])
+	slash := strings.HasPrefix(after, "/")
+	switch {
+	case !slash && !closing && micromarkRawNames[lower]:
 		return true
+	case micromarkBlockNames[lower]:
+		return !slash || strings.HasPrefix(after, "/>")
 	}
 	return lazy && completeTagLine.MatchString(line)
 }
+
+// isASCIIAlpha reports whether value is an ASCII letter.
+func isASCIIAlpha(value byte) bool {
+	return value >= 'a' && value <= 'z' || value >= 'A' && value <= 'Z'
+}
+
+// micromarkRawNames is micromark-util-html-tag-name 2.0.1's htmlRawNames.
+var micromarkRawNames = withNames(nil, "pre", "script", "style", "textarea")
+
+// micromarkBlockNames is micromark-util-html-tag-name 2.0.1's htmlBlockNames, CommonMark's list.
+var micromarkBlockNames = withNames(nil,
+	"address", "article", "aside", "base", "basefont", "blockquote", "body", "caption", "center", "col",
+	"colgroup", "dd", "details", "dialog", "dir", "div", "dl", "dt", "fieldset", "figcaption", "figure",
+	"footer", "form", "frame", "frameset", "h1", "h2", "h3", "h4", "h5", "h6", "head", "header", "hr",
+	"html", "iframe", "legend", "li", "link", "main", "menu", "menuitem", "nav", "noframes", "ol",
+	"optgroup", "option", "p", "param", "search", "section", "summary", "table", "tbody", "td",
+	"tfoot", "th", "thead", "title", "tr", "track", "ul",
+)
+
+// withNames is a set of names: those of base and the rest.
+func withNames(base map[string]bool, names ...string) map[string]bool {
+	set := make(map[string]bool, len(base)+len(names))
+	for name := range base {
+		set[name] = true
+	}
+	for _, name := range names {
+		set[name] = true
+	}
+	return set
+}
+
+// completeTagLine is a line holding one complete opening or closing tag, as micromark's html-flow
+// reads one (completeAttributeNameBefore through completeAfter), and blanks after it: an HTML block
+// of the seventh kind.
+var completeTagLine = regexp.MustCompile(`^(?:<[A-Za-z][A-Za-z0-9-]*` +
+	`(?:[ \t]+[A-Za-z_:][A-Za-z0-9_.:-]*(?:[ \t]*=[ \t]*(?:[^ \t"'=<>/` + "`" + `]+|'[^']*'|"[^"]*"))?)*` +
+	`[ \t]*/?>|</[A-Za-z][A-Za-z0-9-]*[ \t]*>)[ \t]*$`)

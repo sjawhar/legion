@@ -560,6 +560,13 @@ func TestRenderWritesEachImageFieldSoItReadsBackAsHeld(t *testing.T) {
 		// The fuzz corpus's (fuzz.ts): a backtick run whose info holds a backtick, a fence of tildes
 		// whose info holds one, a self-closing tag followed by an indented definition.
 		"a\n``` a`b\nz", "a\n``` a`b", "a\n~~~ a`b\nz", "a\n```` x`\nz", "a\n<b/>\n [l]: /u\nz",
+		// HTML lines only Go's reader (goldmark's parser/html_block.go) opens a block at: `meta`,
+		// in goldmark's block tags only; spaces after `</`; a raw element's opening followed by
+		// `/>` or a form feed. And the forms around them both readers read alike.
+		"a\n<meta\nz", "a\n<META x=\"1\">\nz", "a\n</meta>\nz", "a\n</ div>\nz", "a\n</ p\nz", "a\n</  DIV\nz",
+		"a\n<pre/>\nz", "a\n<script/>x\nz", "a\n<pre\fx\nz", "a\n<style\tx>\nz", "a\n<textarea/>\nz",
+		"a\n<div\tx=\"1\">\nz", "a\n<div\fx\nz", "a\n<metax>\nz", "a\n</ b>\nz", "a\n< /div>\nz",
+		"a\n<a b=c/d>\nz", "a\n<a b=c/>\nz", "a\n#\fb\nz", "a\n-\fb\nz", "a\n1.\fb\nz",
 	}
 	titles := []string{`"`, `say "hi"`, `\"`, `a\"b`, "'", `"\`, `a"`}
 	image := func(src string, title any, link, linkTitle any) *Node {
