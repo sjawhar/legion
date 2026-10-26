@@ -2,42 +2,38 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-439",
-  "completed": "2026-10-26T22:13:34Z",
+  "completed": "2026-10-26T22:50:11Z",
   "pr": 2228,
-  "round": "architect's acceptance send-back: the PR body's Fast-follow batch done in this PR (five items), Fast-follow set to none",
+  "round": "tester round 13 fail (b): a replay notice held for a streaming turn was lost when omp was killed before the first settled heartbeat",
   "proof": [
     {
-      "criterion": "Replay notices (stream recreated, retention gap) are held while a turn streams and handed at the first settled heartbeat, so no extra model turn runs for them (item 4)",
-      "surface": "pi-envoy bun test: src/unwritten-frames.test.ts 'a replay notice' and extensions/envoy.test.ts 'a retention gap found while the host's turn streams is told once, at the first idle heartbeat'",
-      "command": "cd packages/pi-envoy && bun test (1004 pass, 0 fail)",
-      "observed": "a notice raised while the host streams is not sent on a busy tick, is sent once (details LOCAL_ENVOY_NOTICE) at the first idle tick, and not again; held notices retry after a failed hand and are dropped on a session move",
-      "headSha": "232a541eb40c27720c9bab0f17bb42fa4e5c0dad",
-      "negativeControl": "with the card route back to the direct pi.sendMessage the envoy test fails (Expected length 0, Received 1); with sendNotice handing at once, three unit tests fail"
+      "criterion": "A replay notice held for a busy session survives a SIGKILL before the first settled heartbeat and is shown once after the resume",
+      "surface": "the tester's leg N2 (/legion/scratch/tmp/adv/notice2.sh, unchanged) on real omp 18.12.2 with natsd -js and the listener built from this head: long turn streaming, ENVOY_NOTIFICATIONS deleted and added back, omp SIGKILLed with the notice held, session resumed",
+      "command": "bash /legion/scratch/tmp/adv/notice2.sh (exit 0; https://github.com/sjawhar/legion/pull/2228#issuecomment-6429185726)",
+      "observed": "NOTICE RESULT: N2-shown-after-resume:PASS N2-once:PASS; notices in file 0 at the kill, 1 after the resume, still 1 three heartbeats later; the session file holds the held envoy-replay-notice entry before the kill and its handed mark after the resume",
+      "headSha": "489fd64ded897ef011a110aad09ba2bb8280efab",
+      "negativeControl": "the same leg at 232a541e (tester's round 13 run) gave N2-shown-after-resume:FAIL(0->0)"
     },
     {
-      "criterion": "smoke-replay.sh, with its card predicate defined once, still passes in local and remote mode (items 1 and 5 do not change behaviour)",
-      "surface": "packages/pi-envoy/scripts/smoke-replay.sh on real omp 18.12.2: local mode, and remote mode against a loopback natsd -js and a listener built from this head",
-      "command": "bash packages/pi-envoy/scripts/smoke-replay.sh; SMOKE_REPLAY_ENVOY_URL=http://127.0.0.1:24080 SMOKE_REPLAY_NATS_URL=nats://127.0.0.1:24222 bash packages/pi-envoy/scripts/smoke-replay.sh (https://github.com/sjawhar/legion/pull/2228#issuecomment-6428572513)",
-      "observed": "both exit 0 with SMOKE REPLAY PASS (legs 1-7 and the released-plugin controls; leg 6 local only)",
-      "headSha": "232a541eb40c27720c9bab0f17bb42fa4e5c0dad",
-      "negativeControl": "the old and new jq filters of card_entries, cards and assistant_after gave identical output on a crafted session file (string, array and null content, other customTypes, non-JSON lines) for present and missing ids"
+      "criterion": "Red test bddc5c2a9815 passes unmodified; held notices are recorded, marked handed, and re-queued once by id",
+      "surface": "pi-envoy bun test (extensions/envoy.test.ts, src/unwritten-frames.test.ts)",
+      "command": "cd packages/pi-envoy && bun test (1012 pass, 0 fail); jj diff --git --from bddc5c2a9815 packages/pi-envoy/extensions/envoy.test.ts shows only added lines",
+      "observed": "'a retention gap held while the host's turn streams is told after a restart that cut the hold short' passes, as do the new unit tests and the switch-away-and-back test",
+      "headSha": "489fd64ded897ef011a110aad09ba2bb8280efab",
+      "negativeControl": "with the recordNotice and noticeHanded calls removed, five unit tests and both retention-gap envoy tests fail"
     }
   ],
   "filesChanged": [
+    "packages/pi-envoy/src/missed-messages.ts",
     "packages/pi-envoy/src/unwritten-frames.ts",
     "packages/pi-envoy/src/unwritten-frames.test.ts",
     "packages/pi-envoy/extensions/envoy.ts",
-    "packages/pi-envoy/extensions/envoy.test.ts",
+    "packages/pi-envoy/extensions/envoy.test.ts (tests added only)",
     "packages/pi-envoy/AGENTS.md",
-    "packages/pi-envoy/CHANGELOG.md",
-    "packages/pi-envoy/scripts/smoke-replay.sh",
-    "packages/pi-envoy/scripts/README.md",
-    "packages/envoy-client/src/replay.ts",
-    "packages/envoy/AGENTS.md",
-    "docs/site/src/content/docs/dispatch/envoy.md"
+    "packages/pi-envoy/CHANGELOG.md"
   ],
-  "deviations": [
-    "Item 4 needed a behaviour change, not only a doc line: the replay notices went to omp directly as steers, so a streaming turn ran one more model turn for them. They now go through UnwrittenFrames.sendNotice and wait for a settled host, which makes the AGENTS.md statement ('held until settled, no extra turn') true.",
-    "One existing envoy.test.ts test ('a session back four days later ... says older ones may be missing') now boots its second session with turn 'idle', since the harness defaults to a streaming turn and the notice is now held there; its assertions are unchanged."
+  "trickyParts": [
+    "A notice is recorded (envoy-replay-notice {id, content}) only when it stays held; a notice handed at once records nothing. Handing a recorded notice appends {id, handed: true}.",
+    "restoreLocalSessionState re-queues held-and-not-handed notices by id; UnwrittenFrames skips an id already held or handed in this process, so a second restore of the same session queues nothing twice."
   ]
 }
