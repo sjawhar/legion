@@ -829,15 +829,22 @@ sigkill_and_resume() {
 }
 
 # expect_each_once SINCE LIMIT WHAT ID...: every ID has an entry within LIMIT seconds of SINCE (a
-# SECONDS value: the moment WHAT names); once the session is idle each has exactly one, and still
-# exactly one three heartbeats later.
+# SECONDS value: the moment WHAT names), or, when omp is still streaming the turn a re-handed card
+# started and holds the rest behind it, once that turn ends; once the session is idle each has
+# exactly one, and still exactly one three heartbeats later. A card nobody handed again stays
+# missing with the session idle and nothing queued, which fails.
 expect_each_once() {
   local since=$1 limit=$2 what=$3 remaining id
   shift 3
   remaining=$((since + limit - SECONDS))
   ((remaining > 0)) || remaining=0
-  wait_until "$remaining" all_shown "$@" ||
-    fail "${limit}s after ${what} not every event has an entry: $(card_counts "$@")"
+  if ! wait_until "$remaining" all_shown "$@"; then
+    note "${limit}s after ${what}: $(card_counts "$@"); waiting for omp's turn to take what it holds"
+    await_idle 300
+    note "idle $((SECONDS - since))s after ${what}; get_state: ${omp_view}; $(card_counts "$@")"
+    wait_until "$((2 * heartbeat_s))" all_shown "$@" ||
+      fail "the session is idle with nothing queued and not every event has an entry: $(card_counts "$@")"
+  fi
   note "every event has an entry $((SECONDS - since))s after ${what}: $(card_counts "$@")"
   await_idle 300
   note "the session is idle $((SECONDS - since))s after ${what}; get_state: ${omp_view}; $(card_counts "$@")"
