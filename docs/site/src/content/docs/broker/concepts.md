@@ -296,8 +296,13 @@ reason of at most 400 characters. The broker evaluates every name
   account its `github-owners` tag lists. A release can narrow that token, with the `github_app`
   body of `POST /v1/grants/{id}/values` or the exec form's `--github-owner`, `--github-repo` and
   `--github-read-only`: the token of one listed account alone, limited to named repositories of
-  that account, to `contents: read` and `metadata: read`, or to both. It narrows that release
-  alone; the grant's next release is owner-wide unless it narrows too. A Google login
+  that account, to `contents: read` and `metadata: read`, or to both. A token limited to
+  repositories alone keeps every permission the App holds, its organization permissions among
+  them, so a token for a machine that must only read is limited to read access too. A narrowing
+  to an account the tag does not list is refused `NARROWING_OWNER_NOT_LISTED`, and one GitHub
+  refuses, such as a repository the installation does not reach, `NARROWING_REFUSED`; the broker
+  releases a narrowed token only once GitHub's answer shows it holds no more. It narrows that
+  release alone; the grant's next release is owner-wide unless it narrows too. A Google login
   value holds an `authorized_user` refresh-token credential. Its release returns a bare access
   token. The broker reads the stored value for each release, as it reads any secret, and mints from
   it. It never returns the stored App key or refresh token. A token lasts about an hour, so a client

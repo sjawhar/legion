@@ -138,7 +138,7 @@ var commands = []command{
 	{"sign", "agent-secrets sign --method M --url U [--enrollment E]",
 		"Print the proof this session would sign for one broker call, without making the call."},
 	{"", "agent-secrets NAME... [--reason TEXT] [--wait DURATION] [--ttl DURATION] [--github-owner LOGIN [--github-repo NAME]... [--github-read-only]] -- <command> [args...]",
-		"Request secrets, wait up to --wait (default 30m) for a person to decide, and run <command>\nwith each granted secret in its environment under its NAME; nothing runs unless all are\ngranted. The grant lasts --ttl, or until this session ends. --github-owner narrows each\nGitHub App token the grant releases to that account's installation, and --github-repo and\n--github-read-only narrow it further, to those repositories and to read access; <command>\nruns only once the broker answers that it applied the narrowing."},
+		"Request secrets, wait up to --wait (default 30m) for a person to decide, and run <command>\nwith each granted secret in its environment under its NAME; nothing runs unless all are\ngranted. The grant lasts --ttl, or until this session ends. --github-owner narrows each\nGitHub App token the grant releases to that account's installation, and --github-repo and\n--github-read-only narrow it further, to those repositories and to read access; a token\nnarrowed to repositories alone keeps every permission the App holds, so a machine that must\nonly read needs --github-read-only too. <command> runs only once the broker answers that it\napplied the narrowing."},
 }
 
 // usageEnvironment closes usage: the variables every form reads, and the exit codes.
@@ -854,7 +854,7 @@ func cmdExec(args []string, stdout, stderr io.Writer) int {
 	ttlFlagValue := flags.Duration("ttl", 0, ttlFlag)
 	githubOwner := flags.String("github-owner", "", "narrow each GitHub App token the grant releases to this account's installation")
 	var githubRepos []string
-	flags.Func("github-repo", "narrow the GitHub App token further, to this repository of --github-owner's (repeatable)", func(name string) error {
+	flags.Func("github-repo", "narrow the GitHub App token further, to this repository of --github-owner's (repeatable); it keeps the App's permissions unless --github-read-only is given too", func(name string) error {
 		githubRepos = append(githubRepos, name)
 		return nil
 	})

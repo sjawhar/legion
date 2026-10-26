@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -23,11 +24,14 @@ import (
 
 // TestTheExecFormReleasesANarrowedGitHubAppTokenEndToEnd drives the real broker (its handlers on a
 // real Postgres, through brokertest's rig), a real helper and this binary, with the broker's own
-// GitHub App minter aimed at a stub GitHub installed on acme and ada. A session key the machine
-// enrolled reads an agent-tier github-app secret: narrowed to ada's proofs repository, read-only,
-// the command gets ada's token alone, minted with that access_tokens body; with no flag, the same
-// grant gives every listed owner's owner-wide token, each minted with no body; and narrowed to an
-// account github-owners does not list, nothing runs and GitHub is asked for no token.
+// GitHub App minter aimed at a stub GitHub installed on acme and ada, which answers a token
+// request as GitHub does: the permissions and repositories its body names, or all of them. A
+// session key the machine enrolled reads an agent-tier github-app secret: narrowed to ada's proofs
+// repository, read-only, the command gets ada's token alone, minted with that access_tokens body;
+// with no flag, the same grant gives every listed owner's owner-wide token, each minted with no
+// body; narrowed to an account github-owners does not list, nothing runs, the broker answers
+// NARROWING_OWNER_NOT_LISTED and GitHub is asked for no token; and narrowed to a repository
+// GitHub refuses with 422, nothing runs and the broker answers NARROWING_REFUSED naming it.
 func TestTheExecFormReleasesANarrowedGitHubAppTokenEndToEnd(t *testing.T) {
 	type tokenRequest struct{ installation, body string }
 	var mu sync.Mutex
@@ -45,12 +49,35 @@ func TestTheExecFormReleasesANarrowedGitHubAppTokenEndToEnd(t *testing.T) {
 			mu.Lock()
 			asked = append(asked, tokenRequest{id, string(body)})
 			mu.Unlock()
-			token := "ghs-" + id
+			var narrowing struct {
+				Repositories []string          `json:"repositories"`
+				Permissions  map[string]string `json:"permissions"`
+			}
+			_ = json.Unmarshal(body, &narrowing)
+			if slices.Contains(narrowing.Repositories, "missing") {
+				w.WriteHeader(http.StatusUnprocessableEntity)
+				_ = json.NewEncoder(w).Encode(map[string]string{"message": "There is at least one repository that does not exist or is not accessible to the parent installation."})
+				return
+			}
+			answer := map[string]any{
+				"token": "ghs-" + id, "expires_at": time.Now().Add(time.Hour).UTC().Format(time.RFC3339),
+				"permissions": map[string]string{"contents": "write", "metadata": "read"}, "repository_selection": "all",
+			}
 			if len(body) > 0 {
-				token += "-narrowed"
+				answer["token"] = "ghs-" + id + "-narrowed"
+			}
+			if narrowing.Permissions != nil {
+				answer["permissions"] = narrowing.Permissions
+			}
+			if len(narrowing.Repositories) > 0 {
+				var repositories []map[string]string
+				for _, name := range narrowing.Repositories {
+					repositories = append(repositories, map[string]string{"name": name})
+				}
+				answer["repository_selection"], answer["repositories"] = "selected", repositories
 			}
 			w.WriteHeader(http.StatusCreated)
-			_ = json.NewEncoder(w).Encode(map[string]string{"token": token, "expires_at": time.Now().Add(time.Hour).UTC().Format(time.RFC3339)})
+			_ = json.NewEncoder(w).Encode(answer)
 		default:
 			t.Errorf("unexpected request to GitHub: %s %s", r.Method, r.URL.Path)
 		}
@@ -136,11 +163,19 @@ func TestTheExecFormReleasesANarrowedGitHubAppTokenEndToEnd(t *testing.T) {
 	}
 
 	_, stderr, exit = release("--github-owner", "outsider", "--github-read-only")
-	if exit != 1 || !strings.Contains(stderr, "MINT_FAILED") || !strings.Contains(stderr, "github-owners") {
-		t.Fatalf("release narrowed to an unlisted owner: exit %d, stderr %q; want exit 1 and MINT_FAILED naming github-owners", exit, stderr)
+	if exit != 1 || !strings.Contains(stderr, "NARROWING_OWNER_NOT_LISTED") || !strings.Contains(stderr, "github-owners") {
+		t.Fatalf("release narrowed to an unlisted owner: exit %d, stderr %q; want exit 1 and NARROWING_OWNER_NOT_LISTED naming github-owners", exit, stderr)
 	}
 	if tokens := take(); len(tokens) != 0 {
 		t.Fatalf("GitHub was asked for tokens %+v for an unlisted owner, want none", tokens)
+	}
+
+	_, stderr, exit = release("--github-owner", "ada", "--github-repo", "missing")
+	if exit != 1 || !strings.Contains(stderr, "NARROWING_REFUSED") || !strings.Contains(stderr, "(missing)") || strings.Contains(stderr, "MINT_FAILED") {
+		t.Fatalf("release narrowed to a repository GitHub refuses: exit %d, stderr %q; want exit 1 and NARROWING_REFUSED naming the repository", exit, stderr)
+	}
+	if tokens := take(); len(tokens) != 1 || tokens[0].installation != "8" {
+		t.Fatalf("GitHub was asked for tokens %+v, want installation 8's alone", tokens)
 	}
 }
 

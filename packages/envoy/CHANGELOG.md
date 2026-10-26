@@ -7,12 +7,17 @@
 - A release of a `github-app` secret can be narrowed: `POST /v1/grants/{id}/values` takes an
   optional `github_app` body (`owner`, `repositories`, `read_only`) that mints the token of one
   account `github-owners` lists alone, sent to GitHub as the `access_tokens` body, limited to
-  those repositories of the account, to `contents: read` and `metadata: read`, or to both. It can
-  only narrow, applies to that release alone, and the answer names it as `github_app`; a bad body
-  is `400 INVALID_NARROWING`, and a narrowing of a grant holding no `github-app` secret
-  `400 NARROWING_NOT_APPLICABLE`. `agent-secrets`' exec form takes `--github-owner`,
-  `--github-repo` and `--github-read-only` and runs its command only once the broker names the
-  narrowing it applied, so deploy the broker before any caller passes `--github-owner`.
+  those repositories of the account, to `contents: read` and `metadata: read`, or to both; a
+  token limited to repositories alone keeps every permission the App holds. It can only narrow,
+  applies to that release alone, and the answer names it as `github_app`, which the broker
+  releases only once GitHub's own answer shows the token holds no more. A bad body is
+  `400 INVALID_NARROWING`, a narrowing of a grant holding no `github-app` secret
+  `400 NARROWING_NOT_APPLICABLE`, one to an account its `github-owners` tag does not list
+  `403 NARROWING_OWNER_NOT_LISTED`, and one GitHub refuses (a repository the installation does not
+  reach) `422 NARROWING_REFUSED`, each logged at WARN as `broker: narrowing refused`.
+  `agent-secrets`' exec form takes `--github-owner`, `--github-repo` and `--github-read-only` and
+  runs its command only once the broker names the narrowing it applied, so deploy the broker
+  before any caller passes `--github-owner`.
 - A project's default assignee, the last step of an issue create's assignee chain: an issue created
   with no assignee, by nobody (the shared token), under no parent or under a parent with nobody on
   it, goes to the person the project names; nothing already filed, and no create that names an

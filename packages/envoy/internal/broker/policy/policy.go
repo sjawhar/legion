@@ -29,6 +29,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/envoy/internal/broker/record"
+	"github.com/sjawhar/envoy/internal/broker/secrets"
 )
 
 // The tags a namespace secret carries, and their fixed values.
@@ -129,25 +130,37 @@ var gitHubLogin = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9-]*$`)
 
 const maxGitHubLogin = 39
 
+// ParseGitHubLogin reads one GitHub account login, as written: up to 39 ASCII letters, digits and
+// hyphens, starting with a letter or digit, and not the word none (ErrGitHubOwnersLogin). It
+// answers it lowercased, since GitHub compares logins without regard to case. White space is no
+// part of a login, so "ada ada" is refused rather than read as one.
+func ParseGitHubLogin(raw string) (string, error) {
+	if len(raw) > maxGitHubLogin || !gitHubLogin.MatchString(raw) {
+		return "", fmt.Errorf("%w, not %q", ErrGitHubOwnersLogin, raw)
+	}
+	login := strings.ToLower(raw)
+	if login == TagRemoved {
+		return "", fmt.Errorf("%w, not %q: none removes the tag through agent-secrets and names no account", ErrGitHubOwnersLogin, raw)
+	}
+	return login, nil
+}
+
 // ParseGitHubOwners reads a github-owners tag: GitHub account logins separated by white space,
 // compared without regard to case. It refuses a comma anywhere (ErrGitHubOwnersComma), an entry that
-// is not a GitHub login or that is the word none (ErrGitHubOwnersLogin), and a list that names no
-// account (ErrGitHubOwnersMissing). It answers them lowercased, sorted and joined by single spaces,
-// so a Secret holding them stays comparable, two spellings of one list are one policy, and the value
-// is one that both stores hold: an AWS tag value and a Secret Manager annotation both take a space,
-// which a GitHub login never holds.
+// is not a GitHub login or that is the word none (ParseGitHubLogin's ErrGitHubOwnersLogin), and a
+// list that names no account (ErrGitHubOwnersMissing). It answers them lowercased, sorted and
+// joined by single spaces, so a Secret holding them stays comparable, two spellings of one list are
+// one policy, and the value is one that both stores hold: an AWS tag value and a Secret Manager
+// annotation both take a space, which a GitHub login never holds.
 func ParseGitHubOwners(raw string) (string, error) {
 	if strings.Contains(raw, ",") {
 		return "", ErrGitHubOwnersComma
 	}
 	var owners []string
 	for _, entry := range strings.Fields(raw) {
-		if len(entry) > maxGitHubLogin || !gitHubLogin.MatchString(entry) {
-			return "", fmt.Errorf("%w, not %q", ErrGitHubOwnersLogin, entry)
-		}
-		owner := strings.ToLower(entry)
-		if owner == TagRemoved {
-			return "", fmt.Errorf("%w, not %q: none removes the tag through agent-secrets and names no account", ErrGitHubOwnersLogin, entry)
+		owner, err := ParseGitHubLogin(entry)
+		if err != nil {
+			return "", err
 		}
 		owners = append(owners, owner)
 	}
@@ -156,6 +169,46 @@ func ParseGitHubOwners(raw string) (string, error) {
 	}
 	slices.Sort(owners)
 	return strings.Join(slices.Compact(owners), " "), nil
+}
+
+// maxNarrowedRepositories is the most repositories GitHub's access_tokens body takes.
+const maxNarrowedRepositories = 500
+
+// gitHubRepositoryName is what a repository name GitHub creates can be: ASCII letters, digits,
+// '.', '-' and '_', at most 100 of them. The names . and .. are refused beside it.
+var gitHubRepositoryName = regexp.MustCompile(`^[A-Za-z0-9._-]{1,100}$`)
+
+// ParseGitHubNarrowing checks one release's narrowing of its GitHub App tokens as a caller wrote it
+// and answers it in its canonical form (CanonicalGitHubNarrowing): owner one GitHub login
+// (ParseGitHubLogin, once white space around it is trimmed), and repositories names GitHub can
+// hold, without the owner, at most maxNarrowedRepositories. Nothing else reaches GitHub: the
+// permissions a narrowing can name are fixed, so a caller can only narrow. Each error opens with
+// the field it names, owner or repositories.
+func ParseGitHubNarrowing(owner string, repositories []string, readOnly bool) (secrets.GitHubNarrowing, error) {
+	login, err := ParseGitHubLogin(strings.TrimSpace(owner))
+	if err != nil {
+		return secrets.GitHubNarrowing{}, fmt.Errorf("owner must name one GitHub login, not %q", owner)
+	}
+	if len(repositories) > maxNarrowedRepositories {
+		return secrets.GitHubNarrowing{}, fmt.Errorf("repositories names %d repositories; GitHub takes at most %d", len(repositories), maxNarrowedRepositories)
+	}
+	for _, name := range repositories {
+		if !gitHubRepositoryName.MatchString(name) || name == "." || name == ".." {
+			return secrets.GitHubNarrowing{}, fmt.Errorf("repositories names %s's repositories by name alone, in ASCII letters, digits, '.', '-' and '_', not %q", login, name)
+		}
+	}
+	return CanonicalGitHubNarrowing(owner, repositories, readOnly), nil
+}
+
+// CanonicalGitHubNarrowing is the one form a narrowing takes, without ParseGitHubNarrowing's
+// checks: the owner trimmed and lowercased, the repositories sorted, each once (none stay none).
+// The broker applies a narrowing in this form and names it back in the release's answer, and the
+// CLI builds its request in it, so the CLI's check that the broker applied the narrowing it asked
+// for compares like with like.
+func CanonicalGitHubNarrowing(owner string, repositories []string, readOnly bool) secrets.GitHubNarrowing {
+	sorted := slices.Clone(repositories)
+	slices.Sort(sorted)
+	return secrets.GitHubNarrowing{Owner: strings.ToLower(strings.TrimSpace(owner)), Repositories: slices.Compact(sorted), ReadOnly: readOnly}
 }
 
 // KindNeedsGitHubOwners reports whether a secret of kind must carry a github-owners tag naming at

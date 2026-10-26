@@ -2,11 +2,7 @@ package api
 
 import (
 	"errors"
-	"fmt"
 	"net/http"
-	"regexp"
-	"slices"
-	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -151,8 +147,9 @@ type requestStatusResponse struct {
 type grantValuesBody struct {
 	// Optional: narrows the token of every github-app secret the grant holds to one account's
 	// installation and, within it, to named repositories, to read access, or to both. A grant
-	// that holds no github-app secret refuses it (NARROWING_NOT_APPLICABLE). It narrows this
-	// release alone: the grant's next release without it is owner-wide.
+	// that holds no github-app secret refuses it (NARROWING_NOT_APPLICABLE), and one whose
+	// github-app secret does not list the account refuses it (NARROWING_OWNER_NOT_LISTED). It
+	// narrows this release alone: the grant's next release without it is owner-wide.
 	GitHubApp *githubNarrowing `json:"github_app"`
 }
 
@@ -163,39 +160,13 @@ type githubNarrowing struct {
 	// github-owners lists, compared without regard to case. The answer names it lowercased.
 	Owner string `json:"owner"`
 	// Optional: names of the account's repositories, without the account, at most 500: the token
-	// reaches those alone. The answer names them sorted, each once.
+	// reaches those repositories alone, but keeps every permission the App holds, its
+	// organization permissions among them, unless read_only is set too. The answer names them
+	// sorted, each once.
 	Repositories []string `json:"repositories,omitempty"`
-	// Optional: true limits the token to contents: read and metadata: read.
+	// Optional: true limits the token to contents: read and metadata: read. A machine that must
+	// only read needs it, with or without repositories.
 	ReadOnly bool `json:"read_only,omitempty"`
-}
-
-// maxNarrowedRepositories is the most repositories GitHub's access_tokens body takes.
-const maxNarrowedRepositories = 500
-
-// gitHubRepositoryName is what a repository name GitHub creates can be: ASCII letters, digits,
-// '.', '-' and '_', at most 100 of them. The names . and .. are refused beside it.
-var gitHubRepositoryName = regexp.MustCompile(`^[A-Za-z0-9._-]{1,100}$`)
-
-// narrowingOf checks body and answers it as the minter's narrowing: its owner one GitHub login,
-// lowercased (policy.ParseGitHubOwners, the github-owners tag's own rule), and its repositories
-// names GitHub can hold, at most maxNarrowedRepositories, sorted, each once. Nothing else reaches
-// GitHub: the permissions a narrowing can name are fixed, so a caller can only narrow.
-func narrowingOf(body githubNarrowing) (secrets.GitHubNarrowing, error) {
-	owner, err := policy.ParseGitHubOwners(body.Owner)
-	if err != nil || strings.Contains(owner, " ") {
-		return secrets.GitHubNarrowing{}, fmt.Errorf("github_app.owner must name one GitHub login, not %q", body.Owner)
-	}
-	if len(body.Repositories) > maxNarrowedRepositories {
-		return secrets.GitHubNarrowing{}, fmt.Errorf("github_app.repositories names %d repositories; GitHub takes at most %d", len(body.Repositories), maxNarrowedRepositories)
-	}
-	repositories := slices.Clone(body.Repositories)
-	for _, name := range repositories {
-		if !gitHubRepositoryName.MatchString(name) || name == "." || name == ".." {
-			return secrets.GitHubNarrowing{}, fmt.Errorf("github_app.repositories names %s's repositories by name alone, in ASCII letters, digits, '.', '-' and '_', not %q", owner, name)
-		}
-	}
-	slices.Sort(repositories)
-	return secrets.GitHubNarrowing{Owner: owner, Repositories: slices.Compact(repositories), ReadOnly: body.ReadOnly}, nil
 }
 
 // grantValuesResponse is POST /v1/grants/{id}/values's answer.
@@ -278,9 +249,9 @@ func (s *server) grantValues(w http.ResponseWriter, r *http.Request, enrollmentI
 	var narrowing *secrets.GitHubNarrowing
 	var applied *githubNarrowing
 	if body.GitHubApp != nil {
-		n, err := narrowingOf(*body.GitHubApp)
+		n, err := policy.ParseGitHubNarrowing(body.GitHubApp.Owner, body.GitHubApp.Repositories, body.GitHubApp.ReadOnly)
 		if err != nil {
-			writeError(w, http.StatusBadRequest, "INVALID_NARROWING", err.Error())
+			writeError(w, http.StatusBadRequest, "INVALID_NARROWING", "github_app."+err.Error())
 			return
 		}
 		narrowing = &n
@@ -303,9 +274,21 @@ func (s *server) grantValues(w http.ResponseWriter, r *http.Request, enrollmentI
 	case errors.Is(err, requests.ErrNarrowingNotApplicable):
 		writeError(w, http.StatusBadRequest, "NARROWING_NOT_APPLICABLE", err.Error())
 		return
+	case errors.Is(err, requests.ErrNarrowingOwnerNotListed):
+		// The narrowing names an account a github-app secret of the grant does not list; no minter
+		// ran and GitHub was not asked. The caller's input, so a 4xx and never MINT_FAILED.
+		writeError(w, http.StatusForbidden, "NARROWING_OWNER_NOT_LISTED", err.Error())
+		return
+	case errors.Is(err, secrets.ErrMintNarrowingRefused):
+		// GitHub refused the narrowed token (a repository the installation does not reach, or a
+		// permission the App does not hold); its message names the narrowing's likely mistake. The
+		// caller's input, so a 4xx and never MINT_FAILED.
+		writeError(w, http.StatusUnprocessableEntity, "NARROWING_REFUSED", err.Error())
+		return
 	case errors.Is(err, requests.ErrMintFailed):
-		// The kind's upstream (GitHub or Google) refused or failed the mint; its message says why,
-		// such as a Google login that needs a new sign-in, and never holds the stored value.
+		// The kind's upstream (GitHub or Google) refused or failed a mint the narrowing, if any, is
+		// not at fault: an App with no installation, a Google login that needs a new sign-in, an
+		// upstream that could not be asked. Its message says why and never holds the stored value.
 		writeError(w, http.StatusBadGateway, "MINT_FAILED", err.Error())
 		return
 	case err != nil:

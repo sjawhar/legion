@@ -5,8 +5,10 @@ import (
 	"cmp"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"slices"
 	"strconv"
@@ -44,9 +46,16 @@ type githubInstallation struct {
 	SuspendedAt *time.Time `json:"suspended_at"`
 }
 
+// githubInstallationToken is GitHub's answer to a token request: the token, its expiry, and what
+// GitHub says the token holds, which Mint checks against a narrowing (GitHubNarrowing.heldBy).
 type githubInstallationToken struct {
-	Token     string    `json:"token"`
-	ExpiresAt time.Time `json:"expires_at"`
+	Token               string            `json:"token"`
+	ExpiresAt           time.Time         `json:"expires_at"`
+	Permissions         map[string]string `json:"permissions"`
+	RepositorySelection string            `json:"repository_selection"`
+	Repositories        []struct {
+		Name string `json:"name"`
+	} `json:"repositories"`
 }
 
 type githubMintedInstallations struct {
@@ -67,18 +76,83 @@ type githubAccessTokensBody struct {
 	Permissions  map[string]string `json:"permissions,omitempty"`
 }
 
+// readOnlyPermissions are the permissions a read-only narrowing asks GitHub for, and the most a
+// token minted for one may hold.
+var readOnlyPermissions = map[string]string{"contents": "read", "metadata": "read"}
+
+// narrowsToken reports whether n narrows the token GitHub mints, not only which installation it is
+// minted for: whether it sends GitHub an access_tokens body.
+func (n *GitHubNarrowing) narrowsToken() bool {
+	return n != nil && (len(n.Repositories) > 0 || n.ReadOnly)
+}
+
 // accessTokensBody is narrowing as GitHub's access_tokens body, nil for a narrowing that names
 // neither repositories nor read-only (it narrows to its owner alone) and for none, whose tokens
 // are asked for with no body, as before narrowing existed.
 func (n *GitHubNarrowing) accessTokensBody() ([]byte, error) {
-	if n == nil || len(n.Repositories) == 0 && !n.ReadOnly {
+	if !n.narrowsToken() {
 		return nil, nil
 	}
 	body := githubAccessTokensBody{Repositories: n.Repositories}
 	if n.ReadOnly {
-		body.Permissions = map[string]string{"contents": "read", "metadata": "read"}
+		body.Permissions = readOnlyPermissions
 	}
 	return json.Marshal(body)
+}
+
+// refusal is err, GitHub's answer to the token request for owner, unless it is the 422 GitHub
+// gives a narrowed token it cannot mint: that is the caller's narrowing (ErrMintNarrowingRefused),
+// named by what it likely got wrong, since GitHub's own text is never quoted. A 422 to a request
+// that sent no body narrowed nothing, and stays the App's.
+func (n *GitHubNarrowing) refusal(err error, appID, owner string) error {
+	var status *mintStatusError
+	if !n.narrowsToken() || !errors.As(err, &status) || status.code != http.StatusUnprocessableEntity {
+		return err
+	}
+	var causes []string
+	if len(n.Repositories) > 0 {
+		causes = append(causes, fmt.Sprintf("a repository it names (%s) that the installation does not reach, such as a misspelled name", strings.Join(n.Repositories, ", ")))
+	}
+	if n.ReadOnly {
+		causes = append(causes, "contents: read, which the App does not hold")
+	}
+	return fmt.Errorf("%w: github app %s: GitHub answered HTTP 422 to the narrowed token for %s: likely %s; the caller fixes the narrowing", ErrMintNarrowingRefused, appID, owner, strings.Join(causes, ", or "))
+}
+
+// heldBy checks that token, as GitHub describes it, holds no more than n asked: for repositories, a
+// selection of named repositories, each one n names (GitHub names them in its own case); for
+// read-only, named permissions, each at most readOnlyPermissions'. GitHub applies the
+// access_tokens body and refuses what it cannot grant, so a token past it means something between
+// the broker and GitHub dropped or widened the body; refusing it keeps the narrowing the release
+// answers with true by construction. A token not narrowed is not checked.
+func (n *GitHubNarrowing) heldBy(token githubInstallationToken) error {
+	if !n.narrowsToken() {
+		return nil
+	}
+	if len(n.Repositories) > 0 {
+		if token.RepositorySelection != "selected" {
+			return fmt.Errorf("GitHub's token reaches %q repositories, not the ones the narrowing names", token.RepositorySelection)
+		}
+		if len(token.Repositories) == 0 {
+			return errors.New("GitHub's token names no repositories, so it may reach more than the narrowing names")
+		}
+		for _, repository := range token.Repositories {
+			if !slices.ContainsFunc(n.Repositories, func(name string) bool { return strings.EqualFold(name, repository.Name) }) {
+				return fmt.Errorf("GitHub's token reaches %q, a repository the narrowing does not name", repository.Name)
+			}
+		}
+	}
+	if n.ReadOnly {
+		if len(token.Permissions) == 0 {
+			return errors.New("GitHub's token names no permissions, so it may hold more than read access")
+		}
+		for _, permission := range slices.Sorted(maps.Keys(token.Permissions)) {
+			if level := token.Permissions[permission]; readOnlyPermissions[permission] != level {
+				return fmt.Errorf("GitHub's token holds %s: %s, past read access", permission, level)
+			}
+		}
+	}
+	return nil
 }
 
 // Mint returns a token and expiry for every installation of the App in req.Value that is not
@@ -88,8 +162,10 @@ func (n *GitHubNarrowing) accessTokensBody() ([]byte, error) {
 // leaves out a record with no positive installation id, which names no installation a token can be
 // asked for. With req.GitHubNarrowing it mints for the narrowing's owner alone, which
 // req.GitHubOwners must list (it refuses, asking GitHub nothing, otherwise), sending the narrowing
-// as GitHub's access_tokens body. The value is the JSON object stored in the secret, never part of
-// an error. Every error wraps one of ErrMintStoredValue, ErrMintRefused or ErrMintUpstream.
+// as GitHub's access_tokens body, and releases the token only when GitHub's answer holds no more
+// than the narrowing asked (heldBy). The value is the JSON object stored in the secret, never part
+// of an error. Every error wraps one of ErrMintStoredValue, ErrMintRefused,
+// ErrMintNarrowingRefused or ErrMintUpstream.
 func (m GitHubApp) Mint(ctx context.Context, req MintRequest) (string, error) {
 	var secret githubAppSecret
 	// encoding/json's syntax errors quote the offending byte, so this decode and the token's do
@@ -100,9 +176,16 @@ func (m GitHubApp) Mint(ctx context.Context, req MintRequest) (string, error) {
 	if !validGitHubAppID(secret.AppID) || secret.PrivateKey == "" {
 		return "", fmt.Errorf("%w: GitHub App secret needs an app_id and private_key", ErrMintStoredValue)
 	}
+	owners := req.GitHubOwners
 	narrowing := req.GitHubNarrowing
-	if narrowing != nil && !slices.Contains(req.GitHubOwners, strings.ToLower(narrowing.Owner)) {
-		return "", fmt.Errorf("%w: github app %s: %s is not an account its github-owners tag lists", ErrMintRefused, secret.AppID, narrowing.Owner)
+	if narrowing != nil {
+		// requests.Machine.Values refuses an unlisted owner before any minter runs; this is the
+		// second barrier.
+		owner := strings.ToLower(narrowing.Owner)
+		if !slices.Contains(owners, owner) {
+			return "", fmt.Errorf("%w: github app %s: %s is not an account its github-owners tag lists", ErrMintNarrowingRefused, secret.AppID, narrowing.Owner)
+		}
+		owners = []string{owner}
 	}
 	body, err := narrowing.accessTokensBody()
 	if err != nil {
@@ -124,7 +207,7 @@ func (m GitHubApp) Mint(ctx context.Context, req MintRequest) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	minted := githubMintedInstallations{Installations: make(map[string]githubMintedInstallation, len(req.GitHubOwners))}
+	minted := githubMintedInstallations{Installations: make(map[string]githubMintedInstallation, len(owners))}
 	for _, installation := range installations {
 		// JSON decoding leaves a missing or null id 0: no installation GitHub mints for, so the
 		// record is left out rather than failing the release before a valid one is reached.
@@ -134,15 +217,15 @@ func (m GitHubApp) Mint(ctx context.Context, req MintRequest) (string, error) {
 		// An account with neither a login nor a slug names nothing github-owners can list, so the
 		// owners filter leaves it out like any unlisted account.
 		owner := cmp.Or(installation.Account.Login, installation.Account.Slug)
-		if !slices.Contains(req.GitHubOwners, strings.ToLower(owner)) {
-			continue
-		}
-		if narrowing != nil && !strings.EqualFold(owner, narrowing.Owner) {
+		if !slices.Contains(owners, strings.ToLower(owner)) {
 			continue
 		}
 		token, err := m.installationToken(ctx, jwt, installation.ID, body)
 		if err != nil {
-			return "", err
+			return "", narrowing.refusal(err, secret.AppID, owner)
+		}
+		if err := narrowing.heldBy(token); err != nil {
+			return "", fmt.Errorf("%w: github app %s: installation %d: %w", ErrMintUpstream, secret.AppID, installation.ID, err)
 		}
 		minted.Installations[owner] = githubMintedInstallation{
 			InstallationID: installation.ID,

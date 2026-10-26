@@ -196,8 +196,11 @@ secret:
 - `--github-owner <owner>` gives a token for the installation on that account only. The account
   must be in the `github-owners` tag of the secret.
 - `--github-repo <repository>` limits the token to that repository of the account. Use the flag
-  one time for each repository. Give the repository name without the account.
-- `--github-read-only` limits the token to `contents: read` and `metadata: read`.
+  one time for each repository. Give the repository name without the account. The token keeps
+  every permission the App holds, its organization permissions too, unless you also give
+  `--github-read-only`.
+- `--github-read-only` limits the token to `contents: read` and `metadata: read`. A machine that
+  must only read needs it, with or without `--github-repo`.
 
 `--github-repo` and `--github-read-only` need `--github-owner`.
 
@@ -210,7 +213,10 @@ printf %s "$GITHUB_APP_<PERSON>" | jq -er ".installations[].token"
 
 The release JSON has one entry, keyed by the account's login as GitHub spells it, so the example
 reads that one entry whatever case you typed. The broker sends the narrowing to GitHub, which
-refuses a repository or permission the installation does not have. The command runs only when
+refuses a repository or permission the installation does not have: `agent-secrets` then exits 1
+with `NARROWING_REFUSED`, naming the repositories, and an account the `github-owners` tag does
+not list exits 1 with `NARROWING_OWNER_NOT_LISTED`. The broker gives out the token only when
+GitHub's answer shows that the token holds no more than you asked. The command runs only when
 the broker tells `agent-secrets` that it applied the narrowing. A broker that cannot narrow
 releases the token for all repositories, so `agent-secrets` runs nothing and exits 1.
 

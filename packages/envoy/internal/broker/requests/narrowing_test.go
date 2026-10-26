@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/jackc/pgx/v5"
@@ -84,7 +86,7 @@ func TestANarrowedReleaseLeavesTheGrantOwnerWide(t *testing.T) {
 // TestANarrowingOfAGrantWithNoGitHubAppSecretReleasesNothing: a release that asks to narrow a
 // GitHub App token from a grant that holds none (a stored secret, another kind) is refused and
 // releases nothing, rather than every value whole as though no narrowing were asked for. In a grant
-// that holds one, the narrowing reaches the github-app minter alone, and a stored value is released
+// that holds one, the narrowing reaches its github-app minter, and every other value is released
 // as it is.
 func TestANarrowingOfAGrantWithNoGitHubAppSecretReleasesNothing(t *testing.T) {
 	machine, enrollmentID, key, _ := newFixture(t)
@@ -126,7 +128,68 @@ func TestANarrowingOfAGrantWithNoGitHubAppSecretReleasesNothing(t *testing.T) {
 	if err != nil || values["APP_KEY"] != "narrowed-token" || values["LOGIN_KEY"] != "access-token" || values["PLAIN_KEY"] != "plain-v1" {
 		t.Fatalf("narrowed Values(APP_KEY, LOGIN_KEY, PLAIN_KEY) = %v, %v; want each value", values, err)
 	}
-	if !reflect.DeepEqual(githubNarrowings, []*secrets.GitHubNarrowing{narrowing}) || !reflect.DeepEqual(googleNarrowings, []*secrets.GitHubNarrowing{nil}) {
-		t.Fatalf("narrowings: github-app minter %v, google-login minter %v; want the narrowing for github-app alone", githubNarrowings, googleNarrowings)
+	if !reflect.DeepEqual(githubNarrowings, []*secrets.GitHubNarrowing{narrowing}) {
+		t.Fatalf("the github-app minter's narrowings = %v, want %v", githubNarrowings, []*secrets.GitHubNarrowing{narrowing})
+	}
+}
+
+// TestANarrowingToAnUnlistedOwnerReleasesNothing: a narrowing names an account every github-app
+// secret of the grant lists in its github-owners tag, or the release is refused before any minter
+// runs (ErrNarrowingOwnerNotListed), naming the secret and the account, and releases nothing, not
+// even the grant's stored values: the caller's input, not the App, is at fault, so nothing reaches
+// the minter whose failure the operator acts on. The same grant narrowed to a listed account
+// releases, and so does its release with no narrowing.
+func TestANarrowingToAnUnlistedOwnerReleasesNothing(t *testing.T) {
+	machine, enrollmentID, key, _ := newFixture(t)
+	retag(t, machine,
+		requestKindSecret("APP_KEY", policy.KindGitHubApp, policy.TierAgent, ""),
+		policytest.Secret("PLAIN_KEY", fixtureOperator, policy.TierAgent, "plain-v1"),
+	)
+	minted := 0
+	machine.Minters = map[string]Minter{
+		policy.KindGitHubApp: func(context.Context, secrets.MintRequest) (string, error) {
+			minted++
+			return "token", nil
+		},
+	}
+	request, err := machine.Create(t.Context(), enrollmentID, signRequest(t, machine, key, "read", "APP_KEY", "PLAIN_KEY"), "")
+	if err != nil || request.GrantID == nil {
+		t.Fatalf("Create = %+v, %v; want a grant", request, err)
+	}
+	values, _, err := machine.Values(t.Context(), *request.GrantID, enrollmentID, &secrets.GitHubNarrowing{Owner: "outsider", ReadOnly: true})
+	if !errors.Is(err, ErrNarrowingOwnerNotListed) || values != nil || !strings.Contains(err.Error(), "APP_KEY") || !strings.Contains(err.Error(), "outsider") {
+		t.Fatalf("Values narrowed to an unlisted owner = %v, %v; want ErrNarrowingOwnerNotListed naming APP_KEY and outsider, no value", values, err)
+	}
+	if minted != 0 {
+		t.Fatalf("the github-app minter ran %d times for a refused narrowing, want none", minted)
+	}
+	if audits := usedAudits(t, machine, *request.GrantID); len(audits) != 0 {
+		t.Fatalf("a refused narrowing wrote grant.used rows %v, want none", audits)
+	}
+	for _, narrowing := range []*secrets.GitHubNarrowing{{Owner: "ada", ReadOnly: true}, nil} {
+		if values, _, err := machine.Values(t.Context(), *request.GrantID, enrollmentID, narrowing); err != nil || values["APP_KEY"] != "token" || values["PLAIN_KEY"] != "plain-v1" {
+			t.Fatalf("Values narrowed to %+v = %v, %v; want both values", narrowing, values, err)
+		}
+	}
+}
+
+// TestANarrowingTheMinterRefusesIsNotAMintFailure: a minter's refusal of the narrowing itself
+// (secrets.ErrMintNarrowingRefused: GitHub's 422 to a narrowed token) reaches the caller as that
+// refusal and not as ErrMintFailed, the class whose ERROR line tells the operator to fix the App.
+func TestANarrowingTheMinterRefusesIsNotAMintFailure(t *testing.T) {
+	machine, enrollmentID, key, _ := newFixture(t)
+	retag(t, machine, requestKindSecret("APP_KEY", policy.KindGitHubApp, policy.TierAgent, ""))
+	machine.Minters = map[string]Minter{
+		policy.KindGitHubApp: func(context.Context, secrets.MintRequest) (string, error) {
+			return "", fmt.Errorf("%w: GitHub answered HTTP 422", secrets.ErrMintNarrowingRefused)
+		},
+	}
+	request, err := machine.Create(t.Context(), enrollmentID, signRequest(t, machine, key, "read", "APP_KEY"), "")
+	if err != nil || request.GrantID == nil {
+		t.Fatalf("Create = %+v, %v; want a grant", request, err)
+	}
+	values, _, err := machine.Values(t.Context(), *request.GrantID, enrollmentID, &secrets.GitHubNarrowing{Owner: "ada", Repositories: []string{"missing"}})
+	if !errors.Is(err, secrets.ErrMintNarrowingRefused) || errors.Is(err, ErrMintFailed) || values != nil {
+		t.Fatalf("Values = %v, %v; want ErrMintNarrowingRefused, not ErrMintFailed, and no value", values, err)
 	}
 }

@@ -27,6 +27,14 @@ import (
 // session's answer is 502 MINT_FAILED; this line is the operator's.
 const MintFailedMessage = "broker: mint failed"
 
+// NarrowingRefusedMessage is logged, at WARN, each time a release's narrowing of its GitHub App
+// tokens is refused for what it names: an account a github-app secret of the grant does not list
+// (403 NARROWING_OWNER_NOT_LISTED, before any minter runs), or GitHub's 422 to the narrowed token
+// (422 NARROWING_REFUSED). It is followed by grant=, enrollment=, name=<the secret's name> and
+// error=, which never holds a value or a token. A refused authorization the caller fixes, not a
+// mint failure the operator acts on.
+const NarrowingRefusedMessage = "broker: narrowing refused"
+
 // Values releases the values of a live grant to its own enrollment, and when the grant expires:
 // nil for a grant that lasts until its session ends. Every call re-checks the
 // enrollment and the grant, re-verifies the grant's whole approval chain (VerifyChain), and — when
@@ -43,7 +51,9 @@ const MintFailedMessage = "broker: mint failed"
 // fetched. A non-nil narrowing is this release's alone: it reaches the github-app minter of every
 // github-app name the grant holds, and the grant records nothing of it, so its next release
 // without one is owner-wide again. A grant that holds no github-app name refuses a narrowing
-// (ErrNarrowingNotApplicable) and releases nothing.
+// (ErrNarrowingNotApplicable), and so does one whose github-app name does not list the
+// narrowing's owner in the snapshot the release mints from (ErrNarrowingOwnerNotListed); each
+// releases nothing and runs no minter.
 func (m *Machine) Values(ctx context.Context, grantID, enrollmentID string, narrowing *secrets.GitHubNarrowing) (map[string]string, *time.Time, error) {
 	var owner, requestID, policyVersion, decidedBy string
 	var expires *time.Time
@@ -100,8 +110,13 @@ func (m *Machine) Values(ctx context.Context, grantID, enrollmentID string, narr
 			}
 		}
 	}
-	if narrowing != nil && !holdsGitHubApp(granted) {
-		return nil, nil, ErrNarrowingNotApplicable
+	if narrowing != nil {
+		if name, err := narrowingRefusal(set, granted, narrowing); err != nil {
+			if errors.Is(err, ErrNarrowingOwnerNotListed) {
+				slog.Warn(NarrowingRefusedMessage, "grant", grantID, "enrollment", enrollmentID, "name", name, "error", err)
+			}
+			return nil, nil, err
+		}
 	}
 	values := map[string]string{}
 	released := []string{}
@@ -109,6 +124,9 @@ func (m *Machine) Values(ctx context.Context, grantID, enrollmentID string, narr
 		value, err := m.release(ctx, g, secrets.MintRequest{GitHubOwners: set.Secrets[g.name].GitHubOwnerLogins(), GitHubNarrowing: narrowing})
 		if errors.Is(err, secrets.ErrNotFound) {
 			return nil, nil, fmt.Errorf("%w: %s", ErrSecretNotInStore, g.name)
+		}
+		if errors.Is(err, secrets.ErrMintNarrowingRefused) {
+			slog.Warn(NarrowingRefusedMessage, "grant", grantID, "enrollment", enrollmentID, "name", g.name, "error", err)
 		}
 		if err != nil {
 			return nil, nil, fmt.Errorf("read %s: %w", g.name, err)
@@ -130,13 +148,25 @@ func (m *Machine) Values(ctx context.Context, grantID, enrollmentID string, narr
 	return values, expires, nil
 }
 
-// holdsGitHubApp reports whether any of granted is a github-app secret: a name whose frozen source
-// is that kind's, the only kind a release's narrowing reaches.
-func holdsGitHubApp(granted []requestedSecret) bool {
-	return slices.ContainsFunc(granted, func(g requestedSecret) bool {
-		kind, _, minted, err := policy.ParseKindSource(g.source)
-		return err == nil && minted && kind == policy.KindGitHubApp
-	})
+// narrowingRefusal is why narrowing cannot reach granted, with the name it refuses for: the grant
+// holds no github-app secret (ErrNarrowingNotApplicable), or a github-app secret of it does not
+// list the narrowing's owner in its github-owners tag in set, the snapshot the release mints from
+// (ErrNarrowingOwnerNotListed). GitHubApp.Mint refuses that owner too, as a second barrier.
+func narrowingRefusal(set *policy.Set, granted []requestedSecret, narrowing *secrets.GitHubNarrowing) (string, error) {
+	held := false
+	for _, g := range granted {
+		if kind, _, minted, err := policy.ParseKindSource(g.source); err != nil || !minted || kind != policy.KindGitHubApp {
+			continue
+		}
+		held = true
+		if !slices.Contains(set.Secrets[g.name].GitHubOwnerLogins(), narrowing.Owner) {
+			return g.name, fmt.Errorf("%w: %s's github-owners tag does not list %s", ErrNarrowingOwnerNotListed, g.name, narrowing.Owner)
+		}
+	}
+	if !held {
+		return "", ErrNarrowingNotApplicable
+	}
+	return "", nil
 }
 
 // recheckStoredSources checks every name of grantID that releases its stored value (a source no
@@ -217,9 +247,10 @@ func (m *Machine) endGrant(ctx context.Context, grantID string, reason error) er
 // req to the kind's minter and returns only what the minter makes. req.GitHubOwners is the name's
 // github-owners in the policy snapshot Values checked the grant against, so a list narrowed after
 // a grant holds at the grant's next release, and a name that snapshot does not serve gets none,
-// which the github-app minter refuses. req.GitHubNarrowing reaches the github-app minter alone. A
-// deleted secret stops releasing once the policy drops it: `agent-secrets secret delete` rereads
-// the name at once.
+// which the github-app minter refuses. Only the github-app minter reads req.GitHubNarrowing. A
+// minter's refusal of the narrowing itself (secrets.ErrMintNarrowingRefused) is returned as it is,
+// for Values to log as a refused narrowing, and is no mint failure. A deleted secret stops
+// releasing once the policy drops it: `agent-secrets secret delete` rereads the name at once.
 func (m *Machine) release(ctx context.Context, g requestedSecret, req secrets.MintRequest) (string, error) {
 	kind, source, minted, err := policy.ParseKindSource(g.source)
 	if err != nil {
@@ -237,10 +268,10 @@ func (m *Machine) release(ctx context.Context, g requestedSecret, req secrets.Mi
 		return "", err
 	}
 	req.Value = value
-	if kind != policy.KindGitHubApp {
-		req.GitHubNarrowing = nil
-	}
 	token, err := mint(ctx, req)
+	if errors.Is(err, secrets.ErrMintNarrowingRefused) {
+		return "", err
+	}
 	if err != nil {
 		// The minter's error names its class and why, never the stored value or a token, so the
 		// line is safe to log; the session sees the same words as MINT_FAILED.

@@ -12,26 +12,29 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+
+	"github.com/sjawhar/envoy/internal/broker/policy"
 )
 
-// githubNarrowing is the narrowing the flags ask for, nil when they ask for none: the owner
-// trimmed and lowercased and the repositories sorted, each once, as the broker names what it
-// applied, so narrowedAsAsked compares like with like. ownerSet says whether --github-owner was
-// given at all: given with no account (an unset variable a caller passed) it is refused rather
-// than read as no narrowing, which would release the owner-wide tokens; and --github-repo or
-// --github-read-only without --github-owner is refused, since a narrowing names one account's
-// token.
+// githubNarrowing is the narrowing the flags ask for, nil when they ask for none, in the one form
+// the broker applies a narrowing and names it back (policy.CanonicalGitHubNarrowing), so
+// narrowedAsAsked compares like with like. ownerSet says whether --github-owner was given at all:
+// given with no account (an unset variable a caller passed) it is refused rather than read as no
+// narrowing, which would release the owner-wide tokens; and --github-repo or --github-read-only
+// without --github-owner is refused, since a narrowing names one account's token. Whether the
+// owner is one login and each repository a name GitHub can hold is the broker's to check
+// (INVALID_NARROWING).
 func githubNarrowing(owner string, ownerSet bool, repositories []string, readOnly bool) (*GitHubNarrowing, error) {
-	owner = strings.TrimSpace(owner)
 	switch {
-	case ownerSet && owner == "":
+	case ownerSet && strings.TrimSpace(owner) == "":
 		return nil, errors.New("--github-owner names no account: give the account whose GitHub App token to narrow")
 	case !ownerSet && (len(repositories) > 0 || readOnly):
 		return nil, errors.New("--github-repo and --github-read-only narrow one account's GitHub App token: name the account with --github-owner")
 	case !ownerSet:
 		return nil, nil
 	}
-	return &GitHubNarrowing{Owner: strings.ToLower(owner), Repositories: slices.Compact(slices.Sorted(slices.Values(repositories))), ReadOnly: readOnly}, nil
+	canonical := policy.CanonicalGitHubNarrowing(owner, repositories, readOnly)
+	return &GitHubNarrowing{Owner: canonical.Owner, Repositories: canonical.Repositories, ReadOnly: canonical.ReadOnly}, nil
 }
 
 // narrowedAsAsked checks that the broker applied asked to the release it answered with applied. A

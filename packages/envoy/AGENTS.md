@@ -2441,17 +2441,28 @@ installation on an account they do not list, nor for a record with no positive i
 A release may narrow its GitHub App tokens (`secrets.GitHubNarrowing`, the `github_app` body of
 `POST /v1/grants/{id}/values`): the token of one listed account's installation alone, sent
 GitHub's `access_tokens` body naming repositories of that account, `contents: read` and
-`metadata: read`, or both, and nothing else, so a caller can only narrow. The narrowing is that
-release's alone: the grant records none and the broker keeps no token, so its next release without
-one mints the owner-wide tokens, and no approval, record, request object or grant changes, since
-the session holding the grant can always have the owner-wide token. The handler checks the body
-(`narrowingOf`: one login by `policy.ParseGitHubOwners`, at most 500 repository names GitHub can
-hold) and refuses any other `400 INVALID_NARROWING`; `Values` refuses a narrowing of a grant that
-holds no github-app secret `400 NARROWING_NOT_APPLICABLE`, releasing nothing; `GitHubApp.Mint`
-refuses an owner `github-owners` does not list before it asks GitHub anything. The answer echoes
-the narrowing applied as `github_app`, which the CLI's exec form (`--github-owner`,
-`--github-repo`, `--github-read-only`) requires before it runs anything, since a broker from
-before narrowing ignores the body and releases the owner-wide token.
+`metadata: read`, or both, and nothing else, so a caller can only narrow. A body naming
+repositories alone names no permissions, and GitHub then gives the token every permission the App
+holds, its organization permissions among them: only `read_only` limits those. The narrowing is
+that release's alone: the grant records none (each release's `grant.used` audit row does) and the
+broker keeps no token, so its next release without one mints the owner-wide tokens, and no
+approval, record, request object or grant changes, since the session holding the grant can always
+have the owner-wide token. `policy.ParseGitHubNarrowing` checks the body (one login by
+`policy.ParseGitHubLogin`, at most 500 repository names GitHub can hold) and the handler refuses
+any other `400 INVALID_NARROWING`; it answers `policy.CanonicalGitHubNarrowing`'s form, the one the
+CLI builds its request in too, so the CLI's comparison of the answer with its request cannot
+drift from the broker's. `Values` refuses, releasing nothing and running no minter, a narrowing
+of a grant that holds no github-app secret (`400 NARROWING_NOT_APPLICABLE`) and one to an account
+a github-app secret of the grant does not list in the snapshot it mints from
+(`403 NARROWING_OWNER_NOT_LISTED`); `GitHubApp.Mint` refuses that account again before it asks
+GitHub anything. GitHub's 422 to a narrowed token is `secrets.ErrMintNarrowingRefused`, answered
+`422 NARROWING_REFUSED` with the narrowing's likely mistake. Both refusals are the caller's, so
+each is logged at WARN as `requests.NarrowingRefusedMessage`, never as `broker: mint failed`.
+`GitHubApp.Mint` releases a narrowed token only when GitHub's answer describes no more than the
+narrowing asked (`GitHubNarrowing.heldBy`: the repositories selected, the permissions held), so
+the narrowing the answer echoes as `github_app` is true by construction. The CLI's exec form
+(`--github-owner`, `--github-repo`, `--github-read-only`) requires that echo before it runs
+anything, since a broker from before narrowing ignores the body and releases the owner-wide token.
 Once its reads are done, `Values` checks every name whose frozen source is a stored one against the
 policy as it stands then (`recheckStoredSources`): a retag to a kind reread during the reads ends
 the grant for good, and one the policy no longer serves pauses it, so a release never returns what

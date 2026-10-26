@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -40,6 +41,9 @@ func newNarrowingServer(t *testing.T) *narrowingServer {
 				s.mu.Lock()
 				defer s.mu.Unlock()
 				s.minted = append(s.minted, req.GitHubNarrowing)
+				if req.GitHubNarrowing != nil && slices.Contains(req.GitHubNarrowing.Repositories, "missing") {
+					return "", fmt.Errorf("%w: GitHub answered HTTP 422 to the narrowed token for ada: likely a repository it names (missing) that the installation does not reach", secrets.ErrMintNarrowingRefused)
+				}
 				if req.GitHubNarrowing != nil {
 					return "narrowed", nil
 				}
@@ -151,6 +155,7 @@ func TestABadNarrowingIs400AndMintsNothing(t *testing.T) {
 	}{
 		{"no owner", map[string]any{"read_only": true}, "owner"},
 		{"two owners", map[string]any{"owner": "ada acme"}, "owner"},
+		{"one owner twice", map[string]any{"owner": "ada ada"}, "owner"},
 		{"an owner no login can be", map[string]any{"owner": "-ada"}, "owner"},
 		{"a repository with its owner", map[string]any{"owner": "ada", "repositories": []string{"ada/proofs"}}, "ada/proofs"},
 		{"a repository named ..", map[string]any{"owner": "ada", "repositories": []string{".."}}, ".."},
@@ -178,5 +183,50 @@ func TestABadNarrowingIs400AndMintsNothing(t *testing.T) {
 	}
 	if strings.Contains(string(body), "plain-v1") {
 		t.Fatalf("the refused narrowing answered the stored value: %s", body)
+	}
+}
+
+// TestANarrowingTheSecretCannotServeIsTheCallersAndNotAMintFailure: a narrowing to an account the
+// secret's github-owners tag does not list is refused 403 NARROWING_OWNER_NOT_LISTED before any
+// minter runs, and one GitHub refuses (a repository it names that the installation does not
+// reach) 422 NARROWING_REFUSED; neither releases a value or answers the 502 MINT_FAILED of an
+// App that failed, and each is logged at WARN as a refused narrowing, never as the operator's
+// mint failure.
+func TestANarrowingTheSecretCannotServeIsTheCallersAndNotAMintFailure(t *testing.T) {
+	logged := policytest.CaptureLog(t)
+	s := newNarrowingServer(t)
+	for _, tc := range []struct {
+		name      string
+		narrowing map[string]any
+		status    int
+		code      string
+		mentions  string
+		minted    int
+	}{
+		{"an unlisted owner", map[string]any{"owner": "Outsider", "read_only": true}, http.StatusForbidden, "NARROWING_OWNER_NOT_LISTED", "outsider", 0},
+		{"a repository GitHub refuses", map[string]any{"owner": "ada", "repositories": []string{"missing"}}, http.StatusUnprocessableEntity, "NARROWING_REFUSED", "missing", 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			status, body := s.values(t, s.grantID, map[string]any{"github_app": tc.narrowing})
+			reply := decode[wireError](t, body)
+			if status != tc.status || reply.Code != tc.code || !strings.Contains(reply.Error, tc.mentions) || strings.Contains(string(body), `"values"`) {
+				t.Fatalf("POST values = %d %s, want %d %s naming %q and no value", status, body, tc.status, tc.code, tc.mentions)
+			}
+			if minted := s.take(); len(minted) != tc.minted {
+				t.Fatalf("the minter ran %d times, want %d", len(minted), tc.minted)
+			}
+		})
+	}
+	if strings.Contains(logged.String(), requests.MintFailedMessage) {
+		t.Fatalf("a refused narrowing was logged as a mint failure: %s", logged.String())
+	}
+	warned := 0
+	for line := range strings.Lines(logged.String()) {
+		if strings.Contains(line, "WARN "+requests.NarrowingRefusedMessage) && strings.Contains(line, "name=APP_KEY") {
+			warned++
+		}
+	}
+	if warned != 2 {
+		t.Fatalf("logged %d %q lines naming APP_KEY at WARN, want 2: %s", warned, requests.NarrowingRefusedMessage, logged.String())
 	}
 }
