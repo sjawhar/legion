@@ -25,7 +25,7 @@ const (
 // siblings): the worker image makes each an empty root-owned mount point. Home is the image's
 // home directory, which each role's namespace overlays with a writable layer of its own.
 // HomeMountsDir is where an issue pod's roles container mounts every volume that belongs at or
-// under Home — the sessions directory, the shared config home, an operator's mount — at the same
+// under Home — the shared config home, an operator's mount — at the same
 // path relative to it, so Home itself carries no mount and the overlay's lower layer has none
 // under it (Linux refuses an overlay whose lower layer has mounts locked under it from a more
 // privileged namespace); role-init binds each back at its own path under Home once the overlay

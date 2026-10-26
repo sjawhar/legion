@@ -1743,10 +1743,11 @@ dropped column would have made this rollback a restore.
 
 From a release that also carries the one `roles` container (daemon API contract 38, [Moving from
 one container per role to one `roles` container](#pinning-a-release-that-drops-what-a-running-pod-still-uses)),
-run that rollback's steps 2 and 4 first — the locators and their `schema_version` row, and
-`legion.yaml`'s `resources` block — since the release before this one refuses a `roles` locator
-and an `issue` resources entry as this one does; its step 3 is not needed, since every issue
-Sandbox is deleted here.
+run that rollback's steps 1, 2, 3 and 5 first — push, stop the daemon, the locators and their
+`schema_version` row, and `legion.yaml`'s `resources` block — since the release before this one
+refuses a `roles` locator and an `issue` resources entry as this one does; its step 4 is not
+needed, since every issue Sandbox is deleted here.
+
 ### Pinning a release that drops what a running pod still uses
 
 A pod is built whole from the image pinned when it was launched, and nothing relaunches it for an
@@ -1818,8 +1819,10 @@ replaces the pod — even an installing (stale-plugin) launch — on the configu
 siblings resume into the new pod; a turn a role was in is sent again once its session resumes, as a
 moved address's relaunch does. The replaced pod takes its disk with it, so the new pod provisions
 its workspace from the issue's pushed branch ([The disk dies with its
-pod](#the-disk-dies-with-its-pod)): have each running issue's work pushed before the rollout, as
-the cutover's step 1 says.
+pod](#the-disk-dies-with-its-pod)): before the rollout, have each running issue's work pushed and
+stop those issues, as the cutover's steps 1 and 2 say ([Cutting over to the pod-owned
+disk](#cutting-over-to-the-pod-owned-disk)), since the boot replaces every issue pod at once and
+work done after a push is lost with its pod.
 `legion.yaml`'s `resources` takes one `issue` entry in place of the per-role entries
 ([Configuration](#configuration)); keep a copy of the block as it was, which a rollback puts back.
 `runtime.kubernetes.pod` loses names it could use before, each refused at load
@@ -1848,7 +1851,7 @@ to what the earlier release reads. Re-pinning alone boots neither:
 
 **Every issue pod ends in this rollback, and its disk with it; push first.** An issue's disk is a
 generic ephemeral volume its pod owns, not its Sandbox ([The disk dies with its
-pod](#the-disk-dies-with-its-pod)), so step 3 below, which suspends each issue Sandbox to rewrite
+pod](#the-disk-dies-with-its-pod)), so step 4 below, which suspends each issue Sandbox to rewrite
 its template, ends each pod and deletes each disk, and whatever a workspace held that was not
 pushed is gone. Nothing else is lost: every session is a row in the session database, which the
 rollback does not touch and both releases read, and the earlier release's next launch of each
@@ -3071,9 +3074,7 @@ through any of these:
   a script, an archive or a patch a role writes there to run or read a moment later is a file
   every sibling can replace first, and a tool that names a file in it by a fixed name reads
   whatever is there;
-- under `session_store: pvc`, the sessions directory on the issue's volume (`/legion/sessions`),
-  which every role can write: the transcript a sibling's Oh My Pi reads back when its session
-  resumes. Under `postgres` the transcripts are rows instead, and the database's URL is in the
+- the session transcripts: under `postgres` they are rows, and the database's URL is in the
   providers mount the container holds for the pod rather than for a role, so every role of the
   issue reaches them there. Under `cloudsql-iam` each generation's connection is private to its
   role (the socket is in that role's private directory), but every role signs in as the pod's one

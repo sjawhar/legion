@@ -6,7 +6,7 @@
 // zz_previous_layout_fixture_test.go of its internal/runtime/sandbox, and builds that package's
 // Stage 4a harness with it. The previous-layout check of this branch's harness runs the result once,
 // while its own runtime is stopped: the previous release's own runtime and rig launch the issue
-// S4A-9's architect and tester in one pod of that layout, on the previous release's worker image,
+// S4A-10's architect and tester in one pod of that layout, on the previous release's worker image,
 // exactly as a deployment running it would, and leave both running. Each claim's marker is at the
 // root of that pod's own disk, which every role container of the layout mounts and which dies with
 // the pod, and its session is recorded in the run's session table (awaitRunning's recordSession),

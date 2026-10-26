@@ -230,7 +230,7 @@ func privateDevices() error {
 }
 
 // privateHome gives the role a writable layer of its own over the image's home, then puts every
-// volume the home carries — an issue pod's sessions directory, an operator's mount — back at its
+// volume the home carries — the shared config home, an operator's mount — back at its
 // own path on top. The container mounts those volumes under the home mounts directory rather than
 // under the home itself, so the overlay's lower layer, the home, has no mount under it: Linux
 // refuses an overlay whose lower layer has mounts under it that a more privileged namespace locked
