@@ -191,10 +191,15 @@ func TestSIGTERMWithAKeyedSendAtTheListenerSettlesItSentBeforeExit(t *testing.T)
 	const sessionID = "s1"
 	held, release := make(chan struct{}), make(chan struct{})
 	var holding atomic.Bool
+	// Dispatch resolves a send's session by id against its record (`/v1/registry/{id}`); the live
+	// list answers the same row for anything that still reads it.
+	const session = `{"session_id":"` + sessionID + `","title":"planner","capabilities":["aside","btw","steer"],"last_seen":200}`
 	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/registry/"+sessionID:
+			_, _ = w.Write([]byte(session))
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/sessions":
-			_, _ = w.Write([]byte(`[{"session_id":"` + sessionID + `","title":"planner","capabilities":["aside","btw","steer"],"last_seen":200}]`))
+			_, _ = w.Write([]byte("[" + session + "]"))
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/messages/send":
 			if holding.CompareAndSwap(false, true) {
 				close(held)
@@ -317,17 +322,25 @@ func TestSIGTERMWithAKeyedSendAtTheListenerSettlesItSentBeforeExit(t *testing.T)
 // and left every recipient the workers had not reached with a pending attempt no process holds.
 func TestSIGTERMWithABroadcastAtTheListenerSettlesEveryRecipientBeforeExit(t *testing.T) {
 	const heldSession = "s2"
-	sessions := `[
-		{"session_id":"s1","title":"Planner","capabilities":["btw","steer"],"last_seen":300},
-		{"session_id":"s2","title":"Tester","capabilities":["btw","steer"],"last_seen":200},
-		{"session_id":"s3","title":"Reviewer","capabilities":["btw","steer"],"last_seen":100}
-	]`
+	// Each selected session is resolved by id against its own record (`/v1/registry/{id}`).
+	sessions := map[string]string{
+		"s1": `{"session_id":"s1","title":"Planner","capabilities":["btw","steer"],"last_seen":300}`,
+		"s2": `{"session_id":"s2","title":"Tester","capabilities":["btw","steer"],"last_seen":200}`,
+		"s3": `{"session_id":"s3","title":"Reviewer","capabilities":["btw","steer"],"last_seen":100}`,
+	}
 	held, release := make(chan struct{}), make(chan struct{})
 	var holding atomic.Bool
 	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/v1/registry/"):
+			row, ok := sessions[strings.TrimPrefix(r.URL.Path, "/v1/registry/")]
+			if !ok {
+				w.WriteHeader(http.StatusNotFound)
+				return
+			}
+			_, _ = w.Write([]byte(row))
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/sessions":
-			_, _ = w.Write([]byte(sessions))
+			_, _ = w.Write([]byte("[" + sessions["s1"] + "," + sessions["s2"] + "," + sessions["s3"] + "]"))
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/messages/send":
 			var request struct {
 				TargetSession string `json:"target_session"`

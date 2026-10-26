@@ -461,10 +461,9 @@ func TestBroadcastWhoseSessionReadDoesNotAnswerWritesNothingAndLeavesItsKeyFree(
 
 	send := func() *httptest.ResponseRecorder {
 		t.Helper()
-		return postBroadcast(t, handler, map[string]any{
+		return postBroadcastKeyed(t, handler, map[string]any{
 			"body": "Status?", "delivery": "steer", "session_ids": []string{"planner", "tester"},
-			"idempotency_key": "one-read-did-not-answer",
-		}, "alice")
+		}, "alice", "one-read-did-not-answer")
 	}
 
 	refused := send()
@@ -519,10 +518,9 @@ func TestBroadcastWhoseBudgetEndsBeforeEverySessionIsReadWritesNothingAndLeavesI
 	expired := &server{deps: deps, broadcastResolveBudget: time.Nanosecond}
 	send := func(handler http.Handler) *httptest.ResponseRecorder {
 		t.Helper()
-		return postBroadcast(t, handler, map[string]any{
+		return postBroadcastKeyed(t, handler, map[string]any{
 			"body": "Status?", "delivery": "steer", "session_ids": []string{"planner", "tester"},
-			"idempotency_key": "budget-ended-before-every-read",
-		}, "alice")
+		}, "alice", "budget-ended-before-every-read")
 	}
 
 	refused := send(http.HandlerFunc(expired.createBroadcast))

@@ -503,10 +503,9 @@ func TestDispatchBroadcastResolvesSessionsTheCacheHasNotRefilled(t *testing.T) {
 	tester := rig.registerSession(t, "ses_tester", "Tester")
 
 	response := rig.asHuman(t, http.MethodPost, "/api/v1/broadcasts", map[string]any{
-		"body":            "Stand down and report status.",
-		"delivery":        rigDeliveryMode,
-		"session_ids":     []string{planner.id, tester.id},
-		"idempotency_key": "cross-service-broadcast",
+		"body":        "Stand down and report status.",
+		"delivery":    rigDeliveryMode,
+		"session_ids": []string{planner.id, tester.id},
 	})
 	if response.Code != http.StatusCreated {
 		t.Fatalf("broadcast to two sessions the cache has not refilled: status=%d body=%s",
@@ -546,10 +545,9 @@ func TestDispatchRefusesABroadcastWhenASessionReadDoesNotAnswer(t *testing.T) {
 	stallSessionReads(t, rig.cold.sessions)
 
 	response := rig.asHuman(t, http.MethodPost, "/api/v1/broadcasts", map[string]any{
-		"body":            "Stand down and report status.",
-		"delivery":        rigDeliveryMode,
-		"session_ids":     []string{planner.id, tester.id},
-		"idempotency_key": "cross-service-unanswered",
+		"body":        "Stand down and report status.",
+		"delivery":    rigDeliveryMode,
+		"session_ids": []string{planner.id, tester.id},
 	})
 	if response.Code != http.StatusServiceUnavailable {
 		t.Fatalf("broadcast while the session bucket cannot be read: status=%d body=%s, want 503",
