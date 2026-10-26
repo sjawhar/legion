@@ -43775,6 +43775,7 @@ try {
 }
 `;
 var MAY_HAVE_POSTED = "the reply may have been posted, and posting it again may put it in the thread twice";
+var AGENT_SECRETS_INJECTION = `agent-secrets: ${SLACK_BOT_TOKEN_SECRET} from `;
 var URL_CANDIDATE = /(?<![a-z0-9+.-])[a-z][a-z0-9+.-]{0,31}:\/\/[^\s<>|"'`]+/gi;
 var WEB_SCHEME = /^https?:\/\//i;
 var BARE_HOST = /(?<![\w@./:%-])((?:[a-z0-9-]{1,63}\.)*[a-z0-9-]{1,63})\.?(:\d{1,5})?(?![\w-])/gi;
@@ -43878,23 +43879,26 @@ async function postSlackReply(reply, options = {}) {
     new Response(child.stderr).text(),
     child.exited
   ]).finally(() => clearTimeout(timer));
-  const said = stderr.trim().split(`
-`).filter(Boolean).join(" ");
+  const stderrLines = stderr.trim().split(`
+`).filter(Boolean);
+  const injectedAt = stderrLines.findIndex((line2) => line2.startsWith(AGENT_SECRETS_INJECTION));
+  const beforeInjection = injectedAt < 0 ? stderrLines.join(" ") : stderrLines.slice(0, injectedAt).join(" ");
   const line = posterLine(stdout);
   if (line === undefined) {
     if (child.signalCode === "SIGKILL") {
       throw new Error(`slack_post got no answer within ${POST_TIMEOUT_MS / 1000} s: ${MAY_HAVE_POSTED}`);
     }
-    if (said.startsWith("agent-secrets:")) {
+    if (injectedAt < 0 && beforeInjection.startsWith("agent-secrets:")) {
       if (code === 75) {
-        throw new Error(`the secrets broker has not granted ${SLACK_BOT_TOKEN_SECRET}: its request is waiting for approval (${said}); nothing was posted`);
+        throw new Error(`the secrets broker has not granted ${SLACK_BOT_TOKEN_SECRET}: its request is waiting for approval (${beforeInjection}); nothing was posted`);
       }
       if (code === 77) {
-        throw new Error(`the secrets broker denied ${SLACK_BOT_TOKEN_SECRET} (${said}); nothing was posted`);
+        throw new Error(`the secrets broker denied ${SLACK_BOT_TOKEN_SECRET} (${beforeInjection}); nothing was posted`);
       }
-      throw new Error(`the secrets broker did not release ${SLACK_BOT_TOKEN_SECRET} (${said}); nothing was posted`);
+      throw new Error(`the secrets broker did not release ${SLACK_BOT_TOKEN_SECRET} (${beforeInjection}); nothing was posted`);
     }
-    throw new Error(`slack_post's poster exited ${code} without an answer: ${MAY_HAVE_POSTED}`);
+    const detail = beforeInjection === "" ? "" : ` (${beforeInjection})`;
+    throw new Error(`slack_post's poster exited ${code} without an answer${detail}: ${MAY_HAVE_POSTED}`);
   }
   if (line.refused === null) {
     throw new Error("Slack refused chat.postMessage with an error code slack_post does not pass on");
