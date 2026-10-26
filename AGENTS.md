@@ -197,8 +197,9 @@ that ran as a tree of its own or carries a handed-over run, `CHILD_IN_OTHER_TREE
 recorded in another tree. A labelled `todo` issue whose parent is not recorded but sits under a
 live tree (a child that tree's architect has not released) waits for no slot until that release,
 or its parent's, brings it into the tree, and queues as a root of its own once that tree lingers or
-leaves the workflow. An issue is recorded on the repository Dispatch resolves for it (its own,
-else its nearest ancestor's, else the project's default) and keeps it: an issue whose repository
+leaves the workflow, or once a person moves its parent, or an ancestor, out from under that tree.
+An issue is recorded on the repository Dispatch resolves for it (its own, else its nearest
+ancestor's, else the project's default) and keeps it: an issue whose repository
 resolves to none, or to one the daemon does not serve, is not admitted, and the daemon says why on
 the issue; a later change of an admitted issue's repository is not applied, which the daemon says
 too. A root that stays `done` through its linger hands every child still in the
