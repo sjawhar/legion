@@ -1169,21 +1169,27 @@ handover below takes its key over once its lease lapses. While it runs it renews
 lease every 20 s, until its ten minutes are up, so a client that gave up and asks again is answered
 `409 KEY_IN_FLIGHT` for as long as the first run lives, then that run's stored answer; only a run
 whose process died is taken over, once its lease lapses. A write Dispatch takes longer to finish
-than its client waits still lands once. A repeat while the first still runs is answered before
-its body is spooled, by the key alone, so a retried upload is never written to disk while its
-first attempt runs, and a different request under a key still running is `KEY_IN_FLIGHT` too
-until the first has answered, then `KEY_REUSED`. The key is claimed, and its answer recorded, on
-a context the client's leaving does not end, bounded at 10 s.
+than its client waits still lands once. A repeat while the first still runs is never spooled, so
+a retried upload is never written to disk while its first attempt runs: its body is read off the
+connection and discarded, hashed on the way, and once it has arrived the key is read again and
+judged by that digest. The first still running is `KEY_IN_FLIGHT`; a different body is
+`KEY_REUSED`, whether the first has answered or not; a first that answered meanwhile is replayed;
+one that committed and lost its answer is `KEY_COMMITTED`; and one that gave the key up meanwhile
+is `KEY_IN_FLIGHT` with `Retry-After: 1`, whose retry runs the request. An
+`Expect: 100-continue` repeat is `KEY_IN_FLIGHT` at once, with nothing read. The key is claimed,
+and its answer recorded, on a context the client's leaving does not end, bounded at 10 s.
 
-Every answer Dispatch gives before it has read a request's body - `KEY_IN_FLIGHT`, `KEY_INVALID`,
-the closed-issue upload refusal, `LOGIN_CHANGED`, a refused path parameter, a refusal before
+Every other answer Dispatch gives before it has read a request's body - `KEY_INVALID`, the
+closed-issue upload refusal, `LOGIN_CHANGED`, a refused path parameter, a refusal before
 decoding - is written only once the rest of the body has been read and discarded, never spooled,
 up to the route's limit (26 MiB on the upload routes, 1 MiB on every other). A browser that sends
 a whole upload before it reads the answer (WebKit, Firefox) otherwise met the connection's close
 as a reset and never saw the answer. A body past the limit is answered `413 CAP_EXCEEDED` (uploads)
 or `413 REQUEST_TOO_LARGE` in that answer's place, and the connection closes; a `401` is the one
 early answer that stands, since a caller nobody resolves is refused before any limit is judged.
-An `Expect: 100-continue` request never told to continue is not drained.
+Both reads wait at most a minute for a body: one that stops arriving is given its answer with
+`Connection: close`. An `Expect: 100-continue` request answered early is never asked for its
+body: Dispatch sends no `100 Continue`, sends the answer and closes the connection.
 
 | Status / code | Meaning |
 | --- | --- |

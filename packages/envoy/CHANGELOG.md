@@ -24,10 +24,12 @@
   first has finished, is answered the first's stored status, headers and body with
   `Idempotency-Replayed: ?1`, and nothing runs again; the same key with a different request is
   `422 KEY_REUSED`, naming the request that used it; a repeat while the first still runs is
-  `409 KEY_IN_FLIGHT` with `Retry-After: 1`, answered by the key alone before the repeat's body is
-  spooled, so a retried upload is never written to disk while its first attempt runs (a different
-  request under a key still running is `KEY_IN_FLIGHT` too, then `KEY_REUSED` once the first has
-  answered). A
+  `409 KEY_IN_FLIGHT` with `Retry-After: 1`. Such a repeat is never spooled, so a retried upload is
+  never written to disk while its first attempt runs: its body is read off the connection and
+  discarded, hashed on the way, and the key is read again and judged by that digest once the body
+  has arrived, so a different request under the key is `KEY_REUSED` whether the first still runs
+  or not, a first that answered meanwhile is replayed, and one that gave the key up meanwhile is
+  `KEY_IN_FLIGHT` again, whose retry runs the request. A
   keyed write finishes on the server whatever its client does: its handler runs with the client's
   cancellation taken off, bounded at ten minutes and counted in the server's background wait, so a
   shutdown lets it finish within the 30 s stop grace, past which the lease handover takes its key
@@ -44,13 +46,15 @@
   before its body is spooled, keyed or not, and claims no key; a repeat under a key Dispatch
   answers itself (a stored answer, a first still running, a write that committed and lost its
   answer) is answered as that key says whatever the issue's state now, so an upload that landed
-  before the issue closed is replayed its `201`. Every answer given before a request's body is read
-  (`KEY_IN_FLIGHT`, `KEY_INVALID`, the closed-issue refusal, `LOGIN_CHANGED`, a refused path
-  parameter, a refusal before decoding) is written only once the rest of the body has been read
-  and discarded, up to the route's limit: WebKit and Firefox, which send a whole upload before
-  they read its answer, met the closed connection as a reset and dropped the answer. A body past
-  the limit is answered `413` in that answer's place and the connection closes, except a `401`,
-  which stands. A
+  before the issue closed is replayed its `201`. Every other answer given before a request's body
+  is read (`KEY_INVALID`, the closed-issue refusal, `LOGIN_CHANGED`, a refused path parameter, a
+  refusal before decoding) is written only once the rest of the body has been read and discarded,
+  up to the route's limit: WebKit and Firefox, which send a whole upload before they read its
+  answer, met the closed connection as a reset and dropped the answer. A body past the limit is
+  answered `413` in that answer's place and the connection closes, except a `401`, which stands.
+  Both reads of a body Dispatch does not keep wait at most a minute: a body that stops arriving is
+  given its answer with `Connection: close`. An `Expect: 100-continue` request answered early is
+  never asked for its body. A
   repeat whose first request committed a write but whose answer was lost (its lease lapsed, or it
   ended in a 5xx or a panic after committing) is `409 KEY_COMMITTED`, with no `Retry-After`: the
   write landed and is not run again, and the client reads what it wrote; every transaction a keyed
