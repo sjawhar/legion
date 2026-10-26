@@ -1099,6 +1099,109 @@ func whileTheRowIsHeld(
 	}
 }
 
+// A claim and a release begin their transaction before they take the issue's row, so a write that
+// holds the row while they wait and stamps updated_at at its own statement - a PATCH does - stamps
+// a time after their start. Neither moves updated_at back below that stamp, and each answers the
+// value the row holds, which a read after it returns too.
+func TestAClaimWriteThatWaitedNeverMovesUpdatedAtBackward(t *testing.T) {
+	for _, write := range []struct {
+		name   string
+		method string
+		body   any
+	}{
+		{name: "a claim", method: http.MethodPost, body: map[string]any{}},
+		{name: "a release", method: http.MethodDelete},
+	} {
+		t.Run(write.name, func(t *testing.T) {
+			live := &liveRegistry{}
+			live.set("session-one")
+			handler, database := claimHandler(t, live)
+			key := claimIssueKey(t, handler, "todo")
+			if write.method == http.MethodDelete {
+				if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+key+"/claim", map[string]any{}, "alice"); response.Code != http.StatusOK {
+					t.Fatalf("claim before the release: status=%d body=%s", response.Code, response.Body.String())
+				}
+			}
+			ctx := context.Background()
+			holder, err := database.Pool.Begin(ctx)
+			if err != nil {
+				t.Fatalf("begin: %v", err)
+			}
+			defer func() { _ = holder.Rollback(ctx) }()
+			if err := holder.QueryRow(ctx, `select key from issues where key = $1 for no key update`, key).Scan(new(string)); err != nil {
+				t.Fatalf("hold the issue row: %v", err)
+			}
+			answered := make(chan *httptest.ResponseRecorder, 1)
+			go func() {
+				answered <- dispatchRequest(t, handler, write.method, "/api/v1/issues/"+key+"/claim", write.body, "alice")
+			}()
+			waitForDatabaseLocks(t, holder, 1)
+			var stamped time.Time
+			if err := holder.QueryRow(ctx, `
+				update issues set updated_at = clock_timestamp() where key = $1 returning updated_at
+			`, key).Scan(&stamped); err != nil {
+				t.Fatalf("stamp updated_at under the row lock: %v", err)
+			}
+			if err := holder.Commit(ctx); err != nil {
+				t.Fatalf("commit the stamp: %v", err)
+			}
+			response := awaitResponse(t, answered)
+			if response.Code != http.StatusOK {
+				t.Fatalf("%s after the wait: status=%d body=%s", write.name, response.Code, response.Body.String())
+			}
+			var stored time.Time
+			if err := database.Pool.QueryRow(ctx, `select updated_at from issues where key = $1`, key).Scan(&stored); err != nil {
+				t.Fatalf("read the stored updated_at: %v", err)
+			}
+			if stored.Before(stamped) {
+				t.Fatalf("%s moved updated_at back from %s, stamped during its wait, to %s", write.name, stamped, stored)
+			}
+			if got := decodeBody[model.Issue](t, response).UpdatedAt; !got.Equal(stored) {
+				t.Fatalf("%s answered updated_at %s, the row holds %s", write.name, got, stored)
+			}
+			read := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+key, nil, "alice")
+			if read.Code != http.StatusOK {
+				t.Fatalf("read after %s: status=%d body=%s", write.name, read.Code, read.Body.String())
+			}
+			if got := decodeBody[model.Issue](t, read).UpdatedAt; !got.Equal(stored) {
+				t.Fatalf("a read after %s answered updated_at %s, the row holds %s", write.name, got, stored)
+			}
+		})
+	}
+}
+
+// The statement's moment is a floor, not the value: a row whose updated_at is already past this
+// statement's clock keeps it through a PATCH, a claim and a release, as it does through an event
+// (TestEventDoesNotMoveIssueUpdatedAtBackward).
+func TestAnIssueWriteKeepsAnUpdatedAtAheadOfItsClock(t *testing.T) {
+	live := &liveRegistry{}
+	live.set("session-one")
+	handler, database := claimHandler(t, live)
+	key := claimIssueKey(t, handler, "todo")
+	future := time.Now().UTC().Truncate(time.Microsecond).Add(time.Hour)
+	if _, err := database.Pool.Exec(context.Background(), `update issues set updated_at = $2 where key = $1`, key, future); err != nil {
+		t.Fatalf("set a future updated_at: %v", err)
+	}
+	for _, write := range []struct {
+		name   string
+		method string
+		target string
+		body   any
+	}{
+		{name: "a PATCH", method: http.MethodPatch, target: "/api/v1/issues/" + key, body: map[string]string{"title": "Retitled"}},
+		{name: "a claim", method: http.MethodPost, target: "/api/v1/issues/" + key + "/claim", body: map[string]any{}},
+		{name: "a release", method: http.MethodDelete, target: "/api/v1/issues/" + key + "/claim"},
+	} {
+		response := dispatchRequest(t, handler, write.method, write.target, write.body, "alice")
+		if response.Code != http.StatusOK {
+			t.Fatalf("%s: status=%d body=%s", write.name, response.Code, response.Body.String())
+		}
+		if got := decodeBody[model.Issue](t, response).UpdatedAt; !got.Equal(future) {
+			t.Fatalf("%s answered updated_at %s, want the later %s the row held", write.name, got, future)
+		}
+	}
+}
+
 // awaitRowLockWaiter waits until a backend of this test's own database is waiting on a lock:
 // the request under test, stopped at the issue's row lock inside claimWrite. Scoped to
 // current_database() because one Postgres serves every test in the package.
