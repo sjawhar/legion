@@ -1136,6 +1136,39 @@
 
 ### Fixed
 
+- The listener no longer empties its copy of the session, interest or CI bucket to read the bucket
+  again, on a reconnect, a recreated bucket or a rebuilt watcher. Every row stays while the read
+  runs, each record it delivers replaces its row, and only a read that delivered every record
+  removes the rows it did not find; a read that times out or ends early removes nothing, and the
+  listener reads again itself (a timed-out read after 5 s). `GET /v1/sessions` used to answer `200`
+  with every session missing for as long as the read took, which Dispatch, the Agents page and
+  every agent's `envoy_sessions` read as agents that had ended. Until a copy's first complete read,
+  and once a copy has not followed its bucket (a read under way, an ended watcher, a recreated
+  bucket, a lost NATS connection) for longer than 2 minutes, or half the bucket's `MaxAge` when that
+  is shorter, `GET /v1/sessions` and `GET /v1/interests/` answer `503` with `Retry-After: 5` and
+  `{"error":"envoy: the agent list is refilling; try again in a moment","code":"refilling"}`, as
+  the closed `/v1` start gate now does for those two reads in place of `service starting`, and
+  `envoy_active_sessions` and `envoy_active_interests` write no sample: `0` is only ever a complete
+  empty copy. The list joins each session's interest from the interest copy alone, with no bucket
+  read per row. The interest reaper used to delete the interests of every session missing from the
+  session copy, which during such a read was every live one; it now asks each candidate's own
+  record in the session bucket before deleting, and keeps the interest when that read does not
+  answer. A NATS disconnect now marks every copy as not following, and the self-health monitor
+  rebuilds a copy left not following with no read under way. `listener-deploy-probe.sh` fails a
+  target whose list refuses while its `/healthz` answers 200, by design. `scripts/e2e-refill.sh`
+  proves the re-read, an interrupted read and the refusal on the real listener (INFRA-261).
+- Dispatch no longer reports an agent absent from an agent list it could not read. While the
+  listener refuses its list as refilling, `GET /api/v1/agents`, both subscriber reads
+  (`GET /api/v1/issues/{key}/subscribers`, `GET /api/v1/artifacts/{id}/subscribers`) and a
+  `route_status=live` or `no_holder` issue filter answer `503 ENVOY_REFILLING` with the listener's
+  `Retry-After` (5 when it sends none), apart from `503 ENVOY_UNAVAILABLE` for a listener that did
+  not answer; every issue read gives a routed issue `route_status: "unknown"` with the new
+  `route_status_reason` (`refilling` or `unreachable`, null with any other status), never
+  `no_holder`. The Agents page, an agent's conversation page, mention suggestions, the issue
+  header's subscribers and route status, document subscribers, an ask card's recipients, the claim
+  chip, the Unclaimed filter, credential session lines and the broadcast controls say the list is
+  refilling, or the listener unreachable, where they used to say an agent had ended, list no one,
+  count zero or show it offline (INFRA-261).
 - An agent woken by a Slack message now reads the words the message carries, wherever it carries
   them. A Slack delivery's `text` is the message's own text and then every display string its
   blocks and then its attachments hold — the strings under `pretext`, `author_name`,

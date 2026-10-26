@@ -225,6 +225,17 @@ so during a rolling deploy the replacement answers `/healthz` 200 `starting`
 and `/v1` 503 `service starting` for most of a minute and the run exits 1. A
 listener that opens `/v1` once its caches are warm passes.
 
+The refilling answer is another cause. A listener answers `GET /v1/sessions`
+`503` with `Retry-After: 5` and code `refilling` (`503:envoy: the agent list is
+refilling; try again in a moment` in the summary) while it cannot stand behind
+its copy of the session or interest bucket: before its first complete read of
+the bucket (its closed `/v1` start gate gives this route the same answer, and a
+cache warm-up that timed out opens `/v1` on a copy still being read), or once a
+re-read has not completed for longer than its bound (2 minutes, or half the
+bucket's `MaxAge` when that is shorter). Its `/healthz` answers 200 all the
+while, so the target fails: a client that reached it then was refused the list
+(INFRA-261).
+
 `listener-deploy-probe.test.sh` proves the verdict over two fake tasks, Python
 `http.server`s on `127.0.0.1` and `127.0.0.2` behind a fake `getent`; CI runs it
 in the `envoy-go` job of `.github/workflows/envoy-and-contracts.yaml`.
