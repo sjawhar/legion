@@ -2544,8 +2544,9 @@ usually empty during a plain refused dial, since nats.go clears it on every fail
 own cause while a handshake keeps failing, since nats.go leaves that one in place until the
 connection succeeds. At boot an unreachable NATS or Dispatch delays the boot instead of exiting,
 retried one second doubling to one minute, forever, logged at warn as `boot probe failed
-transiently; waiting to run it again` with its `probe` (naming which), `attempt`, `retryIn` and
-`detail`.
+transiently; waiting to run it again` with its `probe` (naming which: `repository mapping read`,
+the boot's first Dispatch read, `connect Envoy NATS`, or `list Dispatch issues for admission`),
+`attempt`, `retryIn` and `detail`.
 
 A malformed seed refuses the boot immediately at startup, before any network connection is
 attempted. A NATS authorization violation at connect time is the same: the server said no
@@ -2592,7 +2593,9 @@ waits and the logged `detail` may never name the authorization error at all (LEG
 While the readiness gate waits, callers outside the daemon see it as still booting, not as down:
 the API port is already bound by this point (the same as during the image probe, both before this
 gate), so it accepts a connection but serves nothing until the gate passes, and `legion status`
-reports the daemon's PID alive but not yet answering. A pane's `legion` tool calls (`read_record`
+reports the daemon's PID alive but not yet answering. The repository mapping read waits before the
+port is bound, so while it waits a connection to the API is refused, as for a daemon that is not
+running, and only the daemon's log says it waits. A pane's `legion` tool calls (`read_record`
 and `handoff_complete`, the latter minting its grant in-process first) and `controller start` all
 wait on that same API, so none of them succeeds until the daemon actually serves; a pane's plain
 `gh` and `git` do not, since they read the role's credential from its gh files and call the daemon
