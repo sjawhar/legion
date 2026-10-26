@@ -4,10 +4,11 @@
 # writes anything there.
 #
 # Sourced, never run. The caller defines fail (which exits) and note, and sets work, the run's
-# scratch directory. The gated Go proofs (packages/daemon/internal/api/real_github_test.go,
-# liveProofApps and proveLiveProofApps) are callers too: they define fail and note themselves,
-# set work for check_github_apps alone, and read require_app_inputs's results and app_key_command
-# from stdout, so neither of those two writes anything else to stdout. Each App is an id and the
+# scratch directory. The gated Go proofs (packages/daemon/internal/api/real_github_test.go) are
+# callers too: liveProofApps defines fail and reads require_app_inputs's results and
+# app_key_command from stdout, so neither of those two writes anything else to stdout, and
+# proveLiveProofApps defines fail and note, writes $work/github-apps.yaml itself from the block the
+# proofs act with, and runs check_github_apps on it. Each App is an id and the
 # name of the secret-store key holding its private key, read by require_app_inputs from two inputs
 # that default to this repository's own deployment:
 #   LEGION_E2E_<ROLE>_APP_ID        the App's numeric id (ROLE is IMPLEMENT or REVIEW)

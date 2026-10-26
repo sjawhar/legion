@@ -141,9 +141,9 @@ Read from GitHub itself (`GET /app` with each App's JWT, 2026-09-13):
 05:53Z, and GitHub now shows the review App's earlier reviews as `trajectory-s-legion-reviewer[bot]`
 (bot user 271566912). So the `legion-implementer[bot]` and `legion-reviewer[bot]` this entry and
 older entries quote, before 2026-10-16, are these two Apps. The slugs `legion-implementer` and
-`legion-reviewer` have since gone to two other Apps, whose bots also commit here under other bot
-user ids. Identify an App by its id, which `GET /app` answers with the App's own JWT, or a bot by
-its user id, never by a slug or login.)
+`legion-reviewer` have since gone to two other Apps, and main carries commits by
+`legion-implementer[bot]` after 2026-10-16 under another bot user id. Identify an App by its id,
+which `GET /app` answers with the App's own JWT, or a bot by its user id, never by a slug or login.)
 
 (2026-09-25: the review App's installations have since gained `contents: write`; the current record
 is in `packages/daemon/src/daemon/AGENTS.md`, GitHub Apps.)

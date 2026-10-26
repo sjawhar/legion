@@ -2,6 +2,7 @@ package api
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -135,19 +136,31 @@ done`
 	return liveProofApp{fields[0], fields[1], fields[2]}, liveProofApp{fields[3], fields[4], fields[5]}, nil
 }
 
-// proveLiveProofApps proves both Apps against GitHub as every stage proof does, with the lib's own
-// write_github_apps and check_github_apps in the scratch directory work: each key signs an App JWT
-// and GitHub's GET /app must answer its configured id and the write permission its role needs,
-// which also refuses the two Apps configured the other way round. It returns the lib's notes, and
-// on a refusal the lib's reason, which names the App by role and id and never the key.
-func proveLiveProofApps(environ []string, work string) (notes string, err error) {
+// proveLiveProofApps proves apps, the very block the gated proofs act with, against GitHub as every
+// stage proof does: it writes apps as legion.yaml's `github_apps` block to work/github-apps.yaml and
+// runs the lib's own check_github_apps on that file, so each key signs an App JWT and GitHub's
+// GET /app must answer its configured id and the write permission its role needs, which also
+// refuses the two Apps configured the other way round. It returns the lib's notes, and on a
+// refusal the lib's reason, which names the App by role and id and never the key.
+func proveLiveProofApps(environ []string, work string, apps config.GitHubApps) (notes string, err error) {
+	block := "github_apps:\n"
+	for _, role := range []struct {
+		name string
+		app  config.GitHubApp
+	}{{"implement", apps.Implement}, {"review", apps.Review}} {
+		// A JSON string is a YAML double-quoted scalar, as the lib's own write_github_apps quotes it.
+		id, _ := json.Marshal(role.app.AppID)
+		command, _ := json.Marshal(role.app.PrivateKeyCommand)
+		block += fmt.Sprintf("  %s:\n    app_id: %s\n    private_key_command: %s\n", role.name, id, command)
+	}
+	if err := os.WriteFile(filepath.Join(work, "github-apps.yaml"), []byte(block), 0o600); err != nil {
+		return "", err
+	}
 	const script = `set -euo pipefail
 fail() { printf '%s\n' "$*" >&2; exit 1; }
 note() { printf '%s\n' "$*" >&2; }
 work=$2
 source "$1"
-require_app_inputs implement review
-write_github_apps implement review
 check_github_apps implement review`
 	_, stderr, runErr := runGitHubAppsLib(environ, script, work)
 	if runErr != nil {
@@ -159,7 +172,8 @@ check_github_apps implement review`
 // realGitHubApps is Legion's implement and review Apps: this repository's own deployment by
 // default, another deployment's through the same four inputs the stage proofs read, each App's id
 // and the secrets-store key the devbox's `secrets` CLI resolves to its private key, all as
-// liveProofApps reads them from the lib, and each proved against GitHub before a proof acts as it.
+// liveProofApps reads them from the lib, and the block it returns proved against GitHub before a
+// proof acts as it.
 func realGitHubApps(t *testing.T) config.GitHubApps {
 	t.Helper()
 	// go test's result cache keys a test on the variables it looks up and the files it opens, and
@@ -175,19 +189,20 @@ func realGitHubApps(t *testing.T) config.GitHubApps {
 	if err != nil {
 		t.Fatal(err)
 	}
-	notes, err := proveLiveProofApps(os.Environ(), t.TempDir())
+	apps := config.GitHubApps{
+		Implement: config.GitHubApp{AppID: implement.id, PrivateKeyCommand: implement.keyCommand},
+		Review:    config.GitHubApp{AppID: review.id, PrivateKeyCommand: review.keyCommand},
+	}
+	notes, err := proveLiveProofApps(os.Environ(), t.TempDir(), apps)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Log(notes)
-	apps, err := config.ResolveGitHubApps(config.GitHubApps{
-		Implement: config.GitHubApp{AppID: implement.id, PrivateKeyCommand: implement.keyCommand},
-		Review:    config.GitHubApp{AppID: review.id, PrivateKeyCommand: review.keyCommand},
-	})
+	resolved, err := config.ResolveGitHubApps(apps)
 	if err != nil {
 		t.Fatalf("resolve the GitHub App private-key commands: %v", err)
 	}
-	return apps
+	return resolved
 }
 
 // TestLiveProofAppsReadTheLib proves liveProofApps, ungated: with no input set it answers exactly
@@ -248,9 +263,9 @@ func TestLiveProofAppsReadTheLib(t *testing.T) {
 	}
 
 	pasted := strings.Repeat("Zm9vYmFy", 9) // 72 base64 characters: a value, not a store key's name
-	// The last four run where bash would otherwise read the checks in a UTF-8 locale, trace itself
-	// to stderr, or run a startup file first; a runner without the en_US.UTF-8 locale falls back
-	// to C, so those cases still hold there.
+	// The last three run where bash would otherwise read the checks in a UTF-8 locale or trace
+	// itself to stderr; a runner without the en_US.UTF-8 locale falls back to C, so those cases
+	// still hold there. The startup file and the exported function are the reads further down.
 	startup := filepath.Join(t.TempDir(), "bash_env")
 	if err := os.WriteFile(startup, []byte("printf 'noise from BASH_ENV\\n'\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -265,7 +280,6 @@ func TestLiveProofAppsReadTheLib(t *testing.T) {
 		{"LEGION_E2E_IMPLEMENT_APP_ID", "３２０２６３６", []string{"LC_ALL=en_US.UTF-8"}},
 		{"LEGION_E2E_REVIEW_APP_KEY_NAME", "K\u00e9Y", []string{"LC_ALL=en_US.UTF-8"}},
 		{"LEGION_E2E_REVIEW_APP_KEY_NAME", pasted, []string{"SHELLOPTS=braceexpand:hashall:interactive-comments:xtrace"}},
-		{"LEGION_E2E_REVIEW_APP_KEY_NAME", pasted, []string{"BASH_ENV=" + startup, "BASH_XTRACEFD=2", "PS4=+ "}},
 	} {
 		_, _, err := liveProofApps(append(with(refused.input+"="+refused.value), refused.extra...))
 		if err == nil || !strings.Contains(err.Error(), refused.input) || (refused.value != "" && strings.Contains(err.Error(), refused.value)) {
@@ -273,9 +287,11 @@ func TestLiveProofAppsReadTheLib(t *testing.T) {
 		}
 	}
 
-	implement, _, err = liveProofApps(append(with(), "BASH_ENV="+startup))
-	if err != nil || implement.id != defaults["implement_app_id"] {
-		t.Errorf("with a BASH_ENV file that writes to stdout the implement App is %q (err %v), want the lib's default %s", implement.id, err, defaults["implement_app_id"])
+	for _, inherited := range []string{"BASH_ENV=" + startup, "BASH_FUNC_printf%%=() { builtin printf 'HIJACK|'; builtin printf \"$@\"; }"} {
+		implement, _, err = liveProofApps(append(with(), inherited))
+		if err != nil || implement.id != defaults["implement_app_id"] {
+			t.Errorf("with %s inherited the implement App is %q (err %v), want the lib's default %s", inherited, implement.id, err, defaults["implement_app_id"])
+		}
 	}
 }
 
