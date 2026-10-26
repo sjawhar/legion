@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/sjawhar/envoy/internal/testcaps"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/wait"
 )
@@ -94,16 +95,18 @@ func databaseURL(server url.URL, database string) string {
 }
 
 // containerURL starts Image, waits for Postgres to finish its first initialization and be ready
-// again, and returns its postgres database's loopback connection URL. The container ends with t.
+// again, and returns its postgres database's loopback connection URL. The container ends with t,
+// and is capped at two cores and 2 GiB (internal/testcaps).
 func containerURL(t testing.TB) string {
 	t.Helper()
 	ctx := context.Background()
 	container, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
 		ContainerRequest: testcontainers.ContainerRequest{
-			Image:        Image,
-			ExposedPorts: []string{"5432/tcp"},
-			Env:          map[string]string{"POSTGRES_PASSWORD": "test"},
-			WaitingFor:   wait.ForLog("database system is ready to accept connections").WithOccurrence(2),
+			Image:              Image,
+			ExposedPorts:       []string{"5432/tcp"},
+			Env:                map[string]string{"POSTGRES_PASSWORD": "test"},
+			WaitingFor:         wait.ForLog("database system is ready to accept connections").WithOccurrence(2),
+			HostConfigModifier: testcaps.Cap(2, 2<<30),
 		},
 		Started: true,
 	})

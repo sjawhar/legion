@@ -51,6 +51,29 @@ func TestAFailedStartLeavesNoContainer(t *testing.T) {
 	}
 }
 
+// Every container start runs is capped: Docker holds it to containerCPUs cores and containerMemory
+// bytes with no swap beyond that, as the container's own host configuration reads back. A run on an
+// external server starts no container, so it skips this one.
+func TestAStartedContainerIsCapped(t *testing.T) {
+	if server, _, err := external(); err == nil && server != "" {
+		t.Skipf("%s names a running NATS server, so the package starts no container", externalURLEnv)
+	}
+	started, err := start(Image)
+	testcontainers.CleanupContainer(t, started)
+	if err != nil {
+		t.Fatalf("start NATS: %v", err)
+	}
+	inspected, err := started.Inspect(t.Context())
+	if err != nil {
+		t.Fatalf("inspect the container: %v", err)
+	}
+	host := inspected.HostConfig
+	if host.NanoCPUs != containerCPUs*1e9 || host.Memory != containerMemory || host.MemorySwap != containerMemory {
+		t.Errorf("container caps: NanoCPUs %d, Memory %d, MemorySwap %d; want %d, %d, %d",
+			host.NanoCPUs, host.Memory, host.MemorySwap, int64(containerCPUs*1e9), int64(containerMemory), int64(containerMemory))
+	}
+}
+
 func TestMain(m *testing.M) { os.Exit(Main(m)) }
 
 // A running server is named by both of its variables, the monitoring endpoint's trailing slash

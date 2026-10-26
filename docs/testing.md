@@ -24,3 +24,17 @@ the limit, as on a dev box whose `TMPDIR` is on a data disk.
   L=/tmp/a-deliberately-long-tmpdir-for-unix-socket-path-tests-0001 && mkdir -p "$L"
   TMPDIR="$L" GOTMPDIR="$L" go test ./<package>/... -count=1
   ```
+
+## Containers a test starts
+
+Every container a Go test starts with testcontainers carries a CPU and a memory cap, sized to its
+work. A test runs on a shared host as well as on a CI runner, and an uncapped server can take every
+core and all the memory of a host that other work shares.
+
+- In `packages/envoy`, pass `testcaps.Cap(cpus, memory)` (`packages/envoy/internal/testcaps`):
+  through `testcontainers.WithHostConfigModifier` for a `Run`, or as the request's
+  `HostConfigModifier` for a `GenericContainer`. It holds swap to the memory cap.
+- In `packages/daemon`, every container comes from `internal/testnats`'s `start`, which caps it
+  itself (`limited`).
+- `WithHostConfigModifier` replaces any modifier an earlier option set. A test that needs a host
+  configuration of its own sets the caps in that same modifier.

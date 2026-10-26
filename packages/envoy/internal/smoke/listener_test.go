@@ -20,6 +20,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sjawhar/envoy/internal/testcaps"
 	"github.com/sjawhar/envoy/internal/testnats"
 	"github.com/testcontainers/testcontainers-go"
 	tcnats "github.com/testcontainers/testcontainers-go/modules/nats"
@@ -51,9 +52,11 @@ func TestSmoke(t *testing.T) {
 	}
 	t.Cleanup(func() { net.Remove(ctx) })
 
-	// Start NATS using the same module the rest of the project uses.
+	// Start NATS using the same module the rest of the project uses. Each container is capped at
+	// one core and 512 MiB (internal/testcaps).
 	natsC, err := tcnats.Run(ctx, testnats.Image,
 		network.WithNetwork([]string{"nats"}, net),
+		testcontainers.WithHostConfigModifier(testcaps.Cap(1, 512<<20)),
 	)
 	testcontainers.CleanupContainer(t, natsC)
 	if err != nil {
@@ -76,6 +79,7 @@ func TestSmoke(t *testing.T) {
 			"ENVOY_API_TOKEN": smokeAPIToken,
 		}),
 		testcontainers.WithExposedPorts("9020/tcp"),
+		testcontainers.WithHostConfigModifier(testcaps.Cap(1, 512<<20)),
 		// /healthz answers 200 from the moment the port binds: "starting" until the durable consumer
 		// binds, then "healthy" (a liveness answer, docs/solutions/envoy/async-health-startup-pattern.md).
 		// /v1 answers 503 "service starting" until NATS is connected and the interest and session

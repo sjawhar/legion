@@ -29,6 +29,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/docker/docker/api/types/container"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/testcontainers/testcontainers-go"
@@ -37,6 +38,23 @@ import (
 
 // Image is the NATS server image the daemon's existing NATS tests use.
 const Image = "mirror.gcr.io/library/nats:2.10"
+
+// containerCPUs and containerMemory cap every container start runs. Without a cap a test's server
+// can take every core and all the memory of its host, which a devbox shares with every other
+// session's work. The package's shared server answers a whole test binary's tests, so it gets two
+// cores, and the streams the tests store in it are small, so 1 GiB holds them. Swap is held to the
+// memory cap, so the server cannot grow past it into swap.
+const (
+	containerCPUs   = 2
+	containerMemory = 1 << 30
+)
+
+// limited caps a container's CPU and memory at containerCPUs and containerMemory.
+func limited(hostConfig *container.HostConfig) {
+	hostConfig.NanoCPUs = containerCPUs * 1e9
+	hostConfig.Memory = containerMemory
+	hostConfig.MemorySwap = containerMemory
+}
 
 // readinessTimeout bounds the wait for the JetStream API once the container runs. The container
 // start is not bounded by it: how long Docker takes to create a container is the daemon's load.
@@ -310,11 +328,15 @@ func retryStreamStoreFailure(create func() error) error {
 	}
 }
 
-// start runs a NATS container, with its monitoring endpoint on 8222. A container Docker created and never saw ready (a readiness wait
-// that timed out under load) comes back beside the error, and is removed before start returns:
-// no test's end would remove a container the package shares.
+// start runs a NATS container, with its monitoring endpoint on 8222, capped as limited says. A
+// container Docker created and never saw ready (a readiness wait that timed out under load) comes
+// back beside the error, and is removed before start returns: no test's end would remove a
+// container the package shares.
 func start(image string, options ...testcontainers.ContainerCustomizer) (*tcnats.NATSContainer, error) {
-	options = append([]testcontainers.ContainerCustomizer{tcnats.WithArgument("http_port", "8222")}, options...)
+	options = append([]testcontainers.ContainerCustomizer{
+		tcnats.WithArgument("http_port", "8222"),
+		testcontainers.WithHostConfigModifier(limited),
+	}, options...)
 	started, err := tcnats.Run(context.Background(), image, options...)
 	if err != nil {
 		return started, errors.Join(err, testcontainers.TerminateContainer(started))

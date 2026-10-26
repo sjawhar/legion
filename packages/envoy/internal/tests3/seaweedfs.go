@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/envoy/internal/dispatch/files/filestest"
+	"github.com/sjawhar/envoy/internal/testcaps"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/wait"
 )
@@ -26,7 +27,8 @@ const Image = "mirror.gcr.io/chrislusf/seaweedfs:3.97"
 // Start runs an S3-compatible server holding the empty bucket, removed when t ends, points this
 // process's AWS SDK at it for the rest of t (filestest.PointSDKAt), so files.NewS3(ctx, bucket)
 // reaches it exactly as a deployment's reaches its bucket, and returns the endpoint for a caller
-// that hands it to another process. t.Setenv makes it unusable in a parallel test.
+// that hands it to another process. t.Setenv makes it unusable in a parallel test. The container
+// is capped at one core and 1 GiB (internal/testcaps).
 func Start(t testing.TB, bucket string) string {
 	t.Helper()
 	ctx := context.Background()
@@ -34,6 +36,7 @@ func Start(t testing.TB, bucket string) string {
 		testcontainers.WithCmd("server", "-s3", "-dir=/data", "-ip=0.0.0.0", "-s3.port=8333"),
 		testcontainers.WithExposedPorts("8333/tcp"),
 		testcontainers.WithWaitStrategy(wait.ForHTTP("/").WithPort("8333/tcp").WithStartupTimeout(90*time.Second)),
+		testcontainers.WithHostConfigModifier(testcaps.Cap(1, 1<<30)),
 	)
 	testcontainers.CleanupContainer(t, container)
 	if err != nil {

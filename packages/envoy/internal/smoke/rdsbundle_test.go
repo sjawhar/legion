@@ -14,6 +14,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sjawhar/envoy/internal/testcaps"
 	"github.com/testcontainers/testcontainers-go"
 	tcexec "github.com/testcontainers/testcontainers-go/exec"
 )
@@ -44,6 +45,8 @@ func TestRDSBundle(t *testing.T) {
 	container, err := testcontainers.Run(ctx, image,
 		testcontainers.WithEntrypoint("sleep", "300"),
 		testcontainers.WithFiles(testcontainers.ContainerFile{HostFilePath: probe, ContainerFilePath: "/tmp/systemroots", FileMode: 0o755}),
+		// The container only sleeps while the probe runs in it: one core and 256 MiB (internal/testcaps).
+		testcontainers.WithHostConfigModifier(testcaps.Cap(1, 256<<20)),
 	)
 	testcontainers.CleanupContainer(t, container)
 	if err != nil {

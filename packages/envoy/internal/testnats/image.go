@@ -14,6 +14,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sjawhar/envoy/internal/testcaps"
 	"github.com/testcontainers/testcontainers-go"
 	tcnats "github.com/testcontainers/testcontainers-go/modules/nats"
 )
@@ -28,7 +29,7 @@ const imageConfigPath = "/etc/nats/nats-server.conf"
 // container with its client URL once the server answers a client with no credential (awaitAuth):
 // with anonymous false, by refusing it; with anonymous true, by admitting it, as a configuration
 // naming a no_auth_user makes it. Both official image variants take arguments that start with a
-// flag as nats-server's own.
+// flag as nats-server's own. The container is capped at one core and 512 MiB (internal/testcaps).
 func StartImageConfig(t testing.TB, image, config string, serverArgs []string, anonymous bool) (*tcnats.NATSContainer, string) {
 	t.Helper()
 	ctx := context.Background()
@@ -39,6 +40,7 @@ func StartImageConfig(t testing.TB, image, config string, serverArgs []string, a
 			ContainerFilePath: imageConfigPath,
 			FileMode:          0o644,
 		}),
+		testcontainers.WithHostConfigModifier(testcaps.Cap(1, 512<<20)),
 	)
 	testcontainers.CleanupContainer(t, ctr)
 	if err != nil {
