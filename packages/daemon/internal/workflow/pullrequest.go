@@ -110,11 +110,16 @@ func (e *Engine) pullRequestOpened(ctx context.Context, tx pgx.Tx, fact intake.P
 // to the push's own handler, which re-asks the round the moment the push is classified. Asked
 // here, a round stuck at the previous head would be told stuck again at the new one, which the
 // push then shows to be the handoff head its approval covers - a notice the architect acts on for
-// nothing. A push lost outright leaves the round reported as it was, stuck at the previous head,
-// which is told once either way. A synchronize that moves nothing - a redelivery, or one carrying
-// no head - changes nothing the verdict or the round reads, and applies and re-asks nothing. In
-// implementing a head that arrives once the implementer has completed is the pull request its
-// completion waited for.
+// nothing. The one exception is a head the reviewer's recorded approval names itself: no push can
+// change what an approval of the head itself approves, so the round is re-asked and ends, as it
+// would have had the head arrived before the approval; otherwise a push lost outright would leave
+// the round stuck at the previous head with an approval of the head it now stands at. Any other
+// push lost outright leaves the round reported as it was, stuck at the previous head, which is told
+// once either way, and the required-checks pass's compare carries the approval when only the
+// issue's handoffs changed (daemon's readApprovalCarry). A synchronize that moves nothing - a
+// redelivery, or one carrying no head - changes nothing the verdict or the round reads, and applies
+// and re-asks nothing. In implementing a head that arrives once the implementer has completed is
+// the pull request its completion waited for.
 func (e *Engine) pullRequestSynchronized(ctx context.Context, tx pgx.Tx, fact intake.PullRequestSynchronized) (intake.Result, error) {
 	pr, err := e.pullRequestByBranch(ctx, tx, fact.Repo, fact.Branch)
 	if err != nil || pr == nil || classify.LateLifecycle(fact.UpdatedAt, pr.HeadUpdatedAt) {
@@ -143,8 +148,14 @@ func (e *Engine) pullRequestSynchronized(ctx context.Context, tx pgx.Tx, fact in
 	}
 	switch issue.Phase {
 	case phase.Reviewing:
-		if !moved || !classify.HeadPushKnown(prior, pr.HeadSHA) {
+		if !moved {
 			return intake.Result{}, nil
+		}
+		if !classify.HeadPushKnown(prior, pr.HeadSHA) {
+			reviewer, err := e.phaseRow(ctx, tx, issue.Key, claim.RoleReviewer)
+			if err != nil || reviewer.Decision == nil || reviewer.Decision.State != "approved" || reviewer.Decision.Head != pr.HeadSHA {
+				return intake.Result{}, err
+			}
 		}
 		return intake.Result{}, e.reaskRound(ctx, tx, *issue, pr, prior)
 	case phase.Implementing:
@@ -163,7 +174,7 @@ func (e *Engine) push(ctx context.Context, tx pgx.Tx, fact intake.Push) (intake.
 		return intake.Result{}, err
 	}
 	prior := *pr
-	classification := classify.ClassifyPush(classify.PushPayload{ChangedPaths: fact.ChangedPaths, ChangedPathsTruncated: fact.Truncated})
+	classification := classify.ClassifyPush(classify.PushPayload{ChangedPaths: fact.ChangedPaths, ChangedPathsTruncated: fact.Truncated}, pr.Issue)
 	*pr = classify.ApplyPush(*pr, record.ClassifiedPush{SHA: fact.After, Before: fact.Before,
 		HandoffOnly: classification.HandoffOnly, Unknown: classification.Unknown,
 		ByReviewApp: e.byReviewApp(fact.Pusher),

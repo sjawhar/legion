@@ -29,7 +29,9 @@ type AttemptRun struct {
 type ClassifiedPush struct {
 	SHA string `json:"sha"`
 	// Before is the head the push replaced, empty when the push did not say.
-	Before      string `json:"before,omitempty"`
+	Before string `json:"before,omitempty"`
+	// HandoffOnly is a push every one of whose changed paths is the issue's own handoff, under
+	// .legion/<issue>/ (classify.HandoffPath); a .legion/-only push names such a push throughout.
 	HandoffOnly bool   `json:"handoffOnly"`
 	Unknown     string `json:"unknown,omitempty"`
 	// ByReviewApp is whether the push was the review App's (its pusher is the review App's bot login).
@@ -40,8 +42,8 @@ type ClassifiedPush struct {
 	Forced bool `json:"forced,omitempty"`
 }
 
-// MayChangeCode is whether the push may have changed anything outside .legion/ in the head it
-// replaced.
+// MayChangeCode is whether the push may have changed anything outside the issue's own
+// .legion/<issue>/ in the head it replaced.
 func (p ClassifiedPush) MayChangeCode() bool {
 	return !p.HandoffOnly || p.Forced
 }

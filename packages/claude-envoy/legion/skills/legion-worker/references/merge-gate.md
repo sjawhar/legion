@@ -23,10 +23,10 @@ it, and any other change to the head voids it.
   `task(agent="thermonuclear-code-quality")` once at that head — the head the round reviews —
   and records the verdict. The CI it reads is the checks that stand for the code under review:
   those GitHub ran for the newest push of the branch that started `pull_request` workflows, when
-  every commit above that push's head changes only `.legion/` (GitHub starts no workflow run for a
-  head whose commit message carries `skip-checks: true`, which every handoff-only push before
-  retro does; retro's push carries no such line, so its head does get GitHub's workflow runs of
-  its own). With `<o>/<r>`, `<n>`, `<base>`, `<headRefName>` and `<headRefOid>` from
+  every commit above that push's head changes only `.legion/<issue>/` (GitHub starts no workflow
+  run for a head whose commit message carries `skip-checks: true`, which every handoff-only push
+  before retro does; retro's push carries no such line, so its head does get GitHub's workflow runs
+  of its own). With `<o>/<r>`, `<n>`, `<base>`, `<headRefName>` and `<headRefOid>` from
   `gh pr view <n> --json baseRefName,headRefOid,headRefName`, four reads. The required set is the
   base branch's rulesets' required checks and its branch protection's, when it has any. Both
   branch endpoints take the base as a URL path, each segment escaped and each `/` kept (a raw `#`
@@ -46,8 +46,9 @@ it, and any other change to the head voids it.
   newest first). That commit's check-runs
   (`gh api repos/<o>/<r>/commits/<ci head>/check-runs --paginate --jq '.check_runs[] | [.name, .status, .conclusion] | @tsv'`):
   every required name present, `completed` and `success` (GitHub counts `neutral` and `skipped`
-  as passing for a required check). And the compare proving only `.legion/` changed since
-  (`gh api repos/<o>/<r>/compare/<ci head>...<headRefOid> --jq '{handoffsOnly: ([.files[].filename] | all(startswith(".legion/"))), files: (.files | length)}'`
+  as passing for a required check). And the compare proving only `.legion/<issue>/` changed since,
+  `<issue>` being your `LEGION_ISSUE` (another issue's `.legion/` is code to the daemon and READY)
+  (`gh api repos/<o>/<r>/compare/<ci head>...<headRefOid> --jq '{handoffsOnly: ([.files[] | .filename, (.previous_filename // empty)] | all(startswith(".legion/<issue>/"))), files: (.files | length)}'`
   prints `handoffsOnly` `true`; `false` means code was pushed since CI ran, so wait for the new
   push's runs and read the CI head again). GitHub's compare lists at most 300 files for the whole
   comparison, so `files` at 300 is a comparison GitHub cut at its cap and `handoffsOnly` decides

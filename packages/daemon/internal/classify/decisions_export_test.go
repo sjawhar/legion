@@ -301,11 +301,11 @@ func TestStaleReviewIsAReviewTheGateAlreadyFollowedWithAnother(t *testing.T) {
 }
 
 // arrive applies one head's push webhook and its synchronize in the given order, as the engine
-// does: the push classifies the head's changed paths and names whether its pusher was the review
-// App, and the synchronize advances the pull request to the head.
+// does: the push classifies the head's changed paths for LEGION-208's branch and names whether its
+// pusher was the review App, and the synchronize advances the pull request to the head.
 func arrive(pr record.PullRequest, sha, changedPaths string, byReviewApp, pushFirst bool) record.PullRequest {
 	truncated := "false"
-	classification := ClassifyPush(PushPayload{ChangedPaths: &changedPaths, ChangedPathsTruncated: &truncated})
+	classification := ClassifyPush(PushPayload{ChangedPaths: &changedPaths, ChangedPathsTruncated: &truncated}, "LEGION-208")
 	push := record.ClassifiedPush{SHA: sha, Before: pr.HeadSHA, HandoffOnly: classification.HandoffOnly,
 		Unknown: classification.Unknown, ByReviewApp: byReviewApp}
 	if pushFirst {
@@ -338,7 +338,7 @@ func TestPlannedRedIsSetCarriedAndClearedAcrossATesterRound(t *testing.T) {
 			check("the review App's red tests", "red-tests", true, 0, "")
 			pr.Failing, pr.CheckedHead = []string{"ci"}, pr.HeadSHA
 
-			pr = arrive(pr, "tester-handoff", ".legion/test.json", true, pushFirst)
+			pr = arrive(pr, "tester-handoff", ".legion/LEGION-208/test.json", true, pushFirst)
 			check("the tester's handoff-only head", "tester-handoff", true, 0, "")
 			pr.Failing, pr.CheckedHead = []string{"ci"}, pr.HeadSHA
 
