@@ -638,6 +638,38 @@ func TestRoleClaimReadsAnUndecodableRecordAsErrMalformedRoleClaim(t *testing.T) 
 	}
 }
 
+// An interest record the bucket holds and this build cannot decode is ErrMalformedInterest, so a
+// caller can tell it from a read that did not answer, with the decode failure kept in the message,
+// and the registry logs it at WARN naming the session. Nothing is cached from it.
+func TestGetReadsAnUndecodableInterestRecordAsErrMalformedInterest(t *testing.T) {
+	logs := captureRegistryLogs(t)
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+
+	reg, kv := coldRegistry(t, conn)
+	const sessionID = "ses_unreadable_interest"
+	if _, err := kv.Put(sessionID, []byte("not a json interest record")); err != nil {
+		t.Fatalf("store the interest record: %v", err)
+	}
+	item, err := reg.Get(context.Background(), sessionID)
+	if !errors.Is(err, ErrMalformedInterest) || !strings.HasPrefix(err.Error(), "malformed interest record: invalid character ") {
+		t.Fatalf("Get of an undecodable record = %+v, %v; want ErrMalformedInterest naming the decode failure", item, err)
+	}
+	if item.SessionID != "" || item.Topics != nil {
+		t.Fatalf("Get of an undecodable record returned %+v, want the zero Interest", item)
+	}
+	for _, cached := range reg.List() {
+		if cached.SessionID == sessionID {
+			t.Fatalf("the cache holds %+v after an undecodable read", cached)
+		}
+	}
+	for _, want := range []string{"level=WARN", `msg="registry read an interest record it cannot decode"`, "session_id=" + sessionID, "invalid character"} {
+		if !strings.Contains(logs.String(), want) {
+			t.Fatalf("registry logs %q, want them to contain %q", logs.String(), want)
+		}
+	}
+}
+
 func TestUpsert_TransientGetErrorPropagatesAndDoesNotClobber(t *testing.T) {
 	// Integration regression for the Atlas dropout bug: when the interest bucket's Get fails
 	// transiently (not ErrKeyNotFound), Upsert MUST return the error rather

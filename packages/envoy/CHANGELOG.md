@@ -717,7 +717,12 @@
   the same 3.5 s budget (a session row's read capped at a second, and a list's reads sharing one
   budget), where a silent bus held them for the 10 s JetStream wait: a read that does not answer
   is that 503 with `Retry-After: 1`, where the first two answered a row with no topics and the
-  third a 503 with neither the named body nor `Retry-After`. The 413 for a message NATS cannot
+  third a 503 with neither the named body nor `Retry-After`. An interest record the bus holds but
+  this build cannot decode is not that 503: the two single-session routes answer
+  `500 {"error":"envoy: the interest record of session <id> is unreadable: <reason>"}` with no
+  `Retry-After`, and `GET /v1/sessions` lists that session with no topics and roles, as it did,
+  rather than refusing the list, while the registry logs `registry read an interest record it
+  cannot decode` at WARN naming the session. The 413 for a message NATS cannot
   take whole and the 400 for a subject or key it refuses are unchanged. A publish on either route
   whose request context has already
   ended — its budget spent, which a role-holder resolution that answers just as the budget ends

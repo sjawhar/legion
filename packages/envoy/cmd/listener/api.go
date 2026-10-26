@@ -659,9 +659,12 @@ const sessionInterestReadTimeout = 1 * time.Second
 // sessionInfoFor joins one session entry with its interests (its topics, and the roles those topics
 // name), so a row of GET /v1/sessions and the single answer of GET /v1/registry/<session_id> are
 // one shape built one way. A session the interest registry holds no key for keeps its empty topics
-// and roles: a session that registered and subscribed to nothing is not an error here. Any other
-// error is a read that did not answer within sessionInterestReadTimeout of ctx, and is returned:
-// a caller answers it as the bus-unavailable 503, never as a session with no topics.
+// and roles: a session that registered and subscribed to nothing is not an error here. An interest
+// record this build cannot decode (store.ErrMalformedInterest) is returned with the session's info,
+// its topics and roles empty, so the list can still show the session and the single read can name
+// the record (writeInterestRecordUnreadable). Any other error is a read that did not answer within
+// sessionInterestReadTimeout of ctx, and is returned alone: a caller answers it as the
+// bus-unavailable 503, never as a session with no topics.
 func sessionInfoFor(ctx context.Context, registry *store.Registry, sessionID string, entry session.SessionEntry) (sessionInfo, error) {
 	info := sessionInfo{
 		SessionID:      sessionID,
@@ -681,6 +684,8 @@ func sessionInfoFor(ctx context.Context, registry *store.Registry, sessionID str
 	switch {
 	case errors.Is(err, nats.ErrKeyNotFound):
 		return info, nil
+	case errors.Is(err, store.ErrMalformedInterest):
+		return info, err
 	case err != nil:
 		return sessionInfo{}, err
 	}
@@ -689,12 +694,25 @@ func sessionInfoFor(ctx context.Context, registry *store.Registry, sessionID str
 	return info, nil
 }
 
+// writeInterestRecordUnreadable answers a read of one session's interest record that this build
+// cannot decode (store.ErrMalformedInterest), for GET /v1/registry/<session_id> and GET
+// /v1/interests/<session_id>. The bus answered, and will answer the same record again, so this is
+// not the bus-unavailable 503: it is a 500 with no Retry-After, naming the session and the record,
+// as writeRoleClaimUnreadable answers an unreadable role claim.
+func writeInterestRecordUnreadable(w http.ResponseWriter, sessionID string, err error) {
+	writeJSONError(w, http.StatusInternalServerError, fmt.Sprintf(
+		"envoy: the interest record of session %s is unreadable: %s", sessionID, err,
+	))
+}
+
 // sessionsHandler returns all live sessions by iterating the session registry
 // (envoy_sessions, 5-min TTL — only live sessions) and enriching each with
 // topic data from the interests registry (envoy_interests). Every interest read shares one
 // sendRequestBudget deadline, so however many rows miss the interest cache the list answers
 // inside it, and the first read that does not answer ends the request with the bus-unavailable
-// 503.
+// 503. A session whose interest record this build cannot decode is listed with no topics and
+// roles rather than refusing the list: store.Registry.Get logs that record at WARN through the
+// registry's logger, the listener's own.
 func sessionsHandler(registry *store.Registry, sessions *session.SessionRegistry) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
@@ -716,7 +734,7 @@ func sessionsHandler(registry *store.Registry, sessions *session.SessionRegistry
 				continue
 			}
 			info, err := sessionInfoFor(ctx, registry, entry.SessionID, entry.SessionEntry)
-			if err != nil {
+			if err != nil && !errors.Is(err, store.ErrMalformedInterest) {
 				writeBusUnavailable(w, err)
 				return
 			}
@@ -735,7 +753,8 @@ func sessionsHandler(registry *store.Registry, sessions *session.SessionRegistry
 // Dispatch classifies a delivery failure on the "no live session " prefix, as the send route's own
 // 404 writes it. An id NATS refuses as a key is the caller's to fix, and a read that did not answer
 // — the session's, or its interest record's within sendRequestBudget (sessionInfoFor) — is a 503 to
-// retry: never a session a caller may take for ended, nor one with no topics.
+// retry: never a session a caller may take for ended, nor one with no topics. An interest record
+// this build cannot decode is the 500 writeInterestRecordUnreadable writes: the bus answered it.
 func sessionEntryHandler(d *listenerDeps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
@@ -768,6 +787,10 @@ func sessionEntryHandler(d *listenerDeps) http.HandlerFunc {
 			writeBusUnavailable(w, err)
 		default:
 			info, err := sessionInfoFor(ctx, d.registry, sessionID, entry)
+			if errors.Is(err, store.ErrMalformedInterest) {
+				writeInterestRecordUnreadable(w, sessionID, err)
+				return
+			}
 			if err != nil {
 				writeBusUnavailable(w, err)
 				return
@@ -779,7 +802,8 @@ func sessionEntryHandler(d *listenerDeps) http.HandlerFunc {
 
 // adminInterestsHandler lists, reads and removes persisted interests. GET /v1/interests/<session_id>
 // reads within sendRequestBudget of the request's own context: a cache miss is read through to the
-// bucket, the bucket's word that the key is absent is a 404, and a read that did not answer is the
+// bucket, the bucket's word that the key is absent is a 404, a record this build cannot decode is
+// the 500 writeInterestRecordUnreadable writes, and a read that did not answer is the
 // bus-unavailable 503 with Retry-After: 1 (a key NATS refuses is still the 413 or 400
 // writeBusUnavailable gives it).
 func adminInterestsHandler(registry *store.Registry) http.HandlerFunc {
@@ -804,6 +828,10 @@ func adminInterestsHandler(registry *store.Registry) http.HandlerFunc {
 			// serve is the listener's failure, which a caller must not take for "no topics".
 			if errors.Is(err, nats.ErrKeyNotFound) {
 				writeJSONError(w, http.StatusNotFound, err.Error())
+				return
+			}
+			if errors.Is(err, store.ErrMalformedInterest) {
+				writeInterestRecordUnreadable(w, sessionID, err)
 				return
 			}
 			if err != nil {

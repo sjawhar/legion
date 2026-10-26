@@ -750,10 +750,17 @@ func (r *Registry) RoleHolder(role string) (string, error) {
 	return claim.HolderSessionID, nil
 }
 
+// ErrMalformedInterest is an interest record the bucket holds and this build cannot decode. The bus
+// answered it, so it is not a read that failed, and reading it again returns the same record; the
+// error wrapping it carries the decode failure.
+var ErrMalformedInterest = errors.New("malformed interest record")
+
 // Get returns the Interest for a session. Cache first, direct KV read on miss.
 // The KV fallback also repopulates the cache, bridging the warm-up window after
 // Open() before watch() has fully populated the cache. A cache hit answers in the
-// caller's goroutine; only the bucket read on a miss waits on ctx (bounded).
+// caller's goroutine; only the bucket read on a miss waits on ctx (bounded). The cache holds only
+// records it decoded (applyWatched evicts the rest), so only the bucket read can meet a record this
+// build cannot decode: that is ErrMalformedInterest, logged at WARN with the session it belongs to.
 func (r *Registry) Get(ctx context.Context, sessionID string) (Interest, error) {
 	r.mu.RLock()
 	item, ok := r.cache[sessionID]
@@ -770,13 +777,18 @@ func (r *Registry) Get(ctx context.Context, sessionID string) (Interest, error) 
 		return Interest{}, err
 	}
 	var fresh Interest
-	err = json.Unmarshal(entry.Value(), &fresh)
-	if err == nil {
-		r.mu.Lock()
-		r.cacheInterestLocked(sessionID, fresh, entry.Revision())
-		r.mu.Unlock()
+	if err := json.Unmarshal(entry.Value(), &fresh); err != nil {
+		r.logger().Warn("registry read an interest record it cannot decode",
+			slog.String("session_id", sessionID),
+			slog.Uint64("revision", entry.Revision()),
+			slog.String("error", err.Error()),
+		)
+		return Interest{}, fmt.Errorf("%w: %w", ErrMalformedInterest, err)
 	}
-	return fresh, err
+	r.mu.Lock()
+	r.cacheInterestLocked(sessionID, fresh, entry.Revision())
+	r.mu.Unlock()
+	return fresh, nil
 }
 
 func (r *Registry) Match(machineID string, topic string) []Interest {
