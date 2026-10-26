@@ -10,7 +10,7 @@ tags:
   - bytes-buffer
   - nats
 date: 2026-10-25
-status: active
+status: superseded in part by INFRA-257 — the worker image now carries gcc and libc6-dev with cgo off by default, so a role runs `CGO_ENABLED=1 go test -race …` with no `CC`, zig or `-linkmode=external`, and the zig recipe applies only to an older pinned image digest without gcc; the canary, the reproducer and the stray-writer advice stand
 module: packages/envoy
 related_issues:
   - "INFRA-182"
@@ -18,12 +18,6 @@ related_issues:
 ---
 
 # The race detector runs in a worker pod with zig as the C compiler, and a library callback queued by an earlier test writes your log sink
-
-**Superseded by INFRA-257:** the worker image carries `gcc` and `libc6-dev`, with cgo off by
-default (`ENV CGO_ENABLED=0` and a `CGO_ENABLED=0` line in `/opt/go/go.env`), so a role runs
-`CGO_ENABLED=1 go test -race …` with no `CC`, zig or linker override. The zig recipe below applies
-only to a pod on an older pinned image digest, one without `gcc`. The canary, the reproducer and the
-stray-writer advice stand as written.
 
 Extends docs/solutions/testing/a-held-clock-test-of-timers-armed-from-postgres-times-holds-now-at-microseconds-and-a-first-race-run-indicts-old-log-sinks-LEGION-694.md.
 

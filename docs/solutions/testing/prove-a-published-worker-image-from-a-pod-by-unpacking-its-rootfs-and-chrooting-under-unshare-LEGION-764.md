@@ -36,7 +36,10 @@ pods -n legion` and `create pods/exec` both answer no). It can still prove what 
   downloaded, 2.8 GB unpacked, 90 seconds; `rm -rf` it afterwards (the implementer's and tester's
   ephemeral-storage limit is 20Gi, the other roles' 10Gi).
 - Enter it with `unshare -r -m -p -f sh -c '…'`: mount `proc` at `<rootfs>/proc`, then `mount --rbind /dev
-  <rootfs>/dev`, then `/usr/sbin/chroot <rootfs> /usr/bin/env -i PATH=/opt/legion/bin:/opt/omp/bin:/opt/codegraph/bin:/usr/local/bin:/usr/bin:/bin HOME=/home/legion OMP_PROFILE=legion LEGION_OMP_PATH=/opt/omp/bin/omp DO_NOT_TRACK=1 sh -c '…'`.
+  <rootfs>/dev`, then `/usr/sbin/chroot <rootfs> /usr/bin/env -i PATH=/opt/legion/bin:/opt/omp/bin:/opt/codegraph/bin:/usr/local/bin:/usr/bin:/bin HOME=/home/legion OMP_PROFILE=legion LEGION_OMP_PATH=/opt/omp/bin/omp DO_NOT_TRACK=1 COREPACK_DEFAULT_TO_LATEST=0 CGO_ENABLED=0 sh -c '…'`.
+  That variable list must match the image's own ENV (the final stage's `ENV` instructions in
+  `packages/daemon/docker/worker.Dockerfile`; `imageEnv` in
+  `packages/daemon/internal/runtime/sandbox/operatorpod.go` holds the list).
   Under gVisor a plain `mount --bind /dev <rootfs>/dev` is refused (`wrong fs type, bad option, bad superblock`);
   `--rbind` is accepted. Without `/dev`, `ssh-keygen` fails with `Couldn't open /dev/null` and `legion probe-image`
   with `boot gate: run the OMP pi.agents probe: open /dev/null: no such file or directory`.
@@ -101,6 +104,7 @@ exec unshare -r -m -p -f sh -c '
   /usr/sbin/chroot "$rootfs" /usr/bin/env -i \
     PATH=/opt/legion/bin:/opt/omp/bin:/opt/codegraph/bin:/usr/local/bin:/usr/bin:/bin \
     HOME=/home/legion OMP_PROFILE=legion LEGION_OMP_PATH=/opt/omp/bin/omp DO_NOT_TRACK=1 \
+    COREPACK_DEFAULT_TO_LATEST=0 CGO_ENABLED=0 \
     sh -c "
       bash -c \"type -P jq ssh-keygen\"; echo rc=\$?
       legion version

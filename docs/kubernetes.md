@@ -72,26 +72,7 @@ merger — runs from one image, `ghcr.io/sjawhar/legion-worker` (public). It car
   whatever Kubernetes identity the operator's pod gives it. A corepack shim runs the version a project's
   `packageManager` names, or else the default that corepack ships (the image sets
   `COREPACK_DEFAULT_TO_LATEST=0`, so never npm's newest release), fetched on first use into the user's
-  corepack cache. Beside Go, the image carries trixie's `gcc` and `libc6-dev` at `/usr/bin`, the C
-  compiler and the libc headers and startup files Go's cgo builds with: Go refuses `-race` without cgo,
-  so they are what lets a role run the race detector per command, as `CGO_ENABLED=1 go test -race …`,
-  with no `CC`, zig or linker override. cgo stays off by default all the same, since stock Go turns it
-  on whenever it finds a C compiler on `PATH`, and two places hold that default: the image's
-  `ENV CGO_ENABLED=0`, which every process that inherits the image's environment gets (the bash tool,
-  subagents, `go test`'s test binaries), and a `CGO_ENABLED=0` line the build appends to
-  `/opt/go/go.env`, the file Go reads for a distributor's defaults, which holds where that environment
-  is scrubbed — Oh My Pi's Python eval kernel starts with an allowlisted environment that drops
-  `CGO_ENABLED`, and a test may run `go` under an environment it constructs. `go env -w CGO_ENABLED=1`
-  does not override the image's `ENV`, since Go ranks the environment above its go env file (it only
-  outranks `go.env`), so a role sets it per command; and as a variable the image's `ENV` sets,
-  `CGO_ENABLED` is one `runtime.kubernetes.pod.env` is refused. Two cases still get
-  Go's own default, cgo on: a scrubbed environment that also switches toolchain (`GOTOOLCHAIN` or a
-  `go.mod` `toolchain` line, whose toolchain's own `go.env` lacks the line), and a `go/build` reader,
-  such as `go/types`' source importer, under a scrubbed environment, since it reads only the process
-  environment and never `go.env`; with `gcc` present those builds succeed, linked dynamically. A
-  deployment still pinning an older image digest has no `gcc` and needs the old recipe, zig as `CC`
-  (`docs/solutions/testing/the-race-detector-runs-in-a-worker-pod-with-zig-as-the-c-compiler-and-a-library-callback-from-an-earlier-test-writes-your-log-sink-INFRA-182.md`).
-  Node, Go and the AWS CLI keep their trees at `/opt/node`, `/opt/go` and
+  corepack cache. Node, Go and the AWS CLI keep their trees at `/opt/node`, `/opt/go` and
   `/opt/aws-cli`, outside `HOME`, so no volume a pod mounts under `HOME` shadows any of it;
 - what the capability check (`packages/daemon/internal/capabilities`, which `legion probe-image` runs —
   [the probe subsection](#the-image-is-probed-before-it-publishes)) requires of the image, each outside
@@ -143,7 +124,10 @@ merger — runs from one image, `ghcr.io/sjawhar/legion-worker` (public). It car
   name comes from the alternatives system rather than being a file of the package, so every gate
   asks for `nc` and never `nc.openbsd`), `dig` (from `bind9-dnsutils`, the package trixie's virtual
   `dnsutils` resolves to: how a role whose connection to a service name fails tells "the name does
-  not resolve" from "the packets are dropped"),
+  not resolve" from "the packets are dropped"), `gcc` (with `libc6-dev`, the libc headers and startup
+  files it links with: the C compiler Go's cgo builds with, and Go refuses `-race` without cgo, so
+  they are what lets a role run the race detector; the paragraph after this list says how cgo's
+  default is kept),
   and `chromium` for the browser tools, installed without its Recommends (no
   setuid sandbox: Oh My Pi launches it with `--no-sandbox --disable-setuid-sandbox`). Oh My Pi picks
   its browser from `PUPPETEER_EXECUTABLE_PATH` first, else the first Chrome or Chromium it finds on
@@ -162,6 +146,26 @@ merger — runs from one image, `ghcr.io/sjawhar/legion-worker` (public). It car
   ([Anatomy of a Sandbox pod](#anatomy-of-a-sandbox-pod)); elsewhere it is uv's default,
   `~/.local/share/uv/python`. The image's `python3` is for Oh My Pi's own eval, not a project's
   interpreter.
+
+`gcc` on `PATH` would turn cgo on by default (stock Go does whenever it finds a C compiler), so the
+image keeps it off and a role opts in per command, `CGO_ENABLED=1 go test -race …`, with no `CC`,
+zig or linker override. Two places hold the default. The image's `ENV CGO_ENABLED=0` reaches every
+process that inherits the image's environment: the bash tool, subagents, `go test`'s test binaries,
+a `go/build` reader such as `go/types`' source importer (which reads only the process environment),
+and a toolchain Go switches to for `GOTOOLCHAIN` or a `go.mod` `toolchain` line. A `CGO_ENABLED=0`
+line the build appends to `/opt/go/go.env`, the file Go reads for a distributor's defaults, holds
+where that environment is scrubbed: Oh My Pi's Python eval kernel, which starts from an allowlisted
+environment without `CGO_ENABLED`, and a test that runs `go` under an environment it builds. The
+build's toolchain step reads `go env CGO_ENABLED` with the variable removed from the environment
+and fails unless it is `0`, so the build fails if the `go.env` line is ever lost.
+`go env -w CGO_ENABLED=1` does not override the image's `ENV`, because Go ranks the process
+environment above its `go env -w` file; and `runtime.kubernetes.pod.env` refuses `CGO_ENABLED`, as
+it refuses every variable the image's `ENV` sets. Two cases get Go's own default, cgo on: a scrubbed
+environment that also switches toolchain (the switched toolchain's `go.env` lacks the line), and a
+`go/build` reader under a scrubbed environment (it never reads `go.env`); with `gcc` present those
+builds succeed, linked dynamically. A deployment still pinning an older image digest has no `gcc`
+and needs zig as `CC`
+(`docs/solutions/testing/the-race-detector-runs-in-a-worker-pod-with-zig-as-the-c-compiler-and-a-library-callback-from-an-earlier-test-writes-your-log-sink-INFRA-182.md`).
 
 It runs as user `legion` (uid 1000, declared numerically so `runAsNonRoot` can verify it from the image
 alone) with `HOME=/home/legion`, which must be writable (OMP writes sessions, logs, and `models.db` under
@@ -388,7 +392,9 @@ A step of its own, before that final one, runs every toolchain command listed ab
 the image `PATH` — the language servers (`gopls version`, `typescript-language-server --version`,
 `tsc --version`, and `pyright --version` for `pyright-langserver`, which takes no `--version`), `go
 version` with `go env GOROOT` required to be `/opt/go`, `gcc --version` (Go's cgo, and so its race
-detector, needs it), `gofmt`, `kubectl version --client`, and trixie's
+detector, needs it), `go env CGO_ENABLED` with `CGO_ENABLED` removed from the environment required
+to be `0` (so the build fails if `/opt/go/go.env`'s `CGO_ENABLED=0` line, the default a scrubbed
+environment depends on, is ever lost), `gofmt`, `kubectl version --client`, and trixie's
 `python3`, `curl`, `wget`, `jq --version`, `flock --version`, `psql --version`, `redis-cli --version`,
 `sqlite3 --version`, `nc -h`, `dig -v`, `chromium --version` and `socat -V` included — the corepack shims fetching their shipped default pnpm and yarn
 into a scratch directory the step removes. `ssh-keygen` takes no `--version`, so the step generates a

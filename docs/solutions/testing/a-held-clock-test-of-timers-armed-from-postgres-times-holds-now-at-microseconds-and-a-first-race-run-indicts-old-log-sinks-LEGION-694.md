@@ -11,7 +11,7 @@ tags:
   - outbox
   - deterministic-tests
 date: 2026-10-16
-status: active
+status: superseded in part by INFRA-257 — a worker pod now runs `-race`, since the image carries gcc and libc6-dev with cgo off by default and `CGO_ENABLED=1 go test -race …` needs no `CC`, zig or linker override; adding the CI race step for the packages that gain goroutines, and the rest, stand
 module: packages/daemon
 related_issues:
   - "LEGION-694"
@@ -37,11 +37,8 @@ related_issues:
 - A worker pod has no cgo, so `-race` runs nowhere but CI: add the step for the packages the new
   goroutines live in (`internal/daemon`, `internal/record`), with their fakes holding a fake clock,
   so the run is deterministic and its first failures are findings rather than flakes.
-  **Superseded by INFRA-257:** the worker image carries `gcc` and `libc6-dev`, with cgo off by
-  default, so a role runs `CGO_ENABLED=1 go test -race …` in the pod with no `CC`, zig or linker
-  override. A pod on an older pinned image digest, one without `gcc`, needs zig as the C compiler
-  (docs/solutions/testing/the-race-detector-runs-in-a-worker-pod-with-zig-as-the-c-compiler-and-a-library-callback-from-an-earlier-test-writes-your-log-sink-INFRA-182.md).
-  Adding the CI step for the packages that gain goroutines stands as written.
+  (INFRA-257: the image now carries gcc, so `CGO_ENABLED=1 go test -race …` runs in a pod as well;
+  the CI step still stands.)
 
 ## Evidence
 

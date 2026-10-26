@@ -414,8 +414,7 @@ FROM mirror.gcr.io/library/debian:trixie-slim AS runtime-base
 # linker override; gcc joins go in the toolchain row. libc6-dev is named rather than left to gcc
 # because it is only a Recommends of gcc-14, and Recommends stay out here as everywhere. cgo stays off
 # by default all the same (the final stage's `ENV CGO_ENABLED=0` and the toolchain stage's go.env line
-# say how). The cost of any change to this line: it rebuilds this layer, and with it the probe layer
-# below and its natives and everything after them, once.
+# say how).
 # /opt/legion and /opt/legion/bin are created here, root-owned, before any COPY into them: a COPY
 # creates a missing parent with its own --chown, so the plugin's legion:legion copy below would
 # otherwise leave the runtime user free to rename bin/ and plant its own `legion`. The final step
@@ -651,15 +650,15 @@ COPY --from=go /out/gopls /usr/local/bin/gopls
 # never to npm's newest release, so every place the image runs (a pod, `docker run`, the check below)
 # gets one version until the Node pin moves. It is image ENV, not a pod variable, for that reason.
 # CGO_ENABLED=0 keeps cgo off by default now that gcc is on PATH (the apt line above says why gcc is
-# there). The toolchain stage's go.env line alone would not do: as image ENV this reaches every process
-# that inherits the environment — the bash tool, subagents, and go test's test binaries, where a
-# go/build reader such as go/types' source importer (packages/daemon/internal/supervise/table_test.go)
-# reads only the process environment, never go.env, so it would default cgo on with gcc present and
-# fail type-checking `net` with `go tool cgo: exit status 2` — and a toolchain Go switches to for
-# GOTOOLCHAIN or a go.mod `toolchain` line, whose own go.env lacks that line. A role opts in per command,
-# `CGO_ENABLED=1 go test -race …`; `go env -w CGO_ENABLED=1` does not override it, since Go ranks the
-# environment above its go env file; and as image ENV a deployment's runtime.kubernetes.pod.env may not
-# set it (sandbox/operatorpod.go imageEnv).
+# there), for every process that inherits the image's environment: the bash tool, subagents, and go
+# test's test binaries. The toolchain stage's go.env line alone would not reach two of them: a go/build
+# reader such as go/types' source importer (packages/daemon/internal/supervise/table_test.go) reads only
+# the process environment, never go.env, so this ENV is what makes its cgo setting match the go
+# command's; and a toolchain Go switches to for GOTOOLCHAIN or a go.mod `toolchain` line has its own
+# go.env, which lacks the line. A role opts in per command, `CGO_ENABLED=1 go test -race …`;
+# `go env -w CGO_ENABLED=1` does not override it, since Go ranks the environment above its go env file;
+# and as image ENV a deployment's runtime.kubernetes.pod.env may not set it (sandbox/operatorpod.go
+# imageEnv).
 ENV COREPACK_DEFAULT_TO_LATEST=0 CGO_ENABLED=0
 # The toolchain step: every toolchain command runs as the runtime user from the image PATH, the
 # corepack shims fetching their shipped default pnpm and yarn, with TMPDIR, COREPACK_HOME and
@@ -669,7 +668,10 @@ ENV COREPACK_DEFAULT_TO_LATEST=0 CGO_ENABLED=0
 # python3 --version; uv still installs each project's own at run time. `go version` alone would pass
 # with a GOROOT go cannot find, and every `go build` would then fail, so the step requires GOROOT to
 # resolve to /opt/go through the /usr/local/bin/go symlink. gcc answers --version and is checked beside
-# go, whose cgo (and so whose race detector) needs it. gofmt takes no --version; formatting a
+# go, whose cgo (and so whose race detector) needs it. The step then reads cgo's default with
+# CGO_ENABLED removed from the environment (XDG_CONFIG_HOME in scratch, so no `go env -w` file is
+# read), where only /opt/go/go.env's line holds it at 0, so the build fails if that line, the default
+# a scrubbed environment depends on, is ever lost. gofmt takes no --version; formatting a
 # line from stdin is its check. pyright-langserver takes none either (it opens its LSP connection
 # first and refuses without --stdio), so `pyright --version`, the same package's CLI, answers for it.
 # Being its own layer above `legion`, it reruns only when the toolchain or a layer before it changes,
@@ -695,6 +697,7 @@ RUN set -eu; \
     for shim in pnpm yarn yarnpkg; do "$shim" --version; done; \
     pnpx --help > "$scratch/pnpx-help"; sed -n 1p "$scratch/pnpx-help"; \
     go version; goroot="$(go env GOROOT)"; echo "GOROOT: $goroot"; test "$goroot" = /opt/go; gcc --version; \
+    test "$(env -u CGO_ENABLED go env CGO_ENABLED)" = 0; \
     printf 'package main\n' | gofmt; gopls version; \
     typescript-language-server --version; tsc --version; pyright --version; \
     python3 --version; curl --version; wget --version; jq --version; chromium --version; \

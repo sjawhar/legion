@@ -17,13 +17,13 @@ import (
 
 // imageEnv are the variables the worker image's final stage sets (packages/daemon/docker/
 // worker.Dockerfile, ENV), which every container inherits, and which a pod's env therefore may not
-// override: CGO_ENABLED=0 keeps cgo off by default in every process, the image's gcc on PATH
-// notwithstanding, so a role opts in per command (`CGO_ENABLED=1 go test -race …`) rather than a
-// deployment for every build; COREPACK_DEFAULT_TO_LATEST=0 keeps the corepack shims on the pnpm and
-// yarn their corepack ships; HOME and OMP_PROFILE place Oh My Pi's profile, whose sessions directory
-// a pod mounts from the tree volume; LEGION_OMP_PATH is the Oh My Pi the image probe proves the
-// workers run; DO_NOT_TRACK=1 is CodeGraph's telemetry and update-check opt-out; and PATH, which the
-// runtime sets as well.
+// override: CGO_ENABLED=0 keeps cgo off by default in every process that inherits the image's
+// environment, the image's gcc on PATH notwithstanding, so a role opts in per command
+// (`CGO_ENABLED=1 go test -race …`) rather than a deployment for every build;
+// COREPACK_DEFAULT_TO_LATEST=0 keeps the corepack shims on the pnpm and yarn their corepack ships;
+// HOME and OMP_PROFILE place Oh My Pi's profile, whose sessions directory a pod mounts from the tree
+// volume; LEGION_OMP_PATH is the Oh My Pi the image probe proves the workers run; DO_NOT_TRACK=1 is
+// CodeGraph's telemetry and update-check opt-out; and PATH, which the runtime sets as well.
 // TestImageEnvIsWhatTheWorkerImageSets holds the list to the Dockerfile.
 var imageEnv = []string{"CGO_ENABLED", "COREPACK_DEFAULT_TO_LATEST", "DO_NOT_TRACK", "HOME", "LEGION_OMP_PATH", "OMP_PROFILE", "PATH"}
 
