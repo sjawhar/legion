@@ -1,6 +1,8 @@
 package workflow
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -150,20 +152,39 @@ func TestTheResumeTaskNamesEveryItemStillWithThePerson(t *testing.T) {
 		waiting record.Awaiting
 		gate    *record.DesignGate
 		want    []string
+		not     []string
 	}{
 		{
 			name:    "a person's answer with the spec approved",
 			waiting: record.Awaiting{Ask: "ask-q", AnsweredAt: &answered, AnsweredBy: record.AnsweredByAsk, AnsweredDetail: "ask-q"},
 			gate:    &record.DesignGate{Issue: "LEGION-208", ArtifactID: "artifact-208", LatestVersion: 3, ApprovedVersion: &version},
-			want: []string{"A person answered your ask ask-q", "Your spec is approved at version 3",
+			want: []string{"A person answered your ask ask-q", "Your spec is approved at version 3", DesignApprovedWake,
 				"Waiting on you: ask ask-yours", "Still with the person: ask ask-still", "Continue."},
+		},
+		{
+			// Round 2, adversarial P2-1 and outside-whole P2-1: no design-approved notice reaches
+			// a waiting root, so the resume is its design-approved wake.
+			name:    "an approval that answered the wait",
+			waiting: record.Awaiting{Ask: "ask-q", AnsweredAt: &answered, AnsweredBy: record.AnsweredByApproval, AnsweredDetail: "version 3"},
+			gate:    &record.DesignGate{Issue: "LEGION-208", ArtifactID: "artifact-208", LatestVersion: 3, ApprovedVersion: &version},
+			want:    []string{"Your spec version 3 on LEGION-208 was approved.", DesignApprovedWake},
 		},
 		{
 			name:    "a changes request with the gate closed",
 			waiting: record.Awaiting{Ask: "ask-q", AnsweredAt: &answered, AnsweredBy: record.AnsweredByChanges, AnsweredDetail: "version 4: \"say more\""},
 			gate:    &record.DesignGate{Issue: "LEGION-208", ArtifactID: "artifact-208", LatestVersion: 4},
 			want: []string{"A person requested changes to your spec on LEGION-208 at version 4: \"say more\"",
-				"Your spec is not approved at version 4", "Hand each one back", "returns the slot"},
+				"revise the spec as they ask", "Your spec is not approved at version 4", "Hand each one back", "returns the slot"},
+			not: []string{DesignApprovedWake},
+		},
+		{
+			// Round 2, adversarial P3-2: the person approved the version after asking for changes,
+			// before the resume, so the resume asks for no revision of an approved spec.
+			name:    "a changes request a later approval superseded",
+			waiting: record.Awaiting{Ask: "ask-q", AnsweredAt: &answered, AnsweredBy: record.AnsweredByChanges, AnsweredDetail: "version 3: \"split it\""},
+			gate:    &record.DesignGate{Issue: "LEGION-208", ArtifactID: "artifact-208", LatestVersion: 3, ApprovedVersion: &version},
+			want:    []string{"asks for no revision now", "Your spec is approved at version 3", DesignApprovedWake},
+			not:     []string{"revise the spec as they ask"},
 		},
 		{
 			name:    "a question nobody will answer any more",
@@ -179,7 +200,38 @@ func TestTheResumeTaskNamesEveryItemStillWithThePerson(t *testing.T) {
 					t.Fatalf("resume task %q, want it to name %q", task, want)
 				}
 			}
+			for _, not := range tc.not {
+				if strings.Contains(task, not) {
+					t.Fatalf("resume task %q, want no %q", task, not)
+				}
+			}
 		})
+	}
+}
+
+// A root waiting on a person gets no design-approved notice, so the architect's instructions must
+// take the resume task that says the gate is open as that wake: the skill's release rule, the
+// design gate reference, the wake routing table and the root architect's prompt each name the
+// resume's phrase, and so do the claude-envoy plugin's generated copies of the skill. (Round 2,
+// adversarial P2-1 and outside-whole P2-1.)
+func TestTheArchitectsInstructionsTakeTheResumeAsTheDesignApprovedWake(t *testing.T) {
+	root := filepath.Join("..", "..", "..", "..")
+	for _, file := range []string{
+		"skills/legion-architect/SKILL.md",
+		"skills/legion-architect/references/design-gate.md",
+		"skills/legion-architect/references/wake-routing.md",
+		"packages/claude-envoy/legion/skills/legion-architect/SKILL.md",
+		"packages/claude-envoy/legion/skills/legion-architect/references/design-gate.md",
+		"packages/claude-envoy/legion/skills/legion-architect/references/wake-routing.md",
+		"packages/daemon/internal/prompts/roles/architect-root.md",
+	} {
+		body, err := os.ReadFile(filepath.Join(root, file))
+		if err != nil {
+			t.Fatalf("read %s: %v", file, err)
+		}
+		if !strings.Contains(string(body), DesignApprovedWake) {
+			t.Errorf("%s does not name the resume's design-approved wake (%q)", file, DesignApprovedWake)
+		}
 	}
 }
 

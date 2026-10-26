@@ -361,6 +361,37 @@ func TestAnOffGateStillTellsAnOlderChangesRequest(t *testing.T) {
 	}
 }
 
+// A changes request a read gives no sequence answers no wait, even once the wait's start carries
+// the hand-back's time: placement is by sequence alone (unplaceable). Its sequenced live event then
+// answers the wait, and the architect is told the review once, by the resume task, with no notice
+// beside it. (Round 2, the standard, adversarial and outside-whole P3-1.)
+func TestAnUnsequencedChangesReadThenItsLiveEventTellsTheReviewOnce(t *testing.T) {
+	t0 := time.Date(2026, 10, 26, 12, 0, 0, 0, time.UTC)
+	pool, apply := askRig(t)
+	root := awaitingRoot(3)
+	root.Awaiting.Since.At = t0
+	seedIssue(t, pool, root)
+	seedQuestion(t, pool, "ask-q", 3)
+	seedGate(t, pool, record.DesignGate{Issue: "LEGION-208", ArtifactID: "artifact-208", LatestVersion: 2})
+	at := t0.Add(time.Minute)
+	apply("read", intake.DispatchArtifact{Key: "LEGION-208", ArtifactID: "artifact-208", Kind: intake.DispatchArtifactChangesRequested,
+		Version: 2, Reason: "say more", Mark: record.EventMark{At: at}})
+	if awaiting := recordedRoot(t, pool).Awaiting; awaiting == nil || awaiting.AnsweredAt != nil {
+		t.Fatalf("awaiting after the unsequenced read = %+v, want it unanswered", awaiting)
+	}
+	apply("live", intake.DispatchArtifact{Key: "LEGION-208", ArtifactID: "artifact-208", Kind: intake.DispatchArtifactChangesRequested,
+		Version: 2, Reason: "say more", Mark: record.EventMark{Seq: 8, At: at}})
+	awaiting := recordedRoot(t, pool).Awaiting
+	if awaiting == nil || awaiting.AnsweredBy != record.AnsweredByChanges {
+		t.Fatalf("awaiting after the live event = %+v, want it answered by the changes request", awaiting)
+	}
+	for _, payload := range noticeRows(t, pool) {
+		if notice, ok := payload.(record.Notice); ok && notice.Kind == "design-changes-requested" {
+			t.Fatalf("notice %+v, want the review told by the resume task alone", notice)
+		}
+	}
+}
+
 // A changes request a read gives no sequence to cannot be placed against a root's wait: it is
 // neither told nor recorded as told, and its own sequenced event decides later.
 func TestAnUnplaceableChangesRequestIsNeitherToldNorRecorded(t *testing.T) {

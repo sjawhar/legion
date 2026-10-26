@@ -185,13 +185,22 @@ func (e *Engine) tellChanges(ctx context.Context, tx pgx.Tx, key, artifact strin
 	return e.store.StartHandout(ctx, tx, issue.Key)
 }
 
-// unplaceable says whether a review read at mark cannot be placed against root's wait: the root
-// waits from a sequenced start and the read gave the review no sequence (a Dispatch that predates
-// it). Such a changes request is neither told nor recorded as told, since its own sequenced event,
-// still to come, decides whether it answers the wait or reaches the architect; told now, it would
-// be told again by the resume that event answers.
+// unplaceable says whether an act or review at mark cannot be placed against root's wait: the root
+// waits from a sequenced start and the mark has no sequence (a read of a Dispatch that predates
+// it). It is the one placement rule every answer of a wait and every changes notice read (the
+// wait's start carries the hand-back's time too, for display, and a time is no placement): such a
+// review answers no wait and is neither told nor recorded as told, since its own sequenced event,
+// still to come, decides whether it answers the wait or reaches the architect; acted on now, it
+// would be told again by that event. An approval needs no event of its own: the open gate it
+// leaves answers the wait (answerOpenGates).
 func unplaceable(root record.Issue, mark record.EventMark) bool {
 	return root.AwaitingPerson() && root.Awaiting.Since.Seq > 0 && mark.Seq == 0
+}
+
+// placedAfter says whether mark is placed after the start of root's wait (record.EventMark.After),
+// by the one placement rule (unplaceable): an unsequenced mark against a sequenced start never is.
+func placedAfter(root record.Issue, mark record.EventMark) bool {
+	return !unplaceable(root, mark) && mark.After(root.Awaiting.Since)
 }
 
 // answerAwaitedGate answers a root waiting on its architect's question with a person's review of
@@ -215,7 +224,7 @@ func (e *Engine) answerAwaitedGate(ctx context.Context, tx pgx.Tx, key string, f
 	if carried || fact.Kind == intake.DispatchArtifactVersion {
 		return false, nil
 	}
-	if !fact.Mark.After(issue.Awaiting.Since) {
+	if !placedAfter(*issue, fact.Mark) {
 		e.logOnCommit(ctx, "workflow: a review given before the wait began answers no wait", "issue", issue.Key,
 			"version", fact.Version, "review_seq", fact.Mark.Seq, "since_seq", issue.Awaiting.Since.Seq)
 		return false, nil

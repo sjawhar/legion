@@ -79,6 +79,7 @@ func TestTheMigrationBackfillDeclaresNothingOld(t *testing.T) {
 		{"a gate version with no document", `update issues set phase = 'awaiting_person', awaiting_gate_version = 3 where key = 'LEGION-208'`},
 		{"a declared sequence of zero", `update issues set declared_seq = 0 where key = 'LEGION-208'`},
 		{"a negative handout", `update issues set handout_seq = -1 where key = 'LEGION-208'`},
+		{"a hand-back time with no sequence", `update issues set declared_at = now() where key = 'LEGION-208'`},
 	} {
 		_, err := store.Pool().Exec(ctx, refused.statement)
 		if err == nil || !strings.Contains(err.Error(), "constraint") {

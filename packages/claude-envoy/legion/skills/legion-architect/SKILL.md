@@ -29,7 +29,7 @@ You own one issue tree from its first decision to the merge that closes it. The 
 - Every child names the running system its criteria are proven on (the command, service or page the tester drives) and the repository skill that drives it. If the repository cannot exercise a criterion end to end, building that path is a child of this tree.
 - The issue's primary document is the root spec: extend it in place, because a second "spec" artifact replaces the human's document. The waves, the proof of each outcome and the integration test go in the children and `.legion/<issue>/plan.json`, not the root spec.
 - Read `skill://legion-architect/references/design-gate.md` before you write the root spec and before any edit to it after approval, because any new version closes the gate. It also says which gate runs, and that a sub-architect runs none.
-- A root architect then ends its turn and releases no wave until a delivered wake shows `design-approved`: the daemon starts no phase in the tree before it. A sub-architect waits for none and releases its children with `release_children`.
+- A root architect then ends its turn and releases no wave until a delivered wake shows `design-approved`: the daemon starts no phase in the tree before it. A root that waited on a person's answer gets no `design-approved` notice: a resume task saying "this resume is your design-approved wake" is that wake. A sub-architect waits for none and releases its children with `release_children`.
 
 ## 2. Children in flight
 
