@@ -23,7 +23,12 @@
 #      (packages/claude-envoy/dist/envoy-channel.js), and nowhere else;
 #   4. a Tailscale MagicDNS host — a DNS label then `.ts.net`, in any case, with no letter or
 #      digit after it. A reserved tailnet name (`example-tailnet`, under any machine name of its
-#      own in front) passes.
+#      own in front) passes;
+#   5. the personal model-gateway login tool of another company that the devbox proofs once needed
+#      (its name is the five letters of tool_rule below) — the name as a word of its own, in any
+#      case, with no letter or digit on either side, so its token command and login are refused
+#      and the same letters inside a base64 blob pass. Legion needs it nowhere: the proofs reach
+#      Anthropic through an operator's key file (scripts/e2e/lib/install-key-file-model-route.sh).
 #
 # With no arguments it scans the repository: every file git tracks, a file under an ignored path
 # included, plus every untracked file git does not ignore, so a new file is caught before it is
@@ -78,11 +83,13 @@ tailnet_host_rule='[[:alnum:]-]+[.]ts[.]net([^[:alnum:]]|$)'
 # name (the match is only its last label, so a machine name in front of it passes the same way),
 # with the one trailing character the rule itself may have captured.
 allowed_tailnet_host='example-tailnet[.]ts[.]net[^[:alnum:]]?'
+tool_rule="(^|[^[:alnum:]])h""awk([^[:alnum:]]|\$)"
 
 repository_label='names the private deployment repository or its Dispatch project key'
 company_label='names the company'
 private_host_label='names a private internal host'
 tailnet_host_label='names a Tailscale MagicDNS host'
+tool_label='names the personal model-gateway login tool Legion no longer uses'
 
 lockfiles=(bun.lock go.sum go.work.sum)
 targets=("$@")
@@ -182,6 +189,7 @@ search "$company_label" "$company_rule" -i
 search "$company_label" "$proper_noun_rule"
 search "$private_host_label" "$private_host_rule" -i
 search "$tailnet_host_label" "$tailnet_host_rule" -i
+search "$tool_label" "$tool_rule" -i
 search_paths "$repository_label" "$repository_rule" -i
 search_paths "$company_label" "$company_rule" -i
 search_paths "$company_label" "$proper_noun_rule"
@@ -211,9 +219,13 @@ if [ -s "$hits" ]; then
   echo "    host under the reserved example-tailnet.ts.net. Code that only looks like one, such as"
   echo "    an unbraced shell variable glued right before the literal, is refused too: brace the"
   echo "    variable or build the suffix separately;"
-  echo "  - for a file or directory whose path is reported with <name> in it, rename it."
+  echo "  - for a file or directory whose path is reported with <name> in it, rename it;"
+  echo "  - for the personal model-gateway login tool, delete the text: no proof needs it, and a"
+  echo "    model route is an Anthropic key file (LEGION_E2E_ANTHROPIC_KEY_FILE) or a pod's model"
+  echo "    gateway."
   exit 1
 fi
 
 echo "check-private-names: no file or path names the private deployment repository or the" \
-  "company, and no text names a private internal host or a Tailscale MagicDNS host ($scanned)"
+  "company, and no text names a private internal host, a Tailscale MagicDNS host or the removed" \
+  "model-gateway login tool ($scanned)"

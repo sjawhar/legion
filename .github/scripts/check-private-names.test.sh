@@ -58,6 +58,7 @@ vendored_nats="packages/claude-envoy/dist/envoy-channel.js"
 tailnet_suffix="ts.net"
 tailnet_label="realtailnet"
 tailnet_example="example-tailnet"
+tool="h""awk"
 
 # assert_each_refused <fixture-prefix> <label> <array-name> [line]: writes each line of the named
 # array into its own fixture, on the given line (1 by default; 2 is preceded by a filler line), and
@@ -205,6 +206,23 @@ root=$(fixture public-tailnet)
   printf 'host.%s.%swork, a longer word the boundary must not mistake for one\n' \
     "$tailnet_label" "$tailnet_suffix"
 } > "$root/docs/notes.md"
+run_check "$root"
+check "exits 0" "$(is "$status" 0)"
+
+echo "case: the removed model-gateway login tool is refused, whatever its case"
+# shellcheck disable=SC2034 # read by name through assert_each_refused's nameref
+tool_lines=(
+  "not the ${tool^} gateway"
+  "${tool^^} login"
+  "run $tool-token on PATH"
+  "the ${tool}_token cache"
+  "the tool ($tool)."
+)
+assert_each_refused tool "names the personal model-gateway login tool" tool_lines
+
+echo "case: the tool's letters inside a longer word or a base64 blob pass"
+root=$(fixture tool-lookalikes)
+printf 'Mo%ss and jO%skDC in an encoded update\n' "${tool}" "${tool^^}" > "$root/docs/notes.md"
 run_check "$root"
 check "exits 0" "$(is "$status" 0)"
 
