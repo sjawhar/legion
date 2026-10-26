@@ -736,8 +736,10 @@ run_refuse() {
   wait_whole sessions "$total" 60 || true
   wait_whole interests "$total" 60 || true
   sleep 3
-  run_hook after-refuse "$after_refuse"
+  # The judged window ends before the after-refuse hook runs: a hook may register a session of its
+  # own (an MCP server's envoy_sessions check does), which is not a record the rig seeded.
   poll_stop
+  run_hook after-refuse "$after_refuse"
   parts+=("outage: $(judge outage -sessions-obs "${run_dir}/outage-sessions.jsonl" \
     -interests-obs "${run_dir}/outage-interests.jsonl" -metrics-obs "${run_dir}/outage-metrics.jsonl" \
     -sets "$sets" -down-ns "$down_ns" -restart-ns "$restart_ns" -seeded-ns "$seeded_ns" \
