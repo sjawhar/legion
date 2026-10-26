@@ -2,54 +2,33 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-487",
-  "completed": "2026-10-26T22:08:46Z",
-  "round": 5,
+  "completed": "2026-10-26T22:37:06Z",
+  "round": 6,
   "pullRequest": "https://github.com/sjawhar/legion/pull/2269",
-  "scope": "Review round 1 (eba4fa9c), narrowed by the INFRA-115 architect (envoy 3d4d8ca0) to the reviewer's three findings; the two Minor points and the reviewer's one-SQL-definition note go on the Fast-follow line. Main not merged: GitHub reports MERGEABLE.",
+  "scope": "Review round 2 (f9927a54), narrowed by the INFRA-115 architect (envoy 950e6073) to its one finding: index the latest broker_serving row and show enrollment_lease_live's lookup uses it. Main not merged: GitHub reports MERGEABLE.",
   "answersReview": [
-    "Thread PRRT_kwDORFy7ds6wduPX (clock beats before the broker serves): the serving clock is built and started beside srv.Serve, after close(serveStarted), still on serving. Fixed in 301addfd; TestABrokerThatDiesBeforeServingRecordsNoServingBeat.",
-    "Thread PRRT_kwDORFy7ds6wduPg (a beat has no deadline; a held lock stalls it silently and the guard fails open): each beat runs under context.WithTimeout(Interval) with lock_timeout, statement_timeout and idle_in_transaction_session_timeout set to Interval for its transaction, and the WARN carries timed_out. A deadline alone cannot keep the guard off while one row is held, so migration 0019 now keeps one row per broker process (process, last_serving_at, not_serving_after; no seed): a beat upserts only its own row when no gap exists, and only a beat that finds a gap takes pg_advisory_xact_lock to give the time back once; enrollment_lease_live reads the latest row. Fixed in 301addfd; TestAHeldServingLockFailsTheBeatAndAnotherBrokerKeepsTheGuardOff.",
-    "Thread PRRT_kwDORFy7ds6wduPo (no Contract change census for the config refusal): the PR body now carries a Contract change census with both searches, every hit and its disposition, and the rollout line."
+    "Thread PRRT_kwDORFy7ds6weu7O (enrollment_lease_live's read of the latest row is not an indexed lookup): migration 0019 (unreleased) creates broker_serving_latest on broker_serving (last_serving_at desc), with one header sentence. Fixed in e847db82."
   ],
   "proof": [
     {
-      "criterion": "A broker that dies on start-up before it serves records no serving beat (finding 1)",
-      "surface": "the real broker binary on real Postgres, whose exchange issuer answers discovery 404 after 3 s, so it binds and then fatal()s at exchangeKeys",
-      "command": "cd packages/envoy && BROKER_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:54487/postgres?sslmode=disable go test -count=1 -v -run TestABrokerThatDiesBeforeServingRecordsNoServingBeat ./cmd/broker",
-      "observed": "--- PASS (10.36s): the broker exited non-zero after 'broker: fatal ... discovering issuer', and broker_serving was unchanged",
-      "headSha": "301addfdb1bd47748fe856884c465d6330ecce9e",
-      "negativeControl": "with the clock started at its old place (after enroll.Service, before the OAuth secret and the issuers): --- FAIL, 'broker_serving after a broker that never served = \"975964c6-... 2026-10-26 21:49:15.671408+00 00:00:03\", want it left at \"\"'"
+      "criterion": "enrollment_lease_live's read of the latest broker_serving row is an index lookup",
+      "surface": "Postgres 16.4, a throwaway database with migration 0019 applied by psql and 5050 broker_serving rows spread over the last hour, then dropped",
+      "command": "psql -d zzidx -f packages/envoy/internal/broker/store/migrations/0019_broker_serving.up.sql; insert 5050 rows; analyze; explain (analyze, costs off) select last_serving_at, not_serving_after from broker_serving order by last_serving_at desc limit 1; \\timing; select count(*) from generate_series(1,20000) g where not enrollment_lease_live(now() - interval '1 minute' - g * interval '1 microsecond')",
+      "observed": "Limit -> Index Scan using broker_serving_latest on broker_serving (actual rows=1), Execution Time 0.032 ms; 20000 per-row calls of enrollment_lease_live: 300.905 ms",
+      "headSha": "e847db828666799901873c4153869309b7f170b9",
+      "negativeControl": "the same after drop index broker_serving_latest: Limit -> Sort (top-N heapsort) -> Seq Scan on broker_serving (rows=5050), Execution Time 1.860 ms; the 20000 calls took 35109.684 ms"
     },
     {
-      "criterion": "A held serving lock fails the stuck broker's beat within a bound, logs the WARN, and does not switch the guard on while another broker serves (finding 2)",
-      "surface": "two ServingClocks (two broker processes) in-process on real Postgres, a test transaction holding one clock's row",
-      "command": "cd packages/envoy && BROKER_TEST_DATABASE_URL=... go test -count=1 -v ./internal/broker/enroll ./internal/broker/api ./internal/broker/requests ./internal/broker/config && go test -count=3 -run 'TestAHeldServingLock|TestTwoBeatsAtOnce' ./internal/broker/enroll",
-      "observed": "all ok, 0 SKIP; TestAHeldServingLockFailsTheBeatAndAnotherBrokerKeepsTheGuardOff PASS 4/4 (A's beat failed in under 2x Interval, one WARN with timed_out=true, B kept beating past the threshold, a lease that ran out in that window was not live and EndLapsed ended it); TestTwoBeatsAtOnceGiveTheTimeBackOnce PASS",
-      "headSha": "301addfdb1bd47748fe856884c465d6330ecce9e",
-      "negativeControl": "with a real gap (rows set back past the threshold) the guard is on: a lease that ran out after the latest beat stays live to Lookup and Renew and EndLapsed skips it (TestTheTimeNoBrokerServedIsGivenBackToTheLeasesItRanOut)"
-    },
-    {
-      "criterion": "After a broker outage longer than a pod's lease, a Legion pod fetches a secret again within one renewal interval of the broker serving again, with no relaunch and no person acting; ended enrollments stay ended",
-      "surface": "the real broker binary run twice on one real Postgres database, the real agent-secrets binary as the worker shim runs it, a forwarder holding one address across the restart; lease 45 s, sweep 1 s",
-      "command": "cd packages/envoy && BROKER_TEST_DATABASE_URL=... go test -count=1 -v -run TestABrokerOutageLongerThanALease ./cmd/broker",
-      "observed": "first CLI fetch served 100ms after the restart; renewer (never exited) renewed to 44.988s past now 5.893s after; revoked and lapsed pods refused; mismatch renewals 403 POD_IDENTITY_MISMATCH, lease unmoved; 'gave back ... gap=58.366728s ... enrollments=2'; --- PASS (90.29s), 0 SKIP",
-      "headSha": "301addfdb1bd47748fe856884c465d6330ecce9e",
-      "negativeControl": "the same outage_test.go (unchanged) in a git-archive export of eee16056's packages/envoy, GOWORK=off: --- FAIL at step (1), 'agent-secrets: proof invalid: not live (PROOF_INVALID)'"
+      "criterion": "The migration set and the serving clock still pass",
+      "surface": "in-process broker store and enroll packages on real Postgres",
+      "command": "cd packages/envoy && BROKER_TEST_DATABASE_URL=... go test -count=1 -v -skip TestOpenSignsEveryNewConnectionInWithAFreshlyMintedToken ./internal/broker/store ./internal/broker/enroll",
+      "observed": "ok store (15.4s), ok enroll (70.4s); 0 FAIL, 0 SKIP",
+      "headSha": "e847db828666799901873c4153869309b7f170b9",
+      "negativeControl": "the outage acceptance test is unchanged since 301addfd, where it failed on eee16056 with PROOF_INVALID not live and passed with 0 skips"
     }
   ],
   "filesChanged": [
-    "packages/envoy/cmd/broker/main.go (clock started beside srv.Serve), serving_start_test.go (new)",
-    "packages/envoy/internal/broker/store/migrations/0019_broker_serving.up.sql (one row per process, no seed; enrollment_lease_live reads the latest row)",
-    "packages/envoy/internal/broker/enroll/serving.go (per-process upsert, advisory-locked give-back, deadline and SET LOCAL timeouts, prune, timed_out on the WARN), serving_test.go",
-    "packages/envoy/internal/broker/api/renew_liveness_test.go (stale serving row by INSERT)",
-    "packages/envoy/AGENTS.md, packages/envoy/CHANGELOG.md, docs/site/src/content/docs/broker/operate.md"
-  ],
-  "trickyParts": [
-    "The per-process row is what lets another broker keep the guard off while one row is held: with a single row no broker can record that it serves while any transaction holds it.",
-    "Exactly-once give-back: only a beat whose fast upsert found a gap takes the advisory lock, re-reads the latest row with a fresh statement, and gives back; a second waiter then finds no gap."
-  ],
-  "deviations": [
-    "Migration 0019 rewritten in place: it is unreleased (this PR is unmerged)."
+    "packages/envoy/internal/broker/store/migrations/0019_broker_serving.up.sql (broker_serving_latest index, one header sentence)"
   ],
   "openQuestions": []
 }
