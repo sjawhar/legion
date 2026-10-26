@@ -4,6 +4,10 @@
 
 ### Added
 
+- The `dispatch` command (`dist/dispatch.js`) takes `dispatch issues --all`, which reads the whole
+  filtered issue listing in one request rather than a page, for a caller that must not miss or
+  repeat a row while the list changes under it. `--all` with `--limit` or `--offset` is a usage
+  error. The bundled tool descriptions carry the new argument.
 - The `dispatch` command (`dist/dispatch.js`) moves an issue on its project's board:
   `dispatch issue-update --issue <KEY> --before <OTHER>` puts it above that issue,
   `--after <OTHER>` below, and both together land it between them, printed as `rank -> before KEY`

@@ -1246,7 +1246,10 @@ export const dispatchToolSpecs = [
       "(default 0), and the answer names how many issues match, so repeat with the next offset to " +
       "walk every matching issue. A walk is exact only while the list does not change: an issue " +
       "that enters or leaves what the filters match, or whose status or rank changes, between two " +
-      "pages shifts rows across a page boundary, so one issue can come back twice and another never.",
+      "pages shifts rows across a page boundary, so one issue can come back twice and another never. " +
+      "all takes the whole filtered list in one read instead, for a caller that must not miss or " +
+      "repeat a row while other writers change the list, and especially for one whose own writes " +
+      "move issues out of what it filtered on.",
     arguments: (z) => ({
       project: z.string().describe("Project key to list issues from."),
       status: z.enum(ISSUE_STATUSES).describe("Optional lifecycle status filter.").optional(),
@@ -1278,6 +1281,13 @@ export const dispatchToolSpecs = [
       offset: z
         .number({ int: true, min: 0 })
         .describe("Rows to skip before the page; nonnegative integer; default 0.")
+        .optional(),
+      all: z
+        .boolean()
+        .describe(
+          "Take every matching issue in one unpaged read, so no row is missed or repeated while " +
+            "the list changes. Refused with limit or offset."
+        )
         .optional(),
     }),
   },

@@ -114,8 +114,13 @@ dependency in its body. For the image-pin comparison and `/healthz` deployment e
   the top of the screen once they scroll under it, so it never rises over the issue's header, its
   tabs or the `All / Open / Closed` filter above the turns; from `sm`, where the composer sticks
   to the top, it sits at the foot. While a phone thread covers the Conversation it shows no pill,
-  since the pill acts on the Conversation's place. The live view's transcript has a `Jump to
-  latest` of its own, with its own rules, under `features/agent-view/` below. Every composer fixed
+  since the pill acts on the Conversation's place. Opening the tab places the reader at the newest
+  card in the commit that first renders the list, because `ConversationTab` gives
+  `useFollowLatest` no `latestItemSeq` while any of its three reads is pending or failed, and that
+  first placement replaces a tab-switch scroll recorded before the list was on the page: the hook
+  calls `onFirstPlacement` before the parent's restore in the same commit, and `IssuePage` uses it
+  to forget that position (INFRA-303). The live view's transcript has a `Jump to latest` of its
+  own, with its own rules, under `features/agent-view/` below. Every composer fixed
   at the foot of the screen
   - the docked one below `sm`, a phone thread's own composers, and a phone margin thread's reply,
   each placed there by its `frame` - publishes how far up from the screen's bottom edge it reaches

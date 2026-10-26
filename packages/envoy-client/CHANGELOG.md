@@ -12,6 +12,15 @@
 
 ### Added
 
+- `dispatch issues --all` reads the whole filtered listing in one request. The client gains
+  `listAllIssues`, which sends neither `limit` nor `offset` and takes the bare array Dispatch
+  answers for that request, refusing any other shape by name: a page back from a request carrying
+  no paging is a Dispatch that still pages one. `dispatch_issues` routes `--all` there and leaves
+  every other call on `listIssuePage` with the same default page, and `--all` beside `--limit` or
+  `--offset` is refused before any request goes out. The command is for a caller that must not
+  miss or repeat a row: a row whose status changes between two offset reads comes back twice or
+  never, which bites hardest when the caller's own writes are what move it.
+
 - `dispatch issue-update --before <KEY>` and `--after <KEY>` move an issue on its project's board:
   the executor carries the two arguments into the server's `rank` on the PATCH it already makes, so
   the move rides along with any other change in the same call, and the printed result gains

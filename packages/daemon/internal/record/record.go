@@ -234,7 +234,8 @@ type PullRequest struct {
 	// have not arrived yet. A push that may change code is spent once its head arrives.
 	Pushes []ClassifiedPush
 	// HeadCounted is the head the fix-attempt count last counted, a push onto a red verdict, kept
-	// across every head pushed on top of it until one is pushed onto a green verdict
+	// across every head pushed on top of it until one is pushed onto a green verdict, or onto a
+	// settled head whose base branch requires no check and no workflow
 	// (classify.AdvancePullRequestHead); empty when no such attempt stands. The fix-attempt cap holds
 	// a red within that attempt (classify.FixAttemptCapHolds).
 	HeadCounted string
@@ -250,7 +251,8 @@ type PullRequest struct {
 	// checks and its branch protection's), as the daemon last read them from GitHub
 	// (intake.RequiredChecks). Only a required check or workflow decides the checks verdict
 	// (classify.HeadVerdict), so nil, a set never read, decides none; an empty set, with no
-	// required workflow, is a base that requires nothing, where nothing is red.
+	// required workflow, is a base that requires nothing, which gives the head no verdict and where
+	// nothing is red.
 	Required []string
 	// Workflows is each workflow the base branch's rulesets require to succeed, read with Required,
 	// and the result of its latest run on WorkflowsHead, the head the daemon read the runs of; empty
