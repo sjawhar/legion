@@ -819,6 +819,13 @@ func markUpdateOwedBy(ctx context.Context, tx pgx.Tx, room string, lastActor *mo
 // that edit may be any of the people it credits and no older person may stand in for it; and a
 // session sender, or an unknown sender crediting only sessions, is no person's edit and leaves it
 // as it is (set false).
+//
+// The value lives as long as the row: a settlement deletes the row whether or not it wrote a
+// version (clearSettlementPending), while a pending author survives a settlement that wrote none.
+// So after such a settlement a person's credit can still be pending with no person behind it, and
+// an agent's edit before the next version leaves that version naming nobody. It is then held
+// rather than lost (holdEditNotice), so the cost is one window's attribution, not a notice. The
+// row's last_actor was dropped the same way before this column existed.
 func latestPersonOf(sender *model.Actor, creditsPerson bool) (person *model.Actor, set bool) {
 	switch {
 	case sender != nil && sender.Kind == "user":

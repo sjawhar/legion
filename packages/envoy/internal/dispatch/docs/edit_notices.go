@@ -45,7 +45,10 @@ const openEditNotice = `
 // no last editor and no due time, which the sweep never sends; an open window keeps its last
 // editor, gains this version and its people, and when it names someone it moves its due time as
 // any later person's version does; a held row stays held. The next version that names a person
-// (openEditNotice) keeps the row's from_version, so its notice covers this version too.
+// (openEditNotice) keeps the row's from_version, so its notice covers this version too. A held
+// row is the one row the sweep never claims, so a document whose issue closes while it is held,
+// or that never gets another named version, keeps it until the document is deleted, which takes
+// it (on delete cascade). It is one row per document and nothing reads it but the next version.
 const holdEditNotice = `
 	insert into document_edit_notices (artifact_id, from_version, to_version, editors, last_editor, due_at)
 	values ($1, $2 - 1, $2, $3, null, null)

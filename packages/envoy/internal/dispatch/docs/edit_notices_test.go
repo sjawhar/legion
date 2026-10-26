@@ -1090,7 +1090,11 @@ func TestEditNoticeARebuildNamesThePersonWhoRebuiltIt(t *testing.T) {
 }
 
 // recordLatestEditSourceTx records actor as the document's latest edit source and, a person, its
-// latest person sender, as a person's own append does (markUpdateOwedBy).
+// latest person sender, as a person's own append does (markUpdateOwedBy). It writes its own
+// statement because no production writer leaves a document in that state without an edit:
+// persistLastActor, the one writer a test could call here, deliberately leaves the person alone.
+// What markUpdateOwedBy itself writes is held by
+// TestEditNoticeATwoPeerEditThatLandedClearsTheStoredPerson, through a real append.
 func recordLatestEditSourceTx(t *testing.T, service *Service, artifactID string, actor model.Actor) error {
 	t.Helper()
 	encoded, err := json.Marshal(actor)
@@ -1245,4 +1249,48 @@ func TestEditNoticeAnUnnamedVersionAfterASentNoticeIsInTheNextNotice(t *testing.
 	if !slices.Contains(second.Editors, bob.ID) || edits[1].actor != alice {
 		t.Fatalf("second notice editors = %v actor = %+v, want bob among the editors and alice as the actor", second.Editors, edits[1].actor)
 	}
+}
+
+// The confirm review's NB1: the clearing arm of latestPersonOf, which a two-peer edit's own
+// landed append takes. Alice types alone and her append lands; Bob then connects beside her and
+// one of the two types, and that append lands too, so neither edit is in the room's in-flight
+// credits when the version is written. The document's latest person sender must be cleared by the
+// two-peer append, so the notice names nobody. Without that arm the row still names alice, and
+// the notice would name her for an edit that may be Bob's.
+func TestEditNoticeATwoPeerEditThatLandedClearsTheStoredPerson(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, "First.\n\nSecond.\n")
+	settleCurrentGeneration(t, service, artifactID)
+	alice := model.Actor{Kind: "user", ID: "alice@example.com"}
+	bob := model.Actor{Kind: "user", ID: "bob@example.com"}
+	editAsConnectedPeer(t, service, artifactID, 1, alice, replaceRun("First.", "First, typed by alice."))
+	waitForLandedAppends(t, service, artifactID)
+	if person := storedLastPerson(t, service, artifactID); person == nil || *person != alice {
+		t.Fatalf("the stored latest person sender after alice's edit = %+v, want alice", person)
+	}
+	service.addConnection(artifactID, 1, alice)
+	service.addConnection(artifactID, 2, bob)
+	editAsPeer(t, service, artifactID, replaceRun("Second.", "Second, by one of the two."))
+	service.removeConnection(artifactID, 1)
+	service.removeConnection(artifactID, 2)
+	waitForLandedAppends(t, service, artifactID)
+	if person := storedLastPerson(t, service, artifactID); person != nil {
+		t.Fatalf("the stored latest person sender after the two-peer edit = %+v, want none", person)
+	}
+	settleCurrentGeneration(t, service, artifactID)
+	if row, open := readEditNotice(t, service, artifactID); open {
+		t.Fatalf("a version over a landed two-peer edit opened a window naming %+v, want none", row.lastEditor)
+	}
+}
+
+// storedLastPerson is the document's latest person sender as its pending-settlement row holds it
+// (doc_settlements_pending.last_person), nil when the row is gone or names none.
+func storedLastPerson(t *testing.T, service *Service, artifactID string) *model.Actor {
+	t.Helper()
+	person, err := readLastPerson(context.Background(), service.store.Pool, artifactID)
+	if err != nil {
+		t.Fatalf("read the document's latest person sender: %v", err)
+	}
+	return person
 }
