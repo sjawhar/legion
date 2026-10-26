@@ -2,47 +2,33 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-439",
-  "completed": "2026-10-26T16:30:00Z",
+  "completed": "2026-10-26T17:05:00Z",
   "pr": "https://github.com/sjawhar/legion/pull/2228",
-  "round": "Answers review round 2 at 50298d08 (the architect's NARROW scope): the refused-BTW class, the live frame queued while its cursor starts, the census (stored rows, host filter, trust model), UnwrittenFrames owning its claim protocol, plus the review's minors. Main merged forward once on a GitHub-reported conflict (fingerprint unchanged). A process death interrupted this round once; the Go fix it had left uncommitted was verified and committed (361ab1b4).",
+  "round": "Answers the tester's failure at a17a6e6f (review finding 1, the architect's NARROW scope): a BTW whose side turn answered, with its reply POST in flight when the process died, came back after the resume as a steering card. A process death interrupted this round once; the fix it left uncommitted was re-verified and committed as 3f7f2fc7.",
   "proof": [
     {
-      "criterion": "No regression of the outage paths on a real session after this round's changes (arrival-time FIFO, BTW record order, UnwrittenFrames contract, host private-subject rule)",
-      "surface": "real `omp --mode rpc` session (workspace pi-envoy via -e, scratch HOME, file sessions), real nats-server with JetStream and the listener built from this head, the session's NATS behind a socat proxy",
-      "command": "bash packages/pi-envoy/scripts/smoke-replay.sh (output: https://github.com/sjawhar/legion/pull/2228#issuecomment-6421265617)",
-      "observed": "legs 1-6 each show every event exactly once (connection cut, omp stopped, held through SIGKILL, abort_and_restore_queue, plain abort, switch away and back) and still once three heartbeats later; exit 0",
-      "headSha": "564a851cb54017921f5301493c05e39eba80ce6b",
-      "negativeControl": "released plugin 10.17.7 in the same run loses its messages on the outage, SIGKILL and interrupt paths"
+      "criterion": "Review finding 1: a BTW is never replayed as a steering card on any path (reply fails, sweep during the reply POST, process death with the reply POST in flight)",
+      "surface": "real `omp --mode rpc` session (omp 18.8.9, workspace pi-envoy with tools), a real Dispatch server on embedded Postgres, the listener and natsd built from this checkout, a proxy holding or failing Dispatch's reply route",
+      "command": "bash /legion/scratch/tmp/infra439/r14b.sh (the tester's r14 driver cut before leg B3; output: https://github.com/sjawhar/legion/pull/2228#issuecomment-6422119936)",
+      "observed": "RESULT: B1-no-card:PASS B1-retry-answers:PASS B1-no-card-after-retry:PASS B2-sweep-in-flight:PASS B2-killed-in-flight:PASS. B2-killed-in-flight: alice's BTW ac957758, side turn answered, reply POST held, omp SIGKILLed and resumed on the same session file: 0 cards or turns with the BTW body",
+      "headSha": "3f7f2fc7736610e32d5e0a774a5e78e8bda3228e",
+      "negativeControl": "the tester's run of the same leg at 9ccd956d (/legion/scratch/tmp/adv/r14-b1b2.log, 16:34:11Z): after resume, 1 card with the BTW body"
     },
     {
-      "criterion": "Finding 1: a refused BTW is never replayed as a steering card (reply 503, sweep during the POST, shutdown refusal then resume); finding 2: a live frame queued behind a slow delivery while its cursor starts gets its notice",
-      "surface": "pi-envoy extension under the mocked host with /v1/replay served from an in-test stream model; claude-envoy channel; envoy-client engine",
-      "command": "cd packages/pi-envoy && bun test (989 pass); cd packages/claude-envoy && bun test (212 pass); cd packages/envoy-client && bun test (903 pass)",
-      "observed": "'whose refusal Dispatch answers 503 is not shown by a sweep, and its Retry still runs the side turn', 'is not shown by a sweep that runs while its refusal is still being posted', 'refused while its session shuts down is not shown after a resume of that session', 'a live frame that arrived behind a held delivery before a stream recreation restarted its cursor gets one notice when it fails' (and its claude-envoy twin) all pass",
-      "headSha": "564a851cb54017921f5301493c05e39eba80ce6b",
-      "negativeControl": "with the old behaviour put back (record after release; stamp at delivery start) the new tests fail (deep-reviewer reproduced 1 card where 0 was expected, and 0 notices where 1 was expected)"
-    },
-    {
-      "criterion": "Finding 3: rows stored before the upgrade stop feeding the fan-out",
-      "surface": "the listener's interest registry on in-process nats-server",
-      "command": "cd packages/envoy && go test ./internal/store -count=1; go test ./cmd/listener -run 'Interest|Subscribe|LiveTopicException' -count=1",
-      "observed": "TestInterestSubscribeCleansAStoredRowOfTopicsReachingPrivateStreamSubjects: a row seeded with an exception lane, the controller lane and another session's agent subject matches before one heartbeat and holds only the own subject, the issue topic and the new GitHub topic after it, with Match returning nothing for the private subjects; TestRemoveAndSetRole_DropStoredTopicsReachingAPrivateStreamSubject passes",
-      "headSha": "564a851cb54017921f5301493c05e39eba80ce6b",
-      "negativeControl": "before the heartbeat the same seeded row matches all three private subjects (asserted in the test)"
+      "criterion": "The tester's red test and the BTW tests",
+      "surface": "pi-envoy extension under the mocked host",
+      "command": "cd packages/pi-envoy && bun test (990 pass); the red test file is identical to f2828f31",
+      "observed": "'whose side turn answered is not shown after a restart that cut its reply's POST short' passes, with every earlier BTW test (503 refusal, sweep during the POST, shutdown refusal then resume, Retry still runs)",
+      "headSha": "3f7f2fc7736610e32d5e0a774a5e78e8bda3228e",
+      "negativeControl": "at a17a6e6f the red test fails: expected 0 cards, received 1"
     }
   ],
   "filesChanged": [
-    "packages/envoy/internal/store/interest.go, kv.go (+ tests): private-stream topics dropped from merged and rewritten rows",
-    "packages/envoy/cmd/listener/live_topics_test.go: the read-back watcher registers its topic's own exception lane (the wildcard over every lane is a private subject now)",
-    "packages/envoy-client/src/replay.ts: recordDeliveredFor + ReplayHost.writeSessionID; reachesPrivateStreamSubject; delivery.ts readArrivals; tests",
-    "packages/pi-envoy/extensions/envoy.ts: refuseBTW and taken record for the delivering session before release; pump uses readArrivals; host filter; UnwrittenFrames callers",
-    "packages/pi-envoy/src/unwritten-frames.ts (+ test): sendCard returns queued|shown and owns settle/release; awaitTurn takes an optional identity",
-    "packages/claude-envoy/src: forwarder uses readArrivals; register filter; dist rebuilt",
-    "docs: envoy AGENTS.md and site Envoy page (trust model), CHANGELOGs, plugin AGENTS.md/README; packages/envoy/infra/go.work.sum restored to main"
+    "packages/pi-envoy/extensions/envoy.ts: every BTW is recorded by its event id (recordDeliveredFor, the delivering session) before its side turn and before any reply; refuseBTW folded into that",
+    "packages/pi-envoy/AGENTS.md, CHANGELOG.md, packages/envoy-client/README.md: the BTW recording point"
   ],
   "deviations": [
-    "TestALiveTopicExceptionIsReadBackOnce (from main) registered a serve-port watcher on notifications.envoy.exceptions.>, which reaches the agent subjects' failed-delivery lanes and is no longer stored; it now registers the live topic's own lane, which is what it asserts. CI's envoy workflow never ran at 4b149909, so this was latent since the round-6 guard.",
-    "Existing unwritten-frames tests that asserted the old contract (claim left pending after a non-waiting send) were rewritten for the new one.",
-    "Known timing tests in untouched files fail intermittently on this pod (envoy-client envoy-config 'still running after 10 s', claude-envoy 'queryTmux is bounded'); the final full runs passed."
+    "smoke-replay.sh was not re-run this round: the change is confined to the BTW branch, which the smoke script does not drive; r14 B1/B2 drove it live.",
+    "After the pod restart, scratch files were group-writable: packages/pi-envoy/bin/dispatch (on disk 775, recorded 755) failed prepack.test.ts's mode check, and the tester's Postgres data directory refused to start; both were restored to their correct modes, no content changed."
   ]
 }
