@@ -2,41 +2,41 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-261",
-  "completed": "2026-10-26T17:20:00Z",
+  "completed": "2026-10-26T22:35:00Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2238",
-  "headSha": "724ed7ea10d84136a493101753d8e1d92de90198",
+  "headSha": "f984533ad7d955cdf7be2724825c92dfea88cbd4",
   "proof": [
     {
-      "criterion": "Architect's ruling (tester failure, round 2): no way of ending a kvwatch subscription can panic the listener -- connection close or drain, nats.go's own unsubscribe, a stop, End at shutdown",
-      "surface": "kvwatch with real NATS (the tester's red test) and the real listener binary on its own natsd with NATS killed mid-scan",
-      "command": "cd packages/envoy && go test -count=3 -run TestASubscriptionEndingMidScanNeverPanics ./internal/kvwatch/; bash packages/envoy/scripts/e2e-refill.sh --scenario all and 3x --scenario interrupt --interrupt-by restart (https://github.com/sjawhar/legion/pull/2238#issuecomment-6422239439)",
-      "observed": "the red test passes with -count=3 and -count=4 at head; rig all PASS and every interrupt(restart) PASS with 0 'panic' lines in every listener log; the new TestASubscriptionEndingMidScanDisarmsTheIdleWaitAndReleasesItsContext passes (replacing watch, connection close, End: no panic, idle wait disarmed, nats.go's ctx goroutine released)",
-      "headSha": "724ed7ea10d84136a493101753d8e1d92de90198",
-      "negativeControl": "the same red test at 57e48f1 crashed the test binary: 'panic: send on closed channel' at nats.go v1.50.0 kv.go:1151 (tester: 7 of 7 runs; reproduced once by the implementer); before round 2's deferred stop, interrupt(restart) crashed the listener in 2 of 5 runs"
+      "criterion": "Acceptances 1-4 on the listener (re-read keeps every row; incomplete read removes nothing and is read again; refilling 503 + Retry-After at boot and past the bound with no gauge sample; bucket recreated under a live listener read whole before any self-health tick)",
+      "surface": "real listener binary on its own natsd (file store)",
+      "command": "bash packages/envoy/scripts/e2e-refill.sh --scenario all --out $TMPDIR/infra-261/rig7/head (https://github.com/sjawhar/legion/pull/2238#issuecomment-6428722314)",
+      "observed": "verdicts reread, interrupt(stop), interrupt(restart), recreate-live (both shapes) and refuse PASS, exit 0; 3 more interrupt(restart) runs PASS with 0 'panic' lines",
+      "headSha": "287d7b60f5b913e6b514baa20e569e57d7addb8c",
+      "negativeControl": "merge-base listener: every scenario FAIL (https://github.com/sjawhar/legion/pull/2238#issuecomment-6411086859); recreate-live on the b6d4733 listener FAILs both shapes (#issuecomment-6417102242)"
     },
     {
-      "criterion": "Architect's ruling (tester failure, round 1): once a bucket's stream is recreated under a live watcher, the copy stops reporting Following before it applies any record of the new stream, and the listener reads the new bucket whole without waiting for the self-health tick; the old copy is kept and served within the bound, and the sweep happens only on completion",
-      "surface": "real listener binary on its own natsd: the session bucket (60 s TTL) is recreated 26-28 s before a self-health tick, with the old stream shorter and longer than the new one, while GET /v1/sessions is polled continuously",
-      "command": "bash packages/envoy/scripts/e2e-refill.sh --scenario all --out $TMPDIR/infra-261/rig5/head (recreate-live part; https://github.com/sjawhar/legion/pull/2238#issuecomment-6417655089; first run at 8ef01c5: #issuecomment-6417102242)",
-      "observed": "verdict recreate-live PASS for both shapes: shorter old stream, the watcher's probe found the recreate at +1.005 s and read the new bucket from +1.012 s to +5.122 s (3001 records); longer old stream, found at +1.027 s, read +5.050 s to +5.152 s; both before the tick at ~+26.9 s, with no self-health failure or rebuild; no 200 lacked a record that both the old copy and the new bucket held; after completion every poll was exactly the new bucket; kvwatch red test TestABucketRecreatedUnderALiveWatcherIsReadWholeWithoutCheck passes unmodified with -count=3",
-      "headSha": "724ed7ea10d84136a493101753d8e1d92de90198",
-      "negativeControl": "--scenario recreate-live --listener-bin built from b6d4733: verdict FAIL for both shapes: no probe line, the new bucket read only at +27.03 s after the tick, and 469 polls from +17.0 s to +27.0 s listed new-bucket records while lacking chg x1000 and new x1000 the bucket held, with the copy still claiming to follow"
+      "criterion": "Acceptance 3 through Dispatch and envoy_sessions inside the refusal window",
+      "surface": "the real Go Dispatch server built from the head against the rig listener, and @legion/envoy-client listSessions (the call envoy_sessions makes; claude-envoy's MCP server cannot start while NATS is down, its registration needs the bus)",
+      "command": "e2e-refill.sh --during-refuse '$TMPDIR/infra-261/p5-dispatch.sh start/seed/check; bun $TMPDIR/infra-261/p4-envoy-client.ts refilling' --after-refuse '... check; p4-envoy-client.ts list:N; p4-envoy-sessions.ts list:N'",
+      "observed": "GET /api/v1/agents HTTP/1.1 503, Retry-After: 5, code ENVOY_REFILLING; RIG-1 route_status unknown, route_status_reason refilling in detail and list; listSessions threw EnvoyApiError 'envoy: the agent list is refilling; try again in a moment'; after recovery 200, route live with holder, the client listed 303 and the claude-envoy MCP tool listed 304 (303 seeded plus its own registration)",
+      "headSha": "287d7b60f5b913e6b514baa20e569e57d7addb8c",
+      "negativeControl": "the merge-base listener in the same window returned its frozen list to envoy_sessions (round 1, #issuecomment-6411086859)"
     },
     {
-      "criterion": "Acceptances 1, 2, 3 (listener, envoy_sessions, Dispatch server) and 4 still hold at the round-2 head; the listener survives a cut scan replaced by the reconnect Rewatch",
-      "surface": "real listener + natsd; claude-envoy MCP server over stdio and the real Go Dispatch server inside the outage window",
-      "command": "bash packages/envoy/scripts/e2e-refill.sh --scenario all --during-refuse '<p5-dispatch.sh start/seed/check; p4-envoy-sessions.ts refilling>' --after-refuse '<same>'; plus 5x --scenario interrupt --interrupt-by restart",
-      "observed": "reread PASS (10 of 260 polls inside the read, every old record held, exactly the bucket after), interrupt(stop) PASS (timed-out scan, kvwatch's own re-read), interrupt(restart) PASS, refuse PASS (boot only refilling 503s then complete 200s, no gauge sample while 503; past the bound refilling 503 Retry-After 5; whole after NATS returned); Dispatch built from this head answered GET /api/v1/agents 503 ENVOY_REFILLING and routed issues route_status unknown, reason refilling; envoy_sessions failed with 'envoy: the agent list is refilling; try again in a moment' then listed 303; 0 'panic' lines in every listener log; 5 of 5 interrupt(restart) runs at 8ef01c5 passed with 0 panics",
-      "headSha": "724ed7ea10d84136a493101753d8e1d92de90198",
-      "negativeControl": "merge-base listener: every rig scenario FAIL (round-1 evidence https://github.com/sjawhar/legion/pull/2238#issuecomment-6411086859); before the deferred stop, interrupt(restart) crashed the listener with nats.go 'send on closed channel' in 2 of 5 runs at the pre-fix head and 1 of 3 on b6d4733"
+      "criterion": "Acceptance 3 on every Dispatch view, including the broadcast composer; claims wait for a current list",
+      "surface": "Dispatch browser suite (real Go Dispatch server, fake listener, Chromium) and the web unit suite",
+      "command": "cd packages/dispatch && bun run e2e -- agent-list-refilling claim-refilling --project chromium; bun test web/src/features/agents",
+      "observed": "6 passed; agents tests 98 pass, including the new broadcast tests (a refilling list keeps a missing or mode-less selected session as an unchecked recipient)",
+      "headSha": "f984533ad7d955cdf7be2724825c92dfea88cbd4",
+      "negativeControl": "agent-list-refilling on the merge base: 4 failed; the new broadcast tests fail against the pre-fix broadcast-plan.ts (excluded as 'no live session' / 'does not advertise BTW')"
     },
     {
-      "criterion": "Acceptance 3: every Dispatch view shows refilling, never an agent's absence",
-      "surface": "Dispatch browser suite (real Go Dispatch server, fake listener, Chromium)",
-      "command": "cd packages/dispatch && bun run e2e -- agent-list-refilling claim-refilling --project chromium",
-      "observed": "6 passed at the merged head (agent-list-refilling 4/4 across Agents page, subscribers, ask card, mention suggestions, conversation page, route reason, list and board; the tester's claim-refilling 2/2)",
-      "headSha": "724ed7ea10d84136a493101753d8e1d92de90198",
-      "negativeControl": "the same spec on a build of the merge base 81a3b5ef7b47: 4 failed"
+      "criterion": "Review round 1 findings: Refresh never answers gone for a live read; the stream-confirmation gate never stalls delivery; no legacy watcher callable; no subscription end panics the listener",
+      "surface": "Go tests with real NATS (internal/session, internal/kvwatch, internal/bus), race detector",
+      "command": "go test -count=1 -p 1 over kvwatch, bus, session, store, cistore, testnats, redeliver, dispatch/envoy, dispatch/model, metrics, cmd/listener, cmd/dispatch, integration; tester red tests -count=3; CGO_ENABLED=1 go test -race over kvwatch, session, store, cistore",
+      "observed": "all ok; TestARefreshOvertakenByAWatchAnswersTheBucketsEntry, TestARefreshTheFenceDropsAnswersTheBucketsEntry, TestRecordsShareOneStalledReadOfTheStream, TestAFailedReadOfTheStreamIsNotRetriedPerRecord, TestReadsOfTheStreamThatKeepFailingEndFollowingPastTheStaleBound pass; a legacy watch call on bus.KeyValue no longer compiles",
+      "headSha": "287d7b60f5b913e6b514baa20e569e57d7addb8c",
+      "negativeControl": "with the old per-record gate and old Refresh answer restored, all five new tests failed (2 and 3 reads instead of 1, a gate timeout, 'nats: key not found' twice)"
     }
   ],
   "filesChanged": [
@@ -54,7 +54,8 @@
     "docs: packages/envoy/{AGENTS.md,docs/architecture.md,CHANGELOG.md,cmd/dispatch/README.md,cmd/dispatch/AGENTS.md}, packages/dispatch/AGENTS.md, packages/contracts/AGENTS.md, docs/site dispatch/envoy.md, the INFRA-249 solution note",
     "round 2: packages/envoy/internal/kvwatch/kvwatch.go (stream probe every 2 s, confirmation gate on post-read records, completion stream check, deferred stop of replaced/discarded watchers until their scan ends), probe_test.go, deferred_stop_test.go, export_test.go",
     "round 2: packages/envoy/scripts/e2e-refill.sh, internal/testnats/cmd/refillrig/main.go, scripts/README.md (recreate-live scenario; listener held during fills; keyed on the install line), packages/envoy/AGENTS.md, CHANGELOG.md",
-    "round 3: packages/envoy/internal/bus/kv.go (jetstream watch handle and context; WatchKeys, ReadHistory, fresh-stream ReadStreamState; constructors take the connection), internal/kvwatch/{kvwatch.go,scan.go,entry.go} (jetstream watcher, kvwatch-owned scan idle timer, per-watch context, kvwatch.Entry), adapters and every caller/test, redeliver sweep on ScanExistingKeys, new replaced_test.go and scan_end_test.go; deleted kvwatchtest/timingout.go and deferred_stop_test.go"
+    "round 3: packages/envoy/internal/bus/kv.go (jetstream watch handle and context; WatchKeys, ReadHistory, fresh-stream ReadStreamState; constructors take the connection), internal/kvwatch/{kvwatch.go,scan.go,entry.go} (jetstream watcher, kvwatch-owned scan idle timer, per-watch context, kvwatch.Entry), adapters and every caller/test, redeliver sweep on ScanExistingKeys, new replaced_test.go and scan_end_test.go; deleted kvwatchtest/timingout.go and deferred_stop_test.go",
+    "round 4: internal/bus/kv.go (unexported legacy handle, DrainWatcher, self-bounded ReadStreamState), internal/session/registry.go (Refresh uncached answer), internal/kvwatch (copy.go Copy[V]; stream gate sharing reads; kvwatch.go split into options/serving/stream/repair/shutdown), internal/store (kv.go split into interest_cache/reads/writes/roles/reaper), internal/cistore, internal/testnats/cmd/refillrig split, scripts/e2e-refill.sh (judged window ends before the after-refuse hook), packages/pi-envoy/scripts smoke-btw.sh and smoke-registration-stall.sh, packages/envoy-client dispatch-execute.ts + claude-envoy dist, packages/dispatch broadcast-plan.ts, AGENTS.md and CHANGELOGs"
   ],
   "trickyParts": [
     "kvwatch completeRead takes applyMu, rechecks generation/stopped/Check error/disconnect count under mu, sweeps with mu released, then sets following only if still valid; a read a disconnect overlapped completes nothing (extension of D2 to disconnects).",
@@ -81,10 +82,15 @@
     "ReadStreamState reads through jetstream.JetStream.Stream (a fresh STREAM.INFO each time) rather than the jetstream KV handle's Status, which writes shared stream info with no lock (nats.go v1.50.0 jetstream/stream.go:460); the race detector caught it.",
     "The watch's consumer create is bounded by nats.go's 5 s request wait for a deadline-free context (jsm.go:1791-1795), not a kvwatch create timer.",
     "Round 2's deferred stop is removed: with no init timer a stop is safe at any time; a stopped watcher is still read until it closes.",
-    "Residual (nats.go, cannot be fixed from our side, no panic): jetstream WatchFiltered sets its closed handler after Subscribe returns, so a subscription ending in that window leaves the reader goroutine blocked; the new architect-requested test cannot run at 57e48f1 because it targets the new API, so the tester's red test is the negative control."
+    "Residual (nats.go, cannot be fixed from our side, no panic): jetstream WatchFiltered sets its closed handler after Subscribe returns, so a subscription ending in that window leaves the reader goroutine blocked; the new architect-requested test cannot run at 57e48f1 because it targets the new API, so the tester's red test is the negative control.",
+    "Round 4 P4 inside the outage window is shown through @legion/envoy-client listSessions, the call envoy_sessions makes: claude-envoy's MCP server cannot start while NATS is down (its startup registration needs the bus, envoy-channel-server.ts:1216). The MCP tool itself is shown listing after recovery.",
+    "Rig fix: e2e-refill.sh now ends the outage's judged polls before the after-refuse hook, since a hook can register a session of its own.",
+    "The confirmation gate got option (b) as well: STREAM.INFO failing for longer than the stale bound stops the copy following.",
+    "Broadcast composer fixed under the architect's ruling (2026-10-26 21:48Z); the mode-less session on a stale list is also unchecked rather than excluded, and the unchecked wording is 'couldn't check whether it is running' in both cases."
   ],
   "openQuestions": [
-    "Local env limits unchanged: two internal/dispatch/api tests fail only on this pod's SQL_ASCII Postgres; race tests run with zig as CC."
+    "app.test.tsx 'project routes render the project page...' failed once in the full web suite under parallel load and passes alone (5/5); untouched by this PR."
   ],
-  "round": 3
+  "round": 4,
+  "generation": 3
 }
