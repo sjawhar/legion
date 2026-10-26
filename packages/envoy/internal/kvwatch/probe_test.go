@@ -2,6 +2,8 @@ package kvwatch_test
 
 import (
 	"context"
+	"errors"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -10,6 +12,7 @@ import (
 	natsgo "github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/sjawhar/envoy/internal/bus"
+	"github.com/sjawhar/envoy/internal/goroutinetest"
 	"github.com/sjawhar/envoy/internal/kvwatch"
 	"github.com/sjawhar/envoy/internal/testnats"
 )
@@ -441,5 +444,313 @@ func TestACompletionWhoseStreamChangedUnderTheScanSweepsNothing(t *testing.T) {
 	}
 	if done := into.completions(); len(done) != 1 || done[0].Epoch != 1 || !done[0].Recreated {
 		t.Fatalf("reads completed %+v, want only the recreated bucket's, of epoch 1", done)
+	}
+}
+
+// heldStreams is a JetStream whose reads of the bucket's stream (Stream, the STREAM.INFO a watcher
+// reads) go as the test sets them: answered, held until the test lets them go, or refused. It
+// counts them.
+type heldStreams struct {
+	jetstream.JetStream
+	count atomic.Int32
+	mu    sync.Mutex
+	held  chan struct{}
+	fail  error
+}
+
+func (k *heldStreams) Stream(ctx context.Context, name string) (jetstream.Stream, error) {
+	k.count.Add(1)
+	k.mu.Lock()
+	held, fail := k.held, k.fail
+	k.mu.Unlock()
+	if held != nil {
+		select {
+		case <-held:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	if fail != nil {
+		return nil, fail
+	}
+	return k.JetStream.Stream(ctx, name)
+}
+
+func (k *heldStreams) reads() int { return int(k.count.Load()) }
+
+// hold holds every read from now on until the returned let is called, which answers them and
+// every read after it.
+func (k *heldStreams) hold(t *testing.T) (let func()) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	held := make(chan struct{})
+	k.held = held
+	var once sync.Once
+	let = func() {
+		once.Do(func() {
+			k.mu.Lock()
+			k.held = nil
+			k.mu.Unlock()
+			close(held)
+		})
+	}
+	t.Cleanup(let)
+	return let
+}
+
+// refuse makes every read from now on fail with err, or answer again when err is nil.
+func (k *heldStreams) refuse(err error) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	k.fail = err
+}
+
+// handle is kv with its stream reads going through k, as the bus.KeyValue a watcher takes.
+func (k *heldStreams) handle(kv bus.KeyValue) bus.KeyValue {
+	return bus.NewKeyValue(kv.Legacy(), kv.WatchHandle(), k)
+}
+
+// waitingInTheGate reports whether a record is held in the gate on a read of the stream already in
+// flight: a goroutine parked on a channel receive in applyCurrent itself.
+func waitingInTheGate() bool {
+	for _, goroutine := range goroutinetest.Traces() {
+		if strings.Contains(goroutine, "[chan receive") && strings.Contains(goroutine, "kvwatch.(*Watcher).applyCurrent(") {
+			return true
+		}
+	}
+	return false
+}
+
+// A record on an old confirmation sends a read of the stream; while that read stalls, every
+// record behind it waits for that same read, not for one of its own each. The read answers past
+// 4 s, too late to vouch for the records, and the gate does not send it again per record: within
+// the probe interval after it every record is applied with no read, and only past that interval
+// does a record send the next one.
+func TestRecordsShareOneStalledReadOfTheStream(t *testing.T) {
+	uri := testnats.URL(t)
+	_, kv := bucket(t, uri)
+	streams := &heldStreams{JetStream: kv.Streams()}
+	into := newSeen()
+	now := newClock()
+	w := kvwatch.New("test cache", streams.handle(kv), into,
+		kvwatch.WithNow(now.Now), kvwatch.WithAfterFunc((&pending{}).afterFunc()))
+	t.Cleanup(w.Stop)
+	w.Start()
+	eventually(t, "the first read's completion", w.Following)
+	base := streams.reads()
+	put := func(key string) {
+		t.Helper()
+		if _, err := kv.Put(key, []byte("1")); err != nil {
+			t.Fatalf("put %s: %v", key, err)
+		}
+	}
+	applied := func(keys ...string) func() bool {
+		return func() bool {
+			for _, key := range keys {
+				if !into.has(key) {
+					return false
+				}
+			}
+			return true
+		}
+	}
+
+	let := streams.hold(t)
+	now.advance(staleConfirmation)
+	put("first")
+	eventually(t, "the first record's read of the stream", func() bool { return streams.reads() == base+1 })
+	put("second")
+	put("third")
+	if into.has("first") || into.has("second") || into.has("third") {
+		t.Fatal("a record was applied while the read of the stream it waits for was still held")
+	}
+	now.advance(10 * time.Second)
+	let()
+	eventually(t, "the records held behind the read", applied("first", "second", "third"))
+	if got := streams.reads() - base; got != 1 || !w.Following() {
+		t.Fatalf("three records were applied after %d reads of the stream, Following %v; want the one read they shared, still following", got, w.Following())
+	}
+
+	put("fourth")
+	eventually(t, "a record within the probe interval of the read", applied("fourth"))
+	if got := streams.reads() - base; got != 1 {
+		t.Fatalf("a record within the probe interval of the last read sent another: %d reads in all, want 1", got)
+	}
+	now.advance(probeEvery + time.Second)
+	put("fifth")
+	eventually(t, "a record past the probe interval", applied("fifth"))
+	if got := streams.reads() - base; got != 2 {
+		t.Fatalf("a record past the probe interval of the last read was applied after %d reads in all, want 2", got)
+	}
+}
+
+// A read of the stream that fails is not sent again per record: the record that sent it is
+// applied, and so is every record after it within the probe interval, with no read and the copy
+// still following. Past the interval a record sends one more.
+func TestAFailedReadOfTheStreamIsNotRetriedPerRecord(t *testing.T) {
+	uri := testnats.URL(t)
+	_, kv := bucket(t, uri)
+	streams := &heldStreams{JetStream: kv.Streams()}
+	into := newSeen()
+	now := newClock()
+	w := kvwatch.New("test cache", streams.handle(kv), into,
+		kvwatch.WithNow(now.Now), kvwatch.WithAfterFunc((&pending{}).afterFunc()))
+	t.Cleanup(w.Stop)
+	w.Start()
+	eventually(t, "the first read's completion", w.Following)
+	base := streams.reads()
+	put := func(key string) {
+		t.Helper()
+		if _, err := kv.Put(key, []byte("1")); err != nil {
+			t.Fatalf("put %s: %v", key, err)
+		}
+		eventually(t, key+" to be applied", func() bool { return into.has(key) })
+	}
+
+	streams.refuse(errors.New("stream info refused"))
+	now.advance(staleConfirmation)
+	for _, key := range []string{"first", "second", "third"} {
+		put(key)
+	}
+	if got := streams.reads() - base; got != 1 || !w.Following() {
+		t.Fatalf("three records on an old confirmation sent %d reads of a stream that refuses them, Following %v; want one, still following", got, w.Following())
+	}
+	now.advance(probeEvery + time.Second)
+	put("past-the-interval")
+	if got := streams.reads() - base; got != 2 {
+		t.Fatalf("a record past the probe interval of the failed read was applied after %d reads in all, want 2", got)
+	}
+}
+
+// A record delivered while the probe's read of the stream is in flight waits for that read rather
+// than send one of its own; when the read finds the bucket recreated, the record, which the
+// consumer nats.go moved onto the new bucket delivered, is applied only once the copy stopped
+// following.
+func TestARecordWaitsForTheProbesReadInFlight(t *testing.T) {
+	uri := testnats.URL(t)
+	conn, kv := bucket(t, uri)
+	if _, err := kv.Put("ghost", []byte("old")); err != nil {
+		t.Fatalf("put: %v", err)
+	}
+	records := make(chan jetstream.KeyValueEntry)
+	var (
+		w           *kvwatch.Watcher
+		mu          sync.Mutex
+		followingAt = map[string]bool{}
+	)
+	into := newSeen()
+	cache := withApply{seen: into, before: func(entry natsgo.KeyValueEntry) {
+		following := w.Following()
+		mu.Lock()
+		defer mu.Unlock()
+		followingAt[entry.Key()] = following
+	}}
+	now := newClock()
+	timers := &pending{}
+	handle := scripted(kv, injecting(records))
+	streams := &heldStreams{JetStream: handle.streams}
+	handle.streams = streams
+	w = kvwatch.New("test cache", handle.handle(), cache,
+		kvwatch.WithNow(now.Now), kvwatch.WithAfterFunc(timers.afterFunc()))
+	t.Cleanup(w.Stop)
+	w.Start()
+	eventually(t, "the first read's completion", w.Following)
+
+	recreated := recreate(t, conn, "fresh")
+	entry := jetStreamEntry(t, wrap(t, conn, recreated), "fresh")
+	base := streams.reads()
+	let := streams.hold(t)
+	now.advance(staleConfirmation)
+	probed := make(chan struct{})
+	probe := timers.last(t, probeEvery)
+	go func() {
+		defer close(probed)
+		probe.fire()
+	}()
+	eventually(t, "the probe's read of the stream", func() bool { return streams.reads() == base+1 })
+	records <- entry
+	eventually(t, "the record to wait in the gate", waitingInTheGate)
+	if into.has("fresh") {
+		t.Fatal("the record was applied while the probe's read was in flight")
+	}
+	let()
+	wait(t, probed, "the probe to end")
+	eventually(t, "the new bucket's record to be applied", func() bool { return into.has("fresh") })
+	mu.Lock()
+	whileFollowing := followingAt["fresh"]
+	mu.Unlock()
+	if whileFollowing || w.Following() {
+		t.Fatalf("the new bucket's record was applied with Following %v (now %v); want the copy stopped following first", whileFollowing, w.Following())
+	}
+	if got := streams.reads() - base; got != 1 {
+		t.Fatalf("the stream was read %d times, want only the probe's read the record waited for", got)
+	}
+
+	timers.last(t, rereadNow).fire()
+	readWholeInEpochOne(t, w, into, "fresh", "ghost")
+}
+
+// Reads of the stream that keep failing leave the copy following only for the stale bound: a run
+// a read that answers breaks starts over, and once an unbroken run has outlasted the bound the copy
+// stops following, which starts its stale episode, and the watcher reads its bucket again once the
+// stream answers. The end is logged once, at WARN.
+func TestReadsOfTheStreamThatKeepFailingEndFollowingPastTheStaleBound(t *testing.T) {
+	const (
+		bound       = time.Minute
+		rereadAfter = 5 * time.Second
+		stopped     = "test cache could not read its bucket's stream for longer than its stale bound; its cache stops following and is re-read once the stream answers"
+	)
+	uri := testnats.URL(t)
+	_, kv := bucket(t, uri)
+	streams := &heldStreams{JetStream: kv.Streams()}
+	into := newSeen()
+	now := newClock()
+	timers := &pending{}
+	logger, logs := jsonLogger(t)
+	w := kvwatch.New("test cache", streams.handle(kv), into, kvwatch.WithNow(now.Now),
+		kvwatch.WithAfterFunc(timers.afterFunc()), kvwatch.WithStaleBound(bound), kvwatch.WithLogger(logger))
+	t.Cleanup(w.Stop)
+	w.Start()
+	eventually(t, "the first read's completion", w.Following)
+	probe := func() { timers.last(t, probeEvery).fire() }
+	refused := errors.New("stream info refused")
+
+	streams.refuse(refused)
+	probe()
+	now.advance(bound - time.Second)
+	streams.refuse(nil)
+	probe()
+	streams.refuse(refused)
+	now.advance(time.Second)
+	probe()
+	now.advance(bound)
+	probe()
+	if !w.Following() {
+		t.Fatal("the copy stopped following on a run of failed reads no longer than the stale bound, counted from the read that answered")
+	}
+	if got := len(timers.armed(rereadAfter)); got != 0 {
+		t.Fatalf("failed reads within the stale bound armed %d re-reads, want none", got)
+	}
+
+	now.advance(time.Second)
+	probe()
+	if w.Following() || w.NeedsRead() || len(timers.armed(rereadAfter)) != 1 {
+		t.Fatalf("after failed reads past the stale bound: Following %v, NeedsRead %v, %d re-reads armed; want not following, a re-read armed",
+			w.Following(), w.NeedsRead(), len(timers.armed(rereadAfter)))
+	}
+	serves(t, w, "as its stale episode begins")
+	probe()
+	if lines := matching(logs(), "WARN", stopped); len(lines) != 1 || lines[0]["bucket"] != testBucketName {
+		t.Fatalf("the end of following was logged %v, want one WARN line naming bucket %s", lines, testBucketName)
+	}
+	now.advance(bound + time.Second)
+	refuses(t, w, "past the stale bound of its episode")
+
+	streams.refuse(nil)
+	timers.last(t, rereadAfter).fire()
+	eventually(t, "the re-read's completion", w.Following)
+	serves(t, w, "after the re-read")
+	if got := len(into.completions()); got != 2 {
+		t.Fatalf("%d reads completed, want the first and the re-read", got)
 	}
 }

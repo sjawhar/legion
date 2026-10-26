@@ -403,6 +403,130 @@ func TestAResultFromABucketSinceRecreatedIsDropped(t *testing.T) {
 	}
 }
 
+// refreshed is what one Refresh answered.
+type refreshed struct {
+	entry SessionEntry
+	err   error
+}
+
+// A Refresh whose bucket read a watch overtakes -- the epoch moved to a recreated bucket while the
+// read was in flight -- is not applied, and answers the live entry the bucket returned, not the
+// copy, which the new bucket's read has not yet given that session. Every Refresh caller is about
+// to take something away from a session that looks gone.
+func TestARefreshOvertakenByAWatchAnswersTheBucketsEntry(t *testing.T) {
+	client := setupNATS(t)
+	r, err := OpenSessionRegistry(client.Conn, WithSessionReplicas(1), WithSessionTTL(time.Minute))
+	if err != nil {
+		t.Fatalf("open session registry: %v", err)
+	}
+	waitFor(t, 5*time.Second, r.watcher.Following)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	r.watcher.End(ctx)
+	base := r.watcher.KV()
+	delayed := &delayingKV{KeyValue: base.Legacy()}
+	held := &holdingCache{Cache: sessionCache{r}}
+	// No probe: the Rewatch below is the only thing that moves the epoch, so the new bucket's one
+	// read is the one whose apply of ses_a the test holds.
+	r.watcher = kvwatch.New("session registry", bus.NewKeyValue(delayed, base.WatchHandle(), base.Streams()), held,
+		kvwatch.WithStreamProbeInterval(0))
+	t.Cleanup(r.StopWatch)
+	r.watcher.Start()
+	waitFor(t, 5*time.Second, r.watcher.Following)
+
+	js, err := client.Conn.JetStream()
+	if err != nil {
+		t.Fatalf("jetstream: %v", err)
+	}
+	if err := js.DeleteKeyValue(bus.SessionBucket); err != nil {
+		t.Fatalf("delete the session bucket: %v", err)
+	}
+	recreated := testnats.RecreateKeyValue(t, js, &natsgo.KeyValueConfig{Bucket: bus.SessionBucket, TTL: time.Minute})
+	putRaw(t, recreated, "ses_a", SessionEntry{Port: 1, MachineID: "m1", Title: "live", UpdatedAt: time.Now().UnixMilli()})
+
+	get := delayed.delay(t, &delayed.gets, "ses_a")
+	done := make(chan refreshed, 1)
+	go func() {
+		entry, err := r.Refresh(context.Background(), "ses_a")
+		done <- refreshed{entry: entry, err: err}
+	}()
+	waitClosed(t, get.reached, "the bucket to answer the refresh's read")
+	apply := held.holdApply(t, "ses_a")
+	if err := r.Rewatch(client.Conn); err != nil {
+		t.Fatalf("Rewatch: %v", err)
+	}
+	waitClosed(t, apply.reached, "the new bucket's read to deliver ses_a")
+	if _, err := r.Get("ses_a"); !errors.Is(err, natsgo.ErrKeyNotFound) || r.watcher.Epoch() != 1 {
+		t.Fatalf("before the refresh answers: Get(ses_a) = %v in epoch %d, want not found yet in epoch 1", err, r.watcher.Epoch())
+	}
+
+	get.open()
+	got := <-done
+	if got.err != nil || got.entry.Title != "live" {
+		t.Fatalf("Refresh(ses_a) overtaken by the watch = %+v, %v; want the live entry the bucket returned", got.entry, got.err)
+	}
+	apply.open()
+	waitClosed(t, apply.done, "the new bucket's read to apply ses_a")
+	if got := titleOf(t, r, "ses_a"); got != "live" {
+		t.Fatalf("ses_a = %q once the new bucket's read applied it, want its value", got)
+	}
+}
+
+// A Refresh whose read the revision fence drops answers the entry the bucket returned. The fence
+// holds a revision of the bucket incarnation the copy still follows -- here a delete there -- and a
+// bucket recreated under the watcher, which has not yet found it, numbers its revisions from 1
+// again, so the new bucket's live session reads below that fence. Answered from the copy, the
+// session would be gone. A read the fence drops still answers as Get would for its row: once the
+// row is past its TTL, it is not found.
+func TestARefreshTheFenceDropsAnswersTheBucketsEntry(t *testing.T) {
+	client := setupNATS(t)
+	now := &clock{}
+	r, err := OpenSessionRegistry(client.Conn, WithSessionReplicas(1), WithSessionTTL(time.Minute), WithSessionClock(now.Now))
+	if err != nil {
+		t.Fatalf("open session registry: %v", err)
+	}
+	waitFor(t, 5*time.Second, r.watcher.Following)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	r.watcher.End(ctx)
+	// No probe, so nothing finds the recreate below while the test runs.
+	r.watcher = kvwatch.New("session registry", r.watcher.KV(), sessionCache{r}, kvwatch.WithStreamProbeInterval(0))
+	t.Cleanup(r.StopWatch)
+	r.watcher.Start()
+	waitFor(t, 5*time.Second, r.watcher.Following)
+
+	for range 20 {
+		putRaw(t, r.watcher.KV().Legacy(), "ses_filler", SessionEntry{Port: 9, MachineID: "m1"})
+	}
+	if err := r.Put("ses_a", SessionEntry{Port: 1, MachineID: "m1", Title: "old"}); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	if err := r.Delete("ses_a"); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	js, err := client.Conn.JetStream()
+	if err != nil {
+		t.Fatalf("jetstream: %v", err)
+	}
+	if err := js.DeleteKeyValue(bus.SessionBucket); err != nil {
+		t.Fatalf("delete the session bucket: %v", err)
+	}
+	recreated := testnats.RecreateKeyValue(t, js, &natsgo.KeyValueConfig{Bucket: bus.SessionBucket, TTL: time.Minute})
+	putRaw(t, recreated, "ses_a", SessionEntry{Port: 1, MachineID: "m1", Title: "new", UpdatedAt: time.Now().UnixMilli()})
+	if r.watcher.Epoch() != 0 {
+		t.Fatalf("epoch %d, want the watcher still on the first bucket's epoch 0", r.watcher.Epoch())
+	}
+
+	entry, err := r.Refresh(context.Background(), "ses_a")
+	if err != nil || entry.Title != "new" {
+		t.Fatalf("Refresh(ses_a) below the fence = %+v, %v; want the live entry the bucket returned", entry, err)
+	}
+	now.advance(2 * time.Minute)
+	if _, err := r.Refresh(context.Background(), "ses_a"); !errors.Is(err, natsgo.ErrKeyNotFound) {
+		t.Fatalf("Refresh(ses_a) below the fence past its TTL = %v, want not found", err)
+	}
+}
+
 // clock is the registry's injected clock: the real time moved on by what the test advanced it, so
 // the creation times the server stamps on records and the registry's own time agree until the test
 // moves past a session's TTL without waiting it out.
