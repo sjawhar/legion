@@ -197,7 +197,11 @@ export function ProofDocument({
 }: ProofDocumentProps): ReactNode {
   const root = useRef<HTMLDivElement>(null);
   const editorRef = useRef<EditorHandle | undefined>(undefined);
+  /** The live editor's connection, for a reopened issue's re-admission. */
+  const documentRef = useRef<DocumentConnection | undefined>(undefined);
   const isClosedRef = useRef(isClosed);
+  /** Whether the issue was closed when the access effect last ran, so it sees a reopen. */
+  const wasClosedRef = useRef(isClosed);
   const schemaReadOnlyRef = useRef(false);
   const userRef = useRef(user);
   const highlightTermRef = useRef(highlightTerm);
@@ -425,6 +429,9 @@ export function ProofDocument({
       if (editorRef.current === editor) {
         editorRef.current = undefined;
       }
+      if (documentRef.current === document) {
+        documentRef.current = undefined;
+      }
       disposeEditorBindings = undefined;
       editor = undefined;
       document = undefined;
@@ -651,6 +658,7 @@ export function ProofDocument({
             },
           });
           document = connection;
+          documentRef.current = connection;
         })
         .catch(reportLoadFailure);
     };
@@ -674,9 +682,17 @@ export function ProofDocument({
     }
   }, [textReadAt]);
 
+  // The server admits every socket on a closed issue's document read-only, and decides a socket's
+  // admission once, as it connects. A reopened issue's document takes edits again, so the page has
+  // its connection admitted again: until the new admission (`onAdmission`) replaces the closed
+  // one's, the socket is still read-only, and so is the editor.
   useEffect(() => {
     setQuoteRefusal(undefined);
     editorRef.current?.setAccess(editorAccess(isClosed, schemaReadOnlyRef.current));
+    if (wasClosedRef.current && !isClosed) {
+      documentRef.current?.readmit();
+    }
+    wasClosedRef.current = isClosed;
   }, [isClosed]);
 
   useEffect(() => {

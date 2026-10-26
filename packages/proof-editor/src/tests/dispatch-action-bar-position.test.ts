@@ -1,5 +1,5 @@
 import { test } from './harness.js';
-import { dispatchActionBarPlugin, positionBar } from '../dispatch-action-bar.js';
+import { dispatchActionBarPlugin, positionBar, setAccess } from '../dispatch-action-bar.js';
 import type { MarkRange } from 'proof-sdk-upstream/src/editor/plugins/marks.js';
 import type { EditorView } from '@milkdown/kit/prose/view';
 
@@ -28,6 +28,7 @@ class FakeElement {
   className = '';
   type = '';
   textContent = '';
+  hidden = false;
   innerHTML = '';
   parentElement: FakeElement | null = null;
   readonly children: FakeElement[] = [];
@@ -407,6 +408,48 @@ await test('fine-pointer focus loss leaves the action bar visible until its edit
     const editorDom = fixture.view.dom as unknown as FakeElement;
     editorDom.dispatch('focusout', { relatedTarget: fixture.document.body } as unknown as FocusEvent);
     assert(bar.style.display === 'flex', 'Expected fine-pointer focus loss to leave the action bar unchanged');
+    controller.destroy();
+  } finally {
+    fixture.restore();
+  }
+});
+// An editable view that loses focus keeps a touch selection's bar hidden until it takes focus
+// again. A view that turns read-only with comment access - its issue closed while it was focused -
+// is blurred by the change and never takes focus again, so its bar follows its selection alone.
+await test('a touch view that turns read-only with comment access offers Comment despite the focus it lost', async () => {
+  const fixture = installActionBarDom(true);
+  try {
+    const controller = await createActionBarController(fixture.view);
+    controller.update(fixture.view);
+    fixture.runTimers();
+    const bar = fixture.actionBar()!;
+    assert(bar !== undefined, 'Expected action bar element to be attached');
+    assert(bar.style.display === 'flex', 'Expected the settled touch selection bar to be visible');
+
+    const editorDom = fixture.view.dom as unknown as FakeElement;
+    editorDom.dispatch('focusout', { relatedTarget: fixture.document.body } as unknown as FocusEvent);
+    fixture.document.dispatch('selectionchange');
+    fixture.runTimers();
+    assert(bar.style.display === 'none', 'Expected an editable view that lost focus to keep its touch bar hidden');
+
+    const view = fixture.view as unknown as {
+      editable: boolean;
+      state: { doc: { textBetween?: () => string } };
+    };
+    view.editable = false;
+    view.state.doc.textBetween = () => 'lazy';
+    setAccess(fixture.view, 'comment');
+    controller.update(fixture.view);
+    editorDom.dispatch('focusout', { relatedTarget: null } as unknown as FocusEvent);
+    fixture.document.dispatch('selectionchange');
+    fixture.runTimers();
+
+    assert(bar.style.display === 'flex', 'Expected the read-only view to offer its touch selection a bar');
+    const shown = bar.children.filter((button) => !button.hidden);
+    assert(
+      shown.map((button) => button.textContent).join() === 'Comment',
+      `Expected Comment alone, got ${shown.map((button) => button.textContent).join()}`,
+    );
     controller.destroy();
   } finally {
     fixture.restore();

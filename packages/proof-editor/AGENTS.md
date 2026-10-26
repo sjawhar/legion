@@ -82,10 +82,13 @@ for Dispatch's `Ctrl+Alt+M` (LEGION-680); comments on a read-only document (INFR
 option and `setAccess` (`'edit' | 'comment' | 'read'`), which make the view editable for `'edit'`
 alone and hand the mode to the bar's own `setAccess`, and the bar hides itself on a read-only view
 unless its access is `'comment'` and the selection holds text, and then offers Comment alone,
-which writes no mark and reports a `quote-comment` action with the selection's range,
+which writes no mark and reports a `quote-comment` action with the selection's range, and the
+bar's touch focus loss (`editorLostFocus`) hiding it on an editable view alone, since a read-only
+view - one its issue closed while it was focused, which the change blurs - never takes focus again,
 `src/dispatch-marks.ts`'s `MarkAction` carrying that kind, and
 `src/tests/dispatch-action-bar-position.test.ts`'s view double declaring `editable: true`, since
-the bar reads it before it shows; and annotations, casts
+the bar reads it before it shows, its element double declaring `hidden`, and its case for a touch
+view that turns read-only with comment access after losing focus; and annotations, casts
 and assertions that make a file type-check, each of which erases before runtime (below).
 
 To audit a copied file, diff it against `jj --ignore-working-copy -R <proof-sdk> file show -r

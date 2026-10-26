@@ -539,6 +539,47 @@ test("a real provider's edit typed on an open socket is cleared by its own ackno
   }
 });
 
+/** An open socket whose close reaches the provider, as a browser's does once it has closed. */
+class ClosingSocket extends OpenSocket {
+  override close(): void {
+    queueMicrotask(() => this.dispatchEvent(new CloseEvent("close", { code: 1000 })));
+  }
+}
+
+// The server decides a socket's admission once, as it connects. A connection admitted again
+// closes its socket, the provider reconnects, and the new socket's admission is reported.
+test("a readmitted connection reports the admission of the socket it reconnects", async () => {
+  const artifact = artifactId();
+  const realSocket = globalThis.WebSocket;
+  globalThis.WebSocket = ClosingSocket as unknown as typeof WebSocket;
+  OpenSocket.opened = [];
+  const admissions: boolean[] = [];
+  let connection: DocumentConnection | undefined;
+  try {
+    const connect = await loadDocumentTransport();
+    connection = connect(artifact, {
+      onAdmission: (readOnly) => admissions.push(readOnly),
+      onOutsideSchema() {},
+      onPending() {},
+      onStatus() {},
+      onSynced() {},
+      schemaVersion: 1,
+    });
+    await waitFor(() => expect(OpenSocket.opened[0]?.sent.length).toBeGreaterThan(0));
+    OpenSocket.opened[0]?.receive(authenticatedFrame("readonly", artifact));
+    await waitFor(() => expect(admissions).toEqual([true]));
+
+    connection.readmit();
+    await waitFor(() => expect(OpenSocket.opened[1]?.sent.length).toBeGreaterThan(0));
+    OpenSocket.opened[1]?.receive(authenticatedFrame("read-write", artifact));
+    await waitFor(() => expect(admissions).toEqual([true, false]));
+    expect(OpenSocket.opened).toHaveLength(2);
+  } finally {
+    connection?.destroy();
+    globalThis.WebSocket = realSocket;
+  }
+});
+
 test("a document whose browser keeps no edits says so, and still connects", async () => {
   const realStorage = globalThis.indexedDB;
   const realSocket = globalThis.WebSocket;

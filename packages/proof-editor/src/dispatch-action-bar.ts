@@ -252,7 +252,7 @@ class ActionBarController {
     const range = getSelectionRange(view);
     // A read-only view offers Comment alone where it takes comments and the selection holds text
     // to quote, and nothing elsewhere.
-    if (!range || this.editorLostFocus || !offersActions(view, range)) {
+    if (!range || this.lostFocus() || !offersActions(view, range)) {
       this.lastRange = range;
       this.hideBar();
       return;
@@ -282,9 +282,18 @@ class ActionBarController {
     }
   }
 
+  /** Whether a touch selection's editor has lost focus to something outside the bar, so its bar
+   *  stays hidden until the editor takes focus again. Only an editable view holds focus: a
+   *  read-only one never takes it again, so a focus it lost - the blur of turning read-only, when
+   *  its issue closes with the editor focused - would hide its bar for good. Its bar follows its
+   *  selection alone. */
+  private lostFocus(): boolean {
+    return this.editorLostFocus && this.view.editable;
+  }
+
   private scheduleTouchBar(): void {
     this.clearSelectionSettleTimer();
-    if (this.pointerDown || !this.lastRange || this.editorLostFocus) return;
+    if (this.pointerDown || !this.lastRange || this.lostFocus()) return;
 
     const elapsed = this.selectionChangedAt === null ? 0 : Date.now() - this.selectionChangedAt;
     this.selectionSettleTimer = setTimeout(() => {
@@ -292,7 +301,7 @@ class ActionBarController {
       this.selectionSettleTimer = null;
       if (
         this.pointerDown ||
-        this.editorLostFocus ||
+        this.lostFocus() ||
         !this.isTouchSelection() ||
         !isRangeValid(this.view, this.lastRange) ||
         !offersActions(this.view, this.lastRange)

@@ -37,6 +37,8 @@ export interface FakeEditor {
 
 interface FakeConnection extends DocumentConnection {
   destroyed: boolean;
+  /** How many times the host asked the server to admit this connection again. */
+  readmitted: number;
 }
 
 export interface FakeDocumentRuntime {
@@ -86,6 +88,10 @@ export function fakeDocumentRuntime(seed: { text?: string } = {}): FakeDocumentR
         connection.destroyed = true;
       },
       doc,
+      readmit() {
+        connection.readmitted += 1;
+      },
+      readmitted: 0,
     };
     callbacks.push(nextCallbacks);
     connections.push(connection);
