@@ -1248,6 +1248,21 @@ export const IDEMPOTENCY_KEY_INVALID = "IDEMPOTENCY_KEY_INVALID";
  *  means the write ran; the client reads the resource again rather than this body. */
 export const IDEMPOTENCY_ANSWER_NOT_KEPT = "ANSWER_NOT_KEPT";
 
+/**
+ * The request header a page puts on every write it makes (`POST`, `PATCH`, `PUT`, `DELETE`): the
+ * login of the person who pressed it. Dispatch answers `409 DISPATCH_LOGIN_CHANGED` before
+ * anything runs, its key untouched, when the request's caller is another person or no person at
+ * all, so a write one person pressed never runs under another's session - another tab signs in
+ * in place, and this tab's retry goes out on the new cookie before it learns of it. A caller that
+ * resolves to nobody (a lapsed cookie) is answered by the route's own `401`. A write without the
+ * header (the `dispatch` command, an agent) is not checked.
+ */
+export const DISPATCH_LOGIN_HEADER = "Dispatch-Login";
+
+/** The code of the `409` for a write whose `DISPATCH_LOGIN_HEADER` names a login that is not its
+ *  caller's: nothing ran. The page drops every write that login pressed. */
+export const DISPATCH_LOGIN_CHANGED = "LOGIN_CHANGED";
+
 /** The codes of a write Dispatch made and has no answer to give for: `409 KEY_COMMITTED`, or a
  *  replayed 2xx reading `ANSWER_NOT_KEPT`. A client treats either as landed. */
 export type IdempotencyLandedCode =
