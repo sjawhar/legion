@@ -2,50 +2,53 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-261",
-  "round": 2,
-  "completed": "2026-10-26T14:13:00Z",
-  "headSha": "57e48f1b0ec338d80905ac66eb281e73330305f2",
+  "round": 3,
+  "completed": "2026-10-26T17:21:00Z",
+  "headSha": "724ed7ea10d84136a493101753d8e1d92de90198",
   "implementerProof": {
     "verdict": "verified",
-    "how": "I re-ran its command at 57e48f1: `bash packages/envoy/scripts/e2e-refill.sh --scenario all --out $TMPDIR/infra261-test/r2/rig` exited 0. reread, interrupt(stop), interrupt(restart), recreate-live (both shapes: the probe found the recreate at +1.083 s, its read ran from +5.096 s to +5.138 s, before the tick at +26.946 s) and refuse all PASS, with 0 panic lines in every listener log. `bun run e2e -- agent-list-refilling claim-refilling --project chromium` passed 6/6. My round-1 red test TestABucketRecreatedUnderALiveWatcherIsReadWholeWithoutCheck is unmodified and passes with -count=3."
+    "how": "I re-ran its commands at 724ed7e. `go test ./internal/kvwatch/ -run 'TestASubscriptionEndingMidScanNeverPanics|TestABucketRecreatedUnderALiveWatcherIsReadWholeWithoutCheck' -count=5` passed. `bash packages/envoy/scripts/e2e-refill.sh --scenario all --out $TMPDIR/infra261-test/r3/rig` exited 0: reread, interrupt(stop), interrupt(restart), recreate-live (both shapes) and refuse all PASS, with 0 panic lines in every listener log. `bun run e2e -- agent-list-refilling claim-refilling --project chromium` passed 6/6. The implementer changed two lines of my round-2 red test (b8fcdb264eee): the handle is now built with bus.OpenKeyValue(conn, js, bucket) in place of bus.KeyValue{KeyValue: handle}, because a bare-legacy bus.KeyValue can no longer watch (ErrNoWatchHandle). It is still opened on the connection the test closes, and the scenario and assertion are unchanged, so I accept it as a constructor adaptation."
   },
-  "failures": [
-    {
-      "criterion": "Architect's ruling under the 'fix it here' rule (2026-10-26 13:54Z, envoy bacc93d9ac734fa44f1f32d36b043e7c): no way of ending a kvwatch subscription can panic the listener. The paths include a connection close or drain, nats.go's own unsubscribe, and End at shutdown, not only the watcher replacement round 2 deferred. The architect gave the implementer the design: kvwatch watches through the nats.go jetstream package's KV watcher, which has no init timer, with its own idle timer for the timed-out-scan re-read; writes stay on the legacy API.",
-      "evidence": "nats.go v1.50.0 kv.go:1138-1170: the legacy watcher's init timer callback sends on errCh under w.mu. pDone closes errCh under the same mutex and only Stops the timer, which does not wait for a callback already running. The message handler holds w.mu while it blocks on the full 256-entry updates channel, so a callback that fires then and loses the mutex to pDone sends on a closed channel. Red test, commit b8fcdb264eee: packages/envoy/internal/kvwatch/subscription_end_test.go TestASubscriptionEndingMidScanNeverPanics. It holds the cache's first record, closes the watcher's connection, and releases the record at moments swept across a 20 ms JetStream wait. `cd packages/envoy && go test ./internal/kvwatch/ -run TestASubscriptionEndingMidScanNeverPanics -count=1` crashed the test binary in 7 of 7 runs at 57e48f1, in 0.8-3.2 s: 'panic: send on closed channel ... github.com/nats-io/nats.go.(*kvs).WatchFiltered.func2() .../nats.go@v1.50.0/kv.go:1151, created by time.goFunc'."
-    }
-  ],
-  "failed": 1,
+  "failures": [],
+  "failed": 0,
   "proof": [
     {
-      "criterion": "Round-1 failure (bucket recreated under a live watcher): following stops before any record of the new stream is applied, and the new bucket is read whole without the tick",
-      "surface": "real listener + natsd, the bucket recreated 12 s after a self-health tick (the next tick 16 s later), polled by my own curl + jq loop: $TMPDIR/infra261-test/r2-live.sh",
-      "command": "MODE=shorter|longer|interests|double|empty BIN=$TMPDIR/infra261-test/r2/rig/bin OUT=... bash $TMPDIR/infra261-test/r2-live.sh",
-      "observed": "shorter and longer old stream: 'bucket was recreated under its watcher' at +1 s and the read completed at +1 s. Polls went straight from the old copy [2000 rows, keep 1500, old 500] to exactly the new bucket [2000, keep 1500 v2, new 500, old 0], with no partial answer. interests: the interest copy was re-read at +1 s, and the session rows' role holder moved from 2 to 1 (old_0's role gone). double (recreated twice, 1.77 s apart): one detection at +1.8 s onto the second incarnation, and the list was the final bucket from +1.95 s. 0 panic lines in every log.",
-      "headSha": "57e48f1b0ec338d80905ac66eb281e73330305f2",
-      "negativeControl": "On b6d4733 (round 1, $TMPDIR/infra261-test/adv-expiry-head and adv-expiry2-head) the same recreate was found only at the tick, and the list was missing 40 of 2000 records for 28 s. The kvwatch red test failed there and passes here."
+      "criterion": "Round-2 failure (architect's ruling): no way of ending a kvwatch subscription can panic the listener: shutdown mid-scan, connection lost mid-scan, a scan idled out, and the paths the red test drives",
+      "surface": "real listener binary + natsd, 40000 sessions, each subscription ended at a random point 50-900 ms into the boot scan; plus the kvwatch red test on real NATS",
+      "command": "BIN=$TMPDIR/infra261-test/r3/bin OUT=$TMPDIR/infra261-test/r3/ends ROUNDS=4 bash $TMPDIR/infra261-test/r3-ends.sh (SIGTERM the listener; SIGKILL NATS and restart it; SIGSTOP NATS 12 s); cd packages/envoy && go test ./internal/kvwatch/ -run TestASubscriptionEndingMidScanNeverPanics -count=5",
+      "observed": "12 of 12 rounds had 0 panic lines. kill and stop rounds each recovered the whole list of 40000 (some with a 'timed out' warm-up, then a completed re-read). term rounds ended the listener with no panic. The red test passed in 5 of 5 runs. The listener exits 1 after a graceful SIGTERM and 143 on a SIGTERM before its handler is installed, and the 748e8d95 build does exactly the same, so that is not a regression.",
+      "headSha": "724ed7ea10d84136a493101753d8e1d92de90198",
+      "negativeControl": "At 57e48f1 the same red test crashed the binary in 7 of 7 runs with 'panic: send on closed channel' at nats.go@v1.50.0/kv.go:1151 (round 2)."
     },
     {
-      "criterion": "Acceptance 3 and 4 still hold at the round-2 head: past the bound every client says refilling, never an absence; no gauge sample; whole after recovery",
-      "surface": "real natsd + listener + real Go Dispatch server built from 57e48f1 + claude-envoy MCP server over stdio",
-      "command": "BIN=$TMPDIR/infra261-test/r2/rig/bin OUT=$TMPDIR/infra261-test/r2/outage bash $TMPDIR/infra261-test/outage.sh",
-      "observed": "First 503 at +121 s after NATS stopped. /v1/sessions and /v1/interests/ answered 503 Retry-After: 5 code refilling, with no envoy_active_* sample. /api/v1/agents answered 503 ENVOY_REFILLING, Retry-After: 5. Issue and list showed route_status unknown, reason refilling. ?route_status=no_holder answered 503 ENVOY_REFILLING. envoy_sessions returned error 'envoy: the agent list is refilling; try again in a moment'. 2 s after NATS returned: 50 rows, gauges 50, route live, reason null, envoy_sessions listed the sessions.",
-      "headSha": "57e48f1b0ec338d80905ac66eb281e73330305f2",
-      "negativeControl": "The 748e8d95 listener ($TMPDIR/infra261-test/outage-base, round 1) answered 200 with its frozen 50 rows and gauges 50 past the bound."
+      "criterion": "Round-1 failure stays fixed: a bucket recreated under a live watcher stops following before any new-stream record and is read whole without the tick",
+      "surface": "real listener + natsd, the bucket recreated 12 s after a self-health tick, polled by my own curl + jq loop",
+      "command": "MODE=shorter|longer|interests|double BIN=$TMPDIR/infra261-test/r3/bin OUT=... bash $TMPDIR/infra261-test/r2-live.sh",
+      "observed": "Every mode was found by the watcher's probe within about 1 s and read about 14 s before the tick. longer and interests went straight from the old copy to exactly the new bucket. double (two recreates) was detected twice and ended exactly on the second incarnation. In shorter, the read completed while the rig was still filling the new bucket, so the list showed the bucket as it stood (1115, then 1584, then 2000 rows) without any old row left: the spec-conforming behaviour recorded in round 2. 0 panic lines.",
+      "headSha": "724ed7ea10d84136a493101753d8e1d92de90198",
+      "negativeControl": "At b6d4733 the same recreate was found only at the tick, with 40 of 2000 records missing for 28 s (round 1)."
+    },
+    {
+      "criterion": "Acceptances 3 and 4 hold: past the bound every client says refilling, never an absence; no gauge sample; whole after recovery",
+      "surface": "real natsd + listener + real Go Dispatch server built from 724ed7e + claude-envoy MCP server over stdio",
+      "command": "BIN=$TMPDIR/infra261-test/r3/bin OUT=$TMPDIR/infra261-test/r3/outage DB=dispatch_tester_r3 bash $TMPDIR/infra261-test/outage.sh",
+      "observed": "First 503 at +120 s after NATS stopped. /v1/sessions and /v1/interests/ answered 503 Retry-After: 5 code refilling, with no envoy_active_* sample. /api/v1/agents answered 503 ENVOY_REFILLING, Retry-After: 5. Issue and list showed route_status unknown, reason refilling. ?route_status=no_holder answered 503 ENVOY_REFILLING. envoy_sessions returned error 'envoy: the agent list is refilling; try again in a moment'. 2 s after NATS returned: 50 rows, gauges 50, route live, reason null.",
+      "headSha": "724ed7ea10d84136a493101753d8e1d92de90198",
+      "negativeControl": "The 748e8d95 listener answered 200 with its frozen 50 rows and gauges 50 past the bound (round 1, $TMPDIR/infra261-test/outage-base)."
     },
     {
       "criterion": "Acceptance 3: every Dispatch view shows refilling, never an agent's absence; a lapsed claim waits for a current list",
       "surface": "Dispatch browser suite (real Go Dispatch server, fake listener, Chromium)",
       "command": "cd packages/dispatch && bun run e2e -- agent-list-refilling claim-refilling --project chromium",
-      "observed": "6 passed at 57e48f1",
-      "headSha": "57e48f1b0ec338d80905ac66eb281e73330305f2",
+      "observed": "6 passed at 724ed7e",
+      "headSha": "724ed7ea10d84136a493101753d8e1d92de90198",
       "negativeControl": "Round 1: agent-list-refilling failed 4/4 on the 81a3b5ef base export, and claim-refilling failed against a claimHasLapsed mutant that ignores `current`."
     }
   ],
   "observations": [
-    "Spec-conforming, so not recorded as a failure, but now visible within 2 s instead of at the tick: a recreated bucket is listed as it stands once its read completes. MODE=empty (recreated empty, filled 20 s later) answered 200 [] from +1.8 s to +20.5 s. MODE=double completed a read of 646 records mid-fill, and the rest arrived by the watch. Acceptance 1 makes the new read's records the list, and main and b6d4733 did the same at the tick, so in production after a bucket deletion the lists show only sessions that have heartbeated into the new bucket (up to the 90 s heartbeat interval).",
-    "The rig now holds the listener (SIGSTOP) while it fills a recreated bucket in reread, because the probe would otherwise read the bucket mid-fill. That is consistent with the observation above.",
-    "Implementer's own known limit, not exercised: a gate STREAM.INFO failing with an error other than stream-not-found applies the record with Following unchanged."
+    "No production code calls the legacy handle's Watch, WatchAll, Keys, ListKeys or History any more (grep over packages/envoy/cmd and internal). bus.KeyValue documents the rule; it still embeds nats.KeyValue, so a future caller could reach the legacy methods by promotion. Nothing does today.",
+    "The spec-conforming observation from round 2 stands: once a recreated bucket's read completes, the list is the bucket as it stands, mid-fill included.",
+    "My mutation-during-reread driver no longer lands inside the read: the probe finds the recreate and the read completes before the 'recreated' line the driver keys on. In-read polls are covered by the rig's reread verdict instead."
   ],
-  "ci": "At 57e48f1: Tests 40332075546, Legion Envoy and Contracts 40332075911, Docs 40332075597, Worker Image 40332109954, PR Title 40334143208 all queued (cited as queued, not waited for)."
+  "ci": "At 724ed7e: Worker Image 40362686137 and Docs 40362685744 in progress; Tests 40362685904, Legion Envoy and Contracts 40362685962 queued; PR Title 40364949886 pending (cited as read, not waited for)."
 }
