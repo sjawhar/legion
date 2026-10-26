@@ -933,7 +933,7 @@ func TestTheRuntimeTellsTheShimEveryScratchDirectoryItMakes(t *testing.T) {
 // uv links a project's .venv, in an issue's workspace on the issue's volume, to an interpreter
 // under UV_PYTHON_INSTALL_DIR, and installs into it from UV_CACHE_DIR. Both are on the volume's own
 // mount (no other mount covering them) and outside the workspace, whose tree is the project's, so
-// every role container of the pod runs the .venv as it is and reuses what another role of the pod
+// every role of the pod runs the .venv as it is and reuses what another role of the pod
 // downloaded. No later pod reuses any of it: the disk is the pod's own and dies with it
 // (INFRA-80), so a second pod of the issue downloads afresh. The cache is at the same path in
 // every pod, and the interpreter directory is the issue's, so two pods of one issue name the same

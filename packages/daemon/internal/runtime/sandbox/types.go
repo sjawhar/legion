@@ -153,7 +153,7 @@ type Options struct {
 	// launch expects any disk to hold a session. Under postgres that file is the providers Secret
 	// key the pod and the image probe mount at ProvidersDir/OMP_SESSION_SQL_DSN, which the shim,
 	// seeing the pointer, never exports; under cloudsql-iam no pod mounts a session key at all —
-	// each role container's launcher is told the instance, database and login (sessionProxyFlags),
+	// the `roles` container's launcher is told, for each role, the instance, database and login (sessionProxyFlags),
 	// proxies a socket of its own to Cloud SQL as the pod itself, and writes the URL file in the
 	// generation's private directory.
 	SessionStore ompsessions.Store

@@ -742,8 +742,8 @@ with `permission denied for schema public`. Grant `USAGE, CREATE ON SCHEMA publi
 (measured on Postgres 16.15: `CONNECT, CREATE ON DATABASE` alone is refused, the schema grant
 creates the table), or make the login the schema's owner.
 
-**One login, every conversation: what that costs.** Under `postgres` every role container mounts
-the providers Secret with the session database's URL among its keys, and the agent is told where
+**One login, every conversation: what that costs.** Under `postgres` the `roles` container mounts
+the providers Secret, for every role of the pod, with the session database's URL among its keys, and the agent is told where
 that file is (`OMP_SESSION_SQL_DSN_FILE`, above), so every agent in the deployment holds the login
 the whole table sits behind. Oh My Pi's two tables are keyed by the session's recorded path and
 carry no tenant, project or issue column, so rights over the table are rights over every
@@ -1499,7 +1499,10 @@ this order:
    can be read. For an issue whose push step 1 could not confirm, open a shell in its still-running
    pod ([A shell on an issue's disk](#a-shell-on-an-issues-disk)) and push what the workspace at
    `/legion/workspaces/<owner>/<repo>/<issue key lowercased>` holds that its branch on GitHub does
-   not, with a credential of your own: the `roles` container's shell holds no role's.
+   not, with a credential of your own. The `roles` container's shell has no credential in its
+   environment, but it runs as the runtime user, which the pod's `fsGroup` lets read every role's
+   gh files and launcher token under `/var/run/legion/roles/<role>/`; do not use them, and treat
+   the shell as holding every role's credentials while it is open.
 3. **Restore the dump into a new database the daemon's login owns**, and point the earlier
    release's `postgres_dsn` at it. Create the database as a login that may create one (an admin),
    owned by the daemon's login, then restore as the daemon's login:
@@ -3613,7 +3616,7 @@ does (`xargs -0 sh -c 'exec env -i "$@" omp …' agent-env </proc/<pid>/environ`
 pod's own and went with the pod ([The disk dies with its pod](#the-disk-dies-with-its-pod)), so
 no claim is left to mount, and the clone, the workspace and everything the issue's roles wrote
 are gone with it. A refusal above is worked in the pod that raised it or not at all: a pod whose
-`workspace-init` is failing runs no role container to exec into, and the remedy there is to let
+`workspace-init` is failing has no running `roles` container to exec into, and the remedy there is to let
 the pod be replaced. The runtime reads a failed init container as the end of every role of that
 pod (`InitFailed`, `internal/runtime/sandbox/observe.go`) and the next launch replaces the pod
 outright instead of waiting on its launchers (`relaunch.go`); the replacement provisions a fresh
