@@ -44283,8 +44283,22 @@ function replayNoticeFields(notice) {
 function envoyNoticeText(fields) {
   return encode3({ envoy: fields });
 }
+var AGENT_SPACE = AGENT_TOPIC_PREFIX.slice(0, -1).split(".");
+function coversAnotherAgentSubject(ownAgentSubject, topic) {
+  if (topic === ownAgentSubject)
+    return false;
+  const tokens = topic.split(".");
+  for (const [index, token] of AGENT_SPACE.entries()) {
+    const wanted = tokens[index];
+    if (wanted === ">")
+      return true;
+    if (wanted !== "*" && wanted !== token)
+      return false;
+  }
+  return tokens.length > AGENT_SPACE.length;
+}
 function replayFollowedSubjects(ownAgentSubject, topics, heldForRole = () => false) {
-  const followed = [...topics].filter((topic) => !topic.startsWith(ROLE_TOPIC_PREFIX) && !topic.startsWith(AGENT_TOPIC_PREFIX) && !heldForRole(topic));
+  const followed = [...topics].filter((topic) => !topic.startsWith(ROLE_TOPIC_PREFIX) && !coversAnotherAgentSubject(ownAgentSubject, topic) && !heldForRole(topic));
   return [...new Set([ownAgentSubject, ...followed])];
 }
 function rememberedTopics(state) {
@@ -49565,7 +49579,7 @@ async function startChannelSession(options) {
     await options.client.subscribe({
       sessionID: identity.id,
       directory: identity.directory,
-      topics: forwarder.topics(),
+      topics: forwarder.topics().filter((topic) => !coversAnotherAgentSubject(directSubject, topic)),
       port: 0,
       title,
       capabilities: options.capabilities,

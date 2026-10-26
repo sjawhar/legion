@@ -400,6 +400,76 @@ func TestReplayNeverReturnsAnotherSessionsInboxThroughARegisteredInterest(t *tes
 	}
 }
 
+// A registration naming topics that reach another session's inbox stores the rest of it and names
+// each topic it left out: a wildcard over the agent subjects, another session's agent subject, and
+// notifications.> are not stored, while the session's own agent subject and an issue topic are, so
+// a replay of them answers the own subject and the issue and refuses the rest. The registration is
+// not refused whole, since a released pi-envoy registers a fork parent's agent subject with the
+// rest of what it follows.
+func TestInterestSubscribeStoresOnlyTopicsThatReplayCannotTurnIntoAnotherSessionsInbox(t *testing.T) {
+	rig := newReplayRig(t)
+	own, other := contracts.AgentSubject(replaySession), contracts.AgentSubject("ses_other")
+	refused := []string{"notifications.agent.>", "notifications.agent.*", other, "notifications.>"}
+	body, err := json.Marshal(subscribeBody{
+		SessionID:      replaySession,
+		Topics:         append([]string{own, replayIssueTopic}, refused...),
+		SelfSubscribed: true,
+	})
+	if err != nil {
+		t.Fatalf("marshal subscribe: %v", err)
+	}
+	recorder := httptest.NewRecorder()
+	rig.mux.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/interests/subscribe", strings.NewReader(string(body))))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("subscribe status = %d, want 200; body = %s", recorder.Code, recorder.Body.String())
+	}
+	var answer struct {
+		Topics   []string `json:"topics"`
+		Warnings []string `json:"warnings"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &answer); err != nil {
+		t.Fatalf("decode subscribe answer %s: %v", recorder.Body.String(), err)
+	}
+	if want := []string{own, replayIssueTopic}; !slices.Equal(answer.Topics, want) {
+		t.Fatalf("answered topics = %v, want %v", answer.Topics, want)
+	}
+	if len(answer.Warnings) != len(refused) {
+		t.Fatalf("warnings = %q, want one naming each of %v", answer.Warnings, refused)
+	}
+	for index, topic := range refused {
+		if !strings.HasPrefix(answer.Warnings[index], topic+" was not registered") {
+			t.Fatalf("warning %d = %q, want it to name %s as not registered", index, answer.Warnings[index], topic)
+		}
+	}
+	stored, err := rig.deps.registry.Get(replaySession)
+	if err != nil {
+		t.Fatalf("read the stored interest: %v", err)
+	}
+	if want := []string{own, replayIssueTopic}; !slices.Equal(stored.Topics, want) {
+		t.Fatalf("stored topics = %v, want %v", stored.Topics, want)
+	}
+
+	rig.store(t, other)
+	_, ownSeq := rig.store(t, own)
+	issueBody, issueSeq := rig.store(t, "notifications.dispatch.issue.KEY-1.ask.opened")
+	subjects := []replaySubjectRequest{{Subject: own, After: new(uint64(0))}, {Subject: replayIssueTopic, After: new(uint64(0))}}
+	for _, topic := range refused {
+		subjects = append(subjects, replaySubjectRequest{Subject: topic, After: new(uint64(0))})
+	}
+	response := replayOK(t, rig.mux, replayBody(t, subjects, 0))
+	if got := response.Subjects[0]; got.Refused != "" || !equalSeqs(got.Messages, ownSeq) {
+		t.Fatalf("own agent subject = %+v, want seq %d", got, ownSeq)
+	}
+	if got := response.Subjects[1]; got.Refused != "" || !equalSeqs(got.Messages, issueSeq) || got.Messages[0].Data != issueBody {
+		t.Fatalf("issue topic = %+v, want seq %d", got, issueSeq)
+	}
+	for _, result := range response.Subjects[2:] {
+		if result.Refused != "not_followed" || len(result.Messages) != 0 {
+			t.Fatalf("%s = %+v, want refused not_followed with no messages", result.Subject, result)
+		}
+	}
+}
+
 // Only POST is served.
 func TestReplayAnswers405ForGet(t *testing.T) {
 	mux := replayMux(&listenerDeps{})
@@ -446,16 +516,17 @@ func TestReplayRefusesASubjectTheSessionDoesNotFollow(t *testing.T) {
 }
 
 // A followed subject no subject of the deployed stream's configuration contains is refused
-// not_retained: an ad-hoc team topic, and a topic wider than any one stream subject. The deployed
-// configuration is what counts, not this binary's list: once the stream carries a foreign subject
-// that contains the team topic, the topic is answered.
+// not_retained: an ad-hoc team topic, and a wildcard no one stream subject contains (one wider
+// than a stream subject, such as notifications.>, reaches the agent subjects and is refused
+// not_followed first). The deployed configuration is what counts, not this binary's list: once the
+// stream carries a foreign subject that contains the team topic, the topic is answered.
 func TestReplayRefusesAFollowedSubjectTheStreamDoesNotRetain(t *testing.T) {
 	const team = "notifications.team.x.y"
-	rig := newReplayRig(t, team, "notifications.>")
+	rig := newReplayRig(t, team, "notifications.*")
 
 	response := replayOK(t, rig.mux, replayBody(t, []replaySubjectRequest{
 		{Subject: team, After: new(uint64(3))},
-		{Subject: "notifications.>", After: new(uint64(0))},
+		{Subject: "notifications.*", After: new(uint64(0))},
 	}, 0))
 	for index, wantAfter := range []uint64{3, 0} {
 		result := response.Subjects[index]

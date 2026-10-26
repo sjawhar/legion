@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { decode } from "@toon-format/toon";
 import {
   closeReplayedRemoval,
+  coversAnotherAgentSubject,
   type ReplayNotice,
   rememberedTopics,
   replayFollowedSubjects,
@@ -31,6 +32,35 @@ describe("the subjects a session follows for replay", () => {
     expect(replayFollowedSubjects("notifications.agent.ses-1", [])).toEqual([
       "notifications.agent.ses-1",
     ]);
+  });
+
+  test("leave out every wildcard reaching another session's agent subject, as the listener does", () => {
+    const own = "notifications.agent.ses-1";
+    const wide = [
+      "notifications.agent.*",
+      "notifications.agent.>",
+      "notifications.>",
+      "notifications.*.ses-1",
+      "notifications.*.*.x",
+      ">",
+    ];
+    expect(replayFollowedSubjects(own, [...wide, ISSUE, "notifications.*"])).toEqual([
+      own,
+      ISSUE,
+      "notifications.*",
+    ]);
+    for (const topic of [...wide, "notifications.agent.ses-parent"]) {
+      expect(coversAnotherAgentSubject(own, topic)).toBe(true);
+    }
+    for (const topic of [
+      own,
+      ISSUE,
+      "notifications.agent",
+      "notifications.*",
+      "notifications.role.x",
+    ]) {
+      expect(coversAnotherAgentSubject(own, topic)).toBe(false);
+    }
   });
 });
 

@@ -25,6 +25,7 @@ import { machineID } from "@legion/envoy-client/machine"
 import { natsAuthOptions } from "@legion/envoy-client/nats-auth"
 import {
   closeReplayedRemoval,
+  coversAnotherAgentSubject,
   createReplayEngine,
   envoyNoticeText,
   failureNoticeFields,
@@ -691,7 +692,9 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
 
   /**
    * Advertise the current id and topics; runs only inside `serialized`. The title is also stamped
-   * for the `dispatch` command (`options.stampTitle`) whenever it or the id changes.
+   * for the `dispatch` command (`options.stampTitle`) whenever it or the id changes. A followed
+   * topic reaching another session's agent subject (a wildcard over them, or another session's
+   * by name) is left out: the listener refuses to store it.
    */
   const register = async (): Promise<void> => {
     const title = options.title?.(identity.id) ?? ""
@@ -717,7 +720,9 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
     await options.client.subscribe({
       sessionID: identity.id,
       directory: identity.directory,
-      topics: forwarder.topics(),
+      topics: forwarder
+        .topics()
+        .filter((topic) => !coversAnotherAgentSubject(directSubject, topic)),
       port: 0,
       title,
       capabilities: options.capabilities,

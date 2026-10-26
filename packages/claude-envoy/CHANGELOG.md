@@ -19,8 +19,10 @@
   times, or a live failure no sweep will retry (one received before its subject's cursor started
   included), is replaced by a notice naming it, its fields rendered in TOON as a live card's are,
   so a sender's multi-line summary cannot add a field of its own; a listener
-  without the route, or unable to read the stream, is said once on stderr. `dist/` was rebuilt
-  (INFRA-439).
+  without the route, or unable to read the stream, is said once on stderr. A followed topic
+  reaching another session's agent subject (another session's `notifications.agent.<id>`, or a
+  wildcard such as `notifications.agent.*`) is followed live but neither registered nor replayed,
+  since the listener refuses to store it. `dist/` was rebuilt (INFRA-439).
 
 - The `dispatch` command (`dist/dispatch.js`) takes `dispatch issues --all`, which reads the whole
   filtered issue listing in one request rather than a page, for a caller that must not miss or

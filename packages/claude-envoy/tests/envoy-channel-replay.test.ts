@@ -695,6 +695,24 @@ test("a removal replayed after a restart re-registered the topic takes it out of
   }
 })
 
+test("a followed topic reaching another session's agent subject is followed live and never registered", async () => {
+  const directory = await scratchState()
+  const model = new StreamModel()
+  const running = await boot(model, channelSink(), directory)
+  const refused = ["notifications.*.x", "notifications.agent.*", agentSubject("ses_other")]
+  try {
+    await running.session.follow([...refused, ISSUE_TOPIC])
+
+    expect(running.session.topics()).toEqual(expect.arrayContaining([...refused, ISSUE_TOPIC]))
+    const registered = [...(model.interests.get(SESSION) ?? [])]
+    expect(registered).toEqual(expect.arrayContaining([agentSubject(SESSION), ISSUE_TOPIC]))
+    for (const topic of refused) expect(registered).not.toContain(topic)
+  } finally {
+    await running.session.shutdown()
+    await rm(directory, { recursive: true, force: true })
+  }
+})
+
 test("a listener without the replay route is said once, replays nothing, and live frames still arrive", async () => {
   const directory = await scratchState()
   const model = new StreamModel()

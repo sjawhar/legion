@@ -1081,11 +1081,30 @@ func subscribeHandler(d *listenerDeps, machineID string, logger *logging.Logger)
 			return
 		}
 		logger.Info("listener subscribe", slog.String("session_id", body.SessionID), slog.Any("topics", body.Topics), slog.Int("port", body.Port), slog.Bool("self_subscribed", body.SelfSubscribed), slog.String("dir", body.Dir))
+		// A topic reaching another session's agent subject is left out and named in a warning, the
+		// rest of the registration stored: /v1/replay answers the topics stored here, and such a
+		// topic would read other sessions' inboxes. A registration naming one is not refused whole,
+		// since a released pi-envoy registers every subject it has open, a fork parent's agent
+		// subject and any topic its envoy_subscribe took included.
+		warnings := make([]string, 0)
+		topics := make([]string, 0, len(body.Topics)+1)
+		for _, topic := range append(body.Topics, contracts.AgentSubject(body.SessionID)) {
+			if bus.CoversAnotherAgentSubject(body.SessionID, topic) {
+				warnings = append(warnings, fmt.Sprintf("%s was not registered: it reaches other sessions' agent subjects (%s<session id>), and a session registers only its own, %s",
+					topic, contracts.AgentTopicPrefix, contracts.AgentSubject(body.SessionID)))
+				continue
+			}
+			topics = append(topics, topic)
+		}
+		if len(warnings) > 0 {
+			logger.Warn("listener subscribe refused topics reaching other sessions' agent subjects",
+				slog.String("session_id", body.SessionID), slog.Any("refused", warnings))
+		}
 		item, err := d.registry.Upsert(store.Interest{
 			SessionID: body.SessionID,
 			MachineID: machineID,
 			Dir:       body.Dir,
-		}, append(body.Topics, contracts.AgentSubject(body.SessionID)))
+		}, topics)
 		if err != nil {
 			logger.Warn("listener upsert failed",
 				slog.String("session_id", body.SessionID),
@@ -1103,7 +1122,6 @@ func subscribeHandler(d *listenerDeps, machineID string, logger *logging.Logger)
 		}
 		warningCtx, cancelWarnings := context.WithTimeout(r.Context(), unwiredRepositoryWarningTimeout)
 		defer cancelWarnings()
-		warnings := make([]string, 0)
 		warnedRepositories := make(map[string]struct{})
 		for _, topic := range body.Topics {
 			parsed, ok := parseGithubRepositoryTopic(topic)

@@ -40,8 +40,10 @@
   cursor older than the stream's
   oldest message is said once as a card; a listener without the route (404) or unable to read the
   stream (503 `REPLAY_UNAVAILABLE`, 401, 403) is said once as a warning, and live delivery goes
-  on as before. `scripts/smoke-replay.sh` proves it against a real session, listener and
-  JetStream (INFRA-439).
+  on as before. The session registers and replays no followed topic reaching another session's
+  agent subject (a fork parent's until a pass closes it, or a wildcard such as
+  `notifications.agent.*`), which the listener refuses to store; it still follows it live.
+  `scripts/smoke-replay.sh` proves it against a real session, listener and JetStream (INFRA-439).
 
 - The `dispatch` skill this plugin ships teaches the board move as a command: a card moves with
   `dispatch issue-update --issue <KEY> --before <OTHER>`, which puts it above that issue,

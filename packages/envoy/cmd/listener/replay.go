@@ -106,7 +106,8 @@ func writeReplayReadError(w http.ResponseWriter, err error) {
 // reading, and every subject it cut short says so.
 //
 // A subject that is neither the session's agent subject nor one of its registered interests is
-// refused not_followed; one no subject of the deployed stream's configuration contains is refused
+// refused not_followed, and so is one that reaches another session's agent subject, registered or
+// not (replayFollowed); one no subject of the deployed stream's configuration contains is refused
 // not_retained. Either has no messages and next_after its after.
 //
 // The session_id must be one literal NATS subject token (replaySessionToken), else the request is
@@ -215,7 +216,10 @@ func replaySessionToken(id string) bool {
 
 // replayFollowed returns whether the session follows a subject: it is the session's agent subject
 // or a topic registered as its interest. The interest store is read only when some subject is not
-// the agent subject; a session it holds no record of follows only its agent subject.
+// the agent subject; a session it holds no record of follows only its agent subject. A subject
+// that reaches another session's agent subject (bus.CoversAnotherAgentSubject: one, or a wildcard
+// over them) is never followed, whatever the store holds: an interest registered before
+// /v1/interests/subscribe refused them, or written past it, must not read another session's inbox.
 func (d *listenerDeps) replayFollowed(sessionID string, subjects []replaySubjectRequest) (func(string) bool, error) {
 	agentSubject := contracts.AgentSubject(sessionID)
 	var topics []string
@@ -227,7 +231,8 @@ func (d *listenerDeps) replayFollowed(sessionID string, subjects []replaySubject
 		topics = interest.Topics
 	}
 	return func(subject string) bool {
-		return subject == agentSubject || slices.Contains(topics, subject)
+		return !bus.CoversAnotherAgentSubject(sessionID, subject) &&
+			(subject == agentSubject || slices.Contains(topics, subject))
 	}, nil
 }
 

@@ -9389,6 +9389,34 @@ describe("envoy OMP extension", () => {
       },
     });
   });
+  test("never registers a followed topic reaching another session's agent subject", async () => {
+    const registrations: { readonly topics: readonly string[] }[] = [];
+    globalThis.fetch = async (input, init) => {
+      if (new URL(input.toString()).pathname === "/v1/interests/subscribe") {
+        registrations.push(JSON.parse(init?.body?.toString() ?? "{}"));
+      }
+      return response({ session_id: "ses_bounded", machine_id: "test", dir: "/tmp", topics: [] });
+    };
+    // Query isolation gives this stateful extension its own module state, as every test here does.
+    const { default: envoyExtension } = await import("./envoy.ts?register-bounded");
+    const fixture = createPi();
+    envoyExtension(fixture.pi);
+    await fixture.handlers.get("session_start")?.({}, sessionContext("ses_bounded"));
+    const subscribeTool = fixture.tools.find((tool) => tool.name === "envoy_subscribe");
+    if (subscribeTool === undefined) throw new Error("envoy_subscribe was not registered");
+    const issue = "notifications.dispatch.issue.KEY-1.ask.opened";
+    const refused = ["notifications.*.x", "notifications.agent.*", "notifications.agent.ses_other"];
+
+    await subscribeTool.execute("", { topics: [...refused, issue] });
+
+    // The model follows them live; the listener, which would refuse them, is never sent them.
+    for (const topic of [...refused, issue])
+      expect(natsState.controls.get(topic)?.active()).toBe(true);
+    const topics = registrations.at(-1)?.topics ?? [];
+    expect(topics).toContain("notifications.agent.ses_bounded");
+    expect(topics).toContain(issue);
+    for (const topic of refused) expect(topics).not.toContain(topic);
+  });
   test("answers a targeted BTW delivery ephemerally and registers the capability", async () => {
     process.env.DISPATCH_URL = "http://dispatch.test";
     process.env.DISPATCH_TOKEN = "dispatch-token";

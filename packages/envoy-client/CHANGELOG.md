@@ -62,10 +62,13 @@
   `replayLedgerIdentity` names a frame as the ledger does. The transport gains `replay()` (one
   try, 10 s) and `EnvoyApiError.code`; a `createDeliveryDedupe` claim gains `settle()` and the
   dedupe `pending()`, true until the claim is settled or released. Beside the engine sits the host
-  policy both plugins share: the subjects followed for replay (`replayFollowedSubjects`), the topics
-  a restore follows again (`rememberedTopics`), a replayed removal's close and unregister
-  (`closeReplayedRemoval`), and which one-time notices are a card or a warning
-  (`routeReplayNotice`) (INFRA-439).
+  policy both plugins share: the subjects followed for replay (`replayFollowedSubjects`), never a
+  role's or one reaching another session's agent subject (`coversAnotherAgentSubject`: another
+  session's `notifications.agent.<id>`, or a wildcard over the agent subjects such as
+  `notifications.agent.*` or `notifications.>`, which the listener neither stores as an interest
+  nor replays), the topics a restore follows again (`rememberedTopics`), a replayed removal's
+  close and unregister (`closeReplayedRemoval`), and which one-time notices are a card or a
+  warning (`routeReplayNotice`) (INFRA-439).
 
 - `dispatch issues --all` reads the whole filtered listing in one request. The client gains
   `listAllIssues`, which sends neither `limit` nor `offset` and takes the bare array Dispatch

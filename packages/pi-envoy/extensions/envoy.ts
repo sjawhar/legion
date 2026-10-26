@@ -52,6 +52,7 @@ import { machineID } from "@legion/envoy-client/machine";
 import { natsAuthOptions } from "@legion/envoy-client/nats-auth";
 import {
   closeReplayedRemoval,
+  coversAnotherAgentSubject,
   createReplayEngine,
   envoyNoticeText,
   failureNoticeFields,
@@ -1889,7 +1890,9 @@ export default function envoyExtension(pi: PiApi): void {
 
   // The listener delivers nothing to a self-subscribed session (it takes its topics over its own
   // NATS subscriptions), so the registered topics serve recovery on resume; a role-bound subject
-  // stays out of them. A registration moves the session's `last_seen` at the listener, even one
+  // stays out of them, and so does one reaching another session's agent subject (a fork parent's,
+  // until a pass closes it, or a wildcard over them), which the listener refuses to store.
+  // A registration moves the session's `last_seen` at the listener, even one
   // whose answer is lost, so every hold this process abandoned under that session is its own again
   // first: a pending hand-back under that session's id, under the same key, which the next pass
   // settles.
@@ -1897,6 +1900,7 @@ export default function envoyExtension(pi: PiApi): void {
   // heartbeat's own direct refresh all feed the one clock.
   const registerSession = () => {
     const registeringFor = sessionID;
+    const own = agentSubject(sessionID);
     for (const [key, hold] of abandonedHolds) {
       if (hold.id !== sessionID) continue;
       abandonedHolds.delete(key);
@@ -1908,8 +1912,10 @@ export default function envoyExtension(pi: PiApi): void {
         directory: sessionDirectory,
         topics: [
           ...new Set([
-            agentSubject(sessionID),
-            ...[...subscriptions.keys()].filter((subject) => !isRoleBound(subject)),
+            own,
+            ...[...subscriptions.keys()].filter(
+              (subject) => !isRoleBound(subject) && !coversAnotherAgentSubject(own, subject)
+            ),
           ]),
         ],
         port: 0,

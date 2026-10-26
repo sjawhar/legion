@@ -8,10 +8,12 @@
   session after a cursor per subject, so a session that receives on its own NATS subscriptions
   (pi-envoy, claude-envoy) reads back what it missed while they were down. It serves only the
   session's own `notifications.agent.<session_id>` and the topics registered as its interests
-  (any other is `refused: "not_followed"`), and only subjects the deployed stream retains
-  (`refused: "not_retained"`); a subject without a cursor gets the stream's last sequence to start
-  one. One answer holds at most 32 subjects, 500 messages (100 by default), 2 MiB and 5 s of
-  reading, and says `more` for a subject it cut short. NATS refusing the read is
+  (any other is `refused: "not_followed"`, and so is one reaching another session's agent subject
+  — another session's `notifications.agent.<id>` or a wildcard such as `notifications.agent.*` or
+  `notifications.>` — even when the interest store holds it), and only subjects the deployed
+  stream retains (`refused: "not_retained"`); a subject without a cursor gets the stream's last
+  sequence to start one. One answer holds at most 32 subjects, 500 messages (100 by default),
+  2 MiB and 5 s of reading, and says `more` for a subject it cut short. NATS refusing the read is
   `503 {"code":"REPLAY_UNAVAILABLE"}` naming NATS's error; a listener without the route answers
   404, which a session reads as "does not replay". A `session_id` that is not one literal NATS
   token (`.`, `*`, `>`, whitespace or a control character) is a 400, so a wildcard cannot make
@@ -663,6 +665,15 @@
 
 ### Changed
 
+- `POST /v1/interests/subscribe` no longer stores a topic reaching another session's agent
+  subject: another session's `notifications.agent.<id>`, or a wildcard overlapping
+  `notifications.agent.>` (`notifications.agent.*`, `notifications.agent.>`, `notifications.>`,
+  `notifications.*.<x>`; `bus.CoversAnotherAgentSubject`), since `/v1/replay` answers the stored
+  topics and such a topic would read other sessions' stored inboxes. The rest of the registration
+  is stored and the answer stays 200, its `warnings` naming each topic left out (`<topic> was not
+  registered: …`), so a released pi-envoy, which registers a fork parent's agent subject with the
+  rest of what it follows, keeps registering. pi-envoy and claude-envoy no longer register or
+  replay such a topic (`coversAnotherAgentSubject` in `@legion/envoy-client/replay`) (INFRA-439).
 - **Breaking (local development):** `agent-secrets-devrelay` presents a listed caller's own
   ServiceAccount token, read from `--account-token-file` (default
   `$AGENT_SECRETS_ACCOUNT_TOKEN_FILE`), in place of the shared bearer the broker no longer takes. A

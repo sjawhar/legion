@@ -895,12 +895,34 @@ export function envoyNoticeText(fields: Readonly<Record<string, string>>): strin
   return encode({ envoy: fields });
 }
 
+/** The tokens every session's agent subject starts with; one or more tokens follow them. */
+const AGENT_SPACE = AGENT_TOPIC_PREFIX.slice(0, -1).split(".");
+
+/**
+ * Whether a topic reaches a session's agent subject other than `ownAgentSubject`, under NATS
+ * wildcard rules: another session's by name, or a wildcard over the agent subjects
+ * (`notifications.agent.*`, `notifications.>`, `notifications.*.<x>`). The listener stores no such
+ * interest and replays no such subject (packages/envoy `bus.CoversAnotherAgentSubject`), since
+ * either would read other sessions' inboxes, so a host neither registers nor replays one.
+ */
+export function coversAnotherAgentSubject(ownAgentSubject: string, topic: string): boolean {
+  if (topic === ownAgentSubject) return false;
+  const tokens = topic.split(".");
+  for (const [index, token] of AGENT_SPACE.entries()) {
+    const wanted = tokens[index];
+    if (wanted === ">") return true;
+    if (wanted !== "*" && wanted !== token) return false;
+  }
+  return tokens.length > AGENT_SPACE.length;
+}
+
 /**
  * The subjects a session follows for replay, which are what it registers with the listener: its
- * own agent subject, then every topic it follows but a role's and another session's agent subject.
- * Role messages stay live only, whether on a role lane or on a subject the host holds for a role
- * (`heldForRole`); another session's agent subject (a fork's parent, until the host closes it) is
- * not this session's to replay, and the listener would refuse it.
+ * own agent subject, then every topic it follows but a role's and one reaching another session's
+ * agent subject. Role messages stay live only, whether on a role lane or on a subject the host
+ * holds for a role (`heldForRole`); another session's agent subject (a fork's parent, until the
+ * host closes it), or a wildcard over the agent subjects, is not this session's to replay, and the
+ * listener would refuse it (`coversAnotherAgentSubject`).
  */
 export function replayFollowedSubjects(
   ownAgentSubject: string,
@@ -910,7 +932,7 @@ export function replayFollowedSubjects(
   const followed = [...topics].filter(
     (topic) =>
       !topic.startsWith(ROLE_TOPIC_PREFIX) &&
-      !topic.startsWith(AGENT_TOPIC_PREFIX) &&
+      !coversAnotherAgentSubject(ownAgentSubject, topic) &&
       !heldForRole(topic)
   );
   return [...new Set([ownAgentSubject, ...followed])];

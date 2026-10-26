@@ -105,3 +105,34 @@ func TestCheckFilterSubjectRefusesWhatNATSCannotFilterOn(t *testing.T) {
 		}
 	}
 }
+
+// What a session may register as an interest and replay: anything but a topic reaching another
+// session's agent subject, one by name or any wildcard over the agent subjects. Its own agent
+// subject is its own only when it is one literal subject.
+func TestCoversAnotherAgentSubjectBoundsInterestsAndReplay(t *testing.T) {
+	for _, tc := range []struct {
+		sessionID, topic string
+		want             bool
+	}{
+		{"ses_a", "notifications.agent.ses_a", false},
+		{"ses_a", "notifications.agent.ses_b", true},
+		{"ses_a", "notifications.agent.*", true},
+		{"ses_a", "notifications.agent.>", true},
+		{"ses_a", "notifications.agent.ses_a.>", true},
+		{"ses_a", "notifications.>", true},
+		{"ses_a", "notifications.*.ses_a", true},
+		{"ses_a", "notifications.*.*.x", true},
+		{"ses_a", ">", true},
+		{">", "notifications.agent.>", true},
+		{"*", "notifications.agent.*", true},
+		{"ses_a", "notifications.agent", false},
+		{"ses_a", "notifications.*", false},
+		{"ses_a", "notifications.dispatch.issue.KEY-1.>", false},
+		{"ses_a", "notifications.role.reviewer", false},
+		{"ses_a", "notifications.exceptions.agent.ses_b", false},
+	} {
+		if got := CoversAnotherAgentSubject(tc.sessionID, tc.topic); got != tc.want {
+			t.Errorf("CoversAnotherAgentSubject(%q, %q) = %v, want %v", tc.sessionID, tc.topic, got, tc.want)
+		}
+	}
+}
