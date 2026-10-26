@@ -771,22 +771,31 @@ func (a *Admission) releaseInactiveSlots(ctx context.Context, tx pgx.Tx) ([]stri
 // releaseSlots releases the slot of every issue of this project that release says is done with
 // it, and reports those issues in slot order; which describes such an issue in an error. Each
 // release is logged once the fact commits.
+//
+// It reads the project's records in one query, as promote does, never one query per slot: every
+// fact applies this under the one fact lock (intake.ApplyFact), twice for a Dispatch issue event,
+// so a read per slot made every fact of every consumer, the API and the boot's replay cost a round
+// trip to the database for each slot the project holds. A slot whose issue the project's records
+// do not show is another project's (ownSlots).
 func (a *Admission) releaseSlots(ctx context.Context, tx pgx.Tx, which string, release func(record.Issue) bool) ([]string, error) {
+	issues, err := a.store.Issues(ctx, tx)
+	if err != nil {
+		return nil, fmt.Errorf("list admission issues: %w", err)
+	}
 	slots, err := a.store.Slots(ctx, tx)
 	if err != nil {
 		return nil, fmt.Errorf("list admission slots: %w", err)
 	}
-	own := []record.Issue{}
-	for _, slot := range slots {
-		issue, err := a.store.Issue(ctx, tx, slot.Issue)
-		if err != nil {
-			return nil, fmt.Errorf("read slotted issue %s: %w", slot.Issue, err)
-		}
-		if issue == nil {
-			return nil, fmt.Errorf("slotted issue %s has no record", slot.Issue)
-		}
+	ours := make(map[string]record.Issue, len(issues))
+	for _, issue := range issues {
 		if issue.Project == a.project {
-			own = append(own, *issue)
+			ours[issue.Key] = issue
+		}
+	}
+	own := make([]record.Issue, 0, len(slots))
+	for _, slot := range slots {
+		if issue, ok := ours[slot.Issue]; ok {
+			own = append(own, issue)
 		}
 	}
 	inUse := len(own)
