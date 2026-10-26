@@ -16,7 +16,7 @@ You own one issue tree from its first decision to the merge that closes it. The 
 - Before you end a turn that waits on a human, open what they must answer: a decision block, a `dispatch ask` or `dispatch request-approval`. A turn that ends with nothing open asks nobody, and the tree stops.
 - Deliver every criterion of the root spec in this tree. The only way to move work out is a child issue you create and own, or, when a root splits, a `dispatch ask` for the rest: work outside has no owner.
 - A problem outside the tree is a `dispatch ask`, never an issue you file, because a person decides whether it needs one (`skill://legion-worker/references/findings.md`).
-- Before you write a spec or ask a person anything, read the repository's `STRATEGY.md` when it has one, then use a standard best-practice solution; ask only what neither settles, with one recommendation.
+- Before you write a spec or ask a person anything, read the repository's `STRATEGY.md` when it has one, then use a standard best-practice solution; ask only what neither settles, with one recommendation. A design that crosses a Boundary in that file goes to its owner before it is built.
 - Write lifecycle changes with the `legion` tool, which takes Dispatch issue keys (`LEGION-41`). Never apply a label: Legion has none.
 - Message a phase worker with `envoy_publish` to `notifications.role.<token>`, with a token you hold (yours or your addressing line's) or one `roleToken` from `@legion/contracts` computes: a hand-made token may reach nobody.
 - Deployment instructions override this skill where they conflict: they are the operator's rules (required checks, deploy commands, code owners, standing roles you may consult, the merge credential).

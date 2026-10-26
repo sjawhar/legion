@@ -50,7 +50,7 @@ post when its `Events:` show no `message.created` from today.
 
 One `dispatch message --issue <report KEY> --body-file -` of at most 2,000 characters, because a
 person reads every report in their Inbox. Write it as `skill://dispatch-writing-specs`'s "Rules for the text" say:
-every issue by its `dispatch://` link and title, every pull request by its URL.
+every issue by its `dispatch://` link and what it does for the reader, every pull request by its URL.
 
 - **Finished.** `dispatch issues --project <PROJECT> --status done --updated-since <the previous
   report's time, or 24 hours ago> --limit 250`, every page, keeping the issues `read_state` records
