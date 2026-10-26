@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-448",
-  "completed": "2026-10-26T13:40:00Z",
+  "completed": "2026-10-26T16:10:00Z",
   "proof": [
     {
       "criterion": "C1: on a closed issue a person's and an agent's new comment and message post; a new ask and a document edit stay 409 ISSUE_CLOSED; reopening works",
@@ -43,6 +43,22 @@
       "observed": "five kept lines: four about an issue's repo field and a document rebuild (packages/contracts/AGENTS.md, packages/envoy/AGENTS.md, packages/envoy/cmd/dispatch/AGENTS.md x2) and one about a closed document room, not an issue (packages/envoy/AGENTS.md)",
       "headSha": "dadb5f515a3eeafd4b4693c5dcde97fa19073c62",
       "negativeControl": "the same script at base 135d22e0 printed 30 hits, the corrected statements among them"
+    },
+    {
+      "criterion": "Review round 1: the listener serves without the legion_agents grant and answers 503 on the registry routes; registry writes keep one issue and role per session under concurrency and half writes",
+      "surface": "the real envoy-listener binary on an in-process NATS whose user lacks the bucket's subjects; the registry store on in-process NATS",
+      "command": "cd packages/envoy && go test -count=1 ./cmd/listener/ ./internal/legionagents/ ./internal/kvwatch/ ./internal/dispatch/envoy/ ./internal/session/ ./internal/store/ ./cmd/dispatch/ (with DISPATCH_TEST_DATABASE_URL); go test -count=1 -v ./internal/dispatch/api -run 'TestDoneIssue|TestClosedIssue|TestAskReply|TestTargetedMessage|TestACommentItsOwner|TestIssueCollaborators|TestRoutes|TestComment|TestMessage'",
+      "observed": "all packages ok, no FAIL or SKIP; the grant-less listener answers /v1/sessions 200 and the five registry calls 503 naming the grant with one ERROR line, then 200 after a NATS restart with the full grant; two concurrent PUTs of one session with different issues give one 200 and one 409 with only the winner listed; a write that died after its claim or after the role key is refused 409 for another issue and completed by its retry",
+      "headSha": "adb397f92a79201124cb3d69954e01bcdb4f47eb",
+      "negativeControl": "before the fix the listener exited at start without the grant (main.go log.Fatal) and the store wrote three plain puts after an unguarded read"
+    },
+    {
+      "criterion": "Review round 1: closed-document comments refuse a selection with no text visibly, under one editor access mode, without breaking the closed-issue posting paths",
+      "surface": "Dispatch browser suite, chromium and iphone",
+      "command": "cd packages/dispatch && bun run e2e -- --project=chromium --project=iphone e2e/closed-issue-posting.e2e.ts e2e/margin-composer-hold.e2e.ts e2e/margin.e2e.ts e2e/margin-thread-reply.e2e.ts e2e/mention-composer.e2e.ts e2e/phone-conversation.e2e.ts e2e/offline-edits.e2e.ts",
+      "observed": "138 passed, 8 skipped (the specs' own iPhone-only skips); proof-editor bun test 99 pass, an image-only or space-only selection offers no Comment",
+      "headSha": "adb397f92a79201124cb3d69954e01bcdb4f47eb",
+      "negativeControl": "a closed document's Comment on a selection holding only an image threw 'The selection holds no text to quote.' into a swallowed catch before the fix; now ProofDocument shows the status notice and opens no composer"
     }
   ],
   "filesChanged": [
@@ -71,7 +87,8 @@
     "main merged forward once because GitHub reported the pull request CONFLICTING (fingerprint comment https://github.com/sjawhar/legion/pull/2234#issuecomment-6415546614); main's rewrite of the retro skill dropped the paragraph this branch had corrected, and main's moved architect and controller text in references/ was corrected instead.",
     "Margin comments on a closed issue's document needed a packages/proof-editor change (a comment-only selection action in read-only mode); a read-only view on an open issue (schema mismatch) still offers nothing.",
     "Postgres-backed packages that cannot pass in this pod for environment reasons: internal/dispatch/files (needs Docker), the rank collation test (database initialised with C collation), pmdoc linearity timing; CI runs them.",
-    "Second forward merge of main (bc307fb5, #2188) because GitHub reported the pull request CONFLICTING: rebase re-check 61a71207b9b3 \u2192 19e3dfb6ef31: fingerprint unchanged (39aaf690\u2026), bare gates only; the one conflict was a CHANGELOG entry (https://github.com/sjawhar/legion/pull/2234#issuecomment-6416064353). main touched no packages/envoy, packages/dispatch or packages/proof-editor file."
+    "Second forward merge of main (bc307fb5, #2188) because GitHub reported the pull request CONFLICTING: rebase re-check 61a71207b9b3 \u2192 19e3dfb6ef31: fingerprint unchanged (39aaf690\u2026), bare gates only; the one conflict was a CHANGELOG entry (https://github.com/sjawhar/legion/pull/2234#issuecomment-6416064353). main touched no packages/envoy, packages/dispatch or packages/proof-editor file.",
+    "Review round 1 (review at 034ed9d8): all nine threads fixed in 3d1609ce71f6 and a5770f5d20f2 and resolved one by one; then a third forward merge of main because GitHub reported the pull request CONFLICTING: 3d1609ce \u2192 adb397f9, fingerprint unchanged d4b3f860\u2026 (https://github.com/sjawhar/legion/pull/2234#issuecomment-6419935961); the one conflict was an envoy CHANGELOG entry. The access-mode change also touched VersionView.tsx (readOnly \u2192 access: \"read\"). The stale LEGION-781 testing note was corrected; dated docs/superpowers plans keep requireOpenIssue as history."
   ],
   "openQuestions": [],
   "discoveredComplexity": [
