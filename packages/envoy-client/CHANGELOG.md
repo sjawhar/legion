@@ -45,18 +45,27 @@
 - `askgate-marker` holds AskGate's enforcement at the `dispatch` CLI, shared by the CLI and
   pi-envoy's gate: `gatedWrite(tool, args)`, the one list of gated writes (`ask`, `message`,
   `edit-ask`, `comment`, `doc-edit`, `request-approval`, an `issue` with a spec, an `artifact`
-  that uploads a markdown document); the owner-only `askgate.json` record a live Oh My Pi process
-  keeps in a session's state directory, naming its pid, its Linux start time and its marker store
-  (an owner whose process is gone, or whose pid another process holds, is inert); and single-use
-  markers, minted exclusively and owner-only, keyed by the argv's digest and bound to the dry
-  run's arguments for a reviewed write. Before a gated write posts, after `--help`, `--dry-run`
-  and the session and Dispatch settings, the CLI reads the session's record; with a live one it
-  consumes one matching marker by unlinking it, and in block mode refuses a write with none
+  that uploads a markdown document); the record a live Oh My Pi process keeps in a session's
+  state directory, one owner-only file per process under `askgate/` (`<pid>-<start>.json`), naming
+  its pid, its Linux start time and its marker store, so two processes that bind one session never
+  drop each other (an owner whose process is gone, or whose pid another process holds, is inert);
+  and single-use markers (version 2), minted exclusively and owner-only, keyed by the argv's
+  digest and bound to the dry run's arguments and to the sha256 of each file the argv names
+  (`fileOperands`) for a reviewed write. A marker older than two hours, longer than any tool's
+  time limit, is refused. Before a gated write posts, after `--help`, `--dry-run` and the session
+  and Dispatch settings, the CLI reads the session's record; with a live one it reads each named
+  file once and consumes one matching marker by unlinking it, and an upload by `--path` sends the
+  bytes of that read. In block mode it refuses a write with no matching marker
   (`dispatch <command> was not called: AskGate is on for this session, …`, logged to the ledger
-  with an `askgate` field). In warn mode it posts with a `dispatch: warning:` line and logs the
-  same field. A record that cannot be read, or names a store that is gone, is a refusal; a
-  session no live record names needs no marker, so a terminal, CI, Claude Code, OpenCode and a
-  pod without pi-envoy are unchanged. `pruneSessions` keeps a directory whose record is live.
+  with an `askgate` field), and a file that changed after the review with the advice to send the
+  call again in a later message. In warn mode it writes that ledger line before it posts, refuses
+  the write when the ledger cannot take it, and posts with a `dispatch: warning:` line. A record
+  that cannot be read, or names a store that is gone, is a refusal; a session no live record names
+  needs no marker, so a terminal, CI, Claude Code, OpenCode and a pod without pi-envoy are
+  unchanged. `pruneSessions` keeps a directory whose record is live, and removes the marker store
+  of a process that is gone and that nothing changed for two hours (`sweepStores`).
+- The `dispatch` refusal for a missing `DISPATCH_HOST` says to send the command as a bash call from
+  an agent's session, or to set your own session id to run it by hand.
 - `dispatch issues --all` reads the whole filtered listing in one request. The client gains
   `listAllIssues`, which sends neither `limit` nor `offset` and takes the bare array Dispatch
   answers for that request, refusing any other shape by name: a page back from a request carrying

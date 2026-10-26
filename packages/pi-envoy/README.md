@@ -222,79 +222,110 @@ Every other Dispatch command is outside the gate, and its text posts unreviewed:
 
 The gate reads the arguments from the command's own `--dry-run`. An upload that reads its name
 from a file (`--name-file`) is decided from the name the dry run prints. `--path-file` is refused:
-its content names a file the gate cannot capture before Dispatch opens it. An upload whose name or
-path holds an expansion (`"$NAME"`) is outside the form the gate reads. The gate
-copies each file whose text the write posts, a `--<field>-file` operand and an upload's `--path`,
-into a private snapshot. It reviews the snapshot and changes
-the command to post that snapshot. An `--image` file is not one of them: the model reads the
-path, not the picture, and the gate takes no snapshot of it, because the CLI names the upload
-after the file it opens at send time. The file must be a regular file. The gate refuses a missing
-file, a directory, a device and a FIFO before it reads them, and a path that reaches a file
-descriptor of whichever process opens it (`/dev/stdin`, `/dev/fd/N`, `/proc/self/fd/N`,
-`/proc/thread-self/fd/N`, `/proc/<n>/fd/N`, and any link to one): AskGate would open it in Oh My
-Pi's process and the command in its shell. For
-text from standard input, use `--<field>-file -` with a quoted here-document. For an upload, that
-is `--content-file -`: the CLI reads `--path -` as a file named `-`. The gate cuts all arguments
-at 64 KiB as one JSON block, so it reviews only part of a long document. It judges an upload
-against content failure 10 alone: a plan or a report is long by nature. An upload of any other
-file is not reviewed. A `task` subagent is not reviewed.
+its content names a file the gate does not read before Dispatch opens it. An upload whose name or
+path holds an expansion (`"$NAME"`) is outside the form the gate reads. The gate reads each file
+whose text the write posts, a `--<field>-file` operand and an upload's `--path`, in place, shows
+those bytes to the model, and runs the call as written. The marker it mints binds the sha256 of
+each file. Before the write posts, the CLI reads each file again and refuses one whose bytes
+changed after the review, and an upload sends the bytes the CLI read for that check. An `--image`
+file is not one of them: the model reads the path, not the picture. The file must be a regular
+file. The gate refuses a missing file, a directory, a device and a FIFO before it reads them, and
+a path that reaches a file descriptor of whichever process opens it (`/dev/stdin`, `/dev/fd/N`,
+`/proc/self/fd/N`, `/proc/thread-self/fd/N`, `/proc/<n>/fd/N`, and any link to one): AskGate
+would open it in Oh My Pi's process and the command in its shell. For text from standard input,
+use `--<field>-file -` with a quoted here-document. For an upload, that is `--content-file -`:
+the CLI reads `--path -` as a file named `-`. The gate cuts all arguments at 64 KiB as one JSON
+block, so it reviews only part of a long document. It judges an upload against content failure
+10 alone: a plan or a report is long by nature. An upload of any other file is not reviewed. A
+`task` subagent is not reviewed.
+
+**A file a call of the same message writes.** Oh My Pi runs the gate for every call of a message
+before any call of that message runs. So the gate reads a file before an earlier call of the same
+message writes or edits it. A file that is not there yet is refused in `block` mode with the
+advice to send the call again in a later message; in `warn` mode the call runs unreviewed, with
+that advice as its note. A file that an earlier call changed is refused by the CLI in `block` mode
+(`… AskGate reviews the calls of a message before any of them runs, so it did not review that
+change. Send the call again in a later message.`); in `warn` mode it posts with a
+`dispatch: warning:` line. Write or edit a file in one message, and send the write that posts it
+in the next.
 
 **The form the gate reads.** One `dispatch` call, alone in the bash call:
 
 ```
-[cd <literal path> && ] dispatch <subcommand> <literal words…> [2>&1] [<<'DELIM' … DELIM]
+[cd <literal path> && ] dispatch <subcommand> <literal words…> [2>&1] [<<'DELIM' … DELIM] [| head|tail [-n N]]
 ```
 
 - The program is `dispatch` by name, or a literal path that ends in it.
 - Every word is literal. Outside quotes a word holds only letters, digits and `._/+@%:,=-`, so no
-  `$`, backtick, `~`, `*`, `?`, `[`, `{`, `}` or backslash; inside double quotes, no `$`, backtick
-  or backslash. Single quotes make every character literal.
+  `$`, backtick, `~`, `*`, `?`, `[`, `{`, `}` or backslash. Single quotes make every character
+  literal. Inside double quotes there is no `$`, backtick or backslash. A quoted word may run over
+  several lines.
+- A backslash at the end of a line continues the command, as bash reads it.
 - One `cd <literal path> &&` may stand before it, and one `2>&1` after it.
-- One here-document may feed it, with its delimiter in quotes (`<<'EOF'` or `<<"EOF"`), opened on
-  the command's first line, before or after the `2>&1`.
-- Nothing else is in the call: no second command, no pipe, no `;`, `&&`, `||` or `&`, no
-  assignment, no other redirect and no line continuation.
+- One here-document may feed it, with its delimiter in quotes (`<<'EOF'` or `<<"EOF"`), before or
+  after the `2>&1`. Its body is on the lines after the line that opens it.
+- One trailing pipe stage may read its output: `head` or `tail`, alone or with `-n N`, `-nN` or
+  `-N`. The dry run leaves it out.
+- Nothing else is in the call: no second command, no other pipe, no `;`, `&&`, `||` or `&`, no
+  assignment, no other redirect and no comment.
 
 **Everything else runs, and the `dispatch` command enforces the review.** The gate reads no other
 form and refuses none: a call outside the literal grammar runs as written. What holds it back is
 the CLI. For each literal call it lets run, the gate mints a single-use marker; the CLI posts a
-gated write only when it consumes one, so a write sent any other way is refused when it runs:
+gated write only when it consumes one, so a write sent any other way is refused in `block` mode:
 
-- **The record.** While the gate is bound, pi-envoy keeps an owner-only `askgate.json` in the CLI's
-  state directory of each session id it binds (`<state>/sessions/<id>/`, where `<state>` is
-  `DISPATCH_STATE_DIR`, else `$XDG_STATE_HOME/dispatch`, else `~/.local/state/dispatch`). It names
-  the Oh My Pi process, its Linux start time, and the process's owner-only marker store. A record
-  of a session the process switched away from stays until the process exits, since a shell or an
-  eval kernel started before the switch still acts as that session. A record whose process is
-  gone, or whose pid another process now holds, is inert, and the CLI's session pruning keeps a
-  directory whose record is live.
+- **The record.** While the gate is bound, pi-envoy keeps one owner-only file for its process in
+  the `askgate/` directory of the CLI's state directory of each session id it binds
+  (`<state>/sessions/<id>/askgate/<pid>-<start>.json`, where `<state>` is `DISPATCH_STATE_DIR`,
+  else `$XDG_STATE_HOME/dispatch`, else `~/.local/state/dispatch`). It names the Oh My Pi process,
+  its Linux start time, and the process's owner-only marker store. Each process writes and removes
+  only its own file, so two processes that bind one session never drop each other. pi-envoy sets
+  `DISPATCH_STATE_DIR` in the session's environment when it is not set, so a command that changes
+  `HOME` or `XDG_STATE_HOME` still finds the record. A record of a session the process switched
+  away from stays until the process exits, since a shell or an eval kernel started before the
+  switch still acts as that session. A record whose process is gone, or whose pid another process
+  now holds, is inert, and the CLI's session pruning keeps a directory whose record is live. A
+  record pi-envoy cannot write is a notice in the session, at start or at a switch.
 - **The marker.** The gate mints one file in the store for each literal call it lets run, created
   owner-only and exclusively. It binds the exact argument vector the CLI receives and, behind a
   review or a deliberate pass (a rebuttal, a breaker trip, a halt, another provider), the digest
-  of the arguments the dry run printed, which holds the text of every `--<field>-file`. A call no
-  verdict stands behind, and a `task` subagent's literal call, get a marker of the argument vector
-  alone. Nothing of it is in the command the agent sees. A marker goes when its call ends, is
-  refused or the session shuts down; a backgrounded call keeps its marker until shutdown, and a
-  marker older than ten minutes is refused and removed.
+  of the arguments the dry run printed and the sha256 of each file the argv names, as the gate
+  read it. A call no verdict stands behind, and a `task` subagent's literal call, get a marker of
+  the argument vector alone. Nothing of it is in the command the agent sees. A marker goes when
+  its call ends, is refused or the session shuts down; a backgrounded call keeps its marker until
+  shutdown, and a marker older than two hours, longer than any tool's time limit, is refused and
+  removed. The process removes its store when it exits; the CLI's daily session pruning removes
+  the store of a process that is gone and that nothing changed for two hours.
 - **The check.** After `--help`, `--dry-run` and the session and Dispatch settings, and before a
-  gated write posts, the CLI reads the session's record. With a live one it consumes one matching
-  marker by unlinking it: exactly one process wins, so a marker posts one write and a replay
-  finds none. In `block` mode a write with no matching marker is refused
-  (`dispatch <command> was not called: AskGate is on for this session, …`, which names the form
-  to send). In `warn` mode it posts with a `dispatch: warning:` line. Either way the CLI logs it,
-  and pi-envoy records an `advisor-gate` entry with outcome `unmarked`. A record that cannot be
-  read, or that names a store that is gone, is a refusal. A session no live record names needs no
-  marker: a terminal, CI, Claude Code, OpenCode, a pod without pi-envoy, a session with no
+  gated write posts, the CLI reads the session's record. With a live one it reads each file the
+  argv names once and consumes one matching marker by unlinking it: exactly one process wins, so a
+  marker posts one write and a replay finds none. In `block` mode a write with no matching marker
+  is refused (`dispatch <command> was not called: AskGate is on for this session, …`, which names
+  the form to send, or, for a file that changed after the review, says to send the call again in a
+  later message). In `warn` mode the CLI first records the write in the session's ledger, refuses
+  it when the ledger cannot take that line, and then posts it with a `dispatch: warning:` line.
+  Either way pi-envoy records an `advisor-gate` entry with outcome `unmarked`. A record that cannot
+  be read, or that names a store that is gone, is a refusal. A session no live record names needs
+  no marker: a terminal, CI, Claude Code, OpenCode, a pod without pi-envoy, a session with no
   Dispatch and one with `askgate.enabled: false`.
+- **The cause note.** When a `bash` call outside the literal form holds a `dispatch` word and a
+  gated subcommand, and its result holds the CLI's refusal (or warn-mode warning) of a write with
+  no marker, the gate appends an `AskGate note:` to that result. It names the first cause it found
+  in the call, with the call's own text (an expansion in a value, a double-quoted value over lines
+  with an expansion in it, a program that runs the write such as `xargs` or `timeout`, a pipe, a
+  second command, an assignment, a redirect), and the change that puts the write in the literal
+  form. The note is help only: the gate refuses nothing for it.
 
 The gated writes are the same list for the gate and the CLI (`gatedWrite` in
 `@legion/envoy-client/askgate-marker`): the six commands above, an `issue` with a spec and an
 `artifact` that uploads a markdown document. `--help`, `--dry-run` and every other command need no
-marker. So a pipe, a loop, a variable, `xargs`, an alias, a script, `python3 -c`, `node -e`, or a
-process an eval cell starts runs, and its gated write is refused by the CLI with the form to
-send; a call that holds no Dispatch write, such as a commit message or a search pattern that names
-one, runs and posts nothing. A gate that did not load still writes the record and mints nothing,
-so the CLI refuses every gated write it would have reviewed.
+marker. So a pipe to a program other than one trailing `head` or `tail`, a loop, a variable,
+`xargs`, an alias, a script, `python3 -c`, `node -e`, or a process an eval cell starts runs, and
+its gated write is refused by the CLI in `block` mode with the form to send; a call that holds no
+Dispatch write, such as a commit message or a search pattern that names one, runs and posts
+nothing. A literal call whose last command gives no argument vector is refused in `block` mode. A
+gate that did not load still writes the record and mints nothing, so the CLI refuses every gated
+write it would have reviewed.
 
 **Where the gate binds.** AskGate binds only in a session that has Dispatch, judged at load from
 the session's own envoy.json and the variables over it (`DISPATCH_URL` and the other Dispatch
@@ -346,15 +377,14 @@ why. The note reaches a headless session too:
 | `skipped` | the session's main model is on another provider than the gate's |
 | `rebuttal` | the agent sent `--advisor-rebuttal <line>`, which is recorded and removed |
 | `breaker` | a third attempt on one target after two revise verdicts |
-| `unreadable` (warn mode) | the gate could not capture a file the literal call names |
+| `unreadable` (warn mode) | a file the literal call names was missing or not a regular file when the gate ran |
 | `abandoned` (warn mode) | the call or the run ended before the review answered |
 | `shutdown` (warn mode) | the session shut down before the review answered |
 | `unmarked` (warn mode) | the CLI found no marker for a gated write sent in another form |
 
 In `block` mode `unreadable`, `abandoned`, `shutdown` and `unmarked` refuse the call instead. Only
 `askgate.enabled: false`, and a session with no Dispatch, are silent. Each outcome after a failure
-returns the agent's own command, never the one naming a snapshot: a gate that fails breaks no
-valid write.
+runs the agent's own command as written: a gate that fails breaks no valid write.
 
 **The time limit.** `OMP_ASKGATE_TIMEOUT_MS` sets the review's time limit. The default is 90 s. The
 gate holds the limit 5 s under `extensionHandlers.toolCallTimeoutMs`, the host's limit for one
@@ -386,17 +416,15 @@ whose outcome is no verdict (the table above, a rebuttal, a breaker trip and war
 
 **What AskGate is not.** AskGate reviews the writes of a cooperating agent, so that a write that
 breaks its rules comes back with the reason before it posts. It is no sandbox. A process that
-runs as the same user as the session defeats it: it can replace a snapshot's bytes between the
-review and the open (a snapshot is `0600` in a `0700` directory, which keeps out other users, not
-this one), set `askgate.enabled` to false in its own envoy.json, or point the session at another
-envoy.json with `OMP_PROFILE`, `PI_CODING_AGENT_DIR`, `ENVOY_CONFIG_FILE`, `XDG_CONFIG_HOME` or
-`HOME` in the launching shell.
+runs as the same user as the session defeats it: it can set `askgate.enabled` to false in its own
+envoy.json, or point the session at another envoy.json with `OMP_PROFILE`, `PI_CODING_AGENT_DIR`,
+`ENVOY_CONFIG_FILE`, `XDG_CONFIG_HOME` or `HOME` in the launching shell.
 
 The CLI's check holds only for the CLI. It does not cover a direct HTTP request to Dispatch with
 the session's token, an older or a different `dispatch` binary, or a same-user process that
-removes the record or a marker file, acts as another session id or another state directory
-(`DISPATCH_SESSION_ID`, `DISPATCH_STATE_DIR`, `XDG_STATE_HOME`, `HOME`), or otherwise goes around
-the CLI. claude-envoy has no Dispatch write tool over MCP: Claude Code writes through the same CLI
+removes the record or a marker file, sets `DISPATCH_STATE_DIR` or `DISPATCH_SESSION_ID` itself to
+act as another state directory or session id, or otherwise goes around the CLI. claude-envoy has
+no Dispatch write tool over MCP: Claude Code writes through the same CLI
 under host `claude`, where AskGate keeps no record, so nothing there asks for a marker. Use the
 gate for the writes of an agent that wants the review, and not as a boundary against a program
 that wants around it.

@@ -46,27 +46,44 @@
 - AskGate reviews an upload of a markdown document (`dispatch artifact` with inline text, a
   `--path` file whose name ends in `.md` or `.markdown`, or a `--name` that ends in `.md`) against
   its rule on the person's words alone. A name or path read from a file (`--name-file`) is decided
-  from the dry run, and one that holds an expansion is outside the form the gate reads. Each posted file is reviewed and
-  posted from a private snapshot. A missing or non-regular file is refused before AskGate reads it,
+  from the dry run, and one that holds an expansion is outside the form the gate reads. Each posted
+  file is read in place and reviewed, and the call runs as written; the marker binds each file's
+  sha256, and the CLI refuses a file that changed after the review. A file missing when the gate
+  runs (one a call earlier in the same message writes) is refused in block mode with the advice to
+  send the call again in a later message, and runs unreviewed with that note in warn mode. A
+  missing or non-regular file is refused before AskGate reads it,
   and the refusal names `--content-file -` for an upload's text from standard input.
   The gate cuts all arguments at 64 KiB as one JSON block, so it reviews only part of a long
   document. Its rules now also send back a fact the reader does not need and text longer than its
   decision needs, and a claim about what the person said is sourced only by a link to where they
   wrote it.
 - AskGate reads one form of a Dispatch write: `[cd <literal path> && ] dispatch <subcommand>
-  <literal words…> [2>&1] [<<'DELIM' … DELIM]`, with every word literal and nothing else in the
-  call; `bun <path>/dispatch.js` and any path ending in `dispatch` or `dispatch.js` are the CLI.
+  <literal words…> [2>&1] [<<'DELIM' … DELIM] [| head|tail [-n N]]`, with every word literal and
+  nothing else in the call; a quoted word may run over several lines (double quotes with no `$`,
+  backtick or backslash), a backslash-newline continues the command, and the one trailing `head`
+  or `tail` stage is left out of the dry run. `bun <path>/dispatch.js` and any path ending in
+  `dispatch` or `dispatch.js` are the CLI.
   It refuses no call by reading any other form and reads no eval cell: the `dispatch` CLI enforces
-  the review. While the gate is bound, pi-envoy keeps an owner-only `askgate.json` record in the
-  CLI state directory of each session id it binds, and the gate mints one single-use marker for
-  each literal call it lets run, bound to the CLI's argv and, behind a review, to the dry run's
-  arguments. Under a live record the CLI posts a gated write only when it consumes a matching
-  marker; block mode refuses one with none, warn mode posts it with a warning, and either is
-  recorded as an `unmarked` entry. A pipe, `xargs`, a script, an alias, `python3 -c`, `node -e`
-  or an eval cell's process is therefore refused by the CLI, and text that only names a write
-  (a commit message, a search pattern) runs. A task subagent's literal write gets an argv-only
-  marker. A gate that did not load mints nothing, and a session with no model role still refuses
-  in both modes.
+  the review. While the gate is bound, pi-envoy keeps one owner-only record file for its process
+  in the `askgate/` directory of the CLI state directory of each session id it binds, and the
+  gate mints one single-use marker for each literal call it lets run, bound to the CLI's argv and,
+  behind a review, to the dry run's arguments and each named file's sha256. Under a live record
+  the CLI posts a gated write only when it consumes a matching marker; block mode refuses one with
+  none, warn mode posts it with a warning, and either is recorded as an `unmarked` entry. A pipe
+  other than one trailing `head` or `tail`, `xargs`, a script, an alias, `python3 -c`, `node -e`
+  or an eval cell's process is therefore refused by the CLI in block mode, and text that only
+  names a write (a commit message, a search pattern) runs. A task subagent's literal write gets an
+  argv-only marker. A gate that did not load mints nothing, and a session with no model role still
+  refuses in both modes.
+- When the CLI refuses (or in warn mode warns about) a write with no marker from a `bash` call
+  outside the literal form, AskGate appends a note to the call's result that names the first cause
+  it found (an expansion, a program that runs the write, a pipe, a second command, an assignment,
+  a redirect) with the call's own text, and the literal form to send.
+- pi-envoy sets `DISPATCH_STATE_DIR` in the session's environment when it is unset, so a command
+  that changes `HOME` or `XDG_STATE_HOME` still finds the session's ledger and AskGate record. A
+  record AskGate cannot write after a session switch is a notice at once, not only a log line.
+- An upload whose `--name` ends in `.md` after trimming is judged with the CLI's own markdown
+  predicate, so the gate reviews every upload the CLI asks a marker for.
 - AskGate says it when a write posts unreviewed. A timeout, a model error, an answer with no
   verdict, a handler exception, a dry run that failed, the pause after three failures, a session
   on another provider, a rebuttal and a breaker trip each record their outcome and tell the agent
@@ -79,8 +96,8 @@
   follows every link itself, refuses a component that reaches `/proc` or `/dev`, and opens with
   `O_NOFOLLOW`. A `--path-file` is refused for the same reason. A `--<field>-file` operand goes
   to the kernel as written, so a `..` after a symbolic link names the file the CLI opens. An
-  `--image` file is not snapshotted and not reviewed: the model reads its path, and the CLI names
-  the upload after the file it opens when it sends.
+  `--image` file is not reviewed: the model reads its path, and the CLI names the upload after the
+  file it opens when it sends.
 - AskGate refuses in both modes when no model role resolves, on every path: a rebuttal, a halt, a
   breaker trip, a shutdown and a dry run that failed each allowed the write before this.
 - Every note AskGate hands back rides on the call's own result as well as the loop's context, so
@@ -88,11 +105,9 @@
 - A write that no review stands behind is refused in both modes when AskGate cannot record it:
   the record is the whole account of what posted unreviewed. A write the model allowed still
   posts.
-- AskGate keeps a snapshot until the command that reads it has run. A call the host backgrounds
+- AskGate keeps a marker until the call it was minted for ends. A call the host backgrounds
   (`async: true`, or `bash.autoBackground`) reports its start before the shell runs, so its
-  snapshot stays until the session shuts down, and each gated call removes the snapshots older
-  than a day. A snapshot goes on its own call's `tool_result` or `tool_execution_end`, or at
-  shutdown, and a session switch or branch keeps it, so a background write still finds its file.
+  marker stays until the session shuts down; a session switch or branch keeps it.
 - AskGate binds only in a session that has Dispatch, read from the session's own envoy.json and
   the variables over it; a checkout's file can turn it on and never off. A session or a pod with
   no Dispatch has no write to review, gets no gate and no record. The test runs at load: a session
@@ -107,8 +122,8 @@
   At the 30 s default its deadline is 25 s, a review of a long session often times out, and the
   write posts unreviewed. A deadline under 30 s is one warning at start that names the key.
 - AskGate reviews the writes of a cooperating agent and is no sandbox: a process of the same user
-  can replace a snapshot's bytes between the review and the open, turn the gate off in its own
-  envoy.json, or point the session at another envoy.json through the launching shell. The CLI's
+  can turn the gate off in its own envoy.json, or point the session at another envoy.json through
+  the launching shell. The CLI's
   check does not cover a direct HTTP request to Dispatch, an older or a different CLI, or a
   same-user process that removes the record or a marker, acts as another session id or state
   directory, or otherwise goes around the CLI. claude-envoy has no Dispatch write tool over MCP;

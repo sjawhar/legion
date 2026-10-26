@@ -27,12 +27,17 @@
 ### Changed
 
 - The bundled `dispatch` command (`dist/dispatch.js`, rebuilt) carries AskGate's marker check:
-  before a gated write posts it reads the session's `askgate.json` record and, under a live one,
+  before a gated write posts it reads the session's AskGate record (`askgate/`) and, under a live one,
   needs a marker an Oh My Pi gate minted. A Claude Code session writes under host `claude`, whose
   session id no Oh My Pi process records, so the check is inert here: nothing this plugin sends
   needs a marker. The plugin has no Dispatch write tool over MCP. `dist/envoy-channel.js` is
   rebuilt with the same shared state code, whose session pruning keeps a directory a live record
   names.
+- `dist/` and the generated `legion/` skills are rebuilt with AskGate's file digests (the bundled
+  CLI checks each reviewed file's sha256 and refuses one changed after the review), its two-hour
+  marker age, its per-process record files and its prune of a crashed process's store, and with
+  the skill examples written in the literal form the gate reads (the finding ask and the retro
+  message). Nothing here asks for a marker under host `claude`.
 
 - The plugin declares daemon API contract 38 in `package.json`'s `legion.daemonApiVersion`
   (INFRA-225): `GET /legion/v1/state` carries `admission.blocked`, every root and child Legion is

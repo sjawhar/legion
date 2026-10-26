@@ -5288,9 +5288,10 @@ issue's pod (every role of it alike) and the image probe's.
   it. Without it, the gate logs one warning at start, `AskGate: the review deadline is 25000 ms`,
   through Oh My Pi's logger. The gate binds in a pod because the pod has Dispatch; one without it
   gets no gate. The pod's `dispatch` command enforces the review: while the gate is bound, a
-  gated write that is not one literal `dispatch` call the gate reviewed (a pipe, a script,
-  `python3 -c`, an eval cell's process) is refused by the CLI, in block mode, for want of the
-  single-use marker the gate mints. It reviews the writes of a cooperating agent and is no
+  gated write that is not one literal `dispatch` call the gate reviewed (a pipe other than one
+  trailing `head` or `tail`, a script, `python3 -c`, an eval cell's process) is refused by the
+  CLI, in block mode, for want of the single-use marker the gate mints. It reviews the writes of
+  a cooperating agent and is no
   sandbox: it does not cover a direct HTTP request to Dispatch, an older or a different CLI, or a
   process of the pod's own user that removes the CLI's AskGate record or a marker, acts as another
   session id or state directory, or otherwise goes around the CLI (pi-envoy's README, "What

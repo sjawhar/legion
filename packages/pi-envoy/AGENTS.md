@@ -228,24 +228,32 @@ with fakes. The reader takes one form, the literal grammar of one `dispatch` cal
 any other: a call in another form runs, and an `eval` cell is not read.
 
 Enforcement is the `dispatch` CLI's (`@legion/envoy-client/askgate-marker`, the README's
-"Everything else runs"). While the gate is bound, `envoy.ts`'s top-level instance writes the
-owner-only record `askgate.json` into the CLI state directory of every session id it binds
-(`bindDispatchSession`), keeps each until shutdown (a shell or kernel started before a switch still
-acts as the old session), and removes them and its marker store there. For each literal call it
-lets run, the gate mints one single-use marker in that store (`mintFor`): the argv the CLI gets,
-bound to the dry run's arguments behind a review or a deliberate pass, argv-only for a call no
-verdict stands behind and for a `task` subagent's literal call. A marker goes as its snapshot goes.
-The CLI consumes one by unlinking it before it posts a gated write under a live record, and in
-block mode refuses one with none (`gatedWrite`, the one predicate both sides use). The gate writes
-its mode into the store for the CLI; `envoy.ts` turns each write the CLI logged as unmarked into
-an `unmarked` entry. A gate that did not load mints nothing, so the CLI refuses those writes too.
-Precision comes first: the gate refuses no call that holds no Dispatch write.
+"Everything else runs"). While the gate is bound, `envoy.ts`'s top-level instance writes one
+owner-only file for its own process into the `askgate/` record directory of the CLI state
+directory of every session id it binds (`bindDispatchSession`), keeps each until shutdown (a shell
+or kernel started before a switch still acts as the old session), and on a clean exit removes its
+own files and its marker store; the CLI's daily prune (`sweepStores`) removes the store of a
+process that crashed. `bindDispatchSession` also sets `DISPATCH_STATE_DIR` when it is unset, so a
+command that changes `HOME` or `XDG_STATE_HOME` still finds the record, and a record it cannot
+write after a switch is a UI notice at once. For each literal call it lets run, the gate mints one
+single-use marker in that store (`mintFor`): the argv the CLI gets, bound behind a review or a
+deliberate pass to the dry run's arguments and to the sha256 of each file the argv names
+(`fileOperands`), as the gate read it in place; argv-only for a call no verdict stands behind and
+for a `task` subagent's literal call. A marker goes when its call ends or at shutdown, and the CLI
+refuses one older than two hours (`MARKER_MAX_AGE_MS`). The CLI reads each named file once,
+consumes one matching marker by unlinking it before it posts a gated write under a live record,
+sends an upload's bytes from that same read, and in block mode refuses a write with no matching
+marker (`gatedWrite`, the one predicate both sides use); a file that changed after the review
+matches none and is refused with the advice to send the call again in a later message. In warn
+mode the CLI writes the ledger line before it posts. The gate writes its mode into the store for
+the CLI; `envoy.ts` turns each write the CLI logged as unmarked into an `unmarked` entry, and the
+gate appends a cause note (`nonLiteralCause`, `causeNote`) to the result of a call outside the
+literal form that the CLI refused. A gate that did not load mints nothing, so the CLI refuses those
+writes too. Precision comes first: the gate refuses no call that holds no Dispatch write.
 Every other way a write passes
-unreviewed records its outcome and tells the agent so (`renderUnreviewed`), and each one hands
-back the agent's own command, never the one naming a snapshot (`UNREVIEWED_OUTCOMES`): a gate that
-fails breaks no valid write. A snapshot goes when the command that reads it has run, which for a
-backgrounded call is the session's shutdown, and each gated call sweeps the snapshots older than a
-day. The model walk (`askModel` in `createAskGate`) is the one path a review takes to the
+unreviewed records its outcome and tells the agent so (`renderUnreviewed`), and each one runs the
+agent's own command as written (`UNREVIEWED_OUTCOMES`): a gate that fails breaks no valid write.
+The model walk (`askModel` in `createAskGate`) is the one path a review takes to the
 model. The review's deadline is held 5 s under `extensionHandlers.toolCallTimeoutMs`, so at that
 key's 30 s default a review often times out and the write posts unreviewed: a session that loads
 this plugin sets the key to 120000 or more (the README's "The time limit"), and a deadline under
@@ -254,17 +262,16 @@ this plugin sets the key to 120000 or more (the README's "The time limit"), and 
 upload of a markdown document gets: failure 10 alone) are the prompts, imported as text.
 
 AskGate reviews the writes of a cooperating agent. It is no sandbox, and nothing in it is
-designed as one: a process that runs as the same user defeats it. That process can replace a
-snapshot's bytes between the review and the open (a snapshot is `0600` in a `0700` directory,
-which keeps out other users, not this one), turn the gate off in its own envoy.json, or point the
-session at another envoy.json through `OMP_PROFILE`, `PI_CODING_AGENT_DIR`, `ENVOY_CONFIG_FILE`,
-`XDG_CONFIG_HOME` or `HOME` in the launching shell (the variables `envoyConfigPath` reads, in that
-order). Keep every check that is there; add none that only an attacker of that kind would need.
+designed as one: a process that runs as the same user defeats it. That process can turn the gate
+off in its own envoy.json, or point the session at another envoy.json through `OMP_PROFILE`,
+`PI_CODING_AGENT_DIR`, `ENVOY_CONFIG_FILE`, `XDG_CONFIG_HOME` or `HOME` in the launching shell
+(the variables `envoyConfigPath` reads, in that order). Keep every check that is there; add none
+that only an attacker of that kind would need.
 
 The CLI's check covers the CLI alone: not a direct HTTP request to Dispatch, an older or a
-different `dispatch` binary, or a same-user process that removes the record or a marker, acts as
-another session id or state directory (`DISPATCH_SESSION_ID`, `DISPATCH_STATE_DIR`,
-`XDG_STATE_HOME`, `HOME`), or otherwise goes around the CLI. claude-envoy has no Dispatch write
+different `dispatch` binary, or a same-user process that removes the record or a marker, sets
+`DISPATCH_SESSION_ID` or `DISPATCH_STATE_DIR` itself to act as another session id or state
+directory, or otherwise goes around the CLI. claude-envoy has no Dispatch write
 tool over MCP; Claude Code writes through the CLI under host `claude`, where no record exists.
 Record such a form here rather than chase it with a scan: a refusal that stops a call holding no
 Dispatch write costs more than a construct a cooperating agent never writes.
