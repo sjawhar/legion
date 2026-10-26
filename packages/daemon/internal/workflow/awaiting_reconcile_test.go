@@ -20,7 +20,7 @@ func awaitRootView() awaitView {
 		Slotted: true,
 		Run:     record.RoleRun{Claim: &record.RoleClaim{State: supervise.StateWorking}},
 		Asks: []record.RootAsk{
-			{Issue: "LEGION-208", Ask: "ask-q", Kind: record.AskQuestion, Open: true, WaitingOn: "human", ByTree: true, Seq: 5},
+			{Issue: "LEGION-208", Ask: "ask-q", Kind: record.AskQuestion, Open: true, Seq: 5, WaitingOn: "human", WaitingOnSeq: 5, ByTree: true},
 		},
 	}
 }
@@ -42,7 +42,11 @@ func TestDecideAwaitsTable(t *testing.T) {
 		{"an architect that handed nothing back", func(v *awaitView) { v.Root.DeclaredSeq = 0 }, actStay, "handed nothing"},
 		{"nothing left with the person", func(v *awaitView) { v.Asks[0].WaitingOn = "agent" }, actTakeIn, "still with the person"},
 		{"a question the root's tree did not open", func(v *awaitView) { v.Asks[0].ByTree = false }, actTakeIn, "still with the person"},
-		{"an approval request no gate names", func(v *awaitView) { v.Asks[0].Kind = record.AskApproval }, actTakeIn, "still with the person"},
+		{"an approval request rather than a question", func(v *awaitView) { v.Asks[0].Kind = record.AskApproval }, actTakeIn, "still with the person"},
+		{"nothing left with the person while a member is in a phase", func(v *awaitView) {
+			v.Asks[0].WaitingOn = "agent"
+			v.Members = []record.Issue{{Key: "LEGION-209", Tree: "LEGION-208", Phase: phase.Implementing, Status: "in_progress"}}
+		}, actTakeIn, "still with the person"},
 		{"a member of its tree in a phase", func(v *awaitView) {
 			v.Members = []record.Issue{{Key: "LEGION-209", Tree: "LEGION-208", Phase: phase.Implementing, Status: "in_progress"}}
 		}, actStay, "of its tree is in implementing"},
@@ -66,10 +70,24 @@ func TestDecideAwaitsTable(t *testing.T) {
 		}, actEnter, "awaiting an answer"},
 		{"a person who already acted after the hand-back", func(v *awaitView) { v.Asks[0].PersonSeq = 7 }, actTellInPlace, "already acted"},
 		{"a person who acted before it", func(v *awaitView) { v.Asks[0].PersonSeq = 4 }, actEnter, "awaiting an answer"},
+		{"a person's answer of the gate's approval request after it", func(v *awaitView) {
+			v.Gate = &record.DesignGate{Issue: "LEGION-208", ArtifactID: gateDoc, LatestVersion: 1}
+			v.Asks = append(v.Asks, record.RootAsk{Issue: "LEGION-208", Ask: "ask-approval", Kind: record.AskApproval, Artifact: gateDoc, Seq: 7,
+				WaitingOn: "human", WaitingOnSeq: 4, ClosedBy: record.ClosedByPerson, ClosedSeq: 7, PersonAnswerSeq: 7})
+		}, actEnter, "awaiting an answer"},
+		{"a person's answer of another document's approval request after it", func(v *awaitView) {
+			v.Gate = &record.DesignGate{Issue: "LEGION-208", ArtifactID: gateDoc, LatestVersion: 1}
+			v.Asks = append(v.Asks, record.RootAsk{Issue: "LEGION-208", Ask: "ask-plan", Kind: record.AskApproval, Artifact: "artifact-plan", Seq: 7,
+				WaitingOn: "human", WaitingOnSeq: 4, ClosedBy: record.ClosedByPerson, ClosedSeq: 7, PersonAnswerSeq: 7})
+		}, actTellInPlace, "already acted"},
 		{"a wait on the oldest question still with the person", func(v *awaitView) {
 			v.Asks = append(v.Asks, record.RootAsk{Issue: "LEGION-208", Ask: "ask-older", Kind: record.AskQuestion,
-				Open: true, WaitingOn: "human", ByTree: true, Seq: 3})
+				Open: true, Seq: 3, WaitingOn: "human", WaitingOnSeq: 3, ByTree: true})
 		}, actEnter, "question ask-older"},
+		{"a wait on the question longest on the person's turn, whatever reopened it since", func(v *awaitView) {
+			v.Asks = append(v.Asks, record.RootAsk{Issue: "LEGION-208", Ask: "ask-restored", Kind: record.AskQuestion,
+				Open: true, Seq: 9, WaitingOn: "human", WaitingOnSeq: 3, ClosedBy: record.ClosedBySettlement, ClosedSeq: 4, ByTree: true})
+		}, actEnter, "question ask-restored"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			view := awaitRootView()
@@ -95,8 +113,8 @@ func TestDecideAwaitsOnTheGate(t *testing.T) {
 	approved := 4
 	gateView := func() awaitView {
 		view := awaitRootView()
-		view.Asks = []record.RootAsk{{Issue: "LEGION-208", Ask: "ask-approval", Kind: record.AskApproval, Open: true, WaitingOn: "human", Seq: 5}}
-		view.Gate = &record.DesignGate{Issue: "LEGION-208", ArtifactID: "artifact-208", LatestVersion: 4, RequestAsk: "ask-approval"}
+		view.Asks = []record.RootAsk{{Issue: "LEGION-208", Ask: "ask-approval", Kind: record.AskApproval, Artifact: "artifact-208", Open: true, WaitingOn: "human", Seq: 5}}
+		view.Gate = &record.DesignGate{Issue: "LEGION-208", ArtifactID: "artifact-208", LatestVersion: 4}
 		view.Armed = true
 		return view
 	}
@@ -113,7 +131,7 @@ func TestDecideAwaitsOnTheGate(t *testing.T) {
 		{"the request on the agent's turn", func(v *awaitView) { v.Asks[0].WaitingOn = "agent" }, actTakeIn, "still with the person"},
 		{"the request of a gate already open", func(v *awaitView) { v.Gate.ApprovedVersion = &approved }, actTakeIn, "still with the person"},
 		{"the request with the design gate off", func(v *awaitView) { v.Armed = false }, actTakeIn, "still with the person"},
-		{"an approval request the gate does not name", func(v *awaitView) { v.Gate.RequestAsk = "ask-other" }, actTakeIn, "still with the person"},
+		{"an approval request of another document", func(v *awaitView) { v.Asks[0].Artifact = "artifact-other" }, actTakeIn, "still with the person"},
 		{"a person's reply on the request after the hand-back", func(v *awaitView) { v.Asks[0].PersonSeq = 7 }, actTellInPlace, "already acted"},
 		{"a changes request the gate already told after the hand-back", func(v *awaitView) {
 			reason := "say more"
@@ -146,9 +164,11 @@ func TestAnActAlreadyRecordedTellsTheArchitectInPlace(t *testing.T) {
 		detail string
 	}{
 		{"on the subject question", record.RootAsk{Issue: "LEGION-208", Ask: "ask-q", Kind: record.AskQuestion, Open: true,
-			WaitingOn: "human", ByTree: true, Seq: 5, PersonSeq: 7}, record.AnsweredByAsk, "ask-q"},
+			Seq: 5, WaitingOn: "human", WaitingOnSeq: 5, ByTree: true, PersonSeq: 7}, record.AnsweredByAsk, "ask-q"},
 		{"on another ask of the root", record.RootAsk{Issue: "LEGION-208", Ask: "ask-other", Kind: record.AskQuestion, Open: false,
 			Seq: 6, PersonSeq: 7}, record.AnsweredByReply, "ask-other"},
+		{"a person's answer of another ask", record.RootAsk{Issue: "LEGION-208", Ask: "ask-other", Kind: record.AskQuestion, Open: false,
+			Seq: 7, ClosedBy: record.ClosedByPerson, ClosedSeq: 7, PersonAnswerSeq: 7}, record.AnsweredByReply, "ask-other"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			view := awaitRootView()
@@ -231,7 +251,7 @@ func TestTheResumeTaskUnderNoDesignGateAdvisesNoApproval(t *testing.T) {
 // registering it otherwise.
 func TestTheResumeTaskOfAGateWait(t *testing.T) {
 	answered := time.Date(2026, 9, 23, 0, 0, 0, 0, time.UTC)
-	gate := &record.DesignGate{Issue: "LEGION-208", ArtifactID: "artifact-208", LatestVersion: 5, RequestAsk: "ask-approval"}
+	gate := &record.DesignGate{Issue: "LEGION-208", ArtifactID: "artifact-208", LatestVersion: 5}
 	for _, tc := range []struct {
 		name    string
 		waiting record.Awaiting
@@ -242,21 +262,21 @@ func TestTheResumeTaskOfAGateWait(t *testing.T) {
 		{
 			name:    "a newer version, the request on the architect's turn",
 			waiting: record.Awaiting{GateVersion: 5, Artifact: "artifact-208", AnsweredAt: &answered, AnsweredBy: record.AnsweredByVersion, AnsweredDetail: "version 5"},
-			asks:    []record.RootAsk{{Issue: "LEGION-208", Ask: "ask-approval", Kind: record.AskApproval, Open: true, WaitingOn: "agent", Seq: 9}},
+			asks:    []record.RootAsk{{Issue: "LEGION-208", Ask: "ask-approval", Kind: record.AskApproval, Artifact: "artifact-208", Open: true, WaitingOn: "agent", Seq: 9}},
 			want: []string{"A newer version of your spec on LEGION-208, version 5, handed the approval request back to you",
 				"Waiting on you: ask ask-approval", "register that version with register_gate", "or answer in the request's thread", "returns the slot"},
 		},
 		{
 			name:    "a person's answer of a question, the request still with the person",
 			waiting: record.Awaiting{Ask: "ask-q", AnsweredAt: &answered, AnsweredBy: record.AnsweredByAsk, AnsweredDetail: "ask-q"},
-			asks: []record.RootAsk{{Issue: "LEGION-208", Ask: "ask-approval", Kind: record.AskApproval, Open: true, WaitingOn: "human", Seq: 9},
+			asks: []record.RootAsk{{Issue: "LEGION-208", Ask: "ask-approval", Kind: record.AskApproval, Artifact: "artifact-208", Open: true, WaitingOn: "human", Seq: 9},
 				{Issue: "LEGION-208", Ask: "ask-q", Kind: record.AskQuestion, ByTree: true, Seq: 10}},
 			want: []string{"Still with the person: the approval request for spec version 5", "or request approval again and register that version with register_gate"},
 		},
 		{
 			name:    "a changes request that closed the request",
 			waiting: record.Awaiting{Ask: "ask-approval", AnsweredAt: &answered, AnsweredBy: record.AnsweredByChanges, AnsweredDetail: "version 5: \"say more\""},
-			asks:    []record.RootAsk{{Issue: "LEGION-208", Ask: "ask-approval", Kind: record.AskApproval, Seq: 11, ClosedSeq: 11, ClosedBy: record.ClosedByPerson}},
+			asks:    []record.RootAsk{{Issue: "LEGION-208", Ask: "ask-approval", Kind: record.AskApproval, Artifact: "artifact-208", Seq: 11, ClosedSeq: 11, ClosedBy: record.ClosedByPerson}},
 			want:    []string{"requested changes", "request approval again and register that version with register_gate"},
 			not:     []string{"request's thread", "Still with the person"},
 		},

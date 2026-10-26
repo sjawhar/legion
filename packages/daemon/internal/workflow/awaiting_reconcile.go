@@ -133,7 +133,9 @@ const (
 // awaitView is what decideAwait reads of one root: its record, whether it holds a slot, the other
 // members of its tree, why it could not resume (Unresumable, "" when it could), its architect's run
 // at the root's generation, its asks' mirror rows, its design gate (nil for none), and whether the
-// design gate is armed.
+// design gate is armed. The gate's document (gateArtifact) names its approval requests — every
+// approval row of that document — and their answer is a review rather than a person's act on an
+// ask (RootAsk.PersonActSeq).
 type awaitView struct {
 	Root        record.Issue
 	Slotted     bool
@@ -194,7 +196,7 @@ func decideAwait(v awaitView) awaitDecision {
 	if why, ok := owed(v.Run); ok {
 		return awaitDecision{Why: "its architect " + why}
 	}
-	if answer, detail, ok := answeredSince(waiting, v.Asks); ok {
+	if answer, detail, ok := answeredSince(waiting, v.Asks, gateArtifactOf(v.Gate)); ok {
 		return awaitDecision{Act: actTellInPlace, Why: "a person already acted after its hand-back", Waiting: waiting, Answer: answer, Detail: detail}
 	}
 	why := fmt.Sprintf("question %s is awaiting an answer", waiting.Ask)
@@ -205,31 +207,43 @@ func decideAwait(v awaitView) awaitDecision {
 }
 
 // withHuman is what of a root is still with the person: its tree's open questions that wait on
-// the person, oldest event first, and whether its design gate's approval request does — the gate
-// registered, armed and closed, and the request it names (RequestAsk) open on the person's turn.
-// An approval request no gate names, and the request of a gate that is open or off, ask the person
-// for nothing the root waits on.
+// the person, the one on the person's turn longest first (the turn's own place, WaitingOnSeq; an
+// open ask no event gave a turn is the person's since it opened, so it sorts first), and whether
+// an approval request of its design gate's document is open on the person's turn while the gate is
+// registered, armed and closed. An approval request of another document, and the request of a gate
+// that is open or off, ask the person for nothing the root waits on.
 func withHuman(asks []record.RootAsk, gate *record.DesignGate, armed bool) (questions []record.RootAsk, request bool) {
-	requestAsk := gateRequest(gate, armed)
+	requestOf := gateRequestArtifact(gate, armed)
 	for _, ask := range asks {
 		switch {
-		case requestAsk != "" && ask.Ask == requestAsk:
-			request = ask.WithHuman()
+		case ask.GateRequestOf(requestOf):
+			request = request || ask.WithHuman()
 		case ask.ByTree && ask.Question() && ask.WithHuman():
 			questions = append(questions, ask)
 		}
 	}
-	slices.SortFunc(questions, func(a, b record.RootAsk) int { return cmp.Or(cmp.Compare(a.Seq, b.Seq), cmp.Compare(a.Ask, b.Ask)) })
+	slices.SortFunc(questions, func(a, b record.RootAsk) int {
+		return cmp.Or(cmp.Compare(a.WaitingOnSeq, b.WaitingOnSeq), cmp.Compare(a.Seq, b.Seq), cmp.Compare(a.Ask, b.Ask))
+	})
 	return questions, request
 }
 
-// gateRequest is the approval request a root can wait on: the one gate names while it is
-// registered, armed and closed; "" otherwise.
-func gateRequest(gate *record.DesignGate, armed bool) string {
+// gateRequestArtifact is the document whose approval requests a root can wait on: its design
+// gate's, while the gate is registered, armed and closed; "" otherwise (RootAsk.GateRequestOf
+// matches no row against "").
+func gateRequestArtifact(gate *record.DesignGate, armed bool) string {
 	if gate == nil || !armed || classify.DesignGateOpen(*gate) {
 		return ""
 	}
-	return gate.RequestAsk
+	return gate.ArtifactID
+}
+
+// gateArtifactOf is the document gate is registered on, "" for no gate.
+func gateArtifactOf(gate *record.DesignGate) string {
+	if gate == nil {
+		return ""
+	}
+	return gate.ArtifactID
 }
 
 // waitSubject is the wait a root starts from since on what is still with the person: the gate at
@@ -269,18 +283,19 @@ func owed(run record.RoleRun) (string, bool) {
 
 // answeredSince names a person's act the record already holds that Dispatch recorded after waiting
 // began: their act on the subject question, or on any other ask of the root the mirror recorded one
-// on (record.RootAsk.PersonSeq, which the ask handlers write under one rule, personAnswers). A
-// review of the root's spec is not read here: the architect it would resume is running, and the
-// daemon's own design-changes-requested notice is the work that reaches it (a handout of its own).
-func answeredSince(waiting record.Awaiting, asks []record.RootAsk) (record.Answer, string, bool) {
+// on (record.RootAsk.PersonActSeq against the gate's document, read from the acts the ask handlers
+// record under one rule, personAct). A review of the root's spec is not read here: the architect it
+// would resume is running, and the daemon's own design-changes-requested notice is the work that
+// reaches it (a handout of its own).
+func answeredSince(waiting record.Awaiting, asks []record.RootAsk, gateArtifact string) (record.Answer, string, bool) {
 	since := waiting.Since.Seq
 	for _, ask := range asks {
-		if ask.Ask == waiting.Ask && ask.PersonSeq > since {
+		if ask.Ask == waiting.Ask && ask.PersonActSeq(gateArtifact) > since {
 			return record.AnsweredByAsk, ask.Ask, true
 		}
 	}
 	for _, ask := range asks {
-		if ask.PersonSeq > since {
+		if ask.PersonActSeq(gateArtifact) > since {
 			return record.AnsweredByReply, ask.Ask, true
 		}
 	}
@@ -407,9 +422,9 @@ func resumeTask(key string, waiting record.Awaiting, gate *record.DesignGate, as
 	}
 	requestOpen := false
 	for _, ask := range asks {
-		isRequest := gate != nil && ask.Ask == gate.RequestAsk
-		if isRequest {
-			requestOpen = ask.Open
+		isRequest := ask.GateRequestOf(gateArtifactOf(gate))
+		if isRequest && ask.Open {
+			requestOpen = true
 		}
 		if ask.Open && ask.WaitingOn == "agent" && (isRequest && gateClosed || ask.ByTree && ask.Question()) {
 			yours = append(yours, "ask "+ask.Ask)

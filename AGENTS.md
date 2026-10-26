@@ -249,10 +249,10 @@ the same events in any order give the same result. A root enters `awaiting_perso
 slot, and its architect's session is suspended after its current turn, kept for the resume — when
 all of these hold: its architect handed something to the person since the daemon last gave it
 work (a question a session of its tree opened on the root, a tree session's reply leaving such a
-question or the closed gate's approval request with the person, or a registration of a closed gate
+question, or an approval request of the closed gate's document, with the person, or a registration of a closed gate
 whose request waits on the person; `declared_seq`, the newest such hand-back); something is still
-with the person (an open tree question on the person's turn, or the closed, armed gate's approval
-request on the person's turn); no other issue of its tree is in a phase; it could resume (its
+with the person (an open tree question on the person's turn, or an approval request of the closed,
+armed gate's document on the person's turn); no other issue of its tree is in a phase; it could resume (its
 label is on, and no person or session outside the tree holds its Dispatch claim); and its
 architect has taken the work it was last given (no start queued, its claim not still starting, its
 task confirmed), so a suspension never cancels a resume before its turn runs. The wait begins at
@@ -275,10 +275,10 @@ decides it: it reads the root's Dispatch event log after the root's cursor (`cau
 its last handout) and applies every ask, review and version event through the live handlers, with
 the root held out of admission's decision until its whole window is applied, then decides it once
 and moves the cursor to the sequence it read through. A root recorded before the cursor existed has
-none: its first boot on this release replays nothing and only sets the cursor. A gate that names no
-approval request (one an earlier release registered) is bound at boot to the request Dispatch shows
-open, and when that request waits on the person the boot declares the hand-back as a registration
-would, so a root already waiting on its approval at the deploy returns its slot. A root Dispatch
+none: its first boot on this release replays nothing and only sets the cursor. A gate whose document
+has no approval request in the mirror (one an earlier release registered before the mirror
+existed) has the request Dispatch shows open on that document mirrored at boot, and when that
+request waits on the person the boot declares the hand-back as a registration would, so a root already waiting on its approval at the deploy returns its slot. A root Dispatch
 keeps refusing is released after a bounded number of reads and decided on the record as it stands.
 A wait on the gate is answered by the person's approval or changes request of the version it waits
 on or a later one, and by a newer spec version whoever wrote it once Dispatch shows the approval
@@ -290,8 +290,8 @@ carries, when Dispatch recorded it after the wait began.
 A root waits on a person, not on one ask: a person's act recorded after the wait began on any ask
 of the root — an answer, a resolution, or a reply that hands an open ask to the agent — answers
 it, whichever ask the wait names, since the architect is the tree's only agent while it waits and
-may have superseded the question it asked. A person's answer of the approval request the gate
-names is a review, and answers through that review's own `artifact.*` event. A person's review of
+may have superseded the question it asked. A person's answer of an approval request of the gate's
+document is a review, and answers through that review's own `artifact.*` event. A person's review of
 the root's spec (an approval or a changes request, applied through the root's design gate) answers
 it too. A close of an item of the wait — a tree question, or the closed gate's approval request —
 by anyone who is not a person — Dispatch's settlement retracting it once its decision block has
@@ -303,10 +303,12 @@ handed the turn back, answer nothing. An answered root goes to the front of the 
 ahead of every root that never ran, oldest answer first, and the next free slot resumes the same
 architect session with a task naming what answered it, how the spec stands, what is still with
 the person and what waits on the architect. Its tree stays live while it waits, so its children
-do not become orphans. Taking the `legion` label off a waiting root, or a person or a session
-outside the tree claiming it, takes it out of the workflow with an `unslotted` notice; it is never
-resumed under another owner. A session outside the tree writing a lifecycle status on a waiting
-root is set back, as on a root holding its slot, and its architect is told when it resumes. A root
+do not become orphans; no child of it starts while it waits, even once a person's approval opened
+its design gate, and they start with its resume. Taking the `legion` label off a waiting root, or
+a person or a session outside the tree claiming it, takes it out of the workflow with an
+`unslotted` notice; it is never resumed under another owner. A session outside the tree writing a
+lifecycle status on a waiting root is set back, as on a root holding its slot, and its architect
+is told when it resumes. A root
 whose Dispatch claim a person or outside session already holds keeps its slot at `admitted` while
 its architect asks that holder to release it, and so does an admitted root whose label was taken
 off, since only a labelled root is resumed.

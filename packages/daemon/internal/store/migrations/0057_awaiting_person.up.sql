@@ -27,11 +27,12 @@
 -- person only once it declared (the workflow's ReconcileAwaiting).
 --
 -- Every issue recorded before this migration takes handout_seq from the highest sequence the
--- record already holds of it: its last Dispatch observation, the claim its Dispatch mirror row
--- shows, its mirrored asks and its design gate's review marks. So no event the daemon applied
--- before this release, and no event of the same work redelivered after it, declares a hand-back:
--- a root admitted at the deploy waits on a person only after its architect hands something back
--- again.
+-- record already holds of it: its last Dispatch observation, the claim the claims mirror shows
+-- (dispatch_claims), every fence and person's act of its mirrored asks (seq, waiting_on_seq,
+-- closed_seq, person_seq, person_answer_seq: a row only a turn reached has seq 0) and its design
+-- gate's review marks. So no event the daemon applied before this release, and no event of the
+-- same work redelivered after it, declares a hand-back: a root admitted at the deploy waits on a
+-- person only after its architect hands something back again.
 --
 -- A daemon of an earlier release cannot run on this schema while a root is in awaiting_person: it
 -- does not know the phase, and a write of such a row that leaves the phase without clearing the
@@ -64,6 +65,7 @@ alter table issues add column handout_seq bigint not null default 0 check (hando
 alter table issues add column declared_seq bigint check (declared_seq > 0);
 
 update issues i set handout_seq = greatest(i.last_dispatch_seq,
-  coalesce((select d.claim_seq from dispatch_issues d where d.key = i.key), 0),
-  coalesce((select max(a.seq) from root_asks a where a.issue = i.key), 0),
+  coalesce((select c.claim_seq from dispatch_claims c where c.key = i.key), 0),
+  coalesce((select max(greatest(a.seq, a.waiting_on_seq, a.closed_seq, a.person_seq, a.person_answer_seq))
+    from root_asks a where a.issue = i.key), 0),
   coalesce((select greatest(coalesce(g.approved_seq, 0), coalesce(g.told_changes_seq, 0)) from design_gates g where g.issue = i.key), 0));

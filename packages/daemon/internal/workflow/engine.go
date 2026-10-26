@@ -119,6 +119,8 @@ func (e *Engine) Apply(ctx context.Context, tx pgx.Tx, fact intake.Fact) (intake
 		return e.dispatchAskClosed(ctx, tx, fact)
 	case intake.DispatchAskReply:
 		return e.dispatchAskReply(ctx, tx, fact)
+	case intake.DispatchApprovalMoved:
+		return e.dispatchApprovalMoved(ctx, tx, fact)
 	case intake.DispatchAskRestored:
 		return e.dispatchAskRestored(ctx, tx, fact)
 	case intake.HandoffComplete:
@@ -1029,9 +1031,10 @@ func (e *Engine) StartUnblockedChildren(ctx context.Context, tx pgx.Tx, issues [
 }
 
 // treeStartsChildren says whether tree starts a child of its own now: its root is recorded, not
-// waiting on a person (a root answered while its approval opened its gate starts its children with
-// its resume, advanceAdmittedTree, once it has its slot again), the tree is live, and its design
-// gate is open — the conditions enterChild and advanceAdmittedTree between them stand for.
+// waiting on a person (a root whose wait a person's approval answered, opening its gate, starts its
+// children with its resume, advanceAdmittedTree, once it has its slot again), the tree is live, and
+// its design gate is open — the conditions enterChild and advanceAdmittedTree between them stand
+// for.
 func (e *Engine) treeStartsChildren(ctx context.Context, tx pgx.Tx, tree string) (bool, error) {
 	root, err := e.store.Issue(ctx, tx, tree)
 	if err != nil || root == nil || root.AwaitingPerson() {

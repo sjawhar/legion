@@ -194,7 +194,7 @@ func answeredBy(ask string, seq int64) intake.DispatchAskClosed {
 
 // requestHandedBack is the architect's hand-back of the approval request ask-approval at seq.
 func requestHandedBack(seq int64) intake.DispatchAskReply {
-	return intake.DispatchAskReply{Key: "LEGION-100", Ask: "ask-approval", Kind: "approval", WaitingOn: "human", Actor: architect, Mark: seqMark(seq)}
+	return intake.DispatchAskReply{Key: "LEGION-100", Ask: "ask-approval", Kind: "approval", Artifact: "artifact-root", WaitingOn: "human", Actor: architect, Mark: seqMark(seq)}
 }
 
 // nextFinished frees LEGION-NEXT's slot, so an answered LEGION-100 takes it and resumes.
@@ -265,14 +265,13 @@ func awaitingRoot(t *testing.T, pool *pgxpool.Pool, waiting record.Awaiting) {
 	}
 }
 
-// seedGate records gate. A gate the tests seed was registered with the approval request ask-approval
-// open on its document, unless it names another request.
+// seedRequestedGate records gate, and the approval request ask-approval of its document as the
+// mirror knows it from the request's own events: an approval ask of that document, its state left
+// to the facts each test applies.
 func seedRequestedGate(t *testing.T, pool *pgxpool.Pool, gate record.DesignGate) {
 	t.Helper()
-	if gate.RequestAsk == "" {
-		gate.RequestAsk = "ask-approval"
-	}
 	seedGate(t, pool, gate)
+	mirrorAsk(t, pool, record.RootAsk{Issue: gate.Issue, Ask: "ask-approval", Kind: record.AskApproval, Artifact: gate.ArtifactID})
 }
 
 // handBackOnAClosedGate leaves LEGION-100 waiting on its gate at version 4, its slot taken by
@@ -1533,7 +1532,7 @@ func TestAPersonsReplyOnTheRootWakesARootWaitingOnItsGate(t *testing.T) {
 		{name: "a session's progress note", fact: intake.DispatchAskReply{Key: "LEGION-100", Ask: "ask-approval", WaitingOn: "agent", Actor: outsider}},
 		{name: "the architect's own reply", fact: intake.DispatchAskReply{Key: "LEGION-100", Ask: "ask-approval", WaitingOn: "human", Actor: architect}},
 		{name: "a person's hand-back", fact: intake.DispatchAskReply{Key: "LEGION-100", Ask: "ask-approval", WaitingOn: "human", Actor: alice}},
-		{name: "a person's review", fact: intake.DispatchAskClosed{Key: "LEGION-100", Ask: "ask-approval", Kind: "approval", State: "answered", Actor: alice}},
+		{name: "a person's review", fact: intake.DispatchAskClosed{Key: "LEGION-100", Ask: "ask-approval", Kind: "approval", Artifact: "artifact-root", State: "answered", Actor: alice, Mark: seqMark(9)}},
 		{name: "a session's resolution of a question", fact: intake.DispatchAskClosed{Key: "LEGION-100", Ask: "ask-question", Kind: "question", State: "resolved", Actor: architect}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1580,7 +1579,7 @@ func TestAnArchitectsHandBackReturnsTheSlotToWaitOnThePerson(t *testing.T) {
 			seedSlotted(t, pool, "LEGION-100", "A")
 			seedWaiting(t, pool, "LEGION-NEXT", "B")
 			seedArchitectSession(t, pool, "LEGION-100", architect.ID)
-			mirrorAsk(t, pool, record.RootAsk{Issue: "LEGION-100", Ask: "ask-question", Kind: "question", Open: true, WaitingOn: "agent", Seq: 4, ByTree: true, PersonSeq: 4})
+			mirrorAsk(t, pool, record.RootAsk{Issue: "LEGION-100", Ask: "ask-question", Kind: "question", Open: true, WaitingOn: "agent", WaitingOnSeq: 4, Seq: 4, ByTree: true, PersonSeq: 4})
 			if tc.gate != nil {
 				seedRequestedGate(t, pool, *tc.gate)
 			}

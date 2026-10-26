@@ -167,13 +167,15 @@ func (GateAboveDispatch) isFact() {}
 
 // DispatchAskOpened is an ask a session or a person opened on an issue, with its kind (Kind:
 // record.AskQuestion, record.AskApproval, or "" for a kind this daemon does not know, such as an
-// event retained from before Dispatch had the two), the session that opened it (AuthorSession, ""
-// for a person), and its event's place in the issue's Dispatch event log (Mark). On a root it
-// opens the ask's mirror row (record.RootAsk).
+// event retained from before Dispatch had the two), the document an approval request asks a person
+// to approve (Artifact, "" for a question; every ask.* event of an approval ask carries it), the
+// session that opened it (AuthorSession, "" for a person), and its event's place in the issue's
+// Dispatch event log (Mark). On a root it opens the ask's mirror row (record.RootAsk).
 type DispatchAskOpened struct {
 	Key           string
 	Ask           string
 	Kind          string
+	Artifact      string
 	AuthorSession string
 	Mark          record.EventMark
 }
@@ -184,44 +186,60 @@ func (DispatchAskOpened) isFact() {}
 // opened again (Open), or closed again with the answer given before the retraction. Nobody acted,
 // so it moves the ask's mirror row alone and is never a person's act.
 type DispatchAskRestored struct {
-	Key  string
-	Ask  string
-	Kind string
-	Open bool
-	Mark record.EventMark
+	Key      string
+	Ask      string
+	Kind     string
+	Artifact string
+	Open     bool
+	Mark     record.EventMark
 }
 
 func (DispatchAskRestored) isFact() {}
 
-// DispatchAskClosed is an answered or resolved ask (State `answered` or `resolved`), its kind as
-// DispatchAskOpened names one, the actor who closed it, and where Dispatch recorded that act
-// (Mark).
+// DispatchAskClosed is an answered or resolved ask (State `answered` or `resolved`), its kind and
+// document as DispatchAskOpened names them, the actor who closed it, and where Dispatch recorded
+// that act (Mark).
 type DispatchAskClosed struct {
-	Key   string
-	Ask   string
-	Kind  string
-	State string
-	Actor dispatch.Actor
-	Mark  record.EventMark
+	Key      string
+	Ask      string
+	Kind     string
+	Artifact string
+	State    string
+	Actor    dispatch.Actor
+	Mark     record.EventMark
 }
 
 func (DispatchAskClosed) isFact() {}
 
 // DispatchAskReply is a comment on an ask (comment.created, or comment.answered for a reply sent
 // through a delivery's callback), or Dispatch's ask.handed_back of an approval request (Kind
-// record.AskApproval; a comment names no kind), with whose turn it leaves the ask on (WaitingOn:
-// `agent` or `human` on an open ask, a hand-back `human`, and "" on a closed one), the actor who
-// made it, and its event's place in the issue's Dispatch event log (Mark).
+// record.AskApproval and its Artifact; a comment names neither), with whose turn it leaves the ask
+// on (WaitingOn: `agent` or `human` on an open ask, a hand-back `human`, and "" on a closed one),
+// the actor who made it, and its event's place in the issue's Dispatch event log (Mark).
 type DispatchAskReply struct {
 	Key       string
 	Ask       string
 	Kind      string
+	Artifact  string
 	WaitingOn string
 	Actor     dispatch.Actor
 	Mark      record.EventMark
 }
 
 func (DispatchAskReply) isFact() {}
+
+// DispatchApprovalMoved is an approval request of Artifact that a version of its document moved
+// past the version its agent last handed to the person (Dispatch's ask.edited of an approval ask
+// whose requested_version is below its version), at Mark: Dispatch shows such a request waiting on
+// its agent until the agent hands it back. Nobody replied, so it is never a person's act.
+type DispatchApprovalMoved struct {
+	Key      string
+	Ask      string
+	Artifact string
+	Mark     record.EventMark
+}
+
+func (DispatchApprovalMoved) isFact() {}
 
 // DispatchClaim is the holder Dispatch records for an issue at Seq, from its issue.claimed or
 // issue.released event: ClaimedBy is `<kind>:<id>`, or "" when the release cleared the claim.
@@ -673,13 +691,13 @@ type TaskConfirmed struct {
 func (TaskConfirmed) isFact() {}
 
 // GateRequestFound is the boot catch-up's read of the approval request Dispatch shows open on a
-// root's registered spec document (dispatch.Approval.AskID), for a gate that names none: a gate a
-// daemon of an earlier release registered, before gates named their request, or one whose
-// registration found none open. Since is the issue's Dispatch sequence read before the approval,
-// and WaitsOnAgent says the request waited on the agent. The workflow binds the gate to the
-// request and writes its mirror row as the read found it, at Since; when the gate is closed and
-// the request waits on the person, that is the architect's hand-back of the spec, declared as a
-// registration declares it.
+// root's registered spec document (dispatch.Approval.AskID), for a gate whose document the asks'
+// mirror holds no approval request of: a gate a daemon of an earlier release registered before the
+// mirror existed, or one whose request the daemon never saw an event of. Since is the issue's
+// Dispatch sequence read before the approval, and WaitsOnAgent says the request waited on the
+// agent. The workflow writes the request's mirror row as the read found it, at Since, when it holds
+// none; when the gate is closed and armed and the request waits on the person, that is the
+// architect's hand-back of the spec, declared as a registration declares it.
 type GateRequestFound struct {
 	Issue        string
 	Generation   uint64

@@ -331,7 +331,7 @@ func TestCatchUpSkipsARootDispatchKeepsRefusing(t *testing.T) {
 // state, and a person's reply handing the open approval request to the agent. Every one is read
 // from the root's event log, with its own sequence.
 func TestCatchUpAwaitingAppliesAPersonsAnswerMissedAtBoot(t *testing.T) {
-	gate := &record.DesignGate{ArtifactID: "artifact-root", LatestVersion: 3, RequestAsk: "ask-approval"}
+	gate := &record.DesignGate{ArtifactID: "artifact-root", LatestVersion: 3}
 	for _, tc := range []struct {
 		name     string
 		awaiting record.Awaiting
@@ -343,9 +343,9 @@ func TestCatchUpAwaitingAppliesAPersonsAnswerMissedAtBoot(t *testing.T) {
 			events: []json.RawMessage{specChanges(9, 3, "name the rollback path")}},
 		{name: "a newer version, whoever wrote it", awaiting: record.Awaiting{GateVersion: 3, Artifact: "artifact-root"}, events: []json.RawMessage{specVersion(9, 4)}},
 		{name: "a newer version a registration recorded on the gate", awaiting: record.Awaiting{GateVersion: 3, Artifact: "artifact-root"},
-			gate: &record.DesignGate{ArtifactID: "artifact-root", LatestVersion: 4, RequestAsk: "ask-approval"}, events: []json.RawMessage{specVersion(9, 4)}},
+			gate: &record.DesignGate{ArtifactID: "artifact-root", LatestVersion: 4}, events: []json.RawMessage{specVersion(9, 4)}},
 		{name: "a second changes request at the version an earlier one answered", awaiting: record.Awaiting{GateVersion: 3, Artifact: "artifact-root"},
-			gate: &record.DesignGate{ArtifactID: "artifact-root", LatestVersion: 3, RequestAsk: "ask-approval", ToldChangesVersion: new(3),
+			gate: &record.DesignGate{ArtifactID: "artifact-root", LatestVersion: 3, ToldChangesVersion: new(3),
 				ToldChangesReason: "name the rollback path", ToldChangesMark: record.EventMark{Seq: 5}},
 			events: []json.RawMessage{specChanges(9, 3, "and name who runs the restore")}},
 		{name: "a person's reply on the approval request", awaiting: record.Awaiting{GateVersion: 3, Artifact: "artifact-root"},
@@ -379,7 +379,7 @@ func TestCatchUpAwaitingAppliesAPersonsAnswerMissedAtBoot(t *testing.T) {
 // request that answered an earlier wait, and an act Dispatch recorded before the wait began. The
 // log is read once, from the root's last handout, which takes in the wait's start.
 func TestCatchUpAwaitingLeavesARootNoPersonAnswered(t *testing.T) {
-	gate := &record.DesignGate{ArtifactID: "artifact-root", LatestVersion: 3, RequestAsk: "ask-approval"}
+	gate := &record.DesignGate{ArtifactID: "artifact-root", LatestVersion: 3}
 	for _, tc := range []struct {
 		name     string
 		awaiting record.Awaiting
@@ -397,7 +397,7 @@ func TestCatchUpAwaitingLeavesARootNoPersonAnswered(t *testing.T) {
 		{name: "a version the architect wrote before it handed the request back", awaiting: record.Awaiting{GateVersion: 3, Artifact: "artifact-root", Since: record.EventMark{Seq: 10}},
 			events: []json.RawMessage{specVersion(9, 4), askReplied(10, "ask-approval", "human", architectSession)}},
 		{name: "the changes request that answered an earlier wait", awaiting: record.Awaiting{GateVersion: 3, Artifact: "artifact-root", Since: record.EventMark{Seq: 8}},
-			gate: &record.DesignGate{ArtifactID: "artifact-root", LatestVersion: 3, RequestAsk: "ask-approval", ToldChangesVersion: new(3),
+			gate: &record.DesignGate{ArtifactID: "artifact-root", LatestVersion: 3, ToldChangesVersion: new(3),
 				ToldChangesReason: "name the rollback path", ToldChangesMark: record.EventMark{Seq: 7}},
 			events: []json.RawMessage{specChanges(7, 3, "name the rollback path")}},
 		{name: "a changes request recorded before the wait began", awaiting: record.Awaiting{GateVersion: 3, Artifact: "artifact-root", Since: record.EventMark{Seq: 10}},
@@ -528,7 +528,7 @@ func TestCatchUpAwaitingRecoversSuccessiveReviewsAtOneVersion(t *testing.T) {
 				if err := records.SetCaughtUp(ctx, tx, root.Key, seq); err != nil {
 					return err
 				}
-				return records.PutGate(ctx, tx, record.DesignGate{Issue: root.Key, ArtifactID: "artifact-root", LatestVersion: 4, RequestAsk: "ask-approval"})
+				return records.PutGate(ctx, tx, record.DesignGate{Issue: root.Key, ArtifactID: "artifact-root", LatestVersion: 4})
 			})
 			// waitAgain stands for the root's resume and its architect's hand-back, an event after
 			// the review that answered the previous wait: a fresh, unanswered wait on the same
@@ -575,7 +575,7 @@ func TestCatchUpAwaitingRecoversSuccessiveReviewsAtOneVersion(t *testing.T) {
 // so a person who resolves the approval request, or answers another ask of the root, while the
 // daemon is down has answered the wait as surely as a review would have.
 func TestCatchUpAnswersWithAPersonsActOnAnyAskOfTheRoot(t *testing.T) {
-	gate := &record.DesignGate{ArtifactID: "artifact-root", LatestVersion: 3, RequestAsk: "ask-approval"}
+	gate := &record.DesignGate{ArtifactID: "artifact-root", LatestVersion: 3}
 	for _, tc := range []struct {
 		name   string
 		events []json.RawMessage
@@ -603,7 +603,7 @@ func TestCatchUpAppliesTheApprovalOfANewerVersion(t *testing.T) {
 		if err := records.PutIssue(ctx, tx, captureRoot(phase.AwaitingPerson, &record.Awaiting{GateVersion: 3, Artifact: "artifact-root", Since: record.EventMark{Seq: 10}})); err != nil {
 			return err
 		}
-		return records.PutGate(ctx, tx, record.DesignGate{Issue: "CAPTURE-100", ArtifactID: "artifact-root", LatestVersion: 3, RequestAsk: "ask-approval"})
+		return records.PutGate(ctx, tx, record.DesignGate{Issue: "CAPTURE-100", ArtifactID: "artifact-root", LatestVersion: 3})
 	})
 	if err := bootCatchUp(t, w); err != nil {
 		t.Fatalf("catch up the awaiting root: %v", err)
@@ -831,9 +831,9 @@ func TestAnOutageWindowIsDecidedOnceAfterItsCatchUp(t *testing.T) {
 }
 
 // A root already waiting on its gate's approval at the deploy returns its slot at the first boot:
-// its gate, registered by a daemon of the earlier release, names no approval request, so the boot
-// binds it to the request Dispatch shows open and, with that request on the person's turn, declares
-// the hand-back as a registration would. A request Dispatch shows on the agent's turn hands nothing
+// its gate was registered by a daemon of the earlier release, so the asks' mirror holds no request
+// of its document; the boot mirrors the request Dispatch shows open and, with that request on the
+// person's turn, declares the hand-back as a registration would. A request Dispatch shows on the agent's turn hands nothing
 // back, and the root keeps its slot.
 func TestARootWaitingOnItsGateAtDeployReturnsItsSlot(t *testing.T) {
 	for _, tc := range []struct {
@@ -852,14 +852,14 @@ func TestARootWaitingOnItsGateAtDeployReturnsItsSlot(t *testing.T) {
 			if err := bootCatchUp(t, w); err != nil {
 				t.Fatalf("catch up: %v", err)
 			}
-			var gate *record.DesignGate
+			var request *record.RootAsk
 			seedCatchUp(t, pool, func(ctx context.Context, tx pgx.Tx, records *record.Postgres) error {
 				var err error
-				gate, err = records.Gate(ctx, tx, "CAPTURE-100")
+				request, err = records.RootAsk(ctx, tx, "CAPTURE-100", "ask-approval")
 				return err
 			})
-			if gate == nil || gate.RequestAsk != "ask-approval" {
-				t.Fatalf("gate after the catch-up = %#v, want it bound to ask-approval", gate)
+			if request == nil || !request.GateRequestOf("artifact-root") || !request.Open || request.WaitingOn != tc.waitingOn || request.Seq != 9 {
+				t.Fatalf("request after the catch-up = %#v, want ask-approval of artifact-root mirrored open on the %s's turn at 9", request, tc.waitingOn)
 			}
 			if !tc.waits {
 				assertCaptureKeptItsSlot(t, pool)
@@ -952,7 +952,7 @@ func TestAGateSeedAnswersAGateWaitOnlyWhenTheRequestIsWithTheAgent(t *testing.T)
 		if err := records.PutIssue(ctx, tx, captureRoot(phase.AwaitingPerson, &record.Awaiting{GateVersion: 4, Artifact: "artifact-root", Since: record.EventMark{Seq: 10}})); err != nil {
 			return err
 		}
-		return records.PutGate(ctx, tx, record.DesignGate{Issue: "CAPTURE-100", ArtifactID: "artifact-root", LatestVersion: 4, RequestAsk: "ask-approval"})
+		return records.PutGate(ctx, tx, record.DesignGate{Issue: "CAPTURE-100", ArtifactID: "artifact-root", LatestVersion: 4})
 	})
 	runner := &outbox{pool: pool, dispatch: client, handlers: w.handlers}
 	seed := func() {

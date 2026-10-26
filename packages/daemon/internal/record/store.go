@@ -663,7 +663,7 @@ func scannedMark(seq *int64, at *time.Time) EventMark {
 	return mark
 }
 
-const gateColumns = `issue, artifact_id, latest_version, approved_version, approved_seq, approved_at, told_changes_version, told_changes_reason, told_changes_seq, told_changes_at, coalesce(request_ask, '')`
+const gateColumns = `issue, artifact_id, latest_version, approved_version, approved_seq, approved_at, told_changes_version, told_changes_reason, told_changes_seq, told_changes_at`
 
 // scanGate reads a gate row in the shape PutGate writes: an approval's mark only with the approval,
 // a told changes request's reason and mark only with its version. An older daemon, which knows none
@@ -674,7 +674,7 @@ func scanGate(row scanner) (DesignGate, error) {
 	var approvedSeq, toldSeq *int64
 	var approvedAt, toldAt *time.Time
 	if err := row.Scan(&gate.Issue, &gate.ArtifactID, &gate.LatestVersion, &gate.ApprovedVersion, &approvedSeq, &approvedAt,
-		&gate.ToldChangesVersion, &gate.ToldChangesReason, &toldSeq, &toldAt, &gate.RequestAsk); err != nil {
+		&gate.ToldChangesVersion, &gate.ToldChangesReason, &toldSeq, &toldAt); err != nil {
 		return DesignGate{}, err
 	}
 	if gate.ApprovedVersion != nil {
@@ -732,26 +732,28 @@ func (s *Postgres) PutGate(ctx context.Context, tx pgx.Tx, gate DesignGate) erro
 		toldSeq, toldAt, toldReason = nil, nil, ""
 	}
 	_, err := tx.Exec(ctx, `insert into design_gates (issue, artifact_id, latest_version, approved_version, approved_seq, approved_at,
-		told_changes_version, told_changes_reason, told_changes_seq, told_changes_at, request_ask)
-		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+		told_changes_version, told_changes_reason, told_changes_seq, told_changes_at)
+		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 		on conflict (issue) do update set artifact_id = excluded.artifact_id,
 		latest_version = excluded.latest_version, approved_version = excluded.approved_version,
 		approved_seq = excluded.approved_seq, approved_at = excluded.approved_at,
 		told_changes_version = excluded.told_changes_version, told_changes_reason = excluded.told_changes_reason,
-		told_changes_seq = excluded.told_changes_seq, told_changes_at = excluded.told_changes_at, request_ask = excluded.request_ask`,
+		told_changes_seq = excluded.told_changes_seq, told_changes_at = excluded.told_changes_at`,
 		gate.Issue, gate.ArtifactID, gate.LatestVersion, gate.ApprovedVersion, approvedSeq, approvedAt,
-		gate.ToldChangesVersion, toldReason, toldSeq, toldAt, nullableText(gate.RequestAsk))
+		gate.ToldChangesVersion, toldReason, toldSeq, toldAt)
 	if err != nil {
 		return fmt.Errorf("put design gate for %s: %w", gate.Issue, err)
 	}
 	return nil
 }
 
-const rootAskColumns = `issue, ask, coalesce(kind, ''), open, coalesce(waiting_on, ''), seq, by_tree, person_seq, closed_seq, coalesce(closed_by, '')`
+const rootAskColumns = `issue, ask, coalesce(kind, ''), coalesce(artifact, ''), open, seq, coalesce(waiting_on, ''), waiting_on_seq,
+	coalesce(closed_by, ''), closed_seq, by_tree, person_seq, person_answer_seq`
 
 func scanRootAsk(row scanner) (RootAsk, error) {
 	var ask RootAsk
-	err := row.Scan(&ask.Issue, &ask.Ask, &ask.Kind, &ask.Open, &ask.WaitingOn, &ask.Seq, &ask.ByTree, &ask.PersonSeq, &ask.ClosedSeq, &ask.ClosedBy)
+	err := row.Scan(&ask.Issue, &ask.Ask, &ask.Kind, &ask.Artifact, &ask.Open, &ask.Seq, &ask.WaitingOn, &ask.WaitingOnSeq, &ask.ClosedBy,
+		&ask.ClosedSeq, &ask.ByTree, &ask.PersonSeq, &ask.PersonAnswerSeq)
 	return ask, err
 }
 
@@ -767,14 +769,18 @@ func (s *Postgres) RootAsk(ctx context.Context, tx pgx.Tx, issue, ask string) (*
 }
 
 func (s *Postgres) PutRootAsk(ctx context.Context, tx pgx.Tx, ask RootAsk) error {
-	if _, err := tx.Exec(ctx, `insert into root_asks (issue, ask, kind, open, waiting_on, seq, by_tree, person_seq, closed_seq, closed_by)
-		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-		on conflict (issue, ask) do update set kind = excluded.kind, open = excluded.open, waiting_on = excluded.waiting_on,
-		seq = excluded.seq, by_tree = excluded.by_tree, person_seq = excluded.person_seq, closed_seq = excluded.closed_seq,
-		closed_by = excluded.closed_by
-		where root_asks.seq <= excluded.seq`,
-		ask.Issue, ask.Ask, nullableText(ask.Kind), ask.Open, nullableText(ask.WaitingOn), ask.Seq, ask.ByTree, ask.PersonSeq,
-		ask.ClosedSeq, nullableText(ask.ClosedBy)); err != nil {
+	if _, err := tx.Exec(ctx, `insert into root_asks (issue, ask, kind, artifact, open, seq, waiting_on, waiting_on_seq, closed_by, closed_seq,
+		by_tree, person_seq, person_answer_seq)
+		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+		on conflict (issue, ask) do update set kind = excluded.kind, artifact = excluded.artifact, open = excluded.open, seq = excluded.seq,
+		waiting_on = excluded.waiting_on, waiting_on_seq = excluded.waiting_on_seq, closed_by = excluded.closed_by,
+		closed_seq = excluded.closed_seq, by_tree = excluded.by_tree,
+		person_seq = excluded.person_seq, person_answer_seq = excluded.person_answer_seq
+		where root_asks.seq <= excluded.seq and root_asks.waiting_on_seq <= excluded.waiting_on_seq
+		and root_asks.closed_seq <= excluded.closed_seq and root_asks.person_seq <= excluded.person_seq
+		and root_asks.person_answer_seq <= excluded.person_answer_seq`,
+		ask.Issue, ask.Ask, nullableText(ask.Kind), nullableText(ask.Artifact), ask.Open, ask.Seq, nullableText(ask.WaitingOn), ask.WaitingOnSeq,
+		nullableText(ask.ClosedBy), ask.ClosedSeq, ask.ByTree, ask.PersonSeq, ask.PersonAnswerSeq); err != nil {
 		return fmt.Errorf("put ask %s of %s: %w", ask.Ask, ask.Issue, err)
 	}
 	return nil
@@ -806,8 +812,8 @@ func (s *Postgres) RootAsks(ctx context.Context, tx pgx.Tx, issues []string) (ma
 func (s *Postgres) StartHandout(ctx context.Context, tx pgx.Tx, issue string) error {
 	if _, err := tx.Exec(ctx, `update issues i set declared_seq = null, handout_seq = greatest(i.handout_seq, i.last_dispatch_seq,
 		coalesce(i.awaiting_since_seq, 0),
-		coalesce((select d.claim_seq from dispatch_issues d where d.key = i.key), 0),
-		coalesce((select max(a.seq) from root_asks a where a.issue = i.key), 0),
+		coalesce((select c.claim_seq from dispatch_claims c where c.key = i.key), 0),
+		coalesce((select max(greatest(a.seq, a.waiting_on_seq, a.closed_seq, a.person_seq, a.person_answer_seq)) from root_asks a where a.issue = i.key), 0),
 		coalesce((select greatest(coalesce(g.approved_seq, 0), coalesce(g.told_changes_seq, 0)) from design_gates g where g.issue = i.key), 0))
 		where i.key = $1`, issue); err != nil {
 		return fmt.Errorf("start a handout to %s: %w", issue, err)

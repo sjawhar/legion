@@ -59,7 +59,7 @@ func seedHandBack(t *testing.T, pool *pgxpool.Pool, issue, ask string, seq int64
 	inTx(t, pool, func(tx pgx.Tx) {
 		records := record.NewStore()
 		if err := records.PutRootAsk(context.Background(), tx, record.RootAsk{Issue: issue, Ask: ask, Kind: record.AskQuestion,
-			Open: true, WaitingOn: "human", ByTree: true, Seq: seq}); err != nil {
+			Open: true, Seq: seq, WaitingOn: "human", WaitingOnSeq: seq, ByTree: true}); err != nil {
 			t.Fatalf("record the question of %s: %v", issue, err)
 		}
 		if err := records.Declare(context.Background(), tx, issue, seq); err != nil {
@@ -217,7 +217,8 @@ func TestAnAnsweredHandBackDoesNotStartTheNextWait(t *testing.T) {
 			inTx(t, pool, func(tx pgx.Tx) {
 				records := record.NewStore()
 				if err := records.PutRootAsk(context.Background(), tx, record.RootAsk{Issue: "LEGION-208", Ask: "ask-q1",
-					Kind: record.AskQuestion, Open: false, ByTree: true, Seq: 7, PersonSeq: 7, ClosedSeq: 7, ClosedBy: record.ClosedByPerson}); err != nil {
+					Kind: record.AskQuestion, Open: false, Seq: 7, WaitingOn: "human", WaitingOnSeq: 5, ClosedBy: record.ClosedByPerson, ClosedSeq: 7,
+					ByTree: true, PersonAnswerSeq: 7}); err != nil {
 					t.Fatalf("record the answered question: %v", err)
 				}
 			})
@@ -243,6 +244,44 @@ func TestAnAnsweredHandBackDoesNotStartTheNextWait(t *testing.T) {
 				t.Fatalf("the wait begins at %d, want the newest hand-back 9", root.Awaiting.Since.Seq)
 			}
 		})
+	}
+}
+
+// A hand-back nothing of which is still with the person is taken in on the pass that sees it: the
+// running architect already has the person's answer, so when the question later returns to the
+// person by no hand-back of the architect's (Dispatch's settlement restoring it), no wait starts
+// from the old hand-back and the architect is not resumed with an answer it already read.
+func TestAHandBackNoLongerWithThePersonIsTakenIn(t *testing.T) {
+	pool := migratedPool(t)
+	seedSlotted(t, pool, "LEGION-208", "U")
+	seedArchitectClaim(t, pool, "LEGION-208", true)
+	seedHandBack(t, pool, "LEGION-208", "ask-q", 5)
+	answered := record.RootAsk{Issue: "LEGION-208", Ask: "ask-q", Kind: record.AskQuestion, Open: false, Seq: 7, WaitingOn: "human",
+		WaitingOnSeq: 5, ClosedBy: record.ClosedByPerson, ClosedSeq: 7, ByTree: true, PersonAnswerSeq: 7}
+	putAsk := func(ask record.RootAsk) {
+		t.Helper()
+		inTx(t, pool, func(tx pgx.Tx) {
+			if err := record.NewStore().PutRootAsk(context.Background(), tx, ask); err != nil {
+				t.Fatalf("record ask-q: %v", err)
+			}
+		})
+	}
+	putAsk(answered)
+	admission := newAdmission(t, 1, nil)
+	tick(t, pool, admission, "tick-answered")
+	if root := issue(t, pool, "LEGION-208"); root.Phase != phase.Admitted || root.DeclaredSeq != 0 {
+		t.Fatalf("root = %+v, want it admitted with its answered hand-back taken in", root)
+	}
+
+	restored := answered
+	restored.Open, restored.Seq = true, 9
+	putAsk(restored)
+	tick(t, pool, admission, "tick-restored")
+	if root := issue(t, pool, "LEGION-208"); root.Phase != phase.Admitted || root.Awaiting != nil {
+		t.Fatalf("root = %+v (awaiting %+v), want it admitted, waiting on nothing", root, root.Awaiting)
+	}
+	if requests := superviseRequests(t, pool, "LEGION-208"); len(requests) != 0 {
+		t.Fatalf("supervise requests = %+v, want the architect neither suspended nor resumed", requests)
 	}
 }
 

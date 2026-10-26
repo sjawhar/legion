@@ -375,7 +375,7 @@ func run(ctx context.Context, cfg config.Config, build Build, log *slog.Logger, 
 		// The catch-up of the roots that run or wait on a person is its own probe, after the
 		// reconcile that held them (holdForCatchUp). It reads Dispatch once or twice per root (the
 		// issue's latest sequence, its event log after the root's cursor, and the approval of a
-		// gate that names no request), so it bounds each root by bootTimeout itself and keeps across
+		// gate whose document the asks' mirror holds no request of), so it bounds each root by bootTimeout itself and keeps across
 		// retries the roots it finished (catchUpAwaiting); its attempt's own bound only stops a
 		// catch-up that would never end. The durable consumers start only after it, so no live
 		// fact meets a root still held.

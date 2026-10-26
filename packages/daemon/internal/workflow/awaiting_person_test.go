@@ -8,6 +8,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
@@ -27,7 +28,7 @@ func seedQuestion(t *testing.T, pool *pgxpool.Pool, ask string, seq int64) {
 	t.Helper()
 	seedRecord(t, pool, func(tx pgx.Tx) error {
 		return record.NewStore().PutRootAsk(context.Background(), tx, record.RootAsk{
-			Issue: "LEGION-208", Ask: ask, Kind: record.AskQuestion, Open: true, WaitingOn: "human", ByTree: true, Seq: seq})
+			Issue: "LEGION-208", Ask: ask, Kind: record.AskQuestion, Open: true, Seq: seq, WaitingOn: "human", WaitingOnSeq: seq, ByTree: true})
 	})
 }
 
@@ -108,16 +109,18 @@ func TestAReplyOnAnAskTheRootCannotWaitOnDeclaresNothing(t *testing.T) {
 		want int64
 	}{
 		{"a question of the root's own tree", record.RootAsk{Issue: "LEGION-208", Ask: "ask-q", Kind: record.AskQuestion,
-			Open: true, WaitingOn: "agent", ByTree: true, Seq: 4}, nil, 6},
+			Open: true, WaitingOn: "agent", WaitingOnSeq: 4, ByTree: true, Seq: 4}, nil, 6},
 		{"a question the root's tree did not open", record.RootAsk{Issue: "LEGION-208", Ask: "ask-q", Kind: record.AskQuestion,
-			Open: true, WaitingOn: "agent", Seq: 4}, nil, 0},
-		{"an approval request no gate names", record.RootAsk{Issue: "LEGION-208", Ask: "ask-q", Kind: record.AskApproval,
-			Open: true, WaitingOn: "agent", ByTree: true, Seq: 4}, nil, 0},
-		{"the request of the root's closed gate", record.RootAsk{Issue: "LEGION-208", Ask: "ask-q", Kind: record.AskApproval,
-			Open: true, WaitingOn: "agent", Seq: 4}, &record.DesignGate{Issue: "LEGION-208", ArtifactID: "artifact-208", LatestVersion: 2, RequestAsk: "ask-q"}, 6},
-		{"the request of a gate already open", record.RootAsk{Issue: "LEGION-208", Ask: "ask-q", Kind: record.AskApproval,
-			Open: true, WaitingOn: "agent", Seq: 4}, &record.DesignGate{Issue: "LEGION-208", ArtifactID: "artifact-208", LatestVersion: 2,
-			ApprovedVersion: &approved, RequestAsk: "ask-q"}, 0},
+			Open: true, WaitingOn: "agent", WaitingOnSeq: 4, Seq: 4}, nil, 0},
+		{"an approval request no gate names", record.RootAsk{Issue: "LEGION-208", Ask: "ask-q", Kind: record.AskApproval, Artifact: "artifact-208",
+			Open: true, WaitingOn: "agent", WaitingOnSeq: 4, ByTree: true, Seq: 4}, nil, 0},
+		{"the request of the root's closed gate", record.RootAsk{Issue: "LEGION-208", Ask: "ask-q", Kind: record.AskApproval, Artifact: "artifact-208",
+			Open: true, WaitingOn: "agent", WaitingOnSeq: 4, Seq: 4}, &record.DesignGate{Issue: "LEGION-208", ArtifactID: "artifact-208", LatestVersion: 2}, 6},
+		{"a request of another document than the gate's", record.RootAsk{Issue: "LEGION-208", Ask: "ask-q", Kind: record.AskApproval, Artifact: "artifact-other",
+			Open: true, WaitingOn: "agent", WaitingOnSeq: 4, Seq: 4}, &record.DesignGate{Issue: "LEGION-208", ArtifactID: "artifact-208", LatestVersion: 2}, 0},
+		{"the request of a gate already open", record.RootAsk{Issue: "LEGION-208", Ask: "ask-q", Kind: record.AskApproval, Artifact: "artifact-208",
+			Open: true, WaitingOn: "agent", WaitingOnSeq: 4, Seq: 4}, &record.DesignGate{Issue: "LEGION-208", ArtifactID: "artifact-208", LatestVersion: 2,
+			ApprovedVersion: &approved}, 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pool, apply := askRig(t)
@@ -365,10 +368,10 @@ func gateWaitRoot(t *testing.T, pool *pgxpool.Pool, since int64) {
 	root.Phase = phase.AwaitingPerson
 	root.Awaiting = &record.Awaiting{GateVersion: 2, Artifact: "artifact-208", Since: record.EventMark{Seq: since}}
 	seedIssue(t, pool, root)
-	seedGate(t, pool, record.DesignGate{Issue: "LEGION-208", ArtifactID: "artifact-208", LatestVersion: 2, RequestAsk: "ask-approval"})
+	seedGate(t, pool, record.DesignGate{Issue: "LEGION-208", ArtifactID: "artifact-208", LatestVersion: 2})
 	seedRecord(t, pool, func(tx pgx.Tx) error {
 		return record.NewStore().PutRootAsk(context.Background(), tx, record.RootAsk{Issue: "LEGION-208", Ask: "ask-approval",
-			Kind: record.AskApproval, Open: true, WaitingOn: "human", Seq: since})
+			Kind: record.AskApproval, Artifact: "artifact-208", Open: true, WaitingOn: "human", WaitingOnSeq: since, Seq: since})
 	})
 }
 
@@ -443,4 +446,26 @@ func TestANewerVersionAnswersAGateWaitOnlyWhenItFollowsIt(t *testing.T) {
 			}
 		})
 	}
+}
+
+// A child its blockers held does not start while its root waits on a person, though the tree's
+// design gate is open (a person's approval answered the wait): the root holds no slot, and its
+// children start with its resume (advanceAdmittedTree), once it has its slot again.
+func TestAHeldChildDoesNotStartWhileItsRootWaitsOnAPerson(t *testing.T) {
+	pool := migratedPool(t)
+	root := awaitingRoot(3)
+	answered := time.Date(2026, 9, 23, 0, 0, 0, 0, time.UTC)
+	root.Generation = 4
+	root.Awaiting.AnsweredAt, root.Awaiting.AnsweredBy, root.Awaiting.AnsweredDetail = &answered, record.AnsweredByApproval, "version 3"
+	seedIssue(t, pool, root)
+	seedGate(t, pool, record.DesignGate{Issue: "LEGION-208", ArtifactID: "artifact-208", LatestVersion: 3, ApprovedVersion: new(3)})
+	seedAdmittedChild(t, pool, "LEGION-209")
+	seedMirror(t, pool, "LEGION-209", "todo", "LEGION-300")
+	seedMirror(t, pool, "LEGION-300", "done")
+
+	startUnblockedChildren(t, pool, testEngine(config.DesignGateRootIssues, nil))
+	if got := phaseOf(t, pool, "LEGION-209"); got != phase.Admitted {
+		t.Fatalf("the child = %s, want it admitted until its root resumes", got)
+	}
+	assertOutboxKinds(t, pool, []string{})
 }

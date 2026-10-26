@@ -757,10 +757,8 @@ func (a *Admission) readmit(ctx context.Context, tx pgx.Tx, stored record.Issue,
 		// in its linger has its gate cleared with the generation, so a second close hands its
 		// children over with none: such a child keeps its phase and pull request, and its architect
 		// registers its spec as a fresh root's does, the gate its READY needs.
-		// The copy keeps the old root's review state but not its approval request, which is an
-		// ask on the old root: the new root's own registration binds its own.
 		if gate != nil {
-			gate.Issue, gate.RequestAsk = stored.Key, ""
+			gate.Issue = stored.Key
 			if err := a.store.PutGate(ctx, tx, *gate); err != nil {
 				return fmt.Errorf("carry gate to re-admitted orphan %s: %w", stored.Key, err)
 			}

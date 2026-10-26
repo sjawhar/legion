@@ -89,7 +89,7 @@ func (e *Engine) personAnswered(ctx context.Context, tx pgx.Tx, root record.Issu
 // itemLeft applies an act that is nobody's answer and takes an item of root's wait away from the
 // person: a close by anyone who is not a person, Dispatch's settlement restoring an earlier
 // answer, or a session's reply handing the item back to the agent's turn. An item is a question of
-// the root's tree, or the approval request of its closed, armed design gate. before and after are
+// the root's tree, or an approval request of its closed, armed design gate's document. before and after are
 // that ask's mirror row around the act. Nobody will answer what is no longer with the person, so
 // the wait moves to what still is (withHuman: the gate when its request is, else the oldest
 // question), keeping where it began, and is answered — by what took the item away, which the
@@ -104,8 +104,7 @@ func (e *Engine) itemLeft(ctx context.Context, tx pgx.Tx, root record.Issue, bef
 	if err != nil {
 		return err
 	}
-	requestAsk := gateRequest(gate, e.armed())
-	isRequest := requestAsk != "" && before.Ask == requestAsk
+	isRequest := after.GateRequestOf(gateRequestArtifact(gate, e.armed()))
 	if !isRequest && (!before.ByTree || !before.Question()) {
 		return nil
 	}

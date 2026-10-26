@@ -32,18 +32,21 @@ import (
 // has none: its first catch-up replays nothing and only sets the cursor, since a daemon of an
 // earlier release applied everything before it live, and a replay of that history through this
 // release's handlers would read old hand-backs as new. A root recorded since starts at 0 and reads
-// from its last handout. A gate that names no approval request — one an earlier release registered,
-// or one whose registration found none open — is bound to the request Dispatch shows open on its
-// document, which declares the architect's hand-back when the request waits on the person
-// (workflow's gateRequestFound).
+// from its last handout. A gate whose document has no approval request in the asks' mirror — one an
+// earlier release registered before the mirror existed, or one whose request the daemon never saw
+// an event of — has the request Dispatch shows open on its document mirrored, which declares the
+// architect's hand-back when the request waits on the person (workflow's gateRequestFound).
 
 // catchUpRoot is one root the boot's catch-up reads: its record, its design gate (nil for none),
-// and its cursor (cursor, and whether it has one at all).
+// its cursor (cursor, and whether it has one at all), and whether the mirror holds an approval
+// request of its gate's document (mirrored).
 type catchUpRoot struct {
 	issue     record.Issue
 	gate      *record.DesignGate
 	cursor    int64
 	hasCursor bool
+	// mirrored says whether the asks' mirror holds an approval request of the gate's document.
+	mirrored bool
 }
 
 // catchUpAttempts is how many times the boot's catch-up of one root reads Dispatch again when
@@ -151,6 +154,15 @@ func (w *workflowRuntime) catchUpAwaiting(ctx context.Context) error {
 			if root.cursor, root.hasCursor, err = w.records.CaughtUpSeq(listing, tx, issue.Key); err != nil {
 				return err
 			}
+			if root.gate != nil {
+				asks, err := w.records.RootAsks(listing, tx, []string{issue.Key})
+				if err != nil {
+					return err
+				}
+				for _, ask := range asks[issue.Key] {
+					root.mirrored = root.mirrored || ask.GateRequestOf(root.gate.ArtifactID)
+				}
+			}
 			roots = append(roots, root)
 		}
 		return nil
@@ -248,8 +260,9 @@ func retriable(refusal *dispatch.Error) bool {
 	return refusal.Status >= 500 || refusal.Status == http.StatusRequestTimeout || refusal.Status == http.StatusTooManyRequests
 }
 
-// catchUpRoot catches up one root: it reads the issue's latest sequence on Dispatch, binds a gate
-// that names no approval request to the one Dispatch shows open (as of that sequence), applies its
+// catchUpRoot catches up one root: it reads the issue's latest sequence on Dispatch, mirrors the
+// approval request Dispatch shows open on a gate's document the mirror holds none of (as of that
+// sequence), applies its
 // event log's window — the events after its cursor, or after its last handout for a root with a
 // cursor of 0, and none at all for a root with no cursor — and then finishes it (finishCatchUp).
 // The request's read and the window are independent: one failing still runs the other, and the
@@ -287,11 +300,11 @@ func catchUpFrom(root catchUpRoot) (int64, bool) {
 	return root.issue.HandoutSeq, true
 }
 
-// bindGateRequest reads the approval of a root's gate that names no request and, when Dispatch
-// shows one open, applies it (intake.GateRequestFound) at since, the issue's sequence read before
-// it.
+// bindGateRequest reads the approval of a root's gate whose document has no approval request in the
+// mirror and, when Dispatch shows one open, applies it (intake.GateRequestFound) at since, the
+// issue's sequence read before it.
 func (w *workflowRuntime) bindGateRequest(ctx context.Context, root catchUpRoot, since int64) error {
-	if root.gate == nil || root.gate.RequestAsk != "" || since <= 0 {
+	if root.gate == nil || root.mirrored || since <= 0 {
 		return nil
 	}
 	approval, err := w.dispatch.Approval(ctx, root.gate.ArtifactID)
@@ -306,7 +319,8 @@ func (w *workflowRuntime) bindGateRequest(ctx context.Context, root catchUpRoot,
 	return w.applyCatchUp(ctx, fmt.Sprintf("gate-request:%s:%d:%s:%d", root.issue.Key, root.issue.Generation, approval.AskID, since), fact)
 }
 
-// catchUpWindow applies every ask event, review and document version Dispatch recorded on the
+// catchUpWindow applies every ask event (an ask.edited one when it moved an approval request),
+// review and document version Dispatch recorded on the
 // root after from: it reads the root's event log past that point and applies each through the live
 // decoder and the live handlers, with its own sequence, so the asks' mirror and the architect's
 // hand-backs stand as the live events would have left them. It returns the highest sequence it
@@ -331,7 +345,7 @@ func (w *workflowRuntime) catchUpWindow(ctx context.Context, root catchUpRoot, f
 		}
 		read = max(read, header.Seq)
 		switch header.Type {
-		case "ask.opened", "ask.answered", "ask.resolved", "ask.handed_back", "comment.created", "comment.answered",
+		case "ask.opened", "ask.answered", "ask.resolved", "ask.handed_back", "ask.edited", "comment.created", "comment.answered",
 			"artifact.version", "artifact.approved", "artifact.changes_requested":
 		default:
 			continue

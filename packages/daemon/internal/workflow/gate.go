@@ -26,17 +26,18 @@ import (
 // carried to a later version makes the later one, and is not told it again when the gate of that
 // document was already open at that version.
 //
-// The registration binds the gate to the approval request its read found open (RequestAsk) and
-// writes that request's mirror row as the read found it (mirrorRegisteredRequest). A read that
-// found no request open keeps the request the gate already names for the same document, since the
-// request may be closed or answered rather than gone; only a registration of another document
-// rebinds it, to that document's open request or to none. A closed, armed gate whose request
-// waits on the person is the architect handing the spec to the person, so the registration
-// declares that hand-back at the sequence its read began at (fact.Since), whatever the root's last
-// handout: it is a live call, made in the architect's turn. One whose request Dispatch shows
-// waiting on the agent (RequestWaitsOnAgent: a reply or a newer version since the request) hands
-// nothing back, since the person is not asked to act. Whether the root then waits on the person is
-// admission's next pass (ReconcileAwaiting).
+// The approval request the registration's read found open is mirrored as the read found it
+// (mirrorRegisteredRequest), before anything decides whether the registration changes the gate:
+// the row is the request's, not the gate's, and its write is fenced by the sequence the read began
+// at, so a registration that changes no gate still records what its read saw, and an older one
+// rolls nothing back. When that row, an approval request of the registered document, then stands
+// open on the person's turn as the read left it and the gate the registration leaves is closed and
+// armed, the registration is the architect handing the spec to the person, so it declares that
+// hand-back at the sequence its read began at (fact.Since), whatever the root's last handout: it
+// is a live call, made in the architect's turn (declareRegistration). One whose request Dispatch
+// shows waiting on the agent (RequestWaitsOnAgent: a reply or a newer version since the request)
+// hands nothing back, since the person is not asked to act. Whether the root then waits on the
+// person is admission's next pass (ReconcileAwaiting).
 //
 // A root already waiting on that gate — its architect, still in the turn the wait began in,
 // registered the version anew — is answered by what the read found (answerRegisteredGate), since
@@ -48,6 +49,10 @@ import (
 func (e *Engine) gateRegistered(ctx context.Context, tx pgx.Tx, fact intake.GateRegistered) (intake.Result, error) {
 	issue, err := e.store.Issue(ctx, tx, fact.Issue)
 	if err != nil || issue == nil {
+		return intake.Result{}, err
+	}
+	request, err := e.mirrorRegisteredRequest(ctx, tx, *issue, fact)
+	if err != nil {
 		return intake.Result{}, err
 	}
 	stored, err := e.store.Gate(ctx, tx, fact.Issue)
@@ -79,10 +84,7 @@ func (e *Engine) gateRegistered(ctx context.Context, tx pgx.Tx, fact intake.Gate
 			"artifact", fact.ArtifactID, "version", version, "open", classify.DesignGateOpen(*stored), "since_seq", fact.Since.Seq)
 		return intake.Result{}, e.enqueue(ctx, tx, fact.Issue, record.GateSeed{ArtifactID: fact.ArtifactID, Version: version, Generation: issue.Generation})
 	}
-	gate := record.DesignGate{Issue: fact.Issue, ArtifactID: fact.ArtifactID, LatestVersion: version, RequestAsk: fact.RequestAsk}
-	if gate.RequestAsk == "" && sameDocument {
-		gate.RequestAsk = stored.RequestAsk
-	}
+	gate := record.DesignGate{Issue: fact.Issue, ArtifactID: fact.ArtifactID, LatestVersion: version}
 	// An approval of an older version the gate of this document holds is kept, as a version event
 	// keeps it (classify.ApplyDesignGateEvent): a late changes request it answered stays answered.
 	if sameDocument && stored.ApprovedVersion != nil && *stored.ApprovedVersion < version {
@@ -127,7 +129,7 @@ func (e *Engine) gateRegistered(ctx context.Context, tx pgx.Tx, fact intake.Gate
 	if err := e.enqueue(ctx, tx, fact.Issue, record.GateSeed{ArtifactID: fact.ArtifactID, Version: version, Generation: issue.Generation}); err != nil {
 		return intake.Result{}, err
 	}
-	if err := e.mirrorRegisteredRequest(ctx, tx, *issue, fact, gate); err != nil {
+	if err := e.declareRegistration(ctx, tx, *issue, fact, request, gate); err != nil {
 		return intake.Result{}, err
 	}
 	switch {
@@ -386,6 +388,29 @@ func (e *Engine) untellUnresumedChanges(ctx context.Context, tx pgx.Tx, root rec
 	return e.store.PutGate(ctx, tx, *gate)
 }
 
+// mirrorRegisteredRequest writes the mirror row of the approval request a registration read open
+// on the registered document, as the read found it: an approval request of that document, open, on
+// the turn RequestWaitsOnAgent names. The read's state is written at the issue's sequence the read
+// began at (fact.Since), because Dispatch's approval read gives no sequence of its own. Every event
+// at or below Since is one the read reflects, so it never overwrites the read; every turn or state
+// the request took between Since and the read is an event of the request itself (an opening, a
+// reply, a hand-back, the ask.edited of a version that moved it, its close), which overwrites the
+// read whenever it arrives, and the newest of them is the state the read showed. So once they have
+// all arrived the row is the read's or newer. A fence placed above Since could instead refuse, for
+// good, an event newer than the read. Only a root's asks are mirrored.
+func (e *Engine) mirrorRegisteredRequest(ctx context.Context, tx pgx.Tx, root record.Issue, fact intake.GateRegistered) (record.RootAsk, error) {
+	if fact.RequestAsk == "" || !claim.IsTreeRoot(root.Key, root.Tree) {
+		return record.RootAsk{}, nil
+	}
+	turn := "human"
+	if fact.RequestWaitsOnAgent {
+		turn = "agent"
+	}
+	_, after, err := e.mirrorAsk(ctx, tx, root, fact.RequestAsk, askChange{seq: fact.Since.Seq, kind: record.AskApproval, artifact: fact.ArtifactID,
+		state: askOpen, turn: turn})
+	return after, err
+}
+
 // gateAboveDispatch resets a gate recorded above the version Dispatch holds for its document to
 // that version, and applies the review the gate seed read there. The seed reads Dispatch after the
 // daemon applied every observation that moved the gate, and Dispatch's versions only rise, so a
@@ -404,8 +429,7 @@ func (e *Engine) gateAboveDispatch(ctx context.Context, tx pgx.Tx, fact intake.G
 	}
 	e.logOnCommit(ctx, "workflow: a gate above the version Dispatch holds is reset to it", "issue", issue.Key,
 		"artifact", gate.ArtifactID, "gate_version", gate.LatestVersion, "dispatch_version", fact.Read.Version)
-	// The reset gate is of the same document, so it keeps the approval request its registration bound.
-	reset := record.DesignGate{Issue: issue.Key, ArtifactID: gate.ArtifactID, LatestVersion: fact.Read.Version, RequestAsk: gate.RequestAsk}
+	reset := record.DesignGate{Issue: issue.Key, ArtifactID: gate.ArtifactID, LatestVersion: fact.Read.Version}
 	off := e.cfg.DesignGate == config.DesignGateOff
 	if off {
 		reset = classify.ApplyDesignGateEvent(reset, classify.DesignGateApproved, fact.Read.Version, record.EventMark{})
@@ -419,82 +443,52 @@ func (e *Engine) gateAboveDispatch(ctx context.Context, tx pgx.Tx, fact intake.G
 	return intake.Result{}, e.advancePendingReady(ctx, tx, issue.Key, reset)
 }
 
-// mirrorRegisteredRequest writes the mirror row of the approval request a registration read open,
-// as the read found it (open, on the turn RequestWaitsOnAgent names), at the issue's sequence the
-// read began at (fact.Since): an event at or below that sequence is one the read already reflects,
-// and a row already holding a newer one is left as it stands. Only a root's asks are mirrored.
-//
-// When the row as it then stands is the request of gate, closed and armed, waiting on the person,
-// the registration is the architect handing the spec to the person, and declares that hand-back at
-// Since whatever the root's last handout (Store.Declare): it is a live call from the architect's
-// own turn. A row an event newer than the read already moved is that event's to declare.
-func (e *Engine) mirrorRegisteredRequest(ctx context.Context, tx pgx.Tx, root record.Issue, fact intake.GateRegistered, gate record.DesignGate) error {
-	if fact.RequestAsk == "" || !claim.IsTreeRoot(root.Key, root.Tree) {
+// declareRegistration declares the hand-back a registration makes (gateRegistered): when the
+// request row it mirrored (request) is an approval request of the gate's document that stands open
+// on the person's turn as the read left it — no event newer than the read has given it another
+// turn — and the gate is closed and armed, it records the hand-back at the read's sequence
+// (Store.Declare), whatever the root's last handout. A row an event newer than the read already
+// moved is that event's to declare.
+func (e *Engine) declareRegistration(ctx context.Context, tx pgx.Tx, root record.Issue, fact intake.GateRegistered, request record.RootAsk, gate record.DesignGate) error {
+	since := fact.Since.Seq
+	if fact.RequestAsk == "" || since <= 0 || !claim.IsTreeRoot(root.Key, root.Tree) || request.WaitingOnSeq > since || request.Seq > since ||
+		!request.WithHuman() || !request.GateRequestOf(gateRequestArtifact(&gate, e.armed())) {
 		return nil
 	}
-	_, after, _, err := e.mirrorAsk(ctx, tx, root, fact.RequestAsk, fact.Since.Seq,
-		func(row *record.RootAsk) { row.Kind = record.AskApproval },
-		func(row *record.RootAsk) {
-			row.Open, row.WaitingOn, row.ClosedBy = true, "human", ""
-			if fact.RequestWaitsOnAgent {
-				row.WaitingOn = "agent"
-			}
-		})
-	if err != nil || fact.Since.Seq <= 0 || after.Seq > fact.Since.Seq || !after.WithHuman() || gateRequest(&gate, e.armed()) != fact.RequestAsk {
-		return err
-	}
-	e.logOnCommit(ctx, "workflow: a registration hands the spec to the person", "issue", root.Key, "version", gate.LatestVersion, "since_seq", fact.Since.Seq)
-	return e.store.Declare(ctx, tx, root.Key, fact.Since.Seq)
+	e.logOnCommit(ctx, "workflow: a registration hands the spec to the person", "issue", root.Key, "version", gate.LatestVersion, "since_seq", since)
+	return e.store.Declare(ctx, tx, root.Key, since)
 }
 
-// gateRequestFound binds a root's gate that names no approval request to the one the boot
-// catch-up read open on its document, writes that request's mirror row as the read found it at
-// fact.Since, and, when the gate is closed and armed and the request waits on the person, declares
-// the architect's hand-back of the spec there, as a registration would (mirrorRegisteredRequest).
-// A gate a daemon of an earlier release registered names no request, so a root already waiting on
-// its approval at the deploy returns its slot here rather than holding it until its architect
-// registers again. A gate of another generation or document, or one that names a request already,
-// is left as it is.
+// gateRequestFound mirrors the approval request the boot catch-up read open on a root's
+// registered document, as a registration's read is mirrored, when the mirror holds no row of that
+// request: a gate a daemon of an earlier release registered, before the mirror existed, or one
+// whose request the daemon never saw an event of. When the gate is closed and armed and the request
+// waits on the person, that is the architect's hand-back of the spec, declared at the read's
+// sequence as a registration would declare it (declareRegistration), so a root already waiting on
+// its approval at the deploy returns its slot rather than holding it until its architect registers
+// again. A request the mirror already holds is the mirror's; a gate of another generation or
+// document is left as it is.
 func (e *Engine) gateRequestFound(ctx context.Context, tx pgx.Tx, fact intake.GateRequestFound) (intake.Result, error) {
 	root, err := e.recordedRoot(ctx, tx, fact.Issue)
-	if err != nil || root == nil || root.Generation != fact.Generation {
+	if err != nil || root == nil || root.Generation != fact.Generation || fact.RequestAsk == "" {
 		return intake.Result{}, err
 	}
 	gate, err := e.store.Gate(ctx, tx, root.Key)
-	if err != nil || gate == nil || gate.ArtifactID != fact.ArtifactID || gate.RequestAsk != "" || fact.RequestAsk == "" {
+	if err != nil || gate == nil || gate.ArtifactID != fact.ArtifactID {
 		return intake.Result{}, err
 	}
-	gate.RequestAsk = fact.RequestAsk
-	if err := e.store.PutGate(ctx, tx, *gate); err != nil {
+	if stored, err := e.store.RootAsk(ctx, tx, root.Key, fact.RequestAsk); err != nil || stored != nil {
 		return intake.Result{}, err
 	}
-	e.logOnCommit(ctx, "workflow: the boot catch-up bound a gate to the approval request open on its document", "issue", root.Key,
+	e.logOnCommit(ctx, "workflow: the boot catch-up mirrors the approval request open on a gate's document", "issue", root.Key,
 		"artifact", gate.ArtifactID, "ask", fact.RequestAsk, "waits_on_agent", fact.WaitsOnAgent)
 	registered := intake.GateRegistered{Issue: root.Key, ArtifactID: gate.ArtifactID, Version: gate.LatestVersion,
 		Since: record.EventMark{Seq: fact.Since}, RequestAsk: fact.RequestAsk, RequestWaitsOnAgent: fact.WaitsOnAgent}
-	return intake.Result{}, e.mirrorRegisteredRequest(ctx, tx, *root, registered, *gate)
-}
-
-// versionMovesRequest moves the mirror row of gate's open approval request to the agent's turn
-// for a new version of its document: Dispatch hands the request back to the agent once a version
-// moves it past the one handed to the person. An event older than the row's state, a version with
-// no sequence (the gate seed's read), and a request the mirror holds no row of change nothing: a
-// version says nothing of whether the request is open, and a row it made up would be one with no
-// state at all.
-func (e *Engine) versionMovesRequest(ctx context.Context, tx pgx.Tx, gate record.DesignGate, fact intake.DispatchArtifact) error {
-	root, err := e.recordedRoot(ctx, tx, gate.Issue)
-	if err != nil || root == nil {
-		return err
+	request, err := e.mirrorRegisteredRequest(ctx, tx, *root, registered)
+	if err != nil {
+		return intake.Result{}, err
 	}
-	if stored, err := e.store.RootAsk(ctx, tx, root.Key, gate.RequestAsk); err != nil || stored == nil {
-		return err
-	}
-	_, _, _, err = e.mirrorAsk(ctx, tx, *root, gate.RequestAsk, fact.Mark.Seq, nil, func(row *record.RootAsk) {
-		if row.Open {
-			row.WaitingOn = "agent"
-		}
-	})
-	return err
+	return intake.Result{}, e.declareRegistration(ctx, tx, *root, registered, request, *gate)
 }
 
 // dispatchArtifact applies an artifact event to the gates registered on that document: the root
@@ -567,9 +561,6 @@ func copyTakes(gate record.DesignGate, fact intake.DispatchArtifact) bool {
 // nobody requests an approval under off, and the copy's registration approves it. A changes
 // request's live event is still told, as the person's words, without closing the gate.
 //
-// A version event of the gate's own document moves its approval request to the agent's turn in
-// the mirror (versionMovesRequest), whatever it does to the gate, the design gate off included.
-//
 // An event of the root's own spec also answers a root waiting on a person (answerAwaitedGate): a
 // review answers a wait on its question or on its gate, a stale one included when Dispatch recorded
 // it after the wait began, and a newer version answers a wait on its gate. A changes request that
@@ -578,11 +569,6 @@ func copyTakes(gate record.DesignGate, fact intake.DispatchArtifact) bool {
 // told.
 func (e *Engine) applyArtifact(ctx context.Context, tx pgx.Tx, gate record.DesignGate, fact intake.DispatchArtifact, carried bool) error {
 	key := gate.Issue
-	if fact.Kind == intake.DispatchArtifactVersion && !carried && gate.RequestAsk != "" {
-		if err := e.versionMovesRequest(ctx, tx, gate, fact); err != nil {
-			return err
-		}
-	}
 	off := e.cfg.DesignGate == config.DesignGateOff
 	stale := fact.Kind != intake.DispatchArtifactVersion &&
 		(fact.Version < gate.LatestVersion || classify.StaleReview(gate, fact.Version, fact.Mark))
