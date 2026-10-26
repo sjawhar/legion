@@ -1,0 +1,53 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-251",
+  "completed": "2026-10-26T08:05:00Z",
+  "proof": [
+    {
+      "criterion": "PR #2163 no longer conflicts with main: forward merge of main@origin 63cd684a82, no rebase, nothing existing rewritten",
+      "surface": "GitHub pull request sjawhar/legion#2163 and the issue branch legion/INFRA-251",
+      "command": "jj new legion/INFRA-251 main@origin -m 'merge: resolve conflict against main@origin'; resolve; jj git push --bookmark legion/INFRA-251; git merge-tree --write-tree --name-only edd6044b011338469568540f7b12be9a580b7976 84e8f052ab6c",
+      "observed": "Push moved legion/INFRA-251 forward from a7bf0f7fa522 to edd6044b0113 (a fast-forward). git merge-tree against the newer main 84e8f052ab6c printed only a tree id, exit 0, so there is no conflict. GitHub started Tests 40287856845, PR Title 40287856803, Legion Envoy and Contracts 40287856895, Docs 40287856781 and Worker Image 40287856824 at the new head; all were queued when read. Fingerprint cb5c1756176e… -> 2ccf97d53d40…, changed, posted at https://github.com/sjawhar/legion/pull/2163#issuecomment-6410897565",
+      "headSha": "edd6044b011338469568540f7b12be9a580b7976",
+      "negativeControl": "At a7bf0f7fa522 GitHub reported mergeable=CONFLICTING, mergeStateStatus=DIRTY, and jj new reported 9 two-sided conflicts (the architect and controller skills, wake-routing.md, admission.md, their claude-envoy copies, pi-legion/CHANGELOG.md)."
+    },
+    {
+      "criterion": "Every skill hunk of this branch survives INFRA-353's (#2197) rewrite, ported to the reference that now holds its block, and every skill:// link still resolves",
+      "surface": "The staged Legion skills that Oh My Pi and the claude-envoy plugin load (skills/ and packages/claude-envoy/legion/skills/)",
+      "command": "cd packages/pi-legion && bun test src/skills-guard.test.ts; cd packages/claude-envoy && bun run check-dist; grep -c for each ported sentence in skills/ and packages/claude-envoy/legion/skills/",
+      "observed": "skills-guard: 11 pass, 0 fail, the anchor test included. check-dist: 'dist/ and legion/ match a fresh build'. Each ported sentence occurs once per copy: the architect's slot return and register_gate (SKILL.md, design-gate.md, wake-routing.md), and the controller's awaiting-person and parked-decision wakes, the walk at start and on tick, the Parked by Legion mark (SKILL.md, wakes.md), and the awaiting_person admission row.",
+      "headSha": "edd6044b011338469568540f7b12be9a580b7976",
+      "negativeControl": "With the branch's old skills/legion-controller/references/parked-decisions.md put back on this head, the anchor test fails (10 pass, 1 fail). It names SKILL.md#wake-routing-table (twice), #new-issue-triage and #free-slots-go-daemon as 'names no heading'. The file was then restored, and jj status shows no change."
+    },
+    {
+      "criterion": "main's daemon changes and this branch's product code still work together after the merge",
+      "surface": "The Legion daemon's admission, workflow, intake, api, record and store packages against a real PostgreSQL 17.2 (127.0.0.1:55432) and a real nats-server 2.10.29 (127.0.0.1:54222) in this issue's pod",
+      "command": "LEGION_TEST_PG_DSN=postgres://postgres:pw@127.0.0.1:55432/postgres?sslmode=disable LEGION_TEST_NATS_URL=nats://127.0.0.1:54222 LEGION_TEST_NATS_MONITOR_URL=http://127.0.0.1:58222 go test -p 1 ./internal/admit/ ./internal/workflow/ ./internal/intake/ ./internal/daemon/ ; go test ./internal/api/ ./internal/record/ ./internal/store/ ; go build ./... ; go vet ./...",
+      "observed": "admit ok 221.242s, workflow ok 445.359s, intake ok 21.287s, api ok 203.601s, record ok 64.886s, store ok 98.183s. go build and go vet exit 0. internal/daemon passes except for tests that need what the pod does not have: Docker for the nkey NATS servers (TestDaemonPermissionsOnRealServers and 4 more), pgvector for scratch Dispatch (3 tests), gVisor /proc SigIgn (2), and git helper reset (1).",
+      "headSha": "edd6044b011338469568540f7b12be9a580b7976",
+      "negativeControl": "Without LEGION_TEST_PG_DSN, the admit tests fail with 'LEGION_TEST_PG_DSN is required for real Postgres admission tests'. Without LEGION_TEST_NATS_URL, the NATS tests panic with 'rootless Docker not found'. So the green runs above used the real servers, not skips."
+    }
+  ],
+  "filesChanged": [
+    "skills/legion-architect/SKILL.md",
+    "skills/legion-architect/references/design-gate.md",
+    "skills/legion-architect/references/wake-routing.md",
+    "skills/legion-controller/SKILL.md",
+    "skills/legion-controller/references/wakes.md",
+    "skills/legion-controller/references/admission.md",
+    "skills/legion-controller/references/parked-decisions.md",
+    "packages/claude-envoy/legion/skills/ (regenerated copies of the seven files above)",
+    "packages/pi-legion/CHANGELOG.md"
+  ],
+  "trickyParts": [
+    "#2197 moved every block this branch edits into new references (design-gate.md, wakes.md, session.md). Those new files merged cleanly with main's older wording, so each hunk was ported by hand and checked by grep. Taking main's side alone would have dropped all of them with every lane green.",
+    "parked-decisions.md had no conflict, but its links pointed at anchors the rewrite removed. Only the skills-guard anchor test shows this."
+  ],
+  "deviations": [
+    "admission.md's 'no slot' paragraph now also excludes phase: awaiting_person. That root is never unslotted (admit.go:935). Without this, the controller could read an awaiting_person root as one the daemon will take out of the workflow."
+  ],
+  "openQuestions": [
+    "Gate G1 in the PR body still blocks READY: #2131 is OPEN, and compare/main...edd6044b lists packages/contracts/src/legion-api.ts (index 21, not null)."
+  ]
+}
