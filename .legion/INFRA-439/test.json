@@ -2,34 +2,25 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-439",
-  "completed": "2026-10-26T20:58:00Z",
-  "round": 12,
-  "headSha": "2f95f13f3965",
-  "evidence": "https://github.com/sjawhar/legion/pull/2228#issuecomment-6427112216",
-  "answeringProvider": "anthropic/claude-haiku-4-5 answered every omp 18.12.2 turn in both smoke runs",
+  "completed": "2026-10-26T22:32:00Z",
+  "round": 13,
+  "headSha": "232a541eb40c27720c9bab0f17bb42fa4e5c0dad",
+  "evidence": "https://github.com/sjawhar/legion/pull/2228#issuecomment-6428866683",
+  "answeringProvider": "anthropic/claude-haiku-4-5 answered every omp 18.12.2 turn",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Ran `bash packages/pi-envoy/scripts/smoke-replay.sh` in remote mode exactly as committed (SMOKE_REPLAY_ENVOY_URL and SMOKE_REPLAY_NATS_URL set to a loopback listener and natsd built from this head): SMOKE REPLAY PASS, legs 1 to 7 and the three controls. Every read-back after /v1/messages/send found its message at once ('/v1/replay after 0 holds it: seq 1', 'after 1 … seq 2', 'after 2 … seq 3'). Local mode at this head: SMOKE REPLAY PASS."
+    "how": "Re-ran `bash packages/pi-envoy/scripts/smoke-replay.sh` at this head in local mode and in remote mode as committed (against a loopback listener and natsd built from this head): both SMOKE REPLAY PASS. Drove the held replay notice live (leg N1): it passes."
   },
-  "failed": 0,
-  "failures": [],
-  "proof": [
+  "failed": 1,
+  "failures": [
     {
-      "criterion": "Round 11 failure: smoke-replay.sh remote mode, as committed, passes its read-back after /v1/messages/send",
-      "surface": "real omp --mode rpc 18.12.2 with this checkout's pi-envoy, against a loopback Envoy listener and natsd built from this head, reached only through the script's remote-mode inputs",
-      "command": "SMOKE_REPLAY_ENVOY_URL=http://127.0.0.1:12672 SMOKE_REPLAY_NATS_URL=nats://127.0.0.1:14210 bash packages/pi-envoy/scripts/smoke-replay.sh",
-      "observed": "exit 0, SMOKE REPLAY PASS through legs 1 to 7 and the three controls; each publish found by the first read-back",
-      "headSha": "2f95f13f3965",
-      "negativeControl": "the same command at 6f57a71c (round 11) exited 1 at leg 1: '/v1/replay after 0 does not hold 9bfb96ed…', with the stream holding it"
-    },
-    {
-      "criterion": "Bare gates: local-mode smoke and the red tests",
-      "surface": "real omp, natsd -js and the listener built from this head; the plugin and listener suites",
-      "command": "bash packages/pi-envoy/scripts/smoke-replay.sh; bun test extensions/envoy.test.ts -t \"a BTW refused live\"; go test ./cmd/listener -run 'TestReplayNeverReturnsAnotherSessions…'",
-      "observed": "SMOKE REPLAY PASS; BTW describe 8 pass 0 fail; both listener red tests pass",
-      "headSha": "2f95f13f3965",
-      "negativeControl": "the released plugin loses its messages in the smoke's controls"
+      "criterion": "The architect's check (b): a replay notice held for a busy session is not lost; it survives a SIGKILL before the first settled heartbeat (shown once after the resume, or recorded where the session sees it)",
+      "evidence": "Lost. Live (leg N2, notice2.sh): a long turn streamed; I deleted ENVOY_NOTIFICATIONS and added it back. Within 2 s the session wrote the reset cursor (envoy-replay-state stream_created 22:20:41) to its transcript but held the 'stream recreated' notice for the turn (isStreaming true, queuedMessageCount 0, 0 notices in the file). omp was SIGKILLed. After the resume, 4 heartbeats and idle: 0 notices, still 0 three heartbeats later. The persisted state already names the new stream, so the recreation is never detected again. The same applies to the retention-gap notice. Red test: bddc5c2a9815, `cd packages/pi-envoy && bun test extensions/envoy.test.ts -t \"a retention gap\"` -> fails 'a retention gap held while the host's turn streams is told after a restart that cut the hold short' (expected 1, received 0). Fix direction: the state change that makes the notice unrecoverable must not be persisted before the notice is written, or the held notice itself must be recorded in the transcript."
     }
   ],
-  "ci": "At 2f95f13f when read: Tests (40398571761), Legion Envoy and Contracts (40398571826), Docs (40398572028) and Worker Image (40398572144) queued."
+  "verifiedFixed": [
+    "The architect's check (a), live (leg N1): a 'stream recreated' notice raised while a turn streams is held, with 0 notices and queuedMessageCount 0 on each of 4 heartbeats while streaming. It is written once at 22:16:39 after the turn ended on its own. 1 agent_start and 1 turn_start since the long prompt (the turn's own), and no assistant message after the notice."
+  ],
+  "proof": [],
+  "ci": "At 232a541e when read: Tests queued; Legion Envoy and Contracts, Docs and Worker Image pending."
 }
