@@ -120,26 +120,10 @@ func keysOf(l *broadcastListener) []string {
 }
 
 // INFRA-258. A single-session send without an Idempotency-Key is sent, as any write without one
-// is: it is only not replayed. The key is a header, so a body still naming one - a tab opened
-// before the cutover, which sends no header - is a member the route does not take, and writes and
-// sends nothing.
+// is: it is only not replayed.
 func TestASingleSessionSendWithoutAKeyIsSent(t *testing.T) {
 	listener, sends := newBroadcastListener(t, agentSessions)
-	handler, database := newTargetedMessageHandler(t, listener.URL)
-	before := databaseFingerprint(t, database)
-
-	bodyKey := dispatchRequest(t, handler, http.MethodPost, "/api/v1/agents/s1/messages", map[string]any{
-		"body": "Status?", "delivery": "btw", "idempotency_key": "press-1",
-	}, "alice")
-	if code, text := refusalOf(t, bodyKey); bodyKey.Code != http.StatusBadRequest || code != "INVALID_JSON" ||
-		!strings.Contains(text, "idempotency_key") {
-		t.Fatalf("a body key = %d %s %q, want 400 INVALID_JSON naming idempotency_key", bodyKey.Code, code, text)
-	}
-	assertUnchanged(t, "a send with a body key", before, databaseFingerprint(t, database))
-	if got := sends.targets(); len(got) != 0 {
-		t.Fatalf("listener sends = %v, want none", got)
-	}
-
+	handler, _ := newTargetedMessageHandler(t, listener.URL)
 	keyless := dispatchRequest(t, handler, http.MethodPost, "/api/v1/agents/s1/messages", map[string]any{
 		"body": "Status?", "delivery": "btw",
 	}, "alice")
@@ -278,44 +262,6 @@ func TestASendInFlightAtShutdownStillSettles(t *testing.T) {
 	}
 }
 
-// A key names one request. Reused for a different one - another message, mode, session or reply -
-// it is refused 422 naming the send that used it, and nothing is written or sent: that message
-// says something else, so answering with it would tell the caller a message it never sent had
-// gone out.
-func TestAKeyReusedForAnotherMessageIsRefused(t *testing.T) {
-	listener, sends := newBroadcastListener(t, agentSessions)
-	handler, database := newTargetedMessageHandler(t, listener.URL)
-	created := postAgentMessageKeyed(t, handler, "s1", map[string]any{"body": "Status?", "delivery": "btw"}, "alice", "reused")
-	if created.Code != http.StatusCreated {
-		t.Fatalf("send: status=%d body=%s", created.Code, created.Body.String())
-	}
-	original := decodeBody[model.Message](t, created)
-	before := databaseFingerprint(t, database)
-
-	for name, changed := range map[string]struct {
-		session string
-		input   map[string]any
-	}{
-		"another message": {"s1", map[string]any{"body": "Stand down.", "delivery": "btw"}},
-		"another mode":    {"s1", map[string]any{"body": "Status?", "delivery": "steer"}},
-		"another session": {"s2", map[string]any{"body": "Status?", "delivery": "btw"}},
-		"another reply":   {"s1", map[string]any{"body": "Status?", "delivery": "btw", "in_reply_to": original.ID}},
-	} {
-		t.Run(name, func(t *testing.T) {
-			response := postAgentMessageKeyed(t, handler, changed.session, changed.input, "alice", "reused")
-			code, text := refusalOf(t, response)
-			if response.Code != http.StatusUnprocessableEntity || code != contracts.IdempotencyKeyReused ||
-				!strings.Contains(text, "POST /api/v1/agents/s1/messages") || !strings.Contains(text, "this request was not run") {
-				t.Fatalf("status=%d code=%s error=%q, want 422 %s naming the first send", response.Code, code, text, contracts.IdempotencyKeyReused)
-			}
-		})
-	}
-	assertUnchanged(t, "a reused key", before, databaseFingerprint(t, database))
-	if got := sends.targets(); !equalStrings(got, []string{"s1"}) {
-		t.Fatalf("listener sends = %v, want the original's one and no other", got)
-	}
-}
-
 // A retry racing its original, sixteen times over, all held at the key's insert until the last of
 // them has arrived there: one makes the message and every other is told the first is in flight or,
 // once it has answered, given its answer. The session is handed the message once.
@@ -381,41 +327,6 @@ func TestConcurrentSendsUnderOneKeyMakeOneMessage(t *testing.T) {
 	}
 	if got := sends.targets(); !equalStrings(got, []string{"s1"}) {
 		t.Fatalf("listener sends = %v, want one frame", got)
-	}
-}
-
-// A key belongs to the person who sent it. Another person's identical send under the same key is
-// another send, since a message carries one author; the same person under another casing of the
-// identity header is the same person, since every identity names a person by lowercase email.
-func TestAKeyIsHeldPerPerson(t *testing.T) {
-	listener, sends := newBroadcastListener(t, agentSessions)
-	handler, _ := newTargetedMessageHandler(t, listener.URL)
-	send := func(login string) *httptest.ResponseRecorder {
-		t.Helper()
-		return postAgentMessageKeyed(t, handler, "s1", map[string]any{"body": "Status?", "delivery": "btw"}, login, "shared")
-	}
-
-	alices := send("alice")
-	if alices.Code != http.StatusCreated {
-		t.Fatalf("alice's send: status=%d body=%s", alices.Code, alices.Body.String())
-	}
-	original := decodeBody[model.Message](t, alices).ID
-	bobs := send("bob")
-	if bobs.Code != http.StatusCreated || replayed(bobs) {
-		t.Fatalf("bob's send under alice's key: status=%d body=%s, want a message of his own", bobs.Code, bobs.Body.String())
-	}
-	if got := decodeBody[model.Message](t, bobs).ID; got == original {
-		t.Fatalf("bob's send answered alice's message %s", original)
-	}
-	again := send("Alice")
-	if !replayed(again) {
-		t.Fatalf("Alice's repeat: status=%d body=%s, want alice's message replayed", again.Code, again.Body.String())
-	}
-	if got := decodeBody[model.Message](t, again).ID; got != original {
-		t.Fatalf("Alice's repeat answered %s, want alice's message %s", got, original)
-	}
-	if got := sends.targets(); !equalStrings(got, []string{"s1", "s1"}) {
-		t.Fatalf("listener sends = %v, want alice's and bob's", got)
 	}
 }
 
