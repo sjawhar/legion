@@ -32,7 +32,9 @@ const appRoles: readonly AppRole[] = ["implement", "review"];
 /** The App permission each role's work cannot run without: the implement App pushes the issue's
  * branch, and the review App posts the tester's and architect's check runs. The implement App
  * holds `checks: read` alone, so the review role configured with it, the two swapped whole, is
- * refused here rather than hours later at the first check run. */
+ * refused here rather than hours later at the first check run. `GET /app` answers the App's
+ * declared permissions, not one installation's granted set, so this catches a wrong App and not
+ * an installation that has not accepted a permission the App has since asked for. */
 const roleWrites: Record<AppRole, string> = { implement: "contents", review: "checks" };
 
 /** One App of `github_apps`: its id and the command that prints its PEM private key. */

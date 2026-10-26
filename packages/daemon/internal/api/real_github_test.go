@@ -118,6 +118,28 @@ func realGitHubApps(t *testing.T) config.GitHubApps {
 	return apps
 }
 
+// TestAppFallbacksMatchTheLiveProofLib keeps the fallbacks above equal to the live proofs' own, in
+// scripts/e2e/lib/github-apps.sh, which is the one place this deployment's pair is written: the
+// two gated proofs above and every live proof must run as the same Apps. It is not gated, so a
+// change to either side fails the ordinary `go test`.
+func TestAppFallbacksMatchTheLiveProofLib(t *testing.T) {
+	lib, err := os.ReadFile(filepath.Join("..", "..", "..", "..", "scripts", "e2e", "lib", "github-apps.sh"))
+	if err != nil {
+		t.Fatalf("read the live proofs' App lib: %v", err)
+	}
+	for _, want := range []struct{ variable, value string }{
+		{"default_implement_app_id", "3202636"},
+		{"default_implement_app_key_name", "LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64"},
+		{"default_review_app_id", "3202653"},
+		{"default_review_app_key_name", "GH_REVIEW_APP_PRIVATE_KEY_B64"},
+	} {
+		line := want.variable + "=" + want.value + "\n"
+		if !bytes.Contains(lib, []byte(line)) {
+			t.Errorf("scripts/e2e/lib/github-apps.sh does not set %s, which realGitHubApps falls back to: the two must name one App", line[:len(line)-1])
+		}
+	}
+}
+
 func privateKeyCommand(key string) string {
 	// secretsd stores the reviewer key in Node-compatible base64: unpadded and with one trailing
 	// dangling sextet. Normalize exactly as config.decodeBase64LikeNode before POSIX base64 decodes

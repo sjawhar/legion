@@ -401,6 +401,15 @@ echo "defaults $default_implement_app_id $default_implement_app_key_name"`
     expect(seen).toEqual([]);
   });
 
+  test("an input set to an empty value is refused, not read as a choice of the default", async () => {
+    const { code, stderr } = await githubApps(
+      { ...appInputs, LEGION_E2E_REVIEW_APP_ID: "" },
+      proveBoth
+    );
+    expect(code).toBe(1);
+    expect(stderr).toContain("LEGION_E2E_REVIEW_APP_ID must be");
+  });
+
   test("write_github_apps refuses a role require_app_inputs did not read, and writes nothing", async () => {
     const { code, stdout, stderr, work } = await githubApps(
       appInputs,

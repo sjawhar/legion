@@ -16,10 +16,13 @@
 # is its id's, whether the pair came from a default or an input: lib/app-logins.ts signs an App JWT
 # with the key and refuses the run unless GitHub's GET /app answers that id and the write
 # permission the role's work needs. The key never enters
-# this shell, an argv or a file. A caller's legion.yaml includes $work/github-apps.yaml as it is
-# (`$(<"$work/github-apps.yaml")` in its heredoc), never a copy or an edit, so the block the check
-# proved is the block the daemon loads. app_key_unsets is the `env` argument list that keeps every
-# App key out of a process the run starts.
+# this shell, an argv or a file. Each caller that writes a legion.yaml includes
+# $work/github-apps.yaml as it is (`$(<"$work/github-apps.yaml")` in its heredoc), never a copy or
+# an edit, so the block the check proved is the block the daemon loads; Stage 4a, which writes no
+# legion.yaml, hands its Go harness the same <role>_app_id and <role>_app_key_name the check read.
+# app_key_unsets is the `env` argument list that keeps every
+# App key out of a process the run starts. It is built when require_app_inputs runs, so a key
+# variable a caller exports after that call is not in it.
 
 github_apps_lib=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
 
@@ -52,8 +55,10 @@ require_app_inputs() {
     key_var=LEGION_E2E_${upper}_APP_KEY_NAME
     id_default=default_${role}_app_id
     key_default=default_${role}_app_key_name
-    id=${!id_var:-${!id_default}}
-    key=${!key_var:-${!key_default}}
+    # An input set to an empty value is a command that printed nothing, not a choice of the
+    # default: it is refused, where an unset one takes this deployment's own value.
+    id=${!id_var-${!id_default}}
+    key=${!key_var-${!key_default}}
     # The bounds keep a pasted credential out of the message: a base64 key is letters and digits
     # too, so only its length tells it from a store key's name, and a refusal prints neither.
     [[ "$id" =~ ^[1-9][0-9]*$ && ${#id} -le 12 ]] || fail "$id_var must be the $role App's numeric id (digits, no leading zero); its value is not printed"
