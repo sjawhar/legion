@@ -214,9 +214,6 @@ type deliveryOutcome struct {
 	// core-NATS exception for this terminal fanout outcome.
 	exceptionReason string
 	fanoutRefusal   bool
-	// exceptionFailureRetries: an exception-publish failure escalates this
-	// outcome's retry result to true.
-	exceptionFailureRetries bool
 	// exceptionFailureClearsAttempt: an exception-publish failure clears the
 	// attempt-cache entry, independent of (and possibly in addition to)
 	// clearAttempt below.
@@ -226,8 +223,8 @@ type deliveryOutcome struct {
 	clearAttempt bool
 	// recordDedupe marks the dedupe-cache entry as sent.
 	recordDedupe bool
-	// retry is this outcome's baseline retry request, before any exception-
-	// publish escalation above is folded in.
+	// retry is whether this outcome asks for the attempt to be retried
+	// (NAKed).
 	retry bool
 }
 
@@ -245,15 +242,11 @@ func applyDeliveryOutcome(cfg listenerDeliveryHandlerConfig, item contracts.Enve
 	if outcome.log != nil {
 		outcome.log(cfg.logger)
 	}
-	retry := outcome.retry
 	if outcome.exceptionReason != "" && !isExceptionsTopic(item.Topic) && (isControlTopic(item.Topic) || outcome.fanoutRefusal) {
 		if err := publishDeliveryException(cfg.client, item, outcome.exceptionReason, outcome.sessionID, outcome.fanoutRefusal); err != nil {
 			cfg.logger.Error(exceptionPublishFailedLine, slog.String("error", err.Error()), slog.String("topic", item.Topic))
 			if outcome.exceptionFailureClearsAttempt {
 				cfg.attemptCache.Clear(item.DedupeKey, outcome.sessionID)
-			}
-			if outcome.exceptionFailureRetries {
-				retry = true
 			}
 		}
 	}
@@ -263,7 +256,7 @@ func applyDeliveryOutcome(cfg listenerDeliveryHandlerConfig, item contracts.Enve
 	if outcome.recordDedupe {
 		cfg.dedupeCache.Record(item.DedupeKey, outcome.sessionID)
 	}
-	return retry
+	return outcome.retry
 }
 
 // listenerDeliveryHandler decodes and validates the envelope, then routes it
@@ -986,11 +979,8 @@ func fanoutDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMessage, 
 				log: func(logger *logging.Logger) {
 					logger.DeliveryLog(slog.LevelError, "listener delivery failed", interest.SessionID, item.Topic, item.EventID, "failed", slog.String("error", err.Error()))
 				},
-				exceptionReason:               "delivery_failed",
-				exceptionFailureClearsAttempt: true,
-				exceptionFailureRetries:       true,
-				clearAttempt:                  retryable,
-				retry:                         retryable,
+				clearAttempt: retryable,
+				retry:        retryable,
 			}) {
 				failed = true
 			}
