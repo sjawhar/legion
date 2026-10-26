@@ -165,7 +165,15 @@ export async function loadDocumentTransport(): Promise<ConnectDocument> {
       name: artifactId,
       onAuthenticated: () => {
         authenticated = true;
-        callbacks.onAdmission(isSchemaReadOnly(provider.authorizedScope));
+        const readOnly = isSchemaReadOnly(provider.authorizedScope);
+        callbacks.onAdmission(readOnly);
+        // A reconnect's admission can differ from the first one (an issue reopened or closed
+        // since), and the pending sync decides from it whether a local update is an edit to keep.
+        if (announced) {
+          void sync?.admitted(readOnly).catch((error: unknown) => {
+            console.error("Could not take this document's new admission", error);
+          });
+        }
         notifySynced();
       },
       onClose: ({ event }) => {

@@ -381,6 +381,42 @@ test("a read-only first sync drops a saved row the server already holds", async 
   expect(states.at(-1)).toEqual({ count: 0, readOnly: true, rebuiltAt: undefined, stored: true });
 });
 
+test("a connection first admitted read-only and later writable stores and counts the typing", async () => {
+  const artifact = artifactId();
+  const server = serverWith("shared", 100);
+  // A person typed into the document in another page while it was writable.
+  await savedEdit(artifact, server, " saved");
+  const { doc, states, sync, type } = await scripted(artifact, Y.encodeStateAsUpdate(server));
+  await sync.firstSync(true);
+  expect(doc.getText("t").toString()).toBe("shared");
+
+  // The issue reopens and the socket reconnects: the new admission is writable. The edit the
+  // read-only first sync left is restored, and what the person types now is stored.
+  await sync.admitted(false);
+  expect(doc.getText("t").toString()).toBe("shared saved");
+  type(" typed");
+
+  await waitFor(async () => expect((await rowsOf(artifact)).length).toBe(2));
+  await waitFor(() =>
+    expect(states.at(-1)).toEqual({ count: 2, readOnly: false, rebuiltAt: undefined, stored: true })
+  );
+});
+
+test("a later writable admission keeps this tab's own unacknowledged rows", async () => {
+  const artifact = artifactId();
+  const { sync, type } = await scripted(artifact, Y.encodeStateAsUpdate(serverWith("shared", 100)));
+  await sync.firstSync(false);
+  type(" mine");
+  await waitFor(async () => expect((await rowsOf(artifact)).length).toBe(1));
+  const mine = await rowsOf(artifact);
+
+  // The issue closes and reopens while the server never acknowledged the edit.
+  await sync.admitted(true);
+  await sync.admitted(false);
+
+  expect(await rowsOf(artifact)).toEqual(mine);
+});
+
 test("a restore that parks on a scratch document is dropped, reported, and leaves the live document alone", async () => {
   const artifact = artifactId();
   // The edit was typed against a history the server no longer has: a rebuild reseeded the same
