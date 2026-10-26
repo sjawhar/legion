@@ -177,6 +177,12 @@ func (r *Registry) logger() *slog.Logger {
 	return r.log
 }
 
+// Logger is the logger the registry logs through: the listener's own, which it passes to Open, so
+// a route that reads the registry logs what it makes of a read there too.
+func (r *Registry) Logger() *slog.Logger {
+	return r.logger()
+}
+
 func (r *Registry) roles() bus.KeyValue {
 	r.kvMu.RLock()
 	defer r.kvMu.RUnlock()
