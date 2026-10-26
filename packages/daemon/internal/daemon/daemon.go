@@ -1226,7 +1226,7 @@ func (s *supervision) launchUnfinishedClaim(token claim.Token, m *supervise.Mach
 // relaunchUnfinished launches tokens' unfinished launches on a goroutine of its own, never on the
 // boot: at once when the boot reconciliation succeeded (reconciled), then on the normal orphan-sweep
 // cadence, until none is left or the daemon stops. A relaunched worker reaches the daemon only once
-// the daemon is up — a Sandbox pod's launchers dial it through its Service, which routes only to a
+// the daemon is up — a Sandbox pod's launcher dials it through its Service, which routes only to a
 // pod whose probes pass, so only once the API answers /healthz, and a shim's hello is resolved only
 // once restoration has closed — so a relaunch the boot waited on could not register: it spent its
 // whole launch budget, launch_failure_limit × worker_boot_timeout_seconds, with the API unanswered.

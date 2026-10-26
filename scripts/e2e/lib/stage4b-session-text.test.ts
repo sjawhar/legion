@@ -800,6 +800,7 @@ stop_tree() { :; }; stop_pid() { :; }; record_pair() { :; }; run_processes() { :
 note() { echo "   $*"; }
 ${sessionCopy}
 ${fn("collect_transcripts")}
+${fn("remove_negative_config")}
 ${fn("cleanup")}
 trap cleanup EXIT
 exit 0`,
