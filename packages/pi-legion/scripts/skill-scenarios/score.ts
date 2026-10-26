@@ -1299,8 +1299,14 @@ export interface SpecWork {
  * attributes give the task's id. taskNames reads the opening tags alone, so a closing tag that a
  * report quotes cannot make its list shorter. A greedy capture of the body would merge the
  * envelopes of a blocking result of several tasks into one match and drop every name after the
- * first, so a task that failed would not be required. A quoted opening tag adds a name that has no
- * completed record, and that rejects the check. */
+ * first, so a task that failed would not be required.
+ * The scan lists names conservatively; it does not tell which task is which. An opening tag that a
+ * report quotes can add a name, and no tag can remove one. An added name with no completed record
+ * rejects the check (`no report of task <name> arrived`). An added name that has a completed record
+ * of its own, such as another task that finished after this call, brings that task's unrelated
+ * report into the check, and the check counts. A task of the call that failed still rejects it,
+ * since its name stays in the list. To close the gap, take the call's task ids from its structured
+ * results, not from the text. */
 const TASK_RESULT_OPEN = /<task-result\b([^>]*)>/g;
 const attribute = (attributes: string, name: string) =>
   new RegExp(`\\b${name}="([^"]*)"`).exec(attributes)?.[1];
