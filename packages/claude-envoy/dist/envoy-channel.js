@@ -36562,15 +36562,6 @@ function decodeBlockId(encoded) {
   }
   return id === "" || hasControlCharacter(id) || new TextEncoder().encode(id).length > MAX_BLOCK_ID_BYTES ? undefined : id;
 }
-var MAX_BLOCK_TARGET_BYTES = 2048;
-function blockTargetFits(owner, slug, block) {
-  let bytes = 0;
-  for (const character of `${owner}/${slug}#${block}`) {
-    const code = character.codePointAt(0) ?? 0;
-    bytes += code < 128 ? 1 : code < 2048 ? 2 : code < 65536 ? 3 : 4;
-  }
-  return bytes <= MAX_BLOCK_TARGET_BYTES;
-}
 var MAX_BLOCK_PIN = 9223372036854775807n;
 function parseBlockFragment(encoded) {
   const at = encoded.indexOf("@");
@@ -36637,6 +36628,15 @@ function snippetText(snippet) {
 // ../contracts/src/dispatch-text-rules.ts
 var SESSION_ID_PATTERN = "[^/?#\\s\\p{Z}\\p{Cc}<>\"'`\\[\\]|]+";
 var sessionIdOnly = new RegExp(`^${SESSION_ID_PATTERN}$`, "u");
+var MAX_REFERENCE_TARGET_BYTES = 2048;
+function referenceTargetFits(target) {
+  let bytes = 0;
+  for (const character of target) {
+    const code = character.codePointAt(0) ?? 0;
+    bytes += code < 128 ? 1 : code < 2048 ? 2 : code < 65536 ? 3 : 4;
+  }
+  return bytes <= MAX_REFERENCE_TARGET_BYTES;
+}
 function pictureCaption(name) {
   return name.replace(/[\\[\]`]/g, "\\$&").replace(/\s+/g, " ");
 }
@@ -38325,8 +38325,8 @@ function dispatchChildRef(ownerRef, kind, id) {
 }
 function parseBlockRef(document, fragment) {
   const target = parseBlockFragment(fragment);
-  const parsed = parseDispatchRef(document);
-  if (target === undefined || parsed === null || parsed.version !== undefined || parsed.kind !== "spec" && parsed.kind !== "artifact" || !blockTargetFits(parsed.owner.kind === "issue" ? parsed.owner.issue : parsed.owner.project, parsed.id, target.block)) {
+  const parsed = parseRef(document);
+  if (target === undefined || parsed === null || parsed.version !== undefined || parsed.kind !== "spec" && parsed.kind !== "artifact") {
     return null;
   }
   return {
@@ -38339,7 +38339,31 @@ function parseBlockRef(document, fragment) {
     ...target.pin === undefined ? {} : { pin: target.pin }
   };
 }
+function refTarget(ref) {
+  const owner = ref.owner.kind === "issue" ? ref.owner.issue : ref.owner.project;
+  switch (ref.kind) {
+    case "spec":
+    case "artifact":
+      return `${owner}/${ref.id}`;
+    case "block":
+      return `${owner}/${ref.id}#${ref.block}`;
+    case "ask":
+    case "comment":
+    case "message":
+      try {
+        return decodeURIComponent(ref.id);
+      } catch {
+        return ref.id;
+      }
+    default:
+      return owner;
+  }
+}
 function parseDispatchRef(ref) {
+  const parsed = parseRef(ref);
+  return parsed !== null && referenceTargetFits(refTarget(parsed)) ? parsed : null;
+}
+function parseRef(ref) {
   const hash2 = ref.indexOf("#");
   if (hash2 !== -1 && ref.startsWith("b-", hash2 + 1)) {
     return parseBlockRef(ref.slice(0, hash2), ref.slice(hash2 + 3));
@@ -40482,7 +40506,7 @@ var pictureSendingTools = {
   dispatch_comment: true,
   dispatch_message: true
 };
-function refTarget(ref, kind, id) {
+function refTarget2(ref, kind, id) {
   const ownerRef = ref.owner.kind === "issue" ? dispatchIssueRef(ref.owner.issue) : dispatchDocumentRef(ref.owner.project, `${ref.artifact}`);
   return dispatchChildRef(ownerRef, kind, id);
 }
@@ -40735,7 +40759,7 @@ function dispatchRefFromUrl(value, serverUrl) {
   };
   const blockOf = (versionName, owner, slug2) => {
     const id = url2.hash.startsWith("#b-") ? decodeBlockId(url2.hash.slice(3)) : undefined;
-    return id === undefined || url2.searchParams.get(versionName) || !blockTargetFits(owner, slug2, id) ? "" : `#b-${encodeBlockId(id)}`;
+    return id === undefined || url2.searchParams.get(versionName) || !referenceTargetFits(`${owner}/${slug2}#${id}`) ? "" : `#b-${encodeBlockId(id)}`;
   };
   const issuePage = url2.pathname.match(/^\/issues\/([A-Z][A-Z0-9]{1,9}-[1-9][0-9]*)(?:\/(spec|log|conversation|activity|children)|\/artifacts\/([^/]+)|\/asks\/([^/]+)|\/comments\/([^/]+)|\/messages\/([^/]+))?\/?$/);
   if (issuePage) {
@@ -42591,7 +42615,7 @@ ${trailer.join(`
         const ref = ownerArguments.ref;
         const askRead = await readAskRef(input.tool, ref.id, refOwnerName(ref), client, async () => ref.owner.kind === "issue" ? client.listIssueAsks(ref.owner.issue) : client.getArtifactAsks(await documentIdOf(ref), "all"));
         await refuseItemOffRef(input.tool, "ask", ref, stringArg(args, "ref"), askRead.ask, () => documentIdOf(ref));
-        const askRef = refTarget(ref, "ask", askRead.ask.id);
+        const askRef = refTarget2(ref, "ask", askRead.ask.id);
         const [pictures3, graph2] = await Promise.all([
           picturesOf(askTexts(askRead)),
           graphSections(client, askRef)
@@ -42607,7 +42631,7 @@ ${trailer.join(`
         const id = await resolveIdPrefix(input.tool, "comment", ref.id, refOwnerName(ref), async () => ref.owner.kind === "issue" ? client.getComments(ref.owner.issue) : client.getArtifactComments(await documentIdOf(ref)));
         const comment = await client.getComment(id);
         await refuseItemOffRef(input.tool, "comment", ref, stringArg(args, "ref"), comment.comment, () => documentIdOf(ref));
-        const commentRef = refTarget(ref, "comment", id);
+        const commentRef = refTarget2(ref, "comment", id);
         const [pictures3, graph2] = await Promise.all([
           picturesOf(datedBodies([comment.comment, ...comment.replies])),
           graphSections(client, commentRef)

@@ -133,8 +133,8 @@ block and choose **Copy link to block** in the Spec tab row. The link ends in `#
 id. Opening it scrolls to that block and highlights it briefly. Dispatch gives each block its id.
 Markdown an agent writes can name one as `{#id}`, at most 256 bytes long; Dispatch refuses a
 longer new one. A block link names its block only while the document's key and name and the
-block's id, `<KEY>/<name>#<id>`, come to at most 2048 bytes; a longer one names no block, and
-opening it opens the document.
+block's id, `<KEY>/<name>#<id>`, come to at most 2048 bytes, the bound every reference is held to
+(References, below); a longer one names no block, and opening it opens the document.
 
 ## References
 
@@ -142,6 +142,10 @@ Anything in Dispatch can be linked with a `dispatch://` reference: `dispatch://C
 issue, `dispatch://CORE-12/spec` for its spec, and similar forms for documents, asks, comments, and
 messages. In a document or a comment, a reference shows as a link titled with what it points to.
 Rest the pointer on a link, or focus it with the keyboard, to see a preview card.
+
+A reference names what it points to only while the id Dispatch records the link under comes to at
+most 2048 bytes: an issue's key, a document's `<KEY>/<name>`, a block's `<KEY>/<name>#<id>`, or an
+ask's, comment's or message's id. A longer one is no link: your text is posted as written.
 
 Every issue, document, and ask has a **Referenced by** list of what links to it. A document page
 shows the list open; an issue shows it in its header.

@@ -210,7 +210,10 @@ to its document. `0118`-`0121` add triggers that owe the block index what any bu
 document version carrying markdown, and a comment, ask or issue message whose text holds `#b-`;
 `0122` owes it the comments, asks and issue messages already stored that hold `#b-`. `main` starts
 `docs.Service.RunBlockIndexReconciliation` (lease `block-index`), which indexes what is owed with
-no command run (`packages/envoy/AGENTS.md`, "References form one graph").
+no command run (`packages/envoy/AGENTS.md`, "References form one graph"). `0123` and `0124`
+rebuild `asks_block_id_unique`, `asks_anchor_block_id_idx` and `comments_anchor_block_id_idx`
+over `block_id_key(id)`, the id's SHA-256, so an ask block or an anchor under a block id of any
+length is written.
 `envoy-dispatch rebuild-refs` reparses every document's latest version, ask, comment, and issue message,
 reconciles `refs` with the text (surviving edges keep their provenance, orphan sources are
 deleted), marks every document owed a block index, and prints counts, `blocks_owed` among them;

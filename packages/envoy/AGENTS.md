@@ -238,11 +238,18 @@ replaces whole does not already carry (`pmdoc.LongBlockID`, run by `pmdoc.ParseF
 naming its length and the bound. An insert or an accepted suggestion replaces no document, so any
 such id it names is refused. A browser's edit can still write a long id; the document stores,
 renders and versions it as any other, and an upload that keeps it, or an insert elsewhere, is
-written. A reference to a block is bounded as a whole too: its target id
-`<KEY or PROJECT>/<slug>#<block id>` (`refs.ToID`), which `refs.to_id` and `block_refs.to_id`
-hold in B-tree keys, is at most `text.MaxBlockTargetBytes`, 2048 bytes (`MAX_BLOCK_TARGET_BYTES`),
-since a document's slug has no bound. At that bound the widest such key, `block_refs_pkey` with
-a 256-byte source block id, is about 2360 bytes.
+written. A reference is bounded as a whole too: its target id (`refs.ToID`: an issue's key, a
+document's `<KEY or PROJECT>/<slug>` or `agent/<session id>/<slug>`, a block's
+`<KEY or PROJECT>/<slug>#<block id>`, an ask's, a comment's or a message's id, a component's
+`<project>/<id>`), which `refs.to_id` and `block_refs.to_id` hold in B-tree keys, is at most
+`text.MaxTargetBytes`, 2048 bytes (`MAX_REFERENCE_TARGET_BYTES`, `referenceTargetFits` in
+`@legion/contracts`), since neither a slug nor an item id has a bound of its own: `text.Extract`
+drops one past it (`targetFits`), so the text citing it is written with no edge, and a route
+given one answers `400 INVALID_REFERENCE`. At that bound the widest such key, `block_refs_pkey`
+with a 256-byte source block id, is about 2360 bytes. An ask block's row and a comment's or an
+ask's anchor key their block id by `block_id_key`, its SHA-256 (migrations 0123 and 0124), so a
+block id of any length, a long one a browser's edit wrote included, is written there, and a
+settlement never fails on one.
 
 Markdown a caller writes is stored as its rendering, so a write whose rendering reads back as
 another document is refused, naming what reads back (`pmdoc.RefuseMisreadDocument` for a whole
@@ -1496,11 +1503,12 @@ percent-encoding, and every writer writes it as `text.EncodeBlockID` and `encode
 (`@legion/contracts`) do: each UTF-8 byte but ASCII letters, digits and `-` percent-encoded in
 upper-case hex, so `@` is `%40` and a raw `@` in the fragment is only ever the `@v<N>` pin. A
 fragment whose id decodes to more than `text.MaxBlockIDBytes` (`MAX_BLOCK_ID_BYTES`), 256 bytes,
-whose target id `<KEY or PROJECT>/<slug>#<block id>` is past `text.MaxBlockTargetBytes`
-(`MAX_BLOCK_TARGET_BYTES`), 2048 bytes, or whose pin is past 9223372036854775807 names no block:
-after `dispatch://` the text is no reference, and on a live document page it names the document.
-`parseBlockFragment` carries a pin
-as its digits, so the browser never rounds one past 2^53. The two encoders are tested against
+or whose pin is past 9223372036854775807 names no block: after `dispatch://` the text is no
+reference, and on a live document page it names the document. A block whose target id
+`<KEY or PROJECT>/<slug>#<block id>` is past `text.MaxTargetBytes` (`MAX_REFERENCE_TARGET_BYTES`),
+2048 bytes, the bound every reference's target id is held to, names nothing the same way, and a
+live document page whose document or item is past it names nothing. `parseBlockFragment` carries
+a pin as its digits, so the browser never rounds one past 2^53. The two encoders are tested against
 `DISPATCH_BLOCK_ID_ENCODINGS`, whose JSON copy is
 `text/testdata/dispatch-block-id-encodings.json`. The Go reader parses a reference as the browser
 does: a query's pairs split on `&` alone,
@@ -1817,8 +1825,9 @@ owner (the same issue, or for a project document the same project's other docume
 under that id that asks, or once asked (its `ask.opened` and `ask.edited` events), exactly what the
 block asks - its question, options, `multiple` and urgency, which a copy carries unchanged
 (`copiedAskSources`, `docs/copied_asks.go`): a record copy of a spec uploaded beside it carries its
-blocks under their ids. Block ids are unique per document only (`asks_block_id_unique` is on
-`block_artifact_id` and `block_id`), so the text has to match as well, since an author-chosen id
+blocks under their ids. Block ids are unique per document only (`asks_block_id_unique` keeps
+`block_artifact_id` and `block_id` unique, keyed on `block_id_key(block_id)`, the id's SHA-256,
+since migration 0123), so the text has to match as well, since an author-chosen id
 such as `decision` can name unrelated questions on two documents. A match on an earlier wording
 counts only while the ask is open, or when its answer or resolution was given while that wording was
 current: its `ask.answered` or `ask.resolved` event comes after the event that made the wording

@@ -9,17 +9,25 @@
   `dispatch://PROJECT/artifact/<slug>#b-<id>`, the id percent-encoded as `text.EncodeBlockID` and
   `encodeBlockId` write it, and so does a live document page's `#b-<id>`; `@v<N>` after the id
   pins it to version N of the document. A reference names a block id of at most 256 bytes,
-  decoded (`text.MaxBlockIDBytes`), a target id `<KEY or PROJECT>/<slug>#<block id>` of at most
-  2048 bytes (`text.MaxBlockTargetBytes`; a document's slug has no bound) and N of at most
-  9223372036854775807: a longer id or target or a larger N is no reference (a live document page
-  whose fragment names such a block names the document), `400 INVALID_REFERENCE` where the API
-  is given one, and a pin past every version the document has is `404 NOT_FOUND`
-  `no version N of <document>`. A seeded spec, an
+  decoded (`text.MaxBlockIDBytes`), and N of at most 9223372036854775807: a longer id or a larger
+  N is no reference, `400 INVALID_REFERENCE` where the API is given one, and a pin past every
+  version the document has is `404 NOT_FOUND` `no version N of <document>`. A seeded spec, an
   upload, an `insert` or an accepted suggestion that names a new block id past the bound is
   refused, naming the bound (`400 INVALID_MARKDOWN`, `400 INVALID_OP` for an insert); an id the
   document already holds is kept. A block carrying such an id, which a browser's edit can write,
   is no graph node: its version is written, a mention inside it starts at the block holding it,
-  and the server logs a warning naming the document, the longest id's length and the bound. A
+  and the server logs a warning naming the document, the longest id's length and the bound. An
+  ask block, a comment anchored in a block and an ask anchored in one are written under a block
+  id of any length, so a settlement never fails on one. Every reference, a block's or any other,
+  names its target only while the target id the graph stores its edge under (`refs.ToID`: an
+  issue's key, a document's `<KEY or PROJECT>/<slug>`, a block's
+  `<KEY or PROJECT>/<slug>#<block id>`, an ask's, a comment's or a message's id) holds at most
+  2048 bytes (`text.MaxTargetBytes`), since a slug or an item id has no bound of its own: past it
+  the text is written and cites nothing, the API answers `400 INVALID_REFERENCE` for it, and a
+  live document page whose block is past it names the document, one whose document or item is
+  past it nothing. A new artifact's name, and the reference key `<owner>/<slug>` it gives the
+  artifact, hold at most 2692 bytes: an upload past either is `400 INVALID_ARTIFACT` naming the
+  bound, and an artifact already stored past it keeps taking versions and edits. A
   mention written inside a block starts at the innermost block holding it: `GET /api/v1/references`
   names that block as the source (`kind: "block"`, with
   `block_id`, `document`, `changed_version` and `changed_at`, the version its text last changed
@@ -32,15 +40,17 @@
   `GET /api/v1/block-links?from=<document>&to=<document>` lists the links from the blocks of one
   document to the blocks of another. `GET /api/v1/artifacts/{id}/references` keeps every source.
   Migrations `0117`-`0122` add the block tables, the triggers that owe the index what any build
-  writes, and the seed of the comments, asks and issue messages already holding `#b-`; the server's
-  block-index reconciliation (lease `block-index`, logged as `dispatch: block index`) indexes every
-  document and text owed, with no command run, and takes one more lease connection per server,
-  nine. `rebuild-refs` marks every document owed that index and prints `blocks_owed=`. The
-  dashboard titles a block link with the block's text, its hover card shows the document and, for
-  a pinned link, the version and how the block stands since, a pinned link opens that version, and
-  Referenced by shows one row per citing block, each linked to its block; on a document's page each
-  row also links the document's own block the edge meets (`block <id>`), so a source citing two
-  of its blocks is two rows.
+  writes, and the seed of the comments, asks and issue messages already holding `#b-`, and
+  `0123`-`0124` rebuild the ask-block and block-anchor indexes over `block_id_key`, the id's
+  SHA-256, holding `asks` while its two indexes build and `comments` while its one does; the
+  server's block-index reconciliation (lease `block-index`, logged as `dispatch: block index`)
+  indexes every document and text owed, with no command run, and takes one more lease connection
+  per server, nine. `rebuild-refs` marks every document owed that index and prints `blocks_owed=`.
+  The dashboard titles a block link with the block's text, its hover card shows the document and,
+  for a pinned link, the version and how the block stands since, a pinned link opens that version,
+  and Referenced by shows one row per citing block, each linked to its block; on a document's page
+  each row also links the document's own block the edge meets (`block <id>`), so a source citing
+  two of its blocks is two rows.
 - A project's default assignee, the last step of an issue create's assignee chain: an issue created
   with no assignee, by nobody (the shared token), under no parent or under a parent with nobody on
   it, goes to the person the project names; nothing already filed, and no create that names an

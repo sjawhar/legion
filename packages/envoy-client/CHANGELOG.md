@@ -24,9 +24,12 @@
   `(block <ref>)` when the graph names the document's block at that edge. `ParsedDispatchRef`
   gains kind `"block"` with `block`, `document` and `pin`; `pin` is N's decimal digits, a string,
   so a pin past 2^53 is never rounded. As the server reads it, a block id longer than 256 bytes
-  decoded, a block whose target id `<KEY or PROJECT>/<slug>#<block id>` is longer than 2048 bytes,
-  or a pin past 9223372036854775807, is no reference; a live document page URL whose fragment
-  names such a block names its document.
+  decoded, or a pin past 9223372036854775807, is no reference. `parseDispatchRef` and
+  `dispatchRefFromUrl` hold every reference's target id, the issue key, `<KEY or PROJECT>/<slug>`,
+  a block's `<KEY or PROJECT>/<slug>#<block id>` or the ask, comment or message id, to 2048 bytes
+  (`referenceTargetFits`), as the server does: a longer one is no reference, and a live document
+  page URL whose block is past it names its document, one whose document or item is past it
+  nothing.
 
 - `dispatch issue-update --before <KEY>` and `--after <KEY>` move an issue on its project's board:
   the executor carries the two arguments into the server's `rank` on the PATCH it already makes, so

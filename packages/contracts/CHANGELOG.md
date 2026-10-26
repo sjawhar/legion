@@ -15,12 +15,15 @@
   `DISPATCH_BLOCK_ID_ENCODINGS`; `decodeBlockId` and `parseBlockFragment` read a fragment's id and
   pin back, for the dashboard and the client alike. As Go reads them, an id holds at most
   `MAX_BLOCK_ID_BYTES` (256 UTF-8 bytes, decoded; Go's `text.MaxBlockIDBytes`) and a pin at most
-  9223372036854775807, and a longer id or a larger pin names no block. A block's target id
-  `<KEY or PROJECT>/<slug>#<block id>` holds at most `MAX_BLOCK_TARGET_BYTES` (2048 UTF-8 bytes;
-  Go's `text.MaxBlockTargetBytes`), as `blockTargetFits` tests it: a block past it names nothing,
-  and a live document page whose fragment names one is its document. `parseBlockFragment`'s `pin`
-  is N's decimal digits as a string, so no pin past 2^53 is rounded. `DISPATCH_TEXT_REFERENCES`
-  gains the block and pin rows both reference readers are held to, the bounds included.
+  9223372036854775807, and a longer id or a larger pin names no block. Every reference's target
+  id, the id the server stores its edge under (an issue's key, a document's
+  `<KEY or PROJECT>/<slug>`, a block's `<KEY or PROJECT>/<slug>#<block id>`, an ask's, a
+  comment's or a message's id), holds at most `MAX_REFERENCE_TARGET_BYTES` (2048 UTF-8 bytes; Go's
+  `text.MaxTargetBytes`), as `referenceTargetFits` tests it: a reference past it names nothing, a
+  live document page whose block is past it is its document, and one whose document or item is
+  past it names nothing. `parseBlockFragment`'s `pin` is N's decimal digits as a string, so no pin
+  past 2^53 is rounded. `DISPATCH_TEXT_REFERENCES` gains the block, pin and target-bound rows both
+  reference readers are held to.
 - `dispatch_read` takes `events` (a positive integer, the issue's last N events) and `all_events`
   (every event), for an issue read and its `dispatch://KEY/log`, and its description says an issue
   read lists the last 10 without either.
