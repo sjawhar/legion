@@ -84,6 +84,12 @@
 # - LEGION_E2E_STORAGE_CLASS (required) is the StorageClass of the issue pod's disk, the pod's own
 #   generic ephemeral volume (runtime.kubernetes.storage_class): the cluster has no default to fall
 #   back on.
+# - LEGION_E2E_PRIORITY_CLASS (optional) names a PriorityClass of the cluster the run's pods take:
+#   the bridge pod's priorityClassName, and runtime.kubernetes.scheduling.priority_class in the run's
+#   legion.yaml, so the daemon gives it to the issue pod, the image probe and the repository cache.
+#   Unset, none of them has a priority class and the legion.yaml carries no scheduling block. Set,
+#   the run's pods preempt lower-priority work on a full node, and are themselves preempted only by
+#   a higher class (a cluster's own system pods): prerequisites refuses a class the cluster lacks.
 # - LEGION_E2E_CLAUDE_KEY_FILE (required) names a file holding the Anthropic API key the Claude Code
 #   implementer reaches its model with. The run copies it once (0600) and creates the providers
 #   Secret the runtime names for the project with it, which `provider_keys: {ANTHROPIC_API_KEY:
@@ -179,6 +185,9 @@ runtime_kubeconfig=${LEGION_E2E_RUNTIME_KUBECONFIG:-$HOME/.kube/legion-daemon-pr
 runtime_context=${LEGION_E2E_RUNTIME_CONTEXT:-}
 image=${LEGION_E2E_IMAGE:-}
 storage_class=${LEGION_E2E_STORAGE_CLASS:-}
+priority_class=${LEGION_E2E_PRIORITY_CLASS:-}
+# lib/bridge-tunnel.sh's optional input: the bridge pod's priority class.
+bridge_priority_class=$priority_class
 pod_reachability=${LEGION_E2E_POD_REACHABILITY:-}
 model_route=${LEGION_E2E_MODEL_ROUTE:-}
 claude_key_file=${LEGION_E2E_CLAUDE_KEY_FILE:-}
@@ -713,7 +722,9 @@ runtime:
     namespace: $namespace
     image: $image
     storage_class: $storage_class
-    issue_volume: 20Gi
+    issue_volume: 20Gi${priority_class:+
+    scheduling:
+      priority_class: $priority_class}
     session_store: postgres
     session_dsn_secret: $session_dsn_key
     kubeconfig: $runtime_kubeconfig
@@ -1103,6 +1114,12 @@ cleanup() {
     rm -rf "$work"
   else
     printf "the run's scratch workspace is %s\n" "$work" >&2
+    # The bridge watchdog ended the run (lib/bridge-tunnel.sh bridge_down): the failure is the
+    # bridge's, whatever check was running when its TERM arrived.
+    if [ -s "$work/bridge-failed" ]; then
+      printf 'FAIL bridge: %s\n' "$(cat "$work/bridge-failed")" >&2
+      check=bridge
+    fi
     printf 'claude backend sandbox e2e: FAIL (check %s)\n' "$check" >&2
   fi
   printf "the run's evidence is %s\n" "$evidence" >&2
@@ -1125,6 +1142,8 @@ case "$image" in
 esac
 [ -n "$storage_class" ] ||
   fail "LEGION_E2E_STORAGE_CLASS is unset: name the StorageClass of the issue pod's disk (the cluster has no default to fall back on)"
+[ -z "$priority_class" ] || [[ "$priority_class" =~ ^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$ && ${#priority_class} -le 253 ]] ||
+  fail "LEGION_E2E_PRIORITY_CLASS must be a PriorityClass's name, not '$priority_class'"
 [ -n "$claude_key_file" ] ||
   fail "LEGION_E2E_CLAUDE_KEY_FILE is unset: name a file holding the Anthropic API key the Claude Code implementer reaches its model with"
 [ -f "$claude_key_file" ] && [ -r "$claude_key_file" ] ||
@@ -1250,6 +1269,10 @@ case "$pod_reachability" in
 esac
 pod_dispatch_url="http://$host:$port_dispatch"
 op get namespace "$namespace" -o name >/dev/null || fail "the operator context $operator cannot read namespace $namespace"
+if [ -n "$priority_class" ]; then
+  op get priorityclass "$priority_class" -o name >/dev/null 2>&1 ||
+    fail "LEGION_E2E_PRIORITY_CLASS names $priority_class, which is no PriorityClass the operator context reads on this cluster"
+fi
 timeout --foreground 120 kubectl --kubeconfig "$runtime_kubeconfig" --context "$runtime_context" -n "$namespace" get sandboxes -o name >/dev/null ||
   fail "the runtime identity (context $runtime_context in $runtime_kubeconfig) cannot list the Sandboxes of namespace $namespace; is Agent Sandbox installed and the identity bound?"
 leftover=$(op get sandboxes,pods,pvc,configmaps,secrets -l "legion.dev/project=$run_label" -o name 2>&1) ||

@@ -960,7 +960,15 @@ operator supplies and the run never builds or stands in for (the operator contex
 the namespace, the pods and its teardown use. `prerequisites` holds the runtime identity to listing
 the namespace's Sandboxes. `LEGION_E2E_IMAGE` (required, by digest) and
 `LEGION_E2E_STORAGE_CLASS` (required: the StorageClass of the issue pod's own disk, a generic
-ephemeral volume, since the cluster has no default) are the pod's. `LEGION_E2E_CLAUDE_KEY_FILE`
+ephemeral volume, since the cluster has no default) are the pod's. `LEGION_E2E_PRIORITY_CLASS`
+(optional) names a PriorityClass of the cluster for the run's pods: the bridge pod's
+`priorityClassName`, and `runtime.kubernetes.scheduling.priority_class` in the run's `legion.yaml`,
+so the daemon gives it to the issue pod, the image probe and the repository cache through the
+product's own setting. Unset, none of them has one and the `legion.yaml` carries no `scheduling`
+block. Set, the run's pods preempt lower-priority work on a full node, and only a higher class (a
+cluster's own system pods) preempts them; `prerequisites` refuses a class the operator context
+cannot read on the cluster. A priority-0 bridge pod on a full GKE node was preempted by the
+cluster's `kube-dns` mid-run on 2026-10-26, which is why the input exists. `LEGION_E2E_CLAUDE_KEY_FILE`
 (required) names a file holding the
 Anthropic API key the Claude Code implementer reaches its model with; the run copies it once (0600),
 holds the endpoint to accepting it (`GET /v1/models`, the key in a 0600 header file and never an
@@ -1349,9 +1357,15 @@ stream, the scratch Dispatch, Envoy listener, NATS and session database;
    than chisel's default of forever) can pick the tunnel back up without reconfiguring anything.
    Only two things still send the script itself `SIGTERM`, failing the run loudly: a port-forward
    that cannot be restarted within 60s of dropping, or the chisel client exiting because its own
-   retry budget is exhausted. On either, the watchdog first calls the caller's `kill_harness`,
-   which stops what the run drives (here the Go test process; in the Claude Code sandbox proof, its
-   daemon).
+   retry budget is exhausted. On either, the watchdog prints the bridge pod's last events, read
+   with the operator context (its node's when the pod's are gone), so a preemption or an eviction
+   is named with what caused it, then calls the caller's `kill_harness`, which stops what the run
+   drives (here the Go test process; in the Claude Code sandbox proof, its daemon), and signals the
+   script, whose `EXIT` trap tears the run down at once. The Claude Code sandbox proof then ends
+   with `FAIL bridge: <reason>; the bridge pod <name>: <its events>`, whatever check was running.
+   Every command on that path is guarded, since the watchdog runs under the caller's `errexit`: a
+   failing `kill` of a port-forward already gone once ended the watchdog before it signalled, and
+   the run failed minutes later at an unrelated check (2026-10-26).
 4. Pods dial `tcp://bridge-<project>.legion.svc.cluster.local:<port>` for the worker stream and the
    same host at the session-database port — the advertised host
    (`LEGION_E2E_STREAM_ADVERTISE_HOST`, internal to the harness) the Go runtime hands every launch,
@@ -3701,12 +3715,14 @@ session database).
 The caller sets `root` (the checkout, for the pinned chisel client's `go install`), `operator` (the
 admin kubectl context, the only one this file uses), `work` (the run's scratch directory),
 `bridge_name` (the run's deterministic bridge pod/Service name, set before `bridge_start` runs, so
-the cluster-DNS name pods dial is known from it alone) and `run_label`, beside `lib/namespace-rig.sh`'s
+the cluster-DNS name pods dial is known from it alone), `run_label` and, optionally,
+`bridge_priority_class` (a PriorityClass the bridge pod runs at; unset, it has none), beside `lib/namespace-rig.sh`'s
 own (`namespace`, and `op`, which every read and write here goes through) and `begin`, `note`,
 `fail` and `pass`. It defines `kill_harness`, which stops whatever the run drives: the watchdog
 calls it before it sends the script `SIGTERM`, and runs under the caller's `errexit`, so an
 undefined `kill_harness` would end the watchdog before it signals. This file defines
-`bridge_start` and `bridge_stop`.
+`bridge_start` and `bridge_stop`; when the watchdog ends a run it writes the reason and the bridge
+pod's last events to `$work/bridge-failed` for the caller's `FAIL` line.
 
 | function | does |
 | :--- | :--- |

@@ -35,6 +35,9 @@
 #   bridge_name  the bridge pod and Service's shared name, deterministic from the project alone
 #                (the caller sets it once, beside its other object names, so the cluster-DNS host
 #                pods would dial is known before bridge_start ever runs)
+#   bridge_priority_class  (optional) a PriorityClass the bridge pod runs at; unset, it has none
+#                and a higher-priority pod on a full node can preempt it (which the watchdog then
+#                reports by the pod's events)
 # defines:
 #   kill_harness stops whatever the caller's run drives; the watchdog calls it before
 #                kill -TERM "$$" on both of its fatal paths. The watchdog runs under the caller's
@@ -55,6 +58,7 @@ bridge_chisel_image=mirror.gcr.io/jpillora/chisel@sha256:51d034146bb06e03a493646
 bridge_chisel_version=v1.11.8
 bridge_control_port=8080
 bridge_started=
+bridge_node=
 bridge_local_control_port=
 bridge_portforward_pid=
 bridge_portforward_attempt=0
@@ -71,6 +75,36 @@ bridge_watchdog_pid=
 # Returns failure (never calls fail itself) if this one attempt never starts forwarding within
 # 30s; the caller — bridge_start synchronously, the watchdog's own bounded retry loop otherwise —
 # decides what that means.
+# bridge_events prints, one line each, the last events the operator context reads for the bridge
+# pod, or, when the pod's are gone, for the node it last ran on (Preempted, Evicted, Killing,
+# NodeNotReady and the like), so a run the bridge ended says what removed the pod. It never fails.
+bridge_events() {
+  local events node
+  events=$(op get events --field-selector "involvedObject.name=$bridge_name" \
+    -o jsonpath='{range .items[*]}{.lastTimestamp}{" "}{.reason}{": "}{.message}{"\n"}{end}' 2>/dev/null | tail -5) || events=
+  if [ -z "$events" ] && [ -n "$bridge_node" ]; then
+    events=$(op get events --field-selector "involvedObject.kind=Node,involvedObject.name=$bridge_node" \
+      -o jsonpath='{range .items[*]}{.lastTimestamp}{" "}{.reason}{": "}{.message}{"\n"}{end}' 2>/dev/null | tail -5 |
+      sed "s|^|node $bridge_node: |") || events=
+  fi
+  printf '%s\n' "${events:-no event of pod $bridge_name${bridge_node:+ or of node $bridge_node} is left to read}"
+}
+# bridge_down REASON is the watchdog's one fatal path: it names the reason and what removed the
+# bridge pod (bridge_events) on the transcript, stops what the run drives (the caller's
+# kill_harness), and sends the run's own shell TERM, so its EXIT trap tears everything down at once
+# rather than a later check failing on a tunnel already gone. bridge_failed names the reason for
+# the caller's FAIL line. Every command here is guarded: the watchdog runs under the caller's
+# errexit, and a failing one would end it before it signals.
+bridge_down() {
+  [ -f "$work/bridge-stopping" ] && return 0
+  {
+    printf '%s; the bridge pod %s: %s\n' "$1" "$bridge_name" "$(bridge_events | tr '\n' '|')"
+  } >"$work/bridge-failed" 2>/dev/null || true
+  echo "   BRIDGE TUNNEL DOWN: $1; ending the run" >&2
+  bridge_events 2>/dev/null | sed "s|^|   [operator] bridge pod $bridge_name event: |" >&2 || true
+  kill_harness || true
+  kill -TERM "$$" 2>/dev/null || true
+}
 bridge_portforward_start() {
   bridge_portforward_attempt=$((bridge_portforward_attempt + 1))
   local log="$work/bridge-portforward-$bridge_portforward_attempt.log"
@@ -86,7 +120,7 @@ bridge_portforward_start() {
     waited=$((waited + 1))
     if [ "$waited" -gt 30 ]; then
       echo "   [harness] kubectl port-forward attempt $bridge_portforward_attempt never reported it was forwarding within 30s: $(cat "$log")" >&2
-      kill "$bridge_portforward_pid" 2>/dev/null
+      kill "$bridge_portforward_pid" 2>/dev/null || true
       return 1
     fi
     sleep 1
@@ -161,7 +195,8 @@ metadata:
   labels: {legion.dev/project: "$run_label", legion.dev/bridge: "$bridge_name"}
   annotations: {cluster-autoscaler.kubernetes.io/safe-to-evict: "false", karpenter.sh/do-not-disrupt: "true"}
 spec:
-  restartPolicy: Never
+  restartPolicy: Never${bridge_priority_class:+
+  priorityClassName: $bridge_priority_class}
   automountServiceAccountToken: false
   securityContext: {runAsNonRoot: true, runAsUser: 65532, runAsGroup: 65532, seccompProfile: {type: RuntimeDefault}}
   tolerations: [{key: legion.dev/pool, operator: Equal, value: legion, effect: NoSchedule}]
@@ -193,6 +228,8 @@ YAML
   # timeout's own diagnostic read it).
   op wait "pod/$bridge_name" --for=condition=Ready --timeout=240s >/dev/null ||
     fail "the bridge pod $bridge_name did not become Ready within 240s: $(op get pod "$bridge_name" -o wide 2>&1)"
+  # The node, so a pod later gone without events of its own can still be traced (bridge_events).
+  bridge_node=$(op get pod "$bridge_name" -o jsonpath='{.spec.nodeName}' 2>/dev/null) || bridge_node=
   note "[operator] bridge pod/Service $bridge_name: chisel server on :$bridge_control_port (control, never exposed by the Service), reverse-forwarding $listed, label legion.dev/project=$run_label"
 
   bridge_local_control_port=$(bash "$root/scripts/e2e/lib/free-port.sh" "$@") ||
@@ -253,7 +290,7 @@ YAML
     # bridge_portforward_start itself updates the instant it forks a new attempt, before this loop
     # has assigned pf_pid from it): a TERM arriving mid-restart, after a new port-forward process
     # exists but before `pf_pid=$bridge_portforward_pid` runs below, would otherwise orphan it.
-    trap 'kill "$pf_pid" "$bridge_portforward_pid" 2>/dev/null; exit 0' TERM
+    trap 'kill "$pf_pid" "$bridge_portforward_pid" 2>/dev/null || true; exit 0' TERM
     pf_pid=$bridge_portforward_pid
     down_since=
     while :; do
@@ -271,22 +308,20 @@ YAML
           down_since=
         elif [ $(($(date +%s) - down_since)) -ge 60 ]; then
           [ -f "$work/bridge-stopping" ] && exit 0
-          echo "   BRIDGE TUNNEL DOWN: kubectl port-forward to $bridge_name could not be restarted within 60s; terminating the run" >&2
-          kill_harness
-          kill -TERM "$$" 2>/dev/null
+          bridge_down "kubectl port-forward to $bridge_name could not be restarted within 60s"
           exit 1
         fi
       fi
       if ! kill -0 "$bridge_client_pid" 2>/dev/null; then
         [ -f "$work/bridge-stopping" ] && exit 0
-        echo "   BRIDGE TUNNEL DOWN: the chisel client exited (its own retry budget, max-retry-count 30, is exhausted); terminating the run: $(cat "$work/bridge-chisel-client.log")" >&2
         # The port-forward itself is still up here (the outer branch above only reaches this
         # check once kill -0 "$pf_pid" confirmed it); this path's own exit, unlike a received
         # TERM, never runs the trap above, so without this it would be the one way the watchdog
-        # could orphan a live port-forward process.
-        kill "$pf_pid" "$bridge_portforward_pid" 2>/dev/null
-        kill_harness
-        kill -TERM "$$" 2>/dev/null
+        # could orphan a live port-forward process. `|| true`: one of the two may already be gone,
+        # and a failing kill under the caller's errexit would end the watchdog here, before it
+        # stops the run (seen live, 2026-10-26: the run went on to fail minutes later elsewhere).
+        kill "$pf_pid" "$bridge_portforward_pid" 2>/dev/null || true
+        bridge_down "the chisel client exited (its own retry budget, max-retry-count 30, is exhausted): $(tail -3 "$work/bridge-chisel-client.log" 2>/dev/null | tr '\n' ' ')"
         exit 1
       fi
       sleep 5
