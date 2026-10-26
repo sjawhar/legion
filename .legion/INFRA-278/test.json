@@ -2,50 +2,45 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-278",
-  "completed": "2026-10-26T20:55:00Z",
+  "completed": "2026-10-26T21:42:00Z",
   "generation": 3,
-  "round": 1,
-  "headSha": "4dddd9bc851d2b9320f7f81cfac860237e312cb5",
-  "codeHeadSha": "48d9dd1c08c165fa6de3126a8d9cc758154aaab9",
-  "fingerprint": "The forward merge of main d1f4b8a6 changed the diff fingerprint (implementer, PR comment 6426673319), so this is a full test round",
+  "round": 2,
+  "headSha": "4537dbe54ee735f2fce2ef5dc0243e07e14bbfbc",
+  "codeHeadSha": "17dd17ec2c37800125a455277722cc286f5293e2",
+  "fingerprint": "Two forward merges of main (acd8341b, 17dd17ec, the second bringing #2237's AgentName into AskRecipients.tsx) changed the diff fingerprint (PR comment 6427702588), so this is a full test round",
   "verdictProvider": "provider not verified: no subagent ran, and the tester did not read the provider of its own turns from its transcript",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran `bash scripts/e2e/dispatch-claimant-delivery.sh` at 4dddd9bc: summary 9 ok, 0 FAIL, PASS in 68s. Re-ran `bun run e2e -- recipients-claim.e2e.ts followers.e2e.ts --project chromium --retries 0`: 8 passed, including the Minor 1 unknown-role-route Unfollow scenario."
+    "how": "Re-ran `bash scripts/e2e/dispatch-claimant-delivery.sh` at 4537dbe5: summary 9 ok, 0 FAIL. Re-ran `bun run e2e -- recipients-claim.e2e.ts followers.e2e.ts agent-name.e2e.ts --project chromium --retries 0` with the tester's spec added: 14 passed and 2 skipped (main's phone-only cases). Checked skills/dispatch/SKILL.md:46,48 and the word count."
   },
-  "failures": [
+  "failures": [],
+  "failed": 0,
+  "proof": [
     {
-      "criterion": "Agent-facing text is true and unambiguous (A7; the architect's request for this round): skills/dispatch/SKILL.md:48",
-      "evidence": "The line reads: \"A claim brings a person's answers, comments and messages; otherwise, `dispatch issue-update --route session:<your id>` (`--route ''` on release) or `envoy_subscribe notifications.dispatch.issue.<KEY>.>`. Never route such an issue.\" (1) 'otherwise' can be read as 'without a claim', which is false. At this head, on a claimed issue, an agent's comment and a targeted message reach the claimant on no agent topic (live cases agent-comment {} and targeted-message {}). So a claimant still needs the subscription or the route for anything a claim does not bring. The architect's 'without a claim' wording would be false for the same reason. (2) 'such an issue' has no antecedent in its own paragraph. Its intended noun, an issue with the `legion` label, or under one, is the last clause of the paragraph before. Inside a paragraph about the agent's own claimed issue it reads as 'never route the issue you claimed', contradicting the routing instruction just before it. Corrected text, measured to keep the three Dispatch skills at 1997 words (`find skills/dispatch skills/dispatch-first skills/dispatch-writing-specs -type f | xargs cat | wc -w`; the guard in packages/pi-envoy/src/skills-guard.test.ts requires fewer than 2,000; it is 1998 now): line 46 ends 'Never write the status of, or route, an issue with the `legion` label, or under one.' and line 48 becomes 'A claim brings a person's answers, comments and messages; for anything else, `dispatch issue-update --route session:<your id>` (`--route ''` on release) or `envoy_subscribe notifications.dispatch.issue.<KEY>.>`.' No red test was written: a test asserting the skill's wording is a source-text test, which the repository's test rules forbid."
-    }
-  ],
-  "failed": 1,
-  "passedChecks": [
+      "criterion": "The previous round's failure: skills/dispatch/SKILL.md's claim line is true and unambiguous",
+      "surface": "repository text and the word budget the skills guard measures",
+      "command": "sed -n 46,48p skills/dispatch/SKILL.md; find skills/dispatch skills/dispatch-first skills/dispatch-writing-specs -type f | xargs cat | wc -w; grep -rn 'such an issue\\|; otherwise,' skills/dispatch/",
+      "observed": "Line 46 ends 'Never write the status of, or route, an issue with the `legion` label, or under one.' Line 48 reads 'A claim brings a person's answers, comments and messages; for anything else, `dispatch issue-update --route session:<your id>` (`--route ''` on release) or `envoy_subscribe notifications.dispatch.issue.<KEY>.>`.' The count is 1997 words (the guard needs fewer than 2,000). The grep finds no match",
+      "headSha": "4537dbe54ee735f2fce2ef5dc0243e07e14bbfbc",
+      "negativeControl": "At 48d9dd1c the line said 'otherwise, …' and 'Never route such an issue' (the previous round's failure)"
+    },
     {
       "criterion": "Claimant delivery at the merged head",
       "surface": "real envoy-dispatch built from the head, natsd, Postgres 17 + pgvector, fake Envoy listener; throwaway driver $TMPDIR/infra278-test/adversarial.ts on a copy of the e2e runner, 9 s settle window",
       "command": "DATABASE_URL='postgres://postgres@127.0.0.1:5433/tester_claimant?sslmode=disable' bash $TMPDIR/infra278-test/adv.sh",
-      "observed": "16 ok, 0 FAIL. Comment, edit, resolve and reopen by a person: {P:1} each. Delivered mention: {}. Mention 404: {P:1}. A follower-claimant's mention 404 in an ask reply: {C:1,P:1}. Ask answered, and resolved by a person: {C:1,P:1}. Route session:R: {P:1,R:1}. Route session:P: {P:1}. message.answered: {P:1,Q:1}. Targeted message: {}. Agent comment: {}. Claim moved to Q: {Q:1}. A person's claim: {}",
-      "headSha": "4dddd9bc851d2b9320f7f81cfac860237e312cb5",
-      "negativeControl": "DISPATCH_BIN built from main d1f4b8a6 -> 7 ok, 9 FAIL (comment-created/edited/resolved/reopened {}, mention-failed-404 {}, ask-resolved {C:1}, route-other-session {R:1}, message-answered {Q:1}, claim-moved-to-q {})"
+      "observed": "16 ok, 0 FAIL. Comment, edit, resolve and reopen by a person: {P:1} each. Delivered mention: {}. Mention 404: {P:1}. A follower-claimant's mention 404: {C:1,P:1}. Ask answered and resolved: {C:1,P:1}. Route session:R: {P:1,R:1}. Route session:P: {P:1}. message.answered: {P:1,Q:1}. Targeted message: {}. Agent comment: {}. Claim moved to Q: {Q:1}. A person's claim: {}",
+      "headSha": "4537dbe54ee735f2fce2ef5dc0243e07e14bbfbc",
+      "negativeControl": "DISPATCH_BIN built from main 16e4bb0f -> 7 ok, 9 FAIL (comment-created/edited/resolved/reopened {}, mention-failed-404 {}, ask-resolved {C:1}, route-other-session {R:1}, message-answered {Q:1}, claim-moved-to-q {})"
     },
     {
-      "criterion": "Reaches panel and Minor 1 at the merged head",
-      "surface": "Dispatch browser suite, Chromium",
-      "command": ". /legion/harness/e2e-env.sh && cd packages/dispatch && bun run e2e -- recipients-claim.e2e.ts followers.e2e.ts --project chromium --retries 0",
-      "observed": "8 passed",
-      "headSha": "4dddd9bc851d2b9320f7f81cfac860237e312cb5",
-      "negativeControl": "The implementer's run on main d1f4b8a6 with the head's test file: 6 failed"
-    },
-    {
-      "criterion": "Claim result text",
-      "surface": "the checkout's dispatch CLI against a live e2e Dispatch (run-server.sh on 18797)",
-      "command": "env -i ... bun $TMPDIR/infra278-test/cli/dispatch.js claim --issue TST-1",
-      "observed": "'TST-1: claimed by you since ... A person's answers, comments and messages on TST-1 now reach you directly.' exit 0",
-      "headSha": "4dddd9bc851d2b9320f7f81cfac860237e312cb5",
-      "negativeControl": "On main d1f4b8a6, skills/dispatch/SKILL.md:48 says 'A claim delivers no comments'"
+      "criterion": "The Reaches panel after merging main's AgentName (#2237)",
+      "surface": "Dispatch browser suite: real Go server, production SPA bundle, Chromium",
+      "command": ". /legion/harness/e2e-env.sh && cd packages/dispatch && bun run e2e -- recipients-claim.e2e.ts followers.e2e.ts agent-name.e2e.ts zz-tester-tmp.e2e.ts --project chromium --retries 0 (the throwaway spec was copied in and deleted after the run)",
+      "observed": "14 passed, 2 skipped (main's phone-only agent-name cases). In the throwaway spec: a claimant that is not running is still listed and counted (Reaches 2, 'session:t-p… via claim', linking to /agents/t-p/live). The claim moves P→Q and the card follows with no reload. Route role:t-none (no_holder): 'role:t-none via route ⚠ Nobody holds it right now', uncounted, Reaches 2. Route role:t-other held by R: Reaches 3 with 'R T via route (role:t-other)'. Route cleared: Reaches 2",
+      "headSha": "4537dbe54ee735f2fce2ef5dc0243e07e14bbfbc",
+      "negativeControl": "The implementer's run of recipients-claim on a build of main: all 6 of its own scenarios fail. In round 1 at 15e414ed, a claimant-held role route counted twice"
     }
   ],
-  "ci": "At code head 48d9dd1c, read at 20:49Z: Tests 40396606207, Legion Envoy and Contracts 40396605842, Worker Image 40396606028 and Docs 40396606240 queued; PR Title 40396803537 pending. GitHub reports the PR CONFLICTING with main again.",
-  "evidenceComment": "https://github.com/sjawhar/legion/pull/2225#issuecomment-6427016640"
+  "ci": "At code head 17dd17ec, read at 21:38Z: Tests 40404100301, Legion Envoy and Contracts 40404100409, Worker Image 40404100429, Docs 40404100335 and PR Title 40404290712 queued, cited as running and not waited for. GitHub reports the PR MERGEABLE.",
+  "evidenceComment": "https://github.com/sjawhar/legion/pull/2225#issuecomment-6427959702"
 }
