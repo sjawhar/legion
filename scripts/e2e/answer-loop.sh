@@ -1974,7 +1974,9 @@ for store in $stores; do
   mkdir -p "$state"
   dispatch_human POST projects "$(jq -cn --arg key "$project" --arg name "Answer loop proof $project" '{key: $key, name: $name}')" >/dev/null
   dispatch_human PUT "settings/repo-projects/$repo" "$(jq -cn --arg project "$project" '{project: $project, default: true}')" >/dev/null
-  [ -z "$second_repo" ] || dispatch_human PUT "settings/repo-projects/$second_repo" "$(jq -cn --arg project "$project" '{project: $project, default: true}')" >/dev/null
+  # The second owner's repository joins the project's mapping, never as its default: every rig issue
+  # works the smoke repository, and A17 names the second one in its question.
+  [ -z "$second_repo" ] || dispatch_human PUT "settings/repo-projects/$second_repo" "$(jq -cn --arg project "$project" '{project: $project, default: false}')" >/dev/null
   agent[$store:root]=$(new_rig_issue "Answer loop proof tree ($store)")
   agent[$store:planner.issue]=$(new_rig_issue "Answer loop proof child: the plan" "${agent[$store:root]}")
   agent[$store:tester.issue]=$(new_rig_issue "Answer loop proof child: the tests" "${agent[$store:root]}")
