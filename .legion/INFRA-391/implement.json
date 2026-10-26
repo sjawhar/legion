@@ -1,0 +1,55 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-391",
+  "completed": "2026-10-26T04:30:00Z",
+  "generation": 2,
+  "summary": "Generation 2 implementing round. GitHub showed sjawhar/legion#2209 CONFLICTING against main af460a46bb16 (#2197, INFRA-353), which moved the legion-architect skill's 'Architecture components' section from SKILL.md to references/decomposition.md. Forward merge 5f5b6c18fb6fea3e23d8fecd28a00f1502b337c1 (no rebase): SKILL.md is main's byte for byte, the branch's two insertions sit in decomposition.md's bootstrap bullet, the claude-envoy legion/ copy is regenerated. The unchanged-diff fingerprint changed (f1a51e27... -> ef86905a...) only by those skill files; no code line differs. Reported to the architect; the tester and reviewer run a full round.",
+  "proof": [
+    {
+      "criterion": "Root A2: two sources, two imports in a row record each head and no error; one --components-json update with an id from each source succeeds; one source's failed import leaves the other's components and attachments",
+      "surface": "Gen 1: the branch's real Dispatch server reading real GitHub through the implement App behind the two-call shim, and the harness's fake GitHub (https://github.com/sjawhar/legion/pull/2209#issuecomment-6402749449, https://github.com/sjawhar/legion/pull/2209#issuecomment-6407390336). Gen 2: the unchanged-diff fingerprint input compared line by line, plus Dispatch's browser suite at the merge head",
+      "command": "fingerprintCommand (plan.json) at e7b6ab1259b98e8b6f973b7033dbe71e6778cbd2, 08a478fdb44cbfd4c892177f0d5e6f903b336622 and 5f5b6c18fb6fea3e23d8fecd28a00f1502b337c1; diff of the two fingerprint inputs (fork_point fc379b99147a..08a478fdb44c vs af460a46bb16..5f5b6c18fb6f, '~(.legion | docs/solutions)', context 0, @@/index lines dropped)",
+      "observed": "f1a51e277bb18c5637d3da606320e8564ef1a2ad88872050a67b3cb01afe9044 at e7b6ab12 and 08a478fd; ef86905a9a4d96975e9df01cb00df4b6473775acd1990fef9545be8a71710507 at 5f5b6c18. The input diff differs in exactly four files: skills/legion-architect/SKILL.md and its claude-envoy copy (the branch's edit there is gone, main's file kept) and skills/legion-architect/references/decomposition.md and its copy (the same two insertions, now there). Every Go, TypeScript, SQL and web line of the branch is byte-identical, so gen 1's A2 runs stand for this code. Fingerprint comment: https://github.com/sjawhar/legion/pull/2209#issuecomment-6408126547",
+      "headSha": "5f5b6c18fb6fea3e23d8fecd28a00f1502b337c1",
+      "negativeControl": "Gen 1 at 97ddf0a48fc4: the base build 83f6320140ec against the same shim, two singular saves leave one CORE source (the second replaced the first); ids [daemon-api, not-a-component] -> COMPONENTS_INPUT, exit 1; a failed acme/infra import names the repeated id and leaves acme/infra at ea0d5009b55d"
+    },
+    {
+      "criterion": "Root A6: the browser suite proves Settings, the project page, the architecture page and an issue's Components picker show components from both sources; fails on the base build, passes at the head",
+      "surface": "Dispatch's browser suite (Playwright 1.63 Chromium, real Go server, production SPA bundle) on rootless Postgres 17.11 + pgvector 0.8.0 at 127.0.0.1:55491, database dispatch_impl_e2e, ports 18777/19021/19022/19023/19024, harness /legion/scratch/tmp/harness (env.sh, setup.sh)",
+      "command": "( source /legion/scratch/tmp/harness/env.sh && cd packages/dispatch && DATABASE_URL='postgres://postgres@127.0.0.1:55491/dispatch_impl_e2e?sslmode=disable' DISPATCH_E2E_PORT=18777 FAKE_ENVOY_PORT=19021 FAKE_GITHUB_PORT=19022 PLAIN_HTTP_PORT=19023 FAKE_BROKER_PORT=19024 bun run e2e -- e2e/architecture-sources.e2e.ts --project=chromium --reporter=line )",
+      "observed": "[1/1] [chromium] e2e/architecture-sources.e2e.ts:60:1 a project with two architecture sources shows both in Settings, on its Architecture page and in an issue's Components picker -- 1 passed (29.7s)",
+      "headSha": "5f5b6c18fb6fea3e23d8fecd28a00f1502b337c1",
+      "negativeControl": "Gen 1: the same spec copied alone into an export of base 83f6320140ec007695a8c6415006392c2eeb7768, own database: 1 failed at architecture-sources.e2e.ts:89 'legion/arch is still a CORE source' (element not found)"
+    },
+    {
+      "criterion": "Existing single-source projects keep working unchanged",
+      "surface": "Gen 1: real Postgres migrated 0116 -> 0117 (store upgrade test) and the single-source browser specs; gen 2: fingerprint input and main's migration list",
+      "command": "fingerprint input diff as in the first row; gh api 'repos/sjawhar/legion/contents/packages/envoy/internal/dispatch/store/migrations?ref=main' --jq '.[].name' | grep -E '^011[5-9]_'",
+      "observed": "No code line of the branch changed in the merge; main's highest migration is 0116 (0115_duty_passes, 0116_project_default_assignee), so the branch's 0117_architecture_sources_per_repo is still the next number",
+      "headSha": "5f5b6c18fb6fea3e23d8fecd28a00f1502b337c1",
+      "negativeControl": "Gen 1 at 97ddf0a48fc4: a component whose project has no source makes the census answer 1 and the migration refuse, leaving the schema at 116"
+    },
+    {
+      "criterion": "The conflict resolution keeps the branch's multi-source guidance for the architect, where main moved the section",
+      "surface": "The skill files Oh My Pi and Claude Code load (skills/legion-architect/, packages/claude-envoy/legion/skills/legion-architect/)",
+      "command": "jj file show -r main@origin skills/legion-architect/SKILL.md | cmp - skills/legion-architect/SKILL.md; grep -c 'several sources' / 'syncs that one' on references/decomposition.md at af460a46bb16 and 5f5b6c18fb6f; cd packages/claude-envoy && bun scripts/build.ts --check",
+      "observed": "SKILL.md equals main's; 'several sources'/'syncs that one' counts 1/1 at 5f5b6c18 in both copies; build --check: 'dist/ and legion/ match a fresh build'",
+      "headSha": "5f5b6c18fb6fea3e23d8fecd28a00f1502b337c1",
+      "negativeControl": "main af460a46bb16 alone (the merge taking main's side and carrying nothing over): decomposition.md counts 0/0, the guidance lost"
+    }
+  ],
+  "filesChanged": [
+    "skills/legion-architect/SKILL.md (merge: main's text; the branch's edit to the moved section dropped)",
+    "skills/legion-architect/references/decomposition.md (merge: the branch's several-sources sentence and the architecture-sync note in the bootstrap bullet; the opening sentence made plural)",
+    "packages/claude-envoy/legion/skills/legion-architect/SKILL.md and references/decomposition.md (regenerated)"
+  ],
+  "trickyParts": [
+    "Harness for the next role: /legion/scratch/tmp/harness/setup.sh (idempotent) and env.sh, which picks a lane by LEGION_ROLE (tester 28777/29021-29024 + dispatch_tester_e2e; reviewer 38777/39021-39024 + dispatch_reviewer_e2e). Postgres 17.11 + pgvector on 127.0.0.1:55491, left running. Source env.sh only in a subshell around harness commands; psql is not in this pod's image, env.sh puts the harness's on PATH.",
+    "packages/pi-legion bun test: 8 judge-omp rows in scripts/skill-scenarios/rig.test.ts fail in this pod with 'docker is not on PATH' (main's INFRA-140 rig, a file this branch does not touch); 609 pass."
+  ],
+  "deviations": [
+    "The plan expected the fingerprint unchanged and no merge (PR MERGEABLE at 03:56Z). By 04:20Z main af460a46bb16 conflicted, the forward merge changed the fingerprint in skill prose only, and per the plan this is a full round, reported to the architect (Envoy, 2026-10-26)."
+  ],
+  "openQuestions": []
+}
