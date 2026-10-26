@@ -149,7 +149,7 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 ### Changed
 
 - `legion-architect`, `legion-worker` and `legion-controller` point to
-  `skill://dispatch-writing-specs` (INFRA-140) for a spec's outline, its questions, its approval and
+  `skill://dispatch-writing-specs` for a spec's outline, its questions, its approval and
   the rules for text a person reads, and `legion-architect` drops its own copy of those rules. The
   controller's board-order step names `dispatch issue-update --before`/`--after`. A
   daemon role prompt now names `skill://dispatch-writing-specs`, so the daemon's boot gate refuses

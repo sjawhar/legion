@@ -4,7 +4,7 @@
 
 ### Added
 
-- `dispatch-first`'s blocker rule says a design question that a document records is an ask block in that document, and any other blocker a `dispatch ask`. `packages/pi-shared/test/skills-partition.test.ts` now fails when a shipped skill or a daemon prompt names a `skill://` that neither plugin ships (INFRA-140).
+- `dispatch-first`'s blocker rule says a design question that a document records is an ask block in that document, and any other blocker a `dispatch ask`. `packages/pi-shared/test/skills-partition.test.ts` now fails when a shipped skill or a daemon prompt names a `skill://` that neither plugin ships.
 
 - The agent stream reports the model and thinking level the session runs now, so Dispatch's live
   view can show and switch them: a `settings` frame carrying the current model (`provider/id`),
@@ -136,7 +136,7 @@
 
 ### Changed
 
-- Three Dispatch skills ship, under 2,000 words together (INFRA-140), from four skills and the
+- Three Dispatch skills ship, under 2,000 words together, from four skills and the
   dispatch skill's eight references of 10,908 words. `dispatch-writing-specs` replaces
   `dispatch-brainstorming`, and `skill://dispatch-brainstorming` no longer resolves. It sets a
   spec's seven parts (Summary, Problem, Goals and non-goals, Requirements, Design, Decisions,
@@ -150,7 +150,7 @@
   holds only what the person settled, ask in stages, "density is the problem, not length", and
   "sections follow the topic". `src/skills-guard.test.ts` fails the build when the three skills
   reach 2,000 words.
-- `dispatch-writing-specs` after a fresh-agent dry run on a real issue's messages (INFRA-140): the
+- `dispatch-writing-specs` after a fresh-agent dry run on a real issue's messages: the
   Design gives a value for each limit, size and time; a choice the person's messages favour is
   settled; each design choice no source states is a decision entry; the fresh reader gets the whole
   spec pasted before every spec write; an ask block names a requirement by what it is; unbuilt
@@ -174,7 +174,7 @@
   asked to approve the spec again for a small change.
 - The `dispatch` command's notice after a primary spec with no ask block says that a person does
   not watch the session's chat and sees its need only through an open ask or a spec that waits for
-  approval (INFRA-140). The notice for a typed-block opening stored as text cites
+  approval. The notice for a typed-block opening stored as text cites
   `dispatch-writing-specs`, "Questions". `dispatch issue --spec` and `dispatch doc-edit` point at
   `skill://dispatch-writing-specs`.
 - The `envoy` skill this plugin ships and the `envoy_publish` description say a team topic, any

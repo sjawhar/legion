@@ -12,7 +12,7 @@
 ### Fixed
 
 - `dispatch-first` now says to open a `dispatch ask` the moment a person blocks your work, and to
-  record every request you accept in Dispatch and read that record back before a turn ends (INFRA-140).
+  record every request you accept in Dispatch and read that record back before a turn ends.
 
 - The `dispatch` command waits at most 1 s for tmux to name the session's pane, then kills the tmux
   client and sends the call without the pane. A tmux client waiting to connect to a tmux server too
@@ -25,8 +25,8 @@
 
 ### Changed
 
-- The packaged skills ship `dispatch-writing-specs` in place of `dispatch-brainstorming`
-  (INFRA-140), with no code change: the prepack copies all of `skills/`. The three Dispatch skills
+- The packaged skills ship `dispatch-writing-specs` in place of `dispatch-brainstorming`,
+  with no code change: the prepack copies all of `skills/`. The three Dispatch skills
   are under 2,000 words together; `packages/pi-envoy/CHANGELOG.md` lists what each holds. The
   `dispatch-first` instruction file says which of the three to read before which step. The
   `dispatch` command prints the new notice after a primary spec with no ask block. After approval,

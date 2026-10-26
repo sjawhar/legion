@@ -27,7 +27,7 @@ definition.
   bare term across `skills/`, every `AGENTS.md`, every package `README.md` and the published
   docs. Judge each hit: a hit that is still true under the new definition stays; one that was
   true only because of the sentence you rewrote is the finding.
-> Since INFRA-140, `skills/dispatch/references/` no longer exists: a rule about one command lives in its
+> Since the cut to three Dispatch skills, `skills/dispatch/references/` no longer exists: a rule about one command lives in its
 > `--help` (`packages/contracts/src/dispatch-tools.ts`). The lines below record the files as they were.
 
 - An agent-facing claim about a tool lives in up to seven places in this repository:
