@@ -43,21 +43,42 @@
   on another provider, a rebuttal and a breaker trip each record their outcome and tell the agent
   that the write went out unreviewed and why, in a headless session too. A failed review hands
   back the agent's own command, so a gate that fails breaks no valid write.
-- AskGate refuses a posted path that names a file descriptor of whichever process opens it
-  (`/dev/stdin`, `/dev/fd/N`, `/proc/self/fd/N`): AskGate would open it in Oh My Pi's process and
-  the command in its own shell. A `--path-file` is refused for the same reason.
+- AskGate refuses a posted path that reaches a file descriptor of whichever process opens it, by
+  its own spelling (`/dev/stdin`, `/dev/fd/N`, `/proc/self/fd/N`, `/proc/thread-self/fd/N`,
+  `/proc/<n>/task/<m>/fd/N`) or through a symbolic link to one: AskGate would open it in Oh My
+  Pi's process and the command in its own shell. It walks each operand one component at a time,
+  follows every link itself, refuses a component that reaches `/proc` or `/dev`, and opens with
+  `O_NOFOLLOW`. A `--path-file` is refused for the same reason. A `--<field>-file` operand goes
+  to the kernel as written, so a `..` after a symbolic link names the file the CLI opens. An
+  `--image` file is not snapshotted and not reviewed: the model reads its path, and the CLI names
+  the upload after the file it opens when it sends.
+- AskGate reads a write that quotes, hides or expands its own name: `d\ispatch comment …`,
+  `bash -c 'dispatch "comment" …'`, `bash -c "dispatch $SUB …"`, `xargs -I{} dispatch $SUB …`,
+  `F='--spec=x'; dispatch issue … $F` and `"$D" "$S" …` are each unreadable, in both modes.
+- AskGate refuses in both modes when no model role resolves, on every path: a rebuttal, a halt, a
+  breaker trip, a shutdown and a dry run that failed each allowed the write before this.
+- Every note AskGate hands back rides on the call's own result as well as the loop's context, so
+  a write made from an eval cell, which has no loop context, tells the agent what happened.
+- A write that no review stands behind is refused in both modes when AskGate cannot record it:
+  the record is the whole account of what posted unreviewed. A write the model allowed still
+  posts.
 - AskGate keeps a snapshot until the command that reads it has run. A call the host backgrounds
   (`async: true`, or `bash.autoBackground`) reports its start before the shell runs, so its
-  snapshot stays until the session shuts down, and each gated call removes the snapshots older
-  than a day.
+  snapshot stays until the session shuts down, each gated call removes the snapshots older
+  than a day, and a session switch removes the snapshots of the session before it.
 - A session whose envoy.json location cannot be worked out holds no AskGate switch, so AskGate
   refuses each write it would review and says so at session start.
 - `scripts/askgate-report.ts` prints a count for each outcome and names every session that had a
-  write the gate did not review, with its counts. It counts `no-model-role` and `load-failed` as
-  both sent back and refused, and a warn-mode unreadable call as sent back and not refused.
+  write the gate did not review, with its counts. It counts as sent back every gated call the
+  gate did not pass as sent, reviewed or not, and as unreviewed every `allow` whose outcome is no
+  verdict, a rebuttal, a breaker trip and a warn-mode unreadable call among them.
 - AskGate needs `extensionHandlers.toolCallTimeoutMs` at 120000 or more in the session's settings.
   At the 30 s default its deadline is 25 s, a review of a long session often times out, and the
-  write posts unreviewed. A deadline under 30 s logs one warning at start that names the key.
+  write posts unreviewed. A deadline under 30 s is one warning at start that names the key.
+- AskGate reviews the writes of a cooperating agent and is no sandbox: a process of the same user
+  can replace a snapshot's bytes between the review and the open, turn the gate off in its own
+  envoy.json, point the session at another envoy.json through the launching shell, or call
+  Dispatch's HTTP API with no command. The README and AGENTS.md say so.
 
 ### Fixed
 
