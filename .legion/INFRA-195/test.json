@@ -2,38 +2,29 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-195",
-  "completed": "2026-10-26T08:20:00Z",
+  "completed": "2026-10-26T08:32:00Z",
   "generation": 2,
   "reviewRound": 3,
-  "headTested": "e61da503d250eb5e072fecdc2fb2e251b73db6c4",
-  "codeHead": "fbd76fa87d1a71f08d4bd3cceba59b7e3ee5f753",
-  "fingerprint": "Computed by the tester (conflicts-and-rewrites.md, base main): ea067bb9830f (round 5's verified head) aa4ffcd408cdff82426448a457ce2102685d578247c55f112b16243b55afc2d2; 5676d5fb0329 (the forward merge) aa4ffcd408cdff82426448a457ce2102685d578247c55f112b16243b55afc2d2, unchanged; fbd76fa87d1a b635db7bc0a9b61ecc313950b4a3c7b85f53ef2cb35a3dcf9abad8308cebf4ad. The difference after the merge is scripts/e2e/README.md (one table cell) and the rig's three decoder files (+7/−7) only. No product code changed since round 5, so round 5's Firefox, curl and browser verification stands. This round re-ran the rig and tested the decoder fix.",
-  "ci": "At the pushed head e61da503d250 (the code push's head; its runs cover fbd76fa8's code), read 2026-10-26T08:14Z: Tests run 40289250243, Legion Envoy and Contracts run 40289250276, Docs run 40289250167 and Worker Image run 40289250292 were all queued, and the PR Title runs were queued or pending (40289250372 cancelled). Round 5's code head ea067bb9 had Tests 40280482750 and PR Title 40280482818 success, and the `dispatch` job 121436803081 success (per the review handoff). Not waited for: the reviewer reads these runs before approving. No lane was re-run by the tester.",
+  "headTested": "7ca1bfcbe8a9846700f3efbcecf37ebcdec9fc20",
+  "codeHead": "ecd30b63345bc4e729315aad87f1f20a8f2715ee",
+  "kind": "rebase re-check fbd76fa87d1a → ecd30b63345b: fingerprint unchanged, bare gates only",
+  "fingerprint": "Computed by the tester (conflicts-and-rewrites.md, base main): fbd76fa87d1a71f08d4bd3cceba59b7e3ee5f753 (the head round 6 verified) b635db7bc0a9b61ecc313950b4a3c7b85f53ef2cb35a3dcf9abad8308cebf4ad, and ecd30b63345bc4e729315aad87f1f20a8f2715ee (the forward merge of main, for the conflict in packages/envoy/CHANGELOG.md) b635db7bc0a9b61ecc313950b4a3c7b85f53ef2cb35a3dcf9abad8308cebf4ad. Equal, so the real-surface verification of rounds 5 and 6 stands, and only the bare gates were run.",
+  "ci": "At code head ecd30b63345b, read 2026-10-26T08:29Z: Tests run 40291356376 queued; Legion Envoy and Contracts run 40291356185 queued; Docs run 40291356068 and Worker Image run 40291356127 pending; PR Title run 40291437265 queued (40291356191 cancelled). Every run at the previous head e61da503 was cancelled when this push superseded it, except Worker Image 40289250292, which was in progress. The last green required set is at ea067bb9 (Tests 40280482750, PR Title 40280482818, and the dispatch job 121436803081 success). Not waited for: CI green at this head is the reviewer's to read before approving. No lane was re-run by the tester.",
+  "smoke": "The merge brought main's changes to packages/dispatch (web/src/api/sse.ts, client.ts, queries.ts; e2e/api.ts, e2e/live.e2e.ts), so the tester ran the live-view browser smoke at ecd30b63. `bun run e2e -- --project=firefox e2e/keyboard-session-pickers.e2e.ts --repeat-each=2` → 10 passed (1.2m); `npx playwright test --config e2e/playwright.config.ts --project=chromium --project=iphone e2e/agent-view.e2e.ts e2e/agent-view-settings.e2e.ts e2e/keyboard-session-pickers.e2e.ts e2e/live.e2e.ts` → 90 passed, 12 skipped (5.5m), the same counts as at ea067bb9.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Drove both of the implementer's surfaces independently at fbd76fa8. (1) Decoder: a throwaway probe imports the rig's real `Omp` class (scripts/e2e/lib/session-settings-omp.ts) and starts four instances at once against a stand-in executable. The stand-in writes every line split inside a multibyte character, 30 ms apart, and answers each RPC with \"ünï-<pid>\". Head: 20/20 answers. The same modules at 5676d5fb (the shared decoder): 5/20 answers, 3 instances failed with `did not answer get_state within 3s`, which confirms the implementer's before/after. (2) Rig on two Anthropic models, `fallback` moved last (scratch, reverted): checks 1-17 and 19-20 ok, then `FAIL fallback: timed out after 240s`. That failure is INFRA-309's no-fallback: six ECONNREFUSED retries on broken-model, no fallback model_change, and a signed-thinking claude-haiku-4-5 turn before the pick. (3) The merge's fingerprint was recomputed by the tester (`fingerprint` above)."
+    "how": "The implementer's fingerprint (b635db7bc0a9… at b04b14c9 and at ecd30b63) was recomputed by the tester and matches. Its earlier proofs at fbd76fa8 stand."
   },
   "failures": [],
   "failed": 0,
   "proof": [
     {
-      "criterion": "Review round 3 finding 2: each reader of the session-settings rig decodes with its own TextDecoder, so concurrent Oh My Pi processes whose stdout splits a multibyte character never lose an RPC answer",
-      "surface": "The rig's own Omp class (scripts/e2e/lib/session-settings-omp.ts, imported as the driver imports it) spawning four concurrent processes of a stand-in executable whose stdout splits multibyte characters across chunk writes",
-      "command": "bun /legion/scratch/tmp/infra195-test6/probe.ts new (head modules) and bun …/probe.ts old (5676d5fb modules); throwaway, not committed",
-      "observed": "`new: 20/20 answers, 0 instances failed`, with every answer decoded whole (e.g. \"ünï-legion-e2e-session-settings-4152\"). Evidence: https://github.com/sjawhar/legion/pull/2205#issuecomment-6411325197",
-      "headSha": "fbd76fa87d1a71f08d4bd3cceba59b7e3ee5f753",
-      "negativeControl": "The same probe on the modules at 5676d5fb0329, the shared exported decoder: `old: 5/20 answers, 3 instances failed` (`Oh My Pi p1|p2|p3 did not answer get_state within 3s`)"
-    },
-    {
-      "criterion": "The rig at the new head runs every check: on two Anthropic models checks 1-17 and 19-20 pass, and check 18 fails only as dispatch://INFRA-309's no-fallback",
-      "surface": "scripts/e2e/dispatch-session-settings.sh in this issue pod: /opt/omp/bin/omp 18.8.9 --mode rpc with this checkout's packed pi-envoy (10.25.1) and the released @sjawhar/pi-envoy 10.24.0, nats-server v2.10.22, the real Envoy listener, Dispatch, rootless Postgres 17, Chromium; OPENAI_API_KEY unset",
-      "command": "env -u OPENAI_API_KEY SESSION_SETTINGS_MODELS='anthropic/claude-haiku-5-5 anthropic/claude-haiku-4-5' LEGION_TEST_PG_DSN='postgres://postgres@127.0.0.1:5433/postgres?sslmode=disable' SESSION_SETTINGS_EVIDENCE_DIR=$TMPDIR/infra195-test6/rig bash scripts/e2e/dispatch-session-settings.sh, with the `fallback` row moved to the end of the check table (scratch, reverted)",
-      "observed": "ok for checks 1-17 (header-before-any-turn through new-session-defaults, including no-answer 70s and resume-keeps-switch 37s), older-plugin-notice and attribution; then `FAIL fallback: timed out after 240s waiting for a model_change with role fallback`, with six ECONNREFUSED assistant turns on broken-model, no fallback model_change, and a signed-thinking claude-haiku-4-5 turn before the pick",
-      "headSha": "fbd76fa87d1a71f08d4bd3cceba59b7e3ee5f753",
-      "negativeControl": "Check 18 itself: a session that never falls back is reported as `FAIL fallback`, so the driver still detects it."
+      "criterion": "rebase re-check fbd76fa87d1a → ecd30b63345b: the forward merge of main leaves the pull request's diff unchanged, and the live view's header pickers still work at the merge head in Chromium, the iPhone profile and Firefox",
+      "surface": "The unchanged-diff fingerprint over the branch's diff from its fork point; the Dispatch browser suite in this pod (the real Go server built from ecd30b63, the production SPA bundle, rootless Postgres 17 + pgvector, Playwright Chromium and Firefox)",
+      "command": "jj diff --from \"fork_point(main@origin | <sha>)\" --to <sha> --git --context 0 '~(.legion | docs/solutions)' | sed -e '/^@@/d' -e '/^index /d' | sha256sum at fbd76fa8 and ecd30b63; cd packages/dispatch && bun run e2e -- --project=firefox e2e/keyboard-session-pickers.e2e.ts --repeat-each=2; npx playwright test --config e2e/playwright.config.ts --project=chromium --project=iphone e2e/agent-view.e2e.ts e2e/agent-view-settings.e2e.ts e2e/keyboard-session-pickers.e2e.ts e2e/live.e2e.ts",
+      "observed": "Fingerprint b635db7bc0a9… at both heads. Firefox keyboard rows 10 passed. Chromium + iPhone live-view specs 90 passed, 12 skipped.",
+      "headSha": "ecd30b63345bc4e729315aad87f1f20a8f2715ee",
+      "negativeControl": "Not re-run on a re-check. Round 5's negative control stands for the product, since the diff is unchanged: with the `: open` write removed, the Firefox keyboard rows failed 7 of 20 (11a ×3, 11d ×4)."
     }
-  ],
-  "checkedAndHeld": [
-    "Round 5's verification at ea067bb9 (Firefox rows 11a/11d ×4 20/20, `: open` on the real endpoint, Send held during a pending switch after #2227, live-view specs 90 passed) carries to fbd76fa8 unchanged: the merge's fingerprint is equal and the later commits touch no product code."
   ]
 }
