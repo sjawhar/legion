@@ -131,19 +131,16 @@ export function linkifyDispatchRefs(root: HTMLElement): void {
 }
 
 /**
- * Whether an anchor is a URL its author left as text: what GFM autolinks, a bare `https://…`
- * (a bare `www.…`, whose href gains `http://`) or one in angle brackets, and the anchor
- * `linkifyDispatchRefs` wraps around a bare `dispatch://…`, all show their href as their words.
- * A Markdown link whose words are its own target reads the same, and is the same text to the
- * server. Proof's sanitized `dispatch://` link (`data-dispatch-href`) is never one.
+ * Whether an anchor's target is a URL its author left as text: what GFM autolinks, a bare
+ * `https://…` (a bare `www.…`, whose target gains `http://`) or one in angle brackets
+ * (`<dispatch://…>` too), and the anchor `linkifyDispatchRefs` wraps around a bare
+ * `dispatch://…`, all show their target as their words. A Markdown link whose words are its own
+ * target (`[dispatch://X](dispatch://X)`, the form a document stores an autolink in) reads the
+ * same, and is the same text to the server. `target` is the anchor's own target: Proof's
+ * serializer moves a `dispatch://` target into `data-dispatch-href` and empties `href`.
  */
-function isTextUrl(anchor: HTMLAnchorElement, text: string): boolean {
-  const href = anchor.getAttribute("href");
-  return (
-    !anchor.hasAttribute("data-dispatch-href") &&
-    href !== null &&
-    (href === text || href === `http://${text}`)
-  );
+function isTextUrl(target: string, text: string): boolean {
+  return target === text || target === `http://${text}`;
 }
 
 /**
@@ -180,7 +177,7 @@ export function collectReferenceAnchors(
       continue;
     }
     const text = anchor.textContent ?? "";
-    const route = isTextUrl(anchor, text)
+    const route = isTextUrl(href, text)
       ? referenceRouteFromHref(href, appOrigin)
       : nodeRouteFromHref(href, appOrigin);
     if (route === undefined) {

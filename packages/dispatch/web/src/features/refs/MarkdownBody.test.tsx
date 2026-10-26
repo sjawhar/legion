@@ -321,6 +321,59 @@ describe("Dispatch pictures", () => {
     }
   });
 
+  // The `dispatch://` forms of a URL left as text: an angle-bracket autolink, and a Markdown link
+  // whose words are its own target, the form a document stores one in. Proof's serializer moves
+  // their target into `data-dispatch-href`; they are text to the server all the same, so past the
+  // bounds they stay plain, and within them they are references. A `dispatch://` link its author
+  // gave words of its own still opens the long-named document.
+  test("a dispatch:// URL left as text past the bounds stays plain; an author's dispatch:// link with its own words still opens", async () => {
+    const slug = "a".repeat(2683);
+    const getIssue = spyOn(api, "getIssue").mockResolvedValue({
+      artifacts: [
+        { ...picture, kind: "doc", name: "design.md", slug },
+        { ...picture, id: "artifact-plan", kind: "doc", name: "plan.md", slug: "plan-md" },
+      ],
+      key: "CORE-1",
+      title: "Core one",
+    } as never);
+    const getArtifactText = spyOn(api, "getArtifactText").mockResolvedValue({
+      markdown: "The design.",
+      token: "sha256:design",
+      version: 1,
+    });
+    const long = `dispatch://CORE-1/artifact/${slug}`;
+    const plan = "dispatch://CORE-1/artifact/plan-md";
+    const view = render(
+      withQueries(
+        <MarkdownBody
+          markdown={`Angle: <${long}>\n\nSelf: [${long}](${long})\n\nSee [design](${long}).\n\nPlan: <${plan}> and [${plan}](${plan})`}
+        />
+      )
+    );
+
+    try {
+      const designs = await within(view.container).findAllByRole("link", { name: "design.md" });
+      expect(designs).toHaveLength(1);
+      expect(designs[0]?.getAttribute("href")).toBe(`/issues/CORE-1/artifacts/${slug}`);
+      expect(designs[0]?.getAttribute("data-dispatch-ref")).toBe(long);
+      const plans = await within(view.container).findAllByRole("link", { name: "plan.md" });
+      expect(plans).toHaveLength(2);
+      for (const link of plans) {
+        expect(link.getAttribute("data-dispatch-ref")).toBe(plan);
+      }
+      for (const label of ["Angle:", "Self:"]) {
+        const paragraph = within(view.container).getByText(label, { exact: false });
+        const plain = paragraph.querySelector("a");
+        expect(plain?.textContent).toBe(long);
+        expect(plain?.getAttribute("data-dispatch-ref")).toBeNull();
+      }
+    } finally {
+      getArtifactText.mockRestore();
+      getIssue.mockRestore();
+      view.unmount();
+    }
+  });
+
   test("a picture on another website renders as it always has", async () => {
     const view = render(
       withQueries(<MarkdownBody markdown="![chart](https://example.com/a.png)" />)
