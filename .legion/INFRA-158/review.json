@@ -2,46 +2,42 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-158",
-  "completed": "2026-10-26T15:16:00Z",
-  "round": 1,
-  "head": "bc5dcfe9a7a7d467e6a4b9f3ffb707bcc225cb74",
+  "completed": "2026-10-26T21:13:00Z",
+  "round": 4,
+  "generation": 4,
+  "head": "337c577d886069b322cefb3b9acc36304f47a89f",
   "decision": "changes_requested",
   "critical": 0,
-  "important": 3,
-  "minor": 3,
-  "ci": "Required set (rulesets): lint, typecheck, test, pr-title. At CI head bc5dcfe9: lint, typecheck, test success (run 40333005216); pr-title success (run 40334998057). Compare bc5dcfe9...40e93a68 touches only .legion/. PR body's CI line is stale (says Tests in progress).",
-  "thermonuclear": "deep-review: APPROVE at 40e93a68 with one minor client finding and two hardening items; code-quality: CHANGES at 40e93a68 (structural). Reviewer probes at the head (throwaway Go tests on the pod's Postgres 17) confirmed the unloadable-document close refusal and the decision-20 gap.",
+  "important": 2,
+  "minor": 1,
+  "ci": "Required set (rulesets; no branch protection): lint, typecheck, test, pr-title. CI head 337c577d: lint, typecheck, test success; pr-title success. Compare 337c577d...e74c7c02 changes only .legion/ (2 files).",
+  "thermonuclear": "At 337c577d: thermonuclear-deep-review CHANGES (61 assistant turns, all anthropic / claude-opus-5-5), thermonuclear-code-quality CHANGES (38 assistant turns, all anthropic / claude-opus-5-5); provider and model read turn by turn from each pass's session transcript in the session store.",
+  "previousFindings": {
+    "1 close refused beside an unloadable document": "fixed in a60624f0, but the skip opens the gap in keyFindings[0]",
+    "2 repair window never moved past a failing issue": "fixed in a60624f0 (window moves with every listed pass; unrepaired issues carried)",
+    "3 pending-sync readOnly set once per connection": "fixed in 289c6397, but the later admission is not gated on sync (keyFindings[1])",
+    "4 decision 20 lost when the close released the room": "fixed in 2927a2db (close/reopen writes credit no author; plan decision 9 amended)",
+    "5 pre-close settlement under the request context": "fixed in a60624f0 (context.WithoutCancel)",
+    "6 no contract census": "fixed in the PR body; one omission (keyFindings[2])",
+    "typed settleRoomWithin outcome": "done in c707d3ab; both passes traced every old retry/retrySoon/failed/scheduleSettle path to the same outcome",
+    "pending-sync through Yjs public API": "done in fe28b6d8; no private-field reads left in the readable view; every failure keeps the row"
+  },
   "keyFindings": [
     {
       "severity": "important",
-      "file": "packages/envoy/internal/dispatch/docs/ask_lifecycle.go:202",
-      "description": "A close of an issue with an open ask is refused 409 DOCUMENT_UNLOADABLE when any document of the issue has a history that cannot decode (WriteIssueAskStates loads every document and returns the error). Probe at the head: one open plain ask plus a corrupted notes.md -> PATCH status done answered 409. The Legion daemon's done write then retries forever (outbox.go:530); the reopen and the repair fail the same way. Skip such a document, as the outside-schema case does."
+      "file": "packages/envoy/internal/dispatch/docs/ask_lifecycle.go:211",
+      "description": "A close skips a document whose history cannot load, leaving its blocks open in storage. The rebuild that 409 DOCUMENT_UNLOADABLE offers is allowed on a closed issue without markdown (rebuild.go:88-90) and seeds from the latest version, which predates the close, so the blocks read state=\"open\" again; RebuildTx marks no settlement owed, so the repair (issue_ask_repair.go candidates) reaches the issue only if another of its documents happens to owe one. The closed issue's document then shows an open decision whose row says withdrawn."
     },
     {
       "severity": "important",
-      "file": "packages/envoy/internal/dispatch/api/issue_ask_repair.go:111",
-      "description": "markedSince advances only when the whole pass has no error, so one issue that fails every pass (finding 1 is one such issue) keeps every interval pass a full sweep of every closed issue that owes a settlement, a set every close of this release adds to."
-    },
-    {
-      "severity": "important",
-      "file": "packages/dispatch/web/src/features/doc/pending-sync.ts:332",
-      "description": "readOnly is set only in firstSync, once per connection; a later writable admission (a reconnect after the issue is reopened) makes the editor writable (ProofDocument.tsx:526-530) but onUpdate still skips record(), so typing is never stored in IndexedDB and the pending count stays 0: edits lost with no warning if the socket drops and the tab closes. A regression from round 2."
+      "file": "packages/dispatch/web/src/features/doc/connection.ts:173",
+      "description": "A later admission calls PendingSync.admitted straight from onAuthenticated, before the reconnect's sync step is applied (synced is never reset). A read-only-to-writable admission then runs admit's restore against a stale document: another tab's stored row that builds on items the server took meanwhile parks in the scratch copy, is dropped with the handled rows and sets rebuiltAt, so that tab's unsent typing is lost and the page reports a rebuild that did not happen. The first admission waits for sync (notifySynced); later ones must too."
     },
     {
       "severity": "minor",
-      "file": "packages/envoy/internal/dispatch/docs/roomstate.go:70",
-      "description": "Plan decision 20 is not met after a real close: the close closes the room, OnUnloadDocument releases its state and lifecycleAuthors with it, and the reopen's settlement names system:document-settlement instead of the latest editor. Probe: the close with the room resident, SetIssueClosed(true), state released, reopen -> 'settlement names {Kind:system ID:document-settlement}, want {session reopened-session}'. handOverFailedRoomLocked does not carry it either, which the plan required."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/envoy/internal/dispatch/api/issue_patch.go:131",
-      "description": "The pre-close settlement runs under r.Context(): a client that hangs up after the settlement stamped ids into the room makes abandon fail the room (service.go:1449-1457), reloading it for every connected browser. Use context.WithoutCancel, with issueSettleBudget still bounding it."
-    },
-    {
-      "severity": "minor",
-      "file": "PR body",
-      "description": "No Contract change census: the close route gains new failure answers (409/503 from a document write) at the Legion daemon and CLI boundary, and AskResolution.kind / the ask event payload enum widen with withdrawn, which released plugins parse."
+      "file": "PR body, Contract change census",
+      "description": "The PATCH row lists the daemon's outbox SetStatus/HandOver but not the daemon API's other status writes that can reopen a closed issue and so meet the new 503: the controller's set_status (packages/daemon/internal/api/issues.go:31) and rerun_child (architect.go:909, todo) and release_children (architect.go:532), each answering the agent 502. The AskResolution row omits the margin sheet (useMarginSheet.ts:45), which folds only retracted asks, so a withdrawn ask stays in the margin unfolded."
     }
   ],
-  "fastFollow": "Simplify the close/repair plumbing: one WriteIssueAskStates per repair (drop withdrawIssueAsksTx's markUnindexed; IssueAskRepair.Swept then counts every marked block), closing/reopening computed once in patchIssue, a typed settleRoomWithin outcome in place of the failed callback, and pending-sync's readableType wrapped away from Yjs private fields."
+  "fastFollow": "In the same push (not deferred): issue_ask_lifecycle.go:38-40 says issueSettleBudget bounds the pre-close settlement, but it bounds only the append waits and retries; the repair's carried retry list is per process (README/AGENTS wording); settleOwedNow's exclusion list and settleOutcome.generation; one otherClientsRows helper for the two own-row filters in pending-sync.ts; export the prosemirror/marks root names from editor.ts."
 }
