@@ -109,14 +109,16 @@ type Issue struct {
 	// change together, as Hold and held do.
 	Awaiting *Awaiting
 	// HandoutSeq is the highest Dispatch sequence of the issue the record held when the daemon last
-	// gave the root's architect work (Store.StartHandout), 0 for never. It is never lowered, and
-	// only StartHandout writes it: PutIssue keeps the stored value.
+	// gave the root's architect work (Store.StartHandout, Store.TakeInThrough), 0 for never. It is
+	// never lowered, and only those two write it: PutIssue keeps the stored value.
 	HandoutSeq int64
 	// DeclaredSeq is the newest Dispatch sequence of a hand-back the architect made to a person
 	// since its last handout (Store.Declare), 0 when it made none or when nothing it handed back is
-	// still with the person (Store.ClearDeclared). Only Declare, ClearDeclared and StartHandout
-	// write it: PutIssue keeps the stored value.
+	// still with the person (Store.ClearDeclared), and DeclaredAt Dispatch's time of that hand-back
+	// (zero when its event gave none). Only Declare, ClearDeclared, StartHandout and TakeInThrough
+	// write them: PutIssue keeps the stored values.
 	DeclaredSeq int64
+	DeclaredAt  time.Time
 }
 
 // Repository is the repository the record names (Repo) in the spelling the record keeps: what
@@ -816,9 +818,13 @@ type Store interface {
 	// its Dispatch mirror shows, its wait's start, every fence and person's act of its mirrored
 	// asks, its gate's reviews), and DeclaredSeq clears.
 	StartHandout(ctx context.Context, tx pgx.Tx, issue string) error
-	// Declare records a hand-back to a person at seq: DeclaredSeq becomes the greater of itself and
-	// seq.
-	Declare(ctx context.Context, tx pgx.Tx, issue string, seq int64) error
+	// TakeInThrough records work the daemon gives issue's architect about an event at seq (a
+	// design-changes notice): HandoutSeq rises to seq, and DeclaredSeq clears only when it is at or
+	// below seq, so a hand-back newer than that event, applied first, still stands.
+	TakeInThrough(ctx context.Context, tx pgx.Tx, issue string, seq int64) error
+	// Declare records a hand-back to a person at mark: DeclaredSeq becomes the greater of itself and
+	// mark.Seq, and DeclaredAt the newest hand-back's time.
+	Declare(ctx context.Context, tx pgx.Tx, issue string, mark EventMark) error
 	// ClearDeclared clears DeclaredSeq: nothing the architect handed back is still with the person.
 	ClearDeclared(ctx context.Context, tx pgx.Tx, issue string) error
 	Slots(ctx context.Context, tx pgx.Tx) ([]Slot, error)

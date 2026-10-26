@@ -119,12 +119,16 @@ func (e *Engine) gateRegistered(ctx context.Context, tx pgx.Tx, fact intake.Gate
 	}
 	// The gate of this document was already open at this version: the architect was told then, so
 	// the registration tells it nothing again. Advancing the admitted tree and releasing a refused
-	// READY change nothing that already moved.
-	if !sameDocument || !classify.DesignGateOpen(*stored) || stored.LatestVersion != gate.LatestVersion {
+	// READY change nothing that already moved. A root waiting on a person is told by its resume,
+	// which says how its spec stands (answerOpenGates), so it gets no notice now as well.
+	switch {
+	case issue.AwaitingPerson():
+		e.logOnCommit(ctx, "workflow: a root waiting on a person is told its open gate by its resume", "issue", issue.Key, "version", gate.LatestVersion)
+	case !sameDocument || !classify.DesignGateOpen(*stored) || stored.LatestVersion != gate.LatestVersion:
 		if err := e.notice(ctx, tx, fact.Issue, record.Notice{Kind: "design-approved", Version: gate.LatestVersion}); err != nil {
 			return intake.Result{}, err
 		}
-	} else {
+	default:
 		e.logOnCommit(ctx, "workflow: a registration of a gate already open at its version tells the architect nothing", "issue", issue.Key, "version", gate.LatestVersion)
 	}
 	if err := e.advanceAdmittedTree(ctx, tx, *issue, gate); err != nil {
@@ -145,8 +149,11 @@ func (e *Engine) gateRegistered(ctx context.Context, tx pgx.Tx, fact intake.Gate
 // generation is told the request again, as its architect was not.
 //
 // The notice is work the daemon hands the running architect, so it is a handout for a root that
-// holds its slot (record.Store.StartHandout): what that architect handed back before it is part of
-// the spec it is now asked to revise, and only a hand-back after the notice starts the next wait.
+// holds its slot: what that architect handed back at or before the review is part of the spec it is
+// now asked to revise, and only a hand-back after the review starts the next wait
+// (record.Store.TakeInThrough). A hand-back newer than the review, applied first, still stands. A
+// review with no sequence cannot be placed, so it takes in everything the record holds
+// (record.Store.StartHandout), as the notice did before hand-backs were placed.
 func (e *Engine) tellChanges(ctx context.Context, tx pgx.Tx, key, artifact string, version int, reason string, mark record.EventMark) error {
 	issue, err := e.store.Issue(ctx, tx, key)
 	if err != nil || issue == nil {
@@ -171,6 +178,9 @@ func (e *Engine) tellChanges(ctx context.Context, tx pgx.Tx, key, artifact strin
 	}
 	if issue.Phase != phase.Admitted || !claim.IsTreeRoot(issue.Key, issue.Tree) {
 		return nil
+	}
+	if mark.Seq > 0 {
+		return e.store.TakeInThrough(ctx, tx, issue.Key, mark.Seq)
 	}
 	return e.store.StartHandout(ctx, tx, issue.Key)
 }
@@ -395,7 +405,7 @@ func (e *Engine) applyArtifact(ctx context.Context, tx pgx.Tx, gate record.Desig
 		if fact.Kind != intake.DispatchArtifactChangesRequested {
 			return nil
 		}
-		if stale && classify.ApprovalFollows(gate, fact.Version, fact.Mark) {
+		if !off && stale && classify.ApprovalFollows(gate, fact.Version, fact.Mark) {
 			return nil
 		}
 		if !off {
@@ -439,17 +449,25 @@ func (e *Engine) applyArtifact(ctx context.Context, tx pgx.Tx, gate record.Desig
 		}
 	}
 	if !wasOpen && isOpen {
-		opened := record.Notice{Kind: "design-approved", Version: fact.Version}
-		if carried {
-			opened = record.Notice{Kind: "carried-gate-opened", Version: fact.Version, Reason: fmt.Sprintf(
-				"a human approved %s's spec document at version %d, which opens the gate %s carried; any READY it refused is released and any child waiting on it starts", fact.Key, fact.Version, key)}
-		}
-		if err := e.notice(ctx, tx, key, opened); err != nil {
-			return err
-		}
 		issue, err := e.store.Issue(ctx, tx, key)
 		if err != nil || issue == nil {
 			return err
+		}
+		// A root waiting on a person is told the opening by its resume (answerAwaitedGate,
+		// answerOpenGates), which says how its spec stands: a notice as well would say it twice.
+		opened := &record.Notice{Kind: "design-approved", Version: fact.Version}
+		switch {
+		case carried:
+			opened = &record.Notice{Kind: "carried-gate-opened", Version: fact.Version, Reason: fmt.Sprintf(
+				"a human approved %s's spec document at version %d, which opens the gate %s carried; any READY it refused is released and any child waiting on it starts", fact.Key, fact.Version, key)}
+		case issue.AwaitingPerson():
+			opened = nil
+			e.logOnCommit(ctx, "workflow: a root waiting on a person is told its gate's opening by its resume", "issue", key, "version", fact.Version)
+		}
+		if opened != nil {
+			if err := e.notice(ctx, tx, key, *opened); err != nil {
+				return err
+			}
 		}
 		if err := e.advanceAdmittedTree(ctx, tx, *issue, updated); err != nil {
 			return err

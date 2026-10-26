@@ -14,7 +14,7 @@ import (
 // architect's claim working and its task taken: the view decideAwait would enter on.
 func awaitRootView() awaitView {
 	root := askRoot()
-	root.DeclaredSeq = 5
+	root.DeclaredSeq, root.DeclaredAt = 5, time.Date(2026, 9, 22, 23, 0, 0, 0, time.UTC)
 	return awaitView{
 		Root:    root,
 		Slotted: true,
@@ -96,8 +96,8 @@ func TestDecideAwaitsTable(t *testing.T) {
 			if got.Act != tc.want || !strings.Contains(got.Why, tc.why) {
 				t.Fatalf("decideAwait = %+v, want act %v because %q", got, tc.want, tc.why)
 			}
-			if got.Act == actEnter && got.Waiting.Since.Seq != view.Root.DeclaredSeq {
-				t.Fatalf("the wait begins at %d, want the newest hand-back %d", got.Waiting.Since.Seq, view.Root.DeclaredSeq)
+			if got.Act == actEnter && (got.Waiting.Since.Seq != view.Root.DeclaredSeq || !got.Waiting.Since.At.Equal(view.Root.DeclaredAt)) {
+				t.Fatalf("the wait begins at %+v, want the newest hand-back %d at %s", got.Waiting.Since, view.Root.DeclaredSeq, view.Root.DeclaredAt)
 			}
 		})
 	}
