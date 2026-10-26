@@ -434,8 +434,9 @@ func nothingProvisioned(t *testing.T, run *recordingRunner, before int, workspac
 	}
 }
 
-// An issue branch another clone pushed before the issue's first workspace existed — a repository's
-// fixture, or the branch a tree pushed before its volume was lost — is where the workspace starts:
+// An issue branch another clone pushed before this workspace existed — a repository's fixture, or
+// the branch an earlier pod of the issue pushed before its disk went with it — is where the
+// workspace starts:
 // provisioning tracks legion/<KEY>@origin and adds the workspace at it, on the host's path and on
 // a pod's feed. The branch's commits are in the workspace, the local bookmark is the remote's, and
 // the issue's next push moves that branch.
@@ -477,7 +478,7 @@ func TestProvisionAdoptsAnIssueBranchOnlyTheRemoteHas(t *testing.T) {
 }
 
 // A merged pull request's branch, deleted on GitHub, leaves no remote row: an issue workspace
-// provisioned after that — its directory gone, as when a tree's volume is lost — starts from main
+// provisioned after that — its directory gone, as on a later pod's fresh disk — starts from main
 // as a brand-new issue's does, and the merged branch is not brought back.
 func TestProvisionAfterTheMergedBranchIsDeletedStartsFromMain(t *testing.T) {
 	l := pushedThenLost(t, "merged.txt")

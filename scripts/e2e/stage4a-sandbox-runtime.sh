@@ -234,7 +234,7 @@ bridge)
 *) fail "LEGION_E2E_POD_REACHABILITY must be aws-private-ip or bridge, not '$pod_reachability'" ;;
 esac
 case "$session_db_port" in
-'') fail "LEGION_E2E_SESSION_DB_PORT is unset: postgres-resume's scratch Postgres listens on a port every pod reaches as it reaches the worker stream" ;;
+'') fail "LEGION_E2E_SESSION_DB_PORT is unset: the run's scratch Postgres, which every pod of the run keeps its sessions in, listens on a port every pod reaches as it reaches the worker stream" ;;
 *[!0-9]*) fail "LEGION_E2E_SESSION_DB_PORT must be a port number, not '$session_db_port'" ;;
 esac
 [ "$session_db_port" != "$port" ] || fail "LEGION_E2E_SESSION_DB_PORT is the worker stream's port $port"
@@ -341,11 +341,15 @@ else
 fi
 
 begin session-db
-# postgres-resume's session database: a throwaway Postgres on the devbox, which pods reach as they
-# reach the worker stream (directly in AWS mode, through the bridge in GKE mode). Its password is
+# The run's session database: a throwaway Postgres on the devbox, which pods reach as they
+# reach the worker stream (directly in AWS mode, through the bridge in GKE mode). The daemon
+# requires a store that keeps sessions in a database, and the harness names this one
+# (runtime.kubernetes.session_store postgres), so every runtime the harness
+# builds keeps its sessions here and every resume of the run is held to this table — which is what
+# a role carries across a pod now that an issue's disk dies with its pod. Its password is
 # the run's own and reaches docker through an owner-only env file, never an argument; the URL is
 # written only to an owner-only file, which the harness and the providers Secret read, and is
-# never printed. The harness's own direct connection (postgres-resume's writeSession) needs the
+# never printed. The harness's own direct connection (writeSession) needs the
 # address the devbox itself can dial — bind_host, loopback under bridge — never advertise_host (a
 # bridge-mode devbox cannot resolve the bridge's cluster-DNS name), so a second file carries the
 # same database at that address, for the harness alone; the providers Secret and every pod still
@@ -407,9 +411,10 @@ op create configmap "$route_configmap" --from-file=models.yml="$work/models.yml"
   --dry-run=client -o yaml | op label --local -f - "legion.dev/project=$run_label" -o yaml | op create -f - >/dev/null ||
   fail "the operator could not create ConfigMap $route_configmap"
 # The run's providers Secret, named as the runtime names it (ProvidersSecretName): one key no model
-# route reads, the scratch session database's URL, which postgres-resume's runtime keeps sessions
-# in (session_dsn_secret stage4a_sessions), and, under LEGION_E2E_MODEL_ROUTE=key-file, a
-# placeholder ANTHROPIC_API_KEY.
+# route reads, the scratch session database's URL, which every runtime of the run keeps its
+# sessions in (session_dsn_secret stage4a_sessions, the key of the run's session_store postgres; the
+# daemon requires a store that keeps sessions in a database), and, under
+# LEGION_E2E_MODEL_ROUTE=key-file, a placeholder ANTHROPIC_API_KEY.
 op create secret generic "$providers_secret" --from-literal=stage4a="$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')" \
   --from-file=stage4a_sessions="$work/session-dsn" \
   "${anthropic_key_args[@]}" \
