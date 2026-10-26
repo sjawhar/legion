@@ -2,59 +2,48 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-440",
-  "completed": "2026-10-26T15:32:28Z",
+  "completed": "2026-10-26T16:25:07Z",
   "proof": [
     {
-      "criterion": "Review finding 1: the Inbox ask card's asker stays readable at 390 px beside the copy-handles button and the live link",
-      "surface": "real Go Dispatch server (e2e/run-server.sh) + Postgres 17.11/pgvector + Playwright Chromium 1243 in the issue pod; env /legion/scratch/harness/env.sh (ports 18777/19021-19024, database dispatch_impl_e2e)",
-      "command": "cd packages/dispatch && source /legion/scratch/harness/env.sh && bunx playwright test --config e2e/playwright.config.ts --project=chromium --project=iphone e2e/agent-name.e2e.ts e2e/claim.e2e.ts",
-      "observed": "14 passed, 2 skipped (phone-only rows on chromium); the new iphone row 'on a phone the ask card's asker reads its whole name beside Waiting on you and the live link' passes (name text equals the full title, scrollWidth <= clientWidth), the earlier phone row (no overlap, live link >= 44 px, page not widened, copy handles open) and every other row pass; inbox/keyboard-inbox/inbox-stability with agent-name gave 119 passed on the same source",
-      "headSha": "1c08eb908fced3f754e88c058f221d6f8cd60829",
-      "negativeControl": "the new row against the build of 339e0c89 (before the AskCard layout change) -> fails 'the asker's name is not cut short': Expected <= 28, Received 144"
+      "criterion": "Review round 2 finding 1: the Inbox asker's tooltip carries the full session id",
+      "surface": "real Go Dispatch server (e2e/run-server.sh) + Postgres 17.11/pgvector + Playwright Chromium 1243 in the issue pod; env /legion/scratch/harness/env.sh (ports 18777/19021-19024, database dispatch_impl_e2e); plus the SPA unit suite",
+      "command": "cd packages/dispatch && source /legion/scratch/harness/env.sh && bunx playwright test --config e2e/playwright.config.ts --project=chromium --project=iphone e2e/agent-name.e2e.ts e2e/inbox.e2e.ts e2e/claim.e2e.ts ; bun test web/src/__tests__/ask-card.test.tsx -t 'untitled session asker'",
+      "observed": "69 passed, 3 skipped (phone-only rows on chromium): the asker row finds the name by its tooltip 'Running agent (current) \u00b7 e2e-run-agent' and it reads whole at 390 px; every acceptance row and the Inbox credential rows pass; the unit test finds the title 'session:01234567\u2026 \u00b7 0123456789abcdef-untitled'",
+      "headSha": "8e8a07df30562494388bae76c999ea7abfa8dbcb",
+      "negativeControl": "the unit test against the previous AskCard.tsx -> fails: Unable to find an element with the title: session:01234567\u2026 \u00b7 0123456789abcdef-untitled"
     },
     {
-      "criterion": "Review finding 2 (Security, untrusted input): a credential approval line shows the full session id and says in words when it isn't running or could not be checked",
-      "surface": "real Go Dispatch server (e2e/run-server.sh) + Postgres 17.11/pgvector + Playwright Chromium 1243 in the issue pod; env /legion/scratch/harness/env.sh (ports 18777/19021-19024, database dispatch_impl_e2e); fake broker credential request in the Inbox",
-      "command": "throwaway spec (not committed) seeding a live session 019a2b3c-real-session-0001 and a pending credential request whose session.request is the forged 019a2b3c-forged-claim-9999, then routing /api/v1/agents to 503 and reloading; chromium and iphone",
-      "observed": "line reads 'session:019a2b3c\u2026 \u00b7 019a2b3c-forged-claim-9999 isn't running.', and with the agents list failing 'session:019a2b3c\u2026 \u00b7 couldn't check whether 019a2b3c-forged-claim-9999 is running.'; unit tests in CredentialRequestsSection.test.tsx and CredentialRecordPage.credential.test.tsx assert the full id and the words",
-      "headSha": "1c08eb908fced3f754e88c058f221d6f8cd60829",
-      "negativeControl": "same spec against the previous CredentialSessionLines.tsx -> fails: expected '\u2026 \u00b7 019a2b3c-forged-claim-9999 isn't running.', received only 'session:019a2b3c\u2026'"
+      "criterion": "Review round 2 finding 2: a credential line's words come from the one agents list read (no second registry read, no unreachable branch)",
+      "surface": "SPA unit suite (CredentialRequestsSection, CredentialRecordPage.credential, session.test) and the same browser run's Inbox credential rows",
+      "command": "cd packages/dispatch && bun test web/src (2376 pass, 0 fail)",
+      "observed": "session.test.ts asserts running (with place) / not-running / unknown statuses; the full-id and 'isn't running' / 'couldn't check whether <id> is running' tests pass unchanged; CredentialSessionLines.tsx no longer imports useAgentRegistry",
+      "headSha": "8e8a07df30562494388bae76c999ea7abfa8dbcb",
+      "negativeControl": "round 1's forged-id probe against the original CredentialSessionLines.tsx received only 'session:019a2b3c\u2026'; the same words are now produced from the status the parent's single read computes"
     },
     {
-      "criterion": "Review findings 3-9 (attribution read once, full id behind the short form, control for user/system actors, one naming rule, ReplyTarget always names its author, dead thread.title removed, reply mention named by the shared rule, docs)",
-      "surface": "real Go Dispatch server (e2e/run-server.sh) + Postgres 17.11/pgvector + Playwright Chromium 1243 in the issue pod; env /legion/scratch/harness/env.sh (ports 18777/19021-19024, database dispatch_impl_e2e)",
-      "command": "bun test web/src (2375 pass) plus bunx playwright test --project=chromium --project=iphone e2e/agent-name.e2e.ts e2e/conversation.e2e.ts e2e/margin.e2e.ts e2e/mention-composer.e2e.ts e2e/agents.e2e.ts e2e/delivery-groups.e2e.ts",
-      "observed": "132 passed, 24 skipped, 0 failed; unit tests assert the byline with an owner reads 'Running Planner (for alice)' with no aria-label on the link, two untitled sessions sharing a prefix carry their own full id as title, control around a user actor keeps the host button, an untitled session's reply prefills '@session <full id>', the thread card composer reads 'Replying to Implementer (as legion/legion-worker)'",
-      "headSha": "1c08eb908fced3f754e88c058f221d6f8cd60829",
-      "negativeControl": "under the previous code the new reply-mention unit test gave '@<id>' and the thread-card composer read 'Replying to ' with nothing after it"
+      "criterion": "Review round 2 finding 3: the pull request no longer conflicts with main",
+      "surface": "GitHub mergeability and the branch diff fingerprint",
+      "command": "forward merge of main c79379d9 (jj new legion/INFRA-440 main@origin); fingerprint per conflicts-and-rewrites.md before and after",
+      "observed": "CHANGELOG conflict resolved keeping both entries; fingerprint 8540279c\u2026 before and after (unchanged); GitHub reports MERGEABLE at 8e8a07df; tsc, biome and 2411 unit tests pass after the merge",
+      "headSha": "8e8a07df30562494388bae76c999ea7abfa8dbcb",
+      "negativeControl": "before the merge GitHub reported CONFLICTING in packages/contracts/CHANGELOG.md"
     }
   ],
   "filesChanged": [
-    "biome.json",
-    "packages/contracts/src/actor-label.ts",
-    "packages/contracts/src/actor-label.test.ts",
-    "packages/contracts/CHANGELOG.md",
-    "packages/dispatch/AGENTS.md",
-    "packages/dispatch/e2e/agent-name.e2e.ts",
-    "packages/dispatch/web/src/features/refs/AgentName.tsx",
-    "packages/dispatch/web/src/features/refs/AgentName.test.tsx",
-    "packages/dispatch/web/src/features/conversation/composer-model.ts",
-    "packages/dispatch/web/src/features/conversation/ReplyQuote.tsx",
-    "packages/dispatch/web/src/features/conversation/MentionComposer.tsx",
-    "packages/dispatch/web/src/features/conversation/ConversationTab.tsx",
-    "packages/dispatch/web/src/features/agents/AgentsPage.tsx",
-    "packages/dispatch/web/src/features/margin/ThreadCard.tsx",
-    "packages/dispatch/web/src/features/issue/SubscribedAgents.tsx",
+    "packages/contracts/CHANGELOG.md (merge)",
     "packages/dispatch/web/src/features/inbox/AskCard.tsx",
-    "packages/dispatch/web/src/features/credentials/CredentialSessionLines.tsx",
-    "tests: CredentialRequestsSection, CredentialRecordPage.credential, MentionComposer, usePhoneThread, ConversationTab, MentionComposer.margin, ThreadCard, markdown-surfaces, IssuePage, AskRecipients"
+    "packages/dispatch/web/src/__tests__/ask-card.test.tsx",
+    "packages/dispatch/e2e/agent-name.e2e.ts",
+    "packages/dispatch/web/src/features/credentials/session.ts",
+    "packages/dispatch/web/src/features/credentials/session.test.ts",
+    "packages/dispatch/web/src/features/credentials/CredentialSessionLines.tsx"
   ],
   "trickyParts": [
     "AgentName's public API is unchanged (INFRA-448 builds on it); storedTitle stays required.",
     "Harness: Postgres on 127.0.0.1:55432 restarts with bash /legion/scratch/harness/setup.sh, which now probes the port before starting one (safe from any container). Source env.sh only around harness commands."
   ],
   "deviations": [
-    "Review round 1: all 11 threads fixed in this PR and resolved; e2e/agent-name.e2e.ts gained one row, earlier rows unchanged."
+    "Review round 2: three minor findings fixed; the asker row's locator in agent-name.e2e.ts (a row this implementer added in round 1) follows the new tooltip."
   ],
   "openQuestions": []
 }
