@@ -1,4 +1,4 @@
--- 0117_embeddings_pending_since.up.sql
+-- 0118_embeddings_pending_since.up.sql
 -- INFRA-393: the server keeps meaning search's coverage itself (internal/dispatch/embedqueue's
 -- coverage pass), and its coverage report says how long the oldest item has waited for a current
 -- vector. Two columns serve that:

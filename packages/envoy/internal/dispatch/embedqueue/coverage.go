@@ -69,7 +69,7 @@ var coverageSources = []coverageSource{
 
 // items renders the kind's searchable items, those whose text has something to embed (not
 // nothingToEmbed), as a query of (id, text, hash, written_at). hash is embeddings_enqueue's own
-// content_hash expression (0072, 0117) over the trigger's text, so an item's hash equals the
+// content_hash expression (0072, 0118) over the trigger's text, so an item's hash equals the
 // content_hash its trigger would store.
 func (s coverageSource) items() string {
 	return s.allItems() + " where not " + nothingToEmbed("s.text")
@@ -154,8 +154,8 @@ const dropForeignVectors = `
 	where e.kind = picked.kind and e.id = picked.id`
 
 // readmitForeignDead gives up to $3 of the kind's rows confirmed dead under another identity ($2
-// is the configured one; 0117 recorded embed.BedrockModel for every row dead before it, and only a
-// row the release before 0117 confirmed dead during the roll records none) this identity's
+// is the configured one; 0118 recorded embed.BedrockModel for every row dead before it, and only a
+// row the release before 0118 confirmed dead during the roll records none) this identity's
 // attempts, once: the content failed against another model or place, which says nothing about this
 // one. A row that dies again records the configured identity (retryRows) and is not re-admitted
 // again. Like dropForeignVectors, Cover runs it only once the configured embedder has answered:

@@ -441,7 +441,7 @@ func TestCoverDropsAnotherIdentitysVectors(t *testing.T) {
 	}
 }
 
-// A row confirmed dead under another identity, or under none (a row the release before 0117
+// A row confirmed dead under another identity, or under none (a row the release before 0118
 // confirmed dead during the roll), gets the configured identity's attempts once; a row dead under
 // the configured identity stays dead, and so does a re-admitted row once it dies again here.
 func TestCoverReadmitsARowDeadUnderAnotherIdentityOnce(t *testing.T) {
@@ -486,7 +486,7 @@ func TestCoverReadmitsARowDeadUnderAnotherIdentityOnce(t *testing.T) {
 	}
 }
 
-// A row dead under embed.BedrockModel, as 0117 records every row dead before it, stays dead with
+// A row dead under embed.BedrockModel, as 0118 records every row dead before it, stays dead with
 // its counters, and costs no call, on a deployment that keeps Bedrock: its other rows' vectors are
 // Bedrock's too, so the pass finds nothing foreign. A switch to Azure re-admits it once.
 func TestCoverLeavesARowDeadUnderBedrockDeadUntilAnotherIdentity(t *testing.T) {

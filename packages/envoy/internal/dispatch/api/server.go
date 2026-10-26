@@ -245,9 +245,9 @@ type server struct {
 	routeIndex      []routeIndexEntry
 	adviceQueryHook func(context.Context, pgx.Tx, string) error
 	// suggestionTimeout overrides the allowance the suggestion step runs under; zero, which every
-	// server the deployment builds leaves it, means writeSuggestionTimeout. Only a test sets it
-	// (newFailingAdviceHandler), so a case's outcome is its own choice rather than its machine's
-	// speed (INFRA-56).
+	// server the deployment builds leaves it, means writeSuggestionTimeout. Only tests set it
+	// (newFailingAdviceHandler, and suggestionsBehindLock for the two lock tests), so a case's
+	// outcome is its own choice rather than its machine's speed (INFRA-56).
 	suggestionTimeout time.Duration
 	// broadcastResolveBudget overrides the budget a broadcast's recipient resolution runs under;
 	// zero, which every server the deployment builds leaves it, means broadcastResolveTimeout.
@@ -327,7 +327,10 @@ func (s *server) waitBackground() {
 }
 
 // register is Register, answering the server it mounted, whose delivery hub and event stream
-// relay a test waits out before its database closes.
+// relay a test waits out before its database closes. It is also called with a zero Deps, as
+// TestTheDeploymentsSuggestionAllowanceIsTheDocumentedBound does, so it must stay cheap and
+// must not dial or read the nil Store: whatever reaches the database or the network starts
+// later, from a handler or the relay's first subscriber.
 func register(mux *http.ServeMux, deps Deps) *server {
 	s := &server{deps: deps}
 	s.eventRelay = newEventStreamRelay(s, s.lifetime())

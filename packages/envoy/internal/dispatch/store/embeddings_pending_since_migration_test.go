@@ -11,7 +11,7 @@ import (
 // embeddingsPendingSinceVersion adds embeddings.pending_since and dead_model, and teaches
 // embeddings_enqueue to set them on a text change (INFRA-393); the next version drops the removed
 // backfill-embeddings subcommand's checkpoint table.
-const embeddingsPendingSinceVersion = 117
+const embeddingsPendingSinceVersion = 118
 
 // TestMigrationAddsPendingSince runs the shipped files: a row pending at the migration takes its
 // own created_at as pending_since and an embedded row the migration's time; a row dead at the

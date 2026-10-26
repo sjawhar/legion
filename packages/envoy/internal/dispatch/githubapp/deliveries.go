@@ -52,7 +52,7 @@ func (c *Client) Deliveries(ctx context.Context, since time.Time, before func() 
 		if err != nil {
 			return nil, err
 		}
-		body, status, header, err := c.request(ctx, http.MethodGet, target, "Bearer "+jwt, nil, responseLimit)
+		body, status, header, err := c.request(ctx, http.MethodGet, target, "Bearer "+jwt, mediaTypeJSON, nil, responseLimit)
 		if err != nil {
 			return nil, err
 		}
@@ -94,7 +94,7 @@ func (c *Client) Redeliver(ctx context.Context, deliveryID int64) error {
 		return err
 	}
 	target := c.base + "/app/hook/deliveries/" + strconv.FormatInt(deliveryID, 10) + "/attempts"
-	body, status, header, err := c.request(ctx, http.MethodPost, target, "Bearer "+jwt, nil, responseLimit)
+	body, status, header, err := c.request(ctx, http.MethodPost, target, "Bearer "+jwt, mediaTypeJSON, nil, responseLimit)
 	if err != nil {
 		return err
 	}

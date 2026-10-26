@@ -64,7 +64,7 @@ carry rules beyond their row:
 
 | Variable | Purpose |
 | --- | --- |
-| `DISPATCH_APP_PEM_B64` | Base64-encoded GitHub App private key. With `DISPATCH_DEV_SIGNIN=1` this is the only source a key may come from (a `pem` in `app.json` is refused), it must be a throwaway, and `DISPATCH_GITHUB_API_BASE` must name a loopback host. |
+| `DISPATCH_APP_PEM_B64` | GitHub App private key, as a PEM or the base64 of a PEM: a value holding `-----BEGIN` is the PEM itself, and any other is base64-decoded. A key that does not parse stops boot with an error naming the variable, never the key. With `DISPATCH_DEV_SIGNIN=1` this is the only source a key may come from (a `pem` in `app.json` is refused), it must be a throwaway, and `DISPATCH_GITHUB_API_BASE` must name a loopback host. |
 | `DISPATCH_GITHUB_API_BASE` | GitHub API origin override for App calls (tests and e2e point it at a fake); empty means `https://api.github.com`. With `DISPATCH_DEV_SIGNIN=1` and an App private key loaded, it must name `127.0.0.1`, `[::1]` or `localhost`. That checks the host, not what listens there: every App call hands a signed App JWT to whatever owns the port, so the key must be a throwaway. |
 
 When no GitHub App credentials are configured, the server still starts, but
@@ -387,11 +387,12 @@ What the two processes share, and what each keeps to itself:
 
 **Two processes do not share a live document session.** Durable convergence is unconditional:
 every edit is appended under the document's advisory lock, Yjs updates commute, and the stored
-history is the union of them, so no edit is lost whichever process took it, and no process writes
-a version, a settlement or an ask retraction from a document state it does not hold
-(`ErrRoomBehindHead`). What is per-process is the live room: while a room is resident in one
-process it does not receive the other's updates, so presence and cursors show only the peers on
-that process. A write committed elsewhere closes the room within a notification round trip
+history is the union of them, so no edit is lost whichever process took it, no process writes a
+settlement or an ask retraction from a document state it does not hold (`ErrRoomBehindHead`), and
+a version whose room is behind the head is rendered from the stored document (`storedTree`). What
+is per-process is the live room: while a room is resident in one process it does not receive the
+other's updates, so presence and cursors show only the peers on that process. A write committed
+elsewhere closes the room within a notification round trip
 (`dispatch_doc_changed`, `docs/stale_room.go`), unless that room was evicted less than
 `staleRoomEvictInterval` (two seconds) ago, in which case its notification is refused and the
 room is re-examined when that window ends — the case the trailing write of an editing burst
@@ -429,7 +430,7 @@ ships no earlier than the next release, once no running build reads the old shap
 
 A migration that cannot be written that way is a stop-the-world migration: it is deployed with no
 server of the earlier release running, and that is an exception named in the pull request, not a
-default (`0113` below was one). The pre-deploy census ("Pre-deploy census" below) is unchanged by
+default (`0113` and `0117` below are the two). The pre-deploy census ("Pre-deploy census" below) is unchanged by
 that rule and still applies to every migration: it is taken before any migration of the release
 applies, and a census that refuses fails the deploy before the service moves. The rule in brief
 is `internal/dispatch/store/README.md`, beside the migrations directory rather than in it, since
@@ -667,8 +668,50 @@ image and confirms the stop before it reads the schema, and when the schema has 
 the previous image runs against, it refuses to start that image again and exits `1` for a forward
 recovery.
 
-Migrations `0117_embeddings_pending_since` and `0118_drop_embeddings_backfill_progress` move
-meaning search's coverage into the server (Search, below). `0117` adds `embeddings.pending_since`
+Migration `0117_architecture_sources_per_repo` lets a project import its components from more than
+one repository (`packages/envoy/AGENTS.md`). `architecture_sources` gains `id`, which names a
+source within its project, and its primary key moves from `(project_key)` to `(project_key, id)`,
+with a unique index on `(project_key, repo)`, so a repository is a source of a project at most
+once. `components` gains `source_id` and a foreign key on `(project_key, source_id)` to its
+source's row, `on delete cascade`, so deleting a source deletes its components. Both columns are
+added with the constant default `0`, which rewrites no row, and the default is then dropped:
+every existing source reads `id` 0, every existing component `source_id` 0 (its project's one
+existing source), and a source added later gets an `id` from 1 on. It takes `architecture_sources`
+and `components` in `ACCESS EXCLUSIVE` first and holds both to commit. Its census counts the
+components whose project has no source, the rows the foreign key would refuse:
+
+```sql
+select count(*) from components c
+where not exists (select 1 from architecture_sources s where s.project_key = c.project_key);
+```
+
+Only direct SQL writes such a component: the importer writes components under their source's row
+lock, and deleting a source deletes its components. A census that refuses on it is repaired on the
+release still serving, before the deploy, by deleting them:
+`delete from components c where not exists (select 1 from architecture_sources s where s.project_key = c.project_key)`;
+then take the census again.
+
+**`0117` is a stop-the-world migration: deploy it with no server of the earlier release running,
+and never start a release older than `0117` over it again.** Stop the earlier release, or scale it
+to zero, before the new release boots and migrates: a Kubernetes Deployment's
+`strategy: Recreate`, which `envoy-infra:gcp:Dispatch` uses at its default one replica
+(`packages/envoy/infra/README.md`); a deployment running more than one replica, which rolls, is
+scaled to zero first. The compose auto-deployer above stops the old container before it starts the
+new one. A failed deploy recovers forward, not by rolling the image back. The earlier release does
+not work over the new schema, and nothing at boot stops it from serving:
+
+- Its save of a project's source upserts `on conflict (project_key)`, which no unique index covers
+  once `0117` commits, so Postgres refuses the statement and the save answers `500`.
+- Its import takes one source row of the project as the project's one source, whichever row
+  Postgres returns first. When the model changed, it deletes every component of the project, every
+  source's, and inserts that source's components with no `source_id`, which has no default. A model
+  holding a component fails on the not-null column and rolls back, and its failure record writes
+  the error onto every source row of the project. A model holding none (no file in that branch's
+  `.dispatch/architecture/`) commits the delete, and every source's components are gone.
+- Its delete removes every source of the project and every component of the project.
+
+Migrations `0118_embeddings_pending_since` and `0119_drop_embeddings_backfill_progress` move
+meaning search's coverage into the server (Search, below). `0118` adds `embeddings.pending_since`
 (`not null default now()`: when the row last became pending, which the coverage route's oldest wait
 reads; a row pending at the migration takes its own `created_at`) and `embeddings.dead_model`
 (nullable: the embedder identity the row was confirmed dead under), and replaces
@@ -678,12 +721,12 @@ identity every earlier release embedded with, so a deployment that keeps Bedrock
 it, while a switch to Azure re-admits it once; a row the earlier release confirms dead during the
 roll records none and gets the new release's attempts once. Both columns are additive and the
 earlier release names neither: it inserts only through `embeddings_enqueue` or with an insert the
-default fills. `0118` drops `embeddings_backfill_progress`, the checkpoints of the removed
+default fills. `0119` drops `embeddings_backfill_progress`, the checkpoints of the removed
 `backfill-embeddings` subcommand. Dropping a table in the same release as the code that stopped
 using it is what the rule below forbids for a table a running build reads; no server of any release
 read or wrote this one, only that person-run subcommand did, so the drop breaks no build still
-serving through the roll. Both censuses answer `0`: `0117`'s updates write only the columns it
-adds, and `0118` drops nothing a running build still reads.
+serving through the roll. Both censuses answer `0`: `0118`'s updates write only the columns it
+adds, and `0119` drops nothing a running build still reads.
 
 Migration `0009_project_artifacts` deletes malformed derived artifact references, reports their
 count, and re-derives them from source text on the next write. It aborts server boot before a
@@ -948,7 +991,7 @@ is safe beside a live write and beside another process's pass, so the pass takes
 three null with no embedder), and in total and per kind the searchable items, how many carry a
 current vector of that identity, how many lack one, how many failed for good, and how long the
 oldest lacking item has waited. The `backfill-embeddings` subcommand, which did the pass's first
-job by hand, is gone, with its checkpoint table (0118).
+job by hand, is gone, with its checkpoint table (0119).
 
 Every process of one deployment runs the same embedder configuration, since each one's pass drops
 the vectors any other identity made. Moving a deployment to another place or Azure deployment makes

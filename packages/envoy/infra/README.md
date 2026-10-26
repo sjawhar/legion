@@ -220,15 +220,15 @@ is the consumer's to delete.
 
 `appClientId`, `appId` (the App's numeric ID, as a string of digits), `appPrivateKeySecretName`
 and `appPrivateKeySecretKey` (plain: the name and key of an existing Kubernetes Secret in the
-component's namespace holding the base64 of the App's PEM private key) turn on Dispatch's GitHub
-App: `DISPATCH_APP_CLIENT_ID` and `DISPATCH_APP_ID` are plain env vars, and `DISPATCH_APP_PEM_B64`
-is a `secretKeyRef` to that Secret and key. The component never creates that Secret and the
-Deployment does not wait on it: GKE SecretSync creates it at run time from Secret Manager, so the
-pod starts once the Secret exists. The key is never parsed here; Dispatch checks it at boot (an RSA
-private key, PKCS#1 or PKCS#8). Setting the App also starts Dispatch's webhook redelivery sweep,
-which needs the NATS redelivery bucket the hub's Dispatch user is granted
-(`DispatchPermissions`): a pod whose NATS user lacks it exits at boot. With either group unset,
-nothing renders and the app's pod template is unchanged.
+component's namespace holding the App's PEM private key, as GKE SecretSync copies it from Secret
+Manager, or the base64 of that PEM) turn on Dispatch's GitHub App: `DISPATCH_APP_CLIENT_ID` and
+`DISPATCH_APP_ID` are plain env vars, and `DISPATCH_APP_PEM_B64` is a `secretKeyRef` to that Secret
+and key. The component never creates that Secret and the Deployment does not wait on it: GKE
+SecretSync creates it at run time from Secret Manager, so the pod starts once the Secret exists.
+The key is never parsed here; Dispatch checks it at boot (an RSA private key, PKCS#1 or PKCS#8).
+Setting the App also starts Dispatch's webhook redelivery sweep, which needs the NATS redelivery
+bucket the hub's Dispatch user is granted (`DispatchPermissions`): a pod whose NATS user lacks it
+exits at boot. With either group unset, nothing renders and the app's pod template is unchanged.
 
 The Azure embedder's inputs are a third optional group, which takes no secret value either, and
 which reaches the app's `envoy-dispatch` container alone. `azureEmbedEndpoint` turns meaning search
@@ -469,6 +469,7 @@ Its environment comes from the inputs:
 | `NATS_URLS` | `natsUrls`, joined with commas |
 | `ENVOY_ALLOW_REMOTE_NATS` | `1` when any URL in `natsUrls` names a host other than `localhost` or a loopback address. The URL is read, never resolved. |
 | `ENVOY_HOST_BRIDGE` | `hostBridge`, when set |
+| `ENVOY_SUBSCRIBE_ALL_TOPICS` | `1` when `subscribeAllTopics` is `true`; unset otherwise |
 | `NATS_NKEY_SEED` | `seed`, when set. The whole environment is then a secret in the stack's state. |
 
 The listener serves on the host's loopback, `127.0.0.1:<port>`. This version sets no listen host,
@@ -486,7 +487,8 @@ The listener's outputs are `containerName` and `port`.
 | `image` | required | The listener image, such as `ghcr.io/sjawhar/legion/envoy:<tag>`. |
 | `containerName` | `envoy-listener` | The container's name. |
 | `port` | `9020` | The port the listener serves and the health check calls. |
-| `hostBridge` | unset | The address the listener delivers to this machine's sessions at. Unset, the listener uses `host.docker.internal`. Sessions that serve on the host's loopback are at `127.0.0.1`, since the container shares the host's network. |
+| `hostBridge` | unset | The address the listener delivers to this machine's sessions at: those registered through it, and those recording `machineId` as their host. Unset, the listener uses the host each session recorded, then `host.docker.internal`. Sessions that serve on the host's loopback are at `127.0.0.1`, since the container shares the host's network. |
+| `subscribeAllTopics` | `false` | `true` sets `ENVOY_SUBSCRIBE_ALL_TOPICS=1`: the listener also subscribes to every notification topic, so a session served on this machine receives a topic the stream does not store. Only for a NATS user holding `HostPermissions`, such as a `gcp:NatsHub` user with `machineId`; under any other grant the server refuses the subscription and the listener's start ends. See [Permission sets](#permission-sets). |
 | `seed` | unset | A secret: the nkey seed of the NATS user the listener connects as. May come from another resource or stack. |
 | `waitForHealthy` | `true` | Whether `pulumi up` waits on the container's health check. See [Readiness](#readiness). |
 | `watchdog` | unset | `{host}`: deploys the watchdog on that SSH address. See [The watchdog](#the-watchdog). |
@@ -847,6 +849,7 @@ environment, in this order:
 | `NATS_URLS` | `natsUrls`, joined with commas |
 | `ENVOY_ALLOW_REMOTE_NATS` | `1` when any URL names a host other than `localhost` or a loopback address |
 | `ENVOY_HOST_BRIDGE` | `hostBridge`, when it is not `""` |
+| `ENVOY_SUBSCRIBE_ALL_TOPICS` | `1` when `subscribeAllTopics` is `true` |
 | `ENVOY_NATS_REPLICAS` | `natsReplicas` |
 | `ENVOY_WEBHOOKS` | `webhooks`, joined with commas, when it lists one |
 | `ENVOY_GITHUB_MENTION_TRIGGER`, `ENVOY_REVIEWER_APP_ID` | `mentionTrigger`, `reviewerAppId`, with `github` |
@@ -894,6 +897,7 @@ Its outputs are `serviceArn`, `serviceName`, `logGroupName`, `taskDefinitionArn`
 | `listenHost` | required | `ENVOY_LISTEN_HOST`. The listener binds `127.0.0.1` when it is blank, where the target group cannot reach it. |
 | `hostBridge` | required | `ENVOY_HOST_BRIDGE`; `""` leaves it unset. |
 | `natsReplicas` | required | `ENVOY_NATS_REPLICAS`, at least 1. |
+| `subscribeAllTopics` | `false` | `true` sets `ENVOY_SUBSCRIBE_ALL_TOPICS=1`, as for `host:Listener`: only for a NATS user holding `HostPermissions`, since under any other grant the listener's start ends. |
 | `alarmTopicArn` | required | The SNS topic the alarms page and clear on. |
 | `baseTags`, `metricNamespace` | required | As for `aws:NatsService`. |
 | `natsServiceArn` | required | The NATS service's ARN. The component only orders its ECS service after it, so the listener rolls out after NATS, which by then holds the key the listener presents: pass the `NatsService`'s `serviceArn` output, not a literal. |
@@ -1232,7 +1236,7 @@ authorization {
 ### webhook-listener-env
 
 ```text
-envoy-infra render webhook-listener-env --machine-id <id> --nats-url <url>... [--webhook <name>]... [--reviewer-app-id <id>] [--mention-trigger <t>] --listen-host <h> --host-bridge <h> --nats-replicas <n>
+envoy-infra render webhook-listener-env --machine-id <id> --nats-url <url>... [--webhook <name>]... [--reviewer-app-id <id>] [--mention-trigger <t>] --listen-host <h> --host-bridge <h> --nats-replicas <n> [--subscribe-all-topics]
 ```
 
 Prints `aws:WebhookListener`'s container environment, one `KEY=value` line per variable in the
@@ -1255,6 +1259,9 @@ ENVOY_REVIEWER_APP_ID=1234567
 
 With no `--webhook`, it prints no `ENVOY_WEBHOOKS` line and no GitHub lines, as the component writes
 none for `webhooks: []`, and refuses `--reviewer-app-id` and `--mention-trigger`.
+
+With `--subscribe-all-topics`, the component's `subscribeAllTopics: true`, it prints
+`ENVOY_SUBSCRIBE_ALL_TOPICS=1` right after the `ENVOY_HOST_BRIDGE` line; without it, no such line.
 
 Without `--reviewer-app-id`, it prints
 `refused: --reviewer-app-id: reviewerAppId is required with webhook "github"` and exits 2.
@@ -1734,6 +1741,20 @@ that already reads the host's seed. This repository's listener and a session, co
 user holding `HostPermissions`, and connected as a user holding `ListenerPermissions` beside a
 credential-free session user holding `SessionPermissions`, are checked against real nats-server
 2.10 and 2.15.1 servers; `AGENTS.md` in this directory says how.
+
+`HostPermissions` is also the one set under which a listener may set `ENVOY_SUBSCRIBE_ALL_TOPICS=1`
+(`host:Listener`'s and `aws:WebhookListener`'s `subscribeAllTopics`). The listener then holds a
+core subscription on `notifications.>` in its machine's queue group `envoy-listener-live-<m>`, so a
+session served on its machine receives a topic the stream does not store, which the set's plain
+`notifications.>` subscribe entry allows in any queue group. `ListenerPermissions` and
+`DispatchPermissions` subscribe only to the role lanes and `_INBOX.>`, so the server refuses that
+subscription, and the listener's start ends with exit 1 and an ERROR naming
+`ENVOY_SUBSCRIBE_ALL_TOPICS`. A `gcp:NatsHub`'s own `listener` and `gcp:Dispatch`'s listener
+therefore never set it, and neither component takes the input. Both outcomes are checked against
+the real servers above: the listener opted in as a user holding `HostPermissions` delivers an
+ad-hoc topic to a session's serving port with no refusal, and opted in as a user holding
+`ListenerPermissions` ends its start, the server's one refusal its subscription to
+`notifications.>`.
 
 `DaemonPermissions()` is the grant of a Legion daemon's dedicated NATS user. It publishes the
 notification stream's info request, the info, create and next-message requests of any consumer of

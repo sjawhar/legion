@@ -85,11 +85,6 @@
                 "name": "issue"
               },
               {
-                "mountPath": "/home/legion/.omp/profiles/legion/agent/sessions",
-                "name": "issue",
-                "subPath": "sessions"
-              },
-              {
                 "mountPath": "/var/run/legion/launcher",
                 "name": "launcher-architect",
                 "readOnly": true
@@ -116,6 +111,11 @@
                 "name": "issue",
                 "readOnly": true,
                 "subPath": "feed"
+              },
+              {
+                "mountPath": "/var/run/legion/providers",
+                "name": "providers",
+                "readOnly": true
               },
               {
                 "mountPath": "/var/run/legion/agent-secrets-token",
@@ -187,11 +187,6 @@
                 "name": "issue"
               },
               {
-                "mountPath": "/home/legion/.omp/profiles/legion/agent/sessions",
-                "name": "issue",
-                "subPath": "sessions"
-              },
-              {
                 "mountPath": "/var/run/legion/launcher",
                 "name": "launcher-planner",
                 "readOnly": true
@@ -218,6 +213,11 @@
                 "name": "issue",
                 "readOnly": true,
                 "subPath": "feed"
+              },
+              {
+                "mountPath": "/var/run/legion/providers",
+                "name": "providers",
+                "readOnly": true
               },
               {
                 "mountPath": "/var/run/legion/agent-secrets-token",
@@ -289,11 +289,6 @@
                 "name": "issue"
               },
               {
-                "mountPath": "/home/legion/.omp/profiles/legion/agent/sessions",
-                "name": "issue",
-                "subPath": "sessions"
-              },
-              {
                 "mountPath": "/var/run/legion/launcher",
                 "name": "launcher-implementer",
                 "readOnly": true
@@ -320,6 +315,11 @@
                 "name": "issue",
                 "readOnly": true,
                 "subPath": "feed"
+              },
+              {
+                "mountPath": "/var/run/legion/providers",
+                "name": "providers",
+                "readOnly": true
               },
               {
                 "mountPath": "/var/run/legion/agent-secrets-token",
@@ -391,11 +391,6 @@
                 "name": "issue"
               },
               {
-                "mountPath": "/home/legion/.omp/profiles/legion/agent/sessions",
-                "name": "issue",
-                "subPath": "sessions"
-              },
-              {
                 "mountPath": "/var/run/legion/launcher",
                 "name": "launcher-tester",
                 "readOnly": true
@@ -422,6 +417,11 @@
                 "name": "issue",
                 "readOnly": true,
                 "subPath": "feed"
+              },
+              {
+                "mountPath": "/var/run/legion/providers",
+                "name": "providers",
+                "readOnly": true
               },
               {
                 "mountPath": "/var/run/legion/agent-secrets-token",
@@ -493,11 +493,6 @@
                 "name": "issue"
               },
               {
-                "mountPath": "/home/legion/.omp/profiles/legion/agent/sessions",
-                "name": "issue",
-                "subPath": "sessions"
-              },
-              {
                 "mountPath": "/var/run/legion/launcher",
                 "name": "launcher-reviewer",
                 "readOnly": true
@@ -524,6 +519,11 @@
                 "name": "issue",
                 "readOnly": true,
                 "subPath": "feed"
+              },
+              {
+                "mountPath": "/var/run/legion/providers",
+                "name": "providers",
+                "readOnly": true
               },
               {
                 "mountPath": "/var/run/legion/agent-secrets-token",
@@ -595,11 +595,6 @@
                 "name": "issue"
               },
               {
-                "mountPath": "/home/legion/.omp/profiles/legion/agent/sessions",
-                "name": "issue",
-                "subPath": "sessions"
-              },
-              {
                 "mountPath": "/var/run/legion/launcher",
                 "name": "launcher-merger",
                 "readOnly": true
@@ -626,6 +621,11 @@
                 "name": "issue",
                 "readOnly": true,
                 "subPath": "feed"
+              },
+              {
+                "mountPath": "/var/run/legion/providers",
+                "name": "providers",
+                "readOnly": true
               },
               {
                 "mountPath": "/var/run/legion/agent-secrets-token",
@@ -824,10 +824,23 @@
         ],
         "volumes": [
           {
-            "name": "issue",
-            "persistentVolumeClaim": {
-              "claimName": "issue-legion-legion-legion-208"
-            }
+            "ephemeral": {
+              "volumeClaimTemplate": {
+                "metadata": {},
+                "spec": {
+                  "accessModes": [
+                    "ReadWriteOnce"
+                  ],
+                  "resources": {
+                    "requests": {
+                      "storage": "20Gi"
+                    }
+                  },
+                  "storageClassName": "gp2"
+                }
+              }
+            },
+            "name": "issue"
           },
           {
             "name": "provision",
@@ -1214,31 +1227,22 @@
               "sizeLimit": "1Mi"
             },
             "name": "agent-secrets-key-merger"
+          },
+          {
+            "name": "providers",
+            "secret": {
+              "defaultMode": 288,
+              "items": [
+                {
+                  "key": "SESSION_DSN",
+                  "path": "OMP_SESSION_SQL_DSN"
+                }
+              ],
+              "secretName": "legion-legion-providers"
+            }
           }
         ]
       }
-    },
-    "volumeClaimTemplates": [
-      {
-        "metadata": {
-          "labels": {
-            "legion.dev/issue": "LEGION-208",
-            "legion.dev/project": "legion"
-          },
-          "name": "issue"
-        },
-        "spec": {
-          "accessModes": [
-            "ReadWriteOnce"
-          ],
-          "resources": {
-            "requests": {
-              "storage": "20Gi"
-            }
-          },
-          "storageClassName": "gp2"
-        }
-      }
-    ]
+    }
   }
 }

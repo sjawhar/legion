@@ -280,8 +280,8 @@ func TestTheControllersLaunchIsItsHeadlessPromptAndNoCheckout(t *testing.T) {
 	if spec.Prompt.DeploymentInstructionsPath != s.instructions {
 		t.Errorf("instructions = %q, want %q", spec.Prompt.DeploymentInstructionsPath, s.instructions)
 	}
-	if !spec.Repository.IsZero() || spec.DefaultBranch != "" || len(spec.Env) != 0 || spec.WorkspaceRecoveredFrom != "" {
-		t.Errorf("repository %q, default branch %q, env %v, recovered from %q; want none of them", spec.Repository, spec.DefaultBranch, spec.Env, spec.WorkspaceRecoveredFrom)
+	if !spec.Repository.IsZero() || spec.DefaultBranch != "" || len(spec.Env) != 0 {
+		t.Errorf("repository %q, default branch %q, env %v; want none of them", spec.Repository, spec.DefaultBranch, spec.Env)
 	}
 	if spec.Backend != runtime.BackendOmp {
 		t.Errorf("backend = %q, want omp, named", spec.Backend)
