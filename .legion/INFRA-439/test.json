@@ -2,32 +2,22 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-439",
-  "completed": "2026-10-26T16:50:00Z",
-  "round": 8,
-  "headSha": "9ccd956d02dfbc53785d74b7079703244ebc7d47",
-  "evidence": "https://github.com/sjawhar/legion/pull/2228#issuecomment-6421690359",
-  "answeringProvider": "anthropic/claude-haiku-4-5 answered every omp turn (read from the session files)",
+  "completed": "2026-10-26T17:05:00Z",
+  "round": 9,
+  "headSha": "3f7f2fc7736610e32d5e0a774a5e78e8bda3228e",
+  "evidence": "https://github.com/sjawhar/legion/pull/2228#issuecomment-6422245882",
+  "answeringProvider": "anthropic/claude-haiku-4-5 answered every omp turn (read from the session file)",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran `bash packages/pi-envoy/scripts/smoke-replay.sh` at this head: SMOKE REPLAY PASS. Drove the BTW and cursor-start cases live on a real Dispatch, natsd and listener built from this head, with the session reaching Dispatch through a proxy I control."
+    "how": "The implementer's leg B2-killed-in-flight (a BTW whose answer's reply POST was held when omp was SIGKILLed) shows no card at 3f7f2fc7, and my red test f2828f31 passes there. The record-before-side-turn change closes that window."
   },
   "failed": 1,
   "failures": [
     {
-      "criterion": "Review finding 1 (the architect's NARROW scope): a BTW is never replayed as a steering card; fix the class, so that it is recorded before any path can sweep it",
-      "evidence": "A BTW whose side turn answered, and whose reply POST is in flight when the process dies, comes back after the resume as a steering card that starts a turn. Live (r14 leg B2, real omp 18.8.9 and Dispatch built from this head): alice's BTW f0dc4a80-…; the side turn answered; the proxy held the reply POST; omp was SIGKILLed. After the resume, the session file holds one envoy-message card with the BTW body and expects_reply: required, and Dispatch records attempt 1 'sent' with no reply. refuseBTW records the event id before its POST, but the answered path records only after postDispatchReply succeeds (taken()), so a death between the side turn and the end of the POST leaves the stored copy to a sweep. Red test: f2828f31a1bd, `cd packages/pi-envoy && bun test extensions/envoy.test.ts -t \"a BTW refused live\"` -> fails 'whose side turn answered is not shown after a restart that cut its reply's POST short' (expected 0 cards, received 1)."
+      "criterion": "Review finding 1, the class (architect): a BTW is never replayed as a steering card that starts a turn, on any path",
+      "evidence": "A BTW that reaches replay without a record is still shown through showReplayed -> showReplayCard -> handCard with deliverAs 'steer' and triggerTurn: true. This covers a BTW published while the session's NATS connection is down, one published while omp is stopped, and one whose process is killed between the frame's arrival and its record. Live leg B5 (r17, real omp, Dispatch, natsd and listener built from this head): the NATS proxy was killed and alice sent a BTW (4723d136-…). The heartbeat replay sweep, which runs over HTTP, fetched it. At 17:01:30.798 the session wrote a card with the BTW body and expects_reply: required; at 17:01:31 a turn started and the model answered 'ok'. Dispatch's attempt stays 'sent' with no reply. Red test: 8c4e89118e1b, `cd packages/pi-envoy && bun test extensions/envoy.test.ts -t \"a BTW refused live\"` -> fails 'one the session never received live reaches replay as at most one card that starts no turn' (the card was handed with triggerTurn: true). The architect's direction: make every replayed BTW one inert notice in both plugins."
     }
   ],
-  "verifiedFixed": [
-    "Finding 1, the reply POST answered 503: no card through a reconnect sweep, three heartbeats, and a SIGKILL followed by a resume; the Retry got the reply 'ok' (r14 B1).",
-    "Finding 1, a sweep during a held reply POST in the same process: no card while the POST was held or after it completed (r14 B2).",
-    "Finding 2, a live frame queued behind a held accept while its cursor restarted (stream recreated at 16:38:48): its refusal POST failed at 16:38:55, and the session showed exactly one 'message not shown' notice naming it (r15 C1).",
-    "Red tests 9f8ac8ff and 240a4c4ae641: byte-identical at this head, both PASS."
-  ],
-  "notDrivenLive": [
-    "Finding 1, the shutdown refusal: on real omp the plugin's shutdown handler drains the NATS connection while it deregisters. With the deregistration held by a proxy in front of the listener, a BTW sent during shutdown was never received. Six timed attempts around closing omp's input got no refusal either. The implementer's unit test 'refused while its session shuts down is not shown after a resume of that session' covers it.",
-    "Findings 3 and 4 (the census line on stored rows, and the UnwrittenFrames claim protocol) are the reviewer's to judge in the code and docs."
-  ],
   "proof": [],
-  "ci": "At 9ccd956d when read: Tests, Legion Envoy and Contracts, Docs and Worker Image queued; 19 PR Title runs queued."
+  "notes": "At the architect's instruction this is not a full round: the issue is moved back to implementing with request_backward_move."
 }
