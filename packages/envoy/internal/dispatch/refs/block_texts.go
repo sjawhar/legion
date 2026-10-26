@@ -3,6 +3,7 @@ package refs
 import (
 	"context"
 	"fmt"
+	"math"
 )
 
 // BlockVersion is what the block index recorded of one block at one version of its document
@@ -23,8 +24,13 @@ type BlockVersion struct {
 
 // BlockTextAt reads block blockID of document artifactID as version records it. The text is
 // read only from a version the index recorded: a version an older build wrote and no
-// block-aware build indexed is not Indexed, and its Text is nil.
+// block-aware build indexed is not Indexed, and its Text is nil. Version numbers are stored as
+// Postgres integer, so a version past math.MaxInt32 is one no document has: BlockTextAt answers
+// it with a zero BlockVersion (Exists false) without querying.
 func BlockTextAt(ctx context.Context, q Queryer, artifactID, blockID string, version int) (BlockVersion, error) {
+	if version > math.MaxInt32 {
+		return BlockVersion{}, nil
+	}
 	var read BlockVersion
 	var earliest, removed *int
 	if err := q.QueryRow(ctx, `
