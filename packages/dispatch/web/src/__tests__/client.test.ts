@@ -449,6 +449,37 @@ test("a write carries the login of the person who pressed it", async () => {
   );
 });
 
+// Chromium and WebKit hand a fetched 204 an empty, non-null `body` stream, and refuse to build a
+// new 204 Response around one, as the Fetch standard says (Bun builds it, so the test enforces
+// the rule). A keyed write's answer is watched for silence (`deadlineMs`), so an answered DELETE
+// with no content - an agent token revoked - is still a landing with nothing, never an error of
+// the page's own.
+test("a keyed DELETE answered 204 with an empty body stream lands", async () => {
+  const BunResponse = globalThis.Response;
+  class FetchResponse extends BunResponse {
+    constructor(body?: BodyInit | null, init?: ResponseInit) {
+      if (body != null && [101, 204, 205, 304].includes(init?.status ?? 200)) {
+        throw new TypeError("Response with null body status cannot have body");
+      }
+      super(body, init);
+    }
+  }
+  const answered = createApiClient(async () => {
+    const response = new BunResponse(null, { status: 204 });
+    const empty = new ReadableStream({ start: (controller) => controller.close() });
+    Object.defineProperty(response, "body", { value: empty });
+    return response;
+  });
+  globalThis.Response = FetchResponse as typeof Response;
+  try {
+    expect(
+      await answered.revokeAgentToken("token-1", { deadlineMs: 15_000, key: "k", login: "alice" })
+    ).toBeUndefined();
+  } finally {
+    globalThis.Response = BunResponse;
+  }
+});
+
 // The caller's own abort is the caller's: it ends the request as itself, not as a timeout, and
 // a request the caller lets run is still held to the deadline.
 test("a caller's signal still aborts", async () => {

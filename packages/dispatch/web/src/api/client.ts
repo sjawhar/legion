@@ -540,10 +540,11 @@ export function xhrUpload(
 
 /** `response` with its body watched: `arrived` runs as each piece of it does, for a reader that
  *  bounds the silence between them (`exchange`'s idle deadline) rather than the download. A
- *  response with no body - a 204, a 304 - is handed back as it is. */
+ *  response with no body - a 204, a 304 - is handed back as it is: Chromium and WebKit give one
+ *  an empty stream all the same, and refuse a new 204 Response built around it. */
 function watchBody(response: Response, arrived: () => void): Response {
   const body = response.body;
-  if (body === null) return response;
+  if (body === null || NULL_BODY_STATUSES.has(response.status)) return response;
   const pieces = body.getReader();
   const watched = new ReadableStream<Uint8Array>({
     async pull(toReader) {
