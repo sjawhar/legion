@@ -1031,7 +1031,9 @@ export default function envoyExtension(pi: PiApi): void {
   });
 
   // A card's message: its `details` name the frame (`replayLedgerIdentity`), which the host keeps
-  // on the message it writes. An `inert` card is a steer that starts no turn.
+  // on the message it writes. An `inert` card is a steer that starts no turn on an idle host; a
+  // turn streaming when it is handed takes it and runs another model turn for it, so
+  // `UnwrittenFrames` hands an inert card only to a settled host (`hostSettled`).
   const handCard = (
     content: string | readonly ContentBlock[],
     deliverAs: CardDelivery,
@@ -1051,8 +1053,21 @@ export default function envoyExtension(pi: PiApi): void {
     );
   };
 
+  // The host is idle, holds no message, is not shutting down, and is on the session this instance
+  // serves: only then is an inert card handed, or a withdrawn card handed back (`UnwrittenFrames`).
+  const hostSettled = (): boolean => {
+    const hostContext = activeSessionContext;
+    return (
+      hostContext?.isIdle?.() === true &&
+      hostContext.hasPendingMessages?.() === false &&
+      !shuttingDown &&
+      hostSessionID() === sessionID
+    );
+  };
+
   const unwritten = new UnwrittenFrames({
     sessionID: () => sessionID,
+    settled: hostSettled,
     recordDelivered: async (identity) => {
       await replay?.recordDelivered(identity);
     },
@@ -1063,7 +1078,7 @@ export default function envoyExtension(pi: PiApi): void {
       typedPictures.withdraw(messageID);
     },
     handBackFailed: (identity, error) => {
-      logger.warn("envoy: a card the host withdrew unwritten could not be handed again", {
+      logger.warn("envoy: a card waiting for a settled host could not be handed", {
         eventID: identity.event_id,
         error: messageFor(error),
       });
@@ -2190,17 +2205,11 @@ export default function envoyExtension(pi: PiApi): void {
       // Sessions can be created lazily after session_start (a fresh TUI has no session yet); until
       // the host mints an id there is nothing to register.
       if (context.sessionManager.getSessionId() === "") return;
-      // A card the host withdrew unwritten is handed again first, while the host is idle, holds no
-      // message and is on this instance's session, so the sweep finds its frame still claimed.
+      // A held inert card, or a card the host withdrew unwritten, is handed first, while the host
+      // is settled (`hostSettled`), so the sweep finds its frame still claimed.
       // Every tick also sweeps the stream, outside the pass, so a sweep never waits on one: it
       // catches up on what a missed trigger left, and keeps probing a listener without replay.
-      const hostContext = activeSessionContext;
-      unwritten.handBackWithdrawn(
-        hostContext?.isIdle?.() === true &&
-          hostContext.hasPendingMessages?.() === false &&
-          !shuttingDown &&
-          hostSessionID() === sessionID
-      );
+      unwritten.handBackWithdrawn(hostSettled());
       triggerReplay();
       if (healing) {
         // A pass that has not settled holds the queue, and with it the registration refresh that

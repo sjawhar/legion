@@ -5,9 +5,12 @@ import { writtenCardIdentity } from "./missed-messages";
 
 /**
  * How a card is handed to the host: as a steer or an aside, each starting a turn when the host is
- * idle, or `inert`, a steer that starts no turn (`triggerTurn: false`). An inert card is written at
- * once on an idle host and, sent while a turn streams, when that turn takes it; either way the host
- * runs nothing for it (measured on omp 18.8.9). A card handed again keeps its delivery.
+ * idle, or `inert`, a steer that starts no turn (`triggerTurn: false`). An idle host writes an
+ * inert card at once and runs nothing for it; one handed while a turn streams is steered into
+ * that turn, and the agent loop runs another model turn for it (measured on omp 18.12.2). So an
+ * inert card is handed only to a settled host (`UnwrittenFramesHost.settled`): one sent while the
+ * host is busy is held until the first settled heartbeat (`handBackWithdrawn`). A card handed
+ * again keeps its delivery.
  */
 export type CardDelivery = "steer" | "aside" | "inert";
 
@@ -30,14 +33,20 @@ interface Unwritten {
   readonly claim: DeliveryClaim | undefined;
 }
 
-/** A card waiting to be written, under every key `unwrittenCardKeys` gives its frame. */
+/**
+ * A card waiting to be written, under every key `unwrittenCardKeys` gives its frame: one handed to
+ * the host, or an inert card held until the host is settled.
+ */
 interface UnwrittenCard extends Unwritten {
   readonly keys: readonly string[];
-  /** What it was handed as: a card the host withdrew unwritten is handed again as it was. */
+  /** What it is handed as: a card the host withdrew unwritten is handed again as it was. */
   readonly content: string | readonly ContentBlock[];
   readonly deliverAs: CardDelivery;
-  /** The host moments counted when it was handed (`handBackWithdrawn`). */
-  readonly handedAt: number;
+  /**
+   * The host moments counted when it was handed (`handBackWithdrawn`); undefined for an inert
+   * card held, never handed, which the next settled moment hands.
+   */
+  readonly handedAt: number | undefined;
 }
 
 /** A person's turn waiting to be written; a `pi.sendUserMessage` turn is found by its text. */
@@ -67,6 +76,11 @@ export interface HandedTurn {
 export interface UnwrittenFramesHost {
   /** The session this instance serves now: a frame written once it is on another records nothing. */
   sessionID(): string;
+  /**
+   * Whether the host is settled: idle, holding no message, not shutting down, and on the session
+   * this instance serves. Only a settled host is handed an inert card.
+   */
+  settled(): boolean;
   /** Records a frame the host wrote in the replay ledger (`ReplayEngine.recordDelivered`). */
   recordDelivered(identity: DedupeIdentity): Promise<void>;
   /** Hands the host a card (`pi.sendMessage`); a throw means it was not handed. */
@@ -81,7 +95,8 @@ export interface UnwrittenFramesHost {
   /** The interrupt withdrew the person's turn `messageID` handed to `sessionID`: no message will
    *  carry it, so whatever was noted to find it, or to go with it, goes. */
   turnWithdrawn(sessionID: string, messageID: string): void;
-  /** A card the host withdrew unwritten could not be handed again; the next moment tries again. */
+  /** A card the host withdrew unwritten, or an inert card held until the host settled, could not
+   *  be handed; it keeps waiting, and the next settled moment tries again. */
   handBackFailed(identity: DedupeIdentity, error: unknown): void;
 }
 
@@ -102,12 +117,14 @@ export function unwrittenCardKeys(identity: {
 
 /**
  * The cards (`unwrittenCardKeys`) and the person's turns (by Dispatch message id) handed to the
- * host and not yet written (`Unwritten`), each under the claim of its frame. This owns each
- * claim from the hand-off on: the claim settles, and the replay ledger records the frame, once
- * the host writes it (`written`, `turnHandled`, `textTurnsEnded`), or at once for a frame nothing
- * waits on (`sendCard`, `awaitTurn`); it is released, recording nothing, when the host refused the
- * card (`sendCard`) or dropped the frame unwritten (a session change, `releaseOtherSessions`; a
- * person's turn an interrupt withdrew, `handBackWithdrawn`), so a sweep shows the stream's copy.
+ * host and not yet written (`Unwritten`), and the inert cards held until the host is settled,
+ * each under the claim of its frame. This owns each claim from the hand-off on: the claim
+ * settles, and the replay ledger records the frame, once the host writes it (`written`,
+ * `turnHandled`, `textTurnsEnded`), or at once for a frame nothing waits on (`sendCard`,
+ * `awaitTurn`); it is released, recording nothing, when the host refused the card, or an inert
+ * card held had nothing to wait under (`sendCard`), or the host dropped the frame unwritten (a
+ * session change, `releaseOtherSessions`; a person's turn an interrupt withdrew,
+ * `handBackWithdrawn`), so a sweep shows the stream's copy.
  */
 export class UnwrittenFrames {
   readonly #host: UnwrittenFramesHost;
@@ -127,6 +144,10 @@ export class UnwrittenFrames {
    * the claim, when there is one, waits until then. `shown`: a card of a frame the ledger keeps
    * nothing of, which nothing waits on, so its claim settles at once. A send that throws leaves
    * nothing waiting and releases the claim, so a re-send or a sweep shows the frame again.
+   *
+   * An inert card sent while the host is not settled is not handed: it waits, `queued`, and the
+   * first settled moment hands it (`handBackWithdrawn`). One whose frame the ledger keeps nothing
+   * of has nothing to wait under, so its claim is released and a sweep shows the frame again.
    */
   sendCard(
     content: string | readonly ContentBlock[],
@@ -134,6 +155,7 @@ export class UnwrittenFrames {
     identity: DedupeIdentity | undefined,
     claim: DeliveryClaim | undefined
   ): "queued" | "shown" {
+    const hand = deliverAs !== "inert" || this.#host.settled();
     const keys = identity === undefined ? [] : unwrittenCardKeys(replayLedgerIdentity(identity));
     const card: UnwrittenCard | undefined =
       identity === undefined || keys.length === 0
@@ -145,9 +167,13 @@ export class UnwrittenFrames {
             keys,
             content,
             deliverAs,
-            handedAt: this.#moments,
+            handedAt: hand ? this.#moments : undefined,
           };
     if (card !== undefined) this.#awaitWrite(card);
+    if (!hand) {
+      if (card === undefined) claim?.release();
+      return "queued";
+    }
     try {
       this.#host.handCard(content, deliverAs, identity);
     } catch (error) {
@@ -239,8 +265,9 @@ export class UnwrittenFrames {
   }
 
   /**
-   * Counts a host moment (each heartbeat tick) and, when `settled` (the host is idle, holds no
-   * message, and is on the session this instance serves), hands back what an interrupt withdrew.
+   * Counts a host moment (each heartbeat tick) and, when `settled` (`UnwrittenFramesHost.settled`),
+   * hands the inert cards held while the host was busy (`sendCard`) and hands back what an
+   * interrupt withdrew.
    *
    * Oh My Pi withdraws every card a streaming turn holds, writing none and restoring none, when
    * the person interrupts the turn (Escape; RPC `abort_and_restore_queue`), and is idle with an
@@ -249,7 +276,9 @@ export class UnwrittenFrames {
    * aborted run's `agent_end`). So a card still unwritten while the host is idle and holds no
    * message was withdrawn: it is handed again, as it was, its claim kept. One handed since the
    * host's last moment is left alone, as it may still be on its way into the queue:
-   * `pi.sendMessage` returns before the host queues the card or starts its run.
+   * `pi.sendMessage` returns before the host queues the card or starts its run. A held inert card
+   * was never handed, so any settled moment hands it. A card that cannot be handed keeps waiting
+   * as it was (`handBackFailed`), and the next settled moment tries again.
    *
    * The interrupt withdraws a person's turn the same way: a typed input (`pi.sendUserInput`,
    * answered `handled: "prompt"`) or a `pi.sendUserMessage` turn the streaming turn held goes back
@@ -269,13 +298,14 @@ export class UnwrittenFrames {
     if (!settled) return;
     const sessionID = this.#host.sessionID();
     for (const card of new Set(this.#cards.values())) {
-      if (card.sessionID !== sessionID || card.handedAt >= since) continue;
+      if (card.sessionID !== sessionID) continue;
+      if (card.handedAt !== undefined && card.handedAt >= since) continue;
       const again: UnwrittenCard = { ...card, handedAt: this.#moments };
       this.#awaitWrite(again);
       try {
         this.#host.handCard(card.content, card.deliverAs, card.identity);
       } catch (error) {
-        // Still waiting as it was: the next heartbeat hands it again.
+        // Still waiting as it was: the next settled moment hands it.
         this.#stopAwaitingWrite(again);
         this.#awaitWrite(card);
         this.#host.handBackFailed(card.identity, error);

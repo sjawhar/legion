@@ -49,6 +49,7 @@ function harness() {
   const dedupe: DeliveryDedupe = createDeliveryDedupe();
   const state = {
     session: "s1",
+    settled: true,
     refuseHand: false,
     matched: undefined as string | undefined,
   };
@@ -58,6 +59,7 @@ function harness() {
   const handBackFailures: string[] = [];
   const frames = new UnwrittenFrames({
     sessionID: () => state.session,
+    settled: () => state.settled,
     recordDelivered: async (identity) => {
       recorded.push(identity);
     },
@@ -216,6 +218,91 @@ describe("a card the host withdrew unwritten", () => {
     state.refuseHand = false;
     frames.handBackWithdrawn(true);
     expect(handed).toHaveLength(2);
+  });
+});
+
+describe("an inert card", () => {
+  test("sent while the host is not settled is held, and handed once at the first settled moment", () => {
+    const { frames, state, handed, claim, claimState } = harness();
+    const frame = dispatchFrame(1);
+    state.settled = false;
+
+    expect(frames.sendCard("card", "inert", frame, claim(frame))).toBe("queued");
+    expect(handed).toEqual([]);
+    expect(frames.waitsOnCard(frame)).toBe(true);
+    expect(claimState(frame)).toBe("pending");
+
+    frames.handBackWithdrawn(false);
+    expect(handed).toEqual([]);
+
+    state.settled = true;
+    frames.handBackWithdrawn(true);
+    expect(handed).toEqual([{ content: "card", deliverAs: "inert", identity: frame }]);
+    expect(claimState(frame)).toBe("pending");
+
+    // Just handed, so the next settled moment leaves it alone.
+    frames.handBackWithdrawn(true);
+    expect(handed).toHaveLength(1);
+  });
+
+  test("sent while the host is settled is handed at once", () => {
+    const { frames, handed, claim } = harness();
+    const frame = dispatchFrame(1);
+
+    expect(frames.sendCard("card", "inert", frame, claim(frame))).toBe("queued");
+
+    expect(handed).toEqual([{ content: "card", deliverAs: "inert", identity: frame }]);
+  });
+
+  test("held, that cannot be handed at a settled moment, is reported and handed at the next", () => {
+    const { frames, state, handed, handBackFailures, claim, claimState } = harness();
+    const frame = dispatchFrame(1);
+    state.settled = false;
+    frames.sendCard("card", "inert", frame, claim(frame));
+
+    state.settled = true;
+    state.refuseHand = true;
+    frames.handBackWithdrawn(true);
+    expect(handBackFailures).toEqual(["event-1: the host refused the card"]);
+    expect(handed).toEqual([]);
+    expect(frames.waitsOnCard(frame)).toBe(true);
+    expect(claimState(frame)).toBe("pending");
+
+    state.refuseHand = false;
+    frames.handBackWithdrawn(true);
+    expect(handed).toEqual([{ content: "card", deliverAs: "inert", identity: frame }]);
+  });
+
+  test("held when the host moves to another session is dropped, its claim released", () => {
+    const { frames, state, handed, claim, claimState } = harness();
+    const frame = dispatchFrame(1);
+    state.settled = false;
+    frames.sendCard("card", "inert", frame, claim(frame));
+
+    state.session = "s2";
+    frames.releaseOtherSessions("s2");
+    expect(frames.waitsOnCard(frame)).toBe(false);
+    expect(claimState(frame)).toBe("released");
+
+    state.settled = true;
+    frames.handBackWithdrawn(true);
+    state.session = "s1";
+    frames.handBackWithdrawn(true);
+    expect(handed).toEqual([]);
+  });
+
+  test("whose frame the ledger keeps nothing of, sent while the host is busy, is not handed and its claim is released", () => {
+    const { frames, state, handed } = harness();
+    // No event id, and a key that does not name its event.
+    const frame: DedupeIdentity = { dedupe_key: "content-hash", source: "mcp" };
+    const { claim, became } = notingClaim();
+    state.settled = false;
+
+    frames.sendCard("card", "inert", frame, claim);
+
+    expect(handed).toEqual([]);
+    expect(frames.waitsOnCard(frame)).toBe(false);
+    expect(became).toEqual(["released"]);
   });
 });
 
