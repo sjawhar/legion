@@ -269,3 +269,46 @@ test("a margin comment on a closed issue's spec posts with its quote", async ({ 
     await alice.close();
   }
 });
+
+// The issue can close while a person has its spec open with the editor focused - the merge closes
+// it - and the open page goes over to the closed document's Comment alone. A selection made then
+// is offered Comment, as it is on a page loaded after the close, on a phone as on a desktop.
+test("a margin comment on a spec whose issue closed while the page was open posts with its quote", async ({
+  browser,
+}) => {
+  await createProject({ key: "E2E", name: "Closed issues" });
+  const issue = await createIssue({ project: "E2E", spec, title: "Closes while it is open" });
+  const alice = await asUser(browser, "alice");
+
+  try {
+    const page = await alice.newPage();
+    await page.goto(`/issues/${issue.key}/spec`);
+    await expect(documentEditor(page)).toContainText(spec);
+    await expect(documentEditor(page)).toHaveAttribute("contenteditable", "true");
+    await selectEditorQuote(page, "brown");
+    await expect(
+      actionBar(page).getByRole("button", { exact: true, name: "Suggest" })
+    ).toBeVisible();
+
+    await patchIssue(issue.key, { status: "done" }, { login: "bob" });
+    await expect(page.getByText("This issue is closed.", { exact: true })).toBeVisible();
+    await expect(documentEditor(page)).toHaveAttribute("contenteditable", "false");
+
+    await selectEditorQuote(page, "lazy");
+    await expect(actionBar(page).getByRole("button")).toHaveText(["Comment"]);
+    await barAction(page, "Comment");
+    const margin = composer(page);
+    await expect(margin.locator("blockquote")).toHaveText("lazy");
+    await margin.getByLabel("Comment").fill("Anchored after a live close");
+    await margin.getByRole("button", { exact: true, name: "Send" }).click();
+    await expect
+      .poll(async () =>
+        (await listComments(issue.key))
+          .filter((comment) => comment.body === "Anchored after a live close")
+          .map((comment) => comment.anchor?.quote)
+      )
+      .toEqual(["lazy"]);
+  } finally {
+    await alice.close();
+  }
+});
