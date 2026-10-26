@@ -2,42 +2,30 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-158",
-  "completed": "2026-10-26T21:13:00Z",
-  "round": 4,
+  "completed": "2026-10-26T23:53:30Z",
+  "round": 5,
   "generation": 4,
-  "head": "337c577d886069b322cefb3b9acc36304f47a89f",
+  "head": "58b805d967a00e12722289bfd93de702d4000d58",
   "decision": "changes_requested",
   "critical": 0,
-  "important": 2,
-  "minor": 1,
-  "ci": "Required set (rulesets; no branch protection): lint, typecheck, test, pr-title. CI head 337c577d: lint, typecheck, test success; pr-title success. Compare 337c577d...e74c7c02 changes only .legion/ (2 files).",
-  "thermonuclear": "At 337c577d: thermonuclear-deep-review CHANGES (61 assistant turns, all anthropic / claude-opus-5-5), thermonuclear-code-quality CHANGES (38 assistant turns, all anthropic / claude-opus-5-5); provider and model read turn by turn from each pass's session transcript in the session store.",
+  "important": 1,
+  "minor": 0,
+  "ci": "Required set (rulesets; no branch protection): lint, typecheck, test, pr-title. At CI head 58b805d9 all four were queued when this round ended; the compare 58b805d9...f8aea2df changes only .legion/. A request for changes does not wait on CI.",
+  "thermonuclear": "At 58b805d9: thermonuclear-deep-review CHANGES (66 assistant turns, all anthropic / claude-opus-5-5); thermonuclear-code-quality CHANGES on cleanup only (53 assistant turns, all anthropic / claude-opus-5-5). Provider and model read turn by turn from each pass's session transcript in the session store.",
+  "fingerprint": "The tester reported de6daaff -> 58b805d9 changed only in packages/claude-envoy/dist; this is a new round after review 5659137185 at 49505a9e either way.",
   "previousFindings": {
-    "1 close refused beside an unloadable document": "fixed in a60624f0, but the skip opens the gap in keyFindings[0]",
-    "2 repair window never moved past a failing issue": "fixed in a60624f0 (window moves with every listed pass; unrepaired issues carried)",
-    "3 pending-sync readOnly set once per connection": "fixed in 289c6397, but the later admission is not gated on sync (keyFindings[1])",
-    "4 decision 20 lost when the close released the room": "fixed in 2927a2db (close/reopen writes credit no author; plan decision 9 amended)",
-    "5 pre-close settlement under the request context": "fixed in a60624f0 (context.WithoutCancel)",
-    "6 no contract census": "fixed in the PR body; one omission (keyFindings[2])",
-    "typed settleRoomWithin outcome": "done in c707d3ab; both passes traced every old retry/retrySoon/failed/scheduleSettle path to the same outcome",
-    "pending-sync through Yjs public API": "done in fe28b6d8; no private-field reads left in the readable view; every failure keeps the row"
+    "A rebuild of a closed issue's skipped document came back open": "fixed in 26538847 (the rebuild writes the close's states into its seed under the issue row)",
+    "B reconnect restored rows before its sync": "restore order fixed in 988beb33, but the gate opened keyFindings[0]",
+    "C census and margin": "fixed (census rows added; withdrawn asks fold in the margin, de6daaff)",
+    "round-4 cleanups": "all landed (settleOutcome, otherClientsRows, roots.ts, budget comment, per-process retry wording)",
+    "merges": "24e90b2c's UI conflict resolutions keep main's AgentName and the PR's withdrawn sentence; 58b805d9 only CHANGELOGs"
   },
   "keyFindings": [
     {
       "severity": "important",
-      "file": "packages/envoy/internal/dispatch/docs/ask_lifecycle.go:211",
-      "description": "A close skips a document whose history cannot load, leaving its blocks open in storage. The rebuild that 409 DOCUMENT_UNLOADABLE offers is allowed on a closed issue without markdown (rebuild.go:88-90) and seeds from the latest version, which predates the close, so the blocks read state=\"open\" again; RebuildTx marks no settlement owed, so the repair (issue_ask_repair.go candidates) reaches the issue only if another of its documents happens to owe one. The closed issue's document then shows an open decision whose row says withdrawn."
-    },
-    {
-      "severity": "important",
-      "file": "packages/dispatch/web/src/features/doc/connection.ts:173",
-      "description": "A later admission calls PendingSync.admitted straight from onAuthenticated, before the reconnect's sync step is applied (synced is never reset). A read-only-to-writable admission then runs admit's restore against a stale document: another tab's stored row that builds on items the server took meanwhile parks in the scratch copy, is dropped with the handled rows and sets rebuiltAt, so that tab's unsent typing is lost and the page reports a rebuild that did not happen. The first admission waits for sync (notifySynced); later ones must too."
-    },
-    {
-      "severity": "minor",
-      "file": "PR body, Contract change census",
-      "description": "The PATCH row lists the daemon's outbox SetStatus/HandOver but not the daemon API's other status writes that can reopen a closed issue and so meet the new 503: the controller's set_status (packages/daemon/internal/api/issues.go:31) and rerun_child (architect.go:909, todo) and release_children (architect.go:532), each answering the agent 502. The AskResolution row omits the margin sheet (useMarginSheet.ts:45), which folds only retracted asks, so a withdrawn ask stays in the margin unfolded."
+      "file": "packages/dispatch/web/src/features/doc/connection.ts:188",
+      "description": "onAuthenticated still makes the editor writable at once (callbacks.onAdmission -> ProofDocument.tsx:530 setReadOnly), but since 988beb33 the pending sync learns of the writable admission only in notifyAdmitted, after SyncStep2. In that gap PendingSync.readOnly is still true, so onUpdate skips record(): typing after a read-only-to-writable reconnect and before its sync is sent but never stored, and every later stored row depends on it (another tab drops it as rebuilt history). Hand the read-only flag to the pending sync synchronously at authentication and defer only the restore/prune to the gate."
     }
   ],
-  "fastFollow": "In the same push (not deferred): issue_ask_lifecycle.go:38-40 says issueSettleBudget bounds the pre-close settlement, but it bounds only the append waits and retries; the repair's carried retry list is per process (README/AGENTS wording); settleOwedNow's exclusion list and settleOutcome.generation; one otherClientsRows helper for the two own-row filters in pending-sync.ts; export the prosemirror/marks root names from editor.ts."
+  "fastFollow": "In the same push (not deferred): connection.ts's synced/authenticated locals copy provider.isSynced/isAuthenticated; rebuild.go:164-168 copies logUnindexedAskBlocks and repeats a return; issue_close_asks_test.go copies the unloadable-history setup (file now 1022 lines)."
 }
