@@ -314,7 +314,7 @@ func newDocumentCopy(options ...crdt.DocOption) *crdt.Doc {
 // against the room as the commit before it left it. Catching the replica up to the live document
 // instead took in every commit since the last one rendered: a published write's observer that ran
 // first counted a browser's edit in its own change, which credits no one, and the browser's own
-// observer then found nothing changed and credited no one either (INFRA-458). The update an
+// observer then found nothing changed and credited no one either. The update an
 // observer is handed cannot stand in for the log: each update carries the room's whole delete set,
 // so the later update applied first deletes what the earlier one replaced while its own insertions
 // wait for the earlier one's - a tree no transaction left.

@@ -541,7 +541,7 @@ LEGION-503). The update observer's own turn with the replica (`renderedReplica.o
 one exception to that order: it holds the replica's lock for its whole call (`lockForUpdate`, a
 blocking acquisition, unlike every other caller's), and the classification it runs for each update
 it drains (`observeAskBlocksForUpdate`, `creditContentChange`, `recordUpdateClass`) takes the state
-lock from inside it, nested the other way around (LEGION-503, INFRA-458). This stays deadlock-free because every other acquisition of the replica's lock only
+lock from inside it, nested the other way around (LEGION-503). This stays deadlock-free because every other acquisition of the replica's lock only
 tries it (`hold`, under `holdLive`/`readLive`) rather than blocking on it, and always after
 releasing the state lock first, never while holding it - so nothing can be waiting on the state
 lock while the observer waits for anyone else to release the replica's; only a Yjs transaction's
@@ -755,7 +755,7 @@ credited, exactly once, by whichever observer reaches the log first, against the
 commit before it left it. Catching the replica up to the room instead took in every commit since
 the last one rendered: when a published write's observer ran first, it counted a browser's edit in
 its own change, which credits no one, and the browser's own observer then found nothing changed,
-so the browser was on no version and in no pending row (INFRA-458). The update an observer is
+so the browser was on no version and in no pending row. The update an observer is
 handed cannot stand in for the log: two transactions' observers run concurrently in either order,
 and each update carries the room's whole delete set. The log records the room's state as of just
 before its first transaction since the load, which the replica starts from, so a room that is only

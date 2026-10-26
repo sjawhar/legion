@@ -899,7 +899,7 @@ func TestConcurrentBrowserAndVersionedWritesListEveryAuthorOnceAfterEveryRound(t
 // browser's change in its own, and credit no one, as a published write is credited when it
 // commits; the browser's own observer then found the rendering unchanged and credited no one
 // either. The browser was on no version and in no pending row, which is how the concurrent rounds
-// above lost round1-browser once in CI (INFRA-458). The room's update log now hands the first
+// above lost round1-browser once in CI. The room's update log now hands the first
 // observer both commits in commit order, each measured against the room the commit before it left.
 //
 // Each row is one shape of the browser's edit: a paragraph added before the agent's write forks
