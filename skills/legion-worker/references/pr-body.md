@@ -43,7 +43,7 @@ Verified the implementer's proof by <re-running its command | driving the same s
 **Production:** <what was checked in production, how, what was observed> — merge commit <sha>; woken by <event>.
 (written by the implementer from the production check after the merge closes the issue, naming what woke that look; `pending deploy of <sha>` until then)
 
-**Fast-follow:** <one named cleanup item and where it will land>, or "none".
+**Fast-follow:** "none", or one named cleanup item in a file this pull request does not touch, and where it will land.
 
 **Chain:** stacked on <base bookmark> frozen at <sha> / not stacked.
 ```
@@ -144,8 +144,12 @@ and the tester's proof below are both this proof.
   That cost is why 0-applied is the expected outcome and a pass that applies is spent sparingly.
   The reviewer's pair runs at the head each round reviews. Record both in the `Thermo` line.
 - **No deferrals** is the body's rule (*PR body, review, and the merge gate* in
-  `skill://legion-worker`): the `Fast-follow:` line holds naming, duplication, or wording cleanup
-  only. A base frozen for others to stack on is never rewritten (*Rewriting pushed commits* in
+  `skill://legion-worker`): a wording nit, and any clear fix in a file this pull request touches,
+  is made in the running round, because a later round costs a CI pass and a re-read of the whole
+  change (the operator's answer on that case:
+  dispatch://INFRA-49/ask/2d080aec-ce9a-4c7c-a235-ae998d2b0830). The `Fast-follow:` line reads
+  `none`, or names only cleanup in files this pull request does not touch.
+  A base frozen for others to stack on is never rewritten (*Rewriting pushed commits* in
   `skill://legion-worker/references/conflicts-and-rewrites.md`); the `Chain` line records it.
 - **GitHub refuses a pull request body over 65,536 characters.** Each verification round links its
   evidence (the run, the comment) rather than inlining it once the body passes about 48,000
