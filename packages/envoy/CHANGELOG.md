@@ -52,7 +52,10 @@
   for a pinned link, the version and how the block stands since, a pinned link opens that version,
   and Referenced by shows one row per citing block, each linked to its block; on a document's page
   each row also links the document's own block the edge meets (`block <id>`), so a source citing
-  two of its blocks is two rows.
+  two of its blocks is two rows. The dashboard draws a picture and opens a link an author names
+  whatever the length of its target's key; only bare text it links is held to the index's
+  bounds. A search hit for an ask links its typed block (`#b-<id>`) only while that block is a
+  graph node, and otherwise `?ask=<id>`, so `dispatch read` of the hit reads the ask.
 - Dispatch's conversation view (`/agents/<id>/live`) shows the model and thinking level an Oh My
   Pi session runs now, from the `settings` frame pi-envoy publishes, before any turn runs on them
   and within about 20 seconds of a change made anywhere else (INFRA-195). Where the session runs

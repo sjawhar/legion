@@ -1560,8 +1560,11 @@ that decodes to more than `text.MaxBlockIDBytes` (`MAX_BLOCK_ID_BYTES`), 256 byt
 nothing: after `dispatch://` the text is no reference, a live document page whose block is past
 them names the document (`pageInBound`), and one whose document or item is past them names
 nothing. A request's reference is read whatever its length: `text.ParseRef` for an API route, the
-dashboard's `parseNodeReference` and `nodeRouteFromHref` for what the server returned, and the
-client's `parseDispatchRef` and `dispatchRefFromUrl`. `parseBlockFragment` carries
+dashboard's `parseNodeReference` and `nodeRouteFromHref` for what the server returned and for a
+picture or link target an author wrote, and the client's `parseDispatchRef` and
+`dispatchRefFromUrl`. A search hit for an ask links its typed block (`#b-`) only while that block
+is a graph node (`askBlockNodeSQL` in `api/search.go`), and otherwise `?ask=<id>`, so
+`dispatch read` of any hit's href resolves. `parseBlockFragment` carries
 a pin as its digits, so the browser never rounds one past 2^53. The two encoders are tested against
 `DISPATCH_BLOCK_ID_ENCODINGS`, whose JSON copy is
 `text/testdata/dispatch-block-id-encodings.json`. The Go reader parses a reference as the browser

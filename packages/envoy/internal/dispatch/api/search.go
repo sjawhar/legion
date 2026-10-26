@@ -57,6 +57,8 @@ const (
 //
 // Column shape after kind, list: issue_key, owner_artifact_id, artifact_id, id, block_id,
 // issue_title, issue_status, owner_project, owner_slug, owner_name, updated_at, own, r.
+// block_id is an ask's typed block only while it is a node of the reference graph
+// (askBlockNodeSQL).
 const searchKeywordLegsSQL = `
   select 'issue' as kind, 'keyword' as list, i.key as issue_key, null::uuid as owner_artifact_id, null::uuid as artifact_id, i.key as id, null::text as block_id,
          i.title as issue_title, i.status as issue_status,
@@ -86,7 +88,7 @@ const searchKeywordLegsSQL = `
    where c.search @@ q.tsq and ($2 = '' or coalesce(i.project_key, p.key) = $2)
   union all
   select 'ask' as kind, 'keyword', k.issue_key, case when k.issue_key is null then coalesce(k.artifact_id, k.block_artifact_id) else null::uuid end,
-         coalesce(k.artifact_id, k.block_artifact_id, (k.anchor->>'artifact_id')::uuid), k.id::text, k.block_id,
+         coalesce(k.artifact_id, k.block_artifact_id, (k.anchor->>'artifact_id')::uuid), k.id::text, ` + askBlockNodeSQL + `,
          i.title, i.status, p.key, a.slug, a.name, coalesce(i.updated_at, k.created_at),
          false, ts_rank_cd(k.search, q.tsq)
     from asks k
@@ -100,6 +102,14 @@ const searchKeywordLegsSQL = `
          false, ts_rank_cd(m.search, q.tsq)
     from messages m join issues i on i.key = m.issue_key, q
    where m.search @@ q.tsq and ($2 = '' or i.project_key = $2)`
+
+// askBlockNodeSQL is the block id of ask k's typed block while that block is a node of the
+// reference graph (a document_blocks row of the document holding it), and null otherwise: an id
+// past text.MaxBlockIDBytes is stored but never a node, and a later edit can remove the block.
+// searchHref links an ask's block only when this is set, since a reader of the `#b-` link reads
+// the block's node, and links the ask itself (`?ask=`) when it is not. Both ask arms - the
+// keyword one above and meaning_ask_candidates - select it.
+const askBlockNodeSQL = `case when exists (select 1 from document_blocks d where d.artifact_id = k.block_artifact_id and d.block_id = k.block_id) then k.block_id end`
 
 // searchPageAndTailSQL is the "page the fused ranking, then stitch back the snippet" tail shared
 // by searchQuery and searchQueryMeaning - the other half of the LEGION-549 round-5 dedup above:
@@ -266,7 +276,7 @@ meaning_comment as (
     from meaning_comment_candidates where r >= $10
 ),
 meaning_ask_candidates as (
-  select k.issue_key, k.artifact_id, k.block_artifact_id, k.anchor, k.id, k.block_id, i.title as issue_title, i.status as issue_status,
+  select k.issue_key, k.artifact_id, k.block_artifact_id, k.anchor, k.id, ` + askBlockNodeSQL + ` as block_id, i.title as issue_title, i.status as issue_status,
          p.key as owner_project, a.slug as owner_slug, a.name as owner_name, coalesce(i.updated_at, k.created_at) as updated_at,
          1 - (e.embedding <=> q.qvec) as r
     from embeddings e
@@ -596,9 +606,11 @@ func issueDocumentHref(issueHref string, artifact *model.SearchArtifact, primary
 
 // searchHref is where a hit's reader should land. A comment or ask that carries a document —
 // the document its anchor quotes, or the one holding its typed block — belongs beside that
-// document, so its href opens the document itself and names the item in the query (or the
-// block in the fragment), exactly as the SPA's own thread links do. An item with no document
-// is a Conversation turn, named by its own route so the turn is focused.
+// document, so its href opens the document itself and names the item in the query, exactly as
+// the SPA's own thread links do. An ask whose typed block is a node of the reference graph
+// (blockID, askBlockNodeSQL) names that block in the fragment instead, which a reader of the
+// href reads as the block's node; one whose block is no node names the ask. An item with no
+// document is a Conversation turn, named by its own route so the turn is focused.
 func searchHref(kind string, owner model.SearchOwner, artifact *model.SearchArtifact, primary bool, id string, blockID *string, query string) string {
 	issueHref := "/issues/" + owner.Key
 	// The document a hit belongs beside: a project document's own route, or the issue document
