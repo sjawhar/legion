@@ -5,6 +5,8 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"slices"
+	"strings"
 	"testing"
 
 	dispatchenvoy "github.com/sjawhar/envoy/internal/dispatch/envoy"
@@ -70,5 +72,75 @@ func TestDispatchClientReadsTheLegionAgentRegistry(t *testing.T) {
 	}
 	if _, err := client.IssueAgents(ctx, "infra-448"); !errors.Is(err, dispatchenvoy.ErrUnavailable) {
 		t.Fatalf("a malformed issue key: %v, want ErrUnavailable carrying the listener's 400", err)
+	}
+}
+
+// GET /api/v1/issues/{key}/collaborators on the real Dispatch mux, its ENVOY_URL the real listener
+// mux over real NATS: the registry entries the daemon's batch write recorded for the issue come
+// back as the issue's agents, merged by session id with a session that also commented, the
+// replaced one naming its successor, beside the people the issue's own rows name.
+func TestDispatchIssueCollaboratorsReadTheListenersLegionAgentRegistry(t *testing.T) {
+	l := newLegionListener(t, setupPublishTestClient(t))
+	listener := httptest.NewServer(l.mux)
+	t.Cleanup(listener.Close)
+	rig := &dispatchRig{database: migratedDispatchDatabase(t)}
+	rig.dispatch = dispatchMux(t, rig.database, listener.URL)
+	key := rig.issueKey(t, "Collaborators")
+
+	l.want(t, http.StatusOK, http.MethodPut, "/v1/legion/agents", `{"entries":[`+
+		legionEntry("ses-old-reviewer", key, "reviewer", "2026-10-26T01:00:00Z")+`,`+
+		legionEntry("ses-new-reviewer", key, "reviewer", "2026-10-26T02:00:00Z")+`]}`)
+	if commented := rig.asSession(t, http.MethodPost, "/api/v1/issues/"+key+"/comments", map[string]any{
+		"body":  "Reviewed",
+		"actor": map[string]any{"kind": "session", "id": "ses-new-reviewer", "origin": map[string]any{"session_title": "stamped title"}},
+	}); commented.Code != http.StatusCreated {
+		t.Fatalf("the reviewer's comment: status=%d body=%s", commented.Code, commented.Body.String())
+	}
+
+	response := rig.asHuman(t, http.MethodGet, "/api/v1/issues/"+key+"/collaborators", nil)
+	if response.Code != http.StatusOK {
+		t.Fatalf("read collaborators: status=%d body=%s", response.Code, response.Body.String())
+	}
+	answer := decodeRigBody[struct {
+		People []struct {
+			Login   string   `json:"login"`
+			Reasons []string `json:"reasons"`
+		} `json:"people"`
+		Agents []struct {
+			SessionID string   `json:"session_id"`
+			Title     *string  `json:"title"`
+			Reasons   []string `json:"reasons"`
+			Legion    *struct {
+				Role       string  `json:"role"`
+				RoleToken  string  `json:"role_token"`
+				StartedAt  string  `json:"started_at"`
+				ReplacedBy *string `json:"replaced_by"`
+				ReplacedAt *string `json:"replaced_at"`
+			} `json:"legion"`
+		} `json:"agents"`
+		LegionRegistry string `json:"legion_registry"`
+	}](t, response)
+	if answer.LegionRegistry != "ok" {
+		t.Fatalf("legion_registry = %q, want ok: %s", answer.LegionRegistry, response.Body.String())
+	}
+	if len(answer.People) != 1 || answer.People[0].Login != rigHuman || !slices.Equal(answer.People[0].Reasons, []string{"assignee"}) {
+		t.Fatalf("people = %+v, want %s as the assignee", answer.People, rigHuman)
+	}
+	if len(answer.Agents) != 2 {
+		t.Fatalf("agents = %s, want the two reviewers", response.Body.String())
+	}
+	current, replaced := answer.Agents[0], answer.Agents[1]
+	token := "legion-infra-" + strings.ToLower(key) + "-reviewer"
+	if current.SessionID != "ses-new-reviewer" || current.Legion == nil || current.Legion.Role != "reviewer" ||
+		current.Legion.RoleToken != token || current.Legion.StartedAt != "2026-10-26T02:00:00Z" ||
+		current.Legion.ReplacedBy != nil || current.Legion.ReplacedAt != nil ||
+		!slices.Equal(current.Reasons, []string{"posted"}) ||
+		current.Title == nil || *current.Title != "Legion reviewer · "+key {
+		t.Fatalf("the current reviewer = %s, want the newest reviewer, who commented, under the registry's title", response.Body.String())
+	}
+	if replaced.SessionID != "ses-old-reviewer" || replaced.Legion == nil ||
+		deref(replaced.Legion.ReplacedBy) != "ses-new-reviewer" || deref(replaced.Legion.ReplacedAt) != "2026-10-26T02:00:00Z" ||
+		len(replaced.Reasons) != 0 {
+		t.Fatalf("the replaced reviewer = %s, want it replaced by ses-new-reviewer", response.Body.String())
 	}
 }

@@ -51,6 +51,7 @@ import type {
   Issue,
   IssueAskRow,
   IssueAskThreadRow,
+  IssueCollaborators,
   IssueDetails,
   IssueReferences,
   IssueSummary,
@@ -751,6 +752,11 @@ export class DispatchApiClient {
 
   getIssueReferences(key: string): Promise<IssueReferences> {
     return this.json<IssueReferences>(`/api/v1/issues/${pathSegment(key)}/references`);
+  }
+  /** Everyone who worked the issue, running or not: people, and agent sessions merged with the
+   *  listener's Legion agent registry (`legion_registry: "unavailable"` when it did not answer). */
+  getIssueCollaborators(key: string): Promise<IssueCollaborators> {
+    return this.json<IssueCollaborators>(`/api/v1/issues/${pathSegment(key)}/collaborators`);
   }
   getReferences(reference: string): Promise<GraphReferences> {
     return this.json<GraphReferences>(pathWithQuery("/api/v1/references", { to: reference }));

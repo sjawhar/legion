@@ -27,6 +27,13 @@
   rendered authorization changes, which replaces a GCP hub's VM on its next update. Deploy order:
   apply the `envoy-infra` release carrying the grant before a listener image that opens the bucket;
   a listener whose grant lacks it fails at start when it opens the bucket.
+- `GET /api/v1/issues/{key}/collaborators` lists everyone who worked an issue, running or not
+  (INFRA-448): `people` (one per login: the assignee, everyone who claimed it, posted on it or its
+  documents, or answered one of its asks) and `agents` (one per session: the same writers that are
+  sessions, the daemon's `legion-daemon:<PROJECT>` writer left out, merged with the listener's
+  Legion agent registry entries for the issue, which add `legion: {role, role_token, started_at,
+  replaced_by, replaced_at}`), each with `reasons` and `last_at`. A listener that is not
+  configured or does not answer leaves `legion_registry: "unavailable"` and the rest of the answer.
 - A project's default assignee, the last step of an issue create's assignee chain: an issue created
   with no assignee, by nobody (the shared token), under no parent or under a parent with nobody on
   it, goes to the person the project names; nothing already filed, and no create that names an

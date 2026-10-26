@@ -4,6 +4,10 @@
 
 ### Added
 
+- `IssueCollaborators` and its members (`IssueCollaboratorPerson`, `IssueCollaboratorAgent`,
+  `IssueCollaboratorLegion`, `CollaboratorReason`), the answer of Dispatch's
+  `GET /api/v1/issues/{key}/collaborators`: everyone who worked an issue, running or not, with each
+  Legion agent's role and the session that replaced it (INFRA-448).
 - `dispatch_read` takes `events` (a positive integer, the issue's last N events) and `all_events`
   (every event), for an issue read and its `dispatch://KEY/log`, and its description says an issue
   read lists the last 10 without either.
