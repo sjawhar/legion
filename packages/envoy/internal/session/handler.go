@@ -28,13 +28,14 @@ const (
 	// registered before its server bound a serve port. That record is rewritten when the port
 	// is bound, so asking again is not asking the same question - a caller may wait the port
 	// out, and the listener's delivery does, deferring such a message for its whole retry
-	// window before it gives up (cmd/listener/delivery.go).
+	// window before it gives up (cmd/listener/unplaceable_delivery.go).
 	ReasonNoPushTarget
 	// ReasonPushFailed is a record that named a serve port the push did not land on: an
 	// unreachable peer, a session process restarting, a connection refused, or a server that
 	// answered with anything but 204. The attempt failed and cannot tell whether the session
 	// took the prompt, so a caller may ask again only at the cost of repeating it; the
-	// listener's delivery retries it once (pushFailedDeferrals, cmd/listener/delivery.go).
+	// listener's delivery retries it once (pushFailedDeferrals,
+	// cmd/listener/unplaceable_delivery.go).
 	ReasonPushFailed
 )
 

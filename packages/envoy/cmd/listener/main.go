@@ -202,9 +202,10 @@ func rebuildListenerDependencies(
 const disconnectedFailureThreshold = 20
 
 // attemptCacheTTL is how long the attempt cache (below) remembers a (dedupe_key, session_id)
-// pair it recorded before a delivery. It bounds the unplaceable retry window in delivery.go,
-// which clears and re-records one entry per attempt: a window that reached this TTL could let a
-// message's own retries outlive the entry that keeps its redelivery from being swallowed.
+// pair it recorded before a delivery. It bounds the unplaceable retry window in
+// unplaceable_delivery.go, which clears and re-records one entry per attempt: a window that
+// reached this TTL could let a message's own retries outlive the entry that keeps its redelivery
+// from being swallowed.
 const attemptCacheTTL = 5 * time.Minute
 
 // runSelfHealthMonitor leaves transient dependency timeouts degraded while
@@ -770,7 +771,7 @@ func main() {
 	roleQueue := bus.ListenerQueue(cfg.MachineID)
 
 	// The window an agent delivery this listener cannot place is retried within before it is
-	// given up with a record (delivery.go).
+	// given up with a record (unplaceable_delivery.go).
 	unplaceableRetryWindow := envDuration(logger, "ENVOY_UNPLACEABLE_RETRY_WINDOW", defaultUnplaceableRetryWindow)
 
 	// /healthz handler was registered early (before NATS) — no re-registration needed.
@@ -795,7 +796,8 @@ func main() {
 		// One deferral set for the life of the process, shared by the three handlers built from
 		// this config below - the role lane's, the durable's and the one the self-health rebind
 		// builds - so a rebind after a NATS flap draws on the budget the handler it replaces was
-		// holding rather than opening a second one beside it (unplaceableDeferrals, delivery.go).
+		// holding rather than opening a second one beside it (unplaceableDeferrals,
+		// unplaceable_delivery.go).
 		deferredUnplaceable: newUnplaceableDeferrals(),
 	}
 

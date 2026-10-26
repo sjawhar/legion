@@ -32,7 +32,7 @@ var ErrNoSessionRecord = errors.New("no session record")
 // registers before its server has bound its serve port, and binding the port rewrites it, so
 // re-reading it answers the same thing only until that write lands - a caller may wait the port
 // out rather than give the message up, and the listener's delivery does, deferring such a message
-// for its whole retry window (cmd/listener/delivery.go).
+// for its whole retry window (cmd/listener/unplaceable_delivery.go).
 var ErrNoPushTarget = errors.New("no reachable push target")
 
 var foreignSessionID = regexp.MustCompile(`\b01a0[0-9a-f]{4}-[0-9a-f]{4}-7[0-9a-f]{3}-[0-9a-f]{4}-[0-9a-f]{12}\b`)
