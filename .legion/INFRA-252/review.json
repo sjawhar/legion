@@ -2,22 +2,22 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-252",
-  "completed": "2026-10-26T16:00:00Z",
-  "round": 6,
-  "scope": "The forward merge of main bc307fb5 (#2188) at dd04f49c and the migration renumber to 0054.",
-  "reviewedCodeHead": "dd04f49c458d1d150d4121204ba8358608f9c0d9",
+  "completed": "2026-10-26T19:17:00Z",
+  "round": 7,
+  "scope": "Narrowed by the architect: the hand-over-contract fix (b18ce5f8), the migration renumber (afedb19d), the red `test` check, and correctness defects in them.",
+  "reviewedCodeHead": "afedb19d1ca7254b2da09d55760c74b10cd3f7e5",
   "decision": "changes_requested",
-  "critical": 1,
-  "important": 0,
+  "critical": 0,
+  "important": 1,
   "minor": 0,
-  "mergeResolution": "Read clean by the reviewer and both thermonuclear runs: both sides survive in admit.go, architect.go, workflow.go, store.go (issueColumns, PutIssue and scanIssue all carry taken_back and ancestry in one order), intake_test.go and the two skill references (generated copies identical); go build and go vet pass on the head and on its merge with main 0587774a. migrations.All on the merge with current main lists 51 issue_suspend_release, 52 dispatch_issues, 53 issue_taken_back, 54 issue_ancestry.",
+  "fixVerified": "readmit (admit.go:795) is the only path that turns a member into a root; it sets HandedOverFrom whenever oldTree != Key (admit.go:799-801), reached by the event hand-over, the outbox consumeHandover and both orphan paths; RanAsRoot refuses it (workflow/adopt.go:79-81), so adoptQueuedRoots, adoptChildren and Engine.Ancestry all exclude it; putNewRoot and INFRA-214's self re-admission never set it. Column order matches in issueColumns, PutIssue ($22) and scanIssue. TestAHandedOverChildStaysItsOwnTreeWhenItsOldRootIsReadmitted covers the event hand-over and the uncarried orphan; main's blockers_scratch_dispatch_test.go is unchanged from origin/main and passes in CI. migrations.All on the merge with main 6cdb9995 lists 53, 54 issue_pod_roles_container, 55 issue_ancestry.",
   "keyFindings": [
     {
-      "severity": "critical",
-      "file": "packages/daemon/internal/daemon/blockers_scratch_dispatch_test.go",
-      "description": "The required check `test` is red at dd04f49c (Tests run 40344153501, job 121646481596): main's TestBlockedIssuesAreNotStartedAgainstScratchDispatch fails at step 10, `Legion did not admit BFEACACFD6-5 and BFEACACFD6-12 once BFEACACFD6-11 closed`, with admission.waiting [] and blocked [] and both at phase admitted. [INFERENCE from the state dump] Once the old root BFEACACFD6-3 is taken back into a slot (step 9), the adoption sweep pulls those two handed-over children (recorded parent 3, no run carried, so RanAsRoot is empty) back into 3's tree, which breaks AGENTS.md:221-222 ('A child stays its own tree after hand-over; reopening the old root later does not take it back') and plan finding 5's accepted 'an uncarried orphan rejoins its readmitted old tree'. The PR's rule and main's hand-over contract must be reconciled, and the test must pass."
+      "severity": "important",
+      "file": "packages/daemon/internal/store/migrations/0055_issue_ancestry.up.sql",
+      "description": "handed_over_from defaults to '' for every row that exists at deploy, with no backfill. A child a pre-deploy daemon handed over without its run (no tree_lifecycles row, TakenBack cleared, CarriesRun false) passes RanAsRoot, so the first adoption sweep after the deploy pulls it back into its old root's tree once that root is live — the contract the architect ruled on, broken for existing rows. The adoption sweep is new in this PR, so this cannot happen before the deploy. Existing data marks most of them exactly: every outbox hand-over since #1896 writes processed_events ('outbox', 'handover:<KEY>:<row id>'), which nothing prunes; a hand-over or orphan that ran a worker under its old tree has a claims row with tree <> key. Backfill handed_over_from from those for key = tree rows; name any population no data marks (an uncarried orphan a person admitted that never ran a worker) under 'Not proven / risk' with a pre-deploy query. A generation > 1 heuristic must not be used: it would permanently refuse INFRA-214-style roots that re-admitted themselves."
     }
   ],
-  "thermonuclear": "thermonuclear-deep-review and thermonuclear-code-quality at 1801cee6 (code dd04f49c): both APPROVE the merge resolution with no findings (they ran no Postgres tests); non-blocking: RanAsRoot now reads CarriesRun()||TakenBack instead of handed_over_roots, a behaviour change made in the merge commit. Provider not verified.",
-  "ci": "At dd04f49c, read 2026-10-26T15:58Z: lint success, typecheck success, pr-title success, test failure (TestBlockedIssuesAreNotStartedAgainstScratchDispatch). Required: lint, typecheck, test, pr-title. Compare dd04f49c...1801cee6 touches only .legion/."
+  "thermonuclear": "thermonuclear-deep-review at c5eb9b20 (code afedb19d): CHANGES, the finding above. thermonuclear-code-quality: APPROVE, the same gap judged a deploy-time risk with a pre-deploy audit query. Both report build and vet clean. Provider: both runs name anthropic/claude-opus-5-5 from their transcript's workstation block, not from provider metadata; provider not verified.",
+  "ci": "At afedb19d, read 2026-10-26T19:15Z: Tests 40369963835 success (lint, typecheck, test), PR Title 40370064190 success. Required: lint, typecheck, test, pr-title. Compare afedb19d...c5eb9b20 touches only .legion/."
 }
