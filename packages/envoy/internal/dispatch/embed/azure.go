@@ -39,6 +39,11 @@ const (
 	azureRequestTimeout = 60 * time.Second
 	// azureErrorBodyLimit bounds how much of a failed response is read for its error code.
 	azureErrorBodyLimit = 64 << 10
+	// azureResponseBodyLimit bounds how much of a successful response Embed decodes. The largest
+	// answer is azureMaxBatchTexts vectors of Dimension floats: 96 x 1536 floats at up to about 25
+	// JSON bytes each is under 4 MB, so 16 MiB is generous for any answer Azure means, and a body
+	// past it is a fault the call refuses rather than reads without end.
+	azureResponseBodyLimit = 16 << 20
 )
 
 // TokenSource hands AzureClient a bearer token for each call. EntraTokenSource is the one
@@ -213,9 +218,16 @@ func (c *AzureClient) Embed(ctx context.Context, texts []string, inputType Input
 	if response.StatusCode < 200 || response.StatusCode > 299 {
 		return nil, azureStatusError(response)
 	}
+	// One byte past the cap is read, so a body that fills the cap exactly is told apart from one
+	// that runs past it, which is refused rather than decoded as far as the cap allows.
+	limited := &io.LimitedReader{R: response.Body, N: azureResponseBodyLimit + 1}
 	var decoded azureEmbedResponse
-	if err := json.NewDecoder(response.Body).Decode(&decoded); err != nil {
-		return nil, fmt.Errorf("embed: azure decode response: %w", err)
+	decodeErr := json.NewDecoder(limited).Decode(&decoded)
+	if limited.N == 0 {
+		return nil, fmt.Errorf("embed: azure response exceeds %d bytes", azureResponseBodyLimit)
+	}
+	if decodeErr != nil {
+		return nil, fmt.Errorf("embed: azure decode response: %w", decodeErr)
 	}
 	return placeAzureVectors(decoded, len(texts))
 }

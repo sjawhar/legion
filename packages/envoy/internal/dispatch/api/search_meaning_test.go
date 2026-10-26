@@ -32,8 +32,9 @@ type fakeEmbedder struct {
 	vectors map[string][]float32
 	err     error
 	// errFor, when set, returns err only for a call of the matching InputType and succeeds for
-	// every other type - models a backfill's own bulk document traffic throttling while
-	// unrelated, low-volume query traffic still gets through
+	// every other type - models the queue's own background document traffic (the coverage pass
+	// and embedqueue's scan draining a backlog) throttling while unrelated, low-volume query
+	// traffic still gets through
 	// (TestSearchStaysNonDegradedWhileEmbedqueueIsThrottled). vectors/err/errFor are set up
 	// before a test's concurrent goroutines start and never mutated after, so they need no lock;
 	// callsMu guards calls, the one field tests mutate concurrently.
@@ -161,10 +162,11 @@ func TestSearchStaysNonDegradedWhileEmbedqueueIsThrottled(t *testing.T) {
 	// find - already embedded, before the saturating bulk traffic simulated next ever starts.
 	processAllPending(t, database, embedder)
 
-	// Simulate an unrelated bulk backfill now saturating the account: every further
-	// InputDocument call throttles, forever; InputQuery (a live query's own embedding) keeps
-	// succeeding. A second issue, created only now, gives embedqueue perpetual pending work to
-	// retry and back off on for the rest of the test - exactly a saturating backfill in progress.
+	// Simulate the queue's background drain (the coverage pass and embedqueue's scan working
+	// through a backlog) now saturating the account: every further InputDocument call
+	// throttles, forever; InputQuery (a live query's own embedding) keeps succeeding. A second
+	// issue, created only now, gives embedqueue perpetual pending work to retry and back off on
+	// for the rest of the test - exactly a saturating background drain in progress.
 	throttleErr := embedtest.FakeThrottleError{Code: "ThrottlingException"}
 	embedder.errFor = map[embed.InputType]error{embed.InputDocument: throttleErr}
 	createInteractionIssue(t, handler, "SAT", "Other bulk content that never finishes embedding", "Body.")

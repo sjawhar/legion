@@ -673,14 +673,17 @@ meaning search's coverage into the server (Search, below). `0117` adds `embeddin
 reads; a row pending at the migration takes its own `created_at`) and `embeddings.dead_model`
 (nullable: the embedder identity the row was confirmed dead under), and replaces
 `embeddings_enqueue` so that a text change also starts the row's wait again and clears
-`dead_model`. Both columns are additive and the earlier release names neither: it inserts only
-through `embeddings_enqueue` or with an insert the default fills. `0118` drops
-`embeddings_backfill_progress`, the checkpoints of the removed `backfill-embeddings` subcommand.
-Dropping a table in the same release as the code that stopped using it is what the rule below
-forbids for a table a running build reads; no server of any release read or wrote this one, only
-that person-run subcommand did, so the drop breaks no build still serving through the roll. Both
-censuses answer `0`: `0117`'s update writes only the column it adds, and `0118` drops nothing a
-running build still reads.
+`dead_model`. A row already dead at the migration records `us.cohere.embed-v4:0`, the Bedrock
+identity every earlier release embedded with, so a deployment that keeps Bedrock does not re-admit
+it, while a switch to Azure re-admits it once; a row the earlier release confirms dead during the
+roll records none and gets the new release's attempts once. Both columns are additive and the
+earlier release names neither: it inserts only through `embeddings_enqueue` or with an insert the
+default fills. `0118` drops `embeddings_backfill_progress`, the checkpoints of the removed
+`backfill-embeddings` subcommand. Dropping a table in the same release as the code that stopped
+using it is what the rule below forbids for a table a running build reads; no server of any release
+read or wrote this one, only that person-run subcommand did, so the drop breaks no build still
+serving through the roll. Both censuses answer `0`: `0117`'s updates write only the columns it
+adds, and `0118` drops nothing a running build still reads.
 
 Migration `0009_project_artifacts` deletes malformed derived artifact references, reports their
 count, and re-derives them from source text on the next write. It aborts server boot before a

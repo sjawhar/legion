@@ -441,9 +441,9 @@ func TestCoverDropsAnotherIdentitysVectors(t *testing.T) {
 	}
 }
 
-// A row confirmed dead under another identity, or under none (dead before 0117), gets the
-// configured identity's attempts once; a row dead under the configured identity stays dead, and so
-// does a re-admitted row once it dies again here.
+// A row confirmed dead under another identity, or under none (a row the release before 0117
+// confirmed dead during the roll), gets the configured identity's attempts once; a row dead under
+// the configured identity stays dead, and so does a re-admitted row once it dies again here.
 func TestCoverReadmitsARowDeadUnderAnotherIdentityOnce(t *testing.T) {
 	database := storetest.Open(t)
 	ctx := context.Background()
@@ -483,6 +483,44 @@ func TestCoverReadmitsARowDeadUnderAnotherIdentityOnce(t *testing.T) {
 	cover(t, deps)
 	if dead, deadModel, _, _ := read("DEDA-1"); !dead || deadModel == nil || *deadModel != configuredIdentity {
 		t.Errorf("DEDA-1 after dying again here: dead %t dead_model %v, want it to stay dead", dead, deadModel)
+	}
+}
+
+// A row dead under embed.BedrockModel, as 0117 records every row dead before it, stays dead with
+// its counters, and costs no call, on a deployment that keeps Bedrock: its other rows' vectors are
+// Bedrock's too, so the pass finds nothing foreign. A switch to Azure re-admits it once.
+func TestCoverLeavesARowDeadUnderBedrockDeadUntilAnotherIdentity(t *testing.T) {
+	database := storetest.Open(t)
+	ctx := context.Background()
+	for _, id := range []string{"BDRK-1", "BDRK-2", "BDRK-3"} {
+		seedIssue(t, database, "BDRK", id, "Title of "+id)
+	}
+	drain(t, Deps{Store: database, Embedder: newPlaceEmbedder(embed.BedrockModel)})
+	mustExec(t, database.Pool, `
+		update embeddings set embedding = null, model = null, embedded_hash = null, embedded_at = null,
+		       dead = true, confirmed_failures = 10, attempt_count = 12, dead_model = $1
+		where kind = 'issue' and id = 'BDRK-1'`, embed.BedrockModel)
+	read := func() (dead bool, deadModel *string, confirmed, attempts int) {
+		t.Helper()
+		if err := database.Pool.QueryRow(ctx, `select dead, dead_model, confirmed_failures, attempt_count from embeddings where kind = 'issue' and id = 'BDRK-1'`).
+			Scan(&dead, &deadModel, &confirmed, &attempts); err != nil {
+			t.Fatalf("read BDRK-1: %v", err)
+		}
+		return
+	}
+
+	bedrock := newPlaceEmbedder(embed.BedrockModel)
+	cover(t, Deps{Store: database, Embedder: bedrock})
+	if dead, deadModel, confirmed, attempts := read(); !dead || deadModel == nil || *deadModel != embed.BedrockModel || confirmed != 10 || attempts != 12 {
+		t.Errorf("under Bedrock: dead %t dead_model %v confirmed %d attempts %d, want still dead under %s with 10 and 12", dead, deadModel, confirmed, attempts, embed.BedrockModel)
+	}
+	if len(bedrock.calls) != 0 {
+		t.Errorf("under Bedrock the pass made %d calls, want none", len(bedrock.calls))
+	}
+
+	cover(t, Deps{Store: database, Embedder: newPlaceEmbedder(configuredIdentity)})
+	if dead, deadModel, confirmed, attempts := read(); dead || deadModel != nil || confirmed != 0 || attempts != 0 {
+		t.Errorf("under Azure: dead %t dead_model %v confirmed %d attempts %d, want re-admitted with fresh counters", dead, deadModel, confirmed, attempts)
 	}
 }
 

@@ -23,6 +23,15 @@ alter table embeddings
 update embeddings set pending_since = created_at
   where embedded_hash is distinct from content_hash;
 
+-- Every row already dead here died under us.cohere.embed-v4:0 on Bedrock (embed.BedrockModel), the
+-- identity every release before this one embedded with, so it records that identity: a deployment
+-- that keeps Bedrock leaves these rows dead rather than spending its attempts on them again, and a
+-- switch to Azure still re-admits each of them once, as for any row dead under another identity.
+-- During the roll, a row the release before this one confirms dead after this update records no
+-- identity, so this release's coverage pass gives it this identity's attempts once.
+update embeddings set dead_model = 'us.cohere.embed-v4:0'
+  where dead;
+
 -- embeddings_enqueue as 0072 wrote it, and on a text change it also starts the row's wait again
 -- and forgets the identity it died under: a row whose content moved on deserves a fresh set of
 -- attempts wherever it is embedded.

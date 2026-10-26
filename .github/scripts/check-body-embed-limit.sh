@@ -22,8 +22,8 @@
 # with nothing prepended: the triggers in
 # packages/envoy/internal/dispatch/store/migrations/0075_comments_embeddings_trigger.up.sql:6 and
 # .../0077_messages_embeddings_trigger.up.sql:10 enqueue `new.body`, and the coverage pass, which
-# embeds what no trigger enqueued, selects the same column (`coverageSources` in
-# packages/envoy/internal/dispatch/embedqueue/coverage.go:70 and :72).
+# embeds what no trigger enqueued, selects the same column (the `comment` and `message` entries of
+# `coverageSources` in packages/envoy/internal/dispatch/embedqueue/coverage.go).
 #
 # What this check does not cover: a document's text and an ask's question joined to its answer are
 # embedded too, are cut at the same limit with the same silence, and are not capped by

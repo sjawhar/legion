@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -277,6 +278,27 @@ func TestAzureEmbedRefusesAMalformedAnswer(t *testing.T) {
 				t.Errorf("IsThrottled(%v) = true, want false", err)
 			}
 		})
+	}
+}
+
+// TestAzureEmbedRefusesAnAnswerOverTheBodyCap: a 200 whose body runs past azureResponseBodyLimit
+// is an error naming the cap, not a decode of as much as the cap allows, and not a throttle; the
+// error carries none of the body.
+func TestAzureEmbedRefusesAnAnswerOverTheBodyCap(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"object":"list","model":"` + strings.Repeat("m", azureResponseBodyLimit) + `","data":[]}`))
+	}))
+	defer server.Close()
+	vectors, err := testAzureClient(t, server, AzureConfig{}).Embed(context.Background(), []string{"a"}, InputDocument)
+	if err == nil || vectors != nil {
+		t.Fatalf("Embed = %d vectors, error %v; want no vectors and an error", len(vectors), err)
+	}
+	if IsThrottled(err) {
+		t.Errorf("IsThrottled(%v) = true, want false", err)
+	}
+	if text := err.Error(); !strings.Contains(text, strconv.Itoa(azureResponseBodyLimit)) || strings.Contains(text, "mmmm") {
+		t.Errorf("error %q does not name the %d-byte cap, or carries the body", text, azureResponseBodyLimit)
 	}
 }
 

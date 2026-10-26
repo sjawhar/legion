@@ -154,11 +154,12 @@ const dropForeignVectors = `
 	where e.kind = picked.kind and e.id = picked.id`
 
 // readmitForeignDead gives up to $3 of the kind's rows confirmed dead under another identity ($2
-// is the configured one; a row dead before 0117 recorded none) this identity's attempts, once:
-// the content failed against another model or place, which says nothing about this one. A row
-// that dies again records the configured identity (retryRows) and is not re-admitted again. Like
-// dropForeignVectors, Cover runs it only once the configured embedder has answered: attempts
-// against an embedder that cannot embed would only fail.
+// is the configured one; 0117 recorded embed.BedrockModel for every row dead before it, and only a
+// row the release before 0117 confirmed dead during the roll records none) this identity's
+// attempts, once: the content failed against another model or place, which says nothing about this
+// one. A row that dies again records the configured identity (retryRows) and is not re-admitted
+// again. Like dropForeignVectors, Cover runs it only once the configured embedder has answered:
+// attempts against an embedder that cannot embed would only fail.
 const readmitForeignDead = `
 	with picked as (
 		select kind, id from embeddings

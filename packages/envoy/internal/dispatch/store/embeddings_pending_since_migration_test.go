@@ -4,6 +4,8 @@ import (
 	"context"
 	"testing"
 	"time"
+
+	"github.com/sjawhar/envoy/internal/dispatch/embed"
 )
 
 // embeddingsPendingSinceVersion adds embeddings.pending_since and dead_model, and teaches
@@ -12,8 +14,10 @@ import (
 const embeddingsPendingSinceVersion = 117
 
 // TestMigrationAddsPendingSince runs the shipped files: a row pending at the migration takes its
-// own created_at as pending_since and an embedded row the migration's time; an insert naming
-// neither new column, as the release before this one makes, gets pending_since from the default;
+// own created_at as pending_since and an embedded row the migration's time; a row dead at the
+// migration records embed.BedrockModel, the identity every release before it embedded with, as
+// its dead_model, and the pending and embedded rows record none; an insert naming neither new
+// column, as the release before this one makes, gets pending_since from the default;
 // embeddings_enqueue on a text change starts the row's wait again and clears dead_model, and on an
 // unchanged text leaves both.
 func TestMigrationAddsPendingSince(t *testing.T) {
@@ -33,6 +37,11 @@ func TestMigrationAddsPendingSince(t *testing.T) {
 	`, waitingSince); err != nil {
 		t.Fatalf("seed an embedded row: %v", err)
 	}
+	if _, err := store.Pool.Exec(ctx, `
+		insert into embeddings (kind, id, text_snapshot, content_hash, created_at, dead, confirmed_failures, attempt_count) values ('issue', 'OLD-3', 'Dead', 'h4', $1, true, 10, 12);
+	`, waitingSince); err != nil {
+		t.Fatalf("seed a dead row: %v", err)
+	}
 	migrated := time.Now()
 	if err := store.migrate(ctx, migrationsThrough(t, embeddingsPendingSinceVersion)); err != nil {
 		t.Fatalf("migrate to %d: %v", embeddingsPendingSinceVersion, err)
@@ -41,8 +50,11 @@ func TestMigrationAddsPendingSince(t *testing.T) {
 	if pendingSince, deadModel := readPendingSince(t, store, "issue", "OLD-1"); !pendingSince.Equal(waitingSince) || deadModel != nil {
 		t.Errorf("pending row: pending_since %v dead_model %v, want its created_at %v and no dead_model", pendingSince, deadModel, waitingSince)
 	}
-	if pendingSince, _ := readPendingSince(t, store, "issue", "OLD-2"); pendingSince.Before(migrated.Add(-time.Second)) {
-		t.Errorf("embedded row: pending_since %v, want the migration's time (after %v)", pendingSince, migrated)
+	if pendingSince, deadModel := readPendingSince(t, store, "issue", "OLD-2"); pendingSince.Before(migrated.Add(-time.Second)) || deadModel != nil {
+		t.Errorf("embedded row: pending_since %v dead_model %v, want the migration's time (after %v) and no dead_model", pendingSince, deadModel, migrated)
+	}
+	if _, deadModel := readPendingSince(t, store, "issue", "OLD-3"); deadModel == nil || *deadModel != embed.BedrockModel {
+		t.Errorf("dead row: dead_model %v, want %s", deadModel, embed.BedrockModel)
 	}
 
 	inserted := time.Now()
