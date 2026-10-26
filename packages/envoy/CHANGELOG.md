@@ -18,8 +18,11 @@
   release before it writes while a rollout or a rollback runs both releases gets its sequence too,
   from the migration's trigger at its commit, so it reads as the newest review it is rather than
   ranking below every sequenced one. Deploy order:
-  Dispatch (migration 0117) deploys before the Legion daemon (its migration 0051); a daemon against
-  a Dispatch without `seq` falls back to a review's `at`.
+  Dispatch (migration 0117) deploys before the Legion daemon (its migration 0051). The daemon starts
+  every wait at a sequenced event or read, and never takes a review read without a `seq` to follow
+  a start that carries one, so against a Dispatch without `seq` a changes request answers no wait
+  of a root waiting on a person; an approval that opens the design gate still answers, since an
+  opening approval answers a wait whenever it was given.
 - A project's default assignee, the last step of an issue create's assignee chain: an issue created
   with no assignee, by nobody (the shared token), under no parent or under a parent with nobody on
   it, goes to the person the project names; nothing already filed, and no create that names an
