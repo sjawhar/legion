@@ -1,0 +1,126 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "INFRA-487",
+  "completed": "2026-10-26T17:04:21Z",
+  "plan": "dispatch://INFRA-487/artifact/plan-md (version 1)",
+  "summary": "The broker stops counting time when no broker was serving against a lease. A one-row broker_serving record, migration 0019, holds last_serving_at and not_serving_after. One SQL function, enrollment_lease_live, replaces `lease_expires_at > now()` at all nine liveness sites in enroll/requests, so a lease that ran out during an unrecorded gap stays live inside the very statement that reads it. An enroll.ServingClock beats every BROKER_SWEEP_SECONDS on the `serving` context; after a gap longer than three intervals it gives each unrevoked lease that ran out after last_serving_at that gap back, capped at now()+lease. config.Load refuses 2*lease <= 9*sweep. Separately, the daemon's broker token login retries on a 2s-to-10s schedule when the broker gives no HTTP response; refusals keep 30s-to-5min. A new cmd/broker/outage_test.go runs the real broker and agent-secrets binaries across a stop and a restart, with in-process enroll, api and config tests and two daemon client tests. Docs and the CHANGELOG are updated.",
+  "tasks": [
+    "1. migration 0019_broker_serving.up.sql (table, seed row with null threshold, enrollment_lease_live function); replace the predicate at enroll.go:412,511-513,621,784,971, machine_read.go:50, machine_state.go:614,924,937; rewrite EndLapsed and Sweeper doc comments",
+    "2. enroll/serving.go ServingClock{Store,Interval,NotServingAfter,Lease} Run/Beat; wire in cmd/broker/main.go on `serving`; config refusal and comments (config.go:177-194); regenerate the broker config reference if a check compares it",
+    "3. enroll/serving_test.go, an api newTestServer test (stale serving row: renew 200 and grant values released), and config_test refusal",
+    "4. cmd/broker/outage_test.go acceptance test: real broker and agent-secrets binaries, a test-owned forwarder at a stable address, lease 45s, sweep 1s, drain 0; survivor, revoked, lapsed-while-serving and mismatch pods; compiles and fails on eee16056",
+    "5. packages/daemon/internal/agentsecrets/client.go: a short retry when the broker gives no HTTP response; TestTokenLoginRetriesQuicklyWhileTheBrokerDoesNotAnswer and TestTokenLoginRetriesSlowlyWhenTheBrokerRefuses",
+    "6. docs: broker concepts.md:35-66, revoke-a-session.md:136-142, run-an-agent-in-a-container.md:86-91, troubleshooting.md:29, packages/envoy/AGENTS.md:3143 and :3775, docs/kubernetes.md:4709-4710, the shim comment agentsecrets.go:34-36, and packages/envoy/CHANGELOG.md [Unreleased] Fixed"
+  ],
+  "acceptance": [
+    {
+      "criterion": "After an outage longer than the lease, a pod fetches again within one renewal interval of the broker serving, with no relaunch and no person",
+      "surface": "the real broker binary and the real agent-secrets binary over HTTP, on real Postgres, stopped and started again",
+      "command": "cd packages/envoy && BROKER_TEST_DATABASE_URL=... go test -count=1 -v -run TestABrokerOutageLongerThanALease ./cmd/broker (zero '--- SKIP')"
+    },
+    {
+      "criterion": "The test fails on the code before the change",
+      "surface": "the same test on a read-only export of eee16056's packages/envoy",
+      "command": "git --git-dir=\"$(jj -R \"$LEGION_WORKSPACE\" git root)\" archive eee16056 packages/envoy | tar -x -C \"$TMPDIR/infra-487-base\"; copy outage_test.go in; GOWORK=off go test -count=1 -v -run TestABrokerOutageLongerThanALease ./cmd/broker; expect the survivor's fetch refused PROOF_INVALID not live, or its renewer to exit 76"
+    },
+    {
+      "criterion": "An enrollment really ended stays ended (revoked; lapsed while a broker served; a renewal with another pod's or account's token is refused and does not extend the lease)",
+      "surface": "the same test",
+      "command": "the same command"
+    },
+    {
+      "criterion": "The guard holds through a database outage while the broker runs, and under concurrent beats",
+      "surface": "an in-process broker on real Postgres",
+      "command": "cd packages/envoy && go test -count=1 -v ./internal/broker/enroll ./internal/broker/api ./internal/broker/requests ./internal/broker/config"
+    },
+    {
+      "criterion": "The daemon logs in again within about 10 s of the broker answering",
+      "surface": "the daemon's broker client against an httptest broker that drops connections, then answers",
+      "command": "cd packages/daemon && go test -count=1 -v -run TestTokenLoginRetries ./internal/agentsecrets"
+    }
+  ],
+  "testerBreakAttempts": [
+    "stop the tester's own Postgres for longer than the lease while the broker binary runs, then start it again: the survivor's renewer must not exit 76 and its fetch must work",
+    "an outage shorter than the threshold",
+    "two broker processes on one database, both stopped and both started again",
+    "a revoke written during the outage"
+  ],
+  "requiredSkills": {
+    "implement": [
+      "legion-worker: its pr-body reference sets the PR body, the E2E line and the proof array, which here must quote the acceptance test failing on eee16056 and passing at the head, each with zero skips",
+      "ce-simplify-code: the simplify pass the pr-body reference requires on the settled diff (the migration, serving.go, nine predicate sites, the daemon client)"
+    ],
+    "test": [
+      "legion-worker: the tester's charter in its pr-body reference: re-run the named commands with zero skips, run the break attempts listed in this plan, and read CI on GitHub for lint, types and the full suites"
+    ],
+    "review": [
+      "legion-worker: its merge-gate and review-threads references, for the review of the head and the thread handling; the reviewer checks the nine predicate sites, the beat's lock order and the outage test's margin against the renewer's 10 s retry cap"
+    ]
+  },
+  "gapAnalysis": {
+    "findings": [
+      {
+        "finding": "The draft's in-process Ensure gate ran before the query, so a request stalled on Postgres past the threshold could still read a lapsed lease and answer ENROLLMENT_NOT_LIVE; EndLapsed and recoverConflict had no gate; lock order unset.",
+        "answer": "Dropped the in-process gate. The guard is the SQL function enrollment_lease_live, evaluated in the same statement as every lease read (all nine sites, EndLapsed included). Only the beat locks broker_serving; Renew and EndLapsed read it without a lock, so there is no lock cycle. The plan reviewer confirmed this."
+      },
+      {
+        "finding": "Ambiguity: does 'one whose pod or service account no longer matches its token ... refused after the outage' mean only renewal is refused, or every call at once?",
+        "answer": "The plan reads it as renewal refused (403 POD_IDENTITY_MISMATCH), with the lease not extended, and an enrollment that had already lapsed while a broker served refused on every call. This matches today's rule outside outages. The reading is stated in plan.md and named to the architect, who decides if the spec means more."
+      },
+      {
+        "finding": "'A beat succeeded' covers less than 'outage' may mean: a broker unreachable through ingress, DNS or a NetworkPolicy, or an unreachable OIDC issuer, still ends leases.",
+        "answer": "Scoped to 'no broker serving: process down or database unreachable', which is the incident (the INFRA-242 scale-to-zero). The other failures are named in plan.md as limits, for the architect to widen. The OIDC key set is cached (internal/oidc/keys.go), so an issuer outage matters only for an unseen key."
+      },
+      {
+        "finding": "The threshold (3x sweep) is not tied to the lease; with a small lease, a gap below the threshold still ends live pods.",
+        "answer": "config.Load refuses 2*BROKER_LEASE_SECONDS <= 9*BROKER_SWEEP_SECONDS, naming both, with a config test. Defaults are 900 and 5; neither this repository nor theorem-labs/agent-infra sets them (checked with gh search code)."
+      },
+      {
+        "finding": "The brief's claim that the daemon's credential lasts 30 days was wrong: a token login lasts at most 1 h and expires with its token, so an 18-minute outage can outlast it, and the 30s-to-5min backoff then delays every new enrollment up to 5 min after the broker returns.",
+        "answer": "Corrected (machine/token.go:19, :116-121), and checked that a wake does not skip the backoff (nextDue, client.go:274-283). In scope, since the spec names the daemon's login and covers what outlasts the broker's downtime: task 5 adds a 2s-to-10s retry for a broker that gives no HTTP response, with two tests."
+      },
+      {
+        "finding": "Acceptance test timing was tight (lease 20s against the renewer's 10s cap); the SIGTERM drain blurs when the outage starts; 'within one renewal interval' was not machine-checkable.",
+        "answer": "Lease 45s, sweep 1s, BROKER_DRAIN_SECONDS=0. The clock starts at the restarted process's 'broker listening' line. The test asserts the first fetch succeeds at once and the renewal lands within lease/3 (15 s). The margin is at least 19 s."
+      },
+      {
+        "finding": "The real agent-secrets binary needs a stable broker URL across the restart, because AGENT_SECRETS_URL is also the proof's htu.",
+        "answer": "A forwarder the test owns listens on a stable loopback address. BROKER_PUBLIC_URL and AGENT_SECRETS_URL name it, and each broker listens on :0. The oidctest issuer lives for the whole test."
+      },
+      {
+        "finding": "'Fails on the code before the change' had no stated proof; the test must compile on eee16056 and must not skip.",
+        "answer": "The test uses only symbols on main and asserts the new INFO line last. The plan names the command: a read-only git archive export of eee16056, run with GOWORK=off. It names the expected failure, the survivor's fetch refused PROOF_INVALID not live or its renewer exiting 76, and requires zero skips."
+      },
+      {
+        "finding": "The clock must run on `serving`, not `ctx`, so beats continue through the drain.",
+        "answer": "Wired on `serving` (cmd/broker/main.go:243)."
+      },
+      {
+        "finding": "Which leases come back, and behaviour on rollback, roll-forward, first deploy and a missing row.",
+        "answer": "Leases come back when unrevoked with lease_expires_at > last_serving_at, set to least(lease + gap, now() + Lease). After a rollback and a later roll-forward, live leases get at most now() + Lease, which is a renewal. The first deploy seeds now() and restores nothing; the broker's own two-pod rollout has no gap. A missing row or a null threshold turns the guard off (today's behaviour), and the beat recreates the row. All stated in plan.md."
+      },
+      {
+        "finding": "Making the clock required would break the api.Register and Sweeper callers in tests, and an active guard would make the tests that lapse leases by SQL flake.",
+        "answer": "Nothing is required of api.Deps, requests.Sweeper or the rigs. The threshold is null until a broker first beats, so in-process test databases, which never beat, keep today's semantics. Only cmd/broker/main.go wires the clock."
+      },
+      {
+        "finding": "Docs that state the opposite of the new behaviour.",
+        "answer": "Task 6 lists each: concepts.md, revoke-a-session.md, run-an-agent-in-a-container.md, troubleshooting.md, envoy AGENTS.md:3143 and :3775, the config.go comments with the generated reference, the EndLapsed doc, the Sweeper comment, docs/kubernetes.md:4709-4710, the shim comment, and the CHANGELOG."
+      },
+      {
+        "finding": "Grant lifetimes and pending requests still run on wall-clock time.",
+        "answer": "Kept. They are limits a person or a policy set. Legion pod grants have no lifetime, and the acceptance test uses a policy-granted secret. Stated in plan.md."
+      },
+      {
+        "finding": "Pods already stuck after exit 76 are not covered.",
+        "answer": "Out of scope: they need a relaunch. The spec records that every role of the 2026-10-26 incident was already relaunched."
+      }
+    ]
+  },
+  "planReview": {
+    "verdict": "approved",
+    "rounds": 1
+  },
+  "specDepartures": []
+}
