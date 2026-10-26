@@ -10,8 +10,10 @@ import {
   createProject,
   dashboardOrigin,
   getArtifactText,
+  getIssueArtifactText,
   listIssueAsks,
   listMyReplies,
+  patchIssue,
   userHeaders,
 } from "./api";
 import { connectedDot, documentEditor, openSpec } from "./editor";
@@ -20,6 +22,7 @@ import {
   openMarginThread,
   referenceAgent,
   referenceTargetsIn,
+  settledBlockAsk,
 } from "./reference-surfaces";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
@@ -124,10 +127,11 @@ function casesFor(asks: Readonly<Record<string, string>>): Case[] {
  *  document asks its own words: a block asking what another document of the issue asks under the
  *  same id is a copy of that document's ask and opens none of its own. */
 function questionBlocks(slug: string): string[] {
-  return QUESTION_IDS.map(
-    (id) =>
-      `:::ask{#${id} urgency="med" multiple="false"}\n${questionText(id, slug)}\n\n- Yes\n- No\n:::`
-  );
+  return QUESTION_IDS.map((id) => questionBlock(id, slug));
+}
+
+function questionBlock(id: string, slug: string): string {
+  return `:::ask{#${id} urgency="med" multiple="false"}\n${questionText(id, slug)}\n\n- Yes\n- No\n:::`;
 }
 
 function questionText(id: string, slug: string): string {
@@ -194,6 +198,14 @@ function standaloneKeys(body: string): string[] {
   return keys;
 }
 
+/** What `GET /api/v1/issues/{key}` answers alice. */
+async function issueStatus(key: string): Promise<number> {
+  const response = await fetch(new URL(`/api/v1/issues/${encodeURIComponent(key)}`, baseUrl), {
+    headers: await userHeaders(),
+  });
+  return response.status;
+}
+
 /** The world's precondition, a setup error when it fails: each row's `issues` exist, and every
  *  other key the row writes where the grammar could read it answers 404. */
 async function expectWorldHolds(cases: readonly Case[]): Promise<void> {
@@ -201,11 +213,7 @@ async function expectWorldHolds(cases: readonly Case[]): Promise<void> {
   const status = (key: string) => {
     let answered = statuses.get(key);
     if (answered === undefined) {
-      answered = userHeaders()
-        .then((headers) =>
-          fetch(new URL(`/api/v1/issues/${encodeURIComponent(key)}`, baseUrl), { headers })
-        )
-        .then((response) => response.status);
+      answered = issueStatus(key);
       statuses.set(key, answered);
     }
     return answered;
@@ -503,6 +511,208 @@ test("the live editor draws each reference the shared table links whose target e
     );
     await expect(block).toBeInViewport();
     expect((await getArtifactText(uploaded.artifact.id)).markdown).toBe(stored);
+  } finally {
+    await alice.close();
+  }
+});
+
+test("a bare key that answered 404 is asked about again on issue.created only, not on another issue's update or close, and links once its issue is created with no reload", async ({
+  browser,
+}) => {
+  test.setTimeout(60_000);
+  await createProject({ key: "CORE", name: "Core" });
+  const host = await createIssue({ project: "CORE", title: HOST.title });
+  const renamed = await createIssue({ project: "CORE", title: "Rename the cache" });
+  const closed = await createIssue({ project: "CORE", title: "Close the cache" });
+  // Keys are numbered in order of creation, so the next issue of CORE takes CORE-4.
+  const missing = "CORE-4";
+  if ([host.key, renamed.key, closed.key].join() !== "CORE-1,CORE-2,CORE-3") {
+    throw new Error(`setup: the world made ${host.key}, ${renamed.key} and ${closed.key}`);
+  }
+  for (const key of [missing, "UTF-8"]) {
+    if ((await issueStatus(key)) !== 404) {
+      throw new Error(`setup: ${key} must name no issue`);
+    }
+  }
+  // The two issues the events are about are named too, so the page shows when it has read each.
+  const comment = await createComment(
+    host.key,
+    { body: `Blocked on ${missing} and UTF-8, after ${renamed.key} and ${closed.key}.` },
+    referenceAgent
+  );
+
+  const alice = await signedIn(browser);
+  try {
+    const { page } = alice;
+    const issuePath = (key: string) => `/api/v1/issues/${key}`;
+    // The page's issue reads by path: each request it sends, and each answer it gets.
+    const asked = new Map<string, number>();
+    const answered = new Map<string, number>();
+    page.on("request", (request) => {
+      if (request.method() === "GET") {
+        const path = new URL(request.url()).pathname;
+        asked.set(path, (asked.get(path) ?? 0) + 1);
+      }
+    });
+    page.on("response", (response) => {
+      if (response.request().method() === "GET") {
+        const path = new URL(response.url()).pathname;
+        answered.set(path, (answered.get(path) ?? 0) + 1);
+      }
+    });
+    const askedAbout = (key: string) => asked.get(issuePath(key)) ?? 0;
+    const answersAbout = (key: string) => answered.get(issuePath(key)) ?? 0;
+    // The event stream carries only what commits after it opens, so the writes below wait for it.
+    const streamOpen = page.waitForResponse(
+      (response) => new URL(response.url()).pathname === "/api/v1/events"
+    );
+    await page.goto(`/issues/${host.key}/conversation`);
+    const turn = page.locator(`[data-turn="comment:${comment.id}"]`);
+    await expect(turn).toContainText(`Blocked on ${missing} and UTF-8, after`);
+    // First load: each key that names no issue is asked about once, and its 404 has landed.
+    for (const key of [missing, "UTF-8"]) {
+      await expect.poll(() => answersAbout(key), `the first load's read of ${key}`).toBe(1);
+      expect(askedAbout(key)).toBe(1);
+    }
+    const link = (key: string) => turn.locator(`a[data-dispatch-ref="dispatch://${key}"]`);
+    await expect(link(renamed.key)).toHaveText(`${renamed.key} Rename the cache`);
+    await expect(link(closed.key)).toHaveText(`${closed.key} Close the cache`);
+    await expect(link(missing)).toHaveCount(0);
+    await streamOpen;
+    // A reload would drop this mark.
+    await page.evaluate(() => {
+      document.documentElement.dataset.e2eNoReload = "kept";
+    });
+
+    // issue.updated of another issue: the page reads the issues that exist again, so the renamed
+    // title shows, and asks nothing about a key that answered 404.
+    await patchIssue(renamed.key, { title: "Renamed cache" });
+    await expect(link(renamed.key)).toHaveText(`${renamed.key} Renamed cache`);
+    expect(askedAbout(missing), "an issue.updated asked about a 404 key").toBe(1);
+    expect(askedAbout("UTF-8"), "an issue.updated asked about a 404 key").toBe(1);
+
+    // issue.closed of another issue: the page reads the closed issue again, and asks nothing
+    // about a key that answered 404. Every issue read one event queues is sent at once, so by
+    // the closed issue's answer any read of a 404 key would have been sent too.
+    const closedAnswers = answersAbout(closed.key);
+    await patchIssue(closed.key, { status: "done" });
+    await expect.poll(() => answersAbout(closed.key)).toBeGreaterThan(closedAnswers);
+    expect(askedAbout(missing), "an issue.closed asked about a 404 key").toBe(1);
+    expect(askedAbout("UTF-8"), "an issue.closed asked about a 404 key").toBe(1);
+    await expect(link(missing)).toHaveCount(0);
+
+    // issue.created: the key is asked about once more, and links with no reload or refocus.
+    const created = await createIssue({ project: "CORE", title: "Unblock the release" });
+    if (created.key !== missing) {
+      throw new Error(`setup: the new issue is ${created.key}, not ${missing}`);
+    }
+    await expect(link(missing)).toHaveText(`${missing} Unblock the release`);
+    expect(askedAbout(missing)).toBe(2);
+    await expect(page.locator("html")).toHaveAttribute("data-e2e-no-reload", "kept");
+  } finally {
+    await alice.close();
+  }
+});
+
+/** The line of `seedQuestionHost`'s spec that writes `#q2` followed by `-` and by `_`, as the
+ *  server stores it: Markdown escapes the `_`, and the document reads `See #q2- and #q2_ now.` */
+const TRAILING_LINE = "See #q2- and #q2\\_ now.";
+
+/** Seeds CORE-1, whose spec holds the margin anchor, `TRAILING_LINE`, and the question blocks q2
+ *  and q3, and answers each block's settled ask. */
+async function seedQuestionHost(): Promise<
+  Record<"q2" | "q3", { readonly id: string; readonly question: string }>
+> {
+  await createProject({ key: "CORE", name: "Core" });
+  const spec = [
+    ANCHOR,
+    TRAILING_LINE,
+    questionBlock("q2", "spec"),
+    questionBlock("q3", "spec"),
+    "",
+  ];
+  const host = await createIssue({ project: "CORE", spec: spec.join("\n\n"), title: HOST.title });
+  if (host.key !== HOST.key) {
+    throw new Error(`setup: the world made ${host.key}`);
+  }
+  return {
+    q2: await settledBlockAsk(HOST.key, "q2"),
+    q3: await settledBlockAsk(HOST.key, "q3"),
+  };
+}
+
+test("the live editor draws #q2- and #q2_ as q2's title over #q2 only, keeps the - and the _ as text, and leaves the stored text as written", async ({
+  browser,
+}) => {
+  test.setTimeout(60_000);
+  const { q2 } = await seedQuestionHost();
+  const stored = (await getIssueArtifactText(HOST.key, "spec")).markdown;
+  if (!stored.includes(TRAILING_LINE)) {
+    throw new Error(`setup: the spec holds no ${JSON.stringify(TRAILING_LINE)}: ${stored}`);
+  }
+
+  const alice = await signedIn(browser);
+  try {
+    const { page } = alice;
+    await openSpec(page, HOST.key, ANCHOR);
+    // The title is drawn before the text it hides, so the line is found by its end.
+    const line = documentEditor(page).locator("p").filter({ hasText: "now." });
+    await expect(line).toHaveCount(1);
+    const titles = line.locator("a.dispatch-reference");
+    await expect(titles).toHaveText([q2.question, q2.question]);
+    for (const title of await titles.all()) {
+      await expect(title).toHaveAttribute(
+        "data-dispatch-href",
+        `dispatch://${HOST.key}/ask/${q2.id}`
+      );
+      await expect(title).toBeVisible();
+    }
+    // Each title stands for the #q2 alone; the - and the _ after it stay drawn as text.
+    await expect(line.locator(".dispatch-reference-text")).toHaveText(["#q2", "#q2"]);
+    await expect(line).toHaveText(`See ${q2.question}- and ${q2.question}_ now.`, {
+      useInnerText: true,
+    });
+    expect((await getIssueArtifactText(HOST.key, "spec")).markdown).toBe(stored);
+  } finally {
+    await alice.close();
+  }
+});
+
+test("a margin comment that writes #q2 escaped (\\#q2, &#35;q2) beside #q3 links #q3 alone and shows #q2 as text", async ({
+  browser,
+}, testInfo) => {
+  test.setTimeout(60_000);
+  const { q3 } = await seedQuestionHost();
+  const q3Reference = `dispatch://${HOST.key}/ask/${q3.id}`;
+  const comments: string[] = [];
+  for (const body of ["See \\#q2 and #q3.", "See &#35;q2 and #q3."]) {
+    const comment = await createComment(
+      HOST.key,
+      { anchor: { artifact: "spec", quote: ANCHOR }, body },
+      referenceAgent
+    );
+    expect(comment.anchor?.quote).toBe(ANCHOR);
+    comments.push(comment.id);
+  }
+
+  const alice = await signedIn(browser);
+  try {
+    const { page } = alice;
+    const project = testInfo.project.name;
+    await openSpec(page, HOST.key, ANCHOR);
+    for (const id of comments) {
+      const card = await openMarginThread(page, project, id);
+      // One render links every #id the document's question map names, so a reader that links
+      // the escaped #q2 never shows #q3 linked alone.
+      await expect
+        .poll(() => referenceTargetsIn(card, RENDERED), { timeout: 15_000 })
+        .toEqual([q3Reference]);
+      await expect(card.locator(`a[data-dispatch-ref="${q3Reference}"]`)).toHaveText(q3.question);
+      await expect(card.locator("p").filter({ hasText: "See #q2 and" })).toHaveText(
+        `See #q2 and ${q3.question}.`
+      );
+      await closeThread(page, project);
+    }
   } finally {
     await alice.close();
   }
