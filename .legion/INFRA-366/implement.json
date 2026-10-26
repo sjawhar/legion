@@ -2,8 +2,16 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-366",
-  "completed": "2026-10-26T04:05:00Z",
+  "completed": "2026-10-26T07:25:00Z",
   "proof": [
+    {
+      "criterion": "Tester round 5 and the architect's acceptance (2026-10-26, dispatch://INFRA-459 scope folded into this PR): no write main accepts fails at the head; no id or slug the reference grammar reads reaches a B-tree key past 2704 bytes; a new artifact name over a bound is refused 4xx; an ask or anchor under a block id of any length is written and settlement never fails; a database main wrote is read, edited and indexed by the head. Red test TestTextCitingABlockOfALongNamedDocumentIsStillWritten.",
+      "surface": "Two real server builds on one local Postgres database (infra366_r6): main 81a3b5ef writes, then the head is rolled onto it; the real dispatch CLI; throwaway script $TMPDIR/infra366/r6-accept.sh",
+      "command": "OLD=dispatch-base-81a3b5ef NEW=dispatch-05ea3ef4 bash $TMPDIR/infra366/r6-accept.sh",
+      "observed": "On main: a spec with a 3200-byte callout id, a document named with 2683 bytes, and a comment citing '…#b-x' of it are written. On the head over that database: the issue and long-named document read; both documents edited ('Applied 1 ops (version 2)'); 0 documents and 0 items owed a block index. Head cases: comment citing a 3200-char artifact slug → 'Posted comment'; comment citing a 3200-char comment id → 'Posted comment'; comment and document citing a block of the 2683-byte-named document → posted and 'Uploaded citer.md'; ask and comment anchored across the 3200-byte-id callout → 'Asked …' and 'Posted comment', both anchors storing the 3200-byte id; upload with a 3003-byte name → exit 1 'artifact name is 3003 bytes, past the 2692 bytes a new artifact's name may hold'; head log: 0 'SQLSTATE 54000' lines and 0 'level=ERROR' lines. The red test passes unmodified.",
+      "headSha": "05ea3ef49e56d989513ee01465ec337ce472af74",
+      "negativeControl": "main 81a3b5ef answers the comment anchored across the 3200-byte-id callout with 500 'internal server error' (same run); the previous head 384ff72f answered the comment citing '…#b-x' of the long-named document with 500 (refs_pkey row size 2760, the tester's run); main answers comments citing a 3200-char slug or comment id with 500 (refs_pkey row size 3280, checked 2026-10-26T03:28Z)"
+    },
     {
       "criterion": "Tester round 4 (review round 1's finding as proven): a version write succeeds whatever its keys are - a document whose own reference key is long (a name of 2680 random characters, which main stores) is uploaded, edited and indexed; red test TestADocumentWhoseReferenceKeyLeavesNoRoomForABlockIDIsStillWritten",
       "surface": "Local Dispatch harness: the real Go server built from the head (packages/dispatch/e2e/run-server.sh on port 8777, database infra366_r4) and the real dispatch CLI; throwaway script $TMPDIR/infra366/r4-proof.sh",
@@ -89,13 +97,19 @@
     "Round 3: packages/dispatch/web/src/features/refs/block-reference.ts (moved out of routes.ts, 13430a18)",
     "Round 3: ReferencedBy.tsx row key and cited-block link, ReferencedBy.test.tsx, e2e/block-references.e2e.ts (446d1f3b)",
     "Round 3: AGENTS.md, CHANGELOGs, skills/dispatch, docs/site, claude-envoy dist; shared text table's long-id rows written as literals so bundles leave the table out (9d4fb04e)",
-    "Round 4: migration 0117 (document_blocks.node_id hash index, no unique; block_refs_from_node hash), store_test.go index list, text/refs.go MaxBlockIDBytes comment, packages/envoy/AGENTS.md (384ff72f)"
+    "Round 4: migration 0117 (document_blocks.node_id hash index, no unique; block_refs_from_node hash), store_test.go index list, text/refs.go MaxBlockIDBytes comment, packages/envoy/AGENTS.md (384ff72f)",
+    "Round 6: text/refs.go MaxTargetBytes and targetFits over every reference kind; contracts dispatch-text-rules.ts MAX_REFERENCE_TARGET_BYTES/referenceTargetFits; dashboard routes.ts routeTarget; envoy-client dispatch-owner.ts and dispatch-execute.ts; shared text table rows (5276279b, f77a7a19, 20863d49)",
+    "Round 6: api/artifacts.go maxNewArtifactKeyBytes (2692), refusal of new names and reference keys past it, route descriptions (a7eaf1c3)",
+    "Round 6: migrations 0123 (block_id_key, asks_block_id_unique, asks_anchor_block_id_idx) and 0124 (comments_anchor_block_id_idx); docs/copied_asks.go lookups (28bb6e9a)",
+    "Round 6: docs, README migrations 0123-0124, CHANGELOGs, skills/dispatch, claude-envoy dist (3415df86); forward merge of main 9ed0397b (05ea3ef4)"
   ],
   "trickyParts": [
     "Every document version write now also indexes its blocks (about eight more statements in the version's transaction). TestAHealthyRoomUnderWritesIsNeverRefused passes on an idle pod at the head (27-41 writes against its floor of 20, main 36-54), but failed twice under CPU contention while other Go packages ran in parallel (11-15 writes); main passed the same contended run (24 writes). CI's runners are the judge.",
     "A12 needs every build on one public origin (text.Extract keeps a link outside DISPATCH_SERVER_URL a plain URL); the throwaway driver fronts the second build with a Host-rewriting proxy, as one load balancer does in production.",
     "Bun keeps an exported array in a bundle when any element is a non-literal expression (a template with a computed value), so the long-id fixture rows of DISPATCH_TEXT_REFERENCES are written out as literals; otherwise the test table ships in claude-envoy's dist.",
-    "A block node id is <ref_key>#<block id>, and ref_key (artifact slug) is unbounded, so node_id and from_node are hash indexed: their reads are all equalities (= and = any, bitmap scan), and uniqueness already follows from (artifact_id, block_id) and the unique ref_key. Migration 0117 is this PR's own and unreleased, so it was edited in place."
+    "A block node id is <ref_key>#<block id>, and ref_key (artifact slug) is unbounded, so node_id and from_node are hash indexed: their reads are all equalities (= and = any, bitmap scan), and uniqueness already follows from (artifact_id, block_id) and the unique ref_key. Migration 0117 is this PR's own and unreleased, so it was edited in place.",
+    "Migrations 0123 and 0124 drop and rebuild the ask-block and anchor indexes on asks and comments in one transaction each, holding that table ACCESS EXCLUSIVE while the index builds; the census for each answers 0.",
+    "The artifact-name bound is 2692 bytes for the name and for the new reference key <owner>/<slug>, the largest a B-tree entry holds (12-byte overhead), so the tester's 2683-byte name on TEST-1 (key 2690) is still accepted as main accepts it; such a document can be written but not cited, since its references exceed the 2048-byte target bound."
   ],
   "deviations": [
     "Local checks that failed for environmental reasons: api TestIssueRanksStayOrderedPastLowercaseDigitsAndProductionShapedMoves (the harness database's collation is C, which the test refuses), pi-envoy prepack's 'bin/dispatch' mode (the workspace checkout is 0775), and four load-sensitive tests in the parallel suite runs (envoy-client's 10 s command timeout, claude-envoy's tmux SIGTERM bound, dispatch's AgentsPage and ConversationTab O(1) scroll test), each passing when re-run alone at this head (envoy-client's three times by name; main's copy also passes).",
@@ -103,7 +117,5 @@
     "Round 3: the Referenced by row now also shows a 'block <id>' link to the block of the shown document it cites. Without it, a source's two rows are identical. The reviewer's row-key finding asked only for the key; the link is what makes the two rows tell apart, and the browser test covers it.",
     "Round 3: pmdoc's three timing tests (TestUpdateIsLinearInTheBlockCount, TestBareURLShapesParseAndRenderLinearly, TestParseAndRenderAreLinearOnDelimiterAndOpenerHeavyText) fail on this pod on main 81a3b5ef too (10 ms clock granularity); claude-envoy's tmux SIGTERM timing test failed once in the full suite as before."
   ],
-  "openQuestions": [
-    "For the tree's architect: the same B-tree overflow exists on main for every id and slug the reference grammar reads (a comment citing dispatch://CORE-1/artifact/<3200 chars> gets 500 on main 81a3b5ef, 'index row size 3280 exceeds … refs_pkey'), plus unbounded artifact slugs and the ask/anchor block-id indexes. Outside INFRA-366; evidence and recommendation in dispatch://INFRA-366/comment/85ee2d5a-64ec-4fe7-9a2e-2c55ee09f44f."
-  ]
+  "openQuestions": []
 }
