@@ -589,7 +589,15 @@ export interface ArtifactApproval {
   readonly latest_version: number;
   readonly version?: number;
   readonly by?: Actor;
+  /** The latest review's `created_at`, which its `artifact.*` event shares. */
   readonly at?: string;
+  /** The latest review's event sequence on the document's owner, which orders the review among
+   *  the owner's events as they commit. Absent for a review recorded before Dispatch kept it, and
+   *  on every read the release before that serves (during a rollout or a rollback), so a missing
+   *  `seq` does not prove an older review. It orders; it does not say which versions the review
+   *  covers, which is `version`: a carried approval's `seq` can be below its version's own
+   *  `artifact.version`. */
+  readonly seq?: number;
   readonly reason?: string | null;
   readonly ask_id?: string | null;
   readonly requested_by?: Actor;
@@ -1027,8 +1035,12 @@ export interface ReferenceChangesPayload {
 export type IssueEventPayload = Issue & ReferenceChangesPayload;
 
 /** Every `ask.*` event payload is the ask row, flat, plus what the write moved in the reference
- *  graph. */
-export type AskEventPayload = Ask & ReferenceChangesPayload;
+ *  graph. `restored` is true on the `ask.opened` or `ask.answered` settlement appends when an edit
+ *  restores a decision block it retracted: the ask returns to the state it had, and no one answered
+ *  anything new. A restore the release before Dispatch kept the mark writes - every one already in
+ *  the event log, and one written during a rollout or an image rollback - carries no mark, so a
+ *  missing `restored` does not prove an event is a new answer. */
+export type AskEventPayload = Ask & ReferenceChangesPayload & { readonly restored?: boolean };
 
 /** An `ask.answered` payload. `previous_answer` is present when the answer replaced an earlier
  *  one; the asker and every follower receive it as they received the first. */
@@ -2590,6 +2602,7 @@ const askEventPayloadFields = {
       at: z.string().optional(),
     })
     .nullish(),
+  restored: z.boolean().optional(),
   anchor: z
     .object({
       quote: z.string().optional(),

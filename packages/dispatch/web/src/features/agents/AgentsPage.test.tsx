@@ -4,6 +4,7 @@ import { focusManager, QueryClient, QueryClientProvider } from "@tanstack/react-
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter, useLocation } from "react-router-dom";
 
+import { wholeText } from "../../__tests__/whole-text";
 import { AGENT_LIST_REFILLING, ApiError, api } from "../../api/client";
 import type {
   Agent,
@@ -17,6 +18,7 @@ import type {
   UserAgentStates,
 } from "../../api/types";
 import { AuthGate } from "../../app";
+import type { AgentPart } from "../refs/AgentName";
 import { orderAgents, partitionAgents } from "./AgentsPage";
 import { matchesFilters, searchWords } from "./agent-search";
 import { broadcastPlan, broadcastSendState, composedBroadcast } from "./broadcast-plan";
@@ -230,9 +232,15 @@ test("Agents lists live session activity and capability-aware actions", async ()
     expect(within(pageRegion).getByText("Planner", { exact: true })).toBeTruthy();
     expect(within(pageRegion).getByText("Needs you 2", { exact: true })).toBeTruthy();
     expect(within(pageRegion).queryByText(/^Open asks/)).toBeNull();
+    // The row's state is `AgentName`'s: a listed session is running, and its mark's `title` says
+    // when the listener last heard it.
+    const plannerState = within(card(pageRegion, "Planner")).getByRole("img", { name: "Running" });
+    expect(plannerState.getAttribute("title")).toBe("Running · seen just now");
     expect(
-      within(pageRegion).getByRole("status", { name: "Seen less than 2 minutes ago" })
-    ).toBeTruthy();
+      within(card(pageRegion, "Planner"))
+        .getByRole("link", { name: "Open live conversation with Planner" })
+        .getAttribute("href")
+    ).toBe("/agents/planner-session/live");
     const reviewer = card(pageRegion, "Reviewer");
     expand(reviewer, "Reviewer");
     expect(within(reviewer).queryByRole("button", { name: /^BTW$|^Aside$|^Steer$/ })).toBeNull();
@@ -686,7 +694,7 @@ test("Agents folds sessions unseen for ten minutes under a collapsed Inactive di
       within(region)
         .getAllByRole("heading", { hidden: false, level: 2 })
         .map((heading) => heading.textContent);
-    // Newest Dispatch activity would put Stale first; the grey-dot rule folds it instead.
+    // Newest Dispatch activity would put Stale first; the Inactive rule folds it instead.
     expect(titles()).toEqual(["Planner", "Reviewer"]);
     const disclosure = within(region).getByRole("button", { name: "Inactive (1)" });
     expect(disclosure.getAttribute("aria-expanded")).toBe("false");
@@ -695,9 +703,11 @@ test("Agents folds sessions unseen for ten minutes under a collapsed Inactive di
     fireEvent.click(disclosure);
     expect(disclosure.getAttribute("aria-expanded")).toBe("true");
     const staleCard = card(region, "Stale");
-    expect(
-      within(staleCard).getByRole("status", { name: "Seen 10 minutes ago or longer" })
-    ).toBeTruthy();
+    // Still listed, so still running: the fold is what says it has been quiet, and the mark's
+    // `title` says for how long.
+    expect(within(staleCard).getByRole("img", { name: "Running" }).getAttribute("title")).toBe(
+      "Running · seen 11 minutes ago"
+    );
     expect(titles()).toEqual(["Planner", "Reviewer", "Stale"]);
     // The fold's rows keep the composer.
     expand(staleCard, "Stale");
@@ -920,7 +930,7 @@ test("Agents renders each targeted message and its reply beneath the matching ca
     });
     await expect(within(conversation).findByText("Can this ship?")).resolves.toBeTruthy();
     await expect(within(conversation).findByText("Yes, it can.")).resolves.toBeTruthy();
-    expect(within(conversation).getByText("Answered by Planner")).toBeTruthy();
+    expect(within(conversation).getByText(wholeText("Answered by Planner"))).toBeTruthy();
   } finally {
     page.view.unmount();
     page.restore();
@@ -1046,7 +1056,7 @@ test("Use Send instead is disabled when the target does not advertise steer", as
     const retry = await within(planner).findByRole("button", { name: "Use Send instead" });
     expect(retry.hasAttribute("disabled")).toBe(true);
     expect(retry.hasAttribute("title")).toBe(false);
-    await within(planner).findByText("Planner does not support Send — use BTW.");
+    await within(planner).findByText(wholeText("Planner does not support Send — use BTW."));
     expect(within(planner).getByRole("button", { name: "Retry" }).hasAttribute("disabled")).toBe(
       false
     );
@@ -1173,7 +1183,7 @@ for (const [name, session, read, headline, retries] of [
     try {
       const target = card(await screen.findByRole("region", { name: "Agents" }), session);
       expand(target, session);
-      await within(target).findByText(headline);
+      await within(target).findByText(wholeText(headline));
       expect(within(target).queryAllByRole("button", { name: "Use BTW instead" })).toHaveLength(
         retries
       );
@@ -1296,8 +1306,8 @@ test("an agent's unread reply shows on its row and in the navigation until its c
 });
 
 // The count sums every session that answered the viewer, and a session often answers and then
-// exits. A reply from a session no longer in the live list still has a row, whose Open reads it,
-// so the badge is always one the viewer can clear.
+// exits. A reply from a session no longer in the live list still has a row, whose name links to
+// its live view where the reply is read, so the badge is always one the viewer can clear.
 test("a reply from a session that has ended keeps a row that opens its conversation", async () => {
   const ended = "01a0e52e-0000-7000-8000-00000000abcd";
   const page = renderAgents({
@@ -1308,8 +1318,10 @@ test("a reply from a session that has ended keeps a row that opens its conversat
   try {
     await expect(screen.findByRole("link", { name: "New reply 1" })).resolves.toBeTruthy();
     const region = await screen.findByRole("region", { name: "Replied, no longer connected" });
-    const open = within(region).getByRole("link", { name: "Open session:01a0e52e…" });
+    const open = within(region).getByRole("link", { name: "session:01a0e52e…" });
     expect(open.getAttribute("href")).toBe(`/agents/${ended}/live`);
+    // The registry answered without it: not running.
+    expect(within(region).getByRole("img", { name: "Not running" })).toBeTruthy();
     expect(within(region).getByText("New reply 1")).toBeTruthy();
     expect(screen.getByLabelText("Agents empty state")).toBeTruthy();
   } finally {
@@ -1633,7 +1645,9 @@ test("Agents replies to an issue-less exchange through the agent route, threaded
 
     fireEvent.click(within(answer).getByRole("button", { name: "Reply" }));
     const composer = within(planner).getByRole("form", { name: "Comment composer" });
-    expect(within(composer).getByText("Replying to Planner — Yes, it can.")).toBeTruthy();
+    expect(
+      within(composer).getByText(wholeText("Replying to Planner — Yes, it can."))
+    ).toBeTruthy();
     // A reply lives in its parent's direct-session conversation; it hides the issue picker.
     expect(within(planner).queryByRole("button", { name: "Choose issue" })).toBeNull();
     fireEvent.change(within(planner).getByRole("textbox", { name: "Comment" }), {
@@ -1648,7 +1662,9 @@ test("Agents replies to an issue-less exchange through the agent route, threaded
       })
     );
     await waitFor(() =>
-      expect(within(planner).queryByText("Replying to Planner — Yes, it can.")).toBeNull()
+      expect(
+        within(planner).queryByText(wholeText("Replying to Planner — Yes, it can."))
+      ).toBeNull()
     );
     expect(within(planner).getByRole("button", { name: "Choose issue" })).toBeTruthy();
   } finally {
@@ -1908,9 +1924,15 @@ test("a broadcast leaves out a selected agent that does not advertise the chosen
     fireEvent.change(within(broadcast).getByRole("combobox", { name: "Delivery mode" }), {
       target: { value: "btw" },
     });
-    expect(
-      within(broadcast).getByText(/Excluded: Reviewer \(does not advertise BTW\)/)
-    ).toBeTruthy();
+    const excludedLine = within(broadcast).getByText(
+      wholeText(
+        "Excluded: Reviewer (does not advertise BTW). Nothing is sent to them, and no other mode is substituted."
+      )
+    );
+    // The excluded agent is drawn by `AgentName`: its live link, inside the line.
+    expect(within(excludedLine).getByRole("link", { name: "Reviewer" }).getAttribute("href")).toBe(
+      "/agents/reviewer-session/live"
+    );
     fireEvent.change(within(broadcast).getByRole("textbox", { name: "Broadcast message" }), {
       target: { value: "Stand down and report status." },
     });
@@ -1947,9 +1969,12 @@ test("a broadcast whose selection holds an Aside-only session goes as an Aside u
     );
     broadcast = within(region).getByRole("region", { name: "Broadcast" });
     expect(mode().value).toBe("aside");
-    expect(
-      within(broadcast).getByText("Sending as Aside: Reviewer does not advertise BTW.")
-    ).toBeTruthy();
+    const asideLine = within(broadcast).getByText(
+      wholeText("Sending as Aside: Reviewer does not advertise BTW.")
+    );
+    expect(within(asideLine).getByRole("link", { name: "Reviewer" }).getAttribute("href")).toBe(
+      "/agents/reviewer-session/live"
+    );
     expect(within(broadcast).queryByText(/Excluded:/)).toBeNull();
     fireEvent.change(within(broadcast).getByRole("textbox", { name: "Broadcast message" }), {
       target: { value: "Report status." },
@@ -2146,7 +2171,9 @@ test("Restore draft keeps a mode the sender did not pick unpicked, so it still f
     fireEvent.click(within(sends).getByRole("button", { name: "Restore draft" }));
 
     expect(mode().value).toBe("aside");
-    expect(within(broadcast()).getByText(/^Sending as Aside: Reviewer/)).toBeTruthy();
+    expect(
+      within(broadcast()).getByText(wholeText("Sending as Aside: Reviewer does not advertise BTW."))
+    ).toBeTruthy();
     // Still the selection's: with only the Planner, which takes BTW, it is BTW again.
     fireEvent.click(within(region).getByRole("checkbox", { name: "Select Planner for broadcast" }));
     fireEvent.click(
@@ -2240,9 +2267,17 @@ test("a selected agent that went away does not change what Restore draft re-send
     expect(within(composer()).getByRole("heading", { level: 2 }).textContent).toBe(
       "Broadcast to 2 of 2 selected"
     );
-    expect(
-      within(composer()).getByTitle("Remove session:reviewer… from this broadcast").textContent
-    ).toBe("session:reviewer… ✕");
+    const chip = within(composer()).getByTitle("Remove session:reviewer… from this broadcast");
+    expect(chip.textContent).toBe("session:reviewer… ✕");
+    // The deselect button keeps the name; the agent's live link and its state sit beside it, the
+    // link outside the button.
+    const chipAgent = chip.closest("[data-agent-name]");
+    expect(chipAgent?.getAttribute("data-agent-state")).toBe("not-running");
+    const chipLive = within(chipAgent as HTMLElement).getByRole("link", {
+      name: "Open live conversation with session:reviewer…",
+    });
+    expect(chipLive.getAttribute("href")).toBe("/agents/reviewer-session/live");
+    expect(chip.contains(chipLive)).toBe(false);
     fireEvent.click(within(composer()).getByRole("button", { name: "Send to 2" }));
     await waitFor(() => expect(page.createBroadcast).toHaveBeenCalledTimes(2));
     expect(posted(page, 1)).toEqual(posted(page, 0));
@@ -2288,7 +2323,11 @@ test("a selected agent that came back is shown as not in the restored send, and 
       target: { value: "Still here?" },
     });
     expect(
-      within(composer()).getByText(/Excluded: Reviewer \(does not advertise BTW\)/)
+      within(composer()).getByText(
+        wholeText(
+          "Excluded: Reviewer (does not advertise BTW). Nothing is sent to them, and no other mode is substituted."
+        )
+      )
     ).toBeTruthy();
     fireEvent.click(within(composer()).getByRole("button", { name: "Send to 1" }));
     await waitFor(() => expect(page.createBroadcast).toHaveBeenCalledTimes(1));
@@ -2302,7 +2341,7 @@ test("a selected agent that came back is shown as not in the restored send, and 
     expect(within(composer()).getByRole("heading", { level: 2 }).textContent).toBe(
       "Broadcast to 1 of 2 selected"
     );
-    expect(within(composer()).getByText(notInTheSend)).toBeTruthy();
+    expect(within(composer()).getByText(wholeText(notInTheSend))).toBeTruthy();
     fireEvent.click(within(composer()).getByRole("button", { name: "Send to 1" }));
     await waitFor(() => expect(page.createBroadcast).toHaveBeenCalledTimes(2));
     expect(posted(page, 1)).toEqual(first);
@@ -2443,9 +2482,13 @@ test("Send says which of its reasons stops it, where that reason is shown, and t
     body = "Report status."
   ) => broadcastSendState(broadcastPlan(new Set(selected), live, delivery), delivery, body);
   const both = [planner.session_id, reviewer.session_id];
-  const tail = "Nothing is sent to them, and no other mode is substituted.";
+  const tail = ". Nothing is sent to them, and no other mode is substituted.";
+  // The line keeps each excluded session as an agent part, for `AgentName` to draw: by its
+  // registry title while it is listed, else by its ID.
+  const gone = (sessionId: string) => ({ sessionId, storedTitle: undefined });
+  const listed = (agent: Agent) => ({ sessionId: agent.session_id, storedTitle: agent.title });
   // Nobody reached: the label stops counting, and the Excluded line is the notice and the reason.
-  const nobody = (line: string) => ({
+  const nobody = (line: AgentPart[]) => ({
     label: "No recipient",
     notice: line,
     refusal: line,
@@ -2455,32 +2498,44 @@ test("Send says which of its reasons stops it, where that reason is shown, and t
   // Every selected session has left the registry: the line names each by its ID, and no mode
   // would help.
   expect(state(both, [], "btw")).toEqual(
-    nobody(
-      `Excluded: session:planner-… (no live session), session:reviewer… (no live session). ${tail}`
-    )
+    nobody([
+      "Excluded: ",
+      gone(planner.session_id),
+      " (no live session)",
+      ", ",
+      gone(reviewer.session_id),
+      " (no live session)",
+      tail,
+    ])
   );
   // One gone, one without the mode: each with its own cause, then the mode that reaches the
   // live one.
   expect(state(both, [reviewer], "btw")).toEqual(
-    nobody(
-      `Excluded: session:planner-… (no live session), Reviewer (does not advertise BTW). ${tail} Sending as Aside would reach 1 of them.`
-    )
+    nobody([
+      "Excluded: ",
+      gone(planner.session_id),
+      " (no live session)",
+      ", ",
+      listed(reviewer),
+      " (does not advertise BTW)",
+      `${tail} Sending as Aside would reach 1 of them.`,
+    ])
   );
   // The hint picks the mode that reaches the most: Aside reaches both, BTW only the Planner.
-  expect(state(both, agents, "steer").refusal).toMatch(
+  expect(state(both, agents, "steer").refusal?.at(-1)).toMatch(
     / Sending as Aside would reach 2 of them\.$/
   );
   // One session alone is "it"; a session advertising nothing gets no hint at all.
-  expect(state([reviewer.session_id], [reviewer], "btw").refusal).toMatch(
+  expect(state([reviewer.session_id], [reviewer], "btw").refusal?.at(-1)).toMatch(
     / Sending as Aside would reach it\.$/
   );
   expect(state([deaf.session_id], [deaf], "btw")).toEqual(
-    nobody(`Excluded: Deaf (does not advertise BTW). ${tail}`)
+    nobody(["Excluded: ", listed(deaf), " (does not advertise BTW)", tail])
   );
 
   // Someone reached: the label counts, and an Excluded line is context beside Send, never its
   // reason, with no hint since the mode reaches someone.
-  const reviewerLeftOut = `Excluded: Reviewer (does not advertise BTW). ${tail}`;
+  const reviewerLeftOut = ["Excluded: ", listed(reviewer), " (does not advertise BTW)", tail];
   expect(state(both, agents, "btw")).toEqual({
     label: "Send to 1",
     notice: reviewerLeftOut,
@@ -2491,7 +2546,7 @@ test("Send says which of its reasons stops it, where that reason is shown, and t
   expect(state(both, agents, "btw", "  ")).toEqual({
     label: "Send to 1",
     notice: reviewerLeftOut,
-    refusal: "Type a message first.",
+    refusal: ["Type a message first."],
     refusalOnNotice: false,
   });
   expect(state([planner.session_id], agents, "btw")).toEqual({
@@ -2516,8 +2571,8 @@ test("Send says which of its reasons stops it, where that reason is shown, and t
     )
   ).toEqual({
     label: "Send to 101",
-    notice: limit,
-    refusal: limit,
+    notice: [limit],
+    refusal: [limit],
     refusalOnNotice: true,
   });
 });

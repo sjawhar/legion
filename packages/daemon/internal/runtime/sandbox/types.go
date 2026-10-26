@@ -92,16 +92,15 @@ type Options struct {
 	// default (runtime.kubernetes.issue_volume, config.defaultIssueVolume when the file sets none).
 	IssueVolume resource.Quantity
 	Scheduling  Scheduling
-	// Resources are each role's container requirements, the controller's included: the daemon
-	// hands one for every role (config.DefaultResources fills what its file leaves out), and every
-	// container of every pod the runtime builds takes its role's — an issue pod's init containers
-	// the launching role's. At the defaults each cpu and memory request equals its limit, so every
-	// pod is Guaranteed; a role the deployment gives a lower request makes every pod holding its
-	// container Burstable. The image probe carries its own (ImageProbe.Resources). New refuses a
-	// map that lacks a role of claim.Roles or the controller, or whose entry is not a reservation:
-	// cpu and memory each a positive request no greater than its positive limit, and no other
-	// resource named but ephemeral storage (checkReservation).
-	Resources map[claim.Role]corev1.ResourceRequirements
+	// Resources are the two pods' requirements: every issue pod's one container and its two init
+	// containers carry Issue, the controller's pod's one container Controller. The daemon hands
+	// both (config.DefaultResources fills what its file leaves out). At
+	// the defaults each cpu and memory request equals its limit, so every pod is Guaranteed; a pod
+	// the deployment gives a lower request is Burstable. The image probe carries its own
+	// (ImageProbe.Resources). New refuses either when it is not a reservation: cpu and memory each a
+	// positive request no greater than its positive limit, ephemeral storage bounded the same way,
+	// and no other resource named (checkRequirements).
+	Resources PodResources
 	// StreamURL is the worker stream listener every pod's shim dials, tcp://host:port.
 	StreamURL string
 	// DaemonURL, EnvoyURL, and DispatchURL are the pane values LEGION_DAEMON_URL, ENVOY_URL, and
@@ -154,18 +153,19 @@ type Options struct {
 	// launch expects any disk to hold a session. Under postgres that file is the providers Secret
 	// key the pod and the image probe mount at ProvidersDir/OMP_SESSION_SQL_DSN, which the shim,
 	// seeing the pointer, never exports; under cloudsql-iam no pod mounts a session key at all —
-	// each role container's launcher is told the instance, database and login (sessionProxyFlags),
-	// proxies a socket of its own to Cloud SQL as the pod itself, and writes the URL file in the
+	// each pod's launcher container (an issue pod's `roles`, the controller pod's `controller`)
+	// is told the instance, database and login once (sessionProxyFlags), proxies a socket of each
+	// generation's own to Cloud SQL as the pod itself, and writes the URL file in that
 	// generation's private directory.
 	SessionStore ompsessions.Store
 	// Agent is the command the shim wraps, before the Oh My Pi arguments the runtime appends
 	// (`--extension <envoy plugin> --extension <legion plugin>`, `--resume`, `--mode rpc`,
 	// `--append-system-prompt`); Oh My Pi itself when nil.
 	Agent []string
-	// Setup is the deployment's setup command (runtime.kubernetes.setup), an argv every role's
-	// container runs before each start of its Oh My Pi — after a stale-plugin relaunch's install,
-	// in the container's working directory and with the environment Oh My Pi gets — through the
-	// start wrapper (startArgv); Oh My Pi starts only once it exits 0. Nil runs none.
+	// Setup is the deployment's setup command (runtime.kubernetes.setup), an argv each role runs
+	// before each start of its Oh My Pi — after a stale-plugin relaunch's install, in the role's
+	// working directory and with the environment Oh My Pi gets — through the start wrapper
+	// (startArgv); Oh My Pi starts only once it exits 0. Nil runs none.
 	Setup []string
 	// BootTimeout bounds each wait of a relaunch, its wait for the API server to answer one of its
 	// requests other than overloaded included (resend), and is how long a pod may stay unscheduled
@@ -211,6 +211,12 @@ type Options struct {
 	Now func() time.Time
 	// Log receives what the runtime decides without being asked; slog.Default() when nil.
 	Log *slog.Logger
+}
+
+// PodResources are the requirements of the two pods the runtime builds, each a whole pod's: an
+// issue pod's, whose one container runs every workflow role, and the project controller's.
+type PodResources struct {
+	Issue, Controller corev1.ResourceRequirements
 }
 
 // AgentSecrets is the secrets broker the runtime enrolls every pod with: the URL the

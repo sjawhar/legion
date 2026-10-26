@@ -63,6 +63,8 @@
 
 ### Fixed
 
+- `dispatch-first` now says to open a `dispatch ask` the moment a person blocks your work, and to
+  record every request you accept in Dispatch and read that record back before a turn ends.
 - The plugin's `legion/` copy of the `legion-architect` skill is regenerated with the same
   reference: its Wake routing table moves unchanged to
   `skill://legion-architect/references/wake-routing.md` (INFRA-376).
@@ -144,6 +146,17 @@
 
 ### Changed
 
+- The plugin ships `claude-envoy:dispatch-writing-specs` in place of
+  `claude-envoy:dispatch-brainstorming`: `skills/dispatch-writing-specs` links the
+  repository's new skill, and the old link is gone. The three Dispatch skills are under 2,000 words
+  together, and `dispatch` no longer has a `references/` directory; `pi-envoy`'s changelog lists
+  what each skill holds and which rules are gone. The bundled `dispatch` command (`dist/dispatch.js`,
+  `dist/envoy-channel.js`, `dist/session-hook.js`) prints the new notice after a primary spec with
+  no ask block: a person does not watch the session's chat, and sees its need only through an open
+  ask or a spec that waits for approval. `dispatch issue --spec` and `dispatch doc-edit` point at
+  `skill://dispatch-writing-specs`. After approval, `dispatch-writing-specs` makes a new version only
+  for a change to scope, acceptance, cost, risk or a person's decision, all in one version.
+
 - The bundled Dispatch tools (`dist/dispatch.js`, `dist/envoy-channel.js`, `dist/session-hook.js`)
   carry the 32,000-character body limit, up from 2,000 (INFRA-45): the `comment`, `suggest` and
   `message` bodies and `issue-update`'s closing `reason` accept that many characters, and their
@@ -191,7 +204,7 @@
 - A Legion phase worker can run on Claude Code (sjawhar/legion#2032). When `legion claude-bridge`
   launches Claude Code, the MCP server sees `LEGION_BOOT_TOKEN_FILE`, `LEGION_DAEMON_URL` and
   `CLAUDE_CONFIG_DIR`: it waits for the session's transcript, registers with the daemon (daemon API
-  contract 38, pinned in `package.json`'s `legion.daemonApiVersion`), claims the issue's Envoy role
+  contract 39, pinned in `package.json`'s `legion.daemonApiVersion`), claims the issue's Envoy role
   soft and reports ready, and readies again whenever it regains the role. A registration the daemon
   refuses stops Claude Code so the daemon relaunches it.
 - The MCP tool `legion` (`read_record`, `handoff_complete`, `request_backward_move`) serves the
@@ -211,6 +224,12 @@
 
 ### Changed
 
+- The plugin declares daemon API contract 39 in `package.json`'s `legion.daemonApiVersion`
+  (INFRA-208): under the Kubernetes runtime an issue pod runs one container, `roles`, whose
+  launcher runs every role, and `runtime.kubernetes.resources` in `GET /legion/v1/state`'s
+  `settings` is `{issue, controller}`; nothing this plugin reads or writes moved, and
+  `dist/envoy-channel.js`, which embeds the number, is rebuilt; a session of it registers with a
+  daemon at 39.
 - The plugin declares daemon API contract 35 in `package.json`'s `legion.daemonApiVersion`
   (LEGION-791): `GET /legion/v1/state` carries `settings`, the daemon's resolved `legion.yaml` with
   every credential, credential source and credential file path left out and a URL's userinfo masked

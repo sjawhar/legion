@@ -50,14 +50,13 @@ import {
   textSecondaryHoverToPrimary,
   textSecondaryOnSurface,
 } from "../../theme/classes";
-import { useAgents } from "../conversation/useAgents";
 import { ApprovalChip } from "../doc/ApprovalChip";
 import { waitingOnHuman } from "../inbox/BlockedOnYou";
 import { issueStatuses, openIssueStatuses, statusLabel } from "../project/board-model";
-import { actorLabel } from "../refs/actor";
+import { AgentName, useAgentText } from "../refs/AgentName";
 import { CopyRefButton } from "../refs/CopyRefButton";
 import { ReferencedBy, ReferencedByToggle } from "../refs/ReferencedBy";
-import { buildDispatchReference, buildIssuePath } from "../refs/routes";
+import { buildDispatchReference, buildIssuePath, sessionOfAddress } from "../refs/routes";
 import { useKeymap } from "../shell/keymap";
 import { AssigneeControl } from "./AssigneeControl";
 import { ClaimChip } from "./ClaimChip";
@@ -151,8 +150,7 @@ export function IssueHeader({
   }, [rail]);
   const [subscribersOpen, setSubscribersOpen] = useState(false);
   const [referencesOpen, setReferencesOpen] = useState(false);
-  const { titles: agentTitles } = useAgents(issue.created_by?.kind === "session");
-  const openedBy = issue.created_by == null ? null : actorLabel(issue.created_by, agentTitles);
+  const agentText = useAgentText();
   const subscribers = useQuery({
     queryKey: ["subscribers", issue.key],
     queryFn: () => api.getIssueSubscribers(issue.key),
@@ -299,7 +297,28 @@ export function IssueHeader({
     apiErrorCodeIn(updateIssue.error, titleRefusals)
       ? updateIssue.error.message
       : null;
-  const routeLabel = `Messages default to ${drafts.route === "" ? "no route" : drafts.route}`;
+  // A `session:` route is an agent: its button names it as `AgentName` does, with the agent's own
+  // live link beside it. A role route is its address.
+  const routeSession = sessionOfAddress(drafts.route);
+  const routeLabel = `Messages default to ${
+    drafts.route === ""
+      ? "no route"
+      : routeSession === undefined
+        ? drafts.route
+        : agentText.sessionText(routeSession, undefined)
+  }`;
+  const routeButton = (name: ReactNode) => (
+    <button
+      aria-label={routeLabel}
+      className={`inline-flex min-h-11 max-w-[14ch] shrink-0 items-center truncate rounded-full px-3 py-2 text-left text-sm outline-none focus-visible:ring-2 xl:px-2 ${surfaceMutedStrongBg} ${textSecondaryOnSurface} ${textSecondaryHoverToPrimary} ${focusVisibleRing}`}
+      disabled={isClosed}
+      onClick={() => setRouteEditing(true)}
+      title={drafts.route === "" ? undefined : drafts.route}
+      type="button"
+    >
+      <TruncatedText>{name}</TruncatedText>
+    </button>
+  );
   const issueReference = buildDispatchReference({ key: issue.key, kind: "issue" });
   const referencesPanelId = useId();
   // The title slot has one flex-basis whether it shows the heading or the editor: below 2xl the
@@ -537,11 +556,14 @@ export function IssueHeader({
               {whoseTurn}
             </span>
           )}
-          {openedBy === null ? null : (
+          {issue.created_by == null ? null : (
             <div className={`flex shrink-0 items-center gap-2 text-sm ${textSecondaryOnSurface}`}>
               <span className="font-medium">Opened by:</span>
-              <span className="shrink-0 whitespace-nowrap" title={openedBy}>
-                {openedBy}
+              <span
+                className="shrink-0 whitespace-nowrap"
+                title={agentText.label(issue.created_by)}
+              >
+                <AgentName actor={issue.created_by} inline />
               </span>
             </div>
           )}
@@ -562,16 +584,17 @@ export function IssueHeader({
               <span aria-describedby="issue-route-hint" className="font-medium" title={routeHint}>
                 Message route:
               </span>
-              <button
-                aria-label={routeLabel}
-                className={`inline-flex min-h-11 max-w-[14ch] shrink-0 items-center truncate rounded-full px-3 py-2 text-left text-sm outline-none focus-visible:ring-2 xl:px-2 ${surfaceMutedStrongBg} ${textSecondaryOnSurface} ${textSecondaryHoverToPrimary} ${focusVisibleRing}`}
-                disabled={isClosed}
-                onClick={() => setRouteEditing(true)}
-                title={drafts.route === "" ? undefined : drafts.route}
-                type="button"
-              >
-                <TruncatedText>{drafts.route === "" ? "No route" : drafts.route}</TruncatedText>
-              </button>
+              {routeSession === undefined ? (
+                routeButton(drafts.route === "" ? "No route" : drafts.route)
+              ) : (
+                <AgentName
+                  className="inline-flex shrink-0 items-center"
+                  control={routeButton}
+                  kind="control"
+                  sessionId={routeSession}
+                  storedTitle={undefined}
+                />
+              )}
             </div>
           )}
           <button

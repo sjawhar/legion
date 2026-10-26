@@ -26,8 +26,8 @@ import { asUser } from "./users";
 // complete read to a refilling one in place, keeping the rows they had; assertions on those two
 // pages wait for that poll with `POLL_TIMEOUT`. The other views read again on a reload or a Retry.
 // A failed read surfaces only after the shared retry policy's two retries 500 ms apart
-// (`web/src/main.tsx`), well inside the default expect timeout. Liveness dots are found by their
-// titles (`Live`, `Not live`, `Liveness unknown`), the hook the other follower rows use.
+// (`web/src/main.tsx`), well inside the default expect timeout. Running-state marks are found by
+// their accessible names (`Running`, `Not running`, `Running state unknown`: `AgentName`'s mark).
 
 const REFILLING = "The agent list is refilling. Try again in a moment.";
 // One 15 s poll, its two retries and a margin, measured from whenever the state flipped.
@@ -118,7 +118,7 @@ async function expectNoAbsenceClaim(page: Page): Promise<void> {
   await expect(page.getByText(/may have ended/)).toHaveCount(0);
   await expect(page.getByRole("button", { name: /^Subscribers: \d/ })).toHaveCount(0);
   await expect(page.getByRole("button", { name: /^Reaches \d/ })).toHaveCount(0);
-  await expect(page.locator("[title='Not live']")).toHaveCount(0);
+  await expect(page.getByRole("img", { exact: true, name: "Not running" })).toHaveCount(0);
   await expect(page.getByTestId("issue-route-unreachable")).toHaveCount(0);
 }
 
@@ -197,7 +197,9 @@ async function expectFreshViewsRefilling(page: Page, fixture: RefillFixture): Pr
   const toggle = recipients.getByRole("button", { name: "Recipients", exact: true });
   await toggle.click();
   await expect(
-    recipients.getByRole("list", { name: "Followers" }).locator("[title='Liveness unknown']")
+    recipients
+      .getByRole("list", { name: "Followers" })
+      .getByRole("img", { exact: true, name: "Running state unknown" })
   ).toHaveCount(1);
   await expectNoAbsenceClaim(page);
   await expectNoUnreachableWording(page);
@@ -243,7 +245,7 @@ test("a list that starts refilling after a complete read claims no agent absent,
     await page.goto(documentPath);
     const subscribed = page.getByRole("region", { name: "Subscribed agents" });
     await expect(subscribed.getByText(watcher.title, { exact: true })).toBeVisible();
-    await expect(subscribed.locator("[title='Live']")).toHaveCount(1);
+    await expect(subscribed.getByRole("img", { exact: true, name: "Running" })).toHaveCount(1);
     await page.goto("/");
     const recipients = askRecipients(page, fixture.askId);
     await expect(recipients.getByRole("button", { name: "Reaches 2" })).toBeVisible();
@@ -299,7 +301,9 @@ test("a list that starts refilling after a complete read claims no agent absent,
 
     await page.goto(documentPath);
     await expect(
-      page.getByRole("region", { name: "Subscribed agents" }).locator("[title='Live']")
+      page
+        .getByRole("region", { name: "Subscribed agents" })
+        .getByRole("img", { exact: true, name: "Running" })
     ).toHaveCount(1);
     await expectNoRefillingWording(page);
   } finally {
@@ -337,12 +341,14 @@ test("an empty list that starts refilling never says nobody is connected", async
     const page = await alice.newPage();
     await page.goto(documentPath);
     await expect(
-      page.getByRole("region", { name: "Subscribed agents" }).locator("[title='Not live']")
+      page
+        .getByRole("region", { name: "Subscribed agents" })
+        .getByRole("img", { exact: true, name: "Not running" })
     ).toHaveCount(1);
     await page.goto("/");
     const recipients = askRecipients(page, fixture.askId);
     await recipients.getByRole("button", { name: "Reaches 2" }).click();
-    await expect(recipients.locator("[title='Not live']")).toHaveCount(2);
+    await expect(recipients.getByRole("img", { exact: true, name: "Not running" })).toHaveCount(2);
     await openProjectList(page, fixture.issueKey);
     await expect(page.getByTestId("issue-route-unreachable")).toHaveCount(1);
     await openProjectBoard(page, fixture.issueKey);
@@ -473,7 +479,9 @@ test("a listener that cannot answer reads as unreachable on every view, never as
     ).toBeVisible();
     await recipients.getByRole("button", { name: "Recipients", exact: true }).click();
     await expect(
-      recipients.getByRole("list", { name: "Followers" }).locator("[title='Liveness unknown']")
+      recipients
+        .getByRole("list", { name: "Followers" })
+        .getByRole("img", { exact: true, name: "Running state unknown" })
     ).toHaveCount(1);
     await expectNoRefillingWording(page);
     await expectNoAbsenceClaim(page);

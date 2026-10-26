@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 
-import type { Agent, MessageDeliveryMode } from "../../api/types";
+import type { Actor, Agent, MessageDeliveryMode } from "../../api/types";
 import {
   secondaryButtonBorder,
   secondaryButtonText,
@@ -8,6 +8,7 @@ import {
   textMutedOnSurface,
   textPrimaryOnSurface,
 } from "../../theme/classes";
+import { type AgentPart, AgentParts } from "../refs/AgentName";
 import { Timestamp } from "../refs/Timestamp";
 import type { DwellRef } from "../shell/useDwell";
 import { duplicateText, failureGuidance, isSafeRetry, MODE_LABELS, withGuidance } from "./delivery";
@@ -50,7 +51,9 @@ export interface TargetedMessageAttempt {
   readonly duplicate?: boolean;
   readonly error?: string | null;
   readonly state: "pending" | "sent" | "failed";
-  readonly targetName?: string;
+  /** The session this attempt reached (an agent part, so it is drawn by `AgentName`), else the
+   *  address it was aimed at; a role address is text. */
+  readonly targetName?: AgentPart;
 }
 
 /** Whether the session took a targeted message as its user's own turn: its latest attempt says
@@ -62,7 +65,8 @@ export function takenAsUserTurn(deliveries: readonly TargetedMessageAttempt[]): 
 
 /** The headline one targeted message gets: who answered it, that it reached the session's own
  *  conversation, why it failed, that it is still going out, that it is a BTW waiting on an
- *  answer, or that it was delivered, naming the mode as the composer does (`MODE_LABELS`).
+ *  answer, or that it was delivered, naming the mode as the composer does (`MODE_LABELS`). It is
+ *  `AgentPart`s, so the agents it names keep their identity until `AgentParts` draws them.
  *  `asking` is that BTW branch, whose line ends in a separator because it carries a timestamp:
  *  the two belong to one decision, so the caller reads it here rather than restating the
  *  condition.
@@ -71,15 +75,16 @@ export function takenAsUserTurn(deliveries: readonly TargetedMessageAttempt[]): 
  *  when the send that carried it changed nothing, so the human must keep seeing that one is
  *  expected. */
 function deliveryHeadline(
-  answeredBy: string | undefined,
+  answeredBy: Actor | undefined,
   delivery: TargetedMessageAttempt | undefined,
-  targetName: string,
+  targetName: AgentPart,
   retryRow: boolean
-): { text: string; asking: boolean } {
-  if (answeredBy !== undefined) return { text: `Answered by ${answeredBy}`, asking: false };
+): { parts: AgentPart[]; asking: boolean } {
+  if (answeredBy !== undefined)
+    return { parts: ["Answered by ", { actor: answeredBy }], asking: false };
   if (delivery?.acceptedAs === "user_turn") {
     return {
-      text: `Delivered to ${targetName}'s conversation (${MODE_LABELS[delivery.delivery]})`,
+      parts: ["Delivered to ", targetName, `'s conversation (${MODE_LABELS[delivery.delivery]})`],
       asking: false,
     };
   }
@@ -87,24 +92,29 @@ function deliveryHeadline(
     const cause = `Failed: ${delivery.error ?? "delivery failed"}`;
     // Each sentence names a control in the retry row, so it is said only while that row is shown.
     const guidance = retryRow ? failureGuidance(delivery, "card") : undefined;
-    return { text: guidance === undefined ? cause : withGuidance(cause, guidance), asking: false };
+    return {
+      parts: [guidance === undefined ? cause : withGuidance(cause, guidance)],
+      asking: false,
+    };
   }
   const mode = delivery?.delivery ?? "steer";
   if (delivery?.state === "pending")
-    return { text: `Sending to ${targetName} (${MODE_LABELS[mode]})`, asking: false };
-  if (mode === "btw") return { text: `Asking ${targetName} (${MODE_LABELS.btw}) ·`, asking: true };
-  if (delivery?.duplicate === true) return { text: duplicateText, asking: false };
-  return { text: `Sent to ${targetName} (${MODE_LABELS[mode]})`, asking: false };
+    return { parts: ["Sending to ", targetName, ` (${MODE_LABELS[mode]})`], asking: false };
+  if (mode === "btw") {
+    return { parts: ["Asking ", targetName, ` (${MODE_LABELS.btw}) ·`], asking: true };
+  }
+  if (delivery?.duplicate === true) return { parts: [duplicateText], asking: false };
+  return { parts: ["Sent to ", targetName, ` (${MODE_LABELS[mode]})`], asking: false };
 }
 
-/** One earlier attempt's line: what it did, and the name its own target resolved to when it
- *  was made, which a later role hand-off does not change. An earlier attempt is never what
- *  Retry re-sends, so it never carries the safe-retry promise. */
-function attemptSummary(attempt: TargetedMessageAttempt, targetName: string): string {
-  if (attempt.state === "failed") return `Failed: ${attempt.error ?? "delivery failed"}`;
-  if (attempt.duplicate === true) return duplicateText;
+/** One earlier attempt's line: what it did, and the session it reached when it was made, which
+ *  a later role hand-off does not change. An earlier attempt is never what Retry re-sends, so it
+ *  never carries the safe-retry promise. */
+function attemptSummary(attempt: TargetedMessageAttempt, targetName: AgentPart): AgentPart[] {
+  if (attempt.state === "failed") return [`Failed: ${attempt.error ?? "delivery failed"}`];
+  if (attempt.duplicate === true) return [duplicateText];
   const verb = attempt.state === "pending" ? "Sending" : "Sent";
-  return `${verb} to ${attempt.targetName ?? targetName} (${MODE_LABELS[attempt.delivery]})`;
+  return [`${verb} to `, attempt.targetName ?? targetName, ` (${MODE_LABELS[attempt.delivery]})`];
 }
 
 /** What became of a targeted message: answered, taken into the session's conversation as the
@@ -117,24 +127,26 @@ export function DeliveryStatus({
   retryRow = false,
   targetName,
 }: {
-  answeredBy?: string;
+  /** The session that answered, once one did. */
+  answeredBy?: Actor;
   deliveries: readonly TargetedMessageAttempt[];
   retryRow?: boolean;
-  targetName: string;
+  /** Who the message went to: the session its newest attempt reached, else its address. */
+  targetName: AgentPart;
 }): ReactNode {
   const delivery = deliveries.at(-1);
   const headline = deliveryHeadline(answeredBy, delivery, targetName, retryRow);
   return (
     <>
       <p className={`mt-2 text-sm font-semibold ${textPrimaryOnSurface}`}>
-        {headline.text}
+        <AgentParts parts={headline.parts} />
         {headline.asking ? <Timestamp at={delivery?.createdAt ?? ""} /> : null}
       </p>
       {deliveries.length > 1 ? (
         <div className={`mt-2 flex flex-col gap-1 text-xs ${textMutedOnSurface}`}>
           {deliveries.slice(0, -1).map((attempt) => (
             <span key={attempt.attempt}>
-              Attempt {attempt.attempt}: {attemptSummary(attempt, targetName)}
+              Attempt {attempt.attempt}: <AgentParts parts={attemptSummary(attempt, targetName)} />
             </span>
           ))}
         </div>
@@ -170,7 +182,7 @@ export function DeliveryRetry({
   latest: TargetedMessageAttempt | undefined;
   onRetry: (delivery: MessageDeliveryMode) => void;
   retrying: boolean;
-  targetName: string;
+  targetName: AgentPart;
 }): ReactNode {
   const mode = latest?.delivery ?? "steer";
   const sameModeRetry = latest !== undefined && isSafeRetry(latest);
@@ -193,7 +205,7 @@ export function DeliveryRetry({
           </button>
           {supports[mode] ? null : (
             <p className={`mt-1 text-xs ${textMutedOnSurface}`}>
-              {targetName} does not support {MODE_LABELS[mode]}.
+              <AgentParts parts={[targetName, ` does not support ${MODE_LABELS[mode]}.`]} />
             </p>
           )}
         </div>
@@ -210,7 +222,7 @@ export function DeliveryRetry({
           </button>
           {canBtw ? null : (
             <p className={`mt-1 text-xs ${textMutedOnSurface}`}>
-              {targetName} does not support {MODE_LABELS.btw}.
+              <AgentParts parts={[targetName, ` does not support ${MODE_LABELS.btw}.`]} />
             </p>
           )}
         </div>
@@ -227,8 +239,13 @@ export function DeliveryRetry({
           </button>
           {canSteer ? null : (
             <p className={`mt-1 text-xs ${textMutedOnSurface}`}>
-              {targetName} does not support {MODE_LABELS.steer}
-              {canBtw ? ` — use ${MODE_LABELS.btw}.` : "."}
+              <AgentParts
+                parts={[
+                  targetName,
+                  ` does not support ${MODE_LABELS.steer}`,
+                  canBtw ? ` — use ${MODE_LABELS.btw}.` : ".",
+                ]}
+              />
             </p>
           )}
         </div>
@@ -238,8 +255,8 @@ export function DeliveryRetry({
 }
 
 interface TargetedMessageCardProps {
-  /** Who answered the message, once a session did; the card then reads "Answered by". */
-  readonly answeredBy?: string;
+  /** The session that answered the message, once one did; the card then reads "Answered by". */
+  readonly answeredBy?: Actor;
   readonly body: ReactNode;
   readonly canAside: boolean;
   readonly canBtw: boolean;
@@ -254,7 +271,8 @@ interface TargetedMessageCardProps {
   readonly replyDisabled?: boolean;
   readonly register?: DwellRef;
   readonly retrying?: boolean;
-  readonly targetName: string;
+  /** Who the message went to (`DeliveryStatus`). */
+  readonly targetName: AgentPart;
   /** The replies beneath the message - the answer and every follow-up - as a nested list. */
   readonly thread?: ReactNode;
   readonly turnID: string;

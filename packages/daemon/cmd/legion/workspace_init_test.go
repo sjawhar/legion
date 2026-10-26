@@ -429,7 +429,7 @@ func TestWorkspaceInitRefusesBeforeTouchingTheVolume(t *testing.T) {
 // still GitHub's, and the issue's jj workspace on its bookmark, the clone's credential helper the
 // one named, no gh shim and no tmux pane's `legion` launcher on the volume (a pod's PATH names the
 // image's gh and legion, and its credential is the gh files its role Secret projects), one log
-// line naming the workspace, and no sessions directory: no role container mounts one, every
+// line naming the workspace, and no sessions directory: no container of the pod mounts one, every
 // session being a row in the database the deployment names (INFRA-80). The permanent
 // guard on the pod path: a recording `codegraph` stub is first on PATH throughout, and this
 // container must never call it (#1647) — only a synchronous warm-up regressing back onto the init
@@ -535,7 +535,7 @@ func (v *issueVolume) provisioned(t *testing.T, issue string) string {
 // A git or jj process interrupted mid-write leaves its lock beside the file it was writing, and
 // every later git or jj write to that file fails on it until someone deletes it (LEGION-731: a
 // worktree's index.lock failed every provisioning of an issue's pods with "Could not acquire lock
-// for index file"). provision runs before any role container of the issue's pod starts, on a
+// for index file"). provision runs before the issue pod's launcher container starts, on a
 // volume no other pod mounts, so nothing can hold a lock there: it removes the workspace's stale
 // index.lock, logging its path and age, and the update-stale that failed on it succeeds.
 func TestWorkspaceInitRemovesTheWorkspacesStaleIndexLock(t *testing.T) {

@@ -550,7 +550,10 @@ type Artifact struct {
 }
 
 // ArtifactReview is one human review of a document, pinned to the version it was
-// given on: an approval, or a request for changes with a reason.
+// given on: an approval, or a request for changes with a reason. EventSeq is the
+// sequence of the artifact.* event the review appended on its document's owner, nil
+// for a review recorded before Dispatch kept it; the approval read returns it as
+// ArtifactApproval.Seq, and the review list does not carry it.
 type ArtifactReview struct {
 	ID         string    `json:"id"`
 	ArtifactID string    `json:"artifact_id"`
@@ -560,6 +563,7 @@ type ArtifactReview struct {
 	Reason     *string   `json:"reason"`
 	AskID      *string   `json:"ask_id"`
 	CreatedAt  time.Time `json:"created_at"`
+	EventSeq   *int64    `json:"-"`
 }
 
 // ArtifactApproval is a document's approval state as of its latest version:
@@ -568,13 +572,20 @@ type ArtifactReview struct {
 // version), or changes_requested (the latest review asks for changes). An
 // awaiting approval carries its request's WaitingOn: agent once a version moved
 // the request past the one its agent handed to the human, or a reply left it with
-// the agent; human otherwise (the ask reads' waiting_on).
+// the agent; human otherwise (the ask reads' waiting_on). Seq is the latest
+// review's event sequence on the document's owner, absent for a review recorded
+// before Dispatch kept it and on every read the release before that serves during
+// a rollout or a rollback, so a missing Seq does not prove an older review: the
+// owner's row lock orders its events as they commit, so Seq places the review
+// among them where At, its transaction's start, cannot. Seq orders; Version, not
+// Seq, says which version the review covers.
 type ArtifactApproval struct {
 	State         string  `json:"state"`
 	LatestVersion int     `json:"latest_version"`
 	Version       *int    `json:"version,omitempty"`
 	By            *Actor  `json:"by,omitempty"`
 	At            *string `json:"at,omitempty"`
+	Seq           *int64  `json:"seq,omitempty"`
 	Reason        *string `json:"reason,omitempty"`
 	AskID         *string `json:"ask_id,omitempty"`
 	RequestedBy   *Actor  `json:"requested_by,omitempty"`
@@ -840,10 +851,14 @@ type AskLastReply struct {
 // AskEventPayload is the wire payload of every `ask.*` event that carries the ask row: the ask
 // itself, flat, plus what the write moved in the reference graph. NewAskEventPayload is the only
 // way to build one, and it takes the changes, so a producer whose question text can cite
-// something cannot append an event that stays silent about it.
+// something cannot append an event that stays silent about it. Restored marks the `ask.opened` or
+// `ask.answered` settlement appends when a person's edit restores a decision block it retracted:
+// the ask returns to the state it had, and the event records no new answer (an `ask.answered`
+// restore carries the answer given before the retraction, credited to the editor who restored it).
 type AskEventPayload struct {
 	Ask
 	ReferenceChangesPayload
+	Restored bool `json:"restored,omitempty"`
 }
 
 // NewReferenceChangesPayload states what a write moved on a typed event payload.

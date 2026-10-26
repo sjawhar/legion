@@ -254,7 +254,7 @@ test("the agent transcript renders the viewer's turn, another sender's turn and 
       content: [{ text: FIXTURE, type: "text" }],
       createdAt: new Date("2026-09-10T00:00:01Z"),
       id: "u2",
-      metadata: dispatchMetadata({ author: "Planner" }),
+      metadata: dispatchMetadata({ author: { actor: { id: "bob", kind: "user" } } }),
       role: "user",
     },
     {
@@ -429,14 +429,16 @@ test("a reply quote renders the quoted parent formatted on one line after the ap
   const getIssue = spyOn(api, "getIssue").mockResolvedValue(issue);
   const view = render(
     <Providers>
-      <ReplyQuote author="Planner" excerpt={FIXTURE} to="/issues/CORE-1/messages/message-1" />
+      <ReplyQuote author={undefined} excerpt={FIXTURE} to="/issues/CORE-1/messages/message-1" />
     </Providers>
   );
   try {
     // The quote is a link holding links (the body's own); it is found by its own words.
-    const quote = await within(view.container).findByRole("link", { name: /^Replying to Planner/ });
+    const quote = await within(view.container).findByRole("link", {
+      name: /^Replying to a message/,
+    });
     await waitFor(() => expect(quote.textContent).toContain("Design decision"));
-    expect(quote.textContent?.startsWith("Replying to Planner — ")).toBe(true);
+    expect(quote.textContent?.startsWith("Replying to a message — ")).toBe(true);
     const body = quote.querySelector<HTMLElement>("[data-markdown-preview]");
     if (body === null) throw new Error("the quote is not a MarkdownPreview");
     expectFormatted(body);
@@ -678,7 +680,7 @@ describe("a Dispatch picture on every surface", () => {
         content: [{ text: PICTURE, type: "text" }],
         createdAt: new Date("2026-09-10T00:00:02Z"),
         id: "u2",
-        metadata: dispatchMetadata({ author: "Planner" }),
+        metadata: dispatchMetadata({ author: { actor: { id: "bob", kind: "user" } } }),
         role: "user",
       },
       {
@@ -798,16 +800,16 @@ describe("a Dispatch picture on every surface", () => {
   test("a reply quote shows it in the quoted parent as a thumbnail beside its caption", async () => {
     const view = render(
       <Providers>
-        <ReplyQuote author="Planner" excerpt={PICTURE} to="/issues/CORE-1/messages/message-1" />
+        <ReplyQuote author={undefined} excerpt={PICTURE} to="/issues/CORE-1/messages/message-1" />
       </Providers>
     );
     try {
       const quote = await within(view.container).findByRole("link", {
-        name: /^Replying to Planner/,
+        name: /^Replying to a message/,
       });
       const body = quote.querySelector<HTMLElement>("[data-markdown-preview]");
       if (body === null) throw new Error("the quote is not a MarkdownPreview");
-      await expectThumbnail(body, "inert", `Replying to Planner — ${PICTURE_WORDS}`);
+      await expectThumbnail(body, "inert", `Replying to a message — ${PICTURE_WORDS}`);
       expectOneLine(body);
     } finally {
       view.unmount();

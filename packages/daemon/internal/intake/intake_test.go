@@ -205,6 +205,14 @@ func TestCommitScopedIsTrueOnlyWithinWithCommitHooks(t *testing.T) {
 
 func TestDecodeCapturedProducerEnvelopes(t *testing.T) {
 	updatedAt := time.Date(2026, 9, 23, 0, 0, 0, 0, time.UTC)
+	// mark is a captured Dispatch event's place in its issue's log: its seq and created_at.
+	mark := func(seq int64, at string) record.EventMark {
+		created, err := time.Parse(time.RFC3339Nano, at)
+		if err != nil {
+			t.Fatalf("parse captured created_at %q: %v", at, err)
+		}
+		return record.EventMark{Seq: seq, At: created}
+	}
 	cases := []struct {
 		name    string
 		subject string
@@ -233,19 +241,20 @@ func TestDecodeCapturedProducerEnvelopes(t *testing.T) {
 			name:    "Dispatch artifact version",
 			subject: "notifications.dispatch.issue.CAPTURE-4.artifact.version",
 			file:    "dispatch/artifact-version.json",
-			want:    DispatchArtifact{Key: "CAPTURE-4", ArtifactID: "0544d460-0931-4374-b20b-790408519edd", Kind: DispatchArtifactVersion, Version: 2},
+			want:    DispatchArtifact{Key: "CAPTURE-4", ArtifactID: "0544d460-0931-4374-b20b-790408519edd", Kind: DispatchArtifactVersion, Version: 2, Mark: mark(2, "2026-09-23T00:46:19.000081Z")},
 		},
 		{
 			name:    "Dispatch artifact approved",
 			subject: "notifications.dispatch.issue.CAPTURE-4.artifact.approved",
 			file:    "dispatch/artifact-approved.json",
-			want:    DispatchArtifact{Key: "CAPTURE-4", ArtifactID: "0544d460-0931-4374-b20b-790408519edd", Kind: DispatchArtifactApproved, Version: 2},
+			want:    DispatchArtifact{Key: "CAPTURE-4", ArtifactID: "0544d460-0931-4374-b20b-790408519edd", Kind: DispatchArtifactApproved, Version: 2, Mark: mark(5, "2026-09-23T00:46:26.997872Z")},
 		},
 		{
 			name:    "Dispatch artifact changes requested",
 			subject: "notifications.dispatch.issue.CAPTURE-3.artifact.changes_requested",
 			file:    "dispatch/artifact-changes-requested.json",
-			want:    DispatchArtifact{Key: "CAPTURE-3", ArtifactID: "e7860036-ca1a-4ec6-8bd0-51d5f1b6fbd8", Kind: DispatchArtifactChangesRequested, Version: 2, Reason: "Captured reviewer reason"},
+			want: DispatchArtifact{Key: "CAPTURE-3", ArtifactID: "e7860036-ca1a-4ec6-8bd0-51d5f1b6fbd8", Kind: DispatchArtifactChangesRequested, Version: 2, Reason: "Captured reviewer reason",
+				Mark: mark(7, "2026-09-23T00:45:50.37209Z")},
 		},
 		{
 			name:    "pull request opened",
