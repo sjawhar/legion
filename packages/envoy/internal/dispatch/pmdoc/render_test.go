@@ -557,6 +557,9 @@ func TestRenderWritesEachImageFieldSoItReadsBackAsHeld(t *testing.T) {
 		// as a block's, a delimiter row under a wider line.
 		"a\n+\nz", "a\n*\nz", "a\n-\nz", "a\n+ \nz", "a\n<div", "a\n<pre", "a\n<div\"x\nz", "a\n<pre/\nz",
 		"a\n<div/>\nz", "a\n<pre>\nz", "a\n<div >\nz", "a | b\n| - |\nz", "a | b\n-:\nz", "a\n| |\n*\nz",
+		// The fuzz corpus's (fuzz.ts): a backtick run whose info holds a backtick, a fence of tildes
+		// whose info holds one, a self-closing tag followed by an indented definition.
+		"a\n``` a`b\nz", "a\n``` a`b", "a\n~~~ a`b\nz", "a\n```` x`\nz", "a\n<b/>\n [l]: /u\nz",
 	}
 	titles := []string{`"`, `say "hi"`, `\"`, `a\"b`, "'", `"\`, `a"`}
 	image := func(src string, title any, link, linkTitle any) *Node {
@@ -577,6 +580,9 @@ func TestRenderWritesEachImageFieldSoItReadsBackAsHeld(t *testing.T) {
 		{"an ordered list item", "1. ![x](i.png)\n", []int{0, 0, 0}, []string{"ordered_list", "list_item", "paragraph"}},
 		{"a block quote", "> ![x](i.png)\n", []int{0, 0}, []string{"blockquote", "paragraph"}},
 		{"a list item in a block quote", "> - ![x](i.png)\n", []int{0, 0, 0, 0}, []string{"blockquote", "bullet_list", "list_item", "paragraph"}},
+		{"a task item", "- [ ] ![x](i.png)\n", []int{0, 0, 0}, []string{"bullet_list", "list_item", "paragraph"}},
+		{"a nested list item", "- a\n  - ![x](i.png)\n", []int{0, 0, 1, 0, 0}, []string{"bullet_list", "list_item", "bullet_list", "list_item", "paragraph"}},
+		{"a block quote in a list item", "- > ![x](i.png)\n", []int{0, 0, 1, 0}, []string{"bullet_list", "list_item", "blockquote", "paragraph"}},
 		{"a typed block", ":::callout{#callout-1 kind=\"note\"}\n![x](i.png)\n:::\n", []int{0, 0}, []string{"callout", "paragraph"}},
 		{"a footnote definition", "[^1]\n\n[^1]: ![x](i.png)\n", []int{1, 0}, []string{"footnote_definition", "paragraph"}},
 	}
@@ -683,7 +689,7 @@ func TestRenderWritesEachImageFieldSoItReadsBackAsHeld(t *testing.T) {
 		})
 		return image
 	}
-	compared, rewritten := 0, []string(nil)
+	compared := 0
 	for index, test := range rows {
 		t.Run(test.name, func(t *testing.T) {
 			markdown := markdowns[index]
@@ -715,22 +721,12 @@ func TestRenderWritesEachImageFieldSoItReadsBackAsHeld(t *testing.T) {
 				return
 			}
 			compared++
-			// A title line the allow-list does not admit (rawTitleLinesHold) is written `&#10;`
-			// though the base's raw line feed reads back as held in both readers: such a row is
-			// the allow-list's churn, counted and named apart; any other difference fails.
 			if markdown != test.base {
-				if strings.ReplaceAll(markdown, "&#10;", "\n") != test.base {
-					t.Errorf("Render() = %q, want the base's bytes %q, which read back as held", markdown, test.base)
-					return
-				}
-				rewritten = append(rewritten, test.name)
+				t.Errorf("Render() = %q, want the base's bytes %q, which read back as held", markdown, test.base)
 			}
 		})
 	}
-	t.Logf("%d rows; the base's bytes read back as held in %d of them, and are the writer's in all but %d, whose title lines the allow-list writes `&#10;`", len(rows), compared, len(rewritten))
-	for _, name := range rewritten {
-		t.Logf("allow-list rewrite: %s", name)
-	}
+	t.Logf("%d rows; the base's bytes read back as held, and are the writer's, in %d of them", len(rows), compared)
 	// A title's line feed is written as it is in a paragraph, a list item and a block quote, as the
 	// server stores it, and as `&#10;` in a heading and a table cell, whose line it would end, and
 	// where a blank line would end the paragraph.

@@ -97,7 +97,8 @@ func delimiterRowWidth(line string) (int, bool) {
 //     a thematic break as three or more of one of `-*_` and blanks alone, and outside a lazy line
 //     a setext underline as `=`s or `-`s alone; a table's delimiter row (`-`, `:` and `|` lines)
 //     is judged under its header (makesTable);
-//   - three backticks or tildes open a fence;
+//   - three or more backticks or tildes open a fence, a backtick fence only where its info string
+//     holds no backtick (fenceOpens);
 //   - `>` opens a quote, and a directive line, past any white space it opens with, is refused or
 //     closes a typed block (directiveLineOpens);
 //   - `[^label]:` opens a footnote definition; a link reference definition cannot interrupt a
@@ -123,7 +124,7 @@ func opensAsText(line string, lazy, inTyped bool) bool {
 	case '-', '*', '+', '_', '=', ':', '|':
 		return !markerLine(line, lazy, inTyped)
 	case '`', '~':
-		return !strings.HasPrefix(line, strings.Repeat(string(first), 3))
+		return !fenceOpens(line)
 	case '[':
 		return !footnoteDefinitionOpener.MatchString(line)
 	case '<':
@@ -151,6 +152,15 @@ func directiveLineOpens(line string, inTyped bool) bool {
 	}
 	_, refused := unsupportedDirectiveReason(read)
 	return refused
+}
+
+// fenceOpens reports whether line, opening with a backtick or a tilde, opens a fenced code block:
+// a run of three or more of one, and for backticks no backtick in the rest of the line, which
+// CommonMark's info string may not hold: three backticks before "a`b" are text in both readers.
+func fenceOpens(line string) bool {
+	char := line[0]
+	run := len(line) - len(strings.TrimLeft(line, string(char)))
+	return run >= 3 && (char == '~' || !strings.Contains(line[run:], "`"))
 }
 
 // blankOrEnd reports whether rest, what follows a marker, begins with a space or a tab or is empty.
