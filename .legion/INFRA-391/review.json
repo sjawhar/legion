@@ -2,22 +2,17 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-391",
-  "completed": "2026-10-26T02:33:00Z",
-  "round": 3,
+  "completed": "2026-10-26T02:56:00Z",
+  "round": 4,
   "decision": "approved",
-  "reviewedCodeHead": "64cdb1b013e278f992717b56e5780f7399266ff2",
+  "reviewedCodeHead": "95a9fd1abf7328c895e061eccae9a619c8c00fbd",
+  "previousApprovedCodeHead": "64cdb1b013e278f992717b56e5780f7399266ff2",
   "critical": 0,
   "important": 0,
   "minor": 0,
   "keyFindings": [],
-  "roundTwoFinding": "Fixed in de00bf0aac74: the save's branch check calls githubapp.Client.Branch (client.go:678), an exact GET git/ref/heads/{branch} read with the name path-escaped, refusing any 200 that does not name refs/heads/<branch> with a 40-hex SHA; the sync keeps Ref. TestArchitectureSourcePutRefusesACommitThatIsNoBranch covers a SHA, main~1, main^, HEAD and refs/heads/main on save and re-save. Tester round 3 on real GitHub: 12 non-branch values refused 409 with nothing written; a server from fa2dacfbb399 stored 8 of them with 200. Thread PRRT_kwDORFy7ds6wHH8t replied (4373473632) and accepted.",
-  "thermonuclear": {
-    "head": "64cdb1b013e278f992717b56e5780f7399266ff2",
-    "deepReview": "approve, no finding. Branch is the one production caller's check; sync keeps Ref; the API test fake and the e2e fake-github serve the exact read; other GitHub fakes (importer_test, cmd/dispatch settings_test, multiprocess_test, infra dispatch_permissions_live_test) do not reach the save. Security: authz (server.go:616-643, refusal before writes architecture_source.go:109-140), secret (existing installation token, one replacement read, client.go:682-684), untrusted-input (path-escaped, answered ref compared, client.go:682-705), agent-def (cmd/dispatch/AGENTS.md:424 documents the contract only), transport (1 MiB body cap and 20 s bound, client.go:597-632).",
-    "codeQuality": "one maintainability item: githubapp/client_test.go grows from 950 to 1,045 lines; move branchServer and the four TestBranch* tests (773-867) into githubapp/branch_test.go. Named as the fast-follow; no behaviour change."
-  },
-  "ci": "At code head 64cdb1b013e2 read 2026-10-26T02:31Z: required lint, typecheck, test (Tests run 40257293218) and pr-title (PR Title run 40257326388) all completed success; Docs and Worker Image success; Legion Envoy and Contracts 40257293231 in progress, not required. compare 64cdb1b013e2...65cd816f605e changes only .legion/.",
-  "threads": "Three threads, all mine, all fixed, each replied in my own words (4373302526, 4373302595, 4373473632) and accepted; the implementer resolved all three. No bot thread.",
-  "census": "Re-ran at 64cdb1b013e2: architecture-source(?![s-]) 53 hits/21 files, getArchitectureSource 5, syncArchitectureSource( 19, putArchitectureSource 24, dispatch_architecture_sync 25, the tree .source pattern 4, .Branch( 6 (one caller, five tests). Every hit dispositioned. Corrected in the body the drift from the #2151 merge: section 1 count 52 -> 53, dispatch-execute.test.ts lines +1 in sections 1 and 7, envoy-client/CHANGELOG.md:549 -> 562 in section 3. Section 6 rollout: immediate refusal naming what it closes.",
-  "verified": "E2E (implementer) at b64d85e642ad with the rebase re-check to 64cdb1b013e2 (fingerprint unchanged) and E2E (tester) round 3 at 127dfc6e1426 (code 64cdb1b013e2) present, each with a negative control on fa2dacfbb399. Merge 64cdb1b013e2 resolves only packages/pi-legion/CHANGELOG.md. Test move b64d85e642ad is a pure move (tester: declaration sets identical)."
+  "scope": "Per the architect (Envoy 2026-10-26T02:34Z, review-round cap passed by its decision): only the diff 64cdb1b013e2..95a9fd1abf73, the round-3 fast-follow. It changes two files, githubapp/client_test.go (-95) and the new githubapp/branch_test.go (+110). Lines 17 to the end of branch_test.go equal client_test.go:773-867 at 64cdb1b013e2 (diff: one trailing blank line); the rest is the package clause and imports. The sorted set of `func Test*` and `branchServer` declarations in internal/dispatch/githubapp is identical at both heads (md5 8326e6623cace52d958ae21359500dc2). No non-test file changed, so no thermonuclear pass.",
+  "ci": "At code head 95a9fd1abf73 read 2026-10-26T02:54Z: required lint, typecheck, test (Tests run 40259896808) and pr-title (PR Title run 40259934952) completed success; Worker Image 40259896809 success on attempt 2; Docs success; Legion Envoy and Contracts 40259896822 in progress, not required. compare 95a9fd1abf73...3c4017400e7b changes only .legion/.",
+  "threads": "Three threads, all mine, answered and accepted in earlier rounds, all resolved; no new thread.",
+  "verified": "E2E (implementer) at 95a9fd1abf73: go test -list gives the same 31 names, go test ok. E2E (tester) round 4 at code 95a9fd1abf73: same declarations, every removed line re-added; round 3's real-surface run covers the unchanged binary."
 }
