@@ -62,11 +62,12 @@ import (
 // Refusing is safe in both directions, and the tests hold it as a set relation over generated
 // edits, whole states and the fuzz corpus. Every update the walk accepts, ygo applies to a fresh
 // room (newDocumentCopy, whose pending queue of maxUpdateItems no update ygo decodes can
-// overflow) without error, because the walk refuses every byte sequence ygo's decoder refuses; so
-// the refusal closes the case where a frame of valid structs ending in one bad byte is
-// half-applied (ApplyUpdateV1 integrates each struct as it decodes it, inside a transaction it
-// never rolls back on a document that sets no integrate-scan bound, which no room does yet,
-// crdt/update.go:68-74 and :581-689). And every update ygo applies without error that carries
+// overflow) without error, because the walk refuses every byte sequence ygo's decoder refuses; so a
+// frame of valid structs ending in one bad byte is refused before anything decodes it
+// (ApplyUpdateV1 integrates each struct as it decodes it, crdt/update.go:68-74 and :581-689, and
+// leaves those structs in a document that sets no integrate-scan bound; a room's bounded document,
+// boundRoomDocument, takes them back out, but only after it has integrated them all). And every
+// update ygo applies without error that carries
 // nothing the editor never sends, the walk accepts, so a browser running the editor is never
 // refused by it.
 //

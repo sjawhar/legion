@@ -146,7 +146,7 @@ func residentRoomState(t *testing.T, size int) (state []byte, rendering pmdoc.Do
 // residentRoomDocument is a live document of about size bytes of markdown a room can hold
 // (residentRoomMarkdown), typed over as the live benchmarks' document is (benchmarkLiveDocument):
 // 2,000 keystrokes typed and deleted across it, so its delete set is a document's that people
-// have edited.
+// have edited. It is bounded as a room's document is (boundRoomDocument).
 func residentRoomDocument(tb testing.TB, size int) *crdt.Doc {
 	tb.Helper()
 	tree, err := pmdoc.Parse(residentRoomMarkdown(tb, size))
@@ -167,7 +167,7 @@ func residentRoomDocument(tb testing.TB, size int) *crdt.Doc {
 		live.Transact(func(txn *crdt.Transaction) { text.Insert(txn, 0, "x", nil) })
 		live.Transact(func(txn *crdt.Transaction) { text.Delete(txn, 0, 1) })
 	}
-	return live
+	return boundRoomDocument(live)
 }
 
 // residentRoomMarkdown is markdown of at least size bytes in the shape this package's live

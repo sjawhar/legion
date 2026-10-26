@@ -47,7 +47,7 @@ import { useKeymap, useKeymapScope } from "../shell/keymap";
 import { AskBlockCard } from "./AskBlockCard";
 import { type AskBlockHost, installTypedBlocks } from "./ask-block";
 import type { ConnectionState, DocumentConnection } from "./connection";
-import { colorForLogin } from "./connection";
+import { colorForLogin, refusedEditNotice } from "./connection";
 import type { EditorHandle } from "./editor";
 import { bindRemoteMarks } from "./editor";
 import type { Highlight } from "./highlight";
@@ -188,9 +188,10 @@ export function ProofDocument({
   const [connection, setConnection] = useState<ConnectionState>("connecting");
   const [pending, setPending] = useState<PendingState | undefined>(undefined);
   const [loadError, setLoadError] = useState<string | undefined>(undefined);
-  // The server refused this browser's last edit as one that would take the document past its size
-  // bound; the edit is gone and the notice stays until the person dismisses it.
-  const [tooLarge, setTooLarge] = useState(false);
+  // The server refused this browser's last edit, as one that would take the document past its size
+  // bound or one it could not merge quickly enough: the sentence that says which. The edit is gone
+  // and the notice stays until the person dismisses it.
+  const [refusedEdit, setRefusedEdit] = useState<string | undefined>(undefined);
   // The server is out of room for open documents: the connection keeps trying, and the edits it
   // could not send wait in this browser.
   const [busy, setBusy] = useState(false);
@@ -391,7 +392,7 @@ export function ProofDocument({
     setConnection("connecting");
     setPending(undefined);
     setLoadError(undefined);
-    setTooLarge(false);
+    setRefusedEdit(undefined);
     setBusy(false);
     setAdmission(undefined);
     schemaReadOnlyRef.current = false;
@@ -555,7 +556,7 @@ export function ProofDocument({
               setConnection("connecting");
               refusalTimer = window.setTimeout(admit, delay);
             },
-            onTooLarge: () => {
+            onTooLarge: (reason) => {
               if (!mounted) {
                 return;
               }
@@ -564,7 +565,7 @@ export function ProofDocument({
               // the document afresh from the server, then replays the rows that are left.
               teardown();
               setBusy(false);
-              setTooLarge(true);
+              setRefusedEdit(refusedEditNotice(reason));
               setConnection("connecting");
               admit();
             },
@@ -687,15 +688,12 @@ export function ProofDocument({
         saving={nameVersion.isPending}
       />
       {isClosed ? <p>This issue is closed. Its document is read-only.</p> : null}
-      {tooLarge ? (
+      {refusedEdit !== undefined ? (
         <div className="flex flex-wrap items-center gap-3" role="alert">
-          <p className={dangerText}>
-            Your last edit was not saved: it would make this document larger than a Dispatch
-            document may be. Your other edits are kept.
-          </p>
+          <p className={dangerText}>{refusedEdit}</p>
           <button
             className={`min-h-11 rounded-lg border px-3 py-2 text-sm font-medium ${secondaryButtonBorder} ${secondaryButtonText} ${secondaryButtonHoverBorder}`}
-            onClick={() => setTooLarge(false)}
+            onClick={() => setRefusedEdit(undefined)}
             type="button"
           >
             Dismiss

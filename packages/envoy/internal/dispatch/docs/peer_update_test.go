@@ -227,11 +227,12 @@ func TestAPeerUpdateIsWeighedAgainstTheRoomsLastMeasurement(t *testing.T) {
 	}
 }
 
-// peerUpdateRoom is a room holding markdown, with the measurement its load publishes (keepReplica),
-// and nothing else of the service: the hook reads the room's document and that measurement alone.
-// leastBytes is what the rendering must measure for its caller's state, so a row written for a
-// document at a bound fails rather than passing under one. The replica is returned because the
-// service lists it weakly, and its caller is what holds it.
+// peerUpdateRoom is a room holding markdown, bounded as every room's document is (boundRoomDocument),
+// with the measurement its load publishes (keepReplica), and nothing else of the service: the hook
+// reads the room's document and that measurement alone. leastBytes is what the rendering must
+// measure for its caller's state, so a row written for a document at a bound fails rather than
+// passing under one. The replica is returned because the service lists it weakly, and its caller is
+// what holds it.
 func peerUpdateRoom(t *testing.T, markdown string, leastBytes int) (*Service, *crdt.Doc, *renderedReplica) {
 	t.Helper()
 	tree, err := pmdoc.Parse(markdown)
@@ -246,6 +247,7 @@ func peerUpdateRoom(t *testing.T, markdown string, leastBytes int) (*Service, *c
 	if err := crdt.ApplyUpdateV1(room, update, nil); err != nil {
 		t.Fatal(err)
 	}
+	boundRoomDocument(room)
 	rendering, err := renderDocument(room)
 	if err != nil {
 		t.Fatal(err)
@@ -488,7 +490,7 @@ func heaviestDocument(t *testing.T) *crdt.Doc {
 // document's whole-state frame passes the floor.
 func TestTheHeaviestWholeStateFrameABrowserCanGrowFitsTheMessageFloor(t *testing.T) {
 	const pair = "- \n\n* \n\n"
-	room := heaviestDocument(t)
+	room := boundRoomDocument(heaviestDocument(t))
 	rendering, err := renderDocument(room)
 	if err != nil {
 		t.Fatal(err)
@@ -719,17 +721,18 @@ func deleteRangesFrom(client uint64, n int) []byte {
 }
 
 // An update the walk refuses is never applied: the hook answers the walk's error, which ygo answers
-// with SyncStatus(0) and no close, and the room is as it was. Applied, a frame of valid structs
-// ending in one bad byte would have left those structs in the room, since ygo integrates each
-// struct as it decodes it and never rolls the transaction back on a document that sets no
-// integrate-scan bound, which no room does yet (sjawhar/ygo v1.51.3-sami.5, crdt/update.go:68-74).
+// with SyncStatus(0) and no close, and the room is as it was. ygo integrates each struct as it
+// decodes it (sjawhar/ygo v1.51.3-sami.5, crdt/update.go:68-74): on a document with no
+// integrate-scan bound, a frame of valid structs ending in one bad byte leaves those structs in it,
+// and a room's bounded document takes them back out only after it has decoded and integrated every
+// one (crdt/apply_rollback.go:9-18), the work the walk keeps off the peer's read loop.
 func TestAPeerUpdateTheWalkRefusesIsNeverApplied(t *testing.T) {
 	for _, row := range []struct {
 		name   string
 		update []byte
 		rule   error
-		// halfApplies is whether ygo's own apply leaves part of the update in a room before it
-		// fails, which is what the walk's refusal keeps out.
+		// halfApplies is whether ygo's own apply into an unbounded copy of the room leaves part of
+		// the update in it before it fails: structs ygo integrated before it found the frame bad.
 		halfApplies bool
 	}{
 		{
@@ -963,6 +966,7 @@ func TestTheStructTotalALoadCountsIsTheWalkOfTheRoomsEncodedState(t *testing.T) 
 	if err := crdt.ApplyUpdateV1(room, seed, nil); err != nil {
 		t.Fatal(err)
 	}
+	boundRoomDocument(room)
 	integrated, err := walkUpdate(crdt.EncodeStateAsUpdateV1(room, nil), fromRoom, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -1160,8 +1164,8 @@ func TestTwoReservationsOfTheStructTotalNearTheCapCannotBothPassIt(t *testing.T)
 }
 
 // applyHeapEstimate is the estimate the hook computes for update arriving at room, a room no load
-// listed (peerWeighing.applyHeap, structTotal.roomStructs), and the update's own share of it
-// (peerWeighing.ownApplyHeap).
+// listed (peerWeighing.applyHeap, structTotal.roomStructs, structTotal.parkedCopyHeap), and the
+// update's own share of it (peerWeighing.ownApplyHeap).
 func applyHeapEstimate(t *testing.T, room *crdt.Doc, update []byte) (estimate, own uint64) {
 	t.Helper()
 	weighed := peerWeighing{held: room.StateVector()}
@@ -1169,7 +1173,7 @@ func applyHeapEstimate(t *testing.T, room *crdt.Doc, update []byte) (estimate, o
 		t.Fatal(err)
 	}
 	var unlisted *structTotal
-	return weighed.applyHeap(len(update), unlisted.roomStructs(room)), weighed.ownApplyHeap(len(update))
+	return weighed.applyHeap(len(update), unlisted.roomStructs(room), unlisted.parkedCopyHeap(room)), weighed.ownApplyHeap(len(update))
 }
 
 // marginValues is client 7's frame of one item under the margin's key "k" holding n copies of the
@@ -1225,12 +1229,15 @@ func chainedCharacters(n int) []byte {
 // applyAllocation is what ygo's apply of update into a document into makes allocates, the least of
 // three runs, each into a fresh document from into: an upper bound on the heap the apply adds at
 // its peak, since no byte it holds can be one it did not allocate. The document has an update
-// observer, as every room does (ygo's own, and the room's, websocket.go:527), so the apply
+// observer, as every room does (ygo's own, and the room's, websocket.go:530), so the apply
 // encodes the update its transaction made for the observers (sjawhar/ygo v1.51.3-sami.5,
 // crdt/doc.go:510-516) as a room's does. Two collections before each run empty the pool ygo's
 // encoders come from (encoding/pool.go:17-19), whose primary and victim caches each survive one,
 // so the encode grows its buffer from nothing, as it does in a pod whose pool a collection emptied.
-func applyAllocation(t *testing.T, into func() *crdt.Doc, update []byte) uint64 {
+// scanRefused is whether the apply is to be refused by the document's integrate-scan bound
+// (crdt.ErrIntegrateScanBudget), which then measures what the refused apply allocates up to its
+// refusal and in taking itself back out.
+func applyAllocation(t *testing.T, into func() *crdt.Doc, update []byte, scanRefused bool) uint64 {
 	t.Helper()
 	least := uint64(math.MaxUint64)
 	for range 3 {
@@ -1242,8 +1249,8 @@ func applyAllocation(t *testing.T, into func() *crdt.Doc, update []byte) uint64 
 		runtime.ReadMemStats(&before)
 		err := crdt.ApplyUpdateV1(doc, update, nil)
 		runtime.ReadMemStats(&after)
-		if err != nil {
-			t.Fatal(err)
+		if scanRefused != errors.Is(err, crdt.ErrIntegrateScanBudget) || (!scanRefused && err != nil) {
+			t.Fatalf("the apply answered %v, want the scan bound's refusal: %t", err, scanRefused)
 		}
 		least = min(least, after.TotalAlloc-before.TotalAlloc)
 		runtime.KeepAlive(doc)
@@ -1254,9 +1261,10 @@ func applyAllocation(t *testing.T, into func() *crdt.Doc, update []byte) uint64 
 // ygo's apply of each update, of every kind of content a browser can send and at scale, allocates
 // no more than the hook's estimate of it (peerWeighing.applyHeap), so the bound the estimates are
 // held to (applyHeapBound) bounds what the applies hold. Each row is measured as ygo's apply into
-// a room allocates it (applyAllocation), into a fresh room, or into one that already holds every
-// clock the update carries, where ygo still decodes every struct and value before it drops them,
-// or into one whose items the update splits or whose deleted items the observers' encode walks.
+// a room's bounded document allocates it (applyAllocation, boundRoomDocument), into a fresh room,
+// or into one that already holds every clock the update carries, where ygo still decodes every
+// struct and value before it drops them, or into one whose items the update splits, whose deleted
+// items the observers' encode walks, or whose parked queue the bounded apply copies.
 // The estimate does not overstate what the editor itself sends past three times, so that the bound
 // does not turn away or hold up a real editor: the whole-state handoffs of the heaviest document
 // and of a mebibyte of prose, into the room holding them and into a fresh one, by the whole
@@ -1290,7 +1298,9 @@ func TestEveryApplysTransientHeapIsWithinItsEstimate(t *testing.T) {
 		frame = func(t *testing.T) []byte
 	)
 	built := func(build func() []byte) frame { return builtOnce(func(*testing.T) []byte { return build() }) }
-	fresh := func(*testing.T) *crdt.Doc { return newDocumentCopy() }
+	// Every room is a room's bounded document (boundRoomDocument), holding what it holds before it is
+	// bounded, as a room's load decodes its stored state unbounded.
+	fresh := func(*testing.T) *crdt.Doc { return boundRoomDocument(newDocumentCopy()) }
 	holding := func(updates ...frame) room {
 		return func(t *testing.T) *crdt.Doc {
 			doc := newDocumentCopy()
@@ -1299,7 +1309,7 @@ func TestEveryApplysTransientHeapIsWithinItsEstimate(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			return doc
+			return boundRoomDocument(doc)
 		}
 	}
 	// holdingClocks is a room that already holds client's first length clocks, as one GC run.
@@ -1380,12 +1390,32 @@ func TestEveryApplysTransientHeapIsWithinItsEstimate(t *testing.T) {
 		return newV1Frame(1).group(1, 8, 0).raw(byte(structString) | infoHasOrigin).uint(7).uint(structs - 1).str("y").noDeletes()
 	})
 	tombstoned := builtOnce(func(t *testing.T) []byte { return crdt.EncodeStateAsUpdateV1(holding(text, everyOther)(t), nil) })
+	// Rooms holding within eight of the most parked structs and of the most parked delete ranges
+	// their struct total admits, each parked struct counting three and each parked range two
+	// (countRoomStructs): GC structs of client 8 from clock 1, whose clock 0 the room has never
+	// seen, and ranges of client 11, which it has never seen at all. A bounded document's apply
+	// copies its parked queue (structTotal.parkedCopyHeap).
+	parkedStructs := built(func() []byte {
+		n := maxUpdateItems/(1+splitsAStructCanCause) - 8
+		f := newV1Frame(1).group(n, 8, 1)
+		for range n {
+			f.gc(1)
+		}
+		return f.noDeletes()
+	})
+	parkedRanges := built(func() []byte { return deleteRangesFrom(11, maxUpdateItems/splitsAStructCanCause-8) })
 	// editor is whether the update is one the editor sends, which the estimate may not overstate
-	// past three times: by the whole estimate, or by the update's own share.
+	// past three times: by the whole estimate, or by the update's own share. A whole-state handoff
+	// of a document into a room holding none of it is no update the editor sends a room, which
+	// loads the document before it takes any browser: a fresh room's bounded document refuses the
+	// handoffs below, whose decode into a document holding nothing scans 34,200 items for the
+	// mebibyte of prose and 49,156 for the heaviest document, past integrateScanBound, and the
+	// estimate holds over what its refused apply allocates.
 	const (
 		notTheEditors = iota
 		editorsWhole
 		editorsOwn
+		scanRefused
 	)
 	for _, row := range []struct {
 		name   string
@@ -1448,11 +1478,13 @@ func TestEveryApplysTransientHeapIsWithinItsEstimate(t *testing.T) {
 		{"one character into a room of 20,000 clients", manyClients(structs), oneCharacter, notTheEditors},
 		{"one character into a room of 57,345 clients", manyClients(57_345), oneCharacter, notTheEditors},
 		{"one character into a string of 10,000 deleted items", holding(text, everyOther), atTheEnd, notTheEditors},
+		{"one character into a room holding the most parked structs", holding(parkedStructs), oneCharacter, notTheEditors},
+		{"one character into a room holding the most parked delete ranges", holding(parkedRanges), oneCharacter, notTheEditors},
 		{"the whole state of a string of 10,000 deleted items into the room holding it", holding(text, everyOther), tombstoned, notTheEditors},
 		{"the heaviest handoff into the room holding it", holding(heaviestState), heaviestState, editorsWhole},
-		{"the heaviest handoff into a fresh room", fresh, heaviestState, editorsWhole},
+		{"the heaviest handoff into a fresh room", fresh, heaviestState, scanRefused},
 		{"a mebibyte of prose handed off into the room holding it", holding(prose), prose, editorsWhole},
-		{"a mebibyte of prose handed off into a fresh room", fresh, prose, editorsWhole},
+		{"a mebibyte of prose handed off into a fresh room", fresh, prose, scanRefused},
 		{"a 64 KiB paste into the heaviest document", holding(heaviestState), paste, editorsOwn},
 		{"a keystroke into the heaviest document", holding(heaviestState), keystroke, editorsOwn},
 		{"a deletion of one character from the heaviest document", holding(heaviestState), deletion, editorsOwn},
@@ -1465,7 +1497,7 @@ func TestEveryApplysTransientHeapIsWithinItsEstimate(t *testing.T) {
 			update := row.update(t)
 			into := func() *crdt.Doc { return row.into(t) }
 			estimate, own := applyHeapEstimate(t, into(), update)
-			allocated := applyAllocation(t, into, update)
+			allocated := applyAllocation(t, into, update, row.editor == scanRefused)
 			t.Logf("a %d-byte update allocates %d bytes, estimated at %d (%.2f times), its own share %d (%.2f times)",
 				len(update), allocated, estimate, float64(estimate)/float64(allocated), own, float64(own)/float64(allocated))
 			if allocated > estimate {
@@ -1526,7 +1558,7 @@ func builtOnce[V any](build func(t *testing.T) V) func(t *testing.T) V {
 func TestTheApplyHeapBoundHoldsConcurrentApplies(t *testing.T) {
 	service := &Service{}
 	heavy := marginValues(4_000_000, nil)
-	estimate, own := applyHeapEstimate(t, newDocumentCopy(), heavy)
+	estimate, own := applyHeapEstimate(t, boundRoomDocument(newDocumentCopy()), heavy)
 	fits := int(applyHeapBound / estimate)
 	if own <= unweighedApplyHeapBytes || fits < 1 || fits > 8 {
 		t.Fatalf("the heavy update is estimated at %d bytes, its own share %d, %d to the bound, want its share past %d and a few to the bound",
@@ -1544,6 +1576,7 @@ func TestTheApplyHeapBoundHoldsConcurrentApplies(t *testing.T) {
 	if err := crdt.ApplyUpdateV1(typedInto, seed, nil); err != nil {
 		t.Fatal(err)
 	}
+	boundRoomDocument(typedInto)
 	keystroke := peerTyping(t, typedInto, "y")
 	if _, typed := applyHeapEstimate(t, typedInto, keystroke); typed > unweighedApplyHeapBytes {
 		t.Fatalf("the keystroke's own share is %d bytes, past the %d unweighed", typed, unweighedApplyHeapBytes)
@@ -1573,7 +1606,7 @@ func TestTheApplyHeapBoundHoldsConcurrentApplies(t *testing.T) {
 		})
 	}
 	for i := range fits {
-		weigh(i, newDocumentCopy(), estimate)
+		weigh(i, boundRoomDocument(newDocumentCopy()), estimate)
 	}
 	for range fits {
 		<-started
@@ -1628,7 +1661,7 @@ func TestAnUpdateHeavierThanTheApplyHeapBoundIsNeverApplied(t *testing.T) {
 	if weighed.inserted != 0 || weighed.added() != 0 || len(update) > maxMessageBytes {
 		t.Fatalf("the %d-byte update inserts %d and adds %d structs, want a frame within the floor that inserts and adds nothing", len(update), weighed.inserted, weighed.added())
 	}
-	estimate := weighed.applyHeap(len(update), replica.structs.roomStructs(room))
+	estimate := weighed.applyHeap(len(update), replica.structs.roomStructs(room), replica.structs.parkedCopyHeap(room))
 	if estimate <= applyHeapBound {
 		t.Fatalf("the %d-byte update is estimated at %d bytes, within the %d-byte bound", len(update), estimate, applyHeapBound)
 	}

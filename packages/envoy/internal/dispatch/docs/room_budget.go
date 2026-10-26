@@ -305,11 +305,12 @@ type roomCharge struct {
 // across reconnects would grow its charge with nothing added to its heap.
 //
 // A range the server's own writes deleted is listed only once a browser's update carries it, so it
-// is charged that once; a range charged in an update whose apply then failed is listed all the
-// same, and charged no more. Two browsers' updates weighed at once can each find the same new
-// range unlisted, and both are charged it, which over-charges and never under-charges. The list
-// holds sixteen bytes for each run of the room's delete set, beside the tombstone of at least one
-// struct, 129 bytes or more (bytesOfHeapAStruct), that each run deletes, and it goes with the room.
+// is charged that once; a range of an update whose apply failed is neither listed nor charged,
+// since the room's bounded document took that update back out whole (boundRoomDocument). Two
+// browsers' updates weighed at once can each find the same new range unlisted, and both are
+// charged it, which over-charges and never under-charges. The list holds sixteen bytes for each
+// run of the room's delete set, beside the tombstone of at least one struct, 129 bytes or more
+// (bytesOfHeapAStruct), that each run deletes, and it goes with the room.
 type deletedRuns struct {
 	mu      sync.RWMutex
 	clients map[uint64][]clockRun
@@ -659,6 +660,20 @@ func (c *roomCharge) grew(structure int64) {
 	c.budget.mu.Lock()
 	defer c.budget.unlock()
 	c.structure += structure
+	c.budget.reweighLocked(c)
+}
+
+// gaveBack takes structure back out of the room's structure part: what growWithin charged before
+// an apply under pressure for an update whose apply then failed, which the room's bounded document
+// took back out whole (boundRoomDocument), so the room holds none of what it was charged for. Nil
+// gives back nothing.
+func (c *roomCharge) gaveBack(structure int64) {
+	if c == nil || structure == 0 {
+		return
+	}
+	c.budget.mu.Lock()
+	defer c.budget.unlock()
+	c.structure -= structure
 	c.budget.reweighLocked(c)
 }
 

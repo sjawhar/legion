@@ -200,10 +200,10 @@ func TestTheUpdateWalkAcceptsEveryUpdateARoomTakes(t *testing.T) {
 }
 
 // A frame of valid structs ending in one bad byte is refused whole. ygo's apply refuses it too,
-// but only after it has integrated every struct before the bad byte (crdt/update.go:68-74: on a
-// document that sets no integrate-scan bound, as newDocumentCopy's does not, the transaction it
-// decodes in is never rolled back), which is the half-applied frame the hook's walk keeps out of
-// the room.
+// but only after it has integrated every struct before the bad byte (crdt/update.go:68-74), which
+// on a document that sets no integrate-scan bound, as newDocumentCopy's does not, stay in it, and
+// which a room's bounded document takes back out only once it has integrated them all: the work
+// the hook's walk keeps off the room.
 func TestTheUpdateWalkRefusesValidStructsBeforeOneBadByte(t *testing.T) {
 	update := newV1Frame(1).group(4, 7, 0).gc(2).gc(2).gc(2).raw(0xff).done()
 	_, err := walkUpdate(update, fromPeer, nil)

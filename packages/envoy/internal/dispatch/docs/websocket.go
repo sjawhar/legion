@@ -512,6 +512,9 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 		s.scheduleSettleLocked(room, state)
 	}
 	s.unlockState(room, state)
+	// The room takes peer updates only once this hook returns, and every one of them under the
+	// integrate-scan bound: the state the load decoded is the server's own and went in unbounded.
+	boundRoomDocument(doc)
 	// The log is opened before the observer is registered and before ygo hands the room to anyone
 	// (above), so it holds every transaction the room commits from here on, in commit order.
 	replica := s.keepReplica(doc, doc.OpenUpdateLog(), contentMarkdown)

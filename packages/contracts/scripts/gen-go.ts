@@ -11,6 +11,7 @@ import {
   DOCUMENT_SCHEMA_CLOSE_REASON,
   DOCUMENT_TOO_LARGE_CLOSE_CODE,
   DOCUMENT_TOO_LARGE_CLOSE_REASON,
+  DOCUMENT_TOO_TANGLED_CLOSE_REASON,
   ISSUE_TITLE_MAX,
   MAX_BROADCAST_RECIPIENTS,
   MAX_ISSUE_BLOCKERS,
@@ -182,13 +183,16 @@ const DocumentSchemaCloseCode = ${DOCUMENT_SCHEMA_CLOSE_CODE}
 const DocumentSchemaCloseReason = ${JSON.stringify(DOCUMENT_SCHEMA_CLOSE_REASON)}
 
 // DocumentTooLargeCloseCode and DocumentTooLargeCloseReason close the one browser whose update
-// would grow a document past the document bound; DocumentBusyCloseCode and DocumentBusyCloseReason
-// close a browser the room-memory budget has no room for, and the one whose update would grow a
-// document while that budget is full. Generated from DOCUMENT_TOO_LARGE_CLOSE_CODE,
-// DOCUMENT_TOO_LARGE_CLOSE_REASON, DOCUMENT_BUSY_CLOSE_CODE and DOCUMENT_BUSY_CLOSE_REASON in
+// would grow a document past the document bound, and DocumentTooTangledCloseReason, with the same
+// code, the one whose update the server could not merge within the integrate-scan bound;
+// DocumentBusyCloseCode and DocumentBusyCloseReason close a browser the room-memory budget has no
+// room for, and the one whose update would grow a document while that budget is full. Generated
+// from DOCUMENT_TOO_LARGE_CLOSE_CODE, DOCUMENT_TOO_LARGE_CLOSE_REASON,
+// DOCUMENT_TOO_TANGLED_CLOSE_REASON, DOCUMENT_BUSY_CLOSE_CODE and DOCUMENT_BUSY_CLOSE_REASON in
 // packages/contracts so the server's closes and the dashboard's reading of them cannot drift apart.
 const DocumentTooLargeCloseCode = ${DOCUMENT_TOO_LARGE_CLOSE_CODE}
 const DocumentTooLargeCloseReason = ${JSON.stringify(DOCUMENT_TOO_LARGE_CLOSE_REASON)}
+const DocumentTooTangledCloseReason = ${JSON.stringify(DOCUMENT_TOO_TANGLED_CLOSE_REASON)}
 const DocumentBusyCloseCode = ${DOCUMENT_BUSY_CLOSE_CODE}
 const DocumentBusyCloseReason = ${JSON.stringify(DOCUMENT_BUSY_CLOSE_REASON)}
 

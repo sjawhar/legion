@@ -19,6 +19,7 @@ import (
 
 	gws "github.com/gorilla/websocket"
 	"github.com/reearth/ygo/crdt"
+	"github.com/reearth/ygo/encoding"
 
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
@@ -37,7 +38,7 @@ const (
 	podGoMemoryLimit = 3_865_470_566
 
 	// These mirror constants of internal/dispatch/docs, which this package cannot read:
-	// roomBudgetBytes (room_budget.go:36), bytesOfHeapAnElement (:48), roomCopies (:438),
+	// roomBudgetBytes (room_budget.go:36), bytesOfHeapAnElement (:48), roomCopies (:441),
 	// maxPeerInsertAtTheBound (peer_update.go:87), maxPeerByteCreep (:92) and maxMessageBytes
 	// (:121). No drive takes a mirror on trust. The server names its budget and what each refused
 	// document needs in the line it logs for a refusal (refuseOverRoomBudget), and the budget
@@ -51,6 +52,10 @@ const (
 	maxPeerInsertAtTheBoundForTest = 8 << 10
 	maxPeerByteCreepForTest        = 64 << 10
 	maxMessageBytesForTest         = 37 << 20
+	// integrateScanBoundForTest mirrors integrateScanBound (peer_update.go:153), which
+	// TestAScanFrameIsRefusedWholeAndTheRoomIsAsItWas pins: a frame scanning past it is refused,
+	// and one an item shorter applies.
+	integrateScanBoundForTest = 28_640
 
 	// roomCountIntervalForTest mirrors roomCountInterval (internal/dispatch/docs/tree.go:476), the
 	// least time between two counts of one room's elements, which is how stale a room's charge
@@ -62,7 +67,7 @@ const (
 )
 
 // One browser's update is bounded by bytes, over a real document socket of a real server
-// (Service.weighPeerUpdate, internal/dispatch/docs/peer_update.go:181-243): an update that would
+// (Service.weighPeerUpdate, internal/dispatch/docs/peer_update.go:238-318): an update that would
 // take a document past the bound is refused with 4413 and DOC_TOO_LARGE, and the document is kept;
 // small updates carry a document over the bound only by the creep they are allowed; a document at
 // or over the bound can be opened, handed back whole, edited and shortened; an edit under it
@@ -240,10 +245,184 @@ func TestABrowsersUpdateIsBoundedByTheDocumentBound(t *testing.T) {
 	})
 }
 
+// A frame no other rule refuses but whose merge would scan past the room's integrate-scan bound
+// (integrateScanBound, internal/dispatch/docs/peer_update.go) is refused whole, over a real document
+// socket of a real server, and the room is left as it was. A paragraph is first made a chain of
+// tangledChain one-character items, each of a client of its own, so a run of them is never merged
+// into one item; then a frame of a few hundred bytes whose items each name the chain's first item
+// as their left origin and no right origin, so each scans the whole chain. It passes the walker, the
+// 8 KiB rule (the document is far under the bound), the struct total and the apply-heap bound, and
+// the room's bounded document refuses it: its browser is closed with 4413 and DOC_TOO_TANGLED, the
+// room's encoded state is byte for byte what it was, a browser joining after the refusal receives
+// that state, the stored document once settled holds it, and the budget's figures and the room's
+// struct total, which the server logs at each refusal as the refusal leaves them, are the same at a
+// second refusal of the frame as at the first, so the first left them as it found them. A frame
+// one item shorter, whose scans stay within the bound, applies: what refused the frame is the scan
+// bound and nothing else.
+func TestAScanFrameIsRefusedWholeAndTheRoomIsAsItWas(t *testing.T) {
+	memory := newMemoryHarness(t)
+	server := memory.start(t)
+	stored := server.upload(t, "json", memory.issue, "# Tangled\n\nOne paragraph of ordinary prose.\n")
+	if stored.status != http.StatusCreated {
+		t.Fatalf("upload: status %d body %.300s, want 201", stored.status, stored.body)
+	}
+	memory.waitForSettlement(t, stored)
+	room := stored.artifactID
+	setting := server.openBrowser(t, room)
+	t.Cleanup(setting.leave)
+	requireApplied(t, setting, chainFrame(t, setting.state(t)), fmt.Sprintf("a chain of %d one-character items", tangledChain))
+	// The room's count of what the chain added lands within roomCountIntervalForTest, and its
+	// settlement after the room's settle delay; once both have, nothing moves the budget's figures
+	// or the struct total but what the browsers below send.
+	time.Sleep(roomCountIntervalForTest + 2*time.Second)
+	memory.waitForSettled(t, room)
+	before := setting.state(t)
+
+	// Each item scans the chain after its first item, and each but the first one item of its own
+	// frame more, where its scan stops; items is the fewest whose scans pass the bound.
+	items := integrateScanBoundForTest/(tangledChain-1) + 1
+	frame := scanFrame(items)
+	t.Logf("a %d-byte frame of %d items scanning %d items, against the %d-byte state of the room it is sent to",
+		len(frame), items, items*tangledChain-1, len(before))
+	for refusal := range 2 {
+		refused := server.openBrowser(t, room)
+		t.Cleanup(refused.leave)
+		if state := refused.state(t); !bytes.Equal(state, before) {
+			t.Fatalf("before refusal %d the room's state is %d bytes, want the %d it held before the first", refusal+1, len(state), len(before))
+		}
+		applied, closed, err := refused.send(refused.updateFrame(frame))
+		if err != nil {
+			t.Fatal(err)
+		}
+		requireRefused(t, applied, closed, contracts.DocumentTooLargeCloseCode, contracts.DocumentTooTangledCloseReason)
+	}
+	// The server's output reaches the test through a pipe the process copies on its own goroutine,
+	// so a line the server logged before it closed the socket can still be on its way.
+	var refusals [][]string
+	for deadline := time.Now().Add(30 * time.Second); ; time.Sleep(100 * time.Millisecond) {
+		refusals = scanRefusalLine.FindAllStringSubmatch(server.output.String(), -1)
+		if len(refusals) >= 2 || time.Now().After(deadline) {
+			break
+		}
+	}
+	if len(refusals) != 2 {
+		t.Fatalf("the server logged %d scan refusals, want 2:\n%s", len(refusals), server.output.tail())
+	}
+	t.Logf("the server logged the refusals as %q and %q", refusals[0][0], refusals[1][0])
+	if refusals[0][1] != room || !slices.Equal(refusals[0][2:], refusals[1][2:]) {
+		t.Fatalf("the refusals left the room's figures at %q and then at %q, want the room's and the same at both", refusals[0][1:], refusals[1][1:])
+	}
+	if limit, err := strconv.ParseInt(refusals[0][3], 10, 64); err != nil || limit != roomBudgetBytesForTest {
+		t.Fatalf("the refusal names a budget of %s bytes, want %d", refusals[0][3], roomBudgetBytesForTest)
+	}
+
+	joined := server.openBrowser(t, room)
+	t.Cleanup(joined.leave)
+	if state := joined.state(t); !bytes.Equal(state, before) {
+		t.Fatalf("a browser joining after the refusals received a %d-byte state, want the %d-byte state from before them", len(state), len(before))
+	}
+	memory.waitForSettled(t, room)
+	if storedState, want := canonicalState(t, memory.storedState(t, room)), canonicalState(t, before); !bytes.Equal(storedState, want) {
+		t.Fatalf("the stored document is a %d-byte state, want the room's %d-byte state from before the refusals", len(storedState), len(want))
+	}
+
+	shorter := scanFrame(items - 1)
+	requireApplied(t, joined, shorter, fmt.Sprintf("a frame of %d items scanning %d", items-1, (items-1)*tangledChain-1))
+}
+
+// tangledChain is how many one-character items chainFrame chains onto a paragraph, and
+// tangledChainClient the client of the first of them, each next item's client one more.
+const (
+	tangledChain       = 2_000
+	tangledChainClient = 1_000
+	// tangledScanClient is the client of scanFrame's items, above every client of the chain, so
+	// each of its items wins the tie-break against each item of the chain and scans on past it
+	// (sjawhar/ygo v1.51.3-sami.5, crdt/item.go:161-170).
+	tangledScanClient = 4_000_000
+)
+
+// chainFrame is a frame of tangledChain one-character strings after the last character of the
+// first paragraph of state, each of a client of its own, from tangledChainClient up, naming the
+// one before it as its left origin and no right origin: every one lands at the paragraph's end,
+// scanning nothing, and none merges with its neighbour, since ygo merges only one client's run.
+func chainFrame(t *testing.T, state []byte) []byte {
+	t.Helper()
+	document := newBrowserDocument(t, state)
+	var text *crdt.YXmlText
+	for _, child := range document.fragment.Children() {
+		if element, ok := child.(*crdt.YXmlElement); ok && element.NodeName == "paragraph" {
+			for _, inner := range element.Children() {
+				if found, ok := inner.(*crdt.YXmlText); ok && text == nil {
+					text = found
+				}
+			}
+			break
+		}
+	}
+	if text == nil || text.Len() == 0 {
+		t.Fatal("the document holds no paragraph text to chain onto")
+	}
+	last := crdt.CreateRelativePositionFromIndex(text, text.Len()-1, 0).Item
+	if last == nil {
+		t.Fatal("the paragraph's last character has no item")
+	}
+	return encoding.EncodeBytes(func(encoder *encoding.Encoder) {
+		encoder.WriteVarUint(tangledChain)
+		origin := *last
+		for i := range tangledChain {
+			client := crdt.ClientID(tangledChainClient + i)
+			encoder.WriteVarUint(1)
+			encoder.WriteVarUint(uint64(client))
+			encoder.WriteVarUint(0)
+			writeOriginString(encoder, origin)
+			origin = crdt.ID{Client: client, Clock: 0}
+		}
+		encoder.WriteVarUint(0)
+	})
+}
+
+// scanFrame is a frame of items one-character strings of tangledScanClient, each naming the first
+// item chainFrame chained as its left origin and no right origin, so each scans the chain from
+// there to its end (crdt/item.go:150-192).
+func scanFrame(items int) []byte {
+	return encoding.EncodeBytes(func(encoder *encoding.Encoder) {
+		encoder.WriteVarUint(1)
+		encoder.WriteVarUint(uint64(items))
+		encoder.WriteVarUint(tangledScanClient)
+		encoder.WriteVarUint(0)
+		for range items {
+			writeOriginString(encoder, crdt.ID{Client: tangledChainClient, Clock: 0})
+		}
+		encoder.WriteVarUint(0)
+	})
+}
+
+// writeOriginString writes one V1 struct: a string "k" naming origin as its left origin and no right
+// origin, whose parent is its origin's (Yjs's info byte: the content's reference, 4 for a string,
+// with bit 0x80 for a left origin).
+func writeOriginString(encoder *encoding.Encoder, origin crdt.ID) {
+	encoder.WriteUint8(4 | 0x80)
+	encoder.WriteVarUint(uint64(origin.Client))
+	encoder.WriteVarUint(origin.Clock)
+	encoder.WriteVarString("k")
+}
+
+// canonicalState is state decoded into a document of its own and encoded again, so two states that
+// hold the same structs and deletions compare equal however their updates were folded.
+func canonicalState(t *testing.T, state []byte) []byte {
+	t.Helper()
+	return crdt.EncodeStateAsUpdateV1(newBrowserDocument(t, state).doc, nil)
+}
+
+// scanRefusalLine is the line the server logs for each update its room refuses past the
+// integrate-scan bound, with the budget's figures and the room's struct total as the refusal leaves
+// them (Service.weighPeerUpdate, internal/dispatch/docs/peer_update.go).
+var scanRefusalLine = regexp.MustCompile(`msg="dispatch: refused a browser's update its room could not merge within the integrate-scan bound" room=(\S+) update_bytes=\d+ charged=(\d+) limit=(\d+) struct_total=(\d+)`)
+
 // The room budget refuses the browser its own arithmetic says it has no room for: documents of a
 // mebibyte of prose, each edited once, opened until one is refused with 4503 and DOC_BUSY, under the
 // Go limit a 4 GiB pod gives the server. A room is charged at both copies from its admission
-// (roomCopies, internal/dispatch/docs/room_budget.go:440), so the refusals begin within one room of
+// (roomCopies, internal/dispatch/docs/room_budget.go:441), so the refusals begin within one room of
 // the budget divided by what one such room reserves - its stored version's elements at the price of
 // one, at both copies - computed here from the server's constants and held to the numbers the server
 // logs, both when the browsers come one after another and when fifty open at once.
@@ -1311,7 +1490,7 @@ func requirePodGoMemoryLimit(t *testing.T, server *memoryServer) {
 }
 
 // budgetRefusalLine is the reason the room budget gives a refused browser, as the server logs it
-// (errRoomBudgetFull, internal/dispatch/docs/room_budget.go:501-538).
+// (errRoomBudgetFull, internal/dispatch/docs/room_budget.go:502-539).
 var budgetRefusalLine = regexp.MustCompile(`the open documents fill their memory budget: (\d+) of (\d+) bytes are charged(?:, and this document needs (\d+))?`)
 
 // budgetRefusal is one refusal the server logged: what its rooms were charged, its budget, and
@@ -1353,7 +1532,7 @@ func requireBudgetRefusals(t *testing.T, server *memoryServer, reserved int64) [
 }
 
 // budgetCloseLine is the line the room budget's sweep logs for each unused room it closes, in the
-// budget's own figures (sweepRooms, internal/dispatch/docs/room_budget.go:1203-1236).
+// budget's own figures (sweepRooms, internal/dispatch/docs/room_budget.go:1218-1251).
 var budgetCloseLine = regexp.MustCompile(`msg="dispatch: the room budget closed an unused document" room=(\S+) charged_before=(\d+) charged=(\d+) limit=(\d+) making_room_for=(\d+)`)
 
 // budgetClose is one close the server logged: the room, what the budget charged before and after

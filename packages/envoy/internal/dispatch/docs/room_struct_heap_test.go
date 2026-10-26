@@ -22,7 +22,7 @@ import (
 // of a room keeps for frames ygo applies into it (heldByUpdates), and fail once a price leaves what
 // it is set from by more than the tolerance each states. The room budget charges every price at
 // both copies (roomCopies), since the replica takes the live document's whole state; what is
-// measured here is one copy.
+// measured here is one copy, a room's bounded document (boundRoomDocument), as every room's is.
 
 // heapPriceChild is the environment variable naming the test a process was started to measure
 // alone (measuredAlone).
@@ -133,7 +133,7 @@ func TestTheRoomBudgetsPricePerStructHoldsEveryKind(t *testing.T) {
 		return
 	}
 	const structsAKind, least = 20_000, 0.8
-	fresh := func() *crdt.Doc { return newDocumentCopy() }
+	fresh := func() *crdt.Doc { return boundRoomDocument(newDocumentCopy()) }
 	item := func(kind structKind, content func(v1Frame) v1Frame) []byte {
 		return fragmentItems(structsAKind, kind, content)
 	}
@@ -222,7 +222,7 @@ func TestTheRoomBudgetsSplitMarginHoldsWhatSplitsAdd(t *testing.T) {
 		if err := crdt.ApplyUpdateV1(doc, text, nil); err != nil {
 			t.Fatal(err)
 		}
-		return doc
+		return boundRoomDocument(doc)
 	}
 	between := newV1Frame(1).group(n, 8, 0)
 	for i := range n {
@@ -264,7 +264,7 @@ func TestTheRoomBudgetsContentFactorsHoldEveryKind(t *testing.T) {
 	if !measuredAlone(t) {
 		return
 	}
-	fresh := func() *crdt.Doc { return newDocumentCopy() }
+	fresh := func() *crdt.Doc { return boundRoomDocument(newDocumentCopy()) }
 	big := strings.Repeat("a", 64<<10)
 	pastAPage := strings.Repeat("a", 32<<10+1)
 	margin := func(n int, kind structKind, content func(v1Frame) v1Frame) []byte {

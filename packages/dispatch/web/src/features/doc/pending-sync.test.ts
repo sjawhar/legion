@@ -7,6 +7,7 @@ import {
   type ConnectionCallbacks,
   type DocumentConnection,
   loadDocumentTransport,
+  refusedEditNotice,
 } from "./connection";
 import { openPendingEdits, type PendingEdits, type PendingKey } from "./pending-edits";
 import { type PendingState, type PendingSync, startPendingSync } from "./pending-sync";
@@ -622,46 +623,62 @@ async function syncedProvider(
   return { connection, socket };
 }
 
-test("a real provider closed as too large drops the refused edit's row and stops for the host", async () => {
-  const artifact = artifactId();
-  const realSocket = globalThis.WebSocket;
-  globalThis.WebSocket = OpenSocket as unknown as typeof WebSocket;
-  OpenSocket.opened = [];
-  let connection: DocumentConnection | undefined;
-  let tooLarge = 0;
-  try {
-    const provider = await syncedProvider(artifact, {
-      onTooLarge: () => {
-        tooLarge += 1;
-      },
-    });
-    connection = provider.connection;
-    const text = connection.doc.getText("t");
-    text.insert(0, "kept");
-    text.insert(text.length, " too large");
-    const clientId = connection.doc.clientID;
-    await waitFor(async () =>
-      expect(await rowsOf(artifact)).toEqual([
-        [artifact, clientId, 1],
-        [artifact, clientId, 2],
-      ])
-    );
-    provider.socket.receive(syncStatusFrame(true, artifact));
-    provider.socket.receive(syncStatusFrame(false, artifact));
-    provider.socket.dispatchEvent(
-      new CloseEvent("close", { code: DOCUMENT_TOO_LARGE_CLOSE_CODE, reason: "DOC_TOO_LARGE" })
-    );
+for (const refusal of [
+  {
+    name: "too large",
+    reason: "DOC_TOO_LARGE",
+    notice:
+      "Your last edit was not saved: it would make this document larger than a Dispatch document may be. Your other edits are kept.",
+  },
+  {
+    name: "too tangled to merge",
+    reason: "DOC_TOO_TANGLED",
+    notice:
+      "Your last edit was not saved: Dispatch could not merge it into this document quickly enough. Your other edits are kept.",
+  },
+]) {
+  test(`a real provider closed as ${refusal.name} drops the refused edit's row and stops for the host`, async () => {
+    const artifact = artifactId();
+    const realSocket = globalThis.WebSocket;
+    globalThis.WebSocket = OpenSocket as unknown as typeof WebSocket;
+    OpenSocket.opened = [];
+    let connection: DocumentConnection | undefined;
+    const reasons: string[] = [];
+    try {
+      const provider = await syncedProvider(artifact, {
+        onTooLarge: (reason) => {
+          reasons.push(reason);
+        },
+      });
+      connection = provider.connection;
+      const text = connection.doc.getText("t");
+      text.insert(0, "kept");
+      text.insert(text.length, " refused");
+      const clientId = connection.doc.clientID;
+      await waitFor(async () =>
+        expect(await rowsOf(artifact)).toEqual([
+          [artifact, clientId, 1],
+          [artifact, clientId, 2],
+        ])
+      );
+      provider.socket.receive(syncStatusFrame(true, artifact));
+      provider.socket.receive(syncStatusFrame(false, artifact));
+      provider.socket.dispatchEvent(
+        new CloseEvent("close", { code: DOCUMENT_TOO_LARGE_CLOSE_CODE, reason: refusal.reason })
+      );
 
-    await waitFor(() => expect(tooLarge).toBe(1));
-    expect(await rowsOf(artifact)).toEqual([]);
-    // The provider's own close handler starts a reconnect before the connection's runs; the
-    // connection's disconnect closes it, so no socket is left for the provider to sync on.
-    expect(OpenSocket.opened.every((socket) => socket.closed)).toBe(true);
-  } finally {
-    connection?.destroy();
-    globalThis.WebSocket = realSocket;
-  }
-});
+      await waitFor(() => expect(reasons).toEqual([refusal.reason]));
+      expect(refusedEditNotice(refusal.reason)).toBe(refusal.notice);
+      expect(await rowsOf(artifact)).toEqual([]);
+      // The provider's own close handler starts a reconnect before the connection's runs; the
+      // connection's disconnect closes it, so no socket is left for the provider to sync on.
+      expect(OpenSocket.opened.every((socket) => socket.closed)).toBe(true);
+    } finally {
+      connection?.destroy();
+      globalThis.WebSocket = realSocket;
+    }
+  });
+}
 
 test("a real provider closed as busy reconnects, keeps the edit, and says when it is taken", async () => {
   const artifact = artifactId();

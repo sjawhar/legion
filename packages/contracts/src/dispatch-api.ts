@@ -2460,9 +2460,18 @@ export const DOCUMENT_SCHEMA_CLOSE_REASON = "DOC_SCHEMA";
  */
 export const DOCUMENT_TOO_LARGE_CLOSE_CODE = 4413;
 
-/** The reason the document websocket closes with `DOCUMENT_TOO_LARGE_CLOSE_CODE`. Generated into
- *  Go as `contracts.DocumentTooLargeCloseReason`. */
+/** The reason the document websocket closes with `DOCUMENT_TOO_LARGE_CLOSE_CODE` when the update
+ *  would grow the document past a bound. Generated into Go as
+ *  `contracts.DocumentTooLargeCloseReason`. */
 export const DOCUMENT_TOO_LARGE_CLOSE_REASON = "DOC_TOO_LARGE";
+
+/** The reason the document websocket closes with `DOCUMENT_TOO_LARGE_CLOSE_CODE` when the server
+ *  could not merge the update into the document quickly enough: its merge would scan more of the
+ *  document's items than the server lets one update scan (ygo's integrate-scan bound), so it is
+ *  refused whole, with nothing of it stored or relayed. Permanent like the size refusal: the
+ *  dashboard drops the refused edit and re-reads the document, and tells the person in words of
+ *  its own. Generated into Go as `contracts.DocumentTooTangledCloseReason`. */
+export const DOCUMENT_TOO_TANGLED_CLOSE_REASON = "DOC_TOO_TANGLED";
 
 /**
  * The close code the document websocket (`/ws/doc/{room}`) refuses with when the memory budget over

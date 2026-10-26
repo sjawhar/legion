@@ -310,7 +310,8 @@ func observedReplica(tb testing.TB, service *Service, live *crdt.Doc, markdown *
 
 // benchmarkLiveDocument is a live document holding about size bytes of a spec's markdown - headings,
 // marked paragraphs, lists, tables and code - after 2,000 keystrokes typed and deleted across it,
-// so its delete set is a document's that people have edited.
+// so its delete set is a document's that people have edited, bounded as a room's document is
+// (boundRoomDocument), since a bounded document's apply copies state an unbounded one's does not.
 //
 // Each paragraph runs on in ordinary words past the sentence that names it, and that is what makes
 // the document one a room can hold: the shape without those words makes 0.28 elements a byte, so
@@ -350,7 +351,7 @@ func benchmarkLiveDocument(tb testing.TB, size int) *crdt.Doc {
 		live.Transact(func(txn *crdt.Transaction) { text.Insert(txn, 0, "x", nil) })
 		live.Transact(func(txn *crdt.Transaction) { text.Delete(txn, 0, 1) })
 	}
-	return live
+	return boundRoomDocument(live)
 }
 
 func paragraphTexts(live *crdt.Doc) []*crdt.YXmlText {

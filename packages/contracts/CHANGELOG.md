@@ -12,6 +12,14 @@
   refused edit and re-reads the document rather than reconnecting into the same refusal. 4503 is
   transient — the memory budget over the documents Dispatch holds open is full and nothing can be
   closed, so the dashboard keeps the edit and the provider's own backoff retries it (INFRA-179).
+- `DOCUMENT_TOO_TANGLED_CLOSE_REASON` (`DOC_TOO_TANGLED`), a second reason for
+  `DOCUMENT_TOO_LARGE_CLOSE_CODE` (4413), generated into Go as
+  `contracts.DocumentTooTangledCloseReason`: the server could not merge the browser's update into
+  the document quickly enough, because its merge would scan more of the document's items than the
+  server lets one update scan (ygo's integrate-scan bound), so the update is refused whole and
+  nothing of it is stored or relayed. Like `DOC_TOO_LARGE` it is permanent: the dashboard drops the
+  refused edit and re-reads the document, and says "Your last edit was not saved: Dispatch could not
+  merge it into this document quickly enough. Your other edits are kept." (INFRA-179).
 - `dispatch doc-edit --help` says the spec, not every document, holds no progress or status, and that a record of open items or progress is a document of its own.
 
 - `SearchCoverage`, `SearchCoverageKinds` and `SearchCoverageCounts`, the body of

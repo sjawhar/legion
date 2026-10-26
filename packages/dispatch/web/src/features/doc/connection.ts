@@ -3,6 +3,7 @@ import {
   DOCUMENT_BUSY_CLOSE_CODE,
   DOCUMENT_SCHEMA_CLOSE_CODE,
   DOCUMENT_TOO_LARGE_CLOSE_CODE,
+  DOCUMENT_TOO_TANGLED_CLOSE_REASON,
 } from "@legion/contracts";
 import type { Awareness } from "y-protocols/awareness";
 import type { Doc } from "yjs";
@@ -60,6 +61,18 @@ export function connectionLabel(
   return notice === undefined ? label : `${label} · ${notice}`;
 }
 
+/**
+ * The sentence the editor shows for an edit the server refused with
+ * `DOCUMENT_TOO_LARGE_CLOSE_CODE`, by the close's reason: an edit the server could not merge into
+ * the document quickly enough (`DOCUMENT_TOO_TANGLED_CLOSE_REASON`), or one that would make the
+ * document too large.
+ */
+export function refusedEditNotice(reason: string): string {
+  return reason === DOCUMENT_TOO_TANGLED_CLOSE_REASON
+    ? "Your last edit was not saved: Dispatch could not merge it into this document quickly enough. Your other edits are kept."
+    : "Your last edit was not saved: it would make this document larger than a Dispatch document may be. Your other edits are kept.";
+}
+
 export interface DocumentConnection {
   readonly awareness: Awareness;
   readonly doc: Doc;
@@ -75,12 +88,14 @@ export interface ConnectionCallbacks {
    */
   onOutsideSchema(): void;
   /**
-   * Fires when the server refused this browser's edit because it would take the document past its
-   * size bound (`DOCUMENT_TOO_LARGE_CLOSE_CODE`). The connection has stopped reconnecting and the
-   * refused edit's saved row is gone; the refused text is still in this connection's document, so
-   * the host rebuilds it from a fresh read rather than let a reconnect send it again.
+   * Fires when the server refused this browser's edit with `DOCUMENT_TOO_LARGE_CLOSE_CODE`, with
+   * the close's reason: the edit would take the document past its size bound, or the server could
+   * not merge it quickly enough (`DOCUMENT_TOO_TANGLED_CLOSE_REASON`). The connection has stopped
+   * reconnecting and the refused edit's saved row is gone; the refused text is still in this
+   * connection's document, so the host rebuilds it from a fresh read rather than let a reconnect
+   * send it again.
    */
-  onTooLarge(): void;
+  onTooLarge(reason: string): void;
   /**
    * Fires `true` when the server closed the socket because the memory it keeps for open documents
    * is full (`DOCUMENT_BUSY_CLOSE_CODE`), and `false` once it applies a frame from this browser
@@ -197,7 +212,8 @@ export async function loadDocumentTransport(): Promise<ConnectDocument> {
         // later attempt finds what it has freed, so the edits it refused wait to go with it. The
         // other two are the server's decision about the document itself, so the provider stops:
         // a document outside the Proof schema the host reads again, and an edit past the
-        // document's size bound is dropped before the host rebuilds the document without it.
+        // document's size bound, or one the server could not merge quickly enough, is dropped
+        // before the host rebuilds the document without it.
         switch (event.code) {
           case DOCUMENT_SCHEMA_CLOSE_CODE:
             provider.disconnect();
@@ -208,7 +224,7 @@ export async function loadDocumentTransport(): Promise<ConnectDocument> {
             // has already started a reconnect that this disconnect ends.
             void Promise.resolve(sync?.dropRefused(restored)).then(() => {
               if (!destroyed) {
-                callbacks.onTooLarge();
+                callbacks.onTooLarge(event.reason);
               }
             });
             provider.disconnect();
