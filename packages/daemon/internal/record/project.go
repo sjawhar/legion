@@ -92,5 +92,24 @@ func TreeLive(ctx context.Context, store Store, tx pgx.Tx, root Issue) (bool, er
 	if err != nil {
 		return false, err
 	}
-	return slices.ContainsFunc(Waiting(issues, slots), func(waiting Issue) bool { return waiting.Key == root.Key }), nil
+	_, live := LiveRoots(issues, slots)[root.Key]
+	return live, nil
+}
+
+// LiveRoots is the set of keys whose trees are live (TreeLive), read from issues and slots already
+// in hand: each root does not linger and holds a slot or waits for one.
+func LiveRoots(issues []Issue, slots []Slot) map[string]struct{} {
+	live := make(map[string]struct{}, len(slots))
+	for _, slot := range slots {
+		live[slot.Issue] = struct{}{}
+	}
+	for _, issue := range Waiting(issues, slots) {
+		live[issue.Key] = struct{}{}
+	}
+	for _, issue := range issues {
+		if issue.Lingers() {
+			delete(live, issue.Key)
+		}
+	}
+	return live
 }

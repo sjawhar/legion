@@ -100,15 +100,7 @@ func (e *Engine) Adopt(ctx context.Context, tx pgx.Tx, issue, root record.Issue,
 			return err
 		}
 		if member.Status == "todo" {
-			fact := intake.DispatchIssue{
-				Key: member.Key, Seq: member.LastDispatchSeq, Status: member.Status, Title: member.Title,
-				Rank: member.Rank, HandedOver: member.HandedOver, ResolvedRepo: member.Repo,
-			}
-			if member.Parent != nil {
-				fact.Parent = *member.Parent
-			}
-			at := Resolution{Repo: member.Repo, DefaultBranch: member.DefaultBranch, GitHubRepo: member.GitHubRepo}
-			if err := e.enterChild(ctx, tx, root, fact, next, at); err != nil {
+			if err := e.enterChild(ctx, tx, root, RecordedFact(member), next, recordedResolution(member)); err != nil {
 				return err
 			}
 			continue

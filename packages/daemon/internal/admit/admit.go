@@ -460,18 +460,19 @@ func (a *Admission) applySummary(ctx context.Context, tx pgx.Tx, summary dispatc
 		}
 		stored, status = refreshed, summary.Status
 	}
+	o := observed{
+		Title: summary.Title, Parent: deref(summary.Parent), Rank: summary.Rank,
+		Status: status, Shown: summary.Status, AncestorTree: summary.AncestorTree, HandedOver: handed, Seq: seq,
+	}
 	if summary.Status == "todo" && handed && readmittable(*stored) {
-		return a.readmit(ctx, tx, *stored, summary.Title, deref(summary.Parent), summary.Rank, summary.AncestorTree, seq, false)
+		return a.readmit(ctx, tx, *stored, o, false)
 	}
 	if summary.Status == "todo" && stored.Status == "in_progress" {
 		if _, active := slotted[stored.Key]; active {
 			return nil
 		}
 	}
-	return a.recordObservation(ctx, tx, *stored, observed{
-		Title: summary.Title, Parent: deref(summary.Parent), Rank: summary.Rank,
-		Status: status, Shown: summary.Status, AncestorTree: summary.AncestorTree, HandedOver: handed, Seq: seq,
-	})
+	return a.recordObservation(ctx, tx, *stored, o)
 }
 
 // applyObservation records a newer Dispatch observation of a recorded issue: the one place a live
@@ -483,6 +484,10 @@ func (a *Admission) applyObservation(ctx context.Context, tx pgx.Tx, stored reco
 		return nil
 	}
 	handed := observation.HandedOver
+	o := observed{
+		Title: observation.Title, Parent: observation.Parent, Rank: observation.Rank,
+		Status: observation.Status, Shown: observation.Status, AncestorTree: observation.AncestorTree, HandedOver: handed, Seq: observation.Seq,
+	}
 	if observation.DaemonActor && observation.HandedOver && observation.Status == "todo" {
 		if handover, err := a.store.Handover(ctx, tx, stored.Key); err != nil || handover == nil {
 			if err != nil {
@@ -495,12 +500,12 @@ func (a *Admission) applyObservation(ctx context.Context, tx pgx.Tx, stored reco
 			}
 			if !handover.Cancelled && root != nil && root.LingersAt(handover.Generation) {
 				a.log.Info("admission hand-over", "issue", stored.Key, "tree", handover.Tree, "linger", handover.Generation)
-				return a.readmit(ctx, tx, stored, observation.Title, observation.Parent, observation.Rank, observation.AncestorTree, observation.Seq, startedRun(stored))
+				return a.readmit(ctx, tx, stored, o, startedRun(stored))
 			}
 		}
 	}
 	if observation.Status == "todo" && handed && readmittable(stored) {
-		return a.readmit(ctx, tx, stored, observation.Title, observation.Parent, observation.Rank, observation.AncestorTree, observation.Seq, false)
+		return a.readmit(ctx, tx, stored, o, false)
 	}
 	orphan, err := a.orphan(ctx, tx, stored, observation.Status, handed)
 	if err != nil {
@@ -511,12 +516,9 @@ func (a *Admission) applyObservation(ctx context.Context, tx pgx.Tx, stored reco
 		// Legion: a child stranded by a root that closed before its hand-over existed carries its
 		// phase, gate and pull request too (startedRun).
 		a.log.Info("admission orphan", "issue", stored.Key, "parent", observation.Parent)
-		return a.readmit(ctx, tx, stored, observation.Title, observation.Parent, observation.Rank, observation.AncestorTree, observation.Seq, startedRun(stored))
+		return a.readmit(ctx, tx, stored, o, startedRun(stored))
 	}
-	return a.recordObservation(ctx, tx, stored, observed{
-		Title: observation.Title, Parent: observation.Parent, Rank: observation.Rank,
-		Status: observation.Status, Shown: observation.Status, AncestorTree: observation.AncestorTree, HandedOver: handed, Seq: observation.Seq,
-	})
+	return a.recordObservation(ctx, tx, stored, o)
 }
 
 // consumeHandover completes an outbox hand-over when Dispatch already showed its todo and label.
@@ -540,7 +542,9 @@ func (a *Admission) consumeHandover(ctx context.Context, tx pgx.Tx, fact intake.
 	intake.OnCommit(ctx, func() {
 		a.log.Info("admission hand-over", "issue", fact.Issue, "tree", fact.Tree, "linger", fact.Generation, "via", "outbox")
 	})
-	return a.readmit(ctx, tx, *stored, stored.Title, deref(stored.Parent), stored.Rank, stored.AncestorTree, stored.LastDispatchSeq, startedRun(*stored))
+	return a.readmit(ctx, tx, *stored, observed{
+		Title: stored.Title, Parent: deref(stored.Parent), Rank: stored.Rank, AncestorTree: stored.AncestorTree, Seq: stored.LastDispatchSeq,
+	}, startedRun(*stored))
 }
 
 // orphan says whether an observation makes a recorded child an orphan, admitted as a root of its
@@ -623,14 +627,14 @@ func startedRun(issue record.Issue) bool {
 }
 
 // readmit records a lingering or closed root's todo, or an orphan's, as a new generation waiting
-// for a slot. A root starts a fresh generation: its facts clear across its whole tree, as do those
-// of an orphan readmitted without carry. An orphan readmitted with carry (one that started a phase)
-// is the same work moving from a finished root to a root of its own, so its phase, phase rows, gate
-// and pull request (with its observed head) carry into the new generation, and its promotion starts
-// both its architect and the role of that carried phase. A merged pull request is never observed as
-// merged again, and a review, acceptance or READY would otherwise rerun work already decided or
-// landed.
-func (a *Admission) readmit(ctx context.Context, tx pgx.Tx, stored record.Issue, title, parentKey, rank, ancestorTree string, seq int64, carry bool) error {
+// for a slot, taking o's title, parent, rank, ancestor tree and sequence. A root starts a fresh
+// generation: its facts clear across its whole tree, as do those of an orphan readmitted without
+// carry. An orphan readmitted with carry (one that started a phase) is the same work moving from a
+// finished root to a root of its own, so its phase, phase rows, gate and pull request (with its
+// observed head) carry into the new generation, and its promotion starts both its architect and
+// the role of that carried phase. A merged pull request is never observed as merged again, and a
+// review, acceptance or READY would otherwise rerun work already decided or landed.
+func (a *Admission) readmit(ctx context.Context, tx pgx.Tx, stored record.Issue, o observed, carry bool) error {
 	if stored.Generation == ^uint64(0) {
 		return fmt.Errorf("re-admit %s: generation overflows", stored.Key)
 	}
@@ -650,19 +654,19 @@ func (a *Admission) readmit(ctx context.Context, tx pgx.Tx, stored record.Issue,
 		}
 	}
 	stored.Project = a.project
-	stored.Title = title
+	stored.Title = o.Title
 	stored.HandedOver = true
-	stored.Parent = record.ParentOf(parentKey)
-	stored.AncestorTree = ancestorTree
+	stored.Parent = record.ParentOf(o.Parent)
+	stored.AncestorTree = o.AncestorTree
 	stored.Tree = stored.Key
 	if !orphan {
 		stored.Phase, stored.Hold, stored.ReadyPendingVersion = phase.Admitted, nil, nil
 	}
 	stored.Generation++
 	stored.Status, stored.DispatchStatus = "todo", "todo"
-	stored.Rank = rank
+	stored.Rank = o.Rank
 	stored.LingerUntil = nil
-	stored.LastDispatchSeq = seq
+	stored.LastDispatchSeq = o.Seq
 	if err := a.store.PutIssue(ctx, tx, stored); err != nil {
 		return fmt.Errorf("record re-admission %s: %w", stored.Key, err)
 	}
@@ -780,12 +784,9 @@ func (a *Admission) promote(ctx context.Context, tx pgx.Tx) (int, error) {
 // every one of them back in the very call that released them. A queued root a live tree took in
 // (adoptQueuedRoots) leaves the line before anything else reads it.
 func (a *Admission) promoteHolds(ctx context.Context, tx pgx.Tx, respectHolds bool) (int, error) {
-	if err := a.adoptQueuedRoots(ctx, tx, respectHolds); err != nil {
-		return 0, err
-	}
-	issues, err := a.store.Issues(ctx, tx)
+	issues, err := a.adoptQueuedRoots(ctx, tx, respectHolds)
 	if err != nil {
-		return 0, fmt.Errorf("list admission issues: %w", err)
+		return 0, err
 	}
 	slots, err := a.store.Slots(ctx, tx)
 	if err != nil {
@@ -884,18 +885,26 @@ func (a *Admission) held(key string) bool {
 // key Reconcile holds, the candidate's or its target's, is left for release to apply first, when
 // respectHolds is set.
 //
-// It loops until a pass adopts nothing. Each adoption makes a root a member, never a root again,
-// so the roots bound the passes. A candidate whose target root is itself a candidate waits for
-// the next pass, so nested queued roots join the live tree at the top once each, rather than
-// passing through the queued tree between; candidates whose parents form a cycle are each other's
-// targets and stay roots of their own.
-func (a *Admission) adoptQueuedRoots(ctx context.Context, tx pgx.Tx, respectHolds bool) error {
+// It loops until a pass adopts nothing, and returns the issues that pass read: it wrote nothing, so
+// they are the record as it stands. Each adoption makes a root a member, never a root again, so the
+// roots bound the passes. A candidate whose target root is itself a candidate waits for the next
+// pass, so nested queued roots join the live tree at the top once each, rather than passing through
+// the queued tree between; candidates whose parents form a cycle are each other's targets and stay
+// roots of their own.
+func (a *Admission) adoptQueuedRoots(ctx context.Context, tx pgx.Tx, respectHolds bool) ([]record.Issue, error) {
 	type adoption struct{ issue, target record.Issue }
 	for {
 		issues, err := a.store.Issues(ctx, tx)
 		if err != nil {
-			return fmt.Errorf("list admission issues: %w", err)
+			return nil, fmt.Errorf("list admission issues: %w", err)
 		}
+		slots, err := a.store.Slots(ctx, tx)
+		if err != nil {
+			return nil, fmt.Errorf("list admission slots: %w", err)
+		}
+		// A target whose tree is not live refuses every candidate (AdoptionRefusal), so it is
+		// skipped here without the refusal's own reads.
+		live := record.LiveRoots(issues, slots)
 		recorded := make(map[string]record.Issue, len(issues))
 		for _, issue := range issues {
 			recorded[issue.Key] = issue
@@ -913,10 +922,12 @@ func (a *Admission) adoptQueuedRoots(ctx context.Context, tx pgx.Tx, respectHold
 			if !ok || target.Key == issue.Key || respectHolds && (a.held(issue.Key) || a.held(target.Key)) {
 				continue
 			}
-			// The refusal reads whether target's tree is live, the one tree a member runs in.
+			if _, ok := live[target.Key]; !ok {
+				continue
+			}
 			refusal, err := a.engine.AdoptionRefusal(ctx, tx, issue, target.Key)
 			if err != nil {
-				return fmt.Errorf("read whether %s joins the tree of %s: %w", issue.Key, target.Key, err)
+				return nil, fmt.Errorf("read whether %s joins the tree of %s: %w", issue.Key, target.Key, err)
 			}
 			if refusal == nil {
 				candidates = append(candidates, adoption{issue: issue, target: target})
@@ -928,12 +939,12 @@ func (a *Admission) adoptQueuedRoots(ctx context.Context, tx pgx.Tx, respectHold
 				continue
 			}
 			if err := a.engine.Adopt(ctx, tx, candidate.issue, candidate.target, *candidate.issue.Parent); err != nil {
-				return fmt.Errorf("adopt %s into the tree of %s: %w", candidate.issue.Key, candidate.target.Key, err)
+				return nil, fmt.Errorf("adopt %s into the tree of %s: %w", candidate.issue.Key, candidate.target.Key, err)
 			}
 			adopted = true
 		}
 		if !adopted {
-			return nil
+			return issues, nil
 		}
 	}
 }
@@ -1188,11 +1199,7 @@ func (a *Admission) reenterStrandedChildren(ctx context.Context, tx pgx.Tx, cand
 		if child.Status != "todo" || child.Phase != phase.Done {
 			continue
 		}
-		fact := intake.DispatchIssue{
-			Key: child.Key, Seq: child.LastDispatchSeq, Status: child.Status, Title: child.Title,
-			Parent: deref(child.Parent), Rank: child.Rank, HandedOver: child.HandedOver, ResolvedRepo: child.Repo,
-		}
-		if err := a.engine.ReenterChild(ctx, tx, child, fact); err != nil {
+		if err := a.engine.ReenterChild(ctx, tx, child, workflow.RecordedFact(child)); err != nil {
 			return fmt.Errorf("re-enter stranded child %s: %w", child.Key, err)
 		}
 	}

@@ -347,6 +347,26 @@ func (e *Engine) recordChild(ctx context.Context, tx pgx.Tx, root record.Issue, 
 	return e.enterChild(ctx, tx, root, fact, root.Generation, resolution)
 }
 
+// RecordedFact is the todo fact an issue's own record already says, for a run no live event
+// brought: admission's promotion of a stranded child (ReenterChild) and Adopt's entry of a queued
+// root's todo members.
+func RecordedFact(issue record.Issue) intake.DispatchIssue {
+	fact := intake.DispatchIssue{
+		Key: issue.Key, Seq: issue.LastDispatchSeq, Status: issue.Status, Title: issue.Title,
+		Rank: issue.Rank, HandedOver: issue.HandedOver, ResolvedRepo: issue.Repo,
+	}
+	if issue.Parent != nil {
+		fact.Parent = *issue.Parent
+	}
+	return fact
+}
+
+// recordedResolution is the repository an issue was first recorded on, which a re-entered or
+// adopted record keeps.
+func recordedResolution(issue record.Issue) Resolution {
+	return Resolution{Repo: issue.Repo, DefaultBranch: issue.DefaultBranch, GitHubRepo: issue.GitHubRepo}
+}
+
 // ReenterChild takes a recorded child set back to todo into a new run under its live tree, the way
 // recordChildUnderLiveTree enters an unrecorded one: the run is the child's next generation, so no
 // row its previous run queued acts on it; the run it interrupted is stopped, the previous run's
@@ -408,7 +428,7 @@ func (e *Engine) ReenterChild(ctx context.Context, tx pgx.Tx, child record.Issue
 	if err := e.store.ClearGeneration(ctx, tx, child.Key); err != nil {
 		return err
 	}
-	if err := e.enterChild(ctx, tx, *root, fact, next, Resolution{Repo: child.Repo, DefaultBranch: child.DefaultBranch, GitHubRepo: child.GitHubRepo}); err != nil {
+	if err := e.enterChild(ctx, tx, *root, fact, next, recordedResolution(child)); err != nil {
 		return err
 	}
 	return e.notice(ctx, tx, child.Key, ChildReenteredNotice(child.Key, root.Key))
