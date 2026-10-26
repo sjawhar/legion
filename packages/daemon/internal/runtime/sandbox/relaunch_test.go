@@ -87,7 +87,7 @@ func TestSpawnCreatesTheIssueSandboxAndRoleLocator(t *testing.T) {
 	}
 	pod := g.pod(name)
 	if err := loc.Validate(); err != nil || loc.Sandbox.PodUID != string(pod.UID) || loc.Runtime != runtime.RuntimeSandbox ||
-		loc.Sandbox.Name != name || loc.Sandbox.Container != string(spec.Role) || loc.Sandbox.Generation != spec.Generation ||
+		loc.Sandbox.Name != name || loc.Sandbox.Container != workerContainer || loc.Sandbox.Generation != spec.Generation ||
 		loc.Incarnation != runtime.SandboxIncarnation(string(pod.UID), spec.Generation) || loc.Claim != workerToken {
 		t.Fatalf("locator %+v (%v), want the tester process in issue pod uid %s", loc, err, pod.UID)
 	}
@@ -152,7 +152,7 @@ func TestRoleStartsShareOneIssuePodAndDoNotReinitializeIt(t *testing.T) {
 	if root.Sandbox.Name != worker.Sandbox.Name || root.Sandbox.PodUID != worker.Sandbox.PodUID {
 		t.Fatalf("role locators root=%+v worker=%+v, want one issue pod", root.Sandbox, worker.Sandbox)
 	}
-	if root.Sandbox.Container != string(claim.RoleArchitect) || worker.Sandbox.Container != string(claim.RoleTester) {
+	if root.Sandbox.Container != workerContainer || worker.Sandbox.Container != workerContainer {
 		t.Fatalf("containers root=%q worker=%q", root.Sandbox.Container, worker.Sandbox.Container)
 	}
 	for _, write := range g.writes()[writes:] {
@@ -806,7 +806,7 @@ func TestASuspendedSandboxsInstallingResumeReplacesAndInstallsNothing(t *testing
 	}
 }
 
-// Stage 4b's finished-idle-planner-death: `kill 1` in a role container ends that role's launcher,
+// Stage 4b's finished-idle-planner-death: `kill 1` in an issue pod's `roles` container ends its launcher,
 // the kubelet restarts the container under restartPolicy Always, and the new launcher connects
 // before the pod status drops the killed instance's terminated state. The replacement generation
 // is judged by its own launcher, not by that stale status: reading it as dead reported every
@@ -829,7 +829,7 @@ func TestAReplacementGenerationOutlivesTheKilledInstancesTerminatedStatus(t *tes
 			}
 		}
 	})
-	g.eventually("the store to see the killed role container", func() bool {
+	g.eventually("the store to see the killed roles container", func() bool {
 		status := containerStatus(g.r.storedPod(name), workerContainer)
 		return status != nil && status.State.Terminated != nil
 	})
@@ -960,16 +960,16 @@ func TestAPodOfATreeLaunchesWhileAnotherIsStillInitializing(t *testing.T) {
 	}
 }
 
-// ProvisionBound is the two provisioning phases' bounds together, workspace.FetchBudget (100m: the
-// wait for the repository cache, then one bound for the cache's stream and its verification, then
-// one of its own for the delta from GitHub) for workspace-fetch and workspace.CloneTimeout (30m)
-// for workspace-init's shared clone,
-// and nothing more: provisioning from the feed onto the issue's own volume waits on no other pod,
-// so no lock wait is added to it. Pinned to a literal, 130 minutes, since no test can wait the real
+// ProvisionBound is the two provisioning phases' bounds together, workspace.FetchBudget (190m: the
+// wait for the repository cache, which covers the cache's own first clone, then one bound for the
+// cache's stream and its verification, then one of its own for the delta from GitHub) for
+// workspace-fetch and workspace.CloneTimeout (30m) for workspace-init's shared clone,
+// and nothing more: provisioning from the feed onto the pod's own disk waits on no other pod,
+// so no lock wait is added to it. Pinned to a literal, 220 minutes, since no test can wait the real
 // bound out.
 func TestProvisionBoundIsTheFetchsWholeBudgetAndTheClonesBound(t *testing.T) {
 	g := newRig(t, nil)
-	if got, want := g.r.ProvisionBound(), workspace.CacheWaitTimeout+2*workspace.FetchTimeout+workspace.CloneTimeout; got != 130*time.Minute || got != want {
+	if got, want := g.r.ProvisionBound(), workspace.CacheWaitTimeout+2*workspace.FetchTimeout+workspace.CloneTimeout; got != 220*time.Minute || got != want {
 		t.Fatalf("ProvisionBound = %s, want %s: the cache wait, the stream's bound, the delta's own, and the shared clone's", got, want)
 	}
 }

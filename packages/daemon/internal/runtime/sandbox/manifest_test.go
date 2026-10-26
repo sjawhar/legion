@@ -3,7 +3,9 @@ package sandbox
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"flag"
+	"io/fs"
 	"maps"
 	"os"
 	"os/exec"
@@ -21,6 +23,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
+	"github.com/sjawhar/legion/daemon/internal/launcher"
 	"github.com/sjawhar/legion/daemon/internal/ompsessions"
 	"github.com/sjawhar/legion/daemon/internal/podsafety"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
@@ -40,27 +43,24 @@ func goldenOptions() Options {
 }
 
 // reservations are the daemon's default reservations (config.DefaultResources) as the daemon
-// translates them for the runtime (internal/daemon/kubernetes.go, roleRequirements): every role,
-// the controller included, its cpu and memory requested as the defaults set them — each equal to
+// translates them for the runtime (internal/daemon/kubernetes.go, requirements): an issue pod's
+// and the controller's pod's, its cpu and memory requested as the defaults set them — each equal to
 // its limit — and its ephemeral storage the limit over the smaller request.
-func reservations() map[claim.Role]corev1.ResourceRequirements {
-	translated := map[claim.Role]corev1.ResourceRequirements{}
-	for role, reservation := range config.DefaultResources() {
-		translated[role] = requirementsOf(reservation)
-	}
-	return translated
+func reservations() PodResources {
+	defaults := config.DefaultResources()
+	return PodResources{Issue: requirementsOf(defaults.Issue), Controller: requirementsOf(defaults.Controller)}
 }
 
 // probeReservation is the image probe's own reservation as the daemon hands it
 // (internal/daemon/kubernetes.go, probeReservation), translated the same way: 250m and 1Gi, with a
-// 5Gi disk bound over a 1Gi request — not a role's share, written here as data as the defaults are.
+// 5Gi disk bound over a 1Gi request — not a pod's share, written here as data as the defaults are.
 func probeReservation() corev1.ResourceRequirements {
-	return requirementsOf(config.RoleResources{CPU: "250m", CPURequest: "250m", Memory: "1Gi", MemoryRequest: "1Gi", EphemeralStorage: "5Gi", EphemeralStorageRequest: "1Gi"})
+	return requirementsOf(config.Reservation{CPU: "250m", CPURequest: "250m", Memory: "1Gi", MemoryRequest: "1Gi", EphemeralStorage: "5Gi", EphemeralStorageRequest: "1Gi"})
 }
 
-// requirementsOf is reservation as a container's requirements, translated as roleRequirements
-// translates it.
-func requirementsOf(reservation config.RoleResources) corev1.ResourceRequirements {
+// requirementsOf is reservation as a container's requirements, translated as the daemon's
+// requirements translates it.
+func requirementsOf(reservation config.Reservation) corev1.ResourceRequirements {
 	return corev1.ResourceRequirements{
 		Requests: corev1.ResourceList{
 			corev1.ResourceCPU: resource.MustParse(reservation.CPURequest), corev1.ResourceMemory: resource.MustParse(reservation.MemoryRequest),
@@ -119,10 +119,11 @@ func podQOS(spec corev1.PodSpec) corev1.PodQOSClass {
 // and memory and bursts past neither: each has a non-zero request for both, equal to its limit,
 // which is the kubelet's rule for the Guaranteed class — judged over every container of the pod,
 // the init containers included — and each is bounded on the node's disk, an ephemeral-storage
-// request under its limit. An issue pod's six launchers each carry their role's reservation and its
-// two init containers the launching role's; the controller's pod carries the controller's on its
-// one container; and the image probe's one container carries the probe's own, which the daemon
-// hands it. A deployment with no `resources` block therefore runs only Guaranteed pods.
+// request under its limit. An issue pod's one container and its two init containers carry the
+// issue pod's reservation, whichever role's launch creates it; the controller's pod carries the
+// controller's on its one container; and the image probe's one container carries the probe's own,
+// which the daemon hands it. A deployment with no `resources` block therefore runs only Guaranteed
+// pods.
 func TestEveryContainerOfEveryPodIsGuaranteed(t *testing.T) {
 	r, err := configure(goldenOptions())
 	if err != nil {
@@ -131,15 +132,13 @@ func TestEveryContainerOfEveryPodIsGuaranteed(t *testing.T) {
 	want := reservations()
 	probe := r.probeManifest(probeSandboxName, ImageProbe{Contract: 3, Resources: probeReservation(), RoleReferences: testRoleReferences}, time.Now())
 	for name, tc := range map[string]struct {
-		pod corev1.PodSpec
-		// launch is the reservation every container that is not a role's own carries: the init
-		// containers', the role whose launch creates the pod; the probe's one, the probe's own.
-		launch     corev1.ResourceRequirements
+		pod        corev1.PodSpec
+		want       corev1.ResourceRequirements
 		containers int
 	}{
-		"root":       {podOf(t, r, rootSpec(t)), want[claim.RoleArchitect], 8},
-		"worker":     {podOf(t, r, workerSpec(t)), want[claim.RoleTester], 8},
-		"controller": {podOf(t, r, controllerSpec(t)), want[claim.RoleController], 1},
+		"root":       {podOf(t, r, rootSpec(t)), want.Issue, 3},
+		"worker":     {podOf(t, r, workerSpec(t)), want.Issue, 3},
+		"controller": {podOf(t, r, controllerSpec(t)), want.Controller, 1},
 		"probe":      {probe.Spec.PodTemplate.Spec, probeReservation(), 1},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -151,12 +150,8 @@ func TestEveryContainerOfEveryPodIsGuaranteed(t *testing.T) {
 				t.Fatalf("the pod runs %d containers, want %d", len(containers), tc.containers)
 			}
 			for _, c := range containers {
-				expected, whose := tc.launch, "the launch's"
-				if named := claim.Role(c.Name); claim.IsRole(named) || named == claim.RoleController {
-					expected, whose = want[named], string(named)+"'s"
-				}
-				if !reflect.DeepEqual(c.Resources, expected) {
-					t.Errorf("container %s carries %+v, want %s reservation %+v", c.Name, c.Resources, whose, expected)
+				if !reflect.DeepEqual(c.Resources, tc.want) {
+					t.Errorf("container %s carries %+v, want the pod's reservation %+v", c.Name, c.Resources, tc.want)
 				}
 				for _, kind := range []corev1.ResourceName{corev1.ResourceCPU, corev1.ResourceMemory} {
 					request, limit := c.Resources.Requests[kind], c.Resources.Limits[kind]
@@ -175,49 +170,34 @@ func TestEveryContainerOfEveryPodIsGuaranteed(t *testing.T) {
 	}
 }
 
-// A role whose reservation requests less memory than its limit — the implementer at 8Gi under
-// 32Gi — runs its launcher container with exactly that request and limit, and every issue pod it
-// is a container of is Burstable, whichever role's launch created it; the init containers carry the
-// launching role's reservation as before: the root's, created by the architect's launch, the
-// architect's default Guaranteed 250m and 1Gi, and a pod the implementer's launch creates the
-// implementer's 8Gi request and 32Gi limit. The controller's pod, which holds no implementer, and
-// the image probe's, sized by the probe's own reservation, stay Guaranteed.
+// An issue-pod reservation that requests less memory than its limit — 8Gi under 32Gi — is what
+// every container of every issue pod carries, the init containers included, whichever role's launch
+// created the pod, and every issue pod is Burstable. The controller's pod, sized by its own
+// reservation, and the image probe's, sized by the probe's, stay Guaranteed.
 func TestARequestBelowItsLimitRendersABurstablePod(t *testing.T) {
 	opts := goldenOptions()
-	bursting := config.RoleResources{CPU: "750m", CPURequest: "750m", Memory: "32Gi", MemoryRequest: "8Gi", EphemeralStorage: "20Gi", EphemeralStorageRequest: "1Gi"}
-	opts.Resources[claim.RoleImplementer] = requirementsOf(bursting)
+	bursting := config.Reservation{CPU: "3", CPURequest: "3", Memory: "32Gi", MemoryRequest: "8Gi", EphemeralStorage: "80Gi", EphemeralStorageRequest: "6Gi"}
+	opts.Resources.Issue = requirementsOf(bursting)
 	r, err := configure(opts)
 	if err != nil {
-		t.Fatalf("configure with the implementer requesting 8Gi under a 32Gi limit: %v", err)
+		t.Fatalf("configure with the issue pod requesting 8Gi under a 32Gi limit: %v", err)
 	}
 	want := corev1.ResourceRequirements{
-		Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("750m"), corev1.ResourceMemory: resource.MustParse("8Gi"), corev1.ResourceEphemeralStorage: resource.MustParse("1Gi")},
-		Limits:   corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("750m"), corev1.ResourceMemory: resource.MustParse("32Gi"), corev1.ResourceEphemeralStorage: resource.MustParse("20Gi")},
+		Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("3"), corev1.ResourceMemory: resource.MustParse("8Gi"), corev1.ResourceEphemeralStorage: resource.MustParse("6Gi")},
+		Limits:   corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("3"), corev1.ResourceMemory: resource.MustParse("32Gi"), corev1.ResourceEphemeralStorage: resource.MustParse("80Gi")},
 	}
-	architect := corev1.ResourceRequirements{
-		Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("250m"), corev1.ResourceMemory: resource.MustParse("1Gi"), corev1.ResourceEphemeralStorage: resource.MustParse("1Gi")},
-		Limits:   corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("250m"), corev1.ResourceMemory: resource.MustParse("1Gi"), corev1.ResourceEphemeralStorage: resource.MustParse("10Gi")},
-	}
-	for name, tc := range map[string]struct {
-		pod  corev1.PodSpec
-		init corev1.ResourceRequirements
-	}{
-		"root":        {podOf(t, r, rootSpec(t)), architect},
-		"implementer": {podOf(t, r, childSpec(t)), want},
-	} {
+	for name, spec := range map[string]runtime.SpawnSpec{"root": rootSpec(t), "implementer": childSpec(t)} {
 		t.Run(name, func(t *testing.T) {
-			if got := containerNamed(t, tc.pod, string(claim.RoleImplementer)).Resources; !reflect.DeepEqual(got, want) {
-				t.Errorf("the implementer's container carries %+v, want %+v", got, want)
-			}
-			if qos := podQOS(tc.pod); qos != corev1.PodQOSBurstable {
+			pod := podOf(t, r, spec)
+			if qos := podQOS(pod); qos != corev1.PodQOSBurstable {
 				t.Errorf("the issue pod is %s, want %s", qos, corev1.PodQOSBurstable)
 			}
-			if len(tc.pod.InitContainers) == 0 {
+			if len(pod.InitContainers) == 0 {
 				t.Fatal("the issue pod has no init containers")
 			}
-			for _, c := range tc.pod.InitContainers {
-				if !reflect.DeepEqual(c.Resources, tc.init) {
-					t.Errorf("init container %s carries %+v, want the launching role's %+v", c.Name, c.Resources, tc.init)
+			for _, c := range slices.Concat(pod.InitContainers, pod.Containers) {
+				if !reflect.DeepEqual(c.Resources, want) {
+					t.Errorf("container %s carries %+v, want the issue pod's %+v", c.Name, c.Resources, want)
 				}
 			}
 		})
@@ -288,32 +268,53 @@ func TestManifestGoldens(t *testing.T) {
 	for name, tc := range manifestCases(t) {
 		t.Run(name, func(t *testing.T) {
 			r.agentSecrets = tc.agentSecrets
-			var buffer bytes.Buffer
-			encoder := json.NewEncoder(&buffer)
-			encoder.SetEscapeHTML(false)
-			encoder.SetIndent("", "  ")
-			if err := encoder.Encode(manifestOf(t, r, tc.spec)); err != nil {
-				t.Fatal(err)
-			}
-			encoded := buffer.Bytes()
-			path := filepath.Join("testdata", "golden", name+".json")
-			if *updateGolden {
-				if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-					t.Fatal(err)
-				}
-				if err := os.WriteFile(path, encoded, 0o644); err != nil {
-					t.Fatal(err)
-				}
-				return
-			}
-			want, err := os.ReadFile(path)
-			if err != nil {
-				t.Fatalf("read golden (run `go test ./internal/runtime/sandbox/ -update`): %v", err)
-			}
-			if !bytes.Equal(encoded, want) {
-				t.Fatalf("%s is stale\n got: %s\nwant: %s", path, encoded, want)
-			}
+			checkGolden(t, name, manifestOf(t, r, tc.spec))
 		})
+	}
+}
+
+// The root issue pod under the Go live harnesses' operator pod (deploy/kubernetes/operator-route/
+// pod.yml), which Stage 4b's pod shape (shape_problems in scripts/e2e/stage4b-sandbox-tree.sh)
+// judges: the golden is the pod a live run's daemon builds from that fixture, so the shape's rules
+// are run against what the renderer puts where (scripts/e2e/lib/stage4b-pods.test.ts).
+func TestOperatorRouteGolden(t *testing.T) {
+	opts := goldenOptions()
+	opts.Pod = operatorRouteFixture(t)
+	r, err := configure(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkGolden(t, "root-operator-route", manifestOf(t, r, rootSpec(t)))
+}
+
+// checkGolden compares manifest, encoded as the goldens are, with testdata/golden/<name>.json, or
+// writes it there under -update.
+func checkGolden(t *testing.T, name string, manifest any) {
+	t.Helper()
+	var buffer bytes.Buffer
+	encoder := json.NewEncoder(&buffer)
+	encoder.SetEscapeHTML(false)
+	encoder.SetIndent("", "  ")
+	if err := encoder.Encode(manifest); err != nil {
+		t.Fatal(err)
+	}
+	encoded := buffer.Bytes()
+	path := filepath.Join("testdata", "golden", name+".json")
+	if *updateGolden {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, encoded, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return
+	}
+	want, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read golden (run `go test ./internal/runtime/sandbox/ -update`): %v", err)
+	}
+	if !bytes.Equal(encoded, want) {
+		t.Fatalf("%s is stale\n got: %s\nwant: %s", path, encoded, want)
 	}
 }
 
@@ -395,17 +396,17 @@ func podOf(t *testing.T, r *Runtime, spec runtime.SpawnSpec) corev1.PodSpec {
 	return r.podTemplate(l).Spec
 }
 
-// workerContainer is the role container of workerSpec, the tester.
-const workerContainer = string(claim.RoleTester)
+// workerContainer is the container workerSpec's tester runs in: its issue pod's one container.
+const workerContainer = "roles"
 
-// workerOf is the worker-shim process a launch of spec starts: its role container as the pod runs
-// it (mounts, kubelet-resolved environment), with the launcher start command's argv as Command and
-// its plain environment appended. That is the process's whole environment: the launcher passes its
-// own on, then the start command's.
+// workerOf is the worker-shim process a launch of spec starts: its pod's one container as the pod
+// runs it (mounts, kubelet-resolved environment), with the launcher start command's argv as
+// Command and its plain environment appended. That is the process's whole environment: the
+// launcher passes its own on, then the start command's.
 func workerOf(t *testing.T, r *Runtime, spec runtime.SpawnSpec) corev1.Container {
 	t.Helper()
 	l := launchOf(t, r, spec)
-	c := containerNamed(t, r.podTemplate(l).Spec, string(spec.Role))
+	c := containerNamed(t, r.podTemplate(l).Spec, l.kind.container())
 	start := launcherCommand(l, r)
 	c.Command = start.Argv
 	for _, entry := range start.Env {
@@ -593,10 +594,11 @@ func TestTheInitContainersPathNamesNoIssueVolumeDirectory(t *testing.T) {
 
 // jj keeps a repository's `--repo` configuration under $XDG_CONFIG_HOME, so what workspace-init
 // sets there reaches the agent's jj only when both containers have one config home, on a volume
-// both mount (#1258 deep review, finding 4). It is in memory, so every pod's starts empty and
-// nothing an agent wrote reaches workspace-init's jj. The config home is the one home the two
-// agree on: a role container's cache and data homes are the issue's scratch's on the issue's
-// volume and its state home its own directory there
+// both mount (#1258 deep review, finding 4); each role's role-init seeds the role's own config
+// home from it (launcher's TestARoleRunsInNamespacesOfItsOwn). It is in memory, so every
+// pod's starts empty and nothing an agent wrote reaches workspace-init's jj. The config home is
+// the one home the two agree on: a role's cache and data homes are the issue's scratch's on the
+// issue's volume and its state home a directory per role there
 // (TestTheIssuesRolesShareOneScratchAndOneGoCachePair,
 // TestEachRolesAgentIsToldAStateHomeOfItsOwn), while the setup containers keep the image's home
 // directory ones, so nothing of the issue's scratch reaches a container that holds the
@@ -612,6 +614,12 @@ func TestBothContainersShareOneInMemoryXDGConfigHome(t *testing.T) {
 	if configHome == "" || configHome != envOf(init)["XDG_CONFIG_HOME"] {
 		t.Errorf("XDG_CONFIG_HOME: init %q, main %q; the two containers must agree",
 			envOf(init)["XDG_CONFIG_HOME"], configHome)
+	}
+	// The rendered value is the path role-init binds the role's own config home at, under the
+	// image's home: a value that moved off it would leave every role's XDG_CONFIG_HOME pointing
+	// where role-init binds nothing (launcher.Home, launcher.ConfigHomeDir).
+	if want := launcher.Home + "/" + launcher.ConfigHomeDir; configHome != want {
+		t.Errorf("XDG_CONFIG_HOME is rendered %q, want %q, the path each role's role-init binds its own config home at", configHome, want)
 	}
 	for name, want := range map[string]string{
 		"XDG_CACHE_HOME": podHome + "/.cache",
@@ -630,17 +638,19 @@ func TestBothContainersShareOneInMemoryXDGConfigHome(t *testing.T) {
 			}
 		}
 	}
-	volumeAt := func(c corev1.Container) string {
+	// The issue pod's roles container holds the config home under HomeMountsDir, which each
+	// role's role-init copies into the role's own config home at XDG_CONFIG_HOME (homeMountsView).
+	volumeAt := func(c corev1.Container, path string) string {
 		for _, mount := range c.VolumeMounts {
-			if mount.MountPath == configHome {
+			if mount.MountPath == path {
 				return mount.Name
 			}
 		}
 		return ""
 	}
-	shared := volumeAt(init)
-	if shared == "" || shared != volumeAt(main) {
-		t.Fatalf("XDG_CONFIG_HOME %s is mounted from %q in the init container and %q in the main one", configHome, shared, volumeAt(main))
+	shared := volumeAt(init, configHome)
+	if shared == "" || shared != volumeAt(main, containerHomePath(configHome)) {
+		t.Fatalf("XDG_CONFIG_HOME %s is mounted from %q in the init container and %q in the main one", configHome, shared, volumeAt(main, containerHomePath(configHome)))
 	}
 	for _, volume := range pod.Volumes {
 		if volume.Name == shared && (volume.EmptyDir == nil || volume.EmptyDir.Medium != corev1.StorageMediumMemory) {
@@ -649,7 +659,108 @@ func TestBothContainersShareOneInMemoryXDGConfigHome(t *testing.T) {
 	}
 }
 
-// The role containers of one issue pod share the pod's network namespace, the workspace path, the
+// The issue's roles share one clone, and any of them can write its `.git/config` and hooks, or a
+// git configuration in any config home it reaches. So every role's git is told, at command scope,
+// which git reads after every configuration file, to start no fsmonitor program and no hook: a
+// real git run with exactly the role's GIT_CONFIG pairs, in a clone whose `.git/config` and global
+// configuration name a recording fsmonitor and a recording hooks directory, runs neither through
+// `git status` and `git commit`. The same git without the pairs runs both, so the plant is live.
+// These are the two settings the pairs turn off; others a role can plant still run.
+func TestEveryRolesGitStartsNoPlantedFsmonitorOrHook(t *testing.T) {
+	git, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatalf("this test runs the real git: %v", err)
+	}
+	r, err := configure(goldenOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	sink := filepath.Join(dir, "ran")
+	recorder := func(name string) string {
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, []byte("#!/bin/sh\necho "+name+" >> '"+sink+"'\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	monitor := recorder("fsmonitor")
+	hooks := filepath.Join(dir, "hooks")
+	if err := os.MkdirAll(hooks, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, hook := range []string{"pre-commit", "post-commit"} {
+		if err := os.Rename(recorder(hook), filepath.Join(hooks, hook)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	home, configHome, clone := filepath.Join(dir, "home"), filepath.Join(dir, "config"), filepath.Join(dir, "clone")
+	planted := "[core]\n\tfsmonitor = " + monitor + "\n\thooksPath = " + hooks + "\n"
+	if err := os.MkdirAll(filepath.Join(configHome, "git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(configHome, "git", "config"), []byte(planted), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(home, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	base := []string{"PATH=" + os.Getenv("PATH"), "HOME=" + home, "XDG_CONFIG_HOME=" + configHome, "GIT_CONFIG_NOSYSTEM=1",
+		"GIT_AUTHOR_NAME=a", "GIT_AUTHOR_EMAIL=a@example.invalid", "GIT_COMMITTER_NAME=a", "GIT_COMMITTER_EMAIL=a@example.invalid"}
+	run := func(env []string, args ...string) {
+		t.Helper()
+		cmd := exec.Command(git, args...)
+		cmd.Dir, cmd.Env = clone, env
+		if output, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, output)
+		}
+	}
+	if output, err := exec.Command(git, "init", "--quiet", clone).CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v\n%s", err, output)
+	}
+	if err := os.WriteFile(filepath.Join(clone, ".git", "config"), append(mustRead(t, filepath.Join(clone, ".git", "config")), planted...), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ran := func() string {
+		body, err := os.ReadFile(sink)
+		if errors.Is(err, fs.ErrNotExist) {
+			return ""
+		} else if err != nil {
+			t.Fatal(err)
+		}
+		_ = os.Remove(sink)
+		return strings.Join(strings.Fields(string(body)), " ")
+	}
+	run(base, "status")
+	run(base, "commit", "--quiet", "--allow-empty", "-m", "control")
+	if got := ran(); !strings.Contains(got, "fsmonitor") || !strings.Contains(got, "pre-commit") || !strings.Contains(got, "post-commit") {
+		t.Fatalf("without the role's pairs the planted programs ran %q, want the fsmonitor and both hooks: the plant is not live", got)
+	}
+	for _, role := range launcherRoles {
+		env := slices.Clone(base)
+		for name, value := range envOf(workerOf(t, r, roleSpec(t, role))) {
+			if strings.HasPrefix(name, "GIT_CONFIG_") {
+				env = append(env, name+"="+value)
+			}
+		}
+		run(env, "status")
+		run(env, "commit", "--quiet", "--allow-empty", "-m", string(role))
+		if got := ran(); got != "" {
+			t.Errorf("%s's git ran %q, programs another role planted in the clone's and the global configuration", role, got)
+		}
+	}
+}
+
+func mustRead(t *testing.T, path string) []byte {
+	t.Helper()
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return body
+}
+
+// The roles of one issue pod share the pod's network namespace, the workspace path, the
 // Oh My Pi profile path and the rest of the issue's scratch, and Oh My Pi's browser broker lock is
 // an abstract unix socket named from the lock path under its state root: one state root would
 // make it one name in every container, the first role's lock blocking every other role's broker.
@@ -714,7 +825,7 @@ func roleSpec(t *testing.T, role claim.Role) runtime.SpawnSpec {
 }
 
 // The six directories a role's tools write to without being told where are the issue's, not the
-// role's: every role container of a workflow pod and the controller's is told the same temporary
+// role's: every role of a workflow pod and the controller is told the same temporary
 // directory, cache home, data home and bun install cache — the four directly under the issue's
 // scratch on its volume — and the same Go build and module cache pair beside the workspaces. A
 // directory per role is what this replaces, by the human's decision of 2026-10-20: disk is cheap,
@@ -736,7 +847,7 @@ func roleSpec(t *testing.T, role claim.Role) runtime.SpawnSpec {
 // Each directory is held by the issue volume's own mount, exactly as uv's are
 // (TestUvKeepsItsPythonsAndCacheOnTheIssueVolume), and overlaps neither the workspace nor uv's
 // directories, and no two of the six are one directory. The state home is the one thing of the
-// scratch that stays the role's own, for the browser broker's lock
+// scratch that stays one per role, for the browser broker's lock
 // (TestEachRolesAgentIsToldAStateHomeOfItsOwn).
 func TestTheIssuesRolesShareOneScratchAndOneGoCachePair(t *testing.T) {
 	r, err := configure(goldenOptions())
@@ -786,7 +897,7 @@ func TestTheIssuesRolesShareOneScratchAndOneGoCachePair(t *testing.T) {
 // So each name on the shim's list, plus XDG_STATE_HOME, which the shim makes elsewhere
 // (podsafety.EnsureStateHome, which makes Oh My Pi's profile directory under it), is set to an
 // absolute path on the issue's volume — the issue's shared scratch for four of them, the issue's
-// Go caches for two, and the role's own state home for the last — and, the other way, every
+// Go caches for two, and the role's state home, one per role, for the last — and, the other way, every
 // variable the runtime sets to a path on that volume is on that list, bar the three it names for
 // a reason of their own, so neither a new directory of the issue's scratch nor a new per-role one
 // can appear that nothing makes.
@@ -804,7 +915,7 @@ func TestTheRuntimeTellsTheShimEveryScratchDirectoryItMakes(t *testing.T) {
 	}
 	// The runtime names these three on the issue's volume for a reason of their own and does not
 	// ask the shim to make them: LEGION_WORKSPACE is the issue's checkout, which workspace-init
-	// provisions before any role container starts, and UV_PYTHON_INSTALL_DIR and UV_CACHE_DIR are
+	// provisions before the pod's launcher container starts, and UV_PYTHON_INSTALL_DIR and UV_CACHE_DIR are
 	// uv's own, which uv makes and the tree's pods share by design
 	// (TestUvKeepsItsPythonsAndCacheOnTheIssueVolume). Every other path the runtime names there is
 	// a directory it tells the role to write in, so a fourth exemption has to be argued for rather
@@ -901,11 +1012,11 @@ func TestTheManifestCarriesADNSNamedStreamAndDaemonURL(t *testing.T) {
 // its containers reaches the token at all.
 //
 // What the boundary protects is identity, not a repository-write token kept off the tree volume:
-// an implement-role container now holds the implement App's token — the same lease as the
-// provisioning token — read-only in its own gh volume (GHConfigDir), and a review-role container
-// the review App's. What the fetch container's boundary still keeps is that no review-role
-// container ever holds the implement App's token, which is what lets the reviewer's approval
-// count and the daemon's fix-attempt counting read a push's App from the App that made it.
+// an implement role now holds the implement App's token — the same lease as the
+// provisioning token — read-only in its own gh directory (GHConfigDir), and a review role the
+// review App's. What the fetch container's boundary still keeps is that no review role ever holds
+// the implement App's token, which is what lets the daemon's fix-attempt counting read a push's App
+// from the App that made it.
 func TestTheProvisionTokenSharesNoContainerWithAnythingTheTreeCanWrite(t *testing.T) {
 	r, err := configure(goldenOptions())
 	if err != nil {
@@ -1080,8 +1191,8 @@ func TestNewRefusesOptionsNoPodCouldRun(t *testing.T) {
 		"no cache volume":           {func(o *Options) { o.RepositoryCache.Volume = resource.Quantity{} }, "repository cache volume 0 is not a positive quantity"},
 		"no cache retention":        {func(o *Options) { o.RepositoryCache.Retain = 0 }, "repository cache retention 0s is not positive"},
 		"an unreserved cache":       {func(o *Options) { o.RepositoryCache.Resources = corev1.ResourceRequirements{} }, "the repository cache reserves no cpu"},
-		"a role unreserved":         {func(o *Options) { delete(o.Resources, claim.RoleTester) }, "no reservation for role tester"},
-		"the controller unreserved": {func(o *Options) { delete(o.Resources, claim.RoleController) }, "no reservation for role controller"},
+		"the issue pod unreserved":  {func(o *Options) { o.Resources.Issue = corev1.ResourceRequirements{} }, "the issue pod reserves no cpu"},
+		"the controller unreserved": {func(o *Options) { o.Resources.Controller = corev1.ResourceRequirements{} }, "the controller's pod reserves no cpu"},
 		"the file session store": {
 			func(o *Options) { o.SessionStore = ompsessions.Store{Kind: ompsessions.StoreVolume} },
 			"no session store that keeps sessions in a database",
@@ -1089,41 +1200,41 @@ func TestNewRefusesOptionsNoPodCouldRun(t *testing.T) {
 		"no session store": {func(o *Options) { o.SessionStore = ompsessions.Store{} }, "no session store that keeps sessions in a database"},
 		"cpu request past limit": {
 			func(o *Options) {
-				o.Resources[claim.RoleReviewer].Requests[corev1.ResourceCPU] = resource.MustParse("1500m")
+				o.Resources.Issue.Requests[corev1.ResourceCPU] = resource.MustParse("3500m")
 			},
-			"role reviewer requests cpu 1500m past its limit 750m",
+			"the issue pod requests cpu 3500m past its limit 3",
 		},
 		"memory request past limit": {
 			func(o *Options) {
-				o.Resources[claim.RoleImplementer].Requests[corev1.ResourceMemory] = resource.MustParse("7Gi")
+				o.Resources.Issue.Requests[corev1.ResourceMemory] = resource.MustParse("20Gi")
 			},
-			"role implementer requests memory 7Gi past its limit 6Gi",
+			"the issue pod requests memory 20Gi past its limit 19Gi",
 		},
 		"no memory": {
 			func(o *Options) {
-				delete(o.Resources[claim.RoleMerger].Requests, corev1.ResourceMemory)
-				delete(o.Resources[claim.RoleMerger].Limits, corev1.ResourceMemory)
+				delete(o.Resources.Controller.Requests, corev1.ResourceMemory)
+				delete(o.Resources.Controller.Limits, corev1.ResourceMemory)
 			},
-			"role merger reserves no memory",
+			"the controller's pod reserves no memory",
 		},
 		"ephemeral-storage request past its limit": {
 			func(o *Options) {
-				o.Resources[claim.RoleImplementer].Requests[corev1.ResourceEphemeralStorage] = resource.MustParse("40Gi")
+				o.Resources.Issue.Requests[corev1.ResourceEphemeralStorage] = resource.MustParse("90Gi")
 			},
-			"role implementer requests ephemeral-storage 40Gi past its limit 20Gi",
+			"the issue pod requests ephemeral-storage 90Gi past its limit 80Gi",
 		},
 		"ephemeral-storage unset": {
 			func(o *Options) {
-				delete(o.Resources[claim.RoleMerger].Requests, corev1.ResourceEphemeralStorage)
-				delete(o.Resources[claim.RoleMerger].Limits, corev1.ResourceEphemeralStorage)
+				delete(o.Resources.Issue.Requests, corev1.ResourceEphemeralStorage)
+				delete(o.Resources.Issue.Limits, corev1.ResourceEphemeralStorage)
 			},
-			"role merger bounds no ephemeral-storage",
+			"the issue pod bounds no ephemeral-storage",
 		},
 		"an extended resource": {
 			func(o *Options) {
-				o.Resources[claim.RoleTester].Limits["nvidia.com/gpu"] = resource.MustParse("1")
+				o.Resources.Issue.Limits["nvidia.com/gpu"] = resource.MustParse("1")
 			},
-			"role tester names nvidia.com/gpu in its limits",
+			"the issue pod names nvidia.com/gpu in its limits",
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -1166,7 +1277,7 @@ func TestRuntimeOwnedIsWhatTheWorkerContainerIsToldByTheRuntime(t *testing.T) {
 // address configured: each address-valued argument of every launcher's command and of the
 // generation's worker-shim argv (the words before `--`), by its flag, and each address-valued
 // variable the runtime itself sets in the generation's environment, an address being a value with a
-// scheme. The git credential entries (gitCredentialEnv) are not addresses but git configuration
+// scheme. The git configuration entries (gitConfigEnv) are not addresses but git configuration
 // keys the binary fixes, `credential.https://github.com.helper` among them, so no configuration
 // moves them. An address added to a launch and not to handedAddresses is one the daemon could move
 // without any role it re-adopts being relaunched (evaluate). A workflow role's launch and the
@@ -1199,7 +1310,7 @@ func TestHandedAddressesAreEveryAddressAPodCarries(t *testing.T) {
 				}
 			}
 			gitConfig := map[string]bool{}
-			for _, entry := range gitCredentialEnv() {
+			for _, entry := range gitConfigEnv() {
 				gitConfig[entry.Name] = true
 			}
 			for _, pair := range start.Env {
@@ -1336,8 +1447,8 @@ func TestAPodCarriesLegionsTokenExactlyWhenItIsEnrolled(t *testing.T) {
 			if m := mounts[agentSecretsTokenVolume]; m.MountPath != AgentSecretsTokenDir || !m.ReadOnly {
 				t.Fatalf("token mount %+v, want read-only at %s", m, AgentSecretsTokenDir)
 			}
-			if m := mounts[keyVolume]; m.MountPath != AgentSecretsKeyDir || m.ReadOnly {
-				t.Fatalf("key mount %+v, want writable at %s", m, AgentSecretsKeyDir)
+			if m := mounts[keyVolume]; m.MountPath != roleDir(role)+"/"+launcher.RoleAgentSecretsDir || m.ReadOnly {
+				t.Fatalf("key mount %+v, want writable at %s", m, roleDir(role)+"/"+launcher.RoleAgentSecretsDir)
 			}
 			key := slices.IndexFunc(spec.Volumes, func(v corev1.Volume) bool { return v.Name == keyVolume })
 			if key < 0 || spec.Volumes[key].EmptyDir == nil || spec.Volumes[key].EmptyDir.Medium != corev1.StorageMediumMemory {
@@ -1494,6 +1605,11 @@ func TestTheOperatorsPodReachesEveryPodLegionRuns(t *testing.T) {
 			}
 			agent := tc.agent
 			for _, want := range opts.Pod.VolumeMounts {
+				// An issue pod's roles container holds what belongs under the home under
+				// HomeMountsDir (homeMountsView); every other pod mounts it as configured.
+				if tc.name == "root" || tc.name == "worker" {
+					want = homeMountsView([]corev1.VolumeMount{want})[0]
+				}
 				if !slices.ContainsFunc(agent.VolumeMounts, func(m corev1.VolumeMount) bool { return reflect.DeepEqual(m, want) }) {
 					t.Errorf("%s mounts %+v, want %+v among them", agent.Name, agent.VolumeMounts, want)
 				}
@@ -1665,7 +1781,18 @@ func TestLegionsOwnNamesAreWhatItsPodsCarry(t *testing.T) {
 			volumes[volume.Name] = true
 		}
 		for _, mount := range agent.VolumeMounts {
-			mounts[mount.MountPath] = true
+			// Every role's own mounts lie under RolesDir, which is reserved whole; an issue
+			// pod's roles container holds what belongs under the home under HomeMountsDir, which
+			// is reserved whole too, at the path each is bound back at.
+			switch path := mount.MountPath; {
+			case path == RolesDir || strings.HasPrefix(path, RolesDir+"/"):
+				mounts[RolesDir] = true
+			case strings.HasPrefix(path, HomeMountsDir+"/"):
+				mounts[HomeMountsDir] = true
+				mounts[podHome+strings.TrimPrefix(path, HomeMountsDir)] = true
+			default:
+				mounts[path] = true
+			}
 		}
 		for _, variable := range agent.Env {
 			env[variable.Name] = true
@@ -1857,7 +1984,7 @@ func kubeExpand(input string, env map[string]string) string {
 // Whatever text a launch carries reaches the process as written: the worker's argv and plain
 // environment travel in the launcher's start command, which no kubelet expands, so `$(NAME)` and
 // `$$` in the inlined system prompt, an operator's instructions, and a spec's env values mean
-// what they say in a pod as in a pane. The role container's own command and env, which the kubelet
+// what they say in a pod as in a pane. The `roles` container's own command and env, which the kubelet
 // does expand, still survive it.
 func TestTextSurvivesTheKubeletsExpansion(t *testing.T) {
 	r, err := configure(goldenOptions())
@@ -1892,7 +2019,7 @@ func TestTextSurvivesTheKubeletsExpansion(t *testing.T) {
 			t.Errorf("%s reaches the agent as %q, want %q", name, got, want)
 		}
 	}
-	role := containerNamed(t, r.podTemplate(l).Spec, string(spec.Role))
+	role := containerNamed(t, r.podTemplate(l).Spec, l.kind.container())
 	for _, arg := range role.Command {
 		if expanded := kubeExpand(arg, envOf(role)); strings.ReplaceAll(arg, "$$", "$") != expanded {
 			t.Errorf("the launcher's argument %q reaches it as %q", arg, expanded)

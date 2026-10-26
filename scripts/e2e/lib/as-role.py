@@ -1,6 +1,9 @@
 """Resolve the role's agent process in this pod and run second-owner's credential probes.
 
-scripts/e2e/multi-repo-acceptance.sh streams this file to `python3 -I -` over `kubectl exec -i`:
+scripts/e2e/multi-repo-acceptance.sh streams this file over `kubectl exec -i` into the pod's one
+`roles` container and from there into the role's own namespaces (lib/role-namespaces.sh's
+role_enter_sh: the role's `legion launcher role-init`'s user, mount, PID and IPC namespaces, then
+its worker-shim's user namespace), where it runs as
 
     python3 -I - <proc root> <T repo> <O repo> <O owner> <GitHub base URL> <trusted root>
 
@@ -10,7 +13,10 @@ HOME is one the agent writes to: a planted `hashlib.py` or `.pth` would otherwis
 file and forge the answer. <trusted root> is empty in a pod; a test points it at a directory laid out
 like the image so the prober's absolute paths below resolve to fakes.
 
-Which process is the role's agent: the one child of the one `worker-shim` (own parent PID 1,
+Which process is the role's agent: the one child of the one `worker-shim` (the process whose
+argv[1] is worker-shim, as every reader of a Legion process tree takes it, never one naming it in
+a later argv word; own parent PID 1, which
+inside the role's PID namespace is its role-init, so /proc shows that role's processes alone;
 executing the image's root-owned /opt/legion/bin/legion, which rules out a renamed process or a
 copy of the binary) whose argv equals the shim's own argv after its first `--`, or, when that argv
 is the install wrapper `/bin/sh -c <script> legion-plugins <agent argv...>`
@@ -110,7 +116,7 @@ def resolve_agent(proc_root):
             parent = parent_of(proc_root, pid)
         except OSError:
             continue
-        if b"worker-shim" in fields and parent == "1" and runs_legion(proc_root, pid):
+        if fields[1:2] == [b"worker-shim"] and parent == "1" and runs_legion(proc_root, pid):
             shims.append(pid)
     if len(shims) != 1:
         fail(
