@@ -2,50 +2,46 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-248",
-  "completed": "2026-10-26T02:50:00Z",
-  "round": 2,
-  "testedHead": "600bb5490bb2da74ea0aceeadc6dc392885a60f4",
-  "prHead": "e0a71824f02f2377c3bf3d92b620bfda7e0b3d5a",
-  "fingerprint": "a8a963219106 b145300cb0d6d344a260836a410d8d97da7ca13f0491a247aaea54a1e70b510c -> 600bb5490bb2 9ae5ce5ebdbddf768bfac7529bcf547d59c1df57faad073b32a52d4d077a9bd7: changed (only skills/AGENTS.md's partition sentences, which now carry main's asd-ste100), so a full round on the merged head's image",
+  "completed": "2026-10-26T03:20:59Z",
+  "round": 3,
+  "testedHead": "bba53cf09e7868cfa8d4fb44a4c77436bf14b3de",
+  "prHead": "aa2ba3e6f71b177eff8a5cacd5c096a8c60ead0f",
+  "fingerprint": "600bb5490bb2 9ae5ce5ebdbddf768bfac7529bcf547d59c1df57faad073b32a52d4d077a9bd7 -> bba53cf09e78 6107421c509bbcd39b0224a6edeb76e5aeb0550e681649589a7752a6856d992f: changed (the worker.Dockerfile comment resolution against #2216), so a full round on the merged head's image",
+  "mergeable": "gh pr view 2219: MERGEABLE (BLOCKED only on review) at aa2ba3e6, main@origin 135d22e0f63b; round 2's conflict resolved, the two worker.Dockerfile comment hunks keep both main's dpkg-notices wording and the agent-browser wording, no conflict markers",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Drove the same surfaces independently on the merged head's image sha256:1d4fbfd9c06d17fdc0599798c966195d886a4233d5c6e846b68c9c8b0ba0b08f (Worker Image run 40258618819, tag sha-600bb5490bb2): my own A2 Job and a probe-image Job in namespace builds, gVisor, uid 1000. CI at 600bb549 (Tests 40258618878, Legion Envoy and Contracts 40258618828) carries the skills guards and TestTheRealPluginsOnTheRealOhMyPi. A3-A6 are the settled experiment records (architect's ruling); unchanged since round 1."
+    "how": "Drove the same surfaces independently on the merged head's image sha256:cde52dd858940e4392b00e722d34ff68ea3dbae85cd08ffe6f8afd292b0015a7 (Worker Image run 40261399959, tag sha-bba53cf09e78): my own A2 Job and a probe-image Job in namespace builds, gVisor, uid 1000. CI at bba53cf09e78 all success: Tests 40261400142, Legion Envoy and Contracts 40261399972, Docs 40261399945, PR Title 40261400019 and 40263359715, Worker Image 40261399959; these carry the skills guards and TestTheRealPluginsOnTheRealOhMyPi. A3-A6 are the settled experiment records (architect's ruling); unchanged since round 1."
   },
-  "failed": 1,
-  "failures": [
-    {
-      "criterion": "The change can merge: the head that merges is the head proven (A2 and the merge gate)",
-      "evidence": "Round 1's conflict is resolved by 600bb549 (local merge of 167e30b9c674 into e0a71824: 'Already up to date'), but main moved to 135d22e0f63b after it: #2216 (06170c71a6b0, 'list the Debian packages in THIRD_PARTY_NOTICES from dpkg-query') rewrote the worker.Dockerfile header and the toolchain stage comment. `gh pr view 2219 --repo sjawhar/legion --json mergeable,mergeStateStatus` -> CONFLICTING DIRTY; a local `git merge --no-commit 135d22e0f63b` on e0a71824 conflicts only in packages/daemon/docker/worker.Dockerfile, two comment hunks (line 25: the header's tool list, which needs both agent-browser and main's 'its Debian list comes from the image's own dpkg database'; line 268: the toolchain stage comment, which needs both 'agent-browser … All six downloads' and main's 'runtime-base stage'). The functional lines merge cleanly. Remedy: the implementer's forward merge of main@origin, keeping both texts; the resolved head builds a new worker image (main's notices stage changed), which the tester re-checks with /legion/scratch/tmp/infra-248-test/job.sh and job-probe.sh, including that the agent-browser notices sections survive #2216's notices change. No red test can pin a merge conflict; GitHub's mergeable state is the check."
-    }
-  ],
+  "failed": 0,
+  "failures": [],
   "proof": [
     {
       "criterion": "A2 The worker image builds; in a worker pod (gVisor, uid 1000) agent-browser --version prints the pin and agent-browser open https://example.com loads the page with its title read back",
-      "surface": "Job infra-248-tester-r2-8bd65 in namespace builds, runtimeClassName gvisor, runAsUser 1000, compute class build, image ghcr.io/sjawhar/legion-worker@sha256:1d4fbfd9c06d17fdc0599798c966195d886a4233d5c6e846b68c9c8b0ba0b08f",
-      "command": "bash /legion/scratch/tmp/infra-248-test/job.sh ghcr.io/sjawhar/legion-worker@sha256:1d4fbfd9c06d17fdc0599798c966195d886a4233d5c6e846b68c9c8b0ba0b08f r2 (log /legion/scratch/tmp/infra-248-test/r2-job.log)",
-      "observed": "pod Succeeded, runtimeClassName=gvisor, imageID the digest; uid=1000, 4.19.0-gvisor; /usr/local/bin/agent-browser sha256 0f68e74e…638e = the pin; agent-browser --version -> 'agent-browser 0.39.2'; open https://example.com -> '✓ Example Domain'; get title -> 'Example Domain'; snapshot -i -> link 'Learn more'; screenshot -> 57 KB PNG; second --session on a local page: clipped element 108 > 20, dead link followed to its 404, default session kept example.com; both closed; THIRD_PARTY_NOTICES carries the agent-browser LICENSE, crates, axe-core and axe-core third-party sections; image skill hashes caee76a6…, 89f56440…, ad64591b…, 563735f2… equal round 1's.",
-      "headSha": "600bb5490bb2da74ea0aceeadc6dc392885a60f4",
-      "negativeControl": "agent-browser open http://127.0.0.1:1/ -> '✗ Navigation failed: net::ERR_UNSAFE_PORT' rc 1; round 1's main image sha256:60562f59… -> 'agent-browser: command not found' rc 127."
+      "surface": "Job infra-248-tester-r3-g5kr8 in namespace builds, runtimeClassName gvisor, runAsUser 1000, compute class build, image ghcr.io/sjawhar/legion-worker@sha256:cde52dd858940e4392b00e722d34ff68ea3dbae85cd08ffe6f8afd292b0015a7",
+      "command": "bash /legion/scratch/tmp/infra-248-test/job.sh ghcr.io/sjawhar/legion-worker@sha256:cde52dd858940e4392b00e722d34ff68ea3dbae85cd08ffe6f8afd292b0015a7 r3 (log /legion/scratch/tmp/infra-248-test/r3-job.log)",
+      "observed": "pod Succeeded, runtimeClassName=gvisor, imageID the digest; uid=1000, 4.19.0-gvisor; /usr/local/bin/agent-browser root-owned 0755, sha256 0f68e74e…638e = the pin = GitHub's asset digest; agent-browser --version -> 'agent-browser 0.39.2'; open https://example.com -> '✓ Example Domain'; get title -> 'Example Domain'; snapshot -i -> link 'Learn more'; screenshot -> 57 KB PNG; a second --session on a local page read a clipped element (108 > 20) and followed a dead link to its 404 while the default session kept example.com; both closed; THIRD_PARTY_NOTICES (now with #2216's dpkg-query Debian list) still carries the agent-browser LICENSE, crates, axe-core and axe-core third-party sections.",
+      "headSha": "bba53cf09e7868cfa8d4fb44a4c77436bf14b3de",
+      "negativeControl": "agent-browser open http://127.0.0.1:1/ -> '✗ Navigation failed: net::ERR_UNSAFE_PORT' rc 1; main's image sha256:60562f59a87e423f27607d92afeabce8caf225ab5e32cf43c5013fc56077a5c9 in the same Job (round 1) -> 'agent-browser: command not found' rc 127; the pin with one hex digit changed -> sha256sum --check --strict FAILED rc 1 (round 1)."
     },
     {
       "criterion": "A1 The Legion skills guard passes with ce-dogfood in pi-legion",
-      "surface": "the merged head's worker image under gVisor (Job infra-248-tester-r2probe-mw5x6, namespace builds, uid 1000): the real Oh My Pi loading the image's packed pi-legion and pi-envoy as a pod does",
-      "command": "legion probe-image --plugin-root /opt/legion/pi-legion --envoy-plugin-root /opt/legion/pi-envoy --skip-agent-models (job-probe.sh, log /legion/scratch/tmp/infra-248-test/r2-probe.log); scripts/pi-plugin-prepack.sh and release.yaml read at 600bb549",
-      "observed": "probe-image: OK (/opt/omp/bin/omp) session-storage=probed extensions=discovered agent-models=skipped capabilities=checked model-fallback=on daemon-api-version=36, rc 0; the image's pi-legion dist/skills lists ce-dogfood among nine; the merge kept pi-envoy's asd-ste100 and pi-legion's ce-dogfood in prepack and both release.yaml lists.",
-      "headSha": "600bb5490bb2da74ea0aceeadc6dc392885a60f4",
+      "surface": "the merged head's worker image under gVisor (Job infra-248-tester-r3probe-vnmwv, namespace builds, uid 1000): the real Oh My Pi loading the image's packed pi-legion and pi-envoy as a pod does",
+      "command": "legion probe-image --plugin-root /opt/legion/pi-legion --envoy-plugin-root /opt/legion/pi-envoy --skip-agent-models (job-probe.sh, log /legion/scratch/tmp/infra-248-test/r3-probe.log); CI Tests 40261400142 and Legion Envoy and Contracts 40261399972 at bba53cf09e78 for the skills guards and TestTheRealPluginsOnTheRealOhMyPi",
+      "observed": "probe-image: OK (/opt/omp/bin/omp) session-storage=probed extensions=discovered agent-models=skipped capabilities=checked model-fallback=on daemon-api-version=36, rc 0; the image's pi-legion dist/skills holds nine skills with ce-dogfood; scripts/pi-plugin-prepack.sh and release.yaml keep pi-envoy's asd-ste100 and pi-legion's ce-dogfood.",
+      "headSha": "bba53cf09e7868cfa8d4fb44a4c77436bf14b3de",
       "negativeControl": "probe-image with --plugin-root at a copy lacking dist/skills/ce-dogfood -> 'finds no skill ce-dogfood (loaded by dist/skills/legion-worker/SKILL.md, dist/skills/legion-worker/references/dogfood.md)', rc 1."
     },
     {
       "criterion": "The shipped skill text matches the approved spec v4; no person's name in any skill",
-      "surface": "the image's dist/skills against round 1's verified branch files",
-      "command": "sha256sum of ce-dogfood/SKILL.md, legion-worker/references/dogfood.md, legion-worker/SKILL.md and dispatch-brainstorming/SKILL.md in the image; round 1's checks (approved text substring, upstream diff, name grep) hold for those exact bytes",
-      "observed": "all four hashes equal round 1's, where the approved v4 step was present verbatim with only 'Sami' -> 'the person' and 'he picks' -> 'the person picks', ce-dogfood = upstream 8a776c13 plus the Legion paragraph, and no person's name in skills/ or packages/claude-envoy/legion/",
-      "headSha": "600bb5490bb2da74ea0aceeadc6dc392885a60f4",
-      "negativeControl": "the approved text with 'Sami' left in is not a substring of the shipped bullet (round 1)"
+      "surface": "the image's dist/skills against round 1's verified branch files; upstream sjawhar/compound-engineering-plugin at 8a776c13a08eea0d6485c26c9bc96ea84d5a6cc6",
+      "command": "sha256sum of ce-dogfood/SKILL.md, legion-worker/references/dogfood.md, legion-worker/SKILL.md and dispatch-brainstorming/SKILL.md in the image (r3-job.log); round 1: substring check of the approved step in skills/dispatch-brainstorming/SKILL.md:16, diff of each skills/ce-dogfood file against upstream via gh api contents, diff -r against the claude-envoy mirror, grep -rnE 'Sami|Jawhar|sami@' skills/ packages/claude-envoy/legion/ packages/daemon/internal/prompts/",
+      "observed": "hashes caee76a6…, 89f56440…, ad64591b…, 563735f2… equal round 1's; there the approved v4 step was present verbatim with only 'Sami' -> 'the person' and 'he picks' -> 'the person picks', the bullet equal to plan.md Task 4, ce-dogfood equal to upstream plus the one 'In Legion' paragraph (agents/openai.yaml dropped), mirror identical, and no person's name found.",
+      "headSha": "bba53cf09e7868cfa8d4fb44a4c77436bf14b3de",
+      "negativeControl": "the approved text with 'Sami' left in is not a substring of the shipped bullet (round 1)."
     }
   ],
   "notes": [
-    "Nothing in CI launches the browser: the image build smoke-tests only `agent-browser --version`, so a later chromium or agent-browser bump that breaks `open` would build green. Recorded, not a failure.",
-    "main is moving fast; the next merge should be pushed promptly after a fetch so the tester's re-check lands on a mergeable head."
+    "Nothing in CI launches the browser: the image build smoke-tests only `agent-browser --version`, so a later chromium or agent-browser bump that breaks `open` would build green. Recorded, not a failure: it works at this head.",
+    "probe-image resolves skills by name, not reference files: a pi-legion without legion-worker/references/dogfood.md passes it; the skills guard (CI) is what holds that file."
   ]
 }
