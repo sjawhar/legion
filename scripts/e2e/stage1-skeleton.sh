@@ -17,18 +17,31 @@
 set -euo pipefail
 
 pid=
+# lib/rig.sh's start_kept and keep_port set these: the daemon's pid, copied to pid on each start,
+# and its port keeper's.
+daemon_pid=
+daemon_keeper_pid=
 ok=
 container=legion-e2e-pg-$$
 work=$(mktemp -d /tmp/legion-e2e.XXXXXXXX)
+# lib/rig.sh's process helpers log each service to $evidence/logs/<name>.log.
+evidence=$work
+timeout_hook=
+mkdir -p "$work/logs"
 # cleanup never returns non-zero: a trap that fails under set -e would mask the real status. The
-# work directory survives a failure — its state documents and refusal log are the evidence — and
-# goes when the run passed.
+# work directory survives a failure — its state documents, refusal log and daemon log are the
+# evidence, and the daemon log is printed — and goes when the run passed.
 cleanup() {
   if [ -n "${pid:-}" ]; then kill -TERM "$pid" 2>/dev/null || true; fi
+  if [ -n "${daemon_keeper_pid:-}" ]; then kill -TERM "$daemon_keeper_pid" 2>/dev/null || true; fi
   docker rm -f "$container" >/dev/null 2>&1 || true
   if [ -n "${ok:-}" ]; then
     rm -rf "$work"
   else
+    if [ -s "$work/logs/daemon.log" ]; then
+      echo "--- the daemon's log ($work/logs/daemon.log)"
+      cat "$work/logs/daemon.log" || true
+    fi
     echo "the run's workspace is $work"
   fi
   return 0
@@ -69,11 +82,13 @@ fail() {
   exit 1
 }
 # wait_healthz [SUFFIX] polls the daemon ($pid) on $port for 10 s. A daemon that exits first stops
-# the run at once, naming the daemon's exit status, rather than after the full wait.
+# the run at once, naming the daemon's exit status, rather than after the full wait. Each poll has a
+# timeout: the port is kept (below), so a daemon that is not serving yet leaves a request queued,
+# unanswered, instead of refused.
 wait_healthz() {
   local i status=0
   for i in $(seq 1 50); do
-    curl -fs "http://127.0.0.1:$port/healthz" >/dev/null && return 0
+    curl -fs --max-time 2 "http://127.0.0.1:$port/healthz" >/dev/null && return 0
     if ! kill -0 "$pid" 2>/dev/null; then
       wait "$pid" || status=$?
       pid= # reaped: cleanup must not signal a number the kernel may reuse
@@ -84,6 +99,14 @@ wait_healthz() {
   done
   echo "daemon never answered /healthz${1:-}"
   exit 1
+}
+# held_by_daemon_and_keeper: after a healthy start, the socket the daemon serves on is held by the
+# daemon and the keeper alone. The daemon adopts it close-on-exec, so no process it starts (its
+# tmux server, a pane) inherits it, and no `legion` CLI call holds it; a process that did would keep
+# the port listening, unanswered, after the daemon stops (lib/rig.sh's held_only_by).
+held_by_daemon_and_keeper() {
+  held_only_by "$port" "$pid" "$daemon_keeper_pid" ||
+    fail "the socket the daemon serves on port $port is not held by exactly the daemon ($pid) and its keeper ($daemon_keeper_pid)${1:-}"
 }
 # shellcheck source-path=SCRIPTDIR source=lib/rig.sh
 . "$root/scripts/e2e/lib/rig.sh"
@@ -113,10 +136,11 @@ command -v tmux >/dev/null || {
 }
 export XDG_STATE_HOME="$work/xdg" # the registry lands here, never in the devbox's real one
 project="E2E$$$(date +%s)"        # daemon_boot counts per project; a fresh key makes boots==1 true on any store
-# A port this run holds alone, so a daemon of another run is never mistaken for this one's, and
-# below the kernel's ephemeral range, so no socket the run opens before the daemon binds can take
-# it (scripts/e2e/lib/free-port.sh). The restart reuses it.
-port=$(bash "$root/scripts/e2e/lib/free-port.sh")
+# A port this run holds alone, so a daemon of another run is never mistaken for this one's: a keeper
+# holds a socket on a port the kernel chose for the whole run (lib/rig.sh's keep_port), legion.yaml
+# names that port, and each start serves on a copy of the socket (LEGION_LISTEN_FD), so the restart
+# serves the same port and nothing else can take it in between.
+keep_port daemon_keeper port
 go build -o "$work/legion" ./cmd/legion
 bash "$root/scripts/e2e/lib/built-from.sh" "$root" "$work/legion" | sed 's/^/   /'
 
@@ -231,9 +255,10 @@ grep -q 'hunter2' "$work/refusal.log" && {
 }
 
 # 2. starts, answers, restarts against the same store
-"${pane_home[@]}" "$work/legion" start --config "$work/legion.yaml" &
-pid=$!
+start_kept daemon daemon_keeper LEGION_LISTEN_FD -- "${pane_home[@]}" "$work/legion" start --config "$work/legion.yaml"
+pid=$daemon_pid
 wait_healthz
+held_by_daemon_and_keeper
 "$work/legion" state --json --port "$port" >"$work/state1.json"
 jq -e --arg p "$project" \
   '.daemon.project == $p and .daemon.boots == 1 and .admission.cap == 4 and (.issues | length) == 0' \
@@ -284,9 +309,10 @@ jq -e '.settings.max_fix_attempts == 5
 kill -TERM "$pid"
 stop_daemon SIGTERM
 
-"${pane_home[@]}" "$work/legion" start --config "$work/legion.yaml" &
-pid=$!
+start_kept daemon daemon_keeper LEGION_LISTEN_FD -- "${pane_home[@]}" "$work/legion" start --config "$work/legion.yaml"
+pid=$daemon_pid
 wait_healthz " after restart"
+held_by_daemon_and_keeper " after restart"
 "$work/legion" state --json --port "$port" >"$work/state2.json"
 jq -e '.daemon.boots == 2' "$work/state2.json" || {
   echo "the restart did not record a second boot"

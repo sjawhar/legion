@@ -201,8 +201,8 @@ The Legion casts run against a live daemon: `walkthroughs/legion-operator/record
 one on example data, in the shape `scripts/e2e/controller-start-tmux.sh` builds, and records both
 from it into that directory, `state.cast` first and then `controller.cast`, whose controller
 registers with the daemon the first one read. `legion-state` and `legion-controller` render them.
-It needs Go, Docker, `jq`, curl, tmux, Bun, mise, jj and asciinema, and checks for each before it
-starts.
+It needs Go, Docker, `jq`, curl, tmux, Bun, mise, jj, python3 and asciinema, and checks for each
+before it starts.
 
 ### Before you commit a video
 

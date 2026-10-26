@@ -34,6 +34,7 @@ transcript_to "$evidence/transcript.log"
 ok=
 daemon_pid=
 listener_pid=
+daemon_keeper_pid=
 daemon_port=
 envoy_port=
 profile=legion-e2e-controller-$$-$(date +%s)
@@ -70,6 +71,7 @@ cleanup() {
   stop_pid "$daemon_pid"
   TMUX_TMPDIR=$work/tmux tmux -L "legion-$ptoken" kill-server >/dev/null 2>&1
   stop_pid "$listener_pid"
+  stop_pid "$daemon_keeper_pid"
   for p in $(run_processes); do kill -KILL "$p" 2>/dev/null; done
   docker rm -f "$nats_container" "$pg_container" >/dev/null 2>&1
   rm -rf "$work"
@@ -88,8 +90,9 @@ state_json() { legion state --json --port "$daemon_port"; }
 envoy_role() { curl -fsS -H "@$work/envoy-auth-header" "http://127.0.0.1:$envoy_port/v1/roles/$1"; }
 log_count() { jq -R --arg m "$1" 'fromjson? | select(.msg == $m)' "$daemon_log" | jq -s length; }
 # The operator's shell, less the running session's own OMP and Envoy variables, with the run's own
-# HOME for Oh My Pi.
-operator_env() { env -u OMP_SESSION_ID -u OMPCODE -u PI_CONFIG_FILES -u ENVOY_NATS_URL -u LEGION_OMP_PATH HOME="$omp_home" OMP_PROFILE="$profile" "$@"; }
+# HOME for Oh My Pi: operator_env runs a command in it, and the daemon starts in it (start_kept).
+operator_shell=(env -u OMP_SESSION_ID -u OMPCODE -u PI_CONFIG_FILES -u ENVOY_NATS_URL -u LEGION_OMP_PATH HOME="$omp_home" OMP_PROFILE="$profile")
+operator_env() { "${operator_shell[@]}" "$@"; }
 # controller_omp STATE_DIR: the pid of the Oh My Pi `legion controller start` launched for STATE_DIR.
 controller_omp() {
   local p
@@ -104,7 +107,7 @@ controller_omp() {
 env_of() { tr '\0' '\n' <"/proc/$1/environ" | sed -n "s/^$2=//p"; }
 
 # ---- setup -----------------------------------------------------------------------------------------
-for tool in go docker jq curl tmux bun mise; do command -v "$tool" >/dev/null || fail "$tool is required"; done
+for tool in go docker jq curl python3 tmux bun mise; do command -v "$tool" >/dev/null || fail "$tool is required"; done
 mkdir -p "$state" "$work/xdg" "$work/tmux"
 make_omp_home "$omp_home"
 export XDG_STATE_HOME=$work/xdg TMUX_TMPDIR=$work/tmux
@@ -114,11 +117,12 @@ LEGION_GH_PATH=$(mise which gh) || fail "mise has no gh"
 export LEGION_GH_PATH
 pin=$(<"$root/.omp-pin")
 mise where "$pin" >/dev/null 2>&1 || mise install "$pin" >&2
-pick_port daemon_port
-pick_port envoy_port
+# The daemon's port is one the kernel chose, held by a keeper for the run (lib/rig.sh's keep_port),
+# so legion.yaml and controller.yaml can name it before the daemon starts on a copy of its socket.
+keep_port daemon_keeper daemon_port
 (cd "$root/packages/daemon" && go build -o "$work/legion" ./cmd/legion)
 (cd "$root/packages/envoy" && go build -o "$work/envoy-listener" ./cmd/listener)
-note "legion $("$work/legion" version); OMP pin $pin; daemon port $daemon_port; listener port $envoy_port"
+note "legion $("$work/legion" version); OMP pin $pin; daemon port $daemon_port"
 
 refuse_leftovers legion-e2e-controller
 (umask 077 && head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n' >"$work/postgres-password")
@@ -135,10 +139,10 @@ until_true 90 "NATS to be ready" sh -c "docker logs '$nats_container' 2>&1 | gre
 nats_url="nats://127.0.0.1:$(docker port "$nats_container" 4222/tcp | head -1 | sed 's/.*://')"
 (umask 077 && head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n' >"$work/envoy-token" &&
   printf 'Authorization: Bearer %s\n' "$(cat "$work/envoy-token")" >"$work/envoy-auth-header")
-ENVOY_API_TOKEN="$(cat "$work/envoy-token")" PORT=$envoy_port ENVOY_LISTEN_HOST=127.0.0.1 \
-  ENVOY_MACHINE_ID="legion-e2e-controller-$$" NATS_URLS=$nats_url "$work/envoy-listener" >"$evidence/logs/listener.log" 2>&1 &
-listener_pid=$!
+ENVOY_API_TOKEN="$(cat "$work/envoy-token")" ENVOY_LISTEN_HOST=127.0.0.1 ENVOY_MACHINE_ID="legion-e2e-controller-$$" NATS_URLS=$nats_url \
+  start_held listener envoy_port ENVOY_LISTEN_FD --env 'PORT={port}' -- "$work/envoy-listener"
 until_true 60 "the Envoy listener" curl -fsS -H "@$work/envoy-auth-header" "http://127.0.0.1:$envoy_port/v1/sessions"
+note "listener port $envoy_port"
 
 (cd "$root" && bun install --frozen-lockfile >/dev/null)
 envoy_manifest=$(bash "$root/scripts/e2e/lib/install-plugin-profile.sh" --package pi-envoy --profile "$profile" --home "$omp_home" --dest "$work/pi-envoy")
@@ -247,9 +251,8 @@ pass
 
 # ---- the daemon ------------------------------------------------------------------------------------
 begin daemon-serves
-operator_env "$work/legion" start --config "$work/legion.yaml" >>"$daemon_log" 2>&1 &
-daemon_pid=$!
-until_true 180 "the daemon to answer /healthz" curl -fs "http://127.0.0.1:$daemon_port/healthz"
+start_kept daemon daemon_keeper LEGION_LISTEN_FD -- "${operator_shell[@]}" "$work/legion" start --config "$work/legion.yaml"
+until_true 180 "the daemon to answer /healthz" curl -fs --max-time 5 "http://127.0.0.1:$daemon_port/healthz"
 state_json | jq -e '.controllerLocator == null' >/dev/null || fail "a controller is recorded before any start"
 note "healthy; no controllerLocator yet"
 pass

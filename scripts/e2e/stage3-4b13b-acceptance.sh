@@ -80,8 +80,8 @@ port_pg=${ACCEPT_PG_PORT:?ACCEPT_PG_PORT is the host port of that container}
 pg_user=postgres
 legion_db="legion_$ptoken" dispatch_db="dispatch_$ptoken"
 nats_bin=${ACCEPT_NATS_BIN:?ACCEPT_NATS_BIN is the nats-server binary the run starts}
-daemon_pid='' dispatch_pid='' listener_pid='' bridge_pid='' watcher_pid='' nats_pid=''
-port_daemon='' port_listener='' port_dispatch='' port_worker_stream='' port_nats=''
+daemon_pid='' dispatch_pid='' listener_pid='' bridge_pid='' watcher_pid='' nats_pid='' daemon_keeper_pid=''
+port_daemon='' port_listener='' port_dispatch='' port_nats=''
 # timeout_hook names a function lib/rig.sh's until_true runs when a wait times out.
 # shellcheck disable=SC2034
 timeout_hook=''
@@ -148,6 +148,7 @@ cleanup() {
   stop_pid "$listener_pid"
   stop_pid "$bridge_pid"
   stop_pid "$nats_pid"
+  stop_pid "$daemon_keeper_pid"
   stop_pid "${instructor_pid:-}"
   TMUX_TMPDIR="$work/tmux" tmux -L "legion-$ptoken" kill-server >/dev/null 2>&1 || true
   for p in $(run_processes); do kill -KILL "$p" 2>/dev/null || true; done
@@ -193,54 +194,42 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 # ---- the rig: copied from stage3-devbox-workflow.sh ------------------------------------------------
+# Each service serves on a port the kernel chose, held from that choice until the service serves on
+# it (lib/rig.sh's start_held); the daemon's, which its restart keeps, by a keeper for the whole run.
 start_listener() {
-  local token attempt offset result
+  local token
   token=$(cat "$work/envoy-token")
-  for attempt in 1 2 3 4 5; do
-    pick_port port_listener
-    offset=$(log_size listener)
-    ENVOY_API_TOKEN="$token" PORT="$port_listener" ENVOY_LISTEN_HOST=127.0.0.1 \
-      ENVOY_MACHINE_ID="legion-accept4b13b-$$" NATS_URLS="nats://127.0.0.1:$port_nats" \
-      start_process listener env -u NATS_NKEY_SEED -u NATS_NKEY_SEED_FILE -u GH_PUBLIC_REPO_PAT -u LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64 \
-        -u GH_AGENT_APP_PRIVATE_KEY_B64 -u GH_REVIEW_APP_PRIVATE_KEY_B64 "$work/envoy-listener"
-    result=0
-    await_start listener "$listener_pid" "$offset" 60 "the Envoy listener to answer /v1/sessions" \
-      curl -fsS -H "@$work/envoy-auth-header" "http://127.0.0.1:$port_listener/v1/sessions" || result=$?
-    [ "$result" != 0 ] || return 0
-    note "the Envoy listener lost port $port_listener (attempt $attempt); picking another"
-  done
-  fail "the Envoy listener lost its picked port five times"
+  ENVOY_API_TOKEN="$token" ENVOY_LISTEN_HOST=127.0.0.1 \
+    ENVOY_MACHINE_ID="legion-accept4b13b-$$" NATS_URLS="nats://127.0.0.1:$port_nats" \
+    start_held listener port_listener ENVOY_LISTEN_FD --env 'PORT={port}' -- \
+    env -u NATS_NKEY_SEED -u NATS_NKEY_SEED_FILE -u GH_PUBLIC_REPO_PAT -u LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64 \
+    -u GH_AGENT_APP_PRIVATE_KEY_B64 -u GH_REVIEW_APP_PRIVATE_KEY_B64 "$work/envoy-listener"
+  await_start listener "$listener_pid" 60 "the Envoy listener to answer /v1/sessions" \
+    curl -fsS -H "@$work/envoy-auth-header" "http://127.0.0.1:$port_listener/v1/sessions"
 }
 
 start_dispatch() {
-  local keep=${1:-} dispatch_token envoy_token pg_password attempt offset result
+  local dispatch_token envoy_token pg_password
   dispatch_token=$(cat "$work/dispatch-token")
   envoy_token=$(cat "$work/envoy-token")
   pg_password=$(cat "$work/postgres-password")
   mkdir -p "$work/dispatch-home"
   chmod 0700 "$work/dispatch-home"
-  for attempt in 1 2 3 4 5; do
-    [ -n "$keep" ] || pick_port port_dispatch
-    offset=$(log_size dispatch)
-    # HOME and XDG_CONFIG_HOME are the scratch home, so the server reads no envoy.json of the
-    # operator's: make_omp_home exports the operator's XDG_CONFIG_HOME.
-    DATABASE_URL="postgres://$pg_user:$pg_password@127.0.0.1:$port_pg/$dispatch_db?sslmode=disable" \
-      DISPATCH_AGENT_TOKEN="$dispatch_token" ENVOY_TOKEN="$envoy_token" HOME="$work/dispatch-home" \
-      XDG_CONFIG_HOME="$work/dispatch-home/.config" \
-      DISPATCH_IDENTITY=header:X-Dispatch-User DISPATCH_IDENTITY_HEADER_TRUSTED=1 \
-      DISPATCH_LISTEN_HOST=127.0.0.1 DISPATCH_PORT="$port_dispatch" \
-      DISPATCH_SERVER_URL="http://127.0.0.1:$port_dispatch" NATS_URLS="nats://127.0.0.1:$port_nats" \
-      ENVOY_URL="http://127.0.0.1:$port_listener" \
-      start_process dispatch env -u NATS_NKEY_SEED -u NATS_NKEY_SEED_FILE -u GH_PUBLIC_REPO_PAT -u LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64 \
-        -u GH_AGENT_APP_PRIVATE_KEY_B64 -u GH_REVIEW_APP_PRIVATE_KEY_B64 "$work/envoy-dispatch"
-    result=0
-    await_start dispatch "$dispatch_pid" "$offset" 60 "the scratch Dispatch server" \
-      curl -fsS "http://127.0.0.1:$port_dispatch/api/v1" || result=$?
-    [ "$result" != 0 ] || return 0
-    [ -z "$keep" ] || fail "the restarted scratch Dispatch lost port $port_dispatch"
-    note "the scratch Dispatch lost port $port_dispatch (attempt $attempt); picking another"
-  done
-  fail "the scratch Dispatch lost its picked port five times"
+  # HOME and XDG_CONFIG_HOME are the scratch home, so the server reads no envoy.json of the
+  # operator's: make_omp_home exports the operator's XDG_CONFIG_HOME. They are the server's alone,
+  # set by its env, not the held-port helper's that runs it.
+  DATABASE_URL="postgres://$pg_user:$pg_password@127.0.0.1:$port_pg/$dispatch_db?sslmode=disable" \
+    DISPATCH_AGENT_TOKEN="$dispatch_token" ENVOY_TOKEN="$envoy_token" \
+    DISPATCH_IDENTITY=header:X-Dispatch-User DISPATCH_IDENTITY_HEADER_TRUSTED=1 \
+    DISPATCH_LISTEN_HOST=127.0.0.1 NATS_URLS="nats://127.0.0.1:$port_nats" \
+    ENVOY_URL="http://127.0.0.1:$port_listener" \
+    start_held dispatch port_dispatch DISPATCH_LISTEN_FD \
+    --env 'DISPATCH_PORT={port}' --env 'DISPATCH_SERVER_URL=http://127.0.0.1:{port}' -- \
+    env -u NATS_NKEY_SEED -u NATS_NKEY_SEED_FILE -u GH_PUBLIC_REPO_PAT -u LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64 \
+    -u GH_AGENT_APP_PRIVATE_KEY_B64 -u GH_REVIEW_APP_PRIVATE_KEY_B64 \
+    HOME="$work/dispatch-home" XDG_CONFIG_HOME="$work/dispatch-home/.config" "$work/envoy-dispatch"
+  await_start dispatch "$dispatch_pid" 60 "the scratch Dispatch server" \
+    curl -fsS "http://127.0.0.1:$port_dispatch/api/v1"
 }
 
 # The one difference from Stage 3's configuration: admission_cap 3 (three roots) and a merge queue
@@ -249,7 +238,6 @@ write_legion_config() {
   cat >"$work/legion.yaml" <<EOF
 project: $project
 port: $port_daemon
-worker_stream_port: $port_worker_stream
 postgres_dsn: postgres://$pg_user:$(cat "$work/postgres-password")@127.0.0.1:$port_pg/$legion_db?sslmode=disable
 state_dir: $state
 operator_token_file: $work/operator-token
@@ -277,28 +265,24 @@ github_apps:
 EOF
 }
 
+# start_daemon [keep] — keep restarts the Go daemon on the port every pane already names. Its port
+# is kept for the run, so each poll of it carries a timeout: between two daemons a request waits
+# unanswered instead of being refused.
 start_daemon() {
-  local keep=${1:-} attempt offset result
-  for attempt in 1 2 3 4 5; do
-    if [ -z "$keep" ]; then
-      pick_port port_daemon
-      pick_port port_worker_stream
-      write_legion_config
-    fi
-    offset=$(log_size daemon)
-    HOME="$omp_home" OMP_PROFILE="$profile" PATH="$(dirname "$real_gh"):$work/realtmux:$PATH" env -u NATS_NKEY_SEED -u NATS_NKEY_SEED_FILE \
-      -u NATS_DAEMON_NKEY_SEED -u NATS_DAEMON_NKEY_SEED_FILE -u GH_PUBLIC_REPO_PAT -u LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64 \
-      -u GH_AGENT_APP_PRIVATE_KEY_B64 -u GH_REVIEW_APP_PRIVATE_KEY_B64 \
-      "$work/legion" start --config "$work/legion.yaml" >>"$evidence/logs/daemon.log" 2>&1 &
-    daemon_pid=$!
-    result=0
-    await_start daemon "$daemon_pid" "$offset" 180 "the Go daemon to answer /healthz" \
-      curl -fsS "http://127.0.0.1:$port_daemon/healthz" || result=$?
-    [ "$result" != 0 ] || return 0
-    [ -z "$keep" ] || fail "the restarted Go daemon lost port $port_daemon or $port_worker_stream"
-    note "the Go daemon lost a port (attempt $attempt); picking again"
-  done
-  fail "the Go daemon lost a picked port five times"
+  local keep=${1:-}
+  if [ -z "$keep" ]; then
+    keep_port daemon_keeper port_daemon
+    write_legion_config
+  fi
+  # HOME, OMP_PROFILE and PATH are the daemon's alone, set by its env, not the held-port helper's
+  # that runs it.
+  start_kept daemon daemon_keeper LEGION_LISTEN_FD -- \
+    env -u NATS_NKEY_SEED -u NATS_NKEY_SEED_FILE -u NATS_DAEMON_NKEY_SEED -u NATS_DAEMON_NKEY_SEED_FILE \
+    -u GH_PUBLIC_REPO_PAT -u LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64 -u GH_AGENT_APP_PRIVATE_KEY_B64 \
+    -u GH_REVIEW_APP_PRIVATE_KEY_B64 HOME="$omp_home" OMP_PROFILE="$profile" \
+    PATH="$(dirname "$real_gh"):$work/realtmux:$PATH" "$work/legion" start --config "$work/legion.yaml"
+  await_start daemon "$daemon_pid" 180 "the Go daemon to answer /healthz" \
+    curl -fsS --max-time 5 "http://127.0.0.1:$port_daemon/healthz"
 }
 stop_daemon() { kill -TERM "$daemon_pid" 2>/dev/null || true; stop_pid "$daemon_pid"; daemon_pid=; }
 
@@ -578,10 +562,13 @@ until_true_quiet() {
 }
 
 begin prerequisites
-for tool in go psql jq curl ss tmux bun mise secrets gh jj hawk-token; do command -v "$tool" >/dev/null || fail "$tool is required"; done
+for tool in go psql jq curl python3 tmux bun mise secrets gh jj hawk-token; do command -v "$tool" >/dev/null || fail "$tool is required"; done
 [ -x "$nats_bin" ] || fail "no native nats-server at $nats_bin"
 # The suspension waits are bounded by lib/workflow.sh's turn budget, and the lib sourced is ACCEPT_ROOT's.
 [ -n "${phase_seconds:-}" ] || fail "ACCEPT_ROOT's scripts/e2e/lib/workflow.sh ($root) predates phase_seconds: point ACCEPT_ROOT at a checkout that has it"
+# The services serve on held ports (start_held, keep_port), which ACCEPT_ROOT's lib/rig.sh and its
+# binaries must both provide.
+declare -F start_held >/dev/null || fail "ACCEPT_ROOT's scripts/e2e/lib/rig.sh ($root) predates start_held: point ACCEPT_ROOT at a checkout that has it"
 real_gh=$(mise which gh) || fail "mise has no gh"
 # The real tmux comes after the real gh on the daemon's PATH: the tmux runtime runs tmux with the
 # pane allow-list alone, where a shimmed tmux, run from a directory under the operator's real
@@ -634,10 +621,13 @@ vcs_rev=$(go version -m "$work/legion" | sed -n 's/^[[:space:]]*build[[:space:]]
 note "daemon binary stamped vcs.revision=$vcs_rev, $(go version -m "$work/legion" | sed -n 's/^[[:space:]]*build[[:space:]]*//p' | { grep vcs.modified || true; }); $evidence/binary-stamp.txt"
 PGPASSWORD=ci psql -h 127.0.0.1 -p "$port_pg" -U "$pg_user" -d postgres -v ON_ERROR_STOP=1 -qc "create database $legion_db" -c "create database $dispatch_db" ||
   fail "could not create $legion_db and $dispatch_db in the shared Postgres $pg_container on port $port_pg"
-pick_port port_nats
 mkdir -p "$work/nats-store"
-start_process nats "$nats_bin" -js -a 127.0.0.1 -p "$port_nats" -sd "$work/nats-store"
-until_true 60 "NATS to be ready" grep -q 'Server is ready' "$evidence/logs/nats.log"
+# The port is the kernel's own pick (`-p -1`), read back from the line the server logs once it
+# listens (lib/rig.sh's report_port).
+start_process nats "$nats_bin" -js -a 127.0.0.1 -p -1 -sd "$work/nats-store"
+await_start nats "$nats_pid" 60 "NATS to be ready" grep -q 'Server is ready' "$evidence/logs/nats.log"
+port_nats=$(report_port "$evidence/logs/nats.log" 'Listening for client connections on [^ ]*:') ||
+  fail "the nats-server logged no client port; see $evidence/logs/nats.log"
 start_listener
 start_dispatch
 dispatch_human POST projects "$(jq -cn --arg key "$project" --arg name "4b.13b acceptance $project" '{key:$key,name:$name}')" >/dev/null
@@ -1207,6 +1197,7 @@ daemon_state >"$evidence/final-state.json"
 "$work/legion" claims list --json --config "$work/legion.yaml" --operator-token-file "$work/operator-token" >"$evidence/final-claims.json"
 stop_pid "$watcher_pid"; watcher_pid=
 stop_pid "$daemon_pid"; daemon_pid=
+stop_pid "$daemon_keeper_pid"; daemon_keeper_pid=
 stop_dispatch() { stop_pid "$dispatch_pid"; dispatch_pid=; }
 stop_dispatch
 stop_pid "$listener_pid"; listener_pid=

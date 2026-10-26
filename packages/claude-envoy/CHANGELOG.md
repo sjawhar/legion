@@ -18,6 +18,12 @@
   `merged` or `closed`, always emitted, so the MCP server's strict state reader admits the field
   and nothing this plugin reads or writes moved; a session of it registers with a daemon at 36.
 
+- `scripts/smoke-session-title.sh` starts nats-server (`-p -1`) and the Envoy listener (`PORT=0`)
+  on ports the kernel chooses and reads each back from the server's own log, instead of picking a
+  port that was free a moment earlier, which another program could take before the server bound
+  it; the Dispatch address its session is configured with, which nothing serves, is
+  `http://127.0.0.1:1` (INFRA-253).
+
 ### Fixed
 
 - The plugin's `legion/` copy of the `legion-architect` skill is regenerated with the same

@@ -50,11 +50,11 @@ nats_container="legion-e2ecc-nats-$$"
 daemon_pid=
 dispatch_pid=
 listener_pid=
+daemon_keeper_pid=
 watcher_pid=
 port_daemon=
 port_listener=
 port_dispatch=
-port_worker_stream=
 port_pg=
 port_nats=
 dispatch_base=
@@ -117,6 +117,7 @@ cleanup() {
   stop_pid "$daemon_pid"
   stop_pid "$dispatch_pid"
   stop_pid "$listener_pid"
+  stop_pid "$daemon_keeper_pid"
   TMUX_TMPDIR="$work/tmux" tmux -L "legion-$ptoken" kill-server >/dev/null 2>&1 || true
   for p in $(run_processes); do kill -KILL "$p" 2>/dev/null || true; done
   docker rm -f "$pg_container" "$nats_container" >/dev/null 2>&1 || true
@@ -140,53 +141,42 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 # ---- the scratch services ------------------------------------------------------------------------
+# Each serves on a port the kernel chose, held from that choice until it serves on it (lib/rig.sh's
+# start_held); the daemon's by a keeper, so legion.yaml can name it before the daemon starts.
 start_listener() {
-  local token attempt offset result
+  local token
   token=$(cat "$work/envoy-token")
-  for attempt in 1 2 3 4 5; do
-    pick_port port_listener
-    offset=$(log_size listener)
-    ENVOY_API_TOKEN="$token" PORT="$port_listener" ENVOY_LISTEN_HOST=127.0.0.1 \
-      ENVOY_MACHINE_ID="legion-e2ecc-$$" NATS_URLS="nats://127.0.0.1:$port_nats" \
-      start_process listener env -u NATS_NKEY_SEED -u NATS_NKEY_SEED_FILE -u GH_PUBLIC_REPO_PAT -u LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64 \
-        -u GH_AGENT_APP_PRIVATE_KEY_B64 -u GH_REVIEW_APP_PRIVATE_KEY_B64 "$work/envoy-listener"
-    result=0
-    await_start listener "$listener_pid" "$offset" 60 "the Envoy listener to answer /v1/sessions" \
-      curl -fsS -H "@$work/envoy-auth-header" "http://127.0.0.1:$port_listener/v1/sessions" || result=$?
-    [ "$result" != 0 ] || return 0
-    note "the Envoy listener lost port $port_listener to another process (attempt $attempt); picking another"
-  done
-  fail "the Envoy listener lost its picked port five times"
+  ENVOY_API_TOKEN="$token" ENVOY_LISTEN_HOST=127.0.0.1 \
+    ENVOY_MACHINE_ID="legion-e2ecc-$$" NATS_URLS="nats://127.0.0.1:$port_nats" \
+    start_held listener port_listener ENVOY_LISTEN_FD --env 'PORT={port}' -- \
+    env -u NATS_NKEY_SEED -u NATS_NKEY_SEED_FILE -u GH_PUBLIC_REPO_PAT -u LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64 \
+    -u GH_AGENT_APP_PRIVATE_KEY_B64 -u GH_REVIEW_APP_PRIVATE_KEY_B64 "$work/envoy-listener"
+  await_start listener "$listener_pid" 60 "the Envoy listener to answer /v1/sessions" \
+    curl -fsS -H "@$work/envoy-auth-header" "http://127.0.0.1:$port_listener/v1/sessions"
 }
 
 start_dispatch() {
-  local dispatch_token envoy_token pg_password attempt offset result
+  local dispatch_token envoy_token pg_password
   dispatch_token=$(cat "$work/dispatch-token")
   envoy_token=$(cat "$work/envoy-token")
   pg_password=$(cat "$work/postgres-password")
   mkdir -p "$work/dispatch-home"
   chmod 0700 "$work/dispatch-home"
-  for attempt in 1 2 3 4 5; do
-    pick_port port_dispatch
-    offset=$(log_size dispatch)
-    # HOME and XDG_CONFIG_HOME are the scratch home, so the server reads no envoy.json of the operator's.
-    DATABASE_URL="postgres://legion:$pg_password@127.0.0.1:$port_pg/dispatch?sslmode=disable" \
-      DISPATCH_AGENT_TOKEN="$dispatch_token" ENVOY_TOKEN="$envoy_token" HOME="$work/dispatch-home" \
-      XDG_CONFIG_HOME="$work/dispatch-home/.config" \
-      DISPATCH_IDENTITY=header:X-Dispatch-User DISPATCH_IDENTITY_HEADER_TRUSTED=1 \
-      DISPATCH_LISTEN_HOST=127.0.0.1 DISPATCH_PORT="$port_dispatch" \
-      DISPATCH_SERVER_URL="http://127.0.0.1:$port_dispatch" NATS_URLS="nats://127.0.0.1:$port_nats" \
-      ENVOY_URL="http://127.0.0.1:$port_listener" \
-      start_process dispatch env -u NATS_NKEY_SEED -u NATS_NKEY_SEED_FILE -u GH_PUBLIC_REPO_PAT -u LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64 \
-        -u GH_AGENT_APP_PRIVATE_KEY_B64 -u GH_REVIEW_APP_PRIVATE_KEY_B64 "$work/envoy-dispatch"
-    result=0
-    await_start dispatch "$dispatch_pid" "$offset" 60 "the scratch Dispatch server" \
-      curl -fsS "http://127.0.0.1:$port_dispatch/api/v1" || result=$?
-    dispatch_base="http://127.0.0.1:$port_dispatch"
-    [ "$result" != 0 ] || return 0
-    note "the scratch Dispatch lost port $port_dispatch to another process (attempt $attempt); picking another"
-  done
-  fail "the scratch Dispatch lost its picked port five times"
+  # HOME and XDG_CONFIG_HOME are the scratch home, so the server reads no envoy.json of the
+  # operator's. They are the server's alone, set by its env, not the held-port helper's that runs it.
+  DATABASE_URL="postgres://legion:$pg_password@127.0.0.1:$port_pg/dispatch?sslmode=disable" \
+    DISPATCH_AGENT_TOKEN="$dispatch_token" ENVOY_TOKEN="$envoy_token" \
+    DISPATCH_IDENTITY=header:X-Dispatch-User DISPATCH_IDENTITY_HEADER_TRUSTED=1 \
+    DISPATCH_LISTEN_HOST=127.0.0.1 NATS_URLS="nats://127.0.0.1:$port_nats" \
+    ENVOY_URL="http://127.0.0.1:$port_listener" \
+    start_held dispatch port_dispatch DISPATCH_LISTEN_FD \
+    --env 'DISPATCH_PORT={port}' --env 'DISPATCH_SERVER_URL=http://127.0.0.1:{port}' -- \
+    env -u NATS_NKEY_SEED -u NATS_NKEY_SEED_FILE -u GH_PUBLIC_REPO_PAT -u LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64 \
+    -u GH_AGENT_APP_PRIVATE_KEY_B64 -u GH_REVIEW_APP_PRIVATE_KEY_B64 \
+    HOME="$work/dispatch-home" XDG_CONFIG_HOME="$work/dispatch-home/.config" "$work/envoy-dispatch"
+  await_start dispatch "$dispatch_pid" 60 "the scratch Dispatch server" \
+    curl -fsS "http://127.0.0.1:$port_dispatch/api/v1"
+  dispatch_base="http://127.0.0.1:$port_dispatch"
 }
 
 # The one setting under test is worker_backends; the design gate is off, so the architect's gate
@@ -195,7 +185,6 @@ write_legion_config() {
   cat >"$work/legion.yaml" <<EOF
 project: $project
 port: $port_daemon
-worker_stream_port: $port_worker_stream
 postgres_dsn: postgres://legion:$(cat "$work/postgres-password")@127.0.0.1:$port_pg/legion?sslmode=disable
 state_dir: $state
 operator_token_file: $work/operator-token
@@ -228,28 +217,22 @@ EOF
 
 # start_daemon runs the Go daemon with the run's Claude Code launch pinned: the claude and bun it
 # resolved here, and this checkout's claude-envoy package, whose dist/envoy-channel.js is every
-# Claude Code pane's MCP server and whose legion/ is the Legion plugin the pane loads.
+# Claude Code pane's MCP server and whose legion/ is the Legion plugin the pane loads. Its port is
+# kept, so each poll of it carries a timeout: until the daemon serves, a request waits unanswered.
 start_daemon() {
-  local attempt offset result
-  for attempt in 1 2 3 4 5; do
-    pick_port port_daemon
-    pick_port port_worker_stream
-    write_legion_config
-    offset=$(log_size daemon)
+  keep_port daemon_keeper port_daemon
+  write_legion_config
+  # HOME, OMP_PROFILE, PATH and the Claude Code launch are the daemon's alone, set by its env, not
+  # the held-port helper's that runs it.
+  start_kept daemon daemon_keeper LEGION_LISTEN_FD -- \
+    env -u NATS_NKEY_SEED -u NATS_NKEY_SEED_FILE -u NATS_DAEMON_NKEY_SEED -u NATS_DAEMON_NKEY_SEED_FILE \
+    -u GH_PUBLIC_REPO_PAT -u LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64 -u GH_AGENT_APP_PRIVATE_KEY_B64 \
+    -u GH_REVIEW_APP_PRIVATE_KEY_B64 -u ANTHROPIC_API_KEY \
     HOME="$omp_home" OMP_PROFILE="$profile" PATH="$realbin:$PATH" \
-      LEGION_CLAUDE_PATH="$claude_bin" LEGION_BUN_PATH="$realbin/bun" LEGION_CLAUDE_PLUGIN_DIR="$root/packages/claude-envoy" \
-      env -u NATS_NKEY_SEED -u NATS_NKEY_SEED_FILE -u NATS_DAEMON_NKEY_SEED -u NATS_DAEMON_NKEY_SEED_FILE \
-      -u GH_PUBLIC_REPO_PAT -u LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64 -u GH_AGENT_APP_PRIVATE_KEY_B64 \
-      -u GH_REVIEW_APP_PRIVATE_KEY_B64 -u ANTHROPIC_API_KEY \
-      "$work/legion" start --config "$work/legion.yaml" >>"$evidence/logs/daemon.log" 2>&1 &
-    daemon_pid=$!
-    result=0
-    await_start daemon "$daemon_pid" "$offset" 180 "the Go daemon to answer /healthz" \
-      curl -fsS "http://127.0.0.1:$port_daemon/healthz" || result=$?
-    [ "$result" != 0 ] || return 0
-    note "the Go daemon lost port $port_daemon or $port_worker_stream to another process (attempt $attempt); picking again"
-  done
-  fail "the Go daemon lost a picked port five times"
+    LEGION_CLAUDE_PATH="$claude_bin" LEGION_BUN_PATH="$realbin/bun" LEGION_CLAUDE_PLUGIN_DIR="$root/packages/claude-envoy" \
+    "$work/legion" start --config "$work/legion.yaml"
+  await_start daemon "$daemon_pid" 180 "the Go daemon to answer /healthz" \
+    curl -fsS --max-time 5 "http://127.0.0.1:$port_daemon/healthz"
 }
 
 # write_claude_route gives the implementer's claim its model before the claim exists: the daemon
@@ -508,7 +491,7 @@ key_file=${LEGION_E2E_CLAUDE_KEY_FILE:-}
   fail "LEGION_E2E_CLAUDE_KEY_FILE is unset: name a file holding the Anthropic API key the Claude Code implementer reaches its model with"
 [ -f "$key_file" ] && [ -r "$key_file" ] || fail "LEGION_E2E_CLAUDE_KEY_FILE names $key_file, which is not a readable file"
 refuse_leftovers legion-e2ecc
-for tool in go docker jq curl ss tmux bun mise secrets gh jj hawk-token pgrep claude; do command -v "$tool" >/dev/null || fail "$tool is required"; done
+for tool in go docker jq curl python3 tmux bun mise secrets gh jj hawk-token pgrep claude; do command -v "$tool" >/dev/null || fail "$tool is required"; done
 (umask 077 && tr -d '[:space:]' <"$key_file" >"$work/claude-model-key")
 [ -s "$work/claude-model-key" ] || fail "LEGION_E2E_CLAUDE_KEY_FILE ($key_file) holds no key"
 # The key's preflight: Anthropic lists its models to a key it accepts. The header goes by file, so the

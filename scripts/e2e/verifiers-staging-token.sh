@@ -102,7 +102,7 @@ expect_refusal() {
   echo "  $what → refused, naming $*"
 }
 
-for tool in go docker kubectl jq curl ss base64; do
+for tool in go docker kubectl jq curl python3 base64; do
   command -v "$tool" >/dev/null || fail "$tool is required and is not on PATH"
 done
 
@@ -151,16 +151,13 @@ done
 echo "  postgres 127.0.0.1:$pg_port, nats 127.0.0.1:$nats_port"
 
 database_url="postgres://dispatch:dispatch@127.0.0.1:$pg_port/dispatch"
-# The binaries take a port number, not a socket; lib/free-port.sh picks one below the ephemeral
-# range, so a port that is taken by the time they bind is a loud boot failure, not a silent pass.
-dispatch_port=$(bash "$root/scripts/e2e/lib/free-port.sh") || fail "no free port for dispatch"
-listener_port=$(bash "$root/scripts/e2e/lib/free-port.sh" "$dispatch_port") || fail "no free port for the listener"
 shared_dispatch_token="dispatch-shared-$RANDOM$RANDOM"
 shared_listener_token="listener-shared-$RANDOM$RANDOM"
 
 # The environment each binary boots with. HOME is the scratch dir so the signing key and app
 # credentials land there and never in the box's ~/.local/share/dispatch, and the working
-# directory is the scratch dir so no repo .envoy/envoy.json is picked up.
+# directory is the scratch dir so no repo .envoy/envoy.json is picked up. Neither names a port:
+# the boot refusals below exit before any bind, and the boots serve on held sockets.
 dispatch_env=(
   env -i PATH="$PATH" HOME="$work/home"
   DATABASE_URL="$database_url"
@@ -168,7 +165,6 @@ dispatch_env=(
   DISPATCH_IDENTITY=header:X-Dispatch-User
   DISPATCH_IDENTITY_HEADER_TRUSTED=1
   DISPATCH_LISTEN_HOST=127.0.0.1
-  DISPATCH_PORT="$dispatch_port"
   NATS_URLS="nats://127.0.0.1:$nats_port"
 )
 listener_env=(
@@ -176,7 +172,6 @@ listener_env=(
   ENVOY_MACHINE_ID=verifiers-e2e
   NATS_URLS="nats://127.0.0.1:$nats_port"
   ENVOY_LISTEN_HOST=127.0.0.1
-  PORT="$listener_port"
   ENVOY_API_TOKEN="$shared_listener_token"
 )
 
@@ -221,12 +216,29 @@ case "$subject" in
 esac
 
 echo "== boot both binaries against the staging issuer"
-"${dispatch_env[@]}" DISPATCH_OIDC_ISSUER="$issuer" DISPATCH_OIDC_AUDIENCE=dispatch \
+# Each serves on a port the kernel chose, held from that choice until it serves on it: the helper
+# opens the socket on 127.0.0.1:0, writes its port and becomes the binary (lib/held-port.py).
+# `env -i` clears the descriptor's variable the helper sets, so each names its own: the helper
+# hands the socket over as descriptor 3.
+held_port=$root/scripts/e2e/lib/held-port.py
+python3 "$held_port" exec --port-file "$work/dispatch.port" --fd-env DISPATCH_LISTEN_FD -- \
+  "${dispatch_env[@]}" DISPATCH_LISTEN_FD=3 DISPATCH_PORT='{port}' \
+  DISPATCH_OIDC_ISSUER="$issuer" DISPATCH_OIDC_AUDIENCE=dispatch \
   "$work/dispatch" >"$work/dispatch.log" 2>&1 &
 dispatch_pid=$!
-"${listener_env[@]}" ENVOY_OIDC_ISSUER="$issuer" ENVOY_OIDC_AUDIENCE=envoy \
+python3 "$held_port" exec --port-file "$work/listener.port" --fd-env ENVOY_LISTEN_FD -- \
+  "${listener_env[@]}" ENVOY_LISTEN_FD=3 PORT='{port}' ENVOY_OIDC_ISSUER="$issuer" ENVOY_OIDC_AUDIENCE=envoy \
   "$work/listener" >"$work/listener.log" 2>&1 &
 listener_pid=$!
+for i in $(seq 1 60); do
+  [ -s "$work/dispatch.port" ] && [ -s "$work/listener.port" ] && break
+  kill -0 "$dispatch_pid" 2>/dev/null || fail "dispatch exited before it held a port" "$work/dispatch.log"
+  kill -0 "$listener_pid" 2>/dev/null || fail "the listener exited before it held a port" "$work/listener.log"
+  [ "$i" = 60 ] && fail "the binaries held no port within 30s" "$work/dispatch.log"
+  sleep 0.5
+done
+dispatch_port=$(<"$work/dispatch.port")
+listener_port=$(<"$work/listener.port")
 dispatch_url="http://127.0.0.1:$dispatch_port"
 listener_url="http://127.0.0.1:$listener_port"
 # A binary that refuses to boot is a dead pid, not a slow one: say so at once, with its log,

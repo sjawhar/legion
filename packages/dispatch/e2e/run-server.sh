@@ -25,7 +25,9 @@ unset NATS_NKEY_SEED NATS_NKEY_SEED_FILE
 #   ... msg="dispatch: listening" addr=127.0.0.1:<port>
 # on stderr, the line a caller waits for and reads the port from. Set, the
 # server binds exactly that port, and an occupied one fails with "address
-# already in use".
+# already in use". DISPATCH_E2E_LISTEN_FROM instead names the unix socket of a
+# `held-port.py keep` process, for a caller that needs the port before the
+# server starts: the server serves on that keeper's port.
 : "${DATABASE_URL:?DATABASE_URL must name an isolated Dispatch e2e database}"
 : "${FAKE_ENVOY_PORT:?FAKE_ENVOY_PORT must name the fake Envoy (e2e/fake-envoy.ts) this server reads}"
 : "${FAKE_GITHUB_PORT:?FAKE_GITHUB_PORT must name the fake GitHub (e2e/fake-github.ts) this server reads}"
@@ -33,11 +35,19 @@ database_url="$DATABASE_URL"
 fake_envoy_port="$FAKE_ENVOY_PORT"
 fake_github_port="$FAKE_GITHUB_PORT"
 held_port="$(cd "$(dirname "$0")/../../.." && pwd)/scripts/e2e/lib/held-port.py"
+if [ -n "${DISPATCH_E2E_PORT:-}" ] && [ -n "${DISPATCH_E2E_LISTEN_FROM:-}" ]; then
+  echo "run-server.sh: set DISPATCH_E2E_PORT or DISPATCH_E2E_LISTEN_FROM, not both" >&2
+  exit 2
+fi
 if [ -n "${DISPATCH_E2E_PORT:-}" ]; then
   listen=()
   port_env=(DISPATCH_PORT="$DISPATCH_E2E_PORT" DISPATCH_SERVER_URL="http://127.0.0.1:$DISPATCH_E2E_PORT")
 else
-  listen=(python3 "$held_port" exec --fd-env DISPATCH_LISTEN_FD
+  listen=(python3 "$held_port" exec)
+  if [ -n "${DISPATCH_E2E_LISTEN_FROM:-}" ]; then
+    listen+=(--from "$DISPATCH_E2E_LISTEN_FROM")
+  fi
+  listen+=(--fd-env DISPATCH_LISTEN_FD
     --env 'DISPATCH_PORT={port}' --env 'DISPATCH_SERVER_URL=http://127.0.0.1:{port}' --)
   port_env=()
 fi

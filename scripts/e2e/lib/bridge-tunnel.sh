@@ -16,13 +16,13 @@
 # name, never by broader selection — consistent with namespace-rig's own rule that a shared
 # namespace's teardown only ever acts on the run's own objects.
 #
-# A dropped `kubectl port-forward` is not treated as a dead bridge: the watchdog restarts it, on
-# the same local port, and the chisel client's own bounded reconnect (--max-retry-count 30,
-# --max-retry-interval 2s — finite, not chisel's default of forever) picks the tunnel back up once
-# the new port-forward is in place, since the client, its auth and its reverse listeners never
-# needed to change. Only two things fail the whole run loudly (SIGTERM to the script's own pid):
-# a port-forward that cannot be restarted within 60s of dropping, or the chisel client itself
-# exiting (its own retry budget exhausted) — two earlier runs died outright to this exact drop,
+# A dropped `kubectl port-forward` is not treated as a dead bridge: the watchdog restarts it, on a
+# new local port the kernel chooses, and then restarts the chisel client against that port; the
+# server's auth and the pod are unchanged, and the new client asks for the same two reverse
+# listeners. Only two things fail the whole run loudly (SIGTERM to the script's own pid): a
+# port-forward that cannot be restarted within 60s of dropping, or the chisel client itself exiting
+# (its own bounded reconnect, --max-retry-count 30 and --max-retry-interval 2s — finite, not
+# chisel's default of forever — exhausted) — two earlier runs died outright to this exact drop,
 # live, 2026-10-17, before this fix.
 #
 # Sourced after lib/namespace-rig.sh (stage4a-sandbox-runtime.sh sources both), whose `op` this
@@ -55,37 +55,56 @@ bridge_portforward_attempt=0
 bridge_client_pid=
 bridge_watchdog_pid=
 
-# bridge_portforward_start (re)starts kubectl port-forward to the bridge pod's control port, on
-# the one local port bridge_start picked (bridge_local_control_port), so the chisel client's
-# already-configured target URL keeps working across a restart — the watchdog below calls this
-# again, on the same port, when a dropped port-forward needs recovering, rather than tearing the
-# whole run down for a transient connection loss (confirmed live, 2026-10-17: two full-length runs
-# died to a dropped port-forward with no sign the cluster or the bridge pod itself was unhealthy).
-# Each attempt gets its own log file so a recovered run's evidence still shows the whole history.
-# Returns failure (never calls fail itself) if this one attempt never starts forwarding within
-# 30s; the caller — bridge_start synchronously, the watchdog's own bounded retry loop otherwise —
-# decides what that means.
+# bridge_portforward_start (re)starts kubectl port-forward to the bridge pod's control port, on a
+# local port the kernel chooses (`:<control port>`): kubectl binds it, so no port picked free a
+# moment earlier can be taken before the bind, and reports it on its `Forwarding from
+# 127.0.0.1:<port>` line, which sets bridge_local_control_port. The watchdog below calls this again
+# when a dropped port-forward needs recovering, rather than tearing the whole run down for a
+# transient connection loss (confirmed live, 2026-10-17: two full-length runs died to a dropped
+# port-forward with no sign the cluster or the bridge pod itself was unhealthy), and then restarts
+# the chisel client against the new port. Each attempt gets its own log file so a recovered run's
+# evidence still shows the whole history. Returns failure (never calls fail itself) if this one
+# attempt never starts forwarding within 30s; the caller — bridge_start synchronously, the
+# watchdog's own bounded retry loop otherwise — decides what that means.
 bridge_portforward_start() {
   bridge_portforward_attempt=$((bridge_portforward_attempt + 1))
-  local log="$work/bridge-portforward-$bridge_portforward_attempt.log"
+  local log="$work/bridge-portforward-$bridge_portforward_attempt.log" port=
   timeout --foreground 86400 kubectl --context "$operator" -n "$namespace" port-forward "pod/$bridge_name" \
-    "$bridge_local_control_port:$bridge_control_port" >"$log" 2>&1 &
+    ":$bridge_control_port" >"$log" 2>&1 &
   bridge_portforward_pid=$!
   local waited=0
-  until grep -q "Forwarding from" "$log" 2>/dev/null; do
+  until port=$(sed -n 's/^Forwarding from 127\.0\.0\.1:\([0-9][0-9]*\) -> .*/\1/p' "$log" 2>/dev/null) && [ -n "$port" ]; do
     kill -0 "$bridge_portforward_pid" 2>/dev/null || {
       echo "   [harness] kubectl port-forward attempt $bridge_portforward_attempt exited before it started forwarding: $(cat "$log")" >&2
       return 1
     }
     waited=$((waited + 1))
     if [ "$waited" -gt 30 ]; then
-      echo "   [harness] kubectl port-forward attempt $bridge_portforward_attempt never reported it was forwarding within 30s: $(cat "$log")" >&2
+      echo "   [harness] kubectl port-forward attempt $bridge_portforward_attempt never reported the local port it forwards from within 30s: $(cat "$log")" >&2
       kill "$bridge_portforward_pid" 2>/dev/null
       return 1
     fi
     sleep 1
   done
+  bridge_local_control_port=$port
   return 0
+}
+
+# bridge_client_start CHISEL AUTH STREAM_PORT SESSIONDB_PORT starts the chisel client against the
+# port-forward's current local port (bridge_local_control_port), asking the server for the two
+# reverse listeners, and sets bridge_client_pid. A bounded retry count and a short max interval, not
+# chisel's default of retrying forever: the client gives up and exits if the port-forward it dials
+# stays down past its own budget, which the watchdog below trusts as "this bridge is really gone"
+# rather than restarting indefinitely. AUTH through the environment, never `--auth` on the command
+# line (any local user can read another process's argv; only its owner or root can read its
+# environment) — chisel reads it from there natively when `--auth` is omitted, the same env var
+# name the server's Secret uses. Each start appends to the one client log.
+bridge_client_start() {
+  AUTH="$2" "$1" client --max-retry-count 30 --max-retry-interval 2s "http://127.0.0.1:$bridge_local_control_port" \
+    "R:0.0.0.0:$3:127.0.0.1:$3" \
+    "R:0.0.0.0:$4:127.0.0.1:$4" \
+    >>"$work/bridge-chisel-client.log" 2>&1 &
+  bridge_client_pid=$!
 }
 # bridge_start stands up the pod, the Service, the port-forward, the chisel client and the
 # watchdog, in that order, and fails loudly (via the caller's fail) the moment any of them does not
@@ -186,23 +205,11 @@ YAML
     fail "the bridge pod $bridge_name did not become Ready within 240s: $(op get pod "$bridge_name" -o wide 2>&1)"
   note "[operator] bridge pod/Service $bridge_name: chisel server on :$bridge_control_port (control, never exposed by the Service), reverse-forwarding :$stream_port and :$sessiondb_port, label legion.dev/project=$run_label"
 
-  bridge_local_control_port=$(bash "$root/scripts/e2e/lib/free-port.sh" "$stream_port" "$sessiondb_port") ||
-    fail "no free devbox port for the bridge's kubectl port-forward"
   bridge_portforward_start ||
     fail "the bridge's kubectl port-forward never came up: $(cat "$work/bridge-portforward-$bridge_portforward_attempt.log")"
-  note "[operator] kubectl port-forward pod/$bridge_name $bridge_local_control_port:$bridge_control_port: forwarding"
+  note "[operator] kubectl port-forward pod/$bridge_name :$bridge_control_port: forwarding from local port $bridge_local_control_port"
 
-  # A bounded retry count and a short max interval, not chisel's default of retrying forever: the
-  # client gives up and exits if the port-forward it dials stays down past its own budget, which
-  # the watchdog below trusts as "this bridge is really gone" rather than restarting indefinitely.
-  # AUTH through the environment, never `--auth` on the command line (any local user can read
-  # another process's argv; only its owner or root can read its environment) — chisel reads it
-  # from there natively when `--auth` is omitted, the same env var name the server's Secret uses.
-  AUTH="$auth_user:$auth_token" "$chisel_bin" client --max-retry-count 30 --max-retry-interval 2s "http://127.0.0.1:$bridge_local_control_port" \
-    "R:0.0.0.0:$stream_port:127.0.0.1:$stream_port" \
-    "R:0.0.0.0:$sessiondb_port:127.0.0.1:$sessiondb_port" \
-    >"$work/bridge-chisel-client.log" 2>&1 &
-  bridge_client_pid=$!
+  bridge_client_start "$chisel_bin" "$auth_user:$auth_token" "$stream_port" "$sessiondb_port"
 
   local ready='' attempt log
   for attempt in $(seq 1 30); do
@@ -220,13 +227,14 @@ YAML
   note "[harness] chisel client (pid $bridge_client_pid, max-retry-count 30, max-retry-interval 2s): reverse listeners for :$stream_port and :$sessiondb_port confirmed in the bridge pod's log"
 
   # The watchdog owns every port-forward restart from here: kubectl port-forward never retries
-  # itself, but a dropped one is not necessarily a dead bridge — the chisel client, auth and
-  # reverse listeners it already set up survive a port-forward restart on the same local port
-  # unchanged, and chisel's own bounded reconnect (above) picks the tunnel back up once the new
-  # port-forward is in place. The run only fails if a restart can't be gotten up within 60s of
-  # the drop, or the chisel client itself exits (it already gave up on its own budget). Confirmed
-  # live, 2026-10-17: killing the port-forward process mid-run let the watchdog restart it and the
-  # run continue past the point it would otherwise have died.
+  # itself, but a dropped one is not necessarily a dead bridge — the pod, its server and its auth
+  # survive it. A restarted port-forward listens on a new local port, so the watchdog replaces the
+  # chisel client with one dialing that port, which asks for the same reverse listeners. The run
+  # only fails if a restart can't be gotten up within 60s of the drop, or the chisel client itself
+  # exits (it already gave up on its own budget). Confirmed live, 2026-10-17: killing the
+  # port-forward process mid-run let the watchdog restart it and the run continue past the point it
+  # would otherwise have died. The watchdog owns the client it restarts, too: whichever way it
+  # exits, it stops the current port-forward and the current client.
   # A flag file, not just the TERM bridge_stop sends, decides whether a detected failure here
   # still fires kill -TERM "$$": confirmed live, 2026-10-17, three full-length runs died with the
   # script's own `check` variable never past "harness" — teardown_sequence's bridge_stop had not
@@ -237,11 +245,14 @@ YAML
   # loop), so the two races. The flag file is checked right before every kill -TERM "$$", not only
   # at loop top, so it still catches a check made moments before bridge_stop writes it.
   (
-    # Kills both pf_pid (the one this loop is tracking) and bridge_portforward_pid (the global
-    # bridge_portforward_start itself updates the instant it forks a new attempt, before this loop
-    # has assigned pf_pid from it): a TERM arriving mid-restart, after a new port-forward process
-    # exists but before `pf_pid=$bridge_portforward_pid` runs below, would otherwise orphan it.
-    trap 'kill "$pf_pid" "$bridge_portforward_pid" 2>/dev/null; exit 0' TERM
+    # On any exit — bridge_stop's TERM, the stopping flag, or a failure below — kills pf_pid (the
+    # one this loop is tracking), bridge_portforward_pid (the global bridge_portforward_start itself
+    # updates the instant it forks a new attempt, before this loop has assigned pf_pid from it) and
+    # bridge_client_pid (the client this subshell started last, or bridge_start's own): a TERM
+    # arriving mid-restart, after a new port-forward process exists but before
+    # `pf_pid=$bridge_portforward_pid` runs below, would otherwise orphan it.
+    trap 'kill "$pf_pid" "$bridge_portforward_pid" "$bridge_client_pid" 2>/dev/null' EXIT
+    trap 'exit 0' TERM
     pf_pid=$bridge_portforward_pid
     down_since=
     while :; do
@@ -255,7 +266,9 @@ YAML
         fi
         if bridge_portforward_start; then
           pf_pid=$bridge_portforward_pid
-          echo "   [harness] kubectl port-forward to $bridge_name recovered after $(($(date +%s) - down_since))s" >&2
+          kill "$bridge_client_pid" 2>/dev/null || true
+          bridge_client_start "$chisel_bin" "$auth_user:$auth_token" "$stream_port" "$sessiondb_port"
+          echo "   [harness] kubectl port-forward to $bridge_name recovered after $(($(date +%s) - down_since))s on local port $bridge_local_control_port; chisel client restarted against it (pid $bridge_client_pid)" >&2
           down_since=
         elif [ $(($(date +%s) - down_since)) -ge 60 ]; then
           [ -f "$work/bridge-stopping" ] && exit 0
@@ -269,10 +282,7 @@ YAML
         [ -f "$work/bridge-stopping" ] && exit 0
         echo "   BRIDGE TUNNEL DOWN: the chisel client exited (its own retry budget, max-retry-count 30, is exhausted); terminating the run: $(cat "$work/bridge-chisel-client.log")" >&2
         # The port-forward itself is still up here (the outer branch above only reaches this
-        # check once kill -0 "$pf_pid" confirmed it); this path's own exit, unlike a received
-        # TERM, never runs the trap above, so without this it would be the one way the watchdog
-        # could orphan a live port-forward process.
-        kill "$pf_pid" "$bridge_portforward_pid" 2>/dev/null
+        # check once kill -0 "$pf_pid" confirmed it); the EXIT trap above stops it.
         kill_harness
         kill -TERM "$$" 2>/dev/null
         exit 1
@@ -281,7 +291,7 @@ YAML
     done
   ) &
   bridge_watchdog_pid=$!
-  note "[harness] bridge watchdog (pid $bridge_watchdog_pid): restarts a dropped port-forward (up to 60s) and watches the chisel client; the client exiting (budget exhausted) or a port-forward that cannot be restarted in time fails the run"
+  note "[harness] bridge watchdog (pid $bridge_watchdog_pid): restarts a dropped port-forward (up to 60s) and the chisel client against its new local port, and watches the chisel client; the client exiting (budget exhausted) or a port-forward that cannot be restarted in time fails the run"
 }
 
 # bridge_stop tears down everything bridge_start may have started, in reverse order, and never
@@ -308,19 +318,19 @@ bridge_stop() {
   : >"$work/bridge-stopping"
   { [ -z "$bridge_watchdog_pid" ] || kill "$bridge_watchdog_pid" 2>/dev/null; } || true
   wait "$bridge_watchdog_pid" 2>/dev/null || true
-  { [ -z "$bridge_client_pid" ] || kill "$bridge_client_pid" 2>/dev/null; } || true
-  wait "$bridge_client_pid" 2>/dev/null || true
-  # bridge_portforward_pid here is this shell's own copy, set once by bridge_start's first call
-  # and never updated again in this scope: every later restart runs inside the watchdog's own
-  # subshell above, which gets its own copy of the variable at fork and updates only that copy.
-  # Once a watchdog exists, its own TERM trap (fired by the kill above, or already run on its own
-  # exit path before this point — both now kill whichever port-forward is actually current) is
-  # the only correct owner of that pid; killing this shell's stale one too would either hit a
-  # process already gone (harmless) or, worse, one the OS has since reused for something else
-  # entirely. Only with no watchdog at all (bridge_start failed before starting one) is this
-  # shell's own bridge_portforward_pid both the only port-forward that ever ran and still this
-  # shell's to kill.
+  # bridge_portforward_pid and bridge_client_pid here are this shell's own copies, set once by
+  # bridge_start's first calls and never updated again in this scope: every later restart runs
+  # inside the watchdog's own subshell above, which gets its own copies of the variables at fork and
+  # updates only those. Once a watchdog exists, its own EXIT trap (fired by the kill above, or
+  # already run on its own exit path before this point — both kill whichever port-forward and
+  # client are actually current) is the only correct owner of those pids; killing this shell's
+  # stale ones too would either hit a process already gone (harmless) or, worse, one the OS has
+  # since reused for something else entirely. Only with no watchdog at all (bridge_start failed
+  # before starting one) are this shell's own pids the only port-forward and client that ever ran
+  # and still this shell's to kill.
   if [ -z "$bridge_watchdog_pid" ]; then
+    { [ -z "$bridge_client_pid" ] || kill "$bridge_client_pid" 2>/dev/null; } || true
+    wait "$bridge_client_pid" 2>/dev/null || true
     { [ -z "$bridge_portforward_pid" ] || kill "$bridge_portforward_pid" 2>/dev/null; } || true
     wait "$bridge_portforward_pid" 2>/dev/null || true
   fi

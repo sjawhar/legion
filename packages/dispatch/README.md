@@ -111,7 +111,10 @@ input (`FAKE_BROKER_PORT`, or an empty `DISPATCH_E2E_AGENT_SECRETS_URL`) set and
 `DISPATCH_E2E_PORT` unset, it writes
 `msg="dispatch: listening" addr=127.0.0.1:<port>` to stderr once the server
 serves; read the port from that line. `$!` of a backgrounded run is the server's
-pid.
+pid. A caller that needs the port before the server starts (the broker docs rig
+names it in the broker's settings) starts `scripts/e2e/lib/held-port.py keep`
+first and sets `DISPATCH_E2E_LISTEN_FROM` to the keeper's unix socket: the
+server serves on the keeper's port.
 
 ## Local instance
 

@@ -66,7 +66,7 @@ two heads are the operator's to make and close.
 bash scripts/e2e/stage1-skeleton.sh     # → "stage 1 e2e: PASS", exit 0
 ```
 
-Needs `go`, `docker`, `jq`, `curl`, `ss` and `tmux`. It builds the binary from the checkout
+Needs `go`, `docker`, `jq`, `curl`, `python3` and `tmux`. It builds the binary from the checkout
 (`packages/daemon/cmd/legion`), so it proves the tree you are standing in. When the first tmux on
 `PATH` is a script or mise itself, as on a devbox, the run's `PATH`, and so the daemon's, starts with
 the real binary that `mise which tmux` names in `packages/daemon`, the daemon's working directory
@@ -109,25 +109,33 @@ two sessions — neither collide nor report each other as a leftover:
   box's `~/.local/state/legion/legions.json`.
 - a per-run project key (`E2E<pid><epoch>`) — boots are counted per project, so a fresh key is
   what makes `boots == 1` true on a store that has served other runs.
-- a free daemon port picked per run by [`lib/free-port.sh`](#libfree-portsh), below the kernel's
-  ephemeral range, and on the devbox path the container `legion-e2e-pg-<pid>`.
+- a daemon port the kernel chose, held for the whole run by a keeper ([`lib/rig.sh`](#librigsh)'s
+  `keep_port`, [`lib/held-port.py`](#libheld-portpy)): `legion.yaml` names it, and each start
+  serves on a copy of the keeper's socket (`LEGION_LISTEN_FD`, `start_kept`), so the restart serves
+  the same port and nothing else can take it in between; and on the devbox path the container
+  `legion-e2e-pg-<pid>`.
+
+After each healthy start the run checks that the socket the daemon serves on is held by the
+daemon's and the keeper's processes alone (`held_only_by`: the socket's inode from the `LISTEN` row
+of `/proc/net/tcp`, its holders from `/proc/*/fd`): a copy that leaked into the daemon's tmux
+server, a pane or a `legion` CLI call would keep the port listening after the daemon stops.
 
 After any exit — pass, failure, or an interrupt — the `EXIT` trap removes the container and
-signals the daemon; `docker ps -a --filter name=legion-e2e-pg` comes back empty and no daemon is
-left holding the run's port.
+signals the daemon and the keeper; `docker ps -a --filter name=legion-e2e-pg` comes back empty and
+nothing is left holding the run's port. A failed run prints the daemon's log (`<work>/logs/daemon.log`).
 
 ### How it fails
 
-Every step is fatal and names its reason: no port to pick ([`lib/free-port.sh`](#libfree-portsh):
-`ss` missing or failing, or no room below the ephemeral range), the refusal that does not name its
-host, a first tmux that is a script or mise itself while `mise which tmux` names no tmux
-(`real_bin_path` refuses), a daemon that exits before it answers `/healthz` (the run stops at once
-and names the daemon's exit status),
-a `/healthz` that never answers, a state document that is not boot 1 with cap 4 and no
-issues, a registry without exactly one entry for this run, a `firstBootAt` that moved across the
-restart, a daemon that ignored a stop (SIGKILLed on the way out, so nothing holds the port) or
-exited non-zero on one. `stop_daemon` reads and judges the exit status, because `daemon.Run`
-returns 0 on a cancelled context — a non-zero status there is a defect, not a stop.
+Every step is fatal and names its reason: a keeper that never held a port, the refusal that does
+not name its host, a first tmux that is a script or mise itself while `mise which tmux` names no
+tmux (`real_bin_path` refuses), a daemon that exits before it answers `/healthz` (the run stops at
+once and names the daemon's exit status), a `/healthz` that never answers (each poll times out
+after 2 s: the kept port queues a request no daemon accepts), a socket held by any process but the
+daemon and its keeper, a state document that is not boot 1 with cap 4 and no issues, a registry
+without exactly one entry for this run, a `firstBootAt` that moved across the restart, a daemon
+that ignored a stop (SIGKILLed on the way out) or exited non-zero on one. `stop_daemon` reads and
+judges the exit status, because `daemon.Run` returns 0 on a cancelled context — a non-zero status
+there is a defect, not a stop.
 
 Two notes on what the script had to learn about its own surface:
 
@@ -159,7 +167,7 @@ LEGION_E2E_MODEL_ROUTE=key-file LEGION_E2E_ANTHROPIC_KEY_FILE=<0600 file> bash s
 ```
 
 **Devbox only.** It runs a real Oh My Pi that calls a real model, so it needs `go`, `docker`,
-`jq`, `curl`, `ss`, `tmux`, `socat`, `bun`, `mise` (with the pinned OMP build it installs if
+`jq`, `curl`, `python3`, `tmux`, `socat`, `bun`, `mise` (with the pinned OMP build it installs if
 missing), the `secrets` CLI holding `GEMINI_API_KEY_TESTS` (agent tier: no YubiKey touch), and
 `LEGION_E2E_MODEL_ROUTE` (required, `gateway` or `key-file`), which picks how the agents reach
 Anthropic, independently of which devbox this runs on:
@@ -186,7 +194,8 @@ What it stands up, all of it the run's own:
 - **NATS and the Envoy listener** on the host: a `nats:2.10 -js` container
   (`legion-e2e2-nats-<pid>`), and `packages/envoy`'s `cmd/listener` built into the work directory
   and started with a fresh API bearer, which reaches every pane as the 0600 file `envoy_token_file`
-  names.
+  names, on a socket [`lib/held-port.py`](#libheld-portpy) opened on a port the kernel chose
+  (`ENVOY_LISTEN_FD`).
 - **The plugins**: this checkout's `@sjawhar/pi-envoy` and `@sjawhar/pi-legion`, each packed as
   the release packs it, installed into the OMP profile `legion-e2e2-<pid>-<epoch>` by
   `lib/install-plugin-profile.sh` (`--package pi-envoy`, then `--package pi-legion`), under the
@@ -219,8 +228,9 @@ What it stands up, all of it the run's own:
   environment.
 - **The daemon**: `legion.yaml` with a fresh project key per run (`S2E<pid><epoch>` — a retired
   claim is never spawned again, so a reused key would fail on a store that served an earlier run),
-  a free port from [`lib/free-port.sh`](#libfree-portsh) (its second daemon and the listener get
-  two more, each excluding the ones already picked),
+  a port the kernel chose, held for the whole run by a [`lib/held-port.py`](#libheld-portpy)
+  keeper, which each start serves on (`LEGION_LISTEN_FD`; the restart keeps it), as the second
+  daemon's is by a keeper of its own,
   `probe_interval_seconds: 5`, and the operator token file `legion claims` presents.
   `XDG_STATE_HOME` and `TMUX_TMPDIR` point into the work directory, so the legions registry and
   the private tmux servers are the run's.
@@ -289,7 +299,7 @@ and sees one disposable pull request merged into `sjawhar/legion-smoke` by the d
 submission on its accepted READY: the repository allows no auto-merge, so the daemon merges it once
 GitHub reports it mergeable, and the proof only reads it (`await_ready_merge`), never merging it by
 hand.
-The run needs `go`, `docker`, `jq`, `curl`, `ss`, `tmux`, `bun`, `mise`, `gh`, `shellcheck`, the
+The run needs `go`, `docker`, `jq`, `curl`, `python3`, `tmux`, `bun`, `mise`, `gh`, `shellcheck`, the
 `secrets` CLI, and `LEGION_E2E_MODEL_ROUTE` (required, `gateway` or `key-file`), which picks how
 the agents reach Anthropic, independently of which devbox this runs on:
 - `gateway`: the operator's model gateway access — `LEGION_E2E_MODEL_GATEWAY_URL` naming the
@@ -360,12 +370,14 @@ run's first write.
 The script stands up a scratch Postgres, NATS, Envoy listener, native Dispatch server, and a
 subscribe-only production-Envoy GitHub bridge in one temporary directory. It installs this
 checkout's two plugins in an isolated OMP profile and runs the Go daemon with a separate state
-directory, private tmux server, ports from [`lib/free-port.sh`](#libfree-portsh), a root-only
-Dispatch project, `admission_cap: 2`, `review_round_cap: 3`, `production_check_hours: 0.25` (the
-production check's bound, 14 days by default, brought inside the run: 15 minutes, after the first
-look's report, since a look open at the bound defers it by the look's own two-hour bound; the
-linger keeps its default 72 h, the tree's close being Stage 4b's proof), and the root design gate
-armed. Its
+directory, private tmux server, ports the kernel chose and [`lib/held-port.py`](#libheld-portpy)
+holds until each service serves on its own (the daemon's and Dispatch's by a keeper for the whole
+run, since both restart on the port every pane names, so every poll of either carries a timeout), a
+root-only Dispatch project, `admission_cap: 2`, `review_round_cap: 3`,
+`production_check_hours: 0.25` (the production check's bound, 14 days by default, brought inside
+the run: 15 minutes, after the first look's report, since a look open at the bound defers it by
+the look's own two-hour bound; the linger keeps its default 72 h, the tree's close being Stage
+4b's proof), and the root design gate armed. Its
 host-side helpers are [`lib/rig.sh`](#librigsh), and the workflow's vocabulary (Dispatch, the
 daemon's state, the agents, the proof human, the handoff checks) is
 [`lib/workflow.sh`](#libworkflowsh); the script defines only its runtime's reads, its scratch
@@ -1618,7 +1630,7 @@ Postgres and NATS containers; a run that finds another's leftovers refuses to st
 bash scripts/e2e/verifiers-staging-token.sh     # → "verifiers e2e: PASS", exit 0
 ```
 
-Needs `go`, `docker`, `kubectl`, `jq`, `curl`, `ss` and `base64`, and credentials for the `staging`
+Needs `go`, `docker`, `kubectl`, `jq`, `curl`, `python3` and `base64`, and credentials for the `staging`
 kube context — it mints two real tokens with `kubectl -n legion create token default --audience
 {dispatch,envoy} --duration 10m` (the TokenRequest API) and reads the issuer from the cluster's own
 `/.well-known/openid-configuration`. That is why it is a devbox gate and not a CI job: GitHub's
@@ -1637,8 +1649,9 @@ What the run touches, and nothing else:
   box's `~/.local/share/dispatch`. Recreated from empty each run.
 - the containers `verifiers-e2e-pg` (`postgres:16`) and `verifiers-e2e-nats` (`nats:2.10 -js`), both
   on ephemeral loopback ports.
-- two ports from [`lib/free-port.sh`](#libfree-portsh), one for `dispatch` and one for the
-  listener, the second excluding the first.
+- two ports the kernel chose, one for `dispatch` and one for the listener, each held by
+  [`lib/held-port.py`](#libheld-portpy) from that choice until its binary serves on it
+  (`DISPATCH_LISTEN_FD`, `ENVOY_LISTEN_FD`). The boot refusals exit before any bind and get none.
 
 After any exit — pass, failure, or an interrupt — the `EXIT` trap signals both binaries and removes
 both containers; `docker ps -a --filter name=verifiers-e2e` comes back empty.
@@ -2017,36 +2030,16 @@ server runs, the listener holds the socket only on its own close-on-exec copy, a
 cannot run frees its port, and a keeper keeps its port, unanswered, between two listeners. It
 builds the listener with `go`, so CI runs it after `setup-go`.
 
-## lib/free-port.sh
-
-Prints one TCP port that nothing listens on, for a stage proof to hand a binary that binds it
-later. Stage 1, Stage 2, Stage 3 (through [`lib/rig.sh`](#librigsh)'s `pick_port`) and
-`verifiers-staging-token.sh` take their ports from it.
-
-```sh
-port=$(bash scripts/e2e/lib/free-port.sh)                  # → 20000 ≤ port < first ephemeral port
-second=$(bash scripts/e2e/lib/free-port.sh "$port")        # never $port
-third=$(bash scripts/e2e/lib/free-port.sh "$port" "$second")
-```
-
-The port comes from 20000 up to, not including, the first port of
-`/proc/sys/net/ipv4/ip_local_port_range` (32768 on a default kernel). The kernel autobinds every
-outbound socket from that range, so between the pick and the bind, any connection the run opens
-(go build's module fetches, a Postgres dial, a curl) could take a port inside it. The bind would
-then fail with `address already in use`. The kernel never autobinds a port below the range.
-`ss -ltnH` rules out a port something already listens on. Each argument is a port the caller has
-already picked and not yet bound, and the helper never returns one of them, so several picks in
-one run stay distinct.
-
-### How it fails
-
-It exits non-zero, printing the reason on stderr and nothing on stdout, when:
-
-- `ss` is missing or fails (`ss: command not found`, or `ss`'s own error). An unanswered busy
-  check is never read as a free port.
-- the ephemeral range starts at 21000 or below (`the ephemeral range starts at <n>, leaving no
-  room above 20000`).
-- 50 draws find no free port (`no free port found below <n>`).
+Every stage proof and rig takes its servers' ports this way, apart from the ports Stage 4a and
+Stage 4b pin inside the range the devbox security group admits. [`lib/rig.sh`](#librigsh)'s
+`start_held`, `keep_port` and `start_kept` wrap it for the scripts that source the rig (Stage 1,
+Stage 3, the 4b.13b acceptance, `claude-backend-tmux.sh`, `controller-start-tmux.sh`,
+`dispatch-user-turns.sh`, the docs rigs and the skill-scenarios rig); Stage 2 and
+`verifiers-staging-token.sh` call it directly. A daemon always serves on a keeper's socket, since its
+`legion.yaml` must name the port before it starts. A process that binds port 0 itself and reports
+what it got — `nats-server -p -1`, a Bun fake, `kubectl port-forward :<port>` — needs no helper; the
+rig reads its report with `report_port`. A port a person sets explicitly is used as given, and an
+occupied one fails with `address already in use`.
 
 ## lib/built-from.sh
 
@@ -2538,15 +2531,19 @@ The caller sets `root` (the checkout), `work` (the run's scratch directory: ever
 working directory or command line names it is the run's), `evidence` (each service started by
 `start_process` logs to `$evidence/logs/<name>.log`) and `timeout_hook` (empty, or a function a
 timed-out wait runs before it fails), and defines `note` and `fail`, which exits. Stage 1 calls
-only `real_bin_path`, so it sets `root` and `work` and defines `fail` alone.
+`real_bin_path`, `keep_port`, `start_kept` and `held_only_by`.
 
 | function | does |
 | :--- | :--- |
 | `until_true SECONDS WHAT CMD…` | runs CMD every half second until it succeeds. After SECONDS of wall time, each poll's own run included, it runs `timeout_hook` and fails naming WHAT. It says what it waits for on entry and every 60 s. A poll that never returns would hold the wait, so callers bound their remote calls. A guard that writes `$evidence/pane-endpoint-violation.txt` makes the next wait abort, naming the violation |
-| `pick_port VAR` | assigns VAR a port from [`lib/free-port.sh`](#libfree-portsh) that no earlier pick of the run returned. It assigns in place: a command substitution would run it in a subshell and lose the run's set of picks |
 | `start_process NAME CMD…` | starts CMD in the background, appending to NAME's log, and sets `NAME_pid` |
-| `log_size NAME` | the size of NAME's log, the offset `await_start` reads a start's own lines from |
-| `await_start NAME PID OFFSET SECONDS WHAT CMD…` | waits, bounded, for CMD to succeed while PID lives. It returns 2 when the service exited on `address already in use` after OFFSET, the one race a pick before the bind cannot close, so the caller picks again; any other exit fails naming the log |
+| `start_held NAME PORT_VAR FD_ENV [--env K=V]… -- CMD…` | starts CMD as the service NAME through [`lib/held-port.py`](#libheld-portpy) `exec`: a socket listening on a port the kernel chose, held from that choice until CMD serves on it, handed over as descriptor 3 with `FD_ENV=3`; `{port}` in an `--env` value or in CMD is its port. It waits, bounded, for the helper's port file and sets PORT_VAR before CMD runs; `NAME_pid` is CMD's own pid. A CMD that clears its environment (`env -i`) names `FD_ENV=3` itself |
+| `keep_port NAME PORT_VAR` | starts the keeper NAME (`held-port.py keep`, its socket `$work/NAME.sock`), which holds one socket on a port the kernel chose for the whole run, and sets PORT_VAR once it hands out copies. The caller's cleanup stops it (`NAME_pid`). A configuration can name the port before its service starts, and a restart cannot lose it. Between two servers the port listens unanswered, so every poll of it carries a timeout |
+| `start_kept NAME KEEPER FD_ENV [--env K=V]… -- CMD…` | starts CMD as `start_held` does, on a copy of the socket the keeper KEEPER holds (`exec --from`) |
+| `report_port LOG PATTERN` | prints the port a process that bound port 0 itself reported: the digits right after the first match of the extended regex PATTERN in LOG (`'Listening for client connections on [^ ]*:'` for `nats-server -p -1`). It fails while no line matches, so it is also the poll that waits for one |
+| `listening_holders PORT` | prints the pid of every process holding the one socket listening on PORT: its inode from the `LISTEN` row of `/proc/net/tcp` and `/proc/net/tcp6`, its holders from `/proc/*/fd`. It fails when no socket, or more than one, listens on PORT |
+| `held_only_by PORT PID…` | succeeds when the holders of the socket listening on PORT are exactly the PIDs given; otherwise it prints each holder's pid and command line and fails. Stage 1 runs it after each daemon start with the daemon and its keeper |
+| `await_start NAME PID SECONDS WHAT CMD…` | waits, bounded, for CMD to succeed while PID lives, and fails naming NAME's log the moment PID exits |
 | `stop_pid PID` | TERM, then KILL after 10 s; best effort, so a failed cleanup never hides the check that failed. An empty PID does nothing; a PID that cannot name one process of the run (0 however spelled, so any value with a leading zero, 1, a negative or non-numeric value, the calling shell or its process group's leader) is refused with a printed line, since `kill 0` signals the caller's whole process group |
 | `stop_tree PID` | stops a background loop with every process under it: it freezes the loop, stops each child the same way, then kills the loop, so the `kubectl`, `jq` or `sleep` the loop was waiting on goes with it. It signals a pid only while its parent is the calling shell, so a pid the watcher left and another process reused is never hit, and refuses the same pids `stop_pid` does: `kill -STOP 0` would freeze the whole driver and a later `kill -KILL 0` end it. Stage 3's and Stage 4b's watchers are stopped with it |
 | `run_processes` | prints every pid whose working directory or command line names `$work` |

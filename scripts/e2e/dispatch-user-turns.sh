@@ -191,18 +191,16 @@ launch_session() {
 }
 
 # ---- setup -----------------------------------------------------------------------------------------
-for tool in go docker jq curl tmux bun mise; do command -v "$tool" >/dev/null || fail "$tool is required"; done
+for tool in go docker jq curl python3 tmux bun mise; do command -v "$tool" >/dev/null || fail "$tool is required"; done
 omp_tool=${DISPATCH_USER_TURNS_OMP:-$(<"$root/.omp-pin")}
 mkdir -p "$session_cwd"
 refuse_leftovers legion-e2e-user-turns
 make_omp_home "$omp_home"
 mise where "$omp_tool" >/dev/null 2>&1 || mise install "$omp_tool" >&2
-pick_port envoy_port
-pick_port dispatch_port
 (cd "$root" && bun install --frozen-lockfile >/dev/null)
 (cd "$root/packages/envoy" && go build -o "$work/envoy-listener" ./cmd/listener && go build -o "$work/dispatch" ./cmd/dispatch)
 (cd "$root/packages/dispatch" && bun run build:web >"$evidence/logs/build-web.log" 2>&1) || fail "the SPA did not build; see $evidence/logs/build-web.log"
-note "Oh My Pi $omp_tool; listener port $envoy_port; Dispatch port $dispatch_port; run $run"
+note "Oh My Pi $omp_tool; run $run"
 
 docker run -d --name "$pg_container" --mount type=tmpfs,destination=/var/lib/postgresql/data \
   -e POSTGRES_USER=dispatch -e POSTGRES_PASSWORD=dispatch -e POSTGRES_DB=dispatch \
@@ -219,21 +217,25 @@ nats_url="nats://127.0.0.1:$(docker port "$nats_container" 4222/tcp | head -1 | 
   printf 'Authorization: Bearer %s\n' "$(cat "$work/envoy-token")" >"$work/envoy-auth-header")
 # Neither service inherits this shell: an operator's ENVOY_NATS_URL names production NATS, and a
 # HOME or XDG_CONFIG_HOME holding legion/envoy.json would hand Dispatch a production configuration.
-env -i PATH="$PATH" HOME=/nonexistent ENVOY_API_TOKEN="$(cat "$work/envoy-token")" PORT="$envoy_port" \
+# Each serves on a port the kernel chose, held from that choice until it serves on it (lib/rig.sh's
+# start_held); `env -i` clears the descriptor's variable the helper sets, so each names its own: the
+# helper hands the socket over as descriptor 3.
+start_held listener envoy_port ENVOY_LISTEN_FD -- \
+  env -i PATH="$PATH" HOME=/nonexistent ENVOY_LISTEN_FD=3 ENVOY_API_TOKEN="$(cat "$work/envoy-token")" PORT='{port}' \
   ENVOY_LISTEN_HOST=127.0.0.1 ENVOY_MACHINE_ID="legion-e2e-user-turns-$$" NATS_URLS="$nats_url" \
-  "$work/envoy-listener" >"$evidence/logs/listener.log" 2>&1 &
-listener_pid=$!
+  "$work/envoy-listener"
 until_true 60 "the Envoy listener" listener "http://127.0.0.1:$envoy_port/v1/sessions"
-env -i PATH="$PATH" HOME=/nonexistent XDG_CONFIG_HOME=/nonexistent XDG_DATA_HOME=/nonexistent \
+start_held dispatch dispatch_port DISPATCH_LISTEN_FD -- \
+  env -i PATH="$PATH" HOME=/nonexistent XDG_CONFIG_HOME=/nonexistent XDG_DATA_HOME=/nonexistent \
   DATABASE_URL="postgres://dispatch:dispatch@127.0.0.1:$pg_port/dispatch?sslmode=disable" \
-  DISPATCH_AGENT_TOKEN="$(cat "$work/dispatch-token")" \
-  DISPATCH_IDENTITY=header:X-Dispatch-User DISPATCH_IDENTITY_HEADER_TRUSTED=1 DISPATCH_LISTEN_HOST=127.0.0.1 DISPATCH_PORT="$dispatch_port" \
-  DISPATCH_SERVER_URL="http://127.0.0.1:$dispatch_port" DISPATCH_SIGNING_KEY="$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')" \
+  DISPATCH_AGENT_TOKEN="$(cat "$work/dispatch-token")" DISPATCH_LISTEN_FD=3 \
+  DISPATCH_IDENTITY=header:X-Dispatch-User DISPATCH_IDENTITY_HEADER_TRUSTED=1 DISPATCH_LISTEN_HOST=127.0.0.1 DISPATCH_PORT='{port}' \
+  DISPATCH_SERVER_URL='http://127.0.0.1:{port}' DISPATCH_SIGNING_KEY="$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')" \
   DISPATCH_WEB_DIST="$root/packages/dispatch/web/dist" ENVOY_URL="http://127.0.0.1:$envoy_port" \
   ENVOY_TOKEN="$(cat "$work/envoy-token")" NATS_URLS="$nats_url" \
-  "$work/dispatch" >"$evidence/logs/dispatch.log" 2>&1 &
-dispatch_pid=$!
+  "$work/dispatch"
 until_true 90 "Dispatch to serve, with NATS" sh -c "curl -fsS http://127.0.0.1:$dispatch_port/healthz | jq -e '.ok and .nats'"
+note "listener port $envoy_port; Dispatch port $dispatch_port"
 
 # The session runs outside Legion, with no role, so it needs only the Envoy plugin, the one this
 # proof is about.
