@@ -1013,7 +1013,7 @@ export function dispatchRefFromUrl(value: string, serverUrl: string): string | u
     /^\/issues\/([A-Z][A-Z0-9]{1,9}-[1-9][0-9]*)(?:\/(spec|log|conversation|activity|children)|\/artifacts\/([^/]+)|\/asks\/([^/]+)|\/comments\/([^/]+)|\/messages\/([^/]+))?\/?$/
   );
   if (issuePage) {
-    const [, key, page, artifact, ask, comment, message] = issuePage;
+    const [, key = "", page, artifact, ask, comment, message] = issuePage;
     const version = versionOf("v");
     // A document page carrying `?comment=`/`?ask=` names that item, not the document: that is
     // the href `dispatch_search` returns for an anchored comment or ask on an issue's document.

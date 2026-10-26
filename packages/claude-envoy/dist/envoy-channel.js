@@ -40763,7 +40763,7 @@ function dispatchRefFromUrl(value, serverUrl) {
   };
   const issuePage = url2.pathname.match(/^\/issues\/([A-Z][A-Z0-9]{1,9}-[1-9][0-9]*)(?:\/(spec|log|conversation|activity|children)|\/artifacts\/([^/]+)|\/asks\/([^/]+)|\/comments\/([^/]+)|\/messages\/([^/]+))?\/?$/);
   if (issuePage) {
-    const [, key, page, artifact, ask, comment, message] = issuePage;
+    const [, key = "", page, artifact, ask, comment, message] = issuePage;
     const version2 = versionOf("v");
     if (page === "spec" || artifact !== undefined) {
       const item2 = itemFromSearch(url2.search);
