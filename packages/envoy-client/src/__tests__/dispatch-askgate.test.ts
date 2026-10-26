@@ -11,18 +11,18 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { mintMarker } from "../askgate-marker";
 import { cliRefusals, runDispatchCli } from "../dispatch-cli";
 import { resetAdviceMemory } from "../dispatch-execute";
 import { pruneSessions } from "../dispatch-session-state";
 
-// AskGate's enforcement at the posting CLI. A live Oh My Pi process whose gate is bound leaves a
-// record in the session's state directory (`askgate.json`) that names it and its marker store; the
-// gate mints one single-use marker for each literal call it lets run. The CLI consumes a marker
-// before it posts a gated write, and refuses one with no marker, whatever form ran it. These tests
-// write the record and the markers by hand, in the format the gate writes, so they hold the CLI to
-// that format and to nothing of the gate's.
+// AskGate's enforcement at the posting CLI. A live Oh My Pi process whose gate is bound leaves an
+// owner file in the session's state directory (`askgate/<pid>-<start>.json`) that names it and
+// its marker store; the gate mints one single-use marker for each literal call it lets run. The
+// CLI consumes a marker before it posts a gated write, and refuses one with no marker, whatever
+// form ran it. These tests write the record and the markers by hand, in the format the gate
+// writes, so they hold the CLI to that format and to nothing of the gate's.
 
 interface Recorded {
   readonly method: string;
@@ -89,6 +89,12 @@ function startOf(pid: number): string {
 const store = () => join(stateDir, "askgate", String(process.pid));
 const markers = () => join(store(), "markers");
 
+/** The owner file of `owner` in session `id`'s record, as the gate names it. */
+function ownerFile(id: string, owner: { pid: number; start: string | null }): string {
+  const name = owner.start === null ? String(owner.pid) : `${owner.pid}-${owner.start}`;
+  return join(stateDir, "sessions", id, "askgate", `${name}.json`);
+}
+
 /** The record a live gate writes for session `id`: this test process stands in for Oh My Pi. */
 function writeRecord(
   id = "ses-1",
@@ -99,9 +105,9 @@ function writeRecord(
   },
   mode?: "warn" | "block"
 ): void {
-  const dir = join(stateDir, "sessions", id);
-  mkdirSync(dir, { recursive: true });
-  writeFileSync(join(dir, "askgate.json"), JSON.stringify({ v: 1, owners: [owner] }));
+  const file = ownerFile(id, owner);
+  mkdirSync(dirname(file), { recursive: true });
+  writeFileSync(file, JSON.stringify({ v: 1, ...owner }));
   mkdirSync(join(owner.store, "markers"), { recursive: true });
   if (mode !== undefined) writeFileSync(join(owner.store, "mode"), mode);
 }
@@ -504,20 +510,15 @@ describe("AskGate at the dispatch CLI", () => {
   });
 
   test("a record that cannot be read, or that names a missing store, is a refusal naming the cause", async () => {
-    const dir = join(stateDir, "sessions", "ses-1");
-    mkdirSync(dir, { recursive: true });
-    writeFileSync(join(dir, "askgate.json"), "{not json");
+    const self = { pid: process.pid, start: startOf(process.pid) };
+    const file = ownerFile("ses-1", self);
+    mkdirSync(dirname(file), { recursive: true });
+    writeFileSync(file, "{not json");
     const broken = await run(MESSAGE);
     expect(broken.code).toBe(1);
     expect(broken.stdout).toStartWith("dispatch message was not called: AskGate's record");
-    expect(broken.stdout).toContain(join(dir, "askgate.json"));
-    writeFileSync(
-      join(dir, "askgate.json"),
-      JSON.stringify({
-        v: 1,
-        owners: [{ pid: process.pid, start: startOf(process.pid), store: join(stateDir, "gone") }],
-      })
-    );
+    expect(broken.stdout).toContain(file);
+    writeFileSync(file, JSON.stringify({ v: 1, ...self, store: join(stateDir, "gone") }));
     const missing = await run(MESSAGE);
     expect(missing.code).toBe(1);
     expect(missing.stdout).toContain(join(stateDir, "gone"));
@@ -531,10 +532,8 @@ describe("AskGate at the dispatch CLI", () => {
     utimesSync(dir, old, old);
     pruneSessions(stateDir, Date.now());
     expect(existsSync(dir)).toBe(true);
-    writeFileSync(
-      join(dir, "askgate.json"),
-      JSON.stringify({ v: 1, owners: [{ pid: process.pid, start: "1", store: store() }] })
-    );
+    rmSync(ownerFile("ses-1", { pid: process.pid, start: startOf(process.pid) }));
+    writeRecord("ses-1", { pid: process.pid, start: "1", store: store() });
     utimesSync(dir, old, old);
     writeFileSync(join(stateDir, ".pruned"), "");
     utimesSync(join(stateDir, ".pruned"), old, old);
@@ -628,7 +627,7 @@ describe("AskGate at the dispatch entry, across processes", () => {
       expect({ form, refused: stdout.includes(REFUSAL) }).toEqual({ form, refused: true });
     }
     expect(messagePosts()).toHaveLength(0);
-    rmSync(join(stateDir, "sessions", "ses-1", "askgate.json"));
+    rmSync(join(stateDir, "sessions", "ses-1", "askgate"), { recursive: true });
     for (const [, command] of forms) await runForm(command);
     expect(messagePosts()).toHaveLength(forms.length);
   }, 60_000);

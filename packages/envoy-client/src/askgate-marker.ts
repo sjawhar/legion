@@ -18,11 +18,13 @@ import { hasErrnoCode, messageFor } from "./errors";
 /**
  * AskGate's enforcement at the posting `dispatch` CLI, shared by both sides.
  *
- * The record. While an Oh My Pi process whose gate is bound runs a session, pi-envoy keeps
- * `askgate.json` in that session's CLI state directory (`<root>/sessions/<id>/`): the owners, each
- * one process's id, its Linux start time (field 22 of `/proc/<pid>/stat`, null elsewhere) and its
- * marker store. An owner counts while its process lives and, on Linux, has that start time, so a
- * crashed session's record, or one whose pid another process took, is inert. A session no live
+ * The record. While an Oh My Pi process whose gate is bound runs a session, pi-envoy keeps an
+ * owner file in the `askgate/` directory of that session's CLI state directory
+ * (`<root>/sessions/<id>/askgate/<pid>-<start>.json`): the process's id, its Linux start time
+ * (field 22 of `/proc/<pid>/stat`, null elsewhere) and its marker store. Each process writes and
+ * removes only its own file, so two processes that bind one session at the same time never drop
+ * each other. An owner counts while its process lives and, on Linux, has that start time, so a
+ * crashed session's file, or one whose pid another process took, is inert. A session no live
  * process records (a terminal, CI, Claude Code, OpenCode, a pod without pi-envoy, a session with
  * Dispatch or AskGate off) needs no marker.
  *
@@ -42,8 +44,8 @@ import { hasErrnoCode, messageFor } from "./errors";
  * else refuses it.
  */
 
-/** The record's name in a session's state directory. */
-export const ASKGATE_RECORD = "askgate.json";
+/** The record's directory in a session's state directory: one file for each owner. */
+export const ASKGATE_RECORD = "askgate";
 /**
  * How old a marker may be when the CLI consumes it. The gate mints a marker when it prepares the
  * calls of a message, and the call can then wait behind an exclusive call of the same message for
@@ -181,9 +183,14 @@ export function processStart(pid: number): string | null {
   }
 }
 
+/** `<pid>-<start>`, or `<pid>` with no start time: an owner's name, for its store and its file. */
+function ownerName(pid: number, start: string | null): string {
+  return start === null ? String(pid) : `${pid}-${start}`;
+}
+
 /** `<root>/askgate/<pid>-<start>`: a store of its own for each process, never reused by a pid's next owner. */
 export function askgateStore(root: string, pid: number, start: string | null): string {
-  return join(root, "askgate", start === null ? String(pid) : `${pid}-${start}`);
+  return join(root, "askgate", ownerName(pid, start));
 }
 
 /** This process as an owner, its store under the CLI state root `root`. */
@@ -216,18 +223,17 @@ function isOwner(value: unknown): value is AskgateOwner {
   );
 }
 
-/** The owners a record's text names, or undefined when it is no record. */
-function parseRecord(text: string): AskgateOwner[] | undefined {
+/** The owner an owner file's text names, or undefined when it is no owner file. */
+function parseOwner(text: string): AskgateOwner | undefined {
   let data: unknown;
   try {
     data = JSON.parse(text);
   } catch {
     return undefined;
   }
-  if (typeof data !== "object" || data === null) return undefined;
-  const { v, owners } = data as Record<string, unknown>;
-  if (v !== 1 || !Array.isArray(owners) || !owners.every(isOwner)) return undefined;
-  return owners;
+  if (!isOwner(data) || !("v" in data) || data.v !== 1) return undefined;
+  const { pid, start, store } = data;
+  return { pid, start, store };
 }
 
 /** Writes `text` to `file` through an exclusive owner-only temporary file and `rename`. */
@@ -237,32 +243,47 @@ function writeAtomically(file: string, text: string): void {
   renameSync(temporary, file);
 }
 
-/** The live owners of the record in `dir` other than `owner`; none when it is missing or no record. */
-function otherLiveOwners(dir: string, owner: AskgateOwner): AskgateOwner[] {
-  let text: string;
-  try {
-    text = readFileSync(join(dir, ASKGATE_RECORD), "utf-8");
-  } catch (error) {
-    if (hasErrnoCode(error, "ENOENT")) return [];
-    throw error;
-  }
-  return (parseRecord(text) ?? []).filter(
-    (other) => !(other.pid === owner.pid && other.start === owner.start) && ownerLive(other)
-  );
+const OWNER_FILE = ".json";
+
+/** `owner`'s own file in session directory `dir`'s record. */
+function ownerFile(dir: string, owner: AskgateOwner): string {
+  return join(dir, ASKGATE_RECORD, `${ownerName(owner.pid, owner.start)}${OWNER_FILE}`);
 }
 
-/** Makes `owner` one of the owners of session directory `dir`'s record, keeping the other live ones. */
+/**
+ * Makes `owner` an owner of session directory `dir`'s record by writing its own file, and removes
+ * the files of owners whose process is gone. A gone owner with a start time never writes again,
+ * since no later process has its pid and start time; one with none is left, as its pid can return.
+ */
 export function writeAskgateRecord(dir: string, owner: AskgateOwner): void {
-  mkdirSync(dir, { recursive: true, mode: PRIVATE_DIR });
-  const owners = [...otherLiveOwners(dir, owner), owner];
-  writeAtomically(join(dir, ASKGATE_RECORD), JSON.stringify({ v: 1, owners }));
+  const record = join(dir, ASKGATE_RECORD);
+  mkdirSync(record, { recursive: true, mode: PRIVATE_DIR });
+  const own = ownerFile(dir, owner);
+  writeAtomically(
+    own,
+    JSON.stringify({ v: 1, pid: owner.pid, start: owner.start, store: owner.store })
+  );
+  for (const name of readdirSync(record)) {
+    const file = join(record, name);
+    if (file === own || !name.endsWith(OWNER_FILE)) continue;
+    let other: AskgateOwner | undefined;
+    try {
+      other = parseOwner(readFileSync(file, "utf-8"));
+    } catch {
+      continue;
+    }
+    if (other !== undefined && other.start !== null && !ownerLive(other)) {
+      rmSync(file, { force: true });
+    }
+  }
 }
 
-/** Takes `owner` off session directory `dir`'s record, and removes the record it leaves with none. */
+/**
+ * Takes `owner` off session directory `dir`'s record by removing its own file. The directory
+ * stays: an empty one names no owner, and removing it could fail another process's write there.
+ */
 export function dropAskgateRecord(dir: string, owner: AskgateOwner): void {
-  const owners = otherLiveOwners(dir, owner);
-  if (owners.length === 0) rmSync(join(dir, ASKGATE_RECORD), { force: true });
-  else writeAtomically(join(dir, ASKGATE_RECORD), JSON.stringify({ v: 1, owners }));
+  rmSync(ownerFile(dir, owner), { force: true });
 }
 
 /** Makes a store and its markers directory, owner-only. */
@@ -339,23 +360,37 @@ export type AskgateState =
 
 /**
  * The state of session directory `dir`'s record: off when there is none or no owner lives, on with
- * each live owner's store (warn only when every one is in warn mode), broken when the record
- * cannot be read or a live owner's store is gone.
+ * each live owner's store (warn only when every one is in warn mode), broken when the record or an
+ * owner file cannot be read or a live owner's store is gone.
  */
 export function askgateState(dir: string): AskgateState {
-  const file = join(dir, ASKGATE_RECORD);
-  let text: string;
+  const record = join(dir, ASKGATE_RECORD);
+  let names: string[];
   try {
-    text = readFileSync(file, "utf-8");
+    names = readdirSync(record);
   } catch (error) {
     if (hasErrnoCode(error, "ENOENT")) return { kind: "off" };
-    return { kind: "broken", problem: `${file}, could not be read: ${messageFor(error)}` };
+    return { kind: "broken", problem: `${record}, could not be read: ${messageFor(error)}` };
   }
-  const owners = parseRecord(text);
-  if (owners === undefined) return { kind: "broken", problem: `${file}, is not an AskGate record` };
-  const live = owners.filter(ownerLive);
+  const live: { readonly file: string; readonly store: string }[] = [];
+  for (const name of names) {
+    // Not an owner file: a temporary file that its write's `rename` has yet to make one.
+    if (!name.endsWith(OWNER_FILE)) continue;
+    const file = join(record, name);
+    let text: string;
+    try {
+      text = readFileSync(file, "utf-8");
+    } catch (error) {
+      // Its owner removed it after the listing.
+      if (hasErrnoCode(error, "ENOENT")) continue;
+      return { kind: "broken", problem: `${file}, could not be read: ${messageFor(error)}` };
+    }
+    const owner = parseOwner(text);
+    if (owner === undefined) return { kind: "broken", problem: `${file}, is not an AskGate record` };
+    if (ownerLive(owner)) live.push({ file, store: owner.store });
+  }
   if (live.length === 0) return { kind: "off" };
-  for (const { store } of live) {
+  for (const { file, store } of live) {
     try {
       if (!statSync(join(store, MARKERS)).isDirectory()) throw new Error("not a directory");
     } catch (error) {

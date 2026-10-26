@@ -5,6 +5,7 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   rmSync,
   statSync,
@@ -3915,12 +3916,18 @@ console.log(JSON.stringify(args));
       ]);
       expect(notifications).toEqual([]);
     }, 30_000);
-    /** The AskGate record of `sessionID` in this test's CLI state directory, or null when none. */
+    /**
+     * The owner files of `sessionID`'s AskGate record in this test's CLI state directory, each
+     * with its path, or null when it names no owner.
+     */
     const recordOf = (
       sessionID: string
-    ): { v: number; owners: { pid: number; store: string }[] } | null => {
-      const file = join(sessionDirectory(process.env, sessionID), "askgate.json");
-      return existsSync(file) ? JSON.parse(readFileSync(file, "utf8")) : null;
+    ): { file: string; v: number; pid: number; store: string }[] | null => {
+      const record = join(sessionDirectory(process.env, sessionID), "askgate");
+      const files = existsSync(record) ? readdirSync(record).map((name) => join(record, name)) : [];
+      return files.length === 0
+        ? null
+        : files.map((file) => ({ file, ...JSON.parse(readFileSync(file, "utf8")) }));
     };
     const gateOn = () => {
       writeFileSync(process.env.ENVOY_CONFIG_FILE ?? "", "{}\n");
@@ -3965,14 +3972,12 @@ console.log(JSON.stringify(args));
       const notifications: string[] = [];
       await fixture.handlers.get("session_start")?.({}, gateContext(notifications));
       const first = recordOf("ses_askgate");
-      expect(first?.v).toBe(1);
-      expect(first?.owners).toMatchObject([{ pid: process.pid }]);
-      const store = first?.owners[0]?.store ?? "";
+      expect(first).toMatchObject([{ v: 1, pid: process.pid }]);
+      const store = first?.[0]?.store ?? "";
       expect(store.startsWith(join(process.env.DISPATCH_STATE_DIR ?? "", "askgate"))).toBe(true);
       expect(statSync(join(store, "markers")).mode & 0o777).toBe(0o700);
-      expect(
-        statSync(join(sessionDirectory(process.env, "ses_askgate"), "askgate.json")).mode & 0o777
-      ).toBe(0o600);
+      expect(statSync(first?.[0]?.file ?? "").mode & 0o777).toBe(0o600);
+      expect(statSync(dirname(first?.[0]?.file ?? "")).mode & 0o777).toBe(0o700);
 
       const next = {
         ...gateContext(notifications),
@@ -3983,8 +3988,8 @@ console.log(JSON.stringify(args));
         },
       } as SessionContext;
       await fixture.handlers.get("session_switch")?.({ reason: "new" }, next);
-      expect(recordOf("ses_askgate_next")?.owners).toMatchObject([{ pid: process.pid, store }]);
-      expect(recordOf("ses_askgate")?.owners).toMatchObject([{ pid: process.pid, store }]);
+      expect(recordOf("ses_askgate_next")).toMatchObject([{ pid: process.pid, store }]);
+      expect(recordOf("ses_askgate")).toMatchObject([{ pid: process.pid, store }]);
 
       await fixture.handlers.get("session_shutdown")?.({}, next);
       expect(recordOf("ses_askgate")).toBeNull();
@@ -4064,7 +4069,7 @@ console.log(JSON.stringify(args));
           {},
           sessionWithTranscript("ses_parent", parentFile, [])
         );
-        expect(recordOf("ses_parent")?.owners).toMatchObject([{ pid: process.pid }]);
+        expect(recordOf("ses_parent")).toMatchObject([{ pid: process.pid }]);
       } finally {
         transcripts.remove();
       }
