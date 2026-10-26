@@ -14,15 +14,16 @@ import (
 // back through Go would be invisible until a daemon restart failed to find its own panes.
 //
 // A sandbox is named for its issue: the project and issue lowercased to a DNS-1123 name. Every
-// role in an issue shares it. The project controller's sandbox is named for its token and runs the
-// controller alone. The locator's pod UID, role container and generation identify one process, and
-// the composed incarnation fences stale process events.
+// role in an issue shares it and its one container, `roles`. The project controller's sandbox is
+// named for its token and runs the controller alone, in its container `controller`. The locator's
+// pod UID, container and generation identify one process, and the composed incarnation fences
+// stale process events.
 const (
 	tmuxLocatorJSON = `{"runtime":"tmux","claim":"legion-omp-LEGION-208-tester",` +
 		`"incarnation":"31847:918273","tmux":{"window":"@3","pane":"%41"}}`
 	sandboxLocatorJSON = `{"runtime":"sandbox","claim":"legion-omp-LEGION-208-tester",` +
 		`"incarnation":"3f2b1c7e-9a4d-4f1b-8c2e-7d6a5b4c3e2f/7",` +
-		`"sandbox":{"namespace":"legion","name":"legion-omp-legion-208","podUid":"3f2b1c7e-9a4d-4f1b-8c2e-7d6a5b4c3e2f","container":"tester","generation":7}}`
+		`"sandbox":{"namespace":"legion","name":"legion-omp-legion-208","podUid":"3f2b1c7e-9a4d-4f1b-8c2e-7d6a5b4c3e2f","container":"roles","generation":7}}`
 	controllerLocatorJSON = `{"runtime":"sandbox","claim":"legion-omp-controller",` +
 		`"incarnation":"9d2a6f13-7c48-4e0b-b5a9-1f8e3d6c2a57/3",` +
 		`"sandbox":{"namespace":"legion","name":"legion-omp-controller","podUid":"9d2a6f13-7c48-4e0b-b5a9-1f8e3d6c2a57","container":"controller","generation":3}}`
@@ -44,7 +45,7 @@ func sandboxLocator() Locator {
 		Incarnation: "3f2b1c7e-9a4d-4f1b-8c2e-7d6a5b4c3e2f/7",
 		Sandbox: &SandboxLocator{
 			Namespace: "legion", Name: "legion-omp-legion-208", PodUID: "3f2b1c7e-9a4d-4f1b-8c2e-7d6a5b4c3e2f",
-			Container: "tester", Generation: 7,
+			Container: "roles", Generation: 7,
 		},
 	}
 }
@@ -204,13 +205,13 @@ func TestValidateRefusesALocatorNothingCouldBeActedOnThrough(t *testing.T) {
 			wantFragment: "name",
 		},
 		{
-			name: "the controller's process in a workflow role's container",
+			name: "the controller's process in the issue pod's container",
 			locator: func() Locator {
 				l := controllerLocator()
-				l.Sandbox.Container = "architect"
+				l.Sandbox.Container = "roles"
 				return l
 			}(),
-			wantFragment: "does not match claim role",
+			wantFragment: `the controller's process runs in container "controller"`,
 		},
 		{
 			name: "a workflow role's process in the controller's container",
@@ -219,7 +220,16 @@ func TestValidateRefusesALocatorNothingCouldBeActedOnThrough(t *testing.T) {
 				l.Sandbox.Container = "controller"
 				return l
 			}(),
-			wantFragment: "does not match claim role",
+			wantFragment: `an issue pod's role runs in its one container "roles"`,
+		},
+		{
+			name: "a workflow role's process in a container named for its role",
+			locator: func() Locator {
+				l := sandboxLocator()
+				l.Sandbox.Container = "tester"
+				return l
+			}(),
+			wantFragment: `an issue pod's role runs in its one container "roles"`,
 		},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -235,8 +245,8 @@ func TestValidateRefusesALocatorNothingCouldBeActedOnThrough(t *testing.T) {
 }
 
 // Label names the process a locator addresses as a log line and a capability row read it: the pod
-// and role container of a sandbox, the pane of a tmux locator, and the claim alone for a locator
-// naming no process.
+// and container of a sandbox, the pane of a tmux locator, and the claim alone for a locator naming
+// no process.
 func TestLabelNamesThePodPaneOrClaim(t *testing.T) {
 	for _, testCase := range []struct {
 		name    string
@@ -246,8 +256,8 @@ func TestLabelNamesThePodPaneOrClaim(t *testing.T) {
 		{
 			name: "pod",
 			locator: Locator{Runtime: RuntimeSandbox, Claim: "legion-legion-legion-209-implementer", Incarnation: "pod-uid/3",
-				Sandbox: &SandboxLocator{Namespace: "legion", Name: "legion-legion-legion-209", PodUID: "pod-uid", Container: "implementer", Generation: 3}},
-			want: "pod legion-legion-legion-209/implementer",
+				Sandbox: &SandboxLocator{Namespace: "legion", Name: "legion-legion-legion-209", PodUID: "pod-uid", Container: "roles", Generation: 3}},
+			want: "pod legion-legion-legion-209/roles",
 		},
 		{
 			name:    "pane",

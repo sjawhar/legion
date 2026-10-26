@@ -54,7 +54,26 @@ type FetchRequest struct {
 	// fetched while GitHub has it. Empty, there is none (the cache's own process, a daemon from
 	// before the runtime told it).
 	RecordedDefault string
+	// Bound is the time the fetch's transfers and checks get once it may start, in place of
+	// FetchTimeout when set: the repository cache's own process sets CacheFetchTimeout for its first
+	// clone, the repository's one full download, which an issue pod's bound cannot hold for a large
+	// repository. Its refresh fetches keep FetchTimeout, since they hold the lock every tar waits on.
+	Bound time.Duration
 }
+
+// bound is the time the fetch's transfers and checks get once it may start: Bound, or FetchTimeout.
+func (r FetchRequest) bound() time.Duration {
+	if r.Bound > 0 {
+		return r.Bound
+	}
+	return FetchTimeout
+}
+
+// CacheFetchTimeout is the repository cache's own Bound: its first clone takes the whole repository
+// from GitHub and indexes every object of it, which on 2026-10-26 took one deployment's cache pod (one CPU,
+// gVisor) past FetchTimeout 289 times over 30 hours, each attempt killed at 30 minutes and begun
+// again from nothing, so the cache was never ready (sjawhar/legion#2240).
+const CacheFetchTimeout = 2 * time.Hour
 
 // CacheRepositoryHeader names, on every answer the repository cache gives a request its token
 // authorizes, the repository it caches (owner/name), which Fetch checks is its own before it takes
@@ -99,15 +118,17 @@ type FetchReport struct {
 // cache's own process does. Provision then clones the shared clone from the feed with no
 // credential.
 //
-// Each size-following stage of a fetch gets FetchTimeout of its own, and none starts past the one
-// it is in: from the cache, the stream and its verification share one and the delta from GitHub
-// has another; without a cache, the clone or fetch from GitHub has one. So the fetch's waits,
-// transfers and checks end within FetchBudget, however long it waited on the cache, and a slow
-// stream never leaves the delta minutes to run in: nine of one deployment's issue pods died in the
-// delta on 2026-10-26, the stream and its verification having used most of the one bound they
-// then shared (sjawhar/legion#2235). The few local git commands around them (reading refs, writing
-// the feed's configuration) keep CommandTimeout each and take moments. Every attempt of a transfer
-// from GitHub reads
+// Each size-following stage of a fetch gets its own bound, FetchTimeout unless the request sets
+// Bound (the repository cache's own first clone), and none starts past the one it is in: from the
+// cache, the stream and its verification share one and the delta from GitHub has another; without
+// a cache, the clone or fetch from GitHub has one. So an issue pod's fetch ends its waits,
+// transfers and checks within FetchBudget, however long it waited on the cache, and a slow stream
+// never leaves the delta minutes to run in: nine of one deployment's issue pods died in the delta
+// on 2026-10-26, the stream and its verification having used most of the one bound they then
+// shared (sjawhar/legion#2235). The repository cache's first clone, which waits on nothing, may
+// take its whole CacheFetchTimeout, within FetchBudget too, and is no issue pod's. The few local
+// git commands around them (reading refs, writing the feed's configuration) keep CommandTimeout
+// each and take moments. Every attempt of a transfer from GitHub reads
 // the provisioning token anew as it starts (FetchRequest.Token, fetchCredential.renew), so it
 // presents the token as its file stands then, not as it stood when the fetch began. A transfer
 // from GitHub that fails transiently (transientCloneFailure) is run again after the next of
@@ -158,7 +179,7 @@ func Fetch(ctx context.Context, run Runner, request FetchRequest) (FetchReport, 
 	held := &fetchCredential{remote: credential, env: merge(credential.env, isolatedGitConfig), read: request.Token, held: []string{token}}
 	report := FetchReport{Feed: feed}
 	if present {
-		deadline := request.Clock.Now().Add(FetchTimeout)
+		deadline := request.Clock.Now().Add(request.bound())
 		narrowed, heads, err := deltaBranches(ctx, run, request, feed, held, deadline)
 		if err != nil {
 			return FetchReport{}, err
@@ -182,7 +203,7 @@ func Fetch(ctx context.Context, run Runner, request FetchRequest) (FetchReport, 
 	if request.CacheURL == "" {
 		clone := feedTransfer{verb: "clone", argv: []string{"git", "-c", "gc.auto=0", "-c", "maintenance.auto=false", "clone", "--bare", "--quiet", GitHubURL(request.Repo), staging}, destination: staging}
 		report.Cloned = true
-		deadline := request.Clock.Now().Add(FetchTimeout)
+		deadline := request.Clock.Now().Add(request.bound())
 		if err := report.fromGitHub(ctx, run, request, clone, staging, held, deadline); err != nil {
 			return FetchReport{}, err
 		}
@@ -195,7 +216,7 @@ func Fetch(ctx context.Context, run Runner, request FetchRequest) (FetchReport, 
 	if err := waitForCache(ctx, request); err != nil {
 		return FetchReport{}, err
 	}
-	cached := request.Clock.Now().Add(FetchTimeout)
+	cached := request.Clock.Now().Add(request.bound())
 	started := request.Clock.Now()
 	streamed, err := unpackCache(ctx, run, request, staging, cached)
 	verifying := request.Clock.Now()
@@ -206,7 +227,7 @@ func Fetch(ctx context.Context, run Runner, request FetchRequest) (FetchReport, 
 		return FetchReport{}, fmt.Errorf("fill the feed from the repository cache %s: %w", request.CacheURL, err)
 	}
 	report.CacheBytes, report.CacheDuration, report.VerifyDuration = streamed, verifying.Sub(started), request.Clock.Now().Sub(verifying)
-	deadline := request.Clock.Now().Add(FetchTimeout)
+	deadline := request.Clock.Now().Add(request.bound())
 	narrowed, heads, err := deltaBranches(ctx, run, request, staging, held, deadline)
 	if err != nil {
 		return FetchReport{}, err
@@ -476,14 +497,26 @@ var cacheClient = &http.Client{Transport: &http.Transport{Proxy: nil, ForceAttem
 const CachePoll = 10 * time.Second
 
 // CacheWaitTimeout bounds Fetch's wait on a repository cache that is not ready: the cache's own
-// first clone is bounded by FetchTimeout, and the rest is its pod's scheduling and volume.
-const CacheWaitTimeout = FetchTimeout + 10*time.Minute
+// first clone, which may take up to CacheFetchTimeout, and 10 minutes for its pod to be scheduled
+// and its volume bound. A pod launched while a large repository's first clone runs waits it out
+// rather than failing its fetch, which the daemon would count as one of its claim's launch
+// failures (launch_failure_limit, 3 by default), so a first clone that finishes within
+// CacheFetchTimeout never ends a claim failed. The cost is that a waiting pod holds its node
+// reservation, and its launch the issue's lifecycle lane, for up to the whole wait. That happens
+// while a first clone runs, and also whenever the cache never becomes ready: a cache in a crash
+// loop (a refused token, GitHub down), one whose pod cannot be scheduled or whose volume does not
+// bind, or a first clone that runs past CacheFetchTimeout and starts again from nothing. Nothing
+// cuts the wait short then (the daemon describes the cache only once the fetch has failed), so
+// each launch spends 130 minutes rather than 40 before its fetch fails, and a claim takes about
+// three times as long to reach its launch_failure_limit.
+const CacheWaitTimeout = CacheFetchTimeout + 10*time.Minute
 
 // FetchBudget bounds a fetch's waits, transfers and checks, end to end: at most CacheWaitTimeout
 // waiting for the repository cache, then FetchTimeout for the cache's stream and its verification,
 // then FetchTimeout for the delta from GitHub, which has a bound of its own so that a slow stream
 // cannot leave the delta minutes to run in (sjawhar/legion#2235). A fetch with no cache holds one
-// FetchTimeout for its clone or its fetch, well inside this. The few local git commands around
+// bound for its clone or its fetch, FetchTimeout or the repository cache's first clone's
+// CacheFetchTimeout (FetchRequest.Bound), both well inside this. The few local git commands around
 // them keep CommandTimeout each
 // and take moments, which the launch's boot timeout past ProvisionBound covers. The Sandbox runtime
 // allows a launching pod's provisioning this much and the shared clone's (sandbox.Runtime.
@@ -804,7 +837,7 @@ func trailingHash(path string, hash func() hash.Hash) ([]byte, error) {
 func remaining(request FetchRequest, deadline time.Time, what string) (time.Duration, error) {
 	left := deadline.Sub(request.Clock.Now())
 	if left <= 0 {
-		return 0, fmt.Errorf("the fetch's %s bound ran out before %s", FetchTimeout, what)
+		return 0, fmt.Errorf("the fetch's %s bound ran out before %s", request.bound(), what)
 	}
 	return left, nil
 }
@@ -949,6 +982,15 @@ func FeedGit(ctx context.Context, run Runner, gitDir string, args ...string) (Re
 	return RunChecked(ctx, run, append([]string{"git", "--git-dir=" + gitDir}, args...), isolatedGitConfig, "")
 }
 
+// FeedGitWithin is FeedGit bounded by timeout instead of the runner's slow-command budget: for a
+// command on such a repository whose duration follows the repository's size, as the cache's repack
+// does.
+func FeedGitWithin(ctx context.Context, run Runner, gitDir string, timeout time.Duration, args ...string) (Result, error) {
+	argv := append([]string{"git", "--git-dir=" + gitDir}, args...)
+	result, err := runCommandTimeout(ctx, run, argv, isolatedGitConfig, "", timeout)
+	return checkedResult(argv, result, err)
+}
+
 // transferWithRetries runs transfer under the one-shot credential held until it succeeds, retrying
 // a transient failure as Fetch says, each attempt bounded by what remains before deadline and run
 // on the provisioning token as it stands when the attempt starts (renew). It answers the attempt
@@ -976,7 +1018,7 @@ func transferWithRetries(ctx context.Context, run Runner, request FetchRequest, 
 		}
 		wait := fetchBackoff[attempt-1]
 		if !request.Clock.Now().Add(wait).Before(deadline) {
-			return Result{}, fmt.Errorf("%w\n%s attempt %d failed, and a retry in %s would start past the fetch's %s bound", failed, transfer.verb, attempt, wait, FetchTimeout)
+			return Result{}, fmt.Errorf("%w\n%s attempt %d failed, and a retry in %s would start past the fetch's %s bound", failed, transfer.verb, attempt, wait, request.bound())
 		}
 		request.Log(fmt.Sprintf("%s attempt %d failed; retrying in %s: %s", transfer.verb, attempt, wait,
 			strings.ReplaceAll(strings.TrimSpace(result.Stderr), "\n", " | ")))
@@ -989,7 +1031,7 @@ func transferWithRetries(ctx context.Context, run Runner, request FetchRequest, 
 			return Result{}, fmt.Errorf("%w\nthe wait before %s attempt %d ended: %w", failed, transfer.verb, attempt+1, err)
 		}
 		if now = request.Clock.Now(); !now.Before(deadline) {
-			return Result{}, fmt.Errorf("%w\n%s attempt %d failed, and its retry after the %s wait would start past the fetch's %s bound", failed, transfer.verb, attempt, wait, FetchTimeout)
+			return Result{}, fmt.Errorf("%w\n%s attempt %d failed, and its retry after the %s wait would start past the fetch's %s bound", failed, transfer.verb, attempt, wait, request.bound())
 		}
 	}
 }

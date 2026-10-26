@@ -5,37 +5,43 @@ description: "Use when a session has the dispatch command, before you plan, file
 
 # Dispatch first
 
-Dispatch holds the open issues, their specs and the answers humans gave. A duplicate issue or a repeated question costs a human time and splits the history.
+Dispatch holds the open issues, their specs and people's answers. A duplicate issue or repeated question costs a person time.
 
 ## Search before you act
 
-- Before you plan, file an issue, ask, post a finding or start work, run `dispatch search` (`dispatch --help` lists every command).
-- Every query word must match, so each added word can only lose hits. Use two or three words: the thing and what is wrong with it, as a user names them. Never paste a draft.
+- Before you plan, file an issue, ask, post a finding or start work, run `dispatch search`.
+- Each query word must match. Use two or three words: the thing and what is wrong with it. Never paste a draft.
 
 ```bash
 dispatch search --query 'broadcast send order'
 dispatch search --query 'reviewer threads OR review comments'
 ```
 
-- No hits: drop a word before you add one. Try two or three wordings (the component's name, the symptom, the fix) before you conclude that nothing exists.
-- Open each hit that could be yours with `dispatch read`, then its parent (the `child_of` row under `Links:`; a document hit names its issue on `Issue:`). The parent's children and the `Components:` line show where the rest of the work is.
+- No hits: remove a word before you add one. Try two or three wordings before you decide nothing exists.
+- Open each hit that can be yours with `dispatch read --issue KEY`, then its parent (`child_of` under `Links:`, or a document's `Issue:`).
 
 ## What to do with what you find
 
-`dispatch issue` and `dispatch ask` also search: treat a hit in the result's `advice.suggestions` as one you found.
+`dispatch issue` and `dispatch ask` also search. Treat a hit in `advice.suggestions` as yours to read.
 
-- **Work already tracked:** put the finding on that issue (a comment, a message, or a spec edit). File a new issue only when no hit covers the work, and cite the nearest one you ruled out (`dispatch://KEY`).
-- **Question already decided:** the answered ask is the record. Cite it (`dispatch://KEY/ask/<id>`) where you rely on it. Do not ask again.
-- **Duplicate found:** keep the issue with the spec and the discussion, and copy over what only the duplicate has. Then close it: `dispatch issue-update --issue <KEY> --status done --reason 'Duplicate of dispatch://KEY.'`. If it has the `legion` label, or another session or a human holds its claim, comment on it with the survivor's name. Do not close it.
-- **Every ask and message stands alone:** the reader sees only that text. Put the facts, the options and your recommendation in it. Link what you cite (`dispatch://…`). Never write "see above" or "my earlier message".
-- **In a Legion session, a finding outside your own issue is never an issue you file.** A Legion role, and each of its subagents, opens a `dispatch ask` as `skill://legion-worker/references/findings.md` says, in place of filing above.
+- **Work already tracked:** put the finding on that issue. File a new issue only when no hit covers the work, and cite the nearest one you ruled out (`dispatch://KEY`).
+- **Question already decided:** the answered ask is the record. Cite it (`dispatch://KEY/ask/<id>`). Do not ask again.
+- **Duplicate found:** keep the issue with the spec, copy to it what only the duplicate has, and close the duplicate (`--status done --reason 'Duplicate of dispatch://KEY.'`). When it has the `legion` label or another holder's claim, comment the kept issue's name on it instead.
+- **Each ask and message stands alone:** the reader sees only that text. Put the facts, options and your recommendation in it.
+- In a Legion session, a finding outside your own issue is never an issue you file: follow `skill://legion-worker/references/findings.md`.
 
-## Design in the spec
+## Reach a person only through Dispatch
 
-- A design conversation with a person, or the plan that follows it, uses `skill://dispatch-brainstorming`. Read it before your first design question, the spec, or the plan. It replaces superpowers' `brainstorming` and `writing-plans` here, also when the user names one of them.
-- Before a spec's first version and each approval request, get a fresh read-only subagent to check it. On Oh My Pi, use `task(agent="scout")`. Elsewhere, use the host's read-only agent. It checks the spec against the code, the human's words and the command output that its claims rest on. Scout has no shell: save that Dispatch, gh and git output to files first and give it their paths. Resolve what it flags.
-- A Legion architect's own issue spec follows `skill://legion-architect`. Its fresh reader in that Legion session is the Legion plugin's `plan-gap-analyst` agent.
+A person does not watch your chat. Reach them through an ask, an ask block or an approval request.
 
-## Load the full skill before you write
+- The moment a person blocks your work, open an ask: an ask block for a design question its document records, else `dispatch ask`. A blocker that is not an open ask does not exist for them. A Legion phase worker sends decisions to its architect instead. Before you say you wait on a person, run `dispatch open-asks`.
+- Record every request you accept in Dispatch before you start it: an issue, or a line in your issue's `open-items.md` artifact. Before you end a turn, read that record. Each item is done, in progress, or an open ask. Never drop one.
 
-Before any write to Dispatch, load `skill://dispatch`: an ask, a message, a comment, a document edit, a status change, a claim. Skip this if you loaded it in this session.
+## Which skill to read
+
+| Before you | Read |
+| --- | --- |
+| run your first `dispatch` command in this session | `skill://dispatch` |
+| write or change a spec, or write an ask, comment or message a person reads | `skill://dispatch-writing-specs` (in a session with Dispatch it replaces superpowers' `brainstorming`) |
+| plan work whose spec a person approved | superpowers' `writing-plans`, stored as the issue's `plan.md` (`skill://dispatch-writing-specs`, "The plan") |
+| write a Legion architect's own spec | `skill://legion-architect` too |

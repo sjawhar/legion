@@ -44,9 +44,9 @@ func providersItems(pod corev1.PodSpec) []corev1.KeyToPath {
 // pointer, and the shim reads the providers directory and, seeing the pointer, never exports the
 // URL into Oh My Pi's environment; the image probe mounts the key too, so a Secret that lacks it
 // refuses boot. Under cloudsql-iam no pod and no probe mounts a session key at all: the file is the
-// generation's own, written beside the socket each role container's launcher proxies to the
-// instance, and that launcher is told the instance, the database and the login. The image probe
-// tells its Oh My Pi nothing of the store under either.
+// generation's own, written beside the socket the pod's one launcher proxies to the instance for
+// that generation of that role, and the launcher is told the instance, the database and the login.
+// The image probe tells its Oh My Pi nothing of the store under either.
 func TestASessionDatabaseIsWhereEveryRoleKeepsItsSession(t *testing.T) {
 	projection := corev1.KeyToPath{Key: "SESSION_DSN", Path: "OMP_SESSION_SQL_DSN"}
 	proxyFlags := []string{
@@ -80,25 +80,37 @@ func TestASessionDatabaseIsWhereEveryRoleKeepsItsSession(t *testing.T) {
 					if got := slices.Contains(items, projection); got != tc.projected {
 						t.Errorf("the providers volume projects the session key: %t (%v), want %t", got, items, tc.projected)
 					}
-					role := containerNamed(t, pod, string(spec.Role))
+					// The launcher's flags are the pod's one container's, an issue pod's `roles`
+					// serving every workflow role or the controller's own, which is the container
+					// workerOf read.
 					wantFlags := tc.store.Kind == ompsessions.StoreCloudSQLIAM
-					if got := containsSequence(role.Command, proxyFlags); got != wantFlags {
-						t.Errorf("the role container's launcher carries the session proxy's flags: %t (%q), want %t", got, role.Command, wantFlags)
+					podLauncher := containerNamed(t, pod, worker.Name)
+					if got := containsSequence(podLauncher.Command, proxyFlags); got != wantFlags {
+						t.Errorf("the pod's launcher carries the session proxy's flags: %t (%q), want %t", got, podLauncher.Command, wantFlags)
 					}
 					dsnFile := tc.dsnFile(spec.Generation)
 					if env["OMP_SESSION_STORAGE"] != "sql" || env["OMP_SESSION_SQL_DSN_FILE"] != dsnFile {
 						t.Errorf("OMP_SESSION_STORAGE = %q, OMP_SESSION_SQL_DSN_FILE = %q; want sql and %s",
 							env["OMP_SESSION_STORAGE"], env["OMP_SESSION_SQL_DSN_FILE"], dsnFile)
 					}
-					mount := mountHolding(worker, dsnFile)
+					// The agent reads the URL at the path its own namespaces show it; the
+					// container holds the volume behind it at the fixed path in the controller's
+					// pod and under the role's own directory in an issue pod, which role-init
+					// binds back to the fixed path.
+					held := dsnFile
+					if worker.Name == runtime.IssuePodContainer {
+						held = strings.Replace(dsnFile, LauncherPrivateDir, roleDir(spec.Role)+"/private", 1)
+					}
 					switch tc.store.Kind {
 					case ompsessions.StorePostgres:
+						mount := mountHolding(worker, dsnFile)
 						if mount == nil || mount.Name != providersVolume || !mount.ReadOnly {
 							t.Errorf("%s is held by %+v, want the providers volume read-only", dsnFile, mount)
 						}
 					case ompsessions.StoreCloudSQLIAM:
+						mount := mountHolding(podLauncher, held)
 						if mount == nil || mount.Name != roleVolume("private", spec.Role) || mount.ReadOnly {
-							t.Errorf("%s is held by %+v, want the role's writable private volume: its launcher writes the URL there", dsnFile, mount)
+							t.Errorf("%s is held by %+v, want the role's writable private volume: its launcher writes the URL there", held, mount)
 						}
 					}
 					if !slices.Contains(worker.Command, "--provider-env-dir") && tc.store.Kind == ompsessions.StorePostgres {

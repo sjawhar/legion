@@ -59,6 +59,14 @@ var (
 	// a Google login that needs a new sign-in or a GitHub App GitHub refuses. Its returned error
 	// carries the minter's own message, which never holds the stored value or a token.
 	ErrMintFailed = errors.New("the broker could not mint a token from this secret")
+	// ErrNarrowingNotApplicable: a release asked to narrow a GitHub App token, and the grant holds
+	// no github-app secret, so nothing it releases could be narrowed; it releases nothing rather
+	// than every value whole.
+	ErrNarrowingNotApplicable = errors.New("this grant holds no github-app secret to narrow")
+	// ErrNarrowingOwnerNotListed: a release asked to narrow a GitHub App token to an account that a
+	// github-app secret of the grant does not list in its github-owners tag; it releases nothing,
+	// and no minter runs, since the caller's input, not the App, is at fault.
+	ErrNarrowingOwnerNotListed = errors.New("the narrowing names an account a github-app secret of this grant does not serve")
 	// ErrRequestPending means this session already has a person deciding one of the requested
 	// names. Its returned error names that pending request.
 	ErrRequestPending = errors.New("a request for one or more of these secrets is already pending")
