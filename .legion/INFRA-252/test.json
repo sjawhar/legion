@@ -2,12 +2,12 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-252",
-  "completed": "2026-10-26T04:52:00Z",
-  "round": 2,
-  "headSha": "6c58a2716d7c3f88f27de83605e3ce7f94530bab",
+  "completed": "2026-10-26T07:58:00Z",
+  "round": 3,
+  "headSha": "ee9ec60b7930b8dfa78c78701791aaa6cc959bce",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran `LEGION_TEST_PG_DSN=<tester's own embedded postgres> LEGION_E2E_NATS_BIN=<nats-server> bash scripts/e2e/child-adoption.sh` at 6c58a2716d7c: `child adoption e2e: PASS in 29s`, all seven steps ok including held-root-queues-once-its-parent-leaves (transcript https://github.com/sjawhar/legion/pull/2226#issuecomment-6408410518)."
+    "how": "Re-ran `LEGION_TEST_PG_DSN=<tester's own embedded postgres> LEGION_E2E_NATS_BIN=<nats-server> bash scripts/e2e/child-adoption.sh` at ee9ec60b7930: `child adoption e2e: PASS in 36s`, all ten steps ok, the four review-round steps included: child-of-a-held-root-waits-with-it, held-root-queues-once-its-parent-leaves, a-root-that-ran-keeps-queueing, held-root-queues-once-a-recorded-ancestor-leaves (transcript https://github.com/sjawhar/legion/pull/2226#issuecomment-6410843944)."
   },
   "failures": [],
   "failed": 0,
@@ -15,42 +15,42 @@
     {
       "criterion": "D2: a todo root held under an unrecorded parent of a live tree queues once that parent leaves the tree",
       "round": 1,
-      "status": "fixed at a69d4725d92c; red test TestATodoHeldUnderAnUnreleasedChildQueuesOnceItsParentLeavesTheLiveTree (fac524684344) passes unchanged at 6c58a2716d7c"
+      "status": "fixed; red test TestATodoHeldUnderAnUnreleasedChildQueuesOnceItsParentLeavesTheLiveTree (fac524684344) passes unchanged at ee9ec60b7930"
     }
   ],
   "proof": [
     {
-      "criterion": "D2 (round 1's defect): a held root queues once its unrecorded parent leaves the live tree, at any depth, and is held once its parent moves under a live tree",
-      "surface": "whole daemon over real PostgreSQL and its own nats-server, JetStream Dispatch envelopes, the Legion HTTP API (throwaway -tags e2e driver on child_adoption_live_test.go's harness)",
-      "command": "H under P under T, slot freed, P moved to no parent; H under P1 under P2 under T, P2 moved out; R waiting under parentless P, P moved under T then release {R}; H held under queued root Q, Q made a child of T, then release {H}",
-      "observed": "H took the freed slot 3 s after P's event; the two-level H entered admission.waiting with recorded ancestor cleared; R left admission.waiting held under T, and release {R} answered 200 with R planning in T and park_child 200; with Q adopted into T, H stayed held as its own root, and release {H} answered 200 with H planning in T",
-      "headSha": "6c58a2716d7c3f88f27de83605e3ce7f94530bab",
-      "negativeControl": "round 1, the same stale-ancestor scenario at 9c706cb12173: the held root stayed out of the line with a slot free until its own next event; the red test at fac524684344 failed `LEGION-214 holds no slot with one free after its parent LEGION-169 left the tree of LEGION-168`"
+      "criterion": "Review finding 1: a todo child of a held root waits with it and takes no slot or architect, also once the held root is freed",
+      "surface": "whole daemon over real PostgreSQL and its own nats-server, JetStream Dispatch envelopes, the Legion HTTP API (throwaway -tags e2e driver on live_proof_test.go/child_adoption_live_test.go)",
+      "command": "H labelled todo under unrecorded P under T, K labelled todo under H; release {K}; P moved to no parent; the second slotted tree moved to backlog",
+      "observed": "H held, K recorded in H's tree and not waiting; release {K} alone 409 CHILD_IN_OTHER_TREE `K runs in the tree of H, not T`, no Dispatch write; after P left T, H entered admission.waiting and took the freed slot with its architect launched; K stayed in H's tree at phase admitted with no slot, no architect launch and not waiting",
+      "headSha": "ee9ec60b7930b8dfa78c78701791aaa6cc959bce",
+      "negativeControl": "release {K} alone is refused 409 with nothing written; review round 1 reproduced the defect at 6c58a271 (the child took a slot and an architect)"
     },
     {
-      "criterion": "AC1-AC4 as the implementer's driver states them",
-      "surface": "whole daemon (scripts/e2e/child-adoption.sh)",
-      "command": "LEGION_TEST_PG_DSN=<postgres> LEGION_E2E_NATS_BIN=<nats-server> bash scripts/e2e/child-adoption.sh",
-      "observed": "PASS in 29s: queued-root-leaves-the-line, release-adopts-from-todo, release-adopts-from-backlog, release-adopts-infra-214-state, held-under-an-unreleased-child, held-root-queues-once-its-parent-leaves, release-refuses all ok",
-      "headSha": "6c58a2716d7c3f88f27de83605e3ce7f94530bab",
-      "negativeControl": "release-refuses: 409 CHILD_IN_OTHER_TREE with the record unchanged and no Dispatch write"
+      "criterion": "Review finding 5: one unreadable chain during a re-read skips only its own root",
+      "surface": "whole daemon (throwaway driver)",
+      "command": "H1 held under P1, H2 held under P2, both under T; the Dispatch stand-in answers 404 for P1; P2 moved to no parent",
+      "observed": "H2 entered admission.waiting; H1 stayed held with recorded ancestor T; the daemon logged `a queued root's recorded ancestor was not read again` once, and P2's event was applied rather than retried",
+      "headSha": "ee9ec60b7930b8dfa78c78701791aaa6cc959bce",
+      "negativeControl": "H1, whose chain cannot be read, keeps its hold rather than being freed or dropped"
     },
     {
-      "criterion": "AC2: one release_children adopts it, in the tree when the release answers, under concurrent and repeated releases",
+      "criterion": "D2: holds track the Dispatch chain (round 1 defect and its neighbours)",
+      "surface": "whole daemon (throwaway driver, re-run of round 1-2 scenarios)",
+      "command": "parent leaves T with a slot free; P2 two levels up leaves T; waiting R's parent moved under T then release {R}; H held under queued Q, Q made a child of T, then release {H}; release {P} of a held H's parent",
+      "observed": "held root took the freed slot 3 s after its parent left; the two-level root entered admission.waiting; R left the line held under T and joined T on release; H stayed held when Q joined T and joined T on release; P's release and echo adopted H into T",
+      "headSha": "ee9ec60b7930b8dfa78c78701791aaa6cc959bce",
+      "negativeControl": "red test at fac524684344 failed `LEGION-214 holds no slot with one free after its parent LEGION-169 left the tree of LEGION-168`"
+    },
+    {
+      "criterion": "AC2/AC4: concurrent and repeated releases adopt once; a release that cannot adopt names the child and why and writes nothing",
       "surface": "POST /legion/v1/waves/release on the whole daemon (throwaway driver)",
-      "command": "three concurrent releases of one queued root W by T's architect, then a fourth",
-      "observed": "all 200; W adopted once (generation 1 -> 2, one child-status notice `<W> joined the tree of <T> from the admission queue`), planning, no slot, no architect; the fourth release 200 with nothing changed or written",
-      "headSha": "6c58a2716d7c3f88f27de83605e3ce7f94530bab",
-      "negativeControl": "a release including a child of another tree answers 409 CHILD_IN_OTHER_TREE"
-    },
-    {
-      "criterion": "AC4: a release that cannot adopt a child returns an error naming the child and why, not released, and writes nothing",
-      "surface": "POST /legion/v1/waves/release on the whole daemon (throwaway driver); the legion tool renders it `POST /legion/v1/waves/release failed with 409 <code>: <message>` (packages/pi-shared/src/daemon-client.ts LegionDaemonApiError)",
-      "command": "release {W, G} and {G, W} with G recorded in another live tree U; release {K} with K a root that ran as a tree of its own",
-      "observed": "both orders 409 CHILD_IN_OTHER_TREE `<G> runs in the tree of <U>, not <T>`, W still waiting at generation 1, no Dispatch write; release {W, B} then 200 with one PATCH todo of B; K 409 CHILD_NOT_ADOPTABLE `<K> cannot join the tree of <T>: it ran as a tree of its own`, nothing written, and K made todo under T keeps queueing as its own root (D1)",
-      "headSha": "6c58a2716d7c3f88f27de83605e3ce7f94530bab",
-      "negativeControl": "the same W released with an adoptable companion answers 200 and adopts it"
+      "command": "three concurrent releases of queued W, then a fourth; release {W, G} and {G, W} with G in another live tree; release {K} with K a root that ran as a tree of its own",
+      "observed": "all three 200, adopted once (generation 1 -> 2, one child-status notice), fourth 200 with nothing written; both waves 409 CHILD_IN_OTHER_TREE with W still waiting and no write; K 409 CHILD_NOT_ADOPTABLE `<K> cannot join the tree of <T>: it ran as a tree of its own`, and K made todo under T keeps queueing (D1)",
+      "headSha": "ee9ec60b7930b8dfa78c78701791aaa6cc959bce",
+      "negativeControl": "W released with an adoptable companion answers 200 and adopts it"
     }
   ],
-  "ci": "At 6c58a2716d7c, read 2026-10-26T04:50Z: Tests 40270033720 queued; Legion Envoy and Contracts 40270033722 queued; Docs 40270033658 queued; Worker Image 40270033702 queued; PR Title 40270101341 pending."
+  "ci": "At ee9ec60b7930, read 2026-10-26T07:55Z: Tests 40286874005 queued; Legion Envoy and Contracts 40286874017 queued; Docs 40286873985 queued; Worker Image 40286873956 queued; PR Title 40286962194 queued (40286874021 cancelled)."
 }
