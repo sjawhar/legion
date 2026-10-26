@@ -5,8 +5,10 @@ import (
 	"math"
 	"os"
 	"os/exec"
+	"regexp"
 	"runtime"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/reearth/ygo/crdt"
@@ -26,21 +28,35 @@ import (
 // alone (measuredAlone).
 const heapPriceChild = "DISPATCH_HEAP_PRICE_CHILD"
 
-// measuredAlone runs the calling test again in a process of its own and reports whether this is
-// that process, the one to measure in; the caller returns when it is not. A collection costs as
-// much as the heap the process holds, and a whole run of this package holds a gigabyte or more by
-// the time these tests run: on this pod the three of them took 108, 75 and 16 s inside the
-// package's run, against 2.5, 1.4 and 0.2 s in a process of their own, with the same readings. The
-// test that started the process logs what the process printed, and fails when it failed.
+// measuredAlone runs the calling test, or subtest, again in a process of its own and reports
+// whether this is that process, the one to measure in; the caller returns when it is not. A
+// collection costs as much as the heap the process holds, and a whole run of this package holds a
+// gigabyte or more by the time these tests run: on this pod the three of them took 108, 75 and
+// 16 s inside the package's run, against 2.5, 1.4 and 0.2 s in a process of their own, with the
+// same readings. The process runs the one test of that exact name, each level of it matched whole.
+// The test that started the process logs what the process printed and the process's peak resident
+// memory, and fails when it failed. The peak is the kernel's for the process, which folds in the
+// peak of the memory the process was started from (Go starts it sharing this process's memory
+// until its exec), so it reads no less than this process's own peak at the start, and bounds the
+// process's own from above.
 func measuredAlone(t *testing.T) bool {
 	t.Helper()
 	if os.Getenv(heapPriceChild) == t.Name() {
 		return true
 	}
-	child := exec.Command(os.Args[0], "-test.run=^"+t.Name()+"$", "-test.count=1", "-test.v")
+	levels := strings.Split(t.Name(), "/")
+	for i, level := range levels {
+		levels[i] = "^" + regexp.QuoteMeta(level) + "$"
+	}
+	child := exec.Command(os.Args[0], "-test.run="+strings.Join(levels, "/"), "-test.count=1", "-test.v")
 	child.Env = append(os.Environ(), heapPriceChild+"="+t.Name())
 	output, err := child.CombinedOutput()
 	t.Logf("measured in a process of its own:\n%s", output)
+	if child.ProcessState != nil {
+		if usage, ok := child.ProcessState.SysUsage().(*syscall.Rusage); ok {
+			t.Logf("the process's peak resident memory, at least this process's own: %d KiB", usage.Maxrss)
+		}
+	}
 	if err != nil {
 		t.Fatalf("the measurement in a process of its own failed: %v", err)
 	}

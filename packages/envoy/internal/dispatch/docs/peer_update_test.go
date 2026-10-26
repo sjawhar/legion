@@ -469,6 +469,124 @@ func heaviestDocument(t *testing.T) *crdt.Doc {
 	return doc
 }
 
+// A browser can leave a live document heavier than any the server's own writes leave: the hook
+// admits an update at the byte bound while what it inserts is under maxPeerInsertAtTheBound, until
+// the room's last rendering has crept maxPeerByteCreep past pmdoc.MaxDocumentBytes. So the floor
+// (maxMessageBytes) has to clear the whole-state frame of the heaviest document grown that way too,
+// which a browser hands over on its next sync. This grows heaviestDocument, at both halves of the
+// bound with its full margin and anchor marks, through the hook itself (weighPeerUpdate), with
+// updates a browser's copy of the room makes the way the editor makes them (pmdoc.Update of its
+// tree), of the densest markdown this repository measures: empty items of alternating bullet lists,
+// `- \n\n* \n\n`, 2.25 elements a byte (room_budget.go:62-64), each list and item and paragraph
+// carrying the block id a browser's write mints. Each update is as large as the hook admits at the
+// bound, and the last is taken from a rendering under the creep cap by at most a pair, so the
+// document ends as far past the cap as one admitted update can take it; one more pair is then
+// refused.
+// After each admitted update the room's rendering is published as its update observer publishes
+// it (publishCounted rather than the observer's publishSize, whose element count waits on the
+// service's measurer: the hook reads the byte half alone). It fails once four times the grown
+// document's whole-state frame passes the floor.
+func TestTheHeaviestWholeStateFrameABrowserCanGrowFitsTheMessageFloor(t *testing.T) {
+	const pair = "- \n\n* \n\n"
+	room := heaviestDocument(t)
+	rendering, err := renderDocument(room)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rendering) < pmdoc.MaxDocumentBytes {
+		t.Fatalf("the heaviest document renders %d bytes, want at least %d", len(rendering), pmdoc.MaxDocumentBytes)
+	}
+	serverWritten := len(crdt.EncodeStateAsUpdateV1(room, nil))
+	service := &Service{}
+	replica := service.keepReplica(room, &rendering)
+	// A client id of five bytes, the most a lib0 varint of one takes, which most random ids are:
+	// every origin of every struct the browser writes names it, so a smaller one would measure a
+	// lighter frame than most browsers send.
+	browser := newDocumentCopy(crdt.WithClientID(math.MaxUint32))
+	if err := crdt.ApplyUpdateV1(browser, crdt.EncodeStateAsUpdateV1(room, nil), nil); err != nil {
+		t.Fatal(err)
+	}
+	tree, err := treeOf(browser)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fragment := browser.GetXmlFragment(fragmentName)
+	// grow appends pairs of the densest shape to the browser's document and hands the room the
+	// update that makes, reporting what the update inserts and the hook's answer. An update the
+	// hook admits is applied to the room, whose new rendering is then published.
+	grow := func(pairs int) (inserted int64, refused error) {
+		t.Helper()
+		added, err := pmdoc.Parse(strings.Repeat(pair, pairs))
+		if err != nil {
+			t.Fatal(err)
+		}
+		tree.Children = append(tree.Children, added.Children...)
+		if err := browser.TransactE(func(txn *crdt.Transaction) error { return pmdoc.Update(txn, fragment, tree) }); err != nil {
+			t.Fatal(err)
+		}
+		update := crdt.EncodeStateAsUpdateV1(browser, room.StateVector())
+		weighed := peerWeighing{held: room.StateVector()}
+		if _, err := walkUpdate(update, fromPeer, &weighed); err != nil {
+			t.Fatal(err)
+		}
+		if err, _ := weighInto(service, room, update); err != nil {
+			return weighed.inserted, err
+		}
+		rendering, err := renderDocument(room)
+		if err != nil {
+			t.Fatal(err)
+		}
+		replica.publishCounted(&rendering, countElements(rendering))
+		return weighed.inserted, nil
+	}
+	published := func() int64 {
+		bytes, _, _ := replica.size()
+		return bytes
+	}
+	// One small update first, which says what a pair inserts and renders, and so how many pairs
+	// the largest update the hook admits at the bound carries.
+	const calibration = 64
+	loaded := published()
+	inserted, err := grow(calibration)
+	if err != nil {
+		t.Fatalf("the hook refused %d pairs at the bound: %v", calibration, err)
+	}
+	insertedAPair := (inserted + calibration - 1) / calibration
+	renderedAPair := (published() - loaded) / calibration
+	largest := int((maxPeerInsertAtTheBound - 1) / insertedAPair)
+	creepCap := int64(pmdoc.MaxDocumentBytes + maxPeerByteCreep)
+	updates := 1
+	for published() < creepCap {
+		pairs := largest
+		if fit := int((creepCap - 1 - published()) / renderedAPair); fit > 0 && fit < largest {
+			pairs = fit
+		}
+		if inserted, err := grow(pairs); err != nil {
+			t.Fatalf("the hook refused %d pairs inserting %d at %d rendered bytes: %v", pairs, inserted, published(), err)
+		}
+		updates++
+	}
+	var refusal *websocket.PeerClose
+	if _, err := grow(1); !errors.As(err, &refusal) || refusal.Code != contracts.DocumentTooLargeCloseCode {
+		t.Fatalf("the hook answered %v to one more pair past the creep cap, want the document's own refusal", err)
+	}
+	runtime.KeepAlive(replica)
+	state := crdt.EncodeStateAsUpdateV1(room, nil)
+	frame := len(state)
+	t.Logf("%d updates of up to %d pairs, each pair inserting %d and rendering %d bytes, took the rendering from %d bytes to %d, against the %d-byte creep cap; "+
+		"the whole-state frame grew from %d to %d bytes, four times it %d; the message floor is %d",
+		updates, largest, insertedAPair, renderedAPair, loaded, published(), creepCap, serverWritten, frame, 4*frame, maxMessageBytes)
+	held, _ := applyHeapEstimate(t, room, state)
+	handedOver, _ := applyHeapEstimate(t, newDocumentCopy(), state)
+	t.Logf("its handoff is estimated at %d bytes into the room holding it and %d into a fresh one, against the %d-byte apply heap bound",
+		held, handedOver, uint64(applyHeapBound))
+	if frame*4 > maxMessageBytes {
+		t.Fatalf("the heaviest whole-state frame a browser can grow is %d bytes, past a quarter of the %d-byte message floor: "+
+			"measure it again and set the floor at four times it, or take it back to the design if four times it passes the 64 MiB ygo allowed before",
+			frame, maxMessageBytes)
+	}
+}
+
 // BenchmarkPeerUpdateInsertMeasures weighs the ways to ask what an update carries that the room
 // does not already hold, on the update a keystroke sends against a document at
 // pmdoc.MaxDocumentBytes: the walk the hook takes (walkUpdate with peerWeighing), against the
@@ -1104,17 +1222,6 @@ func chainedCharacters(n int) []byte {
 	return f.noDeletes()
 }
 
-// holdingClocks is a fresh room that already holds client's first length clocks, as one GC run.
-func holdingClocks(t *testing.T, client, length uint64) func() *crdt.Doc {
-	return func() *crdt.Doc {
-		doc := newDocumentCopy()
-		if err := crdt.ApplyUpdateV1(doc, newV1Frame(1).group(1, client, 0).gc(length).noDeletes(), nil); err != nil {
-			t.Fatal(err)
-		}
-		return doc
-	}
-}
-
 // applyAllocation is what ygo's apply of update into a document into makes allocates, the least of
 // three runs, each into a fresh document from into: an upper bound on the heap the apply adds at
 // its peak, since no byte it holds can be one it did not allocate. The document has an update
@@ -1156,47 +1263,90 @@ func applyAllocation(t *testing.T, into func() *crdt.Doc, update []byte) uint64 
 // estimate; and a 64 KiB paste, a keystroke and a deletion, by the update's own share, which is
 // what decides whether they wait (unweighedApplyHeapBytes). The figures the comments of
 // applyHeapBound and unweighedApplyHeapBytes quote are held here too.
+//
+// Each row is measured in a process of its own (measuredAlone), which builds only what that row
+// reads (builtOnce), so no row's collections pay for the heap another row's inputs or the rest of
+// the package hold, and the processes run as many at a time as the binary runs parallel tests: run
+// in one process beside the whole package, this test took 490 s and the package's peak resident
+// memory reached about 11.8 GB, where alone on this pod's two processors it took 20 s, and no
+// row's process passed 300 MiB resident (each logs its peak).
 func TestEveryApplysTransientHeapIsWithinItsEstimate(t *testing.T) {
-	fresh := func() *crdt.Doc { return newDocumentCopy() }
-	documentHolding := func(updates ...[]byte) func() *crdt.Doc {
-		return func() *crdt.Doc {
+	// The rows of many structs carry structs of them, of many Any values values, and of large maps,
+	// objects and arrays entries an element; the long string and binary are blob bytes. Each makes
+	// the estimate's fixed part (applyHeapPerApply) under a hundredth of the row's measurement, so
+	// the per-unit factors decide every comparison, and makes every slice the apply grows by
+	// appending long past the 256 elements under which Go doubles one rather than growing it by
+	// about a quarter, so each unit costs what it costs at scale. The rows of GC structs stay at
+	// maxUpdateItems, the most one update decodes: 1.4 s and about 250 MiB in a process of their
+	// own.
+	const (
+		structs = 20_000
+		values  = 100_000
+		entries = 10_000
+		blob    = 512 << 10
+	)
+	type (
+		room  = func(t *testing.T) *crdt.Doc
+		frame = func(t *testing.T) []byte
+	)
+	built := func(build func() []byte) frame { return builtOnce(func(*testing.T) []byte { return build() }) }
+	fresh := func(*testing.T) *crdt.Doc { return newDocumentCopy() }
+	holding := func(updates ...frame) room {
+		return func(t *testing.T) *crdt.Doc {
 			doc := newDocumentCopy()
 			for _, update := range updates {
-				if err := crdt.ApplyUpdateV1(doc, update, nil); err != nil {
+				if err := crdt.ApplyUpdateV1(doc, update(t), nil); err != nil {
 					t.Fatal(err)
 				}
 			}
 			return doc
 		}
 	}
-	heaviest := heaviestDocument(t)
-	heaviestState := crdt.EncodeStateAsUpdateV1(heaviest, nil)
-	prose := crdt.EncodeStateAsUpdateV1(residentRoomDocument(t, 1<<20), nil)
-	paste := peerTyping(t, heaviest, strings.Repeat("pasted words ", (64<<10)/13))
-	keystroke := peerTyping(t, heaviest, "y")
-	deletion := peerDeleting(t, heaviest, 1)
-	manyClients := func(clients int) func() *crdt.Doc {
-		f := newV1Frame(clients)
-		for c := range clients {
-			f = f.group(1, uint64(100+c), 0).gc(1)
-		}
-		return documentHolding(f.noDeletes())
+	// holdingClocks is a room that already holds client's first length clocks, as one GC run.
+	holdingClocks := func(client, length uint64) room {
+		return holding(built(func() []byte { return newV1Frame(1).group(1, client, 0).gc(length).noDeletes() }))
 	}
+	heaviest := builtOnce(heaviestDocument)
+	heaviestState := builtOnce(func(t *testing.T) []byte { return crdt.EncodeStateAsUpdateV1(heaviest(t), nil) })
+	prose := builtOnce(func(t *testing.T) []byte { return crdt.EncodeStateAsUpdateV1(residentRoomDocument(t, 1<<20), nil) })
+	paste := builtOnce(func(t *testing.T) []byte {
+		return peerTyping(t, heaviest(t), strings.Repeat("pasted words ", (64<<10)/13))
+	})
+	keystroke := builtOnce(func(t *testing.T) []byte { return peerTyping(t, heaviest(t), "y") })
+	deletion := builtOnce(func(t *testing.T) []byte { return peerDeleting(t, heaviest(t), 1) })
+	manyClients := func(clients int) room {
+		return holding(built(func() []byte {
+			f := newV1Frame(clients)
+			for c := range clients {
+				f = f.group(1, uint64(100+c), 0).gc(1)
+			}
+			return f.noDeletes()
+		}))
+	}
+	oneCharacter := built(func() []byte {
+		return fragmentItems(1, structString, func(f v1Frame) v1Frame { return f.str("a") })
+	})
 	record := map[string]any{"kind": "comment", "by": "user:alice", "text": strings.Repeat("m", 200), "at": 1.5e12, "replies": []any{"r", int64(3)}}
-	bigMap := map[string]any{}
-	for i := range 100_000 {
-		bigMap[fmt.Sprint(i)] = nil
-	}
-	var bigObject strings.Builder
-	bigObject.WriteString("{")
-	for i := range 100_000 {
-		if i > 0 {
-			bigObject.WriteString(",")
+	bigMap := func() map[string]any {
+		big := map[string]any{}
+		for i := range entries {
+			big[fmt.Sprint(i)] = nil
 		}
-		fmt.Fprintf(&bigObject, `"%d":0`, i)
+		return big
 	}
-	bigObject.WriteString("}")
-	bigArray := "[" + strings.TrimSuffix(strings.Repeat("0,", 100_000), ",") + "]"
+	bigObject := func() string {
+		var big strings.Builder
+		big.WriteString("{")
+		for i := range entries {
+			if i > 0 {
+				big.WriteString(",")
+			}
+			fmt.Fprintf(&big, `"%d":0`, i)
+		}
+		big.WriteString("}")
+		return big.String()
+	}
+	bigArray := func() string { return "[" + strings.TrimSuffix(strings.Repeat("0,", entries), ",") + "]" }
 	legacyJSON := func(n int) []byte {
 		f := newV1Frame(1).group(1, 7, 0).rooted(byte(structJSON), marksMapName, "k").uint(uint64(n))
 		for range n {
@@ -1204,22 +1354,32 @@ func TestEveryApplysTransientHeapIsWithinItsEstimate(t *testing.T) {
 		}
 		return f.noDeletes()
 	}
-	const n = 200_000
-	skips := newV1Frame(1).group(n, 7, 0)
-	for range n {
-		skips.skip(1)
+	skips := func(n int) []byte {
+		f := newV1Frame(1).group(n, 7, 0)
+		for range n {
+			f.skip(1)
+		}
+		return f.noDeletes()
 	}
-	// A room holding client 7's string of n characters, and the same with every other character
-	// deleted, n/2 deleted items; client 8's characters each inserted between two of client 7's,
-	// splitting the string at both origins; and client 8's keystroke at the string's end.
-	text := fragmentItems(1, structString, func(f v1Frame) v1Frame { return f.str(strings.Repeat("a", n)) })
-	everyOther := deleteRangesFrom(7, n/2)
-	between := newV1Frame(1).group(n/2, 8, 0)
-	for i := range n / 2 {
-		between.raw(byte(structString) | infoHasOrigin | infoHasRightOrigin).uint(7).uint(uint64(2 * i)).uint(7).uint(uint64(2*i + 1)).str("b")
-	}
-	atTheEnd := newV1Frame(1).group(1, 8, 0).raw(byte(structString) | infoHasOrigin).uint(7).uint(n - 1).str("y").noDeletes()
-	tombstoned := crdt.EncodeStateAsUpdateV1(documentHolding(text, everyOther)(), nil)
+	// A room holding client 7's string of structs characters, and the same with every other
+	// character deleted, structs/2 deleted items; client 8's characters each inserted between two
+	// of client 7's, splitting the string at both origins; and client 8's keystroke at the
+	// string's end.
+	text := built(func() []byte {
+		return fragmentItems(1, structString, func(f v1Frame) v1Frame { return f.str(strings.Repeat("a", structs)) })
+	})
+	everyOther := built(func() []byte { return deleteRangesFrom(7, structs/2) })
+	between := built(func() []byte {
+		f := newV1Frame(1).group(structs/2, 8, 0)
+		for i := range structs / 2 {
+			f.raw(byte(structString) | infoHasOrigin | infoHasRightOrigin).uint(7).uint(uint64(2 * i)).uint(7).uint(uint64(2*i + 1)).str("b")
+		}
+		return f.noDeletes()
+	})
+	atTheEnd := built(func() []byte {
+		return newV1Frame(1).group(1, 8, 0).raw(byte(structString) | infoHasOrigin).uint(7).uint(structs - 1).str("y").noDeletes()
+	})
+	tombstoned := builtOnce(func(t *testing.T) []byte { return crdt.EncodeStateAsUpdateV1(holding(text, everyOther)(t), nil) })
 	// editor is whether the update is one the editor sends, which the estimate may not overstate
 	// past three times: by the whole estimate, or by the update's own share.
 	const (
@@ -1229,83 +1389,132 @@ func TestEveryApplysTransientHeapIsWithinItsEstimate(t *testing.T) {
 	)
 	for _, row := range []struct {
 		name   string
-		into   func() *crdt.Doc
-		update []byte
+		into   room
+		update frame
 		editor int
 	}{
-		{"a million null Any values in one struct", fresh, marginValues(1_000_000, nil), notTheEditors},
-		{"a million null Any values in one struct, into a room holding them", holdingClocks(t, 7, 1_000_000), marginValues(1_000_000, nil), notTheEditors},
-		{"maps of one entry, the densest Any, in one struct", fresh, marginValues(n, map[string]any{"": nil}), notTheEditors},
-		{"maps of one empty map in one struct", fresh, marginValues(n, map[string]any{"": map[string]any{}}), notTheEditors},
-		{"arrays of one map in one struct", fresh, marginValues(n, []any{map[string]any{"": nil}}), notTheEditors},
-		{"strings of nine bytes in one struct", fresh, marginValues(n, "123456789"), notTheEditors},
-		{"maps of 100,000 entries", fresh, marginValues(10, bigMap), notTheEditors},
-		{"margin entries of one null each", fresh, marginEntries(n, nil), notTheEditors},
-		{"margin entries of one null each, into a room holding them", holdingClocks(t, 7, n), marginEntries(n, nil), notTheEditors},
-		{"margin entries of one record each", fresh, marginEntries(n/10, record), notTheEditors},
-		{"null JSON texts in one struct", fresh, marginJSON(n, "null"), notTheEditors},
-		{"number JSON texts in one struct", fresh, marginJSON(n, "0"), notTheEditors},
-		{"JSON objects of one entry in one struct", fresh, marginJSON(n, `{"":0}`), notTheEditors},
-		{"JSON objects of one empty object in one struct", fresh, marginJSON(n, `{"":{}}`), notTheEditors},
-		{"JSON arrays of 100,000 numbers", fresh, marginJSON(20, bigArray), notTheEditors},
-		{"JSON objects of 100,000 entries", fresh, marginJSON(20, bigObject.String()), notTheEditors},
-		{"JSON strings of 1,000 escapes", fresh, marginJSON(2000, `"`+strings.Repeat(`\n`, 500)+`"`), notTheEditors},
-		{"legacy Any JSON values in one struct", fresh, legacyJSON(n), notTheEditors},
-		{"a string of 4 MiB", fresh, fragmentItems(1, structString, func(f v1Frame) v1Frame { return f.str(strings.Repeat("a", 4<<20)) }), notTheEditors},
-		{"one-character strings each naming both origins", fresh, chainedCharacters(n), notTheEditors},
-		{"one-character strings each splitting the room's string", documentHolding(text), between.noDeletes(), notTheEditors},
-		{"strings of seventeen bytes", fresh, fragmentItems(n, structString, func(f v1Frame) v1Frame { return f.str("12345678901234567") }), notTheEditors},
-		{"binary of 4 MiB", fresh, fragmentItems(1, structBinary, func(f v1Frame) v1Frame { return f.str(strings.Repeat("a", 4<<20)) }), notTheEditors},
-		{"empty binaries", fresh, fragmentItems(n, structBinary, func(f v1Frame) v1Frame { return f.str("") }), notTheEditors},
-		{"embeds of an empty object", fresh, fragmentItems(n, structEmbed, func(f v1Frame) v1Frame { return f.str("{}") }), notTheEditors},
-		{"formats of an empty object", fresh, fragmentItems(n, structFormat, func(f v1Frame) v1Frame { return f.str("bold").str("{}") }), notTheEditors},
-		{"XML elements", fresh, fragmentItems(n, structType, func(f v1Frame) v1Frame { return f.raw(3).str("paragraph") }), notTheEditors},
-		{"XML texts", fresh, fragmentItems(n, structType, func(f v1Frame) v1Frame { return f.raw(6) }), notTheEditors},
-		{"deleted items", fresh, fragmentItems(n, structDeleted, func(f v1Frame) v1Frame { return f.uint(1) }), notTheEditors},
-		{"maxUpdateItems GC structs", fresh, gcFrameFrom(7, maxUpdateItems), notTheEditors},
-		{"maxUpdateItems GC structs, into a room holding them", holdingClocks(t, 7, maxUpdateItems), gcFrameFrom(7, maxUpdateItems), notTheEditors},
-		{"skips", fresh, skips.noDeletes(), notTheEditors},
-		{"delete ranges of a client the room has not seen", fresh, deleteRangesFrom(7, n), notTheEditors},
-		{"delete ranges each splitting the room's string", documentHolding(text), everyOther, notTheEditors},
-		{"one character into a room of 200,000 clients", manyClients(n), fragmentItems(1, structString, func(f v1Frame) v1Frame { return f.str("a") }), notTheEditors},
-		{"one character into a room of 57,345 clients", manyClients(57_345), fragmentItems(1, structString, func(f v1Frame) v1Frame { return f.str("a") }), notTheEditors},
-		{"one character into a string of 100,000 deleted items", documentHolding(text, everyOther), atTheEnd, notTheEditors},
-		{"the whole state of a string of 100,000 deleted items into the room holding it", documentHolding(text, everyOther), tombstoned, notTheEditors},
-		{"the heaviest handoff into the room holding it", documentHolding(heaviestState), heaviestState, editorsWhole},
+		{"100,000 null Any values in one struct", fresh, built(func() []byte { return marginValues(values, nil) }), notTheEditors},
+		{"100,000 null Any values in one struct, into a room holding them", holdingClocks(7, values), built(func() []byte { return marginValues(values, nil) }), notTheEditors},
+		{"maps of one entry, the densest Any, in one struct", fresh, built(func() []byte { return marginValues(structs, map[string]any{"": nil}) }), notTheEditors},
+		{"maps of one empty map in one struct", fresh, built(func() []byte { return marginValues(structs, map[string]any{"": map[string]any{}}) }), notTheEditors},
+		{"arrays of one map in one struct", fresh, built(func() []byte { return marginValues(structs, []any{map[string]any{"": nil}}) }), notTheEditors},
+		{"strings of nine bytes in one struct", fresh, built(func() []byte { return marginValues(structs, "123456789") }), notTheEditors},
+		{"maps of 10,000 entries", fresh, built(func() []byte { return marginValues(10, bigMap()) }), notTheEditors},
+		{"margin entries of one null each", fresh, built(func() []byte { return marginEntries(structs, nil) }), notTheEditors},
+		{"margin entries of one null each, into a room holding them", holdingClocks(7, structs), built(func() []byte { return marginEntries(structs, nil) }), notTheEditors},
+		{"margin entries of one record each", fresh, built(func() []byte { return marginEntries(structs/10, record) }), notTheEditors},
+		{"null JSON texts in one struct", fresh, built(func() []byte { return marginJSON(structs, "null") }), notTheEditors},
+		{"number JSON texts in one struct", fresh, built(func() []byte { return marginJSON(structs, "0") }), notTheEditors},
+		{"JSON objects of one entry in one struct", fresh, built(func() []byte { return marginJSON(structs, `{"":0}`) }), notTheEditors},
+		{"JSON objects of one empty object in one struct", fresh, built(func() []byte { return marginJSON(structs, `{"":{}}`) }), notTheEditors},
+		{"JSON arrays of 10,000 numbers", fresh, built(func() []byte { return marginJSON(20, bigArray()) }), notTheEditors},
+		{"JSON objects of 10,000 entries", fresh, built(func() []byte { return marginJSON(20, bigObject()) }), notTheEditors},
+		{"JSON strings of 1,000 escapes", fresh, built(func() []byte { return marginJSON(200, `"`+strings.Repeat(`\n`, 500)+`"`) }), notTheEditors},
+		{"legacy Any JSON values in one struct", fresh, built(func() []byte { return legacyJSON(structs) }), notTheEditors},
+		{"a string of 512 KiB", fresh, built(func() []byte {
+			return fragmentItems(1, structString, func(f v1Frame) v1Frame { return f.str(strings.Repeat("a", blob)) })
+		}), notTheEditors},
+		{"one-character strings each naming both origins", fresh, built(func() []byte { return chainedCharacters(structs) }), notTheEditors},
+		{"one-character strings each splitting the room's string", holding(text), between, notTheEditors},
+		{"strings of seventeen bytes", fresh, built(func() []byte {
+			return fragmentItems(structs, structString, func(f v1Frame) v1Frame { return f.str("12345678901234567") })
+		}), notTheEditors},
+		{"binary of 512 KiB", fresh, built(func() []byte {
+			return fragmentItems(1, structBinary, func(f v1Frame) v1Frame { return f.str(strings.Repeat("a", blob)) })
+		}), notTheEditors},
+		{"empty binaries", fresh, built(func() []byte {
+			return fragmentItems(structs, structBinary, func(f v1Frame) v1Frame { return f.str("") })
+		}), notTheEditors},
+		{"embeds of an empty object", fresh, built(func() []byte {
+			return fragmentItems(structs, structEmbed, func(f v1Frame) v1Frame { return f.str("{}") })
+		}), notTheEditors},
+		{"formats of an empty object", fresh, built(func() []byte {
+			return fragmentItems(structs, structFormat, func(f v1Frame) v1Frame { return f.str("bold").str("{}") })
+		}), notTheEditors},
+		{"XML elements", fresh, built(func() []byte {
+			return fragmentItems(structs, structType, func(f v1Frame) v1Frame { return f.raw(3).str("paragraph") })
+		}), notTheEditors},
+		{"XML texts", fresh, built(func() []byte {
+			return fragmentItems(structs, structType, func(f v1Frame) v1Frame { return f.raw(6) })
+		}), notTheEditors},
+		{"deleted items", fresh, built(func() []byte {
+			return fragmentItems(structs, structDeleted, func(f v1Frame) v1Frame { return f.uint(1) })
+		}), notTheEditors},
+		{"maxUpdateItems GC structs", fresh, built(func() []byte { return gcFrameFrom(7, maxUpdateItems) }), notTheEditors},
+		{"maxUpdateItems GC structs, into a room holding them", holdingClocks(7, maxUpdateItems), built(func() []byte { return gcFrameFrom(7, maxUpdateItems) }), notTheEditors},
+		{"skips", fresh, built(func() []byte { return skips(structs) }), notTheEditors},
+		{"delete ranges of a client the room has not seen", fresh, built(func() []byte { return deleteRangesFrom(7, structs) }), notTheEditors},
+		{"delete ranges each splitting the room's string", holding(text), everyOther, notTheEditors},
+		{"one character into a room of 20,000 clients", manyClients(structs), oneCharacter, notTheEditors},
+		{"one character into a room of 57,345 clients", manyClients(57_345), oneCharacter, notTheEditors},
+		{"one character into a string of 10,000 deleted items", holding(text, everyOther), atTheEnd, notTheEditors},
+		{"the whole state of a string of 10,000 deleted items into the room holding it", holding(text, everyOther), tombstoned, notTheEditors},
+		{"the heaviest handoff into the room holding it", holding(heaviestState), heaviestState, editorsWhole},
 		{"the heaviest handoff into a fresh room", fresh, heaviestState, editorsWhole},
-		{"a mebibyte of prose handed off into the room holding it", documentHolding(prose), prose, editorsWhole},
+		{"a mebibyte of prose handed off into the room holding it", holding(prose), prose, editorsWhole},
 		{"a mebibyte of prose handed off into a fresh room", fresh, prose, editorsWhole},
-		{"a 64 KiB paste into the heaviest document", documentHolding(heaviestState), paste, editorsOwn},
-		{"a keystroke into the heaviest document", documentHolding(heaviestState), keystroke, editorsOwn},
-		{"a deletion of one character from the heaviest document", documentHolding(heaviestState), deletion, editorsOwn},
+		{"a 64 KiB paste into the heaviest document", holding(heaviestState), paste, editorsOwn},
+		{"a keystroke into the heaviest document", holding(heaviestState), keystroke, editorsOwn},
+		{"a deletion of one character from the heaviest document", holding(heaviestState), deletion, editorsOwn},
 	} {
-		estimate, own := applyHeapEstimate(t, row.into(), row.update)
-		allocated := applyAllocation(t, row.into, row.update)
-		t.Logf("%s: a %d-byte update allocates %d bytes, estimated at %d (%.2f times), its own share %d (%.2f times)",
-			row.name, len(row.update), allocated, estimate, float64(estimate)/float64(allocated), own, float64(own)/float64(allocated))
-		if allocated > estimate {
-			t.Errorf("%s: the apply allocates %d bytes, past its estimate of %d", row.name, allocated, estimate)
-		}
-		if row.editor == editorsWhole && estimate > 3*allocated {
-			t.Errorf("%s: the estimate of %d bytes is more than three times the %d the editor's update allocates", row.name, estimate, allocated)
-		}
-		if row.editor == editorsOwn && own > 3*allocated {
-			t.Errorf("%s: the update's own share of %d bytes is more than three times the %d it allocates", row.name, own, allocated)
-		}
+		t.Run(row.name, func(t *testing.T) {
+			t.Parallel()
+			if !measuredAlone(t) {
+				return
+			}
+			update := row.update(t)
+			into := func() *crdt.Doc { return row.into(t) }
+			estimate, own := applyHeapEstimate(t, into(), update)
+			allocated := applyAllocation(t, into, update)
+			t.Logf("a %d-byte update allocates %d bytes, estimated at %d (%.2f times), its own share %d (%.2f times)",
+				len(update), allocated, estimate, float64(estimate)/float64(allocated), own, float64(own)/float64(allocated))
+			if allocated > estimate {
+				t.Errorf("the apply allocates %d bytes, past its estimate of %d", allocated, estimate)
+			}
+			if row.editor == editorsWhole && estimate > 3*allocated {
+				t.Errorf("the estimate of %d bytes is more than three times the %d the editor's update allocates", estimate, allocated)
+			}
+			if row.editor == editorsOwn && own > 3*allocated {
+				t.Errorf("the update's own share of %d bytes is more than three times the %d it allocates", own, allocated)
+			}
+		})
 	}
-	held, _ := applyHeapEstimate(t, documentHolding(heaviestState)(), heaviestState)
-	handedOver, _ := applyHeapEstimate(t, fresh(), heaviestState)
-	_, pasted := applyHeapEstimate(t, documentHolding(heaviestState)(), paste)
-	_, typed := applyHeapEstimate(t, documentHolding(heaviestState)(), keystroke)
-	t.Logf("the heaviest handoff is estimated at %d bytes into the room holding it, %d into a fresh one; a 64 KiB paste's own share is %d, a keystroke's %d",
-		held, handedOver, pasted, typed)
-	if 10*held > applyHeapBound || 3*handedOver > applyHeapBound {
-		t.Errorf("the heaviest handoff is estimated at %d bytes into the room holding it and %d into a fresh one, past a tenth and a third of the %d-byte bound",
-			held, handedOver, applyHeapBound)
-	}
-	if 3*pasted > unweighedApplyHeapBytes || 400*typed > unweighedApplyHeapBytes {
-		t.Errorf("a 64 KiB paste's own share is %d bytes and a keystroke's %d, past a third and a four-hundredth of the %d unweighed",
-			pasted, typed, unweighedApplyHeapBytes)
+	t.Run("the heaviest document's handoffs, paste and keystroke against the bounds", func(t *testing.T) {
+		t.Parallel()
+		if !measuredAlone(t) {
+			return
+		}
+		held, _ := applyHeapEstimate(t, holding(heaviestState)(t), heaviestState(t))
+		handedOver, _ := applyHeapEstimate(t, fresh(t), heaviestState(t))
+		_, pasted := applyHeapEstimate(t, holding(heaviestState)(t), paste(t))
+		_, typed := applyHeapEstimate(t, holding(heaviestState)(t), keystroke(t))
+		t.Logf("the heaviest handoff is estimated at %d bytes into the room holding it, %d into a fresh one; a 64 KiB paste's own share is %d, a keystroke's %d",
+			held, handedOver, pasted, typed)
+		if 10*held > applyHeapBound || 3*handedOver > applyHeapBound {
+			t.Errorf("the heaviest handoff is estimated at %d bytes into the room holding it and %d into a fresh one, past a tenth and a third of the %d-byte bound",
+				held, handedOver, applyHeapBound)
+		}
+		if 3*pasted > unweighedApplyHeapBytes || 400*typed > unweighedApplyHeapBytes {
+			t.Errorf("a 64 KiB paste's own share is %d bytes and a keystroke's %d, past a third and a four-hundredth of the %d unweighed",
+				pasted, typed, unweighedApplyHeapBytes)
+		}
+	})
+}
+
+// builtOnce is build's result, built by the first call with that call's test and kept for every
+// call after it. TestEveryApplysTransientHeapIsWithinItsEstimate runs each row in a process of
+// its own, so the first call is that row's, and its test is the one a failed build fails.
+func builtOnce[V any](build func(t *testing.T) V) func(t *testing.T) V {
+	var (
+		done  bool
+		value V
+	)
+	return func(t *testing.T) V {
+		t.Helper()
+		if !done {
+			value, done = build(t), true
+		}
+		return value
 	}
 }
 
@@ -1401,13 +1610,14 @@ func TestTheApplyHeapBoundHoldsConcurrentApplies(t *testing.T) {
 }
 
 // An update whose estimate alone passes the whole bound could never apply within it, so the hook
-// answers it with an error and no close, as it answers a walk's refusal, and never applies it: the
-// update measured to allocate 805,307,736 bytes in one apply, a frame at the message floor of null
-// values for a client whose every clock the room already holds, which inserts nothing and adds no
-// struct, so that every other rule admits it.
+// answers it with an error and no close, as it answers a walk's refusal, and never applies it: a
+// frame at the message floor of null values for a client whose every clock the room already holds,
+// which inserts nothing and adds no struct, so that every other rule admits it. One such frame of
+// 25,165,779 bytes, at the floor before it rose to 37 MiB, measured to allocate 805,307,736 bytes
+// in one apply. The room holds a clock for every byte of the floor, more than the frame has values.
 func TestAnUpdateHeavierThanTheApplyHeapBoundIsNeverApplied(t *testing.T) {
 	service, room, replica := peerUpdateRoom(t, "# Title\n\nOne paragraph of ordinary prose.\n", 0)
-	if err := crdt.ApplyUpdateV1(room, newV1Frame(1).group(1, 7, 0).gc(32<<20).noDeletes(), nil); err != nil {
+	if err := crdt.ApplyUpdateV1(room, newV1Frame(1).group(1, 7, 0).gc(maxMessageBytes).noDeletes(), nil); err != nil {
 		t.Fatal(err)
 	}
 	update := marginValues(maxMessageBytes-64, nil)

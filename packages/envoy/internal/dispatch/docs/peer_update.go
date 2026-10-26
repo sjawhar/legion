@@ -99,18 +99,26 @@ const maxPeerByteCreep = 64 << 10
 // this floor that the hook refuses costs the pod the frame itself and nothing proportional to the
 // structs it carries.
 //
-// The number is four times the largest frame the editor sends, which is a browser handing over the
-// whole live state of the heaviest document the server's own writes can leave: its markdown at
-// pmdoc.MaxDocumentBytes making pmdoc.MaxDocumentElements, its margin at maxMarginBytes and its
-// anchor marks at maxAnchorBytes. That frame measured 5,360,879 bytes, well under the 64 MiB ygo
-// allowed before, past which this design would have had to come back to the architect - the
-// markdown alone is 3,160,622 of it, since a document at the element bound carries 16,384 blocks
-// and the block id of each - so the floor is four times the measured frame rounded up to the next
-// mebibyte, 6 MiB, which is 24 MiB. TestTheHeaviestWholeStateFrameFitsTheMessageFloor builds that
-// document and fails once its frame passes a quarter of this floor, since a frame over the floor is
-// closed by the websocket library with a code the editor reconnects on, a loop no person's edit may
-// ever reach.
-const maxMessageBytes = 24 << 20
+// The number is four times the largest frame the editor sends that this has measured, which is a
+// browser handing over a document's whole live state. The heaviest document the server's own writes
+// can leave - its markdown at pmdoc.MaxDocumentBytes making pmdoc.MaxDocumentElements, its margin
+// at maxMarginBytes and its anchor marks at maxAnchorBytes - is a frame of 5,360,879 bytes, the
+// markdown alone 3,160,622 of it, since a document at the element bound carries 16,384 blocks and
+// the block id of each. A browser can take that document further: the hook admits its inserts at
+// the bound until the room's rendering has crept maxPeerByteCreep past it, and the document already
+// renders 16,383 bytes into that, a blank line between blocks where its markdown had a line break.
+// Grown the rest of the way through the hook, in updates of the largest insert it admits at the
+// bound, of the densest markdown there is - empty items of alternating bullet lists, each list,
+// item and paragraph with the block id a browser's write mints, 20 structs and about 643 bytes of
+// frame for each 8 bytes rendered - its frame measured 9,577,606 bytes. Four times that,
+// 38,310,424, rounded up to the next mebibyte is 37 MiB, under the 64 MiB ygo allowed before, past
+// which this design would have had to come back to the architect.
+// TestTheHeaviestWholeStateFrameFitsTheMessageFloor and
+// TestTheHeaviestWholeStateFrameABrowserCanGrowFitsTheMessageFloor build the two documents and fail
+// once either frame passes a quarter of this floor, since a frame over the floor is closed by the
+// websocket library with a code the editor reconnects on, a loop the editor's handoff must never
+// enter.
+const maxMessageBytes = 37 << 20
 
 // weighPeerUpdate is ygo's Server.OnPeerUpdate: the room hands it every update and whole-state
 // message a read-write browser sends, with the apply that would put it in the room, and a read-only
@@ -699,10 +707,15 @@ const goMemoryLimitBytes = 4 << 30 * 9 / 10
 // for a client whose every clock the room held allocated 805,307,736 bytes in one apply, though it
 // inserted nothing and added no struct. Measured on 2026-10-26
 // (TestEveryApplysTransientHeapIsWithinItsEstimate), the 5,360,879-byte handoff of the heaviest
-// document the message floor is measured on is estimated at 71,356,658 bytes into the room
+// document the server's own writes can leave is estimated at 71,356,658 bytes into the room
 // holding it, against the 33,408,936 it allocates there, so ten such handoffs apply at once, and
-// at 212,118,103 into a fresh room, against 98,003,608; that frame of nulls is estimated at
-// 1,660,944,870 bytes, past the whole bound, and refused (errApplyTooHeavy).
+// at 212,118,103 into a fresh room, against 98,003,880. The 9,577,606-byte handoff of that
+// document grown through the creep allowance (maxMessageBytes,
+// TestTheHeaviestWholeStateFrameABrowserCanGrowFitsTheMessageFloor) is estimated at 157,797,184
+// into the room holding it, so four apply at once, and at 452,530,134 into a fresh room, one at a
+// time. That frame of nulls is estimated at 1,660,944,870 bytes, and one at the message floor at
+// 2,560,625,638 (TestAnUpdateHeavierThanTheApplyHeapBoundIsNeverApplied), each past the whole
+// bound, and refused (errApplyTooHeavy).
 const applyHeapBound = (goMemoryLimitBytes - roomBudgetBytes - documentReadBudget) / 2
 
 // unweighedApplyHeapBytes is the update's own share of its estimate (peerWeighing.ownApplyHeap)
@@ -753,8 +766,8 @@ func (h *applyHeaps) hold(heap uint64) (release func()) {
 //     for every deleted item before it compacts them (encodeV1Locked and buildDeleteSet,
 //     crdt/update.go:177-217 and :448-461): a price for every deleted item of the room, of which
 //     it holds no more than its structs and the structs the update can add (peerWeighing.added).
-//     11,319,808 bytes measured for a one-character keystroke into a string of 100,000 deleted
-//     items, against 2,240 into one of none.
+//     875,008 bytes measured for a one-character keystroke into a string of 10,000 deleted items
+//     among 10,000 live ones, against 2,328 into one of 20,000 live items and none deleted.
 //
 // What it leaves out is what depends on the shape of the room's lists, which no walk of the update
 // can see: an item naming an origin inside a run and no right origin makes ygo's integrate scan the
@@ -784,7 +797,7 @@ func (w *peerWeighing) ownApplyHeap(frame int) uint64 {
 
 // The estimate's factors, in bytes, each set with headroom from what
 // TestEveryApplysTransientHeapIsWithinItsEstimate measures (2026-10-26: bytes one apply allocates
-// into a document with an update observer, per struct of a frame of 200,000 unless said, decode
+// into a document with an update observer, per struct of a frame of 20,000 unless said, decode
 // and integration together unless said); that test holds the estimate over every measurement.
 // What each covers is what ygo's decode allocates (decodeItem, crdt/update.go:794-966;
 // decodeContent, :968-1110; decodeTypeContent, :1112-1177; decodeDeleteSet, :1179-1217), and
@@ -797,13 +810,13 @@ const (
 	// applyHeapPerRoomClient is each client in the room's state vector, which ygo's apply copies
 	// into maps sized for it. A map takes slots for its size past 8/7 rounded up to a power of
 	// two, so a room of 57,345 clients, the least that rounds to 131,072 slots, pays the most a
-	// client: 19,220,952 bytes measured for a keystroke into such a room, each client holding one
-	// GC struct, 335 a client with the observers' encode of that struct as a deleted item
-	// (applyHeapPerRoomStruct), against 263 a client in a room of 200,000.
+	// client: 19,356,120 bytes measured for a keystroke into such a room, each client holding one
+	// GC struct, 338 a client with the observers' encode of that struct as a deleted item
+	// (applyHeapPerRoomStruct), against 299 a client in a room of 20,000.
 	applyHeapPerRoomClient = 160
 	// applyHeapPerRoomStruct is each deleted item of the room, bounded by each struct the room
-	// holds, at every apply: 11,319,808 bytes measured for a keystroke into a string of 100,000
-	// deleted items among 100,000 live ones, 113 a deleted item.
+	// holds, at every apply: 875,008 bytes measured for a keystroke into a string of 10,000
+	// deleted items among 10,000 live ones, 88 a deleted item.
 	applyHeapPerRoomStruct = 256
 	// applyHeapPerFrameByte is each byte of the frame: a string ygo copies out of it is one
 	// allocation of its bytes rounded up to a size class, at most twice them for a short one (a
@@ -812,15 +825,15 @@ const (
 	// applyHeapPerIntegratedFrameByte is each byte of the frame of an update that integrates a
 	// struct, for the observers' encode of what it integrated: a buffer grown by appending, whose
 	// allocations sum to about five times what it holds once it grows by a quarter at a time, and
-	// the copy handed to the observers. 28,356,168 bytes measured for 2,200,018 bytes of Any
-	// strings of 9 bytes in one struct, 12.9 a byte, and 12,602,120 for one string of 4 MiB, 3.
+	// the copy handed to the observers. 2,427,728 bytes measured for 220,018 bytes of Any strings
+	// of 9 bytes in one struct, 11.0 a byte, and 1,592,072 for one string of 512 KiB, 3.
 	applyHeapPerIntegratedFrameByte = 7
 	// applyHeapPerRun is a GC struct or a skip: an Item and its content. 120 bytes measured for
 	// each of maxUpdateItems GC structs into a room holding them, which decodes them and
 	// integrates nothing, and for each skip.
 	applyHeapPerRun = 192
 	// applyHeapPerItem is an item of any content: the Item, its origins and its content's own
-	// struct. 184 bytes measured for a margin entry of one null value into a room holding it.
+	// struct. 182 bytes measured for a margin entry of one null value into a room holding it.
 	applyHeapPerItem = 192
 	// applyHeapPerKey is an item that names a map key: the key.
 	applyHeapPerKey = 64
@@ -830,21 +843,21 @@ const (
 	// applyHeapPerNewStruct is a struct the update integrates: its place in the store and its
 	// parent, the splits of the items its origins fall inside (crdt/update.go:659-661,
 	// crdt/item.go:83-106), and the observers' encode of it. 218 bytes measured for a GC struct,
-	// 357 for a one-character string naming both origins, 661 for one splitting the room's string
-	// at both, 538 for a margin entry of one null value.
+	// 327 for a one-character string naming both origins, 563 for one splitting the room's string
+	// at both, 526 for a margin entry of one null value.
 	applyHeapPerNewStruct = 384
 	// applyHeapPerNewType is an integrated item of a nested type beyond applyHeapPerNewStruct: the
-	// observers' encode of its type and name. 769 bytes measured for an XML element, 614 for an
+	// observers' encode of its type and name. 749 bytes measured for an XML element, 592 for an
 	// XML text.
 	applyHeapPerNewType = 160
 	// applyHeapPerDeleteRange is a range of the delete set: its decoded range, the splits of the
-	// items it starts and ends inside, and its place in the transaction's delete set. 786 bytes
-	// measured for each of 100,000 ranges splitting the room's string, the room's deleted items
-	// included, and 138 for a range of a client the room has not seen.
+	// items it starts and ends inside, and its place in the transaction's delete set. 689 bytes
+	// measured for each of 10,000 ranges splitting the room's string, the room's deleted items
+	// included, and 129 for a range of a client the room has not seen.
 	applyHeapPerDeleteRange = 768
 	// applyHeapPerAnyValue is each lib0 Any value, at every depth (anyValuesApplyHeap): its slot in
 	// the item's values and their normalised copy, a boxed scalar or string header, and the copy a
-	// partly held item's split makes of its values. 38,266,456 bytes measured for a million null
+	// partly held item's split makes of its values. 3,835,480 bytes measured for 100,000 null
 	// values in one struct, 38 a value.
 	applyHeapPerAnyValue = 64
 	// applyHeapPerNewAnyValue is each Any value of an integrated item, as the observers' encode
@@ -853,39 +866,39 @@ const (
 	// applyHeapPerAnyArray is each Any array beyond its values: its boxed slice header.
 	applyHeapPerAnyArray = 32
 	// applyHeapPerAnyMap is each Any map: its header and its first group of slots, which a map of
-	// one entry allocates whole. 393 bytes measured for a map of one entry with its null value,
+	// one entry allocates whole. 392 bytes measured for a map of one entry with its null value,
 	// the densest Any there is.
 	applyHeapPerAnyMap = 384
 	// applyHeapPerAnyMapEntry is each entry of an Any map past the map's first group of eight: its
-	// slots, at a load as low as a map just past a growth leaves them. 123 bytes an entry
-	// measured for maps of 100,000 entries, with each entry's key and value.
+	// slots, at a load as low as a map just past a growth leaves them. 124 bytes an entry
+	// measured for maps of 10,000 entries, with each entry's key and value.
 	applyHeapPerAnyMapEntry = 64
 	// applyHeapPerJSONText is each JSON text ygo decodes with encoding/json (jsonTextApplyHeap):
-	// its slot in the item's values and what encoding/json allocates for any text. 79 bytes
+	// its slot in the item's values and what encoding/json allocates for any text. 80 bytes
 	// measured for a null text.
 	applyHeapPerJSONText = 64
 	// applyHeapPerNewJSONText is each JSON value of an integrated item, which the observers'
 	// encode writes as JSON text again with an encoder of its own (fmtValToJSON,
-	// crdt/update.go:1243-1264). 300 bytes measured for a number, 711 for a map read from legacy
+	// crdt/update.go:1243-1264). 298 bytes measured for a number, 705 for a map read from legacy
 	// lib0 Any.
 	applyHeapPerNewJSONText = 384
 	// applyHeapPerJSONContainer is each JSON object or array: an object's map with its first
-	// group. 760 bytes measured for an object of one entry, 842 for an object of one empty object.
+	// group. 763 bytes measured for an object of one entry, 835 for an object of one empty object.
 	applyHeapPerJSONContainer = 384
 	// applyHeapPerJSONMember is each separator of a JSON text, a ',' or a ':', which bounds its
 	// members: an array's element in a slice grown by appending, an object's entry in a map grown
-	// by inserting. 134 bytes measured for each element of arrays of 100,000 numbers.
+	// by inserting. 112 bytes measured for each element of arrays of 10,000 numbers.
 	applyHeapPerJSONMember = 128
 	// applyHeapPerNewJSONMember is each separator of an integrated JSON text, a member the
-	// observers' encode writes again, keys sorted and each written through encoding/json. 272
-	// bytes measured for each entry of objects of 100,000 entries.
+	// observers' encode writes again, keys sorted and each written through encoding/json. 290
+	// bytes measured for each entry of objects of 10,000 entries.
 	applyHeapPerNewJSONMember = 128
 	// applyHeapPerJSONByte is each byte of JSON text beyond applyHeapPerFrameByte: ygo copies the
 	// text into a string and again into the bytes encoding/json reads (fmtValFromJSON,
 	// crdt/update.go:1296-1305), and the strings it decodes copy it once more.
 	applyHeapPerJSONByte = 2
 	// applyHeapPerNewJSONByte is each byte of an integrated JSON text beyond
-	// applyHeapPerIntegratedFrameByte, which the observers' encode escapes and copies again. 12.2
+	// applyHeapPerIntegratedFrameByte, which the observers' encode escapes and copies again. 11.4
 	// bytes a byte measured for strings of 1,000 escapes.
 	applyHeapPerNewJSONByte = 6
 )

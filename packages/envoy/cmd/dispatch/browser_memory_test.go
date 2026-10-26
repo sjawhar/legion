@@ -39,7 +39,7 @@ const (
 	// These mirror constants of internal/dispatch/docs, which this package cannot read:
 	// roomBudgetBytes (room_budget.go:36), bytesOfHeapAnElement (:48), roomCopies (:438),
 	// maxPeerInsertAtTheBound (peer_update.go:87), maxPeerByteCreep (:92) and maxMessageBytes
-	// (:113). No drive takes a mirror on trust. The server names its budget and what each refused
+	// (:121). No drive takes a mirror on trust. The server names its budget and what each refused
 	// document needs in the line it logs for a refusal (refuseOverRoomBudget), and the budget
 	// drives fail unless those are these numbers; the byte drive fails unless a run of small
 	// inserts is refused exactly once the room is the creep past the bound, a paste past the
@@ -50,7 +50,7 @@ const (
 	roomCopiesForTest              = 2
 	maxPeerInsertAtTheBoundForTest = 8 << 10
 	maxPeerByteCreepForTest        = 64 << 10
-	maxMessageBytesForTest         = 24 << 20
+	maxMessageBytesForTest         = 37 << 20
 
 	// roomCountIntervalForTest mirrors roomCountInterval (internal/dispatch/docs/tree.go:466), the
 	// least time between two counts of one room's elements, which is how stale a room's charge
@@ -62,7 +62,7 @@ const (
 )
 
 // One browser's update is bounded by bytes, over a real document socket of a real server
-// (Service.weighPeerUpdate, internal/dispatch/docs/peer_update.go:173-235): an update that would
+// (Service.weighPeerUpdate, internal/dispatch/docs/peer_update.go:181-243): an update that would
 // take a document past the bound is refused with 4413 and DOC_TOO_LARGE, and the document is kept;
 // small updates carry a document over the bound only by the creep they are allowed; a document at
 // or over the bound can be opened, handed back whole, edited and shortened; an edit under it
