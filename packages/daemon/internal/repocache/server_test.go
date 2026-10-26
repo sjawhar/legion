@@ -623,6 +623,90 @@ func TestAStalledTarReaderDoesNotHoldTheNextFetch(t *testing.T) {
 	}
 }
 
+// Past maxStreams streams a tar waits for one to end: it gets nothing while the stream ahead of it
+// is sent, a waiter whose request ends first gives up having sent nothing and holding no turn, and
+// the next waiter gets the whole tar once the stream ahead ends.
+func TestATarPastTheStreamBoundWaitsForAStreamToEnd(t *testing.T) {
+	defer func(was int) { maxStreams = was }(maxStreams)
+	maxStreams = 1
+	remote := newRemote(t)
+	large := make([]byte, 24<<20)
+	if _, err := rand.Read(large); err != nil {
+		t.Fatal(err)
+	}
+	work := filepath.Join(t.TempDir(), "work")
+	git(t, filepath.Dir(work), "clone", "--quiet", remote, work)
+	if err := os.WriteFile(filepath.Join(work, "large.bin"), large, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	git(t, work, "add", ".")
+	git(t, work, "commit", "--quiet", "-m", "large")
+	git(t, work, "push", "--quiet", "origin", "HEAD:main")
+	head := git(t, work, "rev-parse", "HEAD")
+	c := start(t, testOptions(t, newTestRunner(t, remote)))
+	c.waitFor(t, "at the large commit", func(_ int, h Health) bool { return h.Head == head })
+
+	ahead := c.get(t, "/tar", c.bearer(t))
+	defer ahead.Body.Close()
+	first := make([]byte, 4096)
+	if _, err := io.ReadFull(ahead.Body, first); err != nil {
+		t.Fatalf("read the first tar's first bytes: %v", err)
+	}
+
+	ask := func(ctx context.Context) (*http.Response, error) {
+		request, err := http.NewRequestWithContext(ctx, http.MethodGet, c.url+"/tar", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		request.Header.Set("Authorization", "Bearer "+c.bearer(t))
+		return http.DefaultClient.Do(request)
+	}
+	impatient, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	if response, err := ask(impatient); err == nil {
+		response.Body.Close()
+		t.Fatalf("a tar past the bound was answered %s while the stream ahead of it was sent", response.Status)
+	}
+
+	answered := make(chan *http.Response, 1)
+	go func() {
+		response, err := ask(context.Background())
+		if err != nil {
+			t.Errorf("the waiting tar: %v", err)
+			close(answered)
+			return
+		}
+		answered <- response
+	}()
+	select {
+	case response := <-answered:
+		if response != nil {
+			response.Body.Close()
+		}
+		t.Fatal("a tar past the bound was answered while the stream ahead of it was sent")
+	case <-time.After(300 * time.Millisecond):
+	}
+	unpacked, _ := unpack(t, io.MultiReader(bytes.NewReader(first), ahead.Body))
+	indexed(t, unpacked)
+	ahead.Body.Close()
+	select {
+	case response := <-answered:
+		if response == nil {
+			t.FailNow()
+		}
+		defer response.Body.Close()
+		if response.StatusCode != http.StatusOK {
+			t.Fatalf("the waiting tar was answered %s, want 200 once the stream ahead ended", response.Status)
+		}
+		next, _ := unpack(t, response.Body)
+		if got := git(t, next, "--git-dir="+next, "rev-parse", "refs/heads/main"); got != head {
+			t.Errorf("the waiting tar's main is %s, want %s", got, head)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("the waiting tar was not answered within 30s of the stream ahead ending")
+	}
+}
+
 // The next tick's fetch brings what the remote gained, and /healthz says so; every fetch reads the
 // token file again, so a token the Secret's projection rotated is the one the next fetch presents.
 func TestEachTickFetchesWithTheTokenFileAsItIsThen(t *testing.T) {
@@ -1228,7 +1312,7 @@ func TestASnapshotTakesThePacksARepackLeft(t *testing.T) {
 	git(t, clone, "--git-dir="+clone, "config", "fetch.unpackLimit", "1")
 	advance(t, remote, "second pack")
 	git(t, clone, "--git-dir="+clone, "fetch", "--quiet", remote, "+refs/heads/*:refs/heads/*")
-	c := &cache{opts: Options{Log: func(string) {}}, dir: clone}
+	c := newCache(Options{Log: func(string) {}}, clone)
 	calls := 0
 	snapshotWalked = func() {
 		calls++
@@ -1285,7 +1369,7 @@ func cacheOn(t *testing.T, opts Options) *cache {
 	if err != nil {
 		t.Fatal(err)
 	}
-	c := &cache{opts: opts, dir: dir}
+	c := newCache(opts, dir)
 	c.health.Store(&Health{Repo: opts.Repo.String()})
 	return c
 }

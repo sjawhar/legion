@@ -2850,7 +2850,14 @@ dies (`git remote-https`, `git index-pack`). It serves, on port 8418:
 - `GET /tar`: the clone's refs and packs as a tar stream — `HEAD`, `packed-refs`, `refs/`,
   `objects/pack/pack-<id>.pack` and the `objects/pack/pack-<id>.idx` git reads each pack through,
   no loose object or configuration — which waits for a fetch under way to finish, so it never
-  streams a half-written ref or pack, and waits for no repack.
+  streams a half-written ref or pack, and waits for no repack. At most 32 streams are sent at once
+  (`maxStreams`, `internal/repocache/server.go`); a request past them waits, first come first
+  served, for one to end, within its own deadline. Streams share the cache pod's sending rate
+  evenly, so without the bound a large launch slows every stream at once until none finishes: on
+  2026-10-26 one cache sent a 2.1 GB clone at about 400 MB/s in all over 290 streams, about 29
+  minutes before any reached its last byte, past the fetch's 30-minute `FetchTimeout`, and every
+  fetch failed and started over. Bounded, each stream takes its share among 32 and the queue
+  drains at the same total rate.
 
 `/tar` answers only a request whose `Authorization: Bearer` is the cache's own token; any other is
 401 and names nothing. `/healthz` and `/tar` name their repository in a `Legion-Repository` header
@@ -2943,8 +2950,13 @@ An issue pod's launch makes its repository's cache when there is none yet, and t
 the cache of each repository it serves at boot and on every orphan sweep after it, once a minute:
 a missing cache is created (its Sandbox `Suspended`, then its Secret owned by that Sandbox, then
 its pod template and `Running`), and a cache whose pod runs another image than the daemon's, has
-ended, or was left `Suspended` gets a new pod while its Sandbox and volume stay, so a new release
-costs a pod, not a clone. A launch whose cache cannot be made fails, naming why. The cache of a
+ended, or was left `Suspended`, or whose Sandbox's pod template reserves other than
+`runtime.kubernetes.repository_cache.resources` now says, gets a new pod while its Sandbox and
+volume stay, so a new release or a new reservation costs a pod, not a clone. The reservation is
+read from the Sandbox's pod template, never from the pod, since GKE Autopilot rewrites a pod's
+requirements at admission; the replacement ends every tar the cache was streaming, so the fetches
+reading them fail and their pods are made again. A launch whose cache cannot be made fails,
+naming why. The cache of a
 repository the mapping no longer names is annotated `legion.dev/cache-unmapped-at` at the sweep
 that finds it so, kept for `runtime.kubernetes.repository_cache.retain_hours` (168 by default), and
 then deleted with its volume and Secret; mapped again before that, it loses the annotation and

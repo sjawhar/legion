@@ -18,6 +18,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -411,17 +412,20 @@ func (r *Runtime) cacheURL(name string) string {
 }
 
 // reconcileCachePod makes s's pod (again) when it must be: s is Suspended (a fresh create, or one a
-// failed earlier run left Suspended), or the pod it owns runs an image other than the runtime's
-// (imageDrift) or has ended (terminal: evicted, say). It then suspends s when it is not already,
-// waits the old pod out (awaitPodGone), and sets the pod template, on the runtime's image, and
-// Running in one patch, as relaunch does. The Sandbox and its volume are kept through every
-// replacement: a drifted pod costs a new pod, not a new clone. A Running Sandbox whose pod is live
-// on the right image, or that has no pod yet — the controller makes one — is left alone.
+// failed earlier run left Suspended), s's pod template reserves other than the configuration's
+// runtime.kubernetes.repository_cache.resources (templateResized: the operator changed them), or
+// the pod it owns runs an image other than the runtime's (imageDrift) or has ended (terminal:
+// evicted, say). It then suspends s when it is not already, waits the old pod out (awaitPodGone),
+// and sets the pod template, on the runtime's image and reservation, and Running in one patch, as
+// relaunch does. The Sandbox and its volume are kept through every replacement: a drifted pod
+// costs a new pod, not a new clone. A Running Sandbox whose template reserves what the
+// configuration does, and whose pod is live on the right image or not made yet — the controller
+// makes one — is left alone.
 func (r *Runtime) reconcileCachePod(ctx context.Context, s *sandbox, repo ghrepo.Repository) error {
 	pod := r.storedPod(s.Name)
 	owned := ownedBy(pod, s.UID) && pod.DeletionTimestamp == nil
 	_, drifted := imageDrift(pod, r.image)
-	if s.mode() != modeSuspended && (!owned || (!drifted && !terminal(pod))) {
+	if s.mode() != modeSuspended && !templateResized(s, r.cacheConfig.Resources) && (!owned || (!drifted && !terminal(pod))) {
 		return nil
 	}
 	if s.mode() != modeSuspended {
@@ -440,6 +444,19 @@ func (r *Runtime) reconcileCachePod(ctx context.Context, s *sandbox, repo ghrepo
 	}
 	r.log.Info("sandbox runtime: repository cache pod started", "sandbox", s.Name, "repo", repo.String(), "image", r.image)
 	return nil
+}
+
+// templateResized is whether s's pod template gives the cache container requirements other than
+// want, quantity by quantity. It reads the template, never the pod: GKE Autopilot rewrites a pod's
+// requirements at admission (an ephemeral-storage limit down to its request), so a pod need not
+// match the template it was made from.
+func templateResized(s *sandbox, want corev1.ResourceRequirements) bool {
+	for _, c := range s.Spec.PodTemplate.Spec.Containers {
+		if c.Name == cacheContainer {
+			return !equality.Semantic.DeepEqual(c.Resources, want)
+		}
+	}
+	return true
 }
 
 // The states of a repository cache, as legion state shows them and a failed fetch names them.
