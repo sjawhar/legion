@@ -1,6 +1,7 @@
 import { expect, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { MemoryRouter } from "react-router-dom";
 
 import { api } from "../../api/client";
 import type { Agent, AskFollower, Subscriber } from "../../api/types";
@@ -44,13 +45,19 @@ function renderRecipients({
   removeFollower = async () => {},
   subscribers = [],
 }: {
-  agents?: Agent[];
+  /** An Error rejects the agent registry read, as an unreachable Envoy listener does. */
+  agents?: Agent[] | Error;
   props?: Partial<AskRecipientsProps>;
   removeFollower?: (askId: string, sessionId: string) => Promise<void>;
   /** An Error rejects the subscribers fetch, as an unreachable Envoy listener does. */
   subscribers?: Subscriber[] | Error;
 } = {}) {
-  const listAgents = spyOn(api, "listAgents").mockResolvedValue(agents);
+  const listAgents = spyOn(api, "listAgents");
+  if (agents instanceof Error) {
+    listAgents.mockRejectedValue(agents);
+  } else {
+    listAgents.mockResolvedValue(agents);
+  }
   const getIssueSubscribers = spyOn(api, "getIssueSubscribers");
   const getArtifactSubscribers = spyOn(api, "getArtifactSubscribers");
   if (subscribers instanceof Error) {
@@ -64,20 +71,23 @@ function renderRecipients({
     defaultOptions: { mutations: { retry: false }, queries: { retry: false } },
   });
   queryClient.setQueryData(["whoami"], { kind: "user", login: "alice" });
+  // Each recipient is an `AgentName`, whose live link needs a router.
   const view = render(
-    <QueryClientProvider client={queryClient}>
-      <AskRecipients
-        askId="ask-1"
-        claimant={null}
-        followers={followers}
-        owner={{ artifact_id: null, issue_key: "CORE-1" }}
-        removeFollower={removeFollower}
-        route={null}
-        routeHolder={null}
-        routeStatus={null}
-        {...props}
-      />
-    </QueryClientProvider>
+    <MemoryRouter>
+      <QueryClientProvider client={queryClient}>
+        <AskRecipients
+          askId="ask-1"
+          claimant={null}
+          followers={followers}
+          owner={{ artifact_id: null, issue_key: "CORE-1" }}
+          removeFollower={removeFollower}
+          route={null}
+          routeHolder={null}
+          routeStatus={null}
+          {...props}
+        />
+      </QueryClientProvider>
+    </MemoryRouter>
   );
   // The routing list is folded at rest; every assertion below is about what it holds, so the
   // harness opens it once and each test reads the open list.
@@ -101,18 +111,20 @@ test("AskRecipients folds its routing list at rest and still names the count", a
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   queryClient.setQueryData(["whoami"], { kind: "user", login: "alice" });
   const view = render(
-    <QueryClientProvider client={queryClient}>
-      <AskRecipients
-        askId="ask-1"
-        claimant={null}
-        followers={followers}
-        owner={{ artifact_id: null, issue_key: "CORE-1" }}
-        removeFollower={async () => {}}
-        route={null}
-        routeHolder={null}
-        routeStatus={null}
-      />
-    </QueryClientProvider>
+    <MemoryRouter>
+      <QueryClientProvider client={queryClient}>
+        <AskRecipients
+          askId="ask-1"
+          claimant={null}
+          followers={followers}
+          owner={{ artifact_id: null, issue_key: "CORE-1" }}
+          removeFollower={async () => {}}
+          route={null}
+          routeHolder={null}
+          routeStatus={null}
+        />
+      </QueryClientProvider>
+    </MemoryRouter>
   );
 
   try {
@@ -130,18 +142,28 @@ test("AskRecipients folds its routing list at rest and still names the count", a
   }
 });
 
-test("AskRecipients names live followers by title and offline ones by shortened id", async () => {
+test("AskRecipients names followers by registry title, else by shortened id, with the registry's running state and a live link", async () => {
   const page = renderRecipients({ agents: [agent("0123456789abcdef", "Planner")] });
 
   try {
     const section = screen.getByRole("region", { name: "Recipients" });
     expect(within(section).getByRole("button", { name: /^Reaches/ }).textContent).toBe("Reaches 2");
     const planner = await within(section).findByText("Planner");
-    expect(planner.getAttribute("title")).toBe("0123456789abcdef");
+    expect(planner.closest("[title]")?.getAttribute("title")).toBe("0123456789abcdef");
     const items = within(section).getAllByRole("listitem");
-    expect(within(items[0] as HTMLElement).getByTitle("Live")).toBeTruthy();
-    expect(within(items[1] as HTMLElement).getByText("session:fedcba98…")).toBeTruthy();
-    expect(within(items[1] as HTMLElement).getByTitle("Not live")).toBeTruthy();
+    const running = items[0]?.querySelector('[data-agent-name="0123456789abcdef"]');
+    const stopped = items[1]?.querySelector('[data-agent-name="fedcba9876543210"]');
+    if (!(running instanceof HTMLElement) || !(stopped instanceof HTMLElement)) {
+      throw new Error("a follower is not drawn by AgentName");
+    }
+    await waitFor(() => expect(running.dataset.agentState).toBe("running"));
+    expect(within(running).getByRole("img", { name: "Running" })).toBeTruthy();
+    expect(within(running).getByRole("link", { name: "Planner" }).getAttribute("href")).toBe(
+      "/agents/0123456789abcdef/live"
+    );
+    expect(stopped.dataset.agentState).toBe("not-running");
+    expect(within(stopped).getByRole("img", { name: "Not running" })).toBeTruthy();
+    expect(within(stopped).getByRole("link", { name: "session:fedcba98…" })).toBeTruthy();
   } finally {
     page.unmount();
   }
@@ -252,14 +274,16 @@ test("AskRecipients adds the issue's subscribers once each, removes one through 
     );
     expect(page.getIssueSubscribers).toHaveBeenCalledWith("CORE-1");
     expect(page.getArtifactSubscribers).not.toHaveBeenCalled();
-    expect(within(section).getAllByTitle("0123456789abcdef")).toHaveLength(1);
+    expect(section.querySelectorAll('[data-agent-name="0123456789abcdef"]')).toHaveLength(1);
 
     const viaIssue = within(section).getByRole("list", { name: "Via issue subscription" });
     const rows = within(viaIssue).getAllByRole("listitem");
     expect(rows).toHaveLength(2);
     const po = rows[0] as HTMLElement;
     const wide = rows[1] as HTMLElement;
-    expect(within(po).getByText("Platform PO").getAttribute("title")).toBe("b0b0b0b0b0b0b0b0");
+    expect(within(po).getByText("Platform PO").closest("[title]")?.getAttribute("title")).toBe(
+      "b0b0b0b0b0b0b0b0"
+    );
     expect(within(wide).getByText("via notifications.dispatch.>")).toBeTruthy();
     expect(within(wide).queryByRole("button")).toBeNull();
 
@@ -357,26 +381,29 @@ test("AskRecipients never asks for subscribers unless the signed-in principal is
     defaultOptions: { mutations: { retry: false }, queries: { retry: false } },
   });
   const view = render(
-    <QueryClientProvider client={queryClient}>
-      <AskRecipients
-        askId="ask-1"
-        claimant={null}
-        followers={followers}
-        owner={{ artifact_id: null, issue_key: "CORE-1" }}
-        route={null}
-        routeHolder={null}
-        routeStatus={null}
-      />
-    </QueryClientProvider>
+    <MemoryRouter>
+      <QueryClientProvider client={queryClient}>
+        <AskRecipients
+          askId="ask-1"
+          claimant={null}
+          followers={followers}
+          owner={{ artifact_id: null, issue_key: "CORE-1" }}
+          route={null}
+          routeHolder={null}
+          routeStatus={null}
+        />
+      </QueryClientProvider>
+    </MemoryRouter>
   );
 
   try {
-    expect(
-      within(screen.getByRole("region", { name: "Recipients" })).getByRole("button", {
-        name: /^Reaches/,
-      }).textContent
-    ).toBe("Reaches 2");
-    // The agents fetch the same render starts has settled; the human-only one never began.
+    const toggle = within(screen.getByRole("region", { name: "Recipients" })).getByRole("button", {
+      name: /^Reaches/,
+    });
+    expect(toggle.textContent).toBe("Reaches 2");
+    // Opening the list mounts the followers' names, which read the agent registry; once that read
+    // has begun, the card's fetches have all started, and the human-only one is not among them.
+    fireEvent.click(toggle);
     await waitFor(() => expect(listAgents).toHaveBeenCalled());
     expect(getIssueSubscribers).not.toHaveBeenCalled();
   } finally {
@@ -394,7 +421,7 @@ function reachesText(section: HTMLElement): string | null {
   return within(section).getByRole("button", { name: /^Reaches/ }).textContent;
 }
 
-test("AskRecipients lists the issue's claimant via claim, with no control", async () => {
+test("AskRecipients lists the issue's claimant via claim, drawn by AgentName, with no control", async () => {
   const page = renderRecipients({
     agents: [agent(claimant, "Implementer")],
     props: { claimant },
@@ -405,9 +432,14 @@ test("AskRecipients lists the issue's claimant via claim, with no control", asyn
     expect(reachesText(section)).toBe("Reaches 3");
     const issueRows = within(section).getByRole("list", { name: "Via claim or route" });
     const row = within(issueRows).getByRole("listitem");
-    expect((await within(row).findByText("Implementer")).getAttribute("title")).toBe(claimant);
+    expect(
+      (await within(row).findByText("Implementer")).closest("[title]")?.getAttribute("title")
+    ).toBe(claimant);
     expect(within(row).getByText("via claim")).toBeTruthy();
-    expect(within(row).getByTitle("Live")).toBeTruthy();
+    expect(await within(row).findByRole("img", { name: "Running" })).toBeTruthy();
+    expect(within(row).getByRole("link", { name: "Implementer" }).getAttribute("href")).toBe(
+      `/agents/${claimant}/live`
+    );
     expect(within(row).queryByRole("button")).toBeNull();
   } finally {
     page.unmount();
@@ -420,7 +452,7 @@ test("AskRecipients lists a claimant that already follows once, as a follower", 
   try {
     const section = screen.getByRole("region", { name: "Recipients" });
     expect(reachesText(section)).toBe("Reaches 2");
-    expect(within(section).getAllByTitle("0123456789abcdef")).toHaveLength(1);
+    expect(section.querySelectorAll('[data-agent-name="0123456789abcdef"]')).toHaveLength(1);
     expect(within(section).queryByRole("list", { name: "Via claim or route" })).toBeNull();
     expect(within(section).queryByText("via claim")).toBeNull();
   } finally {
@@ -428,7 +460,7 @@ test("AskRecipients lists a claimant that already follows once, as a follower", 
   }
 });
 
-test("AskRecipients lists a session route's session via route", () => {
+test("AskRecipients lists a session route's session via route", async () => {
   const page = renderRecipients({ props: { route: `session:${routed}` } });
 
   try {
@@ -437,9 +469,11 @@ test("AskRecipients lists a session route's session via route", () => {
     const row = within(within(section).getByRole("list", { name: "Via claim or route" })).getByRole(
       "listitem"
     );
-    expect(within(row).getByText("session:e2e2e2e2…").getAttribute("title")).toBe(routed);
+    expect(
+      within(row).getByText("session:e2e2e2e2…").closest("[title]")?.getAttribute("title")
+    ).toBe(routed);
     expect(within(row).getByText("via route")).toBeTruthy();
-    expect(within(row).getByTitle("Not live")).toBeTruthy();
+    expect(await within(row).findByRole("img", { name: "Not running" })).toBeTruthy();
     expect(within(row).queryByRole("button")).toBeNull();
   } finally {
     page.unmount();
@@ -458,17 +492,19 @@ test("AskRecipients names a role route's holder via the route, live, and counts 
     const row = within(within(section).getByRole("list", { name: "Via claim or route" })).getByRole(
       "listitem"
     );
-    expect((await within(row).findByText("Reviewer")).getAttribute("title")).toBe(holder);
+    expect(
+      (await within(row).findByText("Reviewer")).closest("[title]")?.getAttribute("title")
+    ).toBe(holder);
     expect(within(row).getByText("via route (role:reviewer)")).toBeTruthy();
-    expect(await within(row).findByTitle("Live")).toBeTruthy();
+    expect(await within(row).findByRole("img", { name: "Running" })).toBeTruthy();
     expect(within(row).queryByRole("button")).toBeNull();
   } finally {
     page.unmount();
   }
 });
 
-test("AskRecipients lists a role route nobody holds as the route itself, offline and uncounted", () => {
-  const page = renderRecipients({ props: { route: "role:reviewer" } });
+test("AskRecipients lists a role route nobody holds as the route itself, held by nobody and uncounted", () => {
+  const page = renderRecipients({ props: { route: "role:reviewer", routeStatus: "no_holder" } });
 
   try {
     const section = screen.getByRole("region", { name: "Recipients" });
@@ -478,7 +514,11 @@ test("AskRecipients lists a role route nobody holds as the route itself, offline
     );
     expect(within(row).getByText("role:reviewer").getAttribute("title")).toBe("role:reviewer");
     expect(within(row).getByText("via route")).toBeTruthy();
-    expect(within(row).getByTitle("Not live")).toBeTruthy();
+    // A role is not an agent: no running state, the issue's vacancy marker instead.
+    expect(within(row).queryByRole("img")).toBeNull();
+    expect(within(row).getByTestId("issue-route-unreachable").textContent).toContain(
+      "Nobody holds it right now"
+    );
     expect(within(row).queryByRole("button")).toBeNull();
   } finally {
     page.unmount();
@@ -499,8 +539,8 @@ test("AskRecipients marks a role route the listener did not judge as reach unkno
     expect(within(row).getByText("Route reach unknown").getAttribute("title")).toBe(
       "The Envoy listener did not answer, so Dispatch cannot tell whether anyone receives this route."
     );
-    expect(within(row).queryByTitle("Not live")).toBeNull();
-    expect(within(row).queryByTitle("Live")).toBeNull();
+    expect(within(row).queryByRole("img")).toBeNull();
+    expect(within(row).queryByTestId("issue-route-unreachable")).toBeNull();
   } finally {
     page.unmount();
   }
@@ -560,8 +600,13 @@ test("AskRecipients tells the human an unfollowed or unsubscribed session may st
   }
 });
 
-test("AskRecipients still counts a session route's session when its reach is unknown, without calling it offline", () => {
-  const page = renderRecipients({ props: { route: `session:${routed}`, routeStatus: "unknown" } });
+test("AskRecipients still counts a session route's session when its reach is unknown, without calling it offline", async () => {
+  // The listener did not answer the registry read either, so the session's running state is
+  // unknown too.
+  const page = renderRecipients({
+    agents: new Error("listener unreachable"),
+    props: { route: `session:${routed}`, routeStatus: "unknown" },
+  });
 
   try {
     const section = screen.getByRole("region", { name: "Recipients" });
@@ -569,11 +614,15 @@ test("AskRecipients still counts a session route's session when its reach is unk
     const row = within(within(section).getByRole("list", { name: "Via claim or route" })).getByRole(
       "listitem"
     );
-    expect(within(row).getByText("session:e2e2e2e2…").getAttribute("title")).toBe(routed);
+    expect(
+      within(row).getByText("session:e2e2e2e2…").closest("[title]")?.getAttribute("title")
+    ).toBe(routed);
     expect(within(row).getByText("via route")).toBeTruthy();
     expect(within(row).getByText("Route reach unknown")).toBeTruthy();
-    expect(within(row).queryByTitle("Not live")).toBeNull();
-    expect(within(row).queryByTitle("Live")).toBeNull();
+    await waitFor(() => expect(page.queryClient.getQueryState(["agents"])?.status).toBe("error"));
+    expect(within(row).getByRole("img", { name: "Running state unknown" })).toBeTruthy();
+    expect(within(row).queryByRole("img", { name: "Not running" })).toBeNull();
+    expect(within(row).queryByTestId("issue-route-unreachable")).toBeNull();
   } finally {
     page.unmount();
   }
@@ -668,8 +717,8 @@ test("AskRecipients lists a subscribed claimant or route session once, as a subs
   try {
     const section = screen.getByRole("region", { name: "Recipients" });
     await waitFor(() => expect(reachesText(section)).toBe("Reaches 5"));
-    expect(within(section).getAllByTitle(claimant)).toHaveLength(1);
-    expect(within(section).getAllByTitle(routed)).toHaveLength(1);
+    expect(section.querySelectorAll(`[data-agent-name="${claimant}"]`)).toHaveLength(1);
+    expect(section.querySelectorAll(`[data-agent-name="${routed}"]`)).toHaveLength(1);
     expect(within(section).queryByRole("list", { name: "Via claim or route" })).toBeNull();
     const viaIssue = within(section).getByRole("list", { name: "Via issue subscription" });
     expect(within(viaIssue).getAllByRole("listitem")).toHaveLength(3);

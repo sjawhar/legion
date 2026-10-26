@@ -4,6 +4,7 @@ import { act, fireEvent, render, screen, waitFor, within } from "@testing-librar
 import { MemoryRouter, useLocation, useNavigate } from "react-router-dom";
 
 import { commentDeliveryFields } from "../../__tests__/comment-fixture";
+import { wholeText } from "../../__tests__/whole-text";
 import { ApiError, api } from "../../api/client";
 import type { AskRead, Comment, CredentialPendingRow, InboxRow, Issue } from "../../api/types";
 import { KeymapProvider } from "../shell/KeymapProvider";
@@ -333,7 +334,9 @@ test("Inbox keeps rows waiting on agents below Waiting on you without duplicatin
       .getAllByRole("heading", { level: 2 })
       .map((heading) => heading.textContent);
     expect(headings).toEqual(["Waiting on you", "Waiting on agents"]);
-    expect(screen.getByText("Waiting on session:session-…")).toBeTruthy();
+    expect(screen.getByText(wholeText("Waiting on session:session-…"))).toBeTruthy();
+    // No `?agent=`, so no agent filter to clear.
+    expect(screen.queryByRole("link", { name: "Clear agent filter" })).toBeNull();
   } finally {
     view.unmount();
     getAsk.mockRestore();
@@ -381,7 +384,7 @@ test("Inbox keeps an agent's latest reply on its Waiting-on-you row", async () =
 
   try {
     await screen.findByText("Which approach?");
-    expect(screen.getByText("session:session-… replied")).toBeTruthy();
+    expect(screen.getByText(wholeText("session:session-… replied"))).toBeTruthy();
   } finally {
     view.unmount();
     getAsk.mockRestore();
@@ -426,8 +429,8 @@ test("Inbox partitions by waiting_on: an agent's progress note keeps its ask und
       .getAllByRole("heading", { level: 2 })
       .map((heading) => heading.textContent);
     expect(headings).toEqual(["Waiting on agents"]);
-    expect(screen.queryByText("session:session-… replied")).toBeNull();
-    expect(screen.getByText("Waiting on session:session-…")).toBeTruthy();
+    expect(screen.queryByText(wholeText("session:session-… replied"))).toBeNull();
+    expect(screen.getByText(wholeText("Waiting on session:session-…"))).toBeTruthy();
   } finally {
     view.unmount();
     getAsk.mockRestore();
@@ -868,6 +871,14 @@ test("Inbox narrows to one agent's asks from ?agent and clears back to the whole
     const chip = await screen.findByRole("link", { name: "Clear agent filter" });
     expect(chip.textContent).toBe("Asks from Planner · clear");
     expect(chip.getAttribute("href")).toBe("/");
+    // The agent's live link sits beside the clear-filter link, never inside it.
+    const chipAgent = chip.closest<HTMLElement>("[data-agent-name]");
+    if (chipAgent === null) throw new Error("the agent filter chip is not drawn by AgentName");
+    const live = await within(chipAgent).findByRole("link", {
+      name: "Open live conversation with Planner",
+    });
+    expect(live.getAttribute("href")).toBe("/agents/session-1/live");
+    expect(chip.contains(live)).toBe(false);
     // The whole-inbox banner would contradict the filtered list (and its link clears the filter).
     expect(screen.queryByText(/Blocked on you:/)).toBeNull();
   } finally {
@@ -954,7 +965,8 @@ test("Inbox filtered to an agent with no open asks says so and still offers to c
 
   try {
     const emptyState = await screen.findByRole("region", { name: "Inbox empty state" });
-    expect(within(emptyState).getByText("No open asks from idle-session")).toBeTruthy();
+    // A session the registry does not list and no listed ask names reads by its short id.
+    expect(within(emptyState).getByText("No open asks from session:idle-ses…")).toBeTruthy();
     expect(screen.getByRole("link", { name: "Clear agent filter" }).getAttribute("href")).toBe("/");
     expect(screen.queryByText("Which approach?")).toBeNull();
   } finally {

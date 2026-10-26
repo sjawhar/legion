@@ -70,7 +70,12 @@ test("the ask card lists the issue's claimant and route, and drops the claimant 
     await expect(routeRow).toContainText("via route");
     // The claim and the route change on the issue, not here.
     await expect(viaIssue.getByRole("button")).toHaveCount(0);
-    await expect(recipients.locator("[title='Live']")).toHaveCount(3);
+    // Each row is drawn by `AgentName`: its registry running state and a link to its live view.
+    await expect(recipients.getByRole("img", { exact: true, name: "Running" })).toHaveCount(3);
+    await expect(claimRow.getByRole("link", { name: "Claimant (e2e)" })).toHaveAttribute(
+      "href",
+      `/agents/${claimant.id}/live`
+    );
 
     // The asker is neither the claimant nor the route session: unfollowing it stops delivery.
     await recipients
@@ -145,7 +150,7 @@ test("a follower that holds the claim is listed once, and unfollowing it says th
       .filter({ has: page.locator(`[title='${routed}']`) });
     await expect(roleRow).toContainText("Reviewer (e2e)");
     await expect(roleRow).toContainText("via route (role:reviewer)");
-    await expect(roleRow.locator("[title='Live']")).toHaveCount(1);
+    await expect(roleRow.getByRole("img", { exact: true, name: "Running" })).toHaveCount(1);
   } finally {
     await alice.close();
   }
@@ -188,7 +193,7 @@ test("a role route held by the claimant is counted once, under the claim that na
     const holderRow = viaIssue.getByRole("listitem");
     await expect(holderRow.locator(`[title='${claimant.id}']`)).toHaveText("Claimant (e2e)");
     await expect(holderRow).toContainText("via claim");
-    await expect(holderRow.locator("[title='Live']")).toHaveCount(1);
+    await expect(holderRow.getByRole("img", { exact: true, name: "Running" })).toHaveCount(1);
     await expect(recipients.locator("[title='role:e2e-reach-implementer']")).toHaveCount(0);
     await expect(recipients.locator(`[title='${claimant.id}']`)).toHaveCount(1);
   } finally {

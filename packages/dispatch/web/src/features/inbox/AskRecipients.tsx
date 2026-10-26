@@ -7,11 +7,14 @@ import { DisclosureToggle } from "../../components/DisclosureToggle";
 import { QueryError } from "../../components/QueryError";
 import { useIsHuman } from "../../hooks/useIsHuman";
 import { textMutedOnSurface } from "../../theme/classes";
-import { useAgents } from "../conversation/useAgents";
-import { ROUTE_REACH_UNKNOWN, ROUTE_REACH_UNKNOWN_TITLE } from "../issue/RouteReach";
+import {
+  ROUTE_REACH_UNKNOWN,
+  ROUTE_REACH_UNKNOWN_TITLE,
+  UnreachableRouteMarker,
+} from "../issue/RouteReach";
 import { UnsubscribeDialog } from "../issue/UnsubscribeDialog";
-import { sessionLabel } from "../refs/actor";
-import { LiveDot, sessionChipClassName, sessionRemoveButtonClassName } from "../refs/SessionChip";
+import { AgentName, useAgentText } from "../refs/AgentName";
+import { sessionChipClassName, sessionRemoveButtonClassName } from "../refs/SessionChip";
 
 const removeAskFollower = (askId: string, sessionId: string): Promise<void> =>
   api.removeAskFollower(askId, sessionId);
@@ -85,12 +88,15 @@ export interface IssueReachRow {
    *  to hold it. */
   id: string;
   /** Whether a session receives through the row now. A role route that no session holds does
-   *  not: its row names the route, offline, and `Reaches N` leaves it out. */
+   *  not: its row names the route with the issue's `Nobody holds it right now` marker
+   *  (`UnreachableRouteMarker`), and `Reaches N` leaves it out. */
   reaches: boolean;
   /** Set on the route's row while the listener did not answer (`route_status: unknown`): the row
-   *  claims neither live nor offline. A `session:<id>` route still names and counts its session,
-   *  which is published to either way; a role route names the bare route, uncounted, and the
-   *  count says the route reaches an unknown number more (`reachLabel`). */
+   *  carries the `Route reach unknown` marker and claims neither that the route reaches someone
+   *  nor that nobody holds it. A `session:<id>` route still names and counts its session, which
+   *  is published to either way (its running state is the registry's, as for every agent); a
+   *  role route names the bare route, uncounted, and the count says the route reaches an unknown
+   *  number more (`reachLabel`). */
   reachUnknown?: true;
   /** `via claim`, `via route`, or `via route (role:<name>)` on the session holding a role route. */
   via: string;
@@ -193,21 +199,22 @@ type Confirming =
  * Every session the server routes this ask's answer and replies to, under `Reaches N`: the
  * ask's followers (every session that wrote to the ask, minus any that unfollowed); then the
  * session holding the issue's claim, under `via claim`, and the session the issue's route reaches,
- * under `via route` (`via route (role:<name>)` for a role's holder; the bare `role:<name>`, offline
- * and uncounted, while nobody holds the role); then every session subscribed to the owner's topic
- * family, under `via issue subscription` (or `via document subscription`). Each session is listed
- * and counted once (`reachRows`): as a follower, else as a subscriber, else via the claim, else
- * via the route, so a session keeps the control it has. Each shows a live/offline dot and its
- * title (or shortened session id), except the route's row while the listener did not answer: it
- * shows the issue page's `Route reach unknown` marker instead of a dot, and a role route then
- * reads `Reaches N + route (unknown)` (`reachLabel`). A follower's Unfollow and a subscriber's
- * Unsubscribe each confirm first, name what still reaches the session (a subscription, the claim
- * or the route, or that a role route nobody is known to hold may, while its reach is unknown),
- * and then cut the route that actually delivers; the claim and route rows have no
- * control, since both change on the issue. A subscriber whose only matching topic is
- * wider than this owner (e.g. `notifications.dispatch.>`) names that topic and has no control,
- * as the header's Subscribed agents panel does. When the subscribers fetch fails, the card says
- * so with a retry instead of passing the follower count off as the whole set.
+ * under `via route` (`via route (role:<name>)` for a role's holder; the bare `role:<name>`,
+ * uncounted and marked as held by nobody, while nobody holds the role); then every session
+ * subscribed to the owner's topic family, under `via issue subscription` (or `via document
+ * subscription`). Each session is listed and counted once (`reachRows`): as a follower, else as a
+ * subscriber, else via the claim, else via the route, so a session keeps the control it has. Each
+ * session is drawn by `AgentName`: its name, its running state from the agent registry (not the
+ * subscribers endpoint's `live`, a second snapshot taken at another time), and its live link.
+ * While the listener did not answer, the route's row carries the issue page's `Route reach
+ * unknown` marker, and a role route then reads `Reaches N + route (unknown)` (`reachLabel`). A
+ * follower's Unfollow and a subscriber's Unsubscribe each confirm first, name what still reaches
+ * the session (a subscription, the claim or the route, or that a role route nobody is known to
+ * hold may, while its reach is unknown), and then cut the route that actually delivers; the claim
+ * and route rows have no control, since both change on the issue. A subscriber whose only
+ * matching topic is wider than this owner (e.g. `notifications.dispatch.>`) names that topic and
+ * has no control, as the header's Subscribed agents panel does. When the subscribers fetch fails,
+ * the card says so with a retry instead of passing the follower count off as the whole set.
  */
 export function AskRecipients({
   askId,
@@ -240,9 +247,7 @@ export function AskRecipients({
     staleTime: 30_000,
   });
   const subscriberRows = subscribersQuery.data ?? EMPTY_SUBSCRIBERS;
-  const { agents } = useAgents(followers.length > 0 || claimant !== null || route !== null);
-  const followerLabel = (sessionId: string): string =>
-    sessionLabel(sessionId, agents.find((agent) => agent.session_id === sessionId)?.title);
+  const text = useAgentText();
   const { count, issueRows, routeSession, subscribers, unknownRoute } = reachRows({
     claimant,
     followers,
@@ -276,6 +281,8 @@ export function AskRecipients({
     return null;
   }
 
+  // A follower carries no title of its own: it reads by its registry title, else its short id.
+  const followerLabel = (sessionId: string): string => text.sessionText(sessionId, undefined);
   const viaLabel = subscription === undefined ? "" : `via ${subscription.noun} subscription`;
   // What still delivers to a session once its claim or route is all that is left; the route's
   // session is a role's holder too. A role route the listener could not judge may be held by any
@@ -312,37 +319,36 @@ export function AskRecipients({
         <>
           {followers.length === 0 ? null : (
             <ul aria-label="Followers" className="mt-1 flex flex-wrap gap-2">
-              {followers.map((follower) => {
-                const live = agents.some((agent) => agent.session_id === follower.session_id);
-                return (
-                  <li className={sessionChipClassName} key={follower.session_id}>
-                    <LiveDot live={live} />
-                    <span title={follower.session_id}>{followerLabel(follower.session_id)}</span>
-                    <button
-                      className={sessionRemoveButtonClassName}
-                      disabled={unfollow.isPending}
-                      onClick={() =>
-                        setConfirming({ kind: "follower", sessionId: follower.session_id })
-                      }
-                      type="button"
-                    >
-                      Unfollow
-                    </button>
-                  </li>
-                );
-              })}
+              {followers.map((follower) => (
+                <li className={sessionChipClassName} key={follower.session_id}>
+                  <span title={follower.session_id}>
+                    <AgentName sessionId={follower.session_id} storedTitle={undefined} />
+                  </span>
+                  <button
+                    className={sessionRemoveButtonClassName}
+                    disabled={unfollow.isPending}
+                    onClick={() =>
+                      setConfirming({ kind: "follower", sessionId: follower.session_id })
+                    }
+                    type="button"
+                  >
+                    Unfollow
+                  </button>
+                </li>
+              ))}
             </ul>
           )}
           {issueRows.length === 0 ? null : (
             <ul aria-label="Via claim or route" className="mt-1 flex flex-wrap gap-2">
               {issueRows.map((row) => (
                 <li className={sessionChipClassName} key={`${row.via}:${row.id}`}>
-                  {row.reachUnknown ? null : (
-                    <LiveDot
-                      live={row.reaches && agents.some((agent) => agent.session_id === row.id)}
-                    />
+                  {row.reaches ? (
+                    <span title={row.id}>
+                      <AgentName sessionId={row.id} storedTitle={undefined} />
+                    </span>
+                  ) : (
+                    <span title={row.id}>{row.id}</span>
                   )}
-                  <span title={row.id}>{row.reaches ? followerLabel(row.id) : row.id}</span>
                   <span className="text-xs italic">{row.via}</span>
                   {row.reachUnknown ? (
                     <span
@@ -351,7 +357,11 @@ export function AskRecipients({
                     >
                       {ROUTE_REACH_UNKNOWN}
                     </span>
-                  ) : null}
+                  ) : row.reaches ? null : (
+                    <UnreachableRouteMarker
+                      issue={{ route: row.id, route_holder: null, route_status: routeStatus }}
+                    />
+                  )}
                 </li>
               ))}
             </ul>
@@ -365,9 +375,8 @@ export function AskRecipients({
               >
                 {subscribers.map((subscriber) => (
                   <li className={sessionChipClassName} key={subscriber.session_id}>
-                    <LiveDot live={subscriber.live} />
                     <span title={subscriber.session_id}>
-                      {sessionLabel(subscriber.session_id, subscriber.title)}
+                      <AgentName sessionId={subscriber.session_id} storedTitle={subscriber.title} />
                     </span>
                     {subscriber.removable ? (
                       <button
@@ -442,7 +451,7 @@ export function AskRecipients({
         // person's answer and replies, and the card then shows it under that group.
         <UnsubscribeDialog
           message={[
-            `Unsubscribe ${sessionLabel(confirming.sessionId, subscribers.find((row) => row.session_id === confirming.sessionId)?.title)} from ${subscription?.label}?`,
+            `Unsubscribe ${text.sessionText(confirming.sessionId, subscribers.find((row) => row.session_id === confirming.sessionId)?.title)} from ${subscription?.label}?`,
             issueReach(confirming.sessionId),
             "They will be told.",
           ]
