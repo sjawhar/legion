@@ -457,18 +457,20 @@ func TestTarStreamsTheBareRepositorysRefsAndPacks(t *testing.T) {
 		t.Fatalf("/tar answers %d", status)
 	}
 	unpacked, names := unpack(t, bytes.NewReader(body))
-	packs := 0
+	packs, indexes := 0, 0
 	for _, name := range names {
 		switch {
 		case name == "HEAD" || name == "packed-refs" || strings.HasPrefix(name, "refs/") || name == "objects/" || name == "objects/pack/":
 		case regexp.MustCompile(`^objects/pack/pack-[0-9a-f]{40}\.pack$`).MatchString(name):
 			packs++
+		case regexp.MustCompile(`^objects/pack/pack-[0-9a-f]{40}\.idx$`).MatchString(name):
+			indexes++
 		default:
 			t.Errorf("the tar holds %s, which is neither a ref nor a pack", name)
 		}
 	}
-	if packs == 0 {
-		t.Fatalf("the tar holds no pack: %q", names)
+	if packs == 0 || indexes != packs {
+		t.Fatalf("the tar holds %d packs and %d indexes: %q; want every pack with the index git reads it through", packs, indexes, names)
 	}
 	indexed(t, unpacked)
 	if got, want := git(t, unpacked, "--git-dir="+unpacked, "rev-parse", "refs/heads/main"), git(t, remote, "--git-dir="+remote, "rev-parse", "main"); got != want {
@@ -476,8 +478,9 @@ func TestTarStreamsTheBareRepositorysRefsAndPacks(t *testing.T) {
 	}
 }
 
-// indexed indexes each pack of the unpacked bare repository dir, as an issue pod's fetch does, and
-// checks its connectivity.
+// indexed checks the unpacked bare repository dir as an issue pod's fetch does: each pack the
+// cache streamed came with the index git reads it through, so none is indexed again, and the
+// history is whole.
 func indexed(t *testing.T, dir string) {
 	t.Helper()
 	packs, err := filepath.Glob(filepath.Join(dir, "objects", "pack", "pack-*.pack"))
@@ -485,7 +488,10 @@ func indexed(t *testing.T, dir string) {
 		t.Fatal(err)
 	}
 	for _, pack := range packs {
-		git(t, dir, "--git-dir="+dir, "index-pack", pack)
+		index := strings.TrimSuffix(pack, ".pack") + ".idx"
+		if _, err := os.Stat(index); err != nil {
+			t.Fatalf("the cache streamed %s without its index: %v", filepath.Base(pack), err)
+		}
 	}
 	git(t, dir, "--git-dir="+dir, "fsck", "--connectivity-only")
 }

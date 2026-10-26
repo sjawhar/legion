@@ -2548,8 +2548,9 @@ before it fetches again. It serves, on port 8418:
   "repo":"<owner>/<repo>","head":"<default branch's commit>","lastFetchAt":"…","bytes":<n>}`; it
   waits on no fetch, and answers any request, since it holds nothing secret and nothing of the
   repository's content.
-- `GET /tar`: the clone's refs and packs as a tar stream — `HEAD`, `packed-refs`, `refs/` and
-  `objects/pack/pack-<id>.pack`, no pack index, loose object or configuration — which waits for a
+- `GET /tar`: the clone's refs and packs as a tar stream — `HEAD`, `packed-refs`, `refs/`,
+  `objects/pack/pack-<id>.pack` and the `objects/pack/pack-<id>.idx` git reads each pack through,
+  no loose object or configuration — which waits for a
   fetch under way to finish, so it never streams a half-written ref or pack.
 
 `/tar` answers only a request whose `Authorization: Bearer` is the cache's own token; any other is
@@ -2566,10 +2567,22 @@ An issue pod's `workspace-fetch` fills a fresh feed from its repository's cache 
 ([Anatomy of a Sandbox pod](#anatomy-of-a-sandbox-pod)). It asks the cache's health with no
 credential, takes nothing from a cache whose answer names another repository, so a cache pod
 replaced and its address reused by another repository's cache can put nothing into the feed, and
-presents the cache's token with its request for the tar alone. It indexes each pack
-it received afresh (`git index-pack`, which checks the pack's checksum and every object in it) and
-checks every object the refs reach is there (`git fsck --connectivity-only`) before the feed is
-used, and a damaged or incomplete history fails the fetch. A cache that is not ready is waited
+presents the cache's token with its request for the tar alone. It holds every pack and index it
+received to the checksums git wrote into them — each file's own trailing hash over its bytes, and
+the pack hash the index records, which must be that pack's — and checks every object the refs
+reach is there (`git fsck --connectivity-only`) before the feed is used, and a damaged or
+incomplete history fails the fetch. A pack that arrived without its index is indexed here instead
+(`git index-pack`). Re-indexing every pack the cache wrote is what the feed no longer does: it
+inflates and rehashes every object, 8 to 12 minutes per issue pod on a 3.2 GB cache, to catch only
+a pack whose bytes are self-consistent and whose objects are not what their names say — which
+anyone who could write the cache's volume could write with a matching index too.
+
+From GitHub the fetch then takes the repository's default branch and `refs/heads/legion/*` alone,
+which is what the issue's clone is made from and all the cache can be behind on: every other
+branch comes from the cache's tar, at most one `refresh_minutes` old, and an agent that needs a
+branch newer than that fetches it from GitHub through its clone's `origin`. So a large branch
+pushed between the cache's refresh and a wave of launches is never pulled into every issue pod at
+once. A cache that is not ready is waited
 for, and one that never becomes ready fails the fetch, naming its last answer; the issue pod's
 failure then names the cache's state (`the repository cache of <owner>/<repo>, which a fresh feed
 comes from alone, is failing: container cache CrashLoopBackOff: …`).

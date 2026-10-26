@@ -1290,10 +1290,10 @@ func TestFetchTurnsTheFeedsGarbageCollectionOffAndKeepsPacks(t *testing.T) {
 	}
 }
 
-// What of a bare repository the cache streams and a feed takes: its refs and its packs, nothing
-// the feed rebuilds itself from them (an index, a reverse index, a bitmap, a commit-graph), no
-// loose object, nothing of its own, nothing that would point it at objects elsewhere, and nothing
-// git is still writing.
+// What of a bare repository the cache streams and a feed takes: its refs, its packs and the index
+// git reads each pack through, nothing the feed rebuilds itself from them (a reverse index, a
+// bitmap, a commit-graph), no loose object, nothing of its own, nothing that would point it at
+// objects elsewhere, and nothing git is still writing.
 func TestFeedEntryIsTheRepositorysRefsAndPacksAlone(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -1308,12 +1308,13 @@ func TestFeedEntryIsTheRepositorysRefsAndPacksAlone(t *testing.T) {
 		{"objects", true, true},
 		{"objects/pack", true, true},
 		{"objects/pack/pack-1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d.pack", false, true},
+		{"objects/pack/pack-1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d.idx", false, true},
 
-		{"objects/pack/pack-1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d.idx", false, false},
 		{"objects/pack/pack-1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d.rev", false, false},
 		{"objects/pack/pack-1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d.bitmap", false, false},
 		{"objects/pack/multi-pack-index", false, false},
 		{"objects/pack/pack-x.pack", false, false},
+		{"objects/pack/pack-x.idx", false, false},
 		{"objects/ab", true, false},
 		{"objects/ab/cdef", false, false},
 		{"objects/info", true, false},
@@ -1378,6 +1379,46 @@ func corruptCacheOf(t *testing.T, remote string) string {
 		t.Fatal(err)
 	}
 	return cache
+}
+
+// damagedIndexOf is cacheOf with one byte of its pack's index flipped: an index a disk or a
+// transfer damaged, which git would read the pack's objects through.
+func damagedIndexOf(t *testing.T, remote string) string {
+	t.Helper()
+	cache := cacheOf(t, remote)
+	index := strings.TrimSuffix(packOf(t, cache), ".pack") + ".idx"
+	body, err := os.ReadFile(index)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body[len(body)/2] ^= 0xff
+	writeIndex(t, index, body)
+	return cache
+}
+
+// foreignIndexOf is cacheOf whose pack carries another repository's index, whole in itself and of
+// another pack: what a cache that mixed two repositories' files would stream.
+func foreignIndexOf(t *testing.T, remote string) string {
+	t.Helper()
+	cache := cacheOf(t, remote)
+	other := cacheOf(t, seedRemote(t, t.TempDir(), "main"))
+	body, err := os.ReadFile(strings.TrimSuffix(packOf(t, other), ".pack") + ".idx")
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeIndex(t, strings.TrimSuffix(packOf(t, cache), ".pack")+".idx", body)
+	return cache
+}
+
+// writeIndex replaces the pack index at path, which git wrote read-only.
+func writeIndex(t *testing.T, path string, body []byte) {
+	t.Helper()
+	if err := os.Chmod(path, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // incompleteCacheOf is cacheOf whose pack lacks one blob its history reaches: a cache that lost an
@@ -1555,15 +1596,19 @@ func (c *fakeCache) serve(t *testing.T) string {
 }
 
 // With a repository cache, a feed that does not hold the repository yet is unpacked from the
-// cache's tar and fetched from GitHub for what the cache lacks: the feed has the cache's refs and
-// the remote's newer one, the report counts the tar's bytes and the few GitHub brought, and nothing
-// was cloned from GitHub. The feed's configuration is its own, gc off, whatever the cache's was.
+// cache's tar and fetched from GitHub for what the issue's clone is made from and the cache can be
+// behind on: the repository's default branch and the Legion issue branches. A branch outside those
+// pushed since the cache's tar stays out of the feed, whatever its size. The report counts the
+// tar's bytes and the few GitHub brought, nothing was cloned from GitHub, and the index the cache
+// streamed with each pack is the one the feed reads it through: no pack is indexed again. The
+// feed's configuration is its own, gc off, whatever the cache's was.
 func TestFetchStreamsTheRepositoryCacheThenFetchesTheDeltaFromGitHub(t *testing.T) {
 	run := newLocalRunner(t)
 	cache := cacheOf(t, run.remote)
 	body := cacheTar(t, cache)
 	served := &fakeCache{body: body}
-	moved := pushRemoteBranch(t, run.remote, "release/v7.1", "newer.txt")
+	moved := pushRemoteBranch(t, run.remote, "legion/ACME-7", "newer.txt")
+	unread := pushRemoteBranch(t, run.remote, "release/v7.1", "unread.txt")
 	req := fetchRequest(t)
 	req.CacheURL, req.CacheToken = served.serve(t), testCacheToken
 
@@ -1579,20 +1624,24 @@ func TestFetchStreamsTheRepositoryCacheThenFetchesTheDeltaFromGitHub(t *testing.
 		t.Errorf("the report counts %d bytes in %s from the cache, verified in %s, want the tar's %d and both times", report.CacheBytes, report.CacheDuration, report.VerifyDuration, len(body))
 	}
 	if report.GitHubBytes <= 0 || report.GitHubBytes >= 64<<10 || report.Refs != 1 {
-		t.Errorf("the report counts %d bytes and %d refs from GitHub, want the one new branch's few", report.GitHubBytes, report.Refs)
+		t.Errorf("the report counts %d bytes and %d refs from GitHub, want the one issue branch's few", report.GitHubBytes, report.Refs)
 	}
-	for _, branch := range []string{"main", "release/v7.1"} {
-		if got, want := strings.TrimSpace(runSetup(t, feed, "git", "--git-dir="+feed, "rev-parse", "refs/heads/"+branch)), strings.TrimSpace(runSetup(t, feed, "git", "--git-dir="+run.remote, "rev-parse", branch)); got != want {
-			t.Errorf("the feed's %s is %s, want the remote's %s", branch, got, want)
-		}
+	if got, want := strings.TrimSpace(runSetup(t, feed, "git", "--git-dir="+feed, "rev-parse", "refs/heads/main")), strings.TrimSpace(runSetup(t, feed, "git", "--git-dir="+run.remote, "rev-parse", "main")); got != want {
+		t.Errorf("the feed's main is %s, want the remote's %s", got, want)
 	}
-	if got := strings.TrimSpace(runSetup(t, feed, "git", "--git-dir="+feed, "rev-parse", "refs/heads/release/v7.1")); got != moved {
-		t.Errorf("the feed's release/v7.1 is %s, want the remote's newer %s", got, moved)
+	if got := strings.TrimSpace(runSetup(t, feed, "git", "--git-dir="+feed, "rev-parse", "refs/heads/legion/ACME-7")); got != moved {
+		t.Errorf("the feed's legion/ACME-7 is %s, want the remote's newer %s", got, moved)
+	}
+	if refs := runSetup(t, feed, "git", "--git-dir="+feed, "for-each-ref", "--format=%(refname)"); strings.Contains(refs, "refs/heads/release/v7.1") {
+		t.Errorf("the feed took release/v7.1 (%s) from GitHub, a branch no issue reads; its refs are %q", unread, refs)
 	}
 	runSetup(t, feed, "git", "--git-dir="+feed, "fsck", "--connectivity-only")
 	for _, call := range run.Calls() {
 		if commandWith(call.Argv, "git", "clone") {
 			t.Errorf("Fetch cloned from GitHub with a cache to stream: %q", call.Argv)
+		}
+		if slices.Contains(call.Argv, "index-pack") {
+			t.Errorf("Fetch indexed again a pack the cache streamed its index with: %q", call.Argv)
 		}
 	}
 	var fetch Command
@@ -1605,6 +1654,9 @@ func TestFetchStreamsTheRepositoryCacheThenFetchesTheDeltaFromGitHub(t *testing.
 	}
 	if fetch.Argv == nil {
 		t.Fatalf("Fetch fetched no delta from GitHub into the unpacked cache: %q", run.Calls())
+	}
+	if want := []string{"https://github.com/acme/widgets", "+refs/heads/main:refs/heads/main", "+refs/heads/legion/*:refs/heads/legion/*"}; !slices.Equal(fetch.Argv[len(fetch.Argv)-3:], want) || slices.Contains(fetch.Argv, "--prune") {
+		t.Errorf("the delta ran %q, want it ending in %q and pruning nothing", fetch.Argv, want)
 	}
 	assertCredentialedEnvironmentBounded(t, fetch, fetch.Timeout)
 	if left := FetchTimeout - report.CacheDuration - report.VerifyDuration; fetch.Timeout > left || fetch.Timeout < left-time.Minute {
@@ -1691,11 +1743,10 @@ func TestFetchFailsWhenTheRepositoryCacheIsNeverReady(t *testing.T) {
 
 // The cache's stream, its verification and the delta from GitHub share one FetchTimeout, counted
 // from when the cache is ready, so the fetch's waits, transfers and checks end within FetchBudget
-// however long it waited. A cache ready 35 minutes in, whose pack takes 20 minutes to index and
-// whose history takes 5 to check,
+// however long it waited. A cache ready 35 minutes in, whose history takes 25 minutes to check,
 // leaves the delta the last 5 minutes, and the fresh feed is filled. A cache ready on the wait's
-// last ask, 39 min 50 s in, whose pack takes the whole bound to index, leaves nothing to check its
-// history in: the fetch fails then, 69 min 50 s in, naming the bound, and fills nothing.
+// last ask, 39 min 50 s in, whose history takes the whole bound to check, leaves nothing to fetch
+// the delta in: the fetch fails then, 69 min 50 s in, naming the bound, and fills nothing.
 func TestFetchGivesTheCachesStreamVerificationAndDeltaOneBound(t *testing.T) {
 	polls := func(d time.Duration) int { return int(d / CachePoll) }
 	for _, tc := range []struct {
@@ -1708,15 +1759,15 @@ func TestFetchGivesTheCachesStreamVerificationAndDeltaOneBound(t *testing.T) {
 	}{
 		{
 			name: "a cache ready 35 minutes in", notReady: polls(35 * time.Minute),
-			took:     map[string]time.Duration{"index-pack": 20 * time.Minute, "fsck": 5 * time.Minute},
-			timeouts: map[string][]time.Duration{"index-pack": {FetchTimeout}, "fsck": {FetchTimeout - 20*time.Minute}, "fetch": {FetchTimeout - 25*time.Minute}},
+			took:     map[string]time.Duration{"fsck": 25 * time.Minute},
+			timeouts: map[string][]time.Duration{"fsck": {FetchTimeout}, "fetch": {FetchTimeout - 25*time.Minute}},
 			elapsed:  35*time.Minute + 25*time.Minute,
 		},
 		{
-			name: "a pack that takes the whole bound to index", notReady: polls(CacheWaitTimeout) - 1,
-			took:     map[string]time.Duration{"index-pack": FetchTimeout},
-			timeouts: map[string][]time.Duration{"index-pack": {FetchTimeout}},
-			fails:    "the fetch's " + FetchTimeout.String() + " bound ran out before checking the repository cache's history is whole",
+			name: "a history that takes the whole bound to check", notReady: polls(CacheWaitTimeout) - 1,
+			took:     map[string]time.Duration{"fsck": FetchTimeout},
+			timeouts: map[string][]time.Duration{"fsck": {FetchTimeout}},
+			fails:    "the fetch's " + FetchTimeout.String() + " bound ran out before",
 			elapsed:  CacheWaitTimeout - CachePoll + FetchTimeout,
 		},
 	} {
@@ -1783,9 +1834,9 @@ func assertNothingFilledTheFeed(t *testing.T, run *recordingRunner, req FetchReq
 
 // A cache whose tar holds an entry a feed does not take — one whose name leaves the feed, one that
 // is not a regular file or directory, the cache's own configuration, an alternates file, a loose
-// object, a pack's index — or whose history does not verify — a pack with a damaged object, a
-// history missing an object it reaches — fails the fetch, naming the entry or the check: nothing of
-// it reaches the feed, and nothing is cloned from GitHub.
+// object — or whose history does not verify — a pack with a damaged object, a pack index damaged
+// or belonging to another pack, a history missing an object it reaches — fails the fetch, naming
+// the entry or the check: nothing of it reaches the feed, and nothing is cloned from GitHub.
 func TestFetchRefusesARepositoryCacheItCannotUse(t *testing.T) {
 	const pack = "objects/pack/pack-1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d"
 	for _, tc := range []struct {
@@ -1809,8 +1860,10 @@ func TestFetchRefusesARepositoryCacheItCannotUse(t *testing.T) {
 		{"a loose object", func(t *testing.T, _ string) []byte {
 			return tarOf(t, [2]string{"objects/ab/cdef0123456789abcdef0123456789abcdef01", "x"})
 		}, `the repository cache's tar holds "objects/ab/cdef0123456789abcdef0123456789abcdef01", which is not one of a repository's refs or packs`},
-		{"a pack's index", func(t *testing.T, _ string) []byte { return tarOf(t, [2]string{pack + ".idx", "x"}) },
-			`the repository cache's tar holds "` + pack + `.idx", which is not one of a repository's refs or packs`},
+		{"a damaged pack index", func(t *testing.T, remote string) []byte { return cacheTar(t, damagedIndexOf(t, remote)) },
+			"which does not verify"},
+		{"an index of another pack", func(t *testing.T, remote string) []byte { return cacheTar(t, foreignIndexOf(t, remote)) },
+			"not this one"},
 		{"a pack with a damaged object", func(t *testing.T, remote string) []byte { return cacheTar(t, corruptCacheOf(t, remote)) },
 			"which does not verify"},
 		{"a history missing an object", func(t *testing.T, remote string) []byte { return cacheTar(t, incompleteCacheOf(t, remote)) },

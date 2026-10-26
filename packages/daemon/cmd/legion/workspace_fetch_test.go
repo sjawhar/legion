@@ -53,6 +53,12 @@ if [ "$2 $3 $4 $5" = "fetch --prune --quiet https://github.com/acme/widgets" ]; 
 	printf '%s %s\n' "$LEGION_PROVISIONING_TOKEN_FILE" "$(cat "$LEGION_PROVISIONING_TOKEN_FILE")" >> "$WINIT_CREDENTIAL_LOG"
 	GIT_ALLOW_PROTOCOL="$GIT_ALLOW_PROTOCOL:file" exec "$WINIT_REAL_GIT" "$1" fetch --prune --quiet "$WINIT_REMOTE" "$6"
 fi
+if [ "$2 $3 $4" = "fetch --quiet https://github.com/acme/widgets" ]; then
+	printf '%s %s\n' "$LEGION_PROVISIONING_TOKEN_FILE" "$(cat "$LEGION_PROVISIONING_TOKEN_FILE")" >> "$WINIT_CREDENTIAL_LOG"
+	first="$1"
+	shift 4
+	GIT_ALLOW_PROTOCOL="$GIT_ALLOW_PROTOCOL:file" exec "$WINIT_REAL_GIT" "$first" fetch --quiet "$WINIT_REMOTE" "$@"
+fi
 if [ "$2 $3 $4 $5" = "ls-remote --symref https://github.com/acme/widgets HEAD" ]; then
 	printf '%s %s\n' "$LEGION_PROVISIONING_TOKEN_FILE" "$(cat "$LEGION_PROVISIONING_TOKEN_FILE")" >> "$WINIT_CREDENTIAL_LOG"
 	GIT_ALLOW_PROTOCOL="$GIT_ALLOW_PROTOCOL:file" exec "$WINIT_REAL_GIT" "$1" ls-remote --symref "$WINIT_REMOTE" HEAD
@@ -593,8 +599,9 @@ func TestWorkspaceInitFetchStreamsTheRepositoryCache(t *testing.T) {
 	if main := v.git(t, "--git-dir="+feed, "rev-parse", "refs/heads/main"); main != head {
 		t.Fatalf("the feed's main is %s, want the remote's %s", main, head)
 	}
-	if credential := logLines(t, v.credentialLog); len(credential) != 2 || !strings.HasSuffix(credential[0], " ghs_test") || !strings.HasSuffix(credential[1], " ghs_test") {
-		t.Fatalf("GitHub was reached with %q, want the delta's fetch and its read of GitHub's HEAD, each with the provisioning token", credential)
+	credential := logLines(t, v.credentialLog)
+	if len(credential) != 3 || !strings.HasSuffix(credential[0], " ghs_test") || !strings.HasSuffix(credential[1], " ghs_test") || !strings.HasSuffix(credential[2], " ghs_test") {
+		t.Fatalf("GitHub was reached with %q, want the read of GitHub's HEAD that plans the delta, the delta's fetch and the read that follows HEAD, each with the provisioning token", credential)
 	}
 	holdsNoToken(t, v.feed, "after fetch")
 
