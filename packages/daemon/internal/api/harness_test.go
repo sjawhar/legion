@@ -31,8 +31,16 @@ import (
 )
 
 const (
-	testProject       = "legion"
-	testOperatorToken = "operator-bearer-for-tests"
+	// testProject is the claim project token (Options.Project): claim tokens, tree lifecycles and
+	// the controller record are keyed by it.
+	testProject = "legion"
+	// testDispatchProject is the Dispatch project key (Options.DispatchProject) the same project's
+	// issues and mirror rows are filed under. It deliberately differs from testProject, as a
+	// deployment's two always do — Dispatch keys are uppercase and the claim token is their
+	// lowercase — so a route that reads a Dispatch-keyed row with the claim token finds nothing
+	// and its test fails instead of passing on one string that happens to serve as both.
+	testDispatchProject = "LEGION"
+	testOperatorToken   = "operator-bearer-for-tests"
 )
 
 // testPromptAgents is what the harness's server answers as the task agents a role's prompts

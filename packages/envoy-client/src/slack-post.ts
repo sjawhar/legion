@@ -182,6 +182,11 @@ interface PosterLine {
 const MAY_HAVE_POSTED =
   "the reply may have been posted, and posting it again may put it in the thread twice";
 
+/** The secrets client's final line before it execs the poster. Once this has appeared, the poster
+ * owns every later stderr byte and a missing answer may follow a Slack post; never describe that
+ * as a broker refusal or quote those later bytes. */
+const AGENT_SECRETS_INJECTION = `agent-secrets: ${SLACK_BOT_TOKEN_SECRET} from `;
+
 /** A run of a reply that starts like a URL: a scheme, `://`, and everything up to whitespace or a
  * delimiter of Slack's `<url|text>` form. Trailing punctuation is trimmed before it is parsed. The
  * scheme and each host label are bounded, so a long reply is scanned in linear time. */
@@ -343,34 +348,42 @@ export async function postSlackReply(
     new Response(child.stderr).text(),
     child.exited,
   ]).finally(() => clearTimeout(timer));
-  const said = stderr.trim().split("\n").filter(Boolean).join(" ");
+  const stderrLines = stderr.trim().split("\n").filter(Boolean);
+  const injectedAt = stderrLines.findIndex((line) => line.startsWith(AGENT_SECRETS_INJECTION));
+  // Until the injection line, stderr belongs to agent-secrets and can explain an early refusal.
+  // Once that line appears agent-secrets has exec'd the poster, which owns every later byte: it
+  // might have delivered the reply before it died, and its stderr must never be quoted.
+  const beforeInjection =
+    injectedAt < 0 ? stderrLines.join(" ") : stderrLines.slice(0, injectedAt).join(" ");
   const line = posterLine(stdout);
   if (line === undefined) {
-    // The broker's client writes every line of its own prefixed `agent-secrets:`, and exits before
-    // it runs the poster; anything else is the poster's, which may have reached Slack.
     if (child.signalCode === "SIGKILL") {
       throw new Error(
         `slack_post got no answer within ${POST_TIMEOUT_MS / 1000} s: ${MAY_HAVE_POSTED}`
       );
     }
-    if (said.startsWith("agent-secrets:")) {
+    if (injectedAt < 0 && beforeInjection.startsWith("agent-secrets:")) {
       if (code === 75) {
         throw new Error(
-          `the secrets broker has not granted ${SLACK_BOT_TOKEN_SECRET}: its request is waiting for approval (${said}); nothing was posted`
+          `the secrets broker has not granted ${SLACK_BOT_TOKEN_SECRET}: its request is waiting for approval (${beforeInjection}); nothing was posted`
         );
       }
       if (code === 77) {
         throw new Error(
-          `the secrets broker denied ${SLACK_BOT_TOKEN_SECRET} (${said}); nothing was posted`
+          `the secrets broker denied ${SLACK_BOT_TOKEN_SECRET} (${beforeInjection}); nothing was posted`
         );
       }
       throw new Error(
-        `the secrets broker did not release ${SLACK_BOT_TOKEN_SECRET} (${said}); nothing was posted`
+        `the secrets broker did not release ${SLACK_BOT_TOKEN_SECRET} (${beforeInjection}); nothing was posted`
       );
     }
-    // The poster prints a line whatever happens, so a poster with none died before it could; its
-    // stderr is not quoted, since past the exec it is the token's process speaking.
-    throw new Error(`slack_post's poster exited ${code} without an answer: ${MAY_HAVE_POSTED}`);
+    // The poster prints a line whatever happens, so a poster with none died before it could.
+    // A line before the injection is agent-secrets's alone; quote that diagnostic, never the
+    // injection itself or the poster's later stderr.
+    const detail = beforeInjection === "" ? "" : ` (${beforeInjection})`;
+    throw new Error(
+      `slack_post's poster exited ${code} without an answer${detail}: ${MAY_HAVE_POSTED}`
+    );
   }
   if (line.refused === null) {
     throw new Error(

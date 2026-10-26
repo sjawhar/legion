@@ -99,7 +99,10 @@ func TestMachineListAndRevokeUnderTheMachinesLogin(t *testing.T) {
 		t.Fatalf("machine list --json: exit %d, stdout %q, stderr %q; want Dispatch's page's body %q", exit, stdout, stderr, page)
 	}
 
-	if stdout, stderr, exit := machine("revoke", laptopID); exit != 0 || stdout != "revoked "+laptopID+"\n" || stderr != "" {
+	// Every line names the broker it acted at, so no answer of this CLI's reads as another
+	// secrets CLI's (source.go).
+	at := " at " + brokerSource(rig.URL).String() + "\n"
+	if stdout, stderr, exit := machine("revoke", laptopID); exit != 0 || stdout != "revoked "+laptopID+at || stderr != "" {
 		t.Fatalf("machine revoke the laptop: exit %d, stdout %q, stderr %q", exit, stdout, stderr)
 	}
 	boxKey, err := proof.NewKey()
@@ -118,10 +121,10 @@ func TestMachineListAndRevokeUnderTheMachinesLogin(t *testing.T) {
 	}
 
 	const ownWarning = "agent-secrets machine revoke: revoking this machine's own login ends every session it enrolled, this one's broker access included\n"
-	if stdout, stderr, exit := machine("revoke", strings.ToUpper(own)); exit != 0 || stdout != "revoked "+strings.ToUpper(own)+"\n" || stderr != ownWarning {
+	if stdout, stderr, exit := machine("revoke", strings.ToUpper(own)); exit != 0 || stdout != "revoked "+strings.ToUpper(own)+at || stderr != ownWarning {
 		t.Fatalf("machine revoke this machine's own login in upper case: exit %d, stdout %q, stderr %q; want %q", exit, stdout, stderr, ownWarning)
 	}
-	const refused = "agent-secrets machine list: the launcher credential is not valid (LAUNCHER_INVALID); this machine's login is expired or revoked (run: agent-secrets machine login)\n"
+	refused := "agent-secrets machine list: the launcher credential is not valid (LAUNCHER_INVALID); this machine's login to " + brokerSource(rig.URL).String() + " is expired or revoked (run: agent-secrets machine login)\n"
 	if stdout, stderr, exit := machine("list"); exit != 1 || stdout != "" || stderr != refused {
 		t.Fatalf("machine list after revoking this machine's own login: exit %d, stdout %q, stderr %q; want 1, %q", exit, stdout, stderr, refused)
 	}
@@ -179,7 +182,7 @@ func TestGrantListAndRevokeUnderTheMachinesLogin(t *testing.T) {
 		t.Fatalf("grant list --json: exit %d, stdout %q, stderr %q; want the Live grants page's body %q", exit, stdout, stderr, page)
 	}
 
-	if stdout, stderr, exit := grant("revoke", grantID); exit != 0 || stdout != "revoked "+grantID+"\n" || stderr != "" {
+	if stdout, stderr, exit := grant("revoke", grantID); exit != 0 || stdout != "revoked "+grantID+" at "+brokerSource(rig.URL).String()+"\n" || stderr != "" {
 		t.Fatalf("grant revoke: exit %d, stdout %q, stderr %q", exit, stdout, stderr)
 	}
 	if _, err := newClient(rig.URL).GrantValues(context.Background(), &fileSigner{key: boxKey, enrollmentID: enrolled.EnrollmentID}, grantID); err == nil {
