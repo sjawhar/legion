@@ -388,7 +388,9 @@ func TestCatchUpAwaitingBoundsEachRootAndResumesAfterTheRootsItFinished(t *testi
 	admission := admit.New(records, engine, 0, "CAPTURE", quietLogger())
 	client := &slowFirstRoot{awaitingDispatch: awaitingDispatch{events: []json.RawMessage{answered}}}
 	w := &workflowRuntime{pool: pool, records: records, dispatch: client, dispatchProject: "CAPTURE", handlers: []intake.Handler{engine, admission},
-		log: quietLogger(), catchUpRootTimeout: 200 * time.Millisecond}
+		// The bound is the stalled root's only wait; the others apply their facts well inside it,
+		// each of which now runs admission's whole pass, also under a loaded suite.
+		log: quietLogger(), catchUpRootTimeout: 3 * time.Second}
 
 	if err := w.catchUpAwaiting(context.Background()); !dispatch.Unreachable(err) {
 		t.Fatalf("catch up with a root past its deadline = %v, want a transient error the boot retries", err)
