@@ -6,10 +6,17 @@
 -- function no trigger calls yet (0119-0121 attach it), and the view restated with two more arms.
 -- Nothing writes the artifacts row: the tables are its children, whose writes take only
 -- `for key share` on it.
+--
+-- A node id holds its document's ref_key, which nothing bounds but artifacts_ref_key_key's own
+-- B-tree entry, so with '#' and a block id it can pass the 2704 bytes a B-tree index entry holds.
+-- node_id and from_node are hash indexed instead: an entry holds the value's 4-byte hash, and
+-- every read of either column is an equality. node_id needs no unique constraint: it is ref_key,
+-- '#' and block_id, ref_key is unique and holds no '#', and the primary key makes block_id unique
+-- within the document.
 create table document_blocks (
   artifact_id uuid not null references artifacts (id) on delete cascade,
   block_id text not null,
-  node_id text not null unique,
+  node_id text not null,
   type text not null,
   text_sha256 text not null,
   excerpt text not null,
@@ -18,6 +25,7 @@ create table document_blocks (
   created_at timestamptz not null default now(),
   primary key (artifact_id, block_id)
 );
+create index document_blocks_node_id on document_blocks using hash (node_id);
 
 -- One row per link a block holds. The link name is part of the key, so two attributes of one
 -- block can point at one target under different names.
@@ -34,7 +42,7 @@ create table block_refs (
   primary key (artifact_id, block_id, to_kind, to_id, kind)
 );
 create index block_refs_to on block_refs (to_kind, to_id);
-create index block_refs_from_node on block_refs (from_node);
+create index block_refs_from_node on block_refs using hash (from_node);
 
 -- The version a document's blocks were indexed at; null is owed: every document at this
 -- migration, every version any build writes (0118's trigger), and rebuild-refs. The partial

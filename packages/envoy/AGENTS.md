@@ -1381,7 +1381,10 @@ text in each version that makes it new, changes it, restores it, or deletes it (
 `document_indexed_versions` names each version a block-aware build indexed, and
 `document_block_versions` the version a document's blocks stand at, null while the document is
 owed an index. `block_refs` holds each link a block holds, keyed on the block, its target and the
-link's `kind`. A mention starts at the innermost block holding its start: a list item's
+link's `kind`. `document_blocks.node_id` and `block_refs.from_node` are hash indexed, never B-tree:
+a node id holds the document's ref_key, which no bound short of its own unique key limits, so a
+long-named document's node ids can pass the 2704 bytes a B-tree entry holds. A mention starts at the
+innermost block holding its start: a list item's
 paragraph, and the table for a mention in a cell, since rows and cells are not nodes.
 `docs.indexDocument` unions the targets whose block pairs moved with those the document's own
 `refs` moved before one `refs.CountedChanges`, so a version that goes from one citing block to

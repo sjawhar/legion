@@ -243,12 +243,13 @@ func parseArtifactSlug(value string) (string, bool) {
 }
 
 // MaxBlockIDBytes bounds a block id, decoded, in UTF-8 bytes. The reference graph keys a block by
-// it - document_blocks' primary key and its node id `<ref_key>#<block id>`, document_block_texts'
-// and block_refs' keys, and a reference's refs.to_id - and a Postgres B-tree key holds at most
-// 2704 bytes, so an unbounded id fails every write that indexes it. A reference naming a longer
-// id names nothing (blockID), the index makes no node of a block carrying one (refs.IndexBlocks),
-// and a write through the API that names one is refused (pmdoc.LongBlockID). Its twin is
-// MAX_BLOCK_ID_BYTES in @legion/contracts.
+// it in B-tree keys - document_blocks', document_block_texts' and block_refs' primary keys, and a
+// reference's refs.to_id - and a Postgres B-tree key holds at most 2704 bytes, so an unbounded id
+// fails every write that indexes it. (A block's node id `<ref_key>#<block id>` holds the
+// document's unbounded ref_key too, so it is hash indexed, never a B-tree key.) A reference naming
+// a longer id names nothing (blockID), the index makes no node of a block carrying one
+// (refs.IndexBlocks), and a write through the API that names one is refused (pmdoc.LongBlockID).
+// Its twin is MAX_BLOCK_ID_BYTES in @legion/contracts.
 const MaxBlockIDBytes = 256
 
 // EncodeBlockID writes a block id as a reference's `#b-` fragment carries it: every UTF-8 byte

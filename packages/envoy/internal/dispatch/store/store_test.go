@@ -209,6 +209,7 @@ func TestMigrateCreatesEmptySchemaAndIsIdempotent(t *testing.T) {
 		"ask_followers_ask_id_text",
 		"events_ask_answered_by_user",
 		"comments_ask_replies_by_user",
+		"document_blocks_node_id",
 		"block_refs_to",
 		"block_refs_from_node",
 		"document_block_versions_owed",
