@@ -4,6 +4,7 @@ import * as Y from "yjs";
 
 import { type DocumentConnection, loadDocumentTransport } from "./connection";
 import { openPendingEdits, type PendingEdits, type PendingKey } from "./pending-edits";
+import * as pendingSyncModule from "./pending-sync";
 import { type PendingState, type PendingSync, startPendingSync } from "./pending-sync";
 
 // The frames a Hocuspocus peer exchanges: the document name, a message tag, then the message.
@@ -773,6 +774,11 @@ class OpenSocket extends EventTarget {
   receive(data: Uint8Array): void {
     this.dispatchEvent(new MessageEvent("message", { data: data.slice().buffer }));
   }
+
+  /** The server closes the socket, as a dropped connection does; the provider reconnects. */
+  drop(): void {
+    this.dispatchEvent(new CloseEvent("close", { code: 1006 }));
+  }
 }
 
 test("a real provider's edit typed on an open socket is cleared by its own acknowledgement", async () => {
@@ -815,6 +821,89 @@ test("a real provider's edit typed on an open socket is cleared by its own ackno
   } finally {
     connection?.destroy();
     globalThis.WebSocket = realSocket;
+  }
+});
+
+test("a reconnect's writable admission restores another tab's row only once that reconnect's sync has applied", async () => {
+  const artifact = artifactId();
+  const server = serverWith("shared", 100);
+  const firstState = Y.encodeStateAsUpdate(server);
+  // While this tab is admitted read-only, the issue reopens and a person types into the paragraph.
+  // Another tab types after that text and closes before its socket sends the edit, so its row is
+  // the edit's only copy, and it builds on an update this tab has not received yet.
+  const person = new Y.Doc();
+  person.clientID = 200;
+  Y.applyUpdate(person, firstState);
+  typeInto(person, " added");
+  Y.applyUpdate(server, Y.encodeStateAsUpdate(person));
+  await savedEdit(artifact, server, " typed");
+
+  // Each later admission the transport hands the pending sync, with whether the reconnect's
+  // SyncStep2 had reached the socket by then.
+  const admissions: { readOnly: boolean; afterSync: boolean }[] = [];
+  const running: Promise<void>[] = [];
+  let syncDelivered = false;
+  // The transport imports the pending sync itself, so its sync is wrapped where it is started.
+  const realStart = startPendingSync;
+  const started = spyOn(pendingSyncModule, "startPendingSync").mockImplementation((options) => {
+    const sync = realStart(options);
+    return {
+      ...sync,
+      admitted(readOnly) {
+        admissions.push({ afterSync: syncDelivered, readOnly });
+        const admitting = sync.admitted(readOnly);
+        running.push(admitting);
+        return admitting;
+      },
+    };
+  });
+  const realSocket = globalThis.WebSocket;
+  globalThis.WebSocket = OpenSocket as unknown as typeof WebSocket;
+  OpenSocket.opened = [];
+  let connection: DocumentConnection | undefined;
+  let synced = false;
+  const pending: PendingState[] = [];
+  try {
+    const connect = await loadDocumentTransport();
+    connection = connect(artifact, {
+      onAdmission() {},
+      onOutsideSchema() {},
+      onPending: (state) => pending.push(state),
+      onStatus() {},
+      onSynced: () => {
+        synced = true;
+      },
+      schemaVersion: 1,
+    });
+    await waitFor(() => expect(OpenSocket.opened[0]?.sent.length).toBeGreaterThan(0));
+    const first = OpenSocket.opened[0] as OpenSocket;
+    first.receive(authenticatedFrame("readonly", artifact));
+    first.receive(syncStep2Frame(firstState, artifact));
+    await waitFor(() => expect(synced).toBe(true));
+    await waitFor(() => expect(pending.at(-1)).toMatchObject({ count: 1, readOnly: true }));
+
+    first.drop();
+    await waitFor(() => expect(OpenSocket.opened[1]?.sent.length).toBeGreaterThan(0));
+    const second = OpenSocket.opened[1] as OpenSocket;
+    // The server authenticates the reconnect before its SyncStep2 arrives. Whatever the
+    // authentication starts runs to its end before the sync is delivered.
+    second.receive(authenticatedFrame("read-write", artifact));
+    await Promise.all(running);
+    syncDelivered = true;
+    second.receive(syncStep2Frame(Y.encodeStateAsUpdate(server), artifact));
+
+    const doc = connection.doc;
+    await waitFor(() => expect(paragraphText(doc).toString()).toBe("shared added typed"));
+    await Promise.all(running);
+    await waitFor(async () =>
+      expect(await rowsOf(artifact)).toEqual([[artifact, doc.clientID, 1]])
+    );
+    expect(pending.every((state) => state.rebuiltAt === undefined)).toBe(true);
+    expect(admissions).toEqual([{ afterSync: true, readOnly: false }]);
+  } finally {
+    connection?.destroy();
+    globalThis.WebSocket = realSocket;
+    started.mockRestore();
   }
 });
 

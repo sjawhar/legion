@@ -119,8 +119,13 @@ export async function loadDocumentTransport(): Promise<ConnectDocument> {
   return (artifactId, callbacks) => {
     const doc = new Doc();
     let destroyed = false;
+    // Whether the current socket's SyncStep2 has been applied and its admission authenticated. A
+    // close ends the socket's round, so both start over with the reconnect's.
     let synced = false;
     let authenticated = false;
+    // Whether the current socket's admission has been handed to the pending sync.
+    let admitted = false;
+    // Whether any admission has: the first is the connection's first sync, the rest are later ones.
     let announced = false;
     let provider: HocuspocusProvider;
     // `connect: false` below means this class cannot instantiate a socket until `sync` is assigned
@@ -145,38 +150,49 @@ export async function loadDocumentTransport(): Promise<ConnectDocument> {
       parameters: { schema_version: callbacks.schemaVersion },
       url: wsUrl(artifactId),
     });
-    const notifySynced = () => {
-      if (synced && authenticated && !announced) {
-        announced = true;
-        void sync
-          ?.firstSync(isSchemaReadOnly(provider.authorizedScope))
-          .catch((error: unknown) => {
-            console.error("Could not restore this document's pending browser edits", error);
-          })
-          .then(() => {
-            if (!destroyed) {
-              callbacks.onSynced();
-            }
-          });
+    // Every admission waits for its own socket's authentication and SyncStep2 alike. A writable
+    // one restores the rows other tabs stored, judging each against this document; before the
+    // reconnect's sync applies, the document lacks what the server took meanwhile, so a row that
+    // builds on it would look as if it were typed against a rebuilt history and be dropped.
+    const notifyAdmitted = () => {
+      if (!synced || !authenticated || admitted) {
+        return;
       }
+      admitted = true;
+      const readOnly = isSchemaReadOnly(provider.authorizedScope);
+      if (announced) {
+        // A reconnect's admission can differ from the first one (an issue reopened or closed
+        // since), and the pending sync decides from it whether a local update is an edit to keep.
+        void sync?.admitted(readOnly).catch((error: unknown) => {
+          console.error("Could not take this document's new admission", error);
+        });
+        return;
+      }
+      announced = true;
+      void sync
+        ?.firstSync(readOnly)
+        .catch((error: unknown) => {
+          console.error("Could not restore this document's pending browser edits", error);
+        })
+        .then(() => {
+          if (!destroyed) {
+            callbacks.onSynced();
+          }
+        });
     };
     provider = new HocuspocusProvider({
       document: doc,
       name: artifactId,
       onAuthenticated: () => {
         authenticated = true;
-        const readOnly = isSchemaReadOnly(provider.authorizedScope);
-        callbacks.onAdmission(readOnly);
-        // A reconnect's admission can differ from the first one (an issue reopened or closed
-        // since), and the pending sync decides from it whether a local update is an edit to keep.
-        if (announced) {
-          void sync?.admitted(readOnly).catch((error: unknown) => {
-            console.error("Could not take this document's new admission", error);
-          });
-        }
-        notifySynced();
+        callbacks.onAdmission(isSchemaReadOnly(provider.authorizedScope));
+        notifyAdmitted();
       },
       onClose: ({ event }) => {
+        // A closed socket's admission is over; the reconnect authenticates and syncs anew, and its
+        // own admission waits for both (`synced` the provider resets through `onSynced`).
+        authenticated = false;
+        admitted = false;
         // Hocuspocus answers every other close by reconnecting. This one is the server's decision
         // about the stored document (`DOCUMENT_SCHEMA_CLOSE_CODE`), so the provider stops here and
         // the host reads it again.
@@ -192,10 +208,10 @@ export async function loadDocumentTransport(): Promise<ConnectDocument> {
       },
       onStatus: ({ status }) => callbacks.onStatus(status === "disconnected" ? "offline" : status),
       onSynced: ({ state }) => {
-        if (state) {
-          synced = true;
-          notifySynced();
-        }
+        // The provider reports `false` as a socket closes, before `onClose` above runs, and `true`
+        // once the socket's SyncStep2 has been applied to the document.
+        synced = state;
+        notifyAdmitted();
       },
       // Each document owns its socket. A transport's destroy closes this provider and then the
       // websocket itself, so its connection checker and reconnect attempt cannot outlive it.

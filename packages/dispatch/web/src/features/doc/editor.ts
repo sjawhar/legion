@@ -3,6 +3,7 @@ import type { Doc } from "yjs";
 
 import type { BlockSchema } from "../../api/types";
 import { importWhenOnline } from "../shell/DeploymentResilience";
+import { MARKS_MAP_NAME } from "./roots";
 
 export type { MarkAction, RetypeOutcome, RetypeRefusal, StoredMark } from "@legion/proof-editor";
 
@@ -36,7 +37,7 @@ export const createEditor: CreateEditor = async (root, options) => {
 // the update and writes it back (a remote accept of a suggestion, arriving with its projection,
 // reverts). The observer only notes that the map changed.
 export function bindRemoteMarks(doc: Doc, handle: EditorHandle): () => void {
-  const marks = doc.getMap("marks");
+  const marks = doc.getMap(MARKS_MAP_NAME);
   const project = () => {
     handle.applyRemoteMarks(marks.toJSON() as Record<string, StoredMark>, {
       hydrateAnchors: false,

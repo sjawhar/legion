@@ -4,6 +4,7 @@ import { messageYjsSyncStep2, messageYjsUpdate } from "y-protocols/sync";
 import * as Y from "yjs";
 
 import type { PendingEdits, PendingKey, RestoredEdit } from "./pending-edits";
+import { FRAGMENT_NAME, MARKS_MAP_NAME } from "./roots";
 import { readField } from "./sync-frame";
 
 export interface PendingState {
@@ -30,10 +31,11 @@ export interface PendingSync {
    */
   firstSync(readOnly: boolean): Promise<void>;
   /**
-   * Takes a later admission of the same connection, after a reconnect: whether it is read-only
-   * decides from then on whether a local update is a person's edit to store. One that makes a
-   * read-only connection writable restores the stored rows as a writable first sync does, since the
-   * first sync left them for a writable admission to send.
+   * Takes a later admission of the same connection, once the reconnect's sync has applied: whether
+   * it is read-only decides from then on whether a local update is a person's edit to store. One
+   * that makes a read-only connection writable restores the stored rows as a writable first sync
+   * does, since the first sync left them for a writable admission to send; it judges each row
+   * against this document, so a row that builds on what the server took meanwhile applies.
    */
   admitted(readOnly: boolean): Promise<void>;
   destroy(): void;
@@ -128,11 +130,6 @@ function addsParking(scratch: Y.Doc, update: Uint8Array): boolean {
   return addsMissingClient || addsPendingDeletes(beforeDeletes, scratch.store.pendingDs);
 }
 
-/** The editor's tree, one of the two roots a Dispatch document holds. */
-const FRAGMENT = "prosemirror";
-/** The margin records the server projects, the other of the two roots. */
-const MARKS = "marks";
-
 /** An object's entries ordered by key, so the order Yjs keeps them in does not count. */
 function sortedEntries(record: Record<string, unknown>): [string, unknown][] {
   return Object.entries(record).sort(([left], [right]) => left.localeCompare(right));
@@ -195,8 +192,8 @@ function readableValue(value: unknown): unknown {
  */
 function readable(scratch: Y.Doc): string {
   return JSON.stringify([
-    scratch.getXmlFragment(FRAGMENT).toArray().map(readableNode),
-    sortedEntries(scratch.getMap(MARKS).toJSON()),
+    scratch.getXmlFragment(FRAGMENT_NAME).toArray().map(readableNode),
+    sortedEntries(scratch.getMap(MARKS_MAP_NAME).toJSON()),
   ]);
 }
 
@@ -214,7 +211,7 @@ function changesNothing(doc: Y.Doc, updates: readonly Uint8Array[]): boolean {
   const before = readable(scratch);
   return (
     updates.every((update) => !addsParking(scratch, update)) &&
-    [...scratch.share.keys()].every((name) => name === FRAGMENT || name === MARKS) &&
+    [...scratch.share.keys()].every((name) => name === FRAGMENT_NAME || name === MARKS_MAP_NAME) &&
     readable(scratch) === before
   );
 }
@@ -317,6 +314,13 @@ export function startPendingSync({
     return entry;
   };
 
+  // The stored rows of every client but this tab's. This tab's own rows hold edits this document
+  // already has: applying them again records nothing anew, and judged against this document they
+  // always look as if they changed nothing, so restoring or pruning them would drop what the
+  // server may not have acknowledged yet.
+  const otherClientsRows = (rows: readonly RestoredEdit[]): RestoredEdit[] =>
+    rows.filter((row) => row.key[1] !== doc.clientID);
+
   // Judges the stored rows of a read-only admission again, one pass at a time: a pass queued while
   // none has started yet covers every request made before it starts.
   let pruning: Promise<void> = Promise.resolve();
@@ -341,14 +345,9 @@ export function startPendingSync({
         // before it, so a later row cannot apply without the earlier ones. A writable load whose
         // socket was down stores its editor's heading-id stamp first and what its reader typed
         // after; a read-only load that derives the same stamp leaves that first row alone
-        // changing nothing, yet dropping it would lose the typing. This tab's own rows are never
-        // judged: this document already holds them, so they always look as if they changed
-        // nothing, while the server may not have acknowledged them yet.
+        // changing nothing, yet dropping it would lose the typing.
         const byClient = new Map<number, RestoredEdit[]>();
-        for (const row of rows) {
-          if (row.key[1] === doc.clientID) {
-            continue;
-          }
+        for (const row of otherClientsRows(rows)) {
           const client = byClient.get(row.key[1]);
           if (client === undefined) {
             byClient.set(row.key[1], [row]);
@@ -449,9 +448,7 @@ export function startPendingSync({
 
   // An admission of this connection, first or later: it decides whether a local update is a
   // person's edit to store (onUpdate), and a writable one restores the rows other tabs and earlier
-  // pages left. This tab's own rows are not restored: they hold edits already in this document,
-  // which applying again would not record anew, so dropping them would lose what the server has not
-  // acknowledged yet.
+  // pages left.
   const admit = async (nextReadOnly: boolean): Promise<void> => {
     readOnly = nextReadOnly;
     const edits = await ready;
@@ -466,7 +463,7 @@ export function startPendingSync({
       return;
     }
     try {
-      const restored = (await edits.restoreRows()).filter((row) => row.key[1] !== doc.clientID);
+      const restored = otherClientsRows(await edits.restoreRows());
       if (destroyed || restored.length === 0) {
         await report();
         return;
