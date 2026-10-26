@@ -69,21 +69,34 @@ test("deep-worker.md is blocking", () => {
   expect(definition("deep-worker.md").fields.blocking).toBe(true);
 });
 
-// The planner's two checks: the planner waits for each answer before it drafts or revises
-// (blocking), they change no file, and each runs on the deployment's model role for its job.
+// The planner's and the architect's two checks: each caller waits for each answer before it drafts,
+// revises or requests approval (blocking), and each runs on the deployment's model role for its job.
+// They change no file: no edit or write tool. They carry bash to check live state themselves, and
+// Oh My Pi has no per-agent command limit, so each prompt holds the agent to commands that read.
 test.each([
   ["plan-gap-analyst.md", "@oracle"],
   ["plan-reviewer.md", "@review"],
-])("%s is a blocking, read-only check on %s", (file, model) => {
-  const { fields } = definition(file);
+])("%s is a blocking check on %s that edits no file and runs only read-only commands", (file, model) => {
+  const { fields, body } = definition(file);
   expect(fields.model).toEqual([model]);
   expect(fields.blocking).toBe(true);
-  const readOnly = new Set(["read", "glob", "grep", "find", "lsp", "ast_grep", "todo"]);
+  const allowed: Record<string, true> = {
+    read: true,
+    glob: true,
+    grep: true,
+    find: true,
+    lsp: true,
+    ast_grep: true,
+    todo: true,
+    bash: true,
+  };
   const tools = String(fields.tools)
     .split(",")
     .map((tool) => tool.trim());
   expect(
-    tools.filter((tool) => !readOnly.has(tool)),
+    tools.filter((tool) => allowed[tool] !== true),
     `${file} lists a mutation tool`
   ).toEqual([]);
+  expect(tools).toContain("bash");
+  expect(body.replace(/\s+/g, " ")).toContain("Run only commands that read.");
 });
