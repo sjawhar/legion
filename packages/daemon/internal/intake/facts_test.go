@@ -37,6 +37,13 @@ func TestLegionSessionFindsTheLastFooterInAReviewsBody(t *testing.T) {
 		},
 		{name: "an empty session field", body: "<!-- legion: {\"session\":\"\",\"phase\":\"review\"} -->", want: ""},
 		{name: "the body is exactly the footer", body: "<!-- legion: {\"session\":\"only-thing-here\",\"phase\":\"review\"} -->", want: "only-thing-here"},
+		{
+			// The daemon's answer loop adds the answer key to a stopped agent's footer
+			// (internal/ghtool); the session is still the agent's.
+			name: "a footer carrying the answer loop's answer key",
+			body: "Approved at the head.\n\n<!-- legion: {\"session\":\"stopped-reviewer\",\"phase\":\"review\",\"answer\":\"dispatch:m-1.2\"} -->",
+			want: "stopped-reviewer",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			review := PullRequestReview{Body: tc.body}
