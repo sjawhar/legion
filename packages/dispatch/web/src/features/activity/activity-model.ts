@@ -1,5 +1,6 @@
 import type { Actor, Event } from "../../api/types";
-import { actorLabel, describeAskResolution, shortSessionId } from "../refs/actor";
+import { describeAskResolution } from "../refs/AgentName";
+import { actorLabel, shortSessionId } from "../refs/actor";
 
 export function dateKey(iso: string): string {
   const date = new Date(iso);

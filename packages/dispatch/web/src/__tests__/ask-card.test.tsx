@@ -1636,7 +1636,13 @@ test("a resolved ask keeps its question and options and carries a resolution bad
     },
     state: "resolved",
   } as unknown as Ask;
-  const { view } = renderCard(<AskCard ask={input} getAskThread={emptyThread(input)} />);
+  // The resolution names its actor with a link to that agent's live conversation, so the card
+  // renders inside a router, as it always does in the app.
+  const { view } = renderCard(
+    <MemoryRouter>
+      <AskCard ask={input} getAskThread={emptyThread(input)} />
+    </MemoryRouter>
+  );
 
   try {
     expect(await view.findByText(input.question)).toBeTruthy();

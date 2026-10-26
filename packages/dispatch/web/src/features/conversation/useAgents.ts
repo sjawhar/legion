@@ -1,11 +1,17 @@
 import { useQuery } from "@tanstack/react-query";
 import { useMemo } from "react";
 
-import { api } from "../../api/client";
 import type { Agent } from "../../api/types";
+import {
+  agentsQuery,
+  EMPTY_AGENTS,
+  registryLookup,
+  useRegistryPolling,
+} from "../refs/agent-registry";
 
-const EMPTY_AGENTS: readonly Agent[] = [];
-
+/** The agent registry list. `refreshWhileOpen` keeps it fresh through the shell's one poller
+ *  (`AgentRegistryPoller`) while this caller is mounted and enabled, instead of an interval of
+ *  its own. */
 export function useAgents(
   enabled: boolean,
   refreshWhileOpen = false
@@ -17,18 +23,16 @@ export function useAgents(
   refetch: () => Promise<unknown>;
   titles: ReadonlyMap<string, string>;
 } {
+  useRegistryPolling(enabled && refreshWhileOpen);
   const { data, error, isError, isPending, refetch } = useQuery({
+    ...agentsQuery(),
     enabled,
-    queryFn: () => api.listAgents(),
-    queryKey: ["agents"],
-    refetchInterval: refreshWhileOpen ? 15_000 : false,
-    staleTime: 10_000,
+    // The poller refreshes what a polled caller reads; refetching it again on mount would put
+    // a second request inside the poller's 15 s.
+    refetchOnMount: !refreshWhileOpen,
   });
   const agents = data ?? EMPTY_AGENTS;
-  const titles = useMemo(
-    () => new Map(agents.map((agent) => [agent.session_id, agent.title])),
-    [agents]
-  );
+  const { titles } = registryLookup(agents);
 
   return useMemo(
     () => ({

@@ -540,6 +540,14 @@ export const connectionDotFailed = "bg-rose-500 dark:bg-rose-400";
  * contrast check applies. */
 export const liveDotBg = "bg-emerald-500 dark:bg-emerald-400";
 export const offlineDotBg = "bg-slate-400 dark:bg-slate-600";
+/** The agent state mark's rings (`features/refs/AgentName.tsx`), beside `liveDotBg`'s filled dot
+ * for a running session: a session the registry no longer lists is a hollow ring in
+ * `offlineDotBg`'s own shades, and one whose state is unknown (no successful registry read yet,
+ * or the latest failed) a dashed neutral ring. Filled, hollow and dashed are the distinction that
+ * does not rest on colour. Decorative — the mark's own `aria-label` names the state, so no
+ * contrast check applies. */
+export const offlineDotBorder = "border-slate-400 dark:border-slate-600";
+export const unknownDotBorder = "border-slate-400 dark:border-slate-500";
 // ---------------------------------------------------------------------------------------------
 // Buttons and inputs
 // ---------------------------------------------------------------------------------------------

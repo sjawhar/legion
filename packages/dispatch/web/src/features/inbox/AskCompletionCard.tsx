@@ -16,7 +16,8 @@ import {
   textPrimaryOnSuccessCallout,
   textPrimaryOnSurface,
 } from "../../theme/classes";
-import { actorLabel, describeAskResolutionActor } from "../refs/actor";
+import { AskResolutionLine } from "../refs/AgentName";
+import { actorLabel } from "../refs/actor";
 import { MarkdownBody } from "../refs/MarkdownBody";
 import { buildIssuePath } from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
@@ -246,7 +247,7 @@ function ResolvedAsk({
       <AskOptionList options={ask.options} selected={[]} />
       <AskEditHistory ask={ask} edits={edits} />
       <p className={`mt-2 text-xs ${textMutedOnSurface}`}>
-        Asked <Timestamp at={ask.created_at} /> · {describeAskResolutionActor(resolution)} -{" "}
+        Asked <Timestamp at={ask.created_at} /> · <AskResolutionLine resolution={resolution} /> -{" "}
         <MarkdownBody markdown={resolution.reason} variant="inline" />
       </p>
     </article>

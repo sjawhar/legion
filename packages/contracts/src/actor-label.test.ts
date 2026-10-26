@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 
-import { actorLabel, shortSessionId } from "./actor";
+import { actorLabel, actorName, sessionLabel, shortSessionId } from "./actor-label";
 
 const titles = new Map([["abcdef1234567890", "Planner"]]);
 
@@ -19,6 +19,29 @@ test("a session is labelled by its live registry title, else its stamped title, 
     actorLabel({ id: "0123456789abcdef", kind: "session", origin: { session_title: "  " } })
   ).toBe(shortSessionId("0123456789abcdef"));
   expect(actorLabel({ id: "alice", kind: "user" }, titles)).toBe("alice");
+});
+
+test("a bare session id is labelled by the title given, else its short id", () => {
+  expect(sessionLabel("0123456789abcdef", " Planner ")).toBe("Planner");
+  expect(sessionLabel("0123456789abcdef", "   ")).toBe("session:01234567…");
+  expect(sessionLabel("0123456789abcdef", undefined)).toBe("session:01234567…");
+});
+
+test("an actor's name never carries the owner or service attribution", () => {
+  expect(
+    actorName(
+      { id: "abcdef1234567890", kind: "session", owner: "alice", origin: { session_title: "x" } },
+      titles
+    )
+  ).toBe("Planner");
+  // A blank live title falls back to the stamped one rather than to the short id.
+  expect(
+    actorName(
+      { id: "abcdef1234567890", kind: "session", origin: { session_title: "Stamped" } },
+      new Map([["abcdef1234567890", "  "]])
+    )
+  ).toBe("Stamped");
+  expect(actorName({ id: "architecture-importer", kind: "system" })).toBe("architecture-importer");
 });
 
 test("a personally attributed session keeps its human owner after the same label", () => {

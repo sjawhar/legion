@@ -1,6 +1,7 @@
 import type { Event } from "../../api/types";
 import { capabilityLabel } from "../conversation/delivery";
-import { actorLabel, describeAskResolution } from "../refs/actor";
+import { describeAskResolution } from "../refs/AgentName";
+import { actorLabel } from "../refs/actor";
 
 export function eventDescription(event: Event): string {
   switch (event.type) {
