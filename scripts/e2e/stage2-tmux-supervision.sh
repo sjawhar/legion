@@ -314,14 +314,26 @@ profile_omp() { HOME="$omp_home" OMP_PROFILE="$profile" "$omp_bin/omp" "$@"; }
 # whole run, so its legion.yaml can name the port before the daemon starts and the main daemon's
 # restart below serves the same port; the listener's helper holds its own and becomes the listener.
 held_port=$root/scripts/e2e/lib/held-port.py
+# shellcheck source-path=SCRIPTDIR source=lib/port-file.sh
+. "$root/scripts/e2e/lib/port-file.sh"
+# port_of WHAT FILE PID VAR LOG reads the port held-port.py wrote to FILE into VAR, failing the
+# check naming WHAT, and LOG, the moment PID exits first (read_port_file, lib/port-file.sh).
+port_of() {
+  local rc=0
+  read_port_file "$2" "$3" "$4" || rc=$?
+  case $rc in
+    0) ;;
+    1) fail "$1 exited before it held a port; see $5" ;;
+    *) fail "$1 held no port within ${port_file_seconds}s; see $5" ;;
+  esac
+}
 python3 "$held_port" keep --port-file "$work/daemon.port" --socket "$work/daemon.sock" >>"$work/keepers.log" 2>&1 &
 daemon_keeper_pid=$!
 python3 "$held_port" keep --port-file "$work/deadline.port" --socket "$work/deadline.sock" >>"$work/keepers.log" 2>&1 &
 deadline_keeper_pid=$!
-until_true 30 "the keeper to hold the daemon's port" test -s "$work/daemon.port"
-until_true 30 "the keeper to hold the second daemon's port" test -s "$work/deadline.port"
-port=$(<"$work/daemon.port")
-deadline_port=$(<"$work/deadline.port")
+port='' deadline_port='' envoy_port=''
+port_of "the daemon's keeper" "$work/daemon.port" "$daemon_keeper_pid" port "$work/keepers.log"
+port_of "the second daemon's keeper" "$work/deadline.port" "$deadline_keeper_pid" deadline_port "$work/keepers.log"
 (cd "$root/packages/daemon" && go build -o "$work/legion" ./cmd/legion)
 (cd "$root/packages/envoy" && go build -o "$work/envoy-listener" ./cmd/listener)
 # The binary under proof, checkable after the run: the source it was built from, what a changed
@@ -356,8 +368,7 @@ ENVOY_API_TOKEN="$(cat "$work/envoy-token")" ENVOY_LISTEN_HOST=127.0.0.1 ENVOY_M
   python3 "$held_port" exec --port-file "$work/listener.port" --fd-env ENVOY_LISTEN_FD --env 'PORT={port}' -- \
   "$work/envoy-listener" >"$work/listener.log" 2>&1 &
 listener_pid=$!
-until_true 30 "the Envoy listener's port" test -s "$work/listener.port"
-envoy_port=$(<"$work/listener.port")
+port_of "the Envoy listener" "$work/listener.port" "$listener_pid" envoy_port "$work/listener.log"
 until_true 60 "the Envoy listener to answer /v1/sessions" \
   curl -fsS -H "@$work/envoy-auth-header" "http://127.0.0.1:$envoy_port/v1/sessions"
 envoy_role() { curl -fsS -H "@$work/envoy-auth-header" "http://127.0.0.1:$envoy_port/v1/roles/$1"; }

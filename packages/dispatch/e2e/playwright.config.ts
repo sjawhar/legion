@@ -34,8 +34,10 @@ function resolveReuseServers(): boolean {
 // A listing (`--list`) starts no server and runs no spec, so it needs no harness: it is read from
 // argv before a `--` separator, and yields to a UI token, since `--ui`/`--ui-*` outrank the
 // computed list mode (`lib/cli/testActions.js:52`, `:62`) and a UI session runs specs. The test is
-// deliberately loose (any `--list`, whatever precedes it): `--grep --list` is a real run that
-// skips the refusals below and then meets Playwright's own refusal, with no spec run.
+// loose (any `--list`, whatever precedes it), and Playwright reads the `--list` of `--grep --list`
+// or `--grep-invert --list` as the option's value, which is a real run. So a listing is exempt only
+// from the unset-ports refusal: with every port unset nothing is targeted, and such a run fails at
+// e2e/preflight.ts; with any port set it meets the reuse refusal below like any run.
 function isListMode(argv: readonly string[]): boolean {
   if (argv.some((arg) => arg === "--ui" || arg.startsWith("--ui-"))) return false;
   const separator = argv.indexOf("--");
@@ -48,15 +50,16 @@ function isListMode(argv: readonly string[]): boolean {
 // module, every worker that re-imports it, and every helper that reads a port at import see the
 // real ports when they evaluate. Without it, the run targets servers a person started: every
 // port set and DISPATCH_E2E_REUSE_SERVERS=1, since e2e/seed.ts truncates the database those
-// servers hold. Anything else but a listing is refused here, before a single spec runs;
-// `harnessPorts()` also refuses a malformed or duplicated port, a listing's included.
+// servers hold. Anything else is refused here, before a single spec runs, but a listing with every
+// port unset; `harnessPorts()` also refuses a malformed or duplicated port, a listing's included.
 const runThroughWrapper =
   "bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts [args] (`bun run " +
   "e2e` builds the SPA and runs the same)";
 const ports = harnessPorts();
 const reuseServers = resolveReuseServers();
 const unset = targeted.filter((listener) => ports[listener.key].port === 0);
-if (!isListMode(process.argv) && unset.length > 0) {
+const listing = isListMode(process.argv);
+if (!listing && unset.length > 0) {
   throw new Error(
     `The Dispatch e2e harness is not running: ${unset.map((listener) => harnessVariables[listener.key]).join(", ")} ` +
       `${unset.length > 1 ? "are" : "is"} unset. This config starts no server; run it through ` +
@@ -66,7 +69,7 @@ if (!isListMode(process.argv) && unset.length > 0) {
       "DISPATCH_E2E_REUSE_SERVERS=1."
   );
 }
-if (!isListMode(process.argv) && !reuseServers) {
+if (!reuseServers && (!listing || unset.length < targeted.length)) {
   const targets = targeted
     .map((listener) => `${ports[listener.key].port} (${harnessVariables[listener.key]})`)
     .join(", ");

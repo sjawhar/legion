@@ -221,6 +221,19 @@ echo "== boot both binaries against the staging issuer"
 # `env -i` clears the descriptor's variable the helper sets, so each names its own: the helper
 # hands the socket over as descriptor 3.
 held_port=$root/scripts/e2e/lib/held-port.py
+# shellcheck source-path=SCRIPTDIR source=lib/port-file.sh
+. "$root/scripts/e2e/lib/port-file.sh"
+# port_of WHAT FILE PID VAR LOG reads the port held-port.py wrote to FILE into VAR, failing with
+# LOG the moment PID exits first (read_port_file, lib/port-file.sh).
+port_of() {
+  local rc=0
+  read_port_file "$2" "$3" "$4" || rc=$?
+  case $rc in
+    0) ;;
+    1) fail "$1 exited before it held a port" "$5" ;;
+    *) fail "$1 held no port within ${port_file_seconds}s" "$5" ;;
+  esac
+}
 python3 "$held_port" exec --port-file "$work/dispatch.port" --fd-env DISPATCH_LISTEN_FD -- \
   "${dispatch_env[@]}" DISPATCH_LISTEN_FD=3 DISPATCH_PORT='{port}' \
   DISPATCH_OIDC_ISSUER="$issuer" DISPATCH_OIDC_AUDIENCE=dispatch \
@@ -230,15 +243,9 @@ python3 "$held_port" exec --port-file "$work/listener.port" --fd-env ENVOY_LISTE
   "${listener_env[@]}" ENVOY_LISTEN_FD=3 PORT='{port}' ENVOY_OIDC_ISSUER="$issuer" ENVOY_OIDC_AUDIENCE=envoy \
   "$work/listener" >"$work/listener.log" 2>&1 &
 listener_pid=$!
-for i in $(seq 1 60); do
-  [ -s "$work/dispatch.port" ] && [ -s "$work/listener.port" ] && break
-  kill -0 "$dispatch_pid" 2>/dev/null || fail "dispatch exited before it held a port" "$work/dispatch.log"
-  kill -0 "$listener_pid" 2>/dev/null || fail "the listener exited before it held a port" "$work/listener.log"
-  [ "$i" = 60 ] && fail "the binaries held no port within 30s" "$work/dispatch.log"
-  sleep 0.5
-done
-dispatch_port=$(<"$work/dispatch.port")
-listener_port=$(<"$work/listener.port")
+dispatch_port='' listener_port=''
+port_of dispatch "$work/dispatch.port" "$dispatch_pid" dispatch_port "$work/dispatch.log"
+port_of "the listener" "$work/listener.port" "$listener_pid" listener_port "$work/listener.log"
 dispatch_url="http://127.0.0.1:$dispatch_port"
 listener_url="http://127.0.0.1:$listener_port"
 # A binary that refuses to boot is a dead pid, not a slow one: say so at once, with its log,

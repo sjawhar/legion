@@ -277,7 +277,8 @@ func TestStartRefusesAnInheritedSocketLegionYAMLDoesNotName(t *testing.T) {
 }
 
 // heldSocket listens on a loopback port the kernel chooses and returns a descriptor of its own for
-// the socket, which stays listening once the listener is closed, and the port.
+// the socket, which stays listening once the listener is closed, and the port. The descriptor is
+// closed when t ends, if its caller has not closed it first.
 func heldSocket(t *testing.T) (*os.File, int) {
 	t.Helper()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")

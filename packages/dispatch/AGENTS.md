@@ -1100,8 +1100,11 @@ a person started and left listening; pair it with that harness's own `DATABASE_U
 `e2e/seed.ts` truncates the database the server holds. `CI` takes no part in that decision. A
 deployed run passes `FAKE_ENVOY_PORT` to the acceptance Compose file, which derives the target's
 `ENVOY_URL` from that same value; the README's acceptance recipe wires the pair. A listing
-(`--list`, with no `--ui`) is the one exception: it starts no server and runs no spec, so the
-config lets it evaluate with no ports and no harness.
+(`--list`, with no `--ui`) with every harness port unset is the one exception: it targets nothing,
+so the config lets it evaluate with no harness. The argv test is loose, and Playwright reads the
+`--list` of `--grep --list` as `--grep`'s value, a real run; with no port set that run fails at
+`e2e/preflight.ts`, and with any port set a listing meets the reuse refusal like any other run, so
+it asks for `DISPATCH_E2E_REUSE_SERVERS=1` or the ports unset.
 
 `bun run dispatch:local` (`e2e/local-instance.ts`) is that harness, left running and seeded: it
 starts the harness through `e2e/harness-start.ts`, then imports the e2e modules that read a port
