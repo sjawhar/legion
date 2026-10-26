@@ -2,37 +2,35 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-278",
-  "completed": "2026-10-26T22:08:06Z",
+  "completed": "2026-10-26T22:29:54Z",
   "generation": 3,
-  "round": 3,
-  "answersReview": "review round 4 (5659622475) at code head 17dd17ec: threads PRRT_kwDORFy7ds6weGXu and PRRT_kwDORFy7ds6weGXy, each replied to and resolved; the review's Fast-follow, which the architect said to do now, is done (RouteReachUnknownMarker)",
+  "round": 4,
+  "answersTest": "test.json generation 3 round 3 (fail): the 'only' in skills/dispatch/SKILL.md:48 and three CHANGELOG clauses (an agent's reply in an ask reaches its followers); the architect's scope: the tester's wording word for word, plus a merge of main only on a reported conflict",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2225",
-  "headSha": "bc62db616f0e1adee66148369c546612f407f51f",
+  "headSha": "73874ccb5a5c037e50301f87d58105a15a1a25d1",
+  "mergedMain": "ba9a24e2 after GitHub reported CONFLICTING (packages/pi-envoy/CHANGELOG.md, both sides kept); fingerprint 035fd5e7… → ec72728b…, PR comment 6428853595; MERGEABLE after the push",
   "proof": [
     {
-      "criterion": "Finding 1: the skill line says what a claim and a route bring and that only a subscription brings agents' activity",
+      "criterion": "Agent-facing text is true: the skill line and the three CHANGELOG clauses no longer say a subscription is the only way agents' activity arrives",
       "surface": "repository text and the skills word guard",
-      "command": "sed -n 46,48p skills/dispatch/SKILL.md; find skills/dispatch skills/dispatch-first skills/dispatch-writing-specs -type f | xargs cat | wc -w; cd packages/pi-envoy && bun test src/skills-guard.test.ts; cd packages/pi-legion && bun test src/skills-guard.test.ts",
-      "observed": "line 48: 'A claim, or `dispatch issue-update --route session:<your id>` (`--route ''` on release), brings a person's answers, comments and messages; only `envoy_subscribe notifications.dispatch.issue.<KEY>.>` brings agents' activity.'; line 46 keeps the legion-label sentence; 1998 words; guards 10 pass and 13 pass",
-      "headSha": "bc62db616f0e1adee66148369c546612f407f51f",
-      "negativeControl": "at 17dd17ec, line 48 offered the route 'for anything else', which publisher.go:480 contradicts for agents' events (Notify is false for agent actors)"
+      "command": "sed -n 48p skills/dispatch/SKILL.md; grep -rn 'only a subscription to the issue brings' packages --include=CHANGELOG.md; find skills/dispatch skills/dispatch-first skills/dispatch-writing-specs -type f | xargs cat | wc -w; cd packages/pi-envoy && bun test src/skills-guard.test.ts; cd packages/pi-legion && bun test src/skills-guard.test.ts",
+      "observed": "line 48: 'A claim, or `dispatch issue-update --route session:<your id>` (`--route ''` on release), brings a person's answers, comments and messages; for agents' activity, `envoy_subscribe notifications.dispatch.issue.<KEY>.>`.'; no 'only a subscription' clause left; changelogs read 'a subscription to the issue brings other agents' activity, beyond a reply in an ask the session follows'; 1997 words; guards 10 pass and 13 pass",
+      "headSha": "73874ccb5a5c037e50301f87d58105a15a1a25d1",
+      "negativeControl": "at bc62db61 the line said 'only `envoy_subscribe …` brings agents' activity', which the tester's live case agent-ask-reply-reaches-asker disproved ({adv-c:1, adv-p:1} with no subscription)"
     },
     {
-      "criterion": "Fast-follow: one RouteReachUnknownMarker renders the issue header's and the ask card's marker unchanged",
-      "surface": "Dispatch browser suite: real Go server built from the checkout, production SPA bundle, Chromium",
-      "command": ". /legion/harness/e2e-env.sh && cd packages/dispatch && bun run e2e -- recipients-claim.e2e.ts followers.e2e.ts --project chromium --retries 0",
-      "observed": "8 passed, including 'unfollowing a follower while a role route's holder is unknown says the route may still reach it, under the issue page's marker', which reads the header's issue-route-unknown marker and asserts the ask card's marker title equals it",
-      "headSha": "bc62db616f0e1adee66148369c546612f407f51f",
-      "negativeControl": "the scenario failed with only the unknown-role dialog fix removed (generation 3 round 1); web unit tests for inbox and issue 273 pass"
+      "criterion": "Delivery unchanged at the merged head",
+      "surface": "real envoy-dispatch built from the head, natsd, Postgres 17 + pgvector, fake Envoy listener",
+      "command": ". /legion/harness/env.sh && DATABASE_URL='postgres://postgres@127.0.0.1:5433/claimant?sslmode=disable' bash scripts/e2e/dispatch-claimant-delivery.sh",
+      "observed": "summary: 9 ok, 0 FAIL, PASS in 55s",
+      "headSha": "73874ccb5a5c037e50301f87d58105a15a1a25d1",
+      "negativeControl": "a binary built from main fails the claimant cases (generation 3 round 1: 5 ok, 4 FAIL); no Go file of this PR changed since"
     }
   ],
   "filesChanged": [
-    "c897583f: skills/dispatch/SKILL.md",
-    "2324017e: packages/claude-envoy/CHANGELOG.md, packages/pi-envoy/CHANGELOG.md, packages/envoy/CHANGELOG.md (claim/route/subscription split; Reaches entry without the removed dot), packages/envoy/AGENTS.md (an agent's events reach a claimant only through a subscription)",
-    "bc62db61: packages/dispatch/web/src/features/issue/RouteReach.tsx (RouteReachUnknownMarker), IssueHeader.tsx, features/inbox/AskRecipients.tsx, packages/dispatch/AGENTS.md"
+    "c0701b8e: skills/dispatch/SKILL.md, packages/claude-envoy/CHANGELOG.md, packages/pi-envoy/CHANGELOG.md, packages/envoy/CHANGELOG.md",
+    "73874ccb: merge of main ba9a24e2 (packages/pi-envoy/CHANGELOG.md resolved)"
   ],
-  "deviations": [
-    "RouteReachUnknownMarker takes the test id as a prop: the issue header passes issue-route-unknown and the ask card none, since the issue page can show both and a duplicate test id would break getByTestId."
-  ],
+  "deviations": [],
   "openQuestions": []
 }
