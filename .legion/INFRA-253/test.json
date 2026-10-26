@@ -2,55 +2,78 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-253",
-  "completed": "2026-10-26T10:04:00Z",
-  "headSha": "bd64de9846128dea7244472e02a6a91a36299424",
-  "round": 2,
+  "completed": "2026-10-26T12:10:00Z",
+  "headSha": "c432d8ef102884a3e7751707556ec8f03fe38a4e",
+  "round": 3,
   "implementerProof": {
     "verdict": "verified",
-    "how": "Round 1 (3fb9e2a0) re-ran the implementer's commands in the pod: Stage 1 PASS twice, held-port.test.ts 5 pass, the HoldPort regression, e2e-local.test.sh 7 PASS, e2e-local.sh PASS, the deploy-probe test 15 PASS, the claude-envoy smoke PASS and the daemon scratch-Dispatch tests PASS. I also read A2 run 40292180529 (success; head job: round 1-3, copies 1-4 all pass). Round 2's fix commit bd64de984612 changes only scripts/e2e/stage2-tmux-supervision.sh, docs/site/media/walkthroughs/legion-operator/record-casts.sh and the variable lists of two tests. The Go binaries and every round-1 surface are byte-identical between 3fb9e2a0 and bd64de98, so the round-1 real-surface results stand, and this round drove the changed scripts."
+    "how": "Drove the implementer's round-3 proofs independently at c432d8ef: a Playwright listing with no harness (`--list` → 'Total: 1680 tests in 88 files', no server started) and the bare non-listing refusal; held-port.py exec --from under a darwin simulation. I rebuilt envoy-dispatch, envoy-listener and legion at c432d8ef and re-ran the round-1 surfaces the refactor and the main merge touch (Stage 1, the listener and legion start matrices, the search scripts)."
   },
   "failures": [],
   "failed": 0,
-  "resolvedFromRound1": "CI test job red at 3fb9e2a0 (daemon_keeper_pid unbound in smoke-cleanup.test.ts and stage3-4b13b-notes.test.ts): at bd64de98, `bun test scripts/e2e/lib/smoke-cleanup.test.ts scripts/e2e/lib/stage3-4b13b-notes.test.ts` → 13 pass, 0 fail in the pod. CI at bd64de98 is still queued.",
+  "mergeCheck": "c432d8ef merges main (8298fc710323) for a GitHub-reported conflict. main touched 13 files the PR also changes. For the four code files among them (daemon cmd/legion/main.go and main_test.go, internal/daemon/daemon.go, dispatch e2e/playwright.config.ts), the PR's own +/- lines from main are identical before and after the merge (a13a0366..9a26a4a6 vs 8298fc71..c432d8ef: 0 differing lines). The code changed since bd64de98 anyway (9729362, 9a26a4a6), so this was a full round, not a fingerprint re-check.",
   "proof": [
     {
-      "criterion": "Added sites: scripts/e2e/verifiers-staging-token.sh boots envoy-dispatch and envoy-listener on held sockets (held-port.py exec under env -i, *_LISTEN_FD=3, port '{port}'), with no second bind",
-      "surface": "pod: the script's env arrays (lines 161-176) and its boot block (lines 218-264) ran verbatim; dev-oidc-issuer stands in for the staging issuer and the pod's local Postgres 17 + pgvector for the script's container (the architect accepted both stand-ins; the pod cannot create a Job)",
-      "command": "bash $TMPDIR/tester/verifiers-boot.sh (MODE=mismatch for the control)",
-      "observed": "`dispatch on 29756, listener on 21903, both naming the issuer at boot`. Each port file equals the address the binary logged (`msg=\"dispatch: listening\" addr=127.0.0.1:29756`; `envoy-listener listening … addr 127.0.0.1:21903`). Exactly one socket listens on each port, and its inode is held only by the binary's own pid. The staging token mint stays blocked: the devbox has no kube context for the staging cluster.",
-      "headSha": "bd64de9846128dea7244472e02a6a91a36299424",
-      "negativeControl": "the listener's PORT='{port}' replaced by PORT=1 → `PORT=1 does not match ENVOY_LISTEN_FD=3, a socket listening on 127.0.0.1:40809`, the boot fails, nothing left running"
+      "criterion": "A1c / plan 1b: envoy-dispatch on DISPATCH_LISTEN_FD reads an empty DISPATCH_PORT/DISPATCH_LISTEN_HOST as unset (9a26a4a6), and still refuses a set one that names another address",
+      "surface": "pod: the real envoy-dispatch built at c432d8ef, started through held-port.py exec under env -i against a scratch pgvector database",
+      "command": "bash $TMPDIR/tester/dispatch-empty.sh",
+      "observed": "These serve, with /healthz 200 and `msg=\"dispatch: listening\" addr=127.0.0.1:<port in the port file>`: both unset; DISPATCH_PORT= and DISPATCH_LISTEN_HOST= empty; DISPATCH_PORT='  ' blank; DISPATCH_LISTEN_HOST=127.0.0.1. These exit 1: DISPATCH_LISTEN_HOST=0.0.0.0 (`does not match DISPATCH_LISTEN_FD=3, a socket listening on 127.0.0.1:22802`), DISPATCH_PORT=1, DISPATCH_PORT=0 ('asks for a port the kernel chooses … set it to 34110 or leave it unset') and DISPATCH_PORT=abc.",
+      "headSha": "c432d8ef102884a3e7751707556ec8f03fe38a4e",
+      "negativeControl": "DISPATCH_PORT=1 beside the held socket → exit 1: `DISPATCH_PORT=1 does not match DISPATCH_LISTEN_FD=3, a socket listening on 127.0.0.1:62989`"
     },
     {
-      "criterion": "Added sites: scripts/e2e/lib/bridge-tunnel.sh port-forwards to :0, reads the port from kubectl's Forwarding line, and its watchdog restarts onto a new port",
-      "surface": "pod: bridge-tunnel.sh sourced unchanged, with a kubectl stand-in on PATH that binds 127.0.0.1:0 and prints client-go v0.37.0's line (tools/portforward/portforward.go:423, `Forwarding from %s -> %d` once per address); the architect accepted the stand-in, and a real-kubectl run is blocked (no pods/portforward or services grant for legion-worker; no model route on the devbox)",
-      "command": "bash $TMPDIR/tester/bridge-stub/run.sh v6first|v4first|watchdog|exit-early",
-      "observed": "[::1] line first: rc=0, port 64482 = the stand-in's IPv4 port. [::1] line second: rc=0, port 20350 = the stand-in's IPv4 port. Watchdog (lines 247-293 verbatim): with the port-forward killed, it logged `recovered after 1s on local port 64069; chisel client restarted against it`, the first client (dialing :62890) stopped, and the new one dials http://127.0.0.1:64069. Nothing was left after the stop.",
-      "headSha": "bd64de9846128dea7244472e02a6a91a36299424",
-      "negativeControl": "a stand-in that exits before printing the line (bridge_start lines 208-212 verbatim) → rc=1 in about 1 s, `kubectl port-forward attempt 1 exited before it started forwarding: …` then `FAIL: the bridge's kubectl port-forward never came up`, and no chisel client was started"
+      "criterion": "Plan 1d after 9a26a4a6 (one daemon listen path) and the main merge: legion start serves the handed socket only when legion.yaml names it; the Stage 1 live proof passes",
+      "surface": "pod: the real legion built at c432d8ef; Stage 1 under tmux 3.5a with the pod Postgres",
+      "command": "LEGION_E2E_PG_DSN=<pod pg> bash scripts/e2e/stage1-skeleton.sh; legion start with each socket as fd 3",
+      "observed": "`stage 1 e2e: PASS`, including the keeper restart and the check that only the daemon and keeper hold the listening socket. Refused with exit 1 and the yaml path named: a wildcard socket with the default bind, bind 127.0.0.2, a port one off, a bound-not-listening socket. `--check-config` with LEGION_LISTEN_FD=garbage → 'Config OK', exit 0.",
+      "headSha": "c432d8ef102884a3e7751707556ec8f03fe38a4e",
+      "negativeControl": "legion.yaml port one above the held socket's → exit 1: `port=21192 does not match LEGION_LISTEN_FD=3, a socket listening on 127.0.0.1:21191`"
     },
     {
-      "criterion": "record-casts.sh resolves the real gh as legion controller start does (controllerRealGH)",
-      "surface": "pod: real_gh() extracted verbatim and run under env -i over 11 PATH/LEGION_GH_PATH layouts; devbox: the whole script, run by the INFRA lead's session",
-      "command": "pod: $TMPDIR/tester/gh/rg.sh; devbox: `bash docs/site/media/walkthroughs/legion-operator/record-casts.sh` with the bash gh shim first and LEGION_GH_PATH unset, then the same with LEGION_GH_PATH=$(mise which gh)",
-      "observed": "Pod: a script gh first on PATH, and a symlink to one, are refused. A relative LEGION_GH_PATH, a missing one and no gh at all are refused. An ELF gh is found past relative, empty and non-executable entries and in a directory with a space. An explicit LEGION_GH_PATH is used as given. This matches controller.go:326-352. Devbox with LEGION_GH_PATH set: exit 0, state.cast (223 lines) and controller.cast (137 lines) written, last line `recorded: state controller`.",
-      "headSha": "bd64de9846128dea7244472e02a6a91a36299424",
-      "negativeControl": "devbox, bash shim first and LEGION_GH_PATH unset: exit 1 in the same second, `FAIL setup: the first gh on PATH, /home/sami/.dotfiles/shims/gh, is a script, not the real gh, which legion controller start refuses: set LEGION_GH_PATH …`; no scratch directory or container was created"
+      "criterion": "A1c: envoy-listener on ENVOY_LISTEN_FD (re-run at the new head)",
+      "surface": "pod: the real envoy-listener built at c432d8ef, given each descriptor kind as fd 3",
+      "command": "TBIN=<bin> python3 $TMPDIR/tester/fdmatrix.py listener",
+      "observed": "Same as round 1: loopback v4 and v4-mapped serve (/healthz 200, one descriptor on the listening inode). Refused naming ENVOY_LISTEN_FD without credentials: wildcard, pod-IP, :: and ::ffff:0.0.0.0. Also refused: UDP, unix, bound-only, connected, file, closed fd, fd 2, \"\", \"+3\", \" 3\", a hostname, PORT=0.",
+      "headSha": "c432d8ef102884a3e7751707556ec8f03fe38a4e",
+      "negativeControl": "inherited 0.0.0.0 socket, no credentials → exit 1: `… required when ENVOY_LISTEN_FD=3, a socket listening on 0.0.0.0:49540, is not on loopback`"
     },
     {
-      "criterion": "stage2-tmux-supervision.sh passes its gate checks and runs the daemon on its kept port and the listener on its held socket",
-      "surface": "devbox, run by the INFRA lead's session from a fresh worktree at bd64de98 with no local changes; key-file route with a placeholder key",
-      "command": "LEGION_E2E_MODEL_ROUTE=key-file LEGION_E2E_ANTHROPIC_KEY_FILE=<placeholder> bash scripts/e2e/stage2-tmux-supervision.sh",
-      "observed": "ok: all 6 gate checks (including the two updated expectations, gate-refuses-a-missing-skill and gate-refuses-a-skill-only-a-role-prompt-loads), architect-registers-and-is-ready, envoy-role-held, ready-in-state, task-queued-before-ready-runs-once. The first failing check is model-turn-through-the-route, from the placeholder key (no model route on the box). The checks after it (including restart-readopts on the kept port) did not run.",
-      "headSha": "bd64de9846128dea7244472e02a6a91a36299424",
-      "negativeControl": "the run's own gate refusals pass (another contract, a disabled plugin, no envoy plugin, a missing skill, a prompt-only skill, an unconfigured model role)"
+      "criterion": "Review finding (playwright.config.ts): a listing needs no harness; any non-listing run without the harness is refused, naming e2e/run.ts; the harness still runs the suite",
+      "surface": "pod: the real Playwright CLI and Chromium; bun e2e/run.ts against a scratch pgvector database",
+      "command": "env -u DATABASE_URL bunx playwright test --config e2e/playwright.config.ts --list; the same without --list; FAKE_ENVOY_PORT=1 only; bun e2e/run.ts -- bunx playwright test … --project=chromium --project=chromium-plain-http e2e/smoke.e2e.ts e2e/external-links.e2e.ts e2e/claim.e2e.ts e2e/plain-http-proxy.e2e.ts",
+      "observed": "The listing prints 'Total: 1680 tests in 88 files' (2 for smoke.e2e.ts in chromium) with no server and no DATABASE_URL. A bare run, and one with FAKE_ENVOY_PORT alone, is refused: 'The Dispatch e2e harness is not running: … are unset … run it through e2e/run.ts'. Neither started a server. Through run.ts the harness came up on 5 OS-chosen ports, 6 passed, and no harness process was left.",
+      "headSha": "c432d8ef102884a3e7751707556ec8f03fe38a4e",
+      "negativeControl": "bare `bunx playwright test --config e2e/playwright.config.ts --project=chromium e2e/smoke.e2e.ts` → 'Error: The Dispatch e2e harness is not running: FAKE_ENVOY_PORT, FAKE_GITHUB_PORT, FAKE_BROKER_PORT, DISPATCH_E2E_PORT, PLAIN_HTTP_PORT are unset …'"
+    },
+    {
+      "criterion": "Review finding (held-port.py): exec --from works where MSG_CMSG_CLOEXEC is missing and SO_ACCEPTCONN answers the option's bit (darwin)",
+      "surface": "pod: a real keeper and real exec processes, with held-port.py run under a wrapper that deletes socket.MSG_CMSG_CLOEXEC and makes SO_ACCEPTCONN answer 2 for a listening socket",
+      "command": "python3 $TMPDIR/tester/darwinsim.py scripts/e2e/lib/held-port.py exec --from <keeper sock> --fd-env T_FD -- python3 -c '<list /proc/self/fd; inspect fd 3>' (twice)",
+      "observed": "Both execs: T_FD=3 is a listening socket on the keeper's port (26717), and the command's descriptors are [0, 1, 2, 3, 4], where 4 is its own directory listing (plain python lists [0, 1, 2, 3] with 3 as the listing). No other descriptor of the helper reached the command. A keeper killed with SIGTERM removes its unix socket.",
+      "headSha": "c432d8ef102884a3e7751707556ec8f03fe38a4e",
+      "negativeControl": "the same wrapper, with a keeper that hands over a bound, non-listening TCP socket → exit 1: `held-port: the keeper at …/bad.sock sent a socket that is not a listening TCP socket`"
+    },
+    {
+      "criterion": "A3b after 9a26a4a6 (shared scripts/e2e/lib/port-file.sh wait): search-smoke.sh and searchbench.sh exit 0",
+      "surface": "pod: the real envoy-dispatch built at c432d8ef on held sockets, scratch pgvector databases",
+      "command": "search-smoke.sh and searchbench.sh (pairs) run at the same time with --binary <head envoy-dispatch>; searchbench.sh --binary /bin/false",
+      "observed": "Both exit 0 (smoke 26 output lines; pairs prints its MRR line, with degraded=embedder_unavailable because the pod has no embedder).",
+      "headSha": "c432d8ef102884a3e7751707556ec8f03fe38a4e",
+      "negativeControl": "--binary /bin/false → 'the server exited; its log:', exit 1 in 218 ms, no held-port or server process left"
+    },
+    {
+      "criterion": "Review finding (CI triggers): a change to held-port.py or listenfd starts envoy-and-contracts' dispatch job",
+      "surface": "repository: .github/workflows/envoy-and-contracts.yaml at c432d8ef against `go list -deps ./cmd/dispatch`",
+      "command": "read on.push.paths / on.pull_request.paths (:28, :82) and the dispatch filter (:383-422); compared the filter with the 40 envoy packages `go list -deps ./cmd/dispatch` lists",
+      "observed": "held-port.py is in both workflow-level path lists and in the dispatch filter (:422). Every one of the 40 go-list packages is covered by the dispatch filter, including packages/envoy/listenfd/** (:399) and the two newly listed internal/githubappjwt and internal/id.",
+      "headSha": "c432d8ef102884a3e7751707556ec8f03fe38a4e",
+      "negativeControl": "the same comparison against bd64de98's workflow (the filter before 9729362) leaves packages/envoy/listenfd, internal/githubappjwt and internal/id uncovered, and the workflow lists held-port.py only once (the dispatch filter), not in its push/pull_request path lists: the reviewer's finding, reproduced"
     }
   ],
-  "round1Proof": "The round-1 real-surface proofs at 3fb9e2a0 still hold (unchanged code): envoy-listener refuses 13 bad descriptor kinds and a wildcard socket without credentials; legion start refuses a socket whose address legion.yaml's bind/port do not match, and --check-config ignores LEGION_LISTEN_FD; Stage 1 PASS with LEGION_LISTEN_FD only in the daemon processes; concurrent search-smoke/searchbench exit 0 and /bin/false exits at once; two concurrent Playwright harnesses ran on OS-chosen ports, the bare run refuses, an occupied DISPATCH_E2E_PORT is refused and a SIGTERM leaves nothing. Devbox at 3fb9e2a0: controller-start PASS, broker rig PASS, skill-scenarios services up on held or reported ports.",
-  "ciAtHead": "bd64de98 at 10:04Z: Tests run 40302789174 queued; Legion Envoy and Contracts run 40302789136 queued; Docs run 40302789101 queued; Worker Image run 40302789098 queued; PR Title run 40302906150 pending. envoy-smoke (the first SCM_RIGHTS handoff into a host-network container) has never run: its run at 3fb9e2a0 was cancelled. It stays unproven until CI runs it, and the reviewer must read it.",
-  "blocked": [
-    "Model-turn devbox proofs (stage2 from its model turn on, stage3, stage3-4b13b, claude-backend, dispatch-user-turns): the devbox has no model route (INFRA controller ruling).",
-    "stage4a in bridge mode with real kubectl: the production cluster window is held until at least 15:00Z, there is no model route, and the pod has no pods/portforward grant. The changed part was proved with the stand-in above.",
-    "verifiers-staging-token.sh's staging token mint: no kube context for the verifiers staging cluster. The changed boot block was proved above."
+  "census": "Each `## Contract change census` entry a person invokes was driven at c432d8ef: DISPATCH_LISTEN_FD (the empty, unset, matching and mismatching cases above), ENVOY_LISTEN_FD (the matrix above), LEGION_LISTEN_FD (the refusals and Stage 1 above), the Playwright config's refusal and its listing exemption (above). e2e-local's dropped defaults are unchanged since round 1 (e2e-local.test.sh 7 PASS and e2e-local.sh PASS at 3fb9e2a0; CI envoy-e2e-local success at bd64de98). daemon.Run, cmdtest.FreeTCPPort and rig.sh's pick_port/await_start are code interfaces with no person-facing surface: Stage 1 and the stage tests cover await_start's callers. The wildcard log-text row is not reachable in this pod: it has no IPv6, so a wildcard bind reports 0.0.0.0, not [::].",
+  "ciAtHead": "c432d8ef at 12:09Z: Tests run 40318328337, Legion Envoy and Contracts run 40318328338, Docs run 40318328416 and Worker Image run 40318328341 are all queued; no job has started. Previous head bd64de98, read by job: Tests 40302789174 success (test, lint, typecheck); Docs and Worker Image success; Legion Envoy and Contracts 40302789136, job by job: envoy-smoke success (held-port wrapper image), envoy-go, envoy-infra-go, dispatch-multiprocess, envoy-e2e-local, broker-multiprocess, pi-* and claude-envoy success; dispatch, dispatch-memory and envoy-go-race cancelled because a newer push superseded the run. The diff since then touches held-port.py, the Playwright config and the path filters, so the jobs at c432d8ef must be read before approval.",
+  "notes": [
+    "playwright.config.ts:34-38 says a `--grep --list` run 'meets Playwright's own refusal'. In the pod, `bunx playwright test … --grep --list e2e/smoke.e2e.ts` skips the harness refusal, runs globalSetup (preflight.ts) and fails with 'TypeError: fetch failed … ECONNREFUSED 127.0.0.1', exit 1, with no spec run and no server started. The comment's wording is wrong; the behaviour is safe. Wording only (Fast-follow class).",
+    "Devbox proofs at bd64de98 (round 2) cover stage2 up to its model turn and record-casts; nothing since touches those two scripts except rig.sh's await_port_file now calling port-file.sh's read_port_file, which Stage 1 exercises in the pod. Still blocked as recorded on #2229: the model-turn proofs, stage4a with real kubectl, verifiers' staging token mint."
   ]
 }
