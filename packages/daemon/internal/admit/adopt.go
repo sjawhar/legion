@@ -100,9 +100,10 @@ func (a *Admission) adoptChildren(ctx context.Context, tx pgx.Tx, fact intake.Ch
 // so it takes no slot and no architect of its own, and runs in the tree as any of its todo children
 // does. A candidate is a recorded root of this project in todo whose parent is recorded in a tree
 // other than its own. One that ran as a tree of its own, or carries a run handed over to it, keeps
-// queueing as its own root: taking it out of the line would strand its run with nobody told. A
-// key Reconcile holds, the candidate's or its target's, is left for release to apply first, when
-// respectHolds is set.
+// queueing as its own root: taking it out of the line would strand its run with nobody told. So
+// does one handed over as a root of its own (record.Issue.HandedOverFrom), its old root's
+// re-admission included: the hand-over made it a tree of its own for good. A key Reconcile holds,
+// the candidate's or its target's, is left for release to apply first, when respectHolds is set.
 //
 // It loops until a pass adopts nothing, and returns the issues and slots that pass read: it wrote
 // nothing, so they are the record as it stands. Each adoption makes a root a member, never a root

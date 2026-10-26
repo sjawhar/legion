@@ -52,6 +52,12 @@ func (e *Engine) AdoptionRefusal(ctx context.Context, tx pgx.Tx, issue record.Is
 // gate, the gate needs the root's architect, and the architect needs a slot, whose promotion opens
 // the lifecycle. A root that ran is never adopted (AdoptionRefusal) nor held under an unreleased
 // child of another tree (Ancestry).
+//
+// A root that left another tree as a root of its own (record.Issue.HandedOverFrom: a child its
+// finished tree handed over, or an orphan admitted, carrying a run or not) is the same: it stays
+// its own tree, so neither re-admitting the root it left nor any other tree's release takes it
+// back, though it never took a slot. Only a labelled root that never left a tree and never ran
+// (one a person made a child of a live tree) is adopted.
 func (e *Engine) RanAsRoot(ctx context.Context, tx pgx.Tx, issue record.Issue) (string, error) {
 	project, err := claim.ProjectToken(issue.Project)
 	if err != nil {
@@ -69,6 +75,9 @@ func (e *Engine) RanAsRoot(ctx context.Context, tx pgx.Tx, issue record.Issue) (
 	}
 	if issue.CarriesRun() || issue.TakenBack {
 		return "it carries a run handed over to it as a root of its own", nil
+	}
+	if issue.HandedOverFrom != "" {
+		return "it was handed over as a root of its own", nil
 	}
 	return "", nil
 }

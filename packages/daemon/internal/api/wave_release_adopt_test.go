@@ -430,6 +430,16 @@ func TestReleaseRefusesAChildItCannotAdopt(t *testing.T) {
 				})
 				a.shows(adoptionChild, "todo", adoptionTree, 2, true)
 			}},
+		{name: "a root handed over without a run", child: adoptionChild, code: "CHILD_NOT_ADOPTABLE",
+			reason: adoptionChild + " cannot join the tree of " + adoptionTree + ": it was handed over as a root of its own",
+			seed: func(a *adoptionHarness) {
+				// A child its finished tree handed over carrying no run: it stands admitted with no
+				// mark and took no slot, but re-admission recorded the tree it left.
+				handed := queuedRoot(adoptionChild, "B")
+				handed.Generation, handed.HandedOverFrom = 2, "LEGION-100"
+				a.recordIssue(handed)
+				a.shows(adoptionChild, "todo", adoptionTree, 2, true)
+			}},
 		{name: "a child running in another live tree", child: otherChild, code: "CHILD_IN_OTHER_TREE", reason: "runs in the tree of " + other + ", not " + adoptionTree,
 			seed: func(a *adoptionHarness) {
 				parent := other

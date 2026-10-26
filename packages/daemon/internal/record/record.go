@@ -117,6 +117,14 @@ type Issue struct {
 	// root that ran as a tree of its own (workflow's RanAsRoot), which no release adopts, and
 	// cleared when adoption takes the record into a tree.
 	Ancestry []string
+	// HandedOverFrom is the key of the tree the issue left when it became a root of its own:
+	// re-admission (admit.Admission.readmit) writes it whenever it moves a member of another tree
+	// into a tree of its own, a child its finished tree handed over (carrying its run or not) or an
+	// orphan a person admitted, and never clears it, a root's re-admission of itself included. Such
+	// a root stays its own tree (workflow's RanAsRoot): no admission sweep or release of children
+	// adopts it, into the tree it left or any other, and no ancestry hold holds it. Empty for every
+	// other record.
+	HandedOverFrom string
 }
 
 // Repository is the repository the record names (Repo) in the spelling the record keeps: what

@@ -746,14 +746,18 @@ func readmittable(stored record.Issue) bool {
 }
 
 // readmit records a lingering or closed root's todo, or an orphan's, as a new generation waiting
-// for a slot, taking o's title, parent, rank, Dispatch chain (as the engine's Ancestry
-// takes it; a carried orphan takes none) and sequence. A root starts a fresh generation: its facts
-// clear across its whole tree, as do those of an orphan readmitted without carry. An orphan
+// for a slot, taking o's title, parent, rank, Dispatch chain (as the engine's Ancestry takes it;
+// a root that left another tree takes none) and sequence. A root starts a fresh generation: its
+// facts clear across its whole tree, as do those of an orphan readmitted without carry. An orphan
 // readmitted with carry (one that started a phase) is the same work moving from a finished root to
 // a root of its own, so its phase, phase rows, gate and pull request (with its observed head) carry
 // into the new generation, and its promotion starts both its architect and the role of that
 // carried phase. A merged pull request is never observed as merged again, and a review, acceptance
 // or READY would otherwise rerun work already decided or landed.
+//
+// An issue leaving another tree, a hand-over or an orphan, carried or not, records that tree
+// (record.Issue.HandedOverFrom) and stays a tree of its own from then on: re-admitting or reopening
+// the root it left never takes it back (workflow's RanAsRoot), nor does any other tree's release.
 //
 // The record's record.Issue.TakenBack is the workflow's mark that the issue has stood in a phase of
 // its own (workflow.Engine.transition writes it), and promotion exempts a root carrying it as a tree
@@ -789,8 +793,14 @@ func (a *Admission) readmit(ctx context.Context, tx pgx.Tx, stored record.Issue,
 	stored.HandedOver = true
 	stored.Parent = record.ParentOf(o.Parent)
 	stored.Tree = stored.Key
-	// A carried orphan carries its run, and the run's mark (record.Issue.TakenBack) with it, so it
-	// ran as a tree of its own (workflow's RanAsRoot) and records no chain to be held under.
+	// A member leaving another tree, carried or not, is a root of its own from here on: the tree it
+	// left is recorded so nothing adopts it back (workflow's RanAsRoot). A root re-admitting itself
+	// keeps whatever its record says.
+	if oldTree != stored.Key {
+		stored.HandedOverFrom = oldTree
+	}
+	// A root that left another tree, a carried orphan with its run's mark (record.Issue.TakenBack)
+	// among them, stays its own tree (workflow's RanAsRoot) and records no chain to be held under.
 	stored.Ancestry = nil
 	if !orphan {
 		stored.Phase, stored.Hold, stored.ReadyPendingVersion = phase.Admitted, nil, nil
@@ -798,7 +808,8 @@ func (a *Admission) readmit(ctx context.Context, tx pgx.Tx, stored record.Issue,
 		if !claim.IsTreeRoot(stored.Key, oldTree) {
 			stored.TakenBack = false
 		}
-		// Read once the mark is settled: a child handed over without its run ran nothing as a root.
+		// Read once the mark and the tree it left are settled: only a root re-admitting itself that
+		// never ran and never left another tree keeps a chain.
 		if stored.Ancestry, err = a.engine.Ancestry(ctx, tx, stored, o.Ancestry); err != nil {
 			return fmt.Errorf("read whether re-admitted %s ran as a tree of its own: %w", stored.Key, err)
 		}
