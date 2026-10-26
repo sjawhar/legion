@@ -1,0 +1,62 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-366",
+  "completed": "2026-10-26T00:34:00Z",
+  "proof": [
+    {
+      "criterion": "A1, A2 (with the pinned clause), A4, A5, R6, R7, A10 and A15 (document halves) and the older document references route",
+      "surface": "Local Dispatch harness: the real Go server built from the head (packages/dispatch/e2e/run-server.sh on port 8777, Postgres 17 + pgvector on the issue volume, database infra366_driver) and the real dispatch CLI (packages/envoy-client/bin/dispatch.ts)",
+      "command": "DISPATCH_URL=http://127.0.0.1:8777 DISPATCH_TOKEN=e2e-token PROJECT=CORE bash packages/dispatch/e2e/acceptance/block-graph.sh",
+      "observed": "exit 0 and 37 PASS lines, from 'setup created CORE-1 in CORE' to 'close CORE-1 is done' (output in https://github.com/sjawhar/legion/pull/2210#issuecomment-6405581703)",
+      "headSha": "042c0195551087bb6ccbdb578fb9c5396062df9d",
+      "negativeControl": "The same driver against a server built at main 81a3b5ef (fresh database infra366_neg, port 8778): exit 1, 'FAIL: A1 ?to=X answers: HTTP 400, want 200: {\"code\":\"INVALID_REFERENCE\",...}'"
+    },
+    {
+      "criterion": "The Referenced by panel keeps its shape, two citing blocks show two rows, a block of another document shows as that document's row linked to the citing block, and a pinned link keeps its version's text, says how the block stands since and opens that version (deployment instructions: a browser test that fails before the change and passes at its head)",
+      "surface": "Dispatch's own browser suite (Playwright, chromium and iphone) against the real server and a signed-in dashboard",
+      "command": "cd packages/dispatch && DATABASE_URL=postgres://postgres@127.0.0.1:55432/infra366_e2e_head?sslmode=disable DISPATCH_E2E_PORT=8787 FAKE_ENVOY_PORT=9031 FAKE_GITHUB_PORT=9032 FAKE_BROKER_PORT=9034 bun run e2e -- e2e/block-references.e2e.ts",
+      "observed": "6 passed (1.5m): the three tests on chromium and on iphone",
+      "headSha": "042c0195551087bb6ccbdb578fb9c5396062df9d",
+      "negativeControl": "The same test file copied alone into a git archive of main 81a3b5ef (bun install --frozen-lockfile, database infra366_e2e_base, port 8788): 6 failed, each on a new-behaviour assertion (no 'Artifact · KEY' link at line 89, no row toggle at line 115, no pinned link 'P ships on Monday.' at line 162), none on setup"
+    },
+    {
+      "criterion": "A12: every build answers on one database, an older build skips the block kind it does not know, and the new build indexes older text and what an older build writes during the roll with no command run",
+      "surface": "Two real server builds on one Postgres database (infra366_a12): main 81a3b5ef (carries INFRA-364's registry) and the head, serving one public origin side by side, then the pre-registry build 371d6c87 as the negative witness; throwaway driver $TMPDIR/infra366/a12.sh",
+      "command": "OLD=dispatch-base-81a3b5ef NEW=dispatch-head NEG=<371d6c87 build> WORKSPACE=$LEGION_WORKSPACE bash $TMPDIR/infra366/a12.sh",
+      "observed": "Before the switch main answers ?to=<block X> with 400 and lists no block edge; head lists main's older comment and dashboard-URL message under ?to=X 2 s after its start; main beside head answers 200 on every read with no block node and referenced_by_count 3 equal to its list of 3; head lists the spec's citing block in place of the document row; main's edit of Q citing X and its #b- comment list under ?to=X on head 18 s later; with main stopped, head's ?to=X, block-links (cites.md -> spec and spec -> spec: [\"x_block\"]) and 'dispatch read --ref X' pass (output in https://github.com/sjawhar/legion/pull/2210#issuecomment-6405581703)",
+      "headSha": "042c0195551087bb6ccbdb578fb9c5396062df9d",
+      "negativeControl": "The pre-registry build 371d6c87 on the same database: ?to=dispatch://ACME-1 answers HTTP 500, its log 'dispatch: API handler failed error=\"graph node kind \\\"block\\\" is not addressable\"'"
+    },
+    {
+      "criterion": "Coverage count (architect, 2026-10-25): every document's blocks are graph nodes, and a document left unindexed is named and then healed by the block-index loop",
+      "surface": "The head server on the A12 database (port 8792) read by packages/dispatch/e2e/acceptance/block-coverage.sh",
+      "command": "DISPATCH_URL=http://127.0.0.1:8792 DISPATCH_TOKEN=e2e-token PROJECT=ACME bash packages/dispatch/e2e/acceptance/block-coverage.sh",
+      "observed": "documents=3 indexed=3 not_indexed=0",
+      "headSha": "042c0195551087bb6ccbdb578fb9c5396062df9d",
+      "negativeControl": "Deleting cites-md's document_blocks rows and marking it owed (document_block_versions.version = null): documents=3 indexed=2 not_indexed=1 naming dispatch://ACME-2/artifact/cites-md; 25 s later, with no command run, not_indexed=0"
+    }
+  ],
+  "filesChanged": [
+    "packages/envoy/internal/dispatch/text: block references and pins in the reference grammar (#b-<id>, @v<N>), EncodeBlockID, shared test tables",
+    "packages/envoy/internal/dispatch/store/migrations 0117-0122: document_blocks, block_refs, document_block_texts, document_block_versions, the owed triggers and the block-grammar seed",
+    "packages/envoy/internal/dispatch/refs: IndexBlocks, block texts and pins, graph readers for block nodes, BlockLinks, the older-text rebuild",
+    "packages/envoy/internal/dispatch/docs: block indexing in every version write, the block-index reconciliation loop",
+    "packages/envoy/internal/dispatch/api: block nodes in /references, GET /api/v1/block-links, routes table",
+    "packages/envoy/cmd/dispatch: the block-index loop, the lease pool, README and AGENTS",
+    "packages/contracts: GraphNode kind block, BlockPin, BlockLink(s), encodeBlockId, decodeBlockId, parseBlockFragment, reference tables",
+    "packages/envoy-client: dispatch read of a block reference, other tools refuse one",
+    "packages/dispatch: dashboard block links, pinned-version view, one Referenced by row per citing block; e2e/block-references.e2e.ts; e2e/acceptance/block-graph.sh and block-coverage.sh",
+    "packages/claude-envoy/dist: regenerated",
+    "docs, skills/dispatch, CHANGELOGs",
+    "packages/contracts/CHANGELOG.md and skills/dispatch/references/reading.md: forward-merge resolution against main 81a3b5ef (042c0195)"
+  ],
+  "trickyParts": [
+    "Every document version write now also indexes its blocks (about eight more statements in the version's transaction). TestAHealthyRoomUnderWritesIsNeverRefused passes on an idle pod at the head (27-41 writes against its floor of 20, main 36-54), but failed twice under CPU contention while other Go packages ran in parallel (11-15 writes); main passed the same contended run (24 writes). CI's runners are the judge.",
+    "A12 needs every build on one public origin (text.Extract keeps a link outside DISPATCH_SERVER_URL a plain URL); the throwaway driver fronts the second build with a Host-rewriting proxy, as one load balancer does in production."
+  ],
+  "deviations": [
+    "Local checks that failed for environmental reasons: api TestIssueRanksStayOrderedPastLowercaseDigitsAndProductionShapedMoves (the harness database's collation is C, which the test refuses), pi-envoy prepack's 'bin/dispatch' mode (the workspace checkout is 0775), and four load-sensitive tests in the parallel suite runs (envoy-client's 10 s command timeout, claude-envoy's tmux SIGTERM bound, dispatch's AgentsPage and ConversationTab O(1) scroll test), each passing when re-run alone at this head (envoy-client's three times by name; main's copy also passes)."
+  ],
+  "openQuestions": []
+}
