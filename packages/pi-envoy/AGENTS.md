@@ -64,14 +64,13 @@ entry of the session file (`sessionManager.getEntries()`) on each restore, and a
 recorded attempt is a card with no accept call. So a replay, a frame forged inside the minute for
 a Send that arrived as a card, and one forged after a restart are each a card, while a person's
 retry, a new attempt, can still be their turn. The accept is keyed like every Dispatch write: it
-carries one `Idempotency-Key` and asks again under it after a transport failure, a 5xx, a 429 or
-a `409 KEY_IN_FLIGHT` inside its 10 s bound (at 0, 1, 3 and 7 s), so an accept whose 200 was lost
-becomes the person's turn on the replay rather than a card, against a Dispatch that runs the
-keyed layer, which the client proves by Dispatch's own echo of the key or by its `/healthz`
+carries one `Idempotency-Key` and asks again under it after a transport failure, a 5xx, a 408, a
+429 or a `409 KEY_IN_FLIGHT` inside its 10 s bound (at 0, 1, 3 and 7 s), so an accept whose 200
+was lost becomes the person's turn on the replay rather than a card, against a Dispatch that runs
+the keyed layer, which the client proves by Dispatch's own echo of the key or by its `/healthz`
 (`packages/envoy-client/README.md`); against an older one it is a single attempt, then the card.
-Every refusal, every error and the
-timeout (10 s), a Dispatch configuration that no longer resolves included, keeps the card and
-posts nothing.
+Every refusal, every error and the timeout (10 s), a Dispatch configuration that no longer
+resolves included, keeps the card and posts nothing.
 
 On a host with `pi.sendUserInput` (our Oh My Pi fork, can1357/oh-my-pi#14323) the body runs as if
 typed at the session's terminal (`runTypedInput`), with the Dispatch message id as the host's `tag`

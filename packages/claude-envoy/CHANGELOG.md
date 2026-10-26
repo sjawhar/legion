@@ -5,12 +5,12 @@
 ### Added
 
 - Every Dispatch write the bundled `dispatch` command and the channel server make carries one
-  `Idempotency-Key` and is asked again under it after a transport failure, a 5xx, a 429 or a
-  `409 KEY_IN_FLIGHT` (INFRA-258, through `@sjawhar/envoy-client`'s `DispatchClient`), so a write
-  whose answer was lost is made once. A session's reply to a delivery attempt goes through that
-  client too, keyed and bounded by its deadline. The hooks read Dispatch and write nothing, so
-  they carry no key. `dist/dispatch.js`, `dist/envoy-channel.js` and `dist/session-hook.js` are
-  rebuilt.
+  `Idempotency-Key` and is asked again under it after a transport failure, a 5xx, a 408, a 429, a
+  `409 KEY_IN_FLIGHT` or an attempt that hears nothing for 20 s (INFRA-258, through
+  `@sjawhar/envoy-client`'s `DispatchClient`), so a write whose answer was lost is made once. A
+  session's reply to a delivery attempt goes through that client too, keyed and bounded by its
+  deadline. The hooks read Dispatch and write nothing, so they carry no key.
+  `dist/dispatch.js`, `dist/envoy-channel.js` and `dist/session-hook.js` are rebuilt.
 - The `dispatch` command (`dist/dispatch.js`) takes `dispatch issues --all`, which reads the whole
   filtered issue listing in one request rather than a page, for a caller that must not miss or
   repeat a row while the list changes under it. `--all` with `--limit` or `--offset` is a usage

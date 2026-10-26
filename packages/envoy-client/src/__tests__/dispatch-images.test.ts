@@ -65,9 +65,10 @@ function dispatch(
     const answered = routes(target.pathname, init);
     if (answered !== undefined) return answered;
     if (method === "POST" && target.pathname.endsWith("/artifacts")) {
-      // The client sends a form encoded once, so every attempt of the write carries its bytes. Bun
-      // decodes a part's type from its file name, so the type is read from the part as sent.
-      const sent = new Uint8Array(init.body as Uint8Array);
+      // The client sends a form encoded once, so every attempt of the write carries its bytes, as
+      // a stream once they pass a megabyte. Bun decodes a part's type from its file name, so the
+      // type is read from the part as sent.
+      const sent = new Uint8Array(await new Response(init.body).arrayBuffer());
       const form = await new Response(sent, {
         headers: init.headers as Record<string, string>,
       }).formData();

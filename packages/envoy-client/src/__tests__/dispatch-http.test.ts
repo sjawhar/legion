@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { ArchitectureSource, IssueSummary } from "@legion/contracts";
-import { DispatchClient, DispatchGatewayError } from "../dispatch-http";
+import { DISPATCH_WRITE_RETRY, DispatchClient, DispatchGatewayError } from "../dispatch-http";
 import { fakeSearchResponse } from "./fake-search-response";
 
 interface RecordedRequest {
@@ -591,6 +591,7 @@ describe("DispatchClient", () => {
       page(404, "Not Found"),
     ]);
     const client = new DispatchClient("http://dispatch.test", "secret", fetchImpl, undefined, {
+      ...DISPATCH_WRITE_RETRY,
       pausesMs: [],
       withinMs: 0,
     });

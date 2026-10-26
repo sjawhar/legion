@@ -36246,9 +36246,18 @@ var DEFAULT_ISSUE_PAGE_LIMIT = 50;
 var ASK_TURNS = ["human", "agent"];
 var DELIVERY_CAPABILITIES = ["aside", "btw", "steer"];
 var IDEMPOTENCY_KEY_HEADER = "Idempotency-Key";
+var IDEMPOTENCY_REPLAYED_HEADER = "Idempotency-Replayed";
+var IDEMPOTENCY_KEY_MAX = 128;
+var IDEMPOTENCY_KEY_PATTERN = new RegExp(`^[A-Za-z0-9._:-]{1,${IDEMPOTENCY_KEY_MAX}}$`);
 var IDEMPOTENCY_KEY_IN_FLIGHT = "KEY_IN_FLIGHT";
 var IDEMPOTENCY_KEY_COMMITTED = "KEY_COMMITTED";
 var IDEMPOTENCY_ANSWER_NOT_KEPT = "ANSWER_NOT_KEPT";
+function retriesUnderKey(status, code) {
+  return status >= 500 || status === 408 || status === 429 || status === 409 && code === IDEMPOTENCY_KEY_IN_FLIGHT;
+}
+function answerNotKept(status, replayed, body) {
+  return replayed && status >= 200 && status < 300 && typeof body === "object" && body !== null && Reflect.get(body, "code") === IDEMPOTENCY_ANSWER_NOT_KEPT;
+}
 var IDEMPOTENCY_KEY_TTL_MS = 24 * 60 * 60 * 1000;
 var IDEMPOTENCY_LEASE_MS = 60 * 1000;
 var DELIVERY_DUPLICATE_WINDOW_MS = 72 * 60 * 60 * 1000;
@@ -38309,10 +38318,22 @@ class DispatchWriteUnsettledError extends Error {
   last;
   attempts;
   name = "DispatchWriteUnsettledError";
-  constructor(last, attempts) {
-    const answer = last instanceof DispatchGatewayError ? last.answer : `${last.code}: ${last.message}`;
-    const why = last.code === IDEMPOTENCY_KEY_IN_FLIGHT ? "Dispatch was still running an earlier attempt of the write" : "an earlier attempt of the write may have reached Dispatch";
-    super(`${answer} (the last of ${attempts} attempts), and ${why}, so it may or may not have ` + "taken effect: check whether it did before retrying it.", { cause: last });
+  constructor(last, attempts, unanswered) {
+    let answer;
+    let why = "an earlier attempt of the write may have reached Dispatch";
+    if (last instanceof DispatchGatewayError) {
+      answer = last.answer;
+    } else if (last instanceof DispatchServiceError) {
+      answer = `${last.code}: ${last.message}`;
+      if (last.code === IDEMPOTENCY_KEY_IN_FLIGHT) {
+        why = "Dispatch was still running an earlier attempt of the write";
+      }
+    } else {
+      answer = unanswered ?? last.message;
+      why = "an attempt of the write may have reached Dispatch";
+    }
+    const tried = attempts === 1 ? "its only attempt" : `the last of ${attempts} attempts`;
+    super(`${answer} (${tried}), and ${why}, so it may or may not have taken effect: check whether ` + "it did before retrying it.", { cause: last });
     this.last = last;
     this.attempts = attempts;
   }
@@ -38346,7 +38367,8 @@ function requestSignal(signal) {
 }
 var DISPATCH_WRITE_RETRY = {
   pausesMs: [1000, 2000, 4000, 8000],
-  withinMs: 30000
+  withinMs: 30000,
+  silenceMs: 20000
 };
 function pauseFor(ms, signal) {
   const { promise: promise2, resolve, reject } = Promise.withResolvers();
@@ -38372,39 +38394,67 @@ function retryAfterMs(response) {
   const at = Date.parse(value);
   return Number.isNaN(at) ? 0 : Math.max(0, at - Date.now());
 }
-var KEY_ECHOING_ORIGINS = new Set;
-var KEY_LAYER_PROBES = new Map;
+var KEYED_LAYER_MEMORY_MS = 5 * 60000;
+var KEYED_LAYER_SEEN = new Map;
+var KEYED_LAYER_PROBES = new Map;
 var KEY_LAYER_PROBE_MS = 5000;
 function keyEchoed(response, key) {
   const echoed = response.headers.get(IDEMPOTENCY_KEY_HEADER)?.trim() ?? "";
   return echoed.replace(/^"(.*)"$/, "$1") === key;
 }
-async function writeAnswer(response) {
+var STREAMED_BODY_MIN = 1 << 20;
+var STREAMED_BODY_CHUNK = 64 << 10;
+function attemptBody(body, headers, progress) {
+  const bytes = typeof body.content === "string" ? new TextEncoder().encode(body.content) : body.content;
+  if (bytes.byteLength < STREAMED_BODY_MIN)
+    return { body: body.content, headers };
+  let sent = 0;
+  const stream = new ReadableStream({
+    pull(controller) {
+      progress();
+      if (sent >= bytes.byteLength) {
+        controller.close();
+        return;
+      }
+      const end = Math.min(sent + STREAMED_BODY_CHUNK, bytes.byteLength);
+      controller.enqueue(bytes.subarray(sent, end));
+      sent = end;
+    }
+  });
+  return { body: stream, headers: { ...headers, "Content-Length": String(bytes.byteLength) } };
+}
+
+class WriteAttemptSilent extends Error {
+  name = "WriteAttemptSilent";
+  constructor(silenceMs) {
+    super(`made no progress for ${silenceMs / 1000} s, so it was cut off`);
+  }
+}
+async function writeAnswer(response, key) {
+  const echoed = keyEchoed(response, key);
+  if (response.ok)
+    return { response, again: false, reached: false, echoed, unjudged: false };
   const { status } = response;
-  if (status >= 500)
-    return { response, again: true, reached: true };
-  if (status === 408 || status === 429)
-    return { response, again: true, reached: false };
-  if (status !== 409)
-    return { response, again: false, reached: false };
   const text = await response.text();
-  let code;
+  let shape = {};
   if (isJson(response)) {
     try {
-      code = asErrorShape(JSON.parse(text)).code;
+      shape = asErrorShape(JSON.parse(text));
     } catch {
-      code = undefined;
+      shape = {};
     }
   }
-  const running = code === IDEMPOTENCY_KEY_IN_FLIGHT;
+  const again = retriesUnderKey(status, shape.code);
   return {
     response: new Response(text, {
       status,
       statusText: response.statusText,
       headers: response.headers
     }),
-    again: running,
-    reached: running
+    again,
+    reached: status >= 500 || again && status === 409,
+    echoed,
+    unjudged: !echoed && typeof shape.error === "string"
   };
 }
 function whyNotAPage(answer) {
@@ -38864,62 +38914,111 @@ class DispatchClient {
     };
     if (body !== undefined)
       headers["Content-Type"] = body.type;
-    const init = {
-      method,
-      headers,
-      signal: this.#signal,
-      ...body === undefined ? {} : { body: body.content }
-    };
-    if (method !== "POST" && method !== "PATCH")
-      return this.fetchImpl(url2, init);
+    if (method !== "POST" && method !== "PATCH") {
+      return this.fetchImpl(url2, {
+        method,
+        headers,
+        signal: this.#signal,
+        ...body === undefined ? {} : { body: body.content }
+      });
+    }
     const key = crypto.randomUUID();
     headers[IDEMPOTENCY_KEY_HEADER] = key;
-    const { pausesMs, withinMs, pause = pauseFor, now = () => performance.now() } = this.writeRetry;
-    const started = now();
+    const { pausesMs, withinMs, silenceMs, pause = pauseFor } = this.writeRetry;
+    const request = `${method} ${url2}`;
+    const started = this.#now();
     let reached = false;
     for (let attempt = 1;; attempt++) {
       let answer;
       let thrown;
       try {
-        const response = await this.fetchImpl(url2, init);
-        if (keyEchoed(response, key))
-          KEY_ECHOING_ORIGINS.add(this.#baseUrl);
-        answer = await writeAnswer(response);
+        answer = await writeAnswer(await this.#attempt(url2, method, headers, body, silenceMs), key);
+        if (answer.echoed)
+          KEYED_LAYER_SEEN.set(this.#baseUrl, this.#now());
         if (!answer.again)
           return answer.response;
         reached ||= answer.reached;
       } catch (error48) {
         const name = error48 instanceof Error || error48 instanceof DOMException ? error48.name : "";
-        if (this.#signal.aborted || name === "AbortError" || name === "TimeoutError")
-          throw error48;
+        if (!(error48 instanceof WriteAttemptSilent) && (this.#signal.aborted || name === "AbortError" || name === "TimeoutError")) {
+          throw this.#ended(error48, request, attempt, true);
+        }
         thrown = error48;
         reached = true;
       }
       const scheduled = pausesMs[attempt - 1];
       const wait = Math.max(scheduled ?? 0, answer === undefined ? 0 : retryAfterMs(answer.response));
-      const inTime = scheduled !== undefined && now() - started + wait <= withinMs;
-      if (!inTime || !await this.#runsKeyedLayer()) {
-        if (answer === undefined)
-          throw thrown;
-        return this.#unsettled(method, url2, answer.response, reached, attempt);
+      const inTime = scheduled !== undefined && this.#now() - started + wait <= withinMs;
+      if (!inTime || !(answer?.echoed || await this.#runsKeyedLayer(answer?.unjudged ?? false))) {
+        if (answer !== undefined) {
+          return this.#unsettled(method, url2, answer.response, reached, attempt);
+        }
+        if (thrown instanceof WriteAttemptSilent) {
+          throw new DispatchWriteUnsettledError(thrown, attempt, `${request} ${thrown.message}`);
+        }
+        throw thrown;
       }
       await answer?.response.body?.cancel().catch(() => {
         return;
       });
-      await pause(wait, this.#signal);
+      try {
+        await pause(wait, this.#signal);
+      } catch (error48) {
+        throw this.#ended(error48, request, attempt, reached);
+      }
     }
   }
-  async#runsKeyedLayer() {
-    if (KEY_ECHOING_ORIGINS.has(this.#baseUrl))
+  #now() {
+    return this.writeRetry.now?.() ?? performance.now();
+  }
+  async#attempt(url2, method, headers, body, silenceMs) {
+    const cut = new AbortController;
+    const silent = () => cut.abort(new WriteAttemptSilent(silenceMs));
+    let timer = setTimeout(silent, silenceMs);
+    let answered = false;
+    const progress = () => {
+      if (answered)
+        return;
+      clearTimeout(timer);
+      timer = setTimeout(silent, silenceMs);
+    };
+    try {
+      return await this.fetchImpl(url2, {
+        method,
+        signal: AbortSignal.any([this.#signal, cut.signal]),
+        ...body === undefined ? { headers } : attemptBody(body, headers, progress)
+      });
+    } catch (error48) {
+      if (cut.signal.aborted && !this.#signal.aborted)
+        throw cut.signal.reason;
+      throw error48;
+    } finally {
+      answered = true;
+      clearTimeout(timer);
+    }
+  }
+  #ended(error48, request, attempts, mayHaveReached) {
+    const reason = this.#signal.aborted ? this.#signal.reason : error48;
+    const timedOut = (reason instanceof Error || reason instanceof DOMException) && reason.name === "TimeoutError";
+    if (!timedOut || !mayHaveReached || !(error48 instanceof Error))
+      return error48;
+    return new DispatchWriteUnsettledError(error48, attempts, `${request} had no definitive answer when its deadline ended it`);
+  }
+  async#runsKeyedLayer(unjudged) {
+    const origin = this.#baseUrl;
+    if (unjudged)
+      KEYED_LAYER_SEEN.delete(origin);
+    const seen = KEYED_LAYER_SEEN.get(origin);
+    if (seen !== undefined && this.#now() - seen < KEYED_LAYER_MEMORY_MS)
       return true;
-    let probe = KEY_LAYER_PROBES.get(this.#baseUrl);
+    let probe = KEYED_LAYER_PROBES.get(origin);
     if (probe === undefined) {
-      probe = this.#probeKeyedLayer();
-      KEY_LAYER_PROBES.set(this.#baseUrl, probe);
+      probe = this.#probeKeyedLayer().finally(() => KEYED_LAYER_PROBES.delete(origin));
+      KEYED_LAYER_PROBES.set(origin, probe);
     }
     const runs = await probe;
     if (runs)
-      KEY_ECHOING_ORIGINS.add(this.#baseUrl);
+      KEYED_LAYER_SEEN.set(origin, this.#now());
     return runs;
   }
   async#probeKeyedLayer() {
@@ -38929,7 +39028,7 @@ class DispatchClient {
         headers: { Accept: "application/json", Authorization: `Bearer ${this.token}` },
         signal: AbortSignal.any([this.#signal, AbortSignal.timeout(KEY_LAYER_PROBE_MS)])
       });
-      if (!response.ok || !isJson(response))
+      if (!isJson(response))
         return false;
       const health = await response.json();
       return typeof health === "object" && health !== null && Reflect.get(health, "idempotency_keys") === true;
@@ -38974,7 +39073,7 @@ class DispatchClient {
       const error48 = asErrorShape(payload);
       if (typeof error48.error === "string") {
         if (response.status === 409 && error48.code === IDEMPOTENCY_KEY_COMMITTED) {
-          throw new DispatchWriteLandedError(error48.code, response.status, method, url2);
+          throw new DispatchWriteLandedError(IDEMPOTENCY_KEY_COMMITTED, response.status, method, url2);
         }
         throw new DispatchServiceError(error48.code ?? `HTTP_${response.status}`, response.status, error48.error, error48.candidates, error48.current, error48.mismatches);
       }
@@ -38993,9 +39092,9 @@ class DispatchClient {
       const reason = reasonPhrase === "" ? "" : ` ${reasonPhrase}`;
       throw new DispatchGatewayError(response.status, `${method} ${url2} answered ${response.status}${reason} with ${body}, ${GATEWAY_PAGE}`, gatewayAdvice(method, response.status));
     }
-    const replay = asErrorShape(payload);
-    if (replay.code === IDEMPOTENCY_ANSWER_NOT_KEPT && typeof replay.error === "string") {
-      throw new DispatchWriteLandedError(replay.code, response.status, method, url2);
+    const replayed = response.headers.get(IDEMPOTENCY_REPLAYED_HEADER)?.trim() === "?1";
+    if (answerNotKept(response.status, replayed, payload)) {
+      throw new DispatchWriteLandedError(IDEMPOTENCY_ANSWER_NOT_KEPT, response.status, method, url2);
     }
     return payload;
   }

@@ -3890,23 +3890,28 @@ describe("executeDispatchTool", () => {
     });
 
   // A request that got no answer, the client's timeout and a transport error, each with the
-  // message the client reports for it and the attempts the write made: a timeout is the call's
-  // deadline and ends it, while a transport failure is asked again under the write's key until its
-  // five attempts run out. The reason's post and the close's PATCH each add their own account
-  // after it, as a sentence of its own, since both messages end one.
+  // message the client reports for it (given the request it names) and the attempts the write
+  // made: a timeout is the call's deadline and ends it, saying the write may or may not have taken
+  // effect, while a transport failure is asked again under the write's key until its five attempts
+  // run out. The reason's post and the close's PATCH each add their own account after it, as a
+  // sentence of its own, since both messages end one.
   const unanswered = [
     [
       (): Response => {
         throw new DOMException("The operation timed out.", "TimeoutError");
       },
-      "The operation timed out.",
+      (request: string) =>
+        `${request} had no definitive answer when its deadline ended it (its only attempt), and ` +
+        "an attempt of the write may have reached Dispatch, so it may or may not have taken " +
+        "effect: check whether it did before retrying it.",
       1,
     ],
     [
       (): Response => {
         throw new TypeError("fetch failed");
       },
-      "Dispatch at http://dispatch.test is unreachable: fetch failed. If the Dispatch URL " +
+      (_request: string) =>
+        "Dispatch at http://dispatch.test is unreachable: fetch failed. If the Dispatch URL " +
         "changed, restart this agent process so it picks up the new configuration.",
       5,
     ],
@@ -3951,7 +3956,12 @@ describe("executeDispatchTool", () => {
         5,
       ],
       ...unanswered.map(
-        ([fail, told, tries]) => [fail, `${told}${unknownSentence}`, tries] as const
+        ([fail, told, tries]) =>
+          [
+            fail,
+            `${told("POST http://dispatch.test/api/v1/issues/ACME-175/messages")}${unknownSentence}`,
+            tries,
+          ] as const
       ),
       [
         (): Response => {
@@ -4087,7 +4097,12 @@ describe("executeDispatchTool", () => {
       "since retrying this call posts its reason again";
     for (const [patch, expected, attempts] of [
       ...unanswered.map(
-        ([fail, told, tries]) => [fail, `${told}${unknownSentence}`, tries] as const
+        ([fail, told, tries]) =>
+          [
+            fail,
+            `${told("PATCH http://dispatch.test/api/v1/issues/ACME-175")}${unknownSentence}`,
+            tries,
+          ] as const
       ),
       [() => refusal(502, "HTTP_502", "Bad Gateway"), `HTTP_502: Bad Gateway${unknown}`, 5],
       [

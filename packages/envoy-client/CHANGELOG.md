@@ -46,24 +46,34 @@
   `DispatchClient.#send` mints a UUID per `POST` and `PATCH` call, sends it on every attempt of
   that call, and encodes the body once (a multipart form under a fixed boundary), so Dispatch runs
   the write once however many attempts reach it. A transport failure, any 5xx, a 408, a 429 and
-  Dispatch's `409 KEY_IN_FLIGHT` are asked again under the key: at most five attempts, 1, 2, 4 and
-  8 s apart, a longer `Retry-After` waited instead, none starting more than 30 s after the first,
-  all inside the call's 60 s deadline. A `GET`, `PUT` or `DELETE` carries no key and is sent once,
-  and a timeout or a cancellation is never retried. A write whose attempts run out throws the last
-  attempt's own error, except where that answer alone would say the write never took effect while
-  an earlier attempt may have reached Dispatch (a gateway's 408 or 429, Dispatch's 429, and
-  `409 KEY_IN_FLIGHT`): that is a `DispatchWriteUnsettledError`, naming the last answer, the
+  Dispatch's `409 KEY_IN_FLIGHT` (`retriesUnderKey`, shared with the page through
+  `@legion/contracts`) are asked again under the key: at most five attempts, 1, 2, 4 and 8 s apart,
+  a longer `Retry-After` waited instead, none starting more than 30 s after the first, all inside
+  the call's 60 s deadline. An attempt that goes 20 s without progress before its answer begins
+  (`DispatchWriteRetry.silenceMs`) is cut off and asked again the same way, so a write Dispatch is
+  slow to finish gets `409 KEY_IN_FLIGHT` and then its replay; a body of a megabyte or more goes
+  out as a stream with its `Content-Length`, the connection taking each 64 KiB of it counting as
+  progress, so an upload still going out is never cut off. A `GET`, `PUT` or `DELETE` carries no
+  key and is sent once, and the call's deadline or its cancellation is never retried. A write
+  whose attempts run out throws the last attempt's own error, except where that answer alone would
+  say the write never took effect while an earlier attempt may have reached Dispatch (a gateway's
+  408 or 429, Dispatch's 429, and `409 KEY_IN_FLIGHT`), or where there was no answer at all after
+  an attempt that may have reached Dispatch (its last attempt cut off for silence, or the deadline
+  ending it): that is a `DispatchWriteUnsettledError`, naming the request or the last answer, the
   attempts and that the write may or may not have taken effect. A write Dispatch made whose answer
-  is gone - `409 KEY_COMMITTED`, or a 2xx replay carrying `ANSWER_NOT_KEPT` - is a
-  `DispatchWriteLandedError`, never asked again: `dispatch` exits 0 on it, printing that the write
-  was made and how to read it back, unless it was a step before the command's own write (a picture
-  upload, the closing reason of `issue-update --status done`), which fails the command with what to
-  do next. A write is resent only
-  against a Dispatch this process has seen run the keyed layer: Dispatch's echo of the key on its
-  answer (`Idempotency-Key`), remembered per process and origin, or, where no echo could arrive (a
-  transport failure, a gateway's answer), one cached `GET /healthz` read per process and origin
-  answering `idempotency_keys: true`. Against a Dispatch without the layer nothing is resent, and
-  the write is reported as one that may or may not have taken effect.
+  is gone - `409 KEY_COMMITTED`, or a replayed 2xx reading `ANSWER_NOT_KEPT` (`answerNotKept`) - is
+  a `DispatchWriteLandedError`, its `code` an `IdempotencyLandedCode`, never asked again:
+  `dispatch` exits 0 on it, printing that the write was made and how to read it back, unless it
+  was a step before the command's own write (a picture upload, the closing reason of
+  `issue-update --status done`), which fails the command with what to do next. A write is resent
+  only against a Dispatch this process has seen run the keyed layer within the last five minutes
+  (`KEYED_LAYER_MEMORY_MS`): an answer echoing the key (`Idempotency-Key`), or, where no echo could
+  arrive (a transport failure, a silence cut, a gateway's answer), a `GET /healthz` answering
+  `idempotency_keys: true`, read whatever its status, since Dispatch answers 503 while its
+  database or NATS is down. Only a yes is remembered, so a rollback to a Dispatch without the layer
+  is noticed within five minutes, and Dispatch's own refusal that echoes no key asks `/healthz`
+  afresh whatever the process remembers. Against a Dispatch without the layer nothing is resent,
+  and the write is reported as one that may or may not have taken effect.
 - `DispatchClient.deliveryReply` sends a session's reply to a delivery attempt
   (`POST /api/v1/{messages,comments}/{id}/reply`), which `postDeliveryReply` used to send as a
   bare `fetch`: it is now keyed, retried and bounded by the client's 60 s deadline, and its

@@ -248,23 +248,34 @@ reach it and answers a repeat with the first answer (`packages/envoy/cmd/dispatc
 "Keyed writes"); a `GET`, `PUT` or `DELETE` carries none and is sent once. The body is encoded once
 for the whole call, a multipart form under a boundary of its own, since a retry whose bytes differ
 from the first attempt's is a different request to Dispatch and its key is refused. A transport
-failure, any 5xx, a 408, a 429 and Dispatch's `409 KEY_IN_FLIGHT` are asked again under that key,
-`DISPATCH_WRITE_RETRY`'s pace: at most five attempts, 1, 2, 4 and 8 s apart, a longer `Retry-After`
-waited instead, and no attempt started more than 30 s after the first, all inside the call's own
-60 s deadline, so a Dispatch that is down holds a `dispatch` command, and the session waiting on
-it, no longer than that. The call's timeout or its cancellation ends the write at once and is
-never retried. Any other answer - a 2xx, a replay, `422 KEY_REUSED`, another 4xx - is the answer,
-at once.
+failure, any 5xx, a 408, a 429 and Dispatch's `409 KEY_IN_FLIGHT` (`retriesUnderKey`, the rule
+the page shares from `@legion/contracts`) are asked again under that key, `DISPATCH_WRITE_RETRY`'s
+pace: at most five attempts, 1, 2, 4 and 8 s apart, a longer `Retry-After` waited instead, and no
+attempt started more than 30 s after the first. An attempt that goes 20 s without progress before
+its answer begins (`silenceMs`) is cut off and asked again the same way, so a write Dispatch is
+slow to finish is answered `409 KEY_IN_FLIGHT` and then replayed rather than waited on for the
+whole deadline. Progress is the connection taking the body: a body of a megabyte or more goes out
+as a stream read 64 KiB at a time, with its `Content-Length`, and each read restarts the bound, so
+an upload on a slow line is never cut off while it is still going out; a smaller body leaves in
+one write. All of it sits inside the call's own 60 s deadline, so a Dispatch that is down holds a
+`dispatch` command, and the session waiting on it, no longer than that. The call's deadline and
+its cancellation end the write at once and are never retried. Any other answer - a 2xx, a replay,
+`422 KEY_REUSED`, another 4xx - is the answer, at once.
 
-A write is asked again only against a Dispatch this process has seen run the keyed layer, since
-an earlier Dispatch ignores the header and would run a retried write a second time. The proof is
-Dispatch's own echo of the request's key on its answer (`Idempotency-Key: <key>`), remembered per
-process and per origin, so one of Dispatch's 5xx, 429 or `409 KEY_IN_FLIGHT` is resent at once. A
-transport failure and a gateway's answer carry no echo, so before the first resend the client
-reads `GET /healthz` once per process and origin, bounded at 5 s and cached, and resends only on
-`idempotency_keys: true`; a probe that fails, times out, answers no JSON or lacks the field means
-no resend at all, and the attempt's own failure is the call's. The probe runs only after a write
-has already failed, so the ordinary path makes no request of its own.
+A write is asked again only against a Dispatch this process has lately seen run the keyed layer,
+since an earlier Dispatch ignores the header and would run a retried write a second time. A
+failing answer that echoes the request's key (`Idempotency-Key: <key>`) is that proof itself, so
+one of Dispatch's 5xx, 429 or `409 KEY_IN_FLIGHT` is resent at once. A transport failure, a
+silence cut and a gateway's answer carry no echo, so they rely on what an echo, or a
+`GET /healthz` answering `idempotency_keys: true`, showed for that origin within the last five
+minutes (`KEYED_LAYER_MEMORY_MS`), and otherwise read `/healthz` before the first resend, bounded
+at 5 s. Its status is not read, since Dispatch answers 503 while its database or NATS is down and
+still says `idempotency_keys`; a probe that fails, times out, answers no JSON or lacks the field
+means no resend, and the attempt's own failure is the call's. Only a yes is remembered, and only
+for those five minutes, so a rollback to a Dispatch without the layer is noticed within that
+bound. Dispatch's own refusal that carries no echo says its layer did not judge the request, so
+it sets the memory aside and `/healthz` decides afresh. The probe runs only after a write has
+already failed, so the ordinary path makes no request of its own.
 
 A non-2xx answer is thrown as `DispatchServiceError`. Dispatch's own refusal, JSON with a string
 `error`, is the error's message under its `code` (`HTTP_<status>` when the server set none), with
@@ -294,13 +305,18 @@ Those are a `DispatchWriteUnsettledError`, deliberately not a `DispatchServiceEr
 caller reads one as a refusal Dispatch decided: its message is the last answer, the number of
 attempts, whether an earlier attempt may have reached Dispatch or Dispatch was still running one,
 and that the write may or may not have taken effect, so check before running it again - a new
-command is a new key. A write Dispatch made whose answer is gone is a `DispatchWriteLandedError`
-(`code`, `status`): `409 KEY_COMMITTED`, a write that landed before its answer was lost, which
-Dispatch will not run again, or a 2xx replay carrying `ANSWER_NOT_KEPT`, a first answer larger than
-Dispatch keeps. It is no refusal and no `DispatchServiceError`, and it is never asked again. Its
-message is the one line the session reads: the method and URL were made, why the answer is gone,
-and to read what it made back with `dispatch read` or the matching list. The `dispatch` command
-exits 0 on one and records `landed_without_answer: <code>` in its ledger entry. A step before the
+command is a new key. A write that ends with no answer at all is one too, naming the request: its
+last attempt cut off for silence ("made no progress for 20 s, so it was cut off"), or the call's
+deadline ending it while an attempt was out or after one that may have reached Dispatch ("had no
+definitive answer when its deadline ended it"); `last` is the cut or the timeout. A write Dispatch
+made whose answer is gone is a `DispatchWriteLandedError` (`code`, an `IdempotencyLandedCode`, and
+`status`): `409 KEY_COMMITTED`, a write that landed before its answer was lost, which Dispatch will
+not run again, or a replayed 2xx (`Idempotency-Replayed: ?1`) reading `ANSWER_NOT_KEPT`, a first
+answer larger than Dispatch keeps (`answerNotKept`, shared with the page). It is no refusal and no
+`DispatchServiceError`, and it is never asked again. Its message is the one line the session
+reads: the method and URL were made, why the answer is gone, and to read what it made back with
+`dispatch read` or the matching list. The `dispatch` command exits 0 on one and records
+`landed_without_answer: <code>` in its ledger entry. A step before the
 command's own write that lands this way fails the command (exit 1) with that line and what it
 means: a picture upload (nothing else was written: run the call again, which uploads it as its
 next version), or the closing reason of `issue-update --status done` (the close was not sent: read
