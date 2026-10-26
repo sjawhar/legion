@@ -197,6 +197,33 @@ type Notice struct {
 	// the legion.yaml line that records a decision; a gap is the operator's to close or decide, a
 	// live row's the session's environment to fix, and neither is the controller's.
 	OpenCapabilities []string `json:"openCapabilities,omitempty"`
+	// Blocked is every issue Legion is waiting to start because it waits on a Dispatch issue
+	// nobody has finished (INFRA-225), with what each still waits on. Only a tick controller
+	// notice carries it, as OpenCapabilities does: the tick is the turn that posts the day's
+	// report, so the controller names each there and takes nothing for it. A tick with nothing
+	// blocked carries none.
+	Blocked []BlockedIssue `json:"blocked,omitempty"`
+}
+
+// BlockedIssue is one issue Legion is waiting to start and the issues it waits on that are not
+// done, in the order Dispatch lists them (blockers.Unfinished): a root admission skips, or a
+// child the workflow holds at `admitted`. It lives here, below both readers, so the tick notice
+// above and the state's `blocked` (api.BlockedIssue, an alias of this type) carry one shape
+// rather than two that could drift.
+type BlockedIssue struct {
+	Issue     string   `json:"issue"`
+	BlockedBy []string `json:"blockedBy"`
+}
+
+// MarshalJSON keeps `blockedBy` an array on the wire, empty rather than `null`: the plugin's
+// strict reader refuses a null.
+func (b BlockedIssue) MarshalJSON() ([]byte, error) {
+	type wire BlockedIssue
+	out := wire(b)
+	if out.BlockedBy == nil {
+		out.BlockedBy = []string{}
+	}
+	return json.Marshal(out)
 }
 
 // CatchUp is what a tree's root architect is told of its tree when its claim is ready at a launch
@@ -275,8 +302,8 @@ const (
 // SuperviseOp identifies a worker-session operation: "start" starts, resumes, or retries the role's
 // claim; "suspend" stops its process and keeps its session; "tree_close" is the tree's close —
 // the request that ends the claim, the tree's root claim included; "issue_close" is a child issue's
-// close as done, which ends the claim as a tree close does and drops its session, since the
-// issue's volume the session lived on is released with the close (IssueSuspend's Release). There
+// close as done, which ends the claim as a tree close does and drops its session, since the issue
+// is finished and its next run, should a person set it todo again, starts fresh. There
 // is no plain stop: only a close ends a claim from the workflow, so the op states which.
 type SuperviseOp string
 
@@ -348,16 +375,15 @@ type LingerClose struct {
 
 func (LingerClose) OutboxKind() OutboxKind { return OutboxKindLingerClose }
 
-// IssueSuspend retains an issue's shared resources after its close stops every role. Both
-// workflow generations and this row's ID fence a later re-admission or start. Release is a child's
-// close as done: once every claim of the issue has retired, the issue's Sandbox and the volume it
-// owns are deleted rather than kept, so a later todo re-enters the child fresh. An absent field
-// reads false, the close that keeps.
+// IssueSuspend stops an issue's pod after its close has stopped every role, and deletes the
+// Sandbox the roles ran in (runtime.IssueSuspender). Both workflow generations and this row's ID
+// fence a later re-admission or start. The issue keeps nothing: its disk is its pod's own and
+// goes with the pod, so a later todo re-enters the issue fresh on a Sandbox its next launch
+// makes.
 type IssueSuspend struct {
 	Tree           string `json:"tree"`
 	Generation     uint64 `json:"generation"`
 	TreeGeneration uint64 `json:"treeGeneration"`
-	Release        bool   `json:"release,omitempty"`
 }
 
 func (IssueSuspend) OutboxKind() OutboxKind { return OutboxKindIssueSuspend }

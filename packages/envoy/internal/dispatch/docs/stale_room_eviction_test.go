@@ -141,7 +141,7 @@ func TestAWriteOnTheOtherProcessClosesThisProcessesRoomWithinTheRoundTrip(t *tes
 	waitForPeerDocument(t, browser, storedMarkdown(t, pair.database, pair.artifactID))
 
 	started := time.Now()
-	editAsConnectedPeer(t, pair.taskB, pair.artifactID, 2,
+	editAsBrowserPeer(t, pair.taskB, pair.artifactID, 2,
 		model.Actor{Kind: "user", ID: "bob"}, appendBlocks(t, "Bob writes on the other process.\n"))
 	waitForLandedAppends(t, pair.taskB, pair.artifactID)
 	stored := storedMarkdown(t, pair.database, pair.artifactID)
@@ -202,7 +202,7 @@ func TestARoomIsNotEvictedByItsOwnProcessesWrites(t *testing.T) {
 
 	// The same room, left behind by the other process, is evicted: the five decisions above were
 	// made by an evictor that does evict, on a room it was right to leave alone.
-	editAsConnectedPeer(t, pair.taskB, pair.artifactID, 2,
+	editAsBrowserPeer(t, pair.taskB, pair.artifactID, 2,
 		model.Actor{Kind: "user", ID: "bob"}, appendBlocks(t, "Bob writes on the other process.\n"))
 	waitForLandedAppends(t, pair.taskB, pair.artifactID)
 	if note := waitStaleRoomNote(t, notes, pair.artifactID, "the other process's write"); !note.evicted {
@@ -331,7 +331,7 @@ func TestTheLastWriteOfABurstEvictsTheRoomWithoutAnotherNotification(t *testing.
 	if err := pair.taskA.warmLiveDocument(context.Background(), pair.artifactID); err != nil {
 		t.Fatalf("load task A's room: %v", err)
 	}
-	editAsConnectedPeer(t, pair.taskB, pair.artifactID, 2, bob, appendBlocks(t, "Bob types once.\n"))
+	editAsBrowserPeer(t, pair.taskB, pair.artifactID, 2, bob, appendBlocks(t, "Bob types once.\n"))
 	waitForLandedAppends(t, pair.taskB, pair.artifactID)
 	if note := waitStaleRoomNote(t, notes, pair.artifactID, "the burst's first write"); !note.evicted {
 		t.Fatal("the first write on the other process evicted nothing, so the interval holds no eviction to refuse the burst's last write by")
@@ -347,7 +347,7 @@ func TestTheLastWriteOfABurstEvictsTheRoomWithoutAnotherNotification(t *testing.
 
 	// The burst's last write: inside the window, so the interval refuses it, and nothing writes
 	// this document again.
-	editAsConnectedPeer(t, pair.taskB, pair.artifactID, 3, bob, appendBlocks(t, "Bob types again.\n"))
+	editAsBrowserPeer(t, pair.taskB, pair.artifactID, 3, bob, appendBlocks(t, "Bob types again.\n"))
 	waitForLandedAppends(t, pair.taskB, pair.artifactID)
 	if note := waitStaleRoomNote(t, notes, pair.artifactID, "the burst's last write"); note.evicted {
 		t.Fatalf("the write inside the %s window evicted the room again, under readers the eviction before it had not finished re-syncing", staleRoomEvictInterval)
@@ -380,8 +380,8 @@ func TestTheLastWriteOfABurstEvictsTheRoomWithoutAnotherNotification(t *testing.
 //
 // The no-answer path here is the unlocked head read: the pool refuses a caller already holding
 // one of its connections (store.ErrNestedAcquire), which documentChanged meets as it would any
-// failed read. Evict failing is the other way to reach no verdict, and this service's closes
-// cannot be made to fail from a test without a seam in the service itself.
+// failed read. A close an open live write held off is the other way to reach no verdict; its
+// re-arm is asserted by TestAWriteThatOpensBeforeTheCloseTakesItsLockLeavesTheRoomOpen.
 func TestAStaleRoomWhoseReExaminationGetsNoAnswerIsTriedAgainAtTheNextWindow(t *testing.T) {
 	pair := newProcessPair(t)
 	evictor := newStaleRoomEvictor(pair.taskA)
@@ -646,7 +646,9 @@ func TestARoomReExaminedWithAWriteInFlightKeepsItsWindow(t *testing.T) {
 // it on the same two seconds, so the two met again: the reader held text the store replaced for a
 // second window, or until the settlement's third refusal failed the room. The settlement takes the
 // document's lock before it reads anything, and on a room behind the head it is refused under it,
-// so the evictor's confirmation under that lock waits for the refusal and then closes the room.
+// so the evictor's confirmation under that lock waits for the refusal, and the room is then closed
+// by whichever close reserves it first: the evictor's, or the refused settlement's own
+// (reloadRoomBehindHead), which the evictor finds reserved and leaves to it as a verdict.
 func TestAStaleRoomWhoseWindowEndsAsItsSettlementRunsIsEvicted(t *testing.T) {
 	pair := newProcessPair(t)
 	evictor := newStaleRoomEvictor(pair.taskA)
@@ -724,7 +726,7 @@ func TestAStaleRoomWhoseWindowEndsAsItsSettlementRunsIsEvicted(t *testing.T) {
 		t.Fatal("the room behind the head is still resident once its settlement let go of the lock")
 	}
 	if wake := evictor.wakeIn(); wake != 0 {
-		t.Fatalf("the re-examination that closed the room left a window armed (wakeIn = %s), so it reached no verdict", wake)
+		t.Fatalf("the re-examination left a window armed (wakeIn = %s) for a room one of the two closes closed, so it reached no verdict", wake)
 	}
 	if err := stale.failure(); err != nil {
 		t.Fatalf("the room left by failing, not by its eviction: %v", err)
@@ -912,10 +914,10 @@ func TestAnEvictionClosesOnlyTheInstanceItFoundBehind(t *testing.T) {
 
 // A failed room's eviction closes the failed room and nothing that replaced it. The failure
 // evicts on a goroutine of its own, and another close can take the failed instance first - here
-// the stale-room evictor's, which no longer waits for the browser append whose refusal fails a
-// stale room - after which the browser reconnects and a replacement loads at the head with a
-// state of its own. The failure's eviction, closing by name, closed that replacement under the
-// browser that had just synced with it.
+// Evict, which tests and the browser-test harness's quiesce reach; the stale-room evictor's own
+// close refuses a failed room (reserveRoomCloseLocked) - after which the browser reconnects and a
+// replacement loads at the head with a state of its own. The failure's eviction, closing by name,
+// closed that replacement under the browser that had just synced with it.
 func TestAFailedRoomsEvictionLeavesTheReloadThatReplacedIt(t *testing.T) {
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
@@ -944,9 +946,11 @@ func TestAFailedRoomsEvictionLeavesTheReloadThatReplacedIt(t *testing.T) {
 	done := state.failedDone
 	service.unlockState(artifactID, state)
 
-	closed, err := service.evictInstance(ctx, artifactID, failed)
-	if err != nil || !closed {
-		t.Fatalf("close the failed instance first: closed=%v, %v", closed, err)
+	if err := service.Evict(ctx, artifactID); err != nil {
+		t.Fatalf("close the failed instance first: %v", err)
+	}
+	if service.srv.GetDoc(artifactID) == failed {
+		t.Fatal("Evict left the failed instance resident, so nothing here is tested")
 	}
 	if err := service.warmLiveDocument(ctx, artifactID); err != nil {
 		t.Fatalf("reload the room: %v", err)

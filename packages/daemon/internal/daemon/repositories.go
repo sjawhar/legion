@@ -760,8 +760,8 @@ func (w *workflowRuntime) listingAncestry(ctx context.Context, listed []dispatch
 // issue may be the ancestor a person moved, whose roots below it have no event of their own. A
 // re-parent of any issue on a chain is an event of a key already on that chain, so no other root
 // can be moved by it. A recorded issue's event at or below its record's sequence is stale and
-// reads no root again, so a late event never brings back a hold its newer re-parent removed; a
-// fresh one is read as the event shows it, so the moved ancestor is read as moved, and an
+// reads no root again, so a late event never brings back an ancestry hold its newer re-parent
+// removed; a fresh one is read as the event shows it, so the moved ancestor is read as moved, and an
 // unrecorded issue is read as Dispatch shows it now, as any other ancestor is. A failed read of
 // Dispatch while reading one such root again leaves that root's record as it stands, and says
 // so; only a failed read of the issue's own chain fails the preparation, and the event is
@@ -810,8 +810,8 @@ func (w *workflowRuntime) withAncestry(ctx context.Context, issue intake.Dispatc
 }
 
 // queuesUnderParent says whether issue, recorded as recorded (nil when the workflow does not record
-// it), is a root the waiting line may hold under an ancestor's tree: a labelled todo under a
-// Dispatch parent, unrecorded or recorded as a root.
+// it), is a root the waiting line may hold under an unreleased child of an ancestor's tree (the
+// ancestry hold): a labelled todo under a Dispatch parent, unrecorded or recorded as a root.
 func queuesUnderParent(issue intake.DispatchIssue, recorded *record.Issue) bool {
 	return issue.Status == "todo" && issue.HandedOver && issue.Parent != "" &&
 		(recorded == nil || claim.IsTreeRoot(recorded.Key, recorded.Tree))
@@ -823,8 +823,8 @@ type ancestry map[string]string
 
 // chainOf is the keys of key's Dispatch parent chain, read up walk from parent upward to the top,
 // stopping only at a repeated key or back at key; nil when parent is "". It reads no record: it is
-// the chain release_children's own walk reads (api's releasableChild), so a hold lasts exactly
-// while a live root on it could release the issue into its tree (record.Waiting).
+// the chain release_children's own walk reads (api's releasableChild), so an ancestry hold lasts
+// exactly while a live root on it could release the issue into its tree (record.Waiting).
 func (w *workflowRuntime) chainOf(ctx context.Context, walk ancestry, key, parent string) ([]string, error) {
 	var chain []string
 	for ancestor := parent; ancestor != "" && ancestor != key && !slices.Contains(chain, ancestor); {

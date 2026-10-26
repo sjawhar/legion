@@ -112,11 +112,11 @@ func TestAQueuedRootUnderALiveTreeJoinsItLive(t *testing.T) {
 	r.step("release-adopts-from-backlog", r.releaseAdoptsFromBacklog)
 	r.step("release-adopts-infra-214-state", r.releaseAdoptsInfra214State)
 	r.step("held-under-an-unreleased-child", r.heldUnderAnUnreleasedChild)
-	r.step("child-of-a-held-root-waits-with-it", r.childOfAHeldRootWaitsWithIt)
-	r.step("held-past-a-parked-root-on-its-chain", r.heldPastAParkedRootOnItsChain)
-	r.step("held-root-queues-once-its-parent-leaves", r.heldRootQueuesOnceItsParentLeaves)
+	r.step("child-of-an-ancestry-held-root-waits-with-it", r.childOfAnAncestryHeldRootWaitsWithIt)
+	r.step("ancestry-held-past-a-parked-root-on-its-chain", r.ancestryHeldPastAParkedRootOnItsChain)
+	r.step("ancestry-held-root-queues-once-its-parent-leaves", r.ancestryHeldRootQueuesOnceItsParentLeaves)
 	r.step("a-root-that-ran-keeps-queueing", r.aRootThatRanKeepsQueueing)
-	r.step("held-root-queues-once-a-recorded-ancestor-leaves", r.heldRootQueuesOnceARecordedAncestorLeaves)
+	r.step("ancestry-held-root-queues-once-a-recorded-ancestor-leaves", r.ancestryHeldRootQueuesOnceARecordedAncestorLeaves)
 	r.step("release-refuses", r.releaseRefuses)
 }
 
@@ -728,20 +728,20 @@ func (r *childAdoptionLive) heldUnderAnUnreleasedChild() {
 // neither takes a slot or an architect. T's architect's release of K3 alone is refused 409
 // CHILD_IN_OTHER_TREE, naming K3 and H3, and changes nothing. T's architect then releases H3: H3
 // joins T, and K3 moves with it.
-func (r *childAdoptionLive) childOfAHeldRootWaitsWithIt() {
+func (r *childAdoptionLive) childOfAnAncestryHeldRootWaitsWithIt() {
 	t := r.t
 	p, h, k := r.key(13), r.key(14), r.key(15)
 	r.board.place(p, "backlog", r.tree, false)
 	r.note("the Dispatch stand-in shows %s backlog under %s; the daemon has no event of it", p, r.tree)
 	r.publishIssue(h, "todo", p, true, false)
 	r.note("drove %s labelled todo under %s: an issue.updated envelope", h, p)
-	r.recordedAsHeld(h)
+	r.recordedAsAncestryHeld(h)
 	r.publishIssue(k, "todo", h, true, false)
 	r.note("drove %s labelled todo under %s: an issue.updated envelope", k, h)
 	testwait.Eventually(t, "the daemon's record of "+k, func() bool { return r.recorded(k) != nil })
 	recorded := r.inTree(k, h)
 	r.note("read back: the daemon records %s in the tree of %s, parent %s", k, recorded.Tree, *recorded.Parent)
-	r.heldWithASlotFree(h, k)
+	r.ancestryHeldWithASlotFree(h, k)
 	r.refusedInOtherTree(k, h)
 
 	status, failure := r.release(h)
@@ -762,7 +762,7 @@ func (r *childAdoptionLive) childOfAHeldRootWaitsWithIt() {
 // released and never recorded. R6, a labelled todo issue under P6, is held out of the line under T,
 // the live root its chain reaches past Q6, whose own tree is not live, while the slot step 5 freed
 // stands free. T's architect releases R6: it joins T and plans.
-func (r *childAdoptionLive) heldPastAParkedRootOnItsChain() {
+func (r *childAdoptionLive) ancestryHeldPastAParkedRootOnItsChain() {
 	q, p, h := r.key(21), r.key(22), r.key(23)
 	ctx := context.Background()
 	r.board.place(q, "backlog", r.tree, true)
@@ -780,8 +780,8 @@ func (r *childAdoptionLive) heldPastAParkedRootOnItsChain() {
 	r.publishIssue(h, "todo", p, true, false)
 	r.note("drove %s labelled todo under %s: an issue.updated envelope", h, p)
 	testwait.Eventually(r.t, "the daemon's record of "+h, func() bool { return r.recorded(h) != nil })
-	r.heldWithASlotFree(h)
-	r.recordedAsHeld(h)
+	r.ancestryHeldWithASlotFree(h)
+	r.recordedAsAncestryHeld(h)
 
 	status, failure := r.release(h)
 	if status != http.StatusOK {
@@ -799,15 +799,15 @@ func (r *childAdoptionLive) heldPastAParkedRootOnItsChain() {
 // parent, and Dispatch's event of P2 says so: P2 stays unrecorded, and H2, a labelled todo root
 // under no live tree, queues as its own root again and takes the free slot and an architect of its
 // own, as any promoted root does.
-func (r *childAdoptionLive) heldRootQueuesOnceItsParentLeaves() {
+func (r *childAdoptionLive) ancestryHeldRootQueuesOnceItsParentLeaves() {
 	t := r.t
 	p, h := r.key(9), r.key(10)
 	r.board.place(p, "backlog", r.tree, false)
 	r.note("the Dispatch stand-in shows %s backlog under %s; the daemon has no event of it", p, r.tree)
 	r.publishIssue(h, "todo", p, true, false)
 	r.note("drove %s labelled todo under %s: an issue.updated envelope", h, p)
-	r.recordedAsHeld(h)
-	r.heldWithASlotFree(h)
+	r.recordedAsAncestryHeld(h)
+	r.ancestryHeldWithASlotFree(h)
 
 	r.publishIssue(p, "backlog", "", false, false)
 	r.note("drove %s's move to no parent: the Dispatch stand-in shows it backlog with no parent, and its own issue.updated envelope, status backlog, no parent", p)
@@ -843,7 +843,7 @@ func (r *childAdoptionLive) aRootThatRanKeepsQueueing() {
 // chain reaches through Q, while the slot stands free. A person then moves Q to no parent, and
 // Dispatch's event of Q says so: though the daemon records Q, the event reads H5's chain again, and
 // H5 queues as its own root and takes the free slot and an architect of its own.
-func (r *childAdoptionLive) heldRootQueuesOnceARecordedAncestorLeaves() {
+func (r *childAdoptionLive) ancestryHeldRootQueuesOnceARecordedAncestorLeaves() {
 	q, p, h := r.key(18), r.key(19), r.key(20)
 	r.frees(r.key(17), r.key(16), "the root step 9 slotted")
 	ctx := context.Background()
@@ -861,8 +861,8 @@ func (r *childAdoptionLive) heldRootQueuesOnceARecordedAncestorLeaves() {
 	r.note("the Dispatch stand-in shows %s backlog under %s, under %s; the daemon has no event of %s", p, q, tree, p)
 	r.publishIssue(h, "todo", p, true, false)
 	r.note("drove %s labelled todo under %s: an issue.updated envelope", h, p)
-	r.recordedAsHeld(h)
-	r.heldWithASlotFree(h)
+	r.recordedAsAncestryHeld(h)
+	r.ancestryHeldWithASlotFree(h)
 
 	r.publishIssue(q, "backlog", "", false, false)
 	r.note("drove %s's move to no parent: the Dispatch stand-in shows it backlog with no parent, and its own issue.updated envelope, status backlog, no parent", q)
@@ -873,9 +873,9 @@ func (r *childAdoptionLive) heldRootQueuesOnceARecordedAncestorLeaves() {
 	r.note("read back: the daemon records no %s", p)
 }
 
-// recordedAsHeld waits for the daemon's record of key and requires it a root of its own held under
+// recordedAsAncestryHeld waits for the daemon's record of key and requires it a root of its own held under
 // T: its tree its own, T on the Dispatch chain it records (Ancestry).
-func (r *childAdoptionLive) recordedAsHeld(key string) {
+func (r *childAdoptionLive) recordedAsAncestryHeld(key string) {
 	r.t.Helper()
 	testwait.Eventually(r.t, "the daemon's record of "+key, func() bool { return r.recorded(key) != nil })
 	recorded := r.recorded(key)
@@ -885,10 +885,10 @@ func (r *childAdoptionLive) recordedAsHeld(key string) {
 	r.note("read back: the daemon records %s as a root of its own, its Dispatch chain %v", key, recorded.Ancestry)
 }
 
-// heldWithASlotFree requires each of keys, over liveSettle, out of admission.waiting with
+// ancestryHeldWithASlotFree requires each of keys, over liveSettle, out of admission.waiting with
 // no slot, no architect and no launch of an architect of its own, while the cap's other slot
 // stands free: admission.active is T's slot alone.
-func (r *childAdoptionLive) heldWithASlotFree(keys ...string) {
+func (r *childAdoptionLive) ancestryHeldWithASlotFree(keys ...string) {
 	t := r.t
 	t.Helper()
 	deadline := time.Now().Add(liveSettle)

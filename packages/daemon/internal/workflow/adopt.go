@@ -40,11 +40,18 @@ func (e *Engine) AdoptionRefusal(ctx context.Context, tx pgx.Tx, issue record.Is
 }
 
 // RanAsRoot says how issue ran as a tree of its own, "" when it never did: it opened a tree
-// lifecycle under its key (only its promotion opens one, or an operator's root spawn) or carries a
-// run handed over to it (handed_over_roots). The members of a root that never ran cannot have
-// started a phase either: a phase needs its gate, the gate needs the root's architect, and the
-// architect needs a slot, whose promotion opens the lifecycle. A root that ran is never adopted
-// (AdoptionRefusal) nor held under another tree (Ancestry).
+// lifecycle under its key (only its promotion opens one, or an operator's root spawn), or its
+// record carries a run of its own (record.Issue.CarriesRun, or the run's mark
+// record.Issue.TakenBack: the record blockers.Exempt reads for work already under way). The
+// lifecycle is the fact that the root took a slot and an architect, which a run's record does not
+// hold: promotion opens it while the root still stands at phase.Admitted, and the mark is written
+// only when a phase begins. The run's record covers a root that carries a run handed over to it: a
+// child carries its run only from a phase, whose start wrote the mark, and re-admission keeps the
+// mark with that run; one handed over without its run has it cleared, having run nothing as a
+// root. The members of a root that never ran cannot have started a phase either: a phase needs its
+// gate, the gate needs the root's architect, and the architect needs a slot, whose promotion opens
+// the lifecycle. A root that ran is never adopted (AdoptionRefusal) nor held under an unreleased
+// child of another tree (Ancestry).
 func (e *Engine) RanAsRoot(ctx context.Context, tx pgx.Tx, issue record.Issue) (string, error) {
 	project, err := claim.ProjectToken(issue.Project)
 	if err != nil {
@@ -60,11 +67,7 @@ func (e *Engine) RanAsRoot(ctx context.Context, tx pgx.Tx, issue record.Issue) (
 		}
 		return "it ran as a tree of its own", nil
 	}
-	handed, err := e.store.HandedOverRoot(ctx, tx, issue.Key)
-	if err != nil {
-		return "", err
-	}
-	if handed != nil {
+	if issue.CarriesRun() || issue.TakenBack {
 		return "it carries a run handed over to it as a root of its own", nil
 	}
 	return "", nil
@@ -72,10 +75,11 @@ func (e *Engine) RanAsRoot(ctx context.Context, tx pgx.Tx, issue record.Issue) (
 
 // Ancestry is the Dispatch chain issue's record takes when an observation's preparation read chain
 // (record.Issue.Ancestry): chain, or nil when issue ran as a tree of its own (RanAsRoot). The
-// waiting line holds a root while a live root is on its chain until that root's release adopts it,
-// and a release refuses a root that ran, so such a root keeps queueing as its own instead: held,
-// nothing would ever bring it in. Every write of an observation's chain to a record goes through
-// this.
+// waiting line holds a root out while a live root is on its chain (the ancestry hold, under an
+// unreleased child of that tree) until that root's release adopts it, and a release refuses a root
+// that ran, so such a root keeps queueing as its own instead: held, nothing would ever bring it in.
+// Every write of an observation's chain to a record goes through this, with the record as it will
+// be written: RanAsRoot reads its run's mark.
 func (e *Engine) Ancestry(ctx context.Context, tx pgx.Tx, issue record.Issue, chain []string) ([]string, error) {
 	if len(chain) == 0 {
 		return nil, nil
@@ -93,8 +97,10 @@ func (e *Engine) Ancestry(ctx context.Context, tx pgx.Tx, issue record.Issue, ch
 // checks (its linger's close, its supervise rows, its issue suspend), with no linger, hold,
 // pending READY or Dispatch chain (record.Issue.Ancestry: a member waits in no line), no
 // hand-over fence and its generation's facts cleared. A todo record enters the tree's run
-// admitted, as an unrecorded todo child does (enterChild), so an open gate starts its planning;
-// any other status keeps it as a parked child at done, which a todo runs again (ReenterChild).
+// admitted, as an unrecorded todo child does (enterChild), so an open gate starts its planning,
+// unless it waits on an unfinished Dispatch issue: enterChild then holds it at phase.Admitted
+// (blockers.Holds), and StartUnblockedChildren starts it once nothing holds it. Any other status
+// keeps it as a parked child at done, which a todo runs again (ReenterChild).
 // The tree's architect is told with a child-status notice. Everything is written in the caller's
 // transaction.
 func (e *Engine) Adopt(ctx context.Context, tx pgx.Tx, issue, root record.Issue, parent string) error {

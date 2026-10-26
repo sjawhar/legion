@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"crypto/rand"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/sjawhar/legion/daemon/internal/blockers"
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/credential"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
@@ -40,10 +42,49 @@ type WaveReleaseRequest struct {
 	Issues  []string `json:"issues"`
 }
 
-// WaveReleaseResponse lists the issues whose synchronous Dispatch update was accepted.
+// WaveReleaseResponse answers release_children. A release is accepted whatever the children's
+// links say, so released is every issue the request named, unchanged: no child of a wave is lost,
+// and the architect is never asked to send the request again. started and held then say what the
+// release did with each of them: started compares each child's record read before the request's
+// writes with its record read after them (startedByRelease), and held is judged from the blockers
+// Dispatch showed the request, against the mirror (blockers.UnfinishedOf) — the same list the
+// child's own todo event carries — not from the child's record.
+//
+// started names the children whose first phase this request started, and held each child the
+// request did not start because it waits on an unfinished issue, with the issues it waits on. A
+// child the tree's closed design gate withholds is in released alone: the gate, not a blocker,
+// holds it, its phase starts when the gate opens, and calling it started would be a lie. Both
+// lists follow the request's own order.
 type WaveReleaseResponse struct {
-	Released []string `json:"released"`
+	Released []string    `json:"released"`
+	Started  []string    `json:"started"`
+	Held     []HeldChild `json:"held"`
 }
+
+// MarshalJSON keeps `released`, `started` and `held` arrays on the wire, empty rather than `null`:
+// the plugin parses this answer through a strict schema.
+func (wr WaveReleaseResponse) MarshalJSON() ([]byte, error) {
+	type wire WaveReleaseResponse
+	out := wire(wr)
+	if out.Released == nil {
+		out.Released = []string{}
+	}
+	if out.Started == nil {
+		out.Started = []string{}
+	}
+	if out.Held == nil {
+		out.Held = []HeldChild{}
+	}
+	return json.Marshal(out)
+}
+
+// HeldChild is one released child the daemon did not start, and the issues it waits on that are
+// not done — the keys of its Dispatch blocked-by links, including any the daemon has not yet
+// observed as an issue of its own. It is record.BlockedIssue, the row the state's `blocked` and
+// a tick controller notice carry: one issue and what it waits on, declared once below all three
+// and validated by the one schema the plugin reads them all through. Its own MarshalJSON is what
+// keeps `blockedBy` an array here too, empty rather than `null`.
+type HeldChild = record.BlockedIssue
 
 // PhaseBackwardRequest asks a phase worker to return its own issue to an earlier phase, or the
 // tree's architect to return an issue it owns from accepting. An architect's grant serves its
@@ -484,9 +525,7 @@ func (s *server) waveRelease(w http.ResponseWriter, r *http.Request) {
 	// One wave's children share ancestors, and the walk to the tree root re-read each of them
 	// per child: the reads are cached for the life of this request.
 	read := s.cachedIssueReader()
-	unreleased := make([]string, 0, len(req.Issues))
-	children := make([]dispatch.Issue, 0, len(req.Issues))
-	var todo []dispatch.Issue
+	children := make([]releasedChild, 0, len(req.Issues))
 	for _, issue := range req.Issues {
 		if !claim.IsIssueKey(issue) {
 			writeFailure(w, http.StatusBadRequest, "INVALID_ISSUE", "issues must contain issue keys")
@@ -496,18 +535,22 @@ func (s *server) waveRelease(w http.ResponseWriter, r *http.Request) {
 		if !ok {
 			return
 		}
-		children = append(children, child)
-		if write {
-			unreleased = append(unreleased, issue)
-		} else {
-			todo = append(todo, child)
-		}
+		children = append(children, releasedChild{view: child, write: write})
+	}
+	// The records are read before the adoption writes anything, so releaseOutcome counts a child
+	// the adoption started as one this request started.
+	if err := s.readReleasedBefore(r.Context(), children); err != nil {
+		writeFailure(w, http.StatusInternalServerError, "RECORD_UNAVAILABLE", "could not read the records of the children to release")
+		return
 	}
 	if !s.adoptReleasedChildren(w, r, grant.Tree, children) {
 		return
 	}
-	for _, issue := range unreleased {
-		if err := s.dispatch.SetStatus(r.Context(), issue, "todo"); err != nil {
+	for _, child := range children {
+		if !child.write {
+			continue
+		}
+		if err := s.dispatch.SetStatus(r.Context(), child.view.Key, "todo"); err != nil {
 			var dispatchError *dispatch.Error
 			if errors.As(err, &dispatchError) {
 				writeFailure(w, http.StatusBadGateway, dispatchError.Code, dispatchError.Message)
@@ -517,12 +560,120 @@ func (s *server) waveRelease(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	for _, child := range todo {
-		if !s.enterTodoChild(w, r, grant.Tree, child) {
+	for _, child := range children {
+		if child.write {
+			continue
+		}
+		if !s.enterTodoChild(w, r, grant.Tree, child.view) {
 			return
 		}
 	}
-	writeJSON(w, http.StatusOK, WaveReleaseResponse{Released: req.Issues})
+	started, held, err := s.releaseOutcome(r.Context(), children)
+	if err != nil {
+		writeFailure(w, http.StatusInternalServerError, "RECORD_UNAVAILABLE", "could not read what the released children wait on")
+		return
+	}
+	writeJSON(w, http.StatusOK, WaveReleaseResponse{Released: req.Issues, Started: started, Held: held})
+}
+
+// releasedChild is one child of a release as its answer judges it: Dispatch's view of it as the
+// request read it (releasableChild), whether the request writes it todo or finds it todo already,
+// and its record as it stood before any of the request's writes (readReleasedBefore).
+type releasedChild struct {
+	view   dispatch.Issue
+	write  bool
+	before *record.Issue
+}
+
+// readReleasedBefore reads each child's record before the release writes anything, in one
+// read-only transaction, so releaseOutcome can tell a first phase this request started from one
+// the child was already in.
+func (s *server) readReleasedBefore(ctx context.Context, children []releasedChild) error {
+	if s.pool == nil || s.records == nil {
+		return errors.New("record dependencies are unavailable")
+	}
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly})
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	for i := range children {
+		if children[i].before, err = s.records.Issue(ctx, tx, children[i].view.Key); err != nil {
+			return err
+		}
+	}
+	return tx.Commit(ctx)
+}
+
+// releaseOutcome answers what this request did with each of its children, once its writes and
+// observations are in, in the request's own order. It reads each child's record again and the
+// project's whole mirror with one query (record.Store.DispatchIssues), as every blocker judgement
+// reads it, in one read-only transaction: a wave's children share the issues they wait on, and the
+// mirror is one row per issue of the project.
+//
+// A child is started when this request started its first phase (startedByRelease). Otherwise it is
+// held when it waits on an issue that is not done, unless it is running a phase it was already in:
+// what it waits on is judged from the blockers Dispatch showed the request (blockers.UnfinishedOf),
+// not from the child's own mirror row, since a child this request writes todo — out of backlog, or
+// parked at done — has no row or record of its release until that write's event arrives, after
+// this answer. That event enters it through the workflow's enterChild, which holds it at
+// phase.Admitted on that same wait, as enterTodoChild's observation already has a child found todo.
+//
+// A child in neither list is one this request started nothing for and that waits on nothing — its
+// own todo event is still to start it, or its tree's closed design gate holds it until the gate's
+// opening starts it — or one already running a phase before the request, which holds nothing back.
+func (s *server) releaseOutcome(ctx context.Context, children []releasedChild) ([]string, []HeldChild, error) {
+	if s.pool == nil || s.records == nil {
+		return nil, nil, errors.New("record dependencies are unavailable")
+	}
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly})
+	if err != nil {
+		return nil, nil, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	// The mirror's rows are keyed by the Dispatch project key the issues are filed under, never
+	// by the claim project token: a read with the token finds nothing wherever the two differ,
+	// which in a deployment is always (Options.Project, Options.DispatchProject).
+	rows, err := blockers.Load(ctx, tx, s.records, s.dispatchProject)
+	if err != nil {
+		return nil, nil, err
+	}
+	started, held := []string{}, []HeldChild{}
+	for _, child := range children {
+		after, err := s.records.Issue(ctx, tx, child.view.Key)
+		if err != nil {
+			return nil, nil, err
+		}
+		switch {
+		case startedByRelease(child.before, after):
+			started = append(started, child.view.Key)
+		case runsPhase(after):
+		default:
+			if unfinished := blockers.UnfinishedOf(rows, child.view.BlockedBy); len(unfinished) > 0 {
+				held = append(held, HeldChild{Issue: child.view.Key, BlockedBy: unfinished})
+			}
+		}
+	}
+	return started, held, tx.Commit(ctx)
+}
+
+// startedByRelease says whether the release started a child's first phase: its record after the
+// release runs a phase of a run that, before it, had none — the child was unrecorded, still at
+// phase.Admitted, or in an earlier run (a parked child at done) that the release's todo re-entered
+// as a new generation. A record already running the same run, or a parked one the todo event has
+// not reached yet, was started by no part of this request.
+func startedByRelease(before, after *record.Issue) bool {
+	if !runsPhase(after) {
+		return false
+	}
+	return before == nil || before.Phase == phase.Admitted || before.Generation != after.Generation
+}
+
+// runsPhase says whether a recorded child is in a phase of a run: past phase.Admitted, where it
+// waits to start, and short of phase.Done, where it stands out of the workflow until a todo
+// re-enters it.
+func runsPhase(issue *record.Issue) bool {
+	return issue != nil && issue.Phase != phase.Admitted && issue.Phase != phase.Done
 }
 
 // adoptReleasedChildren moves into tree each released child recorded in another tree: a root that
@@ -531,12 +682,10 @@ func (s *server) waveRelease(w http.ResponseWriter, r *http.Request) {
 // ChildAdoption fact, under the Dispatch parent the release read, and admission adopts them all
 // or refuses the fact, writing nothing: a refusal is the release's answer, naming the child and
 // why, and nothing more is written, Dispatch included. A wave with no such child applies no fact.
-func (s *server) adoptReleasedChildren(w http.ResponseWriter, r *http.Request, tree string, children []dispatch.Issue) bool {
-	outside, err := s.recordedOutside(r.Context(), tree, children)
-	if err != nil {
-		writeFailure(w, http.StatusInternalServerError, "RECORD_UNAVAILABLE", "could not read the records of the released children")
-		return false
-	}
+// An adopted child that waits on an unfinished Dispatch issue joins the tree and is held there,
+// never started (blockers.Holds); releaseOutcome names it held.
+func (s *server) adoptReleasedChildren(w http.ResponseWriter, r *http.Request, tree string, children []releasedChild) bool {
+	outside := recordedOutside(tree, children)
 	if len(outside) == 0 {
 		return true
 	}
@@ -552,28 +701,17 @@ func (s *server) adoptReleasedChildren(w http.ResponseWriter, r *http.Request, t
 	return true
 }
 
-// recordedOutside reads the record of every released child in one read-only transaction, and
-// returns each one recorded in a tree other than tree, with the Dispatch parent the release read.
-func (s *server) recordedOutside(ctx context.Context, tree string, children []dispatch.Issue) ([]intake.AdoptedChild, error) {
-	if s.pool == nil || s.records == nil {
-		return nil, errors.New("record dependencies are unavailable")
-	}
-	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly})
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
+// recordedOutside returns each released child whose record, as the release read it before its
+// writes (readReleasedBefore), is in a tree other than tree, with the Dispatch parent the release
+// read. Admission reads each record again under the fact lock before it adopts.
+func recordedOutside(tree string, children []releasedChild) []intake.AdoptedChild {
 	var outside []intake.AdoptedChild
 	for _, child := range children {
-		recorded, err := s.records.Issue(ctx, tx, child.Key)
-		if err != nil {
-			return nil, err
-		}
-		if recorded != nil && recorded.Tree != tree {
-			outside = append(outside, intake.AdoptedChild{Issue: child.Key, Parent: intake.ObservedIssue(child).Parent})
+		if child.before != nil && child.before.Tree != tree {
+			outside = append(outside, intake.AdoptedChild{Issue: child.view.Key, Parent: intake.ObservedIssue(child.view).Parent})
 		}
 	}
-	return outside, tx.Commit(ctx)
+	return outside
 }
 
 // phaseBackward applies a backward move: a phase worker's on its own issue (the grant's), or the

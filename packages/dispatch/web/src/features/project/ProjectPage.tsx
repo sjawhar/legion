@@ -4,7 +4,7 @@ import type { ReactNode } from "react";
 import { Link, Navigate, useLocation, useNavigate } from "react-router-dom";
 
 import { api } from "../../api/client";
-import { projectsQuery, whoAmIQuery } from "../../api/queries";
+import { projectArchitectureSourcesQuery, projectsQuery, whoAmIQuery } from "../../api/queries";
 import { QueryError } from "../../components/QueryError";
 import { type TabDefinition, Tabs } from "../../components/Tabs";
 import {
@@ -71,13 +71,12 @@ export function ProjectPage(): ReactNode {
   const projects = useQuery(projectsQuery());
   const project = projects.data?.find((candidate) => candidate.key === route?.project);
   // Whether the project has an architecture source decides where the bare project path opens
-  // and whether the Architecture tab exists at all.
-  const source = useQuery({
-    queryKey: ["architecture-source", projectKey],
-    queryFn: () => api.getArchitectureSource(projectKey as string),
+  // and whether the Architecture tab exists at all: one read of its source list.
+  const sources = useQuery({
+    ...projectArchitectureSourcesQuery(projectKey ?? ""),
     enabled: projectKey !== undefined,
   });
-  const hasSource = source.data != null;
+  const hasSource = (sources.data?.length ?? 0) > 0;
   useKeymapScope("project");
   useKeymap("project", [
     {
@@ -98,9 +97,9 @@ export function ProjectPage(): ReactNode {
   }
   const sourceError = (
     <QueryError
-      message="Could not load this project's architecture source."
-      onRetry={() => void source.refetch()}
-      retrying={source.isFetching}
+      message="Could not load this project's architecture sources."
+      onRetry={() => void sources.refetch()}
+      retrying={sources.isFetching}
     />
   );
   if (projects.isPending) {
@@ -114,13 +113,13 @@ export function ProjectPage(): ReactNode {
   }
   if (route.kind === "project") {
     // The open-on rule: a project with an architecture source opens on its Architecture; one
-    // without (the read answers null) opens on Issues, the filter parameters forwarded. A failed
+    // without (the list is empty) opens on Issues, the filter parameters forwarded. A failed
     // read is shown, never quietly turned into Issues. `replace` keeps Back sane; sidebar links
     // stay on the bare path.
-    if (source.isPending) {
+    if (sources.isPending) {
       return null;
     }
-    if (source.isError) {
+    if (sources.isError) {
       return sourceError;
     }
     if (hasSource) {
@@ -141,10 +140,10 @@ export function ProjectPage(): ReactNode {
   if (route.kind === "architecture") {
     // Like the bare path: nothing until the source lookup settles, so the tab strip never
     // renders without its active tab.
-    if (source.isPending) {
+    if (sources.isPending) {
       return null;
     }
-    if (source.isError) {
+    if (sources.isError) {
       return sourceError;
     }
     if (!hasSource) {

@@ -221,6 +221,36 @@ func TestNestedQueuedRootsJoinTheLiveTreeAtTheTop(t *testing.T) {
 	assertSlots(t, pool, []record.Slot{{Issue: tree, Index: 0, AdmittedAt: fixedNow}})
 }
 
+// A queued root that waits on an unfinished Dispatch issue still joins the live tree its recorded
+// parent runs in, and the blocked-by rule then holds it there like any child: it is recorded in
+// the tree at its next generation, admitted and not planning, though the tree's gate is open, and
+// takes no slot. The close of its last blocker starts it.
+func TestAQueuedRootThatWaitsOnAnUnfinishedIssueJoinsTheLiveTreeAndIsHeldThere(t *testing.T) {
+	pool := migratedPool(t)
+	admission := quiet(t, 1)
+	const tree, root, blocker = "LEGION-168", "LEGION-214", "LEGION-400"
+	seedOpenTree(t, pool, tree)
+	putIssue(t, pool, queuedRoot(root, tree, "B", 2))
+	seedMirror(t, pool, root, "todo", blocker)
+	seedMirror(t, pool, blocker, "in_progress")
+
+	applyFact(t, pool, admission, "tick", intake.ControllerTick{})
+	if got := issue(t, pool, root); got.Tree != tree || got.Generation != 2 || got.Phase != phase.Admitted {
+		t.Fatalf("%s = %#v, want it held admitted in the tree of %s at generation 2", root, got, tree)
+	}
+	if want := []string{root + " joined the tree of " + tree + " from the admission queue"}; !reflect.DeepEqual(joinedNotices(t, pool, root), want) {
+		t.Fatalf("child-status notices of %s = %q, want %q", root, joinedNotices(t, pool, root), want)
+	}
+	assertWaiting(t, pool, nil)
+	assertSlots(t, pool, []record.Slot{{Issue: tree, Index: 0, AdmittedAt: fixedNow}})
+
+	applyMirrored(t, pool, admission, "blocker-done", intake.DispatchIssue{Key: blocker, ResolvedRepo: "acme/widgets", Seq: 5, Type: "issue.updated",
+		Status: "done", Title: blocker, Rank: "Z"}, admission.engine)
+	if got := issue(t, pool, root); got.Tree != tree || got.Phase != phase.Planning {
+		t.Fatalf("%s = %#v once %s is done, want it planning in the tree of %s", root, got, blocker, tree)
+	}
+}
+
 // An orphan that never ran waits as its own root while its old root lingers. When a person sets
 // that old root back to todo with the label, the orphan rejoins it: it waits admitted in the old
 // root's tree, whose readmission cleared its gate, and takes no slot of its own.
@@ -316,7 +346,7 @@ func TestAQueuedRootUnderAnUnreleasedChildOfALiveTreeTakesNoSlot(t *testing.T) {
 // the live tree's root is on the issue's chain, so the issue takes no slot with one free. Once that
 // tree lingers, no live root is left on the chain, and the issue waits as its own root again and
 // takes the slot.
-func TestAHoldStandsWhileAQueuedRootOnItsChainIsAdoptedIntoTheLiveTree(t *testing.T) {
+func TestAnAncestryHoldStandsWhileAQueuedRootOnItsChainIsAdoptedIntoTheLiveTree(t *testing.T) {
 	pool := migratedPool(t)
 	admission := newAdmission(t, 2, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	const tree, ancestor, parent, child = "LEGION-168", "LEGION-170", "LEGION-169", "LEGION-214"
@@ -395,7 +425,7 @@ func TestARootHeldPastAParkedRootOnItsChainQueuesOnceTheTreeLingers(t *testing.T
 // held root's tree, as any todo child of a waiting root is: it waits with the held root and takes no
 // slot and no architect, even with a slot free. When the running tree's architect releases the held
 // root, the child joins that tree with it.
-func TestAChildOfAHeldRootWaitsWithIt(t *testing.T) {
+func TestAChildOfAnAncestryHeldRootWaitsWithIt(t *testing.T) {
 	pool := migratedPool(t)
 	admission := newAdmission(t, 2, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	const tree, parent, held, child = "LEGION-168", "LEGION-169", "LEGION-214", "LEGION-300"

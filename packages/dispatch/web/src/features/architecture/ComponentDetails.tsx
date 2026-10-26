@@ -44,7 +44,8 @@ function readExpansion(storageKey: string): string[] {
 /**
  * A component's details, full width under the rows once `?component=` names it (spec items 7,
  * 9–11): **Work** — its own issue rows, unfinished first by lifecycle status then newest
- * activity, the done ones behind `Show N done`; then **Code & definition** — the prose, `paths`,
+ * activity, the done ones behind `Show N done`; then **Code & definition** — the prose, the
+ * repository whose architecture files define it (its source), `paths` in that repository,
  * `depends_on` as links to those components, and the `external` badge. History is not in this
  * slice. A row's chevron expands the issue's children in place; which rows are expanded is kept
  * in `sessionStorage` per project and component, and on mount with `?component=` set the
@@ -179,6 +180,10 @@ export function ComponentDetails({
       <dl
         className={`mt-2 grid gap-x-4 gap-y-1 text-sm sm:grid-cols-[auto_1fr] ${textSecondaryOnSurface}`}
       >
+        <dt className="font-medium">Repository</dt>
+        <dd>
+          <code className="text-xs">{component.source}</code>
+        </dd>
         <dt className="font-medium">Paths</dt>
         <dd>
           {component.paths.length === 0 ? (

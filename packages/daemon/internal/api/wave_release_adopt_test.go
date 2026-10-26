@@ -52,8 +52,10 @@ func newAdoptionHarness(t *testing.T, cap int) *adoptionHarness {
 	statuses := &statusRecorder{issues: map[string]dispatch.Issue{
 		adoptionTree: {Key: adoptionTree, ResolvedRepo: "acme/widgets", Status: "in_progress"},
 	}}
+	// The engine and admission file this harness's issues, and so their mirror rows, under
+	// testProject; the release reads what its children wait on from the same rows.
 	h.handler = NewServer("127.0.0.1", 8437, Options{
-		Supervisor: h.supervisor, BootTokens: h.tokens, Project: testProject, OperatorToken: testOperatorToken,
+		Supervisor: h.supervisor, BootTokens: h.tokens, Project: testProject, DispatchProject: testProject, OperatorToken: testOperatorToken,
 		Controller: h.store, Grants: credential.New(nil), Pool: h.store.Pool(), Record: records,
 		Handlers: []intake.Handler{engine, admission}, Dispatch: statuses,
 	}).Handler
@@ -204,6 +206,72 @@ func TestReleaseAdoptsAQueuedRootDispatchShowsTodo(t *testing.T) {
 	a.assertParked(adoptionChild)
 }
 
+// A queued root the release adopts that waits on an unfinished Dispatch issue joins the tree and
+// is held there by its blocker, never started: the release answers it released and held, naming
+// the issue it waits on, and started names it only for a child the adoption actually started.
+func TestReleaseAdoptsAQueuedRootThatWaitsOnAnUnfinishedIssueAndAnswersItHeld(t *testing.T) {
+	a := newAdoptionHarness(t, 1)
+	const blocker = "LEGION-400"
+	a.observe(adoptionChild, 1, "todo", "", true)
+	if err := a.store.Tx(context.Background(), func(tx pgx.Tx) error {
+		for _, row := range []record.DispatchIssueRow{
+			{Key: adoptionChild, Project: testProject, Status: "todo", Blockers: []string{blocker}, Seq: 1},
+			{Key: blocker, Project: testProject, Status: "in_progress", Seq: 1},
+		} {
+			if err := a.records.PutDispatchIssue(context.Background(), tx, row); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("seed the mirror: %v", err)
+	}
+	a.shows(adoptionChild, "todo", adoptionTree, 2, true)
+	shown := a.statuses.issues[adoptionChild]
+	shown.BlockedBy = []string{blocker}
+	a.statuses.issues[adoptionChild] = shown
+
+	recorder := a.request(http.MethodPost, "/legion/v1/waves/release", map[string]any{"grantId": a.architect.grant(t), "issues": []string{adoptionChild}}, nil)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("release of %s = %d: %s", adoptionChild, recorder.Code, recorder.Body)
+	}
+	var response WaveReleaseResponse
+	decodeInto(t, recorder, &response)
+	want := WaveReleaseResponse{Released: []string{adoptionChild}, Started: []string{}, Held: []HeldChild{{Issue: adoptionChild, BlockedBy: []string{blocker}}}}
+	if !reflect.DeepEqual(response, want) {
+		t.Fatalf("release answer = %#v, want %#v", response, want)
+	}
+	if got := a.record(adoptionChild); got.Tree != adoptionTree || got.Phase != phase.Admitted || got.Generation != 2 {
+		t.Fatalf("%s = %#v, want it held admitted in the tree of %s at generation 2", adoptionChild, got, adoptionTree)
+	}
+	if starts := a.plannerStarts(adoptionChild, adoptionTree, 2); starts != 0 {
+		t.Fatalf("%s has %d planner starts queued, want none while %s is unfinished", adoptionChild, starts, blocker)
+	}
+	if a.slotted(adoptionChild) || slices.Contains(a.waiting(), adoptionChild) {
+		t.Fatalf("%s holds or waits for a slot (waiting %q), want neither: it is held in the tree of %s", adoptionChild, a.waiting(), adoptionTree)
+	}
+}
+
+// A queued root the release adopts and starts, waiting on nothing, is named started: the records
+// the answer compares are read before the adoption writes anything.
+func TestReleaseAnswersAnAdoptedQueuedRootItStartedAsStarted(t *testing.T) {
+	a := newAdoptionHarness(t, 1)
+	a.observe(adoptionChild, 1, "todo", "", true)
+	a.shows(adoptionChild, "todo", adoptionTree, 2, true)
+
+	recorder := a.request(http.MethodPost, "/legion/v1/waves/release", map[string]any{"grantId": a.architect.grant(t), "issues": []string{adoptionChild}}, nil)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("release of %s = %d: %s", adoptionChild, recorder.Code, recorder.Body)
+	}
+	var response WaveReleaseResponse
+	decodeInto(t, recorder, &response)
+	want := WaveReleaseResponse{Released: []string{adoptionChild}, Started: []string{adoptionChild}, Held: []HeldChild{}}
+	if !reflect.DeepEqual(response, want) {
+		t.Fatalf("release answer = %#v, want %#v", response, want)
+	}
+	a.assertJoinedAndPlanning(adoptionChild, 2)
+}
+
 // A queued root that left the line for backlog, lingering as a root of its own, and was then made
 // a child of a live tree is in the tree when its release answers, parked at done until the todo the
 // release writes reaches the daemon; that todo runs it in the tree as any parked child's does.
@@ -352,7 +420,11 @@ func TestReleaseRefusesAChildItCannotAdopt(t *testing.T) {
 			}},
 		{name: "a root carrying a handed-over run", child: adoptionChild, code: "CHILD_NOT_ADOPTABLE", reason: "it carries a run handed over to it as a root of its own",
 			seed: func(a *adoptionHarness) {
-				a.recordIssue(queuedRoot(adoptionChild, "B"))
+				// A hand-over carries a run only from a phase, whose start marked the run
+				// (record.Issue.TakenBack); re-admission keeps the mark with the carried run.
+				handed := queuedRoot(adoptionChild, "B")
+				handed.TakenBack = true
+				a.recordIssue(handed)
 				seed(a, func(tx pgx.Tx) error {
 					return a.records.PutHandedOverRoot(context.Background(), tx, record.HandedOverRoot{Issue: adoptionChild, Generation: 1})
 				})

@@ -516,6 +516,29 @@ func captureAuthors(state *roomState, owed map[string]model.Actor, write *liveWr
 	return capture
 }
 
+// withoutInflight is capture for a version rendered from the stored document rather than the
+// room: a room behind the durable head (captureLiveTextAndAuthors), or a write whose fork came from
+// the store (coldFork). The store holds no change still in flight in the room, so the version
+// lists none of the room's in-flight credits and its commit consumes none: each stays in F, to
+// reach R when its append lands, or, when the gate refuses that append from a room behind the
+// head, to be credited again when its browser resends the edit to the reloaded room. Listed here,
+// that author would be listed again on the version holding the resent edit. The pending authors
+// it read (R), the write's own credits and actor stay, as captureAuthors gave them.
+func (capture authorCapture) withoutInflight(write *liveWrite, actor *model.Actor) authorCapture {
+	authors := make(map[string]model.Actor, len(capture.rAuthors)+1)
+	for _, author := range capture.rAuthors {
+		authors[actorKey(author)] = author
+	}
+	if write != nil {
+		maps.Copy(authors, write.credits)
+	}
+	if actor != nil {
+		authors[actorKey(*actor)] = *actor
+	}
+	capture.authors, capture.inflight = authors, nil
+	return capture
+}
+
 // uploadCapture is an upload's capture over write: the in-flight credits observed by its last read
 // of the room (liveWrite.forkSeq), and the updates the room instance it read held then
 // (liveWrite.forkHold). The upload holds the document's advisory lock from before that read, so no

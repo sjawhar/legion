@@ -1,4 +1,4 @@
--- 0052_issue_ancestry.up.sql — the Dispatch chain a queued root waits under (INFRA-252).
+-- 0054_issue_ancestry.up.sql — the Dispatch chain a queued root waits under (INFRA-252).
 --
 -- A labelled todo issue under a Dispatch parent that is not recorded, or is recorded as a root of
 -- its own (a backlog child of a live tree its architect never released, or a root parked under

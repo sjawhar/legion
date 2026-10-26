@@ -324,10 +324,10 @@ func TestATodoHeldUnderAnUnreleasedChildQueuesOnceItsParentLeavesTheLiveTree(t *
 	}
 }
 
-// heldLine is a running tree, recorded with its slot, under an admission of two slots, and the
+// ancestryLine is a running tree, recorded with its slot, under an admission of two slots, and the
 // consumer's handling of Dispatch's events against it, Dispatch showing client's issues: the tree
 // among them, at the top of its chain.
-type heldLine struct {
+type ancestryLine struct {
 	t       *testing.T
 	pool    *pgxpool.Pool
 	records *record.Postgres
@@ -337,7 +337,7 @@ type heldLine struct {
 	admit   *admit.Admission
 }
 
-func newHeldLine(t *testing.T, tree string, recorded ...record.Issue) *heldLine {
+func newAncestryLine(t *testing.T, tree string, recorded ...record.Issue) *ancestryLine {
 	t.Helper()
 	pool := isolatedOutboxPool(t)
 	records := record.NewStore()
@@ -357,12 +357,12 @@ func newHeldLine(t *testing.T, tree string, recorded ...record.Issue) *heldLine 
 	client := &chainDispatch{issues: map[string]dispatch.Issue{tree: shownUnder(tree, "in_progress", "", true)}}
 	log := quietLogger()
 	engine := workflow.New(records, workflow.Config{Project: "LEGION", Repositories: testRepositories}, log)
-	return &heldLine{t: t, pool: pool, records: records, client: client, engine: engine, admit: admit.New(records, engine, 2, "LEGION", log),
+	return &ancestryLine{t: t, pool: pool, records: records, client: client, engine: engine, admit: admit.New(records, engine, 2, "LEGION", log),
 		w: &workflowRuntime{pool: pool, records: records, dispatch: client, repositories: repos, defaultBranches: branches, log: log}}
 }
 
 // deliver prepares event and applies it as its fact, as the consumer does.
-func (l *heldLine) deliver(event intake.DispatchIssue) {
+func (l *ancestryLine) deliver(event intake.DispatchIssue) {
 	l.t.Helper()
 	prepared, err := l.w.prepareRepository(context.Background(), event)
 	if err != nil {
@@ -374,14 +374,14 @@ func (l *heldLine) deliver(event intake.DispatchIssue) {
 }
 
 // queue delivers the todo event of key, labelled under parent, as Dispatch shows it.
-func (l *heldLine) queue(key, parent string) {
+func (l *ancestryLine) queue(key, parent string) {
 	l.t.Helper()
 	l.client.issues[key] = shownUnder(key, "todo", parent, true)
 	l.deliver(intake.DispatchIssue{Key: key, Seq: 2, Type: "issue.updated", Status: "todo", Title: key, Parent: parent, Rank: "B", HandedOver: true, ResolvedRepo: "acme/widgets"})
 }
 
 // slotted is whether key holds a slot, and its record.
-func (l *heldLine) slotted(key string) (bool, *record.Issue) {
+func (l *ancestryLine) slotted(key string) (bool, *record.Issue) {
 	l.t.Helper()
 	var slotted bool
 	var issue *record.Issue
@@ -400,7 +400,7 @@ func (l *heldLine) slotted(key string) (bool, *record.Issue) {
 }
 
 // waiting is whether key waits in admission's line (record.Waiting), held by no live root.
-func (l *heldLine) waiting(key string) bool {
+func (l *ancestryLine) waiting(key string) bool {
 	l.t.Helper()
 	var waiting bool
 	if err := pgx.BeginFunc(context.Background(), l.pool, func(tx pgx.Tx) error {
@@ -422,9 +422,9 @@ func (l *heldLine) waiting(key string) bool {
 // moves that member out from under the tree, the member's own event, though the workflow records
 // it, reads the held issue's chain again, and the issue takes the free slot: release_children
 // would no longer reach it from the tree, so nothing would ever release it.
-func TestAHeldRootQueuesOnceARecordedAncestorLeavesTheLiveTree(t *testing.T) {
+func TestAnAncestryHeldRootQueuesOnceARecordedAncestorLeavesTheLiveTree(t *testing.T) {
 	const tree, member, parent, child = "LEGION-168", "LEGION-170", "LEGION-169", "LEGION-214"
-	line := newHeldLine(t, tree, parkedIn(member, tree))
+	line := newAncestryLine(t, tree, parkedIn(member, tree))
 	line.client.issues[member] = shownUnder(member, "backlog", tree, false)
 	line.client.issues[parent] = shownUnder(parent, "backlog", member, false)
 
@@ -445,7 +445,7 @@ func TestAHeldRootQueuesOnceARecordedAncestorLeavesTheLiveTree(t *testing.T) {
 // again, so one failing read of Dispatch holds no event back.
 func TestARereadSkipsARootWhoseChainItCannotRead(t *testing.T) {
 	const tree, shared, stuckParent, stuck, movedParent, moved = "LEGION-168", "LEGION-172", "LEGION-169", "LEGION-214", "LEGION-171", "LEGION-215"
-	line := newHeldLine(t, tree)
+	line := newAncestryLine(t, tree)
 	line.client.issues[shared] = shownUnder(shared, "backlog", tree, false)
 	line.client.issues[stuckParent] = shownUnder(stuckParent, "backlog", shared, false)
 	line.client.issues[movedParent] = shownUnder(movedParent, "backlog", shared, false)
@@ -484,7 +484,7 @@ func TestARootHeldPastAParkedRootOnItsChainTakesNoSlot(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			root := recordedOn(parked, parked, "backlog")
 			root.Phase, root.Parent = phase.Done, record.ParentOf(tree)
-			line := newHeldLine(t, tree, root)
+			line := newAncestryLine(t, tree, root)
 			line.client.issues[parked] = shownUnder(parked, "backlog", tree, false)
 			line.client.issues[parent] = shownUnder(parent, "backlog", parked, false)
 
@@ -503,7 +503,7 @@ func TestARootHeldPastAParkedRootOnItsChainTakesNoSlot(t *testing.T) {
 func TestARereadReadsOnlyTheRootsWhoseChainHoldsTheEventsIssue(t *testing.T) {
 	const tree, movedParent, moved, keptParent, kept, unrelated = "LEGION-168", "LEGION-171", "LEGION-215", "LEGION-169", "LEGION-214", "LEGION-300"
 	ctx := context.Background()
-	line := newHeldLine(t, tree)
+	line := newAncestryLine(t, tree)
 	line.client.issues[movedParent] = shownUnder(movedParent, "backlog", tree, false)
 	line.client.issues[keptParent] = shownUnder(keptParent, "backlog", tree, false)
 	line.queue(moved, movedParent)
@@ -535,9 +535,9 @@ func TestARereadReadsOnlyTheRootsWhoseChainHoldsTheEventsIssue(t *testing.T) {
 // A recorded issue's event older than its record, arriving after its newer re-parent out of a
 // running tree, reads no held root's chain again: the root its re-parent freed stays out from
 // under the tree, as Dispatch now shows it, rather than being held there again by the stale parent.
-func TestAStaleEventOfAMovedAncestorBringsBackNoHold(t *testing.T) {
+func TestAStaleEventOfAMovedAncestorBringsBackNoAncestryHold(t *testing.T) {
 	const tree, other, member, parent, child = "LEGION-168", "LEGION-190", "LEGION-170", "LEGION-169", "LEGION-214"
-	line := newHeldLine(t, tree, parkedIn(member, tree), recordedOn(other, other, "in_progress"))
+	line := newAncestryLine(t, tree, parkedIn(member, tree), recordedOn(other, other, "in_progress"))
 	if err := pgx.BeginFunc(context.Background(), line.pool, func(tx pgx.Tx) error {
 		return line.records.PutSlot(context.Background(), tx, record.Slot{Issue: other, Index: 1, AdmittedAt: time.Now()})
 	}); err != nil {
