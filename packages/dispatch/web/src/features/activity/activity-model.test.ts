@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 
 import type { Event } from "../../api/types";
-import { buildActivityItems, dateKey } from "./activity-model";
+import { activityDescription, buildActivityItems, dateKey } from "./activity-model";
 
 function message(seq: number, at: string): Event {
   const actor = { id: "alice", kind: "user" as const };
@@ -53,4 +53,43 @@ test("day dividers name Today and Yesterday and spell an older day in full", () 
       year: "numeric",
     }).format(older),
   ]);
+});
+
+const projectEvent = {
+  actor: { id: "alice", kind: "user" },
+  created_at: "2026-10-25T00:00:00Z",
+  id: 1,
+  issue_key: null,
+  notify: false,
+  project: "CORE",
+  seq: 1,
+} as const;
+
+test("an architecture import names the repository it came from; a retained event without one reads as before", () => {
+  const commit = "3be61df5be90aa11bb22";
+  const error = "duplicate component id api";
+  expect(
+    activityDescription({
+      ...projectEvent,
+      payload: { branch: "main", commit, components: 3, repo: "acme/infra" },
+      type: "architecture.synced",
+    })
+  ).toBe("synced the architecture model from acme/infra at 3be61df5be90");
+  expect(
+    activityDescription({
+      ...projectEvent,
+      payload: { branch: "main", error, repo: "acme/infra" },
+      type: "architecture.sync_failed",
+    })
+  ).toBe("failed to sync the architecture model from acme/infra: duplicate component id api");
+  expect(
+    activityDescription({
+      ...projectEvent,
+      payload: { commit, components: 3 },
+      type: "architecture.synced",
+    })
+  ).toBe("synced the architecture model at 3be61df5be90");
+  expect(
+    activityDescription({ ...projectEvent, payload: { error }, type: "architecture.sync_failed" })
+  ).toBe("failed to sync the architecture model: duplicate component id api");
 });

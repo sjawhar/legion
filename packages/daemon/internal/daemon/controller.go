@@ -186,8 +186,8 @@ func (s *supervision) stopLaunchedController(ctx context.Context) error {
 // then names no dead pod's session, no grant mints for it, and no capability a launch registered
 // under survives the switch. A record naming any other session, the operator's controller's after a
 // `legion controller start`, or none, is left as it is. A record with no registration is left as it
-// is even though a claim whose agent never registered, or whose session a lost volume ended, has no
-// session either: that record can hold the capability `legion controller start` minted for an
+// is even though a claim whose agent never registered has no session either: that record can hold
+// the capability `legion controller start` minted for an
 // operator's controller that has not registered yet, and matching the two empty sessions would
 // replace it, so that controller's registration would then be refused. The guard on the record's
 // registration is correct only beside the session comparison, in one condition: alone it would let

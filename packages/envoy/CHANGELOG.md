@@ -4,6 +4,48 @@
 
 ### Added
 
+- Dispatch's conversation view (`/agents/<id>/live`) shows the model and thinking level an Oh My
+  Pi session runs now, from the `settings` frame pi-envoy publishes, before any turn runs on them
+  and within about 20 seconds of a change made anywhere else (INFRA-195). Where the session runs
+  `/model` and `/effort` from Dispatch, each is a native picker in the header: the model picker
+  lists every model the session can use, grouped by provider, and the thinking picker the levels
+  `/effort` offers. On a focused picker the arrows and type-ahead only move its choice, `Enter`
+  switches to it, and leaving the picker without `Enter` puts it back on the reported value, as
+  the Agents issue picker's keyboard rule does. A pick is the person's own Send of
+  `/model <provider/id>` or `/effort <level>`, always as Send and stored under their name; while
+  it waits for the session's answer Send is disabled and the pickers are held, keeping focus, and
+  the line under the header quotes the session's reply, or says no answer came within 30 seconds
+  or that the message could not reach the session. The header
+  changes only when the session reports the new value. A session on an older pi-envoy shows the
+  last turn's model and asks to be restarted on a newer one; a session whose Oh My Pi cannot tell
+  its settings, or that runs neither built-in from Dispatch, says so. No route changes: an agent's
+  token is still refused on `POST /api/v1/agents/{id}/messages` (`403 HUMAN_ONLY`).
+- A Dispatch project imports its component model from any number of architecture sources, one
+  per repository, each on its own branch, and its model is every source's components together
+  (INFRA-391). `GET /api/v1/projects/{key}/architecture-sources` lists a project's sources (`[]`
+  with none); `PUT /api/v1/projects/{key}/architecture-sources/{owner}/{repo}` `{branch}` adds a
+  source, or changes the branch of the one it already is, after proving the GitHub App can read
+  the repository and that `branch` is the name of a branch it has (an exact
+  `git/ref/heads/{branch}` read): a missing branch, a commit SHA, a relative ref such as
+  `main~1`, `HEAD` or a `refs/` path is `409 SOURCE_ACCESS` naming the value and the repository,
+  as a credential problem is, and nothing is written;
+  `DELETE` on the same path removes that source and its components, and no other source's;
+  `POST …/architecture-sources/{owner}/{repo}/sync` imports one source and
+  `POST /api/v1/projects/{key}/architecture-sources/sync` every source, each attempted whatever
+  another's import did and each answering on its own row. A source row carries `components`, how
+  many components it projects; `GET /api/v1/projects/{key}/architecture` carries `sources` and
+  each component's `source` repository; `architecture.synced` and `architecture.sync_failed`
+  name the source's `repo` and `branch`. One source's failed import keeps that source's previous
+  components and touches no other source's. Component ids stay project-wide: an import whose
+  model holds an id another source of the project already has fails for that source alone,
+  naming the id and the repository that holds it, and an issue may name components of any
+  source of its project. Settings lists one row per source with its component count and its own
+  Refresh and Delete; the architecture page has a header line per source with its own Refresh,
+  and hatches only the components of a source that failed or is stale; a component's details
+  name its repository; an issue's component picker offers every source's components. Migration
+  `0117` adds `architecture_sources.id` and `components.source_id`: every existing source and
+  component reads `0`, so a project with one source keeps it, its components and every issue
+  attachment, and nothing re-imports.
 - A project's default assignee, the last step of an issue create's assignee chain: an issue created
   with no assignee, by nobody (the shared token), under no parent or under a parent with nobody on
   it, goes to the person the project names; nothing already filed, and no create that names an
@@ -724,6 +766,34 @@
   image back. Only this release's API holds the depth limit, so an earlier release serving over
   `0113` can build a deeper chain again, and every read of that chain's issues fails (500) until an
   ancestor that still reads has its parent set to null.
+- **Breaking:** migration `0117` is a stop-the-world migration. Deploy it with no server of the
+  earlier release running, and never start a release older than `0117` over it again: stop the
+  earlier release, or scale it to zero, before this release boots (a Recreate rollout, never a
+  rolling one), and recover a failed deploy forward rather than by rolling the image back. Over
+  the new schema an earlier release's architecture-source save answers `500`, since no unique
+  index covers `project_key` alone; its import deletes every component of the project before
+  inserting one source's, so a model with components fails on the new `source_id` column and one
+  with none deletes every source's components; and its delete removes every source of the
+  project. Its census counts components whose project has no architecture source, which only
+  direct SQL writes; repair them on the release still serving with
+  `delete from components c where not exists (select 1 from architecture_sources s where s.project_key = c.project_key)`
+  and take the census again (`cmd/dispatch/README.md`, "Database migrations").
+- **Breaking:** the singular architecture source routes `PUT` and `DELETE
+  /api/v1/projects/{key}/architecture-source` are gone. A source is addressed by its repository
+  under `/api/v1/projects/{key}/architecture-sources/{owner}/{repo}`, and a project's sources are
+  listed at `/api/v1/projects/{key}/architecture-sources`; the `dispatch` CLI of this release uses
+  the new routes. Two singular routes are kept for `dispatch` clients older than this release,
+  each call logged at warn naming the route and the project:
+  `GET /api/v1/projects/{key}/architecture-source`, which those clients read on every issue
+  create, answers `200 null` when the project has no source, otherwise its first source's row,
+  `404` for an unknown project, and the list route replaces it;
+  `POST /api/v1/projects/{key}/architecture-source/sync`, which their `dispatch architecture-sync`
+  calls, imports every source as `POST …/architecture-sources/sync` does and answers one row: the
+  first source in the order they were added whose `last_error` is set, or the first source when
+  none failed. A project with no source is still `404 SOURCE_NOT_FOUND`, and a failure that could
+  not be recorded `500`; a credential or branch problem, once a `409 SOURCE_ACCESS`, is recorded
+  on its row and answers `200` with that `last_error`, which those clients print as
+  `Sync failed for …`. `POST …/architecture-sources/sync` replaces it.
 - **Breaking:** the Dispatch auto-deployer (`deploy/scripts/autodeploy.sh`) accepts `DATABASE_URL`
   in one form only, `postgres[ql]://<user>[:<password>]@<host>[:<port>]/<database>`, with an
   optional query of `sslmode`, `connect_timeout` and `application_name`.
@@ -1215,6 +1285,13 @@
 - A Markdown document now nests at most 100 blocks, and a document tree with a node more than 1,000 levels below the document, a node attribute value nesting more than 100 arrays and objects, or a mark attribute value nesting more than 99, is outside the Proof schema (LEGION-465, LEGION-535). The bounds sit where every read serves the tree: past about 5,000 levels the document token is JSON that `encoding/json` will not write from Go 1.27 or read in any version, and `GET /blocks`, which hashes each block's subtree apart, does work growing with the square of the depth. A live tree past either tree bound is treated as any other tree outside the schema: settlement writes no version, its reads and edits answer `409 DOC_SCHEMA` naming the repair, the document websocket refuses it, and an upload of replacement markdown repairs it (LEGION-469). A textblock's inline markdown nests at most 100 marks inside one another - emphasis, strong, strikethrough, links, images and code - and deeper content is refused naming the line. An accepted suggestion whose own markdown nests within 100 blocks but lands deep enough that the document would nest past them is refused as `400 INVALID_OP` on `replace_with`, naming how many blocks the result nests (LEGION-465).
 
 ### Fixed
+
+- A Dispatch page in Firefox now shows what changed while its live event stream was reconnecting,
+  such as a session's answer to a model switch, without waiting for the stream's heartbeat.
+  Firefox opened the stream only once its first byte arrived, and a stream with no backlog and no
+  new event sent none until the first heartbeat, fifteen seconds later: until then the page stayed
+  "Reconnecting…" and skipped the refresh a reconnect owes every view. `GET /api/v1/events` now
+  sends an SSE comment, `: open`, with its headers, so the stream opens at once in every browser.
 
 - A browser that opens a document while Dispatch closes that document's room now keeps getting the
   document's edits. Dispatch closes a room when an issue closes, when it evicts a stale or failed
