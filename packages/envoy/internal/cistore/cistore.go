@@ -41,19 +41,25 @@ import (
 // transient errors it outlasts are a NATS reconnect (a request refused while the connection
 // reconnects, since the reconnect buffer is off, and a request that was in flight when the
 // connection went away, given up on at the rewatch that follows the reconnect: kvCall) and a
-// JetStream 503 while a server restarts. It cannot outlast a timeout between rewatches, because
-// every KV call waits up to the JetStream MaxWait (10 s, Open) first, five times this budget, so a
-// call that times out returns after the budget has run out.
+// JetStream 503 while a server restarts.
 // A caller that queues behind a write in progress waits for that write and then its own, so a
-// Record returns within two budgets. The webhook handler records a check_run once for each PR it
-// lists, one after another, so a delivery listing k PRs can take up to 2k budgets, past the
-// listener's 10s HTTP WriteTimeout at three; that needs a write to lose its compare-and-swap for its
-// whole budget, and after combining only the summary loop's transitions and another listener
-// task's batches write the same record. NOTE: this bounds only the retry loop; a KV call can still
-// wait up to the JetStream MaxWait between rewatches (a systemic limit of the legacy nats.go KV
-// API, shared with internal/store).
+// Record can take two budgets, and recordWait holds it to that, every KV call included. The webhook
+// handler records a check_run once for each PR it lists, one after another, under one context for
+// the delivery (webhook.GitHubHandler), so a delivery listing k PRs can take up to 2k budgets
+// unless that context ends first; that needs a write to lose its compare-and-swap for its whole
+// budget, and after combining only the summary loop's transitions and another listener task's
+// batches write the same record. The summary loop's transitions (casState) answer no request and
+// still wait the JetStream MaxWait.
 const recordBudget = 2 * time.Second
 const recordBackoffCap = 50 * time.Millisecond
+
+// recordWait bounds one Record or RecordSuite as a whole: the wait for a write it queues behind and
+// its own write, two budgets (update). nats.go's KV calls take no context and wait up to the
+// JetStream MaxWait (10 s, Open), so each is waited for only until this wait, or the caller's
+// context, ends (kvCall): a silent bus fails the record then rather than holding it, and every
+// caller queued behind it, for the MaxWait. Within that wait a call is still waited for past its
+// write's own budget, so a server that stalls for less and then answers loses nothing.
+const recordWait = 2 * recordBudget
 
 // checkRunID is a GitHub check-run id. Records written before ids were
 // validated at ingress carry it as a decimal string; new records carry a
@@ -459,13 +465,14 @@ func (s *Store) WaitForCacheReady(ctx context.Context) error {
 	return s.watcher.WaitReady(ctx)
 }
 
-// Record folds one check observation into the per-commit state via CAS.
-func (s *Store) Record(observation contracts.CIObservation) error {
-	return s.record(observation)
+// Record folds one check observation into the per-commit state via CAS, waiting for it no longer
+// than ctx allows (update).
+func (s *Store) Record(ctx context.Context, observation contracts.CIObservation) error {
+	return s.record(ctx, observation)
 }
 
-func (s *Store) record(observation contracts.CIObservation) error {
-	return s.update(observation.Owner, observation.Repo, observation.Number, observation.SHA, func(st *State) bool {
+func (s *Store) record(ctx context.Context, observation contracts.CIObservation) error {
+	return s.update(ctx, observation.Owner, observation.Repo, observation.Number, observation.SHA, func(st *State) bool {
 		if st.Checks == nil {
 			st.Checks = map[string]Check{}
 		}
@@ -494,9 +501,10 @@ func (s *Store) record(observation contracts.CIObservation) error {
 	})
 }
 
-// RecordSuite folds a check_suite observation into the per-commit state.
-func (s *Store) RecordSuite(observation contracts.CIObservation) error {
-	return s.update(observation.Owner, observation.Repo, observation.Number, observation.SHA, func(st *State) bool {
+// RecordSuite folds a check_suite observation into the per-commit state, waiting for it no longer
+// than ctx allows (update).
+func (s *Store) RecordSuite(ctx context.Context, observation contracts.CIObservation) error {
+	return s.update(ctx, observation.Owner, observation.Repo, observation.Number, observation.SHA, func(st *State) bool {
 		if st.Suites == nil {
 			st.Suites = map[string]Suite{}
 		}

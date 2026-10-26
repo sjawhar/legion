@@ -374,6 +374,12 @@ func sessionHealthFields(sessions *session.SessionRegistry) map[string]interface
 // lane is "subscribed" or, with ENVOY_SUBSCRIBE_ALL_TOPICS off, "not_applicable"; with it on, a
 // live client that is not connected or holds no valid subscription is 503 "live subscription
 // inactive", since every topic the stream does not store then reaches no session.
+//
+// The checks that go to the bus share one healthzBudget taken from the request's own context: the
+// flush, each cache's KV ping and the durable consumer's info read. A ping or that read that has
+// not answered when it ends is answered as the same check failing is (healthzPing), so a stall in
+// JetStream alone, which the flush's core PING does not see, is answered inside the budget rather
+// than after the 10 s JetStream wait.
 func healthzHandler(deps *atomic.Pointer[listenerDeps]) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -383,7 +389,9 @@ func healthzHandler(deps *atomic.Pointer[listenerDeps]) http.HandlerFunc {
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "starting"})
 			return
 		}
-		if err := d.client.Conn.FlushTimeout(3 * time.Second); err != nil {
+		ctx, cancel := context.WithTimeout(r.Context(), healthzBudget)
+		defer cancel()
+		if err := d.client.Conn.FlushWithContext(ctx); err != nil {
 			w.WriteHeader(http.StatusServiceUnavailable)
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "unhealthy", "error": "nats unavailable"})
 			return
@@ -405,7 +413,7 @@ func healthzHandler(deps *atomic.Pointer[listenerDeps]) http.HandlerFunc {
 			}
 		}
 		for _, c := range d.caches {
-			if err := c.cache.Ping(); err != nil {
+			if err := healthzPing(ctx, c.cache); err != nil {
 				writeDependencyHealth(w, c.name+" KV", err, c.cache.WatchErr() != nil || errors.Is(err, nats.ErrConnectionClosed))
 				return
 			}
@@ -421,7 +429,7 @@ func healthzHandler(deps *atomic.Pointer[listenerDeps]) http.HandlerFunc {
 		if d.live != nil {
 			response["live_topics"] = "subscribed"
 		}
-		consumerInfo, err := d.client.JS().ConsumerInfo(bus.Stream, d.consumer)
+		consumerInfo, err := d.client.JS().ConsumerInfo(bus.Stream, d.consumer, nats.Context(ctx))
 		if err != nil {
 			writeDependencyHealth(w, "durable consumer", err, errors.Is(err, nats.ErrConsumerNotFound))
 			return
@@ -438,6 +446,20 @@ func healthzHandler(deps *atomic.Pointer[listenerDeps]) http.HandlerFunc {
 		w.WriteHeader(http.StatusOK)
 		_ = json.NewEncoder(w).Encode(response)
 	}
+}
+
+// healthzBudget bounds the bus checks of one /healthz answer.
+const healthzBudget = 3 * time.Second
+
+// healthzPing is cache's Ping as a /healthz request holding ctx waits for it (bus.Bounded): nats.go's
+// KV Status takes no context, so a ping that has not answered when ctx ends fails with ctx's error,
+// the "context deadline exceeded" a ping that waited out the JetStream MaxWait failed with. The
+// abandoned ping runs on to its answer or that wait; what it can still do then - record a
+// recreated bucket's error on its watcher, or prune the session cache's last-seen times - is what
+// any later ping would do.
+func healthzPing(ctx context.Context, cache kvCache) error {
+	_, _, err := bus.Bounded(ctx, func() (struct{}, error) { return struct{}{}, cache.Ping() })
+	return err
 }
 
 func writeDependencyHealth(w http.ResponseWriter, dependency string, err error, terminal bool) {

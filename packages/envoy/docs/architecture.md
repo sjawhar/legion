@@ -64,7 +64,7 @@ requires a bearer checks no `Host`.
 | `/v1/sessions/{session_id}` | DELETE | Remove a live session registration. A write route |
 | `/v1/messages/send` | POST | Send a direct agent-to-agent message. The target is read from the session store itself, so a 404 means the store says that session's key is gone; a store read or a publish the bus did not answer is a 503 with `Retry-After: 1` (see “Send and publish answers” below). |
 | `/v1/messages/publish` | POST | Publish an event. Required `message` becomes the human `payload_summary`; optional `payload` is distinct machine data in `payload`. Role topics and ad-hoc topics (any `notifications.` topic the stream does not capture, such as `notifications.team.deploy-squad`) use core NATS and reach the sessions subscribed at that moment; JetStream acknowledgement for every topic the stream captures is bounded to five seconds. A publish the bus did not serve, and a role-holder read that did not answer, are both the 503 below rather than a 500. |
-| `/healthz` | GET | Health check (always available, even during startup) |
+| `/healthz` | GET | Health check (always available, even during startup); its bus checks answer within 3 s (see “Webhook and health check bounds” below) |
 
 ## Send and publish answers
 
@@ -173,6 +173,26 @@ compare-and-swap the status the route always gave it. A write the budget abandon
 after the 503: a put rewrites the record the caller's retry writes again, and a delete or a claim
 is conditional on the revision it read (`store.Registry.UpsertWithin`, `Remove`,
 `SetRoleWithPrevious`, `session.SessionRegistry.PutWithin` and `Delete` say why each is safe).
+
+## Webhook and health check bounds
+
+The webhook routes and `/healthz` do their bus work within the request, keeping every answer and
+status they had; only how long a silent bus can hold them changed.
+
+| Path | Bus work | Bound | A call that did not answer |
+| --- | --- | --- | --- |
+| `/webhook/github`, a check_suite or check_run | CI record writes (`cistore.Store.Record`, `RecordSuite`) | each record 4 s (`recordWait`: the wait for a write it queues behind and its own 2 s write budget), every KV call included; all of it ends when GitHub drops the delivery or at the route's write deadline | `503 service unavailable`, as a failed record |
+| `/webhook/github`, any other event | publishes | the request, the route's write deadline, and the bus's 5 s a publish | `503 service unavailable` |
+| `/webhook/slack` | publishes | 2.5 s from the handler's start (`slackAnswerBudget`), inside the 3 s Slack waits | `503 service unavailable` |
+| `/webhook/ghostwispr` | publish | the request, and the bus's 5 s | `503 service unavailable` |
+| `/healthz` | flush, each cache's KV ping, the durable consumer's info read | 3 s from the request's start, shared (`healthzBudget`) | as the same check failing: `200 degraded` naming the dependency, or `503 unhealthy` for the flush |
+
+nats.go's KV calls take no context and wait out the JetStream MaxWait (10 s), so a CI write's KV
+calls and `/healthz`'s pings are waited for through a context (`kvCall`, `bus.Bounded`) that
+stops waiting when the bound ends. A CI write given up on may still land after the 503: it is a
+compare-and-swap at the revision it read (a create when it read none), so it never overwrites a
+write since, and a redelivery of its observations writes nothing. A ping given up on runs on to its
+own end and changes nothing a later ping would not.
 
 ## Subscription visibility
 

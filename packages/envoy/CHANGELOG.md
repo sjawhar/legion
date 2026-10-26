@@ -804,6 +804,19 @@
   `invalid_request`, `too_large` or `bus_unavailable` on either line, `no_live_session` or
   `capability_refused` on a send, and `publish_denied`, `role_unclaimed`, `role_lapsed`,
   `role_holder_changed` or `role_claim_unreadable` on a publish (INFRA-141).
+- The Envoy listener's webhook routes and `/healthz` answer a bus that went silent inside their
+  callers' wait, with the answers and statuses they always gave (INFRA-141). A GitHub check_suite
+  or check_run delivery's CI record - the wait for a write it queues behind and its own write - is
+  held to 4 s, two write budgets, each KV call included, where a silent bus held it for the 10 s
+  JetStream wait, and ends sooner when its request does; it is still the 503 a failed record was.
+  A write given up on may land after that 503, but it is a compare-and-swap at the revision it
+  read, and a redelivery of its observations writes nothing. A Slack event's publishes end 2.5 s
+  after the handler starts, inside the 3 s Slack waits, where they had the bus's 5 s; a Ghost
+  Wispr event's and a GitHub event's end when the sender drops the request, or at that 5 s; each
+  is still the 503 a failed publish was. `/healthz`'s flush, cache KV pings and durable consumer
+  read share one 3 s budget, so a stall in JetStream alone, which the flush does not see, is
+  answered in 3 s rather than 10 s, as the same check failing always was (`200 degraded`,
+  `context deadline exceeded`).
 - A comment, comment edit, message or broadcast body is at most 32,000 characters
   (`contracts.DispatchBodyMax`, UTF-16 units), up from 2,000 (INFRA-45); a longer one is
   `400 CAP_EXCEEDED` as before, named the way every other cap names its own. The limit is

@@ -50,10 +50,10 @@ func githubSenderField(payload map[string]any, field string) string {
 	return s
 }
 
-// CIRecorder folds check-run and check-suite observations into CI state.
+// CIRecorder folds check-run and check-suite observations into CI state, each within ctx.
 type CIRecorder interface {
-	Record(contracts.CIObservation) error
-	RecordSuite(contracts.CIObservation) error
+	Record(context.Context, contracts.CIObservation) error
+	RecordSuite(context.Context, contracts.CIObservation) error
 }
 
 func reviewerVerdict(name string) bool {
@@ -88,6 +88,11 @@ const githubBodyBudget = 64 << 20
 // to go past the limit, the other deliveries waiting for room for that long. A delivery waiting for
 // room reads its body under the same deadline, so its wait ends there too and it answers 400.
 // They are variables so a test can shorten them.
+//
+// The records and publishes run under the request's own context, with the write deadline as its
+// deadline, so they end when GitHub drops the delivery (it waits 10 s for an answer) and never run
+// past the moment their answer could still be written. Each record is also held to the CI store's
+// own wait (cistore's recordWait, 4 s: two 2 s write budgets), and each publish to the bus's 5 s.
 var (
 	githubBodyDeadline   = 60 * time.Second
 	githubHandleDeadline = 15 * time.Second
@@ -154,6 +159,9 @@ func githubHandler(secret, mentionTrigger, reviewerAppID string, publisher Publi
 			_, _ = w.Write([]byte("ok"))
 			return
 		}
+		// Records and publishes end with the request and at its write deadline (extendDeadlines).
+		answer, cancelAnswer := context.WithDeadline(r.Context(), start.Add(githubBodyDeadline+githubHandleDeadline))
+		defer cancelAnswer()
 		// A pull request's CI events only update durable state. The summary loop publishes one
 		// settled checks envelope for each commit whose suites and check runs are done. A finished
 		// Actions job on the default branch, of a run with no pull request, records nothing and is
@@ -161,7 +169,7 @@ func githubHandler(secret, mentionTrigger, reviewerAppID string, publisher Publi
 		if obs := contracts.GithubCIObservations(event, payload); len(obs) > 0 {
 			for _, o := range obs {
 				if o.CheckName == "" {
-					if err := ci.RecordSuite(o); err != nil {
+					if err := ci.RecordSuite(answer, o); err != nil {
 						deliveryFailed(w, "github ci suite record", err)
 						return
 					}
@@ -177,7 +185,7 @@ func githubHandler(secret, mentionTrigger, reviewerAppID string, publisher Publi
 						continue
 					}
 				}
-				if err := ci.Record(o); err != nil {
+				if err := ci.Record(answer, o); err != nil {
 					deliveryFailed(w, "github ci record", err)
 					return
 				}
@@ -202,7 +210,7 @@ func githubHandler(secret, mentionTrigger, reviewerAppID string, publisher Publi
 				http.Error(w, err.Error(), http.StatusBadRequest)
 				return
 			}
-			if err := publisher.Publish(item); err != nil {
+			if err := publisher.PublishWithin(answer, item); err != nil {
 				deliveryFailed(w, "github publish", err)
 				return
 			}
