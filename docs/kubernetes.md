@@ -2129,7 +2129,7 @@ architect, planner, implementer, tester, reviewer, merger), named for its role:
    <ref> until a fetch brings it`). Once the fetch may start — at once, or once the cache is ready
    — the cache's stream, its verification and the delta from GitHub share one 30-minute bound
    (`workspace.FetchTimeout`), each given what remains of it, so the fetch's waits, transfers and
-   checks end within 70 minutes (`workspace.FetchBudget`) however long it waited, and the few local
+   checks end within 100 minutes (`workspace.FetchBudget`: the wait, then one bound for the cache's stream and its verification, then one of its own for the delta from GitHub) however long it waited, and the few local
    git commands around them take moments; a step with nothing left fails the fetch, naming the
    bound. Each transfer from GitHub is tried again up to four times after a transient failure,
    within that bound. It is the only process that holds the provisioning token
@@ -3740,7 +3740,7 @@ The daemon probes a pod by reading it and consulting the worker stream's live re
   containers have finished. Until it first sees an init container running it waits
   `worker_boot_timeout_seconds`, the image pull's bound; from then on, `worker_boot_timeout_seconds`
   counted from the last moment it saw one running, and never longer than that plus
-  `workspace.FetchBudget` and `workspace.CloneTimeout` together (100 min;
+  `workspace.FetchBudget` and `workspace.CloneTimeout` together (130 min;
   `sandbox.Runtime.ProvisionBound`) from the first (`awaitRoleLauncher`,
   `internal/runtime/sandbox/relaunch.go`): each term is the real bound of a distinct phase, run one
   after the other, `workspace-fetch`'s whole fetch and then `workspace-init`'s shared clone of the
@@ -3774,7 +3774,7 @@ The daemon probes a pod by reading it and consulting the worker stream's live re
   6 min): under Kubernetes, the deadline carries an added bound of `sandbox.Runtime.ProvisionBound`
   until the shim's first hello, and from there the daemon re-arms the base deadline alone, the same
   one a tmux pane runs under throughout. A pod that never says hello is retired at the launch's return
-  plus the base deadline plus the bound, armed as one (106 min at the defaults); one that says hello
+  plus the base deadline plus the bound, armed as one (136 min at the defaults); one that says hello
   and never registers is retired at hello plus the base deadline alone (6 min from the hello); and
   one whose agent registers and never says it is ready is retired at its registration plus the base
   deadline alone (6 min from the registration, again from a daemon restart that finds it
@@ -3885,7 +3885,7 @@ coordinator's pods (`packages/daemon`) keep to that with two init containers:
   start — at once, or once the repository cache is ready, after a wait of at most 40 minutes — the
   cache's stream, its verification, every attempt of the transfer from GitHub and its read of
   GitHub's `HEAD` run under one `workspace.FetchTimeout` (30 minutes) instead, each given what
-  remains of it, so the fetch's waits, transfers and checks end within `workspace.FetchBudget` (70
+  remains of it, so the fetch's waits, transfers and checks end within `workspace.FetchBudget` (100
   minutes). A transfer
   that fails transiently is run again: git's fatal exit (128) with a cause line — `RPC failed; …` for
   a request of the transfer, `unable to access '…': …` for the first request — naming 408, 429 or a
@@ -3897,7 +3897,7 @@ coordinator's pods (`packages/daemon`) keep to that with two init containers:
   fails the fetch. No retry starts past the bound. Any other failure — a token refused, a repository not found or not
   granted, a certificate that does not verify, a curl error the list does not name — fails the
   fetch at once (`transientCloneFailure`, `internal/workspace/fetch.go`). The launch waits for the
-  pod's launchers while either init container runs, up to `sandbox.Runtime.ProvisionBound` (100
+  pod's launchers while either init container runs, up to `sandbox.Runtime.ProvisionBound` (130
   minutes) plus its boot timeout from when it first sees one running (above, "Liveness rules"), so
   the fetch, its wait and retries included, spends no launch failure, and `workspace-init` has its
   shared clone's 30 minutes and at least the boot timeout after a fetch that ran its whole budget.

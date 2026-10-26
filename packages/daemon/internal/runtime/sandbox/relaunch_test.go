@@ -615,16 +615,17 @@ func TestAPodOfATreeLaunchesWhileAnotherIsStillInitializing(t *testing.T) {
 	}
 }
 
-// ProvisionBound is the two provisioning phases' bounds together, workspace.FetchBudget (70m: the
-// wait for the repository cache, then the one bound the fetch's stream, verification and delta
-// share) for workspace-fetch and workspace.CloneTimeout (30m) for workspace-init's shared clone,
+// ProvisionBound is the two provisioning phases' bounds together, workspace.FetchBudget (100m: the
+// wait for the repository cache, then one bound for the cache's stream and its verification, then
+// one of its own for the delta from GitHub) for workspace-fetch and workspace.CloneTimeout (30m)
+// for workspace-init's shared clone,
 // and nothing more: provisioning from the feed onto the issue's own volume waits on no other pod,
-// so no lock wait is added to it. Pinned to a literal, 100 minutes, since no test can wait the real
+// so no lock wait is added to it. Pinned to a literal, 130 minutes, since no test can wait the real
 // bound out.
 func TestProvisionBoundIsTheFetchsWholeBudgetAndTheClonesBound(t *testing.T) {
 	g := newRig(t, nil)
-	if got, want := g.r.ProvisionBound(), workspace.CacheWaitTimeout+workspace.FetchTimeout+workspace.CloneTimeout; got != 100*time.Minute || got != want {
-		t.Fatalf("ProvisionBound = %s, want %s: the cache wait, the fetch's bound after it, and the shared clone's", got, want)
+	if got, want := g.r.ProvisionBound(), workspace.CacheWaitTimeout+2*workspace.FetchTimeout+workspace.CloneTimeout; got != 130*time.Minute || got != want {
+		t.Fatalf("ProvisionBound = %s, want %s: the cache wait, the stream's bound, the delta's own, and the shared clone's", got, want)
 	}
 }
 

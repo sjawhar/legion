@@ -891,8 +891,8 @@ func TestAnIssuePodsFetchFillsItsFeedFromTheCache(t *testing.T) {
 		t.Errorf("the feed's main is %s, want the remote's %s", got, moved)
 	}
 	git(t, report.Feed, "--git-dir="+report.Feed, "fsck", "--connectivity-only")
-	if transfers := run.transfers(); transfers[len(transfers)-1] != "--git-dir="+report.Feed+" fetch" && !strings.HasPrefix(transfers[len(transfers)-1], "--git-dir="+report.Feed+".clone-") {
-		t.Errorf("the pod's last transfer was %q, want a fetch of the delta", transfers[len(transfers)-1])
+	if transfers := run.transfers(); !slices.Contains(transfers, "--git-dir="+report.Feed+" fetch") {
+		t.Errorf("the pod's transfers were %q, wanted a fetch of the delta into the feed", transfers)
 	}
 	for _, transfer := range run.transfers()[1:] {
 		if strings.HasPrefix(transfer, "clone ") {

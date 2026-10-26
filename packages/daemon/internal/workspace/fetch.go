@@ -79,21 +79,29 @@ type FetchReport struct {
 // A feed that holds the repository already — the issue volume's feed on a relaunch, the cache's
 // clone at each refresh — has the delta fetched into it from GitHub, once the locks a killed fetch
 // left are gone (RemoveStaleFeedLocks). A feed that does not is filled in a temporary sibling, its
-// garbage collection turned off (feedConfiguration), and renamed into place once all of that
+// garbage collection turned off (feedConfiguration), and renamed into place once what fills it
 // succeeded, so the feed's repository is either whole or absent. With a cache named, it comes from
 // the cache alone: Fetch waits for the cache to be ready (waitForCache), unpacks its tar
-// (unpackCache), then fetches from GitHub the default branch and the Legion issue branches, which
-// is everything the issue's clone is made from and all the cache can be behind on (fetchInto); a
+// (unpackCache), verifies it (verifyCache), moves it into the feed, and only then fetches from
+// GitHub the default branch and the Legion issue branches, which is everything the issue's clone
+// is made from and all the cache can be behind on (fetchInto); a
 // cache that is not ready within CacheWaitTimeout, or whose tar a feed does not take, fails the
 // fetch, and nothing is cloned from GitHub instead, so the cache's own first clone is the one full
 // download of the repository. With none, the feed is cloned bare from GitHub, or has every branch
 // fetched into it and the ones GitHub deleted pruned: what the cache's own process does. Provision
 // then clones the shared clone from the feed with no credential.
 //
-// What the fetch does once it may start — at once, or once the cache is ready — shares one
-// FetchTimeout: the cache's stream, its verification and the delta from GitHub, or a clone or fetch
-// from GitHub, each bounded by what remains of it, and none started past it. So the fetch's wait,
-// transfers and checks end within FetchBudget, however long it waited on the cache; the few local
+// The feed moves into place before the delta so that a fetch killed in the delta leaves the
+// cache's stream on the volume: the pod the daemon makes in its place finds the repository, and
+// asks GitHub for the delta alone. Nine LINUX issue pods died in the delta on 2026-10-26, and each
+// replacement threw away a verified 2 GB stream and began again (dispatch://INFRA-460). The feed
+// it leaves is a whole repository, no further behind GitHub than the cache is, and provisioning
+// never sees it: `workspace-init provision` runs only after this container exits 0.
+//
+// Each of the fetch's three size-following stages gets FetchTimeout of its own, and none starts
+// past the one it is in: the cache's stream and its verification share one, the delta from GitHub
+// has its own, and a clone from GitHub has its own. So the fetch's waits, transfers and checks end
+// within FetchBudget, however long it waited on the cache; the few local
 // git commands around them (reading refs, writing the feed's configuration) keep CommandTimeout
 // each and take moments. Every attempt of a transfer from GitHub reads
 // the provisioning token anew as it starts (FetchRequest.Token, fetchCredential.renew), so it
@@ -164,41 +172,58 @@ func Fetch(ctx context.Context, run Runner, request FetchRequest) (FetchReport, 
 	defer func() {
 		_ = os.RemoveAll(staging)
 	}()
-	transfer := feedTransfer{verb: "clone", argv: []string{"git", "-c", "gc.auto=0", "-c", "maintenance.auto=false", "clone", "--bare", "--quiet", GitHubURL(request.Repo), staging}, destination: staging}
-	if request.CacheURL != "" {
-		if err := waitForCache(ctx, request); err != nil {
+	if request.CacheURL == "" {
+		clone := feedTransfer{verb: "clone", argv: []string{"git", "-c", "gc.auto=0", "-c", "maintenance.auto=false", "clone", "--bare", "--quiet", GitHubURL(request.Repo), staging}, destination: staging}
+		report.Cloned = true
+		deadline := request.Clock.Now().Add(FetchTimeout)
+		if err := report.fromGitHub(ctx, run, request, clone, staging, held, deadline); err != nil {
 			return FetchReport{}, err
 		}
+		if err := settleFeed(ctx, run, staging, feed); err != nil {
+			return FetchReport{}, err
+		}
+		return report, credential.remove()
+	}
+
+	if err := waitForCache(ctx, request); err != nil {
+		return FetchReport{}, err
+	}
+	cached := request.Clock.Now().Add(FetchTimeout)
+	started := request.Clock.Now()
+	streamed, err := unpackCache(ctx, run, request, staging, cached)
+	verifying := request.Clock.Now()
+	if err == nil {
+		err = verifyCache(ctx, run, request, staging, cached)
+	}
+	if err != nil {
+		return FetchReport{}, fmt.Errorf("fill the feed from the repository cache %s: %w", request.CacheURL, err)
+	}
+	report.CacheBytes, report.CacheDuration, report.VerifyDuration = streamed, verifying.Sub(started), request.Clock.Now().Sub(verifying)
+	if err := settleFeed(ctx, run, staging, feed); err != nil {
+		return FetchReport{}, err
 	}
 	deadline := request.Clock.Now().Add(FetchTimeout)
-	if request.CacheURL != "" {
-		started := request.Clock.Now()
-		streamed, err := unpackCache(ctx, run, request, staging, deadline)
-		verifying := request.Clock.Now()
-		if err == nil {
-			err = verifyCache(ctx, run, request, staging, deadline)
-		}
-		if err != nil {
-			return FetchReport{}, fmt.Errorf("fill the feed from the repository cache %s: %w", request.CacheURL, err)
-		}
-		report.CacheBytes, report.CacheDuration, report.VerifyDuration = streamed, verifying.Sub(started), request.Clock.Now().Sub(verifying)
-		narrowed, err := deltaBranches(ctx, run, request, staging, held, deadline)
-		if err != nil {
-			return FetchReport{}, err
-		}
-		transfer = fetchInto(staging, request.Repo, narrowed)
-	}
-	report.Cloned = transfer.verb == "clone"
-	if err := report.fromGitHub(ctx, run, request, transfer, staging, held, deadline); err != nil {
+	narrowed, err := deltaBranches(ctx, run, request, feed, held, deadline)
+	if err != nil {
 		return FetchReport{}, err
 	}
-	if err := feedConfiguration(ctx, run, staging); err != nil {
+	if err := report.fromGitHub(ctx, run, request, fetchInto(feed, request.Repo, narrowed), feed, held, deadline); err != nil {
 		return FetchReport{}, err
-	}
-	if err := os.Rename(staging, feed); err != nil {
-		return FetchReport{}, fmt.Errorf("move the fetched repository into the feed at %s: %w", feed, err)
 	}
 	return report, credential.remove()
+}
+
+// settleFeed writes the feed repository's own configuration into staging and moves it to feed,
+// where the next fetch of this pod, or of the pod a killed one is replaced by, finds the
+// repository and asks GitHub for its delta alone.
+func settleFeed(ctx context.Context, run Runner, staging, feed string) error {
+	if err := feedConfiguration(ctx, run, staging); err != nil {
+		return err
+	}
+	if err := os.Rename(staging, feed); err != nil {
+		return fmt.Errorf("move the fetched repository into the feed at %s: %w", feed, err)
+	}
+	return nil
 }
 
 // fromGitHub runs transfer into the bare repository gitDir under the one-shot credential held,
@@ -375,13 +400,16 @@ const CachePoll = 10 * time.Second
 const CacheWaitTimeout = FetchTimeout + 10*time.Minute
 
 // FetchBudget bounds a fetch's waits, transfers and checks, end to end: at most CacheWaitTimeout
-// waiting for the repository cache, then FetchTimeout for the cache's stream, its verification and
-// the delta from GitHub together. The few local git commands around them keep CommandTimeout each
+// waiting for the repository cache, then FetchTimeout for the cache's stream and its verification,
+// then FetchTimeout for the delta from GitHub, which has a bound of its own so that a slow stream
+// cannot leave the delta minutes to run in (dispatch://INFRA-460). A fetch with no cache holds one
+// FetchTimeout for its clone or its fetch, well inside this. The few local git commands around
+// them keep CommandTimeout each
 // and take moments, which the launch's boot timeout past ProvisionBound covers. The Sandbox runtime
 // allows a launching pod's provisioning this much and the shared clone's (sandbox.Runtime.
 // ProvisionBound), so a fetch that runs out of it fails, naming why, before the launch would give
 // up on it.
-const FetchBudget = CacheWaitTimeout + FetchTimeout
+const FetchBudget = CacheWaitTimeout + FetchTimeout + FetchTimeout
 
 // waitForCache asks the repository cache's GET <cache>/healthz every CachePoll until it answers
 // 200 ready, logging what it answered whenever that changes and at least once a minute, and fails

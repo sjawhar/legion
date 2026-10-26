@@ -1646,21 +1646,19 @@ func TestFetchStreamsTheRepositoryCacheThenFetchesTheDeltaFromGitHub(t *testing.
 	}
 	var fetch Command
 	for _, call := range run.Calls() {
-		if slices.Contains(call.Argv, "fetch") && slices.ContainsFunc(call.Argv, func(arg string) bool {
-			return strings.HasPrefix(arg, "--git-dir="+feed+cloneSuffix)
-		}) {
+		if commandWith(call.Argv, "git", "--git-dir="+feed, "fetch") {
 			fetch = call
 		}
 	}
 	if fetch.Argv == nil {
-		t.Fatalf("Fetch fetched no delta from GitHub into the unpacked cache: %q", run.Calls())
+		t.Fatalf("Fetch fetched no delta from GitHub into the feed: %q", run.Calls())
 	}
 	if want := []string{"https://github.com/acme/widgets", "+refs/heads/main:refs/heads/main", "+refs/heads/legion/*:refs/heads/legion/*"}; !slices.Equal(fetch.Argv[len(fetch.Argv)-3:], want) || slices.Contains(fetch.Argv, "--prune") {
 		t.Errorf("the delta ran %q, want it ending in %q and pruning nothing", fetch.Argv, want)
 	}
 	assertCredentialedEnvironmentBounded(t, fetch, fetch.Timeout)
-	if left := FetchTimeout - report.CacheDuration - report.VerifyDuration; fetch.Timeout > left || fetch.Timeout < left-time.Minute {
-		t.Errorf("the delta was given %s, want what remained of the one %s bound after the stream and its verification: at most %s", fetch.Timeout, FetchTimeout, left)
+	if fetch.Timeout > FetchTimeout || fetch.Timeout < FetchTimeout-time.Minute {
+		t.Errorf("the delta was given %s, want its own %s, not what the stream and its verification left", fetch.Timeout, FetchTimeout)
 	}
 	for key, want := range map[string]string{"gc.auto": "0", "maintenance.auto": "false"} {
 		if got := strings.TrimSpace(runSetup(t, feed, "git", "--git-dir="+feed, "config", "--get", key)); got != want {
@@ -1741,13 +1739,15 @@ func TestFetchFailsWhenTheRepositoryCacheIsNeverReady(t *testing.T) {
 	}
 }
 
-// The cache's stream, its verification and the delta from GitHub share one FetchTimeout, counted
-// from when the cache is ready, so the fetch's waits, transfers and checks end within FetchBudget
-// however long it waited. A cache ready 35 minutes in, whose history takes 25 minutes to check,
-// leaves the delta the last 5 minutes, and the fresh feed is filled. A cache ready on the wait's
-// last ask, 39 min 50 s in, whose history takes the whole bound to check, leaves nothing to fetch
-// the delta in: the fetch fails then, 69 min 50 s in, naming the bound, and fills nothing.
-func TestFetchGivesTheCachesStreamVerificationAndDeltaOneBound(t *testing.T) {
+// The cache's stream and its verification share one FetchTimeout, counted from when the cache is
+// ready, and the delta from GitHub gets a FetchTimeout of its own, so the fetch's waits, transfers
+// and checks end within FetchBudget however long it waited and however slow the stream was. A
+// cache ready 35 minutes in, whose history takes 25 minutes to check, gives the delta its whole
+// bound, and the fresh feed is filled. So does a cache ready on the wait's last ask, 39 min 50 s
+// in, whose history takes that whole first bound: before the delta had a bound of its own, the
+// fetch died there and its replacement streamed the cache again (dispatch://INFRA-460). The
+// fetch still ends inside FetchBudget.
+func TestFetchGivesTheCachesStreamAndTheDeltaTheirOwnBounds(t *testing.T) {
 	polls := func(d time.Duration) int { return int(d / CachePoll) }
 	for _, tc := range []struct {
 		name     string
@@ -1760,14 +1760,13 @@ func TestFetchGivesTheCachesStreamVerificationAndDeltaOneBound(t *testing.T) {
 		{
 			name: "a cache ready 35 minutes in", notReady: polls(35 * time.Minute),
 			took:     map[string]time.Duration{"fsck": 25 * time.Minute},
-			timeouts: map[string][]time.Duration{"fsck": {FetchTimeout}, "fetch": {FetchTimeout - 25*time.Minute}},
+			timeouts: map[string][]time.Duration{"fsck": {FetchTimeout}, "fetch": {FetchTimeout}},
 			elapsed:  35*time.Minute + 25*time.Minute,
 		},
 		{
-			name: "a history that takes the whole bound to check", notReady: polls(CacheWaitTimeout) - 1,
+			name: "a history that takes the whole first bound to check", notReady: polls(CacheWaitTimeout) - 1,
 			took:     map[string]time.Duration{"fsck": FetchTimeout},
-			timeouts: map[string][]time.Duration{"fsck": {FetchTimeout}},
-			fails:    "the fetch's " + FetchTimeout.String() + " bound ran out before",
+			timeouts: map[string][]time.Duration{"fsck": {FetchTimeout}, "fetch": {FetchTimeout}},
 			elapsed:  CacheWaitTimeout - CachePoll + FetchTimeout,
 		},
 	} {
@@ -1798,6 +1797,63 @@ func TestFetchGivesTheCachesStreamVerificationAndDeltaOneBound(t *testing.T) {
 			}
 		})
 	}
+}
+
+// A fetch that fails in the delta leaves the cache's verified stream in the feed, so the pod the
+// daemon makes in its place finds the repository and asks GitHub for the delta alone: it streams
+// the cache no second time, and the feed ends at the remote's branches. Nine LINUX issue pods died
+// in the delta on 2026-10-26, and before this each replacement began the 2 GB stream again
+// (dispatch://INFRA-460).
+func TestAFetchThatFailsInTheDeltaLeavesTheCachesStreamInTheFeed(t *testing.T) {
+	run := newLocalRunner(t)
+	served := &fakeCache{body: cacheTar(t, cacheOf(t, run.remote))}
+	req := fetchRequest(t)
+	req.CacheURL, req.CacheToken, req.Log = served.serve(t), testCacheToken, func(string) {}
+	moved := pushRemoteBranch(t, run.remote, "legion/ACME-7", "newer.txt")
+	failing := &failingStep{recordingRunner: run, step: cacheFetchStep, fail: "fetch"}
+
+	if _, err := Fetch(context.Background(), failing, req); err == nil {
+		t.Fatalf("Fetch with a failing delta = nil, want the delta's failure")
+	}
+	feed := filepath.Join(req.Feed, "acme", "widgets.git")
+	if _, err := os.Stat(feed); err != nil {
+		t.Fatalf("the failed fetch left no feed at %s: %v", feed, err)
+	}
+	if stale, err := filepath.Glob(feed + cloneSuffix + "*"); err != nil || len(stale) != 0 {
+		t.Errorf("the failed fetch left %v beside the feed (%v)", stale, err)
+	}
+	if served.tarAsked != 1 {
+		t.Fatalf("the cache streamed %d tars, want the one the failed fetch took", served.tarAsked)
+	}
+
+	report, err := Fetch(context.Background(), run, req)
+	if err != nil {
+		t.Fatalf("the fetch after it: %v", err)
+	}
+	if served.tarAsked != 1 {
+		t.Errorf("the cache streamed %d tars, want the first fetch's alone: the second takes the feed it left", served.tarAsked)
+	}
+	if report.CacheBytes != 0 || report.Cloned {
+		t.Errorf("the second Fetch reported %+v, want the delta alone into the feed the first left", report)
+	}
+	if got := strings.TrimSpace(runSetup(t, feed, "git", "--git-dir="+feed, "rev-parse", "refs/heads/legion/ACME-7")); got != moved {
+		t.Errorf("the feed's legion/ACME-7 is %s, want the remote's %s", got, moved)
+	}
+}
+
+// failingStep is a Runner whose named step (step) always fails as git's own failure does, and
+// which runs every other command for real.
+type failingStep struct {
+	*recordingRunner
+	step func(argv []string) string
+	fail string
+}
+
+func (f *failingStep) Run(ctx context.Context, command Command) (Result, error) {
+	if f.step(command.Argv) == f.fail {
+		return Result{ExitCode: 128, Stderr: "fatal: the remote end hung up unexpectedly\n"}, nil
+	}
+	return f.recordingRunner.Run(ctx, command)
 }
 
 // cacheFetchStep names the steps of a fetch from the cache whose duration follows the
