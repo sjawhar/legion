@@ -7,9 +7,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/classify"
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
@@ -258,7 +260,8 @@ func TestARedTheBaseBranchDoesNotRequireSendsNothingBack(t *testing.T) {
 // decides nothing: a red settlement sends nothing back, since nothing says the red check is
 // required, so the head is neither green nor red. The read that records the set decides what the
 // settlement comes to: a check it requires that failed sends the work back, and a base branch that
-// requires no check has nothing red, so the same settlement then moves nothing.
+// requires no check gives the head no verdict and has nothing red, so the same settlement then
+// moves nothing.
 func TestAnUnreadRequiredSetLeavesTheHeadUndecided(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
@@ -266,9 +269,11 @@ func TestAnUnreadRequiredSetLeavesTheHeadUndecided(t *testing.T) {
 		status    string
 		required  []string
 		decidedTo phase.Phase
+		// verdict is the CI verdict that stands for the head once the set is read.
+		verdict string
 	}{
-		{"a red settlement in testing, on a base that requires the check", phase.Testing, "testing", []string{"ci"}, phase.Implementing},
-		{"a red settlement in reviewing, on a base that requires nothing", phase.Reviewing, "needs_review", []string{}, phase.Reviewing},
+		{"a red settlement in testing, on a base that requires the check", phase.Testing, "testing", []string{"ci"}, phase.Implementing, "red"},
+		{"a red settlement in reviewing, on a base that requires nothing", phase.Reviewing, "needs_review", []string{}, phase.Reviewing, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pool := migratedPool(t)
@@ -293,6 +298,17 @@ func TestAnUnreadRequiredSetLeavesTheHeadUndecided(t *testing.T) {
 			}
 			if got := noticeKinds(t, pool, "LEGION-208"); containsNotice(got, "checks-red") != (tc.decidedTo == phase.Implementing) {
 				t.Fatalf("once the required set is read the architect was told %v; want checks-red exactly when the work went back", got)
+			}
+			var verdict string
+			seedRecord(t, pool, func(tx pgx.Tx) error {
+				pr, err := record.NewStore().PullRequest(t.Context(), tx, "LEGION-208")
+				if err == nil {
+					verdict = classify.HeadVerdict(*pr)
+				}
+				return err
+			})
+			if verdict != tc.verdict {
+				t.Fatalf("once the required set is read the head's verdict is %q, want %q", verdict, tc.verdict)
 			}
 		})
 	}

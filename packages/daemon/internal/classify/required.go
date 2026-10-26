@@ -142,14 +142,17 @@ func WorkflowHead(pr record.PullRequest) string {
 }
 
 // HeadVerdict is the CI verdict that stands for the pull request's current head: "red" when a check
-// or workflow its base branch requires failed there (HeadChecks), "green" when every one passed,
-// and none when HeadChecks has nothing to judge or a required check or workflow is pending or has
-// no result. A check the base branch does not require never makes a head red, whatever it settled,
-// and a base that requires nothing has nothing red: GitHub merges such a head under rules of its
-// own, and the verdict decides only where Legion sends the issue.
+// or workflow its base branch requires failed there (HeadChecks), "green" only when every check and
+// workflow it requires passed, and none when HeadChecks has nothing to judge or a required check or
+// workflow is pending or has no result. A base branch that requires no check and no workflow gives
+// the head no verdict either, as an unread required set or a head no settlement stands for does:
+// nothing there was judged, so nothing there passed. A check the base branch does not require never
+// makes a head red, whatever it settled, so a base that requires nothing sends nothing back: GitHub
+// merges such a head under rules of its own, and the verdict decides only where Legion sends the
+// issue.
 func HeadVerdict(pr record.PullRequest) string {
 	checks, ok := HeadChecks(pr)
-	if !ok {
+	if !ok || len(checks) == 0 {
 		return ""
 	}
 	verdict := "green"
@@ -162,6 +165,15 @@ func HeadVerdict(pr record.PullRequest) string {
 		}
 	}
 	return verdict
+}
+
+// nothingRequired says whether a settlement stands for the pull request's head and its base branch
+// requires no check and no workflow there (HeadChecks judged nothing). HeadVerdict leaves such a
+// head without a verdict, yet CI sends nothing back from it, so a push on top of it leaves the
+// counted attempt as a push onto a green verdict does (AdvancePullRequestHead).
+func nothingRequired(pr record.PullRequest) bool {
+	checks, ok := HeadChecks(pr)
+	return ok && len(checks) == 0
 }
 
 // RedOnlyByWorkflows says whether CI is red at the pull request's head only because a workflow its
