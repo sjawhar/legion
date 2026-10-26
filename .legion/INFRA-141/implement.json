@@ -2,74 +2,43 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-141",
-  "completed": "2026-10-26T20:38:47Z",
-  "round": "generation 4: roles from the role claims (dispatch://INFRA-141/comment/04a5215e-6d68-4da1-b0ef-c039e778f9a5), plan v3 at af74a1aa plus the architect's 19:16Z overrule (plan.md v4, acceptance row A10: an incomplete role-claim view is fixed, not documented). The saved WIP 5e173361 was brought over with jj restore of packages/envoy only; no merge of main; GitHub reported the PR CONFLICTING (DIRTY) after the push of b7b09cce, so main 723ba153 was merged forward in d11db8ab (packages/envoy/AGENTS.md only: main's new Dispatch access-log bullet kept beside this PR's /healthz and NATS bullets)",
-  "planPointA10": "Recorded here because the planner cannot commit plan.json while the issue is implementing: RolesHeldBy answers from its view only while the view is complete (the current role watcher's first scan delivered every key and was not ended by nats.go's idle timer; again after a recreated bucket refills). Until then it returns store.ErrRoleViewNotReady; GET /v1/sessions and GET /v1/registry/<id> answer the 503 with Retry-After: 1; the sender stamp leaves Roles empty. Test: TestARoleViewWhoseFirstScanTimedOutAnswersOnlyOnceItsRescanCompletes, TestARecreatedRoleBucketsViewAnswersOnlyOnceItsRefillCompletes (internal/store), TestARoleViewWhoseFirstScanTimedOutIsTheBusNotAnsweringOnTheSessionRoutes, TestARecreatedRoleBucketIsNeverAnsweredAsAHolderWithoutItsRole (cmd/listener).",
+  "completed": "2026-10-26T22:30:22Z",
+  "round": "generation 4, review 5659336410 at c76123f7: five Minors (tests that could not catch what their comments claim, and false statements), per the architect's ruling of 21:31Z; no behaviour change but one log label; no merge of main (MERGEABLE)",
   "proof": [
     {
-      "criterion": "A7: a session holds a role exactly when the role's claim names it — a stale role topic is not reported as a role on /v1/sessions, /v1/registry or sender.roles, and a claim holder whose record lacks the topic is reported; a claims view that cannot answer is the 503 on the session routes",
-      "surface": "go test of ./cmd/listener and ./internal/store against the in-process NATS and the real handlers",
-      "command": "cd packages/envoy && go test ./cmd/listener -run '^(TestARoleIsHeldByTheSessionItsClaimNamesWhateverTheRecordsTopics|TestAClaimsViewThatCannotAnswerIsTheBusNotAnsweringOnTheSessionRoutes)$' -count=1 -v; go test ./internal/store -run '^(TestRolesHeldByFollowsTheRoleClaims|TestRolesHeldByRefusesWhenItsViewCannotAnswer)$' -count=1 -v",
-      "observed": "all four --- PASS",
-      "headSha": "757f5eff82dd035c2e3cc645d284d6960880edfa",
-      "negativeControl": "go test -overlay with roles taken from the record's topics again in senderStamp and sessionInfoFor: 'GET /v1/sessions reports ses_claims_holder_without_record holding [], want [planner]', '… ses_claims_stale_topic holding [reviewer], want []', 'a send from ses_claims_holder_without_record stamps sender roles [], want [planner]'; with sessionInfoFor ignoring RolesHeldBy's error: 'GET /v1/sessions with a claims view that cannot answer: status 200, Retry-After \"\"'"
+      "criterion": "Item 1: TestRolesHeldByFollowsTheRoleClaims fails every time either own-write fence is removed",
+      "surface": "go test of ./internal/store against the in-process NATS, the role watcher's deliveries held behind a gate while SetRole and Remove answer",
+      "command": "cd packages/envoy && go test ./internal/store -count=30 -run '^TestRolesHeldByFollowsTheRoleClaims$'",
+      "observed": "30 of 30 pass at the head",
+      "headSha": "3c79342be613c77d0d6340f2ccdd0db07642ec92",
+      "negativeControl": "go test -overlay, workspace untouched: setOwnRoleHolder after the claim write removed → 30 of 30 fail, 'role_holders_test.go:123: a claim this registry wrote is not in its view as the write answers: []'; both forgetRoleHolder calls removed → 30 of 30 fail, 'role_holders_test.go:129: a claim this registry released is still in its view as the release answers: [planner]'"
     },
     {
-      "criterion": "A8: a claim whose request ends during the old holder's cleanup succeeds and logs no failure; a cleanup that fails within the request is best effort",
-      "surface": "go test of ./internal/store against the in-process NATS",
-      "command": "cd packages/envoy && go test ./internal/store -run '^(TestAClaimWhoseRequestEndsDuringItsCleanupSucceedsAndLogsNoFailure|TestSetRoleSucceedsWhenOldHolderCleanupFails)$' -count=1 -v",
-      "observed": "both --- PASS",
-      "headSha": "757f5eff82dd035c2e3cc645d284d6960880edfa",
-      "negativeControl": "go test -overlay with the ctx.Err() != nil branch of the old holder's cleanup deleted: 'role_holders_test.go:342: the cut-short cleanup was not logged at INFO' (it falls into the WARN branch)"
+      "criterion": "Item 2: the recreated-bucket tests fail when the reset keeps the old view (holders or holderRevisions); item 3: the kvwatch test checks that a Rewatch's new watcher is not complete before its own scan",
+      "surface": "go test of ./internal/store, ./cmd/listener and ./internal/kvwatch against the in-process NATS",
+      "command": "cd packages/envoy && go test ./internal/store -count=10 -run '^(TestARecreatedRoleBucketsViewAnswersOnlyOnceItsRefillCompletes|TestARoleViewWhoseFirstScanTimedOutAnswersOnlyOnceItsRescanCompletes)$'; go test ./cmd/listener -count=10 -run '^(TestARecreatedRoleBucketIsNeverAnsweredAsAHolderWithoutItsRole|TestARoleViewWhoseFirstScanTimedOutIsTheBusNotAnsweringOnTheSessionRoutes|TestARoleIsHeldByTheSessionItsClaimNamesWhateverTheRecordsTopics)$'; go test ./internal/kvwatch -count=10 -run '^TestCompleteIsTheCurrentWatchersFirstScanDeliveringEveryKey$'",
+      "observed": "all pass 10 of 10",
+      "headSha": "3c79342be613c77d0d6340f2ccdd0db07642ec92",
+      "negativeControl": "go test -overlay: resetRoleHolders keeping holders → store 'after the refill ses_holder holds [planner reviewer], want [reviewer]' and listener 'GET /v1/registry/ses_recreated_roles_holder answered 200 with roles [planner reviewer]' (3 of 3 each); keeping holderRevisions → store 'after the refill ses_other holds [], want [architect]' and listener 'after the refill GET /v1/registry/ses_recreated_roles_target reports roles [], want [architect]' (3 of 3 each); watch() no longer clearing complete → 'warmup_test.go:224: a Rewatch whose new watcher has not finished its scan answered Complete true' (3 of 3)"
     },
     {
-      "criterion": "A9: the role-topic reaper and the detached-cleanup machinery are gone",
-      "surface": "the repository tree",
-      "command": "git grep -n -E 'reapRoleTopics|removeStaleRoleTopics|detachedCleanup|roleCleanupBudget|staleRoleTopics' -- packages/envoy",
-      "observed": "prints nothing (exit 1)",
-      "headSha": "757f5eff82dd035c2e3cc645d284d6960880edfa",
-      "negativeControl": "on 0c227469 the same grep matches 1 line in packages/envoy/AGENTS.md and 21 in packages/envoy/internal/store/kv.go"
-    },
-    {
-      "criterion": "A10: an incomplete role-claim view is never answered — after an idle-timed-out first scan and during a recreated bucket's refill, no holder is reported without its role",
-      "surface": "go test of ./internal/store and ./cmd/listener against the in-process NATS: kvwatchtest.TimingOut/TimingOutFirst for the idle-timed-out scan, testnats.RecreateKeyValue then a Rewatch for the recreated bucket (3000 filler claims, the holder's last, both routes polled during the refill)",
-      "command": "cd packages/envoy && go test ./internal/store -count=3 -run '^(TestARoleViewWhoseFirstScanTimedOutAnswersOnlyOnceItsRescanCompletes|TestARecreatedRoleBucketsViewAnswersOnlyOnceItsRefillCompletes|TestAClaimWriteAnsweredAcrossARecreatedRoleBucketLeavesTheNewBucketsView)$' -v; go test ./cmd/listener -count=3 -run '^(TestARoleViewWhoseFirstScanTimedOutIsTheBusNotAnsweringOnTheSessionRoutes|TestARecreatedRoleBucketIsNeverAnsweredAsAHolderWithoutItsRole)$' -v; go test ./internal/kvwatch -run '^(TestCompleteIsTheCurrentWatchersFirstScanDeliveringEveryKey|TestAFirstScanTheIdleTimerEndedIsNotComplete|TestWithRescanCompletesAFirstScanTheIdleTimerEnded)$' -count=1 -v",
-      "observed": "every run PASS: RolesHeldBy returns ErrRoleViewNotReady until the rescan or refill completes, then the holder's roles; the routes answer 503 with Retry-After: 1 (8 to 25 times per run during the refill) or the holder's roles, never the holder without its role",
-      "headSha": "757f5eff82dd035c2e3cc645d284d6960880edfa",
-      "negativeControl": "Control 1, the WIP 5e173361's kv.go and api.go by overlay: 'after a first scan the idle timer ended, RolesHeldBy(ses_holder) = [], <nil>; want ErrRoleViewNotReady', 'with the refill short of the holder's claim, RolesHeldBy(ses_holder) = [], <nil>', 'GET /v1/sessions with a role claim view whose first scan timed out: status 200', 'GET /v1/registry/ses_recreated_roles_holder answered 200 with roles [], want [reviewer] or the bus-unavailable 503'. Control 2, the new kv.go with the incomplete view's answer put back (Ready() instead of Complete): the same four failures. Epoch fence: with setOwnRoleHolder's epoch check removed, 'after a reset, reviewer's holder = \"ses_old_bucket\", want ses_new_bucket'"
-    },
-    {
-      "criterion": "Full verification at the code head",
-      "surface": "the suites against the in-process NATS; scripts/e2e-local.sh against the real binary and a real NATS",
-      "command": "cd packages/envoy && go build ./... && go vet ./...; go test ./internal/kvwatch/... ./internal/store ./internal/session ./internal/bus ./internal/webhook/... ./internal/cistore/... ./internal/integration -count=1; go test ./cmd/listener -count=1 -skip <the four #2191 testpg tests> -timeout 25m; bash scripts/e2e-local.sh",
-      "observed": "build and vet clean; kvwatch ok 63.135s, store ok 30.908s, session ok 7.587s, bus ok 228.888s, webhook ok 4.945s, cistore ok 12.050s, integration ok 97.577s; cmd/listener ok 429.938s; e2e-local exit 0 (after bun install in the recreated workspace), both PASS lines, bus-down send 503 in 3.503081 s, client EnvoyApiError 503, three WARN bus_unavailable records; gofmt and check-private-names.sh clean",
-      "headSha": "757f5eff82dd035c2e3cc645d284d6960880edfa",
-      "negativeControl": "the overlay failures above are the pre-change behaviour on the same rigs"
-    },
-    {
-      "criterion": "The forward merge of main keeps this PR's behaviour: none of main's packages/envoy changes touch cmd/listener, internal/store, internal/kvwatch, internal/bus or internal/session",
-      "surface": "the merged tree's suites against the in-process NATS and scripts/e2e-local.sh against the real binary",
-      "command": "cd packages/envoy && go build ./... && go vet ./cmd/listener ./internal/store ./internal/kvwatch ./internal/session ./internal/bus; go test ./internal/kvwatch/... ./internal/store ./internal/session ./internal/integration -count=1; go test ./cmd/listener -count=1 -skip <the four testpg tests> -timeout 25m; bash scripts/e2e-local.sh",
-      "observed": "build and vet clean; kvwatch ok 63.603s, store ok 32.708s, session ok 8.684s, integration ok 98.308s; cmd/listener ok 414.866s; e2e-local exit 0, bus-down send 503 in 3.504151 s, client EnvoyApiError 503; check-private-names.sh clean",
-      "headSha": "d11db8ab658cc7ec2be6489678b5fb416ab1f020",
-      "negativeControl": "before the merge GitHub reported CONFLICTING/DIRTY and git merge-tree of b7b09cce with main 723ba153 reported a content conflict in packages/envoy/AGENTS.md; unchanged-diff fingerprint before the merge 2f07dc94c02f9aa88f19fee45934c02fde4090961d2ae6782e7c944b486c29ca"
+      "criterion": "Items 4 and 5 and the suites: the /healthz bodies in AGENTS.md and the CHANGELOG are what the handler writes, the warm-up timeout names the cache, and nothing regresses",
+      "surface": "the text against cmd/listener/main.go's /healthz (WatchErr checked first under 'interest KV watcher') and store.Registry.WaitForCacheReady; the full listener and store suites",
+      "command": "cd packages/envoy && go build ./... && go vet ./...; go test ./internal/kvwatch/... ./internal/store -count=1; go test ./cmd/listener -count=1 -v -skip <the four testpg tests> -timeout 25m (three runs)",
+      "observed": "AGENTS.md and the CHANGELOG give 'interest KV watcher unavailable: role claims watcher stopped' (and the recreated-bucket variant); WaitForCacheReady wraps 'interest cache: ' / 'role claim cache: ' and main.go logs 'interest or role claim cache warm-up timed out'; build and vet clean; kvwatch ok 62.927s, store ok 31.445s; cmd/listener ok 415.190s, 425.514s and 415.921s in three -v runs with no --- FAIL; gofmt and check-private-names.sh clean",
+      "headSha": "3c79342be613c77d0d6340f2ccdd0db07642ec92",
+      "negativeControl": "at c76123f7 the two texts gave 'interest KV unavailable: role claims watcher stopped', which the handler never writes for a stopped watcher, and the timeout was logged 'interest cache warm-up timed out' whichever cache ran out"
     }
   ],
   "filesChanged": [
-    "packages/envoy/internal/store/kv.go — role-claim watcher and holder view (RolesHeldBy, ErrRoleViewNotReady, newRoleWatcher with WithRescan), holder epoch fencing the registry's own claim writes across a recreated bucket, role-topic reaper and detached cleanup removed, cleanup best effort with an INFO line when the request ended first, Rewatch order restored",
-    "packages/envoy/internal/kvwatch/kvwatch.go — Complete() and WithRescan (additive; other caches unchanged); kvwatchtest/timingout.go TimingOutFirst; warmup_test.go",
-    "packages/envoy/cmd/listener/api.go — senderStamp and sessionInfoFor take roles from RolesHeldBy; main.go — /healthz and self-health include the role watcher",
-    "tests: cmd/listener/roles_from_claims_test.go (new), internal/store/role_holders_test.go (new), internal/store/role_topics_test.go (deleted), kv_test.go, api_test.go, main_test.go, interest_*_test.go",
-    "packages/envoy/AGENTS.md, docs/architecture.md, CHANGELOG.md",
-    "d11db8ab — forward merge of main 723ba153; conflict in packages/envoy/AGENTS.md resolved by keeping main's Dispatch access-log bullet and this PR's /healthz and NATS bullets"
-  ],
-  "trickyParts": [
-    "Completeness is per watcher generation: a Rewatch (reconnect, self-health rebuild) clears it until the new scan finishes, so the two session routes answer 503 with Retry-After: 1 for that moment (usually milliseconds).",
-    "An idle-timed-out first scan is left by WithRescan: one second later the role watcher replaces itself on the same handle, repeatedly, until a scan completes; a newer Rewatch or Stop takes over and the rescan installs nothing.",
-    "The three narrowed assertions: TestARewatchThatCannotOpenTheRoleBucketMovesNothing stays on the interest watcher's error (WatchErr now joins the role watcher's, which the test's deleted role bucket makes appear at a varying time) and now also requires that neither role handle nor the role watcher's generation moved; useKV's WaitReady stays (coldRegistry registries have no role watcher; at 0c227469 WaitForCacheReady was exactly the interest watcher's); Rewatch is restored to 0c227469's strength (a failure returns at once and moves nothing), pinned by TestARewatchWhoseInterestWatcherCannotMoveMovesNothing."
+    "packages/envoy/internal/store/role_holders_test.go — gated own-write check; recreated-bucket test with a claim left out of the new bucket and one written above its new revision",
+    "packages/envoy/cmd/listener/roles_from_claims_test.go — the listener recreated-bucket test covers both kept-view mutants",
+    "packages/envoy/internal/kvwatch/warmup_test.go — Complete checked false right after a Rewatch and while the new scan is held",
+    "packages/envoy/internal/store/kv.go — WaitForCacheReady names the cache in its error; packages/envoy/cmd/listener/main.go — the warm-up timeout line names both caches",
+    "packages/envoy/AGENTS.md, packages/envoy/CHANGELOG.md — the /healthz bodies"
   ],
   "deviations": [
-    "Beyond the plan: the registry's own claim writes and deletes now apply to the holder view only if no recreated-bucket reset came between their epoch read and their answer (setOwnRoleHolder), so an old bucket's revision cannot fence out the new bucket's claims; pinned by TestAClaimWriteAnsweredAcrossARecreatedRoleBucketLeavesTheNewBucketsView.",
+    "One full cmd/listener run made by the subagent during this round reported FAIL without the failing test's name captured; three later full -v runs on the same code passed with no --- FAIL, and the changed tests passed 10 of 10. Recorded, not reproduced.",
     "The retro notes drafted before the send-backs are held outside the workspace for the next retro."
   ],
   "openQuestions": []
