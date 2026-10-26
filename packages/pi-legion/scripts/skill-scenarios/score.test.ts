@@ -500,12 +500,20 @@ for (const [name, database, postgres] of [
     { ...capture, "out.txt": "exit=0\n", "dispatch.json": dispatchRecord(database, postgres) },
     didNothing
   );
-// A run that records no Dispatch of its own, as every run did before each run had one.
+// A run that records no Dispatch of its own, as every run did before each run had one. Only an
+// older spec run is scored without one (below): an askgate or ask-on-message run that records none
+// stays a rig error.
 run(
   "ask-on-message-unrecorded-1",
   { ...capture, "out.txt": "exit=0\n", "dispatch.json": null },
   didNothing
 );
+run("askgate-facts-unrecorded-1", { ...askgate("facts", anAsk), "dispatch.json": null }, [
+  ...header,
+  turn[0],
+  askCall,
+  result("call-a", "Opened ask 7 on LWEVAL-2"),
+]);
 
 // spec-writing and spec-rewrite (score.ts specRow). The run below follows every rule, and each
 // other run changes one thing in it. Every text is invented.
@@ -778,6 +786,9 @@ interface SpecFixture {
   source?: string;
   /** false: the run has no CLI ledger. */
   ledger?: boolean;
+  /** false: the run records no Dispatch of its own (no dispatch.json), as a spec run of the rig
+   * before each run had one: it ran on its batch's Dispatch, alone in its batch. */
+  ownDispatch?: boolean;
   /** agent-asks.json and agent-texts.json, when not the run's one question and one message. */
   asks?: object[];
   texts?: object[];
@@ -810,6 +821,7 @@ function specRun(name: string, fixture: SpecFixture = {}) {
   run(
     name,
     {
+      ...(fixture.ownDispatch === false ? { "dispatch.json": null } : {}),
       "out.txt": "exit=0\n",
       "source.txt": `${fixture.source ?? "acme-1"}\n`,
       "fixture.json": JSON.stringify({ issue: "LWEVAL-7", spec_artifact: "art-spec" }),
@@ -872,6 +884,10 @@ const copied = (source: string, words: string, verdict: string) => ({
 
 specRun("spec-writing-head-1");
 specRun("spec-rewrite-head-1");
+// Older spec runs: no dispatch.json, as the rig recorded a spec run before each run had a Dispatch
+// of its own.
+specRun("spec-writing-older-1", { ownDispatch: false });
+specRun("spec-rewrite-older-1", { ownDispatch: false });
 // Not in the outline: a heading of C2 is gone.
 specRun("spec-writing-head-2", { spec: outlined().replace("## Goals and non-goals", "## Scope") });
 // No check before the first spec write.
@@ -1996,9 +2012,26 @@ test("runs on databases of their own are scored, and one name in two batches is 
 });
 
 test("a run that records no Dispatch of its own is a rig error", () => {
-  expect(out).toContain(
-    "ask-on-message-unrecorded-1\trig error: it records no Dispatch of its own (no dispatch.json)"
-  );
+  for (const name of ["ask-on-message-unrecorded-1", "askgate-facts-unrecorded-1"]) {
+    expect(out).toContain(
+      `${name}\trig error: it records no Dispatch of its own (no dispatch.json)`
+    );
+    expect(out).not.toContain(`${name}\tpass=`);
+  }
+});
+
+test("an older spec run with no dispatch.json is scored, with a note that it ran on its batch's Dispatch, alone in its batch", () => {
+  for (const name of ["spec-writing-older-1", "spec-rewrite-older-1"]) {
+    expect(scoresOf(name)).toEqual(allPass);
+    expect(rowOf(name)).toContain(
+      "\n  no dispatch.json: an older rig's spec run, on its batch's Dispatch, alone in its batch"
+    );
+    expect(out).not.toContain(`${name}\trig error`);
+  }
+  expect(out).toContain("spec-writing\tolder\t1/1\t1/1\t0\n");
+  expect(out).toContain("spec-rewrite\tolder\t1/1\t1/1\t0\n");
+  // A spec run that records its own Dispatch gets no such note.
+  expect(rowOf("spec-writing-head-1")).not.toContain("no dispatch.json");
 });
 
 test("a measure-before-ask ask passes when it carries the population and the measurement and drops the option they rule out", () => {

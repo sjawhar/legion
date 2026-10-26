@@ -648,14 +648,26 @@ const RunDispatch = z.object({
   port: z.number(),
   url: z.string(),
 });
-/** The run's own Dispatch as `postgres` and `database`, one tab between them; throws when the run
- * records none. */
-function dispatchOf(runDir: string): string {
+/** The run's own Dispatch as `postgres` and `database`, one tab between them, or undefined when the
+ * run records none (no dispatch.json). */
+function dispatchOf(runDir: string): string | undefined {
   const file = path.join(runDir, "dispatch.json");
-  if (!existsSync(file)) throw new Error("it records no Dispatch of its own (no dispatch.json)");
+  if (!existsSync(file)) return undefined;
   const { postgres, database } = json(file, RunDispatch);
   return `${postgres}\t${database}`;
 }
+
+/** The scenarios whose runs the rig scores with no dispatch.json: spec-writing and spec-rewrite.
+ * Before each run had a Dispatch of its own, rig.sh ran each batch of these as one run of one label
+ * (cmd_batch refused more from the first spec run on), so that run had its batch's Dispatch to
+ * itself. Today's rig.sh writes dispatch.json (own_dispatch) before it seeds the run's issue or
+ * starts its agent, so a run of today that has none also has no fixture.json and no `exit=` line,
+ * and is a rig error for that. An older batch of ask-on-message, measure-before-ask or tester-proof
+ * could hold several runs on its one Dispatch, so a run of another scenario with no dispatch.json
+ * stays a rig error. */
+const BATCH_DISPATCH: Record<string, true> = { "spec-writing": true, "spec-rewrite": true };
+const BATCH_DISPATCH_NOTE =
+  "no dispatch.json: an older rig's spec run, on its batch's Dispatch, alone in its batch";
 
 // spec-writing and spec-rewrite: how a fresh agent writes a design spec with a person. A run is a
 // design conversation between a fresh agent and a person stand-in on the run's own issue. Its
@@ -2279,10 +2291,11 @@ function median(values: number[]): number {
 }
 
 /** Why the rig cannot score a run, or undefined when it can:
- *   - it did not have a Dispatch of its own: it records none (no dispatch.json), or another run
- *     names the same database in the same Postgres container (`sharing`, each Dispatch's runs).
- *     A `dispatch search` searches every project of its server, so runs that share one can read
- *     each other's issue and asks, and one run's answer can be another's;
+ *   - it did not have a Dispatch of its own: it records none (`dispatch` undefined: no
+ *     dispatch.json) and is no spec run (BATCH_DISPATCH), or another run names the same database
+ *     in the same Postgres container (`sharing`, each Dispatch's runs). A `dispatch search`
+ *     searches every project of its server, so runs that share one can read each other's issue
+ *     and asks, and one run's answer can be another's;
  *   - it never finished: out.txt has no `exit=` line;
  *   - its agent got no model turn: it left no transcript, or one with no assistant message, as when
  *     the profile's gateway key command ran past its budget. The key command's own record of each
@@ -2297,15 +2310,20 @@ function median(values: number[]): number {
  * A record missing or malformed is a rig error too, thrown by the scenario's function. */
 function unscored(
   runDir: string,
+  scenario: string,
+  dispatch: string | undefined,
   label: string,
   labels: Map<string, string>,
   sharing: Map<string, string[]>
 ): string | undefined {
-  const dispatch = dispatchOf(runDir);
-  const others = (sharing.get(dispatch) ?? []).filter((run) => run !== path.basename(runDir));
-  if (others.length > 0) {
-    const [postgres, database] = dispatch.split("\t");
-    return `it shares Dispatch database ${database} of Postgres ${postgres} with ${others.join(", ")}, so each could read the other's issue and asks`;
+  if (dispatch === undefined) {
+    if (!BATCH_DISPATCH[scenario]) return "it records no Dispatch of its own (no dispatch.json)";
+  } else {
+    const others = (sharing.get(dispatch) ?? []).filter((run) => run !== path.basename(runDir));
+    if (others.length > 0) {
+      const [postgres, database] = dispatch.split("\t");
+      return `it shares Dispatch database ${database} of Postgres ${postgres} with ${others.join(", ")}, so each could read the other's issue and asks`;
+    }
   }
   if (!lines(path.join(runDir, "out.txt")).at(-1)?.startsWith("exit="))
     return "out.txt has no exit= line: the run never finished";
@@ -2347,16 +2365,17 @@ function scoreRuns(runsDir: string, only: string | undefined) {
     }
   });
   // Every run's own Dispatch, keyed by its Postgres container and database, with the runs that
-  // name it. A dispatch.json that is missing or does not parse is its own run's rig error, below.
+  // name it. A run that records none is scored or not by unscored, below; a dispatch.json that does
+  // not parse is its own run's rig error, below.
   const sharing = new Map<string, string[]>();
   for (const run of existsSync(runsDir) ? readdirSync(runsDir) : []) {
-    let dispatch: string;
+    let dispatch: string | undefined;
     try {
       dispatch = dispatchOf(path.join(runsDir, run));
     } catch {
       continue;
     }
-    sharing.set(dispatch, [...(sharing.get(dispatch) ?? []), run]);
+    if (dispatch !== undefined) sharing.set(dispatch, [...(sharing.get(dispatch) ?? []), run]);
   }
   // Every checkout a spec run's agent can reach, so that a check naming one is no spec-only check.
   const reach = checkouts(path.dirname(runsDir));
@@ -2390,8 +2409,14 @@ function scoreRuns(runsDir: string, only: string | undefined) {
         throw new Error(
           "the directory names no case: an askgate run's directory is askgate-<case>-<label>-<n>"
         );
-      reason = unscored(dir, label, labels, sharing);
-      if (reason === undefined) rows.push(score(dir, run, label, askCase));
+      const dispatch = dispatchOf(dir);
+      reason = unscored(dir, scenario, dispatch, label, labels, sharing);
+      if (reason === undefined) {
+        const row = score(dir, run, label, askCase);
+        rows.push(
+          dispatch === undefined ? { ...row, notes: `${row.notes}\n  ${BATCH_DISPATCH_NOTE}` } : row
+        );
+      }
     } catch (error) {
       reason = error instanceof Error ? error.message : String(error);
     }
