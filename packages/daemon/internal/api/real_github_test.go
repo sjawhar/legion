@@ -261,6 +261,13 @@ func TestLiveProofAppsReadTheLib(t *testing.T) {
 	if got := []string{implement.id, implement.keyName, review.id, review.keyName}; !slices.Equal(got, []string{"101", "EXAMPLE_IMPLEMENT_KEY", "202", "EXAMPLE_REVIEW_KEY"}) {
 		t.Errorf("with every input set the Apps are %v, want the inputs", got)
 	}
+	// The key command is what the proofs sign with, so it must read the input's key, not a default's.
+	for role, app := range map[string]liveProofApp{"implement": implement, "review": review} {
+		want := "secrets EXAMPLE_" + strings.ToUpper(role) + "_KEY -- sh -c "
+		if !strings.HasPrefix(app.keyCommand, want) || !strings.Contains(app.keyCommand, "${EXAMPLE_"+strings.ToUpper(role)+"_KEY}") {
+			t.Errorf("with every input set the %s App's key command reads %q, want `%s…` reading that key", role, app.keyCommand, want)
+		}
+	}
 
 	pasted := strings.Repeat("Zm9vYmFy", 9) // 72 base64 characters: a value, not a store key's name
 	// The last three run where bash would otherwise read the checks in a UTF-8 locale or trace

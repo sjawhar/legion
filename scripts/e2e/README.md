@@ -38,10 +38,10 @@ The test is intentionally gated because it calls GitHub as both installed Apps: 
 own unless the four App inputs name another's. It reads both Apps by running
 [`lib/github-apps.sh`](#libgithub-appssh) itself, so it takes that lib's defaults, input checks and
 key command, with no copy of its own: each unset input takes this deployment's value, and a
-malformed one fails the run by name, never printing it. Before it acts, it proves both Apps against
-GitHub's `GET /app` as the stage proofs do (the lib's `check_github_apps` on the very block it uses),
-which needs `bun` and `jq` on `PATH`. The ungated `TestLiveProofAppsReadTheLib` proves the read in
-every `go test`.
+malformed one fails the run by name, never printing it. Before it acts, it proves both Apps
+against GitHub's `GET /app` as the stage proofs do (the lib's `check_github_apps` on the very block
+it uses), which needs `bun` and `jq` on `PATH`. The ungated `TestLiveProofAppsReadTheLib` proves
+the read in every `go test`.
 It resolves each
 App key through its `private_key_command`, mints each App's lease through the real token source,
 writes the gh files the daemon would render for a pane, and drives the real `gh` and `git` against
@@ -2902,10 +2902,11 @@ script's shell, an argv or a file. A run
 refuses before its first write anywhere: Stage 3, 4b.13b, the Claude Code backend and Stage 4b
 check both Apps (`read_app_logins`), Stage 4a, which acts as the implement App alone, checks that
 one. `TestRealGitHubCredentialSurface` and `TestRealGitHubReadyHoldsTheHeadToRetrosCommits` source
-this lib and run its `require_app_inputs`, `app_key_command` and `check_github_apps`
-(`liveProofApps` and `proveLiveProofApps` in `packages/daemon/internal/api/real_github_test.go`,
-which checks the very block the proofs act with), so they hold no copy of the pair, its checks or
-its key command, and they prove both Apps as the stage proofs do before they act. The checks run in
+this lib and run its `require_app_inputs`, `app_key_command` and `check_github_apps` (through
+`liveProofApps` and `proveLiveProofApps` in `packages/daemon/internal/api/real_github_test.go`;
+`proveLiveProofApps` checks the very block the proofs act with), so they hold no copy of the pair,
+its checks or its key command, and they prove both Apps as the stage proofs do before they act. The
+checks run in
 the C locale whatever the caller's, so a UTF-8 locale does not admit fullwidth digits or accented
 letters. `require_app_inputs` also fills `app_key_unsets`, the
 `env` argument list (`-u NAME` …) every proof passes to a process it starts, which strips each
