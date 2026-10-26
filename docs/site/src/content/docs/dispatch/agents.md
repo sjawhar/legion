@@ -69,16 +69,20 @@ and on the agent's row alike, until Dispatch makes it, and **Retry**, **Discard*
 trying** on either act on the same message; one sent from the row's own box stays in that box
 until Dispatch answers. Your messages to one agent go out in the order you sent them: one still
 being tried holds back the ones after it, one that is refused or stopped does not, and its
-**Retry** sends it after them. Every message survives a reload of the tab. While any write is
-unconfirmed, the browser asks you to confirm before you leave or reload the page.
+**Retry** sends it after them. A message waiting behind an earlier one that has not gone out yet
+reads **Waiting to send**, with **Discard**, which drops it before anything is sent. Every message
+survives a reload of the tab, in the order you sent them. While any message is unconfirmed, the
+browser asks you to confirm before you leave or reload the page.
 
 A message a reload brings back is yours alone, and only for a while. It belongs to the person who
-pressed it: if someone else signs in at that browser, in this tab or another, or you sign out, it
-is dropped unsent. And a tab reopened more than five minutes later does not send it behind your
-back — it comes back as **Not sent: this page was closed before Dispatch confirmed it. Retry asks
-again under the same key, so it is delivered at most once if you retry within 24 hours of the first
-try. After that Dispatch no longer knows the key: a Retry is a new write and may be delivered
-twice.**, with **Retry** and **Discard**.
+pressed it: if someone else signs in at that browser, in this tab or another, it is dropped unsent.
+If your sign-in lapses, nothing is lost: the page stops trying, keeps every message, and sends them
+on once you sign in again. Signing out asks first — **Sign out and discard 2 unsent changes?**, each
+one listed — and drops them in every tab only if you confirm. And a tab reopened more than five
+minutes later does not send it behind your back — it comes back as **Not sent: this page was closed
+before Dispatch confirmed it. Retry asks again under the same key, so it is delivered at most once
+if you retry within 24 hours of the first try. After that Dispatch no longer knows the key: a Retry
+is a new write and may be delivered twice.**, with **Retry** and **Discard**.
 
 ### Send, Aside, and BTW
 
@@ -147,8 +151,9 @@ does not drop anyone; the count beside the checkbox says how many selected agent
 filter. **Clear selection** empties it.
 
 Each send gets a row above the broadcast box: `Queued`, `Sending to N…`, `Sent to N agents`, or
-`Could not send to N` with the reason. A failed row offers **Retry**, which sends the same request
-again, and **Restore draft**, which puts the message and the selection back in the box. Once
+`Could not send to N` with the reason. A queued row, which has not gone out yet, offers
+**Discard**. A failed row offers **Retry**, which sends the same request again, and **Restore
+draft**, which puts the message and the selection back in the box. Once
 Dispatch has made the broadcast, its row says so at once, and then how its delivery stands:
 `Sent to N agents — delivering to N agents…` while recipients are still being reached, then
 `— delivered`, or `— not delivered to N` when some could not be.

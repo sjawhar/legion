@@ -172,25 +172,33 @@ Every change you make — a status, a priority, an assignee, labels, a pin, an a
 comment, a comment resolved, an upload — is sent under a name of its own, and Dispatch makes it
 once under that name however many times the page asks. So a change tried again after a lost
 answer, a timeout or an outage lands exactly once, and the page keeps asking while your connection
-is down, at once when it comes back. A change Dispatch is slow to finish is waited for and made
-once, and an upload still going up is never cut off, however long a slow link takes.
+is down, and again at once when Dispatch is reachable again; while it keeps answering with an
+error, the tries spread out, up to 30 seconds apart. A change Dispatch is slow to finish is waited
+for and made once, and an upload still going up is never cut off, however long a slow link takes.
 
 A corner of the screen accounts for the ones still out: **Saving 2 changes…**, and once one has
 gone 30 seconds unconfirmed, **Dispatch has not confirmed 2 changes — still trying**, with **Stop
-trying** beside each. A change Dispatch refuses shows its reason where you made it, with
-**Retry**, when that place is a form or a field you are in front of: a comment, an answer, the
-title, the priority, the assignee, the repository, the components, a new issue. A quick control
-such as **Status**, **Labels** or a pin shows your choice while it is out, puts itself back as it
-was if it is refused, and the corner lists the change as **Not saved: …** with why, **Retry** and
-**Discard**. Changes to one issue go out in the order you made them. While any change is
-unconfirmed the browser asks you to confirm before you leave or reload the page, and a change a
-reload interrupted, an upload's file included, is picked up again when the page comes back, for
-the person who made it and for nobody else: a change pending when someone else signs in at that
-browser, in this tab or another, is dropped unsent. One interrupted more than five minutes ago is
-not sent on its own: the corner lists it as **Not saved: …** with **Retry** and **Discard**. A
-Retry of a stopped or interrupted change asks again under its first name, so it is saved at most
-once if you retry within 24 hours of the first try; after that Dispatch no longer knows the name,
-and the change may be made twice. The corner says so.
+trying** beside each. An upload still going up reads **Uploading… 40%** instead, and never still
+trying unless a try has failed. A change waiting behind an earlier one that has not gone out yet
+reads **Waiting to send**, with **Discard**. A change Dispatch refuses shows its reason where you
+made it, with **Retry**, when that place is a form or a field you are in front of: a comment, an
+answer, the title, the priority, the assignee, the repository, the components, a new issue. A
+quick control such as **Status**, **Labels** or a pin shows your choice while it is out, puts
+itself back as it was if it is refused, and the corner lists the change as **Not saved: …** with
+why, **Retry** and **Discard**. Changes to one issue go out in the order you made them, a card
+moved on the board among them. While any change is unconfirmed the browser asks you to confirm
+before you leave or reload the page, and a change a reload interrupted, an upload's file included,
+is picked up again when the page comes back, in the order you made them, for the person who made
+it and for nobody else: a change pending when someone else signs in at that browser, in this tab
+or another, is dropped unsent. If your sign-in lapses, your changes wait, and go out once you sign
+in again; signing out asks you first, listing each change it would discard. One interrupted more
+than five minutes ago is not sent on its own: the corner lists it as **Not saved: …** with
+**Retry** and **Discard**. A Retry of a stopped or interrupted change asks again under its first
+name, so it is saved at most once if you retry within 24 hours of the first try; after that
+Dispatch no longer knows the name, and the change may be made twice. The corner says so.
+
+A closed issue takes no upload: the Artifacts tab's **Upload** says **This issue is closed. Reopen
+it to upload.** and picks no file, and a file dropped on it is ignored.
 
 Now and then Dispatch makes a change but its answer is lost on the way back. The change is made;
 the page says so (for example **The issue “…” was made, but Dispatch lost its answer, so it may
