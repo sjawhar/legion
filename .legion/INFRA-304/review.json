@@ -2,25 +2,22 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-304",
-  "completed": "2026-10-26T02:48:13Z",
-  "round": 2,
+  "completed": "2026-10-26T03:16:32Z",
+  "round": 3,
   "decision": "approved",
-  "reviewedHead": "0d8c4afdf9d731aab3ad9e4d1b82935747c04dd9",
+  "reviewedHead": "0f1988849a45515a734ad97bfaedb7c4c5fa2f0f",
   "critical": 0,
   "important": 0,
-  "minor": 1,
-  "keyFindings": [
-    {
-      "severity": "minor",
-      "file": "packages/dispatch/web/src/styles.css:116-118",
-      "description": "The note's Segoe UI limit names only 12px on 16px. By the same published metrics (ascent 2210, descent 514 over 2048), Segoe UI also reaches about 0.6px into the line above at the agent-view `text-sm` pitch, 14px on 20px (about 0.2px before rounding). Nobody measured it, and it improves on the old 3px (-2px there). It is now in the PR body's Not proven / risk and in Fast-follow as a wording completion of that sentence."
-    }
+  "minor": 0,
+  "keyFindings": [],
+  "roundTwoMinor": "The Segoe UI sentence named only 12px on 16px. Fixed in bd842a55: the note now gives clearance = (line-height - (2r - 1.2) * font-size) / 2, and Segoe UI's clearance at all five pitches. I recomputed each figure: r = 2724/2048 gives -0.761, -0.221, 0.319, 1.119 and 1.236, which match the note.",
+  "notADefect": [
+    "The Segoe UI figures use the unrounded text box, while the DejaVu figures are rounded browser measurements. With rounding the 14/20 case is about -0.6, not -0.22. The same two pitches overlap either way, and the note labels these figures as published-metric arithmetic, not measured here. I also have no evidence that Windows rounds ascent and descent the way the pod's Chromium does, so the unrounded value is the one the note can stand behind."
   ],
-  "roundOneFinding": "styles.css:108 document row: fixed in 87de9d95 (16px on 25.6px, 3.2px / 3.4px), confirmed against proof-editor lib.css:31,601-604 and the tester's spec-page measurement; thread PRRT_kwDORFy7ds6wHjO2 answered, resolution stands.",
   "verified": {
-    "ci": "Required set from rulesets on main: lint, typecheck, test, pr-title. CI head 5be55a71 (code 87de9d95 plus implement.json): lint, typecheck, test (run 40259387129) and pr-title all completed success. Compare 5be55a71...0d8c4afd touches only .legion/. The non-required dispatch job 121368409810 was still in progress at approval; at be150e35 it passed, including the webkit-iphone reasoning row.",
-    "threads": "1 thread (mine), answered and resolved by the implementer; no bot threads.",
-    "e2e": "E2E (implementer) and E2E (tester) both present for round 2. The bundle is byte-identical (index-BQJouVYI.css). The rows pass, and the 3px control is red at 5be55a71.",
-    "thermonuclear": "Pair at 0d8c4afd. Deep review: APPROVE, with one Minor (above). Code quality: APPROVE, no findings. Both recomputed every figure in the note. Security: no sensitive surface in this diff."
+    "ci": "Required checks on main (rulesets): lint, typecheck, test and pr-title. CI head a8af5ab6 (code bd842a55): lint, typecheck and test (run 40261290420) all completed success; pr-title run 40261860626 success. Compare a8af5ab6...0f198884 touches only .legion/. The dispatch job is not required and was still in progress at approval.",
+    "threads": "1 thread (PRRT_kwDORFy7ds6wHjO2, round 1), resolved and answered. No new threads, no bot threads.",
+    "e2e": "E2E (implementer) and E2E (tester) both present for round 3. The bundle is byte-identical (index-BQJouVYI.css) and the rows pass. The tester recomputed the note's figures.",
+    "thermonuclear": "Pair at 0f198884: deep-review APPROVE and code-quality APPROVE. Each reported only the rounding nit above, which is not a defect. Security: no sensitive surface in this diff."
   }
 }
