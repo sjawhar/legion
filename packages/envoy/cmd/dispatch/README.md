@@ -693,6 +693,12 @@ second lock: a trigger on `events` would need that table's `SHARE ROW EXCLUSIVE`
 `artifact_reviews`, against a transaction that appended an event and then waits to insert a
 review (a carried approval), and the census holds every table a migration names to its 1 GiB limit.
 
+`0117` is additive — a nullable column, a `not valid` check and a trigger — so rolling Dispatch
+back past it is an image rollback alone, with no schema to restore and no backup to take for it:
+the release before it runs over the new schema unchanged, and the trigger gives every review that
+release writes its sequence. The auto-deployer is the exception, by its own rule above: once the
+schema has moved it refuses to start the previous tag, and recovery there is forward.
+
 Migration `0009_project_artifacts` deletes malformed derived artifact references, reports their
 count, and re-derives them from source text on the next write. It aborts server boot before a
 migration record or schema change only when an existing artifact has no owning issue. On success
