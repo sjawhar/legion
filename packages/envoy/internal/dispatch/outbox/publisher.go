@@ -66,7 +66,8 @@ const (
 	// handler that holds the send to settle it, short enough that the copy follows a failed send
 	// promptly. The retry ticker (retryInterval) is what picks the event up again, so in practice
 	// it waits until the next tick after this delay. The wait is bounded: a pending attempt
-	// counts as undecided only for the minute its sender's claim holds (mentionDeliveryQuery).
+	// counts as undecided only for model.DeliveryClaimLapse, the minute its sender's claim holds
+	// (mentionDeliveryQuery).
 	mentionPendingDelay = 2 * time.Second
 	// maxCommentThreadDepth bounds the reply_to walk in loadRootCommentAuthor so a
 	// malformed cycle (comments.reply_to has no acyclicity constraint) cannot spin the
@@ -78,6 +79,14 @@ const (
 // because the comment's mention of that session is still being sent: the mention may deliver it,
 // or may fail and leave the copy to the outbox. Every other destination was published. It is a
 // deferral, not a failure: scanBatch re-schedules the event shortly without counting an attempt.
+//
+// The deferral holds back this one event, not the events after it. The same comment's
+// comment.edited, comment.resolved and comment.reopened are events of their own and publish at
+// once, so the held-back session's topic - as claimant, follower, document author or route - can
+// receive the edit before the creation: for as long as the mention's send stays undecided,
+// normally the listener's receipt timeout and at most model.DeliveryClaimLapse for an attempt
+// nobody finishes, plus mentionPendingDelay. A host that receives an edit, resolution or
+// reopening for a comment it has not seen is seeing this window, not a bug; the creation follows.
 var errMentionPending = errors.New("a mention's delivery is still undecided")
 
 // Publisher is the NATS publication boundary used by the Dispatch outbox.
@@ -506,8 +515,8 @@ type mentionDeliveries struct {
 	// sent holds each session some attempt of a mention reached.
 	sent map[string]struct{}
 	// pending holds each session no attempt reached yet whose send is still live: an attempt is
-	// pending and its claim, or its creation when no sender has claimed it yet, is under a minute
-	// old.
+	// pending and its claim, or its creation when no sender has claimed it yet, is younger than
+	// model.DeliveryClaimLapse.
 	pending map[string]struct{}
 }
 
@@ -531,13 +540,13 @@ func (a *attempt) leftToMention(sessionID string) bool {
 }
 
 // mentionDeliveryQuery groups a comment's mention attempts by the session each was sent to. An
-// attempt pending for over a minute - by its claim, or by its creation when no sender ever claimed
-// it - is abandoned, the same minute the API's claimLapsed gives a sender (internal/dispatch/api),
-// so it no longer holds the outbox's copy back.
-const mentionDeliveryQuery = `
+// attempt pending for longer than model.DeliveryClaimLapse - by its claim, or by its creation when
+// no sender ever claimed it - is abandoned, the same lease the API's claimLapsed gives a sender
+// (internal/dispatch/api), so it no longer holds the outbox's copy back.
+var mentionDeliveryQuery = `
 	select session_id,
 	       bool_or(state = 'sent'),
-	       bool_or(state = 'pending' and coalesce(claimed_at, created_at) >= now() - interval '1 minute')
+	       bool_or(state = 'pending' and coalesce(claimed_at, created_at) >= now() - ` + model.DeliveryClaimLapseInterval + `)
 	from comment_deliveries
 	where comment_id = $1 and session_id is not null
 	group by session_id

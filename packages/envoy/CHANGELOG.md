@@ -7,13 +7,17 @@
 - The ask reads name who besides the followers a person's answer and replies reach:
   `GET /api/v1/asks/{id}` and every ask thread (the Inbox rows and an issue's
   `GET /api/v1/issues/{key}/asks?thread=1`) carry `claimant`, the session holding the claim on the
-  ask's issue, `route`, the issue's route (`session:<id>` or `role:<name>`), and `route_holder`,
-  the live session that route reaches (the routed session while the listener lists it, or the
-  role's holder), resolved per read like the issue reads' `route_holder`; each is null when absent
-  and on a project document's ask. The Inbox ask card's `Reaches N` panel lists the claimant
-  (`via claim`) and the route (`via route`) beside the followers and subscribers, and counts each
-  session once: a session that is the claimant, the route's holder, a follower or a subscriber at
-  once is one row and one in `N` (INFRA-278).
+  ask's issue, `route`, the issue's route (`session:<id>` or `role:<name>`), and that route's
+  reach as the issue reads carry it: `route_status` (`live`, `no_holder`, or `unknown` when the
+  listener is unconfigured or did not answer) and `route_holder`, the live session the route
+  reaches (the routed session while the listener lists it, or the role's holder), resolved per
+  read; each is null when absent and on a project document's ask. The Inbox ask card's `Reaches N`
+  panel lists the claimant (`via claim`) and the route (`via route`) beside the followers and
+  subscribers, and counts each session once: a session that is the claimant, the route's holder, a
+  follower or a subscriber at once is one row and one in `N`. While the route's reach is unknown
+  its row carries the issue page's `Route reach unknown` marker in place of a live/offline dot, a
+  session route still counts its session, and a role route reads `Reaches N + route (unknown)`
+  (INFRA-278).
 - A project's default assignee, the last step of an issue create's assignee chain: an issue created
   with no assignee, by nobody (the shared token), under no parent or under a parent with nobody on
   it, goes to the person the project names; nothing already filed, and no create that names an
@@ -593,7 +597,13 @@
   so the comment reached that session directly by no path. The ask follower route, which before
   reached every follower, now skips a follower the mention delivered the comment to, by the same
   rule. A comment's edit, resolution and reopening are never left to a mention and reach every one
-  of these sessions (INFRA-278).
+  of these sessions, and are not held back with a deferred `comment.created`, so a session can
+  receive a comment's edit before the comment while its mention's send is undecided. One copy is
+  not guaranteed: a mention whose receipt timed out is recorded `failed` though the listener may
+  have delivered it, and a first attempt stranded past the minute is abandoned though it may have
+  landed, so the session also gets its own-topic copy, under a different dedupe key; a host treats
+  the second copy as the same comment. The pending window is `model.DeliveryClaimLapse`, the one
+  lease the API's delivery claims and the outbox's mention deferral both read (INFRA-278).
 - **Breaking (local development):** `agent-secrets-devrelay` presents a listed caller's own
   ServiceAccount token, read from `--account-token-file` (default
   `$AGENT_SECRETS_ACCOUNT_TOKEN_FILE`), in place of the shared bearer the broker no longer takes. A

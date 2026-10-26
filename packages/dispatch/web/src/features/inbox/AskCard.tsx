@@ -702,6 +702,7 @@ export function AskCard({
         owner={displayedAsk}
         route={threadQuery.data?.route ?? null}
         routeHolder={threadQuery.data?.route_holder ?? null}
+        routeStatus={threadQuery.data?.route_status ?? null}
       />
     </article>
   );

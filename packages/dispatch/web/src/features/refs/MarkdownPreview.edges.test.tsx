@@ -67,6 +67,7 @@ function askRead(question: string): AskRead {
     claimant: null,
     followers: [],
     route: null,
+    route_status: null,
     route_holder: null,
     replies: [],
   };

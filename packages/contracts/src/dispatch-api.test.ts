@@ -239,6 +239,7 @@ test("models answer changes, ask answer history, and the answers page", () => {
     followers: [],
     claimant: "session-claimant",
     route: "role:reviewer",
+    route_status: "live",
     route_holder: "session-reviewer",
   } satisfies AskRead;
   const thread = {
@@ -248,6 +249,7 @@ test("models answer changes, ask answer history, and the answers page", () => {
     followers: [],
     claimant: null,
     route: null,
+    route_status: null,
     route_holder: null,
   } satisfies AskThread;
   const page = {

@@ -564,6 +564,7 @@ test("an ask's card heads with its question formatted, not its source", async ()
     claimant: null,
     followers: [],
     route: null,
+    route_status: null,
     route_holder: null,
     replies: [],
   };

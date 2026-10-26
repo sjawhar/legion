@@ -134,11 +134,11 @@ func (s *server) loadAskThreads(ctx context.Context, askIDs []string) (map[strin
 
 // loadAskReaches reads every listed ask's askReach, keyed by ask id: the claimant only while a
 // session holds the claim on the ask's issue (the same rule the outbox's scanPendingEvents
-// reads), the issue's route, and the session that route reaches now. The holder comes from one
-// listener read for the whole batch (readRouteRoster), made only when some ask has a route and
-// only once scanAskReaches has released its pooled connection, so the listener call never runs
-// inside a transaction or with a connection held; a listener that is unconfigured or does not
-// answer leaves every holder null and never fails the read.
+// reads), the issue's route, and that route's reach now (status and holder). The reach comes
+// from one listener read for the whole batch (readRouteRoster), made only when some ask has a
+// route and only once scanAskReaches has released its pooled connection, so the listener call
+// never runs inside a transaction or with a connection held; a listener that is unconfigured or
+// does not answer marks every route's status unknown with a null holder and never fails the read.
 func (s *server) loadAskReaches(ctx context.Context, askIDs []string) (map[string]askReach, error) {
 	reaches, err := scanAskReaches(ctx, s.deps.Store.Pool, askIDs)
 	if err != nil {
@@ -156,7 +156,7 @@ func (s *server) loadAskReaches(ctx context.Context, askIDs []string) (map[strin
 	}
 	roster := s.readRouteRoster(ctx)
 	for askID, reach := range reaches {
-		reach.RouteHolder = roster.reach(reach.Route).RouteHolder
+		reach.IssueRouteReach = roster.reach(reach.Route)
 		reaches[askID] = reach
 	}
 	return reaches, nil

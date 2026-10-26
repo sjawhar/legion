@@ -6,10 +6,11 @@
 
 - `AskReach`, the reach every ask read carries, shared by `AskThread` and `AskRead`: `claimant`
   (the session holding the claim on the ask's issue), `route` (the issue's route, `session:<id>` or
-  `role:<name>`), whom a person's answer and replies on the ask reach beside its followers, and
-  `route_holder` (the live session that route reaches, the issue reads'
-  `IssueRouteReach.route_holder` resolved per read), so a reader counts each session once; each
-  is null when absent and on a project document's ask (INFRA-278).
+  `role:<name>`), whom a person's answer and replies on the ask reach beside its followers, and,
+  since it extends `IssueRouteReach`, `route_status` (`live`, `no_holder` or `unknown`) and
+  `route_holder` (the live session that route reaches), resolved per read as on the issue reads, so
+  a reader counts each session once and tells a route nobody holds from one Dispatch could not
+  judge; each is null when absent and on a project document's ask (INFRA-278).
 - `dispatch_read` takes `events` (a positive integer, the issue's last N events) and `all_events`
   (every event), for an issue read and its `dispatch://KEY/log`, and its description says an issue
   read lists the last 10 without either.
@@ -136,7 +137,8 @@
 - `dispatch_claim`'s description, which is also `dispatch claim --help`, says that while a session
   holds the claim a person's answers, comments and messages on the issue reach it directly, a new
   comment that mentions it arrives once, as the mention, when the mention reached it, and still
-  reaches it directly when the mention's send fails, and that an agent's events and every other
+  reaches it directly when the mention's send fails (a mention whose receipt timed out can arrive
+  twice, and the second copy is the same comment), and that an agent's events and every other
   change on the issue still need a subscription (INFRA-278).
 - `LegionHandoffCompleteResponse.note` carries one case fewer: READY no longer reads or judges the
   head's checks, so a base branch that requires none produces no note at all. What is left is the

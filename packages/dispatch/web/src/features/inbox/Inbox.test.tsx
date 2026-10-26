@@ -35,6 +35,7 @@ function artifactAsk(): InboxRow {
       followers: [],
       replies: [],
       route: null,
+      route_status: null,
       route_holder: null,
     },
     question: "Does this design need review?",
@@ -104,6 +105,7 @@ test("a cold Inbox hydrates every ask thread from its one list response", async 
         claimant: null,
         followers: [],
         route: null,
+        route_status: null,
         route_holder: null,
         replies: [
           {
@@ -167,6 +169,7 @@ test("an unchanged old Inbox cache does not refetch every thread on remount", as
       claimant: null,
       followers: [],
       route: null,
+      route_status: null,
       route_holder: null,
       replies: [
         {
@@ -225,6 +228,7 @@ test("Inbox labels an artifact-owned ask with its project and document page link
     claimant: null,
     followers: [],
     route: null,
+    route_status: null,
     route_holder: null,
     replies: [],
   });
@@ -266,6 +270,7 @@ test("Inbox puts every ask waiting on the viewer under Waiting on you", async ()
     claimant: null,
     followers: [],
     route: null,
+    route_status: null,
     route_holder: null,
     replies: [],
   }));
@@ -309,6 +314,7 @@ test("Inbox keeps rows waiting on agents below Waiting on you without duplicatin
     claimant: null,
     followers: [],
     route: null,
+    route_status: null,
     route_holder: null,
     replies: [],
   }));
@@ -360,6 +366,7 @@ test("Inbox keeps an agent's latest reply on its Waiting-on-you row", async () =
     claimant: null,
     followers: [],
     route: null,
+    route_status: null,
     route_holder: null,
     replies: [],
   }));
@@ -400,6 +407,7 @@ test("Inbox partitions by waiting_on: an agent's progress note keeps its ask und
     claimant: null,
     followers: [],
     route: null,
+    route_status: null,
     route_holder: null,
     replies: [],
   });
@@ -455,6 +463,7 @@ test("Inbox preserves server priority order within Waiting on you", async () => 
     claimant: null,
     followers: [],
     route: null,
+    route_status: null,
     route_holder: null,
     replies: [],
   }));
@@ -822,6 +831,7 @@ test("Inbox narrows to one agent's asks from ?agent and clears back to the whole
     claimant: null,
     followers: [],
     route: null,
+    route_status: null,
     route_holder: null,
     replies: [],
   }));
@@ -886,6 +896,7 @@ test("Inbox ?section=needs-you keeps only the agent's asks waiting on the viewer
     claimant: null,
     followers: [],
     route: null,
+    route_status: null,
     route_holder: null,
     replies: [],
   }));
@@ -926,6 +937,7 @@ test("Inbox filtered to an agent with no open asks says so and still offers to c
     claimant: null,
     followers: [],
     route: null,
+    route_status: null,
     route_holder: null,
     replies: [],
   });
@@ -977,6 +989,7 @@ test("a row being typed into stays under Waiting on you when an agent's note fli
     claimant: null,
     followers: [],
     route: null,
+    route_status: null,
     route_holder: null,
     replies: [],
   }));
@@ -1066,6 +1079,7 @@ test("the reader's own Ask back keeps the row under Waiting on you, unscrolled, 
     claimant: null,
     followers: [],
     route: null,
+    route_status: null,
     route_holder: null,
     replies: id === askB.id ? repliesB : [],
   }));
@@ -1177,6 +1191,7 @@ test("an ask answered elsewhere stays in place with its recorded answer while th
     claimant: null,
     followers: [],
     route: null,
+    route_status: null,
     route_holder: null,
     replies: [],
   }));
@@ -1243,6 +1258,7 @@ test("the reader's own answer leaves the Inbox at once, even though their focus 
     claimant: null,
     followers: [],
     route: null,
+    route_status: null,
     route_holder: null,
     replies: [],
   }));
@@ -1304,6 +1320,7 @@ test("after the reader's own answer fails, an answer from elsewhere still holds 
     claimant: null,
     followers: [],
     route: null,
+    route_status: null,
     route_holder: null,
     replies: [],
   }));

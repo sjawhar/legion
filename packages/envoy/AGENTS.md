@@ -2265,15 +2265,29 @@ the synchronous listener call records the sent or failed attempt instead of blin
   reads the comment's `comment_deliveries` once per publish, grouped by session
   (`mentionDeliveryQuery`), and only for a `comment.created` whose mentions resolved to a session.
   A session with a `sent` row is skipped: the mention delivered the comment. A session with no
-  `sent` row and a `pending` one whose claim (its creation, while no sender claimed it) is under a
-  minute old has its copy held back while every other destination is published; `publish` then
-  returns `errMentionPending`, and `scanBatch` hands the event to `deferEvent`, which moves
-  `next_attempt_at` out by `mentionPendingDelay` (2 s) and leaves `published_at` null and
-  `attempt_count` as it was, so waiting on a send never runs the event to its dead letter. Every
-  other session - each attempt `failed`, a `pending` one past the minute (abandoned, the API's
-  `claimLapsed` minute), or no row at all - is published to as if it had not been mentioned. A
-  deferral joined with a denial (`bus.ErrPublishDenied`) is retried as a failure. A comment's edit,
-  resolution and reopening, and every other event, are never left to a mention.
+  `sent` row and a `pending` one whose claim (its creation, while no sender claimed it) is younger
+  than `model.DeliveryClaimLapse` (a minute) has its copy held back while every other destination
+  is published; `publish` then returns `errMentionPending`, and `scanBatch` hands the event to
+  `deferEvent`, which moves `next_attempt_at` out by `mentionPendingDelay` (2 s) and leaves
+  `published_at` null and `attempt_count` as it was, so waiting on a send never runs the event to
+  its dead letter. Every other session - each attempt `failed`, a `pending` one past the minute
+  (abandoned; the API's `claimLapsed` is built from the same `model.DeliveryClaimLapse`), or no
+  row at all - is published to as if it had not been mentioned. A deferral joined with a denial
+  (`bus.ErrPublishDenied`) is retried as a failure. A comment's edit, resolution and reopening,
+  and every other event, are never left to a mention.
+  One copy is not guaranteed: a receipt timeout records the attempt `failed` though the listener
+  may have delivered the mention, and a first attempt stranded `pending` past the minute may have
+  landed before its sender stopped. Either way the outbox also publishes the session's own-topic
+  copy, so the session receives the comment twice, under different dedupe keys (the mention's
+  delivery and the outbox's event); a host treats the second copy as the same comment (same
+  comment id).
+  Nor is order: while a `comment.created` is deferred, the same comment's `comment.edited`,
+  `comment.resolved` and `comment.reopened` are events of their own and publish at once, so a
+  claimant, follower, author or route topic can receive the edit before the creation - for as
+  long as the mention's send is undecided, normally a listener receipt timeout and at most about a
+  minute for a stranded attempt, plus `mentionPendingDelay`. A host that sees an edit, resolution
+  or reopening for a comment it does not know is seeing this window, not a bug; the creation
+  follows.
   `ask.follower_added` and `ask.follower_removed` also route directly to the session they name,
   since a newly added follower is not subscribed to the issue topic by default.
 - Dispatch document events use `notifications.dispatch.document.<PROJECT>.<slug>.<type>` and

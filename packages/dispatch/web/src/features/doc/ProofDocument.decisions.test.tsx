@@ -87,6 +87,7 @@ test("ProofDocument hands its decision blocks the indexed ask; the hosted card a
     claimant: null,
     followers: [],
     route: null,
+    route_status: null,
     route_holder: null,
     replies: [],
   });
@@ -168,6 +169,7 @@ test("after Ask back on a decision block, the hosted card's turn label follows t
     claimant: null,
     followers: [],
     route: null,
+    route_status: null,
     route_holder: null,
     replies: [],
   });

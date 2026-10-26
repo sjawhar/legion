@@ -46,6 +46,7 @@ function askRow(ask: Partial<Ask> = {}, replies: Comment[] = []): IssueAskThread
       followers: [],
       replies,
       route: null,
+      route_status: null,
       route_holder: null,
     },
   };

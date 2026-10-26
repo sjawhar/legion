@@ -510,6 +510,7 @@ test("a reply typed into an answered ask's thread survives leaving the Comments 
     claimant: null,
     followers: [],
     route: null,
+    route_status: null,
     route_holder: null,
     replies: [],
   });
@@ -721,6 +722,7 @@ test("a reply to an ask renders exactly once in the margin, not also as a standa
     claimant: null,
     followers: [],
     route: null,
+    route_status: null,
     route_holder: null,
     replies: [askReply],
   });

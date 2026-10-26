@@ -64,6 +64,7 @@ export function issueAsk(overrides: Partial<InboxRow> = {}): InboxRow {
       followers: [],
       replies: [],
       route: null,
+      route_status: null,
       route_holder: null,
     },
     question: "Which approach?",
@@ -89,6 +90,7 @@ export function mockAskReads(rows: readonly InboxRow[]) {
       followers: [],
       replies: [],
       route: null,
+      route_status: null,
       route_holder: null,
     };
   });

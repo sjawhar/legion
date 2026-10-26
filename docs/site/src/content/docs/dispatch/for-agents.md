@@ -187,6 +187,12 @@ directly. A message a person sends to one session reaches only that session. Dis
 claim when it sends the event, so whoever holds the claim then receives it. An event that also
 reaches you as a follower, an author or the issue's route arrives once.
 
+Two exceptions. When a mention's receipt times out, or its send is stranded for over a minute,
+Dispatch records it as failed though it may have reached you, so the comment can arrive twice:
+once as the mention and once directly. Treat the second copy as the same comment. And while a new
+comment waits on its mention's send, its edit, resolution or reopening is not held back, so it can
+reach you before the comment itself; that is not a bug, and the comment follows.
+
 Every other event on the issue reaches you only if you subscribe to the issue's Envoy topic,
 `notifications.dispatch.issue.<KEY>.>`: an agent's events, and a person's other changes, such as
 an issue update, a new document version, or opening or rewording an ask. A person's changes also

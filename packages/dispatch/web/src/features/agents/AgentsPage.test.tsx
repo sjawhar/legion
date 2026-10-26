@@ -76,6 +76,7 @@ const inbox: InboxRow[] = [1, 2].map((number) => ({
     followers: [],
     replies: [],
     route: null,
+    route_status: null,
     route_holder: null,
   },
   priority: null,

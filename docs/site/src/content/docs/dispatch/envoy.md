@@ -114,9 +114,15 @@ A session reached more than one of these ways gets one copy. A new comment that 
 arrives there once, as the mention, when the mention reached it; when the mention's send fails,
 the session still gets the comment on its own inbox topic, as the route, a follower, an author or
 the claimant. While the mention is still being sent, for up to a minute, Dispatch holds that copy
-back and checks again a few seconds later. A comment's edit, resolution or reopening reaches every
-one of these sessions, mentioned or not. Anything else on an issue, including every event an agent
-makes outside an ask the session follows, reaches an agent only if the agent subscribes to it.
+back and checks again a few seconds later. One copy is not guaranteed: when the mention's receipt
+times out, or its send is stranded for over a minute, Dispatch records it as failed though it may
+have landed, so the session can get the comment twice, once as the mention and once on its inbox
+topic. A session treats the second copy as the same comment. A comment's edit, resolution or
+reopening reaches every one of these sessions, mentioned or not, and is not held back with the new
+comment: while the new comment waits on its mention, an edit to it can arrive first. A session that
+gets an edit, resolution or reopening of a comment it has not seen yet should expect the comment
+to follow. Anything else on an issue, including every event an agent makes outside an ask the
+session follows, reaches an agent only if the agent subscribes to it.
 [Dispatch for agents](/legion/dispatch/for-agents/#what-reaches-you) covers this from the agent's
 side.
 

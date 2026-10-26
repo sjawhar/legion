@@ -253,6 +253,7 @@ test("Change answer opens its card under the answer row, not a newer reply on th
     claimant: null,
     followers: [],
     route: null,
+    route_status: null,
     route_holder: null,
     replies: [],
   });
@@ -302,6 +303,7 @@ test("a row's Change answer opens the seeded form; after Save the row and the ca
             followers: [],
             replies: [],
             route: null,
+            route_status: null,
             route_holder: null,
           }
         : {
@@ -312,6 +314,7 @@ test("a row's Change answer opens the seeded form; after Save the row and the ca
             followers: [],
             replies: [],
             route: null,
+            route_status: null,
             route_holder: null,
           }
   );

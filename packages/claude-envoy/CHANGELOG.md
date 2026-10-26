@@ -18,9 +18,10 @@
   delivers, where the skill said claiming delivers none of the issue's comments: while a session
   holds an issue's claim, a person's answers, comments and messages on that issue reach it
   directly, a new comment that mentions it arrives once, as the mention, when the mention reached
-  it, and still reaches it directly when the mention's send fails, and a message a person sends to
-  one session reaches only that session. An agent's events and every other change on the issue
-  still need a subscription to the issue, as before (INFRA-278).
+  it, and still reaches it directly when the mention's send fails (a mention whose receipt timed
+  out can arrive twice: the second copy is the same comment), and a message a person sends to one
+  session reaches only that session. An agent's events and every other change on the issue still
+  need a subscription to the issue, as before (INFRA-278).
 - The plugin's regenerated `legion/` copy of the `legion-worker` skill's tools reference no longer
   tells a role to add a new image package to the licence file by hand: the worker image lists every
   Debian package it carries in `/usr/share/doc/legion/THIRD_PARTY_NOTICES` from its own dpkg

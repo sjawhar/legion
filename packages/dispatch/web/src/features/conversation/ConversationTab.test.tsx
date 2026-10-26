@@ -142,6 +142,7 @@ function askRow(overrides: Partial<Ask> = {}, replies: Comment[] = []): IssueAsk
       followers: [],
       replies,
       route: null,
+      route_status: null,
       route_holder: null,
     },
   };

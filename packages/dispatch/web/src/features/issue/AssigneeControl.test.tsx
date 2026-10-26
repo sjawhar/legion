@@ -85,6 +85,7 @@ const inboxRow: InboxRow = {
     followers: [],
     replies: [],
     route: null,
+    route_status: null,
     route_holder: null,
   },
   priority: null,

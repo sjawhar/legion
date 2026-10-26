@@ -991,6 +991,21 @@ type Mention struct {
 	SessionID *string `json:"session_id"`
 }
 
+// DeliveryClaimLapse is the lease on a pending delivery attempt (a comment_deliveries or
+// message_deliveries row): a sender's claim older than this was left by a sender that never came
+// back. Two readers depend on the one window and must agree. The API's claimLapsed
+// (internal/dispatch/api) lets another sender resume or settle an attempt whose claim is older,
+// and the outbox's mentionDeliveryQuery (internal/dispatch/outbox) stops holding a mentioned
+// session's own-topic copy back for a pending mention attempt whose claim - or creation, when no
+// sender claimed it - is older, so the outbox never waits on an attempt a sender may no longer
+// finish. Both judge it in Postgres against Postgres's own timestamps, through
+// DeliveryClaimLapseInterval.
+const DeliveryClaimLapse = time.Minute
+
+// DeliveryClaimLapseInterval is DeliveryClaimLapse as a Postgres interval literal in whole
+// seconds, for SQL that compares a delivery's claimed_at or created_at against now().
+var DeliveryClaimLapseInterval = fmt.Sprintf("interval '%d seconds'", int64(DeliveryClaimLapse/time.Second))
+
 // CommentDelivery records one attempt to deliver a mention to its resolved session.
 type CommentDelivery struct {
 	CommentID  string  `json:"comment_id"`

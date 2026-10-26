@@ -123,6 +123,7 @@ function threadRead(of: Ask, replies: Comment[] = []): AskRead {
     followers: [],
     replies,
     route: null,
+    route_status: null,
     route_holder: null,
   };
 }

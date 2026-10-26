@@ -4,13 +4,16 @@ import (
 	"context"
 	"net/http"
 	"testing"
+
+	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
-// askReachRead is the claimant, route and route holder an ask read carries, at the single-ask
-// read's top level and on every thread the Inbox and an issue's ask list hand back.
+// askReachRead is the claimant, route, route status and route holder an ask read carries, at the
+// single-ask read's top level and on every thread the Inbox and an issue's ask list hand back.
 type askReachRead struct {
 	Claimant    *string `json:"claimant"`
 	Route       *string `json:"route"`
+	RouteStatus *string `json:"route_status"`
 	RouteHolder *string `json:"route_holder"`
 }
 
@@ -23,87 +26,64 @@ func describeOptionalString(value *string) string {
 
 func (reach askReachRead) String() string {
 	return "claimant=" + describeOptionalString(reach.Claimant) + " route=" + describeOptionalString(reach.Route) +
+		" route_status=" + describeOptionalString(reach.RouteStatus) +
 		" route_holder=" + describeOptionalString(reach.RouteHolder)
 }
 
 func (reach askReachRead) matches(want askReachRead) bool {
 	return stringPointersEqual(reach.Claimant, want.Claimant) && stringPointersEqual(reach.Route, want.Route) &&
+		stringPointersEqual(reach.RouteStatus, want.RouteStatus) &&
 		stringPointersEqual(reach.RouteHolder, want.RouteHolder)
 }
 
-// A person's answer and replies on an issue's ask reach the session holding the issue's claim and
-// the issue's route as well as the followers, so every ask read that renders whom an ask reaches
-// carries both, and the live session the route reaches now, so a reader counts each session once:
-// the single-ask read, an Inbox row's thread and an issue ask list's thread. Only a session's
-// claim names a claimant (a person has no Envoy topic); the route holder is the routed session
-// while the listener lists it, or the role's live holder, and null for a route nobody holds; a
-// project document's ask has no issue, so none of the three.
-func TestAskReadsCarryTheIssueClaimantAndRoute(t *testing.T) {
-	roster := &fakeRoster{}
-	roster.set("session-routed")
-	roster.set("ses-reviewer", "reviewer")
-	handler, database := routeStatusServer(t, roster)
-	ctx := context.Background()
+// routedAskCase is one issue an ask reach test opens an ask on, the claim and route it then
+// gives that issue (want.Route), and the reach every read of the ask must carry.
+type routedAskCase struct {
+	name      string
+	key       string
+	claimedBy *string
+	want      askReachRead
+}
 
-	sessionClaimed := createInteractionIssue(t, handler, "TEST", "Transport rollout", "A spec").Key
-	personClaimed := createAnswerListIssue(t, handler, "Billing export").Key
-	vacantRole := createAnswerListIssue(t, handler, "Release notes").Key
-	unclaimed := createAnswerListIssue(t, handler, "Onboarding copy").Key
-	issues := []struct {
-		name      string
-		key       string
-		claimedBy *string
-		want      askReachRead
-	}{
-		{
-			name:      "session claim, live session route",
-			key:       sessionClaimed,
-			claimedBy: new(`{"kind":"session","id":"session-claimant"}`),
-			want: askReachRead{
-				Claimant: new("session-claimant"), Route: new("session:session-routed"), RouteHolder: new("session-routed"),
-			},
-		},
-		{
-			name:      "person claim, held role route",
-			key:       personClaimed,
-			claimedBy: new(`{"kind":"user","id":"alice"}`),
-			want:      askReachRead{Route: new("role:reviewer"), RouteHolder: new("ses-reviewer")},
-		},
-		{name: "no claim, role route nobody holds", key: vacantRole, want: askReachRead{Route: new("role:sre")}},
-		{name: "no claim, no route", key: unclaimed},
-	}
-	type expectation struct {
-		name     string
-		issueKey string
-		want     askReachRead
-	}
-	expected := map[string]expectation{}
-	for _, issue := range issues {
+type askReachExpectation struct {
+	name     string
+	issueKey string
+	want     askReachRead
+}
+
+// openRoutedAsks opens one ask on each case's issue and then sets that issue's claim and route,
+// returning what each ask's reads must carry keyed by ask id.
+func openRoutedAsks(t *testing.T, handler http.Handler, database *store.Store, cases []routedAskCase) map[string]askReachExpectation {
+	t.Helper()
+	expected := map[string]askReachExpectation{}
+	for _, issue := range cases {
 		askID := openAskAs(t, handler, issue.key, "session-asker", issue.name+"?")
-		if _, err := database.Pool.Exec(ctx, `
+		if _, err := database.Pool.Exec(context.Background(), `
 			update issues set claimed_by = $2::jsonb,
 				claimed_at = case when $2::jsonb is null then null else now() end, route = $3
 			where key = $1
 		`, issue.key, issue.claimedBy, issue.want.Route); err != nil {
 			t.Fatalf("set claim and route of %s: %v", issue.key, err)
 		}
-		expected[askID] = expectation{name: issue.name, issueKey: issue.key, want: issue.want}
+		expected[askID] = askReachExpectation{name: issue.name, issueKey: issue.key, want: issue.want}
 	}
+	return expected
+}
 
-	artifact := createProjectDocument(t, handler, "TEST", "Design notes", "# Design notes\n")
-	documentAsk := sessionRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+artifact.ID+"/asks", map[string]any{
-		"question": "Document question", "actor": sessionActor(),
-	})
-	if documentAsk.Code != http.StatusCreated {
-		t.Fatalf("create document ask: status=%d body=%s", documentAsk.Code, documentAsk.Body.String())
+// requireAskReaches reads every expected ask all three ways a client sees its reach - the
+// single-ask read, its Inbox row's thread and its issue ask list's thread - and requires each to
+// carry the expected reach. With a roster it also requires the listener calls the reads make: one
+// per single-ask read of a routed ask, none for an unrouted one, and one for the whole Inbox.
+func requireAskReaches(t *testing.T, handler http.Handler, roster *fakeRoster, expected map[string]askReachExpectation) {
+	t.Helper()
+	lookups := func() int32 {
+		if roster == nil {
+			return 0
+		}
+		return roster.lookups.Load()
 	}
-	documentAskID := decodeBody[struct {
-		ID string `json:"id"`
-	}](t, documentAsk).ID
-	expected[documentAskID] = expectation{name: "project document ask"}
-
 	for askID, want := range expected {
-		before := roster.lookups.Load()
+		before := lookups()
 		read := dispatchRequest(t, handler, http.MethodGet, "/api/v1/asks/"+askID, nil, "alice")
 		if read.Code != http.StatusOK {
 			t.Fatalf("read %s ask: status=%d body=%s", want.name, read.Code, read.Body.String())
@@ -113,21 +93,23 @@ func TestAskReadsCarryTheIssueClaimantAndRoute(t *testing.T) {
 		}
 		// The listener is asked only when the ask's issue has a route, and then once.
 		wantCalls := int32(0)
-		if want.want.Route != nil {
+		if roster != nil && want.want.Route != nil {
 			wantCalls = 1
 		}
-		if calls := roster.lookups.Load() - before; calls != wantCalls {
+		if calls := lookups() - before; calls != wantCalls {
 			t.Fatalf("%s: ask read made %d listener calls, want %d", want.name, calls, wantCalls)
 		}
 	}
 
-	before := roster.lookups.Load()
+	before := lookups()
 	inbox := dispatchRequest(t, handler, http.MethodGet, "/api/v1/inbox", nil, "alice")
 	if inbox.Code != http.StatusOK {
 		t.Fatalf("read inbox: status=%d body=%s", inbox.Code, inbox.Body.String())
 	}
-	if calls := roster.lookups.Load() - before; calls != 1 {
-		t.Fatalf("an inbox read made %d listener calls, want 1 for every routed ask on it", calls)
+	if roster != nil {
+		if calls := lookups() - before; calls != 1 {
+			t.Fatalf("an inbox read made %d listener calls, want 1 for every routed ask on it", calls)
+		}
 	}
 	inboxRows := decodeBody[[]struct {
 		ID     string       `json:"id"`
@@ -156,9 +138,107 @@ func TestAskReadsCarryTheIssueClaimantAndRoute(t *testing.T) {
 		if len(rows) != 1 || rows[0].ID != askID || rows[0].Thread == nil {
 			t.Fatalf("%s: issue ask list = %#v, want its one ask with a thread", want.name, rows)
 		}
-		got := askReachRead{Claimant: rows[0].Thread.Claimant, Route: rows[0].Thread.Route, RouteHolder: rows[0].Thread.RouteHolder}
+		thread := rows[0].Thread
+		got := askReachRead{
+			Claimant: thread.Claimant, Route: thread.Route, RouteStatus: thread.RouteStatus, RouteHolder: thread.RouteHolder,
+		}
 		if !got.matches(want.want) {
 			t.Fatalf("%s: issue ask list thread %s, want %s", want.name, got, want.want)
 		}
 	}
+}
+
+// A person's answer and replies on an issue's ask reach the session holding the issue's claim and
+// the issue's route as well as the followers, so every ask read that renders whom an ask reaches
+// carries both, and the route's reach now (the issue reads' route_status and route_holder), so a
+// reader counts each session once: the single-ask read, an Inbox row's thread and an issue ask
+// list's thread. Only a session's claim names a claimant (a person has no Envoy topic); the route
+// is live with the routed session while the listener lists it, or with the role's live holder,
+// and no_holder with a null holder for a route nobody holds; a project document's ask has no
+// issue, so none of the four.
+func TestAskReadsCarryTheIssueClaimantAndRoute(t *testing.T) {
+	roster := &fakeRoster{}
+	roster.set("session-routed")
+	roster.set("ses-reviewer", "reviewer")
+	handler, database := routeStatusServer(t, roster)
+
+	sessionClaimed := createInteractionIssue(t, handler, "TEST", "Transport rollout", "A spec").Key
+	personClaimed := createAnswerListIssue(t, handler, "Billing export").Key
+	vacantRole := createAnswerListIssue(t, handler, "Release notes").Key
+	unclaimed := createAnswerListIssue(t, handler, "Onboarding copy").Key
+	expected := openRoutedAsks(t, handler, database, []routedAskCase{
+		{
+			name:      "session claim, live session route",
+			key:       sessionClaimed,
+			claimedBy: new(`{"kind":"session","id":"session-claimant"}`),
+			want: askReachRead{
+				Claimant: new("session-claimant"), Route: new("session:session-routed"),
+				RouteStatus: new("live"), RouteHolder: new("session-routed"),
+			},
+		},
+		{
+			name:      "person claim, held role route",
+			key:       personClaimed,
+			claimedBy: new(`{"kind":"user","id":"alice"}`),
+			want:      askReachRead{Route: new("role:reviewer"), RouteStatus: new("live"), RouteHolder: new("ses-reviewer")},
+		},
+		{
+			name: "no claim, role route nobody holds",
+			key:  vacantRole,
+			want: askReachRead{Route: new("role:sre"), RouteStatus: new("no_holder")},
+		},
+		{name: "no claim, no route", key: unclaimed},
+	})
+
+	artifact := createProjectDocument(t, handler, "TEST", "Design notes", "# Design notes\n")
+	documentAsk := sessionRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+artifact.ID+"/asks", map[string]any{
+		"question": "Document question", "actor": sessionActor(),
+	})
+	if documentAsk.Code != http.StatusCreated {
+		t.Fatalf("create document ask: status=%d body=%s", documentAsk.Code, documentAsk.Body.String())
+	}
+	documentAskID := decodeBody[struct {
+		ID string `json:"id"`
+	}](t, documentAsk).ID
+	expected[documentAskID] = askReachExpectation{name: "project document ask"}
+
+	requireAskReaches(t, handler, roster, expected)
+}
+
+// unknownReachCases are the asks an unanswered listener leaves unjudged: a held role route and a
+// live session route both read unknown with a null holder, never no_holder, because a read
+// cannot tell whether anyone receives the route; the claimant still reads, and an unrouted ask
+// stays all null.
+func unknownReachCases(t *testing.T, handler http.Handler) []routedAskCase {
+	t.Helper()
+	return []routedAskCase{
+		{
+			name:      "session claim, session route",
+			key:       createInteractionIssue(t, handler, "TEST", "Transport rollout", "A spec").Key,
+			claimedBy: new(`{"kind":"session","id":"session-claimant"}`),
+			want: askReachRead{
+				Claimant: new("session-claimant"), Route: new("session:session-routed"), RouteStatus: new("unknown"),
+			},
+		},
+		{
+			name: "no claim, role route",
+			key:  createAnswerListIssue(t, handler, "Release notes").Key,
+			want: askReachRead{Route: new("role:reviewer"), RouteStatus: new("unknown")},
+		},
+		{name: "no claim, no route", key: createAnswerListIssue(t, handler, "Onboarding copy").Key},
+	}
+}
+
+func TestAskReadsReachUnknownWhenTheListenerDoesNotAnswer(t *testing.T) {
+	roster := &fakeRoster{}
+	roster.set("session-routed")
+	roster.set("ses-reviewer", "reviewer")
+	roster.down.Store(true)
+	handler, database := routeStatusServer(t, roster)
+	requireAskReaches(t, handler, nil, openRoutedAsks(t, handler, database, unknownReachCases(t, handler)))
+}
+
+func TestAskReadsReachUnknownWithoutAConfiguredListener(t *testing.T) {
+	handler, database, _ := newTestServer(t, testServerOptions{})
+	requireAskReaches(t, handler, nil, openRoutedAsks(t, handler, database, unknownReachCases(t, handler)))
 }
