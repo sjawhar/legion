@@ -110,17 +110,39 @@ func BenchmarkLiveDocumentRead(b *testing.B) {
 // browsers while reads of the room run beside it: none, one every 250 ms, or one after another,
 // each through a copy (snapshotDocument, as main read) or through readLive. ygo broadcasts a
 // peer's update only once the room's update observer has returned, so a keystroke's latency here
-// is its transaction on the live document and the observer's whole turn with the replica
-// (renderedReplica.observe): the catch-up under the replica's lock and the render
+// is everything the peer's read loop runs for it before that broadcast: the peer update hook
+// (Service.weighPeerUpdate, ygo's Server.OnPeerUpdate), the apply the hook is handed, which is
+// ygo's own, crdt.ApplyUpdateV1 of the update into the room's document (sjawhar/ygo
+// v1.51.3-sami.2, provider/websocket/peer_update.go:84-94), and the observer's whole turn with the
+// replica (renderedReplica.observe), which ygo fires inside that apply once its transaction
+// commits (crdt/doc.go:647-652): the catch-up under the replica's lock and the render
 // (renderDocumentForUpdate), which skips pmdoc.Read's copy since the tree it renders never
 // outlives the call. 120 keystrokes 20 ms apart on a 524 KiB document; each run reports the
 // latencies' percentiles in milliseconds.
+//
+// Each keystroke reaches the room as a browser's does: typed on the browser's own copy of the room,
+// and handed to the hook as the V1 update that copy's transaction encodes (crdt.Doc.OnUpdate, the
+// update a browser's document emits and its provider sends), on a service with the room budget New
+// gives it and the room listed and charged as a loaded room is (keepReplica, chargeLoadedRoom), so
+// the hook reads the budget's signal and the room's published measurement and takes the path a
+// keystroke under the bound takes. The browser's encode is outside the timing, as it is outside
+// the server's. The hook is in the path because A1's cost clause compares the keystroke without
+// it, at a base that has no hook, against the keystroke with it: a benchmark whose keystrokes never
+// reached the hook could not see what it costs.
 func BenchmarkKeystrokeBesideReads(b *testing.B) {
 	live := benchmarkLiveDocument(b, 524<<10)
-	texts := paragraphTexts(live)
+	browser, err := snapshotDocument(live)
+	if err != nil {
+		b.Fatal(err)
+	}
+	texts := paragraphTexts(browser)
 	if len(texts) == 0 {
 		b.Fatal("the document holds no paragraph text")
 	}
+	// The browser types into its own copy of the room, and every update it sends is applied to
+	// live, so the two stay one document across every run.
+	var sent []byte
+	browser.OnUpdate(func(update []byte, _ any) { sent = update })
 	walk := func(doc *crdt.Doc) {
 		if _, err := treeOf(doc); err != nil {
 			b.Error(err)
@@ -157,8 +179,13 @@ func BenchmarkKeystrokeBesideReads(b *testing.B) {
 				continue
 			}
 			b.Run(name, func(b *testing.B) {
-				service := &Service{}
-				replica := service.keepReplica(live, nil)
+				rendering, err := renderDocument(live)
+				if err != nil {
+					b.Fatal(err)
+				}
+				service := &Service{budget: roomBudget{limit: roomBudgetBytes}}
+				replica := service.keepReplica(live, &rendering)
+				service.chargeLoadedRoom("bench", replica)
 				replica.observe("bench", live, nil)
 				for b.Loop() {
 					stop := make(chan struct{})
@@ -178,10 +205,20 @@ func BenchmarkKeystrokeBesideReads(b *testing.B) {
 					latencies := make([]time.Duration, 0, 120)
 					for range 120 {
 						time.Sleep(20 * time.Millisecond)
+						browser.Transact(func(txn *crdt.Transaction) { texts[0].Insert(txn, 0, "y", nil) })
+						info := websocket.PeerUpdateInfo{Room: "bench", Doc: live, Update: sent}
 						start := time.Now()
-						live.Transact(func(txn *crdt.Transaction) { texts[0].Insert(txn, 0, "y", nil) })
-						replica.observe("bench", live, nil)
+						err := service.weighPeerUpdate(info, func() error {
+							if err := crdt.ApplyUpdateV1(info.Doc, info.Update, info.Origin); err != nil {
+								return err
+							}
+							replica.observe("bench", live, nil)
+							return nil
+						})
 						latencies = append(latencies, time.Since(start))
+						if err != nil {
+							b.Fatalf("the room refused a keystroke: %v", err)
+						}
 					}
 					close(stop)
 					reading.Wait()
@@ -206,13 +243,14 @@ func BenchmarkKeystrokeBesideReads(b *testing.B) {
 // does nothing: what is timed is the weighing this change adds to the peer's read loop, where the
 // room's own apply runs with the hook or without it. The percentiles are reported in
 // milliseconds, as BenchmarkKeystrokeBesideReads reports a keystroke's, so the hook's cost can be
-// read against the keystroke it rides on.
+// read against the keystroke it rides on, whose latency there is measured with the hook in it.
 //
-// The room is residentRoomDocument's rather than benchmarkLiveDocument's, which is the same shape
-// and the same size but makes more elements than a document may hold at 524 KiB, so no room
-// renders it and none would publish a measurement for the hook to weigh at all (room_heap_test.go,
-// residentRoomMarkdown). What the hook costs turns on the measurement and the update, not on the
-// document under them, and this one is a document a room can hold.
+// The room is residentRoomDocument's, a document of a room's shape at the same size
+// (room_heap_test.go, residentRoomMarkdown). benchmarkLiveDocument, which
+// BenchmarkKeystrokeBesideReads types into, is a document a room holds as well: its paragraphs run
+// on in words, and its room publishes a measurement for the hook to weigh, 537,191 bytes before
+// the benchmark's first keystroke. What the hook costs turns on the measurement and the update, not
+// on the document under them.
 func BenchmarkPeerUpdateWeighing(b *testing.B) {
 	const weighings = 1_000
 	live := residentRoomDocument(b, 524<<10)
