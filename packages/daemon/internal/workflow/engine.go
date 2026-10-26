@@ -1162,6 +1162,11 @@ func (e *Engine) openBeneath(ctx context.Context, tx pgx.Tx, issue record.Issue)
 	if err != nil {
 		return nil, err
 	}
+	return openBeneathIn(members, issue.Key), nil
+}
+
+// openBeneathIn is openBeneath's walk over members, the issues of key's tree as already read.
+func openBeneathIn(members []record.Issue, key string) []string {
 	// The index holds each child's place in members rather than its record: an Issue is a wide
 	// struct, and the walk reads only its key and whether it is in the workflow.
 	children := map[string][]int{}
@@ -1171,8 +1176,8 @@ func (e *Engine) openBeneath(ctx context.Context, tx pgx.Tx, issue record.Issue)
 		}
 	}
 	running := []string{}
-	seen := map[string]bool{issue.Key: true}
-	for frontier := []string{issue.Key}; len(frontier) > 0; {
+	seen := map[string]bool{key: true}
+	for frontier := []string{key}; len(frontier) > 0; {
 		current := frontier[len(frontier)-1]
 		frontier = frontier[:len(frontier)-1]
 		for _, index := range children[current] {
@@ -1188,7 +1193,7 @@ func (e *Engine) openBeneath(ctx context.Context, tx pgx.Tx, issue record.Issue)
 		}
 	}
 	slices.Sort(running)
-	return running, nil
+	return running
 }
 
 func (e *Engine) gateForIssue(ctx context.Context, tx pgx.Tx, issue record.Issue) (*record.DesignGate, error) {

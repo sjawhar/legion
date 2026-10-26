@@ -43,7 +43,10 @@ that version, the daemon reopens the gate and sends `design-approved`, and you r
 After approval, follow `skill://legion-architect`, section 1, for whether the root spec changes,
 when to repeat the two reviews, and when a rewrite means requesting approval again. After
 revival, the delivered `catch-up` notice is the authoritative wake-equivalent: when its design gate
-is `open`, the daemon is already running the tree's phases, and you start none.
+is `open`, the daemon is already running the tree's phases, and you start none. The one thing a
+catch-up leaves to you is acceptance: an issue its `reason` names as waiting for your acceptance is
+in `accepting`, where no worker runs and no other notice will come, so read its evidence and
+`sign_off`, or send it back with `request_backward_move`.
 During a live session, react only to delivered wakes; do not poll.
 
 When a `catch-up` says `carried`, this root is a child handed over from a finished tree, carrying
