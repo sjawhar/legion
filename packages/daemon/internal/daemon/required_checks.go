@@ -66,7 +66,7 @@ func (w *workflowRuntime) watchRequiredChecks(ctx context.Context) {
 // applies a deciding one the daemon has not recorded, whose webhook never arrived (readReviews),
 // whatever phase the issue is in. It then reads what the base branch requires with the implement
 // App's installation token, the credential the daemon reads GitHub with for its own work
-// (requiredchecks.Required, the reader READY uses), and, when that includes a workflow,
+// (requiredchecks.Required, which this pass is the only reader of), and, when that includes a workflow,
 // each required workflow's latest run on the head whose settlement stands for the pull request's
 // (classify.WorkflowHead, requiredchecks.Workflows). It applies an intake.RequiredChecks fact when
 // that read differs from the one recorded, which decides the head's verdict again (workflow's

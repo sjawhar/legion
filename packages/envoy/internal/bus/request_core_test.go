@@ -1,7 +1,6 @@
 package bus_test
 
 import (
-	"context"
 	"errors"
 	"testing"
 	"time"
@@ -9,7 +8,6 @@ import (
 	natsgo "github.com/nats-io/nats.go"
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/contracts"
-	"github.com/testcontainers/testcontainers-go"
 )
 
 // A forward that reached the server (publish and flush both succeeded) and drew
@@ -87,11 +85,11 @@ func TestRequestCoreToReturnsNilOnAnEmptyReceipt(t *testing.T) {
 // the forward is still buffered on this side of a stalled connection and is not
 // known to have reached anyone, so the listener must report it delivery_failed.
 // nats.go's Flush returns the same nats.ErrTimeout value a receipt wait does,
-// which is why the two exits need distinct errors. Driven for real: the NATS
-// server is paused, so the client stays CONNECTED, buffers the publish, and its
+// which is why the two exits need distinct errors. Driven for real: the server's
+// traffic is frozen, so the client stays CONNECTED, buffers the publish, and its
 // flush waits for a PONG that cannot come until the request window runs out.
 func TestRequestCoreToFlushTimeoutIsNotErrReceiptTimeout(t *testing.T) {
-	ctr, uri := startNATS(t)
+	srv, uri := startNATS(t)
 	client, err := bus.ConnectOwningStream([]string{uri})
 	if err != nil {
 		t.Fatalf("connect: %v", err)
@@ -118,7 +116,7 @@ func TestRequestCoreToFlushTimeoutIsNotErrReceiptTimeout(t *testing.T) {
 		Topic:          "notifications.role.stalled-server",
 		DedupeKey:      "publish.stalled",
 		IssuedAt:       contracts.NowMillis(),
-		PayloadSummary: "the server is paused under a live connection",
+		PayloadSummary: "the server's traffic is frozen under a live connection",
 		TraceID:        "trace_stalled",
 	}
 	// Control: the same subject and responder yield a receipt while the server runs.
@@ -126,28 +124,17 @@ func TestRequestCoreToFlushTimeoutIsNotErrReceiptTimeout(t *testing.T) {
 		t.Fatalf("RequestCoreTo against a healthy server = %v, want nil", err)
 	}
 
-	ctx := context.Background()
-	docker, err := testcontainers.NewDockerClientWithOpts(ctx)
-	if err != nil {
-		t.Skipf("no docker client to pause the fixture: %v", err)
-	}
-	defer docker.Close()
-	if err := docker.ContainerPause(ctx, ctr.GetContainerID()); err != nil {
-		t.Skipf("the fixture cannot be paused: %v", err)
-	}
-	// Cleanups run last-in first-out, so this unpause precedes startNATS's Terminate.
-	t.Cleanup(func() {
-		if err := docker.ContainerUnpause(context.Background(), ctr.GetContainerID()); err != nil {
-			t.Errorf("unpause fixture: %v", err)
-		}
-	})
+	// The server's traffic stops in both directions while its connection stays up.
+	thaw := srv.Freeze(t)
+	// Cleanups run last-in first-out, so this thaw precedes startNATS's shutdown.
+	t.Cleanup(thaw)
 
 	const window = 500 * time.Millisecond
 	started := time.Now()
 	err = client.RequestCoreTo(subject, item, window)
 	elapsed := time.Since(started)
 	if err == nil {
-		t.Fatal("RequestCoreTo against a paused server returned nil; the forward cannot have been flushed")
+		t.Fatal("RequestCoreTo against a frozen server returned nil; the forward cannot have been flushed")
 	}
 	if errors.Is(err, bus.ErrReceiptTimeout) {
 		t.Fatalf("a flush timeout was reported as the receipt sentinel: %v", err)

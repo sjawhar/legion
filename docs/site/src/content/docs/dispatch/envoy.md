@@ -77,7 +77,7 @@ no Slack token: the tool asks the [Secrets Broker](/legion/broker/) for the agen
 (`agent-secrets LEGION_SLACK_BOT_TOKEN --reason … --wait 0s -- <poster>`), which puts it in the
 environment of the one process that calls Slack's `chat.postMessage`, never the session's. Store
 the token in the broker's store with owner `legion-daemon` and tier `agent`, so the broker grants it
-at once to the pods the Legion daemon enrolls under the account `BROKER_SERVICES` binds to
+at once to the pods the Legion daemon enrolls under the accounts `BROKER_SERVICES` binds to
 `legion-daemon`, its controller's included, and to no one else; the app needs the
 `chat:write` bot scope and must be added to each channel it answers in. A request still waiting
 for approval, or denied, posts nothing, and the tool says which; Slack's own refusal comes back as
@@ -120,7 +120,7 @@ side.
 | `notifications.legion.<project>.controller` | A Legion project's controller. |
 | `notifications.slack.*.<channel>.mention` | Every mention of the Slack app in one channel, whatever the team. |
 | `notifications.envoy.exceptions.<topic>` | A delivery to `<topic>` that failed, with the reason. |
-| any other `notifications.<name>` topic | A team topic you name, such as `notifications.team.deploy-squad.all`. Live only: it reaches every subscribed session that holds its own NATS connection, the publisher included, and is not retained. A session the listener delivers to over a serve port, such as an OpenCode agent, receives nothing on such a topic and is told nothing: `dispatch://INFRA-122`. A topic outside `notifications.` is refused. |
+| any other `notifications.<name>` topic | A team topic you name, such as `notifications.team.deploy-squad.all`. Live only: it reaches every session subscribed to it when it is published, and is not retained. A session that holds its own NATS connection receives it directly, its own publish included; a session the listener delivers to over a serve port, such as an OpenCode agent, receives it through its machine's listener when that listener subscribes to every topic (`ENVOY_SUBSCRIBE_ALL_TOPICS=1`, which a host's own listener sets; the shared hub's listener does not), except a publish of its own, which the listener does not echo back. A topic outside `notifications.` is refused. |
 
 An agent subscribes with Envoy's `envoy_subscribe` tool, which stores the subscription in the
 listener. A subscription to `<subject>.>` also covers `<subject>` itself, so subscribing to a pull
@@ -192,6 +192,8 @@ verify it as [Running Dispatch](/legion/dispatch/running-dispatch/) shows.
 | `ENVOY_API_TOKEN` | The bearer token `/v1` callers must send. |
 | `ENVOY_OIDC_ISSUER`, `ENVOY_OIDC_AUDIENCE` | Also accept Kubernetes service-account tokens from that issuer for that audience. Set both or neither. |
 | `ENVOY_ALLOWED_HOSTS` | Comma-separated host names or addresses, with no port, that a listener with no bearer serves `/v1` to besides loopback. Set it to each name clients reach such a listener by, such as a forward to it. |
+| `ENVOY_HOST_BRIDGE` | Where the listener reaches a session on its own machine that registered a serve port: one registered through it, or one whose recorded host is the listener's own `ENVOY_MACHINE_ID` (letter case ignored), as a session that stayed on that machine and re-registered through another listener records. Unset, it uses the host the session registered with, then `host.docker.internal`. A session that re-registered through another listener and records another host is reached at that host, else that listener's machine id, never through the bridge. A listener delivers only to the sessions it owns: a session's owner is the listener its stored subscription names (the one it first subscribed through), else the one it last registered through; any other session is its owner's to deliver. |
+| `ENVOY_SUBSCRIBE_ALL_TOPICS` | Set to `1` to have the listener also deliver every topic the stream does not store, such as a team topic, to the sessions on its machine that registered a serve port. Only a NATS user allowed to subscribe to `notifications.>` (a host's own user) may set it; under any other the listener exits at start with an error naming the variable. |
 | `ENVOY_WEBHOOKS` | Which webhook routes to mount, for example `github,slack`. |
 | `ENVOY_GITHUB_WEBHOOK_SECRET` | Required with `github`: the webhook secret. |
 | `ENVOY_REVIEWER_APP_ID` | Required with `github`: the id of the GitHub App that posts reviews. |
@@ -222,9 +224,9 @@ install it, what each component deploys and which settings it sets.
 | Answer | Meaning |
 | --- | --- |
 | `200` `starting` | The listener is still binding its durable consumer. |
-| `200` `healthy` | Everything answers. The body includes the consumer's lag. |
+| `200` `healthy` | Everything answers. The body includes the consumer's lag, and `live_topics`: `subscribed` when the listener subscribes to every topic (`ENVOY_SUBSCRIBE_ALL_TOPICS=1`), `not_applicable` when it does not. |
 | `200` `degraded` | A passing key-value failure the listener is retrying. |
-| `503` `unhealthy` | NATS is unreachable, the subscription or a cache watcher stopped, or the durable consumer is gone. |
+| `503` `unhealthy` | NATS is unreachable, the subscription or a cache watcher stopped, the durable consumer is gone, or the durable consumer is `not bound to this listener's subscription`, which a durable deleted and created again under the listener leaves. With `ENVOY_SUBSCRIBE_ALL_TOPICS=1`, also `live subscription inactive` when the subscription to every topic is gone or the server refuses it, as one restarted without that grant does. |
 
 `/v1` opens before `/healthz` leaves `starting`: as soon as NATS is connected and the session and
 subscription caches are loaded. Until then `/v1` answers `503` `service starting`. During a rolling
@@ -307,7 +309,7 @@ wherever a command or the `envoy.json` below names the default.
 
 NATS keeps the event stream and Envoy's key-value buckets in the `envoy-single-node_nats-data`
 volume. A restart keeps the last 72 hours of events, and the subscriptions and role claims of every
-session still running. A running session renews its registration every two minutes; once it stops,
+session still running. A running session renews its registration every 90 seconds; once it stops,
 Envoy drops its subscriptions and role claims within minutes.
 
 | Task | Command, from `packages/envoy/deploy/compose` |

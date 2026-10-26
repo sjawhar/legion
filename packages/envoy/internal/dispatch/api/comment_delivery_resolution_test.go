@@ -5,22 +5,25 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
 // roleMentionRegistry is the listener state a role-mention retry test moves between requests:
 // who holds the role, whether the session an attempt is pinned to is still live, how many role
-// lookups the listener answered, and every send it accepted.
+// lookups and how many per-session reads the listener answered, and every send it accepted.
 type roleMentionRegistry struct {
-	holder  string
-	s1Live  bool
-	lookups int
-	sent    []map[string]any
+	holder       string
+	s1Live       bool
+	lookups      int
+	sessionReads int
+	sent         []map[string]any
 }
 
 // roleMentionListener is the Envoy listener the role-mention retry tests run against: it
-// resolves reviewer to the registry's holder, lists s1 only while the registry says it is live,
-// and records each send.
+// resolves reviewer to the registry's holder, answers for s1 - the per-session read a pin
+// recheck makes, and the live list every other reader takes - only while the registry says it
+// is live, and records each send.
 func roleMentionListener(t *testing.T, registry *roleMentionRegistry) *httptest.Server {
 	t.Helper()
 	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -30,6 +33,14 @@ func roleMentionListener(t *testing.T, registry *roleMentionRegistry) *httptest.
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"role": "reviewer", "holder": registry.holder, "title": "reviewer", "capabilities": []string{"steer"},
 			})
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/registry/s1":
+			registry.sessionReads++
+			if !registry.s1Live {
+				w.WriteHeader(http.StatusNotFound)
+				_, _ = w.Write([]byte(`{"error":"no live session s1"}`))
+				return
+			}
+			_, _ = w.Write([]byte(`{"session_id":"s1","title":"planner","capabilities":["steer"]}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/sessions":
 			if !registry.s1Live {
 				_, _ = w.Write([]byte(`[]`))
@@ -71,6 +82,7 @@ func TestPendingRoleMentionRetryKeepsTheCreateTimeHolder(t *testing.T) {
 	}
 	registry.holder = "s2"
 	registry.sent = nil
+	registry.sessionReads = 0
 	retry := dispatchRequest(t, handler, http.MethodPost, "/api/v1/comments/"+comment.ID+"/deliveries", map[string]any{
 		"delivery": "steer",
 	}, "alice")
@@ -80,8 +92,10 @@ func TestPendingRoleMentionRetryKeepsTheCreateTimeHolder(t *testing.T) {
 	if attempt := decodeBody[commentDeliveryRead](t, retry); attempt.Attempt != 1 || attempt.SessionID == nil || *attempt.SessionID != "s1" || attempt.State != "sent" {
 		t.Fatalf("pending role retry attempt = %#v, want original-holder attempt 1", attempt)
 	}
-	if registry.lookups != 1 || len(registry.sent) != 1 || registry.sent[0]["target_session"] != "s1" {
-		t.Fatalf("pending role retry = lookups:%d sends:%#v, want no role re-resolution or s2 delivery", registry.lookups, registry.sent)
+	if registry.lookups != 1 || registry.sessionReads != 1 || len(registry.sent) != 1 ||
+		registry.sent[0]["target_session"] != "s1" {
+		t.Fatalf("pending role retry = lookups:%d session reads:%d sends:%#v, want the pin rechecked once, no role re-resolution and no s2 delivery",
+			registry.lookups, registry.sessionReads, registry.sent)
 	}
 	if _, err := database.Pool.Exec(context.Background(), `
 		update comment_deliveries set state = 'pending', envelope_id = null, error = null, claimed_at = null
@@ -91,6 +105,7 @@ func TestPendingRoleMentionRetryKeepsTheCreateTimeHolder(t *testing.T) {
 	}
 	registry.s1Live = false
 	registry.sent = nil
+	registry.sessionReads = 0
 	missingHolder := dispatchRequest(t, handler, http.MethodPost, "/api/v1/comments/"+comment.ID+"/deliveries", map[string]any{
 		"delivery": "steer",
 	}, "alice")
@@ -101,8 +116,9 @@ func TestPendingRoleMentionRetryKeepsTheCreateTimeHolder(t *testing.T) {
 		*attempt.SessionID != "s1" || attempt.State != "failed" || attempt.Error == nil || *attempt.Error != "no live session s1" {
 		t.Fatalf("absent original holder retry = %#v, want the pin kept on a failed no-live-session attempt", attempt)
 	}
-	if registry.lookups != 1 || len(registry.sent) != 0 {
-		t.Fatalf("absent original holder retry = lookups:%d sends:%#v, want no role re-resolution and no send attempt", registry.lookups, registry.sent)
+	if registry.lookups != 1 || registry.sessionReads != 1 || len(registry.sent) != 0 {
+		t.Fatalf("absent original holder retry = lookups:%d session reads:%d sends:%#v, want the pin rechecked once, no role re-resolution and no send attempt",
+			registry.lookups, registry.sessionReads, registry.sent)
 	}
 }
 
@@ -116,11 +132,17 @@ func TestPendingRoleMentionRetryKeepsTheCreateTimeHolder(t *testing.T) {
 // reply for the life of the comment, not merely until the next retry: a retry only resumes a
 // still-"pending" attempt, and this one settles "failed" right here.
 func TestStrandedAttemptRetriedDuringAListenerOutageKeepsThePinAndAcceptsTheReply(t *testing.T) {
-	sessionsUnavailable := false
+	registryUnavailable := false
 	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/registry/s1":
+			if registryUnavailable {
+				w.WriteHeader(http.StatusBadGateway)
+				return
+			}
+			_, _ = w.Write([]byte(`{"session_id":"s1","title":"planner","capabilities":["steer"]}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/sessions":
-			if sessionsUnavailable {
+			if registryUnavailable {
 				w.WriteHeader(http.StatusBadGateway)
 				return
 			}
@@ -150,7 +172,7 @@ func TestStrandedAttemptRetriedDuringAListenerOutageKeepsThePinAndAcceptsTheRepl
 
 	// The retry resumes attempt 2. Its recheck of the pin fails because the listener cannot
 	// answer at all, not because s1 is gone.
-	sessionsUnavailable = true
+	registryUnavailable = true
 	retry := dispatchRequest(t, handler, http.MethodPost, "/api/v1/comments/"+comment.ID+"/deliveries", map[string]any{
 		"delivery": "steer",
 	}, "alice")
@@ -172,7 +194,7 @@ func TestStrandedAttemptRetriedDuringAListenerOutageKeepsThePinAndAcceptsTheRepl
 
 	// The listener recovers; the session the frame reached can still answer it, because the
 	// outage failed the recheck rather than the recipient's own claim on the attempt.
-	sessionsUnavailable = false
+	registryUnavailable = false
 	reply := bearerRequest(t, handler, http.MethodPost, "/api/v1/comments/"+comment.ID+"/reply", map[string]any{
 		"actor": map[string]any{"kind": "session", "id": "s1"}, "attempt": 2,
 		"target": "session:s1", "body": "It reached me before the outage.",
@@ -223,6 +245,7 @@ func TestStrandedRoleAttemptRetriedDuringAnOutageKeepsThePinAndRefusesTheNewHold
 	registry.s1Live = false
 	registry.lookups = 0
 	registry.sent = nil
+	registry.sessionReads = 0
 	retry := dispatchRequest(t, handler, http.MethodPost, "/api/v1/comments/"+comment.ID+"/deliveries", map[string]any{
 		"delivery": "steer",
 	}, "alice")
@@ -233,8 +256,9 @@ func TestStrandedRoleAttemptRetriedDuringAnOutageKeepsThePinAndRefusesTheNewHold
 	if attempt.Attempt != 1 || attempt.State != "failed" || attempt.SessionID == nil || *attempt.SessionID != "s1" {
 		t.Fatalf("attempt settled during the outage = %#v, want the pin on s1 kept", attempt)
 	}
-	if registry.lookups != 0 || len(registry.sent) != 0 {
-		t.Fatalf("retry during the outage = lookups:%d sends:%#v, want the pin rechecked directly and no send attempted", registry.lookups, registry.sent)
+	if registry.lookups != 0 || registry.sessionReads != 1 || len(registry.sent) != 0 {
+		t.Fatalf("retry during the outage = lookups:%d session reads:%d sends:%#v, want the pin rechecked directly once and no send attempted",
+			registry.lookups, registry.sessionReads, registry.sent)
 	}
 
 	// Attempt 1 already carried the receipt its creation send recorded; the outage settle pays
@@ -264,10 +288,13 @@ func TestStrandedRoleAttemptRetriedDuringAnOutageKeepsThePinAndRefusesTheNewHold
 
 func TestPendingMentionRetryKeepsItsOriginalDeliveryMode(t *testing.T) {
 	sentModes := []string{}
+	const sessions = `[{"session_id":"s1","title":"planner","capabilities":["btw","steer"]}]`
 	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/registry/s1":
+			writeSessionRecord(t, w, sessions, "s1")
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/sessions":
-			_, _ = w.Write([]byte(`[{"session_id":"s1","title":"planner","capabilities":["btw","steer"]}]`))
+			_, _ = w.Write([]byte(sessions))
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/messages/send":
 			var request struct {
 				Payload string `json:"payload"`
@@ -337,12 +364,16 @@ func TestPendingMentionRetryKeepsItsOriginalDeliveryMode(t *testing.T) {
 // changed. This is the observable contract createCommentDelivery must honor for every retry.
 func TestPendingMentionRetryRechecksCapabilityAgainstCurrentRegistration(t *testing.T) {
 	capabilities := []string{"steer"}
-	sessionLookups := 0
+	sessionReads := 0
 	sends := 0
 	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/registry/s1":
+			sessionReads++
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"session_id": "s1", "title": "planner", "capabilities": capabilities,
+			})
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/sessions":
-			sessionLookups++
 			_ = json.NewEncoder(w).Encode([]map[string]any{
 				{"session_id": "s1", "title": "planner", "capabilities": capabilities},
 			})
@@ -379,7 +410,7 @@ func TestPendingMentionRetryRechecksCapabilityAgainstCurrentRegistration(t *test
 	attempt := decodeBody[commentDeliveryRead](t, retry)
 	if attempt.Attempt != 1 || attempt.State != "failed" || attempt.Error == nil ||
 		*attempt.Error != "session s1 (planner) does not advertise steer" || sends != 0 {
-		t.Fatalf("pending retry reused stale capability: lookups=%d sends=%d attempt=%#v", sessionLookups, sends, attempt)
+		t.Fatalf("pending retry reused stale capability: session reads=%d sends=%d attempt=%#v", sessionReads, sends, attempt)
 	}
 }
 
@@ -391,16 +422,22 @@ func TestPendingMentionRetryRechecksCapabilityAgainstCurrentRegistration(t *test
 // not trust a decision that predates the commit it was made inside of.
 func TestInitialCommentDeliveryRechecksCapabilityAgainstCurrentRegistration(t *testing.T) {
 	capabilities := []string{"steer"}
-	sessionLookups := 0
+	sessionReads := 0
 	sends := 0
 	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/registry/s1":
+			sessionReads++
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"session_id": "s1", "title": "planner", "capabilities": capabilities,
+			})
+			// Only the read the resolution makes drops steer, so the recheck before the send
+			// is the one that sees the registration change.
+			capabilities = []string{}
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/sessions":
-			sessionLookups++
 			_ = json.NewEncoder(w).Encode([]map[string]any{{
 				"session_id": "s1", "title": "planner", "capabilities": capabilities,
 			}})
-			capabilities = []string{}
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/messages/send":
 			sends++
 			_, _ = w.Write([]byte(`{"event_id":"mention-envelope","recipient":"s1"}`))
@@ -422,7 +459,7 @@ func TestInitialCommentDeliveryRechecksCapabilityAgainstCurrentRegistration(t *t
 	attempt := comment.Deliveries[0]
 	if attempt.State != "failed" || attempt.Error == nil ||
 		*attempt.Error != "session s1 (planner) does not advertise steer" || sends != 0 {
-		t.Fatalf("initial delivery reused stale capability: lookups=%d sends=%d attempt=%#v", sessionLookups, sends, attempt)
+		t.Fatalf("initial delivery reused stale capability: session reads=%d sends=%d attempt=%#v", sessionReads, sends, attempt)
 	}
 }
 
@@ -478,5 +515,50 @@ func TestPendingUnresolvedMentionRetryKeepsTheOriginalError(t *testing.T) {
 	}
 	if roleLookups != 1 || sends != 0 {
 		t.Fatalf("pending unresolved retry = lookups:%d sends:%d, want no fresh decisions or sends", roleLookups, sends)
+	}
+}
+
+// A listener that cannot answer whether a session lives is not a listener saying that session
+// ended. The per-session read answers 503 here, as it does while the message bus is silent, and
+// what the attempt records must be the listener's own reason: "no live session " is the prefix a
+// mention's session pin is kept or dropped by (resolveMentionTargets in comment_delivery.go) and
+// the text the dashboard prints, so wording an unanswered read that way would un-name a
+// recipient that never went anywhere and tell a person to stop waiting on it.
+func TestMentionDuringAnUnanswerableRegistryReadIsNotRecordedAsNoLiveSession(t *testing.T) {
+	const busSilent = "envoy: the message bus did not answer: no responders available for request"
+	sends := 0
+	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/registry/s1":
+			w.Header().Set("Retry-After", "1")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = w.Write([]byte(`{"error":"` + busSilent + `"}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/sessions":
+			_, _ = w.Write([]byte(`[{"session_id":"s1","title":"planner","capabilities":["steer"]}]`))
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/messages/send":
+			sends++
+			_, _ = w.Write([]byte(`{"event_id":"mention-envelope","recipient":"s1"}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer listener.Close()
+	handler, _ := newTargetedMessageHandler(t, listener.URL)
+	issue := createInteractionIssue(t, handler, "TEST", "Mention while the bus is silent", "before")
+	comment := decodeMentionedComment(t, postMentionedComment(t, handler, issue.Key, map[string]any{
+		"body": "Does this reach you?", "mentions": []map[string]any{{"target": "session:s1"}},
+		"delivery": "steer",
+	}))
+	if len(comment.Deliveries) != 1 || comment.Deliveries[0].Error == nil {
+		t.Fatalf("deliveries = %#v, want one failed delivery", comment.Deliveries)
+	}
+	delivery := comment.Deliveries[0]
+	if delivery.State != "failed" || sends != 0 {
+		t.Fatalf("delivery during a silent bus = %#v sends=%d, want a failure and no send", delivery, sends)
+	}
+	if failure := *delivery.Error; strings.HasPrefix(failure, "no live session ") {
+		t.Fatalf("delivery error = %q, want the listener's own reason, not an ended session", failure)
+	} else if !strings.Contains(failure, busSilent) {
+		t.Fatalf("delivery error = %q, want it to carry the listener's reason %q", failure, busSilent)
 	}
 }

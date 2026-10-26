@@ -108,6 +108,23 @@ export const architectureSourcesQuery = () =>
     queryFn: () => api.listArchitectureSources(),
   });
 
+/** One project's architecture sources (`[]` when it has none), read by the project page's
+ *  open-on rule and the issue components line, which shares it. Its key sits under
+ *  `architectureSourcesQuery`'s, so refreshing that list refreshes every project's too. */
+export const projectArchitectureSourcesQuery = (project: string) =>
+  queryOptions({
+    queryKey: ["architecture-sources", project],
+    queryFn: () => api.listProjectArchitectureSources(project),
+  });
+
+/** Every project that names a default assignee, read by the Settings page's Projects table and
+ *  refreshed by the event a write appends. A project absent from the answer names nobody. */
+export const projectDefaultAssigneesQuery = () =>
+  queryOptions({
+    queryKey: ["project-default-assignees"],
+    queryFn: () => api.listProjectDefaultAssignees(),
+  });
+
 /** The mutation key every board move on `project` carries; `projectIssuesQuery` waits on it. */
 export const boardMoveMutationKey = (project: string): readonly unknown[] => [
   "board-move",

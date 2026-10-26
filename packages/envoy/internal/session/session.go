@@ -6,8 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -15,8 +17,12 @@ import (
 	"github.com/sjawhar/envoy/internal/store"
 )
 
-// ErrWrongMachine is returned when a session belongs to a different machine.
-// Callers should ACK the message (another listener owns this session).
+// ErrWrongMachine is returned for a session with a serve port that another listener owns. The
+// owner is the listener the session's stored subscription names (interest.MachineID, the one
+// store.Registry.Match fans its topics out on), else, when no subscription is stored, the listener
+// it registered through (its entry's MachineID); a session neither names counts as every
+// listener's. HandleAgentMessage answers it as owned elsewhere, with no delivery, exception or
+// NAK, since the owning listener delivers the message.
 var ErrWrongMachine = errors.New("session belongs to a different machine")
 
 var foreignSessionID = regexp.MustCompile(`\b01a0[0-9a-f]{4}-[0-9a-f]{4}-7[0-9a-f]{3}-[0-9a-f]{4}-[0-9a-f]{12}\b`)
@@ -64,7 +70,23 @@ func (d Deliverer) DeliverWithResultForEntry(item contracts.Envelope, interest s
 		return DeliveryResult{Skipped: true}, nil
 	}
 	if entry.Port > 0 {
-		return DeliveryResult{}, d.prompt(entry.Port, entry.MachineID, interest.SessionID, text)
+		// Only the owning listener delivers to a session: every listener on the bus reads each
+		// inbox message from its own durable, so a second listener that could reach the session
+		// would deliver the same message again. The owner always has the message and reaches its
+		// sessions by hostFor's rule. The stored subscription names the owner before the entry
+		// does, so a session that re-registered through another listener stays with the one its
+		// topics are matched on (store.Registry.Match), which keeps the stored MachineID: the owner
+		// of a serving-port session is the listener its stored subscription names. A re-registration
+		// does not move that subscription (store's mergeForUpsert); dispatch://INFRA-429 moves it.
+		// A non-owner acks silently: no delivery, no exception on any subject, no NAK.
+		owner := interest.MachineID
+		if owner == "" {
+			owner = entry.MachineID
+		}
+		if owner != "" && owner != d.MachineID {
+			return DeliveryResult{}, ErrWrongMachine
+		}
+		return DeliveryResult{}, d.prompt(*entry, interest.SessionID, text)
 	}
 	return DeliveryResult{}, fmt.Errorf("no live serve port for session %s", interest.SessionID)
 }
@@ -149,7 +171,7 @@ func foreignSession(item contracts.Envelope) string {
 	return ""
 }
 
-func (d Deliverer) prompt(port int, machineID string, sessionID string, text string) error {
+func (d Deliverer) prompt(entry SessionEntry, sessionID string, text string) error {
 	type promptBody struct {
 		Parts []map[string]string `json:"parts"`
 	}
@@ -160,7 +182,8 @@ func (d Deliverer) prompt(port int, machineID string, sessionID string, text str
 	if err != nil {
 		return err
 	}
-	req, err := http.NewRequest(http.MethodPost, fmt.Sprintf("http://%s:%d/session/%s/prompt_async", d.hostFor(machineID), port, sessionID), bytes.NewReader(body))
+	url := "http://" + net.JoinHostPort(d.hostFor(entry), strconv.Itoa(entry.Port)) + "/session/" + sessionID + "/prompt_async"
+	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return err
 	}
@@ -181,16 +204,46 @@ func (d Deliverer) prompt(port int, machineID string, sessionID string, text str
 // resume was removed — cold-starting host processes from inside a container
 // runs as root and is a security risk. Messages stay in JetStream for retry.
 
-func (d Deliverer) hostFor(machineID string) string {
-	// Local session — use the host bridge (localhost or docker internal)
-	if machineID == "" || machineID == d.MachineID {
-		if d.HostBridge != "" {
-			return d.HostBridge
-		}
+// hostFor is the address rule every delivery follows, for a session this listener owns
+// (DeliverWithResultForEntry refuses another listener's session with ErrWrongMachine, since that
+// session is its owner's to deliver). The address follows where the session runs, read from its
+// entry. The session runs on this listener's machine when its entry names this listener or no
+// listener (it registered here), or when its recorded Host equals this listener's machine id,
+// compared case-insensitively (a plugin records its own machine id as Host, so a session that
+// stayed on this machine but re-registered through another listener names this machine). Such a
+// session goes through HostBridge when one is configured: the listener may run in a container
+// that reaches its own machine's sessions only through that bridge, not by dialling its own host
+// name. A session that re-registered through another listener and records another host runs on
+// that machine, which this listener's bridge does not reach, so it never goes through the bridge.
+// Otherwise the session is reached at its recorded Host, where its process runs; with none
+// recorded (its plugin predates the field), at host.docker.internal when it registered through
+// this listener, else at the machine id of the listener it registered through. A session owned
+// by a listener that cannot reach its port is reached by nobody.
+func (d Deliverer) hostFor(entry SessionEntry) string {
+	registeredHere := entry.MachineID == "" || entry.MachineID == d.MachineID
+	stayedLocal := d.MachineID != "" && strings.EqualFold(entry.Host, d.MachineID)
+	if (registeredHere || stayedLocal) && d.HostBridge != "" {
+		return d.HostBridge
+	}
+	if entry.Host != "" {
+		return entry.Host
+	}
+	if registeredHere {
 		return "host.docker.internal"
 	}
-	// Remote session — use the machine's hostname (resolved via Tailscale MagicDNS)
-	return machineID
+	return entry.MachineID
+}
+
+var hostName = regexp.MustCompile(`^[A-Za-z0-9_]([A-Za-z0-9_.-]{0,251}[A-Za-z0-9_])?$`)
+
+// ValidHost reports whether host can stand as a session's recorded Host in a delivery URL: an
+// IP literal (IPv6 unbracketed) or a host name of letters, digits, '_', '.' and '-' that starts
+// and ends with a letter, digit or '_' and is at most 253 characters. It refuses anything that
+// could change the URL's authority or path - a port, '/', '@', '?', '#', '%', brackets,
+// whitespace, control characters. It returns false for the empty string; a caller that accepts
+// "no host recorded" checks for empty before calling it.
+func ValidHost(host string) bool {
+	return net.ParseIP(host) != nil || hostName.MatchString(host)
 }
 
 func (d Deliverer) timeout() time.Duration {

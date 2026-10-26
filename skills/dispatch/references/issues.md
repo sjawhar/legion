@@ -9,7 +9,8 @@ Read this to choose, claim or release an issue, or to handle `409 ISSUE_CLAIMED`
 - Hold at most three issues in flight (`in_progress`, `testing`, `needs_review`, `retro`), of any kind, per agent. A child counts on its own. Priorities decide only what you pull next. Past three: push unfinished work, say where in one comment, move it to `backlog` and clear its route.
 - An in-flight issue with no owner goes back to `backlog`. No owner means no claim or route held by a live session, no Dispatch activity in a day, and no PR moving on GitHub. The order keeper sweeps those.
 - Never write the status of an issue with the `legion` label or under one. A status you write on a running Legion root is set back and its architect is told. Only a person in the dashboard, the controller's `set_status`, or the operator stops that tree. On a child, a status out of the flow parks it and stops its workers.
-- Set priority yourself. Never reorder the board: one agent keeps the order. When the top looks wrong, or a priority's next step is not a ready issue, publish to `notifications.role.backlog-order`.
+- Set priority yourself. Never reorder the board: one agent keeps each project's order, and in a Legion deployment that agent is the controller, at `notifications.role.legion-<project>-controller`. When the top looks wrong, or a priority's next step is not a ready issue, publish it there, and say it on the issue where no Legion controller runs.
+- The keeper moves a card with `dispatch issue-update --issue <KEY> --before <OTHER>` or `--after <OTHER>`.
 
 ## Claim the issue before you work it
 
@@ -26,23 +27,23 @@ dispatch claim --issue LEGION-234 --release   # I have stopped; it is free
 
 ## Issue status is yours to move
 
-- Move it as a person moves a card, root and owned children: `in_progress`, `testing`, `needs_review`, then `done` once driven in production. A merge is not `done`. An issue left in `triage` while work runs is a defect. Waiting for the deploy lane is not a status and is never announced.
+- Move it as a person moves a card, root and owned children: `in_progress`, `testing`, `needs_review`, then `done` once driven in production. A merge is not `done`. An issue left in `triage` while work runs is a defect. Waiting for the deploy lane is not a status and is never announced. Never the status of an issue with the `legion` label or under one: the daemon writes those, and a status you write there is undone.
 - `--status done` needs `--reason`. Dispatch posts it as a message, then closes. If the close fails after the post, read the status first. A retry points its reason at the posted message.
 - Clears differ: `--clear-priority`, `--parent ''` / `--route ''` / `--repo ''`, `--clear-external-links` / `--clear-blocked-by`. See `dispatch issue-update --help`.
 - Repository: own `--repo`, else nearest ancestor's, else the project default, else none. Unmapped is `REPO_NOT_MAPPED`. `dispatch read` shows `Repository:`. `Repository: unknown (…)` is an older server: a `--repo` write there fails.
 - Link the delivering PR with `--external-link` when you open it.
-- `… is still in triage …` on a write: move the status once work starts.
+- `… is still in triage …` on a write: move the status once work starts. It never appears on an issue with the `legion` label or under one, since the daemon moves those out of triage itself.
 
 ## Priority is yours to set
 
 - `0` (P0, highest) to `3` (P3), `null` clears. Set it on creation and on grooming passes over issues with none. Say what you set and why. The human overrides from the dashboard.
-- A closed issue takes only `rank`, `components`, a reopening status, and an external-links write that adds no link. Reopen first, then set priority, in two commands (`409 ISSUE_CLOSED`).
+- A closed issue takes only a board move (`--before` / `--after`), `components`, a reopening status, and an external-links write that adds no link. Reopen first, then set priority, in two commands (`409 ISSUE_CLOSED`).
 - Labels are optional. Dispatch trims them, keeps their case, and drops case-insensitive duplicates.
 
-## Board rank, priority, and assignee on a read
+## Board rank, priority, and assignee
 
 - Reads carry `rank`, nullable priority, and `assignee`: a lowercase email, or `null`. `dispatch read` prints `Assignee: unassigned` for `null`.
-- Reorder with `PATCH /api/v1/issues/{key}` and `{"rank": {"before": "<key>", "after": "<key>"}}` (either optional, same project). A bearer also sends `"actor": {"kind": "session", "id": "<your session id>"}`, or gets `ACTOR_KIND`.
+- Move a card with `dispatch issue-update --issue <KEY> --before <OTHER>`, which puts it above that issue, `--after <OTHER>`, which puts it below, or both together, which land it between them. The neighbour is an issue of the same project and never the issue itself, and the server refuses a pair the board does not hold in that order. The move rides along with any other change in the same call, and a closed issue takes it.
 
 ## Reading a project's backlog
 
@@ -62,4 +63,4 @@ As a surface's owner, run `dispatch issues --project <KEY> --priority 0 --priori
 
 ## Syncing a project's architecture model
 
-`dispatch architecture-sync --project CORE` imports the model now. It prints the commit, or the error, and keeps the old model. No source configured answers `SOURCE_NOT_FOUND`.
+A project imports its model from one or more source repositories, each on its own branch. `dispatch architecture-sync --project CORE` imports every source now and prints a line for each: `Synced CORE architecture from <repo>@<branch>: commit <sha> (<time>).`, or `Sync failed for CORE (<repo>@<branch>): <error>` followed by what of that source still shows: its commit, its component count when the source was re-saved on another branch and has not imported from it yet, or that none ever imported. A failed source keeps its previous components; every other source is untouched. `--repo <owner/name>` imports that one source alone. No source configured, or no source from that repository, answers `SOURCE_NOT_FOUND`. A credential or branch problem is that source's failed line, or with `--repo` an error, `SOURCE_ACCESS`.

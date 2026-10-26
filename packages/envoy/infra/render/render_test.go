@@ -295,6 +295,7 @@ func TestWebhookListenerEnvIsTheEnvironmentWebhookListenerRegisters(t *testing.T
 		replicas               int
 		webhooks               []string
 		trigger, appID         string // given with github
+		subscribeAllTopics     bool   // given as --subscribe-all-topics
 		want                   string // derived by hand from the listener's environment rules
 	}{
 		{
@@ -340,6 +341,20 @@ func TestWebhookListenerEnvIsTheEnvironmentWebhookListenerRegisters(t *testing.T
 				"ENVOY_HOST_BRIDGE=127.0.0.1\n" +
 				"ENVOY_NATS_REPLICAS=1\n",
 		},
+		{
+			name:       "the opt-in to every notification topic",
+			natsUrls:   []string{"nats://example-bus.example-namespace.internal.example:4222"},
+			listenHost: "0.0.0.0", hostBridge: "127.0.0.1", replicas: 1,
+			webhooks: []string{}, subscribeAllTopics: true,
+			want: "PORT=9020\n" +
+				"ENVOY_LISTEN_HOST=0.0.0.0\n" +
+				"ENVOY_MACHINE_ID=example-machine\n" +
+				"NATS_URLS=nats://example-bus.example-namespace.internal.example:4222\n" +
+				"ENVOY_ALLOW_REMOTE_NATS=1\n" +
+				"ENVOY_HOST_BRIDGE=127.0.0.1\n" +
+				"ENVOY_SUBSCRIBE_ALL_TOPICS=1\n" +
+				"ENVOY_NATS_REPLICAS=1\n",
+		},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			github := slices.Contains(c.webhooks, "github")
@@ -350,6 +365,9 @@ func TestWebhookListenerEnvIsTheEnvironmentWebhookListenerRegisters(t *testing.T
 			}
 			args = append(args, "--listen-host", c.listenHost, "--host-bridge", c.hostBridge,
 				"--nats-replicas", strconv.Itoa(c.replicas))
+			if c.subscribeAllTopics {
+				args = append(args, "--subscribe-all-topics")
+			}
 			stdout, stderr, code := run(args...)
 			require.Equal(t, 0, code, stderr)
 			require.Empty(t, stderr)
@@ -359,6 +377,7 @@ func TestWebhookListenerEnvIsTheEnvironmentWebhookListenerRegisters(t *testing.T
 			in.NatsUrls = pulumi.ToStringArray(c.natsUrls)
 			in.ListenHost, in.HostBridge, in.NatsReplicas = c.listenHost, c.hostBridge, c.replicas
 			in.Webhooks = c.webhooks
+			in.SubscribeAllTopics = c.subscribeAllTopics
 			in.MentionTrigger, in.ReviewerAppId = pulumi.StringRef(c.trigger), pulumi.StringRef(c.appID)
 			if !github {
 				in.GitHubWebhookSecretArn, in.MentionTrigger, in.ReviewerAppId = nil, nil, nil
@@ -664,6 +683,11 @@ func TestWebhookListenerEnvRefusals(t *testing.T) {
 			name: "a --nats-replicas that is not a number", usage: true,
 			args: listenerFlags([]string{"nats-replicas"}, "--nats-replicas", "two"),
 			want: "envoy-infra render webhook-listener-env: --nats-replicas: a malformed value (not echoed: a seed may have been pasted there)",
+		},
+		{
+			name: "a --subscribe-all-topics value that is not a boolean", usage: true,
+			args: listenerFlags(nil, "--subscribe-all-topics=yes"),
+			want: "envoy-infra render webhook-listener-env: --subscribe-all-topics: a malformed value (not echoed: a seed may have been pasted there)",
 		},
 		{
 			name: "an argument after the flags", usage: true,

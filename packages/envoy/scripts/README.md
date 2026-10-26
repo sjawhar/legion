@@ -69,16 +69,16 @@ guarantees no real subscriber will ever match the probe traffic.
 
 ## e2e-local.sh
 
-Runs the local listener against a throwaway `nats:2.10-alpine` container. It
+Runs the local listener against a throwaway NATS server it builds and runs
+itself (`internal/testnats/cmd/natsd`), so it needs no container runtime. It
 posts signed public GitHub fixtures and a three-paragraph direct message,
-checks the one-warning response for a never-seen GitHub repository, rejects an
-unheld role publish before claiming it for the fake session, captures the raw
+checks the one-warning response for a never-seen GitHub repository, reads the
+registered session back by id from `/v1/registry/<session_id>` and an id that
+never registered as `404 {"error":"no live session <id>"}`, rejects an unheld
+role publish before claiming it for the fake session, captures the raw
 notification envelopes, and proves both the Go prompt text and the shared
 TypeScript renderer print the full direct message once, with no separate
 summary line repeating its first line.
-
-Docker downloads it from `mirror.gcr.io/library/nats:2.10-alpine`, Google's
-Docker Hub mirror, on the first run when it is not already cached.
 
 ```bash
 packages/envoy/scripts/e2e-local.sh
@@ -92,9 +92,8 @@ The run writes its reusable evidence to `packages/envoy/out/e2e/`:
 - `rendered-go.txt` — the corresponding Go `Deliverer.Text` output
 
 Use `E2E_NATS_PORT`, `E2E_PORT`, or `E2E_SESSION_PORT` to avoid local port
-collisions, and `E2E_NATS_CONTAINER` to name the NATS container something other
-than `envoy-e2e-nats`. The script owns only that one container: it refuses to
-start when the name is taken and removes it on exit. Unlike
+collisions. The NATS server is a process of this checkout's own build, stopped
+on exit with the listener and the two fake clients. Unlike
 `probe-webhook-e2e.sh`, it has no deployment URL or secret prerequisite: it
 validates local branch behavior only. CI runs it as the `envoy-e2e-local` job of
 `.github/workflows/envoy-and-contracts.yaml` on every change to

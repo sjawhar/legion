@@ -23,11 +23,14 @@ related_issues:
 ## The rule
 
 1. **Probe a workflow key or runner fact in a sandbox repository before editing the real
-   workflow.** Push one throwaway branch (`on: push: branches: [<that branch>]`; a
-   `workflow_dispatch` would need the file on the default branch) with one workflow holding the
-   probe job and, in the same file, a control job identical but for the thing under test. Read
-   the run with `gh run view <id> --log`, record the exact lines, delete the branch; the run
-   outlives it and is the proof's link. Two pushes give the control a saved cache to restore.
+   workflow.** Push one throwaway branch (`on: push: branches: [<that branch>]`) with one
+   workflow holding the probe job and, in the same file, a control job identical but for the
+   thing under test. Read the run with `gh run view <id> --log`, record the exact lines, delete
+   the branch; the run outlives it and is the proof's link. Two pushes give the control a saved
+   cache to restore. A `workflow_dispatch` of that file on that branch works too, through the
+   API, though the file is not on the default branch: sjawhar/legion-smoke run 40157672926, a
+   push run, dispatched it with its own `GITHUB_TOKEN` as `gh workflow run <file> --ref
+   <branch>`, and GitHub created run 40157678321 (dispatch://INFRA-281, 2026-10-25).
 2. **Put every step that first executes in production on that run.** Once the sandbox exists,
    list the steps of the change that no pre-merge surface reaches — a registry write, a binary
    the runner alone can execute, an action dropped on a measurement of its sibling — and probe
@@ -52,6 +55,25 @@ related_issues:
    Debian packages extracted for OpenSSH, release binaries for jq and shellcheck) and tell every
    subagent to prepend `$HOME/.local/bin` to `PATH`, since a subagent's shell starts without
    it. A harness that needs them fails before its first case otherwise.
+   **Superseded 2026-10-24 (INFRA-221):** the worker image carries `jq`, `ssh` and `ssh-keygen` as
+   real binaries now, and the five clients `psql`, `redis-cli`, `sqlite3`, `nc` and `dig` with
+   them, so for those the `$HOME/.local` installs above are no longer the step. `shellcheck` the
+   image does not carry, and its route is a pinned runner rather than an extraction or a release
+   binary: `uvx --from shellcheck-py@0.10.0.1 shellcheck --version` prints `ShellCheck - shell
+   script analysis tool` and `version: 0.10.0`. It takes the `--from` form because the PyPI
+   distribution and the command have different names, which is the general Python form. PyYAML
+   needs no install either and goes the same way, with one difference: it is a library, not a
+   command, so the form is `uv run --with pyyaml==6.0.2 --no-project python -c "import yaml;
+   print(yaml.__version__)"`, which prints `Installed 1 package in 12ms` and then `6.0.2` in
+   0.597 s wall, with the package available to the code the run executes. The current rule for
+   anything the image lacks is `skills/legion-worker/references/tools.md`, and the item above
+   fails both conditions of its "The test: where it lands, and what it leaves resolving": the
+   installs land under `$HOME`, the container's own filesystem rather than the issue's volume, and
+   "tell every subagent to prepend `$HOME/.local/bin` to `PATH`" hands an environment to
+   processes that never named it. A hand-over crosses to the next role as a note it sets
+   deliberately instead, as
+   `docs/solutions/legion/a-port-held-in-an-issue-pod-is-a-sibling-roles-harness-move-your-run-with-the-five-port-variables-and-your-own-database-and-never-stop-the-holder-LEGION-695.md`
+   records for its harness. What the item above records is what that pod carried then.
 
 ## Evidence
 

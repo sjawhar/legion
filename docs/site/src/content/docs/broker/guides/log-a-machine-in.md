@@ -106,9 +106,9 @@ which no person approves ([Concepts](/legion/broker/concepts/#machine-login)), s
 waits on this page. A pending login that names a service is one a broker opened before services
 logged in with their tokens; the page says no one can approve it, and you may deny it or let it
 expire. A pod has no operator, so its requests for your secrets come to you for approval. When the
-broker binds `legion-daemon` to the service account its pods run as (`BROKER_SERVICES`), each of
-its pods running as that account gets every secret `legion-daemon` owns at once, with no further
-approval ([Concepts](/legion/broker/concepts/#owner-and-tier-who-may-have-which-secret)).
+broker binds `legion-daemon` to the service accounts its pods run as (`BROKER_SERVICES`), each of
+its pods running as one of those accounts gets every secret `legion-daemon` owns at once, with no
+further approval ([Concepts](/legion/broker/concepts/#owner-and-tier-who-may-have-which-secret)).
 
 Back on the machine, `agent-secrets machine login` exits 0 and the helper logs
 `machine login issued; the helper holds a launcher credential`: the machine credential the approval

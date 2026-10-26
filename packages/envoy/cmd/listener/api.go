@@ -407,6 +407,8 @@ func releaseExpiredRoleClaim(registry roleClaimResolver, role, sessionID string,
 // or fails live; any other error is a read that did not answer, on which nothing is taken from it.
 // The bucket read gets roleHolderReadTimeout, so a lookup that cannot read the bucket answers its
 // 500, and a soft claim its 503, inside the listener's 10 s HTTP write timeout.
+// It is also the read behind the per-session route GET /v1/registry/<session_id>, whose caller is
+// likewise about to decide that a session is gone.
 func roleHolderSession(sessions *session.SessionRegistry, sessionID string, live func(session.SessionEntry) bool) (session.SessionEntry, error) {
 	if entry, err := sessions.Get(sessionID); err == nil && live(entry) {
 		return entry, nil
@@ -653,7 +655,13 @@ func publishHandler(d *listenerDeps) http.HandlerFunc {
 }
 
 // sessionInfo is the joined view of an Interest (topics, dir, machine) and a
-// SessionEntry (port). Returned by GET /v1/sessions.
+// SessionEntry (port). Returned by GET /v1/sessions. Its host is where the session runs, its
+// recorded host or else MachineID (HostOrMachine). Only the session's owner delivers to it
+// (session.Deliverer): the listener its stored subscription names, the one store.Registry.Match
+// delivers on, else the one MachineID names. The owner reaches a session registered through it at
+// its host bridge when one is set, else at the recorded host, else at host.docker.internal; a
+// session that re-registered through another listener is reached at its recorded host, else at
+// MachineID. Any other listener leaves inbox messages to the owner silently.
 type sessionInfo struct {
 	SessionID      string   `json:"session_id"`
 	MachineID      string   `json:"machine_id"`
@@ -667,6 +675,30 @@ type sessionInfo struct {
 	Roles          []string `json:"roles"`
 	UpdatedAt      int64    `json:"updated_at"`
 	LastSeen       int64    `json:"last_seen"`
+}
+
+// sessionInfoFor joins one session entry with its interests (its topics, and the roles those topics
+// name), so a row of GET /v1/sessions and the single answer of GET /v1/registry/<session_id> are
+// one shape built one way. A session the interest registry holds nothing for keeps its empty topics
+// and roles: a session that registered and subscribed to nothing is not an error here.
+func sessionInfoFor(registry *store.Registry, sessionID string, entry session.SessionEntry) sessionInfo {
+	info := sessionInfo{
+		SessionID:      sessionID,
+		MachineID:      entry.MachineID,
+		Host:           entry.HostOrMachine(),
+		Dir:            entry.Dir,
+		Port:           entry.Port,
+		Title:          entry.Title,
+		Capabilities:   append([]string{}, entry.Capabilities...),
+		SelfSubscribed: entry.SelfSubscribed,
+		UpdatedAt:      entry.UpdatedAt,
+		LastSeen:       entry.UpdatedAt,
+	}
+	if interest, err := registry.Get(sessionID); err == nil {
+		info.Topics = interest.Topics
+		info.Roles = roleNames(interest.Topics)
+	}
+	return info
 }
 
 // sessionsHandler returns all live sessions by iterating the session registry
@@ -690,25 +722,47 @@ func sessionsHandler(registry *store.Registry, sessions *session.SessionRegistry
 			if !strings.Contains(entry.Dir, dirFilter) || !strings.Contains(entry.Title, titleFilter) {
 				continue
 			}
-			info := sessionInfo{
-				SessionID:      entry.SessionID,
-				MachineID:      entry.MachineID,
-				Host:           entry.HostOrMachine(),
-				Dir:            entry.Dir,
-				Port:           entry.Port,
-				Title:          entry.Title,
-				Capabilities:   append([]string{}, entry.Capabilities...),
-				SelfSubscribed: entry.SelfSubscribed,
-				UpdatedAt:      entry.UpdatedAt,
-				LastSeen:       entry.UpdatedAt,
-			}
-			if interest, err := registry.Get(entry.SessionID); err == nil {
-				info.Topics = interest.Topics
-				info.Roles = roleNames(interest.Topics)
-			}
-			result = append(result, info)
+			result = append(result, sessionInfoFor(registry, entry.SessionID, entry.SessionEntry))
 		}
 		writeJSON(w, http.StatusOK, result)
+	}
+}
+
+// sessionEntryHandler answers GET /v1/registry/<session_id>, the one question a caller holding a
+// session id asks before it addresses that session: is this session live, and how is it named? The
+// read goes through roleHolderSession, so a session this listener's cache does not hold yet — the
+// session bucket was recreated and the watcher is still refilling it, or another listener
+// registered the session a moment ago — is read from the bucket itself instead of being reported
+// gone. Only the bucket's word that the key is absent is a 404, and its wording is load-bearing:
+// Dispatch classifies a delivery failure on the "no live session " prefix, as the send route's own
+// 404 writes it. An id NATS refuses as a key is the caller's to fix, and a read that did not answer
+// is a 503 to retry — never a session a caller may take for ended.
+func sessionEntryHandler(d *listenerDeps) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		sessionID := strings.TrimPrefix(r.URL.Path, "/v1/registry/")
+		if sessionID == "" {
+			writeJSONError(w, http.StatusBadRequest, "session_id is required", "session_id")
+			return
+		}
+		entry, err := roleHolderSession(d.sessions, sessionID, registered)
+		switch {
+		case errors.Is(err, bus.ErrRefused):
+			// Refresh reports a refused key as a missing one too, so this test comes first:
+			// an id NATS will never hold is answered as the bad input it is, not as a 404.
+			writeNATSError(w, err, http.StatusServiceUnavailable, err.Error())
+		case errors.Is(err, nats.ErrKeyNotFound):
+			writeJSONError(w, http.StatusNotFound, fmt.Sprintf("no live session %s", sessionID))
+		case err != nil:
+			w.Header().Set("Retry-After", "1")
+			writeJSONError(w, http.StatusServiceUnavailable,
+				"envoy: the message bus did not answer: "+err.Error())
+		default:
+			writeJSON(w, http.StatusOK, sessionInfoFor(d.registry, sessionID, entry))
+		}
 	}
 }
 
@@ -1017,6 +1071,14 @@ func subscribeHandler(d *listenerDeps, machineID string, logger *logging.Logger)
 			writeJSONError(w, http.StatusBadRequest, "session_id is required", "session_id")
 			return
 		}
+		// A session on a serving port is reached at the host it records (session.Deliverer), so a
+		// host that could change the delivery URL's authority or path is refused before anything is
+		// written. An absent host is an older plugin's, and a registration with no port is never
+		// dialled, so neither is checked.
+		if body.Port > 0 && body.Host != "" && !session.ValidHost(body.Host) {
+			writeJSONError(w, http.StatusBadRequest, "host is not a host name or address", "host")
+			return
+		}
 		logger.Info("listener subscribe", slog.String("session_id", body.SessionID), slog.Any("topics", body.Topics), slog.Int("port", body.Port), slog.Bool("self_subscribed", body.SelfSubscribed), slog.String("dir", body.Dir))
 		item, err := d.registry.Upsert(store.Interest{
 			SessionID: body.SessionID,
@@ -1099,19 +1161,7 @@ func registerV1Routes(v1 *http.ServeMux, d *listenerDeps, machineID string, logg
 	})
 	v1.HandleFunc("/v1/roles/set", roleSetHandler(d, machineID))
 	v1.HandleFunc("/v1/roles/", roleGetHandler(d))
-	v1.HandleFunc("/v1/registry/", func(w http.ResponseWriter, r *http.Request) {
-		sessionID := strings.TrimPrefix(r.URL.Path, "/v1/registry/")
-		if sessionID == "" {
-			writeJSONError(w, http.StatusBadRequest, "session_id is required", "session_id")
-			return
-		}
-		entry, err := d.sessions.Get(sessionID)
-		if err != nil {
-			writeJSONError(w, http.StatusNotFound, "not found")
-			return
-		}
-		writeJSON(w, http.StatusOK, entry)
-	})
+	v1.HandleFunc("/v1/registry/", sessionEntryHandler(d))
 
 	v1.Handle("/v1/interests/", adminInterestsHandler(d.registry))
 	v1.Handle("/v1/sessions", sessionsHandler(d.registry, d.sessions))

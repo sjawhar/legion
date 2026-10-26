@@ -244,20 +244,22 @@ func natsStartScript(args []string, stdout, stderr io.Writer) int {
 func webhookListenerEnv(args []string, stdout, stderr io.Writer) int {
 	s := newSubcommand("webhook-listener-env",
 		"--machine-id <id> --nats-url <url>... [--webhook <name>]... [--reviewer-app-id <id>] [--mention-trigger <t>] "+
-			"--listen-host <h> --host-bridge <h> --nats-replicas <n>", stderr,
+			"--listen-host <h> --host-bridge <h> --nats-replicas <n> [--subscribe-all-topics]", stderr,
 		map[string]string{
-			"machineId":      "machine-id",
-			"natsUrls":       "nats-url",
-			"webhooks":       "webhook",
-			"reviewerAppId":  "reviewer-app-id",
-			"mentionTrigger": "mention-trigger",
-			"listenHost":     "listen-host",
-			"hostBridge":     "host-bridge",
-			"natsReplicas":   "nats-replicas",
+			"machineId":          "machine-id",
+			"natsUrls":           "nats-url",
+			"webhooks":           "webhook",
+			"reviewerAppId":      "reviewer-app-id",
+			"mentionTrigger":     "mention-trigger",
+			"listenHost":         "listen-host",
+			"hostBridge":         "host-bridge",
+			"natsReplicas":       "nats-replicas",
+			"subscribeAllTopics": "subscribe-all-topics",
 		})
 	var machineID, reviewerAppID, mentionTrigger, listenHost, hostBridge string
 	var natsURLs, webhooks stringList
 	var natsReplicas int
+	var subscribeAllTopics bool
 	s.fs.StringVar(&machineID, "machine-id", "", "machineId: the listener's name, ENVOY_MACHINE_ID")
 	s.fs.Var(&natsURLs, "nats-url", "natsUrls: one NATS server's URL; give it once per URL, in order")
 	s.fs.Var(&webhooks, "webhook", "webhooks: one webhook the listener serves; this version takes none, or exactly github, then slack")
@@ -266,18 +268,21 @@ func webhookListenerEnv(args []string, stdout, stderr io.Writer) int {
 	s.fs.StringVar(&listenHost, "listen-host", "", "listenHost: ENVOY_LISTEN_HOST")
 	s.fs.StringVar(&hostBridge, "host-bridge", "", `hostBridge: ENVOY_HOST_BRIDGE; "" leaves it unset`)
 	s.fs.IntVar(&natsReplicas, "nats-replicas", 0, "natsReplicas: ENVOY_NATS_REPLICAS")
+	s.fs.BoolVar(&subscribeAllTopics, "subscribe-all-topics", false,
+		"subscribeAllTopics: ENVOY_SUBSCRIBE_ALL_TOPICS=1, only for a NATS user whose grant allows a notifications.> subscribe (HostPermissions); unset leaves it unset")
 	given, code, stop := s.parse(args, "machine-id", "listen-host", "host-bridge", "nats-replicas")
 	if stop {
 		return code
 	}
 
 	env := rendering.ListenerEnv{
-		MachineID:    machineID,
-		NatsUrls:     natsURLs,
-		ListenHost:   listenHost,
-		HostBridge:   hostBridge,
-		NatsReplicas: natsReplicas,
-		Webhooks:     webhooks,
+		MachineID:          machineID,
+		NatsUrls:           natsURLs,
+		ListenHost:         listenHost,
+		HostBridge:         hostBridge,
+		SubscribeAllTopics: subscribeAllTopics,
+		NatsReplicas:       natsReplicas,
+		Webhooks:           webhooks,
 	}
 	if given["reviewer-app-id"] {
 		env.ReviewerAppId = &reviewerAppID

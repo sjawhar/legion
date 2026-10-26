@@ -87,6 +87,7 @@ A decision a human must make is an `:::ask{#slug}` block at the end of the secti
 ## Claim the issue before you work it
 
 - Before you implement, `dispatch claim --issue <KEY>` and `dispatch issue-update --issue <KEY> --status in_progress`. Release with `--release` when you finish, hand over or switch. Closing releases it.
+- Claiming does not deliver the issue's comments to you. In the same turn, route the issue to your session, `dispatch issue-update --issue <KEY> --route session:<your session id>`, or subscribe to it with `envoy_subscribe notifications.dispatch.issue.<KEY>.>`. When you release, clear the route with `--route ''`. Never route an issue with the `legion` label, or under one: Legion's roles work it, not your session.
 - Reading, commenting, asking or gating a PR claims nothing.
 - `409 ISSUE_CLAIMED`: someone else holds it. Never work it in parallel. Refusals and takeovers: [issues.md](skill://dispatch/references/issues.md).
 
@@ -135,7 +136,7 @@ EOF
 
 - Attach every architectural issue to the components it changes. Attach the root before you decompose it: children inherit.
 - `--components-json '{"mode":"explicit","ids":["web"]}'`, `'{"mode":"none","reason":"hiring, not code"}'` (only for non-architectural work, with a concrete reason), or `'{"mode":"inherit"}'`.
-- Component ids: each non-external `components[].id` from `GET /api/v1/projects/{key}/architecture`, or the file names under `.dispatch/architecture/` in its source repository. Others are refused `COMPONENTS_INPUT`. A closed issue can be classified without reopening.
+- Component ids: each non-external `components[].id` from `GET /api/v1/projects/{key}/architecture`, or the file names under `.dispatch/architecture/` in any of the project's source repositories. A project may import from several; ids are project-wide, so one issue can name components of different sources. Others are refused `COMPONENTS_INPUT`. A closed issue can be classified without reopening.
 - Change code and `.dispatch/architecture/<id>.md` in the same review. A stale model: `dispatch architecture-sync` ([issues.md](skill://dispatch/references/issues.md#syncing-a-projects-architecture-model)).
 
 ## Close what you opened

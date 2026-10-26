@@ -36,13 +36,16 @@ Three facts govern every thread, whoever opened it.
     it accepted to the implementer, who resolves them. List the pull request's threads:
 
     ```bash
-    gh api graphql -f query='query($o:String!,$r:String!,$n:Int!){repository(owner:$o,name:$r){pullRequest(number:$n){reviewThreads(first:100){nodes{id isResolved comments(last:1){nodes{author{login} body}}}}}}}' -F o=<owner> -F r=<repo> -F n=<number>
+    gh api graphql --paginate -f query='query($o:String!,$r:String!,$n:Int!,$endCursor:String){repository(owner:$o,name:$r){pullRequest(number:$n){reviewThreads(first:100,after:$endCursor){pageInfo{hasNextPage endCursor} nodes{id isResolved comments(last:1){nodes{author{login} body}}}}}}}' -F o=<owner> -F r=<repo> -F n=<number>
     ```
+
+    `--paginate` follows the thread pages, which it prints as one JSON object per page, so add
+    `--slurp` when you want a single document; `comments(last:1)` needs no paging of its own.
 
     Reply on each thread you answer, then tell the implementer the node ids of exactly the threads
     you accepted — a bot's findings you adjudicated — never one you have not read: an
     `envoy_publish` to the implementer's role topic (it is live on the issue and answers while you
-    wait; `skill://legion-worker` "Asking another role" has the topic), or your review body, which
+    wait; its topic is yours from the `Legion addressing` line with `-implementer` as the last part), or your review body, which
     it reads at its next round. The implementer resolves exactly those with its own `gh`. GitHub
     cannot tell a CI bot from a person whose `gh` is routed to an App, so such a thread may be a
     person's finding: accept it only when the finding itself is settled (a genuine Minor is settled

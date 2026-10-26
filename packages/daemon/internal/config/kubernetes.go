@@ -21,6 +21,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/validation"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/ompsessions"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 )
 
@@ -65,10 +66,13 @@ type Kubernetes struct {
 	// AgentSecrets is the secrets broker every pod is enrolled with (runtime.kubernetes.agent_secrets);
 	// nil when the deployment enrolls none, in which case pods carry no token for it.
 	AgentSecrets *AgentSecretsConfig
-	// SessionDSNSecret is the providers Secret's key that holds the postgres:// URL of the database
-	// every pod's Oh My Pi keeps its sessions in (`session_store: postgres`, `session_dsn_secret`);
-	// "" under `session_store: pvc`, the default, where each session is a file on the issue's volume.
-	SessionDSNSecret string
+	// SessionStore is `runtime.kubernetes.session_store`, settled: where every pod's Oh My Pi keeps
+	// its sessions. The database whose whole postgres:// URL the providers Secret key
+	// `session_dsn_secret` holds under `postgres`; the Cloud SQL database `session_database` names,
+	// which each pod signs in to as itself and no password reaches, under `cloudsql-iam`. The key is
+	// required under `runtime: kubernetes` and `pvc` is refused (readSessionStore), so the settled
+	// store always keeps sessions in a database (InDatabase): no issue disk holds a session.
+	SessionStore ompsessions.Store
 	// Plugins is `runtime.kubernetes.plugins`: the exact pi-legion/pi-envoy pair a stale-plugin
 	// relaunch installs into a kept pod, when the file names one. Nil when the file sets none and
 	// PluginsFromBinary is false: the daemon then knows no plugin source
@@ -441,7 +445,7 @@ func readKubernetes(value *yaml.Node) (*Kubernetes, error) {
 	}
 	fields, err := members(value, kubernetesKey, "namespace", "image", "storage_class", "issue_volume", "tree_volume",
 		"kubeconfig", "context", "scheduling", "resources", "gateway", "pod", "session_store", "session_dsn_secret",
-		"role_profiles", "agent_secrets", "plugins", "repository_cache", "setup")
+		"session_database", "role_profiles", "agent_secrets", "plugins", "repository_cache", "setup")
 	if err != nil {
 		return nil, err
 	}
@@ -484,7 +488,7 @@ func readKubernetes(value *yaml.Node) (*Kubernetes, error) {
 	if block.Context != "" && block.Kubeconfig == "" {
 		return nil, errors.New("runtime.kubernetes.context names a kubeconfig context, so it requires runtime.kubernetes.kubeconfig")
 	}
-	if block.SessionDSNSecret, err = readSessionStore(fields["session_store"], fields["session_dsn_secret"]); err != nil {
+	if block.SessionStore, err = readSessionStore(fields["session_store"], fields["session_dsn_secret"], fields["session_database"]); err != nil {
 		return nil, err
 	}
 	if block.Scheduling, err = readScheduling(fields["scheduling"]); err != nil {
@@ -1110,34 +1114,106 @@ func requestsUnderLimits(prefix string, settled RoleResources) error {
 // secretDataKey is what Kubernetes accepts as a Secret's data key.
 var secretDataKey = regexp.MustCompile(`^[-._a-zA-Z0-9]+$`)
 
-// readSessionStore reads `session_store` and `session_dsn_secret`: the providers Secret's key that
-// holds the session database's URL under `postgres`, "" under `pvc`, the default, where each
-// session is a file on the issue's volume. postgres names its key, and pvc names none: an inert key
-// is refused, never ignored.
-func readSessionStore(store, dsnSecret *yaml.Node) (string, error) {
-	name, err := readString(store, kubernetesKey+".session_store")
+const (
+	sessionStoreKey    = kubernetesKey + ".session_store"
+	sessionDSNKey      = kubernetesKey + ".session_dsn_secret"
+	sessionDatabaseKey = kubernetesKey + ".session_database"
+)
+
+// readSessionStore reads `session_store` with the one key its kind carries: `session_dsn_secret`,
+// the providers Secret's key holding the session database's whole URL, under `postgres`;
+// `session_database`, the Cloud SQL instance, database and IAM login each pod signs in as, under
+// `cloudsql-iam`. Each kind names its own key and refuses the other's: an inert key is refused,
+// never ignored. The store is required, and must keep sessions in a database: `pvc`, which an
+// omitted `session_store` also settles to, is refused rather than taken as a silent default
+// (INFRA-80). It kept each session as a file on the issue's disk, and that disk is now the pod's
+// own generic ephemeral volume, deleted with it: the file would die with the pod, the next
+// launch's resume would fail on the missing file (internal/launcher's sessionWritten), and three
+// such failures retire the claim.
+func readSessionStore(store, dsnSecret, database *yaml.Node) (ompsessions.Store, error) {
+	name, err := readString(store, sessionStoreKey)
 	if err != nil {
-		return "", err
+		return ompsessions.Store{}, err
 	}
-	switch {
-	case name == nil || *name == "pvc":
-		if dsnSecret != nil {
-			return "", errors.New("runtime.kubernetes.session_dsn_secret is not used when runtime.kubernetes.session_store is pvc; remove it")
-		}
-		return "", nil
-	case *name == "postgres":
+	kind := ompsessions.StoreVolume
+	if name != nil {
+		kind = ompsessions.StoreKind(*name)
+	}
+	switch kind {
+	case ompsessions.StorePostgres, ompsessions.StoreCloudSQLIAM:
+	case ompsessions.StoreVolume:
+		return ompsessions.Store{}, errors.New(sessionStoreKey + " must name a store that keeps sessions in a database, and is required (INFRA-80):" +
+			" an issue pod's disk is the pod's own ephemeral volume, deleted with the pod, so a session kept as a file on it ('pvc', also what an omitted session_store means) dies with it," +
+			" the next launch's resume fails on the missing file (internal/launcher's sessionWritten), and three such failures retire the claim")
 	default:
-		return "", errors.New("runtime.kubernetes.session_store must be 'pvc' or 'postgres'")
+		// A name this runtime does not take is told the two it does, and not `pvc`: the kind above
+		// refuses that one by name with its own reason, and a list of accepted values that holds a
+		// refused one sends an operator who mistyped to a value the next line would refuse again.
+		return ompsessions.Store{}, errors.New(sessionStoreKey + " must be 'postgres' or 'cloudsql-iam'")
 	}
-	key, err := requiredString(dsnSecret, kubernetesKey+".session_dsn_secret",
-		" with runtime.kubernetes.session_store postgres: the key of the providers Secret that holds the session database's postgres:// URL")
+	if dsnSecret != nil && kind != ompsessions.StorePostgres {
+		return ompsessions.Store{}, inertSessionKey(sessionDSNKey, kind)
+	}
+	if database != nil && kind != ompsessions.StoreCloudSQLIAM {
+		return ompsessions.Store{}, inertSessionKey(sessionDatabaseKey, kind)
+	}
+	settled := ompsessions.Store{Kind: kind}
+	switch kind {
+	case ompsessions.StorePostgres:
+		if settled.DSNSecret, err = requiredString(dsnSecret, sessionDSNKey,
+			" with runtime.kubernetes.session_store postgres: the key of the providers Secret that holds the session database's postgres:// URL"); err != nil {
+			return ompsessions.Store{}, err
+		}
+		if !secretDataKey.MatchString(settled.DSNSecret) {
+			return ompsessions.Store{}, fmt.Errorf("%s %q is not a Secret data key ([-._a-zA-Z0-9]+)", sessionDSNKey, settled.DSNSecret)
+		}
+	case ompsessions.StoreCloudSQLIAM:
+		if settled.Database, err = readSessionDatabase(database); err != nil {
+			return ompsessions.Store{}, err
+		}
+	}
+	return settled, nil
+}
+
+// inertSessionKey refuses a session-store key the chosen kind does not use, naming both.
+func inertSessionKey(key string, kind ompsessions.StoreKind) error {
+	return fmt.Errorf("%s is not used when %s is %s; remove it", key, sessionStoreKey, kind)
+}
+
+// readSessionDatabase reads `session_database` under `cloudsql-iam`: the instance's connection
+// name, project:region:instance or domain:project:region:instance, which the pod's proxy dials
+// (internal/sessionproxy) and which must pass ompsessions.ValidInstance, the connector's own rule;
+// the database in it; and the IAM login the pod signs in as. All three are required, since no pod
+// can reach the database without them.
+func readSessionDatabase(value *yaml.Node) (ompsessions.Database, error) {
+	if value == nil {
+		return ompsessions.Database{}, errors.New(sessionDatabaseKey +
+			" is required with runtime.kubernetes.session_store cloudsql-iam: the Cloud SQL instance, the database in it, and the IAM login each pod signs in as")
+	}
+	if value.Kind != yaml.MappingNode {
+		return ompsessions.Database{}, errors.New(sessionDatabaseKey + " must be a mapping")
+	}
+	fields, err := members(value, sessionDatabaseKey, "instance", "name", "user")
 	if err != nil {
-		return "", err
+		return ompsessions.Database{}, err
 	}
-	if !secretDataKey.MatchString(key) {
-		return "", fmt.Errorf("runtime.kubernetes.session_dsn_secret %q is not a Secret data key ([-._a-zA-Z0-9]+)", key)
+	var database ompsessions.Database
+	if database.Instance, err = requiredString(fields["instance"], sessionDatabaseKey+".instance",
+		": the Cloud SQL instance the pod's session proxy dials"); err != nil {
+		return ompsessions.Database{}, err
 	}
-	return key, nil
+	if database.Name, err = requiredString(fields["name"], sessionDatabaseKey+".name",
+		": the database in that instance"); err != nil {
+		return ompsessions.Database{}, err
+	}
+	if database.User, err = requiredString(fields["user"], sessionDatabaseKey+".user",
+		": the IAM login each pod signs in as"); err != nil {
+		return ompsessions.Database{}, err
+	}
+	if !ompsessions.ValidInstance(database.Instance) {
+		return ompsessions.Database{}, fmt.Errorf("%s.instance %q must be the Cloud SQL instance's connection name, project:region:instance, or domain:project:region:instance for a domain-scoped project", sessionDatabaseKey, database.Instance)
+	}
+	return database, nil
 }
 
 // readQuantity reads a positive Kubernetes quantity as the file wrote it, "" when unset. A bare

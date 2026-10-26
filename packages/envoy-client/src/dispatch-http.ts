@@ -13,6 +13,7 @@ import type {
   ArtifactVersionText,
   Ask,
   AskRead,
+  ClaimedIssue,
   Comment,
   CommentRead,
   CommentWriteResponse,
@@ -36,6 +37,7 @@ import type {
   IssueRead,
   IssueReferences,
   IssueRouteStatus,
+  IssueSummary,
   IssueSummaryPage,
   Message,
   MessageRead,
@@ -49,6 +51,7 @@ import type {
   Version,
   WhoamiResponse,
 } from "@legion/contracts";
+import { DEFAULT_ISSUE_READ_EVENTS } from "@legion/contracts";
 
 import { textHead } from "./ask-answer";
 
@@ -122,6 +125,18 @@ function isJson(response: Response): boolean {
   return response.headers.get("content-type")?.includes("application/json") ?? false;
 }
 
+/** Whether `error` is a server's answer that it has no route for the request (`404 NOT_FOUND`,
+ *  "no route for …"), as a server older than a route answers it; a `404 NOT_FOUND` for a
+ *  resource the server does not know says "not found" instead. */
+function isNoRoute(error: unknown): boolean {
+  return (
+    error instanceof DispatchServiceError &&
+    error.status === 404 &&
+    error.code === "NOT_FOUND" &&
+    error.message.startsWith("no route for ")
+  );
+}
+
 export interface ListIssuesOptions {
   readonly project?: string;
   readonly status?: string;
@@ -152,6 +167,16 @@ export type GraphReferencesQuery = ({ readonly to: string } | { readonly from: s
   /** events.id; keeps mentions introduced after it and excludes structural edges. */
   readonly since?: number;
 };
+
+/** Which of an issue's events `read` returns, oldest first: the newest `events`, or every one. */
+export interface IssueReadOptions {
+  /** `DEFAULT_ISSUE_READ_EVENTS` when absent or undefined. */
+  readonly events?: number | "all" | undefined;
+}
+
+/** The most events one `GET /api/v1/issues/{key}/events` page holds: Dispatch refuses a larger
+ *  `limit` (`parseEventLimit` in packages/envoy/internal/dispatch/api/events.go). */
+const ISSUE_EVENTS_PAGE_MAX = 200;
 
 export const DISPATCH_TOOL_DEADLINE_MS = 60_000;
 
@@ -192,6 +217,22 @@ function whyNotAPage(answer: unknown): string | undefined {
     `${what}. Retrying will not help: the same request gets the same answer until that ` +
     "Dispatch is upgraded or fixed."
   );
+}
+
+/**
+ * Why `answer` is not the bare array `listAllIssues` asked for. A page here is the telling case:
+ * it means Dispatch paged a request that carried neither `limit` nor `offset`, so the caller did
+ * not get the exact set it needs. Text looks like a proxy in the way, which a retry can get past.
+ */
+function whyNotAnArray(answer: unknown): string {
+  if (typeof answer === "string")
+    return `text that is not JSON, ${GATEWAY_PAGE}, so a retry may succeed`;
+  if (answer === null) return "null";
+  if (typeof answer !== "object") return `a ${typeof answer}`;
+  if ("issues" in answer && Array.isArray(answer.issues)) {
+    return "a page, so this Dispatch pages a request that carries no limit and no offset";
+  }
+  return "an object that is not the listing";
 }
 
 /**
@@ -359,6 +400,25 @@ export class DispatchClient {
     );
   }
 
+  /**
+   * Every issue the filters match, in one read: `GET /api/v1/issues` with neither `limit` nor
+   * `offset`, which Dispatch answers as a bare array rather than a page (`parseIssuePage` returns
+   * no page when the query carries neither). A caller whose own writes move issues out of what it
+   * filtered on cannot walk offsets safely, because a row that shifts across a page boundary is
+   * served twice or never; this read is the exact set at one moment. Any answer that is not an
+   * array is refused, naming what arrived: a page here means a Dispatch that still pages a request
+   * carrying no paging parameters.
+   */
+  async listAllIssues(options: ListIssuesOptions): Promise<IssueSummary[]> {
+    const path = ["api", "v1", "issues"];
+    const query = { ...options };
+    const answer: unknown = await this.#json("GET", path, undefined, query);
+    if (Array.isArray(answer)) return answer as IssueSummary[];
+    throw new Error(
+      `GET ${this.#url(path, query)} asked for the unpaged listing and got ${whyNotAnArray(answer)}.`
+    );
+  }
+
   async listProjectArtifacts(project: string, unlinked = false): Promise<Artifact[]> {
     return this.#json(
       "GET",
@@ -419,8 +479,11 @@ export class DispatchClient {
 
   /** `POST /api/v1/issues/{key}/claim`: this session takes the issue. 409 ISSUE_CLAIMED when a
    *  running session, or any human, holds it; 409 CLAIM_CONTENDED when the holder changed twice
-   *  while the request ran, so nothing was applied. */
-  async claimIssue(issue: string, input: { readonly actor?: Actor } = {}): Promise<Issue> {
+   *  while the request ran, so nothing was applied. The answer's `legion_managed_status` says
+   *  whether the Legion daemon owns this issue's status — true when the issue carries the
+   *  `legion` label in any case or sits under one that does, where a status anyone else writes
+   *  is undone. */
+  async claimIssue(issue: string, input: { readonly actor?: Actor } = {}): Promise<ClaimedIssue> {
     return this.#json(
       "POST",
       ["api", "v1", "issues", await this.#resolveIssue(issue), "claim"],
@@ -429,8 +492,12 @@ export class DispatchClient {
   }
 
   /** `DELETE /api/v1/issues/{key}/claim`: give up the claim, or clear one whose session is
-   *  gone. The status does not move. It answers the same two 409s, and has no force. */
-  async releaseIssueClaim(issue: string, input: { readonly actor?: Actor } = {}): Promise<Issue> {
+   *  gone. The status does not move. It answers the same two 409s, has no force, and carries
+   *  `legion_managed_status` as `claimIssue` does. */
+  async releaseIssueClaim(
+    issue: string,
+    input: { readonly actor?: Actor } = {}
+  ): Promise<ClaimedIssue> {
     return this.#json(
       "DELETE",
       ["api", "v1", "issues", await this.#resolveIssue(issue), "claim"],
@@ -438,7 +505,7 @@ export class DispatchClient {
     );
   }
 
-  async getIssueEvents(issue: string, after = 0, limit = 200): Promise<Event[]> {
+  async getIssueEvents(issue: string, after = 0, limit = ISSUE_EVENTS_PAGE_MAX): Promise<Event[]> {
     return this.#json(
       "GET",
       ["api", "v1", "issues", await this.#resolveIssue(issue), "events"],
@@ -446,10 +513,38 @@ export class DispatchClient {
       { after, limit }
     );
   }
-  async read(issueReference: string): Promise<IssueRead> {
+
+  /** The issue and its newest `options.events` events (every one for `"all"`), oldest first, up
+   *  to the issue's `last_seq` as read. An issue's events are numbered 1 to `last_seq`, so the
+   *  newest N are the N after `last_seq - N`, read a page of at most `ISSUE_EVENTS_PAGE_MAX` at a
+   *  time, and an event written after the issue was read is left to the next read. */
+  async read(issueReference: string, options: IssueReadOptions = {}): Promise<IssueRead> {
     const issueKey = await this.#resolveIssue(issueReference);
     const issue = await this.getIssue(issueKey);
-    const events = await this.getIssueEvents(issueKey, Math.max(0, issue.last_seq - 10), 10);
+    const requested = options.events;
+    const count =
+      requested === undefined
+        ? DEFAULT_ISSUE_READ_EVENTS
+        : requested === "all"
+          ? issue.last_seq
+          : Math.min(requested, issue.last_seq);
+    const events: Event[] = [];
+    let after = Math.max(0, issue.last_seq - count);
+    while (events.length < count) {
+      const limit = Math.min(ISSUE_EVENTS_PAGE_MAX, count - events.length);
+      const page = await this.getIssueEvents(issueKey, after, limit);
+      events.push(...page);
+      const last = page.at(-1);
+      // A short page is the end of the issue's events; a full one ends the read once it holds
+      // `count`. Only a page the read goes past must have moved past `after`.
+      if (page.length < limit || last === undefined || events.length >= count) break;
+      if (last.seq <= after) {
+        throw new Error(
+          `GET /api/v1/issues/${issueKey}/events?after=${after} answered no event after seq ${after}`
+        );
+      }
+      after = last.seq;
+    }
     return { issue, events };
   }
 
@@ -494,30 +589,95 @@ export class DispatchClient {
     return this.#json("GET", ["api", "v1", "projects"]);
   }
 
-  /** `POST /api/v1/projects/{key}/architecture-source/sync`: import the
-   *  project's architecture model now; the row's `last_error` says whether the
-   *  import replaced the model or the previous one stays up. */
-  async syncArchitectureSource(project: string): Promise<ArchitectureSource> {
-    return this.#json("POST", ["api", "v1", "projects", project, "architecture-source", "sync"]);
-  }
-
-  /** `GET /api/v1/projects/{key}/architecture-source`: the configured source row, or `null`
-   *  when the project has none. Having none is an answer, not a failure: a current server says
-   *  `200 null`, an older one `404 SOURCE_NOT_FOUND`, and a client meets both while a rollout
-   *  mixes versions. Any other failure, a different 404 included, throws. */
-  async getArchitectureSource(project: string): Promise<ArchitectureSource | null> {
+  /** `GET /api/v1/projects/{key}/architecture-sources`: the project's architecture sources, one
+   *  per repository, in the order the project added them; `[]` when it has none.
+   *
+   *  The plugin and the server ship separately, so a rollout mixes versions (#1522). A server
+   *  older than this route has no route for it (`404 NOT_FOUND`, "no route for …"), so the client
+   *  asks its `GET /api/v1/projects/{key}/architecture-source` instead: `200 null` (or a pre-#1522
+   *  `404 SOURCE_NOT_FOUND`) is `[]`, and a row is that one source. Any other answer throws, so a
+   *  project the server does not know (`404 NOT_FOUND`, "not found") is still an error. */
+  async listArchitectureSources(project: string): Promise<ArchitectureSource[]> {
     try {
-      return await this.#json("GET", ["api", "v1", "projects", project, "architecture-source"]);
+      return await this.#json("GET", ["api", "v1", "projects", project, "architecture-sources"]);
+    } catch (error) {
+      if (!isNoRoute(error)) throw error;
+    }
+    try {
+      const source: ArchitectureSource | null = await this.#json("GET", [
+        "api",
+        "v1",
+        "projects",
+        project,
+        "architecture-source",
+      ]);
+      return source === null ? [] : [source];
     } catch (error) {
       if (
         error instanceof DispatchServiceError &&
         error.status === 404 &&
         error.code === "SOURCE_NOT_FOUND"
       ) {
-        return null;
+        return [];
       }
       throw error;
     }
+  }
+
+  /** `POST /api/v1/projects/{key}/architecture-sources/sync`: import every source of the
+   *  project now. Every source is attempted, and each row's `last_error` says whether its
+   *  import replaced its components or its previous ones stay up. 404 SOURCE_NOT_FOUND when the
+   *  project has no source.
+   *
+   *  The plugin and the server ship separately, so a rollout mixes versions (#1522). A server
+   *  older than this route has no route for it (`404 NOT_FOUND`, "no route for …"), so the client
+   *  asks its `POST /api/v1/projects/{key}/architecture-source/sync` instead, which imports that
+   *  server's one source, and returns the row as a one-element array. Any other answer of either
+   *  call throws as is, so that server's `404 SOURCE_NOT_FOUND` for a project with no source is
+   *  still an error. */
+  async syncArchitectureSources(project: string): Promise<ArchitectureSource[]> {
+    try {
+      return await this.#json("POST", [
+        "api",
+        "v1",
+        "projects",
+        project,
+        "architecture-sources",
+        "sync",
+      ]);
+    } catch (error) {
+      if (!isNoRoute(error)) throw error;
+    }
+    const source: ArchitectureSource = await this.#json("POST", [
+      "api",
+      "v1",
+      "projects",
+      project,
+      "architecture-source",
+      "sync",
+    ]);
+    return [source];
+  }
+
+  /** `POST /api/v1/projects/{key}/architecture-sources/{owner}/{repo}/sync`: import the one
+   *  source `repo` (`owner/name`) now; the row's `last_error` says whether the import replaced
+   *  its components or its previous ones stay up. 404 SOURCE_NOT_FOUND when the project has no
+   *  such source. */
+  async syncArchitectureSource(project: string, repo: string): Promise<ArchitectureSource> {
+    const [owner, name, ...rest] = repo.split("/");
+    if (!owner || !name || rest.length > 0) {
+      throw new Error(`repository must be owner/name, got ${JSON.stringify(repo)}`);
+    }
+    return this.#json("POST", [
+      "api",
+      "v1",
+      "projects",
+      project,
+      "architecture-sources",
+      owner,
+      name,
+      "sync",
+    ]);
   }
 
   async resolveAsk(id: string, input: ResolveAskInput): Promise<Ask> {

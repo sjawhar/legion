@@ -27,6 +27,18 @@ related_issues:
   code are the handoff head's; they stand for the code head only because the handoff commit's
   diff over it is `.legion/` alone — say so in the `CI` line, naming both heads and the cancelled
   run ids, so a reader does not take "cancelled at the code head" for a red.
+
+  **Superseded 2026-10-23 (dispatch://INFRA-83):** only the clause that has you say so in the `CI`
+  line, naming both heads and the cancelled run ids, is gone: the PR body has no `CI:` line
+  (`skills/legion-worker/references/pr-body.md`), and no role records run ids for a later step to
+  trust — the tester and the reviewer each read CI on GitHub at the head they are judging and record
+  none of it (the reviewer's own four GitHub reads are in
+  `skills/legion-worker/references/merge-gate.md`), where a cancelled run at the code head is visible
+  beside the handoff head's green ones. The rest of this finding stands: the `skip-checks: true` push
+  rule, the concurrency group cancelling the code head's runs, that the handoff head's green runs
+  stand for the code head only because the handoff commit's diff over it is `.legion/` alone, and the
+  two `Worker Image` digests below.
+
 - Push the implement handoff right after the code push rather than after watching the code head's
   CI: one run then covers both commits, and nothing is cancelled half-way.
 - `Worker Image` has no such group: it completes at both heads, so one logical code change has two

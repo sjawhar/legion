@@ -105,10 +105,10 @@ type AppContextOptions struct {
 	OIDC          *oidc.Verifier
 	AgentStream   agentstream.Source
 	Lifetime      context.Context
-	// AgentSecretsURL/AgentSecretsToken configure the credential-request UI's secrets broker
+	// AgentSecretsURL/AgentSecretsTokenFile configure the credential-request UI's secrets broker
 	// client; empty URL means the feature is off. See api.DepsInput.
-	AgentSecretsURL   string
-	AgentSecretsToken string
+	AgentSecretsURL       string
+	AgentSecretsTokenFile string
 	// Files is the uploaded-file store main built from DISPATCH_FILE_STORE_BUCKET; nil keeps
 	// files in Postgres. See api.DepsInput.
 	Files            files.Store
@@ -146,25 +146,25 @@ func BuildAppContext(opts AppContextOptions) (*AppContext, error) {
 		devSignInHost = host
 	}
 	apiDeps, err := api.NewDeps(api.DepsInput{
-		Store:             opts.Store,
-		Identity:          opts.Identity,
-		AgentTokens:       opts.AgentTokens,
-		DefaultProject:    opts.DefaultProject,
-		ServerURL:         opts.ServerURL,
-		EnvoyURL:          opts.EnvoyURL,
-		EnvoyToken:        opts.EnvoyToken,
-		Docs:              opts.Docs,
-		Embedder:          opts.Embedder,
-		Events:            opts.Events,
-		App:               opts.App,
-		GitHubAPIBase:     opts.GitHubAPIBase,
-		OIDC:              opts.OIDC,
-		AgentStream:       opts.AgentStream,
-		Lifetime:          opts.Lifetime,
-		AgentSecretsURL:   opts.AgentSecretsURL,
-		AgentSecretsToken: opts.AgentSecretsToken,
-		Files:             opts.Files,
-		TestHooksEnabled:  opts.TestHooksEnabled,
+		Store:                 opts.Store,
+		Identity:              opts.Identity,
+		AgentTokens:           opts.AgentTokens,
+		DefaultProject:        opts.DefaultProject,
+		ServerURL:             opts.ServerURL,
+		EnvoyURL:              opts.EnvoyURL,
+		EnvoyToken:            opts.EnvoyToken,
+		Docs:                  opts.Docs,
+		Embedder:              opts.Embedder,
+		Events:                opts.Events,
+		App:                   opts.App,
+		GitHubAPIBase:         opts.GitHubAPIBase,
+		OIDC:                  opts.OIDC,
+		AgentStream:           opts.AgentStream,
+		Lifetime:              opts.Lifetime,
+		AgentSecretsURL:       opts.AgentSecretsURL,
+		AgentSecretsTokenFile: opts.AgentSecretsTokenFile,
+		Files:                 opts.Files,
+		TestHooksEnabled:      opts.TestHooksEnabled,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("BuildAppContext: %w", err)

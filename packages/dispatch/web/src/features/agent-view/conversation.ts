@@ -5,6 +5,8 @@ import {
   type AgentStreamCommand,
   type AgentStreamFrame,
   type AgentStreamMessage,
+  type AgentStreamSettings,
+  type AgentStreamSettingsReported,
   type AgentStreamToolResult,
   isTypableCommandName,
 } from "@legion/contracts";
@@ -26,7 +28,11 @@ export interface AgentConversation {
   /** The slash commands the session takes from Dispatch, as its newest `commands` frame lists
    *  them; undefined until one arrives, which a session that cannot take typed input never sends. */
   readonly commands: readonly AgentStreamCommand[] | undefined;
-  /** The highest `seq` already applied per message id, per tool call id, and to the command list. */
+  /** The model and thinking level the session runs now, as its newest `settings` frame reports
+   *  them (INFRA-195); absent until one arrives, which a plugin older than the frame never sends. */
+  readonly settings?: AgentStreamSettings;
+  /** The highest `seq` already applied per message id, per tool call id, to the command list and
+   *  to the settings. */
   readonly applied: Readonly<Record<string, number>>;
 }
 
@@ -81,6 +87,30 @@ function isCommand(command: unknown): command is AgentStreamCommand {
   );
 }
 
+/** Whether every value is a string: the settings frame's lists, which a pick sends verbatim. */
+function isStringList(value: unknown): value is readonly string[] {
+  return Array.isArray(value) && value.every((entry) => typeof entry === "string");
+}
+
+/** Whether a `settings` frame has the contract's shape, every field of it. The header renders
+ *  each field and a pick sends a listed model as typed input, so a frame with any field of the
+ *  wrong type is dropped whole and the header keeps what the session reported before. */
+function isSettings(frame: Record<string, unknown>): boolean {
+  if (frame.reported === false) return true;
+  if (frame.reported !== true) return false;
+  if (frame.model !== undefined && typeof frame.model !== "string") return false;
+  if (!isStringList(frame.models)) return false;
+  const { thinking } = frame;
+  if (thinking === null) return true;
+  if (typeof thinking !== "object") return false;
+  return (
+    "level" in thinking &&
+    (thinking.level === null || typeof thinking.level === "string") &&
+    "levels" in thinking &&
+    isStringList(thinking.levels)
+  );
+}
+
 /**
  * Whether a frame is one this build can render. Frames arrive as JSON off a bus any client can
  * publish on, and from a publisher that ships separately from this dashboard, so a shape this
@@ -108,6 +138,9 @@ export function isRenderableFrame(frame: AgentStreamFrame): boolean {
       frame.commands.length <= AGENT_STREAM_LIMITS.commands &&
       frame.commands.every(isCommand)
     );
+  }
+  if (frame.kind === "settings") {
+    return isSettings(frame as unknown as Record<string, unknown>);
   }
   if (frame.kind !== "message") return false;
   const { message } = frame;
@@ -155,12 +188,22 @@ export function applyFrame(state: AgentConversation, frame: AgentStreamFrame): A
       commands: frame.commands,
     };
   }
+  if (frame.kind === "settings") {
+    // One state per session, last-writer-wins by `seq` as the command list is.
+    const key = "settings";
+    if ((state.applied[key] ?? 0) >= frame.seq) return state;
+    return {
+      ...state,
+      applied: { ...state.applied, [key]: frame.seq },
+      settings: frame,
+    };
+  }
   const key = `m:${frame.message.id}`;
   if ((state.applied[key] ?? 0) >= frame.seq) return state;
   // A settled message is final, whatever sequence number a later snapshot carries. The host
   // hands the extension a message's last few `message_update`s after its `message_end`, so the
-  // late streaming snapshot is the one with the higher number; letting it win leaves a finished
-  // turn rendered as running, and assistant-ui then disables the composer.
+  // late streaming snapshot is the one with the higher number; letting it win would leave a
+  // finished turn rendered as still streaming.
   const settled = state.messages.find(
     (message) => message.id === frame.message.id && !message.streaming
   );
@@ -252,17 +295,86 @@ export function currentModel(state: AgentConversation): string | undefined {
   return undefined;
 }
 
-/** Whether the session is mid-turn, which is what shows the composer a running thread. */
-export function isRunning(state: AgentConversation): boolean {
-  return state.messages.some((message) => message.streaming);
-}
-
 /** The slash commands the composer completes: the session's newest list, or undefined for a
  *  session that sent none, which is one whose host cannot run typed input. */
 export function sessionCommands(
   state: AgentConversation
 ): readonly AgentStreamCommand[] | undefined {
   return state.commands;
+}
+
+/** What the live view's header shows of the session's model and thinking level. */
+export type SessionSettingsView =
+  | {
+      /** Nothing the session reported: the header shows the last turn's model, as it always
+       *  did, and offers no picker. */
+      readonly reported: false;
+      readonly model: string | undefined;
+      readonly notice: string | undefined;
+    }
+  | {
+      readonly reported: true;
+      readonly settings: AgentStreamSettingsReported;
+      /** Whether the session runs the built-in `/model` from Dispatch, which is what a pick sends. */
+      readonly modelPicker: boolean;
+      /** Whether the session runs the built-in `/effort` from Dispatch. */
+      readonly thinkingPicker: boolean;
+      readonly notice: string | undefined;
+    };
+
+/**
+ * What the header shows of the session's model and thinking level, and why (INFRA-195). It never
+ * shows a value the session did not report: the settings are the newest `settings` frame alone,
+ * and a session that sent none shows the last turn's model, as the header did before the frame.
+ * A picker is offered only where the session lists the built-in a pick runs (`model`, `effort`)
+ * and runs it from Dispatch, since a pick is a person's Send of `/model <id>` or `/effort <level>`.
+ *
+ * A session that is not answering the live view (a Claude Code session, an older plugin, or one
+ * no longer running) gets no notice, since the empty transcript's own text already says why; nor
+ * does one whose replay has not arrived yet, since the replay is where the frame would be.
+ */
+export function sessionSettingsView(
+  state: AgentConversation,
+  responding: boolean | undefined,
+  replays: number
+): SessionSettingsView {
+  const lastTurn = currentModel(state);
+  if (responding === false) return { model: lastTurn, notice: undefined, reported: false };
+  const { settings } = state;
+  if (settings === undefined) {
+    return {
+      model: lastTurn,
+      notice:
+        replays === 0
+          ? undefined
+          : "This session does not report its model and thinking level. Restart it on a newer pi-envoy to show and switch them here.",
+      reported: false,
+    };
+  }
+  if (!settings.reported) {
+    return {
+      model: lastTurn,
+      notice: "This session's Oh My Pi does not tell Dispatch its model and thinking level.",
+      reported: false,
+    };
+  }
+  const runnable = new Set(
+    (state.commands ?? [])
+      .filter((command) => command.source === "builtin" && command.terminalOnly !== true)
+      .map((command) => command.name)
+  );
+  const modelPicker = runnable.has("model");
+  const thinkingPicker = runnable.has("effort");
+  return {
+    modelPicker,
+    notice:
+      modelPicker && thinkingPicker
+        ? undefined
+        : "This session switches its model and thinking level only at its own terminal.",
+    reported: true,
+    settings,
+    thinkingPicker,
+  };
 }
 
 /** One streamed user message a person's Dispatch message became: the Dispatch message it says it

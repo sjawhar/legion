@@ -89,13 +89,6 @@ func ValidateSpawnSpec(spec SpawnSpec, runtimeOwned map[string]bool) error {
 	if !backend.Runs(spec.Role) {
 		return refuse("the %s does not run on %s (%s), which runs only %s: %s", spec.Role, Of(spec.Backend), backend.Name, JoinRoles(backend.Roles), backend.Why)
 	}
-	// A workspace recovered after its volume was lost is recreated with a fresh session: the one
-	// it had went with the volume, so a resume of it fails every attempt (workspace-init checks the
-	// session before it recreates anything).
-	if spec.ResumeSessionFile != "" && spec.WorkspaceRecoveredFrom != "" {
-		return refuse("ResumeSessionFile %s and WorkspaceRecoveredFrom %s are both set: a workspace recovered after its volume was lost holds no session to resume",
-			spec.ResumeSessionFile, spec.WorkspaceRecoveredFrom)
-	}
 	for _, name := range slices.Sorted(maps.Keys(spec.Env)) {
 		switch {
 		case !IsEnvName(name):
@@ -179,9 +172,6 @@ func validateControllerShape(spec SpawnSpec, refuse func(string, ...any) error) 
 	}
 	if spec.DefaultBranch != "" {
 		return refuse("the controller works no repository, so it has no default branch (got %s)", spec.DefaultBranch)
-	}
-	if spec.WorkspaceRecoveredFrom != "" {
-		return refuse("the controller has no workspace to recover (got %s)", spec.WorkspaceRecoveredFrom)
 	}
 	return nil
 }

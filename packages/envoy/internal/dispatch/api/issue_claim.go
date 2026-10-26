@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -41,7 +42,7 @@ import (
 // recorded on the issue and delivered to the session that lost it.
 //
 // Every claim write is the resolve-then-lock pair envoy_resolve.go owns, because the listener
-// lookup never runs inside a transaction (fetchLiveSessions carries the reason): judgeHolder
+// lookup never runs inside a transaction (fetchHolderLiveness carries the reason): judgeHolder
 // reads the holder and takes the liveness snapshot with nothing held, then claimWrite locks
 // the row, re-reads it, and decides with claimBlockedBy under that lock; a holder that
 // changed in between sends the write around the cycle once more. claimCycle is that pair and
@@ -117,12 +118,14 @@ func (s *server) writeClaimError(w http.ResponseWriter, err error) {
 	s.writeHandlerError(w, err)
 }
 
-// liveSessions is a snapshot of the Envoy listener's live sessions, fetched with no
-// transaction open and no pooled connection held. `fetched` is false when the caller never
-// needed it, which is every claim of an issue nobody else holds.
-type liveSessions struct {
+// holderLiveness is what the listener answered about the claim's holder, read with no
+// transaction open and no pooled connection held. `holder` is that session's own record, or
+// nil when the session store holds none, because that one session is the only thing the
+// decision asks about. `fetched` is false when the caller never needed it, which is every
+// claim of an issue nobody else holds.
+type holderLiveness struct {
 	fetched bool
-	byID    map[string]envoy.Session
+	holder  *envoy.Session
 }
 
 // errHolderUnjudged says the decision needs a liveness snapshot this caller did not take,
@@ -130,28 +133,31 @@ type liveSessions struct {
 // cycle rather than deciding from a snapshot that does not describe the holder.
 var errHolderUnjudged = errors.New("claim holder was not covered by the liveness snapshot")
 
-// fetchLiveSessions asks the listener who is running. It must be called with nothing held: it
-// is a cross-service HTTP call of up to five seconds, and production runs four pool
-// connections, so a held connection or row lock across it stalls unrelated requests. An
-// unreachable or unconfigured listener is a 503, never "unknown, therefore free" — Dispatch
-// does not hand one session's work to another on a transport error.
-func (s *server) fetchLiveSessions(ctx context.Context, holder model.IssueClaim) (liveSessions, error) {
+// fetchHolderLiveness asks the listener about the holder's own session, by id, and answers
+// with that one session's record, or with none when the session store holds no record of it.
+// It must be called with nothing held: it is a cross-service HTTP call of up to five seconds,
+// and production runs four pool connections, so a held connection or row lock across it
+// stalls unrelated requests. An unreachable or unconfigured listener is a 503, never
+// "unknown, therefore free" — Dispatch does not hand one session's work to another on a
+// transport error. Only a session holder is ever asked about: judgeHolder reaches this
+// through errHolderUnjudged, which a holder of any other kind never produces, so no read is
+// made for a human's claim.
+func (s *server) fetchHolderLiveness(ctx context.Context, holder model.IssueClaim) (holderLiveness, error) {
 	if s.deps.Envoy == nil {
-		return liveSessions{}, errorf(http.StatusServiceUnavailable, "ENVOY_UNAVAILABLE",
+		return holderLiveness{}, errorf(http.StatusServiceUnavailable, "ENVOY_UNAVAILABLE",
 			"ENVOY_URL is not configured, so Dispatch cannot tell whether %s is still working", claimHolder(holder.Actor, ""))
 	}
-	sessions, err := s.deps.Envoy.Sessions(ctx)
+	session, err := s.deps.Envoy.Session(ctx, holder.Actor.ID)
+	if errors.Is(err, envoy.ErrNotFound) {
+		return holderLiveness{fetched: true}, nil
+	}
 	if err != nil {
 		if errors.Is(err, envoy.ErrUnavailable) {
-			return liveSessions{}, errorf(http.StatusServiceUnavailable, "ENVOY_UNAVAILABLE", "%s", err.Error())
+			return holderLiveness{}, errorf(http.StatusServiceUnavailable, "ENVOY_UNAVAILABLE", "%s", err.Error())
 		}
-		return liveSessions{}, err
+		return holderLiveness{}, err
 	}
-	byID := make(map[string]envoy.Session, len(sessions))
-	for _, session := range sessions {
-		byID[session.SessionID] = session
-	}
-	return liveSessions{fetched: true, byID: byID}, nil
+	return holderLiveness{fetched: true, holder: &session}, nil
 }
 
 // humanRule is how a route treats a human caller, the one difference between claiming and
@@ -169,7 +175,7 @@ type humanRule struct {
 // alone; apart, they are two loose arguments a caller can pair wrongly.
 type judgement struct {
 	holder *model.IssueClaim
-	live   liveSessions
+	live   holderLiveness
 }
 
 // claimBlockedBy is the whole taking rule, and it runs under the issue's row lock: the caller
@@ -179,12 +185,17 @@ type judgement struct {
 //
 // A liveness snapshot speaks only for the holder that was read before it was taken, so the
 // first check is that the row still shows that holder: a session-to-session change in between
-// would otherwise be judged against a snapshot that predates the new holder, read as "not
-// listed", and let a live session's claim be taken without force.
+// would otherwise be judged against a snapshot that predates the new holder, read as a
+// session the store no longer holds, and let a live session's claim be taken without force.
 //
 // A human's claim has no session to end, so it is held until that human or another releases
-// it. A session's claim is held only while the listener still lists that session — the same
-// live list GET /api/v1/agents and the issue subscribers read.
+// it. A session's claim is held while the session store still holds that session's record,
+// read by id. The listener's live list is not that record: it is one process's in-memory
+// cache, and it cannot tell a cache that is still refilling from a session that has ended, so
+// a working session reads as absent from it for as long as the refill takes. Handing that
+// session's issue to someone else is not a mistake the next read undoes — two sessions then
+// work the same issue, and whatever the first wrote is already another's to overwrite — so
+// the holder's own record decides.
 func claimBlockedBy(
 	current *model.IssueClaim, actor model.Actor, rule humanRule, judged judgement,
 ) error {
@@ -203,11 +214,12 @@ func claimBlockedBy(
 	if !judged.live.fetched {
 		return errHolderUnjudged
 	}
-	session, listed := judged.live.byID[current.Actor.ID]
-	if !listed {
+	if judged.live.holder == nil {
 		return nil
 	}
-	return &claimConflict{claim: *current, liveTitle: session.Title, forcible: rule.forcible}
+	return &claimConflict{
+		claim: *current, liveTitle: judged.live.holder.Title, forcible: rule.forcible,
+	}
 }
 
 // sameHolder reports whether two nullable claims name the same holder.
@@ -234,7 +246,7 @@ func (s *server) judgeHolder(
 	if !errors.Is(claimBlockedBy(holder, actor, rule, judged), errHolderUnjudged) {
 		return judged, nil
 	}
-	judged.live, err = s.fetchLiveSessions(ctx, *holder)
+	judged.live, err = s.fetchHolderLiveness(ctx, *holder)
 	if err != nil {
 		return judgement{}, err
 	}
@@ -299,11 +311,86 @@ type claimChange struct {
 	changed   bool
 }
 
-// claimApplied is the outcome of one locked attempt: the issue as it stands and the event to
-// publish, which is the zero event when nothing was written.
+// claimApplied is the outcome of one locked attempt: the issue as it stands, whether the Legion
+// daemon owns its status, and the event to publish, which is the zero event when nothing was
+// written.
 type claimApplied struct {
 	issue model.Issue
-	event model.Event
+	// legionManagedStatus is nil when the walk failed: the claim still stands, so the answer
+	// says nothing rather than losing it (claimWrite).
+	legionManagedStatus *bool
+	event               model.Event
+}
+
+// claimAnswer is what both claim routes write: the issue, flat, with whether the Legion daemon
+// owns its status beside it. The field is resolved on read from the issue's labels and its
+// parents', stored nowhere, and never part of an event payload, which is why it sits beside
+// Issue in the response rather than in it — model.Issue is embedded in model.IssueEventPayload,
+// the payload of every issue.* event. The JSON stays flat because a caller merges the body
+// straight into the issue it already holds.
+//
+// The field is omitted when the walk failed (claimWrite logs that and keeps the claim), exactly
+// as writeAdvice.LegionManagedStatus is omitted when it was not asked (write_advice.go). A
+// client reads an absent field as "not Legion-managed", the wording every client had before
+// this field existed and the safe direction: it prints the status guidance rather than
+// suppressing it.
+type claimAnswer struct {
+	model.Issue
+	LegionManagedStatus *bool `json:"legion_managed_status,omitempty"`
+}
+
+// claimLegionManagedStatus answers whether Legion owns key's status for a claim answer, or nil
+// when the walk failed. It runs in a savepoint of the claim's own transaction rather than on it
+// directly, because a failed statement aborts the transaction it ran in: on the transaction
+// itself, a failed advisory walk would make the claim's COMMIT a rollback and lose a claim that
+// had otherwise succeeded. The savepoint is the same device writeAdvice uses to keep a write
+// whose advice query failed (write_advice.go), and the failure is logged once there too
+// (logAdviceError). It is never retried: the field is a hint, the claim is the write.
+//
+// A statement's failure is therefore never the claim's. A cancelled request and a lost
+// connection are not statement failures, and they used to be the claim's: a context cancelled
+// under the walk left the savepoint open and made the claim's COMMIT fail. So the walk runs on
+// a context no cancellation reaches (context.WithoutCancel), and what bounds it once
+// cancellation cannot is the 500 ms statement timeout below - the same bound, for the same
+// reason, as the one writeAdvice puts on this very predicate (write_advice.go). A connection
+// that dies under the walk still fails the claim, as it fails every other statement in it.
+func claimLegionManagedStatus(ctx context.Context, tx pgx.Tx, key string) *bool {
+	// Detached from the caller's cancellation, so a client hang-up or a write deadline landing
+	// here cannot skip the savepoint's rollback and leave the claim's transaction holding an
+	// aborted savepoint that its COMMIT would then refuse.
+	walkCtx := context.WithoutCancel(ctx)
+	walk, err := tx.Begin(walkCtx)
+	if err != nil {
+		slog.Warn("dispatch: claim legion_managed_status omitted", "issue", key, "error", err)
+		return nil
+	}
+	// Healthy walks complete in single-digit milliseconds. Bound this one at 500 ms, as the
+	// advice path bounds the same predicate, so neither a future plan regression nor the
+	// detached context above can hold the issue row lock and a pool connection indefinitely.
+	if _, err := walk.Exec(walkCtx, "set local statement_timeout = '500ms'"); err != nil {
+		_ = walk.Rollback(walkCtx)
+		slog.Warn("dispatch: claim legion_managed_status omitted", "issue", key, "error", err)
+		return nil
+	}
+	managed, err := legionManagedStatus(walkCtx, walk, key)
+	if err != nil {
+		_ = walk.Rollback(walkCtx)
+		slog.Warn("dispatch: claim legion_managed_status omitted", "issue", key, "error", err)
+		return nil
+	}
+	// SET LOCAL crosses a released savepoint, so restore the claim transaction's default before
+	// releasing this one, exactly as writeAdvice does. An error path rolls the savepoint back,
+	// which clears the setting.
+	if _, err := walk.Exec(walkCtx, "set local statement_timeout = default"); err != nil {
+		_ = walk.Rollback(walkCtx)
+		slog.Warn("dispatch: claim legion_managed_status omitted", "issue", key, "error", err)
+		return nil
+	}
+	if err := walk.Commit(walkCtx); err != nil {
+		slog.Warn("dispatch: claim legion_managed_status omitted", "issue", key, "error", err)
+		return nil
+	}
+	return &managed
 }
 
 // claimWrite is the locked half of every claim write - resolveThenLock's `write` - and the
@@ -337,28 +424,36 @@ func (s *server) claimWrite(
 	if err != nil {
 		return claimApplied{}, err
 	}
-	if !change.changed {
-		if err := tx.Commit(ctx); err != nil {
+	// A claim writes neither labels nor parent_key, so the walk answers the same whether the
+	// claim changed or not, and the same on either side of the write: one query, either way,
+	// under the issue's row lock this transaction already holds. It runs here, before the
+	// write, so that nothing at all sits between appendEvent and COMMIT. The row lock is not
+	// what makes the answer stable - it holds the issue's own row, not its ancestors' - so the
+	// chain is read as it stands, which is enough for a sentence of guidance. A statement that
+	// fails or times out costs the field alone: claimLegionManagedStatus runs it in a savepoint,
+	// on a context no cancellation reaches, bounded by its own statement timeout, and a claim is
+	// what stops two sessions working one issue.
+	managed := claimLegionManagedStatus(ctx, tx, key)
+	applied := claimApplied{issue: before, legionManagedStatus: managed}
+	if change.changed {
+		if err := writeIssueClaim(ctx, tx, key, change.claim); err != nil {
 			return claimApplied{}, err
 		}
-		return claimApplied{issue: before}, nil
-	}
-	if err := writeIssueClaim(ctx, tx, key, change.claim); err != nil {
-		return claimApplied{}, err
-	}
-	after, err := s.loadIssue(ctx, tx, key)
-	if err != nil {
-		return claimApplied{}, err
-	}
-	after.LastSeq++
-	event, err := s.appendEvent(ctx, tx, claimEvent(change.eventType, key, actor, after, change.previous, change.reason))
-	if err != nil {
-		return claimApplied{}, err
+		after, err := s.loadIssue(ctx, tx, key)
+		if err != nil {
+			return claimApplied{}, err
+		}
+		after.LastSeq++
+		event, err := s.appendEvent(ctx, tx, claimEvent(change.eventType, key, actor, after, change.previous, change.reason))
+		if err != nil {
+			return claimApplied{}, err
+		}
+		applied = claimApplied{issue: after, legionManagedStatus: managed, event: event}
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return claimApplied{}, err
 	}
-	return claimApplied{issue: after, event: event}, nil
+	return applied, nil
 }
 
 // errClaimContended is what the bounded cycle answers with when the holder changed under
@@ -400,7 +495,7 @@ func (s *server) claimCycle(
 	if applied.event.ID != 0 {
 		s.publish(applied.event)
 	}
-	WriteJSON(w, http.StatusOK, applied.issue)
+	WriteJSON(w, http.StatusOK, claimAnswer{Issue: applied.issue, LegionManagedStatus: applied.legionManagedStatus})
 }
 
 // claimIssue is POST /api/v1/issues/{key}/claim: this session (or human) takes the issue.

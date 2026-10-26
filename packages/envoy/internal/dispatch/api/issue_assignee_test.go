@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"strings"
@@ -328,4 +329,100 @@ func TestWhoamiNamesHumanPersonalTokenOwnerAndSharedToken(t *testing.T) {
 	if anonymous := agentRequest(t, handler, http.MethodGet, "/api/v1/whoami", nil, "wrong"); anonymous.Code != http.StatusUnauthorized {
 		t.Fatalf("unknown bearer whoami: status=%d body=%s", anonymous.Code, anonymous.Body.String())
 	}
+}
+
+// createSharedTokenIssue creates an issue as the shared token, which acts for nobody: the chain
+// then rests on the parent and the project's default.
+func createSharedTokenIssue(t *testing.T, handler http.Handler, body map[string]any) assigneeIssue {
+	t.Helper()
+	body["actor"] = sessionActor()
+	response := agentRequest(t, handler, http.MethodPost, "/api/v1/issues", body, "agent-token")
+	if response.Code != http.StatusCreated {
+		t.Fatalf("create issue %v: status=%d body=%s", body["title"], response.Code, response.Body.String())
+	}
+	return decodeBody[assigneeIssue](t, response)
+}
+
+// The project's default is the chain's last step: an issue the shared token creates with no
+// assignee, under no parent, goes to it. A parent created with an explicit null assignee has
+// nobody on it, so its child reaches the default too.
+func TestCreateIssueFallsBackToProjectDefaultAssignee(t *testing.T) {
+	handler := newTestHandler(t)
+	createAssigneeProject(t, handler)
+	putDefaultAssignee(t, handler, "CORE", "Bob")
+
+	root := createSharedTokenIssue(t, handler, map[string]any{"project": "CORE", "title": "Root"})
+	expectAssignee(t, root.Assignee, "bob")
+
+	unowned := createSharedTokenIssue(t, handler, map[string]any{
+		"project": "CORE", "title": "Nobody's parent", "assignee": nil,
+	})
+	expectAssignee(t, unowned.Assignee, "")
+	child := createSharedTokenIssue(t, handler, map[string]any{
+		"project": "CORE", "title": "Child of nobody", "parent": unowned.Key,
+	})
+	expectAssignee(t, child.Assignee, "bob")
+}
+
+// Every earlier step of the chain wins over the project's default, in order, and an explicit
+// null still means nobody.
+func TestProjectDefaultAssigneeYieldsToEveryEarlierChainStep(t *testing.T) {
+	handler := newTestHandler(t)
+	createAssigneeProject(t, handler)
+	putDefaultAssignee(t, handler, "CORE", "bob")
+
+	explicit := createSharedTokenIssue(t, handler, map[string]any{
+		"project": "CORE", "title": "Naming someone wins", "assignee": "alice",
+	})
+	expectAssignee(t, explicit.Assignee, "alice")
+
+	byHuman := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]any{
+		"project": "CORE", "title": "Filing it yourself",
+	}, "alice")
+	if byHuman.Code != http.StatusCreated {
+		t.Fatalf("create as human: status=%d body=%s", byHuman.Code, byHuman.Body.String())
+	}
+	expectAssignee(t, decodeBody[assigneeIssue](t, byHuman).Assignee, "alice")
+
+	parent := createSharedTokenIssue(t, handler, map[string]any{
+		"project": "CORE", "title": "A parent with somebody", "assignee": "alice",
+	})
+	child := createSharedTokenIssue(t, handler, map[string]any{
+		"project": "CORE", "title": "Inheriting from above", "parent": parent.Key,
+	})
+	expectAssignee(t, child.Assignee, "alice")
+
+	nobody := createSharedTokenIssue(t, handler, map[string]any{
+		"project": "CORE", "title": "Nobody at all", "assignee": nil,
+	})
+	expectAssignee(t, nobody.Assignee, "")
+}
+
+// A project that names no default leaves such an issue unassigned, as it did before the column.
+func TestCreateIssueWithoutProjectDefaultAssigneeStaysUnassigned(t *testing.T) {
+	handler := newTestHandler(t)
+	createAssigneeProject(t, handler)
+	issue := createSharedTokenIssue(t, handler, map[string]any{"project": "CORE", "title": "Nobody's"})
+	expectAssignee(t, issue.Assignee, "")
+}
+
+// A default left stale by a restore or a direct write — an address no longer in `people` — is
+// ignored rather than refused: the create succeeds with nobody. The same address present makes
+// it the assignee again.
+func TestStaleProjectDefaultAssigneeFallsThroughToNobody(t *testing.T) {
+	handler, database := newTestHandlerWithStore(t)
+	createAssigneeProject(t, handler)
+	if _, err := database.Pool.Exec(context.Background(),
+		`update projects set default_assignee = 'carol' where key = 'CORE'`); err != nil {
+		t.Fatalf("set stale default: %v", err)
+	}
+	stale := createSharedTokenIssue(t, handler, map[string]any{"project": "CORE", "title": "Stale default"})
+	expectAssignee(t, stale.Assignee, "")
+
+	if _, err := database.Pool.Exec(context.Background(),
+		`insert into people (email) values ('carol')`); err != nil {
+		t.Fatalf("record carol: %v", err)
+	}
+	live := createSharedTokenIssue(t, handler, map[string]any{"project": "CORE", "title": "Live default"})
+	expectAssignee(t, live.Assignee, "carol")
 }

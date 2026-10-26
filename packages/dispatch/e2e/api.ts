@@ -37,6 +37,8 @@ import type {
   MyAnswersResponse,
   MyRepliesResponse,
   Project,
+  ProjectDefaultAssignee,
+  ProjectDefaultAssigneeInput,
   RepoProject,
   SearchResponse,
   UpdateIssueInput,
@@ -813,27 +815,62 @@ export function quiesceDocuments(options: ApiOptions = {}): Promise<{ ok: boolea
   );
 }
 
-/** Points `project` at `repo`'s `.dispatch/architecture` on `branch` (the fake GitHub serves it). */
+/** The route of `project`'s source `repo` (`owner/name`): a source is addressed by its repository. */
+function architectureSourcePath(project: string, repo: string): string {
+  const [owner = "", name = ""] = repo.split("/");
+  return `/api/v1/projects/${encodeURIComponent(project)}/architecture-sources/${encodeURIComponent(owner)}/${encodeURIComponent(name)}`;
+}
+
+/** Adds `repo`'s `.dispatch/architecture` on `branch` as one of `project`'s sources, or moves that
+ *  source to `branch` (the fake GitHub serves it). */
 export function putArchitectureSource(
   project: string,
   input: { branch: string; repo: string },
   options: ApiOptions = {}
 ): Promise<ArchitectureSource> {
   return request<ArchitectureSource>(
-    `/api/v1/projects/${encodeURIComponent(project)}/architecture-source`,
+    architectureSourcePath(project, input.repo),
+    "PUT",
+    { branch: input.branch },
+    options
+  );
+}
+
+/** Names the person a project's unowned new issues fall to, or clears it with `assignee: null`. */
+export function putProjectDefaultAssignee(
+  project: string,
+  input: ProjectDefaultAssigneeInput,
+  options: ApiOptions = {}
+): Promise<ProjectDefaultAssignee> {
+  return request<ProjectDefaultAssignee>(
+    `/api/v1/projects/${encodeURIComponent(project)}/default-assignee`,
     "PUT",
     input,
     options
   );
 }
 
-/** Imports the model now; a rejected model answers 200 with the reason in `last_error`. */
+/** Every project that names a default assignee, as the Settings page reads them. */
+export function listProjectDefaultAssignees(
+  options: ApiOptions = {}
+): Promise<ProjectDefaultAssignee[]> {
+  return request<ProjectDefaultAssignee[]>(
+    "/api/v1/settings/project-default-assignees",
+    "GET",
+    undefined,
+    options
+  );
+}
+
+/** Imports `project`'s source `repo` now; a rejected model answers 200 with the reason in
+ *  `last_error`. */
 export function syncArchitectureSource(
   project: string,
+  repo: string,
   options: ApiOptions = {}
 ): Promise<ArchitectureSource> {
   return request<ArchitectureSource>(
-    `/api/v1/projects/${encodeURIComponent(project)}/architecture-source/sync`,
+    `${architectureSourcePath(project, repo)}/sync`,
     "POST",
     undefined,
     options

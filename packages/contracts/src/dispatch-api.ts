@@ -125,6 +125,23 @@ export interface Project {
   readonly created_at: string;
 }
 
+/**
+ * A project's default assignee: the last step of an issue create's assignee chain, reached when
+ * the create named nobody, the session acts for nobody, and no parent carries one. `assignee` is
+ * a person's lowercase email, or null for a project that names nobody — which
+ * `GET /api/v1/settings/project-default-assignees` leaves out of its list entirely.
+ */
+export interface ProjectDefaultAssignee {
+  readonly project: string;
+  readonly assignee: string | null;
+}
+
+/** The body of `PUT /api/v1/projects/{key}/default-assignee`: the person the project's unowned
+ *  work lands on, or null to clear the default. */
+export interface ProjectDefaultAssigneeInput {
+  readonly assignee: string | null;
+}
+
 export interface RepoProject {
   readonly repo: string;
   readonly project: string;
@@ -136,10 +153,12 @@ export interface RepoProject {
 }
 
 /**
- * The repository and branch a project's architecture documents are imported
- * from (directory fixed at .dispatch/architecture/). The GitHub App
- * installation id backing the access check is a server detail and never
- * appears here. The sync fields stay null until the importer runs.
+ * One repository a project's architecture documents are imported from (directory
+ * fixed at .dispatch/architecture/), on its branch. A project may have several
+ * sources, one per repository, and its component model is every source's components
+ * together. The GitHub App installation id backing the access check is a server
+ * detail and never appears here. The sync fields stay null until the importer runs;
+ * `components` is how many components this source currently projects.
  */
 export interface ArchitectureSource {
   readonly project: string;
@@ -151,6 +170,7 @@ export interface ArchitectureSource {
   readonly last_sync_at: string | null;
   readonly last_commit: string | null;
   readonly last_error: string | null;
+  readonly components: number;
 }
 
 export interface ExternalLink {
@@ -191,6 +211,7 @@ export interface IssueComponentsInput {
 export interface WriteAdvice {
   /** Issue-scoped fields are omitted on project-document writes. */
   readonly issue_status?: IssueStatus;
+  /** The calling session's own messages, comments and asks on the issue since the last human event. */
   readonly session_writes_since_human?: number;
   readonly your_open_asks?: Array<{ id: string; question: string }>;
   /** The ask blocks in the document an upload or issue creation stored, answered ones included. */
@@ -214,6 +235,15 @@ export interface WriteAdvice {
    * `suggestions.missing` explains why search did not answer in time instead.
    */
   readonly suggestions?: Suggestions;
+  /**
+   * True when the issue carries the `legion` label in any case, or sits under an issue that
+   * does, so only the Legion daemon writes its status and a status anyone else sets is undone.
+   * Resolved only where a line depends on it: a session's write on an issue whose status is
+   * `triage`, where it decides whether the "still in triage" advice is printed. Absent
+   * everywhere else — on a write to an issue past triage, and on a write whose actor is not a
+   * session, which is answered without running any advice query.
+   */
+  readonly legion_managed_status?: boolean;
 }
 /** Response-only; never on an event payload. */
 export type Advised<T> = T & { readonly advice?: WriteAdvice };
@@ -307,6 +337,23 @@ export interface IssueRouteReach {
   readonly route_holder: string | null;
 }
 
+/**
+ * What both claim routes answer: the issue, flat, with whether the Legion daemon owns its
+ * status. `legion_managed_status` is true when the issue carries the `legion` label in any case,
+ * or sits under an issue that does; on such an issue only the Legion daemon writes the status,
+ * and a status anyone else sets is undone. It is resolved on read from the issue's labels and
+ * its parents', stored nowhere, and never on an event payload, which is why it is not a field of
+ * `Issue`.
+ */
+export interface ClaimedIssue extends Issue {
+  /**
+   * Absent when the server did not answer it: a Dispatch older than the field, or a label walk
+   * that failed (the claim still stands). A client reads an absent field as not Legion-managed,
+   * which is what every client said before the field existed.
+   */
+  readonly legion_managed_status?: boolean;
+}
+
 export interface IssueSummary
   extends Pick<
       Issue,
@@ -396,14 +443,15 @@ export interface IssueChild {
 }
 
 /**
- * GET /api/v1/projects/{key}/architecture: the project's component model with the work
- * attached to it. Counting rule: a component counts every distinct issue whose effective set
- * names it or any component it contains (transitively over `parent`), parents and icebox
- * included, each once; `own_*` keeps only the issues naming this component itself. History
- * is not served.
+ * GET /api/v1/projects/{key}/architecture: the project's component model, every source's
+ * components together, with the work attached to it. Counting rule: a component counts every
+ * distinct issue whose effective set names it or any component it contains (transitively over
+ * `parent`), parents and icebox included, each once; `own_*` keeps only the issues naming this
+ * component itself. History is not served.
  */
 export interface ArchitectureTree {
-  readonly source: ArchitectureTreeSource;
+  /** Each source's sync bookkeeping, in the order the project added its sources. */
+  readonly sources: ArchitectureTreeSource[];
   readonly totals: ArchitectureTreeTotals;
   readonly components: ArchitectureTreeComponent[];
   /** Issues no ancestor chain attached. */
@@ -435,6 +483,8 @@ export interface ArchitectureTreeTotals {
 
 export interface ArchitectureTreeComponent {
   readonly id: string;
+  /** The repository of the source whose files define this component. */
+  readonly source: string;
   readonly title: string;
   readonly parent: string | null;
   readonly depends_on: string[];
@@ -1671,20 +1721,32 @@ export interface RepoProjectUpdatedEventPayload {
   readonly deleted: boolean;
 }
 
+/** `settings.project_default_assignee.updated`: a human set or cleared a project's default
+ *  assignee. The payload is the stored row, so a clear carries `assignee: null`. */
+export type ProjectDefaultAssigneeUpdatedEventPayload = ProjectDefaultAssignee;
+
 export interface ArchitectureSourceUpdatedEventPayload {
   readonly source: ArchitectureSource;
   readonly deleted: boolean;
 }
 
-/** `architecture.synced`: the importer replaced the project's model. */
+/** `architecture.synced`: the importer replaced one source's part of the project's model.
+ *  `repo` and `branch` name that source; events retained from before projects had several
+ *  sources lack them. */
 export interface ArchitectureSyncedEventPayload {
+  readonly repo?: string;
+  readonly branch?: string;
   readonly commit: string;
   readonly components: number;
 }
 
-/** `architecture.sync_failed`: the import was rejected or failed; the previous
- *  model stays up and the source row carries the same text in `last_error`. */
+/** `architecture.sync_failed`: one source's import was rejected or failed; that source's
+ *  previous components stay up and its row carries the same text in `last_error`. `repo` and
+ *  `branch` name that source; events retained from before projects had several sources lack
+ *  them. */
 export interface ArchitectureSyncFailedEventPayload {
+  readonly repo?: string;
+  readonly branch?: string;
   readonly error: string;
 }
 
@@ -1790,6 +1852,10 @@ export type DispatchEvent =
   | (DispatchEventBase & {
       readonly type: "settings.repo_project.updated";
       readonly payload: RepoProjectUpdatedEventPayload;
+    })
+  | (DispatchEventBase & {
+      readonly type: "settings.project_default_assignee.updated";
+      readonly payload: ProjectDefaultAssigneeUpdatedEventPayload;
     })
   | (DispatchEventBase & {
       readonly type: "settings.architecture_source.updated";
@@ -2038,7 +2104,8 @@ export interface CreateIssueInput {
   readonly labels?: string[];
   readonly priority?: IssuePriority | null;
   /** The email of a person who has signed in; omitted, the server picks the creating person, the
-   *  personal token's owner, or the parent's assignee. */
+   *  personal token's owner, the parent's assignee, or the project's default assignee when that
+   *  still names a person who has signed in. */
   readonly assignee?: string;
   /** The issue's own component attachment; omitted, it inherits its parent's. */
   readonly components?: IssueComponentsInput;
@@ -2316,6 +2383,12 @@ export interface IssueRead {
   readonly issue: IssueDetails;
   readonly events: Event[];
 }
+
+/**
+ * How many of an issue's events `dispatch_read` lists, the newest ones, when it names neither
+ * `events` nor `all_events`: what `DispatchClient.read` returns by default.
+ */
+export const DEFAULT_ISSUE_READ_EVENTS = 10;
 
 export interface ArtifactText {
   readonly markdown: string;

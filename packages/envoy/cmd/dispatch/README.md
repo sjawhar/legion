@@ -63,7 +63,7 @@ carry rules beyond their row:
 
 | Variable | Purpose |
 | --- | --- |
-| `DISPATCH_APP_PEM_B64` | Base64-encoded GitHub App private key. With `DISPATCH_DEV_SIGNIN=1` this is the only source a key may come from (a `pem` in `app.json` is refused), it must be a throwaway, and `DISPATCH_GITHUB_API_BASE` must name a loopback host. |
+| `DISPATCH_APP_PEM_B64` | GitHub App private key, as a PEM or the base64 of a PEM: a value holding `-----BEGIN` is the PEM itself, and any other is base64-decoded. A key that does not parse stops boot with an error naming the variable, never the key. With `DISPATCH_DEV_SIGNIN=1` this is the only source a key may come from (a `pem` in `app.json` is refused), it must be a throwaway, and `DISPATCH_GITHUB_API_BASE` must name a loopback host. |
 | `DISPATCH_GITHUB_API_BASE` | GitHub API origin override for App calls (tests and e2e point it at a fake); empty means `https://api.github.com`. With `DISPATCH_DEV_SIGNIN=1` and an App private key loaded, it must name `127.0.0.1`, `[::1]` or `localhost`. That checks the host, not what listens there: every App call hands a signed App JWT to whatever owns the port, so the key must be a throwaway. |
 
 When no GitHub App credentials are configured, the server still starts, but
@@ -383,11 +383,12 @@ What the two processes share, and what each keeps to itself:
 
 **Two processes do not share a live document session.** Durable convergence is unconditional:
 every edit is appended under the document's advisory lock, Yjs updates commute, and the stored
-history is the union of them, so no edit is lost whichever process took it, and no process writes
-a version, a settlement or an ask retraction from a document state it does not hold
-(`ErrRoomBehindHead`). What is per-process is the live room: while a room is resident in one
-process it does not receive the other's updates, so presence and cursors show only the peers on
-that process. A write committed elsewhere closes the room within a notification round trip
+history is the union of them, so no edit is lost whichever process took it, no process writes a
+settlement or an ask retraction from a document state it does not hold (`ErrRoomBehindHead`), and
+a version whose room is behind the head is rendered from the stored document (`storedTree`). What
+is per-process is the live room: while a room is resident in one process it does not receive the
+other's updates, so presence and cursors show only the peers on that process. A write committed
+elsewhere closes the room within a notification round trip
 (`dispatch_doc_changed`, `docs/stale_room.go`), unless that room was evicted less than
 `staleRoomEvictInterval` (two seconds) ago, in which case its notification is refused and the
 room is re-examined when that window ends — the case the trailing write of an editing burst
@@ -425,7 +426,7 @@ ships no earlier than the next release, once no running build reads the old shap
 
 A migration that cannot be written that way is a stop-the-world migration: it is deployed with no
 server of the earlier release running, and that is an exception named in the pull request, not a
-default (`0113` below was one). The pre-deploy census ("Pre-deploy census" below) is unchanged by
+default (`0113` and `0117` below are the two). The pre-deploy census ("Pre-deploy census" below) is unchanged by
 that rule and still applies to every migration: it is taken before any migration of the release
 applies, and a census that refuses fails the deploy before the service moves. The rule in brief
 is `internal/dispatch/store/README.md`, beside the migrations directory rather than in it, since
@@ -663,6 +664,48 @@ image and confirms the stop before it reads the schema, and when the schema has 
 the previous image runs against, it refuses to start that image again and exits `1` for a forward
 recovery.
 
+Migration `0117_architecture_sources_per_repo` lets a project import its components from more than
+one repository (`packages/envoy/AGENTS.md`). `architecture_sources` gains `id`, which names a
+source within its project, and its primary key moves from `(project_key)` to `(project_key, id)`,
+with a unique index on `(project_key, repo)`, so a repository is a source of a project at most
+once. `components` gains `source_id` and a foreign key on `(project_key, source_id)` to its
+source's row, `on delete cascade`, so deleting a source deletes its components. Both columns are
+added with the constant default `0`, which rewrites no row, and the default is then dropped:
+every existing source reads `id` 0, every existing component `source_id` 0 (its project's one
+existing source), and a source added later gets an `id` from 1 on. It takes `architecture_sources`
+and `components` in `ACCESS EXCLUSIVE` first and holds both to commit. Its census counts the
+components whose project has no source, the rows the foreign key would refuse:
+
+```sql
+select count(*) from components c
+where not exists (select 1 from architecture_sources s where s.project_key = c.project_key);
+```
+
+Only direct SQL writes such a component: the importer writes components under their source's row
+lock, and deleting a source deletes its components. A census that refuses on it is repaired on the
+release still serving, before the deploy, by deleting them:
+`delete from components c where not exists (select 1 from architecture_sources s where s.project_key = c.project_key)`;
+then take the census again.
+
+**`0117` is a stop-the-world migration: deploy it with no server of the earlier release running,
+and never start a release older than `0117` over it again.** Stop the earlier release, or scale it
+to zero, before the new release boots and migrates: a Kubernetes Deployment's
+`strategy: Recreate`, which `envoy-infra:gcp:Dispatch` uses at its default one replica
+(`packages/envoy/infra/README.md`); a deployment running more than one replica, which rolls, is
+scaled to zero first. The compose auto-deployer above stops the old container before it starts the
+new one. A failed deploy recovers forward, not by rolling the image back. The earlier release does
+not work over the new schema, and nothing at boot stops it from serving:
+
+- Its save of a project's source upserts `on conflict (project_key)`, which no unique index covers
+  once `0117` commits, so Postgres refuses the statement and the save answers `500`.
+- Its import takes one source row of the project as the project's one source, whichever row
+  Postgres returns first. When the model changed, it deletes every component of the project, every
+  source's, and inserts that source's components with no `source_id`, which has no default. A model
+  holding a component fails on the not-null column and rolls back, and its failure record writes
+  the error onto every source row of the project. A model holding none (no file in that branch's
+  `.dispatch/architecture/`) commits the delete, and every source's components are gone.
+- Its delete removes every source of the project and every component of the project.
+
 Migration `0009_project_artifacts` deletes malformed derived artifact references, reports their
 count, and re-derives them from source text on the next write. It aborts server boot before a
 migration record or schema change only when an existing artifact has no owning issue. On success
@@ -847,8 +890,11 @@ questions, comment bodies, and issue messages are indexed into `refs` on every w
 that introduced it), and creates the `graph_edges` view, which unions those mentions with the
 structural relations already stored on the node tables (`child_of`, `attached_to`, `anchored_to`,
 `owned_by`, `replies_to`, `followed_by`). `GET /api/v1/references?to=<ref>` lists everything that
-points at a node and `?from=<ref>` everything it points to, cross-project. The migration refuses
-to run when an ask or comment anchor carries a non-uuid `artifact_id`.
+points at a node and `?from=<ref>` everything it points to, cross-project. A row whose other end is
+a node kind the running build does not know (a newer build's, read during a rolling deploy) is left
+out of every list and every count that build serves (`nodeLoaders`, `refs/graph.go`, names the
+kinds it knows). The migration refuses to run when an ask or comment anchor carries a non-uuid
+`artifact_id`.
 
 ```bash
 DATABASE_URL=postgres://... envoy-dispatch rebuild-refs
@@ -1011,6 +1057,8 @@ Dispatch uses cookie identity through the sign-in pool.
 | `/api/v1/projects` | POST | cookie, trusted header, or bearer | Create a project from `key` and `name`, for a person or an agent session alike; rejects a key that is not a project key, an empty name, a name holding a control character or a bidi embedding, override or isolate (U+202A-U+202E, U+2066-U+2069), and a name with no visible character (a letter, number, punctuation or symbol other than the blank fillers U+115F, U+1160, U+3164, U+FFA0 and U+2800, or a code point Go's Unicode tables leave unassigned, such as an emoji newer than them, other than a noncharacter (U+FDD0-U+FDEF and each code point ending in FFFE or FFFF) or a reserved default-ignorable (U+2065, U+FFF0-U+FFF8, U+E0000-U+E0FFF); combining marks, format characters, private-use characters and whitespace don't count) with `400 INVALID_PROJECT`, a name over 80 characters (`contracts.ProjectNameMax`, UTF-16 units after the trim) with `400 CAP_EXCEEDED`, and a duplicate key with `409 PROJECT_EXISTS`. |
 | `/api/v1/settings/repo-projects` | GET | cookie, trusted header, or bearer | List repository-to-project mappings, each with `default`, whether it is its project's default repository. |
 | `/api/v1/settings/repo-projects/{owner}/{repo}` | PUT, DELETE | cookie, trusted header, or bearer | Create or replace, or remove, a repository mapping; PUT takes `{project, default?}`, and `default: true` moves the project's one default to it. A mapping an issue names as its `repo` is neither deleted nor moved: `409 REPO_PROJECT_IN_USE`. `AGENTS.md` gives the rules and the `settings.repo_project.updated` events. |
+| `/api/v1/settings/project-default-assignees` | GET | cookie or trusted header (human only) | List every project that names a default assignee, by project key, as `[{project, assignee}]`; a project with no default is left out. Human-only, since the default names a person. |
+| `/api/v1/projects/{key}/default-assignee` | PUT | cookie or trusted header (human only) | Set a project's default assignee `{assignee}` (the email of a person who has signed in, or `null` to clear it): who an issue created with no assignee, by nobody, under no parent or under a parent with nobody on it, goes to — the last step of the create chain. `400 ASSIGNEE_NOT_ALLOWED` for an email nobody has signed in with, `400 INVALID_PROJECT` for a body without `assignee` or one whose `assignee` is neither a string nor null, `404 NOT_FOUND` for an unknown project. Human-only: no agent surface sets it. |
 | `/api/v1/delivery/session-groups` | POST | cookie, trusted header, or bearer | Create a Delivery session group `{name, sessions}`: its sessions' pull requests take it as their Parent agent, `group:<id>`. `409 SESSION_IN_GROUP` for a session another group holds, `409 SESSION_GROUP_NAME_TAKEN` for a name another group has (ignoring case), `409 SESSION_GROUP_NAME_IS_SESSION_TITLE` for a name that is the latest title of a session outside the group, `400 SESSION_GROUP_INPUT` for a blank name or no sessions. The timeline lists every group (`session_groups`). |
 | `/api/v1/delivery/session-groups/{id}` | PATCH, DELETE | cookie, trusted header, or bearer | Rename a session group, add sessions to it or remove them `{name?, add?, remove?}`, with the create route's refusals and `400 SESSION_GROUP_INPUT` for an edit that would leave it empty; or delete it, its sessions showing as themselves again. `400 SESSION_GROUP_ID_INPUT` for an id that is not a UUID, `404 NOT_FOUND` for one no group has. |
 | `/api/v1/me/agent-tokens` | GET, POST | cookie or trusted header (human only) | List personal-token metadata or mint a personal agent token. |

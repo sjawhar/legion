@@ -62,6 +62,8 @@ import type {
   MyAnswersResponse,
   MyRepliesResponse,
   Project,
+  ProjectDefaultAssignee,
+  ProjectDefaultAssigneeInput,
   RepoProject,
   SearchResponse,
   Subscriber,
@@ -127,7 +129,7 @@ export function isUnauthorized(error: unknown): boolean {
 }
 
 // The architecture TREE read answers this 404 for a project with no source — definitive like an
-// auth outcome, since retrying changes nothing. The source read itself answers `null` instead:
+// auth outcome, since retrying changes nothing. The project's source list answers `[]` instead:
 // the question it asks has "no source" as an ordinary answer, and a 404 made every reader of an
 // ordinary project page log a failed request.
 export function isSourceNotFound(error: unknown): boolean {
@@ -336,39 +338,64 @@ export class DispatchApiClient {
     await this.response(`/api/v1/settings/repo-projects/${repoPath(repo)}`, { method: "DELETE" });
   }
 
-  listArchitectureSources(): Promise<ArchitectureSource[]> {
-    return this.json<ArchitectureSource[]>("/api/v1/settings/architecture-sources");
+  /** Only the projects that name a default; a project left out names nobody. Human-only. */
+  listProjectDefaultAssignees(): Promise<ProjectDefaultAssignee[]> {
+    return this.json<ProjectDefaultAssignee[]>("/api/v1/settings/project-default-assignees");
   }
 
-  /** `null` when the project has no source: having none is the common answer, not a failure. */
-  getArchitectureSource(project: string): Promise<ArchitectureSource | null> {
-    return this.json<ArchitectureSource | null>(
-      `/api/v1/projects/${pathSegment(project)}/architecture-source`
-    );
-  }
-
-  putArchitectureSource(
+  /** Sets the person a project's unowned work lands on, or clears it with `{assignee: null}`.
+   *  Human-only, and a login nobody has signed in as is refused `400 ASSIGNEE_NOT_ALLOWED`. */
+  putProjectDefaultAssignee(
     project: string,
-    input: { repo: string; branch: string }
-  ): Promise<ArchitectureSource> {
-    return this.send<ArchitectureSource>(
+    input: ProjectDefaultAssigneeInput
+  ): Promise<ProjectDefaultAssignee> {
+    return this.send<ProjectDefaultAssignee>(
       "PUT",
-      `/api/v1/projects/${pathSegment(project)}/architecture-source`,
+      `/api/v1/projects/${pathSegment(project)}/default-assignee`,
       input
     );
   }
 
-  syncArchitectureSource(project: string): Promise<ArchitectureSource> {
+  /** Every project's architecture sources, by project and then in the order each was added. */
+  listArchitectureSources(): Promise<ArchitectureSource[]> {
+    return this.json<ArchitectureSource[]>("/api/v1/settings/architecture-sources");
+  }
+
+  /** The project's sources, one per repository, in the order they were added; `[]` when it has
+   *  none: having none is the common answer, not a failure. */
+  listProjectArchitectureSources(project: string): Promise<ArchitectureSource[]> {
+    return this.json<ArchitectureSource[]>(
+      `/api/v1/projects/${pathSegment(project)}/architecture-sources`
+    );
+  }
+
+  /** Adds `repo` (`owner/name`) as a source of the project, or changes the branch of the source
+   *  it already is. */
+  putArchitectureSource(
+    project: string,
+    repo: string,
+    input: { branch: string }
+  ): Promise<ArchitectureSource> {
+    return this.send<ArchitectureSource>(
+      "PUT",
+      `/api/v1/projects/${pathSegment(project)}/architecture-sources/${repoPath(repo)}`,
+      input
+    );
+  }
+
+  /** Imports one source's model now; the row's `last_error` says whether the import failed. */
+  syncArchitectureSource(project: string, repo: string): Promise<ArchitectureSource> {
     return this.json<ArchitectureSource>(
-      `/api/v1/projects/${pathSegment(project)}/architecture-source/sync`,
+      `/api/v1/projects/${pathSegment(project)}/architecture-sources/${repoPath(repo)}/sync`,
       { method: "POST" }
     );
   }
 
-  async deleteArchitectureSource(project: string): Promise<void> {
-    await this.response(`/api/v1/projects/${pathSegment(project)}/architecture-source`, {
-      method: "DELETE",
-    });
+  async deleteArchitectureSource(project: string, repo: string): Promise<void> {
+    await this.response(
+      `/api/v1/projects/${pathSegment(project)}/architecture-sources/${repoPath(repo)}`,
+      { method: "DELETE" }
+    );
   }
 
   /** The project's component tree with the work attached; 404 SOURCE_NOT_FOUND without a source. */

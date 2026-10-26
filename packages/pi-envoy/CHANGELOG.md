@@ -2,7 +2,82 @@
 
 ## [Unreleased]
 
+### Added
+
+- The agent stream reports the model and thinking level the session runs now, so Dispatch's live
+  view can show and switch them: a `settings` frame carrying the current model (`provider/id`),
+  every model the session lists as available, the configured thinking level `/effort` reports
+  (`null` for the model's default) and the levels `/effort` offers (`thinking: null` for a model
+  with no adjustable thinking), read from the live `AgentSession`'s own getters. Ids are never
+  truncated and the list is never cut. A host that cannot be read (no `AgentRegistry` export, no
+  live session under this id, or a missing getter) sends `reported: false`. The session re-reads
+  the getters on every replay and watch, on `turn_start` and `retry_fallback_applied`, and after a
+  person's typed input runs, before its reply is posted, and publishes the frame only when it
+  changed and a viewer is attached; a getter that throws is logged and never blocks the replay
+  answer. A replay ends with the history, the settings, then the commands; the settings frame is
+  paid for first and whole, and the commands keep the prefix that fits what is left (INFRA-195).
+- The `dispatch` skill this plugin ships teaches the board move as a command: a card moves with
+  `dispatch issue-update --issue <KEY> --before <OTHER>`, which puts it above that issue,
+  `--after <OTHER>`, which puts it below, or both together, which land it between them, where the
+  issues reference spelled out a hand-built `PATCH` carrying a `rank` body. Its reorder rule now
+  names the agent that keeps each project's order — in a Legion deployment the controller, at
+  `notifications.role.legion-<project>-controller` — in place of the retired `backlog-order`
+  address, and says to raise a wrong order on the issue itself where no Legion controller runs
+  (INFRA-188).
+- The `dispatch` command's `architecture-sync` imports every architecture source of the project,
+  one per repository, and prints a line for each, or with `--repo <owner/name>` that one source
+  alone (INFRA-391). Against a Dispatch older than this release,
+  `dispatch architecture-sync --project <KEY>` falls back to that server's single-source sync and
+  prints its one line, and `--repo` needs a Dispatch of this release. The `dispatch` skill this
+  plugin ships says an issue's component ids may come from any of its project's source
+  repositories, and its issues reference gives the per-source output and `--repo`.
+
 ### Fixed
+
+- A live view held open while its session is relaunched with `--resume` now shows the resumed
+  process's model, thinking level and command changes. Two things stopped it. Every process
+  numbered its agent-stream frames from 0, and the page keeps a `settings` or `commands` frame only
+  when its `seq` beats the one it already applied, so it ignored everything the resumed process sent
+  below the earlier process's count: the publisher now seeds `seq` from its clock (milliseconds ×
+  1,000) and never moves it back on a reset, so a later process of the session numbers above every
+  frame an earlier one sent. And the page's relay asks the new process for no replay, only re-arms
+  it with bare watches, so the settings and commands the process read before the first watch never
+  reached the page: a control message that arms a publisher nobody was watching now also sends the
+  settings and commands as they stand (INFRA-195).
+- A pass or a role move that never settles no longer stops the registration heartbeat. Both serial
+  queues (`passes`, `roleMoves`) give each task a deadline, never shorter than the heartbeat
+  interval: past it the caller's call rejects, the queue starts the next task, and the abandoned
+  task is fenced, so its late continuation writes nothing over what ran after it. The heartbeat
+  tick also re-posts the registration itself, outside the queues, while a pass is still running
+  and the last accepted registration is a whole refresh interval old, so a pane whose pass is
+  wedged keeps its `envoy ps` row and stays resolvable for its role instead of being dropped five
+  minutes in. A stall counts as a failed registration: the next healthy tick re-asserts the role
+  and fires the regain hook (`"reregistered"`), which re-runs a Legion claim's readiness. The pane
+  is told once per episode — one notification and one warning line, not one per tick.
+
+- A role the listener granted is no longer pinned to a session that refuses its traffic. When a
+  role move was abandoned at its deadline while its claim was in flight, `envoy_role_set` threw
+  and discarded the grant, so the listener named that session as the role's holder while this
+  process had opened none of the role's notices and no pass knew of a hold to hand back: every
+  task and notice addressed to the role went to a pane that never showed one, for the life of the
+  process. The granted hold is now recorded as a pending hand-back before the throw, so the next
+  pass hands it back, or keeps it for the session that wants it.
+
+- A pass abandoned mid-hand-back no longer takes over the hand-backs a session event left for the
+  move that replaced it. `settleEndedHolds` reads its fence at the top of each loop iteration, now
+  before its `delete` rather than after the hand-back: a `Map` iterator visits entries inserted
+  after it was created, so an abandoned move could adopt a hold a session event had just ended and
+  record it as the role this process holds. The next pass then found that role unwanted and handed
+  it back, which closes every subject another plugin opened while the role was held — subjects only
+  that plugin reopens, on its next session switch or restart.
+
+- A NATS dial that lands after its pass was abandoned no longer becomes the session's shared
+  connection. `ensureConnection` re-checks its fence, the shutdown flag and whether another pass
+  established a connection meanwhile before assigning the shared field, and closes the dial it
+  loses with. A late dial used to displace the connection a newer pass had established: that one
+  held the session's live subscriptions and went unreferenced, so nothing drained it at session
+  end and `maxReconnectAttempts: -1` kept it reconnecting for the life of the process, while the
+  shared field named a connection carrying no subscriptions at all.
 
 - The run-end self-check's prompt counts as PROCEEDING a wait for a message, an answer or an event
   a human already said they will send and that is on its way: such a reply is an event, not an
@@ -58,6 +133,18 @@
   code 0.
 
 ### Changed
+
+- The `envoy` skill this plugin ships and the `envoy_publish` description say a team topic, any
+  `notifications.` topic the stream does not store, reaches a session on a serve port through its
+  machine's listener when that listener subscribes to every topic (`ENVOY_SUBSCRIBE_ALL_TOPICS=1`;
+  the shared hub's listener does not), where they said such a session received none. A session of
+  this plugin holds its own NATS connection and receives such a topic as before (INFRA-122).
+
+- The `envoy` skill is rewritten to the minimum text that carries its instructions (INFRA-353),
+  from 21,146 bytes to about 7,500, with the delivery fields, role-claim lifetime, Legion lanes,
+  Slack, Ghost Wispr and WhatsApp topics and the check-settlement contract moved whole to
+  `references/`. Its topic table now names the Dispatch and `agent.<id>` topics, the two that
+  sessions subscribe to most after GitHub's.
 
 - The `dispatch`, `dispatch-first` and `dispatch-brainstorming` skills are rewritten shorter
   (the dispatch skill and its references from about 20,300 words to 9,400), with detail moved to
@@ -126,6 +213,17 @@
 
 ### Added
 
+- The plugin ships a fifth skill, `asd-ste100`: the ASD-STE100 rules (Simplified Technical
+  English) for text a reader must not misread, which a session reads before it writes text a
+  person reads. It is Legion's copy of the MIT-licensed `danyuchn/asd-ste100-skill` at 32511c69,
+  with its licence and without its linter.
+- `dispatch_read` takes `events` (the issue's last N events) and `all_events` (every one) for an
+  issue read and its `dispatch://KEY/log`, which list the last 10 without either; the `dispatch`
+  command spells them `--events N` and `--all-events`. Both together, or either beside a read
+  that lists no events, are refused before any request. The `dispatch` skill's reading reference
+  names them.
+- `ENVOY_PASS_DEADLINE_MS` sets how long a queued session pass or role move may run before the
+  queue abandons it; the default is the heartbeat interval, or 30 s, whichever is longer.
 - The `dispatch` command's `issue` and `issue-update` take `--repo <owner/name>` (`''` clears), and
   `dispatch read` prints the issue's `Repository:` line. Against a Dispatch server older than the
   repository fields the read prints `Repository: unknown (…)`, with a warning on stderr.

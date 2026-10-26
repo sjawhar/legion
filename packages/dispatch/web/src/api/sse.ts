@@ -16,6 +16,8 @@ import {
   architectureSourcesQuery,
   inboxQuery,
   myRepliesKey,
+  projectArchitectureSourcesQuery,
+  projectDefaultAssigneesQuery,
   projectsQuery,
   userAgentStateQuery,
   userStateQuery,
@@ -27,6 +29,7 @@ const knownEventTypes: Record<EventType, true> = {
   "project.created": true,
   "project.updated": true,
   "settings.repo_project.updated": true,
+  "settings.project_default_assignee.updated": true,
   "settings.architecture_source.updated": true,
   "architecture.synced": true,
   "architecture.sync_failed": true,
@@ -420,6 +423,11 @@ function ownerQueryKeys(event: Event, signedInLogin?: string): (readonly unknown
       ...(event.type === "settings.repo_project.updated" ? [["issue"]] : []),
     ];
   }
+  // The default decides who a later create lands on; no issue already listed moves, so only
+  // the Settings table's own read refreshes.
+  if (event.type === "settings.project_default_assignee.updated") {
+    return [projectDefaultAssigneesQuery().queryKey];
+  }
   if (
     event.type === "settings.architecture_source.updated" ||
     event.type === "architecture.synced" ||
@@ -430,7 +438,7 @@ function ownerQueryKeys(event: Event, signedInLogin?: string): (readonly unknown
     }
     return [
       architectureSourcesQuery().queryKey,
-      ["architecture-source", event.project],
+      projectArchitectureSourcesQuery(event.project).queryKey,
       ["components", event.project],
       // A re-import changes which components exist, so every count in the tree.
       ["architecture", event.project],

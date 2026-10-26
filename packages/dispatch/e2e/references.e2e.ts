@@ -13,6 +13,7 @@ import {
   getIssue,
 } from "./api";
 import { documentEditor } from "./editor";
+import { sql } from "./psql";
 import { resetDatabase } from "./seed";
 import { signIn } from "./users";
 
@@ -319,6 +320,31 @@ test("an issue header's count follows an ask whose question cites it", async ({ 
   await expect(header.getByRole("button", { name: /^Referenced by \(1\)$/ })).toBeVisible({
     timeout: 30_000,
   });
+});
+
+// A database a newer build has written to can hold an edge from a node kind this build does not
+// know. The header counts only the edges its panel can list, and the panel lists them rather than
+// failing on the one it cannot.
+test("an issue's backlinks skip an edge of a node kind this build does not know", async ({
+  page,
+}) => {
+  await createProject({ key: "CORE", name: "Core" });
+  await createProject({ key: "OPS", name: "Operations" });
+  const target = await createIssue({ project: "CORE", title: "Cited by two builds" });
+  const source = await createIssue({ project: "OPS", title: "Citing issue" });
+  await createMessage(source.key, { body: `Waiting on dispatch://${target.key} to land.` });
+  await sql(
+    `insert into refs (from_kind, from_id, to_kind, to_id) values ('future', 'x#y', 'issue', '${target.key}')`
+  );
+
+  await page.goto(`/issues/${target.key}`);
+  const header = page.getByTestId("issue-header");
+  // The issue's own spec document and the message: the unknown edge would make it three.
+  await header.getByRole("button", { name: /^Referenced by \(2\)$/ }).click();
+  const references = header.getByRole("region", { name: "Referenced by" });
+  await expect(references).toContainText(`Message · ${source.key}`);
+  await expect(references).toContainText(`Waiting on dispatch://${target.key}`);
+  await expect(references).not.toContainText("Referenced by unavailable.");
 });
 
 test("an Inbox of twenty asks reads no backlinks until a card is opened", async ({ page }) => {
