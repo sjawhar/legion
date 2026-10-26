@@ -383,11 +383,16 @@ func TestDifferentialCompare(t *testing.T) {
 			flag("refused write", sides)
 		}
 		// A link around one whole image is stored as the image's link attributes, as the editor
-		// stores it; head keeps it when it stores the document as the engine reads it.
+		// stores it; head keeps it when it stores the document as the engine reads it. A document
+		// both revisions refuse - its markdown is outside the Proof schema, so no write of it is
+		// taken at either - loses no link it ever had, and is counted apart, ungated.
 		if links.whole {
-			if head.correct {
+			switch {
+			case head.correct:
 				counts["linked image kept"]++
-			} else {
+			case !base.stores && !head.stores:
+				flag("linked image in a write both refuse", sides)
+			default:
 				flag("lost whole-image link", sides)
 			}
 		}
