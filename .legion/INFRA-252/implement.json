@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-252",
-  "completed": "2026-10-26T18:51:01Z",
+  "completed": "2026-10-26T19:37:29Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2226",
   "proof": [
     {
@@ -140,6 +140,14 @@
       "observed": "All(): 52 dispatch_issues, 53 issue_taken_back, 54 issue_pod_roles_container, 55 issue_ancestry, 55 migrations, no error; store and record ok; child adoption e2e: PASS in 55s on the merged tree",
       "headSha": "afedb19d1ca7254b2da09d55760c74b10cd3f7e5",
       "negativeControl": "the tester's merge of the previous head fd6ddb47 with ad909178 fails every migrating test and the e2e with 'migrations 0054_issue_ancestry.up.sql and 0054_issue_pod_roles_container.up.sql share version 54'"
+    },
+    {
+      "criterion": "Review round 7: roots an older daemon already made of another tree's members are marked at deploy, so the first sweep after the upgrade adopts none of them back; a root that only waited or re-admitted itself stays adoptable",
+      "surface": "migration 0055 applied over a PostgreSQL database seeded as a version-54 daemon left it (store package's migrateThrough), then the store, record, admit and api suites, main's TestBlockedIssuesAreNotStartedAgainstScratchDispatch and scripts/e2e/child-adoption.sh on fresh databases",
+      "command": "cd packages/daemon && LEGION_TEST_PG_DSN=<fresh database> go test -count=1 -run TestTheTreeARootLeftIsBackfilledBy0055 ./internal/store/",
+      "observed": "the outbox hand-over without a run and the orphan whose claim names the old tree get handed_over_from = the old tree; the old root, a key that only prefixes another's event, a root back from backlog with a claim on its own tree, a member still in its tree, and a hand-over event from another source stay ''; store, record, admit, api ok; main's scratch-Dispatch test ok; child adoption e2e PASS in 47s",
+      "headSha": "56a52d9a51ab99982c040f40a0bd25ab8d864b27",
+      "negativeControl": "with 0055's update removed, the test fails: 'LEGION-921 handed_over_from = \"\", want \"LEGION-920\"' and the same for LEGION-922"
     }
   ],
   "filesChanged": [
@@ -182,7 +190,8 @@
     "forward merge of main bc307fb5 (#2188) at dd04f49c458d (PR CONFLICTING): conflicts resolved by meaning in admit/admit.go, api/architect.go, daemon/workflow.go, intake/intake_test.go, record/store.go, record/store_test.go, the architect wake-routing and controller admission references (generated copies rebuilt); migration renumbered 0054_issue_ancestry; workflow.RanAsRoot reads #2188's CarriesRun()||TakenBack in place of handed_over_roots and keeps tree_lifecycles; this branch's hold named 'held under an unreleased child' (the ancestry hold) in code, test and e2e step names, AGENTS.md and skills; three tests where the features meet; resolution posted at https://github.com/sjawhar/legion/pull/2226#issuecomment-6419173601",
     "round 6: record.Issue.HandedOverFrom (column handed_over_from in migration 0054), written by admit readmit for any member leaving another tree, carried or not; workflow.RanAsRoot refuses it ('it was handed over as a root of its own'); TestAnUncarriedOrphanRejoinsItsReadmittedOldTree replaced by TestAHandedOverChildStaysItsOwnTreeWhenItsOldRootIsReadmitted; release refusal row; store round-trip test; AGENTS.md, architect SKILL.md, controller admission.md (generated copies rebuilt); plan.json finding 5",
     "tester round 8: packages/daemon/internal/store/migrations/0054_issue_ancestry.up.sql renamed 0055_issue_ancestry.up.sql (header line updated), after main's 0054_issue_pod_roles_container (#2150); nothing else changed",
-    "generation 3 (re-admission after the contract-37 drain): no code change. Code head stays afedb19d; main 6cdb9995 still ends at migration 0054, so 0055_issue_ancestry collides with nothing; GitHub reports MERGEABLE; required checks at afedb19d: Tests 40369963835 success (lint, typecheck, test), PR Title 40370064190 success."
+    "generation 3 (re-admission after the contract-37 drain): no code change. Code head stays afedb19d; main 6cdb9995 still ends at migration 0054, so 0055_issue_ancestry collides with nothing; GitHub reports MERGEABLE; required checks at afedb19d: Tests 40369963835 success (lint, typecheck, test), PR Title 40370064190 success.",
+    "review round 7: 0055 backfills handed_over_from from processed_events outbox hand-over ids and claims naming another tree (store/migration_0055_test.go); PR body deploy note with a read-only pre-upgrade query for the unmarked population (an orphan a person admitted that never ran a worker)"
   ],
   "trickyParts": [
     "Adoption bumps every adopted record's generation: that is the fence the old self-tree's LingerClose, supervise and issue-suspend rows already check; WorkspaceRemove had none, so it now names its tree.",
@@ -214,7 +223,7 @@
     "Every todo event of an unrecorded issue or a recorded root under an unrecorded Dispatch parent now costs one Dispatch read per ancestor at preparation, labelled or not.",
     "Every event of an unrecorded issue now reads the issues table once at preparation; Dispatch is read only when a parented queued root exists (normally none)."
   ],
-  "round": 10,
+  "round": 11,
   "reviewRound": 3,
-  "codeHead": "afedb19d1ca7254b2da09d55760c74b10cd3f7e5"
+  "codeHead": "56a52d9a51ab99982c040f40a0bd25ab8d864b27"
 }
