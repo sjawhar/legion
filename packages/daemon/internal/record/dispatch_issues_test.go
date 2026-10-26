@@ -98,3 +98,70 @@ func TestDispatchIssuesListsOneProject(t *testing.T) {
 		}
 	})
 }
+
+// The claim on a mirror row carries a fence of its own. An observation that shows the claim
+// writes it only over an older claim, one that does not show it leaves it, and the status fence
+// and the claim fence each move only their own columns: a claim event newer than the row's status
+// moves the claim alone, and an issue event older than that claim but newer than the status moves
+// the status alone.
+func TestTheMirrorsClaimHasAFenceOfItsOwn(t *testing.T) {
+	st := migratedStore(t)
+	records := NewStore()
+	read := func(tx pgx.Tx) DispatchIssueRow {
+		t.Helper()
+		rows, err := records.DispatchIssues(t.Context(), tx, "LEGION")
+		if err != nil || len(rows) != 1 {
+			t.Fatalf("the mirror = %#v, %v; want one row", rows, err)
+		}
+		return rows[0]
+	}
+	inTx(t, st, func(tx pgx.Tx) {
+		must(t, records.PutDispatchIssue(t.Context(), tx, DispatchIssueRow{
+			Key: "LEGION-900", Project: "LEGION", Status: "todo", Seq: 5, ClaimedBy: "user:alice", ClaimSeq: 5}))
+		if got, want := read(tx), (DispatchIssueRow{Key: "LEGION-900", Project: "LEGION", Status: "todo", Blockers: []string{}, Seq: 5, ClaimedBy: "user:alice", ClaimSeq: 5}); !reflect.DeepEqual(got, want) {
+			t.Fatalf("first observation = %#v, want %#v", got, want)
+		}
+
+		// A claim event at 9: the claim moves, the status stays.
+		must(t, records.PutDispatchClaim(t.Context(), tx, "LEGION-900", "session:architect", 9))
+		// An issue event at 7 showing an older claim: the status moves, the claim stays.
+		must(t, records.PutDispatchIssue(t.Context(), tx, DispatchIssueRow{
+			Key: "LEGION-900", Project: "LEGION", Status: "in_progress", Seq: 7, ClaimedBy: "user:alice", ClaimSeq: 7}))
+		if got, want := read(tx), (DispatchIssueRow{Key: "LEGION-900", Project: "LEGION", Status: "in_progress", Blockers: []string{}, Seq: 7, ClaimedBy: "session:architect", ClaimSeq: 9}); !reflect.DeepEqual(got, want) {
+			t.Fatalf("after a newer claim and an older issue event = %#v, want %#v", got, want)
+		}
+
+		// A release older than the claim held, and an issue event that does not show the claim.
+		must(t, records.PutDispatchClaim(t.Context(), tx, "LEGION-900", "", 8))
+		must(t, records.PutDispatchIssue(t.Context(), tx, DispatchIssueRow{Key: "LEGION-900", Project: "LEGION", Status: "testing", Seq: 10}))
+		if got := read(tx); got.ClaimedBy != "session:architect" || got.ClaimSeq != 9 || got.Status != "testing" || got.Seq != 10 {
+			t.Fatalf("after an older release and a view without the claim = %#v, want the claim kept and the status moved", got)
+		}
+
+		// A newer release clears it, and a newer view showing nobody keeps it cleared.
+		must(t, records.PutDispatchClaim(t.Context(), tx, "LEGION-900", "", 11))
+		must(t, records.PutDispatchIssue(t.Context(), tx, DispatchIssueRow{Key: "LEGION-900", Project: "LEGION", Status: "testing", Seq: 12, ClaimSeq: 12}))
+		if got := read(tx); got.ClaimedBy != "" || got.ClaimSeq != 12 {
+			t.Fatalf("after a release = %#v, want nobody at 12", got)
+		}
+	})
+}
+
+// A claim event for a key the mirror has no row of writes nothing: the row needs a status and the
+// blockers, which only an issue's own observation carries. Nor does a claim with no sequence.
+func TestAClaimEventWritesNoRowOfItsOwn(t *testing.T) {
+	st := migratedStore(t)
+	records := NewStore()
+	inTx(t, st, func(tx pgx.Tx) {
+		must(t, records.PutDispatchClaim(t.Context(), tx, "LEGION-901", "user:alice", 4))
+		rows, err := records.DispatchIssues(t.Context(), tx, "LEGION")
+		if err != nil || len(rows) != 0 {
+			t.Fatalf("the mirror after a claim of an unmirrored key = %#v, %v; want no row", rows, err)
+		}
+		must(t, records.PutDispatchIssue(t.Context(), tx, DispatchIssueRow{Key: "LEGION-901", Project: "LEGION", Status: "todo", Seq: 2}))
+		must(t, records.PutDispatchClaim(t.Context(), tx, "LEGION-901", "user:alice", 0))
+		if rows, err = records.DispatchIssues(t.Context(), tx, "LEGION"); err != nil || rows[0].ClaimSeq != 0 || rows[0].ClaimedBy != "" {
+			t.Fatalf("the mirror after a claim with no sequence = %#v, %v; want no claim", rows, err)
+		}
+	})
+}

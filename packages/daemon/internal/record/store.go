@@ -613,7 +613,7 @@ func scannedMark(seq *int64, at *time.Time) EventMark {
 	return mark
 }
 
-const gateColumns = `issue, artifact_id, latest_version, approved_version, approved_seq, approved_at, told_changes_version, told_changes_reason, told_changes_seq, told_changes_at`
+const gateColumns = `issue, artifact_id, latest_version, approved_version, approved_seq, approved_at, told_changes_version, told_changes_reason, told_changes_seq, told_changes_at, coalesce(request_ask, '')`
 
 // scanGate reads a gate row in the shape PutGate writes: an approval's mark only with the approval,
 // a told changes request's reason and mark only with its version. An older daemon, which knows none
@@ -624,7 +624,7 @@ func scanGate(row scanner) (DesignGate, error) {
 	var approvedSeq, toldSeq *int64
 	var approvedAt, toldAt *time.Time
 	if err := row.Scan(&gate.Issue, &gate.ArtifactID, &gate.LatestVersion, &gate.ApprovedVersion, &approvedSeq, &approvedAt,
-		&gate.ToldChangesVersion, &gate.ToldChangesReason, &toldSeq, &toldAt); err != nil {
+		&gate.ToldChangesVersion, &gate.ToldChangesReason, &toldSeq, &toldAt, &gate.RequestAsk); err != nil {
 		return DesignGate{}, err
 	}
 	if gate.ApprovedVersion != nil {
@@ -682,19 +682,83 @@ func (s *Postgres) PutGate(ctx context.Context, tx pgx.Tx, gate DesignGate) erro
 		toldSeq, toldAt, toldReason = nil, nil, ""
 	}
 	_, err := tx.Exec(ctx, `insert into design_gates (issue, artifact_id, latest_version, approved_version, approved_seq, approved_at,
-		told_changes_version, told_changes_reason, told_changes_seq, told_changes_at)
-		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+		told_changes_version, told_changes_reason, told_changes_seq, told_changes_at, request_ask)
+		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 		on conflict (issue) do update set artifact_id = excluded.artifact_id,
 		latest_version = excluded.latest_version, approved_version = excluded.approved_version,
 		approved_seq = excluded.approved_seq, approved_at = excluded.approved_at,
 		told_changes_version = excluded.told_changes_version, told_changes_reason = excluded.told_changes_reason,
-		told_changes_seq = excluded.told_changes_seq, told_changes_at = excluded.told_changes_at`,
+		told_changes_seq = excluded.told_changes_seq, told_changes_at = excluded.told_changes_at, request_ask = excluded.request_ask`,
 		gate.Issue, gate.ArtifactID, gate.LatestVersion, gate.ApprovedVersion, approvedSeq, approvedAt,
-		gate.ToldChangesVersion, toldReason, toldSeq, toldAt)
+		gate.ToldChangesVersion, toldReason, toldSeq, toldAt, nullableText(gate.RequestAsk))
 	if err != nil {
 		return fmt.Errorf("put design gate for %s: %w", gate.Issue, err)
 	}
 	return nil
+}
+
+const rootAskColumns = `issue, ask, coalesce(kind, ''), open, coalesce(waiting_on, ''), seq, by_tree, person_seq, closed_seq, coalesce(closed_by, '')`
+
+func scanRootAsk(row scanner) (RootAsk, error) {
+	var ask RootAsk
+	err := row.Scan(&ask.Issue, &ask.Ask, &ask.Kind, &ask.Open, &ask.WaitingOn, &ask.Seq, &ask.ByTree, &ask.PersonSeq, &ask.ClosedSeq, &ask.ClosedBy)
+	return ask, err
+}
+
+func (s *Postgres) RootAsk(ctx context.Context, tx pgx.Tx, issue, ask string) (*RootAsk, error) {
+	row, err := scanRootAsk(tx.QueryRow(ctx, `select `+rootAskColumns+` from root_asks where issue = $1 and ask = $2`, issue, ask))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read ask %s of %s: %w", ask, issue, err)
+	}
+	return &row, nil
+}
+
+func (s *Postgres) PutRootAsk(ctx context.Context, tx pgx.Tx, ask RootAsk) error {
+	if _, err := tx.Exec(ctx, `insert into root_asks (issue, ask, kind, open, waiting_on, seq, by_tree, person_seq, closed_seq, closed_by)
+		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+		on conflict (issue, ask) do update set kind = excluded.kind, open = excluded.open, waiting_on = excluded.waiting_on,
+		seq = excluded.seq, by_tree = excluded.by_tree, person_seq = excluded.person_seq, closed_seq = excluded.closed_seq,
+		closed_by = excluded.closed_by
+		where root_asks.seq <= excluded.seq`,
+		ask.Issue, ask.Ask, nullableText(ask.Kind), ask.Open, nullableText(ask.WaitingOn), ask.Seq, ask.ByTree, ask.PersonSeq,
+		ask.ClosedSeq, nullableText(ask.ClosedBy)); err != nil {
+		return fmt.Errorf("put ask %s of %s: %w", ask.Ask, ask.Issue, err)
+	}
+	return nil
+}
+
+func (s *Postgres) RootAsks(ctx context.Context, tx pgx.Tx, issues []string) (map[string][]RootAsk, error) {
+	asks := make(map[string][]RootAsk, len(issues))
+	if len(issues) == 0 {
+		return asks, nil
+	}
+	rows, err := tx.Query(ctx, `select `+rootAskColumns+` from root_asks where issue = any($1) order by issue, ask`, issues)
+	if err != nil {
+		return nil, fmt.Errorf("read the asks of %d issues: %w", len(issues), err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		ask, err := scanRootAsk(rows)
+		if err != nil {
+			return nil, fmt.Errorf("read the asks of %d issues: %w", len(issues), err)
+		}
+		asks[ask.Issue] = append(asks[ask.Issue], ask)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("read the asks of %d issues: %w", len(issues), err)
+	}
+	return asks, nil
+}
+
+// nullableText is text, or SQL null when it is empty.
+func nullableText(text string) any {
+	if text == "" {
+		return nil
+	}
+	return text
 }
 
 func (s *Postgres) Slots(ctx context.Context, tx pgx.Tx) ([]Slot, error) {

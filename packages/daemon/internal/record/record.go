@@ -495,7 +495,10 @@ const (
 // seed, tells the architect nothing new; another review does, even at that version with that
 // reason. An approval clears the told record and a changes request clears the approval, so the two
 // marks never stand together: the one that is set is the gate's newest applied review
-// (classify.LatestReview).
+// (classify.LatestReview). RequestAsk is the approval request a registration read open on the
+// document, "" when none was ever read open: a registration that finds none open keeps the one
+// recorded for the same document, and only a registration of another document rebinds it. Its
+// RootAsk says whether the request is still with the person.
 type DesignGate struct {
 	Issue              string
 	ArtifactID         string
@@ -505,7 +508,49 @@ type DesignGate struct {
 	ToldChangesVersion *int
 	ToldChangesReason  string
 	ToldChangesMark    EventMark
+	RequestAsk         string
 }
+
+// RootAsk is the daemon's mirror of Dispatch's state of one ask of a root, last writer wins by the
+// issue's event sequence. Seq is the newest event or read applied to its state (Open, WaitingOn,
+// ClosedSeq, ClosedBy): an older one changes none of it. Kind (AskQuestion, AskApproval, "" until
+// an event names a kind this daemon knows) and ByTree (a session of the root's tree opened it) are
+// facts of its opening, kept whatever order its events arrive in. PersonSeq is the newest act of a
+// person on the ask that would answer a root waiting on that person (workflow's personAnswers):
+// any answer or resolution but an answer of the approval request a gate of the root names, and
+// any reply that does not leave the ask with the person. WaitingOn is the turn the ask was last on,
+// `human` or `agent` ("" when no event has named one); a closed ask keeps it, so an ask Dispatch's
+// settlement restores reopens on that turn. ClosedBy is who closed it, "" while it is open.
+type RootAsk struct {
+	Issue     string
+	Ask       string
+	Kind      string
+	Open      bool
+	WaitingOn string
+	Seq       int64
+	ByTree    bool
+	PersonSeq int64
+	ClosedSeq int64
+	ClosedBy  string
+}
+
+// The ask kinds the mirror knows (RootAsk.Kind): an ordinary question, and the approval request
+// of a document (a design gate's request among them).
+const (
+	AskQuestion = "question"
+	AskApproval = "approval"
+)
+
+// Who closed an ask (RootAsk.ClosedBy).
+const (
+	ClosedByPerson     = "person"
+	ClosedByTree       = "tree"
+	ClosedBySettlement = "settlement"
+	ClosedByOther      = "other"
+)
+
+// WithHuman says whether the ask is open and waits on the person.
+func (a RootAsk) WithHuman() bool { return a.Open && a.WaitingOn == "human" }
 
 // Slot is an active admission slot.
 type Slot struct {
@@ -560,13 +605,19 @@ type HandedOverRoot struct {
 // DispatchIssueRow is one row of the daemon's mirror of Dispatch's issues: what Dispatch last
 // said about an issue of the project, whether or not the daemon records the issue itself. Seq is
 // the Dispatch sequence the observation came from, which fences the write (PutDispatchIssue), and
-// Blockers the keys the issue waits on, in Dispatch's own order.
+// Blockers the keys the issue waits on, in Dispatch's own order. ClaimedBy is who Dispatch showed
+// holding the issue's claim, `<kind>:<id>` ("" for nobody), and ClaimSeq the sequence of the
+// observation that showed it, 0 when none has: the claim carries a fence of its own, since a claim
+// event says nothing of the status or the blockers (PutDispatchClaim). A row written with
+// ClaimSeq 0 leaves the stored claim as it stands.
 type DispatchIssueRow struct {
-	Key      string
-	Project  string
-	Status   string
-	Blockers []string
-	Seq      int64
+	Key       string
+	Project   string
+	Status    string
+	Blockers  []string
+	Seq       int64
+	ClaimedBy string
+	ClaimSeq  int64
 }
 
 // Store contains only transactional operations. The caller owns each transaction so intake can
@@ -595,9 +646,17 @@ type Store interface {
 	PutRepoNote(ctx context.Context, tx pgx.Tx, note RepoNote) error
 	// PutDispatchIssue writes row into the mirror of Dispatch's issues, fenced on the Dispatch
 	// sequence: a row already holding an observation at least as fresh keeps what it has, so a
-	// slower observation never overwrites a faster one. A row whose Seq is zero — a fact the
+	// slower observation never overwrites a faster one. The claim is fenced apart, on ClaimSeq: a
+	// row carrying a claim (ClaimSeq above zero) writes it only over an older claim, and one
+	// carrying none leaves the stored claim as it stands. A row whose Seq is zero — a fact the
 	// daemon minted from its own record, which Dispatch never said — writes nothing at all.
 	PutDispatchIssue(ctx context.Context, tx pgx.Tx, row DispatchIssueRow) error
+	// PutDispatchClaim writes holder (`<kind>:<id>`, "" for nobody) as key's claim at seq, over an
+	// older claim only, and touches nothing else of the row. A key the mirror has no row of
+	// writes nothing: a claim event says nothing of the status or the blockers a row needs, and
+	// the first observation of the issue (its events, the boot listing, the periodic re-read)
+	// carries the claim Dispatch shows then. A seq of zero writes nothing.
+	PutDispatchClaim(ctx context.Context, tx pgx.Tx, key, holder string, seq int64) error
 	// DispatchIssues is every mirrored row of the Dispatch project key project, by key: both
 	// consumers read the whole project in one query and judge what is blocked in memory.
 	DispatchIssues(ctx context.Context, tx pgx.Tx, project string) ([]DispatchIssueRow, error)
@@ -636,6 +695,13 @@ type Store interface {
 	// gate and each copy a hand-over carried to a child of its tree.
 	GatesForArtifact(ctx context.Context, tx pgx.Tx, artifactID string) ([]DesignGate, error)
 	PutGate(ctx context.Context, tx pgx.Tx, gate DesignGate) error
+	// RootAsk is the mirror row of ask on issue, nil when it has none.
+	RootAsk(ctx context.Context, tx pgx.Tx, issue, ask string) (*RootAsk, error)
+	// PutRootAsk writes ask's mirror row, unless the stored row's Seq is newer than ask's: the
+	// caller merges an event into the row it read, and a row it did not read is never rolled back.
+	PutRootAsk(ctx context.Context, tx pgx.Tx, ask RootAsk) error
+	// RootAsks is the mirror rows of each of issues, by issue and then ask, in one read.
+	RootAsks(ctx context.Context, tx pgx.Tx, issues []string) (map[string][]RootAsk, error)
 	Slots(ctx context.Context, tx pgx.Tx) ([]Slot, error)
 	PutSlot(ctx context.Context, tx pgx.Tx, slot Slot) error
 	ReleaseSlot(ctx context.Context, tx pgx.Tx, issue string) error
