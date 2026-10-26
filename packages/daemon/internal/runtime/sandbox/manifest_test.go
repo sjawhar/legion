@@ -771,15 +771,16 @@ func mustRead(t *testing.T, path string) []byte {
 // The roles of one issue pod share the pod's network namespace, the workspace path, the
 // Oh My Pi profile path and the rest of the issue's scratch, and Oh My Pi's browser broker lock is
 // an abstract unix socket named from the lock path under its state root: one state root would
-// make it one name in every container, the first role's lock blocking every other role's broker.
+// make it one name across every role of the pod, the first role's lock blocking every other role's
+// broker.
 // So each role's agent is told a XDG_STATE_HOME of its own, its own directory under the scratch's
 // `state` (`/legion/scratch/state/<role>`), differing from every other role's, and the
 // controller's agent one by the same rule; workspace-init, which runs alone, keeps the plain
 // home-directory state home. The value is on the issue's volume, deliberately: Oh My Pi's logs,
 // Chromium's profiles and the installed plugin generation are charged to neither the pod's memory
-// nor the gigabyte of ephemeral storage the container is admitted with, and they outlive a role
-// container's restart (an issue's disk is its pod's own and goes with the pod; the controller's is
-// its Sandbox's and outlives its pod).
+// nor the pod's ephemeral storage, and they outlive a restart of the pod's launcher container (an
+// issue's disk is its pod's own and goes with the pod; the controller's is its Sandbox's and
+// outlives its pod).
 // Which mount holds it is the argument above, not housekeeping: a state home reached through a
 // sub-path mount, or one overlapping the workspace or uv's directories, is a directory whose
 // contents are no longer the role's alone, and the broker-lock reasoning quietly stops holding.
@@ -941,7 +942,7 @@ func TestTheRuntimeTellsTheShimEveryScratchDirectoryItMakes(t *testing.T) {
 // uv links a project's .venv, in an issue's workspace on the issue's volume, to an interpreter
 // under UV_PYTHON_INSTALL_DIR, and installs into it from UV_CACHE_DIR. Both are on the volume's own
 // mount (no other mount covering them) and outside the workspace, whose tree is the project's, so
-// every role container of the pod runs the .venv as it is and reuses what another role of the pod
+// every role of the pod runs the .venv as it is and reuses what another role of the pod
 // downloaded. No later pod reuses any of it: the disk is the pod's own and dies with it
 // (INFRA-80), so a second pod of the issue downloads afresh. The cache is at the same path in
 // every pod, and the interpreter directory is the issue's, so two pods of one issue name the same

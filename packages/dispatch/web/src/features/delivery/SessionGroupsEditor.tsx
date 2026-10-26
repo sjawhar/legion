@@ -16,7 +16,9 @@ import {
   textMutedOnSurface,
   textPrimaryOnSurface,
 } from "../../theme/classes";
+import { AgentName, useAgentText } from "../refs/AgentName";
 import { useDialog } from "../shell/useDialog";
+import { storedSessionTitle } from "./lib/sessionTitles";
 
 const sectionLabel = `text-xs tracking-wide uppercase ${textMutedOnSurface}`;
 const fieldClass = `h-8 min-w-0 flex-1 rounded border px-2 text-sm ${inputClasses(true)} ${textPrimaryOnSurface}`;
@@ -26,18 +28,19 @@ const fieldClass = `h-8 min-w-0 flex-1 rounded border px-2 text-sm ${inputClasse
  *  second click cannot race the one request that decides the membership. */
 function GroupCard({
   group,
-  label,
+  storedTitle,
   selected,
   pending,
   write,
 }: {
   group: DeliverySessionGroup;
-  label: (session: string) => string;
+  storedTitle: (session: string) => string | undefined;
   selected: readonly string[];
   pending: boolean;
   write: (change: () => Promise<unknown>) => void;
 }): ReactNode {
   const id = useId();
+  const text = useAgentText();
   const [name, setName] = useState(group.name);
   const addable = selected.filter((session) => !group.sessions.includes(session));
   return (
@@ -69,11 +72,13 @@ function GroupCard({
             className={`flex items-center gap-1 rounded border px-2 py-0.5 text-xs ${borderStrong}`}
             key={session}
           >
-            <span className="max-w-48 truncate" title={session}>
-              {label(session)}
-            </span>
+            <AgentName
+              className="max-w-48 truncate"
+              sessionId={session}
+              storedTitle={storedTitle(session)}
+            />
             <button
-              aria-label={`Remove ${label(session)}`}
+              aria-label={`Remove ${text.sessionText(session, storedTitle(session))}`}
               className={dismissButtonText}
               disabled={pending}
               onClick={() =>
@@ -110,9 +115,10 @@ function GroupCard({
 
 /** The Delivery page's session-groups editor, opened from the Parent agent facet: the window's
  *  sessions with their titles, pull request counts and groups, to select and name as a new group,
- *  and every group, to rename, add the selected sessions to, remove members from, or delete. A
- *  member no pull request of the window names shows by its id. A save reaches the page's live views
- *  as Dispatch's own delta, so it refreshes only the `["delivery"]` reads that are not live (an open
+ *  and every group, to rename, add the selected sessions to, remove members from, or delete. Every
+ *  session is an `AgentName`; a member no pull request of the window names has no stored title, so
+ *  it reads by its registry title, else its short id. A save reaches the page's live views as
+ *  Dispatch's own delta, so it refreshes only the `["delivery"]` reads that are not live (an open
  *  run's drill-down), and a refusal shows as the server wrote it. A dialog (`useDialog`), at the
  *  right edge as the drill-down is, open while it is mounted. */
 export function SessionGroupsEditor({
@@ -143,16 +149,16 @@ export function SessionGroupsEditor({
     },
   });
 
-  const sessionLabel = (session: string) => {
-    const title = titles[session];
-    return title === undefined || title === session ? session : `${title} (${session})`;
-  };
+  const text = useAgentText();
+  const storedTitle = (session: string): string | undefined => storedSessionTitle(titles, session);
   const groupOf = new Map<string, string>();
   for (const group of groups) {
     for (const session of group.sessions) groupOf.set(session, group.name);
   }
   const sessions = Object.keys(counts).sort(
-    (a, b) => (counts[b] ?? 0) - (counts[a] ?? 0) || sessionLabel(a).localeCompare(sessionLabel(b))
+    (a, b) =>
+      (counts[b] ?? 0) - (counts[a] ?? 0) ||
+      text.sessionText(a, storedTitle(a)).localeCompare(text.sessionText(b, storedTitle(b)))
   );
   const toggle = (session: string) =>
     setSelected((current) =>
@@ -200,20 +206,23 @@ export function SessionGroupsEditor({
             const inGroup = groupOf.get(session);
             return (
               <li className="flex items-center gap-2 text-sm" key={session}>
-                <input
-                  aria-label={sessionLabel(session)}
-                  checked={selected.includes(session)}
-                  id={`${id}-session-${session}`}
-                  onChange={() => toggle(session)}
-                  type="checkbox"
+                {/* The checkbox's label keeps the name; the agent's live link sits beside it. */}
+                <AgentName
+                  className="flex min-w-0 flex-1 items-center"
+                  control={(agentName) => (
+                    <label className="flex min-w-0 flex-1 items-center gap-2" title={session}>
+                      <input
+                        checked={selected.includes(session)}
+                        onChange={() => toggle(session)}
+                        type="checkbox"
+                      />
+                      <span className="min-w-0 truncate">{agentName}</span>
+                    </label>
+                  )}
+                  kind="control"
+                  sessionId={session}
+                  storedTitle={storedTitle(session)}
                 />
-                <label
-                  className="min-w-0 flex-1 truncate"
-                  htmlFor={`${id}-session-${session}`}
-                  title={session}
-                >
-                  {sessionLabel(session)}
-                </label>
                 <span className={`shrink-0 text-xs ${textMutedOnSurface}`}>
                   {count} PR{count === 1 ? "" : "s"}
                   {inGroup === undefined ? "" : ` · ${inGroup}`}
@@ -255,9 +264,9 @@ export function SessionGroupsEditor({
             <GroupCard
               group={group}
               key={`${group.id}:${group.updated_at}`}
-              label={sessionLabel}
               pending={save.isPending}
               selected={selected}
+              storedTitle={storedTitle}
               write={(change) => save.mutate(change)}
             />
           ))}

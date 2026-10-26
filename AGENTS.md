@@ -252,11 +252,49 @@ daemon reads the approval; it never writes one). A later spec version closes the
 someone approves the new version, which Dispatch does in the human's own name when the version is
 his answer to a decision block and that answer is the whole change since the version he approved
 (it records an `approved` review pinned to the new version and emits `artifact.approved`, and the
-gate reopens on that event), and a `changes_requested` review closes it with the reviewer's
-reason. `gates.design: off` is the only way past the gate without a human review — Legion has no
-operator approve command; with `off` the root architect is told so in its system prompt and adds
-no approval step. Whether a human must approve a pull request before it merges is the repository's
-own branch-protection or CODEOWNERS rule: Legion neither reads nor writes it. Only retro's commits
+gate reopens on that event), and a `changes_requested` review closes it with the reviewer's reason.
+
+register_gate reads the issue's Dispatch event sequence, then the document's approval, and refuses
+a version above the latest one Dispatch shows (`VERSION_NOT_IN_DISPATCH`), since no person's review
+could open a gate on a version Dispatch never wrote; the gate is registered at the newer of the
+caller's version and Dispatch's. A registration Dispatch already shows approved at its latest
+version opens the gate at registration, and the root starts planning; one Dispatch shows changes
+requested at its latest version closes it with the architect told. A registration that finds the
+gate of its document already open at that version tells the architect nothing again. A
+registration older than the gate's newest version changes nothing but still queues the gate seed
+at the gate's version, and one whose read of Dispatch began before the review the gate already
+holds at that version is the older reader — the person acted after that read — so the gate keeps
+the review it holds: a told changes request is not told again and an approval is not rolled back.
+A gate seed that reads the document below the version it was queued at finds a gate above every
+version Dispatch wrote (a daemon that did not check the caller's version could record one), and
+resets the gate to Dispatch's version with the review it read there. The daemon identifies a
+review by its version, its reason and where Dispatch recorded it: the sequence of its `artifact.*`
+event on the issue (Dispatch's approval read gives it as `seq`), or Dispatch's time of it (`at`)
+when a read gives no sequence — a review Dispatch recorded before it kept the sequence, or a read
+of a Dispatch that does not give it. Two reads of one review are merged, so the gate keeps the
+sequence once any read gave it. The gate records where Dispatch put the review it last applied —
+the approval it holds (`approved_seq`, `approved_at`) or the changes request it records as told
+(`told_changes_seq`, `told_changes_at`), never both, since each clears the other — and a review of
+that version delivered after a newer one changes no gate state: an approval that arrives after the
+changes request which superseded it, and a changes request that arrives after a newer approval.
+Neither does a review of a version below the gate's latest. Such a changes request is still the
+person's words, so it is told to the architect with its own version and reason unless an approval
+came after it; that is a request of an older version delivered after the next one, and one a newer
+request at its version superseded. Each changes request reaches the architect once per generation,
+whichever of the live event, a registration's read or the gate seed's read carries it and in
+whatever order: the notice's transaction marks the review processed by its issue, generation,
+document, version and Dispatch's time of it (`at`, which the live event and every read carry), and
+a review already marked is not told again; a later review that repeats an earlier one's version
+and wording is a new act and is told. A registration of a newer version keeps the gate's approval
+of an older one, as a version event does, so a late request that approval answered stays answered.
+
+`gates.design: off` is the only way past the gate without a human review — Legion has no operator
+approve command; with `off` the root architect is told so in its system prompt and adds no approval
+step, a registration approves the gate whatever it held, and no artifact event moves the gate, so
+an approval does not open a carried copy that was closed before the switch either; a changes
+request is still told to the architect, once, without closing the gate. Whether a human
+must approve a pull request before it merges is the repository's own branch-protection or
+CODEOWNERS rule: Legion neither reads nor writes it. Only retro's commits
 may sit above the reviewer's approved head, those that change `docs/solutions/` and its removal of
 `.legion/<issue>/`: READY compares the review round's recorded approved head with READY's head on
 GitHub, as the implement App, and refuses anything else above it (`READY_UNREVIEWED_CHANGE`, naming
