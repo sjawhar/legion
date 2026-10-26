@@ -1331,13 +1331,6 @@
   server on a host in another zone answered that zone's offset (`…T08:11:37-07:00`) and a reader
   comparing two timestamps as strings, as the dashboard and its tests do, ordered them by the
   text rather than the moment. A deployment that already ran with `TZ=UTC` sees no change.
-- A Dispatch page in Firefox now shows what changed while its live event stream was reconnecting,
-  such as a session's answer to a model switch, without waiting for the stream's heartbeat.
-  Firefox opened the stream only once its first byte arrived, and a stream with no backlog and no
-  new event sent none until the first heartbeat, fifteen seconds later: until then the page stayed
-  "Reconnecting…" and skipped the refresh a reconnect owes every view. `GET /api/v1/events` now
-  sends an SSE comment, `: open`, with its headers, so the stream opens at once in every browser.
-
 - A browser that opens a document while Dispatch closes that document's room now keeps getting the
   document's edits. Dispatch closes a room when an issue closes, when it evicts a stale or failed
   room, and at shutdown, and each close takes ygo a moment: it closes the browsers it found, waits

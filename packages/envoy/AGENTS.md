@@ -2064,10 +2064,12 @@ from a reuse:
   lapsed mid-write), a 408, a 429 and a panic release the key, so the next attempt runs the
   handler again - unless the request had already committed something (below). One route keeps no
   answer at all: `POST /api/v1/me/agent-tokens`, whose answer carries the plaintext token, which
-  `request_keys` would otherwise hold for 24 hours beside `agent_tokens`' hash. A repeat of a keyed
-  mint, its answer lost or not, is `409 KEY_COMMITTED`, never a replay of the token, and no second
-  token is minted; a route whose answer holds a credential is the one exception to "a 2xx or a 4xx
-  is stored and replayed", and the mint is the one such route. An answer past
+  `request_keys` would otherwise hold for 24 hours beside `agent_tokens`' hash. A repeat of a
+  keyed mint that minted is `409 KEY_COMMITTED` once the first has finished (`409 KEY_IN_FLIGHT`
+  while it still runs), never a replay of the token, and no second token is minted; a mint
+  refused with a 4xx commits nothing, so its key is released and a repeat runs it again. A route
+  whose answer holds a credential is the one exception to "a 2xx or a 4xx is stored and
+  replayed", and the mint is the one such route. An answer past
   1 MiB is answered in full but kept as its status alone, and its replay is that status with the
   body `ANSWER_NOT_KEPT` (`IDEMPOTENCY_ANSWER_NOT_KEPT`): the write ran, and the client reads what
   it wrote again.
@@ -2084,8 +2086,8 @@ from a reuse:
   by the first repeat past the lease, `attempt + 1`; every write the holder makes to the row is
   scoped to its own attempt, so a holder that was only slow changes nothing once it has lost the
   key.
-- A write that also mutates foreign state keeps its own recovery point (Brandur Leach,
-  "Implementing Stripe-like Idempotency Keys in Postgres"): it commits what it made into the row in
+- A write that also mutates foreign state keeps its own recovery point ("Implementing Stripe-like
+  Idempotency Keys in Postgres"): it commits what it made into the row in
   its own transaction (`bindRequestKeyRecovery`), and a repeat that finds the point is answered by
   its route's `keyedReplay` rather than from the stored bytes or a `KEY_COMMITTED`, however its
   first request ended (finished, lapsed, or released after a 5xx): whatever delivery is still owed
@@ -2110,11 +2112,10 @@ resends only against a Dispatch it has seen answer with the echo, or whose `/hea
 
 A key is kept 24 hours (`IDEMPOTENCY_KEY_TTL_MS`): the suggestion-outcome sweep's pass deletes
 every older row (`sweepRequestKeys`), a row a dead process left in flight with it, and a repeat
-that finds an older row not yet swept treats the key as unused. The two hand-written key paths
-before it are gone: the single-session send's table, which this release added and never shipped,
-and `broadcast_idempotency_keys` (migration `0055`), which this release neither reads nor writes
-and a later release drops. Neither send route takes a body `idempotency_key` any more; the header
-carries the key.
+that finds an older row not yet swept treats the key as unused. The hand-written key path before
+it is gone: `broadcast_idempotency_keys` (migration `0055`), which this release neither reads nor
+writes and a later release drops. Neither send route takes a body `idempotency_key` any more; the
+header carries the key.
 
 ## Targeted Dispatch messages
 
