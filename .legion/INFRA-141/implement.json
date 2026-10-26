@@ -2,35 +2,38 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-141",
-  "completed": "2026-10-26T10:27:09Z",
-  "round": "generation 3, review 5650228351 at 4da93e17 (one Minor regression from dc06110d), narrowed by the architect to one change; no merge of main (MERGEABLE)",
+  "completed": "2026-10-26T11:07:58Z",
+  "round": "generation 3, review 5650773083 at b7250b58: the interest read's classification turned around per the architect's ruling of 10:43Z; no merge of main (MERGEABLE)",
   "proof": [
     {
-      "criterion": "GET /v1/sessions refuses its listing with the 503 only when a session's interest read did not answer; a session whose id the interest bucket refuses is listed with no topics (and logged), while GET /v1/registry/<id> and GET /v1/interests/<id> keep the 413/400 for that key",
-      "surface": "the real envoy-listener binary built at this head against a real NATS; a session record published raw to $KV.envoy_sessions under a 3,987-byte key (served by envoy_sessions, past envoy_interests' 3,974-byte get limit) beside a normal session ses_ok; driven with curl",
-      "command": "bash smoke.sh listener-new: GET /v1/sessions; GET /v1/registry/<3987-byte id>; count 'session listed with no topics'; then bash stop.sh listener-new: NATS stopped with an interest-cache miss, GET /v1/sessions",
-      "observed": "GET /v1/sessions 200 listing the 3,987-byte session with topics null and ses_ok with [notifications.agent.ses_ok, notifications.role.reviewer]; GET /v1/registry/<3987-byte id> 413 {\"error\":\"too large to publish whole: a key of 3987 bytes, past 3974\"}, no Retry-After; 1 WARN line; with NATS stopped and a cache miss, GET /v1/sessions 503 {\"error\":\"envoy: the message bus did not answer: nats: outbound buffer limit exceeded\"}, Retry-After: 1",
-      "headSha": "38feffb0c7a13af12428a4cc65ad2da9eec8c795",
-      "negativeControl": "The same rig with the listener from the previous head 76e46d40: GET /v1/sessions 413 {\"error\":\"too large to publish whole: a key of 3987 bytes, past 3974\"} with no rows, before and after NATS was stopped"
+      "criterion": "An interest read counts as answered only for its named answers (no key, a key the bucket refuses, a record this build cannot decode); every other error, a raw *net.OpError write error included, refuses GET /v1/sessions with the 503 and Retry-After: 1",
+      "surface": "go test of ./cmd/listener against the in-process NATS and the listener's real HTTP handlers, the interest bucket wrapped so its Get returns &net.OpError{Op: write, Err: EPIPE} (the test seam the existing stallSessionReads uses; no production hook)",
+      "command": "cd packages/envoy && go test ./cmd/listener -count=3 -run '^TestAnInterestReadFailingWithARawSocketErrorIsTheBusNotAnswering$' -v",
+      "observed": "3 of 3 pass: before the break both routes answer 200 naming the session; after it GET /v1/sessions and GET /v1/registry/<id> answer 503 with the busUnansweredPrefix body naming 'write tcp: write: broken pipe' and Retry-After: 1",
+      "headSha": "f804579ef795590a3979d1a5d5e29d3573a4379a",
+      "negativeControl": "go test -overlay with api.go from 1476cbdc: '/v1/sessions with the interest read failing on a broken pipe: status 200, body [{\"session_id\":\"ses_interest_read_broken_pipe\",…\"topics\":null…}]; want 503' (the registry subtest passed there already)"
     },
     {
-      "criterion": "Pinned by a test that fails before the fix; nothing else changes",
+      "criterion": "The named answers still list on the real binary, and a read that did not answer still refuses the list",
+      "surface": "the real envoy-listener binary built at this head against a real NATS; ses_ok subscribed, ses_bad's interest record overwritten raw with 'not json at all', ses_bare's interest record deleted, and a session published raw under a 3,987-byte key; then NATS stopped",
+      "command": "bash smoke.sh listener-new: GET /v1/sessions with the bus up; stop NATS; GET /v1/sessions",
+      "observed": "bus up: 200 listing the 3,987-byte session, ses_bad and ses_bare with topics null and ses_ok with its topics; NATS stopped: 503 {\"error\":\"envoy: the message bus did not answer: nats: outbound buffer limit exceeded\"}, Retry-After: 1",
+      "headSha": "f804579ef795590a3979d1a5d5e29d3573a4379a",
+      "negativeControl": "The previous head's binary answered the same 3,987-byte case 413 with no rows at 76e46d40 (previous round's control); here the stopped bus is the case the list must refuse"
+    },
+    {
+      "criterion": "The suites stay green, and the sweep finds no other allowlist of did-not-answer errors",
       "surface": "go test against the in-process NATS; scripts/e2e-local.sh against the real binary",
-      "command": "cd packages/envoy && go test ./cmd/listener -count=1 -v -skip <the four testpg tests>; go test ./internal/store ./internal/integration -count=1; bash scripts/e2e-local.sh",
-      "observed": "cmd/listener ok 336.152s, no --- FAIL; --- PASS TestTheSessionListKeepsASessionWhoseIDTheInterestBucketRefuses (too-long legacy id and ses:bad: list 200, registry and interests 413/400 with no Retry-After), TestTheInterestReadRoutesAnswerABusThatStoppedAnsweringInsideTheBudget (frozen bus still 503), TestAnUnreadableInterestRecordIsAnsweredAsUnreadable and the tester's TestAnUnreadableInterestRecordIsNotAnsweredAsTheBusNotAnswering; internal/store ok 18.847s; internal/integration ok 97.184s; e2e-local exit 0, bus-down send 503 in 3.503147 s, client EnvoyApiError 503; build, vet, gofmt and check-private-names.sh clean",
-      "headSha": "38feffb0c7a13af12428a4cc65ad2da9eec8c795",
-      "negativeControl": "go test -overlay with the pre-fix api.go: TestTheSessionListKeepsASessionWhoseIDTheInterestBucketRefuses fails 'GET /v1/sessions: status 413, body {\"error\":\"too large to publish whole: a key of 3987 bytes, past 3974\"}; want 200 listing every session'"
+      "command": "cd packages/envoy && go test ./cmd/listener -count=1 -v -skip <the four testpg tests>; go test ./internal/store ./internal/session ./internal/integration -count=1; bash scripts/e2e-local.sh",
+      "observed": "cmd/listener ok 331.032s, no --- FAIL (incl. TestTheSessionListKeepsASessionWhoseIDTheInterestBucketRefuses, TestTheInterestReadRoutesAnswerABusThatStoppedAnsweringInsideTheBudget, TestAnUnreadableInterestRecordIsAnsweredAsUnreadable and the tester's tests); internal/store ok 18.410s, internal/session ok 7.478s, internal/integration ok 97.243s; e2e-local exit 0, bus-down send 503 in 3.503812 s, client EnvoyApiError 503; build, vet, gofmt, check-private-names.sh clean. Sweep: the send target read, senderStamp, role resolution and release, GET /v1/roles/<role>, the registry route's session read and GET /v1/interests/<id> already name their answers and send every other error to writeBusUnavailable/refuseBusUnavailable (senderStamp carries on for any error by design); interestReadDidNotAnswer was the only allowlist",
+      "headSha": "f804579ef795590a3979d1a5d5e29d3573a4379a",
+      "negativeControl": "interestReadDidNotAnswer's eight-error allowlist at 1476cbdc listed a broken-pipe read as answered (the overlay failure above)"
     }
   ],
   "filesChanged": [
-    "packages/envoy/cmd/listener/api.go — interestReadDidNotAnswer (context deadline/cancel, nats.ErrTimeout, ErrConnectionClosed, ErrConnectionReconnecting, ErrConnectionDraining, ErrReconnectBufExceeded, ErrNoResponders); sessionInfoFor returns the row with every other error; sessionsHandler refuses only on a read that did not answer and logs each session listed without topics; comments",
-    "packages/envoy/internal/store/kv.go — Registry.Logger(), so the handler logs through the listener's own logger without a signature change",
-    "packages/envoy/cmd/listener/interest_key_refused_list_test.go (new)",
-    "packages/envoy/AGENTS.md, docs/architecture.md, CHANGELOG.md — the /v1/sessions rule"
-  ],
-  "trickyParts": [
-    "testnats.LegacyKeys(bus.SessionBucket)'s readable key (3,969 bytes) fits envoy_interests' 3,974-byte limit and is not refused; the unreadable one (3,987 bytes) is the session the cache lists and the interest bucket refuses, so the test uses both.",
-    "With NATS stopped, a cache-miss read returns nats.ErrReconnectBufExceeded at once (ReconnectBufSize = -1), which the predicate counts as not answering: the list is still the 503."
+    "packages/envoy/cmd/listener/api.go — interestReadDidNotAnswer deleted; interestReadAnswered (store.ErrMalformedInterest, bus.ErrRefused); sessionInfoFor and sessionsHandler refuse on every other error; WARN only for a refused key; comments corrected (no ErrTimeout or ErrConnectionReconnecting on this path)",
+    "packages/envoy/cmd/listener/interest_read_socket_error_test.go (new)",
+    "packages/envoy/AGENTS.md (/v1/sessions row), docs/architecture.md:57, CHANGELOG.md (INFRA-141 bullet)"
   ],
   "deviations": [
     "The retro notes drafted before the send-back are held outside the workspace for the next retro."
