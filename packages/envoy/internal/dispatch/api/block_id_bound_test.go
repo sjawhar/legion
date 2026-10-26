@@ -170,3 +170,37 @@ func TestACommentCitingABlockIDPastTheBoundPosts(t *testing.T) {
 		t.Fatalf("the comment's references = %q, want only its issue", kinds)
 	}
 }
+
+// A document whose own reference key is long - a name of 2680 incompressible characters, which
+// main stores, since its ref_key still fits artifacts_ref_key_key - takes its upload and later
+// edits as main does: each stores its version. A block node's id is `<ref_key>#<block id>`, so
+// such a key leaves no room in document_blocks' node_id key even for a minted 36-byte paragraph
+// id; the block index must not turn that into a refusal of the document's writes.
+func TestADocumentWhoseReferenceKeyLeavesNoRoomForABlockIDIsStillWritten(t *testing.T) {
+	_, handler, database := browserDocumentService(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Long document name", "Context paragraph.\n")
+	name := randomBlockID(t, 2680) + ".md"
+
+	uploaded := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/artifacts", map[string]any{
+		"name": name, "content": "A paragraph of the long-named document.\n",
+	}, "alice")
+	if uploaded.Code != http.StatusCreated {
+		t.Fatalf("upload a document named with 2680 characters: status=%d body=%.400s, want 201 as main answers", uploaded.Code, uploaded.Body.String())
+	}
+	artifact := decodeBody[struct {
+		Artifact model.Artifact `json:"artifact"`
+	}](t, uploaded).Artifact
+	if edited := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+artifact.ID+"/edits", map[string]any{
+		"ops": []map[string]string{{"op": "insert", "after": "end", "markdown": "An agent's line."}},
+	}, "alice"); edited.Code != http.StatusOK {
+		t.Fatalf("edit the long-named document: status=%d body=%.400s", edited.Code, edited.Body.String())
+	}
+	var versions int
+	if err := database.Pool.QueryRow(context.Background(),
+		`select count(*) from artifact_versions where artifact_id = $1`, artifact.ID).Scan(&versions); err != nil {
+		t.Fatal(err)
+	}
+	if versions != 2 {
+		t.Fatalf("the long-named document has %d versions after its upload and one edit, want 2", versions)
+	}
+}
