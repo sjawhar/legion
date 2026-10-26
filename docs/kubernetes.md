@@ -1469,11 +1469,14 @@ its uid and so its volume. In this order:
    `internal/store/tree_lifecycle.go`), and otherwise deletes it in the foreground, its volume and
    the sessions on it with it. A label written after the dump can name a tree the dump never
    recorded, so the Sandbox's age does not tell which Sandboxes the sweep would take; its label
-   and the restored record do. Read each issue's home from the restored database, with the earlier
-   release's own `IssueSandboxHome` rule: the issue's own key while a hand-over of it is pending,
-   otherwise the tree its `issues` row records while that tree's lifecycle is open, or, for a tree
-   with no lifecycle, while the issue waits as a handed-over root or lingers; nothing otherwise, and
-   nothing for an issue the dump does not hold. Each key is written as the label spells it
+   and the restored record do. Read from the restored database the tree each issue's Sandbox is to
+   carry, with the earlier release's own `IssueSandboxHome` rule: the issue's own key while a
+   hand-over of it is pending, otherwise the tree its `issues` row records while that tree's
+   lifecycle is open, or, for a tree with no lifecycle, while the issue waits as a handed-over root
+   or lingers; nothing otherwise, and nothing for an issue the dump does not hold. One case differs
+   from the home: a pending hand-over whose source tree (the tree the `issues` row records) is
+   still live is to carry that source tree, not the issue's own key, since the source root can
+   still reopen and cancel the hand-over (below). Each key is written as the label spells it
    (`labelValue` in `internal/runtime/sandbox/names.go`): the key itself up to 63 characters, and
    past that the lowercased key's first 54, a dash, and 8 hex of its SHA-256:
 
@@ -1481,7 +1484,9 @@ its uid and so its volume. In this order:
    psql '<postgres_dsn>' -XAt -F ' ' -v project='<project>' > homes.txt <<'SQL'
    with homes as (
      select i.key, case
-         when exists (select 1 from handovers h where h.issue = i.key and not h.cancelled and h.tree = i.tree) then i.key
+         when exists (select 1 from handovers h where h.issue = i.key and not h.cancelled and h.tree = i.tree) then
+           case when exists (select 1 from tree_lifecycles l where l.project = :'project' and l.tree = i.tree
+                               and l.cleanup_confirmed_at is null) then i.tree else i.key end
          when exists (select 1 from tree_lifecycles l where l.project = :'project' and l.tree = i.tree) then
            case when exists (select 1 from tree_lifecycles l where l.project = :'project' and l.tree = i.tree
                                and l.cleanup_confirmed_at is null) then i.tree else '' end
@@ -1508,8 +1513,8 @@ its uid and so its volume. In this order:
    ```
 
    Then, for each issue Sandbox: delete it, leaving its volume, where its issue has no home; keep
-   its tree label where that tree is live in the restored database or is its issue's home; and
-   otherwise set the label to its issue's home:
+   its tree label where that tree is live in the restored database or is the tree `homes.txt`
+   names; and otherwise set the label to that tree:
 
    ```sh
    kubectl -n <namespace> get sandboxes -l 'legion.dev/project=<project>,legion.dev/issue' \
@@ -1532,9 +1537,13 @@ its uid and so its volume. In this order:
    the dump holds, and the home can still change before that cleanup: a child whose hand-over is
    pending has its own key as its home, and its old tree's root reopened in its linger cancels the
    hand-over (`CancelTreeHandovers`, from `internal/admit/admit.go`), which makes that root's tree
-   the child's home again. A Sandbox relabelled to the child's key would then name a tree with no
-   lifecycle that is not its issue's home, and the sweep would delete it with its volume. A
-   relabelled Sandbox is its issue's home under a tree that is not live, so the sweep keeps it, and
+   the child's home again. A Sandbox labelled with the child's key would then name a tree with no
+   lifecycle that is not its issue's home, and the sweep would delete it with its volume. For the
+   same reason a Sandbox this release already handed over to the child's key, after the dump, is
+   given back to the source tree while that tree is live: under the source tree's label the sweep
+   keeps it whether or not the root reopens, and the source tree's cleanup hands it over again if
+   it does not. A relabelled Sandbox otherwise is its issue's home under a tree that is not live,
+   so the sweep keeps it, and
    the earlier release's launch resumes the issue's claims in it on the same volume. A Sandbox whose
    issue has no home is one the earlier release holds for no tree, which its sweep or its tree's
    cleanup would delete with its volume: `--cascade=orphan` deletes the Sandbox alone. The volume
@@ -1544,7 +1553,7 @@ its uid and so its volume. In this order:
    release's next launch replaces each (`writeSecret` in `relaunch.go`).
 5. **Check that nothing is left.** The `get sandboxes` query of step 3, without the loop, prints
    nothing, and so does this one, which prints every issue Sandbox whose issue has no home, or
-   whose tree label is neither a live tree nor its issue's home:
+   whose tree label is neither a live tree nor the tree `homes.txt` names:
 
    ```sh
    kubectl -n <namespace> get sandboxes -l 'legion.dev/project=<project>,legion.dev/issue' \
