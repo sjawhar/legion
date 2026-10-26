@@ -472,9 +472,11 @@ The attestation is separate from the image's own BuildKit provenance, which the 
 ### How it is built — and the iteration rule
 
 `.github/workflows/worker-image.yaml` builds on the GitHub-hosted runner with `docker/setup-buildx-action`
-+ `docker/build-push-action` (the pair `release-envoy-listener.yaml` uses), layer cache in GitHub Actions
-cache (`cache-from: type=gha`, `cache-to: type=gha,mode=max`), pushed with the workflow's own `GITHUB_TOKEN`
-— no third-party builder, no project variable, no extra credential. It runs (1) from `release.yaml` after
+and `docker/build-push-action` (the pair `release-envoy-listener.yaml` uses), with its layer cache in the
+GitHub Actions cache (`cache-from: type=gha`). Only a build that is not for a pull request writes the
+cache (`cache-to: type=gha,mode=max`). A pull request's build reads it and writes none, because a newer
+head can cancel that build in the middle of a cache upload. It is pushed with the workflow's own
+`GITHUB_TOKEN`: no third-party builder, no project variable, no extra credential. It runs (1) from `release.yaml` after
 the `legion_build` and `legion_publish` jobs on every `main` push that touches any file the image builds
 from, (2) on every head of a pull request against `main` whose diff touches any of those files — building
 the PR head and publishing `sha-` only — and (3) by `gh workflow run worker-image.yaml --ref <ref>` once the
