@@ -8,7 +8,9 @@
   per repository, each on its own branch, and its model is every source's components together
   (INFRA-391). `GET /api/v1/projects/{key}/architecture-sources` lists a project's sources (`[]`
   with none); `PUT /api/v1/projects/{key}/architecture-sources/{owner}/{repo}` `{branch}` adds a
-  source, or changes the branch of the one it already is, after the GitHub App access check;
+  source, or changes the branch of the one it already is, after proving the GitHub App can read
+  the repository and that the branch exists in it (otherwise `409 SOURCE_ACCESS`, naming the
+  branch and the repository when the branch is missing, and nothing is written);
   `DELETE` on the same path removes that source and its components, and no other source's;
   `POST …/architecture-sources/{owner}/{repo}/sync` imports one source and
   `POST /api/v1/projects/{key}/architecture-sources/sync` every source, each attempted whatever

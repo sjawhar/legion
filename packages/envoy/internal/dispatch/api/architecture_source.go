@@ -125,11 +125,11 @@ func (s *server) putArchitectureSource(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// The access check runs before any write: a failed re-PUT leaves the stored
-	// source untouched.
-	check, err := s.deps.GitHub.CheckSource(r.Context(), owner, name)
+	// The access check, of the repository and of the branch, runs before any write: a failed
+	// re-PUT leaves the stored source untouched.
+	installationID, err := s.checkArchitectureSource(r.Context(), owner, name, branch)
 	if err != nil {
-		if errors.Is(err, githubapp.ErrNoAppKey) || errors.Is(err, githubapp.ErrNoInstallation) || errors.Is(err, githubapp.ErrNoContentsRead) {
+		if errors.Is(err, githubapp.ErrNoAppKey) || errors.Is(err, githubapp.ErrNoInstallation) || errors.Is(err, githubapp.ErrNoContentsRead) || errors.Is(err, githubapp.ErrNoBranch) {
 			writeError(w, "SOURCE_ACCESS", http.StatusConflict, err.Error())
 			return
 		}
@@ -161,7 +161,7 @@ func (s *server) putArchitectureSource(w http.ResponseWriter, r *http.Request) {
 			last_tree_sha = null,
 			last_error = null
 		returning `+architecture.SourceColumns,
-		key, owner+"/"+name, branch, check.InstallationID, actorJSON))
+		key, owner+"/"+name, branch, installationID, actorJSON))
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -179,6 +179,24 @@ func (s *server) putArchitectureSource(w http.ResponseWriter, r *http.Request) {
 	}
 	s.publish(event)
 	WriteJSON(w, http.StatusOK, source)
+}
+
+// checkArchitectureSource proves the GitHub App can read owner/name and that branch exists in it,
+// and answers the installation that reads it. The sync refuses a missing branch the same way, so
+// a save that skipped the branch would store a source no sync can import.
+func (s *server) checkArchitectureSource(ctx context.Context, owner, name, branch string) (int64, error) {
+	check, err := s.deps.GitHub.CheckSource(ctx, owner, name)
+	if err != nil {
+		return 0, err
+	}
+	token, err := s.deps.GitHub.Token(ctx, check.InstallationID)
+	if err != nil {
+		return 0, err
+	}
+	if _, err := s.deps.GitHub.Ref(ctx, token, owner, name, branch); err != nil {
+		return 0, err
+	}
+	return check.InstallationID, nil
 }
 
 // deleteArchitectureSource removes the source and, in the same transaction, the model it

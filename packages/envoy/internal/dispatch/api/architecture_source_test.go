@@ -790,7 +790,10 @@ func TestArchitectureSourceInputValidation(t *testing.T) {
 }
 
 func TestArchitectureSourceRePutRevalidatesBeforeWriting(t *testing.T) {
-	fake := &fakeGitHubApp{installations: map[string]string{"legion/arch": "write"}}
+	fake := &fakeGitHubApp{
+		installations: map[string]string{"legion/arch": "write"},
+		repos:         map[string]*fakeArchitectureRepo{"legion/arch": {commit: shaOne, files: archFiles()}},
+	}
 	handler, _ := newArchitectureSourceServer(t, fake)
 	createTestProject(t, handler, "CORE")
 	putSource(t, handler, "CORE", "legion/arch", "main")
@@ -806,6 +809,67 @@ func TestArchitectureSourceRePutRevalidatesBeforeWriting(t *testing.T) {
 		"CORE legion/arch@main enabled=true commit=- error=- components=0",
 	}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("sources after the failed re-put = %q, want %q", got, want)
+	}
+}
+
+// A branch the repository does not have is refused before any write, as the sync would refuse it:
+// 409 SOURCE_ACCESS naming the branch and the repository, and no source row or event.
+func TestArchitectureSourcePutRefusesAMissingBranch(t *testing.T) {
+	fake := &fakeGitHubApp{
+		installations: map[string]string{"legion/arch": "read"},
+		repos:         map[string]*fakeArchitectureRepo{"legion/arch": {commit: shaOne, files: archFiles(), branchMissing: true}},
+	}
+	handler, database := newArchitectureSourceServer(t, fake)
+	createTestProject(t, handler, "CORE")
+
+	refused := dispatchRequest(t, handler, http.MethodPut, sourcePath("CORE", "legion/arch"), map[string]string{"branch": "gone"}, "alice")
+	if refused.Code != http.StatusConflict {
+		t.Fatalf("put on a missing branch: status=%d body=%s, want 409 SOURCE_ACCESS", refused.Code, refused.Body.String())
+	}
+	if body := decodeBody[map[string]string](t, refused); body["code"] != "SOURCE_ACCESS" || !strings.Contains(body["error"], "the branch does not exist: gone on legion/arch") {
+		t.Fatalf("put on a missing branch: body=%s, want SOURCE_ACCESS naming gone on legion/arch", refused.Body.String())
+	}
+	if sources := listSources(t, handler, "CORE"); len(sources) != 0 {
+		t.Fatalf("refused save wrote sources: %q", sourceStrings(sources))
+	}
+	if events := sourceEvents(t, database); len(events) != 0 {
+		t.Fatalf("refused save wrote events: %q", events)
+	}
+}
+
+// Re-pointing a source at a branch the repository does not have is refused the same way, and the
+// stored source keeps its branch, its sync bookkeeping and its components.
+func TestArchitectureSourceRePutRefusesAMissingBranch(t *testing.T) {
+	fake := &fakeGitHubApp{
+		installations: map[string]string{"legion/arch": "read"},
+		repos:         map[string]*fakeArchitectureRepo{"legion/arch": {commit: shaOne, files: archFiles()}},
+	}
+	handler, database := newArchitectureSourceServer(t, fake)
+	createTestProject(t, handler, "CORE")
+	putSource(t, handler, "CORE", "legion/arch", "main")
+	synced := syncSource(t, handler, "CORE", "legion/arch")
+	want := "CORE legion/arch@main enabled=true commit=" + shaOne + " error=- components=2"
+	if got := synced.String(); got != want {
+		t.Fatalf("synced source = %s, want %s", got, want)
+	}
+
+	fake.repos["legion/arch"].branchMissing = true
+	refused := dispatchRequest(t, handler, http.MethodPut, sourcePath("CORE", "legion/arch"), map[string]string{"branch": "gone"}, "alice")
+	if refused.Code != http.StatusConflict {
+		t.Fatalf("re-put on a missing branch: status=%d body=%s, want 409 SOURCE_ACCESS", refused.Code, refused.Body.String())
+	}
+	if body := decodeBody[map[string]string](t, refused); body["code"] != "SOURCE_ACCESS" || !strings.Contains(body["error"], "the branch does not exist: gone on legion/arch") {
+		t.Fatalf("re-put on a missing branch: body=%s, want SOURCE_ACCESS naming gone on legion/arch", refused.Body.String())
+	}
+	sources := listSources(t, handler, "CORE")
+	if got := sourceStrings(sources); !reflect.DeepEqual(got, []string{want}) {
+		t.Fatalf("sources after the refused re-put = %q, want %q", got, []string{want})
+	}
+	if sources[0].LastSyncAt == nil || synced.LastSyncAt == nil || *sources[0].LastSyncAt != *synced.LastSyncAt {
+		t.Fatalf("refused re-put moved last_sync_at from %v to %v", synced.LastSyncAt, sources[0].LastSyncAt)
+	}
+	if got, want := sourceEvents(t, database), []string{"CORE legion/arch@main deleted=false by alice"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("source events = %q, want %q", got, want)
 	}
 }
 
@@ -826,6 +890,11 @@ func TestArchitectureSourceSyncRoute(t *testing.T) {
 	}
 	putSource(t, handler, "CORE", "legion/arch", "main")
 	putSource(t, handler, "CORE", "acme/infra", "main")
+	// Each save read its own branch head; only the syncs' reads below are the one-source sync's.
+	if want := []string{"legion/arch@main", "acme/infra@main"}; !reflect.DeepEqual(fake.headReads, want) {
+		t.Fatalf("head reads of the saves = %q, want %q", fake.headReads, want)
+	}
+	fake.headReads = nil
 	if other := dispatchRequest(t, handler, http.MethodPost, sourcePath("CORE", "other/repo")+"/sync", nil, "alice"); other.Code != http.StatusNotFound ||
 		decodeBody[map[string]string](t, other)["code"] != "SOURCE_NOT_FOUND" {
 		t.Fatalf("sync of a repository that is not a source: status=%d body=%s", other.Code, other.Body.String())
