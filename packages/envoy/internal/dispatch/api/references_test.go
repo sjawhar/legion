@@ -1532,3 +1532,18 @@ func TestAPinnedReferenceAnswers404ForAVersionItCannotRead(t *testing.T) {
 		"version "+strconv.Itoa(unindexed)+" of "+specRef+" has no record of its blocks; the earliest is version 1")
 	requireReferenceNotFound(t, handler, url.Values{"to": {blockRef + "@v1"}}, `no block "ship_it" in `+specRef+` at version 1`)
 }
+
+// A pin whose number no document version can reach - past the largest version number Postgres
+// stores, or past what fits in 64 bits but still a well-formed `@v<N>` - names a version the
+// document lacks: 404 saying so, as for any other missing version, never a server error.
+func TestAPinPastEveryVersionNumberAnswers404(t *testing.T) {
+	handler, _ := blockIndexHandler(t)
+	createReferenceAPIProject(t, handler, "CORE")
+	issue, blockRef := createShipItSpec(t, handler, "CORE")
+	specRef := "dispatch://" + issue.Key + "/spec"
+	for _, version := range []string{"2147483648", "9223372036854775807"} {
+		for _, direction := range []string{"to", "from"} {
+			requireReferenceNotFound(t, handler, url.Values{direction: {blockRef + "@v" + version}}, "no version "+version+" of "+specRef)
+		}
+	}
+}
