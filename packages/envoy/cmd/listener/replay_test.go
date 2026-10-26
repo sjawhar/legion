@@ -400,6 +400,34 @@ func TestReplayNeverReturnsAnotherSessionsInboxThroughARegisteredInterest(t *tes
 	}
 }
 
+// The exception lane of the agent subjects carries another session's inbox too: a delivery that fails
+// to a session is reported on notifications.envoy.exceptions.<its agent subject> with the original
+// message's payload, and the stream keeps that lane. A session's replay never returns another
+// session's exception lane, through a wildcard over it or through that session's own lane by name,
+// also when its registered interests name them.
+func TestReplayNeverReturnsAnotherSessionsExceptionLaneThroughARegisteredInterest(t *testing.T) {
+	lane := bus.ExceptionTopicPrefix + contracts.AgentTopicPrefix + ">"
+	otherLane := bus.ExceptionTopicPrefix + contracts.AgentSubject("ses_other")
+	rig := newReplayRig(t, lane, otherLane)
+	rig.store(t, otherLane)
+	_, ownSeq := rig.store(t, contracts.AgentSubject(replaySession))
+
+	response := replayOK(t, rig.mux, replayBody(t, []replaySubjectRequest{
+		{Subject: lane, After: new(uint64(0))},
+		{Subject: otherLane, After: new(uint64(0))},
+		{Subject: contracts.AgentSubject(replaySession), After: new(uint64(0))},
+	}, 0))
+
+	for _, result := range response.Subjects[:2] {
+		if len(result.Messages) != 0 || result.Refused == "" {
+			t.Fatalf("%s = %+v, want it refused with no messages: it reads another session's undelivered messages", result.Subject, result)
+		}
+	}
+	if own := response.Subjects[2]; own.Refused != "" || !equalSeqs(own.Messages, ownSeq) {
+		t.Fatalf("own agent subject = %+v, want seq %d", own, ownSeq)
+	}
+}
+
 // A registration naming topics that reach another session's inbox stores the rest of it and names
 // each topic it left out: a wildcard over the agent subjects, another session's agent subject, and
 // notifications.> are not stored, while the session's own agent subject and an issue topic are, so
