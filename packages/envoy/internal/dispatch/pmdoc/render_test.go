@@ -1313,3 +1313,44 @@ func TestRenderKeepsAStoredImageTitlesLineFeedInAListItemOrBlockQuote(t *testing
 		}
 	}
 }
+
+// A linked image in a list item, a block quote or a footnote definition whose link title has a line
+// that is an inline HTML tag (`<span>`, `</span>`, `<b>`, `<x-y>`) is written so that the browser
+// editor's engine reads it back as held. Written raw, that line is a lazy continuation Go reads as
+// the title's, but the engine reads it as an HTML block that ends the paragraph: the past-version
+// view, which reads the stored markdown with the engine, then draws `[`, the picture, and
+// `](https://… "a` as text and the link is lost (INFRA-190 round 8; the base stored such an image
+// without its link, which both parsers read back).
+func TestRenderWritesALazyHTMLTagTitleLineSoTheEngineReadsItBack(t *testing.T) {
+	var markdowns []string
+	var held [][]*Node
+	for _, prefix := range []string{"- ", "1. ", "> ", "- > ", "- a\n  - ", "x[^1]\n\n[^1]: "} {
+		for _, line := range []string{"<span>", "</span>", "<b>", "<x-y>"} {
+			source := prefix + "[![x](i.png)](https://u.com \"a&#10;" + line + "&#10;z\")\n"
+			doc, err := ParseForWrite(source, nil)
+			if err != nil {
+				t.Fatalf("ParseForWrite(%q): %v", source, err)
+			}
+			markdown, err := Render(doc)
+			if err != nil {
+				t.Fatalf("Render(ParseForWrite(%q)): %v", source, err)
+			}
+			markdowns = append(markdowns, markdown)
+			held = append(held, documentImages(doc))
+		}
+	}
+	for index, reading := range engineReadings(t, markdowns) {
+		var read []*Node
+		if reading != nil {
+			read = documentImages(reading)
+		}
+		if len(read) != len(held[index]) || len(read) == 0 || !sameImageFields(read[0], held[index][0]) {
+			got := "nothing"
+			if reading != nil {
+				json, _ := reading.JSON()
+				got = string(json)
+			}
+			t.Errorf("the engine reads %q as %s, want its linked image %v", markdowns[index], got, held[index][0].Attrs)
+		}
+	}
+}
