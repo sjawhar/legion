@@ -2,44 +2,21 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-366",
-  "completed": "2026-10-26T20:58:28Z",
-  "reviewedHead": "9d993b51fc293893db690d85555e77896d7408fa",
-  "codeHead": "1d4f991ece",
-  "round": 7,
-  "standard": "The architect's decision of 2026-10-26T19:23Z: round 7 is judged only by the behaviour at RefLink.tsx:183 (a dispatch:// URL left as text that names nothing becomes its words), the tests failing at e3d09251 and passing at the head, and round 7's own diff.",
-  "decision": "changes_requested",
+  "completed": "2026-10-26T22:33:40Z",
+  "reviewedHead": "5ff728846d8131dd1c1a6018c363e185b5dedd90",
+  "codeHead": "f586da9d4b",
+  "round": 8,
+  "standard": "The architect's decision of 2026-10-26T21:00Z: approve round 8 if its items are done and the merge is clean; judge nothing else unless it is a defect in round 8's own diff.",
+  "decision": "approved",
   "critical": 0,
   "important": 0,
-  "minor": 4,
-  "keyFindings": [
-    {
-      "severity": "minor",
-      "file": "packages/dispatch/web/src/features/refs/RefLink.tsx:150-157 and packages/dispatch/AGENTS.md:291",
-      "description": "The doc comment of collectReferenceAnchors and the package AGENTS.md still say a URL left as text past the bounds 'stays the link it is' and that an href that fails to parse 'is left untouched'. Round 7 makes that false for dispatch://, which now becomes plain text. Reword both: the dispatch:// form becomes its words; the http(s) form stays a link."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/dispatch/e2e/pictures.e2e.ts:446",
-      "description": "The no-tooltip check waits a hard-coded 600 ms. If REF_PREVIEW_OPEN_DELAY_MS (ref-preview-timing.ts:5, 300 today) grows past it, the assertion passes with a card still on its way. Import the constant, as hover-preview.e2e.ts imports its sibling."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/dispatch/e2e/pictures.e2e.ts:432",
-      "description": "The old comment line ('keep their words and name no reference either') was left above the new one that replaces it."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/claude-envoy/CHANGELOG.md:11-13",
-      "description": "Merge 1d4f991e kept main's deletion of skills/dispatch/references/{reading,document-edits}.md, but this entry still says the dispatch skill teaches the block forms, the 256-byte bound, the pin and block-links. Reword it as the pi-envoy entry was, to point at the commands' --help."
-    }
-  ],
-  "whyRequestChanges": "No correctness finding stands: the behaviour and the before/after tests hold. These four are the round's fast-follow batch, which the architect's standing rule (2026-10-26T07:58Z) has fixed in this pull request, not later. The head must also be merged forward anyway: GitHub reports it CONFLICTING (main moved 5 commits past b4bea385, packages/envoy/CHANGELOG.md).",
-  "roundItems": "Behaviour holds: RefLink.tsx:185-191 replaces the anchor with createTextNode(text) only for a dispatch:// text URL the bounded read names nothing for; replaceWith over the static NodeList is safe (index only counts pushed anchors; consumers get only pushed anchors). Tests fail before and pass after: the deep pass ran MarkdownBody.test.tsx with e3d09251's RefLink.tsx (22 pass, 1 fail on the dead <a data-dispatch-href>) and at the head (23 pass); the tester and implementer ran pictures.e2e.ts at e3d09251 (2/2 fail) and at the head (pass). Merge 1d4f991e keeps both sides; migrations now 0121-0128 after main's 0120_artifact_reviews_event_seq, pairs intact, no stale names.",
-  "threads": "PRRT_kwDORFy7ds6wauf1 and PRRT_kwDORFy7ds6wW-46: replied, accepted.",
+  "minor": 0,
+  "keyFindings": [],
+  "roundItems": "1. Forward merge f586da9d (PR 87a81d62, main 16e4bb0f, base b4bea385): clean. Five files conflicted (AskBlockCard.tsx, RefPreview.tsx, routes.ts, RefPreview.test.tsx, packages/envoy/CHANGELOG.md); each keeps main's #2237 agent-name behaviour and this PR's block-reference behaviour; RefPreview.test.tsx has the base's 15 tests plus each side's new one; claude-envoy dist matches a fresh build. Main added no migration; this branch keeps 0121-0128 after main's 0120. Fingerprint comment posted (changed, since main touched shared files). 2. The four Minor items are fixed in 87a81d62. 3. Upper-case DISPATCH:// left as is: the server is case-sensitive too (text/refs.go:26, :133), stated on PRRT_kwDORFy7ds6wauf1.",
+  "threads": "Replied on and accepted PRRT_kwDORFy7ds6wauf1, PRRT_kwDORFy7ds6wc2HA, PRRT_kwDORFy7ds6wc2HG, PRRT_kwDORFy7ds6wc2HM, PRRT_kwDORFy7ds6wc2HS; all resolved. No thread stands.",
   "thermonuclear": {
-    "deepReview": "Verdict: APPROVE at 9d993b51 with three Minor items (CHANGELOG claim, lost skill guidance, stale doc comment). Provider: 46 assistant turns, all anthropic/claude-opus-5-5, read from its session transcript.",
-    "codeQuality": "Verdict: CHANGES at 9d993b51 on three cleanup-only items (stale doc comment and AGENTS.md, hard-coded wait, leftover comment). Provider: 36 assistant turns, all anthropic/claude-opus-5-5, read from its session transcript.",
-    "notCounted": "The deep pass's lost-guidance item (the 2048/256-byte citation rules no longer in any skill after main moved reading.md into --help): the block refusals name the arguments to use, and where main keeps such rules is main's layout, so I did not raise it. Upper-case DISPATCH:// staying a dead anchor predates round 7 and is outside its stated scope."
+    "deepReview": "Verdict: APPROVE at 5ff72884, no finding; tsc, biome and the RefPreview/AskBlockCard/AgentName/markdown-surfaces/routes tests pass; `bun scripts/build.ts --check` reports dist matches a fresh build. Provider: 42 assistant turns, all anthropic/claude-opus-5-5, read from its session transcript.",
+    "codeQuality": "Verdict: APPROVE at 5ff72884, no finding; no file past 1000 lines. Provider: 21 assistant turns, all anthropic/claude-opus-5-5, read from its session transcript."
   },
-  "ci": "At code head 1d4f991e: lint, typecheck and test success (pr-title success on the latest run). The compare 1d4f991e...9d993b51 touches only .legion/."
+  "ci": "Required set (rulesets): lint, typecheck, test, pr-title. At code head f586da9d (newest pull_request run's head): lint, typecheck, test completed success (22:33Z); pr-title success. The compare f586da9d...5ff72884 touches only .legion/ (2 files)."
 }
