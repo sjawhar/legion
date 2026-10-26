@@ -1189,8 +1189,10 @@ function textDispatchWrite(command: string): { tool: string; label: string } | u
  * `scopedCommand` could not read.
  */
 export function unreadableDispatchWrite(command: unknown): UnreadableCommand | undefined {
-  // A write names `dispatch`, or reaches it through an expansion.
-  if (typeof command !== "string" || !/dispatch|[$`]/.test(command)) return undefined;
+  // No prefilter on the raw text: bash removes a backslash or empty quotes inside a word
+  // (`d\ispatch`, `di""spatch`), so a write need not hold `dispatch` as written. `commandWords`
+  // removes them as bash does and names the program.
+  if (typeof command !== "string") return undefined;
   let unknownSubcommand: UnreadableCommand | undefined;
   for (const segment of commandWords(command)) {
     const start = commandStart(segment);

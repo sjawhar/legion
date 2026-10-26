@@ -1540,6 +1540,66 @@ console.log(JSON.stringify(args, null, 2));
       expect(g.calls).toHaveLength(0);
       expect(g.entries.map((e) => [e.tool, e.outcome])).toEqual([[tool, "unreadable"]]);
     });
+  // Outside review of #2159 at 31c5cca3b, finding 1: bash removes a backslash or empty quotes
+  // inside the program word and runs `dispatch`. The raw text holds no contiguous `dispatch`, so
+  // a prefilter on that text let the write through with no verdict, no note and no entry.
+  test("F1: a backslash or empty quotes inside the program name do not hide a write", async () => {
+    const hidden: Array<[string, string]> = [
+      ["a backslash in the program name", "d\\ispatch comment --issue X-1 --body hi"],
+      ["empty quotes after another command", 'true; di""spatch comment --issue X-1 --body hi'],
+      ["a backslash after another command", "true && dispatc\\h comment --issue X-1 --body hi"],
+    ];
+    for (const [, command] of hidden)
+      expect(unreadableDispatchWrite(command)).toMatchObject({
+        tool: "dispatch_comment",
+        label: "dispatch comment",
+      });
+    for (const mode of ["warn", "block"]) {
+      const g = bind({ env: { ...STUB, OMP_ASKGATE: mode }, cwd: work });
+      for (const [index, [, command]] of hidden.entries())
+        unreadableText(await g.bash(`h${index}`, command), mode);
+      expect(g.dryRuns).toHaveLength(0);
+      expect(g.calls).toHaveLength(0);
+      expect(g.entries.map((e) => [e.tool, e.outcome])).toEqual(
+        Array(hidden.length).fill(["dispatch_comment", "unreadable"])
+      );
+    }
+    // Alone, empty quotes or quotes around the whole name leave one literal word, and bash runs
+    // `dispatch`: the literal grammar reads it, so it is reviewed as bare `dispatch` is.
+    const quoted = [
+      'di""spatch comment --issue X-1 --body hi',
+      "'dispatch' comment --issue X-1 --body hi",
+    ];
+    const g = bind({ env: STUB, cwd: work });
+    for (const [index, command] of quoted.entries())
+      expect(await g.bash(`q${index}`, command)).toBeUndefined();
+    expect(g.dryRuns.map((run) => run.script)).toEqual([
+      'di""spatch comment --dry-run --issue X-1 --body hi',
+      "'dispatch' comment --dry-run --issue X-1 --body hi",
+    ]);
+    expect(g.entries.map((e) => [e.tool, e.outcome, e.decision])).toEqual(
+      Array(quoted.length).fill(["dispatch_comment", "verdict", "allow"])
+    );
+    // A gate that did not load refuses every one of them, in both modes.
+    for (const mode of ["warn", "block"]) {
+      const entries: Array<Record<string, unknown>> = [];
+      const refuse = core.loadFailureGate(
+        new Error("a host module did not load"),
+        { env: { OMP_ASKGATE: mode }, configFile: CONFIG_FILE },
+        { appendEntry: (_type, data) => entries.push(data as Record<string, unknown>) }
+      );
+      for (const [index, command] of [...hidden.map(([, c]) => c), ...quoted].entries())
+        expect(
+          refuse(
+            { toolName: "bash", toolCallId: `l${index}`, input: { command } },
+            { agent: { kind: "main" }, sessionManager: { getEntries: () => [] } } as never
+          )?.block
+        ).toBe(true);
+      expect(entries.map((e) => [e.tool, e.outcome])).toEqual(
+        Array(hidden.length + quoted.length).fill(["dispatch_comment", "load-failed"])
+      );
+    }
+  }, 30_000);
   const STILL_REFUSED: Array<[string, string, string]> = [
     [
       "a program that may write the file the write reads",
