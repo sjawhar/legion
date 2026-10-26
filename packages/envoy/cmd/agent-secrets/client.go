@@ -23,13 +23,18 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"slices"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -85,6 +90,82 @@ func (e *apiError) Permanent() bool {
 	return e.Code == terminalRenewal.LegacyCode && strings.Contains(e.Message, terminalRenewal.LegacyMessage)
 }
 
+// unreachableError is a broker call that did not complete. Its host might not resolve, nothing
+// might answer at the address, or a peer might answer the connection but fail the exchange. It is
+// not a broker refusal - the broker sent no usable response - and it reads as what it is, naming
+// the address tried and the variable the address came from, because a session that inherited a
+// stale AGENT_SECRETS_URL otherwise reads a bare DNS error as a broker that is down and the stale
+// value goes unnoticed.
+type unreachableError struct {
+	// what classifies the failure: a failed name resolution, no connection made, nothing answered
+	// in time, a peer that answered but failed the exchange, or a request that failed in a way
+	// none of those names.
+	what string
+	// base is the broker's address as AGENT_SECRETS_URL gave it, method and url the call tried.
+	base, method, url string
+	// cause is the transport's own error, with net/http's repetition of the URL unwrapped away.
+	cause error
+}
+
+func (e *unreachableError) Error() string {
+	return fmt.Sprintf("%s: %s %s (%s names %s): %v", e.what, e.method, e.url, brokerURLVar, e.base, e.cause)
+}
+
+func (e *unreachableError) Unwrap() error { return e.cause }
+
+// unreachable classifies a failed HTTP exchange, sending its reader to the layer that failed.
+// Any resolver error is name resolution, before the generic timeout branch. A dial that made no
+// connection (refused, network or host unreachable, any other dial error) is a non-answer, which
+// routing or a listener fixes. Only what proves a peer answered - a TLS record or certificate
+// error, EOF, or a reset once the connection existed - is "answered but the exchange failed",
+// which TLS or a proxy fixes. An error that fits none says no more than that the request failed,
+// rather than name a layer it cannot prove.
+func unreachable(base, method, callURL string, err error) error {
+	cause := err
+	var wrapped *url.Error
+	if errors.As(err, &wrapped) {
+		cause = wrapped.Err
+	}
+	host := brokerHost(base)
+	failed := func(what string) error { return &unreachableError{what, base, method, callURL, cause} }
+	var dns *net.DNSError
+	var timeout net.Error
+	var op *net.OpError
+	switch {
+	case errors.As(err, &dns) && dns.IsNotFound:
+		return failed("the broker's host " + host + " does not resolve")
+	case errors.As(err, &dns):
+		return failed("the broker's host " + host + " name resolution failed")
+	case errors.Is(err, syscall.ECONNREFUSED):
+		return failed("nothing answered at " + host + ": the connection was refused")
+	case errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &timeout) && timeout.Timeout()):
+		return failed("the broker at " + host + " did not answer in time")
+	case errors.Is(err, syscall.ENETUNREACH), errors.Is(err, syscall.EHOSTUNREACH),
+		errors.As(err, &op) && op.Op == "dial":
+		return failed("nothing answered at " + host + ": no connection could be made")
+	case peerAnswered(err):
+		return failed("the broker at " + host + " answered but the exchange failed")
+	default:
+		return failed("the request to the broker at " + host + " failed")
+	}
+}
+
+// peerAnswered reports whether err shows a peer took the connection and then broke the exchange:
+// a TLS record that is not TLS (an HTTP server answering an https URL), a TLS alert or certificate
+// it would not trust, or the stream ending or being reset once it existed.
+func peerAnswered(err error) bool {
+	var record tls.RecordHeaderError
+	var alert tls.AlertError
+	var verify *tls.CertificateVerificationError
+	var authority x509.UnknownAuthorityError
+	var hostname x509.HostnameError
+	var invalid x509.CertificateInvalidError
+	return errors.As(err, &record) || errors.As(err, &alert) || errors.As(err, &verify) ||
+		errors.As(err, &authority) || errors.As(err, &hostname) || errors.As(err, &invalid) ||
+		errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) ||
+		errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.EPIPE)
+}
+
 // do sends the request and, on a 2xx response, returns its raw body; any other status decodes
 // the broker's error envelope into an *apiError.
 func (c *client) do(ctx context.Context, method, url string, body []byte, headers map[string]string) ([]byte, error) {
@@ -104,7 +185,7 @@ func (c *client) do(ctx context.Context, method, url string, body []byte, header
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("%s %s: %w", method, url, err)
+		return nil, unreachable(c.baseURL, method, url, err)
 	}
 	defer resp.Body.Close()
 	data, err := io.ReadAll(resp.Body)

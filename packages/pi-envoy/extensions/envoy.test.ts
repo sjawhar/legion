@@ -9922,9 +9922,11 @@ describe("envoy OMP extension", () => {
         await fixture.handlers.get("message_start")?.({ message }, context);
         await fixture.handlers.get("message_end")?.({ message }, context);
 
+        // The watch that armed the stream also sent the settings it kept (`publishState`).
         const frames = natsState.published
           .filter((published) => published.subject === "agentstream.ses_delivery.frames")
-          .map((published) => JSON.parse(new TextDecoder().decode(published.data)));
+          .map((published) => JSON.parse(new TextDecoder().decode(published.data)))
+          .filter((frame) => frame.kind === "message");
         expect(frames.map((frame) => [frame.message.id, frame.message.dispatchMessageId])).toEqual([
           ["u10", tag],
           ["u10", tag],
@@ -10666,6 +10668,273 @@ describe("envoy OMP extension", () => {
         { name: "bad-description", source: "extension" },
         { description: "Good", name: "good-description", source: "extension" },
       ]);
+    });
+  });
+
+  // The live view's header shows the model and thinking level the session's last `settings` frame
+  // reports, read from the live `AgentSession`'s own getters. The host fires no event when either is
+  // set, so the session re-reads them on every control message, on each turn's start, on a retry's
+  // fallback, and after a person's typed input runs, before its reply.
+  describe("the session's settings frame", () => {
+    const settingsSubject = "agentstream.ses_delivery.frames";
+
+    /** The settings frame of the replay the Dispatch relay asks for: a watch, then a replay
+     *  answered on `inbox`. */
+    const replayedSettings = async (inbox: string): Promise<unknown> => {
+      const control = natsState.controls.get("agentstream.ses_delivery.control");
+      if (control === undefined) throw new Error("the agent stream's control was not subscribed");
+      const answered = Promise.withResolvers<void>();
+      natsState.onPublish = (subject) => {
+        if (subject === inbox) answered.resolve();
+      };
+      control.push(JSON.stringify({ type: "watch", v: 1 }));
+      control.push(JSON.stringify({ type: "replay", v: 1 }), inbox);
+      await answered.promise;
+      const published = natsState.published.findLast((each) => each.subject === inbox);
+      const replay: { readonly frames: readonly { readonly kind: string }[] } = JSON.parse(
+        new TextDecoder().decode(published?.data)
+      );
+      return replay.frames.find((frame) => frame.kind === "settings");
+    };
+
+    /** Every settings frame the session published to its attached viewer, oldest first. */
+    const publishedSettings = (): { readonly model?: string }[] =>
+      natsState.published
+        .filter((each) => each.subject === settingsSubject)
+        .map((each) => JSON.parse(new TextDecoder().decode(each.data)))
+        .filter((frame) => frame.kind === "settings");
+
+    const settle = async (): Promise<void> => {
+      // The mock subscription yields queued controls on microtasks, not wall-clock time.
+      for (let index = 0; index < 10; index += 1) await Promise.resolve();
+    };
+
+    /** A live session in the host's roster whose model and level a test changes. */
+    const liveSession = () => {
+      const state: {
+        model: { readonly provider: string; readonly id: string } | undefined;
+        level: string | undefined;
+        levels: readonly string[];
+      } = {
+        level: "auto",
+        levels: ["off", "auto", "low", "high"],
+        model: { id: "claude-opus-5", provider: "anthropic" },
+      };
+      testAgentRoster().push({
+        id: "Main",
+        kind: "main",
+        session: {
+          sessionManager: { getSessionId: () => "ses_delivery" },
+          get model() {
+            return state.model;
+          },
+          configuredThinkingLevel: () => state.level,
+          getAvailableModels: () => [
+            { id: "claude-opus-5", provider: "anthropic" },
+            { id: "gpt-5.5", provider: "openai" },
+          ],
+          getAvailableEffortSelectors: () => state.levels,
+        },
+        sessionFile: null,
+      });
+      return state;
+    };
+
+    test("a replay carries the model and thinking level the live session reports", async () => {
+      liveSession();
+      await bootDirectSession("settings-frame-reported");
+
+      expect(await replayedSettings("inbox-settings-reported")).toEqual({
+        kind: "settings",
+        model: "anthropic/claude-opus-5",
+        models: ["anthropic/claude-opus-5", "openai/gpt-5.5"],
+        reported: true,
+        seq: expect.any(Number),
+        thinking: { level: "auto", levels: ["off", "auto", "low", "high"] },
+        v: 1,
+      });
+    });
+
+    // `/effort` prints "model default" for an unset level and no levels for a model without
+    // adjustable thinking; a session with no model selected names none.
+    test("reports the model's default level, a model with no adjustable thinking, and no model", async () => {
+      const session = liveSession();
+      session.level = undefined;
+      await bootDirectSession("settings-frame-defaults");
+
+      expect(await replayedSettings("inbox-settings-default-level")).toMatchObject({
+        thinking: { level: null, levels: ["off", "auto", "low", "high"] },
+      });
+      session.levels = [];
+      session.model = undefined;
+      const frame = await replayedSettings("inbox-settings-no-thinking");
+      expect(frame).toMatchObject({ reported: true, thinking: null });
+      expect(frame).not.toHaveProperty("model");
+    });
+
+    for (const [name, session] of [
+      ["the host lists no session under this id", undefined],
+      [
+        "the live session lacks the effort getter",
+        {
+          sessionManager: { getSessionId: () => "ses_delivery" },
+          model: { id: "claude-opus-5", provider: "anthropic" },
+          configuredThinkingLevel: () => "auto",
+          getAvailableModels: () => [],
+        },
+      ],
+      [
+        "the live session lacks the model getter",
+        {
+          sessionManager: { getSessionId: () => "ses_delivery" },
+          configuredThinkingLevel: () => "auto",
+          getAvailableModels: () => [],
+          getAvailableEffortSelectors: () => [],
+        },
+      ],
+    ] as const) {
+      test(`a replay says the session cannot report them when ${name}`, async () => {
+        if (session !== undefined) {
+          testAgentRoster().push({ id: "Main", kind: "main", session, sessionFile: null });
+        }
+        await bootDirectSession(`settings-frame-unreported-${name}`);
+
+        expect(await replayedSettings(`inbox-unreported-${name}`)).toEqual({
+          kind: "settings",
+          reported: false,
+          seq: expect.any(Number),
+          v: 1,
+        });
+      });
+    }
+
+    // The relay re-arms an attached viewer with a bare watch every 10 seconds; that watch is how a
+    // change made at the terminal, by a `/model` message or by a fallback reaches the header.
+    test("a bare watch to an attached viewer publishes a changed model, each time, with no throttle", async () => {
+      const session = liveSession();
+      await bootDirectSession("settings-frame-watch");
+      await replayedSettings("inbox-settings-watch");
+      const control = natsState.controls.get("agentstream.ses_delivery.control");
+      if (control === undefined) throw new Error("the agent stream's control was not subscribed");
+
+      session.model = { id: "gpt-5.5", provider: "openai" };
+      control.push(JSON.stringify({ type: "watch", v: 1 }));
+      await settle();
+      expect(publishedSettings().at(-1)?.model).toBe("openai/gpt-5.5");
+
+      session.model = { id: "claude-opus-5", provider: "anthropic" };
+      control.push(JSON.stringify({ type: "watch", v: 1 }));
+      await settle();
+      // The first is what the watch that armed the stream sent (`publishState`).
+      expect(publishedSettings().map((frame) => frame.model)).toEqual([
+        "anthropic/claude-opus-5",
+        "openai/gpt-5.5",
+        "anthropic/claude-opus-5",
+      ]);
+    });
+
+    // A page held open while its session is relaunched with `--resume` already has its relay's
+    // replay answer, so the new process hears only the relay's bare watches: the first of them must
+    // send what this process read before it, or the header keeps the earlier process's values.
+    test("the first bare watch a relaunched process hears sends the settings it read before it", async () => {
+      const session = liveSession();
+      const { context, fixture } = await bootDirectSession("settings-frame-relaunched");
+      session.level = "high";
+      await fixture.handlers.get("turn_start")?.({}, context);
+      expect(publishedSettings()).toEqual([]);
+      const control = natsState.controls.get("agentstream.ses_delivery.control");
+      if (control === undefined) throw new Error("the agent stream's control was not subscribed");
+
+      control.push(JSON.stringify({ type: "watch", v: 1 }));
+      await settle();
+      expect(publishedSettings()).toEqual([
+        expect.objectContaining({
+          thinking: { level: "high", levels: ["off", "auto", "low", "high"] },
+        }),
+      ]);
+
+      control.push(JSON.stringify({ type: "watch", v: 1 }));
+      await settle();
+      expect(publishedSettings()).toHaveLength(1);
+    });
+
+    for (const [event, payload] of [
+      ["turn_start", {}],
+      [
+        "retry_fallback_applied",
+        { from: "anthropic/claude-opus-5", role: "default", to: "openai/gpt-5.5" },
+      ],
+    ] as const) {
+      test(`${event} publishes a changed model to an attached viewer`, async () => {
+        const session = liveSession();
+        const { context, fixture } = await bootDirectSession(`settings-frame-${event}`);
+        await replayedSettings(`inbox-settings-${event}`);
+
+        session.model = { id: "gpt-5.5", provider: "openai" };
+        await fixture.handlers.get(event)?.(payload, context);
+
+        expect(publishedSettings().map((frame) => frame.model)).toEqual([
+          "anthropic/claude-opus-5",
+          "openai/gpt-5.5",
+        ]);
+      });
+    }
+
+    // The page takes the session's reply as the switch's answer, so the header must already show
+    // what the switch did by the time that reply exists.
+    test("a typed `/model` publishes the session's new model before its reply is posted", async () => {
+      const session = liveSession();
+      const { agent, replied, replies } = await bootDirectSession("settings-frame-typed-input", {
+        accept: () => ({ accepted: true, body: "/model openai/gpt-5.5" }),
+        sendUserInput: async () => {
+          session.model = { id: "gpt-5.5", provider: "openai" };
+          return { handled: "command", output: "Model set to openai/gpt-5.5." };
+        },
+      });
+      await replayedSettings("inbox-settings-typed-input");
+      const repliesWhenPublished: number[] = [];
+      natsState.onPublish = (subject) => {
+        // Past the one the watch that armed the stream sent (`publishState`).
+        if (subject === settingsSubject && publishedSettings().length > 1) {
+          repliesWhenPublished.push(replies.length);
+        }
+      };
+
+      agent.push(directDispatchEnvelope("steer", "settings-frame-typed-input"));
+      await replied(1);
+
+      expect(publishedSettings().map((frame) => frame.model)).toEqual([
+        "anthropic/claude-opus-5",
+        "openai/gpt-5.5",
+      ]);
+      expect(repliesWhenPublished).toEqual([0]);
+    });
+
+    test("still answers replay when a getter throws", async () => {
+      testAgentRoster().push({
+        id: "Main",
+        kind: "main",
+        session: {
+          sessionManager: { getSessionId: () => "ses_delivery" },
+          model: { id: "claude-opus-5", provider: "anthropic" },
+          configuredThinkingLevel: () => "auto",
+          getAvailableModels: () => {
+            throw new Error("the model registry failed");
+          },
+          getAvailableEffortSelectors: () => [],
+        },
+        sessionFile: null,
+      });
+      await bootDirectSession("settings-frame-throws");
+      const control = natsState.controls.get("agentstream.ses_delivery.control");
+      if (control === undefined) throw new Error("the agent stream's control was not subscribed");
+      control.push(JSON.stringify({ type: "watch", v: 1 }));
+      control.push(JSON.stringify({ type: "replay", v: 1 }), "inbox-settings-throws");
+      await settle();
+
+      expect(
+        natsState.published.findLast((published) => published.subject === "inbox-settings-throws")
+      ).toBeDefined();
     });
   });
 

@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/ompsessions"
 	"github.com/sjawhar/legion/daemon/internal/podsafety"
 )
 
@@ -135,8 +136,11 @@ func projectedToken(pod Pod) (fixtureToken, error) {
 
 // pod-baseline: the agent the root's shim started runs on Legion's pod baseline (internal/
 // podsafety): the turn-scoping overlay on the pod's state volume is PI_CONFIG_FILES' first element,
-// ahead of the operator's; PI_CONFIG_DIR and OMP_SESSION_STORAGE, which the operator left unset,
-// are set, and the operator's own variables are kept; neither OTEL_SDK_DISABLED nor PI_AUTO_QA,
+// ahead of the operator's; PI_CONFIG_DIR is set, which the operator left unset, and the operator's
+// own variables are kept; Oh My Pi's two session variables are the runtime's, not the baseline's
+// file default — under the session database the daemon requires (the run's session_store is
+// postgres) the runtime sets OMP_SESSION_STORAGE=sql and points OMP_SESSION_SQL_DSN_FILE at the
+// URL the providers volume projects; neither OTEL_SDK_DISABLED nor PI_AUTO_QA,
 // which no baseline sets any more, is there; the agent's XDG_STATE_HOME is the architect's own
 // (roleStateHome; the root claim is the architect), and the shim made Oh My Pi's profile directory
 // under it (podsafety.EnsureStateHome) before Oh My Pi started, since Oh My Pi reads the variable
@@ -173,9 +177,11 @@ func (r *liveRig) checkPodBaseline() error {
 	overlay := path.Join(StateDir, podsafety.TurnScopeFile)
 	stateHome := roleStateHome(claim.RoleArchitect)
 	want := map[string]string{
-		"PI_CONFIG_FILES": overlay + ":" + operatorOverlays,
-		"PI_CONFIG_DIR":   ".omp", "OMP_SESSION_STORAGE": "file",
-		"XDG_STATE_HOME": stateHome, "TMPDIR": scratchRoot + "/tmp",
+		"PI_CONFIG_FILES":           overlay + ":" + operatorOverlays,
+		"PI_CONFIG_DIR":             ".omp",
+		ompsessions.StorageVariable: ompsessions.SQLStorage,
+		ompsessions.DSNFileVariable: providersDSNFile,
+		"XDG_STATE_HOME":            stateHome, "TMPDIR": scratchRoot + "/tmp",
 	}
 	for name, value := range r.pod.Env {
 		if name != "PI_CONFIG_FILES" {
