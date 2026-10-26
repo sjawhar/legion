@@ -1356,7 +1356,11 @@ export const dispatchToolSpecs = [
       "repository, and its model is every source's components together. Without repo every " +
       "source imports and each answers on its own line; with repo only that source does. Each " +
       "line names the imported commit, or the recorded error when that source's model was " +
-      "rejected (its previous components stay up, and every other source is untouched). Sources " +
+      "rejected (its previous components stay up, and every other source is untouched). A failed " +
+      "line also says what of that source still shows (its commit, its component count when it " +
+      "was saved again on another branch and has not imported from it yet, or that it never " +
+      "imported), and a credential or branch problem is that source's failed line, or with repo " +
+      "the error 409 SOURCE_ACCESS. Sources " +
       "are saved in Settings or with PUT /api/v1/projects/{key}/architecture-sources/{owner}/{repo}; " +
       "404 SOURCE_NOT_FOUND when the project has none, or none for that repository.",
     arguments: (z) => ({

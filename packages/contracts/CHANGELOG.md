@@ -139,12 +139,13 @@
 ### Changed
 
 - `dispatch_issue`'s `spec` and `dispatch_doc_edit` point at `skill://dispatch-writing-specs` in
-  place of the dispatch skill's "Writing a spec" (INFRA-140). Four descriptions take a rule the
+  place of the dispatch skill's "Writing a spec" (INFRA-140). Five descriptions take a rule the
   dispatch skill's references held, so `dispatch <command> --help` prints it: `dispatch_resolve_ask`
   (which kind to use, and that resolving records no decision), `dispatch_comment` (a reply under an
   open ask asks for clarification), `dispatch_doc_edit` (one replace per paragraph, then one
-  insert, then a read back) and `dispatch_artifact` (never upload a document's own name to change
-  it).
+  insert, then a read back), `dispatch_artifact` (never upload a document's own name to change
+  it) and `dispatch_architecture_sync` (what a failed source's line still shows, and that a
+  credential or branch problem with `repo` is `409 SOURCE_ACCESS`).
 - `dispatch ask --help` says never to create an issue to park a question, and `dispatch issue
   --help` says to create a project only when a person asks for one, and that work across projects
   goes in the project that owns most of it (INFRA-140).

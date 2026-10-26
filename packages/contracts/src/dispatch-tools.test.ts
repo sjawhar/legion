@@ -320,6 +320,8 @@ describe("dispatchToolSpecs", () => {
 
     expect(description).toContain("A project may have several sources, one per repository");
     expect(description).toContain("PUT /api/v1/projects/{key}/architecture-sources/{owner}/{repo}");
+    expect(description).toContain("A failed line also says what of that source still shows");
+    expect(description).toContain("or with repo the error 409 SOURCE_ACCESS");
   });
 
   test("dispatch_open_asks accepts no arguments or a project and rejects unknown selectors", () => {
