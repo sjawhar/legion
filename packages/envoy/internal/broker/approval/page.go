@@ -24,6 +24,13 @@ type Page struct {
 	Form string
 	// Button is that button's label.
 	Button string
+	// FormRedirectOrigin is the origin (scheme://host[:port]) the form's own answer redirects the
+	// browser to — the issuer's authorization endpoint, for the page whose button starts a
+	// sign-in. form-action allows it beside 'self', because Chromium and WebKit check form-action
+	// on every redirect that follows a form submission, not only on the form's own target: without
+	// it the button posts to this origin, the redirect to the issuer is blocked, and nothing
+	// happens. Empty on every other page, which then allows this origin alone.
+	FormRedirectOrigin string
 }
 
 // Fact is one line of what is being approved.
@@ -31,16 +38,23 @@ type Fact struct {
 	Label, Value string
 }
 
-// contentSecurityPolicy is what the approval pages are served under: nothing loads, nothing runs,
-// the one form posts to this origin alone, and no page of anyone else's may frame them. A page
-// carrying no asset of its own is what makes default-src 'none' possible rather than a policy with
-// holes in it; frame-ancestors is the modern half of the X-Frame-Options header Write also sends,
-// and base-uri 'none' keeps an injected <base> from re-pointing the form.
-const contentSecurityPolicy = "default-src 'none'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'"
+// contentSecurityPolicy is what an approval page is served under: nothing loads, nothing runs, its
+// one form posts to this origin and redirects nowhere but formRedirect (empty for none), and no
+// page of anyone else's may frame it. A page carrying no asset of its own is what makes
+// default-src 'none' possible rather than a policy with holes in it; frame-ancestors is the modern
+// half of the X-Frame-Options header Write also sends, and base-uri 'none' keeps an injected
+// <base> from re-pointing the form.
+func contentSecurityPolicy(formRedirect string) string {
+	formAction := "'self'"
+	if formRedirect != "" {
+		formAction += " " + formRedirect
+	}
+	return "default-src 'none'; form-action " + formAction + "; base-uri 'none'; frame-ancestors 'none'"
+}
 
 // Write answers w with p and status.
 //
-// Every answer carries the same headers: the policy above, X-Frame-Options for a browser that
+// Every answer carries the same headers: its policy (above), X-Frame-Options for a browser that
 // reads no frame-ancestors, no-store so neither the browser nor anything between keeps a page that
 // names a pending approval, no referrer (the challenge id is in the URL and must not travel in a
 // Referer header), and nosniff.
@@ -56,7 +70,7 @@ func Write(w http.ResponseWriter, status int, p Page) {
 	}
 	header := w.Header()
 	header.Set("Content-Type", "text/html; charset=utf-8")
-	header.Set("Content-Security-Policy", contentSecurityPolicy)
+	header.Set("Content-Security-Policy", contentSecurityPolicy(p.FormRedirectOrigin))
 	header.Set("X-Frame-Options", "DENY")
 	header.Set("Cache-Control", "no-store")
 	header.Set("Referrer-Policy", "no-referrer")

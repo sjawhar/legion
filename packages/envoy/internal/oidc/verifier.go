@@ -69,9 +69,9 @@ func Reason(err error) string {
 // `email_verified` (true only for the JSON true or the string "true"),
 // HostedDomain is `hd`, the account's Workspace domain, and AuthTime is
 // `auth_time`, when the person last authenticated to the issuer, which an
-// issuer returns for a request that asks for max_age (CodeFlow.ConfirmURL) and
-// which is zero for a token that carries none; Verify never reads these four,
-// so it leaves them empty.
+// issuer returns for a request whose claims parameter asks for it
+// (CodeFlow.ConfirmURL) and which is zero for a token that carries none; Verify
+// never reads these four, so it leaves them empty.
 type Claims struct {
 	Subject       string
 	Issuer        string

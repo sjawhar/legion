@@ -10,6 +10,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/cookiejar"
+	"net/http/httptest"
 	"net/url"
 	"strings"
 	"testing"
@@ -124,9 +125,26 @@ func (ts *approvalServer) get(t *testing.T, path string) (int, string) {
 	return response.StatusCode, readBody(t, response)
 }
 
+// post is the browser pressing the page's button: a form POST on the broker's own origin, which a
+// browser marks with that Origin.
 func (ts *approvalServer) post(t *testing.T, path string) *http.Response {
 	t.Helper()
-	response, err := ts.browser.Post(ts.URL+path, "application/x-www-form-urlencoded", nil)
+	return ts.postWith(t, path, map[string]string{"Origin": ts.URL})
+}
+
+// postWith is a POST through the browser's cookie jar carrying exactly headers, for a test of what
+// the start route refuses.
+func (ts *approvalServer) postWith(t *testing.T, path string, headers map[string]string) *http.Response {
+	t.Helper()
+	request, err := http.NewRequest(http.MethodPost, ts.URL+path, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	for name, value := range headers {
+		request.Header.Set(name, value)
+	}
+	response, err := ts.browser.Do(request)
 	if err != nil {
 		t.Fatalf("POST %s: %v", path, err)
 	}
@@ -208,18 +226,38 @@ func TestAnApprovalIsAppliedOnlyByTheApproversOwnSignIn(t *testing.T) {
 	}
 	id := challengeID(t, opened.URL)
 
-	status, page := ts.get(t, "/approve/"+id)
-	if status != http.StatusOK {
-		t.Fatalf("GET the approval page = %d: %s", status, page)
+	pageResponse, err := ts.browser.Get(ts.URL + "/approve/" + id)
+	if err != nil {
+		t.Fatalf("GET the approval page: %v", err)
+	}
+	page := readBody(t, pageResponse)
+	pageResponse.Body.Close()
+	if pageResponse.StatusCode != http.StatusOK {
+		t.Fatalf("GET the approval page = %d: %s", pageResponse.StatusCode, page)
 	}
 	for _, want := range []string{"DEEL_API_KEY", testApprover, "need it for the demo", "Sign in to approve", approvalDomain} {
 		if !strings.Contains(page, want) {
 			t.Errorf("the approval page does not name %q: %s", want, page)
 		}
 	}
+	// Its form posts here and its answer redirects to the issuer's authorization endpoint, which
+	// Chromium checks against form-action too: the policy names both origins, and only those.
+	if policy := pageResponse.Header.Get("Content-Security-Policy"); !strings.Contains(policy, "form-action 'self' "+ts.issuer.URL()+";") ||
+		!strings.HasPrefix(policy, "default-src 'none';") || !strings.Contains(policy, "frame-ancestors 'none'") {
+		t.Errorf("the approval page's Content-Security-Policy is %q, want form-action 'self' and the issuer's origin %s", policy, ts.issuer.URL())
+	}
+	// Every other page allows this origin alone.
+	if response, err := ts.browser.Get(ts.URL + "/approve/" + strings.Repeat("z", 43)); err != nil {
+		t.Fatal(err)
+	} else {
+		response.Body.Close()
+		if policy := response.Header.Get("Content-Security-Policy"); !strings.Contains(policy, "form-action 'self';") {
+			t.Errorf("a page with no form has Content-Security-Policy %q, want form-action 'self' alone", policy)
+		}
+	}
 
 	// The start page's redirect: the issuer's authorization endpoint, asking for this person's
-	// account, a recent authentication and nothing to keep.
+	// account through the account chooser, for auth_time, and for nothing to keep.
 	started := ts.post(t, "/approve/"+id+"/start")
 	if started.StatusCode != http.StatusSeeOther {
 		t.Fatalf("POST /approve/%s/start = %d, want 303", id, started.StatusCode)
@@ -234,7 +272,8 @@ func TestAnApprovalIsAppliedOnlyByTheApproversOwnSignIn(t *testing.T) {
 	}
 	for field, want := range map[string]string{
 		"state": id, "login_hint": testApprover, "prompt": "select_account",
-		"max_age": "300", "hd": approvalDomain, "client_id": approvalClientID, "response_type": "code",
+		"claims": `{"id_token":{"auth_time":{"essential":true}}}`,
+		"hd":     approvalDomain, "client_id": approvalClientID, "response_type": "code",
 	} {
 		if query.Get(field) != want {
 			t.Errorf("the sign-in's %s is %q, want %q", field, query.Get(field), want)
@@ -243,20 +282,25 @@ func TestAnApprovalIsAppliedOnlyByTheApproversOwnSignIn(t *testing.T) {
 	if query.Get("nonce") == "" {
 		t.Error("the sign-in carries no nonce")
 	}
+	if query.Has("max_age") {
+		t.Errorf("the sign-in asks for max_age=%q, which Google ignores", query.Get("max_age"))
+	}
 	if query.Get("access_type") != "" || query.Get("scope") == "" {
 		t.Errorf("the sign-in asks for access_type=%q, want none at all (no refresh token)", query.Get("access_type"))
 	}
 	var binding *http.Cookie
 	for _, cookie := range started.Cookies() {
-		if cookie.Name == "approval_binding" {
+		if strings.HasPrefix(cookie.Name, "approval_binding_") {
 			binding = cookie
 		}
 	}
 	switch {
 	case binding == nil:
 		t.Fatalf("the start page set no binding cookie: %v", started.Cookies())
+	case binding.Name != approval.CookieName(id, false):
+		t.Fatalf("the binding cookie is named %q, want this approval's own %q", binding.Name, approval.CookieName(id, false))
 	case !binding.HttpOnly || binding.SameSite != http.SameSiteLaxMode || binding.Path != "/approve/" || binding.Value == "":
-		t.Fatalf("the binding cookie is %+v, want an HttpOnly SameSite=Lax cookie of /approve/", binding)
+		t.Fatalf("the binding cookie is %+v, want an HttpOnly SameSite=Lax cookie of /approve/ on this http broker", binding)
 	case strings.Contains(query.Get("nonce"), binding.Value):
 		t.Fatal("the sign-in's nonce carries the cookie's own value; it must be a hash of it")
 	}
@@ -274,15 +318,9 @@ func TestAnApprovalIsAppliedOnlyByTheApproversOwnSignIn(t *testing.T) {
 	}
 
 	// The broker's own record of whose sign-in decided it.
-	var usedAt *time.Time
-	var issuer, subject string
-	if err := ts.Store.Pool.QueryRow(context.Background(),
-		`select used_at, coalesce(signed_in_issuer,''), coalesce(signed_in_subject,'') from approval_challenges where id=$1`, id).
-		Scan(&usedAt, &issuer, &subject); err != nil {
-		t.Fatalf("read the spent approval: %v", err)
-	}
-	if usedAt == nil || issuer != ts.issuer.URL() || subject != "google-subject-"+testApprover {
-		t.Fatalf("the spent approval names issuer %q subject %q (used %v), want the issuer and the token's own sub", issuer, subject, usedAt)
+	spent := ts.spentChallenge(t, id)
+	if spent.usedAt == nil || spent.issuer != ts.issuer.URL() || spent.subject != "google-subject-"+testApprover || spent.authTime == nil {
+		t.Fatalf("the spent approval is %+v, want the issuer, the token's own sub and its auth_time", spent)
 	}
 
 	// Spent once: the same callback again decides nothing more.
@@ -321,21 +359,13 @@ func TestASignInTheBrokerWillNotTakeApprovesNothing(t *testing.T) {
 			}(),
 			want: "no verified email address",
 		},
-		"a sign-in from an hour ago": {
+		"a sign-in an hour in the future": {
 			claims: func() map[string]any {
 				claims := workspaceClaims(testApprover)
-				claims["auth_time"] = time.Now().Add(-time.Hour).Unix()
+				claims["auth_time"] = time.Now().Add(time.Hour).Unix()
 				return claims
 			}(),
-			want: "signed in too long ago",
-		},
-		"a token with no auth_time at all": {
-			claims: func() map[string]any {
-				claims := workspaceClaims(testApprover)
-				delete(claims, "auth_time")
-				return claims
-			}(),
-			want: "signed in too long ago",
+			want: "has not come yet",
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -362,6 +392,60 @@ func TestASignInTheBrokerWillNotTakeApprovesNothing(t *testing.T) {
 	}
 }
 
+// TestASignInOfAnyAgeApprovesAndItsAuthTimeIsRecorded: Google authenticates nobody again on
+// request, so how long ago the person signed in to Google decides nothing. The broker records the
+// token's auth_time as the issuer stated it, and records none for a token that carries none.
+func TestASignInOfAnyAgeApprovesAndItsAuthTimeIsRecorded(t *testing.T) {
+	weekAgo := time.Now().Add(-7 * 24 * time.Hour).Truncate(time.Second)
+	for name, tc := range map[string]struct {
+		authTime any
+		want     *time.Time
+	}{
+		"a sign-in a week old":              {authTime: weekAgo.Unix(), want: &weekAgo},
+		"a token that carries no auth_time": {authTime: nil, want: nil},
+	} {
+		t.Run(name, func(t *testing.T) {
+			ts := newApprovalServer(t)
+			recordID := ts.pendingSecretRecord(t)
+			_, body := ts.openApproval(t, recordID, testApprover, nil)
+			id := challengeID(t, decode[wireApproval](t, body).URL)
+			claims := workspaceClaims(testApprover)
+			if tc.authTime == nil {
+				delete(claims, "auth_time")
+			} else {
+				claims["auth_time"] = tc.authTime
+			}
+			if status, page := ts.signIn(t, id, claims); status != http.StatusOK || !strings.Contains(page, "Approved") {
+				t.Fatalf("the callback = %d: %s", status, page)
+			}
+			spent := ts.spentChallenge(t, id)
+			switch {
+			case tc.want == nil && spent.authTime != nil:
+				t.Fatalf("the spent approval records auth_time %v for a token that carried none", *spent.authTime)
+			case tc.want != nil && (spent.authTime == nil || !spent.authTime.Equal(*tc.want)):
+				t.Fatalf("the spent approval records auth_time %v, want %v", spent.authTime, *tc.want)
+			}
+		})
+	}
+}
+
+// spentRow is what approval_challenges holds about one approval once it has been spent.
+type spentRow struct {
+	usedAt, authTime *time.Time
+	issuer, subject  string
+}
+
+func (ts *approvalServer) spentChallenge(t *testing.T, id string) spentRow {
+	t.Helper()
+	var row spentRow
+	if err := ts.Store.Pool.QueryRow(context.Background(),
+		`select used_at, coalesce(signed_in_issuer,''), coalesce(signed_in_subject,''), signed_in_auth_time from approval_challenges where id=$1`, id).
+		Scan(&row.usedAt, &row.issuer, &row.subject, &row.authTime); err != nil {
+		t.Fatalf("read the spent approval: %v", err)
+	}
+	return row
+}
+
 // TestACallbackWithoutTheBrowsersOwnBindingApprovesNothing pins the cookie half of the binding: an
 // ID token that does not carry the nonce this browser's cookie derives approves nothing, so a
 // sign-in captured or started elsewhere cannot be redirected into someone else's approval.
@@ -377,8 +461,9 @@ func TestACallbackWithoutTheBrowsersOwnBindingApprovesNothing(t *testing.T) {
 	callback := "/approve/callback?code=" + url.QueryEscape(code) + "&state=" + url.QueryEscape(state)
 
 	for name, cookie := range map[string]string{
-		"no cookie at all":  "",
-		"another browser's": "approval_binding=" + strings.Repeat("a", 43),
+		"no cookie at all":                       "",
+		"another browser's for this approval":    approval.CookieName(id, false) + "=" + strings.Repeat("a", 43),
+		"the old shared name, which is no one's": "approval_binding=" + strings.Repeat("a", 43),
 	} {
 		t.Run(name, func(t *testing.T) {
 			headers := map[string]string{}
@@ -393,6 +478,132 @@ func TestACallbackWithoutTheBrowsersOwnBindingApprovesNothing(t *testing.T) {
 				t.Fatalf("the record is %q, want it still pending", read.State)
 			}
 		})
+	}
+}
+
+// TestTheSignInStartsOnlyFromTheBrokersOwnPage: /start sends a browser to the issuer only for the
+// button on the broker's own page, which a browser marks same-origin. Another site's form — or a
+// request that says nothing about where it came from — would take the person to the account
+// chooser without their having been shown what they are approving, so it is refused, sets no
+// cookie and redirects nowhere.
+func TestTheSignInStartsOnlyFromTheBrokersOwnPage(t *testing.T) {
+	ts := newApprovalServer(t)
+	recordID := ts.pendingSecretRecord(t)
+	_, body := ts.openApproval(t, recordID, testApprover, nil)
+	id := challengeID(t, decode[wireApproval](t, body).URL)
+	start := "/approve/" + id + "/start"
+
+	for name, headers := range map[string]map[string]string{
+		"no Origin and no Sec-Fetch-Site":  {},
+		"another site's Origin":            {"Origin": "https://attacker.example"},
+		"a cross-site fetch":               {"Sec-Fetch-Site": "cross-site"},
+		"a same-site sibling's fetch":      {"Sec-Fetch-Site": "same-site", "Origin": "https://dispatch.example"},
+		"a null Origin":                    {"Origin": "null"},
+		"an Origin with the broker's path": {"Origin": ts.URL + "/approve"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			refused := ts.postWith(t, start, headers)
+			if refused.StatusCode != http.StatusForbidden || refused.Header.Get("Location") != "" || len(refused.Cookies()) != 0 {
+				t.Fatalf("POST %s (%s) = %d, Location %q, cookies %v; want 403 with no redirect and no cookie",
+					start, name, refused.StatusCode, refused.Header.Get("Location"), refused.Cookies())
+			}
+		})
+	}
+	for name, headers := range map[string]map[string]string{
+		"Sec-Fetch-Site: same-origin": {"Sec-Fetch-Site": "same-origin"},
+		"the broker's own Origin":     {"Origin": ts.URL},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if started := ts.postWith(t, start, headers); started.StatusCode != http.StatusSeeOther {
+				t.Fatalf("POST %s (%s) = %d, want 303 to the issuer", start, name, started.StatusCode)
+			}
+		})
+	}
+}
+
+// TestTwoApprovalsInOneBrowserKeepTheirOwnBindings: each approval's cookie is its own, so starting
+// a second approval in the same browser leaves the first one's sign-in able to finish.
+func TestTwoApprovalsInOneBrowserKeepTheirOwnBindings(t *testing.T) {
+	ts := newApprovalServer(t)
+	first := ts.pendingSecretRecord(t)
+	_, body := ts.openApproval(t, first, testApprover, nil)
+	firstID := challengeID(t, decode[wireApproval](t, body).URL)
+	_, body = ts.openApproval(t, first, testApprover, nil)
+	secondID := challengeID(t, decode[wireApproval](t, body).URL)
+
+	firstStart := ts.post(t, "/approve/"+firstID+"/start")
+	secondStart := ts.post(t, "/approve/"+secondID+"/start")
+	if firstStart.StatusCode != http.StatusSeeOther || secondStart.StatusCode != http.StatusSeeOther {
+		t.Fatalf("the two starts = %d and %d, want 303 each", firstStart.StatusCode, secondStart.StatusCode)
+	}
+	brokerURL, err := url.Parse(ts.URL + "/approve/callback")
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := map[string]bool{}
+	for _, cookie := range ts.browser.Jar.Cookies(brokerURL) {
+		names[cookie.Name] = true
+	}
+	if !names[approval.CookieName(firstID, false)] || !names[approval.CookieName(secondID, false)] {
+		t.Fatalf("the browser holds cookies %v, want one for each approval", names)
+	}
+
+	// The first approval's sign-in finishes after the second was started.
+	ts.issuer.SignInAs(workspaceClaims(testApprover))
+	code, state := ts.issuer.Authorize(t, firstStart.Header.Get("Location"))
+	status, page := ts.get(t, "/approve/callback?code="+url.QueryEscape(code)+"&state="+url.QueryEscape(state))
+	if status != http.StatusOK || !strings.Contains(page, "Approved") {
+		t.Fatalf("the first approval's callback after the second started = %d: %s", status, page)
+	}
+}
+
+// TestAnHTTPSBrokersBindingCookieIsAHostCookie: a deployment's broker is reached over https, and
+// its binding cookie is a __Host- cookie — Secure, Path=/, no Domain — which a browser lets no
+// other host of the broker's registrable domain set. The same broker's handlers serve it here,
+// with BROKER_PUBLIC_URL https, over a second test listener.
+func TestAnHTTPSBrokersBindingCookieIsAHostCookie(t *testing.T) {
+	var deps api.Deps
+	ts := newApprovalServer(t, func(d *api.Deps) { deps = *d })
+	recordID := ts.pendingSecretRecord(t)
+	_, body := ts.openApproval(t, recordID, testApprover, nil)
+	id := challengeID(t, decode[wireApproval](t, body).URL)
+
+	const publicURL = "https://broker.example"
+	deps.PublicURL = publicURL
+	mux := http.NewServeMux()
+	api.Register(mux, deps)
+	deployed := httptest.NewServer(mux)
+	t.Cleanup(deployed.Close)
+
+	request, err := http.NewRequest(http.MethodPost, deployed.URL+"/approve/"+id+"/start", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Origin", publicURL)
+	response, err := ts.browser.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusSeeOther {
+		t.Fatalf("POST /approve/%s/start = %d, want 303", id, response.StatusCode)
+	}
+	setCookie := response.Header.Values("Set-Cookie")
+	if len(setCookie) != 1 {
+		t.Fatalf("Set-Cookie = %q, want one binding cookie", setCookie)
+	}
+	header := setCookie[0]
+	want := approval.CookieName(id, true) + "="
+	if !strings.HasPrefix(header, "__Host-approval_binding_") || !strings.HasPrefix(header, want) {
+		t.Fatalf("Set-Cookie = %q, want this approval's own __Host- cookie %s", header, want)
+	}
+	for _, attribute := range []string{"Path=/;", "Secure", "HttpOnly", "SameSite=Lax"} {
+		if !strings.Contains(header+";", attribute) {
+			t.Errorf("Set-Cookie = %q, want %s", header, attribute)
+		}
+	}
+	if strings.Contains(header, "Domain=") || strings.Contains(header, "Path=/approve") {
+		t.Errorf("Set-Cookie = %q, want no Domain and Path=/ alone, as __Host- requires", header)
 	}
 }
 
@@ -414,11 +625,40 @@ func TestAnApprovalThatIsUnknownOrExpiredShowsSoAndDecidesNothing(t *testing.T) 
 	if status, page := ts.get(t, "/approve/"+id); status != http.StatusGone || !strings.Contains(page, "Expired") {
 		t.Fatalf("an expired approval's page = %d: %s", status, page)
 	}
-	if status, page := ts.get(t, "/approve/"+id+"/start"); status != http.StatusMethodNotAllowed && status != http.StatusGone {
-		t.Logf("GET of the start route = %d: %s", status, page)
+	if started := ts.post(t, "/approve/"+id+"/start"); started.StatusCode != http.StatusGone || started.Header.Get("Location") != "" {
+		t.Fatalf("starting an expired approval = %d (Location %q), want 410 and no redirect", started.StatusCode, started.Header.Get("Location"))
 	}
 	if read := ts.recordState(t, recordID); read.State != "pending" {
 		t.Fatalf("the record is %q, want it still pending", read.State)
+	}
+}
+
+// TestAnApprovalIsNotOpenedForARecordPastItsExpiry: a record past its own expiry is refused when
+// the approval is opened, as the decision would refuse it, whether or not the sweeper has
+// recorded it expired yet — so nobody is sent to sign in for something that cannot be approved.
+func TestAnApprovalIsNotOpenedForARecordPastItsExpiry(t *testing.T) {
+	ts := newApprovalServer(t, func(d *api.Deps) { d.MachineLogin.PendingTTL = time.Second })
+
+	recordID := ts.pendingSecretRecord(t)
+	if _, err := ts.Store.Pool.Exec(context.Background(),
+		`update requests set pending_expires_at=now() - interval '1 minute' where record_id=$1`, recordID); err != nil {
+		t.Fatalf("expire the request: %v", err)
+	}
+	status, body := ts.openApproval(t, recordID, testApprover, nil)
+	if status != http.StatusConflict || decode[wireError](t, body).Code != "RECORD_TERMINAL" ||
+		!strings.Contains(decode[wireError](t, body).Error, "expired") {
+		t.Fatalf("open an approval of an unswept expired request = %d %s, want 409 RECORD_TERMINAL naming the expiry", status, body)
+	}
+
+	machineKey := newSigningKey(t)
+	code := ts.openMachineLogin(t, machineKey, testApprover, "example-host-devbox")
+	_, body = ts.ui(t, http.MethodPost, "/v1/machine-logins/lookup", map[string]any{"code": code})
+	machineRecord := decode[wireRecord](t, body).RecordID
+	time.Sleep(1100 * time.Millisecond)
+	status, body = ts.openApproval(t, machineRecord, testApprover, &code)
+	if status != http.StatusConflict || decode[wireError](t, body).Code != "RECORD_TERMINAL" ||
+		!strings.Contains(decode[wireError](t, body).Error, "expired") {
+		t.Fatalf("open an approval of an unswept expired machine login = %d %s, want 409 RECORD_TERMINAL naming the expiry", status, body)
 	}
 }
 

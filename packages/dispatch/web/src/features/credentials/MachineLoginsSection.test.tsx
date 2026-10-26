@@ -359,7 +359,7 @@ test("Approve hands the browser to the broker's page and adds nothing to the lis
     service: null,
     state: "pending",
   });
-  const startCredentialApproval = spyOn(api, "startCredentialApproval").mockResolvedValue({
+  const approveCredentialRecord = spyOn(api, "approveCredentialRecord").mockResolvedValue({
     expires_at: "2026-10-03T12:10:00Z",
     url: "https://broker.example/approve/challenge-4",
   });
@@ -376,7 +376,7 @@ test("Approve hands the browser to the broker's page and adds nothing to the lis
     fireEvent.click(screen.getByRole("button", { name: "Look up" }));
     fireEvent.click(await screen.findByRole("button", { name: "Approve" }));
 
-    await waitFor(() => expect(startCredentialApproval).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(approveCredentialRecord).toHaveBeenCalledTimes(1));
     await waitFor(() =>
       expect(assign).toHaveBeenCalledWith("https://broker.example/approve/challenge-4")
     );
@@ -386,7 +386,7 @@ test("Approve hands the browser to the broker's page and adds nothing to the lis
     cleanup();
     getMachineLogins.mockRestore();
     lookupMachineCredential.mockRestore();
-    startCredentialApproval.mockRestore();
+    approveCredentialRecord.mockRestore();
     assign.mockRestore();
   }
 });

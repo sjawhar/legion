@@ -163,12 +163,30 @@ func TestTheBinaryApprovesOnlyWithTheApprovingPersonsOwnSignIn(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The page's form answers with a redirect to the issuer, which Chromium checks against
+	// form-action: the policy names the issuer's authorization origin beside 'self'.
 	if page.StatusCode != http.StatusOK || !strings.Contains(string(shown), approver) ||
-		page.Header.Get("Content-Security-Policy") == "" || page.Header.Get("X-Frame-Options") != "DENY" ||
-		page.Header.Get("Cache-Control") != "no-store" {
+		!strings.Contains(page.Header.Get("Content-Security-Policy"), "form-action 'self' "+issuer.URL()+";") ||
+		page.Header.Get("X-Frame-Options") != "DENY" || page.Header.Get("Cache-Control") != "no-store" {
 		t.Fatalf("the approval page = %d %v: %s", page.StatusCode, page.Header, shown)
 	}
-	started, err := browser.Post(approvalURL+"/start", "application/x-www-form-urlencoded", nil)
+	// The button on the broker's own page: a same-origin form post, which a browser marks with
+	// the broker's own Origin. The same post with none is refused, which is the guard against
+	// another site's form skipping the page.
+	unmarked, err := browser.Post(approvalURL+"/start", "application/x-www-form-urlencoded", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unmarked.Body.Close()
+	if unmarked.StatusCode != http.StatusForbidden {
+		t.Fatalf("a start with no Origin = %d, want 403", unmarked.StatusCode)
+	}
+	startRequest, err := http.NewRequest(http.MethodPost, approvalURL+"/start", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	startRequest.Header.Set("Origin", base)
+	started, err := browser.Do(startRequest)
 	if err != nil {
 		t.Fatal(err)
 	}

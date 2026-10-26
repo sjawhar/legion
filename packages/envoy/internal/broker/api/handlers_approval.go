@@ -10,6 +10,16 @@
 // of, so the proof comes from the issuer to the broker and no service in between can mint it. The
 // callback applies the decision only for the person the challenge names, once.
 //
+// What binds an approval to that person is five things together: the press of the button on the
+// broker's own page, which /start refuses from any other origin (sameOriginForm); the binding
+// cookie that press sets, one per challenge and, on an https broker, a __Host- cookie no sibling
+// host can plant (bindingCookie); the nonce the ID token carries, derived from that cookie; the
+// account the person picks at the issuer, which is asked every time (prompt=select_account); and
+// the email the token names, which must be the challenge's own approver. What it does not bind is
+// freshness: Google re-authenticates nobody on request, so a person already signed in to Google
+// approves with a click on the page and a click in the account chooser, and anyone in control of
+// that person's signed-in browser can do the same. The token's auth_time is recorded, not judged.
+//
 // What this does not cover, deliberately: a denial and a revoke still travel on the calling
 // service's word, since either can only take access away.
 package api
@@ -19,6 +29,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -40,17 +51,7 @@ const (
 	// BROKER_PUBLIC_URL + this as the OAuth client's one redirect URI, which cmd/broker logs at
 	// boot.
 	ApprovalCallbackPath = "/approve/callback"
-	// approvalCookie is the cookie the start page sets: the browser's half of the binding the
-	// sign-in's nonce is derived from (approval.Nonce).
-	approvalCookie = "approval_binding"
 )
-
-// ApprovalMaxAge is how recently the person must have authenticated to the issuer for their
-// sign-in to approve anything: the max_age the start page asks for, and the bound the callback
-// holds the ID token's own auth_time to. Five minutes means a browser that merely holds a live
-// session at the issuer does not approve on its own — the issuer asks the person again — while
-// nobody has to sign in twice inside one approval.
-const ApprovalMaxAge = 5 * time.Minute
 
 // approvalBody is POST /v1/credential-requests/{record}/approval's request body:
 // {"approver", "code"?}, the same two fields a decision carries. The approver is who the broker
@@ -76,11 +77,12 @@ type approvalResponse struct {
 }
 
 // openApproval opens a single-use approval for the record and answers the page's URL. It refuses
-// everything the approval itself would refuse — an unknown or decided record, a login the record's
-// rule or the current policy does not admit, a machine login's wrong or missing code, a service's
-// login, which no person approves — so a refusal reaches the person on the page they clicked in
-// rather than at the end of a sign-in. It decides nothing: the record changes only when the person
-// has signed in (approvalCallback).
+// everything the approval itself would refuse — an unknown, decided or expired record (expired
+// by its own clock, whether or not the sweeper has got to it), a login the record's rule or the
+// current policy does not admit, a machine login's wrong or missing code, a service's login,
+// which no person approves — so a refusal reaches the person on the page they clicked in rather
+// than at the end of a sign-in. It decides nothing: the record changes only when the person has
+// signed in (approvalCallback).
 func (s *server) openApproval(w http.ResponseWriter, r *http.Request, callerName string) {
 	recordID, ok := pathRecordID(w, r, "record", "RECORD_ID_INPUT")
 	if !ok {
@@ -123,6 +125,10 @@ func (s *server) openApproval(w http.ResponseWriter, r *http.Request, callerName
 				"a service logs in with its own token, so no person approves its login")
 			return
 		}
+		if !detail.ExpiresAt.After(time.Now()) {
+			writeError(w, http.StatusConflict, "RECORD_TERMINAL", machine.ErrLoginExpired.Error())
+			return
+		}
 		if body.Code == nil || *body.Code == "" {
 			writeError(w, http.StatusBadRequest, "CODE_REQUIRED", "code is required to decide a machine login")
 			return
@@ -143,6 +149,8 @@ func (s *server) openApproval(w http.ResponseWriter, r *http.Request, callerName
 		switch {
 		case errors.Is(err, record.ErrNotApprover):
 			writeError(w, http.StatusForbidden, "NOT_APPROVER", err.Error())
+		case errors.Is(err, requests.ErrExpired), errors.Is(err, requests.ErrTerminal):
+			writeError(w, http.StatusConflict, "RECORD_TERMINAL", err.Error())
 		case errors.Is(err, pgx.ErrNoRows):
 			writeError(w, http.StatusNotFound, "NOT_FOUND", "no such credential request")
 		case errors.Is(err, requests.ErrGrantChainInvalid):
@@ -203,6 +211,8 @@ func (s *server) approvalPage(w http.ResponseWriter, r *http.Request) {
 		Facts:   approvalFacts(detail, challenge),
 		Form:    approvalRoutes + challenge.ID + "/start",
 		Button:  "Sign in to approve",
+		// The button's answer redirects to the issuer, which form-action has to allow.
+		FormRedirectOrigin: s.deps.Approval.Flow.AuthorizationOrigin(),
 	})
 }
 
@@ -262,9 +272,23 @@ func approvalFacts(detail requests.RecordDetail, challenge approval.Challenge) [
 // never leaves the browser and the issuer never sees it: the sign-in's nonce is the hash of it and
 // the challenge id (approval.Nonce), so the ID token that comes back proves the browser that
 // finishes the sign-in is the one that started it, and the broker keeps nothing per sign-in to
-// check that with.
+// check that with. The cookie is named for its challenge (approval.CookieName), so a second
+// approval started in the same browser leaves the first one's binding alone.
+//
+// It starts nothing for a request the broker's own page did not send (sameOriginForm): another
+// site's page that auto-posts here would otherwise take the person straight to the identity
+// provider's account chooser, past the page that shows what they are approving.
 func (s *server) startApprovalSignIn(w http.ResponseWriter, r *http.Request) {
 	if s.refuseApprovalAddress(w, r) {
+		return
+	}
+	if !s.sameOriginForm(r) {
+		slog.Warn("approval sign-in start refused: not posted by the broker's own page",
+			"sec_fetch_site", r.Header.Get("Sec-Fetch-Site"), "origin", r.Header.Get("Origin"))
+		approval.Write(w, http.StatusForbidden, approval.Page{
+			Title:   "Not started",
+			Message: "An approval starts from its own page on the broker, which shows what you are approving. Open the approval link again and press its button.",
+		})
 		return
 	}
 	challenge, ok := s.challengeOf(w, r, r.PathValue("id"))
@@ -276,38 +300,74 @@ func (s *server) startApprovalSignIn(w http.ResponseWriter, r *http.Request) {
 		s.writeApprovalInternal(w, "start an approval sign-in", err)
 		return
 	}
-	http.SetCookie(w, &http.Cookie{
-		Name:  approvalCookie,
-		Value: binding,
-		// The three pages' own prefix: the cookie reaches the callback and nothing else the
-		// broker serves.
-		Path:     approvalRoutes,
-		HttpOnly: true,
-		Secure:   s.approvalCookieSecure(),
-		SameSite: http.SameSiteLaxMode,
-		// As long as the approval itself, and never zero, which would make it a session cookie.
-		MaxAge: max(int(time.Until(challenge.ExpiresAt).Seconds()), 1),
-	})
+	http.SetCookie(w, s.bindingCookie(challenge, binding))
 	target := s.deps.Approval.Flow.ConfirmURL(
 		s.deps.PublicURL+ApprovalCallbackPath, challenge.ID, approval.Nonce(challenge.ID, binding),
-		challenge.Approver, ApprovalMaxAge)
+		challenge.Approver)
 	http.Redirect(w, r, target, http.StatusSeeOther)
 }
 
+// sameOriginForm reports whether r is the form the broker's own page posted: a browser says so
+// with Sec-Fetch-Site: same-origin, or with an Origin that is BROKER_PUBLIC_URL's own (a browser
+// that sends no Sec-Fetch-Site still sends Origin on a form POST). A request that says neither —
+// another site's form, which a browser marks cross-site and gives its own Origin, or a client that
+// sends no such header at all — is refused.
+func (s *server) sameOriginForm(r *http.Request) bool {
+	if r.Header.Get("Sec-Fetch-Site") == "same-origin" {
+		return true
+	}
+	origin := r.Header.Get("Origin")
+	return origin != "" && strings.EqualFold(origin, publicOrigin(s.deps.PublicURL))
+}
+
+// publicOrigin is the origin (scheme://host[:port]) of BROKER_PUBLIC_URL, which config.Load holds
+// to an absolute URL with no path; "" for anything else, which no Origin header matches.
+func publicOrigin(publicURL string) string {
+	parsed, err := url.Parse(publicURL)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return ""
+	}
+	return parsed.Scheme + "://" + parsed.Host
+}
+
+// bindingCookie is the cookie that carries challenge's binding, named for that challenge
+// (approval.CookieName). On every deployment, whose BROKER_PUBLIC_URL is https, it is a __Host-
+// cookie — Secure, Path=/ and no Domain, the three a browser requires of that prefix — so no other
+// host of the broker's registrable domain can plant one. A local http broker sets a plain cookie
+// on the three pages' own prefix instead, since a Secure cookie is never sent back over http and
+// the flow could not be run there at all; that broker has no such protection.
+func (s *server) bindingCookie(challenge approval.Challenge, binding string) *http.Cookie {
+	secure := s.approvalCookieSecure()
+	path := approvalRoutes
+	if secure {
+		path = "/"
+	}
+	return &http.Cookie{
+		Name:     approval.CookieName(challenge.ID, secure),
+		Value:    binding,
+		Path:     path,
+		HttpOnly: true,
+		Secure:   secure,
+		SameSite: http.SameSiteLaxMode,
+		// As long as the approval itself, and never zero, which would make it a session cookie.
+		MaxAge: max(int(time.Until(challenge.ExpiresAt).Seconds()), 1),
+	}
+}
+
 // approvalCookieSecure is whether the binding cookie is Secure: on every deployment, whose
-// BROKER_PUBLIC_URL is https, and not on a local http broker, where a Secure cookie would never be
-// sent back and the flow could not be run at all.
+// BROKER_PUBLIC_URL is https, and not on a local http broker.
 func (s *server) approvalCookieSecure() bool {
 	return strings.HasPrefix(s.deps.PublicURL, "https://")
 }
 
 // approvalCallback is where the issuer sends the person back, and the only place a decision is
 // applied as a person. It verifies the ID token against the issuer's own keys and this client
-// (oidc.CodeFlow.Confirm: audience, signature, expiry, the nonce the cookie binds, a verified
-// email, the Workspace domain and an authentication no older than ApprovalMaxAge), requires that
-// email to be the challenge's approver, spends the challenge, and only then applies the decision —
-// the same ApplyDecision every other approval goes through, under that person's login, writing
-// the same event, grant and audit rows. Any failure renders a page and applies nothing.
+// (oidc.CodeFlow.Confirm: audience, signature, expiry, the nonce the challenge's own cookie binds,
+// a verified email, the Workspace domain, and an auth_time that is not in the future), requires
+// that email to be the challenge's approver, spends the challenge — recording the token's issuer,
+// sub and auth_time on it — and only then applies the decision: the same ApplyDecision every other
+// approval goes through, under that person's login, writing the same event, grant and audit rows.
+// Any failure renders a page and applies nothing.
 func (s *server) approvalCallback(w http.ResponseWriter, r *http.Request) {
 	if s.refuseApprovalAddress(w, r) {
 		return
@@ -335,7 +395,7 @@ func (s *server) approvalCallback(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	binding, err := r.Cookie(approvalCookie)
+	binding, err := r.Cookie(approval.CookieName(id, s.approvalCookieSecure()))
 	if err != nil || binding.Value == "" {
 		approval.Write(w, http.StatusForbidden, approval.Page{
 			Title:   "Not approved",
@@ -343,9 +403,8 @@ func (s *server) approvalCallback(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	now := time.Now()
 	claims, err := s.deps.Approval.Flow.Confirm(r.Context(), s.deps.PublicURL+ApprovalCallbackPath,
-		code, approval.Nonce(id, binding.Value), ApprovalMaxAge, now)
+		code, approval.Nonce(id, binding.Value), time.Now())
 	if err != nil {
 		s.refuseApprovalSignIn(w, challenge.RecordID, err)
 		return
@@ -359,7 +418,9 @@ func (s *server) approvalCallback(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	spent, err := s.deps.Approval.Challenges.Spend(r.Context(), id, claims.Issuer, claims.Subject, now)
+	// The clock read after the exchange, not before it: a challenge whose window closed while the
+	// issuer was answering is expired, not spent.
+	spent, err := s.deps.Approval.Challenges.Spend(r.Context(), id, claims.Issuer, claims.Subject, claims.AuthTime, time.Now())
 	if err != nil {
 		if !writeChallengeRefusal(w, err) {
 			s.writeApprovalInternal(w, "spend an approval", err)
@@ -401,7 +462,7 @@ func (s *server) applyApproval(w http.ResponseWriter, r *http.Request, spent app
 		return
 	}
 	slog.Info("approval decided with the approver's own sign-in", "record", spent.RecordID, "kind", spent.Kind,
-		"approver", spent.Approver, "issuer", claims.Issuer, "subject", claims.Subject)
+		"approver", spent.Approver, "issuer", claims.Issuer, "subject", claims.Subject, "auth_time", claims.AuthTime)
 	approval.Write(w, http.StatusOK, decided)
 }
 
@@ -464,8 +525,8 @@ func (s *server) refuseApprovalSignIn(w http.ResponseWriter, recordID string, er
 		message = "The account you signed in with has no verified email address, so nothing was approved."
 	case errors.Is(err, oidc.ErrHostedDomain):
 		message = "The account you signed in with is not in this deployment's domain, so nothing was approved."
-	case errors.Is(err, oidc.ErrStaleSignIn):
-		message = "You signed in too long ago for this approval. Open the approval link again and sign in when asked."
+	case errors.Is(err, oidc.ErrFutureSignIn):
+		message = "The identity provider's answer says you signed in at a time that has not come yet, so nothing was approved. Tell whoever runs the broker: its clock or the provider's is wrong."
 	}
 	approval.Write(w, http.StatusForbidden, approval.Page{Title: "Not approved", Message: message})
 }

@@ -62,11 +62,12 @@ test("after Deny succeeds the machine-login page shows the decision and no decis
   }
 });
 
-// Approve decides nothing here any more, so the page shows no decision: it hands the browser to
-// the broker's own page, where the approver signs in and the broker mints the credential.
+// On a broker that takes the approver's own sign-in, Approve decides nothing here, so the page
+// shows no decision: it hands the browser to the broker's own page, where the approver signs in
+// and the broker mints the credential.
 test("Approve sends the browser to the broker's page and records no decision here", async () => {
   const lookup = spyOn(api, "lookupMachineCredential").mockResolvedValue(machineRecord());
-  const approval = spyOn(api, "startCredentialApproval").mockResolvedValue({
+  const approval = spyOn(api, "approveCredentialRecord").mockResolvedValue({
     expires_at: "2026-09-27T00:10:00Z",
     url: "https://broker.example/approve/challenge-3",
   });
@@ -79,6 +80,32 @@ test("Approve sends the browser to the broker's page and records no decision her
     );
     expect(screen.queryByText(/^approved/i)).toBeNull();
     expect(screen.getByRole("button", { name: "Approve" })).toBeDefined();
+  } finally {
+    cleanup();
+    lookup.mockRestore();
+    approval.mockRestore();
+    assign.mockRestore();
+  }
+});
+
+// On a broker whose BROKER_APPROVAL_* group is unset, Approve answers the decision itself: the
+// page shows it, with the credential it minted, in place of the buttons, and goes nowhere.
+test("on a broker that takes no sign-in, Approve shows its decision and no decision buttons", async () => {
+  const lookup = spyOn(api, "lookupMachineCredential").mockResolvedValue(machineRecord());
+  const approval = spyOn(api, "approveCredentialRecord").mockResolvedValue({
+    credential_id: "cred-9",
+    grant_id: null,
+    state: "approved",
+  });
+  const assign = spyOn(window.location, "assign").mockImplementation(() => {});
+  try {
+    await lookUp();
+    fireEvent.click(screen.getByRole("button", { name: "Approve" }));
+    await waitFor(() => expect(screen.queryByRole("button", { name: "Approve" })).toBeNull());
+    expect(screen.queryByRole("button", { name: "Deny" })).toBeNull();
+    expect(screen.getByText(/approved/i)).toBeDefined();
+    expect(screen.getByText("Credential cred-9")).toBeDefined();
+    expect(assign).not.toHaveBeenCalled();
   } finally {
     cleanup();
     lookup.mockRestore();

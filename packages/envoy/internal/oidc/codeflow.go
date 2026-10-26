@@ -8,7 +8,6 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"strconv"
 	"strings"
 	"time"
 
@@ -37,8 +36,18 @@ var (
 	ErrNonce           = errors.New("oidc: the ID token's nonce is not the sign-in's")
 	ErrEmailUnverified = errors.New("oidc: the ID token's email is not verified")
 	ErrHostedDomain    = errors.New("oidc: the ID token names another hosted domain")
-	ErrStaleSignIn     = errors.New("oidc: the person signed in longer ago than the confirmation allows")
+	ErrFutureSignIn    = errors.New("oidc: the ID token says the person signed in later than now")
 )
+
+// authTimeSkew is how far past now an ID token's auth_time may sit before Confirm refuses it: the
+// clock difference between the issuer and this process, never a sign-in that has not happened.
+const authTimeSkew = time.Minute
+
+// authTimeClaim is the OpenID Connect claims request (Core 5.5) asking for auth_time in the ID
+// token. Google returns auth_time only when a request's claims parameter names it, and honours
+// neither max_age nor prompt=login (developers.google.com/identity/openid-connect/reference), so
+// this is the one way to learn when the person last authenticated.
+const authTimeClaim = `{"id_token":{"auth_time":{"essential":true}}}`
 
 // CodeFlow signs a person in with OpenID Connect's authorization code flow as one confidential
 // client of one issuer, renews the sign-in with its refresh token, and revokes a refresh token at
@@ -154,20 +163,20 @@ func (f *CodeFlow) AuthURL(redirectURL, state, nonce string) string {
 
 // ConfirmURL is where a browser starts a confirmation: the issuer's authorization endpoint asking
 // for a code to be sent to redirectURL with state, and an ID token carrying nonce. It asks for
-// nothing to keep — no offline access, so the issuer returns no refresh token — and for a sign-in
-// no older than maxAge (whole seconds), which makes the issuer authenticate the person again
-// rather than answer from a session it already holds, and report when it did in auth_time. It
-// names loginHint as login_hint and the domain as hd, the account the person is asked to pick,
-// and prompt=select_account, so a browser signed in to several accounts asks which rather than
-// confirming whichever one it holds first; Confirm relies on neither, and checks the email it
-// gets back itself.
-func (f *CodeFlow) ConfirmURL(redirectURL, state, nonce, loginHint string, maxAge time.Duration) string {
+// nothing to keep — no offline access, so the issuer returns no refresh token — and asks, through
+// the claims parameter, for auth_time, when the person last authenticated to the issuer, which
+// Confirm then reports. It names loginHint as login_hint and the domain as hd, the account the
+// person is asked to pick, and prompt=select_account, so the issuer shows its account chooser on
+// every confirmation rather than answering for whichever account the browser holds first. None
+// of that forces a new authentication: an issuer may answer from a session the browser already
+// has, Google among them. Confirm relies on none of it, and checks the email it gets back itself.
+func (f *CodeFlow) ConfirmURL(redirectURL, state, nonce, loginHint string) string {
 	config := f.config
 	config.RedirectURL = redirectURL
 	options := []oauth2.AuthCodeOption{
 		gooidc.Nonce(nonce),
 		oauth2.SetAuthURLParam("prompt", "select_account"),
-		oauth2.SetAuthURLParam("max_age", strconv.Itoa(int(maxAge.Seconds()))),
+		oauth2.SetAuthURLParam("claims", authTimeClaim),
 	}
 	if loginHint != "" {
 		options = append(options, oauth2.SetAuthURLParam("login_hint", loginHint))
@@ -178,16 +187,32 @@ func (f *CodeFlow) ConfirmURL(redirectURL, state, nonce, loginHint string, maxAg
 	return config.AuthCodeURL(state, options...)
 }
 
+// AuthorizationOrigin is the origin (scheme://host[:port]) of the issuer's authorization endpoint,
+// as its discovery document names it: where a browser goes when ConfirmURL or AuthURL sends it
+// there. A page whose form answers with a redirect to it has to allow it in its
+// content-security policy's form-action, since a browser checks that directive on the redirect
+// too, not only on the form's own target.
+func (f *CodeFlow) AuthorizationOrigin() string {
+	endpoint, err := url.Parse(f.config.Endpoint.AuthURL)
+	if err != nil || endpoint.Scheme == "" || endpoint.Host == "" {
+		return ""
+	}
+	return endpoint.Scheme + "://" + endpoint.Host
+}
+
 // Confirm trades the code the issuer redirected to redirectURL for the person who signed in, and
 // keeps nothing: no refresh token is asked for, and the ID token is dropped once its claims are
 // read. It is the whole of what a confirmation proves, and every check is here — the ID token
 // verified against the issuer's keys, this client as its audience and its own expiry (Verify);
 // nonce, the value the page that sent the browser to ConfirmURL bound it to (ErrNonce); a
 // verified email (ErrEmailUnverified); the flow's Workspace domain, compared on the token's own hd
-// claim rather than on the email's spelling (ErrHostedDomain); and an authentication no older
-// than maxAge from now, which a token carrying no auth_time at all fails too (ErrStaleSignIn),
-// since ConfirmURL asked for one. The caller compares the email with whoever it expected.
-func (f *CodeFlow) Confirm(ctx context.Context, redirectURL, code, nonce string, maxAge time.Duration, now time.Time) (Claims, error) {
+// claim rather than on the email's spelling (ErrHostedDomain); and an auth_time that is not later
+// than now (ErrFutureSignIn), which an issuer that keeps a sane clock never sends. It asks nothing
+// of how recent the sign-in is: Google cannot be made to authenticate the person again, so a
+// freshness bound would refuse every person who was already signed in. Claims.AuthTime is zero
+// for a token that carries no auth_time, which the caller records as such. The caller compares
+// the email with whoever it expected.
+func (f *CodeFlow) Confirm(ctx context.Context, redirectURL, code, nonce string, now time.Time) (Claims, error) {
 	config := f.config
 	config.RedirectURL = redirectURL
 	token, err := config.Exchange(f.tokenContext(ctx), code)
@@ -212,8 +237,8 @@ func (f *CodeFlow) Confirm(ctx context.Context, redirectURL, code, nonce string,
 		return Claims{}, ErrEmailUnverified
 	case f.hostedDomain != "" && claims.HostedDomain != f.hostedDomain:
 		return Claims{}, ErrHostedDomain
-	case claims.AuthTime.IsZero() || now.Sub(claims.AuthTime) > maxAge:
-		return Claims{}, ErrStaleSignIn
+	case claims.AuthTime.After(now.Add(authTimeSkew)):
+		return Claims{}, ErrFutureSignIn
 	}
 	return claims, nil
 }
@@ -320,8 +345,8 @@ type workspaceClaims struct {
 // readWorkspaceClaims reads raw's email, email_verified, hd and auth_time into claims: email and
 // hd when each is a JSON string, email_verified as true only for the JSON true or the string
 // "true", Google documenting both, and auth_time when it is a JSON number of seconds since the
-// epoch, which is what an issuer answers a max_age request with (CodeFlow.ConfirmURL). raw is a
-// token Verify accepted, so its payload is a JSON object.
+// epoch, which is what an issuer answers a claims request for it with (CodeFlow.ConfirmURL). raw
+// is a token Verify accepted, so its payload is a JSON object.
 func readWorkspaceClaims(raw string, claims *Claims) error {
 	payload, err := tokenPayload(raw)
 	if err != nil {

@@ -264,10 +264,7 @@ export interface CredentialApproval {
 export interface CredentialDenial {
   state: "denied";
 }
-/** What deny answers, relayed verbatim from the broker: `{state: "denied"}` alone. An approval is
- *  not answered here at all — it is applied on the broker's own page, where the approver signs in
- *  (`CredentialApprovalResponse`) — so `CredentialApproval` is only ever read back off a decided
- *  record. */
+/** What deny answers, relayed verbatim from the broker: `{state: "denied"}` alone. */
 export type CredentialDecisionResponse = CredentialApproval | CredentialDenial;
 
 /** What opening an approval answers, relayed verbatim from the broker: the broker's own page for
@@ -276,6 +273,19 @@ export type CredentialDecisionResponse = CredentialApproval | CredentialDenial;
 export interface CredentialApprovalResponse {
   url: string;
   expires_at: string;
+}
+
+/** What Approve answers: the broker's approval page (`CredentialApprovalResponse`) on a broker
+ *  that takes the approver's own sign-in, or, on one whose `BROKER_APPROVAL_*` group is unset, the
+ *  decision itself (`CredentialApproval`), which that broker makes on Dispatch's word. */
+export type CredentialApproveResponse = CredentialApprovalResponse | CredentialApproval;
+
+/** Whether Approve's answer is the broker's approval page, for the browser to go to, rather than
+ *  a decision already made. */
+export function isApprovalPage(
+  response: CredentialApproveResponse
+): response is CredentialApprovalResponse {
+  return "url" in response;
 }
 
 interface CredentialGrantFields {

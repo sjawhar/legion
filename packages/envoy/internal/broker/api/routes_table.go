@@ -150,14 +150,17 @@ func routes() []apiRoute {
 		// route answered, with no credential of any kind. Mounted only on a broker with an
 		// approval issuer.
 		{http.MethodGet, "/approve/{id}", public((*server).approvalPage)},
-		// Start that sign-in: sets the browser's own binding cookie and redirects to the issuer's
-		// authorization endpoint, asking for a recent authentication of the approver's account
-		// and nothing to keep.
+		// Start that sign-in, from the button on that page alone (a request whose Sec-Fetch-Site
+		// is not same-origin and whose Origin is not BROKER_PUBLIC_URL's is refused): sets the
+		// browser's own binding cookie for this approval and redirects to the issuer's
+		// authorization endpoint, asking for the approver's account through the account chooser,
+		// for auth_time, and for nothing to keep.
 		{http.MethodPost, "/approve/{id}/start", public((*server).startApprovalSignIn)},
 		// Take the issuer's answer: verifies the ID token against the issuer's keys, this
-		// client, the cookie's nonce, a verified email in the deployment's domain and an
-		// authentication no older than five minutes, requires that email to be the approval's own
-		// approver, spends the approval once and applies the decision as that person.
+		// client, the nonce this approval's cookie binds, a verified email in the deployment's
+		// domain and an auth_time not in the future, requires that email to be the approval's
+		// own approver, spends the approval once — recording the token's issuer, sub and
+		// auth_time — and applies the decision as that person.
 		{http.MethodGet, "/approve/callback", public((*server).approvalCallback)},
 		// Find a pending machine login by the confirmation code its machine shows.
 		{http.MethodPost, "/v1/machine-logins/lookup", accountAuth((*server).lookupMachineLogin)},

@@ -2339,29 +2339,42 @@ the caller's name off `BROKER_API_ACCOUNTS` (`accountAuth`, below).
 `BROKER_APPROVAL_*` group (below), `POST /v1/credential-requests/{record}/approve` is refused
 outright (`403 APPROVAL_NEEDS_PERSON`), whoever calls it: Dispatch's server opens an approval
 instead (`POST .../approval`), and the broker answers a link to a page it serves itself. The
-person opens that page, reads what is being approved from the broker's own record, and signs in
-at `BROKER_APPROVAL_ISSUER` for an OAuth client whose id and secret only the broker holds
-(`internal/broker/approval`, `handlers_approval.go`). The broker's callback verifies the ID token
-against the issuer's keys, that client as its audience, its expiry, the nonce the browser's own
-cookie derives, a verified `email` in `BROKER_APPROVAL_DOMAIN`'s `hd`, and an `auth_time` within
-five minutes; the email must be the approval's own approver; the single-use approval is then
-spent and the decision applied through the same `ApplyDecision` every other approval went
-through, under that person's login, writing the same event, grant and audit rows plus the issuer
-and the token's `sub` on the spent challenge. So the proof comes from the issuer to the broker,
-and neither Dispatch's ServiceAccount, nor its own Google client secret, nor the sealed refresh
-tokens it keeps can mint one. What Dispatch's credential still does to a pending request is list
-it, read it, deny it and open an approval nobody but the named person can complete; a deny and a
-revoke stay on that caller's word, since either can only take access away. What is left is the
-window the sign-in itself leaves: a person's own live browser session at the issuer (the five
-minutes `max_age` bounds, so the issuer asks them again rather than answering from a session it
-holds), a sign-in code or ID token stolen inside its own minutes of validity, and the fact that
-an approval page can show no more than the broker's own record holds — the broker never sees
-what Dispatch or the agent said elsewhere.
+person opens that page, reads what is being approved from the broker's own record, presses its
+button, and signs in at `BROKER_APPROVAL_ISSUER` for an OAuth client whose id and secret only the
+broker holds (`internal/broker/approval`, `handlers_approval.go`). The broker's callback verifies
+the ID token against the issuer's keys, that client as its audience, its expiry, the nonce the
+approval's own cookie derives, a verified `email` in `BROKER_APPROVAL_DOMAIN`'s `hd`, and an
+`auth_time` that is not in the future; the email must be the approval's own approver; the
+single-use approval is then spent and the decision applied through the same `ApplyDecision`
+every other approval went through, under that person's login, writing the same event, grant and
+audit rows plus the issuer, the token's `sub` and its `auth_time` on the spent challenge. So the
+proof comes from the issuer to the broker, and neither Dispatch's ServiceAccount, nor its own
+Google client secret, nor the sealed refresh tokens it keeps can mint one. What binds the
+approval to the person is five things together: the press of the button on the broker's own
+page, which `/approve/{id}/start` refuses unless `Sec-Fetch-Site` is `same-origin` or `Origin` is
+`BROKER_PUBLIC_URL`'s, so another site's form cannot skip the page; the binding cookie that press
+sets, one per approval and, on an https broker, a `__Host-` cookie no sibling host can plant; the
+nonce derived from it; the account the person picks at the issuer, whose chooser
+`prompt=select_account` shows every time; and the email match. What it does not bind is
+freshness. Google re-authenticates nobody on request — it honours neither `max_age` nor
+`prompt=login` — and returns `auth_time` only when the request's `claims` parameter asks for it
+and the app is published, verified, and has "Session age claims" turned on; the broker asks, and
+records what comes back, but refuses only an `auth_time` in the future. What Dispatch's
+credential still does to a pending request is list it, read it, deny it and open an approval
+nobody but the named person can complete; a deny and a revoke stay on that caller's word, since
+either can only take access away. What is left is anyone in control of that person's signed-in
+browser — their own live Google session there approves with a press of the page's button and a
+pick in the account chooser — a sign-in code or ID token stolen inside its own minutes of
+validity, and the fact that an approval page can show no more than the broker's own record holds:
+the broker never sees what Dispatch or the agent said elsewhere.
 
 With the group unset — the rollout's first half, which the broker warns about once at every boot
 — `approve` decides as it always did, on the listed caller's word, so reaching that route is
 reaching an approval credential and keeping Dispatch's ServiceAccount closed to agents is the
-deployment's job. A person's own
+deployment's job. That broker answers `POST .../approval` with `503 APPROVAL_SIGN_IN_OFF`, and
+on exactly that refusal Dispatch sends the same decision to `approve` instead, so this release's
+Dispatch approves against a broker of either setting, and a deployment sets the group whenever
+it is ready. A person's own
 machine ends their machine logins and grants through
 the operator routes instead (below), under its machine login. `internal/broker/enroll` turns a
 launcher credential into a leased
@@ -3151,14 +3164,16 @@ min 0, max 120 — how long a stopping process goes on serving while `/healthz` 
 configuration rather than a constant because the right value is the cluster's EndpointSlice
 propagation time, which lives in the deployment's own repository, and 0 is for a local run), and
 `BROKER_TRUSTED_PROXY_HEADER`
-(optional; names a request header, e.g. `X-Forwarded-For`, the launcher-credential and reread rate
-limiters' per-address buckets trust for the caller's real address (`clientAddress`) — its last
-comma-separated entry, the hop your own reverse proxy appended, never an earlier client-supplied
-one. Unset, the default, keys on
+(optional; names a request header, e.g. `X-Forwarded-For`, the launcher-credential, reread and
+approval-page rate limiters' per-address buckets trust for the caller's real address
+(`clientAddress`) — its last comma-separated entry, the hop your own reverse proxy appended, never
+an earlier client-supplied one. Unset, the default, keys on
 `r.RemoteAddr` directly, correct only when the broker is reached without a proxy in front of it;
 behind one — this broker's documented production shape, the shared internal ALB — `r.RemoteAddr`
 is the proxy's own address for every caller, collapsing each per-address bucket into one shared by
-everyone unless this variable is set). `BROKER_ENVOY_TOKEN` follows the
+everyone unless this variable is set, which a broker behind a proxy with the `BROKER_APPROVAL_*`
+group set needs, since the three approval pages take no credential and share one per-address
+bucket, `DefaultApprovalLimit`). `BROKER_ENVOY_TOKEN` follows the
 broker's `_FILE` secret-loading convention: `<NAME>_FILE`, when set, names a file whose trimmed
 contents win over a bare `<NAME>` — with both set, the file wins silently, nothing is refused — and
 a named-but-unreadable or empty file is a startup error naming the file, never a silent fallback to
@@ -3502,19 +3517,29 @@ the code (`machine.CodeHash`; `machine.Service.CodeFor` reads the record's own c
 that hash for the decision, and refuses it with `ErrCodeMismatch` when it does not match, which
 is also the check `POST .../approval` makes before anyone signs in). `Spend` marks it used in the
 statement that reads it, so two callbacks of one challenge decide once (`ErrUsed`), and writes
-the issuer and the token's `sub` on it; `ErrExpired` is a challenge past its ten minutes, and
-`Open` removes unspent expired ones an hour later while keeping every spent one, which is the
-broker's own record of whose sign-in decided what. `Nonce(id, binding)` is the SHA-256 of the
-challenge id and the browser's own cookie value, so the ID token proves the browser that
-finishes a sign-in is the one that started it and the broker keeps nothing per sign-in to check
-it with. `page.go` renders every page: no script, no style, no asset of anyone's, under
-`default-src 'none'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'` with
-`X-Frame-Options: DENY`, `Cache-Control: no-store`, `Referrer-Policy: no-referrer` and nosniff.
-The table is `0019_approval_challenges.up.sql`. The flow on the `internal/oidc` side is
+the issuer, the token's `sub` and its `auth_time` on it; `ErrExpired` is a challenge past its ten
+minutes, and `Open` removes unspent expired ones an hour later while keeping every spent one,
+which is the broker's own record of whose sign-in decided what. `Nonce(id, binding)` is the
+SHA-256 of the challenge id and the browser's own cookie value, so the ID token proves the browser
+that finishes a sign-in is the one that started it and the broker keeps nothing per sign-in to
+check it with. `CookieName(id, secure)` names that cookie for its challenge, so two approvals in
+one browser keep their own bindings; on an https broker it is `__Host-approval_binding_<hash>`,
+set `Secure`, `Path=/` and with no `Domain`, so no sibling host of the broker's registrable domain
+can plant a binding of its own, and on a local http broker, where a `Secure` cookie never comes
+back, it is a plain cookie of `/approve/` with no such protection. `page.go` renders every page:
+no script, no style, no asset of anyone's, under `default-src 'none'; form-action 'self';
+base-uri 'none'; frame-ancestors 'none'` with `X-Frame-Options: DENY`, `Cache-Control:
+no-store`, `Referrer-Policy: no-referrer` and nosniff — except that the page whose button posts
+to `/start` also names the issuer's authorization origin in `form-action`
+(`Page.FormRedirectOrigin`, from `oidc.CodeFlow.AuthorizationOrigin`), since Chromium checks
+that directive on the redirect a form's answer makes too. The table is
+`0019_approval_challenges.up.sql`. The flow on the `internal/oidc` side is
 `NewConfirmFlow`/`ConfirmURL`/`Confirm`: a code flow that asks for no refresh token, sends
-`prompt=select_account` with `max_age` and `login_hint`, and verifies nonce, `email_verified`,
-`hd` and `auth_time` itself (`ErrNonce`, `ErrEmailUnverified`, `ErrHostedDomain`,
-`ErrStaleSignIn`).
+`prompt=select_account`, `login_hint`, `hd`, and `claims={"id_token":{"auth_time":{"essential":true}}}`
+(Google's only way to return `auth_time`), and verifies nonce, `email_verified` and `hd` itself
+and refuses an `auth_time` more than a minute in the future (`ErrNonce`, `ErrEmailUnverified`,
+`ErrHostedDomain`, `ErrFutureSignIn`). It sets no freshness bound: Google honours neither
+`max_age` nor `prompt=login`, so a bound would refuse every person already signed in.
 
 `internal/broker/requests.Machine` is the `agent_secret` request state machine. `Create` verifies
 the caller's signed request object (`iss` must be the requesting enrollment's own key, no

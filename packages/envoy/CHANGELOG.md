@@ -669,26 +669,42 @@
   its `approval sign-in` line. With the group set, `POST /v1/credential-requests/{record}/approve`
   is refused `403 APPROVAL_NEEDS_PERSON` whoever calls it, for a secret request and a machine
   login alike: a listed caller opens an approval instead
-  (`POST /v1/credential-requests/{record}/approval`, answering `{url, expires_at}`), and the
+  (`POST /v1/credential-requests/{record}/approval`, answering `{url, expires_at}`, and refusing
+  there whatever the decision would refuse, a record past its own expiry among them), and the
   person approves on the broker's own pages — `GET /approve/{id}`, `POST /approve/{id}/start`
-  and `GET /approve/callback`, which take no credential, are rate-limited per address, and carry
-  `Content-Security-Policy: default-src 'none'`, `X-Frame-Options: DENY` and `Cache-Control:
-  no-store`. The callback applies the decision only for an ID token the issuer signed for that
-  client, carrying the nonce the browser's own cookie binds, a verified email in the Workspace
-  domain and an authentication within five minutes (`max_age`), whose email is the approval's own
-  approver; the single-use approval is then spent, and the issuer and the token's `sub` are kept
-  on it. So neither Dispatch's ServiceAccount token, nor its Google client secret, nor the
-  refresh tokens it holds can approve anything; what Dispatch's credential still does is list,
-  read, deny and open an approval. A deny and a revoke are unchanged, since either can only take
-  access away. Dispatch's own `POST /api/v1/credential-requests/{id}/approve` now answers the
-  broker's page URL, which its Approve buttons navigate the browser to. With the group unset the
-  broker behaves as it always did and warns at every boot that approvals are taken on the calling
-  service's word, so a deployment can ship this release and turn the group on afterwards; the
-  local stack (`dev-broker.sh`, `agent-secrets-devrelay`) leaves it unset. New migration
+  and `GET /approve/callback`, which take no credential, share one per-address bucket, and carry
+  `Content-Security-Policy: default-src 'none'` (the page's `form-action` naming the issuer's
+  authorization origin beside `'self'`, which Chromium checks on the button's redirect),
+  `X-Frame-Options: DENY` and `Cache-Control: no-store`. `/start` starts a sign-in only for the
+  button on the broker's own page (`Sec-Fetch-Site: same-origin`, or an `Origin` that is
+  `BROKER_PUBLIC_URL`'s), and sets a binding cookie of that approval's own, a `__Host-` cookie
+  (`Secure`, `Path=/`, no `Domain`) on an https broker, so no sibling host can plant one; a local
+  http broker sets a plain cookie without that protection. The callback applies the decision only
+  for an ID token the issuer signed for that client, carrying the nonce that cookie binds and a
+  verified email in the Workspace domain, whose email is the approval's own approver; the
+  single-use approval is then spent, and the issuer, the token's `sub` and its `auth_time` are
+  kept on it. The sign-in asks for `prompt=select_account` and for `auth_time` through the
+  `claims` parameter; Google re-authenticates nobody on request (it honours neither `max_age` nor
+  `prompt=login`) and returns `auth_time` only for a published, verified app with "Session age
+  claims" turned on, so the broker records `auth_time` and refuses only one in the future. So
+  neither Dispatch's ServiceAccount token, nor its Google client secret, nor the refresh tokens it
+  holds can approve anything; what Dispatch's credential still does is list, read, deny and open an
+  approval. A deny and a revoke are unchanged, since either can only take access away. Dispatch's
+  own `POST /api/v1/credential-requests/{id}/approve` now answers the broker's page URL, which its
+  Approve buttons navigate the browser to; against a broker whose group is unset, which answers
+  `503 APPROVAL_SIGN_IN_OFF`, it sends the same decision to that broker's `approve` route and
+  answers the decision, so Dispatch and the broker can ship together before the group is set. With
+  the group unset the broker behaves as it always did and warns at every boot that approvals are
+  taken on the calling service's word; the local stack (`dev-broker.sh`,
+  `agent-secrets-devrelay`) leaves it unset. Behind a proxy, `BROKER_TRUSTED_PROXY_HEADER` is
+  required before the group is set: the three approval pages take no credential and share one
+  per-address bucket, which without it is one bucket for every person. New migration
   `0019_approval_challenges`, new codes `APPROVAL_NEEDS_PERSON` (403) and `APPROVAL_SIGN_IN_OFF`
-  (503). What the change does not cover: a person's own live browser session at the identity
-  provider, a sign-in code or ID token stolen inside its own minutes of validity, and an approval
-  page that can show no more than the broker's own record holds.
+  (503). What binds an approval to the person is the press of the button on the broker's own
+  page, that approval's own cookie, the nonce, the account the person picks and the email match;
+  what is left is anyone in control of that person's signed-in browser, a sign-in code or ID token
+  stolen inside its own minutes of validity, and an approval page that can show no more than the
+  broker's own record holds.
 
 - **Breaking (local development):** `agent-secrets-devrelay` presents a listed caller's own
   ServiceAccount token, read from `--account-token-file` (default

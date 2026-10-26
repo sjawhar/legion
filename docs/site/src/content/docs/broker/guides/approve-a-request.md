@@ -47,16 +47,19 @@ agent's waiting command exits 77.
 
 Click **Approve** and Dispatch opens an approval for you on the broker and sends your browser to
 a page the broker serves itself. That page shows what you are approving, from the broker's own
-record, and one button; pressing it signs you in with your own Google account, for the broker's
-own OAuth client, and the broker approves the request only when that sign-in comes back as the
-person the approval names. The agent's waiting command then runs. Nothing is approved until you
-have signed in: if you close the page, the request stays pending and the link expires in ten
-minutes.
+record, and one button; pressing it takes you to Google's account chooser, and the account you
+pick signs in for the broker's own OAuth client. The broker approves the request only when that
+sign-in comes back as the person the approval names. The agent's waiting command then runs.
+Nothing is approved until you have signed in: if you close the page, the request stays pending
+and the link expires in ten minutes. A deployment that has not turned approvals by sign-in on
+yet approves at once, with no page, as it always did.
 
-Sign in with the account you are signed in to Dispatch as. The broker refuses any other —
-another account of yours, one outside the deployment's Workspace domain, or a sign-in older than
-five minutes — and says so on its own page, leaving the request pending for you to start again.
-An approval link works once, in the browser that opened it.
+Pick the account you are signed in to Dispatch as. The broker refuses any other — another
+account of yours, or one outside the deployment's Workspace domain — and says so on its own page,
+leaving the request pending for you to start again. An approval link works once, in the browser
+that opened it, and starts only from its own page's button. If you are already signed in to
+Google in that browser, Google asks for no password: whoever controls your signed-in browser can
+approve as you, so keep it to yourself.
 
 The broker refuses a decision that cannot stand, and Dispatch shows its message under the buttons
 (a refusal that comes after you have signed in is shown on the broker's own page instead):

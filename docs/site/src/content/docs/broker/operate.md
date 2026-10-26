@@ -65,8 +65,21 @@ line), and keep its secret where no agent and no other service can read it. With
 the broker serves its own approval pages, and `POST /v1/credential-requests/{record}/approve` is
 refused `403 APPROVAL_NEEDS_PERSON` whoever calls it. With it unset, the broker serves no page,
 refuses `POST /v1/credential-requests/{record}/approval` with `503 APPROVAL_SIGN_IN_OFF`, and
-warns at every boot that every approval is taken on the calling service's word — so turn it on
-before you rely on anything below.
+warns at every boot that every approval is taken on the calling service's word; Dispatch reads
+that refusal and approves through `approve` instead, so a Dispatch of this release works against
+either broker, and you turn the group on once both are deployed — then turn it on before you rely
+on anything below.
+
+The broker asks for the sign-in's `auth_time` and records it on each approval it applies. Google
+returns that claim only for an app that is published and verified and has "Session age claims"
+turned on in its OAuth settings; without them the approval is recorded with none. Nothing is
+refused for it: Google re-authenticates nobody on request, so the broker sets no freshness bound.
+
+Behind a proxy or load balancer, set `BROKER_TRUSTED_PROXY_HEADER` before you set this group. The
+three approval pages take no credential, so their per-address bucket (a burst of 30, one back
+every two seconds) is the only thing in front of them, and without the header every request
+arrives from the proxy's address: one bucket for every person, which one busy client empties for
+everyone.
 
 `BROKER_SECRETS_STORE` picks the secret store: `aws-secrets-manager`, the default when it is unset,
 as above, or `gcp-secret-manager`, which takes the Google Cloud forms of the namespace and the key
@@ -243,12 +256,20 @@ to start while the removed `BROKER_DATABASE_PASSWORD` is set or the URL names it
 - The approval pages (`GET /approve/{id}`, `POST /approve/{id}/start`, `GET /approve/callback`)
   take no credential, since a person's browser has none to give until it has signed in. They are
   reached at `BROKER_PUBLIC_URL`, so a person approving must be able to reach the broker in a
-  browser, and they have a per-address bucket of their own, a burst of 30 refilled one every two
+  browser, and they share a per-address bucket of their own, a burst of 30 refilled one every two
   seconds, answered `429 RATE_LIMITED` with `Retry-After`. Each page carries
-  `Content-Security-Policy: default-src 'none'`, `X-Frame-Options: DENY` and `Cache-Control:
-  no-store`, and loads nothing at all.
-- Behind a reverse proxy, set `BROKER_TRUSTED_PROXY_HEADER` so the machine-login, token-endpoint
-  and secret-reread rate limiters see each caller's address rather than the proxy's. The token
+  `Content-Security-Policy: default-src 'none'` (the approval page's `form-action` names the
+  issuer's authorization origin beside `'self'`, since a browser checks it on the redirect the
+  button's answer makes), `X-Frame-Options: DENY` and `Cache-Control: no-store`, and loads nothing
+  at all. `/approve/{id}/start` answers `403` unless the request says it came from the broker's own
+  page (`Sec-Fetch-Site: same-origin`, or an `Origin` that is `BROKER_PUBLIC_URL`'s), and sets a
+  binding cookie named for that approval: on an https `BROKER_PUBLIC_URL` a `__Host-` cookie
+  (`Secure`, `Path=/`, no `Domain`), so no other host of your domain can plant one; on a local
+  http broker a plain cookie with no such protection.
+- Behind a reverse proxy, set `BROKER_TRUSTED_PROXY_HEADER` so the machine-login, token-endpoint,
+  secret-reread and approval-page rate limiters see each caller's address rather than the proxy's;
+  with the `BROKER_APPROVAL_*` group set it is required, since without it every person approving
+  shares one bucket. The token
   endpoint (`POST /v1/oauth/token`) has its own per-address bucket in each process, a burst of 60
   refilled at two a second, far above a machine's poll every five seconds and refresh about once a
   day; a refused request is `429` `invalid_request` (`RATE_LIMITED: …`) with `Retry-After`.

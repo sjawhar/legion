@@ -2,7 +2,7 @@ import type { UseMutationResult } from "@tanstack/react-query";
 import type { ReactNode } from "react";
 
 import { apiErrorMessage } from "../../api/client";
-import type { CredentialApprovalResponse, CredentialDecisionResponse } from "../../api/types";
+import type { CredentialApproveResponse, CredentialDecisionResponse } from "../../api/types";
 import type { SubmitGuard } from "../../hooks/useSubmitGuard";
 import {
   dangerText,
@@ -22,8 +22,9 @@ import {
  * verbatim broker-error rendering. With no `approve`, only Deny shows: a record nobody may approve
  * any more, such as a service's machine login from before services logged in with their tokens.
  *
- * Approve starts an approval rather than making one: its mutation answers the broker's own
- * approval page and the page it is on navigates there, so the button's own job ends at the
+ * Approve usually starts an approval rather than making one: its mutation answers the broker's
+ * own approval page and the page it is on navigates there. On a broker that takes no sign-in it
+ * answers the decision itself, which the page shows. Either way the button's own job ends at the
  * refusal it may have to show.
  */
 export function CredentialDecisionButtons({
@@ -31,7 +32,7 @@ export function CredentialDecisionButtons({
   deny,
   submitGuard,
 }: {
-  approve?: UseMutationResult<CredentialApprovalResponse, Error, void>;
+  approve?: UseMutationResult<CredentialApproveResponse, Error, void>;
   deny: UseMutationResult<CredentialDecisionResponse, Error, void>;
   submitGuard: SubmitGuard;
 }): ReactNode {

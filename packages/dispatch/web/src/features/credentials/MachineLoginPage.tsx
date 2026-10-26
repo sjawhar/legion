@@ -2,6 +2,7 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { type FormEvent, type ReactNode, useState } from "react";
 
 import { api, apiErrorMessage } from "../../api/client";
+import { isApprovalPage } from "../../api/types";
 import { useSubmitGuard } from "../../hooks/useSubmitGuard";
 import {
   dangerText,
@@ -16,7 +17,7 @@ import { useDocumentTitle } from "../shell/useDocumentTitle";
 import { CredentialDecisionButtons } from "./CredentialDecisionButtons";
 import { CredentialRecordFacts } from "./CredentialRecordFacts";
 import { MachineLoginsSection } from "./MachineLoginsSection";
-import { machineName } from "./machineLogins";
+import { machineLoginsQuery, machineName } from "./machineLogins";
 
 /** What the login's decision was, in place of the buttons that decide it: one just made on this
  *  page, or the one a looked-up record already carries. A service's approved login (the Legion
@@ -60,7 +61,8 @@ function MachineLoginDecision({
  * place a machine record gets Approve/Deny buttons. Approving leaves Dispatch: the broker checks
  * the typed code against the record, answers its own approval page, and this page navigates there,
  * where the operator signs in with their own Google account and the broker mints the credential.
- * A looked-up login already decided shows its decision, and so does one denied here, in their
+ * A broker that takes no sign-in (its `BROKER_APPROVAL_*` group unset) mints it at once instead.
+ * A looked-up login already decided shows its decision, and so does one decided here, in their
  * place, as the record page does, so a second click never reaches the broker's already-decided
  * refusal. Below it, the machine logins the
  * viewer may revoke that can still reach a secret: their own machines' and every service's.
@@ -79,11 +81,18 @@ export function MachineLoginPage(): ReactNode {
   const lookedUpCode = lookup.variables ?? "";
 
   const approve = useMutation({
-    mutationFn: () => api.startCredentialApproval(record?.record_id ?? "", { code: lookedUpCode }),
+    mutationFn: () => api.approveCredentialRecord(record?.record_id ?? "", { code: lookedUpCode }),
     onSettled: () => submitGuard.release(),
-    // A top-level navigation, not a fetch: the sign-in that approves this login happens on the
-    // broker's own page, in this browser's address bar.
-    onSuccess: (approval) => window.location.assign(approval.url),
+    onSuccess: (answer) => {
+      if (isApprovalPage(answer)) {
+        // A top-level navigation, not a fetch: the sign-in that approves this login happens on
+        // the broker's own page, in this browser's address bar.
+        window.location.assign(answer.url);
+        return;
+      }
+      void queryClient.invalidateQueries({ queryKey: ["credential-pending"] });
+      void queryClient.invalidateQueries({ queryKey: machineLoginsQuery().queryKey });
+    },
   });
   const deny = useMutation({
     mutationFn: () => api.denyCredentialRecord(record?.record_id ?? "", { code: lookedUpCode }),
@@ -101,17 +110,22 @@ export function MachineLoginPage(): ReactNode {
       lookup.mutate(code);
     });
   };
-  const decidedHere = deny.data;
-  // The looked-up record and its decision as the page now knows them: a denial made here leaves
-  // the record denied. An approval is not decided here at all — the browser goes to the broker's
-  // page for it — so nothing of it is folded in.
+  // A decision made here: a denial, or an approval a broker that takes no sign-in made at once. An
+  // approval page is no decision — the browser goes to the broker for it — so it folds in nothing.
+  const decidedHere =
+    approve.data !== undefined && !isApprovalPage(approve.data) ? approve.data : deny.data;
+  // The looked-up record and its decision as the page now knows them: a decision made here leaves
+  // the record decided, with the credential an approval minted.
   const view =
     record === undefined
       ? undefined
       : decidedHere === undefined
         ? { decided: record.decided, record }
         : {
-            decided: { credential_id: null, event: decidedHere.state },
+            decided: {
+              credential_id: decidedHere.state === "approved" ? decidedHere.credential_id : null,
+              event: decidedHere.state,
+            },
             record: { ...record, state: decidedHere.state },
           };
 

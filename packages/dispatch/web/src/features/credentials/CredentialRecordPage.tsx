@@ -3,7 +3,7 @@ import type { ReactNode } from "react";
 import { Link, useParams } from "react-router-dom";
 
 import { ApiError, api } from "../../api/client";
-import type { CredentialDecisionEvent } from "../../api/types";
+import { type CredentialDecisionEvent, isApprovalPage } from "../../api/types";
 import { QueryError } from "../../components/QueryError";
 import { useSubmitGuard } from "../../hooks/useSubmitGuard";
 import {
@@ -38,9 +38,11 @@ function CredentialDecision({ decided }: { decided: CredentialDecisionEvent }): 
  * agent's stated reason, and, for a pending `agent_secret` record, denies it with one click or
  * starts an approval. Approving leaves Dispatch: the broker answers its own page's URL and the
  * browser goes there, where the approver signs in with their own Google account and the broker
- * decides. Dispatch names the viewer's own login either way, and the broker decides whether it is
- * the record's approver. A `launcher_credential` (machine) record never gets buttons here (ruling
- * 13 - only its typed code selects it); it links to `MachineLoginPage` instead.
+ * decides. A broker that takes no sign-in (its `BROKER_APPROVAL_*` group unset) decides at once
+ * instead, and the page reads the decision back as it does after a denial. Dispatch names the
+ * viewer's own login either way, and the broker decides whether it is the record's approver. A
+ * `launcher_credential` (machine) record never gets buttons here (ruling 13 - only its typed code
+ * selects it); it links to `MachineLoginPage` instead.
  */
 export function CredentialRecordPage(): ReactNode {
   const { recordId } = useParams<{ recordId: string }>();
@@ -54,11 +56,17 @@ export function CredentialRecordPage(): ReactNode {
   };
 
   const approve = useMutation({
-    mutationFn: () => api.startCredentialApproval(recordId ?? ""),
+    mutationFn: () => api.approveCredentialRecord(recordId ?? ""),
     onSettled: () => submitGuard.release(),
-    // A top-level navigation, not a fetch: the approval page is the broker's own, on its own
-    // origin, and the sign-in that follows has to happen in this browser's address bar.
-    onSuccess: (approval) => window.location.assign(approval.url),
+    onSuccess: (answer) => {
+      if (isApprovalPage(answer)) {
+        // A top-level navigation, not a fetch: the approval page is the broker's own, on its own
+        // origin, and the sign-in that follows has to happen in this browser's address bar.
+        window.location.assign(answer.url);
+        return;
+      }
+      invalidateAfterDecision();
+    },
   });
   const deny = useMutation({
     mutationFn: () => api.denyCredentialRecord(recordId ?? ""),

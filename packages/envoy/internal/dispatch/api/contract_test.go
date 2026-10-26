@@ -82,8 +82,24 @@ type contractRig struct {
 	issuerKey   *oidctest.Key
 }
 
-func newContractRig(t *testing.T) *contractRig {
+// contractRigOption varies how newContractRig wires its broker.
+type contractRigOption func(*contractRigConfig)
+
+type contractRigConfig struct{ noApprovalGroup bool }
+
+// withoutApprovalGroup leaves the broker's BROKER_APPROVAL_* group unset: a broker that takes no
+// person's sign-in and still decides an approval on its listed caller's word, the one a deployment
+// runs until it sets the group.
+func withoutApprovalGroup() contractRigOption {
+	return func(c *contractRigConfig) { c.noApprovalGroup = true }
+}
+
+func newContractRig(t *testing.T, options ...contractRigOption) *contractRig {
 	t.Helper()
+	var config contractRigConfig
+	for _, option := range options {
+		option(&config)
+	}
 	brokerStore := brokerstoretest.Open(t)
 
 	local := secrets.NewLocal(
@@ -124,12 +140,21 @@ func newContractRig(t *testing.T) *contractRig {
 	}
 	// The broker's own approval client, armed on the same local issuer: an approving person signs
 	// in there, in their own browser, and the ID token comes back to the broker. Dispatch's own
-	// credential cannot mint one, which is what every approval below has to go round.
-	issuer.EnableCodeFlow(issuerKey, contractApprovalClientID, contractApprovalClientSecret)
-	approvalFlow, err := oidc.NewConfirmFlow(context.Background(), issuer.URL(),
-		contractApprovalClientID, contractApprovalClientSecret, contractApprovalDomain)
-	if err != nil {
-		t.Fatalf("oidc.NewConfirmFlow: %v", err)
+	// credential cannot mint one, which is what every approval below has to go round — unless the
+	// rig was asked for a broker without the group, which takes its caller's word instead.
+	var approvalSignIn *brokerapi.ApprovalSignIn
+	if !config.noApprovalGroup {
+		issuer.EnableCodeFlow(issuerKey, contractApprovalClientID, contractApprovalClientSecret)
+		approvalFlow, err := oidc.NewConfirmFlow(context.Background(), issuer.URL(),
+			contractApprovalClientID, contractApprovalClientSecret, contractApprovalDomain)
+		if err != nil {
+			t.Fatalf("oidc.NewConfirmFlow: %v", err)
+		}
+		approvalSignIn = &brokerapi.ApprovalSignIn{
+			Challenges: &approval.Service{Store: brokerStore},
+			Flow:       approvalFlow,
+			Domain:     contractApprovalDomain,
+		}
 	}
 	// Dispatch calls the broker as its own listed caller: a projected ServiceAccount token of the
 	// same issuer the broker verifies a pod's with, minted to live well inside the hour a caller's
@@ -145,11 +170,7 @@ func newContractRig(t *testing.T) *contractRig {
 		OAuth: provider, DeviceLogin: mach.LoginDevice, TokenHooks: mach.TokenHooks(),
 		Proof:  &proof.Verifier{Skew: time.Minute, Lookup: enr.Lookup, LookupLauncher: enr.AuthenticateLauncher, Replay: enr.Replay},
 		Policy: cur, SecretsStore: secrets.StoreAWS, SecretsPrefix: policytest.Prefix, SecretsKMSKey: policytest.KeyARN,
-		Approval: &brokerapi.ApprovalSignIn{
-			Challenges: &approval.Service{Store: brokerStore},
-			Flow:       approvalFlow,
-			Domain:     contractApprovalDomain,
-		},
+		Approval: approvalSignIn,
 	})
 
 	dispatchDB := storetest.Open(t)
@@ -368,7 +389,14 @@ func (rig *contractRig) signInAndApprove(t *testing.T, approvalURL, email string
 	if page.StatusCode != http.StatusOK {
 		t.Fatalf("the broker's approval page = %d", page.StatusCode)
 	}
-	started, err := browser.Post(approvalURL+"/start", "application/x-www-form-urlencoded", nil)
+	// The button on the broker's own page: a same-origin form post, which a browser marks with
+	// the broker's own Origin and which /start refuses from anywhere else.
+	startRequest, err := http.NewRequest(http.MethodPost, approvalURL+"/start", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	startRequest.Header.Set("Origin", rig.BrokerURL)
+	started, err := browser.Do(startRequest)
 	if err != nil {
 		t.Fatalf("POST %s/start: %v", approvalURL, err)
 	}
@@ -478,6 +506,32 @@ func TestApproveThroughDispatchReleasesTheValue(t *testing.T) {
 	resp = rig.openApproval(t, pending.RecordID, map[string]any{}, contractApprover)
 	if resp.Code != http.StatusConflict || !strings.Contains(resp.Body.String(), "RECORD_TERMINAL") {
 		t.Fatalf("terminal forwarding: %d %s", resp.Code, resp.Body.String())
+	}
+}
+
+// TestApproveThroughDispatchOnABrokerThatTakesNoSignIn drives the rollout's first half against a
+// real broker whose BROKER_APPROVAL_* group is unset: the broker refuses the approval route
+// APPROVAL_SIGN_IN_OFF, Dispatch then sends the same decision to its approve route, and the click
+// approves at once, under the caller's own login, for that person's record only.
+func TestApproveThroughDispatchOnABrokerThatTakesNoSignIn(t *testing.T) {
+	rig := newContractRig(t, withoutApprovalGroup())
+	pending := rig.createPendingAgentSecretRecord(t, "need it for the demo", "DEEL_API_KEY")
+
+	resp := rig.openApproval(t, pending.RecordID, map[string]any{}, contractOther)
+	if resp.Code != http.StatusForbidden || decodeBody[contractError](t, resp).Code != "NOT_APPROVER" {
+		t.Fatalf("approve as %s = %d %s, want 403 NOT_APPROVER", contractOther, resp.Code, resp.Body.String())
+	}
+	resp = rig.openApproval(t, pending.RecordID, map[string]any{}, contractApprover)
+	approved := decodeBody[struct {
+		State   string  `json:"state"`
+		GrantID *string `json:"grant_id"`
+		URL     *string `json:"url"`
+	}](t, resp)
+	if resp.Code != http.StatusOK || approved.State != "approved" || approved.GrantID == nil || approved.URL != nil {
+		t.Fatalf("approve as %s = %d %s, want the decision itself, approved with a grant", contractApprover, resp.Code, resp.Body.String())
+	}
+	if status, released := rig.values(t, pending, *approved.GrantID); status != http.StatusOK || released["DEEL_API_KEY"] != "deel-v1" {
+		t.Fatalf("values = %d %v, want DEEL_API_KEY=deel-v1", status, released)
 	}
 }
 

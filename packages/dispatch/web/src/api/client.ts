@@ -35,7 +35,7 @@ import type {
   CreateMessageInput,
   CreateProjectInput,
   CreateVersionInput,
-  CredentialApprovalResponse,
+  CredentialApproveResponse,
   CredentialDecisionResponse,
   CredentialGrantsResponse,
   CredentialPendingResponse,
@@ -866,16 +866,16 @@ export class DispatchApiClient {
     return this.json<CredentialRecord>(`/api/v1/credential-requests/${pathSegment(recordId)}`);
   }
 
-  /** Open an approval of a credential request as the signed-in viewer and answer the broker's own
-   *  page for them to approve on: Dispatch names the viewer's own login, and the broker then
-   *  requires that person's own Google sign-in before it decides anything. A machine login also
-   *  carries the code the viewer typed. The caller navigates the browser to `url` — the approval
-   *  happens there, not here. */
-  startCredentialApproval(
+  /** Approve a credential request as the signed-in viewer: Dispatch names the viewer's own login,
+   *  and a machine login also carries the code the viewer typed. A broker that takes the
+   *  approver's own sign-in answers its approval page (`isApprovalPage`), which the caller
+   *  navigates the browser to — the approval happens there, not here. A broker whose
+   *  `BROKER_APPROVAL_*` group is unset answers the decision itself. */
+  approveCredentialRecord(
     recordId: string,
     body: { code?: string } = {}
-  ): Promise<CredentialApprovalResponse> {
-    return this.post<CredentialApprovalResponse>(
+  ): Promise<CredentialApproveResponse> {
+    return this.post<CredentialApproveResponse>(
       `/api/v1/credential-requests/${pathSegment(recordId)}/approve`,
       body
     );

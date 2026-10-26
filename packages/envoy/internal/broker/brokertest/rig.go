@@ -467,7 +467,14 @@ func (r *Rig) SignInAt(t *testing.T, approvalURL, email string) (int, string) {
 	if page.StatusCode != http.StatusOK {
 		t.Fatalf("the approval page = %d, want 200", page.StatusCode)
 	}
-	started, err := browser.Post(approvalURL+"/start", "application/x-www-form-urlencoded", nil)
+	// The button on the broker's own page: a same-origin form post, which a browser marks with
+	// the broker's own Origin and which /start refuses from anywhere else.
+	startRequest, err := http.NewRequest(http.MethodPost, approvalURL+"/start", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	startRequest.Header.Set("Origin", r.URL)
+	started, err := browser.Do(startRequest)
 	if err != nil {
 		t.Fatalf("POST %s/start: %v", approvalURL, err)
 	}

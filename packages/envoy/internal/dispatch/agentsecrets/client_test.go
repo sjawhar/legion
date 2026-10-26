@@ -105,6 +105,9 @@ func TestDecisionsSendBearerPathAndTheApproverDispatchNames(t *testing.T) {
 		{"approval with a machine login's code", "/v1/credential-requests/req-1/approval", `{"approver":"sjawhar","code":"ABCD-1234"}`, func(c *Client) (json.RawMessage, error) {
 			return c.Approval(context.Background(), "req-1", Decision{Approver: "sjawhar", Code: &code})
 		}},
+		{"approve, for a broker that takes no sign-in", "/v1/credential-requests/req-1/approve", `{"approver":"sjawhar","code":"ABCD-1234"}`, func(c *Client) (json.RawMessage, error) {
+			return c.Approve(context.Background(), "req-1", Decision{Approver: "sjawhar", Code: &code})
+		}},
 		{"deny with code", "/v1/credential-requests/req-1/deny", `{"approver":"sjawhar","code":"ABCD-1234"}`, func(c *Client) (json.RawMessage, error) {
 			return c.Deny(context.Background(), "req-1", Decision{Approver: "sjawhar", Code: &code})
 		}},
@@ -123,6 +126,31 @@ func TestDecisionsSendBearerPathAndTheApproverDispatchNames(t *testing.T) {
 			}
 			if string(captured.Body) != tc.wantBody {
 				t.Fatalf("body = %s, want %s", captured.Body, tc.wantBody)
+			}
+		})
+	}
+}
+
+// ApprovalSignInOff is the one refusal Dispatch falls back to the caller's word on: 503 with the
+// code APPROVAL_SIGN_IN_OFF, and no other 503 and no other code.
+func TestApprovalSignInOffMatchesThatRefusalAlone(t *testing.T) {
+	for name, tc := range map[string]struct {
+		status int
+		body   string
+		want   bool
+	}{
+		"the broker takes no sign-in":   {http.StatusServiceUnavailable, `{"code":"APPROVAL_SIGN_IN_OFF","error":"off"}`, true},
+		"the broker's database is down": {http.StatusServiceUnavailable, `{"code":"DATABASE_UNAVAILABLE","error":"down"}`, false},
+		"a proxy's 503 with no JSON":    {http.StatusServiceUnavailable, `<html>unavailable</html>`, false},
+		"the code on another status":    {http.StatusForbidden, `{"code":"APPROVAL_SIGN_IN_OFF","error":"off"}`, false},
+		"the person may not approve":    {http.StatusForbidden, `{"code":"NOT_APPROVER","error":"no"}`, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			server, _ := serveCapturing(t, tc.status, tc.body)
+			defer server.Close()
+			_, err := New(server.URL, tokenFile(t, "account-token")).Approval(context.Background(), "req-1", Decision{Approver: "sjawhar"})
+			if err == nil || ApprovalSignInOff(err) != tc.want {
+				t.Fatalf("ApprovalSignInOff(%v) = %t, want %t", err, ApprovalSignInOff(err), tc.want)
 			}
 		})
 	}

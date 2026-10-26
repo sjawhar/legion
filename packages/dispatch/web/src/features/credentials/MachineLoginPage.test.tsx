@@ -42,7 +42,7 @@ function renderPage() {
 test("code -> lookup -> Approve opens an approval with the looked-up code and goes to the broker", async () => {
   const record = machineRecord();
   const lookupMachineCredential = spyOn(api, "lookupMachineCredential").mockResolvedValue(record);
-  const startCredentialApproval = spyOn(api, "startCredentialApproval").mockResolvedValue({
+  const approveCredentialRecord = spyOn(api, "approveCredentialRecord").mockResolvedValue({
     expires_at: "2026-09-27T00:10:00Z",
     url: "https://broker.example/approve/challenge-2",
   });
@@ -61,15 +61,15 @@ test("code -> lookup -> Approve opens an approval with the looked-up code and go
 
     fireEvent.click(screen.getByRole("button", { name: "Approve" }));
 
-    await waitFor(() => expect(startCredentialApproval).toHaveBeenCalledTimes(1));
-    expect(startCredentialApproval).toHaveBeenCalledWith("req-2", { code: "ABCD-1234" });
+    await waitFor(() => expect(approveCredentialRecord).toHaveBeenCalledTimes(1));
+    expect(approveCredentialRecord).toHaveBeenCalledWith("req-2", { code: "ABCD-1234" });
     await waitFor(() =>
       expect(assign).toHaveBeenCalledWith("https://broker.example/approve/challenge-2")
     );
   } finally {
     cleanup();
     lookupMachineCredential.mockRestore();
-    startCredentialApproval.mockRestore();
+    approveCredentialRecord.mockRestore();
     assign.mockRestore();
   }
 });

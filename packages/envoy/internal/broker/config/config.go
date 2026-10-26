@@ -233,10 +233,12 @@ type Config struct {
 	// a dev stack, where nothing propagates and the wait is pure delay.
 	DrainSeconds int
 	// BROKER_TRUSTED_PROXY_HEADER: the request header (e.g. X-Forwarded-For) whose last entry the
-	// machine-login and secret-reread rate limiters take as the caller's address. Unset, they use
-	// the connection's own address, which is right only when nothing proxies the broker. Set it
-	// only when every request passes through your own reverse proxy, which appends that entry;
-	// otherwise a caller can forge the header and pick its own rate-limit bucket.
+	// machine-login, secret-reread and approval-page rate limiters take as the caller's address.
+	// Unset, they use the connection's own address, which is right only when nothing proxies the
+	// broker; behind a proxy every caller then shares one bucket, which with the BROKER_APPROVAL_*
+	// group set is one bucket for every person approving. Set it only when every request passes
+	// through your own reverse proxy, which appends that entry; otherwise a caller can forge the
+	// header and pick its own rate-limit bucket.
 	TrustedProxyHeader string
 }
 

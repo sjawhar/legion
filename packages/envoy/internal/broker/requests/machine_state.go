@@ -685,12 +685,15 @@ func (m *Machine) ApplyDecision(ctx context.Context, recordID string, approve bo
 }
 
 // ApprovalAdmitted refuses login an approval of agent_secret record recordID that ApplyDecision
-// would refuse: the record's own approver rule (record.ErrNotApprover) and the current policy's
-// (currentPolicyAdmits, whose comment is the whole of that rule). It writes nothing and locks
-// nothing, and is what a broker asks before it sends a person off to sign in for an approval, so
-// a refusal reaches them on Dispatch's page rather than at the end of a sign-in. Answering nil
-// promises nothing: the policy can move again before the decision, and ApplyDecision asks again
-// inside the transaction that grants. pgx.ErrNoRows is no such record, and no request for it.
+// would refuse: the record's own approver rule (record.ErrNotApprover), the current policy's
+// (currentPolicyAdmits, whose comment is the whole of that rule), and its request's own state —
+// ErrExpired for one past its pending_expires_at, whether or not the sweeper has got to it yet,
+// and ErrTerminal for one already decided, the same two answers ApplyDecision gives. It writes
+// nothing and locks nothing, and is what a broker asks before it sends a person off to sign in
+// for an approval, so a refusal reaches them on Dispatch's page rather than at the end of a
+// sign-in. Answering nil promises nothing: the policy can move again before the decision, and
+// ApplyDecision asks again inside the transaction that grants. pgx.ErrNoRows is no such record,
+// and no request for it.
 func (m *Machine) ApprovalAdmitted(ctx context.Context, recordID, login string) error {
 	var enrollmentID, body string
 	if err := m.Store.Pool.QueryRow(ctx, `select enrollment_id, body from credential_requests where id=$1`, recordID).
@@ -704,14 +707,22 @@ func (m *Machine) ApprovalAdmitted(ctx context.Context, recordID, login string) 
 	if _, err := parsed.ApproverLogin(record.KindAgentSecret, "", login); err != nil {
 		return err
 	}
+	var requestID, state string
+	var expired bool
+	if err := m.Store.Pool.QueryRow(ctx, `select id, state, pending_expires_at <= now() from requests where record_id=$1`, recordID).
+		Scan(&requestID, &state, &expired); err != nil {
+		return err
+	}
+	switch {
+	case state == "expired" || state == "pending" && expired:
+		return ErrExpired
+	case state != "pending":
+		return ErrTerminal
+	}
 	enr := enrollmentRow{ID: enrollmentID}
 	if err := m.Store.Pool.QueryRow(ctx, `select e.kind, e.operator, e.subject, c.service from enrollments e
 		left join launcher_credentials c on c.id = e.launcher_credential_id where e.id=$1`, enrollmentID).
 		Scan(&enr.Kind, &enr.Operator, &enr.Subject, &enr.Service); err != nil {
-		return err
-	}
-	var requestID string
-	if err := m.Store.Pool.QueryRow(ctx, `select id from requests where record_id=$1`, recordID).Scan(&requestID); err != nil {
 		return err
 	}
 	requester, err := enr.requester(ctx, m.Store.Pool, m.ServicesByAccount)

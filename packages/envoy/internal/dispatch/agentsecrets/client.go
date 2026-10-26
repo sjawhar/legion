@@ -12,7 +12,8 @@
 // approval is no longer a call that decides: Approval asks the broker to open one, the broker
 // answers its own page, and the person approves there with their own Google sign-in, which
 // Dispatch neither sees nor could produce. A deny and a revoke still travel on this credential
-// alone, since either can only take access away.
+// alone, since either can only take access away, and so does an approval on a broker that takes
+// no person's sign-in at all, which says so (ApprovalSignInOff) and accepts Approve instead.
 package agentsecrets
 
 import (
@@ -219,14 +220,36 @@ func (d Decision) body() (json.RawMessage, error) {
 // Approval asks the broker to open an approval the named person completes with their own sign-in,
 // and answers the broker's page for them to do it on ({"url", "expires_at"}), relayed to the
 // browser as it stands. It approves nothing itself: the record is decided on the broker's own
-// callback, for the person whose sign-in it verified, which is why Dispatch no longer calls the
-// broker's approve route at all.
+// callback, for the person whose sign-in it verified. A broker that takes no person's sign-in
+// (its BROKER_APPROVAL_* group unset) refuses it 503 APPROVAL_SIGN_IN_OFF, and only then does
+// Dispatch call Approve instead (ApprovalSignInOff).
 func (c *Client) Approval(ctx context.Context, recordID string, d Decision) (json.RawMessage, error) {
 	body, err := d.body()
 	if err != nil {
 		return nil, err
 	}
 	return c.do(ctx, http.MethodPost, "/v1/credential-requests/"+url.PathEscape(recordID)+"/approval", body)
+}
+
+// Approve relays an approver's decision to grant a credential request on Dispatch's word alone,
+// which a broker accepts only while its BROKER_APPROVAL_* group is unset — the one broker that
+// answers Approval with APPROVAL_SIGN_IN_OFF. A broker with the group set refuses it 403
+// APPROVAL_NEEDS_PERSON, so Dispatch never calls it anywhere else.
+func (c *Client) Approve(ctx context.Context, recordID string, d Decision) (json.RawMessage, error) {
+	body, err := d.body()
+	if err != nil {
+		return nil, err
+	}
+	return c.do(ctx, http.MethodPost, "/v1/credential-requests/"+url.PathEscape(recordID)+"/approve", body)
+}
+
+// ApprovalSignInOff reports whether err is the broker's refusal of Approval on a broker that takes
+// no person's sign-in: exactly 503 with the code APPROVAL_SIGN_IN_OFF, never a 503 of any other
+// kind (a broker that cannot reach its database answers 503 too, and must not be read as one that
+// takes a caller's word).
+func ApprovalSignInOff(err error) bool {
+	var brokerErr *Error
+	return errors.As(err, &brokerErr) && brokerErr.Status == http.StatusServiceUnavailable && brokerErr.Code == "APPROVAL_SIGN_IN_OFF"
 }
 
 // Deny relays an approver's decision to refuse a credential request.

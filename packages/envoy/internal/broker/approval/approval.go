@@ -75,6 +75,10 @@ type Challenge struct {
 	// client can write. Empty while the challenge has not been spent.
 	SignedInIssuer  string
 	SignedInSubject string
+	// SignedInAuthTime is that token's auth_time, when the person last authenticated to the
+	// issuer, recorded as the issuer stated it; zero while the challenge has not been spent, or
+	// when the token carried none.
+	SignedInAuthTime time.Time
 }
 
 // Service reads and writes the approval challenges of one broker.
@@ -136,12 +140,13 @@ const pruneAfter = time.Hour
 // expired one too and says so (ErrUsed and ErrExpired are Spend's).
 func (s *Service) Read(ctx context.Context, id string) (Challenge, error) {
 	challenge := Challenge{ID: id}
-	var usedAt *time.Time
+	var usedAt, authTime *time.Time
 	var issuer, subject *string
-	err := s.Store.Pool.QueryRow(ctx, `select record_id, kind, approver, code_hash, created_at, expires_at, used_at, signed_in_issuer, signed_in_subject
+	err := s.Store.Pool.QueryRow(ctx, `select record_id, kind, approver, code_hash, created_at, expires_at, used_at,
+			signed_in_issuer, signed_in_subject, signed_in_auth_time
 		from approval_challenges where id=$1`, id).
 		Scan(&challenge.RecordID, &challenge.Kind, &challenge.Approver, &challenge.CodeHash,
-			&challenge.CreatedAt, &challenge.ExpiresAt, &usedAt, &issuer, &subject)
+			&challenge.CreatedAt, &challenge.ExpiresAt, &usedAt, &issuer, &subject, &authTime)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Challenge{}, ErrNotFound
 	}
@@ -157,24 +162,32 @@ func (s *Service) Read(ctx context.Context, id string) (Challenge, error) {
 	if subject != nil {
 		challenge.SignedInSubject = *subject
 	}
+	if authTime != nil {
+		challenge.SignedInAuthTime = *authTime
+	}
 	return challenge, nil
 }
 
 // Spend marks the challenge id names used, in the one statement that reads it, and answers it with
 // the sign-in recorded on it. Only an unspent, unexpired challenge is spent, so two callbacks of
-// one challenge decide once: the second is ErrUsed. issuer and subject are the iss and sub of the
-// ID token the person signed in with.
+// one challenge decide once: the second is ErrUsed. issuer, subject and authTime are the iss, sub
+// and auth_time of the ID token the person signed in with; a zero authTime is recorded as none.
 //
 // A caller applies the decision after Spend has returned, so a decision that then fails leaves the
 // challenge spent: the person starts again from Dispatch, which is the safe way round. The other
 // order would let a crash between the two apply one decision twice.
-func (s *Service) Spend(ctx context.Context, id, issuer, subject string, now time.Time) (Challenge, error) {
-	challenge := Challenge{ID: id, SignedInIssuer: issuer, SignedInSubject: subject}
+func (s *Service) Spend(ctx context.Context, id, issuer, subject string, authTime, now time.Time) (Challenge, error) {
+	challenge := Challenge{ID: id, SignedInIssuer: issuer, SignedInSubject: subject, SignedInAuthTime: authTime}
+	var recordedAuthTime *time.Time
+	if !authTime.IsZero() {
+		utc := authTime.UTC()
+		recordedAuthTime = &utc
+	}
 	err := s.Store.Pool.QueryRow(ctx, `update approval_challenges
-		set used_at=$2, signed_in_issuer=$3, signed_in_subject=$4
+		set used_at=$2, signed_in_issuer=$3, signed_in_subject=$4, signed_in_auth_time=$5
 		where id=$1 and used_at is null and expires_at > $2
 		returning record_id, kind, approver, code_hash, created_at, expires_at, used_at`,
-		id, now.UTC(), issuer, subject).
+		id, now.UTC(), issuer, subject, recordedAuthTime).
 		Scan(&challenge.RecordID, &challenge.Kind, &challenge.Approver, &challenge.CodeHash,
 			&challenge.CreatedAt, &challenge.ExpiresAt, &challenge.UsedAt)
 	if err == nil {
@@ -223,4 +236,26 @@ func randomValue(size int) (string, error) {
 func Nonce(id, binding string) string {
 	sum := sha256.Sum256([]byte("agent-secrets-approval/v1\x00" + id + "\x00" + binding))
 	return hex.EncodeToString(sum[:])
+}
+
+// CookieName is the name of the cookie that carries challenge id's binding: one name per
+// challenge, so a person with two approvals open in one browser starts the second without
+// overwriting the first's binding, and each callback reads its own. The name is a short hash of
+// the id rather than the id itself, so the id — the approval's capability — is not repeated in
+// every Cookie header the browser sends.
+//
+// On a broker reached over https (secure) the name carries the __Host- prefix, which a browser
+// accepts only on a cookie that is Secure, has Path=/ and names no Domain. That is what stops a
+// sibling host of the broker's registrable domain from planting a binding of its own choosing —
+// it could otherwise set one for the parent domain with a longer path, which a browser sends
+// first, compute the nonce from it, and send the person's browser to the issuer itself. A local
+// http broker cannot use the prefix, since a Secure cookie is never sent back over http, and runs
+// without that protection.
+func CookieName(id string, secure bool) string {
+	sum := sha256.Sum256([]byte("agent-secrets-approval-cookie/v1\x00" + id))
+	name := "approval_binding_" + hex.EncodeToString(sum[:8])
+	if secure {
+		return "__Host-" + name
+	}
+	return name
 }
