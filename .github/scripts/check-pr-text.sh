@@ -142,8 +142,9 @@ if [ "$status" -ne 0 ] && grep -q -E "(^|[:=])$kind_pattern:[0-9]+:" "$work/repo
   echo "    now: delete each comment and review comment, since an edit keeps the old text in its"
   echo "    edit history, which anyone who can read the repository can open; a submitted review"
   echo "    cannot be deleted, so edit its body and delete the old revision from that history."
-  echo "    Editing a review starts a new run by itself; after deleting a comment or review"
-  echo "    comment, re-run the failed run (\`gh run rerun <run-id> --failed\`), which reads the"
-  echo "    comments again."
+  echo "    Then re-run the newest failed run of each check that reported it on the current head:"
+  echo "    lint, and pr-title once for each event that is red (\`gh run rerun <run-id> --failed\`)."
+  echo "    Never re-run an older run: a re-run reads the comments again but checks the title and"
+  echo "    body as they were at its own event, so it could pass over a newer run that failed."
 fi
 exit "$status"
