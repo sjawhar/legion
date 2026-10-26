@@ -2,11 +2,11 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-366",
-  "completed": "2026-10-26T18:04:00Z",
-  "headSha": "f7eae6165aa443fac48994db7280a66be8fcafb3",
-  "round": 9,
+  "completed": "2026-10-26T19:08:42Z",
+  "headSha": "ddcbe02a006db5ee763e65ad2aeef6c155442d8a",
+  "round": 10,
   "standard": "The architect's decision after review round 5 (2026-10-26T16:42Z): dispatch:// autolinks and links whose words are their target, past the bounds, read with the bounded parser as https:// forms are, while an author-written link still opens; main merged forward (never rebased) with this branch's migrations renumbered after main's 0119; both driven on builds of the merged head and of main, migrations on a fresh database and on one main eee16056 wrote.",
-  "provider": "349 assistant turns of this test run, all provider anthropic, model claude-opus-5-5, read from the run's own session transcript (omp_session_files, session 01a175a2-1036-71da-aaba-a9b28d0f2e1b) at 2026-10-26T18:03Z; no subagent was used.",
+  "provider": "367 assistant turns of this test run, all provider anthropic, model claude-opus-5-5, read from the run's own session transcript (omp_session_files, session 01a175a2-1036-71da-aaba-a9b28d0f2e1b) at 2026-10-26T19:08Z; no subagent was used.",
   "implementerProof": {
     "verdict": "verified",
     "how": "Drove the link forms in my own throwaway browser test on trees of the merged head f7eae616 (code 44f6cfa2), main ad909178 (contains eee16056) and the previous head 9b1586c5; ran the implementer's updated pictures.e2e.ts test on the previous head as its control; ran the head's migrations on a fresh database and on a database main eee16056 wrote."
@@ -41,7 +41,15 @@
   ],
   "attempted": [
     "The merge is two forward merges (56d31191 onto df396380, 44f6cfa2 onto ad909178), each with two parents and no rebase; the implementer posted the fingerprints at https://github.com/sjawhar/legion/pull/2210#issuecomment-6423164429.",
-    "The PR body's CI and E2E (tester) lines were not updated this round: the contract-37 drain (architect, 18:00Z) required pushing before 18:10Z; this handoff carries the evidence."
+    "Round 10 is the rebase re-check after the forward merge of main 6cdb9995 (e3d09251): the round-9 real-surface proof stands, since the product diff is identical; the PR body's E2E (tester) line carries the re-check."
   ],
-  "ci": "At 44f6cfa2: Tests 40370981740, Legion Envoy and Contracts 40370981929, Docs 40370981766 and Worker Image 40370981725 queued; PR Title queued."
+  "ci": "At e3d09251: Tests 40383011699, Legion Envoy and Contracts 40383011488, Docs 40383011523, Worker Image 40383011483 queued; PR Title 40383251036 pending.",
+  "rebaseRecheck": {
+    "from": "f7eae6165aa443fac48994db7280a66be8fcafb3",
+    "to": "ddcbe02a006db5ee763e65ad2aeef6c155442d8a",
+    "fingerprint": "2e83582a2764eff441c5c4b271a44fd1658778da629261d290d42ef9e7c5ca59 at both heads, computed by the tester with jj diff --from fork_point(\"main\"@origin | <head>) --to <head> --git --context 0 '~(.legion | docs/solutions)' | sed -e '/^@@/d' -e '/^index /d' | sha256sum",
+    "verdict": "unchanged: rebase re-check f7eae616 → ddcbe02a: fingerprint unchanged, bare gates only",
+    "bareGates": "CI at e3d09251 read on GitHub: Tests 40383011699, Legion Envoy and Contracts 40383011488, Docs 40383011523 and Worker Image 40383011483 queued, PR Title 40383251036 pending. Smoke on a server built from ddcbe02a (run-server.sh, fresh database infra366_t10): migrations to 127, block-graph.sh exit 0 with 37 PASS, unauthenticated GET /api/v1/block-links 401.",
+    "harness": "The new pod had no /legion/harness; the tester recreated it (setup.sh starts a postmaster only when pg_isready fails on 55432) and told the implementer."
+  }
 }
