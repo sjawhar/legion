@@ -207,18 +207,22 @@ func (d Deliverer) prompt(entry SessionEntry, sessionID string, text string) err
 // hostFor is the address rule every delivery follows, for a session this listener owns
 // (DeliverWithResultForEntry refuses another listener's session with ErrWrongMachine, since that
 // session is its owner's to deliver). The address follows where the session runs, read from its
-// entry. A session registered through this listener (entry MachineID empty or this listener's)
-// goes through HostBridge when one is configured: the listener may run in a container that
-// reaches its own machine's sessions only through that bridge, whatever host name the session
-// reported. A session that re-registered through another listener runs on that listener's
-// machine, which this listener's bridge does not reach, so it never goes through the bridge.
+// entry. The session runs on this listener's machine when its entry names this listener or no
+// listener (it registered here), or when its recorded Host equals this listener's machine id,
+// compared case-insensitively (a plugin records its own machine id as Host, so a session that
+// stayed on this machine but re-registered through another listener names this machine). Such a
+// session goes through HostBridge when one is configured: the listener may run in a container
+// that reaches its own machine's sessions only through that bridge, not by dialling its own host
+// name. A session that re-registered through another listener and records another host runs on
+// that machine, which this listener's bridge does not reach, so it never goes through the bridge.
 // Otherwise the session is reached at its recorded Host, where its process runs; with none
 // recorded (its plugin predates the field), at host.docker.internal when it registered through
 // this listener, else at the machine id of the listener it registered through. A session owned
 // by a listener that cannot reach its port is reached by nobody.
 func (d Deliverer) hostFor(entry SessionEntry) string {
 	registeredHere := entry.MachineID == "" || entry.MachineID == d.MachineID
-	if registeredHere && d.HostBridge != "" {
+	stayedLocal := d.MachineID != "" && strings.EqualFold(entry.Host, d.MachineID)
+	if (registeredHere || stayedLocal) && d.HostBridge != "" {
 		return d.HostBridge
 	}
 	if entry.Host != "" {

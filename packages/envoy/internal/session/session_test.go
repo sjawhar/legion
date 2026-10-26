@@ -583,8 +583,11 @@ func TestDeliver_NilSessionsReturnsError(t *testing.T) {
 // one its topics are fanned out on), else the one the session registered through (the entry's
 // MachineID); a session neither names counts as this listener's. A listener delivers only to a
 // session it owns. A session registered through this listener goes through the bridge, else its
-// recorded host, else host.docker.internal; one that re-registered through another listener runs
-// on that listener's machine, so it goes to its recorded host, else that listener's machine id.
+// recorded host, else host.docker.internal. One that re-registered through another listener but
+// records this listener's machine id as its host (compared case-insensitively) stayed on this
+// machine, so it goes through the bridge, else its recorded host; any other one that re-registered
+// through another listener runs on that listener's machine, so it goes to its recorded host, else
+// that listener's machine id.
 // Another listener's session is that listener's to deliver, so this one refuses it with
 // ErrWrongMachine and requests nothing: every listener on the bus reads each inbox message, and a
 // second one that delivered would deliver it twice.
@@ -670,6 +673,28 @@ func TestDeliver_SessionAddress(t *testing.T) {
 			bridge:   "127.0.0.1",
 			entry:    session.SessionEntry{MachineID: "remote-machine"},
 			want:     "http://remote-machine:4096/session/ses_target/prompt_async",
+		},
+		{
+			// A plugin records its own machine id as Host, so a session that stayed on this machine
+			// names this machine, though it re-registered through another listener.
+			name:     "a session this machine owns that re-registered through another but records this machine as its host goes through the bridge",
+			interest: "local-machine",
+			bridge:   "127.0.0.1",
+			entry:    session.SessionEntry{MachineID: "remote-machine", Host: "local-machine"},
+			want:     "http://127.0.0.1:4096/session/ses_target/prompt_async",
+		},
+		{
+			name:     "a session this machine owns that records this machine as its host in other letter case goes through the bridge",
+			interest: "local-machine",
+			bridge:   "127.0.0.1",
+			entry:    session.SessionEntry{MachineID: "remote-machine", Host: "LOCAL-Machine"},
+			want:     "http://127.0.0.1:4096/session/ses_target/prompt_async",
+		},
+		{
+			name:     "a session this machine owns that records this machine as its host goes to that host without a bridge",
+			interest: "local-machine",
+			entry:    session.SessionEntry{MachineID: "remote-machine", Host: "local-machine"},
+			want:     "http://local-machine:4096/session/ses_target/prompt_async",
 		},
 		{
 			name:     "a session whose stored subscription names another machine is that machine's, though its entry names no listener",
