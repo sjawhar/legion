@@ -2,48 +2,37 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-141",
-  "completed": "2026-10-26T09:31:04Z",
-  "round": "generation 3, the tester's fail at 8d8816be (an unreadable interest record answered as the bus not answering), settled per the architect's ruling of 08:38Z; no merge of main (MERGEABLE); then, at the architect's ruling of 09:05Z, DELETE /v1/interests/<id>, subscribe, unsubscribe and /v1/roles/set made to get past an unreadable interest record (849dbb98)",
+  "completed": "2026-10-26T10:27:09Z",
+  "round": "generation 3, review 5650228351 at 4da93e17 (one Minor regression from dc06110d), narrowed by the architect to one change; no merge of main (MERGEABLE)",
   "proof": [
     {
-      "criterion": "An interest record the bucket holds and this build cannot decode is not answered as the bus not answering: GET /v1/registry/<id> and GET /v1/interests/<id> answer 500 naming the unreadable record, no Retry-After, no bus prefix; GET /v1/sessions lists the session with no topics and keeps the listing",
-      "surface": "the real envoy-listener binary built at this head against a real NATS (internal/testnats/cmd/natsd); sessions ses_sub and ses_bad registered through /v1/interests/subscribe, then the raw value 'not json at all' written into envoy_interests under ses_bad with a throwaway nats.go client; driven with curl",
-      "command": "bash smoke.sh listener-new: GET /v1/sessions, GET /v1/registry/ses_bad, GET /v1/interests/ses_bad, GET /v1/registry/ses_sub; count 'registry read an interest record it cannot decode' in listener.log",
-      "observed": "sessions 200 [{ses_bad, topics null}, {ses_sub, topics [notifications.agent.ses_sub, notifications.role.reviewer]}]; registry/ses_bad and interests/ses_bad 500 {\"error\":\"envoy: the interest record of session ses_bad is unreadable: malformed interest record: invalid character 'o' in literal null (expecting 'u')\"}, no Retry-After; registry/ses_sub 200 with its topics and roles [reviewer]; 3 WARN lines naming the unreadable record",
-      "headSha": "0ad64d7fbb59887983d3f3094099c8313a6e374f",
-      "negativeControl": "The same rig with the listener built from the previous head 8d8816be: all three routes answered 503 {\"error\":\"envoy: the message bus did not answer: invalid character 'o' …\"} with Retry-After: 1, the listing refused whole, and no WARN line"
+      "criterion": "GET /v1/sessions refuses its listing with the 503 only when a session's interest read did not answer; a session whose id the interest bucket refuses is listed with no topics (and logged), while GET /v1/registry/<id> and GET /v1/interests/<id> keep the 413/400 for that key",
+      "surface": "the real envoy-listener binary built at this head against a real NATS; a session record published raw to $KV.envoy_sessions under a 3,987-byte key (served by envoy_sessions, past envoy_interests' 3,974-byte get limit) beside a normal session ses_ok; driven with curl",
+      "command": "bash smoke.sh listener-new: GET /v1/sessions; GET /v1/registry/<3987-byte id>; count 'session listed with no topics'; then bash stop.sh listener-new: NATS stopped with an interest-cache miss, GET /v1/sessions",
+      "observed": "GET /v1/sessions 200 listing the 3,987-byte session with topics null and ses_ok with [notifications.agent.ses_ok, notifications.role.reviewer]; GET /v1/registry/<3987-byte id> 413 {\"error\":\"too large to publish whole: a key of 3987 bytes, past 3974\"}, no Retry-After; 1 WARN line; with NATS stopped and a cache miss, GET /v1/sessions 503 {\"error\":\"envoy: the message bus did not answer: nats: outbound buffer limit exceeded\"}, Retry-After: 1",
+      "headSha": "38feffb0c7a13af12428a4cc65ad2da9eec8c795",
+      "negativeControl": "The same rig with the listener from the previous head 76e46d40: GET /v1/sessions 413 {\"error\":\"too large to publish whole: a key of 3987 bytes, past 3974\"} with no rows, before and after NATS was stopped"
     },
     {
-      "criterion": "The tester's red test passes unchanged, the chosen answers are pinned, and the rest stays green",
+      "criterion": "Pinned by a test that fails before the fix; nothing else changes",
       "surface": "go test against the in-process NATS; scripts/e2e-local.sh against the real binary",
-      "command": "cd packages/envoy && go test ./cmd/listener -count=1 -v -skip <the four testpg tests>; go test ./internal/store ./internal/session ./internal/integration -count=1; bash scripts/e2e-local.sh",
-      "observed": "cmd/listener ok 333.330s, no --- FAIL; --- PASS TestAnUnreadableInterestRecordIsNotAnsweredAsTheBusNotAnswering (the tester's, unchanged: no diff in its file), TestAnUnreadableInterestRecordIsAnsweredAsUnreadable (new), TestTheInterestReadRoutesAnswerABusThatStoppedAnsweringInsideTheBudget and both earlier red tests; internal/store ok 19.033s (new TestGetReadsAnUndecodableInterestRecordAsErrMalformedInterest), internal/session ok 7.465s, internal/integration ok 97.454s; e2e-local exit 0, both PASS lines, bus-down send 503 in 3.502959 s, client EnvoyApiError 503; go build ./..., go vet ./..., gofmt -l . and check-private-names.sh clean; after 849dbb98: cmd/listener ok 333.515s (incl. TestTheInterestWriteRoutesAnswerOverAnUnreadableInterestRecord), internal/store new Undecodable tests pass, internal/integration ok 97.589s, e2e-local exit 0 (bus-down send 503 in 3.502652 s)",
-      "headSha": "0ad64d7fbb59887983d3f3094099c8313a6e374f",
-      "negativeControl": "go test -overlay with the pre-fix api.go and kv.go: TestAnUnreadableInterestRecordIsAnsweredAsUnreadable fails 'status 503, body {\"error\":\"envoy: the message bus did not answer: invalid character …\"}' on registry and interests, and 'GET /v1/sessions: status 503'"
-    },
-    {
-      "criterion": "DELETE /v1/interests/<id> clears an unreadable interest record (204), and a subscribe over one answers 200 and replaces it with a record that decodes, keeping the session's role claims",
-      "surface": "the real envoy-listener binary built at this head against a real NATS; 'not json at all' written raw into envoy_interests under ses_bad after a subscribe; driven with curl",
-      "command": "bash write-smoke.sh listener-new: DELETE /v1/interests/ses_bad, GET /v1/interests/ses_bad; rewrite the raw value; POST /v1/interests/subscribe for ses_bad, GET /v1/interests/ses_bad; count 'registry replaced an interest record it cannot decode'",
-      "observed": "DELETE 204, then GET 404 {\"error\":\"nats: key not found\"}; subscribe 200 {\"session_id\":\"ses_bad\",\"machine_id\":\"smoke-new\",\"topics\":[\"notifications.agent.ses_bad\",\"notifications.role.reviewer\"]}, then GET 200 with that record; 1 'replaced' WARN line",
-      "headSha": "849dbb989eff599061c35141fb4b895fb917b73e",
-      "negativeControl": "The same rig with the listener from 8d8816be: DELETE 500 {\"error\":\"invalid character 'o' …\"} and the record stayed (GET 503 bus prefix); subscribe 503 {\"error\":\"invalid character 'o' …\"} and the record stayed unreadable; go test -overlay with the three kv.go fixes reverted fails TestRemoveAllDeletesAnUndecodableInterestRecordAndReleasesItsRoles, TestRemoveTopicsLeavesAnUndecodableInterestRecordAndReleasesTheirRoles and TestUpsertReplacesAnUndecodableInterestRecord with 'malformed interest record'"
+      "command": "cd packages/envoy && go test ./cmd/listener -count=1 -v -skip <the four testpg tests>; go test ./internal/store ./internal/integration -count=1; bash scripts/e2e-local.sh",
+      "observed": "cmd/listener ok 336.152s, no --- FAIL; --- PASS TestTheSessionListKeepsASessionWhoseIDTheInterestBucketRefuses (too-long legacy id and ses:bad: list 200, registry and interests 413/400 with no Retry-After), TestTheInterestReadRoutesAnswerABusThatStoppedAnsweringInsideTheBudget (frozen bus still 503), TestAnUnreadableInterestRecordIsAnsweredAsUnreadable and the tester's TestAnUnreadableInterestRecordIsNotAnsweredAsTheBusNotAnswering; internal/store ok 18.847s; internal/integration ok 97.184s; e2e-local exit 0, bus-down send 503 in 3.503147 s, client EnvoyApiError 503; build, vet, gofmt and check-private-names.sh clean",
+      "headSha": "38feffb0c7a13af12428a4cc65ad2da9eec8c795",
+      "negativeControl": "go test -overlay with the pre-fix api.go: TestTheSessionListKeepsASessionWhoseIDTheInterestBucketRefuses fails 'GET /v1/sessions: status 413, body {\"error\":\"too large to publish whole: a key of 3987 bytes, past 3974\"}; want 200 listing every session'"
     }
   ],
   "filesChanged": [
-    "packages/envoy/internal/store/kv.go — ErrMalformedInterest; Registry.Get wraps a decode failure in it, returns a zero Interest and logs one WARN",
-    "packages/envoy/cmd/listener/api.go — writeInterestRecordUnreadable (500, no Retry-After); sessionInfoFor returns the row without topics plus the sentinel; sessionsHandler keeps the row; sessionEntryHandler and adminInterestsHandler answer the sentinel 500",
-    "packages/envoy/cmd/listener/interest_record_unreadable_answer_test.go (new), packages/envoy/internal/store/kv_test.go",
-    "packages/envoy/AGENTS.md, docs/architecture.md, CHANGELOG.md — the three routes",
-    "packages/envoy/internal/store/kv.go (849dbb98) — mergeForUpsert and Remove treat ErrMalformedInterest as absent; Upsert logs 'registry replaced an interest record it cannot decode'; removeInterestTopics leaves an unreadable record unchanged with a WARN; tests in internal/store/kv_test.go and cmd/listener/interest_record_unreadable_write_test.go; AGENTS.md, docs/architecture.md, CHANGELOG.md"
+    "packages/envoy/cmd/listener/api.go — interestReadDidNotAnswer (context deadline/cancel, nats.ErrTimeout, ErrConnectionClosed, ErrConnectionReconnecting, ErrConnectionDraining, ErrReconnectBufExceeded, ErrNoResponders); sessionInfoFor returns the row with every other error; sessionsHandler refuses only on a read that did not answer and logs each session listed without topics; comments",
+    "packages/envoy/internal/store/kv.go — Registry.Logger(), so the handler logs through the listener's own logger without a signature change",
+    "packages/envoy/cmd/listener/interest_key_refused_list_test.go (new)",
+    "packages/envoy/AGENTS.md, docs/architecture.md, CHANGELOG.md — the /v1/sessions rule"
   ],
   "trickyParts": [
-    "The WARN is written by store.Registry.Get through the registry's JSON logger, since sessionsHandler(registry, sessions) keeps its signature (the red test calls it); it fires once per read of the record on any path.",
-    "Sweep: no other path sends a store or session-store decode error to writeBusUnavailable, refuseBusUnavailable or outcomeBusUnavailable. An undecodable session record is evicted by SessionRegistry.applyWatched and reads as absent (404 on a send); senderStamp and agent delivery drop the interest error and carry on.",
-    "A subscribe over an unreadable record replaces it: role claims are kept (they live in envoy_roles, which Upsert never touches); the old topics, MachineID, Dir and UpdatedAt are replaced, none of which this build could read or route. [INFERENCE] residual: during a rolling deploy another build that can decode the record would see it overwritten; that needs a field whose type changed, or corrupt bytes."
+    "testnats.LegacyKeys(bus.SessionBucket)'s readable key (3,969 bytes) fits envoy_interests' 3,974-byte limit and is not refused; the unreadable one (3,987 bytes) is the session the cache lists and the interest bucket refuses, so the test uses both.",
+    "With NATS stopped, a cache-miss read returns nats.ErrReconnectBufExceeded at once (ReconnectBufSize = -1), which the predicate counts as not answering: the list is still the 503."
   ],
   "deviations": [
-    "Unsubscribe with a topic list over an unreadable record answers 200, releases the role claims those topics name and leaves the record unchanged with a WARN; /v1/roles/set no longer answers 500 after a claim landed over an old holder's unreadable record (both approved by the architect, 09:21Z).",
     "The retro notes drafted before the send-back are held outside the workspace for the next retro."
   ],
   "openQuestions": []
