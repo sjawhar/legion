@@ -33,11 +33,12 @@ import type { MarkRange } from 'proof-sdk-upstream/src/editor/plugins/marks';
 export type SelectionBarActionKind = 'comment' | 'ask' | 'suggest';
 export type PopoverActionKind = 'reply' | 'resolve' | 'unresolve' | 'accept' | 'reject' | 'delete';
 
-// `quote-comment` is the selection bar's Comment on a read-only view that takes comments
-// (`CreateProofEditorOptions.readOnlyComments`): it writes no mark, so it carries none.
+// `quote-comment` is the selection bar's Comment on a view that takes comments alone
+// (`CreateProofEditorOptions.access` `'comment'`): it writes no mark, so it carries none, and it
+// names the selection by its range alone, for the host to read the quote from it.
 export type MarkAction =
   | { kind: SelectionBarActionKind; markId: string; quote: string; from: number; to: number }
-  | { kind: 'quote-comment'; quote: string; from: number; to: number }
+  | { kind: 'quote-comment'; from: number; to: number }
   | { kind: 'reply'; markId: string; text: string }
   | { kind: Exclude<PopoverActionKind, 'reply'>; markId: string };
 

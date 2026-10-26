@@ -18,6 +18,8 @@ import type { PendingState } from "../features/doc/pending-sync";
 import type { DocumentRuntimeValue } from "../features/doc/runtime";
 
 export interface FakeEditor {
+  /** What the editor lets the reader do (`access`), as created or as the host last set it. */
+  access: NonNullable<EditorOptions["access"]>;
   /** How many times the host asked to comment on the selection. */
   commented: number;
   destroyed: boolean;
@@ -25,9 +27,6 @@ export interface FakeEditor {
   markdown: string | undefined;
   focusedBlocks: string[];
   options: EditorOptions;
-  readOnly: boolean;
-  /** Whether the read-only editor still takes comments by quote (`readOnlyComments`). */
-  readOnlyComments: boolean;
   remoteMarks: Record<string, StoredMark>[];
   root: HTMLElement;
   /** Whether the fake view's selection is empty (a caret); a test sets it to select text. */
@@ -97,14 +96,13 @@ export function fakeDocumentRuntime(seed: { text?: string } = {}): FakeDocumentR
       root.setAttribute(name, value);
     }
     const editor: FakeEditor = {
+      access: options.access ?? "edit",
       commented: 0,
       destroyed: false,
       focused: [],
       focusedBlocks: [],
       markdown: undefined,
       options,
-      readOnly: options.readOnly ?? false,
-      readOnlyComments: options.readOnlyComments ?? false,
       remoteMarks: [],
       root,
       selectionEmpty: true,
@@ -142,15 +140,14 @@ export function fakeDocumentRuntime(seed: { text?: string } = {}): FakeDocumentR
         editor.markdown = markdown;
         root.textContent = markdown;
       },
-      setReadOnly(readOnly: boolean, readOnlyComments = false) {
-        editor.readOnly = readOnly;
-        editor.readOnlyComments = readOnlyComments;
+      setAccess(access: FakeEditor["access"]) {
+        editor.access = access;
       },
       view: {
         dispatch() {},
         dom: root,
         get editable() {
-          return !editor.readOnly;
+          return editor.access === "edit";
         },
         hasFocus: () => root.ownerDocument.activeElement === root,
         props: editor.viewProps,

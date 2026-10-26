@@ -393,8 +393,11 @@ said under the switch in the reader's words, and the kind stays.
 
 A closed issue's document is read-only, and its socket is admitted read-only, so the browser can
 write no mark there; the server still writes a comment's mark on it (`docs.WithCommentMarks`). So
-on a closed issue's document the selection bar offers Comment alone (`readOnlyComments` on the
-editor), which writes nothing and reports a `quote-comment`. `quoteAnchor`
+on a closed issue's document the selection bar offers Comment alone (the editor's `access` is
+`"comment"`; an open issue's is `"edit"`, or `"read"` after a read-only admission), and only for a
+selection that holds text; it writes nothing and reports a `quote-comment` with the selection's
+range. Should `quoteAnchor` still find no text there, the page says so under the closed-issue
+notice and opens no composer. `quoteAnchor`
 (`features/doc/quote-anchor.ts`) reads the selection as the server's `FindQuote` reads a document -
 text nodes in order, one space wherever text does not run on, U+0000 as U+FFFD - and names it by its
 quote and the occurrence of that quote it is, overlapping matches counted, without a leading

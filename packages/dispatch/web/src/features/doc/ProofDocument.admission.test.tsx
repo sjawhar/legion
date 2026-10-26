@@ -442,8 +442,7 @@ test("ProofDocument makes a schema-read-only admission non-editable and reloadab
     act(() => admit(true));
     await sync();
     await waitFor(() => expect(editors).toHaveLength(1));
-    expect(editors[0]?.readOnly).toBe(true);
-    expect(editors[0]?.readOnlyComments).toBe(false);
+    expect(editors[0]?.access).toBe("read");
     expect(within(view.container).getByRole("article").getAttribute("data-read-only")).toBe("true");
     expect(within(view.container).getByText("Reload to edit.")).toBeDefined();
   } finally {
@@ -464,14 +463,12 @@ test("a closed issue's document takes comments by quote through its read-only ad
     act(() => admit(true));
     await sync();
     await waitFor(() => expect(editors).toHaveLength(1));
-    expect(editors[0]?.options).toMatchObject({ readOnly: true, readOnlyComments: true });
+    expect(editors[0]?.options).toMatchObject({ access: "comment" });
     act(() => admit(true));
-    expect(editors[0]?.readOnly).toBe(true);
-    expect(editors[0]?.readOnlyComments).toBe(true);
+    expect(editors[0]?.access).toBe("comment");
 
     rerender({ isClosed: false });
-    expect(editors[0]?.readOnly).toBe(true);
-    expect(editors[0]?.readOnlyComments).toBe(false);
+    expect(editors[0]?.access).toBe("read");
   } finally {
     view.unmount();
   }

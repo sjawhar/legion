@@ -48,7 +48,7 @@ import { AskBlockCard } from "./AskBlockCard";
 import { type AskBlockHost, installTypedBlocks } from "./ask-block";
 import type { ConnectionState, DocumentConnection } from "./connection";
 import { colorForLogin } from "./connection";
-import type { EditorHandle } from "./editor";
+import type { EditorHandle, EditorOptions } from "./editor";
 import { bindRemoteMarks } from "./editor";
 import type { Highlight } from "./highlight";
 import {
@@ -100,6 +100,21 @@ function admissionBlock(error: unknown): AdmissionBlock {
  * reconnecting: the server refuses a socket exactly when that read answers `409 DOC_SCHEMA`, so a
  * refusal is normally followed by the repair message, never by an endless reconnect. */
 const SCHEMA_REFUSAL_DELAYS_MS = [0, 1_000, 2_000, 4_000, 8_000] as const;
+
+/** What the live editor lets the reader do. A closed issue's document takes comments by quote (the
+ * bar's Comment alone): the server admits every socket on a closed issue read-only, so its
+ * admission cannot say whether this editor's schema is outdated too. On an open issue a read-only
+ * admission means it is, and the document takes nothing until a reload, since this editor's
+ * reading of it may not be the server's. */
+function editorAccess(
+  isClosed: boolean,
+  schemaReadOnly: boolean
+): NonNullable<EditorOptions["access"]> {
+  if (isClosed) {
+    return "comment";
+  }
+  return schemaReadOnly ? "read" : "edit";
+}
 
 /** The document chrome reports its state upward so an issue can place its controls in the active
  * Spec tab row. Project document pages retain their artifact-header toolbar. */
@@ -190,6 +205,8 @@ export function ProofDocument({
   const [pending, setPending] = useState<PendingState | undefined>(undefined);
   const [loadError, setLoadError] = useState<string | undefined>(undefined);
   const [schemaReadOnly, setSchemaReadOnly] = useState(false);
+  /** Why the closed document's last Comment opened no composer, for the reader. */
+  const [quoteRefusal, setQuoteRefusal] = useState<string | undefined>(undefined);
   const [openDecisionIndex, setOpenDecisionIndex] = useState(0);
   const {
     blockSchema: runtimeBlockSchema,
@@ -527,7 +544,7 @@ export function ProofDocument({
             onAdmission: (readOnly) => {
               schemaReadOnlyRef.current = readOnly;
               setSchemaReadOnly(readOnly);
-              editor?.setReadOnly(isClosedRef.current || readOnly, isClosedRef.current);
+              editor?.setAccess(editorAccess(isClosedRef.current, readOnly));
             },
             onOutsideSchema: () => {
               if (!mounted) {
@@ -585,13 +602,19 @@ export function ProofDocument({
                       });
                     case "quote-comment": {
                       // A closed issue's document takes no mark: the comment names its text by
-                      // quote, and the server writes its mark where the reader selected.
+                      // quote, and the server writes its mark where the reader selected. The bar
+                      // offers Comment only for a selection that holds text; should this reading
+                      // of it still find none, the reader is told why no composer opened.
                       const doc = editor?.view.state.doc;
                       const anchor =
                         doc === undefined ? undefined : quoteAnchor(doc, action.from, action.to);
                       if (anchor === undefined) {
-                        throw new Error("The selection holds no text to quote.");
+                        setQuoteRefusal(
+                          "This selection holds no text to quote. Select text to comment on it."
+                        );
+                        return;
                       }
+                      setQuoteRefusal(undefined);
                       return marginRef.current.composeForMark({
                         anchor: { artifact: artifact.id, ...anchor },
                         kind: "comment",
@@ -605,13 +628,7 @@ export function ProofDocument({
                 },
                 onMarkClick: (markId) => marginRef.current.focusItemForMark(markId),
                 onMarkHover: (markId) => marginRef.current.hoverItemForMark(markId),
-                // A closed issue's document takes comments by quote (the bar's Comment alone). The
-                // server admits every socket on a closed issue read-only, so its admission cannot
-                // say whether this editor's schema is outdated too; on an open issue a read-only
-                // admission means it is, and the document takes nothing until a reload, since this
-                // editor's reading of it may not be the server's.
-                readOnly: isClosedRef.current || schemaReadOnlyRef.current,
-                readOnlyComments: isClosedRef.current,
+                access: editorAccess(isClosedRef.current, schemaReadOnlyRef.current),
                 user: {
                   color: colorForLogin(userRef.current.login),
                   name: userRef.current.login,
@@ -658,7 +675,8 @@ export function ProofDocument({
   }, [textReadAt]);
 
   useEffect(() => {
-    editorRef.current?.setReadOnly(isClosed || schemaReadOnlyRef.current, isClosed);
+    setQuoteRefusal(undefined);
+    editorRef.current?.setAccess(editorAccess(isClosed, schemaReadOnlyRef.current));
   }, [isClosed]);
 
   useEffect(() => {
@@ -681,6 +699,7 @@ export function ProofDocument({
         saving={nameVersion.isPending}
       />
       {isClosed ? <p>This issue is closed. Its document is read-only.</p> : null}
+      {quoteRefusal === undefined ? null : <p role="status">{quoteRefusal}</p>}
       {repairError === undefined ? null : (
         <div className="space-y-3" role="alert">
           <p className={dangerText}>{repairError.message}</p>

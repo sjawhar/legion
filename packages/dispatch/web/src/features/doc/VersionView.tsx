@@ -74,10 +74,10 @@ export function VersionView({
       }
       ydoc = doc;
       const editor = await createEditor(parent, {
+        access: "read",
         awareness: null,
         blockSchema,
         heatMapMode: "hidden",
-        readOnly: true,
         user: { color: colorForLogin(user.login), name: user.login },
         ydoc: doc,
       });

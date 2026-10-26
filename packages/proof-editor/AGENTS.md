@@ -77,12 +77,15 @@ so a click on text two record marks cover opens the narrower one (LEGION-458);
 `src/dispatch-action-bar.ts`'s Comment / Suggest / Ask buttons and its exported
 `commentOnSelection` taking one path, `ActionBarController.act`, which marks nothing for an empty
 or stale range or a read-only view, with `src/lib.ts` exposing `commentOnSelection` on the handle
-for Dispatch's `Ctrl+Alt+M` (LEGION-680); comments on a read-only document (INFRA-448), where the
-bar hides itself unless the view takes comments there (`setReadOnlyComments`, which
-`src/lib.ts`'s `readOnlyComments` option and `setReadOnly`'s second argument set), and then offers
-Comment alone, which writes no mark and reports a `quote-comment` action, `src/dispatch-marks.ts`'s
-`MarkAction` carrying that kind, and `src/tests/dispatch-action-bar-position.test.ts`'s view
-double declaring `editable: true`, since the bar reads it before it shows; and annotations, casts
+for Dispatch's `Ctrl+Alt+M` (LEGION-680); comments on a read-only document (INFRA-448), where
+`src/lib.ts`'s `readOnly` option and `setReadOnly` give way to one access mode, the `access`
+option and `setAccess` (`'edit' | 'comment' | 'read'`), which make the view editable for `'edit'`
+alone and hand the mode to the bar's own `setAccess`, and the bar hides itself on a read-only view
+unless its access is `'comment'` and the selection holds text, and then offers Comment alone,
+which writes no mark and reports a `quote-comment` action with the selection's range,
+`src/dispatch-marks.ts`'s `MarkAction` carrying that kind, and
+`src/tests/dispatch-action-bar-position.test.ts`'s view double declaring `editable: true`, since
+the bar reads it before it shows; and annotations, casts
 and assertions that make a file type-check, each of which erases before runtime (below).
 
 To audit a copied file, diff it against `jj --ignore-working-copy -R <proof-sdk> file show -r

@@ -26,7 +26,7 @@ export interface MarksEditor {
  * Runs `run` against the editor `createProofEditor` builds - Milkdown's presets, the collab
  * binding with both undo managers, and every plugin of the stack - in happy-dom, configured as
  * Dispatch's margin configures it, over a Y.Doc seeded with `markdown`; `options` adds to or
- * overrides that configuration (an `onMarkAction`, `readOnly`). The real stack matters:
+ * overrides that configuration (an `onMarkAction`, `access`). The real stack matters:
  * plugins such as commonmark's hard-break mark cleaner append transactions after a mark write, and
  * only the whole stack shows what reaches each undo manager.
  */

@@ -27,9 +27,9 @@ test("ProofDocument creates the editor on the synced document as the signed-in u
     expect(connections).toHaveLength(1);
     await waitFor(() => expect(editors).toHaveLength(1));
     expect(editors[0]?.options).toMatchObject({
+      access: "edit",
       awareness: connections[0]?.awareness,
       heatMapMode: "hidden",
-      readOnly: false,
       user: { color: colorForLogin("alice"), name: "alice" },
       ydoc: connections[0]?.doc,
     });
@@ -221,8 +221,7 @@ test("ProofDocument reports connection status and pending edits through the tool
     );
     await waitFor(() => expect(toolbar.current?.connection).toBe("offline"));
     rerender({ isClosed: true });
-    expect(editors[0]?.readOnly).toBe(true);
-    expect(editors[0]?.readOnlyComments).toBe(true);
+    expect(editors[0]?.access).toBe("comment");
     expect(within(view.container).getByRole("article").getAttribute("data-read-only")).toBe("true");
     expect(
       within(view.container).getByText("This issue is closed. Its document is read-only.")
@@ -544,7 +543,7 @@ test("a closed document's Comment opens a quote composer with no mark, which pos
   try {
     await sync();
     await waitFor(() => expect(editors).toHaveLength(1));
-    expect(editors[0]?.options).toMatchObject({ readOnly: true, readOnlyComments: true });
+    expect(editors[0]?.options).toMatchObject({ access: "comment" });
     const onMarkAction = editors[0]?.options.onMarkAction;
     if (onMarkAction === undefined) {
       throw new Error("The editor did not receive an onMarkAction handler.");
@@ -552,9 +551,7 @@ test("a closed document's Comment opens a quote composer with no mark, which pos
 
     let cancelled: Promise<void> | undefined;
     act(() => {
-      cancelled = Promise.resolve(
-        onMarkAction({ from: 11, kind: "quote-comment", quote: "brown", to: 16 })
-      );
+      cancelled = Promise.resolve(onMarkAction({ from: 11, kind: "quote-comment", to: 16 }));
       void cancelled.catch(() => {});
     });
     const open = margin.current?.pendingCompose;
@@ -570,9 +567,7 @@ test("a closed document's Comment opens a quote composer with no mark, which pos
 
     let sent: Promise<void> | undefined;
     act(() => {
-      sent = Promise.resolve(
-        onMarkAction({ from: 11, kind: "quote-comment", quote: "brown", to: 16 })
-      );
+      sent = Promise.resolve(onMarkAction({ from: 11, kind: "quote-comment", to: 16 }));
     });
     const { anchor } = margin.current?.pendingCompose ?? {};
     if (anchor === undefined) throw new Error("expected an open compose");
@@ -598,6 +593,63 @@ test("a closed document's Comment opens a quote composer with no mark, which pos
   } finally {
     view.unmount();
     createComment.mockRestore();
+  }
+});
+
+// The bar offers a closed document's Comment only for a selection that holds text; should the
+// host's own reading of a selection still find none, it tells the reader so, opens no composer and
+// rejects nothing into the bar. The next Comment that opens one takes the notice away.
+test("a closed document's Comment on a selection with no text to quote says so and opens no composer", async () => {
+  const schema = new Schema({
+    nodes: {
+      doc: { content: "paragraph+" },
+      image: { group: "inline", inline: true },
+      paragraph: { content: "inline*", group: "block" },
+      text: { group: "inline" },
+    },
+  });
+  // "brown " then an image: the image alone is positions 7 to 8.
+  const document = schema.node("doc", undefined, [
+    schema.node("paragraph", undefined, [schema.text("brown "), schema.node("image")]),
+  ]);
+  const fake = fakeDocumentRuntime({ text: "brown " });
+  const createEditor = fake.runtime.createEditor;
+  fake.runtime.createEditor = async (root, options) => {
+    const handle = await createEditor(root, options);
+    // The fake view's state is a plain object whose `doc` the test supplies.
+    const state = handle.view.state as unknown as { doc: ProseMirrorNode };
+    state.doc = document;
+    return handle;
+  };
+  const { editors, margin, sync, view } = renderProofDocument({ fake, isClosed: true });
+  const notice = "This selection holds no text to quote. Select text to comment on it.";
+
+  try {
+    await sync();
+    await waitFor(() => expect(editors).toHaveLength(1));
+    const onMarkAction = editors[0]?.options.onMarkAction;
+    if (onMarkAction === undefined) {
+      throw new Error("The editor did not receive an onMarkAction handler.");
+    }
+
+    let refused: Promise<void> | undefined;
+    act(() => {
+      refused = Promise.resolve(onMarkAction({ from: 7, kind: "quote-comment", to: 8 }));
+    });
+    await expect(refused).resolves.toBeUndefined();
+    expect(within(view.container).getByRole("status").textContent).toBe(notice);
+    expect(margin.current?.pendingCompose).toBeUndefined();
+
+    act(() => {
+      void Promise.resolve(onMarkAction({ from: 1, kind: "quote-comment", to: 6 })).catch(() => {});
+    });
+    expect(margin.current?.pendingCompose).toMatchObject({
+      anchor: { artifact: artifact.id, occurrence: 0, quote: "brown" },
+      kind: "comment",
+    });
+    expect(within(view.container).queryByText(notice)).toBeNull();
+  } finally {
+    view.unmount();
   }
 });
 
