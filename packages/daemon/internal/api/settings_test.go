@@ -95,7 +95,7 @@ var settingsEmitted = map[string]string{
 	"Kubernetes.Scheduling":                          "runtime.kubernetes.scheduling",
 	"Kubernetes.Resources":                           "runtime.kubernetes.resources",
 	"Kubernetes.AgentSecrets":                        "runtime.kubernetes.agent_secrets",
-	"Kubernetes.SessionDSNSecret":                    "runtime.kubernetes.session_store (\"postgres\" iff set, else \"pvc\"; the key itself is never emitted)",
+	"Kubernetes.SessionStore":                        "runtime.kubernetes.session_store (the kind alone: neither the Secret key nor the instance and login behind it is emitted)",
 	"Kubernetes.Plugins":                             "runtime.kubernetes.plugins",
 	"Kubernetes.Setup":                               "runtime.kubernetes.setup",
 	"Kubernetes.RepositoryCache":                     "runtime.kubernetes.repository_cache",
@@ -125,6 +125,10 @@ var settingsEmitted = map[string]string{
 	"Project.MergeQueueRole":                         "projects.<KEY>.merge_queue_role",
 	"Project.Merge":                                  "projects.<KEY>.merge",
 	"Project.SlackChannels":                          "projects.<KEY>.slack_channels",
+	"Project.Deploys":                                "projects.<KEY>.deploys",
+	"Deploy.Repo":                                    "projects.<KEY>.deploys[].repo",
+	"Deploy.Workflow":                                "projects.<KEY>.deploys[].workflow",
+	"Deploy.Step":                                    "projects.<KEY>.deploys[].step",
 	"MergeRules.ByHand":                              "projects.<KEY>.merge.by_hand",
 	"PathPattern.Expression":                         "projects.<KEY>.merge.by_hand[]",
 	"Gates.Design":                                   "gates.design",
@@ -214,7 +218,7 @@ var settingsFixturePlanted = []string{
 // settingsForbiddenKeys are the legion.yaml keys that never appear in `settings`, at any depth.
 var settingsForbiddenKeys = []string{
 	"postgres_dsn", "private_key", "private_key_command", "private_key_secret",
-	"kubeconfig", "context", "session_dsn_secret", "pod", "env", "volumes", "volume_mounts", "service_account",
+	"kubeconfig", "context", "session_dsn_secret", "session_database", "pod", "env", "volumes", "volume_mounts", "service_account",
 }
 
 // The maximal kubernetes file resolves to a settings block whose top-level, runtime.kubernetes and
@@ -321,6 +325,12 @@ func TestSettingsOfAKubernetesConfigurationNamesEveryKeyAndNoSecret(t *testing.T
 	}
 	if want := []string{"C0123ABCD", "C0123ABCE"}; !slices.Equal(settings.Projects["LEGION"].SlackChannels, want) {
 		t.Errorf("projects.LEGION.slack_channels = %q, want %q", settings.Projects["LEGION"].SlackChannels, want)
+	}
+	if want := []DeploySettings{{Repo: "sjawhar/legion", Workflow: ".github/workflows/release.yaml", Step: "Apply"}}; !slices.Equal(settings.Projects["LEGION"].Deploys, want) {
+		t.Errorf("projects.LEGION.deploys = %+v, want %+v", settings.Projects["LEGION"].Deploys, want)
+	}
+	if deploys := settings.Projects["WIDGETS"].Deploys; deploys == nil || len(deploys) != 0 {
+		t.Errorf("projects.WIDGETS.deploys = %#v, want the empty list a project with no deploy shows", deploys)
 	}
 	if want := map[string]string{"pool-capacity": "the pool is sized by hand for the admission cap"}; !maps.Equal(settings.Capabilities.Decided, want) {
 		t.Errorf("capabilities.decided = %q, want %q", settings.Capabilities.Decided, want)

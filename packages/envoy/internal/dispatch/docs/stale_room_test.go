@@ -356,7 +356,7 @@ func TestARoomWritesAgainAfterASupersededSettlementAppendsItsRepair(t *testing.T
 		}
 		superseded = true
 		state := service.lockState(room)
-		state.roomGeneration++
+		state.roomGeneration = service.nextRoomGeneration()
 		service.unlockState(room, state)
 	}
 	versions := latestVersionNumber(t, service, artifactID)

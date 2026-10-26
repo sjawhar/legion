@@ -372,6 +372,103 @@ func TestReferencesIncludeStructuralEdgesAndDocumentBlockExcerpts(t *testing.T) 
 	}
 }
 
+// insertUnknownKindEdges plants refs rows whose other end is a node kind this build does not
+// know, as a newer build sharing the database would write them.
+func insertUnknownKindEdges(t *testing.T, database *store.Store, edges [][4]string) {
+	t.Helper()
+	for _, edge := range edges {
+		if _, err := database.Pool.Exec(context.Background(), `
+			insert into refs (from_kind, from_id, to_kind, to_id) values ($1, $2, $3, $4)
+		`, edge[0], edge[1], edge[2], edge[3]); err != nil {
+			t.Fatalf("insert reference %v: %v", edge, err)
+		}
+	}
+}
+
+// An edge whose other end is a node kind this build cannot address is one a newer build wrote:
+// the graph read skips it in both directions instead of answering 500, and the issue header's
+// count is the number of edges its panel lists, not one more.
+func TestReferencesAnswerAroundAnEdgeOfAKindThisBuildCannotAddress(t *testing.T) {
+	handler, database := newTestHandlerWithStore(t)
+	createReferenceAPIProject(t, handler, "CORE")
+	createReferenceAPIProject(t, handler, "OPS")
+	target := createReferenceAPIIssue(t, handler, "CORE")
+	source := createReferenceAPIIssue(t, handler, "OPS")
+	comment := createReferenceAPIComment(t, handler, source.Key, "see dispatch://"+target.Key)
+	commentRef := "dispatch://" + source.Key + "/comment/" + comment.ID
+	insertUnknownKindEdges(t, database, [][4]string{
+		{"future", "x#y", "issue", target.Key},
+		{"comment", comment.ID, "future", "x#y"},
+	})
+
+	// The target's own spec is attached to it and the comment cites it: two edges this build
+	// can address, and the header counts the same edges the panel lists.
+	incoming := graphRequest(t, handler, url.Values{"to": {"dispatch://" + target.Key}})
+	if incoming.Code != http.StatusOK {
+		t.Errorf("GET references to %s: status=%d body=%s", target.Key, incoming.Code, incoming.Body.String())
+	} else {
+		edges := decodeBody[model.GraphReferences](t, incoming).Edges
+		byKind := make(map[string]model.GraphEdge, len(edges))
+		for _, edge := range edges {
+			byKind[edge.Kind] = edge
+		}
+		mention, attached := byKind["mentions"], byKind["attached_to"]
+		if len(edges) != 2 || mention.Node.Kind != "comment" || mention.Node.ID != comment.ID || attached.Node.Kind != "artifact" || attached.Node.ID != target.PrimaryArtifactID {
+			t.Errorf("backlinks of %s = %#v; want the comment's mention and the attached spec, nothing of kind future", target.Key, edges)
+		}
+	}
+
+	outgoing := graphRequest(t, handler, url.Values{"from": {commentRef}})
+	if outgoing.Code != http.StatusOK {
+		t.Errorf("GET references from %s: status=%d body=%s", commentRef, outgoing.Code, outgoing.Body.String())
+	} else {
+		edges := decodeBody[model.GraphReferences](t, outgoing).Edges
+		if len(edges) != 1 || edges[0].Kind != "mentions" || edges[0].Node.Kind != "issue" || edges[0].Node.ID != target.Key {
+			t.Errorf("links of %s = %#v; want only the mention of %s, nothing of kind future", commentRef, edges, target.Key)
+		}
+	}
+
+	detail := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+target.Key, nil, "alice")
+	if detail.Code != http.StatusOK {
+		t.Fatalf("read issue: status=%d body=%s", detail.Code, detail.Body.String())
+	}
+	if count := decodeBody[struct {
+		ReferencedByCount int `json:"referenced_by_count"`
+	}](t, detail).ReferencedByCount; count != 2 {
+		t.Errorf("issue %q referenced_by_count = %d; want 2, the edges its panel lists", target.Key, count)
+	}
+}
+
+// A document's references read skips an edge of a node kind this build cannot address on both
+// sides: its referenced-by list is the comment that cites it, and its outgoing list is what its
+// text cites, the known issue and the missing document both unresolved as before.
+func TestArtifactReferencesSkipANodeKindThisBuildCannotAddress(t *testing.T) {
+	handler, database := newTestHandlerWithStore(t)
+	createReferenceAPIProject(t, handler, "CORE")
+	issue := createReferenceAPIIssue(t, handler, "CORE")
+	design := createProjectDocument(t, handler, "CORE", "Design notes", "# Design\n\nThe plan lives in dispatch://"+issue.Key+" and dispatch://CORE/artifact/missing.\n")
+	comment := createReferenceAPIComment(t, handler, issue.Key, "dispatch://CORE/artifact/design-notes")
+	insertUnknownKindEdges(t, database, [][4]string{
+		{"artifact", design.ID, "future", "x#y"},
+		{"future", "x#y", "artifact", design.RefKey},
+	})
+
+	response := dispatchRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+design.ID+"/references", nil, "alice")
+	if response.Code != http.StatusOK {
+		t.Fatalf("get artifact references: status=%d body=%s", response.Code, response.Body.String())
+	}
+	value := decodeBody[model.ArtifactReferences](t, response)
+	if want := []model.OutgoingReference{
+		{Kind: "artifact", ToID: "CORE/missing"},
+		{Kind: "issue", ToID: issue.Key},
+	}; !reflect.DeepEqual(value.Outgoing, want) {
+		t.Errorf("outgoing references = %#v; want the unresolved issue and missing document, nothing of kind future", value.Outgoing)
+	}
+	if len(value.ReferencedBy) != 1 || value.ReferencedBy[0].Kind != "comment" || value.ReferencedBy[0].ID != comment.ID {
+		t.Errorf("referenced by = %#v; want only comment %q", value.ReferencedBy, comment.ID)
+	}
+}
+
 // A spec seeded at issue creation that cites an issue in bold, another project's issue in a code
 // span and a third project's issue as an autolink, which the spec stores as a link whose text is
 // its target, mentions all three. The source of each mention is the spec document, not the issue

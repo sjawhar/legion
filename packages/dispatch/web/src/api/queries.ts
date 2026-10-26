@@ -108,6 +108,14 @@ export const architectureSourcesQuery = () =>
     queryFn: () => api.listArchitectureSources(),
   });
 
+/** Every project that names a default assignee, read by the Settings page's Projects table and
+ *  refreshed by the event a write appends. A project absent from the answer names nobody. */
+export const projectDefaultAssigneesQuery = () =>
+  queryOptions({
+    queryKey: ["project-default-assignees"],
+    queryFn: () => api.listProjectDefaultAssignees(),
+  });
+
 /** The mutation key every board move on `project` carries; `projectIssuesQuery` waits on it. */
 export const boardMoveMutationKey = (project: string): readonly unknown[] => [
   "board-move",

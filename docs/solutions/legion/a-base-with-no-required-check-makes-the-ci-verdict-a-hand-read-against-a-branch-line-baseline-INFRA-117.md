@@ -42,6 +42,26 @@ pull request targets that requires no check.
   `jj diff --from <code head> --to <handoff head> --git '~.legion'` being empty. Say both SHAs
   wherever the CI line is quoted, or the next role reads "no checks" as "not run".
 
+**Superseded 2026-10-23 (dispatch://INFRA-83):** two clauses are gone. The first is the one that
+has you say both SHAs wherever the CI line is quoted, because that line is: the pull request body
+carries no `CI:` line (`skills/legion-worker/references/pr-body.md`), and no role records a check
+result for a later step to trust — the tester and the reviewer each read CI on GitHub at the head
+they are judging and record none of it (the reviewer's own four GitHub reads are in
+`skills/legion-worker/references/merge-gate.md`). The hand-read this learning is about is now what
+each role does for itself instead of reading it off a body line: at the head it is judging it reads
+every job with its conclusion and run id, and when that head is a handoff-only one with zero check
+runs it reads the code head's runs and proves the join itself with
+`jj diff --from <code head> --to <handoff head> --git '~.legion'` being empty. The second is the
+first bullet's "READY is accepted with a note that the base requires no check": READY reads no
+check of the head at all now, `rules/branches` included, and answers no note at all on such a base
+— the completion's `note` carries the already-merged sentence and the by-hand
+`MANUAL_MERGE_REQUIRED:` note only. What the empty read means is otherwise unchanged: the daemon
+judges no head red on that base, so a red job never sends the issue back, and GitHub merges under
+its own rules, so nothing on GitHub is in the way either. The rest of the finding stands: the empty
+`rules/branches/<base>` read and what it means for the daemon's verdict, naming the whole job list
+in the plan, classifying a red job-by-job and step-by-step against a baseline head on the same
+branch line, and a handoff-only head having no checks at all.
+
 ## Evidence
 
 INFRA-117 merged onto `envoy-infra-integration`.

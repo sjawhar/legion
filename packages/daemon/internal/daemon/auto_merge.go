@@ -23,6 +23,22 @@ import (
 // every later lifecycle row of the issue behind it.
 const autoMergeTimeout = 30 * time.Second
 
+// mergeWaitWarn is how long a ready_merge row waits before its issue's architect is told once that
+// GitHub has not completed the merge Legion submitted (readyMergeWaiting). It runs from
+// record.ReadyMerge.Queued, the moment the workflow queued that submission: nothing in the daemon
+// records when GitHub was first asked, and the queue time lives on the payload beside the flag that
+// records the telling (record.ReadyMerge.Warned), so a reopen's upsert of the same issue and head,
+// which replaces the payload on purpose (readyMergeConflict), resets the two together and they can
+// never disagree. Measured from created_at they would: the upsert leaves it at the original
+// queueing, so a reopen of an hours-old row would warn at once about a submission seconds old.
+// Measured on sjawhar/legion on 2026-10-23, main requires the checks lint, typecheck, test and
+// pr-title; over the last eight main heads those took test 12-16 minutes, lint 3-5, typecheck and
+// pr-title under a minute, and across the last 97 completed pull_request runs the median was 2.5
+// minutes and the 90th percentile 17, with one 82-minute outlier. An hour is above every required
+// check's observed maximum and above the 90th percentile of every run, so a row still waiting then
+// waits on something the repository's own checks will not end.
+const mergeWaitWarn = time.Hour
+
 // autoMergeDisable disarms pull request payload.Number as the implement App, which submits READY's
 // merge (ghautomerge.Disarm), deciding by the record when it runs, never by when the row was queued:
 // while the issue awaits its merge, the merger's READY commit is the head whose arm is kept, and
@@ -56,13 +72,15 @@ func (r *outbox) autoMergeDisable(ctx context.Context, row record.OutboxRow, pay
 // base that requires a merge queue, leaves the row waiting until GitHub reports the pull request
 // mergeable, so a merge-queue base never has auto-merge armed; an arm or a queue entry leaves it
 // waiting until GitHub reports the merge (ghautomerge.Armed), and a READY the record has left ends
-// the row. The first arm or entry the row sees is recorded on the row (rememberArm), so a later run
+// the row. The first arm or entry the row sees is recorded on the row (rememberWait), so a later run
 // that finds it gone reads the removal from GitHub instead of submitting again: the merge queue
 // failing the merge sends the issue back to implementing (intake.MergeFailed, applied through the
 // workflow), and anyone else's removal ends the row with the architect told (ghautomerge.Removed,
 // merge-removed). A refusal a retry would meet again (ghautomerge.Refused) and a disagreement with
 // the record that has stood on GitHub longer than ghautomerge.LagBound (ghautomerge.Lagging.Stalled)
-// end it too, the architect told (permanentRefusal, finishRefused); every other failure retries.
+// end it too, the architect told (permanentRefusal, finishRefused); every other failure retries. A
+// wait GitHub has left standing longer than mergeWaitWarn tells the architect once that the merge
+// is still waiting (merge-waiting, rememberWait), and the row waits on.
 func (r *outbox) readyMerge(ctx context.Context, row record.OutboxRow, payload record.ReadyMerge) error {
 	ctx, cancel := context.WithTimeout(ctx, autoMergeTimeout)
 	defer cancel()
@@ -84,7 +102,7 @@ func (r *outbox) readyMerge(ctx context.Context, row record.OutboxRow, payload r
 	var failed *ghautomerge.MergeFailed
 	switch {
 	case errors.As(err, &armed) && !payload.Armed:
-		if remembered := r.rememberArm(ctx, row, payload); remembered != nil {
+		if remembered := r.rememberWait(ctx, row, payload, true, err); remembered != nil {
 			return remembered
 		}
 		return err
@@ -103,24 +121,102 @@ func (r *outbox) readyMerge(ctx context.Context, row record.OutboxRow, payload r
 		r.log.Info(message, "row", row.ID, "issue", row.Issue, "number", payload.Number, "head", payload.Head, "reason", failed.Error())
 		return nil
 	case err != nil:
+		if remembered := r.rememberWait(ctx, row, payload, false, err); remembered != nil {
+			return remembered
+		}
 		return err
 	}
 	r.log.Info("outbox submitted a READY merge", "row", row.ID, "issue", row.Issue, "repo", repo.String(), "number", payload.Number, "head", payload.Head, "outcome", outcome)
 	return nil
 }
 
-// rememberArm records on row that its READY's head has been seen armed or queued on GitHub
-// (record.ReadyMerge.Armed), while row's lease holds it: a reopen's queue that took the row since
-// starts it over unarmed, and its own payload stands.
-func (r *outbox) rememberArm(ctx context.Context, row record.OutboxRow, payload record.ReadyMerge) error {
-	payload.Armed = true
-	if err := pgx.BeginFunc(ctx, r.pool, func(tx pgx.Tx) error {
-		_, err := r.records.ReplaceOutboxPayload(ctx, tx, row.ID, row.LeaseToken, payload)
-		return err
+// rememberWait records on row what its wait learned that its next run must know, and tells the
+// issue's architect of a merge GitHub is taking long over, in one transaction under row's lease, so
+// a run writes the payload at most once. arm is GitHub having shown READY's head armed or queued
+// (record.ReadyMerge.Armed): from then on the arm disappearing is a removal the row reads from
+// GitHub rather than a cue to submit again. A submission queued longer ago than mergeWaitWarn
+// whose cause is GitHub not having completed the merge (waitingOnGitHub), and which has not told
+// its architect yet, carries readyMergeWaiting's notice, enqueued in the same transaction as the
+// payload that records the telling (record.ReadyMerge.Warned), so the row is never recorded as
+// warned without its notice, nor the architect told twice.
+//
+// The notice names one thing, GitHub not having completed the merge Legion submitted, so the only
+// causes that carry it are the three that say exactly that: an arm or a merge-queue entry GitHub
+// has yet to merge (ghautomerge.Armed), a pull request GitHub does not report mergeable yet
+// (ghautomerge.Unmergeable), and the queue's removal for the merge itself (ghautomerge.Merging).
+// readyMerge calls this for every failure its other arms leave, and each of the rest is silent
+// here for its own reason. GitHub and the record disagreeing — a pull request GitHub shows closed
+// or at another head (ghautomerge.Lagging), an arm gone from GitHub with nothing on its timeline
+// yet to say who took it (ghautomerge.Disappeared) — is the case where something has gone wrong
+// with the row, while the notice's premise is that nothing has: it would tell the architect the
+// merge has not been withdrawn and the daemon goes on submitting it while quoting a cause whose
+// own words are the opposite. What telling a disagreement has is finishRefused's, and it differs
+// by kind: a ghautomerge.Lagging's is merge-stalled, once it has stood past ghautomerge.LagBound;
+// a ghautomerge.Disappeared's is merge-removed if GitHub names what took the arm away, and nothing
+// at all if it never does, since Submit then answers Disappeared on every run, the row neither
+// ending nor telling anyone and the outbox's own log line for the failed row its only signal. A
+// refusal a retry would meet again (ghautomerge.Refused) and a removal (ghautomerge.Removed) end
+// the row, and finishRefused tells the architect of each itself. A GitHub read that failed, a
+// mutation refusal a retry may not meet again and the re-read after it, a read carrying no
+// updatedAt, and the record read that decides the row, which is a Postgres error, are the daemon's
+// own trouble: each retries on the row's backoff and must spend neither the one notice nor render
+// its own error as GitHub's last answer, and the genuine wait that follows is what the architect is
+// to be told of. Naming the three that carry the notice leaves a wait type added to ghautomerge
+// later silent by default rather than wrong by default. A reopen's queue that took the row since
+// starts it over unarmed, unwarned and freshly queued, and its own payload stands: the replacement
+// writes nothing then, and the notice rolls back with it.
+func (r *outbox) rememberWait(ctx context.Context, row record.OutboxRow, payload record.ReadyMerge, arm bool, cause error) error {
+	now := r.now().UTC()
+	// A row a daemon before record.ReadyMerge.Queued enqueued carries no queue time: its created_at
+	// is what its wait was measured from then, and reading the zero time as an infinite wait would
+	// warn on the row's first run after the upgrade.
+	queued := payload.Queued
+	if queued.IsZero() {
+		queued = row.CreatedAt
+	}
+	waited := now.Sub(queued)
+	warn := !payload.Warned && waited > mergeWaitWarn && waitingOnGitHub(cause)
+	if !arm && !warn {
+		return nil
+	}
+	payload.Armed = payload.Armed || arm
+	payload.Warned = payload.Warned || warn
+	var notice record.OutboxRow
+	if warn {
+		var err error
+		if notice, err = record.NewOutboxRow(row.Issue, readyMergeWaiting(payload, waited, cause), now); err != nil {
+			return err
+		}
+	}
+	// The notice is written in the payload's own transaction, which owns the commit hook that write
+	// registers (projectRecords, intake.OnCommit), so its lane is woken as the payload commits.
+	scoped, committed := intake.WithCommitHooks(ctx)
+	var replaced bool
+	if err := pgx.BeginFunc(scoped, r.pool, func(tx pgx.Tx) error {
+		var err error
+		if replaced, err = r.records.ReplaceOutboxPayload(scoped, tx, row.ID, row.LeaseToken, payload); err != nil || !replaced || !warn {
+			return err
+		}
+		return r.records.Enqueue(scoped, tx, notice)
 	}); err != nil {
-		return fmt.Errorf("record that READY's head is armed on outbox row %d: %w", row.ID, err)
+		return fmt.Errorf("record what outbox row %d learned while it waits: %w", row.ID, err)
+	}
+	committed()
+	if warn && replaced {
+		r.log.Warn("outbox READY merge is still waiting on GitHub; its architect is told once", "row", row.ID, "issue", row.Issue,
+			"number", payload.Number, "head", payload.Head, "waited", waited.Round(time.Minute), "error", cause)
 	}
 	return nil
+}
+
+// waitingOnGitHub says whether cause is GitHub not having completed the merge it was asked for —
+// the one thing merge-waiting asserts. A Lagging or a Disappeared is a wait too, but each is
+// GitHub and the record disagreeing, whose single telling is finishRefused's.
+func waitingOnGitHub(cause error) bool {
+	var armed *ghautomerge.Armed
+	var unmergeable *ghautomerge.Unmergeable
+	var merging *ghautomerge.Merging
+	return errors.As(cause, &armed) || errors.As(cause, &unmergeable) || errors.As(cause, &merging)
 }
 
 // readyMergeEnded is the architect's notice of a READY merge row ended without a merge by cause:
@@ -141,6 +237,25 @@ func readyMergeEnded(cause error) record.Notice {
 		return record.Notice{Kind: "merge-removed", Role: claim.RoleArchitect, Reason: removed.Error()}
 	}
 	return record.Notice{Kind: "merge-refused", Role: claim.RoleArchitect, Reason: cause.Error()}
+}
+
+// readyMergeWaiting is the architect's notice of a merge the daemon submitted that GitHub has not
+// completed within mergeWaitWarn of the submission's queueing (merge-waiting,
+// record.ReadyMerge.Queued): the pull request, READY's head, how long it has waited and what
+// GitHub last answered, cause. cause is GitHub not having completed the merge and nothing else
+// (waitingOnGitHub: ghautomerge.Armed, Unmergeable or Merging), since the notice says exactly
+// that and renders cause as GitHub's last answer: a disagreement between GitHub and the record,
+// a refusal, a removal, a GitHub read that failed, a record read that failed or a mutation
+// refusal a retry may not meet again either says nothing of what GitHub waits for or says the
+// opposite of this notice, and would spend the one notice on it (rememberWait). Nothing has gone wrong with the row — the merge has not been
+// withdrawn, the issue stays in awaiting_merge and the daemon goes on submitting it — so the
+// architect is told once (rememberWait, record.ReadyMerge.Warned) and what is left to find is on
+// GitHub: a required check that never ran or failed, a review only a person can give, a merge
+// queue that has not landed it.
+func readyMergeWaiting(payload record.ReadyMerge, waited time.Duration, cause error) record.Notice {
+	return record.Notice{Kind: "merge-waiting", Role: claim.RoleArchitect,
+		Reason: fmt.Sprintf("Legion submitted the merge of pull request #%d at READY's head %s %s ago and GitHub has not completed it; GitHub last answered: %s. The merge has not been withdrawn, the issue stays in awaiting_merge and the daemon goes on submitting it: read the pull request on GitHub to find what GitHub is waiting for",
+			payload.Number, payload.Head, waited.Round(time.Minute), cause)}
 }
 
 // graphQL is a GitHub GraphQL client carrying the implement App's token, the App that writes the

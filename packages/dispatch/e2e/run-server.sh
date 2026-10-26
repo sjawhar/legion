@@ -26,25 +26,28 @@ fake_broker_port="${FAKE_BROKER_PORT:-9024}"
 # The secrets broker the server relays credential requests to, read before
 # the sweep below drops every DISPATCH_* variable. DISPATCH_E2E_AGENT_SECRETS_URL
 # is the harness's one switch, which e2e/harness-broker.ts reads the same way
-# (no colon, so empty and unset differ): unset is e2e/fake-broker.ts with a
-# throwaway UI bearer; empty is no broker, the credential feature off, as in a
-# deployment that configures none; a URL is a broker the caller runs, whose
-# bearer stays in DISPATCH_E2E_AGENT_SECRETS_TOKEN_FILE, which the server reads
-# itself, so no argv carries it.
+# (no colon, so empty and unset differ): unset is e2e/fake-broker.ts, which
+# verifies no caller, so the server presents the throwaway token in
+# e2e/fake-broker-account-token; empty is no broker, the credential feature
+# off, as in a deployment that configures none; a URL is a broker the caller
+# runs, which verifies the ServiceAccount token in
+# DISPATCH_E2E_AGENT_SECRETS_ACCOUNT_TOKEN_FILE against its issuer and lists
+# that account in its BROKER_API_ACCOUNTS. The server reads the file itself, on
+# each call, so no argv carries the token and a rewrite reaches it.
 broker_env=()
 if [ -z "${DISPATCH_E2E_AGENT_SECRETS_URL+set}" ]; then
   broker_env=(
-    DISPATCH_AGENT_SECRETS_TOKEN=e2e-broker-token
+    DISPATCH_AGENT_SECRETS_ACCOUNT_TOKEN_FILE="$(cd "$(dirname "$0")" && pwd)/fake-broker-account-token"
     DISPATCH_AGENT_SECRETS_URL="http://127.0.0.1:$fake_broker_port"
   )
 elif [ -n "$DISPATCH_E2E_AGENT_SECRETS_URL" ]; then
-  : "${DISPATCH_E2E_AGENT_SECRETS_TOKEN_FILE:?DISPATCH_E2E_AGENT_SECRETS_TOKEN_FILE must accompany DISPATCH_E2E_AGENT_SECRETS_URL}"
+  : "${DISPATCH_E2E_AGENT_SECRETS_ACCOUNT_TOKEN_FILE:?DISPATCH_E2E_AGENT_SECRETS_ACCOUNT_TOKEN_FILE must accompany DISPATCH_E2E_AGENT_SECRETS_URL}"
   # The server reads the file from packages/envoy, where this script changes directory below, so a
   # path relative to the caller's directory is made absolute first.
-  token_file="$DISPATCH_E2E_AGENT_SECRETS_TOKEN_FILE"
+  token_file="$DISPATCH_E2E_AGENT_SECRETS_ACCOUNT_TOKEN_FILE"
   [[ "$token_file" == /* ]] || token_file="$PWD/$token_file"
   broker_env=(
-    DISPATCH_AGENT_SECRETS_TOKEN_FILE="$token_file"
+    DISPATCH_AGENT_SECRETS_ACCOUNT_TOKEN_FILE="$token_file"
     DISPATCH_AGENT_SECRETS_URL="$DISPATCH_E2E_AGENT_SECRETS_URL"
   )
 fi
@@ -87,7 +90,7 @@ done
 # against, the only Host the router serves under the flag, and the Playwright
 # config's baseURL. The flag also refuses a DATABASE_URL whose host is not
 # loopback or a unix socket, and any DISPATCH_SIGNIN_* setting.
-app_pem_b64="$(openssl genrsa 2048 2>/dev/null | base64 -w0)"
+app_pem="$(openssl genrsa 2048 2>/dev/null)"
 
 cd "$(dirname "$0")/../../envoy"
 # Build first, in the caller's toolchain environment, and exec the binary itself. A server
@@ -104,7 +107,7 @@ exec env \
   DATABASE_URL="$database_url" \
   DISPATCH_AGENT_TOKEN=e2e-token \
   DISPATCH_APP_CLIENT_ID=Iv1.e2efake \
-  DISPATCH_APP_PEM_B64="$app_pem_b64" \
+  DISPATCH_APP_PEM_B64="$app_pem" \
   DISPATCH_DEV_SIGNIN=1 \
   DISPATCH_GITHUB_API_BASE="http://127.0.0.1:$fake_github_port" \
   DISPATCH_IDENTITY=cookie \

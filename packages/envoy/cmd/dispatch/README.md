@@ -63,7 +63,7 @@ carry rules beyond their row:
 
 | Variable | Purpose |
 | --- | --- |
-| `DISPATCH_APP_PEM_B64` | Base64-encoded GitHub App private key. With `DISPATCH_DEV_SIGNIN=1` this is the only source a key may come from (a `pem` in `app.json` is refused), it must be a throwaway, and `DISPATCH_GITHUB_API_BASE` must name a loopback host. |
+| `DISPATCH_APP_PEM_B64` | GitHub App private key, as a PEM or the base64 of a PEM: a value holding `-----BEGIN` is the PEM itself, and any other is base64-decoded. A key that does not parse stops boot with an error naming the variable, never the key. With `DISPATCH_DEV_SIGNIN=1` this is the only source a key may come from (a `pem` in `app.json` is refused), it must be a throwaway, and `DISPATCH_GITHUB_API_BASE` must name a loopback host. |
 | `DISPATCH_GITHUB_API_BASE` | GitHub API origin override for App calls (tests and e2e point it at a fake); empty means `https://api.github.com`. With `DISPATCH_DEV_SIGNIN=1` and an App private key loaded, it must name `127.0.0.1`, `[::1]` or `localhost`. That checks the host, not what listens there: every App call hands a signed App JWT to whatever owns the port, so the key must be a throwaway. |
 
 When no GitHub App credentials are configured, the server still starts, but
@@ -847,8 +847,11 @@ questions, comment bodies, and issue messages are indexed into `refs` on every w
 that introduced it), and creates the `graph_edges` view, which unions those mentions with the
 structural relations already stored on the node tables (`child_of`, `attached_to`, `anchored_to`,
 `owned_by`, `replies_to`, `followed_by`). `GET /api/v1/references?to=<ref>` lists everything that
-points at a node and `?from=<ref>` everything it points to, cross-project. The migration refuses
-to run when an ask or comment anchor carries a non-uuid `artifact_id`.
+points at a node and `?from=<ref>` everything it points to, cross-project. A row whose other end is
+a node kind the running build does not know (a newer build's, read during a rolling deploy) is left
+out of every list and every count that build serves (`nodeLoaders`, `refs/graph.go`, names the
+kinds it knows). The migration refuses to run when an ask or comment anchor carries a non-uuid
+`artifact_id`.
 
 ```bash
 DATABASE_URL=postgres://... envoy-dispatch rebuild-refs
@@ -983,6 +986,8 @@ Dispatch uses cookie identity through the sign-in pool.
 | `/api/v1/projects` | POST | cookie, trusted header, or bearer | Create a project from `key` and `name`, for a person or an agent session alike; rejects a key that is not a project key, an empty name, a name holding a control character or a bidi embedding, override or isolate (U+202A-U+202E, U+2066-U+2069), and a name with no visible character (a letter, number, punctuation or symbol other than the blank fillers U+115F, U+1160, U+3164, U+FFA0 and U+2800, or a code point Go's Unicode tables leave unassigned, such as an emoji newer than them, other than a noncharacter (U+FDD0-U+FDEF and each code point ending in FFFE or FFFF) or a reserved default-ignorable (U+2065, U+FFF0-U+FFF8, U+E0000-U+E0FFF); combining marks, format characters, private-use characters and whitespace don't count) with `400 INVALID_PROJECT`, a name over 80 characters (`contracts.ProjectNameMax`, UTF-16 units after the trim) with `400 CAP_EXCEEDED`, and a duplicate key with `409 PROJECT_EXISTS`. |
 | `/api/v1/settings/repo-projects` | GET | cookie, trusted header, or bearer | List repository-to-project mappings, each with `default`, whether it is its project's default repository. |
 | `/api/v1/settings/repo-projects/{owner}/{repo}` | PUT, DELETE | cookie, trusted header, or bearer | Create or replace, or remove, a repository mapping; PUT takes `{project, default?}`, and `default: true` moves the project's one default to it. A mapping an issue names as its `repo` is neither deleted nor moved: `409 REPO_PROJECT_IN_USE`. `AGENTS.md` gives the rules and the `settings.repo_project.updated` events. |
+| `/api/v1/settings/project-default-assignees` | GET | cookie or trusted header (human only) | List every project that names a default assignee, by project key, as `[{project, assignee}]`; a project with no default is left out. Human-only, since the default names a person. |
+| `/api/v1/projects/{key}/default-assignee` | PUT | cookie or trusted header (human only) | Set a project's default assignee `{assignee}` (the email of a person who has signed in, or `null` to clear it): who an issue created with no assignee, by nobody, under no parent or under a parent with nobody on it, goes to — the last step of the create chain. `400 ASSIGNEE_NOT_ALLOWED` for an email nobody has signed in with, `400 INVALID_PROJECT` for a body without `assignee` or one whose `assignee` is neither a string nor null, `404 NOT_FOUND` for an unknown project. Human-only: no agent surface sets it. |
 | `/api/v1/delivery/session-groups` | POST | cookie, trusted header, or bearer | Create a Delivery session group `{name, sessions}`: its sessions' pull requests take it as their Parent agent, `group:<id>`. `409 SESSION_IN_GROUP` for a session another group holds, `409 SESSION_GROUP_NAME_TAKEN` for a name another group has (ignoring case), `409 SESSION_GROUP_NAME_IS_SESSION_TITLE` for a name that is the latest title of a session outside the group, `400 SESSION_GROUP_INPUT` for a blank name or no sessions. The timeline lists every group (`session_groups`). |
 | `/api/v1/delivery/session-groups/{id}` | PATCH, DELETE | cookie, trusted header, or bearer | Rename a session group, add sessions to it or remove them `{name?, add?, remove?}`, with the create route's refusals and `400 SESSION_GROUP_INPUT` for an edit that would leave it empty; or delete it, its sessions showing as themselves again. `400 SESSION_GROUP_ID_INPUT` for an id that is not a UUID, `404 NOT_FOUND` for one no group has. |
 | `/api/v1/me/agent-tokens` | GET, POST | cookie or trusted header (human only) | List personal-token metadata or mint a personal agent token. |

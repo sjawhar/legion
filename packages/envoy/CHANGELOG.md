@@ -4,6 +4,18 @@
 
 ### Added
 
+- A project's default assignee, the last step of an issue create's assignee chain: an issue created
+  with no assignee, by nobody (the shared token), under no parent or under a parent with nobody on
+  it, goes to the person the project names; nothing already filed, and no create that names an
+  assignee or `null`, changes. A default that no longer names a person who has signed in is
+  ignored rather than refused, so a create never fails on a stale one. A person sets it on the
+  Settings page through
+  `GET /api/v1/settings/project-default-assignees` and `PUT /api/v1/projects/{key}/default-assignee`
+  `{assignee}` (an email of someone who has signed in, or `null` to clear it; otherwise
+  `400 ASSIGNEE_NOT_ALLOWED`, and a body without `assignee`, or whose `assignee` is neither a
+  string nor null, is `400 INVALID_PROJECT`), which appends
+  `settings.project_default_assignee.updated`. Both routes are human-only and no agent command,
+  flag or route sets a project's default.
 - A release of a stored secret checks the policy again once it has read the store: a retag to a
   kind (`github-app` or `google-login`) the broker rereads while the release reads the secret
   releases nothing and ends the grant for good, as a kind change found before the read does, so a
@@ -548,6 +560,34 @@
 
 ### Changed
 
+- **Breaking (local development):** `agent-secrets-devrelay` presents a listed caller's own
+  ServiceAccount token, read from `--account-token-file` (default
+  `$AGENT_SECRETS_ACCOUNT_TOKEN_FILE`), in place of the shared bearer the broker no longer takes. A
+  missing or empty file exits 1 naming it, before any request. `scripts/dev-broker.sh` starts
+  `dev-oidc-issuer`, a new local stand-in for a cluster's ServiceAccount token issuer (the Go
+  tests' `internal/oidc/oidctest` served on a loopback port), and its broker trusts it, lists
+  `system:serviceaccount:example-ns:example-dispatch` as its caller `dispatch` and turns the token
+  exchange on for `system:serviceaccount:example-ns:example-worker`; the issuer keeps both tokens in
+  the workdir and rewrites each before it lapses, and the script exports
+  `AGENT_SECRETS_ACCOUNT_TOKEN_FILE`, so devrelay approves records and machine logins locally
+  again. The Dispatch e2e harness's broker token is `DISPATCH_E2E_AGENT_SECRETS_ACCOUNT_TOKEN_FILE`.
+- `DISPATCH_APP_PEM_B64` takes the GitHub App's private key as a plain PEM, as GKE SecretSync
+  copies it from Secret Manager, or as the base64 of a PEM, as before: a value holding `-----BEGIN`
+  is the PEM itself and any other is base64-decoded. Dispatch parses the key when it loads the
+  variable, so a key that does not parse stops boot with `DISPATCH_APP_PEM_B64: plain PEM:
+  <reason>` or `DISPATCH_APP_PEM_B64: base64 of a PEM: <reason>` (a value that is not base64 at
+  all, `DISPATCH_APP_PEM_B64: <reason>`), never quoting the key, where it stopped boot with
+  `parse GitHub App private key: <reason>`, naming neither the variable nor the form (INFRA-390).
+- A failed NATS reconnect attempt is logged, where it was silent: one WARN a minute per
+  connection, `envoy nats reconnect attempt failed`, naming the client, the servers it was
+  configured with and the error, with the first failure of an outage logged at once. nats.go
+  retries about once a second forever, so a broker that is down left no line at all in the
+  process's log, and thousands of identical lines would name the outage no better (INFRA-182).
+- A cache watcher that ends on its own logs `<cache> watcher stopped` at WARN, where it was an
+  ERROR. The ERROR is now `<cache> watcher was not repaired`, logged once with the bucket, the
+  recorded error and a `reason` of `repair failed` or `no repair within 1m0s`, and only when a
+  repair has failed or none has run within a minute, so a stop the self-health rebuild repairs a
+  moment later no longer raises one (INFRA-182).
 - **Breaking:** once any secret with a `kind` tag holds a value, roll the secrets broker forward,
   never back past this release. A broker before kinds reads no `kind` tag and would serve the
   secret's stored GitHub App key or refresh token as its value. `agent-secrets secret` writes
@@ -722,6 +762,12 @@
   pod in that namespace whose spec names no account runs as it and can get a token for the broker's
   audience, so the binding proves nothing about which pods are the service's. Bind each service to
   a dedicated account its pods set as `serviceAccountName` before taking this release.
+- `BROKER_SERVICES` may name one service for several accounts, one entry each, and a pod running
+  as any of them is that service's own session. Each account still proves one service, and an
+  account given twice is still refused, now naming the account and its one service when both
+  entries name the same service. Rollback: a broker before this release refuses a
+  `BROKER_SERVICES` that names a service twice at start-up (`must give each service once`), and
+  the broker is one pod, so roll the image back only together with the setting.
 - **Breaking:** a renewal (`POST /v1/enrollments/{id}/renew`) of an enrollment that has ended,
   lapsed or never existed answers `401 ENROLLMENT_NOT_LIVE` where it answered `401 PROOF_INVALID`;
   the renew route alone answers it, and every other session route still answers a not-live proof
@@ -1097,6 +1143,77 @@
 
 ### Fixed
 
+- An agent woken by a Slack message now reads the words the message carries, wherever it carries
+  them. A Slack delivery's `text` is the message's own text and then every display string its
+  blocks and then its attachments hold — the strings under `pretext`, `author_name`,
+  `author_subname`, `title`, `text`, `alt_text`, `value` and `footer`, at any depth,
+  each object read with those names in that rank and then its remaining keys alphabetically, so a
+  section's own text precedes its fields and a button's label its hidden value — joined by line
+  feeds, and the summary shows the first line. Blocks come before attachments because Slack
+  renders a block as the message body and an attachment after it. An attachment's `fallback` is
+  read last of all, after everything else that attachment carries, and only when nothing in that
+  attachment said it already: it is the plain-text copy Slack shows where the attachment itself
+  cannot be shown, so a coloured alert whose `fallback` repeats its own section delivers that line
+  once, and one whose `fallback` says more delivers the attachment's body first. An app that
+  posts a formatted message leaves `text` empty and puts the words in `blocks` or `attachments`,
+  and such a wake used to carry a summary ending in `: ` and a payload with no words in it at all;
+  an image-only post now carries the `alt_text` Slack renders in the image's place. A string an
+  object has already shown under another of its own names is not shown twice; two objects saying
+  the same thing are two
+  things a reader sees, so a message whose fields read `Passed 3`, `Failed 0`, `Skipped 0` keeps
+  both counts of `0` and two attachments both reading `ok` keep both. A string equal to the
+  message's own text, or to one of its lines, is dropped wherever it sits,
+  and a `rich_text` block that says nothing that text does not say
+  already is left unread — that tree is the Slack client's structured copy of a person's words,
+  and it is the one block kind the walk knows by name, which is why a message composed in a client
+  reads as it did, the `&`, `<` and `>` its author typed included. An app's own rich text, which
+  Slack tells app authors to post beside a short `text` field, says more than that field and is
+  read like any other block, as is a `rich_text` block nested in one already read. The delivered
+  text is still cut at 2,048 runes and marked `body_truncated`, and a deleted message still
+  delivers nothing (INFRA-180).
+
+- A Dispatch reference read no longer fails while the database holds an edge a newer build wrote.
+  `GET /api/v1/references` (`?to=` and `?from=`) and `GET /api/v1/artifacts/{id}/references`
+  answered `500` on a row whose other end is a node kind the running build does not know, which a
+  person saw as "Referenced by unavailable." and an agent's `dispatch read` as one `unavailable`
+  row; the build now leaves that edge out and lists every edge it knows. The `referenced_by_count`
+  of an issue and of every ask leaves it out too, so a count is the number of rows its panel lists,
+  and a document's `outgoing` no longer lists a target of a kind no client reads. A build that adds
+  a node kind to the graph can therefore roll out while the older build still serves reads.
+- The architecture import no longer fails on a branch head whose commit GitHub answers with more
+  than the 1 MiB response cap, as a commit touching many files did. `githubapp.Client.Ref` asks
+  `GET /repos/{owner}/{repo}/commits/{branch}` for the SHA alone
+  (`Accept: application/vnd.github.sha`) and refuses an answer that is not one 40-hex SHA, which a
+  directory read at it would have imported as an empty model (INFRA-390).
+- `GET /v1/registry/<session_id>` is the listener's authoritative answer about one session, so a
+  session that is working is no longer read as gone while a listener's session cache refills. The
+  read goes through that cache to the session bucket: a 200 carries the same body a row of `GET
+  /v1/sessions` carries (`session_id`, `machine_id`, `host`, `dir`, `port`, `title`,
+  `capabilities`, `self_subscribed`, `topics`, `roles`, `updated_at`, `last_seen`), a 413 naming
+  its size or a 400 naming the key refuses an id NATS will not take as a KV key, `404
+  {"error":"no live session <id>"}` is only the bucket's word that it holds no key for that id,
+  and a read that did not answer is `503 {"error":"envoy: the message bus did not answer:
+  <reason>"}` with `Retry-After: 1`. Dispatch asks about the one session it holds the id of
+  instead of fetching every live session and scanning the answer, so three decisions no longer
+  turn on one listener's cache: a comment mention's `session:` target, a broadcast's recipients
+  (each selected recipient read by its own id, eight reads in flight under one five-second
+  budget, and a read that did not answer refuses the whole send `503 ENVOY_UNAVAILABLE` with
+  nothing written), and whether an issue's claim holder is still working (the claim is free only
+  on the bucket's 404; anything else is a 503, never a live session's claim taken without
+  `{"force": true}`).
+- A listener whose durable consumer was deleted and created again under it, so that the durable
+  delivers to some other subscription, reports itself unhealthy and binds the durable again
+  instead of receiving nothing while every check passed. `GET /healthz` answers `503`
+  `unhealthy` with `durable consumer unavailable: not bound to this listener's subscription`,
+  and the self-health monitor treats an unbound durable as terminal: it confirms the reading
+  with a second one, rebinds, and reports success only once the server itself reports this
+  listener bound (INFRA-182).
+- No NATS server URL the bus logs carries its userinfo: `envoy nats reconnected` and the refusal
+  of a NATS server that is not this machine's wrote the configured URL whole, and nats.go
+  authenticates with a URL's userinfo, a user name alone as a token and `user:password` as a
+  password, so `NATS_URLS=nats://user:password@host:4222` put the password in the process's log.
+  Each URL is now written without its userinfo, as `envoy nats reconnect attempt failed` writes
+  its servers (INFRA-182).
 - `agent-secrets secret` writes on a dev box under the person's own Google sign-in, with no setup
   but `gcloud auth login`, and never tells a person to run `gcloud auth application-default login`,
   which replaces a machine's own credentials for every program that uses them. A write under

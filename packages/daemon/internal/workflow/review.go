@@ -64,8 +64,8 @@ func (e *Engine) requiredChecks(ctx context.Context, tx pgx.Tx, fact intake.Requ
 // transition), since GitHub computes no merge ref for a conflicting head and no CI result will
 // ever arrive for it. It decides on every read, not only a changed one: a conflict recorded
 // before the issue reaches awaiting_merge - in testing, reviewing, retro or merging, where
-// nothing moves yet, since the merger's READY check posts a conflicting head whose required
-// checks all succeeded - must still withdraw the READY once the issue gets there. Outside
+// nothing moves yet, since the pass reads every open pull request, in whatever phase its issue
+// is when the base moves - must still withdraw the READY once the issue gets there. Outside
 // awaiting_merge the read is recorded and nothing moves: a conflict is no red for RedSendsBack to
 // act on (GitHub runs no checks on it for a verdict to stand), and the tester or implementer
 // already at work will see it on its own pass or push. Leaving awaiting_merge is what stops a
@@ -129,12 +129,11 @@ func (e *Engine) decideChecks(ctx context.Context, tx pgx.Tx, pr *record.PullReq
 			break
 		}
 		// A required workflow's result is as old as the pass's last read of the runs, up to two
-		// minutes: a run re-run green since, which READY found green on GitHub, still reads red until
-		// the next read. So a settlement, which reads no run, withdraws only a red a required check
-		// makes. A red only the workflows make is left to the pass's next read, which the cleared
-		// head the runs were read at makes a change (record.RequiredReadUnchanged), so it withdraws
-		// the READY if the run is still red, and leaves it if the run passed; that read decides the
-		// count's report too.
+		// minutes: a run re-run green since still reads red until the next read. So a settlement,
+		// which reads no run, withdraws only a red a required check makes. A red only the workflows
+		// make is left to the pass's next read, which the cleared head the runs were read at makes a
+		// change (record.RequiredReadUnchanged), so it withdraws the READY if the run is still red,
+		// and leaves it if the run passed; that read decides the count's report too.
 		if !requiredRead && classify.RedOnlyByWorkflows(*pr) {
 			pr.WorkflowsHead = ""
 			return e.store.PutPullRequest(ctx, tx, *pr)
@@ -475,8 +474,8 @@ func (e *Engine) reviewRound(issue record.Issue, row record.PhaseRow, pr *record
 // follows (decideChecks's count report), a review round's own decision governing meanwhile. The
 // rule runs before awaiting_merge: there only the head's own red withdraws the READY
 // (classify.RedWithdrawsReady, decideChecks's AwaitingMerge case), never one carried to the READY
-// head from the code head a .legion/-only push replaced, since READY found the head's own CI green
-// on GitHub, which is what GitHub merges by. The invariant is that the rule is applied by whichever
+// head from the code head a .legion/-only push replaced, since that red stood before the READY and
+// says nothing new about the submitted head. The invariant is that the rule is applied by whichever
 // fact makes a red stand for the head, in whatever phase the issue is when it does, and never by a
 // review, which changes nothing about the verdict and reads none. A red comes to stand by a
 // settlement or a read of the required set, the facts that change the verdict (decideChecks); by a

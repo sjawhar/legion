@@ -2144,7 +2144,7 @@ func TestRebuildingALostDurableConsumerReplacesItsSubscription(t *testing.T) {
 		if err := client.JS().DeleteConsumer(bus.Stream, consumer); err != nil {
 			t.Fatalf("rebuild %d: lose the durable consumer: %v", rebuild, err)
 		}
-		if err := rebuildListenerDependencies(client, nil, durableProbe, consumer, handler); err != nil {
+		if err := rebuildListenerDependencies(context.Background(), client, nil, durableProbe, consumer, handler); err != nil {
 			t.Fatalf("rebuild %d: %v", rebuild, err)
 		}
 		if got := client.Conn.NumSubscriptions(); got != subscriptions {
@@ -4391,6 +4391,56 @@ func TestRunSelfHealthMonitor_ExitsAfterThreeRebuildsThatLeaveAFault(t *testing.
 	}
 }
 
+// TestRunSelfHealthMonitor_ShutdownCutRebuildLogsNoError is the shutdown that cancels the monitor
+// while a rebuild is rebinding the durable consumer: the rebuild runs under the monitor's context,
+// so the cancel cuts it with context.Canceled. That error is the shutdown, not a failed rebuild, and
+// an ordered shutdown writes no ERROR, so the monitor returns without logging it, probing again or
+// terminating.
+func TestRunSelfHealthMonitor_ShutdownCutRebuildLogsNoError(t *testing.T) {
+	stuck := errors.New("durable consumer not found")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var logs bytes.Buffer
+	rebuild := func() error {
+		cancel()
+		return fmt.Errorf("rebind durable consumer: %w", context.Canceled)
+	}
+	var terminates atomic.Int32
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		runSelfHealthMonitor(ctx, logging.NewWithWriter("test", &logs),
+			func() error { return stuck },
+			func(error) bool { return true },
+			func() bool { return true },
+			rebuild,
+			func() { terminates.Add(1) },
+			time.Millisecond,
+			3,
+		)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the monitor did not return after the shutdown cut its rebuild")
+	}
+	if got := terminates.Load(); got != 0 {
+		t.Fatalf("terminate calls = %d, want 0: a shutdown is not a failure to restart from", got)
+	}
+	for _, line := range strings.Split(strings.TrimSpace(logs.String()), "\n") {
+		var record struct {
+			Level string `json:"level"`
+			Msg   string `json:"msg"`
+		}
+		if err := json.Unmarshal([]byte(line), &record); err != nil {
+			t.Fatalf("log line %q is not JSON: %v", line, err)
+		}
+		if record.Level == "ERROR" || strings.HasPrefix(record.Msg, "self-health rebuild failed") {
+			t.Fatalf("the shutdown-cut rebuild logged %q: an ordered shutdown writes no ERROR", line)
+		}
+	}
+}
+
 // TestRunSelfHealthMonitor_RestartsWithoutItsRoleBucket deletes envoy_roles, the one listener
 // bucket no watcher reads. A rebuild opens a bucket and never creates one, so every rebuild fails
 // and the listener terminates; the next start's store Open creates the bucket again. Without that,
@@ -4494,7 +4544,7 @@ func monitorUntilRecovered(t *testing.T, what string, wait, interval time.Durati
 	<-done
 }
 
-// setupTestNATS launches a NATS testcontainer dedicated to this package's tests.
+// setupTestNATS starts a NATS server dedicated to this test, which ends with it.
 func setupTestNATS(t *testing.T) *bus.Client {
 	t.Helper()
 	_, uri := testnats.Start(t)
@@ -4557,7 +4607,7 @@ func TestSelfHealthRebuildsAnInterestWatcherThatEndedWhileConnected(t *testing.T
 		},
 		client.Connected,
 		func() error {
-			return rebuildListenerDependencies(client, []listenerCache{{name: "interest", cache: registry}}, nil, "", nil)
+			return rebuildListenerDependencies(context.Background(), client, []listenerCache{{name: "interest", cache: registry}}, nil, "", nil)
 		},
 	)
 
