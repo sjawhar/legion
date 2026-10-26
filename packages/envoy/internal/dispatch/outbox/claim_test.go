@@ -53,6 +53,10 @@ func (p *rendezvousPublisher) Publish(item contracts.Envelope) error {
 	return nil
 }
 
+func (p *rendezvousPublisher) PublishAsync(item contracts.Envelope) <-chan error {
+	return answered(p.Publish(item))
+}
+
 func (p *rendezvousPublisher) published() []string {
 	p.mu.Lock()
 	defer p.mu.Unlock()

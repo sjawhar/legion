@@ -37,6 +37,10 @@ func (p *countingPublisher) Publish(item contracts.Envelope) error {
 	return p.fail
 }
 
+func (p *countingPublisher) PublishAsync(item contracts.Envelope) <-chan error {
+	return answered(p.Publish(item))
+}
+
 func (p *countingPublisher) attempted() []string {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -84,9 +88,10 @@ func TestAConnectionFailureEndsTheAttemptAtItsFirstDestination(t *testing.T) {
 	}
 }
 
-// A destination whose record write fails ends the attempt: the store is failing, and every
-// destination published after it would go unrecorded and be published again on each retry.
-func TestAFailedRecordWriteEndsTheAttempt(t *testing.T) {
+// A batch whose record write fails is left as a process that died before the write leaves it:
+// claimed, unmarked and with nothing recorded, so it is published again only once claimWindow
+// lapses (recordBatch), not at every scan while the store is failing.
+func TestABatchWhoseRecordWriteFailsStaysClaimedAndUnmarked(t *testing.T) {
 	database := storetest.Open(t)
 	broker := events.NewBroker()
 	event := seedThreeDestinationEvent(t, database, broker)
@@ -99,15 +104,31 @@ func TestAFailedRecordWriteEndsTheAttempt(t *testing.T) {
 		t.Fatalf("make the record write fail: %v", err)
 	}
 	publisher := &countingPublisher{}
+	sent := time.Now()
 	stop := run(t, database, publisher, broker)
 	defer stop()
 
-	firstAttempt(t, database, event)
-	if topics := publisher.attempted(); len(topics) != 1 {
-		t.Fatalf("one attempt published %v with the record write failing, want only its first destination", topics)
+	waitFor(t, 5*time.Second, "the event's three destinations sent", func() bool { return len(publisher.attempted()) == 3 })
+	// Three scans' worth: a batch left unclaimed would be sent again at each.
+	for range 3 {
+		broker.Publish(model.Event{})
 	}
-	if destinations, _ := publishedDestinations(t, database, event.ID); len(destinations) != 0 {
-		t.Fatalf("published_destinations = %v, though every record write fails", destinations)
+	time.Sleep(200 * time.Millisecond)
+	if topics := publisher.attempted(); len(topics) != 3 {
+		t.Fatalf("published %v, want the three destinations once, the batch then held by its claim", topics)
+	}
+	destinations, attempts := publishedDestinations(t, database, event.ID)
+	if len(destinations) != 0 || attempts != 0 || publishedAt(t, database, event.ID) != nil {
+		t.Fatalf("published_destinations = %v, attempt_count = %d, published = %v, though the record write failed",
+			destinations, attempts, publishedAt(t, database, event.ID) != nil)
+	}
+	var nextAttempt time.Time
+	if err := database.Pool.QueryRow(context.Background(),
+		`select next_attempt_at from events where id = $1`, event.ID).Scan(&nextAttempt); err != nil {
+		t.Fatalf("read the claim: %v", err)
+	}
+	if nextAttempt.Before(sent.Add(claimWindow - time.Second)) {
+		t.Fatalf("next_attempt_at = %v, want the claim's, claimWindow past %v", nextAttempt, sent)
 	}
 }
 

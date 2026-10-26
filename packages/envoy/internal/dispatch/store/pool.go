@@ -136,6 +136,7 @@ type Pool struct {
 	health *pgxpool.Pool
 	listen *pgxpool.Pool
 	leases *pgxpool.Pool
+	outbox *pgxpool.Pool
 	closed bool
 }
 
@@ -279,6 +280,23 @@ func (p *Pool) Leases() (*pgxpool.Pool, error) {
 	return p.separate(&p.leases, leasePoolSize, "loop leases")
 }
 
+// outboxPoolSize bounds the pool the events outbox reads and records events through. The outbox
+// is one goroutine that runs one statement at a time and closes each cursor before its next
+// statement, so one connection is every connection it can use.
+const outboxPoolSize = 1
+
+// Outbox is the pool the events outbox claims, reads and records events through, and reads the
+// followers and authors a publish routes to. Under load the API's requests queue for the shared
+// pool's connections, and an outbox statement queued behind them holds back every event behind
+// it; on a pool of its own it waits for none of them, and holds no connection a request could use.
+func (p *Pool) Outbox() (*Pool, error) {
+	opened, err := p.separate(&p.outbox, outboxPoolSize, "events outbox")
+	if err != nil {
+		return nil, err
+	}
+	return NewPool(opened), nil
+}
+
 // separate opens the pool held at field on demand, sized at size and copied from the shared
 // pool's configuration, and closes it with the shared pool. Each caller holds mu for the whole
 // check-and-open so two of them cannot open two pools, and one opened after Close would be a
@@ -316,10 +334,10 @@ func (p *Pool) Close() {
 		return
 	}
 	p.closed = true
-	rooms, health, listen, leases := p.rooms, p.health, p.listen, p.leases
-	p.rooms, p.health, p.listen, p.leases = nil, nil, nil, nil
+	rooms, health, listen, leases, outbox := p.rooms, p.health, p.listen, p.leases, p.outbox
+	p.rooms, p.health, p.listen, p.leases, p.outbox = nil, nil, nil, nil, nil
 	p.mu.Unlock()
-	for _, separate := range []*pgxpool.Pool{rooms, health, listen, leases} {
+	for _, separate := range []*pgxpool.Pool{rooms, health, listen, leases, outbox} {
 		if separate != nil {
 			separate.Close()
 		}
