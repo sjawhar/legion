@@ -83,6 +83,11 @@ Facts about the request:
   `register_gate` with that id and version: the daemon reads the approval from Dispatch as it
   registers, opens the gate and delivers `design-approved` at once. The same read covers a human
   who answers between your two calls. You never approve anything yourself.
+- `register_gate` refused 409 `VERSION_NOT_IN_DISPATCH` means the version you named is above the
+  latest version Dispatch holds for that document (the message names both), and a
+  version Dispatch never wrote is no registration: the gate is as it was. Read the
+  document's latest version, check it is the spec the human is asked to approve, and
+  `register_gate` that version.
 
 Then end your turn: the closed gate returns the root's slot when nothing else holds it (see "Every
 turn" in `skill://legion-architect/SKILL.md`), and the daemon resumes this session with a task naming
