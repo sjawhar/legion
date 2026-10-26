@@ -15,7 +15,9 @@
 -- so a beat held up on its row (a lock someone else holds) fails on its own deadline while every
 -- other broker goes on beating. A beat deletes rows more than an hour behind the latest, so a
 -- process that is gone leaves its row for an hour at most. The table starts empty, so until a
--- broker beats once nothing differs from before.
+-- broker beats once nothing differs from before. The latest row, which enrollment_lease_live, the
+-- beat and the prune read, is an index lookup (broker_serving_latest): the function runs once per
+-- evaluated row at every liveness site, and the table holds a row per process for up to an hour.
 --
 -- enrollment_lease_live is the one liveness test for a lease, used wherever a read asks whether an
 -- enrollment is live (Lookup, Renew, the sweep, a grant's values). A lease is live while it has not
@@ -29,6 +31,7 @@ create table broker_serving (
   last_serving_at timestamptz not null,
   not_serving_after interval not null
 );
+create index broker_serving_latest on broker_serving (last_serving_at desc);
 create or replace function enrollment_lease_live(lease timestamptz) returns boolean
   language sql stable
   as $$
