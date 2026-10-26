@@ -1,0 +1,55 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-304",
+  "completed": "2026-10-26T02:18:03Z",
+  "headSha": "7a0b3193c3187728fbcd4a2157824cde0f6d0304",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "Re-ran the implementer's command in the tester lane (22777/23021-23024, db dispatch_tester) at 7a0b3193 (code identical to 64e609b7): bun run build:web && bunx playwright test --config e2e/playwright.config.ts --project=iphone -g \"reasoning link's padded box|an inline link keeps its line\" --repeat-each=3 -> 6 passed (43.1s); built CSS .prose a{padding-block:calc(.5lh - .6em)}. Re-did the 3px negative control myself: reasoning row red, Received -1."
+  },
+  "failures": [],
+  "failed": 0,
+  "proof": [
+    {
+      "criterion": "Reasoning link's padded box does not overlap the line above (live view at 390px)",
+      "surface": "Dispatch browser suite, iphone project (iPhone 13 on Chromium), real Go server + Postgres 17/pgvector + production web/dist, issue pod, tester lane",
+      "command": "cd packages/dispatch && (source /legion/harness/env.sh && bun run build:web && bunx playwright test --config e2e/playwright.config.ts --project=iphone -g \"reasoning link's padded box|an inline link keeps its line\" --repeat-each=3)",
+      "observed": "6 passed (43.1s); reasoning clearance 1.21px at 12/16 (pad 0.8px)",
+      "headSha": "7a0b3193c3187728fbcd4a2157824cde0f6d0304",
+      "negativeControl": ".prose a { padding-block: 3px } rebuilt -> reasoning row red, Expected >= 0, Received -1"
+    },
+    {
+      "criterion": "Message turn, Inbox ask card and every other .prose surface: no padded box over the line above",
+      "surface": "same harness; throwaway spec (deleted) rendering one body of hard-break pairs, list, blockquote, bold-over-inline-code links, a wrapping link, # and ### headings with two links, a table, as a message turn, a spec document, live-view reasoning and a live-view text part",
+      "command": "bunx playwright test --config e2e/playwright.config.ts --project=iphone e2e/zz-tester-sweep.e2e.ts (measures every vertically adjacent pair of .prose a fragments: padded top of the lower minus text bottom of the upper)",
+      "observed": "0 negative clearances with DejaVu Sans and with Roboto (FONTCONFIG_FILE overlay); minimums reasoning 1.21, text part 2.41, message turn 2.62, document 3.42; tight headings compute padding-top 0px. The PR's message-turn and Inbox row green in every run.",
+      "headSha": "7a0b3193c3187728fbcd4a2157824cde0f6d0304",
+      "negativeControl": "Mutation calc((1lh - 1em) / 2) rebuilt -> message-turn row red, Expected >= 2, Received 1 (the INFRA-95 4px regression is caught); reasoning row stays green there"
+    },
+    {
+      "criterion": "Rule works on the iOS engine (webkit-iphone)",
+      "surface": "CI Legion Envoy and Contracts run 40248943888, dispatch job 121338156779, at be150e35 (be150e35 -> 64e609b7 changes one assertion message only)",
+      "command": "gh api repos/sjawhar/legion/actions/jobs/121338156779/logs --allow-escape-sequences | grep \"reasoning link's padded box\"",
+      "observed": "✓ 1565 [webkit-iphone] › e2e/agent-view.e2e.ts:784:1 (901ms); job 1466 passed, 159 skipped. The current head's dispatch job (run 40257058207) was in progress when this was written.",
+      "headSha": "be150e35e1afa329e6c74d700f1201bf8c984c3d",
+      "negativeControl": "Not runnable in the pod (WebKit cannot launch, INFRA-317); the Chromium 3px control above is the engine-independent red"
+    },
+    {
+      "criterion": "Wording fixed",
+      "surface": "source",
+      "command": "grep -n \"tightest pitch\\|most that does not reach\\|three pixels\" packages/dispatch/e2e/phone.e2e.ts packages/dispatch/web/src/styles.css",
+      "observed": "no match (exit 1)",
+      "headSha": "7a0b3193c3187728fbcd4a2157824cde0f6d0304",
+      "negativeControl": "The same grep at main@origin matches 4 lines in phone.e2e.ts and 1 in styles.css"
+    }
+  ],
+  "observations": [
+    "Inter (the stylesheet's first family, used only where installed locally; no phone ships it) measures a 1.25em text box in Chromium: reasoning clearance 0.21, message turn 1.62, all >= 0. The existing message-turn row's lowerClearance >= 2 probe-margin precondition then fails (1.61), as it would with today's 3px (clearance 1, computed from the measured 20px text box, not run): a font-sensitivity of the test that predates this change and does not show in CI or the pod. Heading links with 0 padding overlap by the font's own text box (-0.81px at 16/19.2), which no padding changes.",
+    "CI at the code head (f5b81b04 = 64e609b7 code + implement.json): Tests lint/typecheck success, test in progress; Legion Envoy and Contracts dispatch job in progress; Docs and PR Title success."
+  ],
+  "trickyParts": [
+    "Harness hazard: /legion/harness/setup.sh runs `pg_ctl status`, which cannot see a postmaster started from another role's container (separate PID namespace), so it deletes pgdata/postmaster.pid, and that Postgres shuts itself down within a minute (log: 'received immediate shutdown request ... could not open file postmaster.pid'). Running setup.sh in my container stopped the implementer's Postgres; it now runs from the tester's container. A reviewer that runs setup.sh will stop it again: harmless once testing is over, but run setup.sh only when no other role is mid-run.",
+    "web/dist was rebuilt at the head's CSS after the mutation runs, so the shared dist serves the PR's rule."
+  ]
+}
