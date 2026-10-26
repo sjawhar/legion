@@ -848,7 +848,7 @@ func applyOperation(tree *pmdoc.Node, op model.EditOp, budget *pmdoc.WriteBudget
 		if code {
 			return next, refuseCodeThatReshapesItsBlock(tree, next, r, at, "with", op.With)
 		}
-		if err := refuseCodePipeInTableCell(tree, next, r, "with", fmt.Sprintf("with %q", op.With), ""); err != nil {
+		if err := refuseCodePipeInTableCell(tree, next, r, "with", "with", op.With, ""); err != nil {
 			return nil, err
 		}
 		if err := refuseUnreadableReplacement(tree, next, r, op.With); err != nil {
@@ -881,7 +881,7 @@ func applyOperation(tree *pmdoc.Node, op model.EditOp, budget *pmdoc.WriteBudget
 		if err != nil {
 			return nil, invalidSchemaOp("find", err)
 		}
-		return out, refuseCodePipeInTableCell(tree, out, r, "find", fmt.Sprintf("deleting find %q", op.Find), "")
+		return out, refuseCodePipeInTableCell(tree, out, r, "find", "deleting find", op.Find, "")
 	case "insert":
 		if op.Markdown == "" {
 			return nil, invalidOp("markdown")
@@ -1237,14 +1237,15 @@ func refuseReshapedReplacement(before, after *pmdoc.Node, match pmdoc.Range, wit
 // replace's `with` is read as a paragraph's text, where `\|` in code is the code's text, and a
 // delete can cut code down to it. A block that held such a cell before the write is no reason to
 // refuse it (replacementBroke), so a document a browser edit left one in still takes writes. field
-// is the field the refusal names, written the words it opens with (what the caller sent), and
-// advice what the caller can do beside what pmdoc's refusal says, or "".
-func refuseCodePipeInTableCell(before, after *pmdoc.Node, match pmdoc.Range, field, written, advice string) error {
+// is the field the refusal names, opening the words it opens with and value what the caller sent,
+// which the refusal quotes after them, and advice what the caller can do beside what pmdoc's
+// refusal says, or "".
+func refuseCodePipeInTableCell(before, after *pmdoc.Node, match pmdoc.Range, field, opening, value, advice string) error {
 	_, unwritable, err := replacementBroke(before, after, match, pmdoc.TableCodePipeError)
 	if err != nil || unwritable == nil {
 		return err
 	}
-	reason := fmt.Sprintf("%s leaves code the document cannot store where it lands: %v", written, unwritable)
+	reason := fmt.Sprintf("%s %q leaves code the document cannot store where it lands: %v", opening, value, unwritable)
 	if advice != "" {
 		reason += "; " + advice
 	}

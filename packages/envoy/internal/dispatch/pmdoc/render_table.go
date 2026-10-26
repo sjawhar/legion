@@ -82,6 +82,15 @@ func (r *renderer) tableRow(row *Node, cells []*Node, header bool, prefix string
 // Text outside code takes the escapes it needs (needsInlineEscape), so the `|` taken out is
 // written `\|` after the code's closing backtick, which both parsers read back as the `|`.
 func codePipesOutOfCode(nodes []*Node) ([]*Node, string) {
+	if !slices.ContainsFunc(nodes, func(node *Node) bool {
+		if strings.IndexByte(node.Text, '|') < 0 {
+			return false
+		}
+		_, code := codeSpanMarks(node)
+		return code
+	}) {
+		return nodes, ""
+	}
 	var out []*Node
 	var held string
 	// run is how many backslashes the code span written so far ends with, from opens, the index of
@@ -89,15 +98,15 @@ func codePipesOutOfCode(nodes []*Node) ([]*Node, string) {
 	run, opens := 0, -1
 	var marks []Mark
 	for index, node := range nodes {
-		if node.Type != "text" || !nodeHasMark(node, "inlineCode") {
+		written, code := codeSpanMarks(node)
+		if !code {
 			run, opens = 0, -1
 			if out != nil {
 				out = append(out, node)
 			}
 			continue
 		}
-		written := writtenMarks(node, true, true)
-		if opens < 0 || !slices.EqualFunc(written, marks, sameMark) {
+		if opens < 0 || !marksEqual(written, marks) {
 			run, opens, marks = 0, index, written
 		}
 		from := 0
@@ -136,12 +145,21 @@ func codePipesOutOfCode(nodes []*Node) ([]*Node, string) {
 	return out, held
 }
 
+// codeSpanMarks is the marks node is written under (writtenMarks) when it is code-marked text, a
+// node of a code span (codePipesOutOfCode), and false when it is not.
+func codeSpanMarks(node *Node) ([]Mark, bool) {
+	if node.Type != "text" || !nodeHasMark(node, "inlineCode") {
+		return nil, false
+	}
+	return writtenMarks(node, true, true), true
+}
+
 // codeSpanText is the text of the code span whose first node is nodes[opens], written under marks
 // (codePipesOutOfCode).
 func codeSpanText(nodes []*Node, opens int, marks []Mark) string {
 	var text strings.Builder
 	for _, node := range nodes[opens:] {
-		if node.Type != "text" || !nodeHasMark(node, "inlineCode") || !slices.EqualFunc(writtenMarks(node, true, true), marks, sameMark) {
+		if written, code := codeSpanMarks(node); !code || !marksEqual(written, marks) {
 			break
 		}
 		text.WriteString(node.Text)
@@ -168,7 +186,7 @@ func TableCodePipeError(block *Node) error {
 				if len(cell.Children) != 1 {
 					continue
 				}
-				if _, code := codePipesOutOfCode(hardBreaksAsSpaces(cell.Children[0].Children)); code != "" {
+				if _, code := codePipesOutOfCode(cell.Children[0].Children); code != "" {
 					refusal = tableCodePipe{table: node, row: rowIndex, column: column, code: code}
 					return false
 				}
@@ -195,8 +213,8 @@ func (cell tableCodePipe) Error() string {
 	where := fmt.Sprintf("row %d, column %d", cell.row, cell.column)
 	if cell.row == 0 {
 		where += " (the header row)"
-	} else if header := layoutTable(&renderer{spanBudget: maxSpanCells}, cell.table).cellHeaders(cell.table, cell.row)[cell.column]; header >= 0 {
-		where += fmt.Sprintf(" (under the header \"%s\")", oneLineText(cell.table.Children[0].Children[header]))
+	} else if header, found := headerAbove(&renderer{spanBudget: maxSpanCells}, cell.table, cell.row, cell.column); found {
+		where += fmt.Sprintf(" (under the header \"%s\")", header)
 	}
 	// The code is quoted as written, so its backslashes are not doubled.
 	return fmt.Sprintf("%s holds code in %s whose text has a | right after a backslash, \"%s\", which a table cell's markdown cannot write: "+

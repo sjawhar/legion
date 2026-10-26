@@ -422,7 +422,10 @@ func splitAtEvenEscapedPipes(table *extensionast.Table, source []byte) {
 				row.InsertAfter(row, cell, next)
 				cell, start, split = next, segment.Start+index+1, true
 			}
-			cell.Lines().Set(0, tableCellSegment(start, segment.Stop, source))
+			// A cell it did not split keeps the segment goldmark trimmed it to (parseRow).
+			if start != segment.Start {
+				cell.Lines().Set(0, tableCellSegment(start, segment.Stop, source))
+			}
 		}
 		if !split {
 			continue
