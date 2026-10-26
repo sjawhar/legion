@@ -14938,7 +14938,7 @@ function parseCommand(argv, io) {
     if (!token.startsWith("--")) {
       if (ISSUE_KEY.test(token) && surface.flags.has("--issue") && !setBy.has("issue")) {
         if (claim("issue", "--issue", false))
-          args.issue = token;
+          args["issue"] = token;
         continue;
       }
       problems.push(`unexpected argument ${quoteWord(token)}: every value follows its flag`);
