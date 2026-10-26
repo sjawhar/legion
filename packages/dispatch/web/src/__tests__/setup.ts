@@ -24,6 +24,29 @@ void blockSchemaCache.load(async () => serverBlockSchema as unknown as BlockSche
 
 // A route a test answers (`answerRoute`) is that test's: the next test answers its own.
 afterEach(resetRouteAnswers);
+
+// A unit test has no Dispatch: a write that reaches the network was answered by nothing the test
+// set up, so whatever the page made of its failure - a write retried, a read mark dropped - passed
+// unchecked. Each one fails its test with its method and path. Reads still go to the network as
+// before: hundreds of tests leave incidental reads unanswered, which this guard does not yet cover.
+// A test that answers requests itself (`spyOn(globalThis, "fetch")`) replaces this for its own run.
+const reachedNetwork: string[] = [];
+const networkFetch = globalThis.fetch;
+const guardedFetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+  const method = (init?.method ?? (input instanceof Request ? input.method : "GET")).toUpperCase();
+  if (method === "GET" || method === "HEAD") return networkFetch(input, init);
+  const path = input instanceof Request ? input.url : String(input);
+  reachedNetwork.push(`${method} ${path}`);
+  throw new TypeError(`a unit test's write reached the network: ${method} ${path}`);
+};
+// `typeof fetch` also names Bun's `preconnect`, which nothing in a unit test calls.
+globalThis.fetch = Object.assign(guardedFetch, { preconnect: networkFetch.preconnect });
+afterEach(() => {
+  if (reachedNetwork.length === 0) return;
+  const reached = reachedNetwork.splice(0);
+  throw new Error(`writes reached the network, answered by nothing: ${reached.join(", ")}`);
+});
+
 class WebSocketStub {
   binaryType = "arraybuffer";
   identifier = 0;

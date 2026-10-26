@@ -367,7 +367,7 @@ test("the live view attributes other people's messages to the session to their a
         replies: [],
       },
     ],
-    putAgentState: spyOn(api, "putAgentState").mockResolvedValue({ unread_replies: 0 }),
+    putAgentState: answerAgentStates().mockResolvedValue({ unread_replies: 0 }),
   });
 
   const thread = await screen.findByTestId("agent-thread");
@@ -396,7 +396,7 @@ test("the live view orders two stored messages in one millisecond by their micro
         replies: [],
       },
     ],
-    putAgentState: spyOn(api, "putAgentState").mockResolvedValue({ unread_replies: 0 }),
+    putAgentState: answerAgentStates().mockResolvedValue({ unread_replies: 0 }),
   });
 
   const thread = await screen.findByTestId("agent-thread");
@@ -447,7 +447,7 @@ test("a person's message the session took as its own turn shows once, still nami
         replies: [],
       },
     ],
-    putAgentState: spyOn(api, "putAgentState").mockResolvedValue({ unread_replies: 0 }),
+    putAgentState: answerAgentStates().mockResolvedValue({ unread_replies: 0 }),
     replay: [
       userFrame(1, at("2026-09-27T21:16:16Z"), "Mine: where is the dashboard?", "m1"),
       userFrame(2, at("2026-09-27T21:18:01Z"), "Alice here: status?", "m2"),
@@ -476,7 +476,7 @@ test("a streamed user message tagged with a person's message but saying somethin
   renderLiveView({
     agentState: {},
     messages: [{ message: message("m1", "Merge only after review."), replies: [] }],
-    putAgentState: spyOn(api, "putAgentState").mockResolvedValue({ unread_replies: 0 }),
+    putAgentState: answerAgentStates().mockResolvedValue({ unread_replies: 0 }),
     replay: [userFrame(1, Date.parse("2026-09-27T21:16:16Z"), "Merge now, skip review.", "m1")],
   });
 
@@ -499,7 +499,7 @@ test("the live view sends as Send by default where the session takes it, and as 
   renderLiveView({
     agentState: {},
     messages: [],
-    putAgentState: spyOn(api, "putAgentState").mockResolvedValue({ unread_replies: 0 }),
+    putAgentState: answerAgentStates().mockResolvedValue({ unread_replies: 0 }),
   });
 
   const mode = (await screen.findByRole("combobox", {
@@ -531,7 +531,7 @@ test("the live view sends as Send by default where the session takes it, and as 
     agentState: {},
     capabilities: ["aside"],
     messages: [],
-    putAgentState: spyOn(api, "putAgentState").mockResolvedValue({ unread_replies: 0 }),
+    putAgentState: answerAgentStates().mockResolvedValue({ unread_replies: 0 }),
   });
   const asideOnly = (await screen.findByRole("combobox", {
     name: "Delivery mode",
@@ -584,7 +584,7 @@ test("the live view's send retries under one key", async () => {
   renderLiveView({
     agentState: {},
     messages: [],
-    putAgentState: spyOn(api, "putAgentState").mockResolvedValue({ unread_replies: 0 }),
+    putAgentState: answerAgentStates().mockResolvedValue({ unread_replies: 0 }),
   });
   const mode = (await screen.findByRole("combobox", {
     name: "Delivery mode",
@@ -622,7 +622,7 @@ test("leaving the live view leaves its send being tried, under its key", async (
   renderLiveView({
     agentState: {},
     messages: [],
-    putAgentState: spyOn(api, "putAgentState").mockResolvedValue({ unread_replies: 0 }),
+    putAgentState: answerAgentStates().mockResolvedValue({ unread_replies: 0 }),
   });
   const mode = (await screen.findByRole("combobox", {
     name: "Delivery mode",
@@ -663,7 +663,7 @@ async function renderSendingView(): Promise<void> {
   renderLiveView({
     agentState: {},
     messages: [],
-    putAgentState: spyOn(api, "putAgentState").mockResolvedValue({ unread_replies: 0 }),
+    putAgentState: answerAgentStates().mockResolvedValue({ unread_replies: 0 }),
   });
   const mode = (await screen.findByRole("combobox", {
     name: "Delivery mode",
@@ -813,7 +813,7 @@ test("the live view says a session advertising no delivery mode takes no message
     agentState: {},
     capabilities: [],
     messages: [],
-    putAgentState: spyOn(api, "putAgentState").mockResolvedValue({ unread_replies: 0 }),
+    putAgentState: answerAgentStates().mockResolvedValue({ unread_replies: 0 }),
   });
 
   expect((await screen.findByTestId("agent-takes-no-messages")).textContent).toContain(
@@ -826,7 +826,7 @@ test("the live view says a session advertising no delivery mode takes no message
     agentState: {},
     capabilities: ["aside"],
     messages: [],
-    putAgentState: spyOn(api, "putAgentState").mockResolvedValue({ unread_replies: 0 }),
+    putAgentState: answerAgentStates().mockResolvedValue({ unread_replies: 0 }),
   });
   await screen.findByRole("combobox", { name: "Delivery mode" });
   expect(screen.queryByTestId("agent-takes-no-messages")).toBeNull();
@@ -856,7 +856,7 @@ test("the live view shows the session's model next to its title and on the turn 
   renderLiveView({
     agentState: {},
     messages: [],
-    putAgentState: spyOn(api, "putAgentState").mockResolvedValue({ unread_replies: 0 }),
+    putAgentState: answerAgentStates().mockResolvedValue({ unread_replies: 0 }),
     replay: [
       assistantFrame(
         1,
@@ -880,7 +880,7 @@ test("the live view shows nothing for a session whose client reports no model", 
   renderLiveView({
     agentState: {},
     messages: [],
-    putAgentState: spyOn(api, "putAgentState").mockResolvedValue({ unread_replies: 0 }),
+    putAgentState: answerAgentStates().mockResolvedValue({ unread_replies: 0 }),
     replay: [assistantFrame(1, Date.parse("2026-09-27T21:16:16Z"), "Switching to it now.")],
   });
 
@@ -896,7 +896,7 @@ test("the live view connects, goes live on the session's answer, and reconnects 
   renderLiveView({
     agentState: {},
     messages: [],
-    putAgentState: spyOn(api, "putAgentState").mockResolvedValue({ unread_replies: 0 }),
+    putAgentState: answerAgentStates().mockResolvedValue({ unread_replies: 0 }),
   });
   expect(relayStatus()).toEqual(["Connecting to the session"]);
 
@@ -927,7 +927,7 @@ test("a rotation rebuilds from the replay and keeps status live", async () => {
   renderLiveView({
     agentState: {},
     messages: [],
-    putAgentState: spyOn(api, "putAgentState").mockResolvedValue({ unread_replies: 0 }),
+    putAgentState: answerAgentStates().mockResolvedValue({ unread_replies: 0 }),
     replay: [assistantFrame(1, Date.parse("2026-09-27T21:16:16Z"), "Before the rotation.")],
   });
   const thread = await screen.findByTestId("agent-thread");
@@ -956,7 +956,7 @@ test("a human-only refusal shows the view unavailable", async () => {
   const queryClient = renderLiveView({
     agentState: {},
     messages: [],
-    putAgentState: spyOn(api, "putAgentState").mockResolvedValue({ unread_replies: 0 }),
+    putAgentState: answerAgentStates().mockResolvedValue({ unread_replies: 0 }),
   });
   // The app's event feed rides the same socket, so the socket outlives the refused view.
   liveSocketFor(queryClient).subscribeEvents({
@@ -994,7 +994,7 @@ test("two agent views share the tab's socket", async () => {
     agentState: {},
     agents: [agent, { ...agent, session_id: REVIEWER, title: "Reviewer" }],
     messages: () => [],
-    putAgentState: spyOn(api, "putAgentState").mockResolvedValue({ unread_replies: 0 }),
+    putAgentState: answerAgentStates().mockResolvedValue({ unread_replies: 0 }),
   });
   const queryClient = newClient();
   const planner = renderPage(queryClient, SESSION);
@@ -1053,7 +1053,7 @@ async function renderWithCommands(commands?: AgentStreamCommand[]): Promise<HTML
   renderLiveView({
     agentState: {},
     messages: [],
-    putAgentState: spyOn(api, "putAgentState").mockResolvedValue({ unread_replies: 0 }),
+    putAgentState: answerAgentStates().mockResolvedValue({ unread_replies: 0 }),
     replay: commands === undefined ? [] : [commandsFrame(1, commands)],
   });
   const mode = (await screen.findByRole("combobox", {
@@ -1233,7 +1233,7 @@ async function renderWithPickers(replay: AgentStreamFrame[]): Promise<LiveView> 
   const view = renderLiveView({
     agentState: {},
     messages: [],
-    putAgentState: spyOn(api, "putAgentState").mockResolvedValue({ unread_replies: 0 }),
+    putAgentState: answerAgentStates().mockResolvedValue({ unread_replies: 0 }),
     replay,
   });
   await screen.findByRole("combobox", { name: "Model" });
@@ -1303,7 +1303,7 @@ test("a session not answering the live view keeps the empty transcript's explana
   renderLiveView({
     agentState: {},
     messages: [],
-    putAgentState: spyOn(api, "putAgentState").mockResolvedValue({ unread_replies: 0 }),
+    putAgentState: answerAgentStates().mockResolvedValue({ unread_replies: 0 }),
     responding: false,
   });
   expect((await screen.findByTestId("agent-thread-empty")).textContent).toContain(
@@ -1524,7 +1524,7 @@ test("Send stays pressable while the session is mid-turn, and a click sends at o
   renderLiveView({
     agentState: {},
     messages: [],
-    putAgentState: spyOn(api, "putAgentState").mockResolvedValue({ unread_replies: 0 }),
+    putAgentState: answerAgentStates().mockResolvedValue({ unread_replies: 0 }),
     replay: MID_TURN,
   });
   const input = await modeSettled("steer");
@@ -1550,7 +1550,7 @@ test("Enter sends while the session is mid-turn", async () => {
   renderLiveView({
     agentState: {},
     messages: [],
-    putAgentState: spyOn(api, "putAgentState").mockResolvedValue({ unread_replies: 0 }),
+    putAgentState: answerAgentStates().mockResolvedValue({ unread_replies: 0 }),
     replay: MID_TURN,
   });
   const input = await modeSettled("steer");
@@ -1576,7 +1576,7 @@ test("with an empty box Send is refused, says why on screen, and sends nothing",
   renderLiveView({
     agentState: {},
     messages: [],
-    putAgentState: spyOn(api, "putAgentState").mockResolvedValue({ unread_replies: 0 }),
+    putAgentState: answerAgentStates().mockResolvedValue({ unread_replies: 0 }),
   });
   const input = await modeSettled("steer");
 
@@ -1616,7 +1616,7 @@ test("a refused send keeps the message on screen and says why", async () => {
   renderLiveView({
     agentState: {},
     messages: [],
-    putAgentState: spyOn(api, "putAgentState").mockResolvedValue({ unread_replies: 0 }),
+    putAgentState: answerAgentStates().mockResolvedValue({ unread_replies: 0 }),
   });
   const input = await modeSettled("steer");
 
@@ -1640,7 +1640,7 @@ test("a refusal that lands after switching sessions stays with the session that 
     agentState: {},
     messages: [],
     other: {},
-    putAgentState: spyOn(api, "putAgentState").mockResolvedValue({ unread_replies: 0 }),
+    putAgentState: answerAgentStates().mockResolvedValue({ unread_replies: 0 }),
   });
   const input = await modeSettled("steer");
 
@@ -1683,7 +1683,7 @@ test("a send pressed while another is out waits its turn, and a refused one is r
   renderLiveView({
     agentState: {},
     messages: [],
-    putAgentState: spyOn(api, "putAgentState").mockResolvedValue({ unread_replies: 0 }),
+    putAgentState: answerAgentStates().mockResolvedValue({ unread_replies: 0 }),
   });
   const input = await modeSettled("steer");
   const refusal = new ApiError(400, { code: "MESSAGE_INPUT", error: "Dispatch refused it" });
@@ -1751,7 +1751,7 @@ test("a draft stays with its session across a switch to another", async () => {
     agentState: {},
     messages: [],
     other: {},
-    putAgentState: spyOn(api, "putAgentState").mockResolvedValue({ unread_replies: 0 }),
+    putAgentState: answerAgentStates().mockResolvedValue({ unread_replies: 0 }),
   });
   const input = await modeSettled("steer");
 
@@ -1772,7 +1772,7 @@ test("a pending switch holds its own session's Send, and a send out on another h
     agentState: {},
     messages: [],
     other: {},
-    putAgentState: spyOn(api, "putAgentState").mockResolvedValue({ unread_replies: 0 }),
+    putAgentState: answerAgentStates().mockResolvedValue({ unread_replies: 0 }),
     replay: [settingsFrame(1), commandsFrame(2, SWITCHES)],
   });
   await screen.findByRole("combobox", { name: "Model" });
@@ -1860,7 +1860,7 @@ test("a session advertising no delivery mode still takes a mid-turn send as an a
     agentState: {},
     capabilities: [],
     messages: [],
-    putAgentState: spyOn(api, "putAgentState").mockResolvedValue({ unread_replies: 0 }),
+    putAgentState: answerAgentStates().mockResolvedValue({ unread_replies: 0 }),
     replay: MID_TURN,
   });
   await screen.findByTestId("agent-takes-no-messages");
