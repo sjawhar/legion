@@ -2,22 +2,17 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-252",
-  "completed": "2026-10-26T09:37:00Z",
-  "round": 3,
-  "scope": "Narrowed by the architect (review round cap): round-2 findings 1-4, the spec's four acceptance lines, and correctness defects in this change.",
-  "reviewedCodeHead": "5f1f78dc08ae5ae3c7e276f856265eb8fb59efe6",
-  "decision": "changes_requested",
-  "critical": 1,
+  "completed": "2026-10-26T11:05:00Z",
+  "round": 4,
+  "scope": "Narrowed by the architect: the daemon migration renumbered to 0052, main's 0051_issue_suspend_release and this branch's migration loading together in migrations.All, and no correctness defect introduced.",
+  "reviewedCodeHead": "55c575a0c79891a7f43ac1bb3f2d3ae64a30d6f2",
+  "decision": "approved",
+  "critical": 0,
   "important": 0,
   "minor": 0,
-  "roundTwoFindings": "All four fixed at 5f1f78dc: the hold stores the whole Dispatch chain and holds while any live root is on it (the reviewer's round-2 probe now passes: slotted=false, ancestry [LEGION-169 LEGION-180 LEGION-168]); SKILL.md:39 names the held-root case; the re-read is bounded to roots whose chain holds the event's key and prepareObserved does none; a stale recorded event re-reads nothing and an unrecorded key is read from Dispatch's current view. Tests TestARootHeldPastAParkedRootOnItsChainTakesNoSlot, TestARereadReadsOnlyTheRootsWhoseChainHoldsTheEventsIssue, TestARereadSkipsARootWhoseChainItCannotRead and TestAStaleEventOfAMovedAncestorBringsBackNoHold pass on the reviewer's Postgres.",
-  "keyFindings": [
-    {
-      "severity": "critical",
-      "file": "packages/daemon/internal/store/migrations/0051_issue_ancestry.up.sql",
-      "description": "Version 51 collides with main's 0051_issue_suspend_release.up.sql (#2173, merged 2026-10-26T08:43Z). The file names differ, so GitHub shows the PR MERGEABLE, but the merged tree holds both 0051 files and migrations.All refuses them: `migrations 0051_issue_ancestry.up.sql and 0051_issue_suspend_release.up.sql share version 51` (reproduced on `git merge-tree --write-tree origin/main 5f1f78dc`, tree e34ce555). Store.Migrate returns it and daemon.Run aborts boot, so every daemon start and every migrating test would fail after the merge. Fix: renumber to 0052_issue_ancestry.up.sql with its header updated."
-    }
-  ],
-  "thermonuclear": "thermonuclear-deep-review and thermonuclear-code-quality at 37097754 (code 5f1f78dc): both CHANGES on the same migration collision, both confirming round-2 findings 1-4 fixed. Provider not verified.",
-  "ci": "At 5f1f78dc, read 2026-10-26T09:28Z: Tests 40298572792, Legion Envoy and Contracts 40298572760, Docs 40298572980, Worker Image 40298572727 and PR Title 40298739240 all queued. Required: lint, typecheck, test, pr-title. Compare 5f1f78dc...37097754 touches only .legion/."
+  "keyFindings": [],
+  "verification": "55c575a0 renames 0051_issue_ancestry.up.sql to 0052_issue_ancestry.up.sql and changes only its header line; no code, test, doc or script names the old file. On `git merge-tree --write-tree origin/main 55c575a0` (tree 4ccee51b, main 7f6ef46f), the migrations directory ends 0050_claim_failure, 0051_issue_suspend_release, 0052_issue_ancestry, and a one-line test of migrations.All() on it passes (versions 50, 51, 52). Main has no daemon 0052. The two migrations touch different tables (outbox payloads; issues.ancestry), so their order is immaterial.",
+  "thermonuclear": "thermonuclear-deep-review and thermonuclear-code-quality at af8fd044 (code 55c575a0): both APPROVE, no findings. Provider not verified: no run's transcript, as the reviewer can read it, records which provider answered.",
+  "ci": "At 55c575a0: the first runs were cancelled repo-wide at 10:20Z; rerun once at 10:21Z. Read 11:04Z: Tests 40301762532 success (test, lint, typecheck success), PR Title 40301810089 success, Docs 40301762595, Worker Image 40301762544 and Legion Envoy and Contracts 40301762543 success. Required: lint, typecheck, test, pr-title. Compare 55c575a0...af8fd044 touches only .legion/.",
+  "risk": "A database that applied this branch's pre-rename 0051 (a pod's local test database) records version 51 for the ancestry column and would skip main's 0051_issue_suspend_release and then fail 0052; it needs a reset before running the merged code. CI and production never ran it."
 }
