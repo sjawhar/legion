@@ -122,7 +122,11 @@
   the gate reads: a call in any other form is refused before it posts in `block` mode, and in
   `warn` mode it posts with the note that it went out unreviewed, and the check never sees it.
   `--advisor-rebuttal '<line>'` on a command, `"advisor_rebuttal": "<line>"` in a device's JSON,
-  or the third attempt at the same thing on the same target sends the call anyway. The breaker
+  or the third attempt at the same thing on the same target sends the call anyway. The flag runs
+  as a shell comment at the end of the command's first line, so dispatch never sees it and the
+  agent's record of its call still shows it, and the acknowledgement quotes the override as the
+  agent sent it: told only that the flag was removed, agents read their own call back without it
+  and reported a rebuttal they never wrote. The breaker
   counts only the calls the gate refused, so a charter revise in `warn` mode, which sends the
   call, never moves it. It counts each thing apart: each new ask a call opens, or the call as a
   whole when it opens none, so its free pass covers only the thing that was refused twice, and an
@@ -136,7 +140,9 @@
   gains `rule`, `ruleAsk`, `ruleQuote`, `ruleOutcome`, `ruleModel`, `ruleLatencyMs`,
   `ruleTextMissing`, `ruleError`, `ruleAsksCut`, `ruleAsksPartial` and `target`, and
   `scripts/askgate-report.ts` reports the rules check's matches, outcomes and errors and the
-  refusals the agent overrode.
+  refusals the agent overrode; it refuses a flag given twice by name, rather than reading only its
+  last value. Three rules calls in a row with no verdict raise one warning saying those calls' new
+  asks went unchecked and that the check still runs.
 - AskGate publishes each rule decision, and each refused call the agent sent again with a rebuttal
   or the breaker (recorded with `ruleOutcome: null` and the refusal's own target), to a Dispatch
   project document of the session's own, `askgate-decisions-<session id>.md`, so a session holding
