@@ -915,6 +915,9 @@ export function parseArgs(argv: string[]): Args {
       continue;
     }
     if (!known.includes(flag)) throw new Error(`unknown flag ${flag}`);
+    // A second value would replace the first in silence: `--sessions a --sessions b` would read
+    // only `b` and print its counts as the whole. So a flag given twice is refused by name.
+    if (flag in values) throw new Error(`${flag} is given more than once; give it once`);
     const value = argv[i + 1];
     if (value === undefined || value.startsWith("--")) throw new Error(`${flag} needs a value`);
     values[flag] = value;

@@ -492,7 +492,8 @@ document of the session's own, `askgate-decisions-<session id>.md`.
 documents and prints the day's refusals by rule, the refusals the agent overrode, the calls
 judged on part of their asks and those that judged none, and the rules-call error rate, each split
 by `source`, with the documents and lines it could not read counted beside them. The same script's
-`--sessions <dir>` mode still reports the entries on disk.
+`--sessions <dir>` mode still reports the entries on disk. Each flag is given once: the script
+refuses a flag given twice by name, rather than reading only its last value.
 
 **What AskGate is not.** AskGate reviews the writes of a cooperating agent, so that a write that
 breaks its rules comes back with the reason before it posts. It is no sandbox. A process that
