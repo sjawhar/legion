@@ -13607,6 +13607,7 @@ var DispatchServerStartedPayloadSchema = exports_external.strictObject({
   commit: exports_external.string().min(1),
   started_at: exports_external.iso.datetime()
 });
+var DEFAULT_ISSUE_READ_EVENTS = 10;
 var DispatchEventSchema = exports_external.object({
   issue_key: exports_external.string().nullable(),
   artifact_id: exports_external.string().nullish(),
@@ -14384,13 +14385,15 @@ var dispatchToolSpecs = [
   {
     name: "dispatch_read",
     example: { issue: "DSP-1" },
-    description: "Read an issue or document summary, targeted ask, or targeted comment reply chain, or the conversation " + "a message belongs to. Do not use it for document contents; use dispatch doc-read instead. Supply ref, issue, " + "issue plus artifact (one of its documents), or project plus artifact; or message alone, which reads a human's direct message to this session and every " + "reply to it (they belong to no issue). A document summary names its issue, reference, versions and approval. " + "An anchored comment or ask also says where its quote sits, as `Position:`: the block's path from the top, " + "and in a table the row (0 is the header), the cells before the anchored one, and the column's header; " + "`Position: unavailable (<code>)` when Dispatch could not read the document: `DOC_SERVICE_UNAVAILABLE` " + "(try again shortly), `DOC_SCHEMA` (the document needs repair), `DOCUMENT_UNLOADABLE` (the document " + "needs a rebuild) or `INTERNAL`. " + "An issue read carries a `Progress:` line, `tasks 3/7, children 2/5`: its spec's task-list items " + "(`- [ ]` / `- [x]`, nested lists included) and its direct children, each done of total and each only " + "when it has any (`Progress: none` otherwise). " + "Every read ends with `Referenced by:` (what cites or hangs off this node, each with its dispatch:// address, " + "an excerpt, and when) and `Links:` (what it cites), so tracing provenance is one call. " + "The pictures the shown messages, asks and comments embed come back as images you see, newest first, at most 8 " + "and 10 MiB of them per read, each a PNG, JPEG, GIF or WebP of at most 3,750,000 bytes (5 MB of base64); a `Pictures:` section names each " + "one shown, in order, and the rest by reference, for dispatch doc-read. A picture this session was already shown is named, not sent again " + "(every request carries the session's history, and the provider refuses one over 32 MB); dispatch doc-read shows it again. " + OWNER_REFERENCE,
+    description: "Read an issue or document summary, targeted ask, or targeted comment reply chain, or the conversation " + "a message belongs to. Do not use it for document contents; use dispatch doc-read instead. Supply ref, issue, " + "issue plus artifact (one of its documents), or project plus artifact; or message alone, which reads a human's direct message to this session and every " + "reply to it (they belong to no issue). A document summary names its issue, reference, versions and approval. " + "An anchored comment or ask also says where its quote sits, as `Position:`: the block's path from the top, " + "and in a table the row (0 is the header), the cells before the anchored one, and the column's header; " + "`Position: unavailable (<code>)` when Dispatch could not read the document: `DOC_SERVICE_UNAVAILABLE` " + "(try again shortly), `DOC_SCHEMA` (the document needs repair), `DOCUMENT_UNLOADABLE` (the document " + "needs a rebuild) or `INTERNAL`. " + "An issue read carries a `Progress:` line, `tasks 3/7, children 2/5`: its spec's task-list items " + "(`- [ ]` / `- [x]`, nested lists included) and its direct children, each done of total and each only " + "when it has any (`Progress: none` otherwise). " + `An issue read, and its dispatch://KEY/log, lists the issue's last ${DEFAULT_ISSUE_READ_EVENTS} events, oldest first; ` + "--events N lists the last N, and --all-events every one. " + "Every read ends with `Referenced by:` (what cites or hangs off this node, each with its dispatch:// address, " + "an excerpt, and when) and `Links:` (what it cites), so tracing provenance is one call. " + "The pictures the shown messages, asks and comments embed come back as images you see, newest first, at most 8 " + "and 10 MiB of them per read, each a PNG, JPEG, GIF or WebP of at most 3,750,000 bytes (5 MB of base64); a `Pictures:` section names each " + "one shown, in order, and the rest by reference, for dispatch doc-read. A picture this session was already shown is named, not sent again " + "(every request carries the session's history, and the provider refuses one over 32 MB); dispatch doc-read shows it again. " + OWNER_REFERENCE,
     arguments: (z2) => ({
       issue: z2.string().describe(ISSUE_REFERENCE).optional(),
       project: z2.string().describe("Project key owning the document.").optional(),
       artifact: z2.string().describe("Document artifact id, slug, or filename: one of the issue's, or a project document.").optional(),
       ref: z2.string().describe("Optional dispatch:// issue or document reference.").optional(),
-      message: z2.string().describe("A message id (uuid): reads the conversation it belongs to, the root message and every " + "reply. Name nothing else with it.").optional()
+      message: z2.string().describe("A message id (uuid): reads the conversation it belongs to, the root message and every " + "reply. Name nothing else with it.").optional(),
+      events: z2.number({ int: true, min: 1 }).describe(`How many of the issue's newest events an issue read or its dispatch://KEY/log lists, oldest first; default ${DEFAULT_ISSUE_READ_EVENTS}. Name no --all-events with it.`).optional(),
+      all_events: z2.boolean().describe(`List every one of the issue's events, oldest first, on an issue read or its dispatch://KEY/log, in place of the last ${DEFAULT_ISSUE_READ_EVENTS}. Name no --events with it.`).optional()
     }),
     validation: readValidation
   },
@@ -15225,6 +15228,7 @@ function asErrorShape(value) {
 function isJson(response) {
   return response.headers.get("content-type")?.includes("application/json") ?? false;
 }
+var ISSUE_EVENTS_PAGE_MAX = 200;
 var DISPATCH_TOOL_DEADLINE_MS = 60000;
 function requestSignal(signal) {
   const deadline = AbortSignal.timeout(DISPATCH_TOOL_DEADLINE_MS);
@@ -15366,13 +15370,28 @@ class DispatchClient {
   async releaseIssueClaim(issue2, input = {}) {
     return this.#json("DELETE", ["api", "v1", "issues", await this.#resolveIssue(issue2), "claim"], input);
   }
-  async getIssueEvents(issue2, after = 0, limit = 200) {
+  async getIssueEvents(issue2, after = 0, limit = ISSUE_EVENTS_PAGE_MAX) {
     return this.#json("GET", ["api", "v1", "issues", await this.#resolveIssue(issue2), "events"], undefined, { after, limit });
   }
-  async read(issueReference) {
+  async read(issueReference, options = {}) {
     const issueKey = await this.#resolveIssue(issueReference);
     const issue2 = await this.getIssue(issueKey);
-    const events = await this.getIssueEvents(issueKey, Math.max(0, issue2.last_seq - 10), 10);
+    const requested = options.events;
+    const count = requested === undefined ? DEFAULT_ISSUE_READ_EVENTS : requested === "all" ? issue2.last_seq : Math.min(requested, issue2.last_seq);
+    const events = [];
+    let after = Math.max(0, issue2.last_seq - count);
+    while (events.length < count) {
+      const limit = Math.min(ISSUE_EVENTS_PAGE_MAX, count - events.length);
+      const page = await this.getIssueEvents(issueKey, after, limit);
+      events.push(...page);
+      const last = page.at(-1);
+      if (page.length < limit || last === undefined || events.length >= count)
+        break;
+      if (last.seq <= after) {
+        throw new Error(`GET /api/v1/issues/${issueKey}/events?after=${after} answered no event after seq ${after}`);
+      }
+      after = last.seq;
+    }
     return { issue: issue2, events };
   }
   async ask(issue2, input) {
@@ -16749,6 +16768,16 @@ function argumentProblems(tool, args) {
       if (message !== undefined && messageIdOf(message) === undefined) {
         problems.push("message must be a full message id (uuid) or a dispatch://KEY/message/<id> reference");
       }
+      const events = optionalNumber(args, "events");
+      const allEvents = optionalBoolean(args, "all_events") === true;
+      if (events !== undefined && allEvents) {
+        problems.push("--events and --all-events both say how many events the read lists: name one, --events N for the last N or --all-events for every one");
+      }
+      const count = events !== undefined ? "--events" : allEvents ? "--all-events" : undefined;
+      const eventless = count === undefined ? undefined : readWithoutEvents(args);
+      if (eventless !== undefined) {
+        problems.push(`${count} lists an issue's events, which dispatch read prints only for an issue or its dispatch://KEY/log, not for ${eventless}: drop ${count}`);
+      }
       break;
     }
     case "dispatch_doc_read": {
@@ -16759,6 +16788,27 @@ function argumentProblems(tool, args) {
     }
   }
   return problems;
+}
+function readWithoutEvents(args) {
+  if (optionalString(args, "message") !== undefined)
+    return "a message's conversation";
+  const ref = optionalString(args, "ref");
+  switch (ref === undefined ? undefined : parseDispatchRef(ref)?.kind) {
+    case "ask":
+      return "an ask";
+    case "comment":
+      return "a comment";
+    case "message":
+      return "a message's conversation";
+    case "children":
+      return "the issue's children";
+    case "log":
+      return;
+  }
+  if (optionalString(args, "artifact") !== undefined || optionalString(args, "project") !== undefined) {
+    return "a document summary";
+  }
+  return;
 }
 function dispatchRefFromUrl(value, serverUrl) {
   let url2;
@@ -18671,8 +18721,11 @@ ${trailer.join(`
         };
       }
       const issueKey = issue2();
+      const readEvents = {
+        events: optionalBoolean(args, "all_events") === true ? "all" : optionalNumber(args, "events")
+      };
       if (ownerArguments.ref?.kind === "log") {
-        const read2 = await client.read(issueKey);
+        const read2 = await client.read(issueKey, readEvents);
         const pictures3 = await picturesOf(read2.events.flatMap(eventTexts));
         return {
           text: [logSummary(read2.issue, read2.events), ...pictures3.lines].join(`
@@ -18682,13 +18735,13 @@ ${trailer.join(`
         };
       }
       if (ownerArguments.ref?.kind === "children") {
-        const read2 = await client.read(issueKey);
+        const parent = await client.getIssue(issueKey);
         return {
-          text: childrenSummary(read2.issue),
-          details: { issue: read2.issue.key }
+          text: childrenSummary(parent),
+          details: { issue: parent.key }
         };
       }
-      const readPromise = client.read(issueKey);
+      const readPromise = client.read(issueKey, readEvents);
       const referencesPromise = issueReferencesOrUnavailable(client, issueKey);
       const read = await readPromise;
       const [references, graph, titles, pictures2] = await Promise.all([
@@ -18814,6 +18867,10 @@ function writeMemory(dir, sessionId, follows) {
   };
   writeAtomically(join(dir, "state.json"), `${JSON.stringify(state)}
 `);
+}
+function appendResult(dir, entry) {
+  ensureDirectory(dir);
+  writeResult(dir, entry);
 }
 function writeResult(dir, entry) {
   const line = { at: new Date().toISOString(), ...entry };
@@ -19926,45 +19983,49 @@ async function runDispatchCli(argv, rawEnv, io) {
     if (value !== undefined && value !== "")
       env[name] = value;
   }
+  const refuse = (text2, code2, tool2) => {
+    print(text2);
+    const sessionId2 = env.CLAUDE_CODE_SESSION_ID ?? env.DISPATCH_SESSION_ID;
+    if (sessionId2 !== undefined) {
+      try {
+        appendResult(sessionDirectory(env, sessionId2), {
+          tool: tool2 ?? "dispatch",
+          error: text2.trimEnd()
+        });
+      } catch {}
+    }
+    return code2;
+  };
   let parsed;
   try {
     parsed = parseCommand(argv, io);
   } catch (error48) {
-    print(`dispatch: ${messageFor(error48)}`);
-    return USAGE;
+    return refuse(`dispatch: ${messageFor(error48)}`, USAGE);
   }
   if (parsed.kind === "help") {
     print(parsed.tool === undefined ? commandsHelp() : commandHelp(parsed.tool));
     return OK;
   }
   if (parsed.kind === "refused") {
-    if (parsed.tool === undefined) {
-      print([`dispatch: ${parsed.problems.join(`
+    return parsed.tool === undefined ? refuse([`dispatch: ${parsed.problems.join(`
 `)}`, "Run dispatch --help."].join(`
-`));
-      return USAGE;
-    }
-    print(new ToolInputError(parsed.tool, parsed.problems).message);
-    return REFUSED;
+`), USAGE) : refuse(new ToolInputError(parsed.tool, parsed.problems).message, REFUSED, parsed.tool);
   }
   const hostName = env.DISPATCH_HOST ?? (env.CLAUDE_CODE_CHILD_SESSION === "1" ? "claude" : undefined);
   const host = HOSTS.find((name) => name === hostName);
   if (host === undefined) {
-    print(hostName === undefined ? "dispatch: DISPATCH_HOST is not set. The host plugin sets it in an agent's shell; to run dispatch by hand, set DISPATCH_HOST and DISPATCH_SESSION_ID yourself." : `dispatch: DISPATCH_HOST is ${JSON.stringify(hostName)}, not omp, claude or opencode.`);
-    return USAGE;
+    return refuse(hostName === undefined ? "dispatch: DISPATCH_HOST is not set. The host plugin sets it in an agent's shell; to run dispatch by hand, set DISPATCH_HOST and DISPATCH_SESSION_ID yourself." : `dispatch: DISPATCH_HOST is ${JSON.stringify(hostName)}, not omp, claude or opencode.`, USAGE, parsed.tool);
   }
   const sessionVariable = host === "claude" ? "CLAUDE_CODE_SESSION_ID" : "DISPATCH_SESSION_ID";
   const sessionId = env[sessionVariable];
   if (sessionId === undefined) {
-    print(`dispatch: ${sessionVariable} is not set, so this call has no session to act as. The host plugin sets it in an agent's shell.`);
-    return USAGE;
+    return refuse(`dispatch: ${sessionVariable} is not set, so this call has no session to act as. The host plugin sets it in an agent's shell.`, USAGE, parsed.tool);
   }
   let dir;
   try {
     dir = sessionDirectory(env, sessionId);
   } catch (error48) {
-    print(messageFor(error48));
-    return USAGE;
+    return refuse(messageFor(error48), USAGE, parsed.tool);
   }
   const file2 = (env.DISPATCH_HOST === undefined ? null : handedConfigFile(env)) ?? sessionConfigFile(host, env);
   if (parsed.dryRun) {
@@ -19977,22 +20038,19 @@ async function runDispatchCli(argv, rawEnv, io) {
       serverUrls: settings?.enabled === true ? dispatchServerUrls(settings) : []
     });
     if (problems2.length > 0) {
-      print(new ToolInputError(parsed.tool, problems2).message);
-      return REFUSED;
+      return refuse(new ToolInputError(parsed.tool, problems2).message, REFUSED, parsed.tool);
     }
     print(JSON.stringify(parsed.args, null, 2));
     return OK;
   }
   if (file2.path === null) {
-    print(`dispatch: ${file2.error}`);
-    return USAGE;
+    return refuse(`dispatch: ${file2.error}`, USAGE, parsed.tool);
   }
   const { dispatch: resolution, warnings } = sessionDispatchSettings(file2, env, { cwd: io.cwd });
   for (const warning of warnings)
     print(`dispatch: ${warning}`);
   if (!resolution.enabled) {
-    print(resolution.error === null ? `dispatch: ${resolution.notice}` : `dispatch: dispatch config: ${resolution.error}`);
-    return USAGE;
+    return refuse(resolution.error === null ? `dispatch: ${resolution.notice}` : `dispatch: dispatch config: ${resolution.error}`, USAGE, parsed.tool);
   }
   const config2 = resolution;
   let topics;
@@ -20022,8 +20080,7 @@ async function runDispatchCli(argv, rawEnv, io) {
     pruneSessions(sessionStateRoot(env), Date.now());
     follows = loadSessionMemory(dir, sessionId);
   } catch (error48) {
-    print(`dispatch: ${messageFor(error48)}`);
-    return USAGE;
+    return refuse(`dispatch: ${messageFor(error48)}`, USAGE, parsed.tool);
   }
   const { tool, args } = parsed;
   let text;

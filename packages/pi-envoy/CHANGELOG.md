@@ -239,6 +239,15 @@
 
 ### Added
 
+- The plugin ships a fifth skill, `asd-ste100`: the ASD-STE100 rules (Simplified Technical
+  English) for text a reader must not misread, which a session reads before it writes text a
+  person reads. It is Legion's copy of the MIT-licensed `danyuchn/asd-ste100-skill` at 32511c69,
+  with its licence and without its linter.
+- `dispatch_read` takes `events` (the issue's last N events) and `all_events` (every one) for an
+  issue read and its `dispatch://KEY/log`, which list the last 10 without either; the `dispatch`
+  command spells them `--events N` and `--all-events`. Both together, or either beside a read
+  that lists no events, are refused before any request. The `dispatch` skill's reading reference
+  names them.
 - `ENVOY_PASS_DEADLINE_MS` sets how long a queued session pass or role move may run before the
   queue abandons it; the default is the heartbeat interval, or 30 s, whichever is longer.
 - The `dispatch` command's `issue` and `issue-update` take `--repo <owner/name>` (`''` clears), and
