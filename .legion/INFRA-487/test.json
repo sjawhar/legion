@@ -2,63 +2,45 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-487",
-  "completed": "2026-10-26T19:50:02Z",
-  "headTested": "58df5554a1c5ecb5746868fc8b157f32fc636698 (code head 8f8b7ddbaa50eab4ab2901cf3f6c35386b71636f)",
+  "completed": "2026-10-26T20:22:30Z",
+  "round": 2,
+  "headTested": "7d770fb5496db78dca02d6db149cad34fb25ef36 (code head 18abf0990056: merge of main 18f76f3c plus the 5xx retry fix)",
   "implementerProof": {
     "verdict": "rejected",
-    "how": "Re-ran proofs 1-3 independently. Proof 1/2: `cd packages/envoy && BROKER_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:54487/postgres?sslmode=disable go test -count=1 -v -run TestABrokerOutageLongerThanALease ./cmd/broker` at 58df5554: --- PASS (87.20s), 0 SKIP, survivor fetch served 87ms after restart, renewer renewed to 44.922s 5.978s after restart, broker logged 'gave back ... gap=58.338365s ... enrollments=2'. Negative control: a fresh `git archive eee1605637ff packages/envoy` export with this outage_test.go, GOWORK=off: --- FAIL (79.01s) on 'agent-secrets: proof invalid: not live (PROOF_INVALID)', 0 SKIP. Proof 3: `go test -count=1 -v ./internal/broker/enroll ./internal/broker/api ./internal/broker/requests ./internal/broker/config` all ok, 383 PASS, 0 SKIP. Proof 4 is rejected: its surface (an httptest broker that closes the connection with no answer) is not what the daemon meets in either outage the plan defines. In production the daemon's agent_secrets url is the broker's HTTPS front door (the deployment repository's legion stack sets agentSecretsUrl to the broker's front door, a Tailscale serve HTTPS proxy to the broker's Service), whose proxy is httputil.ReverseProxy with no ErrorHandler (tailscale ipn/ipnlocal/serve.go:982), so it answers 502 while no broker serves; and the real broker binary answers a valid token login 500 INTERNAL while its database is away (observed). Both are HTTP answers, so the login stays on the 30 s to 5 min schedule, and the criterion 'logs in again within about 10 s' fails there."
+    "how": "Proofs 1-2 re-run at the merged head: `cd packages/envoy && BROKER_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:54488/postgres?sslmode=disable go test -count=1 -v -run TestABrokerOutageLongerThanALease ./cmd/broker` --- PASS (85.63s), 0 SKIP: fetch served 136ms after the restart, renewal 5.933s after, 'gave back ... gap=58.347543s ... enrollments=2'. My round-1 red tests are byte-identical at head (md5 of both function bodies equal at 8502875f and 7d770fb5). Proof 4 is driven past its unit surface: the daemon's real Client against the REAL broker binary behind a real httputil.ReverseProxy front door on real Postgres. Front-door half verified (see proof). Database half rejected: after five verified logins the broker answers 429 RATE_LIMITED, which the client puts on the long schedule, so the login lands up to a minute after the database is back, not within about 10 s; proof 4's fake broker answers 500 three times and never drains a bucket, so it cannot see this."
   },
   "failures": [
     {
-      "criterion": "The daemon logs in again within about 10 s of the broker answering (plan acceptance 5; PR body: 'after an outage, new pods can enroll within about 10 s instead of up to 5 min')",
-      "evidence": "Red tests committed in 8502875f, packages/daemon/internal/agentsecrets/client_test.go: TestTokenLoginRetriesQuicklyWhileTheFrontDoorAnswersForADownBroker (a real httputil.ReverseProxy, as Tailscale serve runs it, in front of a dead port answers the first 3 logins 502, then forwards to the fake broker) and TestTokenLoginRetriesQuicklyWhileTheBrokerCannotReachItsDatabase (the broker answers 3 logins 500 {\"code\":\"INTERNAL\",\"error\":\"token login failed\"}, the exact answer the real broker binary gave a valid token login with its Postgres stopped). `cd packages/daemon && go test -count=1 -run TestTokenLoginRetries -v ./internal/agentsecrets` at 8502875f: both FAIL 'timed out waiting: a login to succeed ... well before a refusal's minute' (5.01s each); the implementer's two tests still PASS. With the refusal schedule shortened to 20ms the same front-door rig passes in 0.19s, so the red is the 502/500 classification alone. Fix direction: a login answered 5xx (no decision about the token) takes the short schedule, as an unanswered one does; 4xx keeps the long one."
-    },
-    {
-      "criterion": "CI green at the head (lint, types, unit and integration suites are read on GitHub)",
-      "evidence": "No check run and no workflow run exists for any commit of PR #2269 (`gh pr checks 2269` -> 'no checks reported'; `gh api repos/sjawhar/legion/commits/8f8b7ddbaa50.../check-runs` -> empty; `gh run list --branch legion/INFRA-487` -> empty). GitHub reports the PR mergeable=CONFLICTING: `git merge-tree --write-tree 58df5554 main@origin` conflicts in docs/site/src/content/docs/broker/operate.md (main moved 11 commits since eee16056, among them 33e0c1eb #2224 'a GitHub App release can narrow its token'). GitHub builds no merge ref for a conflicting head, so nothing static has been checked. The merged tree (eb66a9b3) has no unguarded `lease_expires_at > now()` site outside enrollment_lease_live and the beat."
+      "criterion": "The daemon logs in again within about 10 s of the broker answering, also when the broker answers 500 while its database is away (plan acceptance 5; PR body 'Change' bullet 4; docs/kubernetes.md and legion/troubleshooting.md now say 'cannot reach its database ... logs in again within about 10 s')",
+      "evidence": "Real surface: throwaway rig (packages/daemon/internal/agentsecrets/zz_tester_daemon_test.go, removed; copy kept outside the tree) runs the daemon's agentsecrets.Client with its default schedules against the broker binary built at 7d770fb5, through a reverse-proxy front door, on the tester's Postgres 16, stopped with pg_ctl. 170 s outage: logins at 20:13:36 500, :38 500, :42 500, :51 500, 20:14:01 500, :11 429 RATE_LIMITED 'too many token logins for this ServiceAccount', :41 500, :43 429, 20:15:13 429, 20:16:13 500, :15 429; issued 17.8 s after Postgres was back. 40 s outage: 5x500 then 429, issued 23.8 s after Postgres was back. The gaps after a 429 are 30 s and 60 s, so a database that returns just after a 429 waits up to about a minute. Cause: limits.go:47 PerLogin {Every: 1 min, Burst: 5} is spent by refuseAccount after the token verifies and before the database write fails, so a 500 login costs a token. Red test committed in bcf37482: packages/envoy/internal/broker/api/token_login_test.go TestATokenLoginTheBrokerCouldNotCompleteSpendsNoAccountBucket (bucket of 2, store closed, four valid logins must all answer 5xx). `cd packages/envoy && BROKER_TEST_DATABASE_URL=... go test -count=1 -run TestATokenLoginTheBrokerCouldNotCompleteSpendsNoAccountBucket ./internal/broker/api` -> FAIL: 'the daemon's login 2 with the database away = 429 {\"code\":\"RATE_LIMITED\",...}'. A daemon-side change alone cannot meet ~10 s: the bucket refills one a minute."
     }
   ],
-  "failed": 2,
+  "failed": 1,
+  "ci": "At 7d770fb5 every check run is queued (typecheck, test, lint, build, changes, pr-title), read 2026-10-26T20:21Z; not waited for. The PR is MERGEABLE now (round-1 conflict resolved by 18f76f3c); the merged tree has no unguarded lease predicate outside enrollment_lease_live and the beat.",
   "proof": [
     {
-      "criterion": "After an outage longer than the lease, a pod fetches again within one renewal interval of the broker serving, with no relaunch and no person",
-      "surface": "the real broker and agent-secrets binaries over HTTP on real Postgres 16, broker stopped and started again behind one forwarded address",
-      "command": "cd packages/envoy && BROKER_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:54487/postgres?sslmode=disable go test -count=1 -v -run TestABrokerOutageLongerThanALease ./cmd/broker",
-      "observed": "--- PASS (87.20s), 0 SKIP; survivor held 39.947s at the stop; fetch served 87ms after the second broker listened; renewer (never exited) renewed to 44.922s past now 5.978s after; 'gave back the time no broker was serving ... gap=58.338365s ... enrollments=2'",
-      "headSha": "58df5554a1c5ecb5746868fc8b157f32fc636698",
-      "negativeControl": "same test on a fresh git-archive export of eee1605637ff packages/envoy, GOWORK=off: --- FAIL (79.01s), 'agent-secrets: proof invalid: not live (PROOF_INVALID)'"
+      "criterion": "The daemon logs in again within about 10 s of a broker serving behind its front door after an outage (front door answers 502 meanwhile)",
+      "surface": "the daemon's agentsecrets.Client, default schedules, against the real broker binary built at 7d770fb5 behind a real httputil.ReverseProxy front door (as Tailscale serve proxies), real Postgres 16",
+      "command": "throwaway TestZZDaemonLoginThroughFrontDoorWhileBrokerDown (ZZ_BROKER_BIN, ZZ_DB_URL), broker absent 40 s then started",
+      "observed": "502 answers at 20:10:24, :26, :30, :38, :48, :58 (2 s doubling to 10 s); daemon login issued 3.4 s after the broker listened; answers {502:6, 200:1}",
+      "headSha": "7d770fb5496db78dca02d6db149cad34fb25ef36",
+      "negativeControl": "same rig on b7e7ff14's daemon (the pre-fix client): 502 at 20:18:18 and :48 (30 s schedule), issued 49.25 s after the broker listened"
     },
     {
-      "criterion": "Break attempt: the database goes away for longer than the lease while the broker binary keeps running",
-      "surface": "the real broker binary and a real agent-secrets renewer and CLI on the tester's own Postgres 16 (port 54488), stopped with pg_ctl -m fast and started again; lease 45s, sweep 1s",
-      "command": "throwaway cmd/broker/zz_tester_break_test.go TestZZDatabaseOutageWhileBrokerRuns (removed after the run; ZZ_PGCTL drove pg_ctl stop/start)",
-      "observed": "--- PASS (87.80s). Survivor held 38.774s at the stop; database back after 58.238s; the broker process stayed up and logged 'the serving clock could not beat' once; its first beat after logged 'gave back ... gap=1m0.037607s ... enrollments=2'; survivor fetch served 746ms after the database came back; renewer, which retried DATABASE_UNAVAILABLE at 2s..10s and never exited, renewed to 44.82s past now 4.186s after; an idle pod whose lease ran out in the outage was not swept and was granted and served its secret",
-      "headSha": "58df5554a1c5ecb5746868fc8b157f32fc636698",
-      "negativeControl": "a pod revoked by its launcher before the outage: fetch 401 PROOF_INVALID not live, renew 401 ENROLLMENT_NOT_LIVE after it"
+      "criterion": "A login the broker really refuses keeps the long schedule",
+      "surface": "same rig, token for an account not in BROKER_SERVICE_LOGINS",
+      "command": "throwaway TestZZDaemonLoginRefusedKeepsLongSchedule",
+      "observed": "first login 403 ACCOUNT_NOT_LISTED; one attempt in the next 25 s ({403:1})",
+      "headSha": "7d770fb5496db78dca02d6db149cad34fb25ef36",
+      "negativeControl": "the refusal itself: 403 ACCOUNT_NOT_LISTED naming system:serviceaccount:legion:someone-else"
     },
     {
-      "criterion": "Break attempts: two brokers on one database both stopped and both started at once; a revoke written during the outage; a given-back lease still ends",
-      "surface": "two real broker processes on one schema, started together (NoWaitForListening), real Postgres",
-      "command": "throwaway TestZZTwoBrokersBothStoppedAndStarted",
-      "observed": "--- PASS (96.66s). Both listened 30.226s after the stop; 'gave back' logged once across both (p1=1, p2=0); a pod with 20s left at the stop had its lease moved by 30.475s (the gap once, 14.982s past now, not doubled) and was served; that given-back lease then lapsed and the sweeper ended it 18.182s after the restart, after which it was refused fetch 401 PROOF_INVALID and renew 401 ENROLLMENT_NOT_LIVE",
-      "headSha": "58df5554a1c5ecb5746868fc8b157f32fc636698",
-      "negativeControl": "a pod revoked by SQL (revoked_at=now()) during the outage: lease unchanged by the beat, fetch 401 PROOF_INVALID not live, renew 401 ENROLLMENT_NOT_LIVE"
-    },
-    {
-      "criterion": "Break attempt: an outage shorter than the threshold gives nothing back; one past the threshold but short of a lease gives the gap back and ends nothing",
-      "surface": "real broker binary, lease 45s, sweep 2s (threshold 6s), real Postgres",
-      "command": "throwaway TestZZShortAndMediumOutages",
-      "observed": "--- PASS (38.90s). 0.5s stop: no 'gave back' line, lease moved 0s. 12s stop: 'gave back ... gap=13.136594s ... enrollments=1', lease moved 13.137s, not revoked",
-      "headSha": "58df5554a1c5ecb5746868fc8b157f32fc636698",
-      "negativeControl": "the short-outage half is itself the control: below three sweeps nothing moves"
-    },
-    {
-      "criterion": "config refuses 2*BROKER_LEASE_SECONDS <= 9*BROKER_SWEEP_SECONDS, at its boundary",
-      "surface": "the real broker binary's start",
-      "command": "throwaway TestZZConfigBoundary",
-      "observed": "lease=14 sweep=3 and lease=10 sweep=2 listen; lease=13 sweep=3 and lease=9 sweep=2 exit 1 'BROKER_LEASE_SECONDS (13) must be more than four and a half times BROKER_SWEEP_SECONDS (3) ...'",
-      "headSha": "58df5554a1c5ecb5746868fc8b157f32fc636698",
-      "negativeControl": "lease=13 sweep=3 refused, exit 1"
+      "criterion": "After an outage longer than the lease, a pod fetches again within one renewal interval of the broker serving (re-run at the merged head)",
+      "surface": "the real broker and agent-secrets binaries on real Postgres 16",
+      "command": "cd packages/envoy && BROKER_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:54488/postgres?sslmode=disable go test -count=1 -v -run TestABrokerOutageLongerThanALease ./cmd/broker",
+      "observed": "--- PASS (85.63s), 0 SKIP; fetch served 136ms after the second broker listened; renewer renewed to 44.966s past now 5.933s after; 'gave back ... gap=58.347543s ... enrollments=2'",
+      "headSha": "7d770fb5496db78dca02d6db149cad34fb25ef36",
+      "negativeControl": "round 1: the same test on eee16056 failed 'agent-secrets: proof invalid: not live (PROOF_INVALID)'; the revoked and lapsed pods in this run are refused 401"
     }
   ]
 }
