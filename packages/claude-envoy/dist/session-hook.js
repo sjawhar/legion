@@ -15375,10 +15375,12 @@ class WriteAttemptSilent extends Error {
     super(`made no progress for ${silenceMs / 1000} s, so it was cut off`);
   }
 }
+var NULL_BODY_STATUSES = new Set([101, 204, 205, 304]);
 async function writeAnswer(response, key) {
   const echoed = keyEchoed(response, key);
-  if (response.ok)
+  if (response.ok || NULL_BODY_STATUSES.has(response.status)) {
     return { response, again: false, reached: false, echoed, unjudged: false };
+  }
   const { status } = response;
   const text = await response.text();
   let shape = {};

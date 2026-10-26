@@ -451,6 +451,40 @@ describe("DispatchClient's writes", () => {
     }
   });
 
+  // A status that carries no body - a 304 - cannot be rebuilt around one: the Fetch standard's
+  // `new Response` refuses a body for it, as Node's and every browser's does. Bun's accepts one, so
+  // the test holds the client to the standard's constructor; the answer is handed on as it came,
+  // and the call fails with Dispatch's status rather than with the client's own TypeError.
+  test("answer a bodiless refusal at once, as it came", async () => {
+    const { fetchImpl, sent } = scripted([
+      new Response(null, { status: 304, statusText: "Not Modified" }),
+    ]);
+    const { retry, pauses } = pacing();
+    const BunResponse = globalThis.Response;
+    globalThis.Response = class extends BunResponse {
+      constructor(body?: BodyInit | null, init?: ResponseInit) {
+        if (
+          body !== null &&
+          body !== undefined &&
+          [101, 204, 205, 304].includes(init?.status ?? 200)
+        ) {
+          throw new TypeError(`Response constructor: a ${init?.status} response has no body`);
+        }
+        super(body, init);
+      }
+    } as typeof Response;
+    try {
+      const error = await failure(client(fetchImpl, retry).comment("DSP-1", comment));
+
+      expect(error).not.toBeInstanceOf(TypeError);
+      expect(error).toEqual(expect.objectContaining({ status: 304 }));
+      expect(sent).toHaveLength(1);
+      expect(pauses).toEqual([]);
+    } finally {
+      globalThis.Response = BunResponse;
+    }
+  });
+
   test("a 409 answered after a retry keeps its code, candidates and message", async () => {
     const candidates = [{ from: 1, to: 2, context: "same" }];
     const { fetchImpl } = scripted([

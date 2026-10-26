@@ -449,17 +449,24 @@ interface WriteAnswer {
   readonly unjudged: boolean;
 }
 
+/** The statuses whose response carries no body, which `new Response` refuses one for. */
+const NULL_BODY_STATUSES: ReadonlySet<number> = new Set([101, 204, 205, 304]);
+
 /**
  * How the retry loop reads one attempt's answer to a write sent under `key`. A 2xx is definitive
- * and handed on unread. Any other answer is read here, for its code and to tell Dispatch's own
- * refusal from a page something in its place wrote, and handed on rebuilt from what was read; it is
- * no definitive answer where `retriesUnderKey` says so: a 5xx (a gateway's, or Dispatch's own, which
- * Dispatch never stores under the key), a 408 or 429 (a timeout or a rate limit), or Dispatch's
- * `409 KEY_IN_FLIGHT` (an earlier attempt still runs under the key).
+ * and handed on unread, and so is an answer whose status carries no body (a 304), which the Fetch
+ * standard's `new Response` would refuse to rebuild. Any other answer is read here, for its code
+ * and to tell Dispatch's own refusal from a page something in its place wrote, and handed on
+ * rebuilt from what was read; it is no definitive answer where `retriesUnderKey` says so: a 5xx (a
+ * gateway's, or Dispatch's own, which Dispatch never stores under the key), a 408 or 429 (a timeout
+ * or a rate limit), or Dispatch's `409 KEY_IN_FLIGHT` (an earlier attempt still runs under the
+ * key).
  */
 async function writeAnswer(response: Response, key: string): Promise<WriteAnswer> {
   const echoed = keyEchoed(response, key);
-  if (response.ok) return { response, again: false, reached: false, echoed, unjudged: false };
+  if (response.ok || NULL_BODY_STATUSES.has(response.status)) {
+    return { response, again: false, reached: false, echoed, unjudged: false };
+  }
   const { status } = response;
   const text = await response.text();
   let shape: DispatchServiceErrorShape = {};
