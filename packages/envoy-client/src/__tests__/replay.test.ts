@@ -565,6 +565,29 @@ describe("replay sweep", () => {
     expect(host.shown.map((frame) => frame.seq)).toEqual([3, 4, 5]);
   });
 
+  test("a retention gap with nothing left to handle writes the moved cursor at once", async () => {
+    const { stream, host, engine, make } = setup();
+    await engine.sweep();
+    stream.publish(AGENT, envelope());
+    stream.publish(AGENT, envelope());
+    stream.expireBelow(3);
+
+    await engine.sweep();
+
+    expect(host.notices.map((notice) => notice.kind)).toEqual(["retention_gap"]);
+    expect(host.writes.at(-1)?.state).toEqual({
+      stream_created: "2026-10-01T00:00:00Z",
+      subjects: { [AGENT]: { since: 0, after: 2 } },
+    });
+
+    // A process killed now resumes from what was written: the gap was told, not found again.
+    const restarted = make();
+    restarted.restore(host.writes.at(-1)?.snapshot() ?? { ledger: [] });
+    await restarted.sweep();
+
+    expect(host.notices.map((notice) => notice.kind)).toEqual(["retention_gap"]);
+  });
+
   test("an unchanged sweep writes nothing; a changed one writes its records and state once", async () => {
     const { stream, host, engine } = setup();
     await engine.sweep();

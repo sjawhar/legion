@@ -43939,7 +43939,7 @@ function createReplayEngine(options) {
     if (entry !== undefined)
       unwritten.push(entry);
   };
-  const flush = (alive, handled = false) => {
+  const flush = (alive, atOnce = false) => {
     writes = writes.then(async () => {
       if (!alive())
         return;
@@ -43948,7 +43948,7 @@ function createReplayEngine(options) {
       if (json2 === writtenState && delivered.length === 0)
         return;
       const shape = stateJSON(false);
-      if (delivered.length === 0 && !handled && shape === writtenShape && writtenAt !== undefined && now() - writtenAt < REPLAY_STATE_REFRESH_MS) {
+      if (delivered.length === 0 && !atOnce && shape === writtenShape && writtenAt !== undefined && now() - writtenAt < REPLAY_STATE_REFRESH_MS) {
         return;
       }
       unwritten = [];
@@ -44240,7 +44240,7 @@ function createReplayEngine(options) {
         if (after > cursor.after)
           cursors.set(subject2, { ...cursor, after });
       }
-      await flush(alive, handledAny);
+      await flush(alive, handledAny || gapNoticed);
       if (![...readings.values()].some((reading) => reading.more))
         break;
     }
