@@ -3,7 +3,15 @@ import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
-import { argsDigest, argvDigest } from "@legion/envoy-client/askgate-marker";
+import {
+  argsDigest,
+  argvDigest,
+  openStore,
+  processStart,
+  writeAskgateRecord,
+} from "@legion/envoy-client/askgate-marker";
+import { runDispatchCli } from "@legion/envoy-client/dispatch-cli";
+import { sessionDirectory } from "@legion/envoy-client/dispatch-session-state";
 import * as core from "./askgate-core";
 import {
   ADVISOR_GATE_ENTRY_TYPE,
@@ -28,8 +36,8 @@ import * as fx from "./askgate-fixtures";
 type DryRunner = (script: string, opts: DryRunOptions) => Promise<DryRunResult>;
 
 /**
- * The suite's own TMPDIR, set before any test runs: every snapshot the gate takes (and every scratch
- * directory a test makes through `tmpdir()`) lands here, and the suite removes it at the end.
+ * The suite's own TMPDIR, set before any test runs: every scratch directory a test makes through
+ * `tmpdir()` lands here, and the suite removes it at the end.
  */
 const CALLER_TMPDIR = process.env.TMPDIR;
 const SUITE_TMP = fs.realpathSync(fs.mkdtempSync(path.join(tmpdir(), "gate-suite-")));
@@ -39,12 +47,15 @@ afterAll(() => {
   if (CALLER_TMPDIR === undefined) delete process.env.TMPDIR;
   else process.env.TMPDIR = CALLER_TMPDIR;
 });
-/** The snapshot directories the gate made under the suite's TMPDIR (`askgate-` and six characters). */
+/**
+ * Directories named as the gate's old snapshots were (`askgate-` and six characters): the gate
+ * reads each file in place now and writes no copy of one, which the suite's last test holds.
+ */
 const snapshotDirs = () =>
   fs.readdirSync(SUITE_TMP).filter((name) => /^askgate-[A-Za-z0-9]{6}$/.test(name));
 /**
  * Ends every call a test's gates were handed, as the runner ends a call's tool, so the gate releases
- * the snapshot each one took: a test that never ends its call would otherwise leave it behind.
+ * the marker each one took: a test that never ends its call would otherwise leave it behind.
  */
 const callEnders: Array<() => Promise<void>> = [];
 afterEach(async () => {
@@ -57,6 +68,7 @@ type MintedMarker = {
   v: number;
   argv: string;
   args: string | null;
+  files: Array<{ flag: string; operand: string; sha256: string }>;
   toolCallId: string;
   outcome: string;
   createdAt: number;
@@ -446,7 +458,7 @@ describe("mode and model role (plan tests c-g)", () => {
       expect(refused?.reason).toContain("modelRoles.askgate");
       expect(failing.entries.map((e) => e.outcome)).toEqual(["no-model-role"]);
       expect(failing.dryRuns).toHaveLength(0);
-      // A literal call whose file the gate cannot capture, which warn mode would otherwise run.
+      // A literal call whose file the gate cannot read, which warn mode would otherwise run.
       const unreadable = bind({ env, roles: {} });
       const fromStdin = await unreadable.bash(
         "u1",
@@ -1062,7 +1074,7 @@ describe("a write that passes unreviewed is recorded and said", () => {
     ]);
     // Delivered once: a second result for the same call carries nothing more.
     expect(await g.event("tool_result", { toolCallId: "js-bash-1", content: [] })).toBeUndefined();
-    // A backgrounded call keeps its snapshot and still gets its note.
+    // A backgrounded call keeps its marker and still gets its note.
     const background = bind({ hasUI: false, complete: async () => ({ text: REVISE }) });
     const warned = await background.device("js-bash-2", "dispatch_comment", COMMENT);
     expect(warned?.additionalContext).toContain("advisor-gate");
@@ -1521,7 +1533,7 @@ console.log(JSON.stringify(args, null, 2));
     expect(g.entries).toHaveLength(0);
   });
   /**
-   * What a literal call whose file the gate cannot capture gives back, by mode: block refuses it
+   * What a literal call whose file the gate cannot read gives back, by mode: block refuses it
    * before it sends, warn runs it and hands the same explanation back as context.
    */
   const unreadableText = (result: Result, mode: string): string => {
@@ -2276,8 +2288,15 @@ console.log(JSON.stringify(args, null, 2));
         "cd inner && dispatch message --issue X-1 --body-file note.txt",
         { cwd: "sub" }
       );
-      expect(first?.input?.command).toContain("/askgate-");
-      expect(second?.input?.command).toContain("/askgate-");
+      expect(first).toBeUndefined();
+      expect(second).toBeUndefined();
+      // Each read the file its own cd reached.
+      const digestOf = (id: string) =>
+        markersIn(g.store).find((m) => m.toolCallId === id)?.files[0]?.sha256;
+      expect([digestOf("cd"), digestOf("rel")]).toEqual([
+        createHash("sha256").update("Body from the working directory.").digest("hex"),
+        createHash("sha256").update("Body from the inner directory.").digest("hex"),
+      ]);
       expect(
         await g.bash("err", "dispatch comment --issue X-1 --body 'Looks right.' 2>&1")
       ).toBeUndefined();
@@ -2470,9 +2489,10 @@ console.log(JSON.stringify(args, null, 2));
       const [marker, ...rest] = markersIn(g.store);
       expect(rest).toEqual([]);
       expect(marker).toMatchObject({
-        v: 1,
+        v: 2,
         argv: argvDigest(ASK_ARGV),
         args: argsDigest(QUESTION_ARGS),
+        files: [],
         toolCallId: "m1",
         outcome: "verdict",
       });
@@ -2484,18 +2504,26 @@ console.log(JSON.stringify(args, null, 2));
       expect(g.entries[0]?.argsDigest).toBe(argsDigest(QUESTION_ARGS));
     });
 
-    test("a write that names a file is keyed by the command that names the snapshot, the one that runs", async () => {
+    // The review of the marker design at cf3f1e021, C1, and its attack, B2: the gate rewrote a file
+    // operand to a snapshot it took when it prepared the message, so a file an earlier call of
+    // the same message wrote was posted in its old text, or refused. It now runs the call as
+    // written and binds the digest of the bytes it reviewed, which the CLI checks.
+    test("a write that names a file runs as written, and its marker binds the file's digest", async () => {
       fs.writeFileSync(path.join(work, "marker-note.md"), "Body from a file.\n");
       const g = bind({ env: STUB, cwd: work });
-      const result = await g.bash("m2", "dispatch comment --issue X-1 --body-file marker-note.md");
-      const ran = result?.input?.command;
-      expect(ran).toContain("/askgate-");
-      const argv = core.commandArgv(ran);
-      expect(argv?.at(-1)).toContain("/askgate-");
+      const command = "dispatch comment --issue X-1 --body-file marker-note.md";
+      expect(await g.bash("m2", command)).toBeUndefined();
       expect(markersIn(g.store)).toMatchObject([
         {
-          argv: argvDigest(argv ?? []),
+          argv: argvDigest(["comment", "--issue", "X-1", "--body-file", "marker-note.md"]),
           args: argsDigest({ issue: "X-1", body: "Body from a file.\n" }),
+          files: [
+            {
+              flag: "--body-file",
+              operand: "marker-note.md",
+              sha256: createHash("sha256").update("Body from a file.\n").digest("hex"),
+            },
+          ],
           outcome: "verdict",
         },
       ]);
@@ -2607,6 +2635,17 @@ console.log(JSON.stringify(args, null, 2));
       expect(fs.readFileSync(path.join(switching.store, "mode"), "utf8")).toBe("block");
     });
 
+    // The mint comes once, after every check and after the record: a write no review stands
+    // behind whose record fails is refused, and leaves no marker the CLI could spend.
+    test("a write no review stands behind whose record fails is refused, and mints no marker", async () => {
+      const g = bind({ env: { ...STUB, OMP_ASKGATE: "warn" }, cwd: work, recordThrows: true });
+      // The stub refuses `--fail` at its dry run: no review stands behind the call.
+      const result = await g.bash("unrecorded", "dispatch message --issue X-1 --fail");
+      expect(result?.block).toBe(true);
+      expect(result?.reason).toContain("could not record that in the session");
+      expect(markersIn(g.store)).toEqual([]);
+    });
+
     test("a marker that cannot be minted refuses the call, naming why", async () => {
       const store = path.join(SUITE_TMP, `not-a-directory-${Date.now()}`);
       fs.writeFileSync(store, "a file where the store goes");
@@ -2632,23 +2671,36 @@ console.log(JSON.stringify(args, null, 2));
         "u1",
         "dispatch artifact --issue DSP-1 --name brief.md --content-file brief.md"
       );
-      expect(result?.input?.command).toContain("/askgate-");
+      expect(result).toBeUndefined();
       expect(g.calls).toHaveLength(1);
       expect(g.calls[0].user).toContain(JSON.stringify(BRIEF));
       expect(g.calls[0].user).toContain(uploadRule);
       expect(g.entries).toMatchObject([{ tool: "dispatch_artifact", outcome: "verdict" }]);
     });
-    test("(b) --path reaches the model with the snapshot path and the source text", async () => {
+    test("(b) --path reaches the model with the path as written and the file's text, and the marker binds the printed arguments", async () => {
       const g = bind({ env: STUB, cwd: work });
       const result = await g.bash(
         "u2",
         "dispatch artifact --issue DSP-1 --name brief.md --path brief.md"
       );
-      expect(result?.input?.command).toContain("/askgate-");
+      expect(result).toBeUndefined();
       expect(g.calls).toHaveLength(1);
       expect(g.calls[0].user).toContain(`"content": ${JSON.stringify(BRIEF)}`);
-      expect(g.calls[0].user).toContain(`"path": "${SUITE_TMP}/askgate-`);
+      expect(g.calls[0].user).toContain(`"path": "brief.md"`);
       expect(g.calls[0].user).toContain(uploadRule);
+      // The dry run's own arguments, never the review's `content` (review C1 at cf3f1e021).
+      expect(markersIn(g.store)).toMatchObject([
+        {
+          args: argsDigest({ issue: "DSP-1", name: "brief.md", path: "brief.md" }),
+          files: [
+            {
+              flag: "--path",
+              operand: "brief.md",
+              sha256: createHash("sha256").update(BRIEF).digest("hex"),
+            },
+          ],
+        },
+      ]);
     });
     test("(c) after a leading cd, a relative --path is read from the directory the cd reached, which bash names", async () => {
       const g = bind({ env: STUB, cwd: work });
@@ -2730,23 +2782,21 @@ console.log(JSON.stringify(args, null, 2));
     });
     // The second final review of #2159, N1: the CLI opens `resolvePath(cwd, path)`, which removes
     // a `..` before the kernel sees the link, also for an absolute operand.
-    test("N1: an absolute --path with .. after a symlink is read and posted as the CLI resolves it", async () => {
-      const posted = path.join(work, "n1-posted.json");
-      fs.rmSync(posted, { force: true });
+    test("N1: an absolute --path with .. after a symlink is read and bound as the CLI resolves it", async () => {
       const command = `dispatch artifact --issue DSP-1 --name brief.md --path ${work}/link/../brief.md`;
       const g = bind({ env: STUB, cwd: work });
       const result = await g.bash("n1", command);
-      expect(result?.block).toBeUndefined();
+      expect(result).toBeUndefined();
       expect(g.calls).toHaveLength(1);
       expect(g.calls[0].user).toContain(`"content": ${JSON.stringify(BRIEF)}`);
-      const child = Bun.spawn(["bash", "-c", result?.input?.command as string], {
-        cwd: work,
-        env: { ...process.env, ...STUB, ASKGATE_POSTED: posted },
-        stdout: "ignore",
-        stderr: "ignore",
-      });
-      expect(await child.exited).toBe(0);
-      expect(JSON.parse(fs.readFileSync(posted, "utf8"))).toMatchObject({ content: BRIEF });
+      // The CLI's own check reads the same file (`operandPath`), so the digest names its bytes.
+      expect(markersIn(g.store)[0]?.files).toEqual([
+        {
+          flag: "--path",
+          operand: `${work}/link/../brief.md`,
+          sha256: createHash("sha256").update(BRIEF).digest("hex"),
+        },
+      ]);
     });
     test("(h) a directory whose name ends in a space keeps that space", async () => {
       fs.mkdirSync(path.join(work, "spaced "), { recursive: true });
@@ -2769,6 +2819,9 @@ console.log(JSON.stringify(args, null, 2));
       );
       expect(result?.block).toBe(true);
       expect(result?.reason).toContain("does not exist");
+      expect(result?.reason).toContain(
+        "If a call earlier in this message writes or changes the file, send this call again in a later message."
+      );
       expect(g.calls).toHaveLength(0);
       expect(g.entries).toMatchObject([{ tool: "dispatch_artifact", outcome: "unreadable" }]);
     });
@@ -2880,7 +2933,7 @@ console.log(JSON.stringify(args, null, 2));
         }
         expect(g.calls).toHaveLength(0);
         expect(g.entries.map((e) => e.outcome)).toEqual(Array(refused.length).fill("unreadable"));
-        // Nothing of the host's own descriptor reached the model or a snapshot.
+        // Nothing of the host's own descriptor reached the model.
         expect(JSON.stringify(g.entries)).not.toContain("own descriptor");
         // A link to an ordinary directory, outside /proc and /dev, still reads its regular file.
         const ok = bind({ env: STUB, cwd: work });
@@ -2910,29 +2963,22 @@ console.log(JSON.stringify(args, null, 2));
       const link = path.join(work, "f6-link");
       fs.rmSync(link, { force: true });
       fs.symlinkSync(other, link);
-      const posted = path.join(work, "f6-posted.json");
-      fs.rmSync(posted, { force: true });
       const command = "dispatch comment --issue X-1 --body-file f6-link/../f6-note.txt";
       const g = bind({ env: STUB, cwd: work });
       const result = await g.bash("f6", command);
-      // The gate reviews the file the CLI reads, and posts the snapshot of that file: it neither
-      // refuses the call nor reviews one file and posts another.
-      expect(result?.block).toBeUndefined();
+      // The gate reviews the file the CLI reads, and binds that file's digest: it neither refuses
+      // the call nor reviews one file and binds another.
+      expect(result).toBeUndefined();
       expect(g.calls).toHaveLength(1);
       expect(g.calls[0]?.user).toContain("The file the CLI would post.");
       expect(g.calls[0]?.user).not.toContain("The file beside the link.");
-      const postedCommand = result?.input?.command;
-      expect(postedCommand).toContain(`${SUITE_TMP}/askgate-`);
-      const child = Bun.spawn(["bash", "-c", postedCommand as string], {
-        cwd: work,
-        env: { ...process.env, ...STUB, ASKGATE_POSTED: posted },
-        stdout: "ignore",
-        stderr: "ignore",
-      });
-      expect(await child.exited).toBe(0);
-      expect(JSON.parse(fs.readFileSync(posted, "utf8")).body).toBe(
-        "The file the CLI would post.\n"
-      );
+      expect(markersIn(g.store)[0]?.files).toEqual([
+        {
+          flag: "--body-file",
+          operand: "f6-link/../f6-note.txt",
+          sha256: createHash("sha256").update("The file the CLI would post.\n").digest("hex"),
+        },
+      ]);
     }, 30_000);
 
     test("an unreadable --path is told to send the text with --content-file -, never --path -, which the CLI opens as a file named -", async () => {
@@ -2958,63 +3004,44 @@ console.log(JSON.stringify(args, null, 2));
       expect(followed?.block).toBeUndefined();
       expect(g.calls).toHaveLength(1);
     });
-    test("astra 5: an artifact posts the file snapshot reviewed before the model answers", async () => {
-      const source = path.join(work, "snapshot.md");
-      const posted = path.join(work, "snapshot-posted.json");
-      const reviewed = "# reviewed upload\n";
-      fs.writeFileSync(source, reviewed);
-      const command = "dispatch artifact --issue DSP-1 --name snapshot.md --path snapshot.md";
-      const g = bind({
-        env: STUB,
-        cwd: work,
-        complete: async () => {
-          fs.writeFileSync(source, "# changed after review\n");
-          return { text: ALLOW };
-        },
+    // Astra 5 at an earlier head: a file changed while the model reviews it. The marker binds the
+    // bytes the model saw, so the CLI refuses the changed file (envoy-client's
+    // dispatch-askgate.test.ts, and the real-CLI rows below).
+    const reviewedThenChanged: Array<[string, string, string, string]> = [
+      [
+        "an upload's --path",
+        "snapshot.md",
+        "--path",
+        "dispatch artifact --issue DSP-1 --name snapshot.md --path snapshot.md",
+      ],
+      [
+        "a --question-file",
+        "snapshot-question.md",
+        "--question-file",
+        "dispatch ask --issue DSP-1 --question-file snapshot-question.md",
+      ],
+    ];
+    for (const [form, file, flag, command] of reviewedThenChanged)
+      test(`astra 5: the marker binds the bytes the model reviewed, not a change made during the review: ${form}`, async () => {
+        const source = path.join(work, file);
+        const reviewed = "Should the deployment wait for approval?\n";
+        fs.writeFileSync(source, reviewed);
+        const g = bind({
+          env: STUB,
+          cwd: work,
+          complete: async () => {
+            fs.writeFileSync(source, "Changed after AskGate reviewed it.\n");
+            return { text: ALLOW };
+          },
+        });
+        expect(await g.bash("changed-in-review", command)).toBeUndefined();
+        expect(g.calls[0]?.user).toContain(JSON.stringify(reviewed));
+        expect(markersIn(g.store)[0]?.files).toEqual([
+          { flag, operand: file, sha256: createHash("sha256").update(reviewed).digest("hex") },
+        ]);
       });
-
-      const result = await g.bash("snapshot", command);
-      const postedCommand = (result?.input?.command as string | undefined) ?? command;
-      const child = Bun.spawn(["bash", "-c", postedCommand], {
-        cwd: work,
-        env: { ...process.env, ...STUB, ASKGATE_POSTED: posted },
-        stdout: "ignore",
-        stderr: "ignore",
-      });
-      expect(await child.exited).toBe(0);
-      expect(JSON.parse(fs.readFileSync(posted, "utf8"))).toMatchObject({ content: reviewed });
-      expect(g.calls[0]?.user).toContain(JSON.stringify(reviewed));
-    });
-    test("a --question-file posts the snapshot that AskGate reviewed", async () => {
-      const source = path.join(work, "snapshot-question.md");
-      const posted = path.join(work, "snapshot-question-posted.json");
-      const reviewed = "Should the deployment wait for approval?\n";
-      fs.writeFileSync(source, reviewed);
-      const command = "dispatch ask --issue DSP-1 --question-file snapshot-question.md";
-      const g = bind({
-        env: STUB,
-        cwd: work,
-        complete: async () => {
-          fs.writeFileSync(source, "Changed after AskGate reviewed it.\n");
-          return { text: ALLOW };
-        },
-      });
-
-      const result = await g.bash("snapshot-question", command);
-      const postedCommand = result?.input?.command as string | undefined;
-      expect(postedCommand).toBeString();
-      const child = Bun.spawn(["bash", "-c", postedCommand ?? command], {
-        cwd: work,
-        env: { ...process.env, ...STUB, ASKGATE_POSTED: posted },
-        stdout: "ignore",
-        stderr: "ignore",
-      });
-      expect(await child.exited).toBe(0);
-      expect(JSON.parse(fs.readFileSync(posted, "utf8"))).toMatchObject({ question: reviewed });
-      expect(g.calls[0]?.user).toContain(JSON.stringify(reviewed));
-    });
-    // A gate that fails must break no valid write: the rewritten command names a snapshot the
-    // agent never saw, so an outcome without a verdict hands the agent's own command back.
+    // A gate that fails must break no valid write: an outcome without a verdict hands the
+    // agent's own command back, with an argv-only marker.
     const FAILED_REVIEW: Array<[string, BindOptions]> = [
       [
         "a dry run that throws",
@@ -3052,88 +3079,6 @@ console.log(JSON.stringify(args, null, 2));
         expect(run.exitCode).toBe(0);
         expect(JSON.parse(fs.readFileSync(posted, "utf8"))).toMatchObject({ question: text });
       });
-
-    test("a snapshot is released when the tool reports its result", async () => {
-      const source = path.join(work, "release-snapshot.md");
-      fs.writeFileSync(source, "Release this snapshot after posting.\n");
-      const g = bind({ env: STUB, cwd: work });
-
-      const result = await g.bash(
-        "release-snapshot",
-        "dispatch ask --issue DSP-1 --question-file release-snapshot.md"
-      );
-      const command = result?.input?.command as string;
-      const snapshot = /'([^']*\/askgate-[^']*\/0[^']*)'/.exec(command)?.[1];
-      expect(snapshot).toBeString();
-      expect(fs.existsSync(snapshot ?? "")).toBe(true);
-
-      await g.event("tool_result", { toolCallId: "release-snapshot" });
-
-      expect(fs.existsSync(snapshot ?? "")).toBe(false);
-    });
-    test("a gated --question-file call snapshots under the suite's own TMPDIR, and its end event removes the snapshot", async () => {
-      fs.writeFileSync(path.join(work, "ended-question.md"), QUESTION);
-      const g = bind({ env: STUB, cwd: work });
-      const result = await g.bash(
-        "ended",
-        "dispatch ask --issue DSP-1 --question-file ended-question.md"
-      );
-      expect(result?.input?.command).toContain(`${SUITE_TMP}/askgate-`);
-      expect(snapshotDirs()).toHaveLength(1);
-      await g.event("tool_execution_end", { toolCallId: "ended", toolName: "bash" });
-      expect(snapshotDirs()).toEqual([]);
-    });
-    // `async: true`, and `bash.autoBackground` past its threshold, return the job's start result:
-    // the host fires tool_result and tool_execution_end before the shell runs the command. A
-    // snapshot released there leaves the command reading a path that is gone (census, contract 3).
-    test("a backgrounded call keeps its snapshot past tool_result, and the command then posts it", async () => {
-      const source = path.join(work, "background-question.md");
-      const posted = path.join(work, "background-posted.json");
-      const reviewed = "Should the release wait for the soak?\n";
-      fs.writeFileSync(source, reviewed);
-      const g = bind({ env: STUB, cwd: work });
-      const result = await g.bash(
-        "bg",
-        "dispatch ask --issue DSP-1 --question-file background-question.md",
-        { async: true }
-      );
-      const command = result?.input?.command as string;
-      expect(command).toContain("/askgate-");
-
-      const started = { async: { state: "running", jobId: "job-1", type: "bash" } };
-      await g.event("tool_result", { toolCallId: "bg", toolName: "bash", details: started });
-      await g.event("tool_execution_end", {
-        toolCallId: "bg",
-        toolName: "bash",
-        result: { content: [], details: started },
-      });
-
-      const run = Bun.spawnSync(["bash", "-c", command], {
-        cwd: work,
-        env: { ...process.env, ...STUB, ASKGATE_POSTED: posted },
-      });
-      expect(run.exitCode).toBe(0);
-      expect(JSON.parse(fs.readFileSync(posted, "utf8"))).toMatchObject({ question: reviewed });
-      await g.event("session_shutdown");
-      expect(snapshotDirs()).toEqual([]);
-    });
-    test("a snapshot a day old is removed at the next gated call", async () => {
-      const stale = fs.mkdtempSync(path.join(SUITE_TMP, "askgate-"));
-      fs.writeFileSync(path.join(stale, "0.md"), "left by a killed session\n");
-      const old = (Date.now() - 25 * 60 * 60 * 1000) / 1000;
-      fs.utimesSync(stale, old, old);
-      fs.writeFileSync(path.join(work, "sweep-question.md"), QUESTION);
-      const g = bind({ env: STUB, cwd: work });
-
-      const result = await g.bash(
-        "sweep",
-        "dispatch ask --issue DSP-1 --question-file sweep-question.md"
-      );
-
-      expect(result?.input?.command).toContain("/askgate-");
-      expect(fs.existsSync(stale)).toBe(false);
-      expect(snapshotDirs()).toHaveLength(1);
-    });
 
     test("(e) an upload of shot.png never reaches the model", async () => {
       const g = bind({ env: STUB, cwd: work });
@@ -3178,7 +3123,7 @@ console.log(JSON.stringify(args, null, 2));
         "u13",
         "dispatch artifact --issue DSP-1 --name-file name-png.txt --path shot.png"
       );
-      expect(result?.input?.command).toContain("/askgate-");
+      expect(result).toBeUndefined();
       expect(g.dryRuns).toHaveLength(1);
       expect(g.calls).toHaveLength(0);
       expect(g.entries).toHaveLength(0);
@@ -3298,13 +3243,16 @@ describe("sessions", () => {
     expect(g.calls[2].user).not.toContain("You answered revise");
   });
   // The second final review of #2159, N5: a switch released every snapshot, also the snapshot of
-  // a call whose shell had not read it yet, so that write failed. A snapshot now goes only on its
-  // own call's end event, or at shutdown.
-  test("N5: a session switch keeps each snapshot until its own call's end event, or until shutdown", async () => {
+  // a call whose shell had not read it yet, so that write failed. The gate takes no snapshot now;
+  // a marker likewise goes only on its own call's end event, or at shutdown.
+  test("N5: a session switch keeps each marker until its own call's end event, or until shutdown", async () => {
     const work = fs.mkdtempSync(path.join(tmpdir(), "askgate-switch-"));
     fs.writeFileSync(path.join(work, "note.txt"), "Body from the session before.\n");
     const g = bind({ env: { PATH: "/usr/bin:/bin" }, cwd: work });
-    const before = snapshotDirs().length;
+    const ids = () =>
+      markersIn(g.store)
+        .map((m) => m.toolCallId)
+        .sort();
     await g.bash("waiting", "dispatch comment --issue X-1 --body-file note.txt");
     await g.bash("bg", "dispatch comment --issue X-1 --body-file note.txt");
     await g.event("tool_result", {
@@ -3312,13 +3260,13 @@ describe("sessions", () => {
       toolName: "bash",
       details: { async: { state: "running" } },
     });
-    expect(snapshotDirs().length).toBe(before + 2);
+    expect(ids()).toEqual(["bg", "waiting"]);
     await g.event("session_switch", { reason: "new" });
-    expect(snapshotDirs().length).toBe(before + 2);
+    expect(ids()).toEqual(["bg", "waiting"]);
     await g.event("tool_execution_end", { toolCallId: "waiting", toolName: "bash" });
-    expect(snapshotDirs().length).toBe(before + 1);
+    expect(ids()).toEqual(["bg"]);
     await g.event("session_shutdown");
-    expect(snapshotDirs().length).toBe(before);
+    expect(ids()).toEqual([]);
     fs.rmSync(work, { recursive: true, force: true });
   }, 30_000);
   // The second re-gate of #2159, non-blocking: `./dispatch` is the literal grammar, and reading
@@ -3930,8 +3878,153 @@ describe("askgate.ts, the entry", () => {
   });
 });
 
-// Runs last: every gated call of every earlier test was ended after its test (`bind`'s calls,
-// ended by the suite's afterEach as the runner ends a call's tool), so no snapshot outlived its test.
-test("no gated call of an earlier test left a snapshot directory behind", () => {
+// The review of the marker design at cf3f1e021, C1, and its attack, B1 and B2: no test drove a
+// marker the gate minted through the CLI's own check, and a reviewed upload by `--path` was
+// refused there. Here the gate runs its dry run on the real CLI, mints through its real code
+// path, and the real CLI (`runDispatchCli`, with a fake Dispatch) checks the marker and posts.
+describe("a marker the gate mints, checked by the real dispatch CLI", () => {
+  const work = fs.realpathSync(fs.mkdtempSync(path.join(tmpdir(), "askgate-real-cli-")));
+  afterAll(() => fs.rmSync(work, { recursive: true, force: true }));
+  const bin = path.join(work, "bin");
+  fs.mkdirSync(bin);
+  const entry = path.join(import.meta.dir, "..", "..", "..", "envoy-client", "bin", "dispatch.ts");
+  fs.writeFileSync(
+    path.join(bin, "dispatch"),
+    `#!/bin/sh\nexec "${process.execPath}" "${entry}" "$@"\n`,
+    { mode: 0o755 }
+  );
+  const env = {
+    PATH: `${bin}:${process.env.PATH}`,
+    HOME: work,
+    DISPATCH_HOST: "omp",
+    DISPATCH_SESSION_ID: "ses-real-cli",
+    DISPATCH_STATE_DIR: path.join(work, "state"),
+    DISPATCH_URL: "http://127.0.0.1:9",
+    DISPATCH_TOKEN: "test-token",
+  };
+  const BRIEF = "# Brief\n\nShip it on Friday.\n";
+  const NOTE = "The acceptance run passed on the staging cluster.\n";
+  const CHANGED = "a file this write posts changed after AskGate reviewed it";
+  const LATER = "send this call again in a later message";
+
+  /** Posts `command` with the real CLI, as the session whose live record names `store`. */
+  async function post(command: string, store: string) {
+    // This test process stands in for Oh My Pi, whose record makes the CLI ask for a marker.
+    openStore(store);
+    writeAskgateRecord(sessionDirectory(env, env.DISPATCH_SESSION_ID), {
+      pid: process.pid,
+      start: processStart(process.pid),
+      store,
+    });
+    const sent: Array<{ path: string; body: unknown }> = [];
+    const fetchImpl = (async (url: string | URL | Request, init?: RequestInit) => {
+      const route = new URL(String(url)).pathname;
+      if (route.endsWith("/artifacts")) {
+        const file = (init?.body as FormData).get("file") as Blob;
+        sent.push({ path: route, body: await file.text() });
+        return Response.json({
+          artifact: { id: "artifact-1", issue_key: "DSP-1", name: "brief.md", slug: "brief-md" },
+          version: { number: 1 },
+        });
+      }
+      sent.push({ path: route, body: JSON.parse(String(init?.body)) });
+      return Response.json({
+        id: "comment-1",
+        issue_key: "DSP-1",
+        advice: { issue_status: "in_progress", session_writes_since_human: 0, your_open_asks: [] },
+      });
+    }) as typeof fetch;
+    let stdout = "";
+    const code = await runDispatchCli(core.commandArgv(command) ?? [], env, {
+      stdout: (text) => {
+        stdout += text;
+      },
+      stderr: () => {},
+      readText: (file) => fs.readFileSync(path.resolve(work, file), "utf8"),
+      cwd: work,
+      fetchImpl,
+    });
+    return { code, stdout, sent };
+  }
+
+  test("a reviewed markdown upload by --path posts the bytes the model reviewed, once", async () => {
+    fs.writeFileSync(path.join(work, "brief.md"), BRIEF);
+    const command = "dispatch artifact --issue DSP-1 --name brief.md --path brief.md";
+    const g = bind({ env, cwd: work });
+    expect(await g.bash("upload", command)).toBeUndefined();
+    expect(g.calls[0]?.user).toContain(`"content": ${JSON.stringify(BRIEF)}`);
+    const posted = await post(command, g.store);
+    expect(posted.stdout).not.toContain("was not called");
+    expect(posted.code).toBe(0);
+    expect(posted.sent).toEqual([{ path: "/api/v1/issues/DSP-1/artifacts", body: BRIEF }]);
+    // The marker is spent: the same call again is refused.
+    expect((await post(command, g.store)).code).toBe(1);
+  }, 30_000);
+
+  test("a reviewed --body-file posts the text the model reviewed, once", async () => {
+    fs.writeFileSync(path.join(work, "note.md"), NOTE);
+    const command = "dispatch comment --issue DSP-1 --body-file note.md";
+    const g = bind({ env, cwd: work });
+    expect(await g.bash("comment", command)).toBeUndefined();
+    const posted = await post(command, g.store);
+    expect(posted.code).toBe(0);
+    expect(posted.sent).toMatchObject([
+      { path: "/api/v1/issues/DSP-1/comments", body: { body: NOTE } },
+    ]);
+  }, 30_000);
+
+  for (const [form, file, command] of [
+    ["--body-file", "note.md", "dispatch comment --issue DSP-1 --body-file note.md"],
+    ["--path", "brief.md", "dispatch artifact --issue DSP-1 --name brief.md --path brief.md"],
+  ] as const)
+    test(`a ${form} file edited between the review and the post is refused, and nothing posts`, async () => {
+      fs.writeFileSync(path.join(work, file), BRIEF);
+      const g = bind({ env, cwd: work });
+      expect(await g.bash("edited", command)).toBeUndefined();
+      // An `edit` later in the same message changes the file after the gate read it.
+      fs.writeFileSync(path.join(work, file), `${BRIEF}An edit made in the same message.\n`);
+      const posted = await post(command, g.store);
+      expect(posted.code).toBe(1);
+      expect(posted.stdout).toContain(`${CHANGED} (\`${form} ${file}\`)`);
+      expect(posted.stdout).toContain("Send the call again in a later message.");
+      expect(posted.sent).toEqual([]);
+    }, 30_000);
+
+  test("a file a call earlier in the same message writes is refused with what to do, then posts when sent again", async () => {
+    const file = path.join(work, "later.md");
+    fs.rmSync(file, { force: true });
+    const command = "dispatch comment --issue DSP-1 --body-file later.md";
+    const g = bind({ env: { ...env, OMP_ASKGATE: "block" }, cwd: work });
+    // Oh My Pi runs the gate for every call of a message before the `write` that makes the file.
+    const refused = await g.bash("first", command);
+    expect(refused?.block).toBe(true);
+    expect(refused?.reason).toContain("does not exist");
+    expect(refused?.reason).toContain(LATER);
+    expect(g.calls).toHaveLength(0);
+    fs.writeFileSync(file, NOTE);
+    expect(await g.bash("again", command)).toBeUndefined();
+    const posted = await post(command, g.store);
+    expect(posted.code).toBe(0);
+    expect(posted.sent).toMatchObject([{ body: { body: NOTE } }]);
+  }, 30_000);
+
+  test("in warn mode a file that is missing when the gate runs passes unreviewed, with the same text as its note", async () => {
+    fs.rmSync(path.join(work, "missing.md"), { force: true });
+    const g = bind({ env: { ...env, OMP_ASKGATE: "warn" }, cwd: work });
+    const result = await g.bash(
+      "warn-missing",
+      "dispatch comment --issue DSP-1 --body-file missing.md"
+    );
+    expect(result?.block).toBeUndefined();
+    expect(result?.additionalContext).toContain(LATER);
+    expect(result?.additionalContext).toContain("The call ran unreviewed.");
+    expect(g.entries).toMatchObject([{ outcome: "unreadable", decision: "allow" }]);
+    expect(markersIn(g.store)).toMatchObject([{ args: null, outcome: "unreadable" }]);
+  }, 30_000);
+});
+
+// Runs last: the gate reads each file in place, so no gated call of an earlier test left a copy of
+// a file under the suite's TMPDIR.
+test("no gated call of an earlier test made a snapshot directory", () => {
   expect(snapshotDirs()).toEqual([]);
 });

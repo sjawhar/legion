@@ -60,8 +60,9 @@ const ASKS = "/api/v1/issues/DSP-1/asks";
  * The `dispatch` is a stand-in whose --dry-run prints the arguments and whose send prints that it
  * sent, or, with `cli: "real"`, a shim that runs the real CLI from source against the fake Dispatch
  * the stand-in serves, which records each ask it takes. `envoyJson` is the session's envoy.json and
- * `config` lines are added to the profile's config.yml. Gives back every request the stand-in took
- * and where the session file landed.
+ * `config` lines are added to the profile's config.yml. `files` are written into the root, beside
+ * `bin/`, before the session starts, and `dispatchUrl` names another fake Dispatch. Gives back every
+ * request the stand-in took and where the session file landed.
  */
 async function runSession(options: {
   gateAnswer: string;
@@ -69,6 +70,8 @@ async function runSession(options: {
   cli?: "standin" | "real";
   envoyJson?: string;
   config?: readonly string[];
+  files?: Readonly<Record<string, string>>;
+  dispatchUrl?: string;
 }): Promise<{ requests: Request[]; sessions: string }> {
   if (omp === undefined) throw new Error("LEGION_TEST_OMP is unset on GitHub Actions");
   const { root, home, workspace, sessions } = await ompRoot(omp, "askgate-omp-", cleanup);
@@ -91,6 +94,8 @@ async function runSession(options: {
   );
   await chmod(dispatch, 0o755);
   await writeFile(path.join(root, "envoy.json"), options.envoyJson ?? "{}\n");
+  for (const [name, text] of Object.entries(options.files ?? {}))
+    await writeFile(path.join(root, name), text);
 
   let turns = 0;
   const { requests, base } = serveStandin(cleanup, (url, body) => {
@@ -138,7 +143,7 @@ async function runSession(options: {
       sessions,
       env: {
         ENVOY_URL: base,
-        DISPATCH_URL: base,
+        DISPATCH_URL: options.dispatchUrl ?? base,
         DISPATCH_TOKEN: "askgate-token",
         ENVOY_CONFIG_FILE: path.join(root, "envoy.json"),
       },
@@ -286,6 +291,53 @@ test.skipIf(omp === undefined && !onActions)(
     expect(lastTurn(requests)).not.toContain(REFUSED);
     expect(await gateEntries(sessions)).toMatchObject([
       { tool: "dispatch_ask", outcome: "verdict", decision: "allow" },
+    ]);
+  },
+  180_000
+);
+
+// The review of the marker design at cf3f1e021, C1: the gate bound an upload's marker to its own
+// review input, so the CLI refused every reviewed markdown upload by `--path`. The fake Dispatch
+// here takes the upload's form and records the file's bytes.
+test.skipIf(omp === undefined && !onActions)(
+  "the real CLI: a markdown upload by --path is reviewed, carries its marker and posts its bytes once",
+  async () => {
+    const brief = "# Brief\n\nShip the release today.\n";
+    const uploads: string[] = [];
+    const fake = Bun.serve({
+      port: 0,
+      async fetch(request) {
+        const route = new URL(request.url).pathname;
+        if (request.method === "POST" && route === "/api/v1/issues/DSP-1/artifacts") {
+          const file = (await request.formData()).get("file");
+          uploads.push(file instanceof Blob ? await file.text() : "");
+          return Response.json({
+            artifact: { id: "artifact-1", issue_key: "DSP-1", name: "brief.md", slug: "brief-md" },
+            version: { number: 1 },
+          });
+        }
+        // An unavailable open-asks read arms no run-end self-check.
+        return new Response("unavailable", { status: 503 });
+      },
+    });
+    cleanup.push(() => fake.stop(true));
+    const { requests, sessions } = await runSession({
+      cli: "real",
+      gateAnswer: '{"decision":"allow"}',
+      dispatchUrl: `http://127.0.0.1:${fake.port}`,
+      files: { "brief.md": brief },
+      firstTurn: (dispatch) => ({
+        type: "tool_use",
+        name: "bash",
+        input: {
+          command: `${dispatch} artifact --issue DSP-1 --name brief.md --path ${path.join(path.dirname(path.dirname(dispatch)), "brief.md")}`,
+        },
+      }),
+    });
+    expect(uploads).toEqual([brief]);
+    expect(lastTurn(requests)).not.toContain("was not called");
+    expect(await gateEntries(sessions)).toMatchObject([
+      { tool: "dispatch_artifact", outcome: "verdict", decision: "allow" },
     ]);
   },
   180_000

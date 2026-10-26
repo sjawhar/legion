@@ -4,9 +4,8 @@
 // tests drive it through a fake `pi`, a fake `ctx` and stubs.
 //
 // What this is not: AskGate reviews the writes of a cooperating agent, and it is no sandbox. A
-// process running as the same user defeats it. It can replace a snapshot's bytes between the
-// review and the open (the snapshot is 0600 in a 0700 directory, which keeps out other users, not
-// this one), turn the gate off in its own envoy.json, or point the session at another envoy.json
+// process running as the same user defeats it. It can remove the record or a marker, turn the
+// gate off in its own envoy.json, or point the session at another envoy.json
 // through OMP_PROFILE, PI_CODING_AGENT_DIR, ENVOY_CONFIG_FILE, XDG_CONFIG_HOME or HOME in the
 // launching shell (the variables `envoyConfigPath` reads, in that order). Every check here is for
 // a write an agent meant to send; none of them is weakened, and none is added for an attacker of
@@ -16,7 +15,8 @@
 // literal grammar below, and refuses no call by reading any other: a call in another form runs as
 // written. For each literal call it lets run it mints one single-use marker
 // (`@legion/envoy-client/askgate-marker`), keyed by the argv the CLI will receive and, behind a
-// review or a deliberate pass, bound to the digest of the dry run's arguments. The CLI posts a
+// review or a deliberate pass, bound to the digest of the dry run's arguments and to the sha256 of
+// each file the argv names, as the gate read it for the review. The CLI posts a
 // gated write in a session whose record a live Oh My Pi process keeps (envoy.ts writes it) only
 // when it consumes such a marker, so a write sent in any other form, from a pipe, a script,
 // `python3 -c`, an eval cell's process or anything else, is refused when it runs. The CLI's check
@@ -47,14 +47,16 @@
 //     `error` and the call runs (the CLI refuses arguments it cannot parse, before it sends
 //     anything). A `dispatch` command with `--dry-run` or `--help` sends nothing and is not
 //     reviewed. An upload given with `--path` prints the path, not the text. Every file whose
-//     text the write posts, that path and each `--<field>-file`, is copied
-//     into a private snapshot the gate owns before the model is asked. The gate reviews the
-//     snapshot's bytes as `content` and rewrites the call to post the snapshot, so the bytes that
-//     post are the bytes reviewed. An `--image` file is no part of that: the model reads its path
-//     and not its bytes, and the gate takes no snapshot of it, since the CLI names the upload
-//     after the file it opens when it sends (`localPicture`, the basename of the resolved path),
-//     which a snapshot would rename. It reads a regular file alone: a missing file, a directory, a
-//     device, a FIFO and `/dev/stdin` are refused as `unreadable` before any read.
+//     text the write posts, that path and each `--<field>-file`, is read in place before the
+//     model is asked, and the call runs as written. The model reviews those bytes (an upload's
+//     as `content`), and the marker binds the sha256 of each file in argv order. The CLI reads
+//     each file again before it posts and refuses one whose bytes changed since the review (a
+//     call earlier in the same message can change it: Oh My Pi runs every `tool_call` hook of a
+//     message before any call of it runs), and an upload sends the bytes the CLI read for that
+//     check. An `--image` file is no part of that: the model reads its path and not its bytes.
+//     It reads a regular file alone: a missing file, a directory, a device, a FIFO and
+//     `/dev/stdin` are refused as `unreadable` before any read, with the advice to send the
+//     call again in a later message when an earlier call of the same message writes the file.
 //     The arguments are cut at 64 KiB as one JSON block, so the document gets less than 64 KiB of
 //     it. A relative path resolves where the CLI resolves it, against its
 //     `process.cwd()`, the physical directory the command runs in after its own `cd`: bash names
@@ -158,11 +160,15 @@
 // and user prompts are appended to, owner-only and never through a symlink.
 import { createHash } from "node:crypto";
 import * as fs from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
 import {
+  bytesDigest,
+  type FileDigest,
+  type FileOperand,
+  fileOperands,
   gatedWrite,
   mintMarker,
+  operandPath,
   setStoreMode,
   uploadIsDocument,
 } from "@legion/envoy-client/askgate-marker";
@@ -226,10 +232,6 @@ const RECOMMENDED_CEILING_MS = 120_000;
 // waits at most SHUTDOWN_WAIT_MS for their records.
 const SHUTDOWN_GRACE_MS = 1_000;
 const SHUTDOWN_WAIT_MS = 1_500;
-// What bounds the snapshots the gate keeps: a backgrounded call's snapshot stays until the session
-// shuts down, and a session the host kills leaves its own behind, so each gated call that takes a
-// snapshot first removes every snapshot directory older than this.
-const SNAPSHOT_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 /**
  * The outcomes of a call the gate let through without a verdict, the gate's own failure or a stop
  * it took: no review stands behind the bytes, so the command the agent wrote runs as written.
@@ -283,7 +285,7 @@ export interface GateEntry {
   toolCallId: string;
   /**
    * `revise`: the call was not passed as sent (a revise verdict; in block mode a call given up
-   * without a verdict, a literal call whose file the gate could not capture, or a gated write the
+   * without a verdict, a literal call whose file the gate could not read, or a gated write the
    * CLI found no marker for, `unmarked`; in any mode no model role or a gate that did not load). A
    * call was refused exactly when this is `revise` and either `verdictMode` is `block` or
    * `outcome` is `no-model-role` or `load-failed`.
@@ -763,17 +765,6 @@ function headWords(head: string): Word[] {
   return words;
 }
 
-/**
- * One file the command asks Dispatch to read. `span` names the complete shell word whose source
- * becomes the owned snapshot: the value word for `--field-file path`, or the whole flag for
- * `--field-file=path`.
- */
-interface FileInput {
-  flag: string;
-  source: string;
-  span: [number, number];
-  equals: boolean;
-}
 type UnsafeFile = { flag: string; path: string; reason: string };
 
 /** A scoped `dispatch` command and every file whose bytes it would make Dispatch read. */
@@ -784,7 +775,8 @@ export interface ScopedCommand {
   dryRunScript: string;
   rebuttal?: string;
   readsFile: boolean;
-  fileInputs: readonly FileInput[];
+  /** Each file the CLI will read (`fileOperands`, the list its own check reads), in argv order. */
+  fileInputs: readonly FileOperand[];
   /** A `--field-file -` needs the call's quoted here-document. */
   stdinFileFlag?: string;
   /** `--path-file` chooses another path after the gate has no way to bind it. */
@@ -833,61 +825,38 @@ function splitRebuttal(flags: readonly Word[]): { rebuttal?: string; removed: Se
 }
 
 /**
- * Every file operand the CLI will open after the gate returns. `--path-file` is different: its
- * contents choose another path, which would be a new open outside this proof and is refused.
+ * Every file operand the CLI will open after the gate returns: `fileOperands`, the one list the
+ * gate and the CLI read. `--path-file` is different: its contents choose another path, which would
+ * be a new open outside this proof and is refused.
  */
 function fileInputs(
   flags: readonly Word[],
   upload: boolean
-): { inputs: FileInput[]; stdinFileFlag?: string; unsafeFile?: UnsafeFile } {
-  const inputs: FileInput[] = [];
+): { inputs: FileOperand[]; stdinFileFlag?: string; unsafeFile?: UnsafeFile } {
+  const values = flags.map((word) => word.value);
   let stdinFileFlag: string | undefined;
-  for (let index = 0; index < flags.length; index++) {
-    const word = flags[index];
-    const eq = word.value.indexOf("=");
-    const flag = eq === -1 ? word.value : word.value.slice(0, eq);
-    if (upload && flag === "--path-file") {
-      const source = eq === -1 ? flags[index + 1]?.value : word.value.slice(eq + 1);
+  for (let index = 0; index < values.length; index++) {
+    const word = values[index] as string;
+    const eq = word.indexOf("=");
+    const flag = eq === -1 ? word : word.slice(0, eq);
+    const source = eq === -1 ? values[index + 1] : word.slice(eq + 1);
+    if (upload && flag === "--path-file")
       return {
-        inputs,
+        inputs: [],
         ...(stdinFileFlag === undefined ? {} : { stdinFileFlag }),
         unsafeFile: {
           flag,
           path: source ?? "",
-          reason: "is an indirect path that AskGate cannot capture before Dispatch opens it",
+          reason: "is an indirect path that AskGate cannot read before Dispatch opens it",
         },
       };
-    }
     const named = flag.startsWith("--") && flag.endsWith("-file");
-    const artifactPath = upload && flag === "--path";
-    if (!named && !artifactPath) continue;
-    const sourceWord =
-      eq === -1
-        ? flags[index + 1]
-        : {
-            raw: word.raw.slice(word.raw.indexOf("=") + 1),
-            value: word.value.slice(eq + 1),
-            start: word.start === undefined ? undefined : word.start,
-            end: word.end,
-          };
-    if (sourceWord === undefined) continue;
-    const source = sourceWord.value;
-    if (source === "-") {
-      stdinFileFlag ??= flag;
-      continue;
-    }
-    const span =
-      eq === -1
-        ? sourceWord.start === undefined || sourceWord.end === undefined
-          ? undefined
-          : ([sourceWord.start, sourceWord.end] as [number, number])
-        : word.start === undefined || word.end === undefined
-          ? undefined
-          : ([word.start, word.end] as [number, number]);
-    if (span === undefined) continue;
-    inputs.push({ flag, source, span, equals: eq !== -1 });
+    if (source === "-" && (named || (upload && flag === "--path"))) stdinFileFlag ??= flag;
   }
-  return { inputs, ...(stdinFileFlag === undefined ? {} : { stdinFileFlag }) };
+  return {
+    inputs: fileOperands([upload ? UPLOAD_COMMAND : "", ...values]),
+    ...(stdinFileFlag === undefined ? {} : { stdinFileFlag }),
+  };
 }
 
 /**
@@ -972,12 +941,16 @@ export function commandArgv(command: unknown): string[] | undefined {
   return words.slice(cliProgramLength(words)).map((word) => word.value);
 }
 
-/** A literal `dispatch` write whose file the gate cannot capture: the tool, the command's name, and
- * the flag, the path and why. */
+/**
+ * A literal `dispatch` write whose file the gate cannot read: the tool, the command's name, and
+ * the flag, the path and why. `inMessage`: the file was missing or not safe to read when the gate
+ * ran, which a call earlier in the same message can explain, since the gate reads every call of a
+ * message before any of them runs.
+ */
 export interface UnreadableCommand {
   tool: string;
   label: string;
-  file: { flag: string; path: string; reason: string };
+  file: { flag: string; path: string; reason: string; inMessage?: true };
 }
 
 /** Runs `script` under bash in a process group of its own, which is killed at the limit or on the signal. */
@@ -1017,38 +990,6 @@ export async function spawnDryRun(
     clearTimeout(timer);
     signal?.removeEventListener("abort", kill);
   }
-}
-
-interface CapturedFile {
-  input: FileInput;
-  path: string;
-}
-interface SnapshotSet {
-  directory: string;
-  files: CapturedFile[];
-}
-
-/** The one shell quoting transform for absolute snapshot paths inserted into a command. */
-function quoteSnapshotPath(value: string): string {
-  const escaped = value.replaceAll("'", "'\\''");
-  return `'${escaped}'`;
-}
-
-/** Rewrites only the operands Dispatch opens, leaving every other command word byte-for-byte intact. */
-function commandWithSnapshots(command: string, files: readonly CapturedFile[]): string {
-  let cursor = 0;
-  let out = "";
-  for (const captured of [...files].sort(
-    (left, right) => left.input.span[0] - right.input.span[0]
-  )) {
-    const [from, to] = captured.input.span;
-    if (from < cursor) throw new Error("AskGate found overlapping file operands");
-    out += command.slice(cursor, from);
-    const snapshot = quoteSnapshotPath(captured.path);
-    out += captured.input.equals ? `${captured.input.flag}=${snapshot}` : snapshot;
-    cursor = to;
-  }
-  return out + command.slice(cursor);
 }
 
 /**
@@ -1106,7 +1047,7 @@ function resolveForOpen(source: string): string {
 }
 
 /**
- * Copies one source into an exclusive owner-only snapshot, reading only a regular file. The source
+ * The bytes of one file the CLI will read, read in place and only from a regular file. The source
  * is resolved as the kernel resolves it (`resolveForOpen`), which refuses a descriptor path
  * whatever names it; the open is `O_NOFOLLOW`, which guards the last path component only, so a
  * link put in the file's place after that walk is refused and never followed (a directory on the
@@ -1114,69 +1055,16 @@ function resolveForOpen(source: string): string {
  * same user); and `O_NONBLOCK` with an `fstat` on the open descriptor refuses a FIFO, a
  * device, a directory or anything else swapped in, before the first read.
  */
-function captureSnapshot(source: string, directory: string, index: number): string {
-  const opened = resolveForOpen(source);
-  const target = path.join(directory, `${index}${path.extname(opened)}`);
+function readReviewedFile(source: string): Buffer {
   const input = fs.openSync(
-    opened,
+    resolveForOpen(source),
     fs.constants.O_RDONLY | fs.constants.O_NONBLOCK | fs.constants.O_NOFOLLOW
   );
-  let output: number | undefined;
-  let complete = false;
   try {
     if (!fs.fstatSync(input).isFile()) throw new Error("is not a regular file AskGate can read");
-    output = fs.openSync(
-      target,
-      fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW,
-      0o600
-    );
-    fs.fchmodSync(output, 0o600);
-    const buffer = Buffer.allocUnsafe(64 * 1024);
-    for (;;) {
-      const read = fs.readSync(input, buffer);
-      if (read === 0) break;
-      for (let written = 0; written < read; )
-        written += fs.writeSync(output, buffer, written, read - written);
-    }
-    complete = true;
-    return target;
+    return fs.readFileSync(input);
   } finally {
-    if (output !== undefined) fs.closeSync(output);
     fs.closeSync(input);
-    if (!complete) fs.rmSync(target, { force: true });
-  }
-}
-
-function removeSnapshots(snapshot: SnapshotSet): void {
-  for (const captured of snapshot.files) fs.rmSync(captured.path, { force: true });
-  fs.rmSync(snapshot.directory, { recursive: true, force: true });
-}
-
-/** A snapshot directory of this gate: `askgate-` and the six characters `mkdtemp` adds. */
-const SNAPSHOT_DIRECTORY = /^askgate-[A-Za-z0-9]{6}$/;
-
-/**
- * Removes the gate's own snapshot directories under `root` that are older than
- * SNAPSHOT_MAX_AGE_MS, at each call that takes one. A backgrounded call's snapshot is kept until
- * the session shuts down, and a session the host kills leaves its own behind, so this is what
- * bounds the files the gate owns. Each directory is 0700 and holds only the gate's own copies.
- */
-function sweepSnapshots(root: string, now: number): void {
-  let entries: fs.Dirent[];
-  try {
-    entries = fs.readdirSync(root, { withFileTypes: true });
-  } catch {
-    return;
-  }
-  for (const entry of entries) {
-    if (!entry.isDirectory() || !SNAPSHOT_DIRECTORY.test(entry.name)) continue;
-    const directory = path.join(root, entry.name);
-    try {
-      if (now - fs.statSync(directory).mtimeMs <= SNAPSHOT_MAX_AGE_MS) continue;
-      fs.rmSync(directory, { recursive: true, force: true });
-    } catch {
-      // Another session swept it first, or it is not this user's to remove.
-    }
   }
 }
 
@@ -1470,6 +1358,14 @@ const recordFailureRefusal = (message: string, configFile: string) =>
 /** The refusal for a call whose marker could not be minted: the CLI would refuse it with none. */
 const mintFailureRefusal = (message: string, configFile: string) =>
   `AskGate did not send this call: the dispatch CLI posts a Dispatch write in this session only with a marker AskGate mints for it, and AskGate could not mint one (${message}). Send the call again once the CLI's state directory takes files. To turn AskGate off for this session, set askgate.enabled to false in ${configFile}.`;
+/**
+ * The refusal, in block mode, of a literal call whose final command gives the gate no argument
+ * vector to key a marker by: the CLI would refuse it with no marker, naming a form it already has.
+ */
+const UNKEYED_REFUSAL =
+  "AskGate did not send this call: it could not read the arguments the dispatch CLI gets from the command that runs, so it could not mint the marker the CLI needs to post the write. Send the write again as one bash call of literal words.";
+/** The note, in warn mode, of the same call: it runs, and the CLI posts it with a warning. */
+const UNKEYED_NOTE = `<advisor-gate advisor="AskGate" outcome="unkeyed">\nAskGate minted no marker for this Dispatch write: it could not read the arguments the dispatch CLI gets from the command that runs. The call ran, and the CLI posts it with a warning that it went out unreviewed.\n</advisor-gate>`;
 // A comment or message cannot be edited or deleted, so its only fix is one more post; the note says so,
 // rather than offering an edit the agent cannot make (two lanes resent whole comments chasing one).
 const renderWarn = (reason: string, second: boolean) =>
@@ -1515,21 +1411,27 @@ function resendFlags(flag: string): { stdin: string; regular: string } {
   return { stdin: flag, regular: `\`${flag}\`` };
 }
 /**
- * What a literal `dispatch` write whose file the gate cannot capture tells the agent. In `block`
+ * What a literal `dispatch` write whose file the gate cannot read tells the agent. In `block`
  * mode the write was not sent, and this is the call's refusal. In `warn` mode the call ran with no
- * review, and this is its note.
+ * review, and this is its note. A file missing or not safe to read when the gate ran
+ * (`inMessage`) can be one a call earlier in the same message writes: Oh My Pi runs the gate for
+ * every call of a message before any of them runs, so the text says to send the call again in a
+ * later message.
  */
 function renderUnreadable({ file }: UnreadableCommand, mode: Mode): string {
   const ran = mode === "warn";
   const { stdin, regular } = resendFlags(file.flag);
   // The file refusals come after AskGate read the call: to find where a relative operand resolves
-  // it ran the command's own `cd` and `pwd -P`, and for an upload the command with `--dry-run`.
+  // it ran the command's own `cd` and `pwd -P`, and for some calls the command with `--dry-run`.
   // Neither sends anything, and nothing else in the call ran, so the claim here says that and not
   // "nothing ran".
   const read = ran
     ? "The call ran unreviewed."
-    : "The write was not sent. To read the call AskGate ran the command's own `cd` and `pwd -P`, and the command with `--dry-run`, which send nothing; nothing else in the call ran.";
-  const body = `AskGate ${ran ? "did not review" : "did not send"} this call: \`${file.flag}\` names ${JSON.stringify(file.path)}, which ${file.reason}. AskGate reads and posts only a regular file it captured before review. Send the text with \`${stdin} -\` and a quoted here-document (\`<<'EOF'\`), or name a regular file with ${regular}. ${read}`;
+    : "The write was not sent. To read the call AskGate ran at most the command's own `cd` and `pwd -P`, and the command with `--dry-run`, which send nothing; nothing else in the call ran.";
+  const later = file.inMessage
+    ? " AskGate reads each file a write posts before any call of the same message runs. If a call earlier in this message writes or changes the file, send this call again in a later message. Else send"
+    : " AskGate reads and posts only a regular file. Send";
+  const body = `AskGate ${ran ? "did not review" : "did not send"} this call: \`${file.flag}\` names ${JSON.stringify(file.path)}, which ${file.reason}.${later} the text with \`${stdin} -\` and a quoted here-document (\`<<'EOF'\`), or name a regular file with ${regular}. ${read}`;
   return ran
     ? `<advisor-gate advisor="AskGate" outcome="unreadable">\n${body}\n</advisor-gate>`
     : body;
@@ -1648,17 +1550,10 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
     /** Why a waiting gate was given up: the user or the runner ended its call or run, or the session shut down. */
     type Abandon = (cause: "abandoned" | "shutdown", graceMs?: number) => void;
     const inflight = new Map<string, Abandon>();
-    const snapshots = new Map<string, SnapshotSet>();
-    const releaseSnapshots = (toolCallId: string) => {
-      const snapshot = snapshots.get(toolCallId);
-      if (snapshot === undefined) return;
-      snapshots.delete(toolCallId);
-      removeSnapshots(snapshot);
-    };
     /**
-     * The markers minted for each call (`mintFor`), by tool call id: each goes as its snapshot
-     * goes, once its call ends, is refused, or the session shuts down. A marker the CLI consumed
-     * is gone already, and its release is a no-op.
+     * The markers minted for each call (`mintFor`), by tool call id: each goes once its call ends,
+     * is refused, or the session shuts down. A marker the CLI consumed is gone already, and its
+     * release is a no-op.
      */
     const markers = new Map<string, string>();
     const releaseMarker = (toolCallId: string) => {
@@ -1695,10 +1590,9 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
     };
     /**
      * The session changed, so nothing of the one before it stands: its halt, its count, its
-     * revise reasons, its unspent rebuttals and the notes its calls are owed. Its snapshots stay:
-     * a call whose own result has not come, or a job still in the background, may not have read
-     * its snapshot yet, and a write whose snapshot is gone fails without posting. Each goes on its
-     * own call's end event below, or at shutdown.
+     * revise reasons, its unspent rebuttals and the notes its calls are owed. Its markers stay: a
+     * call whose own result has not come, or a job still in the background, may not have run its
+     * CLI yet. Each goes on its own call's end event below, or at shutdown.
      */
     const reset = () => {
       rebuttals.clear();
@@ -1709,22 +1603,17 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
     };
     pi.on("session_switch", reset);
     pi.on("session_branch", reset);
-    // A snapshot and a marker go only once the command that reads them has run, whichever session
-    // is current then. A result that reports a backgrounded job's start comes before the shell
-    // runs it (`startedInBackground`), and nothing later names that call's id, so its snapshot and
-    // its marker are kept until `session_shutdown`; a new gated call sweeps the snapshots older
-    // than SNAPSHOT_MAX_AGE_MS, and each mint the markers older than MARKER_MAX_AGE_MS.
+    // A marker goes only once the command that consumes it has run, whichever session is current
+    // then. A result that reports a backgrounded job's start comes before the shell runs it
+    // (`startedInBackground`), and nothing later names that call's id, so its marker is kept until
+    // `session_shutdown`; each mint sweeps the markers older than MARKER_MAX_AGE_MS.
     pi.on("tool_execution_end", (event: { toolCallId: string; result?: unknown }) => {
       inflight.get(event.toolCallId)?.("abandoned");
       if (isRecord(event.result) && startedInBackground(event.result.details)) return;
-      releaseSnapshots(event.toolCallId);
       releaseMarker(event.toolCallId);
     });
     pi.on("tool_result", (event: ToolResultEvent): ToolResultResult => {
-      if (!startedInBackground(event.details)) {
-        releaseSnapshots(event.toolCallId);
-        releaseMarker(event.toolCallId);
-      }
+      if (!startedInBackground(event.details)) releaseMarker(event.toolCallId);
       return deliverNotice(event);
     });
     pi.on("agent_end", (event: { messages?: readonly Message[]; willContinue?: boolean }) => {
@@ -1740,7 +1629,6 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
     pi.on("session_shutdown", async () => {
       closing = true;
       for (const abandon of inflight.values()) abandon("shutdown", SHUTDOWN_GRACE_MS);
-      for (const toolCallId of snapshots.keys()) releaseSnapshots(toolCallId);
       const { promise: waited, resolve: stopWaiting } = Promise.withResolvers<void>();
       const timer = setTimeout(stopWaiting, SHUTDOWN_WAIT_MS);
       await Promise.race([Promise.allSettled([...handling]), waited]);
@@ -1836,7 +1724,7 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
       effect: "none",
     };
     /**
-     * A literal call whose file the gate cannot capture: a judgment on one call's file, not a gate
+     * A literal call whose file the gate cannot read: a judgment on one call's file, not a gate
      * that failed. `block` mode refuses it before it sends, so the agent sends the text in a form
      * AskGate reads; `warn` mode runs it and hands the same explanation back as context, with the
      * entry recording `unreadable` and `allow`. Neither counts toward the halt.
@@ -2071,15 +1959,17 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
     };
 
     /**
-     * A scoped command's arguments as the CLI's own --dry-run prints them, or why there are none,
-     * or `unscoped`: an upload whose resolved name and path make no markdown document.
+     * A scoped command's arguments as the CLI's own --dry-run prints them (`args`), what the model
+     * reviews (`review`: those arguments, and an upload's `--path` text as `content`), and each
+     * file the argv names with the digest of the bytes the gate read; or why there are none; or
+     * `unscoped`: an upload whose resolved name and path make no markdown document.
      */
     type DryRun =
-      | { args: Input; command?: string }
-      | { failure: string; command?: string }
+      | { args: Input; review: Input; files: FileDigest[] }
+      | { failure: string }
       | { unreadable: UnreadableCommand }
-      | { cause: "abandoned" | "shutdown"; command?: string }
-      | { unscoped: true; command?: string };
+      | { cause: "abandoned" | "shutdown" }
+      | { unscoped: true };
     const readArgs = async (
       scoped: ScopedCommand,
       input: Input,
@@ -2150,9 +2040,12 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
           },
         };
 
-      let executionCommand = scoped.command;
+      // Each file the argv names, read here in place, as the CLI will open it: the model reviews
+      // these bytes, and the marker binds their digests, which the CLI checks before it posts.
+      const files: FileDigest[] = [];
+      let uploadText: string | undefined;
       if (scoped.fileInputs.length > 0) {
-        const relativeFile = scoped.fileInputs.find((file) => !path.isAbsolute(file.source));
+        const relativeFile = scoped.fileInputs.find((file) => !path.isAbsolute(file.operand));
         let base = cwd;
         if (relativeFile !== undefined) {
           try {
@@ -2165,7 +2058,7 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
                 label: scoped.label,
                 file: {
                   flag: relativeFile.flag,
-                  path: relativeFile.source,
+                  path: relativeFile.operand,
                   reason: `could not resolve the tool directory: ${messageOf(error)}`,
                 },
               },
@@ -2187,7 +2080,7 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
                 label: scoped.label,
                 file: {
                   flag: firstRelative.flag,
-                  path: firstRelative.source,
+                  path: firstRelative.operand,
                   reason: `could not determine the command directory: ${reached.failure}`,
                 },
               },
@@ -2200,30 +2093,17 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
                 label: scoped.label,
                 file: {
                   flag: firstRelative.flag,
-                  path: firstRelative.source,
+                  path: firstRelative.operand,
                   reason: "could not determine an absolute command directory",
                 },
               },
             };
         }
 
-        /**
-         * The path the CLI opens for one operand. A `--*-file` goes to `readFileSync`, which
-         * hands the whole string to the kernel: a `..` after a symbolic link leaves the link's
-         * target, so a relative operand is joined to the physical directory and never normalized
-         * (`path.resolve` would collapse that `..` first and name another file). An upload's
-         * `--path` is `resolvePath(cwd, path)` in the CLI itself (dispatch-execute.ts), which
-         * removes a `..` first, an absolute operand's too, so it keeps that resolution.
-         */
-        const opened = (file: FileInput): string =>
-          file.flag === "--path"
-            ? path.resolve(base, file.source)
-            : path.isAbsolute(file.source)
-              ? file.source
-              : `${base}/${file.source}`;
         // Refused by name, before any `stat`: such a path resolves in whichever process opens it.
         const descriptor = scoped.fileInputs.find(
-          (file) => PROCESS_FD_PATH.test(file.source) || PROCESS_FD_PATH.test(opened(file))
+          (file) =>
+            PROCESS_FD_PATH.test(file.operand) || PROCESS_FD_PATH.test(operandPath(base, file))
         );
         if (descriptor !== undefined)
           return {
@@ -2232,67 +2112,41 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
               label: scoped.label,
               file: {
                 flag: descriptor.flag,
-                path: descriptor.source,
+                path: descriptor.operand,
                 reason:
                   "names a file descriptor of the process that opens it, which here is Oh My Pi's own and not the command's shell",
+                inMessage: true,
               },
             },
           };
-
-        const root = path.resolve(os.tmpdir());
-        sweepSnapshots(root, deps.now());
-        const directory = fs.mkdtempSync(path.join(root, "askgate-"));
-        fs.chmodSync(directory, 0o700);
-        const snapshot: SnapshotSet = { directory, files: [] };
-        let current = scoped.fileInputs[0];
-        let source = current.source;
-        try {
-          for (const inputFile of scoped.fileInputs) {
-            current = inputFile;
-            source = inputFile.source;
-            const resolved = opened(inputFile);
-            snapshot.files.push({
-              input: inputFile,
-              path: captureSnapshot(resolved, directory, snapshot.files.length),
-            });
+        for (const file of scoped.fileInputs) {
+          let bytes: Buffer;
+          try {
+            bytes = readReviewedFile(operandPath(base, file));
+          } catch (error) {
+            return {
+              unreadable: {
+                tool: scoped.tool,
+                label: scoped.label,
+                file: {
+                  flag: file.flag,
+                  path: file.operand,
+                  reason:
+                    (error as NodeJS.ErrnoException).code === "ENOENT"
+                      ? "does not exist"
+                      : `could not be read: ${messageOf(error)}`,
+                  inMessage: true,
+                },
+              },
+            };
           }
-          snapshots.set(toolCallId, snapshot);
-          executionCommand = commandWithSnapshots(scoped.command, snapshot.files);
-        } catch (error) {
-          removeSnapshots(snapshot);
-          return {
-            unreadable: {
-              tool: scoped.tool,
-              label: scoped.label,
-              file: {
-                flag: current.flag,
-                path: source,
-                reason:
-                  (error as NodeJS.ErrnoException).code === "ENOENT"
-                    ? "does not exist"
-                    : `could not be captured: ${messageOf(error)}`,
-              },
-            },
-          };
+          files.push({ ...file, sha256: bytesDigest(bytes) });
+          if (file.flag === "--path") uploadText = bytes.toString("utf8");
         }
       }
 
-      const execution = executionCommand === scoped.command ? {} : { command: executionCommand };
-      const reviewed = execution.command === undefined ? scoped : scopedCommand(execution.command);
-      if (reviewed === undefined)
-        return {
-          unreadable: {
-            tool: scoped.tool,
-            label: scoped.label,
-            file: {
-              flag: scoped.fileInputs[0]?.flag ?? "--file",
-              path: "",
-              reason: "could not rewrite to the snapshot AskGate captured",
-            },
-          },
-        };
-      const dry = await stdoutOf(reviewed.dryRunScript, `${scoped.label} --dry-run`);
-      if (!("stdout" in dry)) return { ...dry, ...execution };
+      const dry = await stdoutOf(scoped.dryRunScript, `${scoped.label} --dry-run`);
+      if (!("stdout" in dry)) return dry;
       let args: Input | undefined;
       try {
         const parsed: unknown = JSON.parse(dry.stdout);
@@ -2302,48 +2156,24 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
       }
       if (args === undefined) {
         const printed = clipBytes((dry.stdout || dry.stderr).trim(), GATE_REASON_MAX_BYTES);
-        return {
-          failure: `${scoped.label} --dry-run printed no JSON object: ${printed}`,
-          ...execution,
-        };
+        return { failure: `${scoped.label} --dry-run printed no JSON object: ${printed}` };
       }
       // The CLI's own predicate, over the arguments it will parse: an upload that is no markdown
       // document is no gated write, and needs neither a review nor a marker.
-      if (!gatedWrite(scoped.tool, args)) return { unscoped: true, ...execution };
-      // The artifact dry run prints its snapshot path rather than its body. Read only the owned
-      // snapshot here, so the model sees the exact bytes the rewritten command will post.
+      if (!gatedWrite(scoped.tool, args)) return { unscoped: true };
+      // An upload's dry run prints its `--path`, not its text: the model reviews the bytes the
+      // gate read from that path, which the marker binds and the CLI uploads.
       if (!scoped.upload || typeof args.path !== "string" || args.content !== undefined)
-        return { args, ...execution };
-      const snapshot = snapshots
-        .get(toolCallId)
-        ?.files.find((file) => file.input.flag === "--path");
-      if (snapshot === undefined)
+        return { args, review: args, files };
+      if (uploadText === undefined)
         return {
           unreadable: {
             tool: scoped.tool,
             label: scoped.label,
-            file: {
-              flag: "--path",
-              path: args.path,
-              reason: "was not captured before review",
-            },
+            file: { flag: "--path", path: args.path, reason: "was not read before review" },
           },
         };
-      try {
-        return { args: { ...args, content: fs.readFileSync(snapshot.path, "utf8") }, ...execution };
-      } catch (error) {
-        return {
-          unreadable: {
-            tool: scoped.tool,
-            label: scoped.label,
-            file: {
-              flag: "--path",
-              path: snapshot.path,
-              reason: `could not read its captured snapshot: ${messageOf(error)}`,
-            },
-          },
-        };
-      }
+      return { args, review: { ...args, content: uploadText }, files };
     };
 
     /** The fields every entry of a call carries; a gated call fills in its target's revise count and the digest. */
@@ -2359,22 +2189,33 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
 
     /**
      * Mints the marker the CLI consumes for a literal call that will run: keyed by the argument
-     * vector of the command that runs, bound to the dry run's arguments when a review or a
-     * deliberate pass stands behind them (`args`), argv-only otherwise. Undefined when it was
-     * minted; else the refusal of a mint that failed, since the CLI would refuse the call anyway.
+     * vector of the command that runs, the final one the gate returns, bound to the dry run's
+     * arguments and the digests of the files the gate read when a review or a deliberate pass
+     * stands behind them (`bound`), argv-only otherwise. Undefined when it was minted; else the
+     * refusal of a mint that failed, since the CLI would refuse the call anyway. A command whose
+     * argument vector the gate cannot read gets no marker: `block` mode refuses it, and `warn`
+     * mode lets it run with a note, as the CLI then posts it with a warning.
      */
     const mintFor = (
       toolCallId: string,
       command: unknown,
-      args: Input | null,
-      outcome: string
+      bound: { args: Input; files: readonly FileDigest[] } | null,
+      outcome: string,
+      mode: Mode = envMode ?? "block"
     ): ToolCallResult => {
       const argv = commandArgv(command);
-      if (argv === undefined) return undefined;
+      if (argv === undefined)
+        return mode === "block"
+          ? { block: true, reason: UNKEYED_REFUSAL }
+          : { additionalContext: UNKEYED_NOTE };
       try {
         markers.set(
           toolCallId,
-          mintMarker(deps.markerStore, { argv, args, toolCallId, outcome }, deps.now())
+          mintMarker(
+            deps.markerStore,
+            { argv, args: bound?.args ?? null, files: bound?.files ?? [], toolCallId, outcome },
+            deps.now()
+          )
         );
         return undefined;
       } catch (error) {
@@ -2386,12 +2227,11 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
       const started = deps.now();
       let base: Base | undefined;
       let decision: Decision;
-      // A `dispatch` command with its override flag removed, which runs whatever the gate decides,
-      // and, once a file operand is rewritten, the command that names the snapshot.
-      let withoutRebuttal: Input | undefined;
+      // A `dispatch` command with its override flag removed, which runs whatever the gate decides.
       let revised: Input | undefined;
-      // The arguments the call's dry run printed, which a marker for the command it ran binds.
-      let dryArgs: Input | undefined;
+      // What the call's dry run printed and the digests of the files the gate read, which a
+      // marker for the command it ran binds.
+      let dryRun: { args: Input; files: readonly FileDigest[] } | undefined;
       // OMP_ASKGATE when it is a mode; else this session's latest experiments entry, read per call
       // because one binding serves every session the process switches to.
       let mode: Mode = envMode ?? "block";
@@ -2418,8 +2258,7 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
           const scoped = scopedCommand(event.input.command);
           if (scoped === undefined) return undefined;
           if (scoped.rebuttal !== undefined) {
-            withoutRebuttal = { ...event.input, command: scoped.command };
-            revised = withoutRebuttal;
+            revised = { ...event.input, command: scoped.command };
           }
           base = { ...identity(event, mode), tool: scoped.tool, path: scoped.label };
           // Before the dry run and before any path that lets the write out: with no model role
@@ -2427,8 +2266,6 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
           if (resolveRole(ctx) === undefined) decision = noModelRole;
           else {
             const run = await readArgs(scoped, event.input, ctx, event.toolCallId);
-            if ("command" in run && run.command !== undefined)
-              revised = { ...event.input, command: run.command };
             // An upload its dry run shows is no markdown document passes as an ungated call
             // does, with no entry and no marker, which the CLI needs for no such upload; an
             // override flag on it is still removed, since the CLI would refuse it.
@@ -2446,15 +2283,15 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
             // command runs.
             else if ("failure" in run) decision = pass("error", { reason: run.failure });
             else {
-              dryArgs = run.args;
-              const key = breakerKey(scoped.tool, run.args);
+              dryRun = { args: run.args, files: run.files };
+              const key = breakerKey(scoped.tool, run.review);
               base = {
                 ...base,
                 revisesForKey: breaker.reasons(key).length,
-                argsDigest: createHash("sha256").update(JSON.stringify(run.args)).digest("hex"),
+                argsDigest: createHash("sha256").update(JSON.stringify(run.review)).digest("hex"),
               };
               decision = await decide(
-                { toolName: scoped.tool, toolCallId: event.toolCallId, input: run.args },
+                { toolName: scoped.tool, toolCallId: event.toolCallId, input: run.review },
                 ctx,
                 started,
                 base,
@@ -2481,8 +2318,7 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
       } catch (error) {
         // Fail open: the runner turns a thrown handler into a refusal. A throw here is the
         // gate's own (the dump, the render, the dry-run's spawn), not a missing
-        // verdict, so it does not count toward the halt. The snapshot stays until the call ends,
-        // since the command may still name it.
+        // verdict, so it does not count toward the halt.
         decision = pass("error", { reason: messageOf(error) });
       }
       // Settled once and recorded once, each on its own, so neither failing can repeat the other.
@@ -2491,14 +2327,7 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
       } catch {
         // The halt notice is best effort.
       }
-      if (decision.result?.block) {
-        releaseSnapshots(event.toolCallId);
-        revised = undefined;
-      }
-      // No verdict came back, so nothing proves the snapshot's bytes are the reviewed bytes, and a
-      // gate that failed must break no valid write: the agent's own command runs instead of the
-      // one naming a snapshot it never saw (its override flag still removed, which the CLI needs).
-      if (UNREVIEWED_OUTCOMES.includes(decision.fields.outcome)) revised = withoutRebuttal;
+      if (decision.result?.block) revised = undefined;
       // The first gated call says once that the OMP_ASKGATE it ignored is not the switch.
       if (ignoredModeNotice !== undefined) {
         const notice = ignoredModeNotice;
@@ -2522,7 +2351,6 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
         // refuses the call, in both modes. A write the model allowed was reviewed, and still
         // posts; a call already refused keeps its own refusal.
         if (decision.fields.decision === "allow" && decision.fields.outcome !== "verdict") {
-          releaseSnapshots(event.toolCallId);
           notices.delete(event.toolCallId);
           return {
             block: true,
@@ -2533,17 +2361,28 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
       // The marker the CLI needs to post a literal write that will run, minted once its record is
       // written (a write whose record failed is refused above). A review, or a pass the gate took
       // over the dry run's arguments (a rebuttal, a breaker trip, a halt, another provider), binds
-      // those arguments; a call no verdict stands behind runs the agent's own command, argv-only.
+      // those arguments and the files' digests; a call no verdict stands behind is argv-only.
       if (event.toolName === "bash" && base !== undefined && !decision.result?.block) {
         const { outcome } = decision.fields;
-        const bound =
-          dryArgs !== undefined && !UNREVIEWED_OUTCOMES.includes(outcome) ? dryArgs : null;
-        const refused = mintFor(event.toolCallId, (revised ?? event.input).command, bound, outcome);
-        if (refused !== undefined) {
-          releaseSnapshots(event.toolCallId);
+        const bound = dryRun !== undefined && !UNREVIEWED_OUTCOMES.includes(outcome) ? dryRun : null;
+        const minted = mintFor(
+          event.toolCallId,
+          (revised ?? event.input).command,
+          bound,
+          outcome,
+          mode
+        );
+        if (minted?.block) {
           notices.delete(event.toolCallId);
-          return refused;
+          return minted;
         }
+        if (minted?.additionalContext !== undefined)
+          decision.result = {
+            ...decision.result,
+            additionalContext: [decision.result?.additionalContext, minted.additionalContext]
+              .filter((note) => note !== undefined)
+              .join("\n"),
+          };
       }
       // The same note goes on the call's own result (`deliverNotice`), which every caller reads:
       // a call an eval cell made has no loop sink for `additionalContext`, and a note the agent
