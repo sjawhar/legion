@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-391",
-  "completed": "2026-10-26T01:57:42Z",
+  "completed": "2026-10-26T02:05:03Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2209",
   "proof": [
     {
@@ -209,7 +209,8 @@
     "Round 1: forward-merged main a9c9542fb738 (#2202) on a GitHub-reported conflict; fingerprint 2c8e63a1d606 -> 72772984d6d2 (changed: four test files adapted to #2202's 40-hex SHA, Accept: application/vnd.github.sha and 422 fakes; no production line of the branch changed).",
     "Round 1: docs/solutions INFRA-390 learning (from main) named the removed singular PUT; updated to the per-repository routes in fa2dacfbb399.",
     "Review round 2: the save's branch check reads the exact ref (new githubapp.Client.Branch, GET git/ref/heads/{branch}, answer must name refs/heads/<branch> with a 40-hex sha) instead of Ref; 404/409/422 and any other ref are ErrNoBranch -> 409 SOURCE_ACCESS. No shape check of the value: the exact read decides, so a branch whose name looks like a SHA still saves. The sync keeps Ref.",
-    "Review round 2 fast-follow (done this round on the architect's instruction): the older-client singular-route tests and captureSourceWarnings moved to architecture_source_older_clients_test.go; the GitHub fake stays in architecture_source_test.go."
+    "Review round 2 fast-follow (done this round on the architect's instruction): the older-client singular-route tests and captureSourceWarnings moved to architecture_source_older_clients_test.go; the GitHub fake stays in architecture_source_test.go.",
+    "Conflict round after review round 2: forward-merged main fc379b99147a (#2151) into cbdbdc4a78e1 as 64cdb1b013e2 (jj new legion/INFRA-391 \"main\"@origin); the one conflict, packages/pi-legion/CHANGELOG.md, kept both sides' Added entries. Fingerprint 6d9f92ce91bf… before and after: unchanged, so the real-surface proofs stand at their heads and only the bare gates re-ran (claude-envoy check-dist, envoy-client 842 pass, tsc x3, biome, go build, githubapp/architecture/targeted api Go tests); comment https://github.com/sjawhar/legion/pull/2209#issuecomment-6406602508."
   ],
   "openQuestions": [
     "Local go test of the whole internal/dispatch tree is not a green signal in this pod: api (about 1055 s) and docs (about 748 s) pass the 10-minute default only with a longer -timeout; TestIssueRanksStayOrderedPastLowercaseDigitsAndProductionShapedMoves needs a database whose default collation is not byte order, the micromamba Postgres here is; pmdoc's linearity timings and files' S3 test (Docker) fail here. None of those files differs between base, branch and main; CI is the record for them."
