@@ -2,52 +2,33 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-366",
-  "completed": "2026-10-26T07:56:19Z",
-  "reviewedHead": "0c6378c2d0070bb8d08d013bd7288be7453c1cfe",
-  "codeHead": "05ea3ef49e",
-  "round": 2,
-  "standard": "The architect's rule of 2026-10-26T05:09Z: no write main accepts fails at the head; every id and slug the reference grammar reads is bounded; a new artifact name over a bound is refused 400; a long block id never fails an ask, anchor or settlement; data stored over a bound is still read and written; any other defect in code this PR touches is fixed here.",
+  "completed": "2026-10-26T12:52:59Z",
+  "reviewedHead": "2bc81755e19b18d29ae49c93df6a6f659e33bbb9",
+  "codeHead": "e26a664800",
+  "round": 3,
+  "standard": "The architect's rule of 2026-10-26T07:58Z: a length bound only decides which keys go into a Postgres index; it never makes a read fail and never refuses a write main accepts. A new finding counts only if it is a defect in the change, or a read or write main accepts that the head now fails.",
   "decision": "changes_requested",
   "critical": 0,
-  "important": 5,
-  "minor": 1,
+  "important": 2,
+  "minor": 0,
   "keyFindings": [
     {
       "severity": "important",
-      "file": "packages/envoy/internal/dispatch/api/references.go:175",
-      "description": "A document whose reference key is 2,049-2,692 bytes, which the head itself creates (maxNewArtifactKeyBytes 2692) and main stored, can no longer read its own references. text.ExtractAt drops a target past MaxTargetBytes (2048), so GET /references ?to=/?from= and block-links answer 400 INVALID_REFERENCE. DocumentPage's Referenced by panel then shows 'unavailable' and dispatch read prints '- unavailable'. Main answered 200. block_id_bound_test.go asserts the 400. Apply the target bound only where an edge is stored."
+      "file": "packages/envoy/internal/dispatch/api/search.go:632",
+      "description": "dispatch search prints every ask-block hit as <document>#b-<id>. Main's dispatchRefFromUrl read that URL as the document; the head reads it as the block. For an ask block whose id is past 256 bytes, or whose block a later edit removed, `dispatch read --ref <hit>` now exits 1 'No block <id> in <doc>' (dispatch-execute.ts:4096-4099), where main read the document. The census's line-82 disposition ('0 hits' for block-anchored URLs in text an agent reads) misses this producer. Fix: name the ask in the hit (?ask=<id> or /asks/<id>), or fall back to the document; then correct the census."
     },
     {
       "severity": "important",
-      "file": "packages/envoy/internal/dispatch/pmdoc/block_ids.go:82",
-      "description": "LongBlockID with live=nil refuses every id past 256 bytes, the document's own included. A rebuild with supplied markdown (docs/rebuild.go:94, parseInput) of stored text that main wrote is refused 400. A suggestion holding a long id is created 201 but its accept is always 400 (parseFragmentInput), and a suggestion main stored can no longer be accepted. Either drop the refusal (indexing already skips long ids, and asks and anchors are hashed) or make it consistent: refuse at suggestion creation, and pass the stored document as live on a rebuild."
-    },
-    {
-      "severity": "important",
-      "file": "PR body: ## Contract change census",
-      "description": "The census lists only innerRefProblem. It needs the new refusals added in rounds 3-6: a new artifact's name or key past 2692 bytes (400 INVALID_ARTIFACT); a reference target past 2048 bytes (400 INVALID_REFERENCE on ?to=/?from=/block-links where main answered 200/404, and refused by envoy-client parseDispatchRef); and a new block id past 256 bytes through the API (400 INVALID_MARKDOWN/INVALID_OP), unless that refusal is dropped."
-    },
-    {
-      "severity": "important",
-      "file": "packages/dispatch/web/src/features/refs/routes.ts",
-      "description": "routes.ts is 1009 lines again (910 at 9ed0397b). f77a7a19 undid round 1's split. The thread PRRT_kwDORFy7ds6wHOpN is reopened."
-    },
-    {
-      "severity": "important",
-      "file": "packages/envoy/internal/dispatch/text/refs.go:277",
-      "description": "targetFits re-derives refs.ToID's target-id shape field by field. A drift between the two silently brings back the SQLSTATE 54000 500 the bound exists to stop. Make the bound len(TargetID(ref)) <= MaxTargetBytes over one shared function, and drop envoy-client's hand-built copy in dispatchRefFromUrl's blockOf."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/dispatch/web/src/features/refs/block-reference.ts:27",
-      "description": "The dashboard reads /issues/K/spec?v=N#b-x as block x of the live spec. The server (text/refs.go documentPage) and envoy-client read it as the document version. Refuse a block on a spec route that carries ?v=, and add the row to the shared href table."
+      "file": "packages/dispatch/web/src/features/refs/routes.ts:256",
+      "description": "The bounded parseDispatchReference still decides what the dashboard draws and opens for an explicitly named node: pictureReference (routes.ts:663) and collectPictureAnchors (DispatchPicture.tsx), collectReferenceAnchors via referenceRouteFromHref (RefLink.tsx:159), and ProofDocument's click handler (:780). A picture or markdown link to a document whose key is 2,049-2,692 bytes, which main rendered and opened, is not drawn and is a dead link at the head. Use parseNodeReference/nodeRouteFromHref there; keep the bound only for turning plain text into links."
     }
   ],
-  "threads": "Replied on all six round-1 threads. Accepted: PRRT_kwDORFy7ds6wHOo_, PRRT_kwDORFy7ds6wHOpC, PRRT_kwDORFy7ds6wHOpG, PRRT_kwDORFy7ds6wHOpI, PRRT_kwDORFy7ds6wHOpP. Reopened (unresolved): PRRT_kwDORFy7ds6wHOpN (routes.ts 1009 lines).",
+  "roundItems": "Items 1, 2, 4, 5, 6 and 7 hold (both passes and my own read). Item 3 holds for the listed refusals, but one disposition is wrong (finding 1).",
+  "threads": "Replied on the five round-2 threads and the reopened routes.ts thread. Accepted: PRRT_kwDORFy7ds6wHOpN, PRRT_kwDORFy7ds6wLR7F, PRRT_kwDORFy7ds6wLR7L, PRRT_kwDORFy7ds6wLR7P (the listed refusals; the wrong disposition is new finding 1), PRRT_kwDORFy7ds6wLR7U, PRRT_kwDORFy7ds6wLR7Y.",
   "thermonuclear": {
-    "deepReview": "Verdict: CHANGES at 0c6378c2. Provider: mixed, 81 assistant turns anthropic/claude-opus-5-5 and 1 openai/gpt-6.1-sol, read from its session transcript.",
-    "codeQuality": "Verdict: CHANGES at 0c6378c2. Provider: mixed, 52 assistant turns anthropic/claude-opus-5-5 and 1 openai/gpt-6.1-sol, read from its session transcript.",
-    "judgedNotADefect": "The quality pass's proposal to give the spec route a version and drop the async spec-slug path: the current design works and is browser-tested, so this is a redesign rather than a defect."
+    "deepReview": "Verdict: CHANGES at 2bc81755. Provider: mixed, 77 assistant turns anthropic/claude-opus-5-5 and 1 openai/gpt-6.1-sol, read from its session transcript.",
+    "codeQuality": "Verdict: CHANGES at 2bc81755. Provider: mixed, 47 assistant turns anthropic/claude-opus-5-5 and 1 openai/gpt-6.1-sol, read from its session transcript.",
+    "notCounted": "The quality pass's ten copies of the `\"block\" in route` probe: a cleanup, neither a defect nor a read or write main accepts that the head fails, so it does not count under the round's rule. Its stale 'Look at first' and 'Not proven / risk' lines are the reviewer's own, rewritten this round."
   },
-  "ci": "At code head 05ea3ef4: Docs success; Tests and Legion Envoy and Contracts queued; Worker Image in progress; PR Title pending. The compare 05ea3ef4...0c6378c2 touches only .legion/. REQUEST_CHANGES does not wait for CI."
+  "ci": "At code head e26a6648: Tests, Legion Envoy and Contracts, Docs, Worker Image and PR Title all queued. The compare e26a6648...2bc81755 touches only .legion/. REQUEST_CHANGES does not wait for CI."
 }
