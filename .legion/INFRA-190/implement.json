@@ -2,13 +2,37 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-190",
-  "completed": "2026-10-25T21:30:00Z",
-  "round": 4,
-  "roundReason": "Tester's fail at 48eebf71: round 3's src decoder made an image whose source escapes a reference's '&' a refused write (R2; red test TestParseTakesAnImageWhoseSourceEscapesAReferencesAmpersand, b9246afc). Architect narrowed the round: the red test, and every decoded image field (src, title, link, linkTitle) written by the exact inverse of its decoder, proved by one table-driven test and the differential over every corpus. Fix 437ef2a9e6666914755616f53747fb233f14b2d0; evidence https://github.com/sjawhar/legion/pull/2204#issuecomment-6403346645. Earlier rounds: https://github.com/sjawhar/legion/pull/2204#issuecomment-6402787716, https://github.com/sjawhar/legion/pull/2204#issuecomment-6402092124",
+  "completed": "2026-10-26T08:40:45Z",
+  "round": 5,
+  "roundReason": "Generation 3 resumption (plan.json resumption, dispatch://INFRA-190/comment/211c1734-84f9-41ac-b119-9f006b3344de): GitHub reported PR #2204 CONFLICTING at eb1f2266. Forward merge of main@origin 748e8d952a76 into legion/INFRA-190 as merge commit 18e756469fe4cc53056f32750f035a737b55ae84; the only conflict was packages/contracts/CHANGELOG.md (both sides' Unreleased '### Added' bullets kept). No other edit; no admission-query fix to main's tests was needed (every go test package passed). GitHub now reports MERGEABLE. Previous round: Tester's fail at 48eebf71: round 3's src decoder made an image whose source escapes a reference's '&' a refused write (R2; red test TestParseTakesAnImageWhoseSourceEscapesAReferencesAmpersand, b9246afc). Architect narrowed the round: the red test, and every decoded image field (src, title, link, linkTitle) written by the exact inverse of its decoder, proved by one table-driven test and the differential over every corpus. Fix 437ef2a9e6666914755616f53747fb233f14b2d0; evidence https://github.com/sjawhar/legion/pull/2204#issuecomment-6403346645. Earlier rounds: https://github.com/sjawhar/legion/pull/2204#issuecomment-6402787716, https://github.com/sjawhar/legion/pull/2204#issuecomment-6402092124",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2204",
   "evidence": "https://github.com/sjawhar/legion/pull/2204#issuecomment-6401596447",
-  "rebaseRecheck": "rebase re-check 3562964859069a0c762adda181fc94efe89e7123 -> 2c016c99830ae38b862237576bbd571dc8632783 (forward merge of main 4ceb3aa9c5, CHANGELOG-only conflicts): fingerprint 0ef9d407ca42... unchanged, bare gates only, plus linked-images.e2e.ts chromium+iphone 16 passed on the merged tree (https://github.com/sjawhar/legion/pull/2204#issuecomment-6401828292). Round 2: 358c3181be21 -> 073cd8515c22a654fa1fb974cf9023f6a6788b3c (forward merge of main 7af60a22, contracts CHANGELOG conflict only): fingerprint 645de12a231a... unchanged, bare gates only (https://github.com/sjawhar/legion/pull/2204#issuecomment-6402118309)",
+  "rebaseRecheck": "rebase eb1f226634b07e1033bdc5f11ab38d1e93f7015f -> 18e756469fe4cc53056f32750f035a737b55ae84 (forward merge of main 748e8d952a76, contracts CHANGELOG conflict only): fingerprint 07459b8d6ccec0295bd19b34fa803ecce4651f450d0c60355fa67ca4e605150e unchanged (https://github.com/sjawhar/legion/pull/2204#issuecomment-6411510296); full re-proof at the merged head per plan step 4. Earlier: rebase re-check 3562964859069a0c762adda181fc94efe89e7123 -> 2c016c99830ae38b862237576bbd571dc8632783 (forward merge of main 4ceb3aa9c5, CHANGELOG-only conflicts): fingerprint 0ef9d407ca42... unchanged, bare gates only, plus linked-images.e2e.ts chromium+iphone 16 passed on the merged tree (https://github.com/sjawhar/legion/pull/2204#issuecomment-6401828292). Round 2: 358c3181be21 -> 073cd8515c22a654fa1fb974cf9023f6a6788b3c (forward merge of main 7af60a22, contracts CHANGELOG conflict only): fingerprint 645de12a231a... unchanged, bare gates only (https://github.com/sjawhar/legion/pull/2204#issuecomment-6402118309)",
   "proof": [
+    {
+      "criterion": "A3 (R1) at the merged head: the browser suite imports a linked image (paste and API write), saves, reloads and opens the link in the live and past-version views, for a Dispatch picture, a dispatch:// link and a comment; document cases fail at base",
+      "surface": "Dispatch in Playwright Chromium and the iPhone profile against the real Go server, the production SPA bundle and Postgres (issue-pod harness /legion/scratch/tmp/infra190/harness, implementer lane)",
+      "command": "cd packages/dispatch && ( source /legion/scratch/tmp/infra190/harness/env.sh && bunx playwright test --config e2e/playwright.config.ts linked-images.e2e.ts --project chromium --project iphone ) after harness/prepare-tree.sh on the merged tree",
+      "observed": "16 passed (2.3m), 8 cases x 2 projects; log /legion/scratch/tmp/infra190/e2e-r5.log",
+      "headSha": "18e756469fe4cc53056f32750f035a737b55ae84",
+      "negativeControl": "the same spec at the new base 748e8d952a76cc19781957318a8ee371b9211a7f (git archive into harness/base-r5, spec copied in, chromium): 6 failed 2 passed, D1-D4 'the ... picture sits in its link' element(s) not found, C2 'the picture is still shown inside its link', N2 toHaveCount; log /legion/scratch/tmp/infra190/e2e-r5-base.log"
+    },
+    {
+      "criterion": "A4 (R2, R3) at the merged head: the differential reports 0 regressions, misreads and churn, keeps every whole-image link, refuses no write the base takes",
+      "surface": "the pmdoc differential: base and head Go builds against the browser editor's engine over the in-repo corpora, the deployment's documents export and the tester's adversarial, control and decoding corpora",
+      "command": "bash packages/envoy/internal/dispatch/pmdoc/gen/differential.sh --base 748e8d952a76cc19781957318a8ee371b9211a7f --head 18e756469fe4cc53056f32750f035a737b55ae84 --corpus <the deployment's export, plan.json harness line> --corpus /legion/scratch/tmp/infra190/tester/corpus --out /legion/scratch/tmp/infra190/diff-r5",
+      "observed": "exit 0; 2336 documents; every GATE 0 (regressions, misreads, churn, head refuses a write the base takes, head loses a whole-image link, head changes a linked image the base stored); engine links a whole image 65, linked image kept 65; log /legion/scratch/tmp/infra190/diff-r5.log",
+      "headSha": "18e756469fe4cc53056f32750f035a737b55ae84",
+      "negativeControl": "the base column of the same run: base 748e8d95 stores 2231 documents correctly where the head stores 2302 (fixed: 71), i.e. the base drops the linked images' links"
+    },
+    {
+      "criterion": "Round 4 (R2) at the merged head: no write the base takes is refused; each decoded image field is written by the exact inverse of its decoder",
+      "surface": "the documents API of the real Go Dispatch server built from the merged head, on the harness Postgres; pmdoc Render read back by Parse, ParseForWrite and the editor's engine",
+      "command": "bash /legion/scratch/tmp/infra190/live/amp.sh <tree> r5head (POST /api/v1/issues/LIVE-1/artifacts with ![x](i\\&amp;.png), [![x](i\\&amp;.png)](https://u.com), ![x](i.png?a=1\\&copy;), then GET /text); cd packages/envoy && go test ./internal/dispatch/pmdoc/ -run 'TestRenderWritesEachImageFieldSoItReadsBackAsHeld|TestParseTakesAnImageWhoseSourceEscapesAReferencesAmpersand'",
+      "observed": "HTTP 201; /text {\"markdown\":\"![x](i\\\\&amp;.png)\\n\\n[![x](i\\\\&amp;.png)](https://u.com)\\n\\n![x](i.png?a=1\\\\&copy;)\\n\"} byte for byte; both tests PASS",
+      "headSha": "18e756469fe4cc53056f32750f035a737b55ae84",
+      "negativeControl": "the same amp.sh against a server built from base 748e8d95 (harness/base-r5): HTTP 201 but /text {\"markdown\":\"![x](i&.png)\\n\\n![x](i&.png)\\n\\n![x](i.png?a=1©)\\n\"}, the link dropped and the escapes lost"
+    },
     {
       "criterion": "A1 (R1): the spec's reproduction prints [![x](i.png)](https://u.com) for the original and for the copy read back from the Y.Doc",
       "surface": "the headless editor engine (@legion/proof-editor/headless) and y-prosemirror's prosemirrorToYXmlFragment / yXmlFragmentToProseMirrorRootNode, as the spec's reproduction runs them",
@@ -96,7 +120,8 @@
     "A held browser edit that strips a link is reported through a new PendingState.strippedAt notice, not rebuiltAt.",
     "The past-version view now navigates in-app for any dispatch:// link (text, picture, fallback) on a plain click instead of opening a new tab.",
     "Round 3: an image's src is now decoded with the same one-pass decoder as the link (decodeDestination, after micromark): the old unescapeMarkdownText decoded escapes before references and took legacy references without ';', which the editor does not. The differential shows no churn or regression from it.",
-    "Round 4: image title and linkTitle now use the same one-pass decoder as src and link (decodedTitleOrNil); text-link href and title keep titleOrNil and titleSuffix unchanged. A title's line feed is written raw as before (no churn for stored titles); a CR, which only a reference puts in a title, is written &#13;."
+    "Round 4: image title and linkTitle now use the same one-pass decoder as src and link (decodedTitleOrNil); text-link href and title keep titleOrNil and titleSuffix unchanged. A title's line feed is written raw as before (no churn for stored titles); a CR, which only a reference puts in a title, is written &#13;.",
+    "Round 5 (merge): three pmdoc timing tests from main, untouched by this branch (linear_test.go: TestParseAndRenderAreLinearOnDelimiterAndOpenerHeavyText, TestBareURLShapesParseAndRenderLinearly, TestUpdateIsLinearInTheBlockCount), fail in this pod with '+Inf times the 0s it took at 16 KiB' (the gVisor clock reads 0 for the small input), alone as under load; the harness README lists them as known environment failures; CI's envoy job runs them."
   ],
   "openQuestions": [
     "Memory tests (go test -tags memory ./cmd/dispatch) cannot run in this pod (gVisor refuses /proc/<pid>/clear_refs); the new '[![](u)](v)' heaviest shape is measured only by CI's memory job.",
