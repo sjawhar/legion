@@ -2,10 +2,26 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-253",
-  "completed": "2026-10-26T09:04:23Z",
+  "completed": "2026-10-26T09:52:28Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2229",
-  "codeHead": "3fb9e2a0d7e187a2493779e9bf15c2043779f5f1",
+  "codeHead": "bd64de9846128dea7244472e02a6a91a36299424",
   "proof": [
+    {
+      "criterion": "Round 2 (tester's fail): every changed test passes in the CI job that runs it — the pr-and-main test job's `bun test scripts/e2e/lib`",
+      "surface": "pod, the two scripts' real cleanup functions run by bun under set -u, as CI runs them",
+      "command": "bun test scripts/e2e/lib/smoke-cleanup.test.ts scripts/e2e/lib/stage3-4b13b-notes.test.ts; bun test scripts/e2e/lib",
+      "observed": "13 pass, 0 fail; the whole lib lane 516 pass, 2 fail, both nats-stream.test.ts rows that need Docker the pod lacks",
+      "headSha": "bd64de9846128dea7244472e02a6a91a36299424",
+      "negativeControl": "the two fixtures restored from main (no keeper pids declared): the tester's 5 rows fail with 'environment: line 43: daemon_keeper_pid: unbound variable'"
+    },
+    {
+      "criterion": "Round 2 (architect): record-casts.sh resolves the real gh as legion controller start does and refuses, naming it, when there is none",
+      "surface": "pod, the script's own real_gh function under env -i with real files on PATH",
+      "command": "env -i PATH=<dir with a gh script>:<dir with a gh binary> bash -c 'source <real_gh>; real_gh' and the other cases",
+      "observed": "a binary gh first is resolved; LEGION_GH_PATH naming an executable is used as given; the result goes into the operator shell's env -i as LEGION_GH_PATH",
+      "headSha": "bd64de9846128dea7244472e02a6a91a36299424",
+      "negativeControl": "a gh script first on PATH → 'FAIL setup: the first gh on PATH, …/a/gh, is a script, not the real gh, which legion controller start refuses'; no gh → 'gh is not on PATH'; a relative or non-executable LEGION_GH_PATH → refused"
+    },
     {
       "criterion": "A1b: a held port is never free between the harness choosing it and the server serving it (cmdtest.HoldPort replaces FreeTCPPort)",
       "surface": "pod, real child process re-exec'd from the test binary on an inherited socket",
@@ -67,7 +83,8 @@
     "scripts/e2e/lib/held-port.py (+test), rig.sh (start_held, keep_port, start_kept, report_port, held_only_by), bridge-tunnel.sh; free-port.sh deleted; every stage script and rig user",
     "packages/envoy/scripts: e2e-local.sh/test, listener-deploy-probe.test.sh, search-smoke.sh, searchbench.sh",
     "packages/dispatch/e2e: harness-start.ts, run.ts, OS-chosen fake/server/proxy ports, run-server.sh (held socket, DISPATCH_E2E_LISTEN_FROM), playwright.config.ts; docs/site/media harness and rigs; packages/pi-legion skill-scenarios rig; packages/claude-envoy smoke",
-    "docs: AGENTS.md, docs/deployment.md, docs/kubernetes.md, READMEs, CHANGELOGs, skills/legion-worker/references/tools.md (+ generated mirror), dated notes in docs/solutions"
+    "docs: AGENTS.md, docs/deployment.md, docs/kubernetes.md, READMEs, CHANGELOGs, skills/legion-worker/references/tools.md (+ generated mirror), dated notes in docs/solutions",
+    "round 2: scripts/e2e/lib/smoke-cleanup.test.ts and stage3-4b13b-notes.test.ts declare the keeper pids; scripts/e2e/stage2-tmux-supervision.sh expects the gate's current loader lists; docs/site/media/walkthroughs/legion-operator/record-casts.sh resolves LEGION_GH_PATH"
   ],
   "trickyParts": [
     "A held socket accepts and queues connections before the server serves, so every readiness poll against one carries a timeout and waits for the server's own listening line (dispatch and listener launchers, memory harness, search scripts, Stage 1).",
@@ -82,15 +99,22 @@
     "Every scripts/e2e daemon start uses a keeper (keep_port + start_kept), not only restarts: legion.yaml must name the port before legion start runs.",
     "run-server.sh gained DISPATCH_E2E_LISTEN_FROM (a keeper's socket) for the broker docs rig, which needs Dispatch's port before the broker starts.",
     "smoke-session-title.sh's negative-control BASE_REV default is now the parent of 0306bcbe16df (#2154): main@origin carries the feature, so the old default could not fail.",
-    "Two merges of main for GitHub-reported conflicts: #2209 added two FreeTCPPort calls (migrated to HoldPort) and SubscribeAllTopics beside ListenSocket; #2231 replaced the App key unsets with app_key_unsets in three rewritten stage scripts."
+    "Two merges of main for GitHub-reported conflicts: #2209 added two FreeTCPPort calls (migrated to HoldPort) and SubscribeAllTopics beside ListenSocket; #2231 replaced the App key unsets with app_key_unsets in three rewritten stage scripts.",
+    "Round 2 edits the fixtures of the tester's red tests (smoke-cleanup.test.ts:171, stage3-4b13b-notes.test.ts:30): each copies the script's globals, and the scripts now declare daemon_keeper_pid/dispatch_keeper_pid; nothing they assert changed.",
+    "stage2's gate-refuses-a-skill-only-a-role-prompt-loads now asserts the refusal names roles/controller-root.md among two loaders: on main legion-worker/references/findings.md loads legion-controller too, so it is no longer loaded by a role prompt alone."
   ],
   "openQuestions": [
     "envoy-smoke at the code head is the first run of SCM_RIGHTS into a host-network container (plan risk 6); if it fails the plan says report to the architect, no fallback.",
-    "Devbox-only scripts (stage2, stage3, 4b13b, claude-backend, controller-start, dispatch-user-turns, verifiers, stage4a bridge mode, broker rig, record-casts, skill-scenarios) pass bash -n and shellcheck with no new findings and their rig.sh functions were exercised against real processes here; the tester relays the plan's S4b commands to devbox session 01a16962-c84b-7015-9e1d-64beb0a67775.",
-    "With worker_stream_port dropped from the tmux scripts, the daemon defaults it to port+1; a kept port of 65535 would be refused by config validation (outside Linux's default ephemeral range, about 1 in 50k on this pod's 16000-65535 range)."
+    "skill-scenarios: judge.test.ts fails 8 rows in this pod when run after rig.test.ts in one bun process, also with main's rig.sh (pod environment); each file passes alone."
   ],
   "discoveredComplexity": [
     "The Dispatch memory tests that reset peak memory need write access to /proc/<pid>/clear_refs, which gVisor pods refuse; CI's dispatch-memory job is their surface (the same failure on the base harness).",
     "WebKit and Firefox Playwright projects cannot launch in the pod (missing system libraries, no root); CI's dispatch job runs them."
+  ],
+  "round": 2,
+  "notRunEndToEnd": [
+    "stage3-devbox-workflow.sh, stage3-4b13b-acceptance.sh, claude-backend-tmux.sh, dispatch-user-turns.sh, and stage2-tmux-supervision.sh from model-turn-through-the-route on: the devbox has no working model route. Their changed functions ran against real processes: rig.sh start_held/keep_port/start_kept/report_port/held_only_by with the real envoy-listener, envoy-dispatch (env -i, DISPATCH_LISTEN_FD=3), run-server.sh, nats-server -p -1 and legion start on a keeper, in the pod; the keeper daemon path is Stage 1's (pod and CI PASS); the stage3/4b13b cleanup with keeper stops runs in smoke-cleanup.test.ts and stage3-4b13b-notes.test.ts (pod, CI); stage2's gate checks, architect-registers-and-is-ready and envoy-role-held passed on the devbox with the two gate strings patched.",
+    "lib/bridge-tunnel.sh (stage4a bridge mode): no cluster with pods/portforward and no devbox result; ran in the pod against a stub kubectl that binds :0 and stub chisel (port read from the Forwarding line, port-forward and chisel restarted on a new port, bridge_stop leaves nothing).",
+    "verifiers-staging-token.sh: no devbox result; its refusals exit before any bind, and its boots use held-port.py exec --port-file inside env -i, which held-port.test.ts runs against the real listener."
   ]
 }
