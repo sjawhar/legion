@@ -23,6 +23,11 @@ const workspaceFetchUsage = "legion workspace-init fetch --repo <owner>/<repo> -
 // token's file (LEGION_REPOSITORY_CACHE_TOKEN_FILE); --cache-url defaults to it.
 const cacheURLEnv = "LEGION_REPOSITORY_CACHE_URL"
 
+// defaultBranchEnv is where the runtime names the default branch it recorded for the issue, which
+// a fetch from the cache keeps current beside the one GitHub names now (workspace.FetchRequest's
+// RecordedDefault); unset or empty, there is none.
+const defaultBranchEnv = "LEGION_DEFAULT_BRANCH"
+
 // fetchClock is the time the fetch's clone retries read and wait on; a test replaces it.
 var fetchClock workspace.Clock = workspace.WallClock{}
 
@@ -73,6 +78,7 @@ func workspaceFetch(ctx context.Context, repo, feed, cacheURL string, stdout io.
 	report, err := workspace.Fetch(ctx, workspace.NewRunner(workspace.CommandTimeout, tools), workspace.FetchRequest{
 		Repo: repository, Token: token, CredentialDir: os.TempDir(), Feed: feed,
 		Log: func(line string) { fmt.Fprintln(stdout, "workspace-init fetch: "+line) }, Clock: fetchClock, CacheURL: cacheURL, CacheToken: cacheToken,
+		RecordedDefault: os.Getenv(defaultBranchEnv),
 	})
 	if err != nil {
 		return err

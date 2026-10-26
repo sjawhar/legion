@@ -2103,8 +2103,9 @@ architect, planner, implementer, tester, reviewer, merger), named for its role:
    A relaunch, whose volume already holds the feed, fetches the delta into it alone (`the feed
    holds <owner>/<repo> already: …`), after removing every git lock file a fetch killed mid-update
    left in the feed and every partial pack (`objects/pack/tmp_*`) a transfer killed mid-pack left
-   there, each logged with its age, and after deleting every branch GitHub no longer lists, each
-   logged (`removed <branch> from the feed: GitHub no longer has it`). It takes an existing feed only in the shape the
+   there, each logged with its age, and after deleting every branch outside the delta that GitHub no
+   longer lists or has moved, each logged with its reason, as a fresh feed's fetch does too (below,
+   [The repository cache](#the-repository-cache)). It takes an existing feed only in the shape the
    fetch and Git maintenance write: no symlink anywhere, its owner directory included; no gitfile;
    no hook but git's samples; a configuration holding only the keys git's bare init and clone and
    the fetch write, each line in git's own form (a `[section]` header alone on its line, or a
@@ -2588,15 +2589,24 @@ checkout of a blob it misnames writes the other blob's content without an error,
 issue's workspace does not record as a change in a repository of realistic size. The daemon checks
 that the cache's Service is the cache's own once, before it tells a pod the address (below).
 
-From GitHub the fetch then takes the repository's default branch and `refs/heads/legion/*` alone,
-pruned within those, after deleting from the feed every branch GitHub no longer lists (one
-`git ls-remote --symref <url> HEAD refs/heads/*` before the delta). That is what the issue's clone
-is made from. Every other branch keeps the content the cache's tar left it — at most one
-`refresh_minutes` old when the feed was streamed, older on a feed kept on the volume (never streamed
-again) or from a cache whose fetches have been failing — and an agent that needs a branch newer
-than that fetches it from GitHub through its clone's `origin`. So a large branch pushed between the
-cache's refresh and a wave of launches is never pulled into every issue pod at once, and a branch
-GitHub deleted or renamed away from, a default branch among them, leaves a kept feed too. A cache that is not ready is waited
+From GitHub the fetch then takes, by exact name, the default branch GitHub names now and the
+default branch the daemon recorded for the issue while GitHub has it (`LEGION_DEFAULT_BRANCH` on the
+fetch container), and `refs/heads/legion/*`, pruned within those. Before that delta it reads every
+branch GitHub has with its tip (one `git ls-remote --symref <url> HEAD refs/heads/*`) and deletes
+every other branch of the feed that is not exactly GitHub's tip, on a fresh feed and on one kept on
+the volume alike, logging each with its reason (`removed <branch> from the feed: GitHub no longer has
+it`, or `…: GitHub has moved it, and this fetch brings only the default branch and the issue
+branches`). So after a fetch every branch of the feed is GitHub's as it stood then, or absent: the
+issue's clone is made from the recorded default branch and the issue's own branch, both current, an
+issue branch GitHub deleted is gone, and an agent that wants another branch as GitHub has it now
+fetches it from GitHub through its clone's `origin`. A fresh feed streamed from a cache that is
+behind loses, at that point, every branch outside the delta that moved since the cache's last
+refresh; nothing provisioning reads is among them. A large branch pushed between the cache's refresh
+and a wave of launches is never pulled into every issue pod at once. A recorded default GitHub no
+longer has leaves the feed too, and provisioning then refuses it rather than starting from an old
+tip.
+
+A cache that is not ready is waited
 for, and one that never becomes ready fails the fetch, naming its last answer; the issue pod's
 failure then names the cache's state (`the repository cache of <owner>/<repo>, which a fresh feed
 comes from alone, is failing: container cache CrashLoopBackOff: …`).

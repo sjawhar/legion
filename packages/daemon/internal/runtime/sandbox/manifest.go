@@ -847,8 +847,13 @@ const (
 // fetchEnvironment is `workspace-init fetch`'s: the image's PATH alone, its own TMPDIR, the mounted
 // provisioning token, and, for an issue pod, its repository's cache — its address, which resolves
 // only while the cache is Ready, so the fetch waits for it, and its bearer token's file, from the
-// same Secret — which `fetch` streams a fresh feed from alone before it asks GitHub for the delta.
-// Its git reads no configuration but its own, so it is told no config home.
+// same Secret — which `fetch` streams a fresh feed from alone before it asks GitHub for the delta,
+// and the default branch the daemon recorded for the issue (LEGION_DEFAULT_BRANCH), which the
+// delta brings current beside the one GitHub names now, since `workspace-init provision` starts an
+// issue with no branch there. It is a variable and not a flag so that an image from before it
+// ignores it rather than refusing the command, and a daemon from before it leaves it unset, which
+// the fetch reads as no recorded default. Its git reads no configuration but its own, so it is
+// told no config home.
 func fetchEnvironment(l launch) []corev1.EnvVar {
 	return []corev1.EnvVar{
 		{Name: "PATH", Value: imagePath},
@@ -856,6 +861,7 @@ func fetchEnvironment(l launch) []corev1.EnvVar {
 		{Name: "LEGION_PROVISION_TOKEN_FILE", Value: ProvisionDir + "/" + provisionTokenKey},
 		{Name: "LEGION_REPOSITORY_CACHE_URL", Value: l.cacheURL},
 		{Name: repocache.CacheTokenFileEnv, Value: ProvisionDir + "/" + cacheTokenKey},
+		{Name: "LEGION_DEFAULT_BRANCH", Value: l.spec.DefaultBranch},
 	}
 }
 

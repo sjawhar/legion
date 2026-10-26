@@ -48,6 +48,12 @@ type FetchRequest struct {
 	Clock         Clock
 	CacheURL      string
 	CacheToken    string
+	// RecordedDefault is the default branch the daemon recorded for the issue when it admitted it,
+	// where `workspace-init provision` starts an issue with no branch: a fetch from the cache brings
+	// it current beside the one GitHub's HEAD names now, so a default GitHub switched since is still
+	// fetched while GitHub has it. Empty, there is none (the cache's own process, a daemon from
+	// before the runtime told it).
+	RecordedDefault string
 }
 
 // CacheRepositoryHeader names, on every answer the repository cache gives a request its token
@@ -83,8 +89,9 @@ type FetchReport struct {
 // succeeded, so the feed's repository is either whole or absent. With a cache named, it comes from
 // the cache alone: Fetch waits for the cache to be ready (waitForCache), unpacks its tar
 // (unpackCache), verifies it (verifyCache), moves it into the feed, and only then fetches from
-// GitHub the default branch and the Legion issue branches, which is what the issue's clone is
-// made from, after deleting every branch GitHub no longer has (pruneToGitHub, fetchInto); a
+// GitHub, by name, the default branch GitHub names and the issue's recorded default, and the
+// Legion issue branches, which is what the issue's clone is made from, after deleting every other
+// branch that is not exactly GitHub's tip (pruneToGitHub, fetchInto); a
 // cache that is not ready within CacheWaitTimeout, or whose tar a feed does not take, fails the
 // fetch, and nothing is cloned from GitHub instead, so the cache's own first clone is the one full
 // download of the repository. With none, the feed is cloned bare from GitHub, or has every branch
@@ -276,45 +283,52 @@ func (r *FetchReport) fromGitHub(ctx context.Context, run Runner, request FetchR
 }
 
 // deltaBranches reads what GitHub holds now, when the feed this fetch fills comes from the
-// repository cache: the default branch its HEAD names, as a ref, and every branch it has with its
-// tip. It is read with one `git ls-remote --symref <url> HEAD refs/heads/*` under the fetch's
-// credential, retries and deadline. A feed with no cache behind it — the cache's own process —
-// answers "" and no branches, and takes every branch, pruned, as before; so does a GitHub that
-// names no default branch (nothing pushed yet).
+// repository cache, and answers the branches the delta brings by exact name, as refs, with every
+// branch GitHub has and its tip. The exact branches are the default branch GitHub's HEAD names, and
+// the issue's recorded default (FetchRequest.RecordedDefault) when GitHub still has it under that
+// name and it is another branch: provisioning starts an issue with no branch at the recorded one,
+// so a default GitHub switched since stays current while it exists. It is read with one
+// `git ls-remote --symref <url> HEAD refs/heads/*` under the fetch's credential, retries and
+// deadline, so a recorded default reaches a refspec only as GitHub spells a branch it has. A feed
+// with no cache behind it — the cache's own process — answers none, and takes every branch, pruned,
+// as before; so does a GitHub that names no default branch (nothing pushed yet).
 //
-// The default branch is what fetchInto narrows the delta to, beside the issue branches: a fetch of
+// The exact branches are what fetchInto narrows the delta to, beside the issue branches: a fetch of
 // every branch pulls whatever anyone pushed to the repository since the cache's last refresh into
 // every issue pod at once, which no pod reads (sjawhar/legion#2235). The branch list is what
 // pruneToGitHub holds the rest of the feed to.
-func deltaBranches(ctx context.Context, run Runner, request FetchRequest, gitDir string, held *fetchCredential, deadline time.Time) (string, map[string]string, error) {
+func deltaBranches(ctx context.Context, run Runner, request FetchRequest, gitDir string, held *fetchCredential, deadline time.Time) ([]string, map[string]string, error) {
 	if request.CacheURL == "" {
-		return "", nil, nil
+		return nil, nil, nil
 	}
 	target, heads, err := remoteRefs(ctx, run, request, gitDir, held, deadline, "refs/heads/*")
 	if err != nil {
-		return "", nil, err
+		return nil, nil, err
 	}
 	if target == "" {
-		return "", nil, nil
+		return nil, nil, nil
 	}
-	return target, heads, nil
+	exact := []string{target}
+	if recorded := "refs/heads/" + request.RecordedDefault; request.RecordedDefault != "" && recorded != target {
+		if _, listed := heads[recorded]; listed {
+			exact = append(exact, recorded)
+		}
+	}
+	return exact, heads, nil
 }
 
 // pruneToGitHub deletes from the bare repository gitDir, before the delta, every branch the delta
 // will not bring current and that is not already current: one GitHub no longer lists, and one
-// outside the delta's refspecs (the default branch defaultRef and refs/heads/legion/*) whose tip is
-// not GitHub's (heads, read by deltaBranches). Each removal is logged. So every branch a feed holds
-// after the fetch is GitHub's as it stood at this fetch, and nothing stale is left to start from.
-// The narrowed delta prunes only within its own refspecs, and a feed kept on the volume is never
-// streamed again, so without this such a feed would keep, for good, a branch GitHub deleted, the
-// old name of a default branch GitHub renamed, and the tip it was first streamed at of a branch
-// GitHub moved — among them an issue's recorded default after GitHub's default was switched to
-// another branch, which a workspace provisioned again there with no pushed branch would start from
-// without an error. Now provisioning finds that branch current, or missing and refuses (baseCommit).
-// A branch created on GitHub after the read is not in heads and is not in the feed either, since
-// nothing the fetch takes is deleted here: only branches the feed held before the delta are
-// candidates.
-func pruneToGitHub(ctx context.Context, run Runner, request FetchRequest, gitDir, defaultRef string, heads map[string]string) error {
+// outside the delta's refspecs (the exact branches, and refs/heads/legion/*) whose tip is not
+// GitHub's (heads, read by deltaBranches). Each removal is logged with its reason. So every branch
+// a feed holds after the fetch is GitHub's as it stood at this fetch, on a fresh feed and a kept
+// one alike, and nothing stale is left to start from. The narrowed delta prunes only within its
+// own refspecs, and a feed kept on the volume is never streamed again, so without this such a feed
+// would keep, for good, a branch GitHub deleted, the old name of a default branch GitHub renamed,
+// and the tip it was first streamed at of a branch GitHub moved. A branch created on GitHub after
+// the read is not in heads and is not in the feed either, since nothing the fetch takes is deleted
+// here: only branches the feed held before the delta are candidates.
+func pruneToGitHub(ctx context.Context, run Runner, request FetchRequest, gitDir string, exact []string, heads map[string]string) error {
 	if heads == nil {
 		return nil
 	}
@@ -324,7 +338,7 @@ func pruneToGitHub(ctx context.Context, run Runner, request FetchRequest, gitDir
 	}
 	gone := []string{}
 	for ref, tip := range held {
-		if !strings.HasPrefix(ref, "refs/heads/") || ref == defaultRef || strings.HasPrefix(ref, strings.TrimSuffix(issueBranches, "*")) {
+		if !strings.HasPrefix(ref, "refs/heads/") || slices.Contains(exact, ref) || strings.HasPrefix(ref, strings.TrimSuffix(issueBranches, "*")) {
 			continue
 		}
 		if heads[ref] != tip {
@@ -855,40 +869,37 @@ type feedTransfer struct {
 // fetchInto is the transfer into a feed repository that exists, with the remote named by its URL
 // in the argv rather than read from the feed's configuration.
 //
-// An issue pod's feed (defaultRef set: the branch GitHub's HEAD names, read by deltaBranches)
-// takes that branch and every Legion issue branch, and nothing else. Those are what the issue's
-// clone is made from — feedRemote fetches the repository's default branch and the issue's own
-// bookmark by name and no other — and everything else the feed holds is as the repository cache's
-// stream left it: at most one refresh behind GitHub when the feed was streamed, older on a feed
-// kept on the volume, which is never streamed again, or from a cache whose fetches have been
-// failing. An agent that wants a branch newer than that fetches it from GitHub through its clone's
-// origin. A branch outside those is then never pulled
-// into every issue pod at once: the LINUX deployment's owners each fetched 1.27 GB of one
-// upstream-sync branch pushed five minutes before they launched, which with the cache's stream and
-// verification left nine of fourteen pods over FetchTimeout, each restarting the whole fetch
-// (sjawhar/legion#2235). The issue branches' refspec is a pattern, so a fetch brings whichever
-// exist and never fails on an issue whose branch is not pushed yet. The fetch prunes, and with
-// refspecs on its command line git prunes only the refs those refspecs write: an issue branch
-// GitHub deleted leaves the feed, as provisioning relies on (a bookmark with no row on the feed
-// starts at the default branch, and the refusals that tell an operator to delete a branch on
-// GitHub promise the next provisioning drops its row). A branch outside the two is kept only while
-// it is exactly GitHub's: before the delta, Fetch deletes every other branch GitHub no longer lists
-// or has moved (pruneToGitHub), since this prune reaches only its refspecs and a feed kept on the
-// volume is never streamed again. So a feed holds no stale branch to start from: a default branch
-// GitHub renamed, or one an issue recorded before GitHub's default was switched elsewhere and
-// which has moved since, is current or absent, and provisioning refuses an absent one
-// (baseCommit) rather than starting from an old tip.
+// An issue pod's feed (exact set, read by deltaBranches: the default branch GitHub's HEAD names,
+// and the issue's recorded default while GitHub has it) takes those branches by name and every
+// Legion issue branch, and nothing else: what the issue's clone is made from — feedRemote fetches
+// the recorded default branch and the issue's own bookmark by name and no other. Every other
+// branch the feed holds is GitHub's own tip or absent: before the delta, Fetch deletes each one
+// GitHub no longer lists or has moved (pruneToGitHub), on a fresh feed and a kept one alike, since
+// this fetch's prune reaches only its own refspecs and a feed kept on the volume is never streamed
+// again. An agent that wants one of those branches as GitHub has it now fetches it from GitHub
+// through its clone's origin. A branch outside the delta is then never pulled into every issue pod
+// at once: the LINUX deployment's owners each fetched 1.27 GB of one upstream-sync branch pushed
+// five minutes before they launched, which with the cache's stream and verification left nine of
+// fourteen pods over FetchTimeout, each restarting the whole fetch (sjawhar/legion#2235). The issue
+// branches' refspec is a pattern, so a fetch brings whichever exist and never fails on an issue
+// whose branch is not pushed yet. The fetch prunes, and with refspecs on its command line git
+// prunes only the refs those refspecs write: an issue branch GitHub deleted leaves the feed, as
+// provisioning relies on (a bookmark with no row on the feed starts at the default branch, and the
+// refusals that tell an operator to delete a branch on GitHub promise the next provisioning drops
+// its row). A recorded default GitHub no longer has is deleted the same way, and provisioning then
+// refuses it (baseCommit) rather than starting from an old tip.
 //
-// The repository cache's own process (defaultRef empty) takes every branch instead, pruned of
-// those GitHub deleted: what it holds is what every issue pod of its repository starts from.
-func fetchInto(feed string, repo ghrepo.Repository, defaultRef string) feedTransfer {
+// The repository cache's own process (exact empty) takes every branch instead, pruned of those
+// GitHub deleted: what it holds is what every issue pod of its repository starts from.
+func fetchInto(feed string, repo ghrepo.Repository, exact []string) feedTransfer {
 	argv := []string{"git", "-c", "gc.auto=0", "-c", "maintenance.auto=false", "--git-dir=" + feed, "fetch", "--prune", "--quiet", GitHubURL(repo)}
-	if defaultRef == "" {
-		argv = append(argv, "+refs/heads/*:refs/heads/*")
-	} else {
-		argv = append(argv, "+"+defaultRef+":"+defaultRef, "+"+issueBranches+":"+issueBranches)
+	if len(exact) == 0 {
+		return feedTransfer{verb: "fetch", argv: append(argv, "+refs/heads/*:refs/heads/*")}
 	}
-	return feedTransfer{verb: "fetch", argv: argv}
+	for _, ref := range exact {
+		argv = append(argv, "+"+ref+":"+ref)
+	}
+	return feedTransfer{verb: "fetch", argv: append(argv, "+"+issueBranches+":"+issueBranches)}
 }
 
 // issueBranches is the pattern every Legion issue branch of a repository matches: Bookmark names

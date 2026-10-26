@@ -1936,42 +1936,56 @@ func TestAFeedOnTheVolumeTakesTheNarrowedDeltaAndDropsADeletedIssueBranch(t *tes
 	}
 }
 
-// A feed kept on the volume holds no branch outside the delta's two that is not GitHub's own tip:
-// when GitHub's default is switched from main to another branch and main then moves, the next
-// fetch takes the new default and deletes main, which it does not bring, so a workspace provisioned
-// again there for an issue whose recorded default is main finds it absent and is refused, rather
-// than starting from the tip main had when the feed was first streamed. A branch outside the two
-// that GitHub has not moved stays.
+// When GitHub's default is switched from main to trunk and main then moves, a feed kept on the
+// volume keeps no stale tip of main. For an issue whose recorded default is main, the delta brings
+// main current beside trunk, so provisioning starts there as it did when every branch was fetched.
+// With no recorded default (a daemon from before the runtime told it), main is outside the delta
+// and is deleted, so provisioning finds it absent and refuses rather than starting from the tip
+// main had when the feed was first streamed. A branch outside the delta that GitHub has not moved
+// stays either way.
 func TestAFeedOnTheVolumeKeepsNoStaleBranchAfterTheDefaultIsSwitched(t *testing.T) {
-	run := newLocalRunner(t)
-	pushRemoteBranch(t, run.remote, "trunk", "trunk.txt")
-	pushRemoteBranch(t, run.remote, "release/v7.1", "unmoved.txt")
-	served := &fakeCache{body: cacheTar(t, cacheOf(t, run.remote))}
-	req := fetchRequest(t)
-	var logged []string
-	req.CacheURL, req.CacheToken, req.Log = served.serve(t), testCacheToken, func(line string) { logged = append(logged, line) }
-	if _, err := Fetch(context.Background(), run, req); err != nil {
-		t.Fatalf("the first Fetch: %v", err)
-	}
-	feed := filepath.Join(req.Feed, "acme", "widgets.git")
-	runSetup(t, t.TempDir(), "git", "--git-dir="+run.remote, "symbolic-ref", "HEAD", "refs/heads/trunk")
-	pushRemoteBranch(t, run.remote, "main", "moved.txt")
-	trunk := pushRemoteBranch(t, run.remote, "trunk", "newer.txt")
+	for _, recorded := range []string{"main", ""} {
+		t.Run("recorded default "+cmp.Or(recorded, "none"), func(t *testing.T) {
+			run := newLocalRunner(t)
+			pushRemoteBranch(t, run.remote, "trunk", "trunk.txt")
+			pushRemoteBranch(t, run.remote, "release/v7.1", "unmoved.txt")
+			served := &fakeCache{body: cacheTar(t, cacheOf(t, run.remote))}
+			req := fetchRequest(t)
+			var logged []string
+			req.CacheURL, req.CacheToken, req.RecordedDefault = served.serve(t), testCacheToken, recorded
+			req.Log = func(line string) { logged = append(logged, line) }
+			if _, err := Fetch(context.Background(), run, req); err != nil {
+				t.Fatalf("the first Fetch: %v", err)
+			}
+			feed := filepath.Join(req.Feed, "acme", "widgets.git")
+			runSetup(t, t.TempDir(), "git", "--git-dir="+run.remote, "symbolic-ref", "HEAD", "refs/heads/trunk")
+			mainTip := pushRemoteBranch(t, run.remote, "main", "moved.txt")
+			trunk := pushRemoteBranch(t, run.remote, "trunk", "newer.txt")
 
-	if _, err := Fetch(context.Background(), run, req); err != nil {
-		t.Fatalf("the second Fetch: %v", err)
-	}
-	refs := runSetup(t, feed, "git", "--git-dir="+feed, "for-each-ref", "--format=%(refname)")
-	for ref, want := range map[string]bool{"refs/heads/main": false, "refs/heads/trunk": true, "refs/heads/release/v7.1": true} {
-		if got := strings.Contains(refs, ref+"\n"); got != want {
-			t.Errorf("the feed holds %s: %t, want %t; its refs are %q", ref, got, want, refs)
-		}
-	}
-	if got := strings.TrimSpace(runSetup(t, feed, "git", "--git-dir="+feed, "rev-parse", "refs/heads/trunk")); got != trunk {
-		t.Errorf("the feed's trunk is %s, want the remote's %s", got, trunk)
-	}
-	if want := "removed main from the feed: GitHub has moved it, and this fetch brings only the default branch and the issue branches"; !slices.Contains(logged, want) {
-		t.Errorf("Fetch logged %q, want %q", logged, want)
+			if _, err := Fetch(context.Background(), run, req); err != nil {
+				t.Fatalf("the second Fetch: %v", err)
+			}
+			refs := runSetup(t, feed, "git", "--git-dir="+feed, "for-each-ref", "--format=%(refname)")
+			for ref, want := range map[string]bool{"refs/heads/main": recorded == "main", "refs/heads/trunk": true, "refs/heads/release/v7.1": true} {
+				if got := strings.Contains(refs, ref+"\n"); got != want {
+					t.Errorf("the feed holds %s: %t, want %t; its refs are %q", ref, got, want, refs)
+				}
+			}
+			if got := strings.TrimSpace(runSetup(t, feed, "git", "--git-dir="+feed, "rev-parse", "refs/heads/trunk")); got != trunk {
+				t.Errorf("the feed's trunk is %s, want the remote's %s", got, trunk)
+			}
+			removed := "removed main from the feed: GitHub has moved it, and this fetch brings only the default branch and the issue branches"
+			if recorded == "main" {
+				if got := strings.TrimSpace(runSetup(t, feed, "git", "--git-dir="+feed, "rev-parse", "refs/heads/main")); got != mainTip {
+					t.Errorf("the feed's main is %s, want the remote's %s: the issue's recorded default kept current", got, mainTip)
+				}
+				if slices.Contains(logged, removed) {
+					t.Errorf("Fetch removed the issue's recorded default: %q", logged)
+				}
+			} else if !slices.Contains(logged, removed) {
+				t.Errorf("Fetch logged %q, want %q", logged, removed)
+			}
+		})
 	}
 }
 

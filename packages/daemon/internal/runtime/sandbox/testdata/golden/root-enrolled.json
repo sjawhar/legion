@@ -672,6 +672,10 @@
               {
                 "name": "LEGION_REPOSITORY_CACHE_TOKEN_FILE",
                 "value": "/var/run/legion/provision/LEGION_REPOSITORY_CACHE_TOKEN"
+              },
+              {
+                "name": "LEGION_DEFAULT_BRANCH",
+                "value": "main"
               }
             ],
             "image": "ghcr.io/sjawhar/legion-worker@sha256:1d10089a0000000000000000000000000000000000000000000000000000beef",
