@@ -97,12 +97,12 @@ type outbox struct {
 	clock     supervise.Clock
 	provision func(context.Context, workspace.Request) (workspace.Workspace, error)
 	remove    func(context.Context, workspace.Workspace) error
-	// provisionMu runs the workspace provisions and removals one at a time: every issue's
-	// workspace is a jj workspace of its repository's shared clone, and the clone's `jj git
-	// fetch` and `workspace add` corrupt it when two run at once. Lanes run issues side by side,
-	// so without it two issues' starts could both be provisioning. One lock serves every
-	// repository's clone.
-	provisionMu sync.Mutex
+	// provisions orders the workspace provisions and removals (provisionLocks): up to
+	// provisionConcurrency provisions at once, one at a time per issue, and one command at a time
+	// on each repository's shared clone but for the checkouts — the clone's `jj git fetch`, its
+	// git configuration and its bookmarks corrupt or refuse when two write at once. Lanes and
+	// launches run issues side by side, so several issues' provisions are in flight together.
+	provisions provisionLocks
 	// githubAPI is the GitHub REST root an issue_branch row creates its issue's branch under: the
 	// workflow's (workflowRuntime.githubAPI), which empty, in production, is https://api.github.com.
 	githubAPI string
@@ -1186,28 +1186,42 @@ func workspaceMissing(stateDir string, repo ghrepo.Repository, key string) (bool
 // provisionIn provisions key's workspace in repo, at defaultBranch for an issue with no branch, as
 // the implement App for repo's owner; with onlyMissing, only when the workspace is still missing
 // once this provision's turn comes, so two launches that both found it missing provision it once.
+// Provisions of one issue take turns; once it has its turn, a provision waits for one of the
+// provisionConcurrency places, and runs beside other issues' provisions, handed its repository's
+// store lock (provisionLocks).
 func (r *outbox) provisionIn(ctx context.Context, key string, repo ghrepo.Repository, defaultBranch string, onlyMissing bool) error {
 	if r.tokens == nil {
 		return errors.New("supervise executor has no GitHub App token manager")
 	}
-	lease, err := r.tokens.Token(ctx, appauth.Implement, repo.Owner())
+	located, err := workspace.Location(r.stateDir, repo, key)
 	if err != nil {
-		return fmt.Errorf("mint the implement App token for %s to provision %s: %w", repo.Owner(), key, err)
+		return fmt.Errorf("provision workspace for %s: %w", key, err)
 	}
-	// One provision at a time (provisionMu): the issue's workspace is added to its repository's
-	// shared clone, which every issue on that repository shares, and a second issue's lane
-	// provisioning beside this one would have the clone fetching and adding under both.
-	r.provisionMu.Lock()
-	defer r.provisionMu.Unlock()
+	issue, releaseIssue := r.provisions.issues.take(located.Dir)
+	defer releaseIssue()
+	issue.Lock()
+	defer issue.Unlock()
 	if onlyMissing {
 		if missing, err := workspaceMissing(r.stateDir, repo, key); err != nil || !missing {
 			return err
 		}
 	}
+	releaseSlot, err := r.provisions.slot(ctx)
+	if err != nil {
+		return fmt.Errorf("provision workspace for %s: wait for a provision's turn: %w", key, err)
+	}
+	defer releaseSlot()
+	lease, err := r.tokens.Token(ctx, appauth.Implement, repo.Owner())
+	if err != nil {
+		return fmt.Errorf("mint the implement App token for %s to provision %s: %w", repo.Owner(), key, err)
+	}
+	store, releaseStore := r.provisions.stores.take(located.Clone)
+	defer releaseStore()
 	if _, err := r.provision(ctx, workspace.Request{
 		StateDir: r.stateDir, Repo: repo, Issue: key, DefaultBranch: defaultBranch, CredentialHelper: workspace.GitHubCredentialHelper,
-		Source: workspace.FromGitHub(lease.Token, r.stateDir),
-		Log:    func(line string) { r.log.Warn("provisioning: "+line, "issue", key) },
+		Source:    workspace.FromGitHub(lease.Token, r.stateDir),
+		Log:       func(line string) { r.log.Warn("provisioning: "+line, "issue", key) },
+		StoreLock: store,
 	}); err != nil {
 		return fmt.Errorf("provision workspace for %s: %w", key, err)
 	}
@@ -1751,10 +1765,17 @@ func (r *outbox) removeWorkspace(ctx context.Context, row record.OutboxRow, payl
 	if err != nil {
 		return fmt.Errorf("locate workspace for %s: %w", row.Issue, err)
 	}
-	// The removal forgets the workspace in the same shared clone a provision adds to, so it takes
-	// the provision's turn (provisionMu) rather than running under another issue's provision.
-	r.provisionMu.Lock()
-	defer r.provisionMu.Unlock()
+	// The removal forgets the workspace in the same shared clone a provision adds to: it takes its
+	// issue's turn, so it never runs under that issue's provision, and holds the clone's store lock
+	// throughout, so nothing of another issue's provision but its checkout runs beside it.
+	issueTurn, releaseIssue := r.provisions.issues.take(working.Dir)
+	defer releaseIssue()
+	issueTurn.Lock()
+	defer issueTurn.Unlock()
+	store, releaseStore := r.provisions.stores.take(working.Clone)
+	defer releaseStore()
+	store.Lock()
+	defer store.Unlock()
 	if err := r.remove(ctx, working); err != nil {
 		return fmt.Errorf("remove workspace for %s: %w", row.Issue, err)
 	}

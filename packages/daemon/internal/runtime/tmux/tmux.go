@@ -190,10 +190,11 @@ type Runtime struct {
 	// and those it was told of by ReconcileOrphans. An entry leaves when its process is stopped
 	// or a sweep has reported it gone for good.
 	tracked map[string]*trackedProcess
-	// displaced is every known claim's locator another runtime recorded (foreign), by
-	// incarnation, as the last ReconcileOrphans read them: the next sweep reports each Gone and
-	// Displaced and lets it go. Guarded by trackedMu.
-	displaced map[string]runtime.Locator
+	// displaced is every known claim's locator another runtime recorded (foreign), by claim, as the
+	// last ReconcileOrphans read them: the next sweep reports each Gone and Displaced and lets it
+	// go. Keyed by claim, not incarnation: the roles of one issue share its pod, so two of them at
+	// one generation share a sandbox incarnation (`PodUID/Generation`). Guarded by trackedMu.
+	displaced map[claim.Token]runtime.Locator
 }
 
 // trackedProcess is one watched process: its locator, the issue it works on when the runtime
@@ -305,7 +306,7 @@ func New(opts Options) (*Runtime, error) {
 		piConfigFiles:    opts.PiConfigFiles,
 		readProc:         os.ReadFile,
 		tracked:          map[string]*trackedProcess{},
-		displaced:        map[string]runtime.Locator{},
+		displaced:        map[claim.Token]runtime.Locator{},
 	}
 	if r.commandTimeout == 0 {
 		r.commandTimeout = defaultCommandTimeout
@@ -509,11 +510,7 @@ func (r *Runtime) untrackClaim(token claim.Token) {
 			delete(r.tracked, incarnation)
 		}
 	}
-	for incarnation, loc := range r.displaced {
-		if loc.Claim == token {
-			delete(r.displaced, incarnation)
-		}
-	}
+	delete(r.displaced, token)
 }
 
 // displaceExactly makes the displaced set exactly the foreign locators of the known claims a
@@ -521,20 +518,23 @@ func (r *Runtime) untrackClaim(token claim.Token) {
 func (r *Runtime) displaceExactly(foreigners []runtime.Locator) {
 	r.trackedMu.Lock()
 	defer r.trackedMu.Unlock()
-	r.displaced = make(map[string]runtime.Locator, len(foreigners))
+	r.displaced = make(map[claim.Token]runtime.Locator, len(foreigners))
 	for _, loc := range foreigners {
-		r.displaced[loc.Incarnation] = loc
+		r.displaced[loc.Claim] = loc
 	}
 }
 
-// forgetDisplaced lets go of a foreign locator: reported, or stopped.
+// forgetDisplaced lets go of a foreign locator, reported or stopped: the claim's displaced entry
+// when it is still that locator, never a newer one a later ReconcileOrphans read.
 func (r *Runtime) forgetDisplaced(loc runtime.Locator) {
 	r.trackedMu.Lock()
 	defer r.trackedMu.Unlock()
-	delete(r.displaced, loc.Incarnation)
+	if held, ok := r.displaced[loc.Claim]; ok && held.Incarnation == loc.Incarnation {
+		delete(r.displaced, loc.Claim)
+	}
 }
 
-// displacedLocators is the displaced set, ordered by claim then incarnation.
+// displacedLocators is the displaced set, ordered by claim.
 func (r *Runtime) displacedLocators() []runtime.Locator {
 	r.trackedMu.Lock()
 	defer r.trackedMu.Unlock()
@@ -542,12 +542,7 @@ func (r *Runtime) displacedLocators() []runtime.Locator {
 	for _, loc := range r.displaced {
 		out = append(out, loc)
 	}
-	sort.Slice(out, func(i, j int) bool {
-		if out[i].Claim != out[j].Claim {
-			return out[i].Claim < out[j].Claim
-		}
-		return out[i].Incarnation < out[j].Incarnation
-	})
+	sort.Slice(out, func(i, j int) bool { return out[i].Claim < out[j].Claim })
 	return out
 }
 

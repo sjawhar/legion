@@ -150,9 +150,11 @@ func createWorkspace(ctx context.Context, run Runner, workspace Workspace, log f
 	// --ignore-working-copy (on 0.44 and 0.45, after registering the workspace and creating its
 	// directory), so the add snapshots the clone's own working copy. Every other command
 	// provisioning and removal run on the clone is onClone's, and so is every command a refusal
-	// prints (wayOut).
+	// prints (wayOut). The add registers the workspace with no files (--sparse-patterns empty), so
+	// it is quick under the store lock; Provision writes the working copy after letting the lock go
+	// (checkout).
 	add := []string{
-		"jj", "workspace", "add", workspace.Dir, "--name", workspaceName, "--revision", revision, "-R", cloneDir,
+		"jj", "workspace", "add", workspace.Dir, "--name", workspaceName, "--revision", revision, "--sparse-patterns", "empty", "-R", cloneDir,
 	}
 	result, err := runCommand(ctx, run, add, nil, "")
 	if err != nil {

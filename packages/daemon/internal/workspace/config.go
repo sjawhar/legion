@@ -13,6 +13,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
@@ -97,6 +98,36 @@ type Request struct {
 	// Log takes the one line provisioning logs: the commits it set aside when it started a merged
 	// issue's workspace at the default branch (createWorkspace).
 	Log func(line string)
+	// StoreLock, when set, is held around every command provisioning runs on the repository's
+	// shared clone — its clone, fetch, bookmark reads and writes, the workspace's registration,
+	// git worktree bookkeeping and configuration — and let go before the checkout writes the
+	// issue's own working copy (`jj sparse reset` in the workspace the registration made with no
+	// files), the one step whose time follows the repository's size and which writes nothing of
+	// the clone's. A daemon that provisions several issues of one repository at once hands each the
+	// clone's one lock, so their checkouts run side by side and nothing else of the clone ever does.
+	// Nil holds nothing: a pod provisions its one issue alone.
+	StoreLock sync.Locker
+}
+
+// storeLock is a Request's StoreLock, or nothing when it names none, and whether this provision
+// holds it.
+type storeLock struct {
+	locker sync.Locker
+	held   bool
+}
+
+func (l *storeLock) lock() {
+	if l.locker != nil && !l.held {
+		l.locker.Lock()
+		l.held = true
+	}
+}
+
+func (l *storeLock) unlock() {
+	if l.locker != nil && l.held {
+		l.locker.Unlock()
+		l.held = false
+	}
 }
 
 // Workspace is the durable location and branch bookmark for one issue. Dir has the shape

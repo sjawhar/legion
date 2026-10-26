@@ -199,8 +199,10 @@ type PaneInputs struct {
 	// GHOwnersDir is the claim's gh bundle root (runtime.GHConfigDir), the pane's
 	// LEGION_GH_OWNERS_DIR, GHDefault the bundle's default owner, whose directory is the pane's
 	// GH_CONFIG_DIR, and GH the real gh the pane's `legion gh` runs, its LEGION_GH_PATH; an empty
-	// GHOwnersDir is none, and the pane is then told no gh variable at all: every pane of a runtime
-	// whose GitHubCredential function is nil.
+	// GHDefault is the controller of a project with no GitHub owner, whose GH_CONFIG_DIR is the
+	// empty root itself, so its gh acts as nobody; an empty GHOwnersDir is none, and the pane is
+	// then told no gh variable at all: every pane of a runtime whose GitHubCredential function is
+	// nil.
 	GHOwnersDir, GHDefault, GH string
 	// OperatorEnv is the operator's pane variables (runtime.tmux.pane_env) and PiConfigFiles the
 	// operator's Oh My Pi overlays (runtime.tmux.pi_config_files); nil for none.
@@ -472,16 +474,26 @@ func (r *Runtime) launch(ctx context.Context, spec runtime.SpawnSpec) (runtime.L
 	if r.gitHubCredential != nil {
 		ghRoot = runtime.GHConfigDir(r.stateDir, spec.Claim)
 		bundle, err := r.gitHubCredential(ctx, spec.Role, ghWriter)
-		if err != nil {
+		switch {
+		case spec.Role == claim.RoleController && errors.Is(err, runtime.ErrNoGitHubOwner):
+			// A project with no GitHub owner to mint for still runs its controller, with gh acting
+			// as nobody, as `legion controller start` and the sandbox runtime do there: its gh
+			// directory empty, so no token an earlier launch wrote outlives this one.
+			if err := emptyGitHubBundle(ghRoot); err != nil {
+				return runtime.Locator{}, fmt.Errorf("spawn %s: empty the github credential: %w", spec.Claim, err)
+			}
+			r.log.Info("tmux runtime: no GitHub owner to act for; the controller's gh acts as nobody", "claim", spec.Claim)
+		case err != nil:
 			return runtime.Locator{}, fmt.Errorf("spawn %s: write the github credential: %w", spec.Claim, err)
+		default:
+			if _, err := ghconfig.WriteBundle(ghRoot, bundle); err != nil {
+				return runtime.Locator{}, fmt.Errorf("spawn %s: write the github credential: %w", spec.Claim, err)
+			}
+			ghDefault = bundle.Default
+			written := bundle.Owners[ghDefault]
+			r.log.Info("tmux runtime: github credential written", "claim", spec.Claim, "role", spec.Role, "app", written.App,
+				"expiresAt", written.ExpiresAt, "owners", bundle.OwnerNames())
 		}
-		if _, err := ghconfig.WriteBundle(ghRoot, bundle); err != nil {
-			return runtime.Locator{}, fmt.Errorf("spawn %s: write the github credential: %w", spec.Claim, err)
-		}
-		ghDefault = bundle.Default
-		written := bundle.Owners[ghDefault]
-		r.log.Info("tmux runtime: github credential written", "claim", spec.Claim, "role", spec.Role, "app", written.App,
-			"expiresAt", written.ExpiresAt, "owners", bundle.OwnerNames())
 	}
 	path := r.paneEnv["PATH"]
 	if spec.Env["PATH"] != "" {

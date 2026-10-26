@@ -18,7 +18,8 @@ import (
 // on the clone.
 // The clone and the fetch reach the repository through request.Source: a pod's feed with no
 // credential, or GitHub with the one-shot credential. An issue with no branch starts at
-// request.DefaultBranch, which the request must name.
+// request.DefaultBranch, which the request must name. Every command on the shared clone runs under
+// request.StoreLock, but for the `jj workspace add` that writes the issue's working copy.
 func Provision(ctx context.Context, run Runner, request Request) (Workspace, error) {
 	workspace, err := Location(request.StateDir, request.Repo, request.Issue)
 	if err != nil {
@@ -44,6 +45,9 @@ func Provision(ctx context.Context, run Runner, request Request) (Workspace, err
 		return Workspace{}, err
 	}
 
+	store := &storeLock{locker: request.StoreLock}
+	store.lock()
+	defer store.unlock()
 	exists, err := pathExists(workspace.Dir)
 	if err != nil {
 		return Workspace{}, err
@@ -77,6 +81,14 @@ func Provision(ctx context.Context, run Runner, request Request) (Workspace, err
 	} else if err := createWorkspace(ctx, run, workspace, request.Log); err != nil {
 		return Workspace{}, err
 	}
+	checkout := !exists
+	if exists {
+		// A workspace whose checkout never finished — registered with no files, then the daemon
+		// stopped — is checked out now, or its pane would start in an empty working copy.
+		if checkout, err = sparse(ctx, run, workspace); err != nil {
+			return Workspace{}, err
+		}
+	}
 	// Every workspace provisioning touches has its git worktree entry locked, one added before
 	// provisioning locked any included, so a bare `git worktree prune` that cannot see it skips it.
 	if err := lockGitWorktree(workspace.Clone, workspace.Dir); err != nil {
@@ -102,7 +114,27 @@ func Provision(ctx context.Context, run Runner, request Request) (Workspace, err
 	if err := excludeCodegraphDirectory(workspace.Clone); err != nil {
 		return Workspace{}, err
 	}
+	// The checkout writes the issue's working copy, every file of the tree, into the workspace the
+	// registration made with no files: the one step whose time follows the repository's size, and
+	// it writes nothing of the shared clone's, so it runs with the store lock let go, beside other
+	// issues' checkouts.
+	store.unlock()
+	if checkout {
+		if _, err := RunCheckedIn(ctx, run, workspace, []string{"jj", "sparse", "reset"}); err != nil {
+			return Workspace{}, fmt.Errorf("check out workspace %s: %w", workspace.Dir, err)
+		}
+	}
 	return workspace, nil
+}
+
+// sparse is whether workspace's sparse patterns leave out any of the tree: anything but the whole
+// tree (`.`), which a workspace registered with no files and never checked out holds.
+func sparse(ctx context.Context, run Runner, workspace Workspace) (bool, error) {
+	listed, err := RunCheckedIn(ctx, run, workspace, []string{"jj", "sparse", "list"})
+	if err != nil {
+		return false, err
+	}
+	return strings.TrimSpace(listed.Stdout) != ".", nil
 }
 
 // excludeCodegraphDirectory appends ".codegraph/" to cloneDir's ".git/info/exclude" unless a
