@@ -63,6 +63,37 @@ export function replayed(page: Page, method: string, path: string): Promise<Resp
   );
 }
 
+/** One answer the page got to a write, as a row reads it: the key its request went under, its
+ *  status, its error code, and the two headers a keyed answer may carry. */
+export interface KeyedAnswer {
+  readonly key: string | undefined;
+  readonly status: number;
+  readonly code?: string;
+  readonly retryAfter?: string;
+  readonly replayed?: string;
+}
+
+/** Every answer the page gets from here on to a `method` request to `path`, in order. An attempt
+ *  the page cut off itself has none, so this lists only what reached the page. */
+export function watchAnswers(page: Page, method: string, path: string): KeyedAnswer[] {
+  const answers: KeyedAnswer[] = [];
+  page.on("response", async (response) => {
+    if (response.request().method() !== method || new URL(response.url()).pathname !== path) {
+      return;
+    }
+    const body: unknown = await response.json().catch(() => null);
+    answers.push({
+      code:
+        body !== null && typeof body === "object" && "code" in body ? String(body.code) : undefined,
+      key: response.request().headers()["idempotency-key"],
+      replayed: response.headers()["idempotency-replayed"],
+      retryAfter: response.headers()["retry-after"],
+      status: response.status(),
+    });
+  });
+  return answers;
+}
+
 /** Lets the first `method` request matching `pattern` through to Dispatch and drops its answer,
  *  as a connection lost on the way back drops it; every later request goes through untouched.
  *  With `until`, the page is left waiting on the dropped answer until that settles (a reload

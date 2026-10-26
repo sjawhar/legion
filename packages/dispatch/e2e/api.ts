@@ -46,6 +46,7 @@ import type {
   UserAgentStateInput,
   UserAgentStates,
   UserIssueState,
+  UserState,
   Version,
 } from "../web/src/api/types";
 import { harnessPorts } from "./harness-ports";
@@ -781,6 +782,12 @@ export function putIssueState(
   );
 }
 
+/** `login`'s own state on every issue, `GET /api/v1/me/state`: each issue's pin and its pinned
+ *  items (`dismissed`), as the page reads them. */
+export function getMyState(login = "alice"): Promise<UserState> {
+  return request<UserState>("/api/v1/me/state", "GET", undefined, { login });
+}
+
 /**
  * Forces every open live socket on the server closed, as if it had restarted.
  * Test-only endpoint (mounted when DISPATCH_TEST_HOOKS=1, see run-server.sh) that
@@ -826,6 +833,28 @@ export function quiesceDocuments(options: ApiOptions = {}): Promise<{ ok: boolea
       as: "agent",
       ...options,
     }
+  );
+}
+
+/**
+ * Makes every keyed `method` request to `path` (the exact request path) take `delayMs` longer on
+ * the server: once Dispatch has claimed its key, the run sleeps that long on the handler's own
+ * context before the handler runs, so a write Dispatch is slow to finish is slow server-side
+ * rather than held in the browser. Each call replaces the delay for that method and path, and
+ * `delayMs` 0 removes it. Test-only endpoint (mounted when DISPATCH_TEST_HOOKS=1, see
+ * run-server.sh).
+ */
+export function slowWrites(
+  method: "PATCH" | "POST",
+  path: string,
+  delayMs: number,
+  options: ApiOptions = {}
+): Promise<{ ok: boolean }> {
+  return request<{ ok: boolean }>(
+    "/api/v1/writes/_test/slow",
+    "POST",
+    { delay_ms: delayMs, method, path },
+    { as: "agent", ...options }
   );
 }
 

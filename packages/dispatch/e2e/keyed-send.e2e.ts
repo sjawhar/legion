@@ -8,8 +8,10 @@ import {
   postedBroadcasts,
   reviewerSession,
   seedAgents,
+  setSessionSendDelay,
 } from "./agents";
-import { dropFirstAnswer, replayed, watchWrites } from "./keyed-writes";
+import { listComments, publishAgentStreamFrame, slowWrites } from "./api";
+import { dropFirstAnswer, replayed, watchAnswers, watchWrites } from "./keyed-writes";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
@@ -290,6 +292,139 @@ test("a broadcast held through a reload is resumed under its key, and each agent
       )
       .toBe(0);
   } finally {
+    await alice.close();
+  }
+});
+
+// INFRA-442: Send is pressable whenever the composer holds text. Each press is its own write under
+// its own key, and the writes to one session go out in the order they were pressed. Two presses
+// while the network is down are both held, Send stays pressable, and once the network is back the
+// session hears the first and then the second, each once.
+test("two live-view sends pressed during an outage go out in press order, each once, with Send pressable throughout", async ({
+  browser,
+}) => {
+  test.setTimeout(90_000);
+  await seedAgents();
+  await publishAgentStreamFrame(
+    plannerSession.session_id,
+    {
+      frames: [
+        {
+          kind: "message",
+          message: {
+            at: 1_000,
+            id: "u1000",
+            parts: [{ text: "Start the release notes", type: "text" }],
+            role: "user",
+            streaming: false,
+          },
+          seq: 1,
+          v: 1,
+        },
+      ],
+      session_id: plannerSession.session_id,
+      v: 1,
+    },
+    "replay"
+  );
+  const first = "First, pressed while the network was down";
+  const second = "Second, pressed after the first";
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    const posts = watchWrites(page, "POST", messages);
+    const answers = watchAnswers(page, "POST", messages);
+    await page.goto(`/agents/${plannerSession.session_id}/live`);
+    await expect(page.getByTestId("agent-thread")).toContainText("Start the release notes");
+    const composer = page.getByTestId("agent-composer");
+    const field = composer.locator("textarea");
+    const send = composer.getByRole("button", { exact: true, name: "Send" });
+
+    await alice.setOffline(true);
+    for (const body of [first, second]) {
+      await field.fill(body);
+      await expect(send).toBeEnabled();
+      await send.click();
+      await expect(field).toHaveValue("");
+    }
+    // Both are out and neither has reached Dispatch, and Send still takes the next message.
+    await field.fill("A third, typed while both are out");
+    await expect(send).toBeEnabled();
+    await field.fill("");
+    expect(await getSentMessages()).toEqual([]);
+
+    await alice.setOffline(false);
+    await expect
+      .poll(() => new Set(answers.filter((a) => a.status === 201).map((a) => a.key)).size, {
+        timeout: 45_000,
+      })
+      .toBe(2);
+    expect((await getSentMessages()).map((sent) => sent.message)).toEqual([first, second]);
+    // Two presses, two keys, the first press's key first.
+    const keys = [...new Set(posts.map((post) => post.key))];
+    expect(keys).toHaveLength(2);
+    expect(posts.find((post) => post.key === keys[0])?.input).toMatchObject({ body: first });
+    expect(posts.find((post) => post.key === keys[1])?.input).toMatchObject({ body: second });
+  } finally {
+    await alice.close();
+  }
+});
+
+// A comment's @-mention is delivered once even when the page gives up on the comment while
+// Dispatch is still delivering it. Dispatch is slow on its own side (the slow-write hook holds the
+// comment 12 s once its key is claimed) and the listener takes 4 s to answer the mention's send,
+// so the delivery runs from about 12 s to 16 s, and the page's attempt, silent all that time, is
+// cut off at 15 s, mid-delivery. The first run finishes the delivery regardless; the page's
+// repeat waits on it and is answered with the comment, and the session hears the mention once.
+test("a comment whose @-mention is cut off mid-delivery by the page is delivered once", async ({
+  browser,
+}) => {
+  test.setTimeout(120_000);
+  const issueKey = await seedAgents();
+  const path = `/api/v1/issues/${issueKey}/comments`;
+  await slowWrites("POST", path, 12_000);
+  await setSessionSendDelay(plannerSession.session_id, 4_000);
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    const posts = watchWrites(page, "POST", path);
+    const landed = replayed(page, "POST", path);
+    await page.goto(`/issues/${issueKey}/conversation`);
+    const form = page.getByRole("form", { name: "Comment composer" }).last();
+    const field = form.getByLabel("Comment");
+    await field.fill("Heads up @");
+    await page
+      .getByRole("listbox", { name: "Mention suggestions" })
+      .getByRole("option", { exact: true, name: "Planner" })
+      .first()
+      .click();
+    await form.getByRole("button", { exact: true, name: "Send" }).click();
+
+    const answer = await landed;
+    expect(answer.status()).toBe(201);
+    const comment: { id: string } = await answer.json();
+    // The page gave up on its first attempt mid-delivery and asked again under the same key.
+    expect(posts.length).toBeGreaterThanOrEqual(2);
+    expect(new Set(posts.map((post) => post.key)).size).toBe(1);
+    // The mention's one attempt was delivered, within the first run, not by a later sweep.
+    await expect
+      .poll(
+        async () =>
+          (await listComments(issueKey))
+            .find((listed) => listed.id === comment.id)
+            ?.deliveries.filter((delivery) => delivery.session_id === plannerSession.session_id)
+            .map((delivery) => ({ attempt: delivery.attempt, state: delivery.state })),
+        { timeout: 10_000 }
+      )
+      .toEqual([{ attempt: 1, state: "sent" }]);
+    expect(
+      (await getSentMessages()).filter((sent) => sent.target_session === plannerSession.session_id)
+    ).toHaveLength(1);
+    await expect(field).toHaveValue("");
+    await expect(page.getByText(/^Couldn't send/)).toHaveCount(0);
+  } finally {
+    await slowWrites("POST", path, 0);
+    await setSessionSendDelay(plannerSession.session_id, 0);
     await alice.close();
   }
 });
