@@ -175,7 +175,7 @@ export type DedupeIdentity = z.infer<typeof DedupeIdentitySchema>;
 /**
  * What one claim recorded. `release` undoes exactly that, and only once. `settle` says the host is
  * done with the frame without undoing the record: it was handed over, or the host chose not to
- * show it. Until one of the two, the frame is `pending` (`DeliveryDedupe.status`), and a replay
+ * show it. Until one of the two, the frame is pending (`DeliveryDedupe.pending`), and a replay
  * sweep leaves the stream's copy for later rather than show it beside the live one.
  */
 export interface DeliveryClaim {

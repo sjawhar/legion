@@ -11317,8 +11317,9 @@ describe("envoy OMP extension", () => {
   });
 
   // Dispatch records a BTW answered with an error as failed, and a same-mode re-send of it
-  // repeats the attempt's dedupe key. The agent never answered the first, so the re-send has to
-  // run the side turn again; a repeat of one that was answered is still dropped.
+  // repeats the attempt's dedupe key under the new event id the listener mints for every send.
+  // The agent never answered the first, so the re-send has to run the side turn again; a repeat
+  // of one that was answered is still dropped.
   test("runs a BTW side turn again for a Retry of one whose side turn failed", async () => {
     process.env.DISPATCH_URL = "http://dispatch.test";
     process.env.DISPATCH_TOKEN = "dispatch-token";
@@ -11351,17 +11352,23 @@ describe("envoy OMP extension", () => {
     );
     const agent = natsState.controls.get("notifications.agent.ses_delivery");
     if (agent === undefined) throw new Error("agent subject was not subscribed");
-    const send = async (dedupeKey: string): Promise<void> => {
+    // Each send is a new envelope from the listener: its own event id, the attempt's dedupe key.
+    const btw = (dedupeKey: string, eventID: string) =>
+      JSON.stringify({
+        ...JSON.parse(targetedDispatchEnvelope("btw", dedupeKey)),
+        event_id: eventID,
+      });
+    const send = async (dedupeKey: string, eventID: string): Promise<void> => {
       posted = Promise.withResolvers<void>();
-      agent.push(targetedDispatchEnvelope("btw", dedupeKey));
+      agent.push(btw(dedupeKey, eventID));
       await posted.promise;
     };
 
-    await send("targeted-btw-retry");
-    await send("targeted-btw-retry");
+    await send("targeted-btw-retry", "evt-btw-first");
+    await send("targeted-btw-retry", "evt-btw-retry");
     // Answered now: a third copy is a repeat and runs nothing, so the next reply is the sentinel's.
-    agent.push(targetedDispatchEnvelope("btw", "targeted-btw-retry"));
-    await send("targeted-btw-sentinel");
+    agent.push(btw("targeted-btw-retry", "evt-btw-again"));
+    await send("targeted-btw-sentinel", "evt-btw-sentinel");
 
     expect(sideTurns).toBe(3);
     const actor = { id: "ses_delivery", kind: "session" };
@@ -13915,6 +13922,8 @@ describe("messages missed while the subscription was down", () => {
       readonly turn?: "idle" | "streaming";
       /** The host's `pi.sendUserInput`; the session has none without it. */
       readonly sendUserInput?: (text: string, options: unknown) => Promise<UserInputResult>;
+      /** The host's side turn (`runEphemeralTurn`), which a targeted BTW runs. */
+      readonly runEphemeralTurn?: SessionContext["runEphemeralTurn"];
     } = {}
   ) {
     process.env.ENVOY_RESUBSCRIBE_DELAY_MS = "10";
@@ -13971,6 +13980,7 @@ describe("messages missed while the subscription was down", () => {
       isIdle: () => options.turn === "idle",
       hasPendingMessages: () => held.length > 0,
       ui: { ...base.ui, notify: (message) => notifications.push(message) },
+      ...(options.runEphemeralTurn !== undefined && { runEphemeralTurn: options.runEphemeralTurn }),
     };
     const before = model.replays;
     await fixture.handlers.get("session_start")?.({}, context);
@@ -14477,7 +14487,7 @@ describe("messages missed while the subscription was down", () => {
             () => first.inputs.length + first.session.fixture.userMessages.length > 0,
             "the person's turn"
           );
-          return { first: first.session, model };
+          return { first: first.session, inputs: first.inputs, model };
         }
 
         test("one the host had not written when the process ended is shown as a card after the restart", async () => {
@@ -14507,6 +14517,27 @@ describe("messages missed while the subscription was down", () => {
 
           expect(second.session.cards(`dispatch-turn-written-${slug}`)).toHaveLength(0);
         });
+
+        // Oh My Pi 18.8.9 hands a typed input the streaming turn held back to whoever interrupted
+        // (RPC `abort_and_restore_queue` answers it in its `steering` list) and never writes it.
+        if (slug === "typed") {
+          test("one a person's interrupt withdrew unwritten is shown as a card that runs nothing, once", async () => {
+            const { first, inputs } = await sendTurn("withdrawn-typed");
+
+            await first.interrupt();
+            await first.tick();
+
+            const cards = first.cards("dispatch-turn-withdrawn-typed");
+            expect(cards).toHaveLength(1);
+            expect(cards[0]?.content).toContain("while this session's connection was down");
+            // A card alone: the input is not typed again, and no user message is sent.
+            expect(inputs).toHaveLength(1);
+            expect(first.fixture.userMessages).toHaveLength(0);
+            await first.tick();
+            await first.tick();
+            expect(first.cards("dispatch-turn-withdrawn-typed")).toHaveLength(1);
+          });
+        }
       });
     }
   });
@@ -14668,29 +14699,31 @@ describe("messages missed while the subscription was down", () => {
       expect(second.cards("dispatch-10")).toHaveLength(0);
     });
 
+    /** Dispatch's `subscription.removed` for this session's follow of the issue, event `id`. */
+    const removal = (id: number) =>
+      JSON.stringify({
+        event_id: `dispatch-${id}`,
+        source: "dispatch",
+        source_event_id: String(id),
+        topic: "notifications.agent.ses_replay",
+        dedupe_key: `dispatch-${id}`,
+        issued_at: 1,
+        payload_summary: `unsubscribed from ${ISSUE}`,
+        trace_id: `trace-dispatch-${id}`,
+        payload: JSON.stringify({
+          issue_key: ISSUE,
+          type: "subscription.removed",
+          actor: { kind: "user", id: "alice" },
+          notify: true,
+          payload: {
+            session_id: "ses_replay",
+            by: { kind: "user", id: "alice" },
+            topics: [ISSUE_TOPIC],
+          },
+        }),
+      });
+
     test("a replayed removal closes the topic only when it was stored after the session followed it", async () => {
-      const removal = (id: number) =>
-        JSON.stringify({
-          event_id: `dispatch-${id}`,
-          source: "dispatch",
-          source_event_id: String(id),
-          topic: "notifications.agent.ses_replay",
-          dedupe_key: `dispatch-${id}`,
-          issued_at: 1,
-          payload_summary: `unsubscribed from ${ISSUE}`,
-          trace_id: `trace-dispatch-${id}`,
-          payload: JSON.stringify({
-            issue_key: ISSUE,
-            type: "subscription.removed",
-            actor: { kind: "user", id: "alice" },
-            notify: true,
-            payload: {
-              session_id: "ses_replay",
-              by: { kind: "user", id: "alice" },
-              topics: [ISSUE_TOPIC],
-            },
-          }),
-        });
       const model = new StreamModel();
       const session = await bootReplay("replay-issue-removal", model);
 
@@ -14705,6 +14738,40 @@ describe("messages missed while the subscription was down", () => {
       expect(session.live(ISSUE_TOPIC).active()).toBe(false);
       await session.tick();
       expect(session.live(ISSUE_TOPIC).active()).toBe(false);
+    });
+
+    test("a removal replayed after a resume re-registered the topic takes it out of the registry, so the next restart does not follow it", async () => {
+      const model = new StreamModel();
+      let unsubscribes = 0;
+      const countUnsubscribes = async (url: URL) => {
+        if (url.pathname === "/v1/interests/unsubscribe") unsubscribes += 1;
+        return undefined;
+      };
+      const first = await bootReplay("replay-issue-removal-resumed-a", model);
+      await first.follow(ISSUE_TOPIC);
+      await first.stop();
+      // A person removes the follow while the session is stopped.
+      model.store(first.agentSubject, removal(13));
+
+      // The resume follows the topic again from its transcript, and registers it, before its
+      // first sweep replays the removal.
+      const second = await bootReplay("replay-issue-removal-resumed-b", model, {
+        entries: first.entries(),
+        dispatch: countUnsubscribes,
+      });
+
+      expect(second.live(ISSUE_TOPIC).active()).toBe(false);
+      expect(unsubscribes).toBe(1);
+      expect([...(model.interests.get("ses_replay") ?? [])]).not.toContain(ISSUE_TOPIC);
+      await second.stop();
+
+      const third = await bootReplay("replay-issue-removal-resumed-c", model, {
+        entries: second.entries(),
+      });
+      await third.tick();
+
+      expect(third.live(ISSUE_TOPIC).active()).toBe(false);
+      expect([...(model.interests.get("ses_replay") ?? [])]).not.toContain(ISSUE_TOPIC);
     });
   });
 
@@ -14888,6 +14955,75 @@ describe("messages missed while the subscription was down", () => {
       expect(session.cards("evt-newer")).toHaveLength(1);
       // The replayed copy is a card alone: Dispatch is asked nothing more.
       expect(accepts).toBe(1);
+    });
+  });
+
+  // A BTW answered with an error was handled: Dispatch shows the person that error, and the
+  // stream's copy must not come back as a card that starts a turn on it. A same-mode Retry is a
+  // new event under the same dedupe key, and must still reach the session.
+  describe("a BTW refused live", () => {
+    async function bootBTW(
+      query: string,
+      model: StreamModel,
+      runEphemeralTurn: SessionContext["runEphemeralTurn"]
+    ) {
+      process.env.DISPATCH_URL = "http://dispatch.test";
+      process.env.DISPATCH_TOKEN = "dispatch-token";
+      const replies: unknown[] = [];
+      const session = await bootReplay(query, model, {
+        sessionID: "ses_delivery",
+        dispatch: async (url) => {
+          if (!url.pathname.endsWith("/reply")) return undefined;
+          replies.push(url.pathname);
+          return response({});
+        },
+        ...(runEphemeralTurn !== undefined && { runEphemeralTurn }),
+      });
+      return { replies, session };
+    }
+
+    test("whose side turn failed is not shown by a sweep, and its Retry still runs the side turn", async () => {
+      const model = new StreamModel();
+      let sideTurns = 0;
+      const { replies, session } = await bootBTW("replay-btw-refused", model, async () => {
+        sideTurns += 1;
+        if (sideTurns === 1) throw new Error("No active model on session");
+        return { replyText: `Answer ${sideTurns}` };
+      });
+      const btw = targetedDispatchEnvelope("btw", "replay-btw-refused");
+      model.store(session.agentSubject, btw);
+      session.live(session.agentSubject).push(btw);
+      await until(() => replies.length === 1, "the refusal");
+
+      await session.tick();
+      await session.tick();
+
+      expect(session.cards("dispatch-replay-btw-refused")).toHaveLength(0);
+      expect(sideTurns).toBe(1);
+
+      const retry = JSON.stringify({ ...JSON.parse(btw), event_id: "dispatch-replay-btw-retry" });
+      model.store(session.agentSubject, retry);
+      session.live(session.agentSubject).push(retry);
+      await until(() => replies.length === 2, "the Retry's reply");
+      await session.tick();
+
+      expect(sideTurns).toBe(2);
+      expect(session.cards("dispatch-replay-btw-refused")).toHaveLength(0);
+      expect(session.cards("dispatch-replay-btw-retry")).toHaveLength(0);
+    });
+
+    test("by a host without a side turn is not shown by a sweep", async () => {
+      const model = new StreamModel();
+      const { replies, session } = await bootBTW("replay-btw-no-side-turn", model, undefined);
+      const btw = targetedDispatchEnvelope("btw", "replay-btw-no-side-turn");
+      model.store(session.agentSubject, btw);
+      session.live(session.agentSubject).push(btw);
+      await until(() => replies.length === 1, "the refusal");
+
+      await session.tick();
+      await session.tick();
+
+      expect(session.cards("dispatch-replay-btw-no-side-turn")).toHaveLength(0);
     });
   });
 });

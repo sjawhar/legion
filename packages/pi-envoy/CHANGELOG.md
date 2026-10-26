@@ -22,15 +22,21 @@
   (Escape, RPC `abort_and_restore_queue`) withdrew is handed again at the next heartbeat, once
   the host is idle and holds no message (`ctx.isIdle()`, `ctx.hasPendingMessages()`), and one a
   switch away dropped is released, so that session's sweep shows it once the host is back on it
-  or resumes it, never recorded before its card is written.
+  or resumes it, never recorded before its card is written. A person's Send run as typed input
+  that an interrupt withdrew unwritten (Oh My Pi hands it back to whoever interrupted) is
+  released at that heartbeat, so the next sweep shows it as a card that runs nothing. A BTW
+  refused live (its side turn failed, the session shutting down, a host without one) is not
+  shown again by a sweep, and a Retry of it still runs. A replayed subscription removal takes the
+  topic out of the listener's registry too, so a later restart does not follow it again.
   The session file keeps what the session was shown (`envoy-replay-delivered`, and the written
   cards themselves, read back by the event they name) and where it read to
   (`envoy-replay-state`), so a restart shows nothing again (up to 20,000 frames in 72 hours) — a
   live repeat of a frame shown before the restart is dropped too — and a session stopped past the
   listener's grace follows its topics again; a person's turn written just before the process
   ended, its record not, can come back once as a card, never lost. A frame that fails to show is
-  retried, and its third failure, or a live failure no sweep will retry, shows one card naming it
-  and how to read it, where a failed injection was only logged before. A recreated stream or a
+  retried, and its third failure, or a live failure no sweep will retry (a frame received before
+  its subject's cursor started included), shows one card naming it and how to read it, where a
+  failed injection was only logged before. A recreated stream or a
   cursor older than the stream's
   oldest message is said once as a card; a listener without the route (404) or unable to read the
   stream (503 `REPLAY_UNAVAILABLE`, 401, 403) is said once as a warning, and live delivery goes

@@ -196,10 +196,13 @@ user message `matchInjectedUserTurn` finds for it: by its `tag` for typed input
 (`pi.sendUserInput`), which the host keeps on the message idle and queued alike, or by its text
 for `pi.sendUserMessage` on a host without `sendUserInput`, whose search the run's end stops,
 recording the turn then. Typed input the host answers submitted no message (a command, a refusal,
-a failure) is recorded at that answer, which the person gets on Dispatch. A BTW reply and a
-correlated refusal are Dispatch posts, recorded once posted. A replayed card of a frame the
-dedupe let go of that the open session's ledger lacks (shown before the host moved to this
-session) waits on its write too, with no claim.
+a failure) is recorded at that answer, which the person gets on Dispatch. A BTW reply is a
+Dispatch post, recorded once posted. A BTW refused live (its side turn failed, the session is
+shutting down, the host has no side turn) is recorded by its event id alone once the refusal is
+posted, so the stream's copy never comes back as a card that starts a turn, while a same-mode
+Retry, a new event id under the same dedupe key, still reaches the session. A replayed card of a
+frame the dedupe let go of that the open session's ledger lacks (shown before the host moved to
+this session) waits on its write too, with no claim.
 
 The host can also drop a card it holds without writing it while the process lives on. A session
 change drops what the session left was handed and has not written: its claims are released,
@@ -213,7 +216,16 @@ true, at the aborted run's `agent_end`). So each heartbeat tick, while the host 
 unwritten again, as it was and under its claim, which also covers a live frame on a topic the
 stream does not keep (`handBackWithdrawnCards`). A card handed since the last tick or aborted
 run's end is left alone: `pi.sendMessage` returns before the host queues the card or starts its
-run, so the host reads idle and empty for that moment.
+run, so the host reads idle and empty for that moment. A person's turn the interrupt withdrew is
+not handed again (run late, it could act on an instruction the person no longer means): Oh My Pi
+18.8.9 answers a typed input (`pi.sendUserInput`, `handled: "prompt"`) or a `pi.sendUserMessage`
+turn the streaming turn held in `abort_and_restore_queue`'s `steering` list, to whoever
+interrupted, and never writes it. So at that same moment a turn still unwritten that the host
+took into its queue before the last tick or aborted run's end (a typed input from when
+`sendUserInput` answered that it submitted a message) is released, recording nothing, and the
+next sweep shows the stream's copy as a card that runs nothing. A `pi.sendUserMessage` turn is
+recorded at the run's end, found or not, since its text was the only way to find it, so one an
+interrupt withdrew is not shown again.
 
 A sweep asks, for each followed subject, for the stored messages after that subject's cursor,
 merges them by stream sequence and shows each that neither path has shown. The followed subjects
@@ -241,7 +253,10 @@ recorded that attempt as sent when the listener stored it, and nothing later acc
 it. A frame the renderer skips (`notify: false`, the session's own event, another session's
 follow) records nothing, so an eligible copy of it on another subject still shows. A replayed
 `subscription.removed` closes a topic only when it was stored after the session started following
-that topic (the cursor's `since`).
+that topic (the cursor's `since`), and takes it out of the listener's registry as
+`envoy_unsubscribe` does (`client.unsubscribe`): a resumed session registered the topic again
+before the sweep, and the registry, which only ever adds a registered topic, would have the next
+restart follow it again.
 
 Two transcript entries hold it, written with `pi.appendEntry` and rebuilt by
 `restoreLocalSessionState` from every entry of the session file (`replaySnapshot`):
@@ -267,7 +282,10 @@ would be, once the host wrote it. If the notice fails too, a `logger.warn` and a
 so, and the next sweep tries the notice again. A live frame that fails and that no sweep will
 show gets the notice at once: a role forward after its receipt, or a frame on a subscription the
 replay does not read (a team topic, a subject refused or without a cursor yet, or while the
-listener's replay is failing). One card that starts no turn says that the stream was recreated,
+listener's replay is failing), or one the plugin received before its subject's cursor started (a
+new follow, a new session, a reset after a stream recreation), since that cursor starts at the
+stream's end, which can be past a frame the live path still held. One card that starts no turn
+says that the stream was recreated,
 so messages from
 before it may be lost, or that a cursor fell behind the stream's oldest message, so messages
 older than 72 hours may be missing. A listener without the route answers 404; one whose NATS
@@ -280,7 +298,8 @@ Each frame is shown once across reconnects and restarts, within two limits: the 
 hours, and its 20,000 entries, the oldest dropped first, so a session shown more frames than that
 inside 72 hours can be shown the oldest of them again by a sweep that reads it. A frame the host
 still held unwritten when the process ended is shown after the restart, as a card; one an
-interrupt withdrew is shown again by the next heartbeat in the same process, and one a switch away
+interrupt withdrew is shown again by the next heartbeat in the same process (a card handed again,
+a person's turn as a card that runs nothing), and one a switch away
 dropped by that session's sweep once the host is back on it or resumes it; a card written whose
 record was not is read back from the transcript; a user turn written whose record was not (the
 process ending between the two) is shown again as a card. Inside one sweep replayed frames

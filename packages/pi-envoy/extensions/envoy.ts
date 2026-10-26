@@ -53,6 +53,7 @@ import { machineID } from "@legion/envoy-client/machine";
 import { natsAuthOptions } from "@legion/envoy-client/nats-auth";
 import {
   createReplayEngine,
+  envoyNoticeText,
   failureNoticeFields,
   type ReplayDeliveryOutcome,
   type ReplayEngine,
@@ -297,6 +298,12 @@ interface UnwrittenCard extends Unwritten {
 /** A person's turn waiting to be written; a `pi.sendUserMessage` turn is found by its text. */
 interface UnwrittenTurn extends Unwritten {
   readonly via: "text" | "typed";
+  /**
+   * The host moments counted when the host took it into its queue (`handBackWithdrawnCards`): a
+   * `pi.sendUserMessage` turn's at the send, a typed input's once `pi.sendUserInput` answers that
+   * it submitted a message; undefined until then.
+   */
+  readonly handedAt: number | undefined;
 }
 
 /**
@@ -1141,6 +1148,14 @@ export default function envoyExtension(pi: PiApi): void {
   // message was withdrawn: it is handed again, as it was, its claim kept. One handed since the
   // host's last moment is left alone, as it may still be on its way into the queue:
   // `pi.sendMessage` returns before the host queues the card or starts its run.
+  //
+  // The interrupt withdraws a person's turn the same way: a typed input (`pi.sendUserInput`,
+  // answered `handled: "prompt"`) or a `pi.sendUserMessage` turn the streaming turn held goes back
+  // to whoever interrupted (measured on omp 18.8.9: RPC `abort_and_restore_queue` answers it in
+  // its `steering` list, the terminal puts it in the editor) and is never written. Such a turn is
+  // not handed again, since run late it could act on an instruction the person no longer means:
+  // its claim is released and nothing records it, so the next sweep shows the stream's copy as a
+  // card that runs nothing.
   const handBackWithdrawnCards = (context: SessionContext | undefined): void => {
     const since = hostMoments;
     hostMoments += 1;
@@ -1161,6 +1176,15 @@ export default function envoyExtension(pi: PiApi): void {
           error: messageFor(error),
         });
       }
+    }
+    for (const [messageID, turn] of unwrittenTurns) {
+      if (turn.sessionID !== sessionID || turn.handedAt === undefined || turn.handedAt >= since) {
+        continue;
+      }
+      unwrittenTurns.delete(messageID);
+      dropInjectedUserTurn(turn.sessionID, messageID);
+      typedPictures.withdraw(messageID);
+      turn.claim?.release();
     }
   };
 
@@ -1208,6 +1232,11 @@ export default function envoyExtension(pi: PiApi): void {
           if (submitted) {
             // Every input handler has run: pictures never handed over never will be.
             typedPictures.inputPassed(turn.messageId);
+            // In the host's queue from now on, unless its message was written already.
+            const waiting = unwrittenTurns.get(turn.messageId);
+            if (waiting !== undefined) {
+              unwrittenTurns.set(turn.messageId, { ...waiting, handedAt: hostMoments });
+            }
           } else {
             dropInjectedUserTurn(noted, turn.messageId);
             typedPictures.withdraw(turn.messageId);
@@ -1296,6 +1325,8 @@ export default function envoyExtension(pi: PiApi): void {
     raw: string,
     reply: string
   ): Promise<void> => {
+    // When the frame arrived: a cursor that started after it may stand past it (`liveFailed`).
+    const receivedAt = Date.now();
     const rendered = renderInbound(raw, sessionID, subject);
     // Acknowledge first. The listener's role lane waits two seconds for this
     // receipt and reports a miss as a failed delivery, which the daemon answers
@@ -1363,6 +1394,16 @@ export default function envoyExtension(pi: PiApi): void {
         claim.release();
         await postDispatchReply(delivery, { error });
       };
+      // A BTW refused live was answered: the stream's copy must not come back from a sweep as a
+      // card that starts a turn, so the ledger records the frame by its event id alone. A
+      // same-mode Retry carries a new event id under the same dedupe key, and still reaches the
+      // session, as the released claim lets it.
+      const refuseBTW = async (delivery: DispatchDelivery, error: string): Promise<void> => {
+        await refuse(delivery, error);
+        if (identity?.event_id !== undefined) {
+          await replay?.recordDelivered({ event_id: identity.event_id });
+        }
+      };
       try {
         if (rendered.rejectedDelivery !== undefined) {
           console.warn(
@@ -1378,16 +1419,16 @@ export default function envoyExtension(pi: PiApi): void {
           const answer = sideTurn(activeSessionContext);
           if (shuttingDown) {
             // A session that is shutting down starts no model call, but a frame can still drain in.
-            await refuse(rendered.delivery, "This OMP session is shutting down");
+            await refuseBTW(rendered.delivery, "This OMP session is shutting down");
           } else if (answer === undefined) {
-            await refuse(rendered.delivery, "This OMP host does not support BTW delivery");
+            await refuseBTW(rendered.delivery, "This OMP host does not support BTW delivery");
           } else {
             try {
               const reply = await answer({ prompt: rendered.delivery.body });
               await postDispatchReply(rendered.delivery, { body: reply.replyText });
               await taken();
             } catch (error) {
-              await refuse(rendered.delivery, messageFor(error));
+              await refuseBTW(rendered.delivery, messageFor(error));
             }
           }
         } else {
@@ -1455,12 +1496,19 @@ export default function envoyExtension(pi: PiApi): void {
                     identity,
                     claim,
                     via: "text",
+                    handedAt: hostMoments,
                   });
                 }
               }
             } else {
               if (identity !== undefined) {
-                unwrittenTurns.set(turn.messageId, { sessionID, identity, claim, via: "typed" });
+                unwrittenTurns.set(turn.messageId, {
+                  sessionID,
+                  identity,
+                  claim,
+                  via: "typed",
+                  handedAt: undefined,
+                });
               }
               runTypedInput(
                 sendUserInput,
@@ -1483,7 +1531,7 @@ export default function envoyExtension(pi: PiApi): void {
         // A frame no sweep will show again (a role forward, already acknowledged; one on a
         // subscription the replay does not read: refused, not started, or the listener's replay
         // failing) gets its notice at once. The stream's copy of any other waits for a sweep.
-        if (envelope !== undefined) void replay?.liveFailed(topic, envelope, error);
+        if (envelope !== undefined) void replay?.liveFailed(topic, envelope, error, receivedAt);
         throw error;
       }
     }
@@ -1657,17 +1705,25 @@ export default function envoyExtension(pi: PiApi): void {
   // person's Send) runs no side turn, asks Dispatch to accept no user turn and posts no reply: a
   // person's input run late could act on an instruction they no longer mean, so the session is
   // shown it and decides. A removal closes a topic only when it was stored after the session
-  // started following that topic, so an old one never closes a topic followed again since. The
-  // card is `queued` until the host writes it (`showReplayCard`).
+  // started following that topic, so an old one never closes a topic followed again since, and
+  // takes it out of the listener's registry too, as `envoy_unsubscribe` does: a resumed session
+  // registered it again before this sweep, and the registry, which only ever adds a registered
+  // topic, would have the next restart follow it again. The card is `queued` until the host
+  // writes it (`showReplayCard`).
   const showReplayed = async (frame: ReplayFrame): Promise<ReplayDeliveryOutcome> => {
     const rendered = renderInbound(frame.data, sessionID, frame.subject);
-    let removed = false;
-    for (const topic of subscriptionRemovedTopics(frame.data, sessionID) ?? []) {
-      if (replay?.followedBefore(topic, frame.seq) === true && closeIntentionally(topic)) {
-        removed = true;
-      }
+    const removed = (subscriptionRemovedTopics(frame.data, sessionID) ?? []).filter(
+      (topic) => replay?.followedBefore(topic, frame.seq) === true && closeIntentionally(topic)
+    );
+    if (removed.length > 0) {
+      await replayFollowedChanged();
+      await active?.client.unsubscribe({ sessionID, topics: removed }).catch((error: unknown) =>
+        logger.warn("envoy: a replayed subscription removal was not taken out of the registry", {
+          topics: removed,
+          error: messageFor(error),
+        })
+      );
     }
-    if (removed) await replayFollowedChanged();
     if (replaySuppressed(rendered)) return "suppressed";
     if (rendered.envelope !== undefined) noteInbox(rendered.envelope);
     return showReplayCard(replayedText(rendered.content, frame.time), frame.envelope);
@@ -1689,7 +1745,7 @@ export default function envoyExtension(pi: PiApi): void {
             followedSubjects,
             deliver: showReplayed,
             showFailureNotice: async (notice) =>
-              showReplayCard(encode({ envoy: failureNoticeFields(notice) }), notice.envelope),
+              showReplayCard(envoyNoticeText(failureNoticeFields(notice)), notice.envelope),
             failureNoticeFailed: (notice, error) => {
               logger.warn("envoy: a message this session was not shown could not be reported", {
                 eventID: notice.eventId,
@@ -1709,7 +1765,7 @@ export default function envoyExtension(pi: PiApi): void {
               pi.sendMessage(
                 {
                   customType: "envoy-message",
-                  content: encode({ envoy: replayNoticeFields(notice) }),
+                  content: envoyNoticeText(replayNoticeFields(notice)),
                   display: true,
                   details: LOCAL_ENVOY_NOTICE,
                 },

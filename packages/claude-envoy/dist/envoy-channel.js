@@ -43512,8 +43512,9 @@ function createEnvoyClient(config2) {
   const apiToken = config2.token;
   const request = async (path2, init, options = {}) => {
     const url2 = `${baseUrl}${path2}`;
-    const attempts = config2.retry === false || options.retry === false ? 1 : 2;
-    for (let attempt = 0;attempt < attempts; attempt += 1) {
+    const attempts = config2.retry === false ? 1 : 2;
+    const tries = options.retry === false ? 1 : attempts;
+    for (let attempt = 0;attempt < tries; attempt += 1) {
       let response;
       try {
         const headers = new Headers(init.headers);
@@ -43525,7 +43526,7 @@ function createEnvoyClient(config2) {
           signal: AbortSignal.timeout(options.timeoutMs ?? timeoutMs)
         });
       } catch (error49) {
-        if (attempt + 1 < attempts) {
+        if (attempt + 1 < tries) {
           await waitForRetry();
           continue;
         }
@@ -43540,7 +43541,7 @@ function createEnvoyClient(config2) {
         status: response.status,
         responseBody
       });
-      if (response.status >= 500 && attempt + 1 < attempts) {
+      if (response.status >= 500 && attempt + 1 < tries) {
         await waitForRetry();
         continue;
       }
@@ -43694,6 +43695,7 @@ function createReplayEngine(options) {
   const now = options.now ?? Date.now;
   const ledger = createLedger(now);
   const cursors = new Map;
+  const cursorStarts = new Map;
   let streamCreated;
   const failures = new Map;
   let unwritten = [];
@@ -43785,8 +43787,10 @@ function createReplayEngine(options) {
   const syncFollowed = () => {
     const followed = new Set(host.followedSubjects());
     for (const subject2 of [...cursors.keys()]) {
-      if (!followed.has(subject2))
+      if (!followed.has(subject2)) {
         cursors.delete(subject2);
+        cursorStarts.delete(subject2);
+      }
     }
     for (const subject2 of followed) {
       if (!cursors.has(subject2))
@@ -43962,8 +43966,10 @@ function createReplayEngine(options) {
       const { stream } = response;
       if (streamCreated !== undefined && streamCreated !== "" && stream.created !== streamCreated) {
         streamCreated = stream.created;
+        const at = now();
         for (const subject2 of cursors.keys()) {
           cursors.set(subject2, { since: stream.last_seq, after: stream.last_seq });
+          cursorStarts.set(subject2, at);
         }
         failures.clear();
         notify({
@@ -43984,6 +43990,7 @@ function createReplayEngine(options) {
           const cursor = cursors.get(result.subject);
           if (cursor !== undefined && cursor.after === undefined) {
             cursors.set(result.subject, { since: result.next_after, after: result.next_after });
+            cursorStarts.set(result.subject, now());
           }
           reading.read = result.next_after;
           continue;
@@ -44092,8 +44099,9 @@ function createReplayEngine(options) {
       record2(replayLedgerIdentity(frame));
       await flush(alive);
     },
-    async liveFailed(followed, envelope2, error48) {
-      if (!isRoleForward(envelope2) && answered.has(followed) && cursors.get(followed)?.after !== undefined) {
+    async liveFailed(followed, envelope2, error48, receivedAt) {
+      const started = cursorStarts.get(followed);
+      if (!isRoleForward(envelope2) && answered.has(followed) && cursors.get(followed)?.after !== undefined && (started === undefined || started <= receivedAt)) {
         return;
       }
       const alive = bind()?.alive;
@@ -44113,6 +44121,7 @@ function createReplayEngine(options) {
       epoch += 1;
       ledger.restore(snapshot.ledger);
       cursors.clear();
+      cursorStarts.clear();
       streamCreated = snapshot.state?.stream_created;
       for (const [subject2, cursor] of Object.entries(snapshot.state?.subjects ?? {})) {
         cursors.set(subject2, { ...cursor });
@@ -44153,6 +44162,9 @@ function replayNoticeFields(notice) {
     notice: notice.kind === "stream_recreated" ? "stream recreated" : "messages may be missing",
     detail: notice.message
   };
+}
+function envoyNoticeText(fields) {
+  return encode3({ envoy: fields });
 }
 function isRoleForward(envelope2) {
   return envelope2.dedupe_key?.startsWith(ROLE_FORWARD_KEY_PREFIX) === true || envelope2.topic?.startsWith(ROLE_TOPIC_PREFIX) === true;
@@ -47826,6 +47838,7 @@ function createChannelForwarder(connection, options) {
   const deliver = async (topic, subscription) => {
     try {
       for await (const message of subscription) {
+        const receivedAt = Date.now();
         const raw = decoder.decode(message.data);
         const identity = deliveryIdentity(raw);
         let claim = dedupe.claim(identity);
@@ -47848,7 +47861,7 @@ function createChannelForwarder(connection, options) {
           claim?.release();
           report(`could not deliver a message on ${message.subject}`, error48);
           if (claim !== undefined)
-            options.failed?.(inbound, topic, error48);
+            options.failed?.(inbound, topic, error48, receivedAt);
           continue;
         }
         if (claim === undefined)
@@ -48975,12 +48988,6 @@ async function executeLegionTool(runtime, input) {
   return executePhaseOp({ daemon: runtime.daemon, claim, handoffCommit: runtime.handoffCommit }, input);
 }
 
-// src/missed-messages.ts
-function envoyNoticeContent(fields) {
-  return ["envoy:", ...Object.entries(fields).map(([key, value]) => `  ${key}: ${value}`)].join(`
-`);
-}
-
 // src/replay-state.ts
 import { readFile as readFile2 } from "fs/promises";
 import { join as join7 } from "path";
@@ -49317,7 +49324,7 @@ async function startChannelSession(options) {
         ...[...userTopics].filter((topic) => !topic.startsWith(ROLE_TOPIC_PREFIX) && !topic.startsWith(AGENT_TOPIC_PREFIX))
       ],
       deliver: showReplayed,
-      showFailureNotice: (notice) => delivery.notice(envoyNoticeContent(failureNoticeFields(notice))),
+      showFailureNotice: (notice) => delivery.notice(envoyNoticeText(failureNoticeFields(notice))),
       failureNoticeFailed: (notice, error48) => {
         process.stderr.write(`envoy-channel: message ${notice.eventId} from ${notice.sender} was not shown, nor was the notice naming it \u2014 ${messageFor(error48)}
 `);
@@ -49328,7 +49335,7 @@ async function startChannelSession(options) {
 `);
           return;
         }
-        delivery.notice(envoyNoticeContent(replayNoticeFields(notice))).catch((error48) => {
+        delivery.notice(envoyNoticeText(replayNoticeFields(notice))).catch((error48) => {
           process.stderr.write(`envoy-channel: ${notice.message} (the session could not be told \u2014 ${messageFor(error48)})
 `);
         });
@@ -49360,10 +49367,10 @@ async function startChannelSession(options) {
   const forwarder = createChannelForwarder(options.connection, {
     dedupe,
     ledger: replay,
-    failed: (message, topic, error48) => {
+    failed: (message, topic, error48, receivedAt) => {
       const envelope2 = renderInbound(message.raw, identity.id, message.subject).envelope;
       if (envelope2 !== undefined)
-        replay.liveFailed(topic, envelope2, error48);
+        replay.liveFailed(topic, envelope2, error48, receivedAt);
     },
     deliver: async (message) => {
       const removedTopics = subscriptionRemovedTopics(message.raw, identity.id);

@@ -5,6 +5,7 @@ import {
   EnvelopeSchema,
   ROLE_TOPIC_PREFIX,
 } from "@legion/contracts";
+import { encode } from "@toon-format/toon";
 import { z } from "zod";
 import {
   type DedupeIdentity,
@@ -275,15 +276,24 @@ export interface ReplayEngine {
    */
   recordDelivered(frame: DedupeIdentity): Promise<void>;
   /**
-   * The host failed to show a live frame on the followed subject `followed`: shows its failure
-   * notice at once, and records it when shown, unless a sweep will show the stream's copy. A sweep
-   * will when the frame is no role forward (those stay live only), the latest replay call
-   * succeeded, a call since the last failed one answered `followed` without refusing it, and
-   * `followed` has a cursor. Any other frame (a role forward after its receipt, a subject the
-   * stream does not keep, a listener that does not replay or refuses the subject, a subject with
-   * no cursor yet) gets its notice at once instead of being dropped silently. It never rejects.
+   * The host failed to show a live frame on the followed subject `followed`, which it received at
+   * `receivedAt` (the engine's clock, `Date.now` unless `now` is given): shows its failure notice
+   * at once, and records it when shown, unless a sweep will show the stream's copy. A sweep will
+   * when the frame is no role forward (those stay live only), the latest replay call succeeded, a
+   * call since the last failed one answered `followed` without refusing it, `followed` has a
+   * cursor, and that cursor did not start after the frame was received: a cursor starts at the
+   * stream's end, which can be at or past a frame the live path still held, so no sweep reads that
+   * frame. Any other frame (a role forward after its receipt, a subject the stream does not keep,
+   * a listener that does not replay or refuses the subject, a subject with no cursor yet, or one
+   * whose cursor started, or started again after a stream recreation, since the frame arrived)
+   * gets its notice at once instead of being dropped silently. It never rejects.
    */
-  liveFailed(followed: string, envelope: ReplayNoticeEnvelope, error: unknown): Promise<void>;
+  liveFailed(
+    followed: string,
+    envelope: ReplayNoticeEnvelope,
+    error: unknown,
+    receivedAt: number
+  ): Promise<void>;
   /**
    * Whether the session followed `topic` before the stream stored sequence `seq`: the topic has a
    * cursor that started below `seq`. A replayed removal closes a topic only then, so an old one
@@ -332,6 +342,9 @@ export function createReplayEngine(options: ReplayEngineOptions): ReplayEngine {
   const now = options.now ?? Date.now;
   const ledger = createLedger(now);
   const cursors = new Map<string, ReplayCursor>();
+  // When each cursor started in this process (a first read, or a reset after a stream
+  // recreation): a live frame received before then may sit at or below where it started.
+  const cursorStarts = new Map<string, number>();
   let streamCreated: string | undefined;
   // A frame's failures by its stream sequence; in memory only, so a restart gives it three more.
   const failures = new Map<number, { count: number; error: string }>();
@@ -447,7 +460,10 @@ export function createReplayEngine(options: ReplayEngineOptions): ReplayEngine {
   const syncFollowed = () => {
     const followed = new Set(host.followedSubjects());
     for (const subject of [...cursors.keys()]) {
-      if (!followed.has(subject)) cursors.delete(subject);
+      if (!followed.has(subject)) {
+        cursors.delete(subject);
+        cursorStarts.delete(subject);
+      }
     }
     for (const subject of followed) {
       if (!cursors.has(subject)) cursors.set(subject, {});
@@ -650,8 +666,10 @@ export function createReplayEngine(options: ReplayEngineOptions): ReplayEngine {
         // Sequences of the old stream mean nothing in the new one: every cursor starts again at
         // its end, as a new follow does, and what the old stream held for the session is gone.
         streamCreated = stream.created;
+        const at = now();
         for (const subject of cursors.keys()) {
           cursors.set(subject, { since: stream.last_seq, after: stream.last_seq });
+          cursorStarts.set(subject, at);
         }
         failures.clear();
         notify({
@@ -673,6 +691,7 @@ export function createReplayEngine(options: ReplayEngineOptions): ReplayEngine {
           const cursor = cursors.get(result.subject);
           if (cursor !== undefined && cursor.after === undefined) {
             cursors.set(result.subject, { since: result.next_after, after: result.next_after });
+            cursorStarts.set(result.subject, now());
           }
           reading.read = result.next_after;
           continue;
@@ -776,11 +795,13 @@ export function createReplayEngine(options: ReplayEngineOptions): ReplayEngine {
       record(replayLedgerIdentity(frame));
       await flush(alive);
     },
-    async liveFailed(followed, envelope, error) {
+    async liveFailed(followed, envelope, error, receivedAt) {
+      const started = cursorStarts.get(followed);
       if (
         !isRoleForward(envelope) &&
         answered.has(followed) &&
-        cursors.get(followed)?.after !== undefined
+        cursors.get(followed)?.after !== undefined &&
+        (started === undefined || started <= receivedAt)
       ) {
         return;
       }
@@ -803,6 +824,7 @@ export function createReplayEngine(options: ReplayEngineOptions): ReplayEngine {
       epoch += 1;
       ledger.restore(snapshot.ledger);
       cursors.clear();
+      cursorStarts.clear();
       streamCreated = snapshot.state?.stream_created;
       for (const [subject, cursor] of Object.entries(snapshot.state?.subjects ?? {})) {
         cursors.set(subject, { ...cursor });
@@ -859,6 +881,16 @@ export function replayNoticeFields(notice: ReplayNotice): Readonly<Record<string
     notice: notice.kind === "stream_recreated" ? "stream recreated" : "messages may be missing",
     detail: notice.message,
   };
+}
+
+/**
+ * A notice's text, as each host shows it: its fields (`failureNoticeFields`,
+ * `replayNoticeFields`) under `envoy:` in TOON, as every live card is rendered. TOON quotes a
+ * value that holds a newline or would read as structure, so a sender-controlled field (`summary`,
+ * `from`, `error`) can never start a field of its own inside the block.
+ */
+export function envoyNoticeText(fields: Readonly<Record<string, string>>): string {
+  return encode({ envoy: fields });
 }
 
 /** Whether a frame is a role lane's: those stay live only, so a sweep passes them over. */

@@ -16,7 +16,9 @@
   the cursors, the followed topics, which the server follows again at start after the listener
   reaped them, and up to 72 hours and 20,000 entries of what the session was handed, so a resume
   repeats nothing (a live repeat included) and a `/clear` starts afresh. A frame that fails three
-  times, or a live failure no sweep will retry, is replaced by a notice naming it; a listener
+  times, or a live failure no sweep will retry (one received before its subject's cursor started
+  included), is replaced by a notice naming it, its fields rendered in TOON as a live card's are,
+  so a sender's multi-line summary cannot add a field of its own; a listener
   without the route, or unable to read the stream, is said once on stderr. `dist/` was rebuilt
   (INFRA-439).
 

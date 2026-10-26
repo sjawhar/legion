@@ -326,8 +326,9 @@ export function createEnvoyClient(config: EnvoyClientConfig): EnvoyClient {
     options: RequestOptions = {}
   ): Promise<string> => {
     const url = `${baseUrl}${path}`;
-    const attempts = config.retry === false || options.retry === false ? 1 : 2;
-    for (let attempt = 0; attempt < attempts; attempt += 1) {
+    const attempts = config.retry === false ? 1 : 2;
+    const tries = options.retry === false ? 1 : attempts;
+    for (let attempt = 0; attempt < tries; attempt += 1) {
       let response: Response;
       try {
         const headers = new Headers(init.headers);
@@ -338,7 +339,7 @@ export function createEnvoyClient(config: EnvoyClientConfig): EnvoyClient {
           signal: AbortSignal.timeout(options.timeoutMs ?? timeoutMs),
         });
       } catch (error) {
-        if (attempt + 1 < attempts) {
+        if (attempt + 1 < tries) {
           await waitForRetry();
           continue;
         }
@@ -353,7 +354,7 @@ export function createEnvoyClient(config: EnvoyClientConfig): EnvoyClient {
         status: response.status,
         responseBody,
       });
-      if (response.status >= 500 && attempt + 1 < attempts) {
+      if (response.status >= 500 && attempt + 1 < tries) {
         await waitForRetry();
         continue;
       }

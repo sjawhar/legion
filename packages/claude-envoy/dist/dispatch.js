@@ -19803,8 +19803,9 @@ function createEnvoyClient(config2) {
   const apiToken = config2.token;
   const request = async (path2, init, options = {}) => {
     const url2 = `${baseUrl}${path2}`;
-    const attempts = config2.retry === false || options.retry === false ? 1 : 2;
-    for (let attempt = 0;attempt < attempts; attempt += 1) {
+    const attempts = config2.retry === false ? 1 : 2;
+    const tries = options.retry === false ? 1 : attempts;
+    for (let attempt = 0;attempt < tries; attempt += 1) {
       let response;
       try {
         const headers = new Headers(init.headers);
@@ -19816,7 +19817,7 @@ function createEnvoyClient(config2) {
           signal: AbortSignal.timeout(options.timeoutMs ?? timeoutMs)
         });
       } catch (error49) {
-        if (attempt + 1 < attempts) {
+        if (attempt + 1 < tries) {
           await waitForRetry();
           continue;
         }
@@ -19831,7 +19832,7 @@ function createEnvoyClient(config2) {
         status: response.status,
         responseBody
       });
-      if (response.status >= 500 && attempt + 1 < attempts) {
+      if (response.status >= 500 && attempt + 1 < tries) {
         await waitForRetry();
         continue;
       }

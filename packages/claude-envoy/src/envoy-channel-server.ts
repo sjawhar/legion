@@ -26,6 +26,7 @@ import { machineID } from "@legion/envoy-client/machine"
 import { natsAuthOptions } from "@legion/envoy-client/nats-auth"
 import {
   createReplayEngine,
+  envoyNoticeText,
   failureNoticeFields,
   type ReplayDeliveryOutcome,
   type ReplayFrame,
@@ -88,7 +89,6 @@ import {
   type LegionToolRuntime,
   legionToolDefinition,
 } from "./legion-tool"
-import { envoyNoticeContent } from "./missed-messages"
 import { readReplayState, replayStateFile, writeReplayState } from "./replay-state"
 import {
   pruneStaleSessionHandoffs,
@@ -553,8 +553,7 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
         ),
       ],
       deliver: showReplayed,
-      showFailureNotice: (notice) =>
-        delivery.notice(envoyNoticeContent(failureNoticeFields(notice))),
+      showFailureNotice: (notice) => delivery.notice(envoyNoticeText(failureNoticeFields(notice))),
       failureNoticeFailed: (notice, error) => {
         process.stderr.write(
           `envoy-channel: message ${notice.eventId} from ${notice.sender} was not shown, nor was the notice naming it — ${messageFor(error)}\n`,
@@ -567,7 +566,7 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
           process.stderr.write(`envoy-channel: ${notice.message}\n`)
           return
         }
-        delivery.notice(envoyNoticeContent(replayNoticeFields(notice))).catch((error: unknown) => {
+        delivery.notice(envoyNoticeText(replayNoticeFields(notice))).catch((error: unknown) => {
           process.stderr.write(
             `envoy-channel: ${notice.message} (the session could not be told — ${messageFor(error)})\n`,
           )
@@ -612,12 +611,13 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
   const forwarder: ChannelForwarder = createChannelForwarder(options.connection, {
     dedupe,
     ledger: replay,
-    failed: (message, topic, error) => {
+    failed: (message, topic, error, receivedAt) => {
       // A frame no sweep will show again gets its notice at once: a role forward, already
-      // acknowledged, or one on a subscription the replay does not read (refused, not started,
-      // or the listener's replay failing). The stream's copy of any other waits for a sweep.
+      // acknowledged, one on a subscription the replay does not read (refused, not started, or
+      // the listener's replay failing), or one received before its subject's cursor started.
+      // The stream's copy of any other waits for a sweep.
       const envelope = renderInbound(message.raw, identity.id, message.subject).envelope
-      if (envelope !== undefined) void replay.liveFailed(topic, envelope, error)
+      if (envelope !== undefined) void replay.liveFailed(topic, envelope, error, receivedAt)
     },
     deliver: async (message) => {
       const removedTopics = subscriptionRemovedTopics(message.raw, identity.id)

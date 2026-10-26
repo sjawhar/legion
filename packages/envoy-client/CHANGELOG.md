@@ -21,7 +21,9 @@
   key when it names its event), kept 72 hours from when each was recorded and capped at 20,000,
   lets the live path drop a repeat after a restart. A frame the host fails to show three times
   becomes a failure notice the host shows instead, and `liveFailed` shows it at once for a live
-  frame no sweep will show; a recreated stream, a cursor older than the stream's oldest message,
+  frame no sweep will show, a frame received before its subject's cursor started included;
+  `envoyNoticeText` renders a notice in TOON, so a sender's multi-line summary cannot forge a
+  field; a recreated stream, a cursor older than the stream's oldest message,
   and a listener that does not replay (404) or cannot (503 `REPLAY_UNAVAILABLE`, 401, 403) are
   each told once. A sweep that only moved its cursors to the stream's end is written at most
   hourly. A host that handed a frame or a failure notice on without writing it yet answers

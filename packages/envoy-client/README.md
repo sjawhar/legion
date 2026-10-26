@@ -53,10 +53,14 @@ state at any age. A write carries the state only when it changed; a sweep that h
 and only moved its cursors to the stream's end goes with the next write, or once the state last
 written is an hour old (`REPLAY_STATE_REFRESH_MS`). A frame the host fails to show is retried, and
 on its third failure the host shows a notice naming it instead (`showFailureNotice`); a host whose
-live path failed a frame calls `liveFailed(followed, envelope, error)`, which shows that notice at
-once unless a sweep will show the stream's copy. A replayed removal closes a topic only when
-`followedBefore(topic, seq)`; `replaySuppressed` says which rendered frames a replay does not show,
-and `replayedText`, `failureNoticeFields` and `replayNoticeFields` word the cards. The session is
+live path failed a frame calls `liveFailed(followed, envelope, error, receivedAt)`, which shows
+that notice at once unless a sweep will show the stream's copy, which it will not for a frame
+received before its subject's cursor started (a new follow, a new session, or a reset after a
+stream recreation), since that cursor can start past it. A replayed removal closes a topic only
+when `followedBefore(topic, seq)`; `replaySuppressed` says which rendered frames a replay does
+not show, `replayedText`, `failureNoticeFields` and `replayNoticeFields` word the cards, and
+`envoyNoticeText` renders a notice's fields under `envoy:` in TOON, so a sender's summary that
+holds a newline stays inside its own field. The session is
 told once when the stream was recreated, when its cursor fell behind the stream's oldest message
 (older than 72 hours), and when the listener does not replay (404) or cannot (503
 `REPLAY_UNAVAILABLE`, 401, 403). Work started for one session stops, writing nothing, once

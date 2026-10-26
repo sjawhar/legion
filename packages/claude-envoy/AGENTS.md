@@ -20,11 +20,12 @@ notification stream through its listener (`POST /v1/replay`) with the shared eng
 `reconnect` status, on every heartbeat and after a new follow, and shows each stored frame the
 session was not shown, once, through the same path a live frame takes (the channel notification,
 or the Legion bridge's inbox), with a last line saying when it was published while the
-connection was down (`replayedText`, worded by the engine, as are the notices `src/missed-messages.ts`
-lays out); a frame there runs nothing. Role messages and team
-or other ad-hoc topics stay live only. The live path records each frame Claude Code was handed in
-the engine's ledger before its claim settles, and drops a frame the ledger holds (a repeat after
-a restart). The state is one file per session id, `replay-<url-encoded session id>.json` in the
+connection was down (`replayedText`, worded by the engine, as are the notices, which its
+`envoyNoticeText` renders in TOON as every live card is); a frame there runs nothing. Role
+messages and team or other ad-hoc topics stay live only. The live path records each frame
+Claude Code was handed in the engine's ledger before its claim settles, and drops a frame the
+ledger holds (a repeat after a restart). The state is one file per session id,
+`replay-<url-encoded session id>.json` in the
 plugin's state directory (`src/replay-state.ts`, mode 0600, written by rename): the cursors, the
 followed subjects, which the server follows again at start even after the listener reaped its
 interests, and at most 72 hours of ledger, at most 20,000 entries; no sweep prunes these files,

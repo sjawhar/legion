@@ -83,9 +83,15 @@ export interface ChannelForwarderOptions {
   readonly ledger?: ChannelForwarderLedger
   /**
    * A frame whose delivery rejected, after its claim was released: `topic` is the subscription it
-   * came on, which says whether a replay will show it again.
+   * came on, which says whether a replay will show it again, and `receivedAt` when it arrived
+   * (`Date.now`), which says whether a replay cursor started past it.
    */
-  readonly failed?: (message: ChannelInboundMessage, topic: string, error: unknown) => void
+  readonly failed?: (
+    message: ChannelInboundMessage,
+    topic: string,
+    error: unknown,
+    receivedAt: number,
+  ) => void
 }
 
 interface Following {
@@ -141,6 +147,7 @@ export function createChannelForwarder(
   const deliver = async (topic: string, subscription: ChannelTopicSubscription): Promise<void> => {
     try {
       for await (const message of subscription) {
+        const receivedAt = Date.now()
         const raw = decoder.decode(message.data)
         const identity = deliveryIdentity(raw)
         let claim = dedupe.claim(identity)
@@ -168,7 +175,7 @@ export function createChannelForwarder(
           claim?.release()
           report(`could not deliver a message on ${message.subject}`, error)
           // A duplicate was never being shown; only its receipt can have failed.
-          if (claim !== undefined) options.failed?.(inbound, topic, error)
+          if (claim !== undefined) options.failed?.(inbound, topic, error, receivedAt)
           continue
         }
         if (claim === undefined) continue
