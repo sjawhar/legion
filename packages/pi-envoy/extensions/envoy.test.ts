@@ -3865,10 +3865,10 @@ console.log(JSON.stringify(args));
       );
       process.env.PATH = `${bin}:${process.env.PATH ?? ""}`;
     };
-    /** The context a main agent's tool call carries, on the gate's provider with the askgate role set. */
-    const gateContext = (notifications: string[]): SessionContext =>
+    /** The context a main agent's tool call carries in session `sessionID`, on the gate's provider with the askgate role set. */
+    const gateContext = (notifications: string[], sessionID = "ses_askgate"): SessionContext =>
       ({
-        ...sessionContext("ses_askgate"),
+        ...sessionContext(sessionID),
         agent: { kind: "main" },
         cwd: configDirectory,
         getSystemPrompt: () => ["PRIMARY"],
@@ -3877,7 +3877,7 @@ console.log(JSON.stringify(args));
         modelRegistry: { resolver: () => "standin-key" },
         sessionManager: {
           ...topLevelSession,
-          getSessionId: () => "ses_askgate",
+          getSessionId: () => sessionID,
           getLeafId: () => null,
         },
         ui: { ...sessionContext().ui, notify: (message) => notifications.push(message) },
@@ -3914,6 +3914,79 @@ console.log(JSON.stringify(args));
         },
       ]);
       expect(notifications).toEqual([]);
+    }, 30_000);
+    // A session whose envoy.json is not there still has Dispatch when its variables name one, and
+    // the gate binds there: the file is only the switch, and no file leaves it on.
+    test("with no envoy.json at ENVOY_CONFIG_FILE and only DISPATCH_URL and its token set, the gate binds and reviews a dispatch ask", async () => {
+      const file = process.env.ENVOY_CONFIG_FILE ?? "";
+      rmSync(file);
+      process.env.DISPATCH_URL = "http://dispatch.test";
+      process.env.DISPATCH_TOKEN = "dispatch-token";
+      standInHost();
+      const { default: envoyExtension } = await import("./envoy.ts?askgate-no-envoy-json");
+      const fixture = createPi();
+      envoyExtension(fixture.pi);
+      const notifications: string[] = [];
+      const context = gateContext(notifications);
+      await fixture.handlers.get("session_start")?.({}, context);
+      standInDispatch();
+
+      const result = (await fixture.handlers.get("tool_call")?.(
+        { toolName: "bash", toolCallId: "call-ask", input: { command: ASK } },
+        context
+      )) as { block?: boolean; reason?: string } | undefined;
+
+      expect(existsSync(file)).toBe(false);
+      // The charter call, and the rules call the `dispatch ask` opens beside it.
+      expect(completions).toEqual([MODEL, MODEL]);
+      expect(result?.block).toBe(true);
+      expect(fixture.entries).toMatchObject([
+        {
+          customType: "advisor-gate",
+          data: { tool: "dispatch_ask", outcome: "verdict", decision: "revise" },
+        },
+      ]);
+    }, 30_000);
+    // The rules notice is about one session's calls: it goes to the plain log and to that session's
+    // UI, never into the notices every later session start shows again.
+    test("three rules-check failures in a row raise the rules notice, and a new session start does not show it again", async () => {
+      writeFileSync(process.env.ENVOY_CONFIG_FILE ?? "", "{}\n");
+      process.env.DISPATCH_URL = "http://dispatch.test";
+      process.env.DISPATCH_TOKEN = "dispatch-token";
+      standInHost();
+      const { default: envoyExtension } = await import("./envoy.ts?askgate-rules-notice");
+      const fixture = createPi();
+      envoyExtension(fixture.pi);
+      const notifications: string[] = [];
+      const context = gateContext(notifications);
+      await fixture.handlers.get("session_start")?.({}, context);
+      expect(notifications).toEqual([]);
+
+      // The stand-in model answers the rules call with the charter's JSON, which is no rules
+      // verdict; each ask is on its own issue, so no breaker sends one out unasked.
+      for (const issue of ["DSP-1", "DSP-2", "DSP-3"]) {
+        const result = (await fixture.handlers.get("tool_call")?.(
+          {
+            toolName: "dispatch_ask",
+            toolCallId: `call-${issue}`,
+            input: { issue, question: "Ready?" },
+          },
+          context
+        )) as { block?: boolean } | undefined;
+        expect(result?.block).toBe(true);
+      }
+      expect(completions).toHaveLength(6);
+      expect(fixture.entries).toMatchObject(
+        Array(3).fill({ customType: "advisor-gate", data: { ruleOutcome: "no-verdict" } })
+      );
+      expect(fixture.entries).toHaveLength(3);
+      const rulesNotice =
+        "AskGate's rule check failed 3 times in a row; new asks are not checked against the two rules.";
+      expect(notifications).toEqual([rulesNotice]);
+
+      const next: string[] = [];
+      await fixture.handlers.get("session_start")?.({}, gateContext(next, "ses_askgate_next"));
+      expect(next).toEqual([]);
     }, 30_000);
     // The second re-gate of #2159, non-blocking: at the host's default handler limit of 30 s the
     // review deadline is 20 s (the 10 s margin covers the aborted call's usage, the entry and the

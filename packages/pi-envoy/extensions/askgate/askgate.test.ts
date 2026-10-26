@@ -1,4 +1,4 @@
-import { afterAll, afterEach, describe, expect, mock, test } from "bun:test";
+import { afterAll, afterEach, describe, expect, jest, mock, test } from "bun:test";
 import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import { tmpdir } from "node:os";
@@ -1568,6 +1568,86 @@ console.log(JSON.stringify(args, null, 2));
         argsDigest: createHash("sha256").update(JSON.stringify(args)).digest("hex"),
       },
     ]);
+  });
+  // The literal one-line grammar: one `dispatch ask`, its question a quoted word.
+  const ONE_LINE_ASK = "dispatch ask --issue X-1 --question 'Ship the release today?'";
+  test("a one-line dispatch ask opens a new ask, so its bash call gets the rules call beside the charter call", async () => {
+    const g = bind({ env: STUB, cwd: work, complete: bySystem(ALLOW, RULES_NONE) });
+    expect(await g.bash("one-line", ONE_LINE_ASK)).toBeUndefined();
+    expect(g.dryRuns.map((run) => run.script)).toEqual([
+      "dispatch ask --dry-run --issue X-1 --question 'Ship the release today?'",
+    ]);
+    expect(g.calls.filter(isCharter)).toHaveLength(1);
+    const rules = g.calls.filter(isRules);
+    expect(rules).toHaveLength(1);
+    expect(rules[0]?.user).toContain("Ship the release today?");
+    expect(g.entries).toMatchObject([
+      {
+        tool: "dispatch_ask",
+        path: "dispatch ask",
+        decision: "allow",
+        outcome: "verdict",
+        ruleOutcome: "none",
+      },
+    ]);
+  });
+  test("a tool's end during the dry run abandons the call: the dry run is stopped and no model is asked", async () => {
+    const running = Promise.withResolvers<AbortSignal>();
+    const g = bind({
+      env: STUB,
+      cwd: work,
+      // A dry run that runs until it is killed, and then reports what a killed run reports.
+      dryRun: (_script, { signal }) => {
+        const killed = Promise.withResolvers<DryRunResult>();
+        signal?.addEventListener(
+          "abort",
+          () => killed.resolve({ exitCode: null, stdout: "", stderr: "", timedOut: false }),
+          { once: true }
+        );
+        if (signal !== undefined) running.resolve(signal);
+        return killed.promise;
+      },
+    });
+    const gated = g.bash("dry-ended", ONE_LINE_ASK);
+    const signal = await running.promise;
+    g.event("tool_execution_end", { toolCallId: "dry-ended", toolName: "bash", isError: true });
+    expect(signal.aborted).toBe(true);
+    // Warn mode lets the abandoned call go, saying it went out unreviewed.
+    const result = await gated;
+    expect(result?.block).toBeUndefined();
+    expect(result?.additionalContext).toContain('outcome="abandoned"');
+    expect(g.calls).toHaveLength(0);
+    expect(g.entries).toMatchObject([
+      { tool: "dispatch_ask", path: "dispatch ask", decision: "allow", outcome: "abandoned" },
+    ]);
+  });
+  test("a tool's end after the dry run, with the charter and rules calls both in flight, abandons both", async () => {
+    const signals: AbortSignal[] = [];
+    const both = Promise.withResolvers<void>();
+    const g = bind({
+      // A deadline well past the test's own steps: a stop the tool's end missed shows as a timeout.
+      env: { ...STUB, OMP_ASKGATE_TIMEOUT_MS: "3000" },
+      cwd: work,
+      complete: (req) => {
+        signals.push(req.signal);
+        if (signals.length === 2) both.resolve();
+        return untilAborted(req);
+      },
+    });
+    const gated = g.bash("models-ended", ONE_LINE_ASK);
+    await both.promise;
+    expect(g.dryRuns).toHaveLength(1);
+    expect(g.calls.filter(isCharter)).toHaveLength(1);
+    expect(g.calls.filter(isRules)).toHaveLength(1);
+    g.event("tool_execution_end", { toolCallId: "models-ended", toolName: "bash", isError: true });
+    // Both at once, before either call settles: the one stop the call holds aborts them together.
+    expect(signals.map((s) => s.aborted)).toEqual([true, true]);
+    const result = await gated;
+    expect(result?.additionalContext).toContain('outcome="abandoned"');
+    expect(g.entries).toMatchObject([
+      { decision: "allow", outcome: "abandoned", ruleOutcome: "abandoned" },
+    ]);
+    expect(g.entries).toHaveLength(1);
   });
   test("dispatch search is not reviewed", async () => {
     const g = bind({ env: STUB, cwd: work });
@@ -3316,6 +3396,43 @@ console.log(JSON.stringify(args, null, 2));
         expect(run.exitCode).toBe(0);
         expect(JSON.parse(fs.readFileSync(posted, "utf8"))).toMatchObject({ question: text });
       });
+    // A rules refusal is the agent's own command refused, whatever the charter's outcome: an
+    // unreviewed charter outcome hands an allowed call its own command back, never a refused one.
+    test("a rules refusal whose charter model threw is a block that carries no input, so no snapshot command replaces the agent's", async () => {
+      fs.writeFileSync(
+        path.join(work, "refused-question.md"),
+        "I checked the cache path and it is fine. Should I change it? Recommendation: keep it as it is.\n"
+      );
+      const before = snapshotDirs().length;
+      const g = bind({
+        env: STUB,
+        cwd: work,
+        complete: bySystem(
+          async () => {
+            throw new Error("charter model crashed");
+          },
+          rulesAnswer([{ ask: 1, rule: "no_change", quote: "keep it as it is" }])
+        ),
+      });
+      const result = await g.bash(
+        "refused",
+        "dispatch ask --issue DSP-1 --question-file refused-question.md"
+      );
+      expect(result?.block).toBe(true);
+      expect(result?.reason).toContain('The ask matches the rule "no change"');
+      expect(result?.input).toBeUndefined();
+      expect(g.entries).toMatchObject([
+        {
+          decision: "revise",
+          outcome: "error",
+          reason: "charter model crashed",
+          rule: "no_change",
+          ruleOutcome: "match",
+        },
+      ]);
+      // The snapshot the rewrite would have named is gone with the refusal.
+      expect(snapshotDirs()).toHaveLength(before);
+    });
 
     test("a snapshot is released when the tool reports its result", async () => {
       const source = path.join(work, "release-snapshot.md");
@@ -5858,6 +5975,53 @@ describe("the Dispatch decision record (A5)", () => {
     expect(dispatch.uploads).toEqual([]);
     expect(g.entries).toMatchObject([{ rule: "no_change", ruleOutcome: "match" }]);
     expect(g.entries[0]?.recordError).toBeUndefined();
+  });
+
+  test("a call whose model calls hang to the deadline and whose record hangs to its own stop still returns inside the handler ceiling", async () => {
+    // Fake timers, and a clock that moves with them: the deadline, the abort grace and the
+    // record's stop all run their full length without the test waiting 30 s.
+    jest.useFakeTimers();
+    try {
+      let clock = 0;
+      const dispatch = recordingDispatch({
+        projectArtifact: () => Promise.withResolvers<{ artifact: { id: string } }>().promise,
+      });
+      const g = bind({
+        // The host's default handler ceiling.
+        ceiling: 30_000,
+        now: () => clock,
+        // Neither model call ever answers, not even once it is aborted.
+        complete: () => Promise.withResolvers<Completion>().promise,
+        env: { OMP_ASKGATE_RECORD_PROJECT: "INFRA" },
+        dispatch: dispatch.session,
+      });
+      let returnedAt: number | undefined;
+      const gated = g.device("t1", "dispatch_ask", KEEP).then((result) => {
+        returnedAt = clock;
+        return result;
+      });
+      while (returnedAt === undefined && clock < 40_000) {
+        for (let i = 0; i < 50; i++) await Promise.resolve();
+        if (returnedAt !== undefined) break;
+        clock += 100;
+        jest.advanceTimersByTime(100);
+      }
+      // The deadline (20 s), the aborted calls' grace (2 s), then the record's own stop (5 s).
+      expect(returnedAt).toBeGreaterThanOrEqual(20_000 + 2_000 + RECORD_TIMEOUT_MS);
+      expect(returnedAt).toBeLessThan(30_000);
+      expect((await gated)?.block).toBeUndefined();
+      expect(dispatch.uploads).toHaveLength(1);
+      expect(g.entries).toMatchObject([
+        {
+          outcome: "timeout",
+          ruleOutcome: "timeout",
+          deadlineMs: 20_000,
+          recordError: `Dispatch did not answer the record within ${RECORD_TIMEOUT_MS} ms`,
+        },
+      ]);
+    } finally {
+      jest.useRealTimers();
+    }
   });
 
   test("an upload whose de-duplication read fails carries ruleAsksPartial, and no missing text, into the entry and the record", async () => {
