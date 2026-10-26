@@ -94,3 +94,9 @@ INFO broker sweeper: ended an enrollment whose lease lapsed enrollment_id=edd9a1
 ```
 
 A lapsed lease cannot be renewed: to use the box again, start over from step 1 with a new key.
+
+An outage of the broker itself is different. If the box's lease runs out while no broker is
+serving (every broker process down, or the database out of reach), the lease stays live and the
+sweep does not end it. Once a broker serves again, the box's running `agent-secrets renew` renews
+as before ([when no broker is serving](/legion/broker/concepts/#when-no-broker-is-serving)). A
+broker that runs but that the box cannot reach still ends the lease.

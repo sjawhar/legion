@@ -1331,6 +1331,26 @@
 
 ### Fixed
 
+- A broker outage no longer ends the sessions whose leases ran out during it (INFRA-487). A session
+  renews its lease through a broker, so while every broker process was down, or none could reach
+  the database, no lease could be renewed, and the first sweep after the outage ended every
+  enrollment whose lease ran out meanwhile: each such pod lost its grants and stayed locked out
+  until it was relaunched. Every serving broker now beats on a one-row `broker_serving` table
+  (migration 0019) every `BROKER_SWEEP_SECONDS`. A gap longer than three sweeps between beats is
+  time no broker was serving, and until a broker beats again a lease that was still running at the
+  last beat stays live, so the sweep does not end it. The next beat gives that gap back to every
+  such lease that was not revoked, capped at `BROKER_LEASE_SECONDS` from then, and logs
+  `broker: gave back the time no broker was serving …`. A revoked enrollment, and one whose lease
+  ran out while a broker was serving, stays ended, and a renewal with another pod's or service
+  account's token is still refused `POD_IDENTITY_MISMATCH`. It does not cover a broker that runs but
+  that pods cannot reach (ingress, DNS, a NetworkPolicy, a stale `AGENT_SECRETS_URL`): leases still
+  end then. Grant lifetimes and pending requests still run on wall-clock time, the first deploy
+  restores nothing, and a pod whose renewer already exited 76 stays without one until it is
+  relaunched. `config.Load` now refuses to start unless `BROKER_LEASE_SECONDS` is more than four and
+  a half times `BROKER_SWEEP_SECONDS` (`2*BROKER_LEASE_SECONDS <= 9*BROKER_SWEEP_SECONDS` is
+  refused), so a live session's lease cannot run out inside a gap the broker still counts as
+  serving. The defaults, 900 and 5, pass.
+
 - A Dispatch page in Firefox now shows what changed while its live event stream was reconnecting,
   such as a session's answer to a model switch, without waiting for the stream's heartbeat.
   Firefox opened the stream only once its first byte arrived, and a stream with no backlog and no

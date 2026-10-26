@@ -661,8 +661,10 @@ it, then look at what the row `waitsOn` names is doing.
   or `kubectl create token`'s `--duration`, to at most an hour), `TOKEN_LOGIN_OFF` (the broker
   trusts no Kubernetes token issuer), `read the ServiceAccount token` (the file is missing), a
   `404` from a broker too old to have the token route, or a network fault. `.agentSecretsLogin`
-  reads `"state": "failed"` until a login succeeds. Nothing needs restarting: the daemon retries
-  30 s after a failed login, doubling to at most 5 minutes, and no person is ever asked.
+  reads `"state": "failed"` until a login succeeds. Nothing needs restarting, and no person is ever
+  asked. When the broker gave no answer at all (it is down or out of reach), the daemon retries 2 s
+  later, doubling to at most 10 s, so it logs in within about 10 s of the broker serving again.
+  After any other failure it retries 30 s later, doubling to at most 5 minutes.
 
   ```sh
   legion state --config legion.yaml --json | jq .agentSecretsLogin

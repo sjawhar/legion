@@ -138,7 +138,10 @@ in one step, and the approver's Inbox drops them. A session ends in one of three
   `ENROLLMENT_NOT_LIVE` on its next renewal from the moment its lease lapses,
   `BROKER_LEASE_SECONDS` after its last renewal. Other session calls are refused `PROOF_INVALID`.
   The broker's sweep ends it on its next run, within `BROKER_SWEEP_SECONDS`, and logs
-  `broker sweeper: ended an enrollment whose lease lapsed`. The
+  `broker sweeper: ended an enrollment whose lease lapsed`. A lease that ran out while no broker
+  was serving (every broker process down, or the database out of reach) is not ended: the broker
+  gives the session back that time once it serves again
+  ([when no broker is serving](/legion/broker/concepts/#when-no-broker-is-serving)). The
   [configuration reference](/legion/broker/reference/config/) gives both settings' defaults.
 - **Its machine login is revoked.** Whoever may revoke the machine login that enrolled it — the
   person who approved a person's machine login, or anyone signed in for a service's — revokes that

@@ -72,6 +72,30 @@ chooses. A `pod` enrollment records none, since the Legion daemon logs in as a s
 Kubernetes token rather than as a person; it records the service account the pod's projected token
 proved instead.
 
+### When no broker is serving
+
+A lease that runs out while no broker is serving is not ended. A session renews through a
+broker, so while every broker process is down, or none can reach the database, no session can
+renew. Every serving broker records a beat every `BROKER_SWEEP_SECONDS`, and a gap of more than
+three sweeps between beats counts as time no broker was serving. A lease that was still running
+at the last beat stays live through that gap, so the sweep does not end it. The first beat after
+the gap gives the gap back to every such lease that was not revoked, at most
+`BROKER_LEASE_SECONDS` from then, and the broker logs
+`broker: gave back the time no broker was serving …`
+(`packages/envoy/internal/broker/enroll/serving.go`, `ServingClock`). The session's renewer then
+renews as before. A revoked enrollment stays ended, and so does one whose lease ran out while a
+broker was serving. A renewal with another pod's or service account's token is still refused
+`POD_IDENTITY_MISMATCH`. A live session renews with at least two thirds of its lease left, so the
+broker refuses to start unless `BROKER_LEASE_SECONDS` is more than four and a half times
+`BROKER_SWEEP_SECONDS`: a lease that runs out inside a gap of three sweeps, which still counts as
+serving, would otherwise be ended. This covers only an outage of the broker itself:
+
+- A broker that runs but that sessions cannot reach (ingress, DNS, a NetworkPolicy, a stale
+  `AGENT_SECRETS_URL`) still counts as serving, so a lease that runs out then ends as before.
+- A grant's lifetime and a pending request's expiry still run on wall-clock time.
+- The first deploy of a broker with this behavior restores nothing that ran out before it.
+- A pod whose renewer already exited 76 has no renewer until the pod is relaunched.
+
 ## Machine login
 
 A launcher (a person's machine helper, or the Legion daemon) cannot enroll anything until the

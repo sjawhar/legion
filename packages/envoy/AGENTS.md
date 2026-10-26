@@ -3141,7 +3141,11 @@ set, and not itself required at startup), `BROKER_LEASE_SECONDS` (default 900, m
 mints its credential for this long, and each refresh of its device login moves its expiry to this
 long from then; past it the machine logs in again, new key, new code, new human approval),
 `BROKER_SWEEP_SECONDS` (default 5, max 60 —
-`requests.Sweeper`'s tick interval, the poller's replacement), `BROKER_DRAIN_SECONDS` (default 5,
+`requests.Sweeper`'s tick interval, the poller's replacement, and also `enroll.ServingClock`'s beat
+interval, a gap of more than three beats counting as no broker serving; `config.Load` refuses
+`2*BROKER_LEASE_SECONDS <= 9*BROKER_SWEEP_SECONDS`, since a live session renews with at least two
+thirds of its lease left and a lease that ran out inside a three-sweep gap would be ended rather
+than given back), `BROKER_DRAIN_SECONDS` (default 5,
 min 0, max 120 — how long a stopping process goes on serving while `/healthz` answers 503; it is
 configuration rather than a constant because the right value is the cluster's EndpointSlice
 propagation time, which lives in the deployment's own repository, and 0 is for a local run), and
@@ -3779,11 +3783,36 @@ revoked and its pending requests cancelled and dropped from the approver's list,
 `enrollment.expired` audit row and one log line each; then it expires overdue pending
 `agent_secret` requests (waking each one's owner through the Envoy wake seam) and overdue pending
 machine logins. It reads fresh from Postgres every time, so a restart resumes exactly where the
-rows are. Lapsed means what proof lookup means by not live (`lease_expires_at` no later than
-Postgres's `now()`), so a session that keeps renewing is never ended, and rows a concurrent renew
+rows are. Lapsed means what proof lookup means by not live (`enrollment_lease_live`, below, is
+false), so a session that keeps renewing is never ended, and rows a concurrent renew
 or revoke holds are left to the next tick. Each ended enrollment's live grants are found through
 `grants_enrollment_live` (migration 0008), so a backlog of lapsed enrollments costs one index
 lookup each rather than a scan of `grants`.
+
+Time no broker was serving does not count against a lease. A session renews only through a
+broker, so while every broker process is down, or none can reach the database, no lease can be
+renewed. Migration 0019 adds `broker_serving`, one row of `last_serving_at` and
+`not_serving_after`, and the SQL function `enrollment_lease_live(lease)`, the one liveness test
+for a lease at every site that asks (proof lookup, `Renew`, `EndLapsed`, a grant's values): a lease
+is live while it has not run out, and also when no broker has beaten for longer than
+`not_serving_after` and the lease was still running at `last_serving_at`. It reads the row without
+a lock. `enroll.ServingClock` (`internal/broker/enroll/serving.go`), started in `cmd/broker`'s
+`main`, beats on the row every `BROKER_SWEEP_SECONDS` on every serving broker, with a threshold of
+three sweeps. A beat that finds a longer gap since the last one gives that gap back to every
+unrevoked lease that was still running at the last beat, capped at now plus
+`BROKER_LEASE_SECONDS`, and logs INFO `broker: gave back the time no broker was serving ...`; the
+beat locks the row before it reads the gap, so two brokers beating at once give it back once. Until
+then such a lease stays live, so the sweeper never ends it. A revoked enrollment, and one whose
+lease ran out while a broker was serving, stays ended, and a renewal with another pod's or service
+account's token is still refused 403 `POD_IDENTITY_MISMATCH` and moves the lease not at all. Its
+limits: a broker that runs but pods cannot reach (ingress, DNS, a NetworkPolicy, a stale
+`AGENT_SECRETS_URL`) still counts as serving, so leases still end then; grant lifetimes and
+pending requests still run on wall-clock time; the row starts with no threshold, so the first
+deploy restores nothing; and a pod whose renewer already exited 76 stays without one until it is
+relaunched. `internal/broker/enroll/serving_test.go`,
+`internal/broker/api/renew_liveness_test.go` and `cmd/broker/outage_test.go`
+(`TestABrokerOutageLongerThanALease`, the real broker and `agent-secrets` binaries across an outage
+longer than a lease) test it.
 
 Tests: `cd packages/envoy && go vet ./... && go test ./internal/broker/... ./cmd/broker/...
 ./cmd/agent-secrets/... ./cmd/agent-secrets-devrelay/... ./cmd/dev-oidc-issuer/...`. The Postgres-backed tests skip, rather
