@@ -16,14 +16,7 @@ const SOURCE_PREFIX: Record<CredentialSessionSource, string> = {
   request: "",
 };
 
-/**
- * One id: the agent, with its running state and its live link, then its full id, then where it
- * runs while the agents list lists it, or in words that it isn't running or couldn't be
- * checked. A request's id is an unsigned claim (`session.ts`), and an unlisted id's name is its
- * short form `session:<8>…`, which a forged id (or any session started in the same minute)
- * shares; so the person approving reads the whole id, and the state in words rather than only
- * the mark's ring. The full id breaks anywhere, so it never widens the record page's grid.
- */
+/** The words after the name: where it runs, or that it isn't running or couldn't be checked. */
 function statusText(line: CredentialSessionLine): string {
   switch (line.status.kind) {
     case "running":
@@ -35,6 +28,14 @@ function statusText(line: CredentialSessionLine): string {
   }
 }
 
+/**
+ * One id: the agent, with its running state and its live link, then its full id, then where it
+ * runs while the agents list lists it, or in words that it isn't running or couldn't be
+ * checked. A request's id is an unsigned claim (`session.ts`), and an unlisted id's name is its
+ * short form `session:<8>…`, which a forged id (or any session started in the same minute)
+ * shares; so the person approving reads the whole id, and the state in words rather than only
+ * the mark's ring. The full id breaks anywhere, so it never widens the record page's grid.
+ */
 function CredentialSessionLineText({ line }: { line: CredentialSessionLine }): ReactNode {
   return (
     <span className={`${textMutedOnCanvas} [overflow-wrap:anywhere]`}>
