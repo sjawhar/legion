@@ -341,7 +341,10 @@ export async function runDispatchCli(
         for (const file of fileOperands(argv)) {
           let bytes: Buffer | undefined;
           try {
-            const fd = openSync(operandPath(io.cwd, file), constants.O_RDONLY | constants.O_NONBLOCK);
+            const fd = openSync(
+              operandPath(io.cwd, file),
+              constants.O_RDONLY | constants.O_NONBLOCK
+            );
             try {
               if (fstatSync(fd).isFile()) bytes = readFileSync(fd);
             } finally {

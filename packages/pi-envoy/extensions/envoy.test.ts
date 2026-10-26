@@ -4173,11 +4173,22 @@ console.log(JSON.stringify(args));
         error: "dispatch ask was not called: AskGate is on for this session, and …",
         askgate: { mode: "block", why: "this call carries no AskGate marker" },
       });
-    const PY_RESULT = { toolName: "bash", toolCallId: "call-py", input: {}, content: [], isError: false };
+    const PY_RESULT = {
+      toolName: "bash",
+      toolCallId: "call-py",
+      input: {},
+      content: [],
+      isError: false,
+    };
     /** The outcome of each `advisor-gate` entry, in order. */
-    const gateOutcomes = (entries: readonly { readonly customType: string; readonly data: unknown }[]) =>
+    const gateOutcomes = (
+      entries: readonly { readonly customType: string; readonly data: unknown }[]
+    ) =>
       entries.flatMap(({ customType, data }) =>
-        customType === "advisor-gate" && typeof data === "object" && data !== null && "outcome" in data
+        customType === "advisor-gate" &&
+        typeof data === "object" &&
+        data !== null &&
+        "outcome" in data
           ? [data.outcome]
           : []
       );

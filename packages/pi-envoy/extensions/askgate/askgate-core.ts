@@ -707,7 +707,8 @@ function shellTokens(text: string): ShellToken[] {
       const [whole, fd, op] = redirect;
       let next = at + whole.length;
       while (text[next] === " " || text[next] === "\t") next++;
-      const target = next < text.length && !WORD_END.includes(text[next]) ? readWord(text, next) : undefined;
+      const target =
+        next < text.length && !WORD_END.includes(text[next]) ? readWord(text, next) : undefined;
       const end = target?.end ?? at + whole.length;
       if (op === "<<" || op === "<<-") {
         const doc: HeredocToken = {
@@ -879,7 +880,12 @@ function dispatchCommandHead(command: string): DispatchHead | undefined {
   let heredoc: HeredocToken | undefined;
   for (let token = tokens[index]; token !== undefined; token = tokens[++index]) {
     const before = tokens[index - 1]?.end ?? 0;
-    if (token.kind === "redirect" && token.fd === "2" && token.op === ">&" && token.target === "1") {
+    if (
+      token.kind === "redirect" &&
+      token.fd === "2" &&
+      token.op === ">&" &&
+      token.target === "1"
+    ) {
       if (stderr) return undefined;
       stderr = true;
       drop.push([before, token.end]);
@@ -964,12 +970,9 @@ function uploadMayBeDocument(flags: readonly Word[]): boolean {
   const file = flagValue("--path");
   if (named === undefined || file === undefined) return false;
   return (
-    !named.literal ||
-    !file.literal ||
-    uploadIsDocument({ name: named.value, path: file.value })
+    !named.literal || !file.literal || uploadIsDocument({ name: named.value, path: file.value })
   );
 }
-
 
 type UnsafeFile = { flag: string; path: string; reason: string };
 
@@ -2781,7 +2784,8 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
       // those arguments and the files' digests; a call no verdict stands behind is argv-only.
       if (event.toolName === "bash" && base !== undefined && !decision.result?.block) {
         const { outcome } = decision.fields;
-        const bound = dryRun !== undefined && !UNREVIEWED_OUTCOMES.includes(outcome) ? dryRun : null;
+        const bound =
+          dryRun !== undefined && !UNREVIEWED_OUTCOMES.includes(outcome) ? dryRun : null;
         const minted = mintFor(
           event.toolCallId,
           (revised ?? event.input).command,

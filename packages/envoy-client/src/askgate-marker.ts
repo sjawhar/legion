@@ -386,7 +386,8 @@ export function askgateState(dir: string): AskgateState {
       return { kind: "broken", problem: `${file}, could not be read: ${messageFor(error)}` };
     }
     const owner = parseOwner(text);
-    if (owner === undefined) return { kind: "broken", problem: `${file}, is not an AskGate record` };
+    if (owner === undefined)
+      return { kind: "broken", problem: `${file}, is not an AskGate record` };
     if (ownerLive(owner)) live.push({ file, store: owner.store });
   }
   if (live.length === 0) return { kind: "off" };

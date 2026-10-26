@@ -3223,8 +3223,16 @@ describe("the literal grammar, widened to forms with no expansion", () => {
       "dispatch comment --issue X-1 --body hi 2>&1 | tail -n2",
       "dispatch comment --dry-run --issue X-1 --body hi",
     ],
-    ["a trailing | head -N", "dispatch comment --issue X-1 --body hi | head -3", "dispatch comment --dry-run --issue X-1 --body hi"],
-    ["a trailing | tail alone", "dispatch comment --issue X-1 --body hi | tail", "dispatch comment --dry-run --issue X-1 --body hi"],
+    [
+      "a trailing | head -N",
+      "dispatch comment --issue X-1 --body hi | head -3",
+      "dispatch comment --dry-run --issue X-1 --body hi",
+    ],
+    [
+      "a trailing | tail alone",
+      "dispatch comment --issue X-1 --body hi | tail",
+      "dispatch comment --dry-run --issue X-1 --body hi",
+    ],
     [
       "a here-document, 2>&1 and | head on the opener's line",
       "cd /tmp && dispatch comment --issue X-1 --body-file - <<'EOF' 2>&1 | head -n 20\nText.\nEOF",
@@ -3281,7 +3289,11 @@ describe("the literal grammar, widened to forms with no expansion", () => {
     ["bash -c 'dispatch comment --issue X-1 --body hi'", "wrapper", "bash"],
     ["eval 'dispatch comment --issue X-1 --body hi'", "wrapper", "eval"],
     ["timeout 60 dispatch comment --issue X-1 --body hi", "wrapper", "timeout"],
-    ["python3 - <<'EOF'\nimport os\nos.system('dispatch comment --issue X-1 --body hi')\nEOF", "wrapper", "python3"],
+    [
+      "python3 - <<'EOF'\nimport os\nos.system('dispatch comment --issue X-1 --body hi')\nEOF",
+      "wrapper",
+      "python3",
+    ],
     ["dispatch comment --issue X-1 --body hi | jq .", "pipe", "jq ."],
     ["echo hi | dispatch comment --issue X-1 --body-file -", "pipe", "echo"],
     ["make && dispatch comment --issue X-1 --body hi", "commands", "&&"],
@@ -3339,7 +3351,9 @@ describe("the literal grammar, widened to forms with no expansion", () => {
       expect(note).toContain("The value `$BODY` is an expansion");
       expect(note).toContain("--<field>-file - <<'EOF'");
       // Delivered once.
-      expect(await g.event("tool_result", { toolCallId: "c1", content: [refusal] })).toBeUndefined();
+      expect(
+        await g.event("tool_result", { toolCallId: "c1", content: [refusal] })
+      ).toBeUndefined();
     }
   });
   test("no note when the result holds no refusal, or the call is in the grammar", async () => {
