@@ -1218,9 +1218,13 @@
   session copy, which during such a read was every live one; it now asks each candidate's own
   record in the session bucket before deleting, and keeps the interest when that read does not
   answer. A NATS disconnect now marks every copy as not following, and the self-health monitor
-  rebuilds a copy left not following with no read under way. `listener-deploy-probe.sh` fails a
-  target whose list refuses while its `/healthz` answers 200, by design. `scripts/e2e-refill.sh`
-  proves the re-read, an interrupted read and the refusal on the real listener (INFRA-261).
+  rebuilds a copy left not following with no read under way. A watcher finds its bucket deleted and
+  created again under it within about 2 s, by reading the bucket's stream every 2 s (one
+  `STREAM.INFO` per watcher), and reads the new bucket at once, keeping its copy until that read
+  completes, rather than waiting for the self-health monitor's next 30 s check.
+  `listener-deploy-probe.sh` fails a target whose list refuses while its `/healthz` answers 200, by
+  design. `scripts/e2e-refill.sh` proves the re-read, an interrupted read, a bucket recreated under
+  a running listener and the refusal on the real listener (INFRA-261).
 - Dispatch no longer reports an agent absent from an agent list it could not read. While the
   listener refuses its list as refilling, `GET /api/v1/agents`, both subscriber reads
   (`GET /api/v1/issues/{key}/subscribers`, `GET /api/v1/artifacts/{id}/subscribers`) and a
