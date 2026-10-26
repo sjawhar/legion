@@ -2,32 +2,32 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-261",
-  "completed": "2026-10-26T13:50:00Z",
+  "completed": "2026-10-26T14:10:00Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2238",
-  "headSha": "8ef01c55d60f4134eeaea92d93b3d99230d23acb",
+  "headSha": "57e48f1b0ec338d80905ac66eb281e73330305f2",
   "proof": [
     {
       "criterion": "Architect's ruling (tester failure, round 1): once a bucket's stream is recreated under a live watcher, the copy stops reporting Following before it applies any record of the new stream, and the listener reads the new bucket whole without waiting for the self-health tick; the old copy is kept and served within the bound, and the sweep happens only on completion",
       "surface": "real listener binary on its own natsd: the session bucket (60 s TTL) is recreated 26-28 s before a self-health tick, with the old stream shorter and longer than the new one, while GET /v1/sessions is polled continuously",
-      "command": "bash packages/envoy/scripts/e2e-refill.sh --scenario all --out $TMPDIR/infra-261/rig3/head (recreate-live part; https://github.com/sjawhar/legion/pull/2238#issuecomment-6417102242)",
-      "observed": "verdict recreate-live PASS for both shapes: the watcher's probe found the recreate at +0.997 s and read the new bucket from +1.009 s to +5.082 s (3001 records), before the tick at +26.904 s, with no self-health failure or rebuild; no 200 lacked a record that both the old copy and the new bucket held; after completion every poll was exactly the new bucket; kvwatch red test TestABucketRecreatedUnderALiveWatcherIsReadWholeWithoutCheck passes unmodified with -count=3",
-      "headSha": "8ef01c55d60f4134eeaea92d93b3d99230d23acb",
+      "command": "bash packages/envoy/scripts/e2e-refill.sh --scenario all --out $TMPDIR/infra-261/rig3/merged (recreate-live part; https://github.com/sjawhar/legion/pull/2238#issuecomment-6417655089; first run at 8ef01c5: #issuecomment-6417102242)",
+      "observed": "verdict recreate-live PASS for both shapes: shorter old stream, the watcher's probe found the recreate at +1.005 s and read the new bucket from +1.012 s to +5.122 s (3001 records); longer old stream, found at +1.027 s, read +5.050 s to +5.152 s; both before the tick at ~+26.9 s, with no self-health failure or rebuild; no 200 lacked a record that both the old copy and the new bucket held; after completion every poll was exactly the new bucket; kvwatch red test TestABucketRecreatedUnderALiveWatcherIsReadWholeWithoutCheck passes unmodified with -count=3",
+      "headSha": "57e48f1b0ec338d80905ac66eb281e73330305f2",
       "negativeControl": "--scenario recreate-live --listener-bin built from b6d4733: verdict FAIL for both shapes: no probe line, the new bucket read only at +27.03 s after the tick, and 469 polls from +17.0 s to +27.0 s listed new-bucket records while lacking chg x1000 and new x1000 the bucket held, with the copy still claiming to follow"
     },
     {
       "criterion": "Acceptances 1, 2, 3 (listener, envoy_sessions, Dispatch server) and 4 still hold at the round-2 head; the listener survives a cut scan replaced by the reconnect Rewatch",
       "surface": "real listener + natsd; claude-envoy MCP server over stdio and the real Go Dispatch server inside the outage window",
       "command": "bash packages/envoy/scripts/e2e-refill.sh --scenario all --during-refuse '<p5-dispatch.sh start/seed/check; p4-envoy-sessions.ts refilling>' --after-refuse '<same>'; plus 5x --scenario interrupt --interrupt-by restart",
-      "observed": "reread PASS (10 of 276 polls inside the read, every old record held, exactly the bucket after), interrupt(stop) PASS (timed-out scan, kvwatch's own re-read at +15.9 s), interrupt(restart) PASS, refuse PASS (boot only refilling 503s then complete 200s, no gauge sample while 503; past the bound refilling 503 Retry-After 5; whole after NATS returned); envoy_sessions failed with 'envoy: the agent list is refilling; try again in a moment' then listed 303; 0 'panic' lines in every listener log; 5 of 5 interrupt(restart) runs passed with 0 panics",
-      "headSha": "8ef01c55d60f4134eeaea92d93b3d99230d23acb",
+      "observed": "reread PASS (10 of 260 polls inside the read, every old record held, exactly the bucket after), interrupt(stop) PASS (timed-out scan, kvwatch's own re-read), interrupt(restart) PASS, refuse PASS (boot only refilling 503s then complete 200s, no gauge sample while 503; past the bound refilling 503 Retry-After 5; whole after NATS returned); Dispatch built from this head answered GET /api/v1/agents 503 ENVOY_REFILLING and routed issues route_status unknown, reason refilling; envoy_sessions failed with 'envoy: the agent list is refilling; try again in a moment' then listed 303; 0 'panic' lines in every listener log; 5 of 5 interrupt(restart) runs at 8ef01c5 passed with 0 panics",
+      "headSha": "57e48f1b0ec338d80905ac66eb281e73330305f2",
       "negativeControl": "merge-base listener: every rig scenario FAIL (round-1 evidence https://github.com/sjawhar/legion/pull/2238#issuecomment-6411086859); before the deferred stop, interrupt(restart) crashed the listener with nats.go 'send on closed channel' in 2 of 5 runs at the pre-fix head and 1 of 3 on b6d4733"
     },
     {
       "criterion": "Acceptance 3: every Dispatch view shows refilling, never an agent's absence",
       "surface": "Dispatch browser suite (real Go Dispatch server, fake listener, Chromium)",
-      "command": "cd packages/dispatch && bun run e2e -- agent-list-refilling --project chromium",
-      "observed": "4 passed at b6d4733; packages/dispatch and packages/envoy/internal/dispatch are unchanged between b6d4733 and 8ef01c5 (round 2 changed only kvwatch, the rig and docs), and the tester's claim-refilling spec passed at b6d4733",
-      "headSha": "b6d4733ae0e7d759ad63b9df257911a2f96fd016",
+      "command": "cd packages/dispatch && bun run e2e -- agent-list-refilling claim-refilling --project chromium",
+      "observed": "6 passed at the merged head (agent-list-refilling 4/4 across Agents page, subscribers, ask card, mention suggestions, conversation page, route reason, list and board; the tester's claim-refilling 2/2)",
+      "headSha": "57e48f1b0ec338d80905ac66eb281e73330305f2",
       "negativeControl": "the same spec on a build of the merge base 81a3b5ef7b47: 4 failed"
     }
   ],
