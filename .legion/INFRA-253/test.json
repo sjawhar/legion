@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-253",
-  "completed": "2026-10-26T20:20:00Z",
-  "headSha": "993bd7c18ac0683c3adde737e887313db37157aa",
+  "completed": "2026-10-26T20:35:00Z",
+  "headSha": "46502a8428905acd9ecaad7c402ee1050d71af16",
   "generation": 3,
-  "rebaseRecheck": "76d1daad → 993bd7c1 (forward merge of main 6cdb9995 for a GitHub-reported conflict): fingerprint changed, 4faa5738b09770516c7d9012585b005d0c4ae5caa719110e9abf082ab531b64c → 69bcdf6cf4091c8129728c21f9344c94450d6d1853e1681741c824cb9c3792f2. An interdiff of the PR's own diff before and after the merge shows only stage3-devbox-workflow.sh's start_daemon moved: the daemon's env gains `-u LEGION_OMP_PATH`, a log offset is read before start_kept, and daemon_runs_the_pinned_omp (from main's #2242) runs after /healthz. Everything else is byte-identical, so the round-4 proofs at b5139e26 (and earlier rounds' proofs) stand for it, and this round drove the moved function.",
+  "rebaseRecheck": "993bd7c1 → 46502a84 (forward merge of main fab8de3510 for a GitHub-reported conflict in claude-backend-tmux.sh): fingerprint changed, 69bcdf6cf4091c8129728c21f9344c94450d6d1853e1681741c824cb9c3792f2 → c5e74ae23ded884ea7596daa143b41b889097cba2b958739fea029cfaefb673a. My interdiff of the PR's diff before and after the merge shows one line pair: claude-backend-tmux.sh's required-tool list, from which #2206 dropped hawk-token. This PR's change to that line is still `ss` → `python3`. This round drove that line (proof below) and re-ran the Stage 1 smoke. Earlier: 76d1daad → 993bd7c1, fingerprint 4faa5738 → 69bcdf6c, only stage3's start_daemon moved, driven in the pod (proof below at 993bd7c1).",
   "implementerProof": {
     "verdict": "verified",
     "how": "The implementer's merge note (PR comment at 19:07Z) lists bash -n, shellcheck counts and `bun test scripts/e2e/lib` for the moved function, with no real-process run of it. I ran the function myself against real processes (proof below), and it behaves as the note says. The earlier rounds verified the implementer's real-surface proofs."
@@ -13,6 +13,22 @@
   "failures": [],
   "failed": 0,
   "proof": [
+    {
+      "criterion": "claude-backend-tmux.sh after the merge of #2206: its required-tool list still asks for python3 (held-port.py's interpreter) in place of ss",
+      "surface": "pod: line 527 of the script at 46502a84 run verbatim under `env -i` with a PATH of stub tools and the script's own fail",
+      "command": "env -i PATH=<stub dir> bash -c 'fail() {…}; <line 527>'",
+      "observed": "with all 13 tools present: `all tools found`, exit 0",
+      "headSha": "46502a8428905acd9ecaad7c402ee1050d71af16",
+      "negativeControl": "the same PATH without python3 → `FAIL python3 is required`, exit 1"
+    },
+    {
+      "criterion": "S4a smoke at 46502a84: the Stage 1 live proof",
+      "surface": "pod: the real legion built at 46502a84, under tmux 3.5a, with Postgres 17",
+      "command": "LEGION_E2E_PG_DSN=<pod pg> bash scripts/e2e/stage1-skeleton.sh",
+      "observed": "`stage 1 e2e: PASS`",
+      "headSha": "46502a8428905acd9ecaad7c402ee1050d71af16",
+      "negativeControl": "the run's own first check: a DSN to a port with no Postgres is refused, naming the host and not the password"
+    },
     {
       "criterion": "Added sites (stage3-devbox-workflow.sh start_daemon after the merge of #2242): the daemon starts on its keeper's held socket without LEGION_OMP_PATH, and daemon_runs_the_pinned_omp reads only the log this start wrote",
       "surface": "pod: start_daemon and daemon_runs_the_pinned_omp extracted verbatim from the script at 993bd7c1, run against the real legion built from the tree, a real held-port.py keep keeper and the pod's Postgres 17. Stage 1's omp stub stands in for Oh My Pi behind a mise stub whose `where <pin>` names a fake install; LEGION_OMP_PATH names a decoy stub in the caller's environment",
@@ -30,8 +46,8 @@
       "negativeControl": "the run's own first check: a DSN to a port with no Postgres is refused, naming the host and not the password"
     }
   ],
-  "devbox": "The model-turn runs at 993bd7c1 (stage2 to the end and stage3-devbox-workflow, both LEGION_E2E_MODEL_ROUTE=box-login, which #2242 brings into this head) were sent to session 01a16962. It acknowledged them at 19:13Z and had posted no result by 20:20Z. It posts each result on #2229. stage3-4b13b-acceptance, claude-backend-tmux and dispatch-user-turns take only the gateway route (lib/install-model-gateway.sh) and stay blocked on a box with no gateway. As the architect directed, the phase completes without waiting for runs that may not finish.",
-  "ciAtHead": "993bd7c1 at 20:18Z: Tests run 40383800403 success (test, typecheck, lint); Docs 40383800331 success; Worker Image 40383800105 success; Legion Envoy and Contracts 40383800219 still running (changes, pi-shared, pi-envoy, envoy-e2e-local success; dispatch and dispatch-memory in progress; envoy-smoke, envoy-go, envoy-infra-go and the rest queued). 76d1daad, read job by job: every job success, envoy-smoke and dispatch included. The reviewer must read the Envoy jobs at 993bd7c1, envoy-smoke included.",
+  "devbox": "Session 01a16962, at 993bd7c1, at 20:27Z: stage2 not run, because that box holds no GEMINI_API_KEY_TESTS, which main's stage2 requires (not this PR). I asked the INFRA lead's session 01a13c57, whose box passed stage2's input check this morning, to run stage2 on box-login at 46502a84. stage3: the first run failed when the box's gh shim broke mid-run (a dotfiles mise pin, not this PR). Its log and evidence show no 'address already in use', held-port, keep_port, start_kept or LEGION_LISTEN_FD line. A fresh run is in progress. claude-backend-tmux.sh now takes the key-file route (#2206) and is queued after stage3, at 46502a84, with the broker's key. stage3-4b13b and dispatch-user-turns take only the gateway route: not run, no gateway on that box. The phase completes without waiting for these runs, as the architect directed; each result goes on #2229.",
+  "ciAtHead": "46502a84 at 20:33Z: Tests, Legion Envoy and Contracts, Docs and Worker Image all queued. 993bd7c1: Tests 40383800403 success; Docs and Worker Image success; Legion Envoy and Contracts 40383800219 cancelled by this push, with its finished jobs success (changes, pi-shared, envoy-plugin, pi-envoy, envoy-e2e-local) and envoy-smoke and the rest cancelled. 76d1daad: every job success, envoy-smoke and dispatch included. The reviewer must read every job at 46502a84, envoy-smoke included.",
   "notes": [
     "The pod was replaced since the last round. Postgres 17 + pgvector, tmux 3.5a (behind an ELF launcher, since Stage 1 replaces a script tmux) and nats-server 2.11.4 were rebuilt under $TMPDIR/tester."
   ]
