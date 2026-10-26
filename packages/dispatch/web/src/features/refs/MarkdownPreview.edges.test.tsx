@@ -64,7 +64,9 @@ function askRead(question: string): AskRead {
     },
     answers: [],
     edits: [],
+    claimant: null,
     followers: [],
+    route: null,
     replies: [],
   };
 }

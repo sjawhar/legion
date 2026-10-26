@@ -105,13 +105,15 @@ func TestCreateAskRejectsApprovalKind(t *testing.T) {
 	}
 }
 
-// issueAskListThread is an issue ask row's thread as a client reads it, and the same four keys
+// issueAskListThread is an issue ask row's thread as a client reads it, and the same six keys
 // the single-ask read returns at its top level, so the two can be compared.
 type issueAskListThread struct {
 	Replies   []model.Comment     `json:"replies"`
 	Edits     []model.AskEdit     `json:"edits"`
 	Answers   []model.AskAnswer   `json:"answers"`
 	Followers []model.AskFollower `json:"followers"`
+	Claimant  *string             `json:"claimant"`
+	Route     *string             `json:"route"`
 }
 
 // issueAskListRow names the ask fields a reader had before the row carried a thread, so

@@ -31,6 +31,17 @@ type askThread struct {
 	Edits     []model.AskEdit     `json:"edits"`
 	Answers   []model.AskAnswer   `json:"answers"`
 	Followers []model.AskFollower `json:"followers"`
+	askReach
+}
+
+// askReach is who besides the followers a person's answer and replies on an ask reach: the
+// session holding the claim on the ask's issue (the outbox's claimant route) and the issue's
+// route, a session or a role holder. Claimant is null while nobody or a person holds the claim,
+// Route while the issue has none, and both on a project document's ask, which has no issue. The
+// single-ask read and every askThread carry it at the same keys.
+type askReach struct {
+	Claimant *string `json:"claimant"`
+	Route    *string `json:"route"`
 }
 
 type inboxAsk struct {

@@ -10,10 +10,11 @@ import (
 )
 
 // Every read behind an ask card's initial data: the orchestrator, its reply chain, and the
-// per-ask edits and followers. An Inbox card and an issue's ask list render from the
-// same reads, each batched over every ask on the page. `inboxAskReplyChainsQuery` stays in
-// comment_queries.go with `replyChainQuery`, the other recursion over `comments`, so the two
-// can be read against each other; query_plan_test.go pins both from there.
+// per-ask edits, followers and reach (claimant and route). An Inbox card and an issue's ask list
+// render from the same reads, each batched over every ask on the page.
+// `inboxAskReplyChainsQuery` stays in comment_queries.go with `replyChainQuery`, the other
+// recursion over `comments`, so the two can be read against each other; query_plan_test.go pins
+// both from there.
 
 func (s *server) loadInboxAskEdits(ctx context.Context, q queryer, askIDs []string) (map[string][]model.AskEdit, error) {
 	edits := make(map[string][]model.AskEdit, len(askIDs))
@@ -115,13 +116,56 @@ func (s *server) loadAskThreads(ctx context.Context, q queryer, askIDs []string)
 	if err != nil {
 		return nil, err
 	}
+	reaches, err := loadAskReaches(ctx, q, askIDs)
+	if err != nil {
+		return nil, err
+	}
 	for askID, thread := range threads {
 		thread.Replies = replies[askID]
 		thread.Edits = edits[askID]
 		thread.Followers = followers[askID]
+		thread.askReach = reaches[askID]
 		threads[askID] = thread
 	}
 	return threads, nil
+}
+
+// askReachColumns select an askReach for the ask aliased a from the issue askReachJoin attaches
+// as ri: the claimant only while a session holds the claim (the same rule the outbox's
+// loadSessionClaimant reads), and the route; an empty id or route is none. A project document's
+// ask joins no issue, so both are null.
+const askReachColumns = `case when ri.claimed_by->>'kind' = 'session'
+		then nullif(ri.claimed_by->>'id', '') end,
+	nullif(ri.route, '')`
+
+const askReachJoin = `
+		left join issues ri on ri.key = a.issue_key`
+
+// loadAskReaches reads every listed ask's askReach in one query, keyed by ask id; an ask the
+// query does not find keeps the zero askReach, both null.
+func loadAskReaches(ctx context.Context, q queryer, askIDs []string) (map[string]askReach, error) {
+	reaches := make(map[string]askReach, len(askIDs))
+	rows, err := q.Query(ctx, `
+		select a.id::text, `+askReachColumns+`
+		from asks a`+askReachJoin+`
+		where a.id = any($1::uuid[])
+	`, askIDs)
+	if err != nil {
+		return nil, fmt.Errorf("load ask reach: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var askID string
+		var reach askReach
+		if err := rows.Scan(&askID, &reach.Claimant, &reach.Route); err != nil {
+			return nil, fmt.Errorf("scan ask reach: %w", err)
+		}
+		reaches[askID] = reach
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("load ask reach: %w", err)
+	}
+	return reaches, nil
 }
 
 // loadInboxAskReplyChains groups inboxAskReplyChainsQuery's rows by the ask each belongs to,

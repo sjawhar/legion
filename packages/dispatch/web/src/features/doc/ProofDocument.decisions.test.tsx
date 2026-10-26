@@ -84,7 +84,9 @@ test("ProofDocument hands its decision blocks the indexed ask; the hosted card a
     ask: blockAsk,
     answers: [],
     edits: [],
+    claimant: null,
     followers: [],
+    route: null,
     replies: [],
   });
   const answerAsk = spyOn(api, "answerAsk").mockResolvedValue({
@@ -162,7 +164,9 @@ test("after Ask back on a decision block, the hosted card's turn label follows t
     ask: openAsk,
     answers: [],
     edits: [],
+    claimant: null,
     followers: [],
+    route: null,
     replies: [],
   });
   const createComment = spyOn(api, "createComment").mockResolvedValue({

@@ -237,8 +237,17 @@ test("models answer changes, ask answer history, and the answers page", () => {
     edits: [],
     answers: [answer],
     followers: [],
+    claimant: "session-claimant",
+    route: "role:reviewer",
   } satisfies AskRead;
-  const thread = { replies: [], edits: [], answers: [], followers: [] } satisfies AskThread;
+  const thread = {
+    replies: [],
+    edits: [],
+    answers: [],
+    followers: [],
+    claimant: null,
+    route: null,
+  } satisfies AskThread;
   const page = {
     rows: [
       {

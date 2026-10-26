@@ -115,6 +115,8 @@ func TestInboxHydratesTheSameThreadsAsAskReads(t *testing.T) {
 		Replies   []model.Comment     `json:"replies"`
 		Edits     []model.AskEdit     `json:"edits"`
 		Followers []model.AskFollower `json:"followers"`
+		Claimant  *string             `json:"claimant"`
+		Route     *string             `json:"route"`
 	}
 	rows := decodeBody[[]struct {
 		ID     string `json:"id"`

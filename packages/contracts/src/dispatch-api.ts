@@ -812,6 +812,14 @@ export interface AskThread {
   readonly answers: AskAnswer[];
   /** The sessions this ask's answer and replies reach directly, oldest first. */
   readonly followers: AskFollower[];
+  /** The session holding the claim on the ask's issue: a person's answer and replies on the ask
+   *  reach it (Dispatch's claimant route) as well as the route and the followers. Null while
+   *  nobody or a person holds the claim, and on a project document's ask, which has no issue. */
+  readonly claimant: string | null;
+  /** The ask's issue's route (`session:<id>` or `role:<name>`): a person's answer and replies on
+   *  the ask reach that session or role holder as well as the claimant and the followers. Null
+   *  when the issue has no route, and on a project document's ask. */
+  readonly route: string | null;
 }
 
 /** An open ask as returned by the human Inbox. */
@@ -2283,6 +2291,14 @@ export interface AskRead {
   readonly answers: AskAnswer[];
   /** The sessions this ask's answer and replies reach directly, oldest first. */
   readonly followers: AskFollower[];
+  /** The session holding the claim on the ask's issue: a person's answer and replies on the ask
+   *  reach it (Dispatch's claimant route) as well as the route and the followers. Null while
+   *  nobody or a person holds the claim, and on a project document's ask, which has no issue. */
+  readonly claimant: string | null;
+  /** The ask's issue's route (`session:<id>` or `role:<name>`): a person's answer and replies on
+   *  the ask reach that session or role holder as well as the claimant and the followers. Null
+   *  when the issue has no route, and on a project document's ask. */
+  readonly route: string | null;
 }
 
 export interface AskFollowersRead {

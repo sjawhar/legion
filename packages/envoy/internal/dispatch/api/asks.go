@@ -752,7 +752,9 @@ func (s *server) getAsk(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAuthenticated(w, r) || !requireUUIDPath(w, r, "ask") {
 		return
 	}
-	ask, err := s.loadAsk(r.Context(), s.deps.Store.Pool, r.PathValue("id"))
+	var reach askReach
+	ask, err := s.loadAskRow(r.Context(), s.deps.Store.Pool, askReadWithReachQuery, r.PathValue("id"),
+		&reach.Claimant, &reach.Route)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -794,7 +796,8 @@ func (s *server) getAsk(w http.ResponseWriter, r *http.Request) {
 		Edits     []model.AskEdit     `json:"edits"`
 		Answers   []model.AskAnswer   `json:"answers"`
 		Followers []model.AskFollower `json:"followers"`
-	}{Ask: ask, Replies: replies, Edits: edits, Answers: answers, Followers: followers})
+		askReach
+	}{Ask: ask, Replies: replies, Edits: edits, Answers: answers, Followers: followers, askReach: reach})
 }
 
 // loadAskEdits reads every rewording of an ask back from its ask.edited events,
@@ -908,14 +911,24 @@ func (s *server) loadAskAnswers(ctx context.Context, q queryer, askID string) ([
 	return answers[askID], nil
 }
 
+// askReadQuery reads one ask by id; askReadWithReachQuery adds its askReach, which only the
+// single-ask read serialises.
+const (
+	askReadQuery          = `select ` + askReadColumns + ` ` + askReadFrom + ` where a.id = $1`
+	askReadWithReachQuery = `select ` + askReadColumns + `, ` + askReachColumns + `
+		` + askReadFrom + askReachJoin + ` where a.id = $1`
+)
+
 // loadAsk reads one ask for a response: unlike lockAskForTransition, which feeds the
 // ask.* event payloads, it carries WaitingOn for an open ask.
 func (s *server) loadAsk(ctx context.Context, q queryer, id string) (model.Ask, error) {
-	ask, _, err := scanAskRead(q.QueryRow(ctx, `
-		select `+askReadColumns+`
-		`+askReadFrom+`
-		where a.id = $1
-	`, id))
+	return s.loadAskRow(ctx, q, askReadQuery, id)
+}
+
+// loadAskRow reads the ask id through query, which selects askReadColumns and then the columns
+// extra receives.
+func (s *server) loadAskRow(ctx context.Context, q queryer, query, id string, extra ...any) (model.Ask, error) {
+	ask, _, err := scanAskRead(q.QueryRow(ctx, query, id), extra...)
 	if err != nil {
 		return model.Ask{}, err
 	}

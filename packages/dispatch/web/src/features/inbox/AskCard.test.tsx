@@ -59,7 +59,7 @@ function answeredAsk(overrides: Partial<Ask> = {}): Ask {
 }
 
 function thread(ask: Ask, answers: AskAnswer[] = ask.answer === null ? [] : [ask.answer]): AskRead {
-  return { answers, ask, edits: [], followers: [], replies: [] };
+  return { answers, ask, claimant: null, edits: [], followers: [], replies: [], route: null };
 }
 
 function renderCard(node: ReactNode) {
