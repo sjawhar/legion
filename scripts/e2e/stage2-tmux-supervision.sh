@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Stage 2's gate for the Go coordinator: supervision on tmux, proven against the real things. The
-# Go daemon launches a real Oh My Pi — the pinned build (.omp-pin)
+# Go daemon launches a real Oh My Pi — the pinned build (.omp-pin; the operator's own build under
+# the box-login route, below)
 # with this checkout's two plugins in an isolated OMP profile — in panes of its private tmux server,
 # against a real Envoy listener and NATS on the host and a real Postgres. Every gate behaviour is
 # one named check that prints what it observed; the first check that does not hold ends the run
@@ -14,8 +15,8 @@
 # work directory survives a failure, because its logs are the evidence, and goes when the run passed.
 #
 # Inputs: LEGION_E2E_PG_DSN, the Postgres to run against; unset, the run starts its own
-# postgres:16 on tmpfs. LEGION_E2E_MODEL_ROUTE (required, `gateway` or `key-file`) picks how the
-# agents reach Anthropic, independently of which devbox this runs on:
+# postgres:16 on tmpfs. LEGION_E2E_MODEL_ROUTE (required, `gateway`, `key-file` or `box-login`)
+# picks how the agents reach Anthropic, independently of which devbox this runs on:
 #   - `gateway`: the operator's own hawk login, through the Hawk model gateway at
 #     LEGION_E2E_MODEL_GATEWAY_URL (required in this mode; lib/install-model-gateway.sh); the
 #     operator's keyring must be unlocked, and no Anthropic key reaches a pane.
@@ -23,6 +24,12 @@
 #     plaintext Anthropic key, read fresh by lib/install-key-file-model-route.sh's key command on
 #     every call; for a devbox with no Hawk gateway at all. No Anthropic key reaches a pane here
 #     either — only the key command, baked in at install time, ever reads the file.
+#   - `box-login`: the operator's own stored Oh My Pi login, for a devbox whose operator lets
+#     Legion's test runs use it (lib/install-box-login-route.sh): the profile's agent.db is a
+#     symlink to the operator's, no key or gateway is involved, and nothing reads the credential.
+#     The panes run the operator's own Oh My Pi build (its global mise pin, refused unless it
+#     carries the refresh-race fix) instead of .omp-pin, and one box-login proof runs at a time on
+#     the box (lib/box-login-lock.sh).
 # The provider-key path is proven with GEMINI_API_KEY_TESTS from the secret store (agent tier: no
 # YubiKey touch), which the daemon itself resolves at boot and hands every pane's shim as a
 # daemon-held file (`provider_keys`); the run never reads it.
@@ -60,12 +67,17 @@ pg_container=legion-e2e2-pg-$$
 state=$work/state
 omp_home=$work/omp-home
 profile_agent=$omp_home/.omp/profiles/$profile/agent
+# The operator's real home, captured before any command runs under the run's own: the box-login
+# route links to the login under it (lib/install-box-login-route.sh --operator-home).
+operator_home=$HOME
 daemon_log=$work/daemon.log
 check=setup
 TZ=UTC printf -v check_started '%(%FT%TZ)T' -1 # when the current check began (lib/model-gateway-unserved.sh)
 timeout_hook=
 # shellcheck source-path=SCRIPTDIR source=lib/omp-home.sh
 . "$root/scripts/e2e/lib/omp-home.sh"
+# shellcheck source-path=SCRIPTDIR source=lib/box-login-lock.sh
+. "$root/scripts/e2e/lib/box-login-lock.sh"
 
 # ---- reporting and waiting ------------------------------------------------------------------------
 
@@ -252,9 +264,11 @@ expect_refusal() {
 
 model_route=${LEGION_E2E_MODEL_ROUTE:-}
 case "$model_route" in
-gateway | key-file) ;;
-*) fail "LEGION_E2E_MODEL_ROUTE must be gateway or key-file, not '$model_route'" ;;
+gateway | key-file | box-login) ;;
+*) fail "LEGION_E2E_MODEL_ROUTE must be gateway, key-file or box-login, not '$model_route'" ;;
 esac
+# One box-login proof at a time, before this run starts anything (lib/box-login-lock.sh).
+[ "$model_route" != box-login ] || take_box_login_lock || fail "another box-login proof is running on this box (the holder is named above)"
 for tool in go docker jq curl ss tmux bun mise socat secrets; do
   command -v "$tool" >/dev/null || fail "$tool is required"
 done
@@ -272,7 +286,11 @@ ln -sfn "$real_tmux" "$work/realbin/tmux"
 # (the gateway route's key command runs hawk-token under them; the key-file route's needs none of
 # it, but is installed the same way, here, for one setup step regardless of route). The gateway
 # route's first mint is its preflight: a locked keyring stops the run here, by name. The key-file
-# route's own preflight read stops the run here just as loudly if the file cannot be read.
+# route's own preflight read stops the run here just as loudly if the file cannot be read. The
+# box-login route has no key command: it links the profile to the operator's login database and
+# names the operator's own Oh My Pi build, which the panes then run instead of .omp-pin.
+key_command=
+box_pin=
 case "$model_route" in
 gateway)
   key_command=$(bash "$root/scripts/e2e/lib/install-model-gateway.sh" --profile "$profile" --home "$omp_home" --dest "$work/model-gateway" --cache-dir "$work/model-gateway-cache") ||
@@ -284,18 +302,25 @@ key-file)
   key_command=$(bash "$root/scripts/e2e/lib/install-key-file-model-route.sh" --profile "$profile" --home "$omp_home" --dest "$work/model-gateway" --key-dir "$work/model-gateway-key" --key-file "$key_file") ||
     fail "the agents' model route through the key file could not be installed (the reason is above)"
   ;;
+box-login)
+  box_pin=$(bash "$root/scripts/e2e/lib/install-box-login-route.sh" --profile "$profile" --home "$omp_home" --dest "$work/model-gateway" --operator-home "$operator_home") ||
+    fail "the agents' model route on the operator's own Oh My Pi login could not be installed (the reason is above)"
+  ;;
 esac
 # The call record (.log/.calls) always sits under $work/model-gateway, beside $key_command itself
 # for the gateway route; the key-file route's own $key_command lives under its own --key-dir
 # instead, which the run's cleanup removes unconditionally, so the record is addressed separately.
-key_record="$work/model-gateway/$(basename "$key_command")"
+# The box-login route keeps no call record: $work/model-gateway/box-login.route says what it used.
+key_record=${key_command:+$work/model-gateway/$(basename "$key_command")}
 export XDG_STATE_HOME=$work/xdg # the legions registry this run writes is its own
 export TMUX_TMPDIR=$work/tmux   # so are the daemons' private tmux servers
 
 # The daemon receives the ordinary operator PATH, including any OMP wrapper it holds. It must
 # resolve the configured tool's executable itself; this proof checks the OMP child is that pinned
 # binary, rather than repairing PATH before the daemon sees it.
-pin=$(<"$root/.omp-pin")
+# The repository's pin, or under box-login the operator's own build: panes sharing the operator's
+# login must refresh it with the refresh-race fix (lib/install-box-login-route.sh).
+pin=${box_pin:-$(<"$root/.omp-pin")}
 mise where "$pin" >/dev/null 2>&1 || mise install "$pin" >&2
 omp_bin=$(mise where "$pin")/bin
 [ -x "$omp_bin/omp" ] || fail "mise has no omp executable for $pin under $omp_bin"
@@ -508,17 +533,21 @@ begin model-turn-through-the-route
 # The task's reply came through the configured route: every assistant turn in the session file ran
 # as the profile's pinned model on the anthropic provider, the one provider the profile routes and
 # leaves enabled, and none ended in an error; the key command served more calls than the preflight,
-# which records none.
+# which records none. The box-login route has no key command to count.
 pinned=$(sed -n 's/^  default: //p' "$profile_agent/config.yml")
 [ -n "$pinned" ] || fail "the profile's config.yml names no default model role: $profile_agent/config.yml"
 replies=$(jq -c 'select(.type == "message" and .message.role == "assistant")
   | {provider: .message.provider, model: .message.model, stopReason: .message.stopReason}' "$session_file2" | jq -sc .)
 jq -e --arg pinned "$pinned" 'length > 0 and all(.provider == "anthropic" and "anthropic/" + .model == $pinned and .stopReason != "error")' \
   <<<"$replies" >/dev/null || fail "claim $c2's replies did not all come from $pinned through the route: $replies"
-calls=$(grep -c ' invoked by pid ' "$key_record.log")
-[ "$calls" -ge 2 ] || fail "the key command $key_command ran $calls time(s), the preflight's alone"
 note "claim $c2's replies, from its session file: $replies"
-note "the key command $key_command ran $calls times and served $(grep -c $'\tserved\t' "$key_record.calls") ($key_record.log, $key_record.calls)"
+if [ -n "$key_command" ]; then
+  calls=$(grep -c ' invoked by pid ' "$key_record.log")
+  [ "$calls" -ge 2 ] || fail "the key command $key_command ran $calls time(s), the preflight's alone"
+  note "the key command $key_command ran $calls times and served $(grep -c $'\tserved\t' "$key_record.calls") ($key_record.log, $key_record.calls)"
+else
+  note "the route is the operator's own Oh My Pi login, no key command ($work/model-gateway/box-login.route)"
+fi
 pass
 
 begin retried-frame-starts-no-second-turn

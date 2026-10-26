@@ -6,7 +6,7 @@ coordinator — unit tests do not gate a stage, these do; others prove one capab
 against the world it will run in. A later stage's script lands beside these; `lib/` holds what
 the stage scripts share: standalone helpers they run, and the files they source
 ([`lib/rig.sh`](#librigsh), [`lib/workflow.sh`](#libworkflowsh), [`lib/github-apps.sh`](#libgithub-appssh),
-[`lib/namespace-rig.sh`](#libnamespace-rigsh), [`lib/kind-sandbox.sh`](#libkind-sandboxsh), [`lib/omp-home.sh`](#libomp-homesh)), which `shellcheck` follows from this directory
+[`lib/namespace-rig.sh`](#libnamespace-rigsh), [`lib/kind-sandbox.sh`](#libkind-sandboxsh), [`lib/omp-home.sh`](#libomp-homesh), [`lib/box-login-lock.sh`](#libbox-login-locksh)), which `shellcheck` follows from this directory
 through `scripts/e2e/.shellcheckrc`.
 
 | script | proves |
@@ -161,13 +161,14 @@ docker of its own there.
 ```sh
 LEGION_E2E_MODEL_ROUTE=gateway LEGION_E2E_MODEL_GATEWAY_URL=<gateway>/anthropic bash scripts/e2e/stage2-tmux-supervision.sh     # → "stage 2 e2e: PASS", exit 0, in about four minutes
 LEGION_E2E_MODEL_ROUTE=key-file LEGION_E2E_ANTHROPIC_KEY_FILE=<0600 file> bash scripts/e2e/stage2-tmux-supervision.sh           # the same, for a devbox with no Hawk gateway
+LEGION_E2E_MODEL_ROUTE=box-login bash scripts/e2e/stage2-tmux-supervision.sh                                                   # the same, on the operator's own Oh My Pi login
 ```
 
 **Devbox only.** It runs a real Oh My Pi that calls a real model, so it needs `go`, `docker`,
 `jq`, `curl`, `ss`, `tmux`, `socat`, `bun`, `mise` (with the pinned OMP build it installs if
 missing), the `secrets` CLI holding `GEMINI_API_KEY_TESTS` (agent tier: no YubiKey touch), and
-`LEGION_E2E_MODEL_ROUTE` (required, `gateway` or `key-file`), which picks how the agents reach
-Anthropic, independently of which devbox this runs on:
+`LEGION_E2E_MODEL_ROUTE` (required, `gateway`, `key-file` or `box-login`), which picks how the
+agents reach Anthropic, independently of which devbox this runs on:
 - `gateway`: the operator's model gateway access — `LEGION_E2E_MODEL_GATEWAY_URL` naming the
   gateway's Anthropic endpoint (required in this mode;
   [`lib/model-gateway-url.sh`](#libmodel-gateway-urlsh)), `hawk-token` on `PATH`, their
@@ -176,6 +177,15 @@ Anthropic, independently of which devbox this runs on:
 - `key-file`: `LEGION_E2E_ANTHROPIC_KEY_FILE` (required in this mode), a 0600 file holding a
   plaintext Anthropic key, for a devbox with no Hawk gateway at all
   ([`lib/install-key-file-model-route.sh`](#libinstall-key-file-model-routesh)).
+- `box-login`: nothing more, for a devbox whose operator lets Legion's test runs use their own
+  Oh My Pi login. The profile's `agent.db` is a symlink to the operator's `~/.omp/agent/agent.db`,
+  so the panes use the Anthropic login stored there; no key file, gateway or `hawk-token` is
+  involved, and nothing reads, prints or copies the credential
+  ([`lib/install-box-login-route.sh`](#libinstall-box-login-routesh)). The panes run the
+  operator's own Oh My Pi build, not `.omp-pin`: the operator's global mise pin for
+  `github:sjawhar/oh-my-pi`, refused unless it carries the refresh-race fix (the build the
+  operator's own sessions already run against that database). One box-login proof runs at a time
+  on the box, Stage 2 or Stage 3 ([`lib/box-login-lock.sh`](#libbox-login-locksh)).
 
 CI runs the unit and integration tests, not this script; what only this
 run proves is OMP's real RPC frames, `--resume`'s same-agent behaviour, the one-word
@@ -200,7 +210,8 @@ What it stands up, all of it the run's own:
   and the operator's `~/.omp/profiles` holds none of the run; `profile-stays-in-the-run` checks
   that last.
 - **OMP**: `omp_invocation: mise x <pin> -- omp`, the pin read from
-  `.omp-pin`. At boot the daemon asks `mise where <pin>` for the
+  `.omp-pin` (under `box-login`, the operator's own build that
+  [`lib/install-box-login-route.sh`](#libinstall-box-login-routesh) prints). At boot the daemon asks `mise where <pin>` for the
   configured tool's executable, then runs that absolute binary under `mise x <pin>` for every boot
   probe and pane. The script deliberately keeps the ordinary daemon `PATH`, where this devbox has
   `~/.dotfiles/shims/omp` first, and checks the boot log's resolved binary, the OMP child's
@@ -216,7 +227,10 @@ What it stands up, all of it the run's own:
   `<work>/model-gateway/hawk-token` (`gateway`) or `<work>/model-gateway-key/anthropic-key`
   (`key-file`), whose log records each call; no Anthropic key reaches a pane either way — only the
   key command, and only under `gateway` through the operator's hawk login or under `key-file` by
-  reading the file once per call.
+  reading the file once per call. Under `box-login` there is no key command and no call record:
+  the profile's `agent.db` links to the operator's login, and `<work>/model-gateway/box-login.route`
+  records the link and the build; `model-turn-through-the-route` still checks every reply came
+  from `anthropic`.
 - **The provider key**: `provider_keys: {GEMINI_API_KEY: GEMINI_API_KEY_TESTS}`, which proves the
   provider-key path; no pane's model uses it, and the profile disables the Google provider. The
   daemon resolves the secret at boot and writes it as a daemon-held 0600 file; every pane's shim
@@ -287,6 +301,8 @@ LEGION_E2E_MODEL_ROUTE=gateway LEGION_E2E_MODEL_GATEWAY_URL=<gateway>/anthropic 
   bash scripts/e2e/stage3-devbox-workflow.sh     # → "stage 3 e2e: PASS", exit 0
 LEGION_E2E_MODEL_ROUTE=key-file LEGION_E2E_ANTHROPIC_KEY_FILE=<0600 file> SMOKE_UPSTREAM_NATS=nats://<host>.<tailnet>.ts.net:4222 \
   bash scripts/e2e/stage3-devbox-workflow.sh     # the same, for a devbox with no Hawk gateway
+LEGION_E2E_MODEL_ROUTE=box-login SMOKE_UPSTREAM_NATS=nats://<host>.<tailnet>.ts.net:4222 \
+  bash scripts/e2e/stage3-devbox-workflow.sh     # the same, on the operator's own Oh My Pi login
 ```
 
 **Devbox only; CI does not run this script.** It runs real Oh My Pi agents and real GitHub Apps,
@@ -297,7 +313,7 @@ hand.
 The run needs `go`, `docker`, `jq`, `curl`, `ss`, `tmux`, `bun`, `mise`, `gh`, `shellcheck`, the
 `secrets` CLI holding the two role App keys (this deployment's own unless the App inputs name
 another deployment's), and
-`LEGION_E2E_MODEL_ROUTE` (required, `gateway` or `key-file`), which picks how
+`LEGION_E2E_MODEL_ROUTE` (required, `gateway`, `key-file` or `box-login`), which picks how
 the agents reach Anthropic, independently of which devbox this runs on:
 - `gateway`: the operator's model gateway access — `LEGION_E2E_MODEL_GATEWAY_URL` naming the
   gateway's Anthropic endpoint (required in this mode;
@@ -307,6 +323,13 @@ the agents reach Anthropic, independently of which devbox this runs on:
 - `key-file`: `LEGION_E2E_ANTHROPIC_KEY_FILE` (required in this mode), a 0600 file holding a
   plaintext Anthropic key, for a devbox with no Hawk gateway at all
   ([`lib/install-key-file-model-route.sh`](#libinstall-key-file-model-routesh)).
+- `box-login`: nothing more, for a devbox whose operator lets Legion's test runs use their own
+  Oh My Pi login: the profile's `agent.db` is a symlink to the operator's, no key file, gateway or
+  `hawk-token` is involved, and nothing reads the credential
+  ([`lib/install-box-login-route.sh`](#libinstall-box-login-routesh)). The panes run the
+  operator's own Oh My Pi build (its global mise pin, refused unless it carries the refresh-race
+  fix) in place of `.omp-pin`, and `prerequisites` takes the one-at-a-time lock
+  ([`lib/box-login-lock.sh`](#libbox-login-locksh)) before it reads or starts anything.
 
 `SMOKE_UPSTREAM_NATS` (required) names the production Envoy
 NATS the GitHub bridge subscribes on by its fully-qualified name on the operator's tailnet, the
@@ -343,13 +366,15 @@ answer that id and the role's write permission) and read each App's bot login, t
 check that names an App compares with, before the run's first write anywhere. The agents'
 model is Anthropic through the configured route:
 [`lib/install-model-gateway.sh`](#libinstall-model-gatewaysh) (`gateway`) or
-[`lib/install-key-file-model-route.sh`](#libinstall-key-file-model-routesh) (`key-file`) routes the
-isolated profile there in `prerequisites`, where either route's preflight refuses loudly before any
-pane exists (a locked keyring by name under `gateway`, an unreadable or empty key file under
-`key-file`), and the daemon is given
+[`lib/install-key-file-model-route.sh`](#libinstall-key-file-model-routesh) (`key-file`) or
+[`lib/install-box-login-route.sh`](#libinstall-box-login-routesh) (`box-login`) routes the
+isolated profile there in `prerequisites`, where the gateway and key-file routes' preflight refuses
+loudly before any pane exists (a locked keyring by name under `gateway`, an unreadable or empty key
+file under `key-file`), and the box-login route refuses a box with no operator login or an operator
+build without the refresh-race fix, and the daemon is given
 no `provider_keys` (the Google provider answered long workflow turns with empty responses, so the
-agents are not Gemini-backed). No YubiKey touch is required under `key-file`, and no key value
-enters the script's shell, a pane, an argv, or the transcript, under either route.
+agents are not Gemini-backed). No YubiKey touch is required under `key-file` or `box-login`, and no
+key value enters the script's shell, a pane, an argv, or the transcript, under any route.
 
 The proof human's `gh` has to stay authenticated for the whole run. A full run takes about 70
 minutes, longer than the one hour a GitHub App installation token lives. The devbox shim keeps it
@@ -572,7 +597,8 @@ Evidence survives every outcome in `STAGE3_EVIDENCE_DIR` (default a fresh
 transcript, the daemon, Dispatch, listener, and bridge logs, the model route's call record
 (`model-gateway/`: `hawk-token.{log,calls}` under `gateway`, `anthropic-key.{log,calls}` under
 `key-file` — never the key command itself, which under `key-file` lives under its own `--key-dir`,
-removed on every exit), state captures, negative-control outputs, the pane endpoint checks,
+removed on every exit — and `box-login.route` under `box-login`, which names the link, the
+database path and the build, never a credential), state captures, negative-control outputs, the pane endpoint checks,
 and the production audit. A passing run's last three checks stop every process, kill the private
 tmux server and remove both containers (`services-stopped`), check the model route
 (`model-turns-through-the-route`), and close every pull request the run still has open on the
@@ -653,6 +679,11 @@ so the script opens the transcript on fd 8 and calls `transcript_to /dev/fd/8`
 LEGION_E2E_CLAUDE_KEY_FILE=<file holding an Anthropic API key> LEGION_E2E_MODEL_GATEWAY_URL=<gateway>/anthropic \
   bash scripts/e2e/claude-backend-tmux.sh     # → "claude backend e2e: PASS", exit 0
 ```
+
+Claude Code has no box-login route: Claude Code 2.1.309 writes `~/.claude/.credentials.json` by
+writing a temporary file and renaming it over the old one, without following a symlink, so a
+symlinked credentials file would be replaced on its first token refresh and the operator's own
+file would keep a refresh token that is already spent. This script keeps its key file and gateway.
 
 **Devbox only; CI does not run this script.** It proves `worker_backends` on the tmux runtime: a
 real Go daemon whose `legion.yaml` puts the implementer on Claude Code (`worker_backends:
@@ -2481,6 +2512,82 @@ The script creates the profile's two directories, `<dest>` and `<key-dir>`, and 
 the caller does, with its work directory, `<key-dir>` unconditionally and `<dest>` only when it
 keeps no evidence.
 
+## lib/install-box-login-route.sh
+
+Routes a named OMP profile's model turns to Anthropic on the operator's own Oh My Pi login, the
+one the devbox's own sessions use: the box-login alternative to
+[`lib/install-model-gateway.sh`](#libinstall-model-gatewaysh) and
+[`lib/install-key-file-model-route.sh`](#libinstall-key-file-model-routesh), for a devbox whose
+operator lets Legion's test runs use that login. No key is minted, read or copied, and no gateway
+is involved.
+
+```sh
+scripts/e2e/lib/install-box-login-route.sh --profile <name> --home <dir> --dest <dir> --operator-home <dir>
+# → github:sjawhar/oh-my-pi@<the operator's version>
+```
+
+Oh My Pi keeps its stored logins in `<agentDir>/agent.db`, and a named profile's `agentDir` is
+`<home>/.omp/profiles/<name>/agent`, with no setting that moves the database. The script makes the
+profile's `agent.db` a symlink to `<operator-home>/.omp/agent/agent.db`; SQLite opens the database
+through the link and writes its `-wal` and `-shm` beside the real file, so every pane shares the
+operator's one database, never a copy. The script checks only that the operator's `agent.db` is a
+regular file, then links to it: it never opens, reads, copies or hashes it, and runs no `omp`
+command that touches a login. `--operator-home` is the operator's real home, which the stage proof
+captures before it runs anything under the run's own `HOME`; the script never takes it from its own
+`$HOME`.
+
+The profile's `agent/config.yml` is the key-file route's (every model role
+`anthropic/claude-opus-4-8`, `enabledModels` that one model, every other provider a pane could
+reach disabled) plus `memory.backend: "off"`, so the run writes no memory into the operator's
+database. No `models.yml` is written, so no `apiKey` or `X-Api-Key` overrides the stored login.
+
+**The operator's build.** Processes sharing one `agent.db` refresh its OAuth token safely only on a
+build with the refresh-race fix, first released as `18.12.2-sami.20261026-004924`; on a build
+without it one process can spend the shared refresh token while another still holds it, which
+disables the login for every session on the box. So the panes run the operator's own build, the one
+the operator's sessions already run against that database, not `.omp-pin` (which also feeds the
+worker image and CI and is not moved for this). The script reads it with
+`cd / && HOME=<operator-home> mise ls --global --json`: from the filesystem root, so neither this
+checkout's nor the caller's directory's mise config can answer in place of the operator's global
+one. It takes the one active `github:sjawhar/oh-my-pi` entry's `version` and prints the tool spec on
+stdout, which the stage proof writes into `omp_invocation`.
+
+Each refusal goes to stderr and writes nothing into the profile. Exit 2 (arguments): a missing
+flag, OMP's default profile, `--home` equal to `HOME` or `--operator-home` or without `.omp`, an
+existing `agent/models.yml` or `agent/config.yml`, a profile `agent.db` that exists and is not the
+symlink it would make (`… exists and is not the symlink to <db>; this installs a fresh profile's
+model route only, and never replaces a profile's own database`), and a `--dest` that is not empty.
+Exit 1 (the box):
+
+- `<db> is not a regular file: the operator has no Oh My Pi login on this box to share (log in with the operator's own omp first)`, or `<db> is a symlink; …`;
+- `the operator's global mise config pins no single active github:sjawhar/oh-my-pi, …`;
+- `the operator's github:sjawhar/oh-my-pi is <v>, not <base>-sami.YYYYMMDD-HHMMSS, so it cannot be compared with the refresh-race fix (18.12.2-sami.20261026-004924)`;
+- `the operator's github:sjawhar/oh-my-pi is <v>, base <b>; only base 18.12.2 is known here, …`: another base version is refused, never guessed at;
+- `the operator's github:sjawhar/oh-my-pi is <v>, older than 18.12.2-sami.20261026-004924, the first build with the refresh-race fix; …`.
+
+It writes `<dest>/box-login.route`, the link, the database's path and the build, for the evidence;
+it holds no secret. Claude Code has no such route
+([`claude-backend-tmux.sh`](#claude-backend-tmuxsh) says why).
+
+## lib/box-login-lock.sh
+
+One box-login proof at a time on a box. Sourced, never run; Stage 2 and Stage 3 call it under
+`LEGION_E2E_MODEL_ROUTE=box-login` before they start anything.
+
+```sh
+. "$root/scripts/e2e/lib/box-login-lock.sh"
+take_box_login_lock || fail "another box-login proof is running on this box (the holder is named above)"
+```
+
+`take_box_login_lock [DIR]` takes a non-blocking `flock` on `DIR/legion-e2e-box-login.lock`, `DIR`
+being the operator's `XDG_RUNTIME_DIR` when it is a directory, else `/tmp`. The lock stays on a file
+descriptor of the calling shell for its whole life, and of every process it starts that keeps the
+descriptor, so a pane a run leaves behind still holds it. A taken lock fails at once, naming the
+holder the file records: `another box-login proof holds <file>: pid <pid> (<command>); one box-login
+proof runs at a time`, or that the pid has exited and a process it started still holds the lock.
+Every pane of a box-login run shares the operator's login database; one run at a time keeps the
+load on that login bounded and each run's evidence its own.
+
 ## lib/model-gateway-unserved.sh
 
 Says whether the key command [`lib/install-model-gateway.sh`](#libinstall-model-gatewaysh) or
@@ -2543,8 +2650,9 @@ included), and `--record` and `--notes` 1 on a record line they cannot read.
 Proves a tmux stage proof's agents reached the model only through its configured route: every
 agent turn the isolated OMP profile recorded, each subagent's included, was served by the
 `anthropic` provider, the one [`lib/install-model-gateway.sh`](#libinstall-model-gatewaysh) (the
-Hawk gateway) or [`lib/install-key-file-model-route.sh`](#libinstall-key-file-model-routesh) (a
-local key file) routes and leaves enabled. Stage 2 runs it last, after `stop`. Stage 3 runs it once
+Hawk gateway), [`lib/install-key-file-model-route.sh`](#libinstall-key-file-model-routesh) (a
+local key file) or [`lib/install-box-login-route.sh`](#libinstall-box-login-routesh) (the
+operator's own login) routes and leaves enabled. Stage 2 runs it last, after `stop`. Stage 3 runs it once
 every agent process has stopped and before it copies the transcripts, then again over the copies,
 which must hold the same turns, sessions and subagents.
 
