@@ -75,4 +75,22 @@ describe("web_search_open_for on the row the daemon renders", () => {
     const parsed = JSON.parse(row);
     expect(holds(JSON.stringify({ ...parsed, status: "present" }))).toBe(false);
   });
+
+  // The daemon joins up to three failing sessions with "; " (capabilities Deployment.live): the
+  // pod, role, issue and fact must all come from one entry.
+  test("refuses a role and an issue taken from two entries", () => {
+    const fact = "web_search is not a registered tool";
+    const detail = `pod ${pod}/roles (tester, ${issue}): ${fact}; pod legion-omp-legsmoke-4/roles (planner, LEGSMOKE-4): ${fact}`;
+    expect(holds(edited(() => detail))).toBe(false);
+  });
+
+  test("refuses the planner's wrong fact beside another session's right one", () => {
+    const detail = `pod ${pod}/roles (planner, ${issue}): web_search is not among the active tools; pod legion-omp-legsmoke-4/roles (planner, LEGSMOKE-4): web_search is not a registered tool`;
+    expect(holds(edited(() => detail))).toBe(false);
+  });
+
+  test("holds when the matching entry is one of several", () => {
+    const detail = `pod legion-omp-legsmoke-4/roles (tester, LEGSMOKE-4): task agents are disabled; pod ${pod}/roles (planner, ${issue}): web_search is not a registered tool +2 more`;
+    expect(holds(edited(() => detail))).toBe(true);
+  });
 });

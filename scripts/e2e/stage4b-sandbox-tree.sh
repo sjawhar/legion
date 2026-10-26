@@ -5408,14 +5408,13 @@ web_search_row() { daemon_state | jq -ce '.capabilities[] | select(.name == "web
 # web_search_open_for ROW POD ISSUE: the web-search row ROW reads open for the planner of ISSUE in
 # POD, as the daemon names a live session (capabilities.Session.label: `pod <name>/roles (<role>,
 # <issue>)`, an issue pod's roles all running in its one `roles` container), with the fact its
-# check found. The pod, the role and the issue are three separate conditions.
+# check found. The daemon joins up to three failing sessions with "; " and ends the list with
+# ` +N more` (capabilities Deployment.live), so the pod, the role, the issue and the fact must all
+# be one entry of that list.
 web_search_open_for() {
-  jq -e --arg pod "pod $2/roles " --arg issue "$3" \
+  jq -e --arg want "pod $2/roles (planner, $3): web_search is not a registered tool" \
     '.status == "open"
-      and (.detail | contains($pod))
-      and (.detail | contains("(planner, "))
-      and (.detail | contains(", \($issue))"))
-      and (.detail | contains("web_search is not a registered tool"))' <<<"$1" >/dev/null
+      and any(.detail | split("; ")[] | sub(" \\+[0-9]+ more$"; ""); . == $want)' <<<"$1" >/dev/null
 }
 open_row=$(web_search_row) || fail "legion state carries no web-search row"
 web_search_open_for "$open_row" "$pod3" "$tree3" ||
