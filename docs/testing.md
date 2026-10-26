@@ -24,3 +24,21 @@ the limit, as on a dev box whose `TMPDIR` is on a data disk.
   L=/tmp/a-deliberately-long-tmpdir-for-unix-socket-path-tests-0001 && mkdir -p "$L"
   TMPDIR="$L" GOTMPDIR="$L" go test ./<package>/... -count=1
   ```
+
+## Containers a test starts
+
+Every container a test or a proof script starts carries a CPU limit and a memory limit sized to its
+work, and is removed when the test stops. Tests and the live proofs run on shared dev boxes as well
+as on CI runners, and an unlimited server can take every core and all the memory of a host that
+other work shares.
+
+- In Go, set `Resources.NanoCPUs` and `Resources.Memory` in the container's host configuration:
+  through `testcontainers.WithHostConfigModifier` for a `Run`, or as the request's
+  `HostConfigModifier` for a `GenericContainer` (`packages/envoy/internal/testpg/testpg.go` is one).
+  `WithHostConfigModifier` replaces any modifier an earlier option set, so a test that needs a host
+  configuration of its own sets the limits in that same modifier.
+- In a script, `docker run` takes `--cpus` and `--memory` before the image. A Postgres whose data
+  directory is a `tmpfs` mount counts that data against its memory limit. `scripts/e2e/README.md`
+  lists each proof's containers and their limits.
+- Remove a container with its anonymous volumes: `docker rm -f -v`, since the Postgres images
+  declare a `VOLUME` that a plain `docker rm -f` leaves on the host.
