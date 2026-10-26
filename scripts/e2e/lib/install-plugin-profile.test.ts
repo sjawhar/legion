@@ -1,11 +1,22 @@
 import { afterAll, describe, expect, test } from "bun:test";
-import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-// Which Oh My Pi install-plugin-profile.sh runs against the profile. The script runs from a fake
-// checkout (it finds the checkout from its own path), with a fake pack-plugin.sh that packs a
-// manifest alone and a `mise` first on PATH that records every call and answers `omp plugin list`.
+// Which Oh My Pi install-plugin-profile.sh runs against the profile, and how. The script runs from a
+// fake checkout (it finds the checkout from its own path), with a fake pack-plugin.sh that packs a
+// manifest alone, and a `mise` first on PATH that records every call, names a fake install for
+// `mise where`, and answers `omp plugin list`. An `omp` wrapper sits on PATH beside it, as an
+// operator's does: the installer must run the install's own bin/omp by its absolute path instead.
 const dir = mkdtempSync(join(tmpdir(), "install-plugin-profile-test."));
 afterAll(() => rmSync(dir, { recursive: true, force: true }));
 const repoPin = "github:sjawhar/oh-my-pi@18.12.2-sami.20261025-144204";
@@ -31,7 +42,11 @@ tar czf "$2/plugin.tgz" -C "$2" package
 printf '%s\\n' "$2/plugin.tgz"
 `
   );
+  const installDir = join(run, "mise-install");
+  mkdirSync(join(installDir, "bin"), { recursive: true });
+  writeFileSync(join(installDir, "bin", "omp"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
   const log = join(run, "mise.log");
+  const wrapperRan = join(run, "wrapper-ran");
   const bin = join(run, "bin");
   mkdirSync(bin);
   writeFileSync(
@@ -39,7 +54,7 @@ printf '%s\\n' "$2/plugin.tgz"
     `#!/usr/bin/env bash
 printf '%s\\n' "$*" >>${JSON.stringify(log)}
 case $1 in
-where) exit 0 ;;
+where) printf '%s\\n' ${JSON.stringify(installDir)} ;;
 x)
   if [ "$5 $6" = "plugin list" ]; then
     printf '{"npm":[{"name":"@sjawhar/pi-envoy","version":"0.0.0-test","enabled":true,"path":"%s"}]}\\n' "$PWD"
@@ -49,6 +64,9 @@ esac
 `,
     { mode: 0o755 }
   );
+  writeFileSync(join(bin, "omp"), `#!/bin/sh\ntouch ${JSON.stringify(wrapperRan)}\n`, {
+    mode: 0o755,
+  });
   const home = join(run, "omp-home");
   mkdirSync(join(home, ".omp"), { recursive: true });
   const dest = join(run, "pi-envoy");
@@ -68,27 +86,30 @@ esac
     ],
     { env: { PATH: `${bin}:${process.env.PATH ?? ""}`, HOME: join(run, "caller-home") } }
   );
-  const calls = (() => {
-    try {
-      return readFileSync(log, "utf8").trim().split("\n");
-    } catch {
-      return [];
-    }
-  })();
-  return { dest, calls, code: result.exitCode, stderr: result.stderr.toString() };
+  return {
+    dest,
+    omp: realpathSync(join(installDir, "bin", "omp")),
+    calls: existsSync(log) ? readFileSync(log, "utf8").trim().split("\n") : [],
+    wrapperRan: existsSync(wrapperRan),
+    code: result.exitCode,
+    stderr: result.stderr.toString(),
+  };
 }
 
 describe("install-plugin-profile.sh's Oh My Pi", () => {
-  test("runs the build --omp names for the install and the verification, never .omp-pin", () => {
+  test("runs the build --omp names, by its own bin/omp's absolute path, for the install and the verification", () => {
     const spec = "github:sjawhar/oh-my-pi@18.12.2-sami.20261026-004924";
     const r = install(["--omp", spec]);
     expect(r.stderr).toContain("enabled in OMP profile legion-e2e-test");
     expect(r.code).toBe(0);
     expect(r.calls).toEqual([
       `where ${spec}`,
-      `x ${spec} -- omp plugin install ${r.dest}`,
-      `x ${spec} -- omp plugin list --json`,
+      `where ${spec}`,
+      `x ${spec} -- ${r.omp} plugin install ${r.dest}`,
+      `x ${spec} -- ${r.omp} plugin list --json`,
     ]);
+    // The `omp` on PATH, an operator's wrapper on a devbox, never runs.
+    expect(r.wrapperRan).toBe(false);
   });
 
   test("runs .omp-pin's build when no --omp is given", () => {
@@ -96,8 +117,9 @@ describe("install-plugin-profile.sh's Oh My Pi", () => {
     expect(r.code).toBe(0);
     expect(r.calls).toEqual([
       `where ${repoPin}`,
-      `x ${repoPin} -- omp plugin install ${r.dest}`,
-      `x ${repoPin} -- omp plugin list --json`,
+      `where ${repoPin}`,
+      `x ${repoPin} -- ${r.omp} plugin install ${r.dest}`,
+      `x ${repoPin} -- ${r.omp} plugin list --json`,
     ]);
   });
 

@@ -76,23 +76,23 @@ have_operator_home=
 while [ $# -gt 0 ]; do
   case $1 in
   --profile)
-    profile=$2
-    have_profile=1
+    [ $# -ge 2 ] || refuse "--profile needs a value: the OMP profile to route"
+    profile=$2 have_profile=1
     shift 2
     ;;
   --home)
-    home=$2
-    have_home=1
+    [ $# -ge 2 ] || refuse "--home needs a value: the HOME Oh My Pi runs under for the profile"
+    home=$2 have_home=1
     shift 2
     ;;
   --dest)
-    dest=$2
-    have_dest=1
+    [ $# -ge 2 ] || refuse "--dest needs a value: the directory the route's record is written to"
+    dest=$2 have_dest=1
     shift 2
     ;;
   --operator-home)
-    operator_home=$2
-    have_operator_home=1
+    [ $# -ge 2 ] || refuse "--operator-home needs a value: the operator's real home, captured before HOME moved"
+    operator_home=$2 have_operator_home=1
     shift 2
     ;;
   *) refuse "unknown argument $1" ;;

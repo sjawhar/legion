@@ -29,7 +29,8 @@
 #     symlink to the operator's, no key or gateway is involved, and nothing reads the credential.
 #     The panes run the operator's own Oh My Pi build (its global mise pin, refused unless it
 #     carries the refresh-race fix) instead of .omp-pin, and one box-login proof runs at a time on
-#     the box (lib/box-login-lock.sh).
+#     the box (lib/box-login.sh); its teardown stops panes with SIGTERM and a grace before any
+#     SIGKILL and removes the profile's link to the operator's database on every exit.
 # The provider-key path is proven with GEMINI_API_KEY_TESTS from the secret store (agent tier: no
 # YubiKey touch), which the daemon itself resolves at boot and hands every pane's shim as a
 # daemon-held file (`provider_keys`); the run never reads it.
@@ -41,10 +42,10 @@ set -euo pipefail
 unset NATS_NKEY_SEED NATS_NKEY_SEED_FILE NATS_DAEMON_NKEY_SEED NATS_DAEMON_NKEY_SEED_FILE
 
 root=$(cd "$(dirname "$0")/../.." && pwd)
-# The model route first, and under box-login the one-at-a-time lock (lib/box-login-lock.sh), before
-# the run makes its work directory or anything else: a run the lock refuses leaves nothing behind.
-# shellcheck source-path=SCRIPTDIR source=lib/box-login-lock.sh
-. "$root/scripts/e2e/lib/box-login-lock.sh"
+# The model route first, and under box-login the one-at-a-time lock (lib/box-login.sh), before the
+# run makes its work directory or anything else: a run the lock refuses leaves nothing behind.
+# shellcheck source-path=SCRIPTDIR source=lib/box-login.sh
+. "$root/scripts/e2e/lib/box-login.sh"
 model_route=${LEGION_E2E_MODEL_ROUTE:-}
 case "$model_route" in
 gateway | key-file | box-login) ;;
@@ -53,6 +54,13 @@ gateway | key-file | box-login) ;;
   exit 1
   ;;
 esac
+# The daemon prefers LEGION_OMP_PATH to omp_invocation (packages/daemon/internal/omplaunch). Every
+# daemon here runs without it, and under box-login a caller that sets it is refused outright: a
+# build named there could lack the refresh-race fix and still open the operator's login database.
+if [ "$model_route" = box-login ] && [ -n "${LEGION_OMP_PATH:-}" ]; then
+  echo "FAIL setup: LEGION_OMP_PATH is set ($LEGION_OMP_PATH); under LEGION_E2E_MODEL_ROUTE=box-login the panes run the operator's own Oh My Pi build alone, so unset LEGION_OMP_PATH" >&2
+  exit 1
+fi
 if [ "$model_route" = box-login ] && ! take_box_login_lock; then
   echo "FAIL setup: another box-login proof is running on this box (the holder is named above)" >&2
   exit 1
@@ -156,6 +164,15 @@ cleanup() {
   rm -rf "$work/model-gateway-key" || true
   stop_pid "$daemon_pid"
   stop_pid "$deadline_pid"
+  # Under box-login the panes share the operator's login database: each gets SIGTERM and up to
+  # box_login_stop_grace seconds to finish a token refresh before anything is killed, and the
+  # profile's link to that database goes (the link alone) once they are gone, so a kept workspace
+  # holds no live path to the login (lib/box-login.sh). The other routes keep the SIGKILL below.
+  if [ "$model_route" = box-login ]; then
+    # shellcheck disable=SC2046 # one pid per word
+    stop_box_login_processes $(run_processes)
+    unlink_box_login_db "$profile_agent"
+  fi
   for p in "$ptoken" "$deadline_ptoken"; do
     TMUX_TMPDIR=$work/tmux tmux -L "legion-$p" kill-server >/dev/null 2>&1 || true
   done

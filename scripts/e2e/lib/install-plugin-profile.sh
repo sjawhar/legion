@@ -113,12 +113,19 @@ if [ -e "$dest" ] && { [ ! -d "$dest" ] || [ -n "$(ls -A -- "$dest")" ]; }; then
 fi
 
 # The Oh My Pi the daemon runs (--omp, else .omp-pin), under the run's home and the operator's mise
-# tool store, from the unpacked plugin's directory, where no mise config is: an operator's `omp`
-# wrapper reads its own files from HOME, which is the run's here.
+# tool store, from the unpacked plugin's directory, where no mise config is. It runs as the daemon
+# runs it (packages/daemon/internal/omplaunch): `mise x <pin> --` for the tool's environment, and
+# the install's own bin/omp by its absolute path, never an `omp` looked up on PATH, where an
+# operator's wrapper could answer instead (and a wrapper's own setup could rewrite the profile,
+# whose agent.db is the operator's login database under the box-login route).
 pin=${omp_spec:-$(<"$root/.omp-pin")}
 mise where "$pin" >/dev/null 2>&1 || mise install "$pin" >&2
+omp=$(realpath -e -- "$(mise where "$pin")/bin/omp" 2>/dev/null) && [ -x "$omp" ] || {
+  echo "$me: mise has no executable bin/omp for $pin" >&2
+  exit 1
+}
 mise_data=${MISE_DATA_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/mise}
-run_omp() { (cd "$dest" && HOME=$home MISE_DATA_DIR=$mise_data OMP_PROFILE=$profile mise x "$pin" -- omp "$@"); }
+run_omp() { (cd "$dest" && HOME=$home MISE_DATA_DIR=$mise_data OMP_PROFILE=$profile mise x "$pin" -- "$omp" "$@"); }
 
 work=$(mktemp -d "${TMPDIR:-/tmp}/$me.XXXXXXXX")
 trap 'rm -rf "$work"' EXIT

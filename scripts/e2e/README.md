@@ -6,7 +6,7 @@ coordinator — unit tests do not gate a stage, these do; others prove one capab
 against the world it will run in. A later stage's script lands beside these; `lib/` holds what
 the stage scripts share: standalone helpers they run, and the files they source
 ([`lib/rig.sh`](#librigsh), [`lib/workflow.sh`](#libworkflowsh), [`lib/github-apps.sh`](#libgithub-appssh),
-[`lib/namespace-rig.sh`](#libnamespace-rigsh), [`lib/kind-sandbox.sh`](#libkind-sandboxsh), [`lib/omp-home.sh`](#libomp-homesh), [`lib/box-login-lock.sh`](#libbox-login-locksh)), which `shellcheck` follows from this directory
+[`lib/namespace-rig.sh`](#libnamespace-rigsh), [`lib/kind-sandbox.sh`](#libkind-sandboxsh), [`lib/omp-home.sh`](#libomp-homesh), [`lib/box-login.sh`](#libbox-loginsh)), which `shellcheck` follows from this directory
 through `scripts/e2e/.shellcheckrc`.
 
 | script | proves |
@@ -185,9 +185,12 @@ agents reach Anthropic, independently of which devbox this runs on:
   operator's own Oh My Pi build, not `.omp-pin`: the operator's global mise pin for
   `github:sjawhar/oh-my-pi`, refused unless it carries the refresh-race fix (the build the
   operator's own sessions already run against that database); the plugin installs, the plugin
-  gate's `omp plugin` calls and every pane run that one build. One box-login proof runs at a time
-  on the box, Stage 2 or Stage 3: the script takes the lock ([`lib/box-login-lock.sh`](#libbox-login-locksh))
-  first, before it makes its work directory or starts anything.
+  gate's `omp plugin` calls and every pane run that one build, and the run is refused while
+  `LEGION_OMP_PATH` is set, since the daemon would prefer that binary. One box-login proof runs at
+  a time on the box, Stage 2 or Stage 3: the script takes the lock ([`lib/box-login.sh`](#libbox-loginsh))
+  first, before it makes its work directory or starts anything. Its teardown gives each pane
+  SIGTERM and up to 10 s before any SIGKILL, then removes the profile's `agent.db` link (the link
+  alone) on every exit, so a kept workspace holds no live path to the operator's login.
 
 CI runs the unit and integration tests, not this script; what only this
 run proves is OMP's real RPC frames, `--resume`'s same-agent behaviour, the one-word
@@ -278,7 +281,8 @@ Every wait is bounded and names what it waited for; a failed assertion prints
 run also [notes](#libmodel-gateway-unservedsh) each agent that could have failed that check for
 want of a model key, and still exits 1. The
 `EXIT` trap — on a pass, a failure, or an interrupt — stops both daemons (SIGKILL after 10 s),
-kills both private tmux servers, stops the listener, SIGKILLs any process still naming the work
+under `box-login` gives every process of the run SIGTERM and up to 10 s and removes the profile's
+`agent.db` link, kills both private tmux servers, stops the listener, SIGKILLs any process still naming the work
 directory in its command line or working directory, removes both containers and the OMP profile,
 and removes the work directory when the run passed (keeping it, with `transcript.log` (the whole
 run), `daemon.log`, `deadline.log`, `listener.log`, the model key command's log and each
@@ -330,9 +334,14 @@ the agents reach Anthropic, independently of which devbox this runs on:
   `hawk-token` is involved, and nothing reads the credential
   ([`lib/install-box-login-route.sh`](#libinstall-box-login-routesh)). The panes run the
   operator's own Oh My Pi build (its global mise pin, refused unless it carries the refresh-race
-  fix) in place of `.omp-pin` for the plugin installs and every pane, and the script takes the
-  one-at-a-time lock ([`lib/box-login-lock.sh`](#libbox-login-locksh)) first, before it makes its
-  work or evidence directory or starts anything.
+  fix) in place of `.omp-pin` for the plugin installs and every pane; the daemon runs without
+  `LEGION_OMP_PATH` under every route (it would outrank `omp_invocation`), each daemon start must
+  log that build's own `bin/omp` as its resolved binary, and a box-login run with
+  `LEGION_OMP_PATH` set is refused. The script takes the one-at-a-time lock
+  ([`lib/box-login.sh`](#libbox-loginsh)) first, before it makes its work or evidence directory or
+  starts anything, and its teardown (the `EXIT` trap and `services-stopped`) gives every pane
+  SIGTERM and up to 10 s before any SIGKILL, after the failure-path production audit, then removes
+  the profile's `agent.db` link before transcripts are kept.
 
 `SMOKE_UPSTREAM_NATS` (required) names the production Envoy
 NATS the GitHub bridge subscribes on by its fully-qualified name on the operator's tailnet, the
@@ -2295,9 +2304,12 @@ strands no `.tgz` in the checkout). Then:
 3. `OMP_PROFILE=<name> omp plugin list --json` must show the package, by its npm name, at the
    tarball's version, enabled, and resolving to `<dir>`.
 
-Steps 2 and 3 run the Oh My Pi `--omp` names, else the one the daemon pins (`.omp-pin`), through `mise x <pin>`, under
-`HOME=<home>`, from `<dir>`, rather than the `omp` on the caller's `PATH`: an operator's wrapper
-there (the devbox's `~/.dotfiles/shims/omp`) reads its own files from `HOME`, which is the run's.
+Steps 2 and 3 run the Oh My Pi `--omp` names, else the one the daemon pins (`.omp-pin`), under
+`HOME=<home>`, from `<dir>`, as the daemon runs it: the build's own `bin/omp` by its absolute path
+(`mise where <pin>`) under `mise x <pin> --`, never an `omp` looked up on the caller's `PATH`. An
+operator's wrapper there (the devbox's `~/.dotfiles/shims/omp`) reads its own files from `HOME`,
+which is the run's, and its own setup could rewrite the profile, whose `agent.db` is the operator's
+login database under the box-login route.
 
 Each step cites its source by what it runs, never by line number: the lines move with every edit
 above them.
@@ -2557,7 +2569,7 @@ one. It takes the one active `github:sjawhar/oh-my-pi` entry's `version` and pri
 stdout, which the stage proof writes into `omp_invocation`.
 
 Each refusal goes to stderr and writes nothing into the profile. Exit 2 (arguments): a missing
-flag, OMP's default profile, a `--profile` that is not one plain path segment (`--profile '<name>'
+flag or a flag with no value (`--<flag> needs a value: …`), OMP's default profile, a `--profile` that is not one plain path segment (`--profile '<name>'
 is not one plain name …`: a letter or digit, then letters, digits, `.`, `_` or `-`, and no `..`), an
 agent directory whose canonical path is not `<home>/.omp/profiles/<name>/agent` (`… resolves to <path>,
 outside …`: a symlinked directory on the way), `--home` equal to `HOME` or `--operator-home` or without `.omp`, an
@@ -2576,25 +2588,37 @@ It writes `<dest>/box-login.route`, the link, the database's path and the build,
 it holds no secret. Claude Code has no such route
 ([`claude-backend-tmux.sh`](#claude-backend-tmuxsh) says why).
 
-## lib/box-login-lock.sh
+## lib/box-login.sh
 
-One box-login proof at a time on a box. Sourced, never run; Stage 2 and Stage 3 source it and,
-under `LEGION_E2E_MODEL_ROUTE=box-login`, call it first, before they make their work directory or
-start anything.
+What a `LEGION_E2E_MODEL_ROUTE=box-login` run needs beyond the route: one run at a time, a teardown
+that lets a pane finish a token refresh, and no link to the operator's login left behind. Sourced,
+never run; Stage 2 and Stage 3 source it first.
 
 ```sh
-. "$root/scripts/e2e/lib/box-login-lock.sh"
+. "$root/scripts/e2e/lib/box-login.sh"
 take_box_login_lock || { echo "FAIL setup: another box-login proof is running on this box (the holder is named above)" >&2; exit 1; }
+…
+stop_box_login_processes $(run_processes)   # in the teardown
+unlink_box_login_db "$profile_agent"
 ```
 
-`take_box_login_lock [DIR]` takes a non-blocking `flock` on `DIR/legion-e2e-box-login.lock`, `DIR`
-being the operator's `XDG_RUNTIME_DIR` when it is a directory, else `/tmp`. The lock stays on a file
-descriptor of the calling shell for its whole life, and of every process it starts that keeps the
-descriptor, so a pane a run leaves behind still holds it. A taken lock fails at once, naming the
-holder the file records: `another box-login proof holds <file>: pid <pid> (<command>); one box-login
-proof runs at a time`, or that the pid has exited and a process it started still holds the lock.
-Every pane of a box-login run shares the operator's login database; one run at a time keeps the
-load on that login bounded and each run's evidence its own.
+`take_box_login_lock` takes a non-blocking `flock` on one fixed file per operator uid,
+`/tmp/legion-e2e-box-login.<uid>.lock` (`box_login_lock_file`), whatever `XDG_RUNTIME_DIR` or
+`TMPDIR` says, so every box-login run of that operator meets the same lock. The stages take it
+before they make a work or evidence directory. The lock stays on a file descriptor of the calling
+shell for its whole life, and of every process it starts that keeps the descriptor, so a pane a run
+leaves behind still holds it. A taken lock fails at once, naming the holder the file records:
+`another box-login proof holds <file>: pid <pid> (<command>); one box-login proof runs at a time`,
+or that the pid has exited and a process it started still holds the lock. Every pane of a box-login
+run shares the operator's login database; one run at a time keeps the load on that login bounded
+and each run's evidence its own.
+
+`stop_box_login_processes PID…` sends SIGTERM to every pid, waits at most `box_login_stop_grace`
+(10) seconds for all of them to exit, then SIGKILLs only those still alive, so a pane in the middle
+of a token refresh can write the rotated token back before it goes. `unlink_box_login_db
+AGENT_DIR` removes `AGENT_DIR/agent.db` when it is a symlink, the link itself and never what it
+names; the stages call it once the run's processes are gone, since a process that opened the
+database again after the link went would make a fresh database of its own in the profile.
 
 ## lib/model-gateway-unserved.sh
 
