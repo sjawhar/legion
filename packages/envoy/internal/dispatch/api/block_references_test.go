@@ -363,7 +363,7 @@ func TestAVersionWriteNamesATargetWhoseBlockCountChanged(t *testing.T) {
 	requireCitations("one citing block again", 1, 2)
 }
 
-// Migration 0119's trigger marks a document owed on every version insert; each path a block-aware
+// Migration 0121's trigger marks a document owed on every version insert; each path a block-aware
 // build writes a version through indexes that version's blocks in the same transaction, so none
 // leaves its document owed: issue creation, the edit route, the upload route (a new document and
 // a replacement) and an accepted suggestion.

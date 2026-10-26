@@ -12,9 +12,9 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
-// beforeBlockIDKey is the last migration before 0124_asks_block_id_key and
-// 0125_comments_anchor_block_id_key rebuild the block id indexes over block_id_key.
-const beforeBlockIDKey = 123
+// beforeBlockIDKey is the last migration before 0126_asks_block_id_key and
+// 0127_comments_anchor_block_id_key rebuild the block id indexes over block_id_key.
+const beforeBlockIDKey = 125
 
 // incompressibleID is an id of length random hex characters, so no index holds it by compressing
 // it.
@@ -60,7 +60,7 @@ func sqlState(err error) (string, string) {
 	return pgErr.Code, pgErr.ConstraintName
 }
 
-// A block id is a string a browser's edit can make any length. Before 0124 and 0125 an
+// A block id is a string a browser's edit can make any length. Before 0126 and 0127 an
 // incompressible id past a B-tree entry's 2704 bytes fails the write of an ask block's row and of
 // an anchor (SQLSTATE 54000); a long id that compresses, which main stores, does not. The
 // migrations apply over the rows main wrote, those long ids included; afterwards an incompressible
@@ -94,11 +94,11 @@ func TestTheBlockIDKeyIndexesHoldIDsPastTheKeyLimit(t *testing.T) {
 		}
 	}
 	if code, _ := sqlState(writeAskBlock(store, document, incompressible)); code != "54000" {
-		t.Fatalf("before 0124 an ask block of 3200 random hex characters answers SQLSTATE %q, want 54000", code)
+		t.Fatalf("before 0126 an ask block of 3200 random hex characters answers SQLSTATE %q, want 54000", code)
 	}
 	for _, table := range []string{"comments", "asks"} {
 		if code, _ := sqlState(writeAnchored(store, table, document, incompressible)); code != "54000" {
-			t.Fatalf("before 0124 a %s anchor in a block of 3200 random hex characters answers SQLSTATE %q, want 54000", table, code)
+			t.Fatalf("before 0126 a %s anchor in a block of 3200 random hex characters answers SQLSTATE %q, want 54000", table, code)
 		}
 	}
 

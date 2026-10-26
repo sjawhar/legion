@@ -340,6 +340,80 @@ run_check "$root" dist
 check "exits 2" "$(is "$status" 2)"
 check "names it" "$(contains "$out" 'dist does not exist')"
 
+echo "case: a relative path from a subdirectory is read from that subdirectory"
+root=$(fixture relative-subdir)
+mkdir -p "$root/work"
+printf 'line one\n%s\n' "$key-7" > "$root/work/body.md"
+set +e
+out=$(cd "$root/work" && ../.github/scripts/check-private-names.sh body.md 2>&1)
+status=$?
+set -e
+check "fails" "$(is "$status" 1)"
+check "names the file and line" "$(contains "$out" '^::error file=work/body.md,line=2::work/body.md:2: names the private deployment repository')"
+
+echo "case: a missing relative path from a subdirectory is still refused"
+root=$(fixture relative-missing)
+mkdir -p "$root/work"
+set +e
+out=$(cd "$root/work" && ../.github/scripts/check-private-names.sh body.md 2>&1)
+status=$?
+set -e
+check "exits 2" "$(is "$status" 2)"
+check "names it" "$(contains "$out" 'work/body.md does not exist')"
+
+echo "case: a relative path from a subdirectory of a checkout reached through a symlink"
+root=$(fixture relative-symlinked)
+mkdir -p "$root/work"
+printf 'line one\n%s\n' "$key-7" > "$root/work/body.md"
+ln -s "$root" "$work/relative-symlinked-link"
+set +e
+out=$(cd "$work/relative-symlinked-link/work" && ../.github/scripts/check-private-names.sh body.md 2>&1)
+status=$?
+set -e
+check "fails" "$(is "$status" 1)"
+check "names the file by its repository path" "$(contains "$out" '^::error file=work/body.md,line=2::work/body.md:2: names the private deployment repository')"
+
+echo "case: a symlink before a '..' is followed as the kernel follows it"
+root=$(fixture relative-symlink-dotdot)
+mkdir -p "$root/work" "$root/elsewhere/deep"
+ln -s ../elsewhere/deep "$root/work/link"
+printf 'line one\n%s\n' "$key-7" > "$root/elsewhere/body.md"
+printf 'Nothing private here.\n' > "$root/work/body.md"
+run_check "$root" work/link/../body.md
+check "from the root, fails" "$(is "$status" 1)"
+check "from the root, names the file the link leads to" "$(contains "$out" '^::error file=work/link/\.\./body\.md,line=2::')"
+set +e
+out=$(cd "$root/work" && ../.github/scripts/check-private-names.sh link/../body.md 2>&1)
+status=$?
+set -e
+check "from the subdirectory, fails" "$(is "$status" 1)"
+check "from the subdirectory, names the file the link leads to" "$(contains "$out" '^::error file=work/link/\.\./body\.md,line=2::')"
+
+echo "case: a relative name starting with '-' is read as a path"
+root=$(fixture relative-dash)
+mkdir -p "$root/work"
+printf 'line one\n%s\n' "$key-7" > "$root/-dash.md"
+printf 'line one\n%s\n' "$key-7" > "$root/work/-dash.md"
+run_check "$root" -dash.md
+check "from the root, fails" "$(is "$status" 1)"
+check "from the root, names the file" "$(contains "$out" '^::error file=\./-dash\.md,line=2::')"
+set +e
+out=$(cd "$root/work" && ../.github/scripts/check-private-names.sh -dash.md 2>&1)
+status=$?
+set -e
+check "from the subdirectory, fails" "$(is "$status" 1)"
+check "from the subdirectory, names the file" "$(contains "$out" '^::error file=work/-dash\.md,line=2::')"
+
+echo "case: an empty argument from a subdirectory is refused"
+root=$(fixture relative-empty)
+mkdir -p "$root/work"
+set +e
+out=$(cd "$root/work" && ../.github/scripts/check-private-names.sh '' 2>&1)
+status=$?
+set -e
+check "exits 2" "$(is "$status" 2)"
+check "names it" "$(contains "$out" '^check-private-names:  does not exist')"
+
 # write_pr_text <title> <body> <commit message> [branch] [author email] [committer email]: writes
 # the fixture check-pr-text.sh reads as CI runs it. A pull_request event payload carries the title,
 # body, branch name and the head the run checks (its base and head sha, and its one commit); a

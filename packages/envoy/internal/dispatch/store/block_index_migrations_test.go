@@ -11,12 +11,12 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-// beforeBlockGraph is the last migration before the block index: 0118_block_graph through
-// 0123_block_grammar_seed apply after it. lastBlockGrammarTrigger is the last of the triggers
-// (0120-0122) that 0123's seed runs after.
+// beforeBlockGraph is the last migration before the block index: 0120_block_graph through
+// 0125_block_grammar_seed apply after it. lastBlockGrammarTrigger is the last of the triggers
+// (0122-0124) that 0125's seed runs after.
 const (
-	beforeBlockGraph        = 117
-	lastBlockGrammarTrigger = 122
+	beforeBlockGraph        = 119
+	lastBlockGrammarTrigger = 124
 )
 
 // owedItem is one row of block_grammar_owed: an item owed an index with the block grammar.
@@ -220,8 +220,8 @@ func TestTheBlockIndexTriggersOweWhatAnyBuildWrites(t *testing.T) {
 	}
 }
 
-// Text stored before the block index is owed by the migrations themselves: 0118 owes every
-// document, and 0123 owes each comment, ask and issue message whose text holds `#b-`, and nothing
+// Text stored before the block index is owed by the migrations themselves: 0120 owes every
+// document, and 0125 owes each comment, ask and issue message whose text holds `#b-`, and nothing
 // else. A row a trigger already owed before the seed ran keeps its enqueued_at.
 func TestTheBlockGrammarSeedOwesOlderText(t *testing.T) {
 	ctx := context.Background()

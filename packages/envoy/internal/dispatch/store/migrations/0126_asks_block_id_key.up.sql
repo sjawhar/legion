@@ -1,4 +1,4 @@
--- 0124_asks_block_id_key.up.sql
+-- 0126_asks_block_id_key.up.sql
 --
 -- A block id is a string a browser's edit can make any length, and a B-tree index entry holds at
 -- most 2704 bytes, so asks_block_id_unique (0018) and asks_anchor_block_id_idx (0023), which key
@@ -9,7 +9,7 @@
 -- and an id stored under the old index, a long one it held compressed included, is held by the
 -- new one. Each index keeps its first column, which every read of it leads with; a read of one
 -- block id matches block_id_key(block_id) too (docs/copied_asks.go). Its own migration, so the
--- transaction holds asks' lock alone (0075's precedent); 0125 rebuilds comments' anchor index.
+-- transaction holds asks' lock alone (0075's precedent); 0127 rebuilds comments' anchor index.
 --
 -- An index expression must be immutable. block_id_key reads the id's UTF-8 bytes as decode's
 -- escape format reads text, each other character as its own bytes and a doubled backslash as one,

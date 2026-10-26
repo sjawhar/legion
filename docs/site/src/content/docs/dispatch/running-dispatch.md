@@ -44,6 +44,7 @@ docker buildx imagetools inspect ghcr.io/sjawhar/legion/envoy:<that commit>   # 
 | An Envoy listener | `ENVOY_URL` | Where the Agents page finds live agent sessions. Defaults to `http://127.0.0.1:9020`. |
 | NATS | `NATS_URLS`, `NATS_NKEY_SEED_FILE` | Where Dispatch publishes its events for agents. The Agents page's live view also needs it. Dispatch refuses a NATS server on another machine unless `ENVOY_ALLOW_REMOTE_NATS=1`. Set `DISPATCH_NATS_DISABLED=1` to run without it. |
 | An address to listen on | `DISPATCH_LISTEN_HOST`, `DISPATCH_PORT` | Port `8766` by default. |
+| Meaning search | `DISPATCH_EMBEDDER`, and for Azure the `DISPATCH_AZURE_*` settings | Search by meaning embeds text with Cohere Embed v4 on AWS Bedrock (the default, with the AWS SDK's region and credentials) or on Azure AI Foundry (`DISPATCH_EMBEDDER=azure`: the endpoint, the deployment's tokens-per-minute quota, and either the deployment's key or a keyless sign-in through a federated token). Without it, search answers by words alone and says so. The server embeds everything it already holds by itself, at start and every ten minutes; `GET /api/v1/search/coverage` shows how far it has got. |
 
 These are the settings most deployments need, not all of them. The full list, generated from the
 server, is in [Configuration](/legion/dispatch/reference/configuration/).
@@ -195,8 +196,9 @@ To sign in for real instead, replace `DISPATCH_DEV_SIGNIN=1` in step 3 with the 
 client secret and group or domain settings, and list `http://127.0.0.1:8766/auth/callback` as a
 callback URL of Dispatch's client: the sign-in pool's app client, or a Google web client, with
 `DISPATCH_SIGNIN_ISSUER=https://accounts.google.com` and `DISPATCH_SIGNIN_DOMAIN=example.com` for
-your domain. With Google directly, the server needs no AWS account or credentials: without them
-it logs that meaning search is unavailable and serves everything else.
+your domain. With Google directly, the server needs no AWS account or credentials. Search by meaning
+needs AWS credentials for Bedrock, or the Azure settings ([What it needs](#what-it-needs)); without
+either, the server logs that meaning search is unavailable and serves everything else.
 
 ## First steps after it starts
 
@@ -252,7 +254,7 @@ Sign in, then open **Settings**:
 
 Dispatch runs as more than one server against one database, so a new version rolls out without
 taking Dispatch away from everyone: start the new version, let it take traffic, then stop the old
-one. Two things have to be true first, and Dispatch can check neither of them for you.
+one. Three things have to be true first, and Dispatch can check none of them for you.
 
 - **Give every server the same `DISPATCH_SIGNING_KEY`.** Left unset, each server makes a key of
   its own in its own data directory, and a sign-in made by one server is then refused by the
@@ -260,6 +262,11 @@ one. Two things have to be true first, and Dispatch can check neither of them fo
   reads as missing. No server can see another's key, so nothing refuses to start, nothing is
   logged, and the health check cannot report it. That is why this is a precondition rather than
   something Dispatch tells you about.
+- **Give every server the same embedder settings.** Each stored vector records the embedder that
+  made it, and each server drops the vectors another embedder made and embeds that text again, so
+  two servers set up differently keep replacing each other's work. A rollout that changes the
+  settings settles once the last old server stops. For the same reason, a new model on Azure goes
+  under a new deployment name: the name, not the model, tells the vectors apart.
 - **Every migration leaves the version before it able to read and write the database**
   ([Migrations](#migrations)), because a rolling update runs both versions against the one
   database while it lasts.

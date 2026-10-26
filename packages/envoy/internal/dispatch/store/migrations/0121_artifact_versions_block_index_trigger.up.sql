@@ -1,5 +1,5 @@
--- 0119_artifact_versions_block_index_trigger.up.sql
--- Every document version any build writes marks its document's blocks owed (0118's
+-- 0121_artifact_versions_block_index_trigger.up.sql
+-- Every document version any build writes marks its document's blocks owed (0120's
 -- document_block_versions), so a version a build that predates the block index writes during the
 -- roll is indexed by the reconciliation, and a block-aware build's own index, in the same
 -- transaction after the insert, leaves the row indexed. An image or file version carries no

@@ -1,9 +1,9 @@
--- 0118_block_graph.up.sql
+-- 0120_block_graph.up.sql
 --
 -- Every identified block of a document's latest indexed version is a graph node (kind `block`,
 -- id `<ref_key>#<block id>`), part_of its document; a mention written inside a block is an edge
 -- out of the innermost block holding it. Additive while the previous build serves: new tables, a
--- function no trigger calls yet (0120-0122 attach it), and the view restated with two more arms.
+-- function no trigger calls yet (0122-0124 attach it), and the view restated with two more arms.
 -- Nothing writes the artifacts row: the tables are its children, whose writes take only
 -- `for key share` on it.
 --
@@ -45,7 +45,7 @@ create index block_refs_to on block_refs (to_kind, to_id);
 create index block_refs_from_node on block_refs using hash (from_node);
 
 -- The version a document's blocks were indexed at; null is owed: every document at this
--- migration, every version any build writes (0119's trigger), and rebuild-refs. The partial
+-- migration, every version any build writes (0121's trigger), and rebuild-refs. The partial
 -- index serves the owed read.
 create table document_block_versions (
   artifact_id uuid primary key references artifacts (id) on delete cascade,
@@ -74,7 +74,7 @@ create table document_indexed_versions (
 );
 
 -- Comments, asks and issue messages whose text holds `#b-`, owed an index with the block grammar:
--- the triggers of 0120-0122 upsert a row on every write of such a text, 0123 seeds the rows
+-- the triggers of 0122-0124 upsert a row on every write of such a text, 0125 seeds the rows
 -- already stored, and the server's block index reconciliation drains them oldest first.
 create table block_grammar_owed (
   kind text not null check (kind in ('comment', 'ask', 'message')),
@@ -84,7 +84,7 @@ create table block_grammar_owed (
 );
 create index block_grammar_owed_enqueued on block_grammar_owed (enqueued_at);
 
--- The one trigger function of 0120-0122: the row's kind is the trigger's argument, and a write
+-- The one trigger function of 0122-0124: the row's kind is the trigger's argument, and a write
 -- that lands on a row already owed moves its enqueued_at, so a drain that read the earlier time
 -- leaves the row owed.
 create or replace function block_grammar_owe() returns trigger language plpgsql as $$

@@ -47,7 +47,7 @@ func (s *Service) IndexDocumentReferences(ctx context.Context, artifactID string
 // indexRenderedVersion with rendered's blocks. The blocks are rendered.offsets; GET …/blocks lists
 // one block per offset of the same renderer (renderedBlocks), so both list one set of blocks. A
 // version with no rendering - an upload whose replacement changed nothing, which writes no tree -
-// is indexUnrenderedVersion, which indexes no blocks: migration 0119's trigger left the document
+// is indexUnrenderedVersion, which indexes no blocks: migration 0121's trigger left the document
 // owed when the version's row was inserted, for the block-index reconciliation, which reads the
 // document itself.
 func (s *Service) indexDocument(ctx context.Context, tx pgx.Tx, artifactID string, version int, versionAt time.Time, markdown string, rendered renderedTree) (model.ReferenceChanges, error) {

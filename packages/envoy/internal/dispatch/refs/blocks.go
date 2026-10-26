@@ -122,7 +122,7 @@ func IndexBlocks(
 	`, artifactID, version); err != nil {
 		return nil, fmt.Errorf("record version %d of %s indexed: %w", version, artifactID, err)
 	}
-	// Migration 0119's trigger marked the document owed when this version's row was inserted;
+	// Migration 0121's trigger marked the document owed when this version's row was inserted;
 	// this transaction's own index settles it.
 	if _, err := tx.Exec(ctx, `
 		insert into document_block_versions (artifact_id, version) values ($1, $2)
