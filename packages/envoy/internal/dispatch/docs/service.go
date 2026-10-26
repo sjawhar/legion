@@ -150,12 +150,18 @@ type Service struct {
 	// settlement to abandon after its version write, before its commit.
 	afterSettleVersionWrite func(room string) error
 	// beforeObserveUpdate runs in a room's update observer, which ygo runs once the update's
-	// transaction has released the document, before the observer classifies the update and
-	// credits its authors. Nil outside tests; tests use it to hold an edit the room already holds
-	// before its author is credited.
+	// transaction has released the document, before the observer drains the room's update log -
+	// classifying and crediting its own update and every other committed before it that no
+	// observer has reached yet. A repair's observer does not run it. Nil outside tests; tests use
+	// it to hold an observer before it classifies anything: the held update stays unclassified
+	// unless another transaction's observer reaches the log first, which classifies it in commit
+	// order (renderedReplica).
 	beforeObserveUpdate func(room string)
-	// afterCreditUpdate runs in a room's update observer after it has credited a content change
-	// and before it arms the room's settlement. Nil outside tests; tests use it to hold that window.
+	// afterCreditUpdate runs in a room's update observer once its drain of the update log has
+	// classified a content change and credited its authors, outside the replica's lock, and before
+	// it records its own update's class and arms the room's settlement. Nil outside tests; tests
+	// use it to hold that window, in which the observer's own update is credited but neither
+	// pending (recordUpdateClass) nor handed to persistence, whose observer runs after this one.
 	afterCreditUpdate func(room string)
 	// afterLiveCommit runs once a transaction's writes to a document have committed and the
 	// document's advisory lock is gone with them, before the publish applies them to the room.
