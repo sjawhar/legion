@@ -2,24 +2,78 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-366",
-  "completed": "2026-10-26T04:14:05Z",
-  "headSha": "5f795d29022d132928e3ef70055fc8234ceb774e",
-  "round": 4,
+  "completed": "2026-10-26T07:36:08Z",
+  "headSha": "d48adac8da6f63e1ef9d706268a0c1b9d4290480",
+  "round": 5,
+  "standard": "The architect's rule (2026-10-26T05:09Z): no write main accepts fails at the head; every id and slug the reference grammar reads is bounded; a new artifact name over a bound is refused 4xx; a long block id never fails an ask, anchor or settlement; data stored over a bound is still read and written; none of the five named cases answers 500 or logs SQLSTATE 54000.",
+  "provider": "255 assistant turns of this test run, all provider anthropic, model claude-opus-5-5, read from the run's own session transcript (omp_session_files, session 01a175a2-1036-71da-aaba-a9b28d0f2e1b) at 2026-10-26T07:35Z; no subagent was used.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Drove the round-4 proof independently against my own build of the head (dispatch-head4 at 5f795d29, code of 384ff72f, database infra366_t4): a document named with 2680 random hex characters uploads, takes a doc-edit (version 2), lists 3 part_of blocks, its block (node id 2727 bytes) lists under its issue, and ?to=<block> and @v1 answer 200. Rolled a database main 81a3b5ef wrote (infra366_t4_roll) onto the head: the long-named document takes an edit and the indexer indexes it. Round 3's red test passes unmodified; block-graph.sh 37 PASS; block-references.e2e.ts 4 passed on chromium; A12 on 81a3b5ef, 5f795d29 and 371d6c87 all PASS."
+    "how": "Drove the implementer's round-6 cases independently on binaries I built from the head d48adac8 (code of 05ea3ef4) and from current main 9ed0397b (the merge's main parent, which contains INFRA-364's merge d5a8e37a), on databases of my own (infra366_t5, infra366_t5_roll, infra366_t5_roll2): each of the architect's five cases, the roll of a main-written database onto the head, and main's 500s as the control."
   },
-  "failures": [
+  "failures": [],
+  "failed": 0,
+  "proof": [
     {
-      "criterion": "Review round 1's Important finding as proven ('a version write succeeds whatever its keys are'; no write main accepts fails on the block index's keys, and the reconciler retries nothing forever) - for text that cites a block of a long-named document",
-      "evidence": "A block reference's target id is `<ref_key>#<block id>`; refs.to_id (refs_pkey, refs_to) and block_refs.to_id (block_refs_pkey, block_refs_to) are still B-tree keys, and this round hash indexed only document_blocks.node_id and block_refs.from_node. At the head (port 8801): `dispatch comment --issue CORE-1 --body 'Cites dispatch://CORE-1/artifact/<2683-character slug>#b-x here.'` and `dispatch artifact --issue CORE-1 --name citer.md` with that citation each answer 500, log 'write reference: ERROR: index row size 2760 exceeds btree version 4 maximum 2704 for index \"refs_pkey\"'. Main 81a3b5ef reads no `#b-` reference, so it posted the same comment (observed: 'Posted comment 124bfafb-…'). After rolling that database onto the head, the block-index loop retries that comment on every pass, each logging 'block index skipped an item it could not index kind=comment id=124bfafb-… refs_pkey' (04:05:03, 04:05:33, 04:06:03…); other owed items still drain (a re-owed comment was indexed past it). Citing the document itself without `#b-` already fails on main (the older gap in dispatch://INFRA-366/comment/85ee2d5a-64ec-4fe7-9a2e-2c55ee09f44f); the `#b-` form is new to this pull request. Red test: TestTextCitingABlockOfALongNamedDocumentIsStillWritten in packages/envoy/internal/dispatch/api/block_id_bound_test.go (commit e3f6a49a); `cd packages/envoy && go test ./internal/dispatch/api/ -run TestTextCitingABlockOfALongNamedDocumentIsStillWritten -count=1 -v` fails with 'post a comment citing a block of the long-named document: status=500'. With a 2000-character name the same test passes, so its assertions hold."
+      "criterion": "Architect's acceptance case 1-2: a comment citing a 3,200-character artifact slug, and one citing a 3,200-character comment id, write their text with no reference (no 500, no SQLSTATE 54000)",
+      "surface": "Head server built from d48adac8 on port 8841 over a database main wrote (infra366_t5_roll), the real dispatch CLI",
+      "command": "dispatch comment --issue CORE-1 --body 'Cites dispatch://CORE-1/artifact/<3200 hex> slug'; dispatch comment --issue CORE-1 --body 'Cites dispatch://CORE-1/comment/<3200 hex> id'",
+      "observed": "Both 'Posted comment …', exit 0; no refs row for either long target; no ERROR and no 54000 in the server log",
+      "headSha": "d48adac8da6f63e1ef9d706268a0c1b9d4290480",
+      "negativeControl": "Main 9ed0397b on the same database before the roll: the 3,200-character slug comment → exit 1 'internal server error', log 'write reference: … index row size 3280 exceeds btree version 4 maximum 2704 for index \"refs_pkey\" (SQLSTATE 54000)'"
+    },
+    {
+      "criterion": "Architect's acceptance case 3 (round 4's failure): a citation of a block of a document whose name is 2,683 characters writes its text",
+      "surface": "Head server on port 8841 over infra366_t5_roll, the real dispatch CLI",
+      "command": "dispatch comment --issue CORE-1 --body 'Cites dispatch://CORE-1/artifact/<2683-character slug>#b-x block'; dispatch artifact --issue CORE-1 --name citer.md --path <file holding the same citation>",
+      "observed": "'Posted comment …' and 'Uploaded citer.md as version 1', both exit 0; the comment main posted with that citation is indexed once after the roll (block index items=1) and the queue then owes 0 items, with no retry",
+      "headSha": "d48adac8da6f63e1ef9d706268a0c1b9d4290480",
+      "negativeControl": "Round 4's head 5f795d29 answered the same comment with 500 (refs_pkey, row size 2760) and retried main's comment every 30 s"
+    },
+    {
+      "criterion": "Architect's acceptance case 4: an ask (and a comment) anchored to a block whose id is over 256 bytes is written",
+      "surface": "Main 9ed0397b wrote a spec whose callout id is 3,200 hex bytes holding two paragraphs (infra366_t5_roll2); the head server was rolled onto it on port 8851; the real dispatch CLI",
+      "command": "dispatch comment --issue CORE-1 --artifact spec --quote 'One line. Two line.' --body 'head across'; dispatch ask --issue CORE-1 --anchor-json '{\"artifact\":\"spec\",\"quote\":\"line. Two\"}' --question … --option … --option …",
+      "observed": "'Posted comment 864fdd1f-…' and 'Asked c3cb0b60-…', exit 0; each stored anchor's block_id is 3,200 bytes; GET of each answers 200; the spec then takes an edit (version 2); no ERROR or 54000 in the log",
+      "headSha": "d48adac8da6f63e1ef9d706268a0c1b9d4290480",
+      "negativeControl": "Main 9ed0397b on that database before the roll: the same anchored comment → exit 1 'internal server error'"
+    },
+    {
+      "criterion": "Architect's acceptance case 5 and the name bound: an upload with a 3,000-character name is refused 4xx naming the bound; a new name or key at the bound is accepted",
+      "surface": "Head server on ports 8841 and 8801, the real dispatch CLI",
+      "command": "dispatch artifact --issue CORE-1 --name <3000 hex>.md; --name giving key CORE-1/<2685-byte slug> (2,692 bytes) and one byte more; --name of 1,346 'é' plus 'm' (2,693 bytes)",
+      "observed": "3,003-byte name: exit 1 'artifact name is 3003 bytes, past the 2692 bytes a new artifact's name may hold; give it a shorter name'; 2,692-byte key: uploaded; 2,693-byte key: refused 'the reference key `CORE-1/<slug>` … is 2693 bytes, past the 2692 bytes …'; 2,693-byte multibyte name: refused naming the name bound",
+      "headSha": "d48adac8da6f63e1ef9d706268a0c1b9d4290480",
+      "negativeControl": "2,692-byte key and 2,691-byte multibyte name are accepted, so the refusal starts at the bound"
+    },
+    {
+      "criterion": "A database main wrote, rolled onto the head, is read, edited and indexed; an ask block whose id is over 256 bytes settles (data stored over a bound is still read and written)",
+      "surface": "Main 9ed0397b wrote infra366_t5_roll on port 8841, then the head build was started on the same database",
+      "command": "On main: issue with a 3,200-byte callout id, a 2,683-character-named document, a comment citing …#b-x of it, a document holding an ask block with a 3,200-byte id. On the head: reads, dispatch doc-edit of the spec and the long-named document, then the block-index and settlement passes",
+      "observed": "Issue, spec (holding the long id) and long-named document read 200; both edits 'Applied 1 ops (version 2)'; document_block_versions owed 0 and block_grammar_owed 0; 'resumed owed document settlements documents=1' then the ask block's ask open under its 3,200-byte id asking 'Ship on Monday?'; no ERROR or 54000 in the head's log",
+      "headSha": "d48adac8da6f63e1ef9d706268a0c1b9d4290480",
+      "negativeControl": "Main's own log for that ask block: 'settle document … create ask block row: ERROR: index row size 3232 exceeds … \"asks_block_id_unique\" (SQLSTATE 54000)', repeated"
+    },
+    {
+      "criterion": "Reference target bound, server and dashboard agreeing: a target of 2,048 bytes is a reference, 2,049 is not",
+      "surface": "Head server on 8801 (database infra366_t5) and Dispatch's browser harness (Playwright, chromium) against a server built from the head",
+      "command": "dispatch comment citing dispatch://CORE-1/comment/<'a'×2048>, <'a'×2049>, <'%C3%A9'×1024>, <'%C3%A9'×1024 + 'a'>; then a throwaway Playwright test (deleted) posting the same plus a 3,200-character slug and reading the conversation's links",
+      "observed": "refs rows exist for the two 2,048-byte targets only (octet_length 2048 each); the dashboard renders exactly two links (href lengths 2072 and 6168, the 2,048-byte targets) and leaves the 2,049-byte ones and the 3,200-character slug as text; `dispatch read --ref` of a 2,049-byte target is refused by the CLI",
+      "headSha": "d48adac8da6f63e1ef9d706268a0c1b9d4290480",
+      "negativeControl": "The 2,049-byte targets: no refs row and no link"
+    },
+    {
+      "criterion": "A1, A2 (with the pinned clause), A4, A5, R6, R7, A10 and A15 (document halves), the older references route; the browser rows; A12",
+      "surface": "Head server on 8801 and the real CLI; Dispatch's browser suite (chromium); three builds on one database",
+      "command": "DISPATCH_URL=http://127.0.0.1:8801 DISPATCH_TOKEN=e2e-token PROJECT=CORE bash packages/dispatch/e2e/acceptance/block-graph.sh; bun run e2e -- e2e/block-references.e2e.ts --project chromium; OLD=dispatch-main5 NEW=dispatch-head5 NEG=dispatch-371d6c879565 bash $TMPDIR/t366/a12.sh",
+      "observed": "driver exit 0, 37 PASS; browser 4 passed; A12 exit 0, 8 PASS lines, old build count 3 = list 3",
+      "headSha": "d48adac8da6f63e1ef9d706268a0c1b9d4290480",
+      "negativeControl": "371d6c87 (no INFRA-364) on the A12 database: ?to=dispatch://ACME-1 → 500, log 'graph node kind \"block\" is not addressable'; unauthenticated GET /api/v1/block-links → 401 NO_IDENTITY (round 4)"
     }
   ],
-  "failed": 1,
   "attempted": [
-    "Round 3's failure: upload, edit, part_of, issue listing and pinned read of a 2680-character-named document at the head; the same document written by main and rolled onto the head is edited and indexed. All held.",
-    "block-graph.sh 37 PASS; block-references.e2e.ts 4 passed (chromium); A12 all PASS with the edited migration 0117 on a fresh database.",
-    "Negative control: unauthenticated GET /api/v1/block-links → 401 NO_IDENTITY."
+    "Each of the architect's five cases, main's 500 for three of them as control, the roll of two main-written databases, name and key bounds at and past 2,692 bytes (ASCII and multibyte), reference targets at and past 2,048 bytes (ASCII and percent-encoded multibyte) on the server and in the dashboard, the driver, the browser file and A12.",
+    "Noted, not judged: `dispatch doc-edit` insert before or after a paragraph inside a callout placed the new paragraph at the top level, beside the callout; I did not compare it with main."
   ],
-  "ci": "At 384ff72f: Tests 40267005762, Docs 40267005743 and Worker Image 40267005708 in progress; Legion Envoy and Contracts 40267005746 queued; PR Title 40267045020 in progress."
+  "ci": "At 05ea3ef4: Tests 40285020945 and Legion Envoy and Contracts 40285021056 queued; Docs 40285021020 and Worker Image 40285021091 in progress; PR Title 40285291234 pending."
 }
