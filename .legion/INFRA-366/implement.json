@@ -2,8 +2,16 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-366",
-  "completed": "2026-10-26T19:40:00Z",
+  "completed": "2026-10-26T20:20:00Z",
   "proof": [
+    {
+      "criterion": "Review round 6: a dispatch:// URL left as text (<dispatch://…>, [X](X), or a #b- id over 256 bytes) that cites nothing past the bounds is its words as plain text: no <a>, no href=\"\", no data-dispatch-href, so no click target and no hover card; https:// forms and author links unchanged",
+      "surface": "Dispatch's browser suite (Playwright, chromium and iphone) against the real server, plus MarkdownBody's component test",
+      "command": "cd packages/dispatch && DATABASE_URL=postgres://postgres@127.0.0.1:55432/infra366_e2e_r12?sslmode=disable DISPATCH_E2E_PORT=8787 FAKE_ENVOY_PORT=9031 FAKE_GITHUB_PORT=9032 FAKE_BROKER_PORT=9034 bun run e2e -- e2e/pictures.e2e.ts e2e/block-references.e2e.ts e2e/references.e2e.ts; bun test web/src/features/refs/MarkdownBody.test.tsx",
+      "observed": "40 passed: for Angle, Self and Block the paragraph reads '<label> <words>', getByRole('link') count 0, [data-dispatch-href],[data-dispatch-ref] count 0, and hovering (chromium) shows no tooltip; the bare https:// URL keeps its raw link and the author's [design](dispatch://…) link still opens. MarkdownBody 23 pass.",
+      "headSha": "b4e4a2d2a362034c872bbbb099566a765991f63e",
+      "negativeControl": "On a git archive of e3d09251 the browser test fails 2/2 (link count 1); with the DOM assertions removed it fails on hover (tooltip count 1); with e3d09251's RefLink.tsx the unit test receives '<a data-dispatch-href=\"dispatch://CORE-1/artifact/aaa…\">'"
+    },
     {
       "criterion": "Review round 5: a dispatch:// URL left as text — an angle autolink <dispatch://…> or a link whose words are its target [dispatch://X](dispatch://X) — past the index's bounds stays a plain link, as the server records no reference; a dispatch:// link with words of its own still opens the long-named document. Plus the forward merge: migrations renumbered 0120-0127 after main's 0118-0119; a database main wrote migrates under the head.",
       "surface": "Dispatch's browser suite (Playwright, chromium and iphone) against the real server; MarkdownBody component test; main df396380 and the head build serving one local Postgres database (throwaway r6-accept.sh)",
@@ -151,7 +159,9 @@
     "Round 10: RefLink.tsx isTextUrl and bounded read of text URLs, routes.ts comments, MarkdownBody.test.tsx, e2e/pictures.e2e.ts, packages/dispatch/AGENTS.md (ea0496c2)",
     "Round 11: RefLink.tsx isTextUrl compares words with the anchor's own target; MarkdownBody.test.tsx; e2e/pictures.e2e.ts; packages/dispatch/AGENTS.md (4ff4dc39)",
     "Round 11: forward merges of main df396380 and ad909178; migrations renumbered 0120-0127, every reference updated; routes_table_test.go pin 139; search_ask_block_href_test.go vectors carry the embedder's model (56d31191, 44f6cfa2)",
-    "Round 12 (after the drain): forward merge of main 6cdb9995 (e3d09251), with packages/envoy/CHANGELOG.md keeping both entries; main added no migration, so this branch keeps 0120-0127; the diff fingerprint is unchanged (2e83582a…), https://github.com/sjawhar/legion/pull/2210#issuecomment-6424826991"
+    "Round 12 (after the drain): forward merge of main 6cdb9995 (e3d09251), with packages/envoy/CHANGELOG.md keeping both entries; main added no migration, so this branch keeps 0120-0127; the diff fingerprint is unchanged (2e83582a…), https://github.com/sjawhar/legion/pull/2210#issuecomment-6424826991",
+    "Round 12: RefLink.tsx text node for an uncited dispatch:// text URL; MarkdownBody.test.tsx; e2e/pictures.e2e.ts (b4e4a2d2)",
+    "Round 12: forward merge of main b4bea385: migrations renumbered 0121-0128 after main's 0120; skills/dispatch/references deletions kept and the block guidance moved into dispatch read/ask/doc-edit help in contracts dispatch-tools.ts with test rows (1d4f991e)"
   ],
   "trickyParts": [
     "Every document version write now also indexes its blocks (about eight more statements in the version's transaction). TestAHealthyRoomUnderWritesIsNeverRefused passes on an idle pod at the head (27-41 writes against its floor of 20, main 36-54), but failed twice under CPU contention while other Go packages ran in parallel (11-15 writes); main passed the same contended run (24 writes). CI's runners are the judge.",
