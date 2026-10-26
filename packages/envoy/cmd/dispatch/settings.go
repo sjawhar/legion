@@ -65,6 +65,8 @@ var settings = []setting{
 		Description: "Port the server binds. With `DISPATCH_LISTEN_FD` set the server binds nothing, and a set port must be the port of the socket that names; an empty one is unset."},
 	{Name: "DISPATCH_LISTEN_FD", Required: "no",
 		Description: "An inherited listening TCP socket (descriptor number) the server serves on instead of binding; for test harnesses that hold the port. `DISPATCH_PORT` and `DISPATCH_LISTEN_HOST`, when set and not empty, must name the socket's address; `DISPATCH_SERVER_URL` is not derived from it. A descriptor that is not a listening TCP socket refuses startup, and the server binds nothing in its place."},
+	{Name: "DISPATCH_PPROF_PORT", Required: "no",
+		Description: "Port on `127.0.0.1` the Go profiler (`net/http/pprof`, under `/debug/pprof/`) listens on, reachable only from inside the pod or through `kubectl port-forward`; unset or empty, nothing listens. A value that is not a port 1-65535 refuses startup."},
 	{Name: "XDG_CONFIG_HOME", Default: "`~/.config`", Required: "no",
 		Description: "Directory whose `legion/envoy.json` is the user `envoy.json`, which `DISPATCH_SERVER_URL` and `NATS_URLS` fall back to; set but empty, it is `~/.config` too, and a path that is not absolute refuses startup."},
 	{Name: "DISPATCH_SERVER_URL", Default: "`dispatch.serverUrl` from `envoy.json`", Required: "no",

@@ -351,6 +351,28 @@ address, refuses the boot, and nothing is bound in its place. `DISPATCH_SERVER_U
 is not derived from the socket. Either way the server logs the address it serves
 on once it serves, as `dispatch: listening addr=<host:port>`.
 
+### Profiling
+
+Set `DISPATCH_PPROF_PORT` to a port to serve the Go profiler (`net/http/pprof`) on
+`127.0.0.1:<port>`, on a mux of its own, apart from the server's routes. It binds the loopback
+address only, so nothing outside the pod reaches it; unset or empty, nothing listens. A value
+that is not a port 1-65535, or a port already taken, refuses startup naming the variable. The
+profiler binds before anything connects, so a slow boot can be profiled too. The listener closes
+at once when the process is told to stop, cutting off a profile in flight, so it never delays the
+shutdown (and the shutdown's own drain cannot be profiled). A `gcp:Dispatch` deployment turns it
+on with the component's `pprofPort` input (`packages/envoy/infra/README.md`), which sets the
+variable on the `envoy-dispatch` container; setting it by hand on the Deployment rolls the pods
+and is reverted by the next update. To take a 30-second CPU profile of a pod:
+
+```sh
+kubectl port-forward <pod> <port>:<port>
+go tool pprof -seconds 30 http://127.0.0.1:<port>/debug/pprof/profile
+```
+
+`/debug/pprof/` lists the other profiles (`heap`, `goroutine`, `allocs`, `threadcreate`, `trace`).
+`mutex` and `block` are listed too but record nothing: Dispatch sets no mutex or block sampling
+rate.
+
 ## Running more than one process
 
 Two `envoy-dispatch` processes serve one Postgres and one NATS, so a release rolls instead of

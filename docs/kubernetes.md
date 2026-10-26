@@ -195,8 +195,9 @@ unprivileged container, unpacking a package by hand works for some tools and not
 client a role unpacks onto its own `PATH` is the withheld `operator-setup` capability — while the
 runners answer the tools no image can anticipate.
 
-What decided it is the container, not the cost. Measured in a role container of a deployment: the
-role is an unprivileged user, `/usr/local/bin` and `/opt` are read-only, `/home` is read-only while
+What decided it is the container, not the cost. Measured on 2026-10-25 in a role container of a
+deployment, in the issue pod of six role containers that the one-container pod replaced: the role
+is an unprivileged user, `/usr/local/bin` and `/opt` are read-only, `/home` is read-only while
 `$HOME` (`/home/legion`) under it is writable, and `apt-get` cannot take dpkg's lock even to
 download.
 
@@ -743,8 +744,9 @@ with `permission denied for schema public`. Grant `USAGE, CREATE ON SCHEMA publi
 (measured on Postgres 16.15: `CONNECT, CREATE ON DATABASE` alone is refused, the schema grant
 creates the table), or make the login the schema's owner.
 
-**One login, every conversation: what that costs.** Under `postgres` every role container mounts
-the providers Secret with the session database's URL among its keys, and the agent is told where
+**One login, every conversation: what that costs.** Under `postgres` every Legion pod's launcher
+container (an issue pod's `roles`, the controller's `controller`) mounts the providers Secret with
+the session database's URL among its keys, for every role of the pod, and the agent is told where
 that file is (`OMP_SESSION_SQL_DSN_FILE`, above), so every agent in the deployment holds the login
 the whole table sits behind. Oh My Pi's two tables are keyed by the session's recorded path and
 carry no tenant, project or issue column, so rights over the table are rights over every
@@ -1497,10 +1499,14 @@ this order:
    the restored database, and that one boot sweeps every issue Sandbox with a grace of 0. Stopping
    the daemon ends no pod: an issue pod keeps running, unsupervised, until the earlier release's
    boot deletes its Sandbox in step 5. That window is the last in which anything on an issue's disk
-   can be read. For an issue whose push step 1 could not confirm, open a shell in its still-running
-   pod ([A shell on an issue's disk](#a-shell-on-an-issues-disk)) and push what the workspace at
+   can be read. For an issue whose push step 1 could not confirm, copy what the workspace at
    `/legion/workspaces/<owner>/<repo>/<issue key lowercased>` holds that its branch on GitHub does
-   not, with a credential of your own: the `roles` container's shell holds no role's.
+   not out of its still-running pod with `tar`, rebuild it in a throwaway container, and push the
+   bundle from a clone of your own
+   ([Carrying unpushed work out of an issue's pod](#carrying-unpushed-work-out-of-an-issues-pod)).
+   Run no git, jj or omp in the pod and bring no credential into it: a `kubectl exec -c roles`
+   shell runs as user 1000, the launcher's own user, so it can read every role's credentials, and
+   git, jj and omp there obey the configuration any role can write in the clone and workspace.
 3. **Restore the dump into a new database the daemon's login owns**, and point the earlier
    release's `postgres_dsn` at it. Create the database as a login that may create one (an admin),
    owned by the daemon's login, then restore as the daemon's login:
@@ -1733,7 +1739,10 @@ holds none. **Every issue Sandbox of the project is deleted before the earlier i
 (`kubectl -n legion delete sandbox <name>` for each, or a tree at a time by its
 `legion.dev/tree` label), which takes each pod and each pod's disk, so every issue's unpushed
 work is gone and the earlier release provisions its volumes afresh at the next launch. Push
-first, as the cutover does.
+first, as the cutover does; for an issue whose push you cannot confirm, carry its work out of the
+pod before the deletion ([Carrying unpushed work out of an issue's
+pod](#carrying-unpushed-work-out-of-an-issues-pod); that release's pods have a container per role
+and no `roles` container, so exec into the implementer's, `-c implementer`).
 
 The database needs no restore for this step. This release's own migration, 0051, strips the
 `release` key from queued `issue_suspend` rows and changes no column, and the claims table keeps
@@ -1874,7 +1883,9 @@ record, every Sandbox, its uid, its annotations and its tree label. In this orde
 1. **Have every running issue's work pushed, and confirm it**, while this release still runs, as
    the cutover's step 1 does ([Cutting over to the pod-owned
    disk](#cutting-over-to-the-pod-owned-disk)). The pushed branch is the only copy of an issue's
-   workspace the rollback keeps.
+   workspace the rollback keeps; for an issue whose push you cannot confirm, carry its work out of
+   the pod before step 4 ([Carrying unpushed work out of an issue's
+   pod](#carrying-unpushed-work-out-of-an-issues-pod)).
 2. **Stop this release's daemon** (scale its Deployment to zero, or `legion stop`), so nothing
    launches into a Sandbox or writes a locator while both are rewritten.
 3. **Give every issue pod's locator back its role's container.** Before 0054 an issue pod's role
@@ -2380,8 +2391,11 @@ entries ([Anatomy of a Sandbox pod](#anatomy-of-a-sandbox-pod)), so a `git clone
 one of the project's owners holds, which the role's App is installed on, is answered with the
 role's own token. It runs after the install a stale-plugin relaunch makes
 ([Contract discipline](#contract-discipline)), with stdin from `/dev/null` and its stdout on
-stderr, so neither touches the RPC stream the shim and Oh My Pi share; its output is in the role
-container's log. Oh My Pi starts only once it exits 0. A non-zero exit ends the start with
+stderr, so neither touches the RPC stream the shim and Oh My Pi share. Its output is in the
+`roles` container's log on lines prefixed `<role>: `
+(`kubectl logs <pod> -c roles | grep '^<role>: '`), and in the controller's pod in the
+`controller` container's log. Oh My Pi starts only once it exits 0. A non-zero exit ends the
+start with
 `legion setup: runtime.kubernetes.setup exited <status>; not starting Oh My Pi` on stderr and the
 command's own exit status, which the launcher reports as the generation's exit: the daemon reads
 the role as gone, charges a launch failure, and retries until the budget ends the claim in a
@@ -3378,13 +3392,21 @@ dies (`git remote-https`, `git index-pack`). It serves, on port 8418:
 - `GET /readyz`: 503 until the first clone is whole, then 200, with nothing else; the pod's
   readiness probe, which carries no token.
 - `GET /healthz`: `503 {"ready":false,…}` until the first clone is whole, then `200 {"ready":true,
-  "repo":"<owner>/<repo>","head":"<default branch's commit>","lastFetchAt":"…","bytes":<n>}`; it
-  waits on no fetch, and answers any request, since it holds nothing secret and nothing of the
-  repository's content.
+  "repo":"<owner>/<repo>","head":"<default branch's commit>","lastFetchAt":"…","bytes":<n>,
+  "streams":<s>}`, `streams` being the `/tar` requests it is sending or holding in its queue at the
+  answer; it waits on no fetch, and answers any request, since it holds nothing secret and nothing
+  of the repository's content.
 - `GET /tar`: the clone's refs and packs as a tar stream — `HEAD`, `packed-refs`, `refs/`,
   `objects/pack/pack-<id>.pack` and the `objects/pack/pack-<id>.idx` git reads each pack through,
   no loose object or configuration — which waits for a fetch under way to finish, so it never
-  streams a half-written ref or pack, and waits for no repack.
+  streams a half-written ref or pack, and waits for no repack. At most 32 streams are sent at once
+  (`maxStreams`, `internal/repocache/server.go`); a request past them waits, first come first
+  served, for one to end, within its own deadline. Streams share the cache pod's sending rate
+  evenly, so without the bound a large launch slows every stream at once until none finishes: on
+  2026-10-26 one cache sent a 4.0 GB clone (51 packs) at about 400 MB/s in all over 290 streams,
+  about 48 minutes before any reached its last byte, past the fetch's 30-minute `FetchTimeout`, and every
+  fetch failed and started over. Bounded, each stream takes its share among 32 and the queue
+  drains at the same total rate.
 
 `/tar` answers only a request whose `Authorization: Bearer` is the cache's own token; any other is
 401 and names nothing. `/healthz` and `/tar` name their repository in a `Legion-Repository` header
@@ -3477,8 +3499,17 @@ An issue pod's launch makes its repository's cache when there is none yet, and t
 the cache of each repository it serves at boot and on every orphan sweep after it, once a minute:
 a missing cache is created (its Sandbox `Suspended`, then its Secret owned by that Sandbox, then
 its pod template and `Running`), and a cache whose pod runs another image than the daemon's, has
-ended, or was left `Suspended` gets a new pod while its Sandbox and volume stay, so a new release
-costs a pod, not a clone. A launch whose cache cannot be made fails, naming why. The cache of a
+ended, or was left `Suspended`, or whose Sandbox's pod template reserves other than
+`runtime.kubernetes.repository_cache.resources` now says, gets a new pod while its Sandbox and
+volume stay, so a new release or a new reservation costs a pod, not a clone. The reservation is
+read from the Sandbox's pod template, never from the pod, since GKE Autopilot rewrites a pod's
+requirements at admission. A pod still running is replaced only once it serves no stream: the
+daemon asks its `/healthz` first, whose `streams` counts the tars it is sending or holding in its
+queue, and while that is above 0 it logs `repository cache pod is replaced once it serves no
+stream` and leaves the pod to a later sweep, because the replacement would end every one of those
+tars, failing each fetch reading one and making its issue pod again. A cache of an earlier release
+answers no `streams`, and one whose `/healthz` cannot be read is replaced at once, as before. A
+launch whose cache cannot be made fails, naming why. The cache of a
 repository the mapping no longer names is annotated `legion.dev/cache-unmapped-at` at the sweep
 that finds it so, kept for `runtime.kubernetes.repository_cache.retain_hours` (168 by default), and
 then deleted with its volume and Secret; mapped again before that, it loses the annotation and
@@ -3586,19 +3617,18 @@ provisioning again settles them.
 
 Each refusal is in the failing pod's `workspace-init` log
 (`kubectl -n legion logs <pod> -c workspace-init`), and the daemon's log quotes its tail. Nothing
-is registered before a refusal, so the pod's next attempt refuses again until the operator acts.
-The clone is only on the pod's own disk, so the commands run in that pod, from the operator's
-context: the daemon's identity creates no pod and has no exec
-([RBAC](#rbac-the-go-daemon-needs)).
+is registered before a refusal, so the pod's next attempt refuses again.
+The clone is only on the pod's own disk, and a pod whose `workspace-init` refuses runs no `roles`
+container to exec into, so those commands are run nowhere: the remedy is the replacement pod
+(below). A shell reaches a running pod's disk from the operator's context only: the daemon's
+identity creates no pod and has no exec ([RBAC](#rbac-the-go-daemon-needs)).
 
 **The issue's pod is running.** Its `roles` container mounts the disk at `/legion`:
 
 ```sh
 kubectl -n legion get pods -l legion.dev/issue=<KEY> --field-selector=status.phase=Running
 kubectl -n legion exec -it <pod> -c roles -- sh
-export XDG_CONFIG_HOME=/var/run/legion/home/.config   # the pod's config home (below)
-export XDG_STATE_HOME=/legion/scratch/state/architect   # the role's state home (below)
-jj bookmark list --all-remotes legion/<KEY> -R /legion/repos/github.com/<owner>/<repo>
+ls /legion/workspaces/<owner>/<repo>/<issue key lowercased>   # read files; start nothing
 ```
 
 The shell runs as the issue's agents do, user 1000 under gVisor, but it carries the container's
@@ -3606,36 +3636,35 @@ environment, not any agent's: the `roles` container's spec holds only what the k
 is `POD_UID` from the downward API, and every other variable the agent is told — the operator's
 `runtime.kubernetes.pod.env` included, and among them
 `XDG_STATE_HOME=/legion/scratch/state/<role>`, the role's state home — arrives in its
-launcher's start command (`launchEnvironment`, `manifest.go`). The first `export` points jj at the
-pod's shared config home, where `workspace-init` wrote the clone's per-repository configuration
-(`git.abandon-unreachable-commits = false` and no repository identity), and which no role writes:
-the `roles` container mounts it at `/var/run/legion/home/.config`. A role's own `~/.config` is a
-copy of it made in its namespace (`/var/run/legion/roles/.homes/<role>/config` here, holding what
-that role wrote since). The shell's own `~/.config` is the image's, empty, so without the `export`
-the shell's jj reads it, says `Per-repo config not found`, and reads
-jj's default `git.abandon-unreachable-commits = true`, the setting Legion turns off. jj needs only
-that variable, so the shell's `HOME` stays the image's `/home/legion`, which carries no mount in the
-`roles` container: an `omp` started there reads the image's own `~/.omp` profile, its plugins and
-natives, as a role's does through its overlay, where `/var/run/legion/home` holds only the
-container's mounts and no profile. The second `export` sets the state home, so
-an `omp` started in the shell roots its state where the role's agent does rather than under the
-profile's config root; for the agent's whole environment, read `/proc/<agent pid>/environ`, the
-process whose `argv[0]` is `omp` under the role's `legion worker-shim`, as stage 4a's `pod-baseline`
-does (`xargs -0 sh -c 'exec env -i "$@" omp …' agent-env </proc/<pid>/environ`). The clone is at
+launcher's start command (`launchEnvironment`, `manifest.go`); `/proc/<agent pid>/environ`, the
+process whose `argv[0]` is `omp` under the role's `legion worker-shim`, holds the agent's whole
+environment. The shell starts in the issue's workspace, the container's working directory. The
+clone is at
 `/legion/repos/github.com/<owner>/<repo>` and the issue's workspace at
 `/legion/workspaces/<owner>/<repo>/<issue key lowercased>` (`workspace.Location`,
-`internal/workspace/provision.go`); no other issue's workspace is on this volume.
+`internal/workspace/provision.go`); no other issue's workspace is on this volume. Every role writes
+that clone and workspace, so a role can plant configuration there that starts a program — for jj
+a legacy `config.toml` without its `config-id` or a workspace's `.jj/repo` file pointing at a
+repository of the role's own, for git a filter, fsmonitor or promisor remote, for `omp` an
+extension under the workspace's `.omp/` — and a `jj`, `git` or `omp` run in this shell obeys it, as
+user 1000 outside every role's namespaces, with every role's credentials in reach. No flag makes a
+jj read safe: `--ignore-working-copy --no-pager` still verifies a signature through a planted
+`signing.backends.gpg.program`, and the migration of a planted legacy file writes the pod's shared
+config home. So run no `jj`, `git` or `omp` here; read files, and take work out of the pod as
+[Carrying unpushed work out of an issue's pod](#carrying-unpushed-work-out-of-an-issues-pod) says.
+A refusal's `jj` commands are not run in this shell either: a pod whose `workspace-init` refuses
+has no running `roles` container, and its remedy is the replacement pod below.
 
 **No pod of the issue is running.** Then there is nothing to reach. The issue's disk was its
 pod's own and went with the pod ([The disk dies with its pod](#the-disk-dies-with-its-pod)), so
 no claim is left to mount, and the clone, the workspace and everything the issue's roles wrote
 are gone with it. A refusal above is worked in the pod that raised it or not at all: a pod whose
-`workspace-init` is failing runs no role container to exec into, and the remedy there is to let
-the pod be replaced. The runtime reads a failed init container as the end of every role of that
-pod (`InitFailed`, `internal/runtime/sandbox/observe.go`) and the next launch replaces the pod
-outright instead of waiting on its launchers (`relaunch.go`); the replacement provisions a fresh
-clone and workspace from the issue's pushed branch, on a disk of its own. Nothing is saved first,
-because a shell on the old disk could carry nothing over.
+`workspace-init` is failing has no running `roles` container to exec into, and the remedy there
+is to let the pod be replaced. The runtime reads a failed init container as the end of every role
+of that pod (`InitFailed`, `internal/runtime/sandbox/observe.go`) and the next launch replaces the
+pod outright instead of waiting on its launchers (`relaunch.go`); the replacement provisions a
+fresh clone and workspace from the issue's pushed branch, on a disk of its own. Nothing is saved
+first, because a shell on the old disk could carry nothing over.
 
 **The one stopped disk still worth mounting: a tree volume of the release before issue pods.**
 That release's tree volume is its root Sandbox's, not a pod's, so it outlives every pod of the
@@ -3686,6 +3715,123 @@ The pod carries no credential. An agent of that tree could plant git and jj conf
 clone on the volume ([Trust model](#trust-model-the-provisioning-token)), which a `jj` run in this
 shell would obey, and the pod gives that configuration nothing to take. Run no command in it that
 holds a token.
+
+### Carrying unpushed work out of an issue's pod
+
+A running issue pod's workspace can hold work its branch on GitHub lacks: commits no role pushed,
+and edits not yet in a commit. To keep that work when the pod must go (step 2 of [Rolling back the
+upgrade](#rolling-back-the-upgrade)), copy the clone's objects and the workspace's files out of the
+pod with `tar`, rebuild the work in a throwaway container, and push the resulting bundle from a
+clone of your own. Run no `git` or `jj` in the pod, and bring no credential into it, for two
+reasons.
+
+- **The shell can read every role's credentials.** `kubectl exec -c roles` runs as user 1000, the
+  launcher's own user, outside every role's namespaces, so it can read everything under
+  `/var/run/legion/roles/`. The pod's `fsGroup` opens the mode-0440 mounts to it: each role's gh
+  files (`<role>/gh`) and launcher token (`<role>/launcher`), the providers Secret at
+  `/var/run/legion/providers` (the provider keys, the `legion-pane` NATS nkey seed when the daemon
+  has one and, under `postgres`, the session database's URL, the login to every conversation of
+  the deployment) and, when the pod is enrolled with the secrets broker, the projected
+  ServiceAccount token at `/var/run/legion/agent-secrets-token`. It reads the rest as their owner:
+  each running generation's `<role>/private/g<generation>/` files, which the launcher writes
+  owner-only (the boot token, the Envoy and Dispatch bearers, a spec's secrets and, under
+  `cloudsql-iam`, the session database's URL file and socket), each role's `<role>/agent-secrets/`
+  key directory and each role's home under `.homes/`, whose files a role writes as user 1000
+  outside its namespaces. It reads each agent's environment through `/proc/<pid>/environ` too, and
+  whatever the operator's `runtime.kubernetes.pod.volume_mounts` mount. Where the pods'
+  ServiceAccount is federated to a cloud identity, it can act as that identity, as every role can.
+- **The clone's configuration is every role's to write.** The clone's `.git/config`, its hooks, a
+  legacy jj configuration file and the workspace's `.jj/repo` pointer are on the issue's disk, which
+  every role writes ([Trust model](#trust-model-the-provisioning-token)), and the shell's git is
+  given none of the overrides a role's git is. That configuration can name programs git and jj start
+  — a working-copy filter, a signing program, a promisor remote's `uploadpack`, a pager — and they
+  run as user 1000 with every role's credentials in reach. Disabling hooks and fsmonitor is not
+  enough, and the daemon's own guards (`sharedRepository`, `internal/workspace/config.go`) do not
+  cover a command run by hand. `tar` reads no configuration.
+
+So the pod runs only `tar`, and every `git` that touches the pod's bytes runs in a throwaway
+container on your machine with no network and no credential, inside the container's own
+filesystem. It reads the two archives from your directory and writes only a git bundle back, and
+fetching a bundle runs nothing. Run the steps from an empty directory, run no git on anything but
+the bundle outside the container, and delete the directory once the push is done:
+
+```sh
+pod=<pod> K=<KEY> image=<runtime.kubernetes.image>   # the daemon's worker image, by digest
+clone=/legion/repos/github.com/<owner>/<repo>
+ws=/legion/workspaces/<owner>/<repo>/<issue key lowercased>
+# 1. In the pod, tar alone: the clone's refs, worktree records and objects, and the workspace's
+#    files. Each refuses a directory reached through a symlink; the tree drops every .git and .jj.
+#    An exit of 1 after "file changed as we read it" (the agents still write) is not a failure.
+kubectl -n legion exec "$pod" -c roles -- sh -c 'set -e; cd -P "$1/.git"
+  test "$(pwd -P)" = "$1/.git"
+  tar --hard-dereference -cf - refs worktrees $(test -f packed-refs && echo packed-refs) objects
+  ' sh "$clone" > "$K-git.tar"
+kubectl -n legion exec "$pod" -c roles -- sh -c 'set -e; cd -P "$1"; test "$(pwd -P)" = "$1"
+  tar --hard-dereference --ignore-case --exclude=.git --exclude=.jj --exclude=./.codegraph \
+  -cf - .' sh "$ws" > "$K-tree.tar"
+# 2. In a throwaway container: rebuild the work under configurations git init wrote, and bundle
+#    what origin lacks.
+docker run --rm -i --network none --cap-drop ALL --security-opt no-new-privileges \
+  --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$PWD:/w" --entrypoint sh "$image" \
+  -s "$K" "$ws" <<'EOF'
+set -eu
+K=$1 ws=$2 git=/w/$K-git.tar tree=/w/$K-tree.tar
+refuse() { echo "refused: $*" >&2; exit 1; }
+bad=$(tar -tvf "$git" | awk '$1 !~ /^[-d]/'); test -z "$bad" || refuse "$git holds $bad"
+bad=$(tar -tvf "$tree" | awk '$1 !~ /^[-dl]/'); test -z "$bad" || refuse "$tree holds $bad"
+cd "$(mktemp -d)" && git init -q --bare pod.git
+tar -C pod.git --exclude=objects/info -xf "$git" objects refs \
+  $(tar -tf "$git" | grep -x packed-refs || true)
+id=
+for g in $(tar -tf "$git" | grep '^worktrees/[^/]*/gitdir$'); do
+  case $(tar -xOf "$git" "$g") in "$ws/.git" | */"${ws#/legion/}/.git") id=${g%/gitdir} ;; esac
+done
+test -n "$id" || refuse "no worktree record names $ws"
+base=$(tar -xOf "$git" "$id/HEAD")
+echo "$base" | grep -Eqx '[0-9a-f]{40}' || refuse "$id/HEAD is not a commit id"
+git -C pod.git update-ref refs/rescue-base "$base"
+git init -q work && cd work
+git fetch -q ../pod.git 'refs/jj/*:refs/jj/*' 'refs/heads/*:refs/rescue/*' \
+  'refs/remotes/origin/*:refs/remotes/origin/*' refs/rescue-base:refs/rescue-base
+git symbolic-ref HEAD "refs/heads/rescue-$K" && git reset -q "$base"
+tar -xf "$tree"
+git -c core.excludesFile=/dev/null add -A
+git status --short
+git diff --cached --quiet ||
+  git -c user.name=rescue -c user.email=rescue@invalid commit -q -m "Edits left in $K's workspace"
+echo "unpushed commits of other branches, not in the bundle:"
+git log --oneline --glob=refs/rescue/ --not --remotes=origin "rescue-$K"
+git bundle create "/w/$K.bundle" "rescue-$K" --not --remotes=origin
+EOF
+# 3. In a clone of your own, fetched from GitHub first: read what the bundle adds, then push it.
+git fetch origin
+git fetch "<dir>/$K.bundle" "rescue-$K:refs/remotes/rescue/$K"
+git log --stat --oneline "origin/legion/$K..rescue/$K"
+git push origin "refs/remotes/rescue/$K:refs/heads/legion/$K"
+```
+
+The workspace's git worktree record (`<clone>/.git/worktrees/<id>/HEAD`, the entry whose `gitdir`
+names the workspace's `.git`, absolute or relative) names the parent of jj's working-copy commit as
+of jj's last command there, or a commit a role made with `git commit` since; the files carry
+everything after it, snapshotted or not. Step 2 names that commit with a ref of its own in the bare
+repository, so the fetch reaches it and every unpushed commit below it, bookmarked or not. The
+rebuild resets the index to that commit and lays the files over it, so a file the repository
+tracks stays as the tree holds it even when a `.gitignore` names it, a submodule's gitlink stays,
+and every new file the tree holds is added, those over jj's `snapshot.max-new-file-size` included.
+`objects/info` stays out of the bare repository, so no alternates file borrows objects from
+elsewhere. `git status --short` prints the edits left out of a commit, and the next log the
+unpushed commits on other branches, which the bundle leaves out; none of either and `Refusing to
+create empty bundle` together mean nothing below the working copy was left unpushed. The bundle is
+as trustworthy as a push of the role's own: read the log's `--stat` before pushing, and refuse a
+change under `.github/workflows/` unless the implement App holds `workflows: write`, since your own
+credential may push a workflow the App could not. The log fails when the issue never pushed
+`legion/<KEY>`; read `git log --stat --oneline rescue/<KEY>` then, and the push creates the branch.
+`git fetch` refuses the bundle when your clone lacks a commit it builds on, such as one since
+force-pushed away on GitHub; drop `--not --remotes=origin` and run step 2 again. `git push` refuses
+anything but a fast-forward of GitHub's branch; when it does, push to a branch of another name and
+merge from there. The pod's agents run while you copy, so finish steps 1 and 2 while it is still
+there, and repeat step 1 when step 2 refuses an archive; step 2 starts in a fresh directory of the
+container each run.
 
 ### Running a workload in the cluster from a role
 
@@ -5843,8 +5989,8 @@ relaunch hears the channels the launch names and no others; the list is one of t
 runtime records per generation, so a daemon restarted with another `slack_channels` re-adopts the
 controller as an address that moved and relaunches it, resuming its session;
 `legion controller start` drops an inherited value, and any controller but this one ignores it),
-the launch secrets' `<NAME>_FILE` pointers, and the six gh variables exactly as an issue pod's role
-container is told them (`LEGION_GH_OWNERS_DIR=/var/run/legion/gh`, `GH_CONFIG_DIR` its first owner's
+the launch secrets' `<NAME>_FILE` pointers, and the six gh variables exactly as each role of an
+issue pod is told them (`LEGION_GH_OWNERS_DIR=/var/run/legion/gh`, `GH_CONFIG_DIR` its first owner's
 directory there, `LEGION_GH_PATH=/usr/local/bin/gh`, `GH_TOKEN=""`, `GITHUB_TOKEN=""`, `GH_HOST=""`)
 and the git credential entries every role of an issue pod is told
 ([Anatomy of a Sandbox pod](#anatomy-of-a-sandbox-pod)), and nothing of
