@@ -2,52 +2,43 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-393",
-  "completed": "2026-10-25T23:52:00Z",
-  "round": "answers the tester's failure at 2135849104505c182a700291ae8546ce8d0843fb (test.json failures[0]) and its three risks; the first round's proof of every other criterion is the implement handoff at 79cbbf1b and still stands, since this round changes only embedqueue's Run/coverage pass, the Azure batch byte bound and their docs",
+  "completed": "2026-10-26T00:58:00Z",
+  "round": "answers review round 1 at b505eafc00e5 (code head 55eb49eb71c1): finding 1 (the PR body's Contract change census), finding 2 (rows dead before 0117 re-admitted on Bedrock), minors 3 and 4, and the hardening item on the Azure success body; code head f29797a6693c. The earlier rounds' proof of every other criterion stands: this round changes migration 0117 (one update), comments, and Embed's read of a successful Azure answer.",
   "proof": [
     {
-      "criterion": "The server itself embeds everything it holds after boot, including items written before the embedding triggers existed, with no command run by a person (the tester's failure: Run's coverage pass refused while the scan loop holds a cursor)",
-      "surface": "real envoy-dispatch built at the head, on a copy of the tester's migrated database (Postgres 17.11 + pgvector 0.8.0 in the issue pod), DISPATCH_EMBEDDER=azure keyless (the pod's projected token exchanged at Entra) against the live embed-v-4-0 deployment",
-      "command": "createdb infra393_r2 from infra393_test; the tester's cjk-burst.sql (50 pending 32,000-character CJK comments) plus 5 comments inserted with session_replication_role = replica; serve.sh EMBED_MODE=azure; grep ERROR / 'coverage pass failed' / 'second pooled' in the log; curl -H 'Authorization: Bearer e2e-token' …/api/v1/search/coverage | jq .total",
-      "observed": "boot coverage pass ran beside the scan loop with no ERROR line: 'coverage pass … added=5 … items=150 current=95 lacking=55 failed=0'; within 68 s coverage read items 150 current 150 lacking 0 failed 0 oldest null; the tester's red test TestRunsCoveragePassIsNotRefusedWhileTheScanLoopHoldsACursor passes unmodified",
-      "headSha": "55eb49eb71c11bf1b4f5c05566a01a04204ffa78",
-      "negativeControl": "the same red test on the pre-fix tree (9a1cbfdf, extracted with git archive, GOWORK=off) → FAIL 'after Run: items 3 current 2 lacking 1 … the coverage pass stopped before the comment no trigger saw', logging 'second pooled connection requested while one is held' and 'coverage pass failed; the next one runs on schedule'"
+      "criterion": "Bedrock stays today's behaviour, unchanged for a deployment that sets nothing new: a row that died before this release is not re-admitted (review finding 2)",
+      "surface": "real envoy-dispatch binaries on a Postgres 17.11 + pgvector 0.8.0 database in the issue pod: main's server (fork point f2c17ded) migrated a fresh database to 0116 and took a project, 5 issues and 3 comments through its API; SQL then gave 6 rows a Bedrock vector (model us.cohere.embed-v4:0, as that release writes) and marked 2 rows (an issue and a comment) dead with 10 confirmed failures and 12 attempts, as that release's queue does; the database was copied twice",
+      "command": "serve2.sh EMBED_MODE=bedrock-region (AWS_REGION set, no AWS credentials, so any Bedrock call fails) BIN=envoy-dispatch built at f29797a6693c on copy A; psql select kind, id, dead, dead_model, confirmed_failures, attempt_count from embeddings where dead; curl -H 'Authorization: Bearer e2e-token' …/api/v1/search/coverage",
+      "observed": "0117 recorded dead_model us.cohere.embed-v4:0 on both dead rows; the boot pass logged 'coverage pass identity=us.cohere.embed-v4:0 … foreignVectorsDropped=0 … foreignDeadReadmitted=0 identityStepsSkipped=false items=8 current=6 lacking=0 failed=2' with no WARN and no ERROR, and made no Bedrock call (no canary: nothing foreign); both rows stayed dead with 10 and 12; coverage identity us.cohere.embed-v4:0 place bedrock, failed 2",
+      "headSha": "f29797a6693c3d63a0cd88b5c64fc43b5b6dbe9a",
+      "negativeControl": "the pre-fix binary (55eb49eb71c1) on copy B, same settings → dead_model null on both rows, and the pass counted them foreign: a Bedrock canary call, then WARN 'coverage pass left other identities' vectors and dead rows in place … foreignVectorsLeft=0 foreignDeadLeft=2', which with working credentials re-admits both"
     },
     {
-      "criterion": "A misnamed deployment (any identity change) no longer drops every vector before the configured embedder has answered (the tester's risk 1)",
-      "surface": "the head's binary on its own copy of the tester's database (infra393_r3: 97 vectors under azure:<resource>.services.ai.azure.com/embed-v-4-0, one vector relabelled us.cohere.embed-v4:0, one row dead under us.cohere.embed-v4:0)",
-      "command": "serve.sh with DISPATCH_AZURE_EMBED_DEPLOYMENT=embed-v-4-0-typo; psql select model, dead, count(*) from embeddings group by 1,2; stop; serve.sh with the right deployment; the same psql and the coverage route",
-      "observed": "typo: WARN 'coverage pass left other identities' vectors and dead rows in place: the configured embedder has not embedded anything yet and a canary failed' canaryError='HTTP 404 Not Found, error code \"DeploymentNotFound\"' foreignVectorsLeft=94 foreignDeadLeft=1, then 'coverage pass … foreignVectorsDropped=0 … identityStepsSkipped=true'; the table still held 97 + 1 vectors and the dead row after the process stopped",
-      "headSha": "55eb49eb71c11bf1b4f5c05566a01a04204ffa78",
-      "negativeControl": "the right deployment on the same database → 'foreignVectorsDropped=1 … foreignDeadReadmitted=1 identityStepsSkipped=false', the two rows re-embedded, coverage items 95 current 95 lacking 0 failed 0 (at the pre-fix head the tester saw the typo drop 41 vectors at the first pass)"
-    },
-    {
-      "criterion": "Each Azure background call carries at most 320,000 bytes, so dense text finishes inside the 60 s request timeout (the tester's risk 2; risk 3, EstimateTokens' under-count, is documented where it paces Azure and meets 429s the queue retries as throttles)",
-      "surface": "the two Azure runs above: the head's binary (infra393_r2) and the tester's binary at 2135849104505c182a700291ae8546ce8d0843fb (infra393_r4), each on a fresh copy with the same 50 dense comments",
-      "command": "psql per database: group the 50 new comments' rows by embedded_at (one value per committed call), count the groups and the largest group's bodies and bytes",
-      "observed": "head: 17 calls, at most 3 bodies and 287,988 bytes a call, every row current, attempt_count and confirmed_failures 0",
-      "headSha": "55eb49eb71c11bf1b4f5c05566a01a04204ffa78",
-      "negativeControl": "the pre-fix binary on the same seed → 1 call of 50 bodies, 4,799,720 bytes (the size whose dense form the tester measured at 65 s against the 60 s timeout)"
+      "criterion": "A row dead before 0117 is re-admitted once when the deployment switches to Azure",
+      "surface": "the fixed binary on copy A after the Bedrock run, DISPATCH_EMBEDDER=azure keyless (the pod's projected token exchanged at Entra) against the live embed-v-4-0 deployment",
+      "command": "serve2.sh EMBED_MODE=azure BIN=envoy-dispatch built at f29797a6693c; psql select kind, dead, dead_model, model from embeddings; curl …/api/v1/search/coverage | jq .total",
+      "observed": "'coverage pass identity=azure:<resource>.services.ai.azure.com/embed-v-4-0 … foreignVectorsDropped=6 … foreignDeadReadmitted=2 identityStepsSkipped=false'; within 10 s coverage items 8 current 8 lacking 0 failed 0, every issue and comment row under the Azure identity, none dead",
+      "headSha": "f29797a6693c3d63a0cd88b5c64fc43b5b6dbe9a",
+      "negativeControl": "the Bedrock run on the same rows just before → foreignDeadReadmitted=0 and both rows dead; TestCoverLeavesARowDeadUnderBedrockDeadUntilAnotherIdentity holds the same pair, and TestMigrationAddsPendingSince fails with the 0117 update removed (the worker ran it so, then restored the line)"
     }
   ],
   "localChecks": [
-    "cd packages/envoy && gofmt -l ./internal/dispatch ./cmd/dispatch → no output; go vet ./internal/dispatch/embed/... ./internal/dispatch/embedqueue/... ./internal/dispatch/api/... → clean",
-    "DISPATCH_TEST_DATABASE_URL=<local Postgres 17 + pgvector> go test -count=1 ./internal/dispatch/embed/... ./internal/dispatch/embedqueue/... ./internal/dispatch/store/... ./cmd/dispatch/... → ok; ./internal/dispatch/api/... -timeout 45m → ok (1084 s on this pod; the default 10-minute timeout expired on the first run, CI's envoy-go lane is green at the head)",
-    "the red test's file diffed from the tester's commit f2d36015 to the head: additions only, the test itself unchanged"
+    "bash .github/scripts/check-body-embed-limit.sh → exit 0",
+    "cd packages/envoy && gofmt -l ./internal/dispatch ./cmd/dispatch → no output; go vet ./internal/dispatch/embed/... ./internal/dispatch/embedqueue/... ./internal/dispatch/store/... ./internal/dispatch/api/... → clean",
+    "DISPATCH_TEST_DATABASE_URL=<local Postgres 17 + pgvector> go test -count=1 ./internal/dispatch/embed/... ./internal/dispatch/embedqueue/... ./cmd/dispatch/... → ok; ./internal/dispatch/store/... → ok. ./internal/dispatch/api/... not re-run: its change is comments only, compiled by go vet; it passed at 55eb49eb (1084 s) and CI runs it"
   ],
   "filesChanged": [
-    "packages/envoy/internal/dispatch/embedqueue/{queue,coverage,canary}.go, coverage_test.go, limits_test.go",
-    "packages/envoy/internal/dispatch/embed/{embed,azure,bedrock}.go and tests",
-    "packages/envoy/internal/dispatch/api/search.go",
-    "packages/envoy/cmd/dispatch/{README,AGENTS}.md, packages/envoy/CHANGELOG.md"
+    "packages/envoy/internal/dispatch/store/migrations/0117_embeddings_pending_since.{up,census}.sql, store/embeddings_pending_since_migration_test.go",
+    "packages/envoy/internal/dispatch/embedqueue/coverage.go (comment), coverage_test.go (new test, comment)",
+    "packages/envoy/internal/dispatch/embed/azure.go, azure_test.go (16 MiB cap on a successful answer)",
+    "packages/envoy/internal/dispatch/api/search_meaning_test.go (comments), .github/scripts/check-body-embed-limit.sh (comment), packages/envoy/cmd/dispatch/README.md"
   ],
   "trickyParts": [
-    "Run gives the coverage pass and the scan loop each its own store.ForConcurrentRead mark; one shared mark made whichever loop held a cursor refuse the other's next statement.",
-    "The coverage pass drops another identity's vectors and re-admits rows dead under another identity only once this process has embedded something or a canary succeeds; otherwise it logs a WARN naming what it kept and skips only those steps.",
-    "embed.Limits.MaxBatchBytes bounds tokens from above (a Cohere token is at least one byte), so chunkForBudget closes a group at the text count or the byte budget; Azure sets 320,000, Bedrock 0 (no budget)."
+    "0117 records dead_model us.cohere.embed-v4:0 on every row already dead: embed.Model was that constant from LEGION-549 (731d71d3c) to f2c17ded, never overridden, so it is the identity those rows died under. During the roll, a row the previous release confirms dead after the update records none and gets this release's attempts once; the migration and README say so.",
+    "Embed reads a successful answer through an io.LimitedReader of cap+1 and refuses one that exhausts it, naming the cap and none of the body, rather than decoding a cut body."
   ],
-  "deviations": [
-    "Plan Decision 8 (drop foreign vectors at the first pass) now waits for the configured embedder's first success, answering the tester's risk 1; the tester's record names it the architect's decision, so the report to the architect asks it to confirm."
-  ],
-  "openQuestions": []
+  "deviations": [],
+  "openQuestions": [
+    "The reviewer's other hardening item (GET /api/v1/search/coverage and every pass hash every searchable text) is unchanged and stays in the PR body's 'Not proven / risk'; it is for the architect whether it needs work before merge."
+  ]
 }
