@@ -217,6 +217,56 @@ func TestAnAgentThatRefusesEveryPromptRunsOutOfItsBudget(t *testing.T) {
 	h.wantState(StateLaunching)
 }
 
+// Oh My Pi answers a prompt that reaches it mid-turn "Agent is already processing": the agent is in
+// a turn of its own — an Envoy notice's, which a tree publishes while its workers boot — so it is
+// working, not refusing the work. That answer to the task's own send is charged nothing, as the
+// same answer after an acknowledgement is (lateRefused), and the turn's end sends the task again.
+// Charged, three such collisions in a row retired the agent in the middle of the turn doing the
+// work, and two retirements failed its claim.
+func TestABusyAgentsRefusalOfTheSendIsChargedNothingAndItsTurnsEndSendsTheTask(t *testing.T) {
+	const busy = "Agent is already processing. Use steer() or followUp() to queue messages, or wait for completion."
+	h := newHarness(t)
+	h.reach(StateReady)
+	base := len(h.prompts())
+	h.conn.RefusePrompt(busy)
+	h.must(RequestDeliver{Claim: testToken, Task: "the task", Generation: 7})
+	task := h.pending().ID
+
+	for sent := 1; sent <= 4; sent++ {
+		if prompt := h.wantPrompts(base + sent)[base+sent-1]; prompt.DeliveryID != task {
+			t.Fatalf("send %d went under %s, want the task's %s", sent, prompt.DeliveryID, task)
+		}
+		h.wantBudgets(Budgets{})
+		h.wantCalls("Suspend", 0)
+		if p := h.pending(); p.ID != task || !p.DeliveredAt.IsZero() || !p.ConfirmedAt.IsZero() {
+			t.Fatalf("after busy refusal %d the task is %+v, want it waiting unread", sent, p)
+		}
+		h.must(StreamTurnStart{Claim: testToken}) // the notice's turn
+		if run := h.claim().ServingRun(); run != 0 {
+			t.Fatalf("during the notice's turn the claim serves run %d, want none: the agent never read the task", run)
+		}
+		if sent == 4 {
+			h.conn.FailPrompt(nil) // the agent takes the next prompt
+		}
+		h.must(StreamTurnEnd{Claim: testToken}) // its end sends the task again
+	}
+
+	if prompt := h.wantPrompts(base + 5)[base+4]; prompt.DeliveryID != task {
+		t.Fatalf("the send after the last notice went under %s, want the task's %s", prompt.DeliveryID, task)
+	}
+	h.must(StreamTurnStart{Claim: testToken}) // the task's own turn
+	if run := h.claim().ServingRun(); run != 7 {
+		t.Fatalf("during the task's turn the claim serves run %d, want the task's 7", run)
+	}
+	h.must(StreamTurnEnd{Claim: testToken})
+	if c := h.claim(); c.Pending != nil || c.ServingGeneration != 7 {
+		t.Fatalf("after the task's turn: pending %+v serving %d, want the task retired and run 7 served", c.Pending, c.ServingGeneration)
+	}
+	h.wantBudgets(Budgets{})
+	h.wantCalls("Suspend", 0)
+	h.wantState(StateIdle)
+}
+
 // The sweep that finds a ready or idle claim's process alive is what retries a delivery waiting
 // for its connection when nothing else will: no hello, no turn end, no request.
 func TestAnAliveSweepSendsAWaitingDelivery(t *testing.T) {

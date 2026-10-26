@@ -50,6 +50,9 @@ func (e *RefusedError) Error() string {
 	return fmt.Sprintf("worker-stream: %s refused %s: %s", e.Claim, e.Command, e.Reason)
 }
 
+// RefusalReason is the words the far side refused with (runtime.RefusalReason).
+func (e *RefusedError) RefusalReason() string { return e.Reason }
+
 func (e *RefusedError) Is(target error) bool {
 	switch target {
 	case runtime.ErrPromptRefused:
