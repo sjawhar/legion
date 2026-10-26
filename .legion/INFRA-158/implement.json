@@ -2,10 +2,18 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-158",
-  "completed": "2026-10-26T22:24:17Z",
+  "completed": "2026-10-26T23:11:46Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2233",
-  "head": "de6daaffe1cd",
+  "head": "58b805d967a00e12722289bfd93de702d4000d58",
   "proof": [
+    {
+      "criterion": "Ninth forward merge leaves the change intact and the pull request mergeable",
+      "surface": "the merged tree's builds and contract tests, and GitHub's mergeability",
+      "command": "go build ./... and go vet of internal/dispatch/api and docs; cd packages/dispatch && bun run typecheck; bun test packages/contracts; cd packages/claude-envoy && bun run check-dist; gh pr view 2233 --json mergeable",
+      "observed": "All pass (contracts 237 pass); GitHub reports MERGEABLE. Fingerprint c0fbebd5 39943e16 -> 58b805d9 172e0d29: the difference is only in the regenerated claude-envoy dist bundles (main now carries #2237's actorAttribution); with dist left out the two diffs are byte-identical.",
+      "headSha": "58b805d967a00e12722289bfd93de702d4000d58",
+      "negativeControl": "At c0fbebd5 GitHub reported CONFLICTING (pi-envoy and pi-legion CHANGELOGs)"
+    },
     {
       "criterion": "Review round 4 finding A: a rebuild of a closed issue's document that the close skipped shows its withdrawn decision block resolved",
       "surface": "Go API on real Postgres 17 through POST /api/v1/artifacts/{id}/rebuild as a person, after PATCH /api/v1/issues/{key} closed the issue beside a document whose history cannot load",
@@ -144,6 +152,7 @@
     }
   ],
   "filesChanged": [
+    "round 6: ninth forward merge 58b805d9 (pi-envoy and pi-legion CHANGELOGs, both sides kept)",
     "round 5: eighth forward merge 24e90b2c (main's AgentName resolution line now carries the withdrawn wording; actor.ts keeps askResolutionBadge/askResolutionReason); docs/rebuild.go and ask_lifecycle.go (rebuild writes the close's states); dispatch web connection.ts, pending-sync.ts, roots.ts (one admission gate, one own-row helper, shared root names); margin/useMarginSheet.ts (withdrawn folds); docs/service.go settleReloaded carries no err; README/AGENTS.md repair retry list is per process",
     "round 4: docs/service.go and docs/ask_lifecycle.go (settleOutcome, followUpSettlement), dispatch web pending-sync.ts and pending-sync.test.ts (public Yjs reads); sixth and seventh forward merges (89be96d2, 337c577d; main deleted skills/dispatch/references/, the fact stays in the issue-update and resolve-ask --help text)",
     "round 3: docs/ask_lifecycle.go (unloadable document skipped), api/issue_ask_lifecycle.go, issue_ask_repair.go, issue_patch.go (window, retry set, WithoutCancel, one write per repair), docs/{ledger,livewrite,mutation,pending_authors,roomstate,service,websocket}.go (lifecycleAuthors deleted, lifecycle writes credit no author), dispatch web pending-sync.ts and connection.ts (admitted), tests; fifth forward merge 3fef5314",
@@ -177,5 +186,5 @@
     "R7 local runs at 39c12172 (from a git archive of the head): api ok (1562 s), store ok, cmd/dispatch ok, -tags multiprocess cmd/dispatch ok (350 s); docs failed only TestAHealthyRoomUnderWritesIsNeverRefused ('too few to say anything' under load), which passes alone (ok 6.6 s) and is not in the diff; pmdoc failed only its timing tests and the differential tests that need the workspace's @legion/proof-editor link absent from the archive (pmdoc is not in the diff). bun test packages/contracts packages/envoy-client: one envoy-config timing test failed under load and passes alone. packages/dispatch: typecheck clean; bun test 2388 pass on the re-run (the first run under load had 2 failures not reproduced). biome check of contracts, dispatch, claude-envoy, envoy-client: no errors. claude-envoy check-dist passes. -race was not run locally (the pod has no C compiler); CI's envoy-go-race lane runs it."
   ],
   "openQuestions": [],
-  "round": 5
+  "round": 6
 }
