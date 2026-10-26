@@ -415,10 +415,13 @@ func (r *Runtime) cacheURL(name string) string {
 // failed earlier run left Suspended), s's pod template reserves other than the configuration's
 // runtime.kubernetes.repository_cache.resources (templateResized: the operator changed them), or
 // the pod it owns runs an image other than the runtime's (imageDrift) or has ended (terminal:
-// evicted, say). It then suspends s when it is not already, waits the old pod out (awaitPodGone),
-// and sets the pod template, on the runtime's image and reservation, and Running in one patch, as
-// relaunch does. The Sandbox and its volume are kept through every replacement: a drifted pod
-// costs a new pod, not a new clone. A Running Sandbox whose template reserves what the
+// evicted, say). A pod it would replace while that pod still runs waits until the cache serves no
+// stream (cacheStreams): replacing it ends every tar it is sending, which fails each fetch reading
+// one and has the daemon make its issue pod again, so the replacement is left to a later sweep
+// while a tar is sent or queued. It then suspends s when it is not already, waits the old pod out
+// (awaitPodGone), and sets the pod template, on the runtime's image and reservation, and Running
+// in one patch, as relaunch does. The Sandbox and its volume are kept through every replacement: a
+// drifted pod costs a new pod, not a new clone. A Running Sandbox whose template reserves what the
 // configuration does, and whose pod is live on the right image or not made yet — the controller
 // makes one — is left alone.
 func (r *Runtime) reconcileCachePod(ctx context.Context, s *sandbox, repo ghrepo.Repository) error {
@@ -427,6 +430,12 @@ func (r *Runtime) reconcileCachePod(ctx context.Context, s *sandbox, repo ghrepo
 	_, drifted := imageDrift(pod, r.image)
 	if s.mode() != modeSuspended && !templateResized(s, r.cacheConfig.Resources) && (!owned || (!drifted && !terminal(pod))) {
 		return nil
+	}
+	if s.mode() != modeSuspended && owned && !terminal(pod) {
+		if streams := r.cacheStreams(ctx, pod, repo); streams > 0 {
+			r.log.Info("sandbox runtime: repository cache pod is replaced once it serves no stream", "sandbox", s.Name, "repo", repo.String(), "streams", streams)
+			return nil
+		}
 	}
 	if s.mode() != modeSuspended {
 		if err := r.setMode(ctx, s, modeSuspended); err != nil {
@@ -681,6 +690,26 @@ func (r *Runtime) readCacheHealth(ctx context.Context) {
 	r.mu.Lock()
 	r.cacheHealth = reads
 	r.mu.Unlock()
+}
+
+// cacheStreams is how many tars pod, repo's cache pod, is sending or holding in its queue, as its
+// /healthz answers now, read as readCacheHealth reads it. It is 0 when there is nothing to read
+// streams from: the pod has no address, its /healthz cannot be read (the read is logged), or it
+// answers no streams (a cache of an earlier release, which counted none).
+func (r *Runtime) cacheStreams(ctx context.Context, pod *corev1.Pod, repo ghrepo.Repository) int {
+	if pod.Status.PodIP == "" {
+		return 0
+	}
+	address := "http://" + net.JoinHostPort(pod.Status.PodIP, strconv.Itoa(repocache.Port))
+	health, err := cacheHealthOf(ctx, r.cacheHealthClient(), address, repo)
+	if err != nil {
+		r.log.Warn("sandbox runtime: the repository cache's streams could not be read before its replacement", "pod", pod.Name, "repo", repo.String(), "error", err)
+		return 0
+	}
+	if health.Streams == nil {
+		return 0
+	}
+	return *health.Streams
 }
 
 // cacheHealthOf is GET <address>/healthz through client, carrying no credential, decoded, within a

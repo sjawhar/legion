@@ -64,14 +64,17 @@ type Options struct {
 }
 
 // Health is what GET /healthz answers: whether the cache has a clone to serve, its repository, the
-// default branch's head, when its last fetch in this process succeeded (zero before one has), and
-// how many bytes /tar streams.
+// default branch's head, when its last fetch in this process succeeded (zero before one has), how
+// many bytes /tar streams, and how many /tar requests it is sending or holding in its queue at the
+// answer (Streams), which the daemon waits to reach zero before it replaces a live cache pod. A
+// cache of an earlier release answers no streams, so Streams is nil there.
 type Health struct {
 	Ready       bool      `json:"ready"`
 	Repo        string    `json:"repo"`
 	Head        string    `json:"head,omitempty"`
 	LastFetchAt time.Time `json:"lastFetchAt,omitzero"`
 	Bytes       int64     `json:"bytes"`
+	Streams     *int      `json:"streams,omitempty"`
 }
 
 // repackEvery is how long after the clone, or its last repack, a fetch repacks it.
@@ -100,8 +103,9 @@ var maxStreams = 32
 //
 //	GET /readyz   the kubelet's readiness probe, which carries no token: 200 once the clone is
 //	              there to serve, 503 before, and nothing else.
-//	GET /healthz  200 {"ready":true,"repo":"acme/widgets","head":"<default branch sha>","lastFetchAt":"…","bytes":N}
-//	              once the clone is there to serve; 503 {"ready":false,…} before.
+//	GET /healthz  200 {"ready":true,"repo":"acme/widgets","head":"<default branch sha>","lastFetchAt":"…","bytes":N,"streams":S}
+//	              once the clone is there to serve; 503 {"ready":false,…} before. streams is the
+//	              /tar requests being sent or waiting at the answer.
 //	GET /tar      a tar stream of the bare clone's refs and packs (workspace.FeedEntry), taken under
 //	              the read lock, so no fetch moves refs or packs while it streams, at most
 //	              maxStreams at once, a request past them waiting its turn; 503 before the clone
@@ -214,7 +218,8 @@ func (opts Options) check() error {
 // cache is Serve's state: lock is the clone's refs and packs as a tar reads them, written by every
 // fetch and read by every tar; maint keeps a fetch and a repack from running at once, and is held
 // by refresh alone; health is what /healthz answers, swapped whole after each fetch and repack;
-// streams holds one token per /tar stream being sent, maxStreams at most.
+// streams holds one token per /tar stream being sent, maxStreams at most; inFlight counts the /tar
+// requests being sent or waiting for a token, which /healthz reports as Health.Streams.
 type cache struct {
 	opts       Options
 	dir        string
@@ -223,6 +228,7 @@ type cache struct {
 	health     atomic.Pointer[Health]
 	lastRepack time.Time
 	streams    chan struct{}
+	inFlight   atomic.Int64
 }
 
 // newCache is the state Serve keeps for opts' clone at dir.
@@ -488,7 +494,10 @@ func (c *cache) handler() http.Handler {
 		}
 	})
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
-		health := c.health.Load()
+		answer := *c.health.Load()
+		streams := int(c.inFlight.Load())
+		answer.Streams = &streams
+		health := &answer
 		w.Header().Set(workspace.CacheRepositoryHeader, c.opts.Repo.String())
 		w.Header().Set("Content-Type", "application/json")
 		if !health.Ready {
@@ -533,6 +542,8 @@ func (c *cache) serveTar(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "the repository cache holds no clone yet", http.StatusServiceUnavailable)
 		return
 	}
+	c.inFlight.Add(1)
+	defer c.inFlight.Add(-1)
 	select {
 	case c.streams <- struct{}{}:
 		defer func() { <-c.streams }()

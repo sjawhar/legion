@@ -2844,9 +2844,10 @@ dies (`git remote-https`, `git index-pack`). It serves, on port 8418:
 - `GET /readyz`: 503 until the first clone is whole, then 200, with nothing else; the pod's
   readiness probe, which carries no token.
 - `GET /healthz`: `503 {"ready":false,…}` until the first clone is whole, then `200 {"ready":true,
-  "repo":"<owner>/<repo>","head":"<default branch's commit>","lastFetchAt":"…","bytes":<n>}`; it
-  waits on no fetch, and answers any request, since it holds nothing secret and nothing of the
-  repository's content.
+  "repo":"<owner>/<repo>","head":"<default branch's commit>","lastFetchAt":"…","bytes":<n>,
+  "streams":<s>}`, `streams` being the `/tar` requests it is sending or holding in its queue at the
+  answer; it waits on no fetch, and answers any request, since it holds nothing secret and nothing
+  of the repository's content.
 - `GET /tar`: the clone's refs and packs as a tar stream — `HEAD`, `packed-refs`, `refs/`,
   `objects/pack/pack-<id>.pack` and the `objects/pack/pack-<id>.idx` git reads each pack through,
   no loose object or configuration — which waits for a fetch under way to finish, so it never
@@ -2954,9 +2955,13 @@ ended, or was left `Suspended`, or whose Sandbox's pod template reserves other t
 `runtime.kubernetes.repository_cache.resources` now says, gets a new pod while its Sandbox and
 volume stay, so a new release or a new reservation costs a pod, not a clone. The reservation is
 read from the Sandbox's pod template, never from the pod, since GKE Autopilot rewrites a pod's
-requirements at admission; the replacement ends every tar the cache was streaming, so the fetches
-reading them fail and their pods are made again. A launch whose cache cannot be made fails,
-naming why. The cache of a
+requirements at admission. A pod still running is replaced only once it serves no stream: the
+daemon asks its `/healthz` first, whose `streams` counts the tars it is sending or holding in its
+queue, and while that is above 0 it logs `repository cache pod is replaced once it serves no
+stream` and leaves the pod to a later sweep, because the replacement would end every one of those
+tars, failing each fetch reading one and making its issue pod again. A cache of an earlier release
+answers no `streams`, and one whose `/healthz` cannot be read is replaced at once, as before. A
+launch whose cache cannot be made fails, naming why. The cache of a
 repository the mapping no longer names is annotated `legion.dev/cache-unmapped-at` at the sweep
 that finds it so, kept for `runtime.kubernetes.repository_cache.retain_hours` (168 by default), and
 then deleted with its volume and Secret; mapped again before that, it loses the annotation and

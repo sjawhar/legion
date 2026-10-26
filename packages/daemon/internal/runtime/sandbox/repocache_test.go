@@ -434,6 +434,47 @@ func TestEnsureRepositoryCacheReadsTheTemplateNotThePodForItsReservation(t *test
 	}
 }
 
+// A live cache pod due for replacement is left while its /healthz counts a stream it is sending or
+// queueing, since the replacement would end every one of them, and replaced at the first ensure
+// that finds it serving none.
+func TestEnsureRepositoryCacheWaitsForTheStreamsToEndBeforeReplacingAPod(t *testing.T) {
+	var streams atomic.Int64
+	streams.Store(2)
+	served := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set(workspace.CacheRepositoryHeader, cacheRepo.String())
+		n := int(streams.Load())
+		_ = json.NewEncoder(w).Encode(repocache.Health{Ready: true, Repo: cacheRepo.String(), Streams: &n})
+	}))
+	t.Cleanup(served.Close)
+	live := cachePod(cacheRepo, "uid-pod-old", "uid-cache", testImage, corev1.PodRunning)
+	live.Status.PodIP = "10.0.0.5"
+	g := newRig(t, []k8sruntime.Object{reserveCacheCPU(t, cacheObject(t, cacheRepo, "uid-cache", modeRunning, ""), "7"), live})
+	g.r.cacheDial = (&podNetwork{routes: map[string]string{"10.0.0.5:8418": served.Listener.Addr().String()}}).dial
+	g.clearActions()
+	if err := g.r.EnsureRepositoryCache(g.ctx, cacheRepo); err != nil {
+		t.Fatalf("EnsureRepositoryCache: %v", err)
+	}
+	for _, w := range g.writes() {
+		if w.resource == "sandboxes" || w.resource == "pods" {
+			t.Errorf("a cache pod sending 2 streams was replaced: %s", w)
+		}
+	}
+	streams.Store(0)
+	g.clearActions()
+	if err := g.r.EnsureRepositoryCache(g.ctx, cacheRepo); err != nil {
+		t.Fatalf("EnsureRepositoryCache: %v", err)
+	}
+	running := false
+	for _, w := range g.writes() {
+		if w.resource == "sandboxes" && w.verb == "patch" && modePatched(t, w.patch, modeRunning) {
+			running = true
+		}
+	}
+	if !running {
+		t.Errorf("a cache pod serving no stream was not replaced: writes %v", g.writes())
+	}
+}
+
 func jsonEqual(t *testing.T, a, b any) bool {
 	t.Helper()
 	left, err := json.Marshal(a)

@@ -686,6 +686,9 @@ func TestATarPastTheStreamBoundWaitsForAStreamToEnd(t *testing.T) {
 		t.Fatal("a tar past the bound was answered while the stream ahead of it was sent")
 	case <-time.After(300 * time.Millisecond):
 	}
+	if _, health := c.health(t); health.Streams == nil || *health.Streams != 2 {
+		t.Errorf("/healthz counts streams %v, want 2: one sent and one waiting", health.Streams)
+	}
 	unpacked, _ := unpack(t, io.MultiReader(bytes.NewReader(first), ahead.Body))
 	indexed(t, unpacked)
 	ahead.Body.Close()
