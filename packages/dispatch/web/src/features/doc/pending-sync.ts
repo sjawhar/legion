@@ -128,53 +128,95 @@ function addsParking(scratch: Y.Doc, update: Uint8Array): boolean {
   return addsMissingClient || addsPendingDeletes(beforeDeletes, scratch.store.pendingDs);
 }
 
+/** The editor's tree, one of the two roots a Dispatch document holds. */
+const FRAGMENT = "prosemirror";
+/** The margin records the server projects, the other of the two roots. */
+const MARKS = "marks";
+
+/** An object's entries ordered by key, so the order Yjs keeps them in does not count. */
+function sortedEntries(record: Record<string, unknown>): [string, unknown][] {
+  return Object.entries(record).sort(([left], [right]) => left.localeCompare(right));
+}
+
+/** One run of an `XmlText` delta: its text or embed, and the formats it carries. */
+interface DeltaRun {
+  insert: unknown;
+  attributes?: Record<string, unknown>;
+}
+
 /**
- * What a reader sees of a shared type: an element's name, its live children and its live entries.
- * Types are walked item by item rather than read through `toJSON`: a root type no code has asked
- * for by its class yet - the editor's fragment before the editor exists - is a bare
- * `AbstractType` whose `toJSON` shows nothing, and an element's `toString` prints an object
- * attribute as `[object Object]`. Children are flattened, so how Yjs happens to split the same
- * text into items does not count as a change.
+ * The runs a reader sees of a text: adjacent text of the same formats is joined, so how Yjs
+ * happens to split the same text into items does not count as a change.
  */
-function readableType(type: Y.ContentType["type"]): unknown[] {
-  const children: unknown[] = [];
-  for (let item = type._start; item !== null; item = item.right) {
-    if (!item.deleted) {
-      children.push(...readableContent(item.content));
+function readableRuns(delta: readonly DeltaRun[]): unknown[] {
+  const runs: { text?: string; embed?: unknown; marks: [string, unknown][] }[] = [];
+  for (const { insert, attributes } of delta) {
+    const marks = sortedEntries(attributes ?? {});
+    const last = runs.at(-1);
+    if (typeof insert !== "string") {
+      runs.push({ embed: readableValue(insert), marks });
+    } else if (last?.text !== undefined && JSON.stringify(last.marks) === JSON.stringify(marks)) {
+      last.text += insert;
+    } else {
+      runs.push({ text: insert, marks });
     }
   }
-  const entries = [...type._map]
-    .filter(([, item]) => !item.deleted)
-    .map(([key, item]) => [key, readableContent(item.content)]);
-  return type instanceof Y.XmlElement ? [type.nodeName, children, entries] : [children, entries];
+  return runs;
 }
 
-/** What one item shows a reader: its values, a nested type walked, a format as its mark. */
-function readableContent(content: Y.Item["content"]): unknown[] {
-  if (content instanceof Y.ContentType) {
-    return [readableType(content.type)];
+/** What a reader sees of one node of the editor's tree: its name, attributes and content. */
+function readableNode(node: Y.XmlElement | Y.XmlText | Y.XmlHook): unknown {
+  if (node instanceof Y.XmlText) {
+    return ["text", sortedEntries(node.getAttributes()), readableRuns(node.toDelta())];
   }
-  if (content instanceof Y.ContentFormat) {
-    return [{ format: content.key, value: content.value }];
+  if (node instanceof Y.XmlElement) {
+    return [node.nodeName, sortedEntries(node.getAttributes()), node.toArray().map(readableNode)];
   }
-  return content.getContent();
+  return [node.hookName, sortedEntries(node.toJSON())];
 }
 
-/** Everything a reader of `doc` sees, as one string to compare. */
-function readable(doc: Y.Doc): string {
-  return JSON.stringify([...doc.share].map(([name, type]) => [name, readableType(type)]));
+/** What a reader sees of an embed: a node of the tree read as one, another type as JSON. */
+function readableValue(value: unknown): unknown {
+  if (value instanceof Y.XmlElement || value instanceof Y.XmlText || value instanceof Y.XmlHook) {
+    return readableNode(value);
+  }
+  return value instanceof Y.AbstractType ? value.toJSON() : value;
+}
+
+/**
+ * Everything a reader of `scratch` sees, as one string to compare: the editor's tree and the
+ * margin records, the only two roots a Dispatch document holds. A root nobody has asked for by
+ * its class yet - the editor's fragment before the editor exists - is a bare type that shows
+ * nothing, so both are asked for by their class here. That defines them on the document it is
+ * called on, so it is only ever called on a scratch copy, never on the live document the editor
+ * binds. Only public reads are used: children, names, attributes, a text's delta with its
+ * formats, and the margin records as JSON. Values are compared as JSON, so an object attribute is
+ * compared by what it holds rather than printed as `[object Object]`.
+ */
+function readable(scratch: Y.Doc): string {
+  return JSON.stringify([
+    scratch.getXmlFragment(FRAGMENT).toArray().map(readableNode),
+    sortedEntries(scratch.getMap(MARKS).toJSON()),
+  ]);
 }
 
 /**
  * Whether one browser client's stored rows, applied in order to a copy of `doc`, park nothing and
  * leave what the copy shows as it was. Rows the document already holds do; so do rows whose only
  * change the editor of this load derived again. Rows that park never do, so a row typed against a
- * rebuilt history stays named.
+ * rebuilt history stays named. A copy that holds any root but the tree and the margin records,
+ * before or after the rows, holds something the comparison cannot read, so its rows are kept
+ * rather than risk dropping a person's unsent edit. Applying a row adds roots and never removes
+ * one, so the roots after the rows cover those before.
  */
 function changesNothing(doc: Y.Doc, updates: readonly Uint8Array[]): boolean {
   const scratch = scratchOf(doc);
   const before = readable(scratch);
-  return updates.every((update) => !addsParking(scratch, update)) && readable(scratch) === before;
+  return (
+    updates.every((update) => !addsParking(scratch, update)) &&
+    [...scratch.share.keys()].every((name) => name === FRAGMENT || name === MARKS) &&
+    readable(scratch) === before
+  );
 }
 
 export function startPendingSync({

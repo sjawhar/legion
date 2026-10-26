@@ -68,7 +68,7 @@ interface Scripted {
   doc: Y.Doc;
   states: PendingState[];
   sync: PendingSync;
-  /** Types `text` at the end of the document's text, as a local edit, and returns its update. */
+  /** Types `text` at the end of the document's paragraph, as a local edit, and returns its update. */
   type(text: string): Uint8Array;
 }
 
@@ -105,7 +105,7 @@ async function scripted(
         emitted = update;
       };
       doc.on("update", capture);
-      doc.getText("t").insert(doc.getText("t").length, text);
+      typeInto(doc, text);
       doc.off("update", capture);
       if (emitted === undefined) {
         throw new Error("a local edit emits an update");
@@ -148,9 +148,7 @@ async function savedChanges(
 
 /** A browser of an earlier page load: it applied `server`, typed `text`, and kept the edit. */
 async function savedEdit(artifact: string, server: Y.Doc, text: string): Promise<Uint8Array> {
-  const [saved] = await savedChanges(artifact, server, (browser) => {
-    browser.getText("t").insert(browser.getText("t").length, text);
-  });
+  const [saved] = await savedChanges(artifact, server, (browser) => typeInto(browser, text));
   if (saved === undefined) {
     throw new Error("one change saves one row");
   }
@@ -184,10 +182,34 @@ function typeParagraph(doc: Y.Doc): void {
   doc.getXmlFragment("prosemirror").insert(1, [paragraph]);
 }
 
+/** The text of the document's first paragraph, where these tests type. */
+function paragraphText(doc: Y.Doc): Y.XmlText {
+  const paragraph = doc.getXmlFragment("prosemirror").get(0);
+  const text = paragraph instanceof Y.XmlElement ? paragraph.get(0) : undefined;
+  if (!(text instanceof Y.XmlText)) {
+    throw new Error("the document's first block is a paragraph of text");
+  }
+  return text;
+}
+
+/** Types `text` at the end of the first paragraph, opening one in an empty document. */
+function typeInto(doc: Y.Doc, text: string): void {
+  const fragment = doc.getXmlFragment("prosemirror");
+  if (fragment.length === 0) {
+    const paragraph = new Y.XmlElement("paragraph");
+    paragraph.insert(0, [new Y.XmlText(text)]);
+    fragment.insert(0, [paragraph]);
+    return;
+  }
+  const typed = paragraphText(doc);
+  typed.insert(typed.length, text);
+}
+
+/** A server document holding one paragraph of `text`. */
 function serverWith(text: string, clientId: number): Y.Doc {
   const server = new Y.Doc();
   server.clientID = clientId;
-  server.getText("t").insert(0, text);
+  typeInto(server, text);
   return server;
 }
 
@@ -294,7 +316,7 @@ test("a read-only first sync applies nothing and keeps the saved edits", async (
 
   await sync.firstSync(true);
 
-  expect(doc.getText("t").toString()).toBe("shared");
+  expect(paragraphText(doc).toString()).toBe("shared");
   expect(Y.encodeStateVector(doc)).toEqual(before);
   expect((await rowsOf(artifact)).length).toBe(1);
   expect(states.at(-1)).toEqual({ count: 1, readOnly: true, rebuiltAt: undefined, stored: true });
@@ -381,6 +403,95 @@ test("a read-only first sync drops a saved row the server already holds", async 
   expect(states.at(-1)).toEqual({ count: 0, readOnly: true, rebuiltAt: undefined, stored: true });
 });
 
+test("a read-only first sync keeps a saved row that changes an object attribute", async () => {
+  type Attributes = { meta: { size: number } };
+  const artifact = artifactId();
+  const server = new Y.Doc();
+  server.clientID = 100;
+  const image = new Y.XmlElement<Attributes>("image");
+  image.setAttribute("meta", { size: 1 });
+  server.getXmlFragment("prosemirror").insert(0, [image as unknown as Y.XmlElement]);
+  await savedChanges(artifact, server, (browser) => {
+    const saved = browser
+      .getXmlFragment("prosemirror")
+      .get(0) as unknown as Y.XmlElement<Attributes>;
+    saved.setAttribute("meta", { size: 2 });
+  });
+  const { states, sync } = await scripted(artifact, Y.encodeStateAsUpdate(server));
+
+  await sync.firstSync(true);
+
+  expect((await rowsOf(artifact)).length).toBe(1);
+  expect(states.at(-1)).toEqual({ count: 1, readOnly: true, rebuiltAt: undefined, stored: true });
+});
+
+test("a read-only first sync drops a saved row that only splits the same text into other items", async () => {
+  const artifact = artifactId();
+  const server = serverWith("shared", 100);
+  // The same text typed again in two pieces, the later one before the earlier, which Yjs keeps
+  // as two items where the server holds one.
+  await savedChanges(artifact, server, (browser) => {
+    browser.transact(() => {
+      const text = paragraphText(browser);
+      text.delete(0, text.length);
+      text.insert(0, "red");
+      text.insert(0, "sha");
+    });
+  });
+  const { states, sync } = await scripted(artifact, Y.encodeStateAsUpdate(server));
+
+  await sync.firstSync(true);
+
+  expect(await rowsOf(artifact)).toEqual([]);
+  expect(states.at(-1)).toEqual({ count: 0, readOnly: true, rebuiltAt: undefined, stored: true });
+});
+
+test("a read-only first sync drops a saved row that inserts and deletes the same text", async () => {
+  const artifact = artifactId();
+  const server = serverWith("shared", 100);
+  await savedChanges(artifact, server, (browser) => {
+    browser.transact(() => {
+      const text = paragraphText(browser);
+      text.insert(3, "typo");
+      text.delete(3, "typo".length);
+    });
+  });
+  const { states, sync } = await scripted(artifact, Y.encodeStateAsUpdate(server));
+
+  await sync.firstSync(true);
+
+  expect(await rowsOf(artifact)).toEqual([]);
+  expect(states.at(-1)).toEqual({ count: 0, readOnly: true, rebuiltAt: undefined, stored: true });
+});
+
+test("a read-only first sync keeps a saved row that writes a margin record", async () => {
+  const artifact = artifactId();
+  const server = serverWith("shared", 100);
+  await savedChanges(artifact, server, (browser) => {
+    browser.getMap("marks").set("c-1", { kind: "comment", by: "ada" });
+  });
+  const { states, sync } = await scripted(artifact, Y.encodeStateAsUpdate(server));
+
+  await sync.firstSync(true);
+
+  expect((await rowsOf(artifact)).length).toBe(1);
+  expect(states.at(-1)).toEqual({ count: 1, readOnly: true, rebuiltAt: undefined, stored: true });
+});
+
+test("a read-only first sync keeps a saved row that writes a root other than the tree and the margin records", async () => {
+  const artifact = artifactId();
+  const server = serverWith("shared", 100);
+  await savedChanges(artifact, server, (browser) => {
+    browser.getText("notes").insert(0, "aside");
+  });
+  const { states, sync } = await scripted(artifact, Y.encodeStateAsUpdate(server));
+
+  await sync.firstSync(true);
+
+  expect((await rowsOf(artifact)).length).toBe(1);
+  expect(states.at(-1)).toEqual({ count: 1, readOnly: true, rebuiltAt: undefined, stored: true });
+});
+
 test("a connection first admitted read-only and later writable stores and counts the typing", async () => {
   const artifact = artifactId();
   const server = serverWith("shared", 100);
@@ -388,12 +499,12 @@ test("a connection first admitted read-only and later writable stores and counts
   await savedEdit(artifact, server, " saved");
   const { doc, states, sync, type } = await scripted(artifact, Y.encodeStateAsUpdate(server));
   await sync.firstSync(true);
-  expect(doc.getText("t").toString()).toBe("shared");
+  expect(paragraphText(doc).toString()).toBe("shared");
 
   // The issue reopens and the socket reconnects: the new admission is writable. The edit the
   // read-only first sync left is restored, and what the person types now is stored.
   await sync.admitted(false);
-  expect(doc.getText("t").toString()).toBe("shared saved");
+  expect(paragraphText(doc).toString()).toBe("shared saved");
   type(" typed");
 
   await waitFor(async () => expect((await rowsOf(artifact)).length).toBe(2));
@@ -431,7 +542,7 @@ test("a restore that parks on a scratch document is dropped, reported, and leave
 
   expect(Y.encodeStateVector(doc)).toEqual(stateVector);
   expect(doc.store.pendingStructs).toBeNull();
-  expect(doc.getText("t").toString()).toBe("shared");
+  expect(paragraphText(doc).toString()).toBe("shared");
   expect(await rowsOf(artifact)).toEqual([]);
   const reported = states.at(-1);
   expect(reported?.count).toBe(0);
@@ -452,7 +563,7 @@ test("a restore the server already holds fires no update and drops its rows", as
   await sync.firstSync(false);
 
   expect(updates).toEqual([]);
-  expect(doc.getText("t").toString()).toBe("shared saved");
+  expect(paragraphText(doc).toString()).toBe("shared saved");
   expect(await rowsOf(artifact)).toEqual([]);
 });
 
@@ -464,7 +575,7 @@ test("a restore that merges is recorded under the new client and the old rows ar
 
   await sync.firstSync(false);
 
-  expect(doc.getText("t").toString()).toBe("shared saved");
+  expect(paragraphText(doc).toString()).toBe("shared saved");
   expect(await rowsOf(artifact)).toEqual([[artifact, doc.clientID, 1]]);
   expect(states.at(-1)).toEqual({ count: 1, readOnly: false, rebuiltAt: undefined, stored: true });
 });
@@ -478,7 +589,7 @@ test("a stale saved row does not discard another row that still applies", async 
 
   await sync.firstSync(false);
 
-  expect(doc.getText("t").toString()).toBe("shared valid");
+  expect(paragraphText(doc).toString()).toBe("shared valid");
   expect(await rowsOf(artifact)).toEqual([[artifact, doc.clientID, 1]]);
   expect(states.at(-1)?.rebuiltAt).toBeDefined();
 });
@@ -497,7 +608,7 @@ test("a stale row does not let a later row from the same lost history through", 
 
   await sync.firstSync(false);
 
-  expect(doc.getText("t").toString()).toBe("shared valid");
+  expect(paragraphText(doc).toString()).toBe("shared valid");
   expect(doc.store.pendingStructs).toBeNull();
   expect(await rowsOf(artifact)).toEqual([[artifact, doc.clientID, 1]]);
   expect(states.at(-1)?.rebuiltAt).toBeDefined();
@@ -568,7 +679,7 @@ test("a later SyncStep2 acknowledgement retries an earlier row whose individual 
       doc.on("update", (emitted: Uint8Array) => {
         update = emitted;
       });
-      doc.getText("t").insert(0, "first");
+      typeInto(doc, "first");
       if (update === undefined) {
         throw new Error("a local edit emits an update");
       }
@@ -578,7 +689,7 @@ test("a later SyncStep2 acknowledgement retries an earlier row whose individual 
     await sync.frameReceived(syncStatusFrame(true));
     expect(await rowsOf(artifact)).toEqual([[artifact, doc.clientID, 1]]);
 
-    doc.getText("t").insert(doc.getText("t").length, " second");
+    typeInto(doc, " second");
     sync.frameWritten(syncStep2Frame(Y.encodeStateAsUpdate(doc)));
     await sync.frameReceived(syncStatusFrame(true));
 
@@ -695,9 +806,8 @@ test("a real provider's edit typed on an open socket is cleared by its own ackno
 
     // On an open socket the provider writes each edit's frame inside the document's own update
     // event, before any later listener has stored the edit.
-    const text = connection.doc.getText("t");
-    text.insert(0, "first");
-    text.insert(text.length, " second");
+    typeInto(connection.doc, "first");
+    typeInto(connection.doc, " second");
     socket.receive(syncStatusFrame(true, artifact));
 
     const clientId = connection.doc.clientID;
