@@ -2,44 +2,54 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-487",
-  "completed": "2026-10-26T21:14:06Z",
-  "round": 4,
+  "completed": "2026-10-26T22:08:46Z",
+  "round": 5,
   "pullRequest": "https://github.com/sjawhar/legion/pull/2269",
-  "scope": "Narrowed by the INFRA-115 architect after review_round_cap=3 (envoy fdfc5b80): only the deletion of the address give-back after VerifyServiceToken and the 401, 401, 429 test. Main not merged: GitHub reports MERGEABLE.",
-  "answersTesterFailures": [
-    "A token that does not verify always spends its token-login buckets: handlers_launcher.go tokenLogin no longer gives back the address's request after a failed VerifyServiceToken, whatever it is answered; the give-backs after a verified token's TokenLogin 5xx stay. Fixed in fa1312aa, with TestATokenThatDoesNotVerifySpendsItsAddressBucketWhileTheDatabaseIsAway. The doc comments on tokenLogin, writeTokenLoginRefusal and two in limits.go now say the give-back applies only once the token verified."
+  "scope": "Review round 1 (eba4fa9c), narrowed by the INFRA-115 architect (envoy 3d4d8ca0) to the reviewer's three findings; the two Minor points and the reviewer's one-SQL-definition note go on the Fast-follow line. Main not merged: GitHub reports MERGEABLE.",
+  "answersReview": [
+    "Thread PRRT_kwDORFy7ds6wduPX (clock beats before the broker serves): the serving clock is built and started beside srv.Serve, after close(serveStarted), still on serving. Fixed in 301addfd; TestABrokerThatDiesBeforeServingRecordsNoServingBeat.",
+    "Thread PRRT_kwDORFy7ds6wduPg (a beat has no deadline; a held lock stalls it silently and the guard fails open): each beat runs under context.WithTimeout(Interval) with lock_timeout, statement_timeout and idle_in_transaction_session_timeout set to Interval for its transaction, and the WARN carries timed_out. A deadline alone cannot keep the guard off while one row is held, so migration 0019 now keeps one row per broker process (process, last_serving_at, not_serving_after; no seed): a beat upserts only its own row when no gap exists, and only a beat that finds a gap takes pg_advisory_xact_lock to give the time back once; enrollment_lease_live reads the latest row. Fixed in 301addfd; TestAHeldServingLockFailsTheBeatAndAnotherBrokerKeepsTheGuardOff.",
+    "Thread PRRT_kwDORFy7ds6wduPo (no Contract change census for the config refusal): the PR body now carries a Contract change census with both searches, every hit and its disposition, and the rollout line."
   ],
   "proof": [
     {
-      "criterion": "A token that does not verify spends its address's bucket, also while the database is away",
-      "surface": "the broker's HTTP API in-process on real Postgres, store closed (newTestServerWith, PerAddress burst 2, PerLogin burst 100)",
-      "command": "cd packages/envoy && BROKER_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:54487/postgres?sslmode=disable go test -count=1 -v ./internal/broker/api",
-      "observed": "ok (176.7s), 0 SKIP; TestATokenThatDoesNotVerifySpendsItsAddressBucketWhileTheDatabaseIsAway PASS (forged token claiming the daemon's account: 401, 401, 429); TestATokenLoginTheBrokerCouldNotCompleteSpendsNoAccountBucket, ...NoAddressBucket, TestARefusedTokenLoginStillSpendsItsAccountBucket, TestAForgedTokenFloodIsLimitedByAddress PASS",
-      "headSha": "fa1312aac8e972163afbedf7bedca8251a1abe58",
-      "negativeControl": "the same test passes at 6df6138d too, stated rather than faked: VerifyServiceToken (machine/token.go:63-85) answers every failure 4xx, so the removed give-back could not run; the test pins the rule against a later 5xx verifier path. A verified token whose login the broker could not complete still gets both tokens back (TestATokenLoginTheBrokerCouldNotCompleteSpendsNoAddressBucket: four 5xx with an address bucket of 2)"
+      "criterion": "A broker that dies on start-up before it serves records no serving beat (finding 1)",
+      "surface": "the real broker binary on real Postgres, whose exchange issuer answers discovery 404 after 3 s, so it binds and then fatal()s at exchangeKeys",
+      "command": "cd packages/envoy && BROKER_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:54487/postgres?sslmode=disable go test -count=1 -v -run TestABrokerThatDiesBeforeServingRecordsNoServingBeat ./cmd/broker",
+      "observed": "--- PASS (10.36s): the broker exited non-zero after 'broker: fatal ... discovering issuer', and broker_serving was unchanged",
+      "headSha": "301addfdb1bd47748fe856884c465d6330ecce9e",
+      "negativeControl": "with the clock started at its old place (after enroll.Service, before the OAuth secret and the issuers): --- FAIL, 'broker_serving after a broker that never served = \"975964c6-... 2026-10-26 21:49:15.671408+00 00:00:03\", want it left at \"\"'"
     },
     {
-      "criterion": "The daemon logs in again within about 10 s of the broker answering after a database outage of minutes, and a refused credential keeps the long schedule",
-      "surface": "the tester's throwaway rig: the daemon's agentsecrets.Client with its default schedules against the real broker binary built at the head, behind a real httputil.ReverseProxy front door, on real Postgres 16.4 stopped with pg_ctl -m fast",
-      "command": "cd packages/daemon && ZZ_BROKER_BIN=$TMPDIR/bin/broker ZZ_DB_URL=postgres://postgres@127.0.0.1:54487/zzrig?sslmode=disable ZZ_PGCTL=$TMPDIR/pgctl-wrap.sh ZZ_OUTAGE=120s go test -count=1 -v -run 'TestZZDaemonLoginWhileBrokerDatabaseDown|TestZZDaemonLoginRefusedKeepsLongSchedule' ./internal/agentsecrets (rig copied in from $TMPDIR/zz_tester_daemon_test.go.keep and removed after)",
-      "observed": "answers while the database was down map[500:14], no 429; login issued 3.789s after Postgres was back; an unlisted account's 403 made one attempt in 25 s",
-      "headSha": "fa1312aac8e972163afbedf7bedca8251a1abe58",
-      "negativeControl": "the same rig against the broker built at 18abf099 (before the round-3 give-back), 40 s outage: map[429:1 500:5], login issued 23.806s after Postgres was back"
+      "criterion": "A held serving lock fails the stuck broker's beat within a bound, logs the WARN, and does not switch the guard on while another broker serves (finding 2)",
+      "surface": "two ServingClocks (two broker processes) in-process on real Postgres, a test transaction holding one clock's row",
+      "command": "cd packages/envoy && BROKER_TEST_DATABASE_URL=... go test -count=1 -v ./internal/broker/enroll ./internal/broker/api ./internal/broker/requests ./internal/broker/config && go test -count=3 -run 'TestAHeldServingLock|TestTwoBeatsAtOnce' ./internal/broker/enroll",
+      "observed": "all ok, 0 SKIP; TestAHeldServingLockFailsTheBeatAndAnotherBrokerKeepsTheGuardOff PASS 4/4 (A's beat failed in under 2x Interval, one WARN with timed_out=true, B kept beating past the threshold, a lease that ran out in that window was not live and EndLapsed ended it); TestTwoBeatsAtOnceGiveTheTimeBackOnce PASS",
+      "headSha": "301addfdb1bd47748fe856884c465d6330ecce9e",
+      "negativeControl": "with a real gap (rows set back past the threshold) the guard is on: a lease that ran out after the latest beat stays live to Lookup and Renew and EndLapsed skips it (TestTheTimeNoBrokerServedIsGivenBackToTheLeasesItRanOut)"
     },
     {
       "criterion": "After a broker outage longer than a pod's lease, a Legion pod fetches a secret again within one renewal interval of the broker serving again, with no relaunch and no person acting; ended enrollments stay ended",
-      "surface": "the real broker binary run twice on one real Postgres database, the real agent-secrets binary as the worker shim runs it, a test-owned forwarder holding one address across the restart; lease 45 s, sweep 1 s",
-      "command": "cd packages/envoy && BROKER_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:54487/postgres?sslmode=disable go test -count=1 -v -run TestABrokerOutageLongerThanALease ./cmd/broker",
-      "observed": "at 6df6138d (round 4 changes only the token-login handler's failed-verification branch, which this test does not reach): first CLI fetch served 185ms after the restart; renewer (never exited) renewed to 44.964s past now 5.904s after; revoked and lapsed pods refused; mismatch renewals 403 POD_IDENTITY_MISMATCH, lease unmoved; 'gave back ... gap=58.36837s'; --- PASS (86.52s), 0 SKIP",
-      "headSha": "6df6138d5af1599caf80ec2a5c947163b0a4cdfc",
-      "negativeControl": "the same outage_test.go in a git-archive export of eee16056's packages/envoy, GOWORK=off: --- FAIL at step (1), 'agent-secrets: proof invalid: not live (PROOF_INVALID)', 0 skips"
+      "surface": "the real broker binary run twice on one real Postgres database, the real agent-secrets binary as the worker shim runs it, a forwarder holding one address across the restart; lease 45 s, sweep 1 s",
+      "command": "cd packages/envoy && BROKER_TEST_DATABASE_URL=... go test -count=1 -v -run TestABrokerOutageLongerThanALease ./cmd/broker",
+      "observed": "first CLI fetch served 100ms after the restart; renewer (never exited) renewed to 44.988s past now 5.893s after; revoked and lapsed pods refused; mismatch renewals 403 POD_IDENTITY_MISMATCH, lease unmoved; 'gave back ... gap=58.366728s ... enrollments=2'; --- PASS (90.29s), 0 SKIP",
+      "headSha": "301addfdb1bd47748fe856884c465d6330ecce9e",
+      "negativeControl": "the same outage_test.go (unchanged) in a git-archive export of eee16056's packages/envoy, GOWORK=off: --- FAIL at step (1), 'agent-secrets: proof invalid: not live (PROOF_INVALID)'"
     }
   ],
   "filesChanged": [
-    "round 4: packages/envoy/internal/broker/api/handlers_launcher.go (no give-back after a failed VerifyServiceToken; doc comments), limits.go (two doc sentences), token_login_test.go (one test)"
+    "packages/envoy/cmd/broker/main.go (clock started beside srv.Serve), serving_start_test.go (new)",
+    "packages/envoy/internal/broker/store/migrations/0019_broker_serving.up.sql (one row per process, no seed; enrollment_lease_live reads the latest row)",
+    "packages/envoy/internal/broker/enroll/serving.go (per-process upsert, advisory-locked give-back, deadline and SET LOCAL timeouts, prune, timed_out on the WARN), serving_test.go",
+    "packages/envoy/internal/broker/api/renew_liveness_test.go (stale serving row by INSERT)",
+    "packages/envoy/AGENTS.md, packages/envoy/CHANGELOG.md, docs/site/src/content/docs/broker/operate.md"
+  ],
+  "trickyParts": [
+    "The per-process row is what lets another broker keep the guard off while one row is held: with a single row no broker can record that it serves while any transaction holds it.",
+    "Exactly-once give-back: only a beat whose fast upsert found a gap takes the advisory lock, re-reads the latest row with a fresh statement, and gives back; a second waiter then finds no gap."
   ],
   "deviations": [
-    "Beyond the narrowed list: writeTokenLoginRefusal's doc comment said tokenLogin gives back on any 500; this round made that false, so one sentence now says it does so only once the token verified. No code beyond the listed deletion changed."
+    "Migration 0019 rewritten in place: it is unreleased (this PR is unmerged)."
   ],
   "openQuestions": []
 }
