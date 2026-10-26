@@ -2,56 +2,36 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-439",
-  "completed": "2026-10-26T07:06:00Z",
-  "round": 3,
-  "headSha": "2aef017d87b732a154c54ff0645d9fabd19925a9",
-  "evidence": "https://github.com/sjawhar/legion/pull/2228#issuecomment-6410222928",
-  "previousRounds": [
-    "https://github.com/sjawhar/legion/pull/2228#issuecomment-6408420209",
-    "https://github.com/sjawhar/legion/pull/2228#issuecomment-6409323092"
-  ],
-  "answeringProvider": "anthropic/claude-haiku-4-5 answered every omp turn in these runs (35 of 35 assistant turns, read from the session files)",
+  "completed": "2026-10-26T09:12:00Z",
+  "round": 4,
+  "headSha": "466c24da87a097f7d26958ce121fed242851cd8e",
+  "evidence": "https://github.com/sjawhar/legion/pull/2228#issuecomment-6412260097",
+  "answeringProvider": "anthropic/claude-haiku-4-5 answered every omp turn in these runs (read from the session files); in the BTW leg the provider was deliberately swapped for a local server that answers 401",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran `bash packages/pi-envoy/scripts/smoke-replay.sh` (local mode) at 2aef017d: exit 0, SMOKE REPLAY PASS through legs 1-6 (reconnect, resume, mid-turn SIGKILL, interrupt, plain abort, switch). The released plugin 10.17.7 lost its mid-turn cards in the control."
+    "how": "Re-ran `bash packages/pi-envoy/scripts/smoke-replay.sh` at 466c24da: exit 0, SMOKE REPLAY PASS for legs 1 to 6 and the controls. Re-drove the finding 4 refusal on a listener built from this head: session_id '>', '*', 'a.b', '>.x', 'x>', 'x*', 'a b', a tab, a newline and '  >  ' each answered 400 naming session_id. A UUID, ' <uuid> ', 'ses_ok', a unicode id and '$JS' were each answered."
   },
-  "failed": 0,
-  "failures": [],
-  "verifiedFixed": [
-    "Round 2 failure 1 (an interrupt withdraws held cards, and they are not shown again while the process lives): r6 L5 same-process PASS. 3 cards held, then abort_and_restore_queue; each card shown once in the same process and still once after a restart.",
-    "Round 2 failure 2 (frames recorded shown after a switch away and back, though omp never wrote them): r6 L6 PASS. The new session got none of the 3 cards; after the switch back each was shown once in the old session.",
-    "Round 1 failure (a held card lost to SIGKILL): r6 L1 to L4 PASS."
-  ],
-  "proof": [
+  "failed": 1,
+  "failures": [
     {
-      "criterion": "Live proof: break a real Oh My Pi session's NATS connection, publish to its own topic, restore, show the event once in the transcript with no second copy",
-      "surface": "real omp --mode rpc with this checkout's pi-envoy, natsd -js and the listener built from this head, NATS behind a socat proxy",
-      "command": "bash packages/pi-envoy/scripts/smoke-replay.sh",
-      "observed": "exit 0. Leg 1: one entry 1 s after the proxy restart, still one three heartbeats later. Leg 2 (resume): one entry. Legs 3 to 6: held cards shown once after SIGKILL, after an interrupt, after a plain abort and after a switch away and back",
-      "headSha": "2aef017d87b732a154c54ff0645d9fabd19925a9",
-      "negativeControl": "released plugin 10.17.7: no entry for an event published while its connection was down; its mid-turn cards and its interrupted cards were lost"
-    },
-    {
-      "criterion": "A message the plugin cannot inject is delivered later or reported, never only caught: cards held behind a turn and taken away by a kill, end of input, an interrupt or a switch",
-      "surface": "same stack; the throwaway legs r6 (L1 to L6), r5 (L7) and r8 (L8)",
-      "command": "/legion/scratch/tmp/adv/r6.sh, r5.sh, r8.sh, built on the smoke harness (comment 6410222928)",
-      "observed": "L1 to L6 PASS. L7: an aside card while idle, and one right after an interrupt, each one card, also after the person's next prompt. L8: 3 cards handed during each of two real compactions (compact answered success) each shown once, four heartbeats later",
-      "headSha": "2aef017d87b732a154c54ff0645d9fabd19925a9",
-      "negativeControl": "the same L5 and L6 legs at 4202727e failed (round 2: 951..953 card=0 in the same process; 962 and 963 recorded with no card)"
-    },
-    {
-      "criterion": "Issue topic followed, dedupe across subjects and re-publishes, races, more than 32 subjects, the route's refusals",
-      "surface": "same stack",
-      "command": "/legion/scratch/tmp/adv/adv5.sh, g4.sh",
-      "observed": "ADV PASS (issue topic, both subjects, re-published event, live burst racing the sweep, reconnect storm, /new and back); ADV G PASS (124 frames on 41 subjects, each once, in stream order)",
-      "headSha": "2aef017d87b732a154c54ff0645d9fabd19925a9",
-      "negativeControl": "POST /v1/replay naming another session's agent subject -> refused not_followed; 33 subjects -> 400"
+      "criterion": "Review finding 4 (the architect's NARROW scope): /v1/replay must not let a caller read every session's inbox",
+      "evidence": "The session_id token check closes only the session_id '>' route. Any caller of /v1 can register an interest for its own session id in notifications.agent.> or in another session's agent subject (POST /v1/interests/subscribe takes any topic). /v1/replay then answers those subjects with other sessions' stored messages, because replayFollowed accepts every registered topic and CheckFilterSubject allows the wildcard. Live, on a listener and natsd built from this head: A registered notifications.agent.>, and its replay returned 2 messages from notifications.agent.01a17000-bbbb-…; A registered B's agent subject, and its replay returned the same 2 messages. Both plugins already leave every other agent subject out of what they follow (pi-envoy followedSubjects), so the listener can refuse an agent subject other than the session's own, and a wildcard that covers agent subjects, without breaking a caller. Red test: 9f8ac8ffbff6, `cd packages/envoy && go test ./cmd/listener -run TestReplayNeverReturnsAnotherSessionsInboxThroughARegisteredInterest -count=1` -> FAIL: notifications.agent.> returned notifications.agent.ses_other's stored message (seq 1)."
     }
   ],
+  "verifiedFixed": [
+    "Finding 2 (a refused BTW replayed as a steering card), on a real Dispatch with the provider answering 401: Dispatch recorded attempt 1 as failed with the 401 error. No card and no turn for the BTW body over five heartbeats of sweeps. The Retry (attempt 2) ran the side turn and got the reply 'ok' 0.5 s later (r12).",
+    "Finding 3 (a replayed subscription.removed left registered), on a real Dispatch: the session was SIGKILLed, alice removed it from the issue, and omp resumed. The removed issue.<KEY>.> topic was not registered again after 5 heartbeats, and was still unregistered after a second restart (r12).",
+    "Finding 4 as the reviewer stated it (session_id '>'): refused 400.",
+    "A person's typed input withdrawn by an interrupt (the architect's item), on a real Dispatch (r9): alice's steer Send mid-turn; omp held it (queuedMessageCount 1); abort_and_restore_queue returned it to the caller ({steering:[{text}]}). Four heartbeats later the session file held exactly one envoy-message card with the text and no user turn, and still one after a SIGKILL and resume. Baseline while idle: one user turn, no card.",
+    "Earlier rounds' cases at this head: r13 L1 to L6 PASS; adv6 PASS; g5 PASS (124 frames, 41 subjects); the Claude Code channel server legs (claude8) PASS."
+  ],
+  "proof": [],
+  "notDrivenLive": [
+    "Finding 5 (a live failure before its subject's cursor started gets a notice) and finding 6 (claude-envoy notice fields encoded): no real surface makes either path fail on demand. Each is covered by the implementer's unit tests, which CI runs.",
+    "Finding 1 (lint and test failing on check-heartbeat-margin.sh) is CI's to judge. At 466c24da when read: Docs success, Worker Image in progress, Tests and Legion Envoy and Contracts queued, PR Title pending."
+  ],
   "observations": [
-    "Claude Code channel server (claude7, real dist/envoy-channel.js over MCP stdio): the reconnect, restart and burst legs each showed every event once. In the SIGKILL-mid-sweep leg, the server wrote one notification at 06:57:09.856 and was killed before it saved its replay state. The restarted server showed that event again (dispatch-1792997769528 = 2). This is a duplicate, not a loss, inside the crash window that claude-envoy's documented boundary leaves open (a channel write counts as shown); Envoy delivery is documented at-least-once. Recorded as a risk for the reviewer, not as a failure. Round 1's run of the same leg showed every event once.",
-    "Withdrawn cards are handed again at the next heartbeat (90 s by default), not at once (implement.json deviation).",
-    "/v1/replay trusts a self-asserted session_id, like every /v1 route (round 1 observation; still true).",
-    "CI at 2aef017d when read: Docs in progress; Tests, Legion Envoy and Contracts and Worker Image queued; PR Title queued (earlier PR Title runs cancelled by newer pushes)."
+    "A person's removal of a session from an issue, live or replayed, leaves the base subject notifications.dispatch.issue.<KEY> registered and subscribed: Dispatch's removal names only the .> topic. Dispatch publishes issue events on notifications.dispatch.issue.<KEY>.<type>, so the base subject receives nothing from Dispatch. This is existing behaviour, not this change.",
+    "Rig: a real Dispatch server built from this head (./cmd/dispatch with DISPATCH_DEV_SIGNIN=1) on an embedded Postgres 16.2 with pgvector 0.6.2 (pgserver 0.1.4), with ENVOY_URL and NATS_URLS set to the smoke stack's listener and natsd. Throwaway scripts are under /legion/scratch/tmp/adv (r9.sh, r12.sh, f2.sh, f3.sh)."
   ]
 }
