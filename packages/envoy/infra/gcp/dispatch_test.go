@@ -65,6 +65,37 @@ func dispatchBrokerAndAppArgs(t *testing.T) *gcp.DispatchArgs {
 	return args
 }
 
+const (
+	azureEmbedEndpoint  = "https://example-resource.services.ai.azure.com/models"
+	azureEmbedKeySecret = "projects/example-project/secrets/example-azure-embed-key"
+	azureTenantID       = "example-azure-tenant-id"
+	azureClientID       = "example-azure-client-id"
+	azureIssuer         = "https://container.googleapis.com/v1/projects/example-project/locations/us-central1/clusters/example-dispatch"
+)
+
+// setAzureEndpoint sets the Azure embedder's endpoint and quota, which come together, and no
+// credential.
+func setAzureEndpoint(a *gcp.DispatchArgs) {
+	a.AzureEmbedEndpoint = pulumi.String(azureEmbedEndpoint)
+	a.AzureEmbedTokensPerMinute = pulumi.IntRef(300000)
+}
+
+// setAzureKey sets the Azure embedder with the key form of credential, the Secret Manager path of
+// the key, and no deployment, which Dispatch then defaults.
+func setAzureKey(a *gcp.DispatchArgs) {
+	setAzureEndpoint(a)
+	a.AzureEmbedKeySecret = pulumi.String(azureEmbedKeySecret)
+}
+
+// setAzureFederation sets the Azure embedder with the keyless form of credential, a deployment
+// named, and the default audience.
+func setAzureFederation(a *gcp.DispatchArgs) {
+	setAzureEndpoint(a)
+	a.AzureEmbedDeployment = pulumi.String("example-embed-deployment")
+	a.AzureTenantId = pulumi.String(azureTenantID)
+	a.AzureClientId = pulumi.String(azureClientID)
+}
+
 func runDispatch(t *testing.T, args *gcp.DispatchArgs, providers bool) (*pulumitest.Mocks, error) {
 	return runDispatchNamed(t, "example-dispatch", args, providers)
 }
@@ -102,6 +133,49 @@ func TestDispatchSettingsApplyDefaults(t *testing.T) {
 	require.Equal(t, "Recreate", settings.StrategyType)
 	require.Nil(t, settings.RollingUpdate, "one replica is recreated, never rolled")
 	require.Equal(t, `{"TCP":{"443":{"HTTPS":true}},"Web":{"example-dispatch.example-tailnet.ts.net:443":{"Handlers":{"/":{"Proxy":"http://example-dispatch.dispatch.svc.cluster.local:8766"}}}}}`, settings.ServeConfig)
+}
+
+// Unset, appCpu and appMemory are the 1 CPU and 4Gi the app container always had, as requests and
+// limits of envoy-dispatch, so a deployment that sets neither sees no change to its pod
+// (TestDispatchPodMatchesGolden pins the whole template).
+func TestDispatchAppContainerDefaultsToOneCPUAnd4Gi(t *testing.T) {
+	settings, err := gcp.ResolveDispatch(dispatchArgs())
+	require.NoError(t, err)
+	require.Equal(t, "1", settings.AppCPU)
+	require.Equal(t, "4Gi", settings.AppMemory)
+	m, err := runDispatch(t, dispatchArgs(), true)
+	require.NoError(t, err)
+	container := podContainer(t, deploymentPodTemplate(t, m, "example-dispatch"), "envoy-dispatch")
+	require.Equal(t, appResources("1", "4Gi"), container["resources"])
+}
+
+// The quantity forms Kubernetes reads are taken as written, up to Autopilot's bounds for the pod:
+// with cloud-sql-proxy's 200m and 256Mi, 300m and 256Mi make the 500m and 512Mi floor, 29800m
+// and 112384Mi the 30 CPU and 110Gi ceiling, and 800m and 6400Mi exactly 6.5 GiB per CPU. A
+// decimal exponent inside e-9 to e18 is valued exactly, its mantissa included.
+func TestDispatchAcceptsAppResourcesWithinAutopilotsBounds(t *testing.T) {
+	for _, row := range []struct{ cpu, memory string }{
+		{"300m", "512Mi"},
+		{"300m", "256Mi"},
+		{"1.5", "6Gi"},
+		{"2", "8589934592"},
+		{"4", "16G"},
+		{"29800m", "112384Mi"},
+		{"2e0", "0.5e10"},
+		{"800m", "6400Mi"},
+		{"1", "4500000k"},
+		{"1000000000e-9", "0.000000004e18"},
+	} {
+		t.Run(row.cpu+"/"+row.memory, func(t *testing.T) {
+			args := dispatchArgs()
+			args.AppCpu = pulumi.StringRef(row.cpu)
+			args.AppMemory = pulumi.StringRef(row.memory)
+			settings, err := gcp.ResolveDispatch(args)
+			require.NoError(t, err)
+			require.Equal(t, row.cpu, settings.AppCPU)
+			require.Equal(t, row.memory, settings.AppMemory)
+		})
+	}
 }
 
 // Above one replica the operator has accepted two overlapping envoy-dispatch processes, so the
@@ -192,6 +266,82 @@ func TestDispatchResolverRefusesInvalidInputs(t *testing.T) {
 		{name: "an invalid app private key secret name", edit: func(a *gcp.DispatchArgs) { setApp(a); a.AppPrivateKeySecretName = "Example_Key" }, err: []string{"appPrivateKeySecretName", "DNS subdomain"}},
 		{name: "an invalid app private key secret key", edit: func(a *gcp.DispatchArgs) { setApp(a); a.AppPrivateKeySecretKey = "bad/key" }, err: []string{"appPrivateKeySecretKey", "must match"}},
 		{name: "fewer than one replica", edit: func(a *gcp.DispatchArgs) { a.Replicas = pulumi.IntRef(0) }, err: []string{"replicas", "at least 1"}},
+		{name: "an app CPU that is not a quantity", edit: func(a *gcp.DispatchArgs) { a.AppCpu = pulumi.StringRef("two") }, err: []string{`appCpu "two"`, "Kubernetes quantity"}},
+		{name: "an app CPU with a memory suffix in the wrong case", edit: func(a *gcp.DispatchArgs) { a.AppCpu = pulumi.StringRef("1gi") }, err: []string{`appCpu "1gi"`, "Kubernetes quantity"}},
+		{name: "an app memory that is not a quantity", edit: func(a *gcp.DispatchArgs) { a.AppMemory = pulumi.StringRef("4 GiB") }, err: []string{`appMemory "4 GiB"`, "Kubernetes quantity"}},
+		{name: "an empty app CPU", edit: func(a *gcp.DispatchArgs) { a.AppCpu = pulumi.StringRef("") }, err: []string{"appCpu is empty", "leave it unset for 1"}},
+		{name: "an empty app memory", edit: func(a *gcp.DispatchArgs) { a.AppMemory = pulumi.StringRef("") }, err: []string{"appMemory is empty", "leave it unset for 4Gi"}},
+		{name: "a negative app CPU", edit: func(a *gcp.DispatchArgs) { a.AppCpu = pulumi.StringRef("-1") }, err: []string{`appCpu "-1"`, "at least 300m", "less than 500m", "Autopilot raises it"}},
+		{name: "an app CPU below Autopilot's pod floor", edit: func(a *gcp.DispatchArgs) { a.AppCpu = pulumi.StringRef("250m") }, err: []string{`appCpu "250m"`, "at least 300m", "cloud-sql-proxy's 200m", "less than 500m", "Autopilot raises it"}},
+		{name: "an app memory below Autopilot's pod floor", edit: func(a *gcp.DispatchArgs) {
+			a.AppCpu = pulumi.StringRef("500m")
+			a.AppMemory = pulumi.StringRef("128Mi")
+		}, err: []string{`appMemory "128Mi"`, "at least 256Mi", "cloud-sql-proxy's 256Mi", "less than 512Mi", "Autopilot raises it"}},
+		{name: "an app CPU above Autopilot's pod ceiling", edit: func(a *gcp.DispatchArgs) {
+			a.AppCpu = pulumi.StringRef("30")
+			a.AppMemory = pulumi.StringRef("64Gi")
+		}, err: []string{`appCpu "30"`, "at most 29800m", "above 30", "rejects"}},
+		{name: "an app memory above Autopilot's pod ceiling", edit: func(a *gcp.DispatchArgs) {
+			a.AppCpu = pulumi.StringRef("20")
+			a.AppMemory = pulumi.StringRef("110Gi")
+		}, err: []string{`appMemory "110Gi"`, "at most 112384Mi", "above 110Gi", "rejects"}},
+		{name: "app CPU raised without memory to match", edit: func(a *gcp.DispatchArgs) { a.AppCpu = pulumi.StringRef("8") }, err: []string{`appCpu "8"`, `appMemory "4Gi"`, "between 1 and 6.5 GiB of memory per CPU"}},
+		{name: "app memory raised without CPU to match", edit: func(a *gcp.DispatchArgs) { a.AppMemory = pulumi.StringRef("32Gi") }, err: []string{`appCpu "1"`, `appMemory "32Gi"`, "between 1 and 6.5 GiB of memory per CPU"}},
+		{name: "app memory just above 6.5 GiB per CPU", edit: func(a *gcp.DispatchArgs) {
+			a.AppCpu = pulumi.StringRef("800m")
+			a.AppMemory = pulumi.StringRef("6401Mi")
+		}, err: []string{`appCpu "800m"`, `appMemory "6401Mi"`, "between 1 and 6.5 GiB of memory per CPU"}},
+		{name: "an app CPU with leading whitespace", edit: func(a *gcp.DispatchArgs) { a.AppCpu = pulumi.StringRef(" 1") }, err: []string{`appCpu " 1"`, "Kubernetes quantity"}},
+		{name: "an app CPU with trailing whitespace", edit: func(a *gcp.DispatchArgs) { a.AppCpu = pulumi.StringRef("1 ") }, err: []string{`appCpu "1 "`, "Kubernetes quantity"}},
+		{name: "an app memory with leading whitespace", edit: func(a *gcp.DispatchArgs) { a.AppMemory = pulumi.StringRef(" 4Gi") }, err: []string{`appMemory " 4Gi"`, "Kubernetes quantity"}},
+		{name: "an app memory with a trailing line break", edit: func(a *gcp.DispatchArgs) { a.AppMemory = pulumi.StringRef("4Gi\n") }, err: []string{`appMemory "4Gi\n"`, "Kubernetes quantity"}},
+		// Kubernetes reads this as 100 CPU: the mantissa makes up for the exponent.
+		{name: "an app CPU whose exponent a small mantissa makes up for", edit: func(a *gcp.DispatchArgs) {
+			a.AppCpu = pulumi.StringRef("0.000000000000000000000000000000000001e38")
+		}, err: []string{`appCpu "0.000000000000000000000000000000000001e38"`, "decimal exponent outside e-9 to e18"}},
+		// Kubernetes reads this as 4 CPU, a size the pod could have with 6Gi.
+		{name: "an app CPU of 4 written with a large exponent", edit: func(a *gcp.DispatchArgs) {
+			a.AppCpu = pulumi.StringRef("0.0000000000000000000000000000000000004e37")
+			a.AppMemory = pulumi.StringRef("6Gi")
+		}, err: []string{`appCpu "0.0000000000000000000000000000000000004e37"`, "decimal exponent outside e-9 to e18"}},
+		// Kubernetes reads this as 10 CPU.
+		{name: "an app CPU whose negative exponent a long mantissa makes up for", edit: func(a *gcp.DispatchArgs) {
+			a.AppCpu = pulumi.StringRef("10000000000000000000000000000000000000000e-39")
+		}, err: []string{`appCpu "10000000000000000000000000000000000000000e-39"`, "decimal exponent outside e-9 to e18"}},
+		{name: "an app memory with an exponent past int's range", edit: func(a *gcp.DispatchArgs) { a.AppMemory = pulumi.StringRef("1e99999999999999999999") }, err: []string{`appMemory "1e99999999999999999999"`, "decimal exponent outside e-9 to e18"}},
+		{name: "an Azure endpoint without its quota", edit: func(a *gcp.DispatchArgs) {
+			setAzureKey(a)
+			a.AzureEmbedTokensPerMinute = nil
+		}, err: []string{"azureEmbedTokensPerMinute is required when azureEmbedEndpoint is set"}},
+		{name: "a zero Azure quota", edit: func(a *gcp.DispatchArgs) { setAzureKey(a); a.AzureEmbedTokensPerMinute = pulumi.IntRef(0) }, err: []string{"azureEmbedTokensPerMinute 0", "positive integer"}},
+		{name: "a negative Azure quota", edit: func(a *gcp.DispatchArgs) { setAzureKey(a); a.AzureEmbedTokensPerMinute = pulumi.IntRef(-1) }, err: []string{"azureEmbedTokensPerMinute -1", "positive integer"}},
+		{name: "an Azure deployment without the endpoint", edit: func(a *gcp.DispatchArgs) { a.AzureEmbedDeployment = pulumi.String("example-embed-deployment") }, err: []string{"azureEmbedEndpoint is required when azureEmbedDeployment is set"}},
+		{name: "an Azure quota without the endpoint", edit: func(a *gcp.DispatchArgs) { a.AzureEmbedTokensPerMinute = pulumi.IntRef(300000) }, err: []string{"azureEmbedEndpoint is required when azureEmbedTokensPerMinute is set"}},
+		{name: "an Azure key without the endpoint", edit: func(a *gcp.DispatchArgs) { a.AzureEmbedKeySecret = pulumi.String(azureEmbedKeySecret) }, err: []string{"azureEmbedEndpoint is required when azureEmbedKeySecret is set"}},
+		{name: "an Azure tenant without the endpoint", edit: func(a *gcp.DispatchArgs) { a.AzureTenantId = pulumi.String(azureTenantID) }, err: []string{"azureEmbedEndpoint is required when azureTenantId is set"}},
+		{name: "an Azure client without the endpoint", edit: func(a *gcp.DispatchArgs) { a.AzureClientId = pulumi.String(azureClientID) }, err: []string{"azureEmbedEndpoint is required when azureClientId is set"}},
+		{name: "an Azure audience without the endpoint", edit: func(a *gcp.DispatchArgs) { a.AzureFederationAudience = pulumi.StringRef("api://example-audience") }, err: []string{"azureEmbedEndpoint is required when azureFederationAudience is set"}},
+		{name: "both Azure credential forms", edit: func(a *gcp.DispatchArgs) {
+			setAzureFederation(a)
+			a.AzureEmbedKeySecret = pulumi.String(azureEmbedKeySecret)
+		}, err: []string{"azureEmbedKeySecret is set with azureTenantId or azureClientId", "exactly one"}},
+		{name: "an Azure endpoint without a credential", edit: setAzureEndpoint, err: []string{"azureEmbedEndpoint needs one credential: azureEmbedKeySecret, or azureTenantId with azureClientId"}},
+		{name: "an Azure tenant without its client", edit: func(a *gcp.DispatchArgs) {
+			setAzureEndpoint(a)
+			a.AzureTenantId = pulumi.String(azureTenantID)
+		}, err: []string{"azureClientId is required when azureTenantId is set"}},
+		{name: "an Azure client without its tenant", edit: func(a *gcp.DispatchArgs) {
+			setAzureEndpoint(a)
+			a.AzureClientId = pulumi.String(azureClientID)
+		}, err: []string{"azureTenantId is required when azureClientId is set"}},
+		{name: "an Azure audience with the key form", edit: func(a *gcp.DispatchArgs) {
+			setAzureKey(a)
+			a.AzureFederationAudience = pulumi.StringRef("api://example-audience")
+		}, err: []string{"azureFederationAudience is set without azureTenantId and azureClientId"}},
+		{name: "an empty Azure audience", edit: func(a *gcp.DispatchArgs) {
+			setAzureFederation(a)
+			a.AzureFederationAudience = pulumi.StringRef("")
+		}, err: []string{"azureFederationAudience is empty", "api://AzureADTokenExchange"}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -232,7 +382,8 @@ func TestDispatchRequiresGCPAndRandomProvidersBeforeRegistering(t *testing.T) {
 // Every plain string input of the component has a row; the seed is found as bus.HoldsSeed finds
 // it: any type, either case, whole, inside a longer value, or split. tailnetAuthKey,
 // signInClientSecret and natsSeedSecret are Inputs, checked once they resolve
-// (TestConstructRefusesASeedInADispatchInput), and natsUrl once it resolves too
+// (TestConstructRefusesASeedInADispatchInput), as are the Azure Inputs
+// (TestConstructRefusesASeedInAnAzureInput), and natsUrl once it resolves too
 // (TestDispatchRefusesABadNatsURLOnceItResolves).
 func TestDispatchRefusesAnNKeySeedInAPlainInput(t *testing.T) {
 	seed, _ := testnats.User(t)
@@ -255,6 +406,8 @@ func TestDispatchRefusesAnNKeySeedInAPlainInput(t *testing.T) {
 		{"a seed inside the sign-in domain", "signInDomain", func(a *gcp.DispatchArgs) { a.SignInDomain = lower + ".example.com" }},
 		{"a seed in the database version", "databaseVersion", func(a *gcp.DispatchArgs) { a.DatabaseVersion = pulumi.StringRef(seed) }},
 		{"a seed in the database tier", "databaseTier", func(a *gcp.DispatchArgs) { a.DatabaseTier = pulumi.StringRef(seed) }},
+		{"a seed as the app CPU", "appCpu", func(a *gcp.DispatchArgs) { a.AppCpu = pulumi.StringRef(seed) }},
+		{"a seed as the app memory", "appMemory", func(a *gcp.DispatchArgs) { a.AppMemory = pulumi.StringRef(seed) }},
 		{"a seed as the namespace", "namespace", func(a *gcp.DispatchArgs) { a.Namespace = pulumi.StringRef(lower) }},
 		{"a seed in an allowed namespace", "allowedNamespaces[1]", func(a *gcp.DispatchArgs) { a.AllowedNamespaces = []string{"envoy", lower} }},
 		{"a seed inside the agent secrets URL", "agentSecretsUrl", func(a *gcp.DispatchArgs) { a.AgentSecretsUrl = "https://" + lower + ".internal.example" }},
@@ -263,6 +416,10 @@ func TestDispatchRefusesAnNKeySeedInAPlainInput(t *testing.T) {
 		{"a seed as the app ID", "appId", func(a *gcp.DispatchArgs) { a.AppId = seed }},
 		{"a seed as the app private key secret name", "appPrivateKeySecretName", func(a *gcp.DispatchArgs) { a.AppPrivateKeySecretName = lower }},
 		{"a seed as the app private key secret key", "appPrivateKeySecretKey", func(a *gcp.DispatchArgs) { a.AppPrivateKeySecretKey = seed }},
+		{"a seed in the Azure federation audience", "azureFederationAudience", func(a *gcp.DispatchArgs) {
+			setAzureFederation(a)
+			a.AzureFederationAudience = pulumi.StringRef("api://" + lower)
+		}},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			args := dispatchArgs()
@@ -1121,4 +1278,187 @@ func TestDispatchBrokerAndAppLeaveTheOtherWorkloadsUnchanged(t *testing.T) {
 	require.NoError(t, err)
 	requirePodGolden(t, m, "example-dispatch-listener", "dispatch-listener-pod.golden")
 	requirePodGolden(t, m, "example-dispatch-tailnet", "dispatch-tailnet-pod.golden")
+}
+
+// A refused Azure configuration is refused by the resolver, before the component registers, so
+// nothing beyond the test's providers exists.
+func TestDispatchRefusesAnAzureMisconfigurationBeforeRegistering(t *testing.T) {
+	args := dispatchArgs()
+	setAzureEndpoint(args)
+	m, err := runDispatch(t, args, true)
+	require.ErrorContains(t, err, "envoy-infra:gcp:Dispatch example-dispatch: azureEmbedEndpoint needs one credential")
+	require.ElementsMatch(t, []string{gcpProviderType, randomProviderType}, m.Types())
+}
+
+// Unset, the Azure inputs leave no trace: no key SecretProviderClass and no accessor beyond the
+// seed's; TestDispatchPodMatchesGolden pins the pod template byte-identical to before they existed.
+func TestDispatchRegistersNoAzureResourceUnset(t *testing.T) {
+	m, err := runDispatch(t, dispatchArgs(), true)
+	require.NoError(t, err)
+	for _, r := range m.Registrations() {
+		require.NotContains(t, r.Name, "azure")
+	}
+}
+
+// azureKeyAccessorURN is the key form's accessor, which the app's Deployment waits for.
+const azureKeyAccessorURN = "urn:pulumi:s::p::" + dispatchType + "$gcp:secretmanager/secretIamMember:SecretIamMember::example-dispatch-azure-embed-key-accessor"
+
+// The key form adds exactly one per-secret accessor for the pod's principal, on the key's secret
+// alone, and the app's Deployment waits for it; the keyless form adds none. The key itself is never
+// an input: no Secret the component writes gains a key.
+func TestDispatchGrantsTheAzureKeyAccessorOnlyWithTheKeyForm(t *testing.T) {
+	args := dispatchArgs()
+	setAzureKey(args)
+	m, err := runDispatch(t, args, true)
+	require.NoError(t, err)
+	var members []string
+	for _, r := range registrationsOf(m, "gcp:secretmanager/secretIamMember:SecretIamMember") {
+		members = append(members, r.Name)
+	}
+	require.ElementsMatch(t, []string{"example-dispatch-nats-seed-accessor", "example-dispatch-azure-embed-key-accessor"}, members)
+	inputs := m.Named(t, "gcp:secretmanager/secretIamMember:SecretIamMember", "example-dispatch-azure-embed-key-accessor").Inputs.Mappable()
+	require.Equal(t, azureEmbedKeySecret, inputs["secretId"])
+	require.Equal(t, "roles/secretmanager.secretAccessor", inputs["role"])
+	require.Equal(t, "principal://iam.googleapis.com/projects/123456789012/locations/global/workloadIdentityPools/example-project.svc.id.goog/subject/ns/dispatch/sa/example-dispatch", inputs["member"])
+	require.Contains(t, m.Named(t, "kubernetes:apps/v1:Deployment", "example-dispatch").RPC.GetDependencies(), azureKeyAccessorURN)
+	for _, other := range []string{"example-dispatch-listener", "example-dispatch-tailnet"} {
+		require.NotContains(t, m.Named(t, "kubernetes:apps/v1:Deployment", other).RPC.GetDependencies(), azureKeyAccessorURN,
+			"%s mounts no Azure key", other)
+	}
+	require.ElementsMatch(t, []string{
+		"DATABASE_URL", "DISPATCH_AGENT_TOKEN", "DISPATCH_SIGNING_KEY", "DISPATCH_SIGNIN_CLIENT_SECRET",
+	}, secretDataKeys(dispatchSecretData(t, m)))
+
+	args = dispatchArgs()
+	setAzureFederation(args)
+	m, err = runDispatch(t, args, true)
+	require.NoError(t, err)
+	require.Len(t, registrationsOf(m, "gcp:secretmanager/secretIamMember:SecretIamMember"), 1, "only the NATS seed's accessor exists")
+}
+
+// The key's SecretProviderClass is its own: provider gke, the secret's path with /versions/latest,
+// written to the file key, which the pod mounts at /var/run/secrets/azure-embed. The keyless form
+// registers none.
+func TestDispatchRegistersTheAzureKeySecretProviderClassOnlyWithTheKeyForm(t *testing.T) {
+	args := dispatchArgs()
+	setAzureKey(args)
+	m, err := runDispatch(t, args, true)
+	require.NoError(t, err)
+	class := m.Named(t, "kubernetes:secrets-store.csi.x-k8s.io/v1:SecretProviderClass", "example-dispatch-azure-embed-key").Inputs.Mappable()
+	require.Equal(t, "example-dispatch-azure-embed-key", class["metadata"].(map[string]any)["name"])
+	spec := class["spec"].(map[string]any)
+	require.Equal(t, "gke", spec["provider"])
+	require.Equal(t, "- resourceName: "+azureEmbedKeySecret+"/versions/latest\n  path: key\n", spec["parameters"].(map[string]any)["secrets"])
+
+	args = dispatchArgs()
+	setAzureFederation(args)
+	m, err = runDispatch(t, args, true)
+	require.NoError(t, err)
+	for _, r := range m.Registrations() {
+		require.NotEqual(t, "example-dispatch-azure-embed-key", r.Name)
+	}
+}
+
+// The key form: the pod template gains exactly DISPATCH_EMBEDDER, the endpoint, the quota and
+// DISPATCH_AZURE_EMBED_KEY_FILE, with the key's own CSI volume mounted into envoy-dispatch alone;
+// no deployment is named, so Dispatch defaults it.
+func TestDispatchPodWithAzureKeyMatchesGolden(t *testing.T) {
+	args := dispatchArgs()
+	setAzureKey(args)
+	m, err := runDispatch(t, args, true)
+	require.NoError(t, err)
+	requirePodGolden(t, m, "example-dispatch", "dispatch-pod-with-azure-key.golden")
+}
+
+// The keyless form: the pod template gains DISPATCH_EMBEDDER, the endpoint, the quota, the
+// deployment, the tenant and client, and DISPATCH_AZURE_FEDERATED_TOKEN_FILE naming a projected
+// service-account token for api://AzureADTokenExchange, an hour long, mounted into envoy-dispatch
+// alone.
+func TestDispatchPodWithAzureFederationMatchesGolden(t *testing.T) {
+	args := dispatchArgs()
+	setAzureFederation(args)
+	m, err := runDispatch(t, args, true)
+	require.NoError(t, err)
+	requirePodGolden(t, m, "example-dispatch", "dispatch-pod-with-azure-federation.golden")
+}
+
+// azureFederationVolume is the keyless form's projected volume in the app's pod template.
+func azureFederationVolume(t *testing.T, template map[string]any) map[string]any {
+	t.Helper()
+	for _, item := range template["spec"].(map[string]any)["volumes"].([]any) {
+		if volume := item.(map[string]any); volume["name"] == "azure-federation" {
+			return volume
+		}
+	}
+	t.Fatal("no azure-federation volume")
+	return nil
+}
+
+// azureFederationAudience gives the projected token its audience, for a federated credential that
+// expects another than Entra's default.
+func TestDispatchProjectsTheTokenForTheGivenAudience(t *testing.T) {
+	args := dispatchArgs()
+	setAzureFederation(args)
+	args.AzureFederationAudience = pulumi.StringRef("api://example-audience")
+	m, err := runDispatch(t, args, true)
+	require.NoError(t, err)
+	volume := azureFederationVolume(t, deploymentPodTemplate(t, m, "example-dispatch"))
+	require.Equal(t, map[string]any{"sources": []any{map[string]any{"serviceAccountToken": map[string]any{
+		"audience": "api://example-audience", "expirationSeconds": 3600.0, "path": "token",
+	}}}}, volume["projected"])
+}
+
+// Either form reaches the app's envoy-dispatch container alone: the listener's and the front
+// door's pods are exactly as without it.
+func TestDispatchAzureLeavesTheOtherWorkloadsUnchanged(t *testing.T) {
+	for name, set := range map[string]func(*gcp.DispatchArgs){"key": setAzureKey, "federation": setAzureFederation} {
+		t.Run(name, func(t *testing.T) {
+			args := dispatchArgs()
+			set(args)
+			m, err := runDispatch(t, args, true)
+			require.NoError(t, err)
+			requirePodGolden(t, m, "example-dispatch-listener", "dispatch-listener-pod.golden")
+			requirePodGolden(t, m, "example-dispatch-tailnet", "dispatch-tailnet-pod.golden")
+		})
+	}
+}
+
+// appResources is a container's resources as the component renders them: equal requests and limits.
+func appResources(cpu, memory string) map[string]any {
+	values := map[string]any{"cpu": cpu, "memory": memory}
+	return map[string]any{"requests": values, "limits": values}
+}
+
+// appCpu and appMemory size the app's envoy-dispatch container and nothing else: the app's pod
+// template is the default's with that one container's resources changed, so cloud-sql-proxy keeps
+// its 200m and 256Mi, and the front door's and the listener's pods match their goldens.
+func TestDispatchAppResourcesReachEnvoyDispatchAlone(t *testing.T) {
+	defaults, err := runDispatch(t, dispatchArgs(), true)
+	require.NoError(t, err)
+	args := dispatchArgs()
+	args.AppCpu = pulumi.StringRef("2")
+	args.AppMemory = pulumi.StringRef("8Gi")
+	m, err := runDispatch(t, args, true)
+	require.NoError(t, err)
+
+	got := deploymentPodTemplate(t, m, "example-dispatch")
+	require.Equal(t, appResources("2", "8Gi"), podContainer(t, got, "envoy-dispatch")["resources"])
+	want := deploymentPodTemplate(t, defaults, "example-dispatch")
+	podContainer(t, want, "envoy-dispatch")["resources"] = appResources("2", "8Gi")
+	require.Equal(t, want, got)
+	proxy := got["spec"].(map[string]any)["initContainers"].([]any)[0].(map[string]any)
+	require.Equal(t, "cloud-sql-proxy", proxy["name"])
+	require.Equal(t, appResources("200m", "256Mi"), proxy["resources"])
+	requirePodGolden(t, m, "example-dispatch-listener", "dispatch-listener-pod.golden")
+	requirePodGolden(t, m, "example-dispatch-tailnet", "dispatch-tailnet-pod.golden")
+}
+
+// A size Autopilot would raise or reject is refused by the resolver, before the component
+// registers, so nothing beyond the test's providers exists.
+func TestDispatchRefusesAppResourcesBeforeRegistering(t *testing.T) {
+	args := dispatchArgs()
+	args.AppCpu = pulumi.StringRef("100m")
+	m, err := runDispatch(t, args, true)
+	require.ErrorContains(t, err, `envoy-infra:gcp:Dispatch example-dispatch: appCpu "100m" must be at least 300m`)
+	require.ElementsMatch(t, []string{gcpProviderType, randomProviderType}, m.Types())
 }

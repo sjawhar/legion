@@ -3,8 +3,6 @@ package config
 import (
 	"strings"
 	"testing"
-
-	"github.com/sjawhar/legion/daemon/internal/claim"
 )
 
 // Who launches the project's controller is the deployment's choice: the operator, with `legion
@@ -48,18 +46,19 @@ func TestTheControllerKeyIsRefusedWhereTheDaemonCannotLaunchOne(t *testing.T) {
 	}
 }
 
-// The controller's pod is sized as a workflow role's pod is, by its own key under
+// The controller's pod is sized as an issue pod is, by its own key under
 // runtime.kubernetes.resources, which only a daemon that launches the controller reads: under
-// `controller: operator` the key would size nothing, so it is refused, naming why — and only the
-// key the file wrote is, never the default every settled block holds for the controller.
+// `controller: operator` the key would size nothing, so it is refused, naming why, an entry that
+// sets no field included — and only the key the file wrote is, never the default every settled
+// block holds for the controller.
 func TestTheControllersPodIsSizedOnlyWhereTheDaemonLaunchesIt(t *testing.T) {
 	const sized = "    resources: {controller: {cpu: 2, memory: 8Gi}}\n"
 	cfg, err := LoadForValidation(writeConfigFile(t, "controller: daemon\n"+kubernetesFile+sized), noEnv)
 	if err != nil {
 		t.Fatalf("LoadForValidation with the controller's resources under controller: daemon: %v", err)
 	}
-	want := RoleResources{CPU: "2", CPURequest: "2", Memory: "8Gi", MemoryRequest: "8Gi", EphemeralStorage: "10Gi", EphemeralStorageRequest: "1Gi"}
-	if got := cfg.Runtime.Kubernetes.Resources[claim.RoleController]; got != want {
+	want := Reservation{CPU: "2", CPURequest: "2", Memory: "8Gi", MemoryRequest: "8Gi", EphemeralStorage: "10Gi", EphemeralStorageRequest: "1Gi"}
+	if got := cfg.Runtime.Kubernetes.Resources.Controller; got != want {
 		t.Errorf("the controller's resources = %+v, want %+v", got, want)
 	}
 	for _, launch := range []string{"", "controller: operator\n"} {
@@ -67,13 +66,14 @@ func TestTheControllersPodIsSizedOnlyWhereTheDaemonLaunchesIt(t *testing.T) {
 		if err != nil {
 			t.Fatalf("LoadForValidation with %q and no resources key: %v", launch, err)
 		}
-		if got, want := cfg.Runtime.Kubernetes.Resources[claim.RoleController], DefaultResources()[claim.RoleController]; got != want {
+		if got, want := cfg.Runtime.Kubernetes.Resources.Controller, DefaultResources().Controller; got != want {
 			t.Errorf("with %q the controller's default reservation = %+v, want %+v", launch, got, want)
 		}
 	}
 	for name, body := range map[string]string{
-		"no controller key":    kubernetesFile + sized,
-		"controller: operator": "controller: operator\n" + kubernetesFile + sized,
+		"no controller key":        kubernetesFile + sized,
+		"controller: operator":     "controller: operator\n" + kubernetesFile + sized,
+		"an entry setting nothing": kubernetesFile + "    resources: {controller: {}}\n",
 	} {
 		t.Run(name, func(t *testing.T) {
 			_, err := LoadForValidation(writeConfigFile(t, body), noEnv)

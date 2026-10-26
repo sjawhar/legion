@@ -117,7 +117,11 @@ import type { UserInputBuiltinCommand } from "@oh-my-pi/pi-coding-agent/extensib
 import { logger, procmgr, VERSION } from "@oh-my-pi/pi-utils";
 import { encode } from "@toon-format/toon";
 import { connect, type NatsConnection, StringCodec, type Subscription } from "nats";
-import { AgentStreamPublisher } from "../src/agent-stream";
+import {
+  AgentStreamPublisher,
+  type AgentStreamSettingsState,
+  modelReference,
+} from "../src/agent-stream";
 import { transcriptPictures, withDeliveredPictures } from "../src/delivery-pictures";
 import { withDispatchFirst } from "../src/dispatch-first";
 import {
@@ -149,6 +153,50 @@ void import("@oh-my-pi/pi-coding-agent/extensibility/extensions/send-user-input-
   },
   () => undefined
 );
+
+/** The host's live `AgentSession`, as far as this extension reads it. */
+type LiveAgentSession = NonNullable<host.AgentRef["session"]>;
+
+// The live `AgentSession` under `session`, its live id, found in the host's roster
+// (`AgentRegistry`) at every call, since the host keeps one `AgentSession` across `/new`, `/resume`
+// and a fork and changes its id. Undefined on a host without the registry export, or listing no
+// live session under that id.
+function liveAgentSession(session: string): LiveAgentSession | undefined {
+  return (
+    host.AgentRegistry?.global()
+      .list()
+      .find((ref) => ref.session?.sessionManager.getSessionId() === session)?.session ?? undefined
+  );
+}
+
+// The model and thinking level the live session reports, read through the same getters the host's
+// `/model` and `/effort` read: `model`, `getAvailableModels()`, `configuredThinkingLevel()` (what
+// `/effort` reports, undefined for the model's default) and `getAvailableEffortSelectors()` (what
+// `/effort` offers, empty for a model with no adjustable thinking). Unreported with no live session,
+// or on a build that lacks any of the four. A model whose provider or id is empty is skipped.
+function liveSessionSettings(live: LiveAgentSession | undefined): AgentStreamSettingsState {
+  if (
+    live === undefined ||
+    !("model" in live) ||
+    typeof live.configuredThinkingLevel !== "function" ||
+    typeof live.getAvailableModels !== "function" ||
+    typeof live.getAvailableEffortSelectors !== "function"
+  ) {
+    return { reported: false };
+  }
+  const model = modelReference(live.model?.provider, live.model?.id);
+  const levels = live.getAvailableEffortSelectors();
+  return {
+    ...(model !== undefined && { model }),
+    models: live.getAvailableModels().flatMap((available) => {
+      const listed = modelReference(available.provider, available.id);
+      return listed === undefined ? [] : [listed];
+    }),
+    reported: true,
+    thinking:
+      levels.length === 0 ? null : { level: live.configuredThinkingLevel() ?? null, levels },
+  };
+}
 
 const codec = StringCodec();
 const NATS_RETRY_INTERVAL_MS = 15_000;
@@ -1047,6 +1095,9 @@ export default function envoyExtension(pi: PiApi): void {
         }
       )
       .then(async (reply) => {
+        // A `/model` or `/effort` has run by now: the viewer's header shows its result before the
+        // reply that names it reaches the page.
+        refreshAgentStreamSettings(sessionID);
         if (reply !== undefined) await postDispatchReply(delivery, { body: reply }, replySessionID);
       })
       .catch((error: unknown) => {
@@ -1425,11 +1476,9 @@ export default function envoyExtension(pi: PiApi): void {
   // (`#rebuildSlashCommandAutocomplete` in the host's `modes/interactive-mode.ts`): the host's
   // built-ins, each marked when only the terminal runs it; its extension, custom and skill commands
   // (`pi.getCommands`); then the file commands and prompt templates the live session expands in
-  // `prompt()`, read from the host's own `AgentSession` (`slashCommands`, `promptTemplates`). That
-  // session is found in the host's roster (`AgentRegistry`) by `session`, its live id, at every
-  // call, since the host keeps one `AgentSession` across `/new`, `/resume` and a fork and changes its
-  // id; a host without the registry export, or listing no live session under that id, lists none of
-  // the two. The host runs a built-in by its name or any alias before anything else, so those names
+  // `prompt()`, read from the host's own `AgentSession` (`slashCommands`, `promptTemplates`); a
+  // host that lists no live session under this id (`liveAgentSession`) lists none of the two.
+  // The host runs a built-in by its name or any alias before anything else, so those names
   // are reserved first; a name repeated among the rest runs its first source, and the publisher
   // keeps the first. Only a host that can run typed input from an extension offers any; one that
   // cannot sends no list, and its viewer offers no completion.
@@ -1437,9 +1486,7 @@ export default function envoyExtension(pi: PiApi): void {
     if (typeof pi.sendUserInput !== "function") return;
     const builtins = hostBuiltinCommands?.() ?? [];
     const reserved = new Set(builtins.flatMap((builtin) => [builtin.name, ...builtin.aliases]));
-    const live = host.AgentRegistry?.global()
-      .list()
-      .find((ref) => ref.session?.sessionManager.getSessionId() === session)?.session;
+    const live = liveAgentSession(session);
     const commands: AgentStreamCommand[] = builtins.map((builtin) => ({
       description: builtin.description,
       name: builtin.name,
@@ -1466,6 +1513,27 @@ export default function envoyExtension(pi: PiApi): void {
     agentStream.setCommands(agentStreamFramesSubject(session), commands);
   };
 
+  // The model and thinking level a viewer's header shows (`liveSessionSettings`). The host fires no
+  // event when either is set (`/model`, `/effort`, its terminal's selector), so they are re-read on
+  // every control message, on each turn's start, on a retry's fallback to another model, and after
+  // a person's typed input runs. The reads are in-memory getters and the publisher sends only a
+  // change, so nothing throttles them. A getter that throws must not suppress the replay answer, a
+  // turn or a typed input's reply, so it is logged and the last frame stands.
+  const refreshAgentStreamSettings = (session: string): void => {
+    if (session === "") return;
+    try {
+      agentStream.setSettings(
+        agentStreamFramesSubject(session),
+        liveSessionSettings(liveAgentSession(session))
+      );
+    } catch (error) {
+      logger.warn("envoy: could not refresh agent stream settings", {
+        error: messageFor(error),
+        sessionID: session,
+      });
+    }
+  };
+
   const pumpAgentStreamControl = async (
     subscription: Subscription,
     session: string
@@ -1482,6 +1550,7 @@ export default function envoyExtension(pi: PiApi): void {
           if (typeof parsed !== "object" || parsed === null) continue;
           const request = parsed as AgentStreamControlMessage;
           if (request.type !== "replay" && request.type !== "watch") continue;
+          refreshAgentStreamSettings(session);
           const attached = agentStreamViewerAttached;
           if (
             request.type === "replay" ||
@@ -1509,8 +1578,13 @@ export default function envoyExtension(pi: PiApi): void {
             request.type === "replay" && reply !== undefined
               ? JSON.stringify(agentStream.replay(session))
               : undefined;
+          // A viewer arming a session nobody was watching is sent the settings and commands as
+          // they stand: what was read before it arrived was kept unpublished, and a page held open
+          // while this session was relaunched gets no replay from this process (`publishState`).
+          const arming = !agentStream.watched;
           agentStream.noteViewer();
           agentStreamViewerAttached = true;
+          if (arming) agentStream.publishState(agentStreamFramesSubject(session));
           if (answer === undefined || reply === undefined) continue;
           connection?.publish(reply, codec.encode(answer));
         } catch (error) {
@@ -1577,6 +1651,16 @@ export default function envoyExtension(pi: PiApi): void {
   });
   pi.on("message_end", async (event) => {
     recordAgentStreamMessage(event.message, false);
+  });
+
+  // A turn runs on the model and level set when it starts, and a retry's fallback moves the session
+  // onto another model: either can follow a change no event announced. A subagent's instance knows
+  // no session id and publishes nothing.
+  pi.on("turn_start", async () => {
+    refreshAgentStreamSettings(sessionID);
+  });
+  pi.on("retry_fallback_applied", async () => {
+    refreshAgentStreamSettings(sessionID);
   });
 
   // The session stops holding its role: close the notice subjects it took for it, so a holder

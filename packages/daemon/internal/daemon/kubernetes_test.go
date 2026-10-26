@@ -24,7 +24,6 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 
 	"github.com/sjawhar/legion/daemon/internal/bootprobe"
-	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/promptrefs"
@@ -50,20 +49,21 @@ func kubernetesConfig(t *testing.T, server string) config.Config {
 	return cfg
 }
 
-// defaultReservations are every role's container requirements at the daemon's defaults, translated
-// as sandboxOptions translates them: the map sandbox.New requires of a test that builds Options by
-// hand, since it refuses one lacking a role.
-func defaultReservations(t *testing.T) map[claim.Role]corev1.ResourceRequirements {
+// defaultReservations are both pods' container requirements at the daemon's defaults, translated as
+// sandboxOptions translates them: what sandbox.New requires of a test that builds Options by hand,
+// since it refuses a pod with no reservation.
+func defaultReservations(t *testing.T) sandbox.PodResources {
 	t.Helper()
-	reservations := map[claim.Role]corev1.ResourceRequirements{}
-	for role, reservation := range config.DefaultResources() {
-		requirements, err := roleRequirements(role, reservation)
-		if err != nil {
-			t.Fatal(err)
-		}
-		reservations[role] = requirements
+	defaults := config.DefaultResources()
+	issue, err := requirements("runtime.kubernetes.resources.issue", defaults.Issue)
+	if err != nil {
+		t.Fatal(err)
 	}
-	return reservations
+	controller, err := requirements("runtime.kubernetes.resources.controller", defaults.Controller)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return sandbox.PodResources{Issue: issue, Controller: controller}
 }
 
 // defaultRepositoryCache is the repository cache at the daemon's defaults, translated as
@@ -439,51 +439,52 @@ func TestAKubernetesDaemonRefusesAConfigurationTheClusterWouldRefuseLater(t *tes
 	}
 }
 
-// Every role's reservation reaches the runtime's Options as that role's container requirements:
-// its cpu and memory requests the file's where it set one below its limit, its limit otherwise —
-// here one role keeps request == limit at sizes the file set and another requests less than it may
-// use, which the runtime renders as a Burstable pod — and its ephemeral storage the limit the file
-// or the default set with the request under it; and the image probe carries its own fixed
+// Each pod's reservation reaches the runtime's Options as that pod's container requirements: its
+// cpu and memory requests the file's where it set one below its limit, its limit otherwise — here
+// the issue pod requests less than it may use, which the runtime renders as a Burstable pod, and the
+// controller's keeps request == limit at sizes the file set — and its ephemeral storage the limit
+// the file or the default set with the request under it; and the image probe carries its own fixed
 // reservation (probeReservation), 250m and 1Gi over a 5Gi disk bound and a 1Gi disk request,
-// translated the same way and no role's share — a probe that reserved the controller's 1 CPU and
+// translated the same way and no pod's share — a probe that reserved the controller's 1 CPU and
 // 4Gi could not boot the daemon on a pool with room for less.
 func TestEveryReservationReachesTheSandboxRuntimeAsRequestAndLimit(t *testing.T) {
 	cfg := kubernetesConfig(t, "https://127.0.0.1:1")
-	cfg.Runtime.Kubernetes.Resources[claim.RoleImplementer] = config.RoleResources{CPU: "1500m", CPURequest: "1500m", Memory: "8Gi", MemoryRequest: "8Gi", EphemeralStorage: "40Gi", EphemeralStorageRequest: "2Gi"}
-	cfg.Runtime.Kubernetes.Resources[claim.RoleTester] = config.RoleResources{CPU: "2", CPURequest: "500m", Memory: "32Gi", MemoryRequest: "8Gi", EphemeralStorage: "20Gi", EphemeralStorageRequest: "1Gi"}
+	cfg.Runtime.Kubernetes.Resources = config.PodResources{
+		Issue:      config.Reservation{CPU: "4", CPURequest: "2", Memory: "32Gi", MemoryRequest: "8Gi", EphemeralStorage: "20Gi", EphemeralStorageRequest: "1Gi"},
+		Controller: config.Reservation{CPU: "1500m", CPURequest: "1500m", Memory: "8Gi", MemoryRequest: "8Gi", EphemeralStorage: "40Gi", EphemeralStorageRequest: "2Gi"},
+	}
 	opts, err := sandboxOptions(cfg, *cfg.Runtime.Kubernetes, "test", "", lookup(nil), quietLogger())
 	if err != nil {
 		t.Fatalf("sandboxOptions: %v", err)
 	}
-	if len(opts.Resources) != len(claim.Roles)+1 {
-		t.Fatalf("the runtime's Resources name %d roles, want the six workflow roles and the controller", len(opts.Resources))
-	}
-	for role, reservation := range cfg.Runtime.Kubernetes.Resources {
-		got, ok := opts.Resources[role]
-		if !ok {
-			t.Errorf("%s has no requirements", role)
-			continue
-		}
+	for _, pod := range []struct {
+		name        string
+		reservation config.Reservation
+		got         corev1.ResourceRequirements
+	}{
+		{"the issue pod", cfg.Runtime.Kubernetes.Resources.Issue, opts.Resources.Issue},
+		{"the controller's pod", cfg.Runtime.Kubernetes.Resources.Controller, opts.Resources.Controller},
+	} {
 		want := corev1.ResourceRequirements{
 			Requests: corev1.ResourceList{
-				corev1.ResourceCPU: resource.MustParse(reservation.CPURequest), corev1.ResourceMemory: resource.MustParse(reservation.MemoryRequest),
-				corev1.ResourceEphemeralStorage: resource.MustParse(reservation.EphemeralStorageRequest),
+				corev1.ResourceCPU: resource.MustParse(pod.reservation.CPURequest), corev1.ResourceMemory: resource.MustParse(pod.reservation.MemoryRequest),
+				corev1.ResourceEphemeralStorage: resource.MustParse(pod.reservation.EphemeralStorageRequest),
 			},
 			Limits: corev1.ResourceList{
-				corev1.ResourceCPU: resource.MustParse(reservation.CPU), corev1.ResourceMemory: resource.MustParse(reservation.Memory),
-				corev1.ResourceEphemeralStorage: resource.MustParse(reservation.EphemeralStorage),
+				corev1.ResourceCPU: resource.MustParse(pod.reservation.CPU), corev1.ResourceMemory: resource.MustParse(pod.reservation.Memory),
+				corev1.ResourceEphemeralStorage: resource.MustParse(pod.reservation.EphemeralStorage),
 			},
 		}
-		if !reflect.DeepEqual(got, want) {
-			t.Errorf("%s's requirements = %+v, want %+v (each request the reservation's, under or at its limit)", role, got, want)
+		if !reflect.DeepEqual(pod.got, want) {
+			t.Errorf("%s's requirements = %+v, want %+v (each request the reservation's, under or at its limit)", pod.name, pod.got, want)
 		}
 	}
-	tester := opts.Resources[claim.RoleTester]
-	if request, limit := tester.Requests[corev1.ResourceMemory], tester.Limits[corev1.ResourceMemory]; request.Cmp(resource.MustParse("8Gi")) != 0 || limit.Cmp(resource.MustParse("32Gi")) != 0 {
-		t.Errorf("the tester requests memory %s under a limit of %s, want 8Gi under 32Gi", request.String(), limit.String())
+	issue := opts.Resources.Issue
+	if request, limit := issue.Requests[corev1.ResourceMemory], issue.Limits[corev1.ResourceMemory]; request.Cmp(resource.MustParse("8Gi")) != 0 || limit.Cmp(resource.MustParse("32Gi")) != 0 {
+		t.Errorf("the issue pod requests memory %s under a limit of %s, want 8Gi under 32Gi", request.String(), limit.String())
 	}
-	if request, limit := tester.Requests[corev1.ResourceCPU], tester.Limits[corev1.ResourceCPU]; request.Cmp(resource.MustParse("500m")) != 0 || limit.Cmp(resource.MustParse("2")) != 0 {
-		t.Errorf("the tester requests cpu %s under a limit of %s, want 500m under 2", request.String(), limit.String())
+	if request, limit := issue.Requests[corev1.ResourceCPU], issue.Limits[corev1.ResourceCPU]; request.Cmp(resource.MustParse("2")) != 0 || limit.Cmp(resource.MustParse("4")) != 0 {
+		t.Errorf("the issue pod requests cpu %s under a limit of %s, want 2 under 4", request.String(), limit.String())
 	}
 	probe, err := imageProbe(cfg, promptrefs.New())
 	if err != nil {
@@ -506,8 +507,8 @@ func TestEveryReservationReachesTheSandboxRuntimeAsRequestAndLimit(t *testing.T)
 			t.Errorf("the image probe is limited to %s %s, want %s", kind, limit.String(), want)
 		}
 	}
-	if controller := opts.Resources[claim.RoleController]; reflect.DeepEqual(probe.Resources, controller) {
-		t.Errorf("the image probe carries the controller's reservation %+v; it must carry its own", controller)
+	if reflect.DeepEqual(probe.Resources, opts.Resources.Controller) {
+		t.Errorf("the image probe carries the controller's reservation %+v; it must carry its own", opts.Resources.Controller)
 	}
 }
 
@@ -543,7 +544,7 @@ func TestKubernetesSetupReachesTheSandboxRuntime(t *testing.T) {
 // its container's requirements, a settled reservation's lower memory request under its limit.
 func TestTheRepositoryCacheReachesTheSandboxRuntime(t *testing.T) {
 	cfg := kubernetesConfig(t, "https://127.0.0.1:1")
-	reservation := config.RoleResources{CPU: "2", CPURequest: "2", Memory: "8Gi", MemoryRequest: "4Gi", EphemeralStorage: "2Gi", EphemeralStorageRequest: "1Gi"}
+	reservation := config.Reservation{CPU: "2", CPURequest: "2", Memory: "8Gi", MemoryRequest: "4Gi", EphemeralStorage: "2Gi", EphemeralStorageRequest: "1Gi"}
 	cfg.Runtime.Kubernetes.RepositoryCache = config.RepositoryCacheConfig{Volume: "50Gi", RefreshMinutes: 5, RetainHours: 24, Resources: reservation}
 	opts, err := sandboxOptions(cfg, *cfg.Runtime.Kubernetes, "test", "", lookup(nil), quietLogger())
 	if err != nil {
@@ -627,7 +628,7 @@ current-context: legion-daemon
 	if err != nil {
 		t.Fatalf("sandboxOptions: %v", err)
 	}
-	controller := opts.Resources[claim.RoleController]
+	controller := opts.Resources.Controller
 	if cpu := controller.Requests[corev1.ResourceCPU]; cpu.Cmp(resource.MustParse("100000")) != 0 {
 		t.Fatalf("the controller's request reached the runtime as %s CPU, want the file's 100000", cpu.String())
 	}

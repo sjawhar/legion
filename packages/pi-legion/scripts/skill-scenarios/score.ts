@@ -296,14 +296,14 @@ function surfaceOf(createdIssue: boolean, askedChat: boolean): string {
 
 /** brainstorm: whether a bare `/brainstorming` prompt, with no word of Dispatch in the prompt and
  * no Dispatch configuration anywhere in the run's environment, puts the design in the issue's spec
- * (`skill://dispatch-brainstorming`) or asks in chat (main, before the skill existed); `surface`
+ * (`skill://dispatch-writing-specs`) or asks in chat (main, before the skill existed); `surface`
  * is `surfaceOf`'s answer. `blocks` is the created issue's own ask count, from
  * `capture-brainstorm`'s read of Dispatch, never the agent's own claim in chat. `leak` flags a
  * session that went looking for its project next to the credential
- * (`skills/dispatch-brainstorming/SKILL.md` "Where the spec lives"): `LEAK` matching a tool call's
+ * (`skills/dispatch/SKILL.md`, its opening list): `LEAK` matching a tool call's
  * arguments, or a tool's result, where a bare `env` or `printenv` dump lands in the model's
  * context without its command naming anything. `ref`: the run's first `read` was
- * `skill://dispatch-brainstorming` — this scenario's own instrument, since a main run has no such
+ * `skill://dispatch-writing-specs` — this scenario's own instrument, since a main run has no such
  * skill to read. The run passes when it put the design in the spec and leaked nothing looking for
  * the project. */
 function brainstormSurface(runDir: string, run: string, label: string): Row {
@@ -321,7 +321,7 @@ function brainstormSurface(runDir: string, run: string, label: string): Row {
     calls.some((call) => LEAK.test(call.args)) || results.some((text) => LEAK.test(text));
   const captured = json(path.join(runDir, "brainstorm.json"), BrainstormCapture);
   const reads = calls.filter((call) => call.tool === "read").map((call) => call.path);
-  const ref = reads[0] === "skill://dispatch-brainstorming";
+  const ref = reads[0] === "skill://dispatch-writing-specs";
   const pass = surface === "spec" && !leak;
   return {
     run,
@@ -333,7 +333,7 @@ function brainstormSurface(runDir: string, run: string, label: string): Row {
   };
 }
 
-/** measure-before-ask: gate 2 of the dispatch skill's "Before you ask" (skills/dispatch/SKILL.md).
+/** measure-before-ask: gate 2 of the dispatch skill's "Before you ask", which the cut to three Dispatch skills removed.
  * rig.sh's export lists 430 stranded issues, 412 of them without the owner that fix A (email each
  * issue's owner) needs, while fixes B and C repair all 430. So the ask gate 2 calls for names the
  * 430 and that measurement, offers B and C, and drops A rather than offering it cut down to the 18
@@ -2306,7 +2306,7 @@ function median(values: number[]): number {
  *     call, which scripts/e2e/lib/model-gateway-unserved.sh reads, is a better signal this rig does
  *     not set up;
  *   - it compared the wrong text: a tool call's arguments name the other label's checkout, or a
- *     skill file (a path to skills/dispatch, skills/dispatch-first, skills/dispatch-brainstorming
+ *     skill file (a path to skills/dispatch, skills/dispatch-first, skills/dispatch-writing-specs
  *     or skills/legion-worker)
  *     anywhere but its own run directory (its HOME is there) or its label's profile or checkout.
  *     An agent reads the whole filesystem, and `legion` on its PATH resolves into the checkout
@@ -2341,7 +2341,7 @@ function unscored(
       if (other !== label && call.args.includes(checkout))
         return `a ${call.tool} call names ${other}'s checkout: ${call.args.slice(0, 200)}`;
     for (const [skillPath] of call.args.matchAll(
-      /[^\s"'`=:;|&<>()]*skills\/(?:dispatch-first|dispatch-brainstorming|dispatch|legion-worker)\b/g
+      /[^\s"'`=:;|&<>()]*skills\/(?:dispatch-first|dispatch-writing-specs|dispatch|legion-worker)\b/g
     ))
       if (!allowed.some((dir) => skillPath.startsWith(dir)))
         return `a ${call.tool} call names a skill outside ${label}'s own: ${skillPath}`;
