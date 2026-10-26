@@ -156,6 +156,7 @@ func TestABadNarrowingIs400AndMintsNothing(t *testing.T) {
 		{"an owner no login can be", map[string]any{"owner": "-ada"}, "owner"},
 		{"a repository with its owner", map[string]any{"owner": "ada", "repositories": []string{"ada/proofs"}}, "ada/proofs"},
 		{"a repository named ..", map[string]any{"owner": "ada", "repositories": []string{".."}}, ".."},
+		{"a repository named .", map[string]any{"owner": "ada", "repositories": []string{"."}}, `"."`},
 		{"an empty repository name", map[string]any{"owner": "ada", "repositories": []string{""}}, "repositor"},
 		{"501 repositories", map[string]any{"owner": "ada", "repositories": tooMany}, "500"},
 		{"a field the broker does not read", map[string]any{"owner": "ada", "permissions": map[string]string{"administration": "write"}}, "permissions"},

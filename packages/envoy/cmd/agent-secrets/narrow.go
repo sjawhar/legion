@@ -25,14 +25,20 @@ func (r *repositoryFlag) Set(name string) error {
 }
 
 // githubNarrowing is the narrowing the flags ask for, nil when they ask for none: the owner
-// lowercased and the repositories sorted, each once, as the broker names what it applied, so
-// narrowedAsAsked compares like with like. --github-repo or --github-read-only without
-// --github-owner is refused, since a narrowing names one account's token.
-func githubNarrowing(owner string, repositories []string, readOnly bool) (*GitHubNarrowing, error) {
-	if owner == "" {
-		if len(repositories) > 0 || readOnly {
-			return nil, errors.New("--github-repo and --github-read-only narrow one account's GitHub App token: name the account with --github-owner")
-		}
+// trimmed and lowercased and the repositories sorted, each once, as the broker names what it
+// applied, so narrowedAsAsked compares like with like. ownerSet says whether --github-owner was
+// given at all: given with no account (an unset variable a caller passed) it is refused rather
+// than read as no narrowing, which would release the owner-wide tokens; and --github-repo or
+// --github-read-only without --github-owner is refused, since a narrowing names one account's
+// token.
+func githubNarrowing(owner string, ownerSet bool, repositories []string, readOnly bool) (*GitHubNarrowing, error) {
+	owner = strings.TrimSpace(owner)
+	switch {
+	case ownerSet && owner == "":
+		return nil, errors.New("--github-owner names no account: give the account whose GitHub App token to narrow")
+	case !ownerSet && (len(repositories) > 0 || readOnly):
+		return nil, errors.New("--github-repo and --github-read-only narrow one account's GitHub App token: name the account with --github-owner")
+	case !ownerSet:
 		return nil, nil
 	}
 	sorted := slices.Clone(repositories)

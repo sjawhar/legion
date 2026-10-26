@@ -204,11 +204,12 @@ secret:
 ```sh
 agent-secrets --reason "read <repository> on <machine>" GITHUB_APP_<PERSON> \
   --github-owner <owner> --github-repo <repository> --github-read-only -- sh -ceu '
-printf %s "$GITHUB_APP_<PERSON>" | jq -r ".installations[\"<owner>\"].token"
+printf %s "$GITHUB_APP_<PERSON>" | jq -er ".installations[].token"
 '
 ```
 
-The release JSON has one entry, for `<owner>`. The broker sends the narrowing to GitHub, which
+The release JSON has one entry, keyed by the account's login as GitHub spells it, so the example
+reads that one entry whatever case you typed. The broker sends the narrowing to GitHub, which
 refuses a repository or permission the installation does not have. The command runs only when
 the broker tells `agent-secrets` that it applied the narrowing. A broker that cannot narrow
 releases the token for all repositories, so `agent-secrets` runs nothing and exits 1.

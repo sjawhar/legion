@@ -64,7 +64,15 @@ func newNarrowBroker(t *testing.T) *narrowBroker {
 			}
 		}
 		answer := map[string]any{"values": map[string]string{name: "owner-wide"}, "expires_at": nil}
-		if sent.GitHubApp != nil && name != "OLD_APP" {
+		switch {
+		case sent.GitHubApp == nil || name == "OLD_APP":
+		case name == "OTHER_APP":
+			// A broker that applied another narrowing than the one sent: the owner alone.
+			var asked GitHubNarrowing
+			_ = json.Unmarshal(sent.GitHubApp, &asked)
+			answer["values"] = map[string]string{name: "narrowed-otherwise"}
+			answer["github_app"] = GitHubNarrowing{Owner: asked.Owner}
+		default:
 			answer["values"] = map[string]string{name: "narrowed"}
 			answer["github_app"] = sent.GitHubApp
 		}
@@ -138,13 +146,29 @@ func TestANarrowingTheBrokerDidNotApplyRunsNothing(t *testing.T) {
 	}
 }
 
+// TestANarrowingTheBrokerAppliedOtherwiseRunsNothing: an answer naming another narrowing than the
+// one asked for (here the owner alone, without the read-only limit) is no narrowing the command
+// asked for, so the exec form exits 1 and runs nothing.
+func TestANarrowingTheBrokerAppliedOtherwiseRunsNothing(t *testing.T) {
+	binary := buildAgentSecrets(t)
+	b := newNarrowBroker(t)
+	keyDir := newKeyDir(t)
+	stdout, stderr, exit := runAgentSecrets(t, binary, b.srv.URL, keyDir, nil,
+		"OTHER_APP", "--github-owner", "ada", "--github-read-only", "--", "sh", "-c", "echo ran-the-child")
+	if exit != 1 || strings.Contains(stdout, "ran-the-child") || !strings.Contains(stderr, "did not narrow") || !strings.Contains(stderr, "nothing was run") {
+		t.Fatalf("exit %d, stdout %q, stderr %q; want exit 1 saying the broker did not narrow as asked and nothing was run", exit, stdout, stderr)
+	}
+}
+
 // TestAGitHubNarrowingWithoutAnOwnerExitsTwo: --github-repo or --github-read-only narrows one
-// account's token, so without --github-owner it is a usage error, and nothing reaches the broker.
+// account's token, so without --github-owner it is a usage error, and so is a --github-owner that
+// names no account (an unset variable a helper passed), which would otherwise send no narrowing at
+// all; nothing reaches the broker.
 func TestAGitHubNarrowingWithoutAnOwnerExitsTwo(t *testing.T) {
 	binary := buildAgentSecrets(t)
 	b := newNarrowBroker(t)
 	keyDir := newKeyDir(t)
-	for _, flags := range [][]string{{"--github-repo", "widgets"}, {"--github-read-only"}} {
+	for _, flags := range [][]string{{"--github-repo", "widgets"}, {"--github-read-only"}, {"--github-owner", ""}, {"--github-owner="}, {"--github-owner", "  ", "--github-read-only"}} {
 		args := append(append([]string{"APP"}, flags...), "--", "sh", "-c", "echo ran-the-child")
 		stdout, stderr, exit := runAgentSecrets(t, binary, b.srv.URL, keyDir, nil, args...)
 		if exit != 2 || strings.Contains(stdout, "ran-the-child") || !strings.Contains(stderr, "--github-owner") {

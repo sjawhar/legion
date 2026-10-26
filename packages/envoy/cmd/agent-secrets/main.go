@@ -856,7 +856,9 @@ func cmdExec(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "agent-secrets: %v\n", err)
 		return exitUsageError
 	}
-	narrowing, err := githubNarrowing(*githubOwner, githubRepos, *githubReadOnly)
+	ownerSet := false
+	flags.Visit(func(f *flag.Flag) { ownerSet = ownerSet || f.Name == "github-owner" })
+	narrowing, err := githubNarrowing(*githubOwner, ownerSet, githubRepos, *githubReadOnly)
 	if err != nil {
 		fmt.Fprintf(stderr, "agent-secrets: %v\n", err)
 		return exitUsageError
