@@ -2,13 +2,15 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-272",
-  "completed": "2026-10-26T02:55:30Z",
-  "headSha": "4e0bf68c654d67fa81cb961765e4dc8f2529e915",
-  "evidence": "https://github.com/sjawhar/legion/pull/2223#issuecomment-6407172561",
-  "ci": "Tests run 40259286382 (lint, typecheck, test) success; PR Title run 40259317604 success (40259286362 cancelled, superseded); Legion Envoy and Contracts 40259286354, Docs 40259286387, Worker Image 40259286381 success, all at 4e0bf68c. sjawhar/legion main requires lint, typecheck, test, pr-title.",
+  "completed": "2026-10-26T03:54:30Z",
+  "round": 2,
+  "headSha": "307f166c09f786859d3270c472bc11b74b42be37",
+  "evidence": "round 1 https://github.com/sjawhar/legion/pull/2223#issuecomment-6407172561; round 2 https://github.com/sjawhar/legion/pull/2223#issuecomment-6407835261",
+  "ci": "At 307f166c: Docs 40265420616 success, PR Title 40265528130 success; Tests 40265420504 and Worker Image 40265420528 in progress, Legion Envoy and Contracts 40265420551 queued when read (not waited for). sjawhar/legion main requires lint, typecheck, test, pr-title.",
+  "round2Scope": "No daemon runtime Go changed between 4e0bf68c and 307f166c (classify, record, workflow, projection, api: 0 files); the round changes the architect prompt and skill wording, the docs, and the e2e harness (scripts/e2e/lib/live-daemon-proof.sh, internal/daemon/live_proof_test.go). The round-1 runtime probes below therefore still apply.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran its command on a fresh embedded Postgres 16 (own initdb -E UTF8, own port, not the implementer's instance) and the script's own nats-server v2.10.22: LEGION_TEST_PG_DSN=postgres://postgres@127.0.0.1:<port>/postgres?sslmode=disable bash scripts/e2e/no-required-checks.sh -> 'no required checks e2e: PASS in 575s', exit 0; all four steps observed as the implementer recorded them (step 1 no checksVerdict key and no checks-red; step 2 red, implementing, 'CI is red at a1: ci'; step 3 green; step 4 held red at b1 with one pr-blocked, base -> nothing, push b1->b2 fixAttempts 1, base -> ci, red at b2 -> implementing, 'CI is red at b2: ci')."
+    "how": "Round 2: re-ran both commands at 307f166c on my own Postgres 16 and the pinned nats-server v2.10.22: bash scripts/e2e/merged-root-waits.sh -> 'merged root waits e2e: PASS in 44s' (7 steps ok); bash scripts/e2e/no-required-checks.sh -> 'no required checks e2e: PASS in 374s', all four steps as the implementer recorded. Round 1 (4e0bf68c): no-required-checks.sh PASS in 575s."
   },
   "failures": [],
   "failed": 0,
@@ -28,6 +30,22 @@
       "observed": "y1 red held in testing with one pr-blocked; base -> nothing, pass read []; restart: stored required []string{} (non-nil empty), headCounted y1, no checksVerdict key; push y1->y2 + synchronize: headCounted \"\", fixAttempts 1; base -> ci: red at y2 -> implementing, checksVerdict red, fixAttempts 1, checks-red 'CI is red at y2: ci'.",
       "headSha": "4e0bf68c654d67fa81cb961765e4dc8f2529e915",
       "negativeControl": "The implementer's mutation (only `|| nothingRequired(pr)` removed) fails the same flow's last settlement, left in testing; the restart-specific discrimination is that a nil set after reload would keep headCounted y1, which the store read after restart rules out (Required non-nil [])."
+    },
+    {
+      "criterion": "Acceptance 1 and 2 at the round-2 head, through the shared live-proof run; the shared run keeps merged-root-waits' proof as it was and still fails closed",
+      "surface": "the whole daemon (run, via startDaemonWithin) over my own Postgres 16 and the pinned nats-server v2.10.22, driven by scripts/e2e/lib/live-daemon-proof.sh and internal/daemon/live_proof_test.go",
+      "command": "LEGION_TEST_PG_DSN=postgres://postgres@127.0.0.1:<port>/postgres?sslmode=disable bash scripts/e2e/merged-root-waits.sh; then the same for scripts/e2e/no-required-checks.sh; transcript https://github.com/sjawhar/legion/pull/2223#issuecomment-6407835261",
+      "observed": "merged root waits e2e: PASS in 44s (step1..step7 ok). no required checks e2e: PASS in 374s: step 1 no checksVerdict key, testing, no checks-red; step 2 red, implementing, 'CI is red at a1: ci'; step 3 green; step 4 held red at b1 + one pr-blocked, base -> nothing, push b1->b2 fixAttempts 1, base -> ci, red at b2 -> implementing, 'CI is red at b2: ci', still one pr-blocked. The harness refactor removes only the eight duplicated helper Fatalfs (each now once in live_proof_test.go); no step assertion was lost.",
+      "headSha": "307f166c09f786859d3270c472bc11b74b42be37",
+      "negativeControl": "the lib sourced with test name TestNoSuchLiveProof -> 'FAIL proof: the proof's driver ran no step: it skipped, or -test.run matched no test', 'guard probe e2e: FAIL at proof after 12s', exit 1, work dir removed; env -u LEGION_TEST_PG_DSN bash scripts/e2e/no-required-checks.sh -> 'FAIL prerequisites: LEGION_TEST_PG_DSN is required …', exit 1"
+    },
+    {
+      "criterion": "Review finding (important): the architect's instructions state the fix-attempt rule exactly as the code applies it",
+      "surface": "the embedded architect prompt packages/daemon/internal/prompts/go/architect-common.md, skills/legion-architect/references/wake-routing.md and its generated claude-envoy copy, read against classify.nothingRequired",
+      "command": "grep of each 'requires no check' / 'green' sentence in architect-common.md and wake-routing.md row pr-blocked; diff of the skill row against packages/claude-envoy/legion/skills/legion-architect/references/wake-routing.md",
+      "observed": "all three architect-common.md sentences and both wake-routing.md sentences say 'a settled head whose base branch requires no check and no workflow', which is nothingRequired (settled(pr) && Required != nil && len(Required) == 0 && len(Workflows) == 0); the claude-envoy row is identical to the skill's",
+      "headSha": "307f166c09f786859d3270c472bc11b74b42be37",
+      "negativeControl": "at 4e0bf68c the same grep found 'a head whose base branch requires no check' with neither 'settled' nor 'no workflow', the wording the reviewer flagged"
     }
   ],
   "notes": [
