@@ -678,7 +678,13 @@ func publishHandler(d *listenerDeps) http.HandlerFunc {
 }
 
 // sessionInfo is the joined view of an Interest (topics, dir, machine) and a
-// SessionEntry (port). Returned by GET /v1/sessions.
+// SessionEntry (port). Returned by GET /v1/sessions. Its host is where the session runs, its
+// recorded host or else MachineID (HostOrMachine). Only the session's owner delivers to it
+// (session.Deliverer): the listener its stored subscription names, the one store.Registry.Match
+// delivers on, else the one MachineID names. The owner reaches a session registered through it at
+// its host bridge when one is set, else at the recorded host, else at host.docker.internal; a
+// session that re-registered through another listener is reached at its recorded host, else at
+// MachineID. Any other listener leaves inbox messages to the owner silently.
 type sessionInfo struct {
 	SessionID      string   `json:"session_id"`
 	MachineID      string   `json:"machine_id"`
@@ -1121,6 +1127,14 @@ func subscribeHandler(d *listenerDeps, machineID string, logger *logging.Logger)
 		body.SessionID = strings.TrimSpace(body.SessionID)
 		if body.SessionID == "" {
 			writeJSONError(w, http.StatusBadRequest, "session_id is required", "session_id")
+			return
+		}
+		// A session on a serving port is reached at the host it records (session.Deliverer), so a
+		// host that could change the delivery URL's authority or path is refused before anything is
+		// written. An absent host is an older plugin's, and a registration with no port is never
+		// dialled, so neither is checked.
+		if body.Port > 0 && body.Host != "" && !session.ValidHost(body.Host) {
+			writeJSONError(w, http.StatusBadRequest, "host is not a host name or address", "host")
 			return
 		}
 		logger.Info("listener subscribe", slog.String("session_id", body.SessionID), slog.Any("topics", body.Topics), slog.Int("port", body.Port), slog.Bool("self_subscribed", body.SelfSubscribed), slog.String("dir", body.Dir))

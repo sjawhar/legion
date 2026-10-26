@@ -157,6 +157,49 @@ func TestCoreSubscriptionRestoresAfterConnectionRecovery(t *testing.T) {
 	})
 }
 
+// CoreSubOK answers for the core subscription the client holds now. After the client replaces a
+// closed connection, the handle SubscribeCore returned stays invalid for good while the replacement
+// the recovery bound delivers, and CoreSubOK must report the replacement: read from the returned
+// handle, a recovered lane would read inactive forever.
+func TestCoreSubOKReportsTheReplacementAfterTheClientReplacesAClosedConnection(t *testing.T) {
+	_, uri := startNATS(t)
+	client, err := bus.Connect([]string{uri})
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer client.Close()
+	publisher := testnats.Connect(t, uri)
+	defer publisher.Close()
+
+	if client.CoreSubOK() {
+		t.Fatal("CoreSubOK is true before SubscribeCore")
+	}
+	var received atomic.Int32
+	const subject = "notifications.team.core-sub-ok"
+	returned, err := client.SubscribeCore(subject, func(*natsgo.Msg) { received.Add(1) }, "core-sub-ok")
+	if err != nil {
+		t.Fatalf("subscribe core: %v", err)
+	}
+	if !client.CoreSubOK() {
+		t.Fatal("CoreSubOK is false after SubscribeCore")
+	}
+
+	client.Conn.Close()
+	waitFor(t, 30*time.Second, "the client to bind a replacement core subscription", client.CoreSubOK)
+	if returned.IsValid() {
+		t.Fatal("the handle SubscribeCore returned is still valid after its connection closed; the test proves nothing")
+	}
+	waitFor(t, 5*time.Second, "the replacement core subscription to deliver", func() bool {
+		if err := publisher.Publish(subject, []byte("recovered")); err != nil {
+			t.Fatalf("publish: %v", err)
+		}
+		if err := publisher.Flush(); err != nil {
+			t.Fatalf("flush: %v", err)
+		}
+		return received.Load() > 0
+	})
+}
+
 // While a listener waits out the task that holds its durable, its JetStream subscription is
 // registered but unbound and its core role lane already delivers. A recovery onto a new connection
 // in that window must restore the role lane though the durable still refuses the bind: the role

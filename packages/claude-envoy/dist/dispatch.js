@@ -14422,7 +14422,7 @@ var dispatchToolSpecs = [
   {
     name: "dispatch_issues",
     example: { project: "PROJ", limit: 250, offset: 250 },
-    description: "List a project's issues for a roadmap or backlog pass: every issue in one project, each carrying " + "its status, priority, parent, labels, open-ask count, progress (its spec's task-list items and " + "its direct children, each done of total, as `tasks 3/7 \xB7 children 2/5`, each only when it has " + "any), and route with whether it reaches anyone, " + "so you can see backlog shape without opening every issue. Optionally filter by status, parent, " + "label, priority, route status, or how recently it changed; priority takes one or more of 0-3 " + "(P0-P3) and null for an issue with no priority, so an owner's P0/P1 audit is priority [0, 1]. " + 'route_status "no_holder" lists every open issue whose route names a role nobody holds or a ' + "session that is not running at the moment of the read, whatever its priority. A restarting " + "session is absent for minutes, so an issue is unowned only when a read ten minutes later agrees. " + "Do not use it to search by keyword or phrase; dispatch search remains the keyword surface. " + "Dispatch pages the list: limit sets the page size (default " + `${DEFAULT_ISSUE_PAGE_LIMIT}, max ${MAX_ISSUE_PAGE_LIMIT}) and offset selects where it starts ` + "(default 0), and the answer names how many issues match, so repeat with the next offset to " + "walk every matching issue. A walk is exact only while the list does not change: an issue " + "that enters or leaves what the filters match, or whose status or rank changes, between two " + "pages shifts rows across a page boundary, so one issue can come back twice and another never.",
+    description: "List a project's issues for a roadmap or backlog pass: every issue in one project, each carrying " + "its status, priority, parent, labels, open-ask count, progress (its spec's task-list items and " + "its direct children, each done of total, as `tasks 3/7 \xB7 children 2/5`, each only when it has " + "any), and route with whether it reaches anyone, " + "so you can see backlog shape without opening every issue. Optionally filter by status, parent, " + "label, priority, route status, or how recently it changed; priority takes one or more of 0-3 " + "(P0-P3) and null for an issue with no priority, so an owner's P0/P1 audit is priority [0, 1]. " + 'route_status "no_holder" lists every open issue whose route names a role nobody holds or a ' + "session that is not running at the moment of the read, whatever its priority. A restarting " + "session is absent for minutes, so an issue is unowned only when a read ten minutes later agrees. " + "Do not use it to search by keyword or phrase; dispatch search remains the keyword surface. " + "Dispatch pages the list: limit sets the page size (default " + `${DEFAULT_ISSUE_PAGE_LIMIT}, max ${MAX_ISSUE_PAGE_LIMIT}) and offset selects where it starts ` + "(default 0), and the answer names how many issues match, so repeat with the next offset to " + "walk every matching issue. A walk is exact only while the list does not change: an issue " + "that enters or leaves what the filters match, or whose status or rank changes, between two " + "pages shifts rows across a page boundary, so one issue can come back twice and another never. " + "all takes the whole filtered list in one read instead, for a caller that must not miss or " + "repeat a row while other writers change the list, and especially for one whose own writes " + "move issues out of what it filtered on.",
     arguments: (z2) => ({
       project: z2.string().describe("Project key to list issues from."),
       status: z2.enum(ISSUE_STATUSES).describe("Optional lifecycle status filter.").optional(),
@@ -14432,7 +14432,8 @@ var dispatchToolSpecs = [
       updated_since: z2.string().describe("Optional RFC3339 timestamp; only issues updated at or after it.").optional(),
       route_status: z2.enum(ISSUE_ROUTE_STATUSES).describe("Optional: only open issues whose route is in this state. live: a running session holds " + "the role or is the routed session. no_holder: nobody running holds the role, or the " + "session is not running, right now. unknown: the Envoy listener did not answer.").optional(),
       limit: z2.number({ int: true, min: 1, max: MAX_ISSUE_PAGE_LIMIT }).describe(`Maximum rows, 1-${MAX_ISSUE_PAGE_LIMIT}; default ${DEFAULT_ISSUE_PAGE_LIMIT}.`).optional(),
-      offset: z2.number({ int: true, min: 0 }).describe("Rows to skip before the page; nonnegative integer; default 0.").optional()
+      offset: z2.number({ int: true, min: 0 }).describe("Rows to skip before the page; nonnegative integer; default 0.").optional(),
+      all: z2.boolean().describe("Take every matching issue in one unpaged read, so no row is missed or repeated while " + "the list changes. Refused with limit or offset.").optional()
     })
   },
   {
@@ -15255,6 +15256,18 @@ function whyNotAPage(answer) {
   }
   return `${what}. Retrying will not help: the same request gets the same answer until that ` + "Dispatch is upgraded or fixed.";
 }
+function whyNotAnArray(answer) {
+  if (typeof answer === "string")
+    return `text that is not JSON, ${GATEWAY_PAGE}, so a retry may succeed`;
+  if (answer === null)
+    return "null";
+  if (typeof answer !== "object")
+    return `a ${typeof answer}`;
+  if ("issues" in answer && Array.isArray(answer.issues)) {
+    return "a page, so this Dispatch pages a request that carries no limit and no offset";
+  }
+  return "an object that is not the listing";
+}
 var GATEWAY_PAGE = "which looks like a proxy or gateway page rather than Dispatch's own answer";
 function gatewayAdvice(method, status) {
   if (!transientStatus(status)) {
@@ -15329,6 +15342,14 @@ class DispatchClient {
     if (refusal === undefined)
       return answer;
     throw new Error(`GET ${this.#url(path, query)} asked for a page ({issues, total, limit, offset}) and got ` + refusal);
+  }
+  async listAllIssues(options) {
+    const path = ["api", "v1", "issues"];
+    const query = { ...options };
+    const answer = await this.#json("GET", path, undefined, query);
+    if (Array.isArray(answer))
+      return answer;
+    throw new Error(`GET ${this.#url(path, query)} asked for the unpaged listing and got ${whyNotAnArray(answer)}.`);
   }
   async listProjectArtifacts(project, unlinked = false) {
     return this.#json("GET", ["api", "v1", "projects", project, "artifacts"], undefined, unlinked ? { unlinked: "true" } : undefined);
@@ -16786,6 +16807,18 @@ function argumentProblems(tool, args) {
       }
       break;
     }
+    case "dispatch_issues": {
+      if (optionalBoolean(args, "all") === true) {
+        const paging = [
+          ...optionalNumber(args, "limit") === undefined ? [] : ["--limit"],
+          ...optionalNumber(args, "offset") === undefined ? [] : ["--offset"]
+        ];
+        if (paging.length > 0) {
+          problems.push(`--all takes every matching issue in one unpaged read, so it cannot be combined with ${paging.join(" or ")}: name --all on its own, or page with --limit and --offset`);
+        }
+      }
+      break;
+    }
   }
   return problems;
 }
@@ -18103,7 +18136,7 @@ async function executeDispatchTool(input) {
       const priority = optionalPriorityFilter(args, "priority");
       const updatedSince = optionalString(args, "updated_since");
       const routeStatus = optionalString(args, "route_status");
-      const page = await client.listIssuePage({
+      const filters = {
         project,
         ...status === undefined ? {} : { status },
         ...parent === undefined ? {} : { parent },
@@ -18111,7 +18144,13 @@ async function executeDispatchTool(input) {
         ...priority === undefined ? {} : { priority },
         ...updatedSince === undefined ? {} : { updated_since: updatedSince },
         ...routeStatus === undefined ? {} : { route_status: routeStatus }
-      }, {
+      };
+      const page = optionalBoolean(args, "all") === true ? await client.listAllIssues(filters).then((issues) => ({
+        issues,
+        total: issues.length,
+        limit: issues.length,
+        offset: 0
+      })) : await client.listIssuePage(filters, {
         limit: optionalNumber(args, "limit") ?? DEFAULT_ISSUE_PAGE_LIMIT,
         offset: optionalNumber(args, "offset") ?? 0
       });
@@ -18867,6 +18906,10 @@ function writeMemory(dir, sessionId, follows) {
   };
   writeAtomically(join(dir, "state.json"), `${JSON.stringify(state)}
 `);
+}
+function appendResult(dir, entry) {
+  ensureDirectory(dir);
+  writeResult(dir, entry);
 }
 function writeResult(dir, entry) {
   const line = { at: new Date().toISOString(), ...entry };
@@ -19974,45 +20017,49 @@ async function runDispatchCli(argv, rawEnv, io) {
     if (value !== undefined && value !== "")
       env[name] = value;
   }
+  const refuse = (text2, code2, tool2) => {
+    print(text2);
+    const sessionId2 = env.CLAUDE_CODE_SESSION_ID ?? env.DISPATCH_SESSION_ID;
+    if (sessionId2 !== undefined) {
+      try {
+        appendResult(sessionDirectory(env, sessionId2), {
+          tool: tool2 ?? "dispatch",
+          error: text2.trimEnd()
+        });
+      } catch {}
+    }
+    return code2;
+  };
   let parsed;
   try {
     parsed = parseCommand(argv, io);
   } catch (error48) {
-    print(`dispatch: ${messageFor(error48)}`);
-    return USAGE;
+    return refuse(`dispatch: ${messageFor(error48)}`, USAGE);
   }
   if (parsed.kind === "help") {
     print(parsed.tool === undefined ? commandsHelp() : commandHelp(parsed.tool));
     return OK;
   }
   if (parsed.kind === "refused") {
-    if (parsed.tool === undefined) {
-      print([`dispatch: ${parsed.problems.join(`
+    return parsed.tool === undefined ? refuse([`dispatch: ${parsed.problems.join(`
 `)}`, "Run dispatch --help."].join(`
-`));
-      return USAGE;
-    }
-    print(new ToolInputError(parsed.tool, parsed.problems).message);
-    return REFUSED;
+`), USAGE) : refuse(new ToolInputError(parsed.tool, parsed.problems).message, REFUSED, parsed.tool);
   }
   const hostName = env.DISPATCH_HOST ?? (env.CLAUDE_CODE_CHILD_SESSION === "1" ? "claude" : undefined);
   const host = HOSTS.find((name) => name === hostName);
   if (host === undefined) {
-    print(hostName === undefined ? "dispatch: DISPATCH_HOST is not set. The host plugin sets it in an agent's shell; to run dispatch by hand, set DISPATCH_HOST and DISPATCH_SESSION_ID yourself." : `dispatch: DISPATCH_HOST is ${JSON.stringify(hostName)}, not omp, claude or opencode.`);
-    return USAGE;
+    return refuse(hostName === undefined ? "dispatch: DISPATCH_HOST is not set. The host plugin sets it in an agent's shell; to run dispatch by hand, set DISPATCH_HOST and DISPATCH_SESSION_ID yourself." : `dispatch: DISPATCH_HOST is ${JSON.stringify(hostName)}, not omp, claude or opencode.`, USAGE, parsed.tool);
   }
   const sessionVariable = host === "claude" ? "CLAUDE_CODE_SESSION_ID" : "DISPATCH_SESSION_ID";
   const sessionId = env[sessionVariable];
   if (sessionId === undefined) {
-    print(`dispatch: ${sessionVariable} is not set, so this call has no session to act as. The host plugin sets it in an agent's shell.`);
-    return USAGE;
+    return refuse(`dispatch: ${sessionVariable} is not set, so this call has no session to act as. The host plugin sets it in an agent's shell.`, USAGE, parsed.tool);
   }
   let dir;
   try {
     dir = sessionDirectory(env, sessionId);
   } catch (error48) {
-    print(messageFor(error48));
-    return USAGE;
+    return refuse(messageFor(error48), USAGE, parsed.tool);
   }
   const file2 = (env.DISPATCH_HOST === undefined ? null : handedConfigFile(env)) ?? sessionConfigFile(host, env);
   if (parsed.dryRun) {
@@ -20025,22 +20072,19 @@ async function runDispatchCli(argv, rawEnv, io) {
       serverUrls: settings?.enabled === true ? dispatchServerUrls(settings) : []
     });
     if (problems2.length > 0) {
-      print(new ToolInputError(parsed.tool, problems2).message);
-      return REFUSED;
+      return refuse(new ToolInputError(parsed.tool, problems2).message, REFUSED, parsed.tool);
     }
     print(JSON.stringify(parsed.args, null, 2));
     return OK;
   }
   if (file2.path === null) {
-    print(`dispatch: ${file2.error}`);
-    return USAGE;
+    return refuse(`dispatch: ${file2.error}`, USAGE, parsed.tool);
   }
   const { dispatch: resolution, warnings } = sessionDispatchSettings(file2, env, { cwd: io.cwd });
   for (const warning of warnings)
     print(`dispatch: ${warning}`);
   if (!resolution.enabled) {
-    print(resolution.error === null ? `dispatch: ${resolution.notice}` : `dispatch: dispatch config: ${resolution.error}`);
-    return USAGE;
+    return refuse(resolution.error === null ? `dispatch: ${resolution.notice}` : `dispatch: dispatch config: ${resolution.error}`, USAGE, parsed.tool);
   }
   const config2 = resolution;
   let topics;
@@ -20070,8 +20114,7 @@ async function runDispatchCli(argv, rawEnv, io) {
     pruneSessions(sessionStateRoot(env), Date.now());
     follows = loadSessionMemory(dir, sessionId);
   } catch (error48) {
-    print(`dispatch: ${messageFor(error48)}`);
-    return USAGE;
+    return refuse(`dispatch: ${messageFor(error48)}`, USAGE, parsed.tool);
   }
   const { tool, args } = parsed;
   let text;
