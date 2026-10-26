@@ -5,15 +5,17 @@
 // What the counts mean, as `isSentBack`, `isRefusal` and `isUnreviewed` read an entry:
 //   - sent back: the gate did not pass the write as sent. Every entry whose decision is
 //     `revise` — a revise verdict, `no-model-role`, and, in block mode, `abandoned` and
-//     `shutdown`, the two causes of a call given up with no verdict — and every `unreadable` or
+//     `shutdown` (the two causes of a call given up with no verdict) and `unmarked` (a gated
+//     write the dispatch CLI found no marker for) — and every `unreadable`, `unmarked` or
 //     `load-failed` entry, whatever its mode.
 //   - refusal: a write that did not post. Every sent-back entry of a session in block mode,
 //     plus `no-model-role` and `load-failed` in warn mode too, since neither gate can review
-//     anything and a gate that cannot review is no off switch. A warn-mode `unreadable`,
-//     `abandoned` or `shutdown` is sent back and no refusal: its write posted.
+//     anything and a gate that cannot review is no off switch. A warn-mode `unreadable` or
+//     `unmarked` is sent back and no refusal: its write posted.
 //   - unreviewed: a write that posted with no review behind it. Every `allow` whose outcome is
 //     not `verdict`: timeout, error, no-verdict, halted, skipped, rebuttal, breaker, and in
-//     warn mode `unreadable`, `abandoned` and `shutdown`.
+//     warn mode `unreadable`, `unmarked`, `abandoned` and `shutdown`. A warn-mode `abandoned` or
+//     `shutdown` is that alone: its decision is `allow`, so it is not sent back.
 import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
@@ -178,13 +180,15 @@ export function isReview(record: GateRecord): boolean {
 }
 
 /**
- * The gate did not pass the write as sent: a revise, a call the gate could not read (which in warn
- * mode runs with the reason returned, so its decision is `allow`), or a gate that did not load.
+ * The gate did not pass the write as sent: a revise, a literal call whose file the gate could not
+ * capture or a gated write the CLI found no marker for (each of which warn mode lets post, so its
+ * decision is `allow`), or a gate that did not load.
  */
 export function isSentBack(record: GateRecord): boolean {
   return (
     record.decision === "revise" ||
     record.outcome === "unreadable" ||
+    record.outcome === "unmarked" ||
     record.outcome === "load-failed"
   );
 }
@@ -285,13 +289,14 @@ export function formatReport(stats: Stats, seed: number): string[] {
       : `$${stats.costMedian.toFixed(4)} (${stats.costCount} reviews with a cost)`;
   return [
     "A gated call is any advisor-gate entry. A review is one where the model gave a verdict.",
-    "Sent back means the gate did not pass the write as sent: a revise verdict, a call it could",
-    "not read, or a gate that did not load. It is counted over every gated call, since two of",
-    "those three never reach a review. A refusal is a write that did not post: one sent back",
-    "in block mode, and `no-model-role` and `load-failed`, which refuse in warn mode too.",
+    "Sent back means the gate did not pass the write as sent: every revise (a revise verdict,",
+    "no-model-role, and in block mode abandoned, shutdown and unmarked), and every unreadable,",
+    "unmarked or load-failed entry in any mode. It is counted over every gated call, since most",
+    "of those never reach a review. A refusal is a write that did not post: one sent back in",
+    "block mode, and no-model-role and load-failed, which refuse in warn mode too.",
     "Unreviewed is a write that posted with no review behind it: every allow whose outcome is no",
-    "verdict, a rebuttal, a breaker trip and a warn-mode unreadable call among them.",
-    "A session named below had at least one such write, with each outcome's count.",
+    "verdict, a rebuttal, a breaker trip, and warn mode's unreadable, unmarked, abandoned and",
+    "shutdown among them. A session named below had at least one such write, with each count.",
     `gated calls: ${stats.gatedCalls}`,
     `reviews: ${stats.reviews}`,
     `sent back: ${share(stats.sentBack, stats.gatedCalls)} (${stats.sentBack} of ${stats.gatedCalls} gated calls)`,

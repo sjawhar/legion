@@ -296,6 +296,55 @@ describe("isSentBack and isRefusal", () => {
     );
     expect(blocked && isRefusal(blocked)).toBe(true);
   });
+
+  // Final review of #2159, confirm at 0aa47421c, N2: the counts the header and the report's own
+  // lines name, one fixture each.
+  test("no-model-role is sent back and refused in warn mode too", () => {
+    const [record] = parseSessionText(
+      gate({ id: "nm", outcome: "no-model-role", decision: "revise", mode: "warn" }),
+      "s"
+    );
+    expect(record && isSentBack(record)).toBe(true);
+    expect(record && isRefusal(record)).toBe(true);
+  });
+
+  test("a block-mode abandoned call is sent back and refused; a warn-mode one is neither, and counts as unreviewed", () => {
+    const [blocked] = parseSessionText(
+      gate({ id: "ab", outcome: "abandoned", decision: "revise", mode: "block" }),
+      "s"
+    );
+    expect(blocked && isSentBack(blocked)).toBe(true);
+    expect(blocked && isRefusal(blocked)).toBe(true);
+    const [warned] = parseSessionText(
+      gate({ id: "aw", outcome: "abandoned", decision: "allow", mode: "warn" }),
+      "s"
+    );
+    expect(warned && isSentBack(warned)).toBe(false);
+    expect(warned && isRefusal(warned)).toBe(false);
+    expect(warned ? computeStats([warned]).unreviewed : 0).toBe(1);
+  });
+
+  test("an unmarked write the CLI refused is sent back and refused; a warn-mode one posted, sent back and unreviewed", () => {
+    const [blocked] = parseSessionText(
+      gate({ id: "mb", outcome: "unmarked", decision: "revise", mode: "block" }),
+      "s"
+    );
+    expect(blocked && isRefusal(blocked)).toBe(true);
+    const [warned] = parseSessionText(
+      gate({ id: "mw", outcome: "unmarked", decision: "allow", mode: "warn" }),
+      "s"
+    );
+    expect(warned && isSentBack(warned)).toBe(true);
+    expect(warned && isRefusal(warned)).toBe(false);
+    expect(warned ? computeStats([warned]).unreviewed : 0).toBe(1);
+  });
+
+  test("the printed header names the rules isSentBack, isRefusal and isUnreviewed count by", () => {
+    const header = formatReport(computeStats([]), 1).slice(0, 9).join(" ");
+    for (const name of ["no-model-role", "abandoned", "shutdown", "unmarked", "load-failed"])
+      expect(header).toContain(name);
+    expect(header).toContain("warn mode's unreadable, unmarked, abandoned and shutdown");
+  });
 });
 
 describe("CLI", () => {
