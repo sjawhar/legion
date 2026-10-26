@@ -2,8 +2,8 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-141",
-  "completed": "2026-10-26T20:23:39Z",
-  "round": "generation 4: roles from the role claims (dispatch://INFRA-141/comment/04a5215e-6d68-4da1-b0ef-c039e778f9a5), plan v3 at af74a1aa plus the architect's 19:16Z overrule (plan.md v4, acceptance row A10: an incomplete role-claim view is fixed, not documented). The saved WIP 5e173361 was brought over with jj restore of packages/envoy only; no merge of main",
+  "completed": "2026-10-26T20:38:47Z",
+  "round": "generation 4: roles from the role claims (dispatch://INFRA-141/comment/04a5215e-6d68-4da1-b0ef-c039e778f9a5), plan v3 at af74a1aa plus the architect's 19:16Z overrule (plan.md v4, acceptance row A10: an incomplete role-claim view is fixed, not documented). The saved WIP 5e173361 was brought over with jj restore of packages/envoy only; no merge of main; GitHub reported the PR CONFLICTING (DIRTY) after the push of b7b09cce, so main 723ba153 was merged forward in d11db8ab (packages/envoy/AGENTS.md only: main's new Dispatch access-log bullet kept beside this PR's /healthz and NATS bullets)",
   "planPointA10": "Recorded here because the planner cannot commit plan.json while the issue is implementing: RolesHeldBy answers from its view only while the view is complete (the current role watcher's first scan delivered every key and was not ended by nats.go's idle timer; again after a recreated bucket refills). Until then it returns store.ErrRoleViewNotReady; GET /v1/sessions and GET /v1/registry/<id> answer the 503 with Retry-After: 1; the sender stamp leaves Roles empty. Test: TestARoleViewWhoseFirstScanTimedOutAnswersOnlyOnceItsRescanCompletes, TestARecreatedRoleBucketsViewAnswersOnlyOnceItsRefillCompletes (internal/store), TestARoleViewWhoseFirstScanTimedOutIsTheBusNotAnsweringOnTheSessionRoutes, TestARecreatedRoleBucketIsNeverAnsweredAsAHolderWithoutItsRole (cmd/listener).",
   "proof": [
     {
@@ -45,6 +45,14 @@
       "observed": "build and vet clean; kvwatch ok 63.135s, store ok 30.908s, session ok 7.587s, bus ok 228.888s, webhook ok 4.945s, cistore ok 12.050s, integration ok 97.577s; cmd/listener ok 429.938s; e2e-local exit 0 (after bun install in the recreated workspace), both PASS lines, bus-down send 503 in 3.503081 s, client EnvoyApiError 503, three WARN bus_unavailable records; gofmt and check-private-names.sh clean",
       "headSha": "757f5eff82dd035c2e3cc645d284d6960880edfa",
       "negativeControl": "the overlay failures above are the pre-change behaviour on the same rigs"
+    },
+    {
+      "criterion": "The forward merge of main keeps this PR's behaviour: none of main's packages/envoy changes touch cmd/listener, internal/store, internal/kvwatch, internal/bus or internal/session",
+      "surface": "the merged tree's suites against the in-process NATS and scripts/e2e-local.sh against the real binary",
+      "command": "cd packages/envoy && go build ./... && go vet ./cmd/listener ./internal/store ./internal/kvwatch ./internal/session ./internal/bus; go test ./internal/kvwatch/... ./internal/store ./internal/session ./internal/integration -count=1; go test ./cmd/listener -count=1 -skip <the four testpg tests> -timeout 25m; bash scripts/e2e-local.sh",
+      "observed": "build and vet clean; kvwatch ok 63.603s, store ok 32.708s, session ok 8.684s, integration ok 98.308s; cmd/listener ok 414.866s; e2e-local exit 0, bus-down send 503 in 3.504151 s, client EnvoyApiError 503; check-private-names.sh clean",
+      "headSha": "d11db8ab658cc7ec2be6489678b5fb416ab1f020",
+      "negativeControl": "before the merge GitHub reported CONFLICTING/DIRTY and git merge-tree of b7b09cce with main 723ba153 reported a content conflict in packages/envoy/AGENTS.md; unchanged-diff fingerprint before the merge 2f07dc94c02f9aa88f19fee45934c02fde4090961d2ae6782e7c944b486c29ca"
     }
   ],
   "filesChanged": [
@@ -52,7 +60,8 @@
     "packages/envoy/internal/kvwatch/kvwatch.go — Complete() and WithRescan (additive; other caches unchanged); kvwatchtest/timingout.go TimingOutFirst; warmup_test.go",
     "packages/envoy/cmd/listener/api.go — senderStamp and sessionInfoFor take roles from RolesHeldBy; main.go — /healthz and self-health include the role watcher",
     "tests: cmd/listener/roles_from_claims_test.go (new), internal/store/role_holders_test.go (new), internal/store/role_topics_test.go (deleted), kv_test.go, api_test.go, main_test.go, interest_*_test.go",
-    "packages/envoy/AGENTS.md, docs/architecture.md, CHANGELOG.md"
+    "packages/envoy/AGENTS.md, docs/architecture.md, CHANGELOG.md",
+    "d11db8ab — forward merge of main 723ba153; conflict in packages/envoy/AGENTS.md resolved by keeping main's Dispatch access-log bullet and this PR's /healthz and NATS bullets"
   ],
   "trickyParts": [
     "Completeness is per watcher generation: a Rewatch (reconnect, self-health rebuild) clears it until the new scan finishes, so the two session routes answer 503 with Retry-After: 1 for that moment (usually milliseconds).",
