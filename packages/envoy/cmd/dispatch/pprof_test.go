@@ -7,9 +7,19 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
+
+// defaultMuxSentinel is a route on http.DefaultServeMux that the pprof listener must not serve.
+// It is registered once per test binary, since DefaultServeMux refuses a pattern twice and a run
+// with -count=N runs the test N times in one process.
+const defaultMuxSentinel = "/debug/pprof-default-mux-sentinel"
+
+var registerDefaultMuxSentinel = sync.OnceFunc(func() {
+	http.HandleFunc(defaultMuxSentinel, func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusTeapot) })
+})
 
 // Unset or empty, DISPATCH_PPROF_PORT names no address, and startPprof listens on nothing.
 func TestPprofUnsetStartsNoListener(t *testing.T) {
@@ -76,9 +86,8 @@ func TestPprofServesTheIndexOnLoopbackAndStopsWithTheContext(t *testing.T) {
 	}
 	// Only the pprof routes, from a mux of its own: neither the server's routes nor anything on
 	// http.DefaultServeMux (where importing net/http/pprof also registers the profiler) is here.
-	sentinel := "/debug/pprof-default-mux-sentinel-" + t.Name()
-	http.HandleFunc(sentinel, func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusTeapot) })
-	for _, path := range []string{"/healthz", sentinel} {
+	registerDefaultMuxSentinel()
+	for _, path := range []string{"/healthz", defaultMuxSentinel} {
 		if response, err := http.Get("http://" + bound.String() + path); err != nil || response.StatusCode != http.StatusNotFound {
 			t.Errorf("GET %s on the pprof listener = %v, %v; want 404", path, response, err)
 		} else {

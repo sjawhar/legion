@@ -4,6 +4,12 @@
 
 ### Added
 
+- `envoy-infra:gcp:Dispatch` takes `pprofPort`, which sets `DISPATCH_PPROF_PORT` on the app
+  Deployment's `envoy-dispatch` container alone, so a deployment turns on Dispatch's loopback-only
+  profiler through the component rather than by editing the Deployment, which the next update
+  would revert. Unset, nothing is rendered and the pod is the one it always was. The component
+  refuses, naming the input, a value outside 1-65535 and the ports the app pod already binds on its
+  loopback, `8766` and the `cloud-sql-proxy` sidecar's `5432`.
 - `envoy-infra:gcp:Dispatch` takes `appCpu` and `appMemory`, the Kubernetes quantities that size
   the app Deployment's `envoy-dispatch` container as both its request and its limit: 1 CPU and
   `4Gi` by default, the size it always had, so a deployment that sets neither renders the same pod.
@@ -47,8 +53,8 @@
   server is one `kubectl port-forward` and `go tool pprof` away. Unset or empty, nothing listens;
   a value that is not a port 1-65535 refuses startup naming the variable, the profiler binds
   before anything connects, and it closes at once on shutdown, delaying nothing. `DISPATCH_PORT`
-  is read by the same rule, so a value past the integer range (which wrapped to a small port)
-  is refused too.
+  is read by the same rule, so a value past the integer range, which the old check accepted and
+  only the bind refused (after NATS and the migrations had run), is refused at startup too.
 - Dispatch's meaning search embeds through AWS Bedrock (the default, unchanged) or Azure AI
   Foundry, chosen by `DISPATCH_EMBEDDER`. Azure takes `DISPATCH_AZURE_EMBED_ENDPOINT`,
   `DISPATCH_AZURE_EMBED_TOKENS_PER_MINUTE` (the deployment's quota, two thirds of which paces

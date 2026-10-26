@@ -348,8 +348,10 @@ address only, so nothing outside the pod reaches it; unset or empty, nothing lis
 that is not a port 1-65535, or a port already taken, refuses startup naming the variable. The
 profiler binds before anything connects, so a slow boot can be profiled too. The listener closes
 at once when the process is told to stop, cutting off a profile in flight, so it never delays the
-shutdown (and the shutdown's own drain cannot be profiled). To take a 30-second CPU profile of a
-pod:
+shutdown (and the shutdown's own drain cannot be profiled). A `gcp:Dispatch` deployment turns it
+on with the component's `pprofPort` input (`packages/envoy/infra/README.md`), which sets the
+variable on the `envoy-dispatch` container; setting it by hand on the Deployment rolls the pods
+and is reverted by the next update. To take a 30-second CPU profile of a pod:
 
 ```sh
 kubectl port-forward <pod> <port>:<port>

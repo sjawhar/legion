@@ -178,6 +178,56 @@ func TestDispatchAcceptsAppResourcesWithinAutopilotsBounds(t *testing.T) {
 	}
 }
 
+// Unset, pprofPort renders no DISPATCH_PPROF_PORT, so Dispatch starts no profiler and a deployment
+// that leaves it unset renders the pod it always had (TestDispatchPodMatchesGolden pins it).
+func TestDispatchRendersNoProfilerByDefault(t *testing.T) {
+	settings, err := gcp.ResolveDispatch(dispatchArgs())
+	require.NoError(t, err)
+	require.Zero(t, settings.PprofPort)
+	m, err := runDispatch(t, dispatchArgs(), true)
+	require.NoError(t, err)
+	require.NotContains(t, containerEnv(t, podContainer(t, deploymentPodTemplate(t, m, "example-dispatch"), "envoy-dispatch")), "DISPATCH_PPROF_PORT")
+}
+
+// pprofPort sets DISPATCH_PPROF_PORT on the envoy-dispatch container alone, where Dispatch serves
+// its profiler on 127.0.0.1 at that port: the app's pod template is the default's with that one
+// variable added to that one container, and the front door's and the listener's pods match their
+// goldens.
+func TestDispatchPprofPortReachesTheAppContainerAlone(t *testing.T) {
+	defaults, err := runDispatch(t, dispatchArgs(), true)
+	require.NoError(t, err)
+	for _, port := range []int{1, 6060, 65535} {
+		t.Run(strconv.Itoa(port), func(t *testing.T) {
+			args := dispatchArgs()
+			args.PprofPort = pulumi.IntRef(port)
+			settings, err := gcp.ResolveDispatch(args)
+			require.NoError(t, err)
+			require.Equal(t, port, settings.PprofPort)
+			m, err := runDispatch(t, args, true)
+			require.NoError(t, err)
+
+			got := deploymentPodTemplate(t, m, "example-dispatch")
+			require.Equal(t, strconv.Itoa(port), containerEnv(t, podContainer(t, got, "envoy-dispatch"))["DISPATCH_PPROF_PORT"])
+			want := deploymentPodTemplate(t, defaults, "example-dispatch")
+			app := podContainer(t, want, "envoy-dispatch")
+			app["env"] = append(app["env"].([]any), map[string]any{"name": "DISPATCH_PPROF_PORT", "value": strconv.Itoa(port)})
+			require.Equal(t, want, got)
+			requirePodGolden(t, m, "example-dispatch-listener", "dispatch-listener-pod.golden")
+			requirePodGolden(t, m, "example-dispatch-tailnet", "dispatch-tailnet-pod.golden")
+		})
+	}
+}
+
+// A pprofPort Dispatch would refuse, or one the app pod already binds, is refused by the resolver
+// before the component registers, so nothing beyond the test's providers exists.
+func TestDispatchRefusesAPprofPortBeforeRegistering(t *testing.T) {
+	args := dispatchArgs()
+	args.PprofPort = pulumi.IntRef(70000)
+	m, err := runDispatch(t, args, true)
+	require.ErrorContains(t, err, "envoy-infra:gcp:Dispatch example-dispatch: pprofPort 70000 must be a port number 1-65535")
+	require.ElementsMatch(t, []string{gcpProviderType, randomProviderType}, m.Types())
+}
+
 // Above one replica the operator has accepted two overlapping envoy-dispatch processes, so the
 // Deployment rolls a new pod up before taking an old one down.
 func TestDispatchSeveralReplicasRollWithoutGoingUnavailable(t *testing.T) {
@@ -266,6 +316,11 @@ func TestDispatchResolverRefusesInvalidInputs(t *testing.T) {
 		{name: "an invalid app private key secret name", edit: func(a *gcp.DispatchArgs) { setApp(a); a.AppPrivateKeySecretName = "Example_Key" }, err: []string{"appPrivateKeySecretName", "DNS subdomain"}},
 		{name: "an invalid app private key secret key", edit: func(a *gcp.DispatchArgs) { setApp(a); a.AppPrivateKeySecretKey = "bad/key" }, err: []string{"appPrivateKeySecretKey", "must match"}},
 		{name: "fewer than one replica", edit: func(a *gcp.DispatchArgs) { a.Replicas = pulumi.IntRef(0) }, err: []string{"replicas", "at least 1"}},
+		{name: "a pprof port of 0", edit: func(a *gcp.DispatchArgs) { a.PprofPort = pulumi.IntRef(0) }, err: []string{"pprofPort 0", "1-65535", "leave it unset"}},
+		{name: "a negative pprof port", edit: func(a *gcp.DispatchArgs) { a.PprofPort = pulumi.IntRef(-1) }, err: []string{"pprofPort -1", "1-65535"}},
+		{name: "a pprof port past 65535", edit: func(a *gcp.DispatchArgs) { a.PprofPort = pulumi.IntRef(65536) }, err: []string{"pprofPort 65536", "1-65535"}},
+		{name: "a pprof port on envoy-dispatch's own port", edit: func(a *gcp.DispatchArgs) { a.PprofPort = pulumi.IntRef(8766) }, err: []string{"pprofPort 8766", "envoy-dispatch"}},
+		{name: "a pprof port on cloud-sql-proxy's port", edit: func(a *gcp.DispatchArgs) { a.PprofPort = pulumi.IntRef(5432) }, err: []string{"pprofPort 5432", "cloud-sql-proxy"}},
 		{name: "an app CPU that is not a quantity", edit: func(a *gcp.DispatchArgs) { a.AppCpu = pulumi.StringRef("two") }, err: []string{`appCpu "two"`, "Kubernetes quantity"}},
 		{name: "an app CPU with a memory suffix in the wrong case", edit: func(a *gcp.DispatchArgs) { a.AppCpu = pulumi.StringRef("1gi") }, err: []string{`appCpu "1gi"`, "Kubernetes quantity"}},
 		{name: "an app memory that is not a quantity", edit: func(a *gcp.DispatchArgs) { a.AppMemory = pulumi.StringRef("4 GiB") }, err: []string{`appMemory "4 GiB"`, "Kubernetes quantity"}},
