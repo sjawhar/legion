@@ -10,8 +10,8 @@ import (
 )
 
 // Every read behind an ask card's initial data: the orchestrator, its reply chain, and the
-// per-ask edits, followers and reach (claimant and route). An Inbox card and an issue's ask list
-// render from the same reads, each batched over every ask on the page.
+// per-ask edits, followers and reach (claimant, route and route holder). An Inbox card and an
+// issue's ask list render from the same reads, each batched over every ask on the page.
 // `inboxAskReplyChainsQuery` stays in comment_queries.go with `replyChainQuery`, the other
 // recursion over `comments`, so the two can be read against each other; query_plan_test.go pins
 // both from there.
@@ -89,8 +89,9 @@ func (s *server) loadInboxAskFollowers(ctx context.Context, q queryer, askIDs []
 // matches loadReplyChain exactly either way. Answers are not among the reads: an Inbox row is an
 // open ask and can have none, so a caller that does want them (an issue's ask list asked for a
 // thread) merges loadAskAnswersByAsk over the same ask ids itself rather than making every
-// Inbox load scan `events` for answers that cannot exist.
-func (s *server) loadAskThreads(ctx context.Context, q queryer, askIDs []string) (map[string]askThread, error) {
+// Inbox load scan `events` for answers that cannot exist. It reads on the pool, never inside a
+// transaction, because the reach read ends with a listener call (loadAskReaches).
+func (s *server) loadAskThreads(ctx context.Context, askIDs []string) (map[string]askThread, error) {
 	threads := make(map[string]askThread, len(askIDs))
 	for _, askID := range askIDs {
 		threads[askID] = askThread{
@@ -104,6 +105,7 @@ func (s *server) loadAskThreads(ctx context.Context, q queryer, askIDs []string)
 		return threads, nil
 	}
 
+	q := s.deps.Store.Pool
 	replies, err := s.loadInboxAskReplyChains(ctx, q, askIDs)
 	if err != nil {
 		return nil, err
@@ -116,7 +118,7 @@ func (s *server) loadAskThreads(ctx context.Context, q queryer, askIDs []string)
 	if err != nil {
 		return nil, err
 	}
-	reaches, err := loadAskReaches(ctx, q, askIDs)
+	reaches, err := s.loadAskReaches(ctx, askIDs)
 	if err != nil {
 		return nil, err
 	}
@@ -130,12 +132,40 @@ func (s *server) loadAskThreads(ctx context.Context, q queryer, askIDs []string)
 	return threads, nil
 }
 
-// loadAskReaches reads every listed ask's askReach in one query, keyed by ask id: the claimant
-// only while a session holds the claim on the ask's issue (the same rule the outbox's
-// loadSessionClaimant reads), and the issue's route; an empty id or route is none. A project
-// document's ask joins no issue, and an ask the query does not find keeps the zero askReach, so
-// both are null.
-func loadAskReaches(ctx context.Context, q queryer, askIDs []string) (map[string]askReach, error) {
+// loadAskReaches reads every listed ask's askReach, keyed by ask id: the claimant only while a
+// session holds the claim on the ask's issue (the same rule the outbox's scanPendingEvents
+// reads), the issue's route, and the session that route reaches now. The holder comes from one
+// listener read for the whole batch (readRouteRoster), made only when some ask has a route and
+// only once scanAskReaches has released its pooled connection, so the listener call never runs
+// inside a transaction or with a connection held; a listener that is unconfigured or does not
+// answer leaves every holder null and never fails the read.
+func (s *server) loadAskReaches(ctx context.Context, askIDs []string) (map[string]askReach, error) {
+	reaches, err := scanAskReaches(ctx, s.deps.Store.Pool, askIDs)
+	if err != nil {
+		return nil, err
+	}
+	routed := false
+	for _, reach := range reaches {
+		if reach.Route != nil {
+			routed = true
+			break
+		}
+	}
+	if !routed {
+		return reaches, nil
+	}
+	roster := s.readRouteRoster(ctx)
+	for askID, reach := range reaches {
+		reach.RouteHolder = roster.reach(reach.Route).RouteHolder
+		reaches[askID] = reach
+	}
+	return reaches, nil
+}
+
+// scanAskReaches reads every listed ask's claimant and route in one query and returns with the
+// pooled connection released; an empty id or route is none. A project document's ask joins no
+// issue, and an ask the query does not find keeps the zero askReach, so every key is null.
+func scanAskReaches(ctx context.Context, q queryer, askIDs []string) (map[string]askReach, error) {
 	reaches := make(map[string]askReach, len(askIDs))
 	rows, err := q.Query(ctx, `
 		select a.id::text,

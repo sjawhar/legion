@@ -253,6 +253,7 @@ test("Change answer opens its card under the answer row, not a newer reply on th
     claimant: null,
     followers: [],
     route: null,
+    route_holder: null,
     replies: [],
   });
   const { view } = renderPage();
@@ -301,6 +302,7 @@ test("a row's Change answer opens the seeded form; after Save the row and the ca
             followers: [],
             replies: [],
             route: null,
+            route_holder: null,
           }
         : {
             answers: [shipAnswer],
@@ -310,6 +312,7 @@ test("a row's Change answer opens the seeded form; after Save the row and the ca
             followers: [],
             replies: [],
             route: null,
+            route_holder: null,
           }
   );
   const sent: AnswerAskInput[] = [];

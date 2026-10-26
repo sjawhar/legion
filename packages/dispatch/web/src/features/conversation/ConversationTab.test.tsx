@@ -135,7 +135,15 @@ function askRow(overrides: Partial<Ask> = {}, replies: Comment[] = []): IssueAsk
     ...baseAsk,
     ...overrides,
     last_reply: null,
-    thread: { answers: [], claimant: null, edits: [], followers: [], replies, route: null },
+    thread: {
+      answers: [],
+      claimant: null,
+      edits: [],
+      followers: [],
+      replies,
+      route: null,
+      route_holder: null,
+    },
   };
 }
 

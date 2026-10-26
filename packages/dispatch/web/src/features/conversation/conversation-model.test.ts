@@ -39,7 +39,15 @@ function askRow(ask: Partial<Ask> = {}, replies: Comment[] = []): IssueAskThread
       replies.length === 0
         ? null
         : { author: replies[replies.length - 1]?.author ?? bob, created_at: "" },
-    thread: { answers: [], claimant: null, edits: [], followers: [], replies, route: null },
+    thread: {
+      answers: [],
+      claimant: null,
+      edits: [],
+      followers: [],
+      replies,
+      route: null,
+      route_holder: null,
+    },
   };
 }
 

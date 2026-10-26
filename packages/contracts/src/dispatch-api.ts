@@ -801,17 +801,9 @@ export interface Ask extends AnchorPosition {
 export const ASK_TURNS = ["human", "agent"] as const;
 export type AskTurn = (typeof ASK_TURNS)[number];
 
-/** An ask's thread as a list row carries it: everything a card needs before its first targeted
- *  thread refresh. */
-export interface AskThread {
-  readonly replies: Comment[];
-  /** Every rewording of the question, oldest first; empty when never edited. */
-  readonly edits: AskEdit[];
-  /** Every answer, oldest first: empty on an Inbox row, which is an open ask, and the answers of
-   *  an answered ask on `GET /api/v1/issues/{key}/asks?thread=1`. */
-  readonly answers: AskAnswer[];
-  /** The sessions this ask's answer and replies reach directly, oldest first. */
-  readonly followers: AskFollower[];
+/** Whom besides the followers a person's answer and replies on an ask reach, as every ask read
+ *  carries it: the single-ask read (`AskRead`) and each list row's thread (`AskThread`). */
+export interface AskReach {
   /** The session holding the claim on the ask's issue: a person's answer and replies on the ask
    *  reach it (Dispatch's claimant route) as well as the route and the followers. Null while
    *  nobody or a person holds the claim, and on a project document's ask, which has no issue. */
@@ -820,6 +812,25 @@ export interface AskThread {
    *  the ask reach that session or role holder as well as the claimant and the followers. Null
    *  when the issue has no route, and on a project document's ask. */
   readonly route: string | null;
+  /** The live session `route` reaches right now: the routed session while the Envoy listener lists
+   *  it, or the session holding the role, so a reader can count each session once (the claimant
+   *  may be the same session). It is the issue reads' `IssueRouteReach.route_holder`, resolved per
+   *  read and stored nowhere. Null when there is no route, nobody holds it, the listener is
+   *  unconfigured or did not answer, and on a project document's ask. */
+  readonly route_holder: string | null;
+}
+
+/** An ask's thread as a list row carries it: everything a card needs before its first targeted
+ *  thread refresh. */
+export interface AskThread extends AskReach {
+  readonly replies: Comment[];
+  /** Every rewording of the question, oldest first; empty when never edited. */
+  readonly edits: AskEdit[];
+  /** Every answer, oldest first: empty on an Inbox row, which is an open ask, and the answers of
+   *  an answered ask on `GET /api/v1/issues/{key}/asks?thread=1`. */
+  readonly answers: AskAnswer[];
+  /** The sessions this ask's answer and replies reach directly, oldest first. */
+  readonly followers: AskFollower[];
 }
 
 /** An open ask as returned by the human Inbox. */
@@ -2282,7 +2293,7 @@ export interface CommentRead {
   readonly replies: Comment[];
 }
 
-export interface AskRead {
+export interface AskRead extends AskReach {
   readonly ask: Ask;
   readonly replies: Comment[];
   /** Every rewording of the question, oldest first; empty when never edited. */
@@ -2291,14 +2302,6 @@ export interface AskRead {
   readonly answers: AskAnswer[];
   /** The sessions this ask's answer and replies reach directly, oldest first. */
   readonly followers: AskFollower[];
-  /** The session holding the claim on the ask's issue: a person's answer and replies on the ask
-   *  reach it (Dispatch's claimant route) as well as the route and the followers. Null while
-   *  nobody or a person holds the claim, and on a project document's ask, which has no issue. */
-  readonly claimant: string | null;
-  /** The ask's issue's route (`session:<id>` or `role:<name>`): a person's answer and replies on
-   *  the ask reach that session or role holder as well as the claimant and the followers. Null
-   *  when the issue has no route, and on a project document's ask. */
-  readonly route: string | null;
 }
 
 export interface AskFollowersRead {

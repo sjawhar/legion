@@ -707,7 +707,7 @@ func (s *server) attachIssueAskThreads(ctx context.Context, rows []issueAskRow) 
 	for index := range rows {
 		askIDs[index] = rows[index].ID
 	}
-	threads, err := s.loadAskThreads(ctx, s.deps.Store.Pool, askIDs)
+	threads, err := s.loadAskThreads(ctx, askIDs)
 	if err != nil {
 		return err
 	}
@@ -788,19 +788,19 @@ func (s *server) getAsk(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	reaches, err := loadAskReaches(r.Context(), s.deps.Store.Pool, []string{ask.ID})
+	reaches, err := s.loadAskReaches(r.Context(), []string{ask.ID})
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
+	// The single-ask read is a thread with the ask beside it, so it and every Inbox or ask-list
+	// thread serialise through one definition and carry the same keys.
 	WriteJSON(w, http.StatusOK, struct {
-		Ask       model.Ask           `json:"ask"`
-		Replies   []model.Comment     `json:"replies"`
-		Edits     []model.AskEdit     `json:"edits"`
-		Answers   []model.AskAnswer   `json:"answers"`
-		Followers []model.AskFollower `json:"followers"`
-		askReach
-	}{Ask: ask, Replies: replies, Edits: edits, Answers: answers, Followers: followers, askReach: reaches[ask.ID]})
+		Ask model.Ask `json:"ask"`
+		askThread
+	}{Ask: ask, askThread: askThread{
+		Replies: replies, Edits: edits, Answers: answers, Followers: followers, askReach: reaches[ask.ID],
+	}})
 }
 
 // loadAskEdits reads every rewording of an ask back from its ask.edited events,

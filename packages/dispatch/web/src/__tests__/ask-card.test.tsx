@@ -92,6 +92,7 @@ function emptyThread(input: Ask): () => Promise<AskRead> {
     followers: [],
     replies: [],
     route: null,
+    route_holder: null,
   });
 }
 
@@ -496,6 +497,7 @@ test("AskCard shows every previous version of an edited question, oldest first",
         followers: [],
         replies: [],
         route: null,
+        route_holder: null,
       })}
     />
   );
@@ -1299,7 +1301,15 @@ test("AskCard restores its inbox entry if an optimistic answer fails", async () 
     ...input,
     priority: null,
     snoozed_until: null,
-    thread: { answers: [], claimant: null, edits: [], followers: [], replies: [], route: null },
+    thread: {
+      answers: [],
+      claimant: null,
+      edits: [],
+      followers: [],
+      replies: [],
+      route: null,
+      route_holder: null,
+    },
   };
   queryClient.setQueryData<InboxRow[]>(["inbox"], [inboxInput]);
 
@@ -1342,6 +1352,7 @@ test("AskCard reloads a changed question, requires the human to reconfirm, and a
         claimant: null,
         followers: [],
         route: null,
+        route_holder: null,
         replies: [],
       })}
     />
@@ -1512,6 +1523,7 @@ test("AskCard renders replies under the question without an open-ask thread comp
         claimant: null,
         followers: [],
         route: null,
+        route_holder: null,
         replies: [reply({ id: "comment-1", body: "Any update?" })],
       })}
     />
@@ -1690,6 +1702,7 @@ test("AskCard shows the newest two replies, expands older replies, and puts a fr
     followers: [],
     replies,
     route: null,
+    route_holder: null,
   });
   const { view } = renderCard(
     <AskCard
@@ -1762,6 +1775,7 @@ test("a compact answered ask's Write a reply reveals its composer as the next ke
         claimant: null,
         followers: [],
         route: null,
+        route_holder: null,
         replies: [reply({ body: "Earlier reply" })],
       })}
       thread="collapsed"
@@ -1806,6 +1820,7 @@ test("a reply arriving while the older replies are shown lands first and keeps t
         followers: [],
         replies,
         route: null,
+        route_holder: null,
       })}
       thread="collapsed"
     />
@@ -1865,6 +1880,7 @@ test("a link to a folded reply opens the fold and still lets the reader collapse
         followers: [],
         replies,
         route: null,
+        route_holder: null,
       })}
       thread="collapsed"
     />
@@ -1927,6 +1943,7 @@ test("AskCard with no replies offers Write a reply only after an answer, and ret
           followers: [],
           replies: [],
           route: null,
+          route_holder: null,
         };
       }}
       thread="collapsed"
@@ -2089,7 +2106,15 @@ test("a document ask links its project and document page", async () => {
       ...input,
       priority: null,
       snoozed_until: null,
-      thread: { answers: [], claimant: null, edits: [], followers: [], replies: [], route: null },
+      thread: {
+        answers: [],
+        claimant: null,
+        edits: [],
+        followers: [],
+        replies: [],
+        route: null,
+        route_holder: null,
+      },
     },
   ]);
   const whoAmI = spyOn(api, "whoAmI").mockResolvedValue({ kind: "user", login: "alice" });

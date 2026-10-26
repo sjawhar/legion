@@ -220,6 +220,7 @@ test("Unfurl unfurls a dispatch ask reference with the question, not the issue t
     claimant: null,
     followers: [],
     route: null,
+    route_holder: null,
     replies: [],
   };
   const getIssue = spyOn(api, "getIssue").mockResolvedValue(issue);

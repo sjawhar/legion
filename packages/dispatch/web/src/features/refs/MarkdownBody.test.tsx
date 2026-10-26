@@ -326,6 +326,7 @@ test("a bare dispatch ask reference renders an inline link to the ask route with
     claimant: null,
     followers: [],
     route: null,
+    route_holder: null,
     replies: [],
   };
   const getAsk = spyOn(api, "getAsk").mockResolvedValue(askRead);
@@ -399,6 +400,7 @@ test("two references in one body each resolve their own inline link and title", 
     claimant: null,
     followers: [],
     route: null,
+    route_holder: null,
     replies: [],
   };
   const projectArtifact: Artifact = {
@@ -476,6 +478,7 @@ test("a hand-authored Markdown link to a dispatch:// target resolves through dat
     claimant: null,
     followers: [],
     route: null,
+    route_holder: null,
     replies: [],
   };
   const getAsk = spyOn(api, "getAsk").mockResolvedValue(askRead);

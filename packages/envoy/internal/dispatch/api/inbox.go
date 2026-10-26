@@ -36,12 +36,16 @@ type askThread struct {
 
 // askReach is who besides the followers a person's answer and replies on an ask reach: the
 // session holding the claim on the ask's issue (the outbox's claimant route) and the issue's
-// route, a session or a role holder. Claimant is null while nobody or a person holds the claim,
-// Route while the issue has none, and both on a project document's ask, which has no issue. The
-// single-ask read and every askThread carry it at the same keys.
+// route, a session or a role holder. RouteHolder is the session that route reaches right now
+// (routeRoster.reach's holder), so a reader can count a session that is both claimant and route
+// holder once. Claimant is null while nobody or a person holds the claim, Route while the issue
+// has none, RouteHolder while nobody holds the route or the listener did not answer, and all
+// three on a project document's ask, which has no issue. The single-ask read and every askThread
+// carry it at the same keys.
 type askReach struct {
-	Claimant *string `json:"claimant"`
-	Route    *string `json:"route"`
+	Claimant    *string `json:"claimant"`
+	Route       *string `json:"route"`
+	RouteHolder *string `json:"route_holder"`
 }
 
 type inboxAsk struct {
@@ -156,7 +160,7 @@ func (s *server) listInbox(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	threads, err := s.loadAskThreads(r.Context(), s.deps.Store.Pool, askIDs)
+	threads, err := s.loadAskThreads(r.Context(), askIDs)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
