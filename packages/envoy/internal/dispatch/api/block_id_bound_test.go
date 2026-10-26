@@ -4,15 +4,14 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
-	"fmt"
 	"log/slog"
 	"net/http"
-	"net/http/httptest"
 	"net/url"
 	"strings"
 	"testing"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 	"github.com/sjawhar/envoy/internal/dispatch/text"
 )
@@ -33,61 +32,82 @@ func boundCallout(id string) string {
 	return ":::callout{#" + id + " kind=\"note\" title=\"\"}\nA note.\n:::\n"
 }
 
+// requireStoredWithoutLongIDNode fails unless the document holds long as a block's id, and its
+// block index stands at its latest version with a node for the block of each text in want and
+// none for long or any other id past text.MaxBlockIDBytes.
+func requireStoredWithoutLongIDNode(t *testing.T, handler http.Handler, database *store.Store, artifactID, long string, want ...string) {
+	t.Helper()
+	if markdown := documentMarkdown(t, handler, artifactID); !strings.Contains(markdown, "{#"+long+" ") {
+		t.Fatalf("document = %.400q, want it holding the long block id", markdown)
+	}
+	requireIndexedAt(t, database, artifactID, latestVersion(t, database, artifactID).Number)
+	blocks, _ := readIndexedBlocks(t, database, artifactID)
+	nodes := map[string]bool{}
+	for id, block := range blocks {
+		if len(id) > text.MaxBlockIDBytes {
+			t.Fatalf("block %.40q… of %d bytes is a graph node, want none past the bound of %d", id, len(id), text.MaxBlockIDBytes)
+		}
+		nodes[block.Excerpt] = true
+	}
+	for _, excerpt := range want {
+		if !nodes[excerpt] {
+			t.Fatalf("graph nodes = %v, want the block %q among them", blocks, excerpt)
+		}
+	}
+}
+
 // A write through the API whose markdown names a block id past text.MaxBlockIDBytes - a spec
-// seeded at issue creation, an uploaded version, an inserted block, an accepted suggestion - is
-// refused with 400 naming the bound in bytes, and the document is unchanged. An id at the bound is
-// written, and its block is a node the graph reads.
-func TestAWriteNamingABlockIDPastTheBoundIsRefused(t *testing.T) {
+// seeded at issue creation, an uploaded version, an inserted block - is written as main writes it:
+// the document stores the id, the block carrying it is no graph node, and its other blocks are.
+// An id at the bound is written, and its block is a node the graph reads.
+func TestAWriteNamingABlockIDPastTheBoundIsWritten(t *testing.T) {
 	long := randomBlockID(t, 3200)
-	bound := fmt.Sprintf("past the %d bytes a block id may hold", text.MaxBlockIDBytes)
 	for _, test := range []struct {
-		name, code string
-		write      func(t *testing.T, handler http.Handler, issueKey, artifactID string) *httptest.ResponseRecorder
+		name  string
+		nodes []string
+		// write writes the long id and returns the document it wrote it in.
+		write func(t *testing.T, handler http.Handler, issueKey, artifactID string) string
 	}{
-		{name: "a seeded spec", code: "INVALID_MARKDOWN",
-			write: func(t *testing.T, handler http.Handler, _, _ string) *httptest.ResponseRecorder {
-				return dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]string{
+		{name: "a seeded spec", nodes: []string{"A note."},
+			write: func(t *testing.T, handler http.Handler, _, _ string) string {
+				created := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]string{
 					"project": "TEST", "title": "Seeded callout", "spec": boundCallout(long),
 				}, "alice")
+				if created.Code != http.StatusCreated {
+					t.Fatalf("seed a spec naming a block id of 3200 bytes: status=%d body=%.400s, want 201 as main answers", created.Code, created.Body.String())
+				}
+				return decodeBody[struct {
+					PrimaryArtifactID string `json:"primary_artifact_id"`
+				}](t, created).PrimaryArtifactID
 			}},
-		{name: "an uploaded version", code: "INVALID_MARKDOWN",
-			write: func(t *testing.T, handler http.Handler, issueKey, artifactID string) *httptest.ResponseRecorder {
-				return dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issueKey+"/artifacts", map[string]any{
+		{name: "an uploaded version", nodes: []string{"Context paragraph.", "A note."},
+			write: func(t *testing.T, handler http.Handler, issueKey, artifactID string) string {
+				uploaded := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issueKey+"/artifacts", map[string]any{
 					"name": "spec.md", "content": documentMarkdown(t, handler, artifactID) + "\n" + boundCallout(long),
 				}, "alice")
+				if uploaded.Code != http.StatusCreated {
+					t.Fatalf("upload a version naming a block id of 3200 bytes: status=%d body=%.400s, want 201 as main answers", uploaded.Code, uploaded.Body.String())
+				}
+				return artifactID
 			}},
-		{name: "an inserted callout", code: "INVALID_OP",
-			write: func(t *testing.T, handler http.Handler, _, artifactID string) *httptest.ResponseRecorder {
-				return dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+artifactID+"/edits", map[string]any{
+		{name: "an inserted callout", nodes: []string{"Context paragraph.", "A note."},
+			write: func(t *testing.T, handler http.Handler, _, artifactID string) string {
+				edited := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+artifactID+"/edits", map[string]any{
 					"ops": []map[string]string{{"op": "insert", "after": "end", "markdown": boundCallout(long)}},
 				}, "alice")
-			}},
-		{name: "an accepted suggestion", code: "INVALID_MARKDOWN",
-			write: func(t *testing.T, handler http.Handler, issueKey, _ string) *httptest.ResponseRecorder {
-				created := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issueKey+"/comments", map[string]any{
-					"body": "a note first", "anchor": map[string]any{"artifact": "spec", "quote": "Context"},
-					"suggestion": map[string]string{"replace_with": boundCallout(long)}, "actor": sessionActor(),
-				})
-				if created.Code != http.StatusCreated {
-					t.Fatalf("create the suggestion: status=%d body=%s", created.Code, created.Body.String())
+				if edited.Code != http.StatusOK {
+					t.Fatalf("insert a callout under a block id of 3200 bytes: status=%d body=%.400s, want 200 as main answers", edited.Code, edited.Body.String())
 				}
-				comment := decodeBody[model.Comment](t, created)
-				return dispatchRequest(t, handler, http.MethodPost, "/api/v1/comments/"+comment.ID+"/accept", map[string]any{}, "alice")
+				return artifactID
 			}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			_, handler, _ := browserDocumentService(t)
+			_, handler, database := browserDocumentService(t)
 			issue := createInteractionIssue(t, handler, "TEST", "Long block id", "Context paragraph.\n")
-			before := documentMarkdown(t, handler, issue.PrimaryArtifactID)
 
-			written := test.write(t, handler, issue.Key, issue.PrimaryArtifactID)
+			artifactID := test.write(t, handler, issue.Key, issue.PrimaryArtifactID)
 
-			if written.Code != http.StatusBadRequest || responseCode(t, written) != test.code || !strings.Contains(written.Body.String(), bound) {
-				t.Fatalf("%s naming a block id of 3200 bytes: status=%d body=%.400s; want 400 %s saying %q", test.name, written.Code, written.Body.String(), test.code, bound)
-			}
-			if after := documentMarkdown(t, handler, issue.PrimaryArtifactID); after != before {
-				t.Fatalf("document after the refusal = %.400q, want it unchanged: %q", after, before)
-			}
+			requireStoredWithoutLongIDNode(t, handler, database, artifactID, long, test.nodes...)
 		})
 	}
 
@@ -106,8 +126,8 @@ func TestAWriteNamingABlockIDPastTheBoundIsRefused(t *testing.T) {
 	})
 }
 
-// A document already holding a block id past the bound - a browser's edit wrote it, which no
-// route can refuse - takes the writes that leave that id where it is: an inserted block and an
+// A document already holding a block id past the bound - a browser's edit wrote it, as any write
+// can - takes the writes that leave that id where it is: an inserted block and an
 // uploaded version that keeps it are written, each storing its version, and the id stays in the
 // document. The block is no graph node, so a reference naming it is malformed.
 func TestADocumentHoldingABlockIDPastTheBoundTakesUnrelatedWrites(t *testing.T) {
@@ -145,6 +165,74 @@ func TestADocumentHoldingABlockIDPastTheBoundTakesUnrelatedWrites(t *testing.T) 
 	}
 	if read := graphRequest(t, handler, url.Values{"to": {"dispatch://" + issue.Key + "/spec#b-" + long}}); read.Code != http.StatusBadRequest || responseCode(t, read) != "INVALID_REFERENCE" {
 		t.Fatalf("read the long-id block: status=%d body=%.400s, want 400 INVALID_REFERENCE", read.Code, read.Body.String())
+	}
+}
+
+// A rebuild from supplied markdown - the repair of a history that cannot load - whose markdown
+// holds a block id of 3200 random hex characters, as a document a browser wrote does, succeeds
+// as main's does: it stores its version, the document holds the id, the block carrying it is no
+// graph node, and its other blocks are.
+func TestARebuildFromMarkdownHoldingABlockIDPastTheBoundIsWritten(t *testing.T) {
+	handler, database, broken := newBrokenTestServer(t)
+	issue := createArtifactIssue(t, handler)
+	created := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/artifacts", map[string]string{
+		"name": "repair.md", "content": "before\n",
+	}, "alice")
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create document: status=%d body=%s", created.Code, created.Body.String())
+	}
+	artifact := decodeBody[struct {
+		Artifact model.Artifact `json:"artifact"`
+	}](t, created).Artifact
+	long := randomBlockID(t, 3200)
+	broken.failNextLoad(artifact.ID)
+
+	rebuilt := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+artifact.ID+"/rebuild", map[string]any{
+		"markdown": boundCallout(long) + "\nAfter the note.\n",
+	}, "alice")
+	if rebuilt.Code != http.StatusOK || !strings.Contains(rebuilt.Body.String(), `"source_version":2`) {
+		t.Fatalf("rebuild from markdown holding a block id of 3200 bytes: status=%d body=%.400s, want 200 and source_version 2, the version it wrote", rebuilt.Code, rebuilt.Body.String())
+	}
+	var versions int
+	if err := database.Pool.QueryRow(context.Background(),
+		`select count(*) from artifact_versions where artifact_id = $1`, artifact.ID).Scan(&versions); err != nil {
+		t.Fatal(err)
+	}
+	if versions != 2 {
+		t.Fatalf("the document has %d versions after the rebuild, want 2", versions)
+	}
+	requireStoredWithoutLongIDNode(t, handler, database, artifact.ID, long, "A note.", "After the note.")
+}
+
+// A suggestion whose replace_with holds a block id of 3200 random hex characters is created and
+// accepted as main's is: the document then holds the id, the block carrying it is no graph node
+// and the others are, and no write fails, with a 500 or on an index key past its limit
+// (SQLSTATE 54000).
+func TestASuggestionWritingABlockIDPastTheBoundIsAccepted(t *testing.T) {
+	logs := &storetest.LockedLog{}
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+	_, handler, database := browserDocumentService(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Suggested long block id", "Context paragraph.\n\nOther paragraph.\n")
+	long := randomBlockID(t, 3200)
+
+	created := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
+		"body": "a callout reads better", "anchor": map[string]any{"artifact": "spec", "quote": "Context paragraph."},
+		"suggestion": map[string]string{"replace_with": boundCallout(long)}, "actor": sessionActor(),
+	})
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create the suggestion: status=%d body=%.400s log=%.600s", created.Code, created.Body.String(), logs.Lines("SQLSTATE"))
+	}
+	comment := decodeBody[model.Comment](t, created)
+	accepted := dispatchRequest(t, handler, http.MethodPost, "/api/v1/comments/"+comment.ID+"/accept", map[string]any{}, "alice")
+	if accepted.Code != http.StatusOK {
+		t.Fatalf("accept the suggestion: status=%d body=%.400s log=%.600s, want 200", accepted.Code, accepted.Body.String(), logs.Lines("SQLSTATE"))
+	}
+
+	requireStoredWithoutLongIDNode(t, handler, database, issue.PrimaryArtifactID, long, "A note.", "Other paragraph.")
+	if line := logs.Lines("54000"); line != "" {
+		t.Fatalf("a write failed on an index key past its limit: %.400s", line)
 	}
 }
 

@@ -1,14 +1,11 @@
 package pmdoc
 
 import (
-	"errors"
 	"fmt"
 	"strings"
 	"sync"
 
 	"github.com/google/uuid"
-
-	"github.com/sjawhar/envoy/internal/dispatch/text"
 )
 
 const BlockIDAttr = "blockId"
@@ -66,37 +63,6 @@ func RepeatedBlockID(live, next, named *Node) error {
 		return true
 	})
 	return repeated
-}
-
-// ErrBlockIDTooLong is the refusal of a write naming a block id longer than text.MaxBlockIDBytes
-// that the document it writes over does not already carry (LongBlockID). It is no schema refusal:
-// a document holding such an id, which a browser's edit can write, reads, renders and stores as
-// any other, and the reference graph makes no node of that block (refs.IndexBlocks).
-var ErrBlockIDTooLong = errors.New("block id too long")
-
-// LongBlockID reports the first block id named carries, in document order, that is longer than
-// text.MaxBlockIDBytes and that live does not carry, or nil. live is the document the write
-// replaces whole (nil for a new document or a fragment) and named is what the write itself wrote.
-// An id live already carries is the document's own, so a write that keeps it is not refused. The
-// refusal quotes the id's start, names its length and the bound, both in bytes.
-func LongBlockID(live, named *Node) error {
-	var held map[string]int
-	var long error
-	walkBlockIDs(named, func(id string) bool {
-		if len(id) <= text.MaxBlockIDBytes {
-			return true
-		}
-		if held == nil {
-			held = blockIDCounts(live)
-		}
-		if held[id] > 0 {
-			return true
-		}
-		long = fmt.Errorf("%w: the id starting %q is %d bytes, past the %d bytes a block id may hold; give the block a shorter id, or omit {#…} to have one minted",
-			ErrBlockIDTooLong, text.HeadRunes(id, 32), len(id), text.MaxBlockIDBytes)
-		return false
-	})
-	return long
 }
 
 func blockIDCounts(tree *Node) map[string]int {

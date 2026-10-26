@@ -115,12 +115,12 @@ func parseStampedAt(markdown string, at origin, budget *WriteBudget) (*Node, err
 
 // ParseForWrite parses markdown a caller is writing as Parse does, except that a block id the
 // markdown names on two blocks is refused (ErrSchema) instead of repaired, since the repair would
-// silently give the id to whichever block comes first, and a block id longer than
-// text.MaxBlockIDBytes is refused (ErrBlockIDTooLong). live is the document the markdown replaces
-// whole, or nil for a fragment or a new document: a repeat or a long id live already carries is not
-// refused (RepeatedBlockID, LongBlockID), and the repair keeps a repeat for its first block, as
-// settlement would. A document whose rendering, the markdown it is stored as, reads back otherwise
-// is refused (RefuseMisreadDocument).
+// silently give the id to whichever block comes first. live is the document the markdown replaces
+// whole, or nil for a fragment or a new document: a repeat live already carries is not refused
+// (RepeatedBlockID), and the repair keeps it for its first block, as settlement would. A block id
+// of any length is written; one longer than text.MaxBlockIDBytes is simply no graph node
+// (refs.IndexBlocks). A document whose rendering, the markdown it is stored as, reads back
+// otherwise is refused (RefuseMisreadDocument).
 func ParseForWrite(markdown string, live *Node) (*Node, error) {
 	doc, err := parseForWrite(markdown, live, true, NewWriteBudget())
 	if err != nil {
@@ -148,9 +148,6 @@ func parseForWrite(markdown string, live *Node, readFrontmatter bool, budget *Wr
 	}
 	if err := RepeatedBlockID(live, doc, doc); err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrSchema, err)
-	}
-	if err := LongBlockID(live, doc); err != nil {
-		return nil, err
 	}
 	EnsureBlockIDs(doc)
 	return doc, nil

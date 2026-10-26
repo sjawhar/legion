@@ -108,9 +108,8 @@ func parseInput(markdown string) (*pmdoc.Node, error) {
 // parseFragmentInput parses text written into a document - an insert's, or an accepted
 // suggestion's - where a leading `---` is a rule rather than front matter, except that a closed
 // front-matter block is front matter where the text lands at the document's start
-// (pmdoc.ParseFragment). A block id the text repeats, or one past text.MaxBlockIDBytes, is
-// refused, as parseInput refuses it. Its tables' short rows are padded on budget, which the
-// write's other markdown shares.
+// (pmdoc.ParseFragment). A block id the text repeats is refused, as parseInput refuses it. Its
+// tables' short rows are padded on budget, which the write's other markdown shares.
 func parseFragmentInput(markdown string, opensDocument bool, budget *pmdoc.WriteBudget) (*pmdoc.Node, error) {
 	return uploadedInput(pmdoc.ParseFragment(markdown, opensDocument, budget))
 }
@@ -126,18 +125,17 @@ func opensDocument(tree *pmdoc.Node, position int) bool {
 }
 
 // parseReplacing parses markdown a caller writes over live, the document it replaces whole (nil
-// for none), refusing a block id the markdown repeats, or one past text.MaxBlockIDBytes, that
-// live does not already carry (pmdoc.ParseForWrite).
+// for none), refusing a block id the markdown repeats that live does not already repeat
+// (pmdoc.ParseForWrite).
 func parseReplacing(live *pmdoc.Node, markdown string) (*pmdoc.Node, error) {
 	return uploadedInput(pmdoc.ParseForWrite(markdown, live))
 }
 
 // uploadedInput is a tree parsed from caller markdown as an upload is taken (asUploaded). A
-// refusal of the markdown - one the schema makes, or a block id past text.MaxBlockIDBytes - is
-// ErrInvalidMarkdown, the caller's to fix.
+// refusal the schema makes of the markdown is ErrInvalidMarkdown, the caller's to fix.
 func uploadedInput(tree *pmdoc.Node, err error) (*pmdoc.Node, error) {
 	if err != nil {
-		if errors.Is(err, pmdoc.ErrSchema) || errors.Is(err, pmdoc.ErrBlockIDTooLong) {
+		if errors.Is(err, pmdoc.ErrSchema) {
 			return nil, fmt.Errorf("%w: %v", ErrInvalidMarkdown, err)
 		}
 		return nil, err
