@@ -2,33 +2,32 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-366",
-  "completed": "2026-10-26T12:52:59Z",
-  "reviewedHead": "2bc81755e19b18d29ae49c93df6a6f659e33bbb9",
-  "codeHead": "e26a664800",
-  "round": 3,
-  "standard": "The architect's rule of 2026-10-26T07:58Z: a length bound only decides which keys go into a Postgres index; it never makes a read fail and never refuses a write main accepts. A new finding counts only if it is a defect in the change, or a read or write main accepts that the head now fails.",
+  "completed": "2026-10-26T15:03:46Z",
+  "reviewedHead": "1da5b47c6c1076fbc4887782bc04490b512702b7",
+  "codeHead": "811b7261e7",
+  "round": 4,
+  "standard": "The architect's decision of 2026-10-26T12:55Z: round 4 is judged by the two round-3 findings, by the round-2 rule (a length bound only decides which keys go into an index; it never makes a read fail and never refuses a write main accepts; the bound stays only where the dashboard decides what plain text cites), and by any defect in round 4's own diff. Rounds 1-3's accepted code is not re-read.",
   "decision": "changes_requested",
   "critical": 0,
-  "important": 2,
-  "minor": 0,
+  "important": 1,
+  "minor": 1,
   "keyFindings": [
     {
       "severity": "important",
-      "file": "packages/envoy/internal/dispatch/api/search.go:632",
-      "description": "dispatch search prints every ask-block hit as <document>#b-<id>. Main's dispatchRefFromUrl read that URL as the document; the head reads it as the block. For an ask block whose id is past 256 bytes, or whose block a later edit removed, `dispatch read --ref <hit>` now exits 1 'No block <id> in <doc>' (dispatch-execute.ts:4096-4099), where main read the document. The census's line-82 disposition ('0 hits' for block-anchored URLs in text an agent reads) misses this producer. Fix: name the ask in the hit (?ask=<id> or /asks/<id>), or fall back to the document; then correct the census."
+      "file": "packages/dispatch/web/src/features/refs/RefLink.tsx:163",
+      "description": "collectReferenceAnchors also handles a bare same-origin dashboard URL that GFM autolinked from plain text (RefLink.tsx:134-136, useRenderedMarkdown.tsx:62-66). Round 4 switched it to the unbounded nodeRouteFromHref, so plain text past the bounds now renders as a resolved reference (title, hover card) while the server records no reference for it (text.Extract, pageInBound). Round 3 left it a raw link. With a #b-<over 256 bytes> fragment, the server cites the document and the dashboard names a block that reads 404. This breaks the round's instruction that the bound stays where plain text becomes a link, and the CHANGELOG claim 'only bare text it links is held to the index's bounds'. Fix: read an autolinked anchor (no data-dispatch-href, text equal to its href) with referenceRouteFromHref, keep nodeRouteFromHref for links an author wrote, and add a MarkdownBody case."
     },
     {
-      "severity": "important",
-      "file": "packages/dispatch/web/src/features/refs/routes.ts:256",
-      "description": "The bounded parseDispatchReference still decides what the dashboard draws and opens for an explicitly named node: pictureReference (routes.ts:663) and collectPictureAnchors (DispatchPicture.tsx), collectReferenceAnchors via referenceRouteFromHref (RefLink.tsx:159), and ProofDocument's click handler (:780). A picture or markdown link to a document whose key is 2,049-2,692 bytes, which main rendered and opened, is not drawn and is a dead link at the head. Use parseNodeReference/nodeRouteFromHref there; keep the bound only for turning plain text into links."
+      "severity": "minor",
+      "file": "PR body, E2E (implementer) round-9 bullet",
+      "description": "The bullet says 'an edit that deletes an ask block also deletes its ask'. The settlement retracts the ask (docs/ask_blocks.go:168-171), and TestSearchLinksAnAskBlockOnlyWhileTheBlockIsANode still finds that ask after the delete, linked ?ask=. Correct the proof sentence."
     }
   ],
-  "roundItems": "Items 1, 2, 4, 5, 6 and 7 hold (both passes and my own read). Item 3 holds for the listed refusals, but one disposition is wrong (finding 1).",
-  "threads": "Replied on the five round-2 threads and the reopened routes.ts thread. Accepted: PRRT_kwDORFy7ds6wHOpN, PRRT_kwDORFy7ds6wLR7F, PRRT_kwDORFy7ds6wLR7L, PRRT_kwDORFy7ds6wLR7P (the listed refusals; the wrong disposition is new finding 1), PRRT_kwDORFy7ds6wLR7U, PRRT_kwDORFy7ds6wLR7Y.",
+  "roundItems": "Finding 1 of round 3 (search ask link) holds, census corrected. Finding 2 (pictures, explicit links, click handler, hover cards for 2,049-2,692-byte keys) holds, except the autolinked-bare-URL case above, which round 4's change brought in. Merges 6fdbd78e and 811b7261 keep both sides; the only conflicts were packages/envoy/CHANGELOG.md and dispatch-command.ts:363, where both sides made the same fix.",
+  "threads": "Replied on PRRT_kwDORFy7ds6wRCAf (accepted) and PRRT_kwDORFy7ds6wRCAk (accepted for what the round asked; the autolink defect is the new inline finding).",
   "thermonuclear": {
-    "deepReview": "Verdict: CHANGES at 2bc81755. Provider: mixed, 77 assistant turns anthropic/claude-opus-5-5 and 1 openai/gpt-6.1-sol, read from its session transcript.",
-    "codeQuality": "Verdict: CHANGES at 2bc81755. Provider: mixed, 47 assistant turns anthropic/claude-opus-5-5 and 1 openai/gpt-6.1-sol, read from its session transcript.",
-    "notCounted": "The quality pass's ten copies of the `\"block\" in route` probe: a cleanup, neither a defect nor a read or write main accepts that the head fails, so it does not count under the round's rule. Its stale 'Look at first' and 'Not proven / risk' lines are the reviewer's own, rewritten this round."
+    "deepReview": "Verdict: APPROVE at 1da5b47c, with Low finding 1 (the autolink case, verified and raised here as Important because it breaks the round's stated rule) and a PR-body nit. Provider: mixed, 61 assistant turns anthropic/claude-opus-5-5 and 1 openai/gpt-6.1-sol, read from its session transcript.",
+    "codeQuality": "Verdict: APPROVE at 1da5b47c, with three Low items: partly duplicated routes.test.ts coverage (cleanup, not counted), no long-target RefPreview test (not a defect; MarkdownBody and the browser test cover the paths), and the same PR-body sentence. Provider: mixed, 38 assistant turns anthropic/claude-opus-5-5 and 1 openai/gpt-6.1-sol, read from its session transcript."
   },
-  "ci": "At code head e26a6648: Tests, Legion Envoy and Contracts, Docs, Worker Image and PR Title all queued. The compare e26a6648...2bc81755 touches only .legion/. REQUEST_CHANGES does not wait for CI."
+  "ci": "At code head 811b7261: lint, typecheck, test, Docs, Worker Image and Legion Envoy and Contracts queued. The compare 811b7261...1da5b47c touches only .legion/. REQUEST_CHANGES does not wait for CI."
 }
