@@ -2,8 +2,16 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-366",
-  "completed": "2026-10-26T00:34:00Z",
+  "completed": "2026-10-26T01:25:00Z",
   "proof": [
+    {
+      "criterion": "Pin reading (plan design 1, 'Reading a pin'; A15, R1): a pin to a version the document lacks, including one past the largest version number Postgres stores, answers 404 NOT_FOUND 'no version N of <doc ref>' (the tester's round-1 failure and its red test TestAPinPastEveryVersionNumberAnswers404)",
+      "surface": "Local Dispatch harness: the real Go server built from the head (packages/dispatch/e2e/run-server.sh on port 8777, database infra366_pin) and the real dispatch CLI",
+      "command": "for v in 1 2147483647 2147483648 9223372036854775807 92233720368547758070; do for d in to from; do curl -H 'Authorization: Bearer e2e-token' \"http://127.0.0.1:8777/api/v1/references?$d=<uri-encoded dispatch://CORE-1/spec#b-ship%5Fit@v$v>\"; done; done; bun packages/envoy-client/bin/dispatch.ts read --ref 'dispatch://CORE-1/spec#b-ship%5Fit@v2147483648'; then block-graph.sh re-run at this head on database infra366_driver2",
+      "observed": "@v1: 200 pin.state unchanged (to and from); @v2147483647, @v2147483648 and @v9223372036854775807: 404 NOT_FOUND 'no version N of dispatch://CORE-1/spec' (to and from); @v92233720368547758070: 400 INVALID_REFERENCE; dispatch read --ref …@v2147483648 exits 1 printing 'no version 2147483648 of dispatch://CORE-1/spec'; the red test passes unmodified (go test -run TestAPinPastEveryVersionNumberAnswers404 ./internal/dispatch/api/); the driver at this head: exit 0, 37 PASS",
+      "headSha": "73e2394d99bbf7fd476692e7c94fd8abbb9ba29c",
+      "negativeControl": "The previous build (042c0195, server code of acdf007b) on the same database, port 8779: ?to=dispatch://CORE-1/spec#b-ship%5Fit@v2147483648 answers 500 {\"code\":\"INTERNAL\",\"error\":\"internal server error\"}"
+    },
     {
       "criterion": "A1, A2 (with the pinned clause), A4, A5, R6, R7, A10 and A15 (document halves) and the older document references route",
       "surface": "Local Dispatch harness: the real Go server built from the head (packages/dispatch/e2e/run-server.sh on port 8777, Postgres 17 + pgvector on the issue volume, database infra366_driver) and the real dispatch CLI (packages/envoy-client/bin/dispatch.ts)",
@@ -49,14 +57,16 @@
     "packages/dispatch: dashboard block links, pinned-version view, one Referenced by row per citing block; e2e/block-references.e2e.ts; e2e/acceptance/block-graph.sh and block-coverage.sh",
     "packages/claude-envoy/dist: regenerated",
     "docs, skills/dispatch, CHANGELOGs",
-    "packages/contracts/CHANGELOG.md and skills/dispatch/references/reading.md: forward-merge resolution against main 81a3b5ef (042c0195)"
+    "packages/contracts/CHANGELOG.md and skills/dispatch/references/reading.md: forward-merge resolution against main 81a3b5ef (042c0195)",
+    "packages/envoy/internal/dispatch/refs/block_texts.go (round 2): BlockTextAt answers a version past math.MaxInt32 as one the document lacks, without querying (73e2394d)"
   ],
   "trickyParts": [
     "Every document version write now also indexes its blocks (about eight more statements in the version's transaction). TestAHealthyRoomUnderWritesIsNeverRefused passes on an idle pod at the head (27-41 writes against its floor of 20, main 36-54), but failed twice under CPU contention while other Go packages ran in parallel (11-15 writes); main passed the same contended run (24 writes). CI's runners are the judge.",
     "A12 needs every build on one public origin (text.Extract keeps a link outside DISPATCH_SERVER_URL a plain URL); the throwaway driver fronts the second build with a Host-rewriting proxy, as one load balancer does in production."
   ],
   "deviations": [
-    "Local checks that failed for environmental reasons: api TestIssueRanksStayOrderedPastLowercaseDigitsAndProductionShapedMoves (the harness database's collation is C, which the test refuses), pi-envoy prepack's 'bin/dispatch' mode (the workspace checkout is 0775), and four load-sensitive tests in the parallel suite runs (envoy-client's 10 s command timeout, claude-envoy's tmux SIGTERM bound, dispatch's AgentsPage and ConversationTab O(1) scroll test), each passing when re-run alone at this head (envoy-client's three times by name; main's copy also passes)."
+    "Local checks that failed for environmental reasons: api TestIssueRanksStayOrderedPastLowercaseDigitsAndProductionShapedMoves (the harness database's collation is C, which the test refuses), pi-envoy prepack's 'bin/dispatch' mode (the workspace checkout is 0775), and four load-sensitive tests in the parallel suite runs (envoy-client's 10 s command timeout, claude-envoy's tmux SIGTERM bound, dispatch's AgentsPage and ConversationTab O(1) scroll test), each passing when re-run alone at this head (envoy-client's three times by name; main's copy also passes).",
+    "Round 2: the earlier proof entries ran at 042c0195; this round changes only refs.BlockTextAt, so I re-ran the block-graph driver (37 PASS) at 73e2394d and did not repeat the browser and A12 runs."
   ],
   "openQuestions": []
 }
