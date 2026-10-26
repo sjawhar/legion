@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-304",
+  "completed": "2026-10-26T02:24:45Z",
+  "decision": "changes_requested",
+  "reviewedHead": "cec2757110c54d4a8417c6a913eadd72339b8216",
+  "critical": 0,
+  "important": 1,
+  "minor": 0,
+  "keyFindings": [
+    {
+      "severity": "important",
+      "file": "packages/dispatch/web/src/styles.css:108",
+      "description": "The note's measured table records document prose as 16px on 28px lines, 4.4px padding / 4.6px clearance. Dispatch's document editor sets 1.6 line height on its root and paragraphs (packages/proof-editor/src/lib.css:31,55,603; unlayered, so it beats Typography's layered 1.75), so a document paragraph is 16px on 25.6px: 3.2px / 3.4px, which is what the tester measured (test.json proof[1]: document minimum 3.42, pad 3.2). The same wrong figure is in the PR body's Change bullet ('document prose 4.4px'). A note headed 'Measured' that records a surface Dispatch does not render misleads the next change of this rule, as INFRA-95's corrected pitch row did; fix the row (and the Change bullet) to 16px on 25.6px, 3.2px / 3.4px."
+    }
+  ],
+  "verified": {
+    "ci": "Required set from rulesets on main: lint, typecheck, test, pr-title. CI head f5b81b04 (newest pull_request runs); compare f5b81b04...cec27571 is .legion/ only (true). At f5b81b04: lint, typecheck, pr-title success; test and dispatch in progress at review time. At be150e35 every run success, including the webkit-iphone reasoning row.",
+    "threads": "0 review threads, 0 PR comments (gh api graphql at review time).",
+    "e2e": "E2E (implementer) and E2E (tester) both present; red at tests-only commit 58abf81a (Received -1) and green at the code head.",
+    "arithmetic": "Clearance = L - textbox - p, p = (L - 1.2em)/2: message 24-19-2.4=2.6, Inbox 24.375-18-3.19=3.19, reasoning 16-14-0.8=1.2, text-sm 20-16-1.6=2.4 all match the note; the no-overlap bound r <= 1.2em and the 1.27em / Segoe 0.8px figures check out.",
+    "thermonuclear": "deep-review at cec27571: one finding (the document-prose row above); code-quality at cec27571: no findings. Security: no sensitive surface in this diff."
+  }
+}
