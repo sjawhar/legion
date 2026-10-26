@@ -70,9 +70,9 @@ All five instruments and both claim defects come from INFRA-141 (sjawhar/legion#
   source; the command that produced one side could fail and still print `e3b0c442…`, which would
   have matched a second failure exactly.
 - The conjunction sentence (`cmd/listener/api.go:848-850` as it then stood) claimed the caller's
-  deadline governed both the role-holder read and the publish. `resolveLiveRoleHolder` takes no
-  context parameter at all and reads under `context.Background()` with a per-attempt bound, so a
-  role-lane publish can exceed the budget before the bounded publish begins. A fresh reader with no
+  deadline governed both the role-holder read and the publish. `resolveLiveRoleHolder` then took no
+  context parameter at all and read under `context.Background()` with a per-attempt bound, so a
+  role-lane publish could exceed the budget before the bounded publish began. A fresh reader with no
   prior, reading the route end to end rather than reading diffs, found it in one pass after ten
   rounds had not.
 - The stale citation was in the reviewer's own risk entry and was made wrong by the commit that

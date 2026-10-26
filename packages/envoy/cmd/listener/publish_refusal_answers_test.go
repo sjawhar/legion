@@ -100,8 +100,8 @@ func TestAPublishThatLosesTheRoleClaimRaceSaysSoRatherThanBlamingTheBus(t *testi
 // GET /v1/roles/<role> resolves its holder exactly as a role-lane publish does, so it can lose the
 // same race, and it answers it as the publish route does: the 503 and the Retry-After that ask for
 // the retry a fresh lookup wins, and a body that names the race in a lookup's words. Every bus read
-// answered, so neither the 500 this route gives a failed read nor the bus-unavailable prefix would
-// be true of it.
+// answered and the claim decoded, so neither the bus-unavailable 503 this route gives a read that
+// did not answer nor the 500 it gives an undecodable claim would be true of it.
 func TestARoleLookupThatLosesTheRoleClaimRaceSaysSoRatherThanFailing(t *testing.T) {
 	const (
 		role   = "reviewer"
@@ -173,14 +173,15 @@ func (kv stalledRoleKV) Delete(key string, opts ...nats.DeleteOpt) error {
 	return kv.KeyValue.Delete(key, opts...)
 }
 
-// The two routes that resolve a role's holder do it within sendRequestBudget of the request's own
+// A role-lane publish resolves its role's holder within sendRequestBudget of the request's own
 // context, so a role-bucket call that does not answer - the claim read, or the conditional release
 // of a claim whose holder is gone, neither of which takes a context in nats.go - is reported inside
 // the caller's attempt (the client gives each 5 s, packages/envoy-client/src/transport.ts) rather
-// than after it: a role-lane publish and a lookup both answer the bus-unavailable 503 with
-// Retry-After: 1, naming the call that did not answer. Each must answer at its budget and before
-// stalledRoleKV's stall: answering before the budget would mean something other than the stalled
-// call ended the request, and answering after it that the resolution waited the call out.
+// than after it: the bus-unavailable 503 with Retry-After: 1, naming the call that did not answer.
+// It must answer at its budget and before stalledRoleKV's stall: answering before the budget would
+// mean something other than the stalled call ended the request, and answering after it that the
+// resolution waited the call out. A lookup's same two cases are
+// TestARoleLookupWhoseStoreDoesNotAnswerIsRefusedAsTheBusNotAnswering's.
 func TestARoleResolutionWhoseStoreCallDoesNotAnswerAnswersInsideTheBudget(t *testing.T) {
 	const (
 		role   = "reviewer"
@@ -257,27 +258,6 @@ func TestARoleResolutionWhoseStoreCallDoesNotAnswerAnswersInsideTheBudget(t *tes
 				"status":  float64(http.StatusServiceUnavailable),
 				"topic":   topic,
 			})
-		})
-		t.Run("lookup/"+tc.name, func(t *testing.T) {
-			state := open(t)
-			started := time.Now()
-			recorder := httptest.NewRecorder()
-			roleGetHandler(state).ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/v1/roles/"+role, nil))
-			elapsed := time.Since(started)
-			if recorder.Code != http.StatusServiceUnavailable {
-				t.Fatalf("lookup whose role bucket did not answer: status %d, body %s; want 503", recorder.Code, recorder.Body.String())
-			}
-			answeredInTime(t, elapsed)
-			if got := recorder.Header().Get("Retry-After"); got != "1" {
-				t.Fatalf("Retry-After = %q, want 1", got)
-			}
-			var refusal apiError
-			if err := json.Unmarshal(recorder.Body.Bytes(), &refusal); err != nil {
-				t.Fatalf("decode the refusal %s: %v", recorder.Body.String(), err)
-			}
-			if !strings.HasPrefix(refusal.Error, busUnansweredPrefix) || !strings.Contains(refusal.Error, tc.unanswered) {
-				t.Fatalf("the refusal reads %q, want it to begin %q and name %q", refusal.Error, busUnansweredPrefix, tc.unanswered)
-			}
 		})
 	}
 }

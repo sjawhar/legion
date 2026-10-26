@@ -777,7 +777,7 @@ func main() {
 	// /healthz handler was registered early (before NATS) — no re-registration needed.
 
 	// Phase 6: Open the role lane and /v1 onto the stores, then bind the durable consumer.
-	deliveryConfig := newListenerDeliveryHandlerConfigs(listenerDeliveryHandlerConfig{
+	deliveryConfig := listenerDeliveryHandlerConfig{
 		client:            client,
 		forwardRole:       client.RequestCoreTo,
 		registry:          registry,
@@ -793,12 +793,18 @@ func main() {
 		deliveryDuration:  deliveryDuration,
 
 		unplaceableRetryWindow: unplaceableRetryWindow,
-	})
+		// One deferral set for the life of the process, shared by construction by the three
+		// handlers built from this one value below - the role lane's, the durable's and the one
+		// the self-health rebind builds - so a rebind after a NATS flap draws on the budget the
+		// handler it replaces was holding rather than opening a second one beside it
+		// (unplaceableDeferrals, unplaceable_delivery.go).
+		deferredUnplaceable: newUnplaceableDeferrals(),
+	}
 
 	// The role lane is a core-NATS queue subscription in this machine's group. During a rolling
 	// deploy the task being replaced is a member too, and NATS hands each role message to one member
 	// of a group, so opening the lane before the durable binds forwards no message twice.
-	roleSub, err := client.SubscribeCore(contracts.RoleTopicPrefix+">", coreNATSDeliveryHandler(deliveryConfig.roleLane), roleQueue)
+	roleSub, err := client.SubscribeCore(contracts.RoleTopicPrefix+">", coreNATSDeliveryHandler(deliveryConfig), roleQueue)
 	if err != nil {
 		logger.Error("core role subscription failed", slog.String("error", err.Error()))
 		client.Conn.Close()
@@ -835,7 +841,7 @@ func main() {
 	// here is not retried either. The bind is the only refusal when the check after the connect
 	// could not read the durable (logged at WARN above), and it also catches a durable made
 	// refusable since that check.
-	bind, err := bindListenerDurable(stopping, client, consumer, jetStreamDeliveryHandler(deliveryConfig.durable), logger, durableBindInterval, durableBindDeadline)
+	bind, err := bindListenerDurable(stopping, client, consumer, jetStreamDeliveryHandler(deliveryConfig), logger, durableBindInterval, durableBindDeadline)
 	// A start the bind ends shuts down in order: /v1 and the role lane already serve, and no
 	// background loop has started yet. shutdownListener exits, so nothing below runs on an error.
 	if err != nil {
@@ -919,7 +925,7 @@ func main() {
 					caches,
 					probeDurable,
 					consumer,
-					jetStreamDeliveryHandler(deliveryConfig.rebind),
+					jetStreamDeliveryHandler(deliveryConfig),
 				)
 			},
 			func() { _ = syscall.Kill(os.Getpid(), syscall.SIGTERM) },
@@ -944,28 +950,6 @@ func main() {
 		monitorDone: monitorDone,
 		kvLoopsDone: kvLoopsDone,
 	})
-}
-
-// listenerDeliveryHandlerConfigs are the configs main builds its three delivery handlers from:
-// roleLane the role lane's core handler, durable the durable's, and rebind the one the self-health
-// rebind builds after a NATS flap. newListenerDeliveryHandlerConfigs is the only way main gets
-// them, so the one deferral set it makes is the one all three draw on
-// (TestListenerDeliveryHandlersShareOneDeferralSet).
-type listenerDeliveryHandlerConfigs struct {
-	roleLane listenerDeliveryHandlerConfig
-	durable  listenerDeliveryHandlerConfig
-	rebind   listenerDeliveryHandlerConfig
-}
-
-// newListenerDeliveryHandlerConfigs gives each of main's three delivery handlers the config deps,
-// with one deferral set for the life of the process set on it here in place of any deps carries.
-// The three share that set, so a rebind after a NATS flap draws on the budget the handler it
-// replaces was holding rather than opening a second one beside it (unplaceableDeferrals,
-// unplaceable_delivery.go). listenerDeliveryHandler's refusal of a config without a set does not
-// catch a second set, which is why the sharing is made here, in one place, and tested.
-func newListenerDeliveryHandlerConfigs(deps listenerDeliveryHandlerConfig) listenerDeliveryHandlerConfigs {
-	deps.deferredUnplaceable = newUnplaceableDeferrals()
-	return listenerDeliveryHandlerConfigs{roleLane: deps, durable: deps, rebind: deps}
 }
 
 // listenerLoops are the background loops main starts once the durable binds: stop ends them,

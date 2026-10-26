@@ -173,10 +173,8 @@ func (d *unplaceableDeferrals) sweepLocked(now time.Time) {
 
 // unplaceableAgentDelivery answers an agent delivery that nothing placed and nothing failed hard
 // enough to NAK (agentSubjectDelivery's undelivered, error-free result). It either defers the
-// message for redelivery, finalizing it itself and reporting true so the caller returns at once,
-// or gives it up with its record and reports false, leaving the caller to finalize the message as
-// it finalizes every other outcome.
-func unplaceableAgentDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMessage, item contracts.Envelope, sessionID string, metadata *nats.MsgMetadata, result session.HandleAgentResult) bool {
+// message for redelivery or gives it up with its record, and finalizes the message either way.
+func unplaceableAgentDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMessage, item contracts.Envelope, sessionID string, metadata *nats.MsgMetadata, result session.HandleAgentResult) {
 	// Nothing placed this message and nothing failed hard enough to NAK: the session has
 	// no record this listener could find, its record names nothing to push to, or the push
 	// to the port it names did not land. Each can be true of a session that is about to be
@@ -268,7 +266,7 @@ func unplaceableAgentDelivery(cfg listenerDeliveryHandlerConfig, message deliver
 		})
 		cfg.messagesNAKed.Inc()
 		message.finalizeAfter(unplaceableRetryDelay)
-		return true
+		return
 	}
 	// Given up: the deferrals this cause is allowed are spent, the delivery count is reached,
 	// this listener is already holding unplaceableDeferralCap messages, the metadata could
@@ -283,8 +281,8 @@ func unplaceableAgentDelivery(cfg listenerDeliveryHandlerConfig, message deliver
 	// nor clears its attempt-cache entry. The entry is kept rather than cleared because it is
 	// what stops a further delivery of this message pushing again - the redelivery an ACK
 	// lost on the wire brings (finalize's ACK is fire-and-forget), which arrives after the
-	// durable's AckWait and well inside attemptCacheTTL - and agentSubjectDelivery ACKs the
-	// message once this returns.
+	// durable's AckWait and well inside attemptCacheTTL - and this function ACKs the message once
+	// the give-up is applied.
 	//
 	// What this gives up is the notice itself, when it cannot be published. That is cheaper
 	// than the retry it replaces. For an agent subject nothing in this deployment reads the
@@ -306,5 +304,5 @@ func unplaceableAgentDelivery(cfg listenerDeliveryHandlerConfig, message deliver
 		},
 		exceptionReason: "no_holder",
 	})
-	return false
+	message.finalize(false)
 }

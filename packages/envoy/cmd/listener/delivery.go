@@ -66,13 +66,12 @@ type listenerDeliveryHandlerConfig struct {
 	// within it at most pushFailedDeferrals times, however long it is.
 	unplaceableRetryWindow time.Duration
 	// deferredUnplaceable is the set of agent deliveries this listener is holding deferred right
-	// now, the budget unplaceableDeferralCap bounds. It is required: main.go makes one, in
-	// newListenerDeliveryHandlerConfigs, and sets it on the config of each handler it builds - the
-	// role lane's core handler, the durable's, and the one the self-health rebind builds after a
-	// NATS flap - so all three draw on the one budget. listenerDeliveryHandler refuses a config
-	// without one rather than drawing a private set, since a set per handler is a second budget
-	// beside the first on the very rebind this retry exists for. A test that builds a config sets
-	// its own.
+	// now, the budget unplaceableDeferralCap bounds. It is required: main.go makes one and sets
+	// it once, in its deliveryConfig, so every handler built from that config - the role lane's
+	// core handler, the durable's, and the one the self-health rebind builds after a NATS flap -
+	// draws on the one budget. listenerDeliveryHandler refuses a config without one rather than
+	// drawing a private set, since a set per handler is a second budget beside the first on the
+	// very rebind this retry exists for. A test that builds a config sets its own.
 	deferredUnplaceable *unplaceableDeferrals
 }
 
@@ -629,9 +628,8 @@ func agentSubjectDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMes
 			recordDedupe: true,
 		})
 	} else if result.Err == nil {
-		if unplaceableAgentDelivery(cfg, message, item, sessionID, metadata, result) {
-			return
-		}
+		unplaceableAgentDelivery(cfg, message, item, sessionID, metadata, result)
+		return
 	}
 	if result.ShouldNAK {
 		cfg.messagesNAKed.Inc()

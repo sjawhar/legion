@@ -135,7 +135,7 @@ func startListenerDelivery(t *testing.T, d *listenerDeps) {
 		messagesNAKed:     met.NewCounter("rig_messages_naked", "test"),
 		deliveryDuration:  met.NewHistogram("rig_delivery_duration", "test", metrics.DefaultBuckets),
 		// The set every handler built from one config shares; main.go builds one for the whole
-		// process in newListenerDeliveryHandlerConfigs, so a durable rebound after a flap draws on
+		// process and passes it through deliveryConfig, so a durable rebound after a flap draws on
 		// the budget its predecessor held rather than opening a second one. This rig needs one only
 		// because listenerDeliveryHandler refuses a config without it: its unplaceableRetryWindow
 		// is zero, so nothing here is ever deferred, and these tests cover Dispatch resolution and
