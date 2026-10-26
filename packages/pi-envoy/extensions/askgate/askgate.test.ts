@@ -3023,16 +3023,15 @@ console.log(JSON.stringify(args, null, 2));
       const command = "dispatch comment --issue X-1 --body-file f6-link/../f6-note.txt";
       const g = bind({ env: STUB, cwd: work });
       const result = await g.bash("f6", command);
-      // Either the gate reviews the file the CLI reads, or it refuses the call. It never reviews
-      // one file and posts another.
-      if (result?.block === true) {
-        expect(result.reason).toMatch(/a symbolic link|does not exist/);
-        expect(g.calls).toHaveLength(0);
-        return;
-      }
+      // The gate reviews the file the CLI reads, and posts the snapshot of that file: it neither
+      // refuses the call nor reviews one file and posts another.
+      expect(result?.block).toBeUndefined();
+      expect(g.calls).toHaveLength(1);
       expect(g.calls[0]?.user).toContain("The file the CLI would post.");
       expect(g.calls[0]?.user).not.toContain("The file beside the link.");
-      const child = Bun.spawn(["bash", "-c", (result?.input?.command as string) ?? command], {
+      const postedCommand = result?.input?.command;
+      expect(postedCommand).toContain(`${SUITE_TMP}/askgate-`);
+      const child = Bun.spawn(["bash", "-c", postedCommand as string], {
         cwd: work,
         env: { ...process.env, ...STUB, ASKGATE_POSTED: posted },
         stdout: "ignore",
