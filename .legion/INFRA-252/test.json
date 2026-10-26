@@ -2,39 +2,39 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-252",
-  "completed": "2026-10-26T21:50:00Z",
-  "round": 12,
+  "completed": "2026-10-26T23:00:00Z",
+  "round": 13,
   "generation": 3,
-  "headSha": "2286fec9ca1408b7e7d2d3936dfffb5e7e160a38",
-  "fingerprint": "56a52d9a51ab 92fc86c9af71e1b665f36b2fbb9d4c3cfefce9d9b24a607220daa4d0b6cdcde0 -> 2286fec9ca14 41993c3cd63c36e3393f6c39830f0171b27c4cd9f49da3acc674b2d1612f925f: changed (migration renumber 0055 -> 0056 and two test-file resolutions), full round",
+  "headSha": "c78e5a511aec08eda51fbfd1c5c04e006cd82a11",
+  "fingerprint": "2286fec9ca14 41993c3cd63c36e3393f6c39830f0171b27c4cd9f49da3acc674b2d1612f925f -> c78e5a511aec 3d830fce35b106e4d0470a6b4c597f9cad33f358617a3b01be741ca92013a12c: changed (renumber 0056 -> 0057, facts.go and migration-test resolutions), full round",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran `LEGION_TEST_PG_DSN=<fresh postgres> LEGION_E2E_NATS_BIN=<nats-server> bash scripts/e2e/child-adoption.sh` at 2286fec9ca14, which is the merge with current main 5c4548f0: `child adoption e2e: PASS in 46s`, all eleven steps (https://github.com/sjawhar/legion/pull/2226#issuecomment-6427912637)."
+    "how": "Re-ran `LEGION_TEST_PG_DSN=<fresh postgres> LEGION_E2E_NATS_BIN=<nats-server> bash scripts/e2e/child-adoption.sh` at c78e5a511aec, which is the merge with current main ba9a24e2: `child adoption e2e: PASS in 45s`, all eleven steps (https://github.com/sjawhar/legion/pull/2226#issuecomment-6429179732)."
   },
   "failures": [],
   "failed": 0,
   "previousFailures": [
-    {"criterion": "D2: a todo root held under an unrecorded parent of a live tree queues once that parent leaves the tree", "round": 1, "status": "fixed; red test passes at 2286fec9ca14"},
-    {"criterion": "The daemon boots and migrates once this pull request merges", "round": 8, "status": "fixed; now 0056_issue_ancestry after main's 0055_design_gate_review_marks; store suite passes at the merge head"}
+    {"criterion": "D2: a todo root held under an unrecorded parent of a live tree queues once that parent leaves the tree", "round": 1, "status": "fixed; red test passes at c78e5a511aec"},
+    {"criterion": "The daemon boots and migrates once this pull request merges", "round": 8, "status": "fixed; now 0057_issue_ancestry after main's 0056_root_ask_mirror; store suite passes at the merge head"}
   ],
   "proof": [
     {
       "criterion": "Review round 7, after the renumber: roots an older daemon already handed over are not adopted back after an upgrade from current main's schema",
-      "surface": "whole daemon (the function `legion start` calls) booted on a database migrated through 55 (main's 0055_design_gate_review_marks included) and seeded as current main's daemon holds it, then migrated to 0056 by this head's store; real PostgreSQL and nats-server (throwaway -tags e2e driver)",
-      "command": "seed at migration 55: O (todo root under T, processed_events ('outbox','handover:O:77')), R (todo root under T, a retired planner claim with tree T), Q (labelled todo root under T); store.Migrate (0056); seed T live; boot",
-      "observed": "0056 marks O and R handed_over_from T; after boot Q joins T and plans (no slot, no architect); O and R stay their own trees and in admission.waiting over 3 s",
-      "headSha": "2286fec9ca1408b7e7d2d3936dfffb5e7e160a38",
+      "surface": "whole daemon (the function `legion start` calls) booted on a database migrated through 56 (main's 0056_root_ask_mirror included) and seeded as current main's daemon holds it, then migrated to 0057 by this head's store; real PostgreSQL and nats-server (throwaway -tags e2e driver)",
+      "command": "seed at migration 56: O (todo root under T, processed_events ('outbox','handover:O:77')), R (todo root under T, a retired planner claim with tree T), Q (labelled todo root under T); store.Migrate (0057); seed T live; boot",
+      "observed": "0057 marks O and R handed_over_from T; after boot Q joins T and plans (no slot, no architect); O and R stay their own trees and in admission.waiting over 3 s",
+      "headSha": "c78e5a511aec08eda51fbfd1c5c04e006cd82a11",
       "negativeControl": "Q, carrying no hand-over mark, joins T in the same run; round 11's run of this driver against afedb19d1ca7 (no backfill) adopted O and R"
     },
     {
       "criterion": "AC1-AC4, D2 and the migration order at the merge head",
-      "surface": "the store suite (TestTheGatesReviewMarksArriveWith0055 and TestTheTreeARootLeftIsBackfilledBy0056 included), round 1's red test, and the whole daemon (scripts/e2e/child-adoption.sh)",
+      "surface": "the store suite (TestTheGatesReviewMarksArriveWith0055, TestTheAskAndClaimMirrorsArriveWith0056 and TestTheTreeARootLeftIsBackfilledBy0057 included), round 1's red test, and the whole daemon (scripts/e2e/child-adoption.sh)",
       "command": "go test -count=1 ./internal/store/; go test -run TestATodoHeldUnderAnUnreleasedChildQueuesOnceItsParentLeavesTheLiveTree ./internal/daemon/; bash scripts/e2e/child-adoption.sh",
-      "observed": "store ok; red test ok; PASS in 46s, all eleven steps",
-      "headSha": "2286fec9ca1408b7e7d2d3936dfffb5e7e160a38",
+      "observed": "store ok; red test ok; PASS in 45s, all eleven steps",
+      "headSha": "c78e5a511aec08eda51fbfd1c5c04e006cd82a11",
       "negativeControl": "release-refuses: 409 CHILD_IN_OTHER_TREE, record unchanged, no Dispatch write"
     }
   ],
-  "ci": "At 2286fec9ca14, read 2026-10-26T21:45Z: Tests 40404687016, Docs 40404687082, Legion Envoy and Contracts 40404687041, PR Title 40404783928 queued; Worker Image 40404687115 pending (40404687040 cancelled). GitHub reports MERGEABLE; main is 5c4548f0, the merged parent.",
+  "ci": "At c78e5a511aec, read 2026-10-26T22:55Z: Tests 40414541648, Docs 40414541808, Worker Image 40414541757, PR Title 40414648260 queued; Legion Envoy and Contracts 40414541769 pending (40414541788, 40414630079 cancelled). GitHub reports MERGEABLE; main is ba9a24e2, the merged parent, ending at 0056.",
   "verdictProvider": "provider not verified (no review subagents ran)"
 }
