@@ -3,6 +3,14 @@
 // that binds Oh My Pi's completion call and buildSessionContext; everything else lives here so the
 // tests drive it through a fake `pi`, a fake `ctx` and stubs.
 //
+// What this is not: AskGate reviews the writes of a cooperating agent, and it is no sandbox. A
+// process running as the same user defeats it. It can replace a snapshot's bytes between the
+// review and the open (the snapshot is 0600 in a 0700 directory, which keeps out other users, not
+// this one), turn the gate off in its own envoy.json, point the session at another envoy.json
+// through ENVOY_CONFIG_FILE, PI_CODING_AGENT_DIR or XDG_CONFIG_HOME in the launching shell, or
+// call Dispatch's HTTP API and send no command at all. Every check here is for a write an agent
+// meant to send; none of them is weakened, and none is added for an attacker of that kind.
+//
 // Scope: eight calls on the command line and six of them as devices, each recorded under one tool
 // name (dispatch_ask, …).
 //   - A `bash` call whose whole command is the literal grammar of one `dispatch` call

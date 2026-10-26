@@ -333,3 +333,12 @@ reach a review; as a **refusal** when the write did not post (one sent back in b
 `no-model-role` and `load-failed`, which refuse in warn mode too); and as **unreviewed** when it
 posted with no review behind it, which is every `allow` whose outcome is no verdict (the table
 above, a rebuttal and a breaker trip included).
+
+**What AskGate is not.** AskGate reviews the writes of a cooperating agent, so that a write that
+breaks its rules comes back with the reason before it posts. It is no sandbox. A process that
+runs as the same user as the session defeats it: it can replace a snapshot's bytes between the
+review and the open (a snapshot is `0600` in a `0700` directory, which keeps out other users, not
+this one), set `askgate.enabled` to false in its own envoy.json, point the session at another
+envoy.json with `ENVOY_CONFIG_FILE`, `PI_CODING_AGENT_DIR` or `XDG_CONFIG_HOME` in the launching
+shell, or post straight to Dispatch's HTTP API and run no command at all. Use it for the writes
+of an agent that wants the review, and not as a boundary against a program that wants around it.

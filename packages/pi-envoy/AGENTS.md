@@ -200,6 +200,14 @@ this plugin sets the key to 120000 or more (the README's "The time limit"), and 
 `rules.md`, `askgate-system.md`, `askgate-request.md` and `askgate-upload.md` (the instruction an
 upload of a markdown document gets: failure 10 alone) are the prompts, imported as text.
 
+AskGate reviews the writes of a cooperating agent. It is no sandbox, and nothing in it is
+designed as one: a process that runs as the same user defeats it. That process can replace a
+snapshot's bytes between the review and the open (a snapshot is `0600` in a `0700` directory,
+which keeps out other users, not this one), turn the gate off in its own envoy.json, point the
+session at another envoy.json through `ENVOY_CONFIG_FILE`, `PI_CODING_AGENT_DIR` or
+`XDG_CONFIG_HOME` in the launching shell, or call Dispatch's HTTP API and send no command at all.
+Keep every check that is there; add none that only an attacker of that kind would need.
+
 ## Legion
 
 The Legion lifecycle is not this package's. The daemon contract (`legion.daemonApiVersion`, the
