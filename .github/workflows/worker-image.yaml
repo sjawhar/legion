@@ -105,12 +105,18 @@ jobs:
     runs-on: ubuntu-24.04
     # Job-level (not workflow-level): this file is also a called workflow, and job-level concurrency/env
     # behave identically for `workflow_call`, `workflow_dispatch`, and `pull_request`.
-    # Two pushes to one PR serialize on the PR number (unchanged). Other events key on
-    # github.sha, not github.ref, so a dropped pending main run never leaves a commit with no
-    # image to pin (why: this PR's description).
+    # A pull request's runs share one group per PR number. A new head's run cancels the build of the
+    # head it replaced, whether that build is waiting for the group, waiting for a runner or running,
+    # as the Tests, Docs and Legion Envoy and Contracts blocks already do. Only a head that starts a
+    # run of its own can do this. A push carrying `skip-checks: true` (a `.legion/`-only handoff)
+    # starts no run, so it never cancels the code head's build. Another pull request's build is
+    # in another group. Other events key on github.sha, not github.ref, so a pending run of one
+    # main commit never drops another commit's. They never cancel: in a call from
+    # release.yaml, `github.event_name` is the caller's (`push` or `workflow_dispatch`, never
+    # `pull_request`), so no main commit is left without an image to pin.
     concurrency:
       group: worker-image-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.sha }}
-      cancel-in-progress: false
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
     env:
       IMAGE: ghcr.io/sjawhar/legion-worker
       # The commit that is built and that the sha- tag names: the PR head on `pull_request` (github.sha

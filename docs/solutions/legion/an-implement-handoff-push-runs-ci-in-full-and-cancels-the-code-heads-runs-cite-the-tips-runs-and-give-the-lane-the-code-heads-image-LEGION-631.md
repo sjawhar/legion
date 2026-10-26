@@ -47,6 +47,13 @@ related_issues:
   digest, and the handoff head's green run ids in one message, and the tip's digest beside them in
   case its scripts hold the image's revision against the branch tip.
 
+  **Superseded 2026-10-26:** `Worker Image` now has a per-PR group with `cancel-in-progress` on
+  `pull_request`. A handoff push without the trailer cancels the code head's image build if that
+  build has not finished, so there may be only the tip's digest (the same build inputs except
+  for the revision label). Give the coordinator the tip's digest and say that it stands for the
+  code head. A `.legion/`-only push that carries `skip-checks: true` starts no run and cancels
+  nothing.
+
 ## Evidence
 
 sjawhar/legion#1843, round 9: the merge commit 38293495's `Tests` 38042284670, `Docs` 38042284637
