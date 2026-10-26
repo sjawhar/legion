@@ -1,4 +1,4 @@
--- 0052_issue_pod_roles_container.up.sql — an issue pod runs every workflow role in one container,
+-- 0054_issue_pod_roles_container.up.sql — an issue pod runs every workflow role in one container,
 -- `roles`, so a process locator of an issue pod's role names that container (runtime.Locator's
 -- Validate refuses any other). A daemon of the layout before it stored each role's locator naming a
 -- container of the role's own, the claim's role; this rewrites those to `roles`, in both tables that

@@ -61,7 +61,7 @@ func (g *registry) adopt(c claim.Token, gen uint64, token string) {
 // (LEGION_E2E_PREVIOUS_HARNESS, built from LEGION_E2E_PREVIOUS_IMAGE's revision with the fixture)
 // launch issue S4A-10's architect and tester in one issue pod of six role containers, on the
 // previous release's worker image, and exit, leaving both running, as a deployment upgrading onto
-// this release has them. Their locators are taken over as store migration 0052 rewrites them
+// this release has them. Their locators are taken over as store migration 0054 rewrites them
 // (container `roles`) and this runtime starts on them: its first observation of each is
 // StaleAddress naming the six containers, and nothing else of theirs. The architect's Resume
 // replaces the pod with one `roles` container; the tester's old process then reads Displaced,
@@ -147,7 +147,7 @@ func (r *liveRig) checkPreviousLayout() error {
 		claims = append(claims, c)
 	}
 	architect, tester := claims[0], claims[1]
-	note("operator", "pod %s (uid %s) runs containers %v; locators taken over with container %s, as store migration 0052 rewrites them", name, short(oldUID), launched[0].Names, runtime.IssuePodContainer)
+	note("operator", "pod %s (uid %s) runs containers %v; locators taken over with container %s, as store migration 0054 rewrites them", name, short(oldUID), launched[0].Names, runtime.IssuePodContainer)
 
 	restarted := time.Now()
 	mark := r.obs.mark()

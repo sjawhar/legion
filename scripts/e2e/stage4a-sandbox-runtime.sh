@@ -86,12 +86,12 @@
 # id and the secret-store key the `secrets` CLI resolves to its private key (agent tier: no YubiKey
 # touch), which prerequisites proves is that id's App against GitHub's GET /app before the run
 # writes anything (lib/github-apps.sh; the run acts as no other App); LEGION_E2E_PREVIOUS_IMAGE
-# (required) a worker image by digest built from a commit of main at daemon API contract 37, before
-# one container (its issue pods run six role containers), which this checkout contains: previous-layout builds that commit's
+# (required) a worker image by digest built from a commit of main at daemon API contract 37 or 38,
+# before one container (its issue pods run six role containers), which this checkout contains: previous-layout builds that commit's
 # own Stage 4a harness (the image's org.opencontainers.image.revision) with testdata/previouslayout's
 # fixture and runs it on that image, to leave a pod of the previous layout running for this runtime
 # to take over; the script refuses an image whose revision main or this checkout does not contain,
-# one whose commit already runs one container, or one at another contract; STAGE4A_FROM a development entry point, which is
+# one whose commit already runs one container, or one at a contract other than 37 or 38; STAGE4A_FROM a development entry point, which is
 # never the proof; STAGE4A_EVIDENCE_DIR where the transcript and the runtime's log go (default a
 # fresh /tmp directory, kept and printed).
 #
@@ -262,8 +262,10 @@ if git -C "$root" cat-file -e "$previous_base:packages/daemon/internal/runtime/s
   fail "LEGION_E2E_PREVIOUS_IMAGE $previous_image was built from $previous_base, which already runs issue pods of one container"
 fi
 previous_contract=$(git -C "$root" show "$previous_base:packages/daemon/internal/api/version.go" | sed -n 's/^const DaemonAPIVersion = \([0-9]*\)$/\1/p')
-[ "$previous_contract" = 37 ] ||
-  fail "LEGION_E2E_PREVIOUS_IMAGE $previous_image was built from $previous_base, at daemon API contract ${previous_contract:-unknown}: previous-layout needs a main build at contract 37, whose harness records the claim's session"
+case "$previous_contract" in
+37 | 38) ;;
+*) fail "LEGION_E2E_PREVIOUS_IMAGE $previous_image was built from $previous_base, at daemon API contract ${previous_contract:-unknown}: previous-layout needs a main build at contract 37 or 38, the two whose harness records the claim's session and whose issue pods run six role containers" ;;
+esac
 require_app_inputs implement
 write_github_apps implement
 check_github_apps implement

@@ -129,7 +129,7 @@ func TestApplyFactSettlesAViewByWhetherItsIssueIsRecorded(t *testing.T) {
 	event := DispatchIssue{Key: "LEGION-208", Seq: 5, Status: "todo", HandedOver: true, ActorSession: "session", ResolvedRepo: "acme/widgets"}
 	view := DispatchIssue{Key: "LEGION-208", Seq: 7, Status: "backlog", ResolvedRepo: "acme/widgets", Observed: true, Delivered: &event}
 	apply("unrecorded", view)
-	if want := (DispatchIssue{Key: "LEGION-208", Seq: 7, Status: "backlog", ResolvedRepo: "acme/widgets"}); len(seen) != 1 || seen[0] != want {
+	if want := (DispatchIssue{Key: "LEGION-208", Seq: 7, Status: "backlog", ResolvedRepo: "acme/widgets"}); len(seen) != 1 || !reflect.DeepEqual(seen[0], want) {
 		t.Fatalf("the handlers saw %+v for an unrecorded issue's view, want only %+v", seen, want)
 	}
 	if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
@@ -141,7 +141,7 @@ func TestApplyFactSettlesAViewByWhetherItsIssueIsRecorded(t *testing.T) {
 	seen = nil
 	apply("recorded", view)
 	apply("recorded-release", DispatchIssue{Key: "LEGION-208", Seq: 8, Status: "todo", HandedOver: true, ResolvedRepo: "acme/widgets", Observed: true})
-	if len(seen) != 1 || seen[0] != event {
+	if len(seen) != 1 || !reflect.DeepEqual(seen[0], event) {
 		t.Fatalf("the handlers saw %+v once the issue was recorded, want only the delivered event %+v", seen, event)
 	}
 }
@@ -319,13 +319,19 @@ func TestCapturedIssueUpdatedEnvelopeDecodes(t *testing.T) {
 	}
 }
 
-// Dispatch can add issue payload fields before a deployed daemon consumes them: the old decoder
-// must keep accepting those events until its matching workflow change rolls out.
-func TestIssueEventIgnoresUnconsumedBlockedByFields(t *testing.T) {
+// Dispatch can add issue payload fields, or start filling one it has always sent empty, before a
+// deployed daemon consumes them: the old decoder must keep accepting those events until its
+// matching workflow change rolls out. The daemon reads no priority, and no key the captured
+// fixture lacks, which a decoder rejecting unknown fields would refuse.
+func TestIssueEventIgnoresFieldsTheDaemonDoesNotConsume(t *testing.T) {
 	original := string(capturedIssueCreatedEnvelope(t))
-	widened := strings.Replace(original, `\"labels\":[]`, `\"blocked_by\":[\"CAPTURE-3\"],\"priority\":1,\"labels\":[]`, 1)
-	if widened == original {
-		t.Fatal("captured issue.created fixture has no empty labels field to widen")
+	filled := strings.Replace(original, `\"priority\":null`, `\"priority\":1`, 1)
+	if filled == original {
+		t.Fatal("captured issue.created fixture has no priority field to fill")
+	}
+	widened := strings.Replace(filled, `\"labels\":[]`, `\"some_future_field\":1,\"labels\":[]`, 1)
+	if widened == filled {
+		t.Fatal("captured issue.created fixture has no empty labels field to widen beside")
 	}
 	subject := "notifications.dispatch.issue.CAPTURE-4.issue.created"
 	want, err := decodeMessage(subject, "CAPTURE", capturedRepositories, []byte(original))
@@ -334,10 +340,37 @@ func TestIssueEventIgnoresUnconsumedBlockedByFields(t *testing.T) {
 	}
 	got, err := decodeMessage(subject, "CAPTURE", capturedRepositories, []byte(widened))
 	if err != nil {
-		t.Fatalf("decode issue.created with additive fields: %v", err)
+		t.Fatalf("decode issue.created with a priority and a field the fixture lacks: %v", err)
 	}
 	if !reflect.DeepEqual(got.Fact, want.Fact) {
 		t.Fatalf("widened fact = %#v, want %#v", got.Fact, want.Fact)
+	}
+}
+
+// Dispatch sends an issue's blocked_by keys on every issue event, already ordered: the decoder
+// carries that order onto the fact, and an event retained from a Dispatch that sent no such field
+// decodes as an issue waiting on nothing does.
+func TestADispatchIssueEventCarriesTheKeysItIsBlockedBy(t *testing.T) {
+	subject := "notifications.dispatch.issue.CAPTURE-3.issue.updated"
+	original := string(capturedIssueUpdatedEnvelope(t))
+	blocked := strings.Replace(original, `\"labels\":[]`, `\"blocked_by\":[\"CAPTURE-9\",\"CAPTURE-2\"],\"labels\":[]`, 1)
+	if blocked == original {
+		t.Fatal("captured issue.updated fixture has no empty labels field to widen")
+	}
+	got, err := decodeMessage(subject, "CAPTURE", capturedRepositories, []byte(blocked))
+	if err != nil {
+		t.Fatalf("decode issue.updated with blocked_by: %v", err)
+	}
+	want := []string{"CAPTURE-9", "CAPTURE-2"}
+	if blockers := got.Fact.(DispatchIssue).Blockers; !reflect.DeepEqual(blockers, want) {
+		t.Fatalf("blockers = %#v, want %#v in Dispatch's own order", blockers, want)
+	}
+	got, err = decodeMessage(subject, "CAPTURE", capturedRepositories, []byte(original))
+	if err != nil {
+		t.Fatalf("decode captured issue.updated: %v", err)
+	}
+	if blockers := got.Fact.(DispatchIssue).Blockers; len(blockers) != 0 {
+		t.Fatalf("blockers = %#v, want none: the payload carries no blocked_by", blockers)
 	}
 }
 

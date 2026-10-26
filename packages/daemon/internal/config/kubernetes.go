@@ -142,7 +142,7 @@ type Toleration struct{ Key, Operator, Value, Effect string }
 
 // PodResources are the reservations of the two pods the daemon builds, each a whole pod's: every
 // issue pod's one container and its two init containers carry Issue, the controller's pod's one
-// container and its init container Controller.
+// container Controller.
 type PodResources struct {
 	Issue, Controller Reservation
 }

@@ -1276,7 +1276,7 @@ re-admitted after its own tree's close takes.
 Before the daemon opens its store, so before any schema write, image probe or reconcile, it checks
 that Agent Sandbox is installed and refuses a namespace that holds a Sandbox of its project whose pod
 template is neither of the containers its labels allow — for an issue's (`legion.dev/issue`), the one
-`roles` container or, from the layout before contract 38, exactly the six role containers; for the
+`roles` container or, from the layout before contract 39, exactly the six role containers; for the
 project controller's (`legion.dev/role=controller` with no tree), the one `controller` container — or
 that does not own exactly the volumes a Sandbox of that kind owns. That rule is the kind's, not
 one rule for both: an issue's Sandbox owns no volume claim template at all, its pod's disk being
@@ -1449,7 +1449,7 @@ per-claim or tree-volume Sandbox all the same.
 
 Roll back by restoring the dump from step 5 and re-pinning the earlier release; work done under
 this release since the upgrade is not in the dump. Re-pinning without the restore does not work.
-Once this release has booted it has applied migrations 0033 to 0052 (`internal/store/migrations`),
+Once this release has booted it has applied migrations 0033 to 0054 (`internal/store/migrations`),
 and the earlier release cannot read what they and this release write:
 
 - it refuses an `issue_suspend` outbox row as an unknown kind (`decodeOutboxJSON` in
@@ -1741,7 +1741,7 @@ The database needs no restore for this step. This release's own migration, 0051,
 release's daemon still finds the claims table it knows. Migrations here are forward-only, so a
 dropped column would have made this rollback a restore.
 
-From a release that also carries the one `roles` container (daemon API contract 38, [Moving from
+From a release that also carries the one `roles` container (daemon API contract 39, [Moving from
 one container per role to one `roles` container](#pinning-a-release-that-drops-what-a-running-pod-still-uses)),
 run that rollback's steps 1, 2, 3 and 5 first — push, stop the daemon, the locators and their
 `schema_version` row, and `legion.yaml`'s `resources` block — since the release before this one
@@ -1796,11 +1796,12 @@ speaks (the launcher, the shim, `workspace-init`): an install refreshes no binar
 image carries that change, and such a release is still pinned only after every tree is drained or
 every issue pod is relaunched onto the new image.
 
-**Moving from one container per role to one `roles` container (daemon API contract 38).** A
-release at contract 38 builds an issue pod with one container, `roles`, whose launcher runs every
+**Moving from one container per role to one `roles` container (daemon API contract 39).** A
+release at contract 39 builds an issue pod with one container, `roles`, whose launcher runs every
 role in multi-role mode, which only an image of that release's `legion` has: pin the worker image
 with the daemon release, since the image probe refuses an image whose `pi-legion` declares another
-contract. The release before it is contract 37, the pod-owned disk ([Cutting over to the pod-owned
+contract. The release before it is contract 38, the blocked issues (INFRA-225), whose issue pods
+run the six role containers of contract 37, the pod-owned disk ([Cutting over to the pod-owned
 disk](#cutting-over-to-the-pod-owned-disk)), and this section is written against it: a deployment
 still on a release before contract 37 cuts over to the pod-owned disk first. A rollback rewrites
 the database in place and needs no dump (below); a safety copy taken
@@ -1809,7 +1810,7 @@ omp_session_files_parts -f <dump file> '<postgres_dsn>'` with the daemon's `post
 Oh My Pi's two session tables share that database under a login of their own, the daemon's login
 cannot read them and a `pg_dump` that does not leave them out exits 1 with `permission denied for
 table omp_session_files`. At boot, store
-migration 0052 rewrites every stored claim locator naming a per-role container to `roles`, and the
+migration 0054 rewrites every stored claim locator naming a per-role container to `roles`, and the
 boot census passes a pod of either layout and refuses everything else as before. A running issue
 pod whose own containers are exactly the six role names (a container another controller injected
 into the running pod, a mesh's sidecar say, is not counted) is reported moved for every role
@@ -1819,10 +1820,10 @@ replaces the pod — even an installing (stale-plugin) launch — on the configu
 siblings resume into the new pod; a turn a role was in is sent again once its session resumes, as a
 moved address's relaunch does. The replaced pod takes its disk with it, so the new pod provisions
 its workspace from the issue's pushed branch ([The disk dies with its
-pod](#the-disk-dies-with-its-pod)): before the rollout, have each running issue's work pushed and
-stop those issues, as the cutover's steps 1 and 2 say ([Cutting over to the pod-owned
-disk](#cutting-over-to-the-pod-owned-disk)), since the boot replaces every issue pod at once and
-work done after a push is lost with its pod.
+pod](#the-disk-dies-with-its-pod)): before the rollout, have each running issue's work pushed, stop
+those issues and stop the earlier daemon, as the cutover's steps 1, 2 and 4 say ([Cutting over to
+the pod-owned disk](#cutting-over-to-the-pod-owned-disk)), and start them again as its step 7 does,
+since the boot replaces every issue pod at once and work done after a push is lost with its pod.
 `legion.yaml`'s `resources` takes one `issue` entry in place of the per-role entries
 ([Configuration](#configuration)); keep a copy of the block as it was, which a rollback puts back.
 `runtime.kubernetes.pod` loses names it could use before, each refused at load
@@ -1833,18 +1834,18 @@ or above `/tmp`, `/var/tmp`, `/run/lock`, `/var/lock` or `/dev/shm`, or the imag
 spellings of them. Run
 this release's `legion start --check-config` on the file before the rollout.
 
-To roll this release back to contract 37, every stored locator and every issue Sandbox both go back
+To roll this release back to contract 38, every stored locator and every issue Sandbox both go back
 to what the earlier release reads. Re-pinning alone boots neither:
 
-- Migration 0052 has no down migration, and the earlier release cannot read what it wrote: it
+- Migration 0054 has no down migration, and the earlier release cannot read what it wrote: it
   refuses an issue pod's locator naming the container `roles` (`sandbox container "roles" does not
-  match claim role`, `Locator.Validate` in `internal/runtime/locator.go` at contract 37), which
+  match claim role`, `Locator.Validate` in `internal/runtime/locator.go` at contract 38), which
   it reads as it loads its claims. Nothing refuses the newer schema first: its `Migrate` applies
   each migration it has not recorded and compares nothing against the version the database is at
   (`internal/store/store.go`).
 - Before it opens the database at all, its boot census refuses every issue Sandbox whose template
   is not exactly the six role containers (`legacyIssueSandbox` in
-  `internal/runtime/sandbox/install.go` at contract 37): `legacy issue Sandbox <name> runs
+  `internal/runtime/sandbox/install.go` at contract 38): `legacy issue Sandbox <name> runs
   containers [roles], not exactly the launchers its labels name [architect implementer merger
   planner reviewer tester]`. Every Sandbox this release launched a pod into has the one-container
   template, Suspended or not.
@@ -1866,7 +1867,7 @@ it carried. Deleting each issue Sandbox instead of rewriting it would also pass 
 release's census, now that no volume hangs on a Sandbox, and loses no more than the rewrite does:
 the disks, which go with the pods either way. It drops the `legion.dev/displaced-pod` record a
 Sandbox carries, though, so a claim this release displaced would be read as dead and charged.
-Reverse 0052 in the live database and rewrite each Sandbox's template in place, which keeps the
+Reverse 0054 in the live database and rewrite each Sandbox's template in place, which keeps the
 record, every Sandbox, its uid, its annotations and its tree label. In this order:
 
 1. **Have every running issue's work pushed, and confirm it**, while this release still runs, as
@@ -1875,7 +1876,7 @@ record, every Sandbox, its uid, its annotations and its tree label. In this orde
    workspace the rollback keeps.
 2. **Stop this release's daemon** (scale its Deployment to zero, or `legion stop`), so nothing
    launches into a Sandbox or writes a locator while both are rewritten.
-3. **Give every issue pod's locator back its role's container.** Before 0052 an issue pod's role
+3. **Give every issue pod's locator back its role's container.** Before 0054 an issue pod's role
    ran in a container named for the claim's role, so the `role` column says what each locator named;
    the controller's locators still name `controller` and are not touched, and a tmux locator, or one
    with no `sandbox` member, matches neither statement:
@@ -1893,26 +1894,27 @@ record, every Sandbox, its uid, its annotations and its tree label. In this orde
      and cc.locator->>'runtime' = 'sandbox'
      and cc.locator->'sandbox'->>'container' = 'roles'
      and c.role <> 'controller';
-   delete from schema_version where version = 52;
+   delete from schema_version where version = 54;
    commit;
    SQL
    ```
 
    It prints `UPDATE <n>` twice and `DELETE 1`; a rerun prints `UPDATE 0` twice and `DELETE 0`. A
    claim this release launched first gets its role's container the same way, so the earlier
-   release loads it too. The `delete` removes the row `schema_version` records for 0052, so a later
-   upgrade back to this release applies 0052 again and rewrites every claim the earlier release
-   launched in the meantime; with the row left, that upgrade would skip 0052 (its `Migrate` applies
+   release loads it too. The `delete` removes the row `schema_version` records for 0054, so a later
+   upgrade back to this release applies 0054 again and rewrites every claim the earlier release
+   launched in the meantime; with the row left, that upgrade would skip 0054 (its `Migrate` applies
    only the migrations `schema_version` does not record, `versionRecorded` in
    `internal/store/store.go`) and look for each role's own container in a pod that has only
    `roles`. The earlier release's `Migrate` checks each migration it has by its own number and reads
    no highest row; only its `legion state` reports one, the `schemaVersion` it reads as
    `max(version)` (`schemaVersion` in `internal/store/store.go`, the state read in
-   `internal/daemon/daemon.go`), which reads 51 once the row is gone, the earlier release's own
-   last migration (`0051_issue_suspend_release.up.sql`, which this rollback leaves applied). The
+   `internal/daemon/daemon.go`), which reads 53 once the row is gone, the earlier release's own
+   last migration (`0053_issue_taken_back.up.sql`, which this rollback leaves applied with
+   `0052_dispatch_issues.up.sql`). The
    SQL changes only these locators and that row, so Oh My Pi's session tables, wherever they are,
-   keep every turn taken under this release. The `52` in the `delete` is the number of the
-   migration that renames the container, `0052_issue_pod_roles_container.up.sql`; where that file
+   keep every turn taken under this release. The `54` in the `delete` is the number of the
+   migration that renames the container, `0054_issue_pod_roles_container.up.sql`; where that file
    carries another number in the release you roll back from, use that number.
 4. **Return every one-container issue Sandbox to the earlier layout's template.** With
    `<namespace>` and `<project>` as in [Upgrading a deployment with running
@@ -1941,7 +1943,7 @@ record, every Sandbox, its uid, its annotations and its tree label. In this orde
    before it sets it running (`relaunch` in `internal/runtime/sandbox/relaunch.go`), as for any
    Suspended Sandbox. The patch leaves `volumeClaimTemplates` as it is, and an issue Sandbox of
    either release owns none, which is the shape the earlier release's census passes
-   (`treeVolumeLayout` in `install.go` at contract 37). The controller's Sandbox (one `controller`
+   (`treeVolumeLayout` in `install.go` at contract 38). The controller's Sandbox (one `controller`
    container in both releases), a repository cache's and the image probe's carry no
    `legion.dev/issue` label and are left as they are. The same `get sandboxes` query, without the
    loop, then prints nothing.
@@ -1974,13 +1976,13 @@ release left.
 Step 4 was run against Agent Sandbox v1.0.3 on a scratch cluster, with the earlier release's census
 itself as the check: before step 4 it refused the one-container Sandbox as above; after it, it
 passed, and the Sandbox kept its uid. That run predates the pod-owned disk: its Sandbox still owned
-a volume, which it kept; under contract 37 the pod's disk goes with the pod at the patch, as above.
-Step 3's SQL was run verbatim on 2026-10-26 09:35Z against PostgreSQL 16.15 (Docker) holding
-contract 37's migrations 0001 to 0051 (main at `7f6ef46fd`), with sandbox locators for every
+a volume, which it kept; from contract 37 the pod's disk goes with the pod at the patch, as above.
+Step 3's SQL was run verbatim on 2026-10-26 12:48Z against PostgreSQL 16.2 holding contract 38's
+migrations 0001 to 0053 (main at `bc307fb56`), with sandbox locators for every
 workflow role of an issue pod, a controller's sandbox locator, a tmux locator, a null locator, one
-with no `container` and one with a null `sandbox`, in both tables: after this release's 0052 and
-step 3, both tables equalled a snapshot taken before 0052, row for row, with `schema_version` back
-at 51, and a second run changed nothing. Applying 0052 again afterwards, as the next upgrade's
+with no `container` and one with a null `sandbox`, in both tables: after this release's 0054 and
+step 3, both tables equalled a snapshot taken before 0054, row for row, with `schema_version` back
+at 53, and a second run changed nothing. Applying 0054 again afterwards, as the next upgrade's
 `Migrate` does, rewrote the same six claims and six capabilities to `roles`. The safety copy's
 `pg_dump`, run as a login that cannot read the session tables, exited 1 without the two `-T`
 options and 0 with them.
@@ -2877,11 +2879,11 @@ each owner's two keys as `<owner>/hosts.yml` and `<owner>/config.yml`),
 (`state-<r>`, memory) and, only when the pod enrolls with the secrets broker,
 `/var/run/legion/roles/<r>/agent-secrets` (`agent-secrets-key-<r>`, memory). One disk `emptyDir`,
 `role-homes`, is at `/var/run/legion/roles/.homes`. The pod's shared mounts appear once: the issue
-volume at `/legion`, the sessions `subPath`, the config home, the feed read-only, the providers
+volume at `/legion`, the config home, the feed read-only, the providers
 Secret's configured keys when there are any (with its `NATS_NKEY_SEED` key when the daemon has a
 NATS nkey seed), the broker's token when the pod enrolls, and the operator's volumes and mounts.
-Every one of them that belongs at or under `/home/legion` (the sessions `subPath` at
-`.omp/profiles/legion/agent/sessions`, the config home at `.config`, an operator's mount there) is
+Every one of them that belongs at or under `/home/legion` (the config home at `.config`, an
+operator's mount there) is
 mounted under `/var/run/legion/home` at the same relative path instead, so `/home/legion` itself
 carries no mount in the `roles` container; each role's namespace binds it back at its own path,
 except the config home. That one is `workspace-init`'s, and no role sees or writes it: each role
