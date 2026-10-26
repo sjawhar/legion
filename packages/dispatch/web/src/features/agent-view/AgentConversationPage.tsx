@@ -21,14 +21,15 @@ import {
 import { useMarkRepliesRead } from "../agents/unread";
 import { MODE_LABELS } from "../conversation/delivery";
 import { useAgents } from "../conversation/useAgents";
-import { sessionLabel } from "../refs/actor";
+import { AgentName, useAgentText } from "../refs/AgentName";
 import { ErrorBoundary } from "../shell/ErrorBoundary";
 import { useDocumentTitle } from "../shell/useDocumentTitle";
 import { AgentRuntimeThread } from "./AgentRuntimeThread";
 import { currentModel, sessionCommands } from "./conversation";
 import { type AgentStreamStatus, useAgentStream } from "./useAgentStream";
 
-/** What the live dot says about the relay, and how it reads to a screen reader. */
+/** What the stream-status dot says about the relay connection (not whether the agent is
+ *  running, which the header's `AgentName` mark shows), and how it reads to a screen reader. */
 const STATUS: Record<AgentStreamStatus, { dot: string; label: string }> = {
   connecting: { dot: connectionDotConnecting, label: "Connecting to the session" },
   live: { dot: liveDotBg, label: "Live" },
@@ -71,7 +72,9 @@ export function AgentConversationPage(): ReactNode {
   const { sessionId = "" } = useParams<{ sessionId: string }>();
   const { agents } = useAgents(true, true);
   const agent = agents.find((candidate) => candidate.session_id === sessionId);
-  const label = sessionLabel(sessionId, agent?.title ?? "");
+  // The page knows the route's session id and the registry, not a stamped title: the agent is
+  // named by its registry title, else its short id.
+  const label = useAgentText().sessionText(sessionId, undefined);
   useDocumentTitle(label);
 
   const { conversation, replays, responding, status } = useAgentStream(sessionId);
@@ -143,7 +146,11 @@ export function AgentConversationPage(): ReactNode {
         <Link className={`text-sm ${linkText} ${linkHoverText}`} to="/agents">
           ← Agents
         </Link>
-        <h1 className={`min-w-0 truncate text-lg font-semibold ${textPrimaryOnCanvas}`}>{label}</h1>
+        {/* This is that agent's own live conversation, so its name links nowhere: `AgentName`
+            draws it, with its running state, without a link. */}
+        <h1 className={`min-w-0 truncate text-lg font-semibold ${textPrimaryOnCanvas}`}>
+          <AgentName kind="static" sessionId={sessionId} storedTitle={undefined} />
+        </h1>
         {model === undefined ? null : (
           <span className={`${pillClassName("label")} max-w-56`} data-testid="agent-session-model">
             <TruncatedText className="min-w-0" title={model}>
@@ -151,12 +158,18 @@ export function AgentConversationPage(): ReactNode {
             </TruncatedText>
           </span>
         )}
-        <span className="flex items-center gap-1.5">
+        <span
+          className="flex items-center gap-1.5"
+          title={`Connection to the session's conversation: ${presence.label}`}
+        >
           <span
             aria-hidden="true"
             className={`inline-block h-2 w-2 rounded-full ${status === "unavailable" ? connectionDotFailed : presence.dot}`}
           />
-          <span className={`text-xs ${textMutedOnCanvas}`}>{presence.label}</span>
+          <span className={`text-xs ${textMutedOnCanvas}`}>
+            <span className="sr-only">Connection: </span>
+            {presence.label}
+          </span>
         </span>
         {agent === undefined ? (
           <span className={`text-xs ${textMutedOnCanvas}`}>

@@ -31,8 +31,7 @@ import {
   DeliveryStatus,
 } from "../conversation/TargetedMessageCard";
 import { useAgents } from "../conversation/useAgents";
-import { AgentName } from "../refs/AgentName";
-import { sessionLabel } from "../refs/actor";
+import { AgentName, type AgentPart, AgentParts, useAgentText } from "../refs/AgentName";
 import { MarkdownBody } from "../refs/MarkdownBody";
 import { Timestamp } from "../refs/Timestamp";
 
@@ -60,17 +59,27 @@ export function exclusionsFromState(state: unknown): readonly BroadcastExclusion
   return Array.isArray(excluded) ? (excluded as BroadcastExclusion[]) : [];
 }
 
+/** The Excluded line: every session the send left out, with the reason the server gave. Each
+ *  session is an agent part, for `AgentParts` to draw. */
+function exclusionParts(excluded: readonly BroadcastExclusion[]): AgentPart[] {
+  const parts: AgentPart[] = ["Excluded: "];
+  excluded.forEach((item, index) => {
+    if (index > 0) parts.push(", ");
+    parts.push({ sessionId: item.session_id, storedTitle: item.title }, ` (${item.reason})`);
+  });
+  return parts;
+}
+
 function BroadcastRecipientRow({
   delivery,
   liveAgents,
   recipient,
-  titles,
 }: {
   delivery: MessageDeliveryMode;
   liveAgents: readonly Agent[];
   recipient: BroadcastRecipient;
-  titles: ReadonlyMap<string, string>;
 }): ReactNode {
+  const text = useAgentText();
   const queryClient = useQueryClient();
   const retry = useMutation({
     mutationFn: (mode: MessageDeliveryMode) =>
@@ -80,10 +89,13 @@ function BroadcastRecipientRow({
   // The row shows the recipient's whole thread, so its replies are read. Only these: the
   // session's replies anywhere else, older or newer, stay unread until a view shows them.
   useMarkShownRepliesRead(recipient.session_id, recipient.replies);
-  const label = sessionLabel(recipient.session_id, titles.get(recipient.session_id) ?? "");
+  // The recipient is the session the broadcast addressed: `AgentName` draws it wherever the row
+  // names it, and the row's accessible name is the same name as text.
+  const recipientAgent: AgentPart = { sessionId: recipient.session_id, storedTitle: undefined };
+  const label = text.sessionText(recipient.session_id, undefined);
   const answer = recipient.replies.find((reply) => reply.author.kind === "session");
   const answeredBy = answer?.author;
-  const attempts = deliveryAttempts(recipient.message.deliveries, label);
+  const attempts = deliveryAttempts(recipient.message.deliveries, recipientAgent);
   const latest = attempts.at(-1);
   // A pending attempt nobody has come back to. The server frees a claim after a minute
   // (`claimLapsed`), and it judges the claim; this reads the attempt's own timestamp, which is
@@ -95,17 +107,25 @@ function BroadcastRecipientRow({
   const capabilities = capabilitiesForTarget(recipient.message.target, liveAgents);
   return (
     <article aria-label={label} className={`rounded-xl border p-3 ${card} ${borderDefault}`}>
-      <h3 className={`text-sm font-semibold ${textPrimaryOnCanvas}`}>{label}</h3>
+      <h3 className={`text-sm font-semibold ${textPrimaryOnCanvas}`}>
+        <AgentName
+          className="break-words"
+          sessionId={recipient.session_id}
+          storedTitle={undefined}
+        />
+      </h3>
       {latest === undefined ? (
         <p className={`mt-2 text-sm font-semibold ${dangerText}`}>
-          Not sent to {label}: no delivery attempt was recorded.
+          <AgentParts
+            parts={["Not sent to ", recipientAgent, ": no delivery attempt was recorded."]}
+          />
         </p>
       ) : (
         <DeliveryStatus
           answeredBy={answeredBy}
           deliveries={attempts}
           retryRow={answeredBy === undefined && latest.state === "failed"}
-          targetName={label}
+          targetName={recipientAgent}
         />
       )}
       {answeredBy !== undefined || latest?.state === "sent" ? null : latest?.state === "failed" ? (
@@ -118,7 +138,7 @@ function BroadcastRecipientRow({
           latest={latest}
           onRetry={retry.mutate}
           retrying={retry.isPending}
-          targetName={label}
+          targetName={recipientAgent}
         />
       ) : latest === undefined || stranded ? (
         // Outstanding, and nobody is carrying it. Only the attempt's own mode is offered: the
@@ -158,7 +178,7 @@ export function BroadcastPage(): ReactNode {
   const { id = "" } = useParams<{ id: string }>();
   const location = useLocation();
   const excluded = exclusionsFromState(location.state);
-  const { agents, titles } = useAgents(true, true);
+  const { agents } = useAgents(true, true);
   const broadcast = useQuery({
     queryFn: () => api.getBroadcast(id),
     // Keyed under ["broadcast"], the prefix every issue-less message event invalidates, so a
@@ -200,11 +220,7 @@ export function BroadcastPage(): ReactNode {
         </div>
         {excluded.length === 0 ? null : (
           <p className={`mt-2 text-sm ${dangerText}`}>
-            Excluded:{" "}
-            {excluded
-              .map((item) => `${sessionLabel(item.session_id, item.title)} (${item.reason})`)
-              .join(", ")}
-            . Nothing was sent to them.
+            <AgentParts parts={exclusionParts(excluded)} />. Nothing was sent to them.
           </p>
         )}
       </header>
@@ -218,7 +234,6 @@ export function BroadcastPage(): ReactNode {
               key={recipient.session_id}
               liveAgents={agents}
               recipient={recipient}
-              titles={titles}
             />
           ))}
         </div>

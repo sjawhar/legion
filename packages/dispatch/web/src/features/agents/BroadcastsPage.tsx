@@ -16,8 +16,7 @@ import {
   textPrimaryOnCanvas,
 } from "../../theme/classes";
 import { MODE_LABELS } from "../conversation/delivery";
-import { useAgents } from "../conversation/useAgents";
-import { useAgentText } from "../refs/AgentName";
+import { AgentName } from "../refs/AgentName";
 import { MarkdownPreview } from "../refs/MarkdownPreview";
 import { Timestamp } from "../refs/Timestamp";
 import { useDocumentTitle } from "../shell/useDocumentTitle";
@@ -26,10 +25,6 @@ import { useDocumentTitle } from "../shell/useDocumentTitle";
  *  again after the sender navigated away from it. */
 export function BroadcastsPage(): ReactNode {
   useDocumentTitle("Broadcasts · Dispatch");
-  // The registry the senders are named from; `useAgentText` reads what it caches. The sender sits
-  // inside the row's link, so it is text here, not an `AgentName` link.
-  useAgents(true);
-  const text = useAgentText();
   const broadcasts = useQuery({
     queryFn: () => api.listBroadcasts(),
     queryKey: ["broadcast", "list"],
@@ -67,15 +62,23 @@ export function BroadcastsPage(): ReactNode {
         <ul className="space-y-3">
           {broadcasts.data.map((sent) => (
             <li className={`rounded-xl border ${card} ${borderDefault}`} key={sent.id}>
+              {/* The sender is drawn by `AgentName`, whose name links to its live conversation,
+                  so it sits above the row's link rather than inside it: one link never holds
+                  another. A long name wraps rather than widening the row. */}
+              <p className={`min-w-0 break-words px-3 pt-3 text-xs ${textMutedOnCanvas}`}>
+                <AgentName actor={sent.author} />
+              </p>
               {/* Below `xl` every link is `inline-flex` with centred items (styles.css's touch
                   rule, unlayered, so it beats `block` and `items-*`): the row stacks its two lines
                   explicitly and each stretches to the row's width. */}
-              <Link className="flex w-full flex-col p-3" to={`/agents/broadcasts/${sent.id}`}>
+              <Link
+                className="flex w-full flex-col px-3 pt-1 pb-3"
+                to={`/agents/broadcasts/${sent.id}`}
+              >
                 <p
                   className={`flex flex-wrap items-center gap-2 self-stretch text-xs ${textMutedOnCanvas}`}
                 >
                   <LabelPill>{MODE_LABELS[sent.delivery]}</LabelPill>
-                  <span>{text.label(sent.author)}</span>
                   <Timestamp at={sent.created_at} />
                   <span>
                     {sent.replies} of {sent.recipients} answered

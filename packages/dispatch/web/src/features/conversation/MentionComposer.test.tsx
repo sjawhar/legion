@@ -636,6 +636,46 @@ test("an accepted mention survives its target going offline before Send", async 
   }
 });
 
+// INFRA-440 (exclusion E2). Each suggestion is one option inside a listbox, which may own only
+// options, so the agent in it is drawn by `AgentName` with its running state and no link: a
+// session option's name, and a role option's holder in its detail line.
+test("the mention picker draws each agent with its state and no link", async () => {
+  const listAgents = spyOn(api, "listAgents").mockResolvedValue([planner]);
+  const queryClient = new QueryClient({
+    defaultOptions: { mutations: { retry: false }, queries: { retry: false } },
+  });
+  const view = render(
+    <MemoryRouter future={{ v7_relativeSplatPath: true, v7_startTransition: true }}>
+      <QueryClientProvider client={queryClient}>
+        <MentionComposer
+          onClose={() => {}}
+          onSent={() => {}}
+          owner={{ issueKey: "CORE-1", kind: "issue" }}
+        />
+      </QueryClientProvider>
+    </MemoryRouter>
+  );
+
+  try {
+    fireEvent.change(screen.getByLabelText<HTMLTextAreaElement>("Comment"), {
+      target: { value: "@" },
+    });
+    const listbox = await screen.findByRole("listbox", { name: "Mention suggestions" });
+    const session = await within(listbox).findByRole("option", { name: "Planner" });
+    const role = within(listbox).getByRole("option", { name: "legion-planner" });
+    for (const option of [session, role]) {
+      const agent = option.querySelector('[data-agent-name="A"]');
+      expect(agent?.textContent).toBe("Planner");
+      await waitFor(() => expect(agent?.getAttribute("data-agent-state")).toBe("running"));
+    }
+    expect(role.textContent).toContain("Planner · /workspaces/planner");
+    expect(listbox.querySelector("a")).toBeNull();
+  } finally {
+    view.unmount();
+    listAgents.mockRestore();
+  }
+});
+
 test("two accepted mentions receive one comment-level delivery mode", async () => {
   const createComment = spyOn(api, "createComment").mockResolvedValue(createdComment);
   const { view } = renderComposer({ agents: [planner] });

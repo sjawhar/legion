@@ -251,7 +251,7 @@ test("the agent transcript renders the viewer's turn, another sender's turn and 
       content: [{ text: FIXTURE, type: "text" }],
       createdAt: new Date("2026-09-10T00:00:01Z"),
       id: "u2",
-      metadata: dispatchMetadata({ author: "Planner" }),
+      metadata: dispatchMetadata({ author: { actor: { id: "bob", kind: "user" } } }),
       role: "user",
     },
     {
@@ -675,7 +675,7 @@ describe("a Dispatch picture on every surface", () => {
         content: [{ text: PICTURE, type: "text" }],
         createdAt: new Date("2026-09-10T00:00:02Z"),
         id: "u2",
-        metadata: dispatchMetadata({ author: "Planner" }),
+        metadata: dispatchMetadata({ author: { actor: { id: "bob", kind: "user" } } }),
         role: "user",
       },
       {

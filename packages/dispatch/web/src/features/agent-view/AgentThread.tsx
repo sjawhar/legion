@@ -38,6 +38,7 @@ import {
   textPrimaryOnSurface,
   textSecondaryOnCanvas,
 } from "../../theme/classes";
+import { AgentName } from "../refs/AgentName";
 import { MarkdownBody } from "../refs/MarkdownBody";
 import { ErrorBoundary } from "../shell/ErrorBoundary";
 import { readDispatchMarks, turnKey } from "./dispatch-marks";
@@ -127,7 +128,8 @@ function UserMessage(): ReactNode {
   // A message someone other than the viewer sent the session, stored or taken as its own turn
   // (AgentRuntimeThread names them): it sits on the session's side of the thread with its author,
   // never styled as the viewer's own. Both are text a person or an agent wrote (a broadcast, a
-  // targeted message, a reply), so both render as Markdown, as the session's own turns do.
+  // targeted message, a reply), so both render as Markdown, as the session's own turns do. The
+  // mark is the very object the metadata holds, so this selector's result is stable.
   const author = useAuiState((state) => readDispatchMarks(state.message.metadata.custom).author);
   const turn = useTurnKey();
   if (author !== undefined) {
@@ -137,7 +139,10 @@ function UserMessage(): ReactNode {
         data-message-id={turn}
         data-testid="agent-message-other"
       >
-        <p className={`mb-1 text-xs font-semibold ${textSecondaryOnCanvas}`}>{author}</p>
+        <p className={`mb-1 text-xs font-semibold ${textSecondaryOnCanvas}`}>
+          <AgentName actor={author.actor} inline />
+          {author.issue === undefined ? null : ` · ${author.issue}`}
+        </p>
         <MessagePrimitive.Parts components={{ Text: MarkdownText }} />
       </div>
     );
