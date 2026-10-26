@@ -9,8 +9,8 @@
   state issue view gains `waitingOn`, present only in that phase: `kind: "ask"` with the question's
   `ask`, or `kind: "gate"` with `gateVersion` and `artifactId` (in the schema now so the gate waits
   of a later daemon need no plugin bump; a contract-40 daemon writes only `ask`), `since`, when the
-  wait began, and `answeredAt` with `answeredBy` (`LEGION_WAIT_ANSWERS`, the act that answered it)
-  once a person answered, the two always together. `LEGION_PHASE_BACKWARD_TARGETS` is unchanged:
+  wait began, and `answeredAt` with `answeredBy` (`LEGION_WAIT_ANSWERS`, the act that answered it,
+  not always a person's) once the wait was answered, the two always together. `LEGION_PHASE_BACKWARD_TARGETS` is unchanged:
   no backward move reaches the new phase. A contract-39 reader refuses a state carrying either
   addition.
 

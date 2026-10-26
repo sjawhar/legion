@@ -48,8 +48,9 @@ const RoleTopicPrefix = "notifications.role."
 // (admit.Admission.wakeController and its callers say when; the tick alone carries
 // `openCapabilities`, the deployment capabilities with no decision,
 // admit.Admission.ReportCapabilities). The controller takes no issue for `slot-free`, `todo` or
-// `awaiting-person`: it names the free slots in its summary and report, and only a person hands
-// Legion work (skill://legion-controller, "Free slots"). It sits among the issue topics, where no
+// `awaiting-person`: it names the free slots in its summary and report, and work reaches Legion
+// only when a person hands it over or a role reports a clear defect the controller files
+// (skill://legion-controller, "Free slots"). It sits among the issue topics, where no
 // issue key (`[A-Z][A-Z0-9]*-[0-9]+`) can be `controller`, and the plugin's controller subscribes to it
 // while it holds the controller role (legionControllerNoticeSubject,
 // packages/contracts/src/subject.ts). project is the project token panes are told as LEGION_PROJECT

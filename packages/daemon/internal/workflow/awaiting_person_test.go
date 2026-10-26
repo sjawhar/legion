@@ -374,6 +374,37 @@ func TestAnOffGateStillTellsAnOlderChangesRequest(t *testing.T) {
 	}
 }
 
+// A changes request a read gives no sequence answers no wait, even once the wait's start carries
+// the hand-back's time: placement is by sequence alone (unplaceable). Its sequenced live event then
+// answers the wait, and the architect is told the review once, by the resume task, with no notice
+// beside it. (Round 2, the standard, adversarial and outside-whole P3-1.)
+func TestAnUnsequencedChangesReadThenItsLiveEventTellsTheReviewOnce(t *testing.T) {
+	t0 := time.Date(2026, 10, 26, 12, 0, 0, 0, time.UTC)
+	pool, apply := askRig(t)
+	root := awaitingRoot(3)
+	root.Awaiting.Since.At = t0
+	seedIssue(t, pool, root)
+	seedQuestion(t, pool, "ask-q", 3)
+	seedGate(t, pool, record.DesignGate{Issue: "LEGION-208", ArtifactID: "artifact-208", LatestVersion: 2})
+	at := t0.Add(time.Minute)
+	apply("read", intake.DispatchArtifact{Key: "LEGION-208", ArtifactID: "artifact-208", Kind: intake.DispatchArtifactChangesRequested,
+		Version: 2, Reason: "say more", Mark: record.EventMark{At: at}})
+	if awaiting := recordedRoot(t, pool).Awaiting; awaiting == nil || awaiting.AnsweredAt != nil {
+		t.Fatalf("awaiting after the unsequenced read = %+v, want it unanswered", awaiting)
+	}
+	apply("live", intake.DispatchArtifact{Key: "LEGION-208", ArtifactID: "artifact-208", Kind: intake.DispatchArtifactChangesRequested,
+		Version: 2, Reason: "say more", Mark: record.EventMark{Seq: 8, At: at}})
+	awaiting := recordedRoot(t, pool).Awaiting
+	if awaiting == nil || awaiting.AnsweredBy != record.AnsweredByChanges {
+		t.Fatalf("awaiting after the live event = %+v, want it answered by the changes request", awaiting)
+	}
+	for _, payload := range noticeRows(t, pool) {
+		if notice, ok := payload.(record.Notice); ok && notice.Kind == "design-changes-requested" {
+			t.Fatalf("notice %+v, want the review told by the resume task alone", notice)
+		}
+	}
+}
+
 // A changes request a read gives no sequence to cannot be placed against a root's wait: it is
 // neither told nor recorded as told, and its own sequenced event decides later.
 func TestAnUnplaceableChangesRequestIsNeitherToldNorRecorded(t *testing.T) {
@@ -494,6 +525,33 @@ func TestANewerVersionAnswersAGateWaitOnlyWhenItFollowsIt(t *testing.T) {
 			}
 			if got := waiting.AnsweredAt != nil && waiting.AnsweredBy == record.AnsweredByVersion; got != tc.answered {
 				t.Fatalf("wait = %+v, answered by the version = %t, want %t", waiting, got, tc.answered)
+			}
+		})
+	}
+}
+
+// A changes request the resume would name though an ask act answered the wait first, placed after
+// the wait began, is likewise no longer recorded as told when the root leaves unresumed; one placed
+// before it, which a notice told, keeps its record. (Round 3, adversarial P3-1.)
+func TestALaterChangesRequestARootNeverResumedForIsNotRecordedAsTold(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		seq     int64
+		cleared bool
+	}{{"placed after the wait began", 7, true}, {"placed before it", 2, false}} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool, apply := askRig(t)
+			root := awaitingRoot(3)
+			answered := time.Date(2026, 9, 23, 0, 0, 0, 0, time.UTC)
+			root.Awaiting.AnsweredAt, root.Awaiting.AnsweredBy, root.Awaiting.AnsweredDetail = &answered, record.AnsweredByAsk, "ask-q"
+			seedIssue(t, pool, root)
+			version := 2
+			seedGate(t, pool, record.DesignGate{Issue: "LEGION-208", ArtifactID: "artifact-208", LatestVersion: 2,
+				ToldChangesVersion: &version, ToldChangesReason: "say more", ToldChangesMark: record.EventMark{Seq: tc.seq}})
+			apply("parked", intake.DispatchIssue{Key: "LEGION-208", Seq: 20, Type: "issue.updated", Status: "backlog", Title: "root", Rank: "U"})
+			gate := recordedGate(t, pool)
+			if gate == nil || (gate.ToldChangesVersion == nil) != tc.cleared {
+				t.Fatalf("gate = %+v, want the told record cleared = %v", gate, tc.cleared)
 			}
 		})
 	}

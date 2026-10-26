@@ -187,7 +187,8 @@ const (
 	// to the agent's turn: a progress note leaves no question with the person, so the architect
 	// looks again.
 	AnsweredByTurn Answer = "turn"
-	// AnsweredByApproval is a person's approval of the root's spec.
+	// AnsweredByApproval is the root's design gate standing open: a person's approval of the
+	// root's spec, or a registration under gates.design: off, where nobody approved it.
 	AnsweredByApproval Answer = "approved"
 	// AnsweredByChanges is a person's changes request on the root's spec, which the gate records
 	// as told with its reason.

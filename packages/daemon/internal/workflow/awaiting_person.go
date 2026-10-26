@@ -77,7 +77,7 @@ func (e *Engine) personAnswered(ctx context.Context, tx pgx.Tx, root record.Issu
 	if root.Awaiting.Ask == ask {
 		answer, by = "workflow: an architect ask was answered", record.AnsweredByAsk
 	}
-	if !mark.After(root.Awaiting.Since) {
+	if !placedAfter(root, mark) {
 		e.logOnCommit(ctx, "workflow: a person's act recorded before the wait began answers no wait", "issue", root.Key,
 			"ask", ask, "act_seq", mark.Seq, "since_seq", root.Awaiting.Since.Seq)
 		return nil

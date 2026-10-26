@@ -261,9 +261,12 @@ legion state --config legion.yaml --json |
 ```
 
 `waitingOn.ask` is the question it waits on, and `since` Dispatch's time of the hand-back the wait
-began at. `answeredAt` means a person answered: the root is at the front of `admission.waiting`
-and resumes itself at the next free slot. Do not park it or start it by hand. Without `answeredAt`,
-check, in order:
+began at. `answeredAt` means the wait was answered, and `answeredBy` names how — not always by a
+person: `closed` (a session or anyone else who is not a person closed the question), `turn` (a
+session handed it back to the agent's turn), `retracted` (Dispatch's settlement), and `approved`
+also when the spec's gate stands open with nobody's approval under `gates.design: off`. The root is
+at the front of `admission.waiting` and resumes itself at the next free slot. Do not park it or
+start it by hand. Without `answeredAt`, check, in order:
 
 1. **The question is still with the person.** `dispatch read <KEY>` shows the root's asks. A
    person's answer, resolution or reply on any ask of the root wakes it, whichever ask the wait
