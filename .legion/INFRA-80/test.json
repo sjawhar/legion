@@ -2,35 +2,44 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-80",
-  "completed": "2026-10-26T04:36:02Z",
-  "round": "tester round 16, generation 4: the implementer's answer (4bee7ec164de, handoff 752a8e4edf9e) to round 15's finding at e4ebfb39daa4; skill text only",
+  "completed": "2026-10-26T05:29:15Z",
+  "round": "tester round 17, generation 4: the round-14 skill fixes (ae3f92ecd6c7) and the podkind.go refactor (71705421a303, handoff 5f066bc79c76) together, as the architect asked when it stopped round 16's successor",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran it myself at 752a8e4edf9e: `cd packages/pi-legion && bun test src/skills-guard.test.ts` → 12 pass 0 fail; `cd packages/claude-envoy && bun run check-dist` → 'dist/ and legion/ match a fresh build'; the red test's file shows 0 changes against my commit 585076d4e409; grep over every tracked file outside .legion finds workspace-recovered only in api/version.go (the removal's record), the red test, and scripts/e2e/README.md and stage4b-sandbox-tree.sh (which assert its absence). Negative control performed myself: skills/legion-worker/SKILL.md restored from e4ebfb39daa4 → 11 pass 1 fail naming skills/legion-worker/SKILL.md; put back afterwards."
+    "how": "Drove the same claim independently rather than re-running the goldens (CI's lane): a throwaway test in package sandbox rendered every manifest case (root, worker, resume, controller, controller-resume, root-enrolled) under 3 storage classes x 3 disk sizes, as the created Sandbox, the Sandbox after the Running patch, and the pod template — 162 files — once with the code at 71705421a303 and once with podkind.go and manifest.go restored from 58d8060c4a43 (the pre-refactor code); diff -r: identical. Confirmed no golden or testdata file changed between 58d8060c4a43 and 5f066bc79c76, the four _test.go edits are comment-only, and no reference to claimTemplates or diskSource remains in packages/daemon. Re-ran the implementer's negative-control shape myself: with controllerPod.disk's ClaimName given a '-x' suffix the same render differs from the pre-refactor code in 54 files, exactly the controller and controller-resume cases (created, running, pod) under all nine disk configurations. The throwaway file and every temporary edit were removed; go.work.sum, touched by go, was restored."
   },
   "failures": [],
   "failed": 0,
   "proof": [
     {
-      "criterion": "Spec acceptance 5 (dispatch://INFRA-80 v40): the recovery marker is gone from the tree, so no skill a Legion pane loads sends a resumed agent to it (round 15's finding)",
-      "surface": "the skills the @sjawhar/pi-legion plugin ships, staged as its prepack stages them (scripts/pi-plugin-prepack.sh --stage-skills @sjawhar/pi-legion <dir>), and pi-legion's skills guard over those staged skills and the daemon's prompts",
-      "command": "bash scripts/pi-plugin-prepack.sh --stage-skills @sjawhar/pi-legion $TMPDIR/infra80-pack/skills && grep -o 'After a `Your workspace was recreated…` message.*' .../legion-worker/SKILL.md; cd packages/pi-legion && bun test src/skills-guard.test.ts",
-      "observed": "the shipped step 1 now ends 'After a `Your workspace was recreated…` message, anything unpushed is gone, and no file in the workspace says so.', which matches the notice the plugin sends (packages/pi-legion/src/workspace-recreated.ts:34-35, 'anything you had not pushed is gone'); the guard runs 12 pass 0 fail, the red test 'no skill or prompt sends an agent to the workspace recovery marker, which nothing writes' included",
-      "headSha": "752a8e4edf9ef0baa390374228712a32395bc607",
-      "negativeControl": "skills/legion-worker/SKILL.md restored from e4ebfb39daa4 (main's 'read .legion/<issue>/workspace-recovered.json too, once'): the guard runs 11 pass 1 fail, received [\"skills/legion-worker/SKILL.md\"]"
+      "criterion": "Architect's condition for the podkind.go refactor: one podKind method returns the claim templates and the disk's source, with no behaviour change — the manifests the runtime sends to Kubernetes stay byte-identical and no golden is updated",
+      "surface": "the Sandbox runtime's manifest builder as the daemon calls it on a launch (sandboxManifest, the relaunch's Running patch via podTemplate), for both pod kinds, rendered to JSON outside the golden fixtures' single disk configuration",
+      "command": "throwaway packages/daemon/internal/runtime/sandbox/zz_infra80_tester_dump_test.go: for storageClass in {standard-rwo, premium-rwo, x} and volumeSize in {1Gi, 50Gi, 73Gi}, for every manifestCases entry, JSON-encode r.sandboxManifest(l), manifestOf(t, r, spec) and r.podTemplate(l); INFRA80_DUMP_DIR=<dir> CGO_ENABLED=0 go test ./internal/runtime/sandbox/ -run '^TestINFRA80TesterDump$' at 71705421a303, then again with jj restore --from 58d8060c4a43 of podkind.go and manifest.go; diff -r old new",
+      "observed": "162 files each side; diff -r prints nothing (IDENTICAL). jj diff 58d8060c4a43..5f066bc79c76 on testdata/**: 0 files; the _test.go changes are five comment lines; grep for claimTemplates|diskSource over packages/daemon *.go: 0 hits",
+      "headSha": "71705421a303142106f80a5d27bb8d844b376309",
+      "negativeControl": "controllerPod.disk's ClaimName temporarily IssueClaimName(l.spec.Claim)+\"-x\": 54 of 162 files differ from the pre-refactor render, all and only controller_{created,running,pod} and controller-resume_{created,running,pod} across the nine disk configurations; restored afterwards"
     },
     {
-      "criterion": "Smoke at the fix head: a legion built here refuses the file session store at load and accepts the database stores",
-      "surface": "the real legion CLI built with CGO_ENABLED=0 go build ./cmd/legion at 752a8e4edf9e (no Go file changed since 8867bd5d67a1), against deploy/kubernetes/daemon/legion.yaml.example with stub 0600 token files, a stub kubeconfig (context legion-daemon) and LEGION_POSTGRES_DSN set",
-      "command": "legion start --config <file> --check-config for the example (postgres), cloudsql-iam with session_database, session_store: pvc, and session_store omitted",
-      "observed": "postgres and cloudsql-iam: 'Config OK: project=WIDGETS' exit 0; pvc and omitted: exit 1 'runtime.kubernetes.session_store must name a store that keeps sessions in a database, and is required (INFRA-80)…'",
-      "headSha": "752a8e4edf9ef0baa390374228712a32395bc607",
+      "criterion": "Review round 14's finding: the shipped skills say a pass or fail takes the issue's Sandbox with its pod and disk for a root as for a child, and acceptance.md's child-closed bullet points to merge-gate.md instead of restating it",
+      "surface": "skills/legion-worker/references/merge-gate.md and skills/legion-architect/references/acceptance.md as the plugins ship them, against the daemon code they describe",
+      "command": "read merge-gate.md:254-284 and acceptance.md:122-125 at 5f066bc79c76 against packages/daemon/internal/workflow/check.go:283-302 (closeCheck), internal/daemon/outbox.go:456-468 (the IssueSuspend executor) and internal/runtime/sandbox/issue_suspend.go:24-65 (SuspendIssue); grep -rnE 'Sandbox and volume|volume are released|volume kept|session and volume' over skills/, the claude-envoy copy and the daemon prompts; cd packages/pi-legion && bun test src/skills-guard.test.ts; cd packages/claude-envoy && bun run check-dist",
+      "observed": "closeCheck enqueues record.IssueSuspend for every issue not back in the workflow with no root/child branch, and SuspendIssue sets the Sandbox Suspended, waits for the pod to go and deletes the Sandbox, so merge-gate.md:282-284 is true; acceptance.md's bullet names the five retired claims and the running implementer and points to merge-gate.md 'The production check after the close', whose lines 254-278 cover pending with and without a queued wake, a look that reports nothing, and the bound. Grep: 0 hits. Guard 12 pass 0 fail; check-dist 'dist/ and legion/ match a fresh build'",
+      "headSha": "5f066bc79c7649b49c44c8d75dbdea71e8dd89e2",
+      "negativeControl": "the same grep at 152c849ca282 finds merge-gate.md's 'for a child, the issue's Sandbox and volume are released', the sentence the review named false"
+    },
+    {
+      "criterion": "Smoke at this head: a legion built here refuses the file session store at load and accepts the database store",
+      "surface": "the real legion CLI built with CGO_ENABLED=0 go build ./cmd/legion at 5f066bc79c76, against deploy/kubernetes/daemon/legion.yaml.example with stub 0600 token files, a stub kubeconfig (context legion-daemon) and LEGION_POSTGRES_DSN set",
+      "command": "legion start --config <file> --check-config for the example (postgres), session_store: pvc, and session_store omitted",
+      "observed": "postgres: 'Config OK: project=WIDGETS' exit 0; pvc and omitted: exit 1 'runtime.kubernetes.session_store must name a store that keeps sessions in a database, and is required (INFRA-80)…'",
+      "headSha": "5f066bc79c7649b49c44c8d75dbdea71e8dd89e2",
       "negativeControl": "session_store: pvc and the omitted key, each refused with exit 1 and the INFRA-80 line"
     }
   ],
-  "ci": "At 752a8e4edf9e (the code push's head), read without waiting: Tests 40269736377 (lint, typecheck, test) queued, PR Title 40269780681 queued (an earlier PR Title 40269736369 cancelled), Worker Image 40269736372 pending, Docs 40269736379 and Legion Envoy and Contracts 40269736381 queued. Nothing concluded from unsettled lanes; the daemon reads their settlement.",
+  "ci": "At code head 71705421a303 (5f066bc79c76 carries skip-checks), read without waiting: Tests 40273842467 (lint, typecheck, test), PR Title 40273842554, Worker Image 40273842423, Docs 40273842385 and Legion Envoy and Contracts 40273842537 all queued. At the previous code head 58d8060c4a43 the required lanes settled success (lint 05:05:30Z, typecheck 05:06:32Z, pr-title 05:10:54Z, test 05:15:06Z), while Worker Image run 40270907952 failed in docker/setup-buildx-action with 'unknown blob', a runner/registry failure before any build step, not this change; its run at 71705421a303 is the one the live Stage 4a run needs.",
   "notRun": [
     "The live Stage 4a run (scripts/e2e/stage4a-sandbox-runtime.sh) on the cluster: it cannot run from a pod; the architect arranges it from the devbox. Not run by me and not recorded as passing.",
-    "Stage 4b has run at no head."
+    "Stage 4b has run at no head.",
+    "The rendered manifests were not applied to a kube-apiserver this round: the render is byte-identical to the pre-refactor code's, which earlier rounds applied to a real API server against the pinned CRD."
   ]
 }
