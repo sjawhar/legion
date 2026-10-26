@@ -179,6 +179,10 @@
 
 ### Added
 
+- The plugin ships a fifth skill, `asd-ste100`: the ASD-STE100 rules (Simplified Technical
+  English) for text a reader must not misread, which a session reads before it writes text a
+  person reads. It is Legion's copy of the MIT-licensed `danyuchn/asd-ste100-skill` at 32511c69,
+  with its licence and without its linter.
 - `dispatch_read` takes `events` (the issue's last N events) and `all_events` (every one) for an
   issue read and its `dispatch://KEY/log`, which list the last 10 without either; the `dispatch`
   command spells them `--events N` and `--all-events`. Both together, or either beside a read
