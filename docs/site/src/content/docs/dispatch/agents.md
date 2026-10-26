@@ -76,9 +76,11 @@ browser asks you to confirm before you leave or reload the page.
 
 A message a reload brings back is yours alone, and only for a while. It belongs to the person who
 pressed it: if someone else signs in at that browser, in this tab or another, it is dropped unsent.
-If your sign-in lapses, nothing is lost: the page stops trying, keeps every message, and sends them
-on once you sign in again. Signing out asks first — **Sign out and discard 2 unsent changes?**, each
-one listed — and drops them in every tab only if you confirm. And a tab reopened more than five
+If your sign-in lapses, nothing is lost: the page stops trying, keeps every message, lists them on
+the sign-in page, and sends them on once you sign in again. Signing out asks first — **Sign out and
+discard 2 unsent changes?**, each one listed, your other Dispatch tabs' among them — and drops them
+in every tab only once you confirm and Dispatch has signed you out; nothing is sent meanwhile, and a
+sign-out that fails leaves every message where it was. And a tab reopened more than five
 minutes later does not send it behind your back — it comes back as **Not sent: this page was closed
 before Dispatch confirmed it. Retry asks again under the same key, so it is delivered at most once
 if you retry within 24 hours of the first try. After that Dispatch no longer knows the key: a Retry

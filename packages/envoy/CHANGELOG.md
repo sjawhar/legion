@@ -1453,6 +1453,14 @@
 
 ### Fixed
 
+- An issue's `updated_at` never moves backwards (INFRA-258). A `PATCH /api/v1/issues/{key}`, a
+  claim and a release stamped it with `now()`, the moment their transaction began, before they
+  took the issue's locks, so one that waited behind another write committing on the issue (an
+  event append, another `PATCH`) overwrote that write's later stamp with an earlier one, and the
+  dashboard, whose issue cache keeps the newest `updated_at` it has seen, dropped the waiting
+  write's answer and every read after it. Each now stamps the later of the stored value and its
+  own statement's moment (`greatest(updated_at, clock_timestamp())`); an event append already kept
+  the later of the stored value and the event's time.
 - Dispatch answers every JSON timestamp in UTC, whatever zone its process runs in: the database
   pool scans `timestamptz` in UTC and a time the server makes itself is taken in UTC, where a
   server on a host in another zone answered that zone's offset (`…T08:11:37-07:00`) and a reader

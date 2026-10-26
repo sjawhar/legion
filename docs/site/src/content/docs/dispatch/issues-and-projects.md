@@ -172,8 +172,9 @@ Every change you make — a status, a priority, an assignee, labels, a pin, an a
 comment, a comment resolved, an upload — is sent under a name of its own, and Dispatch makes it
 once under that name however many times the page asks. So a change tried again after a lost
 answer, a timeout or an outage lands exactly once, and the page keeps asking while your connection
-is down, and again at once when Dispatch is reachable again; while it keeps answering with an
-error, the tries spread out, up to 30 seconds apart. A change Dispatch is slow to finish is waited
+is down, and again at once when Dispatch is reachable again; while Dispatch keeps answering the
+change with an error, or the change keeps failing on its way while the rest of Dispatch answers,
+the tries spread out, up to 30 seconds apart. A change Dispatch is slow to finish is waited
 for and made once, and an upload still going up is never cut off, however long a slow link takes.
 
 A corner of the screen accounts for the ones still out: **Saving 2 changes…**, and once one has
@@ -191,14 +192,21 @@ before you leave or reload the page, and a change a reload interrupted, an uploa
 is picked up again when the page comes back, in the order you made them, for the person who made
 it and for nobody else: a change pending when someone else signs in at that browser, in this tab
 or another, is dropped unsent. If your sign-in lapses, your changes wait, and go out once you sign
-in again; signing out asks you first, listing each change it would discard. One interrupted more
+in again: the sign-in page lists them under **Kept until you sign in again as …**, a refused one
+with **Discard**, and its sign-in link leaves the page without asking. Signing out asks you first,
+listing each change it would discard, in this tab and in your other Dispatch tabs (when a tab does
+not answer at once, it says it would also discard **any unsent changes in your other Dispatch
+tabs**), and discards nothing until Dispatch has signed you out: meanwhile none of your changes
+goes out in any tab, and if the sign-out fails you stay signed in with every change, told **The
+sign-out did not go through.** One interrupted more
 than five minutes ago is not sent on its own: the corner lists it as **Not saved: …** with
 **Retry** and **Discard**. A Retry of a stopped or interrupted change asks again under its first
 name, so it is saved at most once if you retry within 24 hours of the first try; after that
 Dispatch no longer knows the name, and the change may be made twice. The corner says so.
 
 A closed issue takes no upload: the Artifacts tab's **Upload** says **This issue is closed. Reopen
-it to upload.** and picks no file, and a file dropped on it is ignored.
+it to upload.** and picks no file, no key opens a file picker there, and a file dropped on it is
+ignored.
 
 Now and then Dispatch makes a change but its answer is lost on the way back. The change is made;
 the page says so (for example **The issue “…” was made, but Dispatch lost its answer, so it may
