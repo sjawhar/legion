@@ -2036,8 +2036,9 @@ Every Dispatch write has one keyed path (INFRA-258, after the IETF `Idempotency-
 Google AIP-155). A caller names the intent behind a `POST` or `PATCH` with the request header
 `Idempotency-Key` (`contracts.IdempotencyKeyHeader`), the same on every retry of that intent and
 new for every new one: the dashboard mints one per press and the agents' client one per command,
-and both retry a failed fetch, a timeout, a 5xx, a 429 and a `409 KEY_IN_FLIGHT` under it, none of
-which says whether the first attempt ran. The key is optional on every route, and no route
+and both retry under it by one rule (`retriesUnderKey` in `packages/contracts`): a failed fetch,
+an attempt silent too long, a 5xx, a 408, a 429 and a `409 KEY_IN_FLIGHT`, none of which says
+whether the first attempt ran. The key is optional on every route, and no route
 requires it; a write without one runs as it always did, unkeyed, logged at DEBUG only, since the
 Legion daemon's outbox and scripts send such writes. `PUT` and `DELETE` are idempotent already and
 take no key. A key is 1 to 128 (`IDEMPOTENCY_KEY_MAX`) letters, digits, `.`, `_`, `:` and `-`,
@@ -2053,12 +2054,30 @@ method, the route pattern, its path values, the query, the media type and the bo
 body with its boundary masked, since a client mints a boundary per attempt), so a repeat is told
 from a reuse:
 
+- The layer first reads the body, spooling at most the route's own limit (`keyedBodyLimit`: an
+  upload's file and a megabyte of fields for the three upload routes, `keyedUploads`, 26 MiB;
+  `maxJSONRequestBytes`, 1 MiB, for every other); a body past it runs unkeyed and its route
+  refuses it. A body the client did not finish sending is `400 REQUEST_BODY_UNREADABLE`, and a
+  spill Dispatch could not write (`keyedSpillError`: a full disk, a temporary directory it cannot
+  write) is a 5xx with the key echoed, Dispatch's own failure, which the client asks again.
 - The row is inserted in flight, in a statement of its own, before the handler runs. A repeat that
   finds it answers from it instead. A different request under the key is `422 KEY_REUSED`, whose
-  message names the method and path that used it; nothing runs. A first request still running,
-  inside the 60 s lease (`IDEMPOTENCY_LEASE_MS`), is `409 KEY_IN_FLIGHT` with `Retry-After: 1`,
-  which a client asks again after. A finished one is replayed: its stored status, content type
-  and body, with `Idempotency-Replayed: ?1`, and the handler does not run again.
+  message names the method and path that used it; nothing runs. A first request still running is
+  `409 KEY_IN_FLIGHT` with `Retry-After: 1`, which a client asks again after. A finished one is
+  replayed: its stored status, content type and body, with `Idempotency-Replayed: ?1`, and the
+  handler does not run again.
+- The handler finishes whatever its client does: it runs on the request's context with the
+  client's cancellation taken off (`context.WithoutCancel`), bounded by `keyedHandlerLimit` (ten
+  minutes, past which its work rolls back and the key is released as for a 5xx) and counted in the
+  server's background wait (`detached`, a `backgroundWork`), so a shutdown lets it finish as it
+  lets a delivery finish. While it runs it renews its key's lease (`IDEMPOTENCY_LEASE_MS`, 60 s)
+  every `keyedLeaseRenewal` (20 s, `renewRequestKeyLease`), each renewal a statement of its own, so
+  a client that gave up and asks again is answered `409 KEY_IN_FLIGHT` for as long as the first run
+  lives and then its stored answer, and only a run whose process died is taken over. A handler cut
+  off with its client would roll its transactions back and leave every retry to start over, so a
+  write that takes the server longer than the client waits could never land. Every handler that
+  reads `r.Context()` for its work gets this detached context, the architecture importer's `Sync`
+  among them.
 - The handler answers on a writer that holds its answer (`keyedAnswer`) until the row has it. A
   2xx or a 4xx is stored and the row finished in one statement; a 5xx, a 401 (a session that
   lapsed mid-write), a 408, a 429 and a panic release the key, so the next attempt runs the
@@ -2094,21 +2113,45 @@ from a reuse:
   is resumed first, then what it made is read again, under `201` and `Idempotency-Replayed: ?1`.
   Four routes do: the single-session send and the broadcast (below), the issue message
   (`POST /api/v1/issues/{key}/messages`), and a comment (`POST /api/v1/issues/{key}/comments` and
-  `POST /api/v1/artifacts/{id}/comments`), whose replay resumes every mention whose one attempt
+  `POST /api/v1/artifacts/{id}/comments`), whose replay resumes every mention whose latest attempt
   is pending under a lapsed claim, under that attempt's own number (so its dedupe key is the same
   and the stream drops a frame that landed), then answers the comment with its mentions and
   deliveries in the first answer's shape, its `advice` and `ask_waiting_on` kept and every other
   member read fresh; the issue message does the same. The layer replays the answer; the delivery
-  code decides what is still owed.
+  code decides what is still owed. A repeat only resumes owed deliveries sooner: the delivery sweep
+  ("The delivery sweep", below) makes each of them whether anyone asks again or not.
+
+The delivery sweep (`internal/dispatch/api/delivery_sweep.go`) finishes the deliveries a dead
+process left. Every write that delivers to sessions - a send to one session, the live view's model
+and thinking switch, a broadcast's recipients, an issue message to a session, a comment's and a
+document comment's mentions, and a retry from an agent card - claims each attempt before its send
+and settles it after, on a context its client's cancellation does not reach. A process that dies
+between the two leaves the attempt pending under a claim nobody holds. Every pass of the
+maintenance loop (`RunSuggestionOutcomeSweep`, once a minute, the `ResumeDeliveries` that
+`api.Register` and `routes.New` return in `api.Background` beside `Wait`) calls
+`resumeOwedDeliveries`, which sends, `broadcastDeliveryWorkers` at a time and at most
+`deliverySweepBatch` (100) of each kind a pass, every attempt that is its message's or its
+mention's latest, still pending, its claim lapsed (`claimLapsed`, a minute), opened over a minute
+ago and inside `DeliveryDuplicateWindow`, under its own attempt number; and the first attempt of a
+keyed send whose process died between committing its message and opening that attempt, found by its
+key's recovery point once the key's holder is gone. Of two senders that find one attempt owed - the
+sweep and a repeat, or two processes' sweeps - the one that claims it sends and the other sends
+nothing.
 
 Every answer the layer judged echoes the key back (`Idempotency-Key: <key>`) - not the
 `400 IDEMPOTENCY_KEY_INVALID`, nor a request whose caller it could not resolve, nor one whose body
-is past the largest any route reads (26 MiB), each of which runs unkeyed - and `/healthz` answers
+is past its route's limit, each of which runs unkeyed - and `/healthz` answers
 `idempotency_keys: true` on every build that judges the header, a fact of the binary
-rather than of the probe. Together they are how a client tells a Dispatch that runs this layer
-from one that ignores the header and would run a retried write a second time: the agents' client
-resends only against a Dispatch it has seen answer with the echo, or whose `/healthz` it has read
-(`packages/envoy-client/README.md`).
+rather than of the probe, so its `503` carries it too. Together they are how a client tells a
+Dispatch that runs this layer from one that ignores the header and would run a retried write a
+second time: the agents' client resends only against a Dispatch whose answer carried the echo, or
+whose `/healthz` said so, in the last five minutes (`packages/envoy-client/README.md`).
+
+With `DISPATCH_TEST_HOOKS=1`, `POST /api/v1/writes/_test/slow` `{method, path, delay_ms}`
+(`slow_write_hook.go`) makes every keyed run of that method and exact path wait `delay_ms` on its
+handler's context once its key is claimed; a context that ends during the wait answers
+`503 SLOW_WRITE_CUT_OFF` and the handler never runs. The browser suite drives a write Dispatch is
+slow to finish with it.
 
 A key is kept 24 hours (`IDEMPOTENCY_KEY_TTL_MS`): the suggestion-outcome sweep's pass deletes
 every older row (`sweepRequestKeys`), a row a dead process left in flight with it, and a repeat
@@ -2127,8 +2170,8 @@ session, never by a human. A human may also create an issue-less, session-target
 `Idempotency-Key` header ("Keyed Dispatch writes" above). Its write commits the message and its
 mode as the key's recovery point (`agentMessageRecovery`), so a repeat under the key is answered
 by `replayAgentMessage` however the first request ended: `sendHeldMessageOn` first puts the
-message on its way when it is owed (no attempt at all, or its only attempt pending under a claim
-that has lapsed), then the message is read as the list below reads it, with its deliveries as they
+message on its way when it is owed (`owedMessageAttempts`: no attempt at all, or its latest
+attempt pending under a claim that has lapsed), then the message is read as the list below reads it, with its deliveries as they
 stand, under the send's own `201` and `Idempotency-Replayed: ?1`. It is answered from the database
 before the listener is read, so a repeat never fails because the listener is down; a different
 request under the key is `422 KEY_REUSED`. `GET
@@ -2241,12 +2284,15 @@ reachable recipient is `400 BROADCAST_EMPTY` and writes nothing. The send answer
 as the messages are committed and delivers behind the request, `broadcastDeliveryWorkers` (four)
 recipients at a time, on a context detached from the request's (`context.WithoutCancel`), each
 worker with a tracking mark of its own (`store.ForConcurrentRead`: the pool's one-connection guard
-is per context, so workers sharing one would refuse each other a connection). That delivery is
-counted in the server's `detachedSends`, which the background wait (`waitBackground`) waits for
-before the pool closes, so a shutdown lets it finish instead of ending it with `Deps.Lifetime`,
-which SIGTERM cancels before the HTTP drain; each recipient is bounded by the listener client's
-receipt timeout instead. A process killed before every recipient settled leaves them owed, for
-the repeat below to resume. Each
+is per context, so workers sharing one would refuse each other a connection): a fan-out to many
+sessions, each bounded by the listener client's receipt timeout, is too long to hold an answer
+for. A single send to one session answers once its own attempt has settled instead
+(`createStoredMessage`), which keeps a person's sends to one session in the order they pressed
+them; a broadcast is not ordered against a later single send to one of its recipients. That
+delivery is counted in the server's background wait (`detached`, which `waitBackground` waits for
+before the pool closes), so a shutdown lets it finish instead of ending it with `Deps.Lifetime`,
+which SIGTERM cancels before the HTTP drain. A process killed before every recipient settled
+leaves them owed, for the delivery sweep, or a repeat (below), to resume. Each
 recipient starts with attempt 1, opened pending and unclaimed in the same transaction as its
 message, which a delivery worker then claims and settles.
 `GET /api/v1/broadcasts` lists the newest sends with recipient and reply counts, and
@@ -2259,15 +2305,14 @@ above); the body's `idempotency_key` of LEGION-446 and its `broadcast_idempotenc
 are gone from the route. The send commits the broadcast and its exclusions, with their reasons,
 as the key's recovery point (`broadcastRecovery`) in the broadcast's own transaction, so a repeat
 under the key is answered by `replayBroadcast` however the first request ended, even while the
-listener is down: `sendOwedBroadcastRecipients` first sends every recipient the broadcast owes
-(`owedBroadcastAttempts`: one with no attempt at all, and one whose single attempt is pending
-under a claim that has lapsed), as `sendHeldMessageOn` does for one session, and leaves a
-recipient whose pending attempt a live claim holds to the sender that holds it; then the
-broadcast is read as `GET /api/v1/broadcasts/{id}` reads it, with the send's own `excluded`,
-under the send's own `201` and `Idempotency-Replayed: ?1`. The answer carries the attempts that
-resume settled rather than the pending rows it found, so a recipient still `pending` is one a live
-sender holds, and the page keeps asking until none is. A different request under the key is
-`422 KEY_REUSED`, and nothing is written.
+listener is down: the broadcast is read as `GET /api/v1/broadcasts/{id}` reads it, every
+recipient's attempts as they stand, with the send's own `excluded`, under the send's own `201` and
+`Idempotency-Replayed: ?1`, answered at once as the send was, while
+`sendOwedBroadcastRecipients` puts every recipient the broadcast still owes on its way behind the
+answer (`owedMessageAttempts`, the rule a single send's repeat, `sendHeldMessageOn`, also reads:
+the first attempt of a message with none, or its latest attempt when that is pending under a
+claim that has lapsed). A different request under the key is `422 KEY_REUSED`, and nothing is
+written.
 
 The event feed retains the targeted `message.created`, `message.delivery`, and `message.answered`
 events for the Conversation card. Issue-less targeted-message events have no issue owner, use

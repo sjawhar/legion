@@ -126,7 +126,13 @@ browser test uses. `POST /api/v1/agents/{id}/stream/_test/publish` (human only, 
 is) feeds the in-memory agent relay the live-view browser rows run against: with no query it
 publishes one frame, `?as=replay` sets what the next agent view is answered with, `?as=responder`
 says whether anyone answers on its control subject, and `?as=drop` ends every open agent view as
-`dropped`, so the page subscribes again and rebuilds from the replay set by then.
+`dropped`, so the page subscribes again and rebuilds from the replay set by then. `POST
+/api/v1/writes/_test/slow` `{method, path, delay_ms}` (any signed-in caller; its body is strict, so
+no `actor`) makes every keyed run of that method and exact request path wait `delay_ms` on its
+handler's own context once its key is claimed, until a call with `delay_ms: 0`: the browser rows
+drive a write Dispatch is slow to finish with it, slow on the server rather than held in the
+browser. A context that ends during the wait answers `503 SLOW_WRITE_CUT_OFF` and the handler never
+runs, so a keyed handler cut off with its client would never land under it.
 
 With NATS configured and the GitHub App private key loaded, startup also runs the webhook
 redelivery sweep (`internal/dispatch/redeliver`, wired in `cmd/dispatch/redeliver.go`). Every
@@ -511,6 +517,7 @@ and `DELETE` take no key.
 | `/api/v1/live/_test/disconnect` | POST | user or bearer, `DISPATCH_TEST_HOOKS=1` only | Close every open `/ws/live` socket with 1012 (service restart); not mounted otherwise. |
 | `/api/v1/live/_test/rotate` | POST | user or bearer, `DISPATCH_TEST_HOOKS=1` only | Close every open `/ws/live` socket with 4001 (`max age`); not mounted otherwise. |
 | `/api/v1/agents/{session_id}/stream/_test/publish` | POST | human only, `DISPATCH_TEST_HOOKS=1` only | Feed the in-memory agent relay: one frame, `?as=replay` what a new agent view is answered with, `?as=responder` whether anyone answers on the control subject, `?as=drop` ends every open agent view as `dropped`, so the page subscribes again and rebuilds from that replay; not mounted otherwise. |
+| `/api/v1/writes/_test/slow` | POST | user or bearer, `DISPATCH_TEST_HOOKS=1` only | `{method, path, delay_ms}`: every keyed run of that method and exact path waits `delay_ms` on its handler's context once its key is claimed (`503 SLOW_WRITE_CUT_OFF` when that context ends first); `delay_ms: 0` removes it; not mounted otherwise. |
 | `/ws/doc/{room}` | GET | user or bearer | Join the Hocuspocus document room. A room whose stored tree is outside the Proof schema admits no connection, a provider's reconnect included: the upgrade completes and closes with code `4409` (reason `DOC_SCHEMA`; `DOCUMENT_SCHEMA_CLOSE_CODE` and `DOCUMENT_SCHEMA_CLOSE_REASON` in `packages/contracts`) before any sync, and the dashboard reads that close as the repair state. The check reads a copy of a resident room taken under its lock, as `/text` reads it, so a healthy room under writes is never refused. An open socket resolves its caller again on every 15 s heartbeat, as `/ws/live` does, and closes once they no longer resolve (a sign-out, a membership the sign-in issuer no longer confirms), so their editor stops receiving and sending the document's edits. |
 | `/ws/live` | GET | user or bearer | One live socket per browser tab. Each `subscribe` names a delivery, `events`, or human-only `agent` view; the socket replies on that subscription id with delivery snapshots/deltas/freshness, `events_start` and events, or agent responder/replay/frame data. An `events` resume is its decimal event id; a delivery resume is its change and revisions; an agent view never resumes. Every quiet socket receives a `heartbeat` every `StreamHeartbeat` (15 s). It closes with 4001 (`max age`) at a random age in [30, 60) minutes, 1012 on restart, 1008 when the caller stops resolving, and 1013 when its hub queue fills. |
 

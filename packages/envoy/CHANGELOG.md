@@ -23,41 +23,62 @@
   `-`, anything else `400 IDEMPOTENCY_KEY_INVALID`. A repeat with the same key and the same
   request, once the first has finished, is answered the first's stored status and body with
   `Idempotency-Replayed: ?1`, and nothing runs again; the same key with a different request is
-  `422 KEY_REUSED`, naming the request that used it; a repeat while the first still runs, inside
-  a 60 s lease, is `409 KEY_IN_FLIGHT` with `Retry-After: 1`. A 5xx, 401, 408 or 429 is not
-  stored, so the next attempt runs the request again, and an answer larger than 1 MiB is replayed
-  as its status with `ANSWER_NOT_KEPT`. Keys belong to the caller's login and are kept 24 hours,
-  in migration `0118_request_keys`'s table, which the suggestion-outcome sweep empties of older
-  rows. A write without the header runs as before. A repeat whose first request committed a write
-  but whose answer was lost (its lease lapsed in flight, or it ended in a 5xx or a panic after
-  committing) is `409 KEY_COMMITTED`, with no `Retry-After`: the write landed and is not run again,
-  and the client reads what it wrote; every transaction a keyed request commits marks the key in
-  that same transaction. `POST /api/v1/me/agent-tokens` keeps no answer under its key, since the
-  answer carries the plaintext token: a repeat of a keyed mint is always `409 KEY_COMMITTED`, never
-  a replay of the token, and mints nothing more.
-  The single-session send, the broadcast, the issue message and both
-  comment routes commit a recovery point with what they made, so a repeat of any of them resumes
-  whatever delivery it still owes (a comment's mentions under their own attempt numbers) and
-  answers what it made as it stands, under the first's `201`, even across a crash between the
-  commit and its answer. The dashboard and the `dispatch` CLI
-  send a key on every write and retry under it. Every answer to a keyed request carries the key
-  back (`Idempotency-Key: <key>`), and `/healthz` answers `idempotency_keys: true` on every build
-  that judges the header, so a client can tell this Dispatch from one that ignores the header and
-  would run a retried write a second time.
+  `422 KEY_REUSED`, naming the request that used it; a repeat while the first still runs is
+  `409 KEY_IN_FLIGHT` with `Retry-After: 1`. A keyed write finishes on the server whatever its
+  client does: its handler runs with the client's cancellation taken off, bounded at ten minutes
+  and counted in the server's background wait, so a shutdown lets it finish, and it renews its
+  key's 60 s lease every 20 s, so a repeat waits on it for as long as it runs and takes the key
+  over only once its process has died. A write the server takes longer to finish than its client
+  waits therefore lands once, where a client giving up used to cancel it and every retry started
+  over. A 5xx, 401, 408 or 429 is not stored, so the next attempt runs the request again, and an
+  answer larger than 1 MiB is replayed as its status with `ANSWER_NOT_KEPT`. Keys belong to the
+  caller's login and are kept 24 hours, in migration `0118_request_keys`'s table, which the
+  suggestion-outcome sweep empties of older rows. A write without the header runs as before. A
+  repeat whose first request committed a write but whose answer was lost (its lease lapsed, or it
+  ended in a 5xx or a panic after committing) is `409 KEY_COMMITTED`, with no `Retry-After`: the
+  write landed and is not run again, and the client reads what it wrote; every transaction a keyed
+  request commits marks the key in that same transaction. `POST /api/v1/me/agent-tokens` keeps no
+  answer under its key, since the answer carries the plaintext token: a repeat of a keyed mint that
+  minted is `409 KEY_COMMITTED` once the first has finished, never a replay of the token, and mints
+  nothing more, while a mint refused with a 4xx commits nothing, so its repeat runs again. The
+  layer reads a keyed body before the handler, at most the route's own limit (26 MiB for the three
+  upload routes, 1 MiB for every other); a larger body runs unkeyed and its route refuses it, and
+  a body Dispatch cannot spool to its temporary directory is a 5xx, which the client asks again.
+  The single-session send, the broadcast, the issue message and both comment routes commit a
+  recovery point with what they made, so a repeat of any of them answers what it made as it
+  stands, under the first's `201`, even across a crash between the commit and its answer. The
+  dashboard and the `dispatch` CLI send a key on every `POST` and `PATCH` and retry under it.
+  Every answer the layer judged carries the key back (`Idempotency-Key: <key>`): not
+  `400 IDEMPOTENCY_KEY_INVALID`, nor a request whose caller it could not resolve, nor one whose body
+  is past its route's limit, each of which runs unkeyed. `/healthz` answers
+  `idempotency_keys: true` on every build that judges the header, its `503` included, so a client
+  can tell this Dispatch from one that ignores the header and would run a retried write a second
+  time. With `DISPATCH_TEST_HOOKS=1`, `POST /api/v1/writes/_test/slow`
+  `{method, path, delay_ms}` makes every keyed run of that method and exact path wait `delay_ms`
+  once its key is claimed (0 removes it), so the browser suite drives a write Dispatch is slow to
+  finish.
 - `GET /auth/whoami` answers `event_head`, the newest committed event id as of the sign-in check
   (INFRA-292). A page's first events subscription on `/ws/live` resumes from it, so a change
   committed between that answer and the socket opening reaches the page instead of being lost
   until something else refreshed it. The sign-in check comes first: a caller who is not signed in
   is `401 NO_IDENTITY` and the head is never read, and a signed-in caller whose head cannot be
   read is `503 EVENT_HEAD_UNAVAILABLE`.
-- A broadcast reaches every recipient across a deploy or a crash (INFRA-258). Each recipient's
-  delivery runs on a context detached from the request's and is registered with the server's
-  background wait, so a shutdown waits for it where the server's lifetime used to cancel it, each
-  recipient bounded by the listener client's receipt timeout; and a repeat under the send's
-  `Idempotency-Key` sends every recipient the broadcast still owes - one with no attempt at all,
-  and one whose single attempt is pending under a claim that has lapsed - before it answers, as a
-  repeated send to one session does. A recipient whose pending attempt a live claim holds is left
-  to the sender holding it.
+- A delivery a process left half-done is finished without anyone asking again (INFRA-258). Every
+  write that delivers to sessions - a send to one session, the live view's model and thinking
+  switch, a broadcast's recipients, an issue message to a session, a comment's and a document
+  comment's mentions, and a retry from an agent card - claims each attempt before its send and
+  settles it after, and its sends run on a context the client's cancellation does not reach,
+  counted in the server's background wait. A process that dies between the two leaves the attempt
+  pending under a claim nobody holds; the maintenance loop's pass, once a minute, sends each such
+  attempt that is its message's or mention's latest, opened over a minute ago and inside the
+  72-hour duplicate window, once its claim has lapsed, under its own attempt number, so the
+  listener drops a frame that did land; it also sends the first attempt of a keyed send whose
+  process died between its message's commit and that attempt. A repeat under the write's key
+  resumes the same attempts sooner. A broadcast answers as soon as its messages are committed, and
+  its repeat as soon as it has read the broadcast, with the recipients it still owes put on their
+  way behind the answer; a send to one session answers once its own attempt has settled, which
+  keeps a person's sends to one session in the order they pressed them. A broadcast is not ordered
+  against a later send to one of its recipients.
 
 - Dispatch's conversation view (`/agents/<id>/live`) shows the model and thinking level an Oh My
   Pi session runs now, from the `settings` frame pi-envoy publishes, before any turn runs on them

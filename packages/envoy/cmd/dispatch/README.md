@@ -21,7 +21,7 @@ below add only what a setting's one line cannot say.
 | `DISPATCH_AGENT_TOKEN` | One value, or several separated by whitespace, so the shared token can rotate with an overlap: write the new value followed by the old one, move every consumer to the new one, then write the new value alone. The first is the current value; the API and the document websocket accept every value, comparing a bearer with each in constant time. Whitespace at either end is ignored; startup refuses an empty entry (two whitespace characters in a row, a CR LF among them) or a repeated one, naming its position, never its value. A request that authenticates with a value after the first logs one WARN line, `dispatch: request authenticated with a previous shared agent token`, with `entry` (the value's position), `address` (the rightmost `X-Forwarded-For` entry, which is the load balancer's view of the caller, or the connection's own address without one), `user_agent` and `path`, at most once per address and User-Agent every 10 minutes, and never a token. Each field keeps its first 256 bytes, and the server remembers up to 10,000 callers; one past that is logged on each request. Callers that share an address and User-Agent share a line, so the log says whether a value on its way out is still in use, not who uses it. |
 | `DISPATCH_SIGNING_KEY` | The HMAC key every session cookie is signed and verified with, and the key the stored refresh tokens' seal is derived from (Identity, below). Unset, each process mints a key of its own in its own data directory (`auth.LoadOrCreateSigningKey`), so a deployment of more than one process sets one value every process is given: with a key apiece, a session minted on one process is refused by the other — every person is signed out by whichever process answers next — and every stored refresh token reads as absent. No process can see another's key, so nothing refuses the boot and `/healthz` cannot report it; it is a precondition of running more than one process, never a check (Running more than one process, below). Rotating it signs everyone out and leaves every stored refresh token unopenable. |
 | `NATS_NKEY_SEED_FILE`, `NATS_NKEY_SEED` | The NATS nkey user Dispatch connects as: a file holding the seed (trimmed; wins), or the seed. A set but unusable value refuses startup naming the variable and path; neither set connects without a credential. |
-| `DISPATCH_TEST_HOOKS` | Set to `1` to mount test-only routes: `POST /api/v1/live/_test/disconnect` closes every open live socket with 1012 (restart), and `POST /api/v1/live/_test/rotate` closes every one with 4001 (`max age`); `POST /api/v1/agents/{session_id}/stream/_test/publish` (human only) feeds the in-memory agent relay, with `as=drop` ending agent views as `dropped`; `POST /api/v1/artifacts/_test/quiesce` closes every live document and waits for settlements; and `POST /api/v1/artifacts/{id}/_test/outside-schema` writes the crafted malformed document e2e uses. Leave unset in every real deployment. |
+| `DISPATCH_TEST_HOOKS` | Set to `1` to mount test-only routes: `POST /api/v1/live/_test/disconnect` closes every open live socket with 1012 (restart), and `POST /api/v1/live/_test/rotate` closes every one with 4001 (`max age`); `POST /api/v1/agents/{session_id}/stream/_test/publish` (human only) feeds the in-memory agent relay, with `as=drop` ending agent views as `dropped`; `POST /api/v1/artifacts/_test/quiesce` closes every live document and waits for settlements; `POST /api/v1/artifacts/{id}/_test/outside-schema` writes the crafted malformed document e2e uses; and `POST /api/v1/writes/_test/slow` `{method, path, delay_ms}` makes every keyed run of that method and exact path wait `delay_ms` once its key is claimed. Leave unset in every real deployment. |
 | `DISPATCH_ASSET_STORE_BUCKET` | Optional bucket of immutable dashboard assets from earlier builds, each stored under its URL path without the leading slash (`assets/<file>`). When a local `/assets/*` file is absent, Dispatch reads the object under that key through the AWS SDK default credential chain, which takes its region and credentials from the task's environment. It reads the whole object, at most 8 MiB, within 3 seconds before it answers, so the browser's own download is not held to that time. It never reads `index.html` or a non-asset path from the bucket. An absent object stays a 404; any other store failure (an error, a short body, an object over the limit) is a 502 with no cache header, logged at ERROR with its key. An object stays in memory until its client has read it, so at most 64 MiB of retained objects are held at once: a request reserves 8 MiB before it asks the bucket, waiting within its 3 seconds for earlier requests to finish, and keeps its object's size until the response is written or the client goes away. A request that cannot reserve room in time, or whose admitted fetch then runs out of that same 3 seconds before the bucket answers, is a 503 with `Cache-Control: no-store` and `Retry-After: 1`, logged at WARN with its key — the bound expiring is never a 502, since the store was only asked too late to answer in time; a room refusal asks the bucket nothing. A client that disconnects while still queued for room logs nothing above a debug line and gets no response. The task role needs `s3:GetObject` on `<bucket>/assets/*` and `s3:ListBucket` on the bucket: without `ListBucket`, S3 answers a missing key with 403, and Dispatch returns 502 where it should return 404. Leave it unset for local-only static serving. |
 | `DISPATCH_DEV_SIGNIN` | Set to `1` to mount `GET /auth/_dev/signin?login=<email>&next=<path>`, which signs any person in by the email it names, with no sign-in pool, so a browser or test harness can be signed in to a local instance. Boot refuses it unless identity is `cookie`, no `DISPATCH_SIGNIN_*` setting is set, the listen address is a loopback IP literal, the dashboard origin (`DISPATCH_SERVER_URL` or `dispatch.serverUrl`) names `127.0.0.1`, `[::1]` or `localhost`, every `DATABASE_URL` host is loopback or a unix socket, `DISPATCH_SIGNING_KEY` is unset, `ENVOY_ALLOW_REMOTE_NATS=1` is not set while NATS is on, `DISPATCH_AGENT_SECRETS_URL`, when set, names a loopback host, `ENVOY_URL` names a loopback host, and a loaded GitHub App private key comes from `DISPATCH_APP_PEM_B64` with `DISPATCH_GITHUB_API_BASE` naming a loopback host, never from the `pem` in `app.json`, where a developer keeps the real App's key: a signed-in session can have the App probe and import any repository it is installed on, and read GitHub through the App's proxy. That key must be a throwaway, as `packages/dispatch/e2e/run-server.sh` generates one, since every App call hands a signed App JWT to whatever listens at that base. While it is on every request must carry the dashboard origin as its `Host` (else `421 HOST_MISMATCH`). The session cookie is signed with a key generated for that process alone, so it is worthless on any other server; what a signed-in session writes to the database is not. It can mint a `dsp_` personal agent token, and its sign-out advances the person's session generation, and every server on the same database honours those rows. Give a dev-sign-in server a database no other server uses: the loopback check makes that likely, not certain, since a loopback address can be a tunnel to another machine's database or a database a second local server also runs on. Any value other than `1` or unset is refused. |
 | `DISPATCH_FILE_STORE_BUCKET` | Files are stored under `files/sha256/<hash>`, one object however often a file is uploaded; a document's markdown never leaves Postgres. The credential chain on Fargate is the task role, which needs `s3:GetObject` and `s3:PutObject` on `files/*` and `s3:ListBucket` on the bucket: without `ListBucket`, S3 answers a missing object 403, which Dispatch reads as a store failure. The SDK must also find a region (`AWS_REGION`, or the shared config); without one the boot is refused. An upload writes its object before its row and before any lock or connection is taken, within 30 seconds, so a store that refuses answers 502 `FILE_STORE_UNAVAILABLE` and writes no version. The version route serves a row still holding bytes from the row and any other from the bucket: it opens the object within 30 seconds, sends its headers and `Content-Length` only then, and streams the body at the client's pace, checking it against the row's hash as it goes; a bucket that does not answer is 502, a row whose object the bucket does not hold is 500 `FILE_MISSING` (a restore from the bucket's versioning, not a retry), a cleared row on a server with the setting unset is 503, and a body that fails or hashes wrong mid-stream is cut off rather than ended as if whole. `/healthz` reports `files`: null when unset, else whether the bucket answered a two-second `HeadBucket`; it never decides `ok`, since a bucket outage must not take the one task, and with it documents and asks, down. `envoy-dispatch backfill-files` moves the rows uploaded before the bucket, and `--restore` is the rollback ("Moving uploaded files to the bucket", below). |
@@ -1079,8 +1079,9 @@ difference (`packages/envoy/scripts/README.md`, "Measuring search on a copy of t
 Every `POST` and `PATCH` route takes an optional `Idempotency-Key` request header naming the
 intent behind the write, the same on every retry of it and new for every new one (the IETF
 `Idempotency-Key` draft; Google AIP-155). The dashboard mints one per press and the `dispatch`
-CLI one per command's write, and both retry a failed fetch, a timeout, a 5xx, a 429 and a
-`409 KEY_IN_FLIGHT` under it. No route requires the header: a write without one runs as it always
+CLI one per command's write, and both retry under it by one rule (`retriesUnderKey` in
+`@legion/contracts`): a failed fetch, an attempt silent too long, a 5xx, a 408, a 429 and a
+`409 KEY_IN_FLIGHT`. No route requires the header: a write without one runs as it always
 did, unkeyed, so a script or the Legion daemon's outbox keeps working. `PUT` and `DELETE` take no
 key, being idempotent already. A key is 1 to 128 letters, digits, `.`, `_`, `:` and `-`, bare or
 double-quoted, and belongs to the caller who sent it: a person's canonical login (from the
@@ -1088,34 +1089,62 @@ dashboard or through a personal token), a service token's subject, or the shared
 Dispatch keeps each key's answer for 24 hours (`request_keys`, migration `0118`; the
 suggestion-outcome sweep deletes older rows).
 
+A keyed write finishes on the server whatever its client does. Its handler runs with the client's
+cancellation taken off, bounded at ten minutes (past which its work rolls back and the key is
+released, as for a 5xx) and counted in the server's background wait, so a shutdown lets it finish
+as it lets a delivery finish. While it runs it renews its key's 60 s lease every 20 s, so a
+client that gave up and asks again is answered `409 KEY_IN_FLIGHT` for as long as the first run
+lives, then that run's stored answer; only a run whose process died is taken over, once its lease
+lapses. A write Dispatch takes longer to finish than its client waits still lands once.
+
 | Status / code | Meaning |
 | --- | --- |
 | The first answer, with `Idempotency-Replayed: ?1` | A repeat under a key whose first request finished, with the same method, route, path values, query, media type and body: the stored status, content type and body, and nothing runs again. |
 | The first status with `ANSWER_NOT_KEPT` | That repeat, when the first answer was larger than the 1 MiB a key keeps: the write ran, and the caller reads what it wrote again. |
-| `409 KEY_IN_FLIGHT`, `Retry-After: 1` | A repeat while the key's first request still runs, inside its 60 s lease; nothing ran, and the caller asks again under the same key. A repeat past the lease takes over a key whose holder died before it committed anything, and runs the request. |
+| `409 KEY_IN_FLIGHT`, `Retry-After: 1` | A repeat while the key's first request still runs (its lease renewed every 20 s while it does); nothing ran, and the caller asks again under the same key. A repeat once the lease has lapsed, 60 s after the last renewal, takes over a key whose holder died before it committed anything, and runs the request. |
 | `409 KEY_COMMITTED`, no `Retry-After` | A repeat whose first request committed a write but whose answer was lost: its lease lapsed in flight, or it ended in a 5xx or a panic after committing (every transaction a keyed request commits marks the key's `committed_at` in that same transaction). The write landed and is not run again; there is no answer to replay, so the caller reads what it wrote. Also a repeat of a keyed `POST /api/v1/me/agent-tokens` that minted, once that first request has finished, answer lost or not: the mint's answer carries the plaintext token, so it is never kept under the key, never replayed, and no second token is minted (a mint refused with a 4xx commits nothing, so its key is released and a repeat runs it again). That is the one route whose answer is not stored. |
 | `422 KEY_REUSED` | The key was already used for a different request; the message names its method and path, and this request did not run. A changed request needs a new key. |
 | `400 IDEMPOTENCY_KEY_INVALID` | The header is not 1 to 128 of those characters, or was sent twice. |
+| `400 REQUEST_BODY_UNREADABLE` | The client did not finish sending the body the layer reads before the handler; nothing ran and the key was not claimed, so the same key may be sent again. |
 
 A 5xx, a 401, a 408 and a 429 are not stored: the key is released and the next attempt runs the
 request again, unless the request had already committed a write, which makes that next attempt
 `409 KEY_COMMITTED` at once. Four kinds of write keep their own recovery point beside the key, so a
 repeat of `POST /api/v1/agents/{session_id}/messages`, `POST /api/v1/broadcasts`,
 `POST /api/v1/issues/{key}/messages`, or a comment (`POST /api/v1/issues/{key}/comments`,
-`POST /api/v1/artifacts/{id}/comments`) resumes whatever delivery is still owed and answers what it
-made as it stands now, under the first's `201`, however the first request ended; a recipient a
-live sender still holds reads `pending`. A comment's or an issue message's replay keeps the first
-answer's `advice` and `ask_waiting_on` and reads every other member fresh. Neither send route takes
-a body `idempotency_key` any more.
+`POST /api/v1/artifacts/{id}/comments`) answers what it made as it stands now, under the first's
+`201`, however the first request ended, and puts on its way whatever delivery a dead process left
+owed; a broadcast's repeat answers at once and sends what it owes behind the answer. A comment's
+or an issue message's replay keeps the first answer's `advice` and `ask_waiting_on` and reads every
+other member fresh. Neither send route takes a body `idempotency_key` any more.
+
+A delivery a dead process left owed is made whether anyone asks again or not. Every write that
+delivers to sessions claims each attempt before its send and settles it after, on a context its
+client's cancellation does not reach. The maintenance loop's pass, once a minute, sends each
+attempt that is still pending under a claim that has lapsed, is its message's or mention's latest,
+and was opened over a minute ago and inside the 72-hour duplicate window
+(`DELIVERY_DUPLICATE_WINDOW_MS`), under its own attempt number, so the listener drops a frame that
+did land; and the first attempt of a keyed send whose process died between committing its message
+and opening that attempt. A send to one session answers once its own attempt has settled, which
+keeps a person's sends to one session in the order they pressed them; a broadcast answers once its
+messages are committed, with its deliveries behind the answer.
+
+The layer reads a keyed body before its handler runs, spooling at most the route's own limit: 26
+MiB for the three upload routes (`POST /api/v1/issues/{key}/artifacts`,
+`/projects/{key}/artifacts`, `/agents/{session_id}/artifacts`), 1 MiB for every other. A body past
+it runs unkeyed and its route refuses it. A body the client did not finish sending is
+`400 REQUEST_BODY_UNREADABLE`; one Dispatch cannot spool to its temporary directory is Dispatch's
+own failure, a 5xx with the key echoed, which the client asks again.
 
 Every answer the layer judged echoes the key back (`Idempotency-Key: <key>`) - not the
 `400 IDEMPOTENCY_KEY_INVALID`, a request whose caller it could not resolve, or one whose body is
-past the largest any route reads (26 MiB), each of which runs unkeyed - and `/healthz`
+past its route's limit, each of which runs unkeyed - and `/healthz`
 answers `idempotency_keys: true` on every build that judges the header - a fact of the binary, so
-it is true whatever the database or NATS answer. A client tells a Dispatch that runs this layer
-from one that ignores the header, and would run a retried write a second time, by one or the
-other: the agents' client resends a failed write only against a Dispatch whose answer carried the
-echo, or whose `/healthz` it has read (`packages/envoy-client/README.md`).
+it is true whatever the database or NATS answer, on a `503` too. A client tells a Dispatch that runs
+this layer from one that ignores the header, and would run a retried write a second time, by one
+or the other: the agents' client resends a failed write only against a Dispatch whose answer
+carried the echo in the last five minutes, or whose `/healthz` said so in that time
+(`packages/envoy-client/README.md`).
 
 ## Routes
 
@@ -1153,6 +1182,7 @@ Dispatch uses cookie identity through the sign-in pool.
 | `/api/v1/live/_test/disconnect` | POST | cookie, trusted header, or bearer; `DISPATCH_TEST_HOOKS=1` | Close every open live socket with 1012, as a restart does; not mounted otherwise. |
 | `/api/v1/live/_test/rotate` | POST | cookie, trusted header, or bearer; `DISPATCH_TEST_HOOKS=1` | Close every open live socket with 4001 (`max age`); not mounted otherwise. |
 | `/api/v1/agents/{session_id}/stream/_test/publish` | POST | cookie or trusted header (human only); `DISPATCH_TEST_HOOKS=1` | Feed the in-memory agent relay; `as=drop` ends agent views as `dropped`, so the page subscribes again and rebuilds from the replay; not mounted otherwise. |
+| `/api/v1/writes/_test/slow` | POST | cookie, trusted header, or bearer; `DISPATCH_TEST_HOOKS=1` | `{method, path, delay_ms}` arms or replaces a delay for that method and exact request path, and `delay_ms: 0` removes it: every keyed run of it waits `delay_ms` on its handler's context once its key is claimed, and a context that ends during the wait answers `503 SLOW_WRITE_CUT_OFF` with the handler never run; a bad body is `400`. Not mounted otherwise. |
 | `/ws/live` | GET | cookie, trusted header, or bearer | One WebSocket per browser tab, serving delivery, events, and agent subscriptions. A socket rotates with 4001 at a random age from 30 to 60 minutes; it closes with 1012 on restart, 1008 when its caller stops resolving, and 1013 when the hub queue fills. |
 | `/api/v1/inbox?project=&assignee=` | GET | cookie or trusted header (human only) | List open asks newest-first, including their issue key, title, and assignee. `assignee=me\|unassigned\|<email>` keeps asks on issues held by the caller, by nobody (project-document asks included), or by that person; an email nobody has signed in with is `400 ASSIGNEE_NOT_ALLOWED`. |
 | `/api/v1/me/answers?limit=&offset=` | GET | cookie or trusted header (human only) | List the caller's answers and replies on asks, newest first. A row is either an answer with `current`, or a reply, and carries the ask's question, kind, state, owner and deep link. Answers come from user-authored `ask.answered` events whose actor is the answer's user; a restored answered block adds no row. `limit` is 1–200 (default 50), `offset` is 0 or more, and an invalid value is `400 INVALID_QUERY`. |

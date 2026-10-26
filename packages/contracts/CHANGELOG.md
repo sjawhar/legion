@@ -156,11 +156,20 @@
   `IDEMPOTENCY_REPLAYED_HEADER`, a different request under it is `422 KEY_REUSED`
   (`IDEMPOTENCY_KEY_REUSED`), and a repeat while the first still runs is `409 KEY_IN_FLIGHT`
   (`IDEMPOTENCY_KEY_IN_FLIGHT`) with `Retry-After: 1`; a 5xx, 401, 408 or 429 is not kept, so the
-  next attempt runs again. A repeat of `POST /api/v1/agents/{session_id}/messages` or
-  `POST /api/v1/broadcasts` resumes what its delivery still owes and answers the message or
-  broadcast read afresh, under the first's `201`. Added `IDEMPOTENCY_KEY_MAX`,
-  `IDEMPOTENCY_KEY_PATTERN`, `IDEMPOTENCY_KEY_INVALID`, `IDEMPOTENCY_ANSWER_NOT_KEPT`,
-  `IDEMPOTENCY_KEY_TTL_MS` (24 hours) and `IDEMPOTENCY_LEASE_MS` (60 seconds).
+  next attempt runs again, unless the first attempt had committed its write, which makes the next
+  attempt `409 KEY_COMMITTED` (`IDEMPOTENCY_KEY_COMMITTED`): the write landed, Dispatch has no
+  answer to replay, and a client treats it as landed. A repeat of
+  `POST /api/v1/agents/{session_id}/messages`, `POST /api/v1/broadcasts`,
+  `POST /api/v1/issues/{key}/messages`, `POST /api/v1/issues/{key}/comments` or
+  `POST /api/v1/artifacts/{id}/comments` is answered from its recovery point: what it made, read
+  afresh, under the first's `201`. Added `IDEMPOTENCY_KEY_MAX`, `IDEMPOTENCY_KEY_PATTERN` (built
+  from the max), `IDEMPOTENCY_KEY_INVALID`, `IDEMPOTENCY_ANSWER_NOT_KEPT`, `IDEMPOTENCY_KEY_TTL_MS`
+  (24 hours) and `IDEMPOTENCY_LEASE_MS` (60 seconds); `retriesUnderKey(status, code)`, the one
+  rule the page and the `dispatch` command retry a write by (a 5xx, 408, 429 or
+  `409 KEY_IN_FLIGHT`); `answerNotKept(status, replayed, body)`, whether a replayed 2xx reads
+  `ANSWER_NOT_KEPT`; and `IdempotencyLandedCode`, the two codes of a write made without its answer.
+  `DISPATCH_LOGIN_HEADER` (`Dispatch-Login`) names the login that pressed a page write and
+  `DISPATCH_LOGIN_CHANGED` (`LOGIN_CHANGED`) the `409` for one whose caller is someone else.
 - **Breaking:** the frames every live view shares are renamed (INFRA-258): `DeliveryLiveSubscribe`,
   `DeliveryLiveUnsubscribe`, `DeliveryLiveClientFrame`, `DeliveryLiveError`,
   `DeliveryLiveHeartbeat` and `DeliveryLiveServerFrame` are `LiveSubscribe`, `LiveUnsubscribe`,
