@@ -31,7 +31,7 @@ which you have; those need no runner.
 
 ## Why a sixth is an image change, not an install
 
-Your container is an unprivileged user with no writable system prefix: `/usr/local/bin` and `/opt`
+Your role runs as an unprivileged user with no writable system prefix: `/usr/local/bin` and `/opt`
 are read-only, `/home` is read-only too, and `apt-get` cannot take dpkg's lock even to download.
 `$HOME` — `/home/legion`, the one writable directory under that read-only `/home` — is yours to
 write.
@@ -48,7 +48,7 @@ extraction prefix under `$HOME` with `LD_LIBRARY_PATH` set, and `psql` did not �
 extraction prefix is on. What rules such an attempt out is not the unpacking: it is the next
 section's test ("The test: where it lands, and what it leaves resolving"), and an extraction under
 `$HOME` fails that test's first condition whatever you scope it to, because `/home/legion` is the
-container's own filesystem rather than the issue's volume — the placement `roleEnvironment`
+pod's disk rather than the issue's volume — the placement `roleEnvironment`
 (`packages/daemon/internal/runtime/sandbox/manifest.go`) exists to move writes off. The sanctioned
 extraction is the harness's: onto the issue's volume, and exported around its own commands and no
 further (the Dispatch e2e stack, below, is the worked case). For everything the five do not cover,
@@ -68,7 +68,7 @@ three artefacts in this repository are what draw the line — not a claim about 
   `uv` and `uvx`, `bun` with its `bunx` link, and the Go toolchain, and the `toolchain` capability
   row (`packages/daemon/internal/capabilities/capabilities.go`) grants them by name. A runner put
   in the image deliberately and granted by a capability row is not a route around a withheld one.
-- **What the pod configures for those runners to write.** A role container's environment relocates
+- **What the pod configures for those runners to write.** A role's environment relocates
   `UV_CACHE_DIR` and `UV_PYTHON_INSTALL_DIR` (`podkind.go`) and `BUN_INSTALL_CACHE_DIR`, `GOCACHE`
   and `GOMODCACHE` (`roleEnvironment`, `packages/daemon/internal/runtime/sandbox/manifest.go`)
   onto the issue's volume, shared by the issue's roles. Legion provisions the caches a pinned run
@@ -91,8 +91,8 @@ variable the runtime sets for you there or under a path on that volume your harn
 itself — but outside the issue's workspace (`$LEGION_WORKSPACE`, under `/legion/workspaces`) and
 the runtime's own directories (`/legion/repos`, `/legion/feed`, `/legion/sessions`); and after
 the command exits nothing else resolves differently. The workspace is excluded because its jj
-working copy tracks every new file under jj's `snapshot.max-new-file-size` (1 MiB in a role
-container), so a root written there is added to the change every role shares, and a larger new
+working copy tracks every new file under jj's `snapshot.max-new-file-size` (1 MiB for a role), so
+a root written there is added to the change every role shares, and a larger new
 file is left untracked, every jj command in the workspace then warning `Refused to snapshot some
 files`. The one write into it that is sanctioned is a repository's own dependency install into
 its ignored directories, below. The variables the runtime sets on the volume, where a tool's own
@@ -100,8 +100,9 @@ cache already goes, are
 `XDG_CACHE_HOME` (`/legion/scratch/cache`), `XDG_DATA_HOME`, `XDG_STATE_HOME`, `TMPDIR`, `GOCACHE`,
 `GOMODCACHE`, `BUN_INSTALL_CACHE_DIR`, `UV_CACHE_DIR` (`/legion/uv/cache`) and
 `UV_PYTHON_INSTALL_DIR` (`/legion/uv/python/<issue>`). (`XDG_CONFIG_HOME` is set too and is not
-one of them: it is the pod's shared in-memory volume.) `$HOME` and `/tmp` are not on the volume:
-both are the container's own filesystem.
+one of them: it is your role's own config home, a copy of the pod's made for your role on the
+pod's disk, which no other role reads.) `$HOME` and `/tmp` are not on the volume:
+both are your role's own, on the pod's disk.
 
 It is the withheld capability when either condition fails — anything that writes into a
 system prefix, and anything that leaves a toolchain, shim or binary which a later launch or
@@ -158,7 +159,7 @@ home — worth reading before an install, for the two things that follow from sh
 `PLAYWRIGHT_BROWSERS_PATH` elsewhere is what costs you: that shared registry, and the lock that
 makes a second role installing at the same time wait rather than race. The condition is for a tool
 whose cache the runtime does not already place — Puppeteer is one, resolving its browser cache to
-`join(homedir(), '.cache', 'puppeteer')` and so to the container's own filesystem whatever
+`join(homedir(), '.cache', 'puppeteer')` and so to your role's own home on the pod's disk whatever
 `XDG_CACHE_HOME` says. For that one, point the tool's own cache variable (`PUPPETEER_CACHE_DIR`
 here) at a directory under one of the paths above yourself, since an unset one leaves the download
 wherever the tool defaults, which is nowhere this runtime chose.
@@ -168,10 +169,12 @@ outlives the pod, and every role of the issue shares it — under every one of t
 `XDG_STATE_HOME`, which is `/legion/scratch/state/<role>`, "the one directory of the issue's
 scratch that is the role's own rather than the issue's" (`roleEnvironment`), because Oh My Pi
 names its browser broker's lock from the state root and an abstract socket name is one name across
-every container of the pod — and a later pod of the issue reuses it. Under `$HOME` —
-`/home/legion`, which no volume is mounted on — it is the container's own filesystem: one copy per
-role, per pod, gone when the role relaunches, and charged to the container's ephemeral-storage
-limit, which is per role and smaller than the volume. Moving exactly these writes off that
+every role of the pod, which share its network — and a later pod of the issue reuses it. Under
+`$HOME` — `/home/legion`, which no volume is mounted on — it is your role's own home, an overlay
+over the image's whose writes land on the pod's disk (an `emptyDir` every role's home and `/tmp`
+share): one copy per role, per pod, kept across the role's relaunches in that pod and gone when
+the pod is replaced, and charged to the pod's ephemeral-storage limit, which every role of the pod
+shares and which is smaller than the volume. Moving exactly these writes off that
 filesystem is what `roleEnvironment` (`packages/daemon/internal/runtime/sandbox/manifest.go`)
 exists for, after GKE Autopilot evicted issue pods that charged their caches to it — so an install
 under `$HOME` fails the first condition and is outside the sanctioned form, however little else it

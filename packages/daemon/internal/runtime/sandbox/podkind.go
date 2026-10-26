@@ -200,15 +200,17 @@ func (issuePod) initVolumes(l launch) []corev1.Volume {
 // gh, private, state and agent-secrets key directories at the fixed paths a role reads them at and
 // none of its siblings'. So each role's own volumes mount under its directory of RolesDir, its
 // launcher token and gh files read-only, and none at those fixed paths; the role homes volume
-// (roleHomesVolume) at RoleHomesDir holds each role's home overlay and temporary directories. The
-// pod's shared mounts are mounted once: the issue's volume, its sessions directory, the config
-// home, the feed read-only (so no agent writes what workspace-fetch, the token's holder, reads),
-// the providers, the broker's token, and the operator's. Every one of them that belongs at or under
-// the image's home — the sessions directory, the config home, an operator's mount there — is
-// mounted under launcher.HomeMountsDir at the same relative path instead (homeMountsView), so the
-// home carries no mount: each role's namespace overlays the home, which Linux refuses over a lower
-// layer with mounts under it, and then binds each of them back at its own path. The values the
-// kubelet resolves are the same for every role (the downward API's POD_UID), so they are set once.
+// (roleHomesVolume) at RoleHomesDir holds each role's home overlay, temporary directories and own
+// config home. The pod's shared mounts are mounted once: the issue's volume, its sessions
+// directory, the config home workspace-init writes, the feed read-only (so no agent writes what
+// workspace-fetch, the token's holder, reads), the providers, the broker's token, and the
+// operator's. Every one of them that belongs at or under the image's home — the sessions
+// directory, the config home, an operator's mount there — is mounted under launcher.HomeMountsDir
+// at the same relative path instead (homeMountsView), so the home carries no mount: each role's
+// namespace overlays the home, which Linux refuses over a lower layer with mounts under it, and
+// then binds each of them back at its own path, but the shared config home, whose place gets the
+// role's own copy of it (launcher.ConfigHomeDir). The values the kubelet resolves are the same for
+// every role (the downward API's POD_UID), so they are set once.
 func (k issuePod) launcherContainer(r *Runtime, l launch, resolved []corev1.EnvVar, providersMounts []corev1.VolumeMount) corev1.Container {
 	command := []string{r.tools.Legion, "launcher", connectFlag, r.streamURL, "--sandbox", l.name, "--roles-dir", RolesDir}
 	mounts := []corev1.VolumeMount{
@@ -248,9 +250,9 @@ func (k issuePod) launcherContainer(r *Runtime, l launch, resolved []corev1.EnvV
 
 // mainVolumes is the role homes volume: an emptyDir on the node's disk, charged to the pod's
 // ephemeral storage as a container's own filesystem is, where each role's namespace keeps its home
-// overlay's writable layer and its /tmp and /var/tmp (`legion launcher role-init`). An overlay's
-// writable layer cannot be the container's own root filesystem, and a memory one would charge a
-// role's /tmp to the pod's memory.
+// overlay's writable layer, its /tmp and /var/tmp, and its own config home (`legion launcher
+// role-init`). An overlay's writable layer cannot be the container's own root filesystem, and a
+// memory one would charge a role's /tmp to the pod's memory.
 func (issuePod) mainVolumes() []corev1.Volume {
 	return []corev1.Volume{{Name: roleHomesVolume, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}}}
 }

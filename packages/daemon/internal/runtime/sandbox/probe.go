@@ -1184,8 +1184,12 @@ type probeSpec struct {
 // configured, each providers
 // secret's `<NAME>_FILE` pointing at its file there as a worker's does (so neither exports it),
 // and resolving the daemon's own role prompts' references (--role-references), which ProbeImage
-// requires. Its command and env are escaped against the kubelet's expansion as every worker
-// container's are (kubeletLiteral). It carries Karpenter's `do-not-disrupt` alone, not the Cluster
+// requires, and, first, running one role generation's namespaces as an issue pod's launcher runs
+// every role (--role-namespaces), over a disk emptyDir of its own at RoleProbeDir, as an issue
+// pod's role homes volume is, so a runtime that refuses a role's namespaces fails the probe rather
+// than every role's start. Its command and env are escaped against the kubelet's expansion as
+// every worker container's are (kubeletLiteral). It carries Karpenter's `do-not-disrupt` alone,
+// not the Cluster
 // Autoscaler's `safe-to-evict` (podTemplate sets both): GKE Autopilot places a pod carrying that
 // one on a node of its own whenever possible, so each boot's probe would ask for a node, and a
 // probe minutes long and already retried on failure (kubeletFailure, ImageProbe.Retry) gains nothing
@@ -1197,13 +1201,13 @@ func (r *Runtime) probeManifest(name string, p ImageProbe, shutdown time.Time) p
 	if len(providersMounts) > 0 {
 		command = append(command, "--provider-env-dir", ProvidersDir)
 	}
-	command = append(command, "--role-references", p.RoleReferences.Encode())
+	command = append(command, "--role-references", p.RoleReferences.Encode(), "--role-namespaces", RoleProbeDir)
 	container := corev1.Container{
 		Name:            probeContainer,
 		Image:           r.image,
 		Command:         command,
 		Env:             slices.Concat(r.operatorEnv(), r.providersPointers(), r.sessionDSNPointer()),
-		VolumeMounts:    slices.Concat(providersMounts, r.pod.VolumeMounts),
+		VolumeMounts:    slices.Concat([]corev1.VolumeMount{{Name: roleProbeVolume, MountPath: RoleProbeDir}}, providersMounts, r.pod.VolumeMounts),
 		Resources:       p.Resources,
 		SecurityContext: restrictedContainer(),
 	}
@@ -1230,7 +1234,7 @@ func (r *Runtime) probeManifest(name string, p ImageProbe, shutdown time.Time) p
 					NodeSelector:      r.nodeSelector(),
 					Tolerations:       r.tolerations(),
 					PriorityClassName: r.scheduling.PriorityClass,
-					Volumes:           slices.Concat(providers, r.pod.Volumes),
+					Volumes:           slices.Concat([]corev1.Volume{{Name: roleProbeVolume, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}}}, providers, r.pod.Volumes),
 					Containers:        []corev1.Container{container},
 				},
 			},

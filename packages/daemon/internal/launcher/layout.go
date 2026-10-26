@@ -5,8 +5,9 @@ package launcher
 // role, holding the role's launcher token projection (RoleLauncherDir, its token file
 // LauncherTokenFile), its gh bundle (RoleGHDir), and its own memory-backed private, state and
 // agent-secrets directories (RolePrivateDir, RoleStateDir, RoleAgentSecretsDir); and RoleHomesDir,
-// the one disk directory, which holds each role's home overlay layers and its own temporary
-// directories. Both sides name these constants, so a renamed directory moves on both.
+// the one disk directory, which holds each role's home overlay layers, its own temporary
+// directories and its own config home (RoleConfigHomeDir). Both sides name these constants, so a
+// renamed directory moves on both.
 const (
 	RoleLauncherDir     = "launcher"
 	RoleGHDir           = "gh"
@@ -14,6 +15,7 @@ const (
 	RoleStateDir        = "state"
 	RoleAgentSecretsDir = "agent-secrets"
 	RoleHomesDir        = ".homes"
+	RoleConfigHomeDir   = "config"
 	LauncherTokenFile   = "LAUNCHER_TOKEN"
 )
 
@@ -28,8 +30,17 @@ const (
 // under it (Linux refuses an overlay whose lower layer has mounts locked under it from a more
 // privileged namespace); role-init binds each back at its own path under Home once the overlay
 // is in place, and covers HomeMountsDir, so the role sees each mount only where it belongs.
+//
+// ConfigHomeDir is the XDG config home's place under Home, the XDG_CONFIG_HOME every process of an
+// issue pod is told. The pod's one shared config home, which workspace-init writes Legion's jj
+// configuration of the issue's clone into, is mounted there in workspace-init and under
+// HomeMountsDir in the roles container; no role sees it. role-init binds each role's own config
+// home at that path instead (RoleConfigHomeDir under the role's directory of RoleHomesDir), made
+// once per pod as a copy of the shared one, so what one role writes there — a git `core.fsmonitor`
+// or a jj alias, which run in whatever git or jj reads them — never reaches another role.
 const (
 	FixedRoot     = "/var/run/legion"
 	Home          = "/home/legion"
 	HomeMountsDir = FixedRoot + "/home"
+	ConfigHomeDir = ".config"
 )

@@ -148,6 +148,22 @@ func probeImage(args ...string) (int, string, string) {
 	return code, stdout.String(), stderr.String()
 }
 
+// With --role-namespaces the probe runs a role generation's namespaces first
+// (launcher.CheckRoleNamespaces, whose own test runs a whole generation) and refuses, exit 1,
+// naming the check, when it fails; here its layout cannot be made, since the directory named is a
+// file. Nothing of the image's launch probes runs: no Oh My Pi is named at all.
+func TestProbeImageRefusesWhenTheRoleNamespaceCheckFails(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(file, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("LEGION_OMP_PATH", "")
+	code, stdout, stderr := probeImage("--plugin-root", t.TempDir(), "--envoy-plugin-root", t.TempDir(), "--role-namespaces", file)
+	if code != 1 || !strings.Contains(stderr, "legion probe-image: role namespaces: make the probe's layout") || stdout != "" {
+		t.Errorf("probe-image with a failing role-namespace check = %d, stdout %q, stderr %q; want exit 1 naming the check", code, stdout, stderr)
+	}
+}
+
 // tableLines are stdout's lines before the NATS user line and the OK line: the capability table.
 // Each is one row of capabilities.Table, rendered by its Line, so stdout is split on the row shape.
 func tableLines(stdout string) []string {

@@ -1,6 +1,7 @@
 package launcher
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -60,8 +61,9 @@ const roleStatusFD = 3
 // RoleInitSetupFailedExit is the exit status `legion launcher role-init` uses for one thing alone:
 // it failed before it started the shim, setting up the role's namespaces or starting the shim
 // itself. Every other end of role-init is told apart from it: once the shim started, role-init
-// reports the shim's own wait status and exits 0, and a role-init that panics or is ended by Go's
-// runtime exits 2. sysexits' EX_OSERR, an operating-system error, which is what such a failure is.
+// reports the shim's own wait status and exits 0, a role-init that panics exits 2, and one that
+// Go's runtime ends for a signal no one registered for exits 128 plus the signal (roleInit).
+// sysexits' EX_OSERR, an operating-system error, which is what such a failure is.
 const RoleInitSetupFailedExit = 71
 
 func (c RoleInitConfig) validate() error {
@@ -89,18 +91,69 @@ func (c RoleInitConfig) validate() error {
 // RoleInit is `legion launcher role-init`: the init of one role generation's user, mount, PID and
 // IPC namespaces, which the launcher clones into them and nothing else ever runs. It hides every
 // other role's credentials and its own launcher token, binds the role's own directories back at
-// the fixed paths, gives the role a private home overlay and private temporary directories,
-// starts the shim as its child in a nested user namespace as the image's unprivileged user,
-// forwards the launcher's stop to it, reaps the orphans the role leaves, and reports the shim's
-// own wait status. Every failure it can hit is this role's exit and never the launcher's. stop
-// ends at the launcher's stop: the context `legion`'s main ends on SIGTERM or SIGINT, the
-// signals it registers for at its first instruction. Every error it returns is a failure before
-// the shim started, which `legion launcher role-init` exits RoleInitSetupFailedExit for.
+// the fixed paths, gives the role a private home overlay, its own config home, private temporary
+// directories and its own pseudo-terminals and message queues, starts the shim as its child in a
+// nested user namespace as the image's unprivileged user, forwards the launcher's stop to it,
+// reaps the orphans the role leaves, and reports the shim's own wait status. Every failure it can
+// hit is this role's exit and never the launcher's. stop ends at the launcher's stop: the context
+// `legion`'s main ends on SIGTERM or SIGINT, the signals it registers for in its first statement.
+// Every error it returns is a failure before the shim started, which `legion launcher role-init`
+// exits RoleInitSetupFailedExit for.
 func RoleInit(stop context.Context, cfg RoleInitConfig) error {
 	if err := cfg.validate(); err != nil {
 		return err
 	}
 	return roleInit(stop, cfg)
+}
+
+// CheckRoleNamespaces runs one role generation as an issue pod's launcher runs every role — its
+// role-init cloned into a user, mount, PID and IPC namespace of its own, which sets the namespaces
+// up and starts its shim in a nested user namespace as the image's unprivileged user — over a
+// layout of its own under dir, with shim as the shim's argv, and refuses unless the shim ran and
+// exited 0. `legion probe-image --role-namespaces` runs it in the daemon's probe pod, placed and
+// secured as every issue pod is, with dir on a disk volume as the role homes volume is and its
+// own `legion version` as the shim, so a runtime or node that refuses a role's namespaces, a mount
+// role-init makes, or the overlay over its home fails the daemon's boot rather than every role's
+// start. The layout is the roles directory, fixed root, home and home mounts directory role-init's
+// flags name, with the one role's gh, private and state directories and nothing else.
+func CheckRoleNamespaces(dir string, shim ...string) error {
+	if len(shim) == 0 {
+		return errors.New("role namespaces: no shim argv")
+	}
+	const role = "probe"
+	cfg := RoleInitConfig{
+		RolesDir: filepath.Join(dir, "roles"), Role: role, Generation: 1, Home: filepath.Join(dir, "home"),
+		HomeMounts: filepath.Join(dir, "home-mounts"), FixedRoot: filepath.Join(dir, "fixed"), Argv: shim,
+	}
+	dirs := []string{cfg.Home, cfg.HomeMounts}
+	for _, name := range []string{RoleGHDir, RolePrivateDir, RoleStateDir} {
+		dirs = append(dirs, filepath.Join(cfg.RolesDir, role, name), filepath.Join(cfg.FixedRoot, name))
+	}
+	for _, path := range dirs {
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			return fmt.Errorf("role namespaces: make the probe's layout: %w", err)
+		}
+	}
+	var output bytes.Buffer
+	process, err := newRoleProcess(cfg, os.Environ(), &output, &output)
+	if err != nil {
+		return fmt.Errorf("role namespaces: %w", err)
+	}
+	if err := process.start(); err != nil {
+		return fmt.Errorf("role namespaces: start role-init in namespaces of its own: %w", err)
+	}
+	raw, _ := io.ReadAll(process.status)
+	_ = process.status.Close()
+	waitErr := process.cmd.Wait()
+	if status := parseStatus(raw); waitErr != nil || status == nil || status.ExitStatus() != 0 || status.Signaled() {
+		shim := "none, it never ran or never ended"
+		if status != nil {
+			shim = fmt.Sprintf("%+v", exitOfStatus(*status, cfg.Generation))
+		}
+		return fmt.Errorf("role namespaces: a role generation over a probe layout under %s did not run its shim to a clean exit (role-init: %v; the shim's exit: %s): %s",
+			dir, waitErr, shim, strings.TrimSpace(output.String()))
+	}
+	return nil
 }
 
 // roleInitLaunch is the command line and the extra environment that run one generation's

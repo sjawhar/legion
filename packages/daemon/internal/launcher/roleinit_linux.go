@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"os/exec"
@@ -47,14 +48,18 @@ func roleInit(stop context.Context, cfg RoleInitConfig) error {
 	if os.Getpid() != 1 {
 		return errors.New("role-init: not the init of a PID namespace of its own")
 	}
-	// The kernel delivers a signal from outside to a PID namespace's init only once it handles
-	// it. `legion`'s main registers for the launcher's stop (SIGTERM, and SIGINT) before it runs
-	// any subcommand, and ends stop on it, so a stop that arrives while the namespace is still
-	// being set up reaches the shim the moment it starts, rather than waiting out the launcher's
-	// grace for a kill. Only a stop during the Go runtime's own start, before main runs, misses
-	// it: Go's default handling ends role-init then, with exit status 2, which the launcher
-	// reports as that exit rather than as a setup failure. Child exits arrive on a channel of
-	// their own; a dropped SIGCHLD costs nothing, since one reap pass takes every exited orphan.
+	// The kernel delivers a signal to a PID namespace's init only while it handles it. `legion`'s
+	// main registers for the launcher's stop (SIGTERM, and SIGINT) before it runs any subcommand,
+	// and ends stop on it, so a stop that arrives while the namespace is still being set up
+	// reaches the shim the moment it starts, rather than waiting out the launcher's grace for a
+	// kill. A stop before main runs misses it, in one of two ways. Before the Go runtime installs
+	// its own handlers, in its first instructions, the kernel drops it: role-init goes on to start
+	// the shim as though no stop came, and the launcher's SIGKILL at the end of its grace ends the
+	// role. From then until main registers, during package initialization, the runtime's handler
+	// finds no one registered and ends role-init (runtime/signal_unix.go, dieFromSignal: its
+	// raise is ignored by an init, so it exits 128+15), which the launcher reports as that exit
+	// rather than as a setup failure. Child exits arrive on a channel of their own; a dropped
+	// SIGCHLD costs nothing, since one reap pass takes every exited orphan.
 	exits := make(chan os.Signal, 1)
 	signal.Notify(exits, syscall.SIGCHLD)
 	defer signal.Stop(exits)
@@ -162,6 +167,9 @@ func prepareRoleNamespace(cfg RoleInitConfig) error {
 			return fmt.Errorf("give the role its own %s: %w", path, err)
 		}
 	}
+	if err := privateDevices(); err != nil {
+		return err
+	}
 	if err := os.RemoveAll(stage); err != nil {
 		return fmt.Errorf("clear the role's stage: %w", err)
 	}
@@ -179,15 +187,59 @@ func prepareRoleNamespace(cfg RoleInitConfig) error {
 	return nil
 }
 
+// privateDevices gives the role its own pseudo-terminals and its own view of POSIX message queues
+// where the image's /dev has them. A new devpts instance at /dev/pts: the container's lists, and
+// lets the opener of a sibling's terminal read and write it, every terminal of every role, all
+// the same user outside their namespaces; the new one holds only those the role opens, with
+// /dev/ptmx opening into it (bound over a /dev/ptmx that is a node; a link to pts/ptmx already
+// resolves there). The mqueue filesystem mounted at /dev/mqueue from inside the role's own IPC
+// namespace shows that namespace's queues alone, where the container's mount showed — and let a
+// role create — queues of the container's IPC namespace, a channel every sibling could read.
+// Linux lets the owner of a user namespace mount both, and gVisor registers both as mountable
+// there (runsc/boot/vfs.go: devpts and mqfs AllowUserMount; devpts takes newinstance, and a new
+// IPC namespace gets its own POSIX queue registry, task_clone.go). ptmxmode 0666 is what container
+// runtimes give /dev/ptmx, so the role's unprivileged agent can open it. A path the image does not
+// have is skipped; any other failure is a refusal, since the role would otherwise share the
+// container's with its siblings.
+func privateDevices() error {
+	if _, err := os.Stat("/dev/pts"); err == nil {
+		if err := unix.Mount("devpts", "/dev/pts", "devpts", unix.MS_NOSUID|unix.MS_NOEXEC, "newinstance,ptmxmode=0666"); err != nil {
+			return fmt.Errorf("give the role its own /dev/pts: %w", err)
+		}
+		info, err := os.Lstat("/dev/ptmx")
+		switch {
+		case errors.Is(err, fs.ErrNotExist), err == nil && info.Mode()&fs.ModeSymlink != 0:
+		case err != nil:
+			return fmt.Errorf("give the role its own /dev/ptmx: %w", err)
+		default:
+			if err := unix.Mount("/dev/pts/ptmx", "/dev/ptmx", "", unix.MS_BIND, ""); err != nil {
+				return fmt.Errorf("give the role its own /dev/ptmx: %w", err)
+			}
+		}
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("give the role its own /dev/pts: %w", err)
+	}
+	if _, err := os.Stat("/dev/mqueue"); err == nil {
+		if err := unix.Mount("mqueue", "/dev/mqueue", "mqueue", unix.MS_NOSUID|unix.MS_NODEV|unix.MS_NOEXEC, ""); err != nil {
+			return fmt.Errorf("give the role its own /dev/mqueue: %w", err)
+		}
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("give the role its own /dev/mqueue: %w", err)
+	}
+	return nil
+}
+
 // privateHome gives the role a writable layer of its own over the image's home, then puts every
-// volume the home carries — an issue pod's sessions and shared config home, an operator's mount —
-// back at its own path on top. The container mounts those volumes under the home mounts
-// directory rather than under the home itself, so the overlay's lower layer, the home, has no
-// mount under it: Linux refuses an overlay whose lower layer has mounts under it that a more
-// privileged namespace locked (clone_private_mount), and every mount the container carries is
-// locked in the role's namespaces. A home that carries a mount anyway is refused, naming it, rather
-// than overlaid on one kernel and hidden on another. What the role writes anywhere else under its
-// home is its own: no sibling role and nothing in the container sees it.
+// volume the home carries — an issue pod's sessions directory, an operator's mount — back at its
+// own path on top. The container mounts those volumes under the home mounts directory rather than
+// under the home itself, so the overlay's lower layer, the home, has no mount under it: Linux
+// refuses an overlay whose lower layer has mounts under it that a more privileged namespace locked
+// (clone_private_mount), and every mount the container carries is locked in the role's namespaces.
+// A home that carries a mount anyway is refused, naming it, rather than overlaid on one kernel and
+// hidden on another. What the role writes anywhere else under its home is its own: no sibling role
+// and nothing in the container sees it. The pod's shared config home is the one volume not bound
+// back: the role's own config home goes at its path instead (ownConfigHome), and a mount under the
+// shared one is bound back on top of the role's.
 func privateHome(cfg RoleInitConfig, homes, work string) error {
 	if _, carried, err := mountsUnder(cfg.Home); err != nil {
 		return err
@@ -218,15 +270,103 @@ func privateHome(cfg RoleInitConfig, homes, work string) error {
 			return err
 		}
 		target := filepath.Join(cfg.Home, rel)
-		if err := makeLike(mount, target); err != nil {
+		source := mount
+		if rel == ConfigHomeDir {
+			if source, err = ownConfigHome(mount, filepath.Join(homes, RoleConfigHomeDir), mounts); err != nil {
+				return fmt.Errorf("give the role its own config home: %w", err)
+			}
+		}
+		if err := makeLike(source, target); err != nil {
 			return fmt.Errorf("make %s's place in the role's home: %w", target, err)
 		}
-		if err := bindMount(mount, target); err != nil {
-			return fmt.Errorf("bind %s at %s: %w", mount, target, err)
+		if err := bindMount(source, target); err != nil {
+			return fmt.Errorf("bind %s at %s: %w", source, target, err)
 		}
-		bound = append(bound, mount)
+		if source == mount {
+			bound = append(bound, mount)
+		}
 	}
 	return nil
+}
+
+// ownConfigHome is the role's own config home, own, made the first time a generation of the role
+// starts in the pod as a copy of the pod's shared one, shared, and the role's from then on: what
+// workspace-init wrote there (Legion's jj configuration of the issue's clone, which jj keeps in
+// the config home) is what the role's jj reads, and what the role writes there stays its own
+// across its generations. A git `core.fsmonitor` or a jj alias one role sets in its config home
+// would otherwise run in every sibling's git or jj, with the sibling's credentials. The copy
+// leaves out every mount under the shared config home (among mounts, mountinfo's list), which
+// privateHome binds back over the role's copy, and is made under a name of its own and renamed
+// into place, so a generation that stopped midway leaves no half copy for the next to keep.
+func ownConfigHome(shared, own string, mounts []string) (string, error) {
+	if _, err := os.Lstat(own); err == nil {
+		return own, nil
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return "", err
+	}
+	partial := own + ".partial"
+	if err := os.RemoveAll(partial); err != nil {
+		return "", err
+	}
+	err := filepath.WalkDir(shared, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if path != shared && slices.Contains(mounts, path) {
+			if entry.IsDir() {
+				return fs.SkipDir
+			}
+			return nil
+		}
+		rel, err := filepath.Rel(shared, path)
+		if err != nil {
+			return err
+		}
+		target := filepath.Join(partial, rel)
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		switch {
+		case entry.IsDir():
+			return os.Mkdir(target, info.Mode().Perm())
+		case entry.Type().IsRegular():
+			return copyRegular(path, target, info.Mode().Perm())
+		case entry.Type()&fs.ModeSymlink != 0:
+			link, err := os.Readlink(path)
+			if err != nil {
+				return err
+			}
+			return os.Symlink(link, target)
+		default:
+			return fmt.Errorf("%s is neither a directory, a regular file nor a link", path)
+		}
+	})
+	if err != nil {
+		return "", err
+	}
+	if err := os.Rename(partial, own); err != nil {
+		return "", err
+	}
+	return own, nil
+}
+
+// copyRegular copies the regular file source to target, which it creates with perm.
+func copyRegular(source, target string, perm fs.FileMode) error {
+	in, err := os.Open(source)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_EXCL, perm)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		_ = out.Close()
+		return err
+	}
+	return out.Close()
 }
 
 // carryOver puts the role's own filesystem at dir (place) while keeping every mount strictly

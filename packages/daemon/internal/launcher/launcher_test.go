@@ -1001,18 +1001,32 @@ func TestARoleInitThatFailsBeforeItsShimIsReportedAsASetupFailure(t *testing.T) 
 
 // A stop that reaches a generation its wait has already reaped signals nothing: the launcher
 // signals the role-init it started through that process's own handle, never by a number the
-// kernel may have handed to another role's role-init since.
+// kernel may have handed to another role's role-init since. The reaped generation's number here
+// names a live process, as a reused one would: a stop sent by number would end it.
 func TestAStopOfAReapedGenerationSignalsNothing(t *testing.T) {
-	cmd := exec.Command("/bin/true")
-	if err := cmd.Start(); err != nil {
+	reaped := exec.Command("/bin/true")
+	if err := reaped.Start(); err != nil {
 		t.Fatal(err)
 	}
-	if err := cmd.Wait(); err != nil {
+	if err := reaped.Wait(); err != nil {
 		t.Fatal(err)
 	}
+	reuser := exec.Command("/bin/sleep", "60")
+	if err := reuser.Start(); err != nil {
+		t.Fatal(err)
+	}
+	ended := make(chan error, 1)
+	go func() { ended <- reuser.Wait() }()
+	t.Cleanup(func() { _ = reuser.Process.Kill(); <-ended })
 	m := &manager{role: "tester", namespaced: true}
-	if err := m.signalChild(&child{pid: cmd.Process.Pid, process: cmd.Process}, syscall.SIGTERM); err != nil {
+	if err := m.signalChild(&child{pid: reuser.Process.Pid, process: reaped.Process}, syscall.SIGTERM); err != nil {
 		t.Fatalf("signal a reaped generation = %v, want nothing to signal and no error", err)
+	}
+	select {
+	case err := <-ended:
+		ended <- err
+		t.Fatalf("the process now holding the reaped generation's number ended (%v): the stop was sent by number", err)
+	case <-time.After(200 * time.Millisecond):
 	}
 }
 

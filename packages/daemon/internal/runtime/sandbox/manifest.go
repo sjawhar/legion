@@ -17,6 +17,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/ghconfig"
+	"github.com/sjawhar/legion/daemon/internal/launcher"
 	"github.com/sjawhar/legion/daemon/internal/ompsessions"
 	"github.com/sjawhar/legion/daemon/internal/repocache"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
@@ -34,8 +35,9 @@ const (
 
 // The pod's volumes. ghVolume is the prefix of each launcher role's gh volume (roleVolume), the
 // projection of its role Secret's gh files, which only that role's namespace sees at GHConfigDir.
-// roleHomesVolume is an issue pod's disk emptyDir of every role's home overlay and temporary
-// directories (issuePod.mainVolumes).
+// roleHomesVolume is an issue pod's disk emptyDir of every role's home overlay, temporary
+// directories and own config home (issuePod.mainVolumes), and roleProbeVolume the image probe's
+// disk emptyDir its role-namespace check runs a role generation over (probeManifest).
 const (
 	provisionVolume = "provision"
 	stateVolume     = "state"
@@ -44,6 +46,7 @@ const (
 	providersVolume = "providers"
 	ghVolume        = "gh"
 	roleHomesVolume = "role-homes"
+	roleProbeVolume = "role-probe"
 )
 
 // The agent-secrets volumes: agentSecretsTokenVolume alone carries the projected token for the
@@ -84,22 +87,27 @@ const podUser = 1000
 // (TestRuntimeOwnedIsWhatTheWorkerContainerIsToldByTheRuntime), which the shared validator refuses
 // in a spec's Env and as a secret's pointer, and CheckPod in the operator's pod. The image probe's
 // container sets none of its own.
-var runtimeOwned = map[string]bool{
-	"LEGION_TREE": true, "LEGION_ISSUE": true, "LEGION_ROLE": true, "LEGION_CONTROLLER": true,
-	"LEGION_GENERATION": true, "LEGION_PROJECT": true, "LEGION_DAEMON_URL": true,
-	"LEGION_STATE_DIR": true, "LEGION_WORKSPACE": true, "ENVOY_NATS_URL": true, "ENVOY_URL": true,
-	"DISPATCH_URL": true, "GH_CONFIG_DIR": true, "GH_TOKEN": true, "GITHUB_TOKEN": true, "GH_HOST": true,
-	"LEGION_GH_OWNERS_DIR": true, "LEGION_GH_PATH": true,
-	"PATH": true, "PI_SHELL_PREFIX": true, "GIT_TERMINAL_PROMPT": true,
-	"GIT_CONFIG_COUNT": true, "GIT_CONFIG_KEY_0": true, "GIT_CONFIG_VALUE_0": true,
-	"GIT_CONFIG_KEY_1": true, "GIT_CONFIG_VALUE_1": true, "GIT_CONFIG_KEY_2": true, "GIT_CONFIG_VALUE_2": true,
-	"XDG_CONFIG_HOME": true, "XDG_CACHE_HOME": true, "XDG_DATA_HOME": true, "XDG_STATE_HOME": true,
-	"TMPDIR": true, "GOCACHE": true, "GOMODCACHE": true, "BUN_INSTALL_CACHE_DIR": true,
-	"POD_UID": true, bootTokenKey + "_FILE": true, dispatchTokenKey + "_FILE": true,
-	"AGENT_SECRETS_URL": true, "AGENT_SECRETS_KEY_DIR": true, slackChannelsVariable: true,
-	"UV_PYTHON_INSTALL_DIR": true, "UV_CACHE_DIR": true, "UV_LINK_MODE": true,
-	ompsessions.StorageVariable: true, ompsessions.DSNFileVariable: true,
-}
+var runtimeOwned = func() map[string]bool {
+	owned := map[string]bool{
+		"LEGION_TREE": true, "LEGION_ISSUE": true, "LEGION_ROLE": true, "LEGION_CONTROLLER": true,
+		"LEGION_GENERATION": true, "LEGION_PROJECT": true, "LEGION_DAEMON_URL": true,
+		"LEGION_STATE_DIR": true, "LEGION_WORKSPACE": true, "ENVOY_NATS_URL": true, "ENVOY_URL": true,
+		"DISPATCH_URL": true, "GH_CONFIG_DIR": true, "GH_TOKEN": true, "GITHUB_TOKEN": true, "GH_HOST": true,
+		"LEGION_GH_OWNERS_DIR": true, "LEGION_GH_PATH": true,
+		"PATH": true, "PI_SHELL_PREFIX": true, "GIT_TERMINAL_PROMPT": true,
+		"XDG_CONFIG_HOME": true, "XDG_CACHE_HOME": true, "XDG_DATA_HOME": true, "XDG_STATE_HOME": true,
+		"TMPDIR": true, "GOCACHE": true, "GOMODCACHE": true, "BUN_INSTALL_CACHE_DIR": true,
+		"POD_UID": true, bootTokenKey + "_FILE": true, dispatchTokenKey + "_FILE": true,
+		"AGENT_SECRETS_URL": true, "AGENT_SECRETS_KEY_DIR": true, slackChannelsVariable: true,
+		"UV_PYTHON_INSTALL_DIR": true, "UV_CACHE_DIR": true, "UV_LINK_MODE": true,
+		ompsessions.StorageVariable: true, ompsessions.DSNFileVariable: true,
+	}
+	// GIT_CONFIG_COUNT and each GIT_CONFIG_KEY_<n>/GIT_CONFIG_VALUE_<n> gitConfigEnv sets.
+	for _, entry := range gitConfigEnv() {
+		owned[entry.Name] = true
+	}
+	return owned
+}()
 
 // slackChannelsVariable is the project's slack_channels as the runtime tells the controller it
 // launches (Options.ControllerSlackChannels): comma-joined, set even when empty, so no other value
@@ -130,7 +138,7 @@ var sessionProxyFlagNames = [3]string{"--session-instance", "--session-database"
 // controller's included, has a key volume when the pod enrolls and a gh volume always.
 func legionVolumeNames() []string {
 	names := []string{
-		issueVolume, provisionVolume, tempVolume, configVolume, providersVolume, agentSecretsTokenVolume, roleHomesVolume,
+		issueVolume, provisionVolume, tempVolume, configVolume, providersVolume, agentSecretsTokenVolume, roleHomesVolume, roleProbeVolume,
 	}
 	for _, role := range launcherRoles {
 		names = append(names, roleVolume("launcher", role), roleVolume("private", role), roleVolume(stateVolume, role), roleVolume(ghVolume, role),
@@ -146,13 +154,14 @@ func legionVolumeNames() []string {
 // AgentSecretsTokenDir are reserved whether or not this deployment enrolls, GHConfigDir whether or
 // not the pod is an issue's, FeedDir, which TreeRoot already covers, is named for the read-only
 // mount every issue pod's container carries there, RolesDir is where an issue pod mounts every
-// role's own volumes, which each role's namespace covers whole, and HomeMountsDir is where an
-// issue pod's roles container mounts what belongs under the home (homeMountsView), which each
-// role's namespace covers too once it has bound each back.
+// role's own volumes, which each role's namespace covers whole, HomeMountsDir is where an issue
+// pod's roles container mounts what belongs under the home (homeMountsView), which each role's
+// namespace covers too once it has bound each back, and RoleProbeDir is the image probe's volume
+// for its role-namespace check.
 func legionMountPaths() []string {
 	paths := []string{
 		TreeRoot, FeedDir, ompSessionsDir, LauncherDir, LauncherPrivateDir, StateDir, xdgConfigHome, ProvidersDir,
-		AgentSecretsKeyDir, AgentSecretsTokenDir, GHConfigDir, RolesDir, HomeMountsDir,
+		AgentSecretsKeyDir, AgentSecretsTokenDir, GHConfigDir, RolesDir, HomeMountsDir, RoleProbeDir,
 	}
 	slices.Sort(paths)
 	return paths
@@ -692,16 +701,21 @@ func (r *Runtime) operatorEnv() []corev1.EnvVar {
 }
 
 // The XDG base directories, at the standard offsets from the image's HOME: what the issue pod's
-// workspace-init is told (xdgEnvironment), the state home xdgStateHome itself there. A role
-// container is told none of the three home-directory ones: its cache and data homes are the
-// issue's scratch's, shared with every other role of the pod, its state home its own directory
-// under that scratch (roleEnvironment), and the config home alone is shared with workspace-init.
-// The config home is the pod's shared in-memory volume: jj keeps a repository's `--repo`
-// configuration under $XDG_CONFIG_HOME/jj/repos/, so what workspace-init sets there
-// (git.abandon-unreachable-commits false, no repository identity) is what the agent's jj reads.
-// It starts empty in every pod, so nothing an agent wrote reaches workspace-init's jj.
+// workspace-init is told (xdgEnvironment), the state home xdgStateHome itself there. A role is
+// told none of the three home-directory ones: its cache and data homes are the issue's
+// scratch's, shared with every other role of the pod, and its state home its own directory under
+// that scratch (roleEnvironment). The config home is the one path a role is told the same as
+// workspace-init. There it is the pod's shared in-memory volume: jj keeps a repository's `--repo`
+// configuration under $XDG_CONFIG_HOME/jj/repos/, so workspace-init writes Legion's settings of the
+// issue's clone there (git.abandon-unreachable-commits false, no repository identity). In an issue
+// pod's roles container that volume is under launcher.HomeMountsDir, which no role sees, and each
+// role's role-init binds the role's own config home at the path instead, a copy of the shared one
+// made once per pod (launcher.ConfigHomeDir): the role's jj reads Legion's settings, and what a
+// role writes there — a git `core.fsmonitor`, a jj alias — never runs in another role's git or
+// jj. The shared volume starts empty in every pod, and no role writes it, so nothing an agent wrote
+// reaches workspace-init's jj.
 const (
-	xdgConfigHome = podHome + "/.config"
+	xdgConfigHome = podHome + "/" + launcher.ConfigHomeDir
 	xdgCacheHome  = podHome + "/.cache"
 	xdgDataHome   = podHome + "/.local/share"
 	xdgStateHome  = podHome + "/.local/state"
@@ -711,8 +725,8 @@ const (
 // workspace-init is told (initEnvironment), the one container of a pod told any of them besides
 // what each role is told — workspace-fetch is told none (fetchEnvironment), and neither is the
 // controller pod's workspace-init (controllerPod.initContainers, podkind.go). A role is told none
-// of them but the config home; its cache and data homes are the issue's scratch's and its state
-// home its own directory there (roleEnvironment).
+// of them but the config home, at whose path it sees its own; its cache and data homes are the
+// issue's scratch's and its state home its own directory there (roleEnvironment).
 func xdgEnvironment() []corev1.EnvVar {
 	return []corev1.EnvVar{
 		{Name: "XDG_CONFIG_HOME", Value: xdgConfigHome},
@@ -748,10 +762,11 @@ const scratchRoot = TreeRoot + "/scratch"
 // role's own (roleStateHome), and for a mechanism rather than caution: Oh My Pi names its browser
 // broker's lock from the state root, the name is an abstract unix socket, and an abstract socket
 // name is one name across every container of the pod, so one state home would block every role's
-// broker but the first. Only the config home is neither the issue's scratch nor the role's: it
-// stays the pod's shared in-memory volume (xdgConfigHome), where workspace-init writes the jj
-// configuration the agents' jj reads. Every directory here outlives the pod, so a later pod of
-// the issue reuses what an earlier one downloaded and built.
+// broker but the first. Only the config home is neither the issue's scratch nor a directory of
+// it: each role sees its own at xdgConfigHome, which role-init seeds from the pod's shared
+// in-memory volume, where workspace-init writes the jj configuration the agents' jj reads. Every
+// directory of the issue's scratch outlives the pod, so a later pod of the issue reuses what an
+// earlier one downloaded and built.
 func roleEnvironment(role claim.Role) []corev1.EnvVar {
 	return []corev1.EnvVar{
 		{Name: "XDG_CONFIG_HOME", Value: xdgConfigHome},
@@ -921,7 +936,8 @@ func (r *Runtime) LaunchBound() time.Duration {
 // API. The secrets broker is told when the runtime enrolls pods. PI_SHELL_PREFIX puts
 // the `legion` directory first on PATH alone: a pod's gh is the image's, so no directory of the
 // issue's volume leads PATH. The GIT_CONFIG pairs are the GitHub credential of every git the role
-// runs, in the issue's clone or outside it (gitCredentialEnv).
+// runs, in the issue's clone or outside it, and the two settings that would run another role's
+// program in it (gitConfigEnv).
 func (r *Runtime) mainEnvironment(l launch) []corev1.EnvVar {
 	spec := l.spec
 	env := l.kind.agentEnv(l)
@@ -946,7 +962,7 @@ func (r *Runtime) mainEnvironment(l launch) []corev1.EnvVar {
 	add("PATH", podPath(legionDir))
 	add("PI_SHELL_PREFIX", shellprefix.For(legionDir))
 	add("GIT_TERMINAL_PROMPT", "0")
-	env = append(env, gitCredentialEnv()...)
+	env = append(env, gitConfigEnv()...)
 	if broker := r.agentSecrets; broker != nil {
 		add("AGENT_SECRETS_URL", broker.URL)
 		add("AGENT_SECRETS_KEY_DIR", AgentSecretsKeyDir)
@@ -978,29 +994,35 @@ func (r *Runtime) mainEnvironment(l launch) []corev1.EnvVar {
 	return env
 }
 
-// gitCredentialPairs are the git configuration entries gitCredentialEnv sets: the helper for
+// gitConfigPairs are the git configuration entries gitConfigEnv sets: the helper for
 // https://github.com reset, then set to `legion git-credential` (workspace.GitHubCredentialHelper),
 // and credential.useHttpPath on for github.com, so git hands the helper the path whose owner picks
-// the token.
-var gitCredentialPairs = [][2]string{
+// the token; then core.fsmonitor off and core.hooksPath at /dev/null, so no git a role runs starts
+// the fsmonitor program or a hook any configuration file names. The issue's roles share the
+// clone, and each can write its `.git/config` and hooks, so without these a `git status` or `git
+// commit` of one role would run a program another planted, with the first role's credentials.
+var gitConfigPairs = [][2]string{
 	{"credential.https://github.com.helper", ""},
 	{"credential.https://github.com.helper", workspace.GitHubCredentialHelper},
 	{"credential.https://github.com.useHttpPath", "true"},
+	{"core.fsmonitor", ""},
+	{"core.hooksPath", "/dev/null"},
 }
 
-// gitCredentialEnv is gitCredentialPairs as GIT_CONFIG_COUNT, GIT_CONFIG_KEY_<n> and
-// GIT_CONFIG_VALUE_<n>, which git reads after every configuration file, as it reads `-c`. Every git
-// a role process runs then answers https://github.com from the role's gh files, in the issue's
-// clone or outside it: a clone the setup command makes (runtime.kubernetes.setup: Oh My Pi's
-// marketplace clone among them), or a repository an agent clones for itself. The reset drops every
-// helper a configuration file names for github.com, the image's or a repository's, and the helper
-// it sets is the one the issue's clone already names, so git in the clone asks what it asked
-// before. Any other host is left to the configuration files. `legion git-credential` answers only
-// an owner of the project, from that owner's directory of LEGION_GH_OWNERS_DIR (ghAgentEnv), and
-// `legion gh` adds its own entry after these (withGitHubUseHTTPPath, cmd/legion/gh.go).
-func gitCredentialEnv() []corev1.EnvVar {
-	env := []corev1.EnvVar{{Name: "GIT_CONFIG_COUNT", Value: strconv.Itoa(len(gitCredentialPairs))}}
-	for i, pair := range gitCredentialPairs {
+// gitConfigEnv is gitConfigPairs as GIT_CONFIG_COUNT, GIT_CONFIG_KEY_<n> and GIT_CONFIG_VALUE_<n>,
+// which git reads after every configuration file, the repository's own `.git/config` among them,
+// as it reads `-c`. Every git a role process runs then answers https://github.com from the role's
+// gh files, in the issue's clone or outside it: a clone the setup command makes
+// (runtime.kubernetes.setup: Oh My Pi's marketplace clone among them), or a repository an agent
+// clones for itself. The reset drops every helper a configuration file names for github.com, the
+// image's or a repository's, and the helper it sets is the one the issue's clone already names, so
+// git in the clone asks what it asked before. Any other host is left to the configuration files.
+// `legion git-credential` answers only an owner of the project, from that owner's directory of
+// LEGION_GH_OWNERS_DIR (ghAgentEnv), and `legion gh` adds its own entry after these
+// (withGitHubUseHTTPPath, cmd/legion/gh.go).
+func gitConfigEnv() []corev1.EnvVar {
+	env := []corev1.EnvVar{{Name: "GIT_CONFIG_COUNT", Value: strconv.Itoa(len(gitConfigPairs))}}
+	for i, pair := range gitConfigPairs {
 		env = append(env,
 			corev1.EnvVar{Name: "GIT_CONFIG_KEY_" + strconv.Itoa(i), Value: pair[0]},
 			corev1.EnvVar{Name: "GIT_CONFIG_VALUE_" + strconv.Itoa(i), Value: pair[1]})

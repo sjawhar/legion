@@ -36,7 +36,9 @@
               "/opt/legion/pi-envoy",
               "--pod-safety",
               "--role-references",
-              "{\"LEGION_PROMPT_AGENTS\":{\"oracle\":[\"roles/core/planner.md\"]},\"LEGION_PROMPT_SKILLS\":{}}"
+              "{\"LEGION_PROMPT_AGENTS\":{\"oracle\":[\"roles/core/planner.md\"]},\"LEGION_PROMPT_SKILLS\":{}}",
+              "--role-namespaces",
+              "/var/run/legion/role-probe"
             ],
             "image": "ghcr.io/sjawhar/legion-worker@sha256:1d10089a0000000000000000000000000000000000000000000000000000beef",
             "name": "probe",
@@ -62,7 +64,13 @@
               "seccompProfile": {
                 "type": "RuntimeDefault"
               }
-            }
+            },
+            "volumeMounts": [
+              {
+                "mountPath": "/var/run/legion/role-probe",
+                "name": "role-probe"
+              }
+            ]
           }
         ],
         "enableServiceLinks": false,
@@ -85,6 +93,12 @@
             "key": "legion.dev/pool",
             "operator": "Equal",
             "value": "legion"
+          }
+        ],
+        "volumes": [
+          {
+            "emptyDir": {},
+            "name": "role-probe"
           }
         ]
       }

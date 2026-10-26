@@ -93,17 +93,19 @@ func CensusLegacyIssueSandboxes(ctx context.Context, rc *rest.Config, namespace,
 }
 
 // rejectLegacyIssueSandboxes refuses the project's Sandboxes whose pod is not one this runtime
-// builds: its containers must be exactly the launcher roles of the kind its labels name
-// (podKindOf), every workflow role for an issue Sandbox and the controller alone for the project
-// controller's, and it must own a volume of its own, the one claim template every Sandbox made now
-// carries (issueVolume). So a per-claim Sandbox of the layout before issue pods (one worker
-// container), the controller Sandbox a daemon before issue pods made (role=controller, one worker
-// container), a pod missing a launcher, one with a container more, a Sandbox whose labels name no
-// kind, and a Sandbox of the tree-volume layout before per-issue volumes (treeVolumeLayout: no
-// claim template, or the tree root's `tree` template, the controller's of that layout included) are
-// each refused. A repository cache's Sandbox (labelled legion.dev/cache) is judged by its own shape
-// alone (cacheSandboxShape), never as a pod of a kind, and refused, as `cache Sandbox <name>`, when
-// it is not one this runtime builds. The refusal names every one of them, each with its reason, and
+// builds: its containers must be exactly the one container of the kind its labels name
+// (podKindOf), `roles` for an issue Sandbox and `controller` for the project controller's, or, for
+// an issue Sandbox alone, one container per workflow role, the layout before one container
+// (earlierLayout), whose pod the next launch of any of its roles replaces (movedLayout); and it
+// must own a volume of its own, the one claim template every Sandbox made now carries
+// (issueVolume). So a per-claim Sandbox of the layout before issue pods (one worker container),
+// the controller Sandbox a daemon before issue pods made (role=controller, one worker container),
+// a pod with any other set of containers, a Sandbox whose labels name no kind, and a Sandbox of
+// the tree-volume layout before per-issue volumes (treeVolumeLayout: no claim template, or the
+// tree root's `tree` template, the controller's of that layout included) are each refused. A
+// repository cache's Sandbox (labelled legion.dev/cache) is judged by its own shape alone
+// (cacheSandboxShape), never as a pod of a kind, and refused, as `cache Sandbox <name>`, when it
+// is not one this runtime builds. The refusal names every one of them, each with its reason, and
 // how many there are, so an operator removes them all before the next boot rather than one per
 // refused boot.
 func rejectLegacyIssueSandboxes(ctx context.Context, sandboxes dynamic.ResourceInterface, project string) error {

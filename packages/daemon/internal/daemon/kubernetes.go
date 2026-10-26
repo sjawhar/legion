@@ -295,9 +295,9 @@ func kubeClient(k config.Kubernetes) (*rest.Config, error) {
 
 // sandboxOptions translates the configuration into the runtime's Options, all but the worker
 // stream's address, the connection directory and the token source, which boot hands the factory.
-// Every role the configuration holds a reservation for — all seven once the loader settled it —
-// gets its container requirements (roleRequirements). lookup is the daemon's environment, which
-// can name the NATS nkey seed (launchSecrets).
+// The issue pod's one container gets runtime.kubernetes.resources.issue as its requirements, and
+// the daemon-launched controller's container runtime.kubernetes.resources.controller (requirements).
+// lookup is the daemon's environment, which can name the NATS nkey seed (launchSecrets).
 func sandboxOptions(cfg config.Config, k config.Kubernetes, project, dispatchToken string, lookup func(string) (string, bool), log *slog.Logger) (sandbox.Options, error) {
 	issueVolume, err := resource.ParseQuantity(k.IssueVolume)
 	if err != nil {

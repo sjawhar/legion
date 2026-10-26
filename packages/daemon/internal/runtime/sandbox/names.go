@@ -71,9 +71,9 @@ const (
 // --roles-dir` reads each role's launcher token there, and `legion launcher role-init` covers the
 // whole directory inside the role's namespaces and binds the role's own gh, private, state and
 // agent-secrets directories back at GHConfigDir, LauncherPrivateDir, StateDir and
-// AgentSecretsKeyDir, and makes the role's home overlay and temporary directories under its
-// directory of RoleHomesDir. The names under it are internal/launcher's layout (launcher.RoleGHDir
-// and its siblings), which both sides read.
+// AgentSecretsKeyDir, and makes the role's home overlay, temporary directories and own config
+// home under its directory of RoleHomesDir. The names under it are internal/launcher's layout
+// (launcher.RoleGHDir and its siblings), which both sides read.
 const (
 	RolesDir     = launcher.FixedRoot + "/roles"
 	RoleHomesDir = RolesDir + "/" + launcher.RoleHomesDir
@@ -81,6 +81,10 @@ const (
 	// or under the image's home (homeMountsView), and where `legion launcher role-init` finds
 	// each to bind it back at its own path under the role's home overlay.
 	HomeMountsDir = launcher.HomeMountsDir
+	// RoleProbeDir is where the image probe's pod mounts a disk volume of its own, as an issue
+	// pod mounts its role homes volume, for `legion probe-image --role-namespaces` to run one role
+	// generation's namespaces over (launcher.CheckRoleNamespaces).
+	RoleProbeDir = launcher.FixedRoot + "/role-probe"
 )
 
 // roleDir is role's own directory of an issue pod's one container, under RolesDir: its launcher

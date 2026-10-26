@@ -3,7 +3,9 @@ package sandbox
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"flag"
+	"io/fs"
 	"maps"
 	"os"
 	"os/exec"
@@ -577,10 +579,11 @@ func TestTheInitContainersPathNamesNoIssueVolumeDirectory(t *testing.T) {
 
 // jj keeps a repository's `--repo` configuration under $XDG_CONFIG_HOME, so what workspace-init
 // sets there reaches the agent's jj only when both containers have one config home, on a volume
-// both mount (#1258 deep review, finding 4). It is in memory, so every pod's starts empty and
-// nothing an agent wrote reaches workspace-init's jj. The config home is the one home the two
-// agree on: a role's cache and data homes are the issue's scratch's on the issue's
-// volume and its state home its own directory there
+// both mount (#1258 deep review, finding 4); each role's role-init seeds the role's own config
+// home from it (TestEveryRoleIsToldTheConfigHomeItsRoleInitMakesItsOwn). It is in memory, so every
+// pod's starts empty and nothing an agent wrote reaches workspace-init's jj. The config home is
+// the one home the two agree on: a role's cache and data homes are the issue's scratch's on the
+// issue's volume and its state home its own directory there
 // (TestTheIssuesRolesShareOneScratchAndOneGoCachePair,
 // TestEachRolesAgentIsToldAStateHomeOfItsOwn), while the setup containers keep the image's home
 // directory ones, so nothing of the issue's scratch reaches a container that holds the
@@ -614,8 +617,8 @@ func TestBothContainersShareOneInMemoryXDGConfigHome(t *testing.T) {
 			}
 		}
 	}
-	// The issue pod's roles container holds the config home under HomeMountsDir, where every
-	// role's namespace binds it back at XDG_CONFIG_HOME (homeMountsView).
+	// The issue pod's roles container holds the config home under HomeMountsDir, which each
+	// role's role-init copies into the role's own config home at XDG_CONFIG_HOME (homeMountsView).
 	volumeAt := func(c corev1.Container, path string) string {
 		for _, mount := range c.VolumeMounts {
 			if mount.MountPath == path {
@@ -633,6 +636,122 @@ func TestBothContainersShareOneInMemoryXDGConfigHome(t *testing.T) {
 			t.Fatalf("the config home's volume %q is not an in-memory emptyDir: %+v", shared, volume.VolumeSource)
 		}
 	}
+}
+
+// Every role is told the config home at the image's home where its role-init binds the role's own
+// (launcher.ConfigHomeDir), never a path of the issue's volume or scratch, which every role of the
+// pod writes: a git `core.fsmonitor` one role set in a config home the roles shared ran in every
+// sibling's `git status`, with the sibling's credentials.
+func TestEveryRoleIsToldTheConfigHomeItsRoleInitMakesItsOwn(t *testing.T) {
+	r, err := configure(goldenOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, role := range launcherRoles {
+		if got, want := envOf(workerOf(t, r, roleSpec(t, role)))["XDG_CONFIG_HOME"], launcher.Home+"/"+launcher.ConfigHomeDir; got != want {
+			t.Errorf("%s's agent is told XDG_CONFIG_HOME=%q, want %q, where its role-init binds its own", role, got, want)
+		}
+	}
+}
+
+// The issue's roles share one clone, and any of them can write its `.git/config` and hooks, or a
+// git configuration in any config home it reaches. So every role's git is told, at command scope,
+// which git reads after every configuration file, to start no fsmonitor program and no hook: a
+// real git run with exactly the role's GIT_CONFIG pairs, in a clone whose `.git/config` and global
+// configuration name a recording fsmonitor and a recording hooks directory, runs neither through
+// `git status` and `git commit`. The same git without the pairs runs both, so the plant is live.
+func TestEveryRolesGitRunsNoProgramAnotherRolePlanted(t *testing.T) {
+	git, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatalf("this test runs the real git: %v", err)
+	}
+	r, err := configure(goldenOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	sink := filepath.Join(dir, "ran")
+	recorder := func(name string) string {
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, []byte("#!/bin/sh\necho "+name+" >> '"+sink+"'\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	monitor := recorder("fsmonitor")
+	hooks := filepath.Join(dir, "hooks")
+	if err := os.MkdirAll(hooks, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, hook := range []string{"pre-commit", "post-commit"} {
+		if err := os.Rename(recorder(hook), filepath.Join(hooks, hook)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	home, configHome, clone := filepath.Join(dir, "home"), filepath.Join(dir, "config"), filepath.Join(dir, "clone")
+	planted := "[core]\n\tfsmonitor = " + monitor + "\n\thooksPath = " + hooks + "\n"
+	if err := os.MkdirAll(filepath.Join(configHome, "git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(configHome, "git", "config"), []byte(planted), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(home, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	base := []string{"PATH=" + os.Getenv("PATH"), "HOME=" + home, "XDG_CONFIG_HOME=" + configHome, "GIT_CONFIG_NOSYSTEM=1",
+		"GIT_AUTHOR_NAME=a", "GIT_AUTHOR_EMAIL=a@example.invalid", "GIT_COMMITTER_NAME=a", "GIT_COMMITTER_EMAIL=a@example.invalid"}
+	run := func(env []string, args ...string) {
+		t.Helper()
+		cmd := exec.Command(git, args...)
+		cmd.Dir, cmd.Env = clone, env
+		if output, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, output)
+		}
+	}
+	if output, err := exec.Command(git, "init", "--quiet", clone).CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v\n%s", err, output)
+	}
+	if err := os.WriteFile(filepath.Join(clone, ".git", "config"), append(mustRead(t, filepath.Join(clone, ".git", "config")), planted...), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ran := func() string {
+		body, err := os.ReadFile(sink)
+		if errors.Is(err, fs.ErrNotExist) {
+			return ""
+		} else if err != nil {
+			t.Fatal(err)
+		}
+		_ = os.Remove(sink)
+		return strings.Join(strings.Fields(string(body)), " ")
+	}
+	run(base, "status")
+	run(base, "commit", "--quiet", "--allow-empty", "-m", "control")
+	if got := ran(); !strings.Contains(got, "fsmonitor") || !strings.Contains(got, "pre-commit") || !strings.Contains(got, "post-commit") {
+		t.Fatalf("without the role's pairs the planted programs ran %q, want the fsmonitor and both hooks: the plant is not live", got)
+	}
+	for _, role := range launcherRoles {
+		env := slices.Clone(base)
+		for name, value := range envOf(workerOf(t, r, roleSpec(t, role))) {
+			if strings.HasPrefix(name, "GIT_CONFIG_") {
+				env = append(env, name+"="+value)
+			}
+		}
+		run(env, "status")
+		run(env, "commit", "--quiet", "--allow-empty", "-m", string(role))
+		if got := ran(); got != "" {
+			t.Errorf("%s's git ran %q, programs another role planted in the clone's and the global configuration", role, got)
+		}
+	}
+}
+
+func mustRead(t *testing.T, path string) []byte {
+	t.Helper()
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return body
 }
 
 // The roles of one issue pod share the pod's network namespace, the workspace path, the
@@ -1144,7 +1263,7 @@ func TestRuntimeOwnedIsWhatTheWorkerContainerIsToldByTheRuntime(t *testing.T) {
 // address configured: each address-valued argument of every launcher's command and of the
 // generation's worker-shim argv (the words before `--`), by its flag, and each address-valued
 // variable the runtime itself sets in the generation's environment, an address being a value with a
-// scheme. The git credential entries (gitCredentialEnv) are not addresses but git configuration
+// scheme. The git configuration entries (gitConfigEnv) are not addresses but git configuration
 // keys the binary fixes, `credential.https://github.com.helper` among them, so no configuration
 // moves them. An address added to a launch and not to handedAddresses is one the daemon could move
 // without any role it re-adopts being relaunched (evaluate). A workflow role's launch and the
@@ -1177,7 +1296,7 @@ func TestHandedAddressesAreEveryAddressAPodCarries(t *testing.T) {
 				}
 			}
 			gitConfig := map[string]bool{}
-			for _, entry := range gitCredentialEnv() {
+			for _, entry := range gitConfigEnv() {
 				gitConfig[entry.Name] = true
 			}
 			for _, pair := range start.Env {
