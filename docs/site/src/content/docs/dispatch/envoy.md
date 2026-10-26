@@ -173,6 +173,11 @@ without the route answers `404`, and one whose NATS user lacks the permission an
 code `REPLAY_UNAVAILABLE`: the session then says once, as a warning, that missed messages are not
 recovered, and live delivery goes on as before. A session on an older plugin recovers nothing.
 
+The listener trusts the session id a replay names, as it trusts it on every `/v1` route: there is
+no per-session secret, so whoever can reach the listener and knows a live session's id can read
+that session's stored inbox for the last 72 hours. It refuses a wildcard id, another session's
+inbox reached through a registered topic, and every failed-delivery lane.
+
 ## The NATS grant a Legion daemon needs
 
 Legion's daemon reads Dispatch and GitHub events from the stream through two durable consumers

@@ -729,9 +729,9 @@
   build stored with such a topic is cleaned at the session's next registration: the registry drops
   every such topic from the merged row, not only from the incoming topics, as do a role claim and
   an unsubscribe that rewrite the row, so the fan-out stops reaching the session after its next
-  heartbeat. pi-envoy and claude-envoy no longer register or replay a topic reaching another
-  session's agent subject (`coversAnotherAgentSubject` in `@legion/envoy-client/replay`)
-  (INFRA-439).
+  heartbeat. pi-envoy and claude-envoy no longer register or replay a topic reaching a private
+  stream subject other than their own agent subject (`reachesPrivateStreamSubject` in
+  `@legion/envoy-client/replay`, mirroring `bus.ReachesPrivateStreamSubject`) (INFRA-439).
 - **Breaking (local development):** `agent-secrets-devrelay` presents a listed caller's own
   ServiceAccount token, read from `--account-token-file` (default
   `$AGENT_SECRETS_ACCOUNT_TOKEN_FILE`), in place of the shared bearer the broker no longer takes. A
