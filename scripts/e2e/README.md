@@ -15,14 +15,15 @@ shared devbox, where an unbounded container takes cores and memory from every ot
 Every scratch Postgres keeps its data directory on `tmpfs`, so no run leaves a volume behind, and
 tmpfs is charged to the container's memory. Every scratch Postgres gets `--cpus 2 --memory 2g`,
 except the session databases of Stage 4a and Stage 4b, which get `--cpus 2 --memory 4g`: they hold
-every pod's Oh My Pi session for the whole run, hours for Stage 4b. NATS gets `--cpus 1 --memory
+every pod's Oh My Pi session for the whole run, hours for Stage 4b. NATS gets `--cpus 1` (0.5 in `lib/nats-stream.test.ts`) `--memory
 512m`, enough for one run's JetStream streams. A kind proof's containers on the kind network get
 `--cpus 2 --memory 2g`: each runs one static binary from the work directory, a Go test driver that
 runs the daemon against the cluster or, in `share-volumes-kind.sh`'s probe, `legion probe-boot`.
 The one exception is kind's node container, which `kind create cluster` starts
 ([`lib/kind-sandbox.sh`](#libkind-sandboxsh)): it has no limit, because the kubelet inside it
-reads the host's capacity, not a cgroup cap. The test pods declare 8 to 32 Gi memory limits, so a
-cap on the node would kill those pods without the kubelet knowing why.
+reads the host's capacity, not a cgroup cap. `burstable-kind.sh`'s pods declare memory limits of
+19 Gi and 32 Gi, which the kubelet admits against the host's memory; a smaller cap on the node lets
+the kernel kill pod processes below their own limits, and the kubelet does not see why.
 
 | script | proves |
 | :--- | :--- |
