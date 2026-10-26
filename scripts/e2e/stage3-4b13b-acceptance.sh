@@ -388,8 +388,9 @@ production_audit() {
   audited=1
   sessions=$(rig_sessions_json)
   printf '%s\n' "$sessions" >"$evidence/rig-sessions.json"
-  envoy=$(curl -fsS --max-time 10 "$prod_envoy_url/v1/sessions" |
-    jq -c --argjson ids "$sessions" --arg work "$work" '[.[] | select((.session_id as $s | $ids | index($s)) or ((.dir // "") | startswith($work)))]')
+  # A non-200 (the refilling 503 included) is a list the audit could not read, never an empty one.
+  envoy=$(curl -fsS --max-time 10 "$prod_envoy_url/v1/sessions") || { printf 'could not read %s/v1/sessions\n' "$prod_envoy_url"; return 1; }
+  envoy=$(jq -c --argjson ids "$sessions" --arg work "$work" '[.[] | select((.session_id as $s | $ids | index($s)) or ((.dir // "") | startswith($work)))]' <<<"$envoy")
   printf '%s\n' "$envoy" >"$evidence/production-envoy-rig-sessions.json"
   if [ "$envoy" != "[]" ]; then printf 'production Envoy listener holds rig sessions: %s\n' "$envoy"; found=1; fi
   if [ "$prod_baseline" = none ]; then printf 'no user-level Dispatch configuration\n'; return "$found"; fi
@@ -1199,7 +1200,7 @@ cap_exceeded=$(grep -c 'CAP_EXCEEDED' "$evidence/logs/daemon.log" || true)
 printf '%s\n' "$cap_exceeded" >"$evidence/daemon-log-cap-exceeded-count.txt"
 [ "$cap_exceeded" = 0 ] || soft "the daemon log carries $cap_exceeded CAP_EXCEEDED line(s): Dispatch refused a message the daemon sent"
 note "daemon log CAP_EXCEEDED lines: $cap_exceeded (before the READY cap, the daemon logged the READY packet's refusal on every outbox attempt)"
-production_audit || fail "the rig touched production; see $evidence/production-dispatch-audit.json"
+production_audit || fail "the rig touched production, or the audit could not check it; the reason is above (see $evidence/production-dispatch-audit.json)"
 pass
 
 begin services-stopped
