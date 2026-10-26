@@ -22,6 +22,15 @@ Extends docs/solutions/daemon/omp-pin-bump-behavioral-proof.md (3c: a handoff-on
 a second code push that changes a later layer rebuilds from that layer down and prints `#<n> CACHED` for every
 step above it, so the proof of one step and the proof of another can live in two runs at two heads.
 
+**Changed 2026-10-26:** a pull request's image build no longer writes the cache (`worker-image.yaml`,
+`cache-to` only off `pull_request`), because a newer head can now cancel it in the middle of an
+upload. A `CACHED` step in a pull request's run comes from a layer main's builds cached. It comes
+from an earlier head of the same pull request only while an entry written before the change
+survives eviction. So a later head usually rebuilds the earlier head's layers and prints their
+output again, and the reuse in the evidence below, where a second head reused the first head's
+layer, is no longer the normal case inside one pull request. The rest of this note, how to find
+a step's output when it is `CACHED`, still holds.
+
 - Before quoting a `RUN` step's output from a `Worker Image` log, find its step line (`#<n> [stage-5 2/22] RUN
   apt-get …`) and check whether the next line is `#<n> CACHED`. If it is, the output is in the newest run where
   that step was not cached; cite that run id and head beside the head's run, and say the step text is identical
@@ -30,13 +39,6 @@ step above it, so the proof of one step and the proof of another can live in two
   `plugin` stage's `jq`, for its `omp.extensions` rewrite) prints one too, and it never reaches the runtime
   image. The runtime stage's lines are the ones that distinguish before from after; a `grep -c` over the whole
   log does not.
-
-  **Changed 2026-10-26:** a pull request's image build no longer writes the cache (`worker-image.yaml`,
-  `cache-to` only off `pull_request`), because a newer head can now cancel it in the middle of an
-  upload. A `CACHED` step in a pull request's run now comes from a layer main's builds cached, never
-  from an earlier head of the same pull request. An earlier head's layers are rebuilt and print
-  their output again, so the evidence below, where a second head reused the first head's layer, can
-  no longer happen inside one pull request.
 
 ## Evidence
 

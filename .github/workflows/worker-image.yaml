@@ -201,13 +201,14 @@ jobs:
           push: true
           cache-from: type=gha
           # A pull request's build reads the cache main's builds write but writes none itself. A newer
-          # head can cancel this build (the job's concurrency above), and a build cancelled while it
-          # uploads to the cache can leave a cache entry reserved and never written. The cache library
-          # BuildKit uses cannot discard such an entry and answers a later save of the same key with
-          # "already exists", so the next head's export could index a blob that never landed.
-          # On 2026-10-26, for 36 pull requests with image builds between 05:22Z and 10:16Z, the later
-          # builds took no less time than the first (median 13.6 min against 12.8), so the per-PR
-          # cache saved nothing measurable.
+          # head can cancel this build (the job's concurrency above), and a build cancelled between
+          # reserving a cache entry and committing it leaves the entry reserved. GitHub's cache service
+          # answers a later save of that key with `already_exists` and keeps it reserved for up to 24
+          # hours. BuildKit takes that answer as "already saved", so the next head's export could
+          # index a blob that never landed. On 2026-10-26 the per-PR cache also cost more than it
+          # gave: the 14 successful pull request builds created 08:32-08:59Z each spent 6.1-11.3 min
+          # (median 9.3) in "exporting to GitHub Actions Cache", and 13 of them printed no `CACHED`
+          # step. This change's own build without the export took 5.6 min.
           cache-to: ${{ github.event_name != 'pull_request' && 'type=gha,mode=max' || '' }}
           tags: ${{ steps.meta.outputs.tags }}
           # org.opencontainers.image.source is the Dockerfile's LABEL (the in-repo convention).

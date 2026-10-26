@@ -49,10 +49,9 @@ once before the fix lands" is therefore two pushes, not a local run.
 - A fix inside the apt `RUN` rebuilds every layer below it, so the fix push's run is cold and is the
   one whose later steps print; the next head's run reused them and printed `CACHED`
   (docs/solutions/daemon/a-cached-image-layer-s-output-is-in-the-run-that-built-it-cite-both-runs-LEGION-764.md).
-  Cite both runs. Since 2026-10-26 a pull request's image build writes no cache. A later head of
-  the same pull request reuses only the layers main's builds cached, so it rebuilds the fix's
-  layers and prints their output again. Push the next head only after the fix run has completed: a
-  head pushed earlier cancels the cold build this bullet tells you to cite.
+  Since 2026-10-26 a pull request's image build writes no cache. A later head of the same pull
+  request reuses only the layers main's builds cached, so it rebuilds the fix's layers and prints
+  the same lines again. Cite the fix run, or the run of the head you rely on.
 
 ## Evidence
 
