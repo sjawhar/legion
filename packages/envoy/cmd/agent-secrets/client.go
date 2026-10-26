@@ -23,6 +23,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -95,8 +97,9 @@ func (e *apiError) Permanent() bool {
 // stale AGENT_SECRETS_URL otherwise reads a bare DNS error as a broker that is down and the stale
 // value goes unnoticed.
 type unreachableError struct {
-	// what classifies the failure: a failed name resolution, nothing answered, nothing answered in
-	// time, or a peer answered but the exchange failed.
+	// what classifies the failure: a failed name resolution, no connection made, nothing answered
+	// in time, a peer that answered but failed the exchange, or a request that failed in a way
+	// none of those names.
 	what string
 	// base is the broker's address as AGENT_SECRETS_URL gave it, method and url the call tried.
 	base, method, url string
@@ -110,10 +113,13 @@ func (e *unreachableError) Error() string {
 
 func (e *unreachableError) Unwrap() error { return e.cause }
 
-// unreachable classifies a failed HTTP exchange. A name resolver that timed out or returned an
-// error is still name resolution, before the generic net.Error timeout branch; and a peer that
-// did answer the connection but failed HTTP or TLS has a different recovery from a broker whose
-// address nothing listened on.
+// unreachable classifies a failed HTTP exchange, sending its reader to the layer that failed.
+// Any resolver error is name resolution, before the generic timeout branch. A dial that made no
+// connection (refused, network or host unreachable, any other dial error) is a non-answer, which
+// routing or a listener fixes. Only what proves a peer answered - a TLS record or certificate
+// error, EOF, or a reset once the connection existed - is "answered but the exchange failed",
+// which TLS or a proxy fixes. An error that fits none says no more than that the request failed,
+// rather than name a layer it cannot prove.
 func unreachable(base, method, callURL string, err error) error {
 	cause := err
 	var wrapped *url.Error
@@ -121,20 +127,43 @@ func unreachable(base, method, callURL string, err error) error {
 		cause = wrapped.Err
 	}
 	host := brokerHost(base)
+	failed := func(what string) error { return &unreachableError{what, base, method, callURL, cause} }
 	var dns *net.DNSError
 	var timeout net.Error
+	var op *net.OpError
 	switch {
 	case errors.As(err, &dns) && dns.IsNotFound:
-		return &unreachableError{"the broker's host " + host + " does not resolve", base, method, callURL, cause}
+		return failed("the broker's host " + host + " does not resolve")
 	case errors.As(err, &dns):
-		return &unreachableError{"the broker's host " + host + " name resolution failed", base, method, callURL, cause}
+		return failed("the broker's host " + host + " name resolution failed")
 	case errors.Is(err, syscall.ECONNREFUSED):
-		return &unreachableError{"nothing answered at " + host + ": the connection was refused", base, method, callURL, cause}
+		return failed("nothing answered at " + host + ": the connection was refused")
 	case errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &timeout) && timeout.Timeout()):
-		return &unreachableError{"the broker at " + host + " did not answer in time", base, method, callURL, cause}
+		return failed("the broker at " + host + " did not answer in time")
+	case errors.Is(err, syscall.ENETUNREACH), errors.Is(err, syscall.EHOSTUNREACH),
+		errors.As(err, &op) && op.Op == "dial":
+		return failed("nothing answered at " + host + ": no connection could be made")
+	case peerAnswered(err):
+		return failed("the broker at " + host + " answered but the exchange failed")
 	default:
-		return &unreachableError{"the broker at " + host + " answered but the exchange failed", base, method, callURL, cause}
+		return failed("the request to the broker at " + host + " failed")
 	}
+}
+
+// peerAnswered reports whether err shows a peer took the connection and then broke the exchange:
+// a TLS record that is not TLS (an HTTP server answering an https URL), a TLS alert or certificate
+// it would not trust, or the stream ending or being reset once it existed.
+func peerAnswered(err error) bool {
+	var record tls.RecordHeaderError
+	var alert tls.AlertError
+	var verify *tls.CertificateVerificationError
+	var authority x509.UnknownAuthorityError
+	var hostname x509.HostnameError
+	var invalid x509.CertificateInvalidError
+	return errors.As(err, &record) || errors.As(err, &alert) || errors.As(err, &verify) ||
+		errors.As(err, &authority) || errors.As(err, &hostname) || errors.As(err, &invalid) ||
+		errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) ||
+		errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.EPIPE)
 }
 
 // do sends the request and, on a 2xx response, returns its raw body; any other status decodes

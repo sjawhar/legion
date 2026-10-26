@@ -10,6 +10,8 @@ package main
 import (
 	"bufio"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"io"
 	"net"
@@ -256,22 +258,34 @@ func TestABrokerThatCannotBeReachedSaysSo(t *testing.T) {
 }
 
 // TestEveryUnreachableFailureIsClassified keeps a failed name lookup distinct from a broker that
-// timed out, and both distinct from a peer that answered the connection but failed the exchange.
-// An agent fixing a stale AGENT_SECRETS_URL needs to know which it is; saying an address resolves
-// after DNS itself timed out or returned SERVFAIL sends that agent to the wrong layer.
+// timed out, a dial that made no connection distinct from a peer that answered and then failed the
+// exchange, and an error none of those covers worded as no more than a failed request. Each class
+// sends a reader to a different layer: DNS, routing or a listener, TLS or a proxy.
 func TestEveryUnreachableFailureIsClassified(t *testing.T) {
 	const base = "https://secrets.internal.example"
+	const answered = "answered but the exchange failed"
+	dial := func(errno syscall.Errno) error {
+		return &net.OpError{Op: "dial", Net: "tcp", Err: os.NewSyscallError("connect", errno)}
+	}
 	for _, row := range []struct {
-		name string
-		err  error
-		want string
+		name    string
+		err     error
+		want    string
+		notWant string
 	}{
-		{"no such host", &net.DNSError{Err: "no such host", Name: "secrets.internal.example", IsNotFound: true}, "does not resolve"},
-		{"DNS timeout", &net.DNSError{Err: "i/o timeout", Name: "secrets.internal.example", IsTimeout: true}, "name resolution failed"},
-		{"DNS server failure", &net.DNSError{Err: "server misbehaving", Name: "secrets.internal.example", IsTemporary: true}, "name resolution failed"},
-		{"refused", syscall.ECONNREFUSED, "the connection was refused"},
-		{"timed out", context.DeadlineExceeded, "did not answer in time"},
-		{"an answered exchange failed", io.EOF, "answered but the exchange failed"},
+		{"no such host", &net.DNSError{Err: "no such host", Name: "secrets.internal.example", IsNotFound: true}, "does not resolve", ""},
+		{"DNS timeout", &net.DNSError{Err: "i/o timeout", Name: "secrets.internal.example", IsTimeout: true}, "name resolution failed", ""},
+		{"DNS server failure", &net.DNSError{Err: "server misbehaving", Name: "secrets.internal.example", IsTemporary: true}, "name resolution failed", ""},
+		{"refused", dial(syscall.ECONNREFUSED), "the connection was refused", answered},
+		{"network unreachable", dial(syscall.ENETUNREACH), "nothing answered at secrets.internal.example: no connection could be made", answered},
+		{"host unreachable", dial(syscall.EHOSTUNREACH), "nothing answered at secrets.internal.example: no connection could be made", answered},
+		{"any other dial failure", &net.OpError{Op: "dial", Net: "tcp", Err: errors.New("socket: too many open files")}, "no connection could be made", answered},
+		{"timed out", context.DeadlineExceeded, "did not answer in time", answered},
+		{"an HTTP answer to HTTPS", tls.RecordHeaderError{Msg: "first record does not look like a TLS handshake"}, answered, ""},
+		{"an untrusted certificate", &tls.CertificateVerificationError{Err: x509.UnknownAuthorityError{}}, answered, ""},
+		{"EOF after the request", io.EOF, answered, ""},
+		{"a reset after the request", &net.OpError{Op: "read", Net: "tcp", Err: os.NewSyscallError("read", syscall.ECONNRESET)}, answered, ""},
+		{"an error none of these covers", errors.New("something unforeseen"), "the request to the broker at secrets.internal.example failed", "answered"},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			err := unreachable(base, http.MethodGet, base+"/v1/enrollments/self", &url.Error{Op: "Get", URL: base, Err: row.err})
@@ -283,6 +297,9 @@ func TestEveryUnreachableFailureIsClassified(t *testing.T) {
 				if !strings.Contains(err.Error(), want) {
 					t.Fatalf("message %q does not name %q", err, want)
 				}
+			}
+			if row.notWant != "" && strings.Contains(err.Error(), row.notWant) {
+				t.Fatalf("message %q says %q, which this failure is not", err, row.notWant)
 			}
 		})
 	}

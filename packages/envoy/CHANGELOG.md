@@ -23,7 +23,9 @@
   under the person's own sign-in, lists each version as before).
 - A broker call that did not complete says what failed, rather than leaving a bare transport error
   to read as a broker refusal: the host does not resolve, name resolution failed, the connection
-  was refused, nothing answered in time, or a peer answered but the HTTP/TLS exchange failed. It
+  was refused, no connection could be made (network or host unreachable, or any other dial error),
+  nothing answered in time, or a peer answered and then broke the exchange (TLS, an HTTP answer to
+  https, EOF or a reset after the request); any other error says only that the request failed. It
   names the method and URL it tried, and that `AGENT_SECRETS_URL` named that address, so a session
   that inherited a stale address reads a stale address. Such a message carries no `asked the
   broker …` trailer: the broker refused nothing. A local helper refusal or dead helper socket names
