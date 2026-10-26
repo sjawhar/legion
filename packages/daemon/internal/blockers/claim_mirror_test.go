@@ -52,8 +52,9 @@ func TestMirrorWritesTheClaimAnIssueEventShows(t *testing.T) {
 }
 
 // Dispatch's issue.claimed and issue.released move the claim of a mirrored issue and nothing else
-// of its row, a claim event older than the claim held changes nothing, and one for an issue the
-// mirror has no row of writes none.
+// of its row, and a claim event older than the claim held changes nothing. One for an issue the
+// mirror has no row of makes no row, but is kept: the issue's own older event, delivered after it,
+// shows that claim rather than the older one it carries.
 func TestMirrorWritesTheClaimOfAClaimEvent(t *testing.T) {
 	pool := migratedPool(t)
 	records := record.NewStore()
@@ -81,6 +82,10 @@ func TestMirrorWritesTheClaimOfAClaimEvent(t *testing.T) {
 	apply(intake.DispatchClaim{Key: "LEGION-900", Seq: 8})
 	if holder, seq := claimOf(t, mirrored(t, pool, records), "LEGION-900"); holder != "" || seq != 8 {
 		t.Fatalf("claim after the release = %q at %d, want nobody at 8", holder, seq)
+	}
+	apply(intake.DispatchIssue{Key: "LEGION-902", Seq: 2, Status: "todo", ClaimKnown: true})
+	if holder, seq := claimOf(t, mirrored(t, pool, records), "LEGION-902"); holder != "user:alice" || seq != 3 {
+		t.Fatalf("claim of LEGION-902 after its older first event = %q at %d, want user:alice at 3", holder, seq)
 	}
 }
 

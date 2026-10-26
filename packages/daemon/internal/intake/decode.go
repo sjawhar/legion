@@ -301,26 +301,14 @@ func decodeDispatchEvent(event dispatchEvent, unread *[]string) (Fact, error) {
 		}
 		return IssueDeployed{Issue: event.IssueKey, Repo: deployed.Repo, Number: deployed.Number, RunID: deployed.RunID, CompletedAt: completedAt.UTC()}, nil
 	case "ask.opened":
-		var ask struct {
-			ID     string `json:"id"`
-			Kind   string `json:"kind"`
-			Author struct {
-				Kind string `json:"kind"`
-				ID   string `json:"id"`
-			} `json:"author"`
-			Restored bool `json:"restored"`
+		ask, err := decodeAskPayload(event, unread)
+		if err != nil {
+			return nil, err
 		}
-		if err := json.Unmarshal(event.Payload, &ask); err != nil {
-			return nil, fmt.Errorf("decode Dispatch ask.opened payload: %w", err)
-		}
-		if ask.ID == "" {
-			return nil, fmt.Errorf("Dispatch ask.opened payload has no id")
-		}
-		kind := askKind(ask.Kind, unread)
 		// Settlement restoring a decision block it retracted appends ask.opened with the block's
 		// original author: nobody asked anything, so it is the ask's state alone.
 		if ask.Restored {
-			return DispatchAskRestored{Key: event.IssueKey, Ask: ask.ID, Kind: kind, Open: true, Mark: event.mark()}, nil
+			return DispatchAskRestored{Key: event.IssueKey, Ask: ask.ID, Kind: ask.kind, Artifact: ask.artifact(), Open: true, Mark: event.mark()}, nil
 		}
 		session := ""
 		if ask.Author.Kind == "session" {
@@ -329,43 +317,45 @@ func decodeDispatchEvent(event dispatchEvent, unread *[]string) (Fact, error) {
 			}
 			session = ask.Author.ID
 		}
-		return DispatchAskOpened{Key: event.IssueKey, Ask: ask.ID, Kind: kind, AuthorSession: session, Mark: event.mark()}, nil
+		return DispatchAskOpened{Key: event.IssueKey, Ask: ask.ID, Kind: ask.kind, Artifact: ask.artifact(), AuthorSession: session, Mark: event.mark()}, nil
 	case "ask.answered", "ask.resolved":
-		var ask struct {
-			ID       string `json:"id"`
-			Kind     string `json:"kind"`
-			Restored bool   `json:"restored"`
+		ask, err := decodeAskPayload(event, unread)
+		if err != nil {
+			return nil, err
 		}
-		if err := json.Unmarshal(event.Payload, &ask); err != nil {
-			return nil, fmt.Errorf("decode Dispatch %s payload: %w", event.Type, err)
-		}
-		if ask.ID == "" {
-			return nil, fmt.Errorf("Dispatch %s payload has no id", event.Type)
-		}
-		kind := askKind(ask.Kind, unread)
 		// Settlement restoring a decision block it retracted appends ask.answered with the answer
 		// given before the retraction, credited to the editor who restored the block: nobody
 		// answered anything, so it is the ask's state alone.
 		if ask.Restored {
-			return DispatchAskRestored{Key: event.IssueKey, Ask: ask.ID, Kind: kind, Mark: event.mark()}, nil
+			return DispatchAskRestored{Key: event.IssueKey, Ask: ask.ID, Kind: ask.kind, Artifact: ask.artifact(), Mark: event.mark()}, nil
 		}
-		return DispatchAskClosed{Key: event.IssueKey, Ask: ask.ID, Kind: kind, State: strings.TrimPrefix(event.Type, "ask."),
+		return DispatchAskClosed{Key: event.IssueKey, Ask: ask.ID, Kind: ask.kind, Artifact: ask.artifact(), State: strings.TrimPrefix(event.Type, "ask."),
 			Actor: dispatch.Actor(event.Actor), Mark: event.mark()}, nil
 	case "ask.handed_back":
 		// An approval request its asker returned to the person (Dispatch's handBackApprovalAsk):
 		// whatever the thread held, it now waits on the human, as a session's human-turn reply does.
-		var ask struct {
-			ID   string `json:"id"`
-			Kind string `json:"kind"`
+		ask, err := decodeAskPayload(event, unread)
+		if err != nil {
+			return nil, err
 		}
-		if err := json.Unmarshal(event.Payload, &ask); err != nil {
-			return nil, fmt.Errorf("decode Dispatch ask.handed_back payload: %w", err)
-		}
-		if ask.ID == "" {
-			return nil, fmt.Errorf("Dispatch ask.handed_back payload has no id")
-		}
-		return DispatchAskReply{Key: event.IssueKey, Ask: ask.ID, Kind: askKind(ask.Kind, unread), WaitingOn: "human",
+		return DispatchAskReply{Key: event.IssueKey, Ask: ask.ID, Kind: ask.kind, Artifact: ask.artifact(), WaitingOn: "human",
 			Actor: dispatch.Actor(event.Actor), Mark: event.mark()}, nil
+	case "ask.edited":
+		// An edit changes an ask's turn only when it moves an approval request: Dispatch appends
+		// ask.edited in a version's own transaction for the document's open approval request
+		// (docs.MoveApprovalAsk), and shows a request whose requested_version is below its version
+		// waiting on its agent (approvalMoved in waitingOnExpression). Any other edit, of a question
+		// or of a request still at the version handed to the person, leaves the turn as it was, and
+		// is no fact.
+		ask, err := decodeAskPayload(event, unread)
+		if err != nil {
+			return nil, err
+		}
+		if ask.kind != record.AskApproval || ask.Approval == nil || ask.Approval.ArtifactID == "" ||
+			ask.Approval.RequestedVersion >= ask.Approval.Version {
+			return nil, nil
+		}
+		return DispatchApprovalMoved{Key: event.IssueKey, Ask: ask.ID, Artifact: ask.Approval.ArtifactID, Mark: event.mark()}, nil
 	case "comment.created", "comment.answered":
 		// comment.answered is a reply a session sends through a delivery's callback (Dispatch's
 		// comment_delivery), which joins its thread as comment.created does and carries the same
@@ -451,6 +441,47 @@ func issueEventClaim(raw json.RawMessage, unread *[]string) (string, bool) {
 		return "", false
 	}
 	return claimed.Actor.Kind + ":" + claimed.Actor.ID, true
+}
+
+// askPayload is what the daemon reads of an ask.* event's payload, which is the ask itself
+// (Dispatch's model.AskEventPayload and AskEditEventPayload): its id, its kind, the author of an
+// opening, settlement's restored mark, and an approval request's document with the version it now
+// names and the version its agent last handed to the person.
+type askPayload struct {
+	ID     string `json:"id"`
+	Kind   string `json:"kind"`
+	Author struct {
+		Kind string `json:"kind"`
+		ID   string `json:"id"`
+	} `json:"author"`
+	Restored bool `json:"restored"`
+	Approval *struct {
+		ArtifactID       string `json:"artifact_id"`
+		Version          int    `json:"version"`
+		RequestedVersion int    `json:"requested_version"`
+	} `json:"approval"`
+	kind string
+}
+
+// decodeAskPayload reads event's ask, refusing one with no id, with its kind as askKind keeps it.
+func decodeAskPayload(event dispatchEvent, unread *[]string) (askPayload, error) {
+	var ask askPayload
+	if err := json.Unmarshal(event.Payload, &ask); err != nil {
+		return askPayload{}, fmt.Errorf("decode Dispatch %s payload: %w", event.Type, err)
+	}
+	if ask.ID == "" {
+		return askPayload{}, fmt.Errorf("Dispatch %s payload has no id", event.Type)
+	}
+	ask.kind = askKind(ask.Kind, unread)
+	return ask, nil
+}
+
+// artifact is the document an approval request asks a person to approve, "" for any other ask.
+func (a askPayload) artifact() string {
+	if a.kind != record.AskApproval || a.Approval == nil {
+		return ""
+	}
+	return a.Approval.ArtifactID
 }
 
 // askKind is an ask event's kind as the mirror keeps it: record.AskQuestion or record.AskApproval,

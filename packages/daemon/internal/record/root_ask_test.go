@@ -26,8 +26,8 @@ func TestARootAskMirrorKeepsItsNewestState(t *testing.T) {
 	inTx(t, st, func(tx pgx.Tx) {
 		putRoot(t, ctx, records, tx, "LEGION-1")
 		putRoot(t, ctx, records, tx, "LEGION-2")
-		newer := RootAsk{Issue: "LEGION-1", Ask: "ask-q", Kind: AskQuestion, Open: false, Seq: 12, WaitingOn: "human", WaitingOnSeq: 11,
-			ClosedBy: ClosedByPerson, ClosedSeq: 12, ByTree: true, GateRequest: true, PersonSeq: 9, PersonAnswerSeq: 12}
+		newer := RootAsk{Issue: "LEGION-1", Ask: "ask-q", Kind: AskApproval, Artifact: "artifact-1", Open: false, Seq: 12, WaitingOn: "human",
+			WaitingOnSeq: 11, ClosedBy: ClosedByPerson, ClosedSeq: 12, ByTree: true, PersonSeq: 9, PersonAnswerSeq: 12}
 		must(t, records.PutRootAsk(ctx, tx, newer))
 		for _, older := range []RootAsk{
 			{Issue: "LEGION-1", Ask: "ask-q", Kind: AskQuestion, Open: true, Seq: 10, WaitingOn: "human", WaitingOnSeq: 10, ByTree: true},
@@ -56,35 +56,19 @@ func TestARootAskMirrorKeepsItsNewestState(t *testing.T) {
 	})
 }
 
-// A gate keeps the approval request its registration bound and that request's document, through
-// Gate and GatesForArtifact, and a gate bound to none reads back with none. The request is the
-// gate's only while its document is the gate's (BoundRequest).
-func TestAGateRoundTripsItsApprovalRequest(t *testing.T) {
-	ctx := context.Background()
-	st := migratedStore(t)
-	records := NewStore()
-	inTx(t, st, func(tx pgx.Tx) {
-		putRoot(t, ctx, records, tx, "LEGION-1")
-		bound := DesignGate{Issue: "LEGION-1", ArtifactID: "artifact-1", LatestVersion: 3, RequestAsk: "ask-approval", RequestArtifact: "artifact-1"}
-		must(t, records.PutGate(ctx, tx, bound))
-		got, err := records.Gate(ctx, tx, "LEGION-1")
-		must(t, err)
-		if !reflect.DeepEqual(got, &bound) || got.BoundRequest() != "ask-approval" {
-			t.Fatalf("gate = %#v, want %#v bound to ask-approval", got, bound)
-		}
-		forArtifact, err := records.GatesForArtifact(ctx, tx, "artifact-1")
-		must(t, err)
-		if !reflect.DeepEqual(forArtifact, []DesignGate{bound}) {
-			t.Fatalf("gates for artifact = %#v, want %#v", forArtifact, []DesignGate{bound})
-		}
-		elsewhere := DesignGate{Issue: "LEGION-1", ArtifactID: "artifact-2", LatestVersion: 1, RequestAsk: "ask-approval", RequestArtifact: "artifact-1"}
-		if elsewhere.BoundRequest() != "" {
-			t.Fatalf("gate of artifact-2 naming artifact-1's request binds %q, want none", elsewhere.BoundRequest())
-		}
-		unbound := DesignGate{Issue: "LEGION-1", ArtifactID: "artifact-2", LatestVersion: 1}
-		must(t, records.PutGate(ctx, tx, unbound))
-		if got, err = records.Gate(ctx, tx, "LEGION-1"); err != nil || !reflect.DeepEqual(got, &unbound) {
-			t.Fatalf("gate rebound to none = %#v, %v; want %#v", got, err, unbound)
-		}
-	})
+// An approval request's answer is a review of its document: it answers no root waiting on the
+// person when that document is the root's design gate's, and does for any other document or for a
+// question. PersonSeq's acts count whatever the document.
+func TestAnAnswerOfTheGatesDocumentIsNoPersonsAct(t *testing.T) {
+	request := RootAsk{Kind: AskApproval, Artifact: "artifact-1", PersonSeq: 4, PersonAnswerSeq: 9}
+	if !request.GateRequestOf("artifact-1") || request.PersonActSeq("artifact-1") != 4 {
+		t.Fatalf("the gate's request = %t, act %d; want its answer left out, its other act at 4", request.GateRequestOf("artifact-1"), request.PersonActSeq("artifact-1"))
+	}
+	if request.GateRequestOf("artifact-2") || request.PersonActSeq("artifact-2") != 9 || request.PersonActSeq("") != 9 {
+		t.Fatalf("another document's request acts at %d (no gate: %d), want its answer at 9", request.PersonActSeq("artifact-2"), request.PersonActSeq(""))
+	}
+	question := RootAsk{Kind: AskQuestion, PersonAnswerSeq: 9}
+	if question.GateRequestOf("") || question.PersonActSeq("") != 9 {
+		t.Fatalf("a question's answer acts at %d, want 9", question.PersonActSeq(""))
+	}
 }

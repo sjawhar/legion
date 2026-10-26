@@ -107,6 +107,53 @@ func TestADispatchAskHandedBackIsAHumanTurnReplyFromItsActor(t *testing.T) {
 	}
 }
 
+// Every ask.* event of an approval request carries the document it asks a person to approve, and
+// each decodes with it; a question's events carry none.
+func TestAnApprovalRequestsEventsCarryItsDocument(t *testing.T) {
+	person := map[string]any{"kind": "user", "id": "alice"}
+	approval := map[string]any{"artifact_id": "artifact-7", "version": 3, "requested_version": 3}
+	for _, tc := range []struct {
+		eventType string
+		want      Fact
+	}{
+		{eventType: "ask.opened", want: DispatchAskOpened{Key: "LEGION-7", Ask: "ask-approval", Kind: "approval", Artifact: "artifact-7", Mark: askEventMark}},
+		{eventType: "ask.answered", want: DispatchAskClosed{Key: "LEGION-7", Ask: "ask-approval", Kind: "approval", Artifact: "artifact-7", State: "answered",
+			Actor: dispatch.Actor{Kind: "user", ID: "alice"}, Mark: askEventMark}},
+		{eventType: "ask.handed_back", want: DispatchAskReply{Key: "LEGION-7", Ask: "ask-approval", Kind: "approval", Artifact: "artifact-7", WaitingOn: "human",
+			Actor: dispatch.Actor{Kind: "user", ID: "alice"}, Mark: askEventMark}},
+	} {
+		decoded := decodeEvent(t, tc.eventType, person, map[string]any{"id": "ask-approval", "kind": "approval", "approval": approval})
+		if !reflect.DeepEqual(decoded.Fact, tc.want) {
+			t.Fatalf("%s decoded to %#v, want %#v", tc.eventType, decoded.Fact, tc.want)
+		}
+	}
+	question := decodeEvent(t, "ask.opened", person, map[string]any{"id": "ask-q", "kind": "question", "approval": approval})
+	if opened, ok := question.Fact.(DispatchAskOpened); !ok || opened.Artifact != "" {
+		t.Fatalf("a question's opening decoded to %#v, want no document", question.Fact)
+	}
+}
+
+// Dispatch appends ask.edited for the document's open approval request in a version's own
+// transaction: an edit that leaves requested_version below the version it names moved the request,
+// which Dispatch then shows waiting on its agent, and decodes as that move. Any other edit, of a
+// request still at the version handed to the person or of a question, is no fact.
+func TestAnEditThatMovesAnApprovalRequestDecodesAsItsMove(t *testing.T) {
+	person := map[string]any{"kind": "user", "id": "alice"}
+	moved := decodeEvent(t, "ask.edited", person, map[string]any{"id": "ask-approval", "kind": "approval", "quiet": true,
+		"approval": map[string]any{"artifact_id": "artifact-7", "version": 4, "requested_version": 3}})
+	if want := (DispatchApprovalMoved{Key: "LEGION-7", Ask: "ask-approval", Artifact: "artifact-7", Mark: askEventMark}); !reflect.DeepEqual(moved.Fact, want) {
+		t.Fatalf("a moving edit decoded to %#v, want %#v", moved.Fact, want)
+	}
+	for name, payload := range map[string]map[string]any{
+		"a request at its handed version": {"id": "ask-approval", "kind": "approval", "approval": map[string]any{"artifact_id": "artifact-7", "version": 4, "requested_version": 4}},
+		"a question":                      {"id": "ask-q", "kind": "question"},
+	} {
+		if decoded := decodeEvent(t, "ask.edited", person, payload); decoded.Fact != nil {
+			t.Fatalf("an edit of %s decoded to %#v, want no fact", name, decoded.Fact)
+		}
+	}
+}
+
 // An ask kind the daemon does not know — an event Dispatch recorded before it had questions and
 // approvals, whose kind is `action` — decodes with no kind and names the kind as unread: the ask's
 // event is not poison, and nothing it carries is lost but the kind.

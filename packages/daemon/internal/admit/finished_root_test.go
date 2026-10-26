@@ -182,7 +182,7 @@ func TestAHandedOverChildCarriesItsPhaseGateAndPullRequest(t *testing.T) {
 				for _, put := range []error{
 					records.PutIssue(context.Background(), tx, record.Issue{Key: root, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: root, Project: testProject, Title: root, Phase: phase.Done, Generation: 1, Status: "done", LingerUntil: &until}),
 					records.PutIssue(context.Background(), tx, record.Issue{Key: child, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: root, Project: testProject, Title: child, Parent: &parent, Phase: tc.phase, Generation: 1, Status: "retro", Rank: "B", LastDispatchSeq: 1}),
-					records.PutGate(context.Background(), tx, record.DesignGate{Issue: root, ArtifactID: artifact, LatestVersion: 2, ApprovedVersion: new(2), RequestAsk: "ask-root-approval", RequestArtifact: artifact}),
+					records.PutGate(context.Background(), tx, record.DesignGate{Issue: root, ArtifactID: artifact, LatestVersion: 2, ApprovedVersion: new(2)}),
 					records.PutPullRequest(context.Background(), tx, record.PullRequest{Issue: child, Repo: "acme/widgets", Number: 42, Branch: "legion/LEGION-209", HeadSHA: "head-42", Generation: 1, State: tc.prState}),
 					records.PutHandover(context.Background(), tx, record.Handover{Issue: child, Tree: root, Generation: 1}),
 				} {
@@ -200,9 +200,7 @@ func TestAHandedOverChildCarriesItsPhaseGateAndPullRequest(t *testing.T) {
 			inTx(t, pool, func(tx pgx.Tx) {
 				records := record.NewStore()
 				gate, err := records.Gate(context.Background(), tx, child)
-				// The copy keeps the old root's review state, not its approval request: that ask is
-				// the old root's.
-				if err != nil || gate == nil || gate.ArtifactID != artifact || gate.LatestVersion != 2 || gate.ApprovedVersion == nil || *gate.ApprovedVersion != 2 || gate.RequestAsk != "" || gate.RequestArtifact != "" {
+				if err != nil || gate == nil || gate.ArtifactID != artifact || gate.LatestVersion != 2 || gate.ApprovedVersion == nil || *gate.ApprovedVersion != 2 {
 					t.Fatalf("carried gate = %#v, %v", gate, err)
 				}
 				pr, err := records.PullRequest(context.Background(), tx, child)
