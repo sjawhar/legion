@@ -252,8 +252,8 @@ reviewing until you finish.
     drove and what failed. Name the ask (`dispatch://<REPORT KEY>/ask/<id>`) in the `Production:`
     line and in the summary.
 - **Nothing waits in the session for a deploy.** A `pending` ends the look. Where no wake is
-  queued yet, the daemon suspends your claim with its session kept, and the pod goes and the
-  issue's disk with it; where a wake arrived while the look was open, the next look starts at once
+  queued yet, the daemon suspends your claim with its session kept, and the issue's Sandbox goes
+  with its pod and disk; where a wake arrived while the look was open, the next look starts at once
   on the same pod. Either way the daemon wakes the check (after a suspension a new pod comes back
   on a fresh disk, and your session resumes with a new check task) on Dispatch's
   `issue.deployed` event for the pull request; when the project's `legion.yaml` names the
@@ -281,4 +281,5 @@ reviewing until you finish.
   issue" is the pull request for a closed issue, and a defect reaches Dispatch as the ask above.
   The architect accepted the issue before the merge and is asked nothing after it. `pass` or
   `fail` closes the check: your claim is retired and the issue's Sandbox goes with its pod and
-  disk, for a root as for a child.
+  disk, for a root as for a child. Neither ending retires or suspends anything of an issue back in
+  the workflow (a root reopened inside its linger): its claim and pod are the new run's.

@@ -2415,13 +2415,13 @@ architect, planner, implementer, tester, reviewer, merger), named for its role:
    connection: <why>; reconnecting`, so a connected launcher reads apart from one still dialing.
 
 The pod's disk is declared in the pod template itself, as a generic ephemeral volume
-(`issuePod.diskSource`, `podkind.go`): `ReadWriteOnce`, of `runtime.kubernetes.issue_volume`
+(`issuePod.disk`, `podkind.go`): `ReadWriteOnce`, of `runtime.kubernetes.issue_volume`
 (50Gi by default) and `storage_class`. Kubernetes creates its claim when the pod starts, names it
 `<pod>-issue` after the pod and the volume, makes the pod its owner, and deletes it when the pod
 goes; the claim carries no label, since the Sandbox CRD prunes whatever an ephemeral template's
 `metadata` sets, so an operator finds it by that name and owner and by no selector ([The disk
 dies with its pod](#the-disk-dies-with-its-pod)). An issue's Sandbox owns no
-`volumeClaimTemplates` entry at all (`issuePod.claimTemplates`), and no role's session is on the
+`volumeClaimTemplates` entry at all (`issuePod.disk`), and no role's session is on the
 disk: every session is a row in the session database ([Selecting the store](#selecting-the-store)),
 which is what a role carries from one pod of its issue to the next. `workspace-init` and every
 role container mount the disk at `/legion`. The feed is its `feed` directory:
@@ -3864,7 +3864,7 @@ something an operator's own configuration can size around.
 ### The disk dies with its pod
 
 An issue pod's disk is the pod's own: a generic ephemeral volume declared in its pod template
-(`issuePod.diskSource`, `podkind.go`), whose claim Kubernetes creates when the pod starts and
+(`issuePod.disk`, `podkind.go`), whose claim Kubernetes creates when the pod starts and
 deletes when the pod goes. Its size and class are what they were when an issue's Sandbox owned the
 claim — `runtime.kubernetes.issue_volume` (50Gi by default) and `storage_class`, `ReadWriteOnce` —
 and what changed is who owns it and how long it lives. The claim is named for the pod and the
@@ -3886,7 +3886,7 @@ kubectl -n legion get pvc legion-<project>-<issue key lowercased>-issue \
 `kubectl -n legion get pvc -l legion.dev/issue=<KEY>` answers nothing whatever the issue is doing,
 and so does any other selector over an issue's disk.
 
-An issue's Sandbox owns no `volumeClaimTemplates` entry at all (`issuePod.claimTemplates`), so
+An issue's Sandbox owns no `volumeClaimTemplates` entry at all (`issuePod.disk`), so
 nothing an issue works on is held by an object that outlives its pod. Two claims are still a
 Sandbox's and are untouched by this release: the project controller's,
 `issue-legion-<project>-controller` (`IssueClaimName`, from its Sandbox's one `issue` template,
