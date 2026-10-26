@@ -2,75 +2,51 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-168",
-  "completed": "2026-10-26T10:50:00Z",
-  "round": 9,
-  "headSha": "403f240f20d59c2538399b61e927920288e24697",
-  "handoffHead": "092611db42374cacf7a70110bde8705d5d4a5748",
-  "provider": "anthropic/claude-opus-5-5 answered all 156 assistant turns of the round's 38 sessions and all 19 rules calls (ruleModel), read from each session's own turns and advisor-gate entries.",
-  "fingerprint": "Full round: 3d254fb4… at round 8's 63e6a8b6, 350d9b78… at 092611db, computed by the tester with the skill's command.",
-  "scope": "The architect's brief (10:31Z): drive each of the reviewer's five findings live and confirm each fix, then the five cases once per mode; fail only for a correctness defect in that scope.",
+  "completed": "2026-10-26T11:32:00Z",
+  "round": 10,
+  "headSha": "70bc570bd7e619d19218d5a5eab223a2e3fe6fa7",
+  "handoffHead": "481fcf321798b57ba2e9ec8365899a2d49ff7902",
+  "provider": "anthropic/claude-opus-5-5 answered all 65 assistant turns of the round's 17 sessions and all 14 rules calls (ruleModel), read from each session's own turns and advisor-gate entries.",
+  "fingerprint": "Full round, narrowed by the architect: 350d9b78… at round 9's 092611db, d7b15b3b… at 481fcf32, computed by the tester with the skill's command.",
+  "scope": "The architect's brief (11:14Z): drive the review's two findings at 868cd58b live, each with the pre-fix tree as negative control, then the five cases once per mode; fail only for a correctness defect in that scope.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Finding 3's live proof re-driven independently: the recorded comment form sent as written, the here-document comment form, and a flag-form ask resent as recorded twice, all read as rebuttals. The four findings the implementer pinned with unit tests only (1, 2, 4, 5) were driven live here, each against the pre-fix tree (83ff55cf, pi-envoy and pi-shared extracted with git archive under $TMPDIR/oldgate) as the negative control."
+    "how": "Both findings the implementer pinned with unit tests (no live surface named) were driven live here: the charter-path breaker on six uploads beside a stored #window, and a record in flight at SIGTERM, each on the fixed tree and on a pre-fix tree extracted with git archive."
   },
   "failed": 0,
   "failures": [],
   "proof": [
     {
-      "criterion": "Finding 1: an upload whose stored version holds an ask block cannot trip the breaker on an ask no check judged.",
-      "surface": "Nested headless Oh My Pi sessions in this Legion pod, production Dispatch, dispatch://INFRA-465; the fixed tree and the pre-fix tree.",
-      "command": "RUN_CWD=/legion/scratch/tmp/t6/f1 [EXT=$TMPDIR/oldgate/packages/pi-envoy] /legion/scratch/tmp/t6/run-case.sh 9-f1-<new|old3> block q/f1-<new|old3>.txt: six `dispatch artifact --issue INFRA-465 --name f1-<x>.md --path <file>` uploads, v1.md (#window, with --advisor-rebuttal), v-a.md (+#keep-a no-change), v-b.md (+#keep-b), v-c.md (+#keep-c) three times.",
-      "observed": "Fixed: rebuttal; #keep-a refused no_change; #keep-b refused; #keep-c refused; #keep-c refused again; the third #keep-c upload outcome breaker (revisesForKey 4). Pre-fix: rebuttal; #keep-a refused; #keep-b refused; the first #keep-c upload outcome breaker with no review.",
-      "headSha": "403f240f20d59c2538399b61e927920288e24697",
-      "negativeControl": "The pre-fix tree, same six uploads: the never-judged #keep-c ask went out by the breaker on its first send."
+      "criterion": "Finding 1 (charter path): with a stored #window block, uploads that each add a new ask, rules none and the charter revising: the third upload's new ask is reviewed, never passed by the breaker; an unchanged upload still trips after two charter refusals.",
+      "surface": "Nested headless Oh My Pi session in this Legion pod, block mode, production Dispatch, dispatch://INFRA-465; the fixed tree and the pre-fix tree 868cd58b (code identical to 403f240f) with its own pi-shared under $TMPDIR/oldgate2.",
+      "command": "RUN_CWD=/legion/scratch/tmp/t6/f10 [EXT=$TMPDIR/oldgate2/packages/pi-envoy] /legion/scratch/tmp/t6/run-case.sh 10-c10-<new|old> block q/c10-<new|old>.txt: `dispatch artifact --issue INFRA-465 --name brief-<x>.md --path <file>` six times: brief-v1.md (#window, --advisor-rebuttal), brief-a.md (+#move-a), brief-b.md (+#move-b), brief-c.md three times; each new ask recommends a change and quotes the person's words with no link.",
+      "observed": "Fixed: rebuttal; then four charter refusals (Content 10, ruleOutcome none, revisesForKey 1, 2, 3, 4) for #move-a, #move-b, #move-c, #move-c; the third #move-c upload outcome breaker. Pre-fix: rebuttal; #move-a and #move-b refused; the first #move-c upload outcome breaker, judged by neither check.",
+      "headSha": "70bc570bd7e619d19218d5a5eab223a2e3fe6fa7",
+      "negativeControl": "The pre-fix tree under the same six uploads passed the never-judged #move-c on its first send."
     },
     {
-      "criterion": "Finding 2: a rebutted dispatch comment does not re-arm Envoy's run-end ask check.",
-      "surface": "Oh My Pi in --mode rpc-ui (hasUI true; the check never arms in -p mode), production Dispatch, ENVOY_SELF_CHECK_TIMEOUT_MS=1 so a check that starts logs 'envoy: run-end waiting self-check failed … self-check timed out after 1 ms'.",
-      "command": "/legion/scratch/tmp/t6/run-rpc.py 9r-n-<fix|ctl|old2> block q/n-<fix|ctl>.txt 20 ENVOY_SELF_CHECK_TIMEOUT_MS=1 [EXT=$TMPDIR/oldgate/packages/pi-envoy]; then grep the session id in /legion/scratch/state/tester/omp/profiles/legion/logs/omp.2026-10-26.*.log",
-      "observed": "9r-n-fix (rebutted ask, then rebutted comment, fixed tree): no self-check line. 9r-n-old2 (same, pre-fix pi-envoy and pi-shared): the self-check line at 10:41:08Z. 9r-n-ctl (rebutted ask, then `ls`, fixed tree): the self-check line at 10:40:05Z.",
-      "headSha": "403f240f20d59c2538399b61e927920288e24697",
-      "negativeControl": "The control run shows the check runs when work re-arms it, and the pre-fix tree shows the rebutted comment re-armed it; so its absence on the fixed tree is the fix."
-    },
-    {
-      "criterion": "Finding 3: the recorded rebutted command, resent, is read as a rebuttal in warn and block; any other trailing comment stays unreadable.",
-      "surface": "Nested headless sessions, production Dispatch.",
-      "command": "run-case.sh 9-p1-<warn|block> (comment form as written), 9-p4-block (here-document comment form), 9-p6-block (flag form, then the recorded form twice), 9-p3-block (`# just a note`), 9-p5-block (`# --advisor-rebuttal 'x' && echo CHAINED-RAN`), 9-p2-<warn|block> (the comment form, then a second line `echo SECOND-LINE-RAN`).",
-      "observed": "p1 rebuttal and posted in both modes; p4 rebuttal, ask opened with its body intact; p6 three rebuttals, three asks (each retracted). p3, p5 and p2 refused as unreadable in block, nothing ran; p2 in warn ran with the unreadable note (#2159's warn design).",
-      "headSha": "403f240f20d59c2538399b61e927920288e24697",
-      "negativeControl": "p3, p5 and p2 are the forms that must stay unreadable, and they did."
-    },
-    {
-      "criterion": "Finding 4: refusal texts say per surface what happens to the override, and agents reading them file no false report.",
-      "surface": "Nested headless sessions, production Dispatch.",
-      "command": "run-case.sh 9-b5-<warn|block>-<a|b> p/b5.txt (the open-ended rebuttal prompt), plus every refusal and acknowledgement text of the round.",
-      "observed": "Rules refusal: 'the flag is kept as a shell comment at the end of the command's first line, so dispatch never sees it'; acknowledgement: 'it stays a shell comment at the end of the command's first line: it is in your record of the call, and dispatch never saw it'; device fate 'the field is removed before the call runs' (askgate-core.ts:2641). The four b5 sessions: one refusal, one rebuttal, one ask each, none saying a flag was missing; no session of the round wrote xd://report_issue.",
-      "headSha": "403f240f20d59c2538399b61e927920288e24697",
-      "negativeControl": "The pre-fix tree's rules refusal (run 9-f1-old3) still read 'the flag is removed before sending'."
-    },
-    {
-      "criterion": "Finding 5: at shutdown with a slow Dispatch record, the advisor-gate entry is written before the session is sealed.",
-      "surface": "Nested headless session, block mode, DISPATCH_URL=http://10.255.255.1:8766 (never answers; the CLI's dry run works offline), SIGTERM 1 s after the review began.",
-      "command": "/legion/scratch/tmp/t6/shutdown-probe.sh 9-s-<new|old> <extension dir>",
-      "observed": "Fixed: session_exit (sigterm) at 10:42:27.883Z, then the advisor-gate entry {decision revise, outcome shutdown, ruleOutcome shutdown, recordError 'the session shut down before Dispatch answered the record', latencyMs 1461} at 10:42:29.145Z, before the process exited (143) at 10:42:29.23Z. Pre-fix: session_exit and no advisor-gate entry.",
-      "headSha": "403f240f20d59c2538399b61e927920288e24697",
-      "negativeControl": "The pre-fix tree under the same probe lost the entry."
+      "criterion": "Finding 2: a decision record already in flight when the session shuts down has its advisor-gate entry written before exit.",
+      "surface": "omp --mode json -p in this Legion pod, block mode, DISPATCH_URL=http://10.255.255.1:8766 (never answers; the dry run works offline).",
+      "command": "/legion/scratch/tmp/t6/rpc-shutdown.py 10-s-<new|old|old83> <extension dir>: the agent runs `date -u`, then `dispatch comment --issue INFRA-465 --body '…' --advisor-rebuttal '…'`, whose rebuttal record starts after the dry run and hangs; SIGTERM 1.5 s after the call's toolcall_end event.",
+      "observed": "Fixed tree (70bc570b): session_exit sigterm at 11:26:25.669Z, then the advisor-gate entry {allow, rebuttal, recordError 'the session shut down before Dispatch answered the record', latencyMs 406} at 11:26:26.927Z, process exit 143 1.39 s after SIGTERM. 403f240f (868cd58b): the same, so the code was already right there and the review's finding was the missing test. 83ff55cf (before round 9's shutdown fix): session_exit and no advisor-gate entry.",
+      "headSha": "70bc570bd7e619d19218d5a5eab223a2e3fe6fa7",
+      "negativeControl": "83ff55cf under the same probe lost the entry."
     },
     {
       "criterion": "Regression: the five cases and the charter-only call, warn and block.",
       "surface": "Nested headless sessions, production Dispatch.",
-      "command": "run-case.sh 9-c<0-5>-<warn|block> p/c<0-5>.txt",
-      "observed": "c1 refused no_change; c2 rebuttal opened; c3 refused naming #log-retention; c4 refused untried_access (block: the charter call timed out beside it); c5 opened with ruleOutcome none in both modes; c0 allowed with no rules call. Every opened ask retracted.",
-      "headSha": "403f240f20d59c2538399b61e927920288e24697",
+      "command": "run-case.sh 10-c<0-5>-<warn|block> p/c<0-5>.txt",
+      "observed": "c1 refused no_change; c2 rebuttal opened; c3 refused naming #log-retention; c4 refused untried_access; c5 opened with ruleOutcome none; c0 allowed with no rules call; in both modes. Every opened ask retracted in its run.",
+      "headSha": "70bc570bd7e619d19218d5a5eab223a2e3fe6fa7",
       "negativeControl": "c5's tried read answered none where c4's untried read matched."
     }
   ],
   "observations": [
-    "Five sessions did not test what they were run for and are not counted as evidence: 9-n-fix, 9-n-ctl and 9-n-old ran in -p mode, where Envoy never arms the run-end check (envoy.ts: `!context.hasUI` returns before arming), and so were re-driven in rpc-ui as 9r-*; 9-f1-old, 9-f1-old2, 9-n-old and 9-n-old2 ran before the pre-fix tree had its skills directory, its dist/dispatch.js and its own pi-shared, so their gate did not load or their CLI did not run (nothing posted). 9r-n-old used the fixed pi-shared and is superseded by 9r-n-old2.",
-    "In warn mode the comment form followed by a second shell line runs with the unreadable note and the second line runs: #2159's warn design for any unreadable call, unchanged here.",
-    "Every ask the round opened is retracted (13 by the tester at the end, with a reason naming this round and sjawhar/legion#2161). The uploads f1-new.md and f1-old3.md stay on dispatch://INFRA-465, which is left open with no open ask."
+    "Four shutdown runs did not test what they were run for: in --mode rpc-ui the process exits about 0.07 s after SIGTERM without waiting on session_shutdown handlers, and a session whose first assistant message is the gated call has no session file yet; the probe was moved to --mode json -p with a `date -u` call first. Not counted.",
+    "The pre-fix tree's agent in 10-c10-old wrote xd://report_issue about the breaker pass (a real defect there, fixed here) and about the snapshot path in its recorded command (#2159's design, seen in rounds 7 and 9). No fixed-tree session wrote one.",
+    "Every ask the round opened is retracted; the last one, the pre-fix tree's #move-c (4c819919), by the tester. dispatch://INFRA-465 is left open with no open ask."
   ],
-  "ci": "Read at 10:43Z at 403f240f, nothing re-run: Tests 40307664973, Legion Envoy and Contracts 40307665025 and Docs 40307665069 queued; Worker Image 40307664980 pending; PR Title 40307665048 cancelled and the later PR Title runs queued.",
+  "ci": "Read at 11:27Z at 70bc570b, nothing re-run: Tests 40313282357, Legion Envoy and Contracts 40313282377, Docs 40313282282 and Worker Image 40313282532 queued; PR Title 40313282385 cancelled and the later PR Title runs queued.",
   "priorRounds": [
     {
       "round": 1,
@@ -126,6 +102,13 @@
       "fixture": "dispatch://INFRA-465",
       "verdict": "pass",
       "summary": "25 runs: round 7's multi-flag fix verified (two and three flags kept in record, note and entry); the five cases held. Full record in commit 4fb131c0's test.json."
+    },
+    {
+      "round": 9,
+      "headSha": "403f240f20d59c2538399b61e927920288e24697",
+      "fixture": "dispatch://INFRA-465",
+      "verdict": "pass",
+      "summary": "38 sessions: each of the review's five findings driven live on the fixed tree and reproduced on 83ff55cf (breaker on a held upload block, run-end check re-armed by a rebutted comment, entry lost at shutdown); the recorded comment form read as a rebuttal and other comments kept unreadable. Full record in commit 717bd4eb's test.json."
     }
   ]
 }
