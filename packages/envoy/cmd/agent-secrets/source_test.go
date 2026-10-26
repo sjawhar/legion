@@ -106,41 +106,150 @@ func TestASourceWithNoSettingsNamesTheBrokerItself(t *testing.T) {
 }
 
 // TestExecFormNamesItsSourceBeforeItExecs: the one line the injection form writes before it execs
-// names every secret it puts in the command's environment and the store they came from, never a
-// value, and it is written before the command runs - a reader of the command's own log sees the
-// source above its first line.
+// names every secret it puts in the command's environment, the broker AGENT_SECRETS_URL names and
+// the kind of its store, never a value, and it is written before the command runs - a reader of
+// the command's own log sees the source above its first line. The line is quoted wherever that
+// output is, so for every store kind it names no host, account, region or project.
 func TestExecFormNamesItsSourceBeforeItExecs(t *testing.T) {
 	binary := buildAgentSecrets(t)
+	keyDir := newKeyDir(t)
+	const prefix = "agent-secrets: GRANT_ME from the broker AGENT_SECRETS_URL names"
+	for _, row := range []struct {
+		name     string
+		settings *Settings // nil: a broker too old to serve GET /v1/settings
+		line     string
+	}{
+		{"gcp", &fakeSettings, prefix + " (GCP Secret Manager)\n"},
+		{"aws", &Settings{Store: secrets.StoreAWS, AWSAccountID: "111122223333", AWSRegion: "us-east-1"}, prefix + " (AWS Secrets Manager)\n"},
+		{"a broker from before the store field", &Settings{AWSAccountID: "111122223333", AWSRegion: "us-east-1"}, prefix + " (AWS Secrets Manager)\n"},
+		{"a store this release does not know", &Settings{Store: "vault"}, prefix + " (vault)\n"},
+		{"no settings route", nil, prefix + "\n"},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			broker, counters := fakeBroker(t)
+			defer broker.Close()
+			if row.settings == nil {
+				counters.hideSettings()
+			} else {
+				counters.serveSettings(*row.settings)
+			}
+			cmd := exec.Command(binary, "GRANT_ME", "--", "sh", "-c", "echo the-child-ran >&2")
+			cmd.Env = append(os.Environ(), "AGENT_SECRETS_URL="+broker.URL, "AGENT_SECRETS_KEY_DIR="+keyDir)
+			pipe, err := cmd.StderrPipe()
+			if err != nil {
+				t.Fatalf("stderr pipe: %v", err)
+			}
+			if err := cmd.Start(); err != nil {
+				t.Fatalf("start agent-secrets: %v", err)
+			}
+			stderr := bufio.NewReader(pipe)
+			first, err := stderr.ReadString('\n')
+			if err != nil {
+				t.Fatalf("read the first stderr line: %v (%q)", err, redactSecrets(first))
+			}
+			rest, _ := stderr.ReadString('\n')
+			if err := cmd.Wait(); err != nil {
+				t.Fatalf("agent-secrets GRANT_ME -- sh: %v (stderr %q)", err, redactSecrets(first+rest))
+			}
+			if first != row.line {
+				t.Fatalf("the first stderr line is %q; want %q", redactSecrets(first), row.line)
+			}
+			host := strings.TrimPrefix(broker.URL, "http://")
+			for _, absent := range []string{"topsecretvalue123", host, "127.0.0.1", "000000000000", "111122223333", "us-east-1"} {
+				if strings.Contains(first, absent) {
+					t.Fatalf("the injection line %q names %q", redactSecrets(first), absent)
+				}
+			}
+			if !strings.Contains(rest, "the-child-ran") {
+				t.Fatalf("the child's own line is %q, want it after the source line", redactSecrets(rest))
+			}
+		})
+	}
+}
+
+// TestNoFormPrintsACredentialTheBrokerURLCarries: a user name, password or query in
+// AGENT_SECRETS_URL reaches no output of any form - a refusal from a broker that answered, a
+// broker that was never reached, a URL no parser reads, the secret forms' own refusals, and a
+// line naming a source - while a line about an unreached broker still names the address it
+// tried, with the credential masked.
+func TestNoFormPrintsACredentialTheBrokerURLCarries(t *testing.T) {
+	binary := buildAgentSecrets(t)
+	keyDir := newKeyDir(t)
 	broker, _ := fakeBroker(t)
 	defer broker.Close()
-	keyDir := newKeyDir(t)
+	answering := "http://tokuser9f3:hunter2pw@" + strings.TrimPrefix(broker.URL, "http://")
+	const unreached = "http://tokuser9f3:hunter2pw@127.0.0.1:1"
+	injection := []string{"GRANT_ME", "--", "sh", "-c", "echo the-child-ran"}
+	for _, row := range []struct {
+		name, base string
+		args       []string
+		want       string // what the output must still name
+	}{
+		{"self, unreached", unreached, []string{"self"}, "GET http://xxxxx@127.0.0.1:1/v1/enrollments/self (AGENT_SECRETS_URL names http://xxxxx@127.0.0.1:1)"},
+		{"request, unreached", unreached, []string{"request", "GRANT_ME"}, "POST http://xxxxx@127.0.0.1:1/v1/requests"},
+		{"request --json, unreached", unreached, []string{"request", "--json", "GRANT_ME"}, "POST http://xxxxx@127.0.0.1:1/v1/requests"},
+		{"status, unreached", unreached, []string{"status", "req-approved"}, "GET http://xxxxx@127.0.0.1:1/v1/requests/req-approved"},
+		{"exec, unreached", unreached, injection, "POST http://xxxxx@127.0.0.1:1/v1/requests"},
+		{"secret list, unreached", unreached, []string{"secret", "list"}, "http://xxxxx@127.0.0.1:1"},
+		{"self, answered", answering, []string{"self"}, "source: the broker at 127.0.0.1:"},
+		{"status, answered", answering, []string{"status", "req-approved"}, "source: the broker at 127.0.0.1:"},
+		{"exec, refused by the broker", answering, injection, "asked the broker at 127.0.0.1:"},
+		{"a port no parser reads", "http://tokuser9f3:hunter2pw@127.0.0.1:badport", []string{"self"}, "http://xxxxx@127.0.0.1:badport"},
+		{"a plain-http broker on the network, secret list", "http://tokuser9f3:hunter2pw@example.internal", []string{"secret", "list"}, `"http://xxxxx@example.internal" must be https`},
+		{"a token in the query", "http://127.0.0.1:1/?token=hunter2pw", []string{"self"}, "http://127.0.0.1:1/?xxxxx"},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			stdout, stderr, _ := runAgentSecrets(t, binary, row.base, keyDir, nil, row.args...)
+			output := stdout + stderr
+			for _, secret := range []string{"tokuser9f3", "hunter2pw"} {
+				if strings.Contains(output, secret) {
+					t.Fatalf("output names %q: stdout %q, stderr %q", secret, stdout, stderr)
+				}
+			}
+			if !strings.Contains(output, row.want) {
+				t.Fatalf("stdout %q, stderr %q; want them to name %q", stdout, stderr, row.want)
+			}
+		})
+	}
+}
 
-	cmd := exec.Command(binary, "GRANT_ME", "--", "sh", "-c", "echo the-child-ran >&2")
-	cmd.Env = append(os.Environ(), "AGENT_SECRETS_URL="+broker.URL, "AGENT_SECRETS_KEY_DIR="+keyDir)
-	pipe, err := cmd.StderrPipe()
-	if err != nil {
-		t.Fatalf("stderr pipe: %v", err)
-	}
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("start agent-secrets: %v", err)
-	}
-	stderr := bufio.NewReader(pipe)
-	first, err := stderr.ReadString('\n')
-	if err != nil {
-		t.Fatalf("read the first stderr line: %v (%q)", err, redactSecrets(first))
-	}
-	rest, _ := stderr.ReadString('\n')
-	if err := cmd.Wait(); err != nil {
-		t.Fatalf("agent-secrets GRANT_ME -- sh: %v (stderr %q)", err, redactSecrets(first+rest))
-	}
-	if !strings.Contains(first, "GRANT_ME") || !strings.Contains(first, fakeSourceText(broker)) {
-		t.Fatalf("the first stderr line is %q; want it to name GRANT_ME and %s", redactSecrets(first), fakeSourceText(broker))
-	}
-	if strings.Contains(first, "topsecretvalue123") {
-		t.Fatalf("the source line carried the secret's value: %q", redactSecrets(first))
-	}
-	if !strings.Contains(rest, "the-child-ran") {
-		t.Fatalf("the child's own line is %q, want it after the source line", redactSecrets(rest))
+// TestWhatAScriptReadsIsUnchanged pins the bytes a script parses: --json stdout is the broker's
+// body verbatim, and each outcome keeps its exit code, whatever the human-read lines say.
+func TestWhatAScriptReadsIsUnchanged(t *testing.T) {
+	binary := buildAgentSecrets(t)
+	keyDir := newKeyDir(t)
+	broker, _ := fakeBroker(t)
+	defer broker.Close()
+	for _, row := range []struct {
+		name   string
+		base   string
+		args   []string
+		exit   int
+		stdout string
+	}{
+		{"request --json", broker.URL, []string{"request", "--json", "GRANT_ME"}, 0,
+			`{"approver":null,"grant_id":"grant-granted","record_id":null,"request_id":"req-granted","secrets":[{"decision":"automatic","name":"GRANT_ME"}],"state":"granted"}` + "\n"},
+		{"request --json, no trailing newline", broker.URL, []string{"request", "--json", "NONEWLINE_ME"}, 0,
+			`{"request_id":"req-nonewline","state":"granted","secrets":[{"name":"NONEWLINE_ME","decision":"automatic"}],"grant_id":"grant-nonewline","record_id":null,"approver":null}`},
+		{"status --json", broker.URL, []string{"status", "--json", "req-approved"}, 0, approvedStatusJSON},
+		{"request --json, denied", broker.URL, []string{"request", "--json", "DENY_ME"}, 77,
+			`{"approver":null,"grant_id":null,"record_id":null,"request_id":"req-denied","secrets":[{"decision":"deny","name":"DENY_ME"}],"state":"denied"}` + "\n"},
+		{"request --json, refused", broker.URL, []string{"request", "--json", "NO_SUCH_NAME"}, 1, ""},
+		{"request --json, unreached", "http://127.0.0.1:1", []string{"request", "--json", "GRANT_ME"}, 1, ""},
+		{"exec, granted", broker.URL, []string{"GRANT_ME", "--", "sh", "-c", "echo the-child-ran"}, 0, "the-child-ran\n"},
+		{"exec, denied", broker.URL, []string{"DENY_ME", "--", "sh", "-c", "echo the-child-ran"}, 77, ""},
+		{"exec, nothing released", broker.URL, []string{"UNRELEASED_ME", "--", "sh", "-c", "echo the-child-ran"}, 1, ""},
+		{"exec, still pending", broker.URL, []string{"PENDING_ME", "--wait", "200ms", "--", "sh", "-c", "echo the-child-ran"}, 75, ""},
+		{"exec, refused", broker.URL, []string{"NO_SUCH_NAME", "--", "sh", "-c", "echo the-child-ran"}, 1, ""},
+		{"exec, unreached", "http://127.0.0.1:1", []string{"GRANT_ME", "--", "sh", "-c", "echo the-child-ran"}, 1, ""},
+		{"exec, the child's own exit", broker.URL, []string{"GRANT_ME", "--", "sh", "-c", "exit 9"}, 9, ""},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			stdout, stderr, exit := runAgentSecrets(t, binary, row.base, keyDir, nil, row.args...)
+			if exit != row.exit || stdout != row.stdout {
+				t.Fatalf("exit %d, stdout %q (stderr %q); want %d, %q", exit, redactSecrets(stdout), redactSecrets(stderr), row.exit, row.stdout)
+			}
+		})
 	}
 }
 

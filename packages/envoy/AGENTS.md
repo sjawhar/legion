@@ -2330,11 +2330,18 @@ its environment. Every line it prints about a secret names the store it answered
 own store, read once from the public `GET /v1/settings` and named as `AWS Secrets Manager account
 <id> in <region>` or `GCP Secret Manager project <number>`, the broker alone where those settings
 cannot be read. The injection form writes one line to stderr before it execs, naming the injected
-names and that source and never a value; `request`, `status` and `self` print it as `source:`,
+names, the broker as the one `AGENT_SECRETS_URL` names and its store's kind alone (`agent-secrets:
+NAME from the broker AGENT_SECRETS_URL names (GCP Secret Manager)`), never a value, a host, an
+account or a project, since that line is quoted wherever the command's output is (`source.injected`;
+`packages/envoy-client/src/slack-post.ts` matches its `agent-secrets: NAME from ` prefix); `request`,
+`status` and `self` print the whole source as `source:`,
 `secret show` the store as `store:` (and `secret list` one line on stderr, with `store` on each
 row under `--json`), and every refusal carries it, so no answer or refusal of this CLI's is read
 as another secrets CLI's about the same name. No line names a secret's version: a grant's release
 carries names and values alone, and a session holds no sign-in of its own to the store.
+No output of `agent-secrets` or `agent-secrets-helper` prints a user name, password, query or fragment `AGENT_SECRETS_URL`
+carries: every message naming that URL prints it through `internal/redact`'s `URL`, which masks
+each as `xxxxx`.
 `--json` on `request`, `status`, `self`, `whoami`, `machine list` and `grant list` is the broker's
 body verbatim as before, and makes no settings call. The other secrets CLI a box may hold,
 `secrets`, is secretsd, shipped from `sjawhar/forward` (the old `sjawhar/secretsd` repository is

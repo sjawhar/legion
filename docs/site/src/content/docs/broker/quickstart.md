@@ -37,17 +37,20 @@ agent-secrets DEMO_API_KEY --reason "Deploy the example service" -- ./deploy.sh
 
 When the secret's owner and tier grant it automatically, the command runs at once. One line on
 standard error names the secrets it put in the command's environment and where they came from -
-the broker, and the store that broker keeps them in - never a value:
+the broker `AGENT_SECRETS_URL` names, and the kind of store that broker keeps them in - never a
+value:
 
 ```console
 $ agent-secrets DEMO_READ_TOKEN -- printenv DEMO_READ_TOKEN
-agent-secrets: DEMO_READ_TOKEN from the broker at secrets.internal.example (AWS Secrets Manager account 111122223333 in us-east-1)
+agent-secrets: DEMO_READ_TOKEN from the broker AGENT_SECRETS_URL names (AWS Secrets Manager)
 demo-read-token-value
 ```
 
 That line is why a reader never has to guess which store answered: another secrets CLI on the same
 machine can hold a different value under the same name, and every `agent-secrets` answer and
-refusal names its own broker and store.
+refusal names its own broker and store. The line lands in the command's own output, which is
+often quoted, so it names no host, account or project; `agent-secrets self` names the broker's
+host and the store's account and region.
 
 When it needs a person's approval, `agent-secrets` says so, with the request's id, where it was
 made, who approves it, and where (the request's Dispatch page when `AGENT_SECRETS_APPROVE_URL`
@@ -102,7 +105,7 @@ Once approved, the waiting `agent-secrets` collects the grant and replaces itsel
 
 ```console
 $ agent-secrets DEMO_API_KEY --reason "Deploy the example service" -- sh -c 'echo "deploying with a ${#DEMO_API_KEY}-character key"'
-agent-secrets: DEMO_API_KEY from the broker at secrets.internal.example (AWS Secrets Manager account 111122223333 in us-east-1)
+agent-secrets: DEMO_API_KEY from the broker AGENT_SECRETS_URL names (AWS Secrets Manager)
 deploying with a 18-character key
 ```
 

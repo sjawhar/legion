@@ -36,6 +36,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/sjawhar/envoy/internal/redact"
 )
 
 type client struct {
@@ -101,14 +103,15 @@ type unreachableError struct {
 	// in time, a peer that answered but failed the exchange, or a request that failed in a way
 	// none of those names.
 	what string
-	// base is the broker's address as AGENT_SECRETS_URL gave it, method and url the call tried.
+	// base is the broker's address as AGENT_SECRETS_URL gave it, method and url the call tried;
+	// Error prints both through redact.URL, so a credential the variable carries never prints.
 	base, method, url string
 	// cause is the transport's own error, with net/http's repetition of the URL unwrapped away.
 	cause error
 }
 
 func (e *unreachableError) Error() string {
-	return fmt.Sprintf("%s: %s %s (%s names %s): %v", e.what, e.method, e.url, brokerURLVar, e.base, e.cause)
+	return fmt.Sprintf("%s: %s %s (%s names %s): %v", e.what, e.method, redact.URL(e.url), brokerURLVar, redact.URL(e.base), e.cause)
 }
 
 func (e *unreachableError) Unwrap() error { return e.cause }
@@ -121,11 +124,7 @@ func (e *unreachableError) Unwrap() error { return e.cause }
 // which TLS or a proxy fixes. An error that fits none says no more than that the request failed,
 // rather than name a layer it cannot prove.
 func unreachable(base, method, callURL string, err error) error {
-	cause := err
-	var wrapped *url.Error
-	if errors.As(err, &wrapped) {
-		cause = wrapped.Err
-	}
+	cause := withoutURL(err)
 	host := brokerHost(base)
 	failed := func(what string) error { return &unreachableError{what, base, method, callURL, cause} }
 	var dns *net.DNSError
@@ -148,6 +147,17 @@ func unreachable(base, method, callURL string, err error) error {
 	default:
 		return failed("the request to the broker at " + host + " failed")
 	}
+}
+
+// withoutURL is err without net/http's *url.Error wrapper, which repeats the URL the call was
+// made to (its password masked, its user name and query not), so every message that prints a
+// URL prints it once, through redact.URL.
+func withoutURL(err error) error {
+	var wrapped *url.Error
+	if errors.As(err, &wrapped) {
+		return wrapped.Err
+	}
+	return err
 }
 
 // peerAnswered reports whether err shows a peer took the connection and then broke the exchange:
@@ -175,7 +185,7 @@ func (c *client) do(ctx context.Context, method, url string, body []byte, header
 	}
 	req, err := http.NewRequestWithContext(ctx, method, url, reader)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%s %s: %w", method, redact.URL(url), withoutURL(err))
 	}
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
@@ -190,7 +200,7 @@ func (c *client) do(ctx context.Context, method, url string, body []byte, header
 	defer resp.Body.Close()
 	data, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("%s %s: read response: %w", method, url, err)
+		return nil, fmt.Errorf("%s %s: read response: %w", method, redact.URL(url), err)
 	}
 	if resp.StatusCode/100 != 2 {
 		var envelope struct {

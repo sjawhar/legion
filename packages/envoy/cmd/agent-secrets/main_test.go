@@ -72,6 +72,7 @@ type brokerCounters struct {
 	lastSessionID string
 	pendingPoll   chan struct{}
 	noSettings    bool
+	settings      *Settings
 }
 
 func (c *brokerCounters) sessionID() string {
@@ -95,10 +96,25 @@ func (c *brokerCounters) hideSettings() {
 	c.noSettings = true
 }
 
-func (c *brokerCounters) settingsHidden() bool {
+// serveSettings makes GET /v1/settings describe settings in place of fakeSettings.
+func (c *brokerCounters) serveSettings(settings Settings) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.noSettings
+	c.settings = &settings
+}
+
+// servedSettings is what GET /v1/settings answers: nil for a 404, else the settings it describes.
+func (c *brokerCounters) servedSettings() *Settings {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	switch {
+	case c.noSettings:
+		return nil
+	case c.settings != nil:
+		return c.settings
+	default:
+		return &fakeSettings
+	}
 }
 
 // fakePending are fakeBroker's never-resolving pending requests, keyed by the name that asks for
@@ -261,11 +277,12 @@ func fakeBroker(t *testing.T) (*httptest.Server, *brokerCounters) {
 		})
 	})
 	mux.HandleFunc("GET /v1/settings", func(w http.ResponseWriter, r *http.Request) {
-		if counters.settingsHidden() {
+		settings := counters.servedSettings()
+		if settings == nil {
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
-		writeJSON(w, fakeSettings)
+		writeJSON(w, settings)
 	})
 	srv := httptest.NewServer(mux)
 	audience = srv.URL

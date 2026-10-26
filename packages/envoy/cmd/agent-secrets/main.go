@@ -12,8 +12,10 @@
 // AGENT_SECRETS_URL names, by host, and that broker's store, where its settings give one. This
 // CLI reads no local secrets file, and another secrets CLI on the same machine can answer the
 // same NAME from a store of its own, so the injection form writes one line to stderr before it
-// execs — the names it injected and their source, never a value — and the status and secret
-// forms print that source beside what they report.
+// execs — the names it injected, that the broker AGENT_SECRETS_URL names answered and its store's
+// kind, never a value, a host, an account or a project — and the status and secret forms print
+// the whole source beside what they report. No form prints a credential AGENT_SECRETS_URL
+// carries (internal/redact).
 //
 //	agent-secrets keygen --out <dir>
 //	agent-secrets enroll --helper --runtime-id <id> --thumbprint <tp> [--session-id <id>]
@@ -989,9 +991,11 @@ func cmdExec(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	// The one line the injected command's own output is preceded by: which names this process
-	// puts in its environment, and the store they came from, never a value. A reader of the
-	// command's log can tell these values from another secrets CLI's for the same names.
-	fmt.Fprintf(stderr, "agent-secrets: %s from %s\n", strings.Join(names, ", "), src())
+	// puts in its environment, and that this CLI's broker and a store of which kind gave them,
+	// never a value. A reader of the command's log can tell these values from another secrets
+	// CLI's for the same names; the line names no host, account or project (source.injected),
+	// since it is quoted wherever that output is.
+	fmt.Fprintf(stderr, "agent-secrets: %s from %s\n", strings.Join(names, ", "), src().injected())
 	if err := syscall.Exec(path, command, buildChildEnv(os.Environ(), values.Values)); err != nil {
 		fmt.Fprintf(stderr, "agent-secrets: exec %s: %v\n", command[0], err)
 		return 1

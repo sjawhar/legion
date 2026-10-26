@@ -107,14 +107,15 @@ operator: ada@example.com
 lease_expires_at: 2026-10-03T03:36:40Z
 source: the broker at 127.0.0.1:62083 (AWS Secrets Manager account 111122223333 in us-east-1)
 $ agent-secrets DEMO_READ_TOKEN -- printenv DEMO_READ_TOKEN
-agent-secrets: DEMO_READ_TOKEN from the broker at 127.0.0.1:62083 (AWS Secrets Manager account 111122223333 in us-east-1)
+agent-secrets: DEMO_READ_TOKEN from the broker AGENT_SECRETS_URL names (AWS Secrets Manager)
 demo-read-token-value
 $ agent-secrets DEMO_API_KEY --reason "Deploy the example service" -- sh -c 'echo "deploying with a ${#DEMO_API_KEY}-character key"'
 ```
 
 Every line about a secret names where it came from: the broker this stack runs, and the store that
 broker reads. The local stack's store is `BROKER_FAKE_SECRETS_FILE`, which stands in for AWS
-Secrets Manager, so the lines name the account and region its key ARN carries.
+Secrets Manager, so `self` names the account and region its key ARN carries; the line before an
+injected command names the store's kind alone, since that command's output is often quoted.
 
 The last command waits for approval, and names who approves it (`waiting for ada@example.com to
 approve it under Credential requests in their Dispatch Inbox`). In the third shell, list what waits
@@ -135,7 +136,7 @@ passed, while the session lives on:
 
 ```console
 $ agent-secrets DEMO_READ_TOKEN --ttl 2m -- printenv DEMO_READ_TOKEN
-agent-secrets: DEMO_READ_TOKEN from the broker at 127.0.0.1:62083 (AWS Secrets Manager account 111122223333 in us-east-1)
+agent-secrets: DEMO_READ_TOKEN from the broker AGENT_SECRETS_URL names (AWS Secrets Manager)
 demo-read-token-value
 $ agent-secrets self
 enrollment_id: 7cf72ec3-d10f-46fd-984f-ddd856b229c2

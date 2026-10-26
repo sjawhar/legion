@@ -64,7 +64,7 @@ operator: ada@example.com
 lease_expires_at: 2026-10-03T03:39:03Z
 source: the broker at secrets.internal.example (AWS Secrets Manager account 111122223333 in us-east-1)
 $ agent-secrets DEMO_READ_TOKEN -- printenv DEMO_READ_TOKEN
-agent-secrets: DEMO_READ_TOKEN from the broker at secrets.internal.example (AWS Secrets Manager account 111122223333 in us-east-1)
+agent-secrets: DEMO_READ_TOKEN from the broker AGENT_SECRETS_URL names (AWS Secrets Manager)
 demo-read-token-value
 ```
 

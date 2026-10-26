@@ -287,6 +287,52 @@ func TestServeNamesTheSignalItStopsOn(t *testing.T) {
 	}
 }
 
+// TestServeLogsTheBrokerWithoutACredential: a user name and password AGENT_SECRETS_URL carries
+// never reach the helper's journal; its listening line names the broker with both masked.
+func TestServeLogsTheBrokerWithoutACredential(t *testing.T) {
+	binary := filepath.Join(t.TempDir(), "agent-secrets-helper")
+	if out, err := exec.Command("go", "build", "-o", binary, ".").CombinedOutput(); err != nil {
+		t.Fatalf("go build: %v\n%s", err, out)
+	}
+	dir := shortTempDir(t)
+	stderr, err := os.Create(filepath.Join(dir, "stderr"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stderr.Close()
+	logged := func() string {
+		b, err := os.ReadFile(stderr.Name())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(b)
+	}
+	host := strings.TrimPrefix(fakeBroker(t).URL, "http://")
+	cmd := exec.Command(binary, "serve")
+	cmd.Env = []string{"PATH=/usr/bin:/bin", "HOME=" + dir,
+		"AGENT_SECRETS_URL=http://tokuser9f3:hunter2pw@" + host,
+		"AGENT_SECRETS_HELPER_SOCK=" + filepath.Join(dir, "run", "helper.sock")}
+	cmd.Stderr = stderr
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	exited := make(chan error, 1)
+	go func() { exited <- cmd.Wait() }()
+	defer func() { _ = cmd.Process.Kill(); <-exited }()
+	want := `level=INFO msg="agent-secrets-helper listening"`
+	deadline := time.Now().Add(10 * time.Second)
+	for !strings.Contains(logged(), want) {
+		if time.Now().After(deadline) {
+			t.Fatalf("no listening line within 10 s; stderr:\n%s", logged())
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if got := logged(); !strings.Contains(got, "broker=http://xxxxx@"+host) ||
+		strings.Contains(got, "tokuser9f3") || strings.Contains(got, "hunter2pw") {
+		t.Fatalf("stderr:\n%s\nwant the broker named as http://xxxxx@%s, with no user name or password", got, host)
+	}
+}
+
 // TestClaimSocketRefusesALiveHelperAndClearsAStaleSocket: serve never takes over a socket another
 // helper answers on (the error names it, and the socket still answers), and removes one nothing
 // answers on, as a helper that died leaves.

@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/envoy/internal/broker/secrets"
+	"github.com/sjawhar/envoy/internal/redact"
 )
 
 // sourceSettingsTimeout bounds the settings read describe makes. It is short because naming the
@@ -45,6 +46,9 @@ type source struct {
 	// <id> in <region>", "GCP Secret Manager project <number>"); empty until describe has read
 	// them.
 	store string
+	// kind is the store's kind alone ("AWS Secrets Manager", "GCP Secret Manager"), for the
+	// injection line (injected); empty until describe has read the settings.
+	kind string
 }
 
 // brokerSource is the source naming the broker at base, with its store still unread.
@@ -54,9 +58,10 @@ func brokerSource(base string) source {
 
 // brokerHost is base's host and port. A URL without a host (a bare host:port, say) is named
 // whole, so the source always says which broker the command was pointed at, even one pointed at
-// a value no URL parser reads.
+// a value no URL parser reads; either way through redact.URL, so a credential in the variable
+// never prints.
 func brokerHost(base string) string {
-	base = strings.TrimSuffix(base, "/")
+	base = redact.URL(strings.TrimSuffix(base, "/"))
 	parsed, err := url.Parse(base)
 	if err != nil || parsed.Host == "" {
 		return base
@@ -91,7 +96,8 @@ func (c *client) source(ctx context.Context) source {
 func (s source) withSettings(settings Settings) source {
 	switch settings.Store {
 	case "", secrets.StoreAWS:
-		s.store = "AWS Secrets Manager"
+		s.kind = "AWS Secrets Manager"
+		s.store = s.kind
 		if settings.AWSAccountID != "" {
 			s.store += " account " + settings.AWSAccountID
 		}
@@ -99,14 +105,16 @@ func (s source) withSettings(settings Settings) source {
 			s.store += " in " + settings.AWSRegion
 		}
 	case secrets.StoreGCP:
-		s.store = "GCP Secret Manager"
+		s.kind = "GCP Secret Manager"
+		s.store = s.kind
 		if settings.GCPProject != "" {
 			s.store += " project " + settings.GCPProject
 		}
 	default:
 		// A store this release does not know: name it as the broker spells it rather than
 		// leave the source silent about where the value came from.
-		s.store = settings.Store
+		s.kind = settings.Store
+		s.store = s.kind
 	}
 	return s
 }
@@ -131,6 +139,19 @@ func (s source) brokerAt() string {
 // of this CLI's for another CLI's answer about the same name.
 func (s source) asked() string {
 	return "; asked " + s.String()
+}
+
+// injected names the source on the injection line. That line lands in the injected command's
+// own output, and from there in whatever an agent quotes of it, a public pull request among
+// them, so it names the broker by the variable that chose it and the store by its kind alone:
+// never the broker's host, nor the account, region or project that holds the store, which
+// `agent-secrets self` prints for a reader who needs them. Two brokers of one kind read alike
+// here, and the line still says the values came from this CLI's broker, not a local file.
+func (s source) injected() string {
+	if s.kind == "" {
+		return "the broker " + brokerURLVar + " names"
+	}
+	return "the broker " + brokerURLVar + " names (" + s.kind + ")"
 }
 
 // storeName is the store alone, for the secret forms: they read and write it directly under the
