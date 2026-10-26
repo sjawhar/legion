@@ -2,44 +2,36 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-80",
-  "completed": "2026-10-26T05:29:15Z",
-  "round": "tester round 17, generation 4: the round-14 skill fixes (ae3f92ecd6c7) and the podkind.go refactor (71705421a303, handoff 5f066bc79c76) together, as the architect asked when it stopped round 16's successor",
+  "completed": "2026-10-26T05:46:32Z",
+  "round": "tester round 18, generation 4: the implementer's answer (19aca29ca15c, handoff c05785ff96e9) to review round 15 (27e70bf79f21); docs/kubernetes.md and merge-gate.md text only, no Go or other code changed since round 17's 71705421a303",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Drove the same claim independently rather than re-running the goldens (CI's lane): a throwaway test in package sandbox rendered every manifest case (root, worker, resume, controller, controller-resume, root-enrolled) under 3 storage classes x 3 disk sizes, as the created Sandbox, the Sandbox after the Running patch, and the pod template — 162 files — once with the code at 71705421a303 and once with podkind.go and manifest.go restored from 58d8060c4a43 (the pre-refactor code); diff -r: identical. Confirmed no golden or testdata file changed between 58d8060c4a43 and 5f066bc79c76, the four _test.go edits are comment-only, and no reference to claimTemplates or diskSource remains in packages/daemon. Re-ran the implementer's negative-control shape myself: with controllerPod.disk's ClaimName given a '-x' suffix the same render differs from the pre-refactor code in 54 files, exactly the controller and controller-resume cases (created, running, pod) under all nine disk configurations. The throwaway file and every temporary edit were removed; go.work.sum, touched by go, was restored."
+    "how": "Finding 1: grep for diskSource|claimTemplates over every tracked file outside .legion at c05785ff96e9 finds nothing; the four docs/kubernetes.md citations now read issuePod.disk, which podkind.go:121 defines (and controllerPod.disk at :314); issuePod.disk returns nil templates, so 'owns no volumeClaimTemplates entry at all (issuePod.disk)' is true. Finding 2 and the added sentence, read against the code: merge-gate.md:254-256's pending with no queued wake matches workflow/check.go:262-270 (endLookPending: suspend the implementer, enqueue record.IssueSuspend, which runtime/sandbox/issue_suspend.go:24-65 runs to delete the Sandbox once its pod is gone). The new :284-285 sentence matches closeCheck's InWorkflow return at check.go:291-295 and endLookPending's at :257-261; its parenthetical example (a root reopened inside its linger) is the only issue that can be back in the workflow with its check open, since a child set back to todo closes its open check as not run at once (workflow/engine.go:385-401). claude-envoy check-dist in sync; skills guard 12 pass 0 fail."
   },
   "failures": [],
   "failed": 0,
   "proof": [
     {
-      "criterion": "Architect's condition for the podkind.go refactor: one podKind method returns the claim templates and the disk's source, with no behaviour change — the manifests the runtime sends to Kubernetes stay byte-identical and no golden is updated",
-      "surface": "the Sandbox runtime's manifest builder as the daemon calls it on a launch (sandboxManifest, the relaunch's Running patch via podTemplate), for both pod kinds, rendered to JSON outside the golden fixtures' single disk configuration",
-      "command": "throwaway packages/daemon/internal/runtime/sandbox/zz_infra80_tester_dump_test.go: for storageClass in {standard-rwo, premium-rwo, x} and volumeSize in {1Gi, 50Gi, 73Gi}, for every manifestCases entry, JSON-encode r.sandboxManifest(l), manifestOf(t, r, spec) and r.podTemplate(l); INFRA80_DUMP_DIR=<dir> CGO_ENABLED=0 go test ./internal/runtime/sandbox/ -run '^TestINFRA80TesterDump$' at 71705421a303, then again with jj restore --from 58d8060c4a43 of podkind.go and manifest.go; diff -r old new",
-      "observed": "162 files each side; diff -r prints nothing (IDENTICAL). jj diff 58d8060c4a43..5f066bc79c76 on testdata/**: 0 files; the _test.go changes are five comment lines; grep for claimTemplates|diskSource over packages/daemon *.go: 0 hits",
-      "headSha": "71705421a303142106f80a5d27bb8d844b376309",
-      "negativeControl": "controllerPod.disk's ClaimName temporarily IssueClaimName(l.spec.Claim)+\"-x\": 54 of 162 files differ from the pre-refactor render, all and only controller_{created,running,pod} and controller-resume_{created,running,pod} across the nine disk configurations; restored afterwards"
+      "criterion": "Review round 15 finding 1: no operator doc cites the methods the refactor removed; docs/kubernetes.md names issuePod.disk",
+      "surface": "docs/kubernetes.md as published to the docs site, against podkind.go at the same head",
+      "command": "jj file list -r @ | grep -v '^.legion/' | xargs grep -ln 'diskSource\\|claimTemplates'; grep -n 'func (issuePod) disk\\|func (controllerPod) disk' packages/daemon/internal/runtime/sandbox/podkind.go; jj diff -r 19aca29ca15c docs/kubernetes.md",
+      "observed": "no file names diskSource or claimTemplates; podkind.go:121 and :314 define the two disk methods; the doc's four citations (:2418, :2424, :3867, :3889) read issuePod.disk and no other text of those paragraphs changed",
+      "headSha": "c05785ff96e91484ed5a644acee2eda26e29c300",
+      "negativeControl": "at 27e70bf79f21 the same doc names issuePod.diskSource at :2418 and :3867 and issuePod.claimTemplates at :2424 and :3889, none of which podkind.go defines since 71705421a303"
     },
     {
-      "criterion": "Review round 14's finding: the shipped skills say a pass or fail takes the issue's Sandbox with its pod and disk for a root as for a child, and acceptance.md's child-closed bullet points to merge-gate.md instead of restating it",
-      "surface": "skills/legion-worker/references/merge-gate.md and skills/legion-architect/references/acceptance.md as the plugins ship them, against the daemon code they describe",
-      "command": "read merge-gate.md:254-284 and acceptance.md:122-125 at 5f066bc79c76 against packages/daemon/internal/workflow/check.go:283-302 (closeCheck), internal/daemon/outbox.go:456-468 (the IssueSuspend executor) and internal/runtime/sandbox/issue_suspend.go:24-65 (SuspendIssue); grep -rnE 'Sandbox and volume|volume are released|volume kept|session and volume' over skills/, the claude-envoy copy and the daemon prompts; cd packages/pi-legion && bun test src/skills-guard.test.ts; cd packages/claude-envoy && bun run check-dist",
-      "observed": "closeCheck enqueues record.IssueSuspend for every issue not back in the workflow with no root/child branch, and SuspendIssue sets the Sandbox Suspended, waits for the pod to go and deletes the Sandbox, so merge-gate.md:282-284 is true; acceptance.md's bullet names the five retired claims and the running implementer and points to merge-gate.md 'The production check after the close', whose lines 254-278 cover pending with and without a queued wake, a look that reports nothing, and the bound. Grep: 0 hits. Guard 12 pass 0 fail; check-dist 'dist/ and legion/ match a fresh build'",
-      "headSha": "5f066bc79c7649b49c44c8d75dbdea71e8dd89e2",
-      "negativeControl": "the same grep at 152c849ca282 finds merge-gate.md's 'for a child, the issue's Sandbox and volume are released', the sentence the review named false"
-    },
-    {
-      "criterion": "Smoke at this head: a legion built here refuses the file session store at load and accepts the database store",
-      "surface": "the real legion CLI built with CGO_ENABLED=0 go build ./cmd/legion at 5f066bc79c76, against deploy/kubernetes/daemon/legion.yaml.example with stub 0600 token files, a stub kubeconfig (context legion-daemon) and LEGION_POSTGRES_DSN set",
-      "command": "legion start --config <file> --check-config for the example (postgres), session_store: pvc, and session_store omitted",
-      "observed": "postgres: 'Config OK: project=WIDGETS' exit 0; pvc and omitted: exit 1 'runtime.kubernetes.session_store must name a store that keeps sessions in a database, and is required (INFRA-80)…'",
-      "headSha": "5f066bc79c7649b49c44c8d75dbdea71e8dd89e2",
-      "negativeControl": "session_store: pvc and the omitted key, each refused with exit 1 and the INFRA-80 line"
+      "criterion": "Review round 15 finding 2: merge-gate.md, where acceptance.md sends the architect, says when the issue's Sandbox goes in a pending look, and says what a closing check does to an issue back in the workflow",
+      "surface": "skills/legion-worker/references/merge-gate.md as the plugins ship it (and its claude-envoy copy), against the workflow code it describes",
+      "command": "read merge-gate.md:254-285 at c05785ff96e9 against packages/daemon/internal/workflow/check.go:249-302 and engine.go:385-401, and internal/runtime/sandbox/issue_suspend.go:24-65; cd packages/claude-envoy && bun run check-dist; cd packages/pi-legion && bun test src/skills-guard.test.ts",
+      "observed": "':254-256 the daemon suspends your claim with its session kept, and the issue's Sandbox goes with its pod and disk' = endLookPending's suspend + IssueSuspend; ':284-285 Neither ending retires or suspends anything of an issue back in the workflow (a root reopened inside its linger)' = the InWorkflow returns in closeCheck and endLookPending; a child set back to todo cannot hold an open check (engine.go:389-393 closes it). check-dist 'dist/ and legion/ match a fresh build'; guard 12 pass 0 fail",
+      "headSha": "c05785ff96e91484ed5a644acee2eda26e29c300",
+      "negativeControl": "at 27e70bf79f21 :254-256 read 'the pod goes and the issue's disk with it', naming no Sandbox, though IssueSuspend deletes it"
     }
   ],
-  "ci": "At code head 71705421a303 (5f066bc79c76 carries skip-checks), read without waiting: Tests 40273842467 (lint, typecheck, test), PR Title 40273842554, Worker Image 40273842423, Docs 40273842385 and Legion Envoy and Contracts 40273842537 all queued. At the previous code head 58d8060c4a43 the required lanes settled success (lint 05:05:30Z, typecheck 05:06:32Z, pr-title 05:10:54Z, test 05:15:06Z), while Worker Image run 40270907952 failed in docker/setup-buildx-action with 'unknown blob', a runner/registry failure before any build step, not this change; its run at 71705421a303 is the one the live Stage 4a run needs.",
+  "smoke": "No Go or other code changed since round 17 (jj diff 27e70bf79f21..c05785ff96e9 outside .legion: docs/kubernetes.md and the two merge-gate.md copies only), so round 17's legion --check-config smoke and manifest render at 71705421a303 stand for this head's code.",
+  "ci": "At c05785ff96e9 (this push's head, no skip-checks), read without waiting: Tests 40275819917 (lint, typecheck, test), Worker Image 40275819946, Docs 40275819915, Legion Envoy and Contracts 40275819935 and the PR Title runs queued or pending. At 71705421a303, Tests 40273842467 was cancelled by this push and Worker Image 40273842423 still queued. Nothing concluded from unsettled lanes.",
   "notRun": [
     "The live Stage 4a run (scripts/e2e/stage4a-sandbox-runtime.sh) on the cluster: it cannot run from a pod; the architect arranges it from the devbox. Not run by me and not recorded as passing.",
-    "Stage 4b has run at no head.",
-    "The rendered manifests were not applied to a kube-apiserver this round: the render is byte-identical to the pre-refactor code's, which earlier rounds applied to a real API server against the pinned CRD."
+    "Stage 4b has run at no head."
   ]
 }
