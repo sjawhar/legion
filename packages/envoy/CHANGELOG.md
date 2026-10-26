@@ -9,10 +9,13 @@
   and within about 20 seconds of a change made anywhere else (INFRA-195). Where the session runs
   `/model` and `/effort` from Dispatch, each is a native picker in the header: the model picker
   lists every model the session can use, grouped by provider, and the thinking picker the levels
-  `/effort` offers. A pick is the person's own Send of `/model <provider/id>` or `/effort <level>`,
-  always as Send and stored under their name; while it waits for the session's answer the pickers
-  and Send are disabled, and the line under the header quotes the session's reply, or says no
-  answer came within 30 seconds or that the message could not reach the session. The header
+  `/effort` offers. On a focused picker the arrows and type-ahead only move its choice, `Enter`
+  switches to it, and leaving the picker without `Enter` puts it back on the reported value, as
+  the Agents issue picker's keyboard rule does. A pick is the person's own Send of
+  `/model <provider/id>` or `/effort <level>`, always as Send and stored under their name; while
+  it waits for the session's answer Send is disabled and the pickers are held, keeping focus, and
+  the line under the header quotes the session's reply, or says no answer came within 30 seconds
+  or that the message could not reach the session. The header
   changes only when the session reports the new value. A session on an older pi-envoy shows the
   last turn's model and asks to be restarted on a newer one; a session whose Oh My Pi cannot tell
   its settings, or that runs neither built-in from Dispatch, says so. No route changes: an agent's

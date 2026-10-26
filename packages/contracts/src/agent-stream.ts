@@ -184,7 +184,9 @@ export type AgentStreamSettings = AgentStreamSettingsReported | AgentStreamSetti
 /**
  * One frame. `seq` is the session's own monotonic counter, monotonic across the session's
  * processes too: a session relaunched with `--resume` numbers its frames above every frame the
- * earlier process sent, so a page held open across the relaunch keeps applying them. Frames for one
+ * earlier process sent, so a page held open across the relaunch keeps applying them. The publisher
+ * seeds it from its clock (milliseconds × 1,000), so that holds while a process averages under
+ * 1,000 frames a millisecond and the clock does not run back across a relaunch. Frames for one
  * message arrive in any order the host's concurrent handlers produce them, so a viewer applies a
  * frame only when its `seq` beats the one it already holds for that id.
  */
