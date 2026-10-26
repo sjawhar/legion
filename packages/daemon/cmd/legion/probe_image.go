@@ -197,6 +197,15 @@ func runProbeImage(ctx context.Context, args []string, stdout, stderr io.Writer)
 		fmt.Fprintf(stderr, "legion probe-image: %v\n", err)
 		return 1
 	}
+	observations, err := probeTLSClients(ctx, newImageTLSClients(invocation, environ, workDir))
+	for _, observation := range observations {
+		fmt.Fprintf(stdout, "probe-image: TLS client %s %s: %s (%s)\n",
+			observation.client, observation.site.name, observation.status, observation.detail)
+	}
+	if err != nil {
+		fmt.Fprintf(stderr, "legion probe-image: %v\n", err)
+		return 1
+	}
 	modelFallback, err := capabilities.ReadModelFallback(ctx, img)
 	if err != nil {
 		fmt.Fprintf(stderr, "legion probe-image: model-fallback not read; the deployment's capability report shows the row open: %v\n", err)

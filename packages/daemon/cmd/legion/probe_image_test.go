@@ -143,6 +143,9 @@ func inImage(t *testing.T, contract, omp string) image {
 const capabilityMarks = " capabilities=checked model-fallback=off daemon-api-version="
 
 func probeImage(args ...string) (int, string, string) {
+	previous := newImageTLSClients
+	newImageTLSClients = passingImageTLSClients
+	defer func() { newImageTLSClients = previous }()
 	var stdout, stderr bytes.Buffer
 	code := run(context.Background(), append([]string{"legion", "probe-image"}, args...), &stdout, &stderr)
 	return code, stdout.String(), stderr.String()
@@ -179,8 +182,8 @@ func tableLines(stdout string) []string {
 // As the worker image's build runs it, with no contract named, the command holds the image's plugin
 // to the contract this binary speaks, prints the capability table — one line per row of the
 // declared list, in its order, every image row present, codegraph with the CLI on PATH and the
-// plugin enabled in the profile's lock — and then the OK line the daemon's probe Sandbox reads,
-// carrying the capabilities and model-fallback marks.
+// plugin enabled in profile's lock — then prints every TLS client and site decision before the OK
+// line the daemon's probe Sandbox reads, carrying the capabilities and model-fallback marks.
 func TestProbeImagePrintsTheTableAndTheOKLineWithThisBinarysContract(t *testing.T) {
 	omp := imageOmp(t)
 	img := inImage(t, thisBinarysContract, omp)
@@ -207,8 +210,11 @@ func TestProbeImagePrintsTheTableAndTheOKLineWithThisBinarysContract(t *testing.
 		t.Errorf("table = %q, want the codegraph line %q", table, codegraph)
 	}
 	okLine := "probe-image: OK (" + omp + ") session-storage=probed extensions=discovered agent-models=resolved" + capabilityMarks + thisBinarysContract + "\n"
-	if want := strings.Join(table, "\n") + "\n" + okLine; stdout != want {
-		t.Fatalf("stdout = %q, want the table then the OK line %q", stdout, okLine)
+	if !strings.HasPrefix(stdout, strings.Join(table, "\n")+"\n") || !strings.HasSuffix(stdout, okLine) {
+		t.Fatalf("stdout = %q, want the table, TLS decisions, then the OK line %q", stdout, okLine)
+	}
+	if got, want := strings.Count(stdout, "probe-image: TLS client "), len(tlsSites)*8; got != want {
+		t.Fatalf("stdout carries %d TLS decisions, want one for each client and site (%d):\n%s", got, want, stdout)
 	}
 }
 

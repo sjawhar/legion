@@ -38,9 +38,9 @@
 # runs every toolchain command, the language servers', Python's and the browser's included; the last
 # runs `legion version` and `legion probe-image`, which runs the three launch probes (the daemon's two
 # plus the session-storage probe), holds the Legion plugin to the daemon API contract and proves it
-# loads with the Envoy plugin, checks every image-site row of the capability table against this image,
-# and prints the table, then the OK line the daemon's probe Sandbox reads. A broken
-# image never publishes.
+# loads with the Envoy plugin, checks every image-site capability and TLS client against this image,
+# and prints their results before the OK line the daemon's probe Sandbox reads. A broken image never
+# publishes.
 #
 # The `legion` profile carries no model route, and neither does Legion: an operator's pod supplies it
 # (runtime.kubernetes.pod, docs/kubernetes.md). In a pod, the Go `legion` starts Oh My Pi on Legion's
@@ -49,7 +49,7 @@
 
 # Pins not derived from daemon code. The OMP fork pin is deliberately NOT an ARG: it is the one line of
 # the repository's .omp-pin, its only home, which the tools stage copies.
-ARG BUN_VERSION=1.3.14
+ARG BUN_VERSION=1.4.4
 ARG MISE_VERSION=v2026.8.12
 # SHA-256 of the tools stage's linux-x64 archive (the image builds linux/amd64 only; `install-jj`'s
 # mise step reads this pair from here too). Take the hash from the output of
@@ -74,16 +74,16 @@ ARG GOPLS_VERSION=0.23.0
 # The toolchain stage's pins: each is a release version and the SHA-256 of the linux/amd64 download the
 # stage fetches for it (an archive, or kubectl's single binary), which the build checks before unpacking
 # or installing anything.
-ARG UV_VERSION=0.12.21
-ARG UV_SHA256=23f02075b652bb1df64178cfae41b5caf160822e720e2663568f3f5d63bc52c0
+ARG UV_VERSION=0.13.5
+ARG UV_SHA256=f68d291c75783122dad58ab77def0e13f3233f358731db5d6d7e8715603b928f
 # Node 24 LTS.
-ARG NODE_VERSION=24.21.0
-ARG NODE_SHA256=fd8e59d5a511510f6a298afb548f18c7d2b1be404d8b4a27d94fbe49f56cb2d6
-ARG AWS_CLI_VERSION=2.37.6
+ARG NODE_VERSION=24.22.1
+ARG NODE_SHA256=6c172a9ab6718f7b801fb5a7bd486af2ee5e32758086a04b84fcce2aa77095e6
+ARG AWS_CLI_VERSION=2.38.4
 # AWS publishes no SHA-256 for the CLI, only a PGP signature. This pin is the SHA-256 of the zip whose
 # `.sig` gpg verified as a good signature from the AWS CLI Team key
 # FB5DB77FD5C118B80511ADA8A6310ACC4672475C. A version bump repeats that check before taking its hash.
-ARG AWS_CLI_SHA256=cd40c7d1f41b3a4964e77a65377e480d71fe6ebc96bbbb64eb2239d69af6fbb2
+ARG AWS_CLI_SHA256=10ab32a95b27138d7cc1c1ac4ebb4d3acab60cd0a0df2fc37c4e2c440ed40bce
 # kubectl, pinned to the minor version of the API server of the production cluster the Legion workers
 # run on (v1.35.7 when this pin was set): Kubernetes' version skew policy supports kubectl one minor
 # version either side of its server, so a bump follows that server's minor. A deployment whose cluster
@@ -663,6 +663,9 @@ COPY --from=go /out/gopls /usr/local/bin/gopls
 # Corepack resolves a project with no `packageManager` to the pnpm and yarn it ships as defaults,
 # never to npm's newest release, so every place the image runs (a pod, `docker run`, the check below)
 # gets one version until the Node pin moves. It is image ENV, not a pod variable, for that reason.
+# AWS_CA_BUNDLE makes the AWS CLI use Debian's current system roots. Its vendored bundle has no
+# trust path for example.com's current chain after the compromised AAA root is removed, while the
+# system bundle validates that control and rejects both compromised test chains.
 # CGO_ENABLED=0 keeps cgo off by default now that gcc is on PATH (the apt line above says why gcc is
 # there), for every process that inherits the image's environment: the bash tool, subagents, and go
 # test's test binaries. The toolchain stage's go.env line alone would not reach two of them: a go/build
@@ -673,7 +676,7 @@ COPY --from=go /out/gopls /usr/local/bin/gopls
 # `go env -w CGO_ENABLED=1` does not override it, since Go ranks the environment above its go env file;
 # and as image ENV a deployment's runtime.kubernetes.pod.env may not set it (sandbox/operatorpod.go
 # imageEnv).
-ENV COREPACK_DEFAULT_TO_LATEST=0 CGO_ENABLED=0
+ENV AWS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt COREPACK_DEFAULT_TO_LATEST=0 CGO_ENABLED=0
 # The toolchain step: every toolchain command runs as the runtime user from the image PATH, the
 # corepack shims fetching their shipped default pnpm and yarn, with TMPDIR, COREPACK_HOME and
 # XDG_CONFIG_HOME in a scratch directory the step removes, so the layer keeps nothing (go, gofmt and
@@ -773,20 +776,22 @@ COPY --chmod=0755 packages/daemon/docker/gh /opt/legion/bin/gh
 # task agent and skill Legion's prompts name (shipped in the Legion plugin's agents/ and the two
 # plugins' dist/skills directories). It leaves those agents' models unresolved
 # (--skip-agent-models): the build has none of the operator's model configuration, which the pod
-# brings. Then it checks every image-site row of the capability table against this image, as a
-# worker's Oh My Pi would find each: `omp setup python --check`, the chromium on PATH (or the browser a
-# PUPPETEER_EXECUTABLE_PATH names) run with --version, gopls, typescript-language-server and pyright-langserver on PATH, the
-# CodeGraph CLI on PATH with its plugin enabled in the profile's lock, and go, gcc, curl, wget, python3,
-# node, bun, uv, kubectl, jq, ssh-keygen, flock, psql, redis-cli, sqlite3, nc and dig on PATH with
-# `go version` running (packages/daemon/internal/capabilities/image.go).
-# It prints the table, one `probe-image: capability <name>: <status> (<detail>)` line per row, then
-# `probe-image: OK (/opt/omp/bin/omp) session-storage=probed extensions=discovered agent-models=skipped
-# capabilities=checked model-fallback=on daemon-api-version=<N>` — `on` here is Oh My Pi's own default for retry.modelFallback,
-# since the build runs under no operator overlay; a probe pod reads the operator's value — and a build
-# whose image lacks a capability fails here, the
-# probe naming every missing one. The daemon's probe Sandbox runs it again with its own contract, on
-# the pod baseline and under the operator's pod, resolving every agent's model, and refuses a skipped
-# result, before any claim runs on the image (packages/daemon/internal/runtime/sandbox/probe.go).
+# brings. It then checks every image-site capability as a worker's Oh My Pi would find each:
+# `omp setup python --check`; the chromium on PATH (or the browser a PUPPETEER_EXECUTABLE_PATH names)
+# with --version; gopls, typescript-language-server and pyright-langserver on PATH; the CodeGraph CLI
+# on PATH with its plugin enabled in the profile's lock; and go, gcc, curl, wget, python3, node, bun,
+# uv, kubectl, jq, ssh-keygen, flock, psql, redis-cli, sqlite3, nc and dig on PATH with `go version`
+# running (packages/daemon/internal/capabilities/image.go). It then has node, bun, omp's embedded bun,
+# uv, the AWS CLI, curl, Python and gh refuse each compromised chain while reaching the control. It
+# prints the table, one `probe-image: capability <name>: <status> (<detail>)` line per row, every TLS
+# decision, then `probe-image: OK (/opt/omp/bin/omp) session-storage=probed extensions=discovered
+# agent-models=skipped capabilities=checked model-fallback=on daemon-api-version=<N>` — `on` here is
+# Oh My Pi's own default for retry.modelFallback, since the build runs under no operator overlay; a
+# probe pod reads the operator's value — and a build whose image lacks a capability or trusts a
+# compromised chain fails here, the probe naming every failure. The daemon's probe Sandbox runs it
+# again with its own contract, on the pod baseline and under the operator's pod, resolving every
+# agent's model, and refuses a skipped result, before any claim runs on the image
+# (packages/daemon/internal/runtime/sandbox/probe.go).
 # It needs the natives step 3 extracted, which the cached probe layer above carries. The step leaves no
 # residue: Oh My Pi's logs, and the Go telemetry counters the capability check's `go version` writes
 # under HOME (the toolchain step's XDG_CONFIG_HOME does not reach a probe that runs as a pod would).
