@@ -2,60 +2,47 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-122",
-  "completed": "2026-10-25T20:37:00Z",
-  "round": 4,
-  "headSha": "311640e7692341d75896ce75e491b702f3e18281",
+  "completed": "2026-10-26T05:38:30Z",
+  "generation": 3,
+  "round": 5,
+  "headSha": "5c812a5b9ade2dbcc9330805f9b26cbfb77aef92",
+  "handoffHead": "ea8627c3368818ff76e6d964688b98f20687b711",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Drove the same surfaces independently with a listener the tester built from 311640e7: the two-listener inbox and stored-topic case (one prompt each, no exception from the non-owner), run.sh (one prompt at the pod address 10.1.10.198:18080 with no bridge, malformed host 400) and refusal.sh (503 live subscription inactive after NATS restarted without the grant). The implementer's own criterion-1 and refusal entries name c6889bb0; the tester's runs put both at this head."
+    "how": "Drove the same surface independently: listeners the tester built from the head (GOWORK=off go build ./cmd/listener) with the tester's own rig ($TMPDIR/tester5/rig.py), every cell of the plan's matrix rather than only cells 2 and 5, and negative controls built from git archive of 311640e7 and 40e85398 rather than overlays. Results match the implementer's: cells 2 and 5 pass at the head, round 4 fails cells 2 and 4, round 5 fails cell 5."
   },
   "failures": [],
   "failed": 0,
   "proof": [
     {
-      "criterion": "Review round 2 finding 1: a non-owning listener reports no exception for an inbox message its owner delivered",
-      "surface": "listeners mA (owner, ENVOY_HOST_BRIDGE=127.0.0.1) and mB built by the tester on one real nats-server, a fake serving port, a raw subscriber (natscli sub) on notifications.envoy.exceptions.> for 8 s",
-      "command": "register IN through mA; POST /v1/messages/send to IN through mB; raw publish on notifications.github.acme.repo.pr.7.comment",
-      "observed": "port got inbox-r4 and stored-r4 once each; mA 'listener agent delivered'; mB logged nothing at INFO or above for it; the raw subscriber saw no exception",
-      "headSha": "311640e7692341d75896ce75e491b702f3e18281",
-      "negativeControl": "round 3's binary c6889bb0 in the same rig -> the raw subscriber saw notifications.envoy.exceptions.notifications.agent.IN, and mB logged WARN 'listener agent session not found anywhere'"
+      "criterion": "6. A message to a session that moved to another listener arrives exactly once and is never lost, with each listener's bridge set or unset, the session that stayed on its owner's machine included",
+      "surface": "two envoy-listener processes built by the tester from the head (owner A, second B, both ENVOY_SUBSCRIBE_ALL_TOPICS=1) on a real nats-server v2.10.29 -js; a fake serving port bound on 127.0.0.1 only; a nats-py subscriber on notifications.envoy.exceptions.>; the session registered through A, then through B, with one recorded host; a stored GitHub topic through A's /v1/messages/publish, an inbox message through B's /v1/messages/send, a notifications.team.* topic through B's /v1/messages/publish",
+      "command": "cd $TMPDIR/tester5 && uv run --with nats-py==2.9.0 python rig.py $TMPDIR/tester5/listener-head 1 2 3 4 5 6",
+      "observed": "Every cell 3 of 3, each message once, nothing more within 6 s, 0 'listener delivery failed'/ERROR lines, 0 exceptions. Each run first confirmed 127.0.0.2:<port> refuses a connection (ConnectionRefusedError), so the 'cannot reach' bridge truly cannot. The serving port's Host header: 127.0.0.1 in cells 1-5 (cell 5, recorded host and A's machine id t-owner-nowhere which resolves nowhere, reached through A's bridge 127.0.0.1), localhost in cell 6",
+      "headSha": "5c812a5b9ade2dbcc9330805f9b26cbfb77aef92",
+      "negativeControl": "The same rig on binaries built from git archive of 311640e7 (round 4) fails exactly cells 2 and 4 (0 of 3, A logs ERROR 'listener delivery failed', 1 exception), and of 40e85398 (round 5) fails exactly cell 5 (0 of 3, Post http://t-owner-nowhere:<port>/...: dial tcp: lookup t-owner-nowhere ... no such host, 1 exception); every other cell passes on both"
     },
     {
-      "criterion": "Review round 2 finding 2 and acceptance 2: a session re-registered through another listener still gets its stored topics, once",
-      "surface": "same rig, IN registered through mA, then again through mB with the same port and host; with mA bridged (host 127.0.0.1) and with mA unbridged (host = pod address)",
-      "command": "send an inbox message through mB and raw-publish a stored GitHub topic the session subscribed to; then with ENVOY_SUBSCRIBE_ALL_TOPICS=1 on both, 3 raw team publishes after the re-registration",
-      "observed": "bridged and unbridged: inbox-r4 and stored-r4 once each, both delivered by mA (the listener its stored subscription names), no ERROR, no exception; the 3 team publishes arrived once each",
-      "headSha": "311640e7692341d75896ce75e491b702f3e18281",
-      "negativeControl": "round 3's binary in the bridged rig -> the stored topic never arrived (mA ERROR 'listener delivery failed', NAKed for retry) and an exception was published for the inbox message"
+      "criterion": "6. (attempts to break it) case, bursts, owner restart, a session that moves back",
+      "surface": "same rig and head binary",
+      "command": "cd $TMPDIR/tester5 && uv run --with nats-py==2.9.0 python rig.py $TMPDIR/tester5/listener-head 51 52 53 54 55",
+      "observed": "51 recorded host T-Owner-NOWHERE against machine id t-owner-nowhere: 3 of 3 through the bridge. 52 burst of 5 per kind, B bridged to 127.0.0.2: 15 of 15, once each. 53 owner A stopped and restarted between two rounds (cell 5 shape): 6 of 6. 54 bursts of 5 with A restarted (cell 2 shape): 30 of 30. 55 session registered A -> B -> A, host t-second-nowhere: 3 of 3 through A's bridge. No failed delivery, no exception in any",
+      "headSha": "5c812a5b9ade2dbcc9330805f9b26cbfb77aef92",
+      "negativeControl": "Cell 51 on the round-5 binary (40e85398): 0 of 3, A logs listener delivery failed dialling t-owner-nowhere"
     },
     {
-      "criterion": "2. Nothing arrives twice; the owner-only cost",
-      "surface": "same rig, mA without bridge, session host = pod address",
-      "command": "red test TestAnInboxMessageReachesAServingPortOnceWithAnotherMachinesListenerOnTheBus run once locally; stop mA, send through mB, restart mA",
-      "observed": "red test ok (6.9 s); owner down: 0 prompts, owner back: 1 prompt from its durable",
-      "headSha": "311640e7692341d75896ce75e491b702f3e18281",
-      "negativeControl": "round 2's binary d73383ee in that rig gave 2 prompts (round 3 measurement, delivery code unchanged in kind)"
-    },
-    {
-      "criterion": "1. and 5. A serving-port session receives a topic the stream does not store, at its recorded host",
-      "surface": "listener from 311640e7, ENVOY_SUBSCRIBE_ALL_TOPICS=1, no bridge, session host = pod address 10.1.10.198",
-      "command": "bash $TMPDIR/smoke/run.sh <311640e7 listener> t4-on ENVOY_SUBSCRIBE_ALL_TOPICS=1",
-      "observed": "one prompt carrying Topic notifications.team.smoke-1792960442 at 10.1.10.198:18080 in the publish's second",
-      "headSha": "311640e7692341d75896ce75e491b702f3e18281",
-      "negativeControl": "host evil.example:80/x -> 400 expected [host]"
-    },
-    {
-      "criterion": "Review round 1 finding 1 and the refusal-parse hardening: the live lane reads unhealthy while the server refuses it",
-      "surface": "listener from 311640e7 under a nats-server authorization config",
-      "command": "bash $TMPDIR/smoke/refusal.sh <311640e7 listener> t4-refusal",
-      "observed": "200 healthy with the grant; 503 live subscription inactive after NATS restarted without notifications.>, with the server's 'Permissions Violation for Subscription to notifications.> using queue envoy-listener-live-smoke' in the log as the second source",
-      "headSha": "311640e7692341d75896ce75e491b702f3e18281",
-      "negativeControl": "round 1's binary 5bdf1607 stayed 200 healthy under the same restart (round 2 measurement)"
+      "criterion": "4. Text corrected; 7. The pull request merges cleanly onto main",
+      "surface": "the workspace at the handoff head, GitHub",
+      "command": "grep -rnE 'receives nothing on such a topic|receives no team topic|never the routing key' <the plan's file list>; jj log -r 'conflicts() & ::legion/INFRA-122@origin'; gh pr view 2199 --repo sjawhar/legion --json mergeable",
+      "observed": "grep prints nothing (exit 1); conflicts() prints nothing; GitHub reports MERGEABLE at ea8627c3 (mergeStateStatus BLOCKED: required checks still queued)",
+      "headSha": "5c812a5b9ade2dbcc9330805f9b26cbfb77aef92",
+      "negativeControl": "Implementer's recorded control stands: the same grep on main@origin a6fa1211 matched skills/envoy/references/deliveries.md:57 'receives no team topic at all'; GitHub reported CONFLICTING at e884d19f before the merge"
     }
   ],
+  "testsJudged": "TestAMovedSessionReceivesEachKindOnceWhateverTheBridges covers the six cells with a truly unreachable 127.0.0.2 bridge and asserts once-only, no failed delivery and no exception; the other-letter-case rule is pinned by TestDeliver_SessionAddress rows. Nothing broke that no committed test would catch, so no red test this round.",
   "accepted": [
-    "A grant removed and given back by config reloads stays 503 until the listener restarts (round 2), accepted by the architect.",
-    "A re-registration does not move the stored subscription's owner; dispatch://INFRA-429 owns that, per the code comment."
+    "A live topic to a moved session is lost when its owner is not opted in: dispatch://INFRA-429.",
+    "A re-registration does not move the stored subscription's owner: dispatch://INFRA-429."
   ],
-  "ciAtTest": "Code head 311640e7 (the handoff commit 072b68d0 carries skip-checks), read 20:34Z: Legion Envoy and Contracts 40231008588, Tests 40231008552, Worker Image 40231008495, Docs 40231008526 and PR Title runs all queued. Cited as queued, not waited on."
+  "ciAtTest": "Code head 5c812a5b (handoff ea8627c3 carries skip-checks: 0 check runs), read 05:37Z: Tests run 40274303622 (lint, typecheck, test), Legion Envoy and Contracts run 40274303528 (changes), Docs 40274303513, Worker Image 40274303530 build, PR Title 40274450090 all queued. Cited as queued, not waited on."
 }
