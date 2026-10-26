@@ -2,27 +2,24 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-366",
-  "completed": "2026-10-26T03:41:20Z",
-  "headSha": "c914a72349e08dba8cbe9ac2b4852e6ea68c831d",
-  "round": 3,
+  "completed": "2026-10-26T04:14:05Z",
+  "headSha": "5f795d29022d132928e3ef70055fc8234ceb774e",
+  "round": 4,
   "implementerProof": {
     "verdict": "verified",
-    "how": "Drove the round-3 proof independently against my own build of the head (run-server.sh at c914a723, database infra366_t3): a spec, an insert and an upload naming a 3200-character block id are refused naming the 256-byte bound; a 256-byte id is a node and 257 bytes is 400 INVALID_REFERENCE; a comment citing the 3200-byte id posts. Re-ran block-graph.sh (37 PASS) and e2e/block-references.e2e.ts (4 passed on chromium, the new two-blocks row among them), and A12 on my builds of 81a3b5ef, c914a723 and 371d6c87 (all PASS)."
+    "how": "Drove the round-4 proof independently against my own build of the head (dispatch-head4 at 5f795d29, code of 384ff72f, database infra366_t4): a document named with 2680 random hex characters uploads, takes a doc-edit (version 2), lists 3 part_of blocks, its block (node id 2727 bytes) lists under its issue, and ?to=<block> and @v1 answer 200. Rolled a database main 81a3b5ef wrote (infra366_t4_roll) onto the head: the long-named document takes an edit and the indexer indexes it. Round 3's red test passes unmodified; block-graph.sh 37 PASS; block-references.e2e.ts 4 passed on chromium; A12 on 81a3b5ef, 5f795d29 and 371d6c87 all PASS."
   },
   "failures": [
     {
-      "criterion": "Review round 1's Important finding, as the round-3 proof states it: 'a version write succeeds whatever its block ids are' - a write main accepts must not fail because the block index cannot key a block (no regression against main; the reconciler must not retry a document forever)",
-      "evidence": "A block node's id is `<ref_key>#<block id>` (document_blocks.node_id, unique), and the 256-byte bound covers only the block id, so a long reference key still overflows the key. Uploading a document named with 2680 random hex characters (`dispatch artifact --issue CORE-3 --name <2680 hex>.md --path f`): main 81a3b5ef (port 8841) stores version 1; the head (port 8801) answers 500, log 'record the blocks version 1 of … changed: ERROR: index row size 2744 exceeds btree version 4 maximum 2704 for index \"document_blocks_node_id_key\"'. After rolling main's database onto the head build, the document main stored cannot be edited (`dispatch doc-edit` → 500, same index), and the block-index loop logs 'block index skipped a document it could not index' for it on every pass. A 2690-character name fails on main too (artifacts_ref_key_key), so the gap is the ~36-260 bytes the node id adds. Red test: TestADocumentWhoseReferenceKeyLeavesNoRoomForABlockIDIsStillWritten in packages/envoy/internal/dispatch/api/block_id_bound_test.go (commit 8eda5b76); `cd packages/envoy && go test ./internal/dispatch/api/ -run TestADocumentWhoseReferenceKeyLeavesNoRoomForABlockIDIsStillWritten -count=1 -v` fails with 'upload a document named with 2680 characters: status=500 … want 201 as main answers'. With a 2000-character name the same test passes, so its later assertions hold. The implementer's comment dispatch://INFRA-366/comment/85ee2d5a-64ec-4fe7-9a2e-2c55ee09f44f names this gap as outside the issue; it is a regression this pull request introduces (main writes these documents), unlike the refs_pkey overflow there, which main already has."
+      "criterion": "Review round 1's Important finding as proven ('a version write succeeds whatever its keys are'; no write main accepts fails on the block index's keys, and the reconciler retries nothing forever) - for text that cites a block of a long-named document",
+      "evidence": "A block reference's target id is `<ref_key>#<block id>`; refs.to_id (refs_pkey, refs_to) and block_refs.to_id (block_refs_pkey, block_refs_to) are still B-tree keys, and this round hash indexed only document_blocks.node_id and block_refs.from_node. At the head (port 8801): `dispatch comment --issue CORE-1 --body 'Cites dispatch://CORE-1/artifact/<2683-character slug>#b-x here.'` and `dispatch artifact --issue CORE-1 --name citer.md` with that citation each answer 500, log 'write reference: ERROR: index row size 2760 exceeds btree version 4 maximum 2704 for index \"refs_pkey\"'. Main 81a3b5ef reads no `#b-` reference, so it posted the same comment (observed: 'Posted comment 124bfafb-…'). After rolling that database onto the head, the block-index loop retries that comment on every pass, each logging 'block index skipped an item it could not index kind=comment id=124bfafb-… refs_pkey' (04:05:03, 04:05:33, 04:06:03…); other owed items still drain (a re-owed comment was indexed past it). Citing the document itself without `#b-` already fails on main (the older gap in dispatch://INFRA-366/comment/85ee2d5a-64ec-4fe7-9a2e-2c55ee09f44f); the `#b-` form is new to this pull request. Red test: TestTextCitingABlockOfALongNamedDocumentIsStillWritten in packages/envoy/internal/dispatch/api/block_id_bound_test.go (commit e3f6a49a); `cd packages/envoy && go test ./internal/dispatch/api/ -run TestTextCitingABlockOfALongNamedDocumentIsStillWritten -count=1 -v` fails with 'post a comment citing a block of the long-named document: status=500'. With a 2000-character name the same test passes, so its assertions hold."
     }
   ],
   "failed": 1,
   "attempted": [
-    "Census: comment, suggest, doc-edit and doc-read given a `#b-` dashboard URL each refuse naming the block and the issue/artifact arguments; doc-read of the URL without the fragment reads the document.",
-    "Block id bound: spec, insert and upload naming 3200 bytes refused with the bound; 256 bytes a node, 257 bytes 400; a comment citing 3200 and 256 bytes posts and lists under the 256-byte block.",
-    "Dashboard: a pin of 9007199254740993 links ?v=9007199254740993 and its card requests that pin digit for digit; a pin of 9223372036854775808 stays plain text (throwaway Playwright check, deleted).",
-    "Browser file e2e/block-references.e2e.ts: 4 passed on chromium.",
-    "block-graph.sh: 37 PASS. A12 (81a3b5ef, c914a723, 371d6c87): all PASS.",
-    "A comment citing a block, or the document itself, of a document with a 2640-character name answers 500 at the head via refs_pkey; the document-citation form fails on main too (the pre-existing gap the implementer escalated), so it is not recorded as this pull request's failure."
+    "Round 3's failure: upload, edit, part_of, issue listing and pinned read of a 2680-character-named document at the head; the same document written by main and rolled onto the head is edited and indexed. All held.",
+    "block-graph.sh 37 PASS; block-references.e2e.ts 4 passed (chromium); A12 all PASS with the edited migration 0117 on a fresh database.",
+    "Negative control: unauthenticated GET /api/v1/block-links → 401 NO_IDENTITY."
   ],
-  "ci": "At 9d4fb04e: Tests 40264090190 failure in job test (TestFetchKeepsAFeedAfterGitGC/killed_during_repack, packages/daemon/internal/workspace, untouched by this pull request), lint and typecheck success; Docs 40264090270 and Worker Image 40264090191 success; PR Title 40264143799 success; Legion Envoy and Contracts 40264090163 queued."
+  "ci": "At 384ff72f: Tests 40267005762, Docs 40267005743 and Worker Image 40267005708 in progress; Legion Envoy and Contracts 40267005746 queued; PR Title 40267045020 in progress."
 }
