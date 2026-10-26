@@ -1,6 +1,7 @@
 package pmdoc
 
 import (
+	"bytes"
 	"regexp"
 	"strings"
 	"unicode"
@@ -32,13 +33,52 @@ func (r *renderer) rawTitleLinesHold(raw string, lazy bool) bool {
 	if typed != nil && typed.prefix != "" && lazy {
 		return false
 	}
-	_, rest, _ := strings.Cut(raw, "\n")
-	for line := range strings.SplitSeq(rest, "\n") {
+	lines := strings.Split(raw, "\n")
+	for index := 1; index < len(lines); index++ {
+		line := lines[index]
 		if !opensAsText(line, lazy, typed != nil) {
+			return false
+		}
+		if width, ok := delimiterRowWidth(line); ok && !lazy && r.makesTable(lines, index, width) {
 			return false
 		}
 	}
 	return true
+}
+
+// maxTableHeaderRead is how much of the line before a raw title's first line feed
+// rawTitleLinesHold reads as the header of a delimiter row the title writes after it. Where that
+// line is longer, the delimiter row is taken to make a table, and the title is written `&#10;`.
+const maxTableHeaderRead = 4 << 10
+
+// makesTable reports whether lines[index], a delimiter row width cells wide that raw's lines
+// (lines) write in a paragraph, not lazily, can make a table of it under the line before, its
+// header: lines[index-1], or for raw's first line feed the written line up to it, holding more than
+// a lone `|` and no wider than the delimiter row. Go's table reader (lazyTableRows) takes only the
+// paragraph's first delimiter row, but the browser editor's engine takes a later line of the
+// paragraph as a header too, a delimiter row before it included (`| - |` over `| - |` is a table
+// there), so every delimiter row is judged under its own header. A lazy line makes no table in
+// either reader.
+func (r *renderer) makesTable(lines []string, index, width int) bool {
+	header := lines[index-1]
+	if index == 1 {
+		written := r.b.Bytes()
+		from := max(len(written)-maxTableHeaderRead, 0)
+		lineFrom := bytes.LastIndexByte(written[from:], '\n') + 1
+		if lineFrom == 0 && from > 0 {
+			return true
+		}
+		header = string(written[from+lineFrom:]) + header
+	}
+	source := []byte(header)
+	return !lonePipe(source) && tableRowWidth(gmtext.NewSegment(0, len(source)), source) <= width
+}
+
+// delimiterRowWidth is the width of line read as a table's delimiter row (tableDelimiterWidth), or
+// false when it is none.
+func delimiterRowWidth(line string) (int, bool) {
+	source := []byte(line)
+	return tableDelimiterWidth(gmtext.NewSegment(0, len(source)), source)
 }
 
 // opensAsText reports whether line, a line of an open paragraph, a lazy continuation line where
@@ -52,9 +92,11 @@ func (r *renderer) rawTitleLinesHold(raw string, lazy bool) bool {
 //     space, a tab or the line's end - which interrupts a paragraph only starting at 1 with content
 //     (orderedMarkerOpens);
 //   - `#` opens a heading only as one to six of them before a space, a tab or the end;
-//   - `-`, `*`, `+`, `_`, `=` open a bullet item as a marker before a space, a tab or the end, a
-//     thematic break as three or more of one of `-*_` and blanks alone, and outside a lazy line a
-//     setext underline as `=`s or `-`s alone and a table's delimiter row (`-`, `:` and `|` lines);
+//   - `-`, `*`, `+`, `_`, `=` open a bullet item as a marker before a space, a tab or the end -
+//     interrupting a paragraph only with content after it, where a lazy line opens an empty one -
+//     a thematic break as three or more of one of `-*_` and blanks alone, and outside a lazy line
+//     a setext underline as `=`s or `-`s alone; a table's delimiter row (`-`, `:` and `|` lines)
+//     is judged under its header (makesTable);
 //   - three backticks or tildes open a fence;
 //   - `>` opens a quote, and a directive line, past any white space it opens with, is refused or
 //     closes a typed block (directiveLineOpens);
@@ -116,13 +158,15 @@ func blankOrEnd(rest string) bool {
 	return rest == "" || rest[0] == ' ' || rest[0] == '\t'
 }
 
-// markerLine reports whether line, opening with one of `-*+_=:|`, opens a block: a bullet marker;
-// a thematic break; outside a lazy line, a setext underline or a table's delimiter row, which a lazy
-// line cannot be in either reader; or a directive line (directiveLineOpens).
+// markerLine reports whether line, opening with one of `-*+_=:|`, opens a block: a bullet marker,
+// with content outside a lazy line; a thematic break; outside a lazy line, a setext underline, which
+// a lazy line cannot be in either reader; or a directive line (directiveLineOpens).
 func markerLine(line string, lazy, inTyped bool) bool {
 	switch line[0] {
 	case '-', '*', '+':
-		if blankOrEnd(line[1:]) {
+		// A bullet item interrupts a paragraph only with content after its marker; at a lazy line
+		// the engine opens an empty one too.
+		if blankOrEnd(line[1:]) && (lazy || strings.Trim(line[1:], " \t") != "") {
 			return true
 		}
 	case ':':
@@ -135,15 +179,8 @@ func markerLine(line string, lazy, inTyped bool) bool {
 			return true
 		}
 	}
-	if char := line[0]; !lazy && (char == '=' || char == '-') && strings.TrimRight(strings.TrimLeft(line, string(char)), " \t") == "" {
-		return true
-	}
-	if lazy {
-		return false
-	}
-	source := []byte(line)
-	_, delimiter := tableDelimiterWidth(gmtext.NewSegment(0, len(source)), source)
-	return delimiter
+	char := line[0]
+	return !lazy && (char == '=' || char == '-') && strings.TrimRight(strings.TrimLeft(line, string(char)), " \t") == ""
 }
 
 // orderedMarkerOpens reports whether line, opening with a digit, opens an ordered list item there:
@@ -217,8 +254,11 @@ func htmlBlockOpens(line string, lazy bool) bool {
 	if name == nil {
 		return false
 	}
-	lower := strings.ToLower(name[1])
-	if blockHTMLNames[lower] || rawHTMLNames[lower] && rest[0] != '/' {
+	// A block or raw element's name opens its kind of block only where the name ends at a blank,
+	// the line's end, `>`, or for a block element `/>`.
+	lower, after := strings.ToLower(name[1]), line[len(name[0]):]
+	ends := blankOrEnd(after) || strings.HasPrefix(after, ">")
+	if blockHTMLNames[lower] && (ends || strings.HasPrefix(after, "/>")) || rawHTMLNames[lower] && rest[0] != '/' && ends {
 		return true
 	}
 	return lazy && completeTagLine.MatchString(line)

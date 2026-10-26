@@ -553,6 +553,10 @@ func TestRenderWritesEachImageFieldSoItReadsBackAsHeld(t *testing.T) {
 		"a\n| - |\n| - |\nz", "a\nb|c\n-|-\nz", "a\n| b | c |\n| - | - |\nz", "a\n:::b\nz", "a\n::: \nz",
 		"a\n</script> c\nz", "a\n<script>\nz", "a\n<!--\nz", "a\n<!-- c -->\nz",
 		"a\n::{b}\nz", "a\n:b{c}\nz", "a\n:b c\nz", "a\n\u00a0:::b{}\nz", "a\n\u00a0# b\nz", "a\n\u3000- b\nz",
+		// The shapes the tester's fuzz corpora hold: an empty bullet marker, a tag name not ended
+		// as a block's, a delimiter row under a wider line.
+		"a\n+\nz", "a\n*\nz", "a\n-\nz", "a\n+ \nz", "a\n<div", "a\n<pre", "a\n<div\"x\nz", "a\n<pre/\nz",
+		"a\n<div/>\nz", "a\n<pre>\nz", "a\n<div >\nz", "a | b\n| - |\nz", "a | b\n-:\nz", "a\n| |\n*\nz",
 	}
 	titles := []string{`"`, `say "hi"`, `\"`, `a\"b`, "'", `"\`, `a"`}
 	image := func(src string, title any, link, linkTitle any) *Node {
