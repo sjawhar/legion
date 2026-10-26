@@ -2,62 +2,24 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-439",
-  "completed": "2026-10-26T19:56:31Z",
+  "completed": "2026-10-26T20:46:26Z",
   "pr": 2228,
-  "round": "review round 3 (changes requested at ad53f9ca), narrowed by the architect: inert BTW notice never starts a turn on any path; readArrivals keeps read frames on a clean end; three minors",
+  "round": "tester round 11 fail: smoke-replay.sh remote mode read-back passed its cursor as $1 while replay_read read $2",
   "proof": [
     {
-      "criterion": "A BTW replayed while a turn streams starts no turn: the inert card is held until the host is idle with nothing queued, then shown once",
-      "surface": "packages/pi-envoy/scripts/smoke-replay.sh leg 7 btw-mid-turn: real omp --mode rpc 18.12.2 with claude-haiku-4-5, natsd -js and the listener built from this head; BTW published while the connection is down, connection restored while a long turn streams, turn left to end on its own",
-      "command": "bash packages/pi-envoy/scripts/smoke-replay.sh (exit 0; leg 7 lines in https://github.com/sjawhar/legion/pull/2228#issuecomment-6425727432)",
-      "observed": "three heartbeats after the restore: isStreaming true, queuedMessageCount 0, no card; after the turn ended on its own: exactly one inert card ('runs no side turn and needs no answer'), still one three heartbeats later; 1 agent_start and 1 turn_start since the prompt; no assistant message after the card",
-      "headSha": "02ceb04270b74771f812c7a8b58db69b47d05f19",
-      "negativeControl": "the same leg against the plugin at cdc5696f (round 3 head) fails: 'omp holds a message for its streaming turn 1s after the restart ... queuedMessageCount 1'"
-    },
-    {
-      "criterion": "UnwrittenFrames never hands an inert card to a host that is not settled, and hands a held one once at the first settled moment",
-      "surface": "pi-envoy bun test (src/unwritten-frames.test.ts, describe 'an inert card')",
-      "command": "cd packages/pi-envoy && bun test (999 pass, 0 fail at 6f57a71c)",
-      "observed": "held while busy (queued, waitsOnCard, claim pending), handed once as inert at handBackWithdrawn(true), not at handBackWithdrawn(false); a failed hand retries at the next settled moment; a session move drops it and releases its claim",
-      "headSha": "6f57a71c61d7b07972e24c504fc434c4676fe65c",
-      "negativeControl": "with the hold disabled (const hand = true) four of the five new tests fail"
-    },
-    {
-      "criterion": "readArrivals yields every frame it read before a subscription's clean end or error, as nats.js's own iterator does",
-      "surface": "envoy-client bun test (src/__tests__/delivery-arrivals.test.ts) driving nats 2.29.3's real QueuedIteratorImpl",
-      "command": "cd packages/envoy-client && bun test (909 pass, 0 fail at 6f57a71c)",
-      "observed": "clean stop while the caller is busy: a, b, c yielded then done, equal to the raw iterator's output; stop with an error: frames read first, then the error; break stops the source",
-      "headSha": "6f57a71c61d7b07972e24c504fc434c4676fe65c",
-      "negativeControl": "against round 3's delivery.ts all three tests fail (clean stop yields only the first frame)"
+      "criterion": "smoke-replay.sh remote mode, run as committed, reads each publish back from /v1/replay after the cursor it passes",
+      "surface": "packages/pi-envoy/scripts/smoke-replay.sh in remote mode against a loopback natsd -js and an Envoy listener built from this head, real omp 18.12.2",
+      "command": "SMOKE_REPLAY_ENVOY_URL=http://127.0.0.1:24080 SMOKE_REPLAY_NATS_URL=nats://127.0.0.1:24222 bash packages/pi-envoy/scripts/smoke-replay.sh (exit 0; https://github.com/sjawhar/legion/pull/2228#issuecomment-6426833042)",
+      "observed": "leg 1: '/v1/replay starts a cursor ... at 0', then '/v1/replay after 0 holds it: {\"seq\":1,...}'; every later read-back also holds its publish; the run ends SMOKE REPLAY PASS",
+      "headSha": "b9e0c62a888e2d431313426d7c7243258d505c93",
+      "negativeControl": "with the old ${2:-}/$2 lines restored, the same command exits 1 at leg 1's first read-back: 'SMOKE REPLAY FAIL (leg-1-reconnect): /v1/replay after 20 does not hold ...' with messages []"
     }
   ],
   "filesChanged": [
-    "packages/pi-envoy/src/unwritten-frames.ts",
-    "packages/pi-envoy/src/unwritten-frames.test.ts",
-    "packages/pi-envoy/extensions/envoy.ts",
-    "packages/pi-envoy/AGENTS.md",
-    "packages/pi-envoy/CHANGELOG.md",
     "packages/pi-envoy/scripts/smoke-replay.sh",
-    "packages/pi-envoy/scripts/README.md",
-    "packages/envoy-client/src/delivery.ts",
-    "packages/envoy-client/src/__tests__/delivery-arrivals.test.ts",
-    "packages/envoy-client/src/replay.ts",
-    "packages/envoy-client/CHANGELOG.md",
-    "packages/claude-envoy/dist/envoy-channel.js",
-    "packages/envoy/AGENTS.md",
-    "packages/envoy/CHANGELOG.md (forward-merge resolution only)",
-    "docs/site/src/content/docs/dispatch/envoy.md"
-  ],
-  "trickyParts": [
-    "hostSettled (idle, no pending message, not shutting down, on this session) is one function used both by UnwrittenFrames.sendCard and the heartbeat's handBackWithdrawn, so the two gates cannot drift.",
-    "A held inert card has handedAt undefined, so handBackWithdrawn's 'just handed' age guard does not skip it; it is handed at the first settled tick, before that tick's sweep, which then finds the frame still waiting on its card.",
-    "readArrivals returns the source iterator when the caller leaves early; nats.js takes the return only after its read in flight settles."
+    "packages/envoy/CHANGELOG.md (forward-merge resolution only)"
   ],
   "deviations": [
-    "Cursor-start window (minor 3): stated in the cursorStarts comment as reasoned, not driven; no margin added. A start moved later turns live failures in the seconds after each reconnect into notices (often beside a replayed card) and changed six host tests; the architect allowed 'stated or removed'.",
-    "Two forward merges of main this round (GitHub reported CONFLICTING each time), fingerprints unchanged: ad53f9ca -> a7ce6316 (4a1fb448...), 02ceb042 -> 6f57a71c (0157b623...)."
-  ],
-  "openQuestions": [
-    "smoke-replay.sh remote mode was driven only against a loopback listener; its read-back of a /v1/messages/send publish sometimes missed the message right after the send there. Leg 7 passes in remote mode with that read-back bypassed. Not in this round's narrowed scope."
+    "Forward merge of main because GitHub reported CONFLICTING: b9e0c62a -> 2f95f13f, fingerprint 247399ae... unchanged (https://github.com/sjawhar/legion/pull/2228#issuecomment-6426926113)."
   ]
 }
