@@ -597,12 +597,6 @@ func TestTokenLoginRetriesSlowlyWhenTheBrokerRefuses(t *testing.T) {
 	if !errors.As(err, &api) || api.Status != http.StatusUnauthorized {
 		t.Fatalf("the first login = %v, want the broker's 401", err)
 	}
-	time.Sleep(150 * time.Millisecond)
-	// A sleep a loaded machine stretches past the 300 ms wait may see the retry; the gap below
-	// still pins that wait.
-	if n := broker.loginCount(); n != 1 && time.Since(broker.login(0).at) < 300*time.Millisecond {
-		t.Fatalf("%d logins 150 ms after a refusal, want only the refused one before the 300 ms wait", n)
-	}
 	eventually(t, func() bool { return c.LoginStatus().State == "issued" }, "the refused login to be retried")
 	if gap := broker.login(1).at.Sub(broker.login(0).at); gap < 300*time.Millisecond {
 		t.Fatalf("the retry came %v after the refusal, want the long schedule's 300 ms wait at least", gap)

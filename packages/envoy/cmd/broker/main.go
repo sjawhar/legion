@@ -403,7 +403,7 @@ func main() {
 	enr := &enroll.Service{Store: st, Lease: lease, Pod: pod, ServiceLogins: cfg.ServiceLogins}
 	// The serving clock beats on serving, not ctx: this pod still answers renewals through its
 	// drain, so it is still a broker serving, and a gap in the beats there would read as an outage.
-	clock := &enroll.ServingClock{Store: st, Interval: sweep, NotServingAfter: 3 * sweep, Lease: lease}
+	clock := &enroll.ServingClock{Enrollments: enr, Interval: sweep, NotServingAfter: config.NotServingSweeps * sweep}
 	go clock.Run(serving)
 	enr.Chain = enroll.NewChainVerifier(st, cfg.PublicURL, time.Duration(cfg.ProofSkewSeconds)*time.Second)
 	reqMachine := newRequestMachine(cfg, st, current, secretStore, enr.Replay)

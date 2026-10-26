@@ -485,14 +485,14 @@ const lapsedBatch = 100
 // rather than waiting there for their own expiry with an approval that could grant nothing.
 //
 // Lapsed means what Lookup means by not live: lease_expires_at no later than Postgres's now(), and
-// not a lease that ran out while no broker was serving (enrollment_lease_live, migration 0019). A
-// lease that ran out while no broker was serving is not lapsed, so it is never ended for that: the
-// next ServingClock beat gives it the time back. A session that keeps renewing keeps its lease
-// ahead of now() and is never selected, and Renew refuses an enrollment once its lease has lapsed,
-// so ending one takes nothing a session could still use. Rows a concurrent Renew or Revoke has
-// locked are skipped (the next sweep sees them as they are then), and an ended row has revoked_at
-// set and is never selected again, so a sweep that finds nothing changes nothing. It works in
-// batches of lapsedBatch, each one transaction, and returns what it ended.
+// not a lease that ran out while no broker was serving (enrollment_lease_live, migration 0019),
+// which is never ended for that: the next ServingClock beat gives it the time back. A session that
+// keeps renewing keeps its lease ahead of now() and is never selected, and Renew refuses an
+// enrollment once its lease has lapsed, so ending one takes nothing a session could still use. Rows
+// a concurrent Renew or Revoke has locked are skipped (the next sweep sees them as they are then),
+// and an ended row has revoked_at set and is never selected again, so a sweep that finds nothing
+// changes nothing. It works in batches of lapsedBatch, each one transaction, and returns what it
+// ended.
 func (s *Service) EndLapsed(ctx context.Context) ([]LapsedEnrollment, error) {
 	var ended []LapsedEnrollment
 	for {

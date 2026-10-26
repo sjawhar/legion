@@ -4,8 +4,6 @@ import (
 	"context"
 	"log/slog"
 	"time"
-
-	"github.com/sjawhar/envoy/internal/broker/store"
 )
 
 // ServingClock keeps the broker_serving row (migration 0019) beating while this broker serves, so
@@ -16,14 +14,15 @@ import (
 // relaunched. With it, enrollment_lease_live holds such a lease live until a broker beats again,
 // and that beat moves the lease on by the time nobody served.
 //
-// Interval is how often it beats. NotServingAfter is the longest gap between two beats that still
-// counts as a broker serving; it must be well past Interval, so a beat that is merely late is not
-// an outage, and well short of the part of its lease a renewing session always holds, so no live
-// session's lease runs out inside a gap the clock tolerates. Lease is the enrollment lease, the
-// most a given-back lease may run ahead of the beat that gives it back.
+// Enrollments is the enrollment service whose Store it beats on and whose Lease, the enrollment
+// lease, is the most a given-back lease may run ahead of the beat that gives it back. Interval is
+// how often it beats. NotServingAfter is the longest gap between two beats that still counts as a
+// broker serving; it must be well past Interval, so a beat that is merely late is not an outage,
+// and well short of the part of its lease a renewing session always holds, so no live session's
+// lease runs out inside a gap the clock tolerates.
 type ServingClock struct {
-	Store                            *store.Store
-	Interval, NotServingAfter, Lease time.Duration
+	Enrollments               *Service
+	Interval, NotServingAfter time.Duration
 }
 
 // Run beats at once, then every Interval on its own ticker, until ctx ends. A beat that fails is
@@ -55,15 +54,16 @@ func (c *ServingClock) Run(ctx context.Context) {
 // Beat records that a broker is serving now, in one transaction. When the last beat is further
 // back than the threshold the last beating process recorded, no broker served in between: every
 // unended lease that was still running at the last beat gets that gap back, moved on by it but no
-// further than Lease past now, which a session that renewed during the gap already holds. The
-// clock then moves to now, never backward, and the threshold to this process's NotServingAfter.
+// further than the enrollment lease past now, which a session that renewed during the gap already
+// holds. The clock then moves to now, never backward, and the threshold to this process's
+// NotServingAfter.
 //
 // Beat alone locks the row, taken before it reads the gap, so two brokers beating at once give the
 // time back once: the second waits, then finds the gap the first one closed. enrollment_lease_live
 // reads the row without a lock, so no read of a lease ever waits on a beat. A missing row (deleted
 // by hand) is recreated as of now and gives nothing back.
 func (c *ServingClock) Beat(ctx context.Context) error {
-	tx, err := c.Store.Pool.Begin(ctx)
+	tx, err := c.Enrollments.Store.Pool.Begin(ctx)
 	if err != nil {
 		return err
 	}
@@ -87,7 +87,7 @@ func (c *ServingClock) Beat(ctx context.Context) error {
 	var restored int64
 	if notServing {
 		tag, err := tx.Exec(ctx, `update enrollments set lease_expires_at = least(lease_expires_at + $1::interval, $2::timestamptz + $3::interval)
-			where revoked_at is null and lease_expires_at > $4::timestamptz`, gap, at, c.Lease, last)
+			where revoked_at is null and lease_expires_at > $4::timestamptz`, gap, at, c.Enrollments.Lease, last)
 		if err != nil {
 			return err
 		}

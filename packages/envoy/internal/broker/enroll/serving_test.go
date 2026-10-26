@@ -5,6 +5,8 @@ import (
 	"errors"
 	"testing"
 	"time"
+
+	"github.com/sjawhar/envoy/internal/broker/store/storetest"
 )
 
 // notServingAfter is the threshold every clock in this file records: a gap between beats longer
@@ -24,7 +26,7 @@ func newServingRig(t *testing.T) servingRig {
 	svc := newService(t)
 	return servingRig{
 		svc:   svc,
-		clock: &ServingClock{Store: svc.Store, Interval: 10 * time.Millisecond, NotServingAfter: notServingAfter, Lease: svc.Lease},
+		clock: &ServingClock{Enrollments: svc, Interval: 10 * time.Millisecond, NotServingAfter: notServingAfter},
 		cred:  mintCredential(t, svc, str("ada@example.com"), nil, "devbox"),
 	}
 }
@@ -217,8 +219,8 @@ func TestTheTimeNoBrokerServedIsGivenBackToTheLeasesItRanOut(t *testing.T) {
 	beatBefore, beatAfter := r.beat(t)
 
 	within(t, "the restored lease", r.lease(t, restorable), old[restorable].Add(beatBefore.Sub(last)), old[restorable].Add(beatAfter.Sub(last)))
-	within(t, "the capped lease", r.lease(t, capped), beatBefore.Add(r.clock.Lease), beatAfter.Add(r.clock.Lease))
-	within(t, "the renewed lease", r.lease(t, renewer), beatBefore, beatAfter.Add(r.clock.Lease))
+	within(t, "the capped lease", r.lease(t, capped), beatBefore.Add(r.svc.Lease), beatAfter.Add(r.svc.Lease))
+	within(t, "the renewed lease", r.lease(t, renewer), beatBefore, beatAfter.Add(r.svc.Lease))
 	for _, id := range []string{before, revoked} {
 		if got := r.lease(t, id); !got.Equal(old[id]) {
 			t.Fatalf("lease of ended enrollment %s = %s after the beat, want it left at %s", id, got, old[id])
@@ -259,8 +261,7 @@ func TestTwoBeatsAtOnceGiveTheTimeBackOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = holder.Rollback(ctx) })
-	var pid int
-	if err := holder.QueryRow(ctx, `select pg_backend_pid() from broker_serving for update`).Scan(&pid); err != nil {
+	if _, err := holder.Exec(ctx, `select 1 from broker_serving for update`); err != nil {
 		t.Fatal(err)
 	}
 	start := r.now(t)
@@ -268,7 +269,7 @@ func TestTwoBeatsAtOnceGiveTheTimeBackOnce(t *testing.T) {
 	for range 2 {
 		go func() { done <- r.clock.Beat(ctx) }()
 	}
-	awaitServingWaiters(t, r, pid, 2)
+	storetest.AwaitLockWaiters(t, r.svc.Store.Pool, holder, 2)
 	if err := holder.Rollback(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -280,28 +281,6 @@ func TestTwoBeatsAtOnceGiveTheTimeBackOnce(t *testing.T) {
 	end := r.now(t)
 
 	within(t, "the lease after two beats", r.lease(t, id), old.Add(start.Sub(last)), old.Add(end.Sub(last)))
-}
-
-// awaitServingWaiters waits until n backends wait, directly or behind another waiter, on holder's
-// lock (as api's awaitWaiters does).
-func awaitServingWaiters(t *testing.T, r servingRig, holder, n int) {
-	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
-	for {
-		var waiting int
-		if err := r.svc.Store.Pool.QueryRow(context.Background(), `select count(*) from pg_stat_activity a
-			where $1 = any(pg_blocking_pids(a.pid)) or exists (select 1 from pg_stat_activity b
-				where $1 = any(pg_blocking_pids(b.pid)) and b.pid = any(pg_blocking_pids(a.pid)))`, holder).Scan(&waiting); err != nil {
-			t.Fatal(err)
-		}
-		if waiting >= n {
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("%d backends wait on broker_serving's lock, want %d", waiting, n)
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
 }
 
 // The clock never moves backward: a beat that finds last_serving_at ahead of its own time leaves it

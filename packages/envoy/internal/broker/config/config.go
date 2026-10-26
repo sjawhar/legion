@@ -218,6 +218,10 @@ type Config struct {
 	TrustedProxyHeader string
 }
 
+// NotServingSweeps is how many sweeps a gap between two serving records may last and still count
+// as a broker serving; a longer gap is time no broker was serving.
+const NotServingSweeps = 3
+
 // noUIToken is why BROKER_UI_TOKEN and its file are gone: the routes it authenticated take the
 // caller's own Kubernetes ServiceAccount token now.
 const noUIToken = "the broker's approval routes take the calling service's own Kubernetes ServiceAccount token, verified against BROKER_K8S_OIDC_ISSUER, so list that account in BROKER_API_ACCOUNTS instead of sharing a bearer with Dispatch's server"
@@ -640,10 +644,10 @@ func Load(getenv func(string) string) (Config, error) {
 		}
 		*i.dst = n
 	}
-	// A live session renews with at least two thirds of its lease left, and a gap of up to three
-	// sweeps reads as a broker still serving, so a lease that ran out inside such a gap would be
-	// ended rather than given back. Three sweeps must fall short of two thirds of a lease.
-	if 2*cfg.LeaseSeconds <= 9*cfg.SweepSeconds {
+	// A live session renews with at least two thirds of its lease left, and a gap of up to
+	// NotServingSweeps sweeps reads as a broker still serving, so a lease that ran out inside such a
+	// gap would be ended rather than given back. That gap must fall short of two thirds of a lease.
+	if 2*cfg.LeaseSeconds <= 3*NotServingSweeps*cfg.SweepSeconds {
 		return Config{}, fmt.Errorf("BROKER_LEASE_SECONDS (%d) must be more than four and a half times BROKER_SWEEP_SECONDS (%d): a live session holds at least two thirds of its lease, and the gap the broker tolerates before giving back the time no broker was serving is three sweeps",
 			cfg.LeaseSeconds, cfg.SweepSeconds)
 	}

@@ -154,7 +154,7 @@ func TestABrokerOutageLongerThanALease(t *testing.T) {
 		default:
 		}
 	}
-	fetch := func(when string) time.Duration {
+	fetch := func(when string) {
 		t.Helper()
 		started := time.Now()
 		commandCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
@@ -170,7 +170,6 @@ func TestABrokerOutageLongerThanALease(t *testing.T) {
 				when, err, stdout.String(), secretValue, stderr.String(), renewer.Output.String())
 		}
 		t.Logf("the survivor's fetch %s was served in %s: %s", when, took.Round(time.Millisecond), strings.TrimSpace(stderr.String()))
-		return took
 	}
 	fetch("before the outage")
 
@@ -276,11 +275,11 @@ func TestABrokerOutageLongerThanALease(t *testing.T) {
 			t.Fatal(err)
 		}
 		status, answer := broker.signed(ended.pod, "/v1/requests", map[string]any{"request": request, "session_id": nil})
-		if code, message := brokerRefusal(t, answer); status != http.StatusUnauthorized || code != "PROOF_INVALID" || !strings.Contains(message, "not live") {
+		if code, message := brokerRefusal(answer); status != http.StatusUnauthorized || code != "PROOF_INVALID" || !strings.Contains(message, "not live") {
 			t.Fatalf("the %s pod's fetch = %d %s, want 401 PROOF_INVALID not live", ended.name, status, answer)
 		}
 		status, answer = broker.signed(ended.pod, "/v1/enrollments/"+ended.pod.enrollmentID+"/renew", nil)
-		if code, _ := brokerRefusal(t, answer); status != http.StatusUnauthorized || code != "ENROLLMENT_NOT_LIVE" {
+		if code, _ := brokerRefusal(answer); status != http.StatusUnauthorized || code != "ENROLLMENT_NOT_LIVE" {
 			t.Fatalf("the %s pod's renewal = %d %s, want 401 ENROLLMENT_NOT_LIVE", ended.name, status, answer)
 		}
 	}
@@ -292,7 +291,7 @@ func TestABrokerOutageLongerThanALease(t *testing.T) {
 		{"another service account", podToken(mismatch.runtimeID, otherAccount)},
 	} {
 		status, answer := broker.signed(mismatch, "/v1/enrollments/"+mismatch.enrollmentID+"/renew", map[string]any{"pod_token": other.token})
-		if code, _ := brokerRefusal(t, answer); status != http.StatusForbidden || code != "POD_IDENTITY_MISMATCH" {
+		if code, _ := brokerRefusal(answer); status != http.StatusForbidden || code != "POD_IDENTITY_MISMATCH" {
 			t.Fatalf("the mismatch pod's renewal with a token naming %s = %d %s, want 403 POD_IDENTITY_MISMATCH", other.what, status, answer)
 		}
 	}
@@ -404,8 +403,7 @@ func deleteEnrollment(t *testing.T, base string, by launcher, enrollmentID strin
 
 // brokerRefusal answers the code and message of the broker's error answer, empty for an answer
 // that is not one.
-func brokerRefusal(t *testing.T, answer []byte) (code, message string) {
-	t.Helper()
+func brokerRefusal(answer []byte) (code, message string) {
 	var refusal struct {
 		Code  string `json:"code"`
 		Error string `json:"error"`
