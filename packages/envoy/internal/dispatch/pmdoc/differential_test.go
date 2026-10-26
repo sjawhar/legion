@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -292,6 +293,9 @@ type diffSide struct {
 	// Why correct fails: the tree differs from the engine's reading, or the engine reads the
 	// rendering back otherwise (Go's read-back is in dump).
 	ReadsAsEngine, EngineReadsBack bool
+	// imagesHeld: Go's Parse and the engine both read the rendering back with the tree's images,
+	// each with its source, alt, titles and link, in document order.
+	imagesHeld bool
 }
 
 // diffRenderings is the engine's reading of one revision's two renderings of a document.
@@ -313,9 +317,42 @@ func judge(dump diffDump, source *Node, reading diffRenderings) diffSide {
 	side.ReadsAsEngine = tree != nil && source != nil && tree.Equal(source)
 	side.correct = side.stores && side.ReadsAsEngine && dump.ReadsBack && side.EngineReadsBack
 	side.engineOnly = side.stores && dump.ReadsBack && !side.EngineReadsBack
+	if side.stores && engineBack != nil {
+		goBack, err := Parse(*dump.Render)
+		images := diffImages(tree)
+		side.imagesHeld = err == nil && diffSameImages(diffImages(goBack), images) && diffSameImages(diffImages(engineBack), images)
+	}
 	engineRenderBack := diffTree(reading.EngineRender)
 	side.renders = source != nil && dump.EngineRender != nil && dump.EngineReadsBack && engineRenderBack != nil && source.Equal(engineRenderBack) && len(dump.Panics) == 0
 	return side
+}
+
+// diffImages is doc's images in document order. The differential's own helpers are named apart
+// from the package's, since differential.sh builds this file into every revision it compares.
+func diffImages(doc *Node) []*Node {
+	var images []*Node
+	Walk(doc, func(node *Node) bool {
+		if node.Type == "image" {
+			images = append(images, node)
+		}
+		return true
+	})
+	return images
+}
+
+// diffSameImages reports whether two lists of images hold the same images in order, each with the
+// same source, alt, title, link and link title, an absent one the same as an empty one.
+func diffSameImages(a, b []*Node) bool {
+	return slices.EqualFunc(a, b, func(x, y *Node) bool {
+		for _, field := range []string{"src", "alt", "title", "link", "linkTitle"} {
+			first, _ := x.Attrs[field].(string)
+			second, _ := y.Attrs[field].(string)
+			if first != second {
+				return false
+			}
+		}
+		return true
+	})
 }
 
 // differs reports whether two renderings differ, one missing counting as a difference.
@@ -388,17 +425,17 @@ func TestDifferentialCompare(t *testing.T) {
 		// taken at either - loses no link it ever had, and is counted apart, ungated. So is one
 		// Go's reader reads otherwise than the engine at both revisions - its author's source,
 		// read two ways at base already, which the server takes as Go reads it (R2) - but only
-		// where head's stored bytes hold what Go read: Go's Parse and ParseForWrite and the engine
-		// all read them back as Go's tree, its images and their links included. Bytes either
-		// reader reads otherwise lose the link the server took, whatever the source said.
+		// where head's stored bytes hold the images Go read: Go's reader and the engine both read
+		// them back with every image, its titles and its link, as Go read it (imagesHeld). Bytes
+		// either reader reads with an image otherwise lose the link the server took, whatever the
+		// source said; a difference elsewhere in the document is the base's, which writes it too.
 		if links.whole {
 			switch {
 			case head.correct:
 				counts["linked image kept"]++
 			case !base.stores && !head.stores:
 				flag("linked image in a write both refuse", sides)
-			case !base.ReadsAsEngine && !head.ReadsAsEngine && head.stores &&
-				head.dump.ReadsBack && head.dump.WriteReadsBack && head.EngineReadsBack:
+			case !base.ReadsAsEngine && !head.ReadsAsEngine && head.imagesHeld:
 				flag("linked image in a document Go reads otherwise than the engine at both revisions", sides)
 			default:
 				flag("lost whole-image link", sides)
