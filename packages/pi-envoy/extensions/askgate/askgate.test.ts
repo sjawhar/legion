@@ -1790,6 +1790,75 @@ console.log(JSON.stringify(args, null, 2));
       expect(g.calls).toHaveLength(0);
       expect(g.entries.map((e) => [e.tool, e.outcome])).toEqual([[tool, "unreadable"]]);
     });
+  // Outside review of #2159 at 31c5cca3b, finding 2: the text scan needed `dispatch` beside an
+  // unquoted subcommand, so quotes the inner shell removes hid the write from it. The gate now
+  // reads the text a wrapper would run (a word's value, `eval`'s joined arguments, a
+  // here-document's body) with the same quote-aware scan, and `dispatch` as any word's value.
+  const QUOTED_WRAPPED: Array<[string, string, string]> = [
+    [
+      "bash -c with a quoted subcommand",
+      `bash -c 'dispatch "comment" --issue X-1 --body hi'`,
+      "dispatch_comment",
+    ],
+    [
+      "sh -c with a quoted program",
+      `sh -c '"dispatch" comment --issue X-1 --body hi'`,
+      "dispatch_comment",
+    ],
+    [
+      "zsh -c with a backslash in the program",
+      "zsh -c 'd\\ispatch comment --issue X-1 --body hi'",
+      "dispatch_comment",
+    ],
+    [
+      "dash -c with options first",
+      `dash -e -c 'dispatch "ask" --issue X-1 --question q'`,
+      "dispatch_ask",
+    ],
+    ["eval of quoted words", `eval '"dispatch" "ask" --issue X-1 --question q'`, "dispatch_ask"],
+    [
+      "eval of split arguments",
+      `eval '"dispatch"' '"ask"' --issue X-1 --question q`,
+      "dispatch_ask",
+    ],
+    [
+      "two shells deep",
+      `bash -c "sh -c 'dispatch \\"comment\\" --issue X-1 --body hi'"`,
+      "dispatch_comment",
+    ],
+    [
+      "xargs with a quoted subcommand",
+      `echo X-1 | xargs -I{} dispatch "comment" --issue {} --body hi`,
+      "dispatch_comment",
+    ],
+    [
+      "a here-document bash runs, its subcommand quoted",
+      `bash <<'EOF'\ndispatch "comment" --issue X-1 --body hi\nEOF`,
+      "dispatch_comment",
+    ],
+  ];
+  for (const [form, command, tool] of QUOTED_WRAPPED)
+    test(`F2: a quoted write another command would run is unreadable: ${form}`, async () => {
+      expect(unreadableDispatchWrite(command)).toMatchObject({ tool, wrapped: true });
+      const g = bind({ env: { ...STUB, OMP_ASKGATE: "block" }, cwd: work });
+      const result = await g.bash("w", command);
+      expect(result?.block).toBe(true);
+      expect(result?.reason).toContain("Nothing in the call ran");
+      expect(g.dryRuns).toHaveLength(0);
+      expect(g.calls).toHaveLength(0);
+      expect(g.entries.map((e) => [e.tool, e.outcome])).toEqual([[tool, "unreadable"]]);
+      const refuse = core.loadFailureGate(
+        new Error("a host module did not load"),
+        { env: { OMP_ASKGATE: "warn" }, configFile: CONFIG_FILE },
+        { appendEntry: () => {} }
+      );
+      expect(
+        refuse(
+          { toolName: "bash", toolCallId: "l", input: { command } },
+          { agent: { kind: "main" }, sessionManager: { getEntries: () => [] } } as never
+        )?.block
+      ).toBe(true);
+    });
   test("the text scan reads a write it cannot run, and says to keep such text off the command line", async () => {
     const g = bind({ env: { ...STUB, OMP_ASKGATE: "block" }, cwd: work });
     const result = await g.bash("t", "grep -n 'dispatch comment --issue' notes.md");

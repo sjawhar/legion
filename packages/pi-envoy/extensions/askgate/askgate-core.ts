@@ -1003,7 +1003,7 @@ type Open =
  * command only writes (`cat > f <<EOF … EOF`, `echo "dispatch ask"`) is never a command. Not a
  * shell parser: a `)` in a `case` pattern ends a substitution early.
  */
-function commandWords(command: string): Word[][] {
+function commandWords(command: string, bodies?: string[]): Word[][] {
   const segments: Word[][] = [];
   const pending: Array<{ delimiter: string; stripTabs: boolean }> = [];
   const open: Open[] = [];
@@ -1042,16 +1042,24 @@ function commandWords(command: string): Word[][] {
     open.pop();
     ({ words, start, value, quote } = outer);
   };
-  /** Past the bodies of the here-documents opened on the line that ended just before `from`. */
+  /** Past the bodies of the here-documents opened on the line that ended just before `from`; each
+   * body goes to `bodies` when the caller asks for them. */
   const skipBodies = (from: number): number => {
     let at = from;
     for (const { delimiter, stripTabs } of pending.splice(0)) {
+      const body = at;
+      let bodyEnd = command.length;
       while (at < command.length) {
+        const lineStart = at;
         const end = command.indexOf("\n", at);
         const line = command.slice(at, end === -1 ? command.length : end);
         at = end === -1 ? command.length : end + 1;
-        if ((stripTabs ? line.replace(/^\t+/, "") : line) === delimiter) break;
+        if ((stripTabs ? line.replace(/^\t+/, "") : line) === delimiter) {
+          bodyEnd = lineStart;
+          break;
+        }
       }
+      bodies?.push(command.slice(body, bodyEnd));
     }
     return at;
   };
@@ -1164,37 +1172,57 @@ const DISPATCH_IN_TEXT = new RegExp(
  * which say whether it would send anything (`--dry-run`, `--help`, an `issue` with no spec, an
  * upload that is no markdown document).
  */
-function textDispatchWrite(command: string): { tool: string; label: string } | undefined {
+function textDispatchWrite(command: string): FoundWrite | undefined {
   for (const match of command.matchAll(DISPATCH_IN_TEXT)) {
     const name = match[1];
     const from = (match.index ?? 0) + match[0].length;
     const lineEnd = command.indexOf("\n", from);
     const flags = commandWords(command.slice(from, lineEnd === -1 ? command.length : lineEnd))[0];
     if (!reviewedWrite(name, flags ?? [])) continue;
-    return { tool: `dispatch_${name.replaceAll("-", "_")}`, label: `dispatch ${name}` };
+    return writeNamed(name);
   }
   return undefined;
 }
 
+/** The tool and the label of the `dispatch` write `name` names. */
+const writeNamed = (name: string): FoundWrite => ({
+  tool: `dispatch_${name.replaceAll("-", "_")}`,
+  label: `dispatch ${name}`,
+});
+
 /**
- * A scoped `dispatch` write in a `bash` command AskGate does not read. Three scans, in order: a
- * write at a command's position (after any assignments and prefixes such as `env -u HOME --` or
- * `timeout -s KILL 30`, each prefix's options and its `--` read as its own parser reads them:
+ * How many levels of text inside text the scan reads: a word that `bash -c` runs, inside a word
+ * that `eval` runs, and so on. Past it, only the text pattern above applies.
+ */
+const NESTED_DEPTH = 4;
+
+/** The write without the fields that say where it sits: a nested write is always `wrapped`. */
+type FoundWrite = Pick<UnreadableCommand, "tool" | "label" | "subcommand">;
+
+/**
+ * A scoped `dispatch` write in a `bash` command AskGate does not read. In order: a write at a
+ * command's position (after any assignments and prefixes such as `env -u HOME --` or `timeout -s
+ * KILL 30`, each prefix's options and its `--` read as its own parser reads them:
  * `commandStart`), or a scoped subcommand run by a program an expansion names (`$D comment …`,
- * `$(command -v dispatch) ask …`), which may be `dispatch`; a `dispatch` whose own subcommand an
- * expansion names (`dispatch $SUB …`), which may be a write; and `dispatch` beside a write
- * subcommand anywhere in the call's text (`textDispatchWrite`), which is the write another
- * command would run. One carrying `--dry-run` or `--help`, or a `dispatch issue` without
- * `--spec`/`--spec-file`, sends nothing for review and is not one. Only for a command
- * `scopedCommand` could not read.
+ * `$(command -v dispatch) ask …`), which may be `dispatch`; then a write in text another command
+ * would run (`nestedWrite`, then `textDispatchWrite`); then a `dispatch` whose own subcommand an
+ * expansion names (`dispatch $SUB …`), which may be a write. One carrying `--dry-run` or `--help`,
+ * or a `dispatch issue` without `--spec`/`--spec-file`, sends nothing for review and is not one.
+ * Only for a command `scopedCommand` could not read.
  */
 export function unreadableDispatchWrite(command: unknown): UnreadableCommand | undefined {
   // No prefilter on the raw text: bash removes a backslash or empty quotes inside a word
   // (`d\ispatch`, `di""spatch`), so a write need not hold `dispatch` as written. `commandWords`
   // removes them as bash does and names the program.
   if (typeof command !== "string") return undefined;
+  return findWrite(command, 0);
+}
+
+function findWrite(command: string, depth: number): UnreadableCommand | undefined {
+  const bodies: string[] = [];
+  const segments = commandWords(command, bodies);
   let unknownSubcommand: UnreadableCommand | undefined;
-  for (const segment of commandWords(command)) {
+  for (const segment of segments) {
     const start = commandStart(segment);
     if (start === undefined) continue;
     const [program, name, ...flags] = start.words.slice(start.at);
@@ -1216,16 +1244,62 @@ export function unreadableDispatchWrite(command: unknown): UnreadableCommand | u
         };
       continue;
     }
-    const found = {
-      tool: `dispatch_${name.value.replaceAll("-", "_")}`,
-      label: `dispatch ${name.value}`,
-    };
+    const found = writeNamed(name.value);
     return unread.length === 0
       ? found
       : { ...found, program: { namesDispatch: named, unread: named ? unread : expansions } };
   }
-  const wrapped = textDispatchWrite(command);
+  const wrapped = nestedWrite(segments, bodies, depth) ?? textDispatchWrite(command);
   return wrapped === undefined ? unknownSubcommand : { ...wrapped, wrapped: true as const };
+}
+
+/**
+ * A write in text another command would run, read with the same quote-aware scan, never only by
+ * the text pattern: quotes and backslashes the inner shell removes (`bash -c 'dispatch "comment"
+ * …'`) hide a write from that pattern. `dispatch` as any word of a command is the command a runner
+ * such as `xargs`, `find -exec` or `sudo` runs. Each word's value with its quotes removed, the
+ * arguments of `eval` joined as `eval` joins them, and each here-document's body are each read as
+ * a script of their own, down to NESTED_DEPTH levels.
+ */
+function nestedWrite(
+  segments: readonly Word[][],
+  bodies: readonly string[],
+  depth: number
+): FoundWrite | undefined {
+  for (const words of segments)
+    for (const [index, word] of words.entries()) {
+      const name = words[index + 1];
+      if (
+        word.value.split("/").at(-1) === "dispatch" &&
+        name !== undefined &&
+        reviewedWrite(name.value, words.slice(index + 2))
+      )
+        return writeNamed(name.value);
+    }
+  if (depth >= NESTED_DEPTH) return undefined;
+  const scripts = [...bodies];
+  for (const words of segments)
+    for (const [index, word] of words.entries()) {
+      // A word bash takes as written splits into the same words again: nothing new to read.
+      if (word.value !== word.raw) scripts.push(word.value);
+      if (word.value === "eval")
+        scripts.push(
+          words
+            .slice(index + 1)
+            .map((arg) => arg.value)
+            .join(" ")
+        );
+    }
+  for (const script of scripts) {
+    const found = findWrite(script, depth + 1);
+    if (found !== undefined)
+      return {
+        tool: found.tool,
+        label: found.label,
+        ...(found.subcommand === undefined ? {} : { subcommand: found.subcommand }),
+      };
+  }
+  return undefined;
 }
 
 /** Runs `script` under bash in a process group of its own, which is killed at the limit or on the signal. */
