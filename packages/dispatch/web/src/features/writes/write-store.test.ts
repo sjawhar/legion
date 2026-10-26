@@ -539,6 +539,24 @@ test("a write lands within 2 s of the network returning, and KEY_IN_FLIGHT honou
   });
 });
 
+// A write Dispatch never answers is asked again after 1 s, 2 s, 4 s, 8 s and 16 s, and never more
+// than 30 s apart after that, however long the outage lasts.
+test("the backoff doubles from 1 s and is capped at 30 s", async () => {
+  await onFakeClock(async () => {
+    const { writes } = storeOf();
+    const times: number[] = [];
+    const start = Date.now();
+    void statusWrite(writes, () => {
+      times.push(Date.now() - start);
+      return Promise.reject(dropped());
+    }).catch(() => {});
+    await tick(1_000 + 2_000 + 4_000 + 8_000 + 16_000 + 30_000 + 30_000 + 500);
+    const gaps = times.slice(1).map((at, index) => at - (times[index] ?? 0));
+    // Each gap is read at the 100 ms the clock moves by.
+    expect(gaps.map((gap) => Math.round(gap / 1_000))).toEqual([1, 2, 4, 8, 16, 30, 30]);
+  });
+});
+
 // A DELETE whose answer was lost and that Dispatch answers 404 on the next attempt was made: the
 // thing it removes is gone either way, so it lands rather than being refused.
 test("a resent DELETE answered 404 lands", async () => {

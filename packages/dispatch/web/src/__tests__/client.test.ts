@@ -1079,108 +1079,104 @@ test("API client keeps only small idempotent /me/ writes alive during navigation
   expect(oversizedIssueState?.init?.keepalive).toBeUndefined();
 });
 
+/** The client's own plumbing, which every write method goes through and which takes no argument a
+ *  census could fill: not a write a page makes. */
+const CLIENT_PLUMBING = new Set([
+  "constructor",
+  "exchange",
+  "answered",
+  "response",
+  "json",
+  "send",
+  "post",
+  "put",
+  "remove",
+]);
+
+/** The one write Dispatch's keyed layer does not take, and so the one the page makes outside the
+ *  write path: `/auth/logout` is the same however often it is made, ends a session rather than
+ *  writing anything a reload should resume, and sits outside the layer. */
+const UNKEYED_POSTS = new Set(["/auth/logout"]);
+
 /**
- * The one keyed write path, over every write method the client has. A `POST` or a `PATCH` names
- * the person's action to Dispatch by the caller's key, so a repeat of it is that one write there;
- * a `PUT` or a `DELETE` is the same write however often it is made, so it carries no key and is
- * let finish as the page goes. A method this list forgets is a write that would reach Dispatch
- * unnamed, which is what this test is for: every write method of the client is called here, and
- * the ones that carry a key and the ones that do not are both named.
+ * The one keyed write path, over every method the client has, found from the client itself rather
+ * than from a list, so a write method added later is in the census without anyone naming it. Each
+ * method is called with one argument that stands for any of them: a string where a path wants one
+ * (`owner/repo`, which a repository path also takes), an empty JSON object where a body does, and
+ * the press's bounds - its key, its login and the `sent` hook every write tells as it goes out.
+ * Every request that is not a GET must have gone out through `send` (it told `sent`), carry the
+ * presser's login (`Dispatch-Login`), and carry the key when it is a `POST` or a `PATCH` and none
+ * when it is a `PUT` or a `DELETE`.
  */
-test("every POST and PATCH sends its Idempotency-Key, and no PUT or DELETE does", async () => {
-  const stub = stubFetch(() => Response.json({ artifact: {}, version: {} }));
+test("every write method of the client goes through the one keyed path", async () => {
+  const stub = stubFetch(() => Response.json({}));
   const api = createApiClient(stub.fetch);
-  const bounds = keyed("press-1");
-
-  await api.createProject({ key: "CORE", name: "Core" }, bounds);
-  await api.syncArchitectureSource("CORE", "legion/arch", bounds);
-  await api.createAgentToken({ name: "planner" }, bounds);
-  await api.createIssue({ project: "CORE", title: "Ship it" }, bounds);
-  await api.patchIssue("CORE-1", { status: "done" }, bounds);
-  await api.createAsk("CORE-1", { question: "Ship?" }, bounds);
-  await api.answerAsk(
-    "ask-1",
-    { expected_edited_at: null, selected: ["Ship"], text: "Yes" },
-    bounds
+  const told: string[] = [];
+  /** Stands for any argument: a path segment, a JSON body, and a press's bounds. */
+  const anything = Object.assign(new String("owner/repo"), {
+    key: "census-key",
+    login: "alice",
+    sent: (request: { method: string; path: string }) =>
+      told.push(`${request.method} ${request.path}`),
+    toJSON: () => ({}),
+  });
+  const methods = Object.getOwnPropertyNames(Object.getPrototypeOf(api)).filter(
+    (name) => !CLIENT_PLUMBING.has(name) && typeof Reflect.get(api, name) === "function"
   );
-  await api.createComment("CORE-1", { body: "Looks good" }, bounds);
-  await api.resolveComment("comment-1", bounds);
-  await api.reopenComment("comment-1", bounds);
-  await api.editComment("comment-1", { body: "Revised" }, bounds);
-  await api.acceptComment("comment-1", bounds);
-  await api.rejectComment("comment-1", bounds);
-  await api.createCommentDelivery("comment-1", "session:planner", "steer", bounds);
-  await api.createMessage("CORE-1", { body: "Ready" }, bounds);
-  await api.createAgentMessage("planner-session", { body: "Ready?", delivery: "btw" }, bounds);
-  await api.createBroadcast({ body: "All", delivery: "btw", session_ids: ["planner"] }, bounds);
-  await api.createMessageDelivery("message-1", "btw", bounds);
-  await api.uploadArtifact({ issue: "CORE-1" }, { content: "# Spec\n", name: "spec.md" }, bounds);
-  await api.uploadArtifact(
-    { issue: "CORE-1" },
-    { file: new File(["spec"], "spec.md", { type: "text/markdown" }), name: "spec.md" },
-    bounds
-  );
-  await api.rebuildArtifact("artifact-1", undefined, bounds);
-  await api.createArtifactVersion("artifact-1", { summary: "Save" }, bounds);
-  await api.createArtifactReview("artifact-1", { state: "approved" }, bounds);
-  await api.createArtifactAsk("artifact-1", { question: "Ship?" }, bounds);
-  await api.createArtifactComment("artifact-1", { body: "Looks good" }, bounds);
-  await api.createDeliverySessionGroup({ name: "Pair", sessions: ["planner"] }, bounds);
-  await api.updateDeliverySessionGroup("group-1", { name: "Trio" }, bounds);
-  await api.approveCredentialRecord("record-1", {}, bounds);
-  await api.denyCredentialRecord("record-1", {}, bounds);
-  await api.lookupMachineCredential("ABCD1234", bounds);
-  await api.revokeCredentialGrant("grant-1", bounds);
-  await api.revokeMachineLogin("credential-1", bounds);
-  const keyedWrites = stub.requests.length;
+  /** Every method that made a request that is not a GET, with those requests. */
+  const writers = new Map<
+    string,
+    { method: string; path: string; key: string | null; login: string | null }[]
+  >();
+  const silent: string[] = [];
+  for (const name of methods) {
+    const call = Reflect.get(api, name) as (...args: unknown[]) => unknown;
+    const before = stub.requests.length;
+    try {
+      await call.apply(
+        api,
+        Array.from({ length: Math.max(call.length, 4) }, () => anything)
+      );
+    } catch {
+      // A read the census's answer does not fit; only the requests it made are judged.
+    }
+    const made = stub.requests.slice(before);
+    if (made.length === 0) silent.push(name);
+    const writes = made
+      .filter(({ init }) => (init?.method ?? "GET") !== "GET")
+      .map(({ init, path }) => {
+        const headers = new Headers(init?.headers);
+        return {
+          key: headers.get("Idempotency-Key"),
+          login: headers.get("Dispatch-Login"),
+          method: init?.method ?? "GET",
+          path,
+        };
+      });
+    if (writes.length > 0) writers.set(name, writes);
+  }
 
-  await api.putRepoProject("owner/repo", { project: "CORE" }, bounds);
-  await api.deleteRepoProject("owner/repo", bounds);
-  await api.putArchitectureSource("CORE", "legion/arch", { branch: "main" }, bounds);
-  await api.deleteArchitectureSource("CORE", "legion/arch", bounds);
-  await api.revokeAgentToken("token-1", bounds);
-  await api.releaseIssueClaim("CORE-1", bounds);
-  await api.snoozeAsk("ask-1", "2026-10-26T00:00:00Z", bounds);
-  await api.unsnoozeAsk("ask-1", bounds);
-  await api.markThreadRead("thread-1", "2026-10-25T00:00:00Z", bounds);
-  await api.removeAskFollower("ask-1", "planner", bounds);
-  await api.unsubscribeArtifactSession("artifact-1", "planner", bounds);
-  await api.unsubscribeIssueSession("CORE-1", "planner", bounds);
-  await api.putDeliverySettings(
-    {
-      deploy_repo: "acme/widgets",
-      deploy_workflow_path: ".github/workflows/deploy.yml",
-      excluded_repos: [],
-      population_authors: ["octocat"],
-      pr_checks_workflow_path: ".github/workflows/pr-checks.yml",
-      production_job_names: ["widgets-release"],
-    },
-    bounds
-  );
-  await api.deleteDeliverySessionGroup("group-1", bounds);
-  await api.putIssueState("CORE-1", { pinned: true }, bounds);
-  await api.putAgentState("planner-session", { cleared_before: "2026-10-25T00:00:00Z" }, bounds);
-  await api.putProjectDefaultAssignee("CORE", { assignee: "alice@example.com" }, bounds);
-
-  const keyOf = ({ init }: { init?: RequestInit }) =>
-    new Headers(init?.headers).get("Idempotency-Key");
-  const keyedRequests = stub.requests.slice(0, keyedWrites);
-  const idempotentRequests = stub.requests.slice(keyedWrites);
-  expect(keyedRequests).not.toHaveLength(0);
-  expect(idempotentRequests).not.toHaveLength(0);
-  // Named by path, so a method whose key went missing says which write it was.
-  expect(
-    keyedRequests.filter((request) => keyOf(request) !== "press-1").map((it) => it.path)
-  ).toEqual([]);
-  expect(
-    keyedRequests.filter(({ init }) => init?.method !== "POST" && init?.method !== "PATCH")
-  ).toEqual([]);
-  expect(
-    idempotentRequests.filter((request) => keyOf(request) !== null).map((it) => it.path)
-  ).toEqual([]);
-  expect(
-    idempotentRequests.filter(({ init }) => init?.method !== "PUT" && init?.method !== "DELETE")
-  ).toEqual([]);
+  // Every method reached Dispatch, so none is out of the census for want of a fitting argument.
+  expect(silent).toEqual([]);
+  // The census found the client's writes, not a handful: every write of the page is one of these.
+  expect(writers.size).toBeGreaterThan(45);
+  const problems: string[] = [];
+  for (const [name, writes] of writers) {
+    for (const { key, login, method, path } of writes) {
+      const keyed = method === "POST" || method === "PATCH";
+      if (UNKEYED_POSTS.has(path)) continue;
+      if (!told.includes(`${method} ${path}`)) {
+        problems.push(`${name}: ${method} ${path} bypassed send`);
+      }
+      if (login !== "alice") problems.push(`${name}: ${method} ${path} carries no Dispatch-Login`);
+      if (keyed && key !== "census-key") problems.push(`${name}: ${method} ${path} carries no key`);
+      if (!keyed && key !== null) problems.push(`${name}: ${method} ${path} carries a key`);
+      if (!keyed && method !== "PUT" && method !== "DELETE") {
+        problems.push(`${name}: ${method} ${path} is no write method`);
+      }
+    }
+  }
+  expect(problems).toEqual([]);
 });
 
 test("API client exposes the current state with a stale state-write conflict", async () => {

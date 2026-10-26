@@ -4,10 +4,12 @@ import { act, fireEvent, render, screen, waitFor, within } from "@testing-librar
 import { MemoryRouter } from "react-router-dom";
 
 import { installFakeLiveSockets } from "./__tests__/live-socket-harness";
-import { ApiError, api } from "./api/client";
+import { ApiError, api, NetworkError } from "./api/client";
 import { liveSocketFor } from "./api/live-socket";
 import type { AuthenticatedUser } from "./api/types";
 import { AuthGate } from "./app";
+import { SendStoppedError } from "./features/writes/keyed-write";
+import { plainWrite, writesOf } from "./features/writes/write-store";
 
 test("signing out shows the sign-in page without a reload and ends the event feed's socket", async () => {
   const originalMatchMedia = window.matchMedia;
@@ -76,6 +78,191 @@ test("signing out shows the sign-in page without a reload and ends the event fee
     sockets.restore();
   }
 });
+
+/** A write alice pressed, made under the app's own store: each attempt is recorded with the login
+ *  it went under, and fails as a dropped connection does, so the store keeps trying it; one with
+ *  `refuse` is refused by Dispatch instead and stays for Retry. */
+function aliceWrite(
+  queryClient: QueryClient,
+  attempts: string[],
+  refuse = false
+): Promise<unknown> {
+  return writesOf(queryClient)
+    .run({
+      detail: null,
+      kind: plainWrite,
+      label: refuse ? "CORE-2 set to done" : "CORE-1 set to done",
+      presentation: "indicator",
+      write: (bounds) => {
+        attempts.push(bounds.login ?? "nobody");
+        bounds.sent?.({ body: { status: "done" }, method: "PATCH", path: "/api/v1/issues/CORE-1" });
+        return Promise.reject(
+          refuse
+            ? new ApiError(422, { code: "ISSUE_INPUT", error: "refused" })
+            : new NetworkError("/api/v1/issues/CORE-1", new TypeError("Failed to fetch"))
+        );
+      },
+    })
+    .catch((error: unknown) => error);
+}
+
+/** The names of the writes this tab keeps across a reload. */
+function keptWrites(): string[] {
+  return Array.from({ length: window.sessionStorage.length }, (_, index) =>
+    window.sessionStorage.key(index)
+  ).filter((name): name is string => name?.startsWith("dispatch.write:") === true);
+}
+
+// W26. Someone else signs in from another tab of this browser: the session cookie is the browser's,
+// so this tab's writes would go out as bob. The other tab tells this one (`dispatch-sign-in`), it
+// reads who is signed in again, and every write alice pressed - one still being tried, one refused
+// and waiting for her Retry - is dropped, in memory and in the tab's storage, its trying stopped,
+// and nothing more goes out at all, as alice or as bob.
+test("a sign-in from another tab drops every write of the person before, stops it and sends nothing", async () => {
+  const sockets = installFakeLiveSockets();
+  let login = "alice";
+  const whoAmI = spyOn(api, "whoAmI").mockImplementation(async () => ({
+    event_head: "0",
+    kind: "user",
+    login,
+  }));
+  const spies = [
+    spyOn(api, "listIssues").mockResolvedValue([]),
+    spyOn(api, "getMyState").mockResolvedValue({}),
+    spyOn(api, "getInbox").mockResolvedValue([]),
+  ];
+  const originalMatchMedia = window.matchMedia;
+  window.matchMedia = (() =>
+    ({
+      addEventListener: () => {},
+      addListener: () => {},
+      dispatchEvent: () => true,
+      matches: false,
+      media: "",
+      onchange: null,
+      removeEventListener: () => {},
+      removeListener: () => {},
+    }) as MediaQueryList) as typeof window.matchMedia;
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const view = render(
+    <MemoryRouter initialEntries={["/"]}>
+      <QueryClientProvider client={queryClient}>
+        <AuthGate />
+      </QueryClientProvider>
+    </MemoryRouter>
+  );
+  const otherTab = new BroadcastChannel("dispatch-sign-in");
+  try {
+    await screen.findByText("Signed in as alice");
+    const attempts: string[] = [];
+    const out = aliceWrite(queryClient, attempts);
+    const refused = aliceWrite(queryClient, attempts, true);
+    await waitFor(() =>
+      expect(
+        writesOf(queryClient)
+          .rows()
+          .map((row) => row.status)
+      ).toEqual(["sending", "refused"])
+    );
+    expect(keptWrites()).toHaveLength(2);
+    expect(await refused).toBeInstanceOf(ApiError);
+
+    login = "bob";
+    act(() => otherTab.postMessage("bob"));
+    await screen.findByText("Signed in as bob");
+    await waitFor(() => expect(writesOf(queryClient).rows()).toEqual([]));
+    expect(await out).toBeInstanceOf(SendStoppedError);
+    expect(keptWrites()).toEqual([]);
+    const made = attempts.length;
+    // Past the first retry's backoff: nothing more went out, under anyone's name.
+    await new Promise((resolve) => setTimeout(resolve, 2_500));
+    expect(attempts).toHaveLength(made);
+    expect(attempts.every((attempted) => attempted === "alice")).toBe(true);
+    expect(whoAmI.mock.calls.length).toBeGreaterThan(1);
+  } finally {
+    otherTab.close();
+    view.unmount();
+    liveSocketFor(queryClient).close();
+    sockets.restore();
+    whoAmI.mockRestore();
+    for (const spy of spies) spy.mockRestore();
+    window.matchMedia = originalMatchMedia;
+  }
+}, 15_000);
+
+// Signing out ends every write with the session that pressed it: one still being tried stops, a
+// refusal waiting for Retry goes, nothing of either is left in the tab for the next person, and
+// the page stops asking to confirm leaving.
+test("signing out drops every write, stops it, and stops asking before the tab is left", async () => {
+  const sockets = installFakeLiveSockets();
+  let signedIn = true;
+  const whoAmI = spyOn(api, "whoAmI").mockImplementation(async () => {
+    if (!signedIn) throw new ApiError(401, { error: "unauthorized" });
+    return { event_head: "0", kind: "user", login: "alice" };
+  });
+  const logout = spyOn(api, "logout").mockImplementation(async () => {
+    signedIn = false;
+    return { ok: true };
+  });
+  const spies = [
+    spyOn(api, "listIssues").mockResolvedValue([]),
+    spyOn(api, "getMyState").mockResolvedValue({}),
+    spyOn(api, "getInbox").mockResolvedValue([]),
+  ];
+  const originalMatchMedia = window.matchMedia;
+  window.matchMedia = (() =>
+    ({
+      addEventListener: () => {},
+      addListener: () => {},
+      dispatchEvent: () => true,
+      matches: false,
+      media: "",
+      onchange: null,
+      removeEventListener: () => {},
+      removeListener: () => {},
+    }) as MediaQueryList) as typeof window.matchMedia;
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const view = render(
+    <MemoryRouter initialEntries={["/"]}>
+      <QueryClientProvider client={queryClient}>
+        <AuthGate />
+      </QueryClientProvider>
+    </MemoryRouter>
+  );
+  const asksBeforeLeaving = () => {
+    const leaving = new Event("beforeunload", { cancelable: true });
+    window.dispatchEvent(leaving);
+    return leaving.defaultPrevented;
+  };
+  try {
+    await screen.findByText("Signed in as alice");
+    const attempts: string[] = [];
+    const out = aliceWrite(queryClient, attempts);
+    void aliceWrite(queryClient, attempts, true);
+    await waitFor(() => expect(writesOf(queryClient).rows()).toHaveLength(2));
+    expect(keptWrites()).toHaveLength(2);
+    expect(asksBeforeLeaving()).toBe(true);
+
+    fireEvent.click(screen.getByRole("button", { name: "Sign out" }));
+    await screen.findByRole("link", { name: "Sign in with Google" });
+    expect(logout).toHaveBeenCalledTimes(1);
+    expect(writesOf(queryClient).rows()).toEqual([]);
+    expect(await out).toBeInstanceOf(SendStoppedError);
+    expect(keptWrites()).toEqual([]);
+    expect(asksBeforeLeaving()).toBe(false);
+    const made = attempts.length;
+    await new Promise((resolve) => setTimeout(resolve, 2_500));
+    expect(attempts).toHaveLength(made);
+  } finally {
+    view.unmount();
+    liveSocketFor(queryClient).close();
+    sockets.restore();
+    whoAmI.mockRestore();
+    logout.mockRestore();
+    for (const spy of spies) spy.mockRestore();
+    window.matchMedia = originalMatchMedia;
+  }
+}, 15_000);
 
 // INFRA-292's precondition. The event feed's first subscription resumes from the sign-in check's
 // `event_head`, which is sound only while every read the page makes, and its socket, wait for that
