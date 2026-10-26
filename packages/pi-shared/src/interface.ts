@@ -24,7 +24,8 @@ export const LEGION_PLUGIN_LOADED_KEY = Symbol.for("legion.pi-legion.loaded");
 /** The pre-split package's Legion marker; its presence means @sjawhar/pi-legion-envoy is loaded. */
 export const LEGACY_LEGION_LOADED_KEY = Symbol.for("legion.pi-envoy.legion-loaded");
 /** The `details` of an `envoy-message` the Envoy extension writes into its own session (the
- * session-id-changed notice): the session's own doing, never an event from outside, so Legion's
+ * session-id-changed notice, and the wake that starts a turn for cards the host folded into the
+ * context with no turn): the session's own doing, never an event from outside, so Legion's
  * phase-stall check does not re-arm a quiet stall on it. */
 export const LOCAL_ENVOY_NOTICE = { localNotice: true } as const;
 

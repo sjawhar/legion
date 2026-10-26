@@ -304,8 +304,9 @@ jobs:
               - 'skills/**'
               - 'scripts/pi-plugin-prepack.sh'
             # The Envoy plugin: its own sources, the workspace packages its bundle inlines, and the
-            # Oh My Pi pin its real-binary test runs (extensions/dispatch-first-omp.test.ts),
-            # installed through the mise install-jj leaves. Every skill and every daemon prompt:
+            # Oh My Pi pin its real-binary tests run (extensions/dispatch-first-omp.test.ts and
+            # card-delivery-omp.test.ts), installed through the mise install-jj leaves. Every skill
+            # and every daemon prompt:
             # src/skills-guard.test.ts stages its five skills through the prepack script and resolves
             # their skill:// links across all of skills/, and its native-tool-name rule scans every
             # .md under skills/ and packages/daemon/internal/prompts, so a prompt that names a

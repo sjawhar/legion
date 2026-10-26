@@ -34,18 +34,24 @@
 
 ### Fixed
 
-- A person's Send from Dispatch's live view no longer waits behind Envoy notifications. Every card
-  (an Envoy notification, an issue message, a comment mention, a Dispatch Steer that was not
-  accepted as the person's own turn) went into the host's steering queue, which the host drains
-  one message per turn, so a session that received many cards took a person's Send minutes
-  later. While a turn runs a card now goes as an aside, which the host folds in at the next step,
-  after the Send, without ending the running tool batch. A card still queued at an interrupt is
-  folded into the context with no run, where an Esc dropped it and a Legion daemon's RPC `abort`
-  resumed the run on it. On an idle session a card is still a steer with `triggerTurn`, so it
-  starts a turn as before, also after an interrupt and in plan mode, where an idle aside would
-  start none. A targeted Aside stays an aside. The session reads which state it is in from the
-  host's `ctx.isIdle()`; a host context without it gets every card as an aside. The limits are in
-  the package's `AGENTS.md`.
+- A person's Send from Dispatch's live view no longer waits behind Envoy notifications, and an
+  interrupt no longer drops the notifications queued when it lands. Every card (an Envoy
+  notification, an issue message, a comment mention, a Dispatch Steer that was not accepted as the
+  person's own turn) went into the host's steering queue, which the host drains one message per
+  step, so a session that received many cards took a person's Send minutes later, and an Esc
+  emptied that queue. While a turn runs a card now goes as an aside, which the host folds in at the
+  next step, after the Send, without ending the running tool batch; a card still queued at an
+  interrupt is folded into the context with no run and read at the next turn. On an idle session a
+  card is still a steer with `triggerTurn`, so it starts a turn as before; a targeted Aside stays
+  an aside, and a host context without `ctx.isIdle()` keeps every card a steer. A card the host
+  folds into the context with no turn, as it does for an aside that lands as a run ends in a
+  session interrupted earlier, or in plan mode, now gets one hidden wake that starts a turn to read
+  it, unless an interrupt is still in effect (INFRA-497).
+- A card that reaches a session while Oh My Pi starts no longer holds back every RPC command until
+  the turn it started ends. Oh My Pi settles every extension send of its startup before RPC mode
+  reads its input, and an idle card's send lasted its whole turn, so a Legion worker's `get_state`
+  and task waited for it (once 72 minutes). Such a card now goes into the context with no turn, and
+  the wake starts its turn once the host is idle after its startup (INFRA-497).
 
 - A live view held open while its session is relaunched with `--resume` now shows the resumed
   process's model, thinking level and command changes. Two things stopped it. Every process
