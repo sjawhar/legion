@@ -165,15 +165,18 @@ func TestAChangesRequestIsToldOnceWhicheverReadCarriesIt(t *testing.T) {
 	changes := intake.DispatchArtifact{Key: "LEGION-100", ArtifactID: "artifact-root",
 		Kind: intake.DispatchArtifactChangesRequested, Version: 4, Reason: "name the rollback path", Mark: record.EventMark{Seq: 9, At: reviewedAt}}
 	seeded := changes
-	seeded.FromRead = true
-	registration := intake.GateRegistered{Issue: "LEGION-100", ArtifactID: "artifact-root", Version: 4,
-		ChangesRequestedVersion: 4, ChangesReason: "name the rollback path", ChangesRequestedMark: changes.Mark}
+	since := record.EventMark{Seq: 10}
+	registration := intake.GateRegistered{Issue: "LEGION-100", ArtifactID: "artifact-root", Version: 4, DispatchVersion: 4,
+		ChangesRequestedVersion: 4, ChangesReason: "name the rollback path", ChangesRequestedMark: changes.Mark, Since: since}
+	// awaiting is a registration whose read shows the request open again, with no review on the
+	// latest version: the rebuild keeps the told record.
+	awaiting := intake.GateRegistered{Issue: "LEGION-100", ArtifactID: "artifact-root", Version: 4, DispatchVersion: 4, Since: since}
 	second := changes
 	second.Reason, second.Mark = "and name who runs the restore", record.EventMark{Seq: 12, At: reviewedAt.Add(time.Minute)}
 	repeated := changes
 	repeated.Mark = record.EventMark{Seq: 12, At: reviewedAt.Add(time.Minute)}
 	timeOnly := changes
-	timeOnly.Mark, timeOnly.FromRead = record.EventMark{At: reviewedAt}, true
+	timeOnly.Mark = record.EventMark{At: reviewedAt}
 	newerVersion := intake.DispatchArtifact{Key: "LEGION-100", ArtifactID: "artifact-root", Kind: intake.DispatchArtifactVersion, Version: 5, Mark: record.EventMark{Seq: 10}}
 	v5 := intake.DispatchArtifact{Key: "LEGION-100", ArtifactID: "artifact-root", Kind: intake.DispatchArtifactChangesRequested, Version: 5, Reason: "name the rollback path", Mark: changes.Mark}
 
@@ -188,30 +191,30 @@ func TestAChangesRequestIsToldOnceWhicheverReadCarriesIt(t *testing.T) {
 			reasons: []string{"name the rollback path"}},
 		// The live event reached no gate, so the seed's read is the only thing that can tell it.
 		{name: "only the seed carries it",
-			order:   []intake.Fact{intake.GateRegistered{Issue: "LEGION-100", ArtifactID: "artifact-root", Version: 4}, seeded},
+			order:   []intake.Fact{intake.GateRegistered{Issue: "LEGION-100", ArtifactID: "artifact-root", Version: 4, DispatchVersion: 4, Since: since}, seeded},
 			reasons: []string{"name the rollback path"}},
-		// A registration whose read predates the review the live event told rebuilds the gate from
-		// Dispatch; it keeps the told record, so the seed's read of that review tells nothing.
-		{name: "the live event, then a registration whose read predates it, then the seed",
-			order:   []intake.Fact{changes, intake.GateRegistered{Issue: "LEGION-100", ArtifactID: "artifact-root", Version: 4}, seeded},
+		// A registration whose read shows the request open again rebuilds the gate from Dispatch;
+		// it keeps the told record, so the seed's read of that review tells nothing.
+		{name: "the live event, then a registration whose read shows the request awaiting, then the seed",
+			order:   []intake.Fact{changes, awaiting, seeded},
 			reasons: []string{"name the rollback path"}},
 		// A registration of another document starts with no told record, so that document's own
 		// review, even with the same reason, is told.
 		{name: "another document registered after the first one's review was told",
 			order: []intake.Fact{changes,
-				intake.GateRegistered{Issue: "LEGION-100", ArtifactID: "artifact-other", Version: 4},
+				intake.GateRegistered{Issue: "LEGION-100", ArtifactID: "artifact-other", Version: 4, DispatchVersion: 4, Since: since},
 				intake.DispatchArtifact{Key: "LEGION-100", ArtifactID: "artifact-other", Kind: intake.DispatchArtifactChangesRequested,
 					Version: 4, Reason: "name the rollback path", Mark: record.EventMark{Seq: 14, At: reviewedAt.Add(2 * time.Minute)}}},
 			reasons: []string{"name the rollback path", "name the rollback path"}},
 		// A registration whose read saw v4 commits after a live v5 changes request was told: it
 		// rolls nothing back, so the seed's read of the v5 review tells nothing again.
 		{name: "a registration of an older version after a newer review was told",
-			order:   []intake.Fact{v5, intake.GateRegistered{Issue: "LEGION-100", ArtifactID: "artifact-root", Version: 4, DispatchVersion: 4}, v5},
+			order:   []intake.Fact{v5, intake.GateRegistered{Issue: "LEGION-100", ArtifactID: "artifact-root", Version: 4, DispatchVersion: 4, Since: since}, v5},
 			reasons: []string{"name the rollback path"}},
 		// The caller registers v4 while Dispatch already shows v5, whose changes request the live
 		// event told first: the gate is registered at v5, keeping the told record.
 		{name: "a caller's older version with Dispatch at the newer one",
-			order:   []intake.Fact{v5, intake.GateRegistered{Issue: "LEGION-100", ArtifactID: "artifact-root", Version: 4, DispatchVersion: 5}, v5},
+			order:   []intake.Fact{v5, intake.GateRegistered{Issue: "LEGION-100", ArtifactID: "artifact-root", Version: 4, DispatchVersion: 5, Since: since}, v5},
 			reasons: []string{"name the rollback path"}},
 		{name: "a second review at the same version", order: []intake.Fact{changes, second},
 			reasons: []string{"name the rollback path", "and name who runs the restore"}},
@@ -226,13 +229,20 @@ func TestAChangesRequestIsToldOnceWhicheverReadCarriesIt(t *testing.T) {
 		// review again.
 		{name: "the same reason again at the same version, a later review", order: []intake.Fact{changes, repeated, repeated},
 			reasons: []string{"name the rollback path", "name the rollback path"}},
+		// Three orders where a request already told reaches the gate again after a newer review
+		// replaced or outdated the told record: each review is told once all the same.
 		// The seed reads the first request, a second request commits and its live event applies,
-		// then the seed's fact: a read of a request a newer review followed tells nothing, since
-		// the request's own live event came first.
+		// then the seed's fact.
 		{name: "the seed's read of a request a second request followed", order: []intake.Fact{changes, second, seeded},
 			reasons: []string{"name the rollback path", "and name who runs the restore"}},
-		// A read tells the request, a newer version follows, and the request's live event arrives
-		// late: the newer version keeps the told record, so the live event is recognised as told.
+		// The live request, a newer version, then the seed's fact for a read that showed the request.
+		{name: "the seed's read of a request a newer version followed", order: []intake.Fact{changes, newerVersion, seeded},
+			reasons: []string{"name the rollback path"}},
+		// A registration's read tells the request, a second request replaces the told record, then
+		// the first request's live event arrives late.
+		{name: "a registration, a second request, then the first request's late live event", order: []intake.Fact{registration, second, changes},
+			reasons: []string{"name the rollback path", "and name who runs the restore"}},
+		// A read tells the request, a newer version follows, and the request's live event arrives late.
 		{name: "a read, a newer version, then the request's late live event", order: []intake.Fact{seeded, newerVersion, changes},
 			reasons: []string{"name the rollback path"}},
 	} {
@@ -422,21 +432,43 @@ func TestAnApprovalAtALaterVersionTellsTheArchitectThatVersion(t *testing.T) {
 
 // With the design gate off, the gate is approved at registration and no artifact event moves it:
 // a changes request the seed or a live event carries must not close it, which would refuse every
-// READY of the tree, and the architect is told nothing.
+// READY of the tree. The request is still the person's words, so the architect is told it, once,
+// whichever carries it.
 func TestAnArtifactEventChangesNoGateWhenTheDesignGateIsOff(t *testing.T) {
 	pool := migratedPool(t)
 	admission := newAdmissionWithGate(t, 1, config.DesignGateOff, nil)
 	seedSlotted(t, pool, "LEGION-100", "A")
 	applyFact(t, pool, admission, "register-v4", intake.GateRegistered{Issue: "LEGION-100", ArtifactID: "artifact-root", Version: 4, DispatchVersion: 4})
-	applyFact(t, pool, admission, "changes-v4", intake.DispatchArtifact{Key: "LEGION-100", ArtifactID: "artifact-root",
-		Kind: intake.DispatchArtifactChangesRequested, Version: 4, Reason: "name the rollback path", Mark: record.EventMark{Seq: 11}})
+	changes := intake.DispatchArtifact{Key: "LEGION-100", ArtifactID: "artifact-root",
+		Kind: intake.DispatchArtifactChangesRequested, Version: 4, Reason: "name the rollback path", Mark: record.EventMark{Seq: 11, At: reviewedAt}}
+	applyFact(t, pool, admission, "changes-v4", changes)
+	applyFact(t, pool, admission, "seed-read", changes)
 	applyFact(t, pool, admission, "spec-v5", intake.DispatchArtifact{Key: "LEGION-100", ArtifactID: "artifact-root",
 		Kind: intake.DispatchArtifactVersion, Version: 5, Mark: record.EventMark{Seq: 12}})
 	if gate := storedGate(t, pool, "LEGION-100"); !classify.DesignGateOpen(*gate) {
 		t.Fatalf("gate after a changes request and a version with the design gate off = %#v, want it still open", gate)
 	}
+	if told := gateNotices(t, pool, "LEGION-100", "design-changes-requested"); len(told) != 1 || told[0].Version != 4 || told[0].Reason != "name the rollback path" {
+		t.Fatalf("design-changes-requested notices with the design gate off = %#v, want the request told once", told)
+	}
+}
+
+// A registration of a newer version keeps the gate's approval of an older version, as a version
+// event does, so a late changes request that approval answered is not told.
+func TestARegistrationKeepsAnOlderApprovalALateRequestItAnswered(t *testing.T) {
+	pool := migratedPool(t)
+	admission := newAdmission(t, 1, nil)
+	seedSlotted(t, pool, "LEGION-100", "A")
+	seedGate(t, pool, record.DesignGate{Issue: "LEGION-100", ArtifactID: "artifact-root", LatestVersion: 4})
+	applyFact(t, pool, admission, "live-approval", approvalOf(4, record.EventMark{Seq: 10, At: reviewedAt}))
+	applyFact(t, pool, admission, "spec-v5", intake.DispatchArtifact{Key: "LEGION-100", ArtifactID: "artifact-root", Kind: intake.DispatchArtifactVersion, Version: 5, Mark: record.EventMark{Seq: 11}})
+	applyFact(t, pool, admission, "register-v5", intake.GateRegistered{Issue: "LEGION-100", ArtifactID: "artifact-root", Version: 5, DispatchVersion: 5, Since: record.EventMark{Seq: 12}})
+	if gate := storedGate(t, pool, "LEGION-100"); gate.ApprovedVersion == nil || *gate.ApprovedVersion != 4 {
+		t.Fatalf("gate after registering version 5 = %#v, want the approval of version 4 kept", gate)
+	}
+	applyFact(t, pool, admission, "late-changes", changesOf(4, "name the rollback path", record.EventMark{Seq: 9, At: reviewedAt.Add(-time.Minute)}))
 	if told := gateNotices(t, pool, "LEGION-100", "design-changes-requested"); len(told) != 0 {
-		t.Fatalf("design-changes-requested notices with the design gate off = %#v, want none", told)
+		t.Fatalf("design-changes-requested notices = %#v, want none for a request the approval answered", told)
 	}
 }
 

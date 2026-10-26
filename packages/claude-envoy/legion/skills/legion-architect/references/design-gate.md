@@ -96,8 +96,8 @@ Then end your turn. Release no wave until a delivered wake shows `design-approve
 words, resolve every finding, request approval again and end your turn. A
 `design-changes-requested` may name a version below the latest, or arrive after another for the
 same version: it is a request the human made that reached the daemon late, and no approval came
-after it. The gate is as the newest review left it; still read the reason, and answer it in the
-spec if the latest version does not already.
+after it. Each request arrives once. The gate is as the newest review left it; still read the
+reason, and answer it in the spec if the latest version does not already.
 
 ## After approval
 

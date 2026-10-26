@@ -57,6 +57,11 @@ func (e *Engine) gateRegistered(ctx context.Context, tx pgx.Tx, fact intake.Gate
 		return intake.Result{}, e.enqueue(ctx, tx, fact.Issue, record.GateSeed{ArtifactID: fact.ArtifactID, Version: version, Generation: issue.Generation})
 	}
 	gate := record.DesignGate{Issue: fact.Issue, ArtifactID: fact.ArtifactID, LatestVersion: version}
+	// An approval of an older version the gate of this document holds is kept, as a version event
+	// keeps it (classify.ApplyDesignGateEvent): a late changes request it answered stays answered.
+	if sameDocument && stored.ApprovedVersion != nil && *stored.ApprovedVersion < version {
+		gate.ApprovedVersion, gate.ApprovedMark = stored.ApprovedVersion, stored.ApprovedMark
+	}
 	changesRequested := false
 	switch {
 	case off:
@@ -97,7 +102,7 @@ func (e *Engine) gateRegistered(ctx context.Context, tx pgx.Tx, fact intake.Gate
 		e.logOnCommit(ctx, "workflow: the registration read a changes request the architect was already told of", "issue", issue.Key, "version", gate.LatestVersion)
 		return intake.Result{}, nil
 	case changesRequested:
-		return intake.Result{}, e.notice(ctx, tx, fact.Issue, record.Notice{Kind: "design-changes-requested", Version: gate.LatestVersion, Reason: fact.ChangesReason})
+		return intake.Result{}, e.tellChanges(ctx, tx, issue.Key, fact.ArtifactID, gate.LatestVersion, fact.ChangesReason, fact.ChangesRequestedMark)
 	case !classify.DesignGateOpen(gate):
 		return intake.Result{}, nil
 	}
@@ -118,6 +123,35 @@ func (e *Engine) gateRegistered(ctx context.Context, tx pgx.Tx, fact intake.Gate
 		return intake.Result{}, err
 	}
 	return intake.Result{}, nil
+}
+
+// tellChanges tells key's architect a changes request on artifact at version, once per review: in
+// the notice's own transaction it marks the review processed under its issue, generation, document,
+// version and place in the issue's Dispatch event log, and a review already marked is told nothing.
+// The place is Dispatch's time of the review, which every carrier has (the live event's created_at
+// and the approval read's at are one transaction's now()), else its sequence; the told record holds
+// only the newest review, so it alone cannot recognise a request a later review replaced. A new
+// generation is told the request again, as its architect was not.
+func (e *Engine) tellChanges(ctx context.Context, tx pgx.Tx, key, artifact string, version int, reason string, mark record.EventMark) error {
+	issue, err := e.store.Issue(ctx, tx, key)
+	if err != nil || issue == nil {
+		return err
+	}
+	place := "none"
+	switch {
+	case !mark.At.IsZero():
+		place = fmt.Sprint(mark.At.UnixNano())
+	case mark.Seq > 0:
+		place = fmt.Sprintf("s%d", mark.Seq)
+	}
+	fresh, err := e.store.MarkProcessed(ctx, tx, "design-changes-told", fmt.Sprintf("%s:%d:%s:%d:%s", key, issue.Generation, artifact, version, place))
+	if err != nil || !fresh {
+		if err == nil {
+			e.logOnCommit(ctx, "workflow: a changes request the architect was already told of is not told again", "issue", key, "version", version)
+		}
+		return err
+	}
+	return e.notice(ctx, tx, key, record.Notice{Kind: "design-changes-requested", Version: version, Reason: reason})
 }
 
 // gateAboveDispatch resets a gate recorded above the version Dispatch holds for its document to
@@ -208,26 +242,28 @@ func copyTakes(gate record.DesignGate, fact intake.DispatchArtifact) bool {
 // otherwise reopen the gate; a changes request delivered after a newer approval, which would
 // otherwise close it; and an approval or changes request of an older version, which would
 // otherwise clear the told record or close a gate open at the newer one. A stale changes request
-// is still the person's words: its live event tells it, with its own version and reason, unless an
-// approval came after it (classify.ApprovalFollows), which the person gave in its place, or the gate
-// still records it as told (a read told it first, and a newer version, which keeps the told record,
-// made it stale). A read of Dispatch that carries a stale changes request (the gate seed, its read
-// begun before a newer review was applied) tells nothing: the request's own live event came ahead
-// of the newer review's in the stream. Intake's event id keeps a redelivery of a live event to one
-// notice. The told record holds one review, so a request whose record a third review replaced (a
-// newer changes request at its version) can still be told again when its own live event arrives
-// after that review.
+// is still the person's words: it is told, with its own version and reason, unless an approval came
+// after it (classify.ApprovalFollows), which the person gave in its place.
+//
+// Every design-changes-requested notice goes through tellChanges, which sends it once per review
+// whatever carries it (the live event, a registration's read, the gate seed's read) and in whatever
+// order: the told record holds only the newest review, so it alone cannot recognise a request a
+// later review replaced, and the key per review can.
 //
 // With the design gate off, no artifact event moves a gate: the gate is approved at registration
 // (gateRegistered), and a review or a version of the document it names must not close it. That
 // return also keeps an approval from opening a carried copy that was closed before the switch;
-// nobody requests an approval under off, and the copy's registration approves it.
+// nobody requests an approval under off, and the copy's registration approves it. A changes
+// request's live event is still told, as the person's words, without closing the gate.
 func (e *Engine) applyArtifact(ctx context.Context, tx pgx.Tx, gate record.DesignGate, fact intake.DispatchArtifact, carried bool) error {
 	key := gate.Issue
 	if e.cfg.DesignGate == config.DesignGateOff {
 		e.logOnCommit(ctx, "workflow: the design gate is off, so an artifact event changes no gate", "issue", key,
 			"artifact", fact.ArtifactID, "event", fact.Kind, "version", fact.Version, "gate_version", gate.LatestVersion)
-		return nil
+		if fact.Kind != intake.DispatchArtifactChangesRequested || carried {
+			return nil
+		}
+		return e.tellChanges(ctx, tx, key, fact.ArtifactID, fact.Version, fact.Reason, fact.Mark)
 	}
 	if fact.Kind != intake.DispatchArtifactVersion && (fact.Version < gate.LatestVersion || classify.StaleReview(gate, fact.Version, fact.Mark)) {
 		e.logOnCommit(ctx, "workflow: a review the person has already followed with another changes no gate state", "issue", key,
@@ -235,16 +271,8 @@ func (e *Engine) applyArtifact(ctx context.Context, tx pgx.Tx, gate record.Desig
 		if fact.Kind != intake.DispatchArtifactChangesRequested || classify.ApprovalFollows(gate, fact.Version, fact.Mark) {
 			return nil
 		}
-		if fact.FromRead {
-			e.logOnCommit(ctx, "workflow: a read of a changes request a newer review followed tells nothing", "issue", key, "version", fact.Version)
-			return nil
-		}
-		if classify.DesignGateChangesTold(gate, fact.Version, fact.Reason, fact.Mark) {
-			e.logOnCommit(ctx, "workflow: a stale changes request the architect was already told of tells nothing", "issue", key, "version", fact.Version)
-			return nil
-		}
 		e.logOnCommit(ctx, "workflow: the architect is told a changes request no approval followed", "issue", key, "version", fact.Version)
-		return e.notice(ctx, tx, key, record.Notice{Kind: "design-changes-requested", Version: fact.Version, Reason: fact.Reason})
+		return e.tellChanges(ctx, tx, key, fact.ArtifactID, fact.Version, fact.Reason, fact.Mark)
 	}
 	wasOpen := classify.DesignGateOpen(gate)
 	kind := classify.DesignGateEventKind(fact.Kind)
@@ -268,7 +296,7 @@ func (e *Engine) applyArtifact(ctx context.Context, tx pgx.Tx, gate record.Desig
 		return err
 	}
 	if tell {
-		if err := e.notice(ctx, tx, key, record.Notice{Kind: "design-changes-requested", Version: fact.Version, Reason: fact.Reason}); err != nil {
+		if err := e.tellChanges(ctx, tx, key, fact.ArtifactID, fact.Version, fact.Reason, fact.Mark); err != nil {
 			return err
 		}
 	}
