@@ -262,8 +262,8 @@ legion state --config legion.yaml --json |
 
 `waitingOn.kind` is `gate` with `gateVersion`, or `ask` with its ask identifier. `answeredAt` means
 the person answered; the root is ahead of never-run roots and resumes itself at the next free slot.
-Do not park or manually start it. Only a person's act wakes it, and their act on any ask of the
-root does, whichever ask the wait names: an answer, a resolution, or a reply that hands an open ask
+Do not park or manually start it. A person's act on any ask of the root wakes it, whichever ask
+the wait names: an answer, a resolution, or a reply that hands an open ask
 to the agent. A wait on a question also wakes on their approval or changes request of the spec, and
 one on the gate on a newer spec version whose approval request then waits on the architect. The ask
 a wait names also ends it when nobody can answer it any more: Dispatch retracts the question
@@ -427,10 +427,13 @@ is `legion-<project>-<issue, lowercased>-<role>`, as `legion claims list` shows.
 
 The list names only claims of trees that hold an admission slot, and leaves out claims that
 something will still start: a worker whose phase is not its own is started again when its phase
-comes, a parked tree's claims wait for its re-admission, and the architect of a tree re-admitted
-while every slot was taken waits for admission to start it once one frees. Never resume or retry by
-hand a claim of a lingering tree or of an issue parked out of the workflow, nor that waiting
-architect: it would run outside the admission cap, and re-admission or the issue's return to `todo`
+comes, a parked tree's claims wait for its re-admission, the architect of a tree re-admitted
+while every slot was taken waits for admission to start it once one frees, and the architect of a
+root in `awaiting_person` waits for the person's answer, after which admission resumes it at the
+next free slot. Never resume or retry by
+hand a claim of a lingering tree or of an issue parked out of the workflow, nor those waiting
+architects: they would run outside the admission cap, and re-admission, the answer, or the issue's
+return to `todo`
 starts it.
 A claim an operator suspended is listed even when a workflow start is queued for it: that start
 waits for the operator's resume. One whose `suspendedBy` is `unknown` is listed only while no start

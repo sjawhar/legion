@@ -146,8 +146,8 @@ off a waiting root takes it out of line; taking it off a running tree does not s
 A root at `admitted` that now waits only for a person returns its slot rather than blocking the
 project: a closed design gate or root-level `dispatch ask` moves it to `awaiting_person`, while the
 architect's same session is suspended after its current turn. The root stays live for its children.
-`waitingOn` in `legion state` names the gate version or ask. Only your act answers it, and your act
-on any ask of the root does, whichever ask the wait names: your answer, resolution, or reply that
+`waitingOn` in `legion state` names the gate version or ask. Your act on any ask of the root
+answers it, whichever ask the wait names: your answer, resolution, or reply that
 hands an open ask to the agent. A wait on a question is also answered by your review of the spec,
 and one on the gate by a newer spec version whose approval request then waits on the architect. The
 ask the wait names also ends it when nobody can answer it any more: Dispatch retracts the question
