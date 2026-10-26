@@ -36,9 +36,11 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/config"
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
+	"github.com/sjawhar/envoy/internal/dispatch/githubapp/githubapptest"
 	"github.com/sjawhar/envoy/internal/dispatch/routes"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
+	"github.com/sjawhar/envoy/internal/githubappjwt"
 	"github.com/sjawhar/envoy/internal/oidc/oidctest"
 	"github.com/sjawhar/envoy/internal/testsocks5"
 )
@@ -934,12 +936,73 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 			}
 		},
 		"DISPATCH_APP_PEM_B64": func(t *testing.T) {
-			app, _, err := loadAppCredentials(envGetter(map[string]string{"DISPATCH_APP_CLIENT_ID": "Iv1.env", "DISPATCH_APP_PEM_B64": base64.StdEncoding.EncodeToString([]byte("app private key"))}), t.TempDir())
-			if err != nil || app.PEM != "app private key" {
-				t.Errorf("app %+v, %v", app, err)
+			// The variable holds the App's PEM as GKE Secret Sync copies it from Secret Manager,
+			// or the base64 of that PEM; a key that does not parse is refused at load, naming the
+			// variable and the form it came in, and never quoting the value.
+			key, pkcs1 := githubapptest.Key(t)
+			pkcs8Bytes, err := x509.MarshalPKCS8PrivateKey(key)
+			if err != nil {
+				t.Fatal(err)
 			}
-			if _, _, err := loadApp(t, map[string]string{"DISPATCH_APP_CLIENT_ID": "Iv1.env", "DISPATCH_APP_PEM_B64": "not base64!"}); err == nil || !strings.Contains(err.Error(), "DISPATCH_APP_PEM_B64") {
-				t.Errorf("malformed: err = %v, want a refusal naming DISPATCH_APP_PEM_B64", err)
+			pkcs8 := string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: pkcs8Bytes}))
+			encoded := base64.StdEncoding.EncodeToString([]byte(pkcs1))
+			var wrapped strings.Builder // base64 as the base64 command prints it: 76 columns a line
+			for rest := encoded; rest != ""; {
+				line := rest[:min(76, len(rest))]
+				rest = rest[len(line):]
+				wrapped.WriteString(line + "\n")
+			}
+			const garbageArmour = "-----BEGIN RSA PRIVATE KEY-----\nbm90IGEga2V5\n-----END RSA PRIVATE KEY-----\n"
+			load := func(value string) (*auth.AppConfig, error) {
+				values := map[string]string{"DISPATCH_APP_CLIENT_ID": "Iv1.env", "DISPATCH_APP_PEM_B64": value}
+				app, _, err := loadAppCredentials(envGetter(values), t.TempDir())
+				return app, err
+			}
+			for _, tc := range []struct {
+				name, value string
+				want        string   // the PEM the App holds, when it loads
+				refusal     []string // what the error names, when it is refused
+			}{
+				{name: "a plain PEM", value: pkcs1, want: pkcs1},
+				{name: "base64 of the PEM", value: encoded, want: pkcs1},
+				{name: "base64 wrapped at 76 columns", value: wrapped.String(), want: pkcs1},
+				{name: "a PKCS8 plain PEM", value: pkcs8, want: pkcs8},
+				{name: "not base64", value: "not base64!", refusal: []string{"DISPATCH_APP_PEM_B64"}},
+				{name: "base64 of no key", value: base64.StdEncoding.EncodeToString([]byte("app private key")), refusal: []string{"DISPATCH_APP_PEM_B64", "base64 of a PEM"}},
+				{name: "PEM armour around garbage", value: garbageArmour, refusal: []string{"DISPATCH_APP_PEM_B64", "plain PEM"}},
+				{name: "empty or unset"},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					app, err := load(tc.value)
+					if tc.refusal == nil {
+						if err != nil || app == nil || app.PEM != tc.want {
+							t.Fatalf("err = %v, App loaded %t, PEM as given %t; want an App holding the case's PEM", err, app != nil, app != nil && app.PEM == tc.want)
+						}
+						if tc.want != "" {
+							if _, err := githubappjwt.ParseKey(app.PEM); err != nil {
+								t.Errorf("the App's PEM does not parse: %v", err)
+							}
+						}
+						return
+					}
+					if err == nil {
+						t.Fatalf("app %+v; want a refusal naming %q", app, tc.refusal)
+					}
+					for _, want := range tc.refusal {
+						if !strings.Contains(err.Error(), want) {
+							t.Errorf("err = %v, want it to name %q", err, want)
+						}
+					}
+					// No part of the value or of the key reaches the message: neither whole,
+					// nor any of their lines.
+					for _, text := range []string{tc.value, pkcs1, pkcs8, encoded} {
+						for _, part := range append([]string{text}, strings.Split(text, "\n")...) {
+							if part = strings.TrimSpace(part); part != "" && strings.Contains(err.Error(), part) {
+								t.Errorf("err = %v quotes %q", err, part)
+							}
+						}
+					}
+				})
 			}
 		},
 		"DISPATCH_APP_ID": func(t *testing.T) {
@@ -992,7 +1055,7 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 					w.WriteHeader(http.StatusNotFound)
 				}))
 				defer github.Close()
-				request := httptest.NewRequest(http.MethodPost, "/api/v1/projects/ARCH/architecture-source/sync", nil)
+				request := httptest.NewRequest(http.MethodPost, "/api/v1/projects/ARCH/architecture-sources/acme/arch/sync", nil)
 				request.Header.Set("Authorization", "Bearer agent-token")
 				response := httptest.NewRecorder()
 				routerFor(t, resolveWith(t, map[string]string{"DISPATCH_GITHUB_API_BASE": github.URL}), routes.AppContextOptions{App: app, Store: database}).ServeHTTP(response, request)

@@ -16,6 +16,7 @@ import {
   architectureSourcesQuery,
   inboxQuery,
   myRepliesKey,
+  projectArchitectureSourcesQuery,
   projectDefaultAssigneesQuery,
   projectsQuery,
   userAgentStateQuery,
@@ -440,7 +441,7 @@ function ownerQueryKeys(event: Event, signedInLogin?: string): (readonly unknown
     }
     return [
       architectureSourcesQuery().queryKey,
-      ["architecture-source", event.project],
+      projectArchitectureSourcesQuery(event.project).queryKey,
       ["components", event.project],
       // A re-import changes which components exist, so every count in the tree.
       ["architecture", event.project],

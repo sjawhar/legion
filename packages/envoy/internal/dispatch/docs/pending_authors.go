@@ -469,6 +469,9 @@ type authorCapture struct {
 	// (latestEditSource), nil when none is known: the person a version's edit notice names as the
 	// one who edited last (recordEditNotice), whoever writes the version.
 	latest *model.Actor
+	// durable is the document's latest person sender the capture read (readLastPerson), kept so a
+	// capture that drops its in-flight credits (withoutInflight) can name latest again without them.
+	durable *model.Actor
 }
 
 // uploadHold is what an upload's commit takes out of its room instance's record of the updates it
@@ -539,6 +542,7 @@ func captureAuthors(state *roomState, owed map[string]model.Actor, durableLatest
 		capture.authors[actorKey(*actor)] = *actor
 	}
 	capture.latest = latestEditSource(capture.inflight, write, durableLatest)
+	capture.durable = durableLatest
 	return capture
 }
 
@@ -609,6 +613,32 @@ func cloneActor(actor *model.Actor) *model.Actor {
 		return nil
 	}
 	return new(*actor)
+}
+
+// withoutInflight is capture for a version rendered from the stored document rather than the
+// room: a room behind the durable head (captureLiveTextAndAuthors), or a write whose fork came from
+// the store (coldFork). The store holds no change still in flight in the room, so the version
+// lists none of the room's in-flight credits and its commit consumes none: each stays in F, to
+// reach R when its append lands, or, when the gate refuses that append from a room behind the
+// head, to be credited again when its browser resends the edit to the reloaded room. Listed here,
+// that author would be listed again on the version holding the resent edit. The pending authors
+// it read (R), the write's own credits and actor stay, as captureAuthors gave them. The person who
+// edited last is read again without those credits (latestEditSource over write and the stored
+// person alone), since an edit the version does not hold cannot name its notice.
+func (capture authorCapture) withoutInflight(write *liveWrite, actor *model.Actor) authorCapture {
+	authors := make(map[string]model.Actor, len(capture.rAuthors)+1)
+	for _, author := range capture.rAuthors {
+		authors[actorKey(author)] = author
+	}
+	if write != nil {
+		maps.Copy(authors, write.credits)
+	}
+	if actor != nil {
+		authors[actorKey(*actor)] = *actor
+	}
+	capture.authors, capture.inflight = authors, nil
+	capture.latest = latestEditSource(nil, write, capture.durable)
+	return capture
 }
 
 // uploadCapture is an upload's capture over write: the in-flight credits observed by its last read

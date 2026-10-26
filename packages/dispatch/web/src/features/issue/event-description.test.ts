@@ -234,6 +234,36 @@ test("eventDescription names the child a reparent adds or removes", () => {
   );
 });
 
+test("eventDescription names the repository an architecture import came from; a retained event without one reads as before", () => {
+  const base = {
+    actor: { id: "alice", kind: "user" },
+    created_at: "2026-10-25T00:00:00Z",
+    id: 3,
+    issue_key: null,
+    notify: false,
+    project: "CORE",
+    seq: 3,
+  } as const;
+  const commit = "3be61df5be90aa11bb22";
+  const synced = (payload: Extract<Event, { type: "architecture.synced" }>["payload"]) =>
+    eventDescription({ ...base, payload, type: "architecture.synced" });
+  const failed = (payload: Extract<Event, { type: "architecture.sync_failed" }>["payload"]) =>
+    eventDescription({ ...base, payload, type: "architecture.sync_failed" });
+
+  expect(synced({ branch: "main", commit, components: 1, repo: "acme/infra" })).toBe(
+    "Architecture synced from acme/infra: 1 component at 3be61df5be90"
+  );
+  expect(failed({ branch: "main", error: "duplicate component id api", repo: "acme/infra" })).toBe(
+    "Architecture sync from acme/infra failed: duplicate component id api"
+  );
+  expect(synced({ commit, components: 3 })).toBe(
+    "Architecture synced: 3 components at 3be61df5be90"
+  );
+  expect(failed({ error: "duplicate component id api" })).toBe(
+    "Architecture sync failed: duplicate component id api"
+  );
+});
+
 // The issue log names the same five movements, in its own voice: it has no actor column beside
 // the line, so a release says what happened and a takeover names who lost the claim.
 type ClaimLogEvent = Extract<Event, { type: "issue.claimed" | "issue.released" }>;

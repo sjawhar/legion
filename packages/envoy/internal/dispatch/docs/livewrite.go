@@ -91,7 +91,7 @@ type liveWrite struct {
 	// append that recorded each one's latest change, which its pending row names; actor made the
 	// latest content change, and is nil while the transaction has made none.
 	// addedAskBlockIDs is every ask block id a readable operation of this transaction introduced,
-	// over its own before/after trees (applyLive), credited to actor at commit (Ledger.credit,
+	// over its own before/after trees (applyLive), credited to actor at commit (Ledger.creditRooms,
 	// registerAskAuthors) rather than guessed from whichever update's observer happens to render
 	// this write's publish first (LEGION-503). renamedAskBlockIDs is every id one of those
 	// operations' own block-id repair re-minted (registerStampedAskBlocks), excluded from
@@ -100,12 +100,12 @@ type liveWrite struct {
 	// applyLive's own before/after diff cannot otherwise tell a rename from an insertion.
 	// carriedAskAuthors is the author carried forward (registerStampedAskBlocks,
 	// roomState.carriedAskAuthors) for each id in renamedAskBlockIDs that has one, credited at
-	// commit the same way (Ledger.credit, roomState.registerCarriedAskAuthors) rather than
+	// commit the same way (Ledger.creditRooms, roomState.registerCarriedAskAuthors) rather than
 	// written into the room's own bookkeeping as soon as the stamp runs: a write refused after the
 	// stamp but before commit (growth, a later validation failure) must not leave the room
 	// holding a trace of it. applyLive's own defer clears all three maps whenever its one
 	// operation changed the fork but was never recorded - the same guard that drops the fork's
-	// rendering - so a growth-refused edit's own stamp never reaches Ledger.credit. That defer
+	// rendering - so a growth-refused edit's own stamp never reaches Ledger.creditRooms. That defer
 	// runs per applyLive call, so it does not distinguish this call's own stamp from an earlier,
 	// already-recorded call's on the same liveWrite; no production caller invokes ApplyOps or
 	// ReplaceText more than once per Join (every api/ call site joins once per request), so two
@@ -138,9 +138,9 @@ type liveWrite struct {
 // liveWriteOrigin tags the room transaction that applies a committed live write, so the room's
 // update observer credits it to no one: Ledger.Commit credited it when its transaction
 // committed, and registered the ask ids it introduced before this write's publish could reach any
-// observer (Ledger.credit, registerAskAuthors). It carries the write's persistence-suppression
-// slot, which that observer finishes (onLoadDocument). It must remain non-zero sized because ygo
-// compares origins by interface equality.
+// observer (Ledger.creditRooms, registerAskAuthors). It carries the write's
+// persistence-suppression slot, which that observer finishes (onLoadDocument). It must remain
+// non-zero sized because ygo compares origins by interface equality.
 type liveWriteOrigin struct {
 	slot *suppressSlot
 }
@@ -167,15 +167,39 @@ func (s *Service) joinLiveWrite(ctx context.Context, ledger *Ledger, artifactID 
 }
 
 // openLiveWrite takes artifactID's writer slot for the transaction, first waiting for the
-// transaction holding it, if one does.
+// transaction holding it, if one does. A room a close has reserved because it stands behind the
+// durable head (reserveRoomCloseLocked) gives its slot to no one: a write admitted then would be
+// forgotten with the room's state, and the room that replaces it would load knowing nothing of the
+// write. The transaction does not wait for that close, whose persistence flush takes the
+// document's advisory lock (awaitRoomRecovery says why no transaction waits for such work): it
+// fails with ErrServiceUnavailable, as on a failed room, and its caller retries once the room has
+// reloaded.
+//
+// Taking the slot moves the room's generation, which ends a settlement already running or about to
+// run: one whose timer fired whose settleRoomWithin has not yet read the generation, or one past
+// that read whose supersession check or reload (reloadRoomBehindHead) then meets the moved
+// generation and writes nothing. The write takes that settlement over (settleDeferred), as it takes
+// over an armed timer it stops, and finishing it arms the settlement again, whether or not the write
+// changed anything: a write that changed nothing publishes no update whose observer would arm one.
+// A settlement that got past its supersession check before the write opened commits its own work,
+// and the one the write arms then finds nothing new.
 func (s *Service) openLiveWrite(ctx context.Context, ledger *Ledger, artifactID string) (*liveWrite, error) {
 	write := &liveWrite{artifactID: artifactID, clientID: crdt.NewClientID(), done: make(chan struct{})}
 	for {
 		state := s.lockState(artifactID)
+		if state.reloading {
+			s.unlockState(artifactID, state)
+			slog.Warn("dispatch: refuse a write on a document room closing behind the durable head", "room", artifactID)
+			return nil, fmt.Errorf("%w: room %s", errRoomReloading, artifactID)
+		}
 		if state.liveWriter == nil {
 			state.liveWriter = write
-			state.roomGeneration++
-			state.settleDeferred = s.stopSettleTimer(state.settle)
+			state.roomGeneration = s.nextRoomGeneration()
+			// The take-over runs whatever the record already says, so it always stops an
+			// armed timer: `settleDeferred || takeOver…` would skip the call on a record
+			// that already defers one, and leave a timer to fire under this write.
+			took := s.takeOverSettlementLocked(state)
+			state.settleDeferred = state.settleDeferred || took
 			s.unlockState(artifactID, state)
 			write.state = state
 			break
@@ -742,10 +766,10 @@ func (s *Service) publishLiveUpdate(room string, update []byte, version persiste
 	return nil
 }
 
-// finishLiveWrite releases write's room: its writer slot, and the settlement it suppressed,
-// which is armed again when opening the write stopped one or a settlement was asked for while
-// it was open. It drops what the write held for its transaction's operations, its fork and their
-// updates, keeping the verdict LostOps reads.
+// finishLiveWrite releases write's room: its writer slot, and the settlement it suppressed, which
+// is armed again when opening the write took one over (takeOverSettlementLocked) or a settlement
+// was asked for while it was open. It drops what the write held for its transaction's operations,
+// its fork and their updates, keeping the verdict LostOps reads.
 func (s *Service) finishLiveWrite(write *liveWrite) {
 	if write.finished {
 		return

@@ -3,7 +3,8 @@ import { harnessPorts } from "./harness-ports";
 // Minimal GitHub App API for the architecture-source access check, the
 // architecture importer and the delivery reconcile: the installation lookup, the
 // installation-token mint, the repository read that proves the minted token works,
-// the commit/tree/blob reads a sync walks, and empty delivery listings. Tests seed
+// the exact branch read a source's save makes, the commit/tree/blob reads a sync
+// walks, and empty delivery listings. Tests seed
 // per-repository state through /__fixture/repos; the server reaches this via
 // DISPATCH_GITHUB_API_BASE.
 
@@ -20,6 +21,9 @@ interface FakeRepo {
    *  branch commit is derived from their content, so a re-seed with different
    *  files moves the commit exactly like a push would. */
   readonly files?: Record<string, string>;
+  /** The repository's branches, every one at the commit `files` derives; `["main"]` when
+   *  unset, GitHub's default branch. The exact branch read answers 404 for any other name. */
+  readonly branches?: readonly string[];
 }
 
 /** Deterministic commit sha for a repository's current files. */
@@ -124,11 +128,34 @@ Bun.serve({
       return Response.json({ message: "fixture has no pull request" }, { status: 500 });
     }
 
+    // The exact branch read a source's save makes (`git/ref/heads/{branch}`, a `/` in the name
+    // percent-encoded by the Go client): a branch the repository was seeded with answers its ref
+    // at the commit the commits read answers, and any other name 404, as GitHub does.
+    const branchRef = url.pathname.match(/^\/repos\/([^/]+)\/([^/]+)\/git\/ref\/heads\/([^/]+)$/);
+    if (request.method === "GET" && branchRef !== null) {
+      const repo = repos.get(`${branchRef[1]}/${branchRef[2]}`);
+      const branch = decodeURIComponent(branchRef[3] ?? "");
+      if (repo === undefined || !(repo.branches ?? ["main"]).includes(branch)) {
+        return Response.json({ message: "Not Found" }, { status: 404 });
+      }
+      return Response.json({
+        object: { sha: commitFor(repo), type: "commit" },
+        ref: `refs/heads/${branch}`,
+      });
+    }
+
+    // As GitHub does: the bare sha for `Accept: application/vnd.github.sha` (what the Go
+    // client's Ref asks for), the commit's JSON otherwise.
     const commit = url.pathname.match(/^\/repos\/([^/]+)\/([^/]+)\/commits\/([^/]+)$/);
     if (request.method === "GET" && commit !== null) {
       const repo = repos.get(`${commit[1]}/${commit[2]}`);
       if (repo === undefined) {
         return Response.json({ message: "Not Found" }, { status: 404 });
+      }
+      if (request.headers.get("Accept") === "application/vnd.github.sha") {
+        return new Response(commitFor(repo), {
+          headers: { "Content-Type": "application/vnd.github.sha" },
+        });
       }
       return Response.json({ sha: commitFor(repo) });
     }

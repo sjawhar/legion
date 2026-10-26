@@ -147,7 +147,8 @@ function mainEventQueryKeys(event: Event, signedInLogin?: string): (readonly unk
     }
     return [
       architectureSourcesQuery().queryKey,
-      ["architecture-source", event.project],
+      // The project's own source list (projectArchitectureSourcesQuery).
+      ["architecture-sources", event.project],
       ["components", event.project],
       ["architecture", event.project],
     ];
@@ -368,10 +369,21 @@ const eventsByType: Record<EventType, readonly Event[]> = {
     event("settings.architecture_source.updated", {}, { issue_key: null }),
   ],
   "architecture.synced": [
+    // Retained from before a project had several sources: no repo or branch.
     event("architecture.synced", { commit: "c0ffee", components: 2 }, { issue_key: null }),
+    event(
+      "architecture.synced",
+      { branch: "main", commit: "c0ffee", components: 2, repo: "legion/arch" },
+      { issue_key: null }
+    ),
   ],
   "architecture.sync_failed": [
     event("architecture.sync_failed", { error: "broken" }, { issue_key: null }),
+    event(
+      "architecture.sync_failed",
+      { branch: "main", error: "broken", repo: "legion/arch" },
+      { issue_key: null }
+    ),
   ],
   "user_state.updated": [
     event("user_state.updated", { login: "alice" }, { issue_key: null }),
@@ -877,6 +889,38 @@ test("a repository mapping event refreshes every loaded issue detail", () => {
         )
       )
     ).toContainEqual(["issue"]);
+  }
+});
+
+// Settings lists every project's sources, the project page and an issue's components line read
+// the project's own list, and the Architecture pane and the components picker read the model;
+// each architecture event names one source and refreshes all of them for its project.
+test("an architecture event refreshes the source lists and the project's model", () => {
+  for (const incoming of [
+    event(
+      "settings.architecture_source.updated",
+      { deleted: true, source: { project: "CORE", repo: "acme/infra" } },
+      { issue_key: null }
+    ),
+    event(
+      "architecture.synced",
+      { branch: "main", commit: "c0ffee", components: 2, repo: "acme/infra" },
+      { issue_key: null }
+    ),
+    event(
+      "architecture.sync_failed",
+      { branch: "main", error: "broken", repo: "acme/infra" },
+      { issue_key: null }
+    ),
+  ]) {
+    expect(keySet(invalidatedKeys(incoming))).toEqual(
+      keySet([
+        ["architecture-sources"],
+        ["architecture-sources", "CORE"],
+        ["components", "CORE"],
+        ["architecture", "CORE"],
+      ])
+    );
   }
 });
 
