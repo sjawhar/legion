@@ -878,7 +878,8 @@ func TestGateRegistrationCarriesAnApprovalDispatchAlreadyShows(t *testing.T) {
 // told; and it carries an open request Dispatch shows waiting on the agent, which starts no wait. A
 // changes request a newer version superseded carries nothing. Each registration reads the issue's
 // event sequence before the approval, and a wait it starts begins at that sequence alone: the
-// latest review's time is that review's, never the read's.
+// latest review's time is that review's, never the read's. A read that shows an approval request
+// open names it (RequestAsk), so the gate binds to that request.
 func TestGateRegistrationCarriesAChangesRequestAndTheRequestsTurn(t *testing.T) {
 	h, facts, statuses := newArchitectHarness(t, nil, nil)
 	const changed, moved, superseded = "d2f1c6b4-8e07-4a53-9c1d-6b8f2e5a7093", "4a6b8c0d-2e4f-4a6b-8c0d-2e4f6a8b0c1d", "7c1e3a5b-9d2f-4b6a-8e0c-1d3f5a7b9c2e"
@@ -903,7 +904,7 @@ func TestGateRegistrationCarriesAChangesRequestAndTheRequestsTurn(t *testing.T) 
 	want := []intake.Fact{
 		intake.GateRegistered{Issue: "LEGION-208", ArtifactID: changed, Version: 4, ChangesRequestedVersion: 4, ChangesReason: reason,
 			ChangesRequestedMark: record.EventMark{Seq: 6, At: reviewed}, DispatchVersion: 4, Since: since},
-		intake.GateRegistered{Issue: "LEGION-208", ArtifactID: moved, Version: 4, RequestWaitsOnAgent: true, DispatchVersion: 4, Since: since},
+		intake.GateRegistered{Issue: "LEGION-208", ArtifactID: moved, Version: 4, RequestAsk: "ask-approval", RequestWaitsOnAgent: true, DispatchVersion: 4, Since: since},
 		intake.GateRegistered{Issue: "LEGION-208", ArtifactID: superseded, Version: 4, DispatchVersion: 5, Since: since},
 	}
 	if got := facts.recorded(); !reflect.DeepEqual(got, want) {

@@ -389,7 +389,8 @@ func TestStoreRoundTripsEveryRecord(t *testing.T) {
 // A gate records the changes request the architect was told of, its version, the reviewer's
 // reason and the review's place in the issue's Dispatch event log, so a registration, a gate seed
 // or a boot catch-up that re-reads the same review from Dispatch knows it was told. An approval of
-// that version clears the record. A root waiting on that gate keeps where its wait began.
+// that version clears the record. A gate keeps the approval request its registration read open. A
+// root waiting on that gate keeps where its wait began.
 func TestGateRoundTripsTheChangesRequestItRecords(t *testing.T) {
 	ctx := context.Background()
 	st := migratedStore(t)
@@ -397,10 +398,10 @@ func TestGateRoundTripsTheChangesRequestItRecords(t *testing.T) {
 	since := EventMark{Seq: 10, At: time.Date(2026, 10, 23, 17, 0, 0, 123456000, time.UTC)}
 	issue := Issue{Key: "LEGION-209", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion",
 		Tree: "LEGION-209", Project: "LEGION", Title: "gate", Phase: phase.AwaitingPerson, Generation: 1, Status: "in_progress", Rank: "U",
-		Awaiting: &Awaiting{GateVersion: 4, Artifact: "artifact-209", Since: since}, WaitFenceSeq: since.Seq}
+		Awaiting: &Awaiting{GateVersion: 4, Artifact: "artifact-209", Since: since}}
 	told := 4
 	closed := DesignGate{Issue: issue.Key, ArtifactID: "artifact-209", LatestVersion: 4, ToldChangesVersion: &told, ToldChangesReason: "name the rollback path",
-		ToldChangesMark: EventMark{Seq: 12, At: since.At.Add(time.Minute)}}
+		ToldChangesMark: EventMark{Seq: 12, At: since.At.Add(time.Minute)}, RequestAsk: "ask-approval"}
 	timeOnly := closed
 	timeOnly.ToldChangesMark = EventMark{At: since.At.Add(time.Minute)}
 	approved := 4
@@ -410,26 +411,8 @@ func TestGateRoundTripsTheChangesRequestItRecords(t *testing.T) {
 		must(t, records.PutIssue(ctx, tx, issue))
 		gotIssue, err := records.Issue(ctx, tx, issue.Key)
 		must(t, err)
-		if gotIssue == nil || !reflect.DeepEqual(gotIssue.Awaiting, issue.Awaiting) || gotIssue.WaitFenceSeq != issue.WaitFenceSeq {
-			t.Fatalf("awaiting root = %#v, want its wait %#v and wait fence %d", gotIssue, issue.Awaiting, issue.WaitFenceSeq)
-		}
-		// The fence outlives the wait: the root resumed keeps it.
-		resumed := *gotIssue
-		resumed.Phase, resumed.Awaiting = phase.Admitted, nil
-		must(t, records.PutIssue(ctx, tx, resumed))
-		gotIssue, err = records.Issue(ctx, tx, issue.Key)
-		must(t, err)
-		if gotIssue == nil || gotIssue.Awaiting != nil || gotIssue.WaitFenceSeq != since.Seq {
-			t.Fatalf("resumed root = %#v, want no wait and wait fence %d", gotIssue, since.Seq)
-		}
-		// An older reconstruction cannot move the durable, monotone fence backward.
-		stale := *gotIssue
-		stale.WaitFenceSeq = 0
-		must(t, records.PutIssue(ctx, tx, stale))
-		gotIssue, err = records.Issue(ctx, tx, issue.Key)
-		must(t, err)
-		if gotIssue == nil || gotIssue.WaitFenceSeq != since.Seq {
-			t.Fatalf("root after a stale fence write = %#v, want wait fence %d kept", gotIssue, since.Seq)
+		if gotIssue == nil || !reflect.DeepEqual(gotIssue.Awaiting, issue.Awaiting) {
+			t.Fatalf("awaiting root = %#v, want its wait %#v", gotIssue, issue.Awaiting)
 		}
 		must(t, records.PutGate(ctx, tx, closed))
 		got, err := records.Gate(ctx, tx, issue.Key)
@@ -452,7 +435,94 @@ func TestGateRoundTripsTheChangesRequestItRecords(t *testing.T) {
 		got, err = records.Gate(ctx, tx, issue.Key)
 		must(t, err)
 		if !reflect.DeepEqual(got, &opened) {
-			t.Fatalf("gate after an approval = %#v, want the changes request cleared", got)
+			t.Fatalf("gate after an approval = %#v, want the changes request and the request cleared", got)
+		}
+	})
+}
+
+// A handout raises handout_seq to the highest sequence the record holds of the issue — its last
+// observation, its claim, its wait's start, its asks, its gate's reviews — and never lowers it, and
+// clears what the architect declared. A declaration keeps the lowest hand-back since. Neither is
+// written by PutIssue, so a copy of the issue read before either never writes it back.
+func TestAHandoutAndADeclarationAreTheirOwnWrites(t *testing.T) {
+	ctx := context.Background()
+	st := migratedStore(t)
+	records := NewStore()
+	issue := Issue{Key: "LEGION-209", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion",
+		Tree: "LEGION-209", Project: "LEGION", Title: "root", Phase: phase.Admitted, Generation: 1, Status: "in_progress", Rank: "U",
+		LastDispatchSeq: 5, ClaimedBy: "session:architect", ClaimSeq: 7}
+	read := func(tx pgx.Tx) Issue {
+		t.Helper()
+		got, err := records.Issue(ctx, tx, issue.Key)
+		must(t, err)
+		if got == nil {
+			t.Fatal("the issue is missing")
+		}
+		return *got
+	}
+	inTx(t, st, func(tx pgx.Tx) {
+		must(t, records.PutIssue(ctx, tx, issue))
+		must(t, records.StartHandout(ctx, tx, issue.Key))
+		if got := read(tx); got.HandoutSeq != 7 || got.DeclaredSeq != 0 {
+			t.Fatalf("after the first handout = handout %d declared %d, want 7 and none", got.HandoutSeq, got.DeclaredSeq)
+		}
+		stale := read(tx)
+		must(t, records.Declare(ctx, tx, issue.Key, 12))
+		must(t, records.Declare(ctx, tx, issue.Key, 9))
+		must(t, records.Declare(ctx, tx, issue.Key, 15))
+		must(t, records.PutIssue(ctx, tx, stale))
+		if got := read(tx); got.DeclaredSeq != 9 || got.HandoutSeq != 7 {
+			t.Fatalf("after three hand-backs and a stale write = handout %d declared %d, want 7 and 9", got.HandoutSeq, got.DeclaredSeq)
+		}
+		must(t, records.PutRootAsk(ctx, tx, RootAsk{Issue: issue.Key, Ask: "ask-q", Kind: "question", Open: true, WaitingOn: "human", Seq: 20, ByTree: true}))
+		reviewed := 3
+		must(t, records.PutGate(ctx, tx, DesignGate{Issue: issue.Key, ArtifactID: "artifact-209", LatestVersion: 3, ApprovedVersion: &reviewed,
+			ApprovedMark: EventMark{Seq: 24}}))
+		must(t, records.StartHandout(ctx, tx, issue.Key))
+		if got := read(tx); got.HandoutSeq != 24 || got.DeclaredSeq != 0 {
+			t.Fatalf("after the second handout = handout %d declared %d, want the gate's review at 24 and none", got.HandoutSeq, got.DeclaredSeq)
+		}
+		must(t, records.PutGate(ctx, tx, DesignGate{Issue: issue.Key, ArtifactID: "artifact-209", LatestVersion: 3}))
+		must(t, records.StartHandout(ctx, tx, issue.Key))
+		if got := read(tx); got.HandoutSeq != 24 {
+			t.Fatalf("after a handout with less in the record = handout %d, want it kept at 24", got.HandoutSeq)
+		}
+		if err := records.Declare(ctx, tx, issue.Key, 0); err == nil {
+			t.Fatal("a declaration with no sequence was accepted, want it refused")
+		}
+	})
+}
+
+// An ask's mirror row round-trips, a write older than the stored row changes nothing, and the
+// batched read groups every issue's rows.
+func TestARootAskMirrorKeepsItsNewestState(t *testing.T) {
+	ctx := context.Background()
+	st := migratedStore(t)
+	records := NewStore()
+	inTx(t, st, func(tx pgx.Tx) {
+		for _, key := range []string{"LEGION-1", "LEGION-2"} {
+			must(t, records.PutIssue(ctx, tx, Issue{Key: key, Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion",
+				Tree: key, Project: "LEGION", Title: key, Phase: phase.Admitted, Generation: 1, Status: "in_progress", Rank: "U"}))
+		}
+		newer := RootAsk{Issue: "LEGION-1", Ask: "ask-q", Kind: "question", Open: false, Seq: 12, ByTree: true, PersonSeq: 12, ClosedSeq: 12, ClosedBy: ClosedByPerson}
+		must(t, records.PutRootAsk(ctx, tx, newer))
+		must(t, records.PutRootAsk(ctx, tx, RootAsk{Issue: "LEGION-1", Ask: "ask-q", Kind: "question", Open: true, WaitingOn: "human", Seq: 10, ByTree: true}))
+		got, err := records.RootAsk(ctx, tx, "LEGION-1", "ask-q")
+		must(t, err)
+		if got == nil || *got != newer {
+			t.Fatalf("ask after an older write = %#v, want %#v kept", got, newer)
+		}
+		unknown := RootAsk{Issue: "LEGION-2", Ask: "ask-r", Open: true, WaitingOn: "agent", Seq: 4}
+		must(t, records.PutRootAsk(ctx, tx, unknown))
+		all, err := records.RootAsks(ctx, tx, []string{"LEGION-1", "LEGION-2", "LEGION-3"})
+		must(t, err)
+		if want := map[string][]RootAsk{"LEGION-1": {newer}, "LEGION-2": {unknown}}; !reflect.DeepEqual(all, want) {
+			t.Fatalf("asks = %#v, want %#v", all, want)
+		}
+		missing, err := records.RootAsk(ctx, tx, "LEGION-2", "ask-none")
+		must(t, err)
+		if missing != nil {
+			t.Fatalf("an ask never mirrored = %#v, want none", missing)
 		}
 	})
 }
@@ -1683,16 +1753,15 @@ func TestRecordMigrationCreatesTheRequiredColumns(t *testing.T) {
 	ctx := context.Background()
 	st := migratedStore(t)
 	want := map[string][]string{
-		"issues":                 {"key", "tree", "project", "title", "parent", "phase", "generation", "status", "rank", "handed_over", "linger_until", "held_from", "last_dispatch_seq", "ready_pending_version", "hold_reason", "dispatch_status", "repo", "default_branch", "github_repo", "awaiting_ask", "awaiting_gate_version", "awaiting_artifact", "awaiting_answered_at", "awaiting_answered_by", "awaiting_answered_detail", "awaiting_since_seq", "awaiting_since", "claimed_by", "claim_seq", "wait_fence_seq", "gate_fence_seq"},
-		"phases":                 {"issue", "role", "claim", "handoff_commit", "rounds", "verdict", "summary", "last_handoff", "decision", "completed_at", "merge_note"},
-		"pull_requests":          {"issue", "repo", "number", "branch", "head_sha", "head_updated_at", "failing", "cancelled", "fix_attempts", "blocked_attempts", "check_runs", "generation", "snapshot", "pushes", "head_counted", "head_counted_before", "planned_red", "review_seen", "review_seen_at", "state", "checked_head", "required", "required_workflows", "required_workflows_head", "mergeability", "merge_sha"},
-		"production_checks":      {"issue", "project", "tree", "repo", "pr_number", "merge_sha", "opened_at", "bound_at", "looks", "look_open", "look_wake_at", "last_wake_kind", "last_wake_detail", "last_wake_at", "pending_cause_kind", "pending_cause_detail", "last", "closed_at", "outcome"},
-		"design_gates":           {"issue", "artifact_id", "latest_version", "approved_version", "approved_seq", "approved_at", "told_changes_version", "told_changes_reason", "told_changes_seq", "told_changes_at"},
-		"awaiting_person_acts":   {"issue", "seq", "ask", "at", "answers_gate", "by_person"},
-		"awaiting_pending_waits": {"issue", "seq", "at", "ask", "gate_version", "artifact"},
-		"slots":                  {"issue", "index", "admitted_at"},
-		"processed_events":       {"source", "event_id", "processed_at"},
-		"outbox":                 {"id", "kind", "issue", "payload", "attempts", "next_at", "last_error", "created_at", "lease_token", "lease_until"},
+		"issues":            {"key", "tree", "project", "title", "parent", "phase", "generation", "status", "rank", "handed_over", "linger_until", "held_from", "last_dispatch_seq", "ready_pending_version", "hold_reason", "dispatch_status", "repo", "default_branch", "github_repo", "awaiting_ask", "awaiting_gate_version", "awaiting_artifact", "awaiting_answered_at", "awaiting_answered_by", "awaiting_answered_detail", "awaiting_since_seq", "awaiting_since", "handout_seq", "declared_seq", "claimed_by", "claim_seq"},
+		"phases":            {"issue", "role", "claim", "handoff_commit", "rounds", "verdict", "summary", "last_handoff", "decision", "completed_at", "merge_note"},
+		"pull_requests":     {"issue", "repo", "number", "branch", "head_sha", "head_updated_at", "failing", "cancelled", "fix_attempts", "blocked_attempts", "check_runs", "generation", "snapshot", "pushes", "head_counted", "head_counted_before", "planned_red", "review_seen", "review_seen_at", "state", "checked_head", "required", "required_workflows", "required_workflows_head", "mergeability", "merge_sha"},
+		"production_checks": {"issue", "project", "tree", "repo", "pr_number", "merge_sha", "opened_at", "bound_at", "looks", "look_open", "look_wake_at", "last_wake_kind", "last_wake_detail", "last_wake_at", "pending_cause_kind", "pending_cause_detail", "last", "closed_at", "outcome"},
+		"design_gates":      {"issue", "artifact_id", "latest_version", "approved_version", "approved_seq", "approved_at", "told_changes_version", "told_changes_reason", "told_changes_seq", "told_changes_at", "request_ask"},
+		"root_asks":         {"issue", "ask", "kind", "open", "waiting_on", "seq", "by_tree", "person_seq", "closed_seq", "closed_by"},
+		"slots":             {"issue", "index", "admitted_at"},
+		"processed_events":  {"source", "event_id", "processed_at"},
+		"outbox":            {"id", "kind", "issue", "payload", "attempts", "next_at", "last_error", "created_at", "lease_token", "lease_until"},
 	}
 	inTx(t, st, func(tx pgx.Tx) {
 		for table, expected := range want {

@@ -43,11 +43,6 @@ import (
 // them.
 func (e *Engine) leave(ctx context.Context, tx pgx.Tx, issue record.Issue, status string) error {
 	e.logOnCommit(ctx, "workflow: issue left the workflow", "issue", issue.Key, "tree", issue.Tree, "status", status)
-	// The acts a person took on its asks are a running issue's: nothing of this issue waits on one
-	// again until it is admitted anew, which records its own.
-	if err := e.store.ForgetPersonActs(ctx, tx, issue.Key); err != nil {
-		return err
-	}
 	if err := e.untellUnresumedChanges(ctx, tx, issue); err != nil {
 		return err
 	}
@@ -115,11 +110,6 @@ func (e *Engine) leave(ctx context.Context, tx pgx.Tx, issue record.Issue, statu
 		return err
 	}
 	if err := e.closeAwaitingRoot(ctx, tx, *root); err != nil {
-		return err
-	}
-	// The member may have been the one whose phase kept the root's slot while the root waited only
-	// on a person: the wait held pending starts now (awaitPending).
-	if err := e.awaitPending(ctx, tx, root.Key); err != nil {
 		return err
 	}
 	if !merged {

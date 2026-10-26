@@ -40,25 +40,32 @@ func TestACallbackReplyDecodesAsTheReplyItIs(t *testing.T) {
 
 // Settlement restoring a decision block it retracted appends the ask's event again — ask.answered
 // with the answer given before the retraction, or ask.opened with the block's original author —
-// and marks it restored: nobody asked or answered anything, so each decodes to no fact, while the
-// same event without the mark decodes as the act it is.
+// and marks it restored: nobody asked or answered anything, so each decodes to the ask's state
+// alone (DispatchAskRestored), never the act the same event without the mark decodes as.
 func TestARestoredAskEventIsNobodysAct(t *testing.T) {
 	at := time.Date(2026, 10, 25, 12, 0, 0, 0, time.UTC)
+	mark := record.EventMark{Seq: 13, At: at}
 	for _, tc := range []struct {
 		name      string
 		eventType string
 		actor     map[string]any
 		payload   map[string]any
+		act       Fact
+		restored  Fact
 	}{
 		{name: "an answer", eventType: "ask.answered", actor: map[string]any{"kind": "user", "id": "alice"},
-			payload: map[string]any{"id": "ask-question", "kind": "question", "state": "answered"}},
+			payload:  map[string]any{"id": "ask-question", "kind": "question", "state": "answered"},
+			act:      DispatchAskClosed{Key: "LEGION-7", Ask: "ask-question", Kind: "question", State: "answered", Actor: dispatch.Actor{Kind: "user", ID: "alice"}, Mark: mark},
+			restored: DispatchAskRestored{Key: "LEGION-7", Ask: "ask-question", Kind: "question", Mark: mark}},
 		{name: "a question opened", eventType: "ask.opened", actor: map[string]any{"kind": "session", "id": "session-architect"},
-			payload: map[string]any{"id": "ask-question", "kind": "question", "author": map[string]any{"kind": "session", "id": "session-architect"}}},
+			payload:  map[string]any{"id": "ask-question", "kind": "question", "author": map[string]any{"kind": "session", "id": "session-architect"}},
+			act:      DispatchAskOpened{Key: "LEGION-7", Ask: "ask-question", Kind: "question", AuthorSession: "session-architect", Mark: mark},
+			restored: DispatchAskRestored{Key: "LEGION-7", Ask: "ask-question", Kind: "question", Open: true, Mark: mark}},
 	} {
 		for _, restored := range []bool{false, true} {
-			name := tc.name
+			name, want := tc.name, tc.act
 			if restored {
-				name += ", restored by settlement"
+				name, want = name+", restored by settlement", tc.restored
 			}
 			t.Run(name, func(t *testing.T) {
 				payload := map[string]any{}
@@ -79,8 +86,8 @@ func TestARestoredAskEventIsNobodysAct(t *testing.T) {
 				if err != nil {
 					t.Fatalf("decode: %v", err)
 				}
-				if restored != (fact == nil) {
-					t.Fatalf("%s decoded to %#v, want a fact %t", name, fact, !restored)
+				if !reflect.DeepEqual(fact, want) {
+					t.Fatalf("%s decoded to %#v, want %#v", name, fact, want)
 				}
 			})
 		}

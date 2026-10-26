@@ -89,6 +89,10 @@ var (
 	settler          = dispatch.Actor{Kind: "system", ID: "document-settlement"}
 )
 
+// catchUpHandout is the sequence of the last handout of the root a catch-up test seeds: the
+// record's last observation of it, which StartHandout takes in.
+const catchUpHandout int64 = 6
+
 // catchUpRoot seeds CAPTURE-ROOT waiting on waiting, with gate when one is given, runs the boot
 // catch-up against client, and returns the root as it stands after.
 func catchUpRoot(t *testing.T, waiting record.Awaiting, gate *record.DesignGate, client *awaitingDispatch) *record.Issue {
@@ -96,9 +100,13 @@ func catchUpRoot(t *testing.T, waiting record.Awaiting, gate *record.DesignGate,
 	pool := isolatedOutboxPool(t)
 	records := record.NewStore()
 	root := record.Issue{Key: "CAPTURE-100", Tree: "CAPTURE-100", Project: "CAPTURE", Title: "root", Phase: phase.AwaitingPerson,
-		Generation: 1, Status: "in_progress", Rank: "A", HandedOver: true, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Awaiting: &waiting}
+		Generation: 1, Status: "in_progress", Rank: "A", HandedOver: true, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Awaiting: &waiting,
+		LastDispatchSeq: catchUpHandout}
 	if err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
 		if err := records.PutIssue(context.Background(), tx, root); err != nil {
+			return err
+		}
+		if err := records.StartHandout(context.Background(), tx, root.Key); err != nil {
 			return err
 		}
 		if gate != nil {
@@ -211,8 +219,8 @@ func TestCatchUpAwaitingLeavesARootNoPersonAnswered(t *testing.T) {
 			client: awaitingDispatch{events: []json.RawMessage{askReplied(9, "ask-root", "human", architectSession)}}},
 		{name: "a session's resolution of another ask", awaiting: record.Awaiting{Ask: "ask-root"},
 			client: awaitingDispatch{events: []json.RawMessage{askClosed(9, "resolved", "ask-other", "question", architectSession)}}},
-		{name: "a session's progress note", awaiting: record.Awaiting{Ask: "ask-root"},
-			client: awaitingDispatch{events: []json.RawMessage{askReplied(9, "ask-root", "agent", architectSession)}}},
+		{name: "a session's progress note on another ask", awaiting: record.Awaiting{Ask: "ask-root"},
+			client: awaitingDispatch{events: []json.RawMessage{askReplied(9, "ask-other", "agent", architectSession)}}},
 		{name: "an approval request a session's reply moved to the agent", awaiting: record.Awaiting{GateVersion: 3, Artifact: "artifact-root"},
 			client: awaitingDispatch{approval: dispatch.Approval{State: "awaiting", LatestVersion: 3, AskID: "ask-approval", WaitingOn: "agent"},
 				events: []json.RawMessage{askReplied(9, "ask-approval", "agent", architectSession)}}},
@@ -240,6 +248,7 @@ func TestCatchUpAwaitingLeavesARootNoPersonAnswered(t *testing.T) {
 			if got == nil || !got.AwaitingPerson() || got.Answered() {
 				t.Fatalf("root after the catch-up = %#v, want it still waiting on the person", got)
 			}
+			// The seeded handout takes in the wait's start, so the earlier of the two is that start.
 			if len(tc.client.afters) != 1 || tc.client.afters[0] != tc.awaiting.Since.Seq {
 				t.Fatalf("event log read after %v, want one read after the wait's start %d", tc.client.afters, tc.awaiting.Since.Seq)
 			}

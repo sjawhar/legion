@@ -102,26 +102,27 @@ func (a *Admission) applyFact(ctx context.Context, tx pgx.Tx, fact intake.Fact) 
 		return a.release(ctx, tx, position)
 	}
 	if _, ok := fact.(intake.ControllerTick); ok {
-		if _, err := a.promote(ctx, tx); err != nil {
+		_, returned, err := a.promote(ctx, tx)
+		if err != nil {
 			return nil, err
 		}
 		// The tick wakes the controller whatever the slots: with every slot taken, it is the only
 		// wake a tree waiting on a refused root claim gets, since only the controller's recheck of
 		// that claim moves it, and it is the turn that posts the day's report.
-		return nil, a.wakeController(ctx, tx, record.TickNotice, a.project, a.now())
+		return returned, a.wakeController(ctx, tx, record.TickNotice, a.project, a.now())
 	}
 	if handover, ok := fact.(intake.Handover); ok {
 		if err := a.consumeHandover(ctx, tx, handover); err != nil {
 			return nil, err
 		}
-		_, err := a.promote(ctx, tx)
-		return nil, err
+		_, returned, err := a.promote(ctx, tx)
+		return returned, err
 	}
 
 	observation, ok := fact.(intake.DispatchIssue)
 	if !ok {
-		_, err := a.promote(ctx, tx)
-		return nil, err
+		_, returned, err := a.promote(ctx, tx)
+		return returned, err
 	}
 
 	stored, err := a.store.Issue(ctx, tx, observation.Key)
@@ -198,10 +199,11 @@ func (a *Admission) applyFact(ctx context.Context, tx pgx.Tx, fact intake.Fact) 
 	if err != nil {
 		return nil, err
 	}
-	if _, err := a.promote(ctx, tx); err != nil {
+	_, returned, err := a.promote(ctx, tx)
+	if err != nil {
 		return nil, err
 	}
-	return released, nil
+	return append(released, returned...), nil
 }
 
 // wakeForFreeSlot wakes the controller when this transaction released a slot that promotion left
@@ -324,10 +326,11 @@ func (a *Admission) Reconcile(ctx context.Context, tx pgx.Tx, summaries []dispat
 	if err != nil {
 		return err
 	}
-	if _, err := a.promote(ctx, tx); err != nil {
+	_, returned, err := a.promote(ctx, tx)
+	if err != nil {
 		return err
 	}
-	return a.wakeForFreeSlot(ctx, tx, released)
+	return a.wakeForFreeSlot(ctx, tx, append(released, returned...))
 }
 
 // putNewRoot records an unrecorded root or orphan handed to Legion in todo, on the repository its
@@ -661,14 +664,13 @@ func (a *Admission) readmit(ctx context.Context, tx pgx.Tx, stored record.Issue,
 	stored.Rank = rank
 	stored.LingerUntil = nil
 	stored.LastDispatchSeq = seq
-	// A generation that ended takes its waits with it: the acts a person took on its asks are
-	// forgotten with the issue's departure (workflow's leave), so an ask.opened or a hand-back of
-	// the old run, delivered late, would start a wait in this generation on a question already
-	// answered. Both fences rise to the observation that re-admits, which every event of the old
-	// run is below.
-	stored.RaiseWaitFence(seq)
-	stored.RaiseGateFence(seq)
 	if err := a.store.PutIssue(ctx, tx, stored); err != nil {
+		return fmt.Errorf("record re-admission %s: %w", stored.Key, err)
+	}
+	// A generation that ended takes what its architect handed back with it: the re-admission is a
+	// handout, so an ask.opened or a hand-back of the old run, delivered late, at or below what the
+	// record holds now, declares nothing in this one.
+	if err := a.store.StartHandout(ctx, tx, stored.Key); err != nil {
 		return fmt.Errorf("record re-admission %s: %w", stored.Key, err)
 	}
 	// A child leaving its old tree, carried or fresh, takes its hand-over fence with it: left behind,
@@ -771,15 +773,17 @@ func (a *Admission) logSlot(ctx context.Context, change, issue string, inUse int
 }
 
 // promote assigns slots to waiting roots and orphans in rank order until the cap is reached or the
-// waiting line empties, and reports how many candidates it admitted. Before it assigns any, every
-// root in the workflow that neither holds a slot nor waits for one leaves it (releaseUnslotted), so
-// each pass of admission — a live fact, the boot read, a release, a tick — repairs that state
-// rather than keeping it. A candidate a.pending still names is held back: the Dispatch consumer has
-// not yet reached the stream position Reconcile captured when it deferred that key. release, not
-// promote, is what clears pending — it empties the whole set at once, so this need only check
-// membership. An admitted candidate's architect start is queued behind a row creating its issue
-// branch (record.IssueBranch), which the start waits for.
-func (a *Admission) promote(ctx context.Context, tx pgx.Tx) (int, error) {
+// waiting line empties, and reports how many candidates it admitted and the slots it released.
+// Before it assigns any, every admitted root that now waits only on a person gives its slot back
+// (workflow's ReconcileAwaiting, then releaseReturnedSlots), and every root in the workflow that
+// neither holds a slot nor waits for one leaves it (releaseUnslotted), so each pass of admission —
+// a live fact, the boot read, a release, a tick — repairs that state rather than keeping it. A
+// candidate a.pending still names is held back: the Dispatch consumer has not yet reached the
+// stream position Reconcile captured when it deferred that key. release, not promote, is what
+// clears pending — it empties the whole set at once, so this need only check membership. An
+// admitted candidate's architect start is queued behind a row creating its issue branch
+// (record.IssueBranch), which the start waits for.
+func (a *Admission) promote(ctx context.Context, tx pgx.Tx) (int, []string, error) {
 	return a.promoteHolds(ctx, tx, true)
 }
 
@@ -789,25 +793,41 @@ func (a *Admission) promote(ctx context.Context, tx pgx.Tx) (int, error) {
 // Reconcile deferred. The in-memory pending set itself only clears after that whole call's
 // transaction commits (see release), so without this, promote's own membership check would hold
 // every one of them back in the very call that released them.
-func (a *Admission) promoteHolds(ctx context.Context, tx pgx.Tx, respectHolds bool) (int, error) {
+func (a *Admission) promoteHolds(ctx context.Context, tx pgx.Tx, respectHolds bool) (int, []string, error) {
 	issues, err := a.store.Issues(ctx, tx)
 	if err != nil {
-		return 0, fmt.Errorf("list admission issues: %w", err)
+		return 0, nil, fmt.Errorf("list admission issues: %w", err)
 	}
 	slots, err := a.store.Slots(ctx, tx)
 	if err != nil {
-		return 0, fmt.Errorf("list admission slots: %w", err)
+		return 0, nil, fmt.Errorf("list admission slots: %w", err)
+	}
+	entered, err := a.engine.ReconcileAwaiting(ctx, tx, a.project, issues, slots)
+	if err != nil {
+		return 0, nil, fmt.Errorf("reconcile the roots waiting on a person: %w", err)
+	}
+	var returned []string
+	if len(entered) > 0 {
+		if returned, err = a.releaseReturnedSlots(ctx, tx); err != nil {
+			return 0, nil, err
+		}
+		if issues, err = a.store.Issues(ctx, tx); err != nil {
+			return 0, returned, fmt.Errorf("list admission issues: %w", err)
+		}
+		if slots, err = a.store.Slots(ctx, tx); err != nil {
+			return 0, returned, fmt.Errorf("list admission slots: %w", err)
+		}
 	}
 	released, err := a.releaseUnslotted(ctx, tx, issues, slots, respectHolds)
 	if err != nil {
-		return 0, err
+		return 0, returned, err
 	}
 	if a.cap <= 0 {
-		return 0, nil
+		return 0, returned, nil
 	}
 	if released {
 		if issues, err = a.store.Issues(ctx, tx); err != nil {
-			return 0, fmt.Errorf("list admission issues: %w", err)
+			return 0, returned, fmt.Errorf("list admission issues: %w", err)
 		}
 	}
 	own := ownSlots(issues, slots)
@@ -822,7 +842,7 @@ func (a *Admission) promoteHolds(ctx context.Context, tx pgx.Tx, respectHolds bo
 		if candidate.Answered() {
 			reason, err := workflow.Unresumable(ctx, a.store, tx, candidate)
 			if err != nil {
-				return admitted, fmt.Errorf("check whether answered root %s can resume: %w", candidate.Key, err)
+				return admitted, returned, fmt.Errorf("check whether answered root %s can resume: %w", candidate.Key, err)
 			}
 			if reason != "" {
 				a.log.Warn("admission skips an answered root it may not resume", "issue", candidate.Key, "reason", reason)
@@ -834,7 +854,7 @@ func (a *Admission) promoteHolds(ctx context.Context, tx pgx.Tx, respectHolds bo
 			// not the Dispatch project key the issue record carries.
 			project, err := claim.ProjectToken(a.project)
 			if err != nil {
-				return admitted, fmt.Errorf("open admission lifecycle of %s: %w", candidate.Key, err)
+				return admitted, returned, fmt.Errorf("open admission lifecycle of %s: %w", candidate.Key, err)
 			}
 			if _, err := a.store.OpenTreeLifecycle(ctx, tx, project, candidate.Tree, treelifecycle.AuthorityWorkflow); err != nil {
 				if errors.Is(err, treelifecycle.ErrCleanupReserved) {
@@ -847,7 +867,7 @@ func (a *Admission) promoteHolds(ctx context.Context, tx pgx.Tx, respectHolds bo
 					a.log.Warn("admission waits for its tree's other authority", "issue", candidate.Key, "tree", candidate.Tree, "error", err)
 					continue
 				}
-				return admitted, fmt.Errorf("open admission lifecycle of %s: %w", candidate.Key, err)
+				return admitted, returned, fmt.Errorf("open admission lifecycle of %s: %w", candidate.Key, err)
 			}
 		}
 		now := a.now()
@@ -864,40 +884,46 @@ func (a *Admission) promoteHolds(ctx context.Context, tx pgx.Tx, respectHolds bo
 			candidate.Status = "in_progress"
 		}
 		if err := a.store.PutIssue(ctx, tx, candidate); err != nil {
-			return admitted, fmt.Errorf("record admitted issue %s: %w", candidate.Key, err)
+			return admitted, returned, fmt.Errorf("record admitted issue %s: %w", candidate.Key, err)
 		}
 		slot := record.Slot{Issue: candidate.Key, Index: index, AdmittedAt: now}
 		if err := a.store.PutSlot(ctx, tx, slot); err != nil {
-			return admitted, fmt.Errorf("put admission slot for %s: %w", candidate.Key, err)
+			return admitted, returned, fmt.Errorf("put admission slot for %s: %w", candidate.Key, err)
 		}
 		if writeInProgress {
 			if err := a.enqueue(ctx, tx, candidate.Key, record.StatusWrite{Status: "in_progress", ObservedStatus: "todo"}, now); err != nil {
-				return admitted, err
+				return admitted, returned, err
 			}
 		}
 		if answered {
+			// ResumeAwaitedRoot is the resume's handout (record.Store.StartHandout).
 			if err := a.engine.ResumeAwaitedRoot(ctx, tx, candidate, *awaiting); err != nil {
-				return admitted, fmt.Errorf("resume %s after a person's answer: %w", candidate.Key, err)
+				return admitted, returned, fmt.Errorf("resume %s after a person's answer: %w", candidate.Key, err)
 			}
 		} else {
+			// A fresh admission hands the architect its tree: what it hands back to a person
+			// afterwards is what it may wait on (workflow's ReconcileAwaiting).
+			if err := a.store.StartHandout(ctx, tx, candidate.Key); err != nil {
+				return admitted, returned, fmt.Errorf("record admitted issue %s: %w", candidate.Key, err)
+			}
 			if err := a.enqueue(ctx, tx, candidate.Key, record.IssueBranch{Generation: candidate.Generation}, now); err != nil {
-				return admitted, err
+				return admitted, returned, err
 			}
 			if err := a.enqueue(ctx, tx, candidate.Key, record.SuperviseRequest{Op: "start", Tree: candidate.Tree, Role: claim.RoleArchitect, Generation: candidate.Generation}, now); err != nil {
-				return admitted, err
+				return admitted, returned, err
 			}
 			if err := a.startMidPhaseMembers(ctx, tx, candidate, append(issues, candidate), now); err != nil {
-				return admitted, err
+				return admitted, returned, err
 			}
 			if err := a.reenterStrandedChildren(ctx, tx, candidate, issues); err != nil {
-				return admitted, err
+				return admitted, returned, err
 			}
 		}
 		slots, own = append(slots, slot), append(own, slot)
 		admitted++
 		a.logSlot(ctx, "taken", candidate.Key, len(own))
 	}
-	return admitted, nil
+	return admitted, returned, nil
 }
 
 // held says whether Reconcile still holds key for the Dispatch consumer to reach the stream
@@ -1065,12 +1091,12 @@ func (a *Admission) release(ctx context.Context, tx pgx.Tx, position intake.Disp
 			return nil, err
 		}
 	}
-	admitted, err := a.promoteHolds(ctx, tx, !caughtUp)
+	admitted, returned, err := a.promoteHolds(ctx, tx, !caughtUp)
 	if err != nil {
 		return nil, err
 	}
 	if !caughtUp {
-		return nil, nil
+		return returned, nil
 	}
 	a.log.Info("admission: the Dispatch consumer has caught up; releasing held roots",
 		"count", len(releasing), "ack_floor", position.AckFloorStream, "idle", position.Idle, "admitted", admitted)
@@ -1081,7 +1107,7 @@ func (a *Admission) release(ctx context.Context, tx pgx.Tx, position intake.Disp
 		}
 		a.mu.Unlock()
 	})
-	return released, nil
+	return append(released, returned...), nil
 }
 
 // ownSlots is the slots of issues, this project's. The slots table is shared by every project's

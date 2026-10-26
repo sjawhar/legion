@@ -6,26 +6,25 @@
 -- id, or awaiting_gate_version, the registered spec version on the document awaiting_artifact),
 -- awaiting_answered_at is when the wait was answered, which puts it at the front of the waiting
 -- line, awaiting_answered_by the act that answered it (the person's act on the ask, settlement's
--- retraction of that ask, a session of the tree closing it, a person's act on another ask, an
--- approval, a changes request, a newer version) and awaiting_answered_detail that act's own
--- detail (the ask acted on, or the version and reason of the review), which the task resuming the
--- architect names. awaiting_since_seq and
--- awaiting_since are where the wait began on Dispatch: the issue's event sequence and Dispatch's
--- time of the event that started it (a hand-back, a question opened), or, for a registration, the
--- sequence its read began at, with no time. A person's act whose event sequence is not past that
--- start never answers the wait, and neither does one Dispatch shows with no sequence (recorded
--- before Dispatch kept one). The five are set only in that phase, and exactly one of the ask and
--- the gate version is; either start may be unknown (null).
+-- retraction of that ask, a session of the tree closing it, a person's act on another ask, a
+-- session handing an awaited question to the agent's turn, an approval, a changes request, a
+-- newer version) and awaiting_answered_detail that act's own detail (the ask acted on, or the
+-- version and reason of the review), which the task resuming the architect names.
+-- awaiting_since_seq and awaiting_since are where the wait began on Dispatch: the earliest event
+-- sequence of the hand-backs the architect made since it was last given work (issues.declared_seq),
+-- with no time. A person's act whose event sequence is not past that start never answers the
+-- wait, and neither does one Dispatch shows with no sequence (recorded before Dispatch kept one).
+-- The five are set only in that phase, and exactly one of the ask and the gate version is; either
+-- start may be unknown (null).
 --
--- wait_fence_seq is the highest Dispatch event sequence of the issue that a wait has started from,
--- kept in every phase and across a resume and a re-admission: a hand-back (ask.handed_back, or a
--- comment.created reply that leaves the turn with the person) or an ask.opened event at or below
--- it is an act a wait already covered, delivered late, and starts no wait. 0 is none.
---
--- gate_fence_seq is the highest issue sequence a register_gate read of Dispatch covered, kept the
--- same way. That read decided the gate alone, so it fences only an event that would start a wait
--- on the gate: a hand-back while the gate is closed. A question opened is fenced by wait_fence_seq
--- alone, since the approval read says nothing about an ordinary ask. 0 is none.
+-- handout_seq is the highest Dispatch sequence of the issue the record held when the daemon last
+-- gave the root's architect work (its admission, its re-admission, or a resume), kept in every
+-- phase and never lowered. declared_seq is the lowest sequence of a hand-back since then: a tree
+-- session's question opened, a reply of a tree session leaving an ask with the person, an
+-- approval request handed back, or a registration of a closed gate whose request waits on the
+-- person; null when the architect has handed nothing back since its last handout. An event at or
+-- below handout_seq declares nothing: the work it belonged to was already handed out. A root
+-- waits on a person only once it declared (the workflow's ReconcileAwaiting).
 --
 -- claimed_by is who holds the issue's Dispatch claim (`<kind>:<id>`, '' for nobody or not yet
 -- seen), and claim_seq the Dispatch sequence it was seen at: a root another session or a person
@@ -40,7 +39,7 @@ alter table issues add column awaiting_gate_version integer check (awaiting_gate
 alter table issues add column awaiting_artifact text check (awaiting_artifact <> '');
 alter table issues add column awaiting_answered_at timestamptz;
 alter table issues add column awaiting_answered_by text check (
-  awaiting_answered_by in ('ask', 'retracted', 'closed', 'reply', 'approved', 'changes_requested', 'version'));
+  awaiting_answered_by in ('ask', 'retracted', 'closed', 'reply', 'turn', 'approved', 'changes_requested', 'version'));
 alter table issues add column awaiting_answered_detail text check (awaiting_answered_detail <> '');
 alter table issues add column awaiting_since_seq bigint check (awaiting_since_seq > 0);
 alter table issues add column awaiting_since timestamptz;
@@ -54,8 +53,8 @@ alter table issues add constraint issues_awaiting_shape check (
       and awaiting_answered_at is null and awaiting_answered_by is null and awaiting_answered_detail is null
       and awaiting_since_seq is null and awaiting_since is null
   end);
-alter table issues add column wait_fence_seq bigint not null default 0 check (wait_fence_seq >= 0);
-alter table issues add column gate_fence_seq bigint not null default 0 check (gate_fence_seq >= 0);
+alter table issues add column handout_seq bigint not null default 0 check (handout_seq >= 0);
+alter table issues add column declared_seq bigint check (declared_seq > 0);
 
 alter table issues add column claimed_by text not null default '';
 alter table issues add column claim_seq bigint not null default 0 check (claim_seq >= 0);
@@ -87,38 +86,32 @@ alter table design_gates add column approved_at timestamptz;
 alter table design_gates add constraint design_gates_approved_mark_shape check (
   approved_version is not null or (approved_seq is null and approved_at is null));
 
--- awaiting_person_acts records each act on an ask of a root — a person's answer or resolution
--- that closed it, a person's reply that left the turn with the agent (by_person), or a close of it
--- by anyone else, a session of the tree or Dispatch's settlement — by its event's sequence on the
--- issue, with Dispatch's time of it (null when the event carried none), the ask, and whether it
--- answers a wait on the root's design gate as well as one on that ask. Dispatch's intake retries a
--- delivery, so the event that starts a wait (a question opened, a hand-back) can reach the daemon
--- after an act that followed it: a wait whose start an act recorded here follows starts none,
--- since what it would wait on has already happened. The rows are the issue's and go when it leaves
--- the workflow.
-create table awaiting_person_acts (
-  issue text not null references issues (key) on delete cascade,
-  seq bigint not null check (seq > 0),
-  ask text not null check (ask <> ''),
-  at timestamptz,
-  answers_gate boolean not null,
-  by_person boolean not null,
-  primary key (issue, seq));
+-- design_gates.request_ask is the approval request register_gate read open on the document (the
+-- ask Dispatch's approval read names while a request is awaiting), null when none was open. Its
+-- root_asks row says whether the request is still with the person.
+alter table design_gates add column request_ask text check (request_ask <> '');
 
--- awaiting_pending_waits keeps each wait a root would have started but did not: the event that
--- would start it (an architect's question on the root, a hand-back, a closed gate registered)
--- arrived while the root already waited, or while a guard kept its slot (a member of its tree
--- mid-phase, a claim a person holds). It names the ask, or the closed gate's version on its
--- document, by the event's sequence on the issue. The root keeps each until it is answered, a wait
--- starts on it, or the root leaves the workflow: when the guard clears the wait starts, and the
--- resumed architect is told which asks are still with the human.
-create table awaiting_pending_waits (
+-- root_asks mirrors Dispatch's state of each ask of a root, last writer wins by the issue's event
+-- sequence: it is level data, not a queue of events. seq is the newest event or read applied to
+-- the row's state (open, waiting_on, closed_seq, closed_by), and an older one changes none of it.
+-- kind (null until an event names it) and by_tree (a session of the root's tree opened the ask)
+-- are facts of the ask's opening, kept whatever order its events arrive in. person_seq is the
+-- newest act of a person on the ask that answers it — an answer or resolution of a question, a
+-- reply that left an open ask with the agent — and closed_seq the event that closed it, with who
+-- closed it (closed_by: a person, a session of the tree, Dispatch's settlement, anyone else).
+-- waiting_on is whose turn an open ask waits on, null once it is closed. The rows are Dispatch's
+-- and outlive the root's runs.
+create table root_asks (
   issue text not null references issues (key) on delete cascade,
+  ask text not null check (ask <> ''),
+  kind text check (kind in ('question', 'approval')),
+  open boolean not null,
+  waiting_on text check (waiting_on in ('human', 'agent')),
   seq bigint not null check (seq > 0),
-  at timestamptz,
-  ask text check (ask <> ''),
-  gate_version integer check (gate_version > 0),
-  artifact text check (artifact <> ''),
-  primary key (issue, seq),
-  check ((ask is null) <> (gate_version is null)),
-  check ((gate_version is null) = (artifact is null)));
+  by_tree boolean not null default false,
+  person_seq bigint not null default 0 check (person_seq >= 0),
+  closed_seq bigint not null default 0 check (closed_seq >= 0),
+  closed_by text check (closed_by in ('person', 'tree', 'settlement', 'other')),
+  primary key (issue, ask),
+  check (open = (waiting_on is not null)),
+  check (open = (closed_by is null)));

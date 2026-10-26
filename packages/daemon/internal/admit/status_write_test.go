@@ -139,15 +139,15 @@ func TestASessionsStatusWriteOnARootWaitingOnAPersonIsSetBack(t *testing.T) {
 			pool := migratedPool(t)
 			admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
 			awaitingRoot(t, pool, record.Awaiting{Ask: "ask-root", Since: record.EventMark{Seq: 1}})
-			apply(t, pool, admission, "parked", intake.DispatchIssue{Key: "LEGION-ROOT", ResolvedRepo: "acme/widgets", Seq: 2, Type: "issue.updated",
+			apply(t, pool, admission, "parked", intake.DispatchIssue{Key: "LEGION-100", ResolvedRepo: "acme/widgets", Seq: 2, Type: "issue.updated",
 				Status: "backlog", Title: "root", Rank: "B", HandedOver: true, ActorSession: tc.actor}, admission.engine)
-			got := issue(t, pool, "LEGION-ROOT")
+			got := issue(t, pool, "LEGION-100")
 			reasserted, told := 0, 0
 			for _, effect := range effects(t, pool) {
-				if write, ok := effect.payload.(record.StatusWrite); ok && effect.issue == "LEGION-ROOT" && write == (record.StatusWrite{Status: "in_progress", ObservedStatus: "backlog"}) {
+				if write, ok := effect.payload.(record.StatusWrite); ok && effect.issue == "LEGION-100" && write == (record.StatusWrite{Status: "in_progress", ObservedStatus: "backlog"}) {
 					reasserted++
 				}
-				if notice, ok := effect.payload.(record.Notice); ok && effect.issue == "LEGION-ROOT" && notice.Kind == "status-reasserted" {
+				if notice, ok := effect.payload.(record.Notice); ok && effect.issue == "LEGION-100" && notice.Kind == "status-reasserted" {
 					told++
 				}
 			}

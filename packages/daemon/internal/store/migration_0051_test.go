@@ -6,13 +6,13 @@ import (
 	"testing"
 )
 
-// 0051 adds awaiting_person and what it waits on, where on Dispatch that wait began, the issue's
-// two fences, the gate columns that record the changes request the architect was told of and
-// where Dispatch recorded its approval, and the table of asks a person closed. An issue the old
-// daemon left in any phase migrates with no awaiting state, nobody's claim and fences of 0, and a
-// gate it left with no recorded request. Afterwards a root waits on exactly one of an ask or a
-// gate version, and only in that phase, a wait's start is set only in that phase, the fences are
-// kept in every phase, and a held issue never waits.
+// 0051 adds awaiting_person and what it waits on, where on Dispatch that wait began, the root's
+// last handout and earliest hand-back since, the gate columns that record the changes request the
+// architect was told of and where Dispatch recorded its approval, and the mirror of a root's asks.
+// An issue the old daemon left in any phase migrates with no awaiting state, nobody's claim, no
+// handout and no hand-back, and a gate it left with no recorded request. Afterwards a root waits on
+// exactly one of an ask or a gate version, and only in that phase, a wait's start is set only in
+// that phase, the handout and the hand-back are kept in every phase, and a held issue never waits.
 func TestAwaitingPersonArrivesWith0051AndItsShapeIsEnforced(t *testing.T) {
 	store := emptyStore(t)
 	ctx := context.Background()
@@ -26,28 +26,30 @@ func TestAwaitingPersonArrivesWith0051AndItsShapeIsEnforced(t *testing.T) {
 		t.Fatalf("migrate: %v", err)
 	}
 	var claimedBy string
-	var claimSeq, fence, gateFence int64
+	var claimSeq, handout int64
 	var ask *string
 	var gateVersion *int
-	var sinceSeq *int64
+	var sinceSeq, declared *int64
 	var since *string
-	if err := store.Pool().QueryRow(ctx, `select claimed_by, claim_seq, awaiting_ask, awaiting_gate_version, awaiting_since_seq, awaiting_since::text, wait_fence_seq, gate_fence_seq
-		from issues where key = 'LEGION-208'`).Scan(&claimedBy, &claimSeq, &ask, &gateVersion, &sinceSeq, &since, &fence, &gateFence); err != nil {
+	if err := store.Pool().QueryRow(ctx, `select claimed_by, claim_seq, awaiting_ask, awaiting_gate_version, awaiting_since_seq, awaiting_since::text, handout_seq, declared_seq
+		from issues where key = 'LEGION-208'`).Scan(&claimedBy, &claimSeq, &ask, &gateVersion, &sinceSeq, &since, &handout, &declared); err != nil {
 		t.Fatalf("read the migrated root: %v", err)
 	}
-	if claimedBy != "" || claimSeq != 0 || ask != nil || gateVersion != nil || sinceSeq != nil || since != nil || fence != 0 || gateFence != 0 {
-		t.Fatalf("root after 0051 = claimed_by %q claim_seq %d ask %v gate %v since %v/%v fences %d/%d, want no claim, no wait and no fence",
-			claimedBy, claimSeq, ask, gateVersion, sinceSeq, since, fence, gateFence)
+	if claimedBy != "" || claimSeq != 0 || ask != nil || gateVersion != nil || sinceSeq != nil || since != nil || handout != 0 || declared != nil {
+		t.Fatalf("root after 0051 = claimed_by %q claim_seq %d ask %v gate %v since %v/%v handout %d declared %v, want no claim, no wait, no handout and no hand-back",
+			claimedBy, claimSeq, ask, gateVersion, sinceSeq, since, handout, declared)
 	}
 
 	for _, accepted := range []string{
 		`update issues set phase = 'awaiting_person', awaiting_gate_version = 3, awaiting_artifact = '7d1e3a5c-9b2f-4c6e-8a40-3f5d7b9e1c26' where key = 'LEGION-208'`,
 		`update issues set awaiting_answered_at = now(), awaiting_answered_by = 'changes_requested', awaiting_answered_detail = 'version 3: name the rollback path' where key = 'LEGION-208'`,
+		`update issues set awaiting_answered_by = 'turn' where key = 'LEGION-208'`,
 		`update issues set awaiting_since_seq = 10, awaiting_since = now() where key = 'LEGION-208'`,
 		`update issues set awaiting_gate_version = null, awaiting_artifact = null, awaiting_ask = '6c83cb7f-8f4e-4820-9e05-7c94fa725007' where key = 'LEGION-208'`,
 		`update issues set phase = 'admitted', awaiting_ask = null, awaiting_answered_at = null, awaiting_answered_by = null, awaiting_answered_detail = null, awaiting_since_seq = null, awaiting_since = null where key = 'LEGION-208'`,
-		// Each fence outlives the wait: both are kept at admitted, after the wait's columns cleared.
-		`update issues set wait_fence_seq = 10, gate_fence_seq = 12 where key = 'LEGION-208'`,
+		// The handout and the hand-back are kept at admitted, after the wait's columns cleared.
+		`update issues set handout_seq = 10, declared_seq = 12 where key = 'LEGION-208'`,
+		`update issues set declared_seq = null where key = 'LEGION-208'`,
 	} {
 		if _, err := store.Pool().Exec(ctx, accepted); err != nil {
 			t.Fatalf("%s: %v, want it accepted", accepted, err)
@@ -70,8 +72,8 @@ func TestAwaitingPersonArrivesWith0051AndItsShapeIsEnforced(t *testing.T) {
 		{"an empty ask", `update issues set phase = 'awaiting_person', awaiting_ask = '' where key = 'LEGION-208'`},
 		{"a gate version of zero", `update issues set phase = 'awaiting_person', awaiting_gate_version = 0 where key = 'LEGION-208'`},
 		{"a negative claim sequence", `update issues set claim_seq = -1 where key = 'LEGION-208'`},
-		{"a negative wait fence", `update issues set wait_fence_seq = -1 where key = 'LEGION-208'`},
-		{"a negative gate fence", `update issues set gate_fence_seq = -1 where key = 'LEGION-208'`},
+		{"a negative handout", `update issues set handout_seq = -1 where key = 'LEGION-208'`},
+		{"a hand-back at sequence zero", `update issues set declared_seq = 0 where key = 'LEGION-208'`},
 	} {
 		_, err := store.Pool().Exec(ctx, refused.statement)
 		if err == nil || !strings.Contains(err.Error(), "check constraint") {
@@ -133,8 +135,9 @@ func TestTheGatesToldChangesRequestArrivesWith0051(t *testing.T) {
 }
 
 // 0051 also records where Dispatch put the approval a gate holds, cleared with the approval
-// itself, and keeps the acts a person took on an issue's asks, which go with the issue.
-func TestTheGatesApprovalMarkAndThePersonsActsArriveWith0051(t *testing.T) {
+// itself, the approval request a registration read open, and the mirror of each ask of an issue,
+// which goes with the issue.
+func TestTheGatesApprovalMarkAndTheAskMirrorArriveWith0051(t *testing.T) {
 	store := emptyStore(t)
 	ctx := context.Background()
 	migrateThrough(t, store, 50)
@@ -151,19 +154,18 @@ func TestTheGatesApprovalMarkAndThePersonsActsArriveWith0051(t *testing.T) {
 		t.Fatalf("migrate: %v", err)
 	}
 	var seq *int64
-	var at *string
-	if err := store.Pool().QueryRow(ctx, `select approved_seq, approved_at::text from design_gates where issue = 'LEGION-208'`).Scan(&seq, &at); err != nil {
+	var at, request *string
+	if err := store.Pool().QueryRow(ctx, `select approved_seq, approved_at::text, request_ask from design_gates where issue = 'LEGION-208'`).Scan(&seq, &at, &request); err != nil {
 		t.Fatalf("read the migrated gate: %v", err)
 	}
-	if seq != nil || at != nil {
-		t.Fatalf("gate after 0051 = approved_seq %v approved_at %v, want the approval it already held placed nowhere", seq, at)
+	if seq != nil || at != nil || request != nil {
+		t.Fatalf("gate after 0051 = approved_seq %v approved_at %v request %v, want the approval it already held placed nowhere and no request", seq, at, request)
 	}
 	for _, accepted := range []string{
-		`update design_gates set approved_seq = 12, approved_at = now() where issue = 'LEGION-208'`,
-		`insert into awaiting_person_acts (issue, seq, ask, at, answers_gate, by_person) values ('LEGION-208', 11, 'ask-question', now(), true, true)`,
-		`insert into awaiting_person_acts (issue, seq, ask, answers_gate, by_person) values ('LEGION-208', 12, 'ask-approval', false, false)`,
-		`insert into awaiting_pending_waits (issue, seq, at, ask) values ('LEGION-208', 13, now(), 'ask-second')`,
-		`insert into awaiting_pending_waits (issue, seq, gate_version, artifact) values ('LEGION-208', 14, 4, '7d1e3a5c-9b2f-4c6e-8a40-3f5d7b9e1c26')`,
+		`update design_gates set approved_seq = 12, approved_at = now(), request_ask = 'ask-approval' where issue = 'LEGION-208'`,
+		`insert into root_asks (issue, ask, kind, open, waiting_on, seq, by_tree) values ('LEGION-208', 'ask-question', 'question', true, 'human', 11, true)`,
+		`insert into root_asks (issue, ask, open, waiting_on, seq) values ('LEGION-208', 'ask-unnamed', true, 'agent', 12)`,
+		`insert into root_asks (issue, ask, kind, open, seq, person_seq, closed_seq, closed_by) values ('LEGION-208', 'ask-approval', 'approval', false, 13, 0, 13, 'person')`,
 	} {
 		if _, err := store.Pool().Exec(ctx, accepted); err != nil {
 			t.Fatalf("%s: %v, want it accepted", accepted, err)
@@ -172,25 +174,32 @@ func TestTheGatesApprovalMarkAndThePersonsActsArriveWith0051(t *testing.T) {
 	for _, refused := range []struct{ why, statement string }{
 		{"a sequence of zero", `update design_gates set approved_seq = 0 where issue = 'LEGION-208'`},
 		{"a mark with no approval", `update design_gates set approved_version = null where issue = 'LEGION-208'`},
-		{"an act's sequence of zero", `update awaiting_person_acts set seq = 0 where ask = 'ask-question'`},
-		{"an act on no ask", `update awaiting_person_acts set ask = '' where ask = 'ask-question'`},
-		{"a pending wait on an ask and a gate", `update awaiting_pending_waits set gate_version = 4, artifact = 'a' where seq = 13`},
-		{"a pending wait on neither", `update awaiting_pending_waits set ask = null where seq = 13`},
-		{"a pending gate wait with no document", `update awaiting_pending_waits set artifact = null where seq = 14`},
+		{"an empty request", `update design_gates set request_ask = '' where issue = 'LEGION-208'`},
+		{"an ask's sequence of zero", `update root_asks set seq = 0 where ask = 'ask-question'`},
+		{"an ask of no known kind", `update root_asks set kind = 'guess' where ask = 'ask-question'`},
+		{"an open ask on nobody's turn", `update root_asks set waiting_on = null where ask = 'ask-question'`},
+		{"a closed ask on someone's turn", `update root_asks set waiting_on = 'human' where ask = 'ask-approval'`},
+		{"a closed ask closed by nobody", `update root_asks set closed_by = null where ask = 'ask-approval'`},
+		{"an open ask someone closed", `update root_asks set closed_by = 'tree' where ask = 'ask-question'`},
+		{"a turn of no known side", `update root_asks set waiting_on = 'both' where ask = 'ask-question'`},
+		{"a negative act", `update root_asks set person_seq = -1 where ask = 'ask-question'`},
 	} {
 		_, err := store.Pool().Exec(ctx, refused.statement)
 		if err == nil || !strings.Contains(err.Error(), "check constraint") {
 			t.Fatalf("%s = %v, want a check constraint to refuse it", refused.why, err)
 		}
 	}
+	if _, err := store.Pool().Exec(ctx, `delete from design_gates where issue = 'LEGION-208'`); err != nil {
+		t.Fatalf("delete the gate: %v", err)
+	}
 	if _, err := store.Pool().Exec(ctx, `delete from issues where key = 'LEGION-208'`); err != nil {
 		t.Fatalf("delete the issue: %v", err)
 	}
 	var left int
-	if err := store.Pool().QueryRow(ctx, `select (select count(*) from awaiting_person_acts) + (select count(*) from awaiting_pending_waits)`).Scan(&left); err != nil {
-		t.Fatalf("count the acts and pending waits: %v", err)
+	if err := store.Pool().QueryRow(ctx, `select count(*) from root_asks`).Scan(&left); err != nil {
+		t.Fatalf("count the mirrored asks: %v", err)
 	}
 	if left != 0 {
-		t.Fatalf("acts and pending waits after the issue was deleted = %d, want none", left)
+		t.Fatalf("mirrored asks after the issue was deleted = %d, want none", left)
 	}
 }

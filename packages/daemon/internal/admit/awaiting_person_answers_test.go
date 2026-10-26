@@ -26,8 +26,8 @@ var (
 	settler   = dispatch.Actor{Kind: "system", ID: "document-settlement"}
 )
 
-// awaitingRoot records LEGION-ROOT waiting on waiting, with no slot, beside LEGION-RUN holding the
-// one slot, so an answer puts LEGION-ROOT at the front of the waiting line without resuming it.
+// awaitingRoot records LEGION-100 waiting on waiting, with no slot, beside LEGION-RUN holding the
+// one slot, so an answer puts LEGION-100 at the front of the waiting line without resuming it.
 func awaitingRoot(t *testing.T, pool *pgxpool.Pool, waiting record.Awaiting) {
 	t.Helper()
 	// A gate wait names the document it waits on, as every wait the workflow starts does.
@@ -36,17 +36,22 @@ func awaitingRoot(t *testing.T, pool *pgxpool.Pool, waiting record.Awaiting) {
 	}
 	seedSlotted(t, pool, "LEGION-RUN", "A")
 	putIssue(t, pool, record.Issue{
-		Key: "LEGION-ROOT", Tree: "LEGION-ROOT", Project: testProject, Title: "root", Phase: phase.AwaitingPerson,
+		Key: "LEGION-100", Tree: "LEGION-100", Project: testProject, Title: "root", Phase: phase.AwaitingPerson,
 		Generation: 1, Status: "in_progress", Rank: "B", HandedOver: true, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets",
 		Awaiting: &waiting,
 	})
 	if waiting.GateVersion != 0 {
-		seedGate(t, pool, record.DesignGate{Issue: "LEGION-ROOT", ArtifactID: "artifact-root", LatestVersion: waiting.GateVersion})
+		seedGate(t, pool, record.DesignGate{Issue: "LEGION-100", ArtifactID: "artifact-root", LatestVersion: waiting.GateVersion})
 	}
 }
 
+// seedGate records gate. A gate the tests seed was registered with the approval request ask-approval
+// open on its document, unless it names another request.
 func seedGate(t *testing.T, pool *pgxpool.Pool, gate record.DesignGate) {
 	t.Helper()
+	if gate.RequestAsk == "" {
+		gate.RequestAsk = "ask-approval"
+	}
 	inTx(t, pool, func(tx pgx.Tx) {
 		if err := record.NewStore().PutGate(context.Background(), tx, gate); err != nil {
 			t.Fatalf("seed gate: %v", err)
@@ -81,34 +86,34 @@ func TestAChangesRequestBeforeRegistrationKeepsTheSlotAndTellsTheArchitect(t *te
 		name  string
 		prior *record.DesignGate
 	}{
-		{name: "a gate registered at an earlier version", prior: &record.DesignGate{Issue: "LEGION-ROOT", ArtifactID: "artifact-root", LatestVersion: 3}},
+		{name: "a gate registered at an earlier version", prior: &record.DesignGate{Issue: "LEGION-100", ArtifactID: "artifact-root", LatestVersion: 3}},
 		{name: "the first registration"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pool := migratedPool(t)
 			admission := newAdmission(t, 1, nil)
-			seedSlotted(t, pool, "LEGION-ROOT", "A")
+			seedSlotted(t, pool, "LEGION-100", "A")
 			seedWaiting(t, pool, "LEGION-NEXT", "B")
 			if tc.prior != nil {
 				seedGate(t, pool, *tc.prior)
 			}
-			applyFact(t, pool, admission, "spec-v4", intake.DispatchArtifact{Key: "LEGION-ROOT", ArtifactID: "artifact-root", Kind: intake.DispatchArtifactVersion, Version: 4})
-			applyFact(t, pool, admission, "changes-v4", intake.DispatchArtifact{Key: "LEGION-ROOT", ArtifactID: "artifact-root",
+			applyFact(t, pool, admission, "spec-v4", intake.DispatchArtifact{Key: "LEGION-100", ArtifactID: "artifact-root", Kind: intake.DispatchArtifactVersion, Version: 4})
+			applyFact(t, pool, admission, "changes-v4", intake.DispatchArtifact{Key: "LEGION-100", ArtifactID: "artifact-root",
 				Kind: intake.DispatchArtifactChangesRequested, Version: 4, Reason: "name the rollback path"})
 
 			if _, err := intake.ApplyFact(context.Background(), pool, "api", "register-v4", intake.GateRegistered{
-				Issue: "LEGION-ROOT", ArtifactID: "artifact-root", Version: 4, ChangesRequestedVersion: 4, ChangesReason: "name the rollback path",
+				Issue: "LEGION-100", ArtifactID: "artifact-root", Version: 4, ChangesRequestedVersion: 4, ChangesReason: "name the rollback path",
 			}, admission.engine, admission); err != nil {
 				t.Fatalf("register gate v4: %v", err)
 			}
 
-			root := issue(t, pool, "LEGION-ROOT")
+			root := issue(t, pool, "LEGION-100")
 			if root.Phase != phase.Admitted || root.Awaiting != nil {
 				t.Fatalf("root after registering a version a person already asked changes of = %#v, want admitted with no wait", root)
 			}
-			assertSlots(t, pool, []record.Slot{{Issue: "LEGION-ROOT", Index: 0, AdmittedAt: fixedNow}})
-			assertNoAwaitingEffects(t, pool, "LEGION-ROOT")
-			told := gateNotices(t, pool, "LEGION-ROOT", "design-changes-requested")
+			assertSlots(t, pool, []record.Slot{{Issue: "LEGION-100", Index: 0, AdmittedAt: fixedNow}})
+			assertNoAwaitingEffects(t, pool, "LEGION-100")
+			told := gateNotices(t, pool, "LEGION-100", "design-changes-requested")
 			if len(told) == 0 || told[len(told)-1].Version != 4 || told[len(told)-1].Reason != "name the rollback path" {
 				t.Fatalf("design-changes-requested notices = %#v, want the last at version 4 with the reason", told)
 			}
@@ -130,16 +135,16 @@ func TestAReviewARegistrationCarriesAnswersTheRootItWaitsFor(t *testing.T) {
 	}{
 		{
 			name:     "a person approved before the registration read Dispatch",
-			fact:     intake.GateRegistered{Issue: "LEGION-ROOT", ArtifactID: "artifact-root", Version: 4, ApprovedVersion: 4},
-			live:     intake.DispatchArtifact{Key: "LEGION-ROOT", ArtifactID: "artifact-root", Kind: intake.DispatchArtifactApproved, Version: 4},
+			fact:     intake.GateRegistered{Issue: "LEGION-100", ArtifactID: "artifact-root", Version: 4, ApprovedVersion: 4},
+			live:     intake.DispatchArtifact{Key: "LEGION-100", ArtifactID: "artifact-root", Kind: intake.DispatchArtifactApproved, Version: 4},
 			resumeAt: phase.Planning,
 		},
 		{
 			name: "a person requested changes before the registration read Dispatch",
-			fact: intake.GateRegistered{Issue: "LEGION-ROOT", ArtifactID: "artifact-root", Version: 4,
-				ChangesRequestedVersion: 4, ChangesReason: "name the rollback path"},
-			live: intake.DispatchArtifact{Key: "LEGION-ROOT", ArtifactID: "artifact-root",
-				Kind: intake.DispatchArtifactChangesRequested, Version: 4, Reason: "name the rollback path"},
+			fact: intake.GateRegistered{Issue: "LEGION-100", ArtifactID: "artifact-root", Version: 4,
+				ChangesRequestedVersion: 4, ChangesReason: "name the rollback path", ChangesRequestedMark: record.EventMark{Seq: 11}},
+			live: intake.DispatchArtifact{Key: "LEGION-100", ArtifactID: "artifact-root",
+				Kind: intake.DispatchArtifactChangesRequested, Version: 4, Reason: "name the rollback path", Mark: record.EventMark{Seq: 11}},
 			resumeAt: phase.Admitted,
 		},
 	} {
@@ -151,7 +156,7 @@ func TestAReviewARegistrationCarriesAnswersTheRootItWaitsFor(t *testing.T) {
 			if _, err := intake.ApplyFact(context.Background(), pool, "api", "register-v4", tc.fact, admission.engine, admission); err != nil {
 				t.Fatalf("register gate v4: %v", err)
 			}
-			answered := issue(t, pool, "LEGION-ROOT")
+			answered := issue(t, pool, "LEGION-100")
 			if !answered.Answered() {
 				t.Fatalf("root after the registration carried the person's review = %#v, want it answered", answered)
 			}
@@ -163,130 +168,137 @@ func TestAReviewARegistrationCarriesAnswersTheRootItWaitsFor(t *testing.T) {
 				Key: "LEGION-NEXT", ResolvedRepo: "acme/widgets", Seq: 1, Type: "issue.closed", Status: "done",
 				Title: "LEGION-NEXT", Rank: "B", HandedOver: true,
 			}, admission.engine)
-			resumed := issue(t, pool, "LEGION-ROOT")
+			resumed := issue(t, pool, "LEGION-100")
 			if resumed.Phase != tc.resumeAt || resumed.Awaiting != nil {
 				t.Fatalf("root once a slot freed = %#v, want %s with no wait", resumed, tc.resumeAt)
 			}
-			assertSlots(t, pool, []record.Slot{{Issue: "LEGION-ROOT", Index: 0, AdmittedAt: fixedNow}})
-			if told := gateNotices(t, pool, "LEGION-ROOT", "design-changes-requested"); len(told) != 0 {
+			assertSlots(t, pool, []record.Slot{{Issue: "LEGION-100", Index: 0, AdmittedAt: fixedNow}})
+			if told := gateNotices(t, pool, "LEGION-100", "design-changes-requested"); len(told) != 0 {
 				t.Fatalf("design-changes-requested notices = %#v, want none: the resume task names the answer", told)
 			}
 		})
 	}
 }
 
-// handBackOnAClosedGate leaves LEGION-ROOT waiting on its gate at version 4, its slot taken by
-// LEGION-NEXT, after its own architect handed the approval request back to the person.
+// handBackOnAClosedGate leaves LEGION-100 waiting on its gate at version 4, its slot taken by
+// LEGION-NEXT, after its own architect handed the approval request back to the person at handBack.
 func handBackOnAClosedGate(t *testing.T, pool *pgxpool.Pool, admission *Admission) {
 	t.Helper()
-	handBackOnAClosedGateAt(t, pool, admission, record.EventMark{})
+	handBackOnAClosedGateAt(t, pool, admission, handBack)
 }
 
 // handBackOnAClosedGateAt is handBackOnAClosedGate with the hand-back's event at mark, where the
 // wait begins.
 func handBackOnAClosedGateAt(t *testing.T, pool *pgxpool.Pool, admission *Admission, mark record.EventMark) {
 	t.Helper()
-	seedSlotted(t, pool, "LEGION-ROOT", "A")
+	seedSlotted(t, pool, "LEGION-100", "A")
 	seedWaiting(t, pool, "LEGION-NEXT", "B")
-	seedArchitectClaim(t, pool, "LEGION-ROOT", architect.ID)
-	seedGate(t, pool, record.DesignGate{Issue: "LEGION-ROOT", ArtifactID: "artifact-root", LatestVersion: 4})
+	seedArchitectClaim(t, pool, "LEGION-100", architect.ID)
+	seedGate(t, pool, record.DesignGate{Issue: "LEGION-100", ArtifactID: "artifact-root", LatestVersion: 4})
 	applyFact(t, pool, admission, "hand-back", intake.DispatchAskReply{
-		Key: "LEGION-ROOT", Ask: "ask-approval", WaitingOn: "human", Actor: architect, Mark: mark})
-	if waiting := issue(t, pool, "LEGION-ROOT"); waiting.Phase != phase.AwaitingPerson || waiting.Answered() || waiting.Awaiting.Since != mark {
+		Key: "LEGION-100", Ask: "ask-approval", WaitingOn: "human", Actor: architect, Mark: mark})
+	if waiting := issue(t, pool, "LEGION-100"); waiting.Phase != phase.AwaitingPerson || waiting.Answered() || waiting.Awaiting.Since.Seq != mark.Seq {
 		t.Fatalf("root after its architect handed the request back = %#v, want it waiting unanswered from the hand-back", waiting)
 	}
 }
 
-// A hand-back whose event is delivered after register_gate's read already covered it starts no
-// second wait. The architect hands the approval request back at seq 10; register_gate reads the
-// issue at seq 10 and starts the wait on version 4 before that event arrives; the gate seed's read
-// answers the wait (a version 5, or a changes request after the hand-back), and admission resumes
-// the root in a freed slot. The seq-10 hand-back, delivered now, is the act the registration
-// covered: a wait started from it would wait on an act the person already answered, and Dispatch,
-// waiting on the agent, would never answer it. A late question at or below the fence starts none
-// either, while a new hand-back past it starts the next wait.
-func TestALateHandBackARegistrationCoveredStartsNoSecondWait(t *testing.T) {
+// A hand-back whose event is delivered after the daemon already gave the architect new work
+// declares nothing (round-18 same-model P3-1). The architect hands the approval request back at
+// seq 10; register_gate reads the issue at seq 10, declares the hand-back there and the root waits
+// on version 4 before that event arrives; the gate seed's read answers the wait (a version 5, or a
+// changes request after the hand-back), and admission resumes the root in a freed slot, a handout
+// that takes in everything the record holds. The seq-10 hand-back, delivered now, and a question
+// opened at seq 9, both at or below that handout, declare nothing, so the resumed architect is not
+// suspended over an act the person already answered; a new hand-back past it, once the architect
+// has taken its resume task, starts the next wait.
+func TestALateHandBackAtOrBelowTheHandoutDeclaresNothing(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
 		answer  intake.DispatchArtifact
 		version int
 	}{
 		{name: "a newer version answered the wait", version: 5,
-			answer: intake.DispatchArtifact{Key: "LEGION-ROOT", ArtifactID: "artifact-root", Kind: intake.DispatchArtifactVersion, Version: 5,
+			answer: intake.DispatchArtifact{Key: "LEGION-100", ArtifactID: "artifact-root", Kind: intake.DispatchArtifactVersion, Version: 5,
 				RequestWaitsOnAgent: true}},
 		{name: "a changes request answered the wait", version: 4,
-			answer: intake.DispatchArtifact{Key: "LEGION-ROOT", ArtifactID: "artifact-root", Kind: intake.DispatchArtifactChangesRequested,
+			answer: intake.DispatchArtifact{Key: "LEGION-100", ArtifactID: "artifact-root", Kind: intake.DispatchArtifactChangesRequested,
 				Version: 4, Reason: "name the rollback path", Mark: record.EventMark{Seq: 11, At: handedBackAt.Add(time.Minute)}}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pool := migratedPool(t)
 			admission := newAdmission(t, 1, nil)
-			seedSlotted(t, pool, "LEGION-ROOT", "A")
+			seedSlotted(t, pool, "LEGION-100", "A")
 			seedWaiting(t, pool, "LEGION-NEXT", "B")
-			seedArchitectClaim(t, pool, "LEGION-ROOT", architect.ID)
+			seedArchitectClaim(t, pool, "LEGION-100", architect.ID)
 			if _, err := intake.ApplyFact(context.Background(), pool, "api", "register-v4", intake.GateRegistered{
-				Issue: "LEGION-ROOT", ArtifactID: "artifact-root", Version: 4, DispatchVersion: 4, Since: handBack,
+				Issue: "LEGION-100", ArtifactID: "artifact-root", Version: 4, DispatchVersion: 4, RequestAsk: "ask-approval", Since: handBack,
 			}, admission.engine, admission); err != nil {
 				t.Fatalf("register gate v4: %v", err)
 			}
-			if waiting := issue(t, pool, "LEGION-ROOT"); waiting.Phase != phase.AwaitingPerson || waiting.WaitFenceSeq != handBack.Seq {
-				t.Fatalf("root after the registration = %#v, want awaiting_person with wait fence %d", waiting, handBack.Seq)
+			if waiting := issue(t, pool, "LEGION-100"); waiting.Phase != phase.AwaitingPerson || waiting.Awaiting.Since.Seq != handBack.Seq {
+				t.Fatalf("root after the registration = %#v, want awaiting_person from the read's sequence %d", waiting, handBack.Seq)
 			}
 			applyFact(t, pool, admission, "gate-seed", tc.answer)
 			apply(t, pool, admission, "next-finished", intake.DispatchIssue{
 				Key: "LEGION-NEXT", ResolvedRepo: "acme/widgets", Seq: 1, Type: "issue.closed", Status: "done",
 				Title: "LEGION-NEXT", Rank: "B", HandedOver: true,
 			}, admission.engine)
-			if resumed := issue(t, pool, "LEGION-ROOT"); resumed.Phase != phase.Admitted || resumed.Awaiting != nil || resumed.WaitFenceSeq != handBack.Seq {
-				t.Fatalf("root once a slot freed = %#v, want admitted with no wait and its wait fence kept", resumed)
+			resumed := issue(t, pool, "LEGION-100")
+			if resumed.Phase != phase.Admitted || resumed.Awaiting != nil || resumed.HandoutSeq < handBack.Seq || resumed.DeclaredSeq != 0 {
+				t.Fatalf("root once a slot freed = %#v, want admitted with no wait, handed out at or past %d with nothing declared", resumed, handBack.Seq)
 			}
 
 			applyFact(t, pool, admission, "late-hand-back", intake.DispatchAskReply{
-				Key: "LEGION-ROOT", Ask: "ask-approval", WaitingOn: "human", Actor: architect, Mark: handBack})
+				Key: "LEGION-100", Ask: "ask-approval", WaitingOn: "human", Actor: architect, Mark: handBack})
 			applyFact(t, pool, admission, "late-question", intake.DispatchAskOpened{
-				Key: "LEGION-ROOT", Ask: "ask-question", Kind: "question", AuthorSession: architect.ID, Mark: record.EventMark{Seq: 9}})
-			if late := issue(t, pool, "LEGION-ROOT"); late.Phase != phase.Admitted || late.Awaiting != nil {
-				t.Fatalf("root after a hand-back and a question the registration covered = %#v, want it still admitted with no wait", late)
+				Key: "LEGION-100", Ask: "ask-question", Kind: "question", AuthorSession: architect.ID, Mark: record.EventMark{Seq: 9}})
+			takeArchitectTask(t, pool, "LEGION-100")
+			applyFact(t, pool, admission, "tick", intake.ControllerTick{})
+			if late := issue(t, pool, "LEGION-100"); late.Phase != phase.Admitted || late.Awaiting != nil || late.DeclaredSeq != 0 {
+				t.Fatalf("root after a hand-back and a question at or below its handout = %#v, want it still admitted, nothing declared", late)
+			}
+			if suspends := countSuspends(architectOps(t, pool, "LEGION-100")); suspends != 1 {
+				t.Fatalf("architect suspends = %d, want the first wait's alone", suspends)
 			}
 
 			next := record.EventMark{Seq: 12, At: handedBackAt.Add(2 * time.Minute)}
 			applyFact(t, pool, admission, "new-hand-back", intake.DispatchAskReply{
-				Key: "LEGION-ROOT", Ask: "ask-approval", WaitingOn: "human", Actor: architect, Mark: next})
-			again := issue(t, pool, "LEGION-ROOT")
-			if again.Phase != phase.AwaitingPerson || again.Answered() || again.Awaiting.GateVersion != tc.version || again.Awaiting.Since != next ||
-				again.WaitFenceSeq != next.Seq {
-				t.Fatalf("root after a new hand-back past the fence = %#v, want waiting unanswered on version %d from seq %d", again, tc.version, next.Seq)
+				Key: "LEGION-100", Ask: "ask-approval", WaitingOn: "human", Actor: architect, Mark: next})
+			again := issue(t, pool, "LEGION-100")
+			if again.Phase != phase.AwaitingPerson || again.Answered() || again.Awaiting.GateVersion != tc.version || again.Awaiting.Since.Seq != next.Seq {
+				t.Fatalf("root after a new hand-back past the handout = %#v, want waiting unanswered on version %d from seq %d", again, tc.version, next.Seq)
 			}
 		})
 	}
 }
 
-// A registration that keeps the slot still raises the gate fence to its read. The architect hands
-// the request back at seq 9; at seq 10 a session's note moves the turn to the agent; register_gate
-// reads seq 10, sees the request waiting on the agent, and keeps the slot, starting no wait. The
-// seq-9 hand-back, delivered now, is an act that read covered: a wait started from it would wait on
-// version 4 while Dispatch waits on the agent, and nothing would answer it.
-func TestARegistrationThatKeepsTheSlotStillFencesTheHandBackItCovered(t *testing.T) {
+// A registration's read writes the approval request's mirror row as the read found it, at the
+// issue's sequence the read began at, so a hand-back at or below that sequence, delivered after it,
+// is older than the row and changes nothing (the round-21 gate fence, now the row's own sequence).
+// The architect hands the request back at seq 9; at seq 10 a session's note moves the turn to the
+// agent; register_gate reads seq 10, sees the request waiting on the agent, and keeps the slot. The
+// seq-9 hand-back, delivered now, declares nothing.
+func TestARegistrationReadOutranksAnOlderHandBackOfItsRequest(t *testing.T) {
 	pool := migratedPool(t)
 	admission := newAdmission(t, 1, nil)
-	seedSlotted(t, pool, "LEGION-ROOT", "A")
+	seedSlotted(t, pool, "LEGION-100", "A")
 	seedWaiting(t, pool, "LEGION-NEXT", "B")
-	seedArchitectClaim(t, pool, "LEGION-ROOT", architect.ID)
+	seedArchitectClaim(t, pool, "LEGION-100", architect.ID)
 	read := record.EventMark{Seq: 10, At: handedBackAt.Add(time.Minute)}
 	if _, err := intake.ApplyFact(context.Background(), pool, "api", "register-v4", intake.GateRegistered{
-		Issue: "LEGION-ROOT", ArtifactID: "artifact-root", Version: 4, DispatchVersion: 4, RequestWaitsOnAgent: true, Since: read,
+		Issue: "LEGION-100", ArtifactID: "artifact-root", Version: 4, DispatchVersion: 4, RequestAsk: "ask-approval", RequestWaitsOnAgent: true, Since: read,
 	}, admission.engine, admission); err != nil {
 		t.Fatalf("register gate v4: %v", err)
 	}
-	if kept := issue(t, pool, "LEGION-ROOT"); kept.Phase != phase.Admitted || kept.Awaiting != nil || kept.GateFenceSeq != read.Seq {
-		t.Fatalf("root after a registration that kept the slot = %#v, want admitted with no wait and gate fence %d", kept, read.Seq)
+	if kept := issue(t, pool, "LEGION-100"); kept.Phase != phase.Admitted || kept.Awaiting != nil || kept.DeclaredSeq != 0 {
+		t.Fatalf("root after a registration that kept the slot = %#v, want admitted with nothing declared", kept)
 	}
 	applyFact(t, pool, admission, "late-hand-back", intake.DispatchAskReply{
-		Key: "LEGION-ROOT", Ask: "ask-approval", WaitingOn: "human", Actor: architect, Mark: record.EventMark{Seq: 9, At: handedBackAt}})
-	if late := issue(t, pool, "LEGION-ROOT"); late.Phase != phase.Admitted || late.Awaiting != nil {
-		t.Fatalf("root after a hand-back the registration's read covered = %#v, want it still admitted with no wait", late)
+		Key: "LEGION-100", Ask: "ask-approval", WaitingOn: "human", Actor: architect, Mark: record.EventMark{Seq: 9, At: handedBackAt}})
+	if late := issue(t, pool, "LEGION-100"); late.Phase != phase.Admitted || late.Awaiting != nil || late.DeclaredSeq != 0 {
+		t.Fatalf("root after a hand-back the registration's read covered = %#v, want it still admitted with nothing declared", late)
 	}
-	assertSlots(t, pool, []record.Slot{{Issue: "LEGION-ROOT", Index: 0, AdmittedAt: fixedNow}})
+	assertSlots(t, pool, []record.Slot{{Issue: "LEGION-100", Index: 0, AdmittedAt: fixedNow}})
 }
 
 // A registration whose read is older than the gate's newest version changes no gate state, but it
@@ -295,16 +307,16 @@ func TestARegistrationThatKeepsTheSlotStillFencesTheHandBackItCovered(t *testing
 func TestAStaleRegistrationStillQueuesItsGateSeed(t *testing.T) {
 	pool := migratedPool(t)
 	admission := newAdmission(t, 1, nil)
-	seedSlotted(t, pool, "LEGION-ROOT", "A")
-	seedGate(t, pool, record.DesignGate{Issue: "LEGION-ROOT", ArtifactID: "artifact-root", LatestVersion: 5})
+	seedSlotted(t, pool, "LEGION-100", "A")
+	seedGate(t, pool, record.DesignGate{Issue: "LEGION-100", ArtifactID: "artifact-root", LatestVersion: 5})
 	if _, err := intake.ApplyFact(context.Background(), pool, "api", "register-v4", intake.GateRegistered{
-		Issue: "LEGION-ROOT", ArtifactID: "artifact-root", Version: 4, DispatchVersion: 4,
+		Issue: "LEGION-100", ArtifactID: "artifact-root", Version: 4, DispatchVersion: 4,
 	}, admission.engine, admission); err != nil {
 		t.Fatalf("register gate v4: %v", err)
 	}
 	var seeds []record.GateSeed
 	for _, effect := range effects(t, pool) {
-		if seed, ok := effect.payload.(record.GateSeed); ok && effect.issue == "LEGION-ROOT" {
+		if seed, ok := effect.payload.(record.GateSeed); ok && effect.issue == "LEGION-100" {
 			seeds = append(seeds, seed)
 		}
 	}
@@ -314,7 +326,7 @@ func TestAStaleRegistrationStillQueuesItsGateSeed(t *testing.T) {
 	var gate *record.DesignGate
 	inTx(t, pool, func(tx pgx.Tx) {
 		var err error
-		if gate, err = record.NewStore().Gate(context.Background(), tx, "LEGION-ROOT"); err != nil {
+		if gate, err = record.NewStore().Gate(context.Background(), tx, "LEGION-100"); err != nil {
 			t.Fatalf("read gate: %v", err)
 		}
 	})
@@ -332,14 +344,14 @@ func TestARegistrationWhoseRequestWaitsOnTheArchitectAnswersNothing(t *testing.T
 	admission := newAdmission(t, 1, nil)
 	handBackOnAClosedGate(t, pool, admission)
 	applyFact(t, pool, admission, "session-note", intake.DispatchAskReply{
-		Key: "LEGION-ROOT", Ask: "ask-approval", WaitingOn: "agent", Actor: outsider})
+		Key: "LEGION-100", Ask: "ask-approval", WaitingOn: "agent", Actor: outsider})
 
 	if _, err := intake.ApplyFact(context.Background(), pool, "api", "register-v4", intake.GateRegistered{
-		Issue: "LEGION-ROOT", ArtifactID: "artifact-root", Version: 4, RequestWaitsOnAgent: true,
+		Issue: "LEGION-100", ArtifactID: "artifact-root", Version: 4, RequestWaitsOnAgent: true,
 	}, admission.engine, admission); err != nil {
 		t.Fatalf("register gate v4: %v", err)
 	}
-	got := issue(t, pool, "LEGION-ROOT")
+	got := issue(t, pool, "LEGION-100")
 	if got.Phase != phase.AwaitingPerson || got.Answered() {
 		t.Fatalf("root after a registration no person's act reached = %#v, want it still waiting unanswered", got)
 	}
@@ -358,9 +370,9 @@ func TestARegistrationOfANewerVersionAnswersTheWaitWhenItsEventIsLost(t *testing
 		answered bool
 	}{
 		{name: "Dispatch shows version 5", answered: true,
-			fact: intake.GateRegistered{Issue: "LEGION-ROOT", ArtifactID: "artifact-root", Version: 5, RequestWaitsOnAgent: true, DispatchVersion: 5}},
+			fact: intake.GateRegistered{Issue: "LEGION-100", ArtifactID: "artifact-root", Version: 5, RequestWaitsOnAgent: true, DispatchVersion: 5}},
 		{name: "only the caller names version 5",
-			fact: intake.GateRegistered{Issue: "LEGION-ROOT", ArtifactID: "artifact-root", Version: 5, DispatchVersion: 4}},
+			fact: intake.GateRegistered{Issue: "LEGION-100", ArtifactID: "artifact-root", Version: 5, DispatchVersion: 4}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pool := migratedPool(t)
@@ -369,7 +381,7 @@ func TestARegistrationOfANewerVersionAnswersTheWaitWhenItsEventIsLost(t *testing
 			if _, err := intake.ApplyFact(context.Background(), pool, "api", "register-v5", tc.fact, admission.engine, admission); err != nil {
 				t.Fatalf("register gate v5: %v", err)
 			}
-			got := issue(t, pool, "LEGION-ROOT")
+			got := issue(t, pool, "LEGION-100")
 			if got.Answered() != tc.answered || tc.answered && got.Awaiting.GateVersion != 5 {
 				t.Fatalf("root after the registration = %#v, want answered %t (at version 5 when answered)", got, tc.answered)
 			}
@@ -384,9 +396,9 @@ func TestARegistrationOfANewerVersionAnswersTheWaitWhenItsEventIsLost(t *testing
 // it. A version written after the hand-back answers it, and so does a registration whose read
 // shows a newer version moved the request to the agent.
 func TestTheArchitectsOwnEarlierVersionNeverAnswersItsWait(t *testing.T) {
-	late := intake.DispatchArtifact{Key: "LEGION-ROOT", ArtifactID: "artifact-root", Kind: intake.DispatchArtifactVersion, Version: 5,
+	late := intake.DispatchArtifact{Key: "LEGION-100", ArtifactID: "artifact-root", Kind: intake.DispatchArtifactVersion, Version: 5,
 		Mark: record.EventMark{Seq: 9, At: handedBackAt.Add(-time.Minute)}}
-	registered := intake.GateRegistered{Issue: "LEGION-ROOT", ArtifactID: "artifact-root", Version: 5, DispatchVersion: 5, Since: record.EventMark{Seq: 11}}
+	registered := intake.GateRegistered{Issue: "LEGION-100", ArtifactID: "artifact-root", Version: 5, DispatchVersion: 5, Since: record.EventMark{Seq: 11}}
 	for _, tc := range []struct {
 		name  string
 		first intake.Fact
@@ -401,13 +413,13 @@ func TestTheArchitectsOwnEarlierVersionNeverAnswersItsWait(t *testing.T) {
 			if _, err := intake.ApplyFact(context.Background(), pool, "dispatch", "first", tc.first, admission.engine, admission); err != nil {
 				t.Fatalf("apply %s: %v", tc.name, err)
 			}
-			got := issue(t, pool, "LEGION-ROOT")
+			got := issue(t, pool, "LEGION-100")
 			if !got.AwaitingPerson() || got.Answered() || got.Awaiting.GateVersion != 5 {
 				t.Fatalf("root after %s = %#v, want it waiting unanswered on version 5", tc.name, got)
 			}
-			applyFact(t, pool, admission, "version-after", intake.DispatchArtifact{Key: "LEGION-ROOT", ArtifactID: "artifact-root",
+			applyFact(t, pool, admission, "version-after", intake.DispatchArtifact{Key: "LEGION-100", ArtifactID: "artifact-root",
 				Kind: intake.DispatchArtifactVersion, Version: 6, Mark: record.EventMark{Seq: 12, At: handedBackAt.Add(time.Minute)}})
-			if got := issue(t, pool, "LEGION-ROOT"); !got.Answered() || got.Awaiting.GateVersion != 6 {
+			if got := issue(t, pool, "LEGION-100"); !got.Answered() || got.Awaiting.GateVersion != 6 {
 				t.Fatalf("root after a version written after the hand-back = %#v, want it answered on version 6", got)
 			}
 		})
@@ -422,9 +434,9 @@ func TestAnOlderReviewAppliedLateLeavesTheNewerWaitUnanswered(t *testing.T) {
 			pool := migratedPool(t)
 			admission := newAdmission(t, 1, nil)
 			handBackOnAClosedGate(t, pool, admission)
-			applyFact(t, pool, admission, "late-v3-review", intake.DispatchArtifact{Key: "LEGION-ROOT", ArtifactID: "artifact-root",
+			applyFact(t, pool, admission, "late-v3-review", intake.DispatchArtifact{Key: "LEGION-100", ArtifactID: "artifact-root",
 				Kind: kind, Version: 3, Reason: "name the rollback path"})
-			if got := issue(t, pool, "LEGION-ROOT"); got.Phase != phase.AwaitingPerson || got.Answered() {
+			if got := issue(t, pool, "LEGION-100"); got.Phase != phase.AwaitingPerson || got.Answered() {
 				t.Fatalf("root after a late v3 review over a wait on v4 = %#v, want it still waiting unanswered", got)
 			}
 		})
@@ -439,10 +451,10 @@ func TestAnOlderReviewAppliedLateLeavesTheNewerWaitUnanswered(t *testing.T) {
 // new act of a person and is told, with another reason or with the same one.
 func TestAChangesRequestIsToldOnceWhicheverReadCarriesIt(t *testing.T) {
 	reviewed := fixedNow.Add(-time.Hour)
-	changes := intake.DispatchArtifact{Key: "LEGION-ROOT", ArtifactID: "artifact-root",
+	changes := intake.DispatchArtifact{Key: "LEGION-100", ArtifactID: "artifact-root",
 		Kind: intake.DispatchArtifactChangesRequested, Version: 4, Reason: "name the rollback path", Mark: record.EventMark{Seq: 9, At: reviewed}}
 	seeded := changes
-	registration := intake.GateRegistered{Issue: "LEGION-ROOT", ArtifactID: "artifact-root", Version: 4,
+	registration := intake.GateRegistered{Issue: "LEGION-100", ArtifactID: "artifact-root", Version: 4,
 		ChangesRequestedVersion: 4, ChangesReason: "name the rollback path", ChangesRequestedMark: changes.Mark}
 	second := changes
 	second.Reason, second.Mark = "and name who runs the restore", record.EventMark{Seq: 12, At: reviewed.Add(time.Minute)}
@@ -464,36 +476,36 @@ func TestAChangesRequestIsToldOnceWhicheverReadCarriesIt(t *testing.T) {
 		// The live event reached no gate, and a child mid-phase keeps the root at admitted, so no
 		// resume task names the request: the seed's read is the only thing that can tell it.
 		{name: "only the seed carries it, on a root a child keeps in its slot", busy: true,
-			order:   []intake.Fact{intake.GateRegistered{Issue: "LEGION-ROOT", ArtifactID: "artifact-root", Version: 4}, seeded},
+			order:   []intake.Fact{intake.GateRegistered{Issue: "LEGION-100", ArtifactID: "artifact-root", Version: 4}, seeded},
 			reasons: []string{"name the rollback path"}},
 		// A registration whose read predates the review the live event told rebuilds the gate from
 		// Dispatch; it keeps the told record, so the seed's read of that review tells nothing.
 		{name: "the live event, then a registration whose read predates it, then the seed", busy: true,
-			order:   []intake.Fact{changes, intake.GateRegistered{Issue: "LEGION-ROOT", ArtifactID: "artifact-root", Version: 4}, seeded},
+			order:   []intake.Fact{changes, intake.GateRegistered{Issue: "LEGION-100", ArtifactID: "artifact-root", Version: 4}, seeded},
 			reasons: []string{"name the rollback path"}},
 		// A registration of another document starts with no told record, so that document's own
 		// review, even with the same reason, is told.
 		{name: "another document registered after the first one's review was told", busy: true,
 			order: []intake.Fact{changes,
-				intake.GateRegistered{Issue: "LEGION-ROOT", ArtifactID: "artifact-other", Version: 4},
-				intake.DispatchArtifact{Key: "LEGION-ROOT", ArtifactID: "artifact-other", Kind: intake.DispatchArtifactChangesRequested,
+				intake.GateRegistered{Issue: "LEGION-100", ArtifactID: "artifact-other", Version: 4},
+				intake.DispatchArtifact{Key: "LEGION-100", ArtifactID: "artifact-other", Kind: intake.DispatchArtifactChangesRequested,
 					Version: 4, Reason: "name the rollback path", Mark: record.EventMark{Seq: 14, At: reviewed.Add(2 * time.Minute)}}},
 			reasons: []string{"name the rollback path", "name the rollback path"}},
 		// A registration whose read saw v4 commits after a live v5 changes request was told: it
 		// rolls nothing back, so the seed's read of the v5 review tells nothing again.
 		{name: "a registration of an older version after a newer review was told", busy: true,
 			order: []intake.Fact{
-				intake.DispatchArtifact{Key: "LEGION-ROOT", ArtifactID: "artifact-root", Kind: intake.DispatchArtifactChangesRequested, Version: 5, Reason: "name the rollback path", Mark: changes.Mark},
-				intake.GateRegistered{Issue: "LEGION-ROOT", ArtifactID: "artifact-root", Version: 4, DispatchVersion: 4},
-				intake.DispatchArtifact{Key: "LEGION-ROOT", ArtifactID: "artifact-root", Kind: intake.DispatchArtifactChangesRequested, Version: 5, Reason: "name the rollback path", Mark: changes.Mark}},
+				intake.DispatchArtifact{Key: "LEGION-100", ArtifactID: "artifact-root", Kind: intake.DispatchArtifactChangesRequested, Version: 5, Reason: "name the rollback path", Mark: changes.Mark},
+				intake.GateRegistered{Issue: "LEGION-100", ArtifactID: "artifact-root", Version: 4, DispatchVersion: 4},
+				intake.DispatchArtifact{Key: "LEGION-100", ArtifactID: "artifact-root", Kind: intake.DispatchArtifactChangesRequested, Version: 5, Reason: "name the rollback path", Mark: changes.Mark}},
 			reasons: []string{"name the rollback path"}},
 		// The caller registers v4 while Dispatch already shows v5, whose changes request the live
 		// event told first: the gate is registered at v5, keeping the told record.
 		{name: "a caller's older version with Dispatch at the newer one", busy: true,
 			order: []intake.Fact{
-				intake.DispatchArtifact{Key: "LEGION-ROOT", ArtifactID: "artifact-root", Kind: intake.DispatchArtifactChangesRequested, Version: 5, Reason: "name the rollback path", Mark: changes.Mark},
-				intake.GateRegistered{Issue: "LEGION-ROOT", ArtifactID: "artifact-root", Version: 4, DispatchVersion: 5},
-				intake.DispatchArtifact{Key: "LEGION-ROOT", ArtifactID: "artifact-root", Kind: intake.DispatchArtifactChangesRequested, Version: 5, Reason: "name the rollback path", Mark: changes.Mark}},
+				intake.DispatchArtifact{Key: "LEGION-100", ArtifactID: "artifact-root", Kind: intake.DispatchArtifactChangesRequested, Version: 5, Reason: "name the rollback path", Mark: changes.Mark},
+				intake.GateRegistered{Issue: "LEGION-100", ArtifactID: "artifact-root", Version: 4, DispatchVersion: 5},
+				intake.DispatchArtifact{Key: "LEGION-100", ArtifactID: "artifact-root", Kind: intake.DispatchArtifactChangesRequested, Version: 5, Reason: "name the rollback path", Mark: changes.Mark}},
 			reasons: []string{"name the rollback path"}},
 		{name: "a second review at the same version", order: []intake.Fact{changes, second},
 			reasons: []string{"name the rollback path", "and name who runs the restore"}},
@@ -512,12 +524,12 @@ func TestAChangesRequestIsToldOnceWhicheverReadCarriesIt(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			pool := migratedPool(t)
 			admission := newAdmission(t, 1, nil)
-			seedSlotted(t, pool, "LEGION-ROOT", "A")
-			seedGate(t, pool, record.DesignGate{Issue: "LEGION-ROOT", ArtifactID: "artifact-root", LatestVersion: 4})
+			seedSlotted(t, pool, "LEGION-100", "A")
+			seedGate(t, pool, record.DesignGate{Issue: "LEGION-100", ArtifactID: "artifact-root", LatestVersion: 4})
 			if tc.busy {
-				parent := "LEGION-ROOT"
+				parent := "LEGION-100"
 				putIssue(t, pool, record.Issue{
-					Key: "LEGION-CHILD", Tree: "LEGION-ROOT", Parent: &parent, Project: testProject, Title: "child", Phase: phase.Implementing,
+					Key: "LEGION-CHILD", Tree: "LEGION-100", Parent: &parent, Project: testProject, Title: "child", Phase: phase.Implementing,
 					Generation: 1, Status: "in_progress", Rank: "B", HandedOver: true, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets",
 				})
 			}
@@ -530,10 +542,10 @@ func TestAChangesRequestIsToldOnceWhicheverReadCarriesIt(t *testing.T) {
 					t.Fatalf("apply %#v: %v", fact, err)
 				}
 			}
-			if root := issue(t, pool, "LEGION-ROOT"); root.Phase != phase.Admitted {
+			if root := issue(t, pool, "LEGION-100"); root.Phase != phase.Admitted {
 				t.Fatalf("root after the reads = %#v, want it still at admitted, told by a notice rather than a resume", root)
 			}
-			told := gateNotices(t, pool, "LEGION-ROOT", "design-changes-requested")
+			told := gateNotices(t, pool, "LEGION-100", "design-changes-requested")
 			var reasons []string
 			for _, notice := range told {
 				reasons = append(reasons, notice.Reason)
@@ -549,7 +561,7 @@ func TestAChangesRequestIsToldOnceWhicheverReadCarriesIt(t *testing.T) {
 // request reached the root, without telling the architect a second time; on a gate a racing
 // registration opened, it closes the gate again and tells the architect.
 func TestASeededChangesRequestAnswersAWaitAndClosesAGateARaceOpened(t *testing.T) {
-	seeded := intake.DispatchArtifact{Key: "LEGION-ROOT", ArtifactID: "artifact-root", Kind: intake.DispatchArtifactChangesRequested,
+	seeded := intake.DispatchArtifact{Key: "LEGION-100", ArtifactID: "artifact-root", Kind: intake.DispatchArtifactChangesRequested,
 		Version: 4, Reason: "name the rollback path"}
 
 	t.Run("a root waiting on the gate", func(t *testing.T) {
@@ -557,10 +569,10 @@ func TestASeededChangesRequestAnswersAWaitAndClosesAGateARaceOpened(t *testing.T
 		admission := newAdmission(t, 1, nil)
 		awaitingRoot(t, pool, record.Awaiting{GateVersion: 4})
 		applyFact(t, pool, admission, "seed-changes-v4", seeded)
-		if got := issue(t, pool, "LEGION-ROOT"); !got.Answered() {
+		if got := issue(t, pool, "LEGION-100"); !got.Answered() {
 			t.Fatalf("root after the seed read a changes request = %#v, want answered", got)
 		}
-		if told := gateNotices(t, pool, "LEGION-ROOT", "design-changes-requested"); len(told) != 0 {
+		if told := gateNotices(t, pool, "LEGION-100", "design-changes-requested"); len(told) != 0 {
 			t.Fatalf("design-changes-requested notices = %#v, want none: the resume task tells it", told)
 		}
 	})
@@ -569,20 +581,20 @@ func TestASeededChangesRequestAnswersAWaitAndClosesAGateARaceOpened(t *testing.T
 		pool := migratedPool(t)
 		admission := newAdmission(t, 1, nil)
 		approved := 4
-		seedSlotted(t, pool, "LEGION-ROOT", "A")
-		seedGate(t, pool, record.DesignGate{Issue: "LEGION-ROOT", ArtifactID: "artifact-root", LatestVersion: 4, ApprovedVersion: &approved})
+		seedSlotted(t, pool, "LEGION-100", "A")
+		seedGate(t, pool, record.DesignGate{Issue: "LEGION-100", ArtifactID: "artifact-root", LatestVersion: 4, ApprovedVersion: &approved})
 		applyFact(t, pool, admission, "seed-changes-v4", seeded)
 		var gate *record.DesignGate
 		inTx(t, pool, func(tx pgx.Tx) {
 			var err error
-			if gate, err = record.NewStore().Gate(context.Background(), tx, "LEGION-ROOT"); err != nil {
+			if gate, err = record.NewStore().Gate(context.Background(), tx, "LEGION-100"); err != nil {
 				t.Fatalf("read gate: %v", err)
 			}
 		})
 		if gate == nil || gate.ApprovedVersion != nil || gate.LatestVersion != 4 {
 			t.Fatalf("gate after the seed read a changes request = %#v, want closed at version 4", gate)
 		}
-		if told := gateNotices(t, pool, "LEGION-ROOT", "design-changes-requested"); len(told) != 1 || told[0].Reason != "name the rollback path" {
+		if told := gateNotices(t, pool, "LEGION-100", "design-changes-requested"); len(told) != 1 || told[0].Reason != "name the rollback path" {
 			t.Fatalf("design-changes-requested notices = %#v, want one with the reason", told)
 		}
 	})
@@ -618,9 +630,9 @@ func TestAChangesRequestGivenBeforeTheWaitBeganAnswersNothingOnTheLivePath(t *te
 			pool := migratedPool(t)
 			admission := newAdmission(t, 1, nil)
 			handBackOnAClosedGateAt(t, pool, admission, handBack)
-			applyFact(t, pool, admission, "changes-v4", intake.DispatchArtifact{Key: "LEGION-ROOT", ArtifactID: "artifact-root",
+			applyFact(t, pool, admission, "changes-v4", intake.DispatchArtifact{Key: "LEGION-100", ArtifactID: "artifact-root",
 				Kind: intake.DispatchArtifactChangesRequested, Version: 4, Reason: "name the rollback path", Mark: tc.mark})
-			if got := issue(t, pool, "LEGION-ROOT"); got.Phase != phase.AwaitingPerson || got.Answered() != tc.answered {
+			if got := issue(t, pool, "LEGION-100"); got.Phase != phase.AwaitingPerson || got.Answered() != tc.answered {
 				t.Fatalf("root after %s = %#v, want awaiting_person answered %t", tc.name, got, tc.answered)
 			}
 		})
@@ -643,12 +655,12 @@ func TestAChangesRequestARegistrationCarriesAnswersOnlyAWaitItFollows(t *testing
 			admission := newAdmission(t, 1, nil)
 			handBackOnAClosedGateAt(t, pool, admission, handBack)
 			if _, err := intake.ApplyFact(context.Background(), pool, "api", "register-v4", intake.GateRegistered{
-				Issue: "LEGION-ROOT", ArtifactID: "artifact-root", Version: 4, DispatchVersion: 4,
+				Issue: "LEGION-100", ArtifactID: "artifact-root", Version: 4, DispatchVersion: 4,
 				ChangesRequestedVersion: 4, ChangesReason: "name the rollback path", ChangesRequestedMark: tc.mark,
 			}, admission.engine, admission); err != nil {
 				t.Fatalf("register gate v4: %v", err)
 			}
-			if got := issue(t, pool, "LEGION-ROOT"); got.Phase != phase.AwaitingPerson || got.Answered() != tc.answered {
+			if got := issue(t, pool, "LEGION-100"); got.Phase != phase.AwaitingPerson || got.Answered() != tc.answered {
 				t.Fatalf("root after %s = %#v, want awaiting_person answered %t", tc.name, got, tc.answered)
 			}
 		})
@@ -662,26 +674,27 @@ func TestAChangesRequestARegistrationCarriesAnswersOnlyAWaitItFollows(t *testing
 // it, answers the wait; begun at the daemon's clock when the fact applies, it would have answered
 // nothing, and the root would wait on with nobody to wake it.
 func TestAChangesRequestBetweenARegistrationsReadAndItsApplyAnswersTheWait(t *testing.T) {
-	registered := intake.GateRegistered{Issue: "LEGION-ROOT", ArtifactID: "artifact-root", Version: 4, DispatchVersion: 4,
-		Since: record.EventMark{Seq: 10}}
+	registered := intake.GateRegistered{Issue: "LEGION-100", ArtifactID: "artifact-root", Version: 4, DispatchVersion: 4,
+		RequestAsk: "ask-approval", Since: record.EventMark{Seq: 10}}
 	// Dispatch's time of the review is before the daemon's clock reads the registration.
-	review := intake.DispatchArtifact{Key: "LEGION-ROOT", ArtifactID: "artifact-root", Kind: intake.DispatchArtifactChangesRequested,
+	review := intake.DispatchArtifact{Key: "LEGION-100", ArtifactID: "artifact-root", Kind: intake.DispatchArtifactChangesRequested,
 		Version: 4, Reason: "name the rollback path", Mark: record.EventMark{Seq: 11, At: fixedNow.Add(-time.Second)}}
 	for _, source := range []string{"the live event", "the gate seed"} {
 		t.Run(source, func(t *testing.T) {
 			pool := migratedPool(t)
 			admission := newAdmission(t, 1, nil)
-			seedSlotted(t, pool, "LEGION-ROOT", "A")
+			seedSlotted(t, pool, "LEGION-100", "A")
 			seedWaiting(t, pool, "LEGION-NEXT", "B")
+			seedArchitectClaim(t, pool, "LEGION-100", architect.ID)
 			if _, err := intake.ApplyFact(context.Background(), pool, "api", "register-v4", registered, admission.engine, admission); err != nil {
 				t.Fatalf("register gate v4: %v", err)
 			}
-			waiting := issue(t, pool, "LEGION-ROOT")
-			if waiting.Phase != phase.AwaitingPerson || waiting.Awaiting.Since != registered.Since || waiting.Answered() {
+			waiting := issue(t, pool, "LEGION-100")
+			if waiting.Phase != phase.AwaitingPerson || waiting.Awaiting.Since.Seq != registered.Since.Seq || waiting.Answered() {
 				t.Fatalf("root after the registration = %#v, want it waiting unanswered from the read's sequence", waiting)
 			}
 			applyFact(t, pool, admission, source, review)
-			if got := issue(t, pool, "LEGION-ROOT"); !got.Answered() {
+			if got := issue(t, pool, "LEGION-100"); !got.Answered() {
 				t.Fatalf("root after %s of a review the registration's read missed = %#v, want it answered", source, got)
 			}
 		})
@@ -695,7 +708,7 @@ func TestAChangesRequestBetweenARegistrationsReadAndItsApplyAnswersTheWait(t *te
 // more, and the root resumes once. An approval that opens nothing (the gate already open, or an
 // older version approved) answers nothing.
 func TestAnApprovalThatOpensTheGateAnswersAWaitWhateverItsTime(t *testing.T) {
-	approval := intake.DispatchArtifact{Key: "LEGION-ROOT", ArtifactID: "artifact-root", Kind: intake.DispatchArtifactApproved,
+	approval := intake.DispatchArtifact{Key: "LEGION-100", ArtifactID: "artifact-root", Kind: intake.DispatchArtifactApproved,
 		Version: 4, Mark: record.EventMark{Seq: 8, At: handedBackAt.Add(-time.Minute)}}
 
 	t.Run("an approval before the wait, applied by the seed and the catch-up", func(t *testing.T) {
@@ -703,24 +716,24 @@ func TestAnApprovalThatOpensTheGateAnswersAWaitWhateverItsTime(t *testing.T) {
 		admission := newAdmission(t, 1, nil)
 		handBackOnAClosedGateAt(t, pool, admission, handBack)
 		applyFact(t, pool, admission, "seed-approved-v4", approval)
-		answered := issue(t, pool, "LEGION-ROOT")
+		answered := issue(t, pool, "LEGION-100")
 		if !answered.Answered() {
 			t.Fatalf("root after the seed applied an approval given before its wait = %#v, want it answered", answered)
 		}
 		applyFact(t, pool, admission, "catch-up-approved-v4", approval)
-		if again := issue(t, pool, "LEGION-ROOT"); !again.Answered() || !again.Awaiting.AnsweredAt.Equal(*answered.Awaiting.AnsweredAt) {
+		if again := issue(t, pool, "LEGION-100"); !again.Answered() || !again.Awaiting.AnsweredAt.Equal(*answered.Awaiting.AnsweredAt) {
 			t.Fatalf("root after the approval applied again = %#v, want its first answer kept", again)
 		}
 		apply(t, pool, admission, "next-finished", intake.DispatchIssue{
 			Key: "LEGION-NEXT", ResolvedRepo: "acme/widgets", Seq: 1, Type: "issue.closed", Status: "done",
 			Title: "LEGION-NEXT", Rank: "B", HandedOver: true,
 		}, admission.engine)
-		if resumed := issue(t, pool, "LEGION-ROOT"); resumed.Phase != phase.Planning || resumed.Awaiting != nil {
+		if resumed := issue(t, pool, "LEGION-100"); resumed.Phase != phase.Planning || resumed.Awaiting != nil {
 			t.Fatalf("root once a slot freed = %#v, want planning with no wait", resumed)
 		}
 		starts := 0
 		for _, effect := range effects(t, pool) {
-			if start, ok := effect.payload.(record.SuperviseRequest); ok && effect.issue == "LEGION-ROOT" && start.Op == "start" && start.Role == "architect" {
+			if start, ok := effect.payload.(record.SuperviseRequest); ok && effect.issue == "LEGION-100" && start.Op == "start" && start.Role == "architect" {
 				starts++
 			}
 		}
@@ -734,10 +747,10 @@ func TestAnApprovalThatOpensTheGateAnswersAWaitWhateverItsTime(t *testing.T) {
 		gate record.DesignGate
 		fact intake.DispatchArtifact
 	}{
-		{name: "an approval of a gate already open", gate: record.DesignGate{Issue: "LEGION-ROOT", ArtifactID: "artifact-root", LatestVersion: 4, ApprovedVersion: new(4)},
+		{name: "an approval of a gate already open", gate: record.DesignGate{Issue: "LEGION-100", ArtifactID: "artifact-root", LatestVersion: 4, ApprovedVersion: new(4)},
 			fact: approval},
-		{name: "an approval of an older version", gate: record.DesignGate{Issue: "LEGION-ROOT", ArtifactID: "artifact-root", LatestVersion: 4},
-			fact: intake.DispatchArtifact{Key: "LEGION-ROOT", ArtifactID: "artifact-root", Kind: intake.DispatchArtifactApproved, Version: 3, Mark: record.EventMark{Seq: 11}}},
+		{name: "an approval of an older version", gate: record.DesignGate{Issue: "LEGION-100", ArtifactID: "artifact-root", LatestVersion: 4},
+			fact: intake.DispatchArtifact{Key: "LEGION-100", ArtifactID: "artifact-root", Kind: intake.DispatchArtifactApproved, Version: 3, Mark: record.EventMark{Seq: 11}}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pool := migratedPool(t)
@@ -745,7 +758,7 @@ func TestAnApprovalThatOpensTheGateAnswersAWaitWhateverItsTime(t *testing.T) {
 			awaitingRoot(t, pool, record.Awaiting{GateVersion: 4, Since: handBack})
 			seedGate(t, pool, tc.gate)
 			applyFact(t, pool, admission, "approval", tc.fact)
-			if got := issue(t, pool, "LEGION-ROOT"); got.Phase != phase.AwaitingPerson || got.Answered() {
+			if got := issue(t, pool, "LEGION-100"); got.Phase != phase.AwaitingPerson || got.Answered() {
 				t.Fatalf("root after %s = %#v, want it still waiting unanswered", tc.name, got)
 			}
 		})
@@ -758,12 +771,12 @@ func TestAnApprovalThatOpensTheGateAnswersAWaitWhateverItsTime(t *testing.T) {
 func TestAnApprovalAtALaterVersionTellsTheArchitectThatVersion(t *testing.T) {
 	pool := migratedPool(t)
 	admission := newAdmission(t, 1, nil)
-	seedSlotted(t, pool, "LEGION-ROOT", "A")
+	seedSlotted(t, pool, "LEGION-100", "A")
 	if _, err := intake.ApplyFact(context.Background(), pool, "api", "register-v3-approved-v4",
-		intake.GateRegistered{Issue: "LEGION-ROOT", ArtifactID: "artifact-root", Version: 3, ApprovedVersion: 4}, admission.engine, admission); err != nil {
+		intake.GateRegistered{Issue: "LEGION-100", ArtifactID: "artifact-root", Version: 3, ApprovedVersion: 4}, admission.engine, admission); err != nil {
 		t.Fatalf("register gate: %v", err)
 	}
-	if told := gateNotices(t, pool, "LEGION-ROOT", "design-approved"); len(told) != 1 || told[0].Version != 4 {
+	if told := gateNotices(t, pool, "LEGION-100", "design-approved"); len(told) != 1 || told[0].Version != 4 {
 		t.Fatalf("design-approved notices = %#v, want one at version 4", told)
 	}
 }
@@ -778,20 +791,20 @@ func TestAPersonsReplyOnTheRootWakesARootWaitingOnItsGate(t *testing.T) {
 		fact  intake.Fact
 		wakes bool
 	}{
-		{name: "a person's reply on the approval request", fact: intake.DispatchAskReply{Key: "LEGION-ROOT", Ask: "ask-approval", WaitingOn: "agent", Actor: alice}, wakes: true},
-		{name: "a person's answer to a question", fact: intake.DispatchAskClosed{Key: "LEGION-ROOT", Ask: "ask-question", Kind: "question", State: "answered", Actor: alice}, wakes: true},
-		{name: "a session's progress note", fact: intake.DispatchAskReply{Key: "LEGION-ROOT", Ask: "ask-approval", WaitingOn: "agent", Actor: outsider}},
-		{name: "the architect's own reply", fact: intake.DispatchAskReply{Key: "LEGION-ROOT", Ask: "ask-approval", WaitingOn: "human", Actor: architect}},
-		{name: "a person's hand-back", fact: intake.DispatchAskReply{Key: "LEGION-ROOT", Ask: "ask-approval", WaitingOn: "human", Actor: alice}},
-		{name: "a person's review", fact: intake.DispatchAskClosed{Key: "LEGION-ROOT", Ask: "ask-approval", Kind: "approval", State: "answered", Actor: alice}},
-		{name: "a session's resolution of a question", fact: intake.DispatchAskClosed{Key: "LEGION-ROOT", Ask: "ask-question", Kind: "question", State: "resolved", Actor: architect}},
+		{name: "a person's reply on the approval request", fact: intake.DispatchAskReply{Key: "LEGION-100", Ask: "ask-approval", WaitingOn: "agent", Actor: alice}, wakes: true},
+		{name: "a person's answer to a question", fact: intake.DispatchAskClosed{Key: "LEGION-100", Ask: "ask-question", Kind: "question", State: "answered", Actor: alice}, wakes: true},
+		{name: "a session's progress note", fact: intake.DispatchAskReply{Key: "LEGION-100", Ask: "ask-approval", WaitingOn: "agent", Actor: outsider}},
+		{name: "the architect's own reply", fact: intake.DispatchAskReply{Key: "LEGION-100", Ask: "ask-approval", WaitingOn: "human", Actor: architect}},
+		{name: "a person's hand-back", fact: intake.DispatchAskReply{Key: "LEGION-100", Ask: "ask-approval", WaitingOn: "human", Actor: alice}},
+		{name: "a person's review", fact: intake.DispatchAskClosed{Key: "LEGION-100", Ask: "ask-approval", Kind: "approval", State: "answered", Actor: alice}},
+		{name: "a session's resolution of a question", fact: intake.DispatchAskClosed{Key: "LEGION-100", Ask: "ask-question", Kind: "question", State: "resolved", Actor: architect}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pool := migratedPool(t)
 			admission := newAdmission(t, 1, nil)
 			awaitingRoot(t, pool, record.Awaiting{GateVersion: 3})
 			applyFact(t, pool, admission, "act", tc.fact)
-			if got := issue(t, pool, "LEGION-ROOT"); got.Answered() != tc.wakes {
+			if got := issue(t, pool, "LEGION-100"); got.Answered() != tc.wakes {
 				t.Fatalf("root after %s = %#v, want answered %t", tc.name, got, tc.wakes)
 			}
 		})
@@ -809,23 +822,23 @@ func TestOnlyAPersonsActAnswersARootWaitingOnItsQuestion(t *testing.T) {
 		fact  intake.Fact
 		wakes bool
 	}{
-		{name: "a person's reply", fact: intake.DispatchAskReply{Key: "LEGION-ROOT", Ask: "ask-root", WaitingOn: "agent", Actor: alice}, wakes: true},
-		{name: "a person's answer", fact: intake.DispatchAskClosed{Key: "LEGION-ROOT", Ask: "ask-root", Kind: "question", State: "answered", Actor: alice}, wakes: true},
-		{name: "a person's resolution", fact: intake.DispatchAskClosed{Key: "LEGION-ROOT", Ask: "ask-root", Kind: "question", State: "resolved", Actor: alice}, wakes: true},
-		{name: "a person's reply under the resolved ask", fact: intake.DispatchAskReply{Key: "LEGION-ROOT", Ask: "ask-root", Actor: alice}, wakes: true},
-		{name: "a session's reply on a person's behalf", fact: intake.DispatchAskReply{Key: "LEGION-ROOT", Ask: "ask-root", WaitingOn: "agent", Actor: outsider}},
-		{name: "a session's reply that leaves the turn with the person", fact: intake.DispatchAskReply{Key: "LEGION-ROOT", Ask: "ask-root", WaitingOn: "human", Actor: outsider}},
-		{name: "a session's resolution of another ask", fact: intake.DispatchAskClosed{Key: "LEGION-ROOT", Ask: "ask-other", Kind: "question", State: "resolved", Actor: architect}},
-		{name: "settlement's retraction", fact: intake.DispatchAskClosed{Key: "LEGION-ROOT", Ask: "ask-root", Kind: "question", State: "resolved", Actor: settler}, wakes: true},
-		{name: "settlement's retraction of another ask", fact: intake.DispatchAskClosed{Key: "LEGION-ROOT", Ask: "ask-other", Kind: "question", State: "resolved", Actor: settler}},
-		{name: "a person's reply on another ask", fact: intake.DispatchAskReply{Key: "LEGION-ROOT", Ask: "ask-other", WaitingOn: "agent", Actor: alice}, wakes: true},
+		{name: "a person's reply", fact: intake.DispatchAskReply{Key: "LEGION-100", Ask: "ask-root", WaitingOn: "agent", Actor: alice}, wakes: true},
+		{name: "a person's answer", fact: intake.DispatchAskClosed{Key: "LEGION-100", Ask: "ask-root", Kind: "question", State: "answered", Actor: alice}, wakes: true},
+		{name: "a person's resolution", fact: intake.DispatchAskClosed{Key: "LEGION-100", Ask: "ask-root", Kind: "question", State: "resolved", Actor: alice}, wakes: true},
+		{name: "a person's reply under the resolved ask", fact: intake.DispatchAskReply{Key: "LEGION-100", Ask: "ask-root", Actor: alice}, wakes: true},
+		{name: "a session's reply on a person's behalf", fact: intake.DispatchAskReply{Key: "LEGION-100", Ask: "ask-root", WaitingOn: "agent", Actor: outsider}},
+		{name: "a session's reply that leaves the turn with the person", fact: intake.DispatchAskReply{Key: "LEGION-100", Ask: "ask-root", WaitingOn: "human", Actor: outsider}},
+		{name: "a session's resolution of another ask", fact: intake.DispatchAskClosed{Key: "LEGION-100", Ask: "ask-other", Kind: "question", State: "resolved", Actor: architect}},
+		{name: "settlement's retraction", fact: intake.DispatchAskClosed{Key: "LEGION-100", Ask: "ask-root", Kind: "question", State: "resolved", Actor: settler}, wakes: true},
+		{name: "settlement's retraction of another ask", fact: intake.DispatchAskClosed{Key: "LEGION-100", Ask: "ask-other", Kind: "question", State: "resolved", Actor: settler}},
+		{name: "a person's reply on another ask", fact: intake.DispatchAskReply{Key: "LEGION-100", Ask: "ask-other", WaitingOn: "agent", Actor: alice}, wakes: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pool := migratedPool(t)
 			admission := newAdmission(t, 1, nil)
 			awaitingRoot(t, pool, record.Awaiting{Ask: "ask-root"})
 			applyFact(t, pool, admission, "act", tc.fact)
-			if got := issue(t, pool, "LEGION-ROOT"); got.Answered() != tc.wakes {
+			if got := issue(t, pool, "LEGION-100"); got.Answered() != tc.wakes {
 				t.Fatalf("root after %s = %#v, want answered %t", tc.name, got, tc.wakes)
 			}
 		})
@@ -838,7 +851,7 @@ func TestASettlementRetractionOfTheAwaitedQuestionResumesTheRoot(t *testing.T) {
 	pool := migratedPool(t)
 	admission := newAdmission(t, 1, nil)
 	awaitingRoot(t, pool, record.Awaiting{Ask: "ask-root", Since: handBack})
-	applyFact(t, pool, admission, "retracted", intake.DispatchAskClosed{Key: "LEGION-ROOT", Ask: "ask-root", Kind: "question", State: "resolved",
+	applyFact(t, pool, admission, "retracted", intake.DispatchAskClosed{Key: "LEGION-100", Ask: "ask-root", Kind: "question", State: "resolved",
 		Actor: settler, Mark: record.EventMark{Seq: 11, At: handedBackAt.Add(time.Minute)}})
 	if task := resumedTask(t, pool, admission); !strings.Contains(task, "ask-root") || !strings.Contains(task, "retracted") {
 		t.Fatalf("resumed architect's task = %q, want it to say ask-root was retracted", task)
@@ -846,14 +859,14 @@ func TestASettlementRetractionOfTheAwaitedQuestionResumesTheRoot(t *testing.T) {
 
 	early := migratedPool(t)
 	admission = newAdmission(t, 1, nil)
-	seedSlotted(t, early, "LEGION-ROOT", "A")
+	seedSlotted(t, early, "LEGION-100", "A")
 	seedWaiting(t, early, "LEGION-NEXT", "B")
-	seedArchitectClaim(t, early, "LEGION-ROOT", architect.ID)
-	applyFact(t, early, admission, "retracted-first", intake.DispatchAskClosed{Key: "LEGION-ROOT", Ask: "ask-question", Kind: "question", State: "resolved",
+	seedArchitectClaim(t, early, "LEGION-100", architect.ID)
+	applyFact(t, early, admission, "retracted-first", intake.DispatchAskClosed{Key: "LEGION-100", Ask: "ask-question", Kind: "question", State: "resolved",
 		Actor: settler, Mark: record.EventMark{Seq: 11}})
-	applyFact(t, early, admission, "opened-later", intake.DispatchAskOpened{Key: "LEGION-ROOT", Ask: "ask-question", Kind: "question",
+	applyFact(t, early, admission, "opened-later", intake.DispatchAskOpened{Key: "LEGION-100", Ask: "ask-question", Kind: "question",
 		AuthorSession: architect.ID, Mark: handBack})
-	if got := issue(t, early, "LEGION-ROOT"); got.Phase != phase.Admitted || got.Awaiting != nil {
+	if got := issue(t, early, "LEGION-100"); got.Phase != phase.Admitted || got.Awaiting != nil {
 		t.Fatalf("root after a retraction and the question it retracted = %#v, want it admitted with no wait", got)
 	}
 }
@@ -866,60 +879,66 @@ func TestAChangesRequestARootNeverResumedForIsNotRecordedAsTold(t *testing.T) {
 	pool := migratedPool(t)
 	admission := newAdmission(t, 1, nil)
 	awaitingRoot(t, pool, record.Awaiting{GateVersion: 4, Since: handBack})
-	applyFact(t, pool, admission, "changes-v4", intake.DispatchArtifact{Key: "LEGION-ROOT", ArtifactID: "artifact-root",
+	applyFact(t, pool, admission, "changes-v4", intake.DispatchArtifact{Key: "LEGION-100", ArtifactID: "artifact-root",
 		Kind: intake.DispatchArtifactChangesRequested, Version: 4, Reason: "name the rollback path", Mark: record.EventMark{Seq: 11, At: handedBackAt.Add(time.Minute)}})
-	if gate := storedGate(t, pool, "LEGION-ROOT"); gate.ToldChangesVersion == nil {
+	if gate := storedGate(t, pool, "LEGION-100"); gate.ToldChangesVersion == nil {
 		t.Fatalf("gate after the answering changes request = %#v, want it recorded as told for the resume task", gate)
 	}
-	apply(t, pool, admission, "label-off", intake.DispatchIssue{Key: "LEGION-ROOT", ResolvedRepo: "acme/widgets", Seq: 12, Type: "issue.updated",
+	apply(t, pool, admission, "label-off", intake.DispatchIssue{Key: "LEGION-100", ResolvedRepo: "acme/widgets", Seq: 12, Type: "issue.updated",
 		Status: "in_progress", Title: "root", Rank: "B"}, admission.engine)
-	if got := issue(t, pool, "LEGION-ROOT"); got.AwaitingPerson() {
+	if got := issue(t, pool, "LEGION-100"); got.AwaitingPerson() {
 		t.Fatalf("root after its label came off = %#v, want it out of the workflow", got)
 	}
-	if gate := storedGate(t, pool, "LEGION-ROOT"); gate.ToldChangesVersion != nil {
+	if gate := storedGate(t, pool, "LEGION-100"); gate.ToldChangesVersion != nil {
 		t.Fatalf("gate after the root left unresumed = %#v, want the changes request no longer recorded as told", gate)
 	}
 }
 
 // The architect hands an ask on its admitted root back to the person: on a registered closed
 // gate the root waits on that gate's latest version, otherwise on the ask itself, and returns its
-// slot either way. A hand-back by a session outside the tree, or by a person, changes nothing.
+// slot either way. The question here is one the architect's tree opened before its last handout
+// and the person moved to the agent's turn, so only the reply hands it back. A hand-back by a
+// session outside the tree, or by a person, changes nothing.
 func TestAnArchitectsHandBackReturnsTheSlotToWaitOnThePerson(t *testing.T) {
+	since := record.EventMark{Seq: 10}
 	for _, tc := range []struct {
 		name  string
 		gate  *record.DesignGate
 		reply intake.DispatchAskReply
 		want  *record.Awaiting
 	}{
-		{name: "the approval request handed back on a closed gate", gate: &record.DesignGate{Issue: "LEGION-ROOT", ArtifactID: "artifact-root", LatestVersion: 4},
-			reply: intake.DispatchAskReply{Key: "LEGION-ROOT", Ask: "ask-approval", WaitingOn: "human", Actor: architect}, want: &record.Awaiting{GateVersion: 4, Artifact: "artifact-root"}},
+		{name: "the approval request handed back on a closed gate", gate: &record.DesignGate{Issue: "LEGION-100", ArtifactID: "artifact-root", LatestVersion: 4},
+			reply: intake.DispatchAskReply{Key: "LEGION-100", Ask: "ask-approval", WaitingOn: "human", Actor: architect, Mark: since},
+			want:  &record.Awaiting{GateVersion: 4, Artifact: "artifact-root", Since: since}},
 		{name: "a human-turn reply on a question with no gate",
-			reply: intake.DispatchAskReply{Key: "LEGION-ROOT", Ask: "ask-question", WaitingOn: "human", Actor: architect}, want: &record.Awaiting{Ask: "ask-question"}},
+			reply: intake.DispatchAskReply{Key: "LEGION-100", Ask: "ask-question", WaitingOn: "human", Actor: architect, Mark: since},
+			want:  &record.Awaiting{Ask: "ask-question", Since: since}},
 		{name: "a reply from outside the tree",
-			reply: intake.DispatchAskReply{Key: "LEGION-ROOT", Ask: "ask-question", WaitingOn: "human", Actor: outsider}},
+			reply: intake.DispatchAskReply{Key: "LEGION-100", Ask: "ask-question", WaitingOn: "human", Actor: outsider, Mark: since}},
 		{name: "a person's own hand-back",
-			reply: intake.DispatchAskReply{Key: "LEGION-ROOT", Ask: "ask-question", WaitingOn: "human", Actor: alice}},
+			reply: intake.DispatchAskReply{Key: "LEGION-100", Ask: "ask-question", WaitingOn: "human", Actor: alice, Mark: since}},
 		{name: "the architect's progress note",
-			reply: intake.DispatchAskReply{Key: "LEGION-ROOT", Ask: "ask-question", WaitingOn: "agent", Actor: architect}},
+			reply: intake.DispatchAskReply{Key: "LEGION-100", Ask: "ask-question", WaitingOn: "agent", Actor: architect, Mark: since}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pool := migratedPool(t)
 			admission := newAdmission(t, 1, nil)
-			seedSlotted(t, pool, "LEGION-ROOT", "A")
+			seedSlotted(t, pool, "LEGION-100", "A")
 			seedWaiting(t, pool, "LEGION-NEXT", "B")
-			seedArchitectClaim(t, pool, "LEGION-ROOT", architect.ID)
+			seedArchitectClaim(t, pool, "LEGION-100", architect.ID)
+			mirrorAsk(t, pool, record.RootAsk{Issue: "LEGION-100", Ask: "ask-question", Kind: "question", Open: true, WaitingOn: "agent", Seq: 4, ByTree: true, PersonSeq: 4})
 			if tc.gate != nil {
 				seedGate(t, pool, *tc.gate)
 			}
 			applyFact(t, pool, admission, "hand-back", tc.reply)
 
-			root := issue(t, pool, "LEGION-ROOT")
+			root := issue(t, pool, "LEGION-100")
 			if tc.want == nil {
 				if root.Phase != phase.Admitted || root.Awaiting != nil {
 					t.Fatalf("root after %s = %#v, want it still admitted", tc.name, root)
 				}
-				assertSlots(t, pool, []record.Slot{{Issue: "LEGION-ROOT", Index: 0, AdmittedAt: fixedNow}})
-				assertNoAwaitingEffects(t, pool, "LEGION-ROOT")
+				assertSlots(t, pool, []record.Slot{{Issue: "LEGION-100", Index: 0, AdmittedAt: fixedNow}})
+				assertNoAwaitingEffects(t, pool, "LEGION-100")
 				return
 			}
 			if root.Phase != phase.AwaitingPerson || root.Awaiting == nil || *root.Awaiting != *tc.want {
@@ -936,13 +955,13 @@ func TestTheResumeTaskOfAGateWaitNamesAReply(t *testing.T) {
 	pool := migratedPool(t)
 	admission := newAdmission(t, 1, nil)
 	awaitingRoot(t, pool, record.Awaiting{GateVersion: 3})
-	applyFact(t, pool, admission, "reply", intake.DispatchAskReply{Key: "LEGION-ROOT", Ask: "ask-approval", WaitingOn: "agent", Actor: alice})
+	applyFact(t, pool, admission, "reply", intake.DispatchAskReply{Key: "LEGION-100", Ask: "ask-approval", WaitingOn: "agent", Actor: alice})
 	apply(t, pool, admission, "run-finished", intake.DispatchIssue{
 		Key: "LEGION-RUN", ResolvedRepo: "acme/widgets", Seq: 1, Type: "issue.closed", Status: "done", Title: "LEGION-RUN", Rank: "A", HandedOver: true,
 	}, admission.engine)
 	var task string
 	for _, effect := range effects(t, pool) {
-		if start, ok := effect.payload.(record.SuperviseRequest); ok && effect.issue == "LEGION-ROOT" && start.Op == "start" && start.Role == "architect" {
+		if start, ok := effect.payload.(record.SuperviseRequest); ok && effect.issue == "LEGION-100" && start.Op == "start" && start.Role == "architect" {
 			task = start.Task
 		}
 	}
@@ -951,7 +970,7 @@ func TestTheResumeTaskOfAGateWaitNamesAReply(t *testing.T) {
 	}
 }
 
-// resumedTask frees LEGION-RUN's slot, so the answered LEGION-ROOT is promoted, and returns the
+// resumedTask frees LEGION-RUN's slot, so the answered LEGION-100 is promoted, and returns the
 // task its architect resumes with.
 func resumedTask(t *testing.T, pool *pgxpool.Pool, admission *Admission) string {
 	t.Helper()
@@ -960,7 +979,7 @@ func resumedTask(t *testing.T, pool *pgxpool.Pool, admission *Admission) string 
 	}, admission.engine)
 	task := ""
 	for _, effect := range effects(t, pool) {
-		if start, ok := effect.payload.(record.SuperviseRequest); ok && effect.issue == "LEGION-ROOT" && start.Op == "start" && start.Role == "architect" {
+		if start, ok := effect.payload.(record.SuperviseRequest); ok && effect.issue == "LEGION-100" && start.Op == "start" && start.Role == "architect" {
 			task = start.Task
 		}
 	}
@@ -982,27 +1001,27 @@ func TestAPersonsReviewOfTheSpecAnswersARootWaitingOnItsQuestion(t *testing.T) {
 		task     []string
 	}{
 		{name: "an approval", answered: true, task: []string{"spec version 4", "was approved"},
-			fact: intake.DispatchArtifact{Key: "LEGION-ROOT", ArtifactID: "artifact-root", Kind: intake.DispatchArtifactApproved, Version: 4, Mark: after}},
+			fact: intake.DispatchArtifact{Key: "LEGION-100", ArtifactID: "artifact-root", Kind: intake.DispatchArtifactApproved, Version: 4, Mark: after}},
 		{name: "a changes request", answered: true, task: []string{"requested changes", "version 4", "name the rollback path"},
-			fact: intake.DispatchArtifact{Key: "LEGION-ROOT", ArtifactID: "artifact-root", Kind: intake.DispatchArtifactChangesRequested, Version: 4,
+			fact: intake.DispatchArtifact{Key: "LEGION-100", ArtifactID: "artifact-root", Kind: intake.DispatchArtifactChangesRequested, Version: 4,
 				Reason: "name the rollback path", Mark: after}},
 		{name: "an approval a registration read", source: "api", answered: true, task: []string{"was approved"},
-			fact: intake.GateRegistered{Issue: "LEGION-ROOT", ArtifactID: "artifact-root", Version: 4, DispatchVersion: 4, ApprovedVersion: 4,
+			fact: intake.GateRegistered{Issue: "LEGION-100", ArtifactID: "artifact-root", Version: 4, DispatchVersion: 4, ApprovedVersion: 4,
 				ApprovedMark: after, Since: record.EventMark{Seq: 12}}},
 		{name: "a changes request a registration read", source: "api", answered: true, task: []string{"requested changes", "name the rollback path"},
-			fact: intake.GateRegistered{Issue: "LEGION-ROOT", ArtifactID: "artifact-root", Version: 4, DispatchVersion: 4, ChangesRequestedVersion: 4,
+			fact: intake.GateRegistered{Issue: "LEGION-100", ArtifactID: "artifact-root", Version: 4, DispatchVersion: 4, ChangesRequestedVersion: 4,
 				ChangesReason: "name the rollback path", ChangesRequestedMark: after, Since: record.EventMark{Seq: 12}}},
 		{name: "a newer version",
-			fact: intake.DispatchArtifact{Key: "LEGION-ROOT", ArtifactID: "artifact-root", Kind: intake.DispatchArtifactVersion, Version: 5, Mark: after}},
+			fact: intake.DispatchArtifact{Key: "LEGION-100", ArtifactID: "artifact-root", Kind: intake.DispatchArtifactVersion, Version: 5, Mark: after}},
 		{name: "a changes request given before the question",
-			fact: intake.DispatchArtifact{Key: "LEGION-ROOT", ArtifactID: "artifact-root", Kind: intake.DispatchArtifactChangesRequested, Version: 4,
+			fact: intake.DispatchArtifact{Key: "LEGION-100", ArtifactID: "artifact-root", Kind: intake.DispatchArtifactChangesRequested, Version: 4,
 				Reason: "name the rollback path", Mark: record.EventMark{Seq: 9, At: handedBackAt.Add(-time.Minute)}}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pool := migratedPool(t)
 			admission := newAdmission(t, 1, nil)
 			awaitingRoot(t, pool, record.Awaiting{Ask: "ask-question", Since: handBack})
-			seedGate(t, pool, record.DesignGate{Issue: "LEGION-ROOT", ArtifactID: "artifact-root", LatestVersion: 4})
+			seedGate(t, pool, record.DesignGate{Issue: "LEGION-100", ArtifactID: "artifact-root", LatestVersion: 4})
 			source := tc.source
 			if source == "" {
 				source = "dispatch"
@@ -1010,7 +1029,7 @@ func TestAPersonsReviewOfTheSpecAnswersARootWaitingOnItsQuestion(t *testing.T) {
 			if _, err := intake.ApplyFact(context.Background(), pool, source, "review", tc.fact, admission.engine, admission); err != nil {
 				t.Fatalf("apply %s: %v", tc.name, err)
 			}
-			got := issue(t, pool, "LEGION-ROOT")
+			got := issue(t, pool, "LEGION-100")
 			if got.Answered() != tc.answered {
 				t.Fatalf("root waiting on its question after %s = %#v, want answered %t", tc.name, got, tc.answered)
 			}
@@ -1037,12 +1056,12 @@ func TestTheResumeTaskNamesWhatAnsweredTheGateWait(t *testing.T) {
 		task []string
 	}{
 		{name: "a changes request", task: []string{"requested changes", "version 4", `"name the rollback path"`},
-			fact: intake.DispatchArtifact{Key: "LEGION-ROOT", ArtifactID: "artifact-root", Kind: intake.DispatchArtifactChangesRequested, Version: 4,
+			fact: intake.DispatchArtifact{Key: "LEGION-100", ArtifactID: "artifact-root", Kind: intake.DispatchArtifactChangesRequested, Version: 4,
 				Reason: "name the rollback path", Mark: after}},
 		{name: "a newer version", task: []string{"newer version", "version 5"},
-			fact: intake.DispatchArtifact{Key: "LEGION-ROOT", ArtifactID: "artifact-root", Kind: intake.DispatchArtifactVersion, Version: 5, Mark: after}},
+			fact: intake.DispatchArtifact{Key: "LEGION-100", ArtifactID: "artifact-root", Kind: intake.DispatchArtifactVersion, Version: 5, Mark: after}},
 		{name: "a reply", task: []string{"replied", "thread", "version 4"},
-			fact: intake.DispatchAskReply{Key: "LEGION-ROOT", Ask: "ask-approval", WaitingOn: "agent", Actor: alice, Mark: after}},
+			fact: intake.DispatchAskReply{Key: "LEGION-100", Ask: "ask-approval", WaitingOn: "agent", Actor: alice, Mark: after}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pool := migratedPool(t)
@@ -1092,13 +1111,13 @@ func TestAPersonsActRecordedBeforeTheWaitBeganAnswersNoWait(t *testing.T) {
 	}{
 		{
 			name:  "a reply",
-			stale: intake.DispatchAskReply{Key: "LEGION-ROOT", Ask: "ask-approval", WaitingOn: "agent", Actor: alice, Mark: record.EventMark{Seq: 19}},
-			fresh: intake.DispatchAskReply{Key: "LEGION-ROOT", Ask: "ask-approval", WaitingOn: "agent", Actor: alice, Mark: record.EventMark{Seq: 21}},
+			stale: intake.DispatchAskReply{Key: "LEGION-100", Ask: "ask-approval", WaitingOn: "agent", Actor: alice, Mark: record.EventMark{Seq: 19}},
+			fresh: intake.DispatchAskReply{Key: "LEGION-100", Ask: "ask-approval", WaitingOn: "agent", Actor: alice, Mark: record.EventMark{Seq: 21}},
 		},
 		{
 			name:  "an answered ask",
-			stale: intake.DispatchAskClosed{Key: "LEGION-ROOT", Ask: "ask-question", Kind: "question", State: "answered", Actor: alice, Mark: record.EventMark{Seq: 19}},
-			fresh: intake.DispatchAskClosed{Key: "LEGION-ROOT", Ask: "ask-question", Kind: "question", State: "answered", Actor: alice, Mark: record.EventMark{Seq: 21}},
+			stale: intake.DispatchAskClosed{Key: "LEGION-100", Ask: "ask-question", Kind: "question", State: "answered", Actor: alice, Mark: record.EventMark{Seq: 19}},
+			fresh: intake.DispatchAskClosed{Key: "LEGION-100", Ask: "ask-question", Kind: "question", State: "answered", Actor: alice, Mark: record.EventMark{Seq: 21}},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1107,11 +1126,11 @@ func TestAPersonsActRecordedBeforeTheWaitBeganAnswersNoWait(t *testing.T) {
 			awaitingRoot(t, pool, record.Awaiting{GateVersion: 4, Since: record.EventMark{Seq: 20}})
 
 			applyFact(t, pool, admission, "act-before-the-wait", tc.stale)
-			if got := issue(t, pool, "LEGION-ROOT"); got.Answered() {
+			if got := issue(t, pool, "LEGION-100"); got.Answered() {
 				t.Fatalf("root after an act Dispatch recorded before the wait began = %#v, want it still waiting", got)
 			}
 			applyFact(t, pool, admission, "act-after-the-wait", tc.fresh)
-			if got := issue(t, pool, "LEGION-ROOT"); !got.Answered() {
+			if got := issue(t, pool, "LEGION-100"); !got.Answered() {
 				t.Fatalf("root after the person's next act = %#v, want it answered", got)
 			}
 		})
@@ -1125,22 +1144,22 @@ func TestAPersonsActRecordedBeforeTheWaitBeganAnswersNoWait(t *testing.T) {
 func TestAQuestionAPersonHasAlreadyAnsweredStartsNoWait(t *testing.T) {
 	pool := migratedPool(t)
 	admission := newAdmission(t, 1, nil)
-	seedSlotted(t, pool, "LEGION-ROOT", "A")
+	seedSlotted(t, pool, "LEGION-100", "A")
 	seedWaiting(t, pool, "LEGION-NEXT", "B")
-	seedArchitectClaim(t, pool, "LEGION-ROOT", architect.ID)
+	seedArchitectClaim(t, pool, "LEGION-100", architect.ID)
 
 	applyFact(t, pool, admission, "answer-delivered-first", intake.DispatchAskClosed{
-		Key: "LEGION-ROOT", Ask: "ask-question", Kind: "question", State: "answered", Actor: alice, Mark: record.EventMark{Seq: 11}})
+		Key: "LEGION-100", Ask: "ask-question", Kind: "question", State: "answered", Actor: alice, Mark: record.EventMark{Seq: 11}})
 	applyFact(t, pool, admission, "question-opened-retried-later", intake.DispatchAskOpened{
-		Key: "LEGION-ROOT", Ask: "ask-question", Kind: "question", AuthorSession: architect.ID, Mark: record.EventMark{Seq: 10}})
-	if got := issue(t, pool, "LEGION-ROOT"); got.Phase != phase.Admitted || got.Awaiting != nil {
+		Key: "LEGION-100", Ask: "ask-question", Kind: "question", AuthorSession: architect.ID, Mark: record.EventMark{Seq: 10}})
+	if got := issue(t, pool, "LEGION-100"); got.Phase != phase.Admitted || got.Awaiting != nil {
 		t.Fatalf("root after the answer and the question it closed = %#v, want it admitted with no wait", got)
 	}
-	assertSlots(t, pool, []record.Slot{{Issue: "LEGION-ROOT", Index: 0, AdmittedAt: fixedNow}})
+	assertSlots(t, pool, []record.Slot{{Issue: "LEGION-100", Index: 0, AdmittedAt: fixedNow}})
 
 	applyFact(t, pool, admission, "another-question", intake.DispatchAskOpened{
-		Key: "LEGION-ROOT", Ask: "ask-other", Kind: "question", AuthorSession: architect.ID, Mark: record.EventMark{Seq: 12}})
-	got := issue(t, pool, "LEGION-ROOT")
+		Key: "LEGION-100", Ask: "ask-other", Kind: "question", AuthorSession: architect.ID, Mark: record.EventMark{Seq: 12}})
+	got := issue(t, pool, "LEGION-100")
 	if !got.AwaitingPerson() || got.Answered() || got.Awaiting.Ask != "ask-other" {
 		t.Fatalf("root after a question nobody answered = %#v, want it waiting on ask-other", got)
 	}
@@ -1157,10 +1176,10 @@ func TestAQuestionAPersonHasAlreadyAnsweredStartsNoWait(t *testing.T) {
 func TestAPersonsActDeliveredBeforeTheEventThatStartsItsWaitStartsNoWait(t *testing.T) {
 	act := record.EventMark{Seq: 11, At: handedBackAt.Add(time.Minute)}
 	early := record.EventMark{Seq: 9, At: handedBackAt.Add(-time.Minute)}
-	opened := intake.DispatchAskOpened{Key: "LEGION-ROOT", Ask: "ask-question", Kind: "question", AuthorSession: architect.ID, Mark: handBack}
-	handedBack := intake.DispatchAskReply{Key: "LEGION-ROOT", Ask: "ask-approval", WaitingOn: "human", Actor: architect, Mark: handBack}
+	opened := intake.DispatchAskOpened{Key: "LEGION-100", Ask: "ask-question", Kind: "question", AuthorSession: architect.ID, Mark: handBack}
+	handedBack := intake.DispatchAskReply{Key: "LEGION-100", Ask: "ask-approval", WaitingOn: "human", Actor: architect, Mark: handBack}
 	changes := func(mark record.EventMark) intake.DispatchArtifact {
-		return intake.DispatchArtifact{Key: "LEGION-ROOT", ArtifactID: "artifact-root", Kind: intake.DispatchArtifactChangesRequested,
+		return intake.DispatchArtifact{Key: "LEGION-100", ArtifactID: "artifact-root", Kind: intake.DispatchArtifactChangesRequested,
 			Version: 4, Reason: "name the rollback path", Mark: mark}
 	}
 	for _, tc := range []struct {
@@ -1170,27 +1189,27 @@ func TestAPersonsActDeliveredBeforeTheEventThatStartsItsWaitStartsNoWait(t *test
 		waits  bool
 	}{
 		{name: "a person's reply before the question it replies to",
-			act: intake.DispatchAskReply{Key: "LEGION-ROOT", Ask: "ask-question", WaitingOn: "agent", Actor: alice, Mark: act}, starts: opened},
+			act: intake.DispatchAskReply{Key: "LEGION-100", Ask: "ask-question", WaitingOn: "agent", Actor: alice, Mark: act}, starts: opened},
 		{name: "a person's reply before the hand-back",
-			act: intake.DispatchAskReply{Key: "LEGION-ROOT", Ask: "ask-approval", WaitingOn: "agent", Actor: alice, Mark: act}, starts: handedBack},
+			act: intake.DispatchAskReply{Key: "LEGION-100", Ask: "ask-approval", WaitingOn: "agent", Actor: alice, Mark: act}, starts: handedBack},
 		{name: "a person's answer of another ask before the hand-back",
-			act: intake.DispatchAskClosed{Key: "LEGION-ROOT", Ask: "ask-question", Kind: "question", State: "answered", Actor: alice, Mark: act}, starts: handedBack},
+			act: intake.DispatchAskClosed{Key: "LEGION-100", Ask: "ask-question", Kind: "question", State: "answered", Actor: alice, Mark: act}, starts: handedBack},
 		{name: "a changes request before the hand-back", act: changes(act), starts: handedBack},
 		{name: "a person's reply Dispatch recorded before the hand-back",
-			act: intake.DispatchAskReply{Key: "LEGION-ROOT", Ask: "ask-approval", WaitingOn: "agent", Actor: alice, Mark: early}, starts: handedBack, waits: true},
+			act: intake.DispatchAskReply{Key: "LEGION-100", Ask: "ask-approval", WaitingOn: "agent", Actor: alice, Mark: early}, starts: handedBack, waits: true},
 		{name: "a changes request Dispatch recorded before the hand-back", act: changes(early), starts: handedBack, waits: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pool := migratedPool(t)
 			admission := newAdmission(t, 1, nil)
-			seedSlotted(t, pool, "LEGION-ROOT", "A")
+			seedSlotted(t, pool, "LEGION-100", "A")
 			seedWaiting(t, pool, "LEGION-NEXT", "B")
-			seedArchitectClaim(t, pool, "LEGION-ROOT", architect.ID)
-			seedGate(t, pool, record.DesignGate{Issue: "LEGION-ROOT", ArtifactID: "artifact-root", LatestVersion: 4})
+			seedArchitectClaim(t, pool, "LEGION-100", architect.ID)
+			seedGate(t, pool, record.DesignGate{Issue: "LEGION-100", ArtifactID: "artifact-root", LatestVersion: 4})
 
 			applyFact(t, pool, admission, "act-delivered-first", tc.act)
 			applyFact(t, pool, admission, "wait-start-retried-later", tc.starts)
-			got := issue(t, pool, "LEGION-ROOT")
+			got := issue(t, pool, "LEGION-100")
 			if tc.waits {
 				if !got.AwaitingPerson() || got.Answered() {
 					t.Fatalf("root after an act before its wait's start = %#v, want it waiting unanswered", got)
@@ -1200,34 +1219,34 @@ func TestAPersonsActDeliveredBeforeTheEventThatStartsItsWaitStartsNoWait(t *test
 			if got.Phase != phase.Admitted || got.Awaiting != nil {
 				t.Fatalf("root after %s = %#v, want it admitted with no wait", tc.name, got)
 			}
-			assertSlots(t, pool, []record.Slot{{Issue: "LEGION-ROOT", Index: 0, AdmittedAt: fixedNow}})
-			assertNoAwaitingEffects(t, pool, "LEGION-ROOT")
+			assertSlots(t, pool, []record.Slot{{Issue: "LEGION-100", Index: 0, AdmittedAt: fixedNow}})
+			assertNoAwaitingEffects(t, pool, "LEGION-100")
 		})
 	}
 }
 
-// A registration reads the approval and nothing else, so it fences only what would start a wait
-// on the gate. An ordinary question its read never saw, delivered late, still releases the root's
-// slot and waits on the person.
-func TestARegistrationDoesNotFenceAQuestionItNeverRead(t *testing.T) {
+// A registration reads the approval and nothing else: the mirror row it writes is its request's,
+// so it fences no question (second-review round-21 P3-2, same-model P3-2). An ordinary question its
+// read never saw, delivered late, still releases the root's slot and waits on the person.
+func TestARegistrationFencesNoQuestion(t *testing.T) {
 	pool := migratedPool(t)
 	admission := newAdmission(t, 1, nil)
-	seedSlotted(t, pool, "LEGION-ROOT", "A")
+	seedSlotted(t, pool, "LEGION-100", "A")
 	seedWaiting(t, pool, "LEGION-NEXT", "B")
-	seedArchitectClaim(t, pool, "LEGION-ROOT", architect.ID)
+	seedArchitectClaim(t, pool, "LEGION-100", architect.ID)
 	read := record.EventMark{Seq: 20, At: handedBackAt}
 	if _, err := intake.ApplyFact(context.Background(), pool, "api", "register-v4", intake.GateRegistered{
-		Issue: "LEGION-ROOT", ArtifactID: "artifact-root", Version: 4, DispatchVersion: 4, RequestWaitsOnAgent: true, Since: read,
+		Issue: "LEGION-100", ArtifactID: "artifact-root", Version: 4, DispatchVersion: 4, RequestAsk: "ask-approval", RequestWaitsOnAgent: true, Since: read,
 	}, admission.engine, admission); err != nil {
 		t.Fatalf("register gate v4: %v", err)
 	}
-	if kept := issue(t, pool, "LEGION-ROOT"); kept.Phase != phase.Admitted || kept.GateFenceSeq != read.Seq || kept.WaitFenceSeq != 0 {
-		t.Fatalf("root after a registration that kept the slot = %#v, want admitted with gate fence %d and no wait fence", kept, read.Seq)
+	if kept := issue(t, pool, "LEGION-100"); kept.Phase != phase.Admitted || kept.DeclaredSeq != 0 {
+		t.Fatalf("root after a registration that kept the slot = %#v, want admitted with nothing declared", kept)
 	}
 
 	applyFact(t, pool, admission, "question-below-the-read", intake.DispatchAskOpened{
-		Key: "LEGION-ROOT", Ask: "ask-question", Kind: "question", AuthorSession: architect.ID, Mark: record.EventMark{Seq: 19}})
-	got := issue(t, pool, "LEGION-ROOT")
+		Key: "LEGION-100", Ask: "ask-question", Kind: "question", AuthorSession: architect.ID, Mark: record.EventMark{Seq: 19}})
+	got := issue(t, pool, "LEGION-100")
 	if !got.AwaitingPerson() || got.Answered() || got.Awaiting.Ask != "ask-question" {
 		t.Fatalf("root after a question the approval read never saw = %#v, want it waiting on that question", got)
 	}
@@ -1246,12 +1265,12 @@ func TestARegistrationDoesNotHideTheReviewTheGateAlreadyHolds(t *testing.T) {
 	}{
 		{
 			name: "a changes request the architect was told of",
-			gate: record.DesignGate{Issue: "LEGION-ROOT", ArtifactID: "artifact-root", LatestVersion: 4,
+			gate: record.DesignGate{Issue: "LEGION-100", ArtifactID: "artifact-root", LatestVersion: 4,
 				ToldChangesVersion: new(4), ToldChangesReason: "name the rollback path", ToldChangesMark: reviewed},
 		},
 		{
 			name: "an approval that opened the gate",
-			gate: record.DesignGate{Issue: "LEGION-ROOT", ArtifactID: "artifact-root", LatestVersion: 4,
+			gate: record.DesignGate{Issue: "LEGION-100", ArtifactID: "artifact-root", LatestVersion: 4,
 				ApprovedVersion: new(4), ApprovedMark: reviewed},
 			open: true,
 		},
@@ -1259,13 +1278,13 @@ func TestARegistrationDoesNotHideTheReviewTheGateAlreadyHolds(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			pool := migratedPool(t)
 			admission := newAdmission(t, 1, nil)
-			seedSlotted(t, pool, "LEGION-ROOT", "A")
+			seedSlotted(t, pool, "LEGION-100", "A")
 			seedWaiting(t, pool, "LEGION-NEXT", "B")
-			seedArchitectClaim(t, pool, "LEGION-ROOT", architect.ID)
+			seedArchitectClaim(t, pool, "LEGION-100", architect.ID)
 			seedGate(t, pool, tc.gate)
 
 			if _, err := intake.ApplyFact(context.Background(), pool, "api", "register-v4", intake.GateRegistered{
-				Issue: "LEGION-ROOT", ArtifactID: "artifact-root", Version: 4, DispatchVersion: 4,
+				Issue: "LEGION-100", ArtifactID: "artifact-root", Version: 4, DispatchVersion: 4,
 				ChangesRequestedVersion: 4, ChangesReason: "name the rollback path",
 				ChangesRequestedMark: record.EventMark{Seq: 9, At: handedBackAt.Add(-time.Minute)},
 				Since:                record.EventMark{Seq: 10, At: handedBackAt},
@@ -1273,15 +1292,15 @@ func TestARegistrationDoesNotHideTheReviewTheGateAlreadyHolds(t *testing.T) {
 				t.Fatalf("register gate v4: %v", err)
 			}
 
-			got := issue(t, pool, "LEGION-ROOT")
+			got := issue(t, pool, "LEGION-100")
 			if got.Phase != phase.Admitted || got.Awaiting != nil {
 				t.Fatalf("root after a registration older than the review the gate holds = %#v, want it admitted with no wait", got)
 			}
-			assertSlots(t, pool, []record.Slot{{Issue: "LEGION-ROOT", Index: 0, AdmittedAt: fixedNow}})
-			if told := gateNotices(t, pool, "LEGION-ROOT", "design-changes-requested"); len(told) != 0 {
+			assertSlots(t, pool, []record.Slot{{Issue: "LEGION-100", Index: 0, AdmittedAt: fixedNow}})
+			if told := gateNotices(t, pool, "LEGION-100", "design-changes-requested"); len(told) != 0 {
 				t.Fatalf("design-changes-requested notices = %#v, want none: the architect already heard the review the gate holds", told)
 			}
-			if gate := storedGate(t, pool, "LEGION-ROOT"); classify.DesignGateOpen(*gate) != tc.open {
+			if gate := storedGate(t, pool, "LEGION-100"); classify.DesignGateOpen(*gate) != tc.open {
 				t.Fatalf("gate after the registration = %#v, want open=%t", gate, tc.open)
 			}
 		})
@@ -1303,15 +1322,15 @@ func TestAReviewAnotherSupersededChangesNoGateState(t *testing.T) {
 	}{
 		{
 			name: "an approval older than the changes request the gate records",
-			gate: record.DesignGate{Issue: "LEGION-ROOT", ArtifactID: "artifact-root", LatestVersion: 4,
+			gate: record.DesignGate{Issue: "LEGION-100", ArtifactID: "artifact-root", LatestVersion: 4,
 				ToldChangesVersion: new(4), ToldChangesReason: "name the rollback path", ToldChangesMark: newer},
-			late: intake.DispatchArtifact{Key: "LEGION-ROOT", ArtifactID: "artifact-root", Kind: intake.DispatchArtifactApproved, Version: 4, Mark: superseded},
+			late: intake.DispatchArtifact{Key: "LEGION-100", ArtifactID: "artifact-root", Kind: intake.DispatchArtifactApproved, Version: 4, Mark: superseded},
 		},
 		{
 			name: "a changes request older than the approval the gate records",
-			gate: record.DesignGate{Issue: "LEGION-ROOT", ArtifactID: "artifact-root", LatestVersion: 4,
+			gate: record.DesignGate{Issue: "LEGION-100", ArtifactID: "artifact-root", LatestVersion: 4,
 				ApprovedVersion: new(4), ApprovedMark: newer},
-			late: intake.DispatchArtifact{Key: "LEGION-ROOT", ArtifactID: "artifact-root", Kind: intake.DispatchArtifactChangesRequested,
+			late: intake.DispatchArtifact{Key: "LEGION-100", ArtifactID: "artifact-root", Kind: intake.DispatchArtifactChangesRequested,
 				Version: 4, Reason: "name the rollback path", Mark: superseded},
 			open: true,
 		},
@@ -1324,13 +1343,13 @@ func TestAReviewAnotherSupersededChangesNoGateState(t *testing.T) {
 
 			applyFact(t, pool, admission, "superseded-review", tc.late)
 
-			if got := issue(t, pool, "LEGION-ROOT"); got.Answered() {
+			if got := issue(t, pool, "LEGION-100"); got.Answered() {
 				t.Fatalf("root after a review the person had already followed with another = %#v, want it still waiting", got)
 			}
-			if told := gateNotices(t, pool, "LEGION-ROOT", "design-changes-requested"); len(told) != 0 {
+			if told := gateNotices(t, pool, "LEGION-100", "design-changes-requested"); len(told) != 0 {
 				t.Fatalf("design-changes-requested notices = %#v, want none for a superseded review", told)
 			}
-			if gate := storedGate(t, pool, "LEGION-ROOT"); classify.DesignGateOpen(*gate) != tc.open {
+			if gate := storedGate(t, pool, "LEGION-100"); classify.DesignGateOpen(*gate) != tc.open {
 				t.Fatalf("gate after the superseded review = %#v, want open=%t", gate, tc.open)
 			}
 		})
@@ -1369,14 +1388,14 @@ func TestAReviewOfAnOlderVersionChangesNoGateState(t *testing.T) {
 	}{
 		{
 			name: "an approval of the older version after the newer one's told changes request",
-			gate: record.DesignGate{Issue: "LEGION-ROOT", ArtifactID: "artifact-root", LatestVersion: 2,
+			gate: record.DesignGate{Issue: "LEGION-100", ArtifactID: "artifact-root", LatestVersion: 2,
 				ToldChangesVersion: new(2), ToldChangesReason: "name the rollback path", ToldChangesMark: reviewed},
-			late: intake.DispatchArtifact{Key: "LEGION-ROOT", ArtifactID: "artifact-root", Kind: intake.DispatchArtifactApproved, Version: 1, Mark: late},
+			late: intake.DispatchArtifact{Key: "LEGION-100", ArtifactID: "artifact-root", Kind: intake.DispatchArtifactApproved, Version: 1, Mark: late},
 		},
 		{
 			name: "a changes request of the older version after the newer one's approval",
-			gate: record.DesignGate{Issue: "LEGION-ROOT", ArtifactID: "artifact-root", LatestVersion: 2, ApprovedVersion: new(2), ApprovedMark: reviewed},
-			late: intake.DispatchArtifact{Key: "LEGION-ROOT", ArtifactID: "artifact-root", Kind: intake.DispatchArtifactChangesRequested,
+			gate: record.DesignGate{Issue: "LEGION-100", ArtifactID: "artifact-root", LatestVersion: 2, ApprovedVersion: new(2), ApprovedMark: reviewed},
+			late: intake.DispatchArtifact{Key: "LEGION-100", ArtifactID: "artifact-root", Kind: intake.DispatchArtifactChangesRequested,
 				Version: 1, Reason: "name the rollback path", Mark: late},
 			open: true,
 		},
@@ -1384,19 +1403,19 @@ func TestAReviewOfAnOlderVersionChangesNoGateState(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			pool := migratedPool(t)
 			admission := newAdmission(t, 1, nil)
-			seedSlotted(t, pool, "LEGION-ROOT", "A")
+			seedSlotted(t, pool, "LEGION-100", "A")
 			seedGate(t, pool, tc.gate)
 
 			applyFact(t, pool, admission, "late-older-review", tc.late)
 
-			gate := storedGate(t, pool, "LEGION-ROOT")
+			gate := storedGate(t, pool, "LEGION-100")
 			if classify.DesignGateOpen(*gate) != tc.open || gate.LatestVersion != 2 {
 				t.Fatalf("gate after a late review of version 1 = %#v, want it at version 2 with open=%t", gate, tc.open)
 			}
 			if !tc.open && (gate.ToldChangesVersion == nil || *gate.ToldChangesVersion != 2 || gate.ToldChangesMark != reviewed) {
 				t.Fatalf("gate after a late approval of version 1 = %#v, want the told changes request of version 2 kept", gate)
 			}
-			if told := gateNotices(t, pool, "LEGION-ROOT", "design-changes-requested"); len(told) != 0 {
+			if told := gateNotices(t, pool, "LEGION-100", "design-changes-requested"); len(told) != 0 {
 				t.Fatalf("design-changes-requested notices = %#v, want none for a review of an older version", told)
 			}
 		})
@@ -1415,15 +1434,15 @@ func TestAPersonsActOnAnyAskOfTheRootAnswersItsQuestionWait(t *testing.T) {
 		answered bool
 	}{
 		{name: "a person's answer of another question", answered: true,
-			fact: intake.DispatchAskClosed{Key: "LEGION-ROOT", Ask: "ask-other", Kind: "question", State: "answered", Actor: alice, Mark: after}},
+			fact: intake.DispatchAskClosed{Key: "LEGION-100", Ask: "ask-other", Kind: "question", State: "answered", Actor: alice, Mark: after}},
 		{name: "a person's reply on another question", answered: true,
-			fact: intake.DispatchAskReply{Key: "LEGION-ROOT", Ask: "ask-other", WaitingOn: "agent", Actor: alice, Mark: after}},
+			fact: intake.DispatchAskReply{Key: "LEGION-100", Ask: "ask-other", WaitingOn: "agent", Actor: alice, Mark: after}},
 		{name: "a person's reply under the awaited question, closed", answered: true,
-			fact: intake.DispatchAskReply{Key: "LEGION-ROOT", Ask: "ask-root", Actor: alice, Mark: after}},
+			fact: intake.DispatchAskReply{Key: "LEGION-100", Ask: "ask-root", Actor: alice, Mark: after}},
 		{name: "a session's reply on another question",
-			fact: intake.DispatchAskReply{Key: "LEGION-ROOT", Ask: "ask-other", WaitingOn: "agent", Actor: outsider, Mark: after}},
+			fact: intake.DispatchAskReply{Key: "LEGION-100", Ask: "ask-other", WaitingOn: "agent", Actor: outsider, Mark: after}},
 		{name: "a person's act recorded before the wait began",
-			fact: intake.DispatchAskClosed{Key: "LEGION-ROOT", Ask: "ask-other", Kind: "question", State: "answered", Actor: alice,
+			fact: intake.DispatchAskClosed{Key: "LEGION-100", Ask: "ask-other", Kind: "question", State: "answered", Actor: alice,
 				Mark: record.EventMark{Seq: 9, At: handedBackAt.Add(-time.Minute)}}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1431,7 +1450,7 @@ func TestAPersonsActOnAnyAskOfTheRootAnswersItsQuestionWait(t *testing.T) {
 			admission := newAdmission(t, 1, nil)
 			awaitingRoot(t, pool, record.Awaiting{Ask: "ask-root", Since: handBack})
 			applyFact(t, pool, admission, "act", tc.fact)
-			if got := issue(t, pool, "LEGION-ROOT"); got.Answered() != tc.answered {
+			if got := issue(t, pool, "LEGION-100"); got.Answered() != tc.answered {
 				t.Fatalf("root waiting on ask-root after %s = %#v, want answered %t", tc.name, got, tc.answered)
 			}
 		})
@@ -1450,21 +1469,21 @@ func TestASessionClosingTheAwaitedQuestionEndsTheWait(t *testing.T) {
 		inTask string
 	}{
 		{name: "the architect resolves the question it superseded", ends: true, inTask: "closed by a session of your tree",
-			fact: intake.DispatchAskClosed{Key: "LEGION-ROOT", Ask: "ask-root", Kind: "question", State: "resolved", Actor: architect, Mark: record.EventMark{Seq: 11}}},
+			fact: intake.DispatchAskClosed{Key: "LEGION-100", Ask: "ask-root", Kind: "question", State: "resolved", Actor: architect, Mark: record.EventMark{Seq: 11}}},
 		{name: "settlement retracts it", ends: true, inTask: "retracted",
-			fact: intake.DispatchAskClosed{Key: "LEGION-ROOT", Ask: "ask-root", Kind: "question", State: "resolved", Actor: settler, Mark: record.EventMark{Seq: 11}}},
+			fact: intake.DispatchAskClosed{Key: "LEGION-100", Ask: "ask-root", Kind: "question", State: "resolved", Actor: settler, Mark: record.EventMark{Seq: 11}}},
 		{name: "a session outside the tree resolves it", ends: true, inTask: "closed by someone outside your tree",
-			fact: intake.DispatchAskClosed{Key: "LEGION-ROOT", Ask: "ask-root", Kind: "question", State: "resolved", Actor: outsider, Mark: record.EventMark{Seq: 11}}},
+			fact: intake.DispatchAskClosed{Key: "LEGION-100", Ask: "ask-root", Kind: "question", State: "resolved", Actor: outsider, Mark: record.EventMark{Seq: 11}}},
 		{name: "the architect resolves another question",
-			fact: intake.DispatchAskClosed{Key: "LEGION-ROOT", Ask: "ask-other", Kind: "question", State: "resolved", Actor: architect, Mark: record.EventMark{Seq: 11}}},
+			fact: intake.DispatchAskClosed{Key: "LEGION-100", Ask: "ask-other", Kind: "question", State: "resolved", Actor: architect, Mark: record.EventMark{Seq: 11}}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pool := migratedPool(t)
 			admission := newAdmission(t, 1, nil)
 			awaitingRoot(t, pool, record.Awaiting{Ask: "ask-root", Since: handBack})
-			seedArchitectClaim(t, pool, "LEGION-ROOT", architect.ID)
+			seedArchitectClaim(t, pool, "LEGION-100", architect.ID)
 			applyFact(t, pool, admission, "closed", tc.fact)
-			got := issue(t, pool, "LEGION-ROOT")
+			got := issue(t, pool, "LEGION-100")
 			if got.Answered() != tc.ends {
 				t.Fatalf("root after %s = %#v, want its wait ended %t", tc.name, got, tc.ends)
 			}
@@ -1484,27 +1503,27 @@ func TestASessionClosingTheAwaitedQuestionEndsTheWait(t *testing.T) {
 // handed the work back, and a root left waiting for a review the gate already holds would wait for
 // good.
 func TestAReviewTheGateAlreadyAppliedStillAnswersTheWaitItFollows(t *testing.T) {
-	changes := intake.DispatchArtifact{Key: "LEGION-ROOT", ArtifactID: "artifact-root", Kind: intake.DispatchArtifactChangesRequested,
+	changes := intake.DispatchArtifact{Key: "LEGION-100", ArtifactID: "artifact-root", Kind: intake.DispatchArtifactChangesRequested,
 		Version: 4, Reason: "name the rollback path", Mark: record.EventMark{Seq: 11, At: handedBackAt.Add(time.Minute)}}
 	pool := migratedPool(t)
 	admission := newAdmission(t, 1, nil)
-	seedSlotted(t, pool, "LEGION-ROOT", "A")
+	seedSlotted(t, pool, "LEGION-100", "A")
 	seedWaiting(t, pool, "LEGION-NEXT", "B")
-	seedArchitectClaim(t, pool, "LEGION-ROOT", architect.ID)
-	seedGate(t, pool, record.DesignGate{Issue: "LEGION-ROOT", ArtifactID: "artifact-root", LatestVersion: 4})
+	seedArchitectClaim(t, pool, "LEGION-100", architect.ID)
+	seedGate(t, pool, record.DesignGate{Issue: "LEGION-100", ArtifactID: "artifact-root", LatestVersion: 4})
 	// The gate applies the review, a newer version follows, and only then does the architect's
 	// hand-back start the wait; the review's own event is redelivered after all of it.
 	applyFact(t, pool, admission, "changes-v4", changes)
-	applyFact(t, pool, admission, "hand-back", intake.DispatchAskReply{Key: "LEGION-ROOT", Ask: "ask-approval", WaitingOn: "human",
+	applyFact(t, pool, admission, "hand-back", intake.DispatchAskReply{Key: "LEGION-100", Ask: "ask-approval", WaitingOn: "human",
 		Actor: architect, Mark: record.EventMark{Seq: 12, At: handedBackAt.Add(2 * time.Minute)}})
-	if waiting := issue(t, pool, "LEGION-ROOT"); !waiting.AwaitingPerson() || waiting.Answered() {
+	if waiting := issue(t, pool, "LEGION-100"); !waiting.AwaitingPerson() || waiting.Answered() {
 		t.Fatalf("root after the hand-back = %#v, want it waiting unanswered", waiting)
 	}
 	again := changes
 	again.Mark = record.EventMark{Seq: 13, At: handedBackAt.Add(3 * time.Minute)}
 	again.Reason = "name the rollback path"
 	applyFact(t, pool, admission, "changes-v4-again", again)
-	if got := issue(t, pool, "LEGION-ROOT"); !got.Answered() {
+	if got := issue(t, pool, "LEGION-100"); !got.Answered() {
 		t.Fatalf("root after the person's second review at the same version = %#v, want it answered", got)
 	}
 }
@@ -1516,23 +1535,23 @@ func TestAReviewTheGateAlreadyAppliedStillAnswersTheWaitItFollows(t *testing.T) 
 func TestARegistrationOfAnotherDocumentMovesTheWaitToIt(t *testing.T) {
 	pool := migratedPool(t)
 	admission := newAdmission(t, 1, nil)
-	seedSlotted(t, pool, "LEGION-ROOT", "A")
+	seedSlotted(t, pool, "LEGION-100", "A")
 	seedWaiting(t, pool, "LEGION-NEXT", "B")
-	seedArchitectClaim(t, pool, "LEGION-ROOT", architect.ID)
-	seedGate(t, pool, record.DesignGate{Issue: "LEGION-ROOT", ArtifactID: "artifact-root", LatestVersion: 4})
-	applyFact(t, pool, admission, "hand-back", intake.DispatchAskReply{Key: "LEGION-ROOT", Ask: "ask-approval", WaitingOn: "human", Actor: architect, Mark: handBack})
+	seedArchitectClaim(t, pool, "LEGION-100", architect.ID)
+	seedGate(t, pool, record.DesignGate{Issue: "LEGION-100", ArtifactID: "artifact-root", LatestVersion: 4})
+	applyFact(t, pool, admission, "hand-back", intake.DispatchAskReply{Key: "LEGION-100", Ask: "ask-approval", WaitingOn: "human", Actor: architect, Mark: handBack})
 	if _, err := intake.ApplyFact(context.Background(), pool, "api", "register-other", intake.GateRegistered{
-		Issue: "LEGION-ROOT", ArtifactID: "artifact-second", Version: 1, DispatchVersion: 1, Since: record.EventMark{Seq: 11},
+		Issue: "LEGION-100", ArtifactID: "artifact-second", Version: 1, DispatchVersion: 1, Since: record.EventMark{Seq: 11},
 	}, admission.engine, admission); err != nil {
 		t.Fatalf("register the second document: %v", err)
 	}
-	moved := issue(t, pool, "LEGION-ROOT")
+	moved := issue(t, pool, "LEGION-100")
 	if !moved.AwaitingPerson() || moved.Answered() || moved.Awaiting.Artifact != "artifact-second" || moved.Awaiting.GateVersion != 1 {
 		t.Fatalf("root after a registration of another document = %#v, want it waiting on artifact-second version 1", moved)
 	}
-	applyFact(t, pool, admission, "approved-second", intake.DispatchArtifact{Key: "LEGION-ROOT", ArtifactID: "artifact-second",
+	applyFact(t, pool, admission, "approved-second", intake.DispatchArtifact{Key: "LEGION-100", ArtifactID: "artifact-second",
 		Kind: intake.DispatchArtifactApproved, Version: 1, Mark: record.EventMark{Seq: 12, At: handedBackAt.Add(time.Minute)}})
-	if got := issue(t, pool, "LEGION-ROOT"); !got.Answered() {
+	if got := issue(t, pool, "LEGION-100"); !got.Answered() {
 		t.Fatalf("root after the approval of the document it now waits on = %#v, want it answered", got)
 	}
 }
@@ -1555,9 +1574,9 @@ func TestASeedVersionAnswersOnlyWhenDispatchShowsTheRequestWithTheAgent(t *testi
 			pool := migratedPool(t)
 			admission := newAdmission(t, 1, nil)
 			awaitingRoot(t, pool, record.Awaiting{GateVersion: 4, Artifact: "artifact-root", Since: handBack})
-			applyFact(t, pool, admission, "seed-version", intake.DispatchArtifact{Key: "LEGION-ROOT", ArtifactID: "artifact-root",
+			applyFact(t, pool, admission, "seed-version", intake.DispatchArtifact{Key: "LEGION-100", ArtifactID: "artifact-root",
 				Kind: intake.DispatchArtifactVersion, Version: 5, RequestWaitsOnAgent: tc.waitsOnAgent})
-			got := issue(t, pool, "LEGION-ROOT")
+			got := issue(t, pool, "LEGION-100")
 			if got.Answered() != tc.wantAnswered || got.Awaiting.GateVersion != tc.wantedVersion {
 				t.Fatalf("root after the seed's version = %#v, want answered %t on version %d", got, tc.wantAnswered, tc.wantedVersion)
 			}
@@ -1571,23 +1590,23 @@ func TestASeedVersionAnswersOnlyWhenDispatchShowsTheRequestWithTheAgent(t *testi
 func TestAnArtifactEventChangesNoGateWhenTheDesignGateIsOff(t *testing.T) {
 	pool := migratedPool(t)
 	admission := newAdmissionWithGate(t, 1, config.DesignGateOff, nil)
-	seedSlotted(t, pool, "LEGION-ROOT", "A")
-	seedArchitectClaim(t, pool, "LEGION-ROOT", architect.ID)
+	seedSlotted(t, pool, "LEGION-100", "A")
+	seedArchitectClaim(t, pool, "LEGION-100", architect.ID)
 	if _, err := intake.ApplyFact(context.Background(), pool, "api", "register-v4", intake.GateRegistered{
-		Issue: "LEGION-ROOT", ArtifactID: "artifact-root", Version: 4, DispatchVersion: 4,
+		Issue: "LEGION-100", ArtifactID: "artifact-root", Version: 4, DispatchVersion: 4,
 	}, admission.engine, admission); err != nil {
 		t.Fatalf("register gate v4: %v", err)
 	}
-	applyFact(t, pool, admission, "changes-v4", intake.DispatchArtifact{Key: "LEGION-ROOT", ArtifactID: "artifact-root",
+	applyFact(t, pool, admission, "changes-v4", intake.DispatchArtifact{Key: "LEGION-100", ArtifactID: "artifact-root",
 		Kind: intake.DispatchArtifactChangesRequested, Version: 4, Reason: "name the rollback path", Mark: record.EventMark{Seq: 11}})
-	gate := storedGate(t, pool, "LEGION-ROOT")
+	gate := storedGate(t, pool, "LEGION-100")
 	if gate == nil || !classify.DesignGateOpen(*gate) {
 		t.Fatalf("gate after a changes request with the design gate off = %#v, want it still open", gate)
 	}
-	if told := gateNotices(t, pool, "LEGION-ROOT", "design-changes-requested"); len(told) != 0 {
+	if told := gateNotices(t, pool, "LEGION-100", "design-changes-requested"); len(told) != 0 {
 		t.Fatalf("design-changes-requested notices with the design gate off = %#v, want none", told)
 	}
-	if got := issue(t, pool, "LEGION-ROOT"); got.AwaitingPerson() {
+	if got := issue(t, pool, "LEGION-100"); got.AwaitingPerson() {
 		t.Fatalf("root with the design gate off = %#v, want it still admitted", got)
 	}
 }

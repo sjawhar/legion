@@ -475,7 +475,7 @@ func TestADispatchAskHandedBackIsAHumanTurnReplyFromItsActor(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decode ask.handed_back: %v", err)
 	}
-	want := DispatchAskReply{Key: "CAPTURE-4", Ask: "6c83cb7f-8f4e-4820-9e05-7c94fa725007", WaitingOn: "human", Actor: dispatch.Actor{Kind: "session", ID: "session-architect"},
+	want := DispatchAskReply{Key: "CAPTURE-4", Ask: "6c83cb7f-8f4e-4820-9e05-7c94fa725007", Kind: "approval", WaitingOn: "human", Actor: dispatch.Actor{Kind: "session", ID: "session-architect"},
 		Mark: record.EventMark{Seq: 11, At: time.Date(2026, 10, 23, 18, 0, 0, 123456000, time.UTC)}}
 	if !reflect.DeepEqual(decoded.Fact, want) {
 		t.Fatalf("decoded ask.handed_back = %#v, want %#v", decoded.Fact, want)

@@ -247,6 +247,9 @@ func (s *server) gateRegister(w http.ResponseWriter, r *http.Request) {
 	fact := intake.GateRegistered{Issue: req.Issue, ArtifactID: artifactID, Version: req.Version, ApprovedVersion: approval.ApprovedLatest(),
 		ChangesRequestedVersion: changes, ChangesReason: reason, RequestWaitsOnAgent: approval.State == "awaiting" && approval.WaitingOn == "agent",
 		DispatchVersion: approval.LatestVersion, Since: record.EventMark{Seq: since}}
+	if approval.State == "awaiting" {
+		fact.RequestAsk = approval.AskID
+	}
 	review := record.EventMark{Seq: approval.Seq, At: approval.At}
 	if changes != 0 {
 		fact.ChangesRequestedMark = review

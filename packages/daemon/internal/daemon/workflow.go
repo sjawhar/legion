@@ -75,6 +75,9 @@ type workflowRuntime struct {
 	// catchUpRootTimeout bounds the boot's catch-up of one awaiting root; zero means bootTimeout. A
 	// test shortens it.
 	catchUpRootTimeout time.Duration
+	// catchUpRetryDelay is the wait between two reads of one root Dispatch refused with an error it
+	// may stop giving; zero means catchUpRetryDelay's default. A test shortens it.
+	catchUpRetryDelay time.Duration
 	// holdPollInterval is pollHoldRelease's ticker period; zero means the production default. A
 	// test shortens it to bound how long a release takes to observe.
 	holdPollInterval time.Duration

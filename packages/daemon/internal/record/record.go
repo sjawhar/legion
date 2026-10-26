@@ -94,48 +94,14 @@ type Issue struct {
 	// sequence than ClaimSeq is not applied.
 	ClaimedBy string
 	ClaimSeq  int64
-	// WaitFenceSeq is the highest Dispatch event sequence of the issue a wait started from, 0 for
-	// none. It outlives the wait, a resume and a re-admission: a hand-back or a question opened at
-	// or below it is an act a wait already covered, delivered late, and starts no wait
-	// (WaitFenced).
-	WaitFenceSeq int64
-	// GateFenceSeq is the highest issue sequence a register_gate read of Dispatch covered, 0 for
-	// none, kept the same way. That read decided the gate alone, so it fences only an event that
-	// would start a wait on the gate (GateFenced): a hand-back while the gate is closed. An
-	// ordinary question the read says nothing about is fenced by WaitFenceSeq alone.
-	GateFenceSeq int64
-}
-
-// WaitFenced says whether a Dispatch event at mark that would start a wait is one a wait already
-// covered: its sequence is at or below WaitFenceSeq. An event Dispatch gave no sequence is never
-// fenced.
-func (i Issue) WaitFenced(mark EventMark) bool {
-	return mark.Seq > 0 && mark.Seq <= i.WaitFenceSeq
-}
-
-// GateFenced says whether a Dispatch event at mark that would start a wait on the design gate is
-// one a registration's read of Dispatch already covered: its sequence is at or below
-// GateFenceSeq.
-func (i Issue) GateFenced(mark EventMark) bool {
-	return mark.Seq > 0 && mark.Seq <= i.GateFenceSeq
-}
-
-// RaiseWaitFence moves WaitFenceSeq up to seq, and reports whether it moved.
-func (i *Issue) RaiseWaitFence(seq int64) bool {
-	if seq <= i.WaitFenceSeq {
-		return false
-	}
-	i.WaitFenceSeq = seq
-	return true
-}
-
-// RaiseGateFence moves GateFenceSeq up to seq, and reports whether it moved.
-func (i *Issue) RaiseGateFence(seq int64) bool {
-	if seq <= i.GateFenceSeq {
-		return false
-	}
-	i.GateFenceSeq = seq
-	return true
+	// HandoutSeq is the highest Dispatch sequence of the issue the record held when the daemon last
+	// gave the root's architect work (Store.StartHandout), 0 for never. It is never lowered, and
+	// only StartHandout writes it: PutIssue keeps the stored value.
+	HandoutSeq int64
+	// DeclaredSeq is the lowest Dispatch sequence of a hand-back the architect made to a person
+	// since its last handout (Store.Declare), 0 when it made none. Only Declare and StartHandout
+	// write it: PutIssue keeps the stored value.
+	DeclaredSeq int64
 }
 
 // Repository is the repository the record names (Repo) in the spelling the record keeps: what
@@ -171,10 +137,11 @@ const HoldEscalated HoldReason = "escalated"
 // (Ask, the ask's id), or the closed design gate at the spec version it registered (GateVersion)
 // on the document it registered (Artifact), when a person answered it (AnsweredAt, nil until then),
 // with what (AnsweredBy) and that act's own detail (AnsweredDetail: the ask acted on, or the
-// version and reason of the review), and where on Dispatch the wait began (Since): the event that
-// started it (a hand-back, a question opened), or, for a registration, the point its read of
-// Dispatch began at. A person's act Dispatch recorded before Since never answers the wait. An
-// answered root waits for a slot ahead of every root that never ran (Waiting).
+// version and reason of the review), and where on Dispatch the wait began (Since): the earliest
+// hand-back the architect made since it was last given work (Issue.DeclaredSeq). It is a snapshot
+// of the wait's subject; what else is still with the person is the root's asks (RootAsk). A
+// person's act Dispatch recorded before Since never answers the wait. An answered root waits for a
+// slot ahead of every root that never ran (Waiting).
 type Awaiting struct {
 	Ask            string
 	GateVersion    int
@@ -199,6 +166,9 @@ const (
 	AnsweredByClosed Answer = "closed"
 	// AnsweredByReply is a person's act on another ask of the root.
 	AnsweredByReply Answer = "reply"
+	// AnsweredByTurn is a session handing a question of the root's wait to the agent's turn: a
+	// progress note leaves no question with the person, so the architect looks again.
+	AnsweredByTurn Answer = "turn"
 	// AnsweredByApproval is a person's approval that opened the root's design gate.
 	AnsweredByApproval Answer = "approved"
 	// AnsweredByChanges is a person's changes request on the root's spec, which the gate records
@@ -577,7 +547,9 @@ const (
 // seed or the boot catch-up, tells the architect nothing new; another review does, even at that
 // version with that reason. An approval clears the told record and a changes request clears the
 // approval, so the two marks never stand together: the one that is set is the gate's newest
-// applied review (classify.LatestReview).
+// applied review (classify.LatestReview). RequestAsk is the approval request the registration read
+// open on the document, "" when none was open: its RootAsk says whether the request is still with
+// the person.
 type DesignGate struct {
 	Issue              string
 	ArtifactID         string
@@ -587,45 +559,42 @@ type DesignGate struct {
 	ToldChangesVersion *int
 	ToldChangesReason  string
 	ToldChangesMark    EventMark
+	RequestAsk         string
 }
 
-// PersonAct is an act on an ask of a root and where Dispatch recorded it (Mark, its event's
-// sequence on the issue and its time): a person's answer or resolution that closed the ask, a
-// person's reply that left the turn with the agent (ByPerson), or a close of the ask by anyone
-// else — a session of the tree, Dispatch's settlement — which ends that ask and nothing more.
-// AnswersGate says whether it answers a wait on the root's design gate as well as one on that ask
-// (the workflow's personActed). Dispatch's intake retries a delivery, so the event that starts a
-// wait — a question opened, a hand-back — can reach the daemon after an act that followed it; the
-// root keeps every such act, and a wait whose start one of them follows starts none, since what it
-// would wait on has happened.
-type PersonAct struct {
-	Issue       string
-	Ask         string
-	Mark        EventMark
-	AnswersGate bool
-	ByPerson    bool
+// RootAsk is the daemon's mirror of Dispatch's state of one ask of a root, last writer wins by the
+// issue's event sequence. Seq is the newest event or read applied to its state (Open, WaitingOn,
+// ClosedSeq, ClosedBy): an older one changes none of it. Kind (`question`, `approval`, "" until an
+// event names it) and ByTree (a session of the root's tree opened it) are facts of its opening,
+// kept whatever order its events arrive in. PersonSeq is the newest act of a person that answers
+// it: an answer or resolution of a question, or a reply that left the open ask with the agent.
+// WaitingOn is `human` or `agent` while Open, "" once closed, and ClosedBy who closed it.
+type RootAsk struct {
+	Issue     string
+	Ask       string
+	Kind      string
+	Open      bool
+	WaitingOn string
+	Seq       int64
+	ByTree    bool
+	PersonSeq int64
+	ClosedSeq int64
+	ClosedBy  string
 }
 
-// PendingWait is a wait a root would have started but did not: the event that would start it (an
-// architect's question on the root, a hand-back, a closed gate registered) arrived while the root
-// already waited, or was answered and not yet resumed, or while a guard kept its slot (a member of
-// its tree mid-phase, a claim a person holds). It names the ask (Ask) or the closed gate's version
-// on its document (GateVersion, Artifact), and the event's place in the issue's event log (Since).
-// The root keeps every one until it is answered, a wait starts on it, or the root leaves the
-// workflow, so the slot goes back when the guard clears and the resumed architect is told of the
-// asks still with the human.
-type PendingWait struct {
-	Issue       string
-	Ask         string
-	GateVersion int
-	Artifact    string
-	Since       EventMark
-}
+// Who closed an ask (RootAsk.ClosedBy).
+const (
+	ClosedByPerson     = "person"
+	ClosedByTree       = "tree"
+	ClosedBySettlement = "settlement"
+	ClosedByOther      = "other"
+)
 
-// Awaiting is the wait p would start.
-func (p PendingWait) Awaiting() Awaiting {
-	return Awaiting{Ask: p.Ask, GateVersion: p.GateVersion, Artifact: p.Artifact, Since: p.Since}
-}
+// WithHuman says whether the ask is open and waits on the person.
+func (a RootAsk) WithHuman() bool { return a.Open && a.WaitingOn == "human" }
+
+// Question says whether the ask is an ordinary question, or one no event has named the kind of.
+func (a RootAsk) Question() bool { return a.Kind != "approval" }
 
 // Slot is an active admission slot.
 type Slot struct {
@@ -736,21 +705,19 @@ type Store interface {
 	// gate and each copy a hand-over carried to a child of its tree.
 	GatesForArtifact(ctx context.Context, tx pgx.Tx, artifactID string) ([]DesignGate, error)
 	PutGate(ctx context.Context, tx pgx.Tx, gate DesignGate) error
-	// RecordPersonAct records an act on an ask of issue, at the place in the issue's event log
-	// Dispatch recorded it. A second record of the same event changes nothing.
-	RecordPersonAct(ctx context.Context, tx pgx.Tx, act PersonAct) error
-	// PersonActs is every act recorded on issue's asks, in event order.
-	PersonActs(ctx context.Context, tx pgx.Tx, issue string) ([]PersonAct, error)
-	// ForgetPersonActs drops every act recorded on the issue, and every wait it holds pending,
-	// which leave the workflow with it.
-	ForgetPersonActs(ctx context.Context, tx pgx.Tx, issue string) error
-	// HoldPendingWait keeps a wait the root would have started, keyed by its event's place in the
-	// issue's event log. A second hold of the same event changes nothing.
-	HoldPendingWait(ctx context.Context, tx pgx.Tx, pending PendingWait) error
-	// PendingWaits is every wait issue holds pending, in event order.
-	PendingWaits(ctx context.Context, tx pgx.Tx, issue string) ([]PendingWait, error)
-	// DropPendingWait drops the pending wait of issue whose event is at seq.
-	DropPendingWait(ctx context.Context, tx pgx.Tx, issue string, seq int64) error
+	// RootAsk is the mirror row of ask on issue, nil when it has none.
+	RootAsk(ctx context.Context, tx pgx.Tx, issue, ask string) (*RootAsk, error)
+	// PutRootAsk writes ask's mirror row. A row whose stored Seq is newer than ask's is kept.
+	PutRootAsk(ctx context.Context, tx pgx.Tx, ask RootAsk) error
+	// RootAsks is the mirror rows of each of issues, by issue and then ask, in one read.
+	RootAsks(ctx context.Context, tx pgx.Tx, issues []string) (map[string][]RootAsk, error)
+	// StartHandout records that the daemon gives issue's architect work now: HandoutSeq rises to
+	// the highest Dispatch sequence the record holds of the issue (its last observation, its claim,
+	// its wait's start, its mirrored asks, its gate's reviews), and DeclaredSeq clears.
+	StartHandout(ctx context.Context, tx pgx.Tx, issue string) error
+	// Declare records a hand-back to a person at seq: DeclaredSeq becomes the lower of itself and
+	// seq.
+	Declare(ctx context.Context, tx pgx.Tx, issue string, seq int64) error
 	Slots(ctx context.Context, tx pgx.Tx) ([]Slot, error)
 	PutSlot(ctx context.Context, tx pgx.Tx, slot Slot) error
 	ReleaseSlot(ctx context.Context, tx pgx.Tx, issue string) error
