@@ -1,4 +1,4 @@
-import { expect, type Page, type Response, test } from "@playwright/test";
+import { expect, type Page, test } from "@playwright/test";
 
 import {
   agentRow,
@@ -9,30 +9,19 @@ import {
   reviewerSession,
   seedAgents,
 } from "./agents";
-import { watchWrites } from "./keyed-writes";
+import { dropFirstAnswer, replayed, watchWrites } from "./keyed-writes";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
 // A message to one session goes under an `Idempotency-Key`, and the page tries it again under
-// that key until Dispatch answers it (`sendKeyedAgentMessage`); a broadcast is keyed and kept the
-// same way (`broadcast-queue.ts`). These rows run both against the real server: an attempt whose
-// answer the page never gets, and one a server that is down answers 503, each end in one message
-// per recipient and the composer cleared. Dispatch answers a repeat under a key it has answered
-// with the first answer's status, marked `Idempotency-Replayed: ?1`; on these two routes it first
-// sends whatever is still owed and reads the message or broadcast afresh.
+// that key until Dispatch answers it (`writeUnderKey`, the one loop every write the page makes
+// runs); a broadcast is keyed and kept the same way. These rows run both against the real server:
+// an attempt whose answer the page never gets, and one a server that is down answers 503, each
+// end in one message per recipient and the composer cleared. Dispatch answers a repeat under a key
+// it has answered with the first answer's status, marked `Idempotency-Replayed: ?1`.
 
 const messages = `/api/v1/agents/${plannerSession.session_id}/messages`;
 const broadcasts = "/api/v1/broadcasts";
-
-/** The first answer to a `POST` to `path` that Dispatch replays from a key it already answered. */
-function replayed(page: Page, path: string): Promise<Response> {
-  return page.waitForResponse(
-    (response) =>
-      response.request().method() === "POST" &&
-      new URL(response.url()).pathname === path &&
-      response.headers()["idempotency-replayed"] === "?1"
-  );
-}
 
 /** Opens the Planner's composer from the keyboard, types `body` and sends it. */
 async function send(page: Page, body: string): Promise<void> {
@@ -68,20 +57,13 @@ test("a send whose answer is lost is tried again under its key, and delivered on
     const posts = watchWrites(page, "POST", messages);
     // The first POST reaches Dispatch, which makes the message and sends it; its answer is lost on
     // the way back, as a dropped connection loses it.
-    let firstAnswer: number | undefined;
-    await page.route(`**${messages}`, async (route) => {
-      if (route.request().method() !== "POST" || firstAnswer !== undefined) {
-        return route.fallback();
-      }
-      firstAnswer = (await route.fetch()).status();
-      return route.abort("failed");
-    });
-    const landed = replayed(page, messages);
+    const firstAnswer = dropFirstAnswer(page, `**${messages}`, "POST");
+    const landed = replayed(page, "POST", messages);
     await openAgents(page);
     await send(page, "Exactly once, please");
 
     const answer = await landed;
-    expect(firstAnswer).toBe(201);
+    expect(await firstAnswer).toBe(201);
     // The repeat is answered what the first attempt was.
     expect(answer.status()).toBe(201);
     expect(posts).toHaveLength(2);
@@ -170,24 +152,12 @@ test("a send held through a reload is resumed under its key, and delivered once"
     });
     // The first POST reaches Dispatch, which makes the message and sends it; its answer is held
     // until the page that asked is gone.
-    const reached = Promise.withResolvers<void>();
     const reloaded = Promise.withResolvers<void>();
-    let firstAnswer: number | undefined;
-    await page.route(`**${messages}`, async (route) => {
-      if (route.request().method() !== "POST" || firstAnswer !== undefined) {
-        return route.fallback();
-      }
-      firstAnswer = (await route.fetch()).status();
-      reached.resolve();
-      await reloaded.promise;
-      // The page cancelled the request with the reload; there is nothing left to answer.
-      await route.abort("failed").catch(() => undefined);
-    });
-    const resumed = replayed(page, messages);
+    const firstAnswer = dropFirstAnswer(page, `**${messages}`, "POST", reloaded.promise);
+    const resumed = replayed(page, "POST", messages);
     await openAgents(page);
     await send(page, "Kept through the reload");
-    await reached.promise;
-    expect(firstAnswer).toBe(201);
+    expect(await firstAnswer).toBe(201);
 
     await page.reload();
     reloaded.resolve();
@@ -230,20 +200,13 @@ test("a broadcast whose answer is lost is tried again under its key, and each ag
   try {
     const page = await alice.newPage();
     const posted = postedBroadcasts(page);
-    let firstAnswer: number | undefined;
-    await page.route(`**${broadcasts}`, async (route) => {
-      if (route.request().method() !== "POST" || firstAnswer !== undefined) {
-        return route.fallback();
-      }
-      firstAnswer = (await route.fetch()).status();
-      return route.abort("failed");
-    });
-    const landed = replayed(page, broadcasts);
+    const firstAnswer = dropFirstAnswer(page, `**${broadcasts}`, "POST");
+    const landed = replayed(page, "POST", broadcasts);
     await openAgents(page);
     await broadcast(page, "Exactly once, everyone");
 
     const answer = await landed;
-    expect(firstAnswer).toBe(201);
+    expect(await firstAnswer).toBe(201);
     // The page opens the broadcast the repeat was answered with, which is the one the lost
     // answer made.
     await page.waitForURL(/\/agents\/broadcasts\/[0-9a-f-]+$/u);
@@ -287,24 +250,12 @@ test("a broadcast held through a reload is resumed under its key, and each agent
       prompts.push(dialog.type());
       void dialog.accept();
     });
-    const reached = Promise.withResolvers<void>();
     const reloaded = Promise.withResolvers<void>();
-    let firstAnswer: number | undefined;
-    await page.route(`**${broadcasts}`, async (route) => {
-      if (route.request().method() !== "POST" || firstAnswer !== undefined) {
-        return route.fallback();
-      }
-      firstAnswer = (await route.fetch()).status();
-      reached.resolve();
-      await reloaded.promise;
-      // The page cancelled the request with the reload; there is nothing left to answer.
-      await route.abort("failed").catch(() => undefined);
-    });
-    const resumed = replayed(page, broadcasts);
+    const firstAnswer = dropFirstAnswer(page, `**${broadcasts}`, "POST", reloaded.promise);
+    const resumed = replayed(page, "POST", broadcasts);
     await openAgents(page);
     await broadcast(page, "Kept through the reload");
-    await reached.promise;
-    expect(firstAnswer).toBe(201);
+    expect(await firstAnswer).toBe(201);
 
     await page.reload();
     reloaded.resolve();

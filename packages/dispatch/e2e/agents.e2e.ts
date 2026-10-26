@@ -1,11 +1,12 @@
 import { expect, type Locator, type Page, test } from "@playwright/test";
-import type { Message } from "../web/src/api/types";
+import type { CreateBroadcastInput, Message } from "../web/src/api/types";
 import {
   agentRow,
   BROADCAST_REFUSED,
   broadcastSends,
   type FakeSession,
   getSentMessages,
+  isBroadcastInput,
   postedBroadcasts,
   refuseBroadcasts,
   setLiveSessions,
@@ -1346,10 +1347,10 @@ test("a second broadcast pressed while the first is on the wire waits its turn, 
     // a key already let through goes straight on: the page asks again while Dispatch's answer
     // shows a recipient still pending (`broadcastSends`).
     const held = [Promise.withResolvers<void>(), Promise.withResolvers<void>()];
-    const posted: KeyedWrite<{ readonly body: string }>[] = [];
+    const posted: KeyedWrite<CreateBroadcastInput>[] = [];
     await page.route("**/api/v1/broadcasts", async (route) => {
       if (route.request().method() !== "POST") return route.fallback();
-      const send = keyedWrite<{ readonly body: string }>(route.request());
+      const send = keyedWrite(route.request(), isBroadcastInput);
       if (posted.some(({ key }) => key === send.key)) {
         return route.fallback();
       }

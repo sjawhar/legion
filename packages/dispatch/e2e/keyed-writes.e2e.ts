@@ -1,8 +1,8 @@
-import { expect, type Locator, type Page, type Route, test } from "@playwright/test";
+import { expect, type Locator, type Page, test } from "@playwright/test";
 
 import type { Event } from "../web/src/api/types";
 import { createAsk, createIssue, createProject, getAsk, getIssue, getIssueEvents } from "./api";
-import { watchWrites } from "./keyed-writes";
+import { dropFirstAnswer, replayed, watchWrites } from "./keyed-writes";
 import { sql } from "./psql";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
@@ -29,31 +29,6 @@ test.beforeEach(async () => {
  *  (`PendingWritesIndicator`); gone while none is pending. */
 function pendingWrites(page: Page): Locator {
   return page.getByRole("region", { name: "Pending changes" });
-}
-
-/** Lets the first `method` request through to Dispatch and drops its answer, as a connection
- *  lost on the way back drops it; every later request goes through untouched. Resolves with the
- *  status Dispatch answered the dropped one. */
-async function dropFirstAnswer(page: Page, pattern: string, method: string): Promise<number> {
-  const { promise, resolve } = Promise.withResolvers<number>();
-  let dropped = false;
-  await page.route(pattern, async (route: Route) => {
-    if (route.request().method() !== method || dropped) return route.fallback();
-    dropped = true;
-    resolve((await route.fetch()).status());
-    return route.abort("failed");
-  });
-  return promise;
-}
-
-/** The first answer the page gets to a `method` request to `path` that Dispatch replayed. */
-function replayed(page: Page, method: string, path: string) {
-  return page.waitForResponse(
-    (response) =>
-      response.request().method() === method &&
-      new URL(response.url()).pathname === path &&
-      response.headers()["idempotency-replayed"] === "?1"
-  );
 }
 
 /** The events of `type` on `issue`. */
@@ -122,20 +97,12 @@ test("a status change whose answer is lost survives a reload, lands once, and th
     });
     // The first PATCH reaches Dispatch, which writes the status; its answer is held until the
     // page that asked is gone.
-    const reached = Promise.withResolvers<number>();
     const reloaded = Promise.withResolvers<void>();
-    let held = false;
-    await page.route(`**${path}`, async (route) => {
-      if (route.request().method() !== "PATCH" || held) return route.fallback();
-      held = true;
-      reached.resolve((await route.fetch()).status());
-      await reloaded.promise;
-      await route.abort("failed").catch(() => undefined);
-    });
+    const reached = dropFirstAnswer(page, `**${path}`, "PATCH", reloaded.promise);
     const resumed = replayed(page, "PATCH", path);
     await page.goto(`/issues/${issue.key}`);
     await page.getByLabel("Status").selectOption("todo");
-    expect(await reached.promise).toBe(200);
+    expect(await reached).toBe(200);
     const indicator = pendingWrites(page);
     await expect(indicator.getByRole("status")).toHaveText("Saving 1 change…");
 

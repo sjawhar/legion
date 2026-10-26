@@ -1,3 +1,4 @@
+import { DELIVERY_CAPABILITIES } from "@legion/contracts";
 import { expect, type Locator, type Page } from "@playwright/test";
 
 import type { BroadcastCreated, CreateBroadcastInput } from "../web/src/api/types";
@@ -54,6 +55,15 @@ export async function setSessionSendStatus(sessionID: string, status: 200 | 404)
   });
 }
 
+/** Holds every send to the session `ms` before the fake Envoy answers it, as a listener slow to
+ *  take it would; 0 answers at once again. Dispatch's listener client gives up on an answer at
+ *  5 s, so a hold that is to end in a delivery stays under that. */
+export async function setSessionSendDelay(sessionID: string, ms: number): Promise<void> {
+  await fixtureRequest(`/__fixture/sessions/${encodeURIComponent(sessionID)}`, "PATCH", {
+    send_delay_ms: ms,
+  });
+}
+
 /** What the fake listener's session store holds for an id, the question its per-session route
  *  answers. Only `absent` is a session that has ended. */
 export type SessionRecord = "present" | "absent" | "unreadable";
@@ -84,10 +94,25 @@ export async function getSentMessages(): Promise<Record<string, unknown>[]> {
   >;
 }
 
+/** Whether a body the page posted is a broadcast's input. */
+export function isBroadcastInput(body: unknown): body is CreateBroadcastInput {
+  return (
+    typeof body === "object" &&
+    body !== null &&
+    "body" in body &&
+    typeof body.body === "string" &&
+    "delivery" in body &&
+    DELIVERY_CAPABILITIES.some((mode) => mode === body.delivery) &&
+    "session_ids" in body &&
+    Array.isArray(body.session_ids) &&
+    body.session_ids.every((id) => typeof id === "string")
+  );
+}
+
 /** Every broadcast request the page posts from here on, in order, as the body it sent and the
  *  `Idempotency-Key` it sent it under - a route that fulfils a request itself still lists it. */
 export function postedBroadcasts(page: Page): KeyedWrite<CreateBroadcastInput>[] {
-  return watchWrites<CreateBroadcastInput>(page, "POST", "/api/v1/broadcasts");
+  return watchWrites(page, "POST", "/api/v1/broadcasts", isBroadcastInput);
 }
 
 /** Every broadcast the page sends from here on, in order: each press, Retry and Restore draft, as
@@ -103,7 +128,7 @@ export function broadcastSends(page: Page): KeyedWrite<CreateBroadcastInput>[] {
     request.method() === "POST" && new URL(request.url()).pathname === "/api/v1/broadcasts";
   page.on("request", (request) => {
     if (!isBroadcastPost(request)) return;
-    const send = keyedWrite<CreateBroadcastInput>(request);
+    const send = keyedWrite(request, isBroadcastInput);
     if (!owed.delete(send.key)) sends.push(send);
   });
   page.on("response", async (response) => {

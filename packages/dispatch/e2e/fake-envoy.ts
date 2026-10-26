@@ -49,6 +49,9 @@ interface FakeEnvoyState {
    *  a seeded session starts in. */
   readonly records: Map<string, SessionRecord>;
   readonly sendStatuses: Map<string, 200 | 404>;
+  /** How long a send to a session is held before it is answered, in milliseconds, as a listener
+   *  slow to take it would hold it; an id named by no entry here is answered at once. */
+  readonly sendDelays: Map<string, number>;
   interests: FakeInterest[];
   readonly sentMessages: SentMessage[];
   /** (idempotency key, recipient) pairs this stand-in has already published, the stream's own
@@ -63,6 +66,7 @@ function emptyState(): FakeEnvoyState {
     liveSessions: new Set(),
     publishedKeys: new Set(),
     records: new Map(),
+    sendDelays: new Map(),
     sendStatuses: new Map(),
     sentMessages: [],
     sessions: [],
@@ -141,6 +145,8 @@ Bun.serve({
     if (request.method === "POST" && url.pathname === "/v1/messages/send") {
       const message = (await request.json()) as SentMessage;
       state.sentMessages.push(message);
+      const delay = state.sendDelays.get(message.target_session) ?? 0;
+      if (delay > 0) await Bun.sleep(delay);
       const sendStatus = state.sendStatuses.get(message.target_session);
       if (
         sendStatus === 404 ||
@@ -188,6 +194,7 @@ Bun.serve({
       const body = (await request.json()) as {
         live?: boolean;
         record?: SessionRecord;
+        send_delay_ms?: number;
         send_status?: 200 | 404;
       };
       if (!state.sessions.some((session) => session.session_id === sessionID)) {
@@ -202,6 +209,15 @@ Bun.serve({
           return Response.json({ error: "send_status must be 200 or 404" }, { status: 400 });
         }
         state.sendStatuses.set(sessionID, body.send_status);
+      }
+      if (body.send_delay_ms !== undefined) {
+        if (!Number.isInteger(body.send_delay_ms) || body.send_delay_ms < 0) {
+          return Response.json(
+            { error: "send_delay_ms must be a whole number of milliseconds, 0 or more" },
+            { status: 400 }
+          );
+        }
+        state.sendDelays.set(sessionID, body.send_delay_ms);
       }
       if (body.record !== undefined) {
         if (!["absent", "present", "unreadable"].includes(body.record)) {
@@ -218,6 +234,7 @@ Bun.serve({
       return Response.json({
         live: state.liveSessions.has(sessionID),
         record: state.records.get(sessionID) ?? "present",
+        send_delay_ms: state.sendDelays.get(sessionID) ?? 0,
         send_status: state.sendStatuses.get(sessionID) ?? 200,
         session_id: sessionID,
       });
