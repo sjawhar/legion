@@ -15,6 +15,8 @@ import (
 	"slices"
 	"strings"
 
+	"golang.org/x/term"
+
 	"github.com/sjawhar/legion/daemon/internal/api"
 	legionclaim "github.com/sjawhar/legion/daemon/internal/claim" // main_test.go's `claim` helper holds the bare name
 	"github.com/sjawhar/legion/daemon/internal/config"
@@ -34,6 +36,9 @@ import (
 // and the session finds that file through the variable with "_FILE" appended, as every pane finds
 // a secret file.
 const controllerSecretVariable = "LEGION_CONTROLLER_SECRET"
+
+// stdinIsTerminal says whether this process's stdin is a terminal; a test replaces it.
+var stdinIsTerminal = func() bool { return term.IsTerminal(int(os.Stdin.Fd())) }
 
 // controllerCommands is `legion controller`'s subcommands, the one list of them `legion controller
 // --help` names.
@@ -67,8 +72,10 @@ func runControllerStart(ctx context.Context, args []string, stdout, stderr io.Wr
 // controllerStart is `legion controller start`, the operator's side of the controller under
 // `controller: operator`, where the daemon launches none. In order, and nothing is kept, and nothing
 // but the probe is launched, until the daemon has answered: read the strict operator-side file;
-// refuse an operator token file others can read, a blank or unreadable Envoy or Dispatch token
-// file, a NATS nkey seed file that is blank, unreadable, or holds no nkey user seed, an
+// refuse an operator token file others can read, then a stdin that is no terminal (stdinIsTerminal:
+// given a positional word there, Oh My Pi runs headless print mode, which would run the start
+// command after the mint revoked the running controller), a blank or unreadable Envoy or Dispatch
+// token file, a NATS nkey seed file that is blank, unreadable, or holds no nkey user seed, an
 // instructions file that is missing or blank, and an Oh My Pi invocation that does not resolve;
 // then probe that Oh My Pi as the controller will run it — the launch prefix, the invocation, the
 // controller's whole environment, in
@@ -90,9 +97,10 @@ func runControllerStart(ctx context.Context, args []string, stdout, stderr io.Wr
 // `<state_dir>/github-credential.log` rather than this process's streams, and stopping when Oh My
 // Pi exits or the daemon says the capability is no longer current
 // (controllerCredentialSuperseded); then run Oh My Pi interactive — the launch prefix and the
-// resolved invocation with one joined `--append-system-prompt`, no `--resume`, no `--mode rpc`,
-// and daemon.ControllerStartMessage as LEGION_CONTROLLER_START_MESSAGE in its environment for the
-// extension to send as the first turn — in the foreground with the same environment, and answer
+// resolved invocation with one joined `--append-system-prompt` and the one positional word
+// daemon.ControllerStartCommand, no `--resume`, no `--mode rpc`, and daemon.ControllerStartMessage
+// as LEGION_CONTROLLER_START_MESSAGE in its environment for that pi-legion command to send as the
+// first turn — in the foreground with the same environment, and answer
 // its exit code. A refusal before the secret is written removes the directories made for the
 // probe, so the state directory is as it was.
 func controllerStart(ctx context.Context, configPath, daemonURL string, stderr io.Writer) (int, error) {
@@ -110,6 +118,13 @@ func controllerStart(ctx context.Context, configPath, daemonURL string, stderr i
 	operatorToken, err := config.ReadPrivateSecretPointer("operator_token_file", cfg.OperatorTokenFile)
 	if err != nil {
 		return 0, err
+	}
+	// Before every other check, but after the operator token file's own, which a script with no
+	// terminal relies on reaching: with a positional word and a stdin that is no terminal, Oh My Pi
+	// runs print mode, headless, and would run the start command only after the mint had revoked the
+	// running controller.
+	if !stdinIsTerminal() {
+		return 0, errors.New("stdin is not a terminal: Oh My Pi would run headless print mode, running the controller start command after the daemon's mint had revoked the running controller; run `legion controller start` at a terminal")
 	}
 	// Every check this machine can make on its own comes before the fetch, and none of them writes
 	// under the state directory but the probe's own directory, removed again on a refusal: the
@@ -232,17 +247,18 @@ func controllerStart(ctx context.Context, configPath, daemonURL string, stderr i
 	// The daemon's design gate policy, then the project's whole repository list (fetched and
 	// validated above, before the capability mint), is the controller's addressing, the line its
 	// take comment reads before it promises anyone a design approval (skill://legion-controller).
-	// The start message travels as LEGION_CONTROLLER_START_MESSAGE (controllerEnvironment) rather
-	// than a CLI word: the pi-legion extension sends it as the session's first turn once its claim
-	// succeeds, before it opens the live wake subscription, so a started or restarted controller
-	// runs its start procedure at once and deterministically, never racing a wake for the one
-	// first-turn slot.
+	// The start message travels as LEGION_CONTROLLER_START_MESSAGE (controllerEnvironment) and the
+	// command line ends with the word daemon.ControllerStartCommand: Oh My Pi runs that word as a
+	// prompt once its startup is over and its TUI listens, and the pi-legion command of that name
+	// sends the start message as the session's first turn, so a started or restarted controller runs
+	// its start procedure at once and deterministically, never racing a wake for the one first-turn
+	// slot.
 	addressing := daemon.DesignGateFragment(designGate) + " " + daemon.RepositoriesSentence(repositories)
 	command := omplaunch.WithPrefix(cfg.OmpLaunchPrefix, invocation) + " " + omplaunch.SystemPromptArgument(runtime.PromptParts{
 		RolePromptPaths:            controllerPrompts,
 		Addressing:                 addressing,
 		DeploymentInstructionsPath: instructionsFile,
-	})
+	}) + " " + shellprefix.Word(daemon.ControllerStartCommand)
 	fmt.Fprintf(stderr, "[legion] starting the controller for %s against %s; state in %s\n", cfg.Project, cfg.DaemonURL, stateDir)
 	// Interactive and in the foreground: the operator's terminal is Oh My Pi's. The child is not
 	// bound to ctx — a Ctrl-C reaches Oh My Pi through the terminal's process group and is its to
@@ -270,8 +286,9 @@ func controllerStart(ctx context.Context, configPath, daemonURL string, stderr i
 // environment: the controller marker and role, the daemon, project and state directory, the Envoy,
 // GitHub and Dispatch settings every pane carries, PI_SHELL_PREFIX, which keeps this state
 // directory's legion launcher and gh wrapper first in the agent's bash tool as on every pane, and
-// LEGION_CONTROLLER_START_MESSAGE, which the pi-legion extension sends as the session's first turn
-// once its claim succeeds (daemon.ControllerStartMessage). LEGION_GH_OWNERS_DIR names
+// LEGION_CONTROLLER_START_MESSAGE, which the pi-legion extension's daemon.ControllerStartCommand,
+// the word on Oh My Pi's command line, sends as the session's first turn
+// (daemon.ControllerStartMessage). LEGION_GH_OWNERS_DIR names
 // `<state_dir>/gh`, the gh bundle controllerStartGitHubCredential writes and keeps fresh, and
 // LEGION_GH_PATH gh, the real gh the wrapper runs; GH_CONFIG_DIR names the bundle's root here, an
 // empty directory when the daemon has no GitHub App, and controllerStart points it at the default

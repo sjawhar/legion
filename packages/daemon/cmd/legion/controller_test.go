@@ -363,6 +363,10 @@ exit %[2]d
 		t.Fatal(err)
 	}
 	t.Setenv("LEGION_GH_PATH", c.gh)
+	// The operator runs the command at a terminal; `go test`'s stdin is none.
+	isTerminal := stdinIsTerminal
+	stdinIsTerminal = func() bool { return true }
+	t.Cleanup(func() { stdinIsTerminal = isTerminal })
 	c.installPlugin(api.DaemonAPIVersion)
 	return c
 }
@@ -624,9 +628,10 @@ func TestControllerStartWritesTheSecretAndTheControllersFilesUnderTheStateDirect
 
 // Oh My Pi runs through the launch prefix, interactive (no --mode rpc, no --resume), with one
 // --append-system-prompt holding the controller prompt, the daemon's design gate policy, and the
-// deployment instructions; under the operator's own environment plus exactly the shared
-// controller environment — the secrets as file pointers, never values — including
-// LEGION_CONTROLLER_START_MESSAGE, which the extension sends as the session's first turn.
+// deployment instructions, then the one word daemon.ControllerStartCommand; under the operator's own
+// environment plus exactly the shared controller environment — the secrets as file pointers, never
+// values — including LEGION_CONTROLLER_START_MESSAGE, which that pi-legion command sends as the
+// session's first turn.
 func TestControllerStartLaunchesOhMyPiWithTheSharedControllerEnvironment(t *testing.T) {
 	d := newControllerDaemon(t)
 	c := newControllerStart(t, d, controllerOptions{})
@@ -654,10 +659,11 @@ func TestControllerStartLaunchesOhMyPiWithTheSharedControllerEnvironment(t *test
 		t.Fatalf("read the deployment instructions: %v", err)
 	}
 	// `$(cat …)` drops each file's trailing newlines, as a shell does. The start message travels
-	// as LEGION_CONTROLLER_START_MESSAGE, not a CLI word: argv carries only the system prompt.
+	// as LEGION_CONTROLLER_START_MESSAGE; argv ends with the command that sends it.
 	wantArgv := []string{"--append-system-prompt",
 		strings.TrimRight(string(controllerPrompt), "\n") + "\n\nDesign gate policy: `gates.design: root-issues`. The project's repositories are acme/widgets.\n\n" +
-			strings.TrimRight(string(instructions), "\n")}
+			strings.TrimRight(string(instructions), "\n"),
+		"/legion-controller-start"}
 	if got := c.argv(); !slices.Equal(got, wantArgv) {
 		t.Fatalf("Oh My Pi's argv = %q\nwant %q", got, wantArgv)
 	}
@@ -747,7 +753,7 @@ func TestControllerStartTellsTheControllerTheDaemonsDesignGatePolicy(t *testing.
 		t.Fatalf("legion controller start = %d, stderr %q", code, errb)
 	}
 	argv := c.argv()
-	if len(argv) != 2 || !strings.Contains(argv[1], "\n\nDesign gate policy: `gates.design: off`. The project's repositories are acme/widgets.\n\n") {
+	if len(argv) != 3 || !strings.Contains(argv[1], "\n\nDesign gate policy: `gates.design: off`. The project's repositories are acme/widgets.\n\n") {
 		t.Fatalf("Oh My Pi's argv = %q; want the system prompt to carry the off policy line", argv)
 	}
 }
@@ -766,7 +772,7 @@ func TestControllerStartsAddressingGainsTheProjectsRepositories(t *testing.T) {
 	}
 	argv := c.argv()
 	want := "\n\nDesign gate policy: `gates.design: off`. The project's repositories are acme/widgets, sjawhar/legion-smoke.\n\n"
-	if len(argv) != 2 || !strings.Contains(argv[1], want) {
+	if len(argv) != 3 || !strings.Contains(argv[1], want) {
 		t.Fatalf("Oh My Pi's argv = %q; want it to contain %q", argv, want)
 	}
 }
@@ -816,7 +822,7 @@ func TestControllerStartLaunchesWithEveryRepositoryRefused(t *testing.T) {
 	}
 	argv := c.argv()
 	want := "The daemon maps no repository to this project now: acme/widgets (the review App is not installed on acme/widgets).\n\n"
-	if len(argv) != 2 || !strings.Contains(argv[1], want) {
+	if len(argv) != 3 || !strings.Contains(argv[1], want) {
 		t.Fatalf("Oh My Pi's argv = %q; want it to contain %q", argv, want)
 	}
 }
@@ -832,7 +838,7 @@ func TestControllerStartLaunchesWithNoRepositoryMappedOrRefused(t *testing.T) {
 	}
 	argv := c.argv()
 	want := "The daemon maps no repository to this project now.\n\n"
-	if len(argv) != 2 || !strings.Contains(argv[1], want) {
+	if len(argv) != 3 || !strings.Contains(argv[1], want) {
 		t.Fatalf("Oh My Pi's argv = %q; want it to contain %q", argv, want)
 	}
 }
@@ -990,6 +996,27 @@ func TestControllerStartRefusesLocallyBeforeTheRequest(t *testing.T) {
 		c.refused(fmt.Sprintf("operator_token_file %s is readable by its group or others (mode 0640); chmod 0600 it", c.tokenFile))
 		c.wantNoSecretRequest()
 		c.wantNothingLaunchedOrWritten(c.defaultDir)
+	})
+	// With a positional word and a stdin that is no terminal, Oh My Pi runs headless print mode,
+	// which would run the start command after the mint revoked the running controller.
+	t.Run("a stdin that is not a terminal, before any probe or request", func(t *testing.T) {
+		d := newControllerDaemon(t)
+		c := newControllerStart(t, d, controllerOptions{})
+		stdinIsTerminal = func() bool { return false }
+		c.refused("stdin is not a terminal: Oh My Pi would run headless print mode")
+		c.refused("run `legion controller start` at a terminal")
+		c.wantNoSecretRequest()
+		if _, err := os.Stat(filepath.Join(c.record, "probe-env")); !os.IsNotExist(err) {
+			t.Fatalf("the load probe ran (%v); want no probe", err)
+		}
+		c.wantNothingLaunchedOrWritten(c.defaultDir)
+	})
+	t.Run("a group-readable operator token file is refused before a stdin that is not a terminal", func(t *testing.T) {
+		d := newControllerDaemon(t)
+		c := newControllerStart(t, d, controllerOptions{tokenMode: 0o640})
+		stdinIsTerminal = func() bool { return false }
+		c.refused(fmt.Sprintf("operator_token_file %s is readable by its group or others (mode 0640); chmod 0600 it", c.tokenFile))
+		c.wantNoSecretRequest()
 	})
 	t.Run("a missing operator token file", func(t *testing.T) {
 		d := newControllerDaemon(t)

@@ -361,4 +361,15 @@ package api
 // merges after another takes the next free contract number and renumbers its store migration past
 // main's, every site that names either included, among them the rollback's
 // `delete from schema_version where version = 54` in docs/kubernetes.md.)
-const DaemonAPIVersion = 39
+//
+// 40: INFRA-511 -- `legion controller start` passes `/legion-controller-start`
+// (daemon.ControllerStartCommand) on the operator's Oh My Pi command line, and pi-legion sends the
+// controller's start message from that extension command rather than from session_start: Oh My Pi
+// drains every session_start send at the end of its startup, so the start turn ran inside the
+// startup wait, with no TUI and no input, while a command-line word runs as a prompt after startup
+// and once the TUI listens. Under this CLI a pi-legion before 40 sends from session_start and then
+// gets the word as a prompt, and a pi-legion at 40 under an older CLI never sends the start, so the
+// controller probe refuses either pair before the mint. The daemon-launched controller is unchanged
+// on the wire. (Other open branches may declare 40 too: whichever merges after another takes the
+// next free number, as the collision note says.)
+const DaemonAPIVersion = 40
