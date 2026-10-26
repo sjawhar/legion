@@ -2,61 +2,46 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-168",
-  "completed": "2026-10-26T12:02:00Z",
-  "round": 11,
-  "headSha": "632f8d02802731f85662e1f593b738e40759db71",
-  "handoffHead": "9dc3c6092df71d876e30842b0d4071cc6f0e1d14",
-  "provider": "anthropic/claude-opus-5-5 answered all 86 assistant turns of the round's 18 sessions and all 15 rules calls (ruleModel), read from each session's own turns and advisor-gate entries.",
-  "fingerprint": "Full round, narrowed by the architect: d7b15b3b… at round 10's 481fcf32, b103f749… at 9dc3c609, computed by the tester with the skill's command.",
-  "scope": "The architect's brief (11:52Z): the one finding, callKeys feeding both what a refusal counts and what a resend matches; drive (1) four unchanged re-uploads of a document holding only a stored ask, (2) a different no-ask upload after two refusals, (3) a partly judged upload, each in block mode with 70bc570b as negative control; report whether a breaker pass of a partly judged upload sends its unjudged asks unread; then the five cases once per mode; fail only for a correctness defect in that scope.",
+  "completed": "2026-10-26T13:35:00Z",
+  "round": 12,
+  "headSha": "2ac8abe5c966d5ef135fe49278857bcdcbd250fc",
+  "handoffHead": "6c383c1534c378ec4179ef8f12d1b1e6f6fc9fd7",
+  "kind": "tests-only round, scoped by the architect (13:25Z): confirm no code moved since round 11's pass at 632f8d02, run the bare gates, and confirm the three new tests fail under the reviewer's two mutants of callKeys and pass unmutated; no live re-drive unless the compare shows a code change.",
+  "provider": "No model was asked this round: the bare gates and the mutation runs are bun test, tsc and biome on this pod. Round 11's live evidence (anthropic/claude-opus-5-5, read from the runs' own turns) stands for the unchanged runtime.",
+  "compare": "gh api repos/sjawhar/legion/compare/632f8d02802731f85662e1f593b738e40759db71...2ac8abe5: modified .legion/INFRA-168/{implement,review,test}.json and packages/pi-envoy/extensions/askgate/askgate.test.ts (+64 -0), nothing else; askgate-core.ts byte-identical (cmp against a git archive of 2ac8abe5). The fingerprint moved only by the test lines: b103f749… at 632f8d02, 25b33d4c… at 6c383c15.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "The implementer's three cases are unit-pinned (the real handler on a fake Dispatch); each was driven live here on the fixed tree and on 70bc570b, extracted with git archive under $TMPDIR/oldgate3 with its own pi-shared, with the outcomes its tests assert."
+    "how": "Re-ran the implementer's mutation check independently on a git archive copy of 2ac8abe5 under $TMPDIR/mut, mutating askgate-core.ts's callKeys upload return and restoring it (cmp against the workspace copy after): unmutated 3 pass; M1 (upload key dropped) 3 fail; M2 (content digest dropped) 2 fail."
   },
   "failed": 0,
   "failures": [],
   "proof": [
     {
-      "criterion": "(1) An unchanged re-upload of a document holding only a stored ask, charter revising, sent four times: the third goes on the breaker and only refusal 2 warns.",
-      "surface": "Nested headless Oh My Pi session in this Legion pod, block mode, production Dispatch, dispatch://INFRA-465; the fixed tree and 70bc570b.",
-      "command": "RUN_CWD=/legion/scratch/tmp/t6/f11 [EXT=$TMPDIR/oldgate3/packages/pi-envoy] run-case.sh 11-a11-<new|old> block q/a11-<new|old>.txt: `dispatch artifact --issue INFRA-465 --name brief-a11-<t>.md --path brief.md` once with --advisor-rebuttal (seed: #move, a Content-10 quote with no link), then four times unchanged; read with /legion/scratch/tmp/t6/brk.py.",
-      "observed": "Fixed: refused (revisesForKey 1, no warning); refused with 'second refusal' warning (2); outcome breaker, posted as version 3; refused (1, the count started over). Pre-fix: refused four times, the warning on refusals 2, 3 and 4, never a breaker pass.",
-      "headSha": "632f8d02802731f85662e1f593b738e40759db71",
-      "negativeControl": "70bc570b under the same sends: the false warning on every refusal from the second, and the loop never ended."
+      "criterion": "No runtime code moved since round 11's live pass at 632f8d02.",
+      "surface": "GitHub's compare of the two heads, and a byte comparison of askgate-core.ts.",
+      "command": "gh api repos/sjawhar/legion/compare/632f8d02802731f85662e1f593b738e40759db71...2ac8abe5 --jq '.files[] | .status, .filename'; cmp $TMPDIR/mut/packages/pi-envoy/extensions/askgate/askgate-core.ts (git archive 2ac8abe5) packages/pi-envoy/extensions/askgate/askgate-core.ts",
+      "observed": "Four modified files: three under .legion/INFRA-168/ and askgate.test.ts (+64 -0). askgate-core.ts identical.",
+      "headSha": "2ac8abe5c966d5ef135fe49278857bcdcbd250fc",
+      "negativeControl": "The same compare from 9dc3c609 to 632f8d02 in round 11 listed askgate-core.ts; here it does not."
     },
     {
-      "criterion": "(2) After two refusals of one upload, a different upload with no ask block on the same issue is reviewed, not passed.",
-      "surface": "The same.",
-      "command": "run-case.sh 11-b11-<new|old> block q/b11-<new|old>.txt: seed brief-b11-<t>.md, two unchanged re-uploads (both refused), then `dispatch artifact --issue INFRA-465 --name notes-b11-<t>.md --path notes.md` (no ask block).",
-      "observed": "Fixed: notes.md outcome verdict, allowed by the charter, posted. Pre-fix: notes.md outcome breaker with 'Third attempt after two refusals of this call on its target', posted with no review.",
-      "headSha": "632f8d02802731f85662e1f593b738e40759db71",
-      "negativeControl": "70bc570b passed the never-refused notes.md by the breaker."
+      "criterion": "The bare gates at the head: pi-envoy tests, tsc and lint.",
+      "surface": "The issue workspace at 6c383c15 (code head 2ac8abe5), this pod.",
+      "command": "cd packages/pi-envoy && bun test && bunx tsc --noEmit && bun run lint",
+      "observed": "1441 pass, 6 skip, 0 fail across 14 files (12017 expect calls); tsc exit 0; biome lint over extensions/ and src/ clean.",
+      "headSha": "2ac8abe5c966d5ef135fe49278857bcdcbd250fc",
+      "negativeControl": "See the mutation entry: the same suite, with callKeys mutated, fails."
     },
     {
-      "criterion": "(3) An upload the rules check judged only in part trips exactly when warned.",
-      "surface": "The same; the stored-version read forced to fail with a second document named with the first's slug (round 4's recipe).",
-      "command": "run-case.sh 11-p11-<new|old> block q/p11-<new|old>.txt: `dispatch artifact --name p11-<t>.md --path plain.md --advisor-rebuttal …`, `--name p11-<t>-md --path plain.md --advisor-rebuttal …`, then `--name p11-<t>-md --path partial.md` four times (an id-less Content-10 ask and #held, a no-change ask).",
-      "observed": "Fixed: refused (ruleOutcome none, ruleAsksPartial true, revisesForKey 1); refused with the warning (2); outcome breaker, posted as version 2; refused (1). Pre-fix: refused four times, warned on refusals 2-4, never tripped.",
-      "headSha": "632f8d02802731f85662e1f593b738e40759db71",
-      "negativeControl": "70bc570b never tripped and warned falsely three times."
-    },
-    {
-      "criterion": "Regression: the five cases and the charter-only call, warn and block.",
-      "surface": "Nested headless sessions, production Dispatch.",
-      "command": "run-case.sh 11-c<0-5>-<warn|block> p/c<0-5>.txt",
-      "observed": "c1 refused no_change; c2 rebuttal opened; c3 refused naming #log-retention; c4 refused untried_access; c5 opened with ruleOutcome none; c0 allowed with no rules call; in both modes. Every opened ask retracted.",
-      "headSha": "632f8d02802731f85662e1f593b738e40759db71",
-      "negativeControl": "c5's tried read answered none where c4's untried read matched."
+      "criterion": "The three new tests lock both parts of callKeys' upload key: each fails under the reviewer's mutants and passes unmutated.",
+      "surface": "A git archive copy of 2ac8abe5 under $TMPDIR/mut, with node_modules linked to the workspace's.",
+      "command": "bun test extensions/askgate/askgate.test.ts -t 'after two charter refusals of (an upload with no ask block|a re-upload)' unmutated; with askgate-core.ts:2538 replaced by M1 `return asks.length === 0 ? [WHOLE_CALL] : asks.map(askIdentity);`; with it replaced by M2 `return [...asks.map(askIdentity), JSON.stringify([\"upload\", name, null])];`; file restored after each.",
+      "observed": "Unmutated: 3 pass. M1: 3 fail (a different no-ask document; the same name with other text; a fully stored re-upload adding a new ask). M2: 2 fail (the same name with other text; the fully stored re-upload adding an ask); the different-document test passes, its key differing by name.",
+      "headSha": "2ac8abe5c966d5ef135fe49278857bcdcbd250fc",
+      "negativeControl": "M1 and M2 are the negative controls: each makes at least one new test fail."
     }
   ],
-  "factsForReviewer": [
-    "Asked by the architect: when the breaker passes a partly judged upload, its unjudged asks go out unread on that pass. In 11-p11-new the breaker pass (version 2 of p11-new-md-2) opened ask 71fe78cc, #held's no-change question ('Should the export format stay CSV or move to Parquet? I recommend keeping CSV and changing nothing.'), which the rules check never judged (it was the id'ed block left out by the failed read) and which no check read on the passing send; the charter read it on the two refused sends. Retracted by the tester. This is the breaker's documented behaviour (README: the third attempt is sent without review), on an ask the rules check never saw."
-  ],
-  "observations": [
-    "The three pre-fix agents (11-a11-old, 11-b11-old, 11-p11-old) each wrote xd://report_issue about the false warning or the breaker pass, real defects there that this head fixes. No fixed-tree session wrote one.",
-    "Every ask the round opened is retracted (the last three by the tester). The uploads brief-*, notes-*, p11-* stay on dispatch://INFRA-465, which is left open with no open ask."
-  ],
-  "ci": "Read at 11:57Z at the push head 9dc3c609 (code and handoff in one push), nothing re-run: Tests 40318098498, Legion Envoy and Contracts 40318098443 and Docs 40318098504 queued; Worker Image 40318098448 pending; PR Title runs queued, 40318098556 cancelled. GitHub shows no run on 632f8d02 itself.",
+  "ci": "Read at 13:27Z, nothing re-run. At the head 6c383c15: Tests 40330177764, Legion Envoy and Contracts 40330177734, Docs 40330177766 and Worker Image 40330177896 queued; PR Title 40330253890 pending. At the previous head 9dc3c609, the same runtime code: Tests 40318098498 success, Docs 40318098504 success, Worker Image 40318098448 success, PR Title 40318944812 success; Legion Envoy and Contracts 40318098443 cancelled by the next push. MERGEABLE, BLOCKED.",
   "priorRounds": [
     {
       "round": 1,
@@ -126,6 +111,13 @@
       "fixture": "dispatch://INFRA-465",
       "verdict": "pass",
       "summary": "17 sessions: the charter-path breaker fix held live (pre-fix 868cd58b passed the third upload's new ask unjudged); a record in flight at SIGTERM kept its entry (83ff55cf lost it). Full record in commit e25512a4's test.json."
+    },
+    {
+      "round": 11,
+      "headSha": "632f8d02802731f85662e1f593b738e40759db71",
+      "fixture": "dispatch://INFRA-465",
+      "verdict": "pass",
+      "summary": "18 sessions, block mode, fixed tree vs 70bc570b: an unchanged re-upload and a partly judged upload trip the breaker exactly when warned, and a different no-ask upload after two refusals is reviewed; the breaker pass of a partly judged upload sends its unjudged ask out unread (71fe78cc). Full record in commit ce5fcf5d's test.json."
     }
   ]
 }
