@@ -1,0 +1,91 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "INFRA-448",
+  "completed": "2026-10-26T03:21:07Z",
+  "requiredSkills": {
+    "implement": [
+      "legion-worker: phase rules, PR body template and proofs (pr-body.md), push procedure, and conflicts-and-rewrites.md for the one forward merge of main the architect authorises after INFRA-440 merges",
+      "ce-simplify-code: the simplify pass pr-body.md requires on the settled change before completion",
+      "dispatch: the production check's dispatch message on the closed issue and any finding ask"
+    ],
+    "test": [
+      "legion-worker: the tester's proof rules (pr-body.md): drive the closed-issue API live, re-run e2e/collaborators.e2e.ts in both projects, run the C3 script, read CI for static checks"
+    ],
+    "review": [
+      "legion-worker: merge-gate.md review order and approval by head SHA, review-threads.md for thread dispositions"
+    ]
+  },
+  "planArtifact": "dispatch://INFRA-448/artifact/plan-md",
+  "gapAnalysis": {
+    "findings": [
+      {
+        "finding": "The spec does not say where 'every Legion agent recorded for it, by role, including an agent a newer session of the same role replaced' comes from. Dispatch keeps no such record. Root line 62 says 'every Legion agent the daemon recorded for it', and root line 49 makes keeping that record root work ('The daemon keeps, for each issue and role, every conversation that worked it'). This issue's spec drops 'the daemon', and nothing assigns the daemon-to-Dispatch transport to either issue.",
+        "answer": "Settled by the INFRA-204 architect: a Legion agent registry in the Envoy listener (KV bucket legion_agents) built here, written later by INFRA-204's daemon; record shape agreed with INFRA-204's planner (plan section 'The registry contract'); Dispatch's Collaborators route reads IssueAgents; browser tests seed the fake listener."
+      },
+      {
+        "finding": "The bullet 'Every agent name is a link' and C2's 'the link from each kind of place an agent is named' duplicate dispatch://INFRA-440 (todo, planned, in the in-progress INFRA-278 tree). That plan builds one AgentName component for about 38 places and adds a Biome lint rule that confines actorLabel/actorName/sessionLabel/shortSessionId imports to `features/refs/AgentName.tsx`. Four conflicts follow. (1) If INFRA-440 merges first, the links already exist at INFRA-448's base, so C2's 'fails at the commit before the change' cannot hold for that clause. (2) INFRA-440's exclusion E2 draws picker options statically on the assumption that 'Every suggestion is a listed agent by construction, so the state reads Running'. INFRA-448's stopped picker entries break that assumption. (3) INFRA-440 excludes reference hover cards (E1) and the live page header (E3) from links. INFRA-448 says 'wherever Dispatch names an agent'. (4) INFRA-448's 'a mention' has two readings: the delivery lines ('Delivered to",
+        "answer": "Architect chose option (a) and updated the spec to v3: no general link work here; Collaborators view and picker stopped entries render with INFRA-440's AgentName; web part blocked on INFRA-440 with one authorised forward merge of main; C2's link clause is the Collaborators view link; INFRA-440's exclusions accepted; 'a mention' is INFRA-440's delivery-line rendering."
+      },
+      {
+        "finding": "'A person's and an agent's new comment and message on a closed issue post, with the deliveries and replies they need' does not say which of the neighbouring operations change, and the code ties them together. Ask replies, anchored (margin) comments and suggestions all come in through the comment-create endpoint. Comment delivery, the agent's reply, resolve, accept, reject, reopen and edit share one refusing helper.",
+        "answer": "Decided (architect confirmed): every new comment posts on a closed issue, including thread replies, ask replies and document-anchored comments with their thread replies (comment-mark writes pass the closed document check); suggestions stay 409; resolve, reopen, edit, accept, reject stay 409; a reply to a resolved root still reopens it; comment and message deliveries, retries and agent replies flip (lock-only issue read keeping the lock order)."
+      },
+      {
+        "finding": "Agents' `issue-update --status done --reason` relies on the closed refusal. The executor posts the reason as a message first and lets the close wait on it, because 'a closed issue refuses messages'. Run against an issue that is already closed, today's 409 stops it before anything is written. After the change, the reason message posts and then the PATCH to done is refused, leaving a stray message. The agent-facing tool text states the old rule as fact. It is pinned by tests and bundled into committed dist files.",
+        "answer": "Part 3: the issue-update executor refuses --status done --reason on an already-closed issue locally before posting; tool text, tests, READMEs, AGENTS.md lines and CHANGELOGs rewritten; claude-envoy bundles regenerated."
+      },
+      {
+        "finding": "No criterion covers a person posting on a closed issue from the web. C1 is server-only. C2 lists the Collaborators view, the picker and links, but not the composer, Reply or Retry flip that finding 3 implies. Root A3 depends on it: 'asks … on the closed issue's own thread, choosing the tester's role in the mention picker'. Today the picker cannot appear there, because the dormant composer renders nothing. Existing browser and unit tests assert the refusal and must be rewritten.",
+        "answer": "Browser spec step 2 (closed Conversation composer shows, no ask/suggestion kind, comment and thread Reply post) and step 4 (anchored comment posts); the e2e and unit tests that pin the refusal are rewritten (listed in Part 4 step 5)."
+      },
+      {
+        "finding": "The spec does not say what a stopped agent's picker entry inserts or what C2 asserts about it. Root A3 says 'choosing the tester's role', which means a `role:` target. Root's own work resolves a stopped role or session (root-spec.md:50). Until that lands, Dispatch records a failed delivery ('no live session <id>' or the listener's 'no holder for role X'). For a stopped session, the mention's session pin is dropped, so `resolved_session_id` stays null.",
+        "answer": "Picker offers one option per stopped role token (no live holder) targeting role:<role_token>; replaced sessions are not separate options; offered in composers owned by an issue or its documents; C2 asserts the offer and the stored mention target, not delivery (root's)."
+      },
+      {
+        "finding": "The spec does not say how 'running' / 'not running' is decided. Dispatch knows only Envoy's registry, which has a 5-minute TTL and can briefly omit a working session while its cache refills. The daemon's states (suspended, retired, closed), on which root's 'Whom it answers for' rests, are not visible to Dispatch. INFRA-440 defines running as 'listed in the latest successful GET /api/v1/agents read', with an unknown state on failure.",
+        "answer": "Running state is INFRA-440's AgentName registry rule (running / not running / unknown); the collaborators route carries no running flag; the picker adds no stopped options while the live list's state is unknown."
+      },
+      {
+        "finding": "Who belongs in the Collaborators view has several readings. 'posted on it': comments, messages and asks only, or also uploads, document edits and versions, reviews or approvals, status and field updates, and agents' delivery replies? 'everyone who claimed it': claims are mostly root architects', and history exists only as issue.claimed and issue.released events. Further cases: ask answerers are users (AskAnswer.User). A session acting 'for <owner>' through a personal token: person or agent? The daemon's own actor `legion-daemon:<PROJECT>` is kind `session` and posts READY and lifecycle notices, so a naive aggregate lists it as an agent linked to a conversation that does not exist. The controller (`Legion controller · PROJ`), which root's loop does not cover. A root architect on its children's pages. Sessions that were addressed but never wrote. Implementers' subagent sessions in delivery_pull_requests.sessions. How a person is deduplicated against their agents, and a Legion agent acros",
+        "answer": "Membership defined in Part 2b: people (assignee, claimers, authors of comments/messages/asks/document versions/delivery replies, ask answerers) by canonical login; agents by session id from event actors plus registry entries; legion-daemon:<PROJECT> excluded; controller included when it posted; sessions acting for an owner are agents."
+      },
+      {
+        "finding": "C1 ('Shown by the Dispatch server's Go tests') can pass vacuously: every Postgres-backed test skips when DISPATCH_TEST_DATABASE_URL is unset, and this pod has no Postgres. C1 also omits what the spec's text promises: uploads and claims still refused, and deliveries, retries and agent replies allowed.",
+        "answer": "C1 evidence is the named go test run with DISPATCH_TEST_DATABASE_URL set and a zero SKIP count, PASS lines quoted, plus a live curl run against the built server; uploads, claims, retries and agent replies are in the test list."
+      },
+      {
+        "finding": "C2's red/green run is not possible in the pod as it stands, and parts of it depend on undecided points. The pod has no Postgres, psql, browsers, node_modules or web/dist, and it lacks the proof-sdk src. The workspace is shared by six roles under jj, and no repository document gives a Playwright run at a base commit. A failure on a missing element passes 'fails at the commit before' without testing behaviour. The fake Envoy's `setSessionLive(id,false)` drops a session only from the cached list, and the registry re-adds it. A replaced agent cannot be seeded until finding 1 is decided.",
+        "answer": "Red/green recipe: e2e harness files committed with the spec, base product = the main commit the forward merge brought in, failing expect lines and SHAs quoted, both projects; harness per the INFRA-42, INFRA-43 and LEGION-695 solution docs; replaced agent seeded through the fake listener."
+      },
+      {
+        "finding": "C3 ('finds no remaining statement') names no search terms, and the stale wording varies: 'refuses a write on a closed issue', 'takes no comment', 'takes no further write', 'a closed issue takes no record', 'nothing is written on the closed issue', 'refuses a message, a comment or an ask'. Its scope leaves out agent-facing text that carries the claim: contracts/src/dispatch-tools.ts (finding 4), packages/envoy-client/README.md:361, the generated skill copies under packages/claude-envoy/legion/skills if 'skills/' means the top-level directory, and scripts/e2e/README.md:471-472 and :1490. It also includes docs/superpowers/ (dated, not excluded), whose generic ISSUE_CLOSED lines are about mutations. Correcting merge-gate.md:278-280 needs a new rationale, not just a deletion: the deployment instructions say 'on the pull request and the issue', and the only stated reason for 'the pull request alone' is the refusal being removed. Root line 62 says the location stays.",
+        "answer": "C3 is a tested bash script (pod has no rg) joining lines, over skills, docs (minus plans/solutions/superpowers), daemon prompts, claude-envoy/legion, contracts/src, envoy-client README, scripts/e2e README and every AGENTS.md; 30 hits at base; expected head result stated."
+      },
+      {
+        "finding": "The spec's docs bullet asks only for corrections. The new behaviour also has to be documented where the repository already describes the issue page, closed composers and routes.",
+        "answer": "Part 5 adds documentation of the new behaviour (packages/dispatch/AGENTS.md, docs/site issues-and-projects.md, packages/envoy/AGENTS.md and docs/architecture.md, route tables, CHANGELOGs)."
+      },
+      {
+        "finding": "C4 ('the command the deployment instructions give for a page a person reads in Dispatch, run for the issue page with the routes it reads') names neither the command, the issue nor the routes. The command is not in this repository. A page read also does not exercise the main server change, a comment accepted on a closed issue, in production.",
+        "answer": "C4 command written out with page /issues/INFRA-448/collaborators and every route it reads (collaborators is a path route for that reason); output on the PR and in a dispatch message on the closed issue; no production write."
+      }
+    ]
+  },
+  "planReview": {
+    "verdict": "approved",
+    "rounds": 3
+  },
+  "specDepartures": [
+    {
+      "spec": "Spec v3 'Not in this issue': this issue builds the registry's read side (the listener registry and its read routes); the root's daemon fills it.",
+      "plan": "Also builds the listener's two write routes (PUT /v1/legion/agents/sessions/<id>, batch PUT /v1/legion/agents) and the Dispatch client methods Agent and RoleAgents that only INFRA-204 calls; the daemon stays the only writer.",
+      "evidence": "INFRA-204 architect delegated the record shape to the two planners; INFRA-204 planner asked for it (Envoy 4096ee2db175c273ce13c85fe78ed57c: build the write routes in INFRA-448, one owner of the bucket's schema and tests).",
+      "outcome": {
+        "kind": "changed",
+        "scope": "Adds the listener write routes and two Dispatch client methods to this issue; no acceptance line or settled decision changes."
+      }
+    }
+  ]
+}
