@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-260",
+  "completed": "2026-10-26T01:52:45Z",
+  "reviewedCodeHead": "1caf0c2404148adf74f3c9fb7220ea3efa581fd5",
+  "decision": "changes_requested",
+  "critical": 0,
+  "important": 1,
+  "minor": 0,
+  "ci": "CI head 1caf0c240414 (newest pull_request run); required lint, typecheck, test, pr-title all completed/success; compare 1caf0c240414...578fa9b72a0d changes only .legion/.",
+  "thermonuclear": "At 578fa9b72a0d: thermonuclear-deep-review CHANGES (2 important: unrelated backend satisfies the pg_locks guard; non-empty Missing accepted for any failure); thermonuclear-code-quality APPROVE, no findings.",
+  "keyFindings": [
+    {
+      "severity": "important",
+      "file": "packages/envoy/internal/dispatch/api/suggestions_test.go",
+      "description": "suggestionsBehindLock (lines 294-303) counts any backend blocked by the holder, and the seeded spec's document settlement (scheduled by POST /api/v1/issues, settle 20 ms in newTestServer) queues behind both the asks and issues locks, so neither test proves the suggestion call waited. Reproduced with a go test -overlay mutant that, for the two probes' askIDs only, sleeps 2 s and returns Missing without any query: both tests PASS 10 of 10; a pg_stat_activity overlay shows the waiters were the settlement's asks select and 'select coalesce(i.closed_at is null, true) from artifacts a left join issues i ...'. The tester's MUT=earlyslow control did not catch this because it also slept inside the issue-creation handler, which let settlement finish before the lock was taken. Fix: make the observed waiter the call's own (quiesce or postpone settlement before locking, or attribute the waiter to the step's statement), then re-run the negative controls and correct the E2E lines' claims."
+    }
+  ],
+  "consideredNotDefects": [
+    "Non-empty Missing accepted for any failure (deep review finding 2): reproduced only with lock_timeout added to the test database URL; storetest's database sets no lock_timeout or statement_timeout, and the lock is released only after the answer is received, so once the waiter is the call's own query only its context can end it. Plan decision 5 deliberately asserts Missing without its text."
+  ],
+  "reproduction": "Overlays under /legion/scratch/tmp/infra260-reviewer (overlay3.json = probe-only mutant; overlay4.json = mutant + waiter logging; overlay5.json = unmutated + waiter logging), run from packages/envoy with DISPATCH_TEST_DATABASE_URL='postgres://postgres@127.0.0.1:5434/postgres?sslmode=disable' go test -overlay <file> ./internal/dispatch/api/ -run '^TestComputeAndPersistSuggestionsRespectsDeadline(UnderLock|WhenProjectLookupIsLocked)$' -count=5 -v"
+}
