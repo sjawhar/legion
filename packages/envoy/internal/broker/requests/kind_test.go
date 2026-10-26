@@ -28,7 +28,7 @@ func requestKindSecret(name, kind, tier, maxGrant string) secrets.LocalSecret {
 func TestAMalformedMintedSourceIsNamedAndReleasesNothing(t *testing.T) {
 	machine, _, _, _ := newFixture(t)
 	for _, source := range []string{"mint:github-app", "mint::" + policytest.ID("X")} {
-		value, err := machine.release(t.Context(), requestedSecret{name: "X", source: source}, nil, nil)
+		value, err := machine.release(t.Context(), requestedSecret{name: "X", source: source}, secrets.MintRequest{})
 		if !errors.Is(err, policy.ErrKindSourceMalformed) || value != "" {
 			t.Fatalf("release(%q) = %q, %v; want ErrKindSourceMalformed and no value", source, value, err)
 		}

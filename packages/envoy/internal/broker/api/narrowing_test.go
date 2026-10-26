@@ -62,11 +62,9 @@ func newNarrowingServer(t *testing.T) *narrowingServer {
 // grant requests name for the session and answers the automatic grant's id.
 func (s *narrowingServer) grant(t *testing.T, name string) string {
 	t.Helper()
-	_, body := s.session(t, s.key, s.enrollmentID, http.MethodPost, "/v1/requests",
-		map[string]any{"request": signAgentSecretRequest(t, s.key, s.URL, "read "+name, name), "session_id": nil})
-	created := decode[wireCreateRequestResponse](t, body)
+	created := s.requestAs(t, s.key, s.enrollmentID, name)
 	if created.GrantID == nil {
-		t.Fatalf("POST /v1/requests for %s = %s, want an automatic grant", name, body)
+		t.Fatalf("POST /v1/requests for %s = %+v, want an automatic grant", name, created)
 	}
 	return *created.GrantID
 }

@@ -327,6 +327,14 @@ func exitUsage(err error) int {
 	return exitUsageError
 }
 
+// flagGiven reports whether flags' command line gave the flag name, so a flag given an empty or
+// zero value is told apart from one not given.
+func flagGiven(flags *flag.FlagSet, name string) bool {
+	given := false
+	flags.Visit(func(f *flag.Flag) { given = given || f.Name == name })
+	return given
+}
+
 // reportError prints a command's failure as "<prefix>: <err>", except that a helper holding no
 // launcher credential is reported with the one line identity prints for it, whatever the command.
 func reportError(stderr io.Writer, prefix string, err error) {
@@ -845,8 +853,11 @@ func cmdExec(args []string, stdout, stderr io.Writer) int {
 	wait := flags.Duration("wait", 30*time.Minute, "how long to wait for a pending request")
 	ttlFlagValue := flags.Duration("ttl", 0, ttlFlag)
 	githubOwner := flags.String("github-owner", "", "narrow each GitHub App token the grant releases to this account's installation")
-	var githubRepos repositoryFlag
-	flags.Var(&githubRepos, "github-repo", "narrow the GitHub App token further, to this repository of --github-owner's (repeatable)")
+	var githubRepos []string
+	flags.Func("github-repo", "narrow the GitHub App token further, to this repository of --github-owner's (repeatable)", func(name string) error {
+		githubRepos = append(githubRepos, name)
+		return nil
+	})
 	githubReadOnly := flags.Bool("github-read-only", false, "narrow the GitHub App token further, to contents: read and metadata: read")
 	if err := flags.Parse(flagArgs); err != nil {
 		return exitUsage(err)
@@ -856,9 +867,7 @@ func cmdExec(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "agent-secrets: %v\n", err)
 		return exitUsageError
 	}
-	ownerSet := false
-	flags.Visit(func(f *flag.Flag) { ownerSet = ownerSet || f.Name == "github-owner" })
-	narrowing, err := githubNarrowing(*githubOwner, ownerSet, githubRepos, *githubReadOnly)
+	narrowing, err := githubNarrowing(*githubOwner, flagGiven(flags, "github-owner"), githubRepos, *githubReadOnly)
 	if err != nil {
 		fmt.Fprintf(stderr, "agent-secrets: %v\n", err)
 		return exitUsageError

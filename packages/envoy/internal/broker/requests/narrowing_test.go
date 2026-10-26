@@ -7,6 +7,8 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/sjawhar/envoy/internal/broker/policy"
 	"github.com/sjawhar/envoy/internal/broker/policy/policytest"
 	"github.com/sjawhar/envoy/internal/broker/secrets"
@@ -20,13 +22,12 @@ func usedAudits(t *testing.T, machine *Machine, grantID string) []map[string]any
 	if err != nil {
 		t.Fatalf("read grant.used audit: %v", err)
 	}
-	defer rows.Close()
+	raws, err := pgx.CollectRows(rows, pgx.RowTo[[]byte])
+	if err != nil {
+		t.Fatalf("read grant.used audit: %v", err)
+	}
 	var audits []map[string]any
-	for rows.Next() {
-		var raw []byte
-		if err := rows.Scan(&raw); err != nil {
-			t.Fatalf("scan grant.used audit: %v", err)
-		}
+	for _, raw := range raws {
 		var narrowing map[string]any
 		if raw != nil {
 			if err := json.Unmarshal(raw, &narrowing); err != nil {
@@ -34,9 +35,6 @@ func usedAudits(t *testing.T, machine *Machine, grantID string) []map[string]any
 			}
 		}
 		audits = append(audits, narrowing)
-	}
-	if err := rows.Err(); err != nil {
-		t.Fatalf("read grant.used audit: %v", err)
 	}
 	return audits
 }

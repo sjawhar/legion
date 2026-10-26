@@ -1,11 +1,7 @@
 package main
 
 import (
-	"crypto/rand"
-	"crypto/rsa"
-	"crypto/x509"
 	"encoding/json"
-	"encoding/pem"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -22,6 +18,7 @@ import (
 	"github.com/sjawhar/envoy/internal/broker/proof"
 	"github.com/sjawhar/envoy/internal/broker/requests"
 	"github.com/sjawhar/envoy/internal/broker/secrets"
+	"github.com/sjawhar/envoy/internal/dispatch/githubapp/githubapptest"
 )
 
 // TestTheExecFormReleasesANarrowedGitHubAppTokenEndToEnd drives the real broker (its handlers on a
@@ -70,14 +67,8 @@ func TestTheExecFormReleasesANarrowedGitHubAppTokenEndToEnd(t *testing.T) {
 	rig := brokertest.NewRig(t, brokertest.WithMinters(map[string]requests.Minter{
 		policy.KindGitHubApp: secrets.GitHubApp{Base: github.URL, HTTP: github.Client()}.Mint,
 	}))
-	appKey, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		t.Fatal(err)
-	}
-	value, err := json.Marshal(map[string]string{
-		"app_id":      "123456",
-		"private_key": string(pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(appKey)})),
-	})
+	_, appKey := githubapptest.Key(t)
+	value, err := json.Marshal(map[string]string{"app_id": "123456", "private_key": appKey})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -14,16 +14,6 @@ import (
 	"strings"
 )
 
-// repositoryFlag is --github-repo's value: every name it was given, in order.
-type repositoryFlag []string
-
-func (r *repositoryFlag) String() string { return strings.Join(*r, ",") }
-
-func (r *repositoryFlag) Set(name string) error {
-	*r = append(*r, name)
-	return nil
-}
-
 // githubNarrowing is the narrowing the flags ask for, nil when they ask for none: the owner
 // trimmed and lowercased and the repositories sorted, each once, as the broker names what it
 // applied, so narrowedAsAsked compares like with like. ownerSet says whether --github-owner was
@@ -41,9 +31,7 @@ func githubNarrowing(owner string, ownerSet bool, repositories []string, readOnl
 	case !ownerSet:
 		return nil, nil
 	}
-	sorted := slices.Clone(repositories)
-	slices.Sort(sorted)
-	return &GitHubNarrowing{Owner: strings.ToLower(owner), Repositories: slices.Compact(sorted), ReadOnly: readOnly}, nil
+	return &GitHubNarrowing{Owner: strings.ToLower(owner), Repositories: slices.Compact(slices.Sorted(slices.Values(repositories))), ReadOnly: readOnly}, nil
 }
 
 // narrowedAsAsked checks that the broker applied asked to the release it answered with applied. A

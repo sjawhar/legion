@@ -104,7 +104,7 @@ func (m GitHubApp) Mint(ctx context.Context, req MintRequest) (string, error) {
 	if narrowing != nil && !slices.Contains(req.GitHubOwners, strings.ToLower(narrowing.Owner)) {
 		return "", fmt.Errorf("%w: github app %s: %s is not an account its github-owners tag lists", ErrMintRefused, secret.AppID, narrowing.Owner)
 	}
-	scope, err := narrowing.accessTokensBody()
+	body, err := narrowing.accessTokensBody()
 	if err != nil {
 		return "", fmt.Errorf("%w: encode the narrowing as GitHub's access_tokens body: %w", ErrMintUpstream, err)
 	}
@@ -140,7 +140,7 @@ func (m GitHubApp) Mint(ctx context.Context, req MintRequest) (string, error) {
 		if narrowing != nil && !strings.EqualFold(owner, narrowing.Owner) {
 			continue
 		}
-		token, err := m.installationToken(ctx, jwt, installation.ID, scope)
+		token, err := m.installationToken(ctx, jwt, installation.ID, body)
 		if err != nil {
 			return "", err
 		}
@@ -214,11 +214,11 @@ func (m GitHubApp) installations(ctx context.Context, jwt string) ([]githubInsta
 	}
 }
 
-// installationToken asks GitHub for installationID's token, narrowed by scope, GitHub's
-// access_tokens body, when it is not nil.
-func (m GitHubApp) installationToken(ctx context.Context, jwt string, installationID int64, scope []byte) (githubInstallationToken, error) {
+// installationToken asks GitHub for installationID's token, sending body, GitHub's access_tokens
+// body, when it is not nil.
+func (m GitHubApp) installationToken(ctx context.Context, jwt string, installationID int64, body []byte) (githubInstallationToken, error) {
 	const what = "mint GitHub App installation token"
-	request, err := githubRequest(ctx, http.MethodPost, m.base()+"/app/installations/"+strconv.FormatInt(installationID, 10)+"/access_tokens", jwt, scope)
+	request, err := githubRequest(ctx, http.MethodPost, m.base()+"/app/installations/"+strconv.FormatInt(installationID, 10)+"/access_tokens", jwt, body)
 	if err != nil {
 		return githubInstallationToken{}, fmt.Errorf("%w: %s: %w", ErrMintUpstream, what, err)
 	}
