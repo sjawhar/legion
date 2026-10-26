@@ -2,39 +2,28 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-393",
-  "completed": "2026-10-26T00:27:00Z",
-  "round": 1,
-  "codeHeadReviewed": "55eb49eb71c11bf1b4f5c05566a01a04204ffa78",
-  "decision": "changes_requested",
+  "completed": "2026-10-26T01:13:00Z",
+  "round": 2,
+  "codeHeadReviewed": "f29797a6693cd2e99908e95cd0e5b9012bfb6e90",
+  "decision": "approved",
   "critical": 0,
-  "important": 2,
-  "minor": 2,
-  "keyFindings": [
-    {
-      "severity": "important",
-      "file": "PR #2208 body",
-      "description": "No `## Contract change census`. The PR removes the `envoy-dispatch backfill-embeddings` subcommand (exit 2 now), drops the `embeddings_backfill_progress` table, adds boot refusals (any DISPATCH_AZURE_* without DISPATCH_EMBEDDER=azure, the Azure shape refusals) and gcp:Dispatch input refusals, and changes the exported `embed` and `embedqueue` API (embed.New/Model/MaxBatchTexts gone, Embedder gains Identity/Limits, embedqueue.Backfill gone). Each needs its search, hits with dispositions, and rollout line. Reviewer's own searches: theorem-labs/agent-infra code search for backfill-embeddings, embeddings_backfill_progress and DISPATCH_AZURE returned 0 hits each; in-tree hits are docs, CHANGELOG, migration comments and main_test.go's negative case."
-    },
-    {
-      "severity": "important",
-      "file": "packages/envoy/internal/dispatch/store/migrations/0117_embeddings_pending_since.up.sql:21",
-      "description": "dead_model is added null for every existing dead row, and readmitForeignDead (coverage.go:162-173) and foreignRows (coverage.go:197-202) treat `dead_model is distinct from $identity` as foreign, so on a Bedrock deployment that sets nothing new every row dead before this release is re-admitted at the first proven pass and confirmed dead again (ERROR lines at canary.go:41 and queue.go, extra Bedrock calls). The spec's acceptance says Bedrock is unchanged for a deployment that sets nothing new. Every pre-0117 dead row was confirmed against us.cohere.embed-v4:0 (main.go at f2c17ded called embed.New with no WithModel), so 0117 should set dead_model = 'us.cohere.embed-v4:0' where dead; a switch to Azure still re-admits them once."
-    },
-    {
-      "severity": "minor",
-      "file": ".github/scripts/check-body-embed-limit.sh:26",
-      "description": "Cites coverage.go:70 and :72 for the comment and message rows of coverageSources; they are at coverage.go:65 and :67 (70-72 is items()' doc comment)."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/envoy/internal/dispatch/api/search_meaning_test.go:35,164,167",
-      "description": "Comments still describe the scenario as a backfill's bulk traffic and a saturating backfill in progress; the backfill is gone (the coverage pass and the queue's drain are the bulk traffic now)."
-    }
+  "important": 0,
+  "minor": 0,
+  "keyFindings": [],
+  "roundOneFindings": [
+    "Finding 1 (no Contract change census): fixed; the PR body's census re-run at f29797a6693c matches: in-tree counts 12/12/71/158/109/2/20 for its patterns, no importer outside packages/envoy, and the deployment repository at f25712bb9c2d gives 0 hits for backfill-embeddings, embeddings_backfill_progress, DISPATCH_EMBEDDER, DISPATCH_AZURE_ and search/coverage, and 7 azureTenantId hits that are stack config of two other programs, none an input of gcp:Dispatch.",
+    "Finding 2 (legacy dead rows re-admitted on Bedrock): fixed in f29797a6693c by 0117's update setting dead_model to us.cohere.embed-v4:0 where dead, with TestMigrationAddsPendingSince and TestCoverLeavesARowDeadUnderBedrockDeadUntilAnotherIdentity; both E2E lines drive it with the pre-fix binary as negative control. Thread PRRT_kwDORFy7ds6wGpIQ answered.",
+    "Minor 3 (script line refs): fixed in f29797a6693c. Thread PRRT_kwDORFy7ds6wGpIS answered.",
+    "Minor 4 (stale backfill wording in search_meaning_test.go): fixed in f29797a6693c."
   ],
+  "judgedNotDefects": [
+    "Deep review hardening: azure.go's LimitedReader refuses an oversized JSON value but accepts a valid answer followed by trailing bytes past the 16 MiB cap, since Decode stops after the first value; reading stays bounded at cap+1 and the vectors returned are valid, so no error is hidden. The comment at azure.go:221-222 slightly overstates it.",
+    "Code quality P2: coverage_test.go grows from 967 to 1,005 lines; a same-package Go test file of that size is no defect and no repository rule caps it."
+  ],
+  "censusRollout": "The subcommand removal is the spec's acceptance ('the backfill-embeddings subcommand goes') with zero callers; the boot and gcp:Dispatch refusals apply only to settings and inputs this PR introduces, which nothing sets today, so no existing caller is refused and warn-first has no caller to warn.",
   "thermonuclear": {
-    "deepReview": "APPROVE at 953fc6fe: two Minor (legacy dead rows re-admitted on unchanged Bedrock, adopted here as Important because it contradicts a spec acceptance line; wrong line refs in check-body-embed-limit.sh) and hardening (coverage route hashes the whole corpus per request; Azure success body decoded unbounded, azure.go:217; key accessor grant on the shared principal; no token-cache reset on 401; 0117's pending_since update under the ALTER's lock).",
-    "codeQuality": "CHANGES at 953fc6fe: Important 1 (keep foreign vectors and mark rows pending instead of the proven/canary gate) and Important 2 (settle empty text at write time instead of in scanPending) judged by the reviewer as design alternatives, not defects: the gate is correct, tested and proven live, and dropping keeps the HNSW index free of foreign vectors as plan decision 7 wants; the empty-text settle is correct and tested. Minors 3-8 are structure and wording; the stale backfill wording is carried as a finding."
+    "deepReview": "APPROVE at a48bfa07 (same code as f29797a6693c): 0117 ordering sound in one migration transaction, the historical identity assumption holds, census conclusions supported; one Minor hardening (trailing-overflow detection in the Azure body cap).",
+    "codeQuality": "CHANGES at a48bfa07 on one P2 (coverage_test.go past 1,000 lines), judged not a defect."
   },
-  "planEvidence": "Plan review-evidence checklist (plan.md 'Review evidence') holds item by item: no Bedrock constant on the Azure path, the CAS guard and pending-row claim handling, coverageSources byte-for-byte against 0073-0077 and 0072/0117's hash, the report's definitions, the settings refusals, and select-0 censuses for 0117/0118 (a non-zero census refuses the deploy, so the plan's counting censuses would have been wrong).",
-  "ci": "Required set (rulesets): lint, typecheck, test, pr-title; branch protection lists none. CI head 55eb49eb71c11bf1b4f5c05566a01a04204ffa78: all four completed success; compare to 953fc6fe touches only .legion/."
+  "ci": "Required set (rulesets): lint, typecheck, test, pr-title; branch protection lists none. CI head 2bd38f8733e4 (newest pull_request run): all four completed success; compare to a48bfa07 touches only .legion/INFRA-393/implement.json and test.json. The non-required 'Legion Envoy and Contracts' workflow (run 40251184593) was still queued; the implementer ran the embed, embedqueue, store and cmd/dispatch suites against Postgres at f29797a6693c."
 }
