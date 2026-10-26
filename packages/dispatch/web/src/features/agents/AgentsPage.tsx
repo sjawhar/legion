@@ -34,6 +34,7 @@ import { EmptyState } from "../../components/EmptyState";
 import { LoadingSkeleton } from "../../components/LoadingSkeleton";
 import { LabelPill } from "../../components/Pill";
 import { PinButton } from "../../components/PinButton";
+import { AgentListRefilling } from "../../components/QueryError";
 import { RefusableButton } from "../../components/RefusableButton";
 import { useSending } from "../../hooks/useSending";
 import { compareTimestamps } from "../../lib/timestamps";
@@ -269,7 +270,7 @@ function AgentExchangeReply({
   titles,
 }: {
   agent: Agent;
-  liveAgents: readonly Agent[];
+  liveAgents: readonly Agent[] | undefined;
   onReply: (reply: AgentReply) => void;
   read: MessageRead;
   reply: Message;
@@ -345,7 +346,7 @@ function AgentTargetedMessage({
   replyDisabled,
 }: {
   agent: Agent;
-  liveAgents: readonly Agent[];
+  liveAgents: readonly Agent[] | undefined;
   onReply: (reply: AgentReply) => void;
   read: MessageRead;
   replyDisabled: boolean;
@@ -440,7 +441,7 @@ function AgentMessageList({
   replyDisabled,
 }: {
   agent: Agent;
-  liveAgents: readonly Agent[];
+  liveAgents: readonly Agent[] | undefined;
   onReply: (reply: AgentReply) => void;
   /** Whether the row is open. Its list stays mounted while it is collapsed, and marks nothing read
    *  there: a reply is read once it is on screen. */
@@ -617,7 +618,9 @@ function AgentRow({
   /** A row in a closed fold, or one the filters exclude: still mounted, so a pin, a fold's toggle
    *  or a filter loses nothing it holds. */
   hidden: boolean;
-  liveAgents: readonly Agent[];
+  /** The roster a reply's delivery capabilities are judged against; `undefined` while the agent
+   *  list's read is not current, when every capability is unknown (`capabilitiesForTarget`). */
+  liveAgents: readonly Agent[] | undefined;
   /** Whether the page is at Tailwind's `md` or wider - the width the row's own `md:` classes
    *  switch at - answered once for the whole list rather than once per row: a list of two
    *  hundred rows must not hold two hundred media-query listeners. Below it, on a phone, there
@@ -832,7 +835,7 @@ function AgentRowDetails({
   expanded: boolean;
   hidden: boolean;
   id: string;
-  liveAgents: readonly Agent[];
+  liveAgents: readonly Agent[] | undefined;
   replyTo: AgentReply | null;
   setReplyTo: (reply: AgentReply | null) => void;
 }): ReactNode {
@@ -1176,7 +1179,7 @@ function BroadcastComposer({
 
 export function AgentsPage(): ReactNode {
   useDocumentTitle("Agents · Dispatch");
-  const { agents, error, isError, isPending } = useAgents(true, true);
+  const { agents, current, error, isError, isPending, refilling } = useAgents(true, true);
   // One listener for the list, not one per row: every row's directory reads the same answer.
   const mdViewport = useMediaQuery(MD_VIEWPORT_QUERY);
   const inbox = useQuery(inboxQuery());
@@ -1344,7 +1347,7 @@ export function AgentsPage(): ReactNode {
       agent={agent}
       hidden={!foldOpen || !matches(agent)}
       key={agent.session_id}
-      liveAgents={agents}
+      liveAgents={current ? agents : undefined}
       mdViewport={mdViewport}
       needsYou={needsYouBySession.get(agent.session_id) ?? 0}
       onPin={() => togglePin(agent.session_id)}
@@ -1387,8 +1390,9 @@ export function AgentsPage(): ReactNode {
 
   if (isPending) return <LoadingSkeleton label="Loading agents" />;
   // A refresh that fails keeps the list it has: unmounting every row would throw away what each
-  // holds - a draft, a send's refusal, an upload. With no rows there is nothing to keep.
-  if (isError && agents.length === 0) {
+  // holds - a draft, a send's refusal, an upload. With no rows there is nothing to keep. A list
+  // that is refilling is no failure to report, and the page says so in its place.
+  if (isError && agents.length === 0 && !refilling) {
     return <p className={dangerText}>Could not load agents: {error}</p>;
   }
 
@@ -1405,13 +1409,19 @@ export function AgentsPage(): ReactNode {
           </Link>
         </p>
       </header>
-      {isError ? (
+      {refilling ? (
+        <AgentListRefilling className={`mb-3 text-sm ${textSecondaryOnCanvas}`} />
+      ) : isError ? (
         <p className={`mb-3 text-sm ${dangerText}`} role="alert">
           Could not refresh agents: {error}
         </p>
       ) : null}
+      {/* Only a current list says nobody is connected: one that failed or is refilling keeps
+          the rows it had, and an empty one it had says nothing about now. */}
       {agents.length === 0 ? (
-        <EmptyState label="Agents empty state" message="No agents are connected." />
+        current ? (
+          <EmptyState label="Agents empty state" message="No agents are connected." />
+        ) : null
       ) : (
         <>
           <AgentFilterBar
@@ -1427,7 +1437,7 @@ export function AgentsPage(): ReactNode {
             onToggle={() => setSelected((current) => toggleMatching(matching, current))}
             selected={selected}
           />
-          {matching.length === 0 ? (
+          {matching.length === 0 && current ? (
             <EmptyState
               label="Agents filtered empty state"
               message="No agent matches these filters."
@@ -1473,7 +1483,8 @@ export function AgentsPage(): ReactNode {
           ) : null}
         </div>
       )}
-      <EndedAgentsWithReplies live={agents} />
+      {/* A session the list does not hold has ended only when the list is current. */}
+      {current ? <EndedAgentsWithReplies live={agents} /> : null}
     </section>
   );
 }

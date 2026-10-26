@@ -1,6 +1,7 @@
 import { claimHolds } from "@legion/contracts";
 import type { ReactNode } from "react";
 
+import { AGENT_LIST_REFILLING } from "../../api/client";
 import type { IssueClaim } from "../../api/types";
 import { pillClassName } from "../../components/Pill";
 import { useAgents } from "../conversation/useAgents";
@@ -9,25 +10,23 @@ import { Timestamp } from "../refs/Timestamp";
 
 /** What a claim is judged against: the live agent registry as `useAgents` returns it. */
 export interface AgentRegistry {
-  readonly isError: boolean;
-  readonly isPending: boolean;
+  readonly current: boolean;
   readonly titles: ReadonlyMap<string, string>;
 }
 
 /**
- * Whether a claim's session has lapsed: the registry has loaded and does not list it, which is
- * exactly when the server lets any agent take the issue. A human's claim never lapses - there
- * is no session to end, and only a human releases or forces it. The judgement is `claimHolds`
- * from `@legion/contracts`, the one the agent tools print as "not running" too.
+ * Whether a claim's session has lapsed: the registry's latest read answered and does not list
+ * it, which is exactly when the server lets any agent take the issue. A human's claim never
+ * lapses - there is no session to end, and only a human releases or forces it. The judgement is
+ * `claimHolds` from `@legion/contracts`, the one the agent tools print as "not running" too.
  *
- * The loaded test is the whole point. A chip paints the stamped title before the registry
+ * The current test is the whole point. A chip paints the stamped title before the registry
  * answers, so "the registry has not arrived" and "the holder is gone" look identical to a bare
  * `titles.has(id)`; treating the first as lapsed would mark every claim on the page free for a
- * moment, and mark them all free for good whenever the listener is unreachable.
+ * moment, and mark them all free for good whenever the listener is unreachable or refilling.
  */
 export function claimHasLapsed(claim: IssueClaim, registry: AgentRegistry): boolean {
-  const loaded = registry.isPending || registry.isError ? undefined : registry.titles;
-  return claimHolds(claim, loaded) === "lapsed";
+  return claimHolds(claim, registry.current ? registry.titles : undefined) === "lapsed";
 }
 
 /**
@@ -66,12 +65,19 @@ export function ClaimChip({ claim }: { claim: IssueClaim | null }): ReactNode {
   const explains =
     "A claim marks who is implementing this issue, so two agents never take the same work.";
   const lapsedNote = lapsed ? " That session is no longer running, so anyone may claim it." : "";
+  // A session claim the registry could not judge says so, rather than pass for a held one.
+  const uncheckedNote =
+    holdsSession && registry.isError
+      ? ` Couldn't check whether that session is still running: ${
+          registry.refilling ? AGENT_LIST_REFILLING : "Envoy listener unreachable."
+        }`
+      : "";
   return (
     <span
       className={`${pillClassName(lapsed ? "label" : "selected-label")} min-w-0 max-w-full gap-1`}
       data-testid="issue-claim"
       style={{ flexShrink: 1 }}
-      title={`${since} ${explains}${lapsedNote}`}
+      title={`${since} ${explains}${lapsedNote}${uncheckedNote}`}
     >
       <span className="shrink-0">Claimed by</span>
       <span className="min-w-0 truncate">{holder}</span>

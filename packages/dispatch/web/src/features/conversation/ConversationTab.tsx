@@ -94,9 +94,13 @@ const FILTERS: readonly { readonly label: string; readonly value: ConversationFi
   { label: "Closed", value: "closed" },
 ];
 
-/** The live session behind a stored delivery, by the id the attempt recorded. */
-function sessionTitle(sessionId: string | null, agents: readonly Agent[]): string | undefined {
-  return agents.find((agent) => agent.session_id === sessionId)?.title;
+/** The session behind a stored delivery, by the id the attempt recorded, as the agent list
+ *  titles it. */
+function sessionTitle(
+  sessionId: string | null,
+  titles: ReadonlyMap<string, string>
+): string | undefined {
+  return sessionId === null ? undefined : titles.get(sessionId);
 }
 
 /** The session a thread's newest attempt reached, or the target it was aimed at: what the card
@@ -104,11 +108,11 @@ function sessionTitle(sessionId: string | null, agents: readonly Agent[]): strin
 function targetNameOf(
   deliveries: readonly MessageDelivery[],
   target: string | null,
-  agents: readonly Agent[]
+  titles: ReadonlyMap<string, string>
 ): string {
   const last = deliveries.at(-1);
   return (
-    (last === undefined ? undefined : sessionTitle(last.session_id, agents)) ?? target ?? "agent"
+    (last === undefined ? undefined : sessionTitle(last.session_id, titles)) ?? target ?? "agent"
   );
 }
 
@@ -128,7 +132,7 @@ function UnreadMark(): ReactNode {
  *  thread's most recent attempt (root or any reply), named after the session that received it. */
 function threadDelivery(
   root: MessageConversation,
-  agents: readonly Agent[]
+  titles: ReadonlyMap<string, string>
 ): ReplyTarget["thread"] | undefined {
   if (root.kind !== "targeted-message" || root.root.target === null) {
     return undefined;
@@ -146,7 +150,7 @@ function threadDelivery(
   return {
     delivery: last?.delivery ?? "steer",
     target,
-    title: sessionTitle(last?.session_id ?? null, agents) ?? target,
+    title: sessionTitle(last?.session_id ?? null, titles) ?? target,
   };
 }
 
@@ -156,9 +160,9 @@ function replyTargetFor(
   author: Author,
   root: MessageConversation,
   issueKey: string,
-  agents: readonly Agent[]
+  titles: ReadonlyMap<string, string>
 ): ReplyTarget {
-  const thread = threadDelivery(root, agents);
+  const thread = threadDelivery(root, titles);
   return {
     author: author.label,
     excerpt: message.body,
@@ -184,7 +188,7 @@ function ConversationReply({
   root,
   titles,
 }: {
-  agents: readonly Agent[];
+  agents: readonly Agent[] | undefined;
   currentReplyId: string | undefined;
   isClosed: boolean;
   issueKey: string;
@@ -204,7 +208,7 @@ function ConversationReply({
   const author = resolveAuthor(reply.author, titles);
   const capabilities = capabilitiesForTarget(root.root.target, agents);
   const lastAttempt = reply.deliveries.at(-1);
-  const targetName = targetNameOf(reply.deliveries, root.root.target, agents);
+  const targetName = targetNameOf(reply.deliveries, root.root.target, titles);
   const answer = root.replies.find(
     (candidate) => candidate.in_reply_to === reply.id && candidate.author.kind === "session"
   );
@@ -237,7 +241,7 @@ function ConversationReply({
             }
       }
       onReply={
-        isClosed ? undefined : () => onReply(replyTargetFor(reply, author, root, issueKey, agents))
+        isClosed ? undefined : () => onReply(replyTargetFor(reply, author, root, issueKey, titles))
       }
       quote={{
         author: parent === undefined ? undefined : resolveAuthor(parent.author, titles).label,
@@ -263,7 +267,7 @@ function Thread({
   root,
   titles,
 }: {
-  agents: readonly Agent[];
+  agents: readonly Agent[] | undefined;
   currentReplyId: string | undefined;
   isClosed: boolean;
   issueKey: string;
@@ -339,7 +343,7 @@ function MessageTurn({
   replyDisabled,
   titles,
 }: {
-  agents: readonly Agent[];
+  agents: readonly Agent[] | undefined;
   author: Author;
   current: boolean;
   currentReplyId: string | undefined;
@@ -376,7 +380,7 @@ function MessageTurn({
           {isClosed ? null : (
             <ReplyButton
               disabled={replyDisabled}
-              onClick={() => onReply(replyTargetFor(item.root, author, item, issueKey, agents))}
+              onClick={() => onReply(replyTargetFor(item.root, author, item, issueKey, titles))}
             />
           )}
           <TurnPin disabled={disabled} onPin={onPin} pinned={pinned} />
@@ -398,7 +402,7 @@ function MessageTurn({
 
 function commentReplyTarget(
   comment: Comment,
-  agents: readonly Agent[],
+  titles: ReadonlyMap<string, string>,
   issueKey: string
 ): ReplyTarget {
   const author = comment.author;
@@ -409,13 +413,11 @@ function commentReplyTarget(
   const mentions = [...new Set(targets)].map((target) => ({
     target,
     title: target.startsWith("session:")
-      ? (agents.find((agent) => `session:${agent.session_id}` === target)?.title ??
-        target.slice("session:".length))
+      ? (titles.get(target.slice("session:".length)) ?? target.slice("session:".length))
       : target.slice("role:".length),
   }));
   return {
-    author: resolveAuthor(author, new Map(agents.map((agent) => [agent.session_id, agent.title])))
-      .label,
+    author: resolveAuthor(author, titles).label,
     excerpt: comment.body,
     id: comment.id,
     mentions,
@@ -431,7 +433,7 @@ function CommentDeliveryList({
   onRetry,
   retrying,
 }: {
-  agents: readonly Agent[];
+  agents: readonly Agent[] | undefined;
   deliveries: readonly CommentDeliveryAttempt[];
   disabled: boolean;
   onRetry: (delivery: CommentDeliveryAttempt) => void;
@@ -519,10 +521,13 @@ function CommentTurn({
   replyDisabled,
   sendKey,
   setExpanded,
+  titles,
   viewerLogin,
 }: {
   actionFailure: CommentActionFailure | undefined;
-  agents: readonly Agent[];
+  /** The roster delivery capabilities are judged against; `undefined` while the agent list's
+   *  read is not current, when every capability is unknown (`capabilitiesForTarget`). */
+  agents: readonly Agent[] | undefined;
   issueArtifacts: ConversationTabProps["issueArtifacts"];
   composerClassName?: string;
   current: boolean;
@@ -553,6 +558,7 @@ function CommentTurn({
    *  (`threadReplySendKey`). */
   sendKey: MutationKey;
   setExpanded: (expanded: boolean) => void;
+  titles: ReadonlyMap<string, string>;
   viewerLogin: string;
 }): ReactNode {
   const queryClient = useQueryClient();
@@ -686,7 +692,7 @@ function CommentTurn({
           <ReplyButton
             disabled={replyDisabled}
             onClick={() => {
-              if (onReply(commentReplyTarget(item.root, agents, issueKey)) && !isPhone) {
+              if (onReply(commentReplyTarget(item.root, titles, issueKey)) && !isPhone) {
                 setExpanded(true);
               }
             }}
@@ -710,7 +716,7 @@ function TargetedMessageTurn({
   replyDisabled,
   titles,
 }: {
-  agents: readonly Agent[];
+  agents: readonly Agent[] | undefined;
   current: boolean;
   currentReplyId: string | undefined;
   isClosed: boolean;
@@ -728,7 +734,7 @@ function TargetedMessageTurn({
     onSuccess: () => void queryClient.invalidateQueries({ queryKey: ["issue-messages", issueKey] }),
   });
   const capabilities = capabilitiesForTarget(item.root.target, agents);
-  const targetName = targetNameOf(item.root.deliveries, item.root.target, agents);
+  const targetName = targetNameOf(item.root.deliveries, item.root.target, titles);
   const asker = resolveAuthor(item.root.author, titles);
 
   return (
@@ -754,7 +760,7 @@ function TargetedMessageTurn({
       deliveries={deliveryAttempts(item.root.deliveries, targetName)}
       header={<Avatar author={asker} />}
       isClosed={isClosed}
-      onReply={() => onReply(replyTargetFor(item.root, asker, item, issueKey, agents))}
+      onReply={() => onReply(replyTargetFor(item.root, asker, item, issueKey, titles))}
       onRetry={retry.mutate}
       register={register}
       replyDisabled={replyDisabled}
@@ -946,7 +952,10 @@ export function ConversationTab({
   const newestShown = shown.at(0);
   const latestItemSeq = newestShown === undefined ? undefined : Date.parse(newestShown.at);
   const follow = useFollowLatest({ enabled: visible, latestItemSeq, ownSendCount });
-  const { agents, titles } = useAgents(visible);
+  const { agents: listedAgents, current: agentsCurrent, titles } = useAgents(visible);
+  // Delivery capabilities come only from a current list: one that is refilling or unreachable
+  // leaves every mode unknown, never "not supported". Titles keep what the last read gave.
+  const agents = agentsCurrent ? listedAgents : undefined;
   const scrolledToFocus = useRef<string | undefined>(undefined);
 
   useEffect(() => {
@@ -1177,6 +1186,7 @@ export function ConversationTab({
                 }
                 hideReplyComposer={replyTo?.parentKind === "comment" && replyTo.id === item.root.id}
                 agents={agents}
+                titles={titles}
                 issueArtifacts={issueArtifacts}
                 isPhone={isPhoneViewport}
                 onPhoneThreadToggle={() => phone.open(item.root.id)}
@@ -1272,6 +1282,7 @@ export function ConversationTab({
                     : undefined
                 }
                 agents={agents}
+                titles={titles}
                 issueArtifacts={issueArtifacts}
                 composerClassName={`fixed inset-x-0 bottom-0 z-20 border-t px-4 pt-4 pb-2 ${card} ${borderDefault}`}
                 current={phoneThread.id === focus?.id}

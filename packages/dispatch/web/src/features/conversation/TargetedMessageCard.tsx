@@ -16,15 +16,17 @@ import { ReplyButton } from "./ReplyButton";
 /** The current live capabilities behind a stored delivery target - a bare session, or a role
  *  re-resolved to whoever holds it now, since a role's holder can change between a recorded
  *  attempt and a retry rendered from it. `undefined` means unknown (no live registration),
- *  which every caller treats as permissive rather than as a reason to disable a control. Every
- *  retry control must resolve through this from the delivery's own stored target - never from
- *  the attempt's recorded session, and never from an enclosing agent/session context, both of
- *  which can go stale after a role hands off. */
+ *  which every caller treats as permissive rather than as a reason to disable a control. So does
+ *  an `agents` roster of `undefined`, which a caller passes while its read of the agent list is
+ *  not current (`useAgents`): a refilling or unreachable list says nothing about what a session
+ *  takes. Every retry control must resolve through this from the delivery's own stored target -
+ *  never from the attempt's recorded session, and never from an enclosing agent/session
+ *  context, both of which can go stale after a role hands off. */
 export function capabilitiesForTarget(
   target: string | null | undefined,
-  agents: readonly Agent[]
+  agents: readonly Agent[] | undefined
 ): readonly string[] | undefined {
-  if (target === null || target === undefined) return undefined;
+  if (target === null || target === undefined || agents === undefined) return undefined;
   if (target.startsWith("session:")) {
     return agents.find((agent) => `session:${agent.session_id}` === target)?.capabilities;
   }

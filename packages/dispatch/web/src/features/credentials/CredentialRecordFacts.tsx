@@ -61,7 +61,7 @@ function Fact({ children, label }: { children: ReactNode; label: string }): Reac
  * this same layout before their own (page-specific) decision/action controls.
  */
 export function CredentialRecordFacts({ record }: { record: CredentialRecord }): ReactNode {
-  const { agents, isError, isPending } = useAgents(
+  const { agents, isError, isPending, refilling } = useAgents(
     credentialSessionNamesAnyone(record.session),
     true
   );
@@ -84,6 +84,7 @@ export function CredentialRecordFacts({ record }: { record: CredentialRecord }):
               agents={agents}
               isError={isError}
               isPending={isPending}
+              refilling={refilling}
               session={record.session}
             />
           </div>

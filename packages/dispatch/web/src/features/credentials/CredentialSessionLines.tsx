@@ -1,6 +1,7 @@
 import type { ReactNode } from "react";
 import { generatePath, Link } from "react-router-dom";
 
+import { AGENT_LIST_REFILLING } from "../../api/client";
 import type { Agent, CredentialSession } from "../../api/types";
 import { focusVisibleRing, linkHoverText, linkText, textMutedOnCanvas } from "../../theme/classes";
 import { AGENT_LIVE_PATH } from "../refs/routes";
@@ -17,7 +18,13 @@ const SOURCE_PREFIX: Record<CredentialSessionSource, string> = {
   request: "",
 };
 
-function CredentialSessionLineText({ line }: { line: CredentialSessionLine }): ReactNode {
+function CredentialSessionLineText({
+  line,
+  refilling,
+}: {
+  line: CredentialSessionLine;
+  refilling: boolean;
+}): ReactNode {
   const prefix = line.source === null ? "" : SOURCE_PREFIX[line.source];
   switch (line.status.kind) {
     case "running":
@@ -41,6 +48,7 @@ function CredentialSessionLineText({ line }: { line: CredentialSessionLine }): R
       return (
         <span className={textMutedOnCanvas}>
           {`${prefix}Couldn't check whether ${line.status.id} is running.`}
+          {refilling ? ` ${AGENT_LIST_REFILLING}` : null}
         </span>
       );
   }
@@ -49,7 +57,8 @@ function CredentialSessionLineText({ line }: { line: CredentialSessionLine }): R
 /**
  * The credential request's session, resolved against the live Agents list: the Inbox row and the
  * record page both render this one component (LEGION-587), so a running, not-running, couldn't-
- * check or unnamed session always reads identically in both places. Takes the agents list (and
+ * check or unnamed session always reads identically in both places; a couldn't-check line says
+ * why when the agent list is refilling. Takes the agents list (and
  * its loading/error state) as props rather than calling `useAgents` itself: a page that renders
  * several of these (the Inbox's pending-requests list) polls the shared Agents list once from
  * its own page-level `useAgents` call and passes the result down, so N rows cost one 15s poll,
@@ -61,11 +70,13 @@ export function CredentialSessionLines({
   agents,
   isError,
   isPending,
+  refilling,
   session,
 }: {
   agents: readonly Agent[];
   isError: boolean;
   isPending: boolean;
+  refilling: boolean;
   session: CredentialSession | undefined;
 }): ReactNode {
   const lines = credentialSessionLines(session, agents, isError || isPending);
@@ -75,7 +86,11 @@ export function CredentialSessionLines({
   return (
     <>
       {lines.map((line) => (
-        <CredentialSessionLineText key={line.source ?? line.status.id} line={line} />
+        <CredentialSessionLineText
+          key={line.source ?? line.status.id}
+          line={line}
+          refilling={refilling}
+        />
       ))}
     </>
   );

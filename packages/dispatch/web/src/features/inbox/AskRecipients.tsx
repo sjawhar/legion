@@ -79,8 +79,9 @@ type Confirming =
  * Unsubscribe each confirm first and then cut the route that actually delivers; a subscriber
  * whose only matching topic is wider than this owner (e.g. `notifications.dispatch.>`) names
  * that topic and has no control, as the header's Subscribed agents panel does. When the
- * subscribers fetch fails, the card says so with a retry instead of passing the follower count
- * off as the whole set.
+ * subscribers fetch fails, the card says so with a retry - the shared refilling notice while
+ * Envoy's agent list refills - and counts nobody, instead of passing the follower count off as
+ * the whole set. A follower's dot is unknown, not offline, while the agent list is not current.
  */
 export function AskRecipients({
   askId,
@@ -112,7 +113,10 @@ export function AskRecipients({
   const subscribers = subscriberRows.filter(
     (subscriber) => !followers.some((row) => row.session_id === subscriber.session_id)
   );
-  const { agents } = useAgents(followers.length > 0);
+  const { agents, current: agentsCurrent } = useAgents(followers.length > 0);
+  // `Reaches N` counts nobody from a subscriber read that failed: it says nothing of how many
+  // there are, and the card says why instead.
+  const counted = !subscribersQuery.isError;
   const [confirming, setConfirming] = useState<Confirming | undefined>(undefined);
   const [open, setOpen] = useState(false);
   const unfollow = useMutation({
@@ -141,7 +145,7 @@ export function AskRecipients({
     <section aria-label="Recipients" className="mt-2">
       <DisclosureToggle
         expanded={open}
-        label={`Reaches ${followers.length + subscribers.length}`}
+        label={counted ? `Reaches ${followers.length + subscribers.length}` : "Recipients"}
         onToggle={() => setOpen((shown) => !shown)}
         textClassName={textMutedOnSurface}
       />
@@ -150,7 +154,9 @@ export function AskRecipients({
           {followers.length === 0 ? null : (
             <ul aria-label="Followers" className="mt-1 flex flex-wrap gap-2">
               {followers.map((follower) => {
-                const live = agents.some((agent) => agent.session_id === follower.session_id);
+                const live = agentsCurrent
+                  ? agents.some((agent) => agent.session_id === follower.session_id)
+                  : undefined;
                 return (
                   <li className={sessionChipClassName} key={follower.session_id}>
                     <LiveDot live={live} />
@@ -179,7 +185,7 @@ export function AskRecipients({
               >
                 {subscribers.map((subscriber) => (
                   <li className={sessionChipClassName} key={subscriber.session_id}>
-                    <LiveDot live={subscriber.live} />
+                    <LiveDot live={counted ? subscriber.live : undefined} />
                     <span title={subscriber.session_id}>
                       {sessionLabel(subscriber.session_id, subscriber.title)}
                     </span>
@@ -212,6 +218,7 @@ export function AskRecipients({
       {subscribersQuery.isError ? (
         <div className="mt-2">
           <QueryError
+            error={subscribersQuery.error}
             message="Subscribers unavailable — Envoy listener unreachable."
             onRetry={() => subscribersQuery.refetch()}
             retrying={subscribersQuery.isFetching}

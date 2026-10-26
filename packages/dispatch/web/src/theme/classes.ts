@@ -540,6 +540,9 @@ export const connectionDotFailed = "bg-rose-500 dark:bg-rose-400";
  * contrast check applies. */
 export const liveDotBg = "bg-emerald-500 dark:bg-emerald-400";
 export const offlineDotBg = "bg-slate-400 dark:bg-slate-600";
+/** The same dot when liveness is unknown (the agent list is refilling or unreachable): a hollow
+ * ring, so it reads as neither live nor offline. */
+export const unknownDotBorder = "border border-slate-400 dark:border-slate-500";
 // ---------------------------------------------------------------------------------------------
 // Buttons and inputs
 // ---------------------------------------------------------------------------------------------

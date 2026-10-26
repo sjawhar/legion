@@ -2,7 +2,7 @@ import { expect, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 
-import { api } from "../../api/client";
+import { AGENT_LIST_REFILLING, ApiError, api } from "../../api/client";
 import type { Agent, AskFollower, Subscriber } from "../../api/types";
 import { AskRecipients, type AskRecipientsProps } from "./AskRecipients";
 
@@ -44,13 +44,16 @@ function renderRecipients({
   removeFollower = async () => {},
   subscribers = [],
 }: {
-  agents?: Agent[];
+  /** An Error rejects the agents fetch. */
+  agents?: Agent[] | Error;
   props?: Partial<AskRecipientsProps>;
   removeFollower?: (askId: string, sessionId: string) => Promise<void>;
   /** An Error rejects the subscribers fetch, as an unreachable Envoy listener does. */
   subscribers?: Subscriber[] | Error;
 } = {}) {
-  const listAgents = spyOn(api, "listAgents").mockResolvedValue(agents);
+  const listAgents = spyOn(api, "listAgents");
+  if (agents instanceof Error) listAgents.mockRejectedValue(agents);
+  else listAgents.mockResolvedValue(agents);
   const getIssueSubscribers = spyOn(api, "getIssueSubscribers");
   const getArtifactSubscribers = spyOn(api, "getArtifactSubscribers");
   if (subscribers instanceof Error) {
@@ -286,6 +289,26 @@ test("AskRecipients says when the subscribers fetch failed and retries it, inste
     );
     expect(page.getIssueSubscribers).toHaveBeenCalledTimes(2);
     expect(within(section).queryByRole("alert")).toBeNull();
+  } finally {
+    page.unmount();
+  }
+});
+
+// While Envoy's agent list refills, the card says so - not that the listener is unreachable -
+// counts nobody, and shows each follower's liveness as unknown rather than offline.
+test("AskRecipients says the agent list is refilling and claims no count or offline follower", async () => {
+  const refilling = new ApiError(503, { code: "ENVOY_REFILLING", error: AGENT_LIST_REFILLING });
+  const page = renderRecipients({ agents: refilling, subscribers: refilling });
+
+  try {
+    const section = screen.getByRole("region", { name: "Recipients" });
+    const notice = await within(section).findByTestId("agent-list-refilling");
+    expect(notice.textContent).toBe(AGENT_LIST_REFILLING);
+    expect(within(section).queryByRole("alert")).toBeNull();
+    expect(within(section).queryByRole("button", { name: /^Reaches/ })).toBeNull();
+    expect(within(section).getByRole("button", { name: "Recipients" })).toBeTruthy();
+    await waitFor(() => expect(within(section).getAllByTitle("Liveness unknown")).toHaveLength(2));
+    expect(within(section).queryByTitle("Not live")).toBeNull();
   } finally {
     page.unmount();
   }

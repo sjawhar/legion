@@ -4,7 +4,7 @@ import { focusManager, QueryClient, QueryClientProvider } from "@tanstack/react-
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter, useLocation } from "react-router-dom";
 
-import { api } from "../../api/client";
+import { AGENT_LIST_REFILLING, ApiError, api } from "../../api/client";
 import type {
   Agent,
   CreateBroadcastInput,
@@ -2804,6 +2804,70 @@ test("a registry poll that fails keeps every row and what it holds, and says so"
     expect(card(region, "Planner")).toBe(planner);
     expect(field.isConnected).toBe(true);
     expect(field.value).toBe("Half a thought");
+  } finally {
+    page.view.unmount();
+    page.restore();
+  }
+});
+
+/** The 503 Dispatch answers `/agents` with while the Envoy listener refills its agent list. */
+function refillingError(): ApiError {
+  return new ApiError(503, { code: "ENVOY_REFILLING", error: AGENT_LIST_REFILLING });
+}
+
+// A refilling list is no failure and no departure: the rows an earlier read gave stay, the page
+// says the list is refilling (as status, not alert), and no session is called ended from it.
+test("a refilling registry keeps every row, says it is refilling, and ends no session", async () => {
+  const ended = "01a0e52e00000000";
+  const page = renderAgents({ agentState: { [ended]: { unread_replies: 1 } } });
+
+  try {
+    const region = await screen.findByRole("region", { name: "Agents" });
+    const planner = card(region, "Planner");
+    await screen.findByRole("region", { name: "Replied, no longer connected" });
+
+    page.listAgents.mockRejectedValue(refillingError());
+    await page.queryClient.refetchQueries({ queryKey: ["agents"] });
+    expect((await screen.findByTestId("agent-list-refilling")).textContent).toBe(
+      AGENT_LIST_REFILLING
+    );
+    expect(screen.getByTestId("agent-list-refilling").getAttribute("role")).toBe("status");
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(card(region, "Planner")).toBe(planner);
+    expect(screen.queryByRole("region", { name: "Replied, no longer connected" })).toBeNull();
+  } finally {
+    page.view.unmount();
+    page.restore();
+  }
+});
+
+// An empty list from an earlier read says nothing about now: while the registry refills the page
+// shows the refilling notice and no "No agents are connected.", and it says so from the start too.
+test("a refilling registry never says no agents are connected", async () => {
+  const page = renderAgents({ listedAgents: [] });
+
+  try {
+    await screen.findByText("No agents are connected.");
+    page.listAgents.mockRejectedValue(refillingError());
+    await page.queryClient.refetchQueries({ queryKey: ["agents"] });
+    await screen.findByTestId("agent-list-refilling");
+    expect(screen.queryByText("No agents are connected.")).toBeNull();
+    expect(screen.queryByText(/Could not (load|refresh) agents/)).toBeNull();
+  } finally {
+    page.view.unmount();
+    page.restore();
+  }
+});
+
+test("a registry refilling from the first read shows the refilling notice, not an error", async () => {
+  const page = renderAgents();
+  page.listAgents.mockRejectedValue(refillingError());
+
+  try {
+    await screen.findByTestId("agent-list-refilling");
+    expect(screen.getByRole("region", { name: "Agents" })).toBeTruthy();
+    expect(screen.queryByText("No agents are connected.")).toBeNull();
+    expect(screen.queryByText(/Could not (load|refresh) agents/)).toBeNull();
   } finally {
     page.view.unmount();
     page.restore();
