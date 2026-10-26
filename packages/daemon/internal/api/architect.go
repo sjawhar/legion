@@ -281,10 +281,12 @@ func (s *server) gateRegister(w http.ResponseWriter, r *http.Request) {
 	// approved or asked changes of before the architect registered is applied at once: the gate
 	// opens, or closes with the architect told. The read's own start is its sequence alone: no time
 	// this read shows is the read's own (the latest review's time is that review's), and every act
-	// Dispatch records after the read carries a later sequence.
+	// Dispatch records after the read carries a later sequence. The approval request the read found
+	// open, and whose turn it waits on, travel with it too, for the gate to bind and mirror.
 	changes, reason := approval.ChangesRequestedLatest()
 	fact := intake.GateRegistered{Issue: req.Issue, ArtifactID: artifactID, Version: req.Version, ApprovedVersion: approval.ApprovedLatest(),
-		ChangesRequestedVersion: changes, ChangesReason: reason, DispatchVersion: approval.LatestVersion, Since: record.EventMark{Seq: since}}
+		ChangesRequestedVersion: changes, ChangesReason: reason, DispatchVersion: approval.LatestVersion, Since: record.EventMark{Seq: since},
+		RequestAsk: approval.AskID, RequestWaitsOnAgent: approval.AskID != "" && approval.WaitingOn == "agent"}
 	review := record.EventMark{Seq: approval.Seq, At: approval.At}
 	if changes != 0 {
 		fact.ChangesRequestedMark = review
