@@ -778,6 +778,89 @@ func TestARedeliveryThisListenerNeverDeferredGivesNoSlotBack(t *testing.T) {
 	})
 }
 
+// A window longer than the durable's MaxDeliver can pay for still ends in a give-up record.
+// ENVOY_UNPLACEABLE_RETRY_WINDOW has no upper bound (envDuration, main.go), and at ten minutes the
+// window buys 120 deferrals against a consumer that stops redelivering after consumerMaxDeliver
+// (20), silently: nothing in this repository consumes JetStream's max-deliveries advisory. The
+// count the handler holds the window to is therefore capped at unplaceableMaxDeliveries, and the
+// delivery that reaches it is given up - with its record, its counter and its no_holder exception -
+// while the stream would still deliver it. Without that cap the message is deferred on every one of
+// its twenty deliveries and then simply stops arriving, with no line, no counter and no exception:
+// the loss this change exists to end, reached by an operator setting rather than a code change.
+// TestUnplaceableRetryWindowFitsTheBoundsItDependsOn checks only the default window, so nothing
+// else catches the cap going.
+//
+// The run's own NAKs, in front of the listener's handler, take every earlier delivery and ask for
+// it again at once, so the handler's first sight of the message is the delivery under test, with
+// no 5 s deferral delay to wait out per attempt. The negative control is the sibling subtest: the
+// same window on the same rig, one delivery earlier, is deferred, so the give-up is the cap and not
+// a rig whose late deliveries can never be deferred.
+func TestAWindowPastTheDurablesMaxDeliverStillGivesUpBeforeIt(t *testing.T) {
+	const window = 10 * time.Minute
+	if deferrals := int(window / unplaceableRetryDelay); deferrals < consumerMaxDeliver {
+		t.Fatalf("a %s window buys %d deferrals, fewer than the durable's MaxDeliver of %d: it no longer reaches the cap this test exists for", window, deferrals, consumerMaxDeliver)
+	}
+	start := func(t *testing.T, target string, handlerFirstSees uint64) unplaceableDeliveryRun {
+		t.Helper()
+		harness := unplaceableHarness(t)
+		cfg := harness.config
+		cfg.unplaceableRetryWindow = window
+		handler := jetStreamDeliveryHandler(cfg)
+		var taken atomic.Uint64
+		return startDeliveryThrough(t, harness, func(msg *natsgo.Msg) {
+			if taken.Add(1) < handlerFirstSees {
+				if err := msg.Nak(); err != nil {
+					t.Errorf("NAK an early delivery of %s: %v", target, err)
+				}
+				return
+			}
+			handler(msg)
+		}, target, 0)
+	}
+
+	t.Run("the delivery that reaches the cap is given up", func(t *testing.T) {
+		run := start(t, "ses_window_past_max_deliver", unplaceableMaxDeliveries)
+		harness := run.harness
+
+		waitFor(t, 15*time.Second, "the delivery at the cap to be disposed of", func() bool {
+			logs := harness.logs.String()
+			return len(deliveryRecords(t, logs, "listener agent delivery given up"))+
+				len(deliveryRecords(t, logs, "listener agent delivery deferred")) > 0
+		})
+		logs := harness.logs.String()
+		if deferrals := deliveryRecords(t, logs, "listener agent delivery deferred"); len(deferrals) != 0 {
+			t.Fatalf("delivery %d of a %s window was deferred (attempt %d of %d window deferrals): the stream stops redelivering at %d, so this message would be lost with no give-up record, no counter and no exception:\n%s",
+				unplaceableMaxDeliveries, window, deferrals[0].Attempt, deferrals[0].WindowDeferrals, consumerMaxDeliver, logs)
+		}
+		giveUps := deliveryRecords(t, logs, "listener agent delivery given up")
+		if len(giveUps) != 1 || giveUps[0].Reason != "no_session_record" || giveUps[0].DeliveryStatus != "unplaceable_no_record" {
+			t.Fatalf("want exactly one give-up line naming no_session_record and unplaceable_no_record, got %d:\n%s", len(giveUps), logs)
+		}
+		body := metricsBody(t, harness)
+		if got := counterValue(t, body, deliveredSeries("unplaceable_no_record")); got != 1 {
+			t.Fatalf("%s = %d, want 1:\n%s", deliveredSeries("unplaceable_no_record"), got, body)
+		}
+		assertDeliveryException(t, run.exceptions, run.item, "no_holder")
+	})
+
+	t.Run("one delivery earlier, the same window defers", func(t *testing.T) {
+		run := start(t, "ses_window_under_max_deliver", unplaceableMaxDeliveries-1)
+		harness := run.harness
+
+		waitFor(t, 15*time.Second, "the delivery under the cap to be deferred", func() bool {
+			return len(deliveryRecords(t, harness.logs.String(), "listener agent delivery deferred")) > 0
+		})
+		logs := harness.logs.String()
+		deferrals := deliveryRecords(t, logs, "listener agent delivery deferred")
+		if deferrals[0].Attempt != unplaceableMaxDeliveries-1 {
+			t.Fatalf("the deferral is attempt %d, want %d - the handler's first sight of the message is the delivery after the run's own NAKs:\n%s", deferrals[0].Attempt, unplaceableMaxDeliveries-1, logs)
+		}
+		if got := len(deliveryRecords(t, logs, "listener agent delivery given up")); got != 0 {
+			t.Fatalf("%d give-up lines one delivery under the cap, want none:\n%s", got, logs)
+		}
+	})
+}
+
 // recordsFor keeps the records that name sessionID, for runs that share one harness's log.
 func recordsFor(records []deliveryRecord, sessionID string) []deliveryRecord {
 	var kept []deliveryRecord
