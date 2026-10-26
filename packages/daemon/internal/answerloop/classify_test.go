@@ -18,17 +18,21 @@ func (a askAuthors) Ask(_ context.Context, id string) (dispatch.Ask, error) {
 
 // Every kind of hand-off is classified before any model call: what the agent answers (a message
 // sent to it, a comment mentioning it, a reply on an ask it opened, another agent's Envoy message),
-// the decisions (a person's answer to its ask, the ask handed back, a person's reply on its ask,
-// which is answered too), and everything it never answers.
+// the decisions (a person's answer to its ask, a person's reply that hands its ask back to it), each
+// answered too when it asks something and allowed to ask nothing, and everything it never answers.
 func TestEveryHandoffIsClassifiedBeforeAnyModelCall(t *testing.T) {
 	const ownAsk, othersAsk = "a-own", "a-other"
 	asks := askAuthors{ownAsk: "ses_tester", othersAsk: "ses_reviewer"}
 	agent := intake.DispatchActor{Kind: "session", ID: "ses_asker"}
+	self := intake.DispatchActor{Kind: "session", ID: "ses_tester"}
 	daemon := intake.DispatchActor{Kind: "session", ID: "legion-daemon:LEGION"}
 	comment := func(id string, ask *string, body string) map[string]any {
 		return map[string]any{"id": id, "issue_key": "LEGION-9", "body": body, "ask_id": ask}
 	}
 	mention := map[string]any{"attempt": 1, "mode": "btw", "comment_id": "c-1", "target": "role:legion-legion-legion-9-tester"}
+	reply := func(id, waitingOn, body string) map[string]any {
+		return map[string]any{"id": id, "issue_key": "LEGION-9", "body": body, "ask_id": ownAsk, "reply_to": nil, "ask_waiting_on": waitingOn}
+	}
 	for _, tc := range []struct {
 		name     string
 		handoff  intake.Handoff
@@ -47,16 +51,30 @@ func TestEveryHandoffIsClassifiedBeforeAnyModelCall(t *testing.T) {
 			handoff: dispatchHandoff("ses_tester", bare("comment.created", agent, new("LEGION-9"), comment("c-2", new(ownAsk), "Which run?")))},
 		{name: "a person's reply on the agent's ask", kind: KindAskReply, decision: true, maySkip: true,
 			handoff: dispatchHandoff("ses_tester", bare("comment.created", person, new("LEGION-9"), comment("c-3", new(ownAsk), "Use B. Why A?")))},
+		{name: "a person's reply handing the agent's ask back to it", kind: KindAskReply, decision: true, maySkip: true,
+			handoff: dispatchHandoff("ses_tester", bare("comment.created", person, new("LEGION-9"), reply("c-9", "agent", "Use B.")))},
+		{name: "a person's reply leaving the agent's ask with the person", kind: KindAskReply,
+			handoff: dispatchHandoff("ses_tester", bare("comment.created", person, new("LEGION-9"), reply("c-10", "human", "Which version?")))},
+		{name: "an agent's reply handing the agent's ask to the person", kind: KindAskReply,
+			handoff: dispatchHandoff("ses_tester", bare("comment.created", agent, new("LEGION-9"), reply("c-11", "human", "Over to you: B?")))},
+		{name: "a person's reply on the agent's ask that mentions it", kind: KindMention, decision: true, maySkip: true,
+			handoff: dispatchHandoff("ses_tester", frame("comment.created", person, new("LEGION-9"), reply("c-12", "agent", "@tester use B; why A?"), mention))},
+		{name: "the loop's own answer on the agent's ask", handoff: dispatchHandoff("ses_tester", bare("comment.created", self, new("LEGION-9"),
+			reply("c-13", "human", "Because B.\n\n<!-- legion-answer:0123456789abcdef0123456789abcdef -->")))},
 		{name: "a reply on an ask the agent follows", handoff: dispatchHandoff("ses_tester",
 			bare("comment.created", person, new("LEGION-9"), comment("c-4", new(othersAsk), "Why?")))},
 		{name: "a reply on the agent's comment thread", handoff: dispatchHandoff("ses_tester",
 			bare("comment.created", person, new("LEGION-9"), comment("c-5", nil, "ok")))},
-		{name: "a person's answer to the agent's ask", decision: true, handoff: dispatchHandoff("ses_tester",
-			bare("ask.answered", person, new("LEGION-9"), map[string]any{"id": ownAsk}))},
-		{name: "the agent's ask handed back", decision: true, handoff: dispatchHandoff("ses_tester",
-			bare("ask.handed_back", person, new("LEGION-9"), map[string]any{"id": ownAsk}))},
+		{name: "a person's answer to the agent's ask that asks", kind: KindAskReply, decision: true, maySkip: true,
+			handoff: dispatchHandoff("ses_tester", answeredEvent(34, person, ownAsk, "question", []string{"B"}, new("Use B. Why A?")))},
+		{name: "a person's answer to the agent's ask with options alone", decision: true,
+			handoff: dispatchHandoff("ses_tester", answeredEvent(35, person, ownAsk, "question", []string{"B"}, nil))},
+		{name: "a person's review of the agent's approval request", handoff: dispatchHandoff("ses_tester",
+			answeredEvent(36, person, ownAsk, "approval", []string{"Approve"}, new("Looks right.")))},
+		{name: "the agent's own hand-back of its approval request", handoff: dispatchHandoff("ses_tester",
+			bare("ask.handed_back", self, new("LEGION-9"), map[string]any{"id": ownAsk}))},
 		{name: "an answer to another's ask", handoff: dispatchHandoff("ses_tester",
-			bare("ask.answered", person, new("LEGION-9"), map[string]any{"id": othersAsk}))},
+			answeredEvent(37, person, othersAsk, "question", []string{"B"}, new("Why A?")))},
 		{name: "an edit", handoff: dispatchHandoff("ses_tester", bare("comment.edited", person, new("LEGION-9"), comment("c-6", new(ownAsk), "edited")))},
 		{name: "a message edit", handoff: dispatchHandoff("ses_tester", bare("message.edited", person, new("LEGION-9"), map[string]any{"id": "m-4"}))},
 		{name: "a resolution", handoff: dispatchHandoff("ses_tester", bare("comment.resolved", person, new("LEGION-9"), comment("c-7", new(ownAsk), "")))},
@@ -104,6 +122,43 @@ func TestEveryHandoffIsClassifiedBeforeAnyModelCall(t *testing.T) {
 				t.Fatalf("decision = %t; want %t", verdict.Decision != nil, tc.decision)
 			}
 		})
+	}
+}
+
+// A decision names its own id, the same whichever envelope carries it (the Dispatch event's for an
+// answer, the comment's for a reply), the person, where they decided and what: an answer's selected
+// options and text, a reply's body. An answer that also asks is answered on the ask's thread.
+func TestADecisionNamesItsIDThePersonWhereAndWhat(t *testing.T) {
+	asks := askAuthors{askID: "ses_tester"}
+	conv := store.AgentConversation{Session: "ses_tester", Issue: "LEGION-9"}
+	classify := func(h intake.Handoff) Verdict {
+		t.Helper()
+		verdict, err := Classify(context.Background(), h, conv, asks)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if verdict.Decision == nil {
+			t.Fatalf("no decision (%s)", verdict.Because)
+		}
+		return verdict
+	}
+	answer := answeredEvent(34, person, askID, "question", []string{"B", "C"}, new("Use B. Why A?"))
+	first := classify(dispatchHandoff("ses_tester", answer))
+	redelivered := dispatchHandoff("ses_tester", answer)
+	redelivered.Envelope.EventID, redelivered.Envelope.DedupeKey = "dispatch-2", "dispatch-2"
+	again := classify(redelivered)
+	want := Decision{ID: "dispatch:34", Asker: "user:person@example.com", Ref: "dispatch://LEGION-9/ask/" + askID,
+		Text: "Selected: B; C\n\nUse B. Why A?", Conversation: conv}
+	if *first.Decision != want || *again.Decision != want {
+		t.Fatalf("decisions = %+v, %+v; want %+v for both", *first.Decision, *again.Decision, want)
+	}
+	if q := first.Question; q == nil || q.Identity != "dispatch:34" || q.AskID != askID || q.Issue != "LEGION-9" || q.Text != want.Text || q.Ref != want.Ref {
+		t.Fatalf("question = %+v; want the answer's, on the ask's thread", q)
+	}
+	reply := classify(dispatchHandoff("ses_tester", bare("comment.created", person, new("LEGION-9"),
+		map[string]any{"id": "c-9", "issue_key": "LEGION-9", "body": "Use B.", "ask_id": askID, "reply_to": nil, "ask_waiting_on": "agent"})))
+	if want := (Decision{ID: "dispatch:c-9", Asker: "user:person@example.com", Ref: "dispatch://LEGION-9/comment/c-9", Text: "Use B.", Conversation: conv}); *reply.Decision != want {
+		t.Fatalf("decision = %+v; want %+v", *reply.Decision, want)
 	}
 }
 

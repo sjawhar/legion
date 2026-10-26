@@ -26,6 +26,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/ghtool"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/notify"
+	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/store"
@@ -106,7 +107,7 @@ func TestAClaimStartedDuringAnAnswerGetsTheQuestionAndItsConversationNothing(t *
 		Store:   st, Dispatch: dispatch.New(dispatchServer.URL, "t"), Envoy: notify.New(listener.URL, "t"), Gate: gate,
 		Issues: noFacts{}, Tools: noTool{}, Conversations: answerloop.Harnesses{},
 		PassOn:    controllerPassOn{pool: st.Pool(), records: record.NewStore(), now: func() time.Time { return now }, log: slog.New(slog.NewTextHandler(io.Discard, nil))},
-		Decisions: loggedDecisions{slog.New(slog.NewTextHandler(io.Discard, nil))},
+		Decisions: routedDecisions{},
 		Answer: func(ctx context.Context, req answer.Request) (answer.Reply, error) {
 			// The operator resumes the tester while its answer is generated.
 			if err := gate.CheckLaunch(ctx, views.view.Claim); err != nil {
@@ -195,6 +196,92 @@ func TestOutboxAgentQuestionIsQueuedAndDeliveredOncePerQuestion(t *testing.T) {
 		`"issue":"LEGION-9","session":"ses_tester","asker":"user:person@example.com","ref":"dispatch://LEGION-9/message/m-1","text":"Is PR 7 green?"}}`
 	if string(body) != want {
 		t.Fatalf("notice body = %s, want %s", body, want)
+	}
+}
+
+// A person's decision on an ask a stopped tester of a parked child opened goes on as one
+// agent-decision notice: to the tree's architect while it holds its role, otherwise (its claim
+// suspended, none the daemon supervises, or its tree lingering) to the controller. Handed off again,
+// again after a restart, and again after the notice went, it queues nothing more, and the notice
+// names the decision's id, the agent's issue, role and session, the person, where and what they
+// decided.
+func TestADecisionGoesOnceToTheRunningArchitectElseToTheController(t *testing.T) {
+	const controller = "notifications.legion.legion.controller"
+	for _, tc := range []struct {
+		name      string
+		architect supervise.ClaimState
+		lingers   bool
+		toArch    bool
+	}{
+		{name: "the tree's architect holds its role", architect: supervise.StateWorking, toArch: true},
+		{name: "the tree's architect is suspended", architect: supervise.StateSuspended},
+		{name: "no architect of the tree is supervised"},
+		{name: "the tree lingers", architect: supervise.StateWorking, lingers: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			pool := isolatedOutboxPool(t)
+			records := record.NewStore()
+			noticeTree(t, pool, records, tc.lingers)
+			root := "LEGION-1"
+			putOutboxIssue(t, pool, records, record.Issue{Key: "LEGION-4", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION",
+				Tree: root, Parent: &root, Title: "Parked child", Phase: phase.Done, Generation: 1, Status: "backlog"})
+			sup, _ := newOutboxSupervisor(t, "legion", t.TempDir())
+			if tc.architect != "" {
+				architectClaim(t, sup, root, tc.architect)
+			}
+			publisher := &holderPublisher{}
+			now := time.Date(2026, 10, 26, 12, 0, 0, 0, time.UTC)
+			// A restart builds the outbox and the decisions anew over the same database.
+			boot := func() routedDecisions {
+				runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", records: records, notices: publisher, supervisor: sup,
+					project: "legion", now: func() time.Time { return now }}
+				return routedDecisions{outbox: runner, now: func() time.Time { return now }, log: quietLogger()}
+			}
+			decision := answerloop.Decision{ID: "dispatch:34", Asker: "user:person@example.com", Ref: "dispatch://LEGION-4/ask/a-1", Text: "Selected: B\n\nUse B.",
+				Conversation: store.AgentConversation{Session: "ses_tester", Project: "legion", Issue: "LEGION-4", Role: claim.RoleTester}}
+			decide := func(d routedDecisions) {
+				t.Helper()
+				if err := d.Decide(ctx, decision); err != nil {
+					t.Fatal(err)
+				}
+			}
+			first := boot()
+			decide(first)
+			decide(first)
+			restarted := boot()
+			decide(restarted)
+			if rows := outboxRows(t, pool); rows != 1 {
+				t.Fatalf("outbox rows after the decision was handed off three times = %d, want one", rows)
+			}
+			if err := restarted.outbox.RunOnce(ctx); err != nil {
+				t.Fatal(err)
+			}
+			decide(restarted)
+			if err := restarted.outbox.RunOnce(ctx); err != nil {
+				t.Fatal(err)
+			}
+			_, delivered := publisher.snapshot()
+			if len(delivered) != 1 || outboxRows(t, pool) != 0 {
+				t.Fatalf("publishes = %+v with %d rows left; want one and none", delivered, outboxRows(t, pool))
+			}
+			want := controller
+			if tc.toArch {
+				want = architectTopic(t, root)
+			}
+			if delivered[0].topic != want || delivered[0].message != "agent-decision on LEGION-4" {
+				t.Fatalf("published to %q as %q; want %q, as an agent-decision on the agent's issue", delivered[0].topic, delivered[0].message, want)
+			}
+			body, err := json.Marshal(delivered[0].payload)
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantBody := `{"kind":"agent-decision","role":"tester","agent_decision":{"id":"dispatch:34","issue":"LEGION-4","session":"ses_tester",` +
+				`"asker":"user:person@example.com","ref":"dispatch://LEGION-4/ask/a-1","text":"Selected: B\n\nUse B."}}`
+			if string(body) != wantBody {
+				t.Fatalf("notice body = %s, want %s", body, wantBody)
+			}
+		})
 	}
 }
 

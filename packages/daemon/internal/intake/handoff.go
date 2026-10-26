@@ -81,12 +81,16 @@ func DecodeHandoff(data []byte) (Handoff, error) {
 	return h, nil
 }
 
-// DispatchActor is a Dispatch writer: a person ("user", their login) or an agent ("session", its
-// session id).
+// DispatchActor is a Dispatch writer: a person ("user", their login), an agent ("session", its
+// session id), or Dispatch itself ("system").
 type DispatchActor struct {
 	Kind string `json:"kind"`
 	ID   string `json:"id"`
 }
+
+// Person says whether the actor is a person: only a person's act is a decision on an agent's ask
+// (dispatch.Actor.Person of sjawhar/legion#2163).
+func (a DispatchActor) Person() bool { return a.Kind == "user" }
 
 // DispatchDelivery is a targeted send's delivery: the attempt the recipient replies through, the
 // mode it was sent in, and for a mention the comment and the mention's target.
@@ -103,10 +107,19 @@ type DispatchMention struct {
 	SessionID *string `json:"session_id"`
 }
 
+// DispatchAnswer is a person's answer to an ask as ask.answered carries it (Dispatch's AskAnswer):
+// who answered, the options they selected, and their text, nil when they wrote none.
+type DispatchAnswer struct {
+	User     string   `json:"user"`
+	Selected []string `json:"selected"`
+	Text     *string  `json:"text"`
+}
+
 // DispatchPayload is what the loop reads of a Dispatch event's payload: the message's, comment's
 // or ask's id, its issue, its text, its author (an ask's), its thread (InReplyTo of a message,
-// ReplyTo and AskID of a comment), a message's target, a comment's mentions, and whom an ask waits
-// on after a reply.
+// ReplyTo and AskID of a comment), a message's target, a comment's mentions, whom an ask waits on
+// after a reply, and an ask's kind (`question`, or `approval` for a document's review request) and
+// answer.
 type DispatchPayload struct {
 	ID           string            `json:"id"`
 	IssueKey     *string           `json:"issue_key"`
@@ -118,18 +131,31 @@ type DispatchPayload struct {
 	AskID        *string           `json:"ask_id"`
 	Mentions     []DispatchMention `json:"mentions"`
 	AskWaitingOn string            `json:"ask_waiting_on"`
+	Kind         string            `json:"kind"`
+	Answer       *DispatchAnswer   `json:"answer"`
 }
 
-// DispatchEvent is a Dispatch event as an envelope's payload carries it: its type, who acted, its
-// issue and project, and its payload; Delivery is set when it came in a targeted send's frame
-// ({event, delivery}), nil for a bare event on a follower or author route.
+// DispatchEvent is a Dispatch event as an envelope's payload carries it: its id, its type, who
+// acted, its issue and project, and its payload; Delivery is set when it came in a targeted send's
+// frame ({event, delivery}), nil for a bare event on a follower or author route.
 type DispatchEvent struct {
+	ID       int64           `json:"id"`
 	Type     string          `json:"type"`
 	Actor    DispatchActor   `json:"actor"`
 	IssueKey *string         `json:"issue_key"`
 	Project  string          `json:"project"`
 	Payload  DispatchPayload `json:"payload"`
 	Delivery *DispatchDelivery
+}
+
+// HandsTurnBack says whether the event is a person's reply on an ask that leaves the next move
+// with the ask's agent, as sjawhar/legion#2163's dispatchAskReply reads a reply: a comment on an
+// ask (AskID) by a person whose ask_waiting_on is not `human`. Dispatch hands an open ask to the
+// agent at every reply of a person (`agent`); a reply under an answered or resolved ask records no
+// turn (empty), and is the only answer a person can still give there. A person's reply that leaves
+// the ask with the human is their own hand-back of an approval request, which hands nothing back.
+func (e DispatchEvent) HandsTurnBack() bool {
+	return e.Type == "comment.created" && e.Payload.AskID != nil && e.Actor.Person() && e.Payload.AskWaitingOn != "human"
 }
 
 // Dispatch decodes a Dispatch envelope's payload: a targeted send's {event, delivery} frame, or the

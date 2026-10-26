@@ -1,6 +1,6 @@
 ---
 name: legion-controller
-description: Use when you are a Legion project's controller session, on any controller wake (triage, slot-free, todo, tick, unslotted, held, worker-died, agent-question), weekly-plan ranking, backlog stewardship, a finding ask, an issue a person asks you to file, the daily report, an architect's escalation, or a person's message or mention.
+description: Use when you are a Legion project's controller session, on any controller wake (triage, slot-free, todo, tick, unslotted, held, worker-died, agent-question, agent-decision), weekly-plan ranking, backlog stewardship, a finding ask, an issue a person asks you to file, the daily report, an architect's escalation, or a person's message or mention.
 ---
 
 # Legion Controller
@@ -65,6 +65,7 @@ Wake details: `skill://legion-controller/references/wakes.md`.
 | `held on <KEY>` | Nothing, unless `reason: "escalated"`: then an escalation |
 | `worker-died on <KEY>` (`role: "architect"`) | Re-admit once its cause is gone, else park it |
 | `agent-question on <KEY>` | Answer the asker or route it to the owning architect; re-admit nothing for it |
+| `agent-decision on <KEY>` | Route it to the tree's architect if the tree runs; otherwise re-admit nothing for it |
 | An architect's escalation | `skill://legion-controller/references/escalation.md` |
 | A finding ask's reference, or its answer | `skill://legion-controller/references/finding-asks.md` |
 | A finding sent as text | Open an ask ([Findings](#findings-and-the-issues-you-file)) |

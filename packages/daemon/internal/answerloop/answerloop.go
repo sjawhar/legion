@@ -125,15 +125,25 @@ type PassOn interface {
 	PassOn(ctx context.Context, question store.AnswerQuestion, reason Reason, origin Origin) error
 }
 
-// Decision is a person's decision on an ask the stopped agent opened: the ask's answer, or a
-// person's reply that hands the turn back to the agent.
+// Decision is a person's decision on an ask the stopped agent opened: their answer to the ask
+// (ask.answered), or their reply that hands the ask back to the agent (intake.DispatchEvent's
+// HandsTurnBack). ID is the decision's own id, the same however often it is handed off:
+// `dispatch:<event id>` of the answer, `dispatch:<comment id>` of the reply. Asker is the person
+// (`user:<login>`), Ref where they decided (`dispatch://<KEY>/ask/<id>` for an answer,
+// `dispatch://<KEY>/comment/<id>` for a reply), Text what they decided: the options they selected
+// and their text. Conversation is the agent's.
 type Decision struct {
-	Handoff      intake.Handoff
-	Event        intake.DispatchEvent
+	ID           string
+	Asker        string
+	Ref          string
+	Text         string
 	Conversation store.AgentConversation
 }
 
-// Decisions takes the decisions the hand-offs carry (plan 2.9 routes them).
+// Decisions passes on the decisions the hand-offs carry (plan 2.9): to the architect that owns the
+// agent's issue while it holds its role, else to the controller. Receive calls it for every
+// hand-off carrying one, a redelivery and a restart's included, so an implementation passes a
+// decision once by its ID.
 type Decisions interface {
 	Decide(ctx context.Context, d Decision) error
 }
@@ -296,9 +306,10 @@ func (l *Loop) work(ctx context.Context, session string) {
 }
 
 // Receive is the hand-off consumer's handler (intake.HandoffHandler): it finds the conversation the
-// hand-off is for in the daemon's history, classifies it, records a question, and wakes the loop. A
-// hand-off for a session the history does not hold, and one that is no question, is logged and
-// dropped; nil acknowledges it. An error leaves it to be delivered again.
+// hand-off is for in the daemon's history, classifies it, passes on the decision it carries
+// (Decisions), records the question it asks, and wakes the loop. A hand-off for a session the
+// history does not hold, and one that is no question, is logged and dropped; nil acknowledges it.
+// An error leaves it to be delivered again.
 func (l *Loop) Receive(ctx context.Context, h intake.Handoff, raw []byte) error {
 	conv, ok, err := l.conversationFor(ctx, h)
 	if err != nil {
@@ -315,7 +326,7 @@ func (l *Loop) Receive(ctx context.Context, h intake.Handoff, raw []byte) error 
 	}
 	if verdict.Decision != nil {
 		if err := l.cfg.Decisions.Decide(ctx, *verdict.Decision); err != nil {
-			return fmt.Errorf("record the decision of %s: %w", h.Envelope.EventID, err)
+			return fmt.Errorf("pass on the decision %s of %s: %w", verdict.Decision.ID, h.Envelope.EventID, err)
 		}
 	}
 	if verdict.Question == nil {

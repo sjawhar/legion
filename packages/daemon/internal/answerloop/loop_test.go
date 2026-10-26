@@ -190,7 +190,7 @@ func TestEachAnswerIsPostedWhereItWasAskedAsTheAgent(t *testing.T) {
 	if len(sends) != 1 || !reflect.DeepEqual(sends[0], wantSend) {
 		t.Fatalf("listener posts = %s; want %s", describe(sends), describe([]request{wantSend}))
 	}
-	if len(r.rec.decisions) != 1 || r.rec.decisions[0].Event.Payload.ID != "c-2" {
+	if len(r.rec.decisions) != 1 || r.rec.decisions[0].ID != "dispatch:c-2" {
 		t.Fatalf("decisions = %+v; want the person's reply on the agent's ask", r.rec.decisions)
 	}
 	for _, req := range r.requests {
@@ -224,6 +224,50 @@ func TestAnAskThreadHoldingTheAnswerIsNotPostedAgain(t *testing.T) {
 	}
 	if got := r.only(); got.State != store.QuestionPosted || r.answerCount() != 0 {
 		t.Fatalf("question = %s after %d answers; want posted, never answered again", got.State, r.answerCount())
+	}
+}
+
+// A person's answer to the agent's ask that also asks a question is passed on as a decision with
+// the same id at every hand-off (Decisions passes it once by that id), and its question is
+// answered once, the model told it may reply the message asks nothing, on the ask's thread in the
+// agent's name. An agent's reply on the ask, and the loop's own answer there, are no decision.
+func TestAnAnswerThatAlsoAsksIsADecisionAndItsQuestionIsAnswered(t *testing.T) {
+	r := newRig(t)
+	r.conversation("ses_tester", testerToken, 0)
+	answer := dispatchHandoff("ses_tester", answeredEvent(34, person, askID, "question", []string{"B"}, new("Use B. Why did you test A?")))
+	r.receive(answer)
+	r.receive(answer)
+	r.drain()
+	r.restart()
+	r.receive(answer)
+	r.drain()
+	q := r.only()
+	if q.State != store.QuestionPosted || q.Identity != "dispatch:34" || r.answerCount() != 1 {
+		t.Fatalf("question %s is %s after %d answers; want dispatch:34 posted after one", q.Identity, q.State, r.answerCount())
+	}
+	if req := r.requests[0]; !req.MayAskNothing || req.Question.Text != "Selected: B\n\nUse B. Why did you test A?" {
+		t.Fatalf("model asked %q, may ask nothing %t; want the answer, allowed to ask nothing", req.Question.Text, req.MayAskNothing)
+	}
+	agent := map[string]any{"kind": "session", "id": "ses_tester"}
+	want := []request{{"POST", "/api/v1/issues/LEGION-9/comments", map[string]any{"actor": agent, "ask_id": askID,
+		"body": "Plum, from Selected: B\n\nUse B. Why did you test A?\n\n" + AnswerMarker + q.ID + " -->"}}}
+	if got := r.dispatch.posts(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("Dispatch posts:\n%s\nwant:\n%s", describe(got), describe(want))
+	}
+	if len(r.rec.decisions) != 3 {
+		t.Fatalf("decisions = %+v; want the answer at each of its three hand-offs", r.rec.decisions)
+	}
+	for _, d := range r.rec.decisions {
+		if d.ID != "dispatch:34" || d.Asker != "user:person@example.com" || d.Ref != "dispatch://LEGION-9/ask/"+askID || d.Conversation.Session != "ses_tester" {
+			t.Fatalf("decision = %+v; want dispatch:34 by the person on the agent's ask", d)
+		}
+	}
+	r.receive(dispatchHandoff("ses_tester", bare("comment.created", intake.DispatchActor{Kind: "session", ID: "ses_tester"}, new("LEGION-9"),
+		map[string]any{"id": "c-own", "issue_key": "LEGION-9", "body": "Plum.\n\n" + AnswerMarker + q.ID + " -->", "ask_id": askID, "ask_waiting_on": "human"})))
+	r.receive(dispatchHandoff("ses_tester", bare("comment.created", intake.DispatchActor{Kind: "session", ID: "ses_asker"}, new("LEGION-9"),
+		map[string]any{"id": "c-agent", "issue_key": "LEGION-9", "body": "B is green.", "ask_id": askID, "ask_waiting_on": "agent"})))
+	if len(r.rec.decisions) != 3 {
+		t.Fatalf("decisions = %+v; want no more for the loop's own answer and another agent's reply", r.rec.decisions)
 	}
 }
 

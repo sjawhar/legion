@@ -4,6 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 )
@@ -113,5 +116,55 @@ func TestADispatchEnvelopeReadsAsItsFrameOrItsBareEvent(t *testing.T) {
 	}
 	if _, err := (HandoffEnvelope{EventID: "e3", Source: "agent", Payload: "{}"}).Dispatch(); err == nil {
 		t.Fatal("an agent's envelope decoded as Dispatch's")
+	}
+}
+
+// readHandoffFixture decodes the hand-off testdata/handoff/<name>.json holds and its Dispatch event.
+func readHandoffFixture(t *testing.T, name string) DispatchEvent {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join("testdata", "handoff", name+".json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	h, err := DecodeHandoff(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	event, err := h.Envelope.Dispatch()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return event
+}
+
+// A person's answer to an ask reads with its Dispatch event id, the person, the ask's id and kind,
+// and the options they selected with their text. A reply on an ask reads with its comment id, its
+// ask and thread, and whether it hands the ask back to the agent: a person's reply that leaves the
+// next move with the agent does, an agent's reply that hands the ask to the person does not
+// (sjawhar/legion#2163's testdata shapes, as the listener hands them off).
+func TestADispatchAskAnswerAndReplyReadAsTheirHandOffCarriesThem(t *testing.T) {
+	const ask = "6c83cb7f-8f4e-4820-9e05-7c94fa725007"
+	answered := readHandoffFixture(t, "ask-answered")
+	answer := answered.Payload.Answer
+	if answered.ID != 34 || answered.Type != "ask.answered" || !answered.Actor.Person() || answered.Actor.ID != "human" ||
+		answered.Payload.ID != ask || answered.Payload.Kind != "question" || answer == nil || !slices.Equal(answer.Selected, []string{"B"}) ||
+		answer.Text == nil || *answer.Text != "Use B. Why did you test A first?" || answered.HandsTurnBack() {
+		t.Fatalf("ask.answered = %+v (answer %+v); want event 34, the person's answer B with its text, no hand-back", answered, answer)
+	}
+	reply := readHandoffFixture(t, "comment-ask-agent")
+	if reply.ID != 32 || reply.Payload.ID != "4c4b2a5f-93df-4aeb-a2ca-b5c74187c8bf" || reply.Payload.AskID == nil || *reply.Payload.AskID != ask ||
+		reply.Payload.ReplyTo != nil || reply.Payload.AskWaitingOn != "agent" || reply.Payload.Body != "Use B, and tell me why A failed." || !reply.HandsTurnBack() {
+		t.Fatalf("person's reply = %+v; want the comment on the ask, handing it back to the agent", reply)
+	}
+	handed := readHandoffFixture(t, "comment-ask-human")
+	if handed.Actor.Person() || handed.Payload.AskWaitingOn != "human" || handed.HandsTurnBack() {
+		t.Fatalf("agent's reply = %+v; want the agent's, handing the ask to the person, not back to the agent", handed)
+	}
+	// A person's reply under a closed ask records no turn; it is the only answer they can still give
+	// there, and #2163 relays it as a decision too.
+	closed := reply
+	closed.Payload.AskWaitingOn = ""
+	if !closed.HandsTurnBack() {
+		t.Fatal("a person's reply under a closed ask does not hand it back; want it to")
 	}
 }

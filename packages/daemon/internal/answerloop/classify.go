@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
@@ -24,7 +25,8 @@ const (
 	// KindMention is a Dispatch comment mentioning the agent, answered through the mention's
 	// delivery attempt.
 	KindMention Kind = "mention"
-	// KindAskReply is a comment on the thread of an ask the agent opened, answered on that thread.
+	// KindAskReply is a comment on the thread of an ask the agent opened, or a person's answer to
+	// that ask, answered on that thread.
 	KindAskReply Kind = "ask_reply"
 	// KindEnvoy is another agent's Envoy message, answered by a direct message back to its sender.
 	KindEnvoy Kind = "envoy"
@@ -69,7 +71,8 @@ type Origin struct {
 }
 
 // Verdict is what a hand-off is: a question to answer, a decision to pass to Decisions (a person's
-// reply on the agent's ask is both), or neither, Because says why.
+// answer or reply on the agent's ask that also asks something is both), or neither, Because says
+// why.
 type Verdict struct {
 	Question *Origin
 	Decision *Decision
@@ -91,9 +94,12 @@ func QuestionID(project, identity, session string) string {
 // Classify decides, before any model call, what a hand-off for conv is. Answered: a Dispatch
 // message sent to the agent; a comment that mentions it (its mention's delivery); a comment on the
 // thread of an ask it opened (a follower that did not open the ask answers nothing); another
-// agent's Envoy message, which may ask nothing. A decision: a person's answer to the agent's ask,
-// the ask handed back to it, and a person's reply on its ask, which is also answered. Never: an
-// edit, a resolution, a delivery receipt, a claim, an issue event, a reply the agent already got
+// agent's Envoy message, which may ask nothing. A decision (Decision), whose question part, if any,
+// is answered too and may ask nothing: a person's answer to a question the agent asked, and a
+// person's reply on the thread of an ask it opened that hands the ask back to it
+// (intake.DispatchEvent.HandsTurnBack). Never: an edit, a resolution, a delivery receipt, a claim,
+// an issue event, the agent's own hand-back of an approval request to the person, an answer to an
+// approval request (its document's review reaches the architect), a reply the agent already got
 // (*.answered), the daemon's own notices and posts, the broker's (source envoy), and anything
 // carrying the loop's own marker (its dedupe key, the `<!-- legion-answer:` marker, a Legion footer
 // with an `answer` key). The ask's author is read from Dispatch.
@@ -137,51 +143,128 @@ func classifyDispatch(ctx context.Context, h intake.Handoff, conv store.AgentCon
 		}
 		return ask.Author.Kind == "session" && ask.Author.ID == h.TargetSession, nil
 	}
-	decision := &Decision{Handoff: h, Event: event, Conversation: conv}
+	var decision *Decision
 	switch event.Type {
 	case "message.created":
 		if event.Delivery == nil {
 			return Verdict{Because: "a message not sent to the agent, with no delivery to answer"}, nil
 		}
 	case "comment.created":
-		if event.Delivery != nil {
+		if event.Payload.AskID == nil {
+			if event.Delivery == nil {
+				return Verdict{Because: "a comment that neither mentions the agent nor replies on its ask"}, nil
+			}
 			break
 		}
-		if event.Payload.AskID == nil {
-			return Verdict{Because: "a comment that neither mentions the agent nor replies on its ask"}, nil
-		}
+		// A reply on an ask's thread can also mention the agent; it is a decision all the same.
 		own, err := ownAsk(*event.Payload.AskID)
 		if err != nil {
 			return Verdict{}, err
 		}
-		if !own {
+		switch {
+		case own && event.HandsTurnBack():
+			if decision, err = readDecision(event, conv); err != nil {
+				return Verdict{Because: err.Error()}, nil
+			}
+		case !own && event.Delivery == nil:
 			return Verdict{Because: "a reply on an ask the agent follows but did not open"}, nil
 		}
-		origin, err := ReadOrigin(h)
-		if err != nil {
+	case "ask.answered":
+		own, err := ownAsk(event.Payload.ID)
+		switch {
+		case err != nil:
+			return Verdict{}, err
+		case !own:
+			return Verdict{Because: "an answer to an ask the agent did not open"}, nil
+		case !event.Actor.Person():
+			return Verdict{Because: "an answer no person gave"}, nil
+		case event.Payload.Kind == "approval":
+			return Verdict{Because: "a review of the agent's document, which reaches its architect as the document's review"}, nil
+		}
+		if decision, err = readDecision(event, conv); err != nil {
 			return Verdict{Because: err.Error()}, nil
 		}
-		if origin.MayAskNothing {
-			return Verdict{Question: &origin, Decision: decision}, nil
+		if answer := event.Payload.Answer; answer == nil || answer.Text == nil || strings.TrimSpace(*answer.Text) == "" {
+			return Verdict{Decision: decision, Because: "a decision whose answer has no text, which asks nothing"}, nil
 		}
-		return Verdict{Question: &origin}, nil
-	case "ask.answered", "ask.handed_back":
-		own, err := ownAsk(event.Payload.ID)
-		if err != nil {
-			return Verdict{}, err
-		}
-		if !own {
-			return Verdict{Because: "a decision on an ask the agent did not open"}, nil
-		}
-		return Verdict{Decision: decision, Because: "a decision, which the loop answers nothing for"}, nil
 	default:
 		return Verdict{Because: "a " + event.Type + " event, which asks the agent nothing"}, nil
 	}
 	origin, err := ReadOrigin(h)
 	if err != nil {
-		return Verdict{Because: err.Error()}, nil
+		return Verdict{Decision: decision, Because: err.Error()}, nil
 	}
-	return Verdict{Question: &origin}, nil
+	if decision != nil {
+		// What the person decided may ask the agent nothing besides.
+		origin.MayAskNothing = true
+	}
+	return Verdict{Question: &origin, Decision: decision}, nil
+}
+
+// readDecision is the decision a person's answer to the agent's ask, or their reply handing it
+// back, carries for conv. Its id is the Dispatch event's for an answer (a person who changes their
+// answer makes a new decision, a new event) and the comment's for a reply.
+func readDecision(event intake.DispatchEvent, conv store.AgentConversation) (*Decision, error) {
+	p := event.Payload
+	issue := eventIssue(event)
+	d := &Decision{Asker: event.Actor.Kind + ":" + event.Actor.ID, Conversation: conv, Text: decisionText(event)}
+	switch event.Type {
+	case "ask.answered":
+		if event.ID <= 0 || p.ID == "" {
+			return nil, fmt.Errorf("the Dispatch ask.answered names no event id or ask id")
+		}
+		d.ID, d.Ref = dispatchEventIdentity(event.ID), itemRef(issue, "ask", p.ID)
+	default:
+		if p.ID == "" {
+			return nil, fmt.Errorf("the Dispatch %s names no comment id", event.Type)
+		}
+		d.ID, d.Ref = "dispatch:"+p.ID, itemRef(issue, "comment", p.ID)
+	}
+	return d, nil
+}
+
+// decisionText is what a person decided: an answer's selected options and its text, a reply's body.
+func decisionText(event intake.DispatchEvent) string {
+	answer := event.Payload.Answer
+	if event.Type != "ask.answered" {
+		return event.Payload.Body
+	}
+	if answer == nil {
+		return ""
+	}
+	var parts []string
+	if len(answer.Selected) > 0 {
+		parts = append(parts, "Selected: "+strings.Join(answer.Selected, "; "))
+	}
+	if answer.Text != nil && strings.TrimSpace(*answer.Text) != "" {
+		parts = append(parts, *answer.Text)
+	}
+	return strings.Join(parts, "\n\n")
+}
+
+// dispatchEventIdentity is the identity of a Dispatch event that is neither a message nor a
+// comment, an ask's answer: its event id.
+func dispatchEventIdentity(id int64) string { return "dispatch:" + strconv.FormatInt(id, 10) }
+
+// eventIssue is the issue a Dispatch event's payload names, else the event's own, else "" (a
+// document's or the agent's conversation page's).
+func eventIssue(event intake.DispatchEvent) string {
+	switch {
+	case event.Payload.IssueKey != nil:
+		return *event.Payload.IssueKey
+	case event.IssueKey != nil:
+		return *event.IssueKey
+	}
+	return ""
+}
+
+// itemRef is the Dispatch reference of an issue's ask or comment, `dispatch://<KEY>/<kind>/<id>`,
+// or `dispatch <kind> <id>` for one on a document, which has no issue.
+func itemRef(issue, kind, id string) string {
+	if issue == "" {
+		return "dispatch " + kind + " " + id
+	}
+	return "dispatch://" + issue + "/" + kind + "/" + id
 }
 
 // ReadOrigin reads what a question's hand-off says about it, without reading anything else: its
@@ -214,12 +297,7 @@ func ReadOrigin(h intake.Handoff) (Origin, error) {
 	if p.ID == "" {
 		return Origin{}, fmt.Errorf("the Dispatch %s of %s names no id", event.Type, env.EventID)
 	}
-	issue := ""
-	if p.IssueKey != nil {
-		issue = *p.IssueKey
-	} else if event.IssueKey != nil {
-		issue = *event.IssueKey
-	}
+	issue := eventIssue(event)
 	o := Origin{Identity: "dispatch:" + p.ID, Text: p.Body, Asker: event.Actor.Kind + ":" + event.Actor.ID, Issue: issue}
 	switch {
 	case event.Type == "message.created" && event.Delivery != nil:
@@ -238,8 +316,19 @@ func ReadOrigin(h intake.Handoff) (Origin, error) {
 		}
 		o.Kind, o.AskID = KindAskReply, *p.AskID
 		o.Where, o.Ref = "a reply on the agent's ask "+*p.AskID+" on "+issue, "dispatch://"+issue+"/comment/"+p.ID
-		// A person's reply hands the ask back to the agent: a decision, which may ask nothing.
-		o.MayAskNothing = event.Actor.Kind != "session"
+		// A person's reply that hands the ask back to the agent is a decision, which may ask nothing.
+		o.MayAskNothing = event.HandsTurnBack()
+	case event.Type == "ask.answered":
+		if issue == "" {
+			return Origin{}, fmt.Errorf("the answer to %s is on a document's ask, which has no issue thread to answer on", p.ID)
+		}
+		if event.ID <= 0 {
+			return Origin{}, fmt.Errorf("the Dispatch ask.answered of %s names no event id", env.EventID)
+		}
+		// A person's answer is a decision, which may ask nothing; what else it asks is answered on
+		// the ask's thread.
+		o.Kind, o.AskID, o.Identity, o.Text, o.MayAskNothing = KindAskReply, p.ID, dispatchEventIdentity(event.ID), decisionText(event), true
+		o.Where, o.Ref = "an answer to the agent's ask "+p.ID+" on "+issue, itemRef(issue, "ask", p.ID)
 	default:
 		return Origin{}, fmt.Errorf("a Dispatch %s is no question", event.Type)
 	}

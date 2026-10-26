@@ -1,0 +1,17 @@
+{
+  "original_topic": "notifications.agent.session-tester",
+  "target_session": "session-tester",
+  "role_token": "legion-capture-capture-4-tester",
+  "project": "capture",
+  "envelope": {
+    "event_id": "dispatch-ask-answered",
+    "source": "dispatch",
+    "source_event_id": "34",
+    "topic": "notifications.agent.session-tester",
+    "dedupe_key": "dispatch-ask-answered",
+    "issued_at": 1790124394000,
+    "payload_summary": "CAPTURE-4 ask answered",
+    "payload": "{\"id\":34,\"issue_key\":\"CAPTURE-4\",\"artifact_id\":null,\"project\":\"CAPTURE\",\"seq\":9,\"type\":\"ask.answered\",\"actor\":{\"kind\":\"user\",\"id\":\"human\"},\"notify\":true,\"created_at\":\"2026-09-23T00:46:34Z\",\"payload\":{\"id\":\"6c83cb7f-8f4e-4820-9e05-7c94fa725007\",\"issue_key\":\"CAPTURE-4\",\"author\":{\"kind\":\"session\",\"id\":\"session-tester\"},\"kind\":\"question\",\"question\":\"Which fixture do I test against?\",\"options\":[{\"label\":\"A\"},{\"label\":\"B\"}],\"multiple\":false,\"state\":\"answered\",\"answer\":{\"user\":\"human\",\"selected\":[\"B\"],\"text\":\"Use B. Why did you test A first?\",\"at\":\"2026-09-23T00:46:34Z\"}}}",
+    "trace_id": "dispatch-ask-answered"
+  }
+}

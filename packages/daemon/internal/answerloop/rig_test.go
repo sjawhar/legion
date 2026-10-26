@@ -374,6 +374,15 @@ func bare(eventType string, actor intake.DispatchActor, issue *string, payload m
 	return string(encoded)
 }
 
+// answeredEvent is Dispatch's ask.answered of ask as a follower route carries it, event id the
+// Dispatch event's, with the person's selected options and text (nil for none).
+func answeredEvent(id int64, actor intake.DispatchActor, ask, kind string, selected []string, text *string) string {
+	encoded, _ := json.Marshal(map[string]any{"id": id, "type": "ask.answered", "actor": actor, "issue_key": "LEGION-9", "project": "LEGION",
+		"payload": map[string]any{"id": ask, "issue_key": "LEGION-9", "kind": kind, "state": "answered",
+			"answer": map[string]any{"user": actor.ID, "selected": selected, "text": text, "at": "2026-10-26T12:00:00Z"}}})
+	return string(encoded)
+}
+
 var person = intake.DispatchActor{Kind: "user", ID: "person@example.com"}
 
 func dispatchHandoff(session, payload string) intake.Handoff {

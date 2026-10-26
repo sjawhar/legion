@@ -30,6 +30,12 @@ func TestOutboxPayloadsRoundTripThroughPostgres(t *testing.T) {
 		ControllerNotice{Kind: AgentQuestionNotice, Role: claim.RoleTester, Reason: "not_answered", Question: &AgentQuestion{
 			ID: "q-1", Issue: "LEGION-208", Session: "ses_tester", Asker: "user:person", Ref: "dispatch://LEGION-208/message/m-1", Text: "Is PR 7 green?",
 		}},
+		Notice{Kind: AgentDecisionNotice, Role: claim.RoleTester, AgentDecision: &AgentDecision{
+			ID: "dispatch:34", Issue: "LEGION-209", Session: "ses_tester", Asker: "user:person", Ref: "dispatch://LEGION-209/ask/a-1", Text: "Selected: B",
+		}},
+		ControllerNotice{Kind: AgentDecisionNotice, Role: claim.RoleTester, AgentDecision: &AgentDecision{
+			ID: "dispatch:c-9", Issue: "LEGION-209", Session: "ses_tester", Asker: "user:person", Ref: "dispatch://LEGION-209/comment/c-9", Text: "Use B.",
+		}},
 		SuperviseRequest{Op: "start", Tree: "LEGION-208", Role: claim.RoleArchitect, Task: "Write the spec."},
 		GateSeed{ArtifactID: "artifact-208", Version: 4},
 		LingerClose{Generation: 7},
@@ -134,6 +140,12 @@ func TestNewOutboxRowRefusesInvalidPayloads(t *testing.T) {
 		{name: "an agent-question notice without its question", payload: ControllerNotice{Kind: AgentQuestionNotice, Reason: "not_answered"}, reason: "carries a question only when"},
 		{name: "another controller notice carrying a question", payload: ControllerNotice{Kind: TickNotice, Question: &AgentQuestion{ID: "q-1"}}, reason: "carries a question only when"},
 		{name: "an agent-question notice naming no question", payload: ControllerNotice{Kind: AgentQuestionNotice, Question: &AgentQuestion{Issue: "LEGION-208"}}, reason: "names its question's id"},
+		{name: "an agent-decision notice without its decision", payload: Notice{Kind: AgentDecisionNotice, Role: claim.RoleTester}, reason: "carries a decision only when"},
+		{name: "an agent-decision controller notice without its decision", payload: ControllerNotice{Kind: AgentDecisionNotice}, reason: "carries a decision only when"},
+		{name: "another notice carrying a decision", payload: Notice{Kind: "held", AgentDecision: &AgentDecision{ID: "dispatch:34"}}, reason: "carries a decision only when"},
+		{name: "another controller notice carrying a decision", payload: ControllerNotice{Kind: AgentQuestionNotice, Question: &AgentQuestion{ID: "q-1"},
+			AgentDecision: &AgentDecision{ID: "dispatch:34"}}, reason: "carries a decision only when"},
+		{name: "an agent-decision notice naming no decision", payload: ControllerNotice{Kind: AgentDecisionNotice, AgentDecision: &AgentDecision{Issue: "LEGION-209"}}, reason: "names its decision's id"},
 		{name: "unknown supervise operation", payload: SuperviseRequest{Op: "unknown"}, reason: "unknown supervise operation"},
 		{name: "a stop that is not a tree close", payload: SuperviseRequest{Op: "stop", Tree: "LEGION-208", Role: claim.RoleArchitect}, reason: "unknown supervise operation"},
 		{name: "an issue close naming a linger", payload: SuperviseRequest{Op: "issue_close", Tree: "LEGION-208", Role: claim.RoleTester, Generation: 3, Linger: 7}, reason: "only a tree close"},
@@ -313,5 +325,19 @@ func TestAnAgentQuestionsTextIsCutAtItsLimitWithANote(t *testing.T) {
 	want := whole + "\n\n[cut: the question is 2002 characters; the first 2000 are shown, the whole question is at " + ref + "]"
 	if got != want {
 		t.Fatalf("a question over the limit = %q, want its first %d characters and the note", got[len(whole):], AgentQuestionTextLimit)
+	}
+}
+
+// An agent-decision notice cuts what a person decided as an agent-question notice cuts a question,
+// and its note names a decision.
+func TestAnAgentDecisionsTextIsCutAtTheSameLimitWithANote(t *testing.T) {
+	const ref = "dispatch://LEGION-208/ask/a-1"
+	whole := strings.Repeat("é", AgentQuestionTextLimit)
+	if got := AgentDecisionText(whole, ref); got != whole {
+		t.Fatalf("a decision of exactly the limit = %d characters, want it whole", len([]rune(got)))
+	}
+	want := whole + "\n\n[cut: the decision is 2001 characters; the first 2000 are shown, the whole decision is at " + ref + "]"
+	if got := AgentDecisionText(whole+"!", ref); got != want {
+		t.Fatalf("a decision over the limit = %q, want its first %d characters and the note", got[len(whole):], AgentQuestionTextLimit)
 	}
 }

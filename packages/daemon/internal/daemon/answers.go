@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -56,7 +57,8 @@ func (w *workflowRuntime) attachAnswers(cfg config.Config, p plan, s *supervisio
 		Envoy: notify.New(cfg.EnvoyURL, p.secrets["ENVOY_TOKEN"]), Gate: s.answerGate,
 		Issues: recordFacts{w}, Tools: ghTools{host: host, bounds: cfg.Answers.Bounds},
 		Conversations: answerloop.Harnesses{OpenSQL: conversationStore(*cfg.Answers, p.answers)},
-		PassOn:        controllerPassOn{pool: w.pool, records: w.records, now: time.Now, log: w.log}, Decisions: loggedDecisions{w.log},
+		PassOn:        controllerPassOn{pool: w.pool, records: w.records, now: time.Now, log: w.log},
+		Decisions:     routedDecisions{outbox: w.outbox, now: time.Now, log: w.log},
 		AppID: func(role claim.Role) string {
 			if appauth.AppRoleFor(role) == appauth.Implement {
 				return cfg.GitHubApps.Implement.AppID
@@ -199,12 +201,85 @@ func questionsForController(ctx context.Context, tx pgx.Tx, st *store.Store, pro
 	return questions, nil
 }
 
-// loggedDecisions records a decision in the log. Routing it to the architect or the controller is
-// plan 2.9's, which replaces this.
-type loggedDecisions struct{ log *slog.Logger }
+// decisionPassedSource is the processed_events source the daemon marks a decision passed on under,
+// by the decision's id (answerloop.Decision.ID), in the transaction that queues its agent-decision
+// notice: the mark is what passes a decision once, across redeliveries and restarts.
+const decisionPassedSource = string(record.AgentDecisionNotice)
 
-func (d loggedDecisions) Decide(_ context.Context, decision answerloop.Decision) error {
-	d.log.Info("answers: decision recorded", "event", decision.Handoff.Envelope.EventID, "type", decision.Event.Type,
-		"issue", decision.Conversation.Issue, "role", decision.Conversation.Role, "session", decision.Conversation.Session)
+// routedDecisions passes on a person's decision on an ask a stopped agent opened (plan 2.9): in one
+// transaction it marks the decision passed by its id and queues one agent-decision notice. The
+// notice is an architect notice row when the architect that owns the agent's issue holds its role
+// (runningArchitect), which the outbox routes to it as it routes every notice; otherwise a
+// controller notice row, so the controller hears the decision nobody in the tree will. A redelivery,
+// and a restart's, finds the mark and queues nothing more. outbox's records wake the outbox once the
+// transaction commits (projectRecords).
+//
+// Every decision is passed here, an ask on an issue whose tree's root left the workflow included:
+// sjawhar/legion#2163 relays a person's decision on such a tree to the controller as well, and
+// whichever of the two merges second skips those here, so the controller hears each once.
+type routedDecisions struct {
+	outbox *outbox
+	now    func() time.Time
+	log    *slog.Logger
+}
+
+func (d routedDecisions) Decide(ctx context.Context, decision answerloop.Decision) error {
+	conv := decision.Conversation
+	notice := record.Notice{Kind: record.AgentDecisionNotice, Role: conv.Role, AgentDecision: &record.AgentDecision{
+		ID: decision.ID, Issue: conv.Issue, Session: conv.Session, Asker: decision.Asker, Ref: decision.Ref,
+		Text: record.AgentDecisionText(decision.Text, decision.Ref),
+	}}
+	// to is whom the decision was queued for, empty when an earlier hand-off passed it on.
+	to := ""
+	// The pass is its own transaction, so it owns the commit hook the row's write registers.
+	scoped, committed := intake.WithCommitHooks(ctx)
+	if err := pgx.BeginFunc(scoped, d.outbox.pool, func(tx pgx.Tx) error {
+		to = ""
+		fresh, err := d.outbox.records.MarkProcessed(scoped, tx, decisionPassedSource, decision.ID)
+		if err != nil || !fresh {
+			return err
+		}
+		architect, err := d.runningArchitect(scoped, tx, conv.Issue)
+		if err != nil {
+			return err
+		}
+		var payload record.OutboxPayload = record.ControllerNotice(notice)
+		to = "the controller"
+		if architect != "" {
+			payload, to = notice, string(architect)
+		}
+		row, err := record.NewOutboxRow(conv.Issue, payload, d.now())
+		if err != nil {
+			return fmt.Errorf("the agent-decision notice of %s: %w", decision.ID, err)
+		}
+		return d.outbox.records.Enqueue(scoped, tx, row)
+	}); err != nil {
+		return fmt.Errorf("pass the decision %s on: %w", decision.ID, err)
+	}
+	committed()
+	if to != "" {
+		d.log.Info("answers: decision passed on", "decision", decision.ID, "to", to, "issue", conv.Issue, "role", conv.Role,
+			"session", conv.Session, "asker", decision.Asker, "ref", decision.Ref)
+	}
 	return nil
+}
+
+// runningArchitect is the architect that owns a notice of the agent's issue key, read through tx
+// as the outbox reads it (readNoticeRoute, owningArchitect), when that architect holds its role
+// (holdsItsRole) and its tree neither lingers nor has closed; "" when none does, the decision then
+// being the controller's: the tree's architect is suspended, being stopped, failed, retired or not
+// supervised, or the issue is not recorded in a tree the daemon routes notices of.
+func (d routedDecisions) runningArchitect(ctx context.Context, tx pgx.Tx, key string) (claim.Token, error) {
+	issue, route, err := d.outbox.readNoticeRoute(ctx, tx, key, map[string]noticeRoute{})
+	switch {
+	case errors.Is(err, errNoticeUnroutable):
+		return "", nil
+	case err != nil || route.root.Lingers():
+		return "", err
+	}
+	architect, err := owningArchitect(route.project, route.issues, issue, record.AgentDecisionNotice, d.outbox.holdsItsRole)
+	if err != nil || !d.outbox.holdsItsRole(architect) {
+		return "", nil
+	}
+	return architect, nil
 }
