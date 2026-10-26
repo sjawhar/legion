@@ -259,12 +259,14 @@ func (c sessionCache) Apply(entry nats.KeyValueEntry, _ kvwatch.Read) {
 
 // CompleteRead removes every row and fence entry the read found no evidence of: the bucket no
 // longer holds that session. A removed row's last heartbeat is kept for LastSeen, as an expired
-// row's is.
+// row's is. The expired last-seen records go first, once for the whole read: the records the read
+// applied leave them in place (cacheSessionLocked says why).
 func (c sessionCache) CompleteRead(kvwatch.Read) {
 	r := c.r
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	now := r.now()
+	r.pruneLastSeenLocked(now)
 	kvwatch.Sweep(&r.marks, r.cache, func(sessionID string, removed cachedSession) {
 		r.retainLastSeenLocked(sessionID, removed.entry.UpdatedAt, now)
 	})
@@ -486,6 +488,7 @@ func (r *SessionRegistry) Delete(sessionID string) error {
 	if !r.currentLocked(epoch, sessionID) {
 		return nil
 	}
+	r.pruneLastSeenLocked(r.now())
 	if err == nil && len(entries) > 0 {
 		latest := entries[len(entries)-1]
 		if latest.Operation() == nats.KeyValueDelete || latest.Operation() == nats.KeyValuePurge {
@@ -554,6 +557,8 @@ func (r *SessionRegistry) pruneLocked(now time.Time) {
 	r.pruneLastSeenLocked(now)
 }
 
+// pruneLastSeenLocked removes the last-seen records past their retention. It walks every record,
+// so it runs once per call or read, never per applied record. Callers must hold r.mu for writing.
 func (r *SessionRegistry) pruneLastSeenLocked(now time.Time) {
 	for key, entry := range r.lastSeen {
 		if entry.expired(now) {
@@ -561,11 +566,17 @@ func (r *SessionRegistry) pruneLastSeenLocked(now time.Time) {
 		}
 	}
 }
+
+// cacheSessionLocked and evictCachedSessionLocked apply one record and leave expired last-seen
+// records in place: a read applies every record of the bucket through them, and pruning the whole
+// lastSeen map per record made a read cost its records times the sessions a sweep had just moved
+// there. Every path that reads lastSeen (LastSeen, through pruneLocked) prunes it first, and Ping,
+// Get, List, Delete and CompleteRead prune it once each, so an expired record is never answered
+// and does not outlive the next of those.
 func (r *SessionRegistry) cacheSessionLocked(sessionID string, entry SessionEntry, expiresAt time.Time, revision uint64) {
 	if revision < r.cacheRevisions[sessionID] {
 		return
 	}
-	r.pruneLastSeenLocked(r.now())
 	r.cache[sessionID] = cachedSession{entry: entry, expiresAt: expiresAt}
 	delete(r.lastSeen, sessionID)
 	r.cacheRevisions[sessionID] = revision
@@ -575,10 +586,8 @@ func (r *SessionRegistry) evictCachedSessionLocked(sessionID string, revision ui
 	if revision < r.cacheRevisions[sessionID] {
 		return
 	}
-	now := r.now()
-	r.pruneLastSeenLocked(now)
 	if entry, ok := r.cache[sessionID]; ok {
-		r.retainLastSeenLocked(sessionID, entry.entry.UpdatedAt, now)
+		r.retainLastSeenLocked(sessionID, entry.entry.UpdatedAt, r.now())
 	}
 	delete(r.cache, sessionID)
 	r.cacheRevisions[sessionID] = revision
