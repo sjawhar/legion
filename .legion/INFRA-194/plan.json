@@ -2,20 +2,21 @@
   "schemaVersion": 1,
   "phase": "plan",
   "issue": "INFRA-194",
-  "completed": "2026-10-26T08:53:00Z",
+  "completed": "2026-10-26T18:49:00Z",
   "plan": "dispatch://INFRA-194/artifact/plan-md (version 1)",
   "summary": "The root's own change is scripts/dispatch/meaning-search-check.ts, a re-runnable production check of A1 (search answer not degraded), A2 (three pre-registered word-disjoint query/issue pairs, issue row in the top five) and A3 (INFRA-393's GET /api/v1/search/coverage: zero lacking, zero failed, configured identity). The implementer builds it and runs it on production before the deploy, waits idle for the architect's go once INFRA-394 closes, then runs it after the deploy; A4 is mapped to INFRA-393's merged tests on main.",
   "readmission": {
-    "generation": 3,
-    "outcome": "No re-plan. The tree was parked at 23:23Z on 2026-10-25 after a workspace-init failure and re-admitted at 08:43Z on 2026-10-26; the architect re-registered approved spec version 8 and confirmed no change to the spec or the children's scope (Envoy 3cd13f57). The plan below stands; the implementer resumes at plan.md section 6 step 5 (wait idle for INFRA-394), after the CI step below.",
-    "checkedAt": "2026-10-26T08:52Z",
+    "generation": 4,
+    "outcome": "No re-plan. Re-admitted at 18:42Z on 2026-10-26 by the contract-37 drain (generation 4), after an earlier re-admission at 08:43Z (generation 3); the architect re-registered approved spec version 8 with no change to the spec or the children's scope (Envoy 26076a44). The plan below stands; the implementer resumes at plan.md section 6 step 5 (wait idle until INFRA-394 closes).",
+    "checkedAt": "2026-10-26T18:48Z",
     "facts": [
-      "Production still answers by keyword only: dispatch search on 2026-10-26 ~08:51Z printed 'Searched by keyword only: meaning search was unavailable for this request.' The before run recorded in PR #2200's E2E (implementer) line (2026-10-25T16:50:19Z, head bc359229) remains the before evidence.",
-      "INFRA-393's coverage report at its pull request #2208 head 5b39834357873eda556fc65bea2c3ea1b7c61683 matches the contract the script parses: GET /api/v1/search/coverage (api/routes_table.go:109), model.SearchCoverage {identity, place, model, total, kinds{issue,document,comment,ask,message}} with counts {items,current,lacking,failed,oldest_lacking_seconds} (model/model.go:331-360), and the Azure identity 'azure:<endpoint host>/<deployment>' (embed/azure.go:131-133). INFRA-393 is back in implementing to merge main forward (migration 0117); the judge still follows its merged report if that changes.",
+      "Production still answers by keyword only: dispatch search on 2026-10-26 ~18:48Z printed 'Searched by keyword only: meaning search was unavailable for this request.' The before run recorded in PR #2200's E2E (implementer) line (2026-10-25T16:50:19Z, head bc359229) remains the before evidence.",
+      "INFRA-393 is done: pull request #2208 merged at 2026-10-26T15:39:17Z as f45fd5095930372b4150e9289aefe35484883531. At that merge commit the coverage report matches the contract the script parses: GET /api/v1/search/coverage is in api/routes_table.go, and model.SearchCoverage {identity, place, model, total, kinds} with counts {items,current,lacking,failed,oldest_lacking_seconds} is at model/model.go:338-367. f45fd509 is the INFRA-393 merge that the deployed-build compare (plan.md section 5) and the A4 mapping (section 7) use.",
+      "INFRA-394 (the deploy) is not closed: Dispatch shows it todo; the architect reports it implementing at legion/INFRA-394 bafa892d, now also carrying INFRA-228's broker and Dispatch identity change, with its applies waiting on INFRA-446 and the controller's clearance. Production cannot show A1-A3 until it closes.",
       "INFRA-156 is still in progress (not merged), so the coverage kinds and the issue row are as plan.md section 10 assumes today.",
-      "PR #2200's head bc359229 has a red 'test' check: run 40213666410, job 121230077826 failed only TestAGenerationWhoseSessionDatabaseNeverAnswersIsRefusedWhileTheDaemonWaits (packages/daemon/internal/launcher, under -race: 'the start was answered 542.35824ms after it was sent, past the 400ms stop grace'). It touches nothing of scripts/dispatch, and the last 28 completed Tests runs on main are green, so it is a one-off timing failure."
+      "PR #2200's CI is green at code head bc359229: the 'test' re-run (run 40213666410, attempt 2) passed at 2026-10-26T09:48:38Z, beside lint, typecheck and pr-title. GitHub reports the pull request MERGEABLE (no conflict), and main changed no file under scripts/dispatch/ since the branch's base 0306bcbe, so no forward merge is needed."
     ],
-    "implementerFirstStep": "Before waiting idle, re-run the failed job once: gh run rerun 40213666410 --failed --repo sjawhar/legion. No new commit and no base merge for it (skill://legion-worker, 'A red CI job'). If it fails again, report it to the architect with the run id."
+    "implementerFirstStep": "Nothing before waiting: CI is green and there is no conflict. Wait idle at plan.md section 6 step 5 until the architect says INFRA-394 has closed."
   },
   "requiredSkills": {
     "implement": [
