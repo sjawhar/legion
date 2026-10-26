@@ -99,6 +99,56 @@ validates local branch behavior only. CI runs it as the `envoy-e2e-local` job of
 `.github/workflows/envoy-and-contracts.yaml` on every change to
 `packages/envoy`, `packages/envoy-client` or `packages/contracts`.
 
+## e2e-refill.sh
+
+Proves on the real listener and a NATS server of its own (`internal/testnats/cmd/natsd`, its file
+store under the output directory) that the listener keeps its copy of a bucket while it reads the
+bucket again, and that its two list routes refuse, with no active-sessions sample, while it cannot
+stand behind that copy (INFRA-261). `internal/testnats/cmd/refillrig` does the work a shell cannot
+do quickly: it seeds the session and interest buckets, through the listener's
+`POST /v1/interests/subscribe` and straight into the buckets, deletes and recreates a bucket,
+polls `GET /v1/sessions`, `GET /v1/interests/` and `/metrics` as fast as they answer, and judges
+each scenario from those polls beside the listener's own log lines.
+
+```bash
+packages/envoy/scripts/e2e-refill.sh [--scenario reread|interrupt|refuse|all]
+```
+
+- `reread`: registers 3,000 `old` and 3,000 `both` sessions, then recreates the session bucket
+  holding `both` with changed titles and 3,000 `new`, the interest bucket the same way with changed
+  topics, and the session bucket again with the very records it holds (only its creation time
+  changes). Each recreate lands just after a tick of the listener's 30 s self-health monitor, which
+  reads the new bucket at its next tick, and carries 100,000 delete markers among its records, so
+  the read outlasts many list answers. Every `old` and `both` row must be listed until the read's
+  completed `cache warm-up` line, a delivered row never goes back, and the list is exactly the
+  bucket after it.
+- `interrupt`: on a 41,000-record session bucket, stops NATS the moment the
+  `bucket was recreated` line appears, either with `SIGSTOP` until the scan times out (or the
+  watcher ends) and then `SIGCONT`, or with `SIGKILL` and a restart (`--interrupt-by stop|restart`,
+  both by default). Nothing may be removed until a later read, which the listener starts itself,
+  completes and sweeps; the verdict names which incomplete outcome the log shows.
+- `refuse`: a start on 40,000-record buckets, where every list answer is the refilling `503` with
+  `Retry-After: 5` or the whole bucket and no gauge has a sample while its list refuses; NATS down
+  past the 2-minute stale bound, where both lists answer the refilling `503` and `/metrics` has
+  neither gauge's sample, then a complete `200` within 30 s of NATS's return with both gauges equal
+  to the lists; and empty buckets, which answer `200 []` and `0` samples. The outage waits out the
+  real bound, which the listener has no setting for, so the scenario takes about four minutes.
+  `--during-refuse <command>` runs while both lists refuse and `--after-refuse <command>` once they
+  are whole again, each with `bash -c`, `ENVOY_URL` and `REFILL_RIG_ROLE`, `REFILL_RIG_HOLDER` (a
+  registered session whose topics make it that role's holder), `REFILL_RIG_SESSIONS` and
+  `REFILL_RIG_DIR` exported, so another client (an MCP host, Dispatch) is checked in the same
+  window; their output is in `refuse/during-refuse.log` and `refuse/after-refuse.log`.
+
+Each scenario prints `verdict <scenario> PASS <what it saw>`, `FAIL <reason>`, or
+`INVALID <reason>` when the run missed the window it was there to observe (no poll inside the read,
+a scan that finished before the interruption, a read that began before the bucket was filled),
+which is never a pass. It exits 0 when every verdict passes, 1 on a `FAIL`, and 4 on an `INVALID`
+with no `FAIL`. `--listener-bin` and `--natsd-bin` run other builds, such as the merge base's for
+a negative control. The evidence (each scenario's listener and NATS logs and every poll, one JSON
+line each) goes to `--out` (default `$TMPDIR/envoy-e2e-refill`). `E2E_REFILL_NATS_PORT` (14232)
+and `E2E_REFILL_PORT` (19030) move the ports. A full run takes about ten minutes, so it is a manual
+proof, not a CI job.
+
 ## listener-deploy-probe.sh
 
 Watches an Envoy listener from a client's seat while its deployment rolls, and
