@@ -111,18 +111,23 @@ catch up), and on the finding asks roles opened on their own issues while no con
    `curl -sS -H "Authorization: Bearer $(cat "$DISPATCH_TOKEN_FILE")" "$DISPATCH_URL/api/v1/issues/<REPORT KEY>/asks?state=answered&thread=1" | jq -c '[.[] | select(any(.options[]; .label == "Do not file" or .label == "Admit it")) | .answer.at as $t | select([.thread.replies[]? | select(.author.kind == "session" and .created_at > $t and (.body | test("^(Filed dispatch://|Admitted dispatch://|Not filed:|Not admitted:)")))] | length == 0) | {id, question, answer}]'`.
    Run the same for each issue in `needs_review`, whose architect holds its acceptance on a
    finding ask's answer. Take the list as one snapshot before you act on any issue in it:
-   `curl -sS --fail-with-body -H "Authorization: Bearer $(cat "$DISPATCH_TOKEN_FILE")" "$DISPATCH_URL/api/v1/issues?project=<PROJECT>&status=needs_review" | jq -r 'if type == "array" then .[].key else error("Dispatch did not answer the listing") end'`.
+
+   ```text
+   rows=$(curl -sS --fail-with-body -H "Authorization: Bearer $(cat "$DISPATCH_TOKEN_FILE")" "$DISPATCH_URL/api/v1/issues?project=<PROJECT>&status=needs_review") || { echo "Dispatch read failed" >&2; exit 1; }
+   printf '%s' "$rows" | jq -r 'if type == "array" then .[].key else error("Dispatch did not answer the listing") end'
+   ```
+
    With neither `limit` nor `offset`, Dispatch answers every matching issue in one array
    (`api/issue_page.go`'s `parseIssuePage`). Do not page it. Pages by `offset` skip or repeat an
    issue whose status changes between reads, and the acceptance your reply releases moves an issue
    out of `needs_review`. `dispatch issues` always sends a page, so it cannot take this read.
-   Read the exit status, never the empty output: a plain pipeline reports `jq`'s status alone, so
-   an unset variable or a 401 would look like an empty list. `--fail-with-body` hands a refusal to
-   `jq`, which `error` turns into a non-zero exit, and a connection failure prints curl's own
-   message on stderr. No output with a zero exit is the one case that means nothing is waiting.
-   Act on each as above, a triage ask as the skill's "New issue triage" says. Your reply under it
-   releases that acceptance. An issue that enters `needs_review` after the snapshot is read at
-   your next start.
+   The exit status is the whole answer, which is why the read lands in `rows` before `jq` sees it:
+   a pipeline would report `jq`'s status alone, and `jq` succeeds on the empty input a failed read
+   gives it. Zero with keys is work. Zero with no output is the one case that means nothing is
+   waiting. Anything else failed, an unreadable token file, a refusal and a dead connection alike,
+   and admits nothing. Act on each as above, a triage ask as the skill's "New issue triage" says.
+   Your reply under it releases that acceptance. An issue that enters `needs_review` after the
+   snapshot is read at your next start.
 4. List the clear defects nobody filed yet. Each is an evidence comment whose first line starts
    `Clear defect from `, with no session reply under it that starts `Filed dispatch://`, `Not
    filed:` or `Asked dispatch://` (a role that asked instead, which step 2 takes):
