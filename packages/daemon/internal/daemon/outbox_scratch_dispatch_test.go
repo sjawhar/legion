@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -181,18 +180,8 @@ func startScratchDispatch(t *testing.T) (string, string) {
 		deadline = testDeadline.Add(-10 * time.Second)
 	}
 	// Dispatch serves on a socket held here on a port the kernel chose (DISPATCH_LISTEN_FD), so no
-	// other process can take the port before Dispatch serves it. The file is a descriptor of its own
-	// for the socket, so the socket stays listening once the listener is closed.
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("hold a port for scratch Dispatch: %v", err)
-	}
-	held, err := listener.(*net.TCPListener).File()
-	_ = listener.Close()
-	if err != nil {
-		t.Fatalf("hold a port for scratch Dispatch: take the listening socket's descriptor: %v", err)
-	}
-	port := listener.Addr().(*net.TCPAddr).Port
+	// other process can take the port before Dispatch serves it (heldSocket).
+	held, port := heldSocket(t)
 	baseURL := fmt.Sprintf("http://127.0.0.1:%d", port)
 	command := exec.Command(binary)
 	command.Dir = filepath.Join(repositoryRoot, "packages", "envoy")

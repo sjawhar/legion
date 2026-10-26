@@ -17,8 +17,8 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Subprocess } from "bun";
 
-import { type HarnessListener, harnessListeners } from "./harness-listeners";
-import { harnessPorts } from "./harness-ports";
+import { type HarnessListener, targetedListeners } from "./harness-listeners";
+import { harnessPorts, harnessVariables } from "./harness-ports";
 import { type PipedRunning, Supervisor } from "./local-instance-support";
 
 const dispatchPackage = fileURLToPath(new URL("..", import.meta.url));
@@ -109,7 +109,7 @@ function refusal(watched: Watched, given: number, what: string): Error {
   const lines = tail.join("\n");
   const inUse = given !== 0 && /EADDRINUSE|address already in use/.test(lines);
   const head = inUse
-    ? `${listener.name} cannot listen on ${listener.variable}=${given}: address already in use`
+    ? `${listener.name} cannot listen on ${harnessVariables[listener.key]}=${given}: address already in use`
     : `${listener.name} ${what}`;
   const where = log === undefined ? "" : ` (${log})`;
   return new Error(
@@ -160,9 +160,7 @@ async function serving(watched: Watched, given: number, supervisor: Supervisor):
 export async function startHarness(options: HarnessOptions = {}): Promise<Harness> {
   // Refuses a malformed or duplicated port before anything starts.
   const given = harnessPorts();
-  const listeners = process.env.PLAYWRIGHT_BASE_URL
-    ? harnessListeners.filter((listener) => listener.deployed)
-    : harnessListeners;
+  const listeners = targetedListeners();
   if (options.logDir !== undefined) mkdirSync(options.logDir, { recursive: true });
   const supervisor = new Supervisor();
   const interrupt = () => supervisor.interrupt();
@@ -178,7 +176,9 @@ export async function startHarness(options: HarnessOptions = {}): Promise<Harnes
       });
       const watched = watch(running, listener, options.logDir);
       processes.push(watched);
-      env[listener.variable] = String(await serving(watched, given[listener.key].port, supervisor));
+      env[harnessVariables[listener.key]] = String(
+        await serving(watched, given[listener.key].port, supervisor)
+      );
     }
   } catch (error) {
     await supervisor.stop();

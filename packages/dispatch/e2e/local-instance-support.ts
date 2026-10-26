@@ -50,17 +50,7 @@ export class Supervisor {
    *  process `bun run build:web` runs. A terminal's Ctrl-C reaches only the command, which stops
    *  them in order. Their output is the command's. */
   start(name: string, argv: readonly string[], cwd: string): Running {
-    const child = Bun.spawn([...argv], {
-      cwd,
-      detached: true,
-      env: process.env,
-      stderr: "inherit",
-      stdin: "ignore",
-      stdout: "inherit",
-    });
-    const running = { child, name };
-    this.#children.push(running);
-    return running;
+    return this.#spawn(name, argv, cwd, process.env, "inherit");
   }
 
   /** As `start`, in the environment `env`, with its output piped to the caller, which reads both
@@ -71,13 +61,24 @@ export class Supervisor {
     cwd: string,
     env: Record<string, string | undefined>
   ): PipedRunning {
+    return this.#spawn(name, argv, cwd, env, "pipe");
+  }
+
+  /** Spawns `argv` detached, with no stdin and both output streams `output`, and tracks it. */
+  #spawn<const Output extends "inherit" | "pipe">(
+    name: string,
+    argv: readonly string[],
+    cwd: string,
+    env: Record<string, string | undefined>,
+    output: Output
+  ) {
     const child = Bun.spawn([...argv], {
       cwd,
       detached: true,
       env,
-      stderr: "pipe",
+      stderr: output,
       stdin: "ignore",
-      stdout: "pipe",
+      stdout: output,
     });
     const running = { child, name };
     this.#children.push(running);

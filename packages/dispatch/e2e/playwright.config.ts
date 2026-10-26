@@ -1,8 +1,8 @@
 import { fileURLToPath } from "node:url";
 import { defineConfig, devices } from "@playwright/test";
 import { baseUrl } from "./api";
-import { harnessListeners } from "./harness-listeners";
-import { harnessPorts } from "./harness-ports";
+import { targetedListeners } from "./harness-listeners";
+import { harnessPorts, harnessVariables } from "./harness-ports";
 import { plainHttpHost, plainHttpOrigin } from "./plain-http-origin";
 
 // The plain-HTTP project's origin is a proxy on PLAIN_HTTP_PORT, reached by a host name Chromium
@@ -13,11 +13,9 @@ import { plainHttpHost, plainHttpOrigin } from "./plain-http-origin";
 // fails on loopback by design.
 const plainHttpSpecs = /plain-http-(origin|proxy)\.e2e\.ts/;
 
-// The rows of e2e/harness-listeners.ts this run targets: every one for a local run, the `deployed`
-// ones for a deployed run (PLAYWRIGHT_BASE_URL).
-const targetedListeners = process.env.PLAYWRIGHT_BASE_URL
-  ? harnessListeners.filter((listener) => listener.deployed)
-  : harnessListeners;
+// The rows of e2e/harness-listeners.ts this run targets, as the environment names them when this
+// config evaluates.
+const targeted = targetedListeners();
 
 // `DISPATCH_E2E_REUSE_SERVERS=1` says the harness ports name servers that are already running:
 // the ones e2e/run.ts started, which sets it for the command it runs, or a harness a person
@@ -44,20 +42,20 @@ const runThroughWrapper =
   "bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts [args] (`bun run " +
   "e2e` builds the SPA and runs the same)";
 const ports = harnessPorts();
-const unset = targetedListeners.filter((listener) => ports[listener.key].port === 0);
+const unset = targeted.filter((listener) => ports[listener.key].port === 0);
 if (unset.length > 0) {
   throw new Error(
-    `The Dispatch e2e harness is not running: ${unset.map((listener) => listener.variable).join(", ")} ` +
+    `The Dispatch e2e harness is not running: ${unset.map((listener) => harnessVariables[listener.key]).join(", ")} ` +
       `${unset.length > 1 ? "are" : "is"} unset. This config starts no server; run it through ` +
       `e2e/run.ts, which starts the harness on ports the OS chooses and exports them: ` +
       `${runThroughWrapper}. To run against servers you started yourself, set ` +
-      `${targetedListeners.map((listener) => listener.variable).join(", ")} and ` +
+      `${targeted.map((listener) => harnessVariables[listener.key]).join(", ")} and ` +
       "DISPATCH_E2E_REUSE_SERVERS=1."
   );
 }
 if (!resolveReuseServers()) {
-  const targets = targetedListeners
-    .map((listener) => `${ports[listener.key].port} (${listener.variable})`)
+  const targets = targeted
+    .map((listener) => `${ports[listener.key].port} (${harnessVariables[listener.key]})`)
     .join(", ");
   throw new Error(
     `This config starts no server, so it would run against whatever listens on ${targets}. Run ` +

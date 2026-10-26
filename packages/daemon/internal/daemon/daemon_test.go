@@ -211,6 +211,23 @@ func holdPortOn(t *testing.T, host string) int {
 	return port
 }
 
+// heldSocket holds a loopback port the kernel chooses and returns a descriptor of its own for the
+// listening socket, with that port: the socket stays listening once the listener is closed, so no
+// other process can take the port before whatever is handed the descriptor serves it.
+func heldSocket(t *testing.T) (*os.File, int) {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("hold a loopback port: %v", err)
+	}
+	file, err := listener.(*net.TCPListener).File()
+	_ = listener.Close()
+	if err != nil {
+		t.Fatalf("take the held socket's descriptor: %v", err)
+	}
+	return file, listener.Addr().(*net.TCPAddr).Port
+}
+
 // rebindHeldPorts hands cfg a freshly held API port. A daemon that has stopped closed the
 // listener it was handed, and from then on the port it used is any process's, so a test that
 // starts a second daemon on the same config holds one again first. The worker stream needs no
@@ -394,15 +411,7 @@ func TestRunRecordsNoBootWhenItCannotTakeItsPort(t *testing.T) {
 // binding an address of its own, and its boot line names the address it serves on.
 func TestRunServesTheSocketItIsHandedAndLogsItsAddress(t *testing.T) {
 	cfg := testConfig(t)
-	held, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("hold a loopback port: %v", err)
-	}
-	file, err := held.(*net.TCPListener).File()
-	_ = held.Close()
-	if err != nil {
-		t.Fatalf("take the held socket's descriptor: %v", err)
-	}
+	file, _ := heldSocket(t)
 	// The descriptor `legion start` inherits is a bare number no *os.File owns, which Adopt closes.
 	descriptor, err := syscall.Dup(int(file.Fd()))
 	_ = file.Close()

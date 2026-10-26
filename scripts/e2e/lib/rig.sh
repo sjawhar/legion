@@ -116,18 +116,26 @@ await_port_file() {
 # COMMAND in place, so <NAME>_pid is the service's own pid. A COMMAND that clears its environment
 # (`env -i`) names FD_ENV=3 itself: held-port.py always hands the socket over as descriptor 3.
 start_held() {
-  local _name=$1 _port_var=$2 _fd_env=$3 _options=()
-  shift 3
+  _held_exec start_held "$1" "$3" --port-file "$work/$1.port" "${@:4}"
+  await_port_file "$1" "$work/$1.port" "$2"
+}
+
+# _held_exec CALLER NAME FD_ENV SOURCE_FLAG SOURCE_VALUE [--env K=V]... -- COMMAND... starts
+# held-port.py exec as the service NAME, its socket from SOURCE_FLAG SOURCE_VALUE (--port-file, a
+# fresh one whose port it writes there, removed first; --from, a keeper's), handed over as FD_ENV.
+# A missing COMMAND is refused naming CALLER.
+_held_exec() {
+  local _caller=$1 _name=$2 _fd_env=$3 _flag=$4 _value=$5 _options=()
+  shift 5
   while [ $# -gt 0 ] && [ "$1" != -- ]; do
     _options+=("$1")
     shift
   done
-  [ $# -gt 1 ] || fail "start_held $_name: no command after --"
+  [ $# -gt 1 ] || fail "$_caller $_name: no command after --"
   shift
-  rm -f "$work/$_name.port"
-  start_process "$_name" python3 "$root/scripts/e2e/lib/held-port.py" exec --port-file "$work/$_name.port" \
+  [ "$_flag" != --port-file ] || rm -f "$_value"
+  start_process "$_name" python3 "$root/scripts/e2e/lib/held-port.py" exec "$_flag" "$_value" \
     --fd-env "$_fd_env" "${_options[@]}" -- "$@"
-  await_port_file "$_name" "$work/$_name.port" "$_port_var"
 }
 
 # keep_port NAME PORT_VAR starts the keeper NAME, a held-port.py keep that holds one listening
@@ -148,16 +156,7 @@ keep_port() {
 # start_kept NAME KEEPER FD_ENV [--env K=V]... -- COMMAND... starts COMMAND as the service NAME, as
 # start_held does, on a copy of the socket the keeper KEEPER (keep_port) holds.
 start_kept() {
-  local _name=$1 _keeper=$2 _fd_env=$3 _options=()
-  shift 3
-  while [ $# -gt 0 ] && [ "$1" != -- ]; do
-    _options+=("$1")
-    shift
-  done
-  [ $# -gt 1 ] || fail "start_kept $_name: no command after --"
-  shift
-  start_process "$_name" python3 "$root/scripts/e2e/lib/held-port.py" exec --from "$work/$_keeper.sock" \
-    --fd-env "$_fd_env" "${_options[@]}" -- "$@"
+  _held_exec start_kept "$1" "$3" --from "$work/$2.sock" "${@:4}"
 }
 
 # report_port LOG PATTERN prints the port a process that bound port 0 itself reported: the digits

@@ -1,14 +1,13 @@
 import { fileURLToPath } from "node:url";
 
 import { usesFakeBroker } from "./harness-broker";
-import { type HarnessListenerKey, harnessVariables } from "./harness-ports";
+import type { HarnessListenerKey } from "./harness-ports";
 
-/** One process the harness starts, beside its port's variable and how it reports that port. */
+/** One process the harness starts and how it reports its port. */
 export interface HarnessListener {
-  /** Its entry in `harnessPorts` (e2e/harness-ports.ts). */
+  /** Its entry in `harnessPorts` and `harnessVariables` (e2e/harness-ports.ts), whose variable,
+   *  set, is the port it binds; unset, the OS chooses and it reports. */
   readonly key: HarnessListenerKey;
-  /** Its port's variable: set, the port it binds; unset, the OS chooses and it reports. */
-  readonly variable: string;
   /** What a message calls it. */
   readonly name: string;
   /** Its log file's name, without `.log`, when its output goes to a directory. */
@@ -48,7 +47,6 @@ export const harnessListeners: readonly HarnessListener[] = [
     key: "fakeEnvoy",
     name: "the fake Envoy",
     report: /^fake envoy listener on 127\.0\.0\.1:(\d+)$/,
-    variable: harnessVariables.fakeEnvoy,
   },
   {
     argv: ["bun", script("fake-github.ts")],
@@ -58,7 +56,6 @@ export const harnessListeners: readonly HarnessListener[] = [
     key: "fakeGithub",
     name: "the fake GitHub",
     report: /^fake github listener on 127\.0\.0\.1:(\d+)$/,
-    variable: harnessVariables.fakeGithub,
   },
   ...(usesFakeBroker
     ? [
@@ -70,7 +67,6 @@ export const harnessListeners: readonly HarnessListener[] = [
           key: "fakeBroker" as const,
           name: "the fake secrets broker",
           report: /^fake broker listener on 127\.0\.0\.1:(\d+)$/,
-          variable: harnessVariables.fakeBroker,
         },
       ]
     : []),
@@ -85,7 +81,6 @@ export const harnessListeners: readonly HarnessListener[] = [
     // The server's slog line, written with the address it serves on (a held socket's, or the one
     // it bound): `msg="dispatch: listening" addr=127.0.0.1:<port>`.
     report: /msg="dispatch: listening" addr=127\.0\.0\.1:(\d+)(?:\s|$)/,
-    variable: harnessVariables.dispatch,
   },
   {
     argv: ["bun", script("plain-http-proxy.ts")],
@@ -95,6 +90,13 @@ export const harnessListeners: readonly HarnessListener[] = [
     key: "plainHttp",
     name: "the plain-HTTP proxy",
     report: /^plain-HTTP proxy on http:\/\/dispatch-e2e\.test:(\d+) for /,
-    variable: harnessVariables.plainHttp,
   },
 ];
+
+/** The rows a run targets: every one for a local run, the `deployed` ones for a deployed run
+ *  (`PLAYWRIGHT_BASE_URL`, read when this is called). */
+export function targetedListeners(): readonly HarnessListener[] {
+  return process.env.PLAYWRIGHT_BASE_URL
+    ? harnessListeners.filter((listener) => listener.deployed)
+    : harnessListeners;
+}

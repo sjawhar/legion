@@ -5,6 +5,7 @@
  *  instance — and empties its database and its fake Envoy, so restart it to reseed. */
 import { fileURLToPath } from "node:url";
 
+import { harnessVariables } from "./harness-ports";
 import { type Harness, startHarness } from "./harness-start";
 import { databaseUrlRefusal, Interrupted, Supervisor, shellQuote } from "./local-instance-support";
 import { sqlAt } from "./psql";
@@ -118,7 +119,7 @@ async function main(): Promise<void> {
   );
 
   // 6. Hand over, and run until Ctrl-C or until one of the processes stops by itself.
-  const fakeEnvoy = `http://127.0.0.1:${harness.env.FAKE_ENVOY_PORT}`;
+  const fakeEnvoy = `http://127.0.0.1:${harness.env[harnessVariables.fakeEnvoy]}`;
   console.log(
     "\nDispatch local instance is up.\n" +
       `  Open (signed in as alice): ${baseUrl}/auth/_dev/signin?login=alice&next=/\n` +
