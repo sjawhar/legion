@@ -42,7 +42,7 @@ import {
   buildIssuePath,
   buildProjectPath,
   buildReferencePath,
-  parseDispatchReference,
+  parseNodeReference,
 } from "../refs/routes";
 import { importWhenOnline } from "../shell/DeploymentResilience";
 import { useKeymap, useKeymapScope } from "../shell/keymap";
@@ -776,8 +776,10 @@ export function ProofDocument({
             return;
           }
           const anchor = (event.target as HTMLElement).closest<HTMLAnchorElement>("a");
+          // The link's target is a node its author named, and opening it is a read, so it is read
+          // as a node's reference, whatever the length of its name.
           const href = anchor === null ? null : dispatchHrefOf(anchor);
-          const route = href === null ? undefined : parseDispatchReference(href);
+          const route = href === null ? undefined : parseNodeReference(href);
           if (route === undefined) {
             return;
           }

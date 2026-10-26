@@ -250,16 +250,19 @@ function parseIssueReference(key: string, target: string | undefined): IssueRout
 
 /** A `dispatch://` reference's route as text cites it, which the server's `text.Extract` indexes:
  * one holding a control character names nothing, and so does one past the bounds the graph keys
- * (`routeInBound`); a fragment names a block (`parseBlockReference`, `withBlock`) or nothing. */
+ * (`routeInBound`); a fragment names a block (`parseBlockReference`, `withBlock`) or nothing. Only
+ * where plain text becomes a reference - linkifying a bare `dispatch://` string, shortening one,
+ * reading a composer's text - since that must match what the server indexes. */
 export function parseDispatchReference(value: string): DispatchReferenceRoute | undefined {
   const route = parseNodeReference(value);
   return route !== undefined && routeInBound(route) ? route : undefined;
 }
 
-/** A node's own `dispatch://` reference - one the API returned for a node, or the dashboard wrote
- * for one it shows - as its route, whatever the length of its target id or its block's id: the
- * bounds `parseDispatchReference` holds text to decide only what text cites, and the server reads
- * a node of any name by its own reference. */
+/** A node's own `dispatch://` reference - one the API returned for a node, one the dashboard wrote
+ * for one it shows, or one an author named explicitly as a link's target or a picture's source -
+ * as its route, whatever the length of its target id or its block's id: the bounds
+ * `parseDispatchReference` holds text to decide only what text cites, and drawing or opening a
+ * node is a read, which the server answers for a node of any name by its own reference. */
 export function parseNodeReference(value: string): DispatchReferenceRoute | undefined {
   if (hasControlCharacter(value)) {
     return undefined;
@@ -427,9 +430,9 @@ export function referenceRouteFromHref(
   return routes === undefined ? undefined : pageInBound(routes.page, routes.block);
 }
 
-/** The reference a link the server returned names - a search hit's `href`, a `dispatch://` node
- * reference - whatever the length of its names, as the server reads a request: the bounds text is
- * held to decide only what text cites (`referenceRouteFromHref`). */
+/** The reference a link names as the server reads a request - a search hit's `href`, an explicit
+ * link's target, a `dispatch://` node reference - whatever the length of its names: the bounds
+ * text is held to decide only what text cites (`referenceRouteFromHref`). */
 export function nodeRouteFromHref(
   href: string,
   appOrigin: string = window.location.origin
@@ -653,14 +656,16 @@ export interface PictureReference {
  *  (`doc/picture-view.ts`) so a picture in a comment and the same picture in a spec are read by
  *  one rule. The source is `src` as a string (`""` when absent); it is a reference only when it
  *  starts with `dispatch://` and the grammar reads it, else undefined and the picture is whatever
- *  the caller draws for any other address. The caption is the trimmed `alt`, or the slug of the
+ *  the caller draws for any other address. An author names the picture's node explicitly, and
+ *  drawing it is a read, so the source is read as a node's reference (`parseNodeReference`),
+ *  whatever the length of its name. The caption is the trimmed `alt`, or the slug of the
  *  artifact the reference names when the `alt` is blank (`""` when it names no artifact). */
 export function pictureReference(attrs: {
   readonly alt?: unknown;
   readonly src?: unknown;
 }): PictureReference | undefined {
   const source = String(attrs.src ?? "");
-  const route = source.startsWith("dispatch://") ? parseDispatchReference(source) : undefined;
+  const route = source.startsWith("dispatch://") ? parseNodeReference(source) : undefined;
   if (route === undefined) {
     return undefined;
   }

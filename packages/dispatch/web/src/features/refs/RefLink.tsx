@@ -7,8 +7,8 @@ import {
   buildDispatchReference,
   buildReferencePath,
   type DispatchReferenceRoute,
+  nodeRouteFromHref,
   parseDispatchReference,
-  referenceRouteFromHref,
   shortForm,
 } from "./routes";
 
@@ -134,9 +134,13 @@ export function linkifyDispatchRefs(root: HTMLElement): void {
  * same-origin dashboard path — a link `linkifyDispatchRefs` just inserted, an ordinary Markdown
  * link a user wrote by hand, or a bare `http(s)://` URL remark-gfm autolinked — rewrites its href
  * to the SPA route via `buildReferencePath`, and clears its text so the caller can
- * portal a `RefLink` in to render the resolved title. An external link, or an href that fails to
- * parse as a reference, is left untouched, and so is a picture's link (`data-dispatch-picture`,
- * the engine's `pictureSerializer`), whose content is a `DispatchPicture` rather than a title.
+ * portal a `RefLink` in to render the resolved title. Each link already names its target, and
+ * drawing or opening it is a read, so its href is read as the server reads a request
+ * (`nodeRouteFromHref`), whatever the length of its names; which bare `dispatch://` text becomes
+ * a link at all is `linkifyDispatchRefs`'s bounded reading. An external link, or an href that
+ * fails to parse as a reference, is left untouched, and so is a picture's link
+ * (`data-dispatch-picture`, the engine's `pictureSerializer`), whose content is a
+ * `DispatchPicture` rather than a title.
  *
  * `@legion/proof-editor`'s Markdown link serializer sanitizes a `dispatch://` href to `""`
  * (Milkdown's link sanitizer only allows http/https/mailto/tel/ftp — a document strangers can
@@ -156,7 +160,7 @@ export function collectReferenceAnchors(
     if (href === null) {
       continue;
     }
-    const route = referenceRouteFromHref(href, appOrigin);
+    const route = nodeRouteFromHref(href, appOrigin);
     if (route === undefined) {
       continue;
     }

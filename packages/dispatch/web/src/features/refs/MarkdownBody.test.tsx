@@ -231,6 +231,44 @@ describe("Dispatch pictures", () => {
     }
   });
 
+  // A picture's source and a link's target are nodes an author named explicitly, so a document
+  // whose name is past the bound text is held to (2683 characters, which a new upload's reference
+  // key still holds) is drawn from its version's bytes and opened by its page, not left a
+  // `dispatch://` source the browser cannot fetch or a dead link.
+  test("a long-named picture is drawn and an explicit link to a long-named document opens it", async () => {
+    const slug = "a".repeat(2683);
+    const getIssue = spyOn(api, "getIssue").mockResolvedValue({
+      artifacts: [{ ...picture, kind: "doc", name: "design.md", slug }],
+      key: "CORE-1",
+      title: "Core one",
+    } as never);
+    const getArtifactText = spyOn(api, "getArtifactText").mockResolvedValue({
+      markdown: "The design.",
+      token: "sha256:design",
+      version: 1,
+    });
+    const view = render(
+      withQueries(
+        <MarkdownBody
+          markdown={`![shot](dispatch://CORE-1/artifact/${slug}@v1)\n\nSee [design](dispatch://CORE-1/artifact/${slug}).`}
+        />
+      )
+    );
+
+    try {
+      const shot = await within(view.container).findByRole("img", { name: "shot" });
+      expect(shot.getAttribute("src")).toBe(`/api/v1/issues/CORE-1/artifacts/${slug}/versions/1`);
+      expect(shot.closest("a")?.getAttribute("href")).toBe(`/issues/CORE-1/artifacts/${slug}?v=1`);
+      const link = await within(view.container).findByRole("link", { name: "design.md" });
+      expect(link.getAttribute("href")).toBe(`/issues/CORE-1/artifacts/${slug}`);
+      expect(link.getAttribute("data-dispatch-ref")).toBe(`dispatch://CORE-1/artifact/${slug}`);
+    } finally {
+      getArtifactText.mockRestore();
+      getIssue.mockRestore();
+      view.unmount();
+    }
+  });
+
   test("a picture on another website renders as it always has", async () => {
     const view = render(
       withQueries(<MarkdownBody markdown="![chart](https://example.com/a.png)" />)

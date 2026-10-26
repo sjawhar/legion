@@ -222,6 +222,35 @@ test("ProofDocument opens a hover card for a dispatch:// link in the live editor
   }
 });
 
+// A link's target is a node its author named, so a click on a link to a document whose name is
+// past the bound text is held to (2683 characters, which a new upload's reference key still
+// holds) opens that document in-app, rather than leaving the browser to follow the sanitized
+// mark's empty href.
+test("ProofDocument opens an explicit link to a long-named document in-app", async () => {
+  const slug = "a".repeat(2683);
+  const { editors, sync, view } = renderProofDocument();
+
+  try {
+    await sync();
+    await waitFor(() => expect(editors).toHaveLength(1));
+    const root = editors[0]?.root;
+    if (root === undefined) throw new Error("editor root missing");
+    // What the proof-editor serializer emits for a dispatch:// link mark (the test above says why).
+    act(() => {
+      root.innerHTML = `<p><a href="" data-dispatch-href="dispatch://CORE-1/artifact/${slug}">design</a></p>`;
+    });
+    const anchor = root.querySelector("a");
+    if (anchor === null) throw new Error("anchor missing");
+
+    fireEvent.click(anchor);
+    expect(within(view.container).getByTestId("current-route").textContent).toBe(
+      `/issues/CORE-1/artifacts/${slug}`
+    );
+  } finally {
+    view.unmount();
+  }
+});
+
 test("ProofDocument reports connection status and pending edits through the toolbar bag", async () => {
   const { editors, pending, rerender, status, sync, toolbar, view } = renderProofDocument();
 
