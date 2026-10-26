@@ -2,48 +2,43 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-278",
-  "completed": "2026-10-26T05:42:00Z",
-  "round": 2,
-  "headSha": "e7fa88b07e0721b160ef6d61d94c06fd31324d8b",
-  "codeHeadSha": "5ab9e45980a5beaba06fa76edf53c1841bfa27b9",
+  "completed": "2026-10-26T07:02:00Z",
+  "round": 3,
+  "headSha": "a7b2983f4d856cd66c4d84baa13a25135e814790",
+  "codeHeadSha": "7a7fd8066cf75be9347324b2cb85cc66e1b76465",
+  "verdictProvider": "provider not verified: no subagent ran, and the tester did not read the provider of its own turns from its transcript",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran `DATABASE_URL=postgres://postgres@127.0.0.1:5433/tester_claimant?sslmode=disable bash scripts/e2e/dispatch-claimant-delivery.sh` at e7fa88b0: summary 9 ok, 0 FAIL, PASS in 68s. In mention-failed-claimant the row is failed and dispatch-16 is on agent.claimant-e2e-p. In mention-delivered-claimant the row is sent and no agent topic carries the event. In mention-failed-follower dispatch-20 is on agent.claimant-e2e-c. Re-ran the browser suite recipients-claim.e2e.ts followers.e2e.ts: 5 passed, plus the tester's spec."
+    "how": "Re-ran `bash scripts/e2e/dispatch-claimant-delivery.sh` at a7b2983f: summary 9 ok, 0 FAIL, PASS in 53s. Re-ran `bun run e2e -- recipients-claim.e2e.ts followers.e2e.ts --project chromium --retries 0`: 7 passed, including the two new refresh scenarios. Those two also passed --repeat-each 5 (10 passed)."
   },
   "failures": [],
   "failed": 0,
   "proof": [
     {
-      "criterion": "Review finding 1: a mention whose send failed leaves the claimant, follower and route copies in place; a delivered mention leaves them to the mention; a pending send defers the copy until the send is decided",
-      "surface": "real envoy-dispatch built from the head, natsd, Postgres 17 + pgvector, fake Envoy listener behind a throwaway delay proxy ($TMPDIR/infra278-test/delay-proxy.ts) that holds POST /v1/messages/send",
-      "command": "DATABASE_URL=... bash $TMPDIR/infra278-test/adv.sh (a copy of scripts/e2e/dispatch-claimant-delivery.sh with the driver path changed and the proxy added; throwaway driver adversarial.ts)",
-      "observed": "summary: 30 ok, 0 FAIL, counting over a 9 s window. A mention of P that gets a 404: {P:1}. A mention in a mode P does not advertise: {P:1}. An ask reply mentioning P, a follower whose send gets a 404: {C:1,P:1}. Route session:R with R's mention 404: {P:1,R:1}. R's mention delivered: {P:1} and 1 send to R. A send held 3 s then 200: outbox {} and 1 mention send. A send held 3 s then 404: {P:1}, with the issue topic at +24 ms and P's copy at +3055 ms. Every round 1 case passes again: edit, resolve and reopen; ask answer and resolution; spec approval; message.answered; the targeted thread; 8 comments at the same time; claim release, move and a person's claim; the unclaimed child",
-      "headSha": "e7fa88b07e0721b160ef6d61d94c06fd31324d8b",
-      "negativeControl": "The same 30 cases with DISPATCH_BIN built from the previous head 15e414ed -> 24 ok, 5 FAIL: mention-resolved-send-fails {}, mention-mode-not-advertised {}, ask-reply-mention-follower-claimant-send-fails {C:1}, route-mention-send-fails {P:1}, pending-then-failed with no P copy"
+      "criterion": "Round-2 finding 2: when the listener does not answer, ask reads carry route_status unknown, and the Reaches panel marks the route's reach as unknown instead of showing it as reaching nobody",
+      "surface": "real envoy-dispatch built from the head, natsd, Postgres 17 + pgvector, fake Envoy listener behind a throwaway proxy that answers GET /v1/sessions with 503 on demand. The rig's Dispatch serves the production web bundle built at the head (packages/dispatch/web/dist), and Chromium (Playwright) drives the Inbox as the dev-signed-in person",
+      "command": "ADV_WEB_DIST=packages/dispatch/web/dist DATABASE_URL=... bash $TMPDIR/infra278-test/adv.sh, case reach-unknown-when-listener-down (throwaway driver adversarial.ts)",
+      "observed": "Listener down, route role:adv-reviewer: GET /api/v1/asks/{id} and the Inbox thread give {claimant:adv-q, route:role:adv-reviewer, route_status:unknown, route_holder:null}. The card reads 'Reaches 2 + route (unknown)' with 'role:adv-reviewer via route Route reach unknown'. Listener down, route session:adv-r: route_status unknown; the card shows 'Reaches 3' with 'session:adv-r… via route Route reach unknown'. Listener up: route_status live, route_holder adv-r, and the card shows 'adv-r via route'",
+      "headSha": "a7b2983f4d856cd66c4d84baa13a25135e814790",
+      "negativeControl": "DISPATCH_BIN built from the previous head 5ab9e459, same bundle: the reads have no route_status, and the card shows 'Reaches 2 … role:adv-reviewer via route' with no mark that the reach is unknown; the case FAILs (30 ok, 1 FAIL)"
     },
     {
-      "criterion": "Contract change census: GET /api/v1/asks/{id}, GET /api/v1/issues/{key}/asks?thread=1 and GET /api/v1/inbox carry claimant, route and route_holder; the CLI still reads an ask",
-      "surface": "the live rig's Dispatch, with the fake listener naming Q as the holder of role adv-reviewer; the checkout CLI (build-dispatch-cli.sh)",
-      "command": "In the driver: Q claims ADV-1, the route is set to role:adv-reviewer, C opens an ask, the three GETs follow, then `bun cli/dispatch.js read --ref dispatch://ADV-1/ask/<id>`",
-      "observed": "All three reads return {\"claimant\":\"adv-q\",\"route\":\"role:adv-reviewer\",\"route_holder\":\"adv-q\"}. The CLI exits 0 and prints 'Question: Census?'",
-      "headSha": "e7fa88b07e0721b160ef6d61d94c06fd31324d8b",
-      "negativeControl": "The 15e414ed and base binaries return no route_holder field (the implementer's run, and the base run in round 1 where claimant was absent)"
+      "criterion": "Regression: delivery unchanged by the shared claim-lapse constant. Failed, delivered and held mentions for the claimant, a follower and the route session; every listed event from a person; claim moves; the census reads and the CLI",
+      "surface": "same rig",
+      "command": "same run",
+      "observed": "summary: 31 ok, 0 FAIL. Held 3 s then sent: outbox {} and 1 send. Held 3 s then 404: P's copy at +3050 ms. Receipt timeout: P gets 2 copies, as the docs now state. Census reads give claimant, route and route_holder; the CLI's dispatch read exits 0",
+      "headSha": "a7b2983f4d856cd66c4d84baa13a25135e814790",
+      "negativeControl": "The 5ab9e459 binary passes all 30 round-2 cases and fails only the new unknown-reach case. The round-2 negative control (15e414ed: 5 FAIL) still applies to the delivery cases"
     },
     {
-      "criterion": "Review finding 2: Reaches N counts each session once, names a role route's holder, and follows claim and route changes without a reload",
+      "criterion": "Round-1 finding 3 in the browser: an issue.closed that changes the route, and a claim that lands while the Inbox is loading, both refresh the open card",
       "surface": "Dispatch browser suite: real Go server, production SPA bundle, Chromium",
-      "command": ". /legion/harness/e2e-env.sh && cd packages/dispatch && bun run e2e -- recipients-claim.e2e.ts followers.e2e.ts zz-tester-tmp.e2e.ts --project chromium --retries 0 (the throwaway spec was copied in and deleted after the run)",
-      "observed": "6 passed. In the throwaway spec, the claim moves P to Q and the card follows with Reaches 2. Route role:t-reviewer, held by the claimant Q: the API returns route_holder t-q and the card stays at Reaches 2. Route role:t-other, held by R: the card shows Reaches 3 with the row 'R T via route (role:t-other)'. Route cleared: back to Reaches 2. All with no reload. Screenshots are in $TMPDIR/infra278-test/reaches-role-*.png",
-      "headSha": "e7fa88b07e0721b160ef6d61d94c06fd31324d8b",
-      "negativeControl": "In round 1, at 15e414ed, the same claimant-held role route showed Reaches 3 for 2 sessions (round 1 evidence comment)"
+      "command": ". /legion/harness/e2e-env.sh && cd packages/dispatch && bun run e2e -- recipients-claim.e2e.ts followers.e2e.ts --project chromium --retries 0; then bun run e2e -- recipients-claim.e2e.ts --grep 'closes the issue|while the Inbox is loading' --repeat-each 5 --project chromium --retries 0",
+      "observed": "7 passed; then 10 passed (5 repeats of each new scenario, none flaky)",
+      "headSha": "a7b2983f4d856cd66c4d84baa13a25135e814790",
+      "negativeControl": "The implementer's run against 15e414ed with this head's test file failed both scenarios: 'Routed next (e2e)' not found, and Expected 'Reaches 2' Received 'Reaches 1'"
     }
   ],
-  "notDriven": [
-    "Review finding 3, the issue.closed refresh and the refresh while an Inbox fetch is in flight, was not driven on a real surface. The implementer's web unit tests (sse.test.ts) are the only evidence."
-  ],
-  "observations": [
-    "Receipt timeout: Dispatch's 5 s send window ends while the listener still delivers the mention. The row is 'failed' and says the message may already have been delivered, and the outbox then publishes the claimant copy, so P got 2 copies (the mention, and {P:1} at +9.7 s). This is the stated trade-off: a duplicate rather than a loss."
-  ],
-  "ci": "At code head 5ab9e459, read at 05:38Z. Tests 40272884546: lint and typecheck success; the test job failed at Initialize containers ('unknown blob', Docker pull failed, no test ran). Worker Image 40272884486: build failed at docker/setup-buildx-action ('unknown blob'). Docs 40272884501 success. Legion Envoy and Contracts 40272884567 queued. Both failures are image-pull failures, not code failures; the tester re-ran neither.",
-  "evidenceComment": "https://github.com/sjawhar/legion/pull/2225#issuecomment-6409070716"
+  "ci": "At code head 7a7fd806, read at 06:58Z: Tests 40281027298 in progress, Worker Image 40281027271 in progress, Docs 40281027230 queued, Legion Envoy and Contracts 40281027313 queued. Not waited for.",
+  "evidenceComment": "https://github.com/sjawhar/legion/pull/2225#issuecomment-6410163821"
 }
