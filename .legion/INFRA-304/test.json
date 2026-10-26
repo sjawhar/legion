@@ -2,16 +2,24 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-304",
-  "completed": "2026-10-26T02:37:38Z",
-  "round": 2,
-  "headSha": "5be55a7161c610abb24b5d4af0001f7723b5f0a6",
+  "completed": "2026-10-26T03:00:01Z",
+  "round": 3,
+  "headSha": "a8af5ab63d40e611aa95750c44af877cd0649feb",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Round 2: re-ran the implementer's round-2 command at 5be55a71 (code head 87de9d95, stylesheet comment only): bun run build:web -> web/dist/assets/index-BQJouVYI.css:.prose a{padding-block:calc(.5lh - .6em)}, the same content-hashed file as round 1; the two rows --repeat-each=3 -> 6 passed (51.2s). Round 1 (7a0b3193): same command, 6 passed (43.1s), plus the 3px control red at Received -1."
+    "how": "Round 3: re-ran the implementer's command at a8af5ab6 (code head bd842a55, stylesheet comment only): bun run build:web -> web/dist/assets/index-BQJouVYI.css:.prose a{padding-block:calc(.5lh - .6em)}, the same content-hashed file as rounds 1 and 2; the two rows --repeat-each=3 -> 6 passed (52.8s). Round 2 (5be55a71): same, 6 passed (51.2s). Round 1 (7a0b3193): 6 passed (43.1s), plus the 3px control red at Received -1."
   },
   "failures": [],
   "failed": 0,
   "proof": [
+    {
+      "criterion": "Round 3: the acceptance fix changes no shipped behaviour, and the note's Segoe UI figures follow from its formula",
+      "surface": "Dispatch browser suite, iphone project (iPhone 13 on Chromium), real Go server + Postgres 17/pgvector + production web/dist, issue pod, tester lane; the note's formula recomputed",
+      "command": "cd packages/dispatch && (source /legion/harness/env.sh && bun run build:web && grep -o '\\.prose a{[^}]*}' web/dist/assets/*.css && bunx playwright test --config e2e/playwright.config.ts --project=iphone -g \"reasoning link's padded box|an inline link keeps its line\" --repeat-each=3); python3: (lh - (2r - 1.2) * fs) / 2 with r = (2210 + 514) / 2048",
+      "observed": "Bundle index-BQJouVYI.css, byte-identical to rounds 1-2; 6 passed (52.8s). Segoe UI: reasoning -0.761, text-sm -0.221, message turn 0.319, document 1.119, Inbox 1.236 = the note. The formula predicts DejaVu's measured clearances (2.6 vs 2.62 at 16/24, 1.2 vs 1.21 at 12/16). Segoe UI itself is unmeasured, as the note states.",
+      "headSha": "a8af5ab63d40e611aa95750c44af877cd0649feb",
+      "negativeControl": ".prose a { padding-block: 3px } rebuilt at a8af5ab6 -> reasoning row red, Expected >= 0, Received -1; rule restored and web/dist rebuilt to index-BQJouVYI.css"
+    },
     {
       "criterion": "Round 2: the review fix changes no shipped behaviour, and the note's document row matches what Dispatch renders",
       "surface": "Dispatch browser suite, iphone project (iPhone 13 on Chromium), real Go server + Postgres 17/pgvector + production web/dist, issue pod, tester lane; the real spec page /issues/<key>/spec at 390px",
@@ -55,7 +63,7 @@
   ],
   "observations": [
     "Inter (the stylesheet's first family, used only where installed locally; no phone ships it) measures a 1.25em text box in Chromium: reasoning clearance 0.21, message turn 1.62, all >= 0. The existing message-turn row's lowerClearance >= 2 probe-margin precondition then fails (1.61), as it would with today's 3px (clearance 1, computed from the measured 20px text box, not run): a font-sensitivity of the test that predates this change and does not show in CI or the pod. Heading links with 0 padding overlap by the font's own text box (-0.81px at 16/19.2), which no padding changes.",
-    "CI at 5be55a71 (round 2, read at 2026-10-26T02:37Z): Tests run 40259387129 lint/typecheck success, test in progress; Legion Envoy and Contracts run 40259387137 dispatch and envoy-smoke in progress; Docs 40259387109 in progress; PR Title 40259387121 success. Round 1's f5b81b04: Tests 40257058235 success, Legion Envoy and Contracts 40257058207 cancelled by the round-2 push."
+    "CI at a8af5ab6 (round 3, read at 2026-10-26T03:00Z): Tests run 40261290420 lint/typecheck success, test in progress; Legion Envoy and Contracts run 40261290458 queued; Docs 40261290401 success; PR Title 40261336213 success. Rounds 1 and 2's Legion Envoy and Contracts runs (40257058207, 40259387137) were each cancelled by the next push before their dispatch job finished, so the newest finished dispatch job, with the webkit-iphone reasoning row green, is be150e35's 121338156779; the CSS rule has not changed since."
   ],
   "trickyParts": [
     "Harness hazard: /legion/harness/setup.sh runs `pg_ctl status`, which cannot see a postmaster started from another role's container (separate PID namespace), so it deletes pgdata/postmaster.pid, and that Postgres shuts itself down within a minute (log: 'received immediate shutdown request ... could not open file postmaster.pid'). Running setup.sh in my container stopped the implementer's Postgres; it now runs from the tester's container. A reviewer that runs setup.sh will stop it again: harmless once testing is over, but run setup.sh only when no other role is mid-run.",
