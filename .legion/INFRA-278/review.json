@@ -2,38 +2,22 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-278",
-  "completed": "2026-10-26T21:58:00Z",
+  "completed": "2026-10-26T23:33:01Z",
   "generation": 3,
-  "round": 4,
-  "reviewedCodeHead": "17dd17ec2c37800125a455277722cc286f5293e2",
-  "previousApproval": "review 5648529993 at de0a588b (code 7a7fd806); a new round because code changed since (Minor fixes c99f2708, 48d9dd1c; skill text 488da04c; merges 9a8af2f1, acd8341b, 17dd17ec with #2237 AgentName).",
-  "decision": "changes_requested",
+  "round": 5,
+  "reviewedCodeHead": "73874ccb5a5c037e50301f87d58105a15a1a25d1",
+  "scope": "Per the architect: only review 5659622475's items and the folded Fast-follow, plus defects in code they change. Commits c897583f, 2324017e, bc62db61, c0701b8e, and merge 73874ccb (resolution touches only packages/pi-envoy/CHANGELOG.md, both entries kept).",
+  "decision": "approved",
   "critical": 0,
-  "important": 1,
-  "minor": 3,
-  "ci": "CI head 17dd17ec (compare to handoff head touches only .legion/): required lint, typecheck queued, test in_progress, pr-title queued (two earlier pr-title runs cancelled) at the read; nothing red.",
-  "thermo": "thermonuclear-deep-review at 17dd17ec: APPROVE, 3 Minors (skill line overclaim, stale changelog clause, stale PR body). thermonuclear-code-quality at 17dd17ec: CHANGES, 3 Minors (marker markup still duplicated, skill line overclaim, stale changelog clause). Provider for both: not verified (the session-store transcript read used in round 3 was not repeated this round).",
-  "mergeCheck": "Deep review compared the PR's changed lines file by file at 7a7fd806 vs a6fa1211 and at 17dd17ec vs 16e4bb0f: every Go, contracts and envoy-client file identical; the AgentName resolution keeps reachRows unchanged and main's AgentName/useAgentText; main deleted skills/dispatch/references/asks.md, taking the PR's hunk with it (the content lives in dispatch claim --help and the site docs).",
-  "keyFindings": [
-    {
-      "severity": "important",
-      "file": "skills/dispatch/SKILL.md:48",
-      "description": "'for anything else, route ... or subscribe' tells an agent a route to its session covers what a claim does not; a route copy is published only for Notify && !targeted events (publisher.go:480), so an agent's events never arrive by route and an agent that routes instead of subscribing misses them. Same overclaim in packages/claude-envoy/CHANGELOG.md:36, packages/pi-envoy/CHANGELOG.md:143 ('subscription to the issue or the route') and packages/envoy/CHANGELOG.md:799 ('or as its route')."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/envoy/CHANGELOG.md:18",
-      "description": "Says the unknown-reach marker replaces a live/offline dot; after the AgentName merge there is no dot, a session route row shows the registry running state beside the marker, and a role route nobody holds shows UnreachableRouteMarker."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/dispatch/web/src/features/inbox/AskRecipients.tsx:354-359",
-      "description": "c99f2708 shared the strings but the marker span is still copied (IssueHeader.tsx:486-492 has shrink-0 and a test id, this copy neither); a RouteReachUnknownMarker beside UnreachableRouteMarker would be one source. Duplication only."
-    },
-    {
-      "severity": "minor",
-      "file": "PR #2225 body",
-      "description": "Not proven / risk still lists the Unfollow-dialog defect 48d9dd1c fixed; Size is stale. Reviewer lines updated in this round."
-    }
-  ]
+  "important": 0,
+  "minor": 0,
+  "ci": "CI head 73874ccb (compare to the handoff head touches only .legion/): required lint, typecheck, test (Tests run 40412726624) and pr-title (run 40412884285) completed success.",
+  "thermo": "Not run this round: the change is the skill line, changelog and AGENTS.md text and a pure extraction of one marker span into RouteReachUnknownMarker with unchanged text, title, classes and test id; the thermonuclear pair ran at 17dd17ec for the rest of this head. Provider: none (no subagent this round).",
+  "verified": [
+    "skills/dispatch/SKILL.md:48: a claim or a session: route brings a person's answers, comments and messages; a subscription brings agents' activity. True against outbox/publisher.go:480 (route copy only for Notify && !targeted) and events/broker.go Notify (false for agent actors). Tester reports both skill guards pass.",
+    "Changelogs (claude-envoy :35-37, pi-envoy :142-144, envoy :18-21 and :798-800) and packages/envoy/AGENTS.md:2319-2321 state the same split; no 'or the route' for agents' events remains.",
+    "RouteReachUnknownMarker (features/issue/RouteReach.tsx): same text and title; IssueHeader keeps shrink-0 and data-testid issue-route-unknown; AskRecipients renders it bare.",
+    "Threads PRRT_kwDORFy7ds6weGXu and PRRT_kwDORFy7ds6weGXy replied (fixed) and resolved by the author; all 14 threads carry my answer."
+  ],
+  "keyFindings": []
 }
