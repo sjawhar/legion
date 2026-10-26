@@ -148,6 +148,11 @@
   approval (INFRA-140). The notice for a typed-block opening stored as text cites
   `dispatch-writing-specs`, "Questions". `dispatch issue --spec` and `dispatch doc-edit` point at
   `skill://dispatch-writing-specs`.
+- The `envoy` skill is rewritten to the minimum text that carries its instructions (INFRA-353),
+  from 21,146 bytes to about 7,500, with the delivery fields, role-claim lifetime, Legion lanes,
+  Slack, Ghost Wispr and WhatsApp topics and the check-settlement contract moved whole to
+  `references/`. Its topic table now names the Dispatch and `agent.<id>` topics, the two that
+  sessions subscribe to most after GitHub's.
 
 - The `dispatch`, `dispatch-first` and `dispatch-brainstorming` skills are rewritten shorter
   (the dispatch skill and its references from about 20,300 words to 9,400), with detail moved to
