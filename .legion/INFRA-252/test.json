@@ -2,12 +2,12 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-252",
-  "completed": "2026-10-26T09:40:00Z",
-  "round": 4,
-  "headSha": "5f1f78dc08ae5ae3c7e276f856265eb8fb59efe6",
+  "completed": "2026-10-26T10:05:00Z",
+  "round": 5,
+  "headSha": "55c575a0c79891a7f43ac1bb3f2d3ae64a30d6f2",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran `LEGION_TEST_PG_DSN=<tester's own embedded postgres> LEGION_E2E_NATS_BIN=<nats-server> bash scripts/e2e/child-adoption.sh` at 5f1f78dc08ae: `child adoption e2e: PASS in 40s`, all eleven steps ok including held-past-a-parked-root-on-its-chain (transcript https://github.com/sjawhar/legion/pull/2226#issuecomment-6412608292)."
+    "how": "Re-ran `LEGION_TEST_PG_DSN=<fresh postgres> LEGION_E2E_NATS_BIN=<nats-server> bash scripts/e2e/child-adoption.sh` at the branch head 55c575a0c798 (PASS in 39s) and on its merge with main 7f6ef46fd42f, tree 4ccee51b75ba exported with `git archive` (PASS in 60s, all eleven steps); transcripts https://github.com/sjawhar/legion/pull/2226#issuecomment-6413066649."
   },
   "failures": [],
   "failed": 0,
@@ -15,43 +15,35 @@
     {
       "criterion": "D2: a todo root held under an unrecorded parent of a live tree queues once that parent leaves the tree",
       "round": 1,
-      "status": "fixed; red test TestATodoHeldUnderAnUnreleasedChildQueuesOnceItsParentLeavesTheLiveTree passes at 5f1f78dc08ae with its assertions unchanged (its fixture now also places the live root on the Dispatch stand-in, since the walk reads the chain to the top)"
+      "status": "fixed; red test TestATodoHeldUnderAnUnreleasedChildQueuesOnceItsParentLeavesTheLiveTree passes at 55c575a0c798"
     }
   ],
   "proof": [
     {
-      "criterion": "Review round 2 finding 1: a root under a parked recorded root under a live tree is held, and release_children from that tree adopts it",
-      "surface": "whole daemon over real PostgreSQL and its own nats-server, JetStream Dispatch envelopes, the Legion HTTP API (throwaway -tags e2e driver on live_proof_test.go/child_adoption_live_test.go)",
-      "command": "Q labelled todo then backlog (a parked once-queued root), placed under T on Dispatch; P backlog under Q; R labelled todo under P; release {R}",
-      "observed": "R recorded as its own root with ancestry [P, Q, T], held (not waiting, no slot); release {R} 200 with no Dispatch write; R planning in T, no slot, no architect; park_child R 200",
-      "headSha": "5f1f78dc08ae5ae3c7e276f856265eb8fb59efe6",
-      "negativeControl": "review round 2 reproduced the defect at ee9ec60b (R slotted with ancestor LEGION-180)"
+      "criterion": "Review round 3 (critical): the merged tree's migrations load and the daemon boots and migrates; the ancestry migration no longer shares version 51 with main's 0051_issue_suspend_release",
+      "surface": "whole daemon (the function `legion start` calls) over a fresh PostgreSQL and its own nats-server, run from the merged tree `git merge-tree --write-tree 7f6ef46fd42f 55c575a0c798` = 4ccee51b75ba (migrations 0050, 0051_issue_suspend_release, 0052_issue_ancestry)",
+      "command": "cd <merged tree> && LEGION_TEST_PG_DSN=<fresh postgres> LEGION_E2E_NATS_BIN=<nats-server> bash scripts/e2e/child-adoption.sh",
+      "observed": "store migrated, daemon booted, `child adoption e2e: PASS in 60s`, all eleven steps ok",
+      "headSha": "55c575a0c79891a7f43ac1bb3f2d3ae64a30d6f2",
+      "negativeControl": "same command on the pre-fix merge e34ce555d437 (main + 5f1f78dc08ae): `migrate the store: migrations 0051_issue_ancestry.up.sql and 0051_issue_suspend_release.up.sql share version 51`, FAIL before any step"
     },
     {
-      "criterion": "Review round 2 finding 4: an out-of-order older event of a moved ancestor brings back no hold",
-      "surface": "whole daemon (throwaway driver)",
-      "command": "H held under unrecorded P under T; P moved to no parent (newer envelope); then P's older envelope (lower seq) still under T while Dispatch shows no parent",
-      "observed": "H entered admission.waiting with ancestry [P]; after the stale envelope H stayed in admission.waiting with ancestry [P] over 3 s",
-      "headSha": "5f1f78dc08ae5ae3c7e276f856265eb8fb59efe6",
-      "negativeControl": "the stale envelope itself is the deliberately wrong input; it changed nothing"
+      "criterion": "AC1-AC4 and D2 at the branch head",
+      "surface": "whole daemon (scripts/e2e/child-adoption.sh) and round 1's red test",
+      "command": "LEGION_TEST_PG_DSN=<fresh postgres> LEGION_E2E_NATS_BIN=<nats-server> bash scripts/e2e/child-adoption.sh; go test -run TestATodoHeldUnderAnUnreleasedChildQueuesOnceItsParentLeavesTheLiveTree ./internal/daemon/",
+      "observed": "PASS in 39s, all eleven steps; red test PASS",
+      "headSha": "55c575a0c79891a7f43ac1bb3f2d3ae64a30d6f2",
+      "negativeControl": "release-refuses: 409 CHILD_IN_OTHER_TREE, record unchanged, no Dispatch write; red test failed at fac524684344 before the fix"
     },
     {
-      "criterion": "D2 and review round 1: holds track the Dispatch chain; a held root's child waits with it; one unreadable chain skips only its root",
-      "surface": "whole daemon (throwaway driver, re-run of round 1-3 scenarios)",
-      "command": "parent leaves T with a slot free; P2 two levels up leaves T; waiting R's parent moved under T then release {R}; H held under queued Q, Q made a child of T, then release {H}; K todo under held H, release {K}, H freed; P1 404 while P2 leaves T",
-      "observed": "held root took the freed slot 3 s after its parent left; two-level root entered the line; R held then joined T on release; H stayed held when Q joined T and joined on release; release {K} alone 409 CHILD_IN_OTHER_TREE `K runs in the tree of H, not T`, H later took a slot and K stayed in H's tree with no slot or architect; H2 entered the line while H1 (unreadable chain) stayed held",
-      "headSha": "5f1f78dc08ae5ae3c7e276f856265eb8fb59efe6",
-      "negativeControl": "red test at fac524684344 failed `LEGION-214 holds no slot with one free after its parent LEGION-169 left the tree of LEGION-168`"
-    },
-    {
-      "criterion": "AC2/AC4: concurrent and repeated releases adopt once; a release that cannot adopt names the child and why and writes nothing",
-      "surface": "POST /legion/v1/waves/release on the whole daemon (throwaway driver)",
-      "command": "three concurrent releases of queued W, then a fourth; release {W, G} and {G, W} with G in another live tree; release {K} with K a root that ran as a tree of its own",
-      "observed": "all three 200, adopted once (generation 1 -> 2, one child-status notice), fourth 200 with nothing written; both waves 409 CHILD_IN_OTHER_TREE, W still waiting, no write; K 409 CHILD_NOT_ADOPTABLE `<K> cannot join the tree of <T>: it ran as a tree of its own`, and K made todo under T keeps queueing (D1)",
-      "headSha": "5f1f78dc08ae5ae3c7e276f856265eb8fb59efe6",
-      "negativeControl": "W released with an adoptable companion answers 200 and adopts it"
+      "criterion": "The tester's round 1-4 scenarios on the merged tree",
+      "surface": "whole daemon on the merged tree (throwaway -tags e2e driver)",
+      "command": "stale-ancestor, parent-release-adopts-held, two-level-move, reverse-move-holds, hold-follows-ancestor-adoption, concurrent-release, wave-atomic, not-adoptable, held-child-follows-freed-root, unreadable-chain-skips-one, stale-unrecorded-ancestor-event, parked-root-on-chain",
+      "observed": "all twelve ok",
+      "headSha": "55c575a0c79891a7f43ac1bb3f2d3ae64a30d6f2",
+      "negativeControl": "wave-atomic and not-adoptable drive the refusals (409 CHILD_IN_OTHER_TREE, 409 CHILD_NOT_ADOPTABLE) with nothing written"
     }
   ],
-  "ci": "At 5f1f78dc08ae, read 2026-10-26T09:38Z: Tests 40298572792 queued; Legion Envoy and Contracts 40298572760 queued; Docs 40298572980 queued; Worker Image 40298572727 queued; PR Title 40298739240 queued (40298572713 cancelled).",
+  "ci": "At 55c575a0c798, read 2026-10-26T10:00Z: Tests 40301762532 queued; Legion Envoy and Contracts 40301762543 queued; Docs 40301762595 queued; Worker Image 40301762544 pending; PR Title 40301810089 pending (40301762637 cancelled).",
   "verdictProvider": "provider not verified (no review subagents ran)"
 }
