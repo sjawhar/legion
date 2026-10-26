@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/reearth/ygo/crdt"
@@ -195,14 +196,44 @@ func readableAskBlocks(tree *pmdoc.Node) []askBlock {
 	return blocks
 }
 
+// The bounds on SettleIssueDocuments' retries. Every settlement it runs is one the close of an
+// issue waits for before it opens its transaction, and the request that closes the issue waits
+// with it, so the retries are few and short: a settlement that stopped short because the room's
+// updates had not landed yet, or because the room had to be reloaded at its durable head, settles
+// on the next attempt, and one that has not settled in three is not going to settle while a person
+// waits on the close. The budget is for the whole issue, not each document, so an issue with many
+// documents still closes within it. The pause is a few times the millisecond the room's own waits
+// poll at, long enough for a persistence worker to store the update an attempt met.
+const (
+	issueSettleAttempts   = 3
+	issueSettleBudget     = 3 * time.Second
+	issueSettleRetryPause = 20 * time.Millisecond
+)
+
 // SettleIssueDocuments runs, on the calling goroutine, the settlement each document of issueKey
 // owes, as Shutdown's drain does: it waits for the room's durable appends to land, reads whether
 // the document owes a settlement, and settles it at its room's current generation, in place of the
-// timer armed for it, if one is. A settlement that fails is logged and returned, joined with the
-// others, and is not retried: the document's pending-settlement row keeps the debt, for the room's
-// next load or the resumption (RunSettlementResumption). Every new ask block the documents hold is
-// then an ask, credited to its author as settlement credits one, which the close of an issue,
-// which no settlement runs after, withdraws with the rest.
+// timer armed for it, if one is. Every new ask block the documents hold is then an ask, credited
+// to its author as settlement credits one, which the close of an issue, which no settlement runs
+// after, withdraws with the rest.
+//
+// A settlement that stops short is run again, up to issueSettleAttempts times for each document
+// and within issueSettleBudget for the whole issue, no retry starting once the budget is spent
+// (every document still gets its first attempt, as before the retries):
+// a timer's settlement would retry it later, but the close does not wait for later, and a block
+// left unindexed when it commits is no ask it can withdraw with a record. A settlement stops short
+// on a room that holds updates its persistence has not stored or made durable yet, which the next
+// attempt, after a pause of issueSettleRetryPause, finds stored; on one superseded by a write that
+// landed while it ran, which the next attempt settles with that write; and on a room behind its
+// durable head (ErrRoomBehindHead), because another envoy-dispatch process appended to the
+// document after this one loaded it. Retrying on that room can never pass the gate, so the
+// instance the attempt held, read before it, is closed, as the stale-room evictor closes one: only
+// while the room still holds it (evictInstance), so a room something else replaced meanwhile is
+// left to its browsers. The next attempt then warms the room from the head. A settlement still
+// short after its last attempt, or once ctx ends or the service stops, which no further attempt
+// would get past, is logged and returned, joined with the others: the document's
+// pending-settlement row keeps the debt, for the room's next load or the resumption
+// (RunSettlementResumption).
 //
 // It opens a transaction of its own for each settlement, which takes the issue's row, so it is
 // refused inside a transaction: a joined context's, or, for a context the pool tracks, any
@@ -217,9 +248,33 @@ func (s *Service) SettleIssueDocuments(ctx context.Context, issueKey string) err
 	if err != nil {
 		return err
 	}
+	deadline := time.Now().Add(issueSettleBudget)
 	var failures []error
 	for _, room := range rooms {
-		if err := s.settleOwedNow(ctx, room); err != nil {
+		var err error
+		for attempt := 1; attempt <= issueSettleAttempts && (attempt == 1 || time.Now().Before(deadline)); attempt++ {
+			if attempt > 1 && (ctx.Err() != nil || s.stopping.Load()) {
+				break
+			}
+			live := s.srv.GetDoc(room)
+			if err = s.settleOwedNow(ctx, room, deadline); err == nil || attempt == issueSettleAttempts {
+				break
+			}
+			if errors.Is(err, ErrRoomBehindHead) && live != nil {
+				if _, evictErr := s.evictInstance(ctx, room, live); evictErr != nil {
+					err = errors.Join(err, fmt.Errorf("close the room behind its durable head: %w", evictErr))
+					break
+				}
+				continue
+			}
+			pause := time.NewTimer(min(issueSettleRetryPause, time.Until(deadline)))
+			select {
+			case <-ctx.Done():
+				pause.Stop()
+			case <-pause.C:
+			}
+		}
+		if err != nil {
 			slog.Warn("dispatch: settle a document of an issue", "issue", issueKey, "room", room, "error", err)
 			failures = append(failures, fmt.Errorf("settle document %s: %w", room, err))
 		}
@@ -228,13 +283,19 @@ func (s *Service) SettleIssueDocuments(ctx context.Context, issueKey string) err
 }
 
 // settleOwedNow settles room, when its document owes a settlement, on the calling goroutine, and
-// reports why the document still owes one afterwards. It takes the settleWG count of the timer it
-// runs in place of, or one of its own, so Shutdown joins it as it would the timer's settlement,
-// and holds the room's state across it, so the state the settlement looks up is the one whose
-// generation it runs at.
-func (s *Service) settleOwedNow(ctx context.Context, room string) error {
-	if err := s.waitForDurableAppends(ctx, room); err != nil {
-		return err
+// reports why the document still owes one afterwards: every reason the settlement stopped short
+// (settleRoomWithin's failed), or, for one another write superseded, that the debt is still
+// there. Its caller decides whether to run it again (SettleIssueDocuments). It waits for the
+// room's durable appends to land first, but not past deadline, so no attempt hangs past its
+// caller's budget waiting for them. It takes the settleWG count of the timer it runs in place of,
+// or one of its own, so Shutdown joins it as it would the timer's settlement, and holds the room's
+// state across it, so the state the settlement looks up is the one whose generation it runs at.
+func (s *Service) settleOwedNow(ctx context.Context, room string, deadline time.Time) error {
+	waitCtx, cancel := context.WithDeadline(ctx, deadline)
+	err := s.waitForDurableAppends(waitCtx, room)
+	cancel()
+	if err != nil {
+		return fmt.Errorf("wait for the room's appends to become durable: %w", err)
 	}
 	owes, err := settlementPending(ctx, s.store.Pool, room)
 	if err != nil || !owes {

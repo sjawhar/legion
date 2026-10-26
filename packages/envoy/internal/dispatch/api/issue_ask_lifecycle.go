@@ -24,9 +24,13 @@ func withdrawnReason(issueKey string) string {
 // settleIssueBeforeClose runs, before a close of issueKey opens its transaction, the settlement
 // each document of the issue owes, so every ask block written into them is an ask, credited to its
 // author, for the close to withdraw with a record: no settlement runs once the issue is closed. It
-// holds no transaction or lock, so it cannot meet the close's. A settlement that fails is logged
-// and the close proceeds; its blocks are not asks yet, and the close's sweep marks them resolved
-// (sweepClosedIssueAsks). An issue already closed, or none, settles nothing: its close is refused.
+// holds no transaction or lock, so it cannot meet the close's. A settlement that stops short is
+// run again a few times within a short budget (docs.SettleIssueDocuments): one that met updates
+// the room had not stored yet, one a write superseded, and one refused on a room another process's
+// append left behind its durable head, whose room is reloaded at the head first, each settle on a
+// later attempt. A settlement still short after those is logged and the close proceeds; its blocks
+// are not asks yet, and the close's sweep marks them resolved (sweepClosedIssueAsks). An issue
+// already closed, or none, settles nothing: its close is refused.
 func (s *server) settleIssueBeforeClose(ctx context.Context, issueKey string) {
 	if s.deps.Store == nil || s.deps.Store.Pool == nil {
 		return

@@ -14,8 +14,10 @@ import (
 	"time"
 
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
+	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
+	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
 
 // Closing an issue withdraws every open ask it holds, whoever closes it: each is recorded resolved
@@ -342,6 +344,85 @@ func TestClosingAnIssueWithdrawsADecisionBlockNotYetSettled(t *testing.T) {
 			requireLiveText(t, handler, issue.PrimaryArtifactID, `#late-decision urgency="high" multiple="false" state="open"`)
 		})
 	}
+}
+
+// otherProcessHandler mounts the API stack of a second envoy-dispatch process on database, as
+// secondProcessHandler does, with a document service whose settle delay is an hour: nothing the
+// second process writes is settled there while a test runs.
+func otherProcessHandler(t *testing.T, database *store.Store) http.Handler {
+	t.Helper()
+	second := storetest.SecondProcess(t, database)
+	broker := events.NewBroker()
+	documentService := docs.New(docs.Deps{Store: second, Events: broker, ServerURL: "https://dispatch.example", Settle: time.Hour})
+	t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
+	deps, err := NewDeps(DepsInput{
+		Store:       second,
+		Identity:    headerIdentity(second),
+		AgentTokens: sharedAgentTokens(t, "agent-token"),
+		ServerURL:   "https://dispatch.example",
+		Docs:        documentService,
+		Events:      broker,
+		Lifetime:    t.Context(),
+	})
+	if err != nil {
+		t.Fatalf("new API dependencies for the other process: %v", err)
+	}
+	mux := http.NewServeMux()
+	t.Cleanup(Register(mux, deps))
+	return mux
+}
+
+// A decision block written a moment before the close is withdrawn by it, with a record naming the
+// closer, even when the agent's next edit landed on another envoy-dispatch process and left this
+// process's room behind the document's durable head. The close's settlement is refused on that
+// room, which can never settle; the close reloads the room at the head and settles again, so the
+// block is an ask, credited to the session that wrote it, before the close withdraws it. Settled
+// once and given up on, the block would only be marked resolved by the close's sweep, with no ask
+// and no record of who closed it.
+func TestClosingAnIssueWithdrawsADecisionBlockWhoseRoomAnotherProcessLeftBehind(t *testing.T) {
+	handler, database := newInteractionHandler(t, func(database *store.Store) docs.API {
+		documentService := docs.New(docs.Deps{Store: database, Settle: time.Hour})
+		t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
+		return documentService
+	})
+	other := otherProcessHandler(t, database)
+	issue := createInteractionIssue(t, handler, "TEST", "A decision on two processes", "Context\n")
+	insert := func(handler http.Handler, markdown string) {
+		t.Helper()
+		edited := sessionRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", map[string]any{
+			"actor": sessionActor(),
+			"ops":   []map[string]string{{"op": "insert", "after": "end", "markdown": markdown}},
+		})
+		if edited.Code != http.StatusOK {
+			t.Fatalf("edit the document: status=%d body=%s", edited.Code, edited.Body.String())
+		}
+	}
+	insert(handler, ":::ask{#late-decision urgency=\"high\" multiple=\"false\"}\nShip late?\n:::\n")
+	insert(other, "Written on the other process.\n")
+	if live, _ := documentTexts(t, handler, issue.PrimaryArtifactID); strings.Contains(live, "Written on the other process.") {
+		t.Fatalf("this process's room holds the other process's edit, so it is not behind the head:\n%s", live)
+	}
+	if id := findBlockAsk(t, handler, issue.Key, issue.PrimaryArtifactID, "late-decision"); id != "" {
+		t.Fatalf("the decision block is ask %s before any settlement", id)
+	}
+
+	closed := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+issue.Key, map[string]string{"status": "done"}, "alice")
+	if closed.Code != http.StatusOK {
+		t.Fatalf("close: status=%d body=%s", closed.Code, closed.Body.String())
+	}
+	id := findBlockAsk(t, handler, issue.Key, issue.PrimaryArtifactID, "late-decision")
+	if id == "" {
+		t.Fatal("the close's settlement never indexed the decision block")
+	}
+	ask := readAskRecord(t, handler, id)
+	if ask.Author.Kind != "session" || ask.Author.ID != sessionActor()["id"] {
+		t.Fatalf("withdrawn decision's author = %#v, want the session that wrote it", ask.Author)
+	}
+	requireWithdrawn(t, handler, issue.Key, id, model.Actor{Kind: "user", ID: "alice"})
+	requireLiveText(t, handler, issue.PrimaryArtifactID,
+		"Written on the other process.",
+		`#late-decision urgency="high" multiple="false" state="resolved"`,
+	)
 }
 
 // peerInsertDocs runs insert once, right after the close's transaction has written the issue's
