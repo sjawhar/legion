@@ -540,8 +540,13 @@ function ownerQueryKeys(event: Event, signedInLogin?: string): (readonly unknown
     // Components, parents and subtree rollups are resolved on read up and down the parent
     // chain, so an issue's own event alters ancestors and descendants that get no event of
     // their own: refetch every open issue. The sidebar's per-project open-ask badge moves
-    // with a close, a reopen and an assignment, so it refetches here too.
+    // with a close, a reopen and an assignment, so it refetches here too. An update can change
+    // the issue's route, which every open ask card on it lists among the sessions it reaches;
+    // the thread key holds only the ask id, so every open thread refetches.
     keys.push(["issue"], projectsQuery().queryKey);
+    if (event.type === "issue.updated") {
+      keys.push(["ask-thread"]);
+    }
     return keys;
   }
   if (
@@ -549,10 +554,14 @@ function ownerQueryKeys(event: Event, signedInLogin?: string): (readonly unknown
     event.type === "issue.released" ||
     event.type === "issue.deployed"
   ) {
-    // A claim changes only who holds the issue: its detail, its log, and the lists that render
-    // the claim — `["issues"]` above covers every project list by prefix. No rollup, ask count
-    // or component attachment moves with it. A deploy is a line in the issue's log and nothing
-    // the lists or rollups read.
+    // A claim changes only who holds the issue: its detail, its log, the lists that render
+    // the claim — `["issues"]` above covers every project list by prefix — and every open ask
+    // card's recipients, which list the claimant (the thread key holds only the ask id, so every
+    // open thread refetches). No rollup, ask count or component attachment moves with it. A
+    // deploy is a line in the issue's log and nothing the lists or rollups read.
+    if (event.type !== "issue.deployed") {
+      keys.push(["ask-thread"]);
+    }
     return keys;
   }
   // The branches above name every `issue.*` type there is, so a type added later falls to the

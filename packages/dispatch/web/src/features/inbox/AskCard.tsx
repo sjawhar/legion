@@ -697,8 +697,10 @@ export function AskCard({
       </form>
       <AskRecipients
         askId={displayedAsk.id}
+        claimant={threadQuery.data?.claimant ?? null}
         followers={threadQuery.data?.followers ?? []}
         owner={displayedAsk}
+        route={threadQuery.data?.route ?? null}
       />
     </article>
   );

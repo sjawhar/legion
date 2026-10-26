@@ -59,11 +59,26 @@ function ownerSubscription(owner: AskOwner):
 
 export interface AskRecipientsProps {
   askId: string;
+  /** The session holding the claim on the ask's issue, from the same thread read. */
+  claimant: string | null;
   /** Oldest first, as `GET /api/v1/asks/{id}` returns them. */
   followers: readonly AskFollower[];
   owner: AskOwner;
   /** Write seam for tests; defaults to the real API. */
   removeFollower?: (askId: string, sessionId: string) => Promise<void>;
+  /** The ask's issue's route (`session:<id>` or `role:<name>`), from the same thread read. */
+  route: string | null;
+}
+
+/** A row the ask reaches through its issue rather than through a follow or a subscription: the
+ *  claimant (`via claim`) or the route (`via route`). Neither is removable from the card; the
+ *  claim and the route change on the issue. */
+interface IssueReachRow {
+  /** A session id, or the route itself (`role:<name>`) when the route names a role. */
+  id: string;
+  label: string;
+  live: boolean;
+  via: "claim" | "route";
 }
 
 type Confirming =
@@ -72,21 +87,27 @@ type Confirming =
 
 /**
  * Every session the server routes this ask's answer and replies to, under `Reaches N`: the
- * ask's followers (every session that wrote to the ask, minus any that unfollowed), then
- * every session subscribed to the owner's topic family that is not already a follower,
- * under `via issue subscription` (or `via document subscription`). Each shows a live/offline
- * dot and its title (or shortened session id). A follower's Unfollow and a subscriber's
- * Unsubscribe each confirm first and then cut the route that actually delivers; a subscriber
- * whose only matching topic is wider than this owner (e.g. `notifications.dispatch.>`) names
- * that topic and has no control, as the header's Subscribed agents panel does. When the
- * subscribers fetch fails, the card says so with a retry instead of passing the follower count
- * off as the whole set.
+ * ask's followers (every session that wrote to the ask, minus any that unfollowed); then the
+ * session holding the issue's claim, under `via claim`, and the issue's route, under
+ * `via route` (its session, or the `role:<name>` text for a role); then every session subscribed
+ * to the owner's topic family, under `via issue subscription` (or `via document subscription`).
+ * Each session is listed once: as a follower, else as a subscriber, else via the claim or the
+ * route, so a session keeps the control it has. Each shows a live/offline dot and its title (or
+ * shortened session id). A follower's Unfollow and a subscriber's Unsubscribe each confirm
+ * first, name what still reaches the session (a subscription, the claim or the route), and then
+ * cut the route that actually delivers; the claim and route rows have no control, since both
+ * change on the issue. A subscriber whose only matching topic is
+ * wider than this owner (e.g. `notifications.dispatch.>`) names that topic and has no control,
+ * as the header's Subscribed agents panel does. When the subscribers fetch fails, the card says
+ * so with a retry instead of passing the follower count off as the whole set.
  */
 export function AskRecipients({
   askId,
+  claimant,
   followers,
   owner,
   removeFollower = removeAskFollower,
+  route,
 }: AskRecipientsProps): ReactNode {
   const queryClient = useQueryClient();
   const subscription = ownerSubscription(owner);
@@ -109,10 +130,47 @@ export function AskRecipients({
     staleTime: 30_000,
   });
   const subscriberRows = subscribersQuery.data ?? EMPTY_SUBSCRIBERS;
-  const subscribers = subscriberRows.filter(
-    (subscriber) => !followers.some((row) => row.session_id === subscriber.session_id)
-  );
-  const { agents } = useAgents(followers.length > 0);
+  const routeSession = route?.startsWith("session:") ? route.slice("session:".length) : undefined;
+  const { agents } = useAgents(followers.length > 0 || claimant !== null || route !== null);
+  const followerLabel = (sessionId: string): string =>
+    sessionLabel(sessionId, agents.find((agent) => agent.session_id === sessionId)?.title);
+  // Each session is listed and counted once: as a follower, else as a subscriber (both keep their
+  // control), else under `via claim` or `via route`.
+  const listed = new Set(followers.map((follower) => follower.session_id));
+  const subscribers = subscriberRows.filter((subscriber) => !listed.has(subscriber.session_id));
+  for (const subscriber of subscribers) {
+    listed.add(subscriber.session_id);
+  }
+  const issueRows: IssueReachRow[] = [];
+  if (claimant !== null && !listed.has(claimant)) {
+    listed.add(claimant);
+    issueRows.push({
+      id: claimant,
+      label: followerLabel(claimant),
+      live: agents.some((agent) => agent.session_id === claimant),
+      via: "claim",
+    });
+  }
+  if (routeSession !== undefined) {
+    if (!listed.has(routeSession)) {
+      listed.add(routeSession);
+      issueRows.push({
+        id: routeSession,
+        label: followerLabel(routeSession),
+        live: agents.some((agent) => agent.session_id === routeSession),
+        via: "route",
+      });
+    }
+  } else if (route?.startsWith("role:")) {
+    // A role route reaches whichever session holds the role, so the row names the route itself.
+    const role = route.slice("role:".length);
+    issueRows.push({
+      id: route,
+      label: route,
+      live: agents.some((agent) => agent.roles.includes(role)),
+      via: "route",
+    });
+  }
   const [confirming, setConfirming] = useState<Confirming | undefined>(undefined);
   const [open, setOpen] = useState(false);
   const unfollow = useMutation({
@@ -129,19 +187,39 @@ export function AskRecipients({
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["subscribers", subscription?.id] }),
   });
 
-  if (followers.length === 0 && subscribers.length === 0 && !subscribersQuery.isError) {
+  if (
+    followers.length === 0 &&
+    issueRows.length === 0 &&
+    subscribers.length === 0 &&
+    !subscribersQuery.isError
+  ) {
     return null;
   }
 
-  const followerLabel = (sessionId: string): string =>
-    sessionLabel(sessionId, agents.find((agent) => agent.session_id === sessionId)?.title);
   const viaLabel = subscription === undefined ? "" : `via ${subscription.noun} subscription`;
+  // What still delivers to a session once its claim or route is all that is left.
+  const issueReach = (sessionId: string): string | undefined => {
+    if (sessionId === claimant) {
+      return "A person's answer and replies still reach them through the claim.";
+    }
+    if (sessionId === routeSession) {
+      return "A person's answer and replies still reach them through the route.";
+    }
+    return undefined;
+  };
+  // What still delivers to a session once it is unfollowed, named by the group it moves into.
+  const stillReachesUnfollowed = (sessionId: string): string => {
+    if (subscription !== undefined && subscriberRows.some((row) => row.session_id === sessionId)) {
+      return `Its answer and replies still reach them through the ${subscription.noun} subscription.`;
+    }
+    return issueReach(sessionId) ?? "Its answer and replies will no longer reach them.";
+  };
 
   return (
     <section aria-label="Recipients" className="mt-2">
       <DisclosureToggle
         expanded={open}
-        label={`Reaches ${followers.length + subscribers.length}`}
+        label={`Reaches ${followers.length + issueRows.length + subscribers.length}`}
         onToggle={() => setOpen((shown) => !shown)}
         textClassName={textMutedOnSurface}
       />
@@ -168,6 +246,17 @@ export function AskRecipients({
                   </li>
                 );
               })}
+            </ul>
+          )}
+          {issueRows.length === 0 ? null : (
+            <ul aria-label="Via claim or route" className="mt-1 flex flex-wrap gap-2">
+              {issueRows.map((row) => (
+                <li className={sessionChipClassName} key={`${row.via}:${row.id}`}>
+                  <LiveDot live={row.live} />
+                  <span title={row.id}>{row.label}</span>
+                  <span className="text-xs italic">via {row.via}</span>
+                </li>
+              ))}
             </ul>
           )}
           {subscribers.length === 0 ? null : (
@@ -237,16 +326,14 @@ export function AskRecipients({
         </div>
       ) : null}
       {confirming === undefined ? null : confirming.kind === "follower" ? (
-        // Unfollowing cuts the follower route only: a session also subscribed to the owner still
-        // hears the ask, and the card then shows it under the subscription group.
+        // Unfollowing cuts the follower route only: a session that is also the claimant, the
+        // route session, or subscribed to the owner still hears the ask, and the card then shows
+        // it under that group.
         <UnsubscribeDialog
           label="Unfollow"
-          message={`Unfollow ${followerLabel(confirming.sessionId)} from this ask? ${
-            subscription !== undefined &&
-            subscriberRows.some((row) => row.session_id === confirming.sessionId)
-              ? `Its answer and replies still reach them through the ${subscription.noun} subscription.`
-              : "Its answer and replies will no longer reach them."
-          } They will be told.`}
+          message={`Unfollow ${followerLabel(confirming.sessionId)} from this ask? ${stillReachesUnfollowed(
+            confirming.sessionId
+          )} They will be told.`}
           onCancel={() => setConfirming(undefined)}
           onConfirm={() => {
             unfollow.mutate(confirming.sessionId);
@@ -254,8 +341,16 @@ export function AskRecipients({
           }}
         />
       ) : (
+        // Unsubscribing cuts the subscription only: a claimant or the route session still hears a
+        // person's answer and replies, and the card then shows it under that group.
         <UnsubscribeDialog
-          message={`Unsubscribe ${sessionLabel(confirming.sessionId, subscribers.find((row) => row.session_id === confirming.sessionId)?.title)} from ${subscription?.label}? They will be told.`}
+          message={[
+            `Unsubscribe ${sessionLabel(confirming.sessionId, subscribers.find((row) => row.session_id === confirming.sessionId)?.title)} from ${subscription?.label}?`,
+            issueReach(confirming.sessionId),
+            "They will be told.",
+          ]
+            .filter((part) => part !== undefined)
+            .join(" ")}
           onCancel={() => setConfirming(undefined)}
           onConfirm={() => {
             unsubscribe.mutate(confirming.sessionId);

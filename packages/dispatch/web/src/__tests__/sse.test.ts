@@ -660,6 +660,18 @@ function answersPageAdditions(incoming: Event): unknown[][] {
   return [];
 }
 
+/** Every open ask card lists the issue's claimant and route among the sessions it reaches, read
+ *  from its thread. A claim or a release moves the claimant and an issue update can move the
+ *  route; the thread key holds only the ask id, so every open thread refetches. */
+function askRecipientsAdditions(incoming: Event): unknown[][] {
+  return incoming.issue_key !== null &&
+    (incoming.type === "issue.claimed" ||
+      incoming.type === "issue.released" ||
+      incoming.type === "issue.updated")
+    ? [["ask-thread"]]
+    : [];
+}
+
 /** The Replies page, its count and every owner's unread set live under `["me", "replies"]`. Only
  *  an event that can move a row refreshes it, on an issue or a document alike: a write the
  *  `user_threads` triggers count (a comment, a session's reply to a mention, an issue message or
@@ -759,6 +771,7 @@ test.each(
     ...rollupAdditions(incoming),
     ...answersPageAdditions(incoming),
     ...repliesAdditions(incoming),
+    ...askRecipientsAdditions(incoming),
   ];
   const counted = countedRowKeys(incoming);
   const references = referenceWrites.has(incoming.type) ? [["references"]] : [];
