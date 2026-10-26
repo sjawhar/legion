@@ -924,6 +924,9 @@ export function parseArgs(argv: string[]): Args {
   // An empty key would be read as a project name and die on a 404 from Dispatch, so it is refused
   // here by name, as `scripts/dispatch/ask-census.ts` refuses an empty --project.
   if (project === "") throw new Error("--dispatch-project requires a project key");
+  // An empty directory would pass as given and fail later on another flag, so it is refused by
+  // name too.
+  if (values["--sessions"] === "") throw new Error("--sessions requires a directory");
   if (project !== undefined && values["--sessions"] !== undefined) {
     throw new Error("--sessions and --dispatch-project cannot be given together");
   }

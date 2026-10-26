@@ -842,6 +842,21 @@ describe("breaker (test 7)", () => {
     await g.device("d", "dispatch_doc_edit", { project: "P", artifact: "a.md", edits: [] });
     expect(g.entries.map((e) => e.outcome)).toEqual(["verdict", "verdict", "verdict", "breaker"]);
   });
+  test("a target value holding a NUL cannot take another target's refusals: refused twice, it gives that target no pass", async () => {
+    // A key joined on NUL would read this one issue value as the issue and artifact of the other.
+    const forged = { issue: "X-1\u0000artifact=a.md", edits: [] };
+    const real = { issue: "X-1", artifact: "a.md", edits: [] };
+    const g = bind({ env: { OMP_ASKGATE: "block" }, complete: async () => ({ text: REVISE }) });
+    for (const id of ["a", "b"])
+      expect((await g.device(id, "dispatch_doc_edit", forged))?.block).toBe(true);
+    expect((await g.device("c", "dispatch_doc_edit", real))?.block).toBe(true);
+    expect(g.calls).toHaveLength(3);
+    expect(g.entries.map((e) => [e.outcome, e.target])).toEqual([
+      ["verdict", "dispatch_doc_edit issue=X-1\u0000artifact=a.md"],
+      ["verdict", "dispatch_doc_edit issue=X-1\u0000artifact=a.md"],
+      ["verdict", "dispatch_doc_edit issue=X-1 artifact=a.md"],
+    ]);
+  });
   test("replies to different messages are different breaker targets", async () => {
     const g = bind({ complete: async () => ({ text: REVISE }) });
     await g.device("a", "dispatch_message", { in_reply_to: "m-1", body: "one" });
@@ -4976,6 +4991,34 @@ describe("rules check", () => {
       ...Array(3).fill(["verdict", "revise"]),
       ["breaker", "allow"],
     ]);
+  });
+  test("an ask with no id whose opening holds a NUL cannot take a block's identity: refused twice, it gives that block no pass (rules test 14j)", async () => {
+    // The block's text is short, so its opening is all of it, and the forgery's opening is the
+    // block's id, a NUL and the block's opening: the parts a key joined on NUL would run together.
+    const QUESTION = "Recommendation: keep it as it is.";
+    const insert = (markdown: string) => ({
+      ...SPEC_TARGET,
+      ops: [{ op: "insert", after: "end", markdown }],
+    });
+    const real = insert(`:::ask{#first}\n${QUESTION}\n:::`);
+    const forged = insert(`:::ask{}\nfirst\u0000${QUESTION}\n:::`);
+    const [realAsk] = newAsks("dispatch_doc_edit", real);
+    const [forgedAsk] = newAsks("dispatch_doc_edit", forged);
+    expect(realAsk.id).toBe("first");
+    expect(realAsk.opening).toBe(QUESTION);
+    expect(forgedAsk.id).toBeUndefined();
+    expect(forgedAsk.opening).toBe(`first\u0000${QUESTION}`);
+    const g = bind({ env: { OMP_ASKGATE: "block" }, complete: bySystem(ALLOW, NO_CHANGE) });
+    for (const id of ["a", "b"])
+      expect((await g.device(id, "dispatch_doc_edit", forged))?.block).toBe(true);
+    const asked = g.calls.length;
+    const reviewed = await g.device("c", "dispatch_doc_edit", real);
+    expect(reviewed?.block).toBe(true);
+    expect(reviewed?.reason).toContain('matches the rule "no change"');
+    expect(g.calls).toHaveLength(asked + 2);
+    expect(g.entries.map((e) => [e.outcome, e.decision])).toEqual(
+      Array(3).fill(["verdict", "revise"])
+    );
   });
   test("the rules call never sees the charter's frame or answer format (rules test 15)", async () => {
     const g = bind({

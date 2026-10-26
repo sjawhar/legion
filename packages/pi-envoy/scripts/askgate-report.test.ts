@@ -656,6 +656,15 @@ describe("parseArgs", () => {
       "--dispatch-project requires a project key"
     );
   });
+
+  test("refuses an empty --sessions by name, rather than failing later on another flag", () => {
+    expect(() => parseArgs(["--sessions", "", "--since", SINCE])).toThrow(
+      "--sessions requires a directory"
+    );
+    expect(() =>
+      parseArgs(["--sessions", "", "--since", SINCE, "--sample", "1", "--out", "o"])
+    ).toThrow("--sessions requires a directory");
+  });
 });
 
 describe("isSentBack and isRefusal", () => {
@@ -1297,5 +1306,21 @@ describe("CLI", () => {
     expect(r.stderr.toString()).toContain(
       "--sessions and --dispatch-project cannot be given together"
     );
+  });
+
+  test("exits 2 naming --sessions when it is empty, and prints nothing", () => {
+    const r = Bun.spawnSync({
+      cmd: [
+        process.execPath,
+        join(import.meta.dir, "askgate-report.ts"),
+        "--sessions",
+        "",
+        "--since",
+        SINCE,
+      ],
+    });
+    expect(r.exitCode).toBe(2);
+    expect(r.stdout.toString()).toBe("");
+    expect(r.stderr.toString()).toContain("--sessions requires a directory");
   });
 });

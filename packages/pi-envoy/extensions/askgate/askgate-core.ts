@@ -2248,15 +2248,17 @@ function startedInBackground(details: unknown): boolean {
 
 /**
  * The call's target: its tool and each of the issue, ask, artifact, project and reply its arguments
- * name. The NUL separators keep two values apart in the breaker's map; `targetLabel` is the same
- * key with spaces for them, which the entry records and a reader joins calls on.
+ * name. The parts are a JSON array, never joined on a separator: a value is the agent's argument and
+ * can hold any character, so a joined key would let one target forge another and give it the
+ * refusals counted on the forgery. `targetLabel` is the same parts joined with spaces, which the
+ * entry records and a reader joins calls on.
  */
 function breakerKey(toolName: string, input: Input): string {
-  let key = toolName;
-  for (const k of BREAKER_KEYS) if (input[k] !== undefined) key += `\u0000${k}=${String(input[k])}`;
-  return key;
+  const parts = [toolName];
+  for (const k of BREAKER_KEYS) if (input[k] !== undefined) parts.push(`${k}=${String(input[k])}`);
+  return JSON.stringify(parts);
 }
-const targetLabel = (key: string) => key.replaceAll("\u0000", " ");
+const targetLabel = (key: string) => (JSON.parse(key) as string[]).join(" ");
 
 /** Splits a top-level REBUTTAL_KEY off a device's JSON arguments; anything else comes back unchanged. */
 function extractRebuttal(content: string): { rebuttal?: string; content: string } {
@@ -2390,13 +2392,14 @@ export function parseVerdict(
  * apart; an ask without one is its opening alone, so an agent that rewords only an ask's tail
  * resends the same thing and its loop still ends. A retype carries no text of its own in this
  * scan — only the rules check reads the block from Dispatch — so the block it names stands for it.
+ * The parts are a JSON array, never joined on a separator: an opening is agent text and can hold
+ * any character, so a joined key would let an ask without an id forge another ask's identity and
+ * give that ask the refusals counted on the forgery.
  */
 const askIdentity = (ask: NewAsk): string =>
   ask.kind === "retype"
-    ? `retype\u0000${ask.id ?? ""}`
-    : ask.id === undefined
-      ? `ask\u0000${ask.opening}`
-      : `ask\u0000${ask.id}\u0000${ask.opening}`;
+    ? JSON.stringify(["retype", ask.id ?? null])
+    : JSON.stringify(["ask", ask.id ?? null, ask.opening]);
 
 /** The breaker's name for a call that opens no new ask: the call as a whole. No ask identity is empty. */
 const WHOLE_CALL = "";
