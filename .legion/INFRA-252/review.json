@@ -2,22 +2,20 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-252",
-  "completed": "2026-10-26T19:17:00Z",
-  "round": 7,
-  "scope": "Narrowed by the architect: the hand-over-contract fix (b18ce5f8), the migration renumber (afedb19d), the red `test` check, and correctness defects in them.",
-  "reviewedCodeHead": "afedb19d1ca7254b2da09d55760c74b10cd3f7e5",
-  "decision": "changes_requested",
+  "completed": "2026-10-26T20:28:00Z",
+  "round": 8,
+  "scope": "Narrowed by the architect: the 0055 backfill of handed_over_from (from processed_events outbox hand-overs and claims with tree <> key), the orphan path's marker going forward, the deploy-note query, and correctness defects in them.",
+  "reviewedCodeHead": "56a52d9a51ab99982c040f40a0bd25ab8d864b27",
+  "decision": "approved",
   "critical": 0,
-  "important": 1,
+  "important": 0,
   "minor": 0,
-  "fixVerified": "readmit (admit.go:795) is the only path that turns a member into a root; it sets HandedOverFrom whenever oldTree != Key (admit.go:799-801), reached by the event hand-over, the outbox consumeHandover and both orphan paths; RanAsRoot refuses it (workflow/adopt.go:79-81), so adoptQueuedRoots, adoptChildren and Engine.Ancestry all exclude it; putNewRoot and INFRA-214's self re-admission never set it. Column order matches in issueColumns, PutIssue ($22) and scanIssue. TestAHandedOverChildStaysItsOwnTreeWhenItsOldRootIsReadmitted covers the event hand-over and the uncarried orphan; main's blockers_scratch_dispatch_test.go is unchanged from origin/main and passes in CI. migrations.All on the merge with main 6cdb9995 lists 53, 54 issue_pod_roles_container, 55 issue_ancestry.",
-  "keyFindings": [
-    {
-      "severity": "important",
-      "file": "packages/daemon/internal/store/migrations/0055_issue_ancestry.up.sql",
-      "description": "handed_over_from defaults to '' for every row that exists at deploy, with no backfill. A child a pre-deploy daemon handed over without its run (no tree_lifecycles row, TakenBack cleared, CarriesRun false) passes RanAsRoot, so the first adoption sweep after the deploy pulls it back into its old root's tree once that root is live — the contract the architect ruled on, broken for existing rows. The adoption sweep is new in this PR, so this cannot happen before the deploy. Existing data marks most of them exactly: every outbox hand-over since #1896 writes processed_events ('outbox', 'handover:<KEY>:<row id>'), which nothing prunes; a hand-over or orphan that ran a worker under its old tree has a claims row with tree <> key. Backfill handed_over_from from those for key = tree rows; name any population no data marks (an uncarried orphan a person admitted that never ran a worker) under 'Not proven / risk' with a pre-deploy query. A generation > 1 heuristic must not be used: it would permanently refuse INFRA-214-style roots that re-admitted themselves."
-    }
+  "verification": "The UPDATE marks key = tree rows with an outbox processed_events row whose event_id splits into 'handover' and exactly the key (format from daemon/outbox.go:543), or a claims row with issue = key and tree <> key; no status filter, no generation heuristic. readmit is untouched and still sets HandedOverFrom for every member leaving another tree (admit.go:799-801). The deploy-note query is a single SELECT listing the remaining class. migration_0055_test.go covers the outbox hand-over, an orphan that ran, a key-prefix decoy, INFRA-214's self re-admission, a member still in its tree and another source's event; it passes in CI (Tests 40388276527). migrations.All on the merge with main b4bea385 loads 0050-0055.",
+  "keyFindings": [],
+  "acceptedRisks": [
+    "An operator spawn of a non-architect role on issue X under tree Y (api/operator.go:205-206) writes claims.tree = Y; if X is later a workflow root that never ran, the backfill marks it and it stays its own root (the pre-PR behaviour) with a release answering CHILD_NOT_ADOPTABLE 'it was handed over as a root of its own'. It needs manual operator use on a workflow root and is the rule the architect specified; named in the PR body's risk list.",
+    "The backfill stores the parent, or the issue's own key when it has none, where no claim names the old tree; only non-emptiness is read (workflow/adopt.go:79)."
   ],
-  "thermonuclear": "thermonuclear-deep-review at c5eb9b20 (code afedb19d): CHANGES, the finding above. thermonuclear-code-quality: APPROVE, the same gap judged a deploy-time risk with a pre-deploy audit query. Both report build and vet clean. Provider: both runs name anthropic/claude-opus-5-5 from their transcript's workstation block, not from provider metadata; provider not verified.",
-  "ci": "At afedb19d, read 2026-10-26T19:15Z: Tests 40369963835 success (lint, typecheck, test), PR Title 40370064190 success. Required: lint, typecheck, test, pr-title. Compare afedb19d...c5eb9b20 touches only .legion/."
+  "thermonuclear": "thermonuclear-deep-review at 8f47b81d (code 56a52d9a): CHANGES on the operator-claim case; thermonuclear-code-quality: APPROVE, the same case judged low severity and within the rule as specified. The reviewer accepts it as a named risk: its effect is the pre-PR behaviour for a row only manual operator use creates. Both ran build, vet and the store migration tests clean. Provider not verified.",
+  "ci": "At 56a52d9a, read 2026-10-26T20:27Z: Tests 40388276527 success (lint, typecheck, test), PR Title 40388371424 success, Docs success; Worker Image 40388276488 failed (not required) on an npm registry 404 for bowser-2.15.0.tgz while installing @bopstack/pi-codegraph, unrelated to this diff; Legion Envoy and Contracts queued (not required). Compare 56a52d9a...8f47b81d touches only .legion/."
 }
