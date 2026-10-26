@@ -2,16 +2,24 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-448",
-  "completed": "2026-10-26T22:38:28Z",
-  "round": 7,
-  "testedCodeHead": "19aaa96fe03bdf0a48bb877a441cf14c962aef69",
+  "completed": "2026-10-26T23:38:07Z",
+  "round": 8,
+  "testedCodeHead": "a2d4b6eef5628a7f5fe09c8ed4fa8b735e12eb26",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran the implementer's C3 search and read each merged record sentence; checked main's new findings.md claim on the live server; smoke at the head with C1 live and closed-issue-posting + conversation in the browser."
+    "how": "Recomputed the implementer's fingerprint at 19aaa96f and a2d4b6ee: equal (8a20f939…). Bare gates: CI read at a2d4b6ee (queued) and the smoke check, C1 live on the merged head's server."
   },
   "failures": [],
   "failed": 0,
   "proof": [
+    {
+      "criterion": "Smoke at the merged head (bare gates after an unchanged-fingerprint merge of main)",
+      "surface": "real Dispatch server, listener and nats-server built at a2d4b6ee on Postgres 17, driven with curl",
+      "command": "/legion/scratch/tmp/infra448-tester/c1.sh",
+      "observed": "comments, messages, replies (including a reply to a resolved root), anchored comment, mention delivery, retries and agent replies 201 on the closed issue; reopen 200 then ask 201",
+      "headSha": "a2d4b6eef5628a7f5fe09c8ed4fa8b735e12eb26",
+      "negativeControl": "suggestion with and without a mention, new ask, comment edit, resolve, claim, document edit and named version 409 ISSUE_CLOSED with the spec unchanged"
+    },
     {
       "criterion": "C3: no remaining statement that a closed issue refuses comments or messages (after the merge of main's legion-architect and merge-gate rewrites)",
       "surface": "the repository at the head, and the live Dispatch server for the one new closed-issue sentence",
@@ -19,14 +27,6 @@
       "observed": "the five kept lines plus main's findings.md sentence (and copy) that a closed issue takes a reopening status alone; the merged sentences say the record is the pull request's Production: line whether or not the issue is closed and Dispatch opens no ask on a closed issue; copies byte-identical; status+assignee 409 ISSUE_CLOSED, status alone 200",
       "headSha": "19aaa96fe03bdf0a48bb877a441cf14c962aef69",
       "negativeControl": "a status sent with an assignee on a closed issue is refused 409 ISSUE_CLOSED, so the findings.md sentence is a true field rule, not a comment or message rule"
-    },
-    {
-      "criterion": "Smoke at the head: C1 and the closed-issue browser posting",
-      "surface": "real Dispatch server, listener and nats-server on Postgres 17 (curl); the browser suite chromium and iphone",
-      "command": "/legion/scratch/tmp/infra448-tester/c1.sh; bun run e2e -- --project=chromium --project=iphone e2e/closed-issue-posting.e2e.ts e2e/conversation.e2e.ts",
-      "observed": "comments, messages, replies, anchored comment, mention delivery, retries and agent replies 201 on the closed issue; reopen 200 then ask 201; 43 passed, 1 skipped (3.2m)",
-      "headSha": "19aaa96fe03bdf0a48bb877a441cf14c962aef69",
-      "negativeControl": "suggestion with and without a mention, new ask, comment edit, resolve, claim, document edit and named version 409 ISSUE_CLOSED with the spec unchanged"
     },
     {
       "criterion": "The INFRA-440 merge keeps a closed issue's Conversation posting: a comment mention's Retry and the comment thread's Reply, with INFRA-440's agent names; resolve and edit stay hidden",
@@ -77,20 +77,21 @@
       "negativeControl": "moving the half-written half-b to TST-32 is 409: its claim stands"
     }
   ],
-  "ci": "At 19aaa96f: Tests 40412996719, Legion Envoy and Contracts 40412996644, Docs 40412996673, Worker Image 40412996668 and PR Title 40413127790 queued. Not re-run by the tester.",
+  "ci": "At a2d4b6ee: Tests 40420818124, Legion Envoy and Contracts 40420818138, Docs 40420818144, Worker Image 40420818478 and PR Title 40420909408 queued. Not re-run by the tester.",
   "observations": [
     "Until an ended write's retry, another session's derived replaced_by can name the wrong successor: with b's session key written and its role key not, a's Get answered replaced_by half-c rather than half-b; the retry corrects it. Display-only, transient.",
     "The Comment chord ($mod+Alt+m) runs only on an editable view; the bar's Comment button is the closed document's path (implement.json deviations)."
   ],
   "fingerprint": {
     "from": {
-      "head": "51c5648273dfe13c608da49c91ec9fcf8b15ff8f",
-      "sha256": "4d7c22aee3d372691f2be2953b82cd6cba673b6c226b0f164bf00071fc5932ec"
-    },
-    "to": {
       "head": "19aaa96fe03bdf0a48bb877a441cf14c962aef69",
       "sha256": "8a20f939271d28889edf63a4820718faa7b98ea9702de849fe6bfe92fa48f71f"
     },
-    "verdict": "changed in 11 files: AGENTS.md, three implementer prompts, legion-architect acceptance.md and legion-worker merge-gate.md with their claude-envoy copies, and three claude-envoy dist bundles (main's actorAttribution absorbed); no runtime code of this pull request changed since round 6"
-  }
+    "to": {
+      "head": "a2d4b6eef5628a7f5fe09c8ed4fa8b735e12eb26",
+      "sha256": "8a20f939271d28889edf63a4820718faa7b98ea9702de849fe6bfe92fa48f71f"
+    },
+    "verdict": "unchanged"
+  },
+  "rebaseRecheck": "rebase re-check 19aaa96fe03bdf0a48bb877a441cf14c962aef69 → a2d4b6eef5628a7f5fe09c8ed4fa8b735e12eb26: fingerprint unchanged, bare gates only"
 }
