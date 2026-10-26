@@ -352,3 +352,96 @@ func TestAHoldFollowsItsRecordedAncestorIntoTheTreeThatAdoptsIt(t *testing.T) {
 		t.Fatalf("%s has %d architect starts queued, want one once it took the slot", child, starts)
 	}
 }
+
+// A labelled todo child of a root held under a running tree's unreleased child is recorded in the
+// held root's tree, as any todo child of a waiting root is: it waits with the held root and takes no
+// slot and no architect, even with a slot free. When the running tree's architect releases the held
+// root, the child joins that tree with it.
+func TestAChildOfAHeldRootWaitsWithIt(t *testing.T) {
+	pool := migratedPool(t)
+	admission := newAdmission(t, 2, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	const tree, parent, held, child = "LEGION-168", "LEGION-169", "LEGION-214", "LEGION-300"
+	seedOpenTree(t, pool, tree)
+
+	// The preparation read the held root's chain from Dispatch: parent is not recorded, tree is.
+	apply(t, pool, admission, "held", intake.DispatchIssue{Key: held, ResolvedRepo: "acme/widgets", Seq: 1, Type: "issue.updated", Status: "todo",
+		Title: held, Parent: parent, Rank: "B", HandedOver: handed, RecordedAncestor: tree}, admission.engine)
+	apply(t, pool, admission, "child", intake.DispatchIssue{Key: child, ResolvedRepo: "acme/widgets", Seq: 1, Type: "issue.updated", Status: "todo",
+		Title: child, Parent: held, Rank: "A", HandedOver: handed}, admission.engine)
+	if got := issue(t, pool, child); got.Tree != held || got.Status != "todo" || got.Phase != phase.Admitted {
+		t.Fatalf("%s = %#v, want it recorded todo and admitted in the tree of %s", child, got, held)
+	}
+	applyFact(t, pool, admission, "tick", intake.ControllerTick{})
+	assertWaiting(t, pool, nil)
+	assertSlots(t, pool, []record.Slot{{Issue: tree, Index: 0, AdmittedAt: fixedNow}})
+	for _, key := range []string{held, child} {
+		if starts := architectStarts(t, pool, key); starts != 0 {
+			t.Fatalf("%s has %d architect starts queued, want none while %s runs", key, starts, tree)
+		}
+	}
+
+	applyFact(t, pool, admission, "release", intake.ChildAdoption{Tree: tree, Children: []intake.AdoptedChild{{Issue: held, Parent: parent}}})
+	for _, key := range []string{held, child} {
+		if got := issue(t, pool, key); got.Tree != tree || got.Generation != 2 || got.Phase != phase.Planning {
+			t.Fatalf("%s = %#v, want it planning in the tree of %s at generation 2", key, got, tree)
+		}
+	}
+	assertWaiting(t, pool, nil)
+	assertSlots(t, pool, []record.Slot{{Issue: tree, Index: 0, AdmittedAt: fixedNow}})
+	if starts := architectStarts(t, pool, child); starts != 0 {
+		t.Fatalf("%s has %d architect starts queued, want none: it runs in the tree of %s", child, starts, tree)
+	}
+}
+
+// A root that ran as a tree of its own, or carries a run handed over to it, keeps queueing as its
+// own root under a running tree's unreleased child, since no release adopts it: it records no
+// ancestor to be held under, waits in the line and takes the free slot.
+func TestARootThatRanKeepsQueueingUnderAnUnreleasedChild(t *testing.T) {
+	const tree, parent, root = "LEGION-168", "LEGION-169", "LEGION-214"
+	for _, tc := range []struct {
+		name string
+		seed func(t *testing.T, pool *pgxpool.Pool) record.Issue
+	}{
+		{name: "a tree lifecycle under its key", seed: func(t *testing.T, pool *pgxpool.Pool) record.Issue {
+			ran := queuedRoot(root, "", "B", 1)
+			putIssue(t, pool, ran)
+			if _, err := pool.Exec(context.Background(), `insert into tree_lifecycles (project, tree, epoch, authority) values ('legion', $1, 1, 'workflow')`, root); err != nil {
+				t.Fatalf("seed lifecycle: %v", err)
+			}
+			return ran
+		}},
+		{name: "a carried orphan", seed: func(t *testing.T, pool *pgxpool.Pool) record.Issue {
+			carried := queuedRoot(root, "", "B", 1)
+			carried.Phase, carried.Generation = phase.Planning, 2
+			putIssue(t, pool, carried)
+			inTx(t, pool, func(tx pgx.Tx) {
+				if err := record.NewStore().PutHandedOverRoot(context.Background(), tx, record.HandedOverRoot{Issue: root, Generation: 2}); err != nil {
+					t.Fatalf("seed handed-over root: %v", err)
+				}
+			})
+			return carried
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := migratedPool(t)
+			admission := newAdmission(t, 2, slog.New(slog.NewTextHandler(io.Discard, nil)))
+			seedOpenTree(t, pool, tree)
+			seeded := tc.seed(t, pool)
+
+			// The preparation read the root's chain from Dispatch: parent is not recorded, tree is.
+			apply(t, pool, admission, "reparented", intake.DispatchIssue{Key: root, ResolvedRepo: "acme/widgets", Seq: 2, Type: "issue.updated", Status: "todo",
+				Title: root, Parent: parent, Rank: "B", HandedOver: handed, RecordedAncestor: tree}, admission.engine)
+			got := issue(t, pool, root)
+			if got.Tree != root || got.Generation != seeded.Generation || got.Status != "in_progress" || got.RecordedAncestor != "" {
+				t.Fatalf("%s = %#v, want it promoted as its own root at generation %d with no recorded ancestor", root, got, seeded.Generation)
+			}
+			if got.Parent == nil || *got.Parent != parent {
+				t.Fatalf("%s = %#v, want its parent recorded as %s", root, got, parent)
+			}
+			assertSlots(t, pool, []record.Slot{{Issue: tree, Index: 0, AdmittedAt: fixedNow}, {Issue: root, Index: 1, AdmittedAt: fixedNow}})
+			if starts := architectStarts(t, pool, root); starts != 1 {
+				t.Fatalf("%s has %d architect starts queued, want one once it took the slot", root, starts)
+			}
+		})
+	}
+}

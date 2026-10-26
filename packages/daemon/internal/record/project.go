@@ -38,36 +38,16 @@ func OutOfWorkflow(status string) bool {
 // A root whose parent is not recorded, under an ancestor recorded in another live tree
 // (RecordedAncestor, whose current tree is read here, so a hold follows that ancestor's adoption
 // into a tree), waits for nothing either: it is that tree's unreleased work, which its architect's
-// release, or its parent's, brings into the tree. A tree is live here when its root does not linger
-// and holds a slot or is itself in the line this reads before leaving such roots out; once that
-// tree lingers or leaves the workflow, the root waits as its own again.
+// release, or its parent's, brings into the tree. A tree is live here as everywhere (LiveRoots), so
+// a held root's tree is live too; once the tree it is held under lingers or leaves the workflow, the
+// root waits as its own again.
 func Waiting(issues []Issue, slots []Slot) []Issue {
-	slotted := make(map[string]struct{}, len(slots))
-	for _, slot := range slots {
-		slotted[slot.Issue] = struct{}{}
-	}
-	waiting := make([]Issue, 0, len(issues))
-	for _, issue := range issues {
-		if issue.Status == "todo" && issue.HandedOver && claim.IsTreeRoot(issue.Key, issue.Tree) {
-			if _, ok := slotted[issue.Key]; !ok {
-				waiting = append(waiting, issue)
-			}
-		}
-	}
+	waiting := line(issues, slots)
 	if slices.ContainsFunc(waiting, func(issue Issue) bool { return issue.RecordedAncestor != "" }) {
-		queued := make(map[string]struct{}, len(waiting))
-		for _, issue := range waiting {
-			queued[issue.Key] = struct{}{}
-		}
+		live := liveRoots(issues, slots, waiting)
 		trees := make(map[string]string, len(issues))
-		live := make(map[string]struct{}, len(slots)+len(waiting))
 		for _, issue := range issues {
 			trees[issue.Key] = issue.Tree
-			_, holds := slotted[issue.Key]
-			_, waits := queued[issue.Key]
-			if (holds || waits) && !issue.Lingers() {
-				live[issue.Key] = struct{}{}
-			}
 		}
 		waiting = slices.DeleteFunc(waiting, func(issue Issue) bool {
 			tree, ok := trees[issue.RecordedAncestor]
@@ -82,8 +62,27 @@ func Waiting(issues []Issue, slots []Slot) []Issue {
 	return waiting
 }
 
-// TreeLive says whether root's tree is live: the root holds a slot or waits for one, and does not
-// linger after its close. A todo child under a live tree runs in it; under any other it is an orphan.
+// line is every slotless todo root handed to Legion, in no order, before any hold is read: the
+// roots Waiting leaves the held ones out of, and with the slotted roots the live trees (liveRoots).
+func line(issues []Issue, slots []Slot) []Issue {
+	slotted := make(map[string]struct{}, len(slots))
+	for _, slot := range slots {
+		slotted[slot.Issue] = struct{}{}
+	}
+	line := make([]Issue, 0, len(issues))
+	for _, issue := range issues {
+		if issue.Status == "todo" && issue.HandedOver && claim.IsTreeRoot(issue.Key, issue.Tree) {
+			if _, ok := slotted[issue.Key]; !ok {
+				line = append(line, issue)
+			}
+		}
+	}
+	return line
+}
+
+// TreeLive says whether root's tree is live: the root holds a slot or waits for one, held or not,
+// and does not linger after its close. A todo child under a live tree runs in it, or waits with its
+// held root and moves with it into the tree that adopts it; under any other it is an orphan.
 func TreeLive(ctx context.Context, store Store, tx pgx.Tx, root Issue) (bool, error) {
 	if root.Lingers() {
 		return false, nil
@@ -104,13 +103,20 @@ func TreeLive(ctx context.Context, store Store, tx pgx.Tx, root Issue) (bool, er
 }
 
 // LiveRoots is the set of keys whose trees are live (TreeLive), read from issues and slots already
-// in hand: each root does not linger and holds a slot or waits for one.
+// in hand.
 func LiveRoots(issues []Issue, slots []Slot) map[string]struct{} {
-	live := make(map[string]struct{}, len(slots))
+	return liveRoots(issues, slots, line(issues, slots))
+}
+
+// liveRoots is LiveRoots over line, the line already read from issues and slots: each root does
+// not linger and holds a slot or is in the line. A root Waiting holds is still in the line, so the
+// hold is read against these same trees and a todo child of a held root records into its tree.
+func liveRoots(issues []Issue, slots []Slot, line []Issue) map[string]struct{} {
+	live := make(map[string]struct{}, len(slots)+len(line))
 	for _, slot := range slots {
 		live[slot.Issue] = struct{}{}
 	}
-	for _, issue := range Waiting(issues, slots) {
+	for _, issue := range line {
 		live[issue.Key] = struct{}{}
 	}
 	for _, issue := range issues {

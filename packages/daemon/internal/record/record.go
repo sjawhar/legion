@@ -90,7 +90,8 @@ type Issue struct {
 	// (intake's DispatchIssue.RecordedAncestor), or as the preparation of an unrecorded issue's event
 	// read it again (intake's DispatchIssue.Reread): a labelled todo issue under a child of a live
 	// tree that tree's architect has not released. Such a root waits for no slot while that
-	// ancestor's current tree is live (Waiting). Empty for every other record, and cleared when
+	// ancestor's current tree is live (Waiting). Empty for every other record, for a root that ran
+	// as a tree of its own (workflow's RanAsRoot), which no release adopts, and cleared when
 	// adoption takes the record into a tree.
 	RecordedAncestor string
 }

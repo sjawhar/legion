@@ -254,13 +254,17 @@ func (e *Engine) sessionStatusWrite(ctx context.Context, tx pgx.Tx, issue record
 
 // keepStatus records an observation of the issue whose status the workflow does not take: its title,
 // rank, parent, label, sequence, the status Dispatch showed and the recorded ancestor its preparation
-// read above an unrecorded parent, with the recorded status kept. Admission, running after this
-// handler, then records none of that status: a live event stops at its sequence fence, and a boot
-// listing the engine applied this way keeps the recorded status (admit's applySummary), so neither
-// frees the slot nor re-admits on it.
+// read above an unrecorded parent (RecordedAncestor), with the recorded status kept. Admission,
+// running after this handler, then records none of that status: a live event stops at its sequence
+// fence, and a boot listing the engine applied this way keeps the recorded status (admit's
+// applySummary), so neither frees the slot nor re-admits on it.
 func (e *Engine) keepStatus(ctx context.Context, tx pgx.Tx, issue record.Issue, fact intake.DispatchIssue) error {
+	ancestor, err := e.RecordedAncestor(ctx, tx, issue, fact.RecordedAncestor)
+	if err != nil {
+		return err
+	}
 	issue.Title, issue.Rank, issue.Parent, issue.LastDispatchSeq = fact.Title, fact.Rank, record.ParentOf(fact.Parent), fact.Seq
-	issue.HandedOver, issue.DispatchStatus, issue.RecordedAncestor = fact.HandedOver, fact.Status, fact.RecordedAncestor
+	issue.HandedOver, issue.DispatchStatus, issue.RecordedAncestor = fact.HandedOver, fact.Status, ancestor
 	return e.store.PutIssue(ctx, tx, issue)
 }
 

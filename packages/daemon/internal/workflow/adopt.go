@@ -13,13 +13,9 @@ import (
 )
 
 // AdoptionRefusal says why issue cannot join the live tree tree, nil when it can. A recorded root
-// that never ran as a tree of its own, whose tree's live root is tree's, is a member of that tree:
-// it never opened a tree lifecycle under its key (only its promotion opens one, or an operator's
-// root spawn) and carries no run handed over to it (handed_over_roots). Such a root's members
-// cannot have started a phase either: a phase needs its gate, the gate needs the root's architect,
-// and the architect needs a slot, whose promotion opens the lifecycle. A child already recorded in
-// tree needs nothing; one recorded in any other tree is that tree's, not tree's to adopt. Every
-// refusal is a 409 whose message names the issue and why.
+// that never ran as a tree of its own (RanAsRoot), whose tree's live root is tree's, is a member of
+// that tree. A child already recorded in tree needs nothing; one recorded in any other tree is that
+// tree's, not tree's to adopt. Every refusal is a 409 whose message names the issue and why.
 //
 // Admission's sweep of its queue (adoptQueuedRoots) leaves a refused root queueing as a root of
 // its own; a release of children answers the refusal. Callers check it before Adopt.
@@ -33,26 +29,12 @@ func (e *Engine) AdoptionRefusal(ctx context.Context, tx pgx.Tx, issue record.Is
 	notAdoptable := func(reason string) *intake.Refusal {
 		return &intake.Refusal{Status: 409, Code: "CHILD_NOT_ADOPTABLE", Message: fmt.Sprintf("%s cannot join the tree of %s: %s", issue.Key, tree, reason)}
 	}
-	project, err := claim.ProjectToken(issue.Project)
+	ran, err := e.RanAsRoot(ctx, tx, issue)
 	if err != nil {
 		return nil, err
 	}
-	lifecycle, found, err := e.store.TreeLifecycle(ctx, tx, project, issue.Key)
-	if err != nil {
-		return nil, err
-	}
-	if found {
-		if lifecycle.HeldByOperator() {
-			return notAdoptable("the operator runs a tree under its key"), nil
-		}
-		return notAdoptable("it ran as a tree of its own"), nil
-	}
-	handed, err := e.store.HandedOverRoot(ctx, tx, issue.Key)
-	if err != nil {
-		return nil, err
-	}
-	if handed != nil {
-		return notAdoptable("it carries a run handed over to it as a root of its own"), nil
+	if ran != "" {
+		return notAdoptable(ran), nil
 	}
 	root, err := e.store.Issue(ctx, tx, tree)
 	if err != nil {
@@ -68,6 +50,54 @@ func (e *Engine) AdoptionRefusal(ctx context.Context, tx pgx.Tx, issue record.Is
 		return notAdoptable(fmt.Sprintf("the tree of %s is not live", tree)), nil
 	}
 	return nil, nil
+}
+
+// RanAsRoot says how issue ran as a tree of its own, "" when it never did: it opened a tree
+// lifecycle under its key (only its promotion opens one, or an operator's root spawn) or carries a
+// run handed over to it (handed_over_roots). The members of a root that never ran cannot have
+// started a phase either: a phase needs its gate, the gate needs the root's architect, and the
+// architect needs a slot, whose promotion opens the lifecycle. A root that ran is never adopted
+// (AdoptionRefusal) nor held under another tree (RecordedAncestor).
+func (e *Engine) RanAsRoot(ctx context.Context, tx pgx.Tx, issue record.Issue) (string, error) {
+	project, err := claim.ProjectToken(issue.Project)
+	if err != nil {
+		return "", err
+	}
+	lifecycle, found, err := e.store.TreeLifecycle(ctx, tx, project, issue.Key)
+	if err != nil {
+		return "", err
+	}
+	if found {
+		if lifecycle.HeldByOperator() {
+			return "the operator runs a tree under its key", nil
+		}
+		return "it ran as a tree of its own", nil
+	}
+	handed, err := e.store.HandedOverRoot(ctx, tx, issue.Key)
+	if err != nil {
+		return "", err
+	}
+	if handed != nil {
+		return "it carries a run handed over to it as a root of its own", nil
+	}
+	return "", nil
+}
+
+// RecordedAncestor is the recorded ancestor issue's record takes when an observation's preparation
+// read ancestor above its unrecorded parent (record.Issue.RecordedAncestor): ancestor, or "" when
+// issue ran as a tree of its own (RanAsRoot). The waiting line holds a root under its recorded
+// ancestor's live tree until that tree's release adopts it, and a release refuses a root that ran,
+// so such a root keeps queueing as its own instead: held, nothing would ever bring it in. Every
+// write of an observation's recorded ancestor to a record goes through this.
+func (e *Engine) RecordedAncestor(ctx context.Context, tx pgx.Tx, issue record.Issue, ancestor string) (string, error) {
+	if ancestor == "" {
+		return "", nil
+	}
+	ran, err := e.RanAsRoot(ctx, tx, issue)
+	if err != nil || ran != "" {
+		return "", err
+	}
+	return ancestor, nil
 }
 
 // Adopt moves issue, a recorded root AdoptionRefusal found adoptable into root's live tree, into

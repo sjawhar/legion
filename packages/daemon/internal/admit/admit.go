@@ -241,9 +241,9 @@ func (a *Admission) settle(ctx context.Context, tx pgx.Tx) ([]string, error) {
 }
 
 // applyReread writes each recorded ancestor an unrecorded issue's preparation read again
-// (intake.DispatchIssue.Reread) to its root's record while that record is still a todo root, and
-// says whether any record changed. The read was taken outside the fact lock, so a root adopted or
-// moved on meanwhile is left as it now stands.
+// (intake.DispatchIssue.Reread) to its root's record while that record is still a todo root, as the
+// engine's RecordedAncestor takes it, and says whether any record changed. The read was taken
+// outside the fact lock, so a root adopted or moved on meanwhile is left as it now stands.
 func (a *Admission) applyReread(ctx context.Context, tx pgx.Tx, reread map[string]string) (bool, error) {
 	changed := false
 	for _, key := range slices.Sorted(maps.Keys(reread)) {
@@ -251,10 +251,17 @@ func (a *Admission) applyReread(ctx context.Context, tx pgx.Tx, reread map[strin
 		if err != nil {
 			return false, fmt.Errorf("read admission issue %s: %w", key, err)
 		}
-		if stored == nil || stored.Status != "todo" || !claim.IsTreeRoot(stored.Key, stored.Tree) || stored.RecordedAncestor == reread[key] {
+		if stored == nil || stored.Status != "todo" || !claim.IsTreeRoot(stored.Key, stored.Tree) {
 			continue
 		}
-		stored.RecordedAncestor = reread[key]
+		ancestor, err := a.engine.RecordedAncestor(ctx, tx, *stored, reread[key])
+		if err != nil {
+			return false, fmt.Errorf("read whether %s ran as a tree of its own: %w", key, err)
+		}
+		if stored.RecordedAncestor == ancestor {
+			continue
+		}
+		stored.RecordedAncestor = ancestor
 		if err := a.store.PutIssue(ctx, tx, *stored); err != nil {
 			return false, fmt.Errorf("record the recorded ancestor of %s: %w", key, err)
 		}
@@ -413,22 +420,24 @@ func (a *Admission) putNewRoot(ctx context.Context, tx pgx.Tx, observation intak
 		return nil
 	}
 	issue := record.Issue{
-		Key:              observation.Key,
-		Tree:             observation.Key,
-		Project:          a.project,
-		Title:            observation.Title,
-		Parent:           record.ParentOf(observation.Parent),
-		Phase:            phase.Admitted,
-		Generation:       1,
-		Status:           "todo",
-		Rank:             observation.Rank,
-		HandedOver:       observation.HandedOver,
-		LastDispatchSeq:  observation.Seq,
-		DispatchStatus:   observation.Status,
-		Repo:             resolution.Repo,
-		DefaultBranch:    resolution.DefaultBranch,
-		GitHubRepo:       resolution.GitHubRepo,
-		RecordedAncestor: observation.RecordedAncestor,
+		Key:             observation.Key,
+		Tree:            observation.Key,
+		Project:         a.project,
+		Title:           observation.Title,
+		Parent:          record.ParentOf(observation.Parent),
+		Phase:           phase.Admitted,
+		Generation:      1,
+		Status:          "todo",
+		Rank:            observation.Rank,
+		HandedOver:      observation.HandedOver,
+		LastDispatchSeq: observation.Seq,
+		DispatchStatus:  observation.Status,
+		Repo:            resolution.Repo,
+		DefaultBranch:   resolution.DefaultBranch,
+		GitHubRepo:      resolution.GitHubRepo,
+	}
+	if issue.RecordedAncestor, err = a.engine.RecordedAncestor(ctx, tx, issue, observation.RecordedAncestor); err != nil {
+		return fmt.Errorf("read whether %s ran as a tree of its own: %w", observation.Key, err)
 	}
 	if err := a.store.PutIssue(ctx, tx, issue); err != nil {
 		return fmt.Errorf("record admitted root %s: %w", observation.Key, err)
@@ -627,7 +636,8 @@ func (a *Admission) orphan(ctx context.Context, tx pgx.Tx, stored record.Issue, 
 // observed is what one Dispatch observation of an issue says about it, from a live event or from
 // the boot read: Shown is the status Dispatch showed, and Status the one the record takes, which is
 // Shown except from a boot listing no newer than the record, which keeps the record's own.
-// RecordedAncestor is the recorded ancestor its preparation read above an unrecorded parent.
+// RecordedAncestor is the recorded ancestor its preparation read above an unrecorded parent, which a
+// record takes as the engine's RecordedAncestor says.
 type observed struct {
 	Title, Parent, Rank, Status, Shown, RecordedAncestor string
 	HandedOver                                           bool
@@ -644,9 +654,13 @@ type observed struct {
 // here: the only path that does is adoption, which the same fact's promote runs next
 // (adoptQueuedRoots) for a todo root that never ran and whose new parent is in a live tree.
 func (a *Admission) recordObservation(ctx context.Context, tx pgx.Tx, stored record.Issue, o observed) error {
+	ancestor, err := a.engine.RecordedAncestor(ctx, tx, stored, o.RecordedAncestor)
+	if err != nil {
+		return fmt.Errorf("read whether %s ran as a tree of its own: %w", stored.Key, err)
+	}
 	if stored.Title == o.Title && stored.Rank == o.Rank && stored.Status == o.Status && stored.DispatchStatus == o.Shown &&
 		stored.HandedOver == o.HandedOver && sameParent(stored.Parent, record.ParentOf(o.Parent)) && stored.LastDispatchSeq == o.Seq &&
-		stored.RecordedAncestor == o.RecordedAncestor {
+		stored.RecordedAncestor == ancestor {
 		return nil
 	}
 	stored.Title = o.Title
@@ -656,7 +670,7 @@ func (a *Admission) recordObservation(ctx context.Context, tx pgx.Tx, stored rec
 	stored.DispatchStatus = o.Shown
 	stored.HandedOver = o.HandedOver
 	stored.LastDispatchSeq = o.Seq
-	stored.RecordedAncestor = o.RecordedAncestor
+	stored.RecordedAncestor = ancestor
 	if err := a.store.PutIssue(ctx, tx, stored); err != nil {
 		return fmt.Errorf("record observation of %s: %w", stored.Key, err)
 	}
@@ -680,13 +694,14 @@ func startedRun(issue record.Issue) bool {
 }
 
 // readmit records a lingering or closed root's todo, or an orphan's, as a new generation waiting
-// for a slot, taking o's title, parent, rank, recorded ancestor and sequence. A root starts a fresh
-// generation: its facts clear across its whole tree, as do those of an orphan readmitted without
-// carry. An orphan readmitted with carry (one that started a phase) is the same work moving from a
-// finished root to a root of its own, so its phase, phase rows, gate and pull request (with its
-// observed head) carry into the new generation, and its promotion starts both its architect and
-// the role of that carried phase. A merged pull request is never observed as merged again, and a
-// review, acceptance or READY would otherwise rerun work already decided or landed.
+// for a slot, taking o's title, parent, rank, recorded ancestor (as the engine's RecordedAncestor
+// takes it; a carried orphan takes none) and sequence. A root starts a fresh generation: its facts
+// clear across its whole tree, as do those of an orphan readmitted without carry. An orphan
+// readmitted with carry (one that started a phase) is the same work moving from a finished root to
+// a root of its own, so its phase, phase rows, gate and pull request (with its observed head) carry
+// into the new generation, and its promotion starts both its architect and the role of that
+// carried phase. A merged pull request is never observed as merged again, and a review, acceptance
+// or READY would otherwise rerun work already decided or landed.
 func (a *Admission) readmit(ctx context.Context, tx pgx.Tx, stored record.Issue, o observed, carry bool) error {
 	if stored.Generation == ^uint64(0) {
 		return fmt.Errorf("re-admit %s: generation overflows", stored.Key)
@@ -710,7 +725,14 @@ func (a *Admission) readmit(ctx context.Context, tx pgx.Tx, stored record.Issue,
 	stored.Title = o.Title
 	stored.HandedOver = true
 	stored.Parent = record.ParentOf(o.Parent)
-	stored.RecordedAncestor = o.RecordedAncestor
+	// A carried orphan is recorded below as carrying a run handed over to it (handed_over_roots), so it
+	// ran as a tree of its own (workflow's RanAsRoot) and records no ancestor to be held under.
+	stored.RecordedAncestor = ""
+	if !orphan {
+		if stored.RecordedAncestor, err = a.engine.RecordedAncestor(ctx, tx, stored, o.RecordedAncestor); err != nil {
+			return fmt.Errorf("read whether re-admitted %s ran as a tree of its own: %w", stored.Key, err)
+		}
+	}
 	stored.Tree = stored.Key
 	if !orphan {
 		stored.Phase, stored.Hold, stored.ReadyPendingVersion = phase.Admitted, nil, nil
