@@ -3981,7 +3981,7 @@ console.log(JSON.stringify(args));
       );
       expect(fixture.entries).toHaveLength(3);
       const rulesNotice =
-        "AskGate's rule check failed 3 times in a row; new asks are not checked against the two rules.";
+        "AskGate's rule check failed 3 times in a row, so the new asks of those 3 calls were not checked against the two rules. The check still runs on each new ask, and refuses a match again as soon as it answers.";
       expect(notifications).toEqual([rulesNotice]);
 
       const next: string[] = [];

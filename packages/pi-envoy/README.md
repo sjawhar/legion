@@ -357,9 +357,10 @@ instead and how to send the call anyway. The agent sends the call anyway in one 
 
 A rebuttal sends the call with no review by either check, and the entry records the line. A rules
 call that ends in an error, a timeout or an answer that does not parse refuses nothing: the
-charter check decides. The third such rules call in a row writes one warning to the host's plain
-log, shows it as a notice in a session with a UI, and adds it to that call's own result. It is not
-one of the notices a session shows at its start.
+charter check decides. The third such rules call in a row writes one warning, saying that the new
+asks of those three calls went unchecked and that the check still runs on each new ask, to the
+host's plain log, shows it as a notice in a session with a UI, and adds it to that call's own
+result. It is not one of the notices a session shows at its start.
 
 **The model.** Both checks ask the session's `askgate` model role (`modelRoles.askgate`). When that
 role is not set, they ask the `default` role. A model that answers with an error passes the request

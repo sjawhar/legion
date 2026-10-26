@@ -2963,7 +2963,7 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
         return undefined;
       ruleFailures++;
       if (ruleFailures !== RULE_NOTICE_AFTER_FAILURES) return undefined;
-      const notice = `AskGate's rule check failed ${ruleFailures} times in a row; new asks are not checked against the two rules.`;
+      const notice = `AskGate's rule check failed ${ruleFailures} times in a row, so the new asks of those ${ruleFailures} calls were not checked against the two rules. The check still runs on each new ask, and refuses a match again as soon as it answers.`;
       deps.runtimeLogger.warn(notice);
       if (ctx.hasUI) ctx.ui.notify(notice, "warning");
       return `<advisor-gate advisor="AskGate">\n${notice}\n</advisor-gate>`;
