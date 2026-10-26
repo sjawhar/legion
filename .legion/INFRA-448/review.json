@@ -2,39 +2,32 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-448",
-  "completed": "2026-10-26T18:52:20Z",
-  "round": 2,
+  "completed": "2026-10-26T20:13:39Z",
+  "round": 3,
   "decision": "changes_requested",
   "critical": 0,
-  "important": 1,
+  "important": 0,
   "minor": 2,
-  "reviewedCodeHead": "27a6de48c023a925cc8297ea2c8212c13d0b28ec",
-  "scope": "Narrow (INFRA-204 architect after review_round_cap): C1-C4 of spec v4, the round-1 fixes, the tester's two closed-document fixes; cleanup on the Fast-follow line only.",
+  "reviewedCodeHead": "7912696a2f26f91538f631c13f95fe07b3e84059",
+  "scope": "Narrow (INFRA-204 architect): C1-C4 of spec v4, the round-1 and round-2 fixes, the tester's two closed-document fixes; cleanup on the Fast-follow line only.",
   "keyFindings": [
     {
-      "severity": "important",
-      "file": "packages/envoy/cmd/listener/legion_agents.go:69",
-      "description": "The registry opens once at start and again only after a NATS connection event. Any failed open (a JetStream timeout or a slow first CreateKeyValue, not only a missing grant) leaves /v1/legion/agents* at 503 on a listener that reports healthy, until something bounces its connection; a grant applied by config reload never reconnects. The ERROR line and the 503 always say the grant is missing. Round 1's log.Fatal at least retried through a restart. Fix: retry the open in the background with backoff while there is no store, and word the log and the 503 as 'could not open the bucket (a missing grant is the usual cause): <err>'."
+      "severity": "minor",
+      "file": "packages/envoy/cmd/listener/legion_agents.go:120",
+      "description": "When a connection event lands during the open, open moves the new store to the latest connection with store.Reopen and, on failure, only logs and still returns true. The retry ends, reconnect already returned nil for that event, and the store stays on the replaced, closed connection, so the routes fail until another connection event that a healthy connection never brings. Fix: on a Reopen failure store the unavailable state and return false so the retry opens again; correct the comment at :111-114."
     },
     {
       "severity": "minor",
-      "file": "packages/dispatch/web/src/features/doc/connection.ts:155",
-      "description": "readmit() reconnects after a reopen, but notifySynced calls sync.firstSync(readOnly) once (announced guard), so pending-sync keeps readOnly=true from the closed admission: edits on the reopened document show 'can't be sent: this document is read-only', and IndexedDB rows are not restored until a reload. Re-run firstSync(false) when a later admission turns read-write, without firing onSynced again."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/envoy/internal/legionagents/store.go:153",
-      "description": "With the claim-first order, a write that ends between its claim and its index keys makes Get answer replaced_by null (the session reads as the current holder) or the role key's old entry instead of the session key it just read. Replace this session's sibling with the session-key entry before succession(), which removes the fallback."
+      "file": "packages/envoy/cmd/listener/legion_agents.go:159",
+      "description": "close cancels the retry's context but openBucket takes none, so a drain that starts during an open waits up to its 10 s, and can eat the drain's hook reserve so conn.Drain passes its deadline. Fix: close calls r.stop() without waiting (an open finishing later only stores state), or pass a context into legionagents.Open."
     }
   ],
-  "roundOneFixesVerified": [
-    "listener no longer exits without the grant (legionAgentRegistry, 503 on its routes)",
-    "registry write claims session.<id> by Create/Update-at-revision before the index keys; a batch that names a session twice and a lost claim re-prepare and answer 409",
-    "closed refusal: ownerStatus/issueStatus return (status, open); refusals in requireOpenOwnerStatus, lockCommentOwner/refuseOwnerBeforeResolving (suggestion), lockedComment; lock clause and order unchanged",
-    "kvwatch.ScanExistingKeys generalised and used by the registry; internal/store callers unchanged in behaviour",
-    "title, reply-reopen and requireOpenIssue docs corrected; PartialWriteError rendered by writeLegionAgentError; access mode edit|comment|read; no Comment on a selection without text; unused collaborators client removed",
-    "tester's closed-document fixes: readmit on reopen with schemaReadOnlyRef keeping the editor read-only until the new admission; touch bar on a read-only view ignores the lost focus"
+  "roundTwoFixesVerified": [
+    "registry open retried in the background with a backoff and at once after a reconnect; first open synchronous, one retry goroutine, no lost wakeup (conn/state ordering); log and 503 no longer blame only the grant",
+    "connection.ts re-runs firstSync(false) when a later admission turns read-write; authenticated reset on close; pending-sync restore skips this page's own rows (row.key[1] is the clientId the store was opened with, read in the same step as ownClient)",
+    "Get replaces the session's sibling with the session-key entry before succession(); IndexFunc always finds it"
   ],
-  "thermonuclear": "deep-review: CHANGES (registry open retry; pending-sync after readmit); code-quality: CHANGES (Get fallback; registry open retry); both at 240accb1; provider not verified",
-  "ci": "At code head 27a6de48 (the newest pull_request run; compare to 240accb1 is .legion/ only, 2 files): required lint, typecheck, test, pr-title success. GitHub reports the pull request CONFLICTING with main."
+  "fastFollow": "AGENTS.md:2098,2104, CHANGELOG.md:33, legion_agents_test.go:370-371 and the PR body's Deploy order say a missing grant logs one ERROR, but each retry's open makes the bus log one 'envoy nats async error' (permissions violation), about one per 70 s at the capped backoff; say so. connection.ts announced/restoredReadOnly could be one boolean|undefined; close's nil-stop guard is dead.",
+  "thermonuclear": "deep-review: CHANGES (repeated async ERROR vs docs; drain waits on open); code-quality: CHANGES (failed Reopen ends the retry); both at c600b111; provider not verified",
+  "ci": "At code head 7912696a (newest pull_request run; compare to c600b111 is .legion/ only, 2 files): typecheck and pr-title success, lint in progress, test queued; a request for changes does not wait. Mergeable."
 }
