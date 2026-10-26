@@ -56,7 +56,11 @@ printf '%s\\n' "$*" >>${JSON.stringify(log)}
 case $1 in
 where) printf '%s\\n' ${JSON.stringify(installDir)} ;;
 x)
-  if [ "$5 $6" = "plugin list" ]; then
+  # Run the command, as the real mise does, so an installer that named \`omp\` rather than the
+  # build's own path would run the wrapper first on PATH and the test would see it.
+  cmd=("\${@:4}")
+  "\${cmd[@]}" >/dev/null 2>&1 || true
+  if [ "\${cmd[1]:-} \${cmd[2]:-}" = "plugin list" ]; then
     printf '{"npm":[{"name":"@sjawhar/pi-envoy","version":"0.0.0-test","enabled":true,"path":"%s"}]}\\n' "$PWD"
   fi
   ;;

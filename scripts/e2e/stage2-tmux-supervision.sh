@@ -55,8 +55,10 @@ gateway | key-file | box-login) ;;
   ;;
 esac
 # The daemon prefers LEGION_OMP_PATH to omp_invocation (packages/daemon/internal/omplaunch). Every
-# daemon here runs without it, and under box-login a caller that sets it is refused outright: a
-# build named there could lack the refresh-race fix and still open the operator's login database.
+# daemon here that runs a real Oh My Pi runs without it (the registration-deadline daemon below
+# names a stub with it on purpose, and that stub opens no login database), and under box-login a
+# caller that sets it is refused outright: a build named there could lack the refresh-race fix and
+# still open the operator's login database.
 if [ "$model_route" = box-login ] && [ -n "${LEGION_OMP_PATH:-}" ]; then
   echo "FAIL setup: LEGION_OMP_PATH is set ($LEGION_OMP_PATH); under LEGION_E2E_MODEL_ROUTE=box-login the panes run the operator's own Oh My Pi build alone, so unset LEGION_OMP_PATH" >&2
   exit 1
@@ -158,6 +160,11 @@ run_processes() {
 }
 cleanup() {
   local status=$? p
+  # A second Ctrl-C, TERM or HUP must not end the teardown part way: its own signal traps would
+  # exit from inside this one, leaving panes running and, under box-login, the profile's link to
+  # the operator's login in a kept workspace. Every wait below is bounded, so ignoring them costs
+  # at most those bounds (lib/teardown.sh and stage4b-sandbox-tree.sh do the same).
+  trap '' HUP INT TERM
   # First, before anything slower can hang or be SIGKILLed mid-teardown: the key-file route's own
   # key command, which bakes in --key-file's resolved path, must never survive this script on any
   # exit, so it is never conditioned on how the rest of cleanup goes.

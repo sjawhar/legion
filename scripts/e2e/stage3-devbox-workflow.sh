@@ -156,6 +156,11 @@ collect_transcripts() {
 
 cleanup() {
   local status=$? p audit_failed=
+  # A second Ctrl-C, TERM or HUP must not end the teardown part way: its own signal traps would
+  # exit from inside this one, leaving panes running and, under box-login, the profile's link to
+  # the operator's login in a kept workspace. Every wait below is bounded, so ignoring them costs
+  # at most those bounds (lib/teardown.sh and stage4b-sandbox-tree.sh do the same).
+  trap '' HUP INT TERM
   set +e
   # Teardown is best effort, and errexit off does not turn the ERR trap off: a command that fails
   # here is a warning about the teardown, never a check's FAIL line, and the run's exit status is
