@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-440",
+  "completed": "2026-10-26T19:37:00Z",
+  "round": 6,
+  "scope": "Rebase re-check after the forward merge of main for a GitHub-reported conflict (packages/contracts/CHANGELOG.md): fingerprint unchanged, bare gates only.",
+  "verdictProvider": "provider not verified (this session's system prompt names model anthropic/claude-opus-5-5; the transcript's per-turn provider was not read)",
+  "headTested": "3f48d4b433737021da1fd81ebc2ea804f1147edd (merge head; 1dfd2305 adds only .legion/INFRA-440/implement.json)",
+  "workspaceRecreated": "The workspace and the issue disk were recreated since round 5: the earlier harness and my round-5 test.json (removed by retro 43934cac/7de00ed6) were gone. I rebuilt the harness under /legion/scratch/tmp/infra440-r6 (Postgres 17.11/pgvector on 127.0.0.1:55532, database dispatch_test_e2e, ports 18877/19121-19124, Playwright Chromium 1243); nothing of mine was unpushed.",
+  "fingerprint": {
+    "7609748a15dd7501a4ccbcbd37175cc9750f5d9e (head my round-5 E2E line named)": "89574d943aa5ad29e7424e43d3f68ed0d93187f39a24d3f2490a34f6766ae05e",
+    "7de00ed63929cde55fd453168e7583791505ef29 (retro, before the merge)": "89574d943aa5ad29e7424e43d3f68ed0d93187f39a24d3f2490a34f6766ae05e",
+    "3f48d4b433737021da1fd81ebc2ea804f1147edd (merge of main)": "89574d943aa5ad29e7424e43d3f68ed0d93187f39a24d3f2490a34f6766ae05e",
+    "reading": "unchanged: retro touched only docs/solutions and .legion, and the merge resolved only the CHANGELOG conflict; the real-surface verification of rounds 1-5 stands"
+  },
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "Recomputed the implementer's fingerprint independently per conflicts-and-rewrites.md: 89574d94... before (7de00ed6) and after (3f48d4b4), equal to the implementer's, and equal to my round-5 head 7609748a. GitHub reports the pull request MERGEABLE."
+  },
+  "failures": [],
+  "failed": 0,
+  "proof": [
+    {
+      "criterion": "Rebase re-check: the merge of main leaves the tested change as it was, and the smoke check passes at the merge head",
+      "surface": "real Go Dispatch server (e2e/run-server.sh) + Postgres 17.11/pgvector + Playwright Chromium 1243 in the recreated issue pod, chromium and iphone projects; diff fingerprint against fork_point(\"main\"@origin | <head>) over '~(.legion | docs/solutions)'",
+      "command": "fingerprint at 7609748a, 7de00ed6 and 3f48d4b4; then cd packages/dispatch && source /legion/scratch/tmp/infra440-r6/env.sh && bun run build:web && bunx playwright test --config e2e/playwright.config.ts --project=chromium --project=iphone e2e/agent-name.e2e.ts e2e/claim.e2e.ts e2e/phone.e2e.ts",
+      "observed": "fingerprint 89574d94... at all three heads; 26 passed, 4 skipped (the projects' own skips), 0 failed, the same count as round 5",
+      "headSha": "3f48d4b433737021da1fd81ebc2ea804f1147edd",
+      "negativeControl": "the width row with AgentName's min-w-0/overflow-wrap undone by injected CSS, same build -> 2 failed at 'page width at 390px': Expected 390, Received 530"
+    }
+  ],
+  "ci": "At 3f48d4b4 when read: Tests 40386335556 queued, Legion Envoy and Contracts 40386335425 (lint, typecheck, unit, browser suite) queued, Docs 40386335542 queued, Worker Image 40386335642 pending, PR Title 40386460693 queued; mergeStateStatus BLOCKED (checks not yet run). Not waited on."
+}
