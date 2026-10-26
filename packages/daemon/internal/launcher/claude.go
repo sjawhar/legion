@@ -117,8 +117,8 @@ func newClaudeKeeper(env []string, resume, clientURL string, log io.Writer) (*cl
 	}
 	configDir = filepath.Clean(configDir)
 	// The id names both files, so it must be one: a uuid, with no separator or dot to lead either
-	// outside the directory (claudelaunch.Transcript's own rule for a transcript's name).
-	if _, ok := claudelaunch.Transcript(filepath.Join(configDir, "projects", "d", session+".jsonl")); !ok {
+	// outside the directory.
+	if !claudelaunch.IsSessionID(session) {
 		return nil, refuse("%s is no Claude Code session id", claudelaunch.SessionVariable)
 	}
 	k := &claudeKeeper{log: log, clientURL: clientURL, configDir: configDir, session: session,
@@ -181,14 +181,13 @@ func (k *claudeKeeper) connect(ctx context.Context) error {
 	if k.conn != nil && !k.conn.IsClosed() {
 		return nil
 	}
-	dsn := k.clientURL
-	if dsn == "" {
-		var err error
-		if dsn, err = ompsessions.ReadDSN(k.dsnFile); err != nil {
-			return err
-		}
+	var conn *pgx.Conn
+	var err error
+	if k.clientURL != "" {
+		conn, err = ompsessions.ConnectURL(ctx, k.clientURL)
+	} else {
+		conn, err = ompsessions.Connect(ctx, k.dsnFile)
 	}
-	conn, err := ompsessions.ConnectURL(ctx, dsn)
 	if err != nil {
 		return err
 	}
@@ -343,7 +342,7 @@ func (k *claudeKeeper) saveFile(ctx context.Context, f *keptFile) error {
 	if err := k.connect(ctx); err != nil {
 		return err
 	}
-	looked := keptState{saved: f.saved, dev: dev, ino: ino, tail: f.tail, size: info.Size(), mtime: info.ModTime()}
+	state := keptState{saved: f.saved, dev: dev, ino: ino, tail: f.tail, size: info.Size(), mtime: info.ModTime()}
 	if same && info.Size() >= f.saved {
 		from := f.saved - int64(len(f.tail))
 		window := make([]byte, info.Size()-from)
@@ -356,11 +355,11 @@ func (k *claudeKeeper) saveFile(ctx context.Context, f *keptFile) error {
 				added = added[:bytes.LastIndexByte(added, '\n')+1]
 			}
 			if len(added) > 0 {
-				looked.saved = f.saved + int64(len(added))
-				looked.tail = lastWindow(window[:len(f.tail)+len(added)])
+				state.saved = f.saved + int64(len(added))
+				state.tail = lastWindow(window[:len(f.tail)+len(added)])
 				err = ompsessions.Append(ctx, k.conn, f.path, f.saved, added, info.ModTime())
 			}
-			return k.settle(f, looked, err)
+			return k.settle(f, state, err)
 		}
 	}
 	content := make([]byte, info.Size())
@@ -373,14 +372,14 @@ func (k *claudeKeeper) saveFile(ctx context.Context, f *keptFile) error {
 	if len(content) == 0 {
 		return nil
 	}
-	looked.saved, looked.tail = int64(len(content)), lastWindow(content)
-	return k.settle(f, looked, ompsessions.Replace(ctx, k.conn, f.path, f.saved, content, info.ModTime()))
+	state.saved, state.tail = int64(len(content)), lastWindow(content)
+	return k.settle(f, state, ompsessions.Replace(ctx, k.conn, f.path, f.saved, content, info.ModTime()))
 }
 
 // settle takes a save's outcome: committed, f holds what it saved, and a fresh transcript's first
 // commit writes its marker. A save that may have landed unanswered is remembered (unacked), and a
 // refusal that the row moved to exactly that save's length is that save landing.
-func (k *claudeKeeper) settle(f *keptFile, saved keptState, err error) error {
+func (k *claudeKeeper) settle(f *keptFile, state keptState, err error) error {
 	var moved *ompsessions.MovedError
 	if errors.As(err, &moved) && f.unacked != nil && moved.Held == f.unacked.saved {
 		k.commit(f, *f.unacked)
@@ -389,12 +388,12 @@ func (k *claudeKeeper) settle(f *keptFile, saved keptState, err error) error {
 	}
 	f.unacked = nil
 	if err != nil {
-		if !errors.As(err, &moved) && saved.saved != f.saved {
-			f.unacked = &saved
+		if !errors.As(err, &moved) && state.saved != f.saved {
+			f.unacked = &state
 		}
 		return err
 	}
-	k.commit(f, saved)
+	k.commit(f, state)
 	return nil
 }
 

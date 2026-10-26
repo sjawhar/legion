@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -491,4 +492,35 @@ func TestAClaudeResumeAfterASIGKILLRestoresExactlyTheSavedPrefix(t *testing.T) {
 		t.Errorf("the replacement's child found the transcript %q, want exactly the saved %q", got, held)
 	}
 	c.stop(1)
+}
+
+// The session id names both kept files, so a fresh launch whose id is no uuid — one with a
+// separator or a dot that would lead either file outside CLAUDE_CONFIG_DIR — is refused before
+// anything is kept, the refusal naming the variable; a uuid is kept.
+func TestClaudeKeeperRefusesASessionIDThatIsNoUUID(t *testing.T) {
+	configDir := t.TempDir()
+	env := func(session string) []string {
+		return []string{"CLAUDE_CONFIG_DIR=" + configDir, claudelaunch.SessionVariable + "=" + session,
+			ompsessions.StorageVariable + "=" + ompsessions.SQLStorage,
+			ompsessions.DSNFileVariable + "=" + filepath.Join(t.TempDir(), ompsessions.DSNFileName)}
+	}
+	for _, session := range []string{
+		"../../../../x/projects/y/" + claudeSession,
+		"x/../" + claudeSession,
+		"../" + claudeSession,
+		"/" + claudeSession,
+		claudeSession + "/..",
+		"..",
+	} {
+		if _, err := newClaudeKeeper(env(session), "", "", io.Discard); err == nil || !strings.Contains(err.Error(), claudelaunch.SessionVariable) {
+			t.Errorf("newClaudeKeeper(session %q) refused with %v, want a refusal naming %s", session, err, claudelaunch.SessionVariable)
+		}
+	}
+	k, err := newClaudeKeeper(env(claudeSession), "", "", io.Discard)
+	if err != nil || k == nil {
+		t.Fatalf("newClaudeKeeper(session %q) made a keeper: %v, err %v; want a keeper", claudeSession, k != nil, err)
+	}
+	if want := filepath.Join(configDir, "legion-phase-stall-"+claudeSession+".json"); k.files[1].path != want {
+		t.Errorf("the kept record is %s, want %s", k.files[1].path, want)
+	}
 }

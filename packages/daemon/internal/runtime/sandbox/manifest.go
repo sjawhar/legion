@@ -1025,7 +1025,7 @@ func (r *Runtime) mainEnvironment(l launch) []corev1.EnvVar {
 		// (claudelaunch.SessionVariable): the pod's disk dies with the pod, so those files would
 		// otherwise die with it and the next pod's `--resume` would find nothing. It is a variable of
 		// the start command, never a field of shimwire.LauncherStart, and the image's launcher reads
-		// it: the contract number (internal/api, 38) and the image probe hold the image to this
+		// it: the contract number (api.DaemonAPIVersion) and the image probe hold the image to this
 		// daemon, so no launcher that predates it runs this launch. It is plain, so it travels in the
 		// start command alone (launchEnvironment) and changes nothing of the pod.
 		add(claudelaunch.SessionVariable, l.claude.session)

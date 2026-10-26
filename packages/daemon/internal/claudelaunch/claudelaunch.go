@@ -106,9 +106,22 @@ func NewSessionID() string {
 	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
 }
 
+// sessionID is the form of a Claude Code session id, a lowercase uuid.
+const sessionID = `[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}`
+
 // transcript is the name of a transcript Claude Code writes, `<session>.jsonl`, its one group the
 // session id.
-var transcript = regexp.MustCompile(`^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$`)
+var transcript = regexp.MustCompile(`^(` + sessionID + `)\.jsonl$`)
+
+// isSessionID matches the whole of a session id, and nothing longer.
+var isSessionID = regexp.MustCompile(`^` + sessionID + `$`)
+
+// IsSessionID reports whether id is a Claude Code session id, by the rule a transcript's name
+// (Transcript) holds it to: a uuid, with no separator or dot that could lead a path built from it
+// outside its directory.
+func IsSessionID(id string) bool {
+	return isSessionID.MatchString(id)
+}
 
 // Transcript is the session id of file when file is a transcript Claude Code writes —
 // `<CLAUDE_CONFIG_DIR>/projects/<cwd>/<session>.jsonl`, wherever that configuration directory is —
