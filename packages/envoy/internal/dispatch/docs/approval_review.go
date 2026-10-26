@@ -30,6 +30,9 @@ const ReviewColumns = `id::text, artifact_id::text, version, state, actor, reaso
 // rollout or a rollback. A row without one was committed before that migration, so every row that
 // carries a sequence is newer than every row without one, which `nulls last` says. created_at is
 // the review's transaction start, so it places two reviews only when neither carries a sequence.
+// This holds only while WriteReview is the one writer of the table: the api package's
+// TestOnlyWriteReviewWritesReviews refuses an insert into or update of artifact_reviews anywhere
+// else in the module.
 const ReviewOrder = `event_seq desc nulls last, created_at desc, id desc`
 
 // ScanReview decodes one ReviewColumns row.
