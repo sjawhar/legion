@@ -525,11 +525,9 @@ ARG PI_CODEGRAPH_VERSION
 # `go test -race …` of CI's envoy-go-race lane — as `CGO_ENABLED=1 go test -race …`, with no CC or
 # linker override; gcc joins go in the toolchain row. libc6-dev is named rather than left to gcc
 # because it is only a Recommends of gcc-14, and Recommends stay out here as everywhere. cgo stays off
-# by default all the same, held in two places: the final stage's `ENV CGO_ENABLED=0`, which reaches
-# every process that inherits the image's environment, and the `CGO_ENABLED=0` line the toolchain
-# stage appends to /opt/go/go.env, which holds where that environment is scrubbed (each of the two
-# comments says why). The cost of any change to this line: it rebuilds this layer, and with it the
-# probe layer below and its natives and everything after them, once.
+# by default all the same (the final stage's `ENV CGO_ENABLED=0` and the toolchain stage's go.env line
+# say how). The cost of any change to this line: it rebuilds this layer, and with it the probe layer
+# below and its natives and everything after them, once.
 # /opt/legion and /opt/legion/bin are created here, root-owned, before any COPY into them: a COPY
 # creates a missing parent with its own --chown, so the plugin's legion:legion copy below would
 # otherwise leave the runtime user free to rename bin/ and plant its own `legion`. The final step
