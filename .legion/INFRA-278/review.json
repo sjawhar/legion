@@ -1,0 +1,46 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-278",
+  "completed": "2026-10-26T03:48:17Z",
+  "round": 1,
+  "reviewedCodeHead": "15e414ed9b6bcda8eb0751074ad16e9f9bb06a4f",
+  "decision": "changes_requested",
+  "critical": 0,
+  "important": 4,
+  "minor": 2,
+  "ci": "CI head 15e414ed (newest pull_request run; compare to handoff head 1af6f4b6 touches only .legion/): required lint, typecheck, test, pr-title all completed success; non-required dispatch check-run in_progress at the read.",
+  "thermo": "thermonuclear-deep-review and thermonuclear-code-quality at 15e414ed: both CHANGES; findings folded into keyFindings.",
+  "keyFindings": [
+    {
+      "severity": "important",
+      "file": "packages/envoy/internal/dispatch/outbox/publisher.go:532,568",
+      "description": "Claimant and follower routes are skipped when a new comment's mention resolved to that session (mentions[].session_id), not when the mention was delivered. A failed send (listener 404, receipt timeout, cancelled handler, or a live session lacking the delivery mode, which resolveMentionTargets still resolves) leaves the session with no copy. For followers this regresses base, which always sent the follower copy. Fix: suppress only a delivered mention; when the send fails, the claimant/follower copy is published; Go table row and live-script case for the failed-mention shape; docs that say 'arrives once, as the mention' updated."
+    },
+    {
+      "severity": "important",
+      "file": "packages/dispatch/web/src/features/inbox/AskRecipients.tsx:162-171,220",
+      "description": "The role route row bypasses the listed-once dedupe, so Reaches N counts the role holder twice when it is the claimant, a follower or a subscriber; the Unfollow/Unsubscribe dialog for a follower holding the route's role says nothing still reaches it. Fix: count distinct sessions using the route holder the server computes (route_holder), name the holder on a role route row, cover in the browser test."
+    },
+    {
+      "severity": "important",
+      "file": "packages/dispatch/web/src/api/sse.ts:591,844",
+      "description": "The ask-thread refresh misses issue.closed carrying a route change, and the issue-scoped marker bypasses markAskThreadsSeededByAnInFlightInbox (sse.ts:909 passes raw keys), so a card mounted from an Inbox body composed before a claim keeps the old claimant (staleTime Infinity)."
+    },
+    {
+      "severity": "important",
+      "file": "packages/contracts/src/dispatch-api.ts:818,2297",
+      "description": "New required members claimant/route on exported AskThread and AskRead with no '## Contract change census' in the PR body."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/internal/dispatch/outbox/publisher.go:577",
+      "description": "loadSessionClaimant adds a per-event query beside scanPendingEvents' existing issues join that already reads the route at publish time; read the claimant there."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/contracts/src/dispatch-api.ts:815-822,2294-2301",
+      "description": "claimant/route and their docs pasted into two interfaces, and getAsk's anonymous struct copies askThread: fast-follow (shared AskReach / embed askThread)."
+    }
+  ]
+}
