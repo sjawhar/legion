@@ -366,6 +366,30 @@ run("askgate-facts-on-9", askgate("facts"), [
   gateRefused("call-a", `AskGate did not send this call.\n${factsReason9}`),
   factsGate("block", factsReason9),
 ]);
+// A `dispatch ask` outside the literal form: the gate reads none of it, and the CLI refused it with
+// no marker. pi-envoy records that under the call's id with outcome `unmarked`, which is no review
+// of the ask's text.
+run("askgate-facts-on-10", askgate("facts"), [
+  ...header,
+  turn[0],
+  toolCall("call-m", "bash", { command: "dispatch ask $(cat ask-args.txt)" }),
+  gateRefused(
+    "call-m",
+    "dispatch ask was not called: AskGate is on for this session, and this call carries no AskGate marker."
+  ),
+  gate({
+    tool: "dispatch_ask",
+    path: "dispatch ask",
+    toolCallId: "call-m",
+    decision: "revise",
+    outcome: "unmarked",
+    verdictMode: "block",
+    reason: "this call carries no AskGate marker",
+  }),
+  askCall,
+  gateRefused("call-a", factsRefusal),
+  factsGate("block"),
+]);
 const linkGate = (decision: string, outcome = "verdict") =>
   gate({ ...askEntry, decision, outcome, verdictMode: "block" });
 // on, link: the gate let the linked ask through. The `--help` call before it has no gate entry.
@@ -2092,6 +2116,12 @@ test("askgate on, facts: reads the first ask the gate reviewed, past an unreadab
   );
 });
 
+test("askgate on, facts: reads the first ask the gate reviewed, past one the CLI refused as unmarked", () => {
+  expect(out).toMatch(
+    /askgate-facts-on-10\tpass=true\t.*refused=true failure12=true age=true contributors=true verdictMode=block /
+  );
+});
+
 test("askgate on, link: passes when the ask exists and the gate allowed it on a verdict", () => {
   expect(out).toMatch(/askgate-link-on-1\tpass=true\t.*asks=1 allowed=1 revised=0 /);
   expect(out).toMatch(/askgate-link-on-2\tpass=false\t.*revised=1 /);
@@ -2136,7 +2166,7 @@ test("askgate: another label and case pair, a directory naming no case, and a ca
 });
 
 test("askgate: the counts are per case and label", () => {
-  expect(out).toContain("askgate:facts\ton\t6/9\t0/9\t0\n");
+  expect(out).toContain("askgate:facts\ton\t7/10\t0/10\t0\n");
   expect(out).toContain("askgate:link\ton\t2/9\t0/9\t0\n");
   expect(out).toContain("askgate:upload\ton\t1/3\t0/3\t1\n");
   expect(out).toContain("askgate:facts\toff\t1/3\t0/3\t0\n");
