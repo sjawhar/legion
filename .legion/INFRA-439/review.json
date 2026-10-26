@@ -2,60 +2,66 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-439",
-  "completed": "2026-10-26T07:23:00Z",
-  "round": 1,
-  "reviewedHead": "2aef017d87b732a154c54ff0645d9fabd19925a9",
+  "completed": "2026-10-26T15:03:03Z",
+  "round": 2,
+  "reviewedHead": "4b149909bb20c1f92d8fac35a0c5ac7d4961d52d",
   "decision": "changes_requested",
   "critical": 0,
-  "important": 6,
-  "minor": 1,
+  "important": 4,
+  "minor": 3,
+  "verifiedFixed": [
+    "Round 1 finding 1: transport.ts:334 is back in the form check-heartbeat-margin.sh reads (it exits 0 at this head).",
+    "Round 1 finding 3: a replayed removal unregisters what it closed (closeReplayedRemoval, both hosts).",
+    "Round 1 finding 4 and the round 4/5 scope: /v1/replay answers only the caller's exact agent subject or a registered interest under a shared stream subject (bus.SharedStreamTopic); session_id must be one NATS token; /v1/interests/subscribe leaves out topics reaching private subjects; TestEveryStreamSubjectIsClassifiedForReplay walks streamCfg.Subjects; red tests 9f8ac8ff and 240a4c4a are byte-identical and pass (tester round 7).",
+    "Round 1 finding 6 and the minor: envoyNoticeText renders both hosts' notices with TOON encode; delivery.ts cites pending().",
+    "Item C: a typed turn withdrawn by an interrupt is released for the sweep (tester round 4, live)."
+  ],
   "keyFindings": [
     {
       "severity": "important",
-      "file": "packages/envoy-client/src/transport.ts",
-      "description": "Required checks lint and test are red at code head 2aef017d (runs 40281287850 jobs lint 121434941868, test 121434942020): .github/scripts/check-heartbeat-margin.sh reads `const attempts = config.retry === false ? N : M;` from transport.ts, and line 329 now adds `|| options.retry === false`. Keep the declaration the check reads and apply the per-request retry on its own line, or update the check's pattern and its self-test together."
+      "file": "packages/pi-envoy/extensions/envoy.ts",
+      "description": "Round 1 finding 2 is only partly fixed. refuseBTW (1301-1306) releases the claim and awaits postDispatchReply before recording the event id. A reply that throws (non-2xx, network) skips the record; a sweep during the in-flight POST sees the frame neither pending nor recorded; and a refusal while shutting down records nothing, because the host's sessionID() answers undefined once shuttingDown is set, so recordDelivered returns at bind(). Each case replays the refused BTW as a steering card. Record before releasing, in a form that persists during shutdown; add tests for a failing reply and for the shutdown refusal followed by a resume."
     },
     {
       "severity": "important",
       "file": "packages/pi-envoy/extensions/envoy.ts",
-      "description": "A BTW refused live (shutting down 1381, host without BTW 1383, side turn failed 1390) releases its claim and records nothing in the replay ledger, so the next sweep finds the stored copy on the agent subject and showReplayed sends it as a steering card that triggers a turn, marked 'published while this session's connection was down'. Contradicts the plan ('after a BTW reply or a correlated refusal is posted') and pi-envoy AGENTS.md ('an advertised btw frame never falls back to steering'). Record the event id only after the refusal is posted, so a same-mode Retry (new event id, same dedupe key) still arrives; add a test: side turn rejects, sweep runs, no card."
+      "description": "Round 1 finding 5 is only partly fixed. receivedAt (1229, and claude-envoy channel-forwarder.ts 150) is taken when deliver starts, not when the frame arrived, so a frame queued behind a slow delivery while its subject's cursor starts (a new follow, a stream recreation) is stamped after the cursor start; if it then fails, liveFailed leaves it to a sweep that never reads it. Deep-review reproduced this in a scratch copy (expected one card or notice, received 0)."
     },
     {
       "severity": "important",
-      "file": "packages/pi-envoy/extensions/envoy.ts",
-      "description": "A replayed subscription.removed (showReplayed 1665-1670) closes the topic locally only; closeIntentionally never unregisters it, and on resume recoverRegisteredInterests subscribed and registered it again from the remembered state (2272-2279), and the listener's upsert merges topics (internal/store/kv.go mergeForUpsert). The registry keeps the topic the person removed, so the next restart follows it again with the removal already behind the cursor. claude-envoy unregisters (dropRemovedTopics). Call client.unsubscribe for the topics the replayed removal closed."
+      "file": "packages/envoy/cmd/listener/api.go",
+      "description": "The PR body's Contract change census states three things the code does not do. (a) Rollout says a serve-port session 'no longer has it stored, so the listener's interest fan-out no longer matches it', but the guard filters only the incoming topics and Registry.Upsert merges them into the stored row (kv.go mergeForUpsert, store.Merge), so a row stored before the upgrade keeps fanning out exception-lane and controller-lane messages through registry.Match. (b) 'pi-envoy and claude-envoy now leave it out of what they register' holds only for agent subjects (coversAnotherAgentSubject). (c) 'both close the cross-session read' overstates: replay of another session's agent subject by its real id still works under the listener's existing trust model. Filter the stored row on upsert (recommended, makes (a) true) and correct (b) and (c)."
     },
     {
       "severity": "important",
-      "file": "packages/envoy/cmd/listener/replay.go",
-      "description": "Security[authz]: session_id is only trimmed (121) and becomes the agent subject as-is (200); `{\"session_id\":\">\",\"subjects\":[{\"subject\":\"notifications.agent.>\",\"after\":0}]}` passes replayFollowed's equality, CheckFilterSubject (trailing `>`) and stream containment, and returns every session's inbox for 72 hours with no interest registered. Refuse a session_id that is not one literal NATS token (no '.', '*', '>', whitespace) with 400; that is a new refusal at a process boundary, so the PR body needs a Contract change census (callers: pi-envoy and claude-envoy via envoy-client replay())."
-    },
-    {
-      "severity": "important",
-      "file": "packages/envoy-client/src/replay.ts",
-      "description": "liveFailed (779-786) leaves a failed live frame to the sweep whenever its subject was answered and has a cursor, but a cursor that starts (675) begins at the watermark, which can be at or above a frame the live path still holds (awaiting a Dispatch accept or pictures). If that delivery fails afterwards no sweep reads it and only a console warning remains, against the spec's 'never only caught'. Applies to a new session's agent subject, a new follow, and the reset after stream recreation. Show the notice at once when the live claim predates the cursor's start."
-    },
-    {
-      "severity": "important",
-      "file": "packages/claude-envoy/src/missed-messages.ts",
-      "description": "envoyNoticeContent writes sender-controlled summary and error text raw as `  key: value` lines; a newline in payload_summary breaks the block or forges a field (a fake `detail:` line) inside an envoy notice the model trusts. pi-envoy encodes the same fields with TOON encode. Render claude-envoy's notices with the same encoder (one exported helper in @legion/envoy-client/replay serves both)."
+      "file": "packages/pi-envoy/src/unwritten-frames.ts",
+      "description": "The structural item is half done: sendCard returns a boolean and hands settle and release back to every caller (showReplayCard envoy.ts 1081-1088, live card 1353-1360, text and typed turns 1392-1414 with their identity === undefined branches and taken()). Make sendCard settle when nothing waits and release on a throw, returning the outcome, and let awaitTurn settle at once without an identity, so no caller repeats the claim protocol."
     },
     {
       "severity": "minor",
-      "file": "packages/envoy-client/src/delivery.ts",
-      "description": "Line 178 cites `DeliveryDedupe.status`, which the simplify pass replaced with `pending()`."
+      "file": "packages/envoy-client/src/replay.ts",
+      "description": "Line 905 cites bus.CoversAnotherAgentSubject, which no longer exists (bus.ReachesPrivateStreamSubject and bus.SharedStreamTopic); replay-host-policy.test.ts:37 says 'as the listener does'. The host filter covers only agent subjects, so a followed exception lane or notifications.legion topic is registered and warned about on every heartbeat."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/pi-envoy/src/unwritten-frames.ts",
+      "description": "Lines 232-238 say a withdrawn pi.sendUserMessage turn is released for a sweep; in production the aborted run's agent_end calls textTurnsEnded() (envoy.ts 3247), which records it shown first, and unwritten-frames.test.ts 261-292 skips that call. Correct the comment and the test, or have handBackWithdrawn take text turns too."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/infra/go.work.sum",
+      "description": "Merge 5e45356e rewrote go.work.sum (4 entries added or removed) though no go.mod changed; the same churn was reverted in ac39a68. Restore main's copy."
     }
   ],
   "ci": {
-    "codeHead": "2aef017d87b732a154c54ff0645d9fabd19925a9",
+    "codeHead": "4b149909bb20c1f92d8fac35a0c5ac7d4961d52d",
     "required": ["lint", "typecheck", "test", "pr-title"],
-    "observed": "lint failure, test failure, typecheck success, pr-title success; compare 2aef017d...d1879281 changes only .legion/. The PR body's CI line (all queued) is stale."
+    "observed": "All queued or pending when read (runs 40341136704, 40341136674, 40341298952); compare 4b149909...b1d2eda3 changes only .legion/. Not read to completion: a request for changes does not wait on CI."
   },
   "thermonuclear": {
-    "head": "d1879281b8a1494a3d15ffc8820b40689fc16821",
-    "deepReview": "CHANGES: refused BTW replayed (adopted), replayed removal not unregistered (adopted, raised to important), wildcard session_id (adopted, raised to important), live failure at cursor start (adopted, raised to important), claude notice unescaped (adopted from its hardening list); typed-input withdrawal is an unverified hypothesis, recorded under Not proven / risk. Providers mixed: 56 anthropic/claude-opus-5-5, 1 openai/gpt-6.1-sol.",
-    "codeQuality": "CHANGES: unwritten-frame tracking inline in envoy.ts, host policy duplicated across plugins, regex re-parse of card text, replay.ts concerns, identity index x4, requestConfirmed copy: structural, batched into one Fast-follow; the unescaped claude notice is taken as a finding. Providers mixed: 33 anthropic/claude-opus-5-5, 1 openai/gpt-6.1-sol."
+    "head": "b1d2eda3833c0cce9b676a427d0eae0b3d4819d9",
+    "deepReview": "CHANGES. Findings 1 and 2 adopted as important; 3 and 5 folded into the census and minor findings; 4 (session_id is a bare claim, so a caller can still read a session by its real id) is a trust-model design question sent to the architect, and the census must stop claiming it is closed. Mixed providers: 94 anthropic/claude-opus-5-5 turns, 1 openai/gpt-6.1-sol.",
+    "codeQuality": "CHANGES. Findings 1, 2 and 3 adopted; 4 (one classified subject table), 5 (session-token rule written twice) and 6 (replay.ts past 1000 lines) are structural minors and not required by this round. Mixed providers: 54 anthropic/claude-opus-5-5 turns, 1 openai/gpt-6.1-sol."
   },
-  "fastFollow": "Move pi-envoy's unwritten-frame tracking out of envoy.ts into a TypedPictures-style module that owns each claim's settle/release, and let the replay engine own the host policy both plugins copy (followed and remembered subject filters, the replayed-removal rule, notice routing).",
-  "contractCensus": "Not required at 2aef017d (new route, optional `code` on the error body, read-only grant added, DeliveryClaim.settle/DeliveryDedupe.pending implemented only by createDeliveryDedupe with every caller in the repository updated); required once the session_id refusal lands."
+  "contractCensus": "Present. Callers re-checked: subscribe call sites are pi-envoy envoy.ts:1994, claude-envoy envoy-channel-server.ts:720 and envoy-plugin server.ts:89 and 303, which the census lists; replay() is called only by the two plugins. Three census statements are wrong (finding 3)."
 }
