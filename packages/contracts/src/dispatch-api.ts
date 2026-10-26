@@ -583,7 +583,11 @@ export interface ArtifactApproval {
   /** The latest review's `created_at`, which its `artifact.*` event shares. */
   readonly at?: string;
   /** The latest review's event sequence on the document's owner, which orders the review among
-   *  the owner's events as they commit; absent for a review recorded before Dispatch kept it. */
+   *  the owner's events as they commit. Absent for a review recorded before Dispatch kept it, and
+   *  on every read the release before that serves (during a rollout or a rollback), so a missing
+   *  `seq` does not prove an older review. It orders; it does not say which versions the review
+   *  covers, which is `version`: a carried approval's `seq` can be below its version's own
+   *  `artifact.version`. */
   readonly seq?: number;
   readonly reason?: string | null;
   readonly ask_id?: string | null;

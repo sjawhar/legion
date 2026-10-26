@@ -526,8 +526,11 @@ type ArtifactReview struct {
 // the request past the one its agent handed to the human, or a reply left it with
 // the agent; human otherwise (the ask reads' waiting_on). Seq is the latest
 // review's event sequence on the document's owner, absent for a review recorded
-// before Dispatch kept it: the owner's row lock orders its events as they commit,
-// so Seq places the review among them where At, its transaction's start, cannot.
+// before Dispatch kept it and on every read the release before that serves during
+// a rollout or a rollback, so a missing Seq does not prove an older review: the
+// owner's row lock orders its events as they commit, so Seq places the review
+// among them where At, its transaction's start, cannot. Seq orders; Version, not
+// Seq, says which version the review covers.
 type ArtifactApproval struct {
 	State         string  `json:"state"`
 	LatestVersion int     `json:"latest_version"`

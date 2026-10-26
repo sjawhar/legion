@@ -713,7 +713,7 @@ the transaction that appends the event and the approval read returns as `seq`
 and the release before it, which names no `event_seq` in its insert, rolls beside it. Adding a
 nullable column with no default writes the catalog alone, under `artifact_reviews`'
 `ACCESS EXCLUSIVE` lock for milliseconds; it refuses and rewrites no row, and its census answers `0`.
-Its `event_seq > 0` check is a second statement, added `not valid` as the rule above requires: an
+Its `event_seq > 0` check is a second statement, added `not valid` as the rule below requires: an
 inline check would read every row of the table while it held that lock, and `not valid` still
 refuses every row written or updated after it. Nothing validates it later — every row below the
 migration carries no sequence at all — so the constraint stays `not valid` for good.
