@@ -1,0 +1,65 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-448",
+  "completed": "2026-10-26T13:31:00Z",
+  "decision": "changes_requested",
+  "critical": 0,
+  "important": 2,
+  "minor": 7,
+  "reviewedCodeHead": "19e3dfb6ef31349a0c8b86104479c385865a172b",
+  "keyFindings": [
+    {
+      "severity": "important",
+      "file": "packages/envoy/cmd/listener/main.go:737-740",
+      "description": "legionagents.Open failing is log.Fatal: a listener image released before the envoy-infra grant lands crash-loops every listener (all Envoy delivery and role routing on that host) for a display-only registry, and the PR carries no Contract change census for this new start-up refusal at the listener/NATS-grant boundary. Degrade instead (log ERROR, keep the store nil, /v1/legion/agents* answer 503, reopen on the reconnect hook), which Dispatch already handles as legion_registry unavailable."
+    },
+    {
+      "severity": "important",
+      "file": "packages/envoy/internal/legionagents/store.go:276-319",
+      "description": "prepare reads session.<id>, then write does three plain kv.Put calls: two concurrent writes of one session with different issues, or a write that dies after its index keys followed by a re-put with another issue, both pass and leave index keys under two issues, breaking the stated 409 / no-orphaned-index guarantee with no delete route to repair it. Claim with kv.Create (new) or kv.Update at the read revision (re-put) before writing index keys."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/internal/legionagents/store.go:191-227",
+      "description": "Store.list copies kvwatch.ScanExistingKeys' end-of-scan protocol (nil marker, idleTimeout on Error(), closed channel); generalise the kvwatch helper (filter and watch options) and use it."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/internal/dispatch/api/comment_create.go:313",
+      "description": "The closed rule is a bare bool through six functions, and here `suggestion` is passed as refuseClosed; separate the lock read from the refusal or use a named type."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/internal/dispatch/api/issue_collaborators.go:96",
+      "description": "Title doc says 'newest stamped title' but ResolveSessionTitles returns the newest event's title and null when that event carries none (tester observation 1); correct here, in contracts dispatch-api.ts:1580 and cmd/dispatch/AGENTS.md:440."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/CHANGELOG.md:698",
+      "description": "Says a reopen of an existing comment stays 409 on a closed issue, but a reply to a resolved root reopens it there (plan D2, tester-confirmed); same in packages/envoy/AGENTS.md:1902."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/proof-editor/src/dispatch-action-bar.ts:314-321",
+      "description": "reportQuoteComment swallows the host's 'The selection holds no text to quote.' error, so Comment silently does nothing; and its `quote` field is computed and never used by the host."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/cmd/listener/api.go:1322",
+      "description": "The batch PUT sends bus.ErrRefused to the 503 retry branch while the single PUT answers it 4xx; route both through writeLegionAgentError with a typed partial-write error."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/dispatch/web/src/api/client.ts:765",
+      "description": "getIssueCollaborators and the four web type re-exports have no caller after spec v4 moved the tab to INFRA-470: dead code left by the cutover."
+    }
+  ],
+  "observationsJudged": [
+    "Tester observation 1 (null title): code behaviour accepted (the registry title wins for Legion agents and plugin writes always stamp one); the doc that contradicts it is finding 5.",
+    "Tester observation 2 (registry writable by any /v1 bearer): not a defect of this PR: same flat /v1 trust as /v1/roles/set, the registry is display-only here and INFRA-204's daemon answers only sessions its own history holds; recorded under Not proven / risk.",
+    "Tester observation 3 (live follows the 5-minute session TTL): not a defect: it is the listener's live rule everywhere, and the collaborators route carries no running flag (plan D4)."
+  ],
+  "thermonuclear": "deep-review: APPROVE with four Minor; code-quality: CHANGES (structure); both at dbd00fca; provider not verified",
+  "ci": "At code head 19e3dfb6: typecheck, pr-title, changes, build success; lint and test in progress; not a gate for a REQUEST_CHANGES round."
+}
