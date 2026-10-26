@@ -191,11 +191,13 @@ const NATS_RETRY_INTERVAL_MS = 15_000;
 const DELIVERY_PICTURES_TIMEOUT_MS = 20_000;
 
 /** What every card `deliver` sends carries in its `details`, which the host keeps on the record
- *  and its persisted entry: an id no other card in the process shares, and whether the card was a
- *  targeted Aside. The session's own notices carry `LOCAL_ENVOY_NOTICE` instead. */
+ *  and its persisted entry: an id no other card in the process shares, whether the card was a
+ *  targeted Aside, and `startup` on a card sent in the startup phase (`startupPhase`). The
+ *  session's own notices carry `LOCAL_ENVOY_NOTICE` instead. */
 type EnvoyCardMarker = {
   readonly envoyCard: string;
   readonly targetedAside: boolean;
+  readonly startup?: true;
 };
 
 /** The card marker a host message's or a branch entry's `details` carries; undefined for none. */
@@ -203,10 +205,15 @@ function envoyCardMarker(details: unknown): EnvoyCardMarker | undefined {
   if (typeof details !== "object" || details === null) return undefined;
   if (!("envoyCard" in details) || !("targetedAside" in details)) return undefined;
   const { envoyCard, targetedAside } = details;
-  return typeof envoyCard === "string" && typeof targetedAside === "boolean"
-    ? { envoyCard, targetedAside }
-    : undefined;
+  if (typeof envoyCard !== "string" || typeof targetedAside !== "boolean") return undefined;
+  return "startup" in details && details.startup === true
+    ? { envoyCard, targetedAside, startup: true }
+    : { envoyCard, targetedAside };
 }
+
+/** How long a card sent in the startup phase may go without its `message_end` before the wake's
+ *  check stops waiting for it (`startupPhase`): one older than this is a send the host failed. */
+const STARTUP_CARD_CAP_MS = 30_000;
 
 /** The `errorMessage` of the assistant message an interrupt ends a run with: the host's
  *  `USER_INTERRUPT_LABEL` (`@oh-my-pi/pi-tui`), which RPC `abort`, Esc and `ctx.abort` all pass. */
@@ -1239,10 +1246,23 @@ export default function envoyExtension(pi: PiApi): void {
             // Legion daemon sends) and in plan mode, where an idle aside starts none. A host
             // context with no `isIdle` cannot say whether a turn runs, and its cards stay steers
             // too: the wake for a card the host folds (`foldedCards`) needs `isIdle`. A targeted
-            // Aside stays an aside in every case. Each card carries a marker (`EnvoyCardMarker`)
-            // the wake finds it by in the branch. The limit is in `AGENTS.md` ("Overview").
+            // Aside stays an aside in every case but one: in the startup phase (`startupPhase`) a
+            // card that finds the host idle, a targeted Aside included, goes as a `followUp` with
+            // no `triggerTurn`, since an idle card with `triggerTurn` started its turn inside the
+            // host's startup drain (`runtime-init.ts` `initializeExtensions`, ~535-548), which
+            // waits for that whole run and so held every RPC command back until it ended. A host
+            // with no `isIdle` keeps the steer, as no check could ever release a startup card on
+            // it; a busy one keeps the aside, which waits in no drain. Each card carries a marker
+            // (`EnvoyCardMarker`) the wake finds it by in the branch. The limit is in `AGENTS.md`
+            // ("Overview").
             const targetedAside = rendered.delivery?.mode === "aside";
-            const marker: EnvoyCardMarker = { envoyCard: randomUUID(), targetedAside };
+            const idle = activeSessionContext?.isIdle?.();
+            const startup = startupPhase && idle === true;
+            const marker: EnvoyCardMarker = {
+              envoyCard: randomUUID(),
+              targetedAside,
+              ...(startup && { startup: true as const }),
+            };
             pi.sendMessage(
               {
                 customType: "envoy-message",
@@ -1250,12 +1270,16 @@ export default function envoyExtension(pi: PiApi): void {
                 display: true,
                 details: marker,
               },
-              {
-                deliverAs:
-                  targetedAside || activeSessionContext?.isIdle?.() === false ? "aside" : "steer",
-                triggerTurn: true,
-              }
+              startup
+                ? { deliverAs: "followUp", triggerTurn: false }
+                : {
+                    deliverAs: targetedAside || idle === false ? "aside" : "steer",
+                    triggerTurn: true,
+                  }
             );
+            // Recorded once the host took the send: the host emits no `message_end` before
+            // `sendMessage` returns, since its send awaits the card's pictures first.
+            if (startup) unseenStartupCards.set(marker.envoyCard, Date.now());
             markPicturesShown(shownPictures(sessionID), card.shown);
           } else {
             const { turn } = accepted;
@@ -1659,21 +1683,93 @@ export default function envoyExtension(pi: PiApi): void {
   // for the asides it strands itself, so it sets nothing here.
   let foldedCards: { readonly id: string; readonly run: number }[] = [];
   let foldInterrupted = false;
+
+  // The startup phase. Oh My Pi starts the sends an extension makes from `session_start` and
+  // startup discovery only once that discovery is done (`runtime-init.ts` `initializeExtensions`
+  // runs both inside `runner.sends.withHeld`, ~535-545), then awaits every send it tracks, those
+  // started while it waits included (`runner.sends.drain()`, ~548; `send-queue.ts` `drain`),
+  // before it returns, and RPC mode reads no input until it has returned. An idle card sent with
+  // `triggerTurn` is a send that lasts as long as the run it starts, so a card that reached this
+  // extension in that window, as this extension opens its agent subject in `session_start`, ran a
+  // whole turn inside the drain, and the host answered no RPC command (`get_state`, `prompt`)
+  // until it ended. The host gives extensions no event once the drain is over.
+  //
+  // So while `startupPhase` holds, a card that finds the host idle goes as a `followUp` with no
+  // `triggerTurn` (`deliver`): on an idle host that appends it to the context, persists it and
+  // emits its `message_end`, starting no turn and awaiting nothing longer than its pictures
+  // (`agent-session.ts` `sendCustomMessage`'s idle append, ~9360-9382). The card is its own
+  // witness that startup is over: the host starts a held send only once the hold settles
+  // (`send-queue.ts` `dispatch`, ~52-55, on the hold `withHeld` settles in its `finally`, ~38-49),
+  // so its `message_end` comes after the hold, and the check that `message_end` arms runs on the
+  // host's timer, a macrotask, while everything from the drain to `initializeExtensions` returning
+  // runs in microtasks and a send that starts a turn marks the host busy before it awaits anything.
+  // A host idle at that check has no tracked send pending: the drain has returned, and the wake
+  // the check sends starts its turn outside it. The one exception is another extension's startup
+  // send still loading its pictures on an idle host.
+  // The first check that finds the host idle ends the phase.
+  //
+  // A startup card is unseen from its send to its `message_end`. While one is younger than
+  // `STARTUP_CARD_CAP_MS` the check waits for it, since it may still be inside the host's send and
+  // so still hold the drain; one older than that is a send the host failed (a discarded hold
+  // rejects it) and waits the check no longer. A seen startup card is in the context: a running
+  // turn reads it, so a busy check keeps it and the run's `agent_end` checks again, and an idle
+  // check wakes for it whatever the interrupt latch or the run, as the steer it replaces started
+  // a turn after an interrupt too.
+  let startupPhase = true;
+  const unseenStartupCards = new Map<string, number>();
+  const seenStartupCards = new Set<string>();
+
   let foldCheckArmed = false;
+  // When the armed check runs: a sooner one replaces it, a later one waits for it.
+  let foldCheckDue = 0;
   // Bumped to drop an armed check, since the host's managed timer has no cancel handle.
   let foldCheckGeneration = 0;
+  const armFoldCheck = (context: SessionContext, delayMs = 0): void => {
+    const due = Date.now() + delayMs;
+    if (foldCheckArmed && foldCheckDue <= due) return;
+    foldCheckGeneration += 1;
+    foldCheckArmed = true;
+    foldCheckDue = due;
+    const generation = foldCheckGeneration;
+    context.setTimeout(() => {
+      if (generation !== foldCheckGeneration) return;
+      foldCheckArmed = false;
+      checkFoldedCards(context);
+    }, delayMs);
+  };
   const cancelFoldCheck = (): void => {
     foldCheckGeneration += 1;
     foldCheckArmed = false;
     foldedCards = [];
+    unseenStartupCards.clear();
+    seenStartupCards.clear();
   };
   const checkFoldedCards = (context: SessionContext): void => {
-    // A card fed to a run that has since started is that run's to read.
+    // The soonest an unseen startup card stops holding the check back, if one still does.
+    let waitMs: number | undefined;
+    const now = Date.now();
+    for (const [id, sentAt] of unseenStartupCards) {
+      const left = sentAt + STARTUP_CARD_CAP_MS - now;
+      if (left <= 0) unseenStartupCards.delete(id);
+      else waitMs = Math.min(waitMs ?? left, left);
+    }
+    if (waitMs !== undefined) {
+      armFoldCheck(context, waitMs);
+      return;
+    }
+    // A card fed to a run that has since started is that run's to read, and one an interrupt
+    // found stays folded.
     const pending = new Set(
-      foldedCards.filter((folded) => folded.run === runSeq).map((folded) => folded.id)
+      foldInterrupted
+        ? []
+        : foldedCards.filter((folded) => folded.run === runSeq).map((folded) => folded.id)
     );
     foldedCards = [];
-    if (pending.size === 0 || foldInterrupted || context.isIdle?.() !== true) return;
+    if (context.isIdle?.() !== true) return;
+    startupPhase = false;
+    for (const id of seenStartupCards) pending.add(id);
+    seenStartupCards.clear();
+    if (pending.size === 0) return;
     // Walked from the end, stopping once every card is placed: a card with an assistant message
     // anywhere after it was read by a run.
     let unread = 0;
@@ -1694,13 +1790,14 @@ export default function envoyExtension(pi: PiApi): void {
     }
     unread += pending.size;
     if (unread === 0) return;
+    // Worded for a session that has had no turn yet too: a startup card's wake may be its first.
     pi.sendMessage(
       {
         customType: "envoy-message",
         content:
           unread === 1
-            ? "1 Envoy message above arrived after your last turn ended: read it and act on it."
-            : `${unread} Envoy messages above arrived after your last turn ended: read them and act on them.`,
+            ? "1 Envoy message above arrived with no turn to read it: read it and act on it."
+            : `${unread} Envoy messages above arrived with no turn to read them: read them and act on them.`,
         display: false,
         details: LOCAL_ENVOY_NOTICE,
       },
@@ -1728,17 +1825,13 @@ export default function envoyExtension(pi: PiApi): void {
         "details" in message
       ) {
         const marker = envoyCardMarker(message.details);
-        if (marker !== undefined && !marker.targetedAside) {
+        if (marker?.startup === true) {
+          unseenStartupCards.delete(marker.envoyCard);
+          seenStartupCards.add(marker.envoyCard);
+          armFoldCheck(context);
+        } else if (marker !== undefined && !marker.targetedAside) {
           foldedCards.push({ id: marker.envoyCard, run: runSeq });
-          if (!foldCheckArmed) {
-            foldCheckArmed = true;
-            const generation = foldCheckGeneration;
-            context.setTimeout(() => {
-              if (generation !== foldCheckGeneration) return;
-              foldCheckArmed = false;
-              checkFoldedCards(context);
-            }, 0);
-          }
+          armFoldCheck(context);
         }
       }
     }
@@ -3067,6 +3160,9 @@ export default function envoyExtension(pi: PiApi): void {
   // ACP host, but a client that defers agent-initiated turns gets the steer queued as hidden
   // next-turn context instead of a turn of its own, consumed when the user next prompts.
   pi.on("agent_end", async (event, context) => {
+    // A startup card a busy check kept, or one not yet seen, is checked again now the run ended
+    // (`startupPhase`).
+    if (unseenStartupCards.size > 0 || seenStartupCards.size > 0) armFoldCheck(context);
     const id = context.sessionManager.getSessionId();
     // A person's direct message sent through `pi.sendUserMessage` and not yet seen as a user
     // message by the end of the run is not looked for again; one sent as typed input is, by its tag,

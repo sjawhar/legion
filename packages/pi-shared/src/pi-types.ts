@@ -442,7 +442,7 @@ export interface PiApi {
         }
       | { readonly type: string },
     options?: {
-      readonly deliverAs: "steer" | "aside" | "nextTurn";
+      readonly deliverAs: "steer" | "aside" | "nextTurn" | "followUp";
       readonly triggerTurn: boolean;
     }
   ) => void;

@@ -36,7 +36,7 @@ function setup(): { readonly binary: string; readonly nats: string } {
 }
 
 /** What the wake (extensions/envoy.ts, `foldedCards`) says, in its one- and many-card forms. */
-const WAKE_TEXT = /Envoy messages? above arrived after your last turn ended/;
+const WAKE_TEXT = /Envoy messages? above arrived with no turn to read (it|them)/;
 
 /** How long a case waits for one thing the session owes it before failing on it. */
 const DEADLINE_MS = 30_000;
@@ -173,6 +173,8 @@ interface CardSession {
   cardEntries(): Promise<string[]>;
   /** Polls `probe` until it returns a value, failing at the deadline or when omp exits. */
   until<T>(what: string, probe: () => T | undefined | Promise<T | undefined>): Promise<T>;
+  /** Answers the registration a session started with `holdStartup` holds; a no-op otherwise. */
+  releaseStartup(): void;
 }
 
 /** Polls `probe` until it returns a value, failing on `what` at the deadline or when omp exits. */
@@ -197,15 +199,21 @@ async function until<T>(
  * Starts the real Oh My Pi in RPC mode with only envoy.ts loaded, against one stand-in that is the
  * model gateway, the Envoy listener and Dispatch, and the NATS server at `nats`. `config` lines go
  * into the profile's config.yml. Resolves once the session has registered its id with the
- * listener and the test holds a NATS connection.
+ * listener and the test holds a NATS connection. With `holdStartup` the stand-in holds its answer
+ * to that first registration until `releaseStartup`: envoy.ts's `session_start` awaits it
+ * (`reconcileNow` registers once the agent subject is open), so the host is still inside its
+ * startup, before it starts any extension send or reads any RPC command.
  */
 async function startSession(
   binary: string,
   nats: string,
-  config: readonly string[] = []
+  config: readonly string[] = [],
+  holdStartup = false
 ): Promise<CardSession> {
   const { root, home, workspace, sessions } = await ompRoot(binary, "card-delivery-omp-", cleanup);
 
+  let startupHold = holdStartup ? Promise.withResolvers<void>() : undefined;
+  const releaseStartup = startupHold?.resolve ?? (() => undefined);
   const turns: Turn[] = [];
   const { requests, base } = serveStandin(cleanup, async (url, body) => {
     if (url.pathname === "/anthropic/v1/messages") {
@@ -239,7 +247,13 @@ async function startSession(
     if (/^\/api\/v1\/messages\/[^/]+\/deliveries\/\d+\/reply$/.test(url.pathname)) {
       return Response.json({}, { status: 201 });
     }
-    // The Envoy listener: registration and any read answer with an interest.
+    // The Envoy listener: registration and any read answer with an interest. A held startup
+    // holds the first registration.
+    if (url.pathname === "/v1/interests/subscribe" && startupHold !== undefined) {
+      const held = startupHold.promise;
+      startupHold = undefined;
+      await held;
+    }
     return Response.json({
       session_id: typeof body.session_id === "string" ? body.session_id : "",
       machine_id: "card-delivery-machine",
@@ -247,8 +261,10 @@ async function startSession(
       topics: [],
     });
   });
-  // A request still held at the end (an aborted one) is answered, so the server stops at once.
+  // A request still held at the end (an aborted one, a held registration) is answered, so the
+  // server stops at once.
   cleanup.push(async () => {
+    releaseStartup();
     for (const turn of turns) turn.reply([text("Case over.")]);
   });
   /** The body each published Send's message id carries, which the accept answers with. */
@@ -379,6 +395,7 @@ async function startSession(
         .filter((line) => line.includes('"custom_message"') && line.includes('"envoy-message"'));
     },
     until: (what, probe) => until(what, probe, closed),
+    releaseStartup,
   };
   return session;
 }
@@ -400,6 +417,20 @@ async function probe(session: CardSession, expected: number): Promise<Request> {
   await session.settled();
   expect(session.turns.length).toBe(expected + 1);
   return turn.request;
+}
+
+/**
+ * Resolves as `promise` does, or fails on `what` once `ms` have passed without it settling. A
+ * real timer, as what it bounds is the real binary's answer time; a passing case never waits on it.
+ */
+async function within<T>(what: string, ms: number, promise: Promise<T>): Promise<T> {
+  const late = Promise.withResolvers<never>();
+  const timer = setTimeout(() => late.reject(new Error(`${what}: no answer within ${ms} ms`)), ms);
+  try {
+    return await Promise.race([promise, late.promise]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 // A card queued while a turn runs used to be a steer, and the host drains its steering queue one
@@ -522,10 +553,14 @@ test.skipIf(skip)(
     await session.command({ type: "abort" });
     await session.settled();
 
-    // An idle card starts a turn under the interrupt; its reply reports usage past the threshold.
+    // An idle card gets a turn under the interrupt; its reply reports usage past the threshold.
+    // The session got no card while it started, so this one is still in the startup phase
+    // (extensions/envoy.ts, `startupPhase`): it goes into the context with no turn, and its wake
+    // starts the turn, as its steer did before.
     const first = await session.card("c1");
-    const cardTurn = await session.nextTurn("the turn the idle card started");
-    expect(lastMessage(cardTurn.request)).toContain(first);
+    const cardTurn = await session.nextTurn("the turn the idle card's wake started");
+    expect(conversation(cardTurn.request)).toContain(first);
+    expect(lastMessage(cardTurn.request)).toMatch(WAKE_TEXT);
     cardTurn.reply([text("Read the first card.")], 150_000);
 
     const summary = await session.nextTurn("the automatic compaction's summary request");
@@ -573,16 +608,65 @@ test.skipIf(skip)(
   120_000
 );
 
+// The first idle card of a session that got none while it started is still in the startup phase
+// (extensions/envoy.ts, `startupPhase`): it goes into the context with no turn, and its wake
+// starts the turn and ends the phase. An idle card after that starts its turn itself.
 test.skipIf(skip)(
   "a card that reaches an idle session starts a turn",
   async () => {
     const { binary, nats } = setup();
     const session = await startSession(binary, nats);
-    const card = await session.card("d1");
+    const first = await session.card("d1");
+    const woken = await session.nextTurn("the turn the first idle card's wake started");
+    expect(conversation(woken.request)).toContain(first);
+    expect(lastMessage(woken.request)).toMatch(WAKE_TEXT);
+    woken.reply([text("Read the first card.")]);
+    await session.settled();
+
+    const card = await session.card("d2");
     const turn = await session.nextTurn("the turn the idle card started");
     expect(lastMessage(turn.request)).toContain(card);
     turn.reply([text("Read the card.")]);
     await probe(session, turn.index + 1);
+  },
+  120_000
+);
+
+// Oh My Pi reads no RPC command until every send an extension started during its startup has
+// settled (runtime-init.ts `initializeExtensions`: `runner.sends.drain()`), and an idle card sent
+// with `triggerTurn` lasts as long as the turn it starts: a card that reached pi-envoy while the
+// session started ran its whole turn inside that drain, and `get_state` and `prompt` waited for
+// it. The stand-in holds the registration envoy.ts's `session_start` awaits, with the agent
+// subject already open, so the cards reach pi-envoy inside the host's startup: the RPC command
+// written meanwhile is not even read until startup is over.
+test.skipIf(skip)(
+  "a card that arrives while the session starts holds no RPC input",
+  async () => {
+    const { binary, nats } = setup();
+    const session = await startSession(binary, nats, [], true);
+    const early = session.command({ type: "get_state" });
+    let answeredEarly = false;
+    void early.then(
+      () => {
+        answeredEarly = true;
+      },
+      () => undefined
+    );
+    const cards = [await session.card("s1"), await session.card("s2")];
+    expect(answeredEarly).toBe(false);
+    session.releaseStartup();
+
+    // The cards' turn is held at its model request, and the host still answers RPC commands:
+    // the one written during startup, and one written now.
+    const woken = await session.nextTurn("the turn the startup cards' wake started");
+    await within("get_state written during startup", 5_000, early);
+    await within("get_state written while the turn is held", 5_000, session.state());
+
+    const messages = conversation(woken.request);
+    for (const card of cards) expect(messages).toContain(card);
+    expect(lastMessage(woken.request)).toMatch(WAKE_TEXT);
+    woken.reply([text("Read the startup cards.")]);
+    await probe(session, woken.index + 1);
   },
   120_000
 );

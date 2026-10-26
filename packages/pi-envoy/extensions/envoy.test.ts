@@ -1,4 +1,13 @@
-import { afterEach, beforeEach, describe, expect, mock, spyOn, test } from "bun:test";
+import {
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  mock,
+  setSystemTime,
+  spyOn,
+  test,
+} from "bun:test";
 import { createHash } from "node:crypto";
 import {
   chmodSync,
@@ -909,6 +918,51 @@ async function bootDirectSession(
     replies,
     sends,
   };
+}
+
+/** What `endStartupPhase` reads of a `createPi()` fixture. */
+type CardFixture = {
+  readonly deliveries: readonly {
+    readonly content: string;
+    readonly customType?: string;
+    readonly details?: unknown;
+    readonly display?: boolean;
+    readonly options: unknown;
+  }[];
+  readonly handlers: ReadonlyMap<
+    string,
+    (event: unknown, context: SessionContext) => Promise<unknown>
+  >;
+};
+
+/**
+ * Ends envoy.ts's startup phase (`startupPhase`) on a host `context` reports idle, for a session
+ * that has taken only cards so far: a card `deliver` sends as a startup card, its `message_end`,
+ * and the check that then finds the host idle and wakes for it. `delivered(n)` resolves once the
+ * session has sent `n` cards.
+ */
+async function endStartupPhase(
+  fixture: CardFixture,
+  agent: SubscriptionControls,
+  context: SessionContext,
+  delivered: (count: number) => Promise<void>,
+  label: string
+): Promise<void> {
+  const sent = fixture.deliveries.length;
+  agent.push(forwardedRoleEnvelope("legion-controller", "a card in startup", label));
+  await delivered(sent + 1);
+  const card = fixture.deliveries[sent];
+  if (card === undefined) throw new Error("the startup card was not delivered");
+  expect(card.options).toEqual({ deliverAs: "followUp", triggerTurn: false });
+  const handler = fixture.handlers.get("message_end");
+  if (handler === undefined) throw new Error("no message_end handler");
+  const { customType, content, display, details } = card;
+  await handler({ message: { role: "custom", customType, content, display, details } }, context);
+  await delivered(sent + 2);
+  expect(fixture.deliveries[sent + 1]?.options).toEqual({
+    deliverAs: "nextTurn",
+    triggerTurn: true,
+  });
 }
 
 function response(body: unknown): Response {
@@ -9477,10 +9531,8 @@ describe("envoy OMP extension", () => {
       },
     });
     let idle = false;
-    await fixture.handlers.get("session_start")?.(
-      {},
-      { ...sessionContext("ses_delivery"), isIdle: () => idle }
-    );
+    const context = { ...sessionContext("ses_delivery"), isIdle: () => idle };
+    await fixture.handlers.get("session_start")?.({}, context);
     const agent = natsState.controls.get("notifications.agent.ses_delivery");
     if (agent === undefined) throw new Error("agent subject was not subscribed");
 
@@ -9488,13 +9540,17 @@ describe("envoy OMP extension", () => {
     agent.push(targetedDispatchEnvelope("steer", "targeted-steer-running"));
     await delivered(2);
     idle = true;
+    // Past the startup phase, whose idle cards go as follow-ups (`startupPhase`).
+    await endStartupPhase(fixture, agent, context, delivered, "targeted-modes-startup");
     agent.push(targetedDispatchEnvelope("aside", "targeted-aside-idle"));
     agent.push(targetedDispatchEnvelope("steer", "targeted-steer-idle"));
-    await delivered(4);
+    await delivered(6);
 
     expect(fixture.deliveries.map((delivery) => delivery.options)).toEqual([
       { deliverAs: "aside", triggerTurn: true },
       { deliverAs: "aside", triggerTurn: true },
+      { deliverAs: "followUp", triggerTurn: false },
+      { deliverAs: "nextTurn", triggerTurn: true },
       { deliverAs: "aside", triggerTurn: true },
       { deliverAs: "steer", triggerTurn: true },
     ]);
@@ -9604,19 +9660,21 @@ describe("envoy OMP extension", () => {
 
     // An idle session has no steering queue to wait in. The host starts a turn for a steer with
     // `triggerTurn` after an interrupt (an Esc, or the RPC `abort` a Legion daemon sends) and in
-    // plan mode too, where an idle aside folds into the context with no turn.
+    // plan mode too, where an idle aside folds into the context with no turn. That is past the
+    // startup phase, whose idle cards go as follow-ups (`startupPhase`).
     test("leaves a card that reaches an idle session a steer that starts a turn", async () => {
-      const { agent, delivered, sends } = await bootDirectSession("idle-card-starts-a-turn", {
-        idle: () => true,
-        sendUserInput: async () => ({ handled: "prompt" }),
-      });
+      const { agent, context, delivered, fixture, sends } = await bootDirectSession(
+        "idle-card-starts-a-turn",
+        { idle: () => true, sendUserInput: async () => ({ handled: "prompt" }) }
+      );
+      await endStartupPhase(fixture, agent, context, delivered, "idle-card-startup");
 
       agent.push(forwardedRoleEnvelope("legion-controller", "wake up", "idle-card"));
-      await delivered(1);
+      await delivered(3);
 
-      expect(sends).toHaveLength(1);
-      expect(String(sends[0]?.content)).toContain("wake up");
-      expect(sends[0]?.options).toEqual({ deliverAs: "steer", triggerTurn: true });
+      expect(sends).toHaveLength(3);
+      expect(String(sends[2]?.content)).toContain("wake up");
+      expect(sends[2]?.options).toEqual({ deliverAs: "steer", triggerTurn: true });
     });
 
     // Only Dispatch's 200 makes a turn: whatever it refuses, and whatever keeps it from answering,
@@ -13455,11 +13513,13 @@ describe("envoy OMP extension", () => {
     type HostMessage = { readonly role: string } & Record<string, unknown>;
 
     /**
-     * Boots ses_delivery with a branch the test writes and a managed timer it runs (`fire`).
-     * `card` delivers one card while a turn runs, as the host is handed it, and returns the
-     * record the host would fold and the entry it would persist; `fold` marks the host idle and
-     * hands it those records, persisted in order; `reply` is an assistant message ending a step.
-     * `reportsIdle: false` is a host context without `isIdle`.
+     * Boots ses_delivery with a branch the test writes and a managed timer it runs (`fire`),
+     * recording the delay each timer was set for (`delays`). `card` delivers one card, as the host
+     * is handed it (while a turn runs unless `setIdle(true)`), and returns the record the host
+     * would fold and the entry it would persist; `fold` marks the host idle and hands it those
+     * records, persisted in order; `reply` is an assistant message ending a step.
+     * `reportsIdle: false` is a host context without `isIdle`. The session starts in envoy.ts's
+     * startup phase (`startupPhase`), and `endStartup` ends it with a startup card a run read.
      */
     async function foldSession(query: string, options: { readonly reportsIdle?: boolean } = {}) {
       let idle = false;
@@ -13468,10 +13528,12 @@ describe("envoy OMP extension", () => {
       });
       const branch: unknown[] = [];
       const timers: (() => void | Promise<void>)[] = [];
+      const delays: number[] = [];
       const context = {
         ...session.context,
-        setTimeout: (callback: () => void | Promise<void>) => {
+        setTimeout: (callback: () => void | Promise<void>, delayMs: number) => {
           timers.push(callback);
+          delays.push(delayMs);
         },
         sessionManager: { ...session.context.sessionManager, getBranch: () => branch },
       };
@@ -13514,9 +13576,19 @@ describe("envoy OMP extension", () => {
         }
         await handle("message_end", { message: record });
       };
+      const reply = (fields: Record<string, unknown> = {}): HostMessage => ({
+        role: "assistant",
+        content: [{ type: "text", text: "done" }],
+        stopReason: "stop",
+        ...fields,
+      });
+      const fire = async (): Promise<void> => {
+        for (const timer of timers.splice(0)) await timer();
+      };
       return {
         branch,
         context,
+        delays,
         handle,
         card,
         message,
@@ -13532,15 +13604,19 @@ describe("envoy OMP extension", () => {
             await handle("message_end", { message: folded.message });
           }
         },
-        reply: (fields: Record<string, unknown> = {}): HostMessage => ({
-          role: "assistant",
-          content: [{ type: "text", text: "done" }],
-          stopReason: "stop",
-          ...fields,
-        }),
-        fire: async (): Promise<void> => {
-          for (const timer of timers.splice(0)) await timer();
+        reply,
+        fire,
+        endStartup: async (): Promise<void> => {
+          const was = idle;
+          idle = true;
+          const startup = await card(`${query}-startup`);
+          await message(startup.message);
+          await message(reply());
+          await fire();
+          idle = was;
         },
+        // The options the latest send went with.
+        lastOptions: () => session.fixture.deliveries.at(-1)?.options,
         wakes: () =>
           session.fixture.deliveries.filter(
             ({ options }) =>
@@ -13736,6 +13812,7 @@ describe("envoy OMP extension", () => {
 
     test("wakes the session again once a run starts after an interrupt", async () => {
       const fold = await foldSession("fold-wake-after-interrupt-cleared");
+      await fold.endStartup();
       await fold.handle("agent_start", {});
       await fold.message(fold.reply(interrupted));
       await fold.handle("agent_end", { messages: [fold.reply(interrupted)] });
@@ -13756,6 +13833,165 @@ describe("envoy OMP extension", () => {
       await fold.fire();
 
       expect(fold.wakes()).toHaveLength(1);
+    });
+
+    // Oh My Pi awaits every send an extension starts during startup, the run an idle card's
+    // `triggerTurn` starts included, before it reads any RPC command, so a card that reaches an
+    // idle host in the startup phase starts no turn: it goes as a follow-up, and its own
+    // `message_end`, which the host emits only after startup released the send, arms the check
+    // that wakes the session for it once the host is idle.
+    describe("in the startup phase", () => {
+      const steer = { deliverAs: "steer", triggerTurn: true };
+
+      for (const targeted of [false, true]) {
+        test(`sends ${targeted ? "a targeted Aside" : "a card"} that finds the host idle as a follow-up that starts no turn`, async () => {
+          const fold = await foldSession(`startup-follow-up-${targeted}`);
+          fold.setIdle(true);
+          await fold.card(`startup-follow-up-${targeted}`, targeted);
+
+          const delivery = fold.session.fixture.deliveries.at(-1);
+          expect(delivery?.options).toEqual({ deliverAs: "followUp", triggerTurn: false });
+          expect(delivery?.display).toBe(true);
+          expect(delivery?.details).toEqual({
+            envoyCard: expect.any(String),
+            targetedAside: targeted,
+            startup: true,
+          });
+        });
+      }
+
+      test("wakes once after the card's message_end with the host idle, and ends the phase", async () => {
+        const fold = await foldSession("startup-wake");
+        fold.setIdle(true);
+        const card = await fold.card("startup-wake");
+        // A check armed while the card is unseen waits for it, re-armed for the time left.
+        await fold.handle("agent_end", { messages: [] });
+        await fold.fire();
+        expect(fold.wakes()).toEqual([]);
+        expect(fold.delays.at(-1)).toBeGreaterThan(0);
+
+        await fold.message(card.message);
+        await fold.fire();
+        expect(fold.wakes()).toEqual([
+          {
+            content:
+              "1 Envoy message above arrived with no turn to read it: read it and act on it.",
+            customType: "envoy-message",
+            details: LOCAL_ENVOY_NOTICE,
+            display: false,
+            options: { deliverAs: "nextTurn", triggerTurn: true },
+          },
+        ]);
+
+        await fold.card("after-startup");
+        expect(fold.lastOptions()).toEqual(steer);
+      });
+
+      test("sends one wake for several startup cards", async () => {
+        const fold = await foldSession("startup-wake-several");
+        fold.setIdle(true);
+        const cards = [
+          await fold.card("startup-one"),
+          await fold.card("startup-two"),
+          await fold.card("startup-three", true),
+        ];
+        for (const card of cards) await fold.message(card.message);
+        await fold.fire();
+
+        expect(fold.wakes()).toHaveLength(1);
+        expect(fold.wakes()[0]?.content).toContain("3 Envoy messages");
+      });
+
+      test("leaves startup cards a busy check finds to the run, which read them", async () => {
+        const fold = await foldSession("startup-busy-read");
+        fold.setIdle(true);
+        const cards = [await fold.card("busy-read-one"), await fold.card("busy-read-two")];
+        fold.setIdle(false);
+        await fold.handle("agent_start", {});
+        for (const card of cards) await fold.message(card.message);
+        await fold.fire();
+        expect(fold.wakes()).toEqual([]);
+
+        await fold.message(fold.reply());
+        fold.setIdle(true);
+        await fold.handle("agent_end", { messages: [fold.reply()] });
+        await fold.fire();
+        expect(fold.wakes()).toEqual([]);
+        // That check found the host idle, which ended the phase.
+        await fold.card("after-busy-read");
+        expect(fold.lastOptions()).toEqual(steer);
+      });
+
+      test("wakes at the run's end for startup cards a busy check kept and no run read", async () => {
+        const fold = await foldSession("startup-busy-unread");
+        fold.setIdle(true);
+        const cards = [await fold.card("busy-unread-one"), await fold.card("busy-unread-two")];
+        fold.setIdle(false);
+        for (const card of cards) await fold.message(card.message);
+        await fold.fire();
+        expect(fold.wakes()).toEqual([]);
+
+        fold.setIdle(true);
+        await fold.handle("agent_end", { messages: [] });
+        await fold.fire();
+        expect(fold.wakes()).toHaveLength(1);
+        expect(fold.wakes()[0]?.content).toContain("2 Envoy messages");
+      });
+
+      test("wakes for a startup card after an interrupted run", async () => {
+        const fold = await foldSession("startup-after-interrupt");
+        await fold.handle("agent_start", {});
+        await fold.message(fold.reply(interrupted));
+        await fold.handle("agent_end", { messages: [fold.reply(interrupted)] });
+        fold.setIdle(true);
+        const card = await fold.card("startup-after-interrupt");
+        expect(fold.lastOptions()).toEqual({ deliverAs: "followUp", triggerTurn: false });
+        await fold.message(card.message);
+        await fold.fire();
+
+        expect(fold.wakes()).toHaveLength(1);
+      });
+
+      test("sends a card on a host that reports no idle state as a steer that starts a turn", async () => {
+        const fold = await foldSession("startup-no-idle", { reportsIdle: false });
+        await fold.card("startup-no-idle");
+
+        expect(fold.lastOptions()).toEqual(steer);
+      });
+
+      test("sends a card that finds a turn running as an aside that starts one", async () => {
+        const fold = await foldSession("startup-busy-host");
+        await fold.card("startup-busy-host");
+
+        expect(fold.lastOptions()).toEqual({ deliverAs: "aside", triggerTurn: true });
+      });
+
+      test("stops waiting for a startup card that never reaches the context after the cap", async () => {
+        const start = Date.now();
+        setSystemTime(new Date(start));
+        try {
+          const fold = await foldSession("startup-cap");
+          fold.setIdle(true);
+          // A send the host failed: no message_end ever comes for it.
+          await fold.card("startup-never-seen");
+          setSystemTime(new Date(start + 20_000));
+          const seen = await fold.card("startup-seen");
+          await fold.message(seen.message);
+          await fold.fire();
+          expect(fold.wakes()).toEqual([]);
+          expect(fold.delays.at(-1)).toBeGreaterThan(9_000);
+          expect(fold.delays.at(-1)).toBeLessThanOrEqual(10_000);
+
+          setSystemTime(new Date(start + 30_000));
+          await fold.fire();
+          expect(fold.wakes()).toHaveLength(1);
+          expect(fold.wakes()[0]?.content).toContain("1 Envoy message ");
+          await fold.card("after-cap");
+          expect(fold.lastOptions()).toEqual(steer);
+        } finally {
+          setSystemTime();
+        }
+      });
     });
   });
 
