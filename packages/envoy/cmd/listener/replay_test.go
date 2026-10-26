@@ -14,6 +14,7 @@ import (
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/logging"
+	"github.com/sjawhar/envoy/internal/store"
 	"github.com/sjawhar/envoy/internal/testnats"
 )
 
@@ -519,6 +520,43 @@ func TestInterestSubscribeLeavesOutEveryPrivateStreamSubject(t *testing.T) {
 	}
 	if !slices.Equal(notRegistered, refused) {
 		t.Fatalf("warnings = %q, want exactly %v named as not registered", answer.Warnings, refused)
+	}
+}
+
+// A row an earlier build stored with topics reaching a private stream subject loses them at the
+// session's next registration, not only the topics that registration names: after one heartbeat
+// the row holds the session's own agent subject, the issue topic it followed and the topic it
+// registers now, and the listener's fan-out (Registry.Match) stops handing it another session's
+// failed-delivery lane and the Legion controller's notices.
+func TestInterestSubscribeCleansAStoredRowOfTopicsReachingPrivateStreamSubjects(t *testing.T) {
+	const githubTopic = "notifications.github.acme.widgets.pr.7.>"
+	own, other := contracts.AgentSubject(replaySession), contracts.AgentSubject("ses_other")
+	lane := bus.ExceptionTopicPrefix + other
+	controller := "notifications.legion.ACME.controller"
+	rig := newReplayRig(t, bus.ExceptionTopicPrefix+">", controller, other, replayIssueTopic)
+	for _, subject := range []string{lane, controller, other} {
+		if !slices.ContainsFunc(rig.deps.registry.Match("test-machine", subject), func(item store.Interest) bool { return item.SessionID == replaySession }) {
+			t.Fatalf("Match(%s) before the heartbeat misses %s: the seeded row must reach it", subject, replaySession)
+		}
+	}
+
+	answer := subscribeInterest(t, rig.mux, []string{own, githubTopic})
+
+	want := []string{own, replayIssueTopic, githubTopic}
+	if !slices.Equal(answer.Topics, want) {
+		t.Fatalf("answered topics = %v, want %v", answer.Topics, want)
+	}
+	stored, err := rig.deps.registry.Get(replaySession)
+	if err != nil {
+		t.Fatalf("read the stored interest: %v", err)
+	}
+	if !slices.Equal(stored.Topics, want) {
+		t.Fatalf("stored topics = %v, want %v", stored.Topics, want)
+	}
+	for _, subject := range []string{lane, controller, other} {
+		if matched := rig.deps.registry.Match("test-machine", subject); len(matched) != 0 {
+			t.Fatalf("Match(%s) = %v, want no session after the heartbeat", subject, matched)
+		}
 	}
 }
 

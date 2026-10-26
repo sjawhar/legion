@@ -725,9 +725,13 @@
   delivery's payload or the controller's notices (`/v1/replay` refuses such a subject on its own).
   The rest of the registration is stored and the answer stays 200, its `warnings` naming each
   topic left out (`<topic> was not registered: …`), so a released pi-envoy, which registers a fork
-  parent's agent subject with the rest of what it follows, keeps registering. pi-envoy and
-  claude-envoy no longer register or replay a topic reaching another session's agent subject
-  (`coversAnotherAgentSubject` in `@legion/envoy-client/replay`) (INFRA-439).
+  parent's agent subject with the rest of what it follows, keeps registering. A row an earlier
+  build stored with such a topic is cleaned at the session's next registration: the registry drops
+  every such topic from the merged row, not only from the incoming topics, as do a role claim and
+  an unsubscribe that rewrite the row, so the fan-out stops reaching the session after its next
+  heartbeat. pi-envoy and claude-envoy no longer register or replay a topic reaching another
+  session's agent subject (`coversAnotherAgentSubject` in `@legion/envoy-client/replay`)
+  (INFRA-439).
 - **Breaking (local development):** `agent-secrets-devrelay` presents a listed caller's own
   ServiceAccount token, read from `--account-token-file` (default
   `$AGENT_SECRETS_ACCOUNT_TOKEN_FILE`), in place of the shared bearer the broker no longer takes. A
