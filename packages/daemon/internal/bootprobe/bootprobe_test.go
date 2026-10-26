@@ -275,28 +275,28 @@ func TestAgentModelsReadsTheMarkOnAnOKLine(t *testing.T) {
 	}
 }
 
-// The daemon reads whether the image's probe checked the whole capability list from its OK line,
-// and the model-fallback mark beside it; a CLI that predates the check prints neither, which reads
-// as unchecked and no mark, and a probe that left the browser row unchecked (--skip-browser) reads
-// as unchecked, so the daemon's probe Sandbox refuses its image.
+// The daemon reads the capabilities state of the image's probe from its OK line, and the
+// model-fallback mark beside it: checked, or browser-skipped from a probe run with --skip-browser,
+// which the daemon's probe Sandbox refuses; a CLI that predates the check prints neither mark,
+// which reads as none.
 func TestCapabilityMarksAreReadFromTheOKLine(t *testing.T) {
 	for _, testCase := range []struct {
 		name, output string
-		checked      bool
+		capabilities string
 		fallback     string
 	}{
-		{"fallback off, among other output", "probe-image: capability browser: present (chromium)\n" + OKLine("/opt/omp/bin/omp", 5, AgentModelsResolved, CapabilitiesAll, ModelFallbackOff) + "\n", true, ModelFallbackOff},
-		{"fallback on", OKLine("/opt/omp/bin/omp", 5, AgentModelsResolved, CapabilitiesAll, ModelFallbackOn), true, ModelFallbackOn},
-		{"fallback unread", OKLine("/opt/omp/bin/omp", 5, AgentModelsResolved, CapabilitiesAll, ModelFallbackUnread), true, ModelFallbackUnread},
-		{"the browser row skipped", OKLine("/opt/omp/bin/omp", 5, AgentModelsSkipped, CapabilitiesBrowserSkipped, ModelFallbackOn), false, ModelFallbackOn},
-		{"a CLI that predates the capability check", oldOKLine, false, ""},
-		{"the marks on a line that is not the OK line", "[legion] capabilities=checked model-fallback=on daemon-api-version=5", false, ""},
-		{"the marks after the contract", "probe-image: OK (/opt/omp/bin/omp) daemon-api-version=5 capabilities=checked model-fallback=on", false, ""},
-		{"nothing", "", false, ""},
+		{"fallback off, among other output", "probe-image: capability browser: present (chromium)\n" + OKLine("/opt/omp/bin/omp", 5, AgentModelsResolved, CapabilitiesAll, ModelFallbackOff) + "\n", CapabilitiesAll, ModelFallbackOff},
+		{"fallback on", OKLine("/opt/omp/bin/omp", 5, AgentModelsResolved, CapabilitiesAll, ModelFallbackOn), CapabilitiesAll, ModelFallbackOn},
+		{"fallback unread", OKLine("/opt/omp/bin/omp", 5, AgentModelsResolved, CapabilitiesAll, ModelFallbackUnread), CapabilitiesAll, ModelFallbackUnread},
+		{"the browser row skipped", OKLine("/opt/omp/bin/omp", 5, AgentModelsSkipped, CapabilitiesBrowserSkipped, ModelFallbackOn), CapabilitiesBrowserSkipped, ModelFallbackOn},
+		{"a CLI that predates the capability check", oldOKLine, "", ""},
+		{"the marks on a line that is not the OK line", "[legion] capabilities=checked model-fallback=on daemon-api-version=5", "", ""},
+		{"the marks after the contract", "probe-image: OK (/opt/omp/bin/omp) daemon-api-version=5 capabilities=checked model-fallback=on", "", ""},
+		{"nothing", "", "", ""},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
-			if got := CapabilitiesChecked(testCase.output); got != testCase.checked {
-				t.Errorf("CapabilitiesChecked = %t, want %t", got, testCase.checked)
+			if got := Capabilities(testCase.output); got != testCase.capabilities {
+				t.Errorf("Capabilities = %q, want %q", got, testCase.capabilities)
 			}
 			if got := ModelFallback(testCase.output); got != testCase.fallback {
 				t.Errorf("ModelFallback = %q, want %q", got, testCase.fallback)

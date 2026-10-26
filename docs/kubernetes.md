@@ -339,7 +339,9 @@ image build's own run passes no `--role-namespaces`, since a build's container m
 namespaces. The runtime requires
 `capabilities=checked` too: an image whose `legion` predates the capability check prints no such mark and
 is refused naming that (`Succeeded without checking the capability list (its legion CLI predates the
-check): build the image from this daemon's commit`), and a probe pod that exits 1 on a missing capability
+check): build the image from this daemon's commit`), a line that carries `capabilities=browser-skipped`
+(a probe run with `--skip-browser`, which the daemon's probe never passes) is refused naming that mark,
+and a probe pod that exits 1 on a missing capability
 is refused with its log tail, which names it (`capability <name> is missing: <detail>` under the table's
 `missing` row; the stage 4a harness's `image-probe-capability-negative` check drives that with an operator
 pod env `PUPPETEER_EXECUTABLE_PATH=/nonexistent/chromium`). An image the kubelet cannot use refuses

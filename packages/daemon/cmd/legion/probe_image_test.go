@@ -320,7 +320,7 @@ func TestProbeImageWithSkipAgentModelsSaysSoOnTheOKLine(t *testing.T) {
 // An image built for a deployment that turns Oh My Pi's browser off carries no Chromium: without
 // --skip-browser the probe refuses it on the browser row, and with the flag it passes, its table's
 // browser row unchecked and its OK line's capabilities mark browser-skipped, which the daemon's
-// probe Sandbox refuses (bootprobe.CapabilitiesChecked).
+// probe Sandbox refuses (bootprobe.Capabilities is not CapabilitiesAll).
 func TestProbeImageWithSkipBrowserPassesAnImageWithNoBrowser(t *testing.T) {
 	omp := imageOmp(t)
 	img := inImage(t, thisBinarysContract, omp)
@@ -340,8 +340,8 @@ func TestProbeImageWithSkipBrowserPassesAnImageWithNoBrowser(t *testing.T) {
 	if row := "probe-image: capability browser: " + capabilities.StatusUnchecked + " (not checked (--skip-browser): "; !strings.Contains(stdout, row) {
 		t.Errorf("stdout = %q, want the browser row %q…", stdout, row)
 	}
-	if bootprobe.CapabilitiesChecked(stdout) {
-		t.Errorf("CapabilitiesChecked(%q) = true, want the daemon to read the browser-skipped line as unchecked", stdout)
+	if got := bootprobe.Capabilities(stdout); got != bootprobe.CapabilitiesBrowserSkipped {
+		t.Errorf("Capabilities(%q) = %q, want %q, which the daemon's probe refuses", stdout, got, bootprobe.CapabilitiesBrowserSkipped)
 	}
 }
 

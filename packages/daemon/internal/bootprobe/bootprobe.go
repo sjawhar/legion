@@ -174,8 +174,8 @@ const (
 // ModelFallbackOff, or ModelFallbackUnread), and the daemon API contract the image's plugin
 // declared, last. The daemon's probe Sandbox passes the image only on a line that confirms the
 // daemon's own contract (ConfirmedContract) with the extensions mark (ExtensionsDiscovered), the
-// agents' models resolved (AgentModels) and the whole capability list checked
-// (CapabilitiesChecked), and keeps the model-fallback mark (ModelFallback) in its ImageReport.
+// agents' models resolved (AgentModels) and the whole capability list checked (Capabilities:
+// CapabilitiesAll), and keeps the model-fallback mark (ModelFallback) in its ImageReport.
 func OKLine(omp string, contract int, agentModels, capabilities, modelFallback string) string {
 	return fmt.Sprintf("%s (%s) %s %s %s%s %s%s %s%s daemon-api-version=%d", OKPrefix, omp, sessionStorageMark, extensionsMark, agentModelsMark, agentModels,
 		capabilitiesMark, capabilities, modelFallbackMark, modelFallback, contract)
@@ -232,13 +232,13 @@ var agentModelsState = markPattern(agentModelsMark)
 // none: no OK line, or one from a CLI that predates the agent-model check.
 func AgentModels(output string) string { return markValue(agentModelsState, output) }
 
-// capabilitiesChecked is the capabilities mark at CapabilitiesAll on an OK line.
-var capabilitiesChecked = markPattern(capabilitiesMark + CapabilitiesAll)
+// capabilitiesState is the capabilities mark on an OK line.
+var capabilitiesState = markPattern(capabilitiesMark)
 
-// CapabilitiesChecked is whether an OK line in output carries the capabilities mark at
-// CapabilitiesAll; false when output holds none (no OK line, or one from a CLI that predates the
-// capability check) or one that left the browser row unchecked (CapabilitiesBrowserSkipped).
-func CapabilitiesChecked(output string) bool { return capabilitiesChecked.MatchString(output) }
+// Capabilities is the capabilities state an OK line in output carries (CapabilitiesAll, or
+// CapabilitiesBrowserSkipped from a probe run with --skip-browser), and "" when output holds none:
+// no OK line, or one from a CLI that predates the capability check.
+func Capabilities(output string) string { return markValue(capabilitiesState, output) }
 
 // extensionsDiscovered is the extensions mark on an OK line.
 var extensionsDiscovered = markPattern(extensionsMark)
