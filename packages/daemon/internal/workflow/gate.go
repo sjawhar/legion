@@ -140,14 +140,17 @@ func (e *Engine) gateRegistered(ctx context.Context, tx pgx.Tx, fact intake.Gate
 // follow find the gate as the registration left it and answer nothing, so without this only
 // another act by the person would resume the root. Only what Dispatch showed counts, never the
 // version the caller named: a document version Dispatch shows newer than the one waited on
-// (DispatchVersion) answers a gate wait whoever wrote it, as a live artifact.version does, since
-// Dispatch then waits on the agent; and the person's approval or changes request of Dispatch's
-// latest version answers it when that version is at least the one waited on. The person's review
-// of the spec answers a root waiting on its question too, as on the live path (answerAwaitedGate).
-// A changes request Dispatch recorded before the wait began (ChangesRequestedMark not after
-// Awaiting.Since) is one the person gave before the request was handed back to them, and answers
-// nothing. A request Dispatch merely shows waiting on the agent carries no author, and a
-// session's note can put it there, so it answers nothing.
+// (DispatchVersion) answers a gate wait when Dispatch shows the approval request waiting on the
+// agent (RequestWaitsOnAgent), as a newer version leaves it, the live artifact.version's answer.
+// With the request still waiting on the person, that version came before the request was handed
+// back — the architect wrote it, then asked for its review, and its own event reached the daemon
+// late — so it answers nothing, and the wait moves to it. The person's approval or changes request
+// of Dispatch's latest version answers the wait when that version is at least the one waited on.
+// The person's review of the spec answers a root waiting on its question too, as on the live path
+// (answerAwaitedGate). A changes request Dispatch recorded before the wait began
+// (ChangesRequestedMark not after Awaiting.Since) is one the person gave before the request was
+// handed back to them, and answers nothing. A request Dispatch shows waiting on the agent with no
+// newer version carries no author, and a session's note can put it there, so it answers nothing.
 func (e *Engine) answerRegisteredGate(ctx context.Context, tx pgx.Tx, fact intake.GateRegistered, gate record.DesignGate, changesRequested bool) (bool, error) {
 	issue, err := e.store.Issue(ctx, tx, fact.Issue)
 	if err != nil || issue == nil || !issue.AwaitingPerson() || issue.Awaiting.AnsweredAt != nil {
@@ -160,7 +163,7 @@ func (e *Engine) answerRegisteredGate(ctx context.Context, tx pgx.Tx, fact intak
 	var by record.Answer
 	version := 0
 	switch {
-	case issue.Awaiting.GateVersion != 0 && fact.DispatchVersion > waited:
+	case issue.Awaiting.GateVersion != 0 && fact.DispatchVersion > waited && fact.RequestWaitsOnAgent:
 		by, version = record.AnsweredByVersion, fact.DispatchVersion
 	case classify.DesignGateOpen(gate) && fact.ApprovedVersion >= waited:
 		by, version = record.AnsweredByApproval, fact.ApprovedVersion
@@ -173,6 +176,12 @@ func (e *Engine) answerRegisteredGate(ctx context.Context, tx pgx.Tx, fact intak
 	default:
 		if fact.RequestWaitsOnAgent {
 			e.logOnCommit(ctx, "workflow: a registration shows the request waiting on the agent, which answers no wait", "issue", issue.Key, "version", gate.LatestVersion)
+		}
+		if issue.Awaiting.GateVersion != 0 && gate.LatestVersion > issue.Awaiting.GateVersion {
+			e.logOnCommit(ctx, "workflow: a registration of a version the person is asked to review moves the wait to it", "issue", issue.Key,
+				"version", gate.LatestVersion, "waited", issue.Awaiting.GateVersion)
+			issue.Awaiting.GateVersion = gate.LatestVersion
+			return false, e.store.PutIssue(ctx, tx, *issue)
 		}
 		return false, nil
 	}
@@ -303,10 +312,14 @@ func (e *Engine) applyArtifact(ctx context.Context, tx pgx.Tx, gate record.Desig
 // answerAwaitedGate records the person result on an awaiting root, and reports whether it
 // answered one. A later document version hands its approval request back to the architect, so it
 // is an answer too: the root resumes with the latest version recorded, keeping where its wait
-// began, and lets the architect continue it. A review of a version below the one waited on is an
-// older review the daemon applied late, and answers nothing. Admission promotes the answered root
-// after this handler, so an opened gate never advances children before the root has its slot
-// again.
+// began, and lets the architect continue it. A version whose event Dispatch recorded at or before
+// the wait's start answers nothing: the architect wrote it before it handed the request back, its
+// event reached the daemon late, and the person is asked to review it, so the wait moves to that
+// version and goes on. A version the daemon read from Dispatch rather than from its event (the
+// gate seed, which reads a version written after the registration's read) carries no mark and
+// answers as before. A review of a version below the one waited on is an older review the daemon
+// applied late, and answers nothing. Admission promotes the answered root after this handler, so
+// an opened gate never advances children before the root has its slot again.
 //
 // A root waiting on its architect's question is answered by the person's review of its own spec
 // too: an approval that opens its gate, or a changes request of its latest version. The person
@@ -335,6 +348,11 @@ func (e *Engine) answerAwaitedGate(ctx context.Context, tx pgx.Tx, key string, f
 	case issue.Awaiting.Ask != "":
 	case fact.Kind == intake.DispatchArtifactVersion && fact.Version <= issue.Awaiting.GateVersion:
 		return false, nil
+	case fact.Kind == intake.DispatchArtifactVersion && fact.Mark.Seq > 0 && !fact.Mark.After(issue.Awaiting.Since):
+		e.logOnCommit(ctx, "workflow: a version written before the wait began moves the wait to it and answers nothing", "issue", issue.Key,
+			"version", fact.Version, "version_seq", fact.Mark.Seq, "since_seq", issue.Awaiting.Since.Seq)
+		issue.Awaiting.GateVersion = fact.Version
+		return false, e.store.PutIssue(ctx, tx, *issue)
 	case fact.Kind == intake.DispatchArtifactVersion:
 		issue.Awaiting.GateVersion, by = fact.Version, record.AnsweredByVersion
 	case fact.Version < issue.Awaiting.GateVersion:

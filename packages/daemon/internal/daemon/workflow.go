@@ -561,17 +561,13 @@ func (w *workflowRuntime) catchUpAwaitingGate(ctx context.Context, root awaiting
 	}
 	review := record.EventMark{Seq: approval.Seq, At: approval.At}
 	approved := approval.ApprovedLatest()
-	// The awaited version, not the gate's: a registration may have recorded a newer version on the
-	// gate whose own event never arrived, and that version is the answer. A question waits on no
-	// version, and is answered by a review of the gate's latest.
+	// The awaited version, not the gate's, is what a review must reach. A question waits on no
+	// version, and is answered by a review of the gate's latest. A newer version is applied from its
+	// own event in the event log (catchUpAwaitingAsks), whose sequence says whether it came after
+	// the wait's start; the version this read shows carries none.
 	waited := root.issue.Awaiting.GateVersion
 	if waited == 0 {
 		waited = root.gate.LatestVersion
-	} else if approval.LatestVersion > waited && approved == 0 {
-		if err := w.applyAwaitingCatchUp(ctx, fmt.Sprintf("gate-version:%s:%d:%d", root.issue.Key, root.issue.Generation, approval.LatestVersion),
-			intake.DispatchArtifact{Key: root.issue.Key, ArtifactID: root.gate.ArtifactID, Kind: intake.DispatchArtifactVersion, Version: approval.LatestVersion}); err != nil {
-			return err
-		}
 	}
 	if approved != 0 && approved >= waited {
 		return w.applyAwaitingCatchUp(ctx, fmt.Sprintf("gate-approved:%s:%d:%d:%d", root.issue.Key, root.issue.Generation, approved, review.ID()),
@@ -588,15 +584,15 @@ func (w *workflowRuntime) catchUpAwaitingGate(ctx context.Context, root awaiting
 	return nil
 }
 
-// catchUpAwaitingAsks applies every act on an ask of the root that Dispatch recorded after the
-// root's wait began, while the daemon was down: it reads the root's Dispatch event log past the
-// wait's start (Awaiting.Since) and applies each ask event through the live decoder and the live
-// handlers, with its own sequence. What each act answers is the workflow's, as on the live path:
-// a root waiting on one of its asks is answered by a person's act on that ask, and one waiting on
-// its design gate by a person's act on any ask of the root, the approval request included — the
-// architect is the tree's only agent while it waits; a session's or Dispatch's own act answers
-// nothing. Each fact's id names the event's sequence and the root's generation, so a second
-// catch-up of the same event is dropped as processed.
+// catchUpAwaitingAsks applies every ask event and document version Dispatch recorded on the root
+// after its wait began, while the daemon was down: it reads the root's Dispatch event log past the
+// wait's start (Awaiting.Since) and applies each through the live decoder and the live handlers,
+// with its own sequence. What each act answers is the workflow's, as on the live path: a root
+// waiting on one of its asks is answered by a person's act on that ask, and one waiting on its
+// design gate by a person's act on any ask of the root, the approval request included — the
+// architect is the tree's only agent while it waits — or by a newer version of its spec; a
+// session's or Dispatch's own act answers nothing. Each fact's id names the event's sequence and
+// the root's generation, so a second catch-up of the same event is dropped as processed.
 func (w *workflowRuntime) catchUpAwaitingAsks(ctx context.Context, root awaitingRoot) error {
 	events, err := w.dispatch.EventsAfter(ctx, root.issue.Key, root.issue.Awaiting.Since.Seq)
 	if err != nil {
@@ -612,6 +608,11 @@ func (w *workflowRuntime) catchUpAwaitingAsks(ctx context.Context, root awaiting
 		case intake.DispatchAskClosed:
 			mark = fact.Mark
 		case intake.DispatchAskReply:
+			mark = fact.Mark
+		case intake.DispatchArtifact:
+			if fact.Kind != intake.DispatchArtifactVersion {
+				continue
+			}
 			mark = fact.Mark
 		default:
 			continue

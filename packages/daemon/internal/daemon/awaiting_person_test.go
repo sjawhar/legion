@@ -76,6 +76,11 @@ func askReplied(seq int64, ask, waitingOn string, actor dispatch.Actor) json.Raw
 	return askEvent(seq, "comment.created", actor, map[string]any{"ask_id": ask, "ask_waiting_on": waitingOn})
 }
 
+// specVersion is the event at seq of CAPTURE-100's spec document reaching version.
+func specVersion(seq int64, version int) json.RawMessage {
+	return askEvent(seq, "artifact.version", architectSession, map[string]any{"artifact_id": "artifact-root", "version": map[string]any{"number": version}})
+}
+
 var (
 	alice            = dispatch.Actor{Kind: "user", ID: "alice"}
 	architectSession = dispatch.Actor{Kind: "session", ID: "session-architect"}
@@ -140,10 +145,12 @@ func TestCatchUpAwaitingAppliesAPersonsAnswerMissedAtBoot(t *testing.T) {
 		{name: "changes requested on the gate's version", awaiting: record.Awaiting{GateVersion: 3},
 			client: awaitingDispatch{approval: dispatch.Approval{State: "changes_requested", LatestVersion: 3, Version: new(3)}}},
 		{name: "a newer version, whoever wrote it", awaiting: record.Awaiting{GateVersion: 3},
-			client: awaitingDispatch{approval: dispatch.Approval{State: "awaiting", LatestVersion: 4, AskID: "ask-approval", WaitingOn: "agent"}}},
+			client: awaitingDispatch{approval: dispatch.Approval{State: "awaiting", LatestVersion: 4, AskID: "ask-approval", WaitingOn: "agent"},
+				events: []json.RawMessage{specVersion(9, 4)}}},
 		{name: "a newer version a registration recorded on the gate", awaiting: record.Awaiting{GateVersion: 3},
-			gate:   &record.DesignGate{ArtifactID: "artifact-root", LatestVersion: 4},
-			client: awaitingDispatch{approval: dispatch.Approval{State: "awaiting", LatestVersion: 4, AskID: "ask-approval", WaitingOn: "agent"}}},
+			gate: &record.DesignGate{ArtifactID: "artifact-root", LatestVersion: 4},
+			client: awaitingDispatch{approval: dispatch.Approval{State: "awaiting", LatestVersion: 4, AskID: "ask-approval", WaitingOn: "agent"},
+				events: []json.RawMessage{specVersion(9, 4)}}},
 		{name: "a second changes request at the version an earlier one answered", awaiting: record.Awaiting{GateVersion: 3},
 			gate:   &record.DesignGate{ArtifactID: "artifact-root", LatestVersion: 3, ToldChangesVersion: new(3), ToldChangesReason: "name the rollback path"},
 			client: awaitingDispatch{approval: dispatch.Approval{State: "changes_requested", LatestVersion: 3, Version: new(3), Reason: new("and name who runs the restore")}}},
@@ -210,6 +217,9 @@ func TestCatchUpAwaitingLeavesARootNoPersonAnswered(t *testing.T) {
 		{name: "a person's reply Dispatch recorded before a registration's read began", awaiting: record.Awaiting{GateVersion: 3, Since: record.EventMark{Seq: 10}},
 			client: awaitingDispatch{approval: dispatch.Approval{State: "awaiting", LatestVersion: 3, AskID: "ask-approval", WaitingOn: "human"},
 				events: []json.RawMessage{askReplied(9, "ask-approval", "agent", alice), askReplied(10, "ask-approval", "human", architectSession)}}},
+		{name: "a version the architect wrote before it handed the request back", awaiting: record.Awaiting{GateVersion: 3, Since: record.EventMark{Seq: 10}},
+			client: awaitingDispatch{approval: dispatch.Approval{State: "awaiting", LatestVersion: 4, AskID: "ask-approval", WaitingOn: "human"},
+				events: []json.RawMessage{specVersion(9, 4), askReplied(10, "ask-approval", "human", architectSession)}}},
 		{name: "the changes request that answered an earlier wait", awaiting: record.Awaiting{GateVersion: 3},
 			gate: &record.DesignGate{ArtifactID: "artifact-root", LatestVersion: 3, ToldChangesVersion: &told, ToldChangesReason: "name the rollback path",
 				ToldChangesMark: record.EventMark{Seq: 5, At: reviewed}},

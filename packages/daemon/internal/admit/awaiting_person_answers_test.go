@@ -371,6 +371,43 @@ func TestARegistrationOfANewerVersionAnswersTheWaitWhenItsEventIsLost(t *testing
 	}
 }
 
+// The architect writes version 5 (seq 9), then hands the approval request back (seq 10); the
+// version's event reaches the daemon late, so the wait starts on version 4. Neither that version
+// event nor the architect's register_gate of version 5, whose read shows the request waiting on
+// the person, answers the wait: Dispatch asks the person to review version 5, and the wait moves to
+// it. A version written after the hand-back answers it, and so does a registration whose read
+// shows a newer version moved the request to the agent.
+func TestTheArchitectsOwnEarlierVersionNeverAnswersItsWait(t *testing.T) {
+	late := intake.DispatchArtifact{Key: "LEGION-ROOT", ArtifactID: "artifact-root", Kind: intake.DispatchArtifactVersion, Version: 5,
+		Mark: record.EventMark{Seq: 9, At: handedBackAt.Add(-time.Minute)}}
+	registered := intake.GateRegistered{Issue: "LEGION-ROOT", ArtifactID: "artifact-root", Version: 5, DispatchVersion: 5, Since: record.EventMark{Seq: 11}}
+	for _, tc := range []struct {
+		name  string
+		first intake.Fact
+	}{
+		{name: "the late version event", first: late},
+		{name: "the architect's registration of that version", first: registered},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := migratedPool(t)
+			admission := newAdmission(t, 1, nil)
+			handBackOnAClosedGateAt(t, pool, admission, handBack)
+			if _, err := intake.ApplyFact(context.Background(), pool, "dispatch", "first", tc.first, admission.engine, admission); err != nil {
+				t.Fatalf("apply %s: %v", tc.name, err)
+			}
+			got := issue(t, pool, "LEGION-ROOT")
+			if !got.AwaitingPerson() || got.Answered() || got.Awaiting.GateVersion != 5 {
+				t.Fatalf("root after %s = %#v, want it waiting unanswered on version 5", tc.name, got)
+			}
+			applyFact(t, pool, admission, "version-after", intake.DispatchArtifact{Key: "LEGION-ROOT", ArtifactID: "artifact-root",
+				Kind: intake.DispatchArtifactVersion, Version: 6, Mark: record.EventMark{Seq: 12, At: handedBackAt.Add(time.Minute)}})
+			if got := issue(t, pool, "LEGION-ROOT"); !got.Answered() || got.Awaiting.GateVersion != 6 {
+				t.Fatalf("root after a version written after the hand-back = %#v, want it answered on version 6", got)
+			}
+		})
+	}
+}
+
 // A review of a version older than the one the root waits on, applied late, answers nothing: the
 // person has not reviewed the version the root waits on.
 func TestAnOlderReviewAppliedLateLeavesTheNewerWaitUnanswered(t *testing.T) {

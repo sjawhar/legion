@@ -126,10 +126,10 @@ const (
 // DispatchArtifact records one review or version event for a registered design document, from a
 // live event or from the daemon's own read of Dispatch's approval (the gate seed, the boot
 // catch-up). Every source applies alike: the gate's told record, not the source, keeps the
-// architect from hearing one changes request twice. Mark places a review in the issue's Dispatch
-// event log: the event's sequence and Dispatch's time of it, from the event itself, or from the
-// read's latest review (dispatch.Approval's Seq and At), whichever of them that read gave. A
-// version event carries none.
+// architect from hearing one changes request twice. Mark places the event in the issue's Dispatch
+// event log: the event's sequence and Dispatch's time of it, from the event itself, or, for a
+// review, from the read's latest review (dispatch.Approval's Seq and At), whichever of them that
+// read gave. A version the gate seed read from Dispatch carries none.
 type DispatchArtifact struct {
 	Key        string
 	ArtifactID string
