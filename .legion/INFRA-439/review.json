@@ -1,0 +1,61 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-439",
+  "completed": "2026-10-26T07:23:00Z",
+  "round": 1,
+  "reviewedHead": "2aef017d87b732a154c54ff0645d9fabd19925a9",
+  "decision": "changes_requested",
+  "critical": 0,
+  "important": 6,
+  "minor": 1,
+  "keyFindings": [
+    {
+      "severity": "important",
+      "file": "packages/envoy-client/src/transport.ts",
+      "description": "Required checks lint and test are red at code head 2aef017d (runs 40281287850 jobs lint 121434941868, test 121434942020): .github/scripts/check-heartbeat-margin.sh reads `const attempts = config.retry === false ? N : M;` from transport.ts, and line 329 now adds `|| options.retry === false`. Keep the declaration the check reads and apply the per-request retry on its own line, or update the check's pattern and its self-test together."
+    },
+    {
+      "severity": "important",
+      "file": "packages/pi-envoy/extensions/envoy.ts",
+      "description": "A BTW refused live (shutting down 1381, host without BTW 1383, side turn failed 1390) releases its claim and records nothing in the replay ledger, so the next sweep finds the stored copy on the agent subject and showReplayed sends it as a steering card that triggers a turn, marked 'published while this session's connection was down'. Contradicts the plan ('after a BTW reply or a correlated refusal is posted') and pi-envoy AGENTS.md ('an advertised btw frame never falls back to steering'). Record the event id only after the refusal is posted, so a same-mode Retry (new event id, same dedupe key) still arrives; add a test: side turn rejects, sweep runs, no card."
+    },
+    {
+      "severity": "important",
+      "file": "packages/pi-envoy/extensions/envoy.ts",
+      "description": "A replayed subscription.removed (showReplayed 1665-1670) closes the topic locally only; closeIntentionally never unregisters it, and on resume recoverRegisteredInterests subscribed and registered it again from the remembered state (2272-2279), and the listener's upsert merges topics (internal/store/kv.go mergeForUpsert). The registry keeps the topic the person removed, so the next restart follows it again with the removal already behind the cursor. claude-envoy unregisters (dropRemovedTopics). Call client.unsubscribe for the topics the replayed removal closed."
+    },
+    {
+      "severity": "important",
+      "file": "packages/envoy/cmd/listener/replay.go",
+      "description": "Security[authz]: session_id is only trimmed (121) and becomes the agent subject as-is (200); `{\"session_id\":\">\",\"subjects\":[{\"subject\":\"notifications.agent.>\",\"after\":0}]}` passes replayFollowed's equality, CheckFilterSubject (trailing `>`) and stream containment, and returns every session's inbox for 72 hours with no interest registered. Refuse a session_id that is not one literal NATS token (no '.', '*', '>', whitespace) with 400; that is a new refusal at a process boundary, so the PR body needs a Contract change census (callers: pi-envoy and claude-envoy via envoy-client replay())."
+    },
+    {
+      "severity": "important",
+      "file": "packages/envoy-client/src/replay.ts",
+      "description": "liveFailed (779-786) leaves a failed live frame to the sweep whenever its subject was answered and has a cursor, but a cursor that starts (675) begins at the watermark, which can be at or above a frame the live path still holds (awaiting a Dispatch accept or pictures). If that delivery fails afterwards no sweep reads it and only a console warning remains, against the spec's 'never only caught'. Applies to a new session's agent subject, a new follow, and the reset after stream recreation. Show the notice at once when the live claim predates the cursor's start."
+    },
+    {
+      "severity": "important",
+      "file": "packages/claude-envoy/src/missed-messages.ts",
+      "description": "envoyNoticeContent writes sender-controlled summary and error text raw as `  key: value` lines; a newline in payload_summary breaks the block or forges a field (a fake `detail:` line) inside an envoy notice the model trusts. pi-envoy encodes the same fields with TOON encode. Render claude-envoy's notices with the same encoder (one exported helper in @legion/envoy-client/replay serves both)."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy-client/src/delivery.ts",
+      "description": "Line 178 cites `DeliveryDedupe.status`, which the simplify pass replaced with `pending()`."
+    }
+  ],
+  "ci": {
+    "codeHead": "2aef017d87b732a154c54ff0645d9fabd19925a9",
+    "required": ["lint", "typecheck", "test", "pr-title"],
+    "observed": "lint failure, test failure, typecheck success, pr-title success; compare 2aef017d...d1879281 changes only .legion/. The PR body's CI line (all queued) is stale."
+  },
+  "thermonuclear": {
+    "head": "d1879281b8a1494a3d15ffc8820b40689fc16821",
+    "deepReview": "CHANGES: refused BTW replayed (adopted), replayed removal not unregistered (adopted, raised to important), wildcard session_id (adopted, raised to important), live failure at cursor start (adopted, raised to important), claude notice unescaped (adopted from its hardening list); typed-input withdrawal is an unverified hypothesis, recorded under Not proven / risk. Providers mixed: 56 anthropic/claude-opus-5-5, 1 openai/gpt-6.1-sol.",
+    "codeQuality": "CHANGES: unwritten-frame tracking inline in envoy.ts, host policy duplicated across plugins, regex re-parse of card text, replay.ts concerns, identity index x4, requestConfirmed copy: structural, batched into one Fast-follow; the unescaped claude notice is taken as a finding. Providers mixed: 33 anthropic/claude-opus-5-5, 1 openai/gpt-6.1-sol."
+  },
+  "fastFollow": "Move pi-envoy's unwritten-frame tracking out of envoy.ts into a TypedPictures-style module that owns each claim's settle/release, and let the replay engine own the host policy both plugins copy (followed and remembered subject filters, the replayed-removal rule, notice routing).",
+  "contractCensus": "Not required at 2aef017d (new route, optional `code` on the error body, read-only grant added, DeliveryClaim.settle/DeliveryDedupe.pending implemented only by createDeliveryDedupe with every caller in the repository updated); required once the session_id refusal lands."
+}
