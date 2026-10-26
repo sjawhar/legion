@@ -2,24 +2,31 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-393",
-  "completed": "2026-10-26T09:18:41Z",
+  "completed": "2026-10-26T11:42:20Z",
   "headTested": "ec6ea9e0b9ad4cb4cf072d6e0424e6ebed64e5eb",
-  "round": 4,
+  "round": 5,
   "rebaseCheck": {
-    "verifiedHead": "5b39834357873eda556fc65bea2c3ea1b7c61683 (code f29797a6)",
-    "newHead": "d5e863cc8a09d12c219333d7aef5e112798645ee (code ec6ea9e0)",
-    "before": "6a1249c243518bfa396fa76c11c72279e76b00c493c526c337249351b723ab24",
+    "verifiedHead": "842cc8f985c22b98a36cf191cda018e95ae22ea7 (code ec6ea9e0)",
+    "newHead": "aedb7656131e018f7e3e10d7a60b2f9f64645486 (code ec6ea9e0)",
+    "before": "337b617b2a85409abb1f3a62ea309c046801380cf48692fec142a1e160b9f4ea",
     "after": "337b617b2a85409abb1f3a62ea309c046801380cf48692fec142a1e160b9f4ea",
-    "verdict": "changed: full round",
-    "whatChanged": "diff of the normalized diffs: migrations 0117/0118 renamed 0118/0119 and every reference to them (README, CHANGELOG, coverage.go and coverage_test.go comments, embeddingsPendingSinceVersion 118), and routes_table_test's registeredRoutes 137→138; nothing else"
+    "verdict": "unchanged: no code since round 4, bare gates only"
   },
   "implementerProof": {
     "verdict": "verified",
-    "how": "Drove the same surface independently: my own database, created by main's 7f6ef46f binary at its 0117 with dead and Bedrock rows, migrated by the merge head to 0119 under Bedrock, served by main's binary through the roll, then run on Azure. I saw the same migration order, full coverage and the trigger-less comment found by meaning, and the coverage route refused a request with no bearer."
+    "how": "Read the runs on GitHub at ec6ea9e0 myself: Tests 40297256033 attempt 3 has lint, typecheck and test success, Legion Envoy and Contracts 40297256195 attempt 2 succeeded, and PR Title, Docs and Worker Image succeeded. The round changed no code (aedb7656 against 842cc8f9 touches only .legion/)."
   },
   "failed": 0,
   "failures": [],
   "proof": [
+    {
+      "criterion": "Code head unchanged since round 4: the required checks are green and the server still embeds everything with no command (bare gates after a no-code round)",
+      "surface": "GitHub Actions on PR #2208 at ec6ea9e0; envoy-dispatch built at the workspace head (aedb7656, code identical to ec6ea9e0) on a copy of round 4's rolled database, DISPATCH_EMBEDDER=azure keyless against the live embed-v-4-0 deployment",
+      "command": "gh run list --commit ec6ea9e0…; gh api commits/ec6ea9e0…/check-runs (lint, typecheck, test, pr-title); a comment inserted with session_replication_role = replica; serve.sh EMBED_MODE=azure DB=r5a; coverage route; GET /api/v1/search?q=bread yeast culture maintenance&project=TST",
+      "observed": "Tests 40297256033 attempt 3, Legion Envoy and Contracts 40297256195 attempt 2, PR Title, Docs and Worker Image: success, and lint, typecheck, test and pr-title all success. The boot pass reported 'added=1', then coverage read place azure, items 12 current 12 lacking 0 failed 0. The query shares no word with the trigger-less sourdough comment and returned it first, with degraded null and 0 ERROR lines",
+      "headSha": "ec6ea9e0b9ad4cb4cf072d6e0424e6ebed64e5eb",
+      "negativeControl": "the coverage route with no bearer → 401"
+    },
     {
       "criterion": "The merged head migrates after main's 0117 and a deployment that keeps Bedrock leaves rows dead before this release dead; an old release keeps serving through the roll",
       "surface": "real envoy-dispatch built at the merge head ec6ea9e0 on a database main's own envoy-dispatch (7f6ef46f, schema 0117) created through its API (project TST, 5 issues, 3 comments), with the earlier release's queue state written in SQL (5 Bedrock vectors, TST-4 and one comment dead at 10/12); Postgres 17.11 + pgvector 0.8.0 in the issue pod",
@@ -173,7 +180,20 @@
       "negativeControl": "the old binary's backfill-embeddings fails on the new schema (person-run, removed with this release)"
     }
   ],
-  "ci": "code head ec6ea9e0b9ad4cb4cf072d6e0424e6ebed64e5eb: Tests 40297256033, Legion Envoy and Contracts 40297256195, Docs 40297256157, PR Title 40297256135, Worker Image 40297256247 all queued when read (not waited on, not re-run); d5e863cc is handoff-only (skip-checks)",
+  "ci": "code head ec6ea9e0: Tests 40297256033 (attempt 3), Legion Envoy and Contracts 40297256195 (attempt 2), PR Title 40297256135, Docs 40297256157, Worker Image 40297256247 all success; required lint, typecheck, test, pr-title success",
+  "openAtCompletion": "GitHub reports PR #2208 CONFLICTING with main (8298fc710323): main's 383b889d and 8298fc71 changed packages/contracts/CHANGELOG.md, packages/envoy/CHANGELOG.md and packages/envoy/internal/dispatch/api/server_test.go, which this branch also changes. The implementer's forward merge is needed, and the architect is told",
+  "round4": {
+    "headTested": "ec6ea9e0b9ad4cb4cf072d6e0424e6ebed64e5eb",
+    "rebaseCheck": {
+      "verifiedHead": "5b39834357873eda556fc65bea2c3ea1b7c61683 (code f29797a6)",
+      "newHead": "d5e863cc8a09d12c219333d7aef5e112798645ee (code ec6ea9e0)",
+      "before": "6a1249c243518bfa396fa76c11c72279e76b00c493c526c337249351b723ab24",
+      "after": "337b617b2a85409abb1f3a62ea309c046801380cf48692fec142a1e160b9f4ea",
+      "verdict": "changed: full round",
+      "whatChanged": "diff of the normalized diffs: migrations 0117/0118 renamed 0118/0119 and every reference to them (README, CHANGELOG, coverage.go and coverage_test.go comments, embeddingsPendingSinceVersion 118), and routes_table_test's registeredRoutes 137→138; nothing else"
+    },
+    "note": "round 4's entries (headSha ec6ea9e0, full round) follow"
+  },
   "round3": {
     "headTested": "f29797a6693cd2e99908e95cd0e5b9012bfb6e90",
     "implementerProof": {
