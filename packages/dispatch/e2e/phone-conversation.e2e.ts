@@ -1105,3 +1105,57 @@ test("on a phone, a Conversation whose read failed opens on its newest message o
     await alice.close();
   }
 });
+
+// INFRA-303: a reader who leaves the Conversation while it shows only "Loading conversation…"
+// was never in the list, so coming back is a first open, not a return to a place: they land on
+// the newest conversation. Returning to a tab they had scrolled still restores that scroll
+// (`conversation.e2e.ts` and `phone.e2e.ts` hold that).
+test("on a phone, a reader who leaves the Conversation while it loads lands on its newest message when they come back", async ({
+  browser,
+}) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Leaving while it loads" });
+  await createAsk(issue.key, { question: "Which landing should the reader get?" }, session);
+  await createComment(issue.key, { body: "A root comment under the ask" });
+  for (let index = 0; index < 8; index += 1) {
+    await createMessage(issue.key, { body: `Older message ${index}` }, session);
+  }
+  const newest = await createMessage(issue.key, { body: "The newest message lands here" }, session);
+  const alice = await asUser(browser, "alice");
+
+  try {
+    const page = await alice.newPage();
+    await page.setViewportSize(iphone);
+    const asksRead = (url: URL) =>
+      url.pathname === `/api/v1/issues/${issue.key}/asks` && url.searchParams.get("thread") === "1";
+    const held: Route[] = [];
+    await page.route(asksRead, (route) => {
+      held.push(route);
+    });
+    await page.goto(`/issues/${issue.key}/conversation`);
+    await expect(page.getByText("Loading conversation…")).toBeVisible();
+    await expect.poll(() => held.length).toBe(1);
+
+    await page.getByRole("tab", { name: "Activity" }).click();
+    await expect(page.getByRole("tab", { name: "Activity" })).toHaveAttribute(
+      "aria-selected",
+      "true"
+    );
+    const answered = page.waitForResponse(
+      (response) => asksRead(new URL(response.url())) && response.status() === 200
+    );
+    await held[0]?.continue();
+    await answered;
+    const newestCard = page.locator(
+      `ol[aria-label="Conversation turns"] [data-turn="message:${newest.id}"]`
+    );
+    // The list renders in the hidden panel before the reader comes back.
+    await expect(newestCard).toBeAttached();
+
+    await page.getByRole("tab", { name: "Conversation" }).click();
+    await settle(newestCard, "back on the Conversation");
+    await expectNewestInView(page, newestCard, "back on the Conversation");
+  } finally {
+    await alice.close();
+  }
+});
