@@ -2,48 +2,27 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-440",
-  "completed": "2026-10-26T16:33:00Z",
-  "round": 4,
-  "scope": "The INFRA-278 architect's round-limit decision (2026-10-26 16:01Z): verify only review round 2's three fixes (Inbox asker tooltip, credential lines read once, the main merge) and the bare gates.",
+  "completed": "2026-10-26T17:06:00Z",
+  "round": 5,
+  "scope": "The INFRA-278 architect's instruction (2026-10-26 16:50Z): two mechanical fixes; verify phone.e2e.ts on chromium and iphone plus the agent-name and claim specs.",
   "verdictProvider": "provider not verified (this session's system prompt names model anthropic/claude-opus-5-5; the transcript's per-turn provider was not read)",
-  "headTested": "8e8a07df30562494388bae76c999ea7abfa8dbcb (code head; f32daa2b adds only .legion/INFRA-440/implement.json)",
+  "headTested": "7609748a15dd7501a4ccbcbd37175cc9750f5d9e (code head; e4f38e1e adds only .legion/INFRA-440/implement.json)",
+  "diffSinceRound4": "843da0b4..e4f38e1e outside .legion/: packages/dispatch/e2e/phone.e2e.ts:849 (the asker tooltip now expected as `${longTitle} · e2e-long-title`) and packages/dispatch/web/src/features/credentials/CredentialSessionLines.tsx (doc comment moved back onto CredentialSessionLineText, a one-line doc on statusText; no code change). The moved doc block is the credential line's, not AgentName's as the architect's message named it.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran the browser part of the implementer's command on my own lane (real Go Dispatch server, Postgres 17.11/pgvector database dispatch_test_e2e, ports 18877/19121-19124, Playwright Chromium 1243; web/dist rebuilt at 8e8a07df): agent-name.e2e.ts and claim.e2e.ts on chromium and iphone -> 14 passed, 2 skipped. Recomputed its merge fingerprint independently: 8540279c... at 1c08eb90 (my round-3 head) and at the merge c3671e43, the same as the implementer's."
+    "how": "Re-ran the specs on my own lane (real Go Dispatch server, Postgres 17.11/pgvector database dispatch_test_e2e, ports 18877/19121-19124, Playwright Chromium 1243; web/dist rebuilt at 7609748a): phone.e2e.ts, agent-name.e2e.ts and claim.e2e.ts on chromium and iphone -> 26 passed, 4 skipped."
   },
   "failures": [],
   "failed": 0,
-  "fingerprint": {
-    "1c08eb908fced3f754e88c058f221d6f8cd60829": "8540279c86e82f008537abe14e696254460db5a04fcef5a9bcd7535c3efb78c4",
-    "c3671e430ddea0c48798f536c94e22dbfa4afc74 (merge of main)": "8540279c86e82f008537abe14e696254460db5a04fcef5a9bcd7535c3efb78c4",
-    "8e8a07df30562494388bae76c999ea7abfa8dbcb (fix commit)": "c33616354548966e888e281cfde2a9ef411d4ce995e43094de982be9f5109abd",
-    "reading": "the merge left the branch's diff unchanged; the diff changed only by the fix commit 8e8a07df (AskCard.tsx, session.ts, CredentialSessionLines.tsx and their tests), which this round drove on the real surface"
-  },
   "proof": [
     {
-      "criterion": "Round 2 fix 1: the Inbox asker's tooltip carries the full session id, not the short form",
-      "surface": "real Go Dispatch server + Postgres 17.11/pgvector + Playwright Chromium 1243, chromium and iphone projects at 390 and 1280 px, tester lane",
-      "command": "scratch spec /legion/scratch/tmp/infra440-test/zz-tester-r4.e2e.ts 'ask card asker tooltip' (not committed): a titled session ask written with a personal token, an untitled session ask, then the Inbox",
-      "observed": "the asker button's name element has title 'Titled agent (for alice) · 019a2b3c-titled-0001' for the titled session and 'session:019a2b3c… · 019a2b3c-untitled-0002' for the untitled one, at 390 and 1280 on both projects; no element inside it carries a second title, so that title is the one a hover shows; agent-name.e2e.ts's phone asker row (which finds the name by that tooltip) passes",
-      "headSha": "8e8a07df30562494388bae76c999ea7abfa8dbcb",
-      "negativeControl": "the implementer's unit test against the previous AskCard.tsx fails (no element with title 'session:01234567… · 0123456789abcdef-untitled'); round 3's head showed only the short form there"
-    },
-    {
-      "criterion": "Round 2 fix 2: the credential lines read the agent list once and still say running / isn't running / couldn't check with the full id",
-      "surface": "same harness; fake broker pending credential request in the Inbox and on /credentials/record-probe, chromium and iphone",
-      "command": "scratch spec zz-tester-r4.e2e.ts 'credential lines': live enrolled 019a2b3c-real-session-0001, forged request id 019a2b3c-forged-claim-9999; then page.route 503 on /api/v1/agents",
-      "observed": "agent list up: 'Real agent · 019a2b3c-real-session-0001 · /home/alice/legion · devbox-alice' (mark running) and 'session:019a2b3c… · 019a2b3c-forged-claim-9999 isn't running.' (mark not-running), in the Inbox and on the record page; the words and the mark agree on every line",
-      "headSha": "8e8a07df30562494388bae76c999ea7abfa8dbcb",
-      "negativeControl": "agent list routed to 503 -> both lines read 'couldn't check whether <full id> is running.', the marks read unknown, and the page shows neither 'isn't running' nor the cached machine 'devbox-alice'"
-    },
-    {
-      "criterion": "Round 2 fix 3 and the bare gates: the main merge for the CHANGELOG conflict leaves the change as tested; the acceptance spec passes at the new head",
-      "surface": "fingerprint per conflicts-and-rewrites.md; same browser harness",
-      "command": "fingerprint of 1c08eb90, c3671e43 and 8e8a07df against fork_point(\"main\"@origin | <head>) over '~(.legion | docs/solutions)'; `bunx playwright test --config e2e/playwright.config.ts --project=chromium --project=iphone e2e/agent-name.e2e.ts e2e/claim.e2e.ts`",
-      "observed": "8540279c... before and after the merge (unchanged); 14 passed, 2 skipped at 8e8a07df; GitHub reports the pull request MERGEABLE",
-      "headSha": "8e8a07df30562494388bae76c999ea7abfa8dbcb",
-      "negativeControl": "the fix commit's fingerprint differs (c3361635...), which is why fixes 1 and 2 were driven above rather than taken as a bare re-check"
+      "criterion": "phone.e2e.ts's ellipsis row expects the asker's tooltip with its full id, and passes on chromium and iphone; the agent-name and claim specs still pass",
+      "surface": "real Go Dispatch server (e2e/run-server.sh) + Postgres 17.11/pgvector + Playwright Chromium 1243 in the issue pod, chromium and iphone projects, tester lane",
+      "command": "cd packages/dispatch && source /legion/scratch/tmp/infra440-test/env.sh && bun run build:web && bunx playwright test --config e2e/playwright.config.ts --project=chromium --project=iphone e2e/phone.e2e.ts e2e/agent-name.e2e.ts e2e/claim.e2e.ts",
+      "observed": "26 passed, 4 skipped (projects' own skips), 0 failed; the row 'a long name ends in an ellipsis wherever a link or control truncates it' (phone.e2e.ts:742) passes on both projects",
+      "headSha": "7609748a15dd7501a4ccbcbd37175cc9750f5d9e",
+      "negativeControl": "a scratch copy of phone.e2e.ts with line 849 back to `.toHaveAttribute(\"title\", longTitle)`, same build -> 2 failed at :849 on chromium and iphone: Received '<longTitle> · e2e-long-title', so the updated assertion follows the running app's tooltip"
     }
   ],
-  "ci": "At 8e8a07df when read: Tests 40358657351 queued, Legion Envoy and Contracts 40358657261 (lint, typecheck, unit, browser suite) queued, Docs 40358657264 pending, Worker Image 40358667408 queued, PR Title 40358875098 queued; mergeStateStatus BLOCKED (checks not yet run)."
+  "ci": "At 7609748a when read: Tests 40364103659 queued, Legion Envoy and Contracts 40364103740 (lint, typecheck, unit, browser suite) queued, Docs 40364103802 pending, Worker Image 40364103735 pending, PR Title 40364233931 queued."
 }
