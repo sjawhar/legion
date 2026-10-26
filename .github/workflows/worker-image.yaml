@@ -115,8 +115,9 @@ jobs:
     # main commit never drops another commit's. They never cancel: in a call from
     # release.yaml, `github.event_name` is the caller's (`push` or `workflow_dispatch`, never
     # `pull_request`), so no main commit is left without an image to pin.
-    # The run that reaches the group last wins, and GitHub does not guarantee arrival order: two
-    # pushes seconds apart, or a re-run of an older head's run, can cancel the newest head's build.
+    # On a pull request, the run that reaches the group last wins, and GitHub does not guarantee
+    # arrival order: two pushes seconds apart, or a re-run of an older head's run, can cancel the
+    # newest head's build.
     # `build` is not a required check, and `gh run rerun` of the newest head's run restores it, so
     # re-run an older head's run only after the newest head's build has completed.
     concurrency:

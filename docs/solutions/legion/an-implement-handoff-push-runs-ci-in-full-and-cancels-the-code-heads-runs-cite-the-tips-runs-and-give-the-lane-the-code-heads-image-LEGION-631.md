@@ -51,8 +51,9 @@ related_issues:
   **Superseded 2026-10-26:** `Worker Image` now has a per-PR group with `cancel-in-progress` on
   `pull_request`. A handoff push without the trailer cancels the code head's image build if that
   build has not finished, so there may be only the tip's digest (the same build inputs except
-  for the image's revision label and the revision linked into its `legion version`, which names
-  the tip). Give the coordinator the tip's digest and say that it stands for the code head.
+  for the image's two OCI labels, `revision` and `version`, and the revision linked into its
+  `legion version`, all of which name the tip). Give the coordinator the tip's digest and say
+  that it stands for the code head.
   Anyone who needs the code head's own digest pushes the handoff only after the code
   head's image run has completed. A `.legion/`-only push that carries `skip-checks: true` starts
   no run and cancels nothing.

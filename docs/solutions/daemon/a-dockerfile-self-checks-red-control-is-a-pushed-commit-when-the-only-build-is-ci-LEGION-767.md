@@ -47,12 +47,11 @@ once before the fix lands" is therefore two pushes, not a local run.
   pod), then `dpkg-deb -c` for the modes and `dpkg-deb -e` for `DEBIAN/postinst`, finds both; a guard
   scoped to the spec's one file would have failed the fixed image on the other.
 - A fix inside the apt `RUN` rebuilds every layer below it, so the fix push's run is cold and is the
-  one whose later steps print. The next head's run reuses those layers and prints `CACHED`, but only
-  when that head is pushed after the fix run has completed: a cancelled build exports no layer cache,
-  so the next run would be the cold one
+  one whose later steps print; the next head's run reuses them and prints `CACHED`
   (docs/solutions/daemon/a-cached-image-layer-s-output-is-in-the-run-that-built-it-cite-both-runs-LEGION-764.md).
   Cite both runs. Push the next head only after the fix run has completed: a head pushed earlier
-  cancels the cold build this bullet tells you to cite.
+  cancels the cold build this bullet tells you to cite, and a build cancelled during `Build and
+  push` exports no layer cache, so the next run would be the cold one.
 
 ## Evidence
 

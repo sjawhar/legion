@@ -27,8 +27,8 @@ artifact ("adding X to an input puts X in the output") and for reading the resul
   package on the apt line) and nothing else; `jj revert -r <probe> --insert-after <probe>` undoes it
   in a new commit, never a rewrite of the pushed one. `jj diff --from <feature> --to <revert>` must
   print nothing, so the revert head is the content that merges. Each head gets its own
-  `sha-<12 hex>` image only if no later head is pushed before that head's image run completes
-  (the last point below).
+  `sha-<12 hex>` image unless a later head is pushed before that head's image run completes; then
+  re-run that head's run after the newest head's run has completed (the last point below).
 - **Compare the two images with `LC_ALL=C comm -3`.** Two cold builds can pull different Debian
   archive states; `comm -3` shows drift as extra lines instead of hiding it in a pass. Expect only
   the probed name.
