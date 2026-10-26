@@ -1000,11 +1000,14 @@ type Rebuttal = { line: string; sent: string };
 /**
  * An override among a write's flags: `--advisor-rebuttal <line>` or `--advisor-rebuttal=<line>`; a
  * value that starts with `--` is the next flag, as the CLI reads it. A blank line is no override.
- * `removed` holds the indexes of the words it took; the last override is the one recorded, its
- * words as written (one space between flag and value) its `sent`.
+ * `removed` holds the indexes of the words it took. Every override is removed and every one is
+ * kept: `sent` is each one's words as written (one space between flag and value), in order, and
+ * `line` each one's line, joined with "; ", so a call that carries the flag twice loses neither
+ * from the agent's record of it, the acknowledgement or the entry.
  */
 function splitRebuttal(flags: readonly Word[]): { rebuttal?: Rebuttal; removed: Set<number> } {
-  let rebuttal: Rebuttal | undefined;
+  const lines: string[] = [];
+  const sent: string[] = [];
   const removed = new Set<number>();
   for (let index = 0; index < flags.length; index++) {
     const { value, raw } = flags[index];
@@ -1016,11 +1019,15 @@ function splitRebuttal(flags: readonly Word[]): { rebuttal?: Rebuttal; removed: 
         ? value.slice(REBUTTAL_FLAG.length + 1)
         : undefined;
     if (line === undefined || !line.trim()) continue;
-    rebuttal = { line: line.trim(), sent: spaced ? `${raw} ${next.raw}` : raw };
+    lines.push(line.trim());
+    sent.push(spaced ? `${raw} ${next.raw}` : raw);
     removed.add(index);
     if (spaced) removed.add(++index);
   }
-  return { ...(rebuttal === undefined ? {} : { rebuttal }), removed };
+  return {
+    ...(lines.length === 0 ? {} : { rebuttal: { line: lines.join("; "), sent: sent.join(" ") } }),
+    removed,
+  };
 }
 
 /**

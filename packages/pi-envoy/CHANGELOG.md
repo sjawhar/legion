@@ -122,11 +122,11 @@
   the gate reads: a call in any other form is refused before it posts in `block` mode, and in
   `warn` mode it posts with the note that it went out unreviewed, and the check never sees it.
   `--advisor-rebuttal '<line>'` on a command, `"advisor_rebuttal": "<line>"` in a device's JSON,
-  or the third attempt at the same thing on the same target sends the call anyway. The flag runs
-  as a shell comment at the end of the command's first line, so dispatch never sees it and the
-  agent's record of its call still shows it, and the acknowledgement quotes the override as the
-  agent sent it: told only that the flag was removed, agents read their own call back without it
-  and reported a rebuttal they never wrote. The breaker
+  or the third attempt at the same thing on the same target sends the call anyway. Each such flag
+  runs as a shell comment at the end of the command's first line, so dispatch never sees it and
+  the agent's record of its call still shows it, and the acknowledgement quotes every override as
+  the agent sent it and records every line: told only that the flag was removed, agents read their
+  own call back without it and reported a rebuttal they never wrote. The breaker
   counts only the calls the gate refused, so a charter revise in `warn` mode, which sends the
   call, never moves it. It counts each thing apart: each new ask a call opens, or the call as a
   whole when it opens none, so its free pass covers only the thing that was refused twice, and an
