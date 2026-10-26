@@ -1302,6 +1302,16 @@
   current document with the badge `Withdrawn` and `Withdrawn when <closer> closed the issue`, as
   the activity feed's `ask.resolved` line reads; a saved version shows its own attributes, so a
   later withdrawal never appears on it.
+- A document write whose transaction changes nothing appends no update, refreshes no anchors and
+  leaves the document's owed settlement marked when it was, for every writer (INFRA-158). ygo hands
+  a document's observers an update for every transaction, one that changes nothing included, and
+  every such update used to be appended and to mark the document owing a settlement again.
+- A closed issue's document no longer tells a person who typed nothing that "1 edit saved in this
+  browser can't be sent: this document is read-only" (INFRA-158). The editor stamps each heading's
+  id from its text as it loads, and the dashboard stored that stamp as an unsent edit even on a
+  read-only document. A read-only document now stores none of the editor's own updates, and drops
+  a stored row an earlier read-only load left that changes nothing; an edit a person typed while
+  the document was writable is still kept and named.
 - A Dispatch page in Firefox now shows what changed while its live event stream was reconnecting,
   such as a session's answer to a model switch, without waiting for the stream's heartbeat.
   Firefox opened the stream only once its first byte arrived, and a stream with no backlog and no
