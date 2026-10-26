@@ -10,7 +10,8 @@
   those repositories of the account, to `contents: read` and `metadata: read`, or to both; a
   token limited to repositories alone keeps every permission the App holds. It can only narrow,
   applies to that release alone, and the answer names it as `github_app`, which the broker
-  releases only once GitHub's own answer shows the token holds no more. A bad body is
+  releases only once GitHub's own answer shows the token holds no more, revoking at GitHub a
+  token whose answer holds more. A bad body is
   `400 INVALID_NARROWING`, a narrowing of a grant holding no `github-app` secret
   `400 NARROWING_NOT_APPLICABLE`, one to an account its `github-owners` tag does not list
   `403 NARROWING_OWNER_NOT_LISTED`, and one GitHub refuses (a repository the installation does not

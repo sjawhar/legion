@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"maps"
 	"net/http"
 	"slices"
@@ -103,10 +104,11 @@ func (n *GitHubNarrowing) accessTokensBody() ([]byte, error) {
 // refusal is err, GitHub's answer to the token request for owner, unless it is the 422 GitHub
 // gives a narrowed token it cannot mint: that is the caller's narrowing (ErrMintNarrowingRefused),
 // named by what it likely got wrong, since GitHub's own text is never quoted. A 422 to a request
-// that sent no body narrowed nothing, and stays the App's.
+// that sent no body narrowed nothing, and stays the App's; a 422 that is a rate limit is no verdict
+// on the narrowing, and stays the upstream's.
 func (n *GitHubNarrowing) refusal(err error, appID, owner string) error {
 	var status *mintStatusError
-	if !n.narrowsToken() || !errors.As(err, &status) || status.code != http.StatusUnprocessableEntity {
+	if !n.narrowsToken() || !errors.As(err, &status) || status.code != http.StatusUnprocessableEntity || status.rateLimited {
 		return err
 	}
 	var causes []string
@@ -124,21 +126,23 @@ func (n *GitHubNarrowing) refusal(err error, appID, owner string) error {
 // read-only, named permissions, each at most readOnlyPermissions'. GitHub applies the
 // access_tokens body and refuses what it cannot grant, so a token past it means something between
 // the broker and GitHub dropped or widened the body; refusing it keeps the narrowing the release
-// answers with true by construction. A token not narrowed is not checked.
+// answers with true by construction. Its errors name the rule the answer failed and never a value
+// the answer holds, which an upstream that is not GitHub can fill with what the request carried. A
+// token not narrowed is not checked.
 func (n *GitHubNarrowing) heldBy(token githubInstallationToken) error {
 	if !n.narrowsToken() {
 		return nil
 	}
 	if len(n.Repositories) > 0 {
 		if token.RepositorySelection != "selected" {
-			return fmt.Errorf("GitHub's token reaches %q repositories, not the ones the narrowing names", token.RepositorySelection)
+			return errors.New(`GitHub's token has a repository selection other than "selected", so it may reach more than the narrowing names`)
 		}
 		if len(token.Repositories) == 0 {
 			return errors.New("GitHub's token names no repositories, so it may reach more than the narrowing names")
 		}
 		for _, repository := range token.Repositories {
 			if !slices.ContainsFunc(n.Repositories, func(name string) bool { return strings.EqualFold(name, repository.Name) }) {
-				return fmt.Errorf("GitHub's token reaches %q, a repository the narrowing does not name", repository.Name)
+				return errors.New("GitHub's token reaches a repository the narrowing does not name")
 			}
 		}
 	}
@@ -147,12 +151,38 @@ func (n *GitHubNarrowing) heldBy(token githubInstallationToken) error {
 			return errors.New("GitHub's token names no permissions, so it may hold more than read access")
 		}
 		for _, permission := range slices.Sorted(maps.Keys(token.Permissions)) {
-			if level := token.Permissions[permission]; readOnlyPermissions[permission] != level {
-				return fmt.Errorf("GitHub's token holds %s: %s, past read access", permission, level)
+			if _, asked := readOnlyPermissions[permission]; !asked {
+				return errors.New("GitHub's token holds a permission past contents and metadata")
+			}
+			if token.Permissions[permission] != readOnlyPermissions[permission] {
+				return errors.New("GitHub's token holds more than read access to contents or metadata")
 			}
 		}
 	}
 	return nil
+}
+
+// revokeTimeout bounds the revoke of a token Mint minted and will not release.
+const revokeTimeout = 10 * time.Second
+
+// revokedWiderMessage is logged, at WARN, when GitHub does not confirm the revoke of a narrowed
+// token it minted wider than asked, followed by app=, installation=, expires_at= (when the token
+// lapses at GitHub without the revoke) and error=, which never holds the token.
+const revokedWiderMessage = "broker: GitHub did not revoke a narrowed token it minted wider than asked; it lapses at its expiry"
+
+// revokeInstallationToken asks GitHub to revoke token, as the token itself
+// (DELETE /installation/token), for a token Mint minted and will not release. It runs to its own
+// bound even once ctx ends, since GitHub honours an unreleased token for an hour otherwise.
+func (m GitHubApp) revokeInstallationToken(ctx context.Context, token string) error {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), revokeTimeout)
+	defer cancel()
+	const what = "revoke GitHub App installation token"
+	request, err := githubRequest(ctx, http.MethodDelete, m.base()+"/installation/token", token, nil)
+	if err != nil {
+		return fmt.Errorf("%w: %s: %w", ErrMintUpstream, what, err)
+	}
+	_, err = mintCall(m.HTTP, request, what, "GitHub", http.StatusNoContent)
+	return err
 }
 
 // Mint returns a token and expiry for every installation of the App in req.Value that is not
@@ -163,9 +193,9 @@ func (n *GitHubNarrowing) heldBy(token githubInstallationToken) error {
 // asked for. With req.GitHubNarrowing it mints for the narrowing's owner alone, which
 // req.GitHubOwners must list (it refuses, asking GitHub nothing, otherwise), sending the narrowing
 // as GitHub's access_tokens body, and releases the token only when GitHub's answer holds no more
-// than the narrowing asked (heldBy). The value is the JSON object stored in the secret, never part
-// of an error. Every error wraps one of ErrMintStoredValue, ErrMintRefused,
-// ErrMintNarrowingRefused or ErrMintUpstream.
+// than the narrowing asked (heldBy); a token it refuses so it revokes at GitHub first. The value is
+// the JSON object stored in the secret, never part of an error. Every error wraps one of
+// ErrMintStoredValue, ErrMintRefused, ErrMintNarrowingRefused or ErrMintUpstream.
 func (m GitHubApp) Mint(ctx context.Context, req MintRequest) (string, error) {
 	var secret githubAppSecret
 	// encoding/json's syntax errors quote the offending byte, so this decode and the token's do
@@ -225,6 +255,9 @@ func (m GitHubApp) Mint(ctx context.Context, req MintRequest) (string, error) {
 			return "", narrowing.refusal(err, secret.AppID, owner)
 		}
 		if err := narrowing.heldBy(token); err != nil {
+			if revokeErr := m.revokeInstallationToken(ctx, token.Token); revokeErr != nil {
+				slog.Warn(revokedWiderMessage, "app", secret.AppID, "installation", installation.ID, "expires_at", token.ExpiresAt, "error", revokeErr)
+			}
 			return "", fmt.Errorf("%w: github app %s: installation %d: %w", ErrMintUpstream, secret.AppID, installation.ID, err)
 		}
 		minted.Installations[owner] = githubMintedInstallation{
@@ -255,9 +288,9 @@ func (m GitHubApp) base() string {
 	return cmp.Or(strings.TrimSuffix(m.Base, "/"), githubAPIBase)
 }
 
-// githubRequest is a call to GitHub's App API, authenticated as the App, carrying body as JSON
-// when it is not nil.
-func githubRequest(ctx context.Context, method, target, jwt string, body []byte) (*http.Request, error) {
+// githubRequest is a call to GitHub's API with bearer as its credential (the App's JWT, or an
+// installation token revoking itself), carrying body as JSON when it is not nil.
+func githubRequest(ctx context.Context, method, target, bearer string, body []byte) (*http.Request, error) {
 	var reader io.Reader
 	if body != nil {
 		reader = bytes.NewReader(body)
@@ -266,7 +299,7 @@ func githubRequest(ctx context.Context, method, target, jwt string, body []byte)
 	if err != nil {
 		return nil, err
 	}
-	request.Header.Set("Authorization", "Bearer "+jwt)
+	request.Header.Set("Authorization", "Bearer "+bearer)
 	request.Header.Set("Accept", "application/vnd.github+json")
 	if body != nil {
 		request.Header.Set("Content-Type", "application/json")

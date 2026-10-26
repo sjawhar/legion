@@ -1,8 +1,10 @@
 package secrets_test
 
 import (
+	"bytes"
 	"encoding/json"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -23,23 +25,28 @@ type tokenRequest struct {
 
 // narrowingGitHub is a stub GitHub with the App installed on Acme-Org (1), ada (2) and outsider
 // (3). It records every request it receives and every token request's body, and answers a token
-// request with answer, asGitHubAnswers unless a test sets another before its first request.
+// request with answer, asGitHubAnswers unless a test sets another before its first request, and
+// with headers. It records the bearer of every DELETE /installation/token and answers it
+// revokeStatus, 204 unless a test sets another.
 type narrowingGitHub struct {
 	server *httptest.Server
 
-	mu       sync.Mutex
-	requests int
-	tokens   []tokenRequest
-	answer   func(installation string, body []byte) (int, any)
+	mu           sync.Mutex
+	requests     int
+	tokens       []tokenRequest
+	revoked      []string
+	answer       func(installation string, body []byte) (int, any)
+	headers      http.Header
+	revokeStatus int
 }
 
 func newNarrowingGitHub(t *testing.T) *narrowingGitHub {
 	t.Helper()
-	g := &narrowingGitHub{answer: asGitHubAnswers}
+	g := &narrowingGitHub{answer: asGitHubAnswers, revokeStatus: http.StatusNoContent}
 	g.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		g.mu.Lock()
 		g.requests++
-		answer := g.answer
+		answer, headers, revokeStatus := g.answer, g.headers, g.revokeStatus
 		g.mu.Unlock()
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/app/installations":
@@ -58,8 +65,16 @@ func newNarrowingGitHub(t *testing.T) *narrowingGitHub {
 			g.tokens = append(g.tokens, tokenRequest{installation: id, body: string(body), contentType: r.Header.Get("Content-Type")})
 			g.mu.Unlock()
 			status, reply := answer(id, body)
+			for name, values := range headers {
+				w.Header()[name] = values
+			}
 			w.WriteHeader(status)
 			_ = json.NewEncoder(w).Encode(reply)
+		case r.Method == http.MethodDelete && r.URL.Path == "/installation/token":
+			g.mu.Lock()
+			g.revoked = append(g.revoked, r.Header.Get("Authorization"))
+			g.mu.Unlock()
+			w.WriteHeader(revokeStatus)
 		default:
 			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
 		}
@@ -73,6 +88,30 @@ func (g *narrowingGitHub) setAnswer(answer func(installation string, body []byte
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	g.answer = answer
+}
+
+// setHeaders makes the stub send headers with every later token request's answer.
+func (g *narrowingGitHub) setHeaders(headers http.Header) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.headers = headers
+}
+
+// setRevokeStatus makes the stub answer every later revoke with status.
+func (g *narrowingGitHub) setRevokeStatus(status int) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.revokeStatus = status
+}
+
+// takeRevoked returns the Authorization header of every revoke since the last call, and forgets
+// them.
+func (g *narrowingGitHub) takeRevoked() []string {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	revoked := g.revoked
+	g.revoked = nil
+	return revoked
 }
 
 // asGitHubAnswers is the 201 GitHub gives a token request with body: the permissions the body
@@ -289,12 +328,49 @@ func TestGitHubAppMintNamesTheNarrowingWhenGitHubRefusesIt(t *testing.T) {
 	}
 }
 
+// TestGitHubAppMintKeepsARateLimited422Upstream: a 422 GitHub answers because the App is rate
+// limited (X-RateLimit-Remaining: 0, or a secondary-rate-limit message) is no verdict on the
+// narrowing, so it stays the upstream class an operator watches, not the caller's narrowing, and
+// its error names neither the repositories as a likely cause nor GitHub's own text.
+func TestGitHubAppMintKeepsARateLimited422Upstream(t *testing.T) {
+	key, err := testAppKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	github := newNarrowingGitHub(t)
+	app := secrets.GitHubApp{Base: github.server.URL, HTTP: github.server.Client()}
+	value := githubAppValue(t, "123456", key)
+	narrowing := &secrets.GitHubNarrowing{Owner: "ada", Repositories: []string{"proofs"}, ReadOnly: true}
+
+	for _, tc := range []struct {
+		name    string
+		headers http.Header
+		message string
+	}{
+		{"no requests left", http.Header{"X-Ratelimit-Remaining": {"0"}}, "Validation Failed"},
+		{"a secondary rate limit", nil, "You have exceeded a secondary rate limit. Please wait a few minutes before you try again."},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			github.setHeaders(tc.headers)
+			github.setAnswer(func(string, []byte) (int, any) {
+				return http.StatusUnprocessableEntity, map[string]string{"message": tc.message}
+			})
+			_, err := app.Mint(t.Context(), secrets.MintRequest{Value: value, GitHubOwners: []string{"acme-org", "ada"}, GitHubNarrowing: narrowing})
+			if secrets.MintErrorClass(err) != "upstream" || !strings.Contains(err.Error(), "rate limit") || strings.Contains(err.Error(), "proofs") || strings.Contains(err.Error(), "few minutes") {
+				t.Fatalf("Mint = %v (class %s), want class upstream naming the rate limit, not the narrowing or GitHub's text", err, secrets.MintErrorClass(err))
+			}
+		})
+	}
+}
+
 // TestGitHubAppMintRefusesATokenWiderThanTheNarrowing: Mint releases a narrowed token only when
 // GitHub's own answer describes no more than the narrowing asked: for read-only, no permission
 // past contents: read and metadata: read and not none named; for repositories, a selection of
 // those alone, named. Anything else (a body something between dropped or widened) is refused as
-// GitHub's fault (class upstream), the token in no error. A token not narrowed is not checked, and
-// a repository GitHub names in another case than asked is the same repository.
+// GitHub's fault (class upstream), and the token GitHub minted is revoked at GitHub with
+// DELETE /installation/token, as its own bearer, before Mint returns. The error names which rule
+// failed and never a value GitHub's answer holds, nor the token. A token not narrowed is not
+// checked, and a repository GitHub names in another case than asked is the same repository.
 func TestGitHubAppMintRefusesATokenWiderThanTheNarrowing(t *testing.T) {
 	key, err := testAppKey()
 	if err != nil {
@@ -312,6 +388,8 @@ func TestGitHubAppMintRefusesATokenWiderThanTheNarrowing(t *testing.T) {
 			return status, answer
 		}
 	}
+	// Every value a wider answer below holds that the request did not, so that no error quotes one.
+	gitHubValues := []string{"write", "administration", "secrets", `"all"`, "SECRETS"}
 
 	for _, tc := range []struct {
 		name      string
@@ -319,22 +397,30 @@ func TestGitHubAppMintRefusesATokenWiderThanTheNarrowing(t *testing.T) {
 		change    func(map[string]any)
 		mentions  string
 	}{
-		{"write contents", readOnly, func(a map[string]any) { a["permissions"] = map[string]string{"contents": "write", "metadata": "read"} }, "contents: write"},
+		{"write contents", readOnly, func(a map[string]any) { a["permissions"] = map[string]string{"contents": "write", "metadata": "read"} }, "more than read access"},
 		{"another permission", readOnly, func(a map[string]any) {
 			a["permissions"] = map[string]string{"administration": "write", "contents": "read", "metadata": "read"}
-		}, "administration: write"},
-		{"no permissions named", readOnly, func(a map[string]any) { delete(a, "permissions") }, "permissions"},
-		{"every repository", proofs, func(a map[string]any) { a["repository_selection"] = "all"; delete(a, "repositories") }, "all"},
+		}, "a permission past contents and metadata"},
+		{"no permissions named", readOnly, func(a map[string]any) { delete(a, "permissions") }, "names no permissions"},
+		{"every repository", proofs, func(a map[string]any) { a["repository_selection"] = "all"; delete(a, "repositories") }, "repository selection"},
 		{"another repository", proofs, func(a map[string]any) {
-			a["repositories"] = []map[string]string{{"name": "proofs"}, {"name": "secrets"}}
-		}, "secrets"},
-		{"no repositories named", proofs, func(a map[string]any) { delete(a, "repositories") }, "repositories"},
+			a["repositories"] = []map[string]string{{"name": "proofs"}, {"name": "SECRETS"}}
+		}, "a repository the narrowing does not name"},
+		{"no repositories named", proofs, func(a map[string]any) { delete(a, "repositories") }, "names no repositories"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			github.setAnswer(answering(tc.change))
 			release, err := app.Mint(t.Context(), secrets.MintRequest{Value: value, GitHubOwners: []string{"acme-org", "ada"}, GitHubNarrowing: tc.narrowing})
 			if release != "" || secrets.MintErrorClass(err) != "upstream" || !strings.Contains(err.Error(), tc.mentions) || strings.Contains(err.Error(), "token-") {
 				t.Fatalf("Mint = %q, %v (class %s), want nothing released, class upstream naming %q and no token", release, err, secrets.MintErrorClass(err), tc.mentions)
+			}
+			for _, quoted := range gitHubValues {
+				if strings.Contains(err.Error(), quoted) {
+					t.Fatalf("Mint = %v quotes %q from GitHub's answer", err, quoted)
+				}
+			}
+			if revoked := github.takeRevoked(); !reflect.DeepEqual(revoked, []string{"Bearer token-2"}) {
+				t.Fatalf("revokes at GitHub = %q, want one DELETE /installation/token as the refused token", revoked)
 			}
 		})
 	}
@@ -346,5 +432,40 @@ func TestGitHubAppMintRefusesATokenWiderThanTheNarrowing(t *testing.T) {
 	github.setAnswer(asGitHubAnswers)
 	if release, err := app.Mint(t.Context(), secrets.MintRequest{Value: value, GitHubOwners: []string{"acme-org", "ada"}}); err != nil || !strings.Contains(release, "token-1") || !strings.Contains(release, "token-2") {
 		t.Fatalf("Mint with no narrowing and GitHub's whole answer = %q, %v; want every listed owner's token", release, err)
+	}
+	if revoked := github.takeRevoked(); len(revoked) != 0 {
+		t.Fatalf("revokes of released tokens = %q, want none", revoked)
+	}
+}
+
+// TestGitHubAppMintStillRefusesWhenGitHubDoesNotRevoke: a revoke GitHub does not confirm (here a
+// 500) is logged at WARN, never naming the token, and the wider token is still refused.
+func TestGitHubAppMintStillRefusesWhenGitHubDoesNotRevoke(t *testing.T) {
+	var logged bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logged, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+	key, err := testAppKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	github := newNarrowingGitHub(t)
+	github.setRevokeStatus(http.StatusInternalServerError)
+	github.setAnswer(func(installation string, body []byte) (int, any) {
+		status, answer := asGitHubAnswers(installation, body)
+		answer.(map[string]any)["permissions"] = map[string]string{"contents": "write", "metadata": "read"}
+		return status, answer
+	})
+	app := secrets.GitHubApp{Base: github.server.URL, HTTP: github.server.Client()}
+
+	release, err := app.Mint(t.Context(), secrets.MintRequest{Value: githubAppValue(t, "123456", key), GitHubOwners: []string{"acme-org", "ada"}, GitHubNarrowing: &secrets.GitHubNarrowing{Owner: "ada", ReadOnly: true}})
+	if release != "" || secrets.MintErrorClass(err) != "upstream" {
+		t.Fatalf("Mint = %q, %v (class %s), want nothing released and class upstream", release, err, secrets.MintErrorClass(err))
+	}
+	if revoked := github.takeRevoked(); len(revoked) != 1 {
+		t.Fatalf("revokes at GitHub = %q, want one", revoked)
+	}
+	if line := logged.String(); !strings.Contains(line, "level=WARN") || !strings.Contains(line, "did not revoke") || strings.Contains(line, "token-2") {
+		t.Fatalf("log = %q, want a WARN line that GitHub did not revoke the token, without the token", line)
 	}
 }

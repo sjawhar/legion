@@ -1,6 +1,7 @@
 package secrets
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"errors"
@@ -16,23 +17,36 @@ import (
 const mintResponseLimit = 1 << 20
 
 // mintStatusError is an upstream answer whose status is not the one the call wanted. It wraps
-// ErrMintRefused for a 4xx and ErrMintUpstream for anything else. It names the numeric status
-// alone: an upstream's reason phrase is its own text, which a malformed or hostile answer can fill
-// with what the request sent.
+// ErrMintRefused for a 4xx and ErrMintUpstream for anything else, a rate-limited 4xx among them:
+// a rate limit is no verdict on the App, the login or a narrowing, and lifts by itself. It names
+// the numeric status alone: an upstream's reason phrase is its own text, which a malformed or
+// hostile answer can fill with what the request sent.
 type mintStatusError struct {
 	what, who string
 	code      int
+	// rateLimited is an answer that says it is a rate limit: GitHub's X-RateLimit-Remaining of 0,
+	// or a body naming a rate limit, as GitHub's secondary rate limit does.
+	rateLimited bool
 }
 
 func (e *mintStatusError) Error() string {
+	if e.rateLimited {
+		return fmt.Sprintf("%s: %s answered HTTP %d, a rate limit", e.what, e.who, e.code)
+	}
 	return fmt.Sprintf("%s: %s answered HTTP %d", e.what, e.who, e.code)
 }
 
 func (e *mintStatusError) Unwrap() error {
-	if e.code >= 400 && e.code < 500 {
+	if e.code >= 400 && e.code < 500 && !e.rateLimited {
 		return ErrMintRefused
 	}
 	return ErrMintUpstream
+}
+
+// rateLimited reports whether response, whose body is body, says it is a rate limit, without
+// quoting either.
+func rateLimited(response *http.Response, body []byte) bool {
+	return response.Header.Get("X-RateLimit-Remaining") == "0" || bytes.Contains(bytes.ToLower(body), []byte("rate limit"))
 }
 
 // mintCall sends request with client (http.DefaultClient when nil) and reads at most
@@ -59,7 +73,7 @@ func mintCall(client *http.Client, request *http.Request, what, who string, want
 		return nil, fmt.Errorf("%w: %s: %s answered more than %d bytes", ErrMintUpstream, what, who, mintResponseLimit)
 	}
 	if response.StatusCode != want {
-		return body, &mintStatusError{what: what, who: who, code: response.StatusCode}
+		return body, &mintStatusError{what: what, who: who, code: response.StatusCode, rateLimited: rateLimited(response, body)}
 	}
 	return body, nil
 }

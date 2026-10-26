@@ -2460,9 +2460,13 @@ GitHub anything. GitHub's 422 to a narrowed token is `secrets.ErrMintNarrowingRe
 each is logged at WARN as `requests.NarrowingRefusedMessage`, never as `broker: mint failed`.
 `GitHubApp.Mint` releases a narrowed token only when GitHub's answer describes no more than the
 narrowing asked (`GitHubNarrowing.heldBy`: the repositories selected, the permissions held), so
-the narrowing the answer echoes as `github_app` is true by construction. The CLI's exec form
-(`--github-owner`, `--github-repo`, `--github-read-only`) requires that echo before it runs
-anything, since a broker from before narrowing ignores the body and releases the owner-wide token.
+the narrowing the answer echoes as `github_app` is true by construction. A token it refuses it
+revokes at GitHub first (`DELETE /installation/token`, as the token), logging a WARN when GitHub
+does not confirm the revoke, and the refusal names the rule the answer failed, never a value from
+it. A 422 that says it is a rate limit (`X-RateLimit-Remaining: 0`, or a rate-limit message) is
+the upstream's class, never the narrowing's. The CLI's exec form (`--github-owner`,
+`--github-repo`, `--github-read-only`) requires that echo before it runs anything, since a broker
+from before narrowing ignores the body and releases the owner-wide token.
 Once its reads are done, `Values` checks every name whose frozen source is a stored one against the
 policy as it stands then (`recheckStoredSources`): a retag to a kind reread during the reads ends
 the grant for good, and one the policy no longer serves pauses it, so a release never returns what

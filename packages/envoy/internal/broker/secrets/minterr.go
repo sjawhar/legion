@@ -53,8 +53,9 @@ var (
 	// caller fixes the narrowing; neither the App nor the secret is at fault.
 	ErrMintNarrowingRefused = errors.New("the narrowing cannot be served")
 	// ErrMintUpstream: GitHub or Google could not be asked or answered no usable reply (the network,
-	// a 5xx, a body past its cap or one that does not decode, a token GitHub describes as wider than
-	// the narrowing asked). The broker's operator looks at egress and the upstream's status.
+	// a 5xx, a rate limit, a body past its cap or one that does not decode, a token GitHub describes
+	// as wider than the narrowing asked, which GitHubApp.Mint revokes at GitHub before it refuses).
+	// The broker's operator looks at egress and the upstream's status.
 	ErrMintUpstream = errors.New("the upstream could not be asked")
 )
 
