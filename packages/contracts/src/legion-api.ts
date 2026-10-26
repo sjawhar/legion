@@ -41,8 +41,10 @@ export const LEGION_WORKFLOW_PHASES = [
   "held",
 ] as const;
 
-/** The `api.PhaseBackwardRequest` targets contract-12's daemon accepts. Future state-only phases
- * join this list only with their daemon transition. */
+/** The `to` values this schema lets a client send in an `api.PhaseBackwardRequest`. The daemon's
+ * route takes any phase there, but its workflow table has a backward transition only to
+ * `planning`, `implementing`, `testing`, `reviewing`, `accepting` or `retro`, each from a later
+ * phase no further than `merging`, and none to the other targets listed here. */
 export const LEGION_PHASE_BACKWARD_TARGETS = [
   "admitted",
   "planning",
