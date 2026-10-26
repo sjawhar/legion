@@ -120,11 +120,10 @@ answer leaves it the session id and the title this listener's cache holds, and t
 follows meets the same silent bus and answers the 503 above inside the caller's attempt.
 
 A publish whose caller's context has already ended puts nothing on the wire; on these two routes it
-is answered the 503 above. A core publish (a role lane or an ad-hoc topic) checks its deadline
-immediately before it publishes (`publishConfirmed`, `internal/bus/confirm.go`), and
-`publishCoreTo` (`internal/bus/nats.go`) refuses a context cancelled while its deadline is still
-ahead, which a deadline alone cannot show, reading it once more after a wait for a reconnect so a
-cancel during that wait sends nothing (a cancel after that last read cannot be undone); the
+is answered the 503 above. A core publish (a role lane or an ad-hoc topic) checks its context
+immediately before it publishes (`publishConfirmed`, `internal/bus/confirm.go`): one check sees
+both a spent deadline and a cancel while the deadline is still ahead, so a cancel during a wait for
+a reconnect sends nothing (a cancel after that check cannot be undone); the
 JetStream path has no check of its own and relies on nats.go's, whose request returns the context's
 error before it sends anything. It matters because the publish route's role-holder resolution runs
 before the publish under the same budget, and one that answers just as the budget ends leaves the

@@ -653,10 +653,10 @@
   ended — its budget spent, which a role-holder resolution that answers just as the budget ends
   can leave it, or the request cancelled — puts nothing on the wire and is answered that 503: a
   core subject has no duplicate window and the client retries every 5xx, so a message emitted
-  behind a failure answer would reach its subscriber twice. A core publish checks its deadline
-  immediately before it publishes and its context's cancellation before that, once more after any
-  wait for a reconnect, so one cancelled while NATS reconnects sends nothing; a cancel after that
-  last check cannot be undone, and the publish goes ahead. A JetStream publish relies on nats.go,
+  behind a failure answer would reach its subscriber twice. A core publish checks its context
+  immediately before it publishes, one check that sees both a spent deadline and a cancel, so one
+  cancelled while NATS reconnects sends nothing; a cancel after that check cannot be undone, and
+  the publish goes ahead. A JetStream publish relies on nats.go,
   whose request sends nothing under an ended context. A send resolves its target from the session
   store itself rather than from this listener's cache of it — a cache miss is read through to the
   `envoy_sessions` bucket within a second, the same direct get the role paths already make — so

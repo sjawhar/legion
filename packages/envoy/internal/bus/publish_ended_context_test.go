@@ -122,9 +122,10 @@ func TestAPublishWithAnEndedContextSendsNothing(t *testing.T) {
 
 // publishConfirmed refuses an ended context before it calls publish, a deadline already spent or a
 // cancel with the deadline still ahead, and answers it with the spent-window text wrapping the
-// context's error. A context reaches publishConfirmed ended when it ended during the wait for a
-// connection or just after it - nothing end to end can time that, so it is pinned on its own:
-// publish must not be called at all. The text is pinned because a deployed filter may match it.
+// context's error. It is the only check of the context on the core path (publishCoreTo reads it
+// nowhere, and ensureConnWithContext returns on a healthy connection without consulting it), so it
+// is pinned on its own, both causes driven directly: publish must not be called at all. The text is
+// pinned because a deployed filter may match it.
 // The control is the same call with a deadline ahead, which publishes, flushes and confirms.
 func TestAPublishConfirmedWithASpentDeadlinePublishesNothing(t *testing.T) {
 	client, err := ConnectOwningStream([]string{testnats.URL(t)})
