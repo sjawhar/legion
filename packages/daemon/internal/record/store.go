@@ -714,30 +714,47 @@ func (s *Postgres) PutGate(ctx context.Context, tx pgx.Tx, gate DesignGate) erro
 	return nil
 }
 
-// RecordClosedAsk records a person's answer or resolution of an ask, with where Dispatch recorded
-// it. A second record of the same ask keeps the first mark: the close is one act, however often a
-// read of it reaches the daemon.
-func (s *Postgres) RecordClosedAsk(ctx context.Context, tx pgx.Tx, closed ClosedAsk) error {
-	seq, at := markValues(closed.Mark)
-	if _, err := tx.Exec(ctx, `insert into awaiting_closed_asks (issue, ask, seq, at) values ($1, $2, $3, $4)
-		on conflict (issue, ask) do nothing`, closed.Issue, closed.Ask, seq, at); err != nil {
-		return fmt.Errorf("record the person's close of ask %s on %s: %w", closed.Ask, closed.Issue, err)
+// RecordPersonAct records a person's act on an ask, keyed by its event's place in the issue's
+// event log: the act is one event, however often a delivery or a read of it reaches the daemon.
+func (s *Postgres) RecordPersonAct(ctx context.Context, tx pgx.Tx, act PersonAct) error {
+	if act.Mark.Seq <= 0 {
+		return fmt.Errorf("record the person's act on ask %s of %s: the act has no event sequence", act.Ask, act.Issue)
+	}
+	_, at := markValues(act.Mark)
+	if _, err := tx.Exec(ctx, `insert into awaiting_person_acts (issue, seq, ask, at, answers_gate) values ($1, $2, $3, $4, $5)
+		on conflict (issue, seq) do nothing`, act.Issue, act.Mark.Seq, act.Ask, at, act.AnswersGate); err != nil {
+		return fmt.Errorf("record the person's act on ask %s of %s: %w", act.Ask, act.Issue, err)
 	}
 	return nil
 }
 
-func (s *Postgres) AskClosedByPerson(ctx context.Context, tx pgx.Tx, issue, ask string) (bool, error) {
-	var closed bool
-	if err := tx.QueryRow(ctx, `select exists (select 1 from awaiting_closed_asks where issue = $1 and ask = $2)`,
-		issue, ask).Scan(&closed); err != nil {
-		return false, fmt.Errorf("read whether a person closed ask %s on %s: %w", ask, issue, err)
+func (s *Postgres) PersonActs(ctx context.Context, tx pgx.Tx, issue string) ([]PersonAct, error) {
+	rows, err := tx.Query(ctx, `select seq, ask, at, answers_gate from awaiting_person_acts where issue = $1 order by seq`, issue)
+	if err != nil {
+		return nil, fmt.Errorf("read the person's acts on %s: %w", issue, err)
 	}
-	return closed, nil
+	defer rows.Close()
+	acts := []PersonAct{}
+	for rows.Next() {
+		act := PersonAct{Issue: issue}
+		var at *time.Time
+		if err := rows.Scan(&act.Mark.Seq, &act.Ask, &at, &act.AnswersGate); err != nil {
+			return nil, fmt.Errorf("read the person's acts on %s: %w", issue, err)
+		}
+		if at != nil {
+			act.Mark.At = at.UTC()
+		}
+		acts = append(acts, act)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("read the person's acts on %s: %w", issue, err)
+	}
+	return acts, nil
 }
 
-func (s *Postgres) ForgetClosedAsks(ctx context.Context, tx pgx.Tx, issue string) error {
-	if _, err := tx.Exec(ctx, `delete from awaiting_closed_asks where issue = $1`, issue); err != nil {
-		return fmt.Errorf("forget the closed asks of %s: %w", issue, err)
+func (s *Postgres) ForgetPersonActs(ctx context.Context, tx pgx.Tx, issue string) error {
+	if _, err := tx.Exec(ctx, `delete from awaiting_person_acts where issue = $1`, issue); err != nil {
+		return fmt.Errorf("forget the person's acts on %s: %w", issue, err)
 	}
 	return nil
 }

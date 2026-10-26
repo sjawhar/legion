@@ -128,8 +128,8 @@ func TestTheGatesToldChangesRequestArrivesWith0051(t *testing.T) {
 }
 
 // 0051 also records where Dispatch put the approval a gate holds, cleared with the approval
-// itself, and keeps the asks a person closed on an issue, which go with the issue.
-func TestTheGatesApprovalMarkAndTheClosedAsksArriveWith0051(t *testing.T) {
+// itself, and keeps the acts a person took on an issue's asks, which go with the issue.
+func TestTheGatesApprovalMarkAndThePersonsActsArriveWith0051(t *testing.T) {
 	store := emptyStore(t)
 	ctx := context.Background()
 	migrateThrough(t, store, 50)
@@ -155,8 +155,8 @@ func TestTheGatesApprovalMarkAndTheClosedAsksArriveWith0051(t *testing.T) {
 	}
 	for _, accepted := range []string{
 		`update design_gates set approved_seq = 12, approved_at = now() where issue = 'LEGION-208'`,
-		`insert into awaiting_closed_asks (issue, ask, seq, at) values ('LEGION-208', 'ask-question', 11, now())`,
-		`insert into awaiting_closed_asks (issue, ask) values ('LEGION-208', 'ask-approval')`,
+		`insert into awaiting_person_acts (issue, seq, ask, at, answers_gate) values ('LEGION-208', 11, 'ask-question', now(), true)`,
+		`insert into awaiting_person_acts (issue, seq, ask, answers_gate) values ('LEGION-208', 12, 'ask-approval', false)`,
 	} {
 		if _, err := store.Pool().Exec(ctx, accepted); err != nil {
 			t.Fatalf("%s: %v, want it accepted", accepted, err)
@@ -165,7 +165,8 @@ func TestTheGatesApprovalMarkAndTheClosedAsksArriveWith0051(t *testing.T) {
 	for _, refused := range []struct{ why, statement string }{
 		{"a sequence of zero", `update design_gates set approved_seq = 0 where issue = 'LEGION-208'`},
 		{"a mark with no approval", `update design_gates set approved_version = null where issue = 'LEGION-208'`},
-		{"a closed ask's sequence of zero", `update awaiting_closed_asks set seq = 0 where ask = 'ask-question'`},
+		{"an act's sequence of zero", `update awaiting_person_acts set seq = 0 where ask = 'ask-question'`},
+		{"an act on no ask", `update awaiting_person_acts set ask = '' where ask = 'ask-question'`},
 	} {
 		_, err := store.Pool().Exec(ctx, refused.statement)
 		if err == nil || !strings.Contains(err.Error(), "check constraint") {
@@ -176,10 +177,10 @@ func TestTheGatesApprovalMarkAndTheClosedAsksArriveWith0051(t *testing.T) {
 		t.Fatalf("delete the issue: %v", err)
 	}
 	var left int
-	if err := store.Pool().QueryRow(ctx, `select count(*) from awaiting_closed_asks`).Scan(&left); err != nil {
-		t.Fatalf("count the closed asks: %v", err)
+	if err := store.Pool().QueryRow(ctx, `select count(*) from awaiting_person_acts`).Scan(&left); err != nil {
+		t.Fatalf("count the person's acts: %v", err)
 	}
 	if left != 0 {
-		t.Fatalf("closed asks after the issue was deleted = %d, want none", left)
+		t.Fatalf("person's acts after the issue was deleted = %d, want none", left)
 	}
 }

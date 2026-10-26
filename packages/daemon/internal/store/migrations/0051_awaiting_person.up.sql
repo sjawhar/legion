@@ -74,14 +74,18 @@ alter table design_gates add column approved_at timestamptz;
 alter table design_gates add constraint design_gates_approved_mark_shape check (
   approved_version is not null or (approved_seq is null and approved_at is null));
 
--- awaiting_closed_asks records each ask of a root that a person answered or resolved, with the
--- event's sequence on the issue and Dispatch's time of it (either null when the event carried
--- none). Dispatch's intake retries a delivery, so an ask.opened can reach the daemon after the
--- answer that closed it: a question whose row is here starts no wait, since nothing would ever
--- answer one. The rows are the issue's and go when it leaves the workflow.
-create table awaiting_closed_asks (
+-- awaiting_person_acts records each act a person took on an ask of a root — an answer or
+-- resolution that closed it, or a reply that left the turn with the agent — by its event's
+-- sequence on the issue, with Dispatch's time of it (null when the event carried none), the ask,
+-- and whether it answers a wait on the root's design gate as well as one on that ask. Dispatch's
+-- intake retries a delivery, so the event that starts a wait (a question opened, a hand-back) can
+-- reach the daemon after a person's act that followed it: a wait whose start an act recorded here
+-- follows starts none, since what it would wait on has already happened. The rows are the issue's
+-- and go when it leaves the workflow.
+create table awaiting_person_acts (
   issue text not null references issues (key) on delete cascade,
-  ask text not null,
-  seq bigint check (seq > 0),
+  seq bigint not null check (seq > 0),
+  ask text not null check (ask <> ''),
   at timestamptz,
-  primary key (issue, ask));
+  answers_gate boolean not null,
+  primary key (issue, seq));

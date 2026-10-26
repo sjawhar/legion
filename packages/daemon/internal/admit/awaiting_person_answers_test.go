@@ -943,6 +943,66 @@ func TestAQuestionAPersonHasAlreadyAnsweredStartsNoWait(t *testing.T) {
 	}
 }
 
+// Dispatch's intake retries a delivery and the daemon naks a failed fact while its consumer moves
+// on, so a person's act can reach the daemon before the event that starts the wait it answers. The
+// root records the act, and the late event starts no wait: the root keeps its slot and its running
+// architect, which already has the act. That holds for a person's reply before the question it
+// replies to, and for a reply, an answer of another ask, or a changes request before the hand-back
+// of the approval request; a changes request the architect was told of while the root ran is never
+// waited on, where no later read would ever answer that wait. An act Dispatch recorded before the
+// wait's start leaves the wait to start.
+func TestAPersonsActDeliveredBeforeTheEventThatStartsItsWaitStartsNoWait(t *testing.T) {
+	act := record.EventMark{Seq: 11, At: handedBackAt.Add(time.Minute)}
+	early := record.EventMark{Seq: 9, At: handedBackAt.Add(-time.Minute)}
+	opened := intake.DispatchAskOpened{Key: "LEGION-ROOT", Ask: "ask-question", Kind: "question", AuthorSession: architect.ID, Mark: handBack}
+	handedBack := intake.DispatchAskReply{Key: "LEGION-ROOT", Ask: "ask-approval", WaitingOn: "human", Actor: architect, Mark: handBack}
+	changes := func(mark record.EventMark) intake.DispatchArtifact {
+		return intake.DispatchArtifact{Key: "LEGION-ROOT", ArtifactID: "artifact-root", Kind: intake.DispatchArtifactChangesRequested,
+			Version: 4, Reason: "name the rollback path", Mark: mark}
+	}
+	for _, tc := range []struct {
+		name   string
+		act    intake.Fact
+		starts intake.Fact
+		waits  bool
+	}{
+		{name: "a person's reply before the question it replies to",
+			act: intake.DispatchAskReply{Key: "LEGION-ROOT", Ask: "ask-question", WaitingOn: "agent", Actor: alice, Mark: act}, starts: opened},
+		{name: "a person's reply before the hand-back",
+			act: intake.DispatchAskReply{Key: "LEGION-ROOT", Ask: "ask-approval", WaitingOn: "agent", Actor: alice, Mark: act}, starts: handedBack},
+		{name: "a person's answer of another ask before the hand-back",
+			act: intake.DispatchAskClosed{Key: "LEGION-ROOT", Ask: "ask-question", Kind: "question", State: "answered", Actor: alice, Mark: act}, starts: handedBack},
+		{name: "a changes request before the hand-back", act: changes(act), starts: handedBack},
+		{name: "a person's reply Dispatch recorded before the hand-back",
+			act: intake.DispatchAskReply{Key: "LEGION-ROOT", Ask: "ask-approval", WaitingOn: "agent", Actor: alice, Mark: early}, starts: handedBack, waits: true},
+		{name: "a changes request Dispatch recorded before the hand-back", act: changes(early), starts: handedBack, waits: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := migratedPool(t)
+			admission := newAdmission(t, 1, nil)
+			seedSlotted(t, pool, "LEGION-ROOT", "A")
+			seedWaiting(t, pool, "LEGION-NEXT", "B")
+			seedArchitectClaim(t, pool, "LEGION-ROOT", architect.ID)
+			seedGate(t, pool, record.DesignGate{Issue: "LEGION-ROOT", ArtifactID: "artifact-root", LatestVersion: 4})
+
+			applyFact(t, pool, admission, "act-delivered-first", tc.act)
+			applyFact(t, pool, admission, "wait-start-retried-later", tc.starts)
+			got := issue(t, pool, "LEGION-ROOT")
+			if tc.waits {
+				if !got.AwaitingPerson() || got.Answered() {
+					t.Fatalf("root after an act before its wait's start = %#v, want it waiting unanswered", got)
+				}
+				return
+			}
+			if got.Phase != phase.Admitted || got.Awaiting != nil {
+				t.Fatalf("root after %s = %#v, want it admitted with no wait", tc.name, got)
+			}
+			assertSlots(t, pool, []record.Slot{{Issue: "LEGION-ROOT", Index: 0, AdmittedAt: fixedNow}})
+			assertNoAwaitingEffects(t, pool, "LEGION-ROOT")
+		})
+	}
+}
+
 // A registration reads the approval and nothing else, so it fences only what would start a wait
 // on the gate. An ordinary question its read never saw, delivered late, still releases the root's
 // slot and waits on the person.

@@ -325,8 +325,10 @@ func (e *Engine) admittedRoot(ctx context.Context, tx pgx.Tx, issue record.Issue
 // suspension waits for its current turn to end, keeping the session for the answer's resume. A root
 // Unresumable answers no for keeps its slot at admitted: released, nothing could ever resume it,
 // and admission's sweep would end its tree. That is the architect whose claim a person refused,
-// asking that person whether to release it. The wait's start raises the root's wait fence, so the
-// event it began at, delivered late, starts no second wait.
+// asking that person whether to release it. A root a person has already answered past the wait's
+// start keeps its slot too (actedSince): the event that starts the wait reached the daemon after
+// that act, and the architect, still running, has it. The wait's start raises the root's wait
+// fence, so the event it began at, delivered late, starts no second wait.
 func (e *Engine) awaitPerson(ctx context.Context, tx pgx.Tx, root record.Issue, waiting record.Awaiting, reason string) error {
 	if root.Phase != phase.Admitted || !claim.IsTreeRoot(root.Key, root.Tree) || root.Lingers() || !InWorkflow(root) {
 		return nil
@@ -350,6 +352,15 @@ func (e *Engine) awaitPerson(ctx context.Context, tx pgx.Tx, root record.Issue, 
 	}
 	if unresumable != "" {
 		e.logOnCommit(ctx, "workflow: root keeps its admission slot while it waits on a person, since it could not resume", "issue", root.Key, "why", unresumable)
+		return nil
+	}
+	acted, err := e.actedSince(ctx, tx, root, waiting)
+	if err != nil {
+		return err
+	}
+	if acted != "" {
+		e.logOnCommit(ctx, "workflow: root keeps its admission slot, since a person already acted after the wait would begin", "issue", root.Key,
+			"why", acted, "since_seq", waiting.Since.Seq)
 		return nil
 	}
 	root.Phase, root.Awaiting = phase.AwaitingPerson, &waiting

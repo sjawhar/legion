@@ -43,9 +43,9 @@ import (
 // them.
 func (e *Engine) leave(ctx context.Context, tx pgx.Tx, issue record.Issue, status string) error {
 	e.logOnCommit(ctx, "workflow: issue left the workflow", "issue", issue.Key, "tree", issue.Tree, "status", status)
-	// The asks a person closed are a running issue's: nothing of this issue waits on one again
-	// until it is admitted anew, which records its own.
-	if err := e.store.ForgetClosedAsks(ctx, tx, issue.Key); err != nil {
+	// The acts a person took on its asks are a running issue's: nothing of this issue waits on one
+	// again until it is admitted anew, which records its own.
+	if err := e.store.ForgetPersonActs(ctx, tx, issue.Key); err != nil {
 		return err
 	}
 	if claim.IsTreeRoot(issue.Key, issue.Tree) {

@@ -212,6 +212,12 @@ func (m EventMark) After(start EventMark) bool {
 	return true
 }
 
+// Follows says whether m surely comes after start: both carry a sequence and m's is greater. A
+// mark either side cannot place by sequence is not taken to follow, so it never stops a wait.
+func (m EventMark) Follows(start EventMark) bool {
+	return m.Seq > 0 && start.Seq > 0 && m.Seq > start.Seq
+}
+
 // Same says whether m and other can mark the same event: equal sequences when both carry one,
 // otherwise equal times when both carry one, otherwise true. A review that a read of Dispatch shows
 // with no sequence (one Dispatch recorded before it kept the sequence, or a Dispatch that predates
@@ -553,13 +559,18 @@ type DesignGate struct {
 	ToldChangesMark    EventMark
 }
 
-// ClosedAsk is an ask of an issue that a person answered or resolved, and where Dispatch recorded
-// that act (Mark, zero when the event carried none). An ask.opened the daemon applies after it
-// starts no wait, since the person has already closed the ask and nothing would answer that wait.
-type ClosedAsk struct {
-	Issue string
-	Ask   string
-	Mark  EventMark
+// PersonAct is an act a person took on an ask of a root and where Dispatch recorded it (Mark, its
+// event's sequence on the issue and its time): an answer or resolution that closed the ask, or a
+// reply that left the turn with the agent. AnswersGate says whether it answers a wait on the
+// root's design gate as well as one on that ask (the workflow's answeredByPerson). Dispatch's
+// intake retries a delivery, so the event that starts a wait — a question opened, a hand-back —
+// can reach the daemon after a person's act that followed it; the root keeps every such act, and a
+// wait whose start one of them follows starts none, since what it would wait on has happened.
+type PersonAct struct {
+	Issue       string
+	Ask         string
+	Mark        EventMark
+	AnswersGate bool
 }
 
 // Slot is an active admission slot.
@@ -671,13 +682,14 @@ type Store interface {
 	// gate and each copy a hand-over carried to a child of its tree.
 	GatesForArtifact(ctx context.Context, tx pgx.Tx, artifactID string) ([]DesignGate, error)
 	PutGate(ctx context.Context, tx pgx.Tx, gate DesignGate) error
-	// RecordClosedAsk records that a person answered or resolved ask on issue, where Dispatch
-	// recorded it. A second record of the same ask keeps the mark the first carried.
-	RecordClosedAsk(ctx context.Context, tx pgx.Tx, closed ClosedAsk) error
-	// AskClosedByPerson says whether a person's close of ask on issue is recorded.
-	AskClosedByPerson(ctx context.Context, tx pgx.Tx, issue, ask string) (bool, error)
-	// ForgetClosedAsks drops every closed-ask row of the issue, which leaves the workflow with it.
-	ForgetClosedAsks(ctx context.Context, tx pgx.Tx, issue string) error
+	// RecordPersonAct records a person's act on an ask of issue, at the place in the issue's event
+	// log Dispatch recorded it. A second record of the same event changes nothing.
+	RecordPersonAct(ctx context.Context, tx pgx.Tx, act PersonAct) error
+	// PersonActs is every person's act recorded on issue, in event order.
+	PersonActs(ctx context.Context, tx pgx.Tx, issue string) ([]PersonAct, error)
+	// ForgetPersonActs drops every person's act recorded on the issue, which leaves the workflow
+	// with it.
+	ForgetPersonActs(ctx context.Context, tx pgx.Tx, issue string) error
 	Slots(ctx context.Context, tx pgx.Tx) ([]Slot, error)
 	PutSlot(ctx context.Context, tx pgx.Tx, slot Slot) error
 	ReleaseSlot(ctx context.Context, tx pgx.Tx, issue string) error
