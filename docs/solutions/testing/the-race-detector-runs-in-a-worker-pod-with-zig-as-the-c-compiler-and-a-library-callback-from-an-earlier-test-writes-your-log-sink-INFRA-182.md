@@ -19,6 +19,12 @@ related_issues:
 
 # The race detector runs in a worker pod with zig as the C compiler, and a library callback queued by an earlier test writes your log sink
 
+**Superseded by INFRA-257:** the worker image carries `gcc` and `libc6-dev`, with cgo off by
+default (`ENV CGO_ENABLED=0` and a `CGO_ENABLED=0` line in `/opt/go/go.env`), so a role runs
+`CGO_ENABLED=1 go test -race …` with no `CC`, zig or linker override. The zig recipe below applies
+only to a pod on an older pinned image digest, one without `gcc`. The canary, the reproducer and the
+stray-writer advice stand as written.
+
 Extends docs/solutions/testing/a-held-clock-test-of-timers-armed-from-postgres-times-holds-now-at-microseconds-and-a-first-race-run-indicts-old-log-sinks-LEGION-694.md.
 
 That page's third bullet ("a worker pod has no cgo, so `-race` runs nowhere but CI") is wrong, and
@@ -39,6 +45,8 @@ that a pod has no C compiler. A pod can fetch one.
   `relocation target __popcountdi2 not defined`, and zig's linker supplies that symbol. Before you
   trust a clean run, first prove the detector reports a race: run a two-goroutine program that
   writes one variable and check that it prints `WARNING: DATA RACE`.
+  On an image with `gcc` (INFRA-257 onward), drop zig, `CC`, `CXX` and `-ldflags=-linkmode=external`:
+  `CGO_ENABLED=1 go test -race ./internal/<pkg>/ -run '<tests>'`. The canary still comes first.
 - **Prove a race fix with a throwaway reproducer that fails on the old code.** A clean `-race` run
   of the real tests proves little, because the race needs a writer at the moment of the read. Write
   a throwaway test where a goroutine logs through `slog.Default()` while the test reads the capture

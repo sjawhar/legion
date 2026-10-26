@@ -40,6 +40,11 @@ Extends docs/solutions/testing/a-worker-pod-ships-no-go-or-tmux-provision-them-u
   from the environment; run it with `env -u LEGION_GRANT_FILE -u LEGION_GRANT`);
   `internal/launcher`'s `TestAGenerationsCredentialsLiveExactlyAsLongAsItsChild` (timing-sensitive
   under gVisor: two different assertions failed in two runs).
+  **Superseded by INFRA-257:** `internal/supervise`'s table tests now pass in a pod: the image
+  carries `gcc` and `libc6-dev` and sets `ENV CGO_ENABLED=0`, under which they type-check `net`
+  without cgo in any process that inherits the image's environment (the bash tool's, not Oh My Pi's
+  Python eval kernel's scrubbed one). On an older pinned image digest, one without `gcc`, they still
+  fail as above.
 - Run the packages the change touches by name (`go test ./internal/prompts/` for a prompt edit),
   and point at CI's `test` job (`.github/workflows/pr-and-main.yaml`) for the whole module; a
   branch that changes no Go source has nothing more to prove in the pod.

@@ -39,6 +39,10 @@ Extends docs/solutions/testing/go-test-in-a-worker-pod-leaves-gowork-to-go-work-
   on `go tool cgo` otherwise), and `internal/launcher`'s
   `TestAResumeIsToldWhetherItsWorkspaceWasRecreatedSinceItsSessionWasWritten` reads the pane's own
   `LEGION_WORKSPACE` in its no-workspace case: run it with `env -u LEGION_WORKSPACE`.
+  **Superseded by INFRA-257:** the worker image sets `ENV CGO_ENABLED=0`, so the supervise table
+  tests pass in a pod with no variable of your own from any process that inherits the image's
+  environment (the bash tool's, not Oh My Pi's Python eval kernel's scrubbed one); set
+  `CGO_ENABLED=0` yourself only on an older pinned image digest or in a scrubbed environment.
 - `go vet -tags e2e ./...` and an overlay build download modules and rewrite `go.work.sum`; restore
   it before a commit.
 

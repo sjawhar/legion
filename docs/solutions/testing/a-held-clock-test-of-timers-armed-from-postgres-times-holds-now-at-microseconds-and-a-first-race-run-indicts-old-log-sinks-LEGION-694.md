@@ -37,6 +37,11 @@ related_issues:
 - A worker pod has no cgo, so `-race` runs nowhere but CI: add the step for the packages the new
   goroutines live in (`internal/daemon`, `internal/record`), with their fakes holding a fake clock,
   so the run is deterministic and its first failures are findings rather than flakes.
+  **Superseded by INFRA-257:** the worker image carries `gcc` and `libc6-dev`, with cgo off by
+  default, so a role runs `CGO_ENABLED=1 go test -race …` in the pod with no `CC`, zig or linker
+  override. A pod on an older pinned image digest, one without `gcc`, needs zig as the C compiler
+  (docs/solutions/testing/the-race-detector-runs-in-a-worker-pod-with-zig-as-the-c-compiler-and-a-library-callback-from-an-earlier-test-writes-your-log-sink-INFRA-182.md).
+  Adding the CI step for the packages that gain goroutines stands as written.
 
 ## Evidence
 

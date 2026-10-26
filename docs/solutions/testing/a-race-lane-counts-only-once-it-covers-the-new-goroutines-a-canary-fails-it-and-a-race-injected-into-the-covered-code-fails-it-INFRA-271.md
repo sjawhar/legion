@@ -42,6 +42,11 @@ longer true. Run `uv pip install ziglang` into a venv under `$TMPDIR`. Write a w
 `exec <venv>/lib/python3.12/site-packages/ziglang/zig cc -target x86_64-linux-gnu "$@"`, and a
 `c++` twin. Then run `CGO_ENABLED=1 CC=<wrapper> go test -race …` from `packages/daemon`.
 
+**Superseded by INFRA-257:** the worker image carries `gcc` and `libc6-dev`, with cgo off by
+default, so a role runs `CGO_ENABLED=1 go test -race …` from `packages/daemon` with no `CC`, zig or
+linker override. The zig wrapper above applies only to a pod on an older pinned image digest, one
+without `gcc`. The three steps stand as written.
+
 ## Evidence
 
 - INFRA-271 added the session proxy's accept loop, copy pairs, `track`/`untrack` and the bounded
