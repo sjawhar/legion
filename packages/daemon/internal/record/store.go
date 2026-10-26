@@ -832,6 +832,27 @@ func (s *Postgres) ClearDeclared(ctx context.Context, tx pgx.Tx, issue string) e
 	return nil
 }
 
+func (s *Postgres) CaughtUpSeq(ctx context.Context, tx pgx.Tx, issue string) (int64, bool, error) {
+	var seq *int64
+	if err := tx.QueryRow(ctx, `select caught_up_seq from issues where key = $1`, issue).Scan(&seq); err != nil {
+		return 0, false, fmt.Errorf("read the catch-up cursor of %s: %w", issue, err)
+	}
+	if seq == nil {
+		return 0, false, nil
+	}
+	return *seq, true, nil
+}
+
+func (s *Postgres) SetCaughtUp(ctx context.Context, tx pgx.Tx, issue string, seq int64) error {
+	if seq < 0 {
+		return fmt.Errorf("set the catch-up cursor of %s: sequence %d is negative", issue, seq)
+	}
+	if _, err := tx.Exec(ctx, `update issues set caught_up_seq = greatest(coalesce(caught_up_seq, 0), $2) where key = $1`, issue, seq); err != nil {
+		return fmt.Errorf("set the catch-up cursor of %s at %d: %w", issue, seq, err)
+	}
+	return nil
+}
+
 // nullableText is text, or SQL null when it is empty.
 func nullableText(text string) any {
 	if text == "" {

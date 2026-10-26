@@ -61,6 +61,10 @@ const (
 	// and the image probe, which wait out GitHub's and the cluster's transient trouble within
 	// retries of their own (appMintRetry, imageProbeRetry); the work after each has a budget anew.
 	bootTimeout = 30 * time.Second
+	// catchUpAttemptBound bounds one attempt of the boot's catch-up of the roots that run or wait on
+	// a person. Each root has bootTimeout of its own and the roots finished survive a retry, so this
+	// bound is no budget for the work, only the end of an attempt that would otherwise never return.
+	catchUpAttemptBound = time.Hour
 	// stopBudget bounds how long the daemon's stop waits for its own work, from the moment the stop
 	// begins (supervision.halt: at the signal, at serve's end, or when supervision fails to start,
 	// once the boot is recorded) until the daemon stamps its boot. The halt cancels every decision
@@ -367,6 +371,17 @@ func run(ctx context.Context, cfg config.Config, build Build, log *slog.Logger, 
 		if err == nil {
 			err = bootprobe.Run(ctx, "list Dispatch issues for admission", readinessRetry, log,
 				readinessAttempt(workflow.reconcile, bootTimeout, dispatch.Unreachable))
+		}
+		// The catch-up of the roots that run or wait on a person is its own probe, after the
+		// reconcile that held them (holdForCatchUp). It reads Dispatch once or twice per root (the
+		// issue's latest sequence, its event log after the root's cursor, and the approval of a
+		// gate that names no request), so it bounds each root by bootTimeout itself and keeps across
+		// retries the roots it finished (catchUpAwaiting); its attempt's own bound only stops a
+		// catch-up that would never end. The durable consumers start only after it, so no live
+		// fact meets a root still held.
+		if err == nil {
+			err = bootprobe.Run(ctx, "catch up the roots that run or wait on a person", readinessRetry, log,
+				readinessAttempt(workflow.catchUpAwaiting, catchUpAttemptBound, dispatch.Unreachable))
 		}
 		if err != nil {
 			s.stop()

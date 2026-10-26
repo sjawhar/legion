@@ -136,14 +136,18 @@ const (
 // request twice (the workflow's tellChanges). Mark places the event in the issue's Dispatch event log: the event's
 // sequence and Dispatch's time of it, from the event itself, or, for a review, from the read's
 // latest review (dispatch.Approval's Seq and At), whichever of them that read gave. A version the
-// gate seed read from Dispatch carries none.
+// gate seed read from Dispatch carries none, and says instead whether that read showed the
+// document's approval request waiting on the agent (RequestWaitsOnAgent), which is what a newer
+// version does to it: a version with neither a mark nor that cannot be placed against a root's
+// wait on its gate, and answers none.
 type DispatchArtifact struct {
-	Key        string
-	ArtifactID string
-	Kind       DispatchArtifactKind
-	Version    int
-	Reason     string
-	Mark       record.EventMark
+	Key                 string
+	ArtifactID          string
+	Kind                DispatchArtifactKind
+	Version             int
+	Reason              string
+	Mark                record.EventMark
+	RequestWaitsOnAgent bool
 }
 
 func (DispatchArtifact) isFact() {}
@@ -667,6 +671,36 @@ type TaskConfirmed struct {
 }
 
 func (TaskConfirmed) isFact() {}
+
+// GateRequestFound is the boot catch-up's read of the approval request Dispatch shows open on a
+// root's registered spec document (dispatch.Approval.AskID), for a gate that names none: a gate a
+// daemon of an earlier release registered, before gates named their request, or one whose
+// registration found none open. Since is the issue's Dispatch sequence read before the approval,
+// and WaitsOnAgent says the request waited on the agent. The workflow binds the gate to the
+// request and writes its mirror row as the read found it, at Since; when the gate is closed and
+// the request waits on the person, that is the architect's hand-back of the spec, declared as a
+// registration declares it.
+type GateRequestFound struct {
+	Issue        string
+	Generation   uint64
+	ArtifactID   string
+	RequestAsk   string
+	WaitsOnAgent bool
+	Since        int64
+}
+
+func (GateRequestFound) isFact() {}
+
+// CatchUpApplied is the boot catch-up of a root finishing: every event of its Dispatch event log
+// up to Through (0 when the catch-up applied nothing and moves no cursor) has been applied. The
+// workflow raises the root's catch-up cursor to Through; admission, which held the root out of its
+// decision while its window was applied, decides it at this fact, once.
+type CatchUpApplied struct {
+	Issue   string
+	Through int64
+}
+
+func (CatchUpApplied) isFact() {}
 
 // LingerExpired records the generation whose post-close linger elapsed.
 type LingerExpired struct {

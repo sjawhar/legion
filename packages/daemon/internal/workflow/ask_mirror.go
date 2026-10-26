@@ -21,10 +21,11 @@ import (
 // into awaiting_person themselves: admission's every pass decides that from the record alone
 // (ReconcileAwaiting). A hand-back is a fresh event of an ask the root can wait on (withHuman): a
 // question a session of the root's tree opened, or a reply of such a session that leaves such a
-// question with the person. A person's act still answers a wait it follows the moment it arrives
-// (personAnswered): an answer is a durable fact, and the root takes the next free slot on it. When
-// an ask of the wait leaves the person by any other act, the wait moves to what is still with them,
-// and is answered only once nothing is (itemLeft).
+// question, or the approval request of the root's closed design gate, with the person (the gate's
+// registration declares too, gateRegistered). A person's act still answers a wait it follows the
+// moment it arrives (personAnswered): an answer is a durable fact, and the root takes the next
+// free slot on it. When an item of the wait leaves the person by any other act, the wait moves to
+// what is still with them, and is answered only once nothing is (itemLeft).
 
 // recordedRoot is the record of key when it is a tree root, nil otherwise.
 func (e *Engine) recordedRoot(ctx context.Context, tx pgx.Tx, key string) (*record.Issue, error) {
@@ -219,10 +220,11 @@ func (e *Engine) closer(ctx context.Context, tx pgx.Tx, root record.Issue, actor
 // request, to the ask's mirror row: an open ask moves to the turn the reply leaves it on, and a
 // reply on a closed ask (no turn) leaves it closed with the turn it last had, recorded as closed
 // when the row had not yet seen its close. A person's act that personAnswers names is recorded,
-// and answers the root's wait (personAnswered). A session of the root's own tree leaving a question
-// that tree opened with the person hands it back (declare). Any other reply that takes an ask of
-// the root's wait away from the person — a session's progress note handing it to the agent's turn
-// — moves the wait (itemLeft).
+// and answers the root's wait (personAnswered). A session of the root's own tree leaving with the
+// person a question that tree opened, or the approval request of the root's closed, armed design
+// gate, hands it back (declare). Any other reply that takes an item of the root's wait away from
+// the person — a session's progress note handing it to the agent's turn — moves the wait
+// (itemLeft).
 func (e *Engine) dispatchAskReply(ctx context.Context, tx pgx.Tx, fact intake.DispatchAskReply) (intake.Result, error) {
 	root, err := e.recordedRoot(ctx, tx, fact.Key)
 	if err != nil || root == nil {
@@ -260,6 +262,12 @@ func (e *Engine) dispatchAskReply(ctx context.Context, tx pgx.Tx, fact intake.Di
 		return intake.Result{}, nil
 	case inTree && fact.WaitingOn == "human" && after.ByTree && after.Question():
 		return intake.Result{}, e.declare(ctx, tx, *root, fact.Mark.Seq, "question "+fact.Ask+" handed back")
+	case inTree && fact.WaitingOn == "human":
+		gate, err := e.store.Gate(ctx, tx, root.Key)
+		if err != nil || gateRequest(gate, e.armed()) != fact.Ask {
+			return intake.Result{}, err
+		}
+		return intake.Result{}, e.declare(ctx, tx, *root, fact.Mark.Seq, "approval request "+fact.Ask+" handed back")
 	}
 	return intake.Result{}, e.itemLeft(ctx, tx, *root, before, after, record.AnsweredByTurn, fact.Ask)
 }

@@ -95,26 +95,37 @@ func TestALateHandBackAtOrBelowTheHandoutDeclaresNothing(t *testing.T) {
 	}
 }
 
-// A reply of a tree session that leaves a question of its own tree with the person hands it back.
-// A reply on an ask the root could never wait on — one another tree opened, or an approval
-// request — declares nothing, whoever leaves it with the person.
+// A reply of a tree session that leaves a question of its own tree, or the approval request of the
+// root's closed design gate, with the person hands it back. A reply on an ask the root could never
+// wait on — one another tree opened, an approval request no gate names, or the request of a gate
+// already open — declares nothing, whoever leaves it with the person.
 func TestAReplyOnAnAskTheRootCannotWaitOnDeclaresNothing(t *testing.T) {
+	approved := 2
 	for _, tc := range []struct {
 		name string
 		seed record.RootAsk
+		gate *record.DesignGate
 		want int64
 	}{
 		{"a question of the root's own tree", record.RootAsk{Issue: "LEGION-208", Ask: "ask-q", Kind: record.AskQuestion,
-			Open: true, WaitingOn: "agent", ByTree: true, Seq: 4}, 6},
+			Open: true, WaitingOn: "agent", ByTree: true, Seq: 4}, nil, 6},
 		{"a question the root's tree did not open", record.RootAsk{Issue: "LEGION-208", Ask: "ask-q", Kind: record.AskQuestion,
-			Open: true, WaitingOn: "agent", Seq: 4}, 0},
-		{"the gate's approval request", record.RootAsk{Issue: "LEGION-208", Ask: "ask-q", Kind: record.AskApproval,
-			Open: true, WaitingOn: "agent", ByTree: true, Seq: 4}, 0},
+			Open: true, WaitingOn: "agent", Seq: 4}, nil, 0},
+		{"an approval request no gate names", record.RootAsk{Issue: "LEGION-208", Ask: "ask-q", Kind: record.AskApproval,
+			Open: true, WaitingOn: "agent", ByTree: true, Seq: 4}, nil, 0},
+		{"the request of the root's closed gate", record.RootAsk{Issue: "LEGION-208", Ask: "ask-q", Kind: record.AskApproval,
+			Open: true, WaitingOn: "agent", Seq: 4}, &record.DesignGate{Issue: "LEGION-208", ArtifactID: "artifact-208", LatestVersion: 2, RequestAsk: "ask-q"}, 6},
+		{"the request of a gate already open", record.RootAsk{Issue: "LEGION-208", Ask: "ask-q", Kind: record.AskApproval,
+			Open: true, WaitingOn: "agent", Seq: 4}, &record.DesignGate{Issue: "LEGION-208", ArtifactID: "artifact-208", LatestVersion: 2,
+			ApprovedVersion: &approved, RequestAsk: "ask-q"}, 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pool, apply := askRig(t)
 			row := tc.seed
 			seedRecord(t, pool, func(tx pgx.Tx) error { return record.NewStore().PutRootAsk(context.Background(), tx, row) })
+			if tc.gate != nil {
+				seedGate(t, pool, *tc.gate)
+			}
 			apply("hand-back", intake.DispatchAskReply{Key: "LEGION-208", Ask: "ask-q", WaitingOn: "human", Actor: askArchitect, Mark: askSeq(6)})
 			if got := declaredSeq(t, pool); got != tc.want {
 				t.Fatalf("declared_seq = %d, want %d", got, tc.want)
@@ -342,5 +353,94 @@ func TestAChangesRequestARootNeverResumedForIsNotRecordedAsTold(t *testing.T) {
 	apply("parked", intake.DispatchIssue{Key: "LEGION-208", Seq: 20, Type: "issue.updated", Status: "backlog", Title: "root", Rank: "U"})
 	if gate := recordedGate(t, pool); gate == nil || gate.ToldChangesVersion != nil {
 		t.Fatalf("gate = %+v, want the told record cleared with the root's leaving", gate)
+	}
+}
+
+// gateWaitRoot is askRoot waiting on version 2 of its spec document artifact-208, from the
+// hand-back at since, with its gate closed there and the approval request ask-approval with the
+// person.
+func gateWaitRoot(t *testing.T, pool *pgxpool.Pool, since int64) {
+	t.Helper()
+	root := askRoot()
+	root.Phase = phase.AwaitingPerson
+	root.Awaiting = &record.Awaiting{GateVersion: 2, Artifact: "artifact-208", Since: record.EventMark{Seq: since}}
+	seedIssue(t, pool, root)
+	seedGate(t, pool, record.DesignGate{Issue: "LEGION-208", ArtifactID: "artifact-208", LatestVersion: 2, RequestAsk: "ask-approval"})
+	seedRecord(t, pool, func(tx pgx.Tx) error {
+		return record.NewStore().PutRootAsk(context.Background(), tx, record.RootAsk{Issue: "LEGION-208", Ask: "ask-approval",
+			Kind: record.AskApproval, Open: true, WaitingOn: "human", Seq: since})
+	})
+}
+
+// An item of a wait on the gate that leaves the person by an act that is nobody's answer — a
+// session's note handing the approval request to the agent's turn, or a close of it by someone who
+// is not a person — moves the wait to the question still with the person, and with nothing else
+// with them answers it on that request, so the architect looks again rather than waiting for good.
+func TestTheGatesRequestLeavingThePersonMovesOrAnswersTheWait(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		question bool
+		fact     intake.Fact
+		by       record.Answer
+	}{
+		{"a session's note, a question still with the person", true,
+			intake.DispatchAskReply{Key: "LEGION-208", Ask: "ask-approval", WaitingOn: "agent", Actor: askOutsider, Mark: askSeq(9)}, ""},
+		{"a session's note, nothing else with the person", false,
+			intake.DispatchAskReply{Key: "LEGION-208", Ask: "ask-approval", WaitingOn: "agent", Actor: askOutsider, Mark: askSeq(9)}, record.AnsweredByTurn},
+		{"a session's close, nothing else with the person", false,
+			intake.DispatchAskClosed{Key: "LEGION-208", Ask: "ask-approval", Kind: record.AskApproval, State: "resolved", Actor: askOutsider, Mark: askSeq(9)},
+			record.AnsweredByClosed},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool, apply := askRig(t)
+			gateWaitRoot(t, pool, 5)
+			if tc.question {
+				seedQuestion(t, pool, "ask-q", 6)
+			}
+			apply("left", tc.fact)
+			waiting := recordedRoot(t, pool).Awaiting
+			switch {
+			case waiting == nil:
+				t.Fatal("the root's wait is gone, want it kept")
+			case tc.by == "" && (waiting.Ask != "ask-q" || waiting.GateVersion != 0 || waiting.AnsweredAt != nil || waiting.Since.Seq != 5):
+				t.Fatalf("wait = %+v, want it moved to ask-q from 5, unanswered", waiting)
+			case tc.by != "" && (waiting.AnsweredBy != tc.by || waiting.Ask != "ask-approval" || waiting.GateVersion != 0):
+				t.Fatalf("wait = %+v, want it answered by %s on the request ask-approval", waiting, tc.by)
+			}
+		})
+	}
+}
+
+// A newer spec version answers a wait on the gate when Dispatch recorded it after the wait began,
+// or when the gate seed's read, which gives a version no place, shows the request on the agent's
+// turn; a version recorded before the wait began, or read with the request still with the person,
+// is one the person is asked to review, so the wait moves to it and goes on.
+func TestANewerVersionAnswersAGateWaitOnlyWhenItFollowsIt(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		fact     intake.DispatchArtifact
+		answered bool
+	}{
+		{"its event after the wait began", intake.DispatchArtifact{Key: "LEGION-208", ArtifactID: "artifact-208",
+			Kind: intake.DispatchArtifactVersion, Version: 3, Mark: askSeq(9)}, true},
+		{"its event before the wait began", intake.DispatchArtifact{Key: "LEGION-208", ArtifactID: "artifact-208",
+			Kind: intake.DispatchArtifactVersion, Version: 3, Mark: askSeq(4)}, false},
+		{"the seed's read, the request with the agent", intake.DispatchArtifact{Key: "LEGION-208", ArtifactID: "artifact-208",
+			Kind: intake.DispatchArtifactVersion, Version: 3, RequestWaitsOnAgent: true}, true},
+		{"the seed's read, the request with the person", intake.DispatchArtifact{Key: "LEGION-208", ArtifactID: "artifact-208",
+			Kind: intake.DispatchArtifactVersion, Version: 3}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool, apply := askRig(t)
+			gateWaitRoot(t, pool, 5)
+			apply("version", tc.fact)
+			waiting := recordedRoot(t, pool).Awaiting
+			if waiting == nil || waiting.GateVersion != 3 {
+				t.Fatalf("wait = %+v, want it on version 3", waiting)
+			}
+			if got := waiting.AnsweredAt != nil && waiting.AnsweredBy == record.AnsweredByVersion; got != tc.answered {
+				t.Fatalf("wait = %+v, answered by the version = %t, want %t", waiting, got, tc.answered)
+			}
+		})
 	}
 }

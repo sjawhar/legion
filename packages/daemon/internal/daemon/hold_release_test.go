@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
@@ -218,6 +219,9 @@ func (d *pilotDispatch) HandOver(context.Context, dispatch.Issue, string) error 
 func (d *pilotDispatch) MessageBodiesSince(context.Context, string, time.Time) ([]string, error) {
 	return nil, nil
 }
+func (d *pilotDispatch) EventsAfter(context.Context, string, int64) ([]json.RawMessage, error) {
+	return nil, nil
+}
 func (d *pilotDispatch) Approval(context.Context, string) (dispatch.Approval, error) {
 	return dispatch.Approval{}, nil
 }
@@ -258,6 +262,9 @@ func (d *filteringDispatch) HandOver(context.Context, dispatch.Issue, string) er
 	return nil
 }
 func (d *filteringDispatch) MessageBodiesSince(context.Context, string, time.Time) ([]string, error) {
+	return nil, nil
+}
+func (d *filteringDispatch) EventsAfter(context.Context, string, int64) ([]json.RawMessage, error) {
 	return nil, nil
 }
 func (d *filteringDispatch) Approval(context.Context, string) (dispatch.Approval, error) {

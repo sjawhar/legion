@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -616,5 +618,51 @@ func TestAnUnknownFieldRefusalIsRiddenOutUntilDispatchKnowsTheField(t *testing.T
 		if _, permanent := PermanentRefusal(refused); !permanent {
 			t.Fatalf("PermanentRefusal(%q) = not permanent; want it permanent", message)
 		}
+	}
+}
+
+// The boot catch-up reads an issue's event log after a sequence, oldest first, page after page
+// until a short page, each event as Dispatch served it; a page that does not ascend past the last
+// sequence read is refused rather than read again.
+func TestEventsAfterPagesTheIssuesEventLogInOrder(t *testing.T) {
+	var afters []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/issues/LEGION-1/events" || r.URL.Query().Get("limit") != "200" {
+			t.Fatalf("request = %s %s", r.Method, r.URL.String())
+		}
+		after, _ := strconv.ParseInt(r.URL.Query().Get("after"), 10, 64)
+		afters = append(afters, r.URL.Query().Get("after"))
+		count := 200
+		if after >= 200 {
+			count = 3
+		}
+		page := make([]map[string]any, 0, count)
+		for seq := after + 1; seq <= after+int64(count); seq++ {
+			page = append(page, map[string]any{"seq": seq, "type": "comment.created", "issue_key": "LEGION-1"})
+		}
+		writeJSON(t, w, page)
+	}))
+	defer server.Close()
+
+	events, err := New(server.URL, dispatchToken).EventsAfter(context.Background(), "LEGION-1", 7)
+	if err != nil {
+		t.Fatalf("read events: %v", err)
+	}
+	if !reflect.DeepEqual(afters, []string{"7", "207"}) || len(events) != 203 {
+		t.Fatalf("pages after %v gave %d events, want pages after 7 and 207 giving 203", afters, len(events))
+	}
+	var last struct {
+		Seq int64 `json:"seq"`
+	}
+	if err := json.Unmarshal(events[len(events)-1], &last); err != nil || last.Seq != 210 {
+		t.Fatalf("last event = %s (%v), want seq 210", events[len(events)-1], err)
+	}
+
+	stuck := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(t, w, []map[string]any{{"seq": 7, "type": "comment.created"}})
+	}))
+	defer stuck.Close()
+	if _, err := New(stuck.URL, dispatchToken).EventsAfter(context.Background(), "LEGION-1", 7); err == nil || !strings.Contains(err.Error(), "non-ascending") {
+		t.Fatalf("a page at the sequence already read = %v, want refused", err)
 	}
 }

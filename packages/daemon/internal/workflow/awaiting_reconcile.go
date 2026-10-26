@@ -74,11 +74,15 @@ func (e *Engine) ReconcileAwaiting(ctx context.Context, tx pgx.Tx, project strin
 	}
 	var entered []string
 	for i, root := range roots {
+		gate, err := e.store.Gate(ctx, tx, root.Key)
+		if err != nil {
+			return nil, err
+		}
 		unresumable, err := Unresumable(ctx, e.store, tx, root)
 		if err != nil {
 			return nil, err
 		}
-		view := awaitView{Root: root, Slotted: true, Unresumable: unresumable, Run: runs[tokens[i]], Asks: asks[root.Key]}
+		view := awaitView{Root: root, Slotted: true, Unresumable: unresumable, Run: runs[tokens[i]], Asks: asks[root.Key], Gate: gate, Armed: e.armed()}
 		for _, member := range issues {
 			if member.Tree == root.Key && member.Key != root.Key {
 				view.Members = append(view.Members, member)
@@ -95,6 +99,12 @@ func (e *Engine) ReconcileAwaiting(ctx context.Context, tx pgx.Tx, project strin
 			if err := e.tellInPlace(ctx, tx, root, decision); err != nil {
 				return nil, err
 			}
+		case actTakeIn:
+			if err := e.store.ClearDeclared(ctx, tx, root.Key); err != nil {
+				return nil, err
+			}
+			e.logOnCommit(ctx, "workflow: what a root handed back is no longer with the person, so it starts no wait", "issue", root.Key,
+				"declared_seq", root.DeclaredSeq)
 		default:
 			intake.OnCommit(ctx, func() {
 				e.log.Debug("workflow: a root that handed work to a person keeps its slot", "issue", root.Key, "why", decision.Why)
@@ -114,11 +124,16 @@ const (
 	actEnter
 	// actTellInPlace resumes the root's architect where it stands, its slot kept.
 	actTellInPlace
+	// actTakeIn clears what the root handed back (Store.ClearDeclared): none of it is still with
+	// the person, and the running architect has the act that took it away, so no later change of
+	// the record may start a wait from that hand-back.
+	actTakeIn
 )
 
 // awaitView is what decideAwait reads of one root: its record, whether it holds a slot, the other
 // members of its tree, why it could not resume (Unresumable, "" when it could), its architect's run
-// at the root's generation, and its asks' mirror rows.
+// at the root's generation, its asks' mirror rows, its design gate (nil for none), and whether the
+// design gate is armed.
 type awaitView struct {
 	Root        record.Issue
 	Slotted     bool
@@ -126,6 +141,8 @@ type awaitView struct {
 	Unresumable string
 	Run         record.RoleRun
 	Asks        []record.RootAsk
+	Gate        *record.DesignGate
+	Armed       bool
 }
 
 // awaitDecision is decideAwait's answer: the act, why, the wait the root enters or is told of
@@ -142,16 +159,17 @@ type awaitDecision struct {
 //
 //  0. a root not at admitted, lingering, out of the workflow, or holding no slot stays;
 //  1. one whose architect handed nothing back since it was last given work (DeclaredSeq) stays;
-//  2. one with no question still with the person (withHuman) stays: what it handed back was
-//     answered or closed first, and the running architect has that act;
+//  2. one with nothing still with the person (withHuman) takes in what it handed back
+//     (actTakeIn): that was answered or closed first, and the running architect has that act;
 //  3. one whose tree has a member in a phase stays, since that member's work needs the slot;
 //  4. one that could not resume (Unresumable) stays, since released, nothing could resume it;
 //  5. one whose architect still owes the work it was given — a start queued, a claim still
 //     starting, a task not yet taken (owed) — stays: a suspension then would cancel that work;
-//  6. otherwise the wait begins at the newest hand-back (DeclaredSeq), on the oldest question
-//     still with the person. When a person's act Dispatch recorded after that start is already in
-//     the record (answeredSince), the architect is told of it where it stands (actTellInPlace);
-//     otherwise the root enters awaiting_person (actEnter).
+//  6. otherwise the wait begins at the newest hand-back (DeclaredSeq), on the design gate when its
+//     approval request is with the person, else on the oldest question that is. When a person's
+//     act Dispatch recorded after that start is already in the record (answeredSince), the
+//     architect is told of it where it stands (actTellInPlace); otherwise the root enters
+//     awaiting_person (actEnter).
 func decideAwait(v awaitView) awaitDecision {
 	root := v.Root
 	switch {
@@ -161,9 +179,9 @@ func decideAwait(v awaitView) awaitDecision {
 		return awaitDecision{Why: "its architect has handed nothing to a person since it was last given work"}
 	}
 	since := record.EventMark{Seq: root.DeclaredSeq}
-	waiting, ok := waitSubject(v.Asks, since)
+	waiting, ok := waitSubject(v.Asks, v.Gate, v.Armed, since)
 	if !ok {
-		return awaitDecision{Why: "nothing it handed back is still with the person"}
+		return awaitDecision{Act: actTakeIn, Why: "nothing it handed back is still with the person"}
 	}
 	for _, member := range v.Members {
 		if InWorkflow(member) && member.Phase != phase.Admitted {
@@ -179,31 +197,53 @@ func decideAwait(v awaitView) awaitDecision {
 	if answer, detail, ok := answeredSince(waiting, v.Asks); ok {
 		return awaitDecision{Act: actTellInPlace, Why: "a person already acted after its hand-back", Waiting: waiting, Answer: answer, Detail: detail}
 	}
-	return awaitDecision{Act: actEnter, Why: fmt.Sprintf("question %s is awaiting an answer", waiting.Ask), Waiting: waiting}
+	why := fmt.Sprintf("question %s is awaiting an answer", waiting.Ask)
+	if waiting.GateVersion != 0 {
+		why = fmt.Sprintf("spec version %d is awaiting a person's review", waiting.GateVersion)
+	}
+	return awaitDecision{Act: actEnter, Why: why, Waiting: waiting}
 }
 
-// withHuman is what of a root is still with the person: its tree's open questions that wait on the
-// person, oldest event first. A root never waits on its gate's approval request here, so that
-// request keeps the root's slot as it did before this release.
-func withHuman(asks []record.RootAsk) []record.RootAsk {
-	var questions []record.RootAsk
+// withHuman is what of a root is still with the person: its tree's open questions that wait on
+// the person, oldest event first, and whether its design gate's approval request does — the gate
+// registered, armed and closed, and the request it names (RequestAsk) open on the person's turn.
+// An approval request no gate names, and the request of a gate that is open or off, ask the person
+// for nothing the root waits on.
+func withHuman(asks []record.RootAsk, gate *record.DesignGate, armed bool) (questions []record.RootAsk, request bool) {
+	requestAsk := gateRequest(gate, armed)
 	for _, ask := range asks {
-		if ask.ByTree && ask.Question() && ask.WithHuman() {
+		switch {
+		case requestAsk != "" && ask.Ask == requestAsk:
+			request = ask.WithHuman()
+		case ask.ByTree && ask.Question() && ask.WithHuman():
 			questions = append(questions, ask)
 		}
 	}
 	slices.SortFunc(questions, func(a, b record.RootAsk) int { return cmp.Or(cmp.Compare(a.Seq, b.Seq), cmp.Compare(a.Ask, b.Ask)) })
-	return questions
+	return questions, request
 }
 
-// waitSubject is the wait a root starts from since on what is still with the person: the oldest
-// question of its tree; false when none is.
-func waitSubject(asks []record.RootAsk, since record.EventMark) (record.Awaiting, bool) {
-	questions := withHuman(asks)
-	if len(questions) == 0 {
-		return record.Awaiting{}, false
+// gateRequest is the approval request a root can wait on: the one gate names while it is
+// registered, armed and closed; "" otherwise.
+func gateRequest(gate *record.DesignGate, armed bool) string {
+	if gate == nil || !armed || classify.DesignGateOpen(*gate) {
+		return ""
 	}
-	return record.Awaiting{Ask: questions[0].Ask, Since: since}, true
+	return gate.RequestAsk
+}
+
+// waitSubject is the wait a root starts from since on what is still with the person: the gate at
+// its latest version, on the document it names, when the request is; otherwise the oldest
+// question of its tree; false when nothing is.
+func waitSubject(asks []record.RootAsk, gate *record.DesignGate, armed bool, since record.EventMark) (record.Awaiting, bool) {
+	questions, request := withHuman(asks, gate, armed)
+	switch {
+	case request:
+		return record.Awaiting{GateVersion: gate.LatestVersion, Artifact: gate.ArtifactID, Since: since}, true
+	case len(questions) > 0:
+		return record.Awaiting{Ask: questions[0].Ask, Since: since}, true
+	}
+	return record.Awaiting{}, false
 }
 
 // owed says whether the architect has not yet taken the work it was last given, and how: a start
@@ -314,10 +354,11 @@ func (e *Engine) ResumeAwaitedRoot(ctx context.Context, tx pgx.Tx, root record.I
 // was answered, so a later act of the same kind does not rename it); how the spec stands at the
 // resume, read from the gate now, so an approval a newer version superseded, or a gate closed
 // again since, is said as it is; what is still with the person (withHuman) and what waits on the
-// architect (a tree question on the agent's turn). Handing back is advice only while the gate is
-// not open, since an open gate moves the root to planning, where a hand-back starts no wait. armed
-// says whether the design gate is armed: with it off, no approval is asked for and register_gate is
-// never the advice.
+// architect (a tree question, or the closed gate's approval request, on the agent's turn). Handing
+// back is advice only while the gate is not open, since an open gate moves the root to planning,
+// where a hand-back starts no wait; the request's own thread is named only while the request is
+// open. armed says whether the design gate is armed: with it off, no approval is asked for and
+// register_gate is never the advice.
 func resumeTask(key string, waiting record.Awaiting, gate *record.DesignGate, asks []record.RootAsk, armed bool) string {
 	var task strings.Builder
 	switch waiting.AnsweredBy {
@@ -325,6 +366,8 @@ func resumeTask(key string, waiting record.Awaiting, gate *record.DesignGate, as
 		fmt.Fprintf(&task, "Your spec %s on %s was approved.", waiting.AnsweredDetail, key)
 	case record.AnsweredByChanges:
 		fmt.Fprintf(&task, "A person requested changes to your spec on %s at %s. Read the review, and revise the spec as they ask.", key, waiting.AnsweredDetail)
+	case record.AnsweredByVersion:
+		fmt.Fprintf(&task, "A newer version of your spec on %s, %s, handed the approval request back to you. Read it and the request's thread.", key, waiting.AnsweredDetail)
 	case record.AnsweredByRetraction:
 		fmt.Fprintf(&task, "Your ask %s on %s was retracted when its decision block left the spec, so no person will answer it. "+
 			"Read the spec as it stands; if you still need the decision, ask again.", waiting.Ask, key)
@@ -354,12 +397,21 @@ func resumeTask(key string, waiting record.Awaiting, gate *record.DesignGate, as
 	default:
 		fmt.Fprintf(&task, " Your spec is not approved at version %d.", gate.LatestVersion)
 	}
+	questions, request := withHuman(asks, gate, armed)
 	var still, yours []string
-	for _, ask := range withHuman(asks) {
+	if request {
+		still = append(still, fmt.Sprintf("the approval request for spec version %d", gate.LatestVersion))
+	}
+	for _, ask := range questions {
 		still = append(still, "ask "+ask.Ask)
 	}
+	requestOpen := false
 	for _, ask := range asks {
-		if ask.Open && ask.WaitingOn == "agent" && ask.ByTree && ask.Question() {
+		isRequest := gate != nil && ask.Ask == gate.RequestAsk
+		if isRequest {
+			requestOpen = ask.Open
+		}
+		if ask.Open && ask.WaitingOn == "agent" && (isRequest && gateClosed || ask.ByTree && ask.Question()) {
 			yours = append(yours, "ask "+ask.Ask)
 		}
 	}
@@ -369,12 +421,19 @@ func resumeTask(key string, waiting record.Awaiting, gate *record.DesignGate, as
 	switch {
 	case len(still) > 0 && !gateOpen:
 		fmt.Fprintf(&task, " Still with the person: %s. Hand each one back once you have done what the answer asks — a reply in its thread that "+
-			"leaves the turn with the person — or close it if you no longer need it. Handing one back starts your next wait and returns the slot; "+
-			"then end your turn.", strings.Join(still, ", "))
+			"leaves the turn with the person", strings.Join(still, ", "))
+		if armed && gateClosed {
+			task.WriteString(", or request approval again and register that version with register_gate")
+		}
+		task.WriteString(" — or close it if you no longer need it. Handing one back starts your next wait and returns the slot; then end your turn.")
 	case len(still) > 0:
 		fmt.Fprintf(&task, " Still with the person: %s. Continue.", strings.Join(still, ", "))
 	case gateClosed && armed:
-		task.WriteString(" When the spec is ready, request approval and register that version with register_gate; then end your turn.")
+		task.WriteString(" When the spec is ready, hand the request back to the person: request approval again and register that version with register_gate")
+		if requestOpen {
+			task.WriteString(", or answer in the request's thread")
+		}
+		task.WriteString(". Handing it back starts your next wait and returns the slot; then end your turn.")
 	default:
 		task.WriteString(" Continue.")
 	}

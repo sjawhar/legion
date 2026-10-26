@@ -69,6 +69,17 @@ type workflowRuntime struct {
 	// would otherwise repeat the same (ack floor, idle) pairs and have its own releases swallowed
 	// as duplicates of the previous boot's.
 	bootID string
+	// caughtUp names each root (key and generation) the boot's catch-up finished, so a retry of the
+	// catch-up resumes after it rather than reading it again (catchUpAwaiting), and the reconcile's
+	// retry does not hold it again (holdForCatchUp). The boot alone writes it, from its one
+	// readiness goroutine.
+	caughtUp map[string]struct{}
+	// catchUpRootTimeout bounds the boot's catch-up of one root; zero means bootTimeout. A test
+	// shortens it.
+	catchUpRootTimeout time.Duration
+	// catchUpRetryDelay is the wait between two reads of one root Dispatch refused with an error it
+	// may stop giving; zero means catchUpRetryDelay's default. A test shortens it.
+	catchUpRetryDelay time.Duration
 	// holdPollInterval is pollHoldRelease's ticker period; zero means the production default. A
 	// test shortens it to bound how long a release takes to observe.
 	holdPollInterval time.Duration
@@ -465,6 +476,12 @@ func (w *workflowRuntime) reconcile(ctx context.Context) error {
 		// still the freshest thing the daemon holds about it, and the sequence fence keeps an
 		// event already applied from being written back over.
 		if err := blockers.Reconcile(scoped, tx, w.records, w.dispatchProject, issues); err != nil {
+			return err
+		}
+		// Every root the boot's catch-up will read is held out of the decision whether it waits on
+		// a person before admission's pass here, until its catch-up has applied what Dispatch
+		// recorded while the daemon was down (catchUpAwaiting).
+		if err := w.holdForCatchUp(scoped, tx); err != nil {
 			return err
 		}
 		return w.admission.Reconcile(scoped, tx, issues, target, position)

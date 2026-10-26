@@ -185,6 +185,15 @@ func decodeDispatchFact(subject, project, payload string) (Fact, []string, error
 	return fact, unread, nil
 }
 
+// DecodeDispatchEvent decodes one event of issue key of project as Dispatch's issue event log
+// serves it (dispatch.Client.EventsAfter), which is the shape its durable stream carries: the
+// boot catch-up applies what the stream did not deliver through the live decoder, so each event
+// becomes the fact its live delivery would have been. It returns the fields it took as unknown,
+// as the live decoder logs them.
+func DecodeDispatchEvent(project, key string, event []byte) (Fact, []string, error) {
+	return decodeDispatchFact("notifications.dispatch.issue."+key, project, string(event))
+}
+
 // decodeDispatchEvent decodes a checked Dispatch event of the daemon's project by its type, adding
 // to unread each field it took as unknown.
 func decodeDispatchEvent(event dispatchEvent, unread *[]string) (Fact, error) {

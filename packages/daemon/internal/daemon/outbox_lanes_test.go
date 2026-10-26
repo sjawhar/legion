@@ -170,6 +170,9 @@ func (d *postingDispatch) PostMessage(_ context.Context, key, body string) error
 func (d *postingDispatch) MessageBodiesSince(context.Context, string, time.Time) ([]string, error) {
 	return nil, nil
 }
+func (d *postingDispatch) EventsAfter(context.Context, string, int64) ([]json.RawMessage, error) {
+	return nil, nil
+}
 func (d *postingDispatch) Approval(context.Context, string) (dispatch.Approval, error) {
 	return dispatch.Approval{}, nil
 }
@@ -219,6 +222,9 @@ func (d *laneBoard) HandOver(context.Context, dispatch.Issue, string) error {
 }
 func (d *laneBoard) PostMessage(context.Context, string, string) error { return nil }
 func (d *laneBoard) MessageBodiesSince(context.Context, string, time.Time) ([]string, error) {
+	return nil, nil
+}
+func (d *laneBoard) EventsAfter(context.Context, string, int64) ([]json.RawMessage, error) {
 	return nil, nil
 }
 func (d *laneBoard) Approval(context.Context, string) (dispatch.Approval, error) {

@@ -109,6 +109,10 @@ func (e *Engine) Apply(ctx context.Context, tx pgx.Tx, fact intake.Fact) (intake
 		return e.dispatchArtifact(ctx, tx, fact)
 	case intake.GateAboveDispatch:
 		return e.gateAboveDispatch(ctx, tx, fact)
+	case intake.GateRequestFound:
+		return e.gateRequestFound(ctx, tx, fact)
+	case intake.CatchUpApplied:
+		return e.catchUpApplied(ctx, tx, fact)
 	case intake.DispatchAskOpened:
 		return e.dispatchAskOpened(ctx, tx, fact)
 	case intake.DispatchAskClosed:
@@ -1024,12 +1028,13 @@ func (e *Engine) StartUnblockedChildren(ctx context.Context, tx pgx.Tx, issues [
 	return nil
 }
 
-// treeStartsChildren says whether tree starts a child of its own now: its root is recorded, the
-// tree is live, and its design gate is open — the two conditions enterChild and
-// advanceAdmittedTree between them stand for.
+// treeStartsChildren says whether tree starts a child of its own now: its root is recorded, not
+// waiting on a person (a root answered while its approval opened its gate starts its children with
+// its resume, advanceAdmittedTree, once it has its slot again), the tree is live, and its design
+// gate is open — the conditions enterChild and advanceAdmittedTree between them stand for.
 func (e *Engine) treeStartsChildren(ctx context.Context, tx pgx.Tx, tree string) (bool, error) {
 	root, err := e.store.Issue(ctx, tx, tree)
-	if err != nil || root == nil {
+	if err != nil || root == nil || root.AwaitingPerson() {
 		return false, err
 	}
 	live, err := record.TreeLive(ctx, e.store, tx, *root)

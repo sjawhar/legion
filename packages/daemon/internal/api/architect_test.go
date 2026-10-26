@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -112,6 +113,9 @@ func (r *statusRecorder) HandOver(context.Context, dispatch.Issue, string) error
 
 func (r *statusRecorder) PostMessage(context.Context, string, string) error { return nil }
 func (r *statusRecorder) MessageBodiesSince(context.Context, string, time.Time) ([]string, error) {
+	return nil, nil
+}
+func (r *statusRecorder) EventsAfter(context.Context, string, int64) ([]json.RawMessage, error) {
 	return nil, nil
 }
 

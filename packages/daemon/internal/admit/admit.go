@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"maps"
+	"slices"
 	"sync"
 	"time"
 
@@ -32,7 +33,7 @@ type Admission struct {
 	log     *slog.Logger
 	now     func() time.Time
 
-	// mu guards pending and target, the only Admission state a caller outside its own
+	// mu guards pending, target and catchingUp, the only Admission state a caller outside its own
 	// transactions touches: the daemon's boot-owned poll calls Held on every tick, outside any
 	// transaction and the database's own advisory fact lock, concurrently with whatever release
 	// call currently holds both while it clears them.
@@ -51,6 +52,13 @@ type Admission struct {
 	// first record behind: every key in pending releases once the Dispatch consumer's position
 	// has Reached it. Zero means nothing is held.
 	target int64
+	// catchingUp names each root the daemon's boot catch-up has yet to finish
+	// (HoldForCatchUp): its record may still miss what its Dispatch event log holds, so no pass
+	// decides whether it waits on a person (workflow's ReconcileAwaiting), nor resumes it once
+	// answered — it keeps its place at the front of the waiting line — until the catch-up has
+	// applied its window and releases it (ReleaseCatchUp). Unlike pending, a release's own pass
+	// does not lift it.
+	catchingUp map[string]struct{}
 
 	// openCapabilities answers the deployment capabilities with no decision, by name
 	// (capabilities.Deployment.Open), for the tick notice to carry; nil until the daemon registers
@@ -866,9 +874,9 @@ func (a *Admission) promoteHolds(ctx context.Context, tx pgx.Tx, respectHolds bo
 	if err != nil {
 		return 0, nil, fmt.Errorf("list admission slots: %w", err)
 	}
-	heldKeys := func(string) bool { return false }
+	heldKeys := a.catchingUpFor
 	if respectHolds {
-		heldKeys = a.held
+		heldKeys = func(key string) bool { return a.held(key) || a.catchingUpFor(key) }
 	}
 	entered, err := a.engine.ReconcileAwaiting(ctx, tx, a.project, issues, slots, heldKeys)
 	if err != nil {
@@ -910,6 +918,13 @@ func (a *Admission) promoteHolds(ctx context.Context, tx pgx.Tx, respectHolds bo
 		waiting = waiting[1:]
 		if respectHolds && a.held(candidate.Key) {
 			continue
+		}
+		// An answered root the boot's catch-up still holds has not applied everything Dispatch
+		// recorded while the daemon was down, so its resume task would miss it; it keeps its place
+		// at the front of the line, and nothing behind it takes the slot, until its catch-up
+		// releases it and decides it on the next pass.
+		if a.catchingUpFor(candidate.Key) {
+			break
 		}
 		answered := candidate.Answered()
 		if answered {
@@ -1026,6 +1041,43 @@ func (a *Admission) held(key string) bool {
 	defer a.mu.Unlock()
 	_, held := a.pending[key]
 	return held
+}
+
+// HoldForCatchUp holds each of keys out of the decision whether it waits on a person until
+// ReleaseCatchUp releases it: the daemon's boot holds every root its catch-up will read before the
+// boot's own admission pass, so no root is decided on a record that has not yet applied what
+// Dispatch recorded while the daemon was down.
+func (a *Admission) HoldForCatchUp(keys ...string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.catchingUp == nil {
+		a.catchingUp = make(map[string]struct{}, len(keys))
+	}
+	for _, key := range keys {
+		a.catchingUp[key] = struct{}{}
+	}
+}
+
+// ReleaseCatchUp ends key's catch-up hold; the next pass decides it.
+func (a *Admission) ReleaseCatchUp(key string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	delete(a.catchingUp, key)
+}
+
+// CatchUpHeld is every key the boot's catch-up still holds, in no order.
+func (a *Admission) CatchUpHeld() []string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return slices.Collect(maps.Keys(a.catchingUp))
+}
+
+// catchingUpFor says whether the boot's catch-up still holds key (HoldForCatchUp).
+func (a *Admission) catchingUpFor(key string) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	_, holding := a.catchingUp[key]
+	return holding
 }
 
 // unslotted says whether issue is a root of this project left in the workflow (workflow's

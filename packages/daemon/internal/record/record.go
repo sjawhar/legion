@@ -785,6 +785,12 @@ type Store interface {
 	Declare(ctx context.Context, tx pgx.Tx, issue string, seq int64) error
 	// ClearDeclared clears DeclaredSeq: nothing the architect handed back is still with the person.
 	ClearDeclared(ctx context.Context, tx pgx.Tx, issue string) error
+	// CaughtUpSeq is the Dispatch sequence the boot catch-up last applied issue's event log
+	// through, and whether the issue has a cursor at all: an issue recorded before the cursor
+	// existed has none (its first catch-up replays nothing), and one recorded since starts at 0.
+	CaughtUpSeq(ctx context.Context, tx pgx.Tx, issue string) (int64, bool, error)
+	// SetCaughtUp raises issue's catch-up cursor to seq; it is never lowered.
+	SetCaughtUp(ctx context.Context, tx pgx.Tx, issue string, seq int64) error
 	Slots(ctx context.Context, tx pgx.Tx) ([]Slot, error)
 	PutSlot(ctx context.Context, tx pgx.Tx, slot Slot) error
 	ReleaseSlot(ctx context.Context, tx pgx.Tx, issue string) error
