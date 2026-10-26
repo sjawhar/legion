@@ -2214,8 +2214,11 @@ the synchronous listener call records the sent or failed attempt instead of blin
   `comment.resolved`, `comment.reopened` or `comment.edited` carrying an `ask_id` - is
   additionally published straight to each follower's `notifications.agent.<session_id>` regardless
   of `notify` and of the issue's route, so a session-authored reply on an ask reaches its followers
-  even though it wakes nobody through the issue topic; the acting session is skipped and a session
-  already reached by the issue's route is not sent the envelope twice. A quiet `ask.edited` (a
+  even though it wakes nobody through the issue topic; the acting session is skipped, and so is a
+  follower a new comment's (`comment.created`) mentions resolved to (`payloadMentionedSessions`,
+  each `mentions[].session_id`), since the mention delivers it already - the comment's edit,
+  resolution and reopening reach every follower - and a session already reached by the issue's
+  route is not sent the envelope twice. A quiet `ask.edited` (a
   version move of an approval request that an earlier version already moved since it was opened or
   last handed back, `quiet: true`) has `notify` false and reaches no follower, as a human's unnamed
   `artifact.version` reaches nobody; the first move after an opening or a hand-back is not quiet. A
@@ -2235,6 +2238,22 @@ the synchronous listener call records the sent or failed attempt instead of blin
   (`suppressed_authors`: on a new comment every session a mention resolved to, so a mentioned
   writer hears the comment once; on a reply only the thread's root author when mentioned). An
   agent's comment notifies nobody (`notify` is false), so it takes no author route at all.
+  A person's (`actor.kind` `user`) `ask.answered`, `ask.handed_back`, `ask.resolved`,
+  `comment.created`, `comment.edited`, `comment.resolved`, `comment.reopened`, `message.created`
+  or `message.answered` on an issue also takes the claimant route (`publishClaimantRoute`): it is
+  published to the `notifications.agent.<session_id>` of the session holding the issue's claim
+  (`issues.claimed_by` of kind `session`; a person holding the claim has no topic), whether or not
+  that session subscribed to the issue. The claimant route runs beside the route and author routes,
+  under `notify` and never for a targeted message (`message.created` or `message.answered` with a
+  `target`), which reaches only its session. An agent's event of these types takes no claimant
+  route, and neither does any other type, a person's `ask.opened`, `ask.edited`, issue update or
+  document version included: those reach a claimant only through a subscription to the issue
+  topic, or as the route. A `comment.created` whose mentions resolved to the claimant is left to
+  the mention, which delivers it already; its edit, resolution and reopening are not. The claim is
+  read when the event is published (`loadSessionClaimant`), not when it was written, so a retry
+  after the claim moved reaches the current claimant. A project document's event names no issue
+  and takes none. A claimant that is also the route, a follower or an author gets one copy:
+  `publishDestination` publishes each topic once per event.
   `ask.follower_added` and `ask.follower_removed` also route directly to the session they name,
   since a newly added follower is not subscribed to the issue topic by default.
 - Dispatch document events use `notifications.dispatch.document.<PROJECT>.<slug>.<type>` and

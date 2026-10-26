@@ -1920,6 +1920,10 @@ describe("executeDispatchTool", () => {
     });
     expect(claimed.text).toContain("DSP-1: claimed by you since 2026-09-24T06:00:00Z");
     expect(claimed.text).toContain("move it to in_progress");
+    // The claim itself delivers a person's answers, comments and messages on the issue.
+    expect(claimed.text).toContain(
+      "A person's answers, comments and messages on DSP-1 now reach you directly."
+    );
     expect(claimed.details).toMatchObject({ issue: "DSP-1", status: "todo", claim });
 
     const released = await run({ issue: "DSP-1", release: true });
@@ -1963,12 +1967,16 @@ describe("executeDispatchTool", () => {
       "Legion's daemon moves this issue's status on an issue it runs, so leave it alone — a status written here is undone"
     );
     expect(claimed.text).not.toContain("issue-update");
+    expect(claimed.text).toContain(
+      "Release the claim when you stop. A person's answers, comments and messages on DSP-1 now reach you directly."
+    );
 
     const released = await run({ issue: "DSP-1", release: true });
     expect(released.text).toContain(
       "Legion's daemon moves this issue's status on an issue it runs, so leave it alone — a status written here is undone"
     );
     expect(released.text).not.toContain("issue-update");
+    expect(released.text).not.toContain("now reach you directly");
   });
 
   test("dispatch_claim reads an omitted legion_managed_status as not Legion-managed", async () => {

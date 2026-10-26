@@ -4,6 +4,13 @@
 
 ### Added
 
+- The ask reads name who besides the followers a person's answer and replies reach:
+  `GET /api/v1/asks/{id}` and every ask thread (the Inbox rows and an issue's
+  `GET /api/v1/issues/{key}/asks?thread=1`) carry `claimant`, the session holding the claim on the
+  ask's issue, and `route`, the issue's route (`session:<id>` or `role:<name>`), each null when
+  absent and on a project document's ask. The Inbox ask card's `Reaches N` panel lists the
+  claimant (`via claim`) and the route (`via route`) beside the followers and subscribers, each
+  session listed and counted once (INFRA-278).
 - A project's default assignee, the last step of an issue create's assignee chain: an issue created
   with no assignee, by nobody (the shared token), under no parent or under a parent with nobody on
   it, goes to the person the project names; nothing already filed, and no create that names an
@@ -560,6 +567,21 @@
 
 ### Changed
 
+- A person's answers, comments and messages on a claimed issue reach the session holding its
+  claim, on its own `notifications.agent.<session_id>` topic, where before they reached it only
+  when it had subscribed to the issue, was its route, followed the ask or wrote the commented
+  document. A person's `ask.answered`, `ask.handed_back`, `ask.resolved`, `comment.created`,
+  `comment.edited`, `comment.resolved`, `comment.reopened`, `message.created` and
+  `message.answered` take this claimant route; a message a person sends to one session still
+  reaches only that session, and a new comment whose mentions resolved to the claimant arrives
+  once, as the mention. The claim is read when the event is published, so a retry after the claim
+  changed hands reaches the new holder, and a claimant that is also the route, a follower or an
+  author gets one copy. An agent's events, and every other event (an issue update, a document
+  version, a person opening or editing an ask), still reach a claimant only through a subscription
+  to the issue or as its route (INFRA-278).
+- The ask follower route skips a follower that a new comment's (`comment.created`) mentions
+  resolved to, since the mention delivers that comment already; the comment's edit, resolution
+  and reopening still reach every follower (INFRA-278).
 - **Breaking (local development):** `agent-secrets-devrelay` presents a listed caller's own
   ServiceAccount token, read from `--account-token-file` (default
   `$AGENT_SECRETS_ACCOUNT_TOKEN_FILE`), in place of the shared bearer the broker no longer takes. A

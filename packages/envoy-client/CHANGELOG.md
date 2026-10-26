@@ -4,6 +4,10 @@
 
 ### Changed
 
+- `dispatch claim`'s answer says what the claim now delivers: `A person's answers, comments and
+  messages on <KEY> now reach you directly.`, after the status advice and before the note that the
+  session is not subscribed to the issue, which still names the subscription every other event on
+  it needs (INFRA-278).
 - A session refreshes its Envoy registration every 90 s rather than every 120 s: the listener
   expires a session record 300 s after its last write, and three refresh attempts plus one whole
   listener call's budget (10 250 ms: two 5 000 ms attempts and the 250 ms retry delay between

@@ -4,6 +4,10 @@
 
 ### Added
 
+- `AskThread` and `AskRead` carry `claimant` (the session holding the claim on the ask's issue)
+  and `route` (the issue's route, `session:<id>` or `role:<name>`), whom a person's answer and
+  replies on the ask reach beside its followers; each is null when absent and on a project
+  document's ask (INFRA-278).
 - `dispatch_read` takes `events` (a positive integer, the issue's last N events) and `all_events`
   (every event), for an issue read and its `dispatch://KEY/log`, and its description says an issue
   read lists the last 10 without either.
@@ -127,6 +131,10 @@
 
 ### Changed
 
+- `dispatch_claim`'s description, which is also `dispatch claim --help`, says that while a session
+  holds the claim a person's answers, comments and messages on the issue reach it directly, a new
+  comment that mentions it once, as the mention, and that an agent's events and every other change
+  on the issue still need a subscription (INFRA-278).
 - `LegionHandoffCompleteResponse.note` carries one case fewer: READY no longer reads or judges the
   head's checks, so a base branch that requires none produces no note at all. What is left is the
   already-merged sentence, for a pull request a person merged before READY, and the by-hand

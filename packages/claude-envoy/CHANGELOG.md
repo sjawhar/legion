@@ -13,6 +13,12 @@
 
 ### Changed
 
+- The `dispatch` skill this plugin ships (its `skills/dispatch` link to the repository's skill)
+  says what a claim delivers, where it said claiming delivers none of the issue's comments: while a
+  session holds an issue's claim, a person's answers, comments and messages on that issue reach it
+  directly, a new comment that mentions it arrives once, as the mention, and a message a person
+  sends to one session reaches only that session. An agent's events and every other change on the
+  issue still need a subscription to the issue, as before (INFRA-278).
 - The plugin declares daemon API contract 36 in `package.json`'s `legion.daemonApiVersion`
   (INFRA-229): `GET /legion/v1/state` carries `state` on an issue's pull request, its `open`,
   `merged` or `closed`, always emitted, so the MCP server's strict state reader admits the field

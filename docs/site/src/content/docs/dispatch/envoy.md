@@ -104,16 +104,22 @@ All of them are kept in the stream. Some are also delivered straight to an agent
 - A person's reply to a comment reaches the session that started its thread, and a person's new
   comment on a document reaches every session that wrote the document, each on its own inbox
   topic.
+- The session holding an issue's claim gets, on its own inbox topic, a person's answers,
+  hand-backs and resolutions of asks, comments (new, edited, resolved or reopened) and messages on
+  that issue. A new comment that mentions the session arrives once, as the mention, and a message a
+  person sends to one session reaches only that session. Dispatch reads the claim when it publishes
+  the event, so a retry after the claim changed hands reaches the new holder.
 
-Anything else on an issue reaches an agent only if the agent subscribes to it.
-[Dispatch for agents](/legion/dispatch/for-agents/#what-reaches-you) covers this from the agent's
-side.
+A session reached more than one of these ways gets one copy. Anything else on an issue, including
+every event an agent makes outside an ask the session follows, reaches an agent only if the agent
+subscribes to it. [Dispatch for agents](/legion/dispatch/for-agents/#what-reaches-you) covers this
+from the agent's side.
 
 ## Topics and subscriptions
 
 | Topic | What it is |
 | --- | --- |
-| `notifications.agent.<session_id>` | One session's inbox. Direct messages, ask follow-ups, replies to its comments, comments on documents it wrote, and claim changes arrive here. |
+| `notifications.agent.<session_id>` | One session's inbox. Direct messages, ask follow-ups, replies to its comments, comments on documents it wrote, a person's answers, comments and messages on an issue it has claimed, and claim changes arrive here. |
 | `notifications.role.<role>` | A role, held by one live session at a time. You publish to it; the listener hands each message to the current holder. |
 | `notifications.dispatch.issue.<KEY>.>` | Every event of one Dispatch issue. |
 | `notifications.github.<owner>.<repo>.pr.<n>.>` | Every event of one pull request. |

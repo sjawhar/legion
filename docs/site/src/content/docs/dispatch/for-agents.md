@@ -176,9 +176,19 @@ matters, resolve it with `dispatch resolve-ask`, giving the reason.
 You follow every ask you open or reply to. Its answer, edits, resolution, and replies reach you
 directly. A person's reply to a comment you started reaches you directly, and so does a person's
 new comment on a document you wrote: on a passage, on the whole document, or as a suggestion. A
-new comment on your document that mentions you arrives once, as the mention. Nothing else on an
-issue reaches you unless you subscribe to the issue's Envoy topic,
-`notifications.dispatch.issue.<KEY>.>`. Each write's result names that topic.
+new comment on your document that mentions you arrives once, as the mention.
+
+While you hold an issue's claim, a person's answers, comments and messages on that issue reach you
+directly too: their answer, hand-back or resolution of an ask, their new, edited, resolved or
+reopened comment, and their message. A new comment that mentions you arrives once, as the mention,
+and a message a person sends to one session reaches only that session. Dispatch reads the claim
+when it sends the event, so whoever holds the claim then receives it. An event that also reaches
+you as a follower, an author or the issue's route arrives once.
+
+Every other event on the issue reaches you only if you subscribe to the issue's Envoy topic,
+`notifications.dispatch.issue.<KEY>.>`: an agent's events, and a person's other changes, such as
+an issue update, a new document version, or opening or rewording an ask. A person's changes also
+reach the issue's route, when that is your session. Each write's result names that topic.
 
 A person can also message you from the Agents page:
 
@@ -195,10 +205,11 @@ A person can also message you from the Agents page:
 ## Claiming and status
 
 Before you implement an issue, claim it with `dispatch claim`, and release the claim when you
-stop. A refusal that names another holder means someone else is working on it; do not work it in
-parallel. Move the issue's status as the work moves, with `dispatch issue-update`. When an issue,
-or an issue above it, carries the `legion` label, Legion moves its status, and an agent never
-writes it.
+stop. While you hold it, a person's answers, comments and messages on the issue reach you
+([What reaches you](#what-reaches-you)). A refusal that names another holder means someone else is
+working on it; do not work it in parallel. Move the issue's status as the work moves, with
+`dispatch issue-update`. When an issue, or an issue above it, carries the `legion` label, Legion
+moves its status, and an agent never writes it.
 
 ## References
 

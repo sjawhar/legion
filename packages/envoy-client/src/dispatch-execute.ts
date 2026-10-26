@@ -3092,9 +3092,13 @@ export async function executeDispatchTool(
           throw new Error(`Dispatch claimed ${issueKey} but answered with no claim`);
         }
         const claimed = `${issueKey}: claimed by you since ${held.at}. Its status is ${after.status}`;
+        // The claimant route (Dispatch's outbox) delivers a person's answers, comments and
+        // messages on the issue to this session; the notSubscribed suffix below is about every
+        // other event on the issue.
+        const reaches = `A person's answers, comments and messages on ${issueKey} now reach you directly.`;
         text = legionManaged
-          ? `${claimed}; ${LEGION_OWNS_STATUS} Release the claim when you stop.`
-          : `${claimed}; a claim moves nothing, so move it to in_progress with dispatch issue-update when you start, and release the claim when you stop.`;
+          ? `${claimed}; ${LEGION_OWNS_STATUS} Release the claim when you stop. ${reaches}`
+          : `${claimed}; a claim moves nothing, so move it to in_progress with dispatch issue-update when you start, and release the claim when you stop. ${reaches}`;
       }
       return {
         text: `${text}${await notSubscribed(issueTopic(issueKey), input.subscriptions)}`,
