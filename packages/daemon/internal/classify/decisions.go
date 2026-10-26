@@ -356,19 +356,97 @@ const (
 	DesignGateVersion          DesignGateEventKind = "version"
 )
 
-// ApplyDesignGateEvent updates a registered gate from one artifact observation. Approval opens
-// only when it names the latest known version; a newer document version and changes request close it.
-func ApplyDesignGateEvent(gate record.DesignGate, kind DesignGateEventKind, version int) record.DesignGate {
+// ApplyDesignGateEvent updates a registered gate from one artifact observation, at mark: where
+// Dispatch recorded the review, zero for a version event and for a read that gave none. Approval
+// opens only when it names the latest known version, and the gate keeps that approval's mark; a
+// newer document version and a changes request close it. A newer version keeps the approval it
+// closes, with its mark, as the version a human approved below the latest; a changes request
+// clears both. An approval and a newer version also clear the changes request the architect was
+// told of, which RecordChangesTold writes when it is told, so the approval and the told request
+// never stand together on the gate.
+func ApplyDesignGateEvent(gate record.DesignGate, kind DesignGateEventKind, version int, mark record.EventMark) record.DesignGate {
 	if version > gate.LatestVersion {
 		gate.LatestVersion = version
+		gate = clearChangesTold(gate)
 	}
 	switch kind {
 	case DesignGateApproved:
 		approved := version
-		gate.ApprovedVersion = &approved
+		gate.ApprovedVersion, gate.ApprovedMark = &approved, mark
+		gate = clearChangesTold(gate)
 	case DesignGateChangesRequested:
-		gate.ApprovedVersion = nil
+		gate.ApprovedVersion, gate.ApprovedMark = nil, record.EventMark{}
 	}
+	return gate
+}
+
+func clearChangesTold(gate record.DesignGate) record.DesignGate {
+	gate.ToldChangesVersion, gate.ToldChangesReason, gate.ToldChangesMark = nil, "", record.EventMark{}
+	return gate
+}
+
+// LatestReview is the review the gate has applied last and the document version it reviewed: the
+// approval it records, else the changes request it records as told. The two never stand together
+// (ApplyDesignGateEvent), so whichever is set is the gate's newest applied review. ok is false
+// when the gate records no review at all.
+func LatestReview(gate record.DesignGate) (record.EventMark, int, bool) {
+	switch {
+	case gate.ApprovedVersion != nil:
+		return gate.ApprovedMark, *gate.ApprovedVersion, true
+	case gate.ToldChangesVersion != nil:
+		return gate.ToldChangesMark, *gate.ToldChangesVersion, true
+	}
+	return record.EventMark{}, 0, false
+}
+
+// StaleReview reports whether a review of version at mark is older than the review the gate has
+// already applied at that version: the person reviewed again after it, so this one changes no gate
+// state. It covers an approval delivered after the changes request that superseded it, and a
+// changes request delivered after a newer approval. A review Dispatch placed neither by sequence
+// nor by time against the recorded one is not stale (record.EventMark.After), which keeps the
+// earlier behaviour for marks a Dispatch did not give, and neither is the recorded review itself
+// (record.EventMark.Same): a read that gave only its time and the live event that carries its
+// sequence are one review, and the sequenced one completes what the gate records of it.
+func StaleReview(gate record.DesignGate, version int, mark record.EventMark) bool {
+	recorded, reviewed, ok := LatestReview(gate)
+	return ok && reviewed == version && !mark.Same(recorded) && !mark.After(recorded)
+}
+
+// ReviewAfter reports whether the review the gate has applied at version was recorded after since.
+// A registration whose read of Dispatch began at since is then older than that review: the person
+// acted after the read, and the gate keeps what it already applied.
+func ReviewAfter(gate record.DesignGate, version int, since record.EventMark) bool {
+	recorded, reviewed, ok := LatestReview(gate)
+	return ok && reviewed == version && recorded.After(since)
+}
+
+// DesignGateChangesTold reports whether the gate already records this changes request as one the
+// architect was told of: the same document version, the same reason, and the same review in the
+// issue's Dispatch event log (mark, record.EventMark.Same: its event's sequence, else Dispatch's
+// time of it). A person who repeats a review's version and wording later has made a new review,
+// with an event of its own, and is not this one. A read that carries neither the sequence nor the
+// time is matched on version and reason alone.
+func DesignGateChangesTold(gate record.DesignGate, version int, reason string, mark record.EventMark) bool {
+	return gate.ToldChangesVersion != nil && *gate.ToldChangesVersion == version && gate.ToldChangesReason == reason &&
+		gate.ToldChangesMark.Same(mark)
+}
+
+// RecordChangesTold records on the gate the changes request the architect is being told of, so a
+// later read of the same review (a registration's or the gate seed's) tells it nothing again. A
+// review the gate already records keeps its record, completed with what this read adds of its
+// mark, so the review's live event and a read that showed only its time are one review.
+func RecordChangesTold(gate record.DesignGate, version int, reason string, mark record.EventMark) record.DesignGate {
+	if DesignGateChangesTold(gate, version, reason, mark) {
+		if gate.ToldChangesMark.Seq == 0 {
+			gate.ToldChangesMark.Seq = mark.Seq
+		}
+		if gate.ToldChangesMark.At.IsZero() {
+			gate.ToldChangesMark.At = mark.At
+		}
+		return gate
+	}
+	told := version
+	gate.ToldChangesVersion, gate.ToldChangesReason, gate.ToldChangesMark = &told, reason, mark
 	return gate
 }
 

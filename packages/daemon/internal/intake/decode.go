@@ -140,9 +140,17 @@ type dispatchEvent struct {
 		Kind string `json:"kind"`
 		ID   string `json:"id"`
 	} `json:"actor"`
-	Notify  *bool           `json:"notify"`
-	Type    string          `json:"type"`
-	Payload json.RawMessage `json:"payload"`
+	Notify *bool  `json:"notify"`
+	Type   string `json:"type"`
+	// CreatedAt is Dispatch's time of the event, zero when the event carries none. A review's
+	// event shares it with the review's own row, which Dispatch writes in the same transaction.
+	CreatedAt time.Time       `json:"created_at"`
+	Payload   json.RawMessage `json:"payload"`
+}
+
+// mark is the event's place in its issue's event log.
+func (e dispatchEvent) mark() record.EventMark {
+	return record.EventMark{Seq: e.Seq, At: e.CreatedAt.UTC()}
 }
 
 // decodeDispatchFact decodes one Dispatch issue event of project. The stream carries every
@@ -236,7 +244,7 @@ func decodeDispatchFact(subject, project, payload string) (Fact, error) {
 			}
 			kind = DispatchArtifactChangesRequested
 		}
-		return DispatchArtifact{Key: event.IssueKey, ArtifactID: artifact.ArtifactID, Kind: kind, Version: artifact.Version, Reason: artifact.Reason}, nil
+		return DispatchArtifact{Key: event.IssueKey, ArtifactID: artifact.ArtifactID, Kind: kind, Version: artifact.Version, Reason: artifact.Reason, Mark: event.mark()}, nil
 	case "artifact.version":
 		var artifact struct {
 			ArtifactID string `json:"artifact_id"`
@@ -253,7 +261,7 @@ func decodeDispatchFact(subject, project, payload string) (Fact, error) {
 		if artifact.Version.Number <= 0 {
 			return nil, fmt.Errorf("Dispatch artifact.version payload has no positive integer version.number")
 		}
-		return DispatchArtifact{Key: event.IssueKey, ArtifactID: artifact.ArtifactID, Kind: DispatchArtifactVersion, Version: artifact.Version.Number}, nil
+		return DispatchArtifact{Key: event.IssueKey, ArtifactID: artifact.ArtifactID, Kind: DispatchArtifactVersion, Version: artifact.Version.Number, Mark: event.mark()}, nil
 	case "issue.deployed":
 		var deployed struct {
 			Repo        string `json:"repo"`

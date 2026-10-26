@@ -760,6 +760,38 @@ func TestOutboxGateSeedRaisesTheGateToTheVersionDispatchHolds(t *testing.T) {
 	}
 }
 
+// The seed applies a changes request Dispatch shows on the version registered (or a later one),
+// with its reason and the review's place in the issue's event log, so a request whose own event
+// was lost still reaches the gate and its architect. The review's place names the fact, so a
+// second seed of one version that reads a newer review is a fact of its own, and a seed that reads
+// the same review again is not.
+func TestOutboxGateSeedAppliesAChangesRequestWithItsMark(t *testing.T) {
+	pool := isolatedOutboxPool(t)
+	handler := &outboxFactHandler{}
+	reason := "name the rollback path"
+	reviewed := time.Date(2026, 10, 23, 17, 0, 0, 0, time.UTC)
+	client := &outboxDispatch{approval: dispatch.Approval{State: "changes_requested", LatestVersion: 3, Version: new(3), Reason: &reason, At: reviewed, Seq: 9}}
+	runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", records: record.NewStore(), dispatch: client, handlers: []intake.Handler{handler}}
+	seed := func() {
+		t.Helper()
+		if err := runner.execute(context.Background(), mustOutboxRow(t, "LEGION-208", record.GateSeed{ArtifactID: "artifact-208", Version: 3}, time.Now())); err != nil {
+			t.Fatalf("execute gate seed: %v", err)
+		}
+	}
+	seed()
+	seed()
+	first := intake.DispatchArtifact{Key: "LEGION-208", ArtifactID: "artifact-208", Kind: intake.DispatchArtifactChangesRequested, Version: 3, Reason: reason,
+		Mark: record.EventMark{Seq: 9, At: reviewed}}
+	if got := handler.facts(); len(got) != 1 || got[0] != first {
+		t.Fatalf("gate facts after two seeds of one review = %#v, want the changes request once: %#v", got, first)
+	}
+	client.approval.Seq, client.approval.At = 12, reviewed.Add(time.Minute)
+	seed()
+	if got := handler.facts(); len(got) != 2 || got[1].(intake.DispatchArtifact).Mark.Seq != 12 {
+		t.Fatalf("gate facts after a seed that read a newer review = %#v, want that review as a second fact", got)
+	}
+}
+
 func TestOutboxLingerAppliesExpirationAndReturnsHandlerFailure(t *testing.T) {
 	pool := isolatedOutboxPool(t)
 	handler := &outboxFactHandler{}
