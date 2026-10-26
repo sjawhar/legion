@@ -44462,10 +44462,15 @@ var daemonInfo = exports_external.strictObject({
   firstBootAt: timestamp,
   startedAt: timestamp
 });
+var legionBlockedIssue = exports_external.strictObject({
+  issue: issueKey,
+  blockedBy: exports_external.array(issueKey)
+});
 var legionAdmission = exports_external.strictObject({
   cap: exports_external.number().int().nonnegative(),
   active: exports_external.array(nonEmptyString),
   waiting: exports_external.array(nonEmptyString),
+  blocked: exports_external.array(legionBlockedIssue),
   free: exports_external.number().int().nonnegative().optional()
 });
 var legionControllerLocator = exports_external.strictObject({
@@ -44613,7 +44618,9 @@ var LegionHandoffCompleteResponse = exports_external.strictObject({
   note: nonEmptyString.optional()
 });
 var LegionWaveReleaseResponse = exports_external.strictObject({
-  released: exports_external.array(nonEmptyString)
+  released: exports_external.array(nonEmptyString),
+  started: exports_external.array(issueKey),
+  held: exports_external.array(legionBlockedIssue)
 });
 var LegionGrantRequest = exports_external.strictObject({
   sessionId: nonEmptyString,
@@ -47286,7 +47293,7 @@ var import_nats2 = __toESM(require_mod4(), 1);
 // package.json
 var version2 = "1.0.0";
 var legion = {
-  daemonApiVersion: 37
+  daemonApiVersion: 38
 };
 
 // src/channel-forwarder.ts

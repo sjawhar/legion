@@ -25,7 +25,7 @@ root took it. Name the free slots; take nothing.
 daemon waits half a minute and folds that window's events into one wake. Take nothing: it is not
 Legion's.
 
-## `tick on <PROJECT>` (`{kind: "tick", openCapabilities?}`)
+## `tick on <PROJECT>` (`{kind: "tick", openCapabilities?, blocked?}`)
 
 The daemon's periodic wake, a minute after it starts and then every
 `controller_wake_interval_seconds` (an hour by default), whatever the slots. Run the skill's every-turn
@@ -40,6 +40,13 @@ session's failed check: its `detail` names the session (pod or pane), role, issu
 has no `configLine`. The next daily report names each row still open; take no other action,
 because the operator closes or decides a deployment row, and the operator or the issue's architect
 fixes a live row's session.
+
+`blocked`, when present, is `[{issue, blockedBy}, …]`: every root and child Legion is waiting to
+start behind an unfinished Dispatch issue, each with the issues it waits on. `read_state` shows the
+same list under `admission.blocked`, and `legion state` prints it as `blocked on Dispatch links:`.
+The wait ends when each blocker reaches `done` (a person's close, or the blocker's own merge) or its
+link is taken off (by a person or the tree's architect): name the waits in the day's report and
+take nothing for them.
 
 ## `unslotted on <KEY>` (`{kind: "unslotted", reason}`)
 

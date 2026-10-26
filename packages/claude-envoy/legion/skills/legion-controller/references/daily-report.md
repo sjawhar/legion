@@ -61,6 +61,9 @@ every issue by its key and title, every pull request by its URL.
 - **Running.** Each root in `admission.active` with its `issues.<KEY>.phase`, and the roots in
   `admission.waiting`. Name as waiting on a claim each root that this turn's "Trees waiting on a
   root claim" check found, with the holder its `Claimed by:` line names.
+- **Waiting on Dispatch links.** Each root and child in `admission.blocked`, with the issues it
+  waits on. The wait ends when each blocker reaches `done` (a person's close, or the blocker's own
+  merge) or its link is taken off (by a person or the tree's architect), so take nothing for them.
 - **Free slots.** Counted as the skill's "Free slots" says; each stays free until a root in `todo`
   with the `legion` label takes it.
 - **Open capabilities.** Each row of `read_state`'s `capabilities` whose `status` is `open`: its

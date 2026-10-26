@@ -136,9 +136,11 @@ looks, what woke the last one and when the next is due).
 
 When a person closes a root and it stays `done` through its linger, each child still in the
 workflow is handed to Legion as a root of its own: `todo` with the `legion` label, its phase, gate,
-phase records and pull request carried into a new generation, and that phase's role started. The
-child stays its own tree; reopening the old root does not take it back. Park a child with
-`park_child` before then when its work should stop with the root.
+phase records and pull request carried into a new generation, and that phase's role started. A
+child that never started but still waits on an unfinished issue is handed over too, carrying no
+run: it waits in the line until its blockers are done, and its architect starts as a fresh root
+and registers its own spec. The child stays its own tree; reopening the old root does not take it
+back. Park a child with `park_child` before then when its work should stop with the root.
 
 If you are that child's architect:
 
