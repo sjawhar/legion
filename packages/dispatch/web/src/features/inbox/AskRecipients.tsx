@@ -202,7 +202,8 @@ type Confirming =
  * shows the issue page's `Route reach unknown` marker instead of a dot, and a role route then
  * reads `Reaches N + route (unknown)` (`reachLabel`). A follower's Unfollow and a subscriber's
  * Unsubscribe each confirm first, name what still reaches the session (a subscription, the claim
- * or the route), and then cut the route that actually delivers; the claim and route rows have no
+ * or the route, or that a role route nobody is known to hold may, while its reach is unknown),
+ * and then cut the route that actually delivers; the claim and route rows have no
  * control, since both change on the issue. A subscriber whose only matching topic is
  * wider than this owner (e.g. `notifications.dispatch.>`) names that topic and has no control,
  * as the header's Subscribed agents panel does. When the subscribers fetch fails, the card says
@@ -277,13 +278,17 @@ export function AskRecipients({
 
   const viaLabel = subscription === undefined ? "" : `via ${subscription.noun} subscription`;
   // What still delivers to a session once its claim or route is all that is left; the route's
-  // session is a role's holder too.
+  // session is a role's holder too. A role route the listener could not judge may be held by any
+  // session, so one not otherwise known to be reached is told it may still hear the ask.
   const issueReach = (sessionId: string): string | undefined => {
     if (sessionId === claimant) {
       return "A person's answer and replies still reach them through the claim.";
     }
     if (sessionId === routeSession) {
       return "A person's answer and replies still reach them through the route.";
+    }
+    if (unknownRoute) {
+      return "A person's answer and replies may still reach them through the route: Dispatch could not tell who holds it.";
     }
     return undefined;
   };

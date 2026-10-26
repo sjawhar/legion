@@ -506,6 +506,60 @@ test("AskRecipients marks a role route the listener did not judge as reach unkno
   }
 });
 
+test("AskRecipients tells the human an unfollowed or unsubscribed session may still hear the ask through a role route whose holder is unknown", async () => {
+  const maybe =
+    "A person's answer and replies may still reach them through the route: Dispatch could not tell who holds it.";
+  const page = renderRecipients({
+    props: { claimant: "0123456789abcdef", route: "role:reviewer", routeStatus: "unknown" },
+    subscribers: [subscriber("b0b0b0b0b0b0b0b0", "Platform PO")],
+  });
+
+  try {
+    const section = screen.getByRole("region", { name: "Recipients" });
+    await waitFor(() => expect(reachesText(section)).toBe("Reaches 3 + route (unknown)"));
+    const unfollow = within(section).getAllByRole("button", { name: "Unfollow" });
+
+    fireEvent.click(unfollow[0] as HTMLElement);
+    const claimed = screen.getByRole("dialog", { name: "Unfollow" });
+    expect(claimed.textContent).toContain(
+      "Unfollow session:01234567… from this ask? A person's answer and replies still reach them through the claim. They will be told."
+    );
+    fireEvent.click(within(claimed).getByRole("button", { name: "Cancel" }));
+
+    fireEvent.click(unfollow[1] as HTMLElement);
+    const follower = screen.getByRole("dialog", { name: "Unfollow" });
+    expect(follower.textContent).toContain(
+      `Unfollow session:fedcba98… from this ask? ${maybe} They will be told.`
+    );
+    fireEvent.click(within(follower).getByRole("button", { name: "Cancel" }));
+
+    fireEvent.click(within(section).getByRole("button", { name: "Unsubscribe" }));
+    expect(screen.getByRole("dialog").textContent).toContain(`${maybe} They will be told.`);
+  } finally {
+    page.unmount();
+  }
+
+  // A role nobody holds and a session route the listener did not judge both say who receives
+  // them, so a session they do not reach keeps today's text.
+  for (const props of [
+    { route: "role:reviewer", routeStatus: "no_holder" as const },
+    { route: `session:${routed}`, routeStatus: "unknown" as const },
+  ]) {
+    const settled = renderRecipients({ props });
+    try {
+      const section = screen.getByRole("region", { name: "Recipients" });
+      fireEvent.click(
+        within(section).getAllByRole("button", { name: "Unfollow" })[1] as HTMLElement
+      );
+      expect(screen.getByRole("dialog", { name: "Unfollow" }).textContent).toContain(
+        "Unfollow session:fedcba98… from this ask? Its answer and replies will no longer reach them. They will be told."
+      );
+    } finally {
+      settled.unmount();
+    }
+  }
+});
+
 test("AskRecipients still counts a session route's session when its reach is unknown, without calling it offline", () => {
   const page = renderRecipients({ props: { route: `session:${routed}`, routeStatus: "unknown" } });
 

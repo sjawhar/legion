@@ -196,6 +196,90 @@ test("a role route held by the claimant is counted once, under the claim that na
   }
 });
 
+test("unfollowing a follower while a role route's holder is unknown says the route may still reach it, under the issue page's marker", async ({
+  browser,
+}) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "The listener did not answer" });
+  const ask = await createAsk(
+    issue.key,
+    { options: [{ label: "Ship" }, { label: "Hold" }], question: "Ship it?" },
+    { actor: asker, as: "agent" }
+  );
+  await patchIssue(issue.key, { route: "role:reviewer" });
+  // The asker holds the role: the very follower Dispatch cannot rule out once the listener is
+  // silent.
+  await setLiveSessions([{ roles: ["reviewer"], session_id: asker.id, title: "Asker (e2e)" }]);
+  const read = await getAsk(ask.id);
+  expect([read.route, read.route_status, read.route_holder]).toEqual([
+    "role:reviewer",
+    "live",
+    asker.id,
+  ]);
+
+  const alice = await asUser(browser, "alice");
+  const page = await alice.newPage();
+  // The listener answering nothing is forced on the real reads: the issue, the ask's thread and
+  // the Inbox rows keep every other field the server sent.
+  const unknownReach = { route_holder: null, route_status: "unknown" };
+  await page.route(`**/api/v1/issues/${issue.key}`, async (route) => {
+    const response = await route.fetch();
+    const body = (await response.json()) as Record<string, unknown>;
+    await route.fulfill({ json: { ...body, ...unknownReach }, response });
+  });
+  await page.route(`**/api/v1/asks/${ask.id}`, async (route) => {
+    const response = await route.fetch();
+    const body = (await response.json()) as Record<string, unknown>;
+    await route.fulfill({ json: { ...body, ...unknownReach }, response });
+  });
+  await page.route("**/api/v1/inbox*", async (route) => {
+    const response = await route.fetch();
+    const rows = (await response.json()) as { id: string; thread: Record<string, unknown> }[];
+    await route.fulfill({
+      json: rows.map((row) =>
+        row.id === ask.id ? { ...row, thread: { ...row.thread, ...unknownReach } } : row
+      ),
+      response,
+    });
+  });
+  try {
+    await page.goto(`/issues/${issue.key}`);
+    const headerMarker = page.getByTestId("issue-route-unknown");
+    await expect(headerMarker).toHaveText("Route reach unknown");
+    const headerTitle = await headerMarker.getAttribute("title");
+    expect(headerTitle).toBe(
+      "The Envoy listener did not answer, so Dispatch cannot tell whether anyone receives this route."
+    );
+
+    await page.goto("/");
+    const card = page.getByTestId(`ask-${ask.id}`);
+    const recipients = card.getByRole("region", { name: "Recipients" });
+    await expect(recipients).toContainText("Reaches 1 + route (unknown)");
+    await recipients.getByRole("button", { name: /^Reaches/ }).click();
+    const routeRow = recipients
+      .getByRole("list", { name: "Via claim or route" })
+      .getByRole("listitem")
+      .filter({ has: page.locator("[title='role:reviewer']") });
+    await expect(routeRow).toContainText("via route");
+    const rowMarker = routeRow.getByText("Route reach unknown");
+    await expect(rowMarker).toHaveAttribute("title", headerTitle ?? "");
+
+    await recipients
+      .getByRole("list", { name: "Followers" })
+      .getByRole("listitem")
+      .filter({ has: page.locator(`[title='${asker.id}']`) })
+      .getByRole("button", { name: "Unfollow" })
+      .click();
+    const dialog = page.getByRole("dialog", { name: "Unfollow" });
+    await expect(dialog).toContainText(
+      "Unfollow Asker (e2e) from this ask? A person's answer and replies may still reach them through the route: Dispatch could not tell who holds it. They will be told."
+    );
+    await expect(dialog).not.toContainText("will no longer reach them");
+  } finally {
+    await alice.close();
+  }
+});
+
 test("a route change that closes the issue moves the open card's route row without a reload", async ({
   browser,
 }) => {
