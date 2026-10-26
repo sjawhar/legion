@@ -2,48 +2,55 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-141",
-  "completed": "2026-10-26T17:20:00Z",
-  "generation": 3,
-  "round": "review 5655062345's round: fix 74318aa8 (detached role-claim cleanups, role-topic reaper, joined store errors, /healthz on an unanswered JetStream check), head 0a48e1d2",
+  "completed": "2026-10-26T21:00:00Z",
+  "generation": 4,
+  "round": "generation 4: roles from the role claims (757f5eff) and the forward merge of main (d11db8ab), head 5f1cdd95. Workspace recreated before this turn; checked against my last pushed handoff 0c2dda95, which is in the branch's history",
   "verdictProvenance": "provider not verified: written in my own session, no subagent ran; the model in my configuration is the one requested, not one read from the run's transcript",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Its proof is three go-test entries plus e2e-local. I drove items (1) on the real binary myself: a role claim over a bus slowed by a relay that delays each reply (0.45 to 0.9 s), against the listener built from git archive of cc183a6f; and the role reaper over two real 5-minute passes. Re-ran its named store and listener tests. Items (2) and (4) cannot be produced from outside the process and rest on its tests, which pass."
+    "how": "Its proof is go-test entries (A7-A10 with overlay controls), the A9 grep and e2e-local. I drove A7 and A10 on the real binary myself (rebuilt at this head and at 0c227469 from git archive), re-ran the A7-A10 tests and the A9 grep, and re-ran e2e-local with the A6' jq on this head."
   },
   "failures": [],
   "failed": 0,
   "proof": [
     {
-      "criterion": "(1) A role claim's old-holder cleanup still lands when the request's budget ends before it",
-      "surface": "the real envoy-listener binary at this head against a real NATS (internal/testnats/cmd/natsd) behind a python relay that delays every server reply by a set time; ses_old holding role r, ses_new registered",
-      "command": "POST /v1/roles/set {ses_new, r} with each reply delayed 0.45, 0.5, 0.55, 0.6, 0.9 s; return the bus to full speed; read ses_old's and ses_new's interest records and the claim of r",
-      "observed": "every claim 503 with Retry-After: 1 in 3.50 s. 0.55 s (run with the reaper wait): 'remove role r's topic from its old holder ses_old: context deadline exceeded', and afterwards ses_old has no topics, ses_new has notifications.role.r, claim r names ses_new: the detached cleanup landed after the 503. 0.5/0.6 s: the claim write was abandoned and landed late; ses_new holds r with its topic; ses_old keeps notifications.role.r (the claim step never reported success, so no old-holder cleanup is due); the detached rollback correctly left ses_new's topic. 0.9 s: the claimant's own read timed out first; nothing changed. 0 'cleanup failed after its request ended' lines",
-      "headSha": "0a48e1d2ce6023332816b2818cd9f84467343a17",
-      "negativeControl": "the listener built from cc183a6f on the same rig at 0.55 s left ses_old with notifications.role.r beside the new holder's, and still had it after 10.8 minutes (it has no role-topic reaper)"
+      "criterion": "A7: a session holds a role exactly when the role's claim names it, on GET /v1/sessions, GET /v1/registry/<id> and sender.roles",
+      "surface": "the real envoy-listener binary at this head against a real NATS (internal/testnats/cmd/natsd); claims written through POST /v1/roles/set and straight into envoy_roles with a throwaway nats.go client; curl",
+      "command": "ses_holder claims reviewer; ses_squatter subscribes straight to notifications.role.reviewer and notifications.role.nobody; a claim planner -> ses_bare written into envoy_roles (ses_bare has no interest record); ses_sender claims tester; read GET /v1/sessions, GET /v1/registry/ses_bare and the sender stamp of sends from ses_sender and ses_squatter; then a take-over and back, an unsubscribe of notifications.role.tester, a claim written and deleted straight in the bucket, and DELETE /v1/interests for a claim-only holder",
+      "observed": "roster: ses_holder [reviewer], ses_sender [tester], ses_bare [planner] (registry 200 roles [planner], topics null), ses_squatter [] despite its two role topics; sender stamps {roles [tester]} and none for ses_squatter. Take-over: ses_squatter [reviewer] and ses_holder [] and back. Unsubscribe released the tester claim (key not found) and ses_sender shows []. A claim put straight into the bucket appeared on ses_squatter at once and left on delete. DELETE /v1/interests/ses_bare 204 released planner by name and left another session's claim",
+      "headSha": "5f1cdd9579ff4b8f8a8c0f165ac84e1635816b6c",
+      "negativeControl": "the listener built from 0c227469 on the same rig: ses_squatter listed with [nobody, reviewer] and stamped them on its messages, ses_bare listed with roles null, a straight-written claim never appeared"
     },
     {
-      "criterion": "(1) The role reaper removes a role topic no claim backs, after two passes on the same revision, and leaves backed and wildcard role topics",
-      "surface": "the same real binary with its production 5-minute role reaper; ses_holder claimed role held; ses_squatter subscribed straight to notifications.role.held and notifications.role.nobody; ses_wild subscribed to notifications.role.>",
-      "command": "read the three interest records at t=0, after one pass (5.5 min) and after two (10.5 min); jq the reaper log lines",
-      "observed": "after pass 1 all unchanged. After pass 2: ses_squatter's two role topics removed (two INFO 'role reaper removed a role topic whose claim names another session or none' lines, holder shown), its github topic kept; ses_holder's notifications.role.held and ses_wild's notifications.role.> kept. In the same pass the claim reaper released held, since my rig's sessions do not heartbeat and outlived the 5-minute session TTL (existing behaviour), and the topic reaper then logged the squatter's removal with holder \"\"",
-      "headSha": "0a48e1d2ce6023332816b2818cd9f84467343a17",
-      "negativeControl": "after one pass nothing was removed, so the removal is the two-pass rule and not a reaper that strips every role topic; the holder's backed topic and the wildcard subscription survived both passes"
+      "criterion": "A10: a role-claim view that is not complete never reports a holder without its role",
+      "surface": "the same real binary; 20,000 claims in envoy_roles across a restart; envoy_roles deleted and recreated under the running listener, polled every ~2 ms on GET /v1/registry/<holder> with timestamps",
+      "command": "restart the listener over 20,000 claims and poll from its first answer for 25 s; delete and recreate the bucket, refilling with the holder's claim first then 3,000 others; again with it last after 3,000; again with it last after 100,000 (so the listener notices the recreation before the claim exists)",
+      "observed": "cold start: 52 x 503 'service starting', then 4,346 x 200 with the role, never 200 without it. Recreate: the listener noticed it at its 30 s self-health probe ('role claims bucket was recreated; its cache is refilled from the new bucket'); 6 to 106 polls then answered 503 'the message bus did not answer: the role claim view is not complete' with Retry-After: 1, then 200 with the role. In the 100,000 run the 200s lacked the role from 29.7 s to 71.263 s and carried it from 71.270 s; the holder's claim was written at 71.262 s, so a role was missing only while the bucket did not hold its claim",
+      "headSha": "5f1cdd9579ff4b8f8a8c0f165ac84e1635816b6c",
+      "negativeControl": "the 0c227469 listener answered every one of the cold-start and recreate polls 200 without the role (it reads roles from topics), so the rig can tell a missing role from a present one"
     },
     {
-      "criterion": "Earlier behaviour unchanged (frozen write routes, webhooks, send/publish/lookup, A1-A6, A6')",
-      "surface": "the real binary on the frozen-relay rigs; scripts/e2e-local.sh; go test of the named tests",
-      "command": "the round-four roles driver and round-ten write-route driver; bash scripts/e2e-local.sh with the A6' jq; go test ./cmd/listener of the implementer's joined-error, healthz, write-route and claim tests, my tests and the cold-cache tests; go test ./internal/store of the three new tests",
-      "observed": "frozen: subscribe, claims, unsubscribe and both deletes 503 in 3.50 s, 20 concurrent subscribes all 503 (slowest 3.536 s), check_run 503 in 4.0 s, push 503 in 5.0 s, sends/publishes/lookups 503 within 3.52 s; e2e exit 0, both PASS lines, client EnvoyApiError 503; A6' three WARN bus_unavailable records (16:50:50.063Z, 16:50:53.891Z, 16:50:57.648Z) after 'Initiating Shutdown...' at 16:50:46.522Z; every named test --- PASS. My test files have no diff since c95e2fec",
-      "headSha": "0a48e1d2ce6023332816b2818cd9f84467343a17",
-      "negativeControl": "every frozen-rig request was answered before the freeze; the e2e send answered 200 before NATS was stopped"
+      "criterion": "A3/A6 and the write routes unchanged: a bus that is connected but silent gets the named 503 inside the budget",
+      "surface": "the same real binary, NATS through a TCP relay frozen with the connection open",
+      "command": "after the freeze: send to a cached and an uncached target, publish to a topic and a role lane, GET /v1/roles/<role>, subscribe, roles/set, unsubscribe, DELETE /v1/interests/<id>, DELETE /v1/sessions/<id>, GET /healthz",
+      "observed": "every one 503 with Retry-After: 1 in 3.50-3.52 s (uncached send 1.0 s), each naming the call ('list the role claims to release ses_a's' for the delete); /healthz 503 unhealthy in 3.0 s",
+      "headSha": "5f1cdd9579ff4b8f8a8c0f165ac84e1635816b6c",
+      "negativeControl": "the same send answered 200 before the freeze"
+    },
+    {
+      "criterion": "A8, A9, A1-A6 and A6' at the merged head",
+      "surface": "go test of the named tests; git grep; scripts/e2e-local.sh",
+      "command": "go test ./cmd/listener and ./internal/store of the A7-A10 tests, my tests and the cold-cache tests; git grep -n -E 'reapRoleTopics|removeStaleRoleTopics|detachedCleanup|roleCleanupBudget|staleRoleTopics' -- packages/envoy; bash scripts/e2e-local.sh with the A6' jq",
+      "observed": "every named test --- PASS (cmd/listener ok 66.378 s, store ok 12.407 s); the grep prints nothing (exit 1); e2e exit 0, both PASS lines, client EnvoyApiError 503, A6' three WARN bus_unavailable records (20:44:37.840Z, 20:44:41.564Z, 20:44:45.328Z) after 'Initiating Shutdown...' at 20:44:34.295Z. My test files have no diff since 0c2dda95",
+      "headSha": "5f1cdd9579ff4b8f8a8c0f165ac84e1635816b6c",
+      "negativeControl": "the e2e send answered 200 before NATS was stopped"
     }
   ],
   "notes": [
-    "A claim can answer 503 although it landed (the 0.55 s run: the route timed out in the old holder's cleanup after the claim write succeeded). The client retries on 503, and a retried claim of a role the session already holds is idempotent.",
-    "Between a late-landing claim and the reaper's second pass (up to ~10 minutes), the old holder's interest record still lists the role topic, so GET /v1/sessions reports that role on it. Role delivery reads the claim, not the topic.",
-    "A session subscribed straight to notifications.role.<role> without holding its claim now loses that topic after two reaper passes; no client in this repository subscribes that way (envoy-client's topic guide says role topics are publish-to, claimed through envoy_role_set).",
-    "PR body is 61,980 characters (GitHub's limit 65,536)."
+    "The listener notices a role bucket deleted out of band only at its 30 s self-health probe; until then it keeps answering from the deleted bucket's view (the holder kept its role for ~29 s in my runs). That latency is the existing self-health rebuild, shared by every watched cache, and not this change; the answer after detection is correct.",
+    "Plan v4's generation-4 point says the session routes read the claims through on a not-ready view; the head answers the 503 directly instead (implement.json's trickyParts). A10's acceptance allows either; the window measured on the real binary was 6 to 106 polls (well under a second).",
+    "The idle-timed-out first scan cannot be produced from outside the process; it rests on TestARoleViewWhoseFirstScanTimedOutAnswersOnlyOnceItsRescanCompletes, which passes."
   ],
-  "ci": "At 0a48e1d2: Tests 40361597010, Docs 40361597170, Legion Envoy and Contracts 40361597214 and Worker Image 40361597002 queued when read, cited unsettled and not waited for.",
+  "ci": "At 5f1cdd95: Tests 40397561455, Legion Envoy and Contracts 40397561463, Docs 40397561574 and Worker Image 40397561461 queued when read, cited unsettled and not waited for. GitHub reports MERGEABLE (BLOCKED on review).",
   "regressionLocksAdded": []
 }
