@@ -571,6 +571,13 @@
   the workdir and rewrites each before it lapses, and the script exports
   `AGENT_SECRETS_ACCOUNT_TOKEN_FILE`, so devrelay approves records and machine logins locally
   again. The Dispatch e2e harness's broker token is `DISPATCH_E2E_AGENT_SECRETS_ACCOUNT_TOKEN_FILE`.
+- `DISPATCH_APP_PEM_B64` takes the GitHub App's private key as a plain PEM, as GKE SecretSync
+  copies it from Secret Manager, or as the base64 of a PEM, as before: a value holding `-----BEGIN`
+  is the PEM itself and any other is base64-decoded. Dispatch parses the key when it loads the
+  variable, so a key that does not parse stops boot with `DISPATCH_APP_PEM_B64: plain PEM:
+  <reason>` or `DISPATCH_APP_PEM_B64: base64 of a PEM: <reason>` (a value that is not base64 at
+  all, `DISPATCH_APP_PEM_B64: <reason>`), never quoting the key, where it stopped boot with
+  `parse GitHub App private key: <reason>`, naming neither the variable nor the form (INFRA-390).
 - A failed NATS reconnect attempt is logged, where it was silent: one WARN a minute per
   connection, `envoy nats reconnect attempt failed`, naming the client, the servers it was
   configured with and the error, with the first failure of an outage logged at once. nats.go
@@ -1173,6 +1180,11 @@
   of an issue and of every ask leaves it out too, so a count is the number of rows its panel lists,
   and a document's `outgoing` no longer lists a target of a kind no client reads. A build that adds
   a node kind to the graph can therefore roll out while the older build still serves reads.
+- The architecture import no longer fails on a branch head whose commit GitHub answers with more
+  than the 1 MiB response cap, as a commit touching many files did. `githubapp.Client.Ref` asks
+  `GET /repos/{owner}/{repo}/commits/{branch}` for the SHA alone
+  (`Accept: application/vnd.github.sha`) and refuses an answer that is not one 40-hex SHA, which a
+  directory read at it would have imported as an empty model (INFRA-390).
 - `GET /v1/registry/<session_id>` is the listener's authoritative answer about one session, so a
   session that is working is no longer read as gone while a listener's session cache refills. The
   read goes through that cache to the session bucket: a 200 carries the same body a row of `GET

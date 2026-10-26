@@ -102,9 +102,9 @@ func (a *servicePersistenceAdapter) StoreUpdateContext(ctx context.Context, room
 		// replaces this one, but its class is taken all the same, so the work the record counts
 		// for it ends here. Left counted, it would be an append no callback can ever finish:
 		// the record - or the one registered in its place, which carries the updates the room's
-		// persistence never took (handOverFailedRoomLocked) - would read as having a write in
-		// flight for ever, so the stale-room evictor would refuse to close that room, the
-		// settlement would retry without end, and the record would never be released.
+		// persistence never took (handOverFailedRoomLocked) - would wait on it for ever, so its
+		// settlement would retry without end, never closing a room behind the head
+		// (reloadRoomBehindHead), and the record would never be released (unusedLocked).
 		class, counted, found := a.service.consumeUpdateClass(room, update)
 		if found && class.durable {
 			a.service.finishDurableAppend(room, counted)

@@ -77,6 +77,32 @@ func (r *roomServer) closeInstance(room string, doc *crdt.Doc) (bool, error) {
 	return true, nil
 }
 
+// closeOwned is CloseRoom for a room its caller owns: holding the gate exclusively, it asks owns
+// whether the room under that name is still the caller's, and only then runs before (when set),
+// closes the room, and hands the close's error to after, whose error it returns; it reports
+// whether it closed the room. CloseRoom closes by name, so two closes queued on one gate for one
+// room, the second of which runs once the first has let go, would close whatever replaced the
+// room in between, a browser's reload among them. owns is what tells the second close that what
+// is there now is not its own.
+//
+// The check, before, the close and after all run holding the gate, so no other close the service
+// makes falls between them, and a close that checks after this one sees what after recorded (the
+// closed room's state forgotten, forgetEvicted). owns, before and after take the room's state
+// lock under the gate, the order CloseRoom's own flush takes them in.
+func (r *roomServer) closeOwned(room string, owns func() bool, before func(), after func(error) error) (bool, error) {
+	gate := r.acquireGate(room)
+	defer r.releaseGate(room, gate)
+	gate.Lock()
+	defer gate.Unlock()
+	if !owns() {
+		return false, nil
+	}
+	if before != nil {
+		before()
+	}
+	return true, after(r.Server.CloseRoom(room, true))
+}
+
 // holdOpen holds doc's room open while a repair commits into it, until release. It refuses,
 // holding nothing, while a close is under way or waiting, or when room has retired or replaced doc:
 // a repair never waits for a close.

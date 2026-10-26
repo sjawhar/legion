@@ -1160,8 +1160,11 @@ func TestSettleCapturesOnlyItsOwnIdentityUpdate(t *testing.T) {
 	state.mu.Lock()
 	generation := state.roomGeneration
 	state.mu.Unlock()
-	if generation != armed+1 {
-		t.Fatalf("generation after foreign update = %d, want %d", generation, armed+1)
+	// The foreign update arms a settlement of its own, which moves the room on from the
+	// generation this one was armed with. Which value it moves to is the service's to choose
+	// (nextRoomGeneration), so what this asserts is that it moved.
+	if generation == armed {
+		t.Fatalf("generation after foreign update = %d, the one the settlement was armed with: the update armed none", generation)
 	}
 	waitForPersistedProofText(t, database, artifactID, "foreign\n")
 	service.settleRoom(artifactID, generation)

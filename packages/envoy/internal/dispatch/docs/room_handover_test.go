@@ -523,9 +523,9 @@ func TestAFailedRoomsUnstoredUpdatesGoToTheRecordThatReplacesIt(t *testing.T) {
 // One is handed on while the failure stands: the service drops it, the browser resends it to the
 // room that replaces this one, and the work the record counts for it ends there. Left counted, it
 // is an append no callback can ever finish, and the record - or the one registered in its place,
-// which carries what the room's persistence never took - reads as having a write in flight for
-// ever: the stale-room evictor refuses to close that room (hasWriteInFlight), the settlement
-// retries without end, and the record is never released.
+// which carries what the room's persistence never took - waits on it for ever: its settlement
+// retries without end, never closing a room behind the head (reloadRoomBehindHead), and the
+// record is never released (unusedLocked).
 //
 // The other is handed on after the hand-over, by ygo's stranded persistence once the eviction has
 // cleared the failure. That one is stored, and it must still carry the class and the credit its

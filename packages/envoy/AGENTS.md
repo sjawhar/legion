@@ -704,11 +704,13 @@ when it finishes, or an update its persistence has not stored, whose settlement 
 delay later) and during a shutdown, which leaves the settlement to the next process. A write that
 opens while a settlement runs, or after its timer has fired, takes the settlement over and arms it
 when it ends, whether or not it changed anything (`openLiveWrite`). The stale-room evictor's close
-(`closeRoomBehindHead`) and this one both reserve the room under its state lock in the same hold
-that found no write in flight (`reserveRoomCloseLocked`), and until the close has returned the
-room's writer slot is refused, `503 DOC_SERVICE_UNAVAILABLE` as on a failed room, rather than
-handed to a write the close would then retire the instance under: the case the check that found
-no write in flight exists to rule out. The refused write's retry lands on the room that replaces
+(`closeRoomBehindHead`) and this one both reserve the room under its state lock, in the same hold
+that found nothing there each must wait for (`reserveRoomCloseLocked`): an open live write for the
+evictor's (`openLiveWriteLocked`; its other writers take the document's lock, which already orders
+them with the evictor's confirmation, INFRA-396), any write of this process for the settlement's.
+Until the close has returned the room's writer slot is refused, `503 DOC_SERVICE_UNAVAILABLE` as
+on a failed room, rather than handed to a write the close would then retire the instance under:
+the case that check exists to rule out. The refused write's retry lands on the room that replaces
 the closed one. The close reaches only the instance that was checked, never a room that replaced
 it: ygo's `CloseRoom` closes whatever room the name holds, and ygo's idle sweep retires a room
 without the close gate, so the close checks the instance again inside a `Server.Apply` on the

@@ -582,9 +582,9 @@ func TestACloseOfARoomBehindTheHeadThatFailsLiftsItsReservation(t *testing.T) {
 	}
 }
 
-// A write that opens after the evictor's own check for a write in flight, and before the close
+// An open live write that starts after the evictor's own check for one, and before the close
 // takes the room's state lock, leaves the room open. The evictor reads that check outside any
-// lock (hasWriteInFlight), so the close reads it again under the lock that admits a writer
+// lock (hasOpenLiveWrite), so the close reads it again under the lock that admits a writer
 // (closeRoomBehindHead): without the second read the close would retire the room under a write
 // whose commit still advances the replacement room's cursor, which is the stale-text-at-a-head-
 // cursor corruption the reservation exists to prevent. The room is left exactly as stale as it
@@ -1129,7 +1129,7 @@ func TestARoomWritesAgainAfterASupersededSettlementAppendsItsRepair(t *testing.T
 		}
 		superseded = true
 		state := service.lockState(room)
-		state.roomGeneration++
+		state.roomGeneration = service.nextRoomGeneration()
 		service.unlockState(room, state)
 	}
 	versions := latestVersionNumber(t, service, artifactID)

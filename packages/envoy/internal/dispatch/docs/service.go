@@ -176,7 +176,7 @@ type Service struct {
 	afterStateLookup func(room string)
 	// beforeCloseBehindHeadLock runs at the start of a close of a room behind the durable head,
 	// before it takes the room's state lock (closeRoomBehindHead). Nil outside tests; tests use it
-	// to open a write in the one window between the evictor's own check for a write in flight and
+	// to open a write in the one window between the evictor's own check for an open live write and
 	// the locked check that decides the close.
 	beforeCloseBehindHeadLock func(room string)
 	// afterRoomCloseReserved runs once a close of a room behind the durable head has reserved the
@@ -190,6 +190,10 @@ type Service struct {
 	// the room's record (closeReservedRoom, evictRoom): the window in which a browser's connect,
 	// the room that connect loads, and an edit typed in it reach that record. Nil outside tests.
 	afterRoomClosed func(room string)
+	// beforeFailedEviction runs on a failed room's eviction goroutine (failRoomLocked) before it
+	// closes the room (evictFailed). Nil outside tests; tests use it to close and reload the room
+	// another way first.
+	beforeFailedEviction func(room string)
 	// inServiceTransaction runs first in every transaction a service mutation makes through
 	// Server.Apply (serviceTransact). Nil outside tests; tests use it to change the live document
 	// between the mutation's read of it and its write, where a peer's update can land: Apply runs
@@ -211,6 +215,9 @@ type Service struct {
 	// across the rooms.Range that locks each room.
 	gateMu          sync.Mutex
 	nextSettleTimer atomic.Uint64
+	// roomGenerations is where every roomState.roomGeneration is drawn from (nextRoomGeneration),
+	// so no two states of the service ever stand at one generation.
+	roomGenerations atomic.Uint64
 	timerMu         sync.Mutex
 	// timers reserve their ID before creating an immediate timer, whose callback
 	// can run before time.AfterFunc returns the *time.Timer to its caller.
@@ -830,7 +837,7 @@ func (s *Service) Quiesce(ctx context.Context) error {
 		state.mu.Lock()
 		// A settlement whose timer already fired reads the generation it was armed with, so
 		// bumping it here ends that settlement before it opens a transaction.
-		state.roomGeneration++
+		state.roomGeneration = s.nextRoomGeneration()
 		s.stopSettleTimer(state.settle)
 		// The closed room's settlement failures are not the next room's (see
 		// reserveRoomCloseLocked).
@@ -897,7 +904,7 @@ func (s *Service) scheduleSettleAfterLocked(room string, state *roomState, delay
 	if !s.addUnlessStopping(&s.settleWG) {
 		return
 	}
-	state.roomGeneration++
+	state.roomGeneration = s.nextRoomGeneration()
 	generation := state.roomGeneration
 	s.stopSettleTimer(state.settle)
 	timerID := s.nextSettleTimer.Add(1)
@@ -1036,6 +1043,19 @@ func (s *Service) retrySettleSoon(room string) {
 	s.scheduleSettleAfterLocked(room, state, 10*time.Millisecond)
 }
 
+// nextRoomGeneration is the generation a state moves to when something invalidates what a
+// settlement read of its room, drawn from one counter for the whole service rather than counted
+// per state. A settlement finds its room's state by name when it runs and when it retries
+// (settleRoomWithin, retrySettle), and an eviction replaces the state: a reload's state counted
+// from zero again, so a settlement the eviction did not end - one already past its generation
+// check, which the stale-room evictor no longer waits for - could find the reload standing at the
+// very generation it was armed with, and count its refusal against that healthy room, failing it
+// at the third (maxSettleFailures). Drawn from one counter, a generation names one state's one
+// arming, and a stale one matches no other state's.
+func (s *Service) nextRoomGeneration() uint64 {
+	return s.roomGenerations.Add(1)
+}
+
 func (s *Service) retrySettle(room string, generation uint64, err error) {
 	state := s.lockState(room)
 	defer s.unlockState(room, state)
@@ -1043,19 +1063,30 @@ func (s *Service) retrySettle(room string, generation uint64, err error) {
 }
 
 func (s *Service) retrySettleLocked(room string, state *roomState, generation uint64, err error) {
-	if errors.Is(err, errRoomReplaced) {
+	counted := state.roomGeneration == generation
+	fails := counted && state.settleFailures+1 >= maxSettleFailures
+	switch {
+	case errors.Is(err, errRoomReplaced):
 		// Expected, not a fault: the settlement wrote nothing (one that wrote fails the room
 		// instead) because the room it read was replaced first, and the replacement's load arms
 		// the settlement the document still owes.
 		slog.Info("dispatch: document settlement wrote nothing into a replaced room", "room", room, "error", err)
-	} else {
+	case errors.Is(err, ErrRoomBehindHead) && !fails:
+		// The gate working, not a fault: another process wrote the document since this room
+		// loaded, and the stale-room evictor is what closes such a room, whose reload then
+		// settles every update. Only the refusal that fails the room is an ERROR, since with the
+		// evictor running a room still behind at the settlement's last retry is one it never
+		// closed. The message is the one every other refusal logs, which a reader matching it
+		// finds whatever the level.
+		slog.Info("dispatch: settle document", "room", room, "error", err)
+	default:
 		slog.Error("dispatch: settle document", "room", room, "error", err)
 	}
-	if state.roomGeneration != generation {
+	if !counted {
 		return
 	}
 	state.settleFailures++
-	if state.settleFailures >= maxSettleFailures {
+	if fails {
 		s.failRoomLocked(room, state, fmt.Errorf("document settlement failed %d times: %w", state.settleFailures, err))
 		return
 	}
@@ -1782,19 +1813,22 @@ func (s *Service) reloadRoomBehindHead(ctx context.Context, room string, state *
 
 // closeRoomBehindHead closes live, room's resident instance, which the stale-room evictor found
 // behind the durable head, so the next access loads the document at the head. It closes nothing,
-// and answers false, while a write of this process is in flight on the room (writeInFlightLocked)
-// or once live is no longer the instance room holds: both are read under the state lock that
-// reserves the close (reserveRoomCloseLocked), so no writer is admitted between the check and the
-// close, and the close reaches live alone (closeRoomInstance). The state is taken as lockState
-// takes it: a room that loaded onto a state an earlier release then forgot has none registered,
-// and one made for it here is the one the close settles. A settlement the reservation ended is
-// armed again (closeReservedRoom).
+// and answers false, while an open live write of this process is on the room
+// (openLiveWriteLocked) or once live is no longer the instance room holds: both are read under
+// the state lock that reserves the close (reserveRoomCloseLocked), so no writer is admitted
+// between the check and the close, and the close reaches live alone (closeRoomInstance). The
+// other writers of this process are not asked about, for the reason the evictor's own check
+// gives (hasOpenLiveWrite): they take the document's lock, and the evictor's confirmation under
+// that lock already orders them. The state is taken as lockState takes it: a room that loaded
+// onto a state an earlier release then forgot has none registered, and one made for it here is
+// the one the close settles. A settlement the reservation ended is armed again
+// (closeReservedRoom).
 func (s *Service) closeRoomBehindHead(ctx context.Context, room string, live *crdt.Doc) (closed bool, err error) {
 	if s.beforeCloseBehindHeadLock != nil {
 		s.beforeCloseBehindHeadLock(room)
 	}
 	state := s.lockState(room)
-	if state.writeInFlightLocked() {
+	if state.openLiveWriteLocked() {
 		s.unlockState(room, state)
 		return false, nil
 	}
@@ -1838,7 +1872,7 @@ func (s *Service) reserveRoomCloseLocked(room string, state *roomState, live *cr
 		return roomCloseReservation{}, false
 	}
 	state.reloading = true
-	state.roomGeneration++
+	state.roomGeneration = s.nextRoomGeneration()
 	// The closed room's settlement failures are not the next room's, and the record outlives the
 	// close. retrySettleLocked counts a failure only for the generation its settlement read, and
 	// that moves here; a settlement that reads the generation again after its warm-up
@@ -2184,7 +2218,7 @@ func (s *Service) SetIssueClosed(ctx context.Context, issueKey string, closed bo
 			changed = state.closed != closed
 			state.closed = closed
 			if closed && changed {
-				state.roomGeneration++
+				state.roomGeneration = s.nextRoomGeneration()
 				// The closed room's settlement failures are not the next room's (see
 				// reserveRoomCloseLocked): a record kept across the close and a reopen starts
 				// over.
@@ -2235,16 +2269,58 @@ func (s *Service) lastActorPersisted(room string, creditSeq uint64) {
 // room as failed. Tests, including those in package api, call it to force a room to reload. It
 // checks nothing about the room: the service's own closes of a room behind the durable head go
 // through closeRoomBehindHead and reloadRoomBehindHead, which reserve the room first
-// (reserveRoomCloseLocked).
+// (reserveRoomCloseLocked) and close the instance they checked (closeRoomInstance).
 func (s *Service) Evict(_ context.Context, artifactID string) error {
-	state := s.lockExistingState(artifactID)
+	return s.evictRoom(artifactID, s.invalidateForEviction(artifactID))
+}
+
+// evictFailed is a failed room's eviction (failRoomLocked): it closes the room that runs on
+// state, the failed one, and hands state over, unless state has been handed over already. The
+// failure evicts on a goroutine of its own, and another close can take the failed instance first
+// - Evict or Quiesce, which tests and the browser-test harness's own route call - after which the
+// browser reconnects and a replacement loads with a state of its own. A close by name here closed
+// that replacement under the browser. The stale-room evictor never takes it first: its
+// reservation refuses a failed room (reserveRoomCloseLocked), whose own eviction is this one.
+//
+// Whose room is under the name is read from state, not from the document, because the load that
+// replaces the failed room can attach to the failed state: ygo's own load takes the state after
+// it has published the room (onLoadDocument), so a load that was already under way when the room
+// failed is refused by the failure (websocket.go's roomFailure check) only if it reaches that
+// check after it, and one that passed it is closed here with the state it took, as before. A
+// state the service holds is the one every load under the name takes, so the room under the name
+// is state's until the state is handed over (handOverFailedRoomLocked, which marks it released):
+// a close that took the failed room first hands it over in forgetEvicted, so this check finds it
+// released.
+//
+// Evict and Quiesce hand their states over after letting go of the gate (evictRoom), leaving a
+// moment in which this close can still meet a load that took the state after it, as every close
+// by name could. ygo's own retirement of an idle room forgets no failed state: a state with a
+// failure is in use until its eviction (unusedLocked).
+func (s *Service) evictFailed(room string, state *roomState) error {
+	_, err := s.srv.closeOwned(room,
+		func() bool {
+			state.mu.Lock()
+			defer state.mu.Unlock()
+			return !state.released
+		},
+		nil,
+		func(err error) error { return s.forgetEvicted(room, state, err) })
+	return err
+}
+
+// invalidateForEviction ends what room's state has armed, ahead of the room's close: the
+// generation bump ends a settlement whose timer already fired before it opens its transaction,
+// and the timer's stop the one still armed. It returns the state, for the eviction to forget once
+// the room is closed (forgetEvicted), or nil when the service holds none for room.
+func (s *Service) invalidateForEviction(room string) *roomState {
+	state := s.lockExistingState(room)
 	if state != nil {
-		state.roomGeneration++
+		state.roomGeneration = s.nextRoomGeneration()
 		state.settleFailures = 0
 		s.stopSettleTimer(state.settle)
-		s.unlockState(artifactID, state)
+		s.unlockState(room, state)
 	}
-	return s.evictRoom(artifactID, state)
+	return state
 }
 
 // evictRoom closes room and then settles what becomes of its record. A failed room's record has to
@@ -2258,10 +2334,16 @@ func (s *Service) Evict(_ context.Context, artifactID string) error {
 // person's keystrokes were credited to nobody, the document forgot its issue was closed, and the
 // settlement the new load armed was left to a timer that found its record gone (INFRA-352).
 func (s *Service) evictRoom(room string, state *roomState) error {
+	return s.forgetEvicted(room, state, s.srv.CloseRoom(room, true))
+}
+
+// forgetEvicted is an eviction's end once its close has returned err: it settles state, the
+// closed room's record, and reports a close that failed, a room that had already gone being none.
+func (s *Service) forgetEvicted(room string, state *roomState, err error) error {
 	// Close first, then settle the state: the close's flush-before-evict consults the state's
 	// persistence-suppression slot, so a state removed before the close would let a failed
-	// settlement's discarded identity update reach the store.
-	err := s.srv.CloseRoom(room, true)
+	// settlement's discarded identity update reach the store. A settlement armed on this
+	// state during the close is re-armed by its own timer (see scheduleSettleAfterLocked).
 	if s.afterRoomClosed != nil {
 		s.afterRoomClosed(room)
 	}
@@ -2295,7 +2377,7 @@ func (s *Service) failRoomLocked(room string, state *roomState, cause error) {
 	state.failed = cause
 	state.failedDone = make(chan struct{})
 	done := state.failedDone
-	state.roomGeneration++
+	state.roomGeneration = s.nextRoomGeneration()
 	s.stopSettleTimer(state.settle)
 	s.purgeSuppressedPersistence(room)
 	// The failure drops this room's settlement: a queued one is stopped just above, one
@@ -2312,7 +2394,10 @@ func (s *Service) failRoomLocked(room string, state *roomState, cause error) {
 		if tracked {
 			defer s.evictWG.Done()
 		}
-		_ = s.evictRoom(room, state)
+		if s.beforeFailedEviction != nil {
+			s.beforeFailedEviction(room)
+		}
+		_ = s.evictFailed(room, state)
 		close(done)
 	}()
 }
