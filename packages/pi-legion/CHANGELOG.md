@@ -136,7 +136,7 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 - `legion-architect`, `legion-worker` and `legion-controller` point to
   `skill://dispatch-writing-specs` (INFRA-140) for a spec's outline, its questions, its approval and
   the rules for text a person reads, and `legion-architect` drops its own copy of those rules. The
-  controller's board-rank link points to `skill://dispatch/SKILL.md#setup-and-the-http-api`. A
+  controller's board-order step names `dispatch issue-update --before`/`--after`. A
   daemon role prompt now names `skill://dispatch-writing-specs`, so the daemon's boot gate refuses
   a `@sjawhar/pi-envoy` released before it: install the pi-envoy of the same release.
 - `legion-architect`: after approval, a corrected citation, a better sentence, a measurement that
@@ -144,6 +144,11 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   comment on the issue or the next handoff, and every change that needs approval goes into one
   version, so the person approves the spec again only when scope, acceptance or their decision
   changes.
+- The `legion-worker` skill's tools reference no longer tells a role to add a new image package to
+  the licence file by hand: the worker image lists every Debian package it carries in
+  `/usr/share/doc/legion/THIRD_PARTY_NOTICES` from its own dpkg database (INFRA-255). The
+  Dockerfile's comments and its toolchain smoke step stay hand-kept.
+
 - The merger's READY, as the `legion` tool's `handoff_complete` with `ready: true` reaches it,
   refuses one ground fewer: `READY_CHECKS_NOT_GREEN` is gone, and the daemon reads none of the
   head's check runs or commit statuses. GitHub, under the base branch's own rules, decides whether
