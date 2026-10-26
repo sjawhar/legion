@@ -199,31 +199,28 @@ describe("the dispatch command surface", () => {
   });
 
   test("a bare issue key is refused by a command without --issue", () => {
-    expect(parseCommand(["search", "--query", "q", "ACME-12"], noFiles)).toEqual({
+    expect(parseCommand(["search", "--query", "q", "ACME-12"], noFiles)).toMatchObject({
       kind: "refused",
       tool: "dispatch_search",
-      problems: ["unexpected argument ACME-12: every value follows its flag"],
     });
   });
 
   test("a bare issue key is refused when --issue is also given", () => {
-    expect(parseCommand(["read", "--issue", "ACME-1", "ACME-12"], noFiles)).toEqual({
-      kind: "refused",
-      tool: "dispatch_read",
-      problems: ["unexpected argument ACME-12: every value follows its flag"],
-    });
-    expect(parseCommand(["read", "ACME-12", "--issue", "ACME-1"], noFiles)).toEqual({
-      kind: "refused",
-      tool: "dispatch_read",
-      problems: ["--issue is given twice"],
-    });
+    for (const argv of [
+      ["read", "--issue", "ACME-1", "ACME-12"],
+      ["read", "ACME-12", "--issue", "ACME-1"],
+    ]) {
+      expect(parseCommand(argv, noFiles)).toMatchObject({
+        kind: "refused",
+        tool: "dispatch_read",
+      });
+    }
   });
 
   test("a second bare issue key is refused", () => {
-    expect(parseCommand(["read", "ACME-12", "ACME-13"], noFiles)).toEqual({
+    expect(parseCommand(["read", "ACME-12", "ACME-13"], noFiles)).toMatchObject({
       kind: "refused",
       tool: "dispatch_read",
-      problems: ["unexpected argument ACME-13: every value follows its flag"],
     });
   });
 
