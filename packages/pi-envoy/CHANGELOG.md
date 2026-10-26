@@ -4,6 +4,14 @@
 
 ### Added
 
+- The `dispatch` skill's reading reference (`references/reading.md`, "Reference forms") teaches
+  the two reference forms Dispatch now reads in text: a bare issue key (`CORE-12`), linked and
+  indexed when its issue exists and it stands alone, and a `#<question id>`, which cites a
+  question block of the same document; a key written before its issue exists links once the issue
+  does and is indexed at the text's next write or the next `rebuild-refs`. It also says a
+  reference reads as its target's title and a reply of references alone shows its cards on every
+  surface (INFRA-189).
+
 - The `dispatch` skill this plugin ships teaches the board move as a command: a card moves with
   `dispatch issue-update --issue <KEY> --before <OTHER>`, which puts it above that issue,
   `--after <OTHER>`, which puts it below, or both together, which land it between them, where the

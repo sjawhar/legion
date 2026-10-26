@@ -4,6 +4,32 @@
 
 ### Added
 
+- Dispatch reads a bare issue key and a `#<question id>` as references, links them wherever it
+  renders text, and lists the citing text under the target's "Referenced by" (INFRA-189). A key
+  (`CORE-12`, `[A-Z][A-Z0-9]{1,9}-[1-9][0-9]*`) counts when it stands alone - at the start of the
+  text, after whitespace or a numeric character reference to whitespace (`&#32;`), or after one of
+  `(` `[` `"` `'` `*` `_` `>` `` ` `` `~` `|` - and is stored as `dispatch://CORE-12` stores only
+  when that issue exists when the text is written. A `#q2` is stored as its ask's reference when a
+  question block of that id is in the document the text belongs to (`refs.ScopeOf`: a document's
+  own text, its questions, comments and replies; an issue's comments and messages belong to its
+  spec; a copied block's id names the original ask). Both are indexed inside code, as a
+  `dispatch://` reference is, and the dashboard links neither there. `GET
+  /api/v1/references/questions?kind=&id=` answers `{document, questions}`, the question map the
+  dashboard and the editor resolve `#id` by. Text stored before this release, and text an earlier
+  release writes while a rolling update runs, is re-indexed with no command run: migrations `0118`
+  to `0123` build `refs_owed` (a table, a trigger each on `comments`, `asks`, `messages` and
+  `artifact_versions`, and a seed of every stored source; every census answers `0`), and the
+  `reference-reindex` lease drains it (the loop lease pool holds nine connections); a version owes
+  its document's scope only when its question blocks change. `envoy-dispatch rebuild-refs`
+  applies the same rules. The dashboard reads a linked key as `KEY Title`, a `#id` as its
+  question's text and a message reference as the message's text; the live editor and the
+  past-version view draw a bare reference, or a link whose text is its own address, as its
+  target's title on one line, cut with an ellipsis, without changing the stored text; a reply or
+  message that is only references shows a card per reference in the Inbox thread and the
+  Conversation as it does in the margin; and a link or card whose target is missing shows the text
+  as written. Following a `#id` lands on its question and keeps it on screen while the titles
+  drawn above it grow the document.
+
 - A Dispatch project imports its component model from any number of architecture sources, one
   per repository, each on its own branch, and its model is every source's components together
   (INFRA-391). `GET /api/v1/projects/{key}/architecture-sources` lists a project's sources (`[]`
