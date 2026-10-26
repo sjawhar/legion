@@ -2,28 +2,35 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-439",
-  "completed": "2026-10-26T13:25:00Z",
-  "round": 5,
-  "headSha": "e0ed6d23865cbab8741dd57e3efce5546d9a1698",
-  "evidence": "https://github.com/sjawhar/legion/pull/2228#issuecomment-6417064184",
+  "completed": "2026-10-26T14:31:00Z",
+  "round": 6,
+  "headSha": "43651661dfe12e0c473e529d0840bd6befa16a95",
+  "evidence": "https://github.com/sjawhar/legion/pull/2228#issuecomment-6418540448",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Drove the fix live on a listener and natsd built from e0ed6d23. Session A registered notifications.agent.>, session B's agent subject, notifications.> and notifications.agent.*; each was left out of the store with a warning. A's replay of each was refused not_followed with no messages, and B's own replay returned its 2 messages. The red test 9f8ac8ff is unmodified and passes: CI Legion Envoy and Contracts run 40301975592, job envoy-go, success."
+    "how": "Re-drove the attacks live at 43651661 on a listener and natsd built from that head. Registering notifications.agent.>, session B's agent subject, notifications.>, notifications.*.>, notifications.envoy.exceptions.notifications.agent.>, notifications.envoy.exceptions.>, notifications.envoy.> and notifications.legion.> stores none of them, and each is named in a warning. The store holds only the session's own agent subject, the issue topic and the PR topic. Replay of each of those private topics, and of '>' and '*.>', is refused not_followed with 0 messages, while the stream held B's inbox messages and B's no_holder exceptions. The session's own exception lane is refused too. The registered issue and PR topics each answer their stored message, and B's own replay returns its 2 messages. Re-ran `bash packages/pi-envoy/scripts/smoke-replay.sh` at 43651661: SMOKE REPLAY PASS."
   },
-  "failed": 1,
-  "failures": [
+  "failed": 0,
+  "failures": [],
+  "proof": [
     {
-      "criterion": "Review finding 4 (architect's ACCEPT scope): /v1/replay can return only the caller's own agent subject and the topics it may follow, never another session's inbox",
-      "evidence": "The exception lane of the agent subjects is still open. When a message to session B is not delivered, the listener publishes an exception on notifications.envoy.exceptions.notifications.agent.<B> (cmd/listener/delivery.go publishDeliveryException). The exception carries B's original payload_summary and payload, and the stream keeps that lane (internal/bus/stream.go). bus.CoversAnotherAgentSubject does not cover the lane. Live at e0ed6d23: session A registered notifications.envoy.exceptions.notifications.agent.> (HTTP 200, stored). A's /v1/replay of that subject returned B's no_holder exception, payload_summary 'SMOKE-1: private body meant for B', with B's full payload. Red test: 240a4c4ae641, `cd packages/envoy && go test ./cmd/listener -run TestReplayNeverReturnsAnotherSessionsExceptionLaneThroughARegisteredInterest -count=1` -> FAIL (the lane returned notifications.envoy.exceptions.notifications.agent.ses_other's stored message)."
+      "criterion": "Review finding 4, the whole class (architect's NARROW): /v1/replay serves only the caller's own agent subject and registered topics under a shared stream subject, and /v1/interests/subscribe stores no private subject",
+      "surface": "a real listener and natsd built from this head, called over HTTP, with messages stored on B's inbox, B's exception lane, an issue topic, a PR topic and notifications.legion.*",
+      "command": "/legion/scratch/tmp/adv/f6.sh (comment 6418540448)",
+      "observed": "the 8 private topics and wildcards were not stored and each was named in a warning; replay of them, of '>' and '*.>', and of the session's own exception lane was refused not_followed with 0 messages; the registered issue and PR topics each returned 1 message; B's own replay returned 2",
+      "headSha": "43651661dfe12e0c473e529d0840bd6befa16a95",
+      "negativeControl": "at e0ed6d23 a registered notifications.envoy.exceptions.notifications.agent.> returned B's undelivered message with its full payload (round 5); red tests 9f8ac8ff and 240a4c4ae641 are byte-identical at this head"
     },
     {
-      "criterion": "Mergeability",
-      "evidence": "GitHub reports pull request #2228 CONFLICTING with main at head 59b5ea82 (gh pr view 2228 --json mergeable). The implementer brings main forward with a forward merge while it fixes the failure above."
+      "criterion": "Bare gates: the smoke run",
+      "surface": "real omp --mode rpc with this checkout's pi-envoy, natsd -js and the listener built from this head",
+      "command": "bash packages/pi-envoy/scripts/smoke-replay.sh",
+      "observed": "SMOKE REPLAY PASS: legs 1 to 6 each show every event once; both controls lose their messages",
+      "headSha": "43651661dfe12e0c473e529d0840bd6befa16a95",
+      "negativeControl": "released plugin 10.17.7 loses its messages in the control legs"
     }
   ],
-  "verifiedFixed": [
-    "Review finding 4 for agent subjects: registration and replay both refuse another session's agent subject and every wildcard over the agent subjects, for interests registered through the route and for interests already in the store (red test 9f8ac8ff, CI green).",
-    "CI at e0ed6d23: Tests, Legion Envoy and Contracts, Docs, Worker Image and PR Title all success."
-  ],
-  "proof": []
+  "blockers": [
+    "GitHub reports #2228 CONFLICTING with main at 43651661: main moved to 8411fe85 (#2239) at 14:25Z, after the implementer's forward merge. GitHub starts no pull_request workflow on a conflicting pull request, so CI at 43651661 has no run; the CI half of the bare gates cannot be read until main is merged forward. Sent back to implementing for that merge (forward-merge procedure, fingerprint before and after)."
+  ]
 }
