@@ -51,19 +51,23 @@
 # job.
 set -euo pipefail
 
-# A relative path argument is read from the caller's directory, so it is resolved there before
-# the cd below, and rewritten relative to the repository root, where it is then read. Both sides
-# are physical paths, so a checkout reached through a symlink prints the same repository paths.
-repo_root=$(cd "$(dirname "$0")/../.." && pwd -P)
+# A relative path argument is read from the caller's directory, so it is prefixed with that
+# directory's path from the repository root (or its absolute path, outside the repository) before
+# the cd below. The path is never rewritten: the kernel follows its symlinks and `..` parts as the
+# caller's shell would, and a name starting with "-" gets a "./" so find does not read an option.
+repo_root=$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd -P)
+caller=$(pwd -P)
+case $caller in
+  "$repo_root") prefix= ;;
+  "$repo_root"/*) prefix=${caller#"$repo_root"/}/ ;;
+  *) prefix=$caller/ ;;
+esac
 args=()
 for arg in "$@"; do
   case $arg in
     '' | /*) args+=("$arg") ;;
-    *)
-      rel=$(realpath -ms --relative-to="$repo_root" -- "$arg")
-      case $rel in -*) rel=./$rel ;; esac
-      args+=("$rel")
-      ;;
+    -*) args+=("${prefix:-./}$arg") ;;
+    *) args+=("$prefix$arg") ;;
   esac
 done
 set -- "${args[@]}"
