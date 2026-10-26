@@ -1293,20 +1293,6 @@ export default function envoyExtension(pi: PiApi): void {
         claim.release();
         await postDispatchReply(delivery, { error });
       };
-      // A BTW refused live was answered: the stream's copy must not come back from a sweep as a
-      // card that starts a turn. The ledger records the frame by its event id alone before the
-      // claim is released and the refusal posted, so no sweep finds it neither pending nor
-      // recorded while the reply is in flight or after it failed; the record reaches the
-      // transcript of the session it was delivered in even while that session shuts down
-      // (`recordDeliveredFor`), so a resume of it passes the stream's copy over too. A same-mode
-      // Retry carries a new event id under the same dedupe key, and still reaches the session, as
-      // the released claim lets it.
-      const refuseBTW = async (delivery: DispatchDelivery, error: string): Promise<void> => {
-        if (identity?.event_id !== undefined) {
-          await replay?.recordDeliveredFor(deliveredIn, { event_id: identity.event_id });
-        }
-        await refuse(delivery, error);
-      };
       try {
         if (rendered.rejectedDelivery !== undefined) {
           console.warn(
@@ -1319,19 +1305,31 @@ export default function envoyExtension(pi: PiApi): void {
           );
           claim.settle();
         } else if (rendered.delivery?.mode === "btw") {
+          // A BTW is answered on Dispatch or refused there, never shown as a card: the stream's
+          // copy must never come back from a sweep as a card that starts a turn. The ledger
+          // records it by its event id alone before the side turn and before any reply is posted,
+          // so no sweep finds it unrecorded whatever happens after (a reply that fails, a sweep
+          // while the POST is in flight, the process ending mid-turn or mid-POST), and the record
+          // reaches the transcript of the session it was delivered in even while that session
+          // shuts down (`recordDeliveredFor`), so a resume of it passes the stream's copy over too.
+          // A same-mode Retry carries a new event id under the same dedupe key, and still reaches
+          // the session once a refusal released the claim.
+          if (identity?.event_id !== undefined) {
+            await replay?.recordDeliveredFor(deliveredIn, { event_id: identity.event_id });
+          }
           const answer = sideTurn(activeSessionContext);
           if (shuttingDown) {
             // A session that is shutting down starts no model call, but a frame can still drain in.
-            await refuseBTW(rendered.delivery, "This OMP session is shutting down");
+            await refuse(rendered.delivery, "This OMP session is shutting down");
           } else if (answer === undefined) {
-            await refuseBTW(rendered.delivery, "This OMP host does not support BTW delivery");
+            await refuse(rendered.delivery, "This OMP host does not support BTW delivery");
           } else {
             try {
               const reply = await answer({ prompt: rendered.delivery.body });
               await postDispatchReply(rendered.delivery, { body: reply.replyText });
               await taken();
             } catch (error) {
-              await refuseBTW(rendered.delivery, messageFor(error));
+              await refuse(rendered.delivery, messageFor(error));
             }
           }
         } else {

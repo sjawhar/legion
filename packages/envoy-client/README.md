@@ -48,8 +48,8 @@ ends first shows it after the restart, until the host calls `recordDelivered` an
 claim once written. `recordDeliveredFor(sessionID, frame)` records the same way for the session a
 frame was delivered in while the host shuts down: it writes while the host's optional
 `writeSessionID()` still names that session, once `sessionID()` already answers none, and the
-ledger holds the frame from the call on (Oh My Pi records a refused BTW's event id so, before it
-releases the claim and posts the refusal).
+ledger holds the frame from the call on (Oh My Pi records every BTW's event id so, before its side
+turn and before any reply is posted).
 
 The state holds each followed subject's `since` and `after` and the stream's `created` time;
 `restore(snapshot)` loads what a host persisted, dropping expired ledger entries and keeping the

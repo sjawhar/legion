@@ -230,14 +230,15 @@ user message `matchInjectedUserTurn` finds for it: by its `tag` for typed input
 (`pi.sendUserInput`), which the host keeps on the message idle and queued alike, or by its text
 for `pi.sendUserMessage` on a host without `sendUserInput`, whose search the run's end stops,
 recording the turn then. Typed input the host answers submitted no message (a command, a refusal,
-a failure) is recorded at that answer, which the person gets on Dispatch. A BTW reply is a
-Dispatch post, recorded once posted. A BTW refused live (its side turn failed, the session is
-shutting down, the host has no side turn) is recorded by its event id alone before its claim is
-released and the refusal posted, in the transcript of the session it was delivered in, even while
-that session shuts down (`recordDeliveredFor`, through the host's `writeSessionID`), so the
-stream's copy never comes back as a card that starts a turn: not while the refusal is in flight,
-not when it fails, and not after a resume. A same-mode Retry, a new event id under the same dedupe
-key, still reaches the session. A replayed card of a
+a failure) is recorded at that answer, which the person gets on Dispatch. A BTW is answered or
+refused on Dispatch and never shown as a card: it is recorded by its event id alone the moment its
+delivery starts, before the side turn and before any reply is posted, in the transcript of the
+session it was delivered in, even while that session shuts down (`recordDeliveredFor`, through
+the host's `writeSessionID`), so the stream's copy never comes back as a card that starts a turn:
+not while the side turn runs or a reply is in flight, not when a reply fails, and not after the
+process ends mid-turn or mid-reply and the session is resumed. An answered BTW's reply records
+its dedupe key too once posted. A same-mode Retry of a refused one, a new event id under the same
+dedupe key, still reaches the session. A replayed card of a
 frame the dedupe let go of that the open session's ledger lacks (shown before the host moved to
 this session) waits on its write too, with no claim.
 
