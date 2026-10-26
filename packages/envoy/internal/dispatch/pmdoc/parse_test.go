@@ -257,6 +257,41 @@ func TestParseTakesALinkedImageWhoseLinkTitleHoldsALineBreak(t *testing.T) {
 	}
 }
 
+// A title line that Go's reader (goldmark) opens an HTML block at, and the title-line allow-list
+// admits as text, must not be written raw: `<meta` (a block tag in goldmark's list, not in
+// CommonMark's or the allow-list's), `</ div>` (goldmark reads a space after `</` and still takes
+// the block tag) and `<pre/>` or `<pre` and a form feed (goldmark's raw-element opening). Written
+// raw, the stored markdown reads back otherwise in Go and the write is refused, where the base
+// took a linked image's write (it dropped the link): R2. An image's own title holding such a line
+// is refused at the base too; it is the same writer's defect, so it is taken here as well.
+func TestParseTakesAnImageTitleLineGoReadsAsAnHTMLBlock(t *testing.T) {
+	for _, prefix := range []string{"", "x | ", "- ", "> "} {
+		for _, line := range []string{"<meta", `<META x=\"1\">`, "</ div>", "</ p", "<pre/>", "<script/>x", "<pre\fx"} {
+			title := "a&#10;" + line + "&#10;z"
+			for _, markdown := range []string{
+				prefix + "[![x](i.png)](https://u.com \"" + title + "\")\n",
+				prefix + "![x](i.png \"" + title + "\")\n",
+			} {
+				got, err := ParseForWrite(markdown, nil)
+				if err != nil {
+					t.Errorf("ParseForWrite(%q) = %v, want the write taken", markdown, err)
+					continue
+				}
+				var image *Node
+				Walk(got, func(node *Node) bool {
+					if node.Type == "image" {
+						image = node
+					}
+					return image == nil
+				})
+				if image == nil || strings.HasPrefix(markdown, prefix+"[") && image.Attrs["link"] != "https://u.com" {
+					t.Errorf("ParseForWrite(%q) image = %v, want the image and its link kept", markdown, image)
+				}
+			}
+		}
+	}
+}
+
 // The browser editor's parser matches a reference to its definition by the labels as written,
 // before their character references are decoded, and a label is stored and written decoded, so a
 // reference whose label matches its definition's only as written would lose it: `[^&AUML;]` finds
