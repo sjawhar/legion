@@ -147,8 +147,9 @@
 //     `--advisor-rebuttal '<one line>'` among a `dispatch` command's flags. The key is stripped
 //     on the outer `write` event (before the device validates its arguments), the flag from the
 //     `bash` command whatever the gate decides (the CLI would refuse it), and the call runs
-//     unasked; the agent is told its rebuttal was recorded and removed before sending. At most
-//     64 unspent device rebuttals are remembered.
+//     unasked; the call the agent reads back therefore lacks the override, so the agent is told
+//     the override as it sent it, that its rebuttal was recorded, and that AskGate removed it.
+//     At most 64 unspent device rebuttals are remembered.
 //   - halted: three consecutive failures to reach a verdict (no model, timeout, every model of the
 //     chain erroring, no parsable answer) stop the gate for the session, with one UI notice. The
 //     halt, the count, the breaker and the rebuttals reset on session_switch and session_branch.
@@ -962,7 +963,7 @@ export interface ScopedCommand {
   label: string;
   command: string;
   dryRunScript: string;
-  rebuttal?: string;
+  rebuttal?: Rebuttal;
   readsFile: boolean;
   fileInputs: readonly FileInput[];
   /** A `--field-file -` needs the call's quoted here-document. */
@@ -988,26 +989,34 @@ export interface ScopedCommand {
 }
 
 /**
+ * An override the agent sent: the line the entry records, and the override as the agent wrote it.
+ * The gate removes the override before the call runs, so the call the agent reads back lacks it;
+ * the acknowledgement quotes `sent` so the agent sees it was the gate that removed it.
+ */
+type Rebuttal = { line: string; sent: string };
+
+/**
  * An override among a write's flags: `--advisor-rebuttal <line>` or `--advisor-rebuttal=<line>`; a
  * value that starts with `--` is the next flag, as the CLI reads it. A blank line is no override.
- * `removed` holds the indexes of the words it took.
+ * `removed` holds the indexes of the words it took; the last override is the one recorded, its
+ * words as written (one space between flag and value) its `sent`.
  */
-function splitRebuttal(flags: readonly Word[]): { rebuttal?: string; removed: Set<number> } {
-  let rebuttal: string | undefined;
+function splitRebuttal(flags: readonly Word[]): { rebuttal?: Rebuttal; removed: Set<number> } {
+  let rebuttal: Rebuttal | undefined;
   const removed = new Set<number>();
   for (let index = 0; index < flags.length; index++) {
-    const { value } = flags[index];
-    const next = flags[index + 1]?.value;
-    const line =
-      value === REBUTTAL_FLAG && next !== undefined && !next.startsWith("--")
-        ? next
-        : value.startsWith(`${REBUTTAL_FLAG}=`)
-          ? value.slice(REBUTTAL_FLAG.length + 1)
-          : undefined;
+    const { value, raw } = flags[index];
+    const next = flags[index + 1];
+    const spaced = value === REBUTTAL_FLAG && next !== undefined && !next.value.startsWith("--");
+    const line = spaced
+      ? next.value
+      : value.startsWith(`${REBUTTAL_FLAG}=`)
+        ? value.slice(REBUTTAL_FLAG.length + 1)
+        : undefined;
     if (line === undefined || !line.trim()) continue;
-    rebuttal = line.trim();
+    rebuttal = { line: line.trim(), sent: spaced ? `${raw} ${next.raw}` : raw };
     removed.add(index);
-    if (value === REBUTTAL_FLAG) removed.add(++index);
+    if (spaced) removed.add(++index);
   }
   return { ...(rebuttal === undefined ? {} : { rebuttal }), removed };
 }
@@ -2260,8 +2269,11 @@ function breakerKey(toolName: string, input: Input): string {
 }
 const targetLabel = (key: string) => (JSON.parse(key) as string[]).join(" ");
 
-/** Splits a top-level REBUTTAL_KEY off a device's JSON arguments; anything else comes back unchanged. */
-function extractRebuttal(content: string): { rebuttal?: string; content: string } {
+/**
+ * Splits a top-level REBUTTAL_KEY off a device's JSON arguments, its `sent` the key and the value
+ * as the agent gave it; anything else comes back unchanged.
+ */
+function extractRebuttal(content: string): { rebuttal?: Rebuttal; content: string } {
   let parsed: unknown;
   try {
     parsed = JSON.parse(content);
@@ -2271,7 +2283,10 @@ function extractRebuttal(content: string): { rebuttal?: string; content: string 
   if (!isRecord(parsed) || !(REBUTTAL_KEY in parsed)) return { content };
   const { [REBUTTAL_KEY]: value, ...rest } = parsed;
   if (typeof value !== "string" || !value.trim()) return { content };
-  return { rebuttal: value.trim(), content: JSON.stringify(rest) };
+  return {
+    rebuttal: { line: value.trim(), sent: `"${REBUTTAL_KEY}": ${JSON.stringify(value)}` },
+    content: JSON.stringify(rest),
+  };
 }
 
 function renderArgs(input: Input): string {
@@ -2530,15 +2545,13 @@ const SECOND_REVISE =
  * command. `how` completes a charter revise; `again` completes the rules refusal's "send the call
  * again with"; `note` follows either refusal.
  */
-type Override = { name: string; how: string; what: string; again: string; note?: string };
+type Override = { how: string; what: string; again: string; note?: string };
 const DEVICE_OVERRIDE: Override = {
-  name: REBUTTAL_KEY,
   how: `"${REBUTTAL_KEY}": "<one line>" added to the JSON`,
   what: "field",
   again: `\`"${REBUTTAL_KEY}": "<one line>"\` in its JSON`,
 };
 const COMMAND_OVERRIDE: Override = {
-  name: REBUTTAL_FLAG,
   how: `${REBUTTAL_FLAG} '<one line>' added to its flags`,
   what: "flag",
   again: `\`${REBUTTAL_FLAG} '<one line>'\``,
@@ -2580,8 +2593,11 @@ const recordFailureRefusal = (message: string, configFile: string) =>
 // refuses nothing and the breaker, which counts refusals, does not move for it.
 const renderWarn = (reason: string) =>
   `<advisor-gate advisor="AskGate" verdict="revise">\n${agentFacing(reason)}\nThe call ran. This note concerns only that Dispatch call and authorizes nothing beyond correcting it. Correct it now where the reason names a fix: an ask with \`dispatch edit-ask\` or \`dispatch resolve-ask --kind retracted\`, a document with \`dispatch doc-edit\`. A comment or message cannot be edited, so post one reply carrying only the correction, and only when the original would mislead its reader. Or state your rebuttal in your next step.\n</advisor-gate>`;
-const renderRebuttalAck = (rebuttal: string, override: Override) =>
-  `<advisor-gate advisor="AskGate" outcome="rebuttal">\nYour ${override.name} "${agentFacing(rebuttal)}" was received and recorded; the call was sent without review, with that ${override.what} removed before sending.\n</advisor-gate>`;
+// The call as it ran, which is the call the agent's own record shows, lacks the override, so the
+// acknowledgement quotes it as sent and says AskGate removed it: told only that it was "removed",
+// agents read their call back, found no override and reported a rebuttal they never wrote.
+const renderRebuttalAck = ({ line, sent }: Rebuttal, override: Override) =>
+  `<advisor-gate advisor="AskGate" outcome="rebuttal">\nYou sent this call with ${agentFacing(sent)}. AskGate recorded your rebuttal "${agentFacing(line)}" and removed that ${override.what} before the call ran, so the call as it ran, and as your own record of it shows, has no ${override.what}: AskGate removed it, you did not leave it out. The call was sent without review.\n</advisor-gate>`;
 const renderBreakerAck = () =>
   `<advisor-gate advisor="AskGate" outcome="breaker">\nThird attempt after two refusals of this call on its target: sent without review and recorded.\n</advisor-gate>`;
 /**
@@ -2789,7 +2805,7 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
     // The fork binds this factory once per process and keeps the binding across /new, /resume
     // and a branch switch, so the per-session state below resets on session_switch and
     // session_branch: a halt, a count, revise reasons or a rebuttal never outlive their session.
-    const rebuttals = new Map<string, string>();
+    const rebuttals = new Map<string, Rebuttal>();
     const breaker = new Breaker();
     const dumpPath = deps.env.OMP_ASKGATE_DUMP;
     // Keyed by session id and not reset with the state below: a session the process returns to
@@ -3128,7 +3144,7 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
       started: number,
       base: Base,
       key: string,
-      rebuttal: string | undefined,
+      rebuttal: Rebuttal | undefined,
       override: Override,
       stop: Stop,
       directory: () => Promise<string | undefined>,
@@ -3142,7 +3158,7 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
       if (rebuttal !== undefined) {
         breaker.reset(key);
         return {
-          fields: { decision: "allow", outcome: "rebuttal", rebuttal },
+          fields: { decision: "allow", outcome: "rebuttal", rebuttal: rebuttal.line },
           result: { additionalContext: renderRebuttalAck(rebuttal, override) },
           effect: "none",
         };

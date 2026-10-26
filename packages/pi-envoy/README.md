@@ -355,12 +355,15 @@ instead and how to send the call anyway. The agent sends the call anyway in one 
   there before it. An allow, a rebuttal or the third attempt starts every count on the target
   again.
 
-A rebuttal sends the call with no review by either check, and the entry records the line. A rules
-call that ends in an error, a timeout or an answer that does not parse refuses nothing: the
-charter check decides. The third such rules call in a row writes one warning, saying that the new
-asks of those three calls went unchecked and that the check still runs on each new ask, to the
-host's plain log, shows it as a notice in a session with a UI, and adds it to that call's own
-result. It is not one of the notices a session shows at its start.
+A rebuttal sends the call with no review by either check, and the entry records the line. The
+gate removes the flag or field before the call runs, since neither the CLI nor the device takes
+it, so the call the agent reads back lacks it; the acknowledgement quotes the override exactly as
+the agent sent it and says AskGate removed it. A rules call that ends in an error, a timeout or an
+answer that does not parse refuses nothing: the charter check decides. The third such rules call
+in a row writes one warning, saying that the new asks of those three calls went unchecked and
+that the check still runs on each new ask, to the host's plain log, shows it as a notice in a
+session with a UI, and adds it to that call's own result. It is not one of the notices a session
+shows at its start.
 
 **The model.** Both checks ask the session's `askgate` model role (`modelRoles.askgate`). When that
 role is not set, they ask the `default` role. A model that answers with an error passes the request

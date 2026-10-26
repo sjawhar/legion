@@ -516,7 +516,7 @@ describe("rebuttal (test 3)", () => {
     // The agent's record of its call no longer shows the field; the acknowledgement says why.
     expect(ack).toContain('outcome="rebuttal"');
     expect(ack).toContain('"a link"');
-    expect(ack).toContain("removed before sending");
+    expect(ack).toContain("AskGate removed it, you did not leave it out");
     expect(g.calls).toHaveLength(0);
     expect(g.entries).toMatchObject([
       {
@@ -528,6 +528,22 @@ describe("rebuttal (test 3)", () => {
         toolCallId: "t1",
       },
     ]);
+  });
+  test("the acknowledgement quotes the field as the agent sent it, so the call it reads back lacks it by AskGate's doing", async () => {
+    // The agent's record of the call shows the JSON the device ran, field gone: the note must show
+    // the field as sent, or the agent takes the recorded rebuttal for one it never wrote.
+    const g = bind();
+    const sent = { issue: "X-1", body: "b", advisor_rebuttal: ' the owner said "go" ' };
+    await g.write("t1", "xd://dispatch_comment", JSON.stringify(sent));
+    const ack =
+      (await g.device("t1", "dispatch_comment", { issue: "X-1", body: "b" }))?.additionalContext ??
+      "";
+    expect(ack).toContain(
+      'You sent this call with "advisor_rebuttal": " the owner said \\"go\\" ".'
+    );
+    expect(ack).toContain('AskGate recorded your rebuttal "the owner said "go""');
+    expect(ack).toContain("removed that field before the call ran");
+    expect(ack).toContain("has no field: AskGate removed it, you did not leave it out");
   });
   test("a rebuttal is spent by its device event: the same id is gated afterwards", async () => {
     const g = bind();
@@ -1071,7 +1087,7 @@ describe("a write that passes unreviewed is recorded and said", () => {
       '{"issue":"X-1","body":"b","advisor_rebuttal":"a"}'
     );
     const rebutted = await g.device("r1", "dispatch_comment", { issue: "X-1", body: "b" });
-    expect(rebutted?.additionalContext).toContain("the call was sent without review");
+    expect(rebutted?.additionalContext).toContain("The call was sent without review.");
     for (const id of ["b1", "b2"]) await g.device(id, "dispatch_comment", COMMENT);
     const tripped = await g.device("b3", "dispatch_comment", COMMENT);
     expect(tripped?.additionalContext).toContain("sent without review and recorded");
@@ -2752,6 +2768,9 @@ console.log(JSON.stringify(args, null, 2));
       "dispatch comment --issue X-1 --advisor-rebuttal='a link' --body hi"
     );
     expect(inline?.input).toEqual({ command: "dispatch comment --issue X-1 --body hi" });
+    expect(inline?.additionalContext).toContain(
+      "You sent this call with --advisor-rebuttal='a link'. AskGate recorded your rebuttal \"a link\" and removed that flag before the call ran"
+    );
   });
   test("after an --advisor-rebuttal pass, what the agent reads back of its call still shows the flag it sent", async () => {
     // Oh My Pi records a call as the tool_call hook returns it, so the agent's own transcript
