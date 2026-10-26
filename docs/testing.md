@@ -28,9 +28,11 @@ the limit, as on a dev box whose `TMPDIR` is on a data disk.
 ## Containers a test starts
 
 Every container a test or a proof script starts carries a CPU limit and a memory limit sized to its
-work, and is removed when the test stops. Tests and the live proofs run on shared dev boxes as well
-as on CI runners, and an unlimited server can take every core and all the memory of a host that
-other work shares.
+work, and is removed when the test stops, except kind's node containers (`scripts/e2e/README.md`
+says why) and the Pulumi containers of `packages/envoy/infra/host/live_test.go`, whose released
+`Listener` component has no CPU or memory inputs. Tests and the live proofs run on shared dev boxes
+as well as on CI runners, and an unlimited server can take every core and all the memory of a host
+that other work shares.
 
 - In Go, set `Resources.NanoCPUs` and `Resources.Memory` in the container's host configuration:
   through `testcontainers.WithHostConfigModifier` for a `Run`, or as the request's
