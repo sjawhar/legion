@@ -367,6 +367,39 @@ func TestReplayRefusesASessionIDThatIsNotOneNATSToken(t *testing.T) {
 	}
 }
 
+// A session's replay never returns another session's inbox, also when its registered interests name
+// one: /v1/interests/subscribe takes any topic for any session id, so an interest in
+// notifications.agent.> or in another session's agent subject, registered with one more call, must
+// not turn /v1/replay into a read of every session's stored messages. Its own agent subject is still
+// answered.
+func TestReplayNeverReturnsAnotherSessionsInboxThroughARegisteredInterest(t *testing.T) {
+	other := contracts.AgentSubject("ses_other")
+	rig := newReplayRig(t, "notifications.agent.>", other, "notifications.agent.*")
+	rig.store(t, other)
+	_, ownSeq := rig.store(t, contracts.AgentSubject(replaySession))
+
+	response := replayOK(t, rig.mux, replayBody(t, []replaySubjectRequest{
+		{Subject: "notifications.agent.>", After: new(uint64(0))},
+		{Subject: other, After: new(uint64(0))},
+		{Subject: "notifications.agent.*", After: new(uint64(0))},
+		{Subject: contracts.AgentSubject(replaySession), After: new(uint64(0))},
+	}, 0))
+
+	for _, result := range response.Subjects[:3] {
+		for _, message := range result.Messages {
+			if message.Subject != contracts.AgentSubject(replaySession) {
+				t.Fatalf("%s returned %s's stored message (seq %d): want another session's inbox never answered", result.Subject, message.Subject, message.Seq)
+			}
+		}
+		if result.Refused == "" {
+			t.Fatalf("%s = %+v, want it refused: it reads other sessions' inboxes", result.Subject, result)
+		}
+	}
+	if own := response.Subjects[3]; own.Refused != "" || !equalSeqs(own.Messages, ownSeq) {
+		t.Fatalf("own agent subject = %+v, want seq %d", own, ownSeq)
+	}
+}
+
 // Only POST is served.
 func TestReplayAnswers405ForGet(t *testing.T) {
 	mux := replayMux(&listenerDeps{})
