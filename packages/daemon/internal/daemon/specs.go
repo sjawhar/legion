@@ -174,7 +174,7 @@ func (s specs) workerSpawnSpec(ctx context.Context, c supervise.Claim) (runtime.
 // and how long a reply that said what it waits on buys. A worker told none of them runs on the
 // defaults its plugin holds (packages/pi-shared/src/stall-limits.ts), so the daemon passes exactly
 // the ones its own environment holds and no more. Both runtimes forward spec.Env verbatim — a
-// pane's -e pairs (runtime/tmux's panePairs) and a pod container's env (runtime/sandbox's
+// pane's -e pairs (runtime/tmux's panePairs) and a pod launcher's start command (runtime/sandbox's
 // mainEnvironment) — so workerSpawnSpec is the one seam that serves both.
 var stallLimitVariables = []string{
 	"LEGION_STALL_ARCHITECT_AFTER",

@@ -393,7 +393,7 @@ func pluginEnabled(lock, name string) (string, bool) {
 // whose own toolchain download or GOTOOLCHAIN setting can make a present binary fail to run. flock
 // is on the list because the install Legion renders for an installing launch serialises on the
 // issue's shared bun install cache with it (installBlock,
-// packages/daemon/internal/runtime/sandbox/plugins.go), so a role container whose image lacks it
+// packages/daemon/internal/runtime/sandbox/plugins.go), so a role whose image lacks it
 // fails every installing launch. psql is on it because `bun run e2e`, the Dispatch browser suite a
 // reader-facing Dispatch change must pass before it merges, reaches psql through
 // packages/dispatch/e2e/psql.ts, which seed.ts calls for every spec's database reset, and the

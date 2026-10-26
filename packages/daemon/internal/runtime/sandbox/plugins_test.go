@@ -159,8 +159,8 @@ func requireFlock(t *testing.T) {
 // hands it after quoting, the one surface that decides whether the install can resolve. The
 // stand-in exits non-zero, so the script stops at its install-failed line and nothing else runs.
 // BUN_INSTALL_CACHE_DIR is pinned under t.TempDir() rather than inherited: the script mkdirs that
-// directory and takes a real exclusive flock on it, so an inherited value — unset in CI, set in
-// every role container — would have this test lock the cache the rest of the pod is installing
+// directory and takes a real exclusive flock on it, so an inherited value — unset in CI, set for
+// every role — would have this test lock the cache the rest of the pod is installing
 // out of, and would make the run's behaviour depend on where it was started.
 func bunInstallArgs(t *testing.T, plugins *runtime.PluginInstall) []string {
 	t.Helper()

@@ -69,6 +69,15 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   takes its own next issue, but it changes no admission; the reference used to have the controller
   set priority and rank together so that "highest priority, then board rank" produced the plan's
   order (INFRA-188).
+- Daemon API contract 39 (INFRA-208): under the Kubernetes runtime an issue pod runs one
+  container, `roles`, whose PID 1 is one `legion launcher` in multi-role mode, each role's
+  generation in Linux namespaces of its own (`legion launcher role-init`), and
+  `runtime.kubernetes.resources` takes `issue` and `controller` alone, so `legion state`'s and the
+  controller's `read_state`'s `settings.runtime.kubernetes.resources` is `{issue, controller}` and
+  the `resource-limits` row names the issue pod and the controller's pod rather than roles. The
+  pod's launcher argv is the contract's surface, so a daemon at 39 refuses an image whose
+  `pi-legion` declares another contract: pin the worker image with the daemon release. Nothing this
+  plugin reads or writes moved; install this release with a `legion` built from the same commit.
 - Daemon API contract 35 (LEGION-791): `legion state` and the controller's `read_state` carry
   `settings`, the daemon's resolved `legion.yaml` with every credential, credential source and
   credential file path left out and a URL's userinfo masked as `xxxxx@` (`max_fix_attempts`,
@@ -197,7 +206,7 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   reads. A session resumed on an
   entry this build does not know — `{"state":"quiet"}` or `{"state":"text-call"}`, what the build
   now in the pods wrote — reads as an open phase with no reminder yet, so it is reminded rather
-  than left alone. Daemon API contract 39 carries the four variables (and, in a pod, Claude Code's
+  than left alone. Daemon API contract 40 carries the four variables (and, in a pod, Claude Code's
   three): install this release's pair with a `legion` built from the same commit.
 
 - Retro's push never carries the `skip-checks: true` trailer line, whatever paths its commits

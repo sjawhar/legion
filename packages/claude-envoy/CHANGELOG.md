@@ -134,8 +134,9 @@
 - The `dispatch` command (`dist/dispatch.js`) waits for its stdout and stderr writes before it
   exits. Bun's `process.exit` dropped whatever a pipe had not yet taken, so a Bash tool lost the
   end of any output over the pipe's buffer (8 KB to 16 KB) with exit code 0.
-- The `dispatch` command (`dist/dispatch.js`) takes a bare issue key where `--issue` belongs as
-  that `--issue` (`dispatch read ACME-12`), once and only when `--issue` is not also given.
+- The `dispatch` command (`dist/dispatch.js`) takes a bare issue key as the first argument of a
+  command with `--issue` as that `--issue` (`dispatch read ACME-12`), only when `--issue` is not
+  also given; a key-shaped word later in the line is refused.
 - The `dispatch` command (`dist/dispatch.js`) refuses an ask, comment or message link as `--ref`
   to `comment`, `suggest`, `doc-edit` and `doc-read`, which used to act on the link's owner and
   drop the item; the refusal names `reply_to_ask` (`--reply-to-ask`), `reply_to` (`--reply-to`) or
@@ -195,7 +196,7 @@
   `claude` process; a file the Go bridge wrote reads as an open phase with no reminder yet. The
   four `LEGION_STALL_*` numbers come from the worker's environment. The hook entries are the Legion
   plugin's alone: a plain `@sjawhar/claude-envoy` install registers no `legion` server, so
-  `hooks/hooks.json` carries none of them. `package.json`'s `legion.daemonApiVersion` is 39.
+  `hooks/hooks.json` carries none of them. `package.json`'s `legion.daemonApiVersion` is 40.
 - A Claude Code phase worker whose launcher recreated its workspace is told so, once per launch,
   over the same inbox the reminders use, as an Oh My Pi worker is
   (`LEGION_WORKSPACE_RECREATED`): it reconciles against its committed handoff before new work
@@ -204,11 +205,13 @@
   it, and a launch that recreated nothing clears it, so a later recreation is told again.
 - The Legion worker image carries this package's committed build at `/opt/legion/claude-envoy`, so
   a phase worker a deployment puts on Claude Code now runs under `runtime: kubernetes` as well as
-  tmux: its pod's command is `legion claude-bridge -- claude -p …`, its one MCP server is that
-  root's `dist/envoy-channel.js` and its plugins are that root and its generated `legion/`. No
-  workflow releases this package, so the image is a Kubernetes deployment's only source of it, and
-  a plugin-contract change for such a role is answered by a new image rather than by an install
-  (`docs/kubernetes.md`).
+  tmux: in its issue pod's one `roles` container, in the role's own namespaces, its command is
+  `legion claude-bridge -- claude -p …`, its one MCP server is that root's
+  `dist/envoy-channel.js` and its plugins are that root and its generated `legion/`. The copy is
+  root's and writable by no one else, as the image's two Oh My Pi plugins are, since every role of
+  the pod loads it from the one container's filesystem. No workflow releases this package, so the
+  image is a Kubernetes deployment's only source of it, and a plugin-contract change for such a role
+  is answered by a new image rather than by an install (`docs/kubernetes.md`).
 - The worker image carries no Claude Code, only its pin: `packages/daemon/docker/claude-code`'s
   `package.json` and `package-lock.json` at `/opt/legion/claude-code`. Claude Code's licence grants
   no redistribution and the image is public, so a pod whose role runs on Claude Code installs the
@@ -245,7 +248,7 @@
 - A Legion phase worker can run on Claude Code (sjawhar/legion#2032). When `legion claude-bridge`
   launches Claude Code, the MCP server sees `LEGION_BOOT_TOKEN_FILE`, `LEGION_DAEMON_URL` and
   `CLAUDE_CONFIG_DIR`: it waits for the session's transcript, registers with the daemon (daemon API
-  contract 38, pinned in `package.json`'s `legion.daemonApiVersion`), claims the issue's Envoy role
+  contract 39, pinned in `package.json`'s `legion.daemonApiVersion`), claims the issue's Envoy role
   soft and reports ready, and readies again whenever it regains the role. A registration the daemon
   refuses stops Claude Code so the daemon relaunches it.
 - The MCP tool `legion` (`read_record`, `handoff_complete`, `request_backward_move`) serves the
@@ -265,6 +268,12 @@
 
 ### Changed
 
+- The plugin declares daemon API contract 39 in `package.json`'s `legion.daemonApiVersion`
+  (INFRA-208): under the Kubernetes runtime an issue pod runs one container, `roles`, whose
+  launcher runs every role, and `runtime.kubernetes.resources` in `GET /legion/v1/state`'s
+  `settings` is `{issue, controller}`; nothing this plugin reads or writes moved, and
+  `dist/envoy-channel.js`, which embeds the number, is rebuilt; a session of it registers with a
+  daemon at 39.
 - The plugin declares daemon API contract 35 in `package.json`'s `legion.daemonApiVersion`
   (LEGION-791): `GET /legion/v1/state` carries `settings`, the daemon's resolved `legion.yaml` with
   every credential, credential source and credential file path left out and a URL's userinfo masked

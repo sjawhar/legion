@@ -3,14 +3,15 @@
 # Go daemon on the devbox, whose legion.yaml puts the implementer on Claude Code
 # (`worker_backends: {implementer: claude}`) and whose runtime is `kubernetes`, drives one scratch
 # Dispatch issue: a real Oh My Pi architect and planner take it to implementing in the issue's pod,
-# and the implementer then runs in that pod's own container as `legion claude-bridge -- claude -p …`
+# and the implementer then runs in that pod's one `roles` container, in namespaces of its own
+# (`legion launcher role-init`), as `legion claude-bridge -- claude -p …`
 # — the Claude Code its pod's start script installed at launch from the image's pin (the image
 # carries the pin and no Claude Code), the image's `@sjawhar/claude-envoy` plugin as its MCP server
 # and its Legion plugin, its `mcp.json` written by the launcher into the generation's private
 # directory, and its `CLAUDE_CONFIG_DIR` a directory of the role's state home on the pod's own disk,
 # which dies with the pod (docs/kubernetes.md, "The disk dies with its pod").
 # The proof holds, in this order, that the Claude Code implementer's pod launches and its claim
-# registers that pod's Claude Code transcript as its session; that the container's command line
+# registers that pod's Claude Code transcript as its session; that the implementer's command line
 # holds `claude-bridge --` and `--session-id <id>`, and runs the Claude Code the generation's start
 # script installed into its own directory on the pod's disk — the pinned version, with no
 # /usr/local/bin/claude in the image; that the endless phase reminder reaches it when a turn
@@ -32,7 +33,9 @@
 # which every pod of the run keeps its sessions in, the Claude Code implementer's transcript among
 # them. It is the first rig that runs `runtime: kubernetes`, so what a tmux proof reads from /proc
 # and a pane's own files this one reads with `kubectl exec` and `kubectl get` against the issue's
-# pod, and the session table with `psql` in the session database's container.
+# pod — a role's processes and its own view of the pod inside that role's namespaces of the `roles`
+# container (lib/role-namespaces.sh), the files of the pod's disk in the container itself — and the
+# session table with `psql` in the session database's container.
 #
 # It pins the branch's own published worker image by digest. A pull-request run of
 # .github/workflows/worker-image.yaml publishes `ghcr.io/sjawhar/legion-worker:sha-<the first 12 hex
@@ -253,6 +256,8 @@ fail() { printf 'FAIL %s: %s\n' "$check" "$*" >&2; exit 1; }
 . "$root/scripts/e2e/lib/leftovers.sh"
 # shellcheck source-path=SCRIPTDIR source=lib/session-db.sh
 . "$root/scripts/e2e/lib/session-db.sh"
+# shellcheck source-path=SCRIPTDIR source=lib/role-namespaces.sh
+. "$root/scripts/e2e/lib/role-namespaces.sh"
 # Nothing the run starts inherits the operator's production Dispatch bearer.
 unset DISPATCH_TOKEN
 
@@ -266,26 +271,42 @@ claim_view() {
 }
 claim_sandbox() { claim_view "$1" "$2" | jq -er '.locator.sandbox.name'; }
 claim_pod_uid() { claim_view "$1" "$2" | jq -er '.locator.sandbox.podUid'; }
+# pod_exec POD ROLE COMMAND… runs COMMAND as ROLE's agent sees POD, as stage4b-sandbox-tree.sh's
+# does (role_enter_sh): an issue pod has one container, `roles`, whose launcher runs every role in
+# namespaces of its own, so COMMAND enters ROLE's role-init's namespaces and then its worker-shim's
+# user namespace, and sees ROLE's /proc (its own processes alone), its private directory and the
+# image's paths. It needs ROLE's generation running.
 pod_exec() {
   local pod=$1 role=$2
   shift 2
-  op exec "$pod" -c "$role" -- "$@"
+  op exec "$pod" -c roles -- sh -c "$role_enter_sh" role-enter "$role" "$@"
+}
+# roles_exec POD COMMAND… runs COMMAND in POD's `roles` container itself, outside every role's
+# namespaces: the pod's disk at /legion, which the container and every role see at the same path,
+# so a file of a role's state home reads there whether or not the role's generation runs.
+roles_exec() {
+  local pod=$1
+  shift
+  op exec "$pod" -c roles -- "$@"
 }
 # implementer_pod prints the pod the implementer's claim names now, which is its Sandbox's own name
 # and so the same word across the deletion step: a replacement pod is a new uid under that name,
 # which is why every check of the replacement compares uids and never names.
 implementer_pod() { claim_sandbox "$issue" implementer; }
-# agent_pid_sh is the POSIX sh that finds a role's agent in its container, Oh My Pi's or Claude
-# Code's, by its direct parent alone, as stage4b-sandbox-tree.sh's does: an omp whose parent is the
-# role's `legion worker-shim`, or a claude whose parent is the `legion claude-bridge` the shim runs.
-# A process further down is never the agent: Oh My Pi starts its own helpers under its own name
+# agent_pid_sh is the POSIX sh that finds a role's agent in its namespaces (pod_exec), Oh My Pi's or
+# Claude Code's, by its direct parent alone, as stage4b-sandbox-tree.sh's does: an omp whose parent
+# is the role's `legion worker-shim`, or a claude whose parent is the `legion claude-bridge` the shim
+# runs, each parent known by its argv[1], never by a later argv word naming it. A process further
+# down is never the agent: Oh My Pi starts its own helpers under its own name
 # (`omp __omp_worker_daemon_broker`, a child of the architect's omp), which a walk up to the shim
 # would count as a second agent. It exits 1 naming both pids when two such processes run and saying
-# so when none does; otherwise it leaves the pid in $pid.
+# so when none does; otherwise it leaves the pid in $pid and the /proc it read in $proc:
+# `${proc_root:-/proc}`, the role's own unless a test points proc_root at a fake tree.
 # shellcheck disable=SC2016  # expanded by the pod's shell
 agent_pid_sh='
+    proc=${proc_root:-/proc}
     found=
-    for d in /proc/[0-9]*; do
+    for d in "$proc"/[0-9]*; do
       argv0=$(tr "\0" "\n" 2>/dev/null <"$d/cmdline" | sed -n 1p)
       case "${argv0##*/}" in
         omp) runner=worker-shim ;;
@@ -294,59 +315,62 @@ agent_pid_sh='
       esac
       parent=$(sed -n "s/^PPid:[[:space:]]*//p" "$d/status" 2>/dev/null)
       [ -n "$parent" ] || continue
-      tr "\0" "\n" 2>/dev/null <"/proc/$parent/cmdline" | grep -qx "$runner" || continue
+      [ "$(tr "\0" "\n" 2>/dev/null <"$proc/$parent/cmdline" | sed -n 2p)" = "$runner" ] || continue
       if [ -n "$found" ]; then
-        echo "more than one agent under a legion worker-shim: pids ${found#/proc/} and ${d#/proc/}" >&2
+        echo "more than one agent under a legion worker-shim: pids $found and ${d##*/}" >&2
         exit 1
       fi
-      found=$d
+      found=${d##*/}
     done
     if [ -z "$found" ]; then
       echo "no Oh My Pi or Claude Code under a legion worker-shim" >&2
       exit 1
     fi
-    pid=${found#/proc/}'
+    pid=$found'
 # claude_pid_sh is agent_pid_sh for the Claude Code lane alone, and it names the bridge too: $pid is
-# the pod's Claude Code and $bridge its parent, the `legion claude-bridge` the launcher's agent
-# command runs it from. A container whose agent is not Claude Code under the bridge exits 1.
+# the role's Claude Code and $bridge its parent, the `legion claude-bridge` (argv[1] claude-bridge)
+# the launcher's agent command runs it from, both read from $proc. A role whose agent is not Claude
+# Code under the bridge exits 1.
 # shellcheck disable=SC2016  # expanded by the pod's shell
 claude_pid_sh='
+    proc=${proc_root:-/proc}
     found=
-    for d in /proc/[0-9]*; do
+    for d in "$proc"/[0-9]*; do
       argv0=$(tr "\0" "\n" 2>/dev/null <"$d/cmdline" | sed -n 1p)
       [ "${argv0##*/}" = claude ] || continue
       up=$(sed -n "s/^PPid:[[:space:]]*//p" "$d/status" 2>/dev/null)
       [ -n "$up" ] || continue
-      tr "\0" " " 2>/dev/null <"/proc/$up/cmdline" | grep -q " claude-bridge " || continue
+      [ "$(tr "\0" "\n" 2>/dev/null <"$proc/$up/cmdline" | sed -n 2p)" = claude-bridge ] || continue
       if [ -n "$found" ]; then
-        echo "more than one Claude Code under legion claude-bridge: pids ${found#/proc/} and ${d#/proc/}" >&2
+        echo "more than one Claude Code under legion claude-bridge: pids $found and ${d##*/}" >&2
         exit 1
       fi
-      found=$d
+      found=${d##*/}
       bridge=$up
     done
     if [ -z "$found" ]; then
       echo "no Claude Code under legion claude-bridge" >&2
       exit 1
     fi
-    pid=${found#/proc/}'
+    pid=$found'
 # pod_env POD ROLE prints the environment of ROLE's agent in POD, one NAME=value a line, read from
-# /proc in the role's container. The container's spec is not where a role's environment is: it
-# carries what the kubelet resolves, and every other variable reaches the role in its launcher's
-# start command.
+# the /proc of the role's namespaces. The container's spec is not where a role's environment is: it
+# carries only what the kubelet resolves, and every other variable reaches the role in its
+# launcher's start command.
 pod_env() {
   # shellcheck disable=SC2016  # expanded by the pod's shell
   pod_exec "$1" "$2" sh -c "$agent_pid_sh"'
-    tr "\0" "\n" <"/proc/$pid/environ"'
+    tr "\0" "\n" <"$proc/$pid/environ"'
 }
-# claude_argv POD WHICH prints, one argument a line, the argv of the implementer container's Claude
-# Code (`agent`) or of the `legion claude-bridge` that runs it (`bridge`).
+# claude_argv POD WHICH prints, one argument a line, the argv of the implementer's Claude Code
+# (`agent`) or of the `legion claude-bridge` that runs it (`bridge`), read in the implementer's
+# namespaces.
 claude_argv() {
   local which=$2
   # shellcheck disable=SC2016  # expanded by the pod's shell
   pod_exec "$1" implementer sh -c "$claude_pid_sh"'
     case "$1" in bridge) read_from=$bridge ;; *) read_from=$pid ;; esac
-    tr "\0" "\n" <"/proc/$read_from/cmdline"' sh "$which"
+    tr "\0" "\n" <"$proc/$read_from/cmdline"' sh "$which"
 }
 # claude_code_root is where the implementer's start script installs Claude Code, one directory per
 # generation, under its state home on the pod's disk (claudeCodeRoot,
@@ -407,7 +431,7 @@ assert_claim_endpoints() {
 pod_endpoint_mismatch() {
   local pod=$1 role=$2 env name want got
   env=$(pod_env "$pod" "$role" 2>&1) || {
-    printf 'no readable agent environment in its %s container: %s\n' "$role" "$(tr '\n' ' ' <<<"$env" | cut -c1-300)"
+    printf 'no readable agent environment in its %s namespaces: %s\n' "$role" "$(tr '\n' ' ' <<<"$env" | cut -c1-300)"
     return 0
   }
   for name in DISPATCH_URL ENVOY_URL ENVOY_NATS_URL LEGION_DAEMON_URL; do
@@ -451,22 +475,25 @@ pod_uid_gone() {
 
 # transcript_size prints the transcript's size in bytes, and transcript_prefix_sha SIZE the sha256
 # of its first SIZE bytes: the resume's own before-and-after in the pod, computed there, since the
-# file is on the pod's own disk and no host of the run can open it. The table's copy of the same
-# bytes is read from the devbox (session_text).
+# file is on the pod's own disk and no host of the run can open it. The pod's disk is mounted at
+# /legion in the `roles` container and seen at that same path in the implementer's namespaces, so
+# the transcript's path is read in the container itself (roles_exec), as stage4b-sandbox-tree.sh
+# reads a role's files, whether or not the implementer's generation runs then. The table's copy of
+# the same bytes is read from the devbox (session_text).
 transcript_size() {
   # shellcheck disable=SC2016  # expanded by the pod's shell
-  pod_exec "$(implementer_pod)" implementer sh -c 'wc -c <"$1"' sh "$transcript" | tr -d '[:space:]'
+  roles_exec "$(implementer_pod)" sh -c 'wc -c <"$1"' sh "$transcript" | tr -d '[:space:]'
 }
 transcript_prefix_sha() {
   # shellcheck disable=SC2016  # expanded by the pod's shell
-  pod_exec "$(implementer_pod)" implementer sh -c 'head -c "$1" -- "$2" | sha256sum' sh "$1" "$transcript" |
+  roles_exec "$(implementer_pod)" sh -c 'head -c "$1" -- "$2" | sha256sum' sh "$1" "$transcript" |
     cut -d' ' -f1
 }
 # transcript_since OFFSET prints the transcript's bytes past OFFSET, the tail every predicate below
 # judges: a poll reads the new entries alone, not a session that grows all run.
 transcript_since() {
   # shellcheck disable=SC2016  # expanded by the pod's shell
-  pod_exec "$(implementer_pod)" implementer sh -c 'tail -c "+$(($1 + 1))" -- "$2"' sh "$1" "$transcript"
+  roles_exec "$(implementer_pod)" sh -c 'tail -c "+$(($1 + 1))" -- "$2"' sh "$1" "$transcript"
 }
 # The opening of what a worker whose turn ended with its phase still open is told (REMINDER in
 # packages/pi-shared/src/phase-stall.ts), which the pod's `legion` MCP server answers its `Stop`
@@ -1238,10 +1265,11 @@ pass
 
 # Check 1. The implementer's pod launches and its claim registers a Claude Code transcript as its
 # session: the file Claude Code records under the CLAUDE_CONFIG_DIR the launch places on the pod's
-# disk, under the role's own state home, which the container's Claude Code says it was told. That
+# disk, under the role's own state home, which the implementer's Claude Code says it was told. That
 # is read from the agent's own environment (pod_env), never the pod's spec: the runtime sets only the
 # kubelet-resolved variables there, and carries CLAUDE_CONFIG_DIR, like every plain NAME=value, in
-# the launcher's start command (launchEnvironment in packages/daemon/internal/runtime/sandbox). The
+# the launcher's start command (launchEnvironment in packages/daemon/internal/runtime/sandbox), so it
+# is read in the implementer's own namespaces of the pod's `roles` container (pod_exec). The
 # claim registers the transcript only once the launcher's first save of it has committed, so the
 # session table already holds its row, keyed by its absolute path.
 begin claude-implementer-registers
@@ -1254,7 +1282,7 @@ pod=$(implementer_pod) || fail "the implementer's claim has no Sandbox locator"
 pod_uid=$(claim_pod_uid "$issue" implementer)
 generation=$(claim_generation "$issue" implementer) || fail "legion claims list has no generation for the implementer's claim $token"
 agent_env=$(pod_env "$pod" implementer 2>&1) ||
-  fail "pod $pod has no readable agent environment in its implementer container: $(tr '\n' ' ' <<<"$agent_env" | cut -c1-300)"
+  fail "pod $pod has no readable agent environment in its implementer's namespaces: $(tr '\n' ' ' <<<"$agent_env" | cut -c1-300)"
 config_dir=$(sed -n 's/^CLAUDE_CONFIG_DIR=//p' <<<"$agent_env")
 [ "$config_dir" = /legion/scratch/state/implementer/claude ] ||
   fail "the implementer's Claude Code is told CLAUDE_CONFIG_DIR=${config_dir:-<unset>}, want /legion/scratch/state/implementer/claude, a directory of its role's state home on the pod's disk"
@@ -1262,27 +1290,28 @@ case "$transcript" in
   "$config_dir/projects/"*"/$session.jsonl") ;;
   *) fail "the implementer registered session file $transcript, want $config_dir/projects/<cwd>/$session.jsonl" ;;
 esac
-[ "$(pod_exec "$pod" implementer sh -c 'wc -c <"$1"' sh "$transcript" | tr -d '[:space:]')" -gt 0 ] ||
+[ "$(transcript_size)" -gt 0 ] ||
   fail "the implementer's transcript $transcript is missing or empty in pod $pod"
 registered_len=$(session_byte_len "$transcript") || fail "the session table gives no byte_len for the registered transcript $transcript (the reason is above)"
 note "implementer claim $token: generation $generation, pod $pod (uid $pod_uid), Claude Code session $session"
 note "its transcript is $transcript, on the pod's disk under CLAUDE_CONFIG_DIR=$config_dir, and a row of the session table (byte_len $registered_len)"
 pass
 
-# Check 2. The container's command line is the Claude Code launch: `legion claude-bridge --` running
+# Check 2. The implementer's command line is the Claude Code launch: `legion claude-bridge --` running
 # the Claude Code this generation's start script installed on this generation's session, with the
 # MCP document the launcher wrote into the generation's private directory as its only
 # `--mcp-config`. The image carries no Claude Code, only its pin, so the fetch has to have happened
 # for the worker to run at all, and this holds that it is the fetch the proof expects: the bridge
 # names, and the process under it is, the binary under this generation's own directory of the
 # implementer's install root on the pod's disk (the claim's generation, which Check 1 read),
-# never /usr/local/bin/claude, which the image does not carry; and that binary, run in the pod,
+# never /usr/local/bin/claude, which the image does not carry; and that binary, run in the
+# implementer's namespaces,
 # prints the version the image's pin names, which is what the start script held it to before it
 # execed.
 begin claude-pod-runs-the-bridge
-bridge_argv=$(claude_argv "$pod" bridge) || fail "the implementer container runs no Claude Code under legion claude-bridge"
+bridge_argv=$(claude_argv "$pod" bridge) || fail "the implementer's namespaces run no Claude Code under legion claude-bridge"
 argv_has_pair "$bridge_argv" claude-bridge -- ||
-  fail "the implementer container's command line does not run claude-bridge --: $(tr '\n' ' ' <<<"$bridge_argv" | cut -c1-300)"
+  fail "the implementer's command line does not run claude-bridge --: $(tr '\n' ' ' <<<"$bridge_argv" | cut -c1-300)"
 argv_has_pair "$bridge_argv" --session-id "$session" ||
   fail "the implementer's claude was not started with --session-id $session: $(tr '\n' ' ' <<<"$bridge_argv" | cut -c1-300)"
 installed=$(claude_code_binary "$generation")
@@ -1302,8 +1331,8 @@ installed_version=$(pod_exec "$pod" implementer "$installed" --version) ||
   fail "the installed Claude Code $installed prints --version '$installed_version'; the image's pin names $pinned"
 mcp=$(argv_value "$bridge_argv" --mcp-config)
 [ -n "$mcp" ] || fail "the Claude Code launch carries no --mcp-config: $(tr '\n' ' ' <<<"$bridge_argv" | cut -c1-300)"
-pod_exec "$pod" implementer test -f "$mcp" || fail "the launcher file $mcp the launch reads its MCP document from is not in the pod"
-note "pod $pod, container implementer: $(tr '\n' ' ' <<<"$bridge_argv" | cut -c1-200)"
+pod_exec "$pod" implementer test -f "$mcp" || fail "the launcher file $mcp the launch reads its MCP document from is not in the implementer's view of the pod"
+note "pod $pod, the implementer's namespaces in container roles: $(tr '\n' ' ' <<<"$bridge_argv" | cut -c1-200)"
 note "its Claude Code is $installed, installed at launch from $claude_code_pin: --version $installed_version, the pin's $pinned"
 note "its MCP document is the launcher file $mcp, written into this generation's private directory"
 pass
@@ -1367,7 +1396,7 @@ pass
 # transcript's path before its Claude Code starts, so the restored file's first bytes, read in the
 # new pod, have it too. A replacement launcher already running when the table is read only appends
 # to the row, never rewrites it, so the read holds either way. The claim keeps its session and
-# session file, the new container runs `--resume <id>`, and the resumed session answers out of its
+# session file, the implementer's new generation runs `--resume <id>`, and the resumed session answers out of its
 # own context with a marker only its implementation instruction carried. The relaunch is the
 # claim's generation in `legion claims list` passing the one it held when the pod was deleted, read
 # just before the deletion along with that pod's uid, so the wait and the uid check both name the

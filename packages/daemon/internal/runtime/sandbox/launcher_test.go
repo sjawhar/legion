@@ -19,6 +19,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/claudelaunch"
 	"github.com/sjawhar/legion/daemon/internal/ghconfig"
+	"github.com/sjawhar/legion/daemon/internal/launcher"
 	"github.com/sjawhar/legion/daemon/internal/shimwire"
 )
 
@@ -178,13 +179,14 @@ func TestANewGenerationStopsTheEarlierOneFirst(t *testing.T) {
 }
 
 // Every role's launcher token projection, private credential directory, state directory,
-// agent-secrets key directory and gh volume are mounted in that role's container alone: no other
-// role, nor an init container, can read another role's credentials, the GitHub App token in its gh
-// files included. The issue's checkout, tree and sessions are what roles share. The gh volume
-// projects each owner's two gh keys of the role Secret as the files gh reads, <owner>/hosts.yml
-// and <owner>/config.yml, and the launcher volume the launcher token alone; the launching role's
-// agent is told, in its start command, the default owner's directory as GH_CONFIG_DIR, the volume
-// as LEGION_GH_OWNERS_DIR and the image's real gh as LEGION_GH_PATH.
+// agent-secrets key directory and gh volume are mounted once, in the pod's one container under that
+// role's own directory of RolesDir, which only that role's namespace binds back (`legion launcher
+// role-init`); no init container mounts any of them, so neither can read a role's credentials, the
+// GitHub App token in its gh files included. The issue's checkout, tree and sessions are what roles
+// share. The gh volume projects each owner's two gh keys of the role Secret as the files gh reads,
+// <owner>/hosts.yml and <owner>/config.yml, and the launcher volume the launcher token alone; the
+// launching role's agent is told, in its start command, the default owner's directory as
+// GH_CONFIG_DIR, the volume as LEGION_GH_OWNERS_DIR and the image's real gh as LEGION_GH_PATH.
 func TestEveryRolesPrivateVolumesMountInItsContainerAlone(t *testing.T) {
 	opts := goldenOptions()
 	opts.AgentSecrets = &AgentSecrets{URL: "https://secrets.internal.example", Audience: "agent-secrets", TokenExpiry: time.Hour}
@@ -196,20 +198,20 @@ func TestEveryRolesPrivateVolumesMountInItsContainerAlone(t *testing.T) {
 	pod := r.podTemplate(l).Spec
 	containers := append(slices.Clone(pod.InitContainers), pod.Containers...)
 	for _, role := range claim.Roles {
-		for _, volume := range []string{
-			roleVolume("launcher", role), roleVolume("private", role), roleVolume(stateVolume, role),
-			roleVolume(agentSecretsKeyVolume, role), roleVolume("gh", role),
+		for volume, dir := range map[string]string{
+			roleVolume("launcher", role): launcher.RoleLauncherDir, roleVolume("private", role): launcher.RolePrivateDir, roleVolume(stateVolume, role): launcher.RoleStateDir,
+			roleVolume(agentSecretsKeyVolume, role): launcher.RoleAgentSecretsDir, roleVolume("gh", role): launcher.RoleGHDir,
 		} {
-			var mountedIn []string
+			var mountedAt []string
 			for _, c := range containers {
 				for _, m := range c.VolumeMounts {
 					if m.Name == volume {
-						mountedIn = append(mountedIn, c.Name)
+						mountedAt = append(mountedAt, c.Name+":"+m.MountPath)
 					}
 				}
 			}
-			if len(mountedIn) != 1 || mountedIn[0] != string(role) {
-				t.Errorf("%s is mounted in %v, want %s alone", volume, mountedIn, role)
+			if want := workerContainer + ":" + roleDir(role) + "/" + dir; len(mountedAt) != 1 || mountedAt[0] != want {
+				t.Errorf("%s is mounted at %v, want %s alone", volume, mountedAt, want)
 			}
 		}
 	}
@@ -218,9 +220,9 @@ func TestEveryRolesPrivateVolumesMountInItsContainerAlone(t *testing.T) {
 		volumes[v.Name] = v
 	}
 	for _, role := range claim.Roles {
-		launcher := volumes[roleVolume("launcher", role)].Secret
-		if launcher == nil || len(launcher.Items) != 1 || launcher.Items[0].Key != LauncherTokenFile {
-			t.Errorf("%s's launcher volume projects %+v, want only the launcher token", role, launcher)
+		token := volumes[roleVolume("launcher", role)].Secret
+		if token == nil || len(token.Items) != 1 || token.Items[0].Key != LauncherTokenFile {
+			t.Errorf("%s's launcher volume projects %+v, want only the launcher token", role, token)
 		}
 		gh := volumes[roleVolume("gh", role)].Secret
 		var want []corev1.KeyToPath
@@ -231,9 +233,9 @@ func TestEveryRolesPrivateVolumesMountInItsContainerAlone(t *testing.T) {
 		if gh == nil || gh.SecretName != roleSecretName(l.name, role) || !slices.Equal(gh.Items, want) || gh.DefaultMode == nil || *gh.DefaultMode != 0o440 {
 			t.Errorf("%s's gh volume projects %+v, want %s's %+v, read-only", role, gh, roleSecretName(l.name, role), want)
 		}
-		mount := mountHolding(containerNamed(t, pod, string(role)), GHConfigDir)
-		if mount == nil || mount.Name != roleVolume("gh", role) || mount.MountPath != GHConfigDir || !mount.ReadOnly {
-			t.Errorf("%s's container mounts %+v at %s, want its gh volume read-only", role, mount, GHConfigDir)
+		mount := mountHolding(containerNamed(t, pod, workerContainer), roleDir(role)+"/"+launcher.RoleGHDir)
+		if mount == nil || mount.Name != roleVolume("gh", role) || !mount.ReadOnly {
+			t.Errorf("the container mounts %+v at %s's gh directory, want its gh volume read-only", mount, role)
 		}
 	}
 	start := map[string]string{}

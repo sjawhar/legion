@@ -38105,9 +38105,20 @@ function parseCommand(argv, io) {
   for (let index = 0;index < rest.length; index++) {
     const token = rest[index];
     if (!token.startsWith("--")) {
-      if (ISSUE_KEY.test(token) && surface.flags.has("--issue") && !setBy.has("issue")) {
-        if (claim("issue", "--issue", false))
-          args["issue"] = token;
+      if (ISSUE_KEY.test(token) && surface.flags.has("--issue")) {
+        if (index === 0) {
+          if (claim("issue", `the issue key ${token}`, false))
+            args["issue"] = token;
+        } else {
+          const earlier = setBy.get("issue");
+          const current = quoteWord(String(args["issue"]));
+          let reason = `a bare issue key is the --issue only as the first argument; otherwise write --issue ${quoteWord(token)}`;
+          if (earlier === "--issue")
+            reason = `--issue is already ${current}`;
+          else if (earlier?.startsWith("--"))
+            reason = `${earlier} already set --issue to ${current}`;
+          problems.push(`unexpected argument ${quoteWord(token)}: ${reason}`);
+        }
         continue;
       }
       problems.push(`unexpected argument ${quoteWord(token)}: every value follows its flag`);
@@ -47333,7 +47344,7 @@ var import_nats2 = __toESM(require_mod4(), 1);
 // package.json
 var version2 = "1.0.0";
 var legion = {
-  daemonApiVersion: 39
+  daemonApiVersion: 40
 };
 
 // src/channel-forwarder.ts

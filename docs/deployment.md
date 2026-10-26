@@ -265,7 +265,8 @@ not know which harness a process runs. A harness is four pieces in the daemon:
 - a boot resolver in `internal/daemon/launchers.go`, which finds what its launch needs on the host;
 - the Kubernetes runtime's own branch in `internal/runtime/sandbox`, which builds the same launch
   from the worker image's paths instead: the pod's agent command, the files its launcher writes,
-  the variables its container is told, and the rule for the session a replacement pod resumes.
+  the variables its start command tells the role, and the rule for the session a replacement pod
+  resumes.
 
 Boot resolves a launch for each harness `worker_backends` uses (`legion start --check-config` makes
 the same refusals), and the tmux runtime refuses a launch on a harness it has no launcher for. A

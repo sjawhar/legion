@@ -11,7 +11,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/shimwire"
 )
 
-// pluginsRoot is where a role's installed plugin generations live, under its own state home
+// pluginsRoot is where a role's installed plugin generations live, under the role's state home
 // (roleStateHome): <role state home>/legion-plugins. Not the Oh My Pi profile's plugin directory
 // (ompProfileDir+"/plugins") and nowhere extension discovery reads, so an installed pair never
 // loads twice (the boot gate's pod lane refuses an image where it would).
@@ -81,7 +81,7 @@ if (got !== want) {
 `
 
 // startName is the start wrapper's $0 (startArgv): what the shell names itself in its own
-// messages, and what a role container's process list shows for the wrapper before its exec.
+// messages, and what a role's process list shows for the wrapper before its exec.
 const startName = "legion-start"
 
 // installLockWait is how long installBlock's flock waits for the shared bun install cache before
@@ -199,7 +199,7 @@ func installLockWait(boot time.Duration, intervals int) int {
 //     person removes it. Hence the mkdir inside, and the rm of a non-directory before it, which
 //     clears exactly that file and nothing a cache can legitimately be. The cache
 //     directory is $BUN_INSTALL_CACHE_DIR itself, with no default behind it: the runtime sets that
-//     variable for every role container (roleEnvironment, manifest.go; runtimeOwned refuses anyone
+//     variable for every role (roleEnvironment, manifest.go; runtimeOwned refuses anyone
 //     else setting it, and TestTheRuntimeTellsTheShimEveryScratchDirectoryItMakes pins that the
 //     runtime names it), and a default would silence, for the one variable this script is about,
 //     the `set -u` abort that is how a broken invariant should announce itself. flock is named by
@@ -352,9 +352,9 @@ if (got.split(/\s+/)[0] !== want) {
 //
 // npm's cache is the issue's, `$XDG_CACHE_HOME/legion-claude-code` on the issue's volume, so the
 // pod's other Claude roles and its later pods reuse the tarballs one already fetched, and neither
-// the cache nor the install is charged to the container's ephemeral storage. XDG_CACHE_HOME is
-// read with no default, as installBlock reads BUN_INSTALL_CACHE_DIR: the runtime sets it for every
-// role container (roleEnvironment) and owns it (runtimeOwned), and its absence is a broken
+// the cache nor the install is charged to the roles container's ephemeral storage. XDG_CACHE_HOME
+// is read with no default, as installBlock reads BUN_INSTALL_CACHE_DIR: the runtime tells it to
+// every role (roleEnvironment) and owns it (runtimeOwned), and its absence is a broken
 // invariant `set -u` should announce. The install takes /usr/bin/flock on that directory with
 // installBlock's bound (lockWait, installLockWait), made before the lock so the lock's inode
 // exists, and so a stalled holder fails the launch by the failure branch while the daemon is

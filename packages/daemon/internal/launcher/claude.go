@@ -149,9 +149,10 @@ func newClaudeKeeper(env []string, resume, clientURL string, log io.Writer) (*cl
 // resumeLookupBackoff's waits until resumeLookupTimeout as a resume's lookup does, and makes Oh My
 // Pi's tables where the database has none. A resume then restores each file from its row
 // (restore), so the child starts on the session the table holds, and the transcript's marker is
-// written: the table already holds what the claim records.
-func (k *claudeKeeper) open(resume bool) error {
-	ctx, cancel := context.WithTimeout(context.Background(), resumeLookupTimeout)
+// written: the table already holds what the claim records. parent's end (the container's stop)
+// ends the wait as the timeout does.
+func (k *claudeKeeper) open(parent context.Context, resume bool) error {
+	ctx, cancel := context.WithTimeout(parent, resumeLookupTimeout)
 	defer cancel()
 	for attempt := 0; ; attempt++ {
 		err := k.connect(ctx)

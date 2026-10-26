@@ -932,9 +932,10 @@ func resolve(file fileConfig, env func(string) string, configDir string) (Config
 
 // resolveControllerLaunch settles `controller`: the operator's launch unless the file names the
 // daemon's, which needs a cluster to run the pod in (and kubernetes already requires Dispatch).
-// runtime.kubernetes.resources.controller sizes that pod, so the operator's launch refuses it
-// rather than read a key that sizes nothing. The file's own block is read: the settled one holds
-// the controller's default reservation whether or not the file named it.
+// runtime.kubernetes.resources.controller sizes that pod, so the operator's launch refuses the key
+// wherever the file names it, an entry setting no field included, rather than read a key that
+// sizes nothing. The file's own block is read: the settled one holds the controller's default
+// reservation whether or not the file named it.
 func resolveControllerLaunch(file fileConfig, cfg *Config) error {
 	cfg.ControllerLaunch = ControllerLaunchOperator
 	if file.Controller != nil {
@@ -949,10 +950,8 @@ func resolveControllerLaunch(file fileConfig, cfg *Config) error {
 			return fmt.Errorf("controller must be 'operator' or 'daemon' (got %q)", *file.Controller)
 		}
 	}
-	if k := file.Kubernetes; k != nil && cfg.ControllerLaunch != ControllerLaunchDaemon {
-		if _, sized := k.Resources[claim.RoleController]; sized {
-			return errors.New("runtime.kubernetes.resources.controller sizes the pod of the controller the daemon launches, and controller: operator launches none: set controller: daemon or drop the key")
-		}
+	if k := file.Kubernetes; k != nil && cfg.ControllerLaunch != ControllerLaunchDaemon && k.controllerNamed {
+		return errors.New("runtime.kubernetes.resources.controller sizes the pod of the controller the daemon launches, and controller: operator launches none: set controller: daemon or drop the key")
 	}
 	return nil
 }
