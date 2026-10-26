@@ -25,6 +25,7 @@ import { appendFileSync, cpSync, existsSync, readdirSync, readFileSync } from "n
 import { createRequire } from "node:module";
 import type { FileSink, Subprocess } from "bun";
 import { connect } from "nats";
+import { agentStreamControlSubject } from "../../../packages/contracts/src/agent-stream";
 
 const [command, ...args] = process.argv.slice(2);
 
@@ -630,6 +631,28 @@ class Services {
     try {
       nc.publish(`agentstream.${session}.frames`, new TextEncoder().encode(JSON.stringify(frame)));
       await nc.flush();
+    } finally {
+      await nc.close();
+    }
+  }
+
+  /** Subscribes to the session's control subject as a bare bus client and answers the first
+   *  message that arrives there within `limitMs` as text (the relay's `watch` while a page is
+   *  open), or undefined when none does. */
+  async nextControl(session: string, limitMs: number): Promise<string | undefined> {
+    const nc = await connect({
+      name: "legion-e2e-session-settings",
+      servers: this.#rig.natsUrl,
+      timeout: 10_000,
+    });
+    try {
+      const subscription = nc.subscribe(agentStreamControlSubject(session), { max: 1 });
+      await nc.flush();
+      const first = async () => {
+        for await (const message of subscription) return decoder.decode(message.data);
+        return undefined;
+      };
+      return await Promise.race([first(), sleep(limitMs).then(() => undefined)]);
     } finally {
       await nc.close();
     }
@@ -1635,60 +1658,142 @@ async function run(rigFile: string): Promise<void> {
     begin("resume-keeps-switch");
     let resumed: Omp;
     {
+      /** Waits up to SHOWN_WITHIN_MS for the page held open across the relaunches to show `what`.
+       *  On a timeout it reloads the page, to tell a page that missed the report from a session
+       *  that never made it, and fails naming `step`. */
+      const heldShows = (step: string, what: string, wanted: (h: Header) => boolean) =>
+        page
+          .headerUntil(`${what} on the page held open across the relaunch`, SHOWN_WITHIN_MS, wanted)
+          .catch(async (error: unknown) => {
+            const missed = error instanceof Error ? error.message : String(error);
+            await page.reload();
+            const reloaded = await page
+              .headerUntil(`${what} after a reload`, 60_000, wanted)
+              .catch((again: unknown) =>
+                fail(
+                  `${step}: ${missed}; after a reload, ${again instanceof Error ? again.message : String(again)}: the session never reported it`
+                )
+              );
+            return fail(
+              `${step}: ${missed}; after a reload the header shows ${headerText(reloaded.header)}: the session reported it and the page held open across the relaunch never applied it`
+            );
+          });
       const before = await oracle(main);
       const file = before.state.sessionFile;
+      const picked = before.model;
+      if (picked === undefined) fail(`get_state of ${S} reports no model`);
+
+      // The switch stays (A2): the session relaunched with --resume is at the model and level
+      // picked last.
+      note("step 1, the switch stays:");
       await main.stop();
-      note(`ended Oh My Pi pid ${main.pid} at ${before.model}, ${effortText(before.effort)}`);
+      note(`ended Oh My Pi pid ${main.pid} at ${picked}, ${effortText(before.effort)}`);
       const relaunched = Date.now();
-      resumed = await startOmp("resumed", rig.plugin, ["--resume", file]);
-      const state = await resumed.state();
+      const first = await startOmp("resumed", rig.plugin, ["--resume", file]);
+      resumed = first;
+      const state = await first.state();
       expect(state.sessionId === S, `--resume opened session ${state.sessionId}, want ${S}`);
-      await registers(resumed, relaunched);
-      const after = await oracle(resumed);
+      await registers(first, relaunched);
+      const registeredAt = Date.now();
+      const after = await oracle(first);
       expect(
-        after.model === before.model && effortText(after.effort) === effortText(before.effort),
-        `the resumed session is at ${after.model}, ${effortText(after.effort)}, was ${before.model}, ${effortText(before.effort)}`
+        after.model === picked && effortText(after.effort) === effortText(before.effort),
+        `the resumed session is at ${after.model}, ${effortText(after.effort)}, was ${picked}, ${effortText(before.effort)}`
       );
-      // The page stays open across the relaunch, as a person's does when a session is relaunched
-      // under it: a change the resumed session makes at its own terminal shows within 20 s with
-      // no reload (A1), as it did before the relaunch.
-      const held = concrete(after.effort).find((level) => level !== effortLevel(after.effort));
+      note(
+        `relaunched with --resume ${file} (pid ${first.pid}), registered ${registeredAt - relaunched} ms after the launch: session ${state.sessionId}; get_state ${after.model}, /effort ${effortText(after.effort)}`
+      );
+
+      // Numbering: the page stays open across the relaunch, as a person's does when a session is
+      // relaunched under it. Once the relay's watch has reached the resumed process, a change it
+      // makes at its own terminal shows within 20 s with no reload (A1), as it did before the
+      // relaunch: its frames number above the earlier process's.
+      note("step 2, numbering:");
+      const subject = agentStreamControlSubject(S);
+      const subscribedAt = Date.now();
+      const control = await services.nextControl(S, 30_000);
+      if (control === undefined)
+        fail(
+          `numbering: no control message reached ${subject} within 30s of the rig subscribing, ${subscribedAt - registeredAt} ms after the resumed session registered`
+        );
+      const controlAt = Date.now();
+      await sleep(1_000);
+      note(
+        `the first control message on ${subject} came ${controlAt - subscribedAt} ms after the rig subscribed, ${controlAt - registeredAt} ms after the resumed session registered: ${control.slice(0, 200)}; then waited ${Date.now() - controlAt} ms for the process to handle it`
+      );
+      const level = effortLevel(after.effort);
+      const held = concrete(after.effort).find((each) => each !== level);
       if (held === undefined)
         fail(`/effort offers no other level than ${effortText(after.effort)}`);
-      await resumed.request({ level: held, type: "set_thinking_level" });
-      const { tookMs: heldTookMs } = await page
-        .headerUntil(
-          `${held} on the page held open across the relaunch`,
-          SHOWN_WITHIN_MS,
-          (h) => h.thinking === held
-        )
-        .catch(async (error: unknown) => {
-          // Tells a page that missed the report from a session that never made it.
-          await page.reload();
-          const reloaded = await page.headerUntil(
-            `${held} after a reload`,
-            60_000,
-            (h) => h.thinking === held
-          );
-          return fail(
-            `${error instanceof Error ? error.message : String(error)}; after a reload the header shows ${reloaded.header.thinking}: the resumed session reported it and the page held open across the relaunch never applied it`
-          );
-        });
+      await first.request({ level: held, type: "set_thinking_level" });
+      const { tookMs: heldTookMs } = await heldShows("numbering", held, (h) => h.thinking === held);
       note(
-        `on the page held open across the relaunch, RPC set_thinking_level ${held}: the header showed it ${heldTookMs} ms after the RPC answer`
+        `RPC set_thinking_level ${held} on pid ${first.pid}: the held page showed it ${heldTookMs} ms after the RPC answer`
       );
-      await resumed.request({ level: effortLevel(after.effort), type: "set_thinking_level" });
+      await first.request({ level, type: "set_thinking_level" });
+      const { tookMs: backTookMs } = await heldShows(
+        "numbering",
+        `${picked} and ${level} again`,
+        (h) => h.model === picked && h.thinking === level
+      );
+      note(
+        `RPC set_thinking_level ${level}: the held page showed it ${backTookMs} ms after the RPC answer`
+      );
+
+      // Arming: a relaunch onto the other model, with no change after it, shows on the held page
+      // within 20 s of registering: the relay's watch arms the new process, which publishes its
+      // settings as they stand.
+      note("step 3, arming:");
+      const other = picked === A ? B : A;
+      await first.stop();
+      note(`ended Oh My Pi pid ${first.pid} at ${picked}, ${level}`);
+      const relaunchedAgain = Date.now();
+      const second = await startOmp("rearmed", rig.plugin, ["--resume", file, "--model", other]);
+      resumed = second;
+      const secondState = await second.state();
+      expect(
+        secondState.sessionId === S,
+        `arming: --resume opened session ${secondState.sessionId}, want ${S}`
+      );
+      expect(
+        secondState.model === other,
+        `arming: --resume ${file} --model ${other} opened the session at ${secondState.model}`
+      );
+      await registers(second, relaunchedAgain);
+      const registeredAgainAt = Date.now();
+      const { header: armed } = await heldShows(
+        "arming",
+        `${other}, with no change and no reload after the relaunch,`,
+        (h) => h.model === other
+      );
+      const armedMs = Date.now() - registeredAgainAt;
+      await page.shot("resume-keeps-switch");
+      const moved = await oracle(second);
+      note(
+        `relaunched with --resume ${file} --model ${other} (pid ${second.pid}), registered ${registeredAgainAt - relaunchedAgain} ms after the launch: get_state ${secondState.model}, /effort ${effortText(moved.effort)}; with no RPC change and no reload the held page showed ${other} ${armedMs} ms after the registration: ${headerText(armed)}`
+      );
+      const [provider, ...id] = picked.split("/");
+      await second.request({ modelId: id.join("/"), provider, type: "set_model" });
+      let restored = await oracle(second);
+      if (effortLevel(restored.effort) !== level) {
+        await second.request({ level, type: "set_thinking_level" });
+        restored = await oracle(second);
+      }
+      expect(
+        restored.model === picked && effortText(restored.effort) === effortText(before.effort),
+        `back on ${picked}, the session is at ${restored.model}, ${effortText(restored.effort)}, was ${effortText(before.effort)}`
+      );
+      note(
+        `RPC set_model ${picked}${effortLevel(moved.effort) === level ? "" : ` and set_thinking_level ${level}`}: get_state ${restored.model}, /effort ${effortText(restored.effort)}`
+      );
+
       await page.reload();
       const { header } = await page.headerUntil(
-        `${before.model} and ${effortLevel(before.effort)}`,
+        `${picked} and ${level}`,
         60_000,
-        (h) =>
-          h.model === before.model && h.thinking === effortLevel(before.effort) && h.modelPicker
+        (h) => h.model === picked && h.thinking === level && h.modelPicker
       );
-      await page.shot("resume-keeps-switch");
-      note(
-        `relaunched with --resume ${file} (pid ${resumed.pid}): session ${state.sessionId}; get_state ${after.model}, /effort ${effortText(after.effort)}; the reloaded header ${headerText(header)}`
-      );
+      note(`the reloaded header ${headerText(header)}`);
       pass();
     }
 
