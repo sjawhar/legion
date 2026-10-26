@@ -333,6 +333,62 @@ func TestStreamConfigExcludesRoleLanes(t *testing.T) {
 	}
 }
 
+// Every subject of the stream's configuration is classified for /v1/replay as shared or private,
+// and in one list only, so a subject added to the stream without a decision on whether a session
+// may replay it through a registered interest fails here; a list naming a subject the stream does
+// not carry is a stale classification and fails too.
+func TestEveryStreamSubjectIsClassifiedForReplay(t *testing.T) {
+	for _, subject := range streamCfg.Subjects {
+		shared, private := slices.Contains(sharedStreamSubjects, subject), slices.Contains(privateStreamSubjects, subject)
+		switch {
+		case !shared && !private:
+			t.Errorf("stream subject %q is neither shared nor private for replay: add it to sharedStreamSubjects or privateStreamSubjects with the reason its publisher gives", subject)
+		case shared && private:
+			t.Errorf("stream subject %q is both shared and private for replay", subject)
+		}
+	}
+	for _, subject := range slices.Concat(sharedStreamSubjects, privateStreamSubjects) {
+		if !slices.Contains(streamCfg.Subjects, subject) {
+			t.Errorf("replay classifies %q, which is no subject of the stream", subject)
+		}
+	}
+}
+
+// A topic is shared only under one shared stream subject: an issue, document, GitHub, Slack, Ghost
+// Wispr or WhatsApp topic, a wildcard inside one of them included, and nothing under an agent
+// subject, an exception lane or the Legion controller's notices, nor a wildcard wider than one
+// shared subject.
+func TestSharedStreamTopicHoldsOnlyTopicsUnderASharedStreamSubject(t *testing.T) {
+	for topic, want := range map[string]bool{
+		"notifications.dispatch.issue.KEY-1.>":                        true,
+		"notifications.dispatch.issue.KEY-1.ask.answered":             true,
+		"notifications.dispatch.document.ACME.notes-md.>":             true,
+		"notifications.dispatch.>":                                    true,
+		"notifications.github.acme.widgets.pr.7":                      true,
+		"notifications.github.acme.widgets.pr.7.>":                    true,
+		"notifications.slack.T1.C1.message":                           true,
+		"notifications.ghostwispr.20260326041405.>":                   true,
+		"notifications.whatsapp.15551234567.>":                        true,
+		"notifications.agent.ses_a":                                   false,
+		"notifications.agent.>":                                       false,
+		"notifications.envoy.exceptions.notifications.agent.ses_a":    false,
+		"notifications.envoy.exceptions.>":                            false,
+		"notifications.envoy.exceptions.notifications.dispatch.issue": false,
+		"notifications.legion.ACME.controller":                        false,
+		"notifications.role.reviewer":                                 false,
+		"notifications.team.x.y":                                      false,
+		"notifications.dispatch":                                      false,
+		"notifications.*.acme.widgets.pr.7":                           false,
+		"notifications.*":                                             false,
+		"notifications.>":                                             false,
+		">":                                                           false,
+	} {
+		if got := SharedStreamTopic(topic); got != want {
+			t.Errorf("SharedStreamTopic(%q) = %v, want %v", topic, got, want)
+		}
+	}
+}
+
 // The legacy notifications.> catch-all captured the role lanes, so it is the one deployed subject
 // start-up replaces outright with the binary's own list.
 func TestEnsureStreamWithConfigReplacesTheLegacyRoleLaneCatchAll(t *testing.T) {

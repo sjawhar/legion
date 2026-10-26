@@ -543,40 +543,86 @@ func TestReplayRefusesASubjectTheSessionDoesNotFollow(t *testing.T) {
 	}
 }
 
-// A followed subject no subject of the deployed stream's configuration contains is refused
-// not_retained: an ad-hoc team topic, and a wildcard no one stream subject contains (one wider
-// than a stream subject, such as notifications.>, reaches the agent subjects and is refused
-// not_followed first). The deployed configuration is what counts, not this binary's list: once the
-// stream carries a foreign subject that contains the team topic, the topic is answered.
-func TestReplayRefusesAFollowedSubjectTheStreamDoesNotRetain(t *testing.T) {
-	const team = "notifications.team.x.y"
-	rig := newReplayRig(t, team, "notifications.*")
+// A registered topic is answered only under a shared stream subject: a wildcard over every
+// notification, a wildcard over every exception lane, the session's own exception lane, the Legion
+// controller's notices, a wildcard wider than one shared subject and an ad-hoc team topic are
+// refused not_followed with no messages and next_after their own cursor, even when the stream
+// holds messages on them, while a registered issue topic and a GitHub pull request topic are
+// still answered.
+func TestReplayAnswersARegisteredTopicOnlyUnderASharedStreamSubject(t *testing.T) {
+	const pullRequest = "notifications.github.acme.widgets.pr.7.>"
+	ownLane := bus.ExceptionTopicPrefix + contracts.AgentSubject(replaySession)
+	controller := "notifications.legion.ACME.controller"
+	refused := []string{
+		"notifications.>",
+		bus.ExceptionTopicPrefix + ">",
+		ownLane,
+		controller,
+		"notifications.*",
+		"notifications.team.x.y",
+	}
+	rig := newReplayRig(t, append([]string{replayIssueTopic, pullRequest}, refused...)...)
+	rig.store(t, ownLane)
+	rig.store(t, controller)
+	issueBody, issueSeq := rig.store(t, "notifications.dispatch.issue.KEY-1.ask.opened")
+	prBody, prSeq := rig.store(t, "notifications.github.acme.widgets.pr.7.checks")
 
-	response := replayOK(t, rig.mux, replayBody(t, []replaySubjectRequest{
-		{Subject: team, After: new(uint64(3))},
-		{Subject: "notifications.*", After: new(uint64(0))},
-	}, 0))
-	for index, wantAfter := range []uint64{3, 0} {
-		result := response.Subjects[index]
-		if result.Refused != "not_retained" || len(result.Messages) != 0 || result.NextAfter != wantAfter {
-			t.Fatalf("%s = %+v, want refused not_retained with next_after %d", result.Subject, result, wantAfter)
+	subjects := []replaySubjectRequest{
+		{Subject: replayIssueTopic, After: new(uint64(0))},
+		{Subject: pullRequest, After: new(uint64(0))},
+	}
+	for _, topic := range refused {
+		subjects = append(subjects, replaySubjectRequest{Subject: topic, After: new(uint64(0))})
+	}
+	response := replayOK(t, rig.mux, replayBody(t, subjects, 0))
+
+	for index, want := range []struct {
+		seq  uint64
+		data string
+	}{{issueSeq, issueBody}, {prSeq, prBody}} {
+		if got := response.Subjects[index]; got.Refused != "" || !equalSeqs(got.Messages, want.seq) || got.Messages[0].Data != want.data {
+			t.Fatalf("%s = %+v, want seq %d answered", got.Subject, got, want.seq)
 		}
 	}
+	for _, result := range response.Subjects[2:] {
+		if result.Refused != "not_followed" || len(result.Messages) != 0 || result.More || result.NextAfter != 0 {
+			t.Fatalf("%s = %+v, want refused not_followed with no messages and next_after 0", result.Subject, result)
+		}
+	}
+}
 
+// A registered topic under a shared stream subject that no subject of the deployed stream's
+// configuration contains is refused not_retained, with no messages and next_after its own cursor.
+// The deployed configuration is what counts, not this binary's list: once the stream carries the
+// subject again, the topic is answered.
+func TestReplayRefusesAFollowedSubjectTheStreamDoesNotRetain(t *testing.T) {
+	const chat = "notifications.whatsapp.15551234567.>"
+	rig := newReplayRig(t, chat)
 	info, err := rig.js.StreamInfo(bus.Stream)
 	if err != nil {
 		t.Fatalf("read stream info: %v", err)
 	}
 	config := info.Config
-	config.Subjects = append(config.Subjects, "notifications.team.>")
+	config.Subjects = slices.DeleteFunc(slices.Clone(info.Config.Subjects), func(subject string) bool {
+		return subject == "notifications.whatsapp.>"
+	})
 	if _, err := rig.js.UpdateStream(&config); err != nil {
-		t.Fatalf("add a foreign subject to the stream: %v", err)
+		t.Fatalf("deploy a stream without the WhatsApp subject: %v", err)
 	}
-	_, teamSeq := rig.store(t, team)
 
-	retained := replayOK(t, rig.mux, replayBody(t, []replaySubjectRequest{{Subject: team, After: new(uint64(0))}}, 0))
-	if result := retained.Subjects[0]; result.Refused != "" || !equalSeqs(result.Messages, teamSeq) {
-		t.Fatalf("team topic under a deployed foreign subject = %+v, want seq %d", result, teamSeq)
+	response := replayOK(t, rig.mux, replayBody(t, []replaySubjectRequest{{Subject: chat, After: new(uint64(3))}}, 0))
+	if result := response.Subjects[0]; result.Refused != "not_retained" || len(result.Messages) != 0 || result.NextAfter != 3 {
+		t.Fatalf("%s = %+v, want refused not_retained with next_after 3", result.Subject, result)
+	}
+
+	if _, err := rig.js.UpdateStream(&info.Config); err != nil {
+		t.Fatalf("deploy the stream with the WhatsApp subject again: %v", err)
+	}
+	_, chatSeq := rig.store(t, "notifications.whatsapp.15551234567.5551234567@s.whatsapp.net.message")
+
+	retained := replayOK(t, rig.mux, replayBody(t, []replaySubjectRequest{{Subject: chat, After: new(uint64(0))}}, 0))
+	if result := retained.Subjects[0]; result.Refused != "" || !equalSeqs(result.Messages, chatSeq) {
+		t.Fatalf("WhatsApp topic under the deployed subject = %+v, want seq %d", result, chatSeq)
 	}
 }
 

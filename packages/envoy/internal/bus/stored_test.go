@@ -106,10 +106,10 @@ func TestCheckFilterSubjectRefusesWhatNATSCannotFilterOn(t *testing.T) {
 	}
 }
 
-// What a session may register as an interest and replay: anything but a topic reaching another
-// session's agent subject, one by name or any wildcard over the agent subjects. Its own agent
-// subject is its own only when it is one literal subject.
-func TestCoversAnotherAgentSubjectBoundsInterestsAndReplay(t *testing.T) {
+// What a session may register as an interest (/v1/interests/subscribe): anything but a topic
+// reaching another session's agent subject, one by name or any wildcard over the agent subjects.
+// Its own agent subject is its own only when it is one literal subject.
+func TestCoversAnotherAgentSubjectBoundsInterests(t *testing.T) {
 	for _, tc := range []struct {
 		sessionID, topic string
 		want             bool

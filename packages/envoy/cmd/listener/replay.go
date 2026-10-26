@@ -105,10 +105,13 @@ func writeReplayReadError(w http.ResponseWriter, err error) {
 // max_messages (at most replayMaxMessages), replayMaxDataBytes of data, or replayReadBudget of
 // reading, and every subject it cut short says so.
 //
-// A subject that is neither the session's agent subject nor one of its registered interests is
-// refused not_followed, and so is one that reaches another session's agent subject, registered or
-// not (replayFollowed); one no subject of the deployed stream's configuration contains is refused
-// not_retained. Either has no messages and next_after its after.
+// A subject is answered only when it is the session's own agent subject, or a topic registered as
+// its interest that lies under a shared stream subject (replayFollowed, bus.SharedStreamTopic);
+// every other is refused not_followed: another session's agent subject or a wildcard over them,
+// every exception lane (the session's own included), the Legion controller's notices, and any
+// topic wider than one shared stream subject, such as notifications.>. An answered subject no
+// subject of the deployed stream's configuration contains is refused not_retained. Either has no
+// messages and next_after its after.
 //
 // The session_id must be one literal NATS subject token (replaySessionToken), else the request is
 // refused 400: it becomes the agent subject as it is and is matched against requested subjects by
@@ -214,16 +217,19 @@ func replaySessionToken(id string) bool {
 	})
 }
 
-// replayFollowed returns whether the session follows a subject: it is the session's agent subject
-// or a topic registered as its interest. The interest store is read only when some subject is not
-// the agent subject; a session it holds no record of follows only its agent subject. A subject
-// that reaches another session's agent subject (bus.CoversAnotherAgentSubject: one, or a wildcard
-// over them) is never followed, whatever the store holds: an interest registered before
-// /v1/interests/subscribe refused them, or written past it, must not read another session's inbox.
+// replayFollowed returns whether the session may replay a subject: it is the session's own agent
+// subject exactly, or a topic registered as its interest that lies under a shared stream subject
+// (bus.SharedStreamTopic: one that never carries an agent session's private payload). Nothing else
+// is, whatever the interest store holds, since /v1/interests/subscribe stores any topic but one
+// reaching another session's agent subject, and an interest written before or past that guard
+// may name anything. The store is read only when some requested subject could pass as an
+// interest; a session it holds no record of follows only its agent subject.
 func (d *listenerDeps) replayFollowed(sessionID string, subjects []replaySubjectRequest) (func(string) bool, error) {
 	agentSubject := contracts.AgentSubject(sessionID)
 	var topics []string
-	if slices.ContainsFunc(subjects, func(requested replaySubjectRequest) bool { return requested.Subject != agentSubject }) {
+	if slices.ContainsFunc(subjects, func(requested replaySubjectRequest) bool {
+		return requested.Subject != agentSubject && bus.SharedStreamTopic(requested.Subject)
+	}) {
 		interest, err := d.registry.Get(sessionID)
 		if err != nil && !errors.Is(err, nats.ErrKeyNotFound) {
 			return nil, err
@@ -231,8 +237,7 @@ func (d *listenerDeps) replayFollowed(sessionID string, subjects []replaySubject
 		topics = interest.Topics
 	}
 	return func(subject string) bool {
-		return !bus.CoversAnotherAgentSubject(sessionID, subject) &&
-			(subject == agentSubject || slices.Contains(topics, subject))
+		return subject == agentSubject || (bus.SharedStreamTopic(subject) && slices.Contains(topics, subject))
 	}, nil
 }
 

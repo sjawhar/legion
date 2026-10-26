@@ -1082,10 +1082,12 @@ func subscribeHandler(d *listenerDeps, machineID string, logger *logging.Logger)
 		}
 		logger.Info("listener subscribe", slog.String("session_id", body.SessionID), slog.Any("topics", body.Topics), slog.Int("port", body.Port), slog.Bool("self_subscribed", body.SelfSubscribed), slog.String("dir", body.Dir))
 		// A topic reaching another session's agent subject is left out and named in a warning, the
-		// rest of the registration stored: /v1/replay answers the topics stored here, and such a
-		// topic would read other sessions' inboxes. A registration naming one is not refused whole,
-		// since a released pi-envoy registers every subject it has open, a fork parent's agent
-		// subject and any topic its envoy_subscribe took included.
+		// rest of the registration stored: the topics stored here drive the listener's fan-out to
+		// serve-port sessions (`store.Registry.Match`), and such a topic would hand this session
+		// another's inbox; /v1/replay refuses such a subject on its own (`bus.SharedStreamTopic`).
+		// A registration naming one is not refused whole, since a released pi-envoy registers every
+		// subject it has open, a fork parent's agent subject and any topic its envoy_subscribe took
+		// included.
 		warnings := make([]string, 0)
 		topics := make([]string, 0, len(body.Topics)+1)
 		for _, topic := range append(body.Topics, contracts.AgentSubject(body.SessionID)) {
