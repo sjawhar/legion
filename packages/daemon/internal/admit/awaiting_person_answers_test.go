@@ -856,6 +856,114 @@ func TestTheResumeTaskOfAGateWaitNamesAReply(t *testing.T) {
 	}
 }
 
+// resumedTask frees LEGION-RUN's slot, so the answered LEGION-ROOT is promoted, and returns the
+// task its architect resumes with.
+func resumedTask(t *testing.T, pool *pgxpool.Pool, admission *Admission) string {
+	t.Helper()
+	apply(t, pool, admission, "run-finished", intake.DispatchIssue{
+		Key: "LEGION-RUN", ResolvedRepo: "acme/widgets", Seq: 1, Type: "issue.closed", Status: "done", Title: "LEGION-RUN", Rank: "A", HandedOver: true,
+	}, admission.engine)
+	task := ""
+	for _, effect := range effects(t, pool) {
+		if start, ok := effect.payload.(record.SuperviseRequest); ok && effect.issue == "LEGION-ROOT" && start.Op == "start" && start.Role == "architect" {
+			task = start.Task
+		}
+	}
+	return task
+}
+
+// A root waiting on its architect's question is answered by the person's review of its spec too:
+// an approval that opens its gate, or a changes request of its latest version, given after the
+// wait began, live or read by a registration. The root takes the next slot, and the architect's
+// task names the review: the approval, or the changes request with its version and reason. A newer
+// version answers no question, nor does a changes request given before the question was opened.
+func TestAPersonsReviewOfTheSpecAnswersARootWaitingOnItsQuestion(t *testing.T) {
+	after := record.EventMark{Seq: 11, At: handedBackAt.Add(time.Minute)}
+	for _, tc := range []struct {
+		name     string
+		fact     intake.Fact
+		source   string
+		answered bool
+		task     []string
+	}{
+		{name: "an approval", answered: true, task: []string{"spec version 4", "was approved"},
+			fact: intake.DispatchArtifact{Key: "LEGION-ROOT", ArtifactID: "artifact-root", Kind: intake.DispatchArtifactApproved, Version: 4, Mark: after}},
+		{name: "a changes request", answered: true, task: []string{"requested changes", "version 4", "name the rollback path"},
+			fact: intake.DispatchArtifact{Key: "LEGION-ROOT", ArtifactID: "artifact-root", Kind: intake.DispatchArtifactChangesRequested, Version: 4,
+				Reason: "name the rollback path", Mark: after}},
+		{name: "an approval a registration read", source: "api", answered: true, task: []string{"was approved"},
+			fact: intake.GateRegistered{Issue: "LEGION-ROOT", ArtifactID: "artifact-root", Version: 4, DispatchVersion: 4, ApprovedVersion: 4,
+				ApprovedMark: after, Since: record.EventMark{Seq: 12}}},
+		{name: "a changes request a registration read", source: "api", answered: true, task: []string{"requested changes", "name the rollback path"},
+			fact: intake.GateRegistered{Issue: "LEGION-ROOT", ArtifactID: "artifact-root", Version: 4, DispatchVersion: 4, ChangesRequestedVersion: 4,
+				ChangesReason: "name the rollback path", ChangesRequestedMark: after, Since: record.EventMark{Seq: 12}}},
+		{name: "a newer version",
+			fact: intake.DispatchArtifact{Key: "LEGION-ROOT", ArtifactID: "artifact-root", Kind: intake.DispatchArtifactVersion, Version: 5, Mark: after}},
+		{name: "a changes request given before the question",
+			fact: intake.DispatchArtifact{Key: "LEGION-ROOT", ArtifactID: "artifact-root", Kind: intake.DispatchArtifactChangesRequested, Version: 4,
+				Reason: "name the rollback path", Mark: record.EventMark{Seq: 9, At: handedBackAt.Add(-time.Minute)}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := migratedPool(t)
+			admission := newAdmission(t, 1, nil)
+			awaitingRoot(t, pool, record.Awaiting{Ask: "ask-question", Since: handBack})
+			seedGate(t, pool, record.DesignGate{Issue: "LEGION-ROOT", ArtifactID: "artifact-root", LatestVersion: 4})
+			source := tc.source
+			if source == "" {
+				source = "dispatch"
+			}
+			if _, err := intake.ApplyFact(context.Background(), pool, source, "review", tc.fact, admission.engine, admission); err != nil {
+				t.Fatalf("apply %s: %v", tc.name, err)
+			}
+			got := issue(t, pool, "LEGION-ROOT")
+			if got.Answered() != tc.answered {
+				t.Fatalf("root waiting on its question after %s = %#v, want answered %t", tc.name, got, tc.answered)
+			}
+			if !tc.answered {
+				return
+			}
+			task := resumedTask(t, pool, admission)
+			for _, want := range tc.task {
+				if !strings.Contains(task, want) {
+					t.Fatalf("resumed architect's task = %q, want it to name %q", task, want)
+				}
+			}
+		})
+	}
+}
+
+// The task resuming a root answered on its design gate names what answered it: a changes request
+// with its version and reason, a newer version, or a reply in a thread.
+func TestTheResumeTaskNamesWhatAnsweredTheGateWait(t *testing.T) {
+	after := record.EventMark{Seq: 11, At: handedBackAt.Add(time.Minute)}
+	for _, tc := range []struct {
+		name string
+		fact intake.Fact
+		task []string
+	}{
+		{name: "a changes request", task: []string{"requested changes", "version 4", `"name the rollback path"`},
+			fact: intake.DispatchArtifact{Key: "LEGION-ROOT", ArtifactID: "artifact-root", Kind: intake.DispatchArtifactChangesRequested, Version: 4,
+				Reason: "name the rollback path", Mark: after}},
+		{name: "a newer version", task: []string{"newer version", "version 5"},
+			fact: intake.DispatchArtifact{Key: "LEGION-ROOT", ArtifactID: "artifact-root", Kind: intake.DispatchArtifactVersion, Version: 5, Mark: after}},
+		{name: "a reply", task: []string{"replied", "thread", "version 4"},
+			fact: intake.DispatchAskReply{Key: "LEGION-ROOT", Ask: "ask-approval", WaitingOn: "agent", Actor: alice, Mark: after}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := migratedPool(t)
+			admission := newAdmission(t, 1, nil)
+			awaitingRoot(t, pool, record.Awaiting{GateVersion: 4, Since: handBack})
+			applyFact(t, pool, admission, "answer", tc.fact)
+			task := resumedTask(t, pool, admission)
+			for _, want := range tc.task {
+				if !strings.Contains(task, want) {
+					t.Fatalf("resumed architect's task = %q, want it to name %q", task, want)
+				}
+			}
+		})
+	}
+}
+
 // A child admission re-enters at its root's promotion keeps the Dispatch claim its record holds,
 // even when its last recorded event is newer than the claim: the synthetic fact names the claim the
 // record holds, so nothing takes the holder away.

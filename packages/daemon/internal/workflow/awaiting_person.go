@@ -121,12 +121,12 @@ func (e *Engine) personActed(ctx context.Context, tx pgx.Tx, key, ask string, an
 	if !issue.AwaitingPerson() || issue.Awaiting.AnsweredAt != nil {
 		return nil
 	}
-	answer := ""
+	answer, by := "", record.Answer("")
 	switch {
 	case issue.Awaiting.Ask != "" && issue.Awaiting.Ask == ask:
-		answer = "workflow: a person answered an architect ask"
+		answer, by = "workflow: a person answered an architect ask", record.AnsweredByAsk
 	case issue.Awaiting.GateVersion != 0 && answersGate:
-		answer = "workflow: a person replied on a root waiting on its design gate"
+		answer, by = "workflow: a person replied on a root waiting on its design gate", record.AnsweredByReply
 	default:
 		return nil
 	}
@@ -136,9 +136,15 @@ func (e *Engine) personActed(ctx context.Context, tx pgx.Tx, key, ask string, an
 		return nil
 	}
 	e.logOnCommit(ctx, answer, "issue", issue.Key, "ask", ask, "version", issue.Awaiting.GateVersion)
+	return e.answerWait(ctx, tx, *issue, by)
+}
+
+// answerWait records that by answered root's wait now, which puts the root at the front of the
+// waiting line (record.Waiting) and names the act in the task its architect resumes with.
+func (e *Engine) answerWait(ctx context.Context, tx pgx.Tx, root record.Issue, by record.Answer) error {
 	at := e.now()
-	issue.Awaiting.AnsweredAt = &at
-	return e.store.PutIssue(ctx, tx, *issue)
+	root.Awaiting.AnsweredAt, root.Awaiting.AnsweredBy = &at, by
+	return e.store.PutIssue(ctx, tx, root)
 }
 
 // actedSince names the person's act the root already holds that answers waiting, a wait about to

@@ -158,6 +158,13 @@ func TestCatchUpAwaitingAppliesAPersonsAnswerMissedAtBoot(t *testing.T) {
 			client: awaitingDispatch{events: []json.RawMessage{askReplied(9, "ask-root", "agent", alice)}}},
 		{name: "a person's reply under an ask a session resolved", awaiting: record.Awaiting{Ask: "ask-root"},
 			client: awaitingDispatch{events: []json.RawMessage{askClosed(9, "resolved", "ask-root", "question", architectSession), askReplied(10, "ask-root", "", alice)}}},
+		{name: "a person's approval of the spec while the root waits on its question", awaiting: record.Awaiting{Ask: "ask-root"},
+			gate:   &record.DesignGate{ArtifactID: "artifact-root", LatestVersion: 3},
+			client: awaitingDispatch{approval: dispatch.Approval{State: "approved", LatestVersion: 3, Version: new(3), Seq: 9}}},
+		{name: "a person's changes request while the root waits on its question", awaiting: record.Awaiting{Ask: "ask-root"},
+			gate: &record.DesignGate{ArtifactID: "artifact-root", LatestVersion: 3},
+			client: awaitingDispatch{approval: dispatch.Approval{State: "changes_requested", LatestVersion: 3, Version: new(3),
+				Reason: new("name the rollback path"), Seq: 9}}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			waitGate := tc.gate

@@ -382,29 +382,15 @@ func (e *Engine) awaitPerson(ctx context.Context, tx pgx.Tx, root record.Issue, 
 // ResumeAwaitedRoot starts an architect in the session its daemon suspension kept, told what the
 // person answered. When that answer opened the design gate, it advances the now-admitted tree only
 // after the root has its slot again. A gate still closed — changes requested, a person's reply on
-// the approval request, or a newer version that handed the request back — tells the architect to
+// an ask of the root, or a newer version that handed the request back — tells the architect to
 // hand the request back to the person, since that hand-back is what starts the root's next wait.
 func (e *Engine) ResumeAwaitedRoot(ctx context.Context, tx pgx.Tx, root record.Issue, waiting record.Awaiting) error {
-	task := ""
-	if waiting.Ask != "" {
-		task = fmt.Sprintf("A person answered your ask %s on %s, or replied in its thread; read it and continue.", waiting.Ask, root.Key)
-	}
 	gate, err := e.store.Gate(ctx, tx, root.Key)
 	if err != nil {
 		return err
 	}
-	if waiting.GateVersion != 0 {
-		if gate != nil && classify.DesignGateOpen(*gate) {
-			task = fmt.Sprintf("Your spec version %d on %s was approved; continue.", gate.LatestVersion, root.Key)
-		} else {
-			task = fmt.Sprintf("Your spec on %s is not approved at version %d: a person requested changes or replied in the approval request's thread, "+
-				"or a newer version handed the request back to you. Read the review and the thread, and revise the spec as they ask. "+
-				"Then hand the request back to the person: request approval again and register that version with register_gate, or answer in the request's thread. "+
-				"Handing it back starts your next wait and returns the slot; then end your turn.", root.Key, waiting.GateVersion)
-		}
-	}
 	if err := e.enqueue(ctx, tx, root.Key, record.SuperviseRequest{
-		Op: "start", Tree: root.Tree, Role: claim.RoleArchitect, Generation: root.Generation, Task: task,
+		Op: "start", Tree: root.Tree, Role: claim.RoleArchitect, Generation: root.Generation, Task: resumeTask(root.Key, waiting, gate),
 	}); err != nil {
 		return err
 	}
@@ -412,6 +398,35 @@ func (e *Engine) ResumeAwaitedRoot(ctx context.Context, tx pgx.Tx, root record.I
 		return e.advanceAdmittedTree(ctx, tx, root, *gate)
 	}
 	return nil
+}
+
+// resumeTask is the task an answered root's architect resumes with: what answered its wait
+// (Awaiting.AnsweredBy), with the version and the reason a changes request gave, and, while the
+// gate is closed, how to hand the request back. A gate open at the resume says the spec was
+// approved, whatever answered: the work it opens is the architect's next step.
+func resumeTask(key string, waiting record.Awaiting, gate *record.DesignGate) string {
+	const handBack = "Then hand the request back to the person: request approval again and register that version with register_gate, or answer in the request's thread. " +
+		"Handing it back starts your next wait and returns the slot; then end your turn."
+	open := gate != nil && classify.DesignGateOpen(*gate)
+	switch {
+	case open && (waiting.GateVersion != 0 || waiting.AnsweredBy == record.AnsweredByApproval):
+		return fmt.Sprintf("Your spec version %d on %s was approved; continue.", gate.LatestVersion, key)
+	case waiting.AnsweredBy == record.AnsweredByChanges && gate != nil && gate.ToldChangesVersion != nil:
+		return fmt.Sprintf("A person requested changes to your spec on %s at version %d: %q. Read the review, and revise the spec as they ask. %s",
+			key, *gate.ToldChangesVersion, gate.ToldChangesReason, handBack)
+	case waiting.AnsweredBy == record.AnsweredByVersion:
+		return fmt.Sprintf("A newer version of your spec on %s, version %d, handed the approval request back to you. Read it and the request's thread. %s",
+			key, waiting.GateVersion, handBack)
+	case waiting.AnsweredBy == record.AnsweredByReply:
+		return fmt.Sprintf("Your spec on %s is not approved at version %d: a person replied in a thread of one of its asks. Read the thread, and revise the spec as they ask. %s",
+			key, waiting.GateVersion, handBack)
+	case waiting.Ask != "":
+		return fmt.Sprintf("A person answered your ask %s on %s, or replied in its thread; read it and continue.", waiting.Ask, key)
+	case waiting.GateVersion != 0:
+		return fmt.Sprintf("Your spec on %s is not approved at version %d: a person requested changes or replied in the approval request's thread, "+
+			"or a newer version handed the request back to you. Read the review and the thread, and revise the spec as they ask. %s", key, waiting.GateVersion, handBack)
+	}
+	return ""
 }
 
 // recordChildUnderLiveTree owns the otherwise unrecorded-child edge from decision 13. Admission

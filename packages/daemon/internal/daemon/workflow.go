@@ -534,7 +534,7 @@ func (w *workflowRuntime) catchUpAwaitingRoot(ctx context.Context, root awaiting
 	if root.issue.Answered() {
 		return nil
 	}
-	if root.issue.Awaiting.GateVersion != 0 {
+	if root.issue.Awaiting.GateVersion != 0 || root.gate != nil {
 		if err := w.catchUpAwaitingGate(ctx, root); err != nil {
 			return err
 		}
@@ -542,14 +542,15 @@ func (w *workflowRuntime) catchUpAwaitingRoot(ctx context.Context, root awaiting
 	return w.catchUpAwaitingAsks(ctx, root)
 }
 
-// catchUpAwaitingGate reads the approval of a root waiting on its design gate: a newer version,
-// whoever wrote it, moves the approval request to the agent and answers it, and an approval or
-// changes request of the version it waits on answers it. When the same read shows the person
-// approved a newer version, the approval alone is applied, as the gate seed does: it records that
-// version and opens the gate in one fact, so admission resumes the architect with its gate open,
-// never with a task telling it to revise a spec the person has already approved. A review carries
-// its place in the issue's Dispatch event log (dispatch.Approval's Seq and At), which identifies it
-// in the gate's told record, places it against the wait's start, and names it in the fact's id.
+// catchUpAwaitingGate reads the approval of a root waiting on its design gate, or on a question
+// while it has a gate: a newer version, whoever wrote it, moves the approval request to the agent
+// and answers a gate wait, and an approval or changes request of the version waited on (for a
+// question, the gate's latest) answers either. When the same read shows the person approved a
+// newer version, the approval alone is applied, as the gate seed does: it records that version and
+// opens the gate in one fact, so admission resumes the architect with its gate open, never with a
+// task telling it to revise a spec the person has already approved. A review carries its place in
+// the issue's Dispatch event log (dispatch.Approval's Seq and At), which identifies it in the
+// gate's told record, places it against the wait's start, and names it in the fact's id.
 func (w *workflowRuntime) catchUpAwaitingGate(ctx context.Context, root awaitingRoot) error {
 	if root.gate == nil {
 		return fmt.Errorf("awaiting root %s has no design gate", root.issue.Key)
@@ -561,18 +562,22 @@ func (w *workflowRuntime) catchUpAwaitingGate(ctx context.Context, root awaiting
 	review := record.EventMark{Seq: approval.Seq, At: approval.At}
 	approved := approval.ApprovedLatest()
 	// The awaited version, not the gate's: a registration may have recorded a newer version on the
-	// gate whose own event never arrived, and that version is the answer.
-	if approval.LatestVersion > root.issue.Awaiting.GateVersion && approved == 0 {
+	// gate whose own event never arrived, and that version is the answer. A question waits on no
+	// version, and is answered by a review of the gate's latest.
+	waited := root.issue.Awaiting.GateVersion
+	if waited == 0 {
+		waited = root.gate.LatestVersion
+	} else if approval.LatestVersion > waited && approved == 0 {
 		if err := w.applyAwaitingCatchUp(ctx, fmt.Sprintf("gate-version:%s:%d:%d", root.issue.Key, root.issue.Generation, approval.LatestVersion),
 			intake.DispatchArtifact{Key: root.issue.Key, ArtifactID: root.gate.ArtifactID, Kind: intake.DispatchArtifactVersion, Version: approval.LatestVersion}); err != nil {
 			return err
 		}
 	}
-	if approved >= root.issue.Awaiting.GateVersion {
+	if approved != 0 && approved >= waited {
 		return w.applyAwaitingCatchUp(ctx, fmt.Sprintf("gate-approved:%s:%d:%d:%d", root.issue.Key, root.issue.Generation, approved, review.ID()),
 			intake.DispatchArtifact{Key: root.issue.Key, ArtifactID: root.gate.ArtifactID, Kind: intake.DispatchArtifactApproved, Version: approved, Mark: review})
 	}
-	if changes, reason := approval.ChangesRequestedLatest(); changes >= root.issue.Awaiting.GateVersion &&
+	if changes, reason := approval.ChangesRequestedLatest(); changes != 0 && changes >= waited &&
 		!classify.DesignGateChangesTold(*root.gate, changes, reason, review) {
 		// The id names the review by its place in the event log, so a person who repeats an earlier
 		// review's version and wording in a later wait of the same generation has made another

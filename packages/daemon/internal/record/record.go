@@ -169,17 +169,36 @@ const HoldEscalated HoldReason = "escalated"
 
 // Awaiting is what a root in awaiting_person waits on: an ask its architect opened on the root
 // (Ask, the ask's id), or the closed design gate at the spec version it registered (GateVersion),
-// when a person answered it (AnsweredAt, nil until then), and where on Dispatch the wait began
-// (Since): the event that started it (a hand-back, a question opened), or, for a registration, the
-// point its read of Dispatch began at. A changes request Dispatch recorded before Since never
-// answers the wait. An answered root waits for a slot ahead of every root that never ran
-// (Waiting).
+// when a person answered it (AnsweredAt, nil until then) and with what (AnsweredBy), and where on
+// Dispatch the wait began (Since): the event that started it (a hand-back, a question opened), or,
+// for a registration, the point its read of Dispatch began at. A person's act Dispatch recorded
+// before Since never answers the wait. An answered root waits for a slot ahead of every root that
+// never ran (Waiting).
 type Awaiting struct {
 	Ask         string
 	GateVersion int
 	AnsweredAt  *time.Time
+	AnsweredBy  Answer
 	Since       EventMark
 }
+
+// Answer is the act that answered a root's wait, which the task resuming its architect names.
+type Answer string
+
+const (
+	// AnsweredByAsk is a person's answer, resolution or reply on the ask the root waits on.
+	AnsweredByAsk Answer = "ask"
+	// AnsweredByReply is a person's act on another ask of a root waiting on its design gate.
+	AnsweredByReply Answer = "reply"
+	// AnsweredByApproval is a person's approval that opened the root's design gate.
+	AnsweredByApproval Answer = "approved"
+	// AnsweredByChanges is a person's changes request on the root's spec, which the gate records
+	// as told with its reason.
+	AnsweredByChanges Answer = "changes_requested"
+	// AnsweredByVersion is a spec version newer than the one waited on, which hands the approval
+	// request back to the architect.
+	AnsweredByVersion Answer = "version"
+)
 
 // EventMark places a Dispatch event in its issue's event log: its sequence on the issue (Seq) and
 // Dispatch's time of it (At), each zero when unknown. Dispatch appends an issue's events under the
