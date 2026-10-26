@@ -2,6 +2,7 @@ package pmdoc
 
 import (
 	"bytes"
+	"math"
 	"regexp"
 	"strings"
 	"unicode"
@@ -46,11 +47,6 @@ func (r *renderer) rawTitleLinesHold(raw string, lazy bool) bool {
 	return true
 }
 
-// maxTableHeaderRead is how much of the line before a raw title's first line feed
-// rawTitleLinesHold reads as the header of a delimiter row the title writes after it. Where that
-// line is longer, the delimiter row is taken to make a table, and the title is written `&#10;`.
-const maxTableHeaderRead = 4 << 10
-
 // makesTable reports whether lines[index], a delimiter row width cells wide that raw's lines
 // (lines) write in a paragraph, not lazily, can make a table of it under the line before, its
 // header: lines[index-1], or for raw's first line feed the written line up to it, holding more than
@@ -58,20 +54,102 @@ const maxTableHeaderRead = 4 << 10
 // paragraph's first delimiter row, but the browser editor's engine takes a later line of the
 // paragraph as a header too, a delimiter row before it included (`| - |` over `| - |` is a table
 // there), so every delimiter row is judged under its own header. A lazy line makes no table in
-// either reader.
+// either reader. The written line is read through the renderer's running tally of it
+// (writtenLineTally), so a long line is read once however many titles on it are judged.
 func (r *renderer) makesTable(lines []string, index, width int) bool {
-	header := lines[index-1]
+	var header rowTally
 	if index == 1 {
-		written := r.b.Bytes()
-		from := max(len(written)-maxTableHeaderRead, 0)
-		lineFrom := bytes.LastIndexByte(written[from:], '\n') + 1
-		if lineFrom == 0 && from > 0 {
-			return true
-		}
-		header = string(written[from+lineFrom:]) + header
+		header = r.writtenLineTally()
 	}
-	source := []byte(header)
-	return !lonePipe(source) && tableRowWidth(gmtext.NewSegment(0, len(source)), source) <= width
+	header.add([]byte(lines[index-1]), 0)
+	cells, lone := header.width()
+	return !lone && cells <= width
+}
+
+// rowTally is what tableRowWidth and lonePipe read of a table line, kept as the line is read a
+// piece at a time: rowCells drops the line's white space at each end, then its first `|` and its
+// last, and splits the rest at each `|` with no backslash right before it.
+type rowTally struct {
+	// read is how many bytes were added; pipes counts the `|`s added with no backslash before them.
+	read, pipes int
+	// first and last are the offsets of the first and the last byte that is not a space or a tab,
+	// -1 before any; firstByte, lastByte and beforeLast are those bytes and the one before last.
+	first, last                     int
+	firstByte, lastByte, beforeLast byte
+	// previous is the last byte added, which escapes a `|` the next piece opens with.
+	previous byte
+}
+
+// add reads piece, the next bytes of the line, from offset on.
+func (t *rowTally) add(piece []byte, offset int) {
+	if t.read == 0 && offset == 0 {
+		t.first, t.last = -1, -1
+	}
+	for index := offset; index < len(piece); index++ {
+		char := piece[index]
+		if char == '|' && t.previous != '\\' {
+			t.pipes++
+		}
+		if char != ' ' && char != '\t' {
+			if t.first < 0 {
+				t.first, t.firstByte = t.read, char
+			}
+			t.last, t.lastByte, t.beforeLast = t.read, char, t.previous
+		}
+		t.previous = char
+		t.read++
+	}
+}
+
+// width is the line's cell count as tableRowWidth counts it, and whether it is a lone `|`
+// (lonePipe).
+func (t *rowTally) width() (cells int, lone bool) {
+	if t.first < 0 {
+		return 0, false
+	}
+	if t.first == t.last && t.firstByte == '|' {
+		return 0, true
+	}
+	pipes, from, to := t.pipes, t.first, t.last+1
+	if t.firstByte == '|' {
+		pipes--
+		from++
+	}
+	if t.lastByte == '|' && t.last >= from {
+		to--
+		if t.beforeLast != '\\' {
+			pipes--
+		}
+	}
+	if from >= to {
+		return 0, false
+	}
+	return pipes + 1, false
+}
+
+// writtenLineTally is the tally of the line the renderer is writing, from its start to the end of
+// what is written. It is kept between calls and read on from where the last call stopped, so each
+// byte of the line is read once; a truncation (truncate) back into the read part restarts it from
+// the line's start.
+func (r *renderer) writtenLineTally() rowTally {
+	written := r.b.Bytes()
+	line := &r.lineTally
+	if r.truncatedTo < line.end || line.end > len(written) {
+		line.start = bytes.LastIndexByte(written[:min(r.truncatedTo, len(written))], '\n') + 1
+		line.end, line.tally = line.start, rowTally{}
+	}
+	r.truncatedTo = math.MaxInt
+	for line.end < len(written) {
+		next := bytes.IndexByte(written[line.end:], '\n')
+		if next < 0 {
+			line.tally.add(written[line.start:], line.end-line.start)
+			line.end = len(written)
+			break
+		}
+		line.start = line.end + next + 1
+		line.end, line.tally = line.start, rowTally{}
+	}
+	return line.tally
 }
 
 // delimiterRowWidth is the width of line read as a table's delimiter row (tableDelimiterWidth), or

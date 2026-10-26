@@ -37,6 +37,13 @@ type renderer struct {
 	// bareEmptyCode writes an empty code block in a typed block in a list item as its fences alone,
 	// and wroteBlankEmptyCode records one written with a line between them (emptyCodeWrittenBare).
 	bareEmptyCode, wroteBlankEmptyCode bool
+	// lineTally is the running tally of the line being written, from start to end
+	// (writtenLineTally), and truncatedTo the lowest length a truncate set since it was read on.
+	lineTally struct {
+		start, end int
+		tally      rowTally
+	}
+	truncatedTo int
 	// spanBudget is how many more empty cells the tables' spans may add: maxSpanCells, or none in
 	// a spanless render (renderSpanless).
 	spanBudget   int

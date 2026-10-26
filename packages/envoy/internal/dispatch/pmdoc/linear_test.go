@@ -277,6 +277,41 @@ func TestRenderIsLinearInImagesWhoseTitlesItKeepsRaw(t *testing.T) {
 	}
 }
 
+// Many images in one paragraph whose titles each hold a delimiter row, and a blank line after it,
+// so each is written `&#10;` and the paragraph's line grows, render in time linear in the line:
+// each delimiter row is judged under the whole line written before it (makesTable), which the
+// renderer's running tally of the line reads once (writtenLineTally). Reading the line afresh for
+// each title would be quadratic in it. The bound is far above a linear render's time.
+func TestRenderIsLinearInTitlesJudgedUnderOneLongLine(t *testing.T) {
+	const images = 24000
+	paragraph := &Node{Type: "paragraph"}
+	for range images {
+		paragraph.Children = append(paragraph.Children, &Node{Type: "text", Text: "x "}, &Node{Type: "image", Attrs: Attrs{
+			"src": "i.png", "alt": "x", "title": "a\n-|-\n\nb", "link": nil, "linkTitle": nil,
+		}})
+	}
+	doc := &Node{Type: "doc", Children: []*Node{paragraph}}
+	const deadline = 30 * time.Second
+	what := fmt.Sprintf("rendering %d images whose titles hold a delimiter row on one line", images)
+	var markdown string
+	took, onTime, _, err := runWithDeadline(what, deadline, func() (time.Duration, error) {
+		started := time.Now()
+		var err error
+		markdown, err = Render(doc)
+		return time.Since(started), err
+	})
+	if !onTime {
+		t.Fatalf("%s took more than %s, want time linear in the line", what, deadline)
+	}
+	if err != nil {
+		t.Fatalf("%s: %v", what, err)
+	}
+	if got := strings.Count(markdown, `"a&#10;-|-&#10;&#10;b"`); got != images || strings.Contains(markdown, "\n-|-") {
+		t.Fatalf("%s wrote %d titles `&#10;`, want all %d", what, got, images)
+	}
+	t.Logf("%s took %s", what, took)
+}
+
 // An image whose title holds 100,000 lines, in a list item where each is a lazy continuation line,
 // renders in time linear in the title, every line feed kept as it is. Each line is judged by itself,
 // read alone (rawTitleLinesHold); a judgement that read the document back once, as render did to

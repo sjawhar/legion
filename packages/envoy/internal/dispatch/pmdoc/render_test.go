@@ -590,11 +590,15 @@ func TestRenderWritesEachImageFieldSoItReadsBackAsHeld(t *testing.T) {
 		{"a task item", "- [ ] ![x](i.png)\n", []int{0, 0, 0}, []string{"bullet_list", "list_item", "paragraph"}},
 		{"a nested list item", "- a\n  - ![x](i.png)\n", []int{0, 0, 1, 0, 0}, []string{"bullet_list", "list_item", "bullet_list", "list_item", "paragraph"}},
 		{"a block quote in a list item", "- > ![x](i.png)\n", []int{0, 0, 1, 0}, []string{"bullet_list", "list_item", "blockquote", "paragraph"}},
+		// A paragraph line over 4 KiB before the image, the header a title's delimiter row is
+		// judged under: three cells, wider than a one- or two-cell delimiter row, and two cells.
+		{"a paragraph after a long three-cell line", "p | q | " + strings.Repeat("x", 5000) + " ![x](i.png)\n", []int{0}, []string{"paragraph"}},
+		{"a paragraph after a long two-cell line", "p | " + strings.Repeat("x", 5000) + " ![x](i.png)\n", []int{0}, []string{"paragraph"}},
 		{"a typed block", ":::callout{#callout-1 kind=\"note\"}\n![x](i.png)\n:::\n", []int{0, 0}, []string{"callout", "paragraph"}},
 		{"a footnote definition", "[^1]\n\n[^1]: ![x](i.png)\n", []int{1, 0}, []string{"footnote_definition", "paragraph"}},
 	}
 	// place parses a context's source and swaps img in for its image, after checking the image
-	// stands alone in the textblock the path names.
+	// ends the textblock the path names, after nothing or one text.
 	place := func(source string, path []int, types []string, img *Node) *Node {
 		doc, err := Parse(source)
 		if err != nil {
@@ -608,11 +612,12 @@ func TestRenderWritesEachImageFieldSoItReadsBackAsHeld(t *testing.T) {
 			}
 			block = block.Children[index]
 		}
-		if len(block.Children) != 1 || block.Children[0].Type != "image" {
+		last := len(block.Children) - 1
+		if last < 0 || block.Children[last].Type != "image" || last > 0 && block.Children[0].Type != "text" {
 			got, _ := doc.JSON()
-			t.Fatalf("Parse(%q) = %s, want one image in its %s", source, got, block.Type)
+			t.Fatalf("Parse(%q) = %s, want one image ending its %s", source, got, block.Type)
 		}
-		block.Children = []*Node{img}
+		block.Children[last] = img
 		return doc
 	}
 	// base is the base's spelling of the document a context writes with img in it: the context's
@@ -1443,6 +1448,53 @@ func TestRenderWritesALazyClosingRawTagTitleLineSoTheEngineReadsItBack(t *testin
 				got = string(json)
 			}
 			t.Errorf("the engine reads %q as %s, want its linked image %v", markdowns[index], got, held[index][0].Attrs)
+		}
+	}
+}
+
+// A title line feed before a delimiter row is judged under the whole written line before it, its
+// header, however long: where the header is wider than the delimiter row neither reader makes a
+// table, and the base's raw bytes, which both readers hold, are written as they are; where it is no
+// wider, the title is written `&#10;`. A header over 4 KiB was once taken to make a table unread,
+// which wrote `&#10;` for a title main keeps raw (the reviewer's finding on INFRA-190).
+func TestRenderJudgesATitlesDelimiterRowUnderALongHeaderLine(t *testing.T) {
+	long := strings.Repeat("x", 5000)
+	tests := []struct{ name, source, want string }{
+		{"a wider header, an image title", "p | q | " + long + ` ![a](i "a` + "\n|-|\n" + `b")` + "\n", ""},
+		{"a wider header, a link title", "p | q | " + long + ` [![a](i)](u "a` + "\n|-|\n" + `b")` + "\n", ""},
+		{"a header no wider, an image title", "p | " + long + ` ![a](i "a` + "&#10;-|-&#10;" + `b")` + "\n", "p | " + long + ` ![a](i "a&#10;-|-&#10;b")` + "\n"},
+		{"a header no wider, a link title", "p | " + long + ` [![a](i)](u "a` + "&#10;-|-&#10;" + `b")` + "\n", "p | " + long + ` [![a](i)](u "a&#10;-|-&#10;b")` + "\n"},
+	}
+	markdowns := make([]string, len(tests))
+	held := make([][]*Node, len(tests))
+	for index, test := range tests {
+		doc, err := ParseForWrite(test.source, nil)
+		if err != nil {
+			t.Fatalf("%s: ParseForWrite: %v", test.name, err)
+		}
+		markdown, err := Render(doc)
+		if err != nil {
+			t.Fatalf("%s: Render: %v", test.name, err)
+		}
+		want := test.want
+		if want == "" {
+			want = test.source
+		}
+		if markdown != want {
+			t.Errorf("%s: Render() = %q, want %q", test.name, markdown[len(markdown)-40:], want[len(want)-40:])
+		}
+		if back, err := ParseForWrite(markdown, nil); err != nil || !back.Equal(doc) {
+			t.Errorf("%s: Go reads the rendering back otherwise (%v)", test.name, err)
+		}
+		markdowns[index], held[index] = markdown, documentImages(doc)
+	}
+	for index, reading := range engineReadings(t, markdowns) {
+		var read []*Node
+		if reading != nil {
+			read = documentImages(reading)
+		}
+		if len(read) != len(held[index]) || !sameImageFields(read[0], held[index][0]) {
+			t.Errorf("%s: the engine reads the rendering with images %v, want %v", tests[index].name, read, held[index])
 		}
 	}
 }

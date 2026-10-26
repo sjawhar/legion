@@ -136,7 +136,7 @@ func (r *renderer) inlineWithEscapes(nodes []*Node, prefix string, context inlin
 			break
 		}
 		for _, spelling := range spellings {
-			r.b.Truncate(from)
+			r.truncate(from)
 			fusedAgain := r.writeInlineRun(nodes, prefix, context, spelling)
 			if r.err == nil && !(spelling.keepOpen && fusedAgain) && r.runReadsBack(from, prefix, nodes, inlineMarkdown) &&
 				(!flankingToo || r.runReadsBack(from, prefix, nodes, flankingOnlyMarkdown)) {
@@ -144,7 +144,7 @@ func (r *renderer) inlineWithEscapes(nodes []*Node, prefix string, context inlin
 			}
 		}
 	}
-	r.b.Truncate(from)
+	r.truncate(from)
 	r.b.WriteString(written)
 }
 
@@ -447,7 +447,7 @@ func (r *renderer) writeInlineRun(nodes []*Node, prefix string, context inlineCo
 				if !bareHere || !isBareWWWLink(n, visibleMarks(n.Marks), escapePipes) || r.wwwMayFollow() {
 					break
 				}
-				r.b.Truncate(before)
+				r.truncate(before)
 				active, position, fused, bareHere = beforeActive, beforePosition, beforeFused, false
 				r.inlineCodeFence, r.inlineCodePadded, r.labelBrackets = beforeFence, beforePadded, beforeLabel
 			}
@@ -584,7 +584,7 @@ func (r *renderer) endLine(continues bool) {
 		}
 	}
 	tail := line[candidate.at-lineFrom+width:]
-	r.b.Truncate(candidate.at)
+	r.truncate(candidate.at)
 	r.b.WriteString(escape)
 	r.b.WriteString(tail)
 }
@@ -679,6 +679,13 @@ func (r *renderer) takesCodeLineIndent(rest string) bool {
 		}
 	}
 	return taken > 0
+}
+
+// truncate cuts what is written back to length, recording it for the line tally
+// (writtenLineTally), which reads on from where it stopped only while nothing before that changed.
+func (r *renderer) truncate(length int) {
+	r.truncatedTo = min(r.truncatedTo, length)
+	r.b.Truncate(length)
 }
 
 func (r *renderer) writeSyntax(value string) {
