@@ -371,6 +371,8 @@ blocked() {
 . "$root/scripts/e2e/lib/namespace-rig.sh"
 # shellcheck source-path=SCRIPTDIR source=lib/leftovers.sh
 . "$root/scripts/e2e/lib/leftovers.sh"
+# shellcheck source-path=SCRIPTDIR source=lib/role-namespaces.sh
+. "$root/scripts/e2e/lib/role-namespaces.sh"
 
 
 rk() { timeout --foreground 300 kubectl --kubeconfig "$runtime_kubeconfig" --context "$runtime_context" "$@"; }
@@ -801,63 +803,6 @@ assert_one_bound_pvc() {
   [ "$(grep -c . <<<"$found")" = 1 ] && [ "${found#* }" = Bound ] ||
     fail "$1's PVCs$2 are '${found:-none}', want its one, Bound"
 }
-# An issue pod has one container, `roles`, whose PID 1 is the launcher of every role; each role's
-# generation runs in Linux user, mount, PID and IPC namespaces of its own, whose init is that
-# generation's `legion launcher role-init --role <role> …` (internal/launcher/roleinit.go), which
-# binds the role's own gh, private, state and agent-secrets directories at the fixed paths under
-# /var/run/legion, covers every role's directory of the roles directory, and runs the role's
-# `legion worker-shim` (with its Oh My Pi) in a nested user namespace as the image's user.
-# role_enter_sh is the POSIX sh, run in the `roles` container as `sh -c "$role_enter_sh" role-enter
-# ROLE COMMAND…`, that runs COMMAND as ROLE's agent sees the pod: it finds ROLE's role-init by its
-# argv (`launcher role-init`, then `--role ROLE` before the shim's `--`), enters that init's user,
-# mount, PID and IPC namespaces (the container's user owns them, so nsenter needs no capability the
-# container lacks), finds the role's worker-shim there (the process whose parent is the namespaces'
-# PID 1 and whose argv[1] is worker-shim), and enters the shim's own user namespace, the agent's,
-# uid 1000. COMMAND then sees the role's /proc (its role-init as PID 1, its shim and agent, nothing
-# of another role), its /tmp and its gh bundle; stdin and the exit status pass through. gVisor
-# refuses a PID namespace entered through the shim's user namespace, so the two hops are in that
-# order (measured in a gVisor pod of the worker image, 2026-10-24). No role-init of ROLE, or two of
-# them (a generation still ending as the next starts), is exit 1 naming why, as a wait expects.
-# shellcheck disable=SC2016  # expanded by the pod's shell
-role_enter_sh='
-role=$1
-shift
-init=
-for d in /proc/[0-9]*; do
-  tr "\0" "\n" 2>/dev/null <"$d/cmdline" | awk -v role="$role" "
-    NR == 2 && \$0 != \"launcher\" { bad = 1; exit }
-    NR == 3 && \$0 != \"role-init\" { bad = 1; exit }
-    \$0 == \"--\" { exit }
-    after && \$0 == role { found = 1 }
-    { after = (\$0 == \"--role\") }
-    END { exit bad || !found }" || continue
-  if [ -n "$init" ]; then
-    echo "two role-init processes of $role run in this container: ${init} and ${d#/proc/}" >&2
-    exit 1
-  fi
-  init=${d#/proc/}
-done
-if [ -z "$init" ]; then
-  echo "no role-init of $role runs in this container" >&2
-  exit 1
-fi
-exec nsenter -t "$init" -U -m -p -i --preserve-credentials -- sh -c "
-  shim=
-  for d in /proc/[0-9]*; do
-    [ \"\$(sed -n \"s/^PPid:[[:space:]]*//p\" \"\$d/status\" 2>/dev/null)\" = 1 ] || continue
-    [ \"\$(tr \"\\\\0\" \"\\\\n\" 2>/dev/null <\"\$d/cmdline\" | sed -n 2p)\" = worker-shim ] || continue
-    if [ -n \"\$shim\" ]; then
-      echo \"two worker-shims run in the namespaces of $role: \$shim and \${d#/proc/}\" >&2
-      exit 1
-    fi
-    shim=\${d#/proc/}
-  done
-  if [ -z \"\$shim\" ]; then
-    echo \"no worker-shim runs in the namespaces of $role\" >&2
-    exit 1
-  fi
-  exec nsenter -t \"\$shim\" -U --preserve-credentials -- \"\$@\"" role-shim "$@"
-'
 # pod_exec POD ROLE COMMAND… runs COMMAND as ROLE's agent sees POD (role_enter_sh). The daemon's
 # controller runs in a pod of its own whose one container, `controller`, is its process with no
 # namespaces of its own, so ROLE `controller` runs COMMAND in that container.
@@ -1438,24 +1383,6 @@ for d in /proc/[0-9]*; do
     END { if (ok && role != \"\") print role, generation, pid }"
 done'
 role_inits() { roles_exec "$1" sh -c "$role_inits_sh" | sort; }
-# role_kill_sh, run in the `roles` container as `sh -c "$role_kill_sh" role-kill INIT`, sends
-# SIGKILL to the process group of the worker-shim role-init INIT runs: the shim is role-init's one
-# child, started in a process group of its own (Setpgid, internal/launcher/roleinit_linux.go
-# runRoleShim), and Oh My Pi, the shim's child, is in that group. The container's user owns the
-# role's user namespaces, so it may signal them. A shim that is not the leader of its own group is
-# refused rather than signalled, since that group would be someone else's.
-# shellcheck disable=SC2016  # expanded by the pod's shell
-role_kill_sh='
-init=$1 shim=
-for d in /proc/[0-9]*; do
-  [ "$(sed -n "s/^PPid:[[:space:]]*//p" "$d/status" 2>/dev/null)" = "$init" ] || continue
-  [ -z "$shim" ] || { echo "role-init $init has two children: $shim and ${d#/proc/}" >&2; exit 1; }
-  shim=${d#/proc/}
-done
-[ -n "$shim" ] || { echo "role-init $init has no child" >&2; exit 1; }
-group=$(sed "s/.*) //" "/proc/$shim/stat" | cut -d" " -f3)
-[ "$group" = "$shim" ] || { echo "the shim $shim of role-init $init is in process group $group, not its own" >&2; exit 1; }
-kill -s KILL -- "-$group"'
 # roles_container_identity POD prints the `roles` container's id and restart count: what a kill
 # of one role leaves alone, and a launcher's end changes for every role.
 roles_container_identity() {
@@ -1521,12 +1448,14 @@ end_claim_process() {
 }
 # role_generation_ended observes end_claim_process kill landing on its one role: the killed
 # generation's role-init is gone from the pod's `roles` container, while the pod, that container
-# (its id and restart count) and every other role's role-init (role, generation and pid) are the
-# ones that ran before the kill. A changed pod, container or peer is a kill that reached more than
-# its role: it is written as the run's violation, which until_true's next poll aborts on, naming it
-# (a fail inside a poll would only end the poll's own output, which until_true discards).
+# (its id and restart count) and every role-init of another role that ran before the kill (role,
+# generation and pid) are still there. A role that launches meanwhile, a sibling's first or next
+# generation the daemon started, is no part of the kill and is not read. A changed pod or container,
+# or a peer gone, is a kill that reached more than its role: it is written as the run's violation,
+# which until_true's next poll aborts on, naming it (a fail inside a poll would only end the poll's
+# own output, which until_true discards).
 role_generation_ended() {
-  local inits identity peers violation=
+  local inits identity lost violation=
   if [ "$(op get pod "$ended_pod" -o jsonpath='{.metadata.uid}')" != "$ended_pod_uid" ]; then
     violation="the kill of $ended_role generation $ended_generation replaced pod $ended_pod_uid"
   elif ! identity=$(roles_container_identity "$ended_pod"); then
@@ -1536,9 +1465,9 @@ role_generation_ended() {
   elif ! inits=$(role_inits "$ended_pod"); then
     return 1
   else
-    peers=$(awk -v r="$ended_role" '$1 != r' <<<"$inits")
-    [ "$peers" = "$ended_peers" ] ||
-      violation="the kill of $ended_role generation $ended_generation changed another role's generation in pod $ended_pod: before $(tr '\n' ';' <<<"$ended_peers"), after $(tr '\n' ';' <<<"$peers")"
+    lost=$(awk 'NR == FNR { now[$0] = 1; next } $0 != "" && !($0 in now)' <(printf '%s\n' "$inits") <(printf '%s\n' "$ended_peers"))
+    [ -z "$lost" ] ||
+      violation="the kill of $ended_role generation $ended_generation ended another role's generation in pod $ended_pod: gone $(tr '\n' ';' <<<"$lost"), now $(tr '\n' ';' <<<"$inits")"
   fi
   if [ -n "$violation" ]; then
     printf '%s\n' "$violation" >"$evidence/pane-endpoint-violation.txt"
