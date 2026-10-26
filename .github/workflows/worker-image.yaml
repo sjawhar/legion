@@ -208,7 +208,7 @@ jobs:
           # index a blob that never landed. On 2026-10-26 the per-PR cache also cost more than it
           # gave: the 14 successful pull request builds created 08:32-08:59Z each spent 6.1-11.3 min
           # (median 9.3) in "exporting to GitHub Actions Cache", and 13 of them printed no `CACHED`
-          # step. This change's own build without the export took 5.6 min.
+          # step. Run 40322460293 (#2244), the first pull request build without the export, took 5.6 min.
           cache-to: ${{ github.event_name != 'pull_request' && 'type=gha,mode=max' || '' }}
           tags: ${{ steps.meta.outputs.tags }}
           # org.opencontainers.image.source is the Dockerfile's LABEL (the in-repo convention).
