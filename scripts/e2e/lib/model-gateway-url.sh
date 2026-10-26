@@ -17,7 +17,7 @@ fail() {
 
 gateway=${LEGION_E2E_MODEL_GATEWAY_URL:-}
 [ -n "$gateway" ] ||
-  fail "is unset: set it to the model gateway's Anthropic endpoint, the anthropic provider's baseUrl in your own ~/.omp/agent/models.yml"
+  fail "is unset: set it to the Anthropic endpoint of the model gateway the cluster's pods reach"
 case "$gateway" in
 *[!A-Za-z0-9:/._~-]*) fail "holds a character other than letters, digits and :/._~-" ;;
 *:) fail "ends in a colon, which YAML reads as a mapping key" ;;

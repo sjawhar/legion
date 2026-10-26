@@ -701,6 +701,7 @@ fi
   probe read-models cat "$HOME/.omp/profiles/$OMP_PROFILE/agent/models.yml"
   key=$(sed -n 's/.*!exec \\(.*\\)"$/\\1/p' "$HOME/.omp/profiles/$OMP_PROFILE/agent/models.yml" | head -1)
   probe key-command test -x "$key"
+  echo "served $("$key" 2>/dev/null | od -An -tx1 | tr -d ' \\n')"
   probe dbus-set test -n "\${DBUS_SESSION_BUS_ADDRESS:-}"
   [ -z "\${SEEK:-}" ] || echo "seek $(find / \\( -path /proc -o -path /sys -o -path /dev \\) -prune -o -name 'leak-*' -print 2>/dev/null | head -1)"
 } >"$PWD/answer.json"
@@ -709,6 +710,9 @@ exit "$(cat "$PWD/exit-status" 2>/dev/null || echo 0)"
 `,
     { mode: 0o755 }
   );
+  // One key file for every judge here: the judge profiles' key command names the file it was built
+  // with, so a test that rewrites the file reaches every later judge.
+  const judgeKeyFile = keyFile(0o600);
   const judge = (
     kind: string,
     dir: string,
@@ -722,7 +726,7 @@ exit "$(cat "$PWD/exit-status" 2>/dev/null || echo 0)"
         SKILL_SCENARIOS_WORK: work,
         SKILL_SCENARIOS_JUDGE_OMP: omp,
         SKILL_SCENARIOS_JUDGE_ENV: `OUTSIDE=${outside} OPERATOR_HOME=${homedir()} WORK=${work}`,
-        LEGION_E2E_ANTHROPIC_KEY_FILE: keyFile(0o600),
+        LEGION_E2E_ANTHROPIC_KEY_FILE: judgeKeyFile,
         ...env,
       },
     });
@@ -847,6 +851,60 @@ exit "$(cat "$PWD/exit-status" 2>/dev/null || echo 0)"
       const result = judge("ste", judgeDir(), output);
       expect(result.exitCode).not.toBe(0);
       expect(result.stderr.toString()).toContain("is not the name of an answer file");
+    }
+  });
+
+  /** The host key command of a built judge profile, and the key file it names. */
+  function judgeKey(kind: string): { command: string; file: string } {
+    const command = path.join(work, `judge-profiles/${kind}/model-key/anthropic-key`);
+    const line = readFileSync(command, "utf8")
+      .split("\n")
+      .find((l) => l.startsWith("key_file="));
+    const file = Bun.spawnSync(["bash", "-c", `${line}\nprintf %s "$key_file"`]).stdout.toString();
+    return { command, file };
+  }
+
+  // Catches: a container key command that does not print the key, and one that keeps whitespace the
+  // host's key command drops, so a key file with a Windows line end or stray spaces sends the model
+  // a key with a carriage return or a space in it.
+  test("the container's key command prints the key, with every whitespace character dropped", () => {
+    const first = judgeDir();
+    expect(judge("ste", first).exitCode).toBe(0);
+    expect(recorded(first, "served")).toEqual([
+      Buffer.from("sk-ant-rig-test-0000000000000000\n").toString("hex"),
+    ]);
+    const { file } = judgeKey("ste");
+    const original = readFileSync(file);
+    try {
+      writeFileSync(file, " sk-ant-rig-test-padded\t\r\n");
+      const padded = judgeDir();
+      expect(judge("ste", padded).exitCode).toBe(0);
+      expect(recorded(padded, "served")).toEqual([
+        Buffer.from("sk-ant-rig-test-padded\n").toString("hex"),
+      ]);
+    } finally {
+      writeFileSync(file, original);
+    }
+  });
+
+  // Catches: a judge-omp that starts a container when the profile's host key command is gone, or
+  // that leaves the judge's key directory behind when it refuses.
+  test("refuses a profile with no key command before docker runs, and leaves no key directory", () => {
+    const { command } = judgeKey("bare");
+    const kept = `${command}.kept`;
+    cpSync(command, kept);
+    rmSync(command);
+    try {
+      const dir = judgeDir();
+      const result = judge("bare", dir);
+      expect(result.exitCode).toBe(1);
+      expect(result.stderr.toString()).toContain("has no key command");
+      expect(existsSync(path.join(dir, "answer.json"))).toBe(false);
+      expect(existsSync(path.join(dir, "out.txt"))).toBe(false);
+      expect(existsSync(`${dir}.key`)).toBe(false);
+    } finally {
+      cpSync(kept, command);
+      rmSync(kept);
     }
   });
 

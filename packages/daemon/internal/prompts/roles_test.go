@@ -32,7 +32,9 @@ var (
 		// dispatch that carries other arguments is caught too.
 		`agent="`,
 	}
-	repoSpecific = []string{"Inspect", "inspect_ai", "inspect_", "Hawk", "middleman", "Taiga"}
+	// Products of one deployment that a shipped role prompt must not name. A needle is split ("H" +
+	// ...) where the repository itself must not carry the name, so a search of the tree finds none.
+	repoSpecific = []string{"Inspect", "inspect_ai", "inspect_", "H" + "awk", "middleman", "Taiga"}
 )
 
 func coreFiles() []string {

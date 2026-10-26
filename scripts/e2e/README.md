@@ -2304,7 +2304,7 @@ break the pod the daemon loads). Its refusal names the variable on stderr and ne
 
 Routes a named OMP profile's model turns straight to Anthropic's own endpoint, keyed from a local
 file: the one model route of the tmux proofs (Stage 2, Stage 3, the 4b.13b acceptance, the Claude
-Code backend proof, the Dispatch user-turns proof, the skill-scenario rig's `profile`) and of
+Code backend proof, the Dispatch user-turns proof, the skill-scenario rig's label and judge profiles) and of
 Stage 4b's operator controller. Mirrors the model-route pattern
 [`deploy/kubernetes/operator-route/models-key-file.yml`](../../deploy/kubernetes/operator-route/models-key-file.yml)
 gives Stage 4a's pods: an operator-supplied key, read fresh on every call, never minted and never
@@ -2338,7 +2338,7 @@ per call to `<dest>/anthropic-key.calls`, in exactly the record shape
 `anthropic` provider at `https://api.anthropic.com` with `apiKey` and `X-Api-Key` both
 `!exec <key-dir>/anthropic-key`, and its `agent/config.yml` pins every model role, the roles
 Legion's task agents name included, to `anthropic/claude-opus-4-8`, sets
-`enabledModels: [anthropic/*]`, and disables every other provider a pane could reach without the
+`enabledModels: [anthropic/claude-opus-4-8]`, and disables every other provider a pane could reach without the
 key file: Oh My Pi falls back from a failing provider without a word, and subagents and retries
 choose from every enabled provider, so the profile leaves it nowhere to fall.
 

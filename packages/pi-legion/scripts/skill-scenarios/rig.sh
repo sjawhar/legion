@@ -907,9 +907,10 @@ judge_keys() {
   key_file=$(bash -c "$(grep -m1 '^key_file=' "$host_command")"$'\nprintf %s "$key_file"')
   [ -f "$key_file" ] || fail "judge-omp: the key command names '$key_file', which is not a file"
   case $key_file in *[!A-Za-z0-9/._-]*) fail "judge-omp: the key file's path '$key_file' holds a character a key command cannot name plainly" ;; esac
-  # $(cat) drops trailing newlines and keeps a key whose file has none, as the host's key command
-  # does with $(<file).
-  (umask 077 && printf '#!/bin/sh\nkey=$(cat %s) && [ -n "$key" ] && printf "%%s\\n" "$key"\n' "$key_file" >"$keys/anthropic-key")
+  # tr drops every whitespace character, as the host's key command does, so a key file with a
+  # Windows line end or stray spaces gives the judge the same key; the key reaches tr on stdin, in
+  # no argv.
+  (umask 077 && printf '#!/bin/sh\nkey=$(tr -d "[:space:]" <%s) && [ -n "$key" ] && printf "%%s\\n" "$key"\n' "$key_file" >"$keys/anthropic-key")
   chmod 0700 "$keys/anthropic-key"
   sed "s#!exec $host_command\"#!exec /opt/key/anthropic-key\"#g" "$agent/models.yml" >"$keys/models.yml"
   grep -q '!exec /opt/key/anthropic-key"' "$keys/models.yml" && ! grep -qF "$host_command" "$keys/models.yml" ||
