@@ -47,7 +47,6 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/api"
 	"github.com/sjawhar/legion/daemon/internal/claim"
-	"github.com/sjawhar/legion/daemon/internal/notify"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
@@ -79,8 +78,6 @@ type mergedRootWaitsLive struct {
 	parentPR, childPR, openedPR int
 	// github is the REST and GraphQL root the daemon's workflow reads (mergedRootWaitsGitHub).
 	github string
-	// architectTopic is the role topic the parent's architect is told on.
-	architectTopic string
 	// arch is the root's architect, the one session more than one step acts as: steps 1 and 6
 	// share its registration (architect).
 	arch *mergedRootWaitsClaimant
@@ -113,10 +110,6 @@ func TestAMergedRootsCloseWaitsForTheRestOfItsTreeLive(t *testing.T) {
 func newMergedRootWaitsLive(t *testing.T) *mergedRootWaitsLive {
 	t.Helper()
 	proof := newLiveProof(t, "scripts/e2e/merged-root-waits.sh")
-	architect, err := claim.NewToken(proof.project, proof.cfg.Project+"-1", claim.RoleArchitect)
-	if err != nil {
-		t.Fatal(err)
-	}
 	number, err := strconv.ParseInt(randomSuffix(t)[:6], 16, 64)
 	if err != nil {
 		t.Fatal(err)
@@ -125,7 +118,7 @@ func newMergedRootWaitsLive(t *testing.T) *mergedRootWaitsLive {
 		liveProof: proof, rt: fake.NewRuntime(), built: &built{},
 		parent: proof.cfg.Project + "-1", child: proof.cfg.Project + "-2",
 		parentPR: int(number) + 1, childPR: int(number) + 2, openedPR: int(number) + 3,
-		github: mergedRootWaitsGitHub(t), architectTopic: notify.RoleTopicPrefix + string(architect), seq: 1,
+		github: mergedRootWaitsGitHub(t), seq: 1,
 	}
 	r.seedTree()
 	r.boot()
@@ -452,7 +445,7 @@ func (r *mergedRootWaitsLive) rootMergeWaits() {
 		}
 	}
 	r.note("read back: the Dispatch stand-in took no status write and no message for %s", r.parent)
-	told := r.waitNoticesOn("the architect told once that the close waits", r.architectTopic, "pr-merged", 1)
+	told := r.waitArchitectNotices(r.parent, "pr-merged", 1)
 	if !strings.Contains(told[0].Payload, r.child) || !strings.Contains(told[0].Payload, fmt.Sprint(r.parentPR)) {
 		t.Fatalf("the pr-merged notice reads %q, want it naming pull request #%d and %s", told[0].Payload, r.parentPR, r.child)
 	}
@@ -549,7 +542,7 @@ func (r *mergedRootWaitsLive) openedLeavesTheMerge() {
 // nobody: a restart must not repeat the architect's notice, and a root can wait across many boots.
 func (r *mergedRootWaitsLive) restartLeavesTheWait() {
 	t := r.t
-	before := len(r.waitNoticesOn("the one notice of the wait", r.architectTopic, "pr-merged", 1))
+	before := len(r.waitArchitectNotices(r.parent, "pr-merged", 1))
 	r.restart()
 	// The boot's work is under way: this boot relaunched the claim the fixture left unfinished,
 	// which its reconciliation does. The window below then watches the wait, and step 4 reads the
@@ -561,7 +554,7 @@ func (r *mergedRootWaitsLive) restartLeavesTheWait() {
 		if got := r.issue(r.parent); got.Phase != phase.AwaitingMerge || got.PullRequest.State != string(record.PullRequestMerged) {
 			t.Fatalf("after the restart %s is in %s on a %s pull request, want it still awaiting its merge", r.parent, got.Phase, got.PullRequest.State)
 		}
-		if told := r.noticesOn(r.architectTopic, "pr-merged"); len(told) != before {
+		if told := r.architectNotices(r.parent, "pr-merged"); len(told) != before {
 			t.Fatalf("the boot told the architect %d pr-merged notices, want the %d the wait began with", len(told), before)
 		}
 		time.Sleep(100 * time.Millisecond)
@@ -607,7 +600,7 @@ func (r *mergedRootWaitsLive) childMergeClosesTheRoot() {
 		t.Fatalf("the close suspended %d claims, want the tree's", len(suspends)-suspendsBefore)
 	}
 	r.note("read back: the fake runtime was asked to suspend %d of the tree's processes", len(suspends)-suspendsBefore)
-	if told := r.noticesOn(r.architectTopic, "pr-merged"); len(told) != 1 {
+	if told := r.architectNotices(r.parent, "pr-merged"); len(told) != 1 {
 		t.Fatalf("the architect was told %d pr-merged notices over the whole run, want the one the wait began with", len(told))
 	}
 	r.note("read back: one pr-merged notice over the whole run")

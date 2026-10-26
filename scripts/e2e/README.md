@@ -2925,9 +2925,12 @@ prints `LABEL e2e: PASS in <n>s (evidence: <dir>)`, or
 | `EVIDENCE` | the evidence directory the script's own variable names (`MERGED_ROOT_WAITS_EVIDENCE_DIR`, `NO_REQUIRED_CHECKS_EVIDENCE_DIR`), or empty for a fresh one; kept and printed, it holds `transcript.log`, the broker's `nats.log`, the daemon's own `daemon.log`, which the driver writes through `LEGION_E2E_DAEMON_LOG`, and the driver's `proof.log` |
 
 The two drivers share their Go harness the same way: `internal/daemon/live_proof_test.go`
-(`-tags e2e`) holds the broker and log variables (`LEGION_E2E_NATS_URL`, `LEGION_E2E_DAEMON_LOG`),
-the stream the daemon's intake consumes, the Dispatch board stand-in (`liveDispatch`), the store,
-and the envelope, notice and `processed_events` reads and writes a step makes.
+(`-tags e2e`) holds the broker and log variables (`LEGION_E2E_NATS_URL`, `LEGION_E2E_DAEMON_LOG`);
+the configuration the daemon boots with (`newLiveProof` reads `LEGION_E2E_NATS_URL`, skips when it
+is unset, and builds the workflow configuration around it); the stream the daemon's intake
+consumes; the Dispatch board stand-in (`liveDispatch`); the store; the seeding of a tree into the
+next free admission slots (`admit`); and the envelope, `processed_events` and notice reads and
+writes a step makes, the notices read by the issue whose architect they tell (`architectNotices`).
 
 ## lib/secret-leaks.ts
 

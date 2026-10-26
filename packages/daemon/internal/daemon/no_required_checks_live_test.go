@@ -51,8 +51,6 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
-	"github.com/sjawhar/legion/daemon/internal/claim"
-	"github.com/sjawhar/legion/daemon/internal/notify"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
@@ -248,7 +246,7 @@ func (r *noRequiredChecksLive) theSameFailureOnceRequiredIsRed() {
 		t.Fatalf("%s is in %s on the red at a1, want implementing", issue.key, got.Phase)
 	}
 	r.note("read back: checksVerdict %s, %s in %s", got.PullRequest.ChecksVerdict, issue.key, got.Phase)
-	told := r.waitNoticesOn(fmt.Sprintf("one checks-red notice to %s's architect", issue.key), r.architectTopic(issue), "checks-red", 1)
+	told := r.waitArchitectNotices(issue.key, "checks-red", 1)
 	r.wantRedAt(issue, told[0], "a1")
 	r.note("read back: one checks-red notice on %s's architect's topic: %s", issue.key, told[0].Payload)
 }
@@ -290,10 +288,10 @@ func (r *noRequiredChecksLive) aPushOntoABaseThatRequiresNothingLeavesTheAttempt
 	if got.Phase != phase.Testing || got.PullRequest == nil || got.PullRequest.ChecksVerdict != "red" || got.PullRequest.FixAttempts != 1 {
 		t.Fatalf("after the red at the counted head b1 %s is in %s on %+v, want testing, checksVerdict red, fixAttempts 1: the cap holds the attempt's red", issue.key, got.Phase, got.PullRequest)
 	}
-	blocked := r.waitNoticesOn(fmt.Sprintf("one pr-blocked notice to %s's architect", issue.key), r.architectTopic(issue), "pr-blocked", 1)
+	blocked := r.waitArchitectNotices(issue.key, "pr-blocked", 1)
 	r.note("read back: %s held in %s, checksVerdict %s, fixAttempts %d; one pr-blocked notice: %s",
 		issue.key, got.Phase, got.PullRequest.ChecksVerdict, got.PullRequest.FixAttempts, blocked[0].Payload)
-	if red := r.noticesOn(r.architectTopic(issue), "checks-red"); len(red) != 0 {
+	if red := r.architectNotices(issue.key, "checks-red"); len(red) != 0 {
 		t.Fatalf("the held red told %s's architect %d checks-red notices, want none", issue.key, len(red))
 	}
 
@@ -338,9 +336,9 @@ func (r *noRequiredChecksLive) aPushOntoABaseThatRequiresNothingLeavesTheAttempt
 		t.Fatalf("after the red at b2 issues[%s].pullRequest is %+v, want checksVerdict red and fixAttempts 1", issue.key, got.PullRequest)
 	}
 	r.note("read back: %s in %s, checksVerdict %s, fixAttempts %d", issue.key, got.Phase, got.PullRequest.ChecksVerdict, got.PullRequest.FixAttempts)
-	told := r.waitNoticesOn(fmt.Sprintf("one checks-red notice to %s's architect", issue.key), r.architectTopic(issue), "checks-red", 1)
+	told := r.waitArchitectNotices(issue.key, "checks-red", 1)
 	r.wantRedAt(issue, told[0], "b2")
-	if blocked := r.noticesOn(r.architectTopic(issue), "pr-blocked"); len(blocked) != 1 {
+	if blocked := r.architectNotices(issue.key, "pr-blocked"); len(blocked) != 1 {
 		t.Fatalf("%s's architect was told %d pr-blocked notices over the step, want the one the held red reported", issue.key, len(blocked))
 	}
 	r.note("read back: one checks-red notice on %s's architect's topic: %s; still the one pr-blocked", issue.key, told[0].Payload)
@@ -431,21 +429,11 @@ func (r *noRequiredChecksLive) holdsWithoutNotice(issue noRequiredChecksIssue, w
 		if got := r.issue(issue.key); got.Phase != want {
 			r.t.Fatalf("%s is in %s, want %s", issue.key, got.Phase, want)
 		}
-		if told := r.noticesOn(r.architectTopic(issue), kind); len(told) != 0 {
+		if told := r.architectNotices(issue.key, kind); len(told) != 0 {
 			r.t.Fatalf("%s's architect was told %d %s notices, want none: %s", issue.key, len(told), kind, told[0].Payload)
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-}
-
-// architectTopic is the role topic the architect of issue's tree is told on.
-func (r *noRequiredChecksLive) architectTopic(issue noRequiredChecksIssue) string {
-	r.t.Helper()
-	architect, err := claim.NewToken(r.project, issue.key, claim.RoleArchitect)
-	if err != nil {
-		r.t.Fatal(err)
-	}
-	return notify.RoleTopicPrefix + string(architect)
 }
 
 // wantRedAt fails unless the checks-red notice told names head and the required check, as the

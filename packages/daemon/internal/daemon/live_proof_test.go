@@ -4,9 +4,13 @@
 // no_required_checks_live_test.go, whose scripts (scripts/e2e/merged-root-waits.sh and
 // scripts/e2e/no-required-checks.sh) make the same run around them through
 // scripts/e2e/lib/live-daemon-proof.sh. A driver embeds liveProof, which holds what every such
-// proof needs before and around the daemon it boots: the broker and log file the script names, the
-// stand-ins for Dispatch and Envoy's listener, the store the daemon runs on, and the reads and
-// writes a step makes of them. What the driver keeps is what its own proof drives.
+// proof needs before and around the daemon it boots: the configuration it boots with (newLiveProof
+// reads the broker LEGION_E2E_NATS_URL names, skips when it names none, and builds workflowConfig
+// around it), the log file the script names, the stand-ins for Dispatch and Envoy's listener, the
+// store the daemon runs on, the seeding of a tree into the next free admission slots (admit), and
+// the reads and writes a step makes of them: the envelopes it publishes, the events it waits for
+// the daemon to take, and the notices an issue's architect is told (architectNotices). What the
+// driver keeps is what its own proof drives.
 package daemon
 
 import (
@@ -29,6 +33,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/api"
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
+	"github.com/sjawhar/legion/daemon/internal/notify"
 	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/store"
 	"github.com/sjawhar/legion/daemon/internal/testnats"
@@ -212,12 +217,18 @@ func (p *liveProof) waitProcessed(eventID string) {
 	})
 }
 
-// noticesOn is every notice of kind the daemon has published to topic, each payload replaced by
-// the notice's reason.
-func (p *liveProof) noticesOn(topic, kind string) []listenerPublish {
+// architectNotices is every notice of kind the daemon has published to the role topic of key's
+// architect, each payload replaced by the notice's reason. Every notice a live proof reads is one
+// an architect is told, so the topic is derived here, from the run's own project, and a step names
+// only the issue it drove.
+func (p *liveProof) architectNotices(key, kind string) []listenerPublish {
 	p.t.Helper()
+	architect, err := claim.NewToken(p.project, key, claim.RoleArchitect)
+	if err != nil {
+		p.t.Fatal(err)
+	}
 	var got []listenerPublish
-	for _, published := range p.notices.acceptedOn(topic) {
+	for _, published := range p.notices.acceptedOn(notify.RoleTopicPrefix + string(architect)) {
 		var payload struct {
 			Kind   string `json:"kind"`
 			Reason string `json:"reason"`
@@ -233,13 +244,14 @@ func (p *liveProof) noticesOn(topic, kind string) []listenerPublish {
 	return got
 }
 
-// waitNoticesOn polls until the daemon has published count notices of kind to topic, and returns
-// them as noticesOn does; what names them in the wait's failure.
-func (p *liveProof) waitNoticesOn(what, topic, kind string, count int) []listenerPublish {
+// waitArchitectNotices polls until the daemon has told key's architect count notices of kind, and
+// returns them as architectNotices does. The wait's failure names the count, the kind and the
+// issue, which is all a step would say of it.
+func (p *liveProof) waitArchitectNotices(key, kind string, count int) []listenerPublish {
 	p.t.Helper()
 	var got []listenerPublish
-	testwait.Eventually(p.t, what, func() bool {
-		got = p.noticesOn(topic, kind)
+	testwait.Eventually(p.t, fmt.Sprintf("%s's architect's %s notices to number %d", key, kind, count), func() bool {
+		got = p.architectNotices(key, kind)
 		return len(got) == count
 	})
 	return got
