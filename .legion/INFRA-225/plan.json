@@ -2,24 +2,27 @@
   "schemaVersion": 1,
   "phase": "plan",
   "issue": "INFRA-225",
-  "completed": "2026-10-25T01:18:00Z",
+  "completed": "2026-10-26T03:39:02Z",
   "plan": "dispatch://INFRA-225/artifact/plan-md",
   "requiredSkills": {
     "implement": [
       "skill://legion-worker — the phase's own rules: the shared workspace, the jj commit and push recipe, the handoff write, and handoff_complete as the only completion.",
       "skill://legion-worker/references/pr-body.md — the pull request body template, what a proof is (a production-like surface, a command or run id, a head SHA and one negative control), and that the implementer pushes and completes without waiting on CI.",
       "skill://ce-simplify-code — mandatory once per pull request, in the first implementing round, because this diff is runtime Go and TypeScript, not docs alone.",
-      "skill://dispatch — every Dispatch write this phase makes, including a comment on INFRA-225 and any dispatch ask for a finding outside the issue."
+      "skill://dispatch — every Dispatch write this phase makes, including a comment on INFRA-225 and any dispatch ask for a finding outside the issue.",
+      "skill://legion-worker/references/conflicts-and-rewrites.md — the forward merge of main (jj new from the bookmark, never a rebase), the fingerprint before and after, and the one rebase comment."
     ],
     "test": [
       "skill://legion-worker — the tester's workspace rules, its handoff fields (implementerProof, failures, proof) and its verdict.",
       "skill://legion-worker/references/pr-body.md — the tester drives the application rather than re-running CI, verifies the implementer's proof, and records a missing proof as a failure rather than filling the gap.",
-      "skill://dispatch — any Dispatch write the tester makes."
+      "skill://dispatch — any Dispatch write the tester makes.",
+      "skill://legion-worker/references/conflicts-and-rewrites.md — the fingerprint from the head the E2E (tester) line names (d7e29553) to the new head; changed by the cleanup commit, so a full test round."
     ],
     "review": [
       "skill://legion-worker — the reviewer's phase, its handoff (decision, counts, keyFindings) and its completion.",
       "skill://legion-worker/references/merge-gate.md — the order of a review round and the approval of the head by SHA.",
-      "skill://legion-worker/references/review-threads.md — one disposition reply per thread, read before it is answered, never resolved in bulk."
+      "skill://legion-worker/references/review-threads.md — one disposition reply per thread, read before it is answered, never resolved in bulk.",
+      "skill://legion-worker/references/conflicts-and-rewrites.md — the reviewer compares its last review's code head (689ec075) with the new head and reads d7e29553's resolution, the new merge and the cleanup commit."
     ]
   },
   "gapAnalysis": {
@@ -46,7 +49,7 @@
       },
       {
         "finding": "F6 — The contract bump names six artefacts and two strict wire shapes, and nobody has named the field.",
-        "answer": "Plan task T8 lists them: api.Admission gains blocked []{issue, blockedBy[]} with waiting left as roots only; WaveReleaseResponse gains started and held (decision D9); DaemonAPIVersion 35 to 36 with its ledger entry; legionAdmission and LegionWaveReleaseResponse in packages/contracts/src/legion-api.ts; the six recorded examples rewritten with go test ./internal/api/ -update and ./internal/projection/ -update, each already registered in the fixture-to-schema table; and legion.daemonApiVersion in packages/pi-legion/package.json and packages/claude-envoy/package.json."
+        "answer": "Plan task T8 lists them: api.Admission gains blocked []{issue, blockedBy[]} with waiting left as roots only; WaveReleaseResponse gains started and held (decision D9); DaemonAPIVersion moves to 37 (main took 36 for INFRA-229 while the branch was open) with its ledger entry; legionAdmission and LegionWaveReleaseResponse in packages/contracts/src/legion-api.ts; the recorded examples rewritten with go test ./internal/api/ -update and ./internal/projection/ -update; and legion.daemonApiVersion 37 in packages/pi-legion/package.json and packages/claude-envoy/package.json."
       },
       {
         "finding": "F7 — Every start path must be classified: three must learn the check and three must not, or one is missed in either direction.",
@@ -54,11 +57,11 @@
       },
       {
         "finding": "F8 — The notice the spec relies on is not the notice the code sends: child-status cannot fire for a held child's start, because the child is already todo; what fires is phase-finished with phase admitted and an empty role.",
-        "answer": "Decision D7: reuse the existing phase-finished notice, which is what the spec's words ('the notice it already receives') allow, and add one sentence to the architect skill's phase-finished row saying what it means for a child that was waiting. No new notice kind. Named to the architect in the completion summary, since the spec's sentence describes child-status."
+        "answer": "Decision D7 as the architect ruled on 2026-10-25: a held child's start tells the tree's architect with the existing child-status notice, from a third producer of that kind (workflow/effects.go ChildUnblockedNotice), its reason naming the child, its root and what cleared the hold (the last blocker done, or the links taken off). The spec's words ('the notice it already receives when a child of its tree changes state') therefore hold as written, and specDepartures is empty."
       },
       {
         "finding": "F9 — The hand-over of a never-started child is narrow or broad, and the two change different sets of trees; the owner must confirm.",
-        "answer": "Decision D8 plans the narrow rule — hand over an admitted child only when its mirror row shows an unfinished blocker — because the spec's 'such a child' reads back to 'a child still waiting on blockers', and the broad rule would turn every never-gated child of every finishing tree into a root that takes a slot, which nothing in the spec asks for. Reported to the architect to confirm or correct, since it is a scope question about trees with no blockers at all."
+        "answer": "Decision D8 plans the narrow rule — hand over an admitted child only when its mirror row shows an unfinished blocker — because the spec's 'such a child' reads back to 'a child still waiting on blockers'; the architect confirmed the narrow reading on 2026-10-25."
       },
       {
         "finding": "F10 — Three acceptance lines no machine can decide as written: 'the only writes that follow are admission's own', 'reads the status table once per look', and 'the rule it encodes survives'.",
@@ -70,7 +73,7 @@
       },
       {
         "finding": "F12 — The driven proof cannot run in a worker pod as the harness stands: turning Dispatch's events on needs a NATS server, testnats.URL can only start a testcontainer, and this pod has no Docker and may not submit a cluster workload (kubectl answers yes/no/no against the three the docs require).",
-        "answer": "Decision D12 and plan task T10: testnats gains the door packages/envoy/cmd/dispatch/multiprocess_test.go:51-74 already has — LEGION_TEST_NATS_URL, plus LEGION_TEST_NATS_MONITOR_URL, which the plan reviewer's note showed is not optional because drained reads <monitorURL>/connz and only monitor(container) produces that address today. The container path stays for CI. The plan's command section gives the whole local recipe; the planner ran its Postgres half and the existing scratch-Dispatch test passed against it in 6.2 s."
+        "answer": "The driven proof needs a NATS server the pod can reach without Docker. main now carries that door itself (packages/daemon/internal/testnats/nats.go:49-50, LEGION_TEST_NATS_URL and LEGION_TEST_NATS_MONITOR_URL), which the branch adopted at d7e29553 in place of its own; the container path stays for CI. plan.md v4 task G4 gives the local recipe on the issue's volume ($TMPDIR)."
       },
       {
         "finding": "F13 — The docs bullet is missing the controller skill, whose tick row documents the payload, and the generated Claude plugin mirror, whose drift check fails.",
@@ -79,24 +82,53 @@
       {
         "finding": "F14 — Sourcing: the spec's claims about Dispatch hold, with one qualification — the cycle refusal is enforced at write time only and assertNoWaitPath gives up past parentDepthCap, so a pre-existing cycle costs a permanent wait rather than a loop.",
         "answer": "Recorded so nobody adds cycle detection: the plan adds none, and the spec's own 'an issue nobody ever finishes' paragraph already covers the permanent wait, which decision D11's periodic re-read and plan task T8's reporting make visible to the operator and the controller."
+      },
+      {
+        "finding": "G1 (generation 3) — Correcting only specDepartures and the F8 answer leaves plan.md v3's 'One stale record … not edited again' paragraph false and other plan.json answers stale against what was built: F6 says contract 35 to 36 (the code is 37), F9 says 'reported to the architect to confirm' (confirmed), F12 describes a testnats door the branch no longer builds, and plan.md names neither migration 0052 / TakenBack nor the links-off child-status start.",
+        "answer": "plan.md v4 adds 'Settled since this plan was first written' (contract 37, migration 0052 and record.Issue.TakenBack, main's testnats door, the links-off child-status start) and replaces the stale-record paragraph. This plan.json rewrites F6, F8, F9 and F12 and sets specDepartures to [] because with child-status the spec's acceptance words hold as written."
+      },
+      {
+        "finding": "G2 — Measured from the reviewer's own last review (e6afd3d7, code head 689ec075) the fingerprint has changed (a96877e4 → 9e8f0d05); no reviewer has read d7e29553's conflict resolution.",
+        "answer": "plan.md v4 'What each later role does' scopes the reviewer to d7e29553's adoption of main's testnats door, the new forward merge and G3's cleanup, with the review pair at the merged head; the check table requires an APPROVED review whose commit_id is the new head and mergeable MERGEABLE."
+      },
+      {
+        "finding": "G3 — The tester's comparison head depends on which head the live PR body's E2E (tester) line names.",
+        "answer": "Read live at 03:22Z: the E2E (tester) line names d7e29553 ('rebase re-check 689ec075 → d7e29553'). Because G3 changes code, the fingerprint from d7e29553 to the new head changes, so the plan gives the tester a full test round as pr-body.md requires; no architect call is needed."
+      },
+      {
+        "finding": "G4 — All fifteen implementer proof entries name d7e29553, one observation says 'version.json reads 36', and the plan's server recipe uses /tmp, which this deployment forbids for large files.",
+        "answer": "Task G4 lists every command to re-run at the new head, requires every headSha rewritten and the '36' corrected to 37, and gives a $TMPDIR server recipe that replaces the /tmp one."
+      },
+      {
+        "finding": "G5 — The expected unchanged fingerprint runs through a regenerated claude-envoy bundle, which main's changes reach.",
+        "answer": "Measured: in an extract of the textual merge 7864e7f4 + 135d22e0, bun install --frozen-lockfile and bun run check-dist on Bun 1.3.14 printed 'dist/ and legion/ match a fresh build'; the git diff -U0 of the change (hunk and index lines dropped, changelogs left out) hashes cf2f65ea… both from decf80f9 to d7e29553 and from 135d22e0 to the merged tree; union-resolved changelogs add byte-identical lines. G2 still runs check-dist and rebuilds if it fails."
+      },
+      {
+        "finding": "G6 — main may move again before the merge and take contract 37 or migration 0051/0052.",
+        "answer": "Task G1 re-reads main@origin after a fetch (DaemonAPIVersion must be 36, newest migration 0050) and, if either moved, has the implementer renumber and tell the architect before pushing; G5 names the old tip as the branch tip at merge time."
+      },
+      {
+        "finding": "G7 — The workspace recovery is not reconciled: the marker names 3929745d, the untracked marker would be snapshotted into the next commit, and an old workspace copy exists.",
+        "answer": "Measured: parents(3929745d) is 7864e7f4, the pushed tip; the local bookmark equals @origin; the old copy's working copy holds only the marker file. Task G0 keeps the marker out of every commit by starting from the bookmark; this planner's own handoff commit was made with jj new legion/INFRA-225@origin for the same reason."
+      },
+      {
+        "finding": "G8 — 'Keep both sides', 'update PR body lines' and 'post the rebase comment' had no machine check, and the claude-envoy conflict sits under ### Changed, not ### Added.",
+        "answer": "G2 names the checks (empty jj resolve --list, no markers, INFRA-255 and 'skill-scenarios rig' present, 'contract 37' in both changelogs); the check table requires the rebase comment and the body's Size, CI, E2E (implementer), Chain and 'Fast-follow: none' lines at the new head. plan.md v4 places the claude-envoy conflict under ### Changed."
+      },
+      {
+        "finding": "G9 — Unsupported claims in the planner's facts: claude-envoy/package.json is the branch's side, not a merge result; build.ts regenerates only dist/ and legion/, not asd-ste100 or skills/AGENTS.md; D7/D8 architect rulings carry no dispatch:// link.",
+        "answer": "plan.md v4 drops both mistaken claims (it names only the four files both sides touched and the pi-legion manifest as merged). The architect's D7 and D8 rulings are recorded in plan.md v3 and implement.json and are not reopened; the corrected F8/F9 answers name them as the architect's rulings without inventing a link."
+      },
+      {
+        "finding": "Plan review round 1 — G3 and G5 dropped the reviewer's second Fast-follow item (WaveReleaseResponse's doc comment, api/architect.go:45-55, still says started and held are 'read back from the children's records') and G5 deleted the Fast-follow line instead of setting it to none.",
+        "answer": "G3 now corrects that doc comment to what releaseOutcome does; G5 sets 'Fast-follow: none' as pr-body.md:48 has it; the check table greps the stale phrase away."
       }
     ]
   },
   "planReview": {
     "verdict": "approved",
-    "rounds": 1
+    "rounds": 2
   },
-  "specDepartures": [
-    {
-      "spec": "Acceptance: a held child's start reaches its architect through 'the notice it already receives when a child of its tree changes state' — which in the architect's notices table is child-status.",
-      "plan": "The plan relies on the phase-finished notice the admitted-to-planning transition already emits (table.go:59, engine.go:801 and :827-835), routed to the tree's architect, and adds one sentence to the architect skill's phase-finished row about a child that was waiting. No new notice kind.",
-      "evidence": "child-status is emitted only by Engine.leave (linger.go:99-104) when a child leaves or re-enters the workflow by a Dispatch status change. A held child is already in todo — release_children writes todo for every child it releases (api/architect.go:488-497) — and the admitted-to-planning row carries no EffectStatus (table.go:59), so its start moves no Dispatch status and child-status cannot fire.",
-      "outcome": {
-        "kind": "changed",
-        "acceptance": [
-          "A child waiting on blockers starts its first phase when its last blocker closes … and the tree's architect learns it started through the notice it already receives when a child of its tree changes state."
-        ]
-      }
-    }
-  ]
+  "specDepartures": [],
+  "generation": 3
 }
