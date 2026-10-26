@@ -3,7 +3,6 @@ import type { ReactNode } from "react";
 import type { Agent, CredentialSession } from "../../api/types";
 import { textMutedOnCanvas } from "../../theme/classes";
 import { AgentName } from "../refs/AgentName";
-import { useAgentRegistry } from "../refs/agent-registry";
 import {
   type CredentialSessionLine,
   type CredentialSessionSource,
@@ -25,24 +24,23 @@ const SOURCE_PREFIX: Record<CredentialSessionSource, string> = {
  * shares; so the person approving reads the whole id, and the state in words rather than only
  * the mark's ring. The full id breaks anywhere, so it never widens the record page's grid.
  */
-function CredentialSessionLineText({ line }: { line: CredentialSessionLine }): ReactNode {
-  // The cached agents list `AgentName` reads too, so the words and the mark always agree.
-  const state = useAgentRegistry(false).state(line.id);
-  let rest: string;
-  if (line.place !== null) {
-    rest = ` · ${line.id} · ${line.place.dir} · ${line.place.machineId}`;
-  } else if (state === "not-running") {
-    rest = ` · ${line.id} isn't running.`;
-  } else if (state === "unknown") {
-    rest = ` · couldn't check whether ${line.id} is running.`;
-  } else {
-    rest = ` · ${line.id}`;
+function statusText(line: CredentialSessionLine): string {
+  switch (line.status.kind) {
+    case "running":
+      return ` · ${line.id} · ${line.status.place.dir} · ${line.status.place.machineId}`;
+    case "not-running":
+      return ` · ${line.id} isn't running.`;
+    case "unknown":
+      return ` · couldn't check whether ${line.id} is running.`;
   }
+}
+
+function CredentialSessionLineText({ line }: { line: CredentialSessionLine }): ReactNode {
   return (
     <span className={`${textMutedOnCanvas} [overflow-wrap:anywhere]`}>
       {line.source === null ? "" : SOURCE_PREFIX[line.source]}
       <AgentName sessionId={line.id} storedTitle={undefined} />
-      {rest}
+      {statusText(line)}
     </span>
   );
 }
@@ -54,7 +52,8 @@ function CredentialSessionLineText({ line }: { line: CredentialSessionLine }): R
  * in words when its session isn't running or could not be checked. Takes the agents list (and
  * its loading/error state) as props rather than calling `useAgents` itself: a page that renders
  * several of these (the Inbox's pending-requests list) reads the list once from its own
- * page-level `useAgents` call for every line's directory and machine. Renders bare text/links,
+ * page-level `useAgents` call, and that one read decides every line's status, so the words
+ * follow the same `["agents"]` query as each name's mark. Renders bare text/links,
  * no wrapping element: each call site supplies its own layout.
  */
 export function CredentialSessionLines({

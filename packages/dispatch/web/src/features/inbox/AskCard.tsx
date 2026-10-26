@@ -274,9 +274,16 @@ export function AskCard({
   const submitHintId = `${answerFieldId}-hint`;
   const agentText = useAgentText();
   // The asker as its button's tooltip: a block ask the server indexed with no pending author
-  // has an empty label and reads as "asked".
-  const askerTitle = displayedAsk.author.id === "" ? "asked" : agentText.label(displayedAsk.author);
+  // has an empty label and reads as "asked". A session's tooltip also carries its full id, since
+  // the innermost title is the one a browser shows, and an untitled session's name is the short
+  // form `session:<8>…` that sessions started in the same minute share.
   const sessionAuthor = displayedAsk.author.kind === "session" ? displayedAsk.author : undefined;
+  const askerTitle =
+    displayedAsk.author.id === ""
+      ? "asked"
+      : sessionAuthor === undefined
+        ? agentText.label(displayedAsk.author)
+        : `${agentText.label(sessionAuthor)} · ${sessionAuthor.id}`;
   // The copy handles' values: the title the session stamped, as the clipboard has always had it.
   const sessionTitle = sessionAuthor?.origin?.session_title?.trim();
   const tmuxTarget = sessionAuthor?.origin?.tmux;

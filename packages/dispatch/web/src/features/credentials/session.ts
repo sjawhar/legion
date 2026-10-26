@@ -12,32 +12,43 @@ export interface CredentialSessionPlace {
  *  and only when both lines show. */
 export type CredentialSessionSource = "enrollment" | "request";
 
+/** Whether a line's session runs, by the same rule as `AgentName`'s state mark: `running` (with
+ *  where) while the agents list answered and lists it; `not-running` when it answered without
+ *  it; `unknown` while it hasn't answered or its latest read failed, which proves nothing. */
+export type CredentialSessionStatus =
+  | { kind: "running"; place: CredentialSessionPlace }
+  | { kind: "not-running" }
+  | { kind: "unknown" };
+
 /** One line the Inbox row and the record page both render: one of a credential request's ids,
- *  where it came from, and, while the agents list lists it, where it runs. The renderer names
- *  the id through `AgentName`, whose state mark says whether it is running, not running, or
- *  could not be checked. `source` is null only when both ids agree (or only the enrollment's was
- *  ever set); every request-sourced line is `"request"`, except when it equals a present
- *  enrollment id, where the two collapse into one line. */
+ *  where it came from, and whether its session runs. The renderer names the id through
+ *  `AgentName` and says the status in words. `source` is null only when both ids agree (or only
+ *  the enrollment's was ever set); every request-sourced line is `"request"`, except when it
+ *  equals a present enrollment id, where the two collapse into one line. */
 export interface CredentialSessionLine {
   id: string;
-  place: CredentialSessionPlace | null;
+  status: CredentialSessionStatus;
   source: CredentialSessionSource | null;
 }
 
-/** One id's line. Its place is set only while the agents list answered and lists it: a list
- *  that never loaded, or whose latest read failed, proves nothing, and `AgentName` then shows
- *  the state unknown. */
+/** One id's line, its status read from the one agents list the caller passes. */
 function resolveLine(
   id: string,
   source: CredentialSessionSource | null,
   agents: readonly Agent[],
   unresolved: boolean
 ): CredentialSessionLine {
-  const agent = unresolved ? undefined : agents.find((candidate) => candidate.session_id === id);
+  if (unresolved) {
+    return { id, source, status: { kind: "unknown" } };
+  }
+  const agent = agents.find((candidate) => candidate.session_id === id);
   return {
     id,
-    place: agent === undefined ? null : { dir: agent.dir, machineId: agent.host },
     source,
+    status:
+      agent === undefined
+        ? { kind: "not-running" }
+        : { kind: "running", place: { dir: agent.dir, machineId: agent.host } },
   };
 }
 
@@ -55,7 +66,7 @@ export function credentialSessionNamesAnyone(session: CredentialSession | undefi
  *  names an id. Two lines, one per source, when both are set and differ; the renderer prefixes
  *  the enrollment's so a reader can tell which one the broker verified. `unresolved` is true
  *  while the agents list hasn't answered yet or answered with an error (Envoy unavailable or not
- *  configured): no line then carries a place, since a quiet agents list proves nothing when the
+ *  configured): every line is then `unknown`, since a quiet agents list proves nothing when the
  *  list itself never loaded. */
 export function credentialSessionLines(
   session: CredentialSession | undefined,

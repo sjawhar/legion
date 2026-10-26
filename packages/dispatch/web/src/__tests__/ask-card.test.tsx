@@ -340,6 +340,19 @@ test("AskCard renders a blocking urgency notch", () => {
   }
 });
 
+// An untitled session is named by its short form, which sessions started in the same minute
+// share; the asker's tooltip, the innermost title a browser shows, carries its full id.
+test("an untitled session asker's tooltip carries its full id", () => {
+  const input = ask({ author: { id: "0123456789abcdef-untitled", kind: "session" } });
+  const { view } = renderCard(<AskCard ask={input} getAskThread={emptyThread(input)} />);
+
+  try {
+    expect(view.getByTitle("session:01234567… · 0123456789abcdef-untitled")).toBeTruthy();
+  } finally {
+    view.unmount();
+  }
+});
+
 test("AskCard copies its tmux target and confirms success", async () => {
   const originalClipboard = navigator.clipboard;
   const writeText = spyOn({ writeText: async () => undefined }, "writeText");

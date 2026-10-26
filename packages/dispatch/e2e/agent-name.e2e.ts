@@ -351,7 +351,7 @@ test("on a phone the ask card's asker reads its whole name beside Waiting on you
     ).toBeVisible();
     const name = card
       .getByRole("button", { expanded: false, name: /Running agent \(current\)/ })
-      .locator(`[title="${runCurrent}"]`);
+      .locator(`[title="${runCurrent} · ${runId}"]`);
     await expect(name).toHaveText(runCurrent);
     const fits = await name.evaluate((element) => ({
       client: element.clientWidth,
