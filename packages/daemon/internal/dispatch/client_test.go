@@ -343,22 +343,26 @@ func TestApprovalNamesOnlyAnOpenRequest(t *testing.T) {
 	}
 }
 
-// The list and the detail carry the issue's claim, which the daemon keeps as `<kind>:<id>`; null,
-// and a claim naming no actor, read as none.
+// The list and the detail carry the issue's claim, which the daemon keeps as `<kind>:<id>`; null
+// reads as nobody. A claim naming no actor is unread, as the decoder takes it on an issue event:
+// not nobody, but a claim the daemon cannot name.
 func TestReadsCarryTheClaimHolder(t *testing.T) {
 	claimed := map[string]any{"actor": map[string]any{"kind": "user", "id": "alice"}, "at": "2026-10-23T18:00:00Z"}
+	actorless := map[string]any{"actor": map[string]any{"kind": "user"}}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/api/v1/issues":
 			writeJSON(t, w, []map[string]any{
 				{"key": "LEGION-1", "status": "todo", "rank": "a", "claim": claimed},
 				{"key": "LEGION-2", "status": "todo", "rank": "b", "claim": nil},
-				{"key": "LEGION-3", "status": "todo", "rank": "c", "claim": map[string]any{"actor": map[string]any{"kind": "user"}}},
+				{"key": "LEGION-3", "status": "todo", "rank": "c", "claim": actorless},
 			})
 		case "/api/v1/issues/LEGION-1":
 			writeJSON(t, w, map[string]any{"key": "LEGION-1", "status": "todo", "rank": "a", "claim": claimed})
 		case "/api/v1/issues/LEGION-2":
 			writeJSON(t, w, map[string]any{"key": "LEGION-2", "status": "todo", "rank": "b", "claim": nil})
+		case "/api/v1/issues/LEGION-3":
+			writeJSON(t, w, map[string]any{"key": "LEGION-3", "status": "todo", "rank": "c", "claim": actorless})
 		default:
 			t.Fatalf("request = %s %s", r.Method, r.URL.Path)
 		}
@@ -370,22 +374,30 @@ func TestReadsCarryTheClaimHolder(t *testing.T) {
 	if err != nil {
 		t.Fatalf("list issues: %v", err)
 	}
-	if len(listed) != 3 || listed[0].ClaimedBy != "user:alice" || listed[1].ClaimedBy != "" || listed[2].ClaimedBy != "" {
-		t.Fatalf("listed claims = %#v, want user:alice, then none twice", listed)
+	if len(listed) != 3 || listed[0].ClaimedBy != "user:alice" || listed[0].ClaimUnread || listed[1].ClaimedBy != "" || listed[1].ClaimUnread ||
+		listed[2].ClaimedBy != "" || !listed[2].ClaimUnread {
+		t.Fatalf("listed claims = %#v, want user:alice, then nobody, then an unread claim", listed)
 	}
 	detail, err := client.GetIssue(context.Background(), "LEGION-1")
 	if err != nil {
 		t.Fatalf("get issue: %v", err)
 	}
-	if got := detail.Claim.Holder(); got != "user:alice" {
-		t.Fatalf("detail claim = %q, want user:alice", got)
+	if got := detail.Claim.Holder(); got != "user:alice" || detail.ClaimUnread {
+		t.Fatalf("detail claim = %q (unread %t), want user:alice", got, detail.ClaimUnread)
 	}
 	unclaimed, err := client.GetIssue(context.Background(), "LEGION-2")
 	if err != nil {
 		t.Fatalf("get issue: %v", err)
 	}
-	if unclaimed.Claim != nil {
-		t.Fatalf("detail claim = %#v, want none", unclaimed.Claim)
+	if unclaimed.Claim != nil || unclaimed.ClaimUnread {
+		t.Fatalf("detail claim = %#v (unread %t), want nobody", unclaimed.Claim, unclaimed.ClaimUnread)
+	}
+	unread, err := client.GetIssue(context.Background(), "LEGION-3")
+	if err != nil {
+		t.Fatalf("get issue: %v", err)
+	}
+	if unread.Claim != nil || !unread.ClaimUnread {
+		t.Fatalf("detail claim = %#v (unread %t), want an unread claim", unread.Claim, unread.ClaimUnread)
 	}
 }
 

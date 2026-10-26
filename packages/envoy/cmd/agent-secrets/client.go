@@ -311,14 +311,36 @@ func (c *client) CancelRequest(ctx context.Context, signer Signer, id string) er
 
 // --- POST /v1/grants/{id}/values, POST /v1/grants/{id}/revoke ---
 
-// GrantValues is POST /v1/grants/{id}/values's exact response shape.
+// GitHubNarrowing is POST /v1/grants/{id}/values's github_app object: one release's narrowing of
+// its GitHub App tokens, as the request names it and as the answer names what the broker applied.
+type GitHubNarrowing struct {
+	Owner        string   `json:"owner"`
+	Repositories []string `json:"repositories,omitempty"`
+	ReadOnly     bool     `json:"read_only,omitempty"`
+}
+
+// GrantValues is POST /v1/grants/{id}/values's exact response shape. GitHubApp is the narrowing
+// the broker applied: nil when it applied none, and always from a broker from before narrowing.
 type GrantValues struct {
 	Values    map[string]string `json:"values"`
 	ExpiresAt *time.Time        `json:"expires_at"`
+	GitHubApp *GitHubNarrowing  `json:"github_app"`
 }
 
-func (c *client) GrantValues(ctx context.Context, signer Signer, grantID string) (GrantValues, error) {
-	raw, err := c.doProof(ctx, signer, http.MethodPost, "/v1/grants/"+grantID+"/values", nil)
+// GrantValues releases grantID's values, asking the broker to narrow its GitHub App tokens when
+// narrowing is not nil; nil sends no body, the release as the grant holds it.
+func (c *client) GrantValues(ctx context.Context, signer Signer, grantID string, narrowing *GitHubNarrowing) (GrantValues, error) {
+	var body []byte
+	if narrowing != nil {
+		encoded, err := json.Marshal(struct {
+			GitHubApp *GitHubNarrowing `json:"github_app"`
+		}{narrowing})
+		if err != nil {
+			return GrantValues{}, fmt.Errorf("encode the narrowing: %w", err)
+		}
+		body = encoded
+	}
+	raw, err := c.doProof(ctx, signer, http.MethodPost, "/v1/grants/"+grantID+"/values", body)
 	if err != nil {
 		return GrantValues{}, err
 	}

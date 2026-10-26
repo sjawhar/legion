@@ -83,7 +83,7 @@ func (m *Mirror) put(ctx context.Context, tx pgx.Tx, observed intake.IssueStatus
 // project this way, and both write what it returns. A listing always shows the claim.
 func Observed(summary dispatch.IssueSummary) intake.IssueStatus {
 	return intake.IssueStatus{Key: summary.Key, Status: summary.Status, Blockers: summary.BlockedBy, Seq: summary.LastSeq,
-		ClaimedBy: summary.ClaimedBy, ClaimKnown: true}
+		ClaimedBy: summary.ClaimedBy, ClaimKnown: !summary.ClaimUnread}
 }
 
 // Reconcile mirrors the boot listing: every summary Dispatch returned for project, through the

@@ -6,6 +6,6 @@
   "dedupe_key": "dispatch-comment-agent",
   "issued_at": 1790124392000,
   "payload_summary": "CAPTURE-4 comment created",
-  "payload": "{\"id\":32,\"issue_key\":\"CAPTURE-4\",\"artifact_id\":null,\"project\":\"CAPTURE\",\"seq\":7,\"type\":\"comment.created\",\"actor\":{\"kind\":\"user\",\"id\":\"human\"},\"notify\":true,\"created_at\":\"2026-09-23T00:46:32Z\",\"payload\":{\"id\":\"4c4b2a5f-93df-4aeb-a2ca-b5c74187c8bf\",\"ask_id\":\"6c83cb7f-8f4e-4820-9e05-7c94fa725007\",\"ask_waiting_on\":\"agent\"}}",
+  "payload": "{\"id\":32,\"issue_key\":\"CAPTURE-4\",\"artifact_id\":null,\"project\":\"CAPTURE\",\"seq\":7,\"type\":\"comment.created\",\"actor\":{\"kind\":\"user\",\"id\":\"human\"},\"notify\":true,\"created_at\":\"2026-09-23T00:46:32Z\",\"payload\":{\"id\":\"4c4b2a5f-93df-4aeb-a2ca-b5c74187c8bf\",\"ask_id\":\"6c83cb7f-8f4e-4820-9e05-7c94fa725007\",\"ask_waiting_on\":\"agent\",\"ask_state\":\"open\"}}",
   "trace_id": "dispatch-comment-agent"
 }

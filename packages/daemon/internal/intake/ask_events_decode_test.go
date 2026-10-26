@@ -152,6 +152,27 @@ func TestAnEditThatMovesAnApprovalRequestDecodesAsItsMove(t *testing.T) {
 			t.Fatalf("an edit of %s decoded to %#v, want no fact", name, decoded.Fact)
 		}
 	}
+	// A request edit that does not say both versions cannot say whether it moved: no fact, reported.
+	for name, approval := range map[string]map[string]any{
+		"no requested_version": {"artifact_id": "artifact-7", "version": 4},
+		"no version":           {"artifact_id": "artifact-7", "requested_version": 3},
+	} {
+		decoded := decodeEvent(t, "ask.edited", person, map[string]any{"id": "ask-approval", "kind": "approval", "approval": approval})
+		if decoded.Fact != nil || len(decoded.Unread) != 1 {
+			t.Fatalf("an edit with %s decoded to %#v, unread %q; want no fact and the gap reported", name, decoded.Fact, decoded.Unread)
+		}
+	}
+}
+
+// An ask opened by a session that names no id is still an opening: the mirror cannot match the
+// session to the tree, so it records none, and the decoder reports the author instead of making
+// the event poison.
+func TestAnAskOpenedByASessionWithNoIDIsStillAnOpening(t *testing.T) {
+	decoded := decodeEvent(t, "ask.opened", map[string]any{"kind": "user", "id": "alice"}, map[string]any{"id": "ask-q", "kind": "question",
+		"author": map[string]any{"kind": "session"}})
+	if want := (DispatchAskOpened{Key: "LEGION-7", Ask: "ask-q", Kind: "question", Mark: askEventMark}); !reflect.DeepEqual(decoded.Fact, want) || len(decoded.Unread) != 1 {
+		t.Fatalf("an opening by a session with no id decoded to %#v, unread %q; want %#v and the author reported", decoded.Fact, decoded.Unread, want)
+	}
 }
 
 // An ask kind the daemon does not know — an event Dispatch recorded before it had questions and

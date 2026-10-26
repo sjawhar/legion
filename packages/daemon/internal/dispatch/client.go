@@ -68,6 +68,7 @@ func (c *HTTPClient) ListIssues(ctx context.Context, project string, statuses []
 			ResolvedRepo: deref(issue.ResolvedRepo),
 			BlockedBy:    issue.BlockedBy,
 			ClaimedBy:    issue.Claim.holder(),
+			ClaimUnread:  issue.Claim.unread(),
 		})
 	}
 	return issues, nil
@@ -93,6 +94,7 @@ func (c *HTTPClient) GetIssue(ctx context.Context, key string) (Issue, error) {
 		ResolvedRepo:      deref(response.ResolvedRepo),
 		BlockedBy:         response.BlockedBy,
 		Claim:             response.Claim.claim(),
+		ClaimUnread:       response.Claim.unread(),
 	}, nil
 }
 
@@ -380,12 +382,18 @@ type claimResponse struct {
 	Actor actor `json:"actor"`
 }
 
-// claim is the claim as Claim, nil for none or for one naming no actor.
+// claim is the claim as Claim, nil for none or for one naming no actor (unread).
 func (c *claimResponse) claim() *Claim {
-	if c == nil || c.Actor.Kind == "" || c.Actor.ID == "" {
+	if c == nil || c.unread() {
 		return nil
 	}
 	return &Claim{Kind: c.Actor.Kind, ID: c.Actor.ID}
+}
+
+// unread says the read showed a claim that names no actor: not nobody, but a claim the daemon
+// cannot name, as intake's decoder takes the same claim on an issue event.
+func (c *claimResponse) unread() bool {
+	return c != nil && (c.Actor.Kind == "" || c.Actor.ID == "")
 }
 
 // holder is the claim as Claim.Holder writes it.

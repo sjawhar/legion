@@ -6,13 +6,13 @@ edit to an approved root spec, and on `design-approved`, `design-changes-request
 
 ## Writing the root spec
 
-Specifications written into Dispatch follow `skill://dispatch`'s
-[Writing a spec](skill://dispatch/SKILL.md#writing-a-spec). Wave releases, child closures and your
+Specifications written into Dispatch follow
+[`dispatch-writing-specs`](skill://dispatch-writing-specs/SKILL.md#the-outline). Wave releases, child closures and your
 own status are visible from the issue tree and the handoffs; do not narrate them into the spec or a
 `dispatch message`.
 
 Extend the primary document in place: a new version adds only the evidence each decision needs and
-what the human decides, each as a [decision block](skill://dispatch/SKILL.md#decision-blocks).
+what the human decides, each as a [decision block](skill://dispatch/SKILL.md#asks-and-ask-blocks).
 Never post a second "spec" artifact beside it: `dispatch artifact` with the primary document's name
 replaces the human's document.
 
@@ -37,7 +37,7 @@ When the gate is armed, run this exact sequence before the tree's work starts:
    ```
 
 2. Settle every decision block as
-   [Approval of a spec](skill://dispatch/SKILL.md#approval-of-a-spec) says;
+   [Approval](skill://dispatch-writing-specs/SKILL.md#approval) says;
    `dispatch request-approval` refuses while one is open. Each answer reaches you, since you follow
    every ask you open.
 3. Run `task(agent="plan-gap-analyst")` with the current root spec, the code and command output it

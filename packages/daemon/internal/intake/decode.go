@@ -310,10 +310,12 @@ func decodeDispatchEvent(event dispatchEvent, unread *[]string) (Fact, error) {
 		if ask.Restored {
 			return DispatchAskRestored{Key: event.IssueKey, Ask: ask.ID, Kind: ask.kind, Artifact: ask.artifact(), Open: true, Mark: event.mark()}, nil
 		}
+		// A session author with no id cannot be matched to the tree, so the ask is mirrored as one no
+		// session of the tree opened, and the author is reported, rather than the event lost.
 		session := ""
 		if ask.Author.Kind == "session" {
 			if ask.Author.ID == "" {
-				return nil, fmt.Errorf("Dispatch ask.opened payload has a session author with no id")
+				*unread = append(*unread, "ask.opened has a session author with no id")
 			}
 			session = ask.Author.ID
 		}
@@ -346,13 +348,20 @@ func decodeDispatchEvent(event dispatchEvent, unread *[]string) (Fact, error) {
 		// (docs.MoveApprovalAsk), and shows a request whose requested_version is below its version
 		// waiting on its agent (approvalMoved in waitingOnExpression). Any other edit, of a question
 		// or of a request still at the version handed to the person, leaves the turn as it was, and
-		// is no fact.
+		// is no fact. A request edit with no requested_version or no version (an event recorded
+		// before Dispatch kept them) cannot say whether it moved, so it is no fact, and reported.
 		ask, err := decodeAskPayload(event, unread)
 		if err != nil {
 			return nil, err
 		}
-		if ask.kind != record.AskApproval || ask.Approval == nil || ask.Approval.ArtifactID == "" ||
-			ask.Approval.RequestedVersion >= ask.Approval.Version {
+		if ask.kind != record.AskApproval || ask.Approval == nil || ask.Approval.ArtifactID == "" {
+			return nil, nil
+		}
+		if ask.Approval.Version == nil || ask.Approval.RequestedVersion == nil {
+			*unread = append(*unread, "ask.edited of an approval request has no version or requested_version")
+			return nil, nil
+		}
+		if *ask.Approval.RequestedVersion >= *ask.Approval.Version {
 			return nil, nil
 		}
 		return DispatchApprovalMoved{Key: event.IssueKey, Ask: ask.ID, Artifact: ask.Approval.ArtifactID, Mark: event.mark()}, nil
@@ -457,8 +466,8 @@ type askPayload struct {
 	Restored bool `json:"restored"`
 	Approval *struct {
 		ArtifactID       string `json:"artifact_id"`
-		Version          int    `json:"version"`
-		RequestedVersion int    `json:"requested_version"`
+		Version          *int   `json:"version"`
+		RequestedVersion *int   `json:"requested_version"`
 	} `json:"approval"`
 	kind string
 }

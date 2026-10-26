@@ -910,8 +910,8 @@ func TestGateRegistrationCarriesAChangesRequestDispatchAlreadyShows(t *testing.T
 }
 
 // A read that shows an approval request open names it on the registration, with whose turn it
-// waits on, so the gate binds to it and mirrors it; a request waiting on the person is not the
-// agent's.
+// waits on, so the registration mirrors it as the read found it; a request waiting on the person
+// is not the agent's.
 func TestGateRegistrationCarriesTheOpenRequestAndItsTurn(t *testing.T) {
 	h, facts, statuses := newArchitectHarness(t, nil, nil)
 	const withPerson, withAgent = "d2f1c6b4-8e07-4a53-9c1d-6b8f2e5a7093", "4a6b8c0d-2e4f-4a6b-8c0d-2e4f6a8b0c1d"

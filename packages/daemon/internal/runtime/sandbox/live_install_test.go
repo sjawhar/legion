@@ -533,7 +533,7 @@ func (r *liveRig) checkImageProbeMissingVolumeRefusal() error {
 			select {
 			case <-watching.Done():
 				return
-			case <-time.After(500 * time.Millisecond):
+			case <-time.After(100 * time.Millisecond):
 			}
 		}
 	}()
@@ -543,6 +543,12 @@ func (r *liveRig) checkImageProbeMissingVolumeRefusal() error {
 	refusedAt := time.Now()
 	stopWatching()
 	pod := <-lastSeen
+	// A refusal read on the first event read after scheduling can land inside one tick of the
+	// watcher, so it may never have sampled the pod. The Sandbox's delete is background
+	// propagation, so the store still holds the pod just after ProbeImage returns: read it once more.
+	if pod == nil {
+		pod = rt.storedPod(probe)
+	}
 	if refusal == nil {
 		return fmt.Errorf("ProbeImage passed with volume operator-missing naming ConfigMap %s, which does not exist", missing)
 	}

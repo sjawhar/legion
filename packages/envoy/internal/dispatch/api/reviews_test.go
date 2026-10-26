@@ -604,4 +604,13 @@ func TestTheApprovalReadNamesTheReviewThatCommittedLast(t *testing.T) {
 	if got.Approval.Seq == nil || *got.Approval.Seq != int64(event.Seq) || got.Approval.Reason == nil || *got.Approval.Reason != reason {
 		t.Fatalf("approval = %#v, want the review that committed last (sequence %d, reason %q)", got.Approval, event.Seq, reason)
 	}
+	// The reviews list names the same order: the delayed review, which committed last, first.
+	listed := documentReviews(t, handler, issue.PrimaryArtifactID)
+	if len(listed) != 2 || listed[0].ID != second.ID || listed[1].ID != first.ID {
+		ids := make([]string, len(listed))
+		for i, review := range listed {
+			ids[i] = review.ID
+		}
+		t.Fatalf("reviews listed %v, want the delayed review %s, which committed last, before %s", ids, second.ID, first.ID)
+	}
 }
