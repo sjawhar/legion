@@ -2,11 +2,27 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-195",
-  "completed": "2026-10-26T02:14:00Z",
+  "completed": "2026-10-26T07:05:00Z",
   "generation": 2,
   "pullRequest": "https://github.com/sjawhar/legion/pull/2205",
-  "codeHead": "2451b5dcba7766ceea944be791e461b5162fecdb",
+  "codeHead": "ea067bb9830f2c703d87f7bd334b9253dd77ee8a",
   "proof": [
+    {
+      "criterion": "A2 in Firefox (review round 2): rows 11a and 11d of e2e/keyboard-session-pickers.e2e.ts pass; the switch's answer reaches a Firefox page whose event stream reconnected",
+      "surface": "Dispatch browser suite in this issue pod: real Go Dispatch server, production SPA bundle, rootless Postgres 17 + pgvector, Playwright Firefox 155 (and chromium/iphone)",
+      "command": "cd packages/dispatch && bun run e2e -- --project=firefox e2e/keyboard-session-pickers.e2e.ts --repeat-each=4 (server without and with the fix); bun run e2e -- --project=firefox (whole project); bunx playwright test --config e2e/playwright.config.ts --project=chromium --project=iphone e2e/agent-view.e2e.ts e2e/agent-view-settings.e2e.ts e2e/keyboard-session-pickers.e2e.ts e2e/live.e2e.ts",
+      "observed": "Cause: the suite truncates the event log between scenarios, so Dispatch ends open event streams; the page's reconnect got headers and no body byte until the 15 s heartbeat, and Firefox resolved the fetch only on the first body byte, so onOpen's refresh never ran and the answer never showed (scratch instrumentation: stream settled ~50 ms after the POST, reconnect flushed by the server at since=3, no onOpen). Fix f563ddfd: GET /api/v1/events writes ': open' with its headers. Firefox keyboard spec ×4: 20 passed with the event log reset mid-row 19 times. At ea067bb9: whole firefox project 51 passed, 2 skipped; chromium+iphone live-view specs 90 passed, 12 skipped. Go: TestSSEStreamOpensAtOnceForABrowserWaitingOnItsFirstByte passes; the api package's stream tests pass. Evidence: https://github.com/sjawhar/legion/pull/2205#issuecomment-6409973033",
+      "headSha": "ea067bb9830f2c703d87f7bd334b9253dd77ee8a",
+      "negativeControl": "The same Firefox spec ×4 against the server without the ': open' write → 7 failed (11a ×3, 11d ×4), the rows CI failed in job 121364414957; the Go test without the write → `first body bytes = \"\" after 2s`."
+    },
+    {
+      "criterion": "Fast-follow brought into this pull request: the rig's driver split into Oh My Pi, services, browser and session-file modules with run() as a table of named checks, proven by a rig run",
+      "surface": "scripts/e2e/dispatch-session-settings.sh in this issue pod on anthropic/claude-haiku-5-5 + anthropic/claude-haiku-4-5, OPENAI_API_KEY unset (OpenAI paused for Legion pods; the controller's and architect's decision)",
+      "command": "SESSION_SETTINGS_MODELS='anthropic/claude-haiku-5-5 anthropic/claude-haiku-4-5' bash scripts/e2e/dispatch-session-settings.sh, with check 18 left out (scratch) for the new and the old driver, and with check 18 moved last (scratch) at ea067bb9",
+      "observed": "New driver and old driver each `all 19 checks passed in 251s`, same sequence of check names. At ea067bb9: checks 1-17 and 19-20 ok, then `FAIL fallback: timed out after 240s`. Check 18 cannot pass on two Anthropic models: Oh My Pi skips a same-provider fallback candidate when the last assistant turn carries a sibling model's signed thinking (dispatch://INFRA-309; its owner reproduced it from dispatch://INFRA-195/artifact/check18-fallback-log-txt, and the session's last assistant turn before the pick was anthropic/claude-haiku-4-5 with signed thinking). Check 18 last passed on the default pair at 2451b5dc.",
+      "headSha": "ea067bb9830f2c703d87f7bd334b9253dd77ee8a",
+      "negativeControl": "Check 18 itself on the Anthropic pair → FAIL fallback with both drivers, which shows the rig still detects a session that never falls back."
+    },
     {
       "criterion": "A4 proof surface (the tester's failures[0]): rig check 13 `no-answer` judges the switch's delivery attempt only once Dispatch has recorded it, so it passes on correct code however the timing falls",
       "surface": "scripts/e2e/dispatch-session-settings.sh in this issue pod (real Oh My Pi --mode rpc on this pi-envoy, Envoy listener, NATS, Dispatch, rootless Postgres, Chromium)",
@@ -33,7 +49,19 @@
     }
   ],
   "filesChanged": [
-    "scripts/e2e/lib/dispatch-session-settings.ts"
+    "packages/envoy/internal/dispatch/api/events.go",
+    "packages/envoy/internal/dispatch/api/server_test.go",
+    "packages/envoy/internal/dispatch/api/events_identity_test.go",
+    "packages/envoy/CHANGELOG.md",
+    "scripts/e2e/lib/dispatch-session-settings.ts",
+    "scripts/e2e/lib/session-settings-common.ts (new)",
+    "scripts/e2e/lib/session-settings-omp.ts (new)",
+    "scripts/e2e/lib/session-settings-services.ts (new)",
+    "scripts/e2e/lib/session-settings-browser.ts (new)",
+    "scripts/e2e/lib/session-settings-session-file.ts (new)",
+    "scripts/e2e/dispatch-session-settings.sh",
+    "scripts/e2e/README.md",
+    "merge ea067bb9: packages/dispatch/web/src/features/agent-view/{AgentConversationPage.tsx,AgentConversationPage.test.tsx,AgentRuntimeThread.tsx,AgentThread.tsx,AgentThread.boundary.test.tsx}, packages/dispatch/web/src/features/refs/markdown-surfaces.test.tsx, packages/dispatch/AGENTS.md"
   ],
   "trickyParts": [
     "Rig check 14 step 2's barrier subscribes to agentStreamControlSubject(S) with a bare NATS client (Services.nextControl) and waits for the relay's first watch plus 1 s; without it the RPC change can land before the first watch and be read while nobody watches.",
@@ -41,8 +69,10 @@
     "keyboard-session-pickers.e2e.ts is self-contained (imports only ./agents, ./api, ./seed, ./users helpers present at the base) so the A5 baseline fails each row on its own assertion."
   ],
   "deviations": [
-    "No red test was handed over (the tester recorded the rig run as the red evidence); the scratch-delay run of the old driver is the deterministic reproduction.",
-    "Earlier rounds' proofs (round-1 rig and browser runs at 87ea738e) are kept in `proof`; this round changes only check 13's wait."
+    "The Firefox fix is in Dispatch's server (events.go), not the page or the row: the row was right, and the same gap held Firefox on 'Reconnecting…' for up to 15 s after any production reconnect.",
+    "The split is proven by checks 1-17 and 19-20 on two Anthropic models (accepted by the architect and decided by the controller, since OpenAI is paused for Legion pods), not by a 20-check run on the default pair.",
+    "Forward merge of main at ea067bb9 because GitHub reported the pull request CONFLICTING after #2227; fingerprint changed (resolution edits), so the browser proof was re-run at the merge head. The resolution adds AgentThread's `held` prop: Send stays disabled and reads 'Send' while a switch is pending, and the line under the box shows the switch's wait text, not 'Enter to send'.",
+    "Open, for the architect: the rig's default model pair still names openai/gpt-5-nano, which no Legion pod can run while OpenAI is paused; on two Anthropic models check 18 fails until dispatch://INFRA-309 ships."
   ],
   "openQuestions": [],
   "discoveredComplexity": [],
@@ -63,7 +93,17 @@
       "thread": "PRRT_kwDORFy7ds6wG37A",
       "reply": "Fixed in 87ea738e: the keys leave the script's environment before it starts anything and reach only the driver and Oh My Pi; the README says so",
       "resolvedAt": "87ea738e6a51"
+    },
+    {
+      "thread": "PRRT_kwDORFy7ds6wIHBn",
+      "reply": "Fixed in f563ddfd: GET /api/v1/events sends ': open' with its headers (row 11a)",
+      "resolvedAt": "ea067bb9830f"
+    },
+    {
+      "thread": "PRRT_kwDORFy7ds6wIHBs",
+      "reply": "Fixed in f563ddfd: same cause and fix (row 11d)",
+      "resolvedAt": "ea067bb9830f"
     }
   ],
-  "round": "after test round at 87ea738e (failures[0]: rig check 13 no-answer race)"
+  "round": "review round 2 (code head 2451b5dc): Firefox rows 11a/11d, plus the fast-follow items brought into this pull request; then a forward merge of main (CONFLICTING after #2227)"
 }
