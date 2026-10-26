@@ -16,6 +16,11 @@
 
 ### Changed
 
+- The plugin's regenerated `legion/` copy of the `legion-worker` skill's tools reference no longer
+  tells a role to add a new image package to the licence file by hand: the worker image lists every
+  Debian package it carries in `/usr/share/doc/legion/THIRD_PARTY_NOTICES` from its own dpkg
+  database (INFRA-255). The Dockerfile's comments and its toolchain smoke step stay hand-kept.
+
 - The plugin declares daemon API contract 36 in `package.json`'s `legion.daemonApiVersion`
   (INFRA-229): `GET /legion/v1/state` carries `state` on an issue's pull request, its `open`,
   `merged` or `closed`, always emitted, so the MCP server's strict state reader admits the field

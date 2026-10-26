@@ -104,6 +104,11 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 
 ### Changed
 
+- The `legion-worker` skill's tools reference no longer tells a role to add a new image package to
+  the licence file by hand: the worker image lists every Debian package it carries in
+  `/usr/share/doc/legion/THIRD_PARTY_NOTICES` from its own dpkg database (INFRA-255). The
+  Dockerfile's comments and its toolchain smoke step stay hand-kept.
+
 - The merger's READY, as the `legion` tool's `handoff_complete` with `ready: true` reaches it,
   refuses one ground fewer: `READY_CHECKS_NOT_GREEN` is gone, and the daemon reads none of the
   head's check runs or commit statuses. GitHub, under the base branch's own rules, decides whether
