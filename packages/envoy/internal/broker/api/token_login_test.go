@@ -174,6 +174,28 @@ func TestAVerifiedAccountSpendsItsOwnBucketToo(t *testing.T) {
 	}
 }
 
+// TestATokenLoginTheBrokerCouldNotCompleteSpendsNoAccountBucket: while the broker's database is
+// away, a verified token login fails with a 5xx the broker decided nothing by, and the daemon
+// retries it every few seconds so it logs in again soon after the database is back. Such a login
+// must not spend its account's bucket: if it did, the bucket would be empty a few retries into
+// the outage, and the daemon's first login after the database is back would be refused 429 and
+// wait out its long schedule, up to a minute, instead of being served.
+func TestATokenLoginTheBrokerCouldNotCompleteSpendsNoAccountBucket(t *testing.T) {
+	ts := newTestServerWith(t, func(d *api.Deps) {
+		d.LauncherLimits = &api.LauncherLimits{
+			PerAddress: ratelimit.Limit{Every: time.Hour, Burst: 100},
+			PerLogin:   ratelimit.Limit{Every: time.Hour, Burst: 2},
+		}
+	})
+	ts.Store.Close()
+	for i := range 4 {
+		status, body := ts.tokenLogin(t, ts.accountToken(t, daemonAccount, "", time.Hour), ts.daemonRequest(t, newSigningKey(t)))
+		if status < 500 || status > 599 {
+			t.Fatalf("the daemon's login %d with the database away = %d %s, want a 5xx: a login the broker could not complete spends none of its account's bucket of 2", i, status, body)
+		}
+	}
+}
+
 // TestARestartLogsInAgainAndKeepsItsOneCredential is a daemon's restart: a second token login for
 // the same account, with a new key and a fresh token, answers the same credential, moved to the new
 // key, so no person is asked and the pods the first boot enrolled stay the daemon's own. The old
