@@ -178,8 +178,11 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   acceptance and the controller find one. At every start the controller's catch-up
   (`legion-controller/references/finding-asks.md`) files a clear-defect ask at once, moves an
   own-issue decision ask to the report issue, and acts on an answered finding ask of an issue in
-  `needs_review`, reading that list as `--status needs_review --limit 250` and paging by
-  `--offset`, since the default page stops at 50 rows and an issue past it would wait for good.
+  `needs_review`, reading that list as one unpaged snapshot before it acts on any issue in it:
+  `GET /api/v1/issues?project=<P>&status=needs_review` with neither `limit` nor `offset`, which
+  answers every match in one array (`api/issue_page.go`'s `parseIssuePage`). Offset paging would
+  skip an issue whose status changes between reads, which the acceptance its own reply releases
+  does, and `dispatch issues` always sends a page, so that command cannot take this read.
   Its reply releases the held acceptance. The planner's core prompt now matches
   the headless part composed with it: a clear defect goes to whoever coordinates the project's
   work, and a finding that needs a decision is an ask (`roles_test.go` pins both sentences and

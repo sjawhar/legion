@@ -110,11 +110,14 @@ catch up), and on the finding asks roles opened on their own issues while no con
 3. List the answered asks still waiting on you, which no `dispatch` command lists:
    `curl -sS -H "Authorization: Bearer $(cat "$DISPATCH_TOKEN_FILE")" "$DISPATCH_URL/api/v1/issues/<REPORT KEY>/asks?state=answered&thread=1" | jq -c '[.[] | select(any(.options[]; .label == "Do not file" or .label == "Admit it")) | .answer.at as $t | select([.thread.replies[]? | select(.author.kind == "session" and .created_at > $t and (.body | test("^(Filed dispatch://|Admitted dispatch://|Not filed:|Not admitted:)")))] | length == 0) | {id, question, answer}]'`.
    Run the same for each issue in `needs_review`, whose architect holds its acceptance on a
-   finding ask's answer. Read that list filtered and to its end, since the default page stops at
-   50 rows and an issue past it would wait for good: `dispatch issues --project <PROJECT> --status
-   needs_review --limit 250 --offset <n>`, starting at `0` and adding 250 until a page returns
-   fewer than 250 rows. Act on each as above, a triage ask as the skill's "New issue triage"
-   says. Your reply under it releases that acceptance.
+   finding ask's answer. Take the list as one snapshot before you act on any issue in it:
+   `curl -sS -H "Authorization: Bearer $(cat "$DISPATCH_TOKEN_FILE")" "$DISPATCH_URL/api/v1/issues?project=<PROJECT>&status=needs_review" | jq -r '.[].key'`.
+   With neither `limit` nor `offset`, Dispatch answers every matching issue in one array
+   (`api/issue_page.go`'s `parseIssuePage`). Do not page it. Pages by `offset` skip or repeat an
+   issue whose status changes between reads, and the acceptance your reply releases moves an issue
+   out of `needs_review`. `dispatch issues` always sends a page, so it cannot take this read. Act on each
+   as above, a triage ask as the skill's "New issue triage" says. Your reply under it releases
+   that acceptance. An issue that enters `needs_review` after the snapshot is read at your next start.
 4. List the clear defects nobody filed yet. Each is an evidence comment whose first line starts
    `Clear defect from `, with no session reply under it that starts `Filed dispatch://`, `Not
    filed:` or `Asked dispatch://` (a role that asked instead, which step 2 takes):
