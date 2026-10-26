@@ -66,7 +66,7 @@ func LoadSource(ctx context.Context, q Queryer, kind, id string) (Source, error)
 }
 
 // Reindex reconciles source's edges with its stored text in tx, as its live write would by the
-// current rules (replace), resolving a bare key and a `#id` through resolver: the source's
+// current rules (replaceAt), resolving a bare key and a `#id` through resolver: the source's
 // NewResolver, or, for a source of a scope the drain reads once, its NewScopedResolver. An edge it
 // adds takes the source's own write time as created_at and carries no source_seq, since no event
 // introduced it, and no event is appended. A source that no longer exists loses its edges. It

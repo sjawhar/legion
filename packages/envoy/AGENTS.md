@@ -1454,15 +1454,16 @@ text's document declares under that id. That document is `refs.ScopeOf` (a versi
 ask's block, anchor or owning document, else its issue's spec; a comment's anchor or owning
 document, else its ask's or thread parent's scope, else its issue's spec; an issue message's
 spec; a direct message none), and the question map is `refs.QuestionMap` (each `:::ask{#id}` line
-of the latest version, to the ask settlement made for it or a copy's `copied_from` ask; plain
-selects and a scan of directive lines, never `loadAskBlocks`, which locks rows).
+of the latest version outside fenced code, to the ask settlement made for it or a copy's
+`copied_from` ask; plain selects and a scan of directive lines, never `loadAskBlocks`, which locks
+rows).
 `refs.ScopeSources` is the inverse (`TestScopeOfAndScopeSourcesAgree`), and
 `GET /api/v1/references/questions?kind=&id=` serves both to the dashboard so it resolves `#id` by
 the same rule. Text the rule has not read is owed in `refs_owed` (migrations 0118-0123): triggers
 on `comments`, `asks`, `messages` and `artifact_versions` enqueue a source when what the index
 reads of it changes, and a document as a `scope` when its question map may have changed (a
-question block's ask made or moved; a version whose sorted `:::ask{` lines differ from the
-previous markdown version's, never a prose-only edit); 0123 seeds every stored source.
+question block's ask made or moved; a version whose `:::ask{` and fence lines, in document order,
+differ from the previous markdown version's, never a prose-only edit); 0123 seeds every stored source.
 `refs.ReplaceCounted` deletes its own source's row in the write's transaction, so only a write an
 earlier release made stays owed. `docs.Service.RunReferenceReindex` drains the queue under the
 `reference-reindex` lease (`duty.Exclusive`): batches of 200, 2 s apart while a batch is full and

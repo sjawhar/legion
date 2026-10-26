@@ -182,10 +182,11 @@ func TestRefsOwedTriggersOweWhatAnEarlierReleaseWrites(t *testing.T) {
 }
 
 // A document version owes its document as a scope only when the lines its question map is read
-// from change: a question block added, renamed or dropped, or settlement writing copied_from into
-// one, each owes it, while an edit of the prose around blocks that stand as they were, or one
-// that only moves them, owes the version alone. A document's first version owes the scope when it
-// declares a block, and not when it declares none.
+// from change, in document order: a question block added, renamed, dropped or moved, settlement
+// writing copied_from into one, or a fence opened or closed around one, each owes it, while an
+// edit of the prose, or of fenced code, around blocks that stand as they were owes the version
+// alone. A document's first version owes the scope when it declares a block, and not when it
+// declares none.
 func TestRefsOwedVersionOwesItsScopeOnlyWhenItsQuestionBlocksChange(t *testing.T) {
 	store := openEmptyTestStore(t)
 	ctx := context.Background()
@@ -215,10 +216,13 @@ func TestRefsOwedVersionOwesItsScopeOnlyWhenItsQuestionBlocksChange(t *testing.T
 		{"a first version declaring a block", declared, "Intro.\n\n:::ask{#q1}\nWhich?\n:::\n", true},
 		{"an edit of the prose alone", declared, "Intro, reworded.\n\n:::ask{#q1}\nWhich one?\n:::\n", false},
 		{"a block added", declared, "Intro, reworded.\n\n:::ask{#q1}\nWhich one?\n:::\n\n:::ask{#q2}\nWhen?\n:::\n", true},
-		{"the blocks moved", declared, ":::ask{#q2}\nWhen?\n:::\n\nIntro, reworded.\n\n:::ask{#q1}\nWhich one?\n:::\n", false},
+		{"the blocks moved", declared, ":::ask{#q2}\nWhen?\n:::\n\nIntro, reworded.\n\n:::ask{#q1}\nWhich one?\n:::\n", true},
 		{"a block renamed", declared, ":::ask{#q3}\nWhen?\n:::\n\nIntro, reworded.\n\n:::ask{#q1}\nWhich one?\n:::\n", true},
 		{"copied_from written into a block", declared, `:::ask{#q3 copied_from="` + copiedFrom + `"}` + "\nWhen?\n:::\n\nIntro, reworded.\n\n:::ask{#q1}\nWhich one?\n:::\n", true},
 		{"a block dropped", declared, `:::ask{#q3 copied_from="` + copiedFrom + `"}` + "\nWhen?\n:::\n\nIntro, reworded.\n", true},
+		{"a fence opened around an unchanged block", declared, "```\n" + `:::ask{#q3 copied_from="` + copiedFrom + `"}` + "\nWhen?\n:::\n```\n\nIntro, reworded.\n", true},
+		{"the fenced code edited", declared, "```\n" + `:::ask{#q3 copied_from="` + copiedFrom + `"}` + "\nWhen, exactly?\n:::\n```\n\nIntro, reworded.\n", false},
+		{"the fence removed", declared, `:::ask{#q3 copied_from="` + copiedFrom + `"}` + "\nWhen, exactly?\n:::\n\nIntro, reworded.\n", true},
 		{"a later version declaring no block, after none did", plain, "Blocked on ACME-1 still.\n", false},
 	} {
 		execAll(t, store, `delete from refs_owed`)

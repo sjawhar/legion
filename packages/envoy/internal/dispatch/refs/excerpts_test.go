@@ -26,7 +26,7 @@ func TestOwedExcerptsAreFoundThroughTheDriftIndexAndRecordedOnce(t *testing.T) {
 	if _, err := tx.Exec(ctx, `insert into artifact_versions (artifact_id, number, markdown, authors) values ($1, 1, 'v1', '[]')`, document); err != nil {
 		t.Fatalf("write version 1: %v", err)
 	}
-	if _, err := replace(ctx, tx, "artifact", document, "see dispatch://CORE-1 and dispatch://CORE-2", "https://dispatch.example"); err != nil {
+	if _, err := ReplaceCounted(ctx, tx, "artifact", document, "see dispatch://CORE-1 and dispatch://CORE-2", "https://dispatch.example"); err != nil {
 		t.Fatalf("index mentions: %v", err)
 	}
 	if err := tx.Commit(ctx); err != nil {

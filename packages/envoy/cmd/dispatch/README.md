@@ -945,10 +945,11 @@ server parses no markdown, so a mention in a code span, a code block or a link's
 indexed, though the dashboard links none of them inside code or a link.
 
 The question map of a document (`refs.QuestionMap`) is each `:::ask{#id}` line of its latest
-version, to the ask settlement made for that block on that document, or, for a copied block, to
-the original ask its `copied_from` names, so a `#id` citing a copy is an edge to the original. A
-block settlement has not made an ask for yet is absent. It reads the directive lines without
-parsing the document and takes no lock. The document a text belongs to is `refs.ScopeOf`:
+version outside fenced code, to the ask settlement made for that block on that document, or, for
+a copied block, to the original ask its `copied_from` names, so a `#id` citing a copy is an edge
+to the original. A block settlement has not made an ask for yet is absent, and so is a fenced
+example of one, whatever `copied_from` it carries. It reads the directive lines without parsing
+the document and takes no lock. The document a text belongs to is `refs.ScopeOf`:
 
 - a document version: that document;
 - an ask: the document its block is on, else the one it is anchored to, else the one that owns
@@ -971,11 +972,14 @@ scope changes, and, when it is made or its `block_id` or block document changes,
 document as a `scope`; an issue message when it is written or its body changes; and, for each
 version holding markdown, its document as an `artifact`, and as a `scope` only when the version's
 question directives differ from the previous markdown version's: every line holding a `:::ask{`
-opener, sorted, so adding, dropping or renaming a block, or settlement writing `copied_from` into
-one, owes the scope, and an edit of the prose around unchanged blocks does not (a first version
-owes it when it has any such line). `refs.ReplaceCounted`, which every indexing write goes
-through, deletes its own source's row at the end of the write's transaction, so a write this
-release indexes is not owed again; an earlier release never deletes one, so its writes stay owed.
+opener or a run of three backticks or tildes, in document order, so adding, dropping, renaming or
+moving a block, settlement writing `copied_from` into one, or a fence opened or closed around one
+owes the scope, and an edit of the prose or the code around unchanged blocks does not (a first
+version owes it when it has any `:::ask{` line; a version with none compares as no lines). A
+fenced example owes at most a scope re-read that finds nothing new.
+`refs.ReplaceCounted`, which every indexing write goes through, deletes its own source's row at
+the end of the write's transaction, so a write this release indexes is not owed again; an earlier
+release never deletes one, so its writes stay owed.
 `docs.Service.RunReferenceReindex` drains the queue under the `reference-reindex` lease
 (`duty.Exclusive`): one batch of 200 rows per tick, oldest first, 2 s apart while a batch comes
 back full and every 30 s otherwise. Each source is re-indexed in a transaction of its own that

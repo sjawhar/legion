@@ -20,15 +20,16 @@
   to `0123` build `refs_owed` (a table, a trigger each on `comments`, `asks`, `messages` and
   `artifact_versions`, and a seed of every stored source; every census answers `0`), and the
   `reference-reindex` lease drains it (the loop lease pool holds nine connections); a version owes
-  its document's scope only when its question blocks change. `envoy-dispatch rebuild-refs`
-  applies the same rules. The dashboard reads a linked key as `KEY Title`, a `#id` as its
-  question's text and a message reference as the message's text; the live editor and the
-  past-version view draw a bare reference, or a link whose text is its own address, as its
-  target's title on one line, cut with an ellipsis, without changing the stored text; a reply or
-  message that is only references shows a card per reference in the Inbox thread and the
-  Conversation as it does in the margin; and a link or card whose target is missing shows the text
-  as written. Following a `#id` lands on its question and keeps it on screen while the titles
-  drawn above it grow the document.
+  its document's scope only when its question blocks or the fences around them change. A
+  directive inside fenced code declares no question. `envoy-dispatch rebuild-refs` applies the
+  same rules. The dashboard reads
+  a linked key as `KEY Title`, a `#id` as its question's text and a message reference as the
+  message's text; the live editor and the past-version view draw a bare reference, or a link
+  whose text is its own address, as its target's title on one line, cut with an ellipsis, without
+  changing the stored text; a reply or message that is only references shows a card per reference
+  in the Inbox thread and the Conversation as it does in the margin; and a link or card whose
+  target is missing shows the text as written. Following a `#id` lands on its question and keeps
+  it on screen while the titles drawn above it grow the document.
 
 - `agent-secrets` names the store it answered from, so no answer of its own is read as another
   secrets CLI's about the same name: the broker `AGENT_SECRETS_URL` names, by host, and that

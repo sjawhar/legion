@@ -168,11 +168,11 @@ func ScopeSources(ctx context.Context, q Queryer, doc string) ([]Target, error) 
 }
 
 // QuestionMap is the question map of the document doc: each question block id its latest version
-// declares (a `:::ask{#id …}` line) to the reference a `dispatch://` address of its ask makes, as
-// text.Extract reads that address, so a `#id` edge is stored as that address's edge is. The ask is
-// the row settlement made for the block on doc, or, for a copied block, the ask settlement wrote
-// into it as copied_from. A block with neither (not settled yet) is absent. It reads the latest
-// version's directive lines, never parsing the document, and takes no lock.
+// declares (a `:::ask{#id …}` line outside fenced code) to the reference a `dispatch://` address of
+// its ask makes, as text.Extract reads that address, so a `#id` edge is stored as that address's
+// edge is. The ask is the row settlement made for the block on doc, or, for a copied block, the ask
+// settlement wrote into it as copied_from. A block with neither (not settled yet) is absent. It
+// reads the latest version's directive lines, never parsing the document, and takes no lock.
 func QuestionMap(ctx context.Context, q Queryer, doc string) (map[string]text.Ref, error) {
 	source, err := LoadSource(ctx, q, "artifact", doc)
 	if err != nil {
@@ -262,12 +262,27 @@ type questionBlock struct {
 
 // questionBlocks is every question block markdown declares, in document order, the first of each
 // id: each line that, past its containers' quote and list markers, opens a typed block named ask
-// with three or more colons and holds `#id` among its attributes.
+// with three or more colons and holds `#id` among its attributes, outside fenced code. A fenced
+// example of a directive is code to pmdoc, so a `copied_from` it carries names no question of this
+// document. Migration 0122 compares every `:::ask{` line and every line holding a run of three
+// backticks or tildes, in document order, so a fence opened or closed around a block owes the scope,
+// and a fenced example only owes a scope re-read that finds nothing new.
 func questionBlocks(markdown string) []questionBlock {
 	blocks := []questionBlock{}
 	seen := map[string]struct{}{}
+	var fence codeFence
 	for line := range strings.Lines(markdown) {
-		block, ok := askDirective(line)
+		rest := trimContainerMarkers(line)
+		if fence.run > 0 {
+			if fence.closedBy(rest) {
+				fence = codeFence{}
+			}
+			continue
+		}
+		if fence = openingFence(rest); fence.run > 0 {
+			continue
+		}
+		block, ok := askDirective(rest)
 		if !ok {
 			continue
 		}
@@ -280,11 +295,49 @@ func questionBlocks(markdown string) []questionBlock {
 	return blocks
 }
 
-// askDirective reads a `:::ask{…}` line's id and copied_from by the attribute grammar of
-// pmdoc's parseDirectiveAttributes: `#` and a run of [A-Za-z0-9_-] is the id, `name="value"` an
-// attribute whose value runs to the next unescaped quote.
-func askDirective(line string) (questionBlock, bool) {
-	rest := trimContainerMarkers(line)
+// codeFence is the fence a fenced code block opened with: its character, a backtick or a tilde,
+// and how many of it the run holds, none when no fence is open.
+type codeFence struct {
+	char byte
+	run  int
+}
+
+// openingFence is the fence text, a line past its containers' markers, opens, as CommonMark reads
+// one: a run of three or more backticks or tildes, a backtick run followed by no other backtick
+// (such a line is an inline code span). Text that opens none is the zero codeFence.
+func openingFence(text string) codeFence {
+	fence := fenceRun(text)
+	if fence.run < 3 || fence.char == '`' && strings.ContainsRune(text[fence.run:], '`') {
+		return codeFence{}
+	}
+	return fence
+}
+
+// closedBy reports whether text, a line past its containers' markers, closes the fence: a run of
+// its character at least as long, followed by nothing but whitespace. A fence nothing closes runs
+// to the document's end.
+func (fence codeFence) closedBy(text string) bool {
+	closer := fenceRun(text)
+	return closer.char == fence.char && closer.run >= fence.run && strings.TrimRight(text[closer.run:], " \t\r\n") == ""
+}
+
+// fenceRun is the run of backticks or tildes text opens with, if any.
+func fenceRun(text string) codeFence {
+	if text == "" || text[0] != '`' && text[0] != '~' {
+		return codeFence{}
+	}
+	run := 1
+	for run < len(text) && text[run] == text[0] {
+		run++
+	}
+	return codeFence{char: text[0], run: run}
+}
+
+// askDirective reads a `:::ask{…}` line's id and copied_from, the line past its containers'
+// markers (trimContainerMarkers), by the attribute grammar of pmdoc's parseDirectiveAttributes:
+// `#` and a run of [A-Za-z0-9_-] is the id, `name="value"` an attribute whose value runs to the
+// next unescaped quote.
+func askDirective(rest string) (questionBlock, bool) {
 	colons := 0
 	for colons < len(rest) && rest[colons] == ':' {
 		colons++

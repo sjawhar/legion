@@ -190,10 +190,12 @@ func TestScopeOfAndScopeSourcesAgree(t *testing.T) {
 }
 
 // A document's question map is the question blocks its latest version declares: a block settlement
-// made a row for, a copied block under the ask it was copied from, and a block in a quote; never a
-// block not settled yet, one whose copied_from names no ask, an id an older version alone declares,
-// or a `#` inside an attribute's value. Each maps to the reference text.Extract reads from that
-// ask's dispatch:// address.
+// made a row for, a copied block under the ask it was copied from, a block in a quote, and a block
+// after a closed code fence; never a block not settled yet, one whose copied_from names no ask, an
+// id an older version alone declares, a `#` inside an attribute's value, or a directive inside
+// fenced code - backticks or tildes, in a quote, a fence a shorter run or the other character does
+// not close, one nothing closes - even one whose copied_from names an ask that exists. Each maps
+// to the reference text.Extract reads from that ask's dispatch:// address.
 func TestQuestionMapReadsTheLatestVersionsQuestionBlocks(t *testing.T) {
 	database := storetest.Open(t)
 	ctx := context.Background()
@@ -215,18 +217,26 @@ func TestQuestionMapReadsTheLatestVersionsQuestionBlocks(t *testing.T) {
 	projectQuestion := insertScopeBlockAsk(t, tx, nil, handbook, "rule")
 
 	insertScopeVersion(t, tx, spec, 1, ":::ask{#gone}\nGone?\n:::\n")
+	copiedFrom := func(id, ask string) string {
+		return `:::ask{#` + id + ` copied_from="` + ask + `"}` + "\n"
+	}
 	insertScopeVersion(t, tx, spec, 2, "# Spec\n\n"+
 		`:::ask{#q1 urgency="med" answer="see #fake and \"#q9\"" state="answered"}`+"\nWhich?\n:::\n\n"+
 		`:::ask{#q2 state="open" copied_from="`+source+`" copied_from_document="dispatch://ACME-1/artifact/record"}`+"\nWhich?\n:::\n\n"+
 		"> :::ask{#quoted}\n> Which?\n> :::\n\n"+
 		":::ask{#unsettled}\nWhich?\n:::\n\n"+
 		`:::ask{#forged copied_from="00000000-0000-4000-8000-000000000000"}`+"\nWhich?\n:::\n\n"+
-		"```\n:::ask{#fake}\n```\n")
+		"```\n"+copiedFrom("q9", source)+"```\nSee #q9.\n\n"+
+		"~~~md\n```\n"+copiedFrom("tilde", source)+"~~~\n\n"+
+		"> ```\n> "+copiedFrom("quotedfence", source)+"> ```\n\n"+
+		"````\n```\n"+copiedFrom("longer", source)+"````\n\n"+
+		copiedFrom("after", source)+"Which?\n:::\n\n"+
+		"```\n"+copiedFrom("unclosed", source))
 	insertScopeVersion(t, tx, handbook, 1, ":::ask{#rule}\nWhich?\n:::\n")
 
 	issueAsk := func(id string) text.Ref { return text.Extract("dispatch://ACME-1/ask/"+id, "")[0] }
 	for doc, want := range map[string]map[string]text.Ref{
-		spec:     {"q1": issueAsk(q1), "q2": issueAsk(source), "quoted": issueAsk(quoted)},
+		spec:     {"q1": issueAsk(q1), "q2": issueAsk(source), "quoted": issueAsk(quoted), "after": issueAsk(source)},
 		record:   nil,
 		handbook: {"rule": text.Extract("dispatch://ACME/artifact/handbook/ask/"+projectQuestion, "")[0]},
 	} {
@@ -276,7 +286,7 @@ func TestReplaceStoresTheBareKeysAndQuestionIDsThatResolve(t *testing.T) {
 		{"comment", comment, "blocked on ACME-2, see _#q2_; not ACME-999999, UTF-8 or #nope; https://dispatch.example/issues/ACME-2", []Target{{"ask", q2}, {"issue", "ACME-2"}}},
 		{"message", direct, "ACME-2 and #q2", []Target{{"issue", "ACME-2"}}},
 	} {
-		if _, err := replace(ctx, tx, tc.kind, tc.id, tc.body, "https://dispatch.example"); err != nil {
+		if _, err := ReplaceCounted(ctx, tx, tc.kind, tc.id, tc.body, "https://dispatch.example"); err != nil {
 			t.Fatalf("replace %s: %v", tc.kind, err)
 		}
 		got, err := scanTargets(tx.Query(ctx, `select to_kind, to_id from refs where from_kind = $1 and from_id = $2 order by to_kind, to_id`, tc.kind, tc.id))

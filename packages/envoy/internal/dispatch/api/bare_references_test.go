@@ -298,3 +298,64 @@ func TestBareIssueKeysStoreAnEdgeOnlyToAnIssueThatExists(t *testing.T) {
 		t.Errorf("ACME-2 lists %v; want the comment blocked on it", listed)
 	}
 }
+
+// An answer renders the links it holds, and is not indexed as a text of its own: answering q1 with
+// ACME-2 bare and `#q2` stores no edge from q1's ask, whose edges come from its question alone,
+// as written and as a rebuild from the stored text reads it. The positive control is a reply to q1
+// in the same words, which lists under ACME-2 and q2, so the answer's names resolve in its scope.
+func TestAnAnswersBareKeysAndQuestionIDsStoreNoEdge(t *testing.T) {
+	handler, database, _ := settlingCarryDocuments(t, 20*time.Millisecond)
+	issue := createInteractionIssue(t, handler, "ACME", "Answers",
+		"Context\n\n"+questionBlock("q1", "Ship on Monday?")+"\n"+questionBlock("q2", "Ship the docs too?"))
+	created := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]string{
+		"project": "ACME", "title": "Migrate the billing cluster",
+	}, "alice")
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create the blocking issue: status=%d body=%s", created.Code, created.Body.String())
+	}
+	if blocker := decodeBody[model.Issue](t, created); blocker.Key != "ACME-2" {
+		t.Fatalf("second issue = %s; want ACME-2", blocker.Key)
+	}
+	spec := issue.PrimaryArtifactID
+	q1 := blockQuestion(t, database, spec, "q1")
+	q2 := blockQuestion(t, database, spec, "q2")
+	const words = "Blocked on ACME-2 until #q2."
+	reply := postIssueComment(t, handler, issue.Key, map[string]any{"body": words, "ask_id": q1})
+	if answered := dispatchRequest(t, handler, http.MethodPost, "/api/v1/asks/"+q1+"/answer", map[string]any{
+		"selected": []string{"Yes"}, "text": words,
+	}, "alice"); answered.Code != http.StatusOK {
+		t.Fatalf("answer q1: status=%d body=%s", answered.Code, answered.Body.String())
+	}
+	awaitDocumentText(t, handler, spec, "q1's answer in its block", contains(`answer="`+words+`"`), nil)
+
+	q1Ref := "dispatch://" + issue.Key + "/ask/" + q1
+	replyRef := "dispatch://" + issue.Key + "/comment/" + reply.ID
+	indexesNoAnswer := func(when string) {
+		t.Helper()
+		var edges int
+		if err := database.Pool.QueryRow(context.Background(), `select count(*) from refs where from_id = $1`, q1).Scan(&edges); err != nil {
+			t.Fatalf("count q1's edges %s: %v", when, err)
+		}
+		if edges != 0 {
+			t.Errorf("%s q1's ask stores %d edges; want none: its question names nothing and its answer is not indexed", when, edges)
+		}
+		for _, target := range []string{"dispatch://ACME-2", "dispatch://" + issue.Key + "/ask/" + q2} {
+			listed := citers(t, handler, target)
+			if listed[q1Ref] {
+				t.Errorf("%s %s lists q1 (%s), whose answer names it", when, target, q1Ref)
+			}
+			if !listed[replyRef] {
+				t.Errorf("%s %s does not list the reply in the answer's words (%s); it lists %v", when, target, replyRef, listed)
+			}
+		}
+	}
+	indexesNoAnswer("as written,")
+
+	if _, err := database.Pool.Exec(context.Background(), `delete from refs`); err != nil {
+		t.Fatalf("empty the index: %v", err)
+	}
+	if _, err := refs.RebuildAll(context.Background(), database.Pool, "https://dispatch.example"); err != nil {
+		t.Fatalf("rebuild the index: %v", err)
+	}
+	indexesNoAnswer("after a rebuild,")
+}

@@ -57,7 +57,7 @@ type Target struct {
 
 // ReplaceCounted reconciles one source's references and resolves the counted targets the event
 // that source appends has to name. Every write that indexes a body goes through it or
-// ReplaceCountedWith, so no producer can reconcile the graph without holding what moved: replace
+// ReplaceCountedWith, so no producer can reconcile the graph without holding what moved: replaceAt
 // itself is unexported. It ends by deleting the source's refs_owed row (migration 0118, ClaimOwed),
 // which the write's own trigger made in the same transaction, so a write this build indexes is not
 // re-indexed by the drain (docs.Service.RunReferenceReindex); a build before it never deletes one,
@@ -92,19 +92,13 @@ func ReplaceCountedWith(
 	return CountedChanges(ctx, tx, changed)
 }
 
-// replace reconciles the Dispatch references written by one source with body: targets no
-// longer mentioned are deleted, new ones inserted, and an edge that persists keeps its
-// created_at and source_seq. It returns the targets whose inbound edges moved — deleted or
-// inserted, oldest state first — so ReplaceCounted can resolve the ones whose readers carry a
-// batched backlink count.
-func replace(ctx context.Context, tx pgx.Tx, fromKind, fromID, body, serverURL string) ([]Target, error) {
-	return replaceAt(ctx, tx, fromKind, fromID, body, serverURL, NewResolver(ctx, tx, fromKind, fromID), nil)
-}
-
-// replaceAt is replace with the resolver a bare key and a `#id` are read through (Reindex's) and
-// the created_at of the edges it inserts: writtenAt, the source's own write time, for a re-index of
-// stored text (Reindex), so old text does not sort as new under "Referenced by"; the transaction's
-// time when nil, for the write that stores the text.
+// replaceAt reconciles the Dispatch references written by one source with body, a bare key and a
+// `#id` read through resolver: targets no longer mentioned are deleted, new ones inserted, and an
+// edge that persists keeps its created_at and source_seq. An edge it inserts is dated writtenAt,
+// the source's own write time, for a re-index of stored text (Reindex), so old text does not sort
+// as new under "Referenced by", and at the transaction's time when nil, for the write that stores
+// the text. It returns the targets whose inbound edges moved — deleted or inserted, oldest state
+// first — so ReplaceCountedWith can resolve the ones whose readers carry a batched backlink count.
 func replaceAt(ctx context.Context, tx pgx.Tx, fromKind, fromID, body, serverURL string, resolver text.Resolver, writtenAt *time.Time) ([]Target, error) {
 	kinds, ids, err := targets(body, serverURL, resolver)
 	if err != nil {
