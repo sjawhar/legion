@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/nats-io/nats.go"
-	"github.com/sjawhar/envoy/internal/contracts"
 )
 
 // storedMessageAPI is the JetStream API subject of a stored-message read of the notification
@@ -156,16 +155,4 @@ func SubjectContains(pattern, subject string) bool {
 		}
 	}
 	return len(patternTokens) == len(subjectTokens)
-}
-
-// CoversAnotherAgentSubject reports whether topic reaches a session's agent subject other than
-// sessionID's own: it overlaps notifications.agent.> under NATS wildcard rules (subjectsOverlap),
-// so notifications.>, notifications.*.<x> and notifications.agent.* count, and it is not
-// sessionID's own agent subject as one literal subject. A session id holding `*` or `>` makes a
-// wildcard of its "own" agent subject, which is no session's alone and counts too.
-func CoversAnotherAgentSubject(sessionID, topic string) bool {
-	if !subjectsOverlap(topic, contracts.AgentTopicPrefix+">") {
-		return false
-	}
-	return topic != contracts.AgentSubject(sessionID) || strings.ContainsAny(sessionID, "*>")
 }

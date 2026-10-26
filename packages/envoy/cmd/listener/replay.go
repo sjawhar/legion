@@ -221,9 +221,9 @@ func replaySessionToken(id string) bool {
 // subject exactly, or a topic registered as its interest that lies under a shared stream subject
 // (bus.SharedStreamTopic: one that never carries an agent session's private payload). Nothing else
 // is, whatever the interest store holds, since /v1/interests/subscribe stores any topic but one
-// reaching another session's agent subject, and an interest written before or past that guard
-// may name anything. The store is read only when some requested subject could pass as an
-// interest; a session it holds no record of follows only its agent subject.
+// reaching a private stream subject (bus.ReachesPrivateStreamSubject), and an interest written
+// before or past that guard may name anything. The store is read only when some requested subject
+// could pass as an interest; a session it holds no record of follows only its agent subject.
 func (d *listenerDeps) replayFollowed(sessionID string, subjects []replaySubjectRequest) (func(string) bool, error) {
 	agentSubject := contracts.AgentSubject(sessionID)
 	var topics []string

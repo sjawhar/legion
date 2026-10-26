@@ -107,9 +107,11 @@ func TestCheckFilterSubjectRefusesWhatNATSCannotFilterOn(t *testing.T) {
 }
 
 // What a session may register as an interest (/v1/interests/subscribe): anything but a topic
-// reaching another session's agent subject, one by name or any wildcard over the agent subjects.
-// Its own agent subject is its own only when it is one literal subject.
-func TestCoversAnotherAgentSubjectBoundsInterests(t *testing.T) {
+// reaching a private stream subject other than its own agent subject: another session's agent
+// subject by name or any wildcard over the agent subjects, a failed-delivery lane (its own
+// included) or a wildcard over them, the Legion controller lane, and wildcards reaching any of
+// those. Its own agent subject is its own only when it is one literal subject.
+func TestReachesPrivateStreamSubjectBoundsInterests(t *testing.T) {
 	for _, tc := range []struct {
 		sessionID, topic string
 		want             bool
@@ -125,14 +127,26 @@ func TestCoversAnotherAgentSubjectBoundsInterests(t *testing.T) {
 		{"ses_a", ">", true},
 		{">", "notifications.agent.>", true},
 		{"*", "notifications.agent.*", true},
+		{"ses_a", "notifications.envoy.exceptions.notifications.agent.ses_a", true},
+		{"ses_a", "notifications.envoy.exceptions.notifications.agent.ses_b", true},
+		{"ses_a", "notifications.envoy.exceptions.notifications.agent.>", true},
+		{"ses_a", "notifications.envoy.exceptions.>", true},
+		{"ses_a", "notifications.envoy.>", true},
+		{"ses_a", "notifications.legion.ACME.controller", true},
+		{"ses_a", "notifications.legion.>", true},
+		{"ses_a", "notifications.*.ACME.controller", true},
 		{"ses_a", "notifications.agent", false},
 		{"ses_a", "notifications.*", false},
+		{"ses_a", "notifications.legion", false},
 		{"ses_a", "notifications.dispatch.issue.KEY-1.>", false},
+		{"ses_a", "notifications.github.acme.widgets.pr.7.>", false},
+		{"ses_a", "notifications.team.x.>", false},
 		{"ses_a", "notifications.role.reviewer", false},
+		{"ses_a", "notifications.envoy.exceptions.notifications.role.reviewer", false},
 		{"ses_a", "notifications.exceptions.agent.ses_b", false},
 	} {
-		if got := CoversAnotherAgentSubject(tc.sessionID, tc.topic); got != tc.want {
-			t.Errorf("CoversAnotherAgentSubject(%q, %q) = %v, want %v", tc.sessionID, tc.topic, got, tc.want)
+		if got := ReachesPrivateStreamSubject(tc.sessionID, tc.topic); got != tc.want {
+			t.Errorf("ReachesPrivateStreamSubject(%q, %q) = %v, want %v", tc.sessionID, tc.topic, got, tc.want)
 		}
 	}
 }

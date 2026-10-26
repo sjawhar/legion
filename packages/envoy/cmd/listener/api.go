@@ -1081,25 +1081,26 @@ func subscribeHandler(d *listenerDeps, machineID string, logger *logging.Logger)
 			return
 		}
 		logger.Info("listener subscribe", slog.String("session_id", body.SessionID), slog.Any("topics", body.Topics), slog.Int("port", body.Port), slog.Bool("self_subscribed", body.SelfSubscribed), slog.String("dir", body.Dir))
-		// A topic reaching another session's agent subject is left out and named in a warning, the
-		// rest of the registration stored: the topics stored here drive the listener's fan-out to
-		// serve-port sessions (`store.Registry.Match`), and such a topic would hand this session
-		// another's inbox; /v1/replay refuses such a subject on its own (`bus.SharedStreamTopic`).
-		// A registration naming one is not refused whole, since a released pi-envoy registers every
-		// subject it has open, a fork parent's agent subject and any topic its envoy_subscribe took
-		// included.
+		// A topic reaching a private stream subject (another session's inbox, a failed-delivery
+		// lane, the Legion controller lane; bus.ReachesPrivateStreamSubject) is left out and named in
+		// a warning, the rest of the registration stored: the topics stored here drive the
+		// listener's fan-out to serve-port sessions (`store.Registry.Match`), and such a topic would
+		// hand this session messages meant for another session or for the controller's role holder;
+		// /v1/replay refuses such a subject on its own (`bus.SharedStreamTopic`). A registration
+		// naming one is not refused whole, since a released pi-envoy registers every subject it has
+		// open, a fork parent's agent subject and any topic its envoy_subscribe took included.
 		warnings := make([]string, 0)
 		topics := make([]string, 0, len(body.Topics)+1)
 		for _, topic := range append(body.Topics, contracts.AgentSubject(body.SessionID)) {
-			if bus.CoversAnotherAgentSubject(body.SessionID, topic) {
-				warnings = append(warnings, fmt.Sprintf("%s was not registered: it reaches other sessions' agent subjects (%s<session id>), and a session registers only its own, %s",
-					topic, contracts.AgentTopicPrefix, contracts.AgentSubject(body.SessionID)))
+			if bus.ReachesPrivateStreamSubject(body.SessionID, topic) {
+				warnings = append(warnings, fmt.Sprintf("%s was not registered: it reaches a private stream subject (another session's inbox, a failed-delivery lane, or the Legion controller lane), and of those a session registers only its own agent subject, %s",
+					topic, contracts.AgentSubject(body.SessionID)))
 				continue
 			}
 			topics = append(topics, topic)
 		}
 		if len(warnings) > 0 {
-			logger.Warn("listener subscribe refused topics reaching other sessions' agent subjects",
+			logger.Warn("listener subscribe refused topics reaching private stream subjects",
 				slog.String("session_id", body.SessionID), slog.Any("refused", warnings))
 		}
 		item, err := d.registry.Upsert(store.Interest{

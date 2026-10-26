@@ -142,6 +142,20 @@ func SharedStreamTopic(subject string) bool {
 	return slices.ContainsFunc(sharedStreamSubjects, func(shared string) bool { return SubjectContains(shared, subject) })
 }
 
+// ReachesPrivateStreamSubject reports whether a topic sessionID registers as an interest reaches a
+// private stream subject (privateStreamSubjects) other than sessionID's own agent subject: it
+// overlaps one under NATS wildcard rules (subjectsOverlap), so another session's inbox, a
+// failed-delivery lane (a session's own included), the Legion controller lane, and wildcards
+// reaching any of them (notifications.>, notifications.*.<x>, notifications.envoy.>) count, and it
+// is not sessionID's own agent subject as one literal subject. A session id holding `*` or `>`
+// makes a wildcard of its "own" agent subject, which is no session's alone and counts too.
+func ReachesPrivateStreamSubject(sessionID, topic string) bool {
+	if !slices.ContainsFunc(privateStreamSubjects, func(private string) bool { return subjectsOverlap(topic, private) }) {
+		return false
+	}
+	return topic != contracts.AgentSubject(sessionID) || strings.ContainsAny(sessionID, "*>")
+}
+
 // StreamSubjects reports the durable notification subjects, excluding role lanes.
 func StreamSubjects() []string {
 	return slices.Clone(streamSubjects)

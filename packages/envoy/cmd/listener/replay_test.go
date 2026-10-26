@@ -438,26 +438,7 @@ func TestInterestSubscribeStoresOnlyTopicsThatReplayCannotTurnIntoAnotherSession
 	rig := newReplayRig(t)
 	own, other := contracts.AgentSubject(replaySession), contracts.AgentSubject("ses_other")
 	refused := []string{"notifications.agent.>", "notifications.agent.*", other, "notifications.>"}
-	body, err := json.Marshal(subscribeBody{
-		SessionID:      replaySession,
-		Topics:         append([]string{own, replayIssueTopic}, refused...),
-		SelfSubscribed: true,
-	})
-	if err != nil {
-		t.Fatalf("marshal subscribe: %v", err)
-	}
-	recorder := httptest.NewRecorder()
-	rig.mux.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/interests/subscribe", strings.NewReader(string(body))))
-	if recorder.Code != http.StatusOK {
-		t.Fatalf("subscribe status = %d, want 200; body = %s", recorder.Code, recorder.Body.String())
-	}
-	var answer struct {
-		Topics   []string `json:"topics"`
-		Warnings []string `json:"warnings"`
-	}
-	if err := json.Unmarshal(recorder.Body.Bytes(), &answer); err != nil {
-		t.Fatalf("decode subscribe answer %s: %v", recorder.Body.String(), err)
-	}
+	answer := subscribeInterest(t, rig.mux, append([]string{own, replayIssueTopic}, refused...))
 	if want := []string{own, replayIssueTopic}; !slices.Equal(answer.Topics, want) {
 		t.Fatalf("answered topics = %v, want %v", answer.Topics, want)
 	}
@@ -496,6 +477,75 @@ func TestInterestSubscribeStoresOnlyTopicsThatReplayCannotTurnIntoAnotherSession
 			t.Fatalf("%s = %+v, want refused not_followed with no messages", result.Subject, result)
 		}
 	}
+}
+
+// Every private stream subject is left out of a registration, not only the agent subjects: a
+// failed-delivery lane carries the undelivered message's payload and the session it was for (the
+// session's own lane included), and the Legion controller lane is heard through the controller
+// role and never registered, so neither is stored, nor is a wildcard reaching them
+// (notifications.envoy.>). A GitHub topic, a team topic and the session's own agent subject are
+// stored, and the answer stays 200.
+func TestInterestSubscribeLeavesOutEveryPrivateStreamSubject(t *testing.T) {
+	rig := newReplayRig(t)
+	own := contracts.AgentSubject(replaySession)
+	githubTopic, teamTopic := "notifications.github.acme.widgets.pr.7.>", "notifications.team.x.>"
+	refused := []string{
+		bus.ExceptionTopicPrefix + contracts.AgentTopicPrefix + ">",
+		bus.ExceptionTopicPrefix + own,
+		"notifications.legion.ACME.controller",
+		"notifications.envoy.>",
+	}
+	answer := subscribeInterest(t, rig.mux, append([]string{githubTopic, teamTopic, own}, refused...))
+
+	// Stored topics are kept sorted.
+	want := []string{own, githubTopic, teamTopic}
+	if !slices.Equal(answer.Topics, want) {
+		t.Fatalf("answered topics = %v, want %v", answer.Topics, want)
+	}
+	stored, err := rig.deps.registry.Get(replaySession)
+	if err != nil {
+		t.Fatalf("read the stored interest: %v", err)
+	}
+	if !slices.Equal(stored.Topics, want) {
+		t.Fatalf("stored topics = %v, want %v", stored.Topics, want)
+	}
+	// The GitHub topic may draw its own unwired-repository warning; only the ones left out are
+	// named as not registered.
+	notRegistered := make([]string, 0, len(refused))
+	for _, warning := range answer.Warnings {
+		if topic, _, found := strings.Cut(warning, " was not registered"); found {
+			notRegistered = append(notRegistered, topic)
+		}
+	}
+	if !slices.Equal(notRegistered, refused) {
+		t.Fatalf("warnings = %q, want exactly %v named as not registered", answer.Warnings, refused)
+	}
+}
+
+// interestSubscribeAnswer is the part of a /v1/interests/subscribe answer these tests read.
+type interestSubscribeAnswer struct {
+	Topics   []string `json:"topics"`
+	Warnings []string `json:"warnings"`
+}
+
+// subscribeInterest registers topics for replaySession through /v1/interests/subscribe, requires a
+// 200, and returns the answer.
+func subscribeInterest(t *testing.T, mux *http.ServeMux, topics []string) interestSubscribeAnswer {
+	t.Helper()
+	body, err := json.Marshal(subscribeBody{SessionID: replaySession, Topics: topics, SelfSubscribed: true})
+	if err != nil {
+		t.Fatalf("marshal subscribe: %v", err)
+	}
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/interests/subscribe", strings.NewReader(string(body))))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("subscribe status = %d, want 200; body = %s", recorder.Code, recorder.Body.String())
+	}
+	var answer interestSubscribeAnswer
+	if err := json.Unmarshal(recorder.Body.Bytes(), &answer); err != nil {
+		t.Fatalf("decode subscribe answer %s: %v", recorder.Body.String(), err)
+	}
+	return answer
 }
 
 // Only POST is served.

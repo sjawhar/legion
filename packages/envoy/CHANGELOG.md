@@ -713,16 +713,21 @@
 
 ### Changed
 
-- `POST /v1/interests/subscribe` no longer stores a topic reaching another session's agent
-  subject: another session's `notifications.agent.<id>`, or a wildcard overlapping
-  `notifications.agent.>` (`notifications.agent.*`, `notifications.agent.>`, `notifications.>`,
-  `notifications.*.<x>`; `bus.CoversAnotherAgentSubject`), since the stored topics drive the
-  listener's fan-out to serve-port sessions and such a topic would hand one session another's
-  inbox (`/v1/replay` refuses such a subject on its own). The rest of the registration
-  is stored and the answer stays 200, its `warnings` naming each topic left out (`<topic> was not
-  registered: …`), so a released pi-envoy, which registers a fork parent's agent subject with the
-  rest of what it follows, keeps registering. pi-envoy and claude-envoy no longer register or
-  replay such a topic (`coversAnotherAgentSubject` in `@legion/envoy-client/replay`) (INFRA-439).
+- `POST /v1/interests/subscribe` no longer stores a topic reaching a private stream subject other
+  than the session's own agent subject (`bus.ReachesPrivateStreamSubject`): another session's
+  `notifications.agent.<id>`, a failed-delivery lane
+  `notifications.envoy.exceptions.notifications.agent.<id>` (the session's own included), a
+  Legion daemon notice under `notifications.legion.>` (the controller lane
+  `notifications.legion.<project>.controller`), or a wildcard overlapping one
+  (`notifications.agent.*`, `notifications.agent.>`, `notifications.envoy.>`,
+  `notifications.>`, `notifications.*.<x>`), since the stored topics drive the listener's fan-out
+  to serve-port sessions and such a topic would hand one session another's inbox, a failed
+  delivery's payload or the controller's notices (`/v1/replay` refuses such a subject on its own).
+  The rest of the registration is stored and the answer stays 200, its `warnings` naming each
+  topic left out (`<topic> was not registered: …`), so a released pi-envoy, which registers a fork
+  parent's agent subject with the rest of what it follows, keeps registering. pi-envoy and
+  claude-envoy no longer register or replay a topic reaching another session's agent subject
+  (`coversAnotherAgentSubject` in `@legion/envoy-client/replay`) (INFRA-439).
 - **Breaking (local development):** `agent-secrets-devrelay` presents a listed caller's own
   ServiceAccount token, read from `--account-token-file` (default
   `$AGENT_SECRETS_ACCOUNT_TOKEN_FILE`), in place of the shared bearer the broker no longer takes. A
