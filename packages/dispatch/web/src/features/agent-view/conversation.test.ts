@@ -15,7 +15,6 @@ import {
   currentModel,
   dispatchTurns,
   EMPTY_CONVERSATION,
-  isRunning,
   sessionCommands,
   sessionSettingsView,
   toThreadMessages,
@@ -52,7 +51,7 @@ describe("the live conversation", () => {
     ]);
     expect(state.messages).toHaveLength(1);
     expect(toThreadMessages(state)[0]?.content).toEqual([{ text: "Hello there", type: "text" }]);
-    expect(isRunning(state)).toBe(false);
+    expect(state.messages[0]?.streaming).toBe(false);
   });
 
   test("messages are ordered by the session's own clock, not by arrival", () => {
@@ -100,9 +99,9 @@ describe("the live conversation", () => {
     }
   });
 
-  test("a message still streaming keeps the thread running", () => {
+  test("a message still streaming renders as running", () => {
     const state = applyFrames(EMPTY_CONVERSATION, [message(1, "a50", 50, "Hel", true)]);
-    expect(isRunning(state)).toBe(true);
+    expect(state.messages[0]?.streaming).toBe(true);
     expect(toThreadMessages(state)[0]?.status).toEqual({ type: "running" });
   });
 });
@@ -110,15 +109,15 @@ describe("the live conversation", () => {
 describe("a settled message in the thread", () => {
   test("is not reopened by a later streaming snapshot, whatever its sequence number", () => {
     // The host delivers a message's last few updates after its end, so the late streaming
-    // snapshot is the one with the HIGHER number. Letting it win leaves a finished turn
-    // rendered as running, and assistant-ui then disables the composer.
+    // snapshot is the one with the HIGHER number. Letting it win would leave a finished turn
+    // rendered as still streaming.
     const state = applyFrames(EMPTY_CONVERSATION, [
       message(58, "a50", 50, "Hello there", false),
       message(59, "a50", 50, "Hello", true),
       message(60, "a50", 50, "Hello", true),
     ]);
     expect(state.messages).toHaveLength(1);
-    expect(isRunning(state)).toBe(false);
+    expect(toThreadMessages(state)[0]?.status).toEqual({ reason: "stop", type: "complete" });
     expect(toThreadMessages(state)[0]?.content).toEqual([{ text: "Hello there", type: "text" }]);
   });
 });
