@@ -1,0 +1,67 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-256",
+  "completed": "2026-10-26T17:35:00Z",
+  "proof": [
+    {
+      "criterion": "E1: a body edit starts a pull_request run whose pr-title is in the pull request's rollup, SUCCESS; a newer pull_request run cancels the older one",
+      "surface": "GitHub Actions on sjawhar/legion, scratch PR sjawhar/legion#2255 (head 88e0dffe619e13862528657970fb17b6467d6d50, empty commit on the issue head 9bb73cab40630765aeb55fccef6f1cd7cb34acf8), driven with gh",
+      "command": "gh pr edit 2255 -R sjawhar/legion --body ...; gh api repos/sjawhar/legion/actions/workflows/pr-title.yaml/runs?head_sha=88e0dffe...; gh pr view 2255 --json statusCheckRollup",
+      "observed": "Opened run 40343502739 (pull_request) was cancelled by the body edit's run 40343578035 (pull_request); the restored-title edit's run 40364082444 (pull_request) finished success and gh pr checks shows pr-title pass for it; rollup state SUCCESS",
+      "headSha": "9bb73cab40630765aeb55fccef6f1cd7cb34acf8",
+      "negativeControl": "Title set to 'Scratch proof bad title': run 40348999174 (pull_request) failed; a body edit while still bad, run 40357937343, failed again; restored title, run 40364082444, success"
+    },
+    {
+      "criterion": "E2/E3: a COMMENT review with two inline comments, and an inline comment posted alone, each start exactly one pull_request_review run and no pull_request_review_comment run",
+      "surface": "GitHub Actions on sjawhar/legion, scratch PR sjawhar/legion#2255 (head 88e0dffe), driven with gh api",
+      "command": "gh api --method POST repos/sjawhar/legion/pulls/2255/reviews --input review.json (COMMENT, two inline comments); gh api --method POST repos/sjawhar/legion/pulls/2255/comments -f commit_id=88e0dffe... -f path=.github/workflows/pr-title.yaml -F line=5 -f side=RIGHT",
+      "observed": "Review 5653985519 -> one run 40343655634 (pull_request_review); inline comment 4378691598 -> one run 40343748246 (pull_request_review). All runs on 88e0dffe: pull_request=5, pull_request_review=4, no pull_request_review_comment event. Same result earlier on scratch #2250 at 672e3e1a (runs 40330006996, 40330125287)",
+      "headSha": "9bb73cab40630765aeb55fccef6f1cd7cb34acf8",
+      "negativeControl": "Main's workflow, same day: one review on another open pull request (head 594014fd) at 12:55:13Z made run 40326253514 (pull_request_review) plus two pull_request_review_comment runs, 40326253720 and 40326255677"
+    },
+    {
+      "criterion": "Concurrency addition: reviews posted while a run waits leave at most one pending run per pull request and event, and the newest run's pr-title stands on the head",
+      "surface": "GitHub Actions on sjawhar/legion, scratch PR sjawhar/legion#2255 (head 88e0dffe), driven with gh api",
+      "command": "two COMMENT reviews 1 s apart: gh api --method POST repos/sjawhar/legion/pulls/2255/reviews -f event=COMMENT (x2)",
+      "observed": "Reviews 5654004610 and 5654004947 -> runs 40343824683 (cancelled) and 40343828930 (success); every earlier pull_request_review run was cancelled by the next, while the queued pull_request run 40343578035 was not touched by review runs (cancelled only by the next pull_request run). gh pr checks shows one pr-title per event, both pass; rollup SUCCESS",
+      "headSha": "9bb73cab40630765aeb55fccef6f1cd7cb34acf8",
+      "negativeControl": "Single group pr-title-<number> for all events (head ebf883ee, scratch #2250 at 672e3e1a): review runs cancelled pull_request run 40329132323, so gh pr checks listed 'pr-title fail' (pull_request) beside 'pr-title pass' (review run 40330236878) and the commit's statusCheckRollup state stayed FAILURE after every required check passed"
+    },
+    {
+      "criterion": "F control: an issue comment's PR Title run comes from main's file and reports on main's commit, never on the head",
+      "surface": "GitHub Actions on sjawhar/legion, scratch PR sjawhar/legion#2248",
+      "command": "gh pr comment 2248 -R sjawhar/legion --body 'Scratch issue comment for the trigger proof.'; gh api repos/sjawhar/legion/actions/workflows/pr-title.yaml/runs?event=issue_comment",
+      "observed": "Run 40327858645, event issue_comment, head_branch main, head_sha d59d119a (main's tip), not on the scratch head 69b1fd1a. After the merge, the production check shows an issue comment starts no PR Title run",
+      "headSha": "12bde844b2a6206449dceaea91cde8629a1d2ebb",
+      "negativeControl": "The same scratch head's pull_request and pull_request_review runs (40326912719, 40327502116) report on 69b1fd1a, the head"
+    },
+    {
+      "criterion": "A/B/D: triggers, no job if:, title filter, texts, script refusal and unit suite",
+      "surface": "Local repository checks in the issue workspace",
+      "command": "actionlint v1.7.7 on pr-title.yaml; acceptance greps A and B from plan.md; bash .github/scripts/check-private-names.test.sh; bash .github/scripts/check-private-names.sh; bunx biome check; check-action-pins/check-image-trigger-paths/check-release-credentials under uv --with pyyaml",
+      "observed": "actionlint exit 0; both greps print nothing; check-private-names.test.sh 237 passed, 0 failed (244 at main; 7 removed checks were issue_comment/review_comment cases); guard and the three workflow scripts exit 0; CI at 9bb73cab: Tests 40343447424 success, PR Title 40343447459 success",
+      "headSha": "9bb73cab40630765aeb55fccef6f1cd7cb34acf8",
+      "negativeControl": "Test 'a payload with no pull_request is refused': an issue-shaped payload exits 1 with '::error::the event payload carries no pull request'"
+    }
+  ],
+  "filesChanged": [
+    ".github/workflows/pr-title.yaml",
+    ".github/scripts/check-pr-text.sh",
+    ".github/scripts/check-private-names.test.sh",
+    ".github/scripts/check-private-names.sh",
+    ".github/workflows/pr-and-main.yaml",
+    "AGENTS.md",
+    "docs/solutions/legion/a-trailered-head-is-missing-the-checks-a-push-starts-not-every-check-run-INFRA-149.md",
+    "docs/solutions/github/merge-queue-required-checks-need-a-merge-group-trigger-on-the-workflow-that-produces-them.md"
+  ],
+  "trickyParts": [
+    "GitHub lists a pull request's checks once per check name and event: a single concurrency group across events lets a review run cancel a pull_request run, leaving that event's latest pr-title cancelled and the commit rollup FAILURE (scratch #2250). The group is therefore pr-title-<event>-<number>.",
+    "An inline comment posted alone also fires pull_request_review submitted, so it still starts exactly one PR Title run; the header never says an inline comment starts no run."
+  ],
+  "deviations": [
+    "The architect's concurrency addition asked for group pr-title-${{ github.event.pull_request.number }}; the head uses pr-title-${{ github.event_name }}-${{ github.event.pull_request.number }} for the per-event check listing above (reported to the architect with evidence). At most one running and one pending run per event, so at most four per pull request.",
+    "ce-simplify-code applied one change: as_event became as_review_event (no argument)."
+  ],
+  "openQuestions": []
+}
