@@ -11,6 +11,12 @@
 
 ### Fixed
 
+- The `dispatch` command and the session's start notice name the lost `DISPATCH_URL` when
+  `DISPATCH_TOKEN_FILE` is set and nothing names the server: `DISPATCH_TOKEN_FILE is set and
+  DISPATCH_URL is not, so Dispatch is off: this shell lost the DISPATCH_URL it started with. Export
+  DISPATCH_URL again, set to the Dispatch server that token is for`, where they named a missing
+  envoy.json.
+
 - `dispatch-first` now says to open a `dispatch ask` the moment a person blocks your work, and to
   record every request you accept in Dispatch and read that record back before a turn ends.
 

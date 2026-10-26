@@ -254,9 +254,11 @@ Dispatch on at load adds the `dispatch-first` context; a Dispatch call after the
 configuring Dispatch throws `Dispatch is no longer configured: <notice>`, and one after it broke
 throws `dispatch config: <error>`. A top-level `session_start` shows one notice when a section is
 off for a reason worth saying: the missing file's (`envoy: no envoy.json at <path>: Dispatch and
-Envoy are off`), a section's error, what a checkout's files hold that the session does not read, or
-that inbound messages are off; a file that turns a section off says nothing. A file location that
-cannot be worked out (a relative `XDG_CONFIG_HOME`, `ENVOY_CONFIG_FILE` or `PI_CODING_AGENT_DIR`)
+Envoy are off`), the lost `DISPATCH_URL` when `DISPATCH_TOKEN_FILE` is set and no server is named
+(`lostDispatchUrlNotice`), a section's error, what a checkout's files hold that the session does not
+read, or that inbound messages are off; otherwise a file that turns a section off says nothing. A
+file location that cannot be worked out (a relative `XDG_CONFIG_HOME`, `ENVOY_CONFIG_FILE` or
+`PI_CODING_AGENT_DIR`)
 still loads the extension, with both sections off, nothing handed on, and that refusal as the
 notice.
 

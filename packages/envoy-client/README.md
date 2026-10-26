@@ -83,7 +83,8 @@ so is a top-level `natsUrls`, which belongs in `envoy.natsUrls`. JSON that does 
 refused at its line and column, never with the parser's message, which quotes the text it stopped
 at. A missing chosen file contributes nothing and sets `missing`: each section is then on only when
 its variables name it, and a section still off says `no envoy.json at <path>: Dispatch is off`
-(`Envoy is off`, or `Dispatch and Envoy are off` when neither is on), with
+(`Envoy is off`, or `Dispatch and Envoy are off` when neither is on; Dispatch with
+`DISPATCH_TOKEN_FILE` set says the lost `DISPATCH_URL` instead, below), with
 `(a link to <target>, which does not exist)` after the path when it is a dangling link. A chosen
 file that cannot be read or is not valid is `failed`, naming the file and the key, and both
 sections are off with that error.
@@ -212,12 +213,14 @@ session's commands, or null when that is unset or empty. `sessionSettings(file, 
 })` reads it once and returns both sections (`dispatchSettings`, `envoySettings`) and the one
 notice the session shows at its start: the file's error (`<error>: Dispatch and Envoy are off`),
 the missing file's notice, the missing-file text for a section still off when a variable turned
-the other on, or a section's own error (`Dispatch is off: <error>`, `Envoy is off: <error>`), then
-what a checkout's files hold that the session does not read (its `envoy` section, the file's own
-error while `DISPATCH_URL` replaces it, or its `.opencode/envoy.json`), then, for a session that
-opens a NATS connection (`nats` not `false`), that an Envoy that is on takes no inbound messages:
-`Envoy's inbound messages are off: <inbound.off>; the Envoy tools still work`. A file that turns a
-section off, or holds no section for it, says nothing.
+the other on, the lost-`DISPATCH_URL` notice for Dispatch when `DISPATCH_TOKEN_FILE` is set and no
+server is named (below), or a section's own error (`Dispatch is off: <error>`,
+`Envoy is off: <error>`), then what a checkout's files hold that the session does not read (its
+`envoy` section, the file's own error while `DISPATCH_URL` replaces it, or its
+`.opencode/envoy.json`), then, for a session that opens a NATS connection (`nats` not `false`),
+that an Envoy that is on takes no inbound messages: `Envoy's inbound messages are off:
+<inbound.off>; the Envoy tools still work`. Otherwise a file that turns a section off, or holds no
+section for it, says nothing.
 `sessionDispatchSettings(file, env, { cwd })` reads
 Dispatch alone, now: `{ dispatch, warnings, missing }`, Dispatch's resolution beside the files the
 read found and did not read and the missing-file record, for a command, which says the `warnings`
@@ -288,7 +291,17 @@ DISPATCH_TOKEN_FILE for it`. Invalid configuration, malformed URLs, and empty to
 disabled and name the failing source in `error`; nothing configuring it, or a file turning it off,
 leaves it disabled with a `notice` (`<file> sets dispatch.enabled to false: Dispatch is off`,
 `<file> names no Dispatch server, and DISPATCH_URL is not set: Dispatch is off`, or the
-missing-file text). `DISPATCH_PUBLIC_URL`, when set, is Dispatch's dashboard as people open it, for
+missing-file text). One case is told apart: `DISPATCH_TOKEN_FILE` set while nothing names the
+server. Legion sets that variable only beside `DISPATCH_URL`, a Legion pod has no envoy.json, and
+an Oh My Pi session keeps one shell, where an `unset DISPATCH_URL` lasts for every later command.
+So the notice names the lost variable rather than the file (`lostDispatchUrlNotice`):
+`DISPATCH_TOKEN_FILE is set and DISPATCH_URL is not, so Dispatch is off: this shell lost the
+DISPATCH_URL it started with. Export DISPATCH_URL again, set to the Dispatch server that token is
+for`. When the chosen file is missing, what may have named the server follows it: a dangling link
+(`; <file> is a link to <target>, which does not exist`), then the unread OpenCode-era user file,
+as in the missing-file text. The session's start notice (`sessionSettings`) says the same for
+Dispatch. `DISPATCH_TOKEN` alone keeps the file's notice, since it also goes with a server an
+envoy.json names. `DISPATCH_PUBLIC_URL`, when set, is Dispatch's dashboard as people open it, for
 a session that reaches Dispatch at an address they cannot (a Legion pod's in-cluster one): the
 settings carry it as `publicUrl`, less a trailing slash; every link the executor prints resolves
 against it rather than the API's URL, which every call still goes to; a dashboard URL given as a

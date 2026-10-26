@@ -39,8 +39,9 @@ own. The `dispatch` command reads the file the `shell.env` hook hands it in `ENV
 `dispatch.enabled: true` without `dispatch.serverUrl` targets `http://localhost:8766`. With
 Dispatch on, every session also carries the `dispatch-first` skill as an instruction file; with
 Envoy off, the plugin registers no Envoy tool and calls no listener. Why a section is off is logged
-once (`envoy: no envoy.json at <path>: Dispatch and Envoy are off`, the section's error, or what a
-checkout's files hold that is not read).
+once (`envoy: no envoy.json at <path>: Dispatch and Envoy are off`, the lost `DISPATCH_URL` when
+`DISPATCH_TOKEN_FILE` is set and no server is named, the section's error, or what a checkout's files
+hold that is not read).
 
 `~/.config/opencode/envoy.json` and a checkout's `.opencode/envoy.json` are not read. While the old
 user file is there and the serve's file is missing, Dispatch and Envoy stay off unless a variable

@@ -83,6 +83,30 @@ function writtenToken(
 }
 
 /**
+ * The notice for `DISPATCH_TOKEN_FILE` set while nothing names Dispatch's server, or undefined when
+ * it is not set. Legion sets `DISPATCH_TOKEN_FILE` only beside `DISPATCH_URL`, in a tmux pane and in
+ * a pod alike, and a pod has no envoy.json; its session keeps one shell, where an `unset
+ * DISPATCH_URL` lasts. So this notice names the variable to export again, not the missing file.
+ * `DISPATCH_TOKEN` alone says nothing of the kind: it also goes with a server an envoy.json names.
+ * What may name the server on this machine is still said after it: the missing file's dangling
+ * link, then the unread OpenCode-era user file, last, as `missingConfigNotice` says it
+ * (claude-envoy's session hook prints a notice only when it ends with that file's notice).
+ */
+export function lostDispatchUrlNotice(
+  env: DispatchEnvironment,
+  config: ReadEnvoyConfig
+): string | undefined {
+  if (nonEmpty(env.DISPATCH_TOKEN_FILE) === undefined) return undefined;
+  const link = config.missing?.link ?? null;
+  const old = config.missing?.oldUserFileNotice;
+  return [
+    "DISPATCH_TOKEN_FILE is set and DISPATCH_URL is not, so Dispatch is off: this shell lost the DISPATCH_URL it started with. Export DISPATCH_URL again, set to the Dispatch server that token is for",
+    ...(link === null ? [] : [`${config.path} is a link to ${link}, which does not exist`]),
+    ...(old === undefined ? [] : [old]),
+  ].join("; ");
+}
+
+/**
  * Dispatch's URL and bearer token from `config` (`readEnvoyConfig`) and the environment. An empty
  * variable counts as unset.
  *
@@ -113,7 +137,8 @@ function writtenToken(
  * what a checkout cannot do is take the user's token, or a variable's, anywhere. A checkout's `!`
  * token is refused; the chosen file's runs here, only once Dispatch is about to use it. Dispatch is
  * on only when both URL and bearer token resolve; off, it says why: a `notice` when nothing names
- * it or a file turns it off, an `error` otherwise.
+ * it or a file turns it off, an `error` otherwise. Nothing naming it while a token variable is set
+ * is said as the `DISPATCH_URL` the shell lost (`lostDispatchUrlNotice`).
  */
 export function dispatchSettings(
   env: DispatchEnvironment,
@@ -141,6 +166,8 @@ export function dispatchSettings(
     own.serverUrl !== undefined ||
     own.enabled === true;
   if (!addressed) {
+    const lost = lostDispatchUrlNotice(env, config);
+    if (lost !== undefined) return offWithNotice(lost);
     return offWithNotice(
       config.missing === null
         ? `${config.path} names no Dispatch server, and DISPATCH_URL is not set: Dispatch is off`

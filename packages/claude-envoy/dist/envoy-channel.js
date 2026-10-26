@@ -43425,6 +43425,17 @@ function writtenToken(config2, checkout) {
     checkout: false
   };
 }
+function lostDispatchUrlNotice(env, config2) {
+  if (nonEmpty(env.DISPATCH_TOKEN_FILE) === undefined)
+    return;
+  const link = config2.missing?.link ?? null;
+  const old = config2.missing?.oldUserFileNotice;
+  return [
+    "DISPATCH_TOKEN_FILE is set and DISPATCH_URL is not, so Dispatch is off: this shell lost the DISPATCH_URL it started with. Export DISPATCH_URL again, set to the Dispatch server that token is for",
+    ...link === null ? [] : [`${config2.path} is a link to ${link}, which does not exist`],
+    ...old === undefined ? [] : [old]
+  ].join("; ");
+}
 function dispatchSettings(env, config2) {
   if (config2.kind === "failed")
     return offWithError(config2.error);
@@ -43443,6 +43454,9 @@ function dispatchSettings(env, config2) {
   const checkoutServer = checkout?.dispatch.serverUrl;
   const addressed = explicitUrl !== undefined || checkoutServer !== undefined || own.serverUrl !== undefined || own.enabled === true;
   if (!addressed) {
+    const lost = lostDispatchUrlNotice(env, config2);
+    if (lost !== undefined)
+      return offWithNotice(lost);
     return offWithNotice(config2.missing === null ? `${config2.path} names no Dispatch server, and DISPATCH_URL is not set: Dispatch is off` : missingConfigNotice(config2.path, config2.missing, "Dispatch is off"));
   }
   if (explicitUrl !== undefined && httpUrl2(explicitUrl) === undefined) {
@@ -43600,25 +43614,29 @@ function handedConfigFile(env) {
     return { path: null, error: messageFor(error48) };
   }
 }
-function startNotice(config2, dispatch, envoy, nats) {
+function startNotice(config2, dispatch, envoy, nats, lost) {
   if (config2.kind === "failed")
     return `${config2.error}: Dispatch and Envoy are off`;
   const { missing, checkout } = config2;
+  const lostNotice = !dispatch.enabled && dispatch.notice === lost ? lost ?? null : null;
   const dispatchQuiet = !dispatch.enabled && dispatch.error === null;
   const envoyQuiet = !envoy.enabled && envoy.error === null;
   const parts = [];
-  if (missing !== null && dispatchQuiet && envoyQuiet) {
+  if (missing !== null && dispatchQuiet && envoyQuiet && lostNotice === null) {
     parts.push(missingConfigNotice(config2.path, missing, "Dispatch and Envoy are off"));
   } else {
     if (!dispatch.enabled && dispatch.error !== null)
       parts.push(`Dispatch is off: ${dispatch.error}`);
+    else if (lostNotice !== null)
+      parts.push(lostNotice);
     else if (dispatchQuiet && missing !== null) {
       parts.push(missingConfigNotice(config2.path, missing, "Dispatch is off"));
     }
     if (!envoy.enabled && envoy.error !== null)
       parts.push(`Envoy is off: ${envoy.error}`);
     else if (envoyQuiet && missing !== null) {
-      parts.push(missingConfigNotice(config2.path, missing, "Envoy is off"));
+      const said = lostNotice === null ? missing : { link: null };
+      parts.push(missingConfigNotice(config2.path, said, "Envoy is off"));
     }
   }
   if (checkout?.kind === "valid" && checkout.envoyError !== null)
@@ -43646,7 +43664,7 @@ function sessionSettings(file2, env, options) {
   return {
     dispatch,
     envoy,
-    notice: startNotice(config2, dispatch, envoy, options.nats !== false)
+    notice: startNotice(config2, dispatch, envoy, options.nats !== false, config2.kind === "read" ? lostDispatchUrlNotice(env, config2) : undefined)
   };
 }
 function sessionDispatchSettings(file2, env, options) {

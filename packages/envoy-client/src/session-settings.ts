@@ -2,6 +2,7 @@ import {
   type DispatchConfigResolution,
   type DispatchEnvironment,
   dispatchSettings,
+  lostDispatchUrlNotice,
 } from "./dispatch-config";
 import {
   type EnvoyConfig,
@@ -57,37 +58,44 @@ export interface SessionSettings {
  * both are off (`missingConfigNotice`, which names a dangling link's target and the OpenCode-era
  * user file, which is not read, while it is still there); when a variable turned a section on, each
  * section still off is said with the same missing-file text. A section's own error (a token that
- * does not resolve, a command that failed) is said for that section. A file that turns a section
- * off, or holds no section for it, says nothing. What a checkout's files hold that the session does
- * not read is said too: an `envoy` section, a file that cannot be used while `DISPATCH_URL`
- * replaces it, and an OpenCode-era `.opencode/envoy.json` (`warnings`). Last, for a session that
- * opens a NATS connection (`nats` not false), an Envoy that is on and takes no inbound messages is
- * said to, naming why (`inbound.off`: no NATS server, or the seed's refusal), and a pass deadline
- * the resolver raised to the heartbeat interval (`passDeadlineRaisedFrom`, `envoySettings`) is
- * said to have been raised, naming both values.
+ * does not resolve, a command that failed) is said for that section. Dispatch off with
+ * `DISPATCH_TOKEN_FILE` set and no server named (`lost`, `lostDispatchUrlNotice`) is said as the
+ * `DISPATCH_URL` a shell lost, whether the file is missing or names no server; a missing file's
+ * link and OpenCode-era user file are then said once, in that notice. Otherwise a file that turns
+ * a section off, or holds no section for it, says nothing. What a checkout's files hold that the
+ * session does not read is said too: an `envoy` section, a file that cannot be used while
+ * `DISPATCH_URL` replaces it, and an OpenCode-era `.opencode/envoy.json` (`warnings`). Last, for a
+ * session that opens a NATS connection (`nats` not false), an Envoy that is on and takes no inbound
+ * messages is said to, naming why (`inbound.off`: no NATS server, or the seed's refusal), and a
+ * pass deadline the resolver raised to the heartbeat interval (`passDeadlineRaisedFrom`,
+ * `envoySettings`) is said to have been raised, naming both values.
  */
 function startNotice(
   config: EnvoyConfig,
   dispatch: DispatchConfigResolution,
   envoy: EnvoySettings,
-  nats: boolean
+  nats: boolean,
+  lost: string | undefined
 ): string | null {
   if (config.kind === "failed") return `${config.error}: Dispatch and Envoy are off`;
   const { missing, checkout } = config;
+  const lostNotice = !dispatch.enabled && dispatch.notice === lost ? (lost ?? null) : null;
   const dispatchQuiet = !dispatch.enabled && dispatch.error === null;
   const envoyQuiet = !envoy.enabled && envoy.error === null;
   const parts: string[] = [];
-  if (missing !== null && dispatchQuiet && envoyQuiet) {
+  if (missing !== null && dispatchQuiet && envoyQuiet && lostNotice === null) {
     parts.push(missingConfigNotice(config.path, missing, "Dispatch and Envoy are off"));
   } else {
     if (!dispatch.enabled && dispatch.error !== null)
       parts.push(`Dispatch is off: ${dispatch.error}`);
+    else if (lostNotice !== null) parts.push(lostNotice);
     else if (dispatchQuiet && missing !== null) {
       parts.push(missingConfigNotice(config.path, missing, "Dispatch is off"));
     }
     if (!envoy.enabled && envoy.error !== null) parts.push(`Envoy is off: ${envoy.error}`);
     else if (envoyQuiet && missing !== null) {
-      parts.push(missingConfigNotice(config.path, missing, "Envoy is off"));
+      const said = lostNotice === null ? missing : { link: null };
+      parts.push(missingConfigNotice(config.path, said, "Envoy is off"));
     }
   }
   if (checkout?.kind === "valid" && checkout.envoyError !== null) parts.push(checkout.envoyError);
@@ -127,7 +135,13 @@ export function sessionSettings(
   return {
     dispatch,
     envoy,
-    notice: startNotice(config, dispatch, envoy, options.nats !== false),
+    notice: startNotice(
+      config,
+      dispatch,
+      envoy,
+      options.nats !== false,
+      config.kind === "read" ? lostDispatchUrlNotice(env, config) : undefined
+    ),
   };
 }
 

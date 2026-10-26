@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import publicUrlFixture from "../../../contracts/fixtures/dispatch-public-url.json";
@@ -331,6 +331,117 @@ describe("Dispatch from a harness's envoy.json", () => {
     expect(dispatchFor({ HOME: home, DISPATCH_URL: "" }, { ...command, cwd })).toEqual({
       enabled: false,
       notice: `${checkout} sets dispatch.enabled to false: Dispatch is off`,
+      error: null,
+    });
+  });
+
+  // Legion sets DISPATCH_TOKEN_FILE only beside DISPATCH_URL, and a pod has no envoy.json: the
+  // token file left without DISPATCH_URL is a shell that lost it, so the notice names the variable
+  // to export again, whether the chosen file is missing or names no server, not the file.
+  const lostUrl =
+    "DISPATCH_TOKEN_FILE is set and DISPATCH_URL is not, so Dispatch is off: this shell lost the DISPATCH_URL it started with. Export DISPATCH_URL again, set to the Dispatch server that token is for";
+
+  test("DISPATCH_TOKEN_FILE with no DISPATCH_URL names the lost DISPATCH_URL, not the chosen file", () => {
+    const tokenFile = path.join(tempDir(), "DISPATCH_TOKEN");
+    writeFileSync(tokenFile, "pointer-token\n");
+    const missingHome = tempDir();
+    const home = tempDir();
+    writeUserConfig(home, { dispatch: { token: "file-token" } });
+    for (const env of [
+      { HOME: missingHome, DISPATCH_TOKEN_FILE: tokenFile },
+      // `export DISPATCH_URL=` empties it, which reads as unset.
+      {
+        HOME: missingHome,
+        DISPATCH_URL: "",
+        DISPATCH_TOKEN: "environment-token",
+        DISPATCH_TOKEN_FILE: tokenFile,
+      },
+      // A chosen file that names no server says the same.
+      { HOME: home, DISPATCH_TOKEN_FILE: tokenFile },
+    ]) {
+      expect(dispatchFor(env, { ...command, cwd: tempDir() })).toEqual({
+        enabled: false,
+        notice: lostUrl,
+        error: null,
+      });
+    }
+    // DISPATCH_TOKEN alone also goes with a server an envoy.json names, so it keeps the file's notice.
+    expect(
+      dispatchFor(
+        { HOME: missingHome, DISPATCH_TOKEN: "environment-token", DISPATCH_TOKEN_FILE: "" },
+        { ...command, cwd: tempDir() }
+      )
+    ).toEqual({
+      enabled: false,
+      notice: `no envoy.json at ${path.join(missingHome, ".config", "legion", "envoy.json")}: Dispatch is off`,
+      error: null,
+    });
+  });
+
+  // Setting DISPATCH_URL would not turn Dispatch on past a file that turns it off or cannot be
+  // read, so those reasons are said, not the lost DISPATCH_URL.
+  test("a file that turns Dispatch off or cannot be read is said before the lost DISPATCH_URL", () => {
+    const tokenFile = path.join(tempDir(), "DISPATCH_TOKEN");
+    writeFileSync(tokenFile, "pointer-token\n");
+    const off = tempDir();
+    const offFile = writeUserConfig(off, { dispatch: { enabled: false } });
+    expect(
+      dispatchFor({ HOME: off, DISPATCH_TOKEN_FILE: tokenFile }, { ...command, cwd: tempDir() })
+    ).toEqual({
+      enabled: false,
+      notice: `${offFile} sets dispatch.enabled to false: Dispatch is off`,
+      error: null,
+    });
+    const broken = tempDir();
+    writeUserConfig(broken, "{not json");
+    expect(
+      dispatchFor({ HOME: broken, DISPATCH_TOKEN_FILE: tokenFile }, { ...command, cwd: tempDir() })
+    ).toMatchObject({
+      enabled: false,
+      notice: null,
+      error: expect.stringContaining("invalid JSON"),
+    });
+    const cwd = tempDir();
+    mkdirSync(path.join(cwd, ".envoy"));
+    const checkout = path.join(cwd, ".envoy", "envoy.json");
+    writeFileSync(checkout, JSON.stringify({ dispatch: { enabled: false } }));
+    expect(
+      dispatchFor({ HOME: tempDir(), DISPATCH_TOKEN_FILE: tokenFile }, { ...command, cwd })
+    ).toEqual({
+      enabled: false,
+      notice: `${checkout} sets dispatch.enabled to false: Dispatch is off`,
+      error: null,
+    });
+    writeFileSync(checkout, "{not json");
+    expect(
+      dispatchFor({ HOME: tempDir(), DISPATCH_TOKEN_FILE: tokenFile }, { ...command, cwd })
+    ).toMatchObject({ enabled: false, notice: null, error: expect.stringContaining(checkout) });
+  });
+
+  // Off a pod, a missing chosen file can be a dangling link, or sit beside the OpenCode-era user
+  // file, either of which may be where the server was named: both are still said, the old file
+  // last, where claude-envoy's session hook looks for it.
+  test("DISPATCH_TOKEN_FILE with no DISPATCH_URL still names a dangling link and the unread old user file", () => {
+    const home = tempDir();
+    const tokenFile = path.join(home, "DISPATCH_TOKEN");
+    writeFileSync(tokenFile, "pointer-token\n");
+    const old = path.join(home, ".config", "opencode", "envoy.json");
+    mkdirSync(path.dirname(old), { recursive: true });
+    writeFileSync(old, JSON.stringify({ dispatch: { serverUrl: "http://old.test" } }));
+    const move = `${old} is not read: mkdir -p ~/.config/legion && mv ~/.config/opencode/envoy.json ~/.config/legion/`;
+    const env = { HOME: home, DISPATCH_TOKEN_FILE: tokenFile };
+    expect(dispatchFor(env, { ...command, cwd: home })).toEqual({
+      enabled: false,
+      notice: `${lostUrl}; ${move}`,
+      error: null,
+    });
+    const chosen = path.join(home, ".config", "legion", "envoy.json");
+    const target = path.join(home, "dotfiles", "envoy.json");
+    mkdirSync(path.dirname(chosen), { recursive: true });
+    symlinkSync(target, chosen);
+    expect(dispatchFor(env, { ...command, cwd: home })).toEqual({
+      enabled: false,
+      notice: `${lostUrl}; ${chosen} is a link to ${target}, which does not exist; ${move}`,
       error: null,
     });
   });

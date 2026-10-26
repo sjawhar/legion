@@ -196,6 +196,35 @@ test("summarises a missing Claude profile file with where its unread old file be
   }
 })
 
+// A token file left without DISPATCH_URL names the lost variable, and the unread old file's advice
+// still ends the notice, which is what the hook looks for before it says anything.
+test("a DISPATCH_TOKEN_FILE with no DISPATCH_URL names the lost URL and still where the old file belongs", async () => {
+  const scratch = await mkdtemp(join(tmpdir(), "claude-envoy-hook-lost-url-"))
+  const configDirectory = join(scratch, "claude-config")
+  const old = join(scratch, ".config", "opencode", "envoy.json")
+  const tokenFile = join(scratch, "DISPATCH_TOKEN")
+  await mkdir(configDirectory)
+  await mkdir(join(scratch, ".config", "opencode"), { recursive: true })
+  await writeFile(old, JSON.stringify({ dispatch: { serverUrl: "https://old.dispatch.example" } }))
+  await writeFile(tokenFile, "pointer-token\n")
+  try {
+    const result = await runHook(hookInput, {
+      HOME: scratch,
+      CLAUDE_CONFIG_DIR: configDirectory,
+      CLAUDE_PLUGIN_DATA: join(scratch, "plugin-data"),
+      DISPATCH_TOKEN_FILE: tokenFile,
+    })
+    const chosen = join(configDirectory, "envoy.json")
+
+    expect(result.exitCode).toBe(0)
+    expect(result.stdout).toBe(
+      `Dispatch authored-ask summary unavailable: DISPATCH_TOKEN_FILE is set and DISPATCH_URL is not, so Dispatch is off: this shell lost the DISPATCH_URL it started with. Export DISPATCH_URL again, set to the Dispatch server that token is for; ${old} is not read for this profile; copy or link it to ${chosen}, or write that file\n`,
+    )
+  } finally {
+    await rm(scratch, { recursive: true, force: true })
+  }
+})
+
 test("says nothing of the unread old user file when a checkout's enabled: false turns Dispatch off", async () => {
   const scratch = await mkdtemp(join(tmpdir(), "claude-envoy-hook-checkout-off-"))
   const checkout = join(scratch, "checkout")

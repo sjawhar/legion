@@ -36,6 +36,13 @@
 
 ### Fixed
 
+- The `dispatch` command (`dist/dispatch.js`) and the session's start notice name the lost
+  `DISPATCH_URL` when `DISPATCH_TOKEN_FILE` is set and nothing names the server: `DISPATCH_TOKEN_FILE
+  is set and DISPATCH_URL is not, so Dispatch is off: this shell lost the DISPATCH_URL it started
+  with. Export DISPATCH_URL again, set to the Dispatch server that token is for`. In a Legion pod,
+  which has no envoy.json and whose session keeps one shell, a command that ran `unset DISPATCH_URL`
+  made every later `dispatch` say `no envoy.json at <path>: Dispatch is off`.
+
 - A live view held open while its session is relaunched with `--resume` now shows the resumed
   process's model, thinking level and command changes. Two things stopped it. Every process
   numbered its agent-stream frames from 0, and the page keeps a `settings` or `commands` frame only

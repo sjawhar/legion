@@ -1301,6 +1301,29 @@ describe("the dispatch CLI's envoy.json", () => {
     }
     expect(requests).toEqual([]);
   });
+
+  // A Legion pod has no envoy.json: its Dispatch is DISPATCH_URL with DISPATCH_TOKEN_FILE, which
+  // the session's one long-lived shell keeps until a command unsets or empties DISPATCH_URL.
+  test("DISPATCH_TOKEN_FILE with no DISPATCH_URL says the shell lost it, not that envoy.json is missing, and exits 2, sending nothing", async () => {
+    const tokenFile = join(stateDir, "DISPATCH_TOKEN");
+    writeFileSync(tokenFile, "test-token\n");
+    const chosen = join(stateDir, "profile", "envoy.json");
+    for (const variables of [
+      { DISPATCH_TOKEN_FILE: tokenFile },
+      { DISPATCH_TOKEN_FILE: tokenFile, DISPATCH_URL: "" },
+    ]) {
+      const { code, stdout } = await run(["whoami"], {
+        ...fromFile,
+        ENVOY_CONFIG_FILE: chosen,
+        ...variables,
+      });
+      expect(stdout).toBe(
+        "dispatch: DISPATCH_TOKEN_FILE is set and DISPATCH_URL is not, so Dispatch is off: this shell lost the DISPATCH_URL it started with. Export DISPATCH_URL again, set to the Dispatch server that token is for\n"
+      );
+      expect(code).toBe(2);
+    }
+    expect(requests).toEqual([]);
+  });
 });
 
 describe("the dispatch CLI's subscription note", () => {

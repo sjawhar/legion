@@ -158,8 +158,10 @@ tools and `/whoami`, takes no inbound messages, connects to no NATS server, and 
 the claim before any listener call, so a Legion process fails its boot rather than hold a role
 whose tasks reach nobody. When a
 section is off for a reason worth saying, the session says so once at its start:
-`envoy: no envoy.json at <path>: Dispatch and Envoy are off`, the section's error, what a
-checkout's file holds that is not read, or that inbound messages are off and why. Invalid configuration, an
+`envoy: no envoy.json at <path>: Dispatch and Envoy are off`, the lost `DISPATCH_URL` when
+`DISPATCH_TOKEN_FILE` is set and no server is named (`DISPATCH_TOKEN_FILE is set and DISPATCH_URL
+is not, so Dispatch is off: …`, which every `dispatch` command also prints), the section's error,
+what a checkout's file holds that is not read, or that inbound messages are off and why. Invalid configuration, an
 invalid URL, or an empty token makes every `dispatch` command exit 2 naming the source of the error.
 
 `~/.config/opencode/envoy.json` and a checkout's `.opencode/envoy.json` are not read. While the old
