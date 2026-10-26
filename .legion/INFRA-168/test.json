@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-168",
-  "completed": "2026-10-26T13:35:00Z",
+  "completed": "2026-10-26T13:37:00Z",
   "round": 12,
   "headSha": "2ac8abe5c966d5ef135fe49278857bcdcbd250fc",
   "handoffHead": "6c383c1534c378ec4179ef8f12d1b1e6f6fc9fd7",
@@ -22,7 +22,7 @@
       "command": "gh api repos/sjawhar/legion/compare/632f8d02802731f85662e1f593b738e40759db71...2ac8abe5 --jq '.files[] | .status, .filename'; cmp $TMPDIR/mut/packages/pi-envoy/extensions/askgate/askgate-core.ts (git archive 2ac8abe5) packages/pi-envoy/extensions/askgate/askgate-core.ts",
       "observed": "Four modified files: three under .legion/INFRA-168/ and askgate.test.ts (+64 -0). askgate-core.ts identical.",
       "headSha": "2ac8abe5c966d5ef135fe49278857bcdcbd250fc",
-      "negativeControl": "The same compare from 9dc3c609 to 632f8d02 in round 11 listed askgate-core.ts; here it does not."
+      "negativeControl": "The compare of round 11's own change, e25512a4 to 632f8d02, lists packages/pi-envoy/extensions/askgate/askgate-core.ts; this one does not."
     },
     {
       "criterion": "The bare gates at the head: pi-envoy tests, tsc and lint.",
