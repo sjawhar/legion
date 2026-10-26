@@ -24,12 +24,15 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"slices"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -85,6 +88,51 @@ func (e *apiError) Permanent() bool {
 	return e.Code == terminalRenewal.LegacyCode && strings.Contains(e.Message, terminalRenewal.LegacyMessage)
 }
 
+// unreachableError is a broker call that never reached the broker: its host does not resolve, or
+// nothing answered at the address. It is not a refusal - the broker said nothing - and it reads as
+// what it is, naming the address tried and the variable the address came from, because a session
+// that inherited a stale AGENT_SECRETS_URL otherwise reads a bare DNS error as a broker that is
+// down and the stale value goes unnoticed.
+type unreachableError struct {
+	// what classifies the failure: the host does not resolve, nothing answered, nothing answered
+	// in time, or it could not be reached at all.
+	what string
+	// base is the broker's address as AGENT_SECRETS_URL gave it, method and url the call tried.
+	base, method, url string
+	// cause is the transport's own error, with net/http's repetition of the URL unwrapped away.
+	cause error
+}
+
+func (e *unreachableError) Error() string {
+	return fmt.Sprintf("%s: %s %s (%s names %s): %v", e.what, e.method, e.url, brokerURLVar, e.base, e.cause)
+}
+
+func (e *unreachableError) Unwrap() error { return e.cause }
+
+// unreachable classifies a failure of the HTTP call itself, which the broker never answered.
+// A host that does not resolve and a refused connection are told apart because they need
+// different fixes: a stale or mistyped AGENT_SECRETS_URL, and a broker that is not listening.
+func unreachable(base, method, callURL string, err error) error {
+	cause := err
+	var wrapped *url.Error
+	if errors.As(err, &wrapped) {
+		cause = wrapped.Err
+	}
+	host := brokerHost(base)
+	var dns *net.DNSError
+	var timeout net.Error
+	switch {
+	case errors.As(err, &dns) && dns.IsNotFound:
+		return &unreachableError{"the broker's host " + host + " does not resolve", base, method, callURL, cause}
+	case errors.Is(err, syscall.ECONNREFUSED):
+		return &unreachableError{"nothing answered at " + host + ": the connection was refused", base, method, callURL, cause}
+	case errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &timeout) && timeout.Timeout()):
+		return &unreachableError{"the broker at " + host + " did not answer in time", base, method, callURL, cause}
+	default:
+		return &unreachableError{"the broker at " + host + " could not be reached", base, method, callURL, cause}
+	}
+}
+
 // do sends the request and, on a 2xx response, returns its raw body; any other status decodes
 // the broker's error envelope into an *apiError.
 func (c *client) do(ctx context.Context, method, url string, body []byte, headers map[string]string) ([]byte, error) {
@@ -104,7 +152,7 @@ func (c *client) do(ctx context.Context, method, url string, body []byte, header
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("%s %s: %w", method, url, err)
+		return nil, unreachable(c.baseURL, method, url, err)
 	}
 	defer resp.Body.Close()
 	data, err := io.ReadAll(resp.Body)

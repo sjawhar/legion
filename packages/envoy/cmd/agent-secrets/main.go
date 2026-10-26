@@ -355,7 +355,20 @@ func refuse(stderr io.Writer, prefix string, src source, err error) {
 		reportError(stderr, prefix, err)
 		return
 	}
-	fmt.Fprintf(stderr, "%s: %v%s\n", prefix, err, src.asked())
+	fmt.Fprintf(stderr, "%s: %s\n", prefix, refusalText(src, err))
+}
+
+// refusalText is what a refusal says after its prefix: the failure, and where this CLI looked.
+// A call that never reached the broker says so itself - which address it tried, that
+// AGENT_SECRETS_URL named it, and whether the host does not resolve or nothing answered - and
+// takes no source trailer: the broker refused nothing, so a trailer saying it was asked would
+// read as an answer it gave, and the store behind it could not be read either.
+func refusalText(src source, err error) string {
+	var unreached *unreachableError
+	if errors.As(err, &unreached) {
+		return unreached.Error()
+	}
+	return err.Error() + src.asked()
 }
 
 // splitArgs partitions args into recognized "--flag"/"--flag value" tokens (as declared by
@@ -454,9 +467,9 @@ func selectSigner(dir string) (string, Signer, error) {
 // subcommand (renew, request, status, cancel, revoke, self, and the exec form) needs, plus the
 // enrollment id buildSigner read from file mode (empty in helper mode).
 func sessionContext() (base, enrollmentID string, signer Signer, err error) {
-	base = strings.TrimSuffix(os.Getenv("AGENT_SECRETS_URL"), "/")
+	base = brokerBaseURL()
 	if base == "" {
-		return "", "", nil, errors.New("AGENT_SECRETS_URL is required: it names the secrets broker this command reads every secret from, and this command reads no local secrets file")
+		return "", "", nil, fmt.Errorf("%s is required: it names the secrets broker this command reads every secret from, and this command reads no local secrets file", brokerURLVar)
 	}
 	enrollmentID, signer, err = buildSigner()
 	if err != nil {
@@ -672,7 +685,7 @@ func cmdRequest(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	if err := grantedLifetime(ctx, c, signer, result, ttl); err != nil {
-		fmt.Fprintf(stderr, "agent-secrets request: %v%s\n", err, c.source(ctx).asked())
+		fmt.Fprintf(stderr, "agent-secrets request: %s\n", refusalText(c.source(ctx), err))
 		return 1
 	}
 	if *asJSON {
@@ -904,7 +917,7 @@ func cmdExec(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	if err := grantedLifetime(ctx, c, signer, result, ttl); err != nil {
-		fmt.Fprintf(stderr, "agent-secrets: %v; nothing was run%s\n", err, src().asked())
+		fmt.Fprintf(stderr, "agent-secrets: %s; nothing was run\n", refusalText(src(), err))
 		return 1
 	}
 

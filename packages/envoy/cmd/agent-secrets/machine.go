@@ -281,7 +281,7 @@ func operatorFail(stderr io.Writer, form string, src source, err error) int {
 	case errors.As(err, &broker) && broker.Status == http.StatusUnauthorized && broker.Code == "LAUNCHER_INVALID":
 		fmt.Fprintf(stderr, "agent-secrets %s: %v; this machine's login to %s is expired or revoked (run: agent-secrets machine login)\n", form, broker, src)
 	default:
-		fmt.Fprintf(stderr, "agent-secrets %s: %v%s\n", form, err, src.asked())
+		fmt.Fprintf(stderr, "agent-secrets %s: %s\n", form, refusalText(src, err))
 	}
 	return 1
 }

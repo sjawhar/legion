@@ -445,9 +445,9 @@ func secretFailIn(stderr io.Writer, form string, s *secretSession, err error) in
 // `store` field names (openSecretBackend). It checks nothing about the sign-in: connectReader
 // and connectWriter do.
 func openSession(ctx context.Context, profile string) (*secretSession, error) {
-	base := strings.TrimSuffix(os.Getenv("AGENT_SECRETS_URL"), "/")
+	base := brokerBaseURL()
 	if base == "" {
-		return nil, usageErr{errors.New("AGENT_SECRETS_URL is required: it names the secrets broker whose store these forms read and write")}
+		return nil, usageErr{fmt.Errorf("%s is required: it names the secrets broker whose store these forms read and write", brokerURLVar)}
 	}
 	if err := requireSecretBrokerURL(base); err != nil {
 		return nil, err

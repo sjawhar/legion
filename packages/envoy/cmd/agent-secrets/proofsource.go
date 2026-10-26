@@ -18,8 +18,6 @@ import (
 	"crypto/ecdsa"
 	"errors"
 	"fmt"
-	"os"
-	"strings"
 	"time"
 
 	"github.com/sjawhar/envoy/internal/broker/helper"
@@ -147,9 +145,9 @@ func (l *launcherSigner) Sign(method, url string) (string, error) {
 // machineContext answers the broker URL and a launcher signer. Machine and grant commands run
 // where the helper does (the devbox); a machine with no helper has no machine login to act as.
 func machineContext() (base string, signer *launcherSigner, err error) {
-	base = strings.TrimSuffix(os.Getenv("AGENT_SECRETS_URL"), "/")
+	base = brokerBaseURL()
 	if base == "" {
-		return "", nil, errors.New("AGENT_SECRETS_URL is required: it names the secrets broker this machine's login, and the grants it lists or ends, are at")
+		return "", nil, fmt.Errorf("%s is required: it names the secrets broker this machine's login, and the grants it lists or ends, are at", brokerURLVar)
 	}
 	sock, named := helperSocket()
 	if !exists(sock) {

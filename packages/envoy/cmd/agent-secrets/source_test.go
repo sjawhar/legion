@@ -9,10 +9,15 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"errors"
+	"net"
+	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/sjawhar/envoy/internal/broker/secrets"
@@ -210,5 +215,68 @@ func TestAnAnswerFromABrokerWithNoSettingsRouteStillNamesTheBroker(t *testing.T)
 	}
 	if err != nil || !strings.Contains(string(out), "the-child-ran") {
 		t.Fatalf("the child did not run against a broker with no settings route: %v, stdout %q", err, redactSecrets(string(out)))
+	}
+}
+
+// TestABrokerThatCannotBeReachedSaysSo: a call that never reached the broker is not a refusal the
+// broker gave. Its message classifies the failure (a host that does not resolve, a refused
+// connection), names the address it tried and the variable that named it, so a session that
+// inherited a stale AGENT_SECRETS_URL reads a stale address rather than a broker that is down.
+func TestABrokerThatCannotBeReachedSaysSo(t *testing.T) {
+	binary := buildAgentSecrets(t)
+	keyDir := newKeyDir(t)
+
+	// broker.invalid is reserved (RFC 2606) and resolves nowhere; 127.0.0.1:1 answers nothing.
+	for _, row := range []struct {
+		name, base, what string
+		args             []string
+	}{
+		{"a host that does not resolve", "https://broker.invalid", "does not resolve", []string{"self"}},
+		{"a host that does not resolve, injecting", "https://broker.invalid", "does not resolve", []string{"GRANT_ME", "--", "sh", "-c", "echo the-child-ran"}},
+		{"nothing listening", "http://127.0.0.1:1", "the connection was refused", []string{"self"}},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			stdout, stderr, exit := runAgentSecrets(t, binary, row.base, keyDir, nil, row.args...)
+			if exit == 0 || strings.Contains(stdout, "the-child-ran") {
+				t.Fatalf("exit = %d, stdout %q; want a refusal and no command run", exit, stdout)
+			}
+			for _, want := range []string{row.what, brokerHost(row.base), brokerURLVar, row.base, "/v1/"} {
+				if !strings.Contains(stderr, want) {
+					t.Fatalf("stderr = %q; want it to name %q", stderr, want)
+				}
+			}
+			if strings.Contains(stderr, "asked the broker") {
+				t.Fatalf("stderr = %q; a broker that was never reached refused nothing", stderr)
+			}
+		})
+	}
+}
+
+// TestEveryUnreachableFailureIsClassified pins the four classes unreachable tells apart, from the
+// errors a transport gives, since only two of them can be produced from a test's own address.
+func TestEveryUnreachableFailureIsClassified(t *testing.T) {
+	const base = "https://secrets.internal.example"
+	for _, row := range []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"no such host", &net.DNSError{Err: "no such host", Name: "secrets.internal.example", IsNotFound: true}, "does not resolve"},
+		{"refused", syscall.ECONNREFUSED, "the connection was refused"},
+		{"timed out", context.DeadlineExceeded, "did not answer in time"},
+		{"anything else", errors.New("tls: handshake failure"), "could not be reached"},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			err := unreachable(base, http.MethodGet, base+"/v1/enrollments/self", &url.Error{Op: "Get", URL: base, Err: row.err})
+			var unreached *unreachableError
+			if !errors.As(err, &unreached) {
+				t.Fatalf("unreachable(%v) = %v, want an unreachableError", row.err, err)
+			}
+			for _, want := range []string{row.want, "secrets.internal.example", brokerURLVar, "/v1/enrollments/self"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Fatalf("message %q does not name %q", err, want)
+				}
+			}
+		})
 	}
 }
