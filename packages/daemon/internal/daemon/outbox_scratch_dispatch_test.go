@@ -132,7 +132,29 @@ func (crashAfterPostStore) FinishOutbox(context.Context, pgx.Tx, int64, string) 
 	return errors.New("simulated crash before finish")
 }
 
+// startScratchDispatch starts the real Dispatch server against a scratch Postgres database of its
+// own with no NATS at all, and returns its base URL and agent token. Nothing it does reaches a
+// bus: a test that only drives the outbox against it wants no events.
 func startScratchDispatch(t *testing.T) (string, string) {
+	t.Helper()
+	return startScratchDispatchOn(t, "")
+}
+
+// startScratchDispatchWithNATS is startScratchDispatch with its events turned on: the same server,
+// publishing every issue event on natsURL, which is the NATS server the test holds
+// (testnats.URL). Dispatch's own start reconciles the ENVOY_NOTIFICATIONS stream there, so the
+// caller creates none — and must take the NATS server before this call, since testnats.URL empties
+// it of every stream.
+func startScratchDispatchWithNATS(t *testing.T, natsURL string) (string, string) {
+	t.Helper()
+	if natsURL == "" {
+		t.Fatal("startScratchDispatchWithNATS was given no NATS server; use startScratchDispatch for a server with no events")
+	}
+	return startScratchDispatchOn(t, natsURL)
+}
+
+// startScratchDispatchOn is both forms: natsURL empty runs the server with NATS off.
+func startScratchDispatchOn(t *testing.T, natsURL string) (string, string) {
 	t.Helper()
 	ctx := context.Background()
 	base, err := url.Parse(testDSN(t))
@@ -185,12 +207,18 @@ func startScratchDispatch(t *testing.T) (string, string) {
 	baseURL := fmt.Sprintf("http://127.0.0.1:%d", port)
 	command := exec.Command(binary)
 	command.Dir = filepath.Join(repositoryRoot, "packages", "envoy")
+	// The bus is the one difference between the two forms: NATS off, or this test's own server,
+	// whose ENVOY_NOTIFICATIONS stream this process reconciles as it starts.
+	bus := "DISPATCH_NATS_DISABLED=1"
+	if natsURL != "" {
+		bus = "NATS_URLS=" + natsURL
+	}
 	command.Env = append(os.Environ(),
 		"DATABASE_URL="+serverURL.String(),
 		"DISPATCH_AGENT_TOKEN="+token,
 		"DISPATCH_IDENTITY=header:X-Dispatch-User",
 		"DISPATCH_IDENTITY_HEADER_TRUSTED=1",
-		"DISPATCH_NATS_DISABLED=1",
+		bus,
 		// ExtraFiles' first entry is descriptor 3 in Dispatch.
 		"DISPATCH_LISTEN_FD=3",
 		"DISPATCH_LISTEN_HOST=127.0.0.1",

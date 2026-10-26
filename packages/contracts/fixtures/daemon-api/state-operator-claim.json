@@ -9,7 +9,8 @@
   "admission": {
     "cap": 2,
     "active": [],
-    "waiting": []
+    "waiting": [],
+    "blocked": []
   },
   "issues": {
     "AC91849371-900": {
