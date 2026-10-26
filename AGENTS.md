@@ -276,11 +276,15 @@ the approval it holds (`approved_seq`, `approved_at`) or the changes request it 
 that version delivered after a newer one changes no gate state: an approval that arrives after the
 changes request which superseded it, and a changes request that arrives after a newer approval.
 Neither does a review of a version below the gate's latest. Such a changes request is still the
-person's words, so it is told to the architect with its own version and reason unless an approval
-came after it; that is a request of an older version delivered after the next one, and one a newer
-request at its version superseded. A changes request reaches the architect once, whichever of the
-live event, a registration's read or the gate seed's read carries it first, while a later review
-that repeats an earlier one's version and wording is a new act and is told.
+person's words, so its live event tells it to the architect with its own version and reason unless
+an approval came after it or the gate still records it as told; that is a request of an older
+version delivered after the next one, and one a newer request at its version superseded. A gate
+seed's read of such a request tells nothing, since its own live event came first. A changes request
+the gate applies reaches the architect once, whichever of the live event, a registration's read or
+the gate seed's read carries it first, and a newer version keeps the told record; a later review
+that repeats an earlier one's version and wording is a new act and is told. The told record holds
+one review, so a request whose record a third review replaced (a newer changes request at its
+version) can be told again when its own live event arrives after that review.
 
 `gates.design: off` is the only way past the gate without a human review — Legion has no operator
 approve command; with `off` the root architect is told so in its system prompt and adds no approval

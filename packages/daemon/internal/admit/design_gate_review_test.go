@@ -165,6 +165,7 @@ func TestAChangesRequestIsToldOnceWhicheverReadCarriesIt(t *testing.T) {
 	changes := intake.DispatchArtifact{Key: "LEGION-100", ArtifactID: "artifact-root",
 		Kind: intake.DispatchArtifactChangesRequested, Version: 4, Reason: "name the rollback path", Mark: record.EventMark{Seq: 9, At: reviewedAt}}
 	seeded := changes
+	seeded.FromRead = true
 	registration := intake.GateRegistered{Issue: "LEGION-100", ArtifactID: "artifact-root", Version: 4,
 		ChangesRequestedVersion: 4, ChangesReason: "name the rollback path", ChangesRequestedMark: changes.Mark}
 	second := changes
@@ -172,7 +173,8 @@ func TestAChangesRequestIsToldOnceWhicheverReadCarriesIt(t *testing.T) {
 	repeated := changes
 	repeated.Mark = record.EventMark{Seq: 12, At: reviewedAt.Add(time.Minute)}
 	timeOnly := changes
-	timeOnly.Mark = record.EventMark{At: reviewedAt}
+	timeOnly.Mark, timeOnly.FromRead = record.EventMark{At: reviewedAt}, true
+	newerVersion := intake.DispatchArtifact{Key: "LEGION-100", ArtifactID: "artifact-root", Kind: intake.DispatchArtifactVersion, Version: 5, Mark: record.EventMark{Seq: 10}}
 	v5 := intake.DispatchArtifact{Key: "LEGION-100", ArtifactID: "artifact-root", Kind: intake.DispatchArtifactChangesRequested, Version: 5, Reason: "name the rollback path", Mark: changes.Mark}
 
 	for _, tc := range []struct {
@@ -224,6 +226,15 @@ func TestAChangesRequestIsToldOnceWhicheverReadCarriesIt(t *testing.T) {
 		// review again.
 		{name: "the same reason again at the same version, a later review", order: []intake.Fact{changes, repeated, repeated},
 			reasons: []string{"name the rollback path", "name the rollback path"}},
+		// The seed reads the first request, a second request commits and its live event applies,
+		// then the seed's fact: a read of a request a newer review followed tells nothing, since
+		// the request's own live event came first.
+		{name: "the seed's read of a request a second request followed", order: []intake.Fact{changes, second, seeded},
+			reasons: []string{"name the rollback path", "and name who runs the restore"}},
+		// A read tells the request, a newer version follows, and the request's live event arrives
+		// late: the newer version keeps the told record, so the live event is recognised as told.
+		{name: "a read, a newer version, then the request's late live event", order: []intake.Fact{seeded, newerVersion, changes},
+			reasons: []string{"name the rollback path"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pool := migratedPool(t)

@@ -1187,7 +1187,7 @@ func (r *outbox) seedGate(ctx context.Context, row record.OutboxRow, payload rec
 	// at has a gate above any version Dispatch wrote (a daemon that registered the caller's version
 	// unchecked could record one), so the seed resets the gate to Dispatch's version with what it
 	// read there (intake.GateAboveDispatch).
-	fact := intake.DispatchArtifact{Key: row.Issue, ArtifactID: payload.ArtifactID, Kind: intake.DispatchArtifactVersion, Version: approval.LatestVersion}
+	fact := intake.DispatchArtifact{Key: row.Issue, ArtifactID: payload.ArtifactID, Kind: intake.DispatchArtifactVersion, Version: approval.LatestVersion, FromRead: true}
 	review := record.EventMark{Seq: approval.Seq, At: approval.At}
 	changes, reason := approval.ChangesRequestedLatest()
 	switch {

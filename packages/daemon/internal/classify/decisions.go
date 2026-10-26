@@ -361,15 +361,16 @@ const (
 // opens only when it names the latest known version, and the gate keeps that approval's mark; a
 // newer document version and a changes request close it. A newer version keeps the approval it
 // closes, with its mark, as the version a human approved below the latest; a changes request
-// clears both. An approval and a newer version also clear the changes request the architect was
-// told of, which RecordChangesTold writes when it is told, so the approval and the told request
-// never stand together on the gate. An approval the gate already records at that version, read
-// again (record.EventMark.Same), keeps the fuller of the two marks (record.EventMark.Merged), so a
-// read that gave only its time never takes the sequence the live event gave.
+// clears both. An approval also clears the changes request the architect was told of, which
+// RecordChangesTold writes when it is told, so the approval and the told request never stand
+// together on the gate. A newer version keeps the told record, at the version it was told at, so a
+// late live event of that request is still recognised as told. An approval the gate already records
+// at that version, read again (record.EventMark.Same), keeps the fuller of the two marks
+// (record.EventMark.Merged), so a read that gave only its time never takes the sequence the live
+// event gave.
 func ApplyDesignGateEvent(gate record.DesignGate, kind DesignGateEventKind, version int, mark record.EventMark) record.DesignGate {
 	if version > gate.LatestVersion {
 		gate.LatestVersion = version
-		gate = clearChangesTold(gate)
 	}
 	switch kind {
 	case DesignGateApproved:

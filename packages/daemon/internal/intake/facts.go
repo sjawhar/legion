@@ -128,6 +128,9 @@ const (
 // sequence and Dispatch's time of it, from the event itself, or, for a review, from the read's
 // latest review (dispatch.Approval's Seq and At), whichever of them that read gave. A version the
 // gate seed read from Dispatch carries none.
+// FromRead says the fact comes from the daemon's own read of Dispatch (the gate seed), not from a
+// live event: a read shows the review Dispatch holds when it reads, and a review the gate's stale
+// rule drops is told only by its own live event.
 type DispatchArtifact struct {
 	Key        string
 	ArtifactID string
@@ -135,6 +138,7 @@ type DispatchArtifact struct {
 	Version    int
 	Reason     string
 	Mark       record.EventMark
+	FromRead   bool
 }
 
 func (DispatchArtifact) isFact() {}

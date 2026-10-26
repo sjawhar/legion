@@ -719,7 +719,7 @@ func TestOutboxGateSeedAppliesApprovedFactAndReturnsApprovalFailure(t *testing.T
 	if err := runner.execute(context.Background(), row); err != nil {
 		t.Fatalf("execute gate seed: %v", err)
 	}
-	if got := handler.facts(); len(got) != 1 || got[0] != (intake.DispatchArtifact{Key: "LEGION-208", ArtifactID: "artifact-208", Kind: intake.DispatchArtifactApproved, Version: 3}) {
+	if got := handler.facts(); len(got) != 1 || got[0] != (intake.DispatchArtifact{Key: "LEGION-208", ArtifactID: "artifact-208", Kind: intake.DispatchArtifactApproved, Version: 3, FromRead: true}) {
 		t.Fatalf("gate facts = %#v, want approved artifact", got)
 	}
 
@@ -741,9 +741,9 @@ func TestOutboxGateSeedRaisesTheGateToTheVersionDispatchHolds(t *testing.T) {
 		want     intake.DispatchArtifact
 	}{
 		{name: "approved at the later version", approval: dispatch.Approval{State: "approved", LatestVersion: 2, Version: &two},
-			want: intake.DispatchArtifact{Key: "LEGION-208", ArtifactID: "artifact-208", Kind: intake.DispatchArtifactApproved, Version: 2}},
+			want: intake.DispatchArtifact{Key: "LEGION-208", ArtifactID: "artifact-208", Kind: intake.DispatchArtifactApproved, Version: 2, FromRead: true}},
 		{name: "approved at the registered version only", approval: dispatch.Approval{State: "stale", LatestVersion: 2, Version: &one},
-			want: intake.DispatchArtifact{Key: "LEGION-208", ArtifactID: "artifact-208", Kind: intake.DispatchArtifactVersion, Version: 2}},
+			want: intake.DispatchArtifact{Key: "LEGION-208", ArtifactID: "artifact-208", Kind: intake.DispatchArtifactVersion, Version: 2, FromRead: true}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pool := isolatedOutboxPool(t)
@@ -781,7 +781,7 @@ func TestOutboxGateSeedAppliesAChangesRequestWithItsMark(t *testing.T) {
 	seed()
 	seed()
 	first := intake.DispatchArtifact{Key: "LEGION-208", ArtifactID: "artifact-208", Kind: intake.DispatchArtifactChangesRequested, Version: 3, Reason: reason,
-		Mark: record.EventMark{Seq: 9, At: reviewed}}
+		Mark: record.EventMark{Seq: 9, At: reviewed}, FromRead: true}
 	if got := handler.facts(); len(got) != 1 || got[0] != first {
 		t.Fatalf("gate facts after two seeds of one review = %#v, want the changes request once: %#v", got, first)
 	}
