@@ -41,7 +41,8 @@ type setter struct {
 // provider key (shim.ReadProviderEnv) to who sets it: the runtime (runtimeOwned, the session
 // store's two variables named apart, since they are Legion's under either store, the controller's
 // Slack channel list, which the runtime sets in the controller's pod alone, Claude Code's three
-// (claudelaunch.Environment), which it sets in a Claude role's container alone, and the name the
+// (claudelaunch.Environment) and the session its launcher keeps (claudelaunch.SessionVariable),
+// which it sets in a Claude role's container alone, and the name the
 // providers volume mounts the session database's URL under, ompsessions.DSNFileName), the worker
 // image (imageEnv), every launch's spec (the role App's git identity, and each launch secret's
 // `<NAME>_FILE` pointer), the pod baseline, and the operator's own pod env. The first setter of a
@@ -62,6 +63,7 @@ func podVariables(pod Pod, launchSecrets []string) map[string]setter {
 		name, _, _ := strings.Cut(pair, "=")
 		add(name, "Legion's runtime sets for a role it launches on Claude Code (worker_backends)", false)
 	}
+	add(claudelaunch.SessionVariable, "Legion's runtime sets for a role it launches on Claude Code (worker_backends)", false)
 	for _, name := range slices.Sorted(maps.Keys(runtimeOwned)) {
 		add(name, "Legion's runtime sets in every pod", false)
 	}

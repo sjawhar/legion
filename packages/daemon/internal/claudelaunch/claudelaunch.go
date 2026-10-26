@@ -88,6 +88,15 @@ func Environment(configDir string) []string {
 	}
 }
 
+// SessionVariable is how the Kubernetes runtime tells a pod's role launcher that a generation runs
+// Claude Code, and which session: the id the agent command starts or resumes, set in the start
+// command's environment of every Claude launch and of nothing else, never under tmux. The launcher
+// keeps that session's transcript and its phase-reminder record in Oh My Pi's session table while
+// the generation runs (internal/launcher, claude.go), since the pod's disk dies with the pod, and
+// the claim boot of claude-envoy waits for the launcher's first save before it registers the
+// transcript (packages/claude-envoy, src/legion-claim.ts).
+const SessionVariable = "LEGION_CLAUDE_SESSION_ID"
+
 // NewSessionID is a random (version 4) UUID, the form `--session-id` takes.
 func NewSessionID() string {
 	var b [16]byte

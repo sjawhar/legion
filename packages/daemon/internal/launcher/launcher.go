@@ -239,7 +239,14 @@ type child struct {
 	// configured. It belongs to the generation: it outlives the child it serves, through the
 	// child's stop grace however the stop arrives, and is closed once the child has exited (wait).
 	proxy *sessionproxy.Proxy
-	done  chan struct{}
+	// keeper keeps a Claude Code child's session in the session table, nil for any other child
+	// (claudeKeeper). It saves until the child has exited, then makes its last save before the
+	// proxy closes (wait).
+	keeper *claudeKeeper
+	// stopBy is when the stop under way, if any, gives up on the child: the end of its grace
+	// (endGeneration), which bounds the keeper's last save. Guarded by manager.mu.
+	stopBy time.Time
+	done   chan struct{}
 }
 
 type manager struct {
@@ -313,9 +320,24 @@ func (m *manager) start(ctx context.Context, command shimwire.LauncherStart) shi
 		endSession(proxy, dir)
 		return refuse(err.Error())
 	}
+	// A Claude Code child's session is kept in the session table (claudeKeeper): the order is
+	// the resume's lookup, which decides the recreated-workspace notice from the row's last save,
+	// then the restore of the session's files from their rows, then the child, then the saves.
+	keeper, err := newClaudeKeeper(env, command.ResumeFile, clientURL, m.cfg.Stderr)
+	if err != nil {
+		endSession(proxy, dir)
+		return refuse(err.Error())
+	}
 	recreated := false
 	if command.ResumeFile != "" {
 		if recreated, err = resumable(env, command.ResumeFile, clientURL, m.cfg.Stderr); err != nil {
+			endSession(proxy, dir)
+			return refuse(err.Error())
+		}
+	}
+	if keeper != nil {
+		if err := keeper.open(command.ResumeFile != ""); err != nil {
+			keeper.close()
 			endSession(proxy, dir)
 			return refuse(err.Error())
 		}
@@ -329,14 +351,20 @@ func (m *manager) start(ctx context.Context, command shimwire.LauncherStart) shi
 	m.mu.Lock()
 	if err := cmd.Start(); err != nil {
 		m.mu.Unlock()
+		if keeper != nil {
+			keeper.close()
+		}
 		endSession(proxy, dir)
 		return refuse(fmt.Sprintf("start child: %v", err))
 	}
-	active := &child{generation: command.Generation, pid: cmd.Process.Pid, dir: dir, proxy: proxy, done: make(chan struct{})}
+	active := &child{generation: command.Generation, pid: cmd.Process.Pid, dir: dir, proxy: proxy, keeper: keeper, done: make(chan struct{})}
 	m.child = active
 	result := shimwire.LauncherStartResult{ID: command.ID, OK: true, RunningGeneration: command.Generation}
 	m.requests[command.ID] = request{body: body, result: result}
 	m.mu.Unlock()
+	if keeper != nil {
+		go keeper.run()
+	}
 	go m.wait(cmd, active)
 	_ = m.state()
 	return result
@@ -351,17 +379,30 @@ func (m *manager) remember(id string, body []byte, result shimwire.Frame) {
 // wait ends a generation once its child has exited. The generation's proxy is closed only then, so
 // the child is served through the whole of its stop grace however the stop arrives, the daemon's
 // stop or the container's own SIGTERM; and after cleanExitedGeneration, which in a pod's PID 1 has
-// ended every process of the generation and so every connection they held. Close is bounded by
-// sessionDrain however many holders remain, in PID 1 or not: off PID 1 cleanExitedGeneration
-// returns at once and a socket holder outside the child's process group outlives it, and Close
-// closes that holder's connection once the drain is over rather than wait on it. It is closed
-// before the generation's directory goes, so nothing is left listening over a socket that has been
-// removed, and between generations nothing is bound at all. active.done is closed last, so
-// endGeneration, and with it Run's stopActive, returns only once the proxy is closed.
+// ended every process of the generation and so every connection they held. A Claude Code child's
+// keeper makes its last save between the two (claudeKeeper.finish), until the stop's grace less the
+// proxy's drain is over, so that save and the keeper's own connection are done before the proxy
+// closes. Close is bounded by sessionDrain however many holders remain, in PID 1 or not: off PID 1
+// cleanExitedGeneration returns at once and a socket holder outside the child's process group
+// outlives it, and Close closes that holder's connection once the drain is over rather than wait
+// on it. It is closed before the generation's directory goes, so nothing is left listening over a
+// socket that has been removed, and between generations nothing is bound at all. active.done is
+// closed last, so endGeneration, and with it Run's stopActive, returns only once the proxy is
+// closed.
 func (m *manager) wait(cmd *exec.Cmd, active *child) {
 	err := cmd.Wait()
 	m.cleanExitedGeneration()
 	exit := exitOf(err, active.generation)
+	if active.keeper != nil {
+		m.mu.Lock()
+		end := active.stopBy
+		m.mu.Unlock()
+		// A child that exited on its own is given the whole grace a stop would have given it.
+		if end.IsZero() {
+			end = time.Now().Add(m.cfg.StopGrace)
+		}
+		active.keeper.finish(end.Add(-sessionDrain))
+	}
 	if active.proxy != nil {
 		_ = active.proxy.Close()
 	}
@@ -551,7 +592,10 @@ var resumeLookupBackoff = []time.Duration{500 * time.Millisecond, time.Second, 2
 // agent: Oh My Pi starts a new session at a --resume path it finds empty. It looks where the child's
 // Oh My Pi will, in the session table (the runtime's runtime.kubernetes.session_store, which must
 // keep sessions in a database: no issue disk holds one), through clientURL when the generation has
-// a session database of its own and otherwise the URL file OMP_SESSION_SQL_DSN_FILE names.
+// a session database of its own and otherwise the URL file OMP_SESSION_SQL_DSN_FILE names. A
+// Claude Code resume's file is its transcript's path, `<CLAUDE_CONFIG_DIR>/projects/<dir>/<id>.jsonl`
+// (the session a claude-envoy claim records), which is the very key its launcher kept the
+// transcript's row under (claudeKeeper): the row's mtime_ms is that file's mtime at its last save.
 //
 // It also reports whether the workspace the child works in, LEGION_WORKSPACE, was recreated since the
 // session was last written: provisioning recorded its creation later than that write

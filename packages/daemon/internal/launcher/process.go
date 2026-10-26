@@ -100,7 +100,14 @@ func (m *manager) cleanExitedGeneration() {
 	}
 }
 
+// endGeneration stops active's child: SIGTERM, then SIGKILL once grace is over. The first stop's
+// end of grace is recorded (child.stopBy), which bounds a Claude Code keeper's last save (wait).
 func (m *manager) endGeneration(active *child, grace time.Duration) error {
+	m.mu.Lock()
+	if active.stopBy.IsZero() {
+		active.stopBy = time.Now().Add(grace)
+	}
+	m.mu.Unlock()
 	if err := signalGeneration(active.pid, syscall.SIGTERM); err != nil {
 		return err
 	}

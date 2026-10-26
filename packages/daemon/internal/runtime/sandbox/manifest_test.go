@@ -2041,9 +2041,9 @@ func TestOnlyAClaudeWorkerIsToldClaudeCodesOwnVariables(t *testing.T) {
 // A Claude Code role's relaunch continues the transcript its replaced pod left: the agent command
 // ends `--resume <uuid>`, the id parsed from the recorded path, and names neither a --session-id
 // nor the path itself — Claude Code resumes by id alone. The recorded path still reaches the role
-// launcher, which stats it before the child starts (internal/launcher). prepare is where the rule
-// is applied, so a Claude claim still recording an Oh My Pi session is refused there, naming the
-// backend change that left it recorded.
+// launcher, which looks it up in the session table and restores it from its row before the child
+// starts (internal/launcher). prepare is where the rule is applied, so a Claude claim still
+// recording an Oh My Pi session is refused there, naming the backend change that left it recorded.
 func TestAResumingClaudePodContinuesItsTranscriptByItsID(t *testing.T) {
 	r, err := configure(goldenOptions())
 	if err != nil {

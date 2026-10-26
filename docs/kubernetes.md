@@ -860,17 +860,46 @@ process lost in that turn resumes with the notice already there. With the plugin
 re-send, the `length` case's stored branch had lost it; with the plugin before the id, so did the
 case of a second recreation. A `task` subagent is never told.
 
-A role on Claude Code is outside all of this. Its conversation is Claude Code's own transcript,
-under the role's `CLAUDE_CONFIG_DIR` (`<role state home>/claude`), never a row of Oh My Pi's
-table. Its generation is told `OMP_SESSION_STORAGE` and `OMP_SESSION_SQL_DSN_FILE` as every role
-of its pod is (`sessionDSNFile`, `mainEnvironment`): under `postgres` the pointer is what keeps
-the shim from exporting the mounted URL, password and all, into Claude Code's environment, and
-under `cloudsql-iam` it names the password-less URL file the role's launcher writes for every
-generation it starts. A relaunch continues the transcript with `--resume <session id>`, the id
-read from the recorded path.
+A role on Claude Code keeps its conversation differently. Its conversation is Claude Code's own
+transcript, under the role's `CLAUDE_CONFIG_DIR` (`<role state home>/claude`), which Oh My Pi never
+reads. Its generation is told `OMP_SESSION_STORAGE` and `OMP_SESSION_SQL_DSN_FILE` as every role
+of its pod is (`sessionDSNFile`, `mainEnvironment`): Claude Code ignores both. Under `postgres` the
+pointer is what keeps the shim from exporting the mounted URL, password and all, into Claude
+Code's environment, and under `cloudsql-iam` it names the password-less URL file the role's
+launcher writes for every generation it starts. A relaunch continues the transcript with
+`--resume <session id>`, the id read from the recorded path.
 
-<!-- INFRA-220 follow-up: where a Claude Code role's transcript is kept across pods, now that an
-issue's disk dies with its pod (#the-disk-dies-with-its-pod), is written here. -->
+**Where a Claude Code session lives across pods.** The transcript and the phase reminder's record
+are files on the pod's disk, which dies with the pod ([The disk dies with its
+pod](#the-disk-dies-with-its-pod)). So the role's own launcher keeps both in Oh My Pi's session
+table while the generation runs (`internal/launcher`, `claude.go`). Each Claude launch's start
+command carries `LEGION_CLAUDE_SESSION_ID`, the session its agent command starts or resumes, and
+nothing else carries it: no Oh My Pi role and no tmux pane. Each file is a row of
+`omp_session_files`, keyed by its absolute path and written as Oh My Pi writes its own: the
+transcript, `<CLAUDE_CONFIG_DIR>/projects/<dir>/<id>.jsonl`, and the record,
+`<CLAUDE_CONFIG_DIR>/legion-phase-stall-<id>.json`. Every row has a `byte_len` and a `mtime_ms`,
+the file's mtime when it was saved, so the rows never stop an Oh My Pi process from loading its
+index. The launcher holds one connection to the session database for the generation, through the
+generation's proxy socket under `cloudsql-iam`. It saves a file that grew at most every 2 s, the
+transcript only up to its last newline. Each save is one transaction that appends the new bytes
+as a part, and only over what that launcher saved last. When another writer has moved the row,
+the launcher stops saving that file and logs it. It never overwrites the row. A save the database
+refuses is logged and tried again at the next save, and the agent runs on.
+
+A resume looks the transcript's row up first, so the recreated-workspace notice below is decided
+from its last save. Then the launcher writes each row to its path, but only where the file is
+missing or holds part of the row: a longer file, which a relaunch into the same pod leaves, is not
+shortened. Then Claude Code starts. On a fresh session the launcher writes
+`<transcript>.legion-saved` beside the transcript once its first save has committed, and the
+claim boot of claude-envoy waits for that file as well as the transcript before it registers the
+session. A transcript the daemon has recorded is then always in the table: otherwise the next
+pod's resume would be refused, and three refusals retire the claim. After Claude Code exits, the
+launcher makes one last save before the generation's proxy closes. Its deadline is the stop's
+grace less the proxy's 1 s drain. This save is best effort: at the 9 s floor of
+`worker_stop_timeout_seconds`, a worker that spends its whole 5 s agent grace can leave it no time.
+A hard kill (a node lost, a SIGKILL) makes no last save. The table then holds what the last
+committed save left: the transcript up to a newline, without at most the lines of its last 2 s.
+The daemon sends an interrupted task again, so the worker does that turn again.
 
 The recreated-workspace notice reaches a Claude Code role too: its own MCP server
 (`packages/claude-envoy`) reads `LEGION_WORKSPACE_RECREATED` at start and writes the same text

@@ -212,6 +212,13 @@
   measures the same, with the `npm` and `node` the install and its check run, in place of `claude`
   on `PATH`. `scripts/e2e/claude-backend-sandbox.sh` now holds the worker to the binary its
   generation's install left.
+- In a Kubernetes pod a Claude Code phase worker's session survives the pod (INFRA-220): the pod's
+  disk dies with it, so the role's launcher keeps the transcript and the phase reminder's record as
+  rows of Oh My Pi's session table while the generation runs, and restores both at the next pod's
+  resume. The claim boot registers a transcript only once that table holds it: when
+  `LEGION_CLAUDE_SESSION_ID` is set, which the Kubernetes runtime sets for every Claude launch, it
+  waits for the launcher's `<transcript>.legion-saved` marker as well as the transcript. Under tmux
+  the variable is unset and the boot is as before.
 
 - A Claude Code session registers with a title, so Dispatch's Agents page names it instead of
   showing its session id: `ENVOY_SESSION_TITLE`; else a name and the session id's first eight

@@ -18,12 +18,15 @@ import type { ChannelSession } from "./envoy-channel-server"
  * its boot token (`LEGION_BOOT_TOKEN_FILE`) and its address (`LEGION_DAEMON_URL`).
  */
 
-/** What the daemon put on a Legion pane: its address, the boot token the registration spends, and
- * the claim's own Claude Code directory (`CLAUDE_CONFIG_DIR`), which holds the transcript. */
+/** What the daemon put on a Legion pane: its address, the boot token the registration spends, the
+ * claim's own Claude Code directory (`CLAUDE_CONFIG_DIR`), which holds the transcript, and whether
+ * its pod's launcher keeps that transcript in the session table (`LEGION_CLAUDE_SESSION_ID`, which
+ * only the Kubernetes runtime sets), so the registration waits for the launcher's first save. */
 export interface LegionPane {
   readonly daemonUrl: string
   readonly bootToken: string
   readonly configDir: string
+  readonly launcherSaves: boolean
 }
 
 /**
@@ -51,6 +54,7 @@ export function legionPane(env: NodeJS.ProcessEnv): LegionPane | undefined {
       pointer === undefined
         ? required("LEGION_BOOT_TOKEN")
         : readSecretFile("LEGION_BOOT_TOKEN_FILE", pointer),
+    launcherSaves: configuredValue(env["LEGION_CLAUDE_SESSION_ID"]) !== undefined,
   }
 }
 
@@ -92,16 +96,40 @@ export async function waitForTranscript(
     signal.throwIfAborted()
     for (const directory of await readdir(projects).catch(() => [] as string[])) {
       const file = join(projects, directory, name)
-      if (
-        await stat(file).then(
-          (info) => info.isFile(),
-          () => false,
-        )
-      )
-        return file
+      if (await isFile(file)) return file
     }
     await delay(pollMs, undefined, { signal })
   }
+}
+
+/** The file a pod's launcher writes beside a transcript once its first save of it has committed
+ * to the session table (`SavedMarkerSuffix`, `packages/daemon/internal/launcher/claude.go`). */
+export const SAVED_MARKER_SUFFIX = ".legion-saved"
+
+/**
+ * Waits until the pod's launcher has saved `transcript` to the session table, which it says by
+ * writing `<transcript>.legion-saved` beside it: the pod's disk dies with the pod, so a transcript
+ * the daemon recorded before the table held it would be refused at the next pod's resume. Polls
+ * every `pollMs` until `signal` aborts.
+ */
+async function waitForSavedTranscript(
+  transcript: string,
+  signal: AbortSignal,
+  pollMs = 100,
+): Promise<void> {
+  const marker = `${transcript}${SAVED_MARKER_SUFFIX}`
+  for (;;) {
+    signal.throwIfAborted()
+    if (await isFile(marker)) return
+    await delay(pollMs, undefined, { signal })
+  }
+}
+
+function isFile(file: string): Promise<boolean> {
+  return stat(file).then(
+    (info) => info.isFile(),
+    () => false,
+  )
 }
 
 export interface LegionClaim {
@@ -113,7 +141,8 @@ export interface LegionClaim {
 
 /**
  * Boots the pane's claim in the background of the server (`bootLegionClaim`): waits for the
- * transcript, registers with it as the session file (`agentId` is the session id,
+ * transcript, and in a pod whose launcher keeps it (`launcherSaves`) for the launcher's first save
+ * of it too, registers with it as the session file (`agentId` is the session id,
  * `pluginContract` this package's `legion.daemonApiVersion`), claims the claim token's Envoy role
  * soft and records it with the channel session, whose heartbeat re-asserts it, and sends
  * `claims/ready` with no capability report, again each time the heartbeat regains the role. A
@@ -143,6 +172,9 @@ export function startLegionClaim(deps: {
       deps.signal,
       deps.pollMs,
     )
+    if (deps.pane.launcherSaves) {
+      await waitForSavedTranscript(transcript, deps.signal, deps.pollMs)
+    }
     await bootLegionClaim({
       daemon: deps.daemon,
       registration: {

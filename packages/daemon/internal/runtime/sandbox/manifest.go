@@ -81,11 +81,12 @@ const podUser = 1000
 // mainEnvironment sets for a tree agent, a Claude Code one or the controller
 // (TestRuntimeOwnedIsWhatTheWorkerContainerIsToldByTheRuntime), which the shared validator refuses
 // in a spec's Env and as a secret's pointer, and CheckPod in the operator's pod. The image probe's
-// container sets none of its own. The three CLAUDE_* names are set in a Claude role's container
-// alone, as the controller's Slack channels are in the controller's, and owned in every pod: an
-// operator that could place a Claude Code worker's configuration directory or turn its background
-// work back on would be undoing the launch (claudelaunch.Environment). CLAUDE_CODE_USE_FOUNDRY
-// and the rest of Claude Code's own variables are not here, and stay the operator's to set.
+// container sets none of its own. The three CLAUDE_* names and claudelaunch.SessionVariable are set
+// in a Claude role's container alone, as the controller's Slack channels are in the controller's,
+// and owned in every pod: an operator that could place a Claude Code worker's configuration
+// directory, turn its background work back on or name another session for its launcher to keep
+// would be undoing the launch (claudelaunch.Environment). CLAUDE_CODE_USE_FOUNDRY and the rest of
+// Claude Code's own variables are not here, and stay the operator's to set.
 var runtimeOwned = map[string]bool{
 	"LEGION_TREE": true, "LEGION_ISSUE": true, "LEGION_ROLE": true, "LEGION_CONTROLLER": true,
 	"LEGION_GENERATION": true, "LEGION_PROJECT": true, "LEGION_DAEMON_URL": true,
@@ -101,7 +102,7 @@ var runtimeOwned = map[string]bool{
 	"AGENT_SECRETS_URL": true, "AGENT_SECRETS_KEY_DIR": true, slackChannelsVariable: true,
 	"UV_PYTHON_INSTALL_DIR": true, "UV_CACHE_DIR": true, "UV_LINK_MODE": true,
 	"CLAUDE_CONFIG_DIR": true, "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": true, "CLAUDE_CODE_DISABLE_CRON": true,
-	ompsessions.StorageVariable: true, ompsessions.DSNFileVariable: true,
+	claudelaunch.SessionVariable: true, ompsessions.StorageVariable: true, ompsessions.DSNFileVariable: true,
 }
 
 // slackChannelsVariable is the project's slack_channels as the runtime tells the controller it
@@ -968,7 +969,7 @@ func (r *Runtime) LaunchBound() time.Duration {
 // image's, so no directory of the issue's disk leads PATH. The GIT_CONFIG pairs are the GitHub
 // credential of every git the role runs, in the issue's clone or outside it (gitCredentialEnv). A
 // Claude Code role, and no other, is also told Claude Code's own three (claudelaunch.Environment,
-// runsClaude).
+// runsClaude) and the session its launcher keeps (claudelaunch.SessionVariable).
 func (r *Runtime) mainEnvironment(l launch) []corev1.EnvVar {
 	spec := l.spec
 	env := l.kind.agentEnv(l)
@@ -1012,6 +1013,15 @@ func (r *Runtime) mainEnvironment(l launch) []corev1.EnvVar {
 			name, value, _ := strings.Cut(pair, "=")
 			add(name, value)
 		}
+		// The session this generation's agent command starts or resumes, which tells the role's
+		// launcher to keep its transcript and phase-reminder record in the session table
+		// (claudelaunch.SessionVariable): the pod's disk dies with the pod, so those files would
+		// otherwise die with it and the next pod's `--resume` would find nothing. It is a variable of
+		// the start command, never a field of shimwire.LauncherStart, and the image's launcher reads
+		// it: the contract number (internal/api, 38) and the image probe hold the image to this
+		// daemon, so no launcher that predates it runs this launch. It is plain, so it travels in the
+		// start command alone (launchEnvironment) and changes nothing of the pod.
+		add(claudelaunch.SessionVariable, l.claude.session)
 	}
 	env = append(env, roleEnvironment(spec.Role)...)
 	env = append(env, corev1.EnvVar{Name: "POD_UID", ValueFrom: &corev1.EnvVarSource{
@@ -1031,7 +1041,9 @@ func (r *Runtime) mainEnvironment(l launch) []corev1.EnvVar {
 	// Oh My Pi's own two variables, which place the session in the database the generation's URL
 	// file names (sessionDSNFile): every pod gets them, since the store must keep sessions in a
 	// database and nothing in a pod may keep a session as a file (internal/podsafety's baseline
-	// covers only a container the runtime tells neither, the image probe's).
+	// covers only a container the runtime tells neither, the image probe's). A Claude role is told
+	// them too: Claude Code ignores them, and its launcher reaches the table through them to keep
+	// the Claude session's files (claudelaunch.SessionVariable).
 	add(ompsessions.StorageVariable, ompsessions.SQLStorage)
 	add(ompsessions.DSNFileVariable, r.sessionDSNFile(spec.Generation))
 	return env

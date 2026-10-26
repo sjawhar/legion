@@ -6,7 +6,12 @@ import type { SetRoleInput, SetRoleResult } from "@legion/envoy-client/transport
 import { createLegionDaemonClient } from "@legion/pi-shared/daemon-client"
 import { legion } from "../package.json" with { type: "json" }
 import type { RoleRegainHook } from "../src/envoy-channel-server"
-import { legionPane, startLegionClaim, waitForTranscript } from "../src/legion-claim"
+import {
+  legionPane,
+  SAVED_MARKER_SUFFIX,
+  startLegionClaim,
+  waitForTranscript,
+} from "../src/legion-claim"
 
 const SESSION = "0b9c2f4e-2d3a-4c55-9a1e-6f7d8e9a0b1c"
 const scratch: string[] = []
@@ -64,6 +69,7 @@ test("a Legion pane reads its boot token from the file the daemon named, and nee
     daemonUrl: "http://daemon.test",
     bootToken: "boot-token-from-the-file",
     configDir: dir,
+    launcherSaves: false,
   })
   expect(() => legionPane({ LEGION_BOOT_TOKEN: "t", CLAUDE_CONFIG_DIR: dir })).toThrow(
     "LEGION_DAEMON_URL is required for Legion",
@@ -109,7 +115,7 @@ test("registers once the transcript exists, claims the claim token's role soft, 
   const lines: string[] = []
   let stops = 0
   const claim = startLegionClaim({
-    pane: { daemonUrl: "http://daemon.test", bootToken: "boot-1", configDir },
+    pane: { daemonUrl: "http://daemon.test", bootToken: "boot-1", configDir, launcherSaves: false },
     sessionID: SESSION,
     daemon: createLegionDaemonClient("http://daemon.test", fetch),
     client: {
@@ -196,7 +202,7 @@ test("a registration the daemon refuses logs the refusal, stops the pane, and cl
   let stops = 0
   const setRoles: SetRoleInput[] = []
   const claim = startLegionClaim({
-    pane: { daemonUrl: "http://daemon.test", bootToken: "spent", configDir },
+    pane: { daemonUrl: "http://daemon.test", bootToken: "spent", configDir, launcherSaves: false },
     sessionID: SESSION,
     daemon: createLegionDaemonClient("http://daemon.test", fetch),
     client: {
@@ -228,7 +234,7 @@ test("a role another live session holds stops the pane after the registration, l
   const lines: string[] = []
   let stops = 0
   const claim = startLegionClaim({
-    pane: { daemonUrl: "http://daemon.test", bootToken: "boot-1", configDir },
+    pane: { daemonUrl: "http://daemon.test", bootToken: "boot-1", configDir, launcherSaves: false },
     sessionID: SESSION,
     daemon: createLegionDaemonClient("http://daemon.test", fetch),
     client: { setRole: async () => ({ claimed: false, holder: "ses_other" }) },
@@ -257,7 +263,7 @@ test("a registration the daemon failed (5xx) is logged and leaves the pane to th
   const lines: string[] = []
   let stops = 0
   const claim = startLegionClaim({
-    pane: { daemonUrl: "http://daemon.test", bootToken: "boot-1", configDir },
+    pane: { daemonUrl: "http://daemon.test", bootToken: "boot-1", configDir, launcherSaves: false },
     sessionID: SESSION,
     daemon: createLegionDaemonClient("http://daemon.test", fetch),
     client: { setRole: async () => ({ claimed: false, holder: "x" }) },
@@ -274,4 +280,73 @@ test("a registration the daemon failed (5xx) is logged and leaves the pane to th
     "claim boot failed before a registration; the daemon's registration deadline relaunches the pane: POST /legion/v1/claims/register failed with 503: register failed",
   ])
   expect(stops).toBe(0)
+})
+
+/** Boots a claim on the pane `env` describes, with its transcript already written, and returns
+ * what it posted to the daemon and the transcript's path. */
+async function bootOn(env: Record<string, string>): Promise<{
+  readonly posted: Posted[]
+  readonly transcript: string
+  readonly booted: Promise<void>
+}> {
+  const configDir = await tempDir()
+  const pane = legionPane({
+    LEGION_BOOT_TOKEN: "boot-1",
+    LEGION_DAEMON_URL: "http://daemon.test",
+    CLAUDE_CONFIG_DIR: configDir,
+    ...env,
+  })
+  if (pane === undefined) throw new Error("no Legion pane")
+  const transcript = join(configDir, "projects", "-work", `${SESSION}.jsonl`)
+  await mkdir(join(configDir, "projects", "-work"), { recursive: true })
+  await writeFile(transcript, "{}\n")
+  const registered = await daemonFixture("register.json")
+  const { posted, fetch } = daemonAnswering((path) =>
+    path.endsWith("/claims/register")
+      ? Response.json(registered)
+      : new Response(null, { status: 204 }),
+  )
+  const claim = startLegionClaim({
+    pane,
+    sessionID: SESSION,
+    daemon: createLegionDaemonClient("http://daemon.test", fetch),
+    client: {
+      setRole: async (): Promise<SetRoleResult> => ({
+        claimed: true,
+        interest: { session_id: SESSION, machine_id: "m", dir: "/w", topics: [] },
+      }),
+    },
+    session: { rememberRole: async () => undefined, onRoleRegained: () => undefined },
+    signal: new AbortController().signal,
+    log: () => undefined,
+    stop: () => undefined,
+    pollMs: 5,
+  })
+  return { posted, transcript, booted: claim.booted }
+}
+
+test("in a pod whose launcher keeps the transcript, the registration waits for the launcher's first save", async () => {
+  const { posted, transcript, booted } = await bootOn({ LEGION_CLAUDE_SESSION_ID: SESSION })
+  // A real delay, deliberately: the boot polls the real filesystem every 5 ms, and the only sign
+  // that it waits is a registration that does not come, which no fake clock can stand in for.
+  // Twelve polls with the transcript there and no marker register nothing.
+  await Bun.sleep(60)
+  expect(posted).toEqual([])
+  await writeFile(`${transcript}${SAVED_MARKER_SUFFIX}`, "")
+  await booted
+  expect(posted.map(({ path }) => path)).toEqual([
+    "/legion/v1/claims/register",
+    "/legion/v1/claims/ready",
+  ])
+  expect(posted[0]?.body["ompSessionFile"]).toBe(transcript)
+})
+
+test("a pane no launcher keeps registers once the transcript exists, waiting for no save", async () => {
+  const { posted, transcript, booted } = await bootOn({})
+  await booted
+  expect(posted.map(({ path }) => path)).toEqual([
+    "/legion/v1/claims/register",
+    "/legion/v1/claims/ready",
+  ])
+  expect(posted[0]?.body["ompSessionFile"]).toBe(transcript)
 })

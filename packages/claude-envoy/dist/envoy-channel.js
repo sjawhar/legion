@@ -38107,7 +38107,7 @@ function parseCommand(argv, io) {
     if (!token.startsWith("--")) {
       if (ISSUE_KEY.test(token) && surface.flags.has("--issue") && !setBy.has("issue")) {
         if (claim("issue", "--issue", false))
-          args.issue = token;
+          args["issue"] = token;
         continue;
       }
       problems.push(`unexpected argument ${quoteWord(token)}: every value follows its flag`);
@@ -48188,7 +48188,8 @@ function legionPane(env) {
   return {
     daemonUrl: required2("LEGION_DAEMON_URL"),
     configDir: required2("CLAUDE_CONFIG_DIR"),
-    bootToken: pointer === undefined ? required2("LEGION_BOOT_TOKEN") : readSecretFile("LEGION_BOOT_TOKEN_FILE", pointer)
+    bootToken: pointer === undefined ? required2("LEGION_BOOT_TOKEN") : readSecretFile("LEGION_BOOT_TOKEN_FILE", pointer),
+    launcherSaves: configuredValue(env["LEGION_CLAUDE_SESSION_ID"]) !== undefined
   };
 }
 function logLegion(line) {
@@ -48209,17 +48210,33 @@ async function waitForTranscript(configDir, sessionID, signal, pollMs = 100) {
     signal.throwIfAborted();
     for (const directory of await readdir2(projects).catch(() => [])) {
       const file2 = join6(projects, directory, name);
-      if (await stat2(file2).then((info) => info.isFile(), () => false))
+      if (await isFile(file2))
         return file2;
     }
     await delay(pollMs, undefined, { signal });
   }
+}
+var SAVED_MARKER_SUFFIX = ".legion-saved";
+async function waitForSavedTranscript(transcript, signal, pollMs = 100) {
+  const marker = `${transcript}${SAVED_MARKER_SUFFIX}`;
+  for (;; ) {
+    signal.throwIfAborted();
+    if (await isFile(marker))
+      return;
+    await delay(pollMs, undefined, { signal });
+  }
+}
+function isFile(file2) {
+  return stat2(file2).then((info) => info.isFile(), () => false);
 }
 function startLegionClaim(deps) {
   let capability;
   const { sessionID } = deps;
   const boot = async () => {
     const transcript = await waitForTranscript(deps.pane.configDir, sessionID, deps.signal, deps.pollMs);
+    if (deps.pane.launcherSaves) {
+      await waitForSavedTranscript(transcript, deps.signal, deps.pollMs);
+    }
     await bootLegionClaim({
       daemon: deps.daemon,
       registration: {

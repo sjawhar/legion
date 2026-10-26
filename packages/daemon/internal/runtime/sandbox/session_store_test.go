@@ -10,6 +10,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 
+	"github.com/sjawhar/legion/daemon/internal/claudelaunch"
 	"github.com/sjawhar/legion/daemon/internal/ompsessions"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/shim"
@@ -314,6 +315,74 @@ func TestAClaudeWorkerIsToldTheSessionStoreAsAnOhMyPiWorkerIs(t *testing.T) {
 			for _, pair := range providersExported(t, claude) {
 				if strings.Contains(pair, "secret@") {
 					t.Errorf("a Claude worker's shim exports the session database's URL into its environment: %q", pair)
+				}
+			}
+		})
+	}
+}
+
+// A Claude Code generation's start command names the session its launcher keeps in the session
+// table, LEGION_CLAUDE_SESSION_ID, beside both of Oh My Pi's session variables, which are what the
+// launcher reaches the table through: the fresh session its agent command starts (`--session-id`),
+// or the recorded transcript's id when it resumes. An Oh My Pi generation's start command names no
+// such session, so its launcher keeps nothing beside Oh My Pi. The id is the generation's, never
+// the pod's: no container of the pod carries it, so a pod the next generation reuses is unchanged.
+func TestAClaudeStartCommandNamesTheSessionItsLauncherKeeps(t *testing.T) {
+	for _, store := range []ompsessions.Store{postgresStore, cloudSQLStore} {
+		t.Run(string(store.Kind), func(t *testing.T) {
+			opts := testOptions()
+			opts.SessionStore = store
+			r, err := configure(opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			startEnv := func(spec runtime.SpawnSpec) (map[string]string, launch) {
+				l := launchOf(t, r, spec)
+				env := map[string]string{}
+				for _, entry := range launcherCommand(l, r).Env {
+					name, value, _ := strings.Cut(entry, "=")
+					env[name] = value
+				}
+				return env, l
+			}
+			fresh, l := startEnv(claudeWorkerSpec(t))
+			argv := l.agentArgv(r.agent)
+			at := slices.Index(argv, "--session-id")
+			if at < 0 || at+1 == len(argv) || fresh[claudelaunch.SessionVariable] != argv[at+1] {
+				t.Errorf("a fresh Claude start command names %s=%q, want the session its agent command starts in %q",
+					claudelaunch.SessionVariable, fresh[claudelaunch.SessionVariable], argv)
+			}
+			resumeSpec := claudeResumeSpec(t)
+			resumed, _ := startEnv(resumeSpec)
+			if resumed[claudelaunch.SessionVariable] != claudeTranscriptID {
+				t.Errorf("a resuming Claude start command names %s=%q, want the recorded transcript's %s",
+					claudelaunch.SessionVariable, resumed[claudelaunch.SessionVariable], claudeTranscriptID)
+			}
+			// The Oh My Pi generation each is compared with is the same generation of the same role.
+			ompOf := func(spec runtime.SpawnSpec) map[string]string {
+				spec.Backend, spec.ResumeSessionFile = "", ""
+				env, _ := startEnv(spec)
+				return env
+			}
+			for name, tc := range map[string]struct{ claude, omp map[string]string }{
+				"a fresh Claude":    {fresh, ompOf(claudeWorkerSpec(t))},
+				"a resuming Claude": {resumed, ompOf(resumeSpec)},
+			} {
+				for _, variable := range sessionStoreVariables {
+					if tc.claude[variable] == "" || tc.claude[variable] != tc.omp[variable] {
+						t.Errorf("%s start command names %s=%q, want %q as the Oh My Pi one does", name, variable, tc.claude[variable], tc.omp[variable])
+					}
+				}
+				if value, named := tc.omp[claudelaunch.SessionVariable]; named {
+					t.Errorf("an Oh My Pi start command names %s=%q, want no Claude session", claudelaunch.SessionVariable, value)
+				}
+			}
+			pod := r.podTemplate(l).Spec
+			for _, c := range slices.Concat(pod.InitContainers, pod.Containers) {
+				for _, v := range c.Env {
+					if v.Name == claudelaunch.SessionVariable {
+						t.Errorf("the pod's container %s carries %s=%q, want it in the start command alone", c.Name, v.Name, v.Value)
+					}
 				}
 			}
 		})
