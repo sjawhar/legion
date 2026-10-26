@@ -31,6 +31,9 @@ function renderMark(send: (value: string) => Promise<void>, initial: Props) {
           succeeded += 1;
         },
         send: (value: string, bounds: WriteBounds) => {
+          // As every client write does, the request is told to `sent` before it goes out: a mark
+          // waiting its turn is planned there, and nothing past it runs (`Writes`).
+          bounds.sent?.({ body: { value }, method: "PUT", path: "/api/v1/me/threads/t/read" });
           sent.push(value);
           keys.push(bounds.key);
           return send(value);

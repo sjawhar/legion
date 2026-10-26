@@ -9,7 +9,7 @@ import {
   type IdempotencyLandedCode,
 } from "@legion/contracts";
 
-import { reachable } from "./reachability";
+import { reachable, unreachable } from "./reachability";
 
 import type {
   Agent,
@@ -97,15 +97,22 @@ export type FetchImplementation = (
 
 /**
  * How an upload reaches Dispatch: `init` (its body a multipart form) sent to `path`, answered with
- * Dispatch's response, and `progress` called as each piece of the body goes up and as the answer
- * comes back. The browser's `fetch` reports no upload progress, so a large file on a slow line
- * would look silent for as long as it uploads; `xhrUpload` is the one that reports it.
+ * Dispatch's response, and `progress` called as each piece of the body goes up - with how much of
+ * it has gone (`sent`), when the transport knows - and as the answer comes back. The browser's
+ * `fetch` reports no upload progress, so a large file on a slow line would look silent for as long
+ * as it uploads; `xhrUpload` is the one that reports it.
  */
 export type UploadImplementation = (
   path: string,
   init: RequestInit,
-  progress: () => void
+  progress: (sent?: UploadProgress) => void
 ) => Promise<Response>;
+
+/** How much of an upload's body has gone up, in bytes, out of how many. */
+export interface UploadProgress {
+  readonly loaded: number;
+  readonly total: number;
+}
 
 /** The largest body a write the page lets finish as it goes (`keepalive`) may carry: the browser
  *  caps every such request's body together at 64 KiB. */
@@ -207,13 +214,15 @@ export interface WriteRequest {
  *  every attempt of it, and what the store keeps it under; sent as `Idempotency-Key` on a `POST`
  *  and a `PATCH`, and never on a `PUT` or a `DELETE`, which are the same however often they are
  *  made - the login of the person who pressed it (`Dispatch-Login`, sent on every write, so
- *  Dispatch refuses it under anyone else's session), the attempt's silence deadline, and `sent`,
- *  told the request as it goes out, for a caller that keeps it to make again. Every write method
- *  takes these, so a write made outside the store does not type-check. */
+ *  Dispatch refuses it under anyone else's session), the attempt's silence deadline, `sent`, told
+ *  the request as it goes out, for a caller that keeps it to make again, and `progress`, told how
+ *  much of an upload's body has gone up. Every write method takes these, so a write made outside
+ *  the store does not type-check. */
 export interface WriteBounds extends RequestBounds {
   readonly key: string;
   readonly login?: string;
   readonly sent?: (request: WriteRequest) => void;
+  readonly progress?: (loaded: number, total: number) => void;
 }
 
 /** A write Dispatch had already made, with no answer it can give for it (`code`): the first
@@ -450,8 +459,11 @@ export function xhrUpload(
     xhr.open(init.method ?? "POST", path);
     xhr.withCredentials = init.credentials === "include";
     for (const [name, value] of new Headers(init.headers)) xhr.setRequestHeader(name, value);
-    xhr.upload.onprogress = progress;
-    xhr.onprogress = progress;
+    xhr.upload.onprogress = (event) =>
+      progress(
+        event?.lengthComputable === true ? { loaded: event.loaded, total: event.total } : undefined
+      );
+    xhr.onprogress = () => progress();
     xhr.onreadystatechange = () => {
       if (xhr.readyState === xhr.HEADERS_RECEIVED) progress();
     };
@@ -525,7 +537,8 @@ export class DispatchApiClient {
     path: string,
     init: RequestInit,
     deadlineMs: number | null | undefined,
-    read: (response: Response) => Promise<T>
+    read: (response: Response) => Promise<T>,
+    uploaded?: (loaded: number, total: number) => void
   ): Promise<T> {
     const limit =
       deadlineMs !== undefined
@@ -533,7 +546,7 @@ export class DispatchApiClient {
         : (init.method ?? "GET").toUpperCase() === "GET"
           ? REQUEST_DEADLINE_MS
           : null;
-    if (limit === null) return read(await this.answered(path, init));
+    if (limit === null) return read(await this.answered(path, init, undefined, uploaded));
     const deadline = new AbortController();
     let timer = setTimeout(() => deadline.abort(), limit);
     const caller = init.signal ?? undefined;
@@ -544,11 +557,13 @@ export class DispatchApiClient {
     try {
       const signal =
         caller === undefined ? deadline.signal : AbortSignal.any([caller, deadline.signal]);
-      return await read(await this.answered(path, { ...init, signal }, arrived));
+      return await read(await this.answered(path, { ...init, signal }, arrived, uploaded));
     } catch (error) {
       // An answer Dispatch gave stays its answer and the caller's abort stays the caller's: only
       // what the deadline cut short is a timeout.
       if (deadline.signal.aborted && !(error instanceof ApiError) && caller?.aborted !== true) {
+        // Dispatch went silent on it: it cannot be reached, as far as the page knows.
+        unreachable();
         throw new RequestTimeoutError(path, limit);
       }
       throw error;
@@ -558,21 +573,33 @@ export class DispatchApiClient {
   }
 
   /** Dispatch's response to one request, or its refusal as an `ApiError`; a connection that
-   *  failed is a `NetworkError`. `arrived`, for a request held to a deadline, runs as the
-   *  request's body goes up (an upload's), as the response's headers arrive and as each piece of
-   *  its body does, the body of a refusal included. Any answer of Dispatch's own - one below 500,
-   *  which no gateway gives for a Dispatch that is down - says it can be reached (`reachable`). */
-  private async answered(path: string, init: RequestInit, arrived?: () => void): Promise<Response> {
+   *  failed is a `NetworkError`, and says Dispatch cannot be reached (`unreachable`). `arrived`,
+   *  for a request held to a deadline, runs as the request's body goes up (an upload's), as the
+   *  response's headers arrive and as each piece of its body does, the body of a refusal included;
+   *  `uploaded` is told how much of an upload's body has gone up. Any answer of Dispatch's own -
+   *  one below 500, which no gateway gives for a Dispatch that is down - says it can be reached
+   *  (`reachable`), which matters only once it could not be. */
+  private async answered(
+    path: string,
+    init: RequestInit,
+    arrived?: () => void,
+    uploaded?: (loaded: number, total: number) => void
+  ): Promise<Response> {
     const sent = { credentials: "same-origin", ...init } satisfies RequestInit;
+    const progress = (part?: UploadProgress) => {
+      arrived?.();
+      if (part !== undefined) uploaded?.(part.loaded, part.total);
+    };
     let answer: Response;
     try {
       answer =
         sent.body instanceof FormData && this.upload !== undefined
-          ? await this.upload(path, sent, arrived ?? (() => {}))
+          ? await this.upload(path, sent, progress)
           : await this.fetchImpl(path, sent);
     } catch (error) {
       // An abort is the deadline's or the caller's (`exchange`), never the network's.
       if (init.signal?.aborted === true) throw error;
+      unreachable();
       throw new NetworkError(path, error);
     }
     if (answer.status < 500) reachable("answer");
@@ -609,7 +636,10 @@ export class DispatchApiClient {
    * JSON rejects with `UnreadableAnswerError`, and a replay of an answer Dispatch did not keep
    * with `AnswerNotKeptError`.
    */
-  send<T>(request: WriteRequest, { deadlineMs, key, login, sent }: WriteBounds): Promise<T> {
+  send<T>(
+    request: WriteRequest,
+    { deadlineMs, key, login, progress, sent }: WriteBounds
+  ): Promise<T> {
     const { body, method, path } = request;
     const idempotent = method === "PUT" || method === "DELETE";
     const form = body instanceof FormData ? body : undefined;
@@ -627,7 +657,7 @@ export class DispatchApiClient {
       method,
     };
     sent?.(request);
-    return this.exchange(path, init, deadlineMs, async (response): Promise<T> => {
+    const read = async (response: Response): Promise<T> => {
       const text = await response.text();
       let answer: unknown;
       try {
@@ -646,7 +676,8 @@ export class DispatchApiClient {
         );
       }
       return answer as T;
-    });
+    };
+    return this.exchange(path, init, deadlineMs, read, progress);
   }
 
   private post<T>(path: string, body: unknown, bounds: WriteBounds): Promise<T> {

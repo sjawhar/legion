@@ -10,11 +10,13 @@ import {
   type WriteBounds,
   type WriteRequest,
 } from "../../api/client";
+import { reachable, unreachable } from "../../api/reachability";
 import {
   KEYED_SEND_ATTEMPT_MS,
   SEND_DEADLINE_MS,
   SendInterruptedError,
   SendStoppedError,
+  WriteDiscardedError,
 } from "./keyed-write";
 import { KEPT_SEND_RESUME_MS } from "./write-storage";
 import { defineWriteKind, plainWrite, type Write, Writes } from "./write-store";
@@ -815,5 +817,106 @@ test("a write the reader was stopping resumes with exactly one attempt", async (
       send.mockRestore();
       tab.close();
     }
+  });
+});
+
+// (a) Every write is kept from its press, one waiting its turn behind another on its line too: it
+// is kept with the request it will make and its place in the line, so a reload during an outage
+// makes both again, each once, in press order.
+test("two writes on one line survive a reload and land once each, in press order", async () => {
+  await onFakeClock(async () => {
+    const tab = keptTab();
+    const before = new Writes(signedIn(), tab.page(), memoryFiles());
+    const landed: unknown[] = [];
+    const send = spyOn(api, "send").mockImplementation(async (request) => {
+      landed.push(request.body);
+      return {} as never;
+    });
+    try {
+      for (const status of ["backlog", "done"]) {
+        const request: WriteRequest = { ...patch, body: { status } };
+        void before
+          .run({
+            detail: null,
+            kind: plainWrite,
+            label: `CORE-1 set to ${status}`,
+            presentation: "indicator",
+            target: "issue:CORE-1",
+            write: attemptOf(request, () => Promise.reject(dropped())),
+          })
+          .catch(() => {});
+      }
+      await settle();
+      expect(before.rows().map((write) => write.status)).toEqual(["sending", "queued"]);
+      expect(tab.kept(row(before, 1)?.key ?? "")).toMatchObject({
+        request: { body: { status: "done" }, method: "PATCH" },
+        sent: false,
+        state: { status: "queued" },
+      });
+
+      const after = new Writes(signedIn(), tab.page(), memoryFiles());
+      after.resume("alice");
+      await settle();
+      expect(landed).toEqual([{ status: "backlog" }, { status: "done" }]);
+      expect(after.rows()).toEqual([]);
+    } finally {
+      send.mockRestore();
+      tab.close();
+    }
+  });
+});
+
+// W37. A write waiting its turn that was never sent is the reader's to discard - its press is
+// refused, and nothing of it goes out - while one that is out is not.
+test("a write waiting its turn and never sent can be discarded; one out cannot", async () => {
+  await onFakeClock(async () => {
+    const { writes } = storeOf();
+    let secondMade = 0;
+    void statusWrite(writes, () => Promise.withResolvers<never>().promise, {
+      target: "issue:CORE-1",
+    }).catch(() => {});
+    const waiting = statusWrite(
+      writes,
+      async () => {
+        secondMade += 1;
+        return {};
+      },
+      { label: "second", target: "issue:CORE-1" }
+    ).catch((error: unknown) => error);
+    await settle();
+    expect(row(writes, 1)).toMatchObject({ sent: false, status: "queued" });
+    expect(writes.discard(row(writes, 0)?.id ?? 0)).toBe(false);
+    expect(writes.discard(row(writes, 1)?.id ?? 0)).toBe(true);
+    expect(await waiting).toBeInstanceOf(WriteDiscardedError);
+    expect(writes.rows().map((write) => write.status)).toEqual(["sending"]);
+    expect(secondMade).toBe(0);
+  });
+});
+
+// W39. Only Dispatch becoming reachable again resets a failing write's backoff. A route that keeps
+// answering 503 while every other request the page makes succeeds backs off 1 s, 2 s, 4 s … to its
+// 30 s cap; once a request has failed to reach Dispatch, the next answer starts it over.
+test("a route that keeps answering 503 backs off to its cap while other requests succeed", async () => {
+  await onFakeClock(async () => {
+    const { writes } = storeOf();
+    const times: number[] = [];
+    const start = Date.now();
+    void statusWrite(writes, () => {
+      times.push(Date.now() - start);
+      return Promise.reject(unavailable);
+    }).catch(() => {});
+    for (let elapsed = 0; elapsed < 91_500; elapsed += 500) {
+      // Another route's 2xx, while Dispatch was reachable all along.
+      reachable("answer");
+      await tick(500);
+    }
+    const gaps = times.slice(1).map((at, index) => at - (times[index] ?? 0));
+    expect(gaps.map((gap) => Math.round(gap / 1_000))).toEqual([1, 2, 4, 8, 16, 30, 30]);
+
+    unreachable();
+    reachable("answer");
+    const made = times.length;
+    await tick(2_200);
+    expect(times.length).toBe(made + 2);
   });
 });

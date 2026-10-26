@@ -46,10 +46,15 @@ function renderShownReplies(put: (body: UserAgentStateInput) => Promise<UserAgen
   let states: UserAgentStates = { [SESSION]: { unread_replies: 2 } };
   const sent: UserAgentStateInput[] = [];
   const getMyAgentState = spyOn(api, "getMyAgentState").mockImplementation(async () => states);
-  const putAgentState = spyOn(api, "putAgentState").mockImplementation(async (_session, body) => {
-    sent.push(body);
-    return put(body);
-  });
+  const putAgentState = spyOn(api, "putAgentState").mockImplementation(
+    async (session, body, bounds) => {
+      // As `api.putAgentState` does, the request is told to `sent` before anything goes out: a
+      // mark waiting its turn is planned there, and nothing past it runs (`Writes`).
+      bounds.sent?.({ body, method: "PUT", path: `/api/v1/me/agents/${session}/state` });
+      sent.push(body);
+      return put(body);
+    }
+  );
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   queryClient.setQueryData(["whoami"], { event_head: "0", kind: "user", login: "alice" });
   const hook = renderHook(

@@ -44,7 +44,11 @@ const artifact: Artifact = {
 
 const noReferences: IssueReferences = { members: [], truncated: false };
 
-function renderTab(artifacts: Artifact[], references: IssueReferences = noReferences) {
+function renderTab(
+  artifacts: Artifact[],
+  references: IssueReferences = noReferences,
+  isClosed = false
+) {
   const listArtifacts = spyOn(api, "listArtifacts").mockResolvedValue(artifacts);
   const getIssueReferences = spyOn(api, "getIssueReferences").mockResolvedValue(references);
   const queryClient = new QueryClient({
@@ -53,7 +57,7 @@ function renderTab(artifacts: Artifact[], references: IssueReferences = noRefere
   const view = render(
     <MemoryRouter initialEntries={[buildIssuePath({ key: "CORE-1", kind: "artifacts" })]}>
       <QueryClientProvider client={queryClient}>
-        <ArtifactsTab />
+        <ArtifactsTab isClosed={isClosed} />
       </QueryClientProvider>
     </MemoryRouter>
   );
@@ -79,6 +83,32 @@ test("renders one row per artifact with no compare controls", async () => {
     expect(screen.queryByText("Compare versions")).toBeNull();
     expect(screen.queryByRole("button", { name: "Show all versions" })).toBeNull();
   } finally {
+    view.unmount();
+    listArtifacts.mockRestore();
+    getIssueReferences.mockRestore();
+  }
+});
+
+// W41. A closed issue takes no upload, and Dispatch would refuse one only after its whole body went
+// up: the tab refuses before a file is picked, with the reason on its Upload control - and on the
+// line beside it, for a reader with no pointer - and a file dropped on it is not staged.
+test("a closed issue's Artifacts tab refuses an upload before a file is picked", async () => {
+  const { getIssueReferences, listArtifacts, view } = renderTab([artifact], noReferences, true);
+  const pick = spyOn(HTMLInputElement.prototype, "click");
+  try {
+    await screen.findByTestId("artifact-diagram-png");
+    const upload = screen.getByRole("button", { name: "Upload" });
+    expect(upload.getAttribute("aria-disabled")).toBe("true");
+    expect(upload.getAttribute("title")).toBe("This issue is closed. Reopen it to upload.");
+    expect(screen.getByText("This issue is closed. Reopen it to upload.")).toBeTruthy();
+    fireEvent.click(upload);
+    expect(pick).not.toHaveBeenCalled();
+    const file = new File(["png"], "late.png", { type: "image/png" });
+    fireEvent.drop(screen.getByTestId("artifact-diagram-png"), { dataTransfer: { files: [file] } });
+    expect(screen.queryByText("late.png")).toBeNull();
+    expect(screen.queryByLabelText("Summary (optional)")).toBeNull();
+  } finally {
+    pick.mockRestore();
     view.unmount();
     listArtifacts.mockRestore();
     getIssueReferences.mockRestore();

@@ -166,3 +166,88 @@ test("a refused write names Dispatch's reason, and Retry sends it again", async 
     tab.close();
   }
 });
+
+const patch = { body: { status: "done" }, method: "PATCH", path: "/api/v1/issues/CORE-1" } as const;
+
+// W37. A write waiting its turn behind another on its line was never sent: it reads "Waiting to
+// send", never "Saving" or "Sending", and offers Discard, which drops it with nothing sent.
+test("a write waiting its turn reads Waiting to send and can be discarded", async () => {
+  jest.useFakeTimers();
+  const { client, unmount } = mountIndicator();
+  const writes = writesOf(client);
+  let secondSent = 0;
+  try {
+    const press = (label: string, answer: () => Promise<unknown>) =>
+      void writes
+        .run({
+          detail: null,
+          kind: plainWrite,
+          label,
+          presentation: "indicator",
+          target: "issue:CORE-1",
+          write: (bounds) => {
+            bounds.sent?.(patch);
+            return answer();
+          },
+        })
+        .catch(() => undefined);
+    press("CORE-1 set to backlog", () => Promise.withResolvers<never>().promise);
+    press("CORE-1 set to done", async () => {
+      secondSent += 1;
+      return {};
+    });
+    await settle();
+    const indicator = screen.getByTestId("pending-writes");
+    expect(within(indicator).getByRole("status").textContent).toBe("Saving 1 change…");
+    expect(indicator.textContent).toContain("CORE-1 set to done — Waiting to send");
+    fireEvent.click(within(indicator).getByRole("button", { name: "Discard" }));
+    await settle();
+    expect(indicator.textContent).not.toContain("Waiting to send");
+    expect(writes.rows().map((row) => row.label)).toEqual(["CORE-1 set to backlog"]);
+    expect(secondSent).toBe(0);
+  } finally {
+    unmount();
+    jest.advanceTimersByTime(1);
+    jest.useRealTimers();
+  }
+});
+
+// W40. An upload whose body is still going up says how far it has got, and is never "still trying"
+// past its deadline until an attempt of it has actually failed; then it is.
+test("an upload in progress reads Uploading… N% until an attempt fails", async () => {
+  jest.useFakeTimers();
+  const { client, unmount } = mountIndicator();
+  const writes = writesOf(client);
+  const first = Promise.withResolvers<never>();
+  let attempts = 0;
+  try {
+    indicatorWrite(writes, "Upload of spec.md", (bounds) => {
+      attempts += 1;
+      bounds.sent?.({
+        body: { name: "spec.md" },
+        method: "POST",
+        path: "/api/v1/issues/CORE-1/artifacts",
+      });
+      if (attempts > 1) return Promise.withResolvers<never>().promise;
+      bounds.progress?.(40, 100);
+      return first.promise;
+    });
+    await settle();
+    await tick(SEND_DEADLINE_MS + 1_000);
+    const indicator = screen.getByTestId("pending-writes");
+    expect(within(indicator).getByRole("status").textContent).toBe("Saving 1 change…");
+    expect(indicator.textContent).toContain("Upload of spec.md — Uploading… 40%");
+    expect(indicator.textContent).not.toContain("still trying");
+
+    first.reject(refusal);
+    await settle();
+    expect(within(indicator).getByRole("status").textContent).toBe(
+      "Dispatch has not confirmed 1 change — still trying"
+    );
+    expect(indicator.textContent).not.toContain("Uploading…");
+  } finally {
+    unmount();
+    jest.advanceTimersByTime(1);
+    jest.useRealTimers();
+  }
+});

@@ -84,8 +84,13 @@ export interface KeptWrite {
   readonly target: string | null;
   readonly pressedAt: number;
   readonly state: KeptState;
-  /** The request as it last went out; `null` before its first attempt. */
+  /** The request it makes: as it last went out, or, for one waiting its turn that has not gone
+   *  out yet, as it will (`Writes`); `null` only for a kind that makes its writes again from its
+   *  own record. */
   readonly request: KeptRequest | null;
+  /** Whether an attempt of it went out under its key: one that never did is the reader's to
+   *  discard while it waits its turn. */
+  readonly sent: boolean;
   readonly detail: unknown;
 }
 
@@ -178,6 +183,7 @@ const keptEntryShape = shape.record({
   presentation: shape.oneOf(...PRESENTATIONS),
   pressedAt: shape.number,
   request: shape.nullable(keptRequestShape),
+  sent: shape.boolean,
   state: keptStateShape,
   target: shape.nullable(shape.string),
   version: shape.oneOf(FORMAT_VERSION),

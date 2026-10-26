@@ -32,6 +32,7 @@ import { versionsNewestFirst } from "../artifacts/ArtifactHeader";
 import {
   ArtifactDropZone,
   ArtifactUploadRow,
+  CLOSED_ISSUE_UPLOAD_REFUSAL,
   useArtifactUpload,
 } from "../artifacts/ArtifactUpload";
 import { useMargin } from "../margin/margin-context";
@@ -217,10 +218,10 @@ export function ProofDocument({
   });
   const liveTextQuery = useQuery(liveTextQueryOptions(artifact.id));
   // The repair replaces this document, so it uploads under the document's own name whatever the
-  // picked file is called.
+  // picked file is called; a closed issue takes none.
   const repairUpload = useArtifactUpload(
     owner.kind === "issue" ? { issue: owner.key } : { project: owner.project },
-    { name: artifact.name }
+    { name: artifact.name, refusal: isClosed ? CLOSED_ISSUE_UPLOAD_REFUSAL : null }
   );
   const [admission, setAdmission] = useState<AdmissionBlock | undefined>(undefined);
   // Set while an admission is blocked: admits again, once the next read of the text succeeds.

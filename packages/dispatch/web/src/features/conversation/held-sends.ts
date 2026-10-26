@@ -51,11 +51,12 @@ interface KeptComposerSend {
 }
 
 /**
- * A composer's send that has not landed, as its composers read it: out (`sending`, which counts one
- * still waiting its turn behind an earlier send to its session), out past its deadline (`late`), or
- * refused and not yet sent again or discarded. It belongs to the composer's target, named by the
- * composer's send name, not to the composer: whatever unmounts the composer, it stays, and a
- * composer that mounts under the same name shows it.
+ * A composer's send that has not landed, as its composers read it: waiting its turn behind an
+ * earlier send to its session, never sent (`waiting`, which the reader may discard), out
+ * (`sending`, which counts one sent before that waits to go again), out past its deadline
+ * (`late`), or refused and not yet sent again or discarded. It belongs to the composer's target,
+ * named by the composer's send name, not to the composer: whatever unmounts the composer, it
+ * stays, and a composer that mounts under the same name shows it.
  */
 export type HeldSend = {
   readonly id: number;
@@ -66,6 +67,7 @@ export type HeldSend = {
    *  `KEPT_SEND_RESUME_MS` is not made again on its own. */
   readonly pressedAt: number;
 } & (
+  | { readonly status: "waiting" }
   | { readonly status: "sending" }
   | { readonly status: "late"; readonly stopping: boolean }
   | { readonly status: "refused"; readonly refusal: Error }
@@ -265,6 +267,8 @@ function heldSend(write: Write<ComposerSend>): HeldSend | undefined {
     case "made":
       return undefined;
     case "queued":
+      held = write.sent ? { ...base, status: "sending" } : { ...base, status: "waiting" };
+      break;
     case "sending":
       held = { ...base, status: "sending" };
       break;

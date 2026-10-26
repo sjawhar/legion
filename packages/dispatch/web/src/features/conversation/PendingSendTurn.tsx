@@ -17,10 +17,11 @@ import type { SessionSends } from "./useSessionSends";
 
 /**
  * One message of the viewer's to a session that Dispatch has not yet made, as its own turn: its
- * text, and where it stands - sending, still being tried past its deadline with Stop trying, or
- * refused with why, Retry and Discard. The session's live view and its Agents row both show it,
- * and either's controls act on the same write (`useSessionSends`). It leaves once Dispatch makes
- * it, and the stored message takes its place.
+ * text, and where it stands - waiting for the message before it, never sent, with Discard;
+ * sending; still being tried past its deadline with Stop trying; or refused with why, Retry and
+ * Discard. The session's live view and its Agents row both show it, and either's controls act on
+ * the same write (`useSessionSends`). It leaves once Dispatch makes it, and the stored message
+ * takes its place.
  */
 export function PendingSendTurn({
   held,
@@ -55,6 +56,19 @@ export function PendingSendTurn({
             >
               Retry
             </RefusableButton>
+            <RefusableButton
+              look="secondary-compact"
+              onPress={() => sends.discard(held)}
+              refusal={null}
+            >
+              Discard
+            </RefusableButton>
+          </>
+        ) : held.status === "waiting" ? (
+          <>
+            <p className={`text-xs ${textMutedOnCanvas}`} role="status">
+              Waiting to send
+            </p>
             <RefusableButton
               look="secondary-compact"
               onPress={() => sends.discard(held)}

@@ -45,7 +45,7 @@ import { Sidebar } from "./features/sidebar/Sidebar";
 import "./features/writes/kinds";
 import { PendingWritesIndicator } from "./features/writes/PendingWritesIndicator";
 import { useKeyedWrite } from "./features/writes/useKeyedWrite";
-import { writesOf } from "./features/writes/write-store";
+import { type Write, writesOf } from "./features/writes/write-store";
 import {
   backdrop50,
   badgeBlocking,
@@ -541,7 +541,17 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
       onHideSidebar={() => setSidebarHidden(true)}
       onOpenInboxDrawer={() => setInboxDrawerOpen(true)}
       onSearch={() => setPaletteMode("all")}
-      onSignOut={() => signOut.mutate()}
+      onSignOut={() => {
+        // Signing out discards the person's own writes in every tab of this browser, so it asks
+        // first while any is unsent here, naming each; Cancel keeps them signed in and their
+        // writes as they are. A session that lapses instead keeps them (`Writes.signedIn`).
+        const writes = writesOf(queryClient);
+        const unsent = unsentChanges(writes.rows());
+        if (unsent.length > 0 && !window.confirm(signOutQuestion(unsent))) return;
+        writes.clear();
+        signIns?.postMessage({ signedOut: user.login });
+        signOut.mutate();
+      }}
       signOutError={signOut.isError}
       signOutPending={signOut.isPending}
       user={user}
@@ -780,9 +790,32 @@ function AuthenticatedApp({ user }: { user: AuthenticatedUser }): ReactNode {
 }
 
 /** Where the tabs of one browser tell each other who is signed in, which a sign-in in place in
- *  one changes for all of them: each reads `["whoami"]` again on a message. */
+ *  one changes for all of them: each reads `["whoami"]` again on a message. A sign-out says whose
+ *  (`{ signedOut: login }`), and every tab drops that person's writes (`Writes.dropLogin`). */
 const signIns =
   typeof BroadcastChannel === "undefined" ? undefined : new BroadcastChannel("dispatch-sign-in");
+
+/** The login a sign-in message says signed out, if it is one. */
+function signedOutLogin(data: unknown): string | undefined {
+  if (typeof data !== "object" || data === null) return undefined;
+  const login: unknown = Reflect.get(data, "signedOut");
+  return typeof login === "string" ? login : undefined;
+}
+
+/** What of the person's a sign-out would discard here: every write they can see that Dispatch has
+ *  not made - out, waiting its turn, or refused and holding their draft - by its name. A read mark
+ *  is never shown, and is no change of theirs to lose. */
+export function unsentChanges(rows: readonly Write[]): string[] {
+  return rows
+    .filter((row) => row.presentation !== "quiet" && row.status !== "made")
+    .map((row) => row.label);
+}
+
+/** What signing out asks while `unsent` changes would be discarded, naming each. */
+export function signOutQuestion(unsent: readonly string[]): string {
+  const count = unsent.length === 1 ? "1 unsent change" : `${unsent.length} unsent changes`;
+  return `Sign out and discard ${count}?\n\n${unsent.map((label) => `• ${label}`).join("\n")}`;
+}
 
 export function AuthGate(): ReactNode {
   const queryClient = useQueryClient();
@@ -811,9 +844,15 @@ export function AuthGate(): ReactNode {
   }, [known, login, queryClient]);
   useEffect(() => {
     if (signIns === undefined) return;
-    const reread = () => void queryClient.invalidateQueries({ queryKey: ["whoami"] });
-    signIns.addEventListener("message", reread);
-    return () => signIns.removeEventListener("message", reread);
+    const heard = (event: MessageEvent) => {
+      // The person signed out in another tab: every write they pressed goes here too, its file
+      // with it, so no tab holds a write whose file another tab let go of.
+      const signedOut = signedOutLogin(event.data);
+      if (signedOut !== undefined) writesOf(queryClient).dropLogin(signedOut);
+      void queryClient.invalidateQueries({ queryKey: ["whoami"] });
+    };
+    signIns.addEventListener("message", heard);
+    return () => signIns.removeEventListener("message", heard);
   }, [queryClient]);
 
   if (whoAmI.isPending) {

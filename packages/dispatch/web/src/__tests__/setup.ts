@@ -5,6 +5,7 @@ import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import "fake-indexeddb/auto";
 import { notifyManager } from "@tanstack/react-query";
 import serverBlockSchema from "../../../../envoy/internal/dispatch/pmdoc/schema/blocks.json";
+import { resetReachability } from "../api/reachability";
 import type { BlockSchema } from "../api/types";
 import { blockSchemaCache } from "../features/doc/schema";
 import { resetReplyDrafts } from "../features/inbox/reply-drafts";
@@ -70,3 +71,6 @@ afterEach(resetReplyDrafts);
 // pin answered, which the next pin would otherwise write over.
 afterEach(resetWriteStorage);
 afterEach(resetPinState);
+// Whether Dispatch could be reached is the page's to learn afresh: a request one test failed would
+// otherwise make the next test's first answer start every waiting write's backoff over.
+afterEach(resetReachability);

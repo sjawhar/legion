@@ -33,7 +33,8 @@ export interface QueuedSend extends BroadcastSend {
   readonly pressed: number;
 }
 
-/** One send as its row shows it: waiting its turn, on the wire within its deadline, still being
+/** One send as its row shows it: waiting its turn and never sent (`queued`, which the reader may
+ *  discard), on the wire within its deadline (or sent before and waiting to go again), still being
  *  tried under its key past it (`stopping` once the reader pressed Stop trying), sent with the
  *  broadcast it made, or failed with what refused it. */
 export type BroadcastSendRow = {
@@ -109,8 +110,10 @@ export function broadcastRows(rows: readonly Write[]): BroadcastSendRow[] {
     };
     switch (write.status) {
       case "queued":
+        shown.push({ ...base, status: write.sent ? "sending" : "queued" });
+        break;
       case "sending":
-        shown.push({ ...base, status: write.status });
+        shown.push({ ...base, status: "sending" });
         break;
       case "late":
         shown.push({ ...base, status: "late", stopping: write.stopping });

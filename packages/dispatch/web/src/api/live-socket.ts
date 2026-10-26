@@ -16,7 +16,7 @@ import { useSyncExternalStore } from "react";
 import { applyDelta, applyRevs } from "../features/delivery/lib/applyDelta";
 import type { DeliveryFreshness } from "../features/delivery/lib/freshness";
 import { ApiError } from "./client";
-import { reachable } from "./reachability";
+import { reachable, unreachable } from "./reachability";
 import type {
   DeliveryLiveBody,
   DeliveryLiveDelta,
@@ -509,6 +509,7 @@ export function createLiveSocket(queryClient: QueryClient): LiveSocket {
   /** The network went: the socket is let go at once rather than left for the silence check, and
    *  the next one waits out the backoff, unless the network comes back first. */
   const onOffline = () => {
+    unreachable();
     if (socket === null) return;
     letGo();
     retryLater();
@@ -543,7 +544,8 @@ export function createLiveSocket(queryClient: QueryClient): LiveSocket {
       cancelStuck?.();
       cancelStuck = undefined;
       update({ since: null, state: "open", stuck: false });
-      // Dispatch is reachable: a write waiting out its backoff is asked again now.
+      // Dispatch is reachable again, if the socket had been lost: a write waiting out its backoff
+      // starts it over and is asked again now (`reachability.ts`).
       reachable("socket");
       for (const sub of subs.values()) sendSubscribe(sub);
     });
@@ -570,6 +572,8 @@ export function createLiveSocket(queryClient: QueryClient): LiveSocket {
       open();
       return;
     }
+    // The socket was lost, not rotated: Dispatch cannot be reached until the next one opens.
+    unreachable();
     markGap();
     if (!wasOpen || code === CALLER_GONE) checkSignIn();
     reconnecting();

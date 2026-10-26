@@ -183,6 +183,16 @@ export function BroadcastSends({
               {row.status === "late" ? (
                 <StopTrying onStop={() => onStop(row)} stopping={row.stopping} />
               ) : null}
+              {row.status === "queued" ? (
+                // Never sent, so dropping it sends nothing.
+                <button
+                  className={secondaryButtonCompact}
+                  onClick={() => onDiscard(row)}
+                  type="button"
+                >
+                  Discard
+                </button>
+              ) : null}
               {row.status === "failed" ? (
                 <>
                   <button

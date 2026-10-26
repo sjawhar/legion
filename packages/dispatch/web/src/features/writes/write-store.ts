@@ -11,6 +11,7 @@ import {
   SEND_DEADLINE_MS,
   SendInterruptedError,
   SendStoppedError,
+  WriteDiscardedError,
   writeUnderKey,
 } from "./keyed-write";
 import {
@@ -56,6 +57,15 @@ export interface WriteBase<D = unknown> {
   readonly pressedAt: number;
   /** Its place in its target's line, in the order writes joined it; a Retry joins at the back. */
   readonly joined: number;
+  /** Whether an attempt of it under its key has gone out. One that has not was never sent, so
+   *  while it waits its turn it reads "Waiting to send" and is the reader's to discard. */
+  readonly sent: boolean;
+  /** How much of an upload's body its current attempt has sent, in percent; `undefined` for a
+   *  write with no body going up. */
+  readonly uploaded: number | undefined;
+  /** Whether an attempt of it has ended without Dispatch's verdict - a connection that failed, an
+   *  attempt gone silent, a 5xx - so it is being tried again, not still on its first try. */
+  readonly retried: boolean;
   readonly detail: D;
 }
 
@@ -65,9 +75,24 @@ export type Write<D = unknown> = WriteBase<D> & WriteState;
 
 /** `write` apart from where it stands, for a new state to be put on. */
 function baseOf<D>(write: Write<D>): WriteBase<D> {
-  const { detail, id, inline, joined, key, kind, label, login, presentation, pressedAt, target } =
-    write;
-  return { detail, id, inline, joined, key, kind, label, login, presentation, pressedAt, target };
+  const { detail, id, inline, joined, key, kind, label, login, presentation, pressedAt } = write;
+  const { retried, sent, target, uploaded } = write;
+  return {
+    detail,
+    id,
+    inline,
+    joined,
+    key,
+    kind,
+    label,
+    login,
+    presentation,
+    pressedAt,
+    retried,
+    sent,
+    target,
+    uploaded,
+  };
 }
 
 /** One attempt of a write, under the bounds the store gives it: its key, its login and its
@@ -280,34 +305,36 @@ export class Writes {
     const login = signedInLogin(this.#client);
     const key = spec.key ?? newSendKey();
     if (spec.file !== undefined && login !== undefined) void this.#files.put(key, login, spec.file);
-    this.#join(
-      {
-        attempt: spec.write,
-        endsWithSession: spec.endsWithSession ?? false,
-        expiry: undefined,
-        file: spec.file,
-        held: false,
-        press,
-        request: null,
-        stop: new AbortController(),
-        turn: undefined,
-        write: {
-          detail: spec.detail,
-          id: this.#nextId(),
-          inline: spec.inline ?? false,
-          joined: this.#nextJoin(),
-          key,
-          kind: spec.kind.name,
-          label: spec.label,
-          login,
-          presentation: spec.presentation,
-          pressedAt: Date.now(),
-          status: "queued",
-          target: spec.target,
-        },
+    const entry: Entry = {
+      attempt: spec.write,
+      endsWithSession: spec.endsWithSession ?? false,
+      expiry: undefined,
+      file: spec.file,
+      held: false,
+      press,
+      request: null,
+      stop: new AbortController(),
+      turn: undefined,
+      write: {
+        detail: spec.detail,
+        id: this.#nextId(),
+        inline: spec.inline ?? false,
+        joined: this.#nextJoin(),
+        key,
+        kind: spec.kind.name,
+        label: spec.label,
+        login,
+        presentation: spec.presentation,
+        pressedAt: Date.now(),
+        retried: false,
+        sent: false,
+        status: "queued",
+        target: spec.target,
+        uploaded: undefined,
       },
-      "sending"
-    );
+    };
+    this.#join(entry, "sending");
+    if (entry.write.status === "queued") this.#plan(entry);
     return press.promise as Promise<T | null>;
   }
 
@@ -336,19 +363,33 @@ export class Writes {
       joined: this.#nextJoin(),
       key,
       pressedAt: Date.now(),
+      retried: false,
+      sent: key === entry.write.key && entry.write.sent,
       status: "queued",
+      uploaded: undefined,
     };
     this.#join(entry, "sending");
   }
 
-  /** Drops the refused write `id`, and says whether there was one. A write still out is not the
-   *  reader's to drop: it stays until Dispatch answers or the reader stops it. */
+  /** Drops the write `id` the reader discards, and says whether there was one: a refused one, or
+   *  one waiting its turn that was never sent, whose press is refused (`WriteDiscardedError`). A
+   *  write that is out, or that went out before and waits to go again, is not the reader's to
+   *  drop: it may have reached Dispatch, so it stays until Dispatch answers or the reader stops
+   *  it. */
   discard(id: number): boolean {
     const entry = this.#entries.get(id);
-    if (entry?.write.status !== "refused") return false;
+    if (entry === undefined) return false;
+    const waiting = entry.write.status === "queued" && !entry.write.sent;
+    if (entry.write.status !== "refused" && !waiting) return false;
+    const discarded = new WriteDiscardedError();
+    entry.press?.reject(discarded);
+    entry.press = undefined;
+    entry.turn?.settled.reject(discarded);
+    entry.turn = undefined;
     this.#remove(entry);
     kinds.get(entry.write.kind)?.undone?.(this.#client, entry.write);
     this.#emit({ kind: "discarded", write: entry.write });
+    this.#advance(entry.write.target);
     return true;
   }
 
@@ -401,6 +442,15 @@ export class Writes {
     this.#resetKinds();
     void this.#files.keepOnly(undefined);
     this.#kept.clear();
+  }
+
+  /** Drops every write `login` pressed, out or refused, its trying stopped and everything kept
+   *  of it, its file included: that person signed out in another tab of this browser, which
+   *  discards their writes in every tab (`app.tsx`). */
+  dropLogin(login: string): void {
+    for (const entry of [...this.#entries.values()]) {
+      if (entry.write.login === login) this.#drop(entry);
+    }
   }
 
   /** Has every kind let go of what it remembered of the person signed in until now. */
@@ -471,8 +521,11 @@ export class Writes {
         login: kept.login,
         presentation: kept.presentation,
         pressedAt: kept.pressedAt,
+        retried: false,
+        sent: kept.sent,
         status: "queued",
         target: kept.target ?? undefined,
+        uploaded: undefined,
       },
     };
     if (onItsOwn) {
@@ -553,7 +606,16 @@ export class Writes {
       sent: (request) => {
         if (!current()) return;
         entry.request = request;
-        this.#keep(entry);
+        if (entry.write.sent) this.#keep(entry);
+        else this.#update(entry, { ...entry.write, sent: true });
+      },
+      uploading: (loaded, total) => {
+        if (!current() || total <= 0) return;
+        const uploaded = Math.min(100, Math.floor((loaded * 100) / total));
+        if (uploaded !== entry.write.uploaded) this.#show(entry, { ...entry.write, uploaded });
+      },
+      failed: () => {
+        if (current()) this.#show(entry, { ...entry.write, retried: true, uploaded: undefined });
       },
       signal: stop.signal,
       // The person's session lapsed under the write: the page learns who is signed in, and a lapse
@@ -658,6 +720,7 @@ export class Writes {
     entry.stop.abort();
     entry.press?.reject(new SendStoppedError());
     entry.press = undefined;
+    entry.turn?.settled.reject(new SendStoppedError());
     entry.turn = undefined;
     this.#remove(entry);
     kinds.get(entry.write.kind)?.undone?.(this.#client, entry.write);
@@ -702,9 +765,38 @@ export class Writes {
       presentation: write.presentation,
       pressedAt: write.pressedAt,
       request: entry.request === null ? null : keptRequest(entry.request),
+      sent: write.sent,
       state,
       target: write.target ?? null,
     });
+  }
+
+  /** Puts `write` in the place of `entry`'s and tells every listener, keeping nothing: what changed
+   *  - an upload's progress, a failed attempt - is not what a reload takes up. */
+  #show(entry: Entry, write: Write): void {
+    entry.write = write;
+    if (this.#entries.get(write.id) === entry) this.#publish();
+  }
+
+  /** Keeps `entry`, which waits its turn before any attempt of it went out, with the request it
+   *  will make, so a reload makes it again in its place in the line: its attempt is asked for the
+   *  request (`sent`) and stopped there, before anything goes out. A kind that makes its writes
+   *  again from its own record (`resume`) needs none. */
+  #plan(entry: Entry): void {
+    if (entry.request !== null || kinds.get(entry.write.kind)?.resume !== undefined) return;
+    const planned = new Error("the request is planned, not sent");
+    const sent = (request: WriteRequest) => {
+      if (entry.request === null && this.#entries.get(entry.write.id) === entry) {
+        entry.request = request;
+        this.#keep(entry);
+      }
+      throw planned;
+    };
+    try {
+      entry.attempt({ key: entry.write.key, login: entry.write.login, sent }).catch(() => {});
+    } catch {
+      // The attempt stopped at its request, as it was asked to.
+    }
   }
 
   #publish(): void {

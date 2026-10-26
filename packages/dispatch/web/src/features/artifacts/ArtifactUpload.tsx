@@ -6,6 +6,7 @@ import {
   type DragEvent,
   type ReactNode,
   type RefObject,
+  useId,
   useRef,
   useState,
 } from "react";
@@ -13,6 +14,7 @@ import {
 import { ApiError, type ArtifactOwner, api, type WriteBounds } from "../../api/client";
 import type { Artifact, Version } from "../../api/types";
 import { QueryError } from "../../components/QueryError";
+import { RefusableButton } from "../../components/RefusableButton";
 import { useSubmitGuard } from "../../hooks/useSubmitGuard";
 import {
   calloutInfoBg,
@@ -30,6 +32,10 @@ import {
 import { buildDispatchReference, type DispatchReferenceRoute } from "../refs/routes";
 import { LandedWithoutAnswer } from "../writes/LandedWithoutAnswer";
 import { useKeyedWrite } from "../writes/useKeyedWrite";
+
+/** Why a closed issue's Artifacts tab, or its document's repair, takes no upload: Dispatch refuses
+ *  one until the issue is reopened. */
+export const CLOSED_ISSUE_UPLOAD_REFUSAL = "This issue is closed. Reopen it to upload.";
 
 export interface UploadResult {
   artifact: Artifact;
@@ -233,6 +239,8 @@ export interface ArtifactUpload {
   madeUnanswered: string | null;
   openPicker(): void;
   pendingFile: File | null;
+  /** Why no file can be uploaded here - its issue is closed - or null while one can. */
+  refusal: string | null;
   selectFile(event: ChangeEvent<HTMLInputElement>): void;
   setSummary(value: string): void;
   summary: string;
@@ -244,11 +252,16 @@ export interface ArtifactUpload {
  * field appears once there is something to summarize and whose "Cancel" discards the pick).
  * `name` uploads every file under that document name, replacing that document, rather than under
  * the picked file's own name. Success invalidates the owner's artifact list and, for an issue, the
- * issue itself.
+ * issue itself. With a `refusal` - the issue is closed - nothing can be picked or dropped, so no
+ * upload starts that Dispatch would refuse, and the row says why on its Upload control.
  */
 export function useArtifactUpload(
   owner: ArtifactOwner,
-  { immediate = false, name }: { immediate?: boolean; name?: string } = {}
+  {
+    immediate = false,
+    name,
+    refusal = null,
+  }: { immediate?: boolean; name?: string; refusal?: string | null } = {}
 ): ArtifactUpload {
   const queryClient = useQueryClient();
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -278,7 +291,7 @@ export function useArtifactUpload(
     },
   });
   const receive = (file: File | undefined) => {
-    if (file === undefined) {
+    if (file === undefined || refusal !== null) {
       return;
     }
     upload.forgetUnanswered();
@@ -320,8 +333,11 @@ export function useArtifactUpload(
       upload.unanswered === undefined
         ? null
         : (name ?? (upload.unanswered.variables.name || "the file")),
-    openPicker: () => fileInputRef.current?.click(),
+    openPicker: () => {
+      if (refusal === null) fileInputRef.current?.click();
+    },
     pendingFile,
+    refusal,
     selectFile: (event) => {
       receive(event.target.files?.[0]);
       event.target.value = "";
@@ -332,6 +348,7 @@ export function useArtifactUpload(
 }
 
 export function ArtifactUploadRow({ upload }: { upload: ArtifactUpload }): ReactNode {
+  const refusalId = useId();
   return (
     // The host owns the strip this sits in, so the row carries no divider of its own: idle it
     // is one button beside the filter, staging a file it takes the line.
@@ -339,13 +356,22 @@ export function ArtifactUploadRow({ upload }: { upload: ArtifactUpload }): React
       className={`flex min-w-0 flex-wrap items-center gap-2 ${upload.pendingFile === null ? "shrink-0" : "w-full"}`}
     >
       {upload.pendingFile === null ? (
-        <button
-          className={`min-h-11 rounded-lg border px-3 py-2 text-sm font-medium ${secondaryButtonBorder} ${secondaryButtonText} ${secondaryButtonHoverBorder}`}
-          onClick={upload.openPicker}
-          type="button"
-        >
-          Upload
-        </button>
+        <>
+          <RefusableButton
+            className="min-h-11 shrink-0"
+            look="secondary-compact"
+            onPress={upload.openPicker}
+            refusal={upload.refusal}
+            refusalShownBy={upload.refusal === null ? undefined : refusalId}
+          >
+            Upload
+          </RefusableButton>
+          {upload.refusal === null ? null : (
+            <span className={`text-xs ${textMutedOnSurface}`} id={refusalId}>
+              {upload.refusal}
+            </span>
+          )}
+        </>
       ) : (
         <>
           <span className={`min-w-0 truncate text-sm ${textMutedOnSurface}`}>

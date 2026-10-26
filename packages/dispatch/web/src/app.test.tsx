@@ -292,10 +292,12 @@ test("a lapsed session keeps every write, and the same person's sign-in resumes 
   }
 }, 15_000);
 
-// Signing out ends every write with the session that pressed it: one still being tried stops, a
-// refusal waiting for Retry goes, nothing of either is left in the tab for the next person, and
-// the page stops asking to confirm leaving.
-test("signing out drops every write, stops it, and stops asking before the tab is left", async () => {
+// (b) Signing out discards the person's own writes, so it asks first while any is unsent, naming
+// each: Cancel keeps them signed in with every write as it was. Confirmed, every write - one still
+// being tried, a refusal waiting for Retry - stops and goes, nothing of either is left in the tab,
+// the page stops asking to confirm leaving, and every other tab of the browser is told whose
+// writes to drop.
+test("signing out asks first, then drops every write here and tells every other tab", async () => {
   const sockets = installFakeLiveSockets();
   let signedIn = true;
   const whoAmI = spyOn(api, "whoAmI").mockImplementation(async () => {
@@ -323,6 +325,16 @@ test("signing out drops every write, stops it, and stops asking before the tab i
       removeEventListener: () => {},
       removeListener: () => {},
     }) as MediaQueryList) as typeof window.matchMedia;
+  const originalConfirm = window.confirm;
+  const asked: string[] = [];
+  let answer = false;
+  window.confirm = (message?: string) => {
+    asked.push(message ?? "");
+    return answer;
+  };
+  const otherTab = new BroadcastChannel("dispatch-sign-in");
+  const told: unknown[] = [];
+  otherTab.addEventListener("message", (event) => told.push(event.data));
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const view = render(
     <MemoryRouter initialEntries={["/"]}>
@@ -346,21 +358,100 @@ test("signing out drops every write, stops it, and stops asking before the tab i
     expect(asksBeforeLeaving()).toBe(true);
 
     fireEvent.click(screen.getByRole("button", { name: "Sign out" }));
+    expect(asked).toEqual([
+      "Sign out and discard 2 unsent changes?\n\n• CORE-1 set to done\n• CORE-2 set to done",
+    ]);
+    expect(logout).not.toHaveBeenCalled();
+    expect(screen.getByText("Signed in as alice")).toBeTruthy();
+    expect(writesOf(queryClient).rows()).toHaveLength(2);
+    expect(keptWrites()).toHaveLength(2);
+
+    answer = true;
+    fireEvent.click(screen.getByRole("button", { name: "Sign out" }));
+    expect(writesOf(queryClient).rows()).toEqual([]);
     await screen.findByRole("link", { name: "Sign in with Google" });
     expect(logout).toHaveBeenCalledTimes(1);
-    expect(writesOf(queryClient).rows()).toEqual([]);
     expect(await out).toBeInstanceOf(SendStoppedError);
     expect(keptWrites()).toEqual([]);
     expect(asksBeforeLeaving()).toBe(false);
+    await waitFor(() => expect(told).toContainEqual({ signedOut: "alice" }));
     const made = attempts.length;
-    await new Promise((resolve) => setTimeout(resolve, 2_500));
+    const quiet = Promise.withResolvers<void>();
+    setTimeout(quiet.resolve, 2_500);
+    await quiet.promise;
     expect(attempts).toHaveLength(made);
   } finally {
+    otherTab.close();
+    window.confirm = originalConfirm;
     view.unmount();
     liveSocketFor(queryClient).close();
     sockets.restore();
     whoAmI.mockRestore();
     logout.mockRestore();
+    for (const spy of spies) spy.mockRestore();
+    window.matchMedia = originalMatchMedia;
+  }
+}, 15_000);
+
+// (b) The person signed out in another tab of this browser: this tab drops every write they pressed
+// - out or refused - and stops trying it, so no tab holds a write whose kept file another tab let
+// go of. A session that lapses with no sign-out keeps them instead (the W32 test above).
+test("a sign-out in another tab drops that person's writes here", async () => {
+  const sockets = installFakeLiveSockets();
+  const whoAmI = spyOn(api, "whoAmI").mockResolvedValue({
+    event_head: "0",
+    kind: "user",
+    login: "alice",
+  });
+  const spies = [
+    spyOn(api, "listIssues").mockResolvedValue([]),
+    spyOn(api, "getMyState").mockResolvedValue({}),
+    spyOn(api, "getInbox").mockResolvedValue([]),
+  ];
+  const originalMatchMedia = window.matchMedia;
+  window.matchMedia = (() =>
+    ({
+      addEventListener: () => {},
+      addListener: () => {},
+      dispatchEvent: () => true,
+      matches: false,
+      media: "",
+      onchange: null,
+      removeEventListener: () => {},
+      removeListener: () => {},
+    }) as MediaQueryList) as typeof window.matchMedia;
+  const otherTab = new BroadcastChannel("dispatch-sign-in");
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const view = render(
+    <MemoryRouter initialEntries={["/"]}>
+      <QueryClientProvider client={queryClient}>
+        <AuthGate />
+      </QueryClientProvider>
+    </MemoryRouter>
+  );
+  try {
+    await screen.findByText("Signed in as alice");
+    const attempts: string[] = [];
+    const out = aliceWrite(queryClient, attempts);
+    void aliceWrite(queryClient, attempts, true);
+    await waitFor(() => expect(writesOf(queryClient).rows()).toHaveLength(2));
+    expect(keptWrites()).toHaveLength(2);
+
+    act(() => otherTab.postMessage({ signedOut: "alice" }));
+    await waitFor(() => expect(writesOf(queryClient).rows()).toEqual([]));
+    expect(await out).toBeInstanceOf(SendStoppedError);
+    expect(keptWrites()).toEqual([]);
+    const made = attempts.length;
+    const quiet = Promise.withResolvers<void>();
+    setTimeout(quiet.resolve, 2_500);
+    await quiet.promise;
+    expect(attempts).toHaveLength(made);
+  } finally {
+    otherTab.close();
+    view.unmount();
+    liveSocketFor(queryClient).close();
+    sockets.restore();
+    whoAmI.mockRestore();
     for (const spy of spies) spy.mockRestore();
     window.matchMedia = originalMatchMedia;
   }

@@ -30,7 +30,12 @@ import {
 } from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
 import { artifactVersionUrl, formatArtifactBytes, versionsNewestFirst } from "./ArtifactHeader";
-import { ArtifactDropZone, ArtifactUploadRow, useArtifactUpload } from "./ArtifactUpload";
+import {
+  ArtifactDropZone,
+  ArtifactUploadRow,
+  CLOSED_ISSUE_UPLOAD_REFUSAL,
+  useArtifactUpload,
+} from "./ArtifactUpload";
 
 function kindIcon(kind: Artifact["kind"]): ReactNode {
   const common = {
@@ -215,13 +220,17 @@ function ArtifactRow({
   );
 }
 
-export function ArtifactsTab(): ReactNode {
+/** The issue's artifacts, with an upload that a closed issue refuses before a file is picked. */
+export function ArtifactsTab({ isClosed }: { readonly isClosed: boolean }): ReactNode {
   const { pathname } = useLocation();
   const route = parseIssuePath(pathname);
   const issueKey = route?.key;
   const highlightedSlug = route?.kind === "artifact" ? route.slug : undefined;
   const [filter, setFilter] = useState("");
-  const upload = useArtifactUpload({ issue: issueKey ?? "" });
+  const upload = useArtifactUpload(
+    { issue: issueKey ?? "" },
+    { refusal: isClosed ? CLOSED_ISSUE_UPLOAD_REFUSAL : null }
+  );
   const artifacts = useQuery({
     enabled: issueKey !== undefined,
     queryKey: ["artifacts", issueKey],

@@ -952,7 +952,9 @@ test("a board move then a header status change land in press order after an outa
   const { queryClient, unmount } = renderIssuePage();
   let up = false;
   const landed: string[] = [];
-  patchIssue.mockImplementation(async (_key, input) => {
+  patchIssue.mockImplementation(async (key, input, bounds) => {
+    // As `api.patchIssue` does, the request is told to `sent` before anything goes out.
+    bounds.sent?.({ body: input, method: "PATCH", path: `/api/v1/issues/${key}` });
     if (!up) throw new NetworkError("/api/v1/issues/CORE-1", new TypeError("Failed to fetch"));
     if (input.rank !== undefined) {
       const slow = Promise.withResolvers<void>();

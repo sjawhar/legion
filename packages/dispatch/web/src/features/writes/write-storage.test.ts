@@ -25,6 +25,7 @@ const kept = (key: string, fields: Partial<KeptWrite> = {}): KeptWrite => ({
   pressedAt: 1_700_000_000_000,
   request: { body: { status: "done" }, method: "PATCH", path: "/api/v1/issues/CORE-1" },
   state: { status: "sending" },
+  sent: true,
   target: null,
   ...fields,
 });
