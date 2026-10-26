@@ -92,6 +92,8 @@ export function activityDescription(
     }
     case "issue.deployed":
       return `deployed ${event.payload.repo}#${event.payload.number} to production (run ${event.payload.run_id})`;
+    case "handoff.recorded":
+      return `recorded the ${event.payload.phase} handoff, version ${event.payload.version}`;
     case "artifact.created":
       return `added ${event.payload.artifact.name}`;
     case "artifact.version":

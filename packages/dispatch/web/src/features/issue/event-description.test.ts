@@ -193,6 +193,21 @@ test("eventDescription names a saved artifact version", () => {
   expect(eventDescription(event)).toBe("Saved cu-update-2026-09-15.md v2");
 });
 
+test("eventDescription names the phase and version of a recorded handoff", () => {
+  const event: Extract<Event, { type: "handoff.recorded" }> = {
+    actor: { id: "session-1", kind: "session" },
+    created_at: "2026-10-26T00:00:00Z",
+    id: 6,
+    issue_key: "OPS-52",
+    notify: true,
+    payload: { handoff_id: "handoff-1", phase: "implement", version: 2 },
+    seq: 6,
+    type: "handoff.recorded",
+  };
+
+  expect(eventDescription(event)).toBe("Recorded the implement handoff, version 2");
+});
+
 test("eventDescription names the child a reparent adds or removes", () => {
   const base = {
     actor: { id: "alice", kind: "user" },

@@ -135,6 +135,8 @@ export type {
   ExternalLink,
   GraphEdge,
   GraphReferences,
+  Handoff,
+  HandoffSummary,
   InboxDocument,
   InboxRow,
   Issue,

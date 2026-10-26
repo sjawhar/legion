@@ -42,6 +42,7 @@ const knownEventTypes: Record<EventType, true> = {
   "issue.claimed": true,
   "issue.released": true,
   "issue.deployed": true,
+  "handoff.recorded": true,
   "artifact.created": true,
   "artifact.version": true,
   "artifact.approved": true,
@@ -653,6 +654,12 @@ function ownerQueryKeys(event: Event, signedInLogin?: string): (readonly unknown
     // that cited an ask moves that ask's count, and `eventQueryKeys` restores the Inbox from
     // the targets the event names.
     return withoutInbox(keys);
+  }
+
+  // A handoff write lands in the issue's handoff list; its log line is the base `["events"]` key.
+  if (event.type === "handoff.recorded") {
+    keys.push(["handoffs", event.issue_key]);
+    return keys;
   }
 
   if (event.type === "subscription.removed") {

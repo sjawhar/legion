@@ -239,6 +239,11 @@ function mainEventQueryKeys(event: Event, signedInLogin?: string): (readonly unk
   if (event.type.startsWith("issue.")) {
     return keys;
   }
+  // An event main never had: the base keys every issue event refreshes, and nothing of the
+  // default branch's. The corpus test adds the handoff list it owns.
+  if (event.type === "handoff.recorded") {
+    return keys;
+  }
 
   if (event.type === "artifact.created" || event.type === "artifact.version") {
     keys.push(["artifacts", event.issue_key]);
@@ -415,6 +420,9 @@ const eventsByType: Record<EventType, readonly Event[]> = {
       run_id: 900,
       completed_at: "2024-01-01T02:10:00Z",
     }),
+  ],
+  "handoff.recorded": [
+    event("handoff.recorded", { handoff_id: "handoff-1", phase: "implement", version: 2 }),
   ],
   "artifact.created": [event("artifact.created", { artifact: { id: "artifact-1" } })],
   "artifact.version": [
@@ -771,6 +779,8 @@ test.each(
     ...rollupAdditions(incoming),
     ...answersPageAdditions(incoming),
     ...repliesAdditions(incoming),
+    // A recorded handoff refreshes its issue's handoff list, which main never had.
+    ...(incoming.type === "handoff.recorded" ? [["handoffs", incoming.issue_key]] : []),
   ];
   const counted = countedRowKeys(incoming);
   const references = referenceWrites.has(incoming.type) ? [["references"]] : [];
@@ -917,6 +927,17 @@ test("an ask reply keeps the ask-thread key the delayed-Inbox freshness marker r
   const keys = invalidatedKeys(event("comment.created", { id: "comment-1", ask_id: "ask-1" }));
   expect(keys).toContainEqual(["ask-thread", "ask-1"]);
   expect(keys).toContainEqual(["inbox"]);
+});
+
+test("a recorded handoff refreshes the issue's handoff list and its log, and no child rollup", () => {
+  const keys = invalidatedKeys(
+    event("handoff.recorded", { handoff_id: "handoff-1", phase: "implement", version: 2 })
+  );
+  expect(keys).toContainEqual(["handoffs", "CORE-1"]);
+  expect(keys).toContainEqual(["events", "CORE-1"]);
+  expect(keys).not.toContainEqual(["children", "CORE-1"]);
+  expect(keys).not.toContainEqual(["issue"]);
+  expect(keys).not.toContainEqual(["references"]);
 });
 
 /** The payload of an `issue.*` event as `issue_patch.go` sends it: `model.NewIssueEventPayload`

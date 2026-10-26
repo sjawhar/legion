@@ -568,6 +568,31 @@ test("API client reaches every remaining documented endpoint", async () => {
   ]);
 });
 
+test("API client lists an issue's handoffs and reads one handoff by id", async () => {
+  const summary = {
+    author: { id: "session-1", kind: "session" as const },
+    created_at: "2026-10-26T00:00:00Z",
+    id: "handoff/1",
+    issue_key: "CORE-1",
+    phase: "implement",
+    version: 2,
+  };
+  const handoff = { ...summary, body: '{"proof":["a"]}' };
+  const stub = stubFetch((request) =>
+    request.path === "/api/v1/issues/CORE-1/handoffs"
+      ? Response.json([summary])
+      : Response.json(handoff)
+  );
+  const api = createApiClient(stub.fetch);
+
+  expect(await api.listHandoffs("CORE-1")).toEqual([summary]);
+  expect(await api.getHandoff("handoff/1")).toEqual(handoff);
+  expect(stub.requests.map(({ init, path }) => [init?.method ?? "GET", path])).toEqual([
+    ["GET", "/api/v1/issues/CORE-1/handoffs"],
+    ["GET", "/api/v1/handoffs/handoff%2F1"],
+  ]);
+});
+
 test("API client keeps only small idempotent /me/ writes alive during navigation", async () => {
   const stub = stubFetch();
   const api = createApiClient(stub.fetch);

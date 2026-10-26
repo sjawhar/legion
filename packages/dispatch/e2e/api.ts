@@ -27,6 +27,7 @@ import type {
   CreateProjectInput,
   EditAskInput,
   Event,
+  HandoffSummary,
   InboxRow,
   Issue,
   IssueDetails,
@@ -744,6 +745,23 @@ export function replyToCommentDelivery(
       actor,
       as: "agent",
     }
+  );
+}
+
+/** A session records the next version of `phase`'s handoff on the issue, as `dispatch
+ *  handoff-write` does: under the agent bearer, naming itself in `actor`. `body` is sent as the
+ *  one JSON object's text the server stores verbatim. */
+export function createHandoff(
+  issue: string,
+  phase: string,
+  body: object,
+  actor: Actor = seedActor
+): Promise<HandoffSummary> {
+  return request<HandoffSummary>(
+    `/api/v1/issues/${encodeURIComponent(issue)}/handoffs/${encodeURIComponent(phase)}`,
+    "POST",
+    { body: JSON.stringify(body) },
+    { actor, as: "agent" }
   );
 }
 
