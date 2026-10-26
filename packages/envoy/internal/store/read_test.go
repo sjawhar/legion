@@ -155,7 +155,7 @@ func rebuiltRegistry(t *testing.T, conn *natsgo.Conn) (*Registry, *holdingCache,
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	reg.watcher.End(ctx)
-	delayed := &delayingKV{KeyValue: reg.watcher.KV().KeyValue}
+	delayed := &delayingKV{KeyValue: reg.watcher.KV().Legacy()}
 	held := &holdingCache{Cache: interestCache{reg}}
 	reg.watcher = kvwatch.New("interest registry", bus.NewKeyValue(delayed, reg.watcher.KV().WatchHandle(), reg.watcher.KV().Streams()), held)
 	t.Cleanup(reg.StopWatch)

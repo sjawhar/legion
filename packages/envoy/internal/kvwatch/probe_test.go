@@ -160,7 +160,7 @@ func TestAProbeOfTheSameStreamOnlyConfirmsIt(t *testing.T) {
 	into := newSeen()
 	now := newClock()
 	timers := &pending{}
-	w := kvwatch.New("test cache", bus.NewKeyValue(kv.KeyValue, kv.WatchHandle(), counted), into,
+	w := kvwatch.New("test cache", bus.NewKeyValue(kv.Legacy(), kv.WatchHandle(), counted), into,
 		kvwatch.WithNow(now.Now), kvwatch.WithAfterFunc(timers.afterFunc()))
 	t.Cleanup(w.Stop)
 	w.Start()
@@ -209,7 +209,7 @@ func TestARecordOnAnOldConfirmationWaitsForAReadOfTheStream(t *testing.T) {
 		return readsAt[key]
 	}
 	now := newClock()
-	w := kvwatch.New("test cache", bus.NewKeyValue(kv.KeyValue, kv.WatchHandle(), counted), into,
+	w := kvwatch.New("test cache", bus.NewKeyValue(kv.Legacy(), kv.WatchHandle(), counted), into,
 		kvwatch.WithNow(now.Now), kvwatch.WithAfterFunc((&pending{}).afterFunc()))
 	t.Cleanup(w.Stop)
 	w.Start()
@@ -373,13 +373,13 @@ func TestStopAndANewerWatchDisarmTheProbe(t *testing.T) {
 	_, kv := bucket(t, uri)
 	counted := &countingKV{JetStream: kv.Streams()}
 	timers := &pending{}
-	w := kvwatch.New("test cache", bus.NewKeyValue(kv.KeyValue, kv.WatchHandle(), counted), newSeen(), kvwatch.WithAfterFunc(timers.afterFunc()))
+	w := kvwatch.New("test cache", bus.NewKeyValue(kv.Legacy(), kv.WatchHandle(), counted), newSeen(), kvwatch.WithAfterFunc(timers.afterFunc()))
 	t.Cleanup(w.Stop)
 	w.Start()
 	eventually(t, "the first read's completion", w.Following)
 	replaced := timers.last(t, probeEvery)
 
-	if err := kvwatch.WatchOn(w, bus.NewKeyValue(kv.KeyValue, kv.WatchHandle(), counted)); err != nil {
+	if err := kvwatch.WatchOn(w, bus.NewKeyValue(kv.Legacy(), kv.WatchHandle(), counted)); err != nil {
 		t.Fatalf("the newer watch: %v", err)
 	}
 	eventually(t, "the newer read's completion", w.Following)

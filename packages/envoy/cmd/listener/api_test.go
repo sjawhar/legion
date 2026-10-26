@@ -1014,7 +1014,7 @@ func stallSessionReads(t *testing.T, sessions *session.SessionRegistry) {
 	field := reflect.ValueOf(sessions).Elem().FieldByName("watcher")
 	watcher := reflect.NewAt(field.Type(), unsafe.Pointer(field.UnsafeAddr())).Elem()
 	old := watcher.Interface().(*kvwatch.Watcher).KV()
-	stalled := bus.NewKeyValue(stalledReadKV{KeyValue: old.KeyValue, released: released}, old.WatchHandle(), old.Streams())
+	stalled := bus.NewKeyValue(stalledReadKV{KeyValue: old.Legacy(), released: released}, old.WatchHandle(), old.Streams())
 	watcher.Set(reflect.ValueOf(kvwatch.New("session registry", stalled, discardingCache{})))
 }
 

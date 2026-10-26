@@ -185,7 +185,7 @@ func putRaw(t *testing.T, kv natsgo.KeyValue, sessionID string, entry SessionEnt
 func TestAHeartbeatNewerThanTheReadsValueWinsAndIsKept(t *testing.T) {
 	client := setupNATS(t)
 	r, held := holdingRegistry(t, client)
-	putRaw(t, r.watcher.KV(), "ses_beat", SessionEntry{Port: 1, MachineID: "m1", Title: "scanned", UpdatedAt: time.Now().UnixMilli()})
+	putRaw(t, r.watcher.KV().Legacy(), "ses_beat", SessionEntry{Port: 1, MachineID: "m1", Title: "scanned", UpdatedAt: time.Now().UnixMilli()})
 	// The current watcher has applied it, so the held apply below is the new read's.
 	waitFor(t, 5*time.Second, func() bool {
 		entry, err := r.Get("ses_beat")
@@ -354,7 +354,7 @@ func TestAResultFromABucketSinceRecreatedIsDropped(t *testing.T) {
 				t.Fatalf("open session registry: %v", err)
 			}
 			t.Cleanup(r.StopWatch)
-			delayed := &delayingKV{KeyValue: r.watcher.KV().KeyValue}
+			delayed := &delayingKV{KeyValue: r.watcher.KV().Legacy()}
 			useKV(t, r, delayed)
 			// The old bucket's revisions run well past the new bucket's.
 			for range 20 {

@@ -284,7 +284,7 @@ func TestSessionRegistryPutDoesNotOverwriteNewerWatcherValue(t *testing.T) {
 	const sessionID = "ses_revision"
 	raw := reg.watcher.KV()
 	useKV(t, reg, &interleavingSessionPutKeyValue{
-		KeyValue: raw,
+		KeyValue: raw.Legacy(),
 		afterFirstPut: func() {
 			remote := SessionEntry{Port: 13382, MachineID: "remote-host", Dir: "/remote", Driving: true}
 			buf, err := json.Marshal(remote)
@@ -335,7 +335,7 @@ func TestSessionRegistryDeleteHistoryFailureSuppressesStaleWatcherUpdate(t *test
 		t.Fatalf("Get seeded entry: %v", err)
 	}
 	useKV(t, reg, &historyFailSessionKeyValue{
-		KeyValue: reg.watcher.KV(),
+		KeyValue: reg.watcher.KV().Legacy(),
 		err:      errors.New("injected history failure"),
 	})
 	if err := reg.Delete(sessionID); err != nil {

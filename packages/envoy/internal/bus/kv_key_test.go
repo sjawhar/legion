@@ -190,20 +190,48 @@ func TestAKeyAnEarlierListenerStoredStaysListableAndDeletable(t *testing.T) {
 	if _, err := kv.Get(unreadable); !errors.Is(err, ErrTooLarge) {
 		t.Fatalf("get of the stored %d-byte key = %v, want ErrTooLarge", len(unreadable), err)
 	}
-	keys, err := kv.Keys()
-	if err != nil || len(keys) != 2 {
-		t.Fatalf("keys = %d, %v; want both stored keys", len(keys), err)
+	if keys := listedKeys(t, kv); len(keys) != 2 {
+		t.Fatalf("keys = %d; want both stored keys", len(keys))
 	}
 	for _, key := range []string{unreadable, readable} {
 		if err := kv.Delete(key); err != nil {
 			t.Fatalf("delete of the stored %d-byte key: %v", len(key), err)
 		}
 	}
-	if keys, err := kv.Keys(); !errors.Is(err, nats.ErrNoKeysFound) {
-		t.Fatalf("keys after both deletes = %d, %v; want none", len(keys), err)
+	if keys := listedKeys(t, kv); len(keys) != 0 {
+		t.Fatalf("keys after both deletes = %d; want none", len(keys))
 	}
 	if !client.Conn.IsConnected() {
 		t.Fatalf("the stored keys left the connection %v, want it connected", client.Conn.Status())
+	}
+}
+
+// listedKeys lists the keys kv's bucket holds through one watch of every key on kv's jetstream
+// handle, delete markers skipped, as a store's listing scan does (kvwatch.ScanExistingKeys, which
+// this package cannot import).
+func listedKeys(t *testing.T, kv KeyValue) []string {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	watcher, err := kv.WatchKeys(ctx, jetstream.AllKeys, jetstream.MetaOnly(), jetstream.IgnoreDeletes())
+	if err != nil {
+		t.Fatalf("watch every key: %v", err)
+	}
+	defer func() { _ = watcher.Stop() }()
+	var keys []string
+	for {
+		select {
+		case entry, open := <-watcher.Updates():
+			if !open {
+				t.Fatalf("the watch of every key ended after %d keys, before its scan's nil", len(keys))
+			}
+			if entry == nil {
+				return keys
+			}
+			keys = append(keys, entry.Key())
+		case <-time.After(10 * time.Second):
+			t.Fatalf("the watch of every key delivered %d keys and no nil within 10 s, want the nil that ends its scan", len(keys))
+		}
 	}
 }
 

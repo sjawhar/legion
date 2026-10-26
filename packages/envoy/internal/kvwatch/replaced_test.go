@@ -221,7 +221,7 @@ func TestADiscardedWatcherIsStoppedAtOnceAndReadUntilItEnds(t *testing.T) {
 
 			discarded := newFakeWatcher(t)
 			if old != nil {
-				stale := scripted(bus.NewKeyValue(kv.KeyValue, kv.WatchHandle(), statusKV{JetStream: kv.Streams(), info: old}), discarded.step())
+				stale := scripted(bus.NewKeyValue(kv.Legacy(), kv.WatchHandle(), statusKV{JetStream: kv.Streams(), info: old}), discarded.step())
 				if err := kvwatch.WatchOn(w, stale.handle()); err != nil {
 					t.Fatalf("the older stream's watch: %v", err)
 				}

@@ -154,7 +154,7 @@ type watchStep func(ctx context.Context, kv jetstream.KeyValue) (jetstream.KeyWa
 
 // scripted is kv whose watches go as steps say.
 func scripted(kv bus.KeyValue, steps ...watchStep) *scriptedKV {
-	return &scriptedKV{KeyValue: kv.WatchHandle(), legacy: kv.KeyValue, streams: kv.Streams(), steps: steps}
+	return &scriptedKV{KeyValue: kv.WatchHandle(), legacy: kv.Legacy(), streams: kv.Streams(), steps: steps}
 }
 
 func (k *scriptedKV) Watch(ctx context.Context, keys string, opts ...jetstream.WatchOpt) (jetstream.KeyWatcher, error) {
@@ -1286,7 +1286,7 @@ func TestConcurrentRewatchesOntoARecreatedBucketKeepTheNewKeys(t *testing.T) {
 	t.Cleanup(release)
 	into := newSeen()
 	// No periodic probe: the test's two Rewatches are the only reads of the recreated bucket.
-	w := kvwatch.New("test cache", bus.NewKeyValue(kv.KeyValue, slow, kv.Streams()), into, kvwatch.WithStreamProbeInterval(0))
+	w := kvwatch.New("test cache", bus.NewKeyValue(kv.Legacy(), slow, kv.Streams()), into, kvwatch.WithStreamProbeInterval(0))
 	t.Cleanup(w.Stop)
 	w.Start()
 	eventually(t, "the first read's completion", w.Following)
@@ -1346,7 +1346,7 @@ type heldWatchKV struct {
 }
 
 func holdWatch(kv bus.KeyValue) *heldWatchKV {
-	return &heldWatchKV{KeyValue: kv.WatchHandle(), legacy: kv.KeyValue, streams: kv.Streams(),
+	return &heldWatchKV{KeyValue: kv.WatchHandle(), legacy: kv.Legacy(), streams: kv.Streams(),
 		watched: make(chan struct{}), release: make(chan struct{}), ended: make(chan struct{})}
 }
 

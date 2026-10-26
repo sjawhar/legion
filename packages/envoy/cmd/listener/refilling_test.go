@@ -129,7 +129,7 @@ func replaceWatcher(t *testing.T, owner any, name string, wrap func(jetstream.Ke
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	old.End(ctx)
-	replacement := kvwatch.New(name, bus.NewKeyValue(old.KV().KeyValue, wrap(old.KV().WatchHandle()), old.KV().Streams()), cache, options...)
+	replacement := kvwatch.New(name, bus.NewKeyValue(old.KV().Legacy(), wrap(old.KV().WatchHandle()), old.KV().Streams()), cache, options...)
 	slot.Set(reflect.ValueOf(replacement))
 	replacement.Start()
 }

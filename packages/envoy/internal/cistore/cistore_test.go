@@ -913,7 +913,7 @@ func TestMarkSettledCacheWriteDoesNotOverwriteNewerWatcherRevision(t *testing.T)
 	originalKV := s.watcher.KV()
 	var watcherRevision uint64
 	useKV(t, s, &interleavingKV{
-		KeyValue: originalKV,
+		KeyValue: originalKV.Legacy(),
 		afterUpdate: func(key string, _ []byte, _ uint64) {
 			entry, err := originalKV.Get(key)
 			if err != nil {

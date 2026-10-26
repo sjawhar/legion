@@ -1045,7 +1045,7 @@ func TestReleaseExpiredRoleClaimDoesNotReportReleaseAfterConcurrentChange(t *tes
 	}
 	roleKV := registry.roleKV
 	registry.roleKV = bus.NewKeyValue(&racingDeleteKeyValue{
-		KeyValue: roleKV,
+		KeyValue: roleKV.Legacy(),
 		beforeFirstDelete: func() {
 			entry, err := roleKV.Get(role)
 			if err != nil {
@@ -1086,7 +1086,7 @@ func TestReleaseExpiredRoleClaimDoesNotReportReleaseAfterConcurrentRemoval(t *te
 	}
 	roleKV := registry.roleKV
 	registry.roleKV = bus.NewKeyValue(&racingDeleteKeyValue{
-		KeyValue: roleKV,
+		KeyValue: roleKV.Legacy(),
 		beforeFirstDelete: func() {
 			entry, err := roleKV.Get(role)
 			if err != nil {
@@ -1121,7 +1121,7 @@ func TestReleaseExpiredRoleClaimReturnsErrorWithoutRelease(t *testing.T) {
 	releaseErr := errors.New("injected conditional delete failure")
 	roleKV := registry.roleKV
 	registry.roleKV = bus.NewKeyValue(&racingDeleteKeyValue{
-		KeyValue:          roleKV,
+		KeyValue:          roleKV.Legacy(),
 		beforeFirstDelete: func() {},
 		err:               releaseErr,
 	}, registry.roleKV.WatchHandle(), registry.roleKV.Streams())
@@ -1414,7 +1414,7 @@ func TestSetRoleLeavesInterestWhenRoleWriteFails(t *testing.T) {
 	}
 
 	reg.roleKV = bus.NewKeyValue(&failingKeyValue{
-		KeyValue:     reg.roleKV,
+		KeyValue:     reg.roleKV.Legacy(),
 		failUpdateAt: 1,
 		err:          errors.New("injected role update failure"),
 	}, reg.roleKV.WatchHandle(), reg.roleKV.Streams())
@@ -1437,7 +1437,7 @@ func TestSetRoleRollsBackWhenRoleCreateFails(t *testing.T) {
 		role      = "legion-controller"
 	)
 	reg.roleKV = bus.NewKeyValue(&failingKeyValue{
-		KeyValue:     reg.roleKV,
+		KeyValue:     reg.roleKV.Legacy(),
 		failCreateAt: 1,
 		err:          errors.New("injected role create failure"),
 	}, reg.roleKV.WatchHandle(), reg.roleKV.Streams())
@@ -1667,7 +1667,7 @@ func TestSetRoleTreatsSameSessionCASConflictAsConcurrentSuccess(t *testing.T) {
 		role      = "legion-controller"
 		roleTopic = "notifications.role.legion-controller"
 	)
-	racingKV := &racingCreateKeyValue{KeyValue: reg.roleKV}
+	racingKV := &racingCreateKeyValue{KeyValue: reg.roleKV.Legacy()}
 	reg.roleKV = bus.NewKeyValue(racingKV, reg.roleKV.WatchHandle(), reg.roleKV.Streams())
 
 	var concurrent Interest
@@ -1764,7 +1764,7 @@ func TestSetRoleOldHolderCleanupDoesNotDeleteNewerClaim(t *testing.T) {
 
 	// B's role-row Update is the CAS write; fire A's re-claim right after it
 	// succeeds and before B proceeds to old-holder cleanup.
-	racing := &afterUpdateKeyValue{KeyValue: reg.roleKV}
+	racing := &afterUpdateKeyValue{KeyValue: reg.roleKV.Legacy()}
 	reg.roleKV = bus.NewKeyValue(racing, reg.roleKV.WatchHandle(), reg.roleKV.Streams())
 	racing.after = func() {
 		racing.after = nil
@@ -1822,9 +1822,9 @@ func TestRemoveDoesNotOverwriteNewerWatcherValue(t *testing.T) {
 
 	interestKV := reg.watcher.KV()
 	useKV(t, reg, &interleavingPutKeyValue{
-		KeyValue: interestKV,
+		KeyValue: interestKV.Legacy(),
 		afterFirstPut: func() {
-			putInterest(t, interestKV, Interest{
+			putInterest(t, interestKV.Legacy(), Interest{
 				SessionID: sessionID,
 				MachineID: machineID,
 				Topics:    []string{"notifications.remote"},
