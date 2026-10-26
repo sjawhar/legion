@@ -138,6 +138,7 @@ function stubIssuePage(
   const originalListIssueAskThreads = api.listIssueAskThreads;
   const originalListComments = api.listComments;
   const originalListIssueMessages = api.listIssueMessages;
+  const originalListHandoffs = api.listHandoffs;
   const originalGetInbox = api.getInbox;
   const originalGetMyState = api.getMyState;
   const originalListAgents = api.listAgents;
@@ -146,12 +147,13 @@ function stubIssuePage(
   api.getInbox = async () => inbox;
   api.getMyState = async () => ({ "CORE-1": state });
   api.getIssueEvents = async () => [];
-  // The Conversation builds its list from the issue's own asks, comments and messages; it asks
-  // the ask list for each thread, where the margin reads the same route without one.
+  // The Conversation builds its list from the issue's own asks, comments, messages and handoffs;
+  // it asks the ask list for each thread, where the margin reads the same route without one.
   api.listIssueAsks = async () => [];
   api.listIssueAskThreads = async () => [];
   api.listComments = async () => [];
   api.listIssueMessages = async () => [];
+  api.listHandoffs = async () => [];
   api.listAgents = async () => agents;
   api.getIssueSubscribers = async () => subscribers;
   return () => {
@@ -163,6 +165,7 @@ function stubIssuePage(
     api.listIssueAskThreads = originalListIssueAskThreads;
     api.listComments = originalListComments;
     api.listIssueMessages = originalListIssueMessages;
+    api.listHandoffs = originalListHandoffs;
     api.listAgents = originalListAgents;
     api.getIssueSubscribers = originalGetIssueSubscribers;
   };

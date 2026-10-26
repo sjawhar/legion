@@ -17,6 +17,7 @@ import type {
   Comment,
   CommentDelivery,
   Event,
+  Handoff,
   IssueAskThreadRow,
   Message,
   MessageDelivery,
@@ -192,6 +193,9 @@ interface Lists {
   agents?: Agent[];
   asks?: IssueAskThreadRow[];
   comments?: Comment[];
+  /** The issue's handoffs with their bodies: the list answers them as they are (a body is extra
+   *  to a summary), and `getHandoff` answers one by id. */
+  handoffs?: Handoff[];
   /** The issue's newest event, which a dwell on the newest card marks read through. */
   head?: Event[];
   messages?: MessageRead[];
@@ -199,15 +203,21 @@ interface Lists {
   unread?: Event[];
 }
 
-/** The three reads the Conversation builds its list from, plus the two one-row event reads that
- *  carry the unread boundary and the issue's head. The returned `lists` is live: a test that
- *  changes it changes what the next refetch answers. */
+/** The four reads the Conversation builds its list from, plus the two one-row event reads that
+ *  carry the unread boundary and the issue's head, and the read of one handoff's body. The
+ *  returned `lists` is live: a test that changes it changes what the next refetch answers. */
 function stubLists(initial: Lists = {}): { lists: Lists; restore: () => void } {
   const lists: Lists = { ...initial };
   const spies = [
     spyOn(api, "listIssueAskThreads").mockImplementation(async () => lists.asks ?? []),
     spyOn(api, "listComments").mockImplementation(async () => lists.comments ?? []),
     spyOn(api, "listIssueMessages").mockImplementation(async () => lists.messages ?? []),
+    spyOn(api, "listHandoffs").mockImplementation(async () => lists.handoffs ?? []),
+    spyOn(api, "getHandoff").mockImplementation(async (id) => {
+      const found = lists.handoffs?.find((row) => row.id === id);
+      if (found === undefined) throw new ApiError(404, { error: `no handoff ${id}` });
+      return found;
+    }),
     spyOn(api, "listAgents").mockImplementation(async () => lists.agents ?? []),
     spyOn(api, "getIssueEvents").mockImplementation(async (_key, options = {}) =>
       options.order === "desc" ? (lists.head ?? []) : (lists.unread ?? [])
@@ -822,6 +832,135 @@ test("a retracted ask is listed, and landing on one resets a filter that hides i
       expect(screen.getByRole("button", { name: "All" }).getAttribute("aria-pressed")).toBe("true")
     );
     const card = view.container.querySelector('[data-turn="ask:ask-retracted"]');
+    expect(card?.getAttribute("aria-current")).toBe("true");
+  } finally {
+    view.unmount();
+    HTMLElement.prototype.scrollIntoView = scrollIntoView;
+    stub.restore();
+  }
+});
+
+function handoffRecord(id: string, version: number, body: string, created_at: string): Handoff {
+  return {
+    author: { id: "fedcba9876543210", kind: "session", origin: { session_title: "Implementer" } },
+    body,
+    created_at,
+    id,
+    issue_key: "CORE-1",
+    phase: "implement",
+    version,
+  };
+}
+
+test("each handoff version is a card naming its phase, version and author, and expanding one reads its fields", async () => {
+  const stub = stubLists({
+    handoffs: [
+      handoffRecord(
+        "handoff-2",
+        2,
+        JSON.stringify({
+          schemaVersion: 1,
+          summary: "Second pass",
+          files: ["a.ts"],
+          proof: ["bun test passed", { command: "bun run typecheck", exit: 0 }],
+        }),
+        "2026-09-10T09:05:00Z"
+      ),
+      handoffRecord("handoff-1", 1, '{"summary":"First pass"}', "2026-09-10T09:00:00Z"),
+    ],
+  });
+  const getHandoff = api.getHandoff as Mock<typeof api.getHandoff>;
+  const queryClient = newQueryClient();
+  const view = render(tab({ "CORE-1": issueState() }, true, queryClient));
+
+  try {
+    const turns = await screen.findByRole("list", { name: "Conversation turns" });
+    await within(turns).findByText("implement handoff, version 2");
+    expect(within(turns).getByText("implement handoff, version 1")).toBeTruthy();
+    // The session's stamped title names it when the registry has no live one.
+    expect(within(turns).getAllByText("Implementer")).toHaveLength(2);
+    // The body is read only once the reader asks for it.
+    expect(getHandoff).not.toHaveBeenCalled();
+
+    const card = view.container.querySelector<HTMLElement>('[data-turn="handoff:handoff-2"]');
+    if (card === null) throw new Error("expected the version 2 card");
+    const toggle = within(card).getByRole("button", { name: "Show fields" });
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+    fireEvent.click(toggle);
+
+    await within(card).findByText("Second pass");
+    expect(getHandoff.mock.calls).toEqual([["handoff-2"]]);
+    expect(toggle.getAttribute("aria-expanded")).toBe("true");
+    const fields = document.getElementById(toggle.getAttribute("aria-controls") ?? "");
+    expect(fields?.tagName).toBe("DL");
+    const rows = [...card.querySelectorAll("[data-handoff-field]")].map((row) => [
+      row.querySelector("dt")?.textContent,
+      row.querySelector("dd")?.textContent,
+    ]);
+    expect(rows).toEqual([
+      ["schemaVersion", "1"],
+      ["summary", "Second pass"],
+      ["files", '[\n  "a.ts"\n]'],
+      ["proof 1", "bun test passed"],
+      ["proof 2", '{\n  "command": "bun run typecheck",\n  "exit": 0\n}'],
+    ]);
+    expect(card.querySelectorAll('[data-handoff-field="proof"]')).toHaveLength(2);
+    // Arrays and objects are indented JSON; strings and numbers are text.
+    expect(card.querySelector('[data-handoff-field="files"] pre')).not.toBeNull();
+    expect(card.querySelector('[data-handoff-field="summary"] pre')).toBeNull();
+
+    fireEvent.click(within(card).getByRole("button", { name: "Hide fields" }));
+    expect(within(card).queryByText("Second pass")).toBeNull();
+    expect(within(card).getByRole("button", { name: "Show fields" })).toBeTruthy();
+  } finally {
+    view.unmount();
+    stub.restore();
+  }
+});
+
+test("a handoff body that is not a JSON object shows as its raw text", async () => {
+  const stub = stubLists({
+    handoffs: [handoffRecord("handoff-1", 1, "not { json", "2026-09-10T09:00:00Z")],
+  });
+  const queryClient = newQueryClient();
+  const view = render(tab({ "CORE-1": issueState() }, true, queryClient));
+
+  try {
+    fireEvent.click(await screen.findByRole("button", { name: "Show fields" }));
+    const raw = await screen.findByText("not { json");
+    expect(raw.hasAttribute("data-handoff-raw")).toBe(true);
+    expect(view.container.querySelector("[data-handoff-field]")).toBeNull();
+  } finally {
+    view.unmount();
+    stub.restore();
+  }
+});
+
+test("a handoff is Closed, and landing on one resets a filter that hides it", async () => {
+  const stub = stubLists({
+    comments: [comment("comment-1", { body: "An open thread" })],
+    handoffs: [handoffRecord("handoff-1", 1, "{}", "2026-09-10T09:00:00Z")],
+  });
+  const queryClient = newQueryClient();
+  const scrollIntoView = HTMLElement.prototype.scrollIntoView;
+  HTMLElement.prototype.scrollIntoView = () => {};
+  const view = render(tab({ "CORE-1": issueState() }, true, queryClient));
+
+  try {
+    await screen.findByText("implement handoff, version 1");
+    fireEvent.click(screen.getByRole("button", { name: "Closed" }));
+    expect(screen.getByText("implement handoff, version 1")).toBeTruthy();
+    expect(screen.queryByText("An open thread")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Open" }));
+    expect(screen.queryByText("implement handoff, version 1")).toBeNull();
+
+    view.rerender(
+      tab({ "CORE-1": issueState() }, true, queryClient, false, new Map(), "handoff-1")
+    );
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "All" }).getAttribute("aria-pressed")).toBe("true")
+    );
+    const card = view.container.querySelector('[data-turn="handoff:handoff-1"]');
     expect(card?.getAttribute("aria-current")).toBe("true");
   } finally {
     view.unmount();

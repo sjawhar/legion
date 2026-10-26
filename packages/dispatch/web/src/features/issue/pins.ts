@@ -23,11 +23,12 @@ export function pinnedEventIds(dismissed: string[]): string[] {
 }
 
 /** What a Conversation card pins: the conversation itself. Only an ask carries an event id of
- *  its own (`opened_event_id`), and a card built from `/comments` or `/messages` has none at
- *  all, so a card is pinned under its own `<kind>:<id>` - the id the list already gives it -
- *  beside the `event:<id>` an Activity row still pins under. A pin made before the Conversation
- *  became a list of conversations is that event's, and stays the margin's to show and unpin. */
-export const CONVERSATION_PIN_KINDS = ["ask", "comment", "message"] as const;
+ *  its own (`opened_event_id`), and a card built from `/comments`, `/messages` or `/handoffs` has
+ *  none at all, so a card is pinned under its own `<kind>:<id>` - the id the list already gives
+ *  it - beside the `event:<id>` an Activity row still pins under. A pin made before the
+ *  Conversation became a list of conversations is that event's, and stays the margin's to show
+ *  and unpin. */
+export const CONVERSATION_PIN_KINDS = ["ask", "comment", "message", "handoff"] as const;
 export type ConversationPinKind = (typeof CONVERSATION_PIN_KINDS)[number];
 
 export interface PinnedConversation {
@@ -41,7 +42,8 @@ export function conversationItemId(kind: ConversationPinKind, id: string): strin
   return `${kind}:${id}`;
 }
 
-/** `conversationId` is a conversation's own id (`ask:<id>`, `comment:<id>`, `message:<id>`). */
+/** `conversationId` is a conversation's own id (`ask:<id>`, `comment:<id>`, `message:<id>`,
+ *  `handoff:<id>`). */
 export function isPinnedConversation(dismissed: string[], conversationId: string): boolean {
   return dismissed.includes(pinnedItemMarker(conversationId));
 }

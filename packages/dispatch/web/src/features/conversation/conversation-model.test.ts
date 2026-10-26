@@ -4,12 +4,18 @@ import type {
   Ask,
   Comment,
   Event,
+  HandoffSummary,
   IssueAskThreadRow,
   Message,
   MessageRead,
 } from "../../api/types";
 import { activityDescription } from "../activity/activity-model";
-import { buildConversations, focusConversation, matchesFilter } from "./conversation-model";
+import {
+  buildConversations,
+  focusConversation,
+  handoffFields,
+  matchesFilter,
+} from "./conversation-model";
 
 const session: Actor = { id: "session-1", kind: "session" };
 const bob: Actor = { id: "bob", kind: "user" };
@@ -79,16 +85,30 @@ function thread(root: Message, replies: Message[] = []): MessageRead {
   return { message: root, replies };
 }
 
+function handoff(
+  overrides: Partial<HandoffSummary> & Pick<HandoffSummary, "id" | "created_at">
+): HandoffSummary {
+  return {
+    author: session,
+    issue_key: "CORE-1",
+    phase: "implement",
+    version: 1,
+    ...overrides,
+  };
+}
+
 const build = (input: {
   asks?: IssueAskThreadRow[];
   comments?: Comment[];
   messages?: MessageRead[];
+  handoffs?: HandoffSummary[];
   unreadFrom?: string;
 }) =>
   buildConversations({
     asks: input.asks ?? [],
     comments: input.comments ?? [],
     messages: input.messages ?? [],
+    handoffs: input.handoffs ?? [],
     ...(input.unreadFrom === undefined ? {} : { unreadFrom: input.unreadFrom }),
   });
 
@@ -306,6 +326,7 @@ test("an item id resolves to the conversation that holds it", () => {
     asks: [askRow({}, [askReply])],
     comments: [askReply, root, threadReply],
     messages: [thread(messageRoot, [messageReply])],
+    handoffs: [handoff({ created_at: "2026-09-10T09:03:00Z", id: "handoff-1" })],
   };
 
   expect(focusConversation("ask-1", lists)).toEqual({ id: "ask:ask-1" });
@@ -319,7 +340,86 @@ test("an item id resolves to the conversation that holds it", () => {
     id: "message:message-1",
     replyId: "message-2",
   });
+  expect(focusConversation("handoff-1", lists)).toEqual({ id: "handoff:handoff-1" });
   expect(focusConversation("nothing", lists)).toBeUndefined();
+});
+
+test("each handoff version is a card of its own, closed, ordered by when it was written", () => {
+  const conversations = build({
+    comments: [comment({ created_at: "2026-09-10T09:01:00Z", id: "comment-1" })],
+    handoffs: [
+      handoff({ created_at: "2026-09-10T09:00:00Z", id: "handoff-1", version: 1 }),
+      handoff({ created_at: "2026-09-10T09:02:00Z", id: "handoff-2", version: 2 }),
+    ],
+  });
+
+  expect(conversations.map((item) => item.id)).toEqual([
+    "handoff:handoff-2",
+    "comment:comment-1",
+    "handoff:handoff-1",
+  ]);
+  const newest = conversations[0];
+  if (newest?.kind !== "handoff") throw new Error("expected the newest card to be a handoff");
+  expect(newest.at).toBe("2026-09-10T09:02:00Z");
+  expect(newest.handoff.version).toBe(2);
+  // A handoff is a finished record: listed under Closed and All, never under Open.
+  expect(
+    conversations.filter((item) => matchesFilter(item, "closed")).map((item) => item.id)
+  ).toEqual(["handoff:handoff-2", "handoff:handoff-1"]);
+  expect(
+    conversations.filter((item) => matchesFilter(item, "open")).map((item) => item.id)
+  ).toEqual(["comment:comment-1"]);
+});
+
+test("a handoff is unread from the boundary on, as every other card is", () => {
+  const conversations = build({
+    handoffs: [
+      handoff({ created_at: "2026-09-10T09:00:00Z", id: "read" }),
+      handoff({ created_at: "2026-09-10T09:05:00Z", id: "unread", version: 2 }),
+    ],
+    unreadFrom: "2026-09-10T09:05:00Z",
+  });
+
+  expect(conversations.filter((item) => item.unread).map((item) => item.id)).toEqual([
+    "handoff:unread",
+  ]);
+});
+
+test("a handoff body expands to one row per top-level field and one per proof entry", () => {
+  const body = JSON.stringify({
+    schemaVersion: 1,
+    phase: "implement",
+    completed: true,
+    note: null,
+    files: ["a.ts", "b.ts"],
+    ci: { status: "green" },
+    proof: ["bun test passed", { command: "bun run typecheck", exit: 0 }],
+  });
+
+  expect(handoffFields(body)).toEqual([
+    { field: "schemaVersion", json: false, label: "schemaVersion", text: "1" },
+    { field: "phase", json: false, label: "phase", text: "implement" },
+    { field: "completed", json: false, label: "completed", text: "true" },
+    { field: "note", json: false, label: "note", text: "null" },
+    { field: "files", json: true, label: "files", text: '[\n  "a.ts",\n  "b.ts"\n]' },
+    { field: "ci", json: true, label: "ci", text: '{\n  "status": "green"\n}' },
+    { field: "proof", json: false, label: "proof 1", text: "bun test passed" },
+    {
+      field: "proof",
+      json: true,
+      label: "proof 2",
+      text: '{\n  "command": "bun run typecheck",\n  "exit": 0\n}',
+    },
+  ]);
+});
+
+test("a proof that is not a list is one row, and a body that is not a JSON object has none", () => {
+  expect(handoffFields('{"proof":"see CI"}')).toEqual([
+    { field: "proof", json: false, label: "proof", text: "see CI" },
+  ]);
+  expect(handoffFields("{not json")).toBeUndefined();
+  expect(handoffFields("[1, 2]")).toBeUndefined();
+  expect(handoffFields("null")).toBeUndefined();
 });
 
 // The activity line is the Activity tab's (`features/activity/activity-model.ts`); these cases

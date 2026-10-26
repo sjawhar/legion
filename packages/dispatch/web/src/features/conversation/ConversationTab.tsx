@@ -1,5 +1,5 @@
 import { type MutationKey, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { type ReactNode, useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 
 import { api } from "../../api/client";
@@ -29,6 +29,7 @@ import {
   surfaceMutedHoverBg,
   textMutedOnCanvas,
   textMutedOnSurface,
+  textMutedOnSurfaceMuted,
   textPrimaryOnSurface,
   textPrimaryOnSurfaceMuted,
   textSecondaryOnCanvas,
@@ -59,6 +60,7 @@ import {
   type ConversationFilter,
   commentDeliveries,
   focusConversation,
+  handoffFields,
   type MessageConversation,
   matchesFilter,
 } from "./conversation-model";
@@ -395,6 +397,118 @@ function MessageTurn({
         root={item}
         titles={titles}
       />
+    </li>
+  );
+}
+
+/** How a handoff shows JSON: an array or object field, or a body that is not a JSON object. */
+const handoffPre = `mt-1 max-h-64 overflow-auto rounded-md p-2 text-xs whitespace-pre-wrap ${surfaceMutedBg} ${textMutedOnSurfaceMuted}`;
+
+/** A handoff's body, fetched when the reader expands its card: each top-level field a labelled
+ *  row, the `proof` list one row per entry. A version never changes once written, so the read
+ *  is kept for the page's life. A body that is not a JSON object is shown as the text it is. */
+function HandoffFields({ handoffId, id }: { handoffId: string; id: string }): ReactNode {
+  const handoff = useQuery({
+    queryKey: ["handoff", handoffId],
+    queryFn: () => api.getHandoff(handoffId),
+    staleTime: Number.POSITIVE_INFINITY,
+  });
+  if (handoff.isPending) {
+    return (
+      <p className={`mt-2 text-sm ${textMutedOnSurface}`} id={id}>
+        Loading handoff…
+      </p>
+    );
+  }
+  if (handoff.isError) {
+    return (
+      <p className={`mt-2 text-sm ${dangerText}`} id={id}>
+        Could not load the handoff.
+      </p>
+    );
+  }
+  const fields = handoffFields(handoff.data.body);
+  if (fields === undefined) {
+    return (
+      <pre className={handoffPre} data-handoff-raw id={id}>
+        {handoff.data.body}
+      </pre>
+    );
+  }
+  return (
+    <dl className={`mt-2 flex flex-col gap-2 text-sm ${textPrimaryOnSurface}`} id={id}>
+      {fields.map(({ field, json, label, text }) => (
+        <div data-handoff-field={field} key={`${field}/${label}`}>
+          <dt className={`font-medium ${textMutedOnSurface}`}>{label}</dt>
+          <dd className="min-w-0">
+            {json ? (
+              <pre className={handoffPre}>{text}</pre>
+            ) : (
+              <span className="break-words whitespace-pre-wrap">{text}</span>
+            )}
+          </dd>
+        </div>
+      ))}
+    </dl>
+  );
+}
+
+/** One version of a phase handoff: which phase and version, the session that wrote it and when.
+ *  Nobody replies to a handoff, so the card's only control besides its pin is the disclosure
+ *  that reads its body. */
+function HandoffTurn({
+  author,
+  current,
+  disabled,
+  item,
+  onPin,
+  pinned,
+  register,
+}: {
+  author: Author;
+  current: boolean;
+  disabled: boolean;
+  item: Extract<Conversation, { kind: "handoff" }>;
+  onPin: () => void;
+  pinned: boolean;
+  register?: DwellRef;
+}): ReactNode {
+  const [expanded, setExpanded] = useState(false);
+  const fieldsId = useId();
+  const { phase, version } = item.handoff;
+  return (
+    <li
+      aria-current={current ? "true" : undefined}
+      className={`group mt-2 rounded-lg px-2 py-1 ${surfaceMutedHoverBg}`}
+      data-turn={item.id}
+      ref={register}
+    >
+      <div className="flex gap-3">
+        <Avatar author={author} />
+        <div className="min-w-0 flex-1">
+          <p className={`flex items-baseline gap-2 text-sm ${textSecondaryOnSurface}`}>
+            <span className="font-semibold">{author.label}</span>
+            <Timestamp at={item.handoff.created_at} />
+            {item.unread ? <UnreadMark /> : null}
+          </p>
+          <p className={`font-medium ${textPrimaryOnSurface}`}>
+            {phase} handoff, version {version}
+          </p>
+          <button
+            aria-controls={expanded ? fieldsId : undefined}
+            aria-expanded={expanded}
+            className={`min-h-8 text-sm font-medium ${linkText}`}
+            onClick={() => setExpanded((open) => !open)}
+            type="button"
+          >
+            {expanded ? "Hide fields" : "Show fields"}
+          </button>
+          {expanded ? <HandoffFields handoffId={item.handoff.id} id={fieldsId} /> : null}
+        </div>
+        <TurnActions>
+          <TurnPin disabled={disabled} onPin={onPin} pinned={pinned} />
+        </TurnActions>
+      </div>
     </li>
   );
 }
@@ -805,7 +919,7 @@ export function ConversationTab({
   const heldCardReplies = useHeldSendsUnder(threadRepliesSendKey(sendKey));
   const pins = usePinWrites(issueKey);
   const viewer = useQuery(whoAmIQuery());
-  // The three reads the list is built from, each the issue's whole set: a conversation is listed
+  // The four reads the list is built from, each the issue's whole set: a conversation is listed
   // however old it is, which no window of the event log could promise.
   // The comments are the read the margin already holds for this issue, under the key it owns
   // (`features/margin/useMarginItems.ts`): the same request, shared rather than fetched and
@@ -824,6 +938,11 @@ export function ConversationTab({
   const messages = useQuery({
     queryKey: ["issue-messages", issueKey],
     queryFn: () => api.listIssueMessages(issueKey),
+  });
+  // Each version of each phase handoff, without its body; a card reads its body when expanded.
+  const handoffs = useQuery({
+    queryKey: ["handoffs", issueKey],
+    queryFn: () => api.listHandoffs(issueKey),
   });
   const issueState = stateForIssue(state, issueKey);
   const lastReadSeq = issueState.last_read_seq;
@@ -847,9 +966,10 @@ export function ConversationTab({
         asks: asks.data ?? [],
         comments: comments.data ?? [],
         messages: messages.data ?? [],
+        handoffs: handoffs.data ?? [],
         unreadFrom,
       }),
-    [asks.data, comments.data, messages.data, unreadFrom]
+    [asks.data, comments.data, handoffs.data, messages.data, unreadFrom]
   );
   const [filter, setFilter] = useState<ConversationFilter>("all");
   const isPhoneViewport = useMediaQuery(PHONE_VIEWPORT_QUERY);
@@ -872,8 +992,9 @@ export function ConversationTab({
         asks: asks.data ?? [],
         comments: comments.data ?? [],
         messages: messages.data ?? [],
+        handoffs: handoffs.data ?? [],
       }),
-    [asks.data, comments.data, focusItemId, messages.data]
+    [asks.data, comments.data, focusItemId, handoffs.data, messages.data]
   );
   const shown = useMemo(
     () =>
@@ -945,14 +1066,14 @@ export function ConversationTab({
   };
   const phoneReplyTargetsThread =
     phoneThread !== undefined && phone.replyTo?.id === phoneThread.root.id;
-  // The list is on the page only once all three reads answer: `loading` and `failed` both hide it
+  // The list is on the page only once all four reads answer: `loading` and `failed` both hide it
   // (the early returns below) and withhold `latestItemSeq`, so the two cannot drift apart. The
   // number is the newest activity's own millisecond, since the list is ordered by activity.
   // Passed while a read is still pending, the hook's first placement would find no card and
   // scroll to the top, and a read answering last without changing the newest time would leave
   // the reader there (INFRA-303).
-  const loading = asks.isPending || comments.isPending || messages.isPending;
-  const failed = asks.isError || comments.isError || messages.isError;
+  const loading = asks.isPending || comments.isPending || messages.isPending || handoffs.isPending;
+  const failed = asks.isError || comments.isError || messages.isError || handoffs.isError;
   const newestShown = loading || failed ? undefined : shown.at(0);
   const latestItemSeq = newestShown === undefined ? undefined : Date.parse(newestShown.at);
   const follow = useFollowLatest({
@@ -1179,6 +1300,20 @@ export function ConversationTab({
                 register={register}
                 replyDisabled={composerSending}
                 titles={titles}
+              />
+            );
+          }
+          if (item.kind === "handoff") {
+            return (
+              <HandoffTurn
+                author={resolveAuthor(item.handoff.author, titles)}
+                current={current}
+                disabled={pins.blocked}
+                item={item}
+                key={item.id}
+                onPin={() => pinConversation(item.id)}
+                pinned={pinned}
+                register={register}
               />
             );
           }
