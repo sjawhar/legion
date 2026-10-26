@@ -12,7 +12,7 @@ import {
   patchIssue,
   requestApproval,
 } from "./api";
-import { documentEditor } from "./editor";
+import { connectedDot, documentEditor } from "./editor";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
@@ -204,5 +204,37 @@ test("the Legion daemon's close names the daemon whole on the withdrawn decision
     await expectWithdrawn(opened, seeded, "legion-daemon:E2E");
   } finally {
     await opened.page.context().close();
+  }
+});
+
+test("a closed issue's document names no unsent edit to a person who typed nothing", async ({
+  browser,
+}) => {
+  // A closed issue whose spec an agent wrote, opened by a person who types nothing: the page must
+  // not tell them an edit saved in their browser cannot be sent.
+  await createProject({ key: "READ", name: "READ" });
+  const issue = await createIssue(
+    { project: "READ", spec: "## Plan\n\nContext.\n", title: "Closed" },
+    asker
+  );
+  await patchIssue(issue.key, { status: "done" }, asker);
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    // The second load reads what the first left in this browser's store of unsent edits.
+    for (const load of ["first", "reload"]) {
+      if (load === "first") {
+        await page.goto(`/issues/${issue.key}/spec`);
+      } else {
+        await page.reload();
+      }
+      await expect(documentEditor(page)).toContainText("Context.");
+      await expect(
+        page.getByText("This issue is closed. Its document is read-only.")
+      ).toBeVisible();
+      await expect(connectedDot(page)).toHaveAccessibleName("connected");
+    }
+  } finally {
+    await alice.close();
   }
 });
