@@ -124,14 +124,12 @@ type SessionRegistry struct {
 	mu sync.RWMutex
 	// ttl is the bucket's MaxAge, the lifetime of a row's local expiry and of a last-seen record. A
 	// read of a bucket with another MaxAge moves it (sessionCache.BeginRead).
-	ttl            time.Duration
-	cache          map[string]cachedSession
-	cacheRevisions map[string]uint64
-	lastSeen       map[string]lastSeenSession
-	// marks are the sessions the current read has evidence of (kvwatch.Marks), and readEpoch the
-	// epoch that read began in: the bucket incarnation cacheRevisions belongs to.
-	marks     kvwatch.Marks
-	readEpoch uint64
+	ttl time.Duration
+	// cache is the copy of the bucket: its rows, revision fence, marks and read epoch
+	// (kvwatch.Copy), which every write site reaches through. A row it removes keeps its last
+	// heartbeat in lastSeen (removedLocked), and one it stores drops it (storedLocked).
+	cache    kvwatch.Copy[cachedSession]
+	lastSeen map[string]lastSeenSession
 
 	// watcher feeds the cache from the session bucket and holds the handle the registry writes
 	// through. Once a read has completed the cache is consistent with the bucket.
@@ -171,13 +169,12 @@ func OpenSessionRegistry(conn *nats.Conn, options ...SessionRegistryOption) (*Se
 		}
 	}
 	r := &SessionRegistry{
-		now:            opts.now,
-		ttl:            ttl,
-		cache:          map[string]cachedSession{},
-		cacheRevisions: map[string]uint64{},
-		lastSeen:       map[string]lastSeenSession{},
-		log:            opts.log,
+		now:      opts.now,
+		ttl:      ttl,
+		lastSeen: map[string]lastSeenSession{},
+		log:      opts.log,
 	}
+	r.cache = kvwatch.NewCopy(kvwatch.Rows[cachedSession]{Decode: r.decodeLocked, Stored: r.storedLocked, Removed: r.removedLocked})
 	r.watcher = kvwatch.New("session registry", kv, sessionCache{r}, kvwatch.WithLogger(opts.log))
 	// The watcher populates the cache asynchronously. A synchronous Keys()+per-key Get() loop
 	// blocks for seconds when the KV stream leader is on a remote node.
@@ -238,67 +235,50 @@ func (r *SessionRegistry) logger() *slog.Logger {
 // own type's, not the registry's methods, so nothing but the watcher calls them.
 type sessionCache struct{ r *SessionRegistry }
 
-// BeginRead starts a read of the session bucket: a fresh set of marks, the bucket's MaxAge as the
-// ttl when it has one, so a bucket recreated with another TTL expires its rows by its own, and, for
-// a recreated bucket whose revisions number from 1 again, no revision fence. Every row stays.
+// BeginRead starts a read of the session bucket (kvwatch.Copy.BeginRead) with the bucket's MaxAge
+// as the ttl when it has one, so a bucket recreated with another TTL expires its rows by its own.
+// Every row stays.
 func (c sessionCache) BeginRead(read kvwatch.Read) {
 	r := c.r
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.marks.Begin()
-	r.readEpoch = read.Epoch
-	if read.Recreated {
-		clear(r.cacheRevisions)
-	}
+	r.cache.BeginRead(read)
 	if read.MaxAge > 0 {
 		r.ttl = read.MaxAge
 	}
 }
 
-// Apply takes one record the read delivered. Its session is marked before the revision fence is
-// compared, so a delivered value older than a local heartbeat still keeps the session through the
-// sweep.
+// Apply takes one record the read delivered (kvwatch.Copy.Delivered), and logs a value it could not
+// decode, which evicted the session.
 func (c sessionCache) Apply(entry kvwatch.Entry, _ kvwatch.Read) {
 	r := c.r
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.marks.Mark(entry.Key)
-	if err := r.applyEntryLocked(entry); err != nil {
+	if err := r.cache.Delivered(entry); err != nil {
 		r.logger().Warn("session registry watcher evicted malformed value", slog.String("key", entry.Key), slog.Uint64("revision", entry.Revision), slog.String("error", err.Error()))
 	}
 }
 
 // CompleteRead removes every row and fence entry the read found no evidence of: the bucket no
 // longer holds that session. A removed row's last heartbeat is kept for LastSeen, as an expired
-// row's is. The expired last-seen records go first, once for the whole read: the records the read
-// applied leave them in place (cacheSessionLocked says why).
+// row's is (removedLocked). The expired last-seen records go first, once for the whole read: the
+// records the read applied leave them in place (storedLocked says why).
 func (c sessionCache) CompleteRead(kvwatch.Read) {
 	r := c.r
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	now := r.now()
-	r.pruneLastSeenLocked(now)
-	kvwatch.Sweep(&r.marks, r.cache, func(sessionID string, removed cachedSession) {
-		r.retainLastSeenLocked(sessionID, removed.entry.UpdatedAt, now)
-	})
-	kvwatch.Sweep(&r.marks, r.cacheRevisions, nil)
-	r.marks.End()
+	r.pruneLastSeenLocked(r.now())
+	r.cache.CompleteRead()
 }
 
-// applyEntryLocked applies one record of the bucket, delivered or read, to the cache under r.mu.
-// A value it cannot decode evicts the session, and is returned for the caller to log.
-func (r *SessionRegistry) applyEntryLocked(entry kvwatch.Entry) error {
-	if entry.Op != kvwatch.OpPut {
-		r.evictCachedSessionLocked(entry.Key, entry.Revision)
-		return nil
-	}
+// decodeLocked is the row a put record of the bucket, delivered or read, leaves in the cache, with
+// its local expiry measured from the record's Created (expiryFor). Callers hold r.mu.
+func (r *SessionRegistry) decodeLocked(entry kvwatch.Entry) (cachedSession, bool, error) {
 	var item SessionEntry
 	if err := json.Unmarshal(entry.Value, &item); err != nil {
-		r.evictCachedSessionLocked(entry.Key, entry.Revision)
-		return err
+		return cachedSession{}, false, err
 	}
-	r.cacheSessionLocked(entry.Key, item, r.expiryFor(entry.Created, item.UpdatedAt), entry.Revision)
-	return nil
+	return cachedSession{entry: item, expiresAt: r.expiryFor(entry.Created, item.UpdatedAt)}, true, nil
 }
 
 // expiryFor computes the local TTL deadline for a cached entry. It prefers the
@@ -354,7 +334,7 @@ func (r *SessionRegistry) CacheReady() bool {
 func (r *SessionRegistry) CacheSize() int {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	return len(r.cache)
+	return r.cache.Len()
 }
 
 // WatchErr is the cache watcher's terminal error, or nil while it runs, so the listener can tell a
@@ -382,9 +362,7 @@ func (r *SessionRegistry) Put(sessionID string, entry SessionEntry) error {
 		return err
 	}
 	r.mu.Lock()
-	if r.marks.MarkCurrent(r.watcher, epoch, sessionID) {
-		r.cacheSessionLocked(sessionID, entry, r.expiryFor(time.Time{}, entry.UpdatedAt), revision)
-	}
+	r.cache.Put(r.watcher, epoch, sessionID, cachedSession{entry: entry, expiresAt: r.expiryFor(time.Time{}, entry.UpdatedAt)}, revision)
 	r.mu.Unlock()
 	return nil
 }
@@ -397,7 +375,7 @@ func (r *SessionRegistry) Get(sessionID string) (SessionEntry, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.pruneLocked(now)
-	cs, ok := r.cache[sessionID]
+	cs, ok := r.cache.Get(sessionID)
 	if !ok || cs.expired(now) {
 		return SessionEntry{}, nats.ErrKeyNotFound
 	}
@@ -449,13 +427,14 @@ func (r *SessionRegistry) Refresh(ctx context.Context, sessionID string) (Sessio
 	entry := kvwatch.LegacyEntry(got.entry)
 	now := r.now()
 	r.mu.Lock()
-	if !r.marks.MarkCurrent(r.watcher, epoch, sessionID) || r.fencedLocked(sessionID, entry.Revision) {
+	outcome, malformed := r.cache.Apply(r.watcher, epoch, entry)
+	if outcome != kvwatch.Applied {
 		answer, err := r.uncachedLocked(entry, now)
 		r.mu.Unlock()
 		return answer, err
 	}
-	if err := r.applyEntryLocked(entry); err != nil {
-		r.logger().Warn("session registry watcher evicted malformed value", slog.String("key", entry.Key), slog.Uint64("revision", entry.Revision), slog.String("error", err.Error()))
+	if malformed != nil {
+		r.logger().Warn("session registry watcher evicted malformed value", slog.String("key", entry.Key), slog.Uint64("revision", entry.Revision), slog.String("error", malformed.Error()))
 	}
 	r.mu.Unlock()
 	return r.Get(sessionID)
@@ -464,19 +443,16 @@ func (r *SessionRegistry) Refresh(ctx context.Context, sessionID string) (Sessio
 // uncachedLocked answers entry, a read of the bucket the cache did not take (Refresh), as Get
 // would answer the row applying it leaves: a delete or purge marker, and a value that does not
 // decode, which applying evicts, are not found, and so is a row past its TTL, measured as the
-// cache measures one (expiryFor). Callers hold r.mu.
+// cache measures one (decodeLocked). Callers hold r.mu.
 func (r *SessionRegistry) uncachedLocked(entry kvwatch.Entry, now time.Time) (SessionEntry, error) {
 	if entry.Op != kvwatch.OpPut {
 		return SessionEntry{}, nats.ErrKeyNotFound
 	}
-	var item SessionEntry
-	if err := json.Unmarshal(entry.Value, &item); err != nil {
+	cs, _, err := r.decodeLocked(entry)
+	if err != nil || cs.expired(now) {
 		return SessionEntry{}, nats.ErrKeyNotFound
 	}
-	if (cachedSession{entry: item, expiresAt: r.expiryFor(entry.Created, item.UpdatedAt)}).expired(now) {
-		return SessionEntry{}, nats.ErrKeyNotFound
-	}
-	return item, nil
+	return cs.entry, nil
 }
 
 // LastSeen returns a recently expired or explicitly removed session's final
@@ -491,22 +467,18 @@ func (r *SessionRegistry) LastSeen(sessionID string) int64 {
 	if entry, ok := r.lastSeen[sessionID]; ok {
 		return entry.lastSeen
 	}
-	if cs, ok := r.cache[sessionID]; ok && cs.expired(now) {
+	if cs, ok := r.cache.Get(sessionID); ok && cs.expired(now) {
 		return cs.entry.UpdatedAt
 	}
 	return 0
 }
 
 func (r *SessionRegistry) Delete(sessionID string) error {
-	// The revision fence read before the delete belongs to the bucket this handle reaches only when
-	// the read under way began in its epoch: between a watch moving the epoch and that read
-	// beginning, the fence still holds the recreated bucket's revisions.
+	// The fence read before the delete is the bucket's this handle reaches only when the read under
+	// way began in its epoch (kvwatch.Copy.FenceFor).
 	r.mu.RLock()
 	kv, epoch := r.watcher.Handle()
-	var revision uint64
-	if r.readEpoch == epoch {
-		revision = r.cacheRevisions[sessionID]
-	}
+	revision := r.cache.FenceFor(epoch, sessionID)
 	r.mu.RUnlock()
 	read, err := kv.DeleteAtRead(sessionID)
 	if err != nil {
@@ -518,22 +490,24 @@ func (r *SessionRegistry) Delete(sessionID string) error {
 	cancel()
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if !r.marks.MarkCurrent(r.watcher, epoch, sessionID) {
-		return nil
-	}
-	r.pruneLastSeenLocked(r.now())
-	if err == nil && len(entries) > 0 {
-		latest := kvwatch.JetStreamEntry(entries[len(entries)-1])
-		if err := r.applyEntryLocked(latest); err != nil {
-			r.logger().Warn("session registry cache evicted malformed value",
-				slog.String("key", latest.Key),
-				slog.Uint64("revision", latest.Revision),
-				slog.String("error", err.Error()),
-			)
+	if err != nil || len(entries) == 0 {
+		if r.cache.Evict(r.watcher, epoch, sessionID, revision+1) != kvwatch.Dropped {
+			r.pruneLastSeenLocked(r.now())
 		}
 		return nil
 	}
-	r.evictCachedSessionLocked(sessionID, revision+1)
+	latest := kvwatch.JetStreamEntry(entries[len(entries)-1])
+	outcome, malformed := r.cache.Apply(r.watcher, epoch, latest)
+	if outcome != kvwatch.Dropped {
+		r.pruneLastSeenLocked(r.now())
+	}
+	if malformed != nil {
+		r.logger().Warn("session registry cache evicted malformed value",
+			slog.String("key", latest.Key),
+			slog.Uint64("revision", latest.Revision),
+			slog.String("error", malformed.Error()),
+		)
+	}
 	return nil
 }
 
@@ -553,8 +527,8 @@ func (r *SessionRegistry) List() ([]ListEntry, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.pruneLocked(now)
-	entries := make([]ListEntry, 0, len(r.cache))
-	for key, cs := range r.cache {
+	entries := make([]ListEntry, 0, r.cache.Len())
+	for key, cs := range r.cache.All() {
 		entries = append(entries, ListEntry{SessionID: key, SessionEntry: cs.entry})
 	}
 	sort.Slice(entries, func(i, j int) bool {
@@ -572,10 +546,10 @@ func (r *SessionRegistry) List() ([]ListEntry, error) {
 // Callers must hold r.mu for writing.
 func (r *SessionRegistry) pruneLocked(now time.Time) {
 	if r.watcher.Following() {
-		for key, cs := range r.cache {
+		for key, cs := range r.cache.All() {
 			if cs.expired(now) {
 				r.retainLastSeenLocked(key, cs.entry.UpdatedAt, now)
-				delete(r.cache, key)
+				r.cache.Remove(key)
 			}
 		}
 	}
@@ -592,36 +566,20 @@ func (r *SessionRegistry) pruneLastSeenLocked(now time.Time) {
 	}
 }
 
-// cacheSessionLocked and evictCachedSessionLocked apply one record and leave expired last-seen
+// storedLocked and removedLocked are what the cache records beside its copy when the copy stores
+// or removes a row (kvwatch.Rows): a stored row's session is live, so its last-seen record goes,
+// and a removed row's last heartbeat is kept for LastSeen. They leave the other expired last-seen
 // records in place: a read applies every record of the bucket through them, and pruning the whole
 // lastSeen map per record made a read cost its records times the sessions a sweep had just moved
 // there. Every path that reads lastSeen (LastSeen, through pruneLocked) prunes it first, and Ping,
 // Get, List, Delete and CompleteRead prune it once each, so an expired record is never answered
-// and does not outlive the next of those.
-func (r *SessionRegistry) cacheSessionLocked(sessionID string, entry SessionEntry, expiresAt time.Time, revision uint64) {
-	if r.fencedLocked(sessionID, revision) {
-		return
-	}
-	r.cache[sessionID] = cachedSession{entry: entry, expiresAt: expiresAt}
+// and does not outlive the next of those. Callers hold r.mu.
+func (r *SessionRegistry) storedLocked(sessionID string, _ cachedSession) {
 	delete(r.lastSeen, sessionID)
-	r.cacheRevisions[sessionID] = revision
 }
 
-func (r *SessionRegistry) evictCachedSessionLocked(sessionID string, revision uint64) {
-	if r.fencedLocked(sessionID, revision) {
-		return
-	}
-	if entry, ok := r.cache[sessionID]; ok {
-		r.retainLastSeenLocked(sessionID, entry.entry.UpdatedAt, r.now())
-	}
-	delete(r.cache, sessionID)
-	r.cacheRevisions[sessionID] = revision
-}
-
-// fencedLocked reports whether the revision fence drops a record of sessionID at revision: the
-// cache already took a higher revision of it in the current epoch. Callers hold r.mu.
-func (r *SessionRegistry) fencedLocked(sessionID string, revision uint64) bool {
-	return revision < r.cacheRevisions[sessionID]
+func (r *SessionRegistry) removedLocked(sessionID string, removed cachedSession) {
+	r.retainLastSeenLocked(sessionID, removed.entry.UpdatedAt, r.now())
 }
 
 func (r *SessionRegistry) retainLastSeenLocked(sessionID string, lastSeen int64, now time.Time) {

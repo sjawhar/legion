@@ -29,12 +29,27 @@ import (
 
 // --- Unit Tests (no NATS needed — test Match() against pre-populated cache) ---
 
+// holding is a registry with no watcher whose cache holds interests, each delivered as a read
+// delivers it (interestCache.Apply).
+func holding(t *testing.T, interests map[string]Interest) *Registry {
+	t.Helper()
+	r := &Registry{cache: newInterestCopy()}
+	for sessionID, item := range interests {
+		value, err := json.Marshal(item)
+		if err != nil {
+			t.Fatalf("encode %s: %v", sessionID, err)
+		}
+		interestCache{r}.Apply(kvwatch.Entry{Key: sessionID, Value: value, Revision: 1}, kvwatch.Read{})
+	}
+	return r
+}
+
 func TestMatch_FiltersByMachineID(t *testing.T) {
-	r := &Registry{cache: map[string]Interest{
+	r := holding(t, map[string]Interest{
 		"ses_a": {SessionID: "ses_a", MachineID: "machine-A", Topics: []string{"notifications.>"}},
 		"ses_b": {SessionID: "ses_b", MachineID: "machine-B", Topics: []string{"notifications.>"}},
 		"ses_c": {SessionID: "ses_c", MachineID: "machine-A", Topics: []string{"notifications.>"}},
-	}}
+	})
 
 	got := r.Match("machine-A", "notifications.test")
 	if len(got) != 2 {
@@ -58,12 +73,12 @@ func TestMatch_FiltersByMachineID(t *testing.T) {
 }
 
 func TestMatch_WildcardPatterns(t *testing.T) {
-	r := &Registry{cache: map[string]Interest{
+	r := holding(t, map[string]Interest{
 		"ses_exact":   {SessionID: "ses_exact", MachineID: "m1", Topics: []string{"notifications.github.sjawhar.legion.pr"}},
 		"ses_star":    {SessionID: "ses_star", MachineID: "m1", Topics: []string{"notifications.github.*.*.pr"}},
 		"ses_chevron": {SessionID: "ses_chevron", MachineID: "m1", Topics: []string{"notifications.github.>"}},
 		"ses_slack":   {SessionID: "ses_slack", MachineID: "m1", Topics: []string{"notifications.slack.>"}},
-	}}
+	})
 
 	got := r.Match("m1", "notifications.github.sjawhar.legion.pr")
 	ids := make([]string, len(got))
@@ -92,7 +107,7 @@ func TestMatch_WildcardPatterns(t *testing.T) {
 }
 
 func TestMatch_SlackThreadIsolation(t *testing.T) {
-	r := &Registry{cache: map[string]Interest{
+	r := holding(t, map[string]Interest{
 		"ses_thread_a": {SessionID: "ses_thread_a", MachineID: "m1", Topics: []string{
 			"notifications.slack.T123.C456.thread.1111111111_111111.>",
 		}},
@@ -102,7 +117,7 @@ func TestMatch_SlackThreadIsolation(t *testing.T) {
 		"ses_channel": {SessionID: "ses_channel", MachineID: "m1", Topics: []string{
 			"notifications.slack.T123.C456.>",
 		}},
-	}}
+	})
 
 	// Thread A message: only ses_thread_a and ses_channel
 	gotA := r.Match("m1", "notifications.slack.T123.C456.thread.1111111111_111111.message")
@@ -138,7 +153,7 @@ func TestMatch_SlackThreadIsolation(t *testing.T) {
 }
 
 func TestMatch_EmptyCache(t *testing.T) {
-	r := &Registry{cache: map[string]Interest{}}
+	r := holding(t, map[string]Interest{})
 	got := r.Match("m1", "notifications.test")
 	if len(got) != 0 {
 		t.Fatalf("expected 0 results from empty cache, got %d", len(got))
@@ -146,13 +161,13 @@ func TestMatch_EmptyCache(t *testing.T) {
 }
 
 func TestMatch_MultipleTopicsOnOneEntry(t *testing.T) {
-	r := &Registry{cache: map[string]Interest{
+	r := holding(t, map[string]Interest{
 		"ses_multi": {
 			SessionID: "ses_multi",
 			MachineID: "m1",
 			Topics:    []string{"notifications.github.>", "notifications.slack.>"},
 		},
-	}}
+	})
 
 	// Matches first topic
 	got := r.Match("m1", "notifications.github.sjawhar.legion.pr")
@@ -527,7 +542,7 @@ func coldRegistry(t *testing.T, conn *natsgo.Conn) (*Registry, natsgo.KeyValue) 
 	if err != nil {
 		t.Fatalf("wrap the role KV bucket: %v", err)
 	}
-	r := &Registry{roleKV: roles, now: time.Now, cache: map[string]Interest{}, cacheRevisions: map[string]uint64{}}
+	r := &Registry{roleKV: roles, now: time.Now, cache: newInterestCopy()}
 	handle, err := bus.WrapKeyValue(conn, kv)
 	if err != nil {
 		t.Fatalf("wrap the KV bucket: %v", err)
@@ -999,9 +1014,7 @@ func TestReapKeepsRoleClaimsForSessionRecovery(t *testing.T) {
 	if err != nil {
 		t.Fatalf("make interest stale: %v", err)
 	}
-	reg.mu.Lock()
-	reg.cacheInterestLocked(sessionID, stale, revision)
-	reg.mu.Unlock()
+	interestCache{reg}.Apply(kvwatch.Entry{Key: sessionID, Value: raw, Revision: revision}, kvwatch.Read{})
 
 	count, err := reg.Reap(func(string) (bool, error) { return false, nil }, 0)
 	if err != nil {
@@ -1908,8 +1921,7 @@ func TestDeleteHistoryFailureSuppressesStaleWatcherUpdate(t *testing.T) {
 		machineID = "example-host"
 		topic     = "notifications.delete"
 	)
-	item, err := reg.Upsert(Interest{SessionID: sessionID, MachineID: machineID}, []string{topic})
-	if err != nil {
+	if _, err := reg.Upsert(Interest{SessionID: sessionID, MachineID: machineID}, []string{topic}); err != nil {
 		t.Fatalf("Upsert: %v", err)
 	}
 	entry, err := kv.Get(sessionID)
@@ -1927,9 +1939,7 @@ func TestDeleteHistoryFailureSuppressesStaleWatcherUpdate(t *testing.T) {
 
 	// This is the same cache mutation performed by a WatchAll update that was
 	// queued before the delete marker. Its older revision must stay rejected.
-	reg.mu.Lock()
-	reg.cacheInterestLocked(sessionID, item, entry.Revision())
-	reg.mu.Unlock()
+	interestCache{reg}.Apply(kvwatch.LegacyEntry(entry), kvwatch.Read{})
 
 	if got := reg.Match(machineID, topic); len(got) != 0 {
 		t.Fatalf("stale watcher update restored deleted route: %v", got)

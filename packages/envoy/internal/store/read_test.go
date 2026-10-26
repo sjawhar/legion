@@ -167,8 +167,8 @@ func rebuiltRegistry(t *testing.T, conn *natsgo.Conn) (*Registry, *holdingCache,
 func cachedIDs(r *Registry) []string {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	ids := make([]string, 0, len(r.cache))
-	for id := range r.cache {
+	ids := make([]string, 0, r.cache.Len())
+	for id := range r.cache.All() {
 		ids = append(ids, id)
 	}
 	slices.Sort(ids)
@@ -300,7 +300,7 @@ func TestAReadThroughSpanningTheReadsCompletionAddsOnlyWhatTheBucketHolds(t *tes
 	waitFor(t, 5*time.Second, func() bool {
 		reg.mu.RLock()
 		defer reg.mu.RUnlock()
-		return reg.watcher.Following() && reg.cacheRevisions["ses_gone"] == deleted
+		return reg.watcher.Following() && reg.cache.FenceFor(reg.watcher.Epoch(), "ses_gone") == deleted
 	})
 	for _, read := range reads {
 		read.open()

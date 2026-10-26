@@ -20,56 +20,56 @@ import (
 	"github.com/sjawhar/envoy/internal/testnats"
 )
 
-// seen is a recording Cache that keeps a copy the way the stores do: each delivered record updates
-// it, a read marks each key it delivers, and a completed read sweeps every key it left unmarked.
-// It records every read that began and every read that completed.
+// seen is a recording Cache that keeps a copy the way the stores do (kvwatch.Copy): each delivered
+// record updates it, a read marks each key it delivers, and a completed read sweeps every key it
+// left unmarked. It records every read that began and every read that completed.
 type seen struct {
 	mu        sync.Mutex
-	keys      map[string]bool
-	marks     kvwatch.Marks
+	keys      kvwatch.Copy[bool]
 	begun     []kvwatch.Read
 	completed []kvwatch.Read
 }
 
-func newSeen() *seen { return &seen{keys: map[string]bool{}} }
+// newSeen is an empty seen, whose copy keeps every put it is handed: its Decode never fails, so
+// Delivered never returns an error.
+func newSeen() *seen {
+	return &seen{keys: kvwatch.NewCopy(kvwatch.Rows[bool]{Decode: func(kvwatch.Entry) (bool, bool, error) {
+		return true, true, nil
+	}})}
+}
 
 func (s *seen) Apply(entry kvwatch.Entry, _ kvwatch.Read) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.marks.Mark(entry.Key)
-	if entry.Op == kvwatch.OpPut {
-		s.keys[entry.Key] = true
-		return
-	}
-	delete(s.keys, entry.Key)
+	_ = s.keys.Delivered(entry)
 }
 
 func (s *seen) BeginRead(read kvwatch.Read) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.marks.Begin()
+	s.keys.BeginRead(read)
 	s.begun = append(s.begun, read)
 }
 
 func (s *seen) CompleteRead(read kvwatch.Read) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	kvwatch.Sweep(&s.marks, s.keys, nil)
-	s.marks.End()
+	s.keys.CompleteRead()
 	s.completed = append(s.completed, read)
 }
 
-// hold puts key in the copy as if an earlier read had left it there.
+// hold puts key in the copy as if an earlier read had left it there, before any read begins.
 func (s *seen) hold(key string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.keys[key] = true
+	_ = s.keys.Delivered(kvwatch.Entry{Key: key, Op: kvwatch.OpPut})
 }
 
 func (s *seen) has(key string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.keys[key]
+	_, ok := s.keys.Get(key)
+	return ok
 }
 
 // reads is every read that began, and completions every read that completed, in order.

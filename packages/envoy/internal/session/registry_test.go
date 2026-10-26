@@ -342,9 +342,7 @@ func TestSessionRegistryDeleteHistoryFailureSuppressesStaleWatcherUpdate(t *test
 		t.Fatalf("Delete: %v", err)
 	}
 
-	reg.mu.Lock()
-	reg.cacheSessionLocked(sessionID, item, time.Time{}, entry.Revision())
-	reg.mu.Unlock()
+	sessionCache{reg}.Apply(kvwatch.LegacyEntry(entry), kvwatch.Read{})
 	if _, err := reg.Get(sessionID); err == nil {
 		t.Fatal("Get returned a session restored by a stale watcher update")
 	}

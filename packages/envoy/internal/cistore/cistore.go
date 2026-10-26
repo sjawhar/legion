@@ -269,11 +269,10 @@ func (s State) Hash() string {
 }
 
 type Store struct {
-	mu             sync.RWMutex
-	cache          map[string]State
-	cacheRevisions map[string]uint64
-	// marks are the records the current read of the bucket has evidence of (kvwatch.Marks).
-	marks kvwatch.Marks
+	mu sync.RWMutex
+	// cache is the copy of the bucket: its records, revision fence, marks and read epoch
+	// (kvwatch.Copy, decodeState), which every write site reaches through.
+	cache kvwatch.Copy[State]
 	// watcher feeds the cache and holds the handle the store writes through. Every watcher it
 	// installs reads the whole bucket again (ciCache): the cache keeps every record through the
 	// read and removes those the read found no evidence of only once it completes. The summary
@@ -345,11 +344,10 @@ func Open(nc *nats.Conn, logger *logging.Logger, opts ...Option) (*Store, error)
 		return nil, err
 	}
 	s := &Store{
-		cache:          map[string]State{},
-		cacheRevisions: map[string]uint64{},
-		combiners:      map[string]*keyCombiner{},
-		rewatched:      make(chan struct{}),
-		logger:         logger,
+		cache:     kvwatch.NewCopy(kvwatch.Rows[State]{Decode: decodeState}),
+		combiners: map[string]*keyCombiner{},
+		rewatched: make(chan struct{}),
+		logger:    logger,
 	}
 	s.watcher = kvwatch.New("cistore", kv, ciCache{s}, kvwatch.WithLogger(logger.Slog()))
 	s.watcher.Start()
@@ -382,55 +380,24 @@ func (s *Store) Rewatch(conn *nats.Conn) error {
 // type's, not the store's methods, so nothing but the watcher calls them.
 type ciCache struct{ s *Store }
 
-// BeginRead starts a read of the CI bucket: a fresh set of marks and, for a recreated bucket whose
-// revisions number from 1 again, no revision fence. Every record stays.
+// BeginRead starts a read of the CI bucket (kvwatch.Copy.BeginRead). Every record stays.
 func (c ciCache) BeginRead(read kvwatch.Read) {
 	s := c.s
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.marks.Begin()
-	if read.Recreated {
-		clear(s.cacheRevisions)
-	}
+	s.cache.BeginRead(read)
 }
 
-// Apply takes one record the read delivered. Its key is marked before the revision fence is
-// compared, so a delivered value older than a local write still keeps the record through the
-// sweep.
+// Apply takes one record the read delivered (kvwatch.Copy.Delivered), and logs a value it could not
+// decode, which evicted the record.
 func (c ciCache) Apply(entry kvwatch.Entry, _ kvwatch.Read) {
 	s := c.s
-	key := entry.Key
-	var malformed error
 	s.mu.Lock()
-	s.marks.Mark(key)
-	switch {
-	case entry.Op != kvwatch.OpPut:
-		s.evictCachedLocked(key, entry.Revision)
-	default:
-		var marker struct {
-			Kind string `json:"kind"`
-		}
-		if err := json.Unmarshal(entry.Value, &marker); err == nil && marker.Kind == retiredHeadKind {
-			s.evictCachedLocked(key, entry.Revision)
-		} else {
-			var st State
-			if err := json.Unmarshal(entry.Value, &st); err != nil {
-				s.evictCachedLocked(key, entry.Revision)
-				malformed = err
-			} else if key != Key(st.Owner, st.Repo, st.Number, st.SHA) {
-				// The summary loop addresses a record by the key its identity builds, so a record
-				// stored under any other key could never be claimed: it waits out its TTL uncached.
-				s.evictCachedLocked(key, entry.Revision)
-			} else {
-				s.cacheStateLocked(key, st, entry.Revision)
-			}
-		}
-	}
+	malformed := s.cache.Delivered(entry)
 	s.mu.Unlock()
-
 	if malformed != nil {
 		s.logger.Warn("cistore watch evicted malformed value",
-			slog.String("key", key),
+			slog.String("key", entry.Key),
 			slog.Uint64("revision", entry.Revision),
 			slog.String("error", malformed.Error()),
 		)
@@ -443,25 +410,28 @@ func (c ciCache) CompleteRead(kvwatch.Read) {
 	s := c.s
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	kvwatch.Sweep(&s.marks, s.cache, nil)
-	kvwatch.Sweep(&s.marks, s.cacheRevisions, nil)
-	s.marks.End()
+	s.cache.CompleteRead()
 }
 
-func (s *Store) cacheStateLocked(key string, state State, revision uint64) {
-	if revision < s.cacheRevisions[key] {
-		return
+// decodeState is the state a put record of the bucket leaves in the cache. A retired head record,
+// and a state stored under a key other than the one its identity builds, are not kept: the summary
+// loop addresses a record by the key its identity builds, so a record stored under any other key
+// could never be claimed, and it waits out its TTL uncached.
+func decodeState(entry kvwatch.Entry) (State, bool, error) {
+	var marker struct {
+		Kind string `json:"kind"`
 	}
-	s.cache[key] = state
-	s.cacheRevisions[key] = revision
-}
-
-func (s *Store) evictCachedLocked(key string, revision uint64) {
-	if revision < s.cacheRevisions[key] {
-		return
+	if err := json.Unmarshal(entry.Value, &marker); err == nil && marker.Kind == retiredHeadKind {
+		return State{}, false, nil
 	}
-	delete(s.cache, key)
-	s.cacheRevisions[key] = revision
+	var st State
+	if err := json.Unmarshal(entry.Value, &st); err != nil {
+		return State{}, false, err
+	}
+	if entry.Key != Key(st.Owner, st.Repo, st.Number, st.SHA) {
+		return State{}, false, nil
+	}
+	return st, true, nil
 }
 
 // WatchErr is the cache watcher's terminal error, or nil while it runs.
@@ -659,9 +629,7 @@ func (s *Store) casState(key string, apply func(st *State) (ok bool, err error))
 		revision, err := kv.Update(key, buf, entry.Revision())
 		if err == nil {
 			s.mu.Lock()
-			if s.marks.MarkCurrent(s.watcher, epoch, key) {
-				s.cacheStateLocked(key, state, revision)
-			}
+			s.cache.Put(s.watcher, epoch, key, state, revision)
 			s.mu.Unlock()
 			return state, true, nil
 		}
@@ -679,8 +647,8 @@ func (s *Store) casState(key string, apply func(st *State) (ok bool, err error))
 func (s *Store) List() []State {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	out := make([]State, 0, len(s.cache))
-	for _, state := range s.cache {
+	out := make([]State, 0, s.cache.Len())
+	for _, state := range s.cache.All() {
 		out = append(out, state)
 	}
 	sort.Slice(out, func(i, j int) bool {

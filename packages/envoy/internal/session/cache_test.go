@@ -8,6 +8,7 @@ import (
 	"time"
 
 	natsgo "github.com/nats-io/nats.go"
+	"github.com/sjawhar/envoy/internal/kvwatch"
 )
 
 // --- Unit tests (no NATS — operate on a pre-populated cache) ---
@@ -55,19 +56,26 @@ func followingRegistry(t *testing.T) *SessionRegistry {
 	return r
 }
 
-// hold puts rows in r's cache as if a read had delivered them.
-func hold(r *SessionRegistry, rows map[string]cachedSession) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
+// hold puts rows in r's cache as a read delivers them (sessionCache.Apply), each at revision 1 and
+// created one ttl before its expiresAt, so the cache computes that expiry for it (expiryFor).
+func hold(t *testing.T, r *SessionRegistry, rows map[string]cachedSession) {
+	t.Helper()
+	r.mu.RLock()
+	ttl := r.ttl
+	r.mu.RUnlock()
 	for sessionID, row := range rows {
-		r.cache[sessionID] = row
+		value, err := json.Marshal(row.entry)
+		if err != nil {
+			t.Fatalf("encode %s: %v", sessionID, err)
+		}
+		sessionCache{r}.Apply(kvwatch.Entry{Key: sessionID, Value: value, Revision: 1, Created: row.expiresAt.Add(-ttl)}, kvwatch.Read{})
 	}
 }
 
 func TestList_PrunesExpiredEntries(t *testing.T) {
 	now := time.Now()
 	r := followingRegistry(t)
-	hold(r, map[string]cachedSession{
+	hold(t, r, map[string]cachedSession{
 		"ses_live":    {entry: SessionEntry{Port: 1}, expiresAt: now.Add(time.Minute)},
 		"ses_expired": {entry: SessionEntry{Port: 2}, expiresAt: now.Add(-time.Minute)},
 	})
@@ -87,7 +95,7 @@ func TestList_PrunesExpiredEntries(t *testing.T) {
 func TestGet_ExpiredReturnsKeyNotFound(t *testing.T) {
 	now := time.Now()
 	r := followingRegistry(t)
-	hold(r, map[string]cachedSession{
+	hold(t, r, map[string]cachedSession{
 		"ses_expired": {entry: SessionEntry{Port: 2}, expiresAt: now.Add(-time.Second)},
 	})
 	if _, err := r.Get("ses_expired"); !errors.Is(err, natsgo.ErrKeyNotFound) {
@@ -101,7 +109,7 @@ func TestGet_ExpiredReturnsKeyNotFound(t *testing.T) {
 func TestGet_ValidReturnsEntry(t *testing.T) {
 	now := time.Now()
 	r := followingRegistry(t)
-	hold(r, map[string]cachedSession{
+	hold(t, r, map[string]cachedSession{
 		"ses_ok": {entry: SessionEntry{Port: 99, MachineID: "m1"}, expiresAt: now.Add(time.Minute)},
 	})
 	got, err := r.Get("ses_ok")
@@ -166,9 +174,9 @@ func TestLastSeenRetentionDoesNotRestoreLiveSession(t *testing.T) {
 		t.Fatal("last seen timestamp was lost before its retention TTL")
 	}
 
-	r.mu.Lock()
-	r.cacheSessionLocked("ses_lapsed", SessionEntry{Port: 1, UpdatedAt: now.UnixMilli()}, now.Add(time.Minute), 1)
-	r.mu.Unlock()
+	hold(t, r, map[string]cachedSession{
+		"ses_lapsed": {entry: SessionEntry{Port: 1, UpdatedAt: now.UnixMilli()}, expiresAt: now.Add(time.Minute)},
+	})
 	if _, err := r.Get("ses_lapsed"); err != nil {
 		t.Fatalf("Get(reregistered): %v", err)
 	}
@@ -394,12 +402,12 @@ func TestOpenSessionRegistry_PrunesUsingBucketTTL(t *testing.T) {
 	// within the 5-minute default. Pruning against the bucket TTL drops it;
 	// pruning against the default would wrongly keep it live.
 	created := time.Now().Add(-3 * time.Minute)
-	reg.mu.Lock()
-	reg.cache["ses_old"] = cachedSession{
-		entry:     SessionEntry{Port: 1},
-		expiresAt: reg.expiryFor(created, 0),
-	}
-	reg.mu.Unlock()
+	reg.mu.RLock()
+	expiresAt := reg.expiryFor(created, 0)
+	reg.mu.RUnlock()
+	hold(t, reg, map[string]cachedSession{
+		"ses_old": {entry: SessionEntry{Port: 1}, expiresAt: expiresAt},
+	})
 	entries, err := reg.List()
 	if err != nil {
 		t.Fatalf("List: %v", err)

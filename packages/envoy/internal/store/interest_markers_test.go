@@ -546,7 +546,7 @@ func TestAnUndecodableLiveValueIsKept(t *testing.T) {
 	}
 	seedLive(t, kv, 2)
 	registry := openRegistry(t, conn)
-	if _, cached := registry.cache["ses_undecodable"]; cached {
+	if _, cached := registry.Cached("ses_undecodable"); cached {
 		t.Fatal("the cache kept an undecodable value; this test needs the eviction that makes the cache incomplete")
 	}
 
@@ -593,7 +593,7 @@ func TestAPassWhoseScanTimedOutPurgesNothingAndLeavesTheRegistryHealthy(t *testi
 	if err != nil {
 		t.Fatalf("wrap the role bucket: %v", err)
 	}
-	registry := &Registry{roleKV: roles, now: time.Now, cache: map[string]Interest{}, cacheRevisions: map[string]uint64{}}
+	registry := &Registry{roleKV: roles, now: time.Now, cache: newInterestCopy()}
 	handle := bus.NewKeyValue(kv, earlyEndKV{KeyValue: interests.WatchHandle(), after: 2}, interests.Streams())
 	registry.watcher = kvwatch.New("interest registry", handle, interestCache{registry}, kvwatch.WithScanIdleTimeout(idle))
 	t.Cleanup(registry.StopWatch)

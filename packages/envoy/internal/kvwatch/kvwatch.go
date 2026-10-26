@@ -68,8 +68,8 @@ type Cache interface {
 	// revisions number from 1 again, so the cache drops its revision fence (and keeps its entries).
 	BeginRead(read Read)
 	// CompleteRead says the read delivered every record of its bucket: the cache removes the entries
-	// the read found no evidence of (Marks, Sweep). A read that times out or ends before its end
-	// marker never completes, and removes nothing.
+	// the read found no evidence of (Copy.CompleteRead). A read that times out or ends before its
+	// end marker never completes, and removes nothing.
 	CompleteRead(read Read)
 }
 

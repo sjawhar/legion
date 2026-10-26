@@ -50,16 +50,9 @@ type Registry struct {
 	openedAt              time.Time
 	restoredRoleRevisions map[string]uint64
 	mu                    sync.RWMutex
-	cache                 map[string]Interest
-	// cacheRevisions holds the latest KV revision applied for each cache key,
-	// including delete tombstones. It prevents a delayed local write-through
-	// from replacing a newer watcher update.
-	cacheRevisions map[string]uint64
-	// marks are the sessions the current read of the interest bucket has evidence of
-	// (kvwatch.Marks), and readEpoch the epoch that read began in: the bucket incarnation
-	// cacheRevisions belongs to.
-	marks     kvwatch.Marks
-	readEpoch uint64
+	// cache is the copy of the interest bucket: its interests, revision fence, marks and read epoch
+	// (kvwatch.Copy, newInterestCopy), which every write site reaches through.
+	cache kvwatch.Copy[Interest]
 	// watcher feeds the cache from the interest bucket. Every watcher it installs reads the whole
 	// bucket again (interestCache): the cache keeps every interest through the read and removes
 	// the ones the read found no evidence of only once it completes. Once a read has completed the
@@ -126,8 +119,7 @@ func Open(conn *nats.Conn, options ...OpenOption) (*Registry, error) {
 	r := &Registry{
 		roleKV:                roleKV,
 		log:                   opts.log,
-		cache:                 map[string]Interest{},
-		cacheRevisions:        map[string]uint64{},
+		cache:                 newInterestCopy(),
 		now:                   opts.now,
 		openedAt:              opts.now(),
 		restoredRoleRevisions: restoredRoleRevisions,
@@ -253,42 +245,29 @@ func (r *Registry) roleKeys() ([]string, error) {
 	return keys, nil
 }
 
-func (r *Registry) cacheInterestLocked(sessionID string, item Interest, revision uint64) {
-	if revision < r.cacheRevisions[sessionID] {
-		return
-	}
-	if r.cache == nil {
-		r.cache = map[string]Interest{}
-	}
-	if r.cacheRevisions == nil {
-		r.cacheRevisions = map[string]uint64{}
-	}
-	r.cache[sessionID] = item
-	r.cacheRevisions[sessionID] = revision
+// newInterestCopy is an empty copy of the interest bucket, which keeps every interest it can
+// decode (decodeInterest).
+func newInterestCopy() kvwatch.Copy[Interest] {
+	return kvwatch.NewCopy(kvwatch.Rows[Interest]{Decode: decodeInterest})
 }
 
-func (r *Registry) evictCachedInterestLocked(sessionID string, revision uint64) {
-	if revision < r.cacheRevisions[sessionID] {
-		return
+// decodeInterest is the interest a put record of the bucket, delivered or read, leaves in the
+// cache.
+func decodeInterest(entry kvwatch.Entry) (Interest, bool, error) {
+	var item Interest
+	if err := json.Unmarshal(entry.Value, &item); err != nil {
+		return Interest{}, false, err
 	}
-	delete(r.cache, sessionID)
-	if r.cacheRevisions == nil {
-		r.cacheRevisions = map[string]uint64{}
-	}
-	r.cacheRevisions[sessionID] = revision
+	return item, true, nil
 }
 
 // deleteInterest deletes sessionID's interest at the revision it reads (bus.KeyValue.DeleteAtRead).
 func (r *Registry) deleteInterest(sessionID string) error {
-	// The revision fence read before the delete belongs to the bucket this handle reaches only when
-	// the read under way began in its epoch: between a watch moving the epoch and that read
-	// beginning, the fence still holds the recreated bucket's revisions.
+	// The fence read before the delete is the bucket's this handle reaches only when the read under
+	// way began in its epoch (kvwatch.Copy.FenceFor).
 	r.mu.RLock()
 	kv, epoch := r.watcher.Handle()
-	var revision uint64
-	if r.readEpoch == epoch {
-		revision = r.cacheRevisions[sessionID]
-	}
+	revision := r.cache.FenceFor(epoch, sessionID)
 	r.mu.RUnlock()
 	read, err := kv.DeleteAtRead(sessionID)
 	if err != nil {
@@ -300,20 +279,16 @@ func (r *Registry) deleteInterest(sessionID string) error {
 	entries, err := kv.ReadHistory(ctx, sessionID)
 	cancel()
 	r.mu.Lock()
-	if !r.marks.MarkCurrent(r.watcher, epoch, sessionID) {
-		r.mu.Unlock()
-		return nil
-	}
 	if err != nil || len(entries) == 0 {
 		// KeyValue.Delete does not return its revision. A successful delete must
 		// still fence off any watcher update from the preceding revision while the
 		// delete marker remains pending.
-		r.evictCachedInterestLocked(sessionID, revision+1)
+		r.cache.Evict(r.watcher, epoch, sessionID, revision+1)
 		r.mu.Unlock()
 		return nil
 	}
 	latest := kvwatch.JetStreamEntry(entries[len(entries)-1])
-	malformed := r.applyEntryLocked(latest)
+	_, malformed := r.cache.Apply(r.watcher, epoch, latest)
 	r.mu.Unlock()
 	if malformed != nil {
 		r.logger().Warn("registry cache evicted malformed value",
@@ -355,28 +330,21 @@ func (r *Registry) Rewatch(conn *nats.Conn) error {
 // own type's, not the registry's methods, so nothing but the watcher calls them.
 type interestCache struct{ r *Registry }
 
-// BeginRead starts a read of the interest bucket: a fresh set of marks and, for a recreated bucket
-// whose revisions number from 1 again, no revision fence. Every interest stays.
+// BeginRead starts a read of the interest bucket (kvwatch.Copy.BeginRead). Every interest stays.
 func (c interestCache) BeginRead(read kvwatch.Read) {
 	r := c.r
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.marks.Begin()
-	r.readEpoch = read.Epoch
-	if read.Recreated {
-		clear(r.cacheRevisions)
-	}
+	r.cache.BeginRead(read)
 }
 
-// Apply takes one record the read delivered. Its session is marked before the revision fence is
-// compared, so a delivered value older than a local write still keeps the interest through the
-// sweep. The fence keeps a delayed local write-through and a watcher update from undoing each
-// other.
+// Apply takes one record the read delivered (kvwatch.Copy.Delivered), and logs a value it could not
+// decode, which evicted the interest. The revision fence keeps a delayed local write-through and a
+// watcher update from undoing each other.
 func (c interestCache) Apply(entry kvwatch.Entry, _ kvwatch.Read) {
 	r := c.r
 	r.mu.Lock()
-	r.marks.Mark(entry.Key)
-	malformed := r.applyEntryLocked(entry)
+	malformed := r.cache.Delivered(entry)
 	r.mu.Unlock()
 	if malformed != nil {
 		r.logger().Warn("registry watcher evicted malformed value",
@@ -393,26 +361,7 @@ func (c interestCache) CompleteRead(kvwatch.Read) {
 	r := c.r
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	kvwatch.Sweep(&r.marks, r.cache, nil)
-	kvwatch.Sweep(&r.marks, r.cacheRevisions, nil)
-	r.marks.End()
-}
-
-// applyEntryLocked applies one record of the bucket, delivered or read, to the cache under r.mu.
-// A value it cannot decode evicts the interest, and is returned for the caller to log once it has
-// released r.mu.
-func (r *Registry) applyEntryLocked(entry kvwatch.Entry) error {
-	if entry.Op != kvwatch.OpPut {
-		r.evictCachedInterestLocked(entry.Key, entry.Revision)
-		return nil
-	}
-	var item Interest
-	if err := json.Unmarshal(entry.Value, &item); err != nil {
-		r.evictCachedInterestLocked(entry.Key, entry.Revision)
-		return err
-	}
-	r.cacheInterestLocked(entry.Key, item, entry.Revision)
-	return nil
+	r.cache.CompleteRead()
 }
 
 // WaitForCacheReady blocks until the watcher has delivered every existing interest, or until ctx
@@ -439,9 +388,7 @@ func (r *Registry) Upsert(item Interest, topics []string) (Interest, error) {
 		return Interest{}, err
 	}
 	r.mu.Lock()
-	if r.marks.MarkCurrent(r.watcher, epoch, merged.SessionID) {
-		r.cacheInterestLocked(merged.SessionID, merged, revision)
-	}
+	r.cache.Put(r.watcher, epoch, merged.SessionID, merged, revision)
 	r.mu.Unlock()
 	return merged, nil
 }
@@ -643,9 +590,7 @@ func (r *Registry) removeInterestTopics(sessionID string, topics []string) error
 		return err
 	}
 	r.mu.Lock()
-	if r.marks.MarkCurrent(r.watcher, epoch, sessionID) {
-		r.cacheInterestLocked(sessionID, item, revision)
-	}
+	r.cache.Put(r.watcher, epoch, sessionID, item, revision)
 	r.mu.Unlock()
 	return nil
 }
@@ -788,9 +733,7 @@ func (r *Registry) Get(sessionID string) (Interest, error) {
 	err = json.Unmarshal(entry.Value(), &fresh)
 	if err == nil {
 		r.mu.Lock()
-		if r.marks.MarkCurrent(r.watcher, epoch, sessionID) {
-			r.cacheInterestLocked(sessionID, fresh, entry.Revision())
-		}
+		r.cache.Put(r.watcher, epoch, sessionID, fresh, entry.Revision())
 		r.mu.Unlock()
 	}
 	return fresh, err
@@ -801,15 +744,14 @@ func (r *Registry) Get(sessionID string) (Interest, error) {
 func (r *Registry) Cached(sessionID string) (Interest, bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	item, ok := r.cache[sessionID]
-	return item, ok
+	return r.cache.Get(sessionID)
 }
 
 func (r *Registry) Match(machineID string, topic string) []Interest {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	out := []Interest{}
-	for _, item := range r.cache {
+	for _, item := range r.cache.All() {
 		if item.MachineID != machineID {
 			continue
 		}
@@ -832,8 +774,8 @@ func (r *Registry) List() ([]Interest, error) {
 	}
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	out := make([]Interest, 0, len(r.cache))
-	for _, item := range r.cache {
+	out := make([]Interest, 0, r.cache.Len())
+	for _, item := range r.cache.All() {
 		out = append(out, item)
 	}
 	sort.Slice(out, func(i, j int) bool {
@@ -873,7 +815,7 @@ func (r *Registry) Reap(live func(sessionID string) (bool, error), graceWindow t
 	}
 	r.mu.RLock()
 	var candidates []candidate
-	for sid, item := range r.cache {
+	for sid, item := range r.cache.All() {
 		if now-item.UpdatedAt > graceMs {
 			candidates = append(candidates, candidate{sessionID: sid, updatedAt: item.UpdatedAt})
 		}
