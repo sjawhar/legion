@@ -2,36 +2,22 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-252",
-  "completed": "2026-10-26T08:05:00Z",
-  "round": 2,
-  "reviewedCodeHead": "ee9ec60b7930b8dfa78c78701791aaa6cc959bce",
+  "completed": "2026-10-26T09:37:00Z",
+  "round": 3,
+  "scope": "Narrowed by the architect (review round cap): round-2 findings 1-4, the spec's four acceptance lines, and correctness defects in this change.",
+  "reviewedCodeHead": "5f1f78dc08ae5ae3c7e276f856265eb8fb59efe6",
   "decision": "changes_requested",
-  "critical": 0,
-  "important": 3,
-  "minor": 1,
-  "roundOneFindings": "All five fixed at ee9ec60b: one live-tree definition (record/project.go line/liveRoots), RanAsRoot gates every RecordedAncestor write (workflow/adopt.go), re-read on a recorded issue's re-parent (repositories.go:761), settleObserved carries RecordedAncestor (intake/facts.go:799), one listing walk at boot and no walk for unlabelled issues; the per-event re-read is only partly bounded (finding 3).",
+  "critical": 1,
+  "important": 0,
+  "minor": 0,
+  "roundTwoFindings": "All four fixed at 5f1f78dc: the hold stores the whole Dispatch chain and holds while any live root is on it (the reviewer's round-2 probe now passes: slotted=false, ancestry [LEGION-169 LEGION-180 LEGION-168]); SKILL.md:39 names the held-root case; the re-read is bounded to roots whose chain holds the event's key and prepareObserved does none; a stale recorded event re-reads nothing and an unrecorded key is read from Dispatch's current view. Tests TestARootHeldPastAParkedRootOnItsChainTakesNoSlot, TestARereadReadsOnlyTheRootsWhoseChainHoldsTheEventsIssue, TestARereadSkipsARootWhoseChainItCannotRead and TestAStaleEventOfAMovedAncestorBringsBackNoHold pass on the reviewer's Postgres.",
   "keyFindings": [
     {
-      "severity": "important",
-      "file": "packages/daemon/internal/daemon/repositories.go",
-      "description": "recordedAncestor stops at the first recorded root on the chain (l.858), and returns '' when the parent itself is recorded (l.836), whether or not that root's tree is live. A labelled todo R under unrecorded P under Q, a recorded root parked in backlog under live T (a once-queued root a person moved under T, INFRA-214's state), is recorded with RecordedAncestor Q, not held (Q is not live), and takes a slot and an architect, though release_children's walk reaches T. Reproduced at ee9ec60b with a throwaway heldLine test: slotted=true, RecordedAncestor LEGION-180. Contradicts AGENTS.md:197-199 and the architect skill l.38."
-    },
-    {
-      "severity": "important",
-      "file": "skills/legion-architect/SKILL.md",
-      "description": "l.39 tells an architect refused CHILD_IN_OTHER_TREE to re-parent the child back or ask that tree's architect. A todo child K of a root H held under the architect's tree is refused exactly so (`K runs in the tree of H, not T`, the tester's round-3 proof), and H has no architect; the remedy is to release H, which brings K. The guidance, or the refusal, must name that case."
-    },
-    {
-      "severity": "important",
-      "file": "packages/daemon/internal/daemon/repositories.go",
-      "description": "Round-1 finding 5, partly open: every event of an unrecorded issue (any status) still re-walks the chain of every labelled todo root under an unrecorded parent (l.761, ParentedQueuedRoots includes roots under plain epics), one Dispatch read and one recordOf transaction per key, inside AckWait; a deadline expiry mid-walk is not an ancestorUnread and naks the unrelated event. prepareObserved (l.645) runs the same full re-read synchronously inside release_children's HTTP request for each unrecorded todo child, and settleObserved discards it once the child is recorded."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/daemon/internal/daemon/repositories.go",
-      "description": "An out-of-order older event of a recorded issue whose parent differs from its record's (l.761) seeds the walk with its stale parent, and applyReread writes before admission's sequence fence, so a hold a newer re-parent removed comes back until the next re-read; T's release of that root answers 403 ISSUE_OUTSIDE_TREE meanwhile."
+      "severity": "critical",
+      "file": "packages/daemon/internal/store/migrations/0051_issue_ancestry.up.sql",
+      "description": "Version 51 collides with main's 0051_issue_suspend_release.up.sql (#2173, merged 2026-10-26T08:43Z). The file names differ, so GitHub shows the PR MERGEABLE, but the merged tree holds both 0051 files and migrations.All refuses them: `migrations 0051_issue_ancestry.up.sql and 0051_issue_suspend_release.up.sql share version 51` (reproduced on `git merge-tree --write-tree origin/main 5f1f78dc`, tree e34ce555). Store.Migrate returns it and daemon.Run aborts boot, so every daemon start and every migrating test would fail after the merge. Fix: renumber to 0052_issue_ancestry.up.sql with its header updated."
     }
   ],
-  "thermonuclear": "thermonuclear-deep-review and thermonuclear-code-quality at dc9f8c18 (code ee9ec60b): both CHANGES; deep finding 1 reproduced by the reviewer. Provider not verified: neither run's transcript records its provider or model as the reviewer can read it, and the two runs' self-reports disagree.",
-  "ci": "At ee9ec60b, read 2026-10-26T08:03Z: lint success, typecheck success, pr-title success, changes success; test and build in_progress; pi-* checks queued. Required: lint, typecheck, test, pr-title. Compare ee9ec60b...dc9f8c18 touches only .legion/."
+  "thermonuclear": "thermonuclear-deep-review and thermonuclear-code-quality at 37097754 (code 5f1f78dc): both CHANGES on the same migration collision, both confirming round-2 findings 1-4 fixed. Provider not verified.",
+  "ci": "At 5f1f78dc, read 2026-10-26T09:28Z: Tests 40298572792, Legion Envoy and Contracts 40298572760, Docs 40298572980, Worker Image 40298572727 and PR Title 40298739240 all queued. Required: lint, typecheck, test, pr-title. Compare 5f1f78dc...37097754 touches only .legion/."
 }
