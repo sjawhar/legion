@@ -135,9 +135,10 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 
 ### Changed
 
-- The `thermonuclear-deep-review` and `thermonuclear-code-quality` skills no longer set
-  `disable-model-invocation`, so a Legion worker on Claude Code can load them with the Skill tool,
-  as it loads `ce-dogfood` (INFRA-248).
+- The `thermonuclear-deep-review` and `thermonuclear-code-quality` skills carry `hide: true` in
+  place of upstream's `disable-model-invocation: true`, as `ce-dogfood` does: still hidden from Oh
+  My Pi's skill listing, and now loadable through Claude Code's Skill tool by a Legion worker on
+  Claude Code (INFRA-248).
 - The Legion skills this plugin ships are rewritten to the minimum text that carries their
   instructions (INFRA-353): `legion-architect`, `legion-controller`, `legion-worker`,
   `legion-retro`, `legion-oracle`, `thermonuclear-code-quality` and `thermonuclear-deep-review`,

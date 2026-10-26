@@ -66,8 +66,8 @@ shows a thumbnail. Keep every other screenshot under `$TMPDIR`.
 
 Send each entry of the report's "Decisions for a Human", each `Blocked (needs human verify)` leg
 and each pack rule or documented convention the branch contradicts on purpose to the tree's
-architect alone, with `envoy_publish` to its role topic. A contradiction on purpose fails nothing.
-The architect writes any decision block. Never ask the person directly.
+architect alone, with `envoy_publish` to its role topic. The architect writes any decision block.
+Never ask the person directly.
 
 ## The suite
 
@@ -76,8 +76,8 @@ on GitHub as `skill://legion-worker/references/pr-body.md` says, and rerun nothi
 
 ## Helpers Legion does not ship
 
-`ce-worktree`, `ce-debug`, `ce-commit`, `ce-compound` and `ce-setup` are not installed: do the step
-yourself or leave it out. List what ce-dogfood would hand to `ce-compound` under "Pack candidates".
+`ce-worktree`, `ce-debug`, `ce-commit` and `ce-compound` are not installed: do the step yourself or
+leave it out. List what ce-dogfood would hand to `ce-compound` under "Pack candidates".
 
 ## Caches
 
@@ -89,7 +89,6 @@ without it the script tries `/tmp` first.
 `agent-browser` is on `PATH` in the worker image. It drives the image's `chromium` with no extra
 flags.
 
-When `agent-browser` is not on `PATH` (a tmux pane, or an image older than this change), tell the
-tree's architect with `envoy_publish`, as `skill://legion-worker/references/tools.md` says. Install
-nothing, and still do your other checks. ce-dogfood's "stop and run `/ce-setup`" does not apply:
-Legion ships no `ce-setup`.
+When `agent-browser` is not on `PATH`, as on a tmux host, tell the tree's architect with
+`envoy_publish`, as `skill://legion-worker/references/tools.md` says. Install nothing, and still do
+your other checks.

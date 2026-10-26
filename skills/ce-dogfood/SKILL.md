@@ -1,6 +1,7 @@
 ---
 name: ce-dogfood
 description: "Hands-off, diff-scoped browser QA of the active branch: maps user flows, drives a real browser, autonomously fixes small breakages with regression tests and commits, judges experience against product personas, and writes a durable dogfood report. Manual invocation only."
+hide: true
 argument-hint: "[PR number, branch name, or blank for current branch] [--port PORT]"
 ---
 
