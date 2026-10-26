@@ -1,0 +1,98 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "INFRA-511",
+  "completed": "2026-10-26T23:21:00Z",
+  "plan": "dispatch://INFRA-511/artifact/plan-md",
+  "summary": "The operator's controller start message moves out of session_start: `legion controller start` appends the positional word `/legion-controller-start`, Oh My Pi runs it as its first command-line prompt after startup and after the TUI listens (omp main.ts:815-821), and pi-legion's new extension command of that name sends LEGION_CONTROLLER_START_MESSAGE. A process-wide start mark in the pi-shared interface (version 4) makes pi-envoy's startup wake (PR #2278) wait for the start turn and then wake for the startup cards after it; the daemon API contract is bumped as the CLI/plugin skew guard, and `legion controller start` refuses a non-terminal stdin before the mint.",
+  "dependencies": [
+    "PR #2278 (dispatch://INFRA-497, branch legion/INFRA-497) must merge to main before task 5 (pi-envoy deferral); bring main into legion/INFRA-511 then (architect asked to confirm)."
+  ],
+  "tasks": [
+    "1. Dependency: tasks 2-4 and 6-8 start on main; task 5 after #2278 merges and main is brought in.",
+    "2. Interactive PTY runner in packages/pi-shared/test/omp-harness.ts (Bun.Terminal, Bun 1.3.14; OMP_SKIP_SETUP=1; stand-in gateway with held replies, stand-in daemon GET /legion/v1/state + controller claims/register + controller grant, stand-in listener, real NATS via LEGION_TEST_NATS_URL). Run it at the base commit with today's argv and record what the screen shows while the start turn's request is held (start message and busy indicator shown?, typed text + Enter taken?, Esc aborts?) in the PR body and implement handoff.",
+    "3. CLI packages/daemon/cmd/legion/controller.go: append positional `/legion-controller-start` (Go constant beside daemon.ControllerStartMessage) after --append-system-prompt; refuse a stdin that is not a terminal after the operator-token-file check and before the probe and mint (test seam per the DI convention); update comments controller.go:92-95, 235-239, 272-274 and internal/daemon/controller.go:17-25.",
+    "4. pi-legion + pi-shared: controller-session.ts keeps the session_start claim from sending; at today's send point it records the start as due and sets envoyPluginInterface().startupTurn = {session, sentAt: undefined}; keeps the in-flight claim promise. extensions/legion.ts registers `legion-controller-start` with the decision table in plan.md (await in-flight claim; due and unsent: sendUserMessage when idle, deliverAs followUp when a turn runs, record sent, stamp sentAt; claim failed before due: ui.notify warning naming /legion-claim-controller; otherwise notify nothing to send). Claims after startup (/legion-claim-controller, reclaimAfterSessionChange) keep today's direct send when nothing was sent. agent_start whose session id equals the mark's clears it; session_shutdown clears it. pi-types.ts: sendUserMessage deliverAs 'followUp', CommandContext isIdle?. interface.ts: startupTurn record, ENVOY_PLUGIN_INTERFACE_VERSION 3 -> 4.",
+    "5. pi-envoy extensions/envoy.ts (on #2278): an idle fold check while the mark names its own session and is not past STARTUP_TURN_CAP_MS (30 s) from sentAt (no cap while sentAt is unset) keeps startupPhase, sends no wake, records the seen startup cards as owed; with sentAt set it re-arms at the cap. After the start turn's agent_end the check wakes for the owed cards whether or not a reply follows them. A mark past the cap is ignored.",
+    "6. Daemon API contract to the next free number (40 unless main took it): internal/api/version.go entry with the collision note, contracts/fixtures/daemon-api/version.json, pi-legion and claude-envoy package.json, every site the bump procedure names (grep daemonApiVersion / DaemonAPIVersion / the old number, packages/contracts/AGENTS.md); promptreferences_omp_test.go spells interface version 4.",
+    "7. Tests (acceptance table) and CI: pi-legion job in .github/workflows/envoy-and-contracts.yaml:584 gets the NATS service and LEGION_TEST_NATS_URL; the pi_legion path filter (:357) adds packages/pi-envoy/**.",
+    "8. Docs and changelogs: packages/pi-legion/AGENTS.md:347-352 (and the LEGION-392 reason), packages/pi-envoy/AGENTS.md, packages/pi-shared/AGENTS.md (version 4, startupTurn), docs/kubernetes.md:6182-6187, scripts/e2e/README.md:1639 and :1663-1664, comments in scripts/e2e/controller-start-tmux.sh:150-151 and stage4b-sandbox-tree.sh:5429-5444, [Unreleased] in pi-legion, pi-envoy and claude-envoy CHANGELOGs, root AGENTS.md `legion controller start` line if it describes the start message."
+  ],
+  "acceptance": [
+    {"id": "A1", "criterion": "Before the change, what the operator sees during the start turn is recorded", "surface": "interactive Oh My Pi under a PTY, today's argv, base commit", "check": "task 2's harness run; screen captures and held-request timeline in the PR body"},
+    {"id": "A2", "criterion": "The start turn runs after startup ends and the TUI shows it", "surface": "interactive Oh My Pi under a PTY with both plugins and the CLI's argv", "check": "while the first Messages request is held the screen shows the start message and a busy indicator; the same case fails at the base commit"},
+    {"id": "A3", "criterion": "The operator can type during the start turn", "surface": "same", "check": "text + Enter while held is shown queued and the next Messages request carries it after the start message"},
+    {"id": "A4", "criterion": "Esc interrupts the start turn", "surface": "same", "check": "lone \\x1b while held: request aborted, transcript assistant entry stopReason aborted with errorMessage 'Interrupted by user', no further request"},
+    {"id": "A5", "criterion": "The start message starts the first turn, once", "surface": "same", "check": "first Messages request's last message is daemon.ControllerStartMessage; no request or transcript entry contains /legion-controller-start; first transcript user message is the start message; one start message"},
+    {"id": "A6", "criterion": "A card and a Legion notice arriving during startup do not take the first turn, and each still gets a turn after it", "surface": "same, real NATS", "check": "stand-in holds a session_start request made once the agent-subject and controller-topic NATS subscriptions are open (plan review found one: envoy.ts subscribeNotice awaits registerSession() right after opening the controller-topic subscription, #2278 envoy.ts:2601-2611), publishes a role-lane card and a controller-topic notice, sees the lane receipt while holding, then answers; first request is the start turn with both before its last message, each marked startup: true; next request's last message is the wake naming 2 messages; no earlier request ends with the wake text"},
+    {"id": "A7", "criterion": "Hand-started takeover sends no start message; daemon-launched controller sends none itself and reports ready as today", "surface": "pi-legion unit tests", "check": "legion.test.ts cases 2608 and 2624 reworked, 2667 unchanged"},
+    {"id": "A8", "criterion": "Skewed CLI and plugin are refused before the mint", "surface": "legion controller start probe", "check": "controller_test.go:1083-1090 pattern (api.DaemonAPIVersion - 1) at the new number"},
+    {"id": "A9", "criterion": "A stdin that is not a terminal is refused before the probe and the mint", "surface": "legion controller start", "check": "controller_test.go case: refusal names stdin, no probe, no mint request"},
+    {"id": "A10", "criterion": "The mark cannot hold wakes forever", "surface": "pi-envoy unit tests", "check": "envoy.test.ts: sentAt older than the cap -> idle card wakes; mark of another session -> no deferral; mark cleared by the start turn -> owed wake after its agent_end"},
+    {"id": "A11", "criterion": "The CLI passes the word", "surface": "Go unit tests", "check": "controller_test.go:656-662 exact argv {--append-system-prompt, <prompt>, /legion-controller-start}; len(argv)==3 at :750, :769, :819, :835"},
+    {"id": "A12", "criterion": "Real CLI smoke", "surface": "built legion + pinned Oh My Pi + both plugins under a PTY, stand-in daemon and listener, real NATS", "check": "cd packages/daemon && go build ./cmd/legion; legion controller start --config <scratch controller.yaml> under a PTY; first Messages request is the start message after startup; recorded in the PR body with the head SHA"}
+  ],
+  "commands": [
+    "cd packages/pi-legion && LEGION_TEST_OMP=$(command -v omp) LEGION_TEST_NATS_URL=nats://127.0.0.1:4222 bun test extensions/controller-start-omp.test.ts",
+    "local NATS: go run github.com/nats-io/nats-server/v2@v2.10.29 -p 4222 (build cache under $TMPDIR)",
+    "cd packages/pi-envoy && bun test extensions/envoy.test.ts",
+    "cd packages/pi-legion && bun test",
+    "cd packages/daemon && go test ./cmd/legion/ ./internal/daemon/ ./internal/api/",
+    "bunx biome check packages/",
+    "bun run typecheck in each changed package"
+  ],
+  "decisions": [
+    "A person typing before the command runs takes the first turn; the start message follows as a follow-up of that turn. The spec orders the start message ahead of Envoy cards and Legion notices, not ahead of a person.",
+    "Startup cards are in the start turn's context and also get their own wake after it (the spec: the wake must not take the first turn ahead of the start message).",
+    "The daemon API contract bump is the repository's CLI/plugin skew guard (version.go 36-39 bumped the same way); a deployment rolls daemon, worker image and plugins together for it.",
+    "Rejected: a witness message plus timer in pi-legion (can fire before InteractiveMode's #subscribeToAgent, interactive-mode.ts:2458-2498, and races pi-envoy's wake timer); the start-message text as the positional word (sent even when the claim failed; session.prompt raises no input event)."
+  ],
+  "reportedToArchitect": [
+    "The daemon-launched controller (out of scope per the spec): since #2278 its start message, an RPC prompt after claims/ready (internal/daemon/controller.go:138-151), can lose the first turn to a startup card's wake timer because RPC mode reads no input until startup returns; on main before #2278 a startup card already ran its turn inside the drain ahead of it. Unverified on a binary; the same mark set at ready would cover it."
+  ],
+  "productionCheck": "The changed path is the operator's `legion controller start`. Read the deployment's `controller:` setting and the released legion and pi-legion versions carrying the merge; record an operator start on that release when one can be observed (first transcript user message, start turn after startup), otherwise report what production carries and that the operator path runs at the operator's next start.",
+  "requiredSkills": {
+    "implement": [
+      "legion-worker: phase rules, push and handoff; references pr-body.md (proof shape, simplify pass), default-branch-check.md, conflicts-and-rewrites.md (bringing main in after #2278 merges)",
+      "ce-simplify-code: the simplify pass over the settled change before the proof at the head",
+      "asd-ste100: the PR body and messages to teammates"
+    ],
+    "test": [
+      "legion-worker: tester proof shape (pr-body.md) and re-running the PTY test, Go tests and the CLI smoke at the head"
+    ],
+    "review": [
+      "legion-worker: references merge-gate.md and review-threads.md for the review and its threads",
+      "ce-simplify-code: judging whether the controller-session state and the pi-envoy deferral are as simple as the behaviour allows"
+    ]
+  },
+  "gapAnalysis": {
+    "findings": [
+      {"finding": "1. CLI and pi-legion coupled through the new positional word with no skew check (new CLI + old plugin sends the word to the model as text; old CLI + new plugin never sends the start).", "answer": "Daemon API contract bump (design item 6, task 6, A8): the controller probe refuses a pi-legion at another contract before the mint, both directions."},
+      {"finding": "2. The startup mark may never clear (no positional word, claim past the 30 s handler timeout, send failing before agent_start, a subagent's agent_start, /new before the command).", "answer": "Contract bump removes the no-word case; the command awaits an in-flight claim; the mark clears only on its own session's agent_start and on session_shutdown; pi-envoy ignores a mark more than 30 s past its sentAt and re-arms at the cap; a session change gives pi-envoy another session id (A10)."},
+      {"finding": "3. Command behaviour undefined for a claim in flight, failed before or after the mark.", "answer": "Decision table in plan.md design item 2 covering in-flight, due-and-unsent (including a later step that threw, as legion.test.ts:2564 keeps), failed before due, already sent / takeover / none."},
+      {"finding": "4. Input typed before the positional command takes the first turn; E2 widens that window.", "answer": "Decision: a person's own turn may come first; the start message then goes as a followUp of that turn; recorded in Decisions."},
+      {"finding": "5. Non-terminal stdin turns the positional word into a headless print-mode run after the mint.", "answer": "legion controller start refuses a non-terminal stdin before the probe and the mint (design item 7, A9), after the token-file check so controller-start-tmux.sh:270 is unchanged."},
+      {"finding": "6. 'Ahead of any card' has two readings.", "answer": "Reading B: startup cards are owed their own wake after the start turn, whether or not a reply follows them (design item 5, A6)."},
+      {"finding": "7. Daemon-launched controller's first turn under #2278 is ambiguous.", "answer": "Out of scope per the spec ('behave as they do today'); reported to the architect with the evidence and a proposed fix."},
+      {"finding": "8. Acceptance criteria had no machine-checkable outputs; test profile must skip the setup wizard; no TS PTY harness; pi-legion CI job has no NATS.", "answer": "Acceptance table A1-A12 with concrete observables; OMP_SKIP_SETUP=1 (tui/src/setup/wizard.ts:51); PTY runner via Bun.Terminal added to omp-harness.ts (task 2); NATS service and path filter in CI (task 7); A6 names the hold point."},
+      {"finding": "9. Two line references wrong (controller_test.go :827 should be :835; legion.test.ts list missed :2608).", "answer": "Corrected in plan.md (A11 :835; 2608 in the reworked tests)."},
+      {"finding": "10. Unverified draft claims (Bun.Terminal, no extension event after the wait, sendUserMessage triggerTurn, notices via the same deliver).", "answer": "Verified: .bun-version 1.3.14 and `typeof Bun.Terminal` is 'function' in this pod; sendUserMessage options confirmed by the analyst; the plan reviewer traced the controller-topic notice through envoy.ts subscribeNotice. The no-event claim stays the INFRA-497 implementer's reading, and the design does not depend on it."},
+      {"finding": "11. Session title from the positional word: not a gap.", "answer": "No change needed; pi-legion titles the session in session_start and auto-title skips a named session."}
+    ]
+  },
+  "planReview": {"verdict": "approved", "rounds": 1},
+  "specDepartures": [
+    {
+      "spec": "The spec's scope is pi-legion's start-message send (controller-session.ts:183) and the real-binary proof; it names no CLI or contract change.",
+      "plan": "`legion controller start` appends the positional word `/legion-controller-start`, and the daemon API contract is bumped so the controller probe refuses a pi-legion of another release before the mint.",
+      "evidence": "The extension API has no event after the startup wait, and a pi-legion timer can fire before InteractiveMode subscribes to agent events (omp interactive-mode.ts:2458-2498, event-controller.ts:800-813); Oh My Pi's command-line prompts run after startup and after the TUI listens (omp main.ts:815-825). The word couples the CLI and pi-legion; the probe compares only daemonApiVersion (bootgate.go:955-1000).",
+      "outcome": {"kind": "changed", "scope": "Adds a change to the legion CLI (controller.go) and a daemon API contract bump; a deployment rolls daemon, worker image and plugins together for it."}
+    },
+    {
+      "spec": "legion controller start is unchanged apart from the start message.",
+      "plan": "`legion controller start` refuses a stdin that is not a terminal, before the probe and the mint.",
+      "evidence": "With a positional word and a non-terminal stdin Oh My Pi runs print mode (omp main.ts:1886-1889) and would run a headless start turn after the mint revoked the running controller; today it exits (exitWithoutTerminal).",
+      "outcome": {"kind": "changed", "scope": "A new refusal in legion controller start for a non-terminal stdin."}
+    }
+  ]
+}
