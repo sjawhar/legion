@@ -435,16 +435,21 @@ func TestDifferentialCompare(t *testing.T) {
 		case lost:
 			flag("lost fixed point of a misread", sides)
 		}
-		// Churn is head writing other bytes for a document base stores correctly in bytes a write
-		// reads back as held too: such bytes are kept, and others are written only where the base's
-		// do not read back as held (a title's carriage return written raw, which every later write
-		// reads as a line feed, is written `&#13;`). Bytes of base's that only Parse reads back as
-		// held are counted apart, ungated.
-		if base.correct && differs(base.dump.Render, head.dump.Render) {
-			if base.dump.WriteReadsBack {
+		// Churn is head writing other bytes for a document base stores correctly - as the engine
+		// reads it, in bytes Go and the engine read back as held - in bytes a write reads back as
+		// held too: such bytes are kept, and others are written only where the base's do not read
+		// back as held (a title's carriage return written raw, which every later write reads as a
+		// line feed, is written `&#13;`). Bytes of base's that only Parse reads back as held, and
+		// the bytes of a document base does not store correctly (one the engine misreads at base),
+		// which head may write otherwise, are counted apart, ungated.
+		if differs(base.dump.Render, head.dump.Render) {
+			switch {
+			case base.correct && base.dump.WriteReadsBack:
 				flag("churn", sides)
-			} else {
+			case base.correct:
 				flag("churn of base bytes a write reads otherwise", sides)
+			case base.stores:
+				flag("rewritten bytes of a document base stores incorrectly", sides)
 			}
 		}
 		if base.renders && !head.renders {
