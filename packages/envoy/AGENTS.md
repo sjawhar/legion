@@ -2467,8 +2467,25 @@ and key-bound launcher credentials to enrolled agent sessions and pods; `cmd/age
 client (a box's or pod's own key, or a machine session's `cmd/agent-secrets-helper`), which enrolls a
 runtime, requests grants, polls a pending decision to completion, and either prints session/grant
 state (`self`, `status --json`) or `syscall.Exec`s a command with the granted values injected into
-its environment. Its `secret` forms are how a person manages the agent secrets themselves, in the
-broker's own store (AWS Secrets Manager or GCP Secret Manager) under their own cloud sign-in (below); the broker writes no secret. The broker holds
+its environment. Every line it prints about a secret names the store it answered from
+(`cmd/agent-secrets/source.go`): the broker `AGENT_SECRETS_URL` names, by host, and that broker's
+own store, read once from the public `GET /v1/settings` and named as `AWS Secrets Manager account
+<id> in <region>` or `GCP Secret Manager project <number>`, the broker alone where those settings
+cannot be read. The injection form writes one line to stderr before it execs, naming the injected
+names and that source and never a value; `request`, `status` and `self` print it as `source:`,
+`secret show` the store as `store:` (and `secret list` one line on stderr, with `store` on each
+row under `--json`), and every refusal carries it, so no answer or refusal of this CLI's is read
+as another secrets CLI's about the same name. No line names a secret's version: a grant's release
+carries names and values alone, and a session holds no sign-in of its own to the store.
+`--json` on `request`, `status`, `self`, `whoami`, `machine list` and `grant list` is the broker's
+body verbatim as before, and makes no settings call. The other secrets CLI a box may hold,
+`secrets`, is secretsd, shipped from `sjawhar/forward` (the old `sjawhar/secretsd` repository is
+archived): it reads its agent tier from local sops files and its human tier through the local
+secretsd daemon, which asks for a YubiKey touch, and it never reads this broker. One key name can
+hold different values in the two stores. `agent-secrets` names its store in output and every
+refusal; `secrets` names none today. `agent-secrets secret` forms are how a person manages the
+agent secrets themselves, in the broker's own store (AWS Secrets Manager or GCP Secret Manager)
+under their own cloud sign-in (below); the broker writes no secret. The broker holds
 no Dispatch credential and opens no Dispatch ask anywhere. Every
 human decision — approving or denying a secret request, approving or denying a machine login,
 revoking a grant, ending a machine login — made in Dispatch reaches the broker's approval routes

@@ -56,6 +56,32 @@
   whatever the length of its target's key; only bare text it links is held to the index's
   bounds. A search hit for an ask links its typed block (`#b-<id>`) only while that block is a
   graph node, and otherwise `?ask=<id>`, so `dispatch read` of the hit reads the ask.
+- `agent-secrets` names the store it answered from, so no answer of its own is read as another
+  secrets CLI's about the same name: the broker `AGENT_SECRETS_URL` names, by host, and that
+  broker's store, read once from its public `GET /v1/settings` (`AWS Secrets Manager account <id>
+  in <region>`, or `GCP Secret Manager project <number>`), with the broker named alone where the
+  settings cannot be read. The injection form writes one line to standard error before it execs -
+  `agent-secrets: NAME, NAME from the broker at <host> (<store>)`, the names it injected and
+  nothing of their values; `request`, `status` and `self` print a `source:` line; `secret show`
+  prints a `store:` line and every row of `secret list` carries `store` in `--json` and a line
+  on standard error naming the store the table is from; `machine list` and `grant list` name
+  their broker the same way; and every refusal names where this CLI looked, from a denied request
+  to `UNKNOWN_SECRET` and a grant that released no value. `--json` output is unchanged for
+  `request`, `status`, `self`, `whoami`, `machine list` and `grant list`, which still print the
+  broker's own body verbatim and make no settings call; `secret list --json` and
+  `secret show --json` gain a `store` field. No line names a secret's version: the broker
+  releases a grant's values as names and values alone, and a session holds no sign-in of its own
+  to the store to read one with (`agent-secrets secret show`, which reads the store directly
+  under the person's own sign-in, lists each version as before).
+- A broker call that did not complete says what failed, rather than leaving a bare transport error
+  to read as a broker refusal: the host does not resolve, name resolution failed, the connection
+  was refused, no connection could be made (network or host unreachable, or any other dial error),
+  nothing answered in time, or a peer answered and then broke the exchange (TLS, an HTTP answer to
+  https, EOF or a reset after the request); any other error says only that the request failed. It
+  names the method and URL it tried, and that `AGENT_SECRETS_URL` named that address, so a session
+  that inherited a stale address reads a stale address. Such a message carries no `asked the
+  broker …` trailer: the broker refused nothing. A local helper refusal or dead helper socket names
+  that socket instead, since no broker was asked.
 - Dispatch's conversation view (`/agents/<id>/live`) shows the model and thinking level an Oh My
   Pi session runs now, from the `settings` frame pi-envoy publishes, before any turn runs on them
   and within about 20 seconds of a change made anywhere else (INFRA-195). Where the session runs

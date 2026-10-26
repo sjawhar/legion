@@ -13,7 +13,8 @@
     ],
     "waiting": [
       "LEGION-209"
-    ]
+    ],
+    "blocked": []
   },
   "issues": {
     "LEGION-208": {
