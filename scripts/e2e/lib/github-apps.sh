@@ -1,12 +1,16 @@
 # shellcheck shell=bash disable=SC2034,SC2154 # require_app_inputs sets <role>_app_* by name; the caller sets work
-# Legion's two role Apps as a live proof takes them: this deployment's own pair by default, any
+# Legion's two role Apps as a live proof takes them: the default pair below, any
 # other deployment's through its inputs, and either one proved against GitHub before the run
 # writes anything there.
 #
 # Sourced, never run. The caller defines fail (which exits) and note, and sets work, the run's
-# scratch directory. Each App is an id and the name of the secret-store key holding its private
-# key, read by require_app_inputs from two inputs that default to this repository's own
-# deployment:
+# scratch directory. The gated Go proofs (packages/daemon/internal/api/real_github_test.go) are
+# callers too: liveProofApps defines fail and reads require_app_inputs's results and
+# app_key_command from stdout, so neither of those two writes anything else to stdout, and
+# proveLiveProofApps defines fail and note, writes $work/github-apps.yaml itself from the block the
+# proofs act with, and runs check_github_apps on it. Each App is an id and the
+# name of the secret-store key holding its private key, read by require_app_inputs from two inputs
+# that default to the pair below:
 #   LEGION_E2E_<ROLE>_APP_ID        the App's numeric id (ROLE is IMPLEMENT or REVIEW)
 #   LEGION_E2E_<ROLE>_APP_KEY_NAME  the secret-store key the key runner resolves to the App's
 #                                   private key, base64-encoded PEM
@@ -31,28 +35,32 @@
 
 github_apps_lib=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
 
-# This repository's own deployment, the pair a run that sets no input takes. They are sjawhar/legion's
-# own App ids and secret-store key names, which this public repository may carry; another
-# deployment's belong in its inputs, never here.
+# The default pair, which a run that sets no input takes: the App ids and secret-store key names
+# the live proofs here have used since they were written. GitHub shows both Apps owned by an
+# organization, not by this repository's owner, so a deployment with Apps of its own passes them
+# through the inputs; no other deployment's ids or names belong here.
 default_implement_app_id=3202636
 default_implement_app_key_name=LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64
 default_review_app_id=3202653
 default_review_app_key_name=GH_REVIEW_APP_PRIVATE_KEY_B64
 
 # require_app_inputs ROLE... sets <role>_app_id and <role>_app_key_name for each ROLE (implement,
-# review) from its two inputs, each defaulting to this deployment's own value above, and fails
+# review) from its two inputs, each defaulting to the default pair's value above, and fails
 # naming an input that is set but malformed, never echoing its value (an operator who pastes a key
 # where its name goes must not see it in the transcript). A name is letters, digits and
 # underscores, so it is safe in the key command's shell text and as a variable name; when this call
 # reads both roles, one App id or one key name for both is refused, since the daemon refuses two
 # roles on one App at boot. It records the roles it read for
-# write_github_apps, and sets app_key_unsets: `-u NAME` for each role's key name, for this
-# deployment's own two, and for every exported variable whose name holds PRIVATE_KEY, so a process
+# write_github_apps, and sets app_key_unsets: `-u NAME` for each role's key name, for the
+# default pair's two, and for every exported variable whose name holds PRIVATE_KEY, so a process
 # the run starts inherits no App key, the proof human's included.
 github_apps_read=()
 app_key_unsets=()
 app_key_runner=
 require_app_inputs() {
+  # The checks below use bracket ranges, which bash's =~ reads in the caller's locale: under a
+  # UTF-8 locale [0-9] and [A-Za-z] admit fullwidth digits and accented letters. C keeps them ASCII.
+  local LC_ALL=C
   local role upper id_var key_var id_default key_default id key name roles_read=()
   for role in "$@"; do
     case "$role" in implement | review) ;; *) fail "require_app_inputs: no App role '$role'" ;; esac
@@ -62,7 +70,7 @@ require_app_inputs() {
     id_default=default_${role}_app_id
     key_default=default_${role}_app_key_name
     # An input set to an empty value is a command that printed nothing, not a choice of the
-    # default: it is refused, where an unset one takes this deployment's own value.
+    # default: it is refused, where an unset one takes the default.
     id=${!id_var-${!id_default}}
     key=${!key_var-${!key_default}}
     # The bounds keep a pasted credential out of the message: a base64 key is letters and digits
