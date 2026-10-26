@@ -204,3 +204,35 @@ func TestADocumentWhoseReferenceKeyLeavesNoRoomForABlockIDIsStillWritten(t *test
 		t.Fatalf("the long-named document has %d versions after its upload and one edit, want 2", versions)
 	}
 }
+
+// Text that cites a block of a document whose reference key is long - the 2680-character name
+// above - is written as main writes it: a comment posts and a document citing it uploads. Main
+// reads no `#b-` reference, so neither write indexes an edge there; a block reference's target
+// id is `<ref_key>#<block id>`, which the refs and block_refs keys cannot hold at this length, so
+// the block index must not turn the citation into a refusal of the write.
+func TestTextCitingABlockOfALongNamedDocumentIsStillWritten(t *testing.T) {
+	_, handler, _ := browserDocumentService(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Cites a long-named document", "Context paragraph.\n")
+	name := randomBlockID(t, 2680) + ".md"
+	uploaded := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/artifacts", map[string]any{
+		"name": name, "content": boundCallout("x"),
+	}, "alice")
+	if uploaded.Code != http.StatusCreated {
+		t.Fatalf("upload a document named with 2680 characters: status=%d body=%.400s", uploaded.Code, uploaded.Body.String())
+	}
+	cited := decodeBody[struct {
+		Artifact model.Artifact `json:"artifact"`
+	}](t, uploaded).Artifact
+	block := "dispatch://" + issue.Key + "/artifact/" + cited.Slug + "#b-x"
+
+	if created := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
+		"body": "See " + block + " and dispatch://" + issue.Key + ".",
+	}, "alice"); created.Code != http.StatusCreated {
+		t.Fatalf("post a comment citing a block of the long-named document: status=%d body=%.400s, want 201 as main answers", created.Code, created.Body.String())
+	}
+	if citer := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/artifacts", map[string]any{
+		"name": "citer.md", "content": "This document cites " + block + ".\n",
+	}, "alice"); citer.Code != http.StatusCreated {
+		t.Fatalf("upload a document citing a block of the long-named document: status=%d body=%.400s, want 201 as main answers", citer.Code, citer.Body.String())
+	}
+}
