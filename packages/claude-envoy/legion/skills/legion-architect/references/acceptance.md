@@ -120,8 +120,9 @@ The merge closes the issue: when GitHub reports the pull request merged while th
   `pr-merged` notice names what it waits for and none follows as they depart, so read the pull
   request on GitHub.
 - A child's close reaches you as `child-closed`. The daemon retires five of its six claims and
-  suspends its implementer, session and volume kept, because it still owes the production check
-  (`skill://legion-worker/references/merge-gate.md`, *The production check after the close*).
+  leaves the implementer running, because it still owes the production check. When the issue's
+  pod and Sandbox go is in `skill://legion-worker/references/merge-gate.md`, *The production check
+  after the close*.
 - A root's close writes `done`, frees the tree's admission slot and lingers the tree for
   `linger_hours` with every member suspended. The linger's end, the tree's last step, waits until
   every member's open production check has closed.
@@ -135,9 +136,11 @@ the looks, what woke the last one and when the next is due).
 
 When a person closes a root and it stays `done` through its linger, each child still in the
 workflow is handed to Legion as a root of its own: `todo` with the `legion` label, its phase, gate,
-phase records and pull request carried into a new generation, and that phase's role started. The
-child stays its own tree; reopening the old root does not take it back. Park a child with
-`park_child` before then when its work should stop with the root.
+phase records and pull request carried into a new generation, and that phase's role started. A
+child that never started but still waits on an unfinished issue is handed over too, carrying no
+run: it waits in the line until its blockers are done, and its architect starts as a fresh root
+and registers its own spec. The child stays its own tree; reopening the old root does not take it
+back. Park a child with `park_child` before then when its work should stop with the root.
 
 If you are that child's architect:
 
