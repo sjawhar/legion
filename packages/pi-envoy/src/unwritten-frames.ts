@@ -50,7 +50,8 @@ interface UnwrittenTurn extends Unwritten {
 export interface HandedTurn {
   /** The session the turn was handed to. */
   readonly sessionID: string;
-  readonly identity: DedupeIdentity;
+  /** The frame the turn carries; none for a frame with no identity, which nothing waits on. */
+  readonly identity: DedupeIdentity | undefined;
   readonly claim: DeliveryClaim | undefined;
   /** `text`: sent with `pi.sendUserMessage`, in the host's queue from the send. `typed`: sent with
    *  `pi.sendUserInput`, in the queue only once the host answers that it submitted a message. */
@@ -98,9 +99,10 @@ export function unwrittenCardKeys(identity: {
  * The cards (`unwrittenCardKeys`) and the person's turns (by Dispatch message id) handed to the
  * host and not yet written (`Unwritten`), each under the claim of its frame. This owns each
  * claim from the hand-off on: the claim settles, and the replay ledger records the frame, once
- * the host writes it (`written`, `turnHandled`, `textTurnsEnded`); it is released, recording
- * nothing, when the host dropped the frame unwritten (a session change, `releaseOtherSessions`;
- * a person's turn an interrupt withdrew, `handBackWithdrawn`), so a sweep shows the stream's copy.
+ * the host writes it (`written`, `turnHandled`, `textTurnsEnded`), or at once for a frame nothing
+ * waits on (`sendCard`, `awaitTurn`); it is released, recording nothing, when the host refused the
+ * card (`sendCard`) or dropped the frame unwritten (a session change, `releaseOtherSessions`; a
+ * person's turn an interrupt withdrew, `handBackWithdrawn`), so a sweep shows the stream's copy.
  */
 export class UnwrittenFrames {
   readonly #host: UnwrittenFramesHost;
@@ -115,17 +117,18 @@ export class UnwrittenFrames {
   }
 
   /**
-   * Hands the host a card for the frame `identity`: one that shows it, or a failure notice naming
-   * it. The card is shown only once the host writes it (`written`), and the answer says it waits
-   * so, under `claim` when there is one; one of a frame the ledger keeps nothing of does not wait,
-   * and its caller settles at once. A send that throws leaves nothing waiting.
+   * Hands the host a card for the frame `identity` under `claim`: one that shows it, or a failure
+   * notice naming it. `queued`: the card is shown only once the host writes it (`written`), and
+   * the claim, when there is one, waits until then. `shown`: a card of a frame the ledger keeps
+   * nothing of, which nothing waits on, so its claim settles at once. A send that throws leaves
+   * nothing waiting and releases the claim, so a re-send or a sweep shows the frame again.
    */
   sendCard(
     content: string | readonly ContentBlock[],
     deliverAs: CardDelivery,
     identity: DedupeIdentity | undefined,
     claim: DeliveryClaim | undefined
-  ): boolean {
+  ): "queued" | "shown" {
     const keys = identity === undefined ? [] : unwrittenCardKeys(replayLedgerIdentity(identity));
     const card: UnwrittenCard | undefined =
       identity === undefined || keys.length === 0
@@ -144,9 +147,13 @@ export class UnwrittenFrames {
       this.#host.handCard(content, deliverAs, identity);
     } catch (error) {
       if (card !== undefined) this.#stopAwaitingWrite(card);
+      claim?.release();
       throw error;
     }
-    return card !== undefined;
+    if (card !== undefined) return "queued";
+    // The ledger keeps nothing of the frame, so there is nothing to record.
+    claim?.settle();
+    return "shown";
   }
 
   /** Whether a card of the frame `identity` waits to be written: that card shows it. */
@@ -154,10 +161,20 @@ export class UnwrittenFrames {
     return unwrittenCardKeys(replayLedgerIdentity(identity)).some((key) => this.#cards.has(key));
   }
 
-  /** A person's turn `messageID` was handed to the host, which writes it as a user message. */
+  /**
+   * A person's turn `messageID` was handed to the host, which writes it as a user message. A turn
+   * of a frame with no identity gives the ledger nothing to record, so nothing waits on its write:
+   * its claim settles at once.
+   */
   awaitTurn(messageID: string, turn: HandedTurn): void {
+    const { identity } = turn;
+    if (identity === undefined) {
+      turn.claim?.settle();
+      return;
+    }
     this.#turns.set(messageID, {
       ...turn,
+      identity,
       handedAt: turn.via === "text" ? this.#moments : undefined,
     });
   }
@@ -235,7 +252,11 @@ export class UnwrittenFrames {
    * its `steering` list, the terminal puts it in the editor) and is never written. Such a turn is
    * not handed again, since run late it could act on an instruction the person no longer means:
    * its claim is released and nothing records it, so the next sweep shows the stream's copy as a
-   * card that runs nothing.
+   * card that runs nothing. That holds for a typed input only. A `pi.sendUserMessage` turn (sent
+   * only on a host without `pi.sendUserInput`) never gets here: the aborted run's `agent_end` calls
+   * `textTurnsEnded` right after `runAborted` (extensions/envoy.ts), which records the turn as
+   * shown, since the host keeps no mark that would tell a withdrawn one from a written one: no
+   * sweep shows the stream's copy of such a turn, which only the person who interrupted got back.
    */
   handBackWithdrawn(settled: boolean): void {
     const since = this.#moments;

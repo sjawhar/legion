@@ -157,6 +157,59 @@ export function expectsLaneReceipt<
   );
 }
 
+/** A message a subscription yielded, and when it arrived. */
+export interface Arrival<Message> {
+  readonly message: Message;
+  /** When the subscription yielded it (`now`), however long the messages before it took. */
+  readonly receivedAt: number;
+}
+
+/**
+ * Reads `subscription` as its messages arrive and yields them in arrival order, each stamped with
+ * when it arrived. nats.js pushes a message into a subscription's iterator as it arrives, and this
+ * always waits on that iterator, so the stamp is the arrival time whatever the caller is doing
+ * with the messages before it (a Dispatch accept, pictures, a side turn): a message waits here
+ * until the caller asks for the next one. Once the subscription ends or throws, nothing more is
+ * yielded: the caller's next read ends, or throws that error, and the messages read but not yet
+ * taken are dropped, as the subscription's own iterator drops what it still holds when it stops.
+ */
+export async function* readArrivals<Message>(
+  subscription: AsyncIterable<Message>,
+  now: () => number = Date.now
+): AsyncGenerator<Arrival<Message>, void, undefined> {
+  const arrived: Arrival<Message>[] = [];
+  let stopped: { readonly error?: unknown; readonly failed: boolean } | undefined;
+  let wake: (() => void) | undefined;
+  const signal = () => {
+    wake?.();
+    wake = undefined;
+  };
+  void (async () => {
+    try {
+      for await (const message of subscription) {
+        arrived.push({ message, receivedAt: now() });
+        signal();
+      }
+      stopped = { failed: false };
+    } catch (error) {
+      stopped = { error, failed: true };
+    }
+    signal();
+  })();
+  for (;;) {
+    if (stopped?.failed === true) throw stopped.error;
+    if (stopped !== undefined) return;
+    const next = arrived.shift();
+    if (next !== undefined) {
+      yield next;
+      continue;
+    }
+    const { promise, resolve } = Promise.withResolvers<void>();
+    wake = resolve;
+    await promise;
+  }
+}
+
 /**
  * The part of an inbound frame a host recognises a repeat by: its `dedupe_key`, which a re-send
  * shares with the frame that came first, and its `event_id`, which only copies of one publish

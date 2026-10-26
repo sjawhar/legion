@@ -152,6 +152,8 @@ interface Write {
 function createHost(followed: string[]) {
   const host = {
     session: SESSION as string | undefined,
+    /** The session a write persists to; it stays on `session`'s while the host shuts down. */
+    writeSession: SESSION as string | undefined,
     followed,
     attempts: [] as ReplayFrame[],
     shown: [] as ReplayFrame[],
@@ -166,6 +168,7 @@ function createHost(followed: string[]) {
   };
   const replayHost: ReplayHost = {
     sessionID: () => host.session,
+    writeSessionID: () => host.writeSession,
     followedSubjects: () => host.followed,
     async deliver(frame) {
       host.attempts.push(frame);
@@ -926,6 +929,34 @@ describe("the ledger", () => {
     expect(restarted.delivered(frame)).toBe(true);
     clock.now = T0 + REPLAY_LEDGER_TTL_MS;
     expect(restarted.delivered(frame)).toBe(false);
+  });
+
+  test("a frame recorded for its session while the host shuts down is written, and a resume passes it over", async () => {
+    const { stream, host, engine, make } = setup();
+    await engine.sweep();
+    const refused = envelope();
+    stream.publish(AGENT, refused);
+
+    // Shutting down: no new work starts, but the session's record is still written.
+    host.session = undefined;
+    await engine.recordDeliveredFor(SESSION, { event_id: refused.event_id });
+    // A write persisting to another session's record records nothing for this one.
+    host.writeSession = "ses_other";
+    await engine.recordDeliveredFor(SESSION, { event_id: "evt-not-this-session" });
+
+    expect(host.writes.flatMap((write) => write.delivered.map((entry) => entry.event_id))).toEqual([
+      refused.event_id,
+    ]);
+    expect(engine.delivered({ event_id: "evt-not-this-session" })).toBe(false);
+
+    host.session = SESSION;
+    host.writeSession = SESSION;
+    const resumed = make();
+    resumed.restore(host.writes.at(-1)?.snapshot() ?? { ledger: [] });
+    await resumed.sweep();
+    expect(host.attempts).toEqual([]);
+    // Recorded by its event id alone: a re-send under a new event id with the same key is new.
+    expect(resumed.delivered({ ...refused, event_id: "evt-retry" })).toBe(false);
   });
 
   test("past its limit the ledger forgets the oldest entry first", async () => {

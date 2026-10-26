@@ -2,8 +2,8 @@ import { describe, expect, test } from "bun:test";
 import { decode } from "@toon-format/toon";
 import {
   closeReplayedRemoval,
-  coversAnotherAgentSubject,
   type ReplayNotice,
+  reachesPrivateStreamSubject,
   rememberedTopics,
   replayFollowedSubjects,
   routeReplayNotice,
@@ -34,33 +34,49 @@ describe("the subjects a session follows for replay", () => {
     ]);
   });
 
-  test("leave out every wildcard reaching another session's agent subject, as the listener does", () => {
-    const own = "notifications.agent.ses-1";
-    const wide = [
+  // The listener's rule, packages/envoy/internal/bus (TestReachesPrivateStreamSubjectBoundsInterests).
+  test("leave out every topic reaching a private stream subject but the session's own agent subject, as the listener's rule does", () => {
+    const own = "notifications.agent.ses_a";
+    const reaching = [
+      "notifications.agent.ses_b",
       "notifications.agent.*",
       "notifications.agent.>",
+      "notifications.agent.ses_a.>",
       "notifications.>",
-      "notifications.*.ses-1",
+      "notifications.*.ses_a",
       "notifications.*.*.x",
       ">",
+      "notifications.envoy.exceptions.notifications.agent.ses_a",
+      "notifications.envoy.exceptions.notifications.agent.ses_b",
+      "notifications.envoy.exceptions.notifications.agent.>",
+      "notifications.envoy.exceptions.>",
+      "notifications.envoy.>",
+      "notifications.legion.ACME.controller",
+      "notifications.legion.>",
+      "notifications.*.ACME.controller",
     ];
-    expect(replayFollowedSubjects(own, [...wide, ISSUE, "notifications.*"])).toEqual([
-      own,
-      ISSUE,
-      "notifications.*",
-    ]);
-    for (const topic of [...wide, "notifications.agent.ses-parent"]) {
-      expect(coversAnotherAgentSubject(own, topic)).toBe(true);
-    }
-    for (const topic of [
-      own,
+    const kept = [
       ISSUE,
       "notifications.agent",
       "notifications.*",
-      "notifications.role.x",
-    ]) {
-      expect(coversAnotherAgentSubject(own, topic)).toBe(false);
+      "notifications.legion",
+      "notifications.github.acme.widgets.pr.7.>",
+      "notifications.team.x.>",
+      "notifications.envoy.exceptions.notifications.role.reviewer",
+      "notifications.exceptions.agent.ses_b",
+    ];
+    expect(replayFollowedSubjects(own, [...reaching, ...kept])).toEqual([own, ...kept]);
+    for (const topic of reaching) expect(reachesPrivateStreamSubject(own, topic)).toBe(true);
+    for (const topic of [own, ...kept, "notifications.role.reviewer"]) {
+      expect(reachesPrivateStreamSubject(own, topic)).toBe(false);
     }
+    // A session id holding a wildcard makes its "own" agent subject no session's alone.
+    expect(reachesPrivateStreamSubject("notifications.agent.>", "notifications.agent.>")).toBe(
+      true
+    );
+    expect(reachesPrivateStreamSubject("notifications.agent.*", "notifications.agent.*")).toBe(
+      true
+    );
   });
 });
 

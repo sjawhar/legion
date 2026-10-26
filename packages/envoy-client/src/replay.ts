@@ -4,6 +4,7 @@ import {
   dedupeKeyNamesItsEvent,
   type Envelope,
   EnvelopeSchema,
+  LEGION_NOTICE_TOPIC_PREFIX,
   ROLE_TOPIC_PREFIX,
 } from "@legion/contracts";
 import { encode } from "@toon-format/toon";
@@ -215,11 +216,17 @@ export interface ReplayChange {
 /**
  * The host side of the engine. Each callback runs for the session that was current when the
  * engine started the work that calls it; the engine re-reads `sessionID()` before each delivery
- * and each write and drops the work when it changed.
+ * and each write and drops the work when it changed (`writeSessionID()` for `recordDeliveredFor`).
  */
 export interface ReplayHost {
   /** The session the host is on now; undefined or empty before it has one. */
   sessionID(): string | undefined;
+  /**
+   * The session whose record `write` persists to now: a host shutting down still writes it while
+   * `sessionID()` already answers none, so no new work starts. `sessionID()` when absent. Only
+   * `recordDeliveredFor` reads it.
+   */
+  writeSessionID?(): string | undefined;
   /** The subjects the session follows and wants replayed: its agent subject and its topics. */
   followedSubjects(): readonly string[];
   /** Shows a stored frame; a throw is `failed`. It must run nothing a live frame would run. */
@@ -277,6 +284,14 @@ export interface ReplayEngine {
    * write that fails is logged, and its record goes with the next write.
    */
   recordDelivered(frame: DedupeIdentity): Promise<void>;
+  /**
+   * Records a frame for the session `sessionID`, as `recordDelivered` does, while the host may be
+   * shutting down: it records only while the host's `writeSessionID()` names `sessionID` and no
+   * `restore` has moved the engine since, and the write goes ahead even once `sessionID()` answers
+   * none. The ledger holds the frame from the call on, so a sweep passes it over before the write
+   * lands. It never rejects.
+   */
+  recordDeliveredFor(sessionID: string, frame: DedupeIdentity): Promise<void>;
   /**
    * The host failed to show a live frame on the followed subject `followed`, which it received at
    * `receivedAt` (the engine's clock, `Date.now` unless `now` is given): shows its failure notice
@@ -381,19 +396,26 @@ export function createReplayEngine(options: ReplayEngineOptions): ReplayEngine {
   const notify = (notice: ReplayNotice) => safely("notice", () => host.notify(notice));
 
   // A host whose session read throws has no session to work for, so its work stops as on a switch.
-  const currentSession = (): string | undefined => {
+  const sessionRead = (read: () => string | undefined) => (): string | undefined => {
     try {
-      return host.sessionID();
+      return read();
     } catch {
       return undefined;
     }
   };
-  const bind = (): { readonly sessionID: string; readonly alive: () => boolean } | undefined => {
-    const sessionID = currentSession();
-    if (sessionID === undefined || sessionID === "") return undefined;
+  const currentSession = sessionRead(() => host.sessionID());
+  const writeSession = sessionRead(() =>
+    host.writeSessionID === undefined ? host.sessionID() : host.writeSessionID()
+  );
+  const bindTo = (
+    sessionID: string | undefined,
+    read: () => string | undefined
+  ): { readonly sessionID: string; readonly alive: () => boolean } | undefined => {
+    if (sessionID === undefined || sessionID === "" || read() !== sessionID) return undefined;
     const bound = epoch;
-    return { sessionID, alive: () => bound === epoch && currentSession() === sessionID };
+    return { sessionID, alive: () => bound === epoch && read() === sessionID };
   };
+  const bind = () => bindTo(currentSession(), currentSession);
 
   // Keys sorted, fields in one order: equal states serialise equally, so a comparison of the text
   // says whether the state changed. Without `afters`, it says whether anything but where the
@@ -797,6 +819,12 @@ export function createReplayEngine(options: ReplayEngineOptions): ReplayEngine {
       record(replayLedgerIdentity(frame));
       await flush(alive);
     },
+    async recordDeliveredFor(sessionID, frame) {
+      const alive = bindTo(sessionID, writeSession)?.alive;
+      if (alive === undefined) return;
+      record(replayLedgerIdentity(frame));
+      await flush(alive);
+    },
     async liveFailed(followed, envelope, error, receivedAt) {
       const started = cursorStarts.get(followed);
       if (
@@ -895,34 +923,58 @@ export function envoyNoticeText(fields: Readonly<Record<string, string>>): strin
   return encode({ envoy: fields });
 }
 
-/** The tokens every session's agent subject starts with; one or more tokens follow them. */
-const AGENT_SPACE = AGENT_TOPIC_PREFIX.slice(0, -1).split(".");
+/** The topic a failed delivery's report goes to is this prefix followed by the original topic. */
+const EXCEPTION_TOPIC_PREFIX = "notifications.envoy.exceptions.";
 
 /**
- * Whether a topic reaches a session's agent subject other than `ownAgentSubject`, under NATS
- * wildcard rules: another session's by name, or a wildcard over the agent subjects
- * (`notifications.agent.*`, `notifications.>`, `notifications.*.<x>`). The listener stores no such
- * interest and replays no such subject (packages/envoy `bus.CoversAnotherAgentSubject`), since
- * either would read other sessions' inboxes, so a host neither registers nor replays one.
+ * The stream subjects whose topics carry one agent session's private payload: each session's
+ * inbox, the Legion daemon's notices for a project's controller, and a failed delivery's report
+ * on a session's subject (a session's own lane included).
  */
-export function coversAnotherAgentSubject(ownAgentSubject: string, topic: string): boolean {
-  if (topic === ownAgentSubject) return false;
-  const tokens = topic.split(".");
-  for (const [index, token] of AGENT_SPACE.entries()) {
-    const wanted = tokens[index];
-    if (wanted === ">") return true;
-    if (wanted !== "*" && wanted !== token) return false;
+const PRIVATE_STREAM_SUBJECTS = [
+  `${AGENT_TOPIC_PREFIX}>`,
+  `${LEGION_NOTICE_TOPIC_PREFIX}>`,
+  `${EXCEPTION_TOPIC_PREFIX}${AGENT_TOPIC_PREFIX}>`,
+];
+
+/** Whether some subject matches both patterns, under NATS wildcard rules. */
+function subjectsOverlap(a: string, b: string): boolean {
+  const aTokens = a.split(".");
+  const bTokens = b.split(".");
+  for (let index = 0; index < aTokens.length && index < bTokens.length; index += 1) {
+    const aToken = aTokens[index];
+    const bToken = bTokens[index];
+    if (aToken === ">" || bToken === ">") return true;
+    if (aToken !== "*" && bToken !== "*" && aToken !== bToken) return false;
   }
-  return tokens.length > AGENT_SPACE.length;
+  return aTokens.length === bTokens.length;
+}
+
+/**
+ * Whether a topic reaches a private stream subject other than `ownAgentSubject`: it overlaps one
+ * under NATS wildcard rules, so another session's agent subject, a failed-delivery lane
+ * (`notifications.envoy.exceptions.notifications.agent.<id>`, the session's own included), the
+ * Legion controller lane (`notifications.legion.>`), and every wildcard reaching any of them
+ * (`notifications.agent.*`, `notifications.>`, `notifications.*.<x>`, `notifications.envoy.>`)
+ * count, and it is not the session's own agent subject as one literal subject. This mirrors the
+ * listener's rule, `privateStreamSubjects` and `ReachesPrivateStreamSubject` in
+ * packages/envoy/internal/bus/stream.go: the listener stores no such interest and replays no such
+ * subject, since either would read another session's private payload, so a host neither
+ * registers nor replays one.
+ */
+export function reachesPrivateStreamSubject(ownAgentSubject: string, topic: string): boolean {
+  if (!PRIVATE_STREAM_SUBJECTS.some((subject) => subjectsOverlap(topic, subject))) return false;
+  // A session id holding `*` or `>` makes a wildcard of its "own" agent subject, no session's alone.
+  return topic !== ownAgentSubject || /[*>]/.test(ownAgentSubject);
 }
 
 /**
  * The subjects a session follows for replay, which are what it registers with the listener: its
- * own agent subject, then every topic it follows but a role's and one reaching another session's
- * agent subject. Role messages stay live only, whether on a role lane or on a subject the host
- * holds for a role (`heldForRole`); another session's agent subject (a fork's parent, until the
- * host closes it), or a wildcard over the agent subjects, is not this session's to replay, and the
- * listener would refuse it (`coversAnotherAgentSubject`).
+ * own agent subject, then every topic it follows but a role's and one reaching a private stream
+ * subject. Role messages stay live only, whether on a role lane or on a subject the host holds for
+ * a role (`heldForRole`); another session's agent subject (a fork's parent, until the host closes
+ * it), a failed-delivery lane, the Legion controller lane, or a wildcard reaching one of them, is
+ * not this session's to replay, and the listener would refuse it (`reachesPrivateStreamSubject`).
  */
 export function replayFollowedSubjects(
   ownAgentSubject: string,
@@ -932,7 +984,7 @@ export function replayFollowedSubjects(
   const followed = [...topics].filter(
     (topic) =>
       !topic.startsWith(ROLE_TOPIC_PREFIX) &&
-      !coversAnotherAgentSubject(ownAgentSubject, topic) &&
+      !reachesPrivateStreamSubject(ownAgentSubject, topic) &&
       !heldForRole(topic)
   );
   return [...new Set([ownAgentSubject, ...followed])];

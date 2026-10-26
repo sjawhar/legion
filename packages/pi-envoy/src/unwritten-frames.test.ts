@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   createDeliveryDedupe,
   type DedupeIdentity,
+  type DeliveryClaim,
   type DeliveryDedupe,
 } from "@legion/envoy-client/delivery";
 import { type CardDelivery, UnwrittenFrames, unwrittenCardKeys } from "./unwritten-frames";
@@ -24,6 +25,23 @@ interface Handed {
   readonly content: unknown;
   readonly deliverAs: CardDelivery;
   readonly identity: DedupeIdentity | undefined;
+}
+
+/**
+ * A claim that notes what became of it: a frame the dedupe keeps nothing of (no event id, a key
+ * that does not name its event) has no record a real claim's state could be read from.
+ */
+function notingClaim() {
+  const became: ("settled" | "released")[] = [];
+  const claim: DeliveryClaim = {
+    settle: () => {
+      became.push("settled");
+    },
+    release: () => {
+      became.push("released");
+    },
+  };
+  return { claim, became };
 }
 
 /** The module beside a fake host, with real claims from a delivery dedupe. */
@@ -74,7 +92,7 @@ describe("a card handed to the host", () => {
     const { frames, recorded, handed, claim, claimState } = harness();
     const frame = dispatchFrame(1);
 
-    expect(frames.sendCard("card", "aside", frame, claim(frame))).toBe(true);
+    expect(frames.sendCard("card", "aside", frame, claim(frame))).toBe("queued");
     expect(handed).toEqual([{ content: "card", deliverAs: "aside", identity: frame }]);
     expect(frames.waitsOnCard({ dedupe_key: "dispatch-1", source: "dispatch" })).toBe(true);
     expect(claimState(frame)).toBe("pending");
@@ -89,29 +107,37 @@ describe("a card handed to the host", () => {
     expect(recorded).toEqual([frame]);
   });
 
-  test("does not wait when the ledger keeps nothing of its frame", () => {
-    const { frames, handed } = harness();
+  test("does not wait when the ledger keeps nothing of its frame, and settles its claim at once", () => {
+    const { frames, recorded, handed } = harness();
     // No event id, and a key that does not name its event.
     const frame: DedupeIdentity = { dedupe_key: "content-hash", source: "mcp" };
+    const { claim, became } = notingClaim();
 
     expect(unwrittenCardKeys({})).toEqual([]);
-    expect(frames.sendCard("card", "steer", frame, undefined)).toBe(false);
-    expect(frames.sendCard("notice", "steer", undefined, undefined)).toBe(false);
+    expect(frames.sendCard("card", "steer", frame, claim)).toBe("shown");
+    expect(frames.sendCard("notice", "steer", undefined, undefined)).toBe("shown");
     expect(handed).toHaveLength(2);
     expect(frames.waitsOnCard(frame)).toBe(false);
+    expect(became).toEqual(["settled"]);
+    expect(recorded).toEqual([]);
   });
 
-  test("leaves nothing waiting when the host refuses it", () => {
+  test("leaves nothing waiting and releases its claim when the host refuses it", () => {
     const { frames, state, claim, claimState } = harness();
     const frame = dispatchFrame(1);
+    const unkept = notingClaim();
     state.refuseHand = true;
 
     expect(() => frames.sendCard("card", "steer", frame, claim(frame))).toThrow(
       "the host refused the card"
     );
+    expect(() =>
+      frames.sendCard("card", "steer", { dedupe_key: "content-hash" }, unkept.claim)
+    ).toThrow("the host refused the card");
     expect(frames.waitsOnCard(frame)).toBe(false);
-    // The caller releases its claim; nothing here settled it.
-    expect(claimState(frame)).toBe("pending");
+    // Claimable again: a re-send, or a sweep, shows the frame.
+    expect(claimState(frame)).toBe("released");
+    expect(unkept.became).toEqual(["released"]);
   });
 
   test("written once the host is on another session settles its claim and records nothing", async () => {
@@ -258,7 +284,11 @@ describe("a person's turn handed to the host", () => {
     expect(claimState(elsewhere)).toBe("pending");
   });
 
-  test("an interrupt withdrew is released, not handed again, once it was in the host's queue", () => {
+  // In order as production runs it: the aborted run's `agent_end` calls `runAborted`, then
+  // `textTurnsEnded` (extensions/envoy.ts), before any heartbeat's `handBackWithdrawn`. So only a
+  // typed input is released; a `pi.sendUserMessage` turn the interrupt withdrew is recorded as
+  // shown at the run's end, as the host keeps no mark that tells it from one it wrote.
+  test("an interrupt withdrew is released, not handed again, once it was in the host's queue, unless sent as text", async () => {
     const { frames, recorded, withdrawn, handed, claim, claimState } = harness();
     const typed = dispatchFrame(1);
     const text = dispatchFrame(2);
@@ -270,25 +300,59 @@ describe("a person's turn handed to the host", () => {
     });
     frames.awaitTurn("m-2", { sessionID: "s1", identity: text, claim: claim(text), via: "text" });
     frames.runAborted();
+    await frames.textTurnsEnded();
+    expect(recorded).toEqual([text]);
+    expect(claimState(text)).toBe("settled");
 
     // The typed input is not in the host's queue until the host answers that it submitted one.
     frames.handBackWithdrawn(true);
-    expect(withdrawn).toEqual([["s1", "m-2"]]);
-    expect(claimState(text)).toBe("released");
+    expect(withdrawn).toEqual([]);
     expect(claimState(typed)).toBe("pending");
 
     frames.turnSubmitted("m-1");
     frames.handBackWithdrawn(true);
-    expect(withdrawn).toHaveLength(1);
+    expect(withdrawn).toEqual([]);
     frames.handBackWithdrawn(true);
 
-    expect(withdrawn).toEqual([
-      ["s1", "m-2"],
-      ["s1", "m-1"],
-    ]);
+    expect(withdrawn).toEqual([["s1", "m-1"]]);
     expect(claimState(typed)).toBe("released");
-    expect(recorded).toEqual([]);
+    expect(recorded).toEqual([text]);
     expect(handed).toEqual([]);
+  });
+
+  test("of a frame with no identity settles its claim at once and waits on nothing", async () => {
+    const { frames, state, recorded, withdrawn } = harness();
+    const text = notingClaim();
+    const typed = notingClaim();
+
+    frames.awaitTurn("m-1", {
+      sessionID: "s1",
+      identity: undefined,
+      claim: text.claim,
+      via: "text",
+    });
+    frames.awaitTurn("m-2", {
+      sessionID: "s1",
+      identity: undefined,
+      claim: typed.claim,
+      via: "typed",
+    });
+    expect(text.became).toEqual(["settled"]);
+    expect(typed.became).toEqual(["settled"]);
+
+    // Nothing waits: no write, run end, interrupt or session change finds either turn.
+    state.matched = "m-1";
+    await frames.written({ role: "user", content: "hello" });
+    await frames.textTurnsEnded();
+    frames.turnSubmitted("m-2");
+    frames.runAborted();
+    frames.handBackWithdrawn(true);
+    frames.handBackWithdrawn(true);
+    frames.releaseOtherSessions("s2");
+    expect(recorded).toEqual([]);
+    expect(withdrawn).toEqual([]);
+    expect(text.became).toEqual(["settled"]);
+    expect(typed.became).toEqual(["settled"]);
   });
 });
 

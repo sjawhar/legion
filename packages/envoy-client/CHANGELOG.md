@@ -51,7 +51,10 @@
   key when it names its event), kept 72 hours from when each was recorded and capped at 20,000,
   lets the live path drop a repeat after a restart. A frame the host fails to show three times
   becomes a failure notice the host shows instead, and `liveFailed` shows it at once for a live
-  frame no sweep will show, a frame received before its subject's cursor started included;
+  frame no sweep will show, a frame received before its subject's cursor started included (a host
+  stamps when the frame arrived with `readArrivals` from `@legion/envoy-client/delivery`, which
+  reads a subscription as its messages arrive, so a frame queued behind a slow delivery is not
+  stamped late);
   `envoyNoticeText` renders a notice in TOON, so a sender's multi-line summary cannot forge a
   field; a recreated stream, a cursor older than the stream's oldest message,
   and a listener that does not replay (404) or cannot (503 `REPLAY_UNAVAILABLE`, 401, 403) are
@@ -59,12 +62,16 @@
   hourly. A host that handed a frame or a failure notice on without writing it yet answers
   `queued`: the frame stays claimed and unrecorded, its cursor before it, until the host records it
   once written (`recordDelivered`), so a process that ends first shows it after the restart;
-  `replayLedgerIdentity` names a frame as the ledger does. The transport gains `replay()` (one
+  `recordDeliveredFor` records for the session a frame was delivered in while the host shuts down
+  (through the host's optional `writeSessionID`); `replayLedgerIdentity` names a frame as the
+  ledger does. The transport gains `replay()` (one
   try, 10 s) and `EnvoyApiError.code`; a `createDeliveryDedupe` claim gains `settle()` and the
   dedupe `pending()`, true until the claim is settled or released. Beside the engine sits the host
   policy both plugins share: the subjects followed for replay (`replayFollowedSubjects`), never a
-  role's or one reaching another session's agent subject (`coversAnotherAgentSubject`: another
-  session's `notifications.agent.<id>`, or a wildcard over the agent subjects such as
+  role's or one reaching a private stream subject (`reachesPrivateStreamSubject`, the listener's
+  rule in `packages/envoy/internal/bus/stream.go`: another session's `notifications.agent.<id>`,
+  a failed-delivery lane `notifications.envoy.exceptions.notifications.agent.<id>` the session's
+  own included, a `notifications.legion.` controller lane, or a wildcard reaching one such as
   `notifications.agent.*` or `notifications.>`, which the listener neither stores as an interest
   nor replays), the topics a restore follows again (`rememberedTopics`), a replayed removal's
   close and unregister (`closeReplayedRemoval`), and which one-time notices are a card or a

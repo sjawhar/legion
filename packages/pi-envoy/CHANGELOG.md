@@ -25,8 +25,10 @@
   or resumes it, never recorded before its card is written. A person's Send run as typed input
   that an interrupt withdrew unwritten (Oh My Pi hands it back to whoever interrupted) is
   released at that heartbeat, so the next sweep shows it as a card that runs nothing. A BTW
-  refused live (its side turn failed, the session shutting down, a host without one) is not
-  shown again by a sweep, and a Retry of it still runs. A replayed subscription removal takes the
+  refused live (its side turn failed, the session shutting down, a host without one) is recorded
+  before its claim is released and the refusal posted, in the session's file even while it shuts
+  down, so no sweep shows it again, whether the refusal is in flight, fails, or the session is
+  resumed; a Retry of it still runs. A replayed subscription removal takes the
   topic out of the listener's registry too, so a later restart does not follow it again.
   The session file keeps what the session was shown (`envoy-replay-delivered`, and the written
   cards themselves, read back by the event they name) and where it read to
@@ -35,14 +37,17 @@
   listener's grace follows its topics again; a person's turn written just before the process
   ended, its record not, can come back once as a card, never lost. A frame that fails to show is
   retried, and its third failure, or a live failure no sweep will retry (a frame received before
-  its subject's cursor started included), shows one card naming it and how to read it, where a
+  its subject's cursor started included, stamped when it arrived even behind a slow delivery),
+  shows one card naming it and how to read it, where a
   failed injection was only logged before. A recreated stream or a
   cursor older than the stream's
   oldest message is said once as a card; a listener without the route (404) or unable to read the
   stream (503 `REPLAY_UNAVAILABLE`, 401, 403) is said once as a warning, and live delivery goes
-  on as before. The session registers and replays no followed topic reaching another session's
-  agent subject (a fork parent's until a pass closes it, or a wildcard such as
-  `notifications.agent.*`), which the listener refuses to store; it still follows it live.
+  on as before. The session registers and replays no followed topic reaching a private stream
+  subject, by the listener's own rule: another session's agent subject (a fork parent's until a
+  pass closes it), a failed-delivery lane, a `notifications.legion.` controller lane, or a
+  wildcard reaching one such as `notifications.agent.*`, which the listener refuses to store; it
+  still follows it live.
   `scripts/smoke-replay.sh` proves it against a real session, listener and JetStream (INFRA-439).
 
 - The agent stream reports the model and thinking level the session runs now, so Dispatch's live

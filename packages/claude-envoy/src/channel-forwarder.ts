@@ -3,6 +3,7 @@ import {
   type DedupeIdentity,
   DedupeIdentitySchema,
   type DeliveryDedupe,
+  readArrivals,
 } from "@legion/envoy-client/delivery"
 import { messageFor } from "@legion/envoy-client/errors"
 import { expandSubscriptionTopics } from "@legion/envoy-client/transport"
@@ -83,8 +84,9 @@ export interface ChannelForwarderOptions {
   readonly ledger?: ChannelForwarderLedger
   /**
    * A frame whose delivery rejected, after its claim was released: `topic` is the subscription it
-   * came on, which says whether a replay will show it again, and `receivedAt` when it arrived
-   * (`Date.now`), which says whether a replay cursor started past it.
+   * came on, which says whether a replay will show it again, and `receivedAt` when the
+   * subscription yielded it (`Date.now`, `readArrivals`), however long the frames before it took
+   * to deliver, which says whether a replay cursor started past it.
    */
   readonly failed?: (
     message: ChannelInboundMessage,
@@ -146,8 +148,7 @@ export function createChannelForwarder(
 
   const deliver = async (topic: string, subscription: ChannelTopicSubscription): Promise<void> => {
     try {
-      for await (const message of subscription) {
-        const receivedAt = Date.now()
+      for await (const { message, receivedAt } of readArrivals(subscription)) {
         const raw = decoder.decode(message.data)
         const identity = deliveryIdentity(raw)
         let claim = dedupe.claim(identity)

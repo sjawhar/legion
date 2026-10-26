@@ -31,12 +31,17 @@ followed subjects, which the server follows again at start even after the listen
 interests, and at most 72 hours of ledger, at most 20,000 entries; no sweep prunes these files,
 since Claude Code can resume a session at any later time. A `/clear` handoff to a new id starts a
 fresh file, as a new session does, so nothing from before it comes back. A frame that fails three
-times, or a live frame that fails and no sweep will show, is replaced by a notice naming it on
+times, or a live frame that fails and no sweep will show (one that arrived before its subject's
+cursor started included, stamped when its subscription yielded it, `readArrivals`, not when the
+frames queued before it finished delivering), is replaced by a notice naming it on
 the same path; a notice that cannot be shown, and a listener that does not replay (404,
 `REPLAY_UNAVAILABLE`, 401 or 403), go to stderr. A crash between the hand-off and the ledger
 write can show a frame twice, never lose it. The host policy pi-envoy shares is the engine's too:
 which subjects are followed for replay (`replayFollowedSubjects`: the agent subject and every
-topic but a role's or another session's agent subject), which remembered topics come back at start
+topic but a role's or one reaching a private stream subject, which registration leaves out too:
+`reachesPrivateStreamSubject`, the listener's rule, another session's agent subject, a
+failed-delivery lane, the Legion controller lane, or a wildcard reaching one), which remembered
+topics come back at start
 (`rememberedTopics`), when a replayed `subscription.removed` closes a topic and takes it out of
 the registry (`closeReplayedRemoval`), and which one-time notices are a card rather than a warning
 (`routeReplayNotice`); this server keeps only how it shows a card, where it warns, and its file.

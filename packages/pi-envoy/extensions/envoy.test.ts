@@ -9389,7 +9389,7 @@ describe("envoy OMP extension", () => {
       },
     });
   });
-  test("never registers a followed topic reaching another session's agent subject", async () => {
+  test("never registers a followed topic reaching a private stream subject", async () => {
     const registrations: { readonly topics: readonly string[] }[] = [];
     globalThis.fetch = async (input, init) => {
       if (new URL(input.toString()).pathname === "/v1/interests/subscribe") {
@@ -9405,7 +9405,13 @@ describe("envoy OMP extension", () => {
     const subscribeTool = fixture.tools.find((tool) => tool.name === "envoy_subscribe");
     if (subscribeTool === undefined) throw new Error("envoy_subscribe was not registered");
     const issue = "notifications.dispatch.issue.KEY-1.ask.opened";
-    const refused = ["notifications.*.x", "notifications.agent.*", "notifications.agent.ses_other"];
+    const refused = [
+      "notifications.*.x",
+      "notifications.agent.*",
+      "notifications.agent.ses_other",
+      "notifications.envoy.exceptions.notifications.agent.ses_bounded",
+      "notifications.legion.ACME.controller",
+    ];
 
     await subscribeTool.execute("", { topics: [...refused, issue] });
 
@@ -14059,7 +14065,8 @@ describe("messages missed while the subscription was down", () => {
    * deployed stream keeps no team topic.
    */
   class StreamModel {
-    readonly created = "2026-10-20T00:00:00Z";
+    /** When the stream was created; a recreation changes it. */
+    created = "2026-10-20T00:00:00Z";
     firstSeq = 1;
     lastSeq = 0;
     messages: StoredFrame[] = [];
@@ -15253,16 +15260,78 @@ describe("messages missed while the subscription was down", () => {
       // The replayed copy is a card alone: Dispatch is asked nothing more.
       expect(accepts).toBe(1);
     });
+
+    // The frame behind a held delivery is stamped when it arrived, not when its turn to be
+    // delivered came: the cursor a stream recreation restarted meanwhile stands past it, so no
+    // sweep reads it, and its failure is noticed at once.
+    test("a live frame that arrived behind a held delivery before a stream recreation restarted its cursor gets one notice when it fails", async () => {
+      process.env.DISPATCH_URL = "http://dispatch.test";
+      process.env.DISPATCH_TOKEN = "dispatch-token";
+      const accepting = Promise.withResolvers<void>();
+      let accepts = 0;
+      const model = new StreamModel();
+      const session = await bootReplay("replay-fail-queued-recreated", model, {
+        sessionID: "ses_delivery",
+        dispatch: async (url) => {
+          if (!url.pathname.endsWith("/accept")) return undefined;
+          accepts += 1;
+          await accepting.promise;
+          return new Response(JSON.stringify({ code: "ACCEPT_ALREADY_ACCEPTED", error: "no" }), {
+            status: 409,
+          });
+        },
+        beforeSend: (content) => {
+          if (content.includes("evt-queued-behind") && !isNotice(content)) {
+            throw new Error("host refuses the card");
+          }
+        },
+      });
+      const held = directDispatchEnvelope("steer", "held-recreated");
+      model.store(session.agentSubject, held);
+      session.live(session.agentSubject).push(held);
+      await until(() => accepts === 1, "the held accept");
+      // The stream is recreated, and a frame published to the new one arrives behind the held one.
+      model.created = "2026-10-21T00:00:00Z";
+      const behind = peerMessage("ses_delivery", "queued-behind");
+      model.store(session.agentSubject, behind);
+      session.live(session.agentSubject).push(behind);
+      await settle();
+      try {
+        // A second later the reconnect sweep restarts every cursor at the new stream's end.
+        setSystemTime(new Date(Date.now() + 1_000));
+        await session.reconnect();
+        accepting.resolve();
+        await until(() => session.notices("evt-queued-behind").length > 0, "the notice");
+        await session.tick();
+        await session.tick();
+      } finally {
+        setSystemTime();
+      }
+
+      expect(session.notices("evt-queued-behind")).toHaveLength(1);
+      expect(session.notices("evt-queued-behind")[0]?.content).toContain("host refuses the card");
+      expect(session.cards("evt-queued-behind")).toHaveLength(0);
+    });
   });
 
   // A BTW answered with an error was handled: Dispatch shows the person that error, and the
   // stream's copy must not come back as a card that starts a turn on it. A same-mode Retry is a
   // new event under the same dedupe key, and must still reach the session.
   describe("a BTW refused live", () => {
+    /**
+     * Boots `ses_delivery` with the host side turn `runEphemeralTurn` (none: a host without one).
+     * Dispatch answers the `n`th reply with `answerReply(n)` (200 by default); every other request
+     * goes to `dispatch` first. `entries`: the transcript already written (a resume).
+     */
     async function bootBTW(
       query: string,
       model: StreamModel,
-      runEphemeralTurn: SessionContext["runEphemeralTurn"]
+      runEphemeralTurn: SessionContext["runEphemeralTurn"],
+      options: {
+        readonly answerReply?: (n: number) => Promise<Response>;
+        readonly dispatch?: (url: URL) => Promise<Response | undefined>;
+        readonly entries?: readonly unknown[];
+      } = {}
     ) {
       process.env.DISPATCH_URL = "http://dispatch.test";
       process.env.DISPATCH_TOKEN = "dispatch-token";
@@ -15270,11 +15339,14 @@ describe("messages missed while the subscription was down", () => {
       const session = await bootReplay(query, model, {
         sessionID: "ses_delivery",
         dispatch: async (url) => {
+          const answered = await options.dispatch?.(url);
+          if (answered !== undefined) return answered;
           if (!url.pathname.endsWith("/reply")) return undefined;
           replies.push(url.pathname);
-          return response({});
+          return options.answerReply?.(replies.length) ?? response({});
         },
         ...(runEphemeralTurn !== undefined && { runEphemeralTurn }),
+        ...(options.entries !== undefined && { entries: options.entries }),
       });
       return { replies, session };
     }
@@ -15321,6 +15393,109 @@ describe("messages missed while the subscription was down", () => {
       await session.tick();
 
       expect(session.cards("dispatch-replay-btw-no-side-turn")).toHaveLength(0);
+    });
+
+    test("whose refusal Dispatch answers 503 is not shown by a sweep, and its Retry still runs the side turn", async () => {
+      const model = new StreamModel();
+      let sideTurns = 0;
+      const { replies, session } = await bootBTW(
+        "replay-btw-reply-503",
+        model,
+        async () => {
+          sideTurns += 1;
+          if (sideTurns === 1) throw new Error("No active model on session");
+          return { replyText: `Answer ${sideTurns}` };
+        },
+        {
+          answerReply: async (n) =>
+            n === 1
+              ? new Response(JSON.stringify({ error: "unavailable" }), { status: 503 })
+              : response({}),
+        }
+      );
+      const btw = targetedDispatchEnvelope("btw", "replay-btw-reply-503");
+      model.store(session.agentSubject, btw);
+      session.live(session.agentSubject).push(btw);
+      await until(() => replies.length === 1, "the refusal");
+
+      await session.tick();
+      await session.tick();
+
+      expect(session.cards("dispatch-replay-btw-reply-503")).toHaveLength(0);
+      expect(session.notices("dispatch-replay-btw-reply-503")).toHaveLength(0);
+
+      const retry = JSON.stringify({
+        ...JSON.parse(btw),
+        event_id: "dispatch-replay-btw-retry-503",
+      });
+      model.store(session.agentSubject, retry);
+      session.live(session.agentSubject).push(retry);
+      await until(() => replies.length === 2, "the Retry's reply");
+      await session.tick();
+
+      expect(sideTurns).toBe(2);
+      expect(session.cards("dispatch-replay-btw-reply-503")).toHaveLength(0);
+      expect(session.cards("dispatch-replay-btw-retry-503")).toHaveLength(0);
+    });
+
+    test("is not shown by a sweep that runs while its refusal is still being posted", async () => {
+      const model = new StreamModel();
+      const posting = Promise.withResolvers<void>();
+      const { replies, session } = await bootBTW("replay-btw-reply-held", model, undefined, {
+        answerReply: async () => {
+          await posting.promise;
+          return response({});
+        },
+      });
+      const btw = targetedDispatchEnvelope("btw", "replay-btw-reply-held");
+      model.store(session.agentSubject, btw);
+      session.live(session.agentSubject).push(btw);
+      await until(() => replies.length === 1, "the refusal's POST");
+
+      await session.tick();
+      await session.tick();
+      expect(session.cards("dispatch-replay-btw-reply-held")).toHaveLength(0);
+
+      posting.resolve();
+      await settle();
+      await session.tick();
+      expect(session.cards("dispatch-replay-btw-reply-held")).toHaveLength(0);
+    });
+
+    test("refused while its session shuts down is not shown after a resume of that session", async () => {
+      const model = new StreamModel();
+      // Deregistration hangs, so the shutdown handler is still running when the frame drains in.
+      const deregistration = Promise.withResolvers<Response>();
+      let sideTurns = 0;
+      const first = await bootBTW(
+        "replay-btw-shutdown-a",
+        model,
+        async () => {
+          sideTurns += 1;
+          return { replyText: "too late" };
+        },
+        {
+          dispatch: async (url) =>
+            url.pathname === "/v1/sessions/ses_delivery" ? deregistration.promise : undefined,
+        }
+      );
+      const btw = targetedDispatchEnvelope("btw", "replay-btw-shutdown");
+      model.store(first.session.agentSubject, btw);
+
+      const stopping = first.session.stop();
+      first.session.live(first.session.agentSubject).push(btw);
+      await until(() => first.replies.length === 1, "the refusal");
+      deregistration.resolve(response({}));
+      await stopping;
+      expect(sideTurns).toBe(0);
+
+      const resumed = await bootBTW("replay-btw-shutdown-b", model, undefined, {
+        entries: first.session.entries(),
+      });
+      await resumed.session.tick();
+      await resumed.session.tick();
+
+      expect(resumed.session.cards("dispatch-replay-btw-shutdown")).toHaveLength(0);
     });
   });
 });

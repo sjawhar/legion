@@ -37194,6 +37194,7 @@ function dedupeKeyNamesItsEvent(envelope) {
 // ../contracts/src/subject.ts
 var AGENT_TOPIC_PREFIX = "notifications.agent.";
 var ROLE_TOPIC_PREFIX = "notifications.role.";
+var LEGION_NOTICE_TOPIC_PREFIX = "notifications.legion.";
 var DISPATCH_TOPIC_PREFIX = "notifications.dispatch.";
 var DISPATCH_ISSUE_TOPIC_PREFIX = `${DISPATCH_TOPIC_PREFIX}issue.`;
 var DISPATCH_DOCUMENT_TOPIC_PREFIX = `${DISPATCH_TOPIC_PREFIX}document.`;
@@ -38456,6 +38457,41 @@ async function postDeliveryReply(config2, sessionId, delivery, result) {
 }
 function expectsLaneReceipt(frame) {
   return frame.reply !== undefined && frame.reply !== "" && frame.subject === frame.directSubject && frame.envelopeTopic !== undefined && frame.envelopeTopic !== frame.directSubject;
+}
+async function* readArrivals(subscription, now = Date.now) {
+  const arrived = [];
+  let stopped;
+  let wake;
+  const signal = () => {
+    wake?.();
+    wake = undefined;
+  };
+  (async () => {
+    try {
+      for await (const message of subscription) {
+        arrived.push({ message, receivedAt: now() });
+        signal();
+      }
+      stopped = { failed: false };
+    } catch (error48) {
+      stopped = { error: error48, failed: true };
+    }
+    signal();
+  })();
+  for (;; ) {
+    if (stopped?.failed === true)
+      throw stopped.error;
+    if (stopped !== undefined)
+      return;
+    const next = arrived.shift();
+    if (next !== undefined) {
+      yield next;
+      continue;
+    }
+    const { promise: promise2, resolve } = Promise.withResolvers();
+    wake = resolve;
+    await promise2;
+  }
 }
 var DedupeIdentitySchema = exports_external.object({
   event_id: exports_external.string().min(1).optional(),
@@ -43835,20 +43871,22 @@ function createReplayEngine(options) {
   };
   const log = (message, error48) => safely("log", () => host.log(message, error48));
   const notify = (notice) => safely("notice", () => host.notify(notice));
-  const currentSession = () => {
+  const sessionRead = (read) => () => {
     try {
-      return host.sessionID();
+      return read();
     } catch {
       return;
     }
   };
-  const bind = () => {
-    const sessionID = currentSession();
-    if (sessionID === undefined || sessionID === "")
+  const currentSession = sessionRead(() => host.sessionID());
+  const writeSession = sessionRead(() => host.writeSessionID === undefined ? host.sessionID() : host.writeSessionID());
+  const bindTo = (sessionID, read) => {
+    if (sessionID === undefined || sessionID === "" || read() !== sessionID)
       return;
     const bound = epoch;
-    return { sessionID, alive: () => bound === epoch && currentSession() === sessionID };
+    return { sessionID, alive: () => bound === epoch && read() === sessionID };
   };
+  const bind = () => bindTo(currentSession(), currentSession);
   const stateJSON = (afters = true) => {
     const subjects = {};
     for (const subject2 of [...cursors.keys()].sort()) {
@@ -44215,6 +44253,13 @@ function createReplayEngine(options) {
       record2(replayLedgerIdentity(frame));
       await flush(alive);
     },
+    async recordDeliveredFor(sessionID, frame) {
+      const alive = bindTo(sessionID, writeSession)?.alive;
+      if (alive === undefined)
+        return;
+      record2(replayLedgerIdentity(frame));
+      await flush(alive);
+    },
     async liveFailed(followed, envelope2, error48, receivedAt) {
       const started = cursorStarts.get(followed);
       if (!isRoleForward(envelope2) && answered.has(followed) && cursors.get(followed)?.after !== undefined && (started === undefined || started <= receivedAt)) {
@@ -44282,22 +44327,32 @@ function replayNoticeFields(notice) {
 function envoyNoticeText(fields) {
   return encode3({ envoy: fields });
 }
-var AGENT_SPACE = AGENT_TOPIC_PREFIX.slice(0, -1).split(".");
-function coversAnotherAgentSubject(ownAgentSubject, topic) {
-  if (topic === ownAgentSubject)
-    return false;
-  const tokens = topic.split(".");
-  for (const [index, token] of AGENT_SPACE.entries()) {
-    const wanted = tokens[index];
-    if (wanted === ">")
+var EXCEPTION_TOPIC_PREFIX = "notifications.envoy.exceptions.";
+var PRIVATE_STREAM_SUBJECTS = [
+  `${AGENT_TOPIC_PREFIX}>`,
+  `${LEGION_NOTICE_TOPIC_PREFIX}>`,
+  `${EXCEPTION_TOPIC_PREFIX}${AGENT_TOPIC_PREFIX}>`
+];
+function subjectsOverlap(a, b) {
+  const aTokens = a.split(".");
+  const bTokens = b.split(".");
+  for (let index = 0;index < aTokens.length && index < bTokens.length; index += 1) {
+    const aToken = aTokens[index];
+    const bToken = bTokens[index];
+    if (aToken === ">" || bToken === ">")
       return true;
-    if (wanted !== "*" && wanted !== token)
+    if (aToken !== "*" && bToken !== "*" && aToken !== bToken)
       return false;
   }
-  return tokens.length > AGENT_SPACE.length;
+  return aTokens.length === bTokens.length;
+}
+function reachesPrivateStreamSubject(ownAgentSubject, topic) {
+  if (!PRIVATE_STREAM_SUBJECTS.some((subject2) => subjectsOverlap(topic, subject2)))
+    return false;
+  return topic !== ownAgentSubject || /[*>]/.test(ownAgentSubject);
 }
 function replayFollowedSubjects(ownAgentSubject, topics, heldForRole = () => false) {
-  const followed = [...topics].filter((topic) => !topic.startsWith(ROLE_TOPIC_PREFIX) && !coversAnotherAgentSubject(ownAgentSubject, topic) && !heldForRole(topic));
+  const followed = [...topics].filter((topic) => !topic.startsWith(ROLE_TOPIC_PREFIX) && !reachesPrivateStreamSubject(ownAgentSubject, topic) && !heldForRole(topic));
   return [...new Set([ownAgentSubject, ...followed])];
 }
 function rememberedTopics(state) {
@@ -48001,8 +48056,7 @@ function createChannelForwarder(connection, options) {
   const drainTimeoutMs = options.drainTimeoutMs ?? DEFAULT_DRAIN_TIMEOUT_MS;
   const deliver = async (topic, subscription) => {
     try {
-      for await (const message of subscription) {
-        const receivedAt = Date.now();
+      for await (const { message, receivedAt } of readArrivals(subscription)) {
         const raw = decoder.decode(message.data);
         const identity = deliveryIdentity(raw);
         let claim = dedupe.claim(identity);
@@ -49589,7 +49643,7 @@ async function startChannelSession(options) {
     await options.client.subscribe({
       sessionID: identity.id,
       directory: identity.directory,
-      topics: forwarder.topics().filter((topic) => !coversAnotherAgentSubject(directSubject, topic)),
+      topics: forwarder.topics().filter((topic) => !reachesPrivateStreamSubject(directSubject, topic)),
       port: 0,
       title,
       capabilities: options.capabilities,

@@ -25,6 +25,7 @@ import {
   inboundTimestamp,
   postDeliveryReply,
   type RenderInboundResult,
+  readArrivals,
   renderInbound,
   senderLabel,
 } from "@legion/envoy-client/delivery";
@@ -52,13 +53,13 @@ import { machineID } from "@legion/envoy-client/machine";
 import { natsAuthOptions } from "@legion/envoy-client/nats-auth";
 import {
   closeReplayedRemoval,
-  coversAnotherAgentSubject,
   createReplayEngine,
   envoyNoticeText,
   failureNoticeFields,
   type ReplayDeliveryOutcome,
   type ReplayEngine,
   type ReplayFrame,
+  reachesPrivateStreamSubject,
   replayedText,
   replayFollowedSubjects,
   replayLedgerIdentity,
@@ -1078,14 +1079,7 @@ export default function envoyExtension(pi: PiApi): void {
     ) {
       return "queued";
     }
-    try {
-      if (unwritten.sendCard(content, "steer", identity, claim)) return "queued";
-    } catch (error) {
-      claim?.release();
-      throw error;
-    }
-    claim?.settle();
-    return "shown";
+    return unwritten.sendCard(content, "steer", identity, claim);
   };
 
   // Runs a person's accepted Send or Aside as if typed at the terminal (`pi.sendUserInput`): a
@@ -1218,15 +1212,16 @@ export default function envoyExtension(pi: PiApi): void {
     }
   };
 
-  // `topic` is the subscription the frame came on, `subject` the subject it was published to.
+  // `topic` is the subscription the frame came on, `subject` the subject it was published to, and
+  // `receivedAt` when the subscription yielded it (`readArrivals`): a cursor that started after
+  // that may stand past it (`liveFailed`), however long the frames before it took to deliver.
   const deliver = async (
     topic: string,
     subject: string,
     raw: string,
-    reply: string
+    reply: string,
+    receivedAt: number
   ): Promise<void> => {
-    // When the frame arrived: a cursor that started after it may stand past it (`liveFailed`).
-    const receivedAt = Date.now();
     const rendered = renderInbound(raw, sessionID, subject);
     // Acknowledge first. The listener's role lane waits two seconds for this
     // receipt and reports a miss as a failed delivery, which the daemon answers
@@ -1279,11 +1274,15 @@ export default function envoyExtension(pi: PiApi): void {
       }
       const envelope = rendered.envelope;
       if (envelope !== undefined) noteInbox(envelope);
+      // The session the frame is delivered in, whose transcript records what became of it.
+      const deliveredIn = sessionID;
       // The host wrote the frame, or handled it without writing anything: the ledger records it,
       // so no sweep shows the stream's copy again, here or after a restart, and the claim is
-      // settled, so a sweep stops waiting on it.
+      // settled, so a sweep stops waiting on it. The record reaches the transcript of the session
+      // it was delivered in even while that session shuts down (`recordDeliveredFor`): a BTW
+      // answered as the session stops must not come back from a sweep after its resume.
       const taken = async (): Promise<void> => {
-        if (identity !== undefined) await replay?.recordDelivered(identity);
+        if (identity !== undefined) await replay?.recordDeliveredFor(deliveredIn, identity);
         claim.settle();
       };
       // An error reply means the agent was not handed the frame: Dispatch records the attempt
@@ -1295,14 +1294,18 @@ export default function envoyExtension(pi: PiApi): void {
         await postDispatchReply(delivery, { error });
       };
       // A BTW refused live was answered: the stream's copy must not come back from a sweep as a
-      // card that starts a turn, so the ledger records the frame by its event id alone. A
-      // same-mode Retry carries a new event id under the same dedupe key, and still reaches the
-      // session, as the released claim lets it.
+      // card that starts a turn. The ledger records the frame by its event id alone before the
+      // claim is released and the refusal posted, so no sweep finds it neither pending nor
+      // recorded while the reply is in flight or after it failed; the record reaches the
+      // transcript of the session it was delivered in even while that session shuts down
+      // (`recordDeliveredFor`), so a resume of it passes the stream's copy over too. A same-mode
+      // Retry carries a new event id under the same dedupe key, and still reaches the session, as
+      // the released claim lets it.
       const refuseBTW = async (delivery: DispatchDelivery, error: string): Promise<void> => {
-        await refuse(delivery, error);
         if (identity?.event_id !== undefined) {
-          await replay?.recordDelivered({ event_id: identity.event_id });
+          await replay?.recordDeliveredFor(deliveredIn, { event_id: identity.event_id });
         }
+        await refuse(delivery, error);
       };
       try {
         if (rendered.rejectedDelivery !== undefined) {
@@ -1350,14 +1353,14 @@ export default function envoyExtension(pi: PiApi): void {
               true,
               shown
             );
-            const held = unwritten.sendCard(
+            // Settled once the host writes the card, or at once when nothing waits on that.
+            unwritten.sendCard(
               card.content,
               rendered.delivery?.mode === "aside" ? "aside" : "steer",
               identity,
               claim
             );
             markPicturesShown(shownPictures(sessionID), card.shown);
-            if (!held) await taken();
           } else {
             const { turn } = accepted;
             // Sent exactly as Enter, or an aside, at the terminal sends it, the person's pictures
@@ -1389,20 +1392,15 @@ export default function envoyExtension(pi: PiApi): void {
                 markPicturesShown(shownPictures(injectionSessionID), delivery.shown);
                 // Done once the host writes the user message its text is found as, or at the
                 // run's end, which stops that search (`endInjectedUserTurns`).
-                if (identity === undefined) await taken();
-                else {
-                  unwritten.awaitTurn(turn.messageId, {
-                    sessionID: injectionSessionID,
-                    identity,
-                    claim,
-                    via: "text",
-                  });
-                }
+                unwritten.awaitTurn(turn.messageId, {
+                  sessionID: injectionSessionID,
+                  identity,
+                  claim,
+                  via: "text",
+                });
               }
             } else {
-              if (identity !== undefined) {
-                unwritten.awaitTurn(turn.messageId, { sessionID, identity, claim, via: "typed" });
-              }
+              unwritten.awaitTurn(turn.messageId, { sessionID, identity, claim, via: "typed" });
               runTypedInput(
                 sendUserInput,
                 accepted.delivery,
@@ -1411,7 +1409,6 @@ export default function envoyExtension(pi: PiApi): void {
                 delivery.content,
                 delivery.shown
               );
-              if (identity === undefined) await taken();
             }
           }
         }
@@ -1493,7 +1490,7 @@ export default function envoyExtension(pi: PiApi): void {
 
   const pump = async (topic: string, subscription: Subscription): Promise<void> => {
     try {
-      for await (const message of subscription) {
+      for await (const { message, receivedAt } of readArrivals(subscription)) {
         // Left undelivered here, the frame stays in the stream: when this session id is resumed,
         // its first sweep shows it.
         if (replacedSessionTopic(topic)) {
@@ -1503,7 +1500,13 @@ export default function envoyExtension(pi: PiApi): void {
           continue;
         }
         try {
-          await deliver(topic, message.subject, codec.decode(message.data), message.reply ?? "");
+          await deliver(
+            topic,
+            message.subject,
+            codec.decode(message.data),
+            message.reply ?? "",
+            receivedAt
+          );
         } catch {
           // A failed injection is logged by deliver and must not tear down the subscription; the
           // next sweep shows the stream's copy, or deliver reported one no sweep can show.
@@ -1621,6 +1624,13 @@ export default function envoyExtension(pi: PiApi): void {
     return showReplayCard(replayedText(rendered.content, frame.time), frame.envelope);
   };
 
+  // The session this instance and the host are both on: an entry appended now lands in its
+  // transcript.
+  const transcriptSessionID = (): string | undefined => {
+    const host = hostSessionID();
+    return host !== "" && host === sessionID ? host : undefined;
+  };
+
   // Shows the session each message the notification stream stored for it while its subscriptions
   // were down, once (`@legion/envoy-client/replay`). Its sessions are this instance's: work started
   // for one session stops once the host, or this instance, is on another.
@@ -1629,11 +1639,10 @@ export default function envoyExtension(pi: PiApi): void {
       ? undefined
       : createReplayEngine({
           host: {
-            sessionID: () => {
-              if (shuttingDown) return undefined;
-              const host = hostSessionID();
-              return host !== "" && host === sessionID ? host : undefined;
-            },
+            sessionID: () => (shuttingDown ? undefined : transcriptSessionID()),
+            // A session shutting down starts no replay work, but the host still writes its
+            // transcript, so a refused BTW's record still reaches it (`recordDeliveredFor`).
+            writeSessionID: transcriptSessionID,
             followedSubjects,
             deliver: showReplayed,
             showFailureNotice: async (notice) =>
@@ -1998,7 +2007,7 @@ export default function envoyExtension(pi: PiApi): void {
           ...new Set([
             own,
             ...[...subscriptions.keys()].filter(
-              (subject) => !isRoleBound(subject) && !coversAnotherAgentSubject(own, subject)
+              (subject) => !isRoleBound(subject) && !reachesPrivateStreamSubject(own, subject)
             ),
           ]),
         ],

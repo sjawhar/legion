@@ -232,9 +232,12 @@ for `pi.sendUserMessage` on a host without `sendUserInput`, whose search the run
 recording the turn then. Typed input the host answers submitted no message (a command, a refusal,
 a failure) is recorded at that answer, which the person gets on Dispatch. A BTW reply is a
 Dispatch post, recorded once posted. A BTW refused live (its side turn failed, the session is
-shutting down, the host has no side turn) is recorded by its event id alone once the refusal is
-posted, so the stream's copy never comes back as a card that starts a turn, while a same-mode
-Retry, a new event id under the same dedupe key, still reaches the session. A replayed card of a
+shutting down, the host has no side turn) is recorded by its event id alone before its claim is
+released and the refusal posted, in the transcript of the session it was delivered in, even while
+that session shuts down (`recordDeliveredFor`, through the host's `writeSessionID`), so the
+stream's copy never comes back as a card that starts a turn: not while the refusal is in flight,
+not when it fails, and not after a resume. A same-mode Retry, a new event id under the same dedupe
+key, still reaches the session. A replayed card of a
 frame the dedupe let go of that the open session's ledger lacks (shown before the host moved to
 this session) waits on its write too, with no claim.
 
@@ -265,7 +268,10 @@ interrupt withdrew is not shown again.
 A sweep asks, for each followed subject, for the stored messages after that subject's cursor,
 merges them by stream sequence and shows each that neither path has shown. The followed subjects
 are what `registerSession` registers (`followedSubjects`, by the engine's shared rule
-`replayFollowedSubjects`): the agent subject and every open subscription not held for a role. One
+`replayFollowedSubjects`): the agent subject and every open subscription not held for a role nor
+reaching a private stream subject (`reachesPrivateStreamSubject`: another session's agent subject,
+a failed-delivery lane, the Legion controller lane, or a wildcard reaching one, the listener's own
+rule, which would refuse it and warn on every heartbeat). One
 sweep runs at a time, on the engine's own chain, never in
 `passes` or `roleMoves`. A sweep starts (`triggerReplay`) after a pass opens the agent subject and
 the recovered interests (a start, a switch, a resume), after the pump reopens a subscription,
@@ -321,7 +327,9 @@ show gets the notice at once: a role forward after its receipt, or a frame on a 
 replay does not read (a team topic, a subject refused or without a cursor yet, or while the
 listener's replay is failing), or one the plugin received before its subject's cursor started (a
 new follow, a new session, a reset after a stream recreation), since that cursor starts at the
-stream's end, which can be past a frame the live path still held. One card that starts no turn
+stream's end, which can be past a frame the live path still held. A frame is stamped when its
+subscription yielded it (`readArrivals`, which reads each subscription as its messages arrive),
+not when the frames queued before it finished delivering. One card that starts no turn
 (`routeReplayNotice` sends this kind to a card) says that the stream was recreated,
 so messages from
 before it may be lost, or that a cursor fell behind the stream's oldest message, so messages

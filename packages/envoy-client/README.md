@@ -45,7 +45,11 @@ beside the live one. A host that hands a stored frame, or a failure notice, on w
 written it yet (Oh My Pi holds a card sent mid-turn until the turn takes it) claims the frame and
 answers `queued`: nothing is recorded and its subjects' cursors stay before it, so a process that
 ends first shows it after the restart, until the host calls `recordDelivered` and settles the
-claim once written.
+claim once written. `recordDeliveredFor(sessionID, frame)` records the same way for the session a
+frame was delivered in while the host shuts down: it writes while the host's optional
+`writeSessionID()` still names that session, once `sessionID()` already answers none, and the
+ledger holds the frame from the call on (Oh My Pi records a refused BTW's event id so, before it
+releases the claim and posts the refusal).
 
 The state holds each followed subject's `since` and `after` and the stream's `created` time;
 `restore(snapshot)` loads what a host persisted, dropping expired ledger entries and keeping the
@@ -56,7 +60,10 @@ on its third failure the host shows a notice naming it instead (`showFailureNoti
 live path failed a frame calls `liveFailed(followed, envelope, error, receivedAt)`, which shows
 that notice at once unless a sweep will show the stream's copy, which it will not for a frame
 received before its subject's cursor started (a new follow, a new session, or a reset after a
-stream recreation), since that cursor can start past it. A replayed removal closes a topic only
+stream recreation), since that cursor can start past it. A host stamps `receivedAt` when the
+subscription yielded the frame: `readArrivals(subscription)` (`@legion/envoy-client/delivery`)
+reads a subscription as its messages arrive and yields each, in order, with that time, so a frame
+queued behind a slow delivery is not stamped late. A replayed removal closes a topic only
 when `followedBefore(topic, seq)`; `replaySuppressed` says which rendered frames a replay does
 not show, `replayedText`, `failureNoticeFields` and `replayNoticeFields` word the cards, and
 `envoyNoticeText` renders a notice's fields under `envoy:` in TOON, so a sender's summary that
@@ -69,8 +76,12 @@ told once when the stream was recreated, when its cursor fell behind the stream'
 The host policy both plugins share sits beside the engine, so each host keeps only how it shows a
 card, how it warns, and how it persists. `replayFollowedSubjects(ownAgentSubject, topics,
 heldForRole?)` is what a host's `followedSubjects()` answers: its own agent subject and every
-topic it follows but a role lane, a subject it holds for a role, and another session's agent
-subject. `rememberedTopics(state)` is what a restore follows again from a persisted state: every
+topic it follows but a role lane, a subject it holds for a role, and a topic reaching a private
+stream subject (`reachesPrivateStreamSubject`, which a host's registration applies too: another
+session's agent subject, a failed-delivery lane on an agent subject, the Legion controller lane,
+or a wildcard reaching one, the listener's own rule, `privateStreamSubjects` and
+`ReachesPrivateStreamSubject` in `packages/envoy/internal/bus/stream.go`). `rememberedTopics(state)`
+is what a restore follows again from a persisted state: every
 subject but agent subjects and role lanes. `closeReplayedRemoval(frame, host)` acts on a replayed
 `subscription.removed` naming the session: it closes each topic the session followed before the
 frame was stored (`followedBefore`, through the host's `close`), then starts the host's

@@ -59,7 +59,8 @@ function subjectMatches(pattern: string, subject: string): boolean {
  * topic. `client` is the real transport over this model.
  */
 class StreamModel {
-  readonly created = "2026-10-20T00:00:00Z"
+  /** When the stream was created; a recreation changes it. */
+  created = "2026-10-20T00:00:00Z"
   firstSeq = 1
   lastSeq = 0
   messages: StoredMessage[] = []
@@ -598,6 +599,70 @@ test("a live frame the channel fails to take waits for the next sweep, which sho
   }
 })
 
+// The frame behind a slow delivery is stamped when it arrived, not when its turn to be delivered
+// came: the cursor a stream recreation restarted meanwhile stands past it, so no sweep reads it,
+// and its failure is noticed at once.
+test("a live frame that arrived behind a slow delivery before a stream recreation restarted its cursor gets one notice when it fails", async () => {
+  const directory = await scratchState()
+  const model = new StreamModel()
+  const slow = peerMessage(SESSION, "slow")
+  const behind = peerMessage(SESSION, "queued-behind")
+  const holding = Promise.withResolvers<void>()
+  let held = false
+  // Claude Code's channel, slow to take the first frame and refusing the one behind it.
+  const shown: Shown[] = []
+  const sink: Sink = {
+    shown,
+    capabilities: CHANNEL_CAPABILITIES,
+    notifier: {
+      notification: async (notification) => {
+        const entry = {
+          eventId: notification.params.meta["event_id"],
+          content: notification.params.content,
+        }
+        if (entry.eventId === slow.eventId) {
+          held = true
+          await holding.promise
+        }
+        if (entry.eventId === behind.eventId) throw new Error("the MCP transport refused the write")
+        shown.push(entry)
+      },
+    },
+    close: () => undefined,
+  }
+  const running = await boot(model, sink, directory)
+  try {
+    model.store(agentSubject(SESSION), slow.raw)
+    running.nats.emit(agentSubject(SESSION), slow.raw)
+    await waitFor(async () => held, "the slow delivery")
+    // The stream is recreated, and a frame published to the new one arrives behind the slow one.
+    model.created = "2026-10-21T00:00:00Z"
+    model.store(agentSubject(SESSION), behind.raw)
+    running.nats.emit(agentSubject(SESSION), behind.raw)
+    // Every queued callback runs, so the subscription's reader takes the frame now.
+    for (let turn = 0; turn < 10; turn += 1) {
+      const { promise, resolve } = Promise.withResolvers<void>()
+      setImmediate(resolve)
+      await promise
+    }
+    // A second later the reconnect sweep restarts every cursor at the new stream's end.
+    setSystemTime(new Date(Date.now() + 1_000))
+    await running.reconnect()
+    holding.resolve()
+    await waitFor(async () => notices(sink, behind.eventId).length === 1, "the failure notice")
+    await running.reconnect()
+    await running.reconnect()
+    expect(notices(sink, behind.eventId)).toHaveLength(1)
+    expect(notices(sink, behind.eventId)[0]?.content).toContain("refused the write")
+    expect(cards(sink, behind.eventId)).toHaveLength(0)
+    expect(cards(sink, slow.eventId)).toHaveLength(1)
+  } finally {
+    setSystemTime()
+    await running.session.shutdown()
+    await rm(directory, { recursive: true, force: true })
+  }
+})
+
 test("a role forward the channel fails to take after its receipt gets its notice at once and is never replayed", async () => {
   const directory = await scratchState()
   const model = new StreamModel()
@@ -695,11 +760,17 @@ test("a removal replayed after a restart re-registered the topic takes it out of
   }
 })
 
-test("a followed topic reaching another session's agent subject is followed live and never registered", async () => {
+test("a followed topic reaching a private stream subject is followed live and never registered", async () => {
   const directory = await scratchState()
   const model = new StreamModel()
   const running = await boot(model, channelSink(), directory)
-  const refused = ["notifications.*.x", "notifications.agent.*", agentSubject("ses_other")]
+  const refused = [
+    "notifications.*.x",
+    "notifications.agent.*",
+    agentSubject("ses_other"),
+    `notifications.envoy.exceptions.${agentSubject(SESSION)}`,
+    "notifications.legion.ACME.controller",
+  ]
   try {
     await running.session.follow([...refused, ISSUE_TOPIC])
 

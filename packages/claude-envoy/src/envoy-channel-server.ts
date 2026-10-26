@@ -25,13 +25,13 @@ import { machineID } from "@legion/envoy-client/machine"
 import { natsAuthOptions } from "@legion/envoy-client/nats-auth"
 import {
   closeReplayedRemoval,
-  coversAnotherAgentSubject,
   createReplayEngine,
   envoyNoticeText,
   failureNoticeFields,
   type ReplayDeliveryOutcome,
   type ReplayFrame,
   type ReplaySnapshot,
+  reachesPrivateStreamSubject,
   rememberedTopics,
   replayedText,
   replayFollowedSubjects,
@@ -722,7 +722,7 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
       directory: identity.directory,
       topics: forwarder
         .topics()
-        .filter((topic) => !coversAnotherAgentSubject(directSubject, topic)),
+        .filter((topic) => !reachesPrivateStreamSubject(directSubject, topic)),
       port: 0,
       title,
       capabilities: options.capabilities,
