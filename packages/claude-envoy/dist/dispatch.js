@@ -13825,19 +13825,17 @@ function actorName(actor, titles) {
   const live = titles?.get(actor.id)?.trim();
   return sessionLabel(actor.id, live === undefined || live === "" ? actor.origin?.session_title : live);
 }
-function actorLabel(actor, titles) {
-  const name = actorName(actor, titles);
+function actorAttribution(actor) {
   if (actor.kind !== "session") {
-    return name;
+    return "";
   }
   if (actor.owner !== undefined) {
-    return `${name} (for ${actor.owner})`;
+    return ` (for ${actor.owner})`;
   }
-  const service = actor.service;
-  if (service === undefined) {
-    return name;
-  }
-  return `${name} (as ${serviceSubjectLabel(service)})`;
+  return actor.service === undefined ? "" : ` (as ${serviceSubjectLabel(actor.service)})`;
+}
+function actorLabel(actor, titles) {
+  return `${actorName(actor, titles)}${actorAttribution(actor)}`;
 }
 // ../contracts/src/agent-stream.ts
 var AGENT_STREAM_LIMITS = {

@@ -15,7 +15,7 @@ import {
   textSecondaryOnSurface,
 } from "../../theme/classes";
 import { type IssueStatus, statusLabel } from "../project/board-model";
-import { actorLabel, shortSessionId } from "./actor";
+import { AgentName } from "./AgentName";
 import { MarkdownPreview } from "./MarkdownPreview";
 import { REF_PREVIEW_CLOSE_DELAY_MS, REF_PREVIEW_OPEN_DELAY_MS } from "./ref-preview-timing";
 import {
@@ -296,13 +296,19 @@ function IssuePreview({ route }: { route: DispatchReferenceRoute }): ReactNode {
   );
 }
 
-/** Who a document belongs to, as a card names it: an agent's conversation, a project, an issue. */
-function documentOwner(route: DispatchReferenceRoute): string {
-  return route.kind === "agent-artifact"
-    ? `agent ${shortSessionId(route.session)}`
-    : isProjectRoute(route)
-      ? route.project
-      : route.key;
+/** Who a document belongs to, as a card names it: an agent's conversation, a project, an issue.
+ *  The card is a tooltip inside one link to the reference (never interactive), so an agent in it
+ *  is named and marked by `AgentName` without a link of its own. */
+function documentOwner(route: DispatchReferenceRoute): ReactNode {
+  return route.kind === "agent-artifact" ? (
+    <>
+      agent <AgentName kind="static" sessionId={route.session} storedTitle={undefined} />
+    </>
+  ) : isProjectRoute(route) ? (
+    route.project
+  ) : (
+    route.key
+  );
 }
 
 function DocumentPreview({ route }: { route: DispatchReferenceRoute }): ReactNode {
@@ -386,7 +392,9 @@ function CommentPreview({ route }: { route: DispatchReferenceRoute }): ReactNode
   }
   return (
     <>
-      <Heading>{actorLabel(comment.comment.author)}</Heading>
+      <Heading>
+        <AgentName actor={comment.comment.author} kind="static" />
+      </Heading>
       <Body markdown={comment.comment.body} />
     </>
   );
@@ -399,7 +407,9 @@ function MessagePreview({ route }: { route: DispatchReferenceRoute }): ReactNode
   }
   return (
     <>
-      <Heading>{actorLabel(message.message.author)}</Heading>
+      <Heading>
+        <AgentName actor={message.message.author} kind="static" />
+      </Heading>
       <Body markdown={message.message.body} />
     </>
   );
