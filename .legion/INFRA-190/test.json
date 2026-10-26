@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-190",
-  "completed": "2026-10-26T22:56:00Z",
+  "completed": "2026-10-26T23:00:00Z",
   "round": 9,
   "headSha": "e17a2d4c40f77bde6cebce56a1a8044d15f7ca62",
-  "codeHeadSha": "d0cc087570fbcbf27aa2e76ed1d5bcc26c34f4e3",
+  "codeHeadSha": "d0cc087570fb47eebace29183275a446c4ba98d7",
   "fullRoundReason": "Code changed since round 8 (3463a524 HTML rules of both readers, 0b2381a2 fuzz tag family, d0cc0875 gate), so this is a full round.",
   "ci": "At d0cc087570fb (read 2026-10-26T22:47Z with gh run list): PR Title 40409677910 success, Docs 40409678141 success, Worker Image 40409678223 success; Tests 40409677608 in progress; Legion Envoy and Contracts 40409677700 queued. Not waited on; no lane rerun here.",
   "implementerProof": {
@@ -20,7 +20,7 @@
       "surface": "the documents API of the real Go Dispatch server built from the head, on the harness Postgres (harness/live.sh)",
       "command": "bash /legion/scratch/tmp/infra190/harness/live.sh tester/head-g11 tg11 tester/cases-g4.jsonl (13 cases: link title and image title 'a&#10;<meta&#10;z', '</ div>', '<pre/>', '<META x=\"1\">', top level and in a list item, plus a control)",
       "observed": "all 13 HTTP 201; each link title stored with &#10; and the link kept, e.g. [![x](i.png)](https://u.com \"a&#10;<meta&#10;z\"); the image-title cases main refuses are taken too; control 'a\\nb\\nz' kept raw",
-      "headSha": "d0cc087570fb",
+      "headSha": "d0cc087570fb47eebace29183275a446c4ba98d7",
       "negativeControl": "the same cases at 7270f77d answered HTTP 400 INVALID_MARKDOWN in 7 of 8 linked cases (round 8, tester/live-tg4head.out); main d1f4b8a6 answers 201 but stores ![x](i.png), dropping the link"
     },
     {
@@ -28,7 +28,7 @@
       "surface": "Dispatch in Playwright Chromium and the iPhone profile against the real Go server, the production SPA bundle and Postgres",
       "command": "cd tester/head-g11/packages/dispatch && bunx playwright test --config e2e/playwright.config.ts linked-images.e2e.ts --project chromium --project iphone",
       "observed": "16 passed (3.4m), log tester/e2e-head-g11.log",
-      "headSha": "d0cc087570fb",
+      "headSha": "d0cc087570fb47eebace29183275a446c4ba98d7",
       "negativeControl": "the same spec copied into main d1f4b8a6 (harness/base-main, chromium): 6 failed 2 passed, the picture-in-link assertions not found (tester/e2e-base-g11.log)"
     },
     {
@@ -36,7 +36,7 @@
       "surface": "the pmdoc differential: main and head Go builds against the browser editor's engine over the deployment's export, the committed fuzz corpus, the in-repo corpora and the tester's rebuilt corpora",
       "command": "bash packages/envoy/internal/dispatch/pmdoc/gen/differential.sh --base d1f4b8a64a964d962d1a2991fd6b926a39cd0756 --head d0cc087570fb --corpus tester/corpora --corpus /legion/scratch/tmp/infra190/export/deployment.jsonl --out tester/diff-g11",
       "observed": "exit 0; 13,334 documents; every GATE 0; linked image kept 7,088; ungated: 140 'linked image in a write both refuse while reading it', 4 'Go reads otherwise than the engine at both revisions', 1 carriage-return row, 6 entity rows",
-      "headSha": "d0cc087570fb",
+      "headSha": "d0cc087570fb47eebace29183275a446c4ba98d7",
       "negativeControl": "the same differential (head's gates) at 7270f77d over the committed fuzz corpus and titles-r6: GATE head refuses a write the base takes 82, lost whole-image links 82, exit 1"
     },
     {
@@ -44,7 +44,7 @@
       "surface": "pmdoc's opensAsText at the head, judged against Go's reader (ParseRendering) and the browser editor's engine (engineReadings) on real documents",
       "command": "throwaway TestZZTesterSweep in tester/head-g11 (removed after): 34,044 lines starting '<' (every tag name of both readers' lists and 17 more, three cases, '<', '</', '</ ', '</  ', '</\\t', 27 suffixes incl. form feed, '/', '/>', attributes; declarations, comments, CDATA, PIs), each the second line of 'x', '- x' and '> x'; every admitted line compared with 'y' by block shape",
       "observed": "61,554 admitted rows; Go breaks 0, engine breaks 0",
-      "headSha": "d0cc087570fb",
+      "headSha": "d0cc087570fb47eebace29183275a446c4ba98d7",
       "negativeControl": "the same sweep at 7270f77d admits 80,040 rows and Go breaks 18,492 of them (e.g. '</ address'), tester/sweep-g4.log"
     }
   ],
