@@ -246,7 +246,7 @@ func owedCopiesOf(ctx context.Context, tx pgx.Tx, documents ...documentAsks) ([]
 	if err != nil || len(copies) == 0 {
 		return nil, err
 	}
-	if err := markSettlementPending(ctx, tx, copies, nil, false, true); err != nil {
+	if err := markSettlementPending(ctx, tx, copies, nil, false, true, nil, false); err != nil {
 		return nil, err
 	}
 	return copies, nil

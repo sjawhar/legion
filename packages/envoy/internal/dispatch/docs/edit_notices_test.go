@@ -27,19 +27,20 @@ type editNoticeRow struct {
 	dueAt, now time.Time
 }
 
-// readEditNotice reads artifactID's pending edit notice, and reports whether there is one.
+// readEditNotice reads artifactID's edit notice window that names someone, and reports whether
+// there is one. A held window, which names nobody and is not due (holdEditNotice), is not one.
 func readEditNotice(t *testing.T, service *Service, artifactID string) (editNoticeRow, bool) {
 	t.Helper()
 	var row editNoticeRow
 	var editors, lastEditor []byte
 	err := service.store.Pool.QueryRow(context.Background(), `
 		select from_version, to_version, editors, last_editor, due_at, now()
-		from document_edit_notices where artifact_id = $1
+		from document_edit_notices where artifact_id = $1 and last_editor is not null
 	`, artifactID).Scan(&row.from, &row.to, &editors, &lastEditor, &row.dueAt, &row.now)
 	if err != nil {
 		var none int
 		if countErr := service.store.Pool.QueryRow(context.Background(),
-			`select count(*) from document_edit_notices where artifact_id = $1`, artifactID).Scan(&none); countErr == nil && none == 0 {
+			`select count(*) from document_edit_notices where artifact_id = $1 and last_editor is not null`, artifactID).Scan(&none); countErr == nil && none == 0 {
 			return editNoticeRow{}, false
 		}
 		t.Fatalf("read the document's edit notice: %v", err)
@@ -908,8 +909,9 @@ func TestEditNoticeAPersonsQuestionEditSendsOne(t *testing.T) {
 // The outside review's first case (dispatch://INFRA-140/artifact/outside-review-2137-md): the
 // document is not loaded in this process, and an agent's version is written here. Zoe edits, then
 // Adam, and the notice must name Adam. The person who edited last comes from the database, the
-// durable pending authors ordered by the update that wrote each row (readPendingAuthors), so no
-// room's memory in another process decides it.
+// document's latest person sender each landed append recorded (readLastPerson), and the agent's
+// own write in the version's transaction is a session sender the walk skips (latestEditSource), so
+// no room's memory in another process decides it.
 func TestOutsideReviewColdAgentVersionLastHuman(t *testing.T) {
 	first, artifactID := newTestService(t)
 	first.settle = time.Hour
@@ -942,9 +944,9 @@ func TestOutsideReviewColdAgentVersionLastHuman(t *testing.T) {
 }
 
 // The outside review's second case: a person's edit and a named version run in one transaction.
-// The room's lastActor takes the write's actor only at commit, so the capture takes the person
-// from the write's own credits instead (newestWritePerson). Zoe edits, Adam edits and names the
-// version, and the notice must name Adam.
+// The room's lastActor takes the write's actor only at commit, so the capture takes the write
+// itself as the newest edit, by the sequence its operation took (liveWrite.creditSeq). Zoe edits,
+// Adam edits and names the version, and the notice must name Adam.
 func TestOutsideReviewJoinedHumanEditLastHuman(t *testing.T) {
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
@@ -975,7 +977,7 @@ func TestOutsideReviewJoinedHumanEditLastHuman(t *testing.T) {
 // The re-read's finding 1 (dispatch://INFRA-140/artifact/review-2137-md): two people are
 // connected and only one of them edits. ygo does not say which connection sent an update, so the
 // room credits every connected peer and records no sender (creditContentChange). The notice must
-// then name nobody and open no window, rather than pick a person out of the credited names.
+// then name nobody, rather than pick a person out of the credited names: no window names anyone.
 func TestEditNoticeTwoConnectedOneEditsNamesNobody(t *testing.T) {
 	logs := &storetest.LockedLog{}
 	previous := slog.Default()
@@ -1087,9 +1089,160 @@ func TestEditNoticeARebuildNamesThePersonWhoRebuiltIt(t *testing.T) {
 	}
 }
 
-// recordLatestEditSourceTx records actor as the document's latest edit source, as an update's own
-// append does (markUpdateOwedBy).
+// recordLatestEditSourceTx records actor as the document's latest edit source and, a person, its
+// latest person sender, as a person's own append does (markUpdateOwedBy).
 func recordLatestEditSourceTx(t *testing.T, service *Service, artifactID string, actor model.Actor) error {
 	t.Helper()
-	return service.persistLastActor(context.Background(), artifactID, actor)
+	encoded, err := json.Marshal(actor)
+	if err != nil {
+		return err
+	}
+	_, err = service.store.Pool.Exec(context.Background(), `
+		insert into doc_settlements_pending (artifact_id, last_actor, last_person) values ($1, $2::jsonb, $2::jsonb)
+		on conflict (artifact_id) do update set last_actor = excluded.last_actor, last_person = excluded.last_person
+	`, artifactID, string(encoded))
+	return err
+}
+
+// The final review's blocking finding (B1): a person types, the append of her edit lands, which
+// takes it out of the room's in-flight credits within milliseconds, and then an agent's API edit
+// commits before the settlement runs. The agent's edit is the latest edit of any kind, but it is
+// no person's, so the settlement's notice must still name the person who typed.
+func TestEditNoticeAnAgentsCommittedEditAfterAPersonsLandedEditNamesThePerson(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, "First.\n\nSecond.\n")
+	settleCurrentGeneration(t, service, artifactID)
+	alice := model.Actor{Kind: "user", ID: "alice@example.com"}
+	agent := model.Actor{Kind: "session", ID: "session-0123456789abcdef"}
+	editAsConnectedPeer(t, service, artifactID, 1, alice, replaceRun("First.", "First, typed by alice."))
+	waitForLandedAppends(t, service, artifactID)
+	if _, err := joinedApplyOps(service, artifactID, []model.EditOp{
+		{Op: "replace", Find: "Second.", With: "Second, by the agent."},
+	}, agent, nil); err != nil {
+		t.Fatalf("the agent's edit after alice's: %v", err)
+	}
+	settleCurrentGeneration(t, service, artifactID)
+	row, open := readEditNotice(t, service, artifactID)
+	if !open {
+		t.Fatal("the settlement over alice's edit and the agent's later edit opened no edit notice naming anyone")
+	}
+	if row.lastEditor != alice {
+		t.Fatalf("last editor = %+v, want alice, the one person who edited", row.lastEditor)
+	}
+}
+
+// B1's second shape: after its committed edit, the agent writes a named version in a transaction
+// of its own. That version captures alice's edit, and its notice must name her.
+func TestEditNoticeAnAgentsNamedVersionAfterItsCommittedEditNamesThePerson(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, "First.\n\nSecond.\n")
+	settleCurrentGeneration(t, service, artifactID)
+	alice := model.Actor{Kind: "user", ID: "alice@example.com"}
+	agent := model.Actor{Kind: "session", ID: "session-0123456789abcdef"}
+	editAsConnectedPeer(t, service, artifactID, 1, alice, replaceRun("First.", "First, typed by alice."))
+	waitForLandedAppends(t, service, artifactID)
+	if _, err := joinedApplyOps(service, artifactID, []model.EditOp{
+		{Op: "replace", Find: "Second.", With: "Second, by the agent."},
+	}, agent, nil); err != nil {
+		t.Fatalf("the agent's edit after alice's: %v", err)
+	}
+	commitNamedVersion(t, service, artifactID, agent)
+	row, open := readEditNotice(t, service, artifactID)
+	if !open {
+		t.Fatal("the agent's named version over alice's edit opened no edit notice naming anyone")
+	}
+	if row.lastEditor != alice {
+		t.Fatalf("last editor = %+v, want alice, the one person who edited", row.lastEditor)
+	}
+}
+
+// The final review's N2: closing an issue writes the room's memory of the latest edit source to
+// the document's pending-settlement row, and that memory can be older than the row. Adam's joined
+// write is open while zoe types: the room observes her edit, then adam's commit sets the room's
+// memory to adam (Ledger.creditRooms), and her append, which waits for the advisory lock adam's
+// write holds, lands after his commit. After a close within the settle delay and a reopen, the
+// settlement's notice must name zoe, whose edit is the later one, and not the memory of adam.
+func TestEditNoticeAClosedAndReopenedIssueNamesTheLaterBrowserEditor(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, "First.\n\nSecond.\n")
+	settleCurrentGeneration(t, service, artifactID)
+	adam := model.Actor{Kind: "user", ID: "adam@example.com"}
+	zoe := model.Actor{Kind: "user", ID: "zoe@example.com"}
+	if err := joinedWrite(service, func(ctx context.Context) error {
+		if _, err := service.ApplyOps(ctx, artifactID, []model.EditOp{
+			{Op: "replace", Find: "First.", With: "First, by adam's API write."},
+		}, adam, nil); err != nil {
+			return err
+		}
+		editAsConnectedPeer(t, service, artifactID, 1, zoe, replaceRun("Second.", "Second, typed by zoe."))
+		return nil
+	}); err != nil {
+		t.Fatalf("adam's joined write with zoe's browser edit inside it: %v", err)
+	}
+	waitForLandedAppends(t, service, artifactID)
+	service.SetIssueClosed(context.Background(), "DOC-1", true)
+	service.SetIssueClosed(context.Background(), "DOC-1", false)
+	if err := service.warmLiveDocument(context.Background(), artifactID); err != nil {
+		t.Fatalf("load the reopened document: %v", err)
+	}
+	settleCurrentGeneration(t, service, artifactID)
+	row, open := readEditNotice(t, service, artifactID)
+	if !open {
+		t.Fatal("the reopened document's settlement over adam's and zoe's edits opened no edit notice")
+	}
+	if row.lastEditor != zoe {
+		t.Fatalf("last editor = %+v, want zoe, whose edit landed after adam's write", row.lastEditor)
+	}
+}
+
+// The final review's N1: a version no person can be named for (two peers were connected) must
+// not drop out of every notice. Alice's notice goes; then one of two connected people edits, which
+// names nobody; then alice edits alone. Her next notice must cover the unnamed edit too: its diff
+// holds both changes and its editors hold bob.
+func TestEditNoticeAnUnnamedVersionAfterASentNoticeIsInTheNextNotice(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, "First.\n\nSecond.\n\nThird.\n")
+	settleCurrentGeneration(t, service, artifactID)
+	alice := model.Actor{Kind: "user", ID: "alice@example.com"}
+	bob := model.Actor{Kind: "user", ID: "bob@example.com"}
+	sendNow := func(what string) {
+		t.Helper()
+		if _, err := service.store.Pool.Exec(context.Background(),
+			`update document_edit_notices set due_at = now() - interval '1 second' where artifact_id = $1 and due_at is not null`, artifactID); err != nil {
+			t.Fatalf("make %s due: %v", what, err)
+		}
+		if sent, err := service.sendDueEditNotices(context.Background()); err != nil || sent != 1 {
+			t.Fatalf("sweep for %s = %d sent, %v; want 1 sent", what, sent, err)
+		}
+	}
+	editAsConnectedPeer(t, service, artifactID, 1, alice, replaceRun("First.", "First, by alice."))
+	settleCurrentGeneration(t, service, artifactID)
+	sendNow("alice's first notice")
+	service.addConnection(artifactID, 1, alice)
+	service.addConnection(artifactID, 2, bob)
+	editAsPeer(t, service, artifactID, replaceRun("Second.", "Second, by one of the two."))
+	service.removeConnection(artifactID, 1)
+	service.removeConnection(artifactID, 2)
+	settleCurrentGeneration(t, service, artifactID)
+	if row, open := readEditNotice(t, service, artifactID); open {
+		t.Fatalf("a version no person can be named for opened a window naming %+v, want none", row.lastEditor)
+	}
+	editAsConnectedPeer(t, service, artifactID, 1, alice, replaceRun("Third.", "Third, by alice again."))
+	settleCurrentGeneration(t, service, artifactID)
+	sendNow("alice's second notice")
+	edits := humanEdits(t, service.store, artifactID)
+	if len(edits) != 2 {
+		t.Fatalf("edit notices = %d, want 2", len(edits))
+	}
+	second := edits[1].payload
+	if !strings.Contains(second.Diff, "+Second, by one of the two.") || !strings.Contains(second.Diff, "+Third, by alice again.") {
+		t.Fatalf("second notice v%d to v%d diff = %q, want both the unnamed edit and alice's", second.FromVersion, second.ToVersion, second.Diff)
+	}
+	if !slices.Contains(second.Editors, bob.ID) || edits[1].actor != alice {
+		t.Fatalf("second notice editors = %v actor = %+v, want bob among the editors and alice as the actor", second.Editors, edits[1].actor)
+	}
 }

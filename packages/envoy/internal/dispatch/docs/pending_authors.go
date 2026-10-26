@@ -465,9 +465,9 @@ type authorCapture struct {
 	rAuthors []model.Actor
 	inflight []*inflightCredit
 	upload   *uploadHold
-	// latest is the room's latest edit source when the capture was taken (roomState.lastActor),
-	// nil when none is known: the person a version's edit notice names as the one who edited last
-	// (recordEditNotice), whoever writes the version.
+	// latest is the person who made the document's latest edit when the capture was taken
+	// (latestEditSource), nil when none is known: the person a version's edit notice names as the
+	// one who edited last (recordEditNotice), whoever writes the version.
 	latest *model.Actor
 }
 
@@ -480,15 +480,15 @@ type uploadHold struct {
 	hold *roomHold
 }
 
-// capturePendingAuthors reads R in tx, which holds the document's advisory lock, with the sender
-// the document's last appended update recorded (readOwedSettlement's last actor), and takes whom a
-// version lists (captureAuthors) under room's state lock.
+// capturePendingAuthors reads R in tx, which holds the document's advisory lock, with the
+// document's latest person sender (readLastPerson), and takes whom a version lists
+// (captureAuthors) under room's state lock.
 func (s *Service) capturePendingAuthors(ctx context.Context, tx pgx.Tx, room string, write *liveWrite, actor *model.Actor) (authorCapture, error) {
 	owed, err := readPendingAuthors(ctx, tx, room)
 	if err != nil {
 		return authorCapture{}, err
 	}
-	_, durableLatest, err := readOwedSettlement(ctx, tx, room)
+	durableLatest, err := readLastPerson(ctx, tx, room)
 	if err != nil {
 		return authorCapture{}, err
 	}
@@ -512,9 +512,11 @@ func (s *Service) capturePendingAuthors(ctx context.Context, tx pgx.Tx, room str
 // wins, and its sender is the one it recorded: for a browser edit the sole connected peer, nil
 // when several were connected and ygo does not say which of them sent it; for the write its own
 // actor. A nil there is an unknown sender, not a reason to look further back: the latest edit is
-// still that one. With no edit of either kind, durableLatest is the sender the document's last
-// appended update recorded (doc_settlements_pending.last_actor), which is how a process that
-// never loaded the document names it. actor, the version's writer, names nobody by itself: an
+// still that one. With no edit of either kind that decides, durableLatest is the document's latest
+// person sender as its stored updates and commits recorded it (doc_settlements_pending.last_person,
+// latestPersonOf). That is the case once a browser edit's append has landed, which takes it out of
+// the in-flight credits within milliseconds, so the process that holds the room reads it as one
+// that never loaded the document does. actor, the version's writer, names nobody by itself: an
 // agent writing a named version over someone's edit did not make that edit.
 func captureAuthors(state *roomState, owed map[string]model.Actor, durableLatest *model.Actor, write *liveWrite, actor *model.Actor) authorCapture {
 	capture := authorCapture{
@@ -542,8 +544,9 @@ func captureAuthors(state *roomState, owed map[string]model.Actor, durableLatest
 
 // latestEditSource is the person who made the document's latest edit, read from the senders the
 // room and the calling transaction recorded, newest first by the sequence each took when its edit
-// was observed or applied, and then from durable, the sender the document's last appended update
-// recorded. It never reads a name out of the set of people an edit credits.
+// was observed or applied, and then from durable, the document's latest person sender, which the
+// stored updates and commits keep by the same rule (latestPersonOf). It never reads a name out of
+// the set of people an edit credits.
 //
 // Walking newest first, each edit answers for itself:
 //   - a known sender that is a person is the answer;
@@ -788,27 +791,51 @@ func deleteHeldPendingAuthors(ctx context.Context, tx pgx.Tx, room string, held 
 
 // recordLatestEditSource records lastActor as the latest edit source on room's pending-settlement
 // row in tx, which holds the document's advisory lock, without moving the row's age: a committed
-// write, a seed, or an issue's close names who made the document's latest change.
+// write, a seed, or a rebuild names who made the document's latest change. A person as lastActor
+// is also the document's latest person sender (last_person); a session leaves that as it is.
 func recordLatestEditSource(ctx context.Context, tx pgx.Tx, room string, lastActor *model.Actor) error {
-	return markSettlementPending(ctx, tx, []string{room}, lastActor, true, false)
+	person, setPerson := latestPersonOf(lastActor, false)
+	return markSettlementPending(ctx, tx, []string{room}, lastActor, true, false, person, setPerson)
 }
 
 // markUpdateOwed records, in the transaction appending a document update, that the document owes
 // a settlement from now, keeping the latest edit source the row names.
 func markUpdateOwed(ctx context.Context, tx pgx.Tx, room string) error {
-	return markSettlementPending(ctx, tx, []string{room}, nil, false, true)
+	return markSettlementPending(ctx, tx, []string{room}, nil, false, true, nil, false)
 }
 
 // markUpdateOwedBy is markUpdateOwed for an update credited to an edit, which names lastActor as
-// its latest edit source, nil for an edit no one peer can be credited with.
-func markUpdateOwedBy(ctx context.Context, tx pgx.Tx, room string, lastActor *model.Actor) error {
-	return markSettlementPending(ctx, tx, []string{room}, lastActor, true, true)
+// its latest edit source, nil for an edit no one peer can be credited with. creditsPerson says
+// whether the edit credits a person, which decides what an unknown sender does to the latest
+// person sender (latestPersonOf).
+func markUpdateOwedBy(ctx context.Context, tx pgx.Tx, room string, lastActor *model.Actor, creditsPerson bool) error {
+	person, setPerson := latestPersonOf(lastActor, creditsPerson)
+	return markSettlementPending(ctx, tx, []string{room}, lastActor, true, true, person, setPerson)
+}
+
+// latestPersonOf is what an edit does to the document's latest person sender
+// (doc_settlements_pending.last_person), by the rule latestEditSource walks the room's edits with:
+// a person sender becomes it; an unknown sender on an edit that credits a person clears it, since
+// that edit may be any of the people it credits and no older person may stand in for it; and a
+// session sender, or an unknown sender crediting only sessions, is no person's edit and leaves it
+// as it is (set false).
+func latestPersonOf(sender *model.Actor, creditsPerson bool) (person *model.Actor, set bool) {
+	switch {
+	case sender != nil && sender.Kind == "user":
+		return sender, true
+	case sender == nil && creditsPerson:
+		return nil, true
+	default:
+		return nil, false
+	}
 }
 
 // markSettlementPending records, in the transaction that appends a document update, that each
 // document of rooms owes a settlement. With setLastActor it also records lastActor as the latest
 // edit source that settlement names on its events, nil for an edit no one peer can be credited
-// with (creditContentChange); without it each row keeps the one it has. The timer that runs the
+// with (creditContentChange); without it each row keeps the one it has. With setPerson it records
+// person as the latest person sender a version's edit notice names (latestPersonOf), nil to clear
+// it; without it each row keeps the one it has. The timer that runs the
 // settlement lives only in memory, so one a shutdown cuts short is found here by the room's next
 // load (onLoadDocument) and by the resumption (RunSettlementResumption). The settlement that
 // covers the update deletes the row in the transaction that commits its writes
@@ -817,25 +844,59 @@ func markUpdateOwedBy(ctx context.Context, tx pgx.Tx, room string, lastActor *mo
 // other documents, in one statement however many there are. updateMarkedAt is true for a newly
 // appended update and for an owed copy: recording the latest edit source after a write or while
 // closing an issue must not make an old row wait another resumption age.
-func markSettlementPending(ctx context.Context, tx pgx.Tx, rooms []string, lastActor *model.Actor, setLastActor, updateMarkedAt bool) error {
-	var encoded any
-	if lastActor != nil {
-		actor, err := json.Marshal(lastActor)
-		if err != nil {
-			return fmt.Errorf("encode the document's latest edit source: %w", err)
-		}
-		encoded = string(actor)
+func markSettlementPending(ctx context.Context, tx pgx.Tx, rooms []string, lastActor *model.Actor, setLastActor, updateMarkedAt bool, person *model.Actor, setPerson bool) error {
+	encoded, err := encodeActor(lastActor)
+	if err != nil {
+		return fmt.Errorf("encode the document's latest edit source: %w", err)
+	}
+	encodedPerson, err := encodeActor(person)
+	if err != nil {
+		return fmt.Errorf("encode the document's latest person sender: %w", err)
 	}
 	if _, err := tx.Exec(ctx, `
-		insert into doc_settlements_pending (artifact_id, last_actor)
-		select unnest($1::uuid[]), $2::jsonb
+		insert into doc_settlements_pending (artifact_id, last_actor, last_person)
+		select unnest($1::uuid[]), $2::jsonb, $5::jsonb
 		on conflict (artifact_id) do update set
 			last_actor = case when $3 then excluded.last_actor else doc_settlements_pending.last_actor end,
-			marked_at = case when $4 then now() else doc_settlements_pending.marked_at end
-	`, rooms, encoded, setLastActor, updateMarkedAt); err != nil {
+			marked_at = case when $4 then now() else doc_settlements_pending.marked_at end,
+			last_person = case when $6 then excluded.last_person else doc_settlements_pending.last_person end
+	`, rooms, encoded, setLastActor, updateMarkedAt, encodedPerson, setPerson); err != nil {
 		return fmt.Errorf("record the document's pending settlement: %w", err)
 	}
 	return nil
+}
+
+// encodeActor is actor as the jsonb text the pending-settlement row stores, nil for none.
+func encodeActor(actor *model.Actor) (any, error) {
+	if actor == nil {
+		return nil, nil
+	}
+	encoded, err := json.Marshal(actor)
+	if err != nil {
+		return nil, err
+	}
+	return string(encoded), nil
+}
+
+// readLastPerson reads the document's latest person sender (doc_settlements_pending.last_person,
+// latestPersonOf), nil when the row is gone or names none. A version reads it in the transaction
+// holding the document's advisory lock, so no append changes it until that version ends.
+func readLastPerson(ctx context.Context, q Queryer, room string) (*model.Actor, error) {
+	var encoded []byte
+	err := q.QueryRow(ctx, `
+		select last_person from doc_settlements_pending where artifact_id = $1
+	`, room).Scan(&encoded)
+	if errors.Is(err, pgx.ErrNoRows) || (err == nil && encoded == nil) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read the document's latest person sender: %w", err)
+	}
+	var actor model.Actor
+	if err := json.Unmarshal(encoded, &actor); err != nil {
+		return nil, fmt.Errorf("decode the document's latest person sender: %w", err)
+	}
+	return &actor, nil
 }
 
 // readOwedSettlement reports whether room owes a settlement and the latest edit source its row
@@ -864,7 +925,10 @@ func readOwedSettlement(ctx context.Context, q Queryer, room string) (owed bool,
 
 // persistLastActor records lastActor on room's pending-settlement row, in a transaction of its own
 // holding the document's advisory lock: closing an issue keeps the latest edit source its
-// settlement names once the room has gone.
+// settlement names once the room has gone. It leaves the latest person sender (last_person) as it
+// is: lastActor is the room's memory, which can be older than the row, since a joined write sets
+// it at commit after a browser edit its transaction saw (Ledger.creditRooms) while that edit's
+// append lands later and records the browser's editor. The row is the order the edits landed in.
 func (s *Service) persistLastActor(ctx context.Context, room string, lastActor model.Actor) error {
 	tx, err := s.store.Pool.Begin(ctx)
 	if err != nil {
@@ -874,7 +938,7 @@ func (s *Service) persistLastActor(ctx context.Context, room string, lastActor m
 	if err := lockDocumentRoom(ctx, tx, room); err != nil {
 		return err
 	}
-	if err := recordLatestEditSource(ctx, tx, room, &lastActor); err != nil {
+	if err := markSettlementPending(ctx, tx, []string{room}, &lastActor, true, false, nil, false); err != nil {
 		return err
 	}
 	if err := tx.Commit(ctx); err != nil {

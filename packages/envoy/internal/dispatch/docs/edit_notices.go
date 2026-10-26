@@ -27,9 +27,9 @@ const defaultEditNoticeQuiet = 30 * time.Second
 // to_version becomes this one, the editors gain this version's people, and the window ends a
 // quiet time from the moment this statement runs. That moment is clock_timestamp(), never now():
 // now() is the transaction's start, before the owner and advisory locks a busy document makes the
-// writer wait on, so a window counted from it could already be over when the notice commits. It
-// is a statement of its own so the sweep's delete (dueEditNotice) and it are the only two writers
-// of the table.
+// writer wait on, so a window counted from it could already be over when the notice commits.
+// It and holdEditNotice are the settlement side's two writers of the table, and the sweep's
+// delete (dueEditNotice) is the third.
 const openEditNotice = `
 	insert into document_edit_notices (artifact_id, from_version, to_version, editors, last_editor, due_at)
 	values ($1, $2 - 1, $2, $3, $4, clock_timestamp() + $5::interval)
@@ -39,6 +39,22 @@ const openEditNotice = `
 			from jsonb_array_elements(document_edit_notices.editors || excluded.editors) e),
 		last_editor = excluded.last_editor,
 		due_at = excluded.due_at`
+
+// holdEditNotice records a person's version whose latest edit has no known person sender in the
+// document's window, without naming anyone: a new row starts at the version before this one with
+// no last editor and no due time, which the sweep never sends; an open window keeps its last
+// editor, gains this version and its people, and when it names someone it moves its due time as
+// any later person's version does; a held row stays held. The next version that names a person
+// (openEditNotice) keeps the row's from_version, so its notice covers this version too.
+const holdEditNotice = `
+	insert into document_edit_notices (artifact_id, from_version, to_version, editors, last_editor, due_at)
+	values ($1, $2 - 1, $2, $3, null, null)
+	on conflict (artifact_id) do update set
+		to_version = excluded.to_version,
+		editors = (select coalesce(jsonb_agg(distinct e), '[]'::jsonb)
+			from jsonb_array_elements(document_edit_notices.editors || excluded.editors) e),
+		due_at = case when document_edit_notices.last_editor is null then null
+			else clock_timestamp() + $4::interval end`
 
 // recordEditNotice opens or moves on artifactID's edit notice for a version just written, when
 // that version lists a person: a person's browser edit is what the notice tells the document's
@@ -56,11 +72,14 @@ const openEditNotice = `
 // own capture read it (authorCapture.latest, latestEditSource), never a name chosen out of the
 // set of people the version credits. That set is what a browser edit leaves when several peers
 // were connected: ygo does not say which of them sent the update, so the room credits them all
-// and records no sender. A version whose latest edit has no known sender, or whose sender is not
-// a person this version credits, names nobody: the notice is logged and skipped rather than
-// carrying a person who may not have typed anything. The next edit with a known sender opens the
-// window. This is reachable, not a theoretical branch: it is what the two-connected-peers case
-// and an agent-only snapshot over a person's pending edit both leave.
+// and records no sender. A version whose latest edit has no known person sender, or whose sender
+// is not a person this version credits, names nobody, and no later notice leaves it out
+// (holdEditNotice): in an open window it moves the window on and keeps the window's last editor,
+// the last person the window knows edited; with no window open it starts one that names nobody
+// and is not due until a later version names a person, whose notice then covers it. While no
+// later version names a person, no notice goes for it. A two-peer edit is what reaches this
+// branch: an agent's edit after a person's leaves the document's latest person sender as it was
+// (latestPersonOf), so a later version still names that person.
 func (s *Service) recordEditNotice(ctx context.Context, tx pgx.Tx, artifactID string, version int, authors []model.Actor, latest *model.Actor) error {
 	var editors []string
 	for index := range authors {
@@ -71,17 +90,19 @@ func (s *Service) recordEditNotice(ctx context.Context, tx pgx.Tx, artifactID st
 	if len(editors) == 0 {
 		return nil
 	}
-	if latest == nil || latest.Kind != "user" || !slices.Contains(editors, latest.ID) {
-		slog.Info("dispatch: a version names no latest editor among the people it lists, so it opens no edit notice",
-			"artifact", artifactID, "version", version, "editors", editors, "latest", latest)
-		return nil
-	}
-	last := *latest
 	editorsJSON, err := json.Marshal(editors)
 	if err != nil {
 		return fmt.Errorf("encode edit notice editors: %w", err)
 	}
-	lastJSON, err := json.Marshal(last)
+	if latest == nil || latest.Kind != "user" || !slices.Contains(editors, latest.ID) {
+		slog.Info("dispatch: a version names no latest editor among the people it lists, so its edit notice names nobody new",
+			"artifact", artifactID, "version", version, "editors", editors, "latest", latest)
+		if _, err := tx.Exec(ctx, holdEditNotice, artifactID, version, editorsJSON, s.editNoticeQuiet); err != nil {
+			return fmt.Errorf("hold edit notice: %w", err)
+		}
+		return nil
+	}
+	lastJSON, err := json.Marshal(*latest)
 	if err != nil {
 		return fmt.Errorf("encode edit notice last editor: %w", err)
 	}

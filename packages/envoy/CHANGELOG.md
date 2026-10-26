@@ -15,7 +15,11 @@
   `edit-notices` lease, and the lease pool grows from eight connections to nine for it. A notice
   on an issue closed inside its quiet window is dropped. The dashboard's issue log reads `Edited
   spec.md v4 to v7`. `DISPATCH_TEST_EDIT_NOTICE_QUIET`, under `DISPATCH_TEST_HOOKS=1`, sets the
-  quiet time for an end-to-end test process.
+  quiet time for an end-to-end test process. The person who edited last is the sender of the
+  latest edit, never a name picked from the people an edit credits: an agent's edit after a
+  person's still names the person, which the new column `doc_settlements_pending.last_person`
+  (same migration) keeps across processes; an edit made while two peers were connected names
+  nobody, and holds the window until a later version names a person, whose notice covers both.
 
 - A project's default assignee, the last step of an issue create's assignee chain: an issue created
   with no assignee, by nobody (the shared token), under no parent or under a parent with nobody on

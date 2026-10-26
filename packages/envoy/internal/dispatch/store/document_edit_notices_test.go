@@ -7,8 +7,8 @@ import (
 )
 
 // document_edit_notices holds one pending notice per document: a row reads back as it was written,
-// and deleting its document takes the row with it, so an artifact delete of either release keeps
-// working.
+// a held row names no last editor and has no due time, the two together, and deleting its document
+// takes the row with it, so an artifact delete of either release keeps working.
 func TestDocumentEditNotices(t *testing.T) {
 	ctx := context.Background()
 	store := migratedEmptyStore(t)
@@ -40,6 +40,16 @@ func TestDocumentEditNotices(t *testing.T) {
 	if from != 4 || to != 7 || editors != `["alice@example.com", "bob@example.com"]` ||
 		lastEditor != `{"id": "bob@example.com", "kind": "user"}` || !dueAt.Equal(due) {
 		t.Fatalf("notice = from %d to %d editors %s last %s due %s; want the row as written", from, to, editors, lastEditor, dueAt)
+	}
+	if _, err := store.Pool.Exec(ctx, `
+		update document_edit_notices set last_editor = null, due_at = null where artifact_id = $1
+	`, artifactID); err != nil {
+		t.Fatalf("hold the notice: %v", err)
+	}
+	if _, err := store.Pool.Exec(ctx, `
+		update document_edit_notices set due_at = now() where artifact_id = $1
+	`, artifactID); err == nil {
+		t.Fatal("a notice due with no last editor was stored, want the check to refuse it")
 	}
 	if _, err := store.Pool.Exec(ctx, `delete from artifacts where id = $1`, artifactID); err != nil {
 		t.Fatalf("delete the document: %v", err)

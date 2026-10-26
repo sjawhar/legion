@@ -149,7 +149,7 @@ func owedSettlementsOfRestored(ctx context.Context, tx pgx.Tx, restored []restor
 	}
 	slices.Sort(owed)
 	owed = slices.Compact(owed)
-	if err := markSettlementPending(ctx, tx, owed, nil, false, true); err != nil {
+	if err := markSettlementPending(ctx, tx, owed, nil, false, true, nil, false); err != nil {
 		return nil, 0, err
 	}
 	return owed, len(copies), nil

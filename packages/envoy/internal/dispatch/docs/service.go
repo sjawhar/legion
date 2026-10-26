@@ -1282,9 +1282,10 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 		retry(err)
 		return
 	}
-	// The sender the document's last appended update recorded, which names who edited last for a
-	// process that never held this room (latestEditSource).
-	_, durableLatest, err := readOwedSettlement(ctx, tx, room)
+	// The document's latest person sender as its stored updates and commits recorded it
+	// (readLastPerson), which names who edited last once the room holds no in-flight credit that
+	// decides (latestEditSource): every landed browser edit, in this process or another.
+	durableLatest, err := readLastPerson(ctx, tx, room)
 	if err != nil {
 		retry(err)
 		return
