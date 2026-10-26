@@ -2,35 +2,41 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-190",
-  "completed": "2026-10-25T20:41:00Z",
-  "round": 2,
-  "headSha": "48eebf71e19204987b556774b9fe705c97329243",
-  "codeHeadSha": "f91b263cc4ad9b987a7fa4d6b502f3b605723ca8",
-  "ci": "At f91b263cc4ad (read 2026-10-25T20:40Z with gh run list --commit): PR Title 40230770745 success; Tests 40230770712, Docs 40230770718 and Worker Image 40230770713 in progress; Legion Envoy and Contracts 40230770821 queued. Not waited on; no lane rerun here.",
+  "completed": "2026-10-26T09:00:00Z",
+  "round": 3,
+  "headSha": "8a7d8697180c662972d259b4f923dd99b987582e",
+  "codeHeadSha": "18e756469fe4cc53056f32750f035a737b55ae84",
+  "fullRoundReason": "My last verification named 48eebf71; the code changed since (round-4 fix 437ef2a9, then the forward merge 18e75646), so this is a full round, not a rebase re-check.",
+  "ci": "At 18e756469fe4 (read 2026-10-26T08:42Z with gh run list --commit): Tests 40292029074, Legion Envoy and Contracts 40292028928, Docs 40292028995, Worker Image 40292028950, PR Title 40292029059 all queued. Not waited on; no lane rerun here.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran at head 48eebf71 from a fresh git archive (/legion/scratch/tmp/infra190/tester/head, harness prepare-tree.sh), tester lane (Postgres 5434, server 28777). A1: reproduction prints [![x](i.png)](https://u.com) on both lines. A2: API write then /text returns [![x](i.png)](https://u.com \"t\") byte for byte; text+image link stored as at base (live/api-r3.log). A3: linked-images.e2e.ts chromium + iphone 16 passed (tester/e2e-head-r3.log). A4: differential.sh --base 7af60a22b33f --head 48eebf71 --corpus theorem.jsonl: 2243 documents, every GATE 0, exit 0 (tester/diff-a4-r3.log). A5: token 2 and 3 readonly with the stale peer's link-stripping update answered applied=0 and /text unchanged; token 3:1 read-write and its update applied (tester/live/a5-r3.log). Round 3 (my round-1 failure): TestParseDecodesALinkedImagesLinkAsTheEditorReadsIt passes; the live editor, past version and comment all draw https://ci.example/q?a=1&b=2 and https://ci.example/a*b (tester/e2e-r3-adv.log)."
+    "how": "Re-ran at code head 18e75646 from a fresh git archive (/legion/scratch/tmp/infra190/tester/head-r5, harness prepare-tree.sh), tester lane (Postgres 5434, server 28777). A1: the reproduction prints [![x](i.png)](https://u.com) on both lines. A2 + round 4: real API write then /text returns [![x](i.png \"s\")](https://u.com \"t\"), ![x](i\\&amp;.png), [![x](i\\&amp;.png)](https://u.com) and ![x](i.png?a=1\\&copy;) byte for byte; text+image link stored as at base (tester/live/r5v.out). A3: linked-images.e2e.ts chromium + iphone 16 passed (tester/e2e-head-r5.log). A4: differential.sh --base 748e8d952a76 --head 18e756469fe4 over theorem.jsonl and tester/corpus: 2336 documents, every GATE 0, linked image kept 65/65, exit 0 (tester/diff-a4-r5.log). A5: tokens 2 and 3 readonly, the stale peer's link-stripping update answered applied=0 and /text unchanged; token 3:1 read-write and its update applied (tester/live/a5-r5.log)."
   },
   "failures": [
     {
-      "criterion": "R2: this change adds no refusal; every write Dispatch takes today it still takes",
-      "evidence": "Round 3 replaced an image's src decoder (parse.go:837, decodeDestination) for every image, linked or not, but the src writer (linkTail -> escapeLinkDestination, render.go) does not escape an '&' that would open a character reference, as the new link writer (escapeDecodedLinkDestination) does. So an image whose source escapes a reference's '&' is now held as 'i&amp;.png', written as ![x](i&amp;.png), which reads back as 'i&.png', and the write is refused. Real server at head 48eebf71 (tester/live/api-r3.log): POST /api/v1/issues/LIVE-1/artifacts content '![x](i\\&amp;.png)' -> HTTP 400 INVALID_MARKDOWN 'the markdown the document would be stored as reads back otherwise'; the same for '[![x](i\\&amp;.png)](https://u.com)'. Base 7af60a22 takes all three shapes (ParseForWrite in a base archive: stored ![x](i&.png), ![x](i&.png), ![x](i.png?a=1©)), and differential.sh --base 7af60a22 --head 48eebf71 over tester/corpus/decoding.jsonl reports 'GATE head refuses a write the base takes 1' (decoding:src-escaped-amp), exit 1 (tester/diff-r3.log). Red test: TestParseTakesAnImageWhoseSourceEscapesAReferencesAmpersand in packages/envoy/internal/dispatch/pmdoc/parse_test.go (commit b9246afc); 'cd packages/envoy && go test ./internal/dispatch/pmdoc/ -run TestParseTakesAnImageWhoseSourceEscapesAReferencesAmpersand' fails on all three cases with 'outside Proof schema: the markdown the document would be stored as reads back otherwise'. The implementer's own TestParseDecodesALinkedImagesLinkInOnePassAsTheEditorReadsIt case '[![x](i\\&amp;&copy=.png)](u)' checks Parse only, so it does not catch the refused write."
+      "criterion": "R2: this change adds no refusal; every write Dispatch takes today, a linked image of any shape included, it still takes",
+      "evidence": "A linked image whose link title holds a line break the context cannot hold as written is now refused. decodedTitleSuffix (render.go) writes a decoded link title's line feed raw, so a blank line in the title, or any line break in a heading or table cell, breaks the block and the read-back check refuses the write. Real server at code head 18e75646 (tester/live/r5head.out): POST /api/v1/issues/LIVE-1/artifacts with [![x](i.png)](https://u.com \"a&#10;&#10;b\"), # [![x](i.png)](https://u.com \"a&#10;b\"), a table cell | [![x](i.png)](https://u.com \"a&#10;b\") |, and the setext heading Head [![x](i.png)](https://u.com \"a\\nb\") / === each -> HTTP 400 INVALID_MARKDOWN 'the markdown the document would be stored as reads back otherwise'. Base 748e8d95 (tester/live/r5base.out) answers HTTP 201 to all four (it drops the link). differential.sh --base 748e8d952a76 --head 18e756469fe4 --corpus tester/corpus-r5 (232 shapes) --corpus tester/corpus: GATE head refuses a write the base takes 4, GATE head loses a whole-image link 6, exit 1 (tester/diff-r5-adv.log, report.jsonl). Red test TestParseTakesALinkedImageWhoseLinkTitleHoldsALineBreak in packages/envoy/internal/dispatch/pmdoc/parse_test.go, commit 0c119da9482ca85dab2fb46218ed092874d66d05; fails with `cd packages/envoy && go test ./internal/dispatch/pmdoc/ -run TestParseTakesALinkedImageWhoseLinkTitleHoldsALineBreak` (4 cases: 'want the write taken, as before INFRA-190'). The implementer's TestRenderWritesEachImageFieldSoItReadsBackAsHeld holds no title line break in a heading, a table or as a blank line, so no existing test caught it."
     }
   ],
   "failed": 1,
   "checked": [
-    "Decoded and encoded link addresses (throwaway zz-tester-linked.e2e.ts T1, chromium, agent-written document and comment, tester/e2e-r3-adv.log): JAVASCRIPT:, <javascript:>, data:, vbscript:, javascript&#58;, javascript\\:, &#x6A;avascript:, JaVaScRiPt:, java&#9;script:, &#32;javascript:, java&#10;script:, javascript&colon; draw no anchor in the live editor, the past version or the comment; a Ctrl/Cmd-click on each in the live editor and a click on each in the past version ran nothing (window.__pwned null) and navigated nowhere. &#1;javascript: is stored as U+FFFD + 'javascript:' and every view draws the same inert relative href. The three views draw the same address for every picture.",
-    "Differential over 180 documents (the in-repo corpora, my 48 adversarial shapes, 9 controls and 36 decoding shapes): every gate 0 except the refused write above; linked image kept 65/65.",
-    "Real API at head: an entity in a linked image's link now reads back decoded ([![x](i.png)](https://u.com/?a=1&b=2)); a text link keeps &amp; as at base (the architect's scope); a control-character reference in a link is stored as U+FFFD, as the editor reads it; a linked image's title reference is decoded (\"a & b\").",
-    "Unchanged since round 1 and re-run here: websocket admission (A5), the Theorem differential, the 16-case browser suite."
+    "Round 4 writer over 232 new shapes (tester/corpus-r5/decoding-r4.jsonl): control, C1, DEL, NUL, surrogate, noncharacter, 8-digit and out-of-range numeric references, and 42 entity names (amp, AMP, Tab, NewLine, bne, nvlt, fjlig, acE, lbrack, bsol, verbar, unknown names) in an image's src and title and a linked image's link and link title, in paragraphs, headings, lists, quotes and table cells: no regression, misread or panic beyond the failure above.",
+    "Two other 'lost whole-image link' flags, [![x](i.png \"a&#10;&#10;b\")](https://u.com) and a table cell holding [![x](i.png \"a&#10;b\")](https://u.com), are refused at base too (an image title with a blank line or a line break in a table): not an R2 regression, but the same writer fix would take them.",
+    "Two churn flags, ![x](i.png \"a&#13;b\") and \"a&#13;&#10;b\": base stores a raw CR in the title, which a write re-reads as a line feed (base /text for a raw-CR title is \"a\\nb\", tester/live/r5base.out), so base does not store it correctly and R3 does not cover it; head writes &#13; and reads it back as held.",
+    "Unchanged-area re-runs at the merged head: websocket admission (A5), the Theorem differential, the 16-case browser suite, the spec reproduction."
   ],
   "previousRounds": [
+    {
+      "round": 2,
+      "headSha": "48eebf71e19204987b556774b9fe705c97329243",
+      "verdict": "fail",
+      "failure": "An image whose source escapes a reference's '&' was refused (R2; red test TestParseTakesAnImageWhoseSourceEscapesAReferencesAmpersand, b9246afc). Fixed at 437ef2a9 and verified in this round on the real API."
+    },
     {
       "round": 1,
       "headSha": "6a206afc8f7a06b773823a0d40709777d673acde",
       "verdict": "fail",
-      "failure": "A linked image's link was stored as written, not decoded as the editor reads it (red test TestParseDecodesALinkedImagesLinkAsTheEditorReadsIt, 80ac2d84fc67). Fixed at f91b263c and verified in round 2.",
-      "checked": "Containers (heading, list, quote, table) keep the link; agent insert/replace, typing after the picture and editor copy/paste keep it; HTML badge paste stored linked; websocket tokens 3:1 read-write, 3/2/3:1:x/3:01/3:2/:1/2:1 readonly; Yjs round trip of 48 shapes holds."
+      "failure": "A linked image's link was stored as written, not decoded as the editor reads it (red test TestParseDecodesALinkedImagesLinkAsTheEditorReadsIt, 80ac2d84fc67). Fixed at f91b263c and verified in round 2."
     }
   ]
 }
