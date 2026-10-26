@@ -68,6 +68,26 @@ type Issue struct {
 	// HandedOver is whether the issue carried LegionLabel when Dispatch last showed it: what hands
 	// a root, or an orphan admitted as one, to Legion. A child running under its tree needs none.
 	HandedOver bool
+	// TakenBack is whether the issue's run has stood in a phase of its own — one that carries a run
+	// (CarriesRun's rule: neither phase.Admitted nor phase.Done) — as part of the tree it now roots or
+	// belongs to. It is a fact about the run, not about the issue's history. Promotion reads it
+	// because the spec exempts a tree Legion takes back after it finished and lingered: both that the
+	// issue ran and that the tree coming back is its own, since re-admission leaves such a root at
+	// phase.Admitted carrying no run, the same shape as a waiting root that only left the line and
+	// returned, or a child handed over from a finished tree as a root of its own, both of which are
+	// checked (blockers.Exempt).
+	//
+	// The workflow's transition writes the mark as the issue moves into such a phase
+	// (workflow.Engine.transition), the only way an issue first leaves phase.Admitted for one. It
+	// lasts through that phase's end and its root's leave into a linger, and re-admission keeps it
+	// when the root's own tree comes back, the work that earned it. Every other path that opens a run
+	// starts the run clean: a child's re-entry into its tree records its new generation without it
+	// (workflow.Engine.enterChild), and re-admission clears it when another tree's work reaches a root
+	// of its own without its run (admit.Admission.readmit), what that child ran being its old tree's.
+	// An orphan that carries its run keeps the mark with it, the run being its new tree's from then
+	// on. So no issue is exempt from the blocker check unless the run it is exempt for is the run it
+	// arrived with. Nothing else writes it.
+	TakenBack bool
 	// DispatchStatus is the status Dispatch showed at the newest event or boot listing applied to the
 	// record (LastDispatchSeq's), whatever the daemon has queued since: every event carries the whole
 	// issue, so only an event whose status differs from it writes a status.
@@ -453,6 +473,18 @@ type HandedOverRoot struct {
 	GateCarried bool
 }
 
+// DispatchIssueRow is one row of the daemon's mirror of Dispatch's issues: what Dispatch last
+// said about an issue of the project, whether or not the daemon records the issue itself. Seq is
+// the Dispatch sequence the observation came from, which fences the write (PutDispatchIssue), and
+// Blockers the keys the issue waits on, in Dispatch's own order.
+type DispatchIssueRow struct {
+	Key      string
+	Project  string
+	Status   string
+	Blockers []string
+	Seq      int64
+}
+
 // Store contains only transactional operations. The caller owns each transaction so intake can
 // atomically deduplicate an event, update the record, and enqueue all of its effects.
 type Store interface {
@@ -477,6 +509,14 @@ type Store interface {
 	// PutRepoNote records a note it posts.
 	RepoNote(ctx context.Context, tx pgx.Tx, issue string) (*RepoNote, error)
 	PutRepoNote(ctx context.Context, tx pgx.Tx, note RepoNote) error
+	// PutDispatchIssue writes row into the mirror of Dispatch's issues, fenced on the Dispatch
+	// sequence: a row already holding an observation at least as fresh keeps what it has, so a
+	// slower observation never overwrites a faster one. A row whose Seq is zero — a fact the
+	// daemon minted from its own record, which Dispatch never said — writes nothing at all.
+	PutDispatchIssue(ctx context.Context, tx pgx.Tx, row DispatchIssueRow) error
+	// DispatchIssues is every mirrored row of the Dispatch project key project, by key: both
+	// consumers read the whole project in one query and judge what is blocked in memory.
+	DispatchIssues(ctx context.Context, tx pgx.Tx, project string) ([]DispatchIssueRow, error)
 	Phases(ctx context.Context, tx pgx.Tx, issue string) ([]PhaseRow, error)
 	PutPhase(ctx context.Context, tx pgx.Tx, phase PhaseRow) error
 	PullRequest(ctx context.Context, tx pgx.Tx, issue string) (*PullRequest, error)
@@ -688,6 +728,19 @@ func (i Issue) Lingers() bool { return i.LingerUntil != nil }
 func (i Issue) LingersAt(generation uint64) bool {
 	return i.Lingers() && i.Generation == generation
 }
+
+// CarriesRun says whether the issue carries a run: it started a phase, and its tree neither left
+// it admitted nor finished or parked it (phase done). It is one reading with two uses, and the
+// only definition of it.
+//
+// A child moving to a root of its own carries its run there when it has one: a child still
+// admitted never started under its old tree's gate, and a finished one (set back to todo during
+// its tree's linger, say) has no run to carry — carried at done, its new root would take a slot
+// and start an architect with nothing to run. Every path that moves a child to a tree of its own
+// asks it: a hand-over's event, the outbox's direct consumption, and a person's labelling of an
+// orphan. And work already under way is never stopped and never re-checked, so a candidate that
+// carries a run waits on nothing, whatever its links say (blockers.Exempt).
+func (i Issue) CarriesRun() bool { return i.Phase != phase.Admitted && i.Phase != phase.Done }
 
 // ParentOf is an observed parent key as a record holds it: nil for none. Dispatch says "no parent"
 // with an empty string, and the record says it with a nil pointer.

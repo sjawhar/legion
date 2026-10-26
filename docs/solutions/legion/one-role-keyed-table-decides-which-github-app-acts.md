@@ -32,9 +32,9 @@ symptoms:
 
 ## Context
 
-Legion acts on GitHub through two Apps: `legion-implementer` (the code-writing App) and
-`legion-reviewer` (the review App). Until LEGION-42 the daemon held **two** functions that decided
-which App a role acts as, and they disagreed:
+Legion acts on GitHub through two Apps: the implement App (the code-writing App) and the review
+App (their ids and slugs are in the table below). Until LEGION-42 the daemon held **two**
+functions that decided which App a role acts as, and they disagreed:
 
 | function | where | used by | mapping |
 | --- | --- | --- | --- |
@@ -131,10 +131,20 @@ implement-only fixtures (#1016, see the rebase note in
 
 Read from GitHub itself (`GET /app` with each App's JWT, 2026-09-13):
 
-| App | id | permissions |
-| --- | --- | --- |
-| `legion-implementer` | 3202636 | actions:write, checks:**read**, contents:write, issues:write, metadata:read, organization_projects:write, packages:read, pull_requests:write, repository_projects:write, **statuses:write**, workflows:write |
-| `legion-reviewer` | 3202653 | actions:write, **checks:write**, issues:write, metadata:read, packages:read, pull_requests:write |
+| App id | role | slug on 2026-09-13 | permissions |
+| --- | --- | --- | --- |
+| 3202636 | implement | `legion-implementer` | actions:write, checks:**read**, contents:write, issues:write, metadata:read, organization_projects:write, packages:read, pull_requests:write, repository_projects:write, **statuses:write**, workflows:write |
+| 3202653 | review | `legion-reviewer` | actions:write, **checks:write**, issues:write, metadata:read, packages:read, pull_requests:write |
+
+(2026-10-26: both Apps' slugs changed on 2026-10-16. GitHub's record of each App gives its
+`updated_at` as 2026-10-16T05:44Z, main's commits by bot user 271566630 change their author login
+between 05:11Z and 05:53Z that day, and GitHub now shows the review App's earlier reviews (bot
+user 271566912) under its new login. So the `legion-implementer[bot]` and `legion-reviewer[bot]`
+this entry and older entries quote, before 2026-10-16, are these two Apps. The slugs
+`legion-implementer` and `legion-reviewer` have since gone to two other Apps, and main carries
+commits by `legion-implementer[bot]` after 2026-10-16 under another bot user id. Identify an App by
+its id, which `GET /app` answers with the App's own JWT, or a bot by its user id, never by a slug
+or login.)
 
 (2026-09-25: the review App's installations have since gained `contents: write`; the current record
 is in `packages/daemon/src/daemon/AGENTS.md`, GitHub Apps.)
