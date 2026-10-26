@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -94,12 +95,13 @@ var liveProofAppInputs = []string{
 // liveProofApp is one role's App as githubAppsLib resolves it.
 type liveProofApp struct{ id, keyName, keyCommand string }
 
-// runGitHubAppsLib runs script in bash with githubAppsLib as $1 and args after it, in environ less
-// the variables that make bash run other code or trace its own: an exported SHELLOPTS with xtrace
-// would print a refused input's value on stderr, and a BASH_ENV file could write to the stdout
-// the caller parses.
-func runGitHubAppsLib(environ []string, script string, args ...string) (stdout []byte, stderr string, err error) {
-	command := exec.Command("bash", append([]string{"-c", script, "bash", githubAppsLib}, args...)...)
+// runGitHubAppsLib runs script in bash with lib as $1 and args after it, in environ less the
+// variables that make bash run other code or trace its own: an exported SHELLOPTS with xtrace
+// would print a refused input's value on stderr, BASHOPTS sets shell options, a BASH_ENV or ENV
+// file could write to the stdout the caller parses, BASH_XTRACEFD and PS4 steer a trace, and an
+// exported function replaces a builtin the lib calls.
+func runGitHubAppsLib(lib string, environ []string, script string, args ...string) (stdout []byte, stderr string, err error) {
+	command := exec.Command("bash", append([]string{"-c", script, "bash", lib}, args...)...)
 	command.Env = slices.DeleteFunc(slices.Clone(environ), func(entry string) bool {
 		name, _, _ := strings.Cut(entry, "=")
 		return strings.HasPrefix(name, "BASH_FUNC_") || slices.Contains(
@@ -117,21 +119,34 @@ func runGitHubAppsLib(environ []string, script string, args ...string) (stdout [
 // them exists to drift. A refusal returns the lib's message, which names the input and never its
 // value.
 func liveProofApps(environ []string) (implement, review liveProofApp, err error) {
+	return liveProofAppsFrom(githubAppsLib, environ)
+}
+
+// liveProofAppsFrom is liveProofApps reading the lib at lib. It refuses anything but exactly six
+// fields, each non-empty and on one line, and a key command that failed, so a lib that wrote
+// stray output or printed no command never yields an App.
+func liveProofAppsFrom(lib string, environ []string) (implement, review liveProofApp, err error) {
 	const script = `set -euo pipefail
 fail() { printf '%s\n' "$*" >&2; exit 1; }
 source "$1"
 require_app_inputs implement review
 for role in implement review; do
   id=${role}_app_id key=${role}_app_key_name
-  printf '%s\0%s\0%s\0' "${!id}" "${!key}" "$(app_key_command "${!key}")"
+  command=$(app_key_command "${!key}")
+  printf '%s\0%s\0%s\0' "${!id}" "${!key}" "$command"
 done`
-	stdout, stderr, runErr := runGitHubAppsLib(environ, script)
+	stdout, stderr, runErr := runGitHubAppsLib(lib, environ, script)
 	if runErr != nil {
-		return liveProofApp{}, liveProofApp{}, fmt.Errorf("%s refused the App inputs (%v): %s", githubAppsLib, runErr, stderr)
+		return liveProofApp{}, liveProofApp{}, fmt.Errorf("%s refused the App inputs (%v): %s", lib, runErr, stderr)
 	}
 	fields := strings.Split(strings.TrimSuffix(string(stdout), "\x00"), "\x00")
 	if len(fields) != 6 {
-		return liveProofApp{}, liveProofApp{}, fmt.Errorf("%s printed %d fields for the two Apps, want 6", githubAppsLib, len(fields))
+		return liveProofApp{}, liveProofApp{}, fmt.Errorf("%s printed %d fields for the two Apps, want 6", lib, len(fields))
+	}
+	for index, field := range fields {
+		if field == "" || strings.ContainsAny(field, "\r\n") {
+			return liveProofApp{}, liveProofApp{}, fmt.Errorf("%s printed field %d of the two Apps empty or on more than one line", lib, index+1)
+		}
 	}
 	return liveProofApp{fields[0], fields[1], fields[2]}, liveProofApp{fields[3], fields[4], fields[5]}, nil
 }
@@ -162,15 +177,15 @@ note() { printf '%s\n' "$*" >&2; }
 work=$2
 source "$1"
 check_github_apps implement review`
-	_, stderr, runErr := runGitHubAppsLib(environ, script, work)
+	_, stderr, runErr := runGitHubAppsLib(githubAppsLib, environ, script, work)
 	if runErr != nil {
 		return stderr, fmt.Errorf("%s could not prove the Apps against GitHub (%v): %s", githubAppsLib, runErr, stderr)
 	}
 	return stderr, nil
 }
 
-// realGitHubApps is Legion's implement and review Apps: this repository's own deployment by
-// default, another deployment's through the same four inputs the stage proofs read, each App's id
+// realGitHubApps is Legion's implement and review Apps: the lib's default pair, another
+// deployment's through the same four inputs the stage proofs read, each App's id
 // and the secrets-store key the devbox's `secrets` CLI resolves to its private key, all as
 // liveProofApps reads them from the lib, and the block it returns proved against GitHub before a
 // proof acts as it.
@@ -270,36 +285,81 @@ func TestLiveProofAppsReadTheLib(t *testing.T) {
 	}
 
 	pasted := strings.Repeat("Zm9vYmFy", 9) // 72 base64 characters: a value, not a store key's name
-	// The last three run where bash would otherwise read the checks in a UTF-8 locale or trace
-	// itself to stderr; a runner without the en_US.UTF-8 locale falls back to C, so those cases
-	// still hold there. The startup file and the exported function are the reads further down.
+	refuses := func(t *testing.T, input, value string, extra ...string) {
+		t.Helper()
+		_, _, err := liveProofApps(append(with(input+"="+value), extra...))
+		if err == nil || !strings.Contains(err.Error(), input) || (value != "" && strings.Contains(err.Error(), value)) {
+			t.Errorf("%s=%q with %v: err = %v, want a refusal naming the input and not its value", input, value, extra, err)
+		}
+	}
+	refuses(t, "LEGION_E2E_REVIEW_APP_KEY_NAME", pasted)
+	refuses(t, "LEGION_E2E_IMPLEMENT_APP_ID", "")
+	refuses(t, "LEGION_E2E_IMPLEMENT_APP_ID", "0123")
+	refuses(t, "LEGION_E2E_REVIEW_APP_KEY_NAME", pasted, "SHELLOPTS=braceexpand:hashall:interactive-comments:xtrace")
+
+	t.Run("a UTF-8 locale admits nothing the C locale refuses", func(t *testing.T) {
+		// Under en_US.UTF-8 bash's [0-9] matches fullwidth digits, which is what the lib's local
+		// LC_ALL=C guards against. Without that locale bash falls back to C, where the case
+		// proves nothing, so it is skipped rather than passed.
+		probe := exec.Command("bash", "-c", `[[ ３ =~ ^[0-9]$ ]]`)
+		probe.Env = append(with(), "LC_ALL=en_US.UTF-8")
+		if probe.Run() != nil {
+			t.Skip("bash under LC_ALL=en_US.UTF-8 does not match a fullwidth digit with [0-9] here: the en_US.UTF-8 locale is absent, so this case cannot show the guard")
+		}
+		refuses(t, "LEGION_E2E_IMPLEMENT_APP_ID", "３２０２６３６", "LC_ALL=en_US.UTF-8")
+		refuses(t, "LEGION_E2E_REVIEW_APP_KEY_NAME", "K\u00e9Y", "LC_ALL=en_US.UTF-8")
+	})
+
 	startup := filepath.Join(t.TempDir(), "bash_env")
 	if err := os.WriteFile(startup, []byte("printf 'noise from BASH_ENV\\n'\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	for _, refused := range []struct {
-		input, value string
-		extra        []string
-	}{
-		{"LEGION_E2E_REVIEW_APP_KEY_NAME", pasted, nil},
-		{"LEGION_E2E_IMPLEMENT_APP_ID", "", nil},
-		{"LEGION_E2E_IMPLEMENT_APP_ID", "0123", nil},
-		{"LEGION_E2E_IMPLEMENT_APP_ID", "３２０２６３６", []string{"LC_ALL=en_US.UTF-8"}},
-		{"LEGION_E2E_REVIEW_APP_KEY_NAME", "K\u00e9Y", []string{"LC_ALL=en_US.UTF-8"}},
-		{"LEGION_E2E_REVIEW_APP_KEY_NAME", pasted, []string{"SHELLOPTS=braceexpand:hashall:interactive-comments:xtrace"}},
-	} {
-		_, _, err := liveProofApps(append(with(refused.input+"="+refused.value), refused.extra...))
-		if err == nil || !strings.Contains(err.Error(), refused.input) || (refused.value != "" && strings.Contains(err.Error(), refused.value)) {
-			t.Errorf("%s=%q with %v: err = %v, want a refusal naming the input and not its value", refused.input, refused.value, refused.extra, err)
-		}
-	}
-
 	for _, inherited := range []string{"BASH_ENV=" + startup, "BASH_FUNC_printf%%=() { builtin printf 'HIJACK|'; builtin printf \"$@\"; }"} {
 		implement, _, err = liveProofApps(append(with(), inherited))
 		if err != nil || implement.id != defaults["implement_app_id"] {
 			t.Errorf("with %s inherited the implement App is %q (err %v), want the lib's default %s", inherited, implement.id, err, defaults["implement_app_id"])
 		}
 	}
+
+	t.Run("the lib's child inherits none of bash's startup or trace variables", func(t *testing.T) {
+		stdout, stderr, err := runGitHubAppsLib(githubAppsLib, append(with(),
+			"SHELLOPTS=braceexpand:hashall:interactive-comments", "BASHOPTS=extglob", "BASH_ENV="+startup,
+			"ENV="+startup, "BASH_XTRACEFD=2", "PS4=+ ", "BASH_FUNC_hijack%%=() { :; }",
+		), `exec env -0`)
+		if err != nil {
+			t.Fatalf("env in the lib's child: %v: %s", err, stderr)
+		}
+		for _, entry := range strings.Split(string(stdout), "\x00") {
+			name, _, _ := strings.Cut(entry, "=")
+			if strings.HasPrefix(name, "BASH_FUNC_") || slices.Contains([]string{"SHELLOPTS", "BASHOPTS", "BASH_ENV", "ENV", "BASH_XTRACEFD", "PS4"}, name) {
+				t.Errorf("the lib's child inherits %s", name)
+			}
+		}
+	})
+
+	t.Run("a lib whose output is malformed yields no App", func(t *testing.T) {
+		// Each scratch lib sources the real one, then breaks one thing about what it prints.
+		real, err := filepath.Abs(githubAppsLib)
+		if err != nil {
+			t.Fatal(err)
+		}
+		wrap := `eval "$(declare -f require_app_inputs | sed '1s/^require_app_inputs/real_require_app_inputs/')"` + "\n"
+		for name, body := range map[string]string{
+			"a seventh field":             wrap + `require_app_inputs() { real_require_app_inputs "$@"; printf 'extra\0'; }`,
+			"stray output before a field": wrap + `require_app_inputs() { real_require_app_inputs "$@"; echo debug; }`,
+			"an empty key command":        `app_key_command() { :; }`,
+			"a key command that failed":   `app_key_command() { printf 'secrets %s' "$1"; return 3; }`,
+			"a key command on two lines":  `app_key_command() { printf 'secrets %s\nmore' "$1"; }`,
+		} {
+			lib := filepath.Join(t.TempDir(), "github-apps.sh")
+			if err := os.WriteFile(lib, []byte("source "+strconv.Quote(real)+"\n"+body+"\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if implement, review, err := liveProofAppsFrom(lib, with()); err == nil {
+				t.Errorf("%s: got Apps %+v and %+v, want a refusal", name, implement, review)
+			}
+		}
+	})
 }
 
 type realCommandResult struct {

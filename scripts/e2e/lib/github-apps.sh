@@ -10,7 +10,7 @@
 # proveLiveProofApps defines fail and note, writes $work/github-apps.yaml itself from the block the
 # proofs act with, and runs check_github_apps on it. Each App is an id and the
 # name of the secret-store key holding its private key, read by require_app_inputs from two inputs
-# that default to this repository's own deployment:
+# that default to the pair below:
 #   LEGION_E2E_<ROLE>_APP_ID        the App's numeric id (ROLE is IMPLEMENT or REVIEW)
 #   LEGION_E2E_<ROLE>_APP_KEY_NAME  the secret-store key the `secrets` CLI resolves to the App's
 #                                   private key, base64-encoded PEM
@@ -30,9 +30,10 @@
 
 github_apps_lib=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
 
-# This repository's own deployment, the pair a run that sets no input takes. They are sjawhar/legion's
-# own App ids and secret-store key names, which this public repository may carry; another
-# deployment's belong in its inputs, never here.
+# The default pair, which a run that sets no input takes: the App ids and secret-store key names
+# the live proofs here have used since they were written. GitHub shows both Apps owned by an
+# organization, not by this repository's owner, so a deployment with Apps of its own passes them
+# through the inputs; no other deployment's ids or names belong here.
 default_implement_app_id=3202636
 default_implement_app_key_name=LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64
 default_review_app_id=3202653

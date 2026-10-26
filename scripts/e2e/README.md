@@ -2881,7 +2881,7 @@ which two optional operator inputs give:
 | `LEGION_E2E_IMPLEMENT_APP_ID`, `LEGION_E2E_REVIEW_APP_ID` | the App's numeric id |
 | `LEGION_E2E_IMPLEMENT_APP_KEY_NAME`, `LEGION_E2E_REVIEW_APP_KEY_NAME` | the secret-store key the `secrets` CLI resolves to the App's private key (base64-encoded PEM) |
 
-Each defaults to this repository's own deployment's value, which the lib holds in one place
+Each defaults to the pair the live proofs have always used, which the lib holds in one place
 (`default_<role>_app_id`, `default_<role>_app_key_name`), so a run here sets none of them and acts
 as it always has, and a deployment with its own Apps sets all four.
 
