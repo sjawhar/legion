@@ -35,12 +35,17 @@ subject with no cursor starts at the stream's end, so a new follow brings up no 
 forwards are passed over: role messages stay live only.
 
 The ledger holds the identity of each frame the session finished with (its `event_id`, and its
-`dedupe_key` when that names its event), each expiring 72 hours after it was recorded, at most
-20,000, the oldest dropped first. A host's live path calls `recordDelivered` once the host took a
-frame, before it settles the claim, and drops a frame `delivered` finds. A `createDeliveryDedupe`
-claim is settled (`settle()`) once the host is done with the frame, shown or not, or released as
-before; until then `pending()` reads it true, and a sweep leaves that frame's stored copy for a
-later sweep rather than show it beside the live one.
+`dedupe_key` when that names its event, `replayLedgerIdentity`), each expiring 72 hours after it
+was recorded, at most 20,000, the oldest dropped first. A host's live path calls
+`recordDelivered` once the host wrote the frame to the session's record, before it settles the
+claim, and drops a frame `delivered` finds. A `createDeliveryDedupe` claim is settled (`settle()`)
+once the host is done with the frame, shown or not, or released as before; until then `pending()`
+reads it true, and a sweep leaves that frame's stored copy for a later sweep rather than show it
+beside the live one. A host that hands a stored frame, or a failure notice, on without having
+written it yet (Oh My Pi holds a card sent mid-turn until the turn takes it) claims the frame and
+answers `queued`: nothing is recorded and its subjects' cursors stay before it, so a process that
+ends first shows it after the restart, until the host calls `recordDelivered` and settles the
+claim once written.
 
 The state holds each followed subject's `since` and `after` and the stream's `created` time;
 `restore(snapshot)` loads what a host persisted, dropping expired ledger entries and keeping the

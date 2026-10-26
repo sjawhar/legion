@@ -43804,8 +43804,9 @@ function createReplayEngine(options) {
     envelope: envelope2
   });
   const showFailureNotice = async (notice, alive) => {
+    let queued;
     try {
-      await host.showFailureNotice(notice);
+      queued = await host.showFailureNotice(notice) === "queued";
     } catch (error48) {
       if (!alive())
         return "stopped";
@@ -43814,7 +43815,9 @@ function createReplayEngine(options) {
     }
     if (!alive())
       return "stopped";
-    record2(ledgerIdentity(notice.envelope));
+    if (queued)
+      return "hole";
+    record2(replayLedgerIdentity(notice.envelope));
     await flush(alive);
     return "done";
   };
@@ -43827,7 +43830,7 @@ function createReplayEngine(options) {
     }
     if (isRoleForward(envelope2))
       return "done";
-    const identity = ledgerIdentity(envelope2);
+    const identity = replayLedgerIdentity(envelope2);
     if (ledger.has(identity)) {
       failures.delete(seq);
       return "done";
@@ -43874,6 +43877,10 @@ function createReplayEngine(options) {
     if (outcome === "suppressed") {
       failures.delete(seq);
       return "done";
+    }
+    if (outcome === "queued") {
+      failures.delete(seq);
+      return "hole";
     }
     const count = (failure?.count ?? 0) + 1;
     failures.set(seq, { count, error: error48 });
@@ -44077,12 +44084,12 @@ function createReplayEngine(options) {
         log("replay: could not take the followed subjects", error48);
       }
     },
-    delivered: (frame) => ledger.has(ledgerIdentity(frame)),
+    delivered: (frame) => ledger.has(replayLedgerIdentity(frame)),
     async recordDelivered(frame) {
       const alive = bind()?.alive;
       if (alive === undefined)
         return;
-      record2(ledgerIdentity(frame));
+      record2(replayLedgerIdentity(frame));
       await flush(alive);
     },
     async liveFailed(followed, envelope2, error48) {
@@ -44150,7 +44157,7 @@ function replayNoticeFields(notice) {
 function isRoleForward(envelope2) {
   return envelope2.dedupe_key?.startsWith(ROLE_FORWARD_KEY_PREFIX) === true || envelope2.topic?.startsWith(ROLE_TOPIC_PREFIX) === true;
 }
-function ledgerIdentity(frame) {
+function replayLedgerIdentity(frame) {
   return {
     ...frame.event_id === undefined || frame.event_id === "" ? {} : { event_id: frame.event_id },
     ...frame.dedupe_key === undefined || !dedupeKeyNamesItsEvent(frame) ? {} : { dedupe_key: frame.dedupe_key }

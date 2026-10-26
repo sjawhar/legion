@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { Envelope } from "@legion/contracts";
-import { createDeliveryDedupe, type DeliveryDedupe } from "../delivery";
+import { createDeliveryDedupe, type DeliveryClaim, type DeliveryDedupe } from "../delivery";
 import {
   createReplayEngine,
   REPLAY_LEDGER_LIMIT,
@@ -12,6 +12,7 @@ import {
   type ReplayFrame,
   type ReplayHost,
   type ReplayNotice,
+  type ReplayNoticeOutcome,
   type ReplaySnapshot,
 } from "../replay";
 import { createEnvoyClient, type ReplayInput, type ReplayResult } from "../transport";
@@ -157,7 +158,7 @@ function createHost(followed: string[]) {
     writes: [] as Write[],
     deliverWith: (_frame: ReplayFrame): ReplayDeliveryOutcome | Promise<ReplayDeliveryOutcome> =>
       "shown",
-    noticeWith: (_notice: ReplayFailureNotice): void => {},
+    noticeWith: (_notice: ReplayFailureNotice): unknown => undefined,
   };
   const replayHost: ReplayHost = {
     sessionID: () => host.session,
@@ -168,9 +169,10 @@ function createHost(followed: string[]) {
       if (outcome === "shown") host.shown.push(frame);
       return outcome;
     },
-    async showFailureNotice(notice) {
-      host.noticeWith(notice);
+    async showFailureNotice(notice): Promise<ReplayNoticeOutcome> {
+      const outcome = host.noticeWith(notice);
       host.failureNotices.push(notice);
+      return outcome === "queued" ? "queued" : "shown";
     },
     failureNoticeFailed: (notice) => host.noticeWarnings.push(notice),
     notify: (notice) => host.notices.push(notice),
@@ -369,6 +371,40 @@ describe("replay sweep", () => {
 
     expect(ids(host.attempts)).toEqual([frame.event_id]);
     expect(engine.state().subjects[AGENT]?.after).toBe(1);
+  });
+
+  test("a frame the host queued is recorded only once written, and its cursor waits until then", async () => {
+    const dedupe = createDeliveryDedupe(() => T0);
+    const { stream, host, engine } = setup([AGENT], { dedupe });
+    await engine.sweep();
+    const [queued, later] = [envelope(), envelope()];
+    stream.publish(AGENT, queued);
+    stream.publish(AGENT, later);
+    let claim: DeliveryClaim | undefined;
+    host.deliverWith = (frame) => {
+      if (frame.envelope.event_id !== queued.event_id) return "shown";
+      claim = dedupe.claim(frame.envelope);
+      return "queued";
+    };
+
+    await engine.sweep();
+    await engine.sweep();
+
+    // Handed on once, recorded nowhere, and the cursor stays before it for a restart's sweep.
+    expect(ids(host.attempts)).toEqual([queued.event_id, later.event_id]);
+    expect(engine.delivered(queued)).toBe(false);
+    expect(host.writes.flatMap((write) => write.delivered).map((entry) => entry.event_id)).toEqual([
+      later.event_id,
+    ]);
+    expect(engine.state().subjects[AGENT]?.after).toBe(0);
+
+    // The host wrote it: recorded, the claim settled, and the next sweep moves past it.
+    await engine.recordDelivered(queued);
+    claim?.settle();
+    await engine.sweep();
+
+    expect(host.attempts).toHaveLength(2);
+    expect(engine.state().subjects[AGENT]?.after).toBe(2);
   });
 
   test("a frame the host failed to show is retried by the next sweep, once shown", async () => {
@@ -706,6 +742,34 @@ describe("failed frames", () => {
 
     expect(host.failureNotices.map((notice) => notice.eventId)).toEqual([frame.event_id]);
     expect(host.failureNotices[0]?.readWith).toBe("envoy_inbox");
+    expect(host.attempts).toHaveLength(3);
+    expect(engine.state().subjects[AGENT]?.after).toBe(1);
+  });
+
+  test("a notice the host queued is shown once, and settles the frame once written", async () => {
+    const dedupe = createDeliveryDedupe(() => T0);
+    const { stream, host, engine } = setup([AGENT], { dedupe });
+    await engine.sweep();
+    const frame = envelope();
+    stream.publish(AGENT, frame);
+    host.deliverWith = () => "failed";
+    let claim: DeliveryClaim | undefined;
+    host.noticeWith = (notice) => {
+      claim = dedupe.claim(notice.envelope);
+      return "queued";
+    };
+
+    for (let sweep = 0; sweep < 5; sweep += 1) await engine.sweep();
+
+    expect(host.failureNotices.map((notice) => notice.eventId)).toEqual([frame.event_id]);
+    expect(engine.delivered(frame)).toBe(false);
+    expect(engine.state().subjects[AGENT]?.after).toBe(0);
+
+    await engine.recordDelivered(frame);
+    claim?.settle();
+    await engine.sweep();
+
+    expect(host.failureNotices).toHaveLength(1);
     expect(host.attempts).toHaveLength(3);
     expect(engine.state().subjects[AGENT]?.after).toBe(1);
   });

@@ -159,9 +159,12 @@ connection was down.
   session does not take it as the person's turn and does not answer a BTW.
 - **Once:** the session records what it was shown, in its transcript (Oh My Pi) or in a state
   file per session (Claude Code), so a restart or resume does not show a message again (up to
-  20,000 messages shown in 72 hours). A crash between showing a message and recording it can show
-  that message twice; it is never lost. A message the session fails to show three times is
-  replaced by one notice naming it and saying how to read it.
+  20,000 messages shown in 72 hours). An Oh My Pi session counts a message shown only once its
+  transcript holds it: a message handed over while a turn runs waits in memory until the turn
+  takes it, and one still waiting when the session stopped is shown after the restart. A crash
+  between showing a message and recording it can show that message twice; it is never lost. A
+  message the session fails to show three times is replaced by one notice naming it and saying
+  how to read it.
 
 The listener reads the stream with one NATS permission,
 `$JS.API.STREAM.MSG.GET.ENVOY_NOTIFICATIONS`, which reads one stored message at a time and can

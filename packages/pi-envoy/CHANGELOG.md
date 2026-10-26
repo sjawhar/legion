@@ -14,13 +14,19 @@
   replayed BTW, Aside, Steer or person's Send is that card only: it runs no side turn, takes no
   user turn and posts no Dispatch reply. Role messages and team or other ad-hoc topics stay live
   only, and nothing from before the session followed a topic, or older than 72 hours, comes back.
-  The session file keeps what the session was shown (`envoy-replay-delivered`) and where it read
-  to (`envoy-replay-state`), so a restart shows nothing again (up to 20,000 frames in 72 hours) —
-  a live repeat of a frame shown before the restart is dropped too — and a session stopped past
-  the listener's grace follows its topics again; a crash between showing a frame and recording it
-  can show it twice, never lose it. A frame that fails to show is retried, and its third failure,
-  or a live failure no sweep will retry, shows one card naming it and how to read it, where a
-  failed injection was only logged before. A recreated stream or a cursor older than the stream's
+  A message counts as shown once Oh My Pi wrote its card, or the person's turn it became, to the
+  session file (the message's `message_end`): a card or turn handed over while a turn streams,
+  which Oh My Pi holds in memory until the turn takes it, is recorded only then, so a process that
+  ends first (a SIGKILL, a pod stopped mid-turn) shows it after the restart instead of losing it.
+  The session file keeps what the session was shown (`envoy-replay-delivered`, and the written
+  cards themselves, read back by the event they name) and where it read to
+  (`envoy-replay-state`), so a restart shows nothing again (up to 20,000 frames in 72 hours) — a
+  live repeat of a frame shown before the restart is dropped too — and a session stopped past the
+  listener's grace follows its topics again; a person's turn written just before the process
+  ended, its record not, can come back once as a card, never lost. A frame that fails to show is
+  retried, and its third failure, or a live failure no sweep will retry, shows one card naming it
+  and how to read it, where a failed injection was only logged before. A recreated stream or a
+  cursor older than the stream's
   oldest message is said once as a card; a listener without the route (404) or unable to read the
   stream (503 `REPLAY_UNAVAILABLE`, 401, 403) is said once as a warning, and live delivery goes
   on as before. `scripts/smoke-replay.sh` proves it against a real session, listener and

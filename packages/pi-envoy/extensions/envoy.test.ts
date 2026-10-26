@@ -13898,7 +13898,10 @@ describe("messages missed while the subscription was down", () => {
   /**
    * Boots a top-level session against `model`, its transcript `entries` already written (a
    * restart), with a heartbeat the test ticks. `beforeSend` sees every `pi.sendMessage` first and
-   * may throw, the host refusing it.
+   * may throw, the host refusing it. The host's turn: `streaming` (the default) holds every card
+   * it is handed in memory and writes none, as Oh My Pi holds a card sent mid-turn until the turn
+   * takes it; `idle` writes each card as it starts a turn for it, its `custom_message` entry and
+   * then its `message_end`, as Oh My Pi does.
    */
   async function bootReplay(
     query: string,
@@ -13908,6 +13911,9 @@ describe("messages missed while the subscription was down", () => {
       readonly entries?: readonly unknown[];
       readonly beforeSend?: (content: string) => void;
       readonly dispatch?: (url: URL) => Promise<Response | undefined>;
+      readonly turn?: "idle" | "streaming";
+      /** The host's `pi.sendUserInput`; the session has none without it. */
+      readonly sendUserInput?: (text: string, options: unknown) => Promise<UserInputResult>;
     } = {}
   ) {
     process.env.ENVOY_RESUBSCRIBE_DELAY_MS = "10";
@@ -13916,12 +13922,37 @@ describe("messages missed while the subscription was down", () => {
     const fixture = createPi();
     const notifications: string[] = [];
     const intervals: (() => void)[] = [];
+    interface SentCard {
+      readonly content: string;
+      readonly customType?: string;
+      readonly display?: boolean;
+      readonly details?: unknown;
+    }
+    // The `custom_message` entries the host wrote, as its session file holds them, and the cards
+    // a streaming turn holds until it takes them (`take`).
+    const written: unknown[] = [];
+    const held: SentCard[] = [];
+    const write = async (message: SentCard) => {
+      // The host starts the turn the card triggers after `sendMessage` returns.
+      await Promise.resolve();
+      const { content, customType, display, details } = message;
+      written.push({ type: "custom_message", customType, content, display, details });
+      await fixture.handlers.get("message_end")?.(
+        {
+          message: { role: "custom", customType, content, display, details, timestamp: Date.now() },
+        },
+        context
+      );
+    };
     envoyExtension({
       ...fixture.pi,
-      sendMessage: (message: { readonly content: string }, sendOptions: unknown) => {
+      sendMessage: (message: SentCard, sendOptions: unknown) => {
         options.beforeSend?.(message.content);
         fixture.pi.sendMessage(message, sendOptions);
+        if (options.turn === "idle") void write(message);
+        else held.push(message);
       },
+      ...(options.sendUserInput !== undefined && { sendUserInput: options.sendUserInput }),
     });
     const sessionID = options.sessionID ?? "ses_replay";
     const prior = options.entries ?? [];
@@ -13930,8 +13961,8 @@ describe("messages missed while the subscription was down", () => {
       ...base,
       sessionManager: {
         ...base.sessionManager,
-        getBranch: () => [...prior, ...fixture.entries],
-        getEntries: () => [...prior, ...fixture.entries],
+        getBranch: () => [...prior, ...fixture.entries, ...written],
+        getEntries: () => [...prior, ...fixture.entries, ...written],
       },
       setInterval: (callback) => {
         intervals.push(callback);
@@ -13951,7 +13982,7 @@ describe("messages missed while the subscription was down", () => {
       fixture,
       notifications,
       agentSubject: `notifications.agent.${sessionID}`,
-      entries: () => [...prior, ...fixture.entries],
+      entries: () => [...prior, ...fixture.entries, ...written],
       /** The `envoy-message` cards naming `eventID`, failure notices aside. */
       cards: (eventID: string) =>
         fixture.deliveries.filter(
@@ -13988,6 +14019,23 @@ describe("messages missed while the subscription was down", () => {
       },
       unfollow: (topic: string) => tool("envoy_unsubscribe").execute("", { topics: [topic] }),
       stop: () => fixture.handlers.get("session_shutdown")?.({}, context),
+      /** The streaming turn takes every card it holds: the host writes each, in order. */
+      take: async () => {
+        for (const message of held.splice(0)) await write(message);
+        await settle();
+      },
+      /** The host writes a user message, the turn a person's Send became: its `message_end`. */
+      writeUserTurn: async (text: string, tag?: string) => {
+        const message = {
+          role: "user",
+          content: [{ type: "text", text }],
+          timestamp: Date.now(),
+          ...(tag === undefined ? {} : { tag }),
+        };
+        written.push({ type: "message", message });
+        await fixture.handlers.get("message_end")?.({ message }, context);
+        await settle();
+      },
       live: (subject: string) => {
         const controls = natsState.controls.get(subject);
         if (controls === undefined) throw new Error(`${subject} was never subscribed`);
@@ -14049,7 +14097,8 @@ describe("messages missed while the subscription was down", () => {
 
     test("a frame delivered live is not shown again when the same envelope arrives after a restart", async () => {
       const model = new StreamModel();
-      const first = await bootReplay("replay-own-repeat-a", model);
+      // An idle host writes the live card as it takes it.
+      const first = await bootReplay("replay-own-repeat-a", model, { turn: "idle" });
       const frame = peerMessage("ses_replay", "own-repeat");
       model.store(first.agentSubject, frame);
       first.live(first.agentSubject).push(frame);
@@ -14058,6 +14107,7 @@ describe("messages missed while the subscription was down", () => {
 
       const second = await bootReplay("replay-own-repeat-b", model, {
         entries: first.entries(),
+        turn: "idle",
       });
       second.live(second.agentSubject).push(frame);
       await settle();
@@ -14152,6 +14202,134 @@ describe("messages missed while the subscription was down", () => {
       expect(second.cards("evt-live-written")).toHaveLength(0);
       expect(second.cards("evt-live-held")).toHaveLength(1);
     });
+  });
+
+  // What the host held is shown from when it writes it: a card a turn takes later, a failure
+  // notice, and a person's Send run as a turn, which the host writes as a user message.
+  describe("a card or turn the host writes only once a turn takes it", () => {
+    test("a replayed card the turn takes later is shown once, and not again after a restart", async () => {
+      const model = new StreamModel();
+      const first = await bootReplay("replay-taken-later-a", model);
+      const frame = peerMessage("ses_replay", "taken-later");
+      model.store(first.agentSubject, frame);
+      await first.reconnect();
+      await first.tick();
+      expect(first.cards("evt-taken-later")).toHaveLength(1);
+
+      await first.take();
+      await first.stillOnce(first.agentSubject, frame, "evt-taken-later");
+      await first.stop();
+
+      const second = await bootReplay("replay-taken-later-b", model, {
+        entries: first.entries(),
+      });
+      await second.tick();
+
+      expect(second.cards("evt-taken-later")).toHaveLength(0);
+    });
+
+    test("a frame whose failure notice was still held when the process ended is shown after the restart", async () => {
+      const model = new StreamModel();
+      const first = await bootReplay("replay-notice-held-a", model, {
+        beforeSend: (content) => {
+          if (content.includes("evt-notice-held") && !isNotice(content)) {
+            throw new Error("host refuses the card");
+          }
+        },
+      });
+      model.store(first.agentSubject, peerMessage("ses_replay", "notice-held"));
+      await first.reconnect();
+      await first.tick();
+      await first.tick();
+      await first.tick();
+      expect(first.notices("evt-notice-held")).toHaveLength(1);
+      await first.stop();
+
+      const second = await bootReplay("replay-notice-held-b", model, {
+        entries: first.entries(),
+      });
+      await second.tick();
+
+      expect(second.cards("evt-notice-held")).toHaveLength(1);
+      expect(second.notices("evt-notice-held")).toHaveLength(0);
+    });
+
+    for (const [via, slug] of [
+      ["typed input", "typed"],
+      ["a user message", "text"],
+    ] as const) {
+      describe(`a person's Send run as a turn through ${via}`, () => {
+        async function bootSend(query: string, model: StreamModel, entries?: readonly unknown[]) {
+          process.env.DISPATCH_URL = "http://dispatch.test";
+          process.env.DISPATCH_TOKEN = "dispatch-token";
+          const inputs: string[] = [];
+          return {
+            inputs,
+            session: await bootReplay(query, model, {
+              sessionID: "ses_delivery",
+              ...(entries === undefined ? {} : { entries }),
+              dispatch: async (url) =>
+                url.pathname.endsWith("/accept")
+                  ? acceptResponse(
+                      Number(url.pathname.split("/").at(-2)),
+                      { accepted: true },
+                      url.pathname.split("/").at(-4)
+                    )
+                  : undefined,
+              ...(via === "typed input" && {
+                sendUserInput: async (text: string): Promise<UserInputResult> => {
+                  inputs.push(text);
+                  return { handled: "prompt" };
+                },
+              }),
+            }),
+          };
+        }
+
+        // The person's Send arrives live and becomes a turn the host is handed; the stream keeps
+        // its copy, which a sweep shows as a card when the turn never reached the transcript.
+        async function sendTurn(label: string) {
+          const model = new StreamModel();
+          const first = await bootSend(`replay-turn-${label}-a`, model);
+          const send = directDispatchEnvelope("steer", `turn-${label}`);
+          model.store(first.session.agentSubject, send);
+          first.session.live(first.session.agentSubject).push(send);
+          await until(
+            () => first.inputs.length + first.session.fixture.userMessages.length > 0,
+            "the person's turn"
+          );
+          return { first: first.session, model };
+        }
+
+        test("one the host had not written when the process ended is shown as a card after the restart", async () => {
+          const { first, model } = await sendTurn(`held-${slug}`);
+          await first.tick();
+          await first.stop();
+
+          const second = await bootSend(`replay-turn-held-${slug}-b`, model, first.entries());
+          await second.session.tick();
+
+          const cards = second.session.cards(`dispatch-turn-held-${slug}`);
+          expect(cards).toHaveLength(1);
+          expect(cards[0]?.content).toContain("while this session's connection was down");
+        });
+
+        test("one the host wrote is not shown again after the restart", async () => {
+          const { first, model } = await sendTurn(`written-${slug}`);
+          await first.writeUserTurn(
+            DIRECT_MESSAGE_BODY,
+            slug === "typed" ? DIRECT_MESSAGE_ID : undefined
+          );
+          await first.tick();
+          await first.stop();
+
+          const second = await bootSend(`replay-turn-written-${slug}-b`, model, first.entries());
+          await second.session.tick();
+
+          expect(second.session.cards(`dispatch-turn-written-${slug}`)).toHaveLength(0);
+        });
+      });
+    }
   });
 
   describe("on a followed issue topic", () => {
@@ -14381,7 +14559,11 @@ describe("messages missed while the subscription was down", () => {
           throw new Error("host refuses the card");
         }
       };
-      const first = await bootReplay("replay-fail-always-a", model, { beforeSend: refuseCards });
+      // An idle host writes the notice as it takes it.
+      const first = await bootReplay("replay-fail-always-a", model, {
+        beforeSend: refuseCards,
+        turn: "idle",
+      });
       model.store(first.agentSubject, peerMessage("ses_replay", "fail-always"));
 
       await first.reconnect();
@@ -14396,6 +14578,7 @@ describe("messages missed while the subscription was down", () => {
 
       const second = await bootReplay("replay-fail-always-b", model, {
         entries: first.entries(),
+        turn: "idle",
       });
       await second.tick();
 

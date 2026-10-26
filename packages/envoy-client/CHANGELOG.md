@@ -24,9 +24,12 @@
   frame no sweep will show; a recreated stream, a cursor older than the stream's oldest message,
   and a listener that does not replay (404) or cannot (503 `REPLAY_UNAVAILABLE`, 401, 403) are
   each told once. A sweep that only moved its cursors to the stream's end is written at most
-  hourly. The transport gains `replay()` (one try, 10 s) and `EnvoyApiError.code`; a
-  `createDeliveryDedupe` claim gains `settle()` and the dedupe `pending()`, true until the claim is
-  settled or released (INFRA-439).
+  hourly. A host that handed a frame or a failure notice on without writing it yet answers
+  `queued`: the frame stays claimed and unrecorded, its cursor before it, until the host records it
+  once written (`recordDelivered`), so a process that ends first shows it after the restart;
+  `replayLedgerIdentity` names a frame as the ledger does. The transport gains `replay()` (one
+  try, 10 s) and `EnvoyApiError.code`; a `createDeliveryDedupe` claim gains `settle()` and the
+  dedupe `pending()`, true until the claim is settled or released (INFRA-439).
 
 - `dispatch issue-update --before <KEY>` and `--after <KEY>` move an issue on its project's board:
   the executor carries the two arguments into the server's `rank` on the PATCH it already makes, so

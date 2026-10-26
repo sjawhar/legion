@@ -128,12 +128,25 @@ export interface ReplayFrame {
 }
 
 /**
- * `shown`: the host took the frame, so the ledger records it. `suppressed`: the host's renderer
- * skips it for this session (`notify: false`, its own event, another session's follow); nothing is
- * recorded, so a copy on another subject that the renderer does show still reaches the session.
- * `failed`, or a throw: the frame stays for a later sweep.
+ * `shown`: the host wrote the frame to the session's record, so the ledger records it.
+ * `queued`: the host handed the frame on but has not written it yet (Oh My Pi holds a card sent
+ * mid-turn in memory until the turn takes it), and it claimed the frame in the engine's `dedupe`:
+ * nothing is recorded and the frame's subjects keep their cursors before it, so a process that
+ * ends first leaves it to the next sweep after the restart; while the claim is pending every sweep
+ * leaves it there. Once the host wrote it, it calls `recordDelivered` and settles the claim; if it
+ * learns the frame was dropped, it releases the claim and a sweep shows it again.
+ * `suppressed`: the host's renderer skips it for this session (`notify: false`, its own event,
+ * another session's follow); nothing is recorded, so a copy on another subject that the renderer
+ * does show still reaches the session. `failed`, or a throw: the frame stays for a later sweep.
  */
-export type ReplayDeliveryOutcome = "shown" | "suppressed" | "failed";
+export type ReplayDeliveryOutcome = "shown" | "queued" | "suppressed" | "failed";
+
+/**
+ * What `showFailureNotice` resolves: `shown` (or nothing) when the notice is written, `queued`
+ * when the host handed it on, claimed the notice's frame in the engine's `dedupe` and records it
+ * itself once written, as for a `queued` frame.
+ */
+export type ReplayNoticeOutcome = "shown" | "queued";
 
 /**
  * Something the session is told once, because replay could not keep its promise: the stream was
@@ -208,8 +221,11 @@ export interface ReplayHost {
   followedSubjects(): readonly string[];
   /** Shows a stored frame; a throw is `failed`. It must run nothing a live frame would run. */
   deliver(frame: ReplayFrame): Promise<ReplayDeliveryOutcome>;
-  /** Shows a failure notice; a throw means it was not shown. */
-  showFailureNotice(notice: ReplayFailureNotice): Promise<void>;
+  /**
+   * Shows a failure notice; a throw means it was not shown. A host that resolves `queued` records
+   * it later (`ReplayNoticeOutcome`); one that resolves nothing showed it.
+   */
+  showFailureNotice(notice: ReplayFailureNotice): Promise<ReplayNoticeOutcome> | Promise<void>;
   /** The notice could not be shown either: the host warns (log and UI). It is tried again. */
   failureNoticeFailed(notice: ReplayFailureNotice, error: unknown): void;
   /** Shows a notice the session is told once. */
@@ -222,7 +238,10 @@ export interface ReplayHost {
 export interface ReplayEngineOptions {
   readonly host: ReplayHost;
   readonly transport: Pick<EnvoyClient, "replay">;
-  /** The live path's claims: a frame it is delivering now is left for a later sweep. */
+  /**
+   * The host's claims: a frame the live path is delivering now, or one the host handed on and has
+   * not written yet (`queued`), is left for a later sweep.
+   */
   readonly dedupe?: Pick<DeliveryDedupe, "pending">;
   readonly now?: () => number;
   /** The most messages per replay call; the listener's default when absent. */
@@ -250,7 +269,8 @@ export interface ReplayEngine {
   /** Whether the ledger holds the frame: a live repeat of it after a restart is dropped. */
   delivered(frame: DedupeIdentity): boolean;
   /**
-   * Records a frame the live path's host took, so no sweep shows it again. It never rejects: a
+   * Records a frame the host wrote to the session's record: one the live path showed, or one a
+   * delivery or notice answered `queued` for, so no sweep shows it again. It never rejects: a
    * write that fails is logged, and its record goes with the next write.
    */
   recordDelivered(frame: DedupeIdentity): Promise<void>;
@@ -281,13 +301,14 @@ export interface ReplayEngine {
 }
 
 interface Ledger {
-  has(identity: LedgerIdentity): boolean;
-  record(identity: LedgerIdentity): ReplayLedgerEntry | undefined;
+  has(identity: ReplayLedgerIdentity): boolean;
+  record(identity: ReplayLedgerIdentity): ReplayLedgerEntry | undefined;
   restore(entries: readonly ReplayLedgerEntry[]): void;
   list(): ReplayLedgerEntry[];
 }
 
-interface LedgerIdentity {
+/** What the ledger knows a frame by (`replayLedgerIdentity`). */
+export interface ReplayLedgerIdentity {
   readonly event_id?: string;
   readonly dedupe_key?: string;
 }
@@ -377,7 +398,7 @@ export function createReplayEngine(options: ReplayEngineOptions): ReplayEngine {
     });
   };
 
-  const record = (identity: LedgerIdentity) => {
+  const record = (identity: ReplayLedgerIdentity) => {
     const entry = ledger.record(identity);
     if (entry !== undefined) unwritten.push(entry);
   };
@@ -449,21 +470,24 @@ export function createReplayEngine(options: ReplayEngineOptions): ReplayEngine {
     envelope,
   });
 
-  // A shown notice settles the frame for good, here and after a restart; one that fails keeps it
-  // outstanding, so the next sweep, or nothing for a live frame, tries again.
+  // A notice written settles the frame for good, here and after a restart; one that fails keeps
+  // it outstanding, so the next sweep, or nothing for a live frame, tries again. One the host
+  // queued is the host's to record once written: until then the frame's claim keeps it a hole.
   const showFailureNotice = async (
     notice: ReplayFailureNotice,
     alive: () => boolean
   ): Promise<Handled> => {
+    let queued: boolean;
     try {
-      await host.showFailureNotice(notice);
+      queued = (await host.showFailureNotice(notice)) === "queued";
     } catch (error) {
       if (!alive()) return "stopped";
       safely("failure notice warning", () => host.failureNoticeFailed(notice, error));
       return "hole";
     }
     if (!alive()) return "stopped";
-    record(ledgerIdentity(notice.envelope));
+    if (queued) return "hole";
+    record(replayLedgerIdentity(notice.envelope));
     await flush(alive);
     return "done";
   };
@@ -481,7 +505,7 @@ export function createReplayEngine(options: ReplayEngineOptions): ReplayEngine {
     }
     // Role messages stay live only: the holder answered the forward's receipt, or it went on.
     if (isRoleForward(envelope)) return "done";
-    const identity = ledgerIdentity(envelope);
+    const identity = replayLedgerIdentity(envelope);
     if (ledger.has(identity)) {
       failures.delete(seq);
       return "done";
@@ -529,6 +553,11 @@ export function createReplayEngine(options: ReplayEngineOptions): ReplayEngine {
     if (outcome === "suppressed") {
       failures.delete(seq);
       return "done";
+    }
+    // Handed on, not yet written: the host's claim keeps it a hole until it records it.
+    if (outcome === "queued") {
+      failures.delete(seq);
+      return "hole";
     }
     const count = (failure?.count ?? 0) + 1;
     failures.set(seq, { count, error });
@@ -740,11 +769,11 @@ export function createReplayEngine(options: ReplayEngineOptions): ReplayEngine {
         log("replay: could not take the followed subjects", error);
       }
     },
-    delivered: (frame) => ledger.has(ledgerIdentity(frame)),
+    delivered: (frame) => ledger.has(replayLedgerIdentity(frame)),
     async recordDelivered(frame) {
       const alive = bind()?.alive;
       if (alive === undefined) return;
-      record(ledgerIdentity(frame));
+      record(replayLedgerIdentity(frame));
       await flush(alive);
     },
     async liveFailed(followed, envelope, error) {
@@ -843,7 +872,12 @@ function isRoleForward(envelope: {
   );
 }
 
-function ledgerIdentity(frame: DedupeIdentity): LedgerIdentity {
+/**
+ * What the ledger records a frame as: its `event_id`, and its `dedupe_key` only when that key
+ * names its event (`ReplayLedgerEntrySchema`). A host that marks what it wrote with it can read
+ * the frame back from its own record.
+ */
+export function replayLedgerIdentity(frame: DedupeIdentity): ReplayLedgerIdentity {
   return {
     ...(frame.event_id === undefined || frame.event_id === "" ? {} : { event_id: frame.event_id }),
     ...(frame.dedupe_key === undefined || !dedupeKeyNamesItsEvent(frame)
@@ -895,7 +929,7 @@ function createLedger(now: () => number): Ledger {
       drop(entry);
     }
   };
-  const has = (identity: LedgerIdentity) => {
+  const has = (identity: ReplayLedgerIdentity) => {
     expire();
     return (
       (identity.event_id !== undefined && byEvent.has(identity.event_id)) ||
