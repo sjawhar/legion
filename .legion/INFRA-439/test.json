@@ -2,46 +2,35 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-439",
-  "completed": "2026-10-26T17:42:00Z",
-  "round": 10,
-  "headSha": "cdc5696f34f2d1808cbe31aca29f80a13e8dddf2",
-  "evidence": "https://github.com/sjawhar/legion/pull/2228#issuecomment-6423085252",
-  "answeringProvider": "anthropic/claude-haiku-4-5 answered every omp turn (read from the session files)",
+  "completed": "2026-10-26T20:35:00Z",
+  "round": 11,
+  "headSha": "6f57a71c61d7b07972e24c504fc434c4676fe65c",
+  "evidence": "https://github.com/sjawhar/legion/pull/2228#issuecomment-6426622994",
+  "answeringProvider": "anthropic/claude-haiku-4-5 answered every omp 18.12.2 turn (read from the session files)",
+  "workspaceRecreated": "The pod and volume were replaced at the drain. The workspace holds the pushed branch, and nothing of mine was unpushed (my last handoff 9d617a58 was on origin). The scratch rig under /legion/scratch/tmp was gone and was rebuilt for this round.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Drove the BTW-in-replay class live myself (legs B5, B7, B6k) at cdc5696f; each replayed BTW is one card carrying the inert note, and no turn starts. Red test 8c4e89118e1b is unmodified and passes. Re-ran `bash packages/pi-envoy/scripts/smoke-replay.sh` at this head: SMOKE REPLAY PASS."
+    "how": "Re-ran `bash packages/pi-envoy/scripts/smoke-replay.sh` (local mode) at this head: SMOKE REPLAY PASS, leg 7 included (a BTW replayed mid-turn is held with no card while the turn streams, then shown once as an inert card after the turn ends, with no extra agent_start and no assistant message after it)."
   },
-  "failed": 0,
-  "failures": [],
-  "proof": [
+  "failed": 1,
+  "failures": [
     {
-      "criterion": "Review finding 1, the class (architect): a BTW that reaches replay never starts a turn in Oh My Pi",
-      "surface": "real omp --mode rpc 18.8.9 with this checkout's pi-envoy, real Dispatch, natsd and listener built from this head",
-      "command": "/legion/scratch/tmp/adv/r18.sh (legs B5, B7) and r20.sh (leg B6k), comment 6423085252",
-      "observed": "B5, a BTW sent while NATS was down: one card with the inert note at 17:26:44 and no assistant message after it. B7, a BTW sent mid-turn while NATS was down, then the turn interrupted: the withdrawn card is handed back as one card and no turn starts. B6k, a BTW sent while omp was SIGKILLed: after the resume, one card and no turn",
-      "headSha": "cdc5696f34f2d1808cbe31aca29f80a13e8dddf2",
-      "negativeControl": "at 3f7f2fc7 (round 9, leg B5) the same BTW was a card followed by a turn and an assistant 'ok' at 17:01:31"
-    },
-    {
-      "criterion": "Architect's check: Dispatch never delivers a BTW to a Claude Code session, so its replay passing one over cannot lose a message",
-      "surface": "the real claude-envoy dist/envoy-channel.js over MCP stdio, registered with the listener (capabilities [aside]); Dispatch built from this head; alice's targeted sends over HTTP",
-      "command": "/legion/scratch/tmp/adv/r19.sh (legs C2, C3), comment 6423085252",
-      "observed": "a BTW to the Claude session, and its Retry, each recorded 'failed: session … does not advertise btw', with 0 messages stored on its agent subject and 0 channel notifications; an aside to it is 'sent' and shown as one channel notification. In code, every message send and Retry goes through resolveDeliveryTarget's capability check (envoy_resolve.go:113), and broadcasts check the same (broadcasts.go:448)",
-      "headSha": "cdc5696f34f2d1808cbe31aca29f80a13e8dddf2",
-      "negativeControl": "the same session's aside, which it advertises, is delivered"
-    },
-    {
-      "criterion": "Bare gates",
-      "surface": "real omp, natsd -js and listener built from this head; the listener's routes on testnats",
-      "command": "bash packages/pi-envoy/scripts/smoke-replay.sh; bun test extensions/envoy.test.ts -t \"a BTW refused live\"; go test ./cmd/listener -run 'TestReplayNeverReturnsAnotherSessions…'",
-      "observed": "SMOKE REPLAY PASS (legs 1 to 6, three controls); BTW describe 8 pass 0 fail; both listener red tests pass",
-      "headSha": "cdc5696f34f2d1808cbe31aca29f80a13e8dddf2",
-      "negativeControl": "the released plugin 10.17.7 loses its messages in the smoke's controls"
+      "criterion": "The architect's question: why smoke-replay.sh remote mode's read-back misses a /v1/messages/send publish; fail if it is a defect. The script's remote mode is part of what this PR delivers.",
+      "evidence": "No message is lost; the script is broken. replay_read reads its cursor from ${2:-} (packages/pi-envoy/scripts/smoke-replay.sh:712), but publish calls replay_read \"$watermark\" (line 774), which passes the cursor as $1. The /v1/replay request therefore carries no 'after', and the route only starts a cursor and returns no messages. Reproduce with the committed script: run it in remote mode against a loopback listener and natsd built from this head (SMOKE_REPLAY_ENVOY_URL=http://127.0.0.1:<port> SMOKE_REPLAY_NATS_URL=nats://127.0.0.1:<port> bash packages/pi-envoy/scripts/smoke-replay.sh) -> exit 1, 'SMOKE REPLAY FAIL (leg-1-reconnect): /v1/replay after 0 does not hold 9bfb96ed…', while the answer shows last_seq 1 and messages []. The same read-back driven 67 times missed 67 of 67, and each stayed missing for 10 s while the stream held every message (raw STREAM.MSG.GET next_by_subj returns each). The same 150 sends with 'after' actually sent were all found by the first read-back. Fix: ${2:-} -> ${1:-} in replay_read. The next round re-runs remote mode as committed. No red test in a suite: a test of the script's text is not allowed, and the committed script's own remote run is the failing check."
     }
   ],
-  "notes": [
-    "A BTW sent after a clean stop is refused by Dispatch ('no live session'), so it never reaches replay.",
-    "My live broadcast attempt to the Claude session used a wrong field name and was refused as invalid JSON; the broadcast capability check rests on the code (broadcasts.go:448).",
-    "CI at cdc5696f when read: Tests, Legion Envoy and Contracts, Docs and Worker Image queued."
-  ]
+  "verifiedFixed": [
+    "Review round 3 finding 1 (an inert card handed mid-turn started a turn), on omp 18.12.2: smoke leg 7 PASS; B5 (sent while NATS was down, idle), B7 (sent mid-turn while NATS was down, then interrupted) and B6k (sent while omp was SIGKILLed, then resumed) each show one inert card, no agent_start and no assistant message after it.",
+    "Review round 3 minors: the trust sentence names the API credential, loopback and ended sessions; the pump comment says a recorded BTW is shown by no sweep; the cursor-start window is stated in the cursorStarts comment.",
+    "Red tests 8c4e8911 (BTW describe 8 pass), 9f8ac8ff and 240a4c4ae641 PASS."
+  ],
+  "notDrivenLive": [
+    "Review round 3 finding 2 (readArrivals keeps already-read frames on a clean end): no real surface ends a subscription cleanly with read frames on demand; delivery-arrivals.test.ts drives nats.js's own QueuedIteratorImpl, and CI runs it."
+  ],
+  "proof": [],
+  "ci": {
+    "head": "6f57a71c61d7b07972e24c504fc434c4676fe65c",
+    "observed": "Docs success; Tests and Worker Image in progress; Legion Envoy and Contracts queued (run 40391084978). 02ceb042 got no run (the pull request was conflicting).",
+    "queryTmux": "claude-envoy 'queryTmux is bounded even by a tmux that ignores SIGTERM' passes in CI: job 121528826195 (run 40301975592, e0ed6d23, the last completed claude-envoy job on this branch), 1073 ms, 213 pass 0 fail. Every later run was cancelled by a newer push. Its failure is specific to the pod."
+  }
 }
