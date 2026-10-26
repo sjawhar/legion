@@ -391,8 +391,9 @@ test("inline @ autocomplete has touch-sized controls and no overflow on iPhone",
 // padding, not an overlay: padding on an inline element grows the hit box without moving the
 // line, and without covering whatever happens to sit within 44px of the link.
 // The row places the turn itself and then waits for it to stop moving: the Conversation's jump
-// to its newest turn lands well after a link first has a box, and when it is missed the turn is
-// left under the fixed comment composer, where a hit test reads the composer and not the link.
+// to its newest turn lands well after a link first has a box, and the row measures what it
+// placed rather than trusting the page's own placement, since a turn left under the fixed comment
+// composer would have a hit test read the composer and not the link.
 test("an inline link keeps its line and grows its hit box without covering its neighbours", async ({
   browser,
 }, testInfo) => {

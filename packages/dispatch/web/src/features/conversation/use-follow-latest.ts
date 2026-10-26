@@ -10,8 +10,10 @@ export function useFollowLatest({
   ownSendCount,
 }: {
   enabled: boolean;
-  /** A number that rises with the newest card's recency, or `undefined` while the list is
-   *  empty: the hook follows that card and needs nothing else about the list. */
+  /** A number that rises with the newest card's recency, or `undefined` until that card is on
+   *  the page (while the caller's list is loading, failed or empty): the hook follows that card
+   *  and needs nothing else about the list. It spends its one first placement on the first
+   *  defined value, so a caller must not pass one before the card renders. */
   latestItemSeq: number | undefined;
   ownSendCount: number;
 }): {
