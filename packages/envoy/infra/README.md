@@ -173,6 +173,21 @@ durable. There is no strategy, surge or front-door-replica input for that reason
 strategy follows from its replica count, and every value but one is wrong for the other two
 workloads.
 
+`appCpu` and `appMemory` size the app Deployment's `envoy-dispatch` container: plain Kubernetes
+quantities (`2`, `1500m`; `8Gi`, `6144Mi`), each rendered as both its request and its limit, 1 CPU
+and `4Gi` by default, so a deployment that sets neither renders the pod it always had. The pod's
+`cloud-sql-proxy` sidecar keeps its own `200m` and `256Mi`, and the front door and the listener
+keep theirs. Autopilot sizes the pod by the two containers' sum, so before it registers a resource
+the component refuses, by name, a value that is not a quantity or is empty, and a size at which
+Autopilot would not run the pod as rendered: a pod below `500m` or `512Mi` (the floor of a
+`safe-to-evict: "false"` pod, so `appCpu` at least `300m` and `appMemory` at least `256Mi`) or
+outside 1 to 6.5 GiB of memory per CPU, which Autopilot raises, and a pod above 30 CPU or `110Gi`
+(`appCpu` at most `29800m`, `appMemory` at most `112384Mi`), which Autopilot rejects; these are
+the bounds of Autopilot's default general-purpose compute class
+([Resource requests in Autopilot](https://cloud.google.com/kubernetes-engine/docs/concepts/autopilot-resource-requests)).
+A change to either replaces the app's pods as any change to its pod template does: recreated at
+one replica, rolled above one.
+
 Two optional groups each come as all their inputs or none. Neither takes a secret value: the
 broker relay's credential is a token the kubelet mints and the App key is read at run time, so no
 broker credential or App key ever enters the component or its Pulumi state. Both reach the app's
@@ -260,7 +275,8 @@ Every image must be pinned by SHA-256 digest. Verify an `envoyImage` digest from
 `ghcr.io/sjawhar/legion/envoy` before pinning it, with the `gh attestation verify` command
 [Running Dispatch](https://sjawhar.github.io/legion/dispatch/running-dispatch/) gives. The
 component refuses invalid hostnames, tailnet DNS names, tags, image references, sign-in domains,
-namespaces, allowed namespaces, missing inputs, and nkey seeds in its own name and in plain inputs
+namespaces, allowed namespaces, an `appCpu` or `appMemory` outside Autopilot's bounds for the app
+pod (above), missing inputs, and nkey seeds in its own name and in plain inputs
 before it registers a resource; it refuses an
 `agentSecretsUrl` or an `agentSecretsAudience` whose partner input is missing, an `appClientId`,
 `appId`, `appPrivateKeySecretName` or `appPrivateKeySecretKey` set without the others (each missing
