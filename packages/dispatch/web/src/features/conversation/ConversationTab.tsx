@@ -3,7 +3,7 @@ import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } fro
 import { Link } from "react-router-dom";
 
 import { api, type WriteBounds } from "../../api/client";
-import { userStateQuery, whoAmIQuery } from "../../api/queries";
+import { whoAmIQuery } from "../../api/queries";
 import type {
   Agent,
   Artifact,
@@ -11,6 +11,7 @@ import type {
   Message,
   MessageDelivery,
   MessageDeliveryMode,
+  UserIssueState,
   UserState,
 } from "../../api/types";
 import { PinButton } from "../../components/PinButton";
@@ -50,6 +51,7 @@ import { PHONE_VIEWPORT_QUERY, useDialog, useMediaQuery } from "../shell/useDial
 import { type DwellRef, useDwell } from "../shell/useDwell";
 import { ViewportAnchor } from "../shell/ViewportAnchor";
 import { useKeyedWrite } from "../writes/useKeyedWrite";
+import { useSendMarkOnce } from "../writes/useSendMarkOnce";
 import { Avatar } from "./Avatar";
 import { type Author, resolveAuthor } from "./authors";
 import type { ReplyTarget } from "./composer-model";
@@ -826,7 +828,6 @@ export function ConversationTab({
   });
   const unreadFrom = unreadBoundary.data?.[0]?.created_at;
   const headSeq = head.data?.[0]?.seq ?? 0;
-  const lastRead = useRef(lastReadSeq);
   const conversations = useMemo(
     () =>
       buildConversations({
@@ -997,35 +998,40 @@ export function ConversationTab({
     else setThreadOpen(root.root.id, true);
   }, [focus, isPhoneViewport, phone.open, setThreadOpen, shown, visible]);
 
-  useEffect(() => {
-    lastRead.current = lastReadSeq;
-  }, [lastReadSeq]);
-
   // The issue's read mark, and the only writer of it: the newest conversation three-quarters on
   // screen for a second reads the issue through its head. A single watermark cannot say "I read
   // the third conversation only", so a dwell lower down writes nothing, and under-marking never
-  // hides an unread conversation. A write the server refuses re-reads the stored mark and dwells
-  // again while the card stays on screen (`useDwell` re-arms on the rejection this rethrows).
+  // hides an unread conversation. The mark is a quiet write of the one write store
+  // (`useSendMarkOnce`): made as the person reading, tried under its key until Dispatch decides
+  // it, kept across a reload and never shown; one Dispatch refuses is sent again once the stored
+  // mark changes. It names its issue, so an answer that lands after the reader moved on is put
+  // where it belongs.
   const newestId = conversations[0]?.id;
+  const [readThrough, setReadThrough] = useState<{
+    readonly issueKey: string;
+    readonly seq: number;
+  }>();
+  const read = readThrough?.issueKey === issueKey ? readThrough : undefined;
   const registerNewest = useDwell({
     enabled: visible && newestId !== undefined && headSeq > 0,
-    onDwell: async () => {
-      if (headSeq <= lastRead.current) return;
-      lastRead.current = headSeq;
-      try {
-        const next = await api.putIssueState(issueKey, { last_read_seq: headSeq });
-        queryClient.setQueryData<UserState>(["user-state"], (current) => ({
-          ...current,
-          [issueKey]: next,
-        }));
-      } catch (error) {
-        const current = await queryClient.fetchQuery(userStateQuery()).catch(() => undefined);
-        lastRead.current = stateForIssue(current, issueKey).last_read_seq;
-        throw error;
-      }
-    },
+    onDwell: () => setReadThrough({ issueKey, seq: headSeq }),
     resetKey: `${issueKey} ${newestId ?? ""} ${headSeq}`,
-    shouldDwell: () => headSeq > lastRead.current,
+    shouldDwell: () => headSeq > Math.max(lastReadSeq, read?.seq ?? 0),
+  });
+  useSendMarkOnce({
+    mark: read === undefined ? undefined : { key: `${read.issueKey} ${read.seq}`, value: read },
+    onSuccess: ({ issueKey: marked, next }: { issueKey: string; next: UserIssueState }) =>
+      queryClient.setQueryData<UserState>(["user-state"], (current) => ({
+        ...current,
+        [marked]: next,
+      })),
+    send: async (mark: { issueKey: string; seq: number }, bounds) => ({
+      issueKey: mark.issueKey,
+      next: await api.putIssueState(mark.issueKey, { last_read_seq: mark.seq }, bounds),
+    }),
+    shouldSend: read !== undefined && read.seq > lastReadSeq,
+    target: `read:issue:${issueKey}`,
+    wake: lastReadSeq,
   });
 
   const pinConversation = (id: string) =>

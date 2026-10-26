@@ -442,7 +442,7 @@ test("a write carries the login of the person who pressed it", async () => {
   const stub = stubFetch();
   const api = createApiClient(stub.fetch);
   await api.patchIssue("CORE-1", { status: "done" }, { key: "k", login: "alice" });
-  await api.putIssueState("CORE-1", { pinned: true }, { login: "alice" });
+  await api.putIssueState("CORE-1", { pinned: true }, { key: "p", login: "alice" });
   await api.patchIssue("CORE-1", { status: "done" }, { key: "k" });
   expect(stub.requests.map(({ init }) => new Headers(init?.headers).get("Dispatch-Login"))).toEqual(
     ["alice", "alice", null]
@@ -594,8 +594,8 @@ test("API client sends repository project mapping requests to their settings rou
   const settingsApi = createApiClient(stub.fetch);
 
   await settingsApi.listRepoProjects();
-  await settingsApi.putRepoProject("owner/repo", { project: "CORE" });
-  await settingsApi.deleteRepoProject("owner/repo");
+  await settingsApi.putRepoProject("owner/repo", { project: "CORE" }, keyed("put-1"));
+  await settingsApi.deleteRepoProject("owner/repo", keyed("delete-1"));
 
   expect(stub.requests.map(({ init, path }) => [init?.method ?? "GET", path])).toEqual([
     ["GET", "/api/v1/settings/repo-projects"],
@@ -638,8 +638,12 @@ test("API client sends project default assignee requests to their routes", async
   const settingsApi = createApiClient(stub.fetch);
 
   await settingsApi.listProjectDefaultAssignees();
-  await settingsApi.putProjectDefaultAssignee("CORE", { assignee: "alice@example.com" });
-  await settingsApi.putProjectDefaultAssignee("CORE", { assignee: null });
+  await settingsApi.putProjectDefaultAssignee(
+    "CORE",
+    { assignee: "alice@example.com" },
+    keyed("put-1")
+  );
+  await settingsApi.putProjectDefaultAssignee("CORE", { assignee: null }, keyed("put-2"));
 
   expect(stub.requests.map(({ init, path }) => [init?.method ?? "GET", path])).toEqual([
     ["GET", "/api/v1/settings/project-default-assignees"],
@@ -956,7 +960,7 @@ test("API client reaches every remaining documented endpoint", async () => {
   await api.listMyReplies({ limit: 50, offset: 0 });
   await api.listMyReplies({ issue: "CORE-1", limit: 200 });
   await api.listMyReplies({ artifact: "artifact-1", limit: 200 });
-  await api.markThreadRead("comment-1", "2026-10-12T00:00:00.000Z");
+  await api.markThreadRead("comment-1", "2026-10-12T00:00:00.000Z", keyed("put-1"));
   await api.createComment("CORE-1", { body: "Looks good" }, keyed("write-3"));
   await api.resolveComment("comment-1", keyed("write-4"));
   await api.acceptComment("comment-1", keyed("write-5"));
@@ -991,21 +995,28 @@ test("API client reaches every remaining documented endpoint", async () => {
   await api.listArtifactReviews("artifact-1");
   await api.createArtifactReview("artifact-1", { state: "approved" }, keyed("write-10"));
   await api.getMyState();
-  await api.putIssueState("CORE-1", { pinned: true });
+  await api.putIssueState("CORE-1", { pinned: true }, keyed("put-2"));
   await api.getMyAgentState();
-  await api.putAgentState("planner-session", { cleared_before: "2026-09-15T20:51:00.000Z" });
+  await api.putAgentState(
+    "planner-session",
+    { cleared_before: "2026-09-15T20:51:00.000Z" },
+    keyed("put-3")
+  );
   await api.whoAmI();
   await api.logout();
   await api.githubRest("repos/acme/dispatch");
   await api.getDeliverySettings();
-  await api.putDeliverySettings({
-    deploy_repo: "acme/widgets",
-    deploy_workflow_path: ".github/workflows/deploy.yml",
-    excluded_repos: [],
-    population_authors: ["octocat"],
-    pr_checks_workflow_path: ".github/workflows/pr-checks.yml",
-    production_job_names: ["widgets-release"],
-  });
+  await api.putDeliverySettings(
+    {
+      deploy_repo: "acme/widgets",
+      deploy_workflow_path: ".github/workflows/deploy.yml",
+      excluded_repos: [],
+      population_authors: ["octocat"],
+      pr_checks_workflow_path: ".github/workflows/pr-checks.yml",
+      production_job_names: ["widgets-release"],
+    },
+    keyed("put-4")
+  );
 
   expect(stub.requests.map(({ init, path }) => [init?.method ?? "GET", path])).toEqual([
     ["GET", "/api/v1/projects"],
@@ -1060,11 +1071,15 @@ test("API client keeps only small idempotent /me/ writes alive during navigation
     (_unused, index) => `pinned_items:event:${index}`
   );
 
-  await api.putIssueState("CORE-1", { pinned: true });
-  await api.putAgentState("planner-session", { cleared_before: "2026-09-15T20:51:00.000Z" });
-  await api.revokeAgentToken("token-1");
+  await api.putIssueState("CORE-1", { pinned: true }, keyed("put-1"));
+  await api.putAgentState(
+    "planner-session",
+    { cleared_before: "2026-09-15T20:51:00.000Z" },
+    keyed("put-2")
+  );
+  await api.revokeAgentToken("token-1", keyed("delete-1"));
   await api.createAgentToken({ name: "planner" }, keyed("write-1"));
-  await api.putIssueState("CORE-1", { dismissed: oversizedDismissed });
+  await api.putIssueState("CORE-1", { dismissed: oversizedDismissed }, keyed("put-3"));
 
   const [smallIssueState, agentState, revokedToken, createdToken, oversizedIssueState] =
     stub.requests;
@@ -1077,6 +1092,22 @@ test("API client keeps only small idempotent /me/ writes alive during navigation
     64 * 1024
   );
   expect(oversizedIssueState?.init?.keepalive).toBeUndefined();
+});
+
+// W38. Every PUT and DELETE the page makes is one write of the store, which hands it the bounds of
+// its press - the key it is kept under, and the login that pressed it (`Dispatch-Login`) - so a
+// client method called bare, as the Conversation's read mark once was, does not type-check.
+test("a PUT or a DELETE without its press's bounds does not type-check", () => {
+  const api = createApiClient(stubFetch().fetch);
+  const bare = () => {
+    // @ts-expect-error a PUT goes with the bounds of the press it belongs to
+    void api.putIssueState("CORE-1", { last_read_seq: 3 });
+    // @ts-expect-error so does a DELETE
+    void api.releaseIssueClaim("CORE-1");
+    // @ts-expect-error and either one made as a bare request
+    void api.send({ method: "PUT", path: "/api/v1/me/issues/CORE-1/state" });
+  };
+  expect(bare).toBeInstanceOf(Function);
 });
 
 /** The client's own plumbing, which every write method goes through and which takes no argument a
@@ -1195,7 +1226,7 @@ test("API client exposes the current state with a stale state-write conflict", a
   const api = createApiClient(stub.fetch);
 
   const error = await api
-    .putIssueState("CORE-1", { dismissed: ["pinned_items:event:1"], seq: 1 })
+    .putIssueState("CORE-1", { dismissed: ["pinned_items:event:1"], seq: 1 }, keyed("put-1"))
     .then(
       () => undefined,
       (caught) => caught

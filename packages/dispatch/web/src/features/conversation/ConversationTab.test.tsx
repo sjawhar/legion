@@ -1925,9 +1925,10 @@ test("without a link, a comment's thread stays collapsed", async () => {
 });
 
 // The issue's watermark is the Conversation's to write, and only from the newest conversation:
-// a single mark cannot say "I read the third card only". A write the server refuses re-reads the
-// stored mark and is sent again while the card stays on screen.
-test("the read mark writes the issue's head seq, and retries a refused write", async () => {
+// a single mark cannot say "I read the third card only". W38: the mark is a quiet write of the one
+// write store, so it goes as the person reading (`Dispatch-Login`), under one key on every attempt,
+// and a write Dispatch answers 503 is asked again under that key.
+test("the read mark writes the issue's head seq as the reader, and retries an unanswered write", async () => {
   const viewport = installIntersectionObserver();
   const stub = stubLists({
     comments: [comment("comment-1", { body: "Newest" })],
@@ -1943,6 +1944,7 @@ test("the read mark writes the issue's head seq, and retries a refused write", a
     return issueState([], input.last_read_seq ?? 0);
   });
   const queryClient = newQueryClient();
+  queryClient.setQueryData(["whoami"], { event_head: "0", kind: "user", login: "alice" });
   const view = render(tab({ "CORE-1": issueState([], 1) }, true, queryClient));
 
   try {
@@ -1950,16 +1952,22 @@ test("the read mark writes the issue's head seq, and retries a refused write", a
     const card = view.container.querySelector('[data-turn="comment:comment-1"]');
     if (card === null) throw new Error("expected the newest card");
     await dwellOn(viewport, card);
-    expect(putIssueState.mock.calls).toEqual([["CORE-1", { last_read_seq: 7 }]]);
-    expect(getMyState).toHaveBeenCalledTimes(1);
+    for (let flush = 0; flush < 5; flush += 1) await act(async () => {});
+    expect(putIssueState.mock.calls).toEqual([["CORE-1", { last_read_seq: 7 }, keyedAttempt]]);
+    expect(putIssueState.mock.calls[0]?.[2]?.login).toBe("alice");
     act(() => {
       jest.advanceTimersByTime(1_000);
     });
     for (let flush = 0; flush < 5; flush += 1) await act(async () => {});
-    expect(putIssueState.mock.calls).toEqual([
+    expect(putIssueState.mock.calls.map(([key, input]) => [key, input])).toEqual([
       ["CORE-1", { last_read_seq: 7 }],
       ["CORE-1", { last_read_seq: 7 }],
     ]);
+    const [first, second] = putIssueState.mock.calls;
+    expect(second?.[2]?.key).toBe(first?.[2]?.key);
+    await waitFor(() =>
+      expect(queryClient.getQueryData<UserState>(["user-state"])?.["CORE-1"]?.last_read_seq).toBe(7)
+    );
   } finally {
     view.unmount();
     getMyState.mockRestore();

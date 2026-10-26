@@ -202,27 +202,16 @@ export interface WriteRequest {
   readonly body?: unknown;
 }
 
-/** A `PUT` or a `DELETE`: the same write however often it is made, so it goes with no key. */
-export interface IdempotentRequest extends WriteRequest {
-  readonly method: "DELETE" | "PUT";
-}
-
-/** One attempt of a write: the key that names the person's action - minted by the caller when the
- *  person acts, and the same on every attempt of it (`Idempotency-Key`, sent on a `POST` and a
- *  `PATCH`) - the login of the person who pressed it (`Dispatch-Login`, sent on every write, so
+/** One attempt of a write, as the one write path (`Writes.run`) hands it over from the press it
+ *  belongs to: the key that names the person's action - minted when the person acts, the same on
+ *  every attempt of it, and what the store keeps it under; sent as `Idempotency-Key` on a `POST`
+ *  and a `PATCH`, and never on a `PUT` or a `DELETE`, which are the same however often they are
+ *  made - the login of the person who pressed it (`Dispatch-Login`, sent on every write, so
  *  Dispatch refuses it under anyone else's session), the attempt's silence deadline, and `sent`,
- *  told the request as it goes out, for a caller that keeps it to make again. */
+ *  told the request as it goes out, for a caller that keeps it to make again. Every write method
+ *  takes these, so a write made outside the store does not type-check. */
 export interface WriteBounds extends RequestBounds {
   readonly key: string;
-  readonly login?: string;
-  readonly sent?: (request: WriteRequest) => void;
-}
-
-/** One attempt of a `PUT` or a `DELETE`: as `WriteBounds`, but its key is optional and never sent,
- *  since the write is the same however often it is made. A caller on the one write path hands its
- *  press's bounds over whole; one that only ever makes it once passes none. */
-export interface IdempotentBounds extends RequestBounds {
-  readonly key?: string;
   readonly login?: string;
   readonly sent?: (request: WriteRequest) => void;
 }
@@ -620,9 +609,7 @@ export class DispatchApiClient {
    * JSON rejects with `UnreadableAnswerError`, and a replay of an answer Dispatch did not keep
    * with `AnswerNotKeptError`.
    */
-  send<T>(request: WriteRequest, bounds: WriteBounds): Promise<T>;
-  send<T>(request: IdempotentRequest, bounds?: IdempotentBounds): Promise<T>;
-  send<T>(request: WriteRequest, { deadlineMs, key, login, sent }: IdempotentBounds = {}) {
+  send<T>(request: WriteRequest, { deadlineMs, key, login, sent }: WriteBounds): Promise<T> {
     const { body, method, path } = request;
     const idempotent = method === "PUT" || method === "DELETE";
     const form = body instanceof FormData ? body : undefined;
@@ -632,7 +619,7 @@ export class DispatchApiClient {
     const init: RequestInit = {
       ...(form !== undefined ? { body: form } : json !== undefined ? { body: json } : {}),
       headers: {
-        ...(idempotent || key === undefined ? {} : { [IDEMPOTENCY_KEY_HEADER]: key }),
+        ...(idempotent ? {} : { [IDEMPOTENCY_KEY_HEADER]: key }),
         ...(login === undefined ? {} : { [DISPATCH_LOGIN_HEADER]: login }),
         ...(json === undefined ? {} : { "Content-Type": "application/json" }),
       },
@@ -666,11 +653,11 @@ export class DispatchApiClient {
     return this.send<T>({ body, method: "POST", path }, bounds);
   }
 
-  private put<T>(path: string, body: unknown, bounds: IdempotentBounds): Promise<T> {
+  private put<T>(path: string, body: unknown, bounds: WriteBounds): Promise<T> {
     return this.send<T>({ body, method: "PUT", path }, bounds);
   }
 
-  private remove<T>(path: string, bounds: IdempotentBounds): Promise<T> {
+  private remove<T>(path: string, bounds: WriteBounds): Promise<T> {
     return this.send<T>({ method: "DELETE", path }, bounds);
   }
 
@@ -693,12 +680,12 @@ export class DispatchApiClient {
   putRepoProject(
     repo: string,
     input: { project: string; default?: boolean },
-    bounds: IdempotentBounds = {}
+    bounds: WriteBounds
   ): Promise<RepoProject> {
     return this.put<RepoProject>(`/api/v1/settings/repo-projects/${repoPath(repo)}`, input, bounds);
   }
 
-  async deleteRepoProject(repo: string, bounds: IdempotentBounds = {}): Promise<void> {
+  async deleteRepoProject(repo: string, bounds: WriteBounds): Promise<void> {
     await this.remove(`/api/v1/settings/repo-projects/${repoPath(repo)}`, bounds);
   }
 
@@ -712,7 +699,7 @@ export class DispatchApiClient {
   putProjectDefaultAssignee(
     project: string,
     input: ProjectDefaultAssigneeInput,
-    bounds: IdempotentBounds = {}
+    bounds: WriteBounds
   ): Promise<ProjectDefaultAssignee> {
     return this.put<ProjectDefaultAssignee>(
       `/api/v1/projects/${pathSegment(project)}/default-assignee`,
@@ -740,7 +727,7 @@ export class DispatchApiClient {
     project: string,
     repo: string,
     input: { branch: string },
-    bounds: IdempotentBounds = {}
+    bounds: WriteBounds
   ): Promise<ArchitectureSource> {
     return this.put<ArchitectureSource>(
       `/api/v1/projects/${pathSegment(project)}/architecture-sources/${repoPath(repo)}`,
@@ -767,7 +754,7 @@ export class DispatchApiClient {
   async deleteArchitectureSource(
     project: string,
     repo: string,
-    bounds: IdempotentBounds = {}
+    bounds: WriteBounds
   ): Promise<void> {
     await this.remove(
       `/api/v1/projects/${pathSegment(project)}/architecture-sources/${repoPath(repo)}`,
@@ -788,7 +775,7 @@ export class DispatchApiClient {
     return this.post<CreatedAgentToken>("/api/v1/me/agent-tokens", input, bounds);
   }
 
-  async revokeAgentToken(id: string, bounds: IdempotentBounds = {}): Promise<void> {
+  async revokeAgentToken(id: string, bounds: WriteBounds): Promise<void> {
     await this.remove(`/api/v1/me/agent-tokens/${pathSegment(id)}`, bounds);
   }
 
@@ -825,7 +812,7 @@ export class DispatchApiClient {
 
   /** `DELETE /api/v1/issues/{key}/claim`: release the claim. A human may release any claim;
    *  the issue's status does not move. */
-  releaseIssueClaim(key: string, bounds: IdempotentBounds = {}): Promise<Issue> {
+  releaseIssueClaim(key: string, bounds: WriteBounds): Promise<Issue> {
     return this.remove<Issue>(`/api/v1/issues/${pathSegment(key)}/claim`, bounds);
   }
 
@@ -842,7 +829,7 @@ export class DispatchApiClient {
 
   /** `PUT /api/v1/me/asks/{id}/snooze`: fold this inbox row away for the caller until
    *  `snoozedUntil` (RFC3339). Human-only, like the inbox itself. */
-  snoozeAsk(id: string, snoozedUntil: string, bounds: IdempotentBounds = {}): Promise<AskSnooze> {
+  snoozeAsk(id: string, snoozedUntil: string, bounds: WriteBounds): Promise<AskSnooze> {
     return this.put<AskSnooze>(
       `/api/v1/me/asks/${pathSegment(id)}/snooze`,
       { snoozed_until: snoozedUntil },
@@ -852,7 +839,7 @@ export class DispatchApiClient {
 
   /** `DELETE /api/v1/me/asks/{id}/snooze`: bring the row back now. A row that is not snoozed
    *  answers the same 204. */
-  async unsnoozeAsk(id: string, bounds: IdempotentBounds = {}): Promise<void> {
+  async unsnoozeAsk(id: string, bounds: WriteBounds): Promise<void> {
     await this.remove(`/api/v1/me/asks/${pathSegment(id)}/snooze`, bounds);
   }
 
@@ -912,11 +899,7 @@ export class DispatchApiClient {
   /** `PUT /api/v1/me/threads/{id}/read`: move the signed-in person's read mark on one thread
    *  forward to `readThrough` (RFC3339, the newest reply shown). Answers 204 whether or not it
    *  moved. */
-  async markThreadRead(
-    threadId: string,
-    readThrough: string,
-    bounds: IdempotentBounds = {}
-  ): Promise<void> {
+  async markThreadRead(threadId: string, readThrough: string, bounds: WriteBounds): Promise<void> {
     await this.put(
       `/api/v1/me/threads/${pathSegment(threadId)}/read`,
       { read_through: readThrough },
@@ -924,11 +907,7 @@ export class DispatchApiClient {
     );
   }
 
-  async removeAskFollower(
-    id: string,
-    sessionId: string,
-    bounds: IdempotentBounds = {}
-  ): Promise<void> {
+  async removeAskFollower(id: string, sessionId: string, bounds: WriteBounds): Promise<void> {
     await this.remove(
       `/api/v1/asks/${pathSegment(id)}/followers/${pathSegment(sessionId)}`,
       bounds
@@ -1174,7 +1153,7 @@ export class DispatchApiClient {
   async unsubscribeArtifactSession(
     id: string,
     sessionId: string,
-    bounds: IdempotentBounds = {}
+    bounds: WriteBounds
   ): Promise<void> {
     await this.remove(
       `/api/v1/artifacts/${pathSegment(id)}/subscribers/${pathSegment(sessionId)}`,
@@ -1203,7 +1182,7 @@ export class DispatchApiClient {
    *  the GitHub App can read `deploy_repo`, answering `409 DELIVERY_SETTINGS_ACCESS` when not. */
   putDeliverySettings(
     input: DeliverySettingsInput,
-    bounds: IdempotentBounds = {}
+    bounds: WriteBounds
   ): Promise<DeliverySettings> {
     return this.put<DeliverySettings>("/api/v1/settings/delivery", input, bounds);
   }
@@ -1235,7 +1214,7 @@ export class DispatchApiClient {
   }
 
   /** Deletes a session group; its sessions show as themselves again. */
-  async deleteDeliverySessionGroup(id: string, bounds: IdempotentBounds = {}): Promise<void> {
+  async deleteDeliverySessionGroup(id: string, bounds: WriteBounds): Promise<void> {
     await this.remove(`/api/v1/delivery/session-groups/${pathSegment(id)}`, bounds);
   }
 
@@ -1246,7 +1225,7 @@ export class DispatchApiClient {
   async unsubscribeIssueSession(
     key: string,
     sessionId: string,
-    bounds: IdempotentBounds = {}
+    bounds: WriteBounds
   ): Promise<void> {
     await this.remove(
       `/api/v1/issues/${pathSegment(key)}/subscribers/${pathSegment(sessionId)}`,
@@ -1261,7 +1240,7 @@ export class DispatchApiClient {
   putIssueState(
     key: string,
     input: Partial<UserIssueState>,
-    bounds: IdempotentBounds = {}
+    bounds: WriteBounds
   ): Promise<UserIssueState> {
     return this.put<UserIssueState>(`/api/v1/me/issues/${pathSegment(key)}/state`, input, bounds);
   }
@@ -1273,7 +1252,7 @@ export class DispatchApiClient {
   putAgentState(
     sessionID: string,
     input: UserAgentStateInput,
-    bounds: IdempotentBounds = {}
+    bounds: WriteBounds
   ): Promise<UserAgentState> {
     return this.put<UserAgentState>(
       `/api/v1/me/agents/${pathSegment(sessionID)}/state`,
