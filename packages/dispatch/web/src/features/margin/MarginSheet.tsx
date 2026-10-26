@@ -177,12 +177,13 @@ export function MarginSheet({
   if (phoneThread !== undefined && visibleArtifact === undefined) {
     throw new Error("A phone margin thread requires its visible artifact.");
   }
+  const threadOpen = isPhoneViewport && phoneThread !== undefined;
   const threadDialog = useDialog<HTMLElement>({
     onClose: sheet.closeThread,
-    open: isPhoneViewport && phoneThread !== undefined,
+    open: threadOpen,
   });
   // What the margin's own tabs give way to: the rail it collapses to, or a phone margin thread.
-  const covered = collapsed || (isPhoneViewport && phoneThread !== undefined);
+  const covered = collapsed || threadOpen;
 
   return (
     <>
@@ -248,15 +249,22 @@ export function MarginSheet({
             </button>
           </>
         ) : null}
-        {/* The tabs and what they show. Mounted under a phone margin thread and under the
-            collapsed rail too, holding only the composer then, so an unsent draft survives
-            whatever the margin shows over it; a send it has out, and that send's refusal, are the
-            held-send store's, and survive anything. */}
+        {/* The tabs and what they show. Mounted under the collapsed rail too, holding only the
+            composer then, so an unsent draft survives whatever the margin shows over it; a send
+            it has out, and that send's refusal, are the held-send store's, and survive anything.
+            Under a phone margin thread all of it stays mounted and laid out, only invisible, so
+            Back returns the reader to the list as they left it: scrolled where they were, every
+            card's content already resolved. Rebuilt on Back, the list loaded each card's pictures
+            again, and one that failed again a moment later shrank its card and re-stacked every
+            card below it, moving the card under the reader's next tap onto its neighbour's
+            link. */}
         <div
-          className={sheet.expanded ? "px-4 pb-4 xl:px-0 xl:pb-0" : "hidden xl:block"}
-          hidden={covered}
+          className={`${sheet.expanded ? "px-4 pb-4 xl:px-0 xl:pb-0" : "hidden xl:block"}${
+            threadOpen ? " invisible" : ""
+          }`}
+          hidden={collapsed}
         >
-          {covered ? null : (
+          {collapsed ? null : (
             <>
               <div className={`flex items-center justify-between border-b ${borderDefault}`}>
                 <div className="flex" role="tablist">
@@ -341,7 +349,7 @@ export function MarginSheet({
             />
           )}
           {tab.value === "comments" &&
-          !covered &&
+          !collapsed &&
           owner !== undefined &&
           visibleArtifact !== undefined ? (
             <CommentsTab
@@ -351,7 +359,10 @@ export function MarginSheet({
               asksPending={asksPending}
               commentsError={commentsError}
               commentsPending={commentsPending}
-              expandedThreadKey={selection.expandedThreadKey}
+              // The thread the phone dialog shows is its current card, never also the list's
+              // beneath it: expanded there it would mount a second reply composer for the
+              // thread, and selected there it would be a second current card.
+              expandedThreadKey={threadOpen ? undefined : selection.expandedThreadKey}
               editingCommentId={selection.editingCommentId}
               savingCommentEditId={selection.savingCommentEditId}
               onEditingChange={actions.onEditingChange}
@@ -374,7 +385,7 @@ export function MarginSheet({
               pendingActionIds={pendingActionIds}
               resolvedThreads={resolvedThreads}
               retractedAskCount={retractedAskCount}
-              selectedItemId={selection.selectedItemId}
+              selectedItemId={threadOpen ? undefined : selection.selectedItemId}
               showResolved={selection.showResolved}
               threads={threads}
               viewerLogin={viewerLogin}

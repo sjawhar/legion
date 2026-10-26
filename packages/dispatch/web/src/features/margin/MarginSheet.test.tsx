@@ -4,7 +4,8 @@ import { fireEvent, render, screen, within } from "@testing-library/react";
 import { commentDeliveryFields } from "../../__tests__/comment-fixture";
 import type { Artifact, Comment } from "../../api/types";
 import { KeymapProvider } from "../shell/KeymapProvider";
-import { MarginSheet } from "./MarginSheet";
+import { MarginSheet, type MarginSheetModel } from "./MarginSheet";
+import type { Thread } from "./useMarginItems";
 
 const specArtifact: Artifact = {
   created_at: "2026-09-10T00:00:00Z",
@@ -349,6 +350,152 @@ test("MarginSheet shows the selected phone thread in a full-height view with a B
     fireEvent.keyDown(thread, { key: "Escape" });
     expect(closed).toBe(true);
     expect(sheetClosed).toBe(false);
+  } finally {
+    view.unmount();
+    window.matchMedia = originalMatchMedia;
+  }
+});
+
+test("a phone margin thread leaves the list beneath it mounted, so Back returns to the same cards", () => {
+  const root: Comment = {
+    anchor: {
+      artifact_id: specArtifact.id,
+      block_id: null,
+      mark_id: "mark-1",
+      orphaned: false,
+      quote: "selected text",
+      version: 1,
+    },
+    ask_id: null,
+    turn: null,
+    author: { id: "alice", kind: "user" },
+    body: "Review this paragraph.",
+    created_at: "2026-09-10T00:00:00Z",
+    edited_at: null,
+    id: "comment-1",
+    issue_key: "CORE-1",
+    reply_to: null,
+    resolved: false,
+    resolved_at: null,
+    resolved_by: null,
+    suggestion: null,
+    ...commentDeliveryFields(),
+  };
+  const thread: Thread = {
+    anchor: root.anchor,
+    key: root.id,
+    lastReplyAt: undefined,
+    replies: [],
+    resolved: false,
+    root: { comment: root, kind: "comment" },
+  };
+  // A card tap selects the thread and opens it in the dialog; Back closes the dialog only.
+  const model = (open: Thread | undefined): MarginSheetModel => ({
+    actions: {
+      closeComposer: () => {},
+      onAction: () => {},
+      onComposerKindChange: () => undefined,
+      onEdit: async () => undefined,
+      onRetryAction: () => {},
+      onUnpin: () => {},
+      onUnpinConversation: () => {},
+      onRetryAnsweredAsk: undefined,
+      onRetryComments: () => {},
+      onRetryIssue: () => {},
+      onToggleResolved: () => {},
+      onToggleThread: () => {},
+      onEditingChange: () => {},
+    },
+    composer: undefined,
+    items: {
+      actionFailure: undefined,
+      answeredAsksPending: false,
+      asksPending: false,
+      commentsError: false,
+      commentsPending: false,
+      historicalAsks: [],
+      isClosed: false,
+      issueError: false,
+      owner: { key: "CORE-1", kind: "issue" },
+      issuePending: false,
+      marginRef: { current: null },
+      needsYou: [],
+      onSelectCard: () => {},
+      openAskCount: 0,
+      pendingActionIds: new Set<string>(),
+      pinned: [],
+      pinnedConversations: [],
+      pinnedIds: [],
+      resolvedThreads: [],
+      retractedAskCount: 0,
+      threads: [thread],
+      viewerLogin: "alice",
+      visibleArtifact: specArtifact,
+    },
+    placement: { blockPlacements: new Map(), markPlacements: new Map() },
+    selection: {
+      expandedThreadKey: undefined,
+      editingCommentId: undefined,
+      savingCommentEditId: undefined,
+      hoveredItemId: undefined,
+      hoveredMarkId: undefined,
+      selectedItemId: root.id,
+      showResolved: false,
+    },
+    sheet: {
+      closeThread: () => {},
+      expanded: true,
+      replySending: false,
+      thread: open,
+      toggle: () => {},
+    },
+    filter: { blockId: undefined, clear: () => {} },
+    tab: { set: () => {}, value: "comments" },
+  });
+  const originalMatchMedia = window.matchMedia;
+  window.matchMedia = (() =>
+    ({
+      addEventListener: () => {},
+      addListener: () => {},
+      dispatchEvent: () => true,
+      matches: true,
+      media: "",
+      onchange: null,
+      removeEventListener: () => {},
+      removeListener: () => {},
+    }) as MediaQueryList) as typeof window.matchMedia;
+  const queryClient = new QueryClient({
+    defaultOptions: { mutations: { retry: false }, queries: { retry: false } },
+  });
+  const sheet = (open: Thread | undefined) => (
+    <QueryClientProvider client={queryClient}>
+      <KeymapProvider>
+        <MarginSheet model={model(open)} />
+      </KeymapProvider>
+    </QueryClientProvider>
+  );
+  const listCardSelector = `section[aria-label="Anchored comments"] [data-margin-item="${root.id}"]`;
+  const view = render(sheet(thread));
+
+  try {
+    const dialog = screen.getByRole("dialog", { name: "Thread" });
+    const opened = within(dialog).getByTestId(`margin-comment-${root.id}`);
+    expect(opened.getAttribute("aria-current")).toBe("true");
+    // Beneath the dialog the list is laid out but invisible, and its card for the open thread
+    // is neither a second current card nor a second expanded one.
+    const beneath = document.querySelector<HTMLElement>(listCardSelector);
+    if (beneath === null) throw new Error("expected the list to stay mounted under the thread");
+    expect(beneath.closest(".invisible")).not.toBeNull();
+    expect(beneath.getAttribute("aria-current")).toBeNull();
+    expect(beneath.getAttribute("aria-expanded")).toBe("false");
+
+    view.rerender(sheet(undefined));
+
+    expect(screen.queryByRole("dialog", { name: "Thread" })).toBeNull();
+    // Back shows the very cards the reader left, not a rebuilt list.
+    expect(document.querySelector(listCardSelector)).toBe(beneath);
+    expect(beneath.closest(".invisible")).toBeNull();
+    expect(beneath.getAttribute("aria-current")).toBe("true");
   } finally {
     view.unmount();
     window.matchMedia = originalMatchMedia;
