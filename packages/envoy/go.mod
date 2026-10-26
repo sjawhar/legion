@@ -140,7 +140,9 @@ require (
 // check rather than refusing it past a pending cap; Apply stamps a room with no peer idle when it
 // returns, so the idle sweep evicts a room only the API touched; a Hocuspocus-framed connection is
 // answered one SyncStatus for each SyncStep2 or Update it sends, so the browser's provider learns
-// which of its edits the room took; and CloseRoom closes a browser that connects while it runs,
-// which it used to leave on the room it removed, where no later edit reached it. A merged update's
-// skip parking the items after it (reearth/ygo#257) is upstream since v1.51.0.
-replace github.com/reearth/ygo => github.com/sjawhar/ygo v1.51.3-sami.3
+// which of its edits the room took; CloseRoom closes a browser that connects while it runs,
+// which it used to leave on the room it removed, where no later edit reached it; and a document
+// logs each committed transaction's update in commit order under its own lock (UpdateLog), so the
+// room's update observer measures each update against the room the commit before it left. A merged
+// update's skip parking the items after it (reearth/ygo#257) is upstream since v1.51.0.
+replace github.com/reearth/ygo => github.com/sjawhar/ygo v1.50.1-0.20261026071617-4c08406bef18

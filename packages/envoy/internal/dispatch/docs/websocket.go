@@ -481,7 +481,9 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 		s.scheduleSettleLocked(room, state)
 	}
 	s.unlockState(room, state)
-	replica := s.keepReplica(doc, contentMarkdown)
+	// The log is opened before the observer is registered and before ygo hands the room to anyone
+	// (above), so it holds every transaction the room commits from here on, in commit order.
+	replica := s.keepReplica(doc, contentMarkdown, doc.OpenUpdateLog())
 	instance := s.keepInstance(room, doc)
 	hold := &instance.hold
 	doc.OnUpdate(func(update []byte, origin any) {
@@ -492,7 +494,8 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 		if published, ok := origin.(*liveWriteOrigin); ok {
 			s.finishSuppressedPersistence(published.slot, update)
 		}
-		if repair, identityRepair := origin.(*identityClosureOrigin); identityRepair {
+		repair, identityRepair := origin.(*identityClosureOrigin)
+		if identityRepair {
 			s.recordSuppressedCommit(repair.slot, update)
 			// A repair's update is not classified or credited - its writer appends it in its own
 			// transaction - but it names this instance all the same: one that reaches the room's
@@ -501,26 +504,42 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 			// it was made in has to take that version in or stand behind the head for good. The
 			// class counts for nothing else: it is not durable work the room's state waits on.
 			s.recordUpdateClass(room, update, documentUpdateClass{contentChanged: true, cursor: &instance.cursor})
-			return
-		}
-		if s.beforeObserveUpdate != nil {
+		} else if s.beforeObserveUpdate != nil {
 			s.beforeObserveUpdate(room)
 		}
-		contentChanged := replica.observe(room, doc, func(tree *pmdoc.Node) {
-			s.observeAskBlocksForUpdate(room, tree)
-		})
-		// The cursor is this instance's, taken here rather than looked up when the update reaches
-		// the store: a room evicted and reloaded in between is a different instance, which did not
-		// take this update and must not be recorded as holding the version it is stored at.
-		class := documentUpdateClass{contentChanged: contentChanged, durable: true, cursor: &instance.cursor}
-		if contentChanged {
-			class.credit = s.creditContentChange(room, origin, hold)
-			if s.afterCreditUpdate != nil {
-				s.afterCreditUpdate(room)
+		// Every observer drains the room's update log, a repair's too, and each committed update
+		// is classified once, by whichever observer reaches it first, against the room as the
+		// commit before it left it (renderedReplica). This observer's own update is in the log -
+		// ygo appended it under the document's lock at its commit - so its class is recorded
+		// before ygo's persistence observer, which runs after this one, hands it on.
+		var classified, changed bool
+		replica.observe(room, func(logged crdt.LoggedUpdate, contentChanged bool, tree *pmdoc.Node) {
+			if _, identityRepair := logged.Origin.(*identityClosureOrigin); identityRepair {
+				// Its own observer records its class (above). The replica takes it all the same,
+				// so the update after it is measured against the room the repair left.
+				return
 			}
+			classified = true
+			if tree != nil {
+				s.observeAskBlocksForUpdate(room, tree)
+			}
+			// The cursor is this instance's, taken here rather than looked up when the update
+			// reaches the store: a room evicted and reloaded in between is a different instance,
+			// which did not take this update and must not be recorded as holding the version it
+			// is stored at.
+			class := documentUpdateClass{contentChanged: contentChanged, durable: true, cursor: &instance.cursor}
+			if contentChanged {
+				class.credit = s.creditContentChange(room, logged.Origin, hold)
+				changed = true
+			}
+			s.recordUpdateClass(room, logged.Update, class)
+		})
+		if changed && s.afterCreditUpdate != nil {
+			s.afterCreditUpdate(room)
 		}
-		s.recordUpdateClass(room, update, class)
-		s.scheduleSettle(room)
+		if classified {
+			s.scheduleSettle(room)
+		}
 	})
 	return nil
 }
