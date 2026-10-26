@@ -1,0 +1,167 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "INFRA-439",
+  "completed": "2026-10-26T01:07:12Z",
+  "plan": "dispatch://INFRA-439/artifact/plan-md",
+  "summary": "Keep core NATS as the live path; add a listener route behind the existing /v1 auth, POST /v1/replay that reads stored messages from ENVOY_NOTIFICATIONS with STREAM.MSG.GET next_by_subj (ListenerPermissions gains exactly $JS.API.STREAM.MSG.GET.ENVOY_NOTIFICATIONS); a shared replay engine in @legion/envoy-client (ledger of finished frames, per-subject cursors bound to the stream's created time, sweeps on subscription open/resubscribe/reconnect/heartbeat) used by pi-envoy (transcript entries) and claude-envoy (per-session state file). Replayed frames are shown as cards and never executed; role forwards stay live only; a frame failing three times becomes one visible notice.",
+  "tasks": [
+    "1. packages/envoy: cmd/listener/replay.go + route in api.go; stored-message read in internal/bus; tests with testnats (go test ./cmd/listener -run Replay).",
+    "2. packages/envoy/infra/core/permissions.go ListenerPermissions + permissions_test.go, permissions_live_test.go (natslive, CI), cloud-config/AWS goldens, infra README Permission sets, docs/nats-hub.md.",
+    "3. packages/envoy-client: src/replay.ts engine + ledger, transport replay(), dedupe claim state read, package export; tests.",
+    "4. packages/pi-envoy/extensions/envoy.ts integration (triggers, followed subjects, ledger writes on live path, card-only replay delivery, subscription.removed since-rule, persistence entries envoy-replay-delivered/envoy-replay-state, topic recovery union, notices, session fencing); envoy.test.ts nats mock gains status().",
+    "5. packages/claude-envoy integration (state file replay-<id>.json, never pruned; channel and bridge inbox paths) + dist/ rebuild; tests.",
+    "6. Docs listed in plan.md (pi-envoy AGENTS/README, claude-envoy AGENTS/README, skills/envoy/SKILL.md 136-147, docs/site envoy.md, for-agents.md, how-it-fits.md, packages/envoy/AGENTS.md, contracts dispatch-api.ts 1213-1229 comment), CHANGELOGs; Dispatch dashboard text unchanged.",
+    "7. packages/pi-envoy/scripts/smoke-replay.sh live proof (natsd + workspace listener + socat + omp --mode rpc; control with /opt/legion/pi-envoy/dist/envoy.js) and its run."
+  ],
+  "requiredSkills": {
+    "implement": [
+      "legion-worker: phase rules, PR body, proofs, push and handoff.",
+      "envoy: the delivery semantics this change alters and skills/envoy/SKILL.md 136-147, which it must rewrite.",
+      "dispatch: the Dispatch ask the rollout's hub VM replacement needs under Approval first, and any Dispatch write.",
+      "ce-simplify-code: the simplify pass pr-body.md requires before the implementer's proof."
+    ],
+    "test": [
+      "legion-worker: the tester's proof rules; drive smoke-replay.sh for real and try to break the sweep (reconnect storms, restart mid-sweep, session switch).",
+      "envoy: what a session should and should not receive (role lanes and team topics stay live only)."
+    ],
+    "review": [
+      "legion-worker: review rounds and the merge gate.",
+      "envoy: to judge the route's trust boundary and the docs' delivery claims against the code."
+    ]
+  },
+  "gapAnalysis": {
+    "findings": [
+      {
+        "finding": "F01 'exactly once' undefined across crash; no atomic host boundary.",
+        "answer": "Ledger written after the host takes the frame; a crash in between can show it twice, never lose it. Recorded as a spec departure."
+      },
+      {
+        "finding": "F02 replay route is not per-caller authorized; hub /v1 takes no bearer.",
+        "answer": "Stated trust boundary: any /v1 caller can already subscribe notifications.> live and register interests; the route adds 72 h look-back only, limited to the session's agent subject and registered interests the deployed stream retains. No new auth added."
+      },
+      {
+        "finding": "F03 replay could execute stale BTW/Aside/Steer/Send.",
+        "answer": "Replayed frames are cards only: no side turn, no accept call, no Dispatch reply; Dispatch already recorded the attempt as not delivered."
+      },
+      {
+        "finding": "F04 followed issue topics lost when the registry reaps interests (10 min grace).",
+        "answer": "envoy-replay-state persists followed subjects; recoverRegisteredInterests resubscribes registry ∪ newest state; unfollowed topics are absent from the newest state."
+      },
+      {
+        "finding": "F05 no age bound; cursor older than retention.",
+        "answer": "72 h horizon; cursor below first_seq moves on and the session gets one notice that older messages may be missing."
+      },
+      {
+        "finding": "F06 initial cursor for upgrade, first follow, re-follow.",
+        "answer": "No cursor -> starts at the first watermark; no backfill before a session existed, followed a topic, or ran this plugin; re-follow starts fresh."
+      },
+      {
+        "finding": "F07 old listener answers POST /v1/sessions/... with 405, not 404.",
+        "answer": "New path POST /v1/replay hits the /v1/ catch-all 404 on old listeners; 404 = not served (notice once, probe each heartbeat); 503 REPLAY_UNAVAILABLE and 401/403 notice once; other errors retried silently."
+      },
+      {
+        "finding": "F08 grant is a production cutover replacing the hub VM.",
+        "answer": "Rollout section: releases, agent-infra PR pinning envoy-infra and listener images in envoy/ and envoy-cluster/, a Dispatch ask under Approval first before it merges, then plugin pins; production check calls /v1/replay and runs the smoke against production."
+      },
+      {
+        "finding": "F09 live messages carry no stream sequence; ordering undefined.",
+        "answer": "Cursors advance only from replay results; live deliveries only write the ledger. Order promised only inside one sweep (stream order)."
+      },
+      {
+        "finding": "F10 pending live claim vs completed delivery race.",
+        "answer": "Dedupe exposes none/pending/done; a pending identity leaves a hole (cursor stops before it) so a later live failure is retried by a later sweep."
+      },
+      {
+        "finding": "F11 cursor invariants: holes, watermark, stream recreation.",
+        "answer": "Exclusive after; watermark = last_seq at request start; next_after per subject; holes cap the cursor; cursors bound to stream created time, reset with a notice when it changes."
+      },
+      {
+        "finding": "F12 replayed subscription.removed could close a re-followed topic.",
+        "answer": "A replayed removal applies only when its seq is above that topic's since; the live path is unchanged."
+      },
+      {
+        "finding": "F13 session switch, fork and handoff ownership of sweeps and state.",
+        "answer": "A sweep belongs to its session id and checks the host before each delivery and each state write; replaced-session frames wait in the stream until that id resumes; Claude /clear handoff starts fresh."
+      },
+      {
+        "finding": "F14 deliver() resolving does not mean injected.",
+        "answer": "Replay delivery is a separate card path reporting shown/suppressed/failed; the live path records the ledger only once the host took the frame or a correlated reply was posted."
+      },
+      {
+        "finding": "F15 'reported where the session sees it' undefined for headless panes.",
+        "answer": "Third failure -> one sendMessage notice card (model-visible in every mode) naming sender, event id, summary, time, error; if it fails too: logger.warn + ui.notify and retried next sweep; Claude: channel/bridge, else stderr."
+      },
+      {
+        "finding": "F16 stored role forwards on the agent subject.",
+        "answer": "Passed over by dedupe-key prefix envoy.role.forward. or role envelope topic; a live role frame failing after its receipt gets the notice at once."
+      },
+      {
+        "finding": "F17 which subjects and rendering filters.",
+        "answer": "All followed subjects the deployed stream retains (checked against STREAM.INFO config, wildcard-aware); renderer skips advance the cursor without a ledger entry so an eligible copy still shows."
+      },
+      {
+        "finding": "F18 persisted dedupe semantics.",
+        "answer": "Ledger keeps event_id and qualifying dedupe_key with recorded time, expiry 72 h from that time, cap 20,000 (documented limit)."
+      },
+      {
+        "finding": "F19 sweeps could stall registration/role work.",
+        "answer": "Own chain outside passes/roleMoves, single-flight with one rerun, server bounds (32 subjects, 100-500 msgs, 2 MiB, 5 s), client 10 s timeout, 20 pages per sweep, errors contained."
+      },
+      {
+        "finding": "F20 transcript growth and Claude file safety.",
+        "answer": "State written only when changed; ledger entries per shown frame; Claude file 0600, atomic rename, ledger trimmed at write, never pruned; failed write logged, memory kept."
+      },
+      {
+        "finding": "F21 Claude Code has the same loss.",
+        "answer": "Said on the issue (comment bd66a966); included in scope with tests for channel and bridge-inbox paths and a 31-day resume; success = admission write."
+      },
+      {
+        "finding": "F22 acceptance needs bounded observable oracles.",
+        "answer": "Acceptance table names commands, cases, observation windows (2 heartbeats, then 3 more) and the live script's natsd /connz gap check, stream-stored check and released-plugin control."
+      },
+      {
+        "finding": "F23 docs list misses contracts comment and dashboard caveat.",
+        "answer": "contracts dispatch-api.ts 1213-1229 updated for new plugin versions; dashboard 'unless the session restarted' stays true while older plugins run and is not changed; live-only role/team text kept."
+      },
+      {
+        "finding": "F24 'most likely place' for BET-5 is unsupported.",
+        "answer": "Plan treats it as a supported mechanism and regression scenario only; the spec's wording is the architect's."
+      },
+      {
+        "finding": "F25 facts overstated members-only credentials and persisted inbound state.",
+        "answer": "Plan's facts narrowed; replay goes through the listener so it works for keyed and credential-free sessions alike; handled-attempt record described as anti-reacceptance."
+      },
+      {
+        "finding": "F26 outbox destinations described too broadly.",
+        "answer": "Plan separates retained session destinations from core role routes and uses the deployed stream config for eligibility."
+      }
+    ]
+  },
+  "planReview": {
+    "verdict": "approved",
+    "rounds": 3
+  },
+  "specDepartures": [
+    {
+      "spec": "Out of scope: Claude Code sessions, unless the planner finds they lose messages the same way; then say so on this issue.",
+      "plan": "Claude Code's channel server gets the same recovery through the shared engine, with its own tests.",
+      "evidence": "packages/claude-envoy/src/channel-forwarder.ts 101-158 and envoy-channel-server.ts 540-549 receive on plain core subscriptions registered selfSubscribed/port 0, which the listener skips (packages/envoy/internal/session/session.go 62-64); said on the issue: dispatch://INFRA-439/comment/bd66a966-a9b1-4419-bd6d-aecee98ee307.",
+      "outcome": {
+        "kind": "changed",
+        "scope": "Adds packages/claude-envoy (channel and Legion bridge inbox paths) to the delivered scope."
+      }
+    },
+    {
+      "spec": "Outcome: an event reaches the session once, also when published while down, as long as the session comes back under the same session id.",
+      "plan": "Holds within the stream's 72 h retention and from the moment the session first runs this plugin or follows the topic; older or pre-existing history is not replayed and the session is told once that messages may be missing; a crash between host admission and the ledger write can show a frame twice, never lose it.",
+      "evidence": "ENVOY_NOTIFICATIONS MaxAge 72 h (packages/envoy/internal/bus/stream.go 111-122); no prior delivered ledger exists (packages/envoy-client/src/delivery.ts 201-289, memory only); pi.sendMessage returns void with no commit hook (packages/pi-shared/src/pi-types.ts 389-418).",
+      "outcome": {
+        "kind": "changed",
+        "summary": [
+          "Reaches the session once within the stream's 72 h, from when the session first ran this plugin or followed the topic; a crash in the window between the host taking a frame and its record can repeat it, never lose it."
+        ]
+      }
+    }
+  ]
+}
