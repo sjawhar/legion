@@ -8,9 +8,9 @@ name: PR Title
 # run reports `pr-title` on the pull request's head, which main's ruleset requires. Comments and
 # review comments start no run of their own: GitHub leaves those events' checks out of a pull
 # request's checks, an inline comment posted alone arrives with a review event that does run, and
-# every run, like the required lint job at each push, reads every comment. A newer pull_request
-# run that cancels an older one loses nothing, since it repeats every check on the title and body
-# as they now are. Anyone signed in can review a public pull request, so check-pr-text.sh, not an
+# every run, like the required lint job at each push, reads every comment. A newer run that
+# cancels an older one loses nothing, since it repeats every check on the title and body as they
+# now are. Anyone signed in can review a public pull request, so check-pr-text.sh, not an
 # `if:`, decides whose text counts: a skipped job posts a `pr-title` that GitHub and the daemon
 # (classify.RunResult) count as a pass, so a skipped run would turn a real failure green.
 on:
@@ -19,13 +19,16 @@ on:
   pull_request_review:
     types: [submitted, edited]
 
-# A pull_request event cancels this workflow's still-running run for the same pull request (its
-# merge ref), as the other three workflows' blocks do. A review run never cancels or is cancelled:
-# two reviews submitted together each get a run that reads every comment and review, and a
-# cancelled run would leave a cancelled required check on the head.
+# Every run of one pull request shares one group and cancels the run before it, whatever event
+# started either, so a pull request holds at most one running and one pending PR Title run however
+# many edits and reviews arrive. Nothing is lost: each run checks the title and body its event
+# names and reads the commits, comments and reviews live, so the newest repeats every check of the
+# runs it cancels, and the newest `pr-title` on the head is the one that stands. A review run
+# checks with main's copy of check-pr-text.sh; the required lint job checks a pull request that
+# changes it with its own copy at every push.
 concurrency:
-  group: pr-title-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: pr-title-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
 
 # The job clones the repository for check-pr-text.sh, which reads the pull request's commits
 # through the compare route (`contents: read`), its reviews and review comments
