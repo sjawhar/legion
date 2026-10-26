@@ -2,49 +2,33 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-261",
-  "completed": "2026-10-26T09:10:00Z",
+  "completed": "2026-10-26T13:50:00Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2238",
-  "headSha": "b6d4733ae0e7d759ad63b9df257911a2f96fd016",
+  "headSha": "8ef01c55d60f4134eeaea92d93b3d99230d23acb",
   "proof": [
     {
-      "criterion": "Acceptance 1: a re-read keeps every record of the copy and every delivered record until the read completes, then exactly the new read's records",
-      "surface": "real listener binary on its own natsd (file store), seeded through the listener's API and the buckets",
-      "command": "bash packages/envoy/scripts/e2e-refill.sh --scenario all --out $TMPDIR/infra-261/rig/merged (verdicts: https://github.com/sjawhar/legion/pull/2238#issuecomment-6412148786)",
-      "observed": "verdict reread PASS: session-bucket recreate, interest-bucket recreate and identical-records recreate each had polls inside the read (e.g. 5 of 629 inside the 1287 ms session read); every old and both row held until the read completed, exactly the bucket's after it; the other list held all 6000 rows throughout",
-      "headSha": "b6d4733ae0e7d759ad63b9df257911a2f96fd016",
-      "negativeControl": "same rig with --listener-bin built from merge base 81a3b5ef7b47: verdict reread FAIL, a 200 of 0 rows missing both x3000 old x3000 mid-read (https://github.com/sjawhar/legion/pull/2238#issuecomment-6411086859)"
+      "criterion": "Architect's ruling (tester failure, round 1): once a bucket's stream is recreated under a live watcher, the copy stops reporting Following before it applies any record of the new stream, and the listener reads the new bucket whole without waiting for the self-health tick; the old copy is kept and served within the bound, and the sweep happens only on completion",
+      "surface": "real listener binary on its own natsd: the session bucket (60 s TTL) is recreated 26-28 s before a self-health tick, with the old stream shorter and longer than the new one, while GET /v1/sessions is polled continuously",
+      "command": "bash packages/envoy/scripts/e2e-refill.sh --scenario all --out $TMPDIR/infra-261/rig3/head (recreate-live part; https://github.com/sjawhar/legion/pull/2238#issuecomment-6417102242)",
+      "observed": "verdict recreate-live PASS for both shapes: the watcher's probe found the recreate at +0.997 s and read the new bucket from +1.009 s to +5.082 s (3001 records), before the tick at +26.904 s, with no self-health failure or rebuild; no 200 lacked a record that both the old copy and the new bucket held; after completion every poll was exactly the new bucket; kvwatch red test TestABucketRecreatedUnderALiveWatcherIsReadWholeWithoutCheck passes unmodified with -count=3",
+      "headSha": "8ef01c55d60f4134eeaea92d93b3d99230d23acb",
+      "negativeControl": "--scenario recreate-live --listener-bin built from b6d4733: verdict FAIL for both shapes: no probe line, the new bucket read only at +27.03 s after the tick, and 469 polls from +17.0 s to +27.0 s listed new-bucket records while lacking chg x1000 and new x1000 the bucket held, with the copy still claiming to follow"
     },
     {
-      "criterion": "Acceptance 2: a read that times out or ends early removes nothing, and the listener reads again itself until one completes",
-      "surface": "real listener binary on its own natsd, 41000 sessions",
-      "command": "bash packages/envoy/scripts/e2e-refill.sh --scenario all (interrupt: SIGSTOP NATS on the recreate line, and SIGKILL+restart NATS)",
-      "observed": "verdict interrupt(stop) PASS: scan timed out at +10 s, 22 polls during the incomplete read held every old record, kvwatch's own re-read completed 41000 records at +15.7 s with no action by the rig, then exactly the bucket; verdict interrupt(restart) PASS: disconnect hook stopped following, reconnect hook re-read, every poll held the old copy, then exactly the bucket",
-      "headSha": "b6d4733ae0e7d759ad63b9df257911a2f96fd016",
-      "negativeControl": "merge-base listener build: interrupt(stop) FAIL and interrupt(restart) FAIL, 200s of 0 rows of 41000 right after the recreate"
+      "criterion": "Acceptances 1, 2, 3 (listener, envoy_sessions, Dispatch server) and 4 still hold at the round-2 head; the listener survives a cut scan replaced by the reconnect Rewatch",
+      "surface": "real listener + natsd; claude-envoy MCP server over stdio and the real Go Dispatch server inside the outage window",
+      "command": "bash packages/envoy/scripts/e2e-refill.sh --scenario all --during-refuse '<p5-dispatch.sh start/seed/check; p4-envoy-sessions.ts refilling>' --after-refuse '<same>'; plus 5x --scenario interrupt --interrupt-by restart",
+      "observed": "reread PASS (10 of 276 polls inside the read, every old record held, exactly the bucket after), interrupt(stop) PASS (timed-out scan, kvwatch's own re-read at +15.9 s), interrupt(restart) PASS, refuse PASS (boot only refilling 503s then complete 200s, no gauge sample while 503; past the bound refilling 503 Retry-After 5; whole after NATS returned); envoy_sessions failed with 'envoy: the agent list is refilling; try again in a moment' then listed 303; 0 'panic' lines in every listener log; 5 of 5 interrupt(restart) runs passed with 0 panics",
+      "headSha": "8ef01c55d60f4134eeaea92d93b3d99230d23acb",
+      "negativeControl": "merge-base listener: every rig scenario FAIL (round-1 evidence https://github.com/sjawhar/legion/pull/2238#issuecomment-6411086859); before the deferred stop, interrupt(restart) crashed the listener with nats.go 'send on closed channel' in 2 of 5 runs at the pre-fix head and 1 of 3 on b6d4733"
     },
     {
-      "criterion": "Acceptances 3 and 4 on the listener: 503 + Retry-After before the first complete read and past the bound; envoy_active_sessions has no sample then, equals the list otherwise, 0 only for a complete empty copy",
-      "surface": "real listener binary on its own natsd; /v1/sessions, /v1/interests/, /metrics",
-      "command": "bash packages/envoy/scripts/e2e-refill.sh --scenario refuse (also inside --scenario all)",
-      "observed": "verdict refuse PASS: boot on 40000 rows answered only refilling 503s (Retry-After: 5, code refilling) then complete 200s, no gauge sample while 503; NATS down: copy served within the bound, refilling 503 from 2m0s, no gauge sample past the bound, whole again ~0.5 s after NATS returned with both gauges 303 = list length; empty buckets 200 [] and 0 samples",
+      "criterion": "Acceptance 3: every Dispatch view shows refilling, never an agent's absence",
+      "surface": "Dispatch browser suite (real Go Dispatch server, fake listener, Chromium)",
+      "command": "cd packages/dispatch && bun run e2e -- agent-list-refilling --project chromium",
+      "observed": "4 passed at b6d4733; packages/dispatch and packages/envoy/internal/dispatch are unchanged between b6d4733 and 8ef01c5 (round 2 changed only kvwatch, the rig and docs), and the tester's claim-refilling spec passed at b6d4733",
       "headSha": "b6d4733ae0e7d759ad63b9df257911a2f96fd016",
-      "negativeControl": "merge-base listener build: refuse FAIL, boot answered 503 'service starting' with no code/Retry-After, and 2m5s after NATS stopped a 200 of all 303 rows with gauges still 303"
-    },
-    {
-      "criterion": "Acceptance 3: envoy_sessions fails with the refilling message",
-      "surface": "claude-envoy MCP server (packages/claude-envoy/dist/envoy-channel.js) over stdio against the rig listener",
-      "command": "e2e-refill.sh --scenario refuse --during-refuse 'bun $TMPDIR/infra-261/p4-envoy-sessions.ts refilling' --after-refuse 'bun $TMPDIR/infra-261/p4-envoy-sessions.ts list:$REFILL_RIG_SESSIONS'",
-      "observed": "inside the outage window tools/call envoy_sessions -> JSON-RPC error 'envoy: the agent list is refilling; try again in a moment'; after recovery it listed 303 sessions",
-      "headSha": "b6d4733ae0e7d759ad63b9df257911a2f96fd016",
-      "negativeControl": "against the merge-base listener in the same window envoy_sessions returned the frozen list (CHECK FAIL)"
-    },
-    {
-      "criterion": "Acceptance 3: every Dispatch view shows refilling, never an agent's absence; route status unknown with the issue page saying why",
-      "surface": "Dispatch browser suite (real Go Dispatch server, fake listener, Chromium) and the real Go Dispatch server against the rig listener",
-      "command": "cd packages/dispatch && bun run e2e -- agent-list-refilling --project chromium; and e2e-refill.sh --scenario refuse --during-refuse '$TMPDIR/infra-261/p5-dispatch.sh start && ... check'",
-      "observed": "4 passed: full list -> refilling -> recovery, empty list -> refilling, refilling from the first read, listener down reads unreachable not refilling, across Agents page, issue and document subscribers, ask card, mention suggestions, conversation page, route reason, list and board; real Dispatch during the outage: GET /api/v1/agents HTTP/1.1 503, Retry-After: 5, code ENVOY_REFILLING; routed issues route_status unknown, route_status_reason refilling (after recovery live, holder set, reason null)",
-      "headSha": "b6d4733ae0e7d759ad63b9df257911a2f96fd016",
-      "negativeControl": "the same spec on a build of the merge base 81a3b5ef7b47: 4 failed (no refilling notice in mention suggestions; ENVOY_UNAVAILABLE where ENVOY_REFILLING was expected)"
+      "negativeControl": "the same spec on a build of the merge base 81a3b5ef7b47: 4 failed"
     }
   ],
   "filesChanged": [
@@ -59,7 +43,9 @@
     "packages/dispatch/e2e/{fake-envoy.ts,agents.ts,agent-list-refilling.e2e.ts}",
     "packages/envoy/scripts/e2e-refill.sh, internal/testnats/cmd/refillrig/main.go, scripts/README.md",
     "packages/claude-envoy/scripts/smoke-channel.sh, scripts/e2e/stage3-4b13b-acceptance.sh: a non-200 list is unreadable, not empty",
-    "docs: packages/envoy/{AGENTS.md,docs/architecture.md,CHANGELOG.md,cmd/dispatch/README.md,cmd/dispatch/AGENTS.md}, packages/dispatch/AGENTS.md, packages/contracts/AGENTS.md, docs/site dispatch/envoy.md, the INFRA-249 solution note"
+    "docs: packages/envoy/{AGENTS.md,docs/architecture.md,CHANGELOG.md,cmd/dispatch/README.md,cmd/dispatch/AGENTS.md}, packages/dispatch/AGENTS.md, packages/contracts/AGENTS.md, docs/site dispatch/envoy.md, the INFRA-249 solution note",
+    "round 2: packages/envoy/internal/kvwatch/kvwatch.go (stream probe every 2 s, confirmation gate on post-read records, completion stream check, deferred stop of replaced/discarded watchers until their scan ends), probe_test.go, deferred_stop_test.go, export_test.go",
+    "round 2: packages/envoy/scripts/e2e-refill.sh, internal/testnats/cmd/refillrig/main.go, scripts/README.md (recreate-live scenario; listener held during fills; keyed on the install line), packages/envoy/AGENTS.md, CHANGELOG.md"
   ],
   "trickyParts": [
     "kvwatch completeRead takes applyMu, rechecks generation/stopped/Check error/disconnect count under mu, sweeps with mu released, then sets following only if still valid; a read a disconnect overlapped completes nothing (extension of D2 to disconnects).",
@@ -77,9 +63,13 @@
     "Unclaimed filter had no notice; one was added (data-testid unclaimed-unchecked). MentionComposer reads useAgents itself (ConversationTab never passed agents), so its states come from its own hook.",
     "Simplify pass applied three changes (marks lifecycle, Marks.MarkCurrent, session Delete via applyEntryLocked); skipped findings are listed in the PR Thermo line.",
     "Perf fix folded in under the standing rule: per-record pruneLastSeenLocked made a read cost entries x swept sessions (15.5 s vs 1.6 s at rig scale).",
-    "Forward-merged main once (GitHub CONFLICTING); fingerprint changed; all proofs re-run at b6d4733."
+    "Forward-merged main once (GitHub CONFLICTING); fingerprint changed; all proofs re-run at b6d4733.",
+    "Round 2 detection is an in-process stream probe (STREAM.INFO per watcher every 2 s, 1.5/s per listener) plus a gate holding a post-read record on a confirmation older than 4 s, not JetStream advisories: the listener's NATS users have no subscribe permission on $JS.EVENT.> (packages/envoy/infra golden configs), so advisories would need a NATS auth rollout first. Check stays the fallback.",
+    "Known limit: if the gate's synchronous STREAM.INFO fails with an error other than stream-not-found, the record is applied with Following unchanged (a transient JetStream error must not force a full re-read).",
+    "Fixed under the standing rule: nats.go v1.50.0 KV watcher init timer can send on a closed channel when the subscription ends as the timer fires (still present upstream); kvwatch stops a replaced/discarded watcher only after its scan marker. Remaining exposure: nats.go's own unsubscribe and End at shutdown."
   ],
   "openQuestions": [
-    "Local env limits: internal/dispatch/api has two tests (events unicode escape, rank collation) that fail only against this pod's SQL_ASCII/C Postgres; untouched by this change, left to CI. One unidentified failure in the first full `bun run test` of packages/dispatch after the merge did not reproduce in three reruns (2342 pass each)."
-  ]
+    "Local env limits unchanged: two internal/dispatch/api tests fail only on this pod's SQL_ASCII Postgres; race tests run with zig as CC."
+  ],
+  "round": 2
 }
