@@ -293,10 +293,10 @@ test("a lapsed session keeps every write, and the same person's sign-in resumes 
 }, 15_000);
 
 // (b) Signing out discards the person's own writes, so it asks first while any is unsent, naming
-// each: Cancel keeps them signed in with every write as it was. Confirmed, every write - one still
-// being tried, a refusal waiting for Retry - stops and goes, nothing of either is left in the tab,
-// the page stops asking to confirm leaving, and every other tab of the browser is told whose
-// writes to drop.
+// each: Cancel keeps them signed in with every write as it was. Confirmed, and once Dispatch has
+// answered the sign-out (W48), every write - one still being tried, a refusal waiting for Retry -
+// stops and goes, nothing of either is left in the tab, the page stops asking to confirm leaving,
+// and every other tab of the browser is told whose writes to drop.
 test("signing out asks first, then drops every write here and tells every other tab", async () => {
   const sockets = installFakeLiveSockets();
   let signedIn = true;
@@ -358,6 +358,7 @@ test("signing out asks first, then drops every write here and tells every other 
     expect(asksBeforeLeaving()).toBe(true);
 
     fireEvent.click(screen.getByRole("button", { name: "Sign out" }));
+    await waitFor(() => expect(asked).toHaveLength(1));
     expect(asked).toEqual([
       "Sign out and discard 2 unsent changes?\n\n• CORE-1 set to done\n• CORE-2 set to done",
     ]);
@@ -368,7 +369,7 @@ test("signing out asks first, then drops every write here and tells every other 
 
     answer = true;
     fireEvent.click(screen.getByRole("button", { name: "Sign out" }));
-    expect(writesOf(queryClient).rows()).toEqual([]);
+    await waitFor(() => expect(writesOf(queryClient).rows()).toEqual([]));
     await screen.findByRole("link", { name: "Sign in with Google" });
     expect(logout).toHaveBeenCalledTimes(1);
     expect(await out).toBeInstanceOf(SendStoppedError);

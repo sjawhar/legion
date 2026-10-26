@@ -646,6 +646,69 @@ test("dropping a line of writes starts none of the writes it drops", async () =>
   });
 });
 
+// W48. A sign-out discards nothing until Dispatch answers it, and sends nothing of its person's
+// meanwhile: while it is out every other write of theirs stops trying after the attempt in flight
+// and none starts. Refused, it lets them go on, each where it stood; landed, they stay held until
+// the page lets them go (`clear`). Another tab's sign-out holds them the same way (`holdFor`) until
+// that tab says how it ended: the person still signed in (`release`), or signed out (`dropLogin`).
+test("a sign-out out holds its person's writes until Dispatch answers it", async () => {
+  await onFakeClock(async () => {
+    const { writes } = storeOf();
+    let attempts = 0;
+    const failing = () => {
+      attempts += 1;
+      return Promise.reject(dropped());
+    };
+    void statusWrite(writes, failing).catch(() => {});
+    await settle();
+    const signOut = (answer: Promise<unknown>) =>
+      writes
+        .run({
+          detail: null,
+          endsWithSession: true,
+          inline: true,
+          kind: plainWrite,
+          label: "Sign out",
+          presentation: "indicator",
+          write: () => answer,
+        })
+        .catch((error: unknown) => error);
+
+    const refused = Promise.withResolvers<unknown>();
+    const first = signOut(refused.promise);
+    await settle();
+    const held = attempts;
+    await tick(10_000);
+    expect(attempts).toBe(held);
+    expect(writes.rows().map((write) => write.label)).toEqual(["CORE-1 set to done", "Sign out"]);
+    refused.reject(new ApiError(403, { code: "FORBIDDEN", error: "not now" }));
+    expect(await first).toBeInstanceOf(ApiError);
+    await tick(2_000);
+    expect(attempts).toBeGreaterThan(held);
+
+    writes.holdFor("alice");
+    await tick(1_000);
+    const elsewhere = attempts;
+    await tick(10_000);
+    expect(attempts).toBe(elsewhere);
+    writes.release("alice");
+    await tick(2_000);
+    expect(attempts).toBeGreaterThan(elsewhere);
+
+    const landed = Promise.withResolvers<unknown>();
+    const last = signOut(landed.promise);
+    await tick(1_000);
+    const signedOut = attempts;
+    landed.resolve({ ok: true });
+    expect(await last).toEqual({ ok: true });
+    await tick(10_000);
+    expect(attempts).toBe(signedOut);
+    expect(writes.rows().map((write) => write.label)).toEqual(["CORE-1 set to done"]);
+    writes.clear();
+    expect(writes.rows()).toEqual([]);
+  });
+});
+
 // W25. Writes to one target go out in press order: a later one waits while an earlier one is still
 // being tried, a refused one no longer holds the line, and its Retry joins at the back.
 test("writes to one target go in press order, and a refused one does not hold the line", async () => {

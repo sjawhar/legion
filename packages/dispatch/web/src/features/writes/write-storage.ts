@@ -246,6 +246,8 @@ export class WriteStorage {
    *  a quiet one (a read mark) is never shown, so leaving never asks for it. */
   readonly #unconfirmed = new Set<string>();
   #retired = false;
+  /** Whether the page is leaving for the sign-in and coming back to this tab (`letLeave`). */
+  #leavingToSignIn = false;
 
   /** `storage` is undefined where the browser gives the page none: writes are then not kept
    *  across a reload, and leaving is still confirmed while one is out. */
@@ -356,14 +358,33 @@ export class WriteStorage {
     }
   }
 
-  /** Asks the browser to confirm leaving the page. This storage's own listener, so another's
-   *  adding and removing its own leaves it be. */
+  /** Lets the page leave without asking: the person follows the sign-in link of a lapsed session,
+   *  and the writes kept here resume in this tab once they are back. Leaving asks again once the
+   *  page is plainly still theirs - a press on it, or the page shown again. */
+  letLeave(): void {
+    if (this.#leavingToSignIn) return;
+    this.#leavingToSignIn = true;
+    const staying = () => {
+      this.#leavingToSignIn = false;
+      for (const type of STAYING) this.#unload.removeEventListener(type, staying, true);
+    };
+    for (const type of STAYING) this.#unload.addEventListener(type, staying, true);
+  }
+
+  /** Asks the browser to confirm leaving the page, unless it is leaving for the sign-in
+   *  (`letLeave`). This storage's own listener, so another's adding and removing its own leaves
+   *  it be. */
   readonly #confirmLeaving = (event: Event): void => {
+    if (this.#leavingToSignIn) return;
     event.preventDefault();
     // A browser older than the `preventDefault` form (Chrome before 119) asks only for this.
     (event as BeforeUnloadEvent).returnValue = true;
   };
 }
+
+/** What says the page is plainly still the person's after a navigation that did not happen: a
+ *  press on it, or the page shown again. */
+const STAYING = ["keydown", "pageshow", "pointerdown"] as const;
 
 /** The page's sessionStorage, or undefined where the browser refuses it the page. */
 function pageStorage(): Storage | undefined {

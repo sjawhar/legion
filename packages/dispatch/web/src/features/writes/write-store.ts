@@ -280,6 +280,10 @@ export class Writes {
   #lapsed = false;
   /** Who was signed in last; `undefined` before the first sign-in and once a session lapsed. */
   #login: string | undefined;
+  /** The logins whose sign-out is out - this page's (`endsWithSession`) or another tab's
+   *  (`holdFor`) - so none of their writes but the sign-out itself starts until Dispatch has
+   *  answered it: nothing the person chose to discard goes out after they confirmed it. */
+  readonly #signingOut = new Set<string>();
 
   constructor(
     client: QueryClient,
@@ -309,7 +313,9 @@ export class Writes {
    *  `null` for a write that landed with no answer to give, or rejects with its refusal - or
    *  `SendStoppedError` once the reader stops it. A write on a line of a kind made again from its
    *  request that names none is a page bug, refused at once: waiting its turn, it could not be
-   *  kept for a reload without running its attempt. */
+   *  kept for a reload without running its attempt. A sign-out (`endsWithSession`) holds every
+   *  other write of its person until Dispatch answers it (`holdFor`): refused, they go on; landed,
+   *  they wait for the page to let them go (`clear`). */
   run<T, D, K>(spec: WriteSpec<T, D, K>): Promise<T | null> {
     if (spec.target !== undefined && spec.request === undefined && spec.kind.resume === undefined) {
       return Promise.reject(
@@ -320,6 +326,7 @@ export class Writes {
     const login = signedInLogin(this.#client);
     const key = spec.key ?? newSendKey();
     if (spec.file !== undefined && login !== undefined) void this.#files.put(key, login, spec.file);
+    if (spec.endsWithSession === true && login !== undefined) this.holdFor(login);
     const entry: Entry = {
       attempt: spec.write,
       endsWithSession: spec.endsWithSession ?? false,
@@ -430,10 +437,13 @@ export class Writes {
    * its line; anyone else's drops every write not theirs, its trying stopped and its press refused.
    * A sign-out still out (`endsWithSession`) has nothing left to do once the session lapses, and
    * goes. Each kind lets go of what it remembered of the person before (`reset`) whenever who is
-   * signed in changes.
+   * signed in changes, and so does every hold a sign-out put on writes (`holdFor`).
    */
   signedIn(login: string | undefined): void {
-    if (login !== this.#login) this.#resetKinds();
+    if (login !== this.#login) {
+      this.#resetKinds();
+      this.#signingOut.clear();
+    }
     this.#login = login;
     if (login === undefined) {
       this.#lapsed = true;
@@ -451,6 +461,7 @@ export class Writes {
    *  included: the person who made them signed out. */
   clear(): void {
     this.#take([...this.#entries.values()]);
+    this.#signingOut.clear();
     this.#resetKinds();
     void this.#files.keepOnly(undefined);
     this.#kept.clear();
@@ -460,7 +471,33 @@ export class Writes {
    *  of it, its file included: that person signed out in another tab of this browser, which
    *  discards their writes in every tab (`app.tsx`). */
   dropLogin(login: string): void {
+    this.#signingOut.delete(login);
     this.#drop([...this.#entries.values()].filter((entry) => entry.write.login === login));
+  }
+
+  /** Holds every write `login` pressed, but a sign-out, while a sign-out of theirs is out - this
+   *  page's, or another tab's: each one out stops trying after the attempt in flight, whose answer
+   *  is still its own, and waits in its line, and none starts, until Dispatch has answered the
+   *  sign-out. Signed out, they go (`clear`, `dropLogin`); still signed in, they go on (`release`). */
+  holdFor(login: string): void {
+    this.#signingOut.add(login);
+    for (const entry of this.#entries.values()) {
+      if (entry.write.login === login && !entry.endsWithSession) this.#hold(entry);
+    }
+  }
+
+  /** Lets `login`'s writes go on where they stood: their sign-out did not go through. */
+  release(login: string): void {
+    if (!this.#signingOut.delete(login)) return;
+    const targets = new Set([...this.#entries.values()].map((entry) => entry.write.target));
+    for (const target of targets) this.#advance(target);
+  }
+
+  /** The person follows the sign-in link of a lapsed session: the page goes and comes back to
+   *  this tab, where every write it keeps resumes, so this navigation asks nothing on leaving
+   *  (`WriteStorage.letLeave`). */
+  leavingToSignIn(): void {
+    this.#kept.letLeave();
   }
 
   /** Has every kind let go of what it remembered of the person signed in until now. */
@@ -572,16 +609,18 @@ export class Writes {
 
   /** Starts every write of `target` whose turn has come: in join order, each queued one that no
    *  earlier one is still being tried ahead of. A write with no target starts at once. None starts
-   *  while the session is lapsed. */
+   *  while the session is lapsed, and none of a person whose sign-out is out but that sign-out
+   *  (`#signingOut`): it waits, holding its place in its line. */
   #advance(target: string | undefined): void {
     if (this.#lapsed) return;
     const line = [...this.#entries.values()]
       .filter((entry) => entry.write.target === target)
       .sort((a, b) => a.write.joined - b.write.joined);
     for (const entry of line) {
-      const { status } = entry.write;
+      const { login, status } = entry.write;
       if (status === "queued") {
-        this.#start(entry);
+        const waits = !entry.endsWithSession && login !== undefined && this.#signingOut.has(login);
+        if (!waits) this.#start(entry);
         if (target !== undefined) return;
       } else if (target !== undefined && (status === "sending" || status === "late")) {
         return;
@@ -701,7 +740,8 @@ export class Writes {
   /** The write `entry` was refused: it stays for Retry or Discard - unless its surface shows the
    *  refusal itself or it is never shown - and the next write of its target goes. One Dispatch
    *  refused because someone else is signed in goes with every write of its login, and the page
-   *  reads who is signed in again. */
+   *  reads who is signed in again. A refused sign-out leaves its person signed in, so every write
+   *  of theirs it held goes on (`release`). */
   #refused(entry: Entry, refusal: Error): void {
     entry.press?.reject(refusal);
     entry.press = undefined;
@@ -721,6 +761,7 @@ export class Writes {
     kinds.get(write.kind)?.undone?.(this.#client, write);
     this.#emit({ kind: "refused", refusal, write });
     this.#advance(write.target);
+    if (entry.endsWithSession && write.login !== undefined) this.release(write.login);
   }
 
   /** Drops every one of `entries` wherever it stands (`#take`), and only then starts the writes

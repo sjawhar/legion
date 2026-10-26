@@ -37,12 +37,14 @@ import { KeymapProvider } from "./features/shell/KeymapProvider";
 import { appKeymap, type KeyBindingDescription, useKeymap } from "./features/shell/keymap";
 import { NotFoundPage } from "./features/shell/NotFoundPage";
 import { ShortcutHelp } from "./features/shell/ShortcutHelp";
+import { SignInChannel } from "./features/shell/sign-in-channel";
 import { COMPACT_VIEWPORT_QUERY, useDialog, useMediaQuery } from "./features/shell/useDialog";
 import { useDocumentTitle } from "./features/shell/useDocumentTitle";
 import { useKeyboardFit } from "./features/shell/useKeyboardFit";
 import { useUserPreference } from "./features/shell/userPreference";
 import { Sidebar } from "./features/sidebar/Sidebar";
 import "./features/writes/kinds";
+import { KeptWrites } from "./features/writes/KeptWrites";
 import { PendingWritesIndicator } from "./features/writes/PendingWritesIndicator";
 import { useKeyedWrite } from "./features/writes/useKeyedWrite";
 import { type Write, writesOf } from "./features/writes/write-store";
@@ -215,7 +217,11 @@ function InboxPage(): ReactNode {
   );
 }
 
+/** The sign-in page. A session that lapsed shows what it keeps for its person (`KeptWrites`), and
+ *  its sign-in link asks nothing on leaving: the page comes back to this tab, where every kept
+ *  write resumes (`Writes.leavingToSignIn`). */
 function SignInPage(): ReactNode {
+  const queryClient = useQueryClient();
   return (
     <ShellMessagePage title="Make the next decision clear.">
       <p className={`mt-3 ${textSecondaryOnSurface}`}>
@@ -224,9 +230,15 @@ function SignInPage(): ReactNode {
       <a
         className={`mt-8 inline-flex rounded-lg px-4 py-2 font-semibold ${primaryButtonBg} ${primaryButtonHoverBg}`}
         href="/auth/start"
+        onClick={(event) => {
+          // A press that opens the link elsewhere leaves this page in place.
+          if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+          writesOf(queryClient).leavingToSignIn();
+        }}
       >
         Sign in with Google
       </a>
+      <KeptWrites />
     </ShellMessagePage>
   );
 }
@@ -342,8 +354,9 @@ function NavigationContents({
           Sign out
         </button>
         {signOutError ? (
+          // A sign-out Dispatch did not answer as done discarded nothing: every write is as it was.
           <p className={`mt-1 px-2 text-sm ${railDangerText}`} role="alert">
-            Couldn&apos;t sign out.{" "}
+            The sign-out did not go through. You are still signed in, with every change.{" "}
             <button className="font-medium underline" onClick={onSignOut} type="button">
               Retry
             </button>
@@ -499,23 +512,39 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
       when: () => !isCompactViewport && hasMargin,
     },
   ]);
+  const login = user.login;
   const signOut = useKeyedWrite({
     // A session that lapses while the sign-out is still out has ended as it asked.
     endsWithSession: true,
     inline: true,
     label: () => "Sign out",
+    // Refused or stopped, the sign-out discarded nothing: the person is still signed in, and every
+    // other tab lets their writes go on, as this one's store does (`Writes.release`).
+    onError: () => signIns.stillSignedIn(login),
     onSuccess: () => {
       // `resetQueries` (not `clear`) forces the active `["whoami"]` observer in AuthGate to
       // refetch immediately — a signed-out user must land on sign-in without a manual reload.
       void queryClient.resetQueries({ queryKey: ["whoami"] });
       queryClient.removeQueries({ predicate: (query) => query.queryKey[0] !== "whoami" });
-      // A write belongs to the person who made it, so none outlives their session: every one
-      // still out stops, the next person to sign in here resumes nothing of theirs, sees none of
-      // their refusals, and the page stops asking to confirm leaving (`write-store.ts`).
+      // Only now, with Dispatch's answer, are the person's writes discarded, in every tab of this
+      // browser: none outlives their session, the next person to sign in here resumes nothing of
+      // theirs and sees none of their refusals, and the page stops asking to confirm leaving.
       writesOf(queryClient).clear();
+      signIns.signedOut(login);
     },
     write: () => api.logout(),
   });
+  // A page that goes while its sign-out is out never hears how it ended, so every other tab lets
+  // the person's writes go on: had the sign-out gone through, Dispatch refuses them (401) and
+  // each tab keeps them for the person's next sign-in.
+  useEffect(() => {
+    if (!signOut.isPending) return;
+    const gone = () => signIns.stillSignedIn(login);
+    window.addEventListener("pagehide", gone);
+    return () => window.removeEventListener("pagehide", gone);
+  }, [login, signOut.isPending]);
+  // Whether the page is asking the other tabs what a sign-out would discard there.
+  const [askingTabs, setAskingTabs] = useState(false);
   // Tabs within the same issue manage their own focus (roving tabindex); only a
   // genuine page change — a different issue, or a different top-level route —
   // should move focus to the main region.
@@ -543,17 +572,27 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
       onSearch={() => setPaletteMode("all")}
       onSignOut={() => {
         // Signing out discards the person's own writes in every tab of this browser, so it asks
-        // first while any is unsent here, naming each; Cancel keeps them signed in and their
-        // writes as they are. A session that lapses instead keeps them (`Writes.signedIn`).
-        const writes = writesOf(queryClient);
-        const unsent = unsentChanges(writes.rows());
-        if (unsent.length > 0 && !window.confirm(signOutQuestion(unsent))) return;
-        writes.clear();
-        signIns?.postMessage({ signedOut: user.login });
-        signOut.mutate();
+        // first while any is unsent, naming each - this tab's, and every other tab's, which it
+        // asks for first (`SignInChannel.unsentElsewhere`); Cancel keeps them signed in and their
+        // writes as they are. Confirmed, nothing of theirs goes out in any tab until Dispatch
+        // answers the sign-out (`Writes.holdFor`), and only its landing discards them. A session
+        // that lapses instead keeps them (`Writes.signedIn`).
+        if (askingTabs) return;
+        setAskingTabs(true);
+        void signIns.unsentElsewhere(login).then((elsewhere) => {
+          setAskingTabs(false);
+          const unsent = [
+            ...unsentChanges(writesOf(queryClient).rows(), login),
+            ...elsewhere.labels,
+          ];
+          const ask = unsent.length > 0 || elsewhere.unanswered;
+          if (ask && !window.confirm(signOutQuestion(unsent, elsewhere.unanswered))) return;
+          signIns.signingOut(login);
+          signOut.mutate();
+        });
       }}
       signOutError={signOut.isError}
-      signOutPending={signOut.isPending}
+      signOutPending={signOut.isPending || askingTabs}
       user={user}
     />
   );
@@ -789,32 +828,31 @@ function AuthenticatedApp({ user }: { user: AuthenticatedUser }): ReactNode {
   );
 }
 
-/** Where the tabs of one browser tell each other who is signed in, which a sign-in in place in
- *  one changes for all of them: each reads `["whoami"]` again on a message. A sign-out says whose
- *  (`{ signedOut: login }`), and every tab drops that person's writes (`Writes.dropLogin`). */
-const signIns =
-  typeof BroadcastChannel === "undefined" ? undefined : new BroadcastChannel("dispatch-sign-in");
+/** Where the tabs of one browser tell each other who is signed in, and what a sign-out in one of
+ *  them does to the person's writes in all of them (`SignInChannel`). */
+const signIns = new SignInChannel(
+  typeof BroadcastChannel === "undefined" ? undefined : new BroadcastChannel("dispatch-sign-in"),
+  typeof window === "undefined" ? undefined : window
+);
 
-/** The login a sign-in message says signed out, if it is one. */
-function signedOutLogin(data: unknown): string | undefined {
-  if (typeof data !== "object" || data === null) return undefined;
-  const login: unknown = Reflect.get(data, "signedOut");
-  return typeof login === "string" ? login : undefined;
-}
-
-/** What of the person's a sign-out would discard here: every write they can see that Dispatch has
- *  not made - out, waiting its turn, or refused and holding their draft - by its name. A read mark
- *  is never shown, and is no change of theirs to lose. */
-export function unsentChanges(rows: readonly Write[]): string[] {
+/** What of `login`'s a sign-out would discard here: every write of theirs they can see that
+ *  Dispatch has not made - out, waiting its turn, or refused and holding their draft - by its
+ *  name. A read mark is never shown, and is no change of theirs to lose. */
+export function unsentChanges(rows: readonly Write[], login: string): string[] {
   return rows
-    .filter((row) => row.presentation !== "quiet" && row.status !== "made")
+    .filter((row) => row.login === login && row.presentation !== "quiet" && row.status !== "made")
     .map((row) => row.label);
 }
 
-/** What signing out asks while `unsent` changes would be discarded, naming each. */
-export function signOutQuestion(unsent: readonly string[]): string {
+/** What signing out asks while `unsent` changes - this tab's and the other tabs' - would be
+ *  discarded, naming each, and while a tab that did not answer in time (`unanswered`) may hold
+ *  more. */
+export function signOutQuestion(unsent: readonly string[], unanswered = false): string {
+  const elsewhere = "any unsent changes in your other Dispatch tabs";
+  if (unsent.length === 0) return `Sign out and discard ${elsewhere}?`;
   const count = unsent.length === 1 ? "1 unsent change" : `${unsent.length} unsent changes`;
-  return `Sign out and discard ${count}?\n\n${unsent.map((label) => `• ${label}`).join("\n")}`;
+  const what = unanswered ? `${count}, and ${elsewhere}` : count;
+  return `Sign out and discard ${what}?\n\n${unsent.map((label) => `• ${label}`).join("\n")}`;
 }
 
 export function AuthGate(): ReactNode {
@@ -840,19 +878,20 @@ export function AuthGate(): ReactNode {
   useEffect(() => {
     if (!known) return;
     writesOf(queryClient).signedIn(login);
-    signIns?.postMessage(login ?? null);
+    signIns.signedIn(login ?? null);
   }, [known, login, queryClient]);
   useEffect(() => {
-    if (signIns === undefined) return;
-    const heard = (event: MessageEvent) => {
+    const writes = writesOf(queryClient);
+    return signIns.listen({
+      changed: () => void queryClient.invalidateQueries({ queryKey: ["whoami"] }),
       // The person signed out in another tab: every write they pressed goes here too, its file
       // with it, so no tab holds a write whose file another tab let go of.
-      const signedOut = signedOutLogin(event.data);
-      if (signedOut !== undefined) writesOf(queryClient).dropLogin(signedOut);
-      void queryClient.invalidateQueries({ queryKey: ["whoami"] });
-    };
-    signIns.addEventListener("message", heard);
-    return () => signIns.removeEventListener("message", heard);
+      signedOut: (signedOut) => writes.dropLogin(signedOut),
+      // Their sign-out there is out: nothing of theirs goes out here until Dispatch answers it.
+      signingOut: (signingOut) => writes.holdFor(signingOut),
+      stillSignedIn: (still) => writes.release(still),
+      unsent: (of) => unsentChanges(writes.rows(), of),
+    });
   }, [queryClient]);
 
   if (whoAmI.isPending) {
