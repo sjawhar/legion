@@ -2,47 +2,48 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-439",
-  "completed": "2026-10-26T09:50:00Z",
+  "completed": "2026-10-26T14:15:00Z",
   "pr": "https://github.com/sjawhar/legion/pull/2228",
-  "round": "Answers the tester's failure at b3e92f8b and the architect's ACCEPT decision (the remaining part of review finding 4 alone): an interest registered for another session's agent subject, or a wildcard covering agent subjects, let /v1/replay return other sessions' stored inboxes.",
+  "round": "Answers the tester's failure at 6607f69b and the architect's NARROW-to-the-class decision: /v1/replay serves only the caller's own agent subject plus registered interests inside an explicit allow list of shared stream subjects; every stream subject is classified and a test fails on an unclassified one; main merged forward on the reported conflict; red tests 9f8ac8ff and 240a4c4ae641 pass unmodified.",
   "proof": [
     {
-      "criterion": "Review finding 4: /v1/replay can return only the caller's own agent subject and topics it may follow, through /v1/interests/subscribe",
-      "surface": "a real listener and natsd built from this head, called over HTTP",
-      "command": "/legion/scratch/tmp/infra439/f4live/run3.sh (output in https://github.com/sjawhar/legion/pull/2228#issuecomment-6412963406)",
-      "observed": "ses_attacker registered notifications.agent.>, notifications.agent.ses_victim, notifications.> and notifications.dispatch.issue.KEY-1.>: only its own agent subject and the issue topic were stored, the other three named in warnings; two messages sent to ses_victim; ses_attacker's replay of notifications.agent.>, notifications.agent.ses_victim and notifications.> each refused not_followed with no messages; ses_victim's own replay returned its 2 messages",
-      "headSha": "e0ed6d23865cbab8741dd57e3efce5546d9a1698",
-      "negativeControl": "before the fix (466c24da) the tester's live run had the same registrations return the victim's 2 stored messages through both notifications.agent.> and the victim's agent subject (test.json failures[0])"
+      "criterion": "Review finding 4, the whole class: /v1/replay never returns another session's inbox or undelivered messages, through any registered interest or wildcard",
+      "surface": "a real listener and natsd built from this head, called over HTTP, with messages stored on the victim's inbox, the victim's exception lane and a GitHub PR topic",
+      "command": "/legion/scratch/tmp/infra439/f4live/run4.sh (output in https://github.com/sjawhar/legion/pull/2228#issuecomment-6418063029)",
+      "observed": "ses_attacker's replay of notifications.>, notifications.agent.>, notifications.agent.ses_victim, notifications.envoy.exceptions.notifications.agent.>, notifications.envoy.exceptions.> and its own exception lane each refused not_followed with 0 messages (the two exception-lane interests were stored and still refused); its own agent subject answered; the registered notifications.github.acme.widgets.pr.7.> answered with its 1 stored message; ses_victim's own replay returned its 2 messages",
+      "headSha": "5b7122c230a6cfb577380354041644db4c4be42e",
+      "negativeControl": "at e0ed6d23 the tester's live run returned B's no_holder exception with its full payload through a registered notifications.envoy.exceptions.notifications.agent.> (test.json failures[0])"
     },
     {
-      "criterion": "Review finding 4 for rows already in the interest store",
-      "surface": "the listener route on in-process nats-server (testnats) with the interest store seeded directly",
-      "command": "cd packages/envoy && go test ./cmd/listener -run TestReplayNeverReturnsAnotherSessionsInboxThroughARegisteredInterest -count=1 -v (the tester's 9f8ac8ff, unmodified)",
-      "observed": "--- PASS: the three out-of-bounds subjects are refused with no other session's message, and the own agent subject returns its stored seq",
-      "headSha": "e0ed6d23865cbab8741dd57e3efce5546d9a1698",
-      "negativeControl": "at b3e92f8b the same test failed: notifications.agent.> returned notifications.agent.ses_other's stored message (seq 1)"
+      "criterion": "The red tests and the classification test",
+      "surface": "the listener route on in-process nats-server (testnats) with the interest store seeded directly; the stream configuration",
+      "command": "cd packages/envoy && go test ./cmd/listener -run 'Replay|Interest|Subscribe' -count=1; go test ./internal/bus -run 'Classified|SharedStreamTopic' -count=1 -v",
+      "observed": "TestReplayNeverReturnsAnotherSessionsInboxThroughARegisteredInterest and TestReplayNeverReturnsAnotherSessionsExceptionLaneThroughARegisteredInterest pass with bodies identical to 240a4c4ae641; TestEveryStreamSubjectIsClassifiedForReplay passes; TestReplayAnswersARegisteredTopicOnlyUnderASharedStreamSubject passes",
+      "headSha": "5b7122c230a6cfb577380354041644db4c4be42e",
+      "negativeControl": "at 6607f69b TestReplayNeverReturnsAnotherSessionsExceptionLaneThroughARegisteredInterest failed: notifications.envoy.exceptions.notifications.agent.> returned ses_other's exception (seq 1)"
     },
     {
-      "criterion": "No regression of the outage paths on a real session (pi-envoy and claude-envoy now leave such topics out of what they register)",
+      "criterion": "No regression of the outage paths on a real session",
       "surface": "real `omp --mode rpc` session, real nats-server with JetStream and the listener built from this head",
       "command": "bash packages/pi-envoy/scripts/smoke-replay.sh (same comment)",
-      "observed": "legs 1-6 each show every event exactly once (connection cut, omp stopped, held through SIGKILL, abort_and_restore_queue, plain abort, switch away and back); exit 0",
-      "headSha": "e0ed6d23865cbab8741dd57e3efce5546d9a1698",
+      "observed": "legs 1-6 each show every event exactly once; both controls lose their messages; exit 0",
+      "headSha": "5b7122c230a6cfb577380354041644db4c4be42e",
       "negativeControl": "released plugin 10.17.7 in the same run loses its messages on the outage, SIGKILL and interrupt paths"
     }
   ],
   "filesChanged": [
-    "packages/envoy/internal/bus/stored.go (+ test): CoversAnotherAgentSubject(sessionID, topic), on the existing subjectsOverlap",
-    "packages/envoy/cmd/listener/replay.go: replayFollowed refuses such a subject even when stored",
-    "packages/envoy/cmd/listener/api.go: subscribeHandler stores the rest and names each refused topic in warnings",
-    "packages/envoy/cmd/listener/replay_test.go: TestInterestSubscribeStoresOnlyTopicsThatReplayCannotTurnIntoAnotherSessionsInbox; TestReplayRefusesAFollowedSubjectTheStreamDoesNotRetain now uses notifications.* as its wide unretained topic",
-    "packages/envoy-client/src/replay.ts (+ test): coversAnotherAgentSubject; replayFollowedSubjects uses it",
-    "packages/pi-envoy/extensions/envoy.ts, packages/claude-envoy/src/envoy-channel-server.ts (+ tests, dist): such topics followed live but never registered",
-    "docs: packages/envoy/AGENTS.md, packages/envoy/docs/architecture.md, four CHANGELOGs; PR body contract change census"
+    "packages/envoy/internal/bus/stream.go: sharedStreamSubjects / privateStreamSubjects with a publisher reason each; SharedStreamTopic",
+    "packages/envoy/cmd/listener/replay.go: replayFollowed = own agent subject, or a registered interest under a shared stream subject",
+    "packages/envoy/internal/bus/stream_config_test.go: TestEveryStreamSubjectIsClassifiedForReplay, TestSharedStreamTopicHoldsOnlyTopicsUnderASharedStreamSubject",
+    "packages/envoy/cmd/listener/replay_test.go: TestReplayAnswersARegisteredTopicOnlyUnderASharedStreamSubject; TestReplayRefusesAFollowedSubjectTheStreamDoesNotRetain rewritten on a whatsapp topic",
+    "packages/envoy/cmd/listener/api.go, CHANGELOG.md, AGENTS.md: the subscribe guard's reason (fan-out to serve-port sessions) and the replay rule",
+    "merge of main (CHANGELOG conflicts, envoy.ts imports); packages/envoy-client/src/dispatch-command.ts and claude-envoy dist: main's #2243 TS4111 under claude-envoy's typecheck",
+    "packages/pi-envoy/scripts/smoke-replay.sh: expect_each_once waits for the turn a re-handed card started before calling a held card missing"
   ],
   "deviations": [
-    "Per-topic refusal at /v1/interests/subscribe (200 with warnings), not a whole-request 400: pi-envoy 10.17.7, claude-envoy and the OpenCode plugin can send such a topic, and a 400 would fail every heartbeat registration of those sessions.",
-    "One existing test changed: TestReplayRefusesAFollowedSubjectTheStreamDoesNotRetain used notifications.> as its unretained topic, which the new rule refuses as not_followed; it now uses notifications.*; notifications.> is asserted in the new subscribe test.",
-    "Rows stored before the upgrade stay in the interest store (replay refuses them); GET /v1/interests/<id> still lists them."
+    "TestReplayRefusesAFollowedSubjectTheStreamDoesNotRetain relied on notifications.team.x.y and notifications.* as unretained topics, now not_followed; it deploys a stream without notifications.whatsapp.> and checks a registered whatsapp topic is not_retained, then answered once the subject is back.",
+    "/v1/interests/subscribe still stores an exception-lane interest (its guard covers agent subjects only, unchanged as the architect scoped this round); replay refuses it. Whether serve-port fan-out of exception lanes needs the same guard is a question sent to the architect.",
+    "One smoke run at 04b25eb4 failed leg 4's 10 s bound: two of three re-handed cards started a turn and were written, the third was held behind that long turn (rpc log: 317 assistant updates streaming); the script now waits for that turn before failing; the next run passed.",
+    "main's dispatch-command.ts (#2243) failed claude-envoy's typecheck; fixed here because the pull request's required CI runs it."
   ]
 }
