@@ -12,19 +12,20 @@
 -- agent's turn, an approval, a changes request, a newer version) and awaiting_answered_detail that
 -- act's own detail (the ask acted on, or the version and reason of the review), which the task
 -- resuming the architect names. awaiting_since_seq and awaiting_since are where the wait began on
--- Dispatch: the newest event sequence of the hand-backs the architect made since it was last given
--- work (issues.declared_seq), with no time. A person's act whose event sequence is not past that
--- start never answers the wait. The columns are set only in that phase, and exactly one of the ask
--- and the gate version is; either start may be unknown (null).
+-- Dispatch: the newest hand-back the architect made since it was last given work, its event
+-- sequence and Dispatch's time of it (issues.declared_seq and declared_at). A person's act whose
+-- event sequence is not past that start never answers the wait. The columns are set only in that
+-- phase, and exactly one of the ask and the gate version is; either start may be unknown (null).
 --
 -- handout_seq is the highest Dispatch sequence of the issue the record held when the daemon last
--- gave the root's architect work (its admission, its re-admission, a resume, a design-changes
--- notice), kept in every phase and never lowered. declared_seq is the newest sequence of a
--- hand-back since then: a tree session's question opened, or a reply of a tree session leaving
--- such a question with the person; null when the architect has handed nothing back since its last
--- handout, or when nothing it handed back is still with the person. An event at or below
--- handout_seq declares nothing: the work it belonged to was already handed out. A root waits on a
--- person only once it declared (the workflow's ReconcileAwaiting).
+-- gave the root's architect work (its admission, its re-admission, a resume), or the sequence of
+-- the review a design-changes notice told it, kept in every phase and never lowered.
+-- declared_seq is the newest sequence of a hand-back since then, and declared_at Dispatch's time
+-- of it (null when its event gave none): a tree session's question opened, or a reply of a tree
+-- session leaving a question its tree opened with the person; null when the architect has handed
+-- nothing back since its last handout, or when nothing it handed back is still with the person. An
+-- event at or below handout_seq declares nothing: the work it belonged to was already handed out.
+-- A root waits on a person only once it declared (the workflow's ReconcileAwaiting).
 --
 -- Every issue recorded before this migration takes handout_seq from the highest sequence the
 -- record already holds of it: its last Dispatch observation, the claim the claims mirror shows
@@ -63,6 +64,8 @@ alter table issues add constraint issues_awaiting_shape check (
   end);
 alter table issues add column handout_seq bigint not null default 0 check (handout_seq >= 0);
 alter table issues add column declared_seq bigint check (declared_seq > 0);
+alter table issues add column declared_at timestamptz;
+alter table issues add constraint issues_declared_shape check (declared_seq is not null or declared_at is null);
 
 update issues i set handout_seq = greatest(i.last_dispatch_seq,
   coalesce((select c.claim_seq from dispatch_claims c where c.key = i.key), 0),

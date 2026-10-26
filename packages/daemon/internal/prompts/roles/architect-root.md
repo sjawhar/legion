@@ -40,10 +40,11 @@ Dispatch claim. The root keeps its slot otherwise, and you run on. An approval r
 `dispatch request-approval`, then `register_gate` of that version, hands the spec to the human,
 so end your turn after the registration; so is a reply in the request's thread that leaves the turn
 with the human. The person's answer, resolution or reply on any ask of the root, their review of the
-spec, or a newer spec version once Dispatch shows the request back on your turn, resumes you in this
-session with a task naming what answered and what is still with them; so does a question or the
-request you wait on being retracted by Dispatch's settlement, closed by anyone who is not a person,
-or handed back to your turn, once nothing else is with the person.
+spec, the spec's design gate standing open, or a newer spec version once Dispatch shows the request
+back on your turn, resumes you in this session with a task naming what answered, how the spec
+stands and what is still with them; so does a question or the request you wait on being retracted
+by Dispatch's settlement, closed by anyone who is not a person, or handed back to your turn, once
+nothing else is with the person.
 Approval is pinned to the spec version: any new version closes the gate until it is approved,
 except the version a human's own answer to a decision block writes when that answer is the whole
 change since the version they approved: Dispatch records an `approved` review in their name at

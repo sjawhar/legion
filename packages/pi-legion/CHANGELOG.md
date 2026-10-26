@@ -9,11 +9,12 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 
 - Daemon API contract 40: a root whose architect asked a person a question and handed the turn
   back gives its admission slot up in the new phase `awaiting_person`, its architect suspended with
-  its session kept, and the person's answer puts it at the front of the waiting line, where the
-  next free slot resumes the same session. `legion state` and the controller's `read_state` carry
-  the phase and the issue's `waitingOn`: the question (`kind: "ask"`, `ask`) or, for the gate waits
-  of a later release, the spec version (`kind: "gate"`, `gateVersion`, `artifactId`), when the wait
-  began (`since`), and, once a person answered, `answeredAt` and `answeredBy`. The controller
+  its session kept, and the person's answer, or the spec's design gate standing open, puts it at
+  the front of the waiting line, where the next free slot resumes the same session. `legion state`
+  and the controller's `read_state` carry the phase and the issue's `waitingOn`: the question
+  (`kind: "ask"`, `ask`) or, for the gate waits of a later release, the spec version (`kind:
+  "gate"`, `gateVersion`, `artifactId`), when the wait began (`since`, Dispatch's time of the
+  hand-back), and, once a person answered, `answeredAt` and `answeredBy`. The controller
   receives the new `awaiting-person` notice. A 39 plugin's strict state reader refuses this state,
   so install this release with a `legion` built from the same commit.
 

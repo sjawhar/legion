@@ -371,15 +371,17 @@ func TestAReviewAnotherSupersededChangesNoGateState(t *testing.T) {
 			}
 		})
 		// The same late review on a root waiting on its gate from a later hand-back answers nothing:
-		// the person gave it before that wait began.
+		// the person gave it before that wait began. A gate standing open answers the wait by
+		// itself (the question-wait slice's answerOpenGates), as its approval, never as this review.
 		t.Run(tc.name+", the root waiting on its gate", func(t *testing.T) {
 			pool := migratedPool(t)
 			admission := newAdmission(t, 1, nil)
 			awaitingRoot(t, pool, record.Awaiting{GateVersion: 4, Since: record.EventMark{Seq: 20, At: reviewedAt.Add(time.Minute)}})
 			seedGate(t, pool, tc.gate)
 			applyFact(t, pool, admission, "superseded-review", tc.late)
-			if got := issue(t, pool, "LEGION-100"); got.Answered() {
-				t.Fatalf("root after a review the person had already followed with another = %#v, want it still waiting", got)
+			got := issue(t, pool, "LEGION-100")
+			if got.Answered() != tc.open || tc.open && got.Awaiting.AnsweredBy != record.AnsweredByApproval {
+				t.Fatalf("root after a review the person had already followed with another = %#v, want answered %t, and by the open gate's approval if so", got, tc.open)
 			}
 		})
 	}

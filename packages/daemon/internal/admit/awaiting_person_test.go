@@ -62,7 +62,7 @@ func seedHandBack(t *testing.T, pool *pgxpool.Pool, issue, ask string, seq int64
 			Open: true, Seq: seq, WaitingOn: "human", WaitingOnSeq: seq, ByTree: true}); err != nil {
 			t.Fatalf("record the question of %s: %v", issue, err)
 		}
-		if err := records.Declare(context.Background(), tx, issue, seq); err != nil {
+		if err := records.Declare(context.Background(), tx, issue, record.EventMark{Seq: seq}); err != nil {
 			t.Fatalf("declare the hand-back of %s: %v", issue, err)
 		}
 	})

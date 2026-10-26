@@ -323,6 +323,57 @@ func TestAChangesRequestToldByNoticeIsAHandout(t *testing.T) {
 	}
 }
 
+// A changes request delivered after a newer hand-back takes in only what was handed back at or
+// before its review: the question the architect handed back after the review still stands, so the
+// root waits on the person as it would had the events arrived in order. (Round 1, standard P3-3.)
+func TestALateChangesRequestKeepsANewerHandBack(t *testing.T) {
+	pool, apply := askRig(t)
+	seedGate(t, pool, record.DesignGate{Issue: "LEGION-208", ArtifactID: "artifact-208", LatestVersion: 2})
+	apply("q", intake.DispatchAskOpened{Key: "LEGION-208", Ask: "ask-q", Kind: record.AskQuestion, AuthorSession: askArchitect.ID, Mark: askSeq(20)})
+	apply("changes", intake.DispatchArtifact{Key: "LEGION-208", ArtifactID: "artifact-208", Kind: intake.DispatchArtifactChangesRequested,
+		Version: 2, Reason: "say more", Mark: askSeq(18)})
+	root := recordedRoot(t, pool)
+	if root.DeclaredSeq != 20 || root.HandoutSeq != 18 {
+		t.Fatalf("declared_seq = %d, handout_seq = %d; want the hand-back at 20 kept and the handout at the review's 18",
+			root.DeclaredSeq, root.HandoutSeq)
+	}
+}
+
+// The hand-back's own time is where the wait begins: the root's record keeps it beside its
+// sequence, and `legion state` shows it as the wait's `since`. (Round 1, standard P3-1.)
+func TestAHandBackRecordsWhenTheWaitBegins(t *testing.T) {
+	pool, apply := askRig(t)
+	at := time.Date(2026, 9, 23, 1, 2, 3, 0, time.UTC)
+	apply("q", intake.DispatchAskOpened{Key: "LEGION-208", Ask: "ask-q", Kind: record.AskQuestion, AuthorSession: askArchitect.ID,
+		Mark: record.EventMark{Seq: 5, At: at}})
+	if root := recordedRoot(t, pool); root.DeclaredSeq != 5 || !root.DeclaredAt.Equal(at) {
+		t.Fatalf("declared = %d at %s, want 5 at %s", root.DeclaredSeq, root.DeclaredAt, at)
+	}
+}
+
+// Under gates.design: off a person's changes request is still the person's words: one on an older
+// version than the registration approved is told to the architect once, without closing the gate.
+// The registration's own approval is the daemon's, not a review that followed the request.
+// (Round 1, outside-whole P2-1.)
+func TestAnOffGateStillTellsAnOlderChangesRequest(t *testing.T) {
+	pool := migratedPool(t)
+	seedAdmittedTree(t, pool, 1)
+	v := 2
+	seedGate(t, pool, record.DesignGate{Issue: "LEGION-1", ArtifactID: "artifact-1", LatestVersion: 2, ApprovedVersion: &v})
+	apply := applyFacts(t, pool, testEngine(config.DesignGateOff, nil))
+	apply("changes-v1", intake.DispatchArtifact{Key: "LEGION-1", ArtifactID: "artifact-1", Kind: intake.DispatchArtifactChangesRequested,
+		Version: 1, Reason: "name the rollback path", Mark: record.EventMark{Seq: 5}})
+	told := 0
+	for _, payload := range noticeRows(t, pool) {
+		if notice, ok := payload.(record.Notice); ok && notice.Kind == "design-changes-requested" {
+			told++
+		}
+	}
+	if told != 1 {
+		t.Fatalf("design-changes-requested notices = %d, want the person's words told once under gates.design: off", told)
+	}
+}
+
 // A changes request a read gives no sequence to cannot be placed against a root's wait: it is
 // neither told nor recorded as told, and its own sequenced event decides later.
 func TestAnUnplaceableChangesRequestIsNeitherToldNorRecorded(t *testing.T) {

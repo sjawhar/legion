@@ -28,12 +28,15 @@ func TestAWaitRoundTripsAndOnlyItsOwnWritersMoveTheSequences(t *testing.T) {
 		must(t, records.PutRootAsk(ctx, tx, RootAsk{Issue: "LEGION-1", Ask: "ask-approval", Kind: AskApproval, Artifact: "artifact-1",
 			WaitingOn: "agent", WaitingOnSeq: 12}))
 
-		must(t, records.Declare(ctx, tx, "LEGION-1", 11))
-		must(t, records.Declare(ctx, tx, "LEGION-1", 7))
+		// The newest hand-back's time is kept: an older one, or the same one read again with no
+		// time, leaves it.
+		must(t, records.Declare(ctx, tx, "LEGION-1", EventMark{Seq: 11, At: at}))
+		must(t, records.Declare(ctx, tx, "LEGION-1", EventMark{Seq: 7, At: at.Add(-time.Hour)}))
+		must(t, records.Declare(ctx, tx, "LEGION-1", EventMark{Seq: 11}))
 		stored, err := records.Issue(ctx, tx, "LEGION-1")
 		must(t, err)
-		if stored.DeclaredSeq != 11 {
-			t.Fatalf("declared_seq = %d, want the newest hand-back 11", stored.DeclaredSeq)
+		if stored.DeclaredSeq != 11 || !stored.DeclaredAt.Equal(at) {
+			t.Fatalf("declared = %d at %s, want the newest hand-back 11 at %s", stored.DeclaredSeq, stored.DeclaredAt, at)
 		}
 
 		waiting := *stored
@@ -82,13 +85,29 @@ func TestAWaitRoundTripsAndOnlyItsOwnWritersMoveTheSequences(t *testing.T) {
 			t.Fatalf("claim of an issue with no mirrored row = %q, %v; want user:alice", holder, err)
 		}
 
-		must(t, records.Declare(ctx, tx, "LEGION-1", 13))
+		must(t, records.Declare(ctx, tx, "LEGION-1", EventMark{Seq: 13, At: at}))
 		must(t, records.ClearDeclared(ctx, tx, "LEGION-1"))
 		cleared, err := records.Issue(ctx, tx, "LEGION-1")
 		must(t, err)
-		if cleared.DeclaredSeq != 0 {
-			t.Fatalf("declared_seq = %d, want it cleared", cleared.DeclaredSeq)
+		if cleared.DeclaredSeq != 0 || !cleared.DeclaredAt.IsZero() {
+			t.Fatalf("declared = %d at %s, want it cleared", cleared.DeclaredSeq, cleared.DeclaredAt)
 		}
+
+		// A design-changes notice takes in the hand-backs at or before its review, and keeps a
+		// newer one applied first.
+		must(t, records.Declare(ctx, tx, "LEGION-1", EventMark{Seq: 20, At: at}))
+		must(t, records.TakeInThrough(ctx, tx, "LEGION-1", 18))
+		kept20, err := records.Issue(ctx, tx, "LEGION-1")
+		must(t, err)
+		if kept20.DeclaredSeq != 20 || !kept20.DeclaredAt.Equal(at) || kept20.HandoutSeq != 18 {
+			t.Fatalf("after a notice of a review at 18: declared %d at %s, handout %d; want 20 kept, handout 18",
+				kept20.DeclaredSeq, kept20.DeclaredAt, kept20.HandoutSeq)
+		}
+		must(t, records.TakeInThrough(ctx, tx, "LEGION-1", 20))
+		if taken, err := records.Issue(ctx, tx, "LEGION-1"); err != nil || taken.DeclaredSeq != 0 || !taken.DeclaredAt.IsZero() || taken.HandoutSeq != 20 {
+			t.Fatalf("after a notice of a review at 20: %+v, %v; want nothing declared and handout 20", taken, err)
+		}
+		must(t, records.ClearDeclared(ctx, tx, "LEGION-1"))
 
 		// Leaving the phase takes the wait with it.
 		admitted := *cleared
@@ -109,7 +128,7 @@ func TestDeclareRefusesAHandBackWithNoSequence(t *testing.T) {
 	records := NewStore()
 	inTx(t, st, func(tx pgx.Tx) {
 		putRoot(t, ctx, records, tx, "LEGION-1")
-		if err := records.Declare(ctx, tx, "LEGION-1", 0); err == nil {
+		if err := records.Declare(ctx, tx, "LEGION-1", EventMark{At: time.Now()}); err == nil {
 			t.Fatal("a hand-back with no sequence was recorded, want it refused")
 		}
 	})

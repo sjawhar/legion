@@ -19,16 +19,21 @@ import (
 
 // ReconcileAwaiting moves each admitted root of project that holds a slot and now waits only on a
 // person into awaiting_person, or, when a person already acted after its wait would begin, gives
-// its architect the resume task where it stands. It reads only the record, so it decides the same
-// whatever order the facts behind it arrived in, and admission calls it on every pass
-// (Admission.promoteHolds): a guard that clears on any path — a member leaving, a claim released,
-// the label put back, the architect's start taken — is seen at the next fact. issues and slots are
-// the caller's snapshot of the record, and held names each root the caller still holds for the
-// Dispatch consumer to catch up (nil holds none): a root whose listing is ahead of the record
-// decides nothing until the consumer has reached it, so a question already answered on Dispatch
-// does not start a wait here first. It returns the roots that entered awaiting_person, whose
-// slots the caller releases.
-func (e *Engine) ReconcileAwaiting(ctx context.Context, tx pgx.Tx, project string, issues []record.Issue, slots []record.Slot, held func(string) bool) ([]string, error) {
+// its architect the resume task where it stands. It also answers each root waiting on a person
+// whose design gate is open (answerOpenGates). It reads only the record, so the same record gives
+// the same decision, and admission calls it on every pass (Admission.promoteHolds): a guard that
+// clears on any path — a member leaving, a claim released, the label put back, the architect's
+// start taken — is seen at the next fact. issues and slots are the caller's snapshot of the
+// record, and held names each root the caller still holds for the Dispatch consumer to catch up
+// (nil holds none): a root whose listing is ahead of the record decides nothing until the consumer
+// has reached it, so a question already answered on Dispatch does not start a wait here first. It
+// returns the roots that entered awaiting_person, whose slots the caller releases, and whether it
+// wrote any issue of the snapshot, which the caller then reads again.
+func (e *Engine) ReconcileAwaiting(ctx context.Context, tx pgx.Tx, project string, issues []record.Issue, slots []record.Slot, held func(string) bool) ([]string, bool, error) {
+	changed, err := e.answerOpenGates(ctx, tx, project, issues, held)
+	if err != nil {
+		return nil, false, err
+	}
 	slotted := make(map[string]struct{}, len(slots))
 	for _, slot := range slots {
 		slotted[slot.Issue] = struct{}{}
@@ -44,11 +49,11 @@ func (e *Engine) ReconcileAwaiting(ctx context.Context, tx pgx.Tx, project strin
 		}
 	}
 	if len(roots) == 0 {
-		return nil, nil
+		return nil, changed, nil
 	}
 	token, err := claim.ProjectToken(project)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	// A root whose key yields no claim token has no architect claim to read (record.RoleRun's
 	// zero value), so it owes its start and keeps its slot.
@@ -66,21 +71,21 @@ func (e *Engine) ReconcileAwaiting(ctx context.Context, tx pgx.Tx, project strin
 	}
 	asks, err := e.store.RootAsks(ctx, tx, keys)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	runs, err := e.store.RoleRuns(ctx, tx, runKeys)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	var entered []string
 	for i, root := range roots {
 		gate, err := e.store.Gate(ctx, tx, root.Key)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		unresumable, err := Unresumable(ctx, e.store, tx, root)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		view := awaitView{Root: root, Slotted: true, Unresumable: unresumable, Run: runs[tokens[i]], Asks: asks[root.Key], Gate: gate, Armed: e.armed()}
 		for _, member := range issues {
@@ -92,26 +97,60 @@ func (e *Engine) ReconcileAwaiting(ctx context.Context, tx pgx.Tx, project strin
 		switch decision.Act {
 		case actEnter:
 			if err := e.enterAwaiting(ctx, tx, root, decision.Waiting, decision.Why); err != nil {
-				return nil, err
+				return nil, false, err
 			}
 			entered = append(entered, root.Key)
+			changed = true
 		case actTellInPlace:
 			if err := e.tellInPlace(ctx, tx, root, decision); err != nil {
-				return nil, err
+				return nil, false, err
 			}
+			changed = true
 		case actTakeIn:
 			if err := e.store.ClearDeclared(ctx, tx, root.Key); err != nil {
-				return nil, err
+				return nil, false, err
 			}
 			e.logOnCommit(ctx, "workflow: what a root handed back is no longer with the person, so it starts no wait", "issue", root.Key,
 				"declared_seq", root.DeclaredSeq)
+			changed = true
 		default:
 			intake.OnCommit(ctx, func() {
 				e.log.Debug("workflow: a root that handed work to a person keeps its slot", "issue", root.Key, "why", decision.Why)
 			})
 		}
 	}
-	return entered, nil
+	return entered, changed, nil
+}
+
+// answerOpenGates answers each unanswered root of project waiting on a person whose design gate is
+// open, whatever opened it and whenever: a person's approval Dispatch recorded before the wait
+// began but applied after it, a registration's read of an approval, or a registration under
+// gates.design: off. The gate's opening advances no tree while the root waits (advanceAdmittedTree),
+// and the person has nothing left to decide that holds the tree, so the root resumes with the next
+// free slot, told how its spec stands, and its tree advances then. It reports whether it answered
+// any root.
+func (e *Engine) answerOpenGates(ctx context.Context, tx pgx.Tx, project string, issues []record.Issue, held func(string) bool) (bool, error) {
+	answered := false
+	for _, root := range issues {
+		if (held != nil && held(root.Key)) || root.Project != project || !claim.IsTreeRoot(root.Key, root.Tree) ||
+			!root.AwaitingPerson() || root.Awaiting.AnsweredAt != nil {
+			continue
+		}
+		gate, err := e.store.Gate(ctx, tx, root.Key)
+		if err != nil {
+			return answered, err
+		}
+		if gate == nil || !classify.DesignGateOpen(*gate) {
+			continue
+		}
+		e.logOnCommit(ctx, "workflow: the design gate of a root waiting on a person is open, which answers its wait", "issue", root.Key,
+			"version", gate.LatestVersion, "ask", root.Awaiting.Ask)
+		if err := e.answerWait(ctx, tx, root, record.AnsweredByApproval, fmt.Sprintf("version %d", gate.LatestVersion)); err != nil {
+			return answered, err
+		}
+		answered = true
+	}
+	return answered, nil
 }
 
 // act is what ReconcileAwaiting does with one root.
@@ -180,7 +219,7 @@ func decideAwait(v awaitView) awaitDecision {
 	case root.DeclaredSeq == 0:
 		return awaitDecision{Why: "its architect has handed nothing to a person since it was last given work"}
 	}
-	since := record.EventMark{Seq: root.DeclaredSeq}
+	since := record.EventMark{Seq: root.DeclaredSeq, At: root.DeclaredAt}
 	waiting, ok := waitSubject(v.Asks, v.Gate, v.Armed, since)
 	if !ok {
 		return awaitDecision{Act: actTakeIn, Why: "nothing it handed back is still with the person"}
@@ -378,7 +417,11 @@ func resumeTask(key string, waiting record.Awaiting, gate *record.DesignGate, as
 	var task strings.Builder
 	switch waiting.AnsweredBy {
 	case record.AnsweredByApproval:
-		fmt.Fprintf(&task, "Your spec %s on %s was approved.", waiting.AnsweredDetail, key)
+		if armed {
+			fmt.Fprintf(&task, "Your spec %s on %s was approved.", waiting.AnsweredDetail, key)
+		} else {
+			fmt.Fprintf(&task, "Your spec %s on %s is registered, and the design gate is off, so it needs no approval.", waiting.AnsweredDetail, key)
+		}
 	case record.AnsweredByChanges:
 		fmt.Fprintf(&task, "A person requested changes to your spec on %s at %s. Read the review, and revise the spec as they ask.", key, waiting.AnsweredDetail)
 	case record.AnsweredByVersion:

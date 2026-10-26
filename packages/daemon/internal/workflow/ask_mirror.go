@@ -198,7 +198,7 @@ func (e *Engine) dispatchAskOpened(ctx context.Context, tx pgx.Tx, fact intake.D
 	if err != nil || fact.Kind != record.AskQuestion || !byTree || !change.handsTurn(before) {
 		return intake.Result{}, err
 	}
-	return intake.Result{}, e.declare(ctx, tx, *root, fact.Mark.Seq, "question "+fact.Ask+" opened")
+	return intake.Result{}, e.declare(ctx, tx, *root, fact.Mark, "question "+fact.Ask+" opened")
 }
 
 // dispatchAskRestored moves the mirror row of an ask Dispatch's settlement restored: open again on
@@ -321,13 +321,13 @@ func (e *Engine) dispatchAskReply(ctx context.Context, tx pgx.Tx, fact intake.Di
 		if !change.handsTurn(before) {
 			return intake.Result{}, nil
 		}
-		return intake.Result{}, e.declare(ctx, tx, *root, fact.Mark.Seq, "question "+fact.Ask+" handed back")
+		return intake.Result{}, e.declare(ctx, tx, *root, fact.Mark, "question "+fact.Ask+" handed back")
 	case inTree && fact.WaitingOn == "human":
 		gate, err := e.store.Gate(ctx, tx, root.Key)
 		if err != nil || !after.GateRequestOf(gateRequestArtifact(gate, e.armed())) || !change.handsTurn(before) {
 			return intake.Result{}, err
 		}
-		return intake.Result{}, e.declare(ctx, tx, *root, fact.Mark.Seq, "approval request "+fact.Ask+" handed back")
+		return intake.Result{}, e.declare(ctx, tx, *root, fact.Mark, "approval request "+fact.Ask+" handed back")
 	}
 	return intake.Result{}, e.itemLeft(ctx, tx, *root, before, after, record.AnsweredByTurn, fact.Ask)
 }

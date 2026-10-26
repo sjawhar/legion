@@ -920,8 +920,8 @@ func TestAnApprovalAnswerWaitsForItsReview(t *testing.T) {
 }
 
 // Round 20 same-model P2-1: a person's answer of the root's approval request answers a wait on a
-// question when no gate names that request; when one does, its review event answers it, whether it
-// opens the gate or finds it already open.
+// question when no request of the gate's document it is; when it is, its review event answers it.
+// A gate already open answers the wait at once, whatever opened it.
 func TestAPersonsAnswerOfTheApprovalRequest(t *testing.T) {
 	answer := intake.DispatchAskClosed{Key: "LEGION-100", Ask: "ask-approval", Kind: "approval", State: "answered", Actor: alice, Mark: seqMark(11)}
 	review := intake.DispatchArtifact{Key: "LEGION-100", ArtifactID: "artifact-root", Kind: intake.DispatchArtifactApproved, Version: 4, Mark: seqMark(11)}
@@ -931,8 +931,10 @@ func TestAPersonsAnswerOfTheApprovalRequest(t *testing.T) {
 		byAnswer bool
 	}{
 		{name: "no_gate", byAnswer: true},
+		// A gate standing open answers the wait at the admission pass the answer's fact runs, whatever
+		// opened it (the question-wait slice's answerOpenGates); the answer itself is a review.
 		{name: "gate_already_open", gate: &record.DesignGate{Issue: "LEGION-100", ArtifactID: "artifact-root", LatestVersion: 4,
-			ApprovedVersion: new(4), ApprovedMark: seqMark(5)}},
+			ApprovedVersion: new(4), ApprovedMark: seqMark(5)}, byAnswer: true},
 		{name: "gate_closed", gate: &record.DesignGate{Issue: "LEGION-100", ArtifactID: "artifact-root", LatestVersion: 4}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1457,8 +1459,9 @@ func TestAChangesRequestBetweenARegistrationsReadAndItsApplyAnswersTheWait(t *te
 // can wait on a gate the record still shows closed after an approval whose own event was lost, and
 // were that approval skipped when the gate seed or the boot catch-up applies it, the root would stay
 // suspended with its gate open and nothing left to answer it. Applied again, it answers nothing
-// more, and the root resumes once. An approval that opens nothing (the gate already open, or an
-// older version approved) answers nothing.
+// more, and the root resumes once. An approval of an older version opens nothing and answers
+// nothing. (A gate already open answers a waiting root by itself: the question-wait slice's
+// answerOpenGates.)
 func TestAnApprovalThatOpensTheGateAnswersAWaitWhateverItsTime(t *testing.T) {
 	approval := intake.DispatchArtifact{Key: "LEGION-100", ArtifactID: "artifact-root", Kind: intake.DispatchArtifactApproved,
 		Version: 4, Mark: record.EventMark{Seq: 8, At: handedBackAt.Add(-time.Minute)}}
@@ -1499,8 +1502,6 @@ func TestAnApprovalThatOpensTheGateAnswersAWaitWhateverItsTime(t *testing.T) {
 		gate record.DesignGate
 		fact intake.DispatchArtifact
 	}{
-		{name: "an approval of a gate already open", gate: record.DesignGate{Issue: "LEGION-100", ArtifactID: "artifact-root", LatestVersion: 4, ApprovedVersion: new(4)},
-			fact: approval},
 		{name: "an approval of an older version", gate: record.DesignGate{Issue: "LEGION-100", ArtifactID: "artifact-root", LatestVersion: 4},
 			fact: intake.DispatchArtifact{Key: "LEGION-100", ArtifactID: "artifact-root", Kind: intake.DispatchArtifactApproved, Version: 3, Mark: record.EventMark{Seq: 11}}},
 	} {
@@ -2025,5 +2026,74 @@ func TestTheClaimHoldersAnswerBeforeARegistrationIsNotToldInPlace(t *testing.T) 
 	}
 	if task := lastArchitectTask(t, pool, "LEGION-100"); task != "" {
 		t.Fatalf("architect told %q in place, want nothing", task)
+	}
+}
+
+// A wait on the gate begins at the request's hand-back, its sequence and Dispatch's time of it,
+// which the root's record keeps and `legion state` shows as the wait's since.
+func TestARequestHandBackRecordsWhenTheGateWaitBegins(t *testing.T) {
+	pool := migratedPool(t)
+	admission := newAdmission(t, 1, nil)
+	handBackOnAClosedGate(t, pool, admission)
+	got := issue(t, pool, "LEGION-100")
+	if !got.Awaiting.Since.At.Equal(handedBackAt) || got.Awaiting.Since.Seq != handBack.Seq {
+		t.Fatalf("the gate wait begins at %+v, want the hand-back %d at %s", got.Awaiting.Since, handBack.Seq, handedBackAt)
+	}
+}
+
+// A person's approval that opens the gate a root waits on answers the wait once, by that
+// approval, and the architect hears of it once, from its resume: no design-approved notice beside
+// it, and the admission pass that also finds the gate open answers nothing more.
+func TestAnApprovalOpeningTheGateARootWaitsOnIsToldOnceByItsResume(t *testing.T) {
+	pool := migratedPool(t)
+	admission := newAdmission(t, 1, nil)
+	handBackOnAClosedGate(t, pool, admission)
+	applyFact(t, pool, admission, "approved", intake.DispatchArtifact{Key: "LEGION-100", ArtifactID: "artifact-root",
+		Kind: intake.DispatchArtifactApproved, Version: 4, Mark: record.EventMark{Seq: 11, At: handedBackAt.Add(time.Minute)}})
+	got := issue(t, pool, "LEGION-100")
+	if !got.Answered() || got.Awaiting.AnsweredBy != record.AnsweredByApproval || got.Awaiting.AnsweredDetail != "version 4" {
+		t.Fatalf("root after the approval = %#v, want it answered by the approval of version 4", got)
+	}
+	applyFact(t, pool, admission, "tick", intake.ControllerTick{})
+	if again := issue(t, pool, "LEGION-100"); !again.Awaiting.AnsweredAt.Equal(*got.Awaiting.AnsweredAt) || again.Awaiting.AnsweredBy != got.Awaiting.AnsweredBy {
+		t.Fatalf("root after the next pass = %#v, want the answer it had", again)
+	}
+	if opened := gateNotices(t, pool, "LEGION-100", "design-approved"); len(opened) != 0 {
+		t.Fatalf("design-approved notices = %#v, want none for a root its resume tells", opened)
+	}
+	nextFinished(t, pool, admission)
+	if task := lastArchitectTask(t, pool, "LEGION-100"); !strings.Contains(task, "was approved") {
+		t.Fatalf("resume task = %q, want it to say the spec was approved", task)
+	}
+	starts := 0
+	for _, op := range architectOps(t, pool, "LEGION-100") {
+		if op == "start" {
+			starts++
+		}
+	}
+	if starts != 1 {
+		t.Fatalf("architect starts = %d, want one resume", starts)
+	}
+}
+
+// A changes request delivered after a newer hand-back of the approval request takes in only what
+// was handed back at or before its review: the request handed back after the review still stands,
+// so once the member holding the slot leaves, the root waits on its gate from that hand-back, as
+// it would had the events arrived in order.
+func TestALateChangesRequestKeepsANewerRequestHandBack(t *testing.T) {
+	pool := migratedPool(t)
+	admission := newAdmission(t, 1, nil)
+	runningRoot(t, pool)
+	seedChild(t, pool, phase.Implementing)
+	seedRequestedGate(t, pool, record.DesignGate{Issue: "LEGION-100", ArtifactID: "artifact-root", LatestVersion: 4})
+	applyFact(t, pool, admission, "hand-back", requestHandedBack(20))
+	applyFact(t, pool, admission, "changes", intake.DispatchArtifact{Key: "LEGION-100", ArtifactID: "artifact-root",
+		Kind: intake.DispatchArtifactChangesRequested, Version: 4, Reason: "name the rollback path", Mark: seqMark(18)})
+	if got := assertAdmittedInItsSlot(t, pool, "a guard holding the slot"); got.DeclaredSeq != 20 || got.HandoutSeq != 18 {
+		t.Fatalf("declared_seq = %d, handout_seq = %d; want the hand-back at 20 kept and the handout at the review's 18", got.DeclaredSeq, got.HandoutSeq)
+	}
+	parkChild(t, pool, admission)
+	if got := issue(t, pool, "LEGION-100"); !got.AwaitingPerson() || got.Answered() || got.Awaiting.GateVersion != 4 || got.Awaiting.Since.Seq != 20 {
+		t.Fatalf("root once the member left = %#v, want it waiting on version 4 from 20", got)
 	}
 }

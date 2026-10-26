@@ -260,16 +260,18 @@ legion state --config legion.yaml --json |
   jq '.issues["<KEY>"] | {phase, waitingOn, designGate}'
 ```
 
-`waitingOn.ask` is the question it waits on. `answeredAt` means a person answered: the root is at
-the front of `admission.waiting` and resumes itself at the next free slot. Do not park it or start
-it by hand. Without `answeredAt`, check, in order:
+`waitingOn.ask` is the question it waits on, and `since` Dispatch's time of the hand-back the wait
+began at. `answeredAt` means a person answered: the root is at the front of `admission.waiting`
+and resumes itself at the next free slot. Do not park it or start it by hand. Without `answeredAt`,
+check, in order:
 
 1. **The question is still with the person.** `dispatch read <KEY>` shows the root's asks. A
    person's answer, resolution or reply on any ask of the root wakes it, whichever ask the wait
-   names, and so does their approval or changes request of the spec. A question Dispatch retracted
-   or a session closed, or one a session handed back to the agent's turn, wakes it once nothing
-   else is with the person. An agent's answer or resolution of another ask never wakes it, nor does
-   a person's act from before the wait began.
+   names, and so does their approval or changes request of the spec, or the spec's gate standing
+   open (`designGate.approvedVersion` equal to `currentVersion`) on the next admission pass. A
+   question Dispatch retracted or a session closed, or one a session handed back to the agent's
+   turn, wakes it once nothing else is with the person. An agent's answer or resolution of another
+   ask never wakes it, nor does a person's act from before the wait began.
 2. **The hand-over label.** A root whose `legion` label was taken off is not resumed: the daemon
    takes it out of the workflow (`phase: done`) and tells the controller `unslotted`. Put the label
    back and set the root to `todo` to queue it again.
@@ -277,6 +279,12 @@ it by hand. Without `answeredAt`, check, in order:
    session outside the tree stops the resume and takes the root out of the workflow the same way,
    with an `unslotted` notice: Legion never resumes work another owner took. Release the claim,
    then `todo` with the label queues the root again.
+4. **An answer the daemon never saw.** When `dispatch read <KEY>` shows the person already
+   answered after `since` and none of the above holds, the answer's event never reached the
+   daemon, and nothing re-reads a waiting root's asks before the next boot. Have the person (or
+   anyone acting as them) add a reply in the thread of any ask of the root, one that leaves the
+   turn with the agent: that new act wakes the root on its own event. Restarting the daemon does
+   not replay the root's asks in this release.
 
 A root whose architect registered its spec while the approval request waits on the person is in
 `awaiting_person` with `waitingOn.kind` `gate`, once nothing else holds its slot; one still

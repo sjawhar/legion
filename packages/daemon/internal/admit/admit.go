@@ -876,7 +876,7 @@ func (a *Admission) promoteHolds(ctx context.Context, tx pgx.Tx, respectHolds bo
 	if respectHolds {
 		heldKeys = func(key string) bool { return a.held(key) || a.catchingUpFor(key) }
 	}
-	entered, err := a.engine.ReconcileAwaiting(ctx, tx, a.project, issues, slots, heldKeys)
+	entered, changed, err := a.engine.ReconcileAwaiting(ctx, tx, a.project, issues, slots, heldKeys)
 	if err != nil {
 		return 0, nil, fmt.Errorf("reconcile the roots waiting on a person: %w", err)
 	}
@@ -885,6 +885,11 @@ func (a *Admission) promoteHolds(ctx context.Context, tx pgx.Tx, respectHolds bo
 		if returned, err = a.releaseReturnedSlots(ctx, tx); err != nil {
 			return 0, nil, err
 		}
+	}
+	// Reconcile wrote roots of the snapshot (a wait entered or answered, a resume told in place), so
+	// what follows reads them as they now stand: an answer it recorded puts its root at the front of
+	// this pass's waiting line.
+	if changed {
 		if issues, err = a.store.Issues(ctx, tx); err != nil {
 			return 0, returned, fmt.Errorf("list admission issues: %w", err)
 		}
@@ -910,7 +915,7 @@ func (a *Admission) promoteHolds(ctx context.Context, tx pgx.Tx, respectHolds bo
 	}
 	own := ownSlots(issues, slots)
 	waiting := record.Waiting(issues, own)
-	admitted := 0
+	admitted, resumed := 0, false
 	for len(own) < a.cap && len(waiting) > 0 {
 		candidate := waiting[0]
 		waiting = waiting[1:]
@@ -945,7 +950,7 @@ func (a *Admission) promoteHolds(ctx context.Context, tx pgx.Tx, respectHolds bo
 		// from the waiting line it would make record.TreeLive false for itself, and its children
 		// would be recorded as orphans admitted as roots of their own. A blocked root stays the
 		// live tree of its children; it simply takes no slot (slotFree counts it as taking none).
-		if waits := blockers.WaitsOn(rows, candidate); !answered && len(waits) > 0 {
+		if waits := blockers.WaitsOn(rows, candidate); len(waits) > 0 {
 			a.log.Info("admission waits for what this root waits on", "issue", candidate.Key, "blockers", waits)
 			continue
 		}
@@ -1000,6 +1005,7 @@ func (a *Admission) promoteHolds(ctx context.Context, tx pgx.Tx, respectHolds bo
 			if err := a.engine.ResumeAwaitedRoot(ctx, tx, candidate, *awaiting); err != nil {
 				return admitted, returned, fmt.Errorf("resume %s after a person's answer: %w", candidate.Key, err)
 			}
+			resumed = true
 		} else {
 			// A fresh admission hands the architect its tree: what it hands back to a person
 			// afterwards is what it may wait on (workflow's ReconcileAwaiting).
@@ -1025,7 +1031,14 @@ func (a *Admission) promoteHolds(ctx context.Context, tx pgx.Tx, respectHolds bo
 	}
 	// The waiting line is roots; a child a blocker held is the engine's to start, from the issues
 	// and the mirror rows this call already holds. It runs here rather than in promote because
-	// release bypasses promote, and a hold's release is one of the looks every held child gets.
+	// release bypasses promote, and a hold's release is one of the looks every held child gets. A
+	// resume above may have started children itself (its tree's gate open), so the issues are read
+	// again first: on the snapshot such a child would still stand at admitted, and start twice.
+	if resumed {
+		if issues, err = a.store.Issues(ctx, tx); err != nil {
+			return admitted, returned, fmt.Errorf("list admission issues: %w", err)
+		}
+	}
 	if err := a.engine.StartUnblockedChildren(ctx, tx, issues, rows); err != nil {
 		return admitted, returned, err
 	}

@@ -51,16 +51,16 @@ func Unresumable(ctx context.Context, store record.Store, tx pgx.Tx, issue recor
 // armed says whether the design gate is armed: with it off, no approval is asked for.
 func (e *Engine) armed() bool { return e.cfg.DesignGate != config.DesignGateOff }
 
-// declare records a hand-back of root's architect to the person at seq, fresh for its ask: one at
-// or below the root's last handout belongs to work the daemon already handed out again, and
-// declares nothing.
-func (e *Engine) declare(ctx context.Context, tx pgx.Tx, root record.Issue, seq int64, what string) error {
-	if seq <= root.HandoutSeq {
+// declare records a hand-back of root's architect to the person at mark (its sequence and
+// Dispatch's time of it, where the wait it starts begins), fresh for its ask: one at or below the
+// root's last handout belongs to work the daemon already handed out again, and declares nothing.
+func (e *Engine) declare(ctx context.Context, tx pgx.Tx, root record.Issue, mark record.EventMark, what string) error {
+	if mark.Seq <= root.HandoutSeq {
 		e.logOnCommit(ctx, "workflow: a hand-back at or below the root's last handout declares nothing", "issue", root.Key,
-			"what", what, "seq", seq, "handout_seq", root.HandoutSeq)
+			"what", what, "seq", mark.Seq, "handout_seq", root.HandoutSeq)
 		return nil
 	}
-	return e.store.Declare(ctx, tx, root.Key, seq)
+	return e.store.Declare(ctx, tx, root.Key, mark)
 }
 
 // personAnswered answers root's wait with a person's act on ask at mark. The architect is the
