@@ -1,0 +1,110 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "INFRA-204",
+  "completed": "2026-10-26T03:21:10Z",
+  "plan": "dispatch://INFRA-204/artifact/plan-md (version 1) is the full plan: design sections 2.1-2.10, tasks 1-13 in order with files and tests, the proof matrix for A1-A10 and A12-A19, decisions D2/D4/D5, risks and spec departures.",
+  "scope": "Everything in the spec approved at v19 except INFRA-448's reader-facing Dispatch pages and the Envoy listener's agent registry store and routes (legion_agents bucket, its grant, PUT /v1/legion/agents[/sessions/{id}], GET sessions/{id}, roles/{token}, ?issue=, Dispatch client Agent/RoleAgents/IssueAgents), which INFRA-448 builds and this issue's daemon writes. Owns A1-A10, A12-A19, and A3's thread half once INFRA-448 has merged.",
+  "registryContract": {
+    "agreedWith": "INFRA-448 planner, Envoy messages 477bd02d1c5e97fae17e2152c16b0e51, 4096ee2db175c273ce13c85fe78ed57c, 73a8a586390080e27f507729683d53e4, cbd7552874d0522578772d4f6c2e6cfb, a2958218d8fbfa02545d769a02614367",
+    "entryWrittenByDaemon": ["session_id", "legion_project", "issue", "role", "role_token", "title", "harness", "started_at"],
+    "derivedAtRead": ["live", "replaced_by", "replaced_at", "recorded_at"],
+    "keys": "session.<id>, issue.<ISSUE>.<id>, role.<role_token>.<id>; project.<legion_project> reserved for INFRA-204's hand-off heartbeat",
+    "followMergedCode": "If INFRA-448's merged code differs, follow the merged code."
+  },
+  "taskOrder": [
+    "1 Go 1.27.3 and the Grafana ai-sdk pins (github.com/grafana/ai-sdk v0.1.0-alpha.2; providers v0.0.0-20261022214133-3fd525caf091; anthropic-sdk-go v1.80.0; openai-go/v3 v3.76.0), third-party notices",
+    "2 answers: config, per-call credentials, settings classification, legion.yaml.example, gh resolved at boot under both runtimes when configured",
+    "3 runtime.tmux.session_store: postgres (proof surface, D2)",
+    "4 internal/conversation/{omp,claude} read+append, ompsessions.Append and title scan, real-binary contract tests, pinned Claude Code in CI",
+    "5 agent_conversations history, register hook, title backfill, registry writes and project heartbeat, notify.HTTPPublisher handoff:false",
+    "6 Envoy hand-off on the three non-delivery paths with the rules of plan 2.2 (needs INFRA-448 merged)",
+    "7 Dispatch resolution of a stopped registered agent as recipient (needs 6)",
+    "8 gh tool: internal/ghroute extraction, allow list, scrubbed environment, footer rules, call table, footer lookup",
+    "9 internal/answer loop on the SDK with every caller-side setting of plan 2.6",
+    "10 questions and decisions: intake consumer, identity rule, classification, answerGate, posting, notices, questionsForController in legion state, #2163 marker skip (needs #2131 then #2163)",
+    "11 prompts, skills, docs corrections and A16 grep",
+    "12 scripts/e2e/answer-loop.sh live proof, both stores",
+    "13 after release: the INFRA daemon's answers configuration in the deployment repository, pulumi preview, release and deploy order"
+  ],
+  "proofSurfaces": {
+    "localRig": "bash scripts/e2e/answer-loop.sh (task 12): in a Legion issue pod or devbox, no docker or root; Postgres from dpkg-deb, nats-server via go run, tmux provisioned under the issue volume, the branch's legion, envoy-listener and envoy-dispatch, pinned OMP and Claude Code, real models behind a recording reverse proxy, the two Legion Apps on sjawhar/legion-smoke plus the stage 4a second-owner repository; matrix run under files and under runtime.tmux.session_store: postgres; questions and answer keys committed before any model call",
+    "goTests": "go test -count=1 ./... in packages/daemon (required test job) and the envoy-go job; contract tests against the real pinned OMP and Claude Code",
+    "cloudsqlIam": "no live proof possible (no deployment runs it, docs/kubernetes.md:646-656); in-process test through sessionproxy's stand-in dialer",
+    "production": "A1, A2, A3 on INFRA after release and task 13, no worker pod started (kubectl -n legion get pods before/after, daemon log), on the PR's Production: line"
+  },
+  "openDecisions": [
+    "D2 (architect, or the spec's approver through it): building runtime.tmux.session_store as the database-store proof surface, versus a recorded acceptance change to contract tests, in-process daemon and production evidence",
+    "D4: task 10 waits for #2131 then #2163 to merge",
+    "D5 (a person): approval of the review and implement App keys from the secrets broker for the local rig (GH_REVIEW_APP_PRIVATE_KEY_B64 exists and needs approval; the implement key was not found under LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64), and the second owner's repository name; without them A15, A17, A18, A19 cannot be shown locally"
+  ],
+  "requiredSkills": {
+    "implement": [
+      "legion-worker: phase mechanics, PR body and E2E proof rules, push and handoff (references/pr-body.md, default-branch-check.md, findings.md)",
+      "envoy: the listener's send, publish and delivery semantics the hand-off changes and the skill text task 11 corrects",
+      "dispatch: Dispatch writes (asks for D5 grants) and the message, mention and reply semantics the resolution changes",
+      "legion-controller: task 11 adds the agent-question and agent-decision notices and questionsForController to the controller's references",
+      "ce-simplify-code: the simplify pass pr-body.md requires before the implementer's final proof"
+    ],
+    "test": [
+      "legion-worker: tester rules (drive the real surface, verify the implementer's proof, read CI rather than rerun it)",
+      "envoy: to drive and judge the hand-off on send, role publish and bus delivery",
+      "dispatch: to drive mentions, targeted messages and ask threads on the local Dispatch and read them back"
+    ],
+    "review": [
+      "legion-worker: review rounds, threads and the merge gate (references/merge-gate.md, review-threads.md)",
+      "envoy: to judge the listener hand-off and its effect on held notices and other callers",
+      "dispatch: to judge the recipient resolution and reply-guard behaviour"
+    ]
+  },
+  "gapAnalysis": {
+    "findings": [
+      {"finding": "A bus hand-off would fire on listeners that do not own a live session and once per listener.", "answer": "Plan 2.2: hand off only when the global session registry (envoy_sessions) has no entry, and publish with a JetStream message id from the envelope's dedupe_key so copies collapse; task 6 tests two machines."},
+      {"finding": "A 202 hand-off body breaks every send/publish client.", "answer": "Plan 2.2: answer 200 with the same envelope body as a delivered message and recipient set to the target; no client changes."},
+      {"finding": "A generic gh on the daemon host lets the model run code with the daemon's secrets.", "answer": "Plan 2.7: allow list of gh first words, everything else refused before it runs; scrubbed environment with empty HOME/XDG; recorded on the PR as a security decision; task 8 tests refused forms never run."},
+      {"finding": "answerGate as written deadlocks against the machine lock.", "answer": "Plan 2.8: gate state is its own (appending, started); the loop reads only Machine.View() and the gate, never Claim(); start waits at most 10 s; race test."},
+      {"finding": "#2163 reads the loop's answer as a hand-back, and its relay can wake a parked tree in A1.", "answer": "Plan 2.8: dispatchAskReply skips comments carrying the legion-answer marker, tested on an admitted root; A1's rig uses a person's park (backlog); task 11's controller skill treats a parked decision whose thread holds the loop's answer to a question as no reason to re-admit."},
+      {"finding": "Controller notices are live-only, so passed questions can be lost.", "answer": "Plan 2.8: legion state lists questionsForController (last 7 days), read by the controller at start; API version bump and contracts; A4/A5 rig check with the controller stopped."},
+      {"finding": "The new KV bucket needs grants and a release order.", "answer": "The bucket and its grant are INFRA-448's (architect's decision); the hand-off publish grant is task 6 with its test; plan task 13 fixes the order (grants, listener and Dispatch, legion release, deployment config); the daemon tolerates an older listener's 404."},
+      {"finding": "Deduping by event_id misses retries.", "answer": "Plan 2.8: identity is dispatch:<message id>/<comment id> for Dispatch origins and the envelope dedupe_key for Envoy origins; a later attempt of the same message is the same question; tested."},
+      {"finding": "A stale or overwritten registry swallows messages for good.", "answer": "Plan 2.1: hand-off only while project.<P> heartbeat is fresher than 3 minutes; one key per session (INFRA-448's layout); the daemon answers only sessions its own history holds."},
+      {"finding": "Title backfill misses imported sessions, accepts forged titles and matches the controller.", "answer": "Plan 2.4: read titles from the header lines when the column is NULL; exclude the controller and subagents; require the conversation's own envoy-role-claim or legion-managed-session entry to name the token; scanned never outranks registered; newest by header timestamp."},
+      {"finding": "Appending after a torn last line corrupts the conversation.", "answer": "Plan 2.5: the reader skips a malformed record as OMP's lenient parser does (session-loader.ts:161-177); the appender starts with a newline when the tail lacks one; contract fixtures for both stores."},
+      {"finding": "The footer filter misses many ways to post.", "answer": "Plan 2.7: only footer-checkable forms may post (pr comment/review --body, api REST literal body); --body-file, -F body=@, --input, graphql mutations and issue comment are refused; each tested."},
+      {"finding": "Task ordering and cross-issue dependencies were wrong.", "answer": "Plan section 3 dependency line: 5 then 6 then 7, 6 waits for INFRA-448, 10 waits for #2131 then #2163; the registry route question was settled by the architect (INFRA-448 owns it)."},
+      {"finding": "The capability check refuses registry-resolved agents.", "answer": "Plan 2.3: a registry-resolved target skips the capability check; task 7 tests it."},
+      {"finding": "cloudsql-iam is in scope with no task.", "answer": "Plan 2.10: implemented through sessionproxy.Start with the daemon's own identity and configured login; in-process test through the stand-in dialer; no live proof possible and said so."},
+      {"finding": "Acceptance gaps: database-store preamble, captured requests, A9, A18 determinism, production rights.", "answer": "D2 builds runtime.tmux.session_store so the real daemon runs both stores locally (departure 4 for the architect); the rig has a recording reverse proxy; A9 checks the resumed agent's first captured request; A18 made deterministic by the footer's answer key lookup; kubectl get/list pods verified allowed from this pod."},
+      {"finding": "The local rig lacks App keys and a second owner.", "answer": "D5: the implementer requests both keys first with a reason, names the stage 4a second-owner repository; without them A15, A17, A18, A19 cannot be shown locally, reported to the architect."},
+      {"finding": "Spec ambiguities: followers on an ask, old session of a replaced role, faults the asker hears.", "answer": "Plan 5: only the ask's author answers; an old session answers from its own conversation (the Dispatch reply guard needs that session); the daemon replies in the agent's name for every fault and passes the question on."},
+      {"finding": "Undeclared departures: kind none, no price, appended not re-answered, Envoy Go bump.", "answer": "Recorded as specDepartures 1-3; the Envoy Go files move only where a go.work build needs them, each named on the PR."}
+    ]
+  },
+  "planReview": {"verdict": "approved", "rounds": 1},
+  "specDepartures": [
+    {
+      "spec": "The model replies in one of three kinds: answered, not answered, a request for work its tools cannot do; notifications are never answered.",
+      "plan": "A fourth kind, none, for a decision message or an agent's Envoy message that asks nothing; nothing is posted. Edits, resolutions, receipts and notices still never reach the model.",
+      "evidence": "Spec 'Decisions it passes on' requires answering any question a decision message also asks, and agent messages may be informational; only the model can tell.",
+      "outcome": {"kind": "unchanged"}
+    },
+    {
+      "spec": "The operator names per-token prices; the loop spends at most a daily dollar limit.",
+      "plan": "A model with no configured price is not answered; the daemon replies naming the missing price and passes the question to the controller.",
+      "evidence": "An unpriced model's cost cannot be logged (A14) or counted against the daily limit.",
+      "outcome": {"kind": "unchanged"}
+    },
+    {
+      "spec": "A question whose answer had not posted when the daemon stopped is answered again.",
+      "plan": "A question whose answer was already appended to the conversation but not posted is posted from what was appended, not answered again; earlier states are answered again with the recorded gh calls.",
+      "evidence": "Answering again would put a second Q/A in the conversation, against A9's 'each once', and post a different answer than the conversation holds.",
+      "outcome": {"kind": "unchanged"}
+    },
+    {
+      "spec": "Acceptance is shown with the real daemon run locally under both a database conversation store and tmux's files; no supported local deployment puts the real daemon's agents on a database store.",
+      "plan": "Adds runtime.tmux.session_store: postgres (pane OMP_SESSION_STORAGE=sql, boot probe, row-based resume check) as the proof surface; the alternative is an acceptance change the spec's approver must accept.",
+      "evidence": "Session store is a Kubernetes-only setting (internal/config/kubernetes.go:69-74); this pod cannot create Sandboxes and stage 4 scripts are devbox-only.",
+      "outcome": {"kind": "changed", "scope": "One new tmux runtime setting, runtime.tmux.session_store, not named by the spec."}
+    }
+  ]
+}
