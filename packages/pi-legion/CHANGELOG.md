@@ -170,12 +170,17 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   cannot close and hide it, since the controller's own project listing drops an open ask on a
   closed issue (`asks.go`'s `listOpenAsks` takes `i.closed_at is null`); and, when the role's own
   issue is closed too (a production check),
-  the report issue, which the role reopens or creates. Every finding ask's question opens
+  the report issue, which the role reopens or creates with `dispatch issue-update --status
+  icebox`, never the controller-only `legion({op: "set_status"})` that would refuse a phase
+  worker (`pi-legion/src/tools.ts`'s `OPERATIONS`); a closed issue takes that reopening status
+  only by itself (`api/issue_patch.go`). Every finding ask's question opens
   `Finding from <role>`, or `Clear defect from <role>` for a clear defect, which is how the
   acceptance and the controller find one. At every start the controller's catch-up
   (`legion-controller/references/finding-asks.md`) files a clear-defect ask at once, moves an
   own-issue decision ask to the report issue, and acts on an answered finding ask of an issue in
-  `needs_review`, so its reply releases the held acceptance. The planner's core prompt now matches
+  `needs_review`, reading that list as `--status needs_review --limit 250` and paging by
+  `--offset`, since the default page stops at 50 rows and an issue past it would wait for good.
+  Its reply releases the held acceptance. The planner's core prompt now matches
   the headless part composed with it: a clear defect goes to whoever coordinates the project's
   work, and a finding that needs a decision is an ask (`roles_test.go` pins both sentences and
   forbids the old one).

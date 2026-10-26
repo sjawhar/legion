@@ -84,10 +84,20 @@ of these that holds, so a person sees it and the controller finds it when it ret
    the controller's own listing (`asks.go`'s `listOpenAsks` takes `i.closed_at is null`), so an
    issue that closed over one hides it for good.
 3. **Your own issue is closed too** (Dispatch refuses the ask `409 ISSUE_CLOSED`, as on a
-   production check): reopen the report issue, or create it when a search finds none, as
-   `skill://legion-controller`'s "Daily report" spells it. Then post the evidence there and ask
-   there, as [What the ask says](#what-the-ask-says) spells it. No other issue can hold an
-   answerable ask, so this is the one case a role writes the report issue.
+   production check): put the report issue back in reach yourself, with the `dispatch` commands
+   below, and ask there. Never `legion({op: "set_status"})`, which the controller's "Daily report"
+   uses: that op is the controller's alone, and your session is refused `set_status is not
+   available to a phase-worker session` (`packages/pi-legion/src/tools.ts`'s `OPERATIONS`). No
+   other issue can hold an answerable ask, so this is the one case a role writes the report issue.
+   - It exists and is closed: `dispatch issue-update --issue <REPORT KEY> --status icebox`. Send
+     the status by itself. A closed issue takes a reopening status alone, and refuses it beside
+     an assignee or any other field (`api/issue_patch.go`, the `before.ClosedAt` branch).
+   - A search finds none: create it as "Where it goes" names it, `dispatch issue --project
+     <PROJECT> --title 'Legion daily report' --spec-file -`, with the Summary the controller's
+     "Daily report" gives, then park it with `dispatch issue-update --issue <NEW KEY> --status
+     icebox`. It carries no `legion` label.
+   - Then post the evidence there and ask there, as [What the ask says](#what-the-ask-says)
+     spells it. Say in your summary that you reopened or created it, so the controller knows.
 
 Name the ask in your summary, and in a production check's `Production:` line.
 

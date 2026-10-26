@@ -109,9 +109,12 @@ catch up), and on the finding asks roles opened on their own issues while no con
    old ask. Resolve the old ask either way.
 3. List the answered asks still waiting on you, which no `dispatch` command lists:
    `curl -sS -H "Authorization: Bearer $(cat "$DISPATCH_TOKEN_FILE")" "$DISPATCH_URL/api/v1/issues/<REPORT KEY>/asks?state=answered&thread=1" | jq -c '[.[] | select(any(.options[]; .label == "Do not file" or .label == "Admit it")) | .answer.at as $t | select([.thread.replies[]? | select(.author.kind == "session" and .created_at > $t and (.body | test("^(Filed dispatch://|Admitted dispatch://|Not filed:|Not admitted:)")))] | length == 0) | {id, question, answer}]'`.
-   Run the same for each issue `dispatch issues --project <PROJECT>` shows in `needs_review`,
-   whose architect holds its acceptance on a finding ask's answer. Act on each as above, a triage
-   ask as the skill's "New issue triage" says. Your reply under it releases that acceptance.
+   Run the same for each issue in `needs_review`, whose architect holds its acceptance on a
+   finding ask's answer. Read that list filtered and to its end, since the default page stops at
+   50 rows and an issue past it would wait for good: `dispatch issues --project <PROJECT> --status
+   needs_review --limit 250 --offset <n>`, starting at `0` and adding 250 until a page returns
+   fewer than 250 rows. Act on each as above, a triage ask as the skill's "New issue triage"
+   says. Your reply under it releases that acceptance.
 4. List the clear defects nobody filed yet. Each is an evidence comment whose first line starts
    `Clear defect from `, with no session reply under it that starts `Filed dispatch://`, `Not
    filed:` or `Asked dispatch://` (a role that asked instead, which step 2 takes):
