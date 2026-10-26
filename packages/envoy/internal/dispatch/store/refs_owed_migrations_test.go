@@ -9,8 +9,8 @@ import (
 )
 
 // beforeRefsOwed is the last migration before the re-index queue: the six that make, feed and seed
-// it (0118_refs_owed through 0123_refs_owed_seed) apply after it.
-const beforeRefsOwed = 117
+// it (0120_refs_owed through 0125_refs_owed_seed) apply after it.
+const beforeRefsOwed = 119
 
 // readOwed is every refs_owed row as "kind id", sorted.
 func readOwed(t *testing.T, store *Store) []string {

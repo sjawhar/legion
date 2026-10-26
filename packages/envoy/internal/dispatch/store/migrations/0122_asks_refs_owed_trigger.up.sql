@@ -1,5 +1,5 @@
--- 0120_asks_refs_owed_trigger.up.sql
--- INFRA-189: an ask is owed a re-index (0118) when it is written and whenever what the index reads
+-- 0122_asks_refs_owed_trigger.up.sql
+-- INFRA-189: an ask is owed a re-index (0120) when it is written and whenever what the index reads
 -- of it changes: its question, or what decides the document its `#id` resolves against
 -- (refs.ScopeOf: its block's document, its anchor's document, its owning document, its issue). An
 -- answer is not indexed, and a refresh of the anchor's position within its document owes nothing.

@@ -1,10 +1,10 @@
--- 0118_refs_owed.up.sql
+-- 0120_refs_owed.up.sql
 -- INFRA-189: the reference sources whose stored text the reference index has not read by this
 -- release's rules. A bare issue key and a `#<question id>` become references, so every text stored
 -- before this release, and every text a server of the release before it writes while a rolling
 -- update runs, owes a re-index. Old and new servers write one database while a roll lasts, and only
--- the database sees both, so triggers fill this queue (0119-0122, one table per migration as
--- 0073-0077 are) and 0123 seeds it with every source already stored.
+-- the database sees both, so triggers fill this queue (0121-0124, one table per migration as
+-- 0073-0077 are) and 0125 seeds it with every source already stored.
 --
 -- One row per source, by the kind refs.from_kind names and its id as refs.from_id holds it (text):
 -- artifact (a document, re-indexed from its latest version), ask (its question), comment (its

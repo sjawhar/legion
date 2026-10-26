@@ -264,7 +264,7 @@ type questionBlock struct {
 // id: each line that, past its containers' quote and list markers, opens a typed block named ask
 // with three or more colons and holds `#id` among its attributes, outside fenced code. A fenced
 // example of a directive is code to pmdoc, so a `copied_from` it carries names no question of this
-// document. Migration 0122 compares every `:::ask{` line and every line holding a run of three
+// document. Migration 0124 compares every `:::ask{` line and every line holding a run of three
 // backticks or tildes, in document order, so a fence opened or closed around a block owes the scope,
 // and a fenced example only owes a scope re-read that finds nothing new.
 func questionBlocks(markdown string) []questionBlock {

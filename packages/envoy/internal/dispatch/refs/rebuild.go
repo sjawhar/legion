@@ -31,7 +31,7 @@ type Rebuild struct {
 // source, so the index converges on what the live write paths produce: the latest version of
 // every document, every ask question, every comment body, and every issue message (issue-less
 // messages are never indexed), each read as LoadSource reads it. Each transaction first deletes
-// the source's refs_owed row (migration 0118), so the drain does not re-index it again, and then
+// the source's refs_owed row (migration 0120), so the drain does not re-index it again, and then
 // reads the source, so a write that lands after the delete waits on it and stays owed. An edge
 // that survives keeps its created_at and source_seq; one the rebuild introduces takes the source's
 // own write time as created_at (Reindex) and has no source_seq, since no event introduced it, and

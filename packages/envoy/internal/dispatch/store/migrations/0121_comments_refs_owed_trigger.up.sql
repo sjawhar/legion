@@ -1,5 +1,5 @@
--- 0119_comments_refs_owed_trigger.up.sql
--- INFRA-189: a comment is owed a re-index (0118) when it is written and whenever what the index
+-- 0121_comments_refs_owed_trigger.up.sql
+-- INFRA-189: a comment is owed a re-index (0120) when it is written and whenever what the index
 -- reads of it changes: its body, or what decides the document its `#id` resolves against
 -- (refs.ScopeOf: its anchor's document, its owning document, the ask it replies to, the comment it
 -- replies to, its issue). An update that leaves all of those as they were - a resolution, a refresh

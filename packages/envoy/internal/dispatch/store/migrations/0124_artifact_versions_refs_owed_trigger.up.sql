@@ -1,5 +1,5 @@
--- 0122_artifact_versions_refs_owed_trigger.up.sql
--- INFRA-189: a document version owes its document a re-index (0118). It owes the document as a
+-- 0124_artifact_versions_refs_owed_trigger.up.sql
+-- INFRA-189: a document version owes its document a re-index (0120). It owes the document as a
 -- scope too, so every `#id` in the document's scope is read again, only when it changes the
 -- directive lines the document's question map is read from (refs.QuestionMap): a version that adds,
 -- drops or renames a block, or into which settlement writes a copied block's copied_from, changes

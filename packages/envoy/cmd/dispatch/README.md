@@ -25,6 +25,7 @@ below add only what a setting's one line cannot say.
 | `DISPATCH_ASSET_STORE_BUCKET` | Optional bucket of immutable dashboard assets from earlier builds, each stored under its URL path without the leading slash (`assets/<file>`). When a local `/assets/*` file is absent, Dispatch reads the object under that key through the AWS SDK default credential chain, which takes its region and credentials from the task's environment. It reads the whole object, at most 8 MiB, within 3 seconds before it answers, so the browser's own download is not held to that time. It never reads `index.html` or a non-asset path from the bucket. An absent object stays a 404; any other store failure (an error, a short body, an object over the limit) is a 502 with no cache header, logged at ERROR with its key. An object stays in memory until its client has read it, so at most 64 MiB of retained objects are held at once: a request reserves 8 MiB before it asks the bucket, waiting within its 3 seconds for earlier requests to finish, and keeps its object's size until the response is written or the client goes away. A request that cannot reserve room in time, or whose admitted fetch then runs out of that same 3 seconds before the bucket answers, is a 503 with `Cache-Control: no-store` and `Retry-After: 1`, logged at WARN with its key — the bound expiring is never a 502, since the store was only asked too late to answer in time; a room refusal asks the bucket nothing. A client that disconnects while still queued for room logs nothing above a debug line and gets no response. The task role needs `s3:GetObject` on `<bucket>/assets/*` and `s3:ListBucket` on the bucket: without `ListBucket`, S3 answers a missing key with 403, and Dispatch returns 502 where it should return 404. Leave it unset for local-only static serving. |
 | `DISPATCH_DEV_SIGNIN` | Set to `1` to mount `GET /auth/_dev/signin?login=<email>&next=<path>`, which signs any person in by the email it names, with no sign-in pool, so a browser or test harness can be signed in to a local instance. Boot refuses it unless identity is `cookie`, no `DISPATCH_SIGNIN_*` setting is set, the listen address is a loopback IP literal, the dashboard origin (`DISPATCH_SERVER_URL` or `dispatch.serverUrl`) names `127.0.0.1`, `[::1]` or `localhost`, every `DATABASE_URL` host is loopback or a unix socket, `DISPATCH_SIGNING_KEY` is unset, `ENVOY_ALLOW_REMOTE_NATS=1` is not set while NATS is on, `DISPATCH_AGENT_SECRETS_URL`, when set, names a loopback host, `ENVOY_URL` names a loopback host, and a loaded GitHub App private key comes from `DISPATCH_APP_PEM_B64` with `DISPATCH_GITHUB_API_BASE` naming a loopback host, never from the `pem` in `app.json`, where a developer keeps the real App's key: a signed-in session can have the App probe and import any repository it is installed on, and read GitHub through the App's proxy. That key must be a throwaway, as `packages/dispatch/e2e/run-server.sh` generates one, since every App call hands a signed App JWT to whatever listens at that base. While it is on every request must carry the dashboard origin as its `Host` (else `421 HOST_MISMATCH`). The session cookie is signed with a key generated for that process alone, so it is worthless on any other server; what a signed-in session writes to the database is not. It can mint a `dsp_` personal agent token, and its sign-out advances the person's session generation, and every server on the same database honours those rows. Give a dev-sign-in server a database no other server uses: the loopback check makes that likely, not certain, since a loopback address can be a tunnel to another machine's database or a database a second local server also runs on. Any value other than `1` or unset is refused. |
 | `DISPATCH_FILE_STORE_BUCKET` | Files are stored under `files/sha256/<hash>`, one object however often a file is uploaded; a document's markdown never leaves Postgres. The credential chain on Fargate is the task role, which needs `s3:GetObject` and `s3:PutObject` on `files/*` and `s3:ListBucket` on the bucket: without `ListBucket`, S3 answers a missing object 403, which Dispatch reads as a store failure. The SDK must also find a region (`AWS_REGION`, or the shared config); without one the boot is refused. An upload writes its object before its row and before any lock or connection is taken, within 30 seconds, so a store that refuses answers 502 `FILE_STORE_UNAVAILABLE` and writes no version. The version route serves a row still holding bytes from the row and any other from the bucket: it opens the object within 30 seconds, sends its headers and `Content-Length` only then, and streams the body at the client's pace, checking it against the row's hash as it goes; a bucket that does not answer is 502, a row whose object the bucket does not hold is 500 `FILE_MISSING` (a restore from the bucket's versioning, not a retry), a cleared row on a server with the setting unset is 503, and a body that fails or hashes wrong mid-stream is cut off rather than ended as if whole. `/healthz` reports `files`: null when unset, else whether the bucket answered a two-second `HeadBucket`; it never decides `ok`, since a bucket outage must not take the one task, and with it documents and asks, down. `envoy-dispatch backfill-files` moves the rows uploaded before the bucket, and `--restore` is the rollback ("Moving uploaded files to the bucket", below). |
+| `DISPATCH_EMBEDDER`, `DISPATCH_AZURE_EMBED_*`, `DISPATCH_AZURE_TENANT_ID`, `DISPATCH_AZURE_CLIENT_ID`, `DISPATCH_AZURE_FEDERATED_TOKEN_FILE` | Where meaning search embeds, and with what credential. Every process of one deployment takes the same values, and a model change on Azure takes a new deployment name, since each vector records an identity that names the deployment and not the model behind it (Search, below). A model service or Entra that is down refuses no boot: search answers by keyword and says so, and the queue retries. |
 
 `DISPATCH_REPO_PROJECTS` optionally seeds repository-to-project settings at boot
 with comma-separated `owner/repo=KEY` entries. Existing dashboard mappings take
@@ -379,7 +380,10 @@ What the two processes share, and what each keeps to itself:
   already served and logs the same skip. The settlement resumption, the delivery live hub, the
   event-stream relay, the stale-room evictor and the document rooms' timers stay per-process by
   design, and the embedding queue, the task progress reconciliation and the outbox's own scan
-  claim their own work; `cmd/dispatch/main.go` says at the call site which loop is which and why.
+  claim their own work; the embedding queue's coverage pass runs in every process with no lease,
+  each of its steps safe beside another process's, and drops every vector its own embedder did not
+  make, so every process takes the same embedder settings (Search, below); `cmd/dispatch/main.go`
+  says at the call site which loop is which and why.
 
 **Two processes do not share a live document session.** Durable convergence is unconditional:
 every edit is appended under the document's advisory lock, Yjs updates commute, and the stored
@@ -710,21 +714,39 @@ not work over the new schema, and nothing at boot stops it from serving:
   `.dispatch/architecture/`) commits the delete, and every source's components are gone.
 - Its delete removes every source of the project and every component of the project.
 
-Migrations `0118_refs_owed` through `0123_refs_owed_seed` build `refs_owed`, the reference sources
+Migrations `0118_embeddings_pending_since` and `0119_drop_embeddings_backfill_progress` move
+meaning search's coverage into the server (Search, below). `0118` adds `embeddings.pending_since`
+(`not null default now()`: when the row last became pending, which the coverage route's oldest wait
+reads; a row pending at the migration takes its own `created_at`) and `embeddings.dead_model`
+(nullable: the embedder identity the row was confirmed dead under), and replaces
+`embeddings_enqueue` so that a text change also starts the row's wait again and clears
+`dead_model`. A row already dead at the migration records `us.cohere.embed-v4:0`, the Bedrock
+identity every earlier release embedded with, so a deployment that keeps Bedrock does not re-admit
+it, while a switch to Azure re-admits it once; a row the earlier release confirms dead during the
+roll records none and gets the new release's attempts once. Both columns are additive and the
+earlier release names neither: it inserts only through `embeddings_enqueue` or with an insert the
+default fills. `0119` drops `embeddings_backfill_progress`, the checkpoints of the removed
+`backfill-embeddings` subcommand. Dropping a table in the same release as the code that stopped
+using it is what the rule below forbids for a table a running build reads; no server of any release
+read or wrote this one, only that person-run subcommand did, so the drop breaks no build still
+serving through the roll. Both censuses answer `0`: `0118`'s updates write only the columns it
+adds, and `0119` drops nothing a running build still reads.
+
+Migrations `0120_refs_owed` through `0125_refs_owed_seed` build `refs_owed`, the reference sources
 owed a re-index by the rules that read a bare issue key and a `#<question id>` (Reference graph,
-below). `0118` creates the table, one row per `(kind, id)` with kinds `artifact`, `ask`, `comment`,
+below). `0120` creates the table, one row per `(kind, id)` with kinds `artifact`, `ask`, `comment`,
 `message` and `scope`, and `refs_owed_enqueue`, which inserts a row or re-dates the one already
-owed. `0119` to `0122` each add one trigger, on `comments`, `asks`, `messages` (a row with an
+owed. `0121` to `0124` each add one trigger, on `comments`, `asks`, `messages` (a row with an
 issue) and `artifact_versions` (a version holding markdown); each is its own migration, so its
 transaction holds that one table's `SHARE ROW EXCLUSIVE` alone: a write to it waits behind the
-migration and a read does not. `0123` then seeds a row for every source already stored (each
+migration and a read does not. `0125` then seeds a row for every source already stored (each
 document with a markdown version, each ask, each comment and each issue message, `on conflict do
 nothing`, so a row a trigger wrote meanwhile stays as it is), under `ACCESS SHARE` on the tables it
 reads, writing only `refs_owed`: about 4,600 rows on production (763 documents, 929 asks, 2,916
 comments and messages, counted 2026-10-24). The triggers are live before the seed reads, so a
-write landing between the two is owed either way. All six censuses answer `0`: `0118` creates new
-objects, `0119` to `0122` add triggers that refuse and rewrite no row, and `0123` writes only the
-table `0118` creates. A server of the release before them (one at `0117`) keeps working as it did;
+write landing between the two is owed either way. All six censuses answer `0`: `0120` creates new
+objects, `0121` to `0124` add triggers that refuse and rewrite no row, and `0125` writes only the
+table `0120` creates. A server of the release before them (one at `0119`) keeps working as it did;
 its writes fire the triggers, it never clears the rows they make, and they stay owed until this
 release's drain re-indexes them.
 
@@ -963,7 +985,7 @@ the document and takes no lock. The document a text belongs to is `refs.ScopeOf`
 `refs.ScopeSources` is the inverse, every source whose scope is one document, and a test holds the
 two to agreeing on every shape above (`TestScopeOfAndScopeSourcesAgree`).
 
-Text is re-indexed with no command run through `refs_owed` (migrations `0118` to `0123`, above):
+Text is re-indexed with no command run through `refs_owed` (migrations `0120` to `0125`, above):
 every source stored before this rule, every source a server of an earlier release writes while a
 rolling update runs, and the sources whose `#id` a document's new question names. Its triggers
 owe a comment when its body or what decides its scope changes (`reply_to`, its anchor's
@@ -999,7 +1021,7 @@ version's creation), so old text does not sort as new under "Referenced by", and
 is logged at ERROR (`dispatch: reference re-index left a source owed for a later tick`) and stays
 owed; each tick that re-indexes any logs `dispatch: re-indexed owed references` with `sources=<n>`.
 
-**A rolling update converges.** While a server of the release before `0118` runs beside this one,
+**A rolling update converges.** While a server of the release before `0120` runs beside this one,
 it indexes what it writes by its own rules, which read no bare key or `#id`, and leaves the row its
 write's trigger made; this release's drain re-indexes that source at a later tick. The drain runs
 for as long as the triggers fire, so once no server older than this release is running and the
@@ -1048,9 +1070,48 @@ text whole when its vector fits, and otherwise the longest of its first half, qu
 that fits, cut between two words, so keyword search finds such a document, comment, ask or message
 by the whole words in that opening part and not by the words after it; a text with no whitespace
 before the cut is found by none of its own. An issue's key is always indexed whole. Meaning search,
-where it is configured, ranks by an embedding of a text's first 32,000 characters
-(`embed.maxInputChars`), not by its vector, so it can still return such a text for a query whose
-words the vector does not hold.
+where an embedder is configured (below), ranks by an embedding of a text's first 32,000 characters
+(`embed.maxInputChars`, which both clients cut at), not by its vector, so it can still return such
+a text for a query whose words the vector does not hold.
+
+Meaning search embeds with Cohere Embed v4 at the place `DISPATCH_EMBEDDER` names: AWS Bedrock
+(`bedrock`, the default, on the AWS SDK's own region and credentials) or Azure AI Foundry (`azure`,
+the `DISPATCH_AZURE_*` settings, with the deployment's API key or a keyless sign-in that exchanges a
+federated token with Microsoft Entra). Bedrock with no AWS region logs `dispatch: meaning search
+unavailable` and leaves meaning search off; then, and whenever the query's embedding fails, a
+search answers by keyword alone with `degraded: embedder_unavailable`. Each vector records its
+embedder's identity in `embeddings.model`, `us.cohere.embed-v4:0` on Bedrock and
+`azure:<endpoint host>/<deployment>` on Azure, and search compares a query vector only with stored
+vectors of its own identity. A write enqueues its text through its table's trigger (0073–0077) in
+the same transaction. The server also runs a coverage pass (`embedqueue.Cover`) when it starts and
+every 10 minutes, so a deployment runs nothing by hand to embed what it already holds: the pass
+adds a row for every searchable item that has none (one written before the triggers existed, or
+with them off, as a restore or a replication writes), points a row whose item's text changed with
+the triggers off at the current text, takes every vector another identity made out of the index and
+queues its item again, gives a row that died under another identity this identity's attempts once,
+and settles a dead row whose text has nothing to embed (empty or only white space) with no vector,
+as the queue settles a pending one. The two steps that act on another identity's rows wait until
+the configured embedder has answered: an embedding this process's queue made has succeeded, or,
+when none has yet and such rows exist, the pass embeds a short fixed canary text and it succeeds.
+Until then the pass leaves those vectors and dead rows as they are and logs one WARN naming the
+identity, the canary's error and how many of each it left, so a misnamed Azure deployment (which
+answers `404 DeploymentNotFound`) or a refused credential drops nothing; a throttled canary waits
+for the next pass too, and a pass with no such rows calls the embedder not at all. Each step is a
+statement of at most 500 rows in its own short transaction, repeated until it changes nothing, and
+is safe beside a live write and beside another process's pass, so the pass takes no lease.
+`GET /api/v1/search/coverage` reports what that leaves: the identity, its place and model (all
+three null with no embedder), and in total and per kind the searchable items, how many carry a
+current vector of that identity, how many lack one, how many failed for good, and how long the
+oldest lacking item has waited. The `backfill-embeddings` subcommand, which did the pass's first
+job by hand, is gone, with its checkpoint table (0119).
+
+Every process of one deployment runs the same embedder configuration, since each one's pass drops
+the vectors any other identity made. Moving a deployment to another place or Azure deployment makes
+every stored vector another identity's: search finds by meaning only what the new identity has
+embedded, and the coverage route counts the rest as lacking, until the pass and the queue have
+re-embedded it at the place's background pace; a new place that cannot embed leaves the old
+vectors in the database, unused by search, until it can. A model change on Azure takes a new
+deployment name, since the identity names the deployment, not the model behind it.
 
 Each kind of content is ranked on a list of its own, by `ts_rank_cd`, then recency, then id, and
 the five lists are merged by reciprocal rank fusion: a hit at position p of its list scores
@@ -1151,6 +1212,7 @@ Dispatch uses cookie identity through the sign-in pool.
 | `/api/v1/whoami` | GET | cookie, trusted header, or bearer | Who the server takes the caller for: `{kind: "user", login}` for a person (`login` their lowercase email), `{kind: "agent", owner, service}` for a bearer (`owner` is a personal token's owner by lowercase email, null for the shared token; `service` is a verified service-account token's Kubernetes subject, null for every other bearer). |
 | `/api/v1/issues?project=&status=&parent=&priority=&updated_since=&route_status=&limit=&offset=` | GET | cookie, trusted header, or bearer | List issue summaries: every matching issue as an array, or, with `limit` (1–250) or `offset` (0 or more; alone it pages 50), one page `{issues, total, limit, offset}` cut after every filter, `total` counting the issues they match. A repeated, blank, non-integer or out-of-range `limit` or `offset`, or any `cursor`, is `400 INVALID_QUERY` naming the parameter. The order is status, rank, creation time and key, so consecutive offsets cover the listing once while it does not change between reads; an issue that enters or leaves what the filters match, or whose status or rank changes, between two reads shifts rows across a page boundary, so one issue is served twice and another never. Only the unpaged array is an exact set in one read. Filters are optional; `updated_since` is RFC3339 and inclusive, matching issue changes and later issue events. `priority` repeats (`priority=0&priority=1`), each value `0`–`3` or `none` for an issue with no priority; any other value is `400 INVALID_PRIORITY`. `route_status` (`live`, `no_holder` or `unknown`; anything else is `400 INVALID_ROUTE_STATUS`) keeps the open issues whose route is in that state, whatever their priority; `live` or `no_holder` is `503 ENVOY_UNAVAILABLE` when the listener does not answer. Summaries contain `key`, `title`, `status`, `priority`, `parent`, `assignee`, `route`, `route_status`, `route_holder`, `updated_at`, `last_seq`, and `open_asks`. Every issue read (this list, `?pinned=true`, and `GET /api/v1/issues/{key}`) resolves `route_status` from one listener `GET /v1/sessions` per request, stored nowhere: `live` (a live session holds the role, or the session is live; `route_holder` names it), `no_holder` (nobody live holds the role, or the session is not live), `unknown` (the listener did not answer), or null with no route. |
 | `/api/v1/search?q=&project=&limit=&offset=` | GET | cookie, trusted header, or bearer | Full-text search over issue titles, latest document text, comments, asks, and messages; each kind ranked on its own and merged by reciprocal rank fusion (above), with `<mark>` snippets and SPA `href`s. One page `{results, total, reachable, limit, offset, took_ms}`: `limit` 1–50 (default 20), `offset` 0 or more (default 0), `total` every match, `reachable` the hits the pages can return (each kind's best 100). An under-two-character query returns `400 INVALID_QUERY`; a stop-word-only query returns `200` with no results; `400 CAP_EXCEEDED` over 1,000 characters (`contracts.SearchQueryMax`, UTF-16 units after trimming), since the query rides in the URL; `400 INVALID_PROJECT` for a project that is not a project key (none searches every project); `400 INVALID_LIMIT`; `400 INVALID_OFFSET`. Keyword search finds a text whose search vector would pass Postgres's limit on one vector by the words in its opening part only ([Search](#search)). |
+| `/api/v1/search/coverage` | GET | cookie, trusted header, or bearer | Meaning search's coverage, counted in one statement ([Search](#search)): `{identity, place, model, total, kinds}`, the configured embedder's identity, its place (`bedrock` or `azure`) and its model, all three null with no embedder; then, in `total` and for each kind in `kinds` (`issue`, `document`, `comment`, `ask`, `message`), `items` (the searchable ones, a text with nothing to embed left out), `current` (embedded at the item's current text by that identity), `failed` (dead and not current), `lacking` (the rest) and `oldest_lacking_seconds`, how long the longest-waiting lacking item has waited (null when none lacks). With no embedder nothing is current. |
 | `/api/v1/issues/{key}/references` | GET | cookie, trusted header, or bearer | Read the issue's eight-hop artifact reference closure. An `If-None-Match` value equal to the response ETag returns `304`. |
 | `/api/v1/references?to=\|from=&kind=&since=` | GET | cookie, trusted header, or bearer | Edges of one node in the reference graph, newest first and cross-project: exactly one of `to` (backlinks) or `from` (links), each a `dispatch://` reference; `kind` filters a csv of edge kinds; `since=<events.id>` keeps mentions introduced after it (structural edges excluded). Each edge carries the other `node`, an `excerpt` (the containing block for a document mention), `created_at`, and `source_seq`. `400 INVALID_REFERENCE` / `INVALID_KIND` / `INVALID_SINCE`; `404` for a node that does not exist. |
 | `/api/v1/references/questions?kind=&id=` | GET | cookie, trusted header, or bearer | What a `#<question id>` in one text names, by the rule the reference index stores it by: `kind` (`artifact`, `ask`, `comment` or `message`) and `id` (its uuid) name the text. Answers `{document, questions}`: `document` is the `dispatch://` reference of the document the text belongs to (`refs.ScopeOf`), and `questions` that document's question blocks (`refs.QuestionMap`), ordered by block id, each `{block_id, ask}` with its ask's `dispatch://` reference; a copied block names the original ask. A direct message, which belongs to no document, is `200` with a null `document` and no questions. Plain reads, no lock, cross-project like `/api/v1/references`. `400 INVALID_KIND` / `INVALID_ID` (not a uuid); `404 NOT_FOUND` for a text that does not exist. |

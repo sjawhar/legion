@@ -58,7 +58,7 @@ type Target struct {
 // ReplaceCounted reconciles one source's references and resolves the counted targets the event
 // that source appends has to name. Every write that indexes a body goes through it or
 // ReplaceCountedWith, so no producer can reconcile the graph without holding what moved: replaceAt
-// itself is unexported. It ends by deleting the source's refs_owed row (migration 0118, ClaimOwed),
+// itself is unexported. It ends by deleting the source's refs_owed row (migration 0120, ClaimOwed),
 // which the write's own trigger made in the same transaction, so a write this build indexes is not
 // re-indexed by the drain (docs.Service.RunReferenceReindex); a build before it never deletes one,
 // so its writes stay owed. A row the drain or a rebuild has claimed is skipped rather than waited

@@ -1,5 +1,5 @@
--- 0121_messages_refs_owed_trigger.up.sql
--- INFRA-189: an issue message is owed a re-index (0118) when it is written and whenever its body
+-- 0123_messages_refs_owed_trigger.up.sql
+-- INFRA-189: an issue message is owed a re-index (0120) when it is written and whenever its body
 -- changes (nothing updates one today; 0077 notes the same). A direct message, which has no issue,
 -- is never indexed, so it owes nothing. Its own migration, so the transaction holds messages' lock
 -- alone (0077's precedent).
