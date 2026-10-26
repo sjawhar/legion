@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -539,10 +540,12 @@ func TestAFailedRoomsUpdatesEndOrMoveWithTheRecordThatReplacesIt(t *testing.T) {
 	adapter := &servicePersistenceAdapter{store: service.persistence, service: service}
 	state := service.room(artifactID)
 
-	// The update the failure drops, handed on while the room is failed.
+	// The update the failure drops, handed on while the room is failed, and the one the room's
+	// persistence never took, which ygo hands on after the eviction clears that failure. The
+	// second is a browser's own update, since the adapter appends it for real.
 	dropped := []byte("the update the failure dropped")
 	service.recordUpdateClass(artifactID, dropped, documentUpdateClass{contentChanged: true, durable: true})
-	stranded := []byte("the update the room's persistence never took")
+	_, stranded := peerEdit(t, service.srv.GetDoc(artifactID), appendBlocks(t, "typed while the room was failing.\n"))
 	service.recordUpdateClass(artifactID, stranded, documentUpdateClass{contentChanged: true, durable: true})
 	state.mu.Lock()
 	state.failed = errors.New("the room failed on an append")
@@ -572,18 +575,19 @@ func TestAFailedRoomsUpdatesEndOrMoveWithTheRecordThatReplacesIt(t *testing.T) {
 	if pending != 1 || appends != 1 {
 		t.Fatalf("the record that replaced the failed room counts %d pending updates and %d appends, want 1 and 1: the update the room's persistence never took, and no other", pending, appends)
 	}
-	class, counted, found := service.consumeUpdateClass(artifactID, stranded)
-	if !found || !class.durable || counted != successor {
-		t.Fatal("the stranded update is unknown to the record that replaced the failed room: its append would be credited to nobody")
+	if err := adapter.StoreUpdate(artifactID, stranded); err != nil {
+		t.Fatalf("hand the stranded update on after the hand-over: %v", err)
 	}
 	if _, _, droppedFound := service.consumeUpdateClass(artifactID, dropped); droppedFound {
 		t.Fatal("the update the failure dropped was carried to the record that replaced the failed room")
 	}
-	service.finishDurableAppend(artifactID, counted)
 	successor.mu.Lock()
 	pending, appends = successor.pendingUpdates, successor.durableAppends.Load()
 	successor.mu.Unlock()
 	if pending != 0 || appends != 0 {
-		t.Fatalf("the record counts %d pending updates and %d appends once its carried append finished, want none", pending, appends)
+		t.Fatalf("the record counts %d pending updates and %d appends once its carried append was stored, want none", pending, appends)
+	}
+	if stored := storedMarkdown(t, service.store, artifactID); !strings.Contains(stored, "typed while the room was failing.") {
+		t.Fatalf("the stored document after the stranded append = %q, want the paragraph it carried", stored)
 	}
 }
