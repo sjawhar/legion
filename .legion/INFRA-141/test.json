@@ -2,55 +2,30 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-141",
-  "completed": "2026-10-26T21:00:00Z",
+  "completed": "2026-10-26T23:40:00Z",
   "generation": 4,
-  "round": "generation 4: roles from the role claims (757f5eff) and the forward merge of main (d11db8ab), head 5f1cdd95. Workspace recreated before this turn; checked against my last pushed handoff 0c2dda95, which is in the branch's history",
+  "round": "review 5659336410's round: test hardening and WaitForCacheReady's cache name (3c79342b), head a9a44ddd",
   "verdictProvenance": "provider not verified: written in my own session, no subagent ran; the model in my configuration is the one requested, not one read from the run's transcript",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Its proof is go-test entries (A7-A10 with overlay controls), the A9 grep and e2e-local. I drove A7 and A10 on the real binary myself (rebuilt at this head and at 0c227469 from git archive), re-ran the A7-A10 tests and the A9 grep, and re-ran e2e-local with the A6' jq on this head."
+    "how": "Re-ran each mutant control myself with go test -overlay (workspace untouched), first finding that a naive deletion of the own-write fences does not compile (unused revision/epoch) and so replacing them with blank uses: setOwnRoleHolder removed -> TestRolesHeldByFollowsTheRoleClaims fails 30/30 at role_holders_test.go:123; both forgetRoleHolder calls removed -> 30/30 at :129; resetRoleHolders keeping holders -> store 10/10 (:329) and listener TestARecreatedRoleBucketIsNeverAnsweredAsAHolderWithoutItsRole 5/5 (:365); keeping holderRevisions -> store 10/10 (:332) and listener 5/5 (:378); Rewatch not clearing completeness (kvwatch.go:530) -> TestCompleteIsTheCurrentWatchersFirstScanDeliveringEveryKey 10/10 (warmup_test.go:224). Each passes at the head. The /healthz bodies the docs name were seen on the real binary."
   },
-  "failures": [],
-  "failed": 0,
-  "proof": [
+  "failures": [
     {
-      "criterion": "A7: a session holds a role exactly when the role's claim names it, on GET /v1/sessions, GET /v1/registry/<id> and sender.roles",
-      "surface": "the real envoy-listener binary at this head against a real NATS (internal/testnats/cmd/natsd); claims written through POST /v1/roles/set and straight into envoy_roles with a throwaway nats.go client; curl",
-      "command": "ses_holder claims reviewer; ses_squatter subscribes straight to notifications.role.reviewer and notifications.role.nobody; a claim planner -> ses_bare written into envoy_roles (ses_bare has no interest record); ses_sender claims tester; read GET /v1/sessions, GET /v1/registry/ses_bare and the sender stamp of sends from ses_sender and ses_squatter; then a take-over and back, an unsubscribe of notifications.role.tester, a claim written and deleted straight in the bucket, and DELETE /v1/interests for a claim-only holder",
-      "observed": "roster: ses_holder [reviewer], ses_sender [tester], ses_bare [planner] (registry 200 roles [planner], topics null), ses_squatter [] despite its two role topics; sender stamps {roles [tester]} and none for ses_squatter. Take-over: ses_squatter [reviewer] and ses_holder [] and back. Unsubscribe released the tester claim (key not found) and ses_sender shows []. A claim put straight into the bucket appeared on ses_squatter at once and left on delete. DELETE /v1/interests/ses_bare 204 released planner by name and left another session's claim",
-      "headSha": "5f1cdd9579ff4b8f8a8c0f165ac84e1635816b6c",
-      "negativeControl": "the listener built from 0c227469 on the same rig: ses_squatter listed with [nobody, reviewer] and stamped them on its messages, ses_bare listed with roles null, a straight-written claim never appeared"
-    },
-    {
-      "criterion": "A10: a role-claim view that is not complete never reports a holder without its role",
-      "surface": "the same real binary; 20,000 claims in envoy_roles across a restart; envoy_roles deleted and recreated under the running listener, polled every ~2 ms on GET /v1/registry/<holder> with timestamps",
-      "command": "restart the listener over 20,000 claims and poll from its first answer for 25 s; delete and recreate the bucket, refilling with the holder's claim first then 3,000 others; again with it last after 3,000; again with it last after 100,000 (so the listener notices the recreation before the claim exists)",
-      "observed": "cold start: 52 x 503 'service starting', then 4,346 x 200 with the role, never 200 without it. Recreate: the listener noticed it at its 30 s self-health probe ('role claims bucket was recreated; its cache is refilled from the new bucket'); 6 to 106 polls then answered 503 'the message bus did not answer: the role claim view is not complete' with Retry-After: 1, then 200 with the role. In the 100,000 run the 200s lacked the role from 29.7 s to 71.263 s and carried it from 71.270 s; the holder's claim was written at 71.262 s, so a role was missing only while the bucket did not hold its claim",
-      "headSha": "5f1cdd9579ff4b8f8a8c0f165ac84e1635816b6c",
-      "negativeControl": "the 0c227469 listener answered every one of the cold-start and recreate polls 200 without the role (it reads roles from topics), so the rig can tell a missing role from a present one"
-    },
-    {
-      "criterion": "A3/A6 and the write routes unchanged: a bus that is connected but silent gets the named 503 inside the budget",
-      "surface": "the same real binary, NATS through a TCP relay frozen with the connection open",
-      "command": "after the freeze: send to a cached and an uncached target, publish to a topic and a role lane, GET /v1/roles/<role>, subscribe, roles/set, unsubscribe, DELETE /v1/interests/<id>, DELETE /v1/sessions/<id>, GET /healthz",
-      "observed": "every one 503 with Retry-After: 1 in 3.50-3.52 s (uncached send 1.0 s), each naming the call ('list the role claims to release ses_a's' for the delete); /healthz 503 unhealthy in 3.0 s",
-      "headSha": "5f1cdd9579ff4b8f8a8c0f165ac84e1635816b6c",
-      "negativeControl": "the same send answered 200 before the freeze"
-    },
-    {
-      "criterion": "A8, A9, A1-A6 and A6' at the merged head",
-      "surface": "go test of the named tests; git grep; scripts/e2e-local.sh",
-      "command": "go test ./cmd/listener and ./internal/store of the A7-A10 tests, my tests and the cold-cache tests; git grep -n -E 'reapRoleTopics|removeStaleRoleTopics|detachedCleanup|roleCleanupBudget|staleRoleTopics' -- packages/envoy; bash scripts/e2e-local.sh with the A6' jq",
-      "observed": "every named test --- PASS (cmd/listener ok 66.378 s, store ok 12.407 s); the grep prints nothing (exit 1); e2e exit 0, both PASS lines, client EnvoyApiError 503, A6' three WARN bus_unavailable records (20:44:37.840Z, 20:44:41.564Z, 20:44:45.328Z) after 'Initiating Shutdown...' at 20:44:34.295Z. My test files have no diff since 0c2dda95",
-      "headSha": "5f1cdd9579ff4b8f8a8c0f165ac84e1635816b6c",
-      "negativeControl": "the e2e send answered 200 before NATS was stopped"
+      "criterion": "The tests this pull request adds are sound: TestARoleViewWhoseFirstScanTimedOutIsTheBusNotAnsweringOnTheSessionRoutes (packages/envoy/cmd/listener/roles_from_claims_test.go) has a data race under the race detector",
+      "evidence": "`cd packages/envoy && CGO_ENABLED=1 go test -race ./cmd/listener -count=1 -v -skip '<the four testpg tests>' -timeout 60m`: FAIL, exit 1, 238 --- PASS and 1 --- FAIL, the failing test TestARoleViewWhoseFirstScanTimedOutIsTheBusNotAnsweringOnTheSessionRoutes with one 'WARNING: DATA RACE'. Alone: `CGO_ENABLED=1 go test -race ./cmd/listener -count=30 -run '^TestARoleViewWhoseFirstScanTimedOutIsTheBusNotAnsweringOnTheSessionRoutes$'` -> 2 of 30 runs fail with a DATA RACE. Write: timeOutRoleClaimScan (roles_from_claims_test.go:209) replaces Registry.holders through reflect.Value.Set without holding holdersMu, called at :261. Previous read: store.(*Registry).setRoleHolderLocked (internal/store/kv.go:452) under holdersMu, from setRoleHolder (:433) <- applyRoleClaim (:425) <- kvwatch.(*Watcher).applyCurrent (kvwatch.go:731) <- consume (:582): the role watcher that the helper has just Stopped is still finishing a delivery (applyCurrent checks the generation under w.mu and applies under applyMu, and Stop takes neither applyMu nor waits). The race is in the test helper, not in shipped code; the fix is the helper's (take holdersMu, or empty the view through a store method, or wait for the stopped watcher's in-flight apply). CI's envoy-go-race job runs only ./internal/dispatch/... and ./internal/bus/ (envoy-and-contracts.yaml), so no CI lane catches it. Under the architect's ruling of 22:32Z (a failure in code this PR touches fails the round), this test file is this PR's, so this round fails."
     }
   ],
-  "notes": [
-    "The listener notices a role bucket deleted out of band only at its 30 s self-health probe; until then it keeps answering from the deleted bucket's view (the holder kept its role for ~29 s in my runs). That latency is the existing self-health rebuild, shared by every watched cache, and not this change; the answer after detection is correct.",
-    "Plan v4's generation-4 point says the session routes read the claims through on a not-ready view; the head answers the 503 directly instead (implement.json's trickyParts). A10's acceptance allows either; the window measured on the real binary was 6 to 106 polls (well under a second).",
-    "The idle-timed-out first scan cannot be produced from outside the process; it rests on TestARoleViewWhoseFirstScanTimedOutAnswersOnlyOnceItsRescanCompletes, which passes."
+  "failed": 1,
+  "breakAttemptsThatHeld": [
+    "Five full `go test ./cmd/listener -count=1 -v -skip <the four testpg tests> -timeout 30m` runs at this head: each exit 0, 239 --- PASS and 0 --- FAIL, ok in 411.3, 440.0, 432.0, 439.5 and 420.4 s. The unnamed FAIL the implementer recorded once did not recur.",
+    "Real binary: across envoy_roles deleted and recreated under the running listener, /healthz answered 61 x 200 degraded 'interest KV unavailable: nats: stream not found' (bucket gone), 1 x 503 unhealthy 'interest KV unavailable: role claims bucket envoy_roles was recreated under its watcher', 483 x 503 unhealthy 'interest KV watcher unavailable: role claims bucket envoy_roles was recreated under its watcher', then 183 x 200 healthy: the bodies AGENTS.md and the CHANGELOG now name.",
+    "The warm-up timeout could not be made to fire from outside (a restart over 20,000 claims through a relay delaying every server chunk 20 ms still completed both scans); WaitForCacheReady wraps 'interest cache: ' and 'role claim cache: ' and main.go logs 'interest or role claim cache warm-up timed out', as read in the code.",
+    "scripts/e2e-local.sh exit 0, both PASS lines, client EnvoyApiError 503; A6' three WARN bus_unavailable records (23:28:38.250Z, 23:28:41.956Z, 23:28:45.714Z) after 'Initiating Shutdown...' at 23:28:34.704Z. go build, go vet and gofmt clean."
   ],
-  "ci": "At 5f1cdd95: Tests 40397561455, Legion Envoy and Contracts 40397561463, Docs 40397561574 and Worker Image 40397561461 queued when read, cited unsettled and not waited for. GitHub reports MERGEABLE (BLOCKED on review).",
-  "regressionLocksAdded": []
+  "ci": "At a9a44ddd: Docs 40413047831 and Worker Image 40413047724 success; Tests 40413047745 and Legion Envoy and Contracts 40413047566 queued when read, cited unsettled and not waited for.",
+  "notesForTheImplementer": [
+    "No new red test: the failing test is the PR's own, and the command above, -race with -count=30 on that test, is the reproduction; it should show 0 races after the fix.",
+    "The full -race run of ./cmd/listener took 718 s here and found only this race."
+  ]
 }
