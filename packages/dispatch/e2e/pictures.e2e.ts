@@ -1,6 +1,7 @@
 import { expect, type Locator, type Page, type Response, test } from "@playwright/test";
 
 import type { ArtifactUploadResponse } from "../web/src/api/types";
+import { REF_PREVIEW_OPEN_DELAY_MS } from "../web/src/features/refs/ref-preview-timing";
 import { agentRow, setLiveSessions } from "./agents";
 import {
   createAsk,
@@ -429,7 +430,6 @@ test("a long-named picture in a comment draws, its link to a long-named document
     await expect(bare).toHaveAttribute("href", bareUrl);
     await expect(bare).toHaveText(bareUrl);
     await expect(bare).not.toHaveAttribute("data-dispatch-ref");
-    // The `dispatch://` forms of the same text keep their words and name no reference either.
     // The `dispatch://` forms of text past the bounds are their words alone: no link to click,
     // and nothing the hover card opens on (`[data-dispatch-ref]`, `[data-dispatch-href]`).
     for (const [label, words] of [
@@ -443,7 +443,7 @@ test("a long-named picture in a comment draws, its link to a long-named document
       await expect(paragraph.locator("[data-dispatch-href],[data-dispatch-ref]")).toHaveCount(0);
       if (testInfo.project.name !== "iphone") {
         await paragraph.hover();
-        await page.waitForTimeout(600);
+        await page.waitForTimeout(2 * REF_PREVIEW_OPEN_DELAY_MS);
         await expect(page.getByRole("tooltip")).toHaveCount(0);
       }
     }

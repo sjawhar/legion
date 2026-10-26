@@ -149,14 +149,15 @@ function isTextUrl(target: string, text: string): boolean {
  * link a user wrote by hand, or a bare `http(s)://` URL remark-gfm autolinked — rewrites its href
  * to the SPA route via `buildReferencePath`, and clears its text so the caller can
  * portal a `RefLink` in to render the resolved title. A URL its author left as text
- * (`isTextUrl`) is read as the server's `text.Extract` reads text (`referenceRouteFromHref`), so
- * one past the bounds the index keys stays the link it is, and one whose block is past them names
- * its document, as the server cites it. A link its author wrote names its target explicitly, and
- * drawing or opening it is a read, so its href is read as the server reads a request
- * (`nodeRouteFromHref`), whatever the length of its names. An external link, or an href that
- * fails to parse as a reference, is left untouched, and so is a picture's link
- * (`data-dispatch-picture`, the engine's `pictureSerializer`), whose content is a
- * `DispatchPicture` rather than a title.
+ * (`isTextUrl`) is read as the server's `text.Extract` reads text (`referenceRouteFromHref`): one
+ * whose block is past the bounds the index keys names its document, as the server cites it; an
+ * `http(s)://` one past them stays the link it is; and a `dispatch://` one that names nothing
+ * becomes its words as plain text, as a bare one already renders, with no link to click and no
+ * hover trigger. A link its author wrote names its target explicitly, and drawing or opening it
+ * is a read, so its href is read as the server reads a request (`nodeRouteFromHref`), whatever the
+ * length of its names. An external link, or an author's href that fails to parse as a reference,
+ * is left untouched, and so is a picture's link (`data-dispatch-picture`, the engine's
+ * `pictureSerializer`), whose content is a `DispatchPicture` rather than a title.
  *
  * `@legion/proof-editor`'s Markdown link serializer sanitizes a `dispatch://` href to `""`
  * (Milkdown's link sanitizer only allows http/https/mailto/tel/ftp — a document strangers can
