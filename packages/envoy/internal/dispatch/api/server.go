@@ -66,9 +66,10 @@ type Deps struct {
 	DefaultProject string
 	ServerURL      string
 	Docs           docs.API
-	// Embedder embeds a search request's query for meaning search (LEGION-549); nil means
-	// Dispatch is configured without a Cohere key, and search answers keyword-only on every
-	// request, always setting SearchResponse.Degraded.
+	// Embedder embeds a search request's query for meaning search (LEGION-549), and its Identity
+	// is the only one search compares queries with (INFRA-393); nil means Dispatch has no
+	// embedder, and search answers keyword-only on every request, always setting
+	// SearchResponse.Degraded.
 	Embedder embed.Embedder
 	Envoy    *envoy.Client
 	Events   *events.Broker
