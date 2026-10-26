@@ -1361,6 +1361,48 @@ func TestRenderWritesALazyHTMLTagTitleLineSoTheEngineReadsItBack(t *testing.T) {
 	}
 }
 
+// A linked image in a list item, a task item, a block quote or a footnote definition whose link
+// title has a line that is the closing tag of a raw HTML element (`</script>`, `</pre>`,
+// `</style>`, any case) is written so that the browser editor's engine reads it back as held. Read
+// alone, such a line is a paragraph in Go's reader, as CommonMark has it (a closing tag of those
+// names opens no HTML block), so the judgement of a lazy line by Go's reading of it alone keeps it
+// raw; the engine reads it as an HTML block that ends the paragraph, and the past-version view
+// draws `[`, the picture and `](https://… "a` as text, the link lost (INFRA-190, the tester's fuzz
+// at 166cdd6c).
+func TestRenderWritesALazyClosingRawTagTitleLineSoTheEngineReadsItBack(t *testing.T) {
+	var markdowns []string
+	var held [][]*Node
+	for _, prefix := range []string{"- ", "- [ ] ", "1. ", "> ", "- a\n  - ", "x[^1]\n\n[^1]: "} {
+		for _, line := range []string{"</script>", "</pre>", "</style>", "</SCRIPT>"} {
+			source := prefix + "[![x](i.png)](https://u.com \"a&#10;" + line + "&#10;z\")\n"
+			doc, err := ParseForWrite(source, nil)
+			if err != nil {
+				t.Fatalf("ParseForWrite(%q): %v", source, err)
+			}
+			markdown, err := Render(doc)
+			if err != nil {
+				t.Fatalf("Render(ParseForWrite(%q)): %v", source, err)
+			}
+			markdowns = append(markdowns, markdown)
+			held = append(held, documentImages(doc))
+		}
+	}
+	for index, reading := range engineReadings(t, markdowns) {
+		var read []*Node
+		if reading != nil {
+			read = documentImages(reading)
+		}
+		if len(read) != len(held[index]) || len(read) == 0 || !sameImageFields(read[0], held[index][0]) {
+			got := "nothing"
+			if reading != nil {
+				json, _ := reading.JSON()
+				got = string(json)
+			}
+			t.Errorf("the engine reads %q as %s, want its linked image %v", markdowns[index], got, held[index][0].Attrs)
+		}
+	}
+}
+
 // A title whose lines write two table delimiter rows, one under the other, in a paragraph whose
 // first line is wider than them, is written `&#10;`: Go's reader takes only the paragraph's first
 // delimiter row, which under a wider header makes no table, but the browser editor's engine reads
