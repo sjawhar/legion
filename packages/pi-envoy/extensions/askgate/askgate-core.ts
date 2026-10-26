@@ -33,7 +33,12 @@
 //     The arguments are cut at 64 KiB as one JSON block, so the document gets less than 64 KiB of
 //     it. A relative path resolves where the CLI resolves it, against its
 //     `process.cwd()`, the physical directory the command runs in after its own `cd`: bash names
-//     it (the `cd`, then `pwd -P`, run as the dry run runs). A directory lookup that fails is
+//     it (the `cd`, then `pwd -P`, run as the dry run runs). The gate walks the path one
+//     component at a time and follows each
+//     link itself, refuses a component that reaches `/proc` or `/dev` (`/proc/self/fd/0`,
+//     `/proc/thread-self/fd/0`, `/dev/fd/0` and every link to one name a descriptor of the
+//     process that opens it, which is Oh My Pi's and not the command's shell), and opens with
+//     `O_NOFOLLOW`, so a link put there after the walk is refused. A directory lookup that fails is
 //     `unreadable`, since a failed lookup is no proof that the write would fail. An upload is
 //     judged against failure 10 alone (askgate-upload.md), since a plan or a report is long by
 //     nature.
@@ -1401,19 +1406,70 @@ function commandWithSnapshots(command: string, files: readonly CapturedFile[]): 
  * A path that names a file descriptor of whichever process opens it: AskGate would resolve it in
  * Oh My Pi's own process and the command in its shell, so the two read different files. The gate
  * refuses it by name, before any `stat`, since with a regular file on that descriptor the `stat`
- * passes and the gate would review and post Oh My Pi's own file (census, contract 2).
+ * passes and the gate would review and post Oh My Pi's own file (census, contract 2). The name is
+ * not the whole check: `resolveForOpen` refuses such a path however the operand spells it.
  */
-const PROCESS_FD_PATH = /^\/dev\/fd\/|^\/dev\/(stdin|stdout|stderr)$|^\/proc\/(self|\d+)\/fd\//;
+const PROCESS_FD_PATH =
+  /^\/dev\/fd\/|^\/dev\/(stdin|stdout|stderr)$|^\/proc\/(self|thread-self|\d+)\/fd\/|^\/proc\/\d+\/task\/\d+\/fd\//;
 
 /**
- * Copies one source into an exclusive owner-only snapshot, reading only a regular file. `stat`
- * refuses a FIFO, a device, a directory or a link to one before the open, and `O_NONBLOCK` with a
- * second `fstat` on the open descriptor refuses one swapped in between, before the first read.
+ * The directories whose files name whatever the process that opens them holds, not bytes on a
+ * disk: a path that reaches one is refused however it spells it (a symlink to `/proc/self/fd/0`,
+ * `/proc/thread-self/fd/0`, `/dev/fd/0`).
+ */
+const MAGIC_DIRECTORIES = ["/proc", "/dev"];
+/** How many symbolic links one path may go through, as the kernel's own limit (ELOOP). */
+const MAX_LINKS = 40;
+
+/**
+ * The file `source` reaches, resolved as the kernel resolves it for the CLI's own open: each
+ * component in turn, a symbolic link followed where it is found (so a `..` after a link leaves
+ * the link's target, which `path.resolve` would collapse first). A component that reaches `/proc`
+ * or `/dev` throws: such a file names a descriptor of the process that opens it, and AskGate's
+ * process is not the command's shell.
+ */
+function resolveForOpen(source: string): string {
+  let resolved = "";
+  const rest = source.split("/").reverse();
+  for (let links = 0; rest.length > 0; ) {
+    const part = rest.pop() as string;
+    if (part === "" || part === ".") continue;
+    if (part === "..") {
+      resolved = resolved.slice(0, Math.max(0, resolved.lastIndexOf("/")));
+      continue;
+    }
+    const candidate = `${resolved}/${part}`;
+    if (MAGIC_DIRECTORIES.includes(candidate))
+      throw new Error(
+        `reaches ${candidate}, whose files name a file descriptor of the process that opens it, which here is Oh My Pi's own and not the command's shell`
+      );
+    const stats = fs.lstatSync(candidate);
+    if (!stats.isSymbolicLink()) {
+      resolved = candidate;
+      continue;
+    }
+    if (++links > MAX_LINKS) throw new Error("goes through too many symbolic links");
+    const target = fs.readlinkSync(candidate);
+    if (target.startsWith("/")) resolved = "";
+    rest.push(...target.split("/").reverse());
+  }
+  return resolved === "" ? "/" : resolved;
+}
+
+/**
+ * Copies one source into an exclusive owner-only snapshot, reading only a regular file. The source
+ * is resolved as the kernel resolves it (`resolveForOpen`), which refuses a descriptor path
+ * whatever names it; the open is `O_NOFOLLOW`, so a link put there after that walk is refused and
+ * never followed; and `O_NONBLOCK` with an `fstat` on the open descriptor refuses a FIFO, a
+ * device, a directory or anything else swapped in, before the first read.
  */
 function captureSnapshot(source: string, directory: string, index: number): string {
-  if (!fs.statSync(source).isFile()) throw new Error("is not a regular file AskGate can read");
-  const target = path.join(directory, `${index}${path.extname(source)}`);
-  const input = fs.openSync(source, fs.constants.O_RDONLY | fs.constants.O_NONBLOCK);
+  const opened = resolveForOpen(source);
+  const target = path.join(directory, `${index}${path.extname(opened)}`);
+  const input = fs.openSync(
+    opened,
+    fs.constants.O_RDONLY | fs.constants.O_NONBLOCK | fs.constants.O_NOFOLLOW
+  );
   let output: number | undefined;
   let complete = false;
   try {
@@ -2454,11 +2510,12 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
             };
         }
 
+        /** The path the CLI opens for one operand, resolved against the physical directory. */
+        const opened = (file: FileInput): string =>
+          path.isAbsolute(file.source) ? file.source : path.resolve(base, file.source);
         // Refused by name, before any `stat`: such a path resolves in whichever process opens it.
         const descriptor = scoped.fileInputs.find(
-          (file) =>
-            PROCESS_FD_PATH.test(file.source) ||
-            PROCESS_FD_PATH.test(path.resolve(base, file.source))
+          (file) => PROCESS_FD_PATH.test(file.source) || PROCESS_FD_PATH.test(opened(file))
         );
         if (descriptor !== undefined)
           return {
@@ -2485,7 +2542,7 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
           for (const inputFile of scoped.fileInputs) {
             current = inputFile;
             source = inputFile.source;
-            const resolved = path.isAbsolute(source) ? source : path.resolve(base, source);
+            const resolved = opened(inputFile);
             snapshot.files.push({
               input: inputFile,
               path: captureSnapshot(resolved, directory, snapshot.files.length),

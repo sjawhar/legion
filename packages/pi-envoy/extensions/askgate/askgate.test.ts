@@ -2567,6 +2567,57 @@ console.log(JSON.stringify(args, null, 2));
         fs.closeSync(fd);
       }
     });
+    // Outside review of #2159 at 31c5cca3b, finding 5: the refusal read the operand's spelling
+    // alone, and the open followed links. So an ordinary-looking name that is a link to the
+    // descriptor, or a spelling the pattern did not hold, copied Oh My Pi's own descriptor.
+    test("F5: a link to a descriptor, and the other descriptor spellings, are refused at the open", async () => {
+      const decoy = path.join(work, "f5-own-stdin.md");
+      fs.writeFileSync(decoy, "The text of AskGate's own descriptor.\n");
+      const fd = fs.openSync(decoy, "r");
+      const link = path.join(work, "f5-link.txt");
+      fs.rmSync(link, { force: true });
+      fs.symlinkSync(`/proc/self/fd/${fd}`, link);
+      const midway = path.join(work, "f5-dir");
+      fs.rmSync(midway, { force: true });
+      fs.symlinkSync("/proc/self", midway);
+      const plain = path.join(work, "f5-plain");
+      fs.rmSync(plain, { recursive: true, force: true });
+      fs.mkdirSync(plain, { recursive: true });
+      fs.writeFileSync(path.join(plain, "note.md"), "A regular file behind a plain link.\n");
+      const plainLink = path.join(work, "f5-plain-link");
+      fs.rmSync(plainLink, { force: true });
+      fs.symlinkSync(plain, plainLink);
+      try {
+        const refused: Array<[string, string]> = [
+          ["a file that is a link to /proc/self/fd", "dispatch ask --issue DSP-1 --question-file f5-link.txt"],
+          ["a link to /proc in the middle of the path", `dispatch comment --issue DSP-1 --body-file f5-dir/fd/${fd}`],
+          ["the /proc/thread-self spelling", "dispatch comment --issue DSP-1 --body-file /proc/thread-self/fd/0"],
+          ["a task's descriptor directory", `dispatch comment --issue DSP-1 --body-file /proc/${process.pid}/task/${process.pid}/fd/0`],
+          ["a /dev/fd path under a directory", "dispatch comment --issue DSP-1 --body-file /dev/fd/1/../0"],
+        ];
+        const g = bind({ env: { ...STUB, OMP_ASKGATE: "block" }, cwd: work });
+        for (const [index, [, command]] of refused.entries()) {
+          const result = await g.bash(`f5-${index}`, command);
+          expect(result?.block).toBe(true);
+          expect(result?.reason).toMatch(/file descriptor of the process that opens it|a symbolic link/);
+        }
+        expect(g.calls).toHaveLength(0);
+        expect(g.entries.map((e) => e.outcome)).toEqual(Array(refused.length).fill("unreadable"));
+        // Nothing of the host's own descriptor reached the model or a snapshot.
+        expect(JSON.stringify(g.entries)).not.toContain("own descriptor");
+        // A link to an ordinary directory, outside /proc and /dev, still reads its regular file.
+        const ok = bind({ env: STUB, cwd: work });
+        const read = await ok.bash(
+          "f5-ok",
+          "dispatch comment --issue DSP-1 --body-file f5-plain-link/note.md"
+        );
+        expect(read?.block).toBeUndefined();
+        expect(ok.entries.map((e) => e.outcome)).toEqual(["verdict"]);
+        expect(ok.calls[0]?.user).toContain("A regular file behind a plain link.");
+      } finally {
+        fs.closeSync(fd);
+      }
+    }, 30_000);
 
     test("an unreadable --path is told to send the text with --content-file -, never --path -, which the CLI opens as a file named -", async () => {
       const g = bind({ env: { ...STUB, OMP_ASKGATE: "block" }, cwd: work });
