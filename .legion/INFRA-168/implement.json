@@ -2,48 +2,71 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-168",
-  "completed": "2026-10-25T11:45:00Z",
+  "completed": "2026-10-26T08:45:00Z",
   "proof": [
     {
-      "criterion": "The reviewed change is unchanged by the forward merge, so the reviewer's approval of 8674f047219cf487b985c5ea11b6850551617d3e holds at the new head.",
-      "surface": "The unchanged-diff fingerprint of skill://legion-worker/references/conflicts-and-rewrites.md, computed at the approved head and at the merged head, and the two diffs themselves.",
-      "command": "base=$(gh pr view 2161 -R sjawhar/legion --json baseRefName -q '.baseRefName | @json'); jj -R \"$LEGION_WORKSPACE\" diff --from \"fork_point(${base}@origin | <head>)\" --to <head> --git --context 0 '~(.legion | docs/solutions)' | sed -e '/^@@/d' -e '/^index /d' | sha256sum, for <head> = 8674f047219cf487b985c5ea11b6850551617d3e and ed71442efb596491a3b08fad9679fdd7b1ff2169; then a line-by-line diff of the two outputs.",
-      "observed": "ecad3d1a2a7e7897810630dc164d9f7db3239862d79bbf54802e6a87549dc03d at both heads, and the two diffs are byte-identical: 0 lines differing over the 58 files they touch.",
-      "headSha": "ed71442efb596491a3b08fad9679fdd7b1ff2169",
-      "negativeControl": "The same comparison run against the first merge attempt, built on the older main 14571f6f4aea, gave the same hash and the same 0 differing lines, so the result is the merge's property and not one main's state happened to produce."
+      "criterion": "A2 — a no-change dispatch ask is refused in a Legion pod, naming the rule and what to do, in warn and in block; the same ask with --advisor-rebuttal opens.",
+      "surface": "Nested headless Oh My Pi sessions on this branch's build (packages/pi-envoy built at the head) in this Legion pod, model anthropic/claude-opus-5-5 (52 of 52 assistant turns and every ruleModel), production Dispatch, scratch issue INFRA-465.",
+      "command": "env -u LEGION_WORKSPACE -u LEGION_ROLE -u LEGION_BOOT_TOKEN_FILE -u LEGION_TREE -u LEGION_GENERATION -u LEGION_DAEMON_URL -u LEGION_STATE_DIR LEGION_ISSUE=INFRA-465 OMP_SESSION_STORAGE=file OMP_ASKGATE=<warn|block> OMP_ASKGATE_RECORD_PROJECT=INFRA /opt/omp/bin/omp --extension \"$LEGION_WORKSPACE/packages/pi-envoy\" --session-dir <run dir> -p '<case 1 or case 2 prompt: one-line dispatch ask whose recommendation is to keep 02:00>' at 08:30Z-08:32Z; read back with bun packages/pi-envoy/scripts/askgate-report.ts --sessions <run dirs> --since 2026-10-26T08:30:00Z --sample 0 --out <dir>",
+      "observed": "Case 1 refused in both modes: 'AskGate did not send this call: a rule refuses a new ask in it. The ask matches the rule \"no change\": \"I recommend keeping it at 02:00 as it is.\".' plus the fix and the --advisor-rebuttal hint; entries decision revise, rule no_change, ruleOutcome match. Case 2 opened in both modes (8f2599d5-d081-4bf4-a40f-91a64aea2b2c block, 6f41679d-876d-4693-b3c0-43a77576553d warn), each retracted in its run; entries outcome rebuttal carrying the rebuttal line. The report: 12 gated calls, 6 refusals, 2 unreviewed sends (the rebuttals), rules outcomes match 6, none 2, 0 errors.",
+      "headSha": "a3fc5c940e4fa6c3f907bc7245bea47a0e449226",
+      "negativeControl": "Case 2, the rebuttal, is the call the gate must let through: it opened in both modes, so the case-1 refusal is the rule's and not a gate refusing every ask."
     },
     {
-      "criterion": "The one conflicting path keeps both sides, so neither the Go server test's reading nor AskGate's scanner loses its binding to the shared decision-block table.",
-      "surface": "The Go test the server and this change share, run against a real test handler.",
-      "command": "cd packages/envoy && go test ./internal/dispatch/api/ -run 'TestDocumentEditAdvice|TestWriteAdvice' -count=1; gofmt -l internal/dispatch/api",
-      "observed": "ok, with main's three new TestWriteAdvice cases and its rawAdviceFields helper running beside this change's decisionBlockInsert type and readDecisionBlockInserts helper; gofmt reports nothing.",
-      "headSha": "ed71442efb596491a3b08fad9679fdd7b1ff2169",
-      "negativeControl": "The resolution was first left with the conflict's trailing marker in place, and the package failed to build (expected declaration, found '>>'), so the passing run is of a file the compiler actually read."
+      "criterion": "A3 — a dispatch doc-edit inserting a no-change ask block is refused, naming that block.",
+      "surface": "The same nested sessions and Dispatch.",
+      "command": "The same invocation with the case 3 prompt: one dispatch doc-edit --issue INFRA-465 with --ops-json-file - and a quoted here-document inserting ':::ask{#export-time urgency=\"med\"}' whose recommendation is to keep 02:00, in warn and in block.",
+      "observed": "Refused in both modes: 'The ask block #export-time that starts 'Keep the nightly export at 02:00 UTC, or move it to 04:00 UT' matches the rule \"no change\"'; entries rule no_change, ruleOutcome match; the scratch spec is unchanged (dispatch doc-read --issue INFRA-465).",
+      "headSha": "a3fc5c940e4fa6c3f907bc7245bea47a0e449226",
+      "negativeControl": "Case 0, a dispatch comment that opens no ask, was allowed in both modes with no rules call (ruleOutcome null), so the doc-edit refusal comes from the block it adds."
     },
     {
-      "criterion": "The merged head carries no red of its own, and the skills guard that was main's red passes.",
-      "surface": "The repository's own checks at the merged head, and GitHub's runs on it.",
-      "command": "cd packages/pi-legion && bun test src/skills-guard.test.ts; cd packages/claude-envoy && bun run check-dist; cd packages/pi-envoy && bun run typecheck && bun run build && bun test; bunx biome check .; gh run list --commit ed71442efb596491a3b08fad9679fdd7b1ff2169",
-      "observed": "The skills guard 10 pass 0 fail (skills/legion-architect/SKILL.md is 33,651 bytes at main 56ba79b8cf6d, under the 51,200 limit, after sjawhar/legion#2192 moved its Wake routing table to a reference); check-dist reports dist/ and legion/ match a fresh build; the pi-envoy suite 1,254 tests 0 fail; typecheck, build and biome clean. GitHub started all five workflows on the merged head and the pull request reads MERGEABLE, where the approved head had no run at all.",
-      "headSha": "ed71442efb596491a3b08fad9679fdd7b1ff2169",
-      "negativeControl": "At the earlier merge, built on main 14571f6f4aea, the same guard failed on one entry, legion-architect/SKILL.md at 51,256 bytes — main's own break, confirmed with `jj file show -r main@origin` before anything of this change touched it, which is why that merge was held unpushed rather than pushed with a red that would have read as ours."
+      "criterion": "A4 — an ask for a read the agent did not try is refused; with the agent's own error it opens.",
+      "surface": "The same nested sessions and Dispatch.",
+      "command": "The same invocation with the case 4 prompt (ask the person to run gh api orgs/example-org/settings/billing/actions, not run by the agent) and the case 5 prompt (run it first, then ask quoting its error), in warn and in block.",
+      "observed": "Case 4 refused in both modes, 'The ask matches the rule \"untried access\"'. Case 5: the agent's gh call failed with 'legion gh: \"example-org\" is not an owner of this project: /var/run/legion/gh holds no gh directory for it'; the ask quoting it was allowed in both modes, ruleOutcome none (9c670a23-e8f7-4514-a778-80f60d04d6f8 block, 680cf135-db59-46c3-8439-631021dc286a warn), each retracted in its run.",
+      "headSha": "a3fc5c940e4fa6c3f907bc7245bea47a0e449226",
+      "negativeControl": "Case 5 is the control that must pass, and it opened in both modes."
+    },
+    {
+      "criterion": "A5 (the session half and the Dispatch half, day 2) — the runs' decisions are listed and counted through Dispatch alone, and the census prints the day's counts.",
+      "surface": "Production Dispatch, read from this pod with no access to the nested sessions' files.",
+      "command": "dispatch read --project INFRA --artifact askgate-decisions-01a17755-1173-7517-bf3d-82483fdbdd5c-md; bun packages/pi-envoy/scripts/askgate-report.ts --dispatch-project INFRA --since 2026-10-26T08:30:00Z --json; bun scripts/dispatch/ask-census.ts --project INFRA --from 2026-10-26T00:00:00Z --to 2026-10-26T08:33:15Z --json",
+      "observed": "The per-session document exists (version 1). The reader: 84 documents, 10 sessions, 0 unreadable, 0 unparsed; total calls 8, refusals 6, byRule no_change 4 and untried_access 2, overrides 0, errors 0, all pod and none machine. The census: 51 asks on 28 issues (27 standalone, 18 decision blocks, 6 approval requests). Recorded as Day 2 in dispatch://INFRA-168/artifact/askcheck-outcome-md (version 4).",
+      "headSha": "a3fc5c940e4fa6c3f907bc7245bea47a0e449226",
+      "negativeControl": "The two rebuttal sessions write no rules call, and the reader counts 8 calls for the 8 sessions that ran the rules check, not 10: a session's document is counted by its rules entries, not by its existence."
+    },
+    {
+      "criterion": "The merge of sjawhar/legion#2159 at 0aa47421c keeps the ten invariants of plan rev 10, and A1's pin holds with its bytes unedited.",
+      "surface": "pi-envoy's own suite, the real Oh My Pi binary, and a deliberate break of each invariant's code.",
+      "command": "cd packages/pi-envoy && bun test (1421 pass, 0 fail) && bunx tsc --noEmit && bun test extensions/askgate/askgate.test.ts -t 'byte for byte' && LEGION_TEST_OMP=/opt/omp/bin/omp bun test extensions/askgate/askgate-omp.test.ts",
+      "observed": "All green: the pin passes unedited; the omp end-to-end file passes 3 of 3 against /opt/omp/bin/omp. Each new invariant test (commit 1a3739f4) and each G3 regression (commit b23a7a02) failed when its code was broken on purpose and passed when restored.",
+      "headSha": "a3fc5c940e4fa6c3f907bc7245bea47a0e449226",
+      "negativeControl": "Restoring the old NUL-joined breakerKey makes 'a target value holding a NUL cannot take another target's refusals' fail (0 pass, 1 fail); setting CEILING_MARGIN_MS back to 5_000 makes the record-inside-the-ceiling test return at 32,000 ms, past the 30,000 ms ceiling."
     }
   ],
   "filesChanged": [
-    "packages/envoy/internal/dispatch/api/write_advice_test.go — the one conflicting path, resolved keeping both sides.",
-    "No other file: the merge commit ed71442efb596491a3b08fad9679fdd7b1ff2169 brings main 56ba79b8cf6d into the branch and changes nothing of this change's own diff."
+    "Merge 42e29fcb (sjawhar/legion#2159 at 0aa47421c): packages/pi-envoy/extensions/askgate/{askgate-core.ts,askgate.ts,askgate.test.ts,askgate-omp.test.ts}, packages/pi-envoy/extensions/{envoy.ts,envoy.test.ts}, packages/pi-envoy/scripts/{askgate-report.ts,askgate-report.test.ts}, packages/pi-envoy/{README.md,AGENTS.md,CHANGELOG.md}, packages/envoy-client/CHANGELOG.md, packages/pi-legion/CHANGELOG.md, packages/pi-legion/scripts/skill-scenarios/{rig.sh,score.ts,score.test.ts}.",
+    "Merges 28ee86af and a3fc5c94 (main): packages/pi-envoy/CHANGELOG.md in the second.",
+    "b23a7a02: askgate-core.ts (askIdentity and breakerKey as JSON arrays), askgate.test.ts (rules test 14j and the target-forgery test), scripts/askgate-report.ts and its test (--sessions '' refused by name).",
+    "1a3739f4: askgate.test.ts and envoy.test.ts, the invariant tests."
   ],
   "trickyParts": [
-    "A conflicting pull request gets no CI at all: GitHub starts no `on: pull_request` run while it conflicts, so the approved head carried no checks and READY would have been refused. The merge is what restores them.",
-    "The merge was built twice. The first, on main 14571f6f4aea, was held unpushed because main carried its own skills-guard break, which would have put a red required job on this head and sent the issue back to implementing for someone else's reason; it was rebuilt on main 56ba79b8cf6d once that was fixed."
+    "jj's auto-merge took hunks of #2159 outside the conflict markers that broke the invariants (each model call and each dry-run script with its own inflight entry), so askgate-core.ts was audited whole, not marker by marker.",
+    "The rules notice after three rules failures now goes to the plain log (a new runtimeLogger on AskGateHost and Deps), the UI notice and that third call's own result, never through gateLogger, which feeds the session-start notices.",
+    "score.test.ts had no markers but no longer ran: #2159 renamed its helper refused to gateRefused because main added a const refused.",
+    "main moved during the turn and conflicted again in packages/pi-envoy/CHANGELOG.md, so a second forward merge of main (a3fc5c94) was needed; the fingerprint is the same at both merged heads."
   ],
   "deviations": [
-    "This round changes no behaviour and writes no new test: it is the forward merge the conflict procedure licenses, and the fingerprint shows the reviewed change untouched."
+    "breakerKey, #2159's target key, joined its parts with NUL as askIdentity did, so a target value holding a NUL could take another target's refusals; it is fixed in b23a7a02 with askIdentity, under the stream rule that a defect in code this change depends on is fixed here. targetLabel prints the same label as before.",
+    "23 test titles of H are absent at the new head; every one is a #2159 test that #2159 itself removed or renamed between 92ad70863 and 0aa47421c (absent at P, present at a814c2cc). No test this change added is missing.",
+    "ce-simplify-code was not run again: skill://legion-worker/references/pr-body.md allows one pass per pull request, run at e4a3db74.",
+    "13 tests of packages/pi-legion/scripts/skill-scenarios (rig.test.ts judge-omp, rig-isolation.test.ts) fail in this pod for want of docker and because its ephemeral port range starts at 16000; the same 13 fail at #2159's head 0aa47421c here."
   ],
   "openQuestions": [
-    "sjawhar/legion#2159 is still open and this branch carries its commits; the architect watches it and the plan's \"when #2159 merges\" step runs before the merge into main."
+    "sjawhar/legion#2159 is still open at 0aa47421c (REVIEW_REQUIRED). Plan rev 10: the architect holds sign-off until it merges; this branch re-merges it only when it merges or its owner asks."
   ],
   "discoveredComplexity": [
-    "The merge's conflicting path is the seam between the Go server test and the shared decision-block table, which is exactly the file where losing a side would quietly unpin one of the two parsers this change binds together. A conflict there is worth resolving by hand every time rather than by taking either side whole."
+    "A --advisor-rebuttal call is run and recorded with the flag removed, so in both live rebuttal runs the agent read its own call as having left the flag out and reported the gate's notice as wrong; the entry's rebuttal text proves the flag was sent. Recorded in the PR body's risk list."
   ]
 }
