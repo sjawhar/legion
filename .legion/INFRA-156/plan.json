@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "plan",
   "issue": "INFRA-156",
-  "completed": "2026-10-26T05:39:30Z",
+  "completed": "2026-10-26T18:47:50Z",
   "planDocument": "dispatch://INFRA-156/artifact/pr3-plan-md",
   "planDocumentVersion": 2,
   "scope": "INFRA-156's own pull request carries root spec v16 R3 and A3 only: a typed block attribute of kind block[] that points at blocks, makes graph links named by the attribute, and limits the block types it points at. Every other requirement belongs to the children INFRA-364, 366, 367, 368, 369, 370, 371. Version 2 of the plan document is the plan of 2026-10-25 re-read against INFRA-366's pull request head (sjawhar/legion#2210 at c11366b53b43) and main 4d3fe8916fa8, with every place the code contradicted it corrected.",
