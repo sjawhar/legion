@@ -15497,5 +15497,35 @@ describe("messages missed while the subscription was down", () => {
 
       expect(resumed.session.cards("dispatch-replay-btw-shutdown")).toHaveLength(0);
     });
+
+    test("whose side turn answered is not shown after a restart that cut its reply's POST short", async () => {
+      const model = new StreamModel();
+      // The answer's POST never completes: the process ends while it is in flight.
+      const never = Promise.withResolvers<Response>();
+      let sideTurns = 0;
+      const first = await bootBTW(
+        "replay-btw-answer-cut-a",
+        model,
+        async () => {
+          sideTurns += 1;
+          return { replyText: "an answer the process never posted" };
+        },
+        { answerReply: () => never.promise }
+      );
+      const btw = targetedDispatchEnvelope("btw", "replay-btw-answer-cut");
+      model.store(first.session.agentSubject, btw);
+      first.session.live(first.session.agentSubject).push(btw);
+      await until(() => first.replies.length === 1, "the answer's POST");
+      expect(sideTurns).toBe(1);
+
+      const restarted = await bootBTW("replay-btw-answer-cut-b", model, undefined, {
+        entries: first.session.entries(),
+      });
+      await restarted.session.tick();
+      await restarted.session.tick();
+
+      // A BTW never falls back to a steering card that starts a turn.
+      expect(restarted.session.cards("dispatch-replay-btw-answer-cut")).toHaveLength(0);
+    });
   });
 });
