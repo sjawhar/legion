@@ -42,7 +42,7 @@ merger — runs from one image, `ghcr.io/sjawhar/legion-worker` (public). It car
   backed by the CodeGraph CLI (`@colbymchenry/codegraph`, pinned) at `/opt/codegraph/bin` (`PATH`) — the
   `codegraph` tool a tester queries for `affected` tests and a reviewer for `impact`/`callers` blast
   radius (`packages/daemon/internal/prompts/roles/core/tester.md`, `core/reviewer.md`). A pod's agent has that tool because its launch loads profile plugins (dispatch://LEGION-629), which the capability report's `codegraph` row says ([The deployment's capability report](#the-deployments-capability-report));
-- OMP's native module, extracted at build into `/home/legion/.omp/natives/<version>/`: from 18.11.0 OMP writes only the variant the CPU selects (AVX2 or not), so this is the build runner's variant, and a pod whose node selects the same one extracts nothing, while a node that selects the other has each role container write that one (111 MiB) into its own writable layer at its first OMP run;
+- OMP's native module, extracted at build into `/home/legion/.omp/natives/<version>/`: from 18.11.0 OMP writes only the variant the CPU selects (AVX2 or not), so this is the build runner's variant, and a pod whose node selects the same one extracts nothing, while a node that selects the other has each role write that one (111 MiB) into its own home overlay, on the pod's `role-homes` volume, at its first OMP run;
 - pinned Bun, `jj` (Sami's fork, the version the dogfood daemon runs) and `gh` at `/usr/local/bin`, and
   `git` at `/usr/bin/git` from the `debian:trixie-slim` base — jj's git backend requires git >= 2.42
   (bookworm's 2.39.5 made every `jj git clone` in the init container fail), so the build also proves the
@@ -202,7 +202,7 @@ priced options and their verdicts:
 | a per-issue install onto the issue's disk | the issue's disk is 49 GiB, and every cache already sits on it (`XDG_CACHE_HOME`, `XDG_DATA_HOME`, `XDG_STATE_HOME`, `TMPDIR`, `GOCACHE`, `GOMODCACHE`, `BUN_INSTALL_CACHE_DIR`, `UV_CACHE_DIR` and `UV_PYTHON_INSTALL_DIR`, the nine `skills/legion-worker/references/tools.md` lists), so disk is not what rules it out | **rejected for a compiled client on a role's `PATH`**: `apt` refuses above, and leaving one unpacked where a role's later commands resolve it is the withheld `operator-setup` capability (ruling dispatch://LEGION-200), the extraction row below. Still right for a language's own package set — which is the runner row — and for a test harness's own prefix, which only its own commands resolve through |
 | a runner the image already provides, pinned and failing closed | `uvx ruff@0.14.0 --version` takes 1.7 s with the uv cache empty and 0.15 s warm; `bunx --package @biomejs/biome@2.6.3 biome --version` 0.3 s with bun's cache warm; `go run github.com/nats-io/natscli/nats@v0.1.5 --version` 7.2 s with the module cache warm, 103 s on a cold one | **chosen, as documentation rather than new code**: the image already carries all three |
 | extracting Debian packages onto the issue's disk | 30 packages, 11 MiB of downloads, 105 MiB extracted; `redis-cli`, `sqlite3` and `dig` ran from the prefix with `LD_LIBRARY_PATH` set and `psql` did not, Debian's `/usr/bin/psql` being a Perl wrapper that loads `PgCommon.pm` through Perl's own search path, which no extraction prefix is on | **rejected as the way to get these five clients onto a role's `PATH`**: that is the withheld `operator-setup` capability (`packages/daemon/internal/capabilities/capabilities.go`, ruling dispatch://LEGION-200) under the test in `skills/legion-worker/references/tools.md`, "What the withheld capability is, and what it is not", and it is fragile for exactly the client this change exists for. The same unpacking inside a test harness's own environment passes that test and is a different verdict — and it would not have got a role `psql` either way |
-| `runtime.kubernetes.setup`, the operator-set command every role container runs before its agent starts | it runs on every start of every role, six times per issue | **rejected**: it buys nothing the image does not, since it is still an unprivileged container |
+| `runtime.kubernetes.setup`, the operator-set command run before each role's agent starts | it runs on every start of every role, six times per issue | **rejected**: it buys nothing the image does not, since it is still an unprivileged container |
 
 The forms a role types, the rule that a pin names a coordinate as well as a version, and the line
 between a sanctioned pinned run and the withheld `operator-setup` capability are a role's own
@@ -294,7 +294,16 @@ lacks `missing` with why.
 A build whose image lacks a capability fails, the probe naming every missing one. The daemon's Agent Sandbox runtime runs the same command in a probe
 Sandbox, `legion-probe-<project>-<digest12>`, with its own contract, under the operator's pod, at every
 boot, and requires `agent-models=resolved`: each agent's model resolves, with a working key, as the task
-tool resolves a subagent's (`packages/daemon/internal/runtime/sandbox/probe.go`). It requires
+tool resolves a subagent's (`packages/daemon/internal/runtime/sandbox/probe.go`). Before those
+probes the probe Sandbox's command adds `--role-namespaces /var/run/legion/role-probe`, a disk
+`emptyDir` (`role-probe`) the probe pod mounts there as an issue pod mounts `role-homes`: the probe
+first runs one role generation through `legion launcher role-init` as an issue pod's launcher
+runs every role, over a layout of its own in that directory and with its own `legion version` as
+the shim, and exits 1 with `legion probe-image: role namespaces: <why>` when the runtime or node
+refuses the role's namespaces, a mount role-init makes or the overlay over its home
+(`launcher.CheckRoleNamespaces`), so such a cluster fails the daemon's boot rather than every
+role's start. The image build's own run passes no `--role-namespaces`, since a build's container
+may not make the namespaces. The runtime requires
 `capabilities=checked` too: an image whose `legion` predates the capability check prints no such mark and
 is refused naming that (`Succeeded without checking the capability list (its legion CLI predates the
 check): build the image from this daemon's commit`), and a probe pod that exits 1 on a missing capability
@@ -1013,7 +1022,7 @@ each authenticated with that role's own token, and starts or stops that role's
 `legion worker-shim` and Oh My Pi when the daemon tells it to, each role's generation in Linux
 namespaces of its own. Every role of the issue
 shares the issue's checkout, the issue's own volume, the sessions directory on it and the pod's network;
-each role keeps its own state directory, agent-secrets key, GitHub App credential and launch credentials. A role's Secret holds
+each role keeps its own home, config home, temporary directories, state directory, agent-secrets key, GitHub App credential and launch credentials. A role's Secret holds
 its launcher token, projected under that role's own directory of the container and bound to the
 pod's uid, which no role's process sees, and the
 two gh files its `gh` and `git` read the role's App token from
@@ -1026,7 +1035,9 @@ following it, and removes that directory when the generation ends: a role starte
 never waits on the kubelet to refresh a Secret, and no credential is in an argv, an environment
 value, a log or an error. The role's own agent sees only its own private directory, inside its
 namespaces, so it can read its own generation's credentials, as a pane can; it cannot read another
-role's. A role process is addressed by the pod's uid, its role and its generation (the
+role's. What the container mounts for the pod rather than for a role is every role's alike: the
+operator's providers Secret (`provider_keys`) and, under `runtime.kubernetes.agent_secrets`, the
+projected broker token. A role process is addressed by the pod's uid, its role and its generation (the
 incarnation `<pod uid>/<generation>`): in a healthy running pod,
 starting, suspending or recovering one role never restarts the pod or touches another role. A new generation of a role
 in a running pod is a new child of its launcher. A pod is replaced after it dies, when it was not
@@ -1163,8 +1174,9 @@ the old sessions gone — the same path a root re-admitted after its own tree's 
 
 Before the daemon opens its store, so before any schema write, image probe or reconcile, it checks
 that Agent Sandbox is installed and refuses a namespace that holds a Sandbox of its project whose pod
-is not exactly the launchers its labels name — six for an issue's (`legion.dev/issue`), the
-controller's alone for the project controller's (`legion.dev/role=controller` with no tree) — or that
+template is neither of the containers its labels allow — for an issue's (`legion.dev/issue`), the one
+`roles` container or, from the layout before contract 37, exactly the six role containers; for the
+project controller's (`legion.dev/role=controller` with no tree), the one `controller` container — or that
 owns no volume claim template, or one not named `issue`, naming every such Sandbox, each with its
 reason, and how many there are. That catches every per-claim Sandbox of the layout before issue
 pods, running or suspended, the controller Sandbox a `controller: daemon` daemon made before the
@@ -1259,16 +1271,20 @@ runs the earlier release:
 
    The query lists every claim that records a Sandbox locator at all, which is stricter than the
    boot check: on the earlier release every such locator is a per-claim one.
-5. **Dump the database** in pg_dump's custom format, `pg_dump -Fc -f <dump file> '<postgres_dsn>'`
-   with the daemon's `postgres_dsn`, so a restore can leave tables out (`pg_restore -L`). It is
-   the only way back ([Rolling back](#rolling-back-the-upgrade)).
+5. **Dump the database**, `pg_dump -Fc -T omp_session_files -T omp_session_files_parts -f <dump
+   file> '<postgres_dsn>'` with the daemon's `postgres_dsn`. It is the only way back ([Rolling
+   back](#rolling-back-the-upgrade)). The two `-T` options leave out Oh My Pi's session tables:
+   where they share the daemon's database under a login of their own, the daemon's login cannot
+   read them and a `pg_dump` that names them exits 1 with `permission denied for table
+   omp_session_files`, and a restore of a dump without them leaves every session as it stands.
 6. **Roll this release out in one step:**
    - the daemon at this release, with its `legion.yaml` at this release's shape:
-     `runtime.kubernetes.issue_volume` where the file set `tree_volume`, and one
-     `resources.issue` entry where it set a `resources.<role>` entry per role
-     ([Configuration](#configuration) names each refusal); keep a copy of the file's
-     `runtime.kubernetes.resources` block as it was, since a rollback puts it back (the earlier
-     release refuses the `issue` entry);
+     `runtime.kubernetes.issue_volume` where the file set `tree_volume`, one `resources.issue`
+     entry where it set a `resources.<role>` entry per workflow role, and `resources.controller`
+     as `{cpu, memory}` (with `cpu_request` and `memory_request` below them where the requests
+     were lower) where it set that entry's `requests` and `limits` ([Configuration](#configuration)
+     names each refusal); keep a copy of the file's `runtime.kubernetes.resources` block as it
+     was, since a rollback puts it back (the earlier release refuses the `issue` entry);
    - `runtime.kubernetes.image` pinned to a worker image built from it, since the image probe
      refuses a worker image whose `pi-legion` declares another daemon API contract (`ProbeImage` in
      `internal/runtime/sandbox/probe.go`); and
@@ -1367,8 +1383,12 @@ every issue pod is relaunched onto the new image.
 release at contract 37 builds an issue pod with one container, `roles`, whose launcher runs every
 role in multi-role mode, which only an image of that release's `legion` has: pin the worker image
 with the daemon release, since the image probe refuses an image whose `pi-legion` declares another
-contract. **Dump the database first** (`pg_dump -Fc -f <dump file> '<postgres_dsn>'` with the
-daemon's `postgres_dsn`), with the daemon stopped: it is the only way back (below). At boot, store
+contract. A rollback rewrites the database in place and needs no dump (below); a safety copy taken
+with the daemon stopped does no harm, as `pg_dump -Fc -T omp_session_files -T
+omp_session_files_parts -f <dump file> '<postgres_dsn>'` with the daemon's `postgres_dsn`: where
+Oh My Pi's two session tables share that database under a login of their own, the daemon's login
+cannot read them and a `pg_dump` that does not leave them out exits 1 with `permission denied for
+table omp_session_files`. At boot, store
 migration 0051 rewrites every stored claim locator naming a per-role container to `roles`, and the
 boot census passes a pod of either layout and refuses everything else as before. A running issue
 pod whose own containers are exactly the six role names (a container another controller injected
@@ -1381,55 +1401,63 @@ moved address's relaunch does.
 `legion.yaml`'s `resources` takes one `issue` entry in place of the per-role entries
 ([Configuration](#configuration)); keep a copy of the block as it was, which a rollback puts back.
 
-To roll this release back, the database and every issue Sandbox both go back to what the earlier
-release reads. Re-pinning alone boots neither:
+To roll this release back, every stored locator and every issue Sandbox both go back to what the
+earlier release reads. Re-pinning alone boots neither:
 
 - Migration 0051 has no down migration, and the earlier release cannot read what it wrote: it
   refuses an issue pod's locator naming the container `roles` (`sandbox container "roles" does not
   match claim role`, `Locator.Validate` in `internal/runtime/locator.go` before contract 37), which
   it reads as it loads its claims. Nothing refuses the newer schema first: its `Migrate` applies
-  the migrations it has not recorded and compares nothing against the version the database is at
+  each migration it has not recorded and compares nothing against the version the database is at
   (`internal/store/store.go`).
 - Before it opens the database at all, its boot census refuses every issue Sandbox whose template
   is not exactly the six role containers (`legacyIssueSandbox` in
   `internal/runtime/sandbox/install.go` before contract 37): `legacy issue Sandbox <name> runs
   containers [roles], not exactly the launchers its labels name [architect implementer merger
   planner reviewer tester]`. Every Sandbox this release launched a pod into has the one-container
-  template, Suspended or not, and restoring the dump changes no Sandbox.
+  template, Suspended or not.
 
-Deleting such a Sandbox is not the way back: its issue's volume (`issue-<Sandbox name>`) is owned
-by it as controller with `blockOwnerDeletion`, so an ordinary delete takes the volume, and the
-sessions on it, with it. Rewrite each Sandbox's template in place instead, which keeps the Sandbox,
-its uid and so its volume. In this order:
+Do not restore a dump taken before the upgrade. The restored record would be behind Dispatch and
+behind the Sandboxes: a root admitted under this release is restored waiting, the earlier release
+reads Dispatch's newer status at boot and releases it as unslotted, and once its linger ends the
+orphan sweep deletes its Sandbox and, with it, its volume; a pending hand-over the dump holds is
+dropped or cancelled, and the source tree's cleanup or the sweep deletes that volume too. Deleting
+a Sandbox is not the way back either: its issue's volume (`issue-<Sandbox name>`) is owned by it as
+controller with `blockOwnerDeletion`, so an ordinary delete takes the volume, and the sessions on
+it, with it. Reverse 0051 in the live database and rewrite each Sandbox's template in place, which
+keeps the record, every Sandbox, its uid, its tree label and so its volume. In this order:
 
 1. **Stop this release's daemon** (scale its Deployment to zero, or `legion stop`), so nothing
-   launches into a Sandbox while it is rewritten.
-2. **Restore the dump** taken before the upgrade (`pg_dump -Fc`, above). Which form depends on
-   whether Oh My Pi's two session tables (`omp_session_files`, `omp_session_files_parts`) are in the
-   daemon's own database, the one `postgres_dsn` names. Both database stores keep every session as
-   a row of those tables (`Store.InDatabase`, `internal/ompsessions/store.go`); the store says only
-   where the database is: under `session_store: postgres`, the database the URL in
-   `session_dsn_secret` names, and under `session_store: cloudsql-iam`, the database
-   `session_database.name` names in the instance `session_database.instance` names. Under
-   `session_store: pvc`, or when that database is another one than `postgres_dsn`'s, restore the
-   whole dump:
+   launches into a Sandbox or writes a locator while both are rewritten.
+2. **Give every issue pod's locator back its role's container.** Before 0051 an issue pod's role
+   ran in a container named for the claim's role, so the `role` column says what each locator named;
+   the controller's locators still name `controller` and are not touched, and a tmux locator, or one
+   with no `sandbox` member, matches neither statement:
 
    ```sh
-   pg_restore --clean --if-exists --single-transaction -d '<postgres_dsn>' <dump file>
+   psql '<postgres_dsn>' -X -v ON_ERROR_STOP=1 <<'SQL'
+   begin;
+   update claims set locator = jsonb_set(locator, '{sandbox,container}', to_jsonb(role))
+   where locator->>'runtime' = 'sandbox'
+     and locator->'sandbox'->>'container' = 'roles'
+     and role <> 'controller';
+   update claim_capabilities cc set locator = jsonb_set(cc.locator, '{sandbox,container}', to_jsonb(c.role))
+   from claims c
+   where c.token = cc.claim_token
+     and cc.locator->>'runtime' = 'sandbox'
+     and cc.locator->'sandbox'->>'container' = 'roles'
+     and c.role <> 'controller';
+   commit;
+   SQL
    ```
 
-   When it is the same database, under either database store — under `cloudsql-iam`, when
-   `postgres_dsn` connects to that same Cloud SQL instance and names the database
-   `session_database.name` names — a whole restore rewinds the two tables to the dump as well, so
-   every resumed conversation loses its turns since the upgrade. Restore everything but those two
-   tables instead: list the dump's contents, drop every entry naming either table (its definition,
-   its data and its primary key), and restore from the list:
-
-   ```sh
-   pg_restore -l <dump file> | grep -vE ' omp_session_files(_parts)? ' > restore.list
-   pg_restore --clean --if-exists --single-transaction -L restore.list -d '<postgres_dsn>' <dump file>
-   ```
-
+   It prints `UPDATE <n>` twice; a rerun prints `UPDATE 0` twice. A claim this release launched
+   first gets its role's container the same way, so the earlier release loads it too. The row
+   `schema_version` records for 0051 stays and is harmless: the earlier release's `Migrate` checks
+   each of its own migrations against `schema_version` and applies only those it has not recorded
+   (`versionRecorded` in `internal/store/store.go`, the same before contract 37), and every one of
+   them is recorded. The SQL changes only these locators, so Oh My Pi's session tables, wherever
+   they are, keep every turn taken under this release.
 3. **Return every one-container issue Sandbox to the earlier layout's template.** With
    `<namespace>` and `<project>` as in [Upgrading a deployment with running
    trees](#upgrading-a-deployment-with-running-trees) step 4, each patch suspends the Sandbox, which
@@ -1457,153 +1485,39 @@ its uid and so its volume. In this order:
    before it sets it running (`relaunch` in `internal/runtime/sandbox/relaunch.go`), as for any
    Suspended Sandbox. The controller's Sandbox (one `controller` container in both releases), a
    repository cache's and the image probe's carry no `legion.dev/issue` label and are left as they
-   are.
-4. **Give every issue Sandbox back to the tree the restored database holds it for.** This release
-   moves an existing Sandbox to a new tree by rewriting its `legion.dev/tree` label, keeping its
-   uid, its creation time and its volume: a carried child's hand-over at its old tree's cleanup
-   (`handOverSandbox` in `internal/runtime/sandbox/cleanup.go`) and a re-admitted issue's launch
-   (`ensureSandbox` in `relaunch.go`). The earlier release's orphan sweep (`sweep` in
-   `internal/runtime/sandbox/sandbox.go`) keeps an issue Sandbox only while the tree its label
-   names is live in the database (`Store.TreeLive`: a `tree_lifecycles` row whose cleanup is not
-   confirmed) or that tree is the issue's Sandbox home (`Store.IssueSandboxHome` in
-   `internal/store/tree_lifecycle.go`), and otherwise deletes it in the foreground, its volume and
-   the sessions on it with it. A label written after the dump can name a tree the dump never
-   recorded, so the Sandbox's age does not tell which Sandboxes the sweep would take; its label
-   and the restored record do. Read from the restored database the tree each issue's Sandbox is to
-   carry, with the earlier release's own `IssueSandboxHome` rule: the issue's own key while a
-   hand-over of it is pending, otherwise the tree its `issues` row records while that tree's
-   lifecycle is open, or, for a tree with no lifecycle, while the issue waits as a handed-over root
-   or lingers; nothing otherwise, and nothing for an issue the dump does not hold. One case differs
-   from the home: a pending hand-over whose source tree (the tree the `issues` row records) is
-   still live is to carry that source tree, not the issue's own key, since the source root can
-   still reopen and cancel the hand-over (below). Each key is written as the label spells it
-   (`labelValue` in `internal/runtime/sandbox/names.go`): the key itself up to 63 characters, and
-   past that the lowercased key's first 54, a dash, and 8 hex of its SHA-256:
-
-   ```sh
-   psql '<postgres_dsn>' -XAt -F ' ' -v project='<project>' > homes.txt <<'SQL'
-   with homes as (
-     select i.key, case
-         when exists (select 1 from handovers h where h.issue = i.key and not h.cancelled and h.tree = i.tree) then
-           case when exists (select 1 from tree_lifecycles l where l.project = :'project' and l.tree = i.tree
-                               and l.cleanup_confirmed_at is null) then i.tree else i.key end
-         when exists (select 1 from tree_lifecycles l where l.project = :'project' and l.tree = i.tree) then
-           case when exists (select 1 from tree_lifecycles l where l.project = :'project' and l.tree = i.tree
-                               and l.cleanup_confirmed_at is null) then i.tree else '' end
-         when (i.status = 'todo' and i.handed_over and i.key = i.tree) or i.linger_until > now() then i.tree
-         else '' end as home
-     from issues i)
-   select case when length(key) <= 63 then key
-            else left(lower(key), 54) || '-' || left(encode(sha256(convert_to(key, 'UTF8')), 'hex'), 8) end,
-          case when length(home) <= 63 then home
-            else left(lower(home), 54) || '-' || left(encode(sha256(convert_to(home, 'UTF8')), 'hex'), 8) end
-   from homes;
-   SQL
-   ```
-
-   Read too the trees whose lifecycle is live in the restored database (`Store.TreeLive`'s rule: a
-   `tree_lifecycles` row whose cleanup is not confirmed), spelled the same way:
-
-   ```sh
-   psql '<postgres_dsn>' -XAt -v project='<project>' > live.txt <<'SQL'
-   select case when length(tree) <= 63 then tree
-            else left(lower(tree), 54) || '-' || left(encode(sha256(convert_to(tree, 'UTF8')), 'hex'), 8) end
-   from tree_lifecycles where project = :'project' and cleanup_confirmed_at is null;
-   SQL
-   ```
-
-   Then, for each issue Sandbox: delete it, leaving its volume, where its issue has no home; keep
-   its tree label where that tree is live in the restored database or is the tree `homes.txt`
-   names; and otherwise set the label to that tree:
-
-   ```sh
-   kubectl -n <namespace> get sandboxes -l 'legion.dev/project=<project>,legion.dev/issue' \
-     -o jsonpath='{range .items[*]}{.metadata.name} {.metadata.labels.legion\.dev/issue} {.metadata.labels.legion\.dev/tree}{"\n"}{end}' |
-   while read -r name issue tree; do
-     home=$(awk -v issue="$issue" '$1 == issue { print $2 }' homes.txt)
-     if [ -z "$home" ]; then
-       kubectl -n <namespace> delete sandbox "$name" --cascade=orphan
-     elif [ "$home" != "$tree" ] && ! grep -qxF -- "$tree" live.txt; then
-       kubectl -n <namespace> patch sandbox "$name" --type json -p '[
-         {"op": "test", "path": "/metadata/labels/legion.dev~1tree", "value": "'"$tree"'"},
-         {"op": "replace", "path": "/metadata/labels/legion.dev~1tree", "value": "'"$home"'"}]'
-     fi
-   done
-   ```
-
-   The sweep keeps a Sandbox whose label names a live tree, and that tree's own cleanup gives it
-   to its issue's home as the record holds the home then (`CleanupTree` in
-   `internal/runtime/sandbox/cleanup.go`), so its label stays. Relabelling it now would fix the home
-   the dump holds, and the home can still change before that cleanup: a child whose hand-over is
-   pending has its own key as its home, and its old tree's root reopened in its linger cancels the
-   hand-over (`CancelTreeHandovers`, from `internal/admit/admit.go`), which makes that root's tree
-   the child's home again. A Sandbox labelled with the child's key would then name a tree with no
-   lifecycle that is not its issue's home, and the sweep would delete it with its volume. For the
-   same reason a Sandbox this release already handed over to the child's key, after the dump, is
-   given back to the source tree while that tree is live: under the source tree's label the sweep
-   keeps it whether or not the root reopens, and the source tree's cleanup hands it over again if
-   it does not. A relabelled Sandbox otherwise is its issue's home under a tree that is not live,
-   so the sweep keeps it, and
-   the earlier release's launch resumes the issue's claims in it on the same volume. A Sandbox whose
-   issue has no home is one the earlier release holds for no tree, which its sweep or its tree's
-   cleanup would delete with its volume: `--cascade=orphan` deletes the Sandbox alone. The volume
-   stays, with no owner and Agent Sandbox's `agents.x-k8s.io/sandbox-name-hash` label, and when the
-   issue is admitted again the Sandbox the earlier release makes under the same name adopts it,
-   clone and session files as they were. Its role Secrets stay too, with no owner, and the earlier
-   release's next launch replaces each (`writeSecret` in `relaunch.go`).
-5. **Check that nothing is left.** The `get sandboxes` query of step 3, without the loop, prints
-   nothing, and so does this one, which prints every issue Sandbox whose issue has no home, or
-   whose tree label is neither a live tree nor the tree `homes.txt` names:
-
-   ```sh
-   kubectl -n <namespace> get sandboxes -l 'legion.dev/project=<project>,legion.dev/issue' \
-     -o jsonpath='{range .items[*]}{.metadata.name} {.metadata.labels.legion\.dev/issue} {.metadata.labels.legion\.dev/tree}{"\n"}{end}' |
-   awk 'FILENAME == "live.txt" { live[$1] = 1; next } FILENAME == "homes.txt" { home[$1] = $2; next }
-        home[$2] == "" || (home[$2] != $3 && !($3 in live))' live.txt homes.txt -
-   ```
-
-6. **Put `legion.yaml`'s `runtime.kubernetes.resources` block back as it was before the upgrade**
+   are. The same `get sandboxes` query, without the loop, then prints nothing.
+4. **Put `legion.yaml`'s `runtime.kubernetes.resources` block back as it was before the upgrade**
    (the copy kept then: one entry per role, or no block when the file had none). The earlier
    release refuses this release's `issue` entry as it reads the file:
    `runtime.kubernetes.resources key "issue" must be a role (architect, planner, implementer,
    tester, reviewer, merger, controller)` (`readResources` in `internal/config/kubernetes.go`).
    Run the earlier release's `legion start --check-config` on the file before re-pinning it.
-7. **Re-pin the earlier daemon and its worker image together**, and start the daemon.
+5. **Re-pin the earlier daemon and its worker image together**, and start the daemon.
 
-The earlier release then boots: its census passes, and it loads the restored claims. Each claim
-the dump records as running names a pod that is gone, so the daemon logs `supervise: process died`
-with `no pod of sandbox <name> (operatingMode Suspended; Suspended=True PodTerminated)` (or `the
-process ended with a pod the daemon replaced; relaunching it uncharged`, for a claim whose old pod
-this release replaced, which the Sandbox's `legion.dev/displaced-pod` still names) and resumes the
-claim's recorded session in a new pod of six containers on the same volume. A Gone charges one
-launch failure, which the agent's becoming ready clears (`ready` in `internal/supervise/table.go`),
-and a death only when the claim had a task outstanding.
+The earlier release then boots: its census passes, and it loads every claim as this release left
+it. Each claim recorded as running names a pod that is gone, so the daemon logs `supervise:
+process died` with `no pod of sandbox <name> (operatingMode Suspended; Suspended=True
+PodTerminated)` (or `the process ended with a pod the daemon replaced; relaunching it uncharged`,
+for a claim whose old pod this release replaced, which the Sandbox's `legion.dev/displaced-pod`
+still names) and resumes the claim's recorded session in a new pod of six containers on the same
+volume. A Gone charges one launch failure, which the agent's becoming ready clears (`ready` in
+`internal/supervise/table.go`), and a death only when the claim had a task outstanding.
 
-What the rollback loses is what the dump does not hold: the workflow's progress since the upgrade
-(phases, deliveries, records), and every claim this release first launched, whose role starts
-fresh when the workflow next needs it, its session file left unused on the volume. Under
-`session_store: pvc` no session file is lost: they live on the issue's volume, which neither the
-restore nor step 3 touches, and step 4 keeps every volume the earlier release's sweep would have
-taken; a resumed claim continues its file with every turn it took under this release. Under
-`session_store: postgres`, step 2's list restore keeps the two session tables as this release left
-them. An issue whose Sandbox this release released, at the issue's close or its
-tree's cleanup, has no volume left to return; the earlier release, which still records it running,
-finds its volume lost and relaunches its roles as fresh sessions ([Volume
-retention](#volume-retention)).
+The rollback rewinds nothing: the workflow's progress since the upgrade stays in the record, and
+every session stays where it is, on the issue's volume, which neither step 2 nor step 3 touches, or
+in the session tables. The record, the Sandboxes' tree labels and Dispatch stay in step, so the
+earlier release's sweep and tree cleanup read the same trees this release left.
 
-Steps 3 and 4 were run against Agent Sandbox v1.0.3 on a scratch cluster, with the earlier
-release's census itself as the check: before step 3 it refused the one-container Sandbox as
-above; after it, it passed, and the Sandbox kept its uid and its volume, owned by it, with the
-file the `roles` container had written; a Sandbox deleted with `--cascade=orphan` and made again
-under its name adopted the same volume (same uid), file included. Step 4's query and loop, step
-5's check and step 2's list restore were run against Postgres 16 holding the earlier release's
-migrations, with `kubectl` stubbed in the loop: the query gave a pending hand-over its own key,
-an open tree's issues that tree, a confirmed tree's issue nothing and a key past 63 characters
-the label `labelValue` spells for it; the loop relabelled exactly the Sandboxes whose label was
-not their issue's home and deleted with `--cascade=orphan` exactly those with none; and the list
-restore rewound every daemon table, `schema_version` included, while leaving the two session
-tables as they stood. The tree label patch itself was run with `kubectl patch --local`, its
-`test` refusing a label that had changed since the read.
+Step 3 was run against Agent Sandbox v1.0.3 on a scratch cluster, with the earlier release's census
+itself as the check: before step 3 it refused the one-container Sandbox as above; after it, it
+passed, and the Sandbox kept its uid and its volume, owned by it, with the file the `roles`
+container had written. Step 2's SQL was run verbatim on 2026-10-26 against PostgreSQL 16.15
+holding the merge base's migrations 0001 to 0050, with sandbox locators for every workflow role of
+an issue pod, a controller's sandbox locator, a tmux locator, a null locator, one with no
+`container` and one with a null `sandbox`, in both tables: after this release's 0051 and step 2,
+both tables equalled a snapshot taken before 0051, row for row, with `schema_version` still at 51,
+and a second run updated nothing. The safety copy's `pg_dump`, run as a login that cannot read the
+session tables, exited 1 without the two `-T` options and 0 with them.
 
 ### Contract discipline
 
@@ -1881,7 +1795,7 @@ Ephemeral storage is what the `roles` container writes outside every volume: its
 the node's disk — the image's own content and whatever a recipe writes outside the told
 directories — and the `role-homes` disk `emptyDir`, which holds each role's home overlay and its
 `/tmp` and `/var/tmp` ([Anatomy of a Sandbox pod](#anatomy-of-a-sandbox-pod)). Each role's
-private and state directories and the config home are in-memory `emptyDir`s, whose pages the bound
+private and state directories and the pod's shared config home are in-memory `emptyDir`s, whose pages the bound
 does not count, and the issue's temporary directory, cache and data homes and bun install cache,
 the role's own state home and the issue's shared Go caches are on the issue's volume, which the
 bound does not count either.
@@ -2441,12 +2355,17 @@ workflow role (`claim.Roles`: architect, planner, implementer, tester, reviewer,
    connection that ended, `launcher: daemon connection: <why>; reconnecting`, so a connected
    launcher reads apart from one still dialing. The launcher's own lines for a role, and each role
    child's stdout and stderr lines, are prefixed `<role>: `, so the container's one log interleaves
-   every role's lines and `kubectl logs <pod> -c roles | grep '^<role>: '` reads one role's. Each
-   line is whole: the launcher's lines and each generation of a role write through writers of
-   their own, and a generation's last line without a newline is written out as a line of its own
-   once the generation ends. A line the launcher writes for no role (a panic, a failed reap) has
-   no prefix, and when the container ends the daemon quotes those lines after each role's own in
-   that role's detail. As the container's PID 1 the launcher reaps every orphan its PID namespace
+   every role's lines and `kubectl logs <pod> -c roles | grep '^<role>: '` reads one role's. A
+   prefix only ever starts a line: the launcher's lines and each generation of a role write through
+   writers of their own, each holding back a partial line until its newline arrives, and a
+   generation's last line without a newline is written out as a line of its own once the generation
+   ends. A line longer than 64 KiB (`maxLogLine` in `internal/launcher/launcher.go`) is cut there:
+   its first 64 KiB is written as a line of its own and the rest follows on a new line behind the
+   prefix again. A line the launcher writes for no role (a panic, a failed reap) has no prefix, and
+   when the container ends the daemon's detail for a role quotes that role's last 20 lines, its
+   prefix dropped, then the container's last 20 unprefixed lines under `the container's own last
+   lines, no role's:` (`roleLog` in `internal/runtime/sandbox/observe.go`), all read from the log's
+   last 2,000 lines and at most 1 MiB. As the container's PID 1 the launcher reaps every orphan its PID namespace
    adopts (what a `kubectl exec` leaves behind), never a role's own generation, whose exit its role
    reads. A generation whose role-init fails before it starts the shim, setting up the role's
    namespaces, exits 71 (`launcher.RoleInitSetupFailedExit`, a status role-init uses for nothing
@@ -2491,7 +2410,14 @@ NATS nkey seed), the broker's token when the pod enrolls, and the operator's vol
 Every one of them that belongs at or under `/home/legion` (the sessions `subPath` at
 `.omp/profiles/legion/agent/sessions`, the config home at `.config`, an operator's mount there) is
 mounted under `/var/run/legion/home` at the same relative path instead, so `/home/legion` itself
-carries no mount in the `roles` container; each role's namespace binds it back at its own path.
+carries no mount in the `roles` container; each role's namespace binds it back at its own path,
+except the config home. That one is `workspace-init`'s, and no role sees or writes it: each role
+gets a config home of its own at `~/.config`, a copy of the shared one made the first time a
+generation of the role starts in the pod and kept on `role-homes` for the pod's life
+(`/var/run/legion/roles/.homes/<role>/config` in the container's view; `ownConfigHome` in
+`internal/launcher/roleinit_linux.go`), with any mount under the shared config home bound back on
+top. A git `core.fsmonitor` or a jj alias one role writes there so never runs in a sibling's git
+or jj.
 A pod's gh projection names the owners of its creation, so an owner added to the project reaches
 the issue's next pod. The issue's `-boot` Secret holds the provisioning token, projected into
 `workspace-fetch` alone.
@@ -2510,7 +2436,11 @@ mount under it because Linux refuses an overlay over one with mounts locked unde
 privileged namespace, which every container mount is inside a role's user namespace; gVisor
 allows it today, and the layout does not lean on that. `/tmp` and
 `/var/tmp` are binds of the role's own directories on `role-homes`; `/run/lock`, `/var/lock` and
-`/dev/shm` are private small memory filesystems; `/proc` is the role's own. role-init then starts
+`/dev/shm` are private small memory filesystems; `/dev/pts` is a new devpts instance holding only
+the terminals the role opens (`newinstance`, `ptmxmode=0666`, with `/dev/ptmx` bound to it where
+the image's is a node), and `/dev/mqueue` is mounted from the role's own IPC namespace, so it
+shows only that namespace's message queues (`privateDevices`, `roleinit_linux.go`); `/proc` is the
+role's own. role-init then starts
 the shim's argv unchanged as its child, cloned into a nested user namespace that maps uid and gid
 1000 with no capabilities, and stays the PID namespace's init, so when a generation ends every
 process it started ends with it and a role's `kill -9 -1` reaches none of its siblings'. The
@@ -2621,10 +2551,21 @@ reads the same files through `!legion git-credential`
 the `hosts.yml` of the owner in the path git asks about and from nothing else. The shared clone
 names it as its `credential.helper`: `workspace-init provision` is passed it as
 `--credential-helper '!legion git-credential'`. Every role is also told it outside any
-clone, as three git configuration entries git reads after every configuration file
-(`gitCredentialEnv`, `manifest.go`): `GIT_CONFIG_COUNT=3`,
+clone, as five git configuration entries git reads after every configuration file, the clone's
+own `.git/config` among them (`gitConfigPairs`, `manifest.go`): `GIT_CONFIG_COUNT=5`,
 `credential.https://github.com.helper` reset to empty and then set to `!legion git-credential`,
-and `credential.https://github.com.useHttpPath=true`. So every git a role runs, the setup
+`credential.https://github.com.useHttpPath=true`, `core.fsmonitor` set to empty and
+`core.hooksPath=/dev/null`. The issue's roles share the clone and each can write its
+`.git/config` and hooks, so the last two keep a role's `git status` or `git commit` from running an
+fsmonitor program or a hook another role planted, with the first role's credentials. They do not
+make the roles of one issue a boundary against each other: the roles share the checkout by design,
+so a role can change code a sibling then runs (a test the tester runs, a script the reviewer runs)
+and can write other clone settings that run programs (a filter driver, `diff.external`,
+`core.pager`), or the clone's `.jj/repo/config.toml`, which a sibling's jj reads. The issue's roles
+trust one another's writes to the workspace as they did when each ran in a container of its own;
+the namespaces keep a role's tokens and private files out of a sibling's own reads, but code one
+role plants and a sibling runs runs with the sibling's credentials. So every git
+a role runs, the setup
 command's ([Configuration](#configuration)) and an agent's own clone of another repository
 included, answers `https://github.com/<owner>/…` from the role's own files when `<owner>` is an
 owner the bundle holds a directory for (one of the project's) and the role's App is installed on
@@ -3022,11 +2963,11 @@ compared: a change there reaches the pods created after it.
 
 The supervisor relaunches each reported claim at once, through the launch path a death uses: a
 `Resume` of its recorded session, or a `Spawn` when it has not registered yet. What the relaunch
-replaces follows from what moved. A pod whose launchers dial a stale stream, or which lacks the
+replaces follows from what moved. A pod whose launcher dials a stale stream, or which lacks the
 broker enrollment its roles are started against now, cannot run them as a pod created now would,
 and every role of it is reported at once, from the boot that re-adopts them: the first of them
 relaunched replaces the pod, under the pod's launch turn, and the others, whose relaunches wait on
-that turn, resume into the new pod, whose six launchers dial the current stream and mount the
+that turn, resume into the new pod, whose launcher dials the current stream for every role and mounts the
 current enrollment. None of them is charged, and none is found gone when the pod is replaced under
 it. The controller's pod, whose one launcher dials a stale stream, or which lacks the broker
 enrollment under `runtime.kubernetes.agent_secrets`, is replaced the same way at its relaunch. A
@@ -3070,6 +3011,7 @@ operator's context: the daemon's identity creates no pod and has no exec
 ```sh
 kubectl -n legion get pods -l legion.dev/issue=<KEY> --field-selector=status.phase=Running
 kubectl -n legion exec -it <pod> -c roles -- sh
+export HOME=/var/run/legion/home XDG_CONFIG_HOME=/var/run/legion/home/.config   # the pod's config home (below)
 export XDG_STATE_HOME=/legion/scratch/state/architect   # the role's state home (below)
 jj bookmark list --all-remotes legion/<KEY> -R /legion/repos/github.com/<owner>/<repo>
 ```
@@ -3079,7 +3021,15 @@ environment, not any agent's: the `roles` container's spec holds only what the k
 is `POD_UID` from the downward API, and every other variable the agent is told — the operator's
 `runtime.kubernetes.pod.env` included, and among them
 `XDG_STATE_HOME=/legion/scratch/state/<role>`, the role's state home — arrives in its
-launcher's start command (`launchEnvironment`, `manifest.go`). The `export` above sets that one, so
+launcher's start command (`launchEnvironment`, `manifest.go`). The first `export` points jj at the
+pod's shared config home, where `workspace-init` wrote the clone's per-repository configuration
+(`git.abandon-unreachable-commits = false` and no repository identity), and which no role writes:
+the `roles` container mounts it at `/var/run/legion/home/.config`. A role's own `~/.config` is a
+copy of it made in its namespace (`/var/run/legion/roles/.homes/<role>/config` here, holding what
+that role wrote since). The shell's own `~/.config` is the image's, empty, so without the `export`
+the shell's jj reads it, says `Per-repo config not found`, and reads
+jj's default `git.abandon-unreachable-commits = true`, the setting Legion turns off. The second
+sets the state home, so
 an `omp` started in the shell roots its state where the role's agent does rather than under the
 profile's config root; for the agent's whole environment, read `/proc/<agent pid>/environ`, the
 process whose `argv[0]` is `omp` under the role's `legion worker-shim`, as stage 4a's `pod-baseline`

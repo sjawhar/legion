@@ -59,11 +59,20 @@ probes were throwaway shell scripts run in a pod (`nstest*.sh`) and server-side 
 - **Cover and bind back; never rely on a read-only root.** A role sees its own gh, private, state
   and agent-secrets directories because role-init covers `/var/run/legion/roles` with an empty
   memory filesystem and binds only that role's back. The cover is locked, so the agent cannot
-  remove it. A read-only `/` is no fence, because a nested user namespace undoes it. So every
-  path uid 1000 could write in the image is either made the role's own (`/home/legion` as an
-  overlay, `/tmp` and `/var/tmp` as binds of the role's directories, `/run/lock`, `/var/lock` and
-  `/dev/shm` as private memory filesystems) or made root-owned in the image (the two plugin
-  directories).
+  remove it. A read-only `/` is no fence, because a nested user namespace undoes it. So each path
+  uid 1000 could write in the image that a role would run or read from is either made the role's
+  own (`/home/legion` as an overlay, `/tmp` and `/var/tmp` as binds of the role's directories,
+  `/run/lock` and `/dev/shm` as private memory filesystems, which also covers `/var/lock` and
+  `/run/shm`, the image's links to them) or made root-owned in the image (the two plugin
+  directories). The `/usr/lib/systemd/system/*.service` files stay writable and shared by every
+  role: nothing in the pod runs or reads them.
+- **A shared writable thing is a channel between roles, not only a file.** The first layout still
+  shared three: the pod's config home, where one role's git `core.fsmonitor` or jj alias ran in a
+  sibling's git or jj with the sibling's credentials; the container's `/dev/pts`, where any role
+  could open a sibling's terminal; and the container's `/dev/mqueue`, whose POSIX queues every role
+  could read. Each role now gets its own copy of the config home on `role-homes`, its own devpts
+  instance (`newinstance`) and an mqueue mount from its own IPC namespace, and every role's git
+  is told `core.fsmonitor=` and `core.hooksPath=/dev/null` after the shared clone's `.git/config`.
 - **role-init stays the PID namespace's init.** Its exit ends every process of the generation, so
   a stop leaves nothing behind, and no role can signal a sibling.
 - **The home overlay's upper needs a disk `emptyDir`.** An upper on the root filesystem does not

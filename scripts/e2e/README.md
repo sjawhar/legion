@@ -747,6 +747,7 @@ LEGION_E2E_MODEL_GATEWAY_AUDIENCE=<gateway audience> \
 LEGION_E2E_STORAGE_CLASS=gp2 \
 LEGION_E2E_SESSION_DB_PORT=<port> \
 LEGION_E2E_REPO_SECOND_OWNER=<owner>/<name> \
+LEGION_E2E_PREVIOUS_IMAGE=<worker image of main before one container@sha256> \
   bash scripts/e2e/stage4a-sandbox-runtime.sh     # → "stage 4a e2e: PASS", exit 0
 
 # A cluster whose pods cannot reach the devbox at all (GKE's shape), with no model gateway:
@@ -759,6 +760,7 @@ LEGION_E2E_MODEL_ROUTE=key-file \
 LEGION_E2E_STORAGE_CLASS=standard-rwo \
 LEGION_E2E_SESSION_DB_PORT=<port> \
 LEGION_E2E_REPO_SECOND_OWNER=<owner>/<name> \
+LEGION_E2E_PREVIOUS_IMAGE=<worker image of main before one container@sha256> \
   bash scripts/e2e/stage4a-sandbox-runtime.sh     # → "stage 4a e2e: PASS", exit 0
 ```
 

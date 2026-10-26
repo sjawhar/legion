@@ -442,9 +442,10 @@ is queued for it, since the next phase start or re-admission resumes it as befor
 
   Nothing is registered before a refusal, so every later attempt refuses the same way until the
   repository is fixed. Run the commands it names from a shell in the issue's running pod
-  (`kubectl -n legion exec -it <pod> -c roles -- sh`), or, when none runs, in a pod of your own
-  that mounts the issue's volume (`docs/kubernetes.md` in the repository, "A shell on an issue's
-  volume").
+  (`kubectl -n legion exec -it <pod> -c roles -- sh`, then
+  `export HOME=/var/run/legion/home XDG_CONFIG_HOME=/var/run/legion/home/.config` so jj reads the
+  clone's per-repository configuration), or, when none runs, in a pod of your own that mounts the
+  issue's volume (`docs/kubernetes.md` in the repository, "A shell on an issue's volume").
 - **The issue's volume was lost.** The daemon logs
   `supervise: the issue's volume was lost with the session; relaunching a fresh session`. The loss
   is one issue's: its other roles drop the sessions they kept on that volume, and no other issue of
