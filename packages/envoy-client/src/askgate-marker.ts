@@ -275,6 +275,48 @@ export function closeStore(store: string): void {
   rmSync(store, { recursive: true, force: true });
 }
 
+/** A store's name under `<root>/askgate/`, as `askgateStore` makes it: `<pid>-<start>`, or `<pid>`. */
+const STORE_NAME = /^([1-9][0-9]*)(?:-([0-9]+))?$/;
+
+/** The last change to a store: its own or its markers directory's, whichever is later. */
+function storeTouched(store: string): number {
+  const own = statSync(store).mtimeMs;
+  try {
+    return Math.max(own, statSync(join(store, MARKERS)).mtimeMs);
+  } catch (error) {
+    if (hasErrnoCode(error, "ENOENT")) return own;
+    throw error;
+  }
+}
+
+/**
+ * Removes each store under `<root>/askgate/` whose process is gone (a crashed process's, whose
+ * markers no CLI reads) and that nothing changed for MARKER_MAX_AGE_MS. The age also keeps the
+ * store of a process this one cannot see, as in another pid namespace, while that process mints.
+ * A store it cannot remove stays: this is tidiness, so it never stops a call.
+ */
+export function sweepStores(root: string, now: number): void {
+  const parent = join(root, "askgate");
+  let names: string[];
+  try {
+    names = readdirSync(parent);
+  } catch {
+    return;
+  }
+  for (const name of names) {
+    const match = STORE_NAME.exec(name);
+    if (match === null) continue;
+    const store = join(parent, name);
+    try {
+      if (ownerLive({ pid: Number(match[1]), start: match[2] ?? null, store })) continue;
+      if (now - storeTouched(store) <= MARKER_MAX_AGE_MS) continue;
+      rmSync(store, { recursive: true, force: true });
+    } catch {
+      // Gone since the listing, or not this user's to remove.
+    }
+  }
+}
+
 /** Records the gate's mode in its store, for the CLI to read. */
 export function setStoreMode(store: string, mode: AskgateMode): void {
   openStore(store);
