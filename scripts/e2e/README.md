@@ -1965,6 +1965,58 @@ outbox lanes are the real ones. `MERGED_ROOT_WAITS_EVIDENCE_DIR` (default a fres
 directory, kept and printed) keeps the transcript, the `nats-server`'s log and the daemon's own,
 which the driver writes through `LEGION_E2E_DAEMON_LOG`.
 
+## lib/held-port.py
+
+Starts a server on a TCP port the kernel chose, and holds that port from the choice until the
+server serves on it, so nothing else can take it in between. Python 3.9 or later, standard library
+only. It replaces picking a port that was free a moment earlier and passing its number: such a port
+can be taken before the server binds it, and the bind then fails with `address already in use`. The
+server must adopt an inherited listening socket: `ENVOY_LISTEN_FD` (envoy-listener),
+`DISPATCH_LISTEN_FD` (envoy-dispatch) or `LEGION_LISTEN_FD` (`legion start`).
+
+```sh
+# One server: the helper listens on 127.0.0.1:0 and becomes the server.
+python3 scripts/e2e/lib/held-port.py exec --port-file "$work/dispatch.port" \
+  --fd-env DISPATCH_LISTEN_FD \
+  --env DISPATCH_PORT={port} --env DISPATCH_SERVER_URL=http://127.0.0.1:{port} \
+  -- "$work/envoy-dispatch" &
+server_pid=$!                       # the server's own PID: the helper executes it in place
+
+# A port that outlives restarts: a keeper holds it, and each start receives a copy.
+python3 scripts/e2e/lib/held-port.py keep --port-file "$work/listener.port" --socket "$work/listener.sock" &
+keeper_pid=$!                       # wait for listener.port before the first start
+python3 scripts/e2e/lib/held-port.py exec --from "$work/listener.sock" \
+  --fd-env ENVOY_LISTEN_FD --env PORT={port} -- "$work/envoy-listener" &
+```
+
+`exec [--host H | --from SOCKPATH] [--port-file F] --fd-env NAME [--env K=V]... -- CMD [ARG]...`
+opens a listening socket on `H:0` (default `127.0.0.1`; an IPv6 address such as `::1` works) or,
+with `--from`, receives one from the keeper at `SOCKPATH`. It puts the socket on descriptor 3,
+inheritable, and keeps no other copy. It replaces `{port}` in each `--env` value and in CMD and
+its arguments, sets each `K=V` and `NAME=3`, writes the port and a newline to F (a temporary file in
+F's directory, then a rename, so a reader never sees half a number) and executes CMD in its own
+process: `$!` is the server's PID. A failure before CMD runs exits 1 and names what failed on
+stderr; a CMD that cannot be executed exits 127 (not found) or 126, after F was written. Either way
+the socket closes with the process and the port is free again.
+
+`keep [--host H] --port-file F --socket SOCKPATH` holds one listening socket for its whole life and
+serves the unix socket `SOCKPATH`, answering each connection with a copy of the held socket
+(SCM_RIGHTS). It writes F only once `SOCKPATH` listens, so a reader of F can start an
+`exec --from` at once. Every server started from it serves the same port, and a restart cannot
+lose the port to another process. It runs until killed: SIGTERM or SIGINT exits 0 and removes
+`SOCKPATH`; the caller's cleanup kills it.
+
+Between two servers, a kept port still listens. The kernel accepts a connection into the socket's
+queue and nothing answers it until the next server starts and accepts it. A check that the server
+is down therefore sees a hang, not a refusal: poll with a timeout (`curl --max-time 2`) and take the
+timeout for down.
+
+`held-port.test.ts` runs the real envoy-listener of this checkout through both commands: it serves
+on the port the port file names in the helper's own PID, a competing bind is refused before the
+server runs, the listener holds the socket only on its own close-on-exec copy, a command that
+cannot run frees its port, and a keeper keeps its port, unanswered, between two listeners. It
+builds the listener with `go`, so CI runs it after `setup-go`.
+
 ## lib/free-port.sh
 
 Prints one TCP port that nothing listens on, for a stage proof to hand a binary that binds it
