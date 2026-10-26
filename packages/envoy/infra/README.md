@@ -218,16 +218,19 @@ leaving Dispatch down. Create the class before, or outside, the program that set
 `system-` prefix is refused: Kubernetes reserves it for `system-cluster-critical` and
 `system-node-critical`, which outrank every workload so the cluster's own components are placed
 first. A pod's priority decides which pods the scheduler may preempt to place it, when its class
-allows preemption, and ranks it among the pods a node under memory or disk pressure evicts that
-alike do, or alike do not, use more than they request. Like `appCpu`, a change to it replaces the
-app's pods.
+allows preemption, and, among pods that alike exceed (or alike stay within) their requests,
+decides which a node under memory or disk pressure evicts first. Like `appCpu`, a change to it
+replaces the app's pods.
 
 `appPdbMinAvailable`, from 1 to `replicas`, registers the PodDisruptionBudget `<hostname>` with
 that `minAvailable`. The `safe-to-evict` annotation above already holds off the autoscaler's
 scale-down and node auto-upgrade for up to seven days; the budget also makes a drain wait, a
 manual upgrade, a node repair or an auto-upgrade past that window among them, and at `replicas`
-it refuses every voluntary eviction. It keeps Kubernetes' default `unhealthyPodEvictionPolicy`,
-`IfHealthyBudget`, so it holds a pod that is not ready too while the budget is not met:
+it refuses every voluntary eviction. So at one replica with `appPdbMinAvailable` 1, every drain
+of the app's node waits: `kubectl drain` waits with no limit (until its own `--timeout`, if one is
+given), and a GKE upgrade waits up to an hour (below). It keeps Kubernetes' default
+`unhealthyPodEvictionPolicy`, `IfHealthyBudget`, so it holds a pod that is not ready too while
+the budget is not met:
 `envoy-dispatch` reports not ready whenever NATS or Postgres is briefly out of reach (the front
 door's own eviction in the same drain is one way), and evicting it then would turn that into a
 cold restart. A drain of a pod that stays broken waits the longer for it: GKE respects a budget for
