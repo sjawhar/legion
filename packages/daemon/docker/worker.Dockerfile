@@ -332,9 +332,10 @@ RUN set -eu; \
 # runtime-base: debian:trixie-slim for its git (2.47; jj 0.45's git backend needs >= 2.42 — bookworm
 # and bookworm-backports stop at 2.39.5). The dynamically linked binaries copied in below were built
 # or fetched on bookworm; trixie's newer glibc runs them, and the probe RUN below proves it.
-# Every package the image carries is installed by this stage's one apt RUN: a package installed in a
-# later layer would be missing from the notices file's Debian list, which the debian-packages stage
-# reads from this stage's dpkg database. ENV, USER and WORKDIR belong in the final stage, not here:
+# No later layer may install a package: the image's Debian packages are the base's own and those this
+# stage's one apt RUN adds, and the debian-packages stage lists them from this stage's dpkg database,
+# so a package installed in a later layer would be missing from the notices file. ENV, USER and
+# WORKDIR belong in the final stage, not here:
 # TestImageEnvIsWhatTheWorkerImageSets (packages/daemon/internal/runtime/sandbox/operatorpod_test.go)
 # reads the last stage's ENV only.
 FROM mirror.gcr.io/library/debian:trixie-slim AS runtime-base
