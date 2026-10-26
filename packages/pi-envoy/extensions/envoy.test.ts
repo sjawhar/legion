@@ -3992,6 +3992,39 @@ console.log(JSON.stringify(args));
       expect(existsSync(store)).toBe(false);
       expect(notifications).toEqual([]);
     }, 30_000);
+    // A record AskGate cannot write after a switch turns the CLI's check off for that session, so
+    // the user is told at once, as at session start, and not only in the log.
+    test("a record that cannot be written after a switch reaches the user as a notice", async () => {
+      gateOn();
+      const { default: envoyExtension } = await import("./envoy.ts?askgate-record-switch-fails");
+      const fixture = allHandlers();
+      envoyExtension(fixture.pi);
+      const notifications: string[] = [];
+      await fixture.handlers.get("session_start")?.({}, gateContext(notifications));
+      expect(notifications).toEqual([]);
+      const dir = sessionDirectory(process.env, "ses_askgate_locked");
+      mkdirSync(dir, { recursive: true });
+      chmodSync(dir, 0o500);
+      try {
+        const locked = {
+          ...gateContext(notifications),
+          sessionManager: {
+            ...topLevelSession,
+            getSessionId: () => "ses_askgate_locked",
+            getLeafId: () => null,
+          },
+        } as SessionContext;
+        await fixture.handlers.get("session_switch")?.({ reason: "new" }, locked);
+        expect(notifications).toEqual([
+          expect.stringContaining(
+            "envoy: AskGate could not write its record for session ses_askgate_locked"
+          ),
+        ]);
+        await fixture.handlers.get("session_shutdown")?.({}, locked);
+      } finally {
+        chmodSync(dir, 0o700);
+      }
+    }, 30_000);
     test("no record is written with the switch off, with Dispatch off, or by a task subagent's instance", async () => {
       // The switch off: this suite's default envoy.json turns AskGate off.
       process.env.DISPATCH_URL = "http://dispatch.test";

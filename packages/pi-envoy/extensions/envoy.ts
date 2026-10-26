@@ -882,8 +882,9 @@ export default function envoyExtension(pi: PiApi): void {
   // It also names the CLI state root (`DISPATCH_STATE_DIR`, unless it is already set), so a
   // command that changes HOME or XDG_STATE_HOME still finds the session's ledger and AskGate
   // record. Oh My Pi refreshes the shell's environment after `session_start`, `session_switch`
-  // and `session_branch`; any other caller refreshes it itself.
-  const bindDispatchSession = (id: string): void => {
+  // and `session_branch`; any other caller refreshes it itself. A caller after `session_start`
+  // passes `ui`, so a record it cannot write is a notice at once: the start notices are shown once.
+  const bindDispatchSession = (id: string, ui?: SessionContext["ui"]): void => {
     process.env.DISPATCH_STATE_DIR ||= sessionStateRoot(process.env);
     if (id === "") {
       delete process.env.DISPATCH_SESSION_ID;
@@ -900,7 +901,8 @@ export default function envoyExtension(pi: PiApi): void {
       } catch (error) {
         const notice = `AskGate could not write its record for session ${id} (${messageFor(error)}), so the dispatch CLI does not ask for AskGate's marker there: a Dispatch write AskGate cannot read posts unreviewed.`;
         logger.warn(notice);
-        askgateNotices.push(notice);
+        if (ui === undefined) askgateNotices.push(notice);
+        else ui.notify(`envoy: ${notice}`, "warning");
       }
     }
     dispatchLedger = {
@@ -2246,7 +2248,7 @@ export default function envoyExtension(pi: PiApi): void {
       // A move with no session event refreshed no shell environment: name the live id, and
       // refresh the snapshot the shell takes, as the host does after a session event.
       if ((process.env.DISPATCH_SESSION_ID ?? "") !== host) {
-        bindDispatchSession(host);
+        bindDispatchSession(host, context.ui);
         procmgr.refreshShellConfigCache();
       }
       tellIdChanged(host);
@@ -2705,7 +2707,9 @@ export default function envoyExtension(pi: PiApi): void {
     reason: SessionSwitchReason | undefined,
     context: SessionContext
   ): Promise<void> => {
-    if (!(await isSubagent(context))) bindDispatchSession(context.sessionManager.getSessionId());
+    if (!(await isSubagent(context))) {
+      bindDispatchSession(context.sessionManager.getSessionId(), context.ui);
+    }
     await rebind(reason, context);
   };
   pi.on("session_switch", (event, context) => rebindDispatch(event.reason, context));
