@@ -2,6 +2,7 @@ import { resolve as resolvePath } from "node:path";
 import type {
   Actor,
   Advised,
+  ArchitectureSource,
   Artifact,
   ArtifactBlock,
   ArtifactUploadResponse,
@@ -540,13 +541,32 @@ async function architectureGuidance(
   if (components.mode === "none" || components.ids.length > 0) return undefined;
 
   try {
-    if ((await client.getArchitectureSource(project)) === null) {
-      return undefined;
-    }
+    if ((await client.listArchitectureSources(project)).length === 0) return undefined;
     return `Project ${project} has an architecture model, but this issue is not linked to any of its current components. ${architectureComponentsAction}`;
   } catch (error) {
     return `Could not check whether project ${project} has an architecture model: ${messageFor(error)}. ${architectureComponentsAction}`;
   }
+}
+
+/** One source's answer to `dispatch architecture-sync`: its imported commit, or the recorded
+ *  failure and what of that source's model stays up. A source re-saved on another branch has no
+ *  recorded commit yet but keeps its earlier components until an import replaces them. */
+function architectureSyncLines(project: string, source: ArchitectureSource): string {
+  if (source.last_error === null) {
+    return `Synced ${project} architecture from ${source.repo}@${source.branch}: commit ${source.last_commit ?? "unknown"} (${source.last_sync_at ?? "unknown time"}).`;
+  }
+  let kept: string;
+  if (source.last_commit !== null) {
+    kept = `The previous model of ${source.repo} stays up (commit ${source.last_commit}).`;
+  } else if (source.components > 0) {
+    kept = `The previous model of ${source.repo} stays up (${source.components} ${source.components === 1 ? "component" : "components"}).`;
+  } else {
+    kept = `No model has ever imported from ${source.repo}.`;
+  }
+  return [
+    `Sync failed for ${project} (${source.repo}@${source.branch}): ${source.last_error}`,
+    kept,
+  ].join("\n");
 }
 
 interface DuplicateCandidateShape {
@@ -932,6 +952,20 @@ function argumentProblems(tool: string, args: ToolArguments): string[] {
         problems.push(
           "blocks lists the live document, the one dispatch doc-edit changes; name no version"
         );
+      }
+      break;
+    }
+    case "dispatch_issues": {
+      if (optionalBoolean(args, "all") === true) {
+        const paging = [
+          ...(optionalNumber(args, "limit") === undefined ? [] : ["--limit"]),
+          ...(optionalNumber(args, "offset") === undefined ? [] : ["--offset"]),
+        ];
+        if (paging.length > 0) {
+          problems.push(
+            `--all takes every matching issue in one unpaged read, so it cannot be combined with ${paging.join(" or ")}: name --all on its own, or page with --limit and --offset`
+          );
+        }
       }
       break;
     }
@@ -3122,23 +3156,31 @@ export async function executeDispatchTool(
       const updatedSince = optionalString(args, "updated_since");
       // The zod spec already refused anything but one of ISSUE_ROUTE_STATUSES.
       const routeStatus = optionalString(args, "route_status") as IssueRouteStatus | undefined;
-      const page = await client.listIssuePage(
-        {
-          project,
-          ...(status === undefined ? {} : { status }),
-          ...(parent === undefined ? {} : { parent }),
-          ...(label === undefined ? {} : { label }),
-          ...(priority === undefined ? {} : { priority }),
-          ...(updatedSince === undefined ? {} : { updated_since: updatedSince }),
-          ...(routeStatus === undefined ? {} : { route_status: routeStatus }),
-        },
-        // The tool's schema has already refused a limit outside 1..MAX_ISSUE_PAGE_LIMIT and a
-        // negative or fractional offset.
-        {
-          limit: optionalNumber(args, "limit") ?? DEFAULT_ISSUE_PAGE_LIMIT,
-          offset: optionalNumber(args, "offset") ?? 0,
-        }
-      );
+      const filters = {
+        project,
+        ...(status === undefined ? {} : { status }),
+        ...(parent === undefined ? {} : { parent }),
+        ...(label === undefined ? {} : { label }),
+        ...(priority === undefined ? {} : { priority }),
+        ...(updatedSince === undefined ? {} : { updated_since: updatedSince }),
+        ...(routeStatus === undefined ? {} : { route_status: routeStatus }),
+      };
+      // --all reads the whole filtered listing in one request, which Dispatch answers as a bare
+      // array; argumentProblems has already refused it beside --limit or --offset. Everything
+      // else pages exactly as before, the tool's schema having refused a limit outside
+      // 1..MAX_ISSUE_PAGE_LIMIT and a negative or fractional offset.
+      const page =
+        optionalBoolean(args, "all") === true
+          ? await client.listAllIssues(filters).then((issues) => ({
+              issues,
+              total: issues.length,
+              limit: issues.length,
+              offset: 0,
+            }))
+          : await client.listIssuePage(filters, {
+              limit: optionalNumber(args, "limit") ?? DEFAULT_ISSUE_PAGE_LIMIT,
+              offset: optionalNumber(args, "offset") ?? 0,
+            });
       const { total, limit, offset } = page;
       const rows = page.issues.map((row) => ({
         key: row.key,
@@ -3223,24 +3265,21 @@ export async function executeDispatchTool(
     }
     case "dispatch_architecture_sync": {
       const project = stringArg(args, "project");
-      const source = await client.syncArchitectureSource(project);
-      const at = source.last_sync_at ?? "unknown time";
+      const repo = optionalString(args, "repo");
+      const sources =
+        repo === undefined
+          ? await client.syncArchitectureSources(project)
+          : [await client.syncArchitectureSource(project, repo)];
       return {
-        text:
-          source.last_error === null
-            ? `Synced ${project} architecture from ${source.repo}@${source.branch}: commit ${source.last_commit ?? "unknown"} (${at}).`
-            : [
-                `Sync failed for ${project} (${source.repo}@${source.branch}): ${source.last_error}`,
-                source.last_commit === null
-                  ? "No model has ever imported for this project."
-                  : `The previous model stays up (commit ${source.last_commit}).`,
-              ].join("\n"),
+        text: sources.map((source) => architectureSyncLines(project, source)).join("\n"),
         details: {
           project,
-          repo: source.repo,
-          branch: source.branch,
-          commit: source.last_commit,
-          error: source.last_error,
+          sources: sources.map((source) => ({
+            repo: source.repo,
+            branch: source.branch,
+            commit: source.last_commit,
+            error: source.last_error,
+          })),
         },
       };
     }
