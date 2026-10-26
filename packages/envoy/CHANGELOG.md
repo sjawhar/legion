@@ -4,6 +4,32 @@
 
 ### Added
 
+- A Dispatch project imports its component model from any number of architecture sources, one
+  per repository, each on its own branch, and its model is every source's components together
+  (INFRA-391). `GET /api/v1/projects/{key}/architecture-sources` lists a project's sources (`[]`
+  with none); `PUT /api/v1/projects/{key}/architecture-sources/{owner}/{repo}` `{branch}` adds a
+  source, or changes the branch of the one it already is, after proving the GitHub App can read
+  the repository and that `branch` is the name of a branch it has (an exact
+  `git/ref/heads/{branch}` read): a missing branch, a commit SHA, a relative ref such as
+  `main~1`, `HEAD` or a `refs/` path is `409 SOURCE_ACCESS` naming the value and the repository,
+  as a credential problem is, and nothing is written;
+  `DELETE` on the same path removes that source and its components, and no other source's;
+  `POST …/architecture-sources/{owner}/{repo}/sync` imports one source and
+  `POST /api/v1/projects/{key}/architecture-sources/sync` every source, each attempted whatever
+  another's import did and each answering on its own row. A source row carries `components`, how
+  many components it projects; `GET /api/v1/projects/{key}/architecture` carries `sources` and
+  each component's `source` repository; `architecture.synced` and `architecture.sync_failed`
+  name the source's `repo` and `branch`. One source's failed import keeps that source's previous
+  components and touches no other source's. Component ids stay project-wide: an import whose
+  model holds an id another source of the project already has fails for that source alone,
+  naming the id and the repository that holds it, and an issue may name components of any
+  source of its project. Settings lists one row per source with its component count and its own
+  Refresh and Delete; the architecture page has a header line per source with its own Refresh,
+  and hatches only the components of a source that failed or is stale; a component's details
+  name its repository; an issue's component picker offers every source's components. Migration
+  `0117` adds `architecture_sources.id` and `components.source_id`: every existing source and
+  component reads `0`, so a project with one source keeps it, its components and every issue
+  attachment, and nothing re-imports.
 - A project's default assignee, the last step of an issue create's assignee chain: an issue created
   with no assignee, by nobody (the shared token), under no parent or under a parent with nobody on
   it, goes to the person the project names; nothing already filed, and no create that names an
@@ -708,6 +734,34 @@
   image back. Only this release's API holds the depth limit, so an earlier release serving over
   `0113` can build a deeper chain again, and every read of that chain's issues fails (500) until an
   ancestor that still reads has its parent set to null.
+- **Breaking:** migration `0117` is a stop-the-world migration. Deploy it with no server of the
+  earlier release running, and never start a release older than `0117` over it again: stop the
+  earlier release, or scale it to zero, before this release boots (a Recreate rollout, never a
+  rolling one), and recover a failed deploy forward rather than by rolling the image back. Over
+  the new schema an earlier release's architecture-source save answers `500`, since no unique
+  index covers `project_key` alone; its import deletes every component of the project before
+  inserting one source's, so a model with components fails on the new `source_id` column and one
+  with none deletes every source's components; and its delete removes every source of the
+  project. Its census counts components whose project has no architecture source, which only
+  direct SQL writes; repair them on the release still serving with
+  `delete from components c where not exists (select 1 from architecture_sources s where s.project_key = c.project_key)`
+  and take the census again (`cmd/dispatch/README.md`, "Database migrations").
+- **Breaking:** the singular architecture source routes `PUT` and `DELETE
+  /api/v1/projects/{key}/architecture-source` are gone. A source is addressed by its repository
+  under `/api/v1/projects/{key}/architecture-sources/{owner}/{repo}`, and a project's sources are
+  listed at `/api/v1/projects/{key}/architecture-sources`; the `dispatch` CLI of this release uses
+  the new routes. Two singular routes are kept for `dispatch` clients older than this release,
+  each call logged at warn naming the route and the project:
+  `GET /api/v1/projects/{key}/architecture-source`, which those clients read on every issue
+  create, answers `200 null` when the project has no source, otherwise its first source's row,
+  `404` for an unknown project, and the list route replaces it;
+  `POST /api/v1/projects/{key}/architecture-source/sync`, which their `dispatch architecture-sync`
+  calls, imports every source as `POST …/architecture-sources/sync` does and answers one row: the
+  first source in the order they were added whose `last_error` is set, or the first source when
+  none failed. A project with no source is still `404 SOURCE_NOT_FOUND`, and a failure that could
+  not be recorded `500`; a credential or branch problem, once a `409 SOURCE_ACCESS`, is recorded
+  on its row and answers `200` with that `last_error`, which those clients print as
+  `Sync failed for …`. `POST …/architecture-sources/sync` replaces it.
 - **Breaking:** the Dispatch auto-deployer (`deploy/scripts/autodeploy.sh`) accepts `DATABASE_URL`
   in one form only, `postgres[ql]://<user>[:<password>]@<host>[:<port>]/<database>`, with an
   optional query of `sslmode`, `connect_timeout` and `application_name`.
