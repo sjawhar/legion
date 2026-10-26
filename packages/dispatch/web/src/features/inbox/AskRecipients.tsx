@@ -8,6 +8,7 @@ import { QueryError } from "../../components/QueryError";
 import { useIsHuman } from "../../hooks/useIsHuman";
 import { textMutedOnSurface } from "../../theme/classes";
 import { useAgents } from "../conversation/useAgents";
+import { ROUTE_REACH_UNKNOWN, ROUTE_REACH_UNKNOWN_TITLE } from "../issue/RouteReach";
 import { UnsubscribeDialog } from "../issue/UnsubscribeDialog";
 import { sessionLabel } from "../refs/actor";
 import { LiveDot, sessionChipClassName, sessionRemoveButtonClassName } from "../refs/SessionChip";
@@ -75,11 +76,6 @@ export interface AskRecipientsProps {
    *  listener did not answer, so a null `routeHolder` says nothing about who receives it. */
   routeStatus: IssueRouteReach["route_status"];
 }
-
-/** The issue page's marker for a route the listener could not judge (`IssueHeader`). */
-const ROUTE_REACH_UNKNOWN = "Route reach unknown";
-const ROUTE_REACH_UNKNOWN_TITLE =
-  "The Envoy listener did not answer, so Dispatch cannot tell whether anyone receives this route.";
 
 /** A row the ask reaches through its issue rather than through a follow or a subscription: the
  *  claimant (`via claim`) or the route (`via route`). Neither is removable from the card; the

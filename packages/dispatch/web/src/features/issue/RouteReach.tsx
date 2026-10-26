@@ -5,6 +5,13 @@ import { calloutWarningBg, calloutWarningBorder, calloutWarningText } from "../.
 
 type RoutedIssue = IssueRouteReach & { readonly route: string | null };
 
+/** The marker for a route the Envoy listener could not judge (`route_status: unknown`), shown in
+ *  the issue header and on an ask's route row (`AskRecipients`). */
+export const ROUTE_REACH_UNKNOWN = "Route reach unknown";
+/** The title that explains `ROUTE_REACH_UNKNOWN`. */
+export const ROUTE_REACH_UNKNOWN_TITLE =
+  "The Envoy listener did not answer, so Dispatch cannot tell whether anyone receives this route.";
+
 /**
  * The warning an issue carries wherever it is shown - the issue header, a List row, a Board
  * card - when its route reaches nobody: `route_status` is `no_holder`, meaning a role nobody

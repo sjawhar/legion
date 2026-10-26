@@ -68,7 +68,11 @@ import { PriorityEditor } from "./PriorityControl";
 import { ProgressChips } from "./ProgressChips";
 import { stateForIssue } from "./pins";
 import { RepoControl } from "./RepoControl";
-import { UnreachableRouteMarker } from "./RouteReach";
+import {
+  ROUTE_REACH_UNKNOWN,
+  ROUTE_REACH_UNKNOWN_TITLE,
+  UnreachableRouteMarker,
+} from "./RouteReach";
 import { SubscribedAgents } from "./SubscribedAgents";
 import { type IssueUpdateInput, useIssueDrafts } from "./useIssueDrafts";
 import type { IssuePriorityWrite } from "./useIssuePriority";
@@ -463,9 +467,9 @@ export function IssueHeader({
                 <span
                   className={`shrink-0 text-xs ${textMutedOnSurface}`}
                   data-testid="issue-route-unknown"
-                  title="The Envoy listener did not answer, so Dispatch cannot tell whether anyone receives this route."
+                  title={ROUTE_REACH_UNKNOWN_TITLE}
                 >
-                  Route reach unknown
+                  {ROUTE_REACH_UNKNOWN}
                 </span>
               ) : null}
             </>
