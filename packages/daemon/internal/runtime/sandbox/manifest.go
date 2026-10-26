@@ -425,8 +425,11 @@ func (r *Runtime) podTemplate(l launch) podTemplate {
 		AutomountServiceAccountToken:  new(false),
 		ServiceAccountName:            r.pod.ServiceAccount,
 		EnableServiceLinks:            new(false),
+		// OnRootMismatch: every file on the pod's disk is already the pod user's, so the kubelet skips
+		// re-owning the whole volume at each mount; on a full volume that walk took about 35 s.
 		SecurityContext: &corev1.PodSecurityContext{
 			RunAsNonRoot: new(true), RunAsUser: new(int64(podUser)), RunAsGroup: new(int64(podUser)), FSGroup: new(int64(podUser)),
+			FSGroupChangePolicy: new(corev1.FSGroupChangeOnRootMismatch),
 		},
 		RuntimeClassName:  new(gvisor),
 		NodeSelector:      r.nodeSelector(),
