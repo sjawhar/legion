@@ -676,6 +676,22 @@ for (const fixture of [
       { ...prTitleOnPullRequest, check_suite_id: 11, event: "pull_request_review" },
     ],
   },
+  // GitHub leaves a run whose event it does not evaluate out of a pull request's checks (an inline
+  // review comment's run on sjawhar/legion#2234 and #2059): its failure or wait does not count.
+  {
+    checkRuns: [
+      { check_suite: { id: 10 }, conclusion: "success", id: 1, status: "completed" },
+      { check_suite: { id: 11 }, conclusion: "failure", id: 2, status: "completed" },
+      { check_suite: { id: 12 }, conclusion: null, id: 3, status: "queued" },
+    ],
+    checks: "success",
+    name: "a failed and a waiting check of an event GitHub does not evaluate",
+    workflowRuns: [
+      prTitleOnPullRequest,
+      { ...prTitleOnPullRequest, check_suite_id: 11, event: "pull_request_review_comment" },
+      { ...prTitleOnPullRequest, check_suite_id: 12, event: "workflow_dispatch" },
+    ],
+  },
 ]) {
   test(`IssuePage renders a merged pull request with ${fixture.name}`, async () => {
     const restore = stubIssuePage(
