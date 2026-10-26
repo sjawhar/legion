@@ -5,18 +5,25 @@ import path from "node:path";
 import { z } from "zod";
 
 /** An Oh My Pi session transcript line: a message, whose assistant content holds each tool call
- * whole (`toolCall`: id, tool name, arguments) and whose tool results name the call they answer
- * and whether the tool refused it (`isError`). Its `tool_execution_start` entries keep only the
- * first 200 characters of the arguments, so nothing here reads them. */
+ * whole (`toolCall`: id, tool name, arguments) and whose tool results name the call they answer,
+ * whether the tool refused it (`isError`) and the tool's own record (`details`; a `bash` result's
+ * holds its `exitCode`). Its `tool_execution_start` entries keep only the first 200 characters of
+ * the arguments, so nothing here reads them. The first line is the header, `{"type":"session",
+ * "id":"<session id>"}`. A background task's report arrives as a line of its own
+ * (`"type":"custom_message"`, `"customType":"async-result"`) whose `content` is its text. */
 export const SessionEntry = z.looseObject({
   type: z.string().optional(),
+  id: z.unknown().optional(),
   timestamp: z.string().optional(),
+  customType: z.string().optional(),
+  content: z.unknown().optional(),
   message: z
     .looseObject({
       role: z.string().optional(),
       toolName: z.string().optional(),
       toolCallId: z.string().optional(),
       isError: z.boolean().optional(),
+      details: z.unknown().optional(),
       content: z
         .array(
           z.looseObject({
@@ -32,6 +39,12 @@ export const SessionEntry = z.looseObject({
     .optional(),
 });
 export type SessionEntry = z.infer<typeof SessionEntry>;
+
+/** The session id the transcript's header names, or undefined when it has no header. */
+export function sessionId(entries: SessionEntry[]): string | undefined {
+  const id = entries.find((entry) => entry.type === "session")?.id;
+  return typeof id === "string" ? id : undefined;
+}
 
 /** The run's own session transcript, parsed whole, or empty when it never got a model turn. A line
  * that does not parse is the rig's fault. */

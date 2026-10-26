@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"log/slog"
-	"os/exec"
 	"strings"
 	"sync"
 	"testing"
@@ -33,14 +32,11 @@ func openWatchedRegistry(t *testing.T, uri string) *SessionRegistry {
 // StopWatch runs in the listener's shutdown before the NATS drain and outside its deadline, so it
 // makes no request of the server: with the server unresponsive it still returns at once.
 func TestStopWatchMakesNoRequestOfTheServer(t *testing.T) {
-	ctr, uri := testnats.Start(t)
+	srv, uri := testnats.Start(t)
 	registry := openWatchedRegistry(t, uri)
 
-	id := ctr.GetContainerID()
-	if out, err := exec.Command("docker", "pause", id).CombinedOutput(); err != nil {
-		t.Fatalf("pause NATS: %v: %s", err, out)
-	}
-	t.Cleanup(func() { _ = exec.Command("docker", "unpause", id).Run() })
+	thaw := srv.Freeze(t)
+	t.Cleanup(thaw)
 
 	started := time.Now()
 	registry.StopWatch()

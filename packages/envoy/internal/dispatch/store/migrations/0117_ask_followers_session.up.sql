@@ -1,0 +1,14 @@
+-- 0117_ask_followers_session.up.sql
+--
+-- The one index an inbound arm of graph_edges still lacked. refs.BacklinkCounts counts a node's
+-- inbound edges by reading only the arms of the view that can point at the node's kind, each
+-- through the index that serves its predicate, rather than planning all fifteen arms of the view
+-- on every call. Every other arm already had its index (0001's refs_to for the mention arm, 0032
+-- for the structural item arms, 0037 and 0038 for the component arms, 0094 for issue_links,
+-- 0009's artifacts_ref_key_key for an artifact's address); the followed_by arm is keyed on
+-- ask_followers.session_id, and the table's primary key is (ask_id, session_id), whose leading
+-- column cannot serve it.
+--
+-- `create index` holds SHARE on ask_followers while it builds, which waits out an open write of
+-- a follower and holds off a new one for that moment. Reads are not held.
+create index ask_followers_session_id on ask_followers (session_id);

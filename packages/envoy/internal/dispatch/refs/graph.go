@@ -3,6 +3,7 @@ package refs
 import (
 	"context"
 	"fmt"
+	"maps"
 	"slices"
 	"strconv"
 	"strings"
@@ -55,8 +56,10 @@ type inboundArm struct {
 }
 
 // mentionsArm is the arm every node kind has: the edges derived from text, which refs stores
-// addressed exactly as the view reads them. Index refs_to (to_kind, to_id).
-const mentionsArm = `select to_id from refs where to_kind = $2 and to_id = any($1)`
+// addressed exactly as the view reads them, less a source of a node kind this build does not
+// read ($3, nodeKinds). Index refs_to (to_kind, to_id). It is the one arm that filter can
+// drop a row from: every structural arm's source is a fixed kind nodeLoaders resolves.
+const mentionsArm = `select to_id from refs where to_kind = $2 and to_id = any($1) and from_kind = any($3)`
 
 // inboundArms is, per node kind, every structural arm of graph_edges whose to side is that
 // kind, read off the view's own definition (migration 0094, which re-states 0038's arms). A
@@ -108,7 +111,7 @@ var inboundArms = map[string][]inboundArm{
 		{"replies_to", `select in_reply_to::text as to_id from messages where in_reply_to is not null and in_reply_to::text = any($1)`},
 	},
 	"session": {
-		// The asks a session follows. Index ask_followers_session_id (migration 0116).
+		// The asks a session follows. Index ask_followers_session_id (migration 0117).
 		{"followed_by", `select session_id as to_id from ask_followers where session_id = any($1)`},
 	},
 	"component": {
@@ -125,11 +128,12 @@ var inboundArms = map[string][]inboundArm{
 }
 
 // BacklinkCounts is how many edges point at each of ids, in one grouped query: the number a
-// list carries beside a row, counted the same way the rows behind it are listed. A node with no
-// inbound edge is absent from the result; the caller decides what zero means. It unions the
-// arms of graph_edges that can point at toKind, each read through its own index, rather than
-// planning the whole view; the counts are the view's, which store's equivalence test holds it
-// to.
+// list carries beside a row, counted the same way the rows behind it are listed. It counts only
+// edges whose source is a node kind this build reads, so the count is the rows its list shows.
+// A node with no inbound edge is absent from the result; the caller decides what zero means. It
+// unions the arms of graph_edges that can point at toKind, each read through its own index,
+// rather than planning the whole view; the counts are the view's, which store's equivalence test
+// holds it to.
 func BacklinkCounts(
 	ctx context.Context,
 	q Queryer,
@@ -145,11 +149,11 @@ func BacklinkCounts(
 	if !addressable {
 		return nil, fmt.Errorf("count %s backlinks: graph node kind %q is not addressable", toKind, toKind)
 	}
-	args := []any{ids, toKind}
+	args := []any{ids, toKind, nodeKinds}
 	mentions := mentionsArm
 	if len(excludeKinds) > 0 {
 		args = append(args, excludeKinds)
-		mentions += ` and not (kind = any($3))`
+		mentions += ` and not (kind = any($4))`
 	}
 	parts := []string{mentions}
 	for _, arm := range arms {
@@ -192,8 +196,8 @@ type edgeRow struct {
 
 // Edges reads a node's edges from graph_edges, newest first, with the other end of each
 // resolved to a node and an excerpt of its text. An edge whose other end no longer exists is
-// omitted. Document mentions carry the source's name as excerpt; the API replaces it with the
-// containing block.
+// omitted, and so is one whose other end is a node kind this build does not know. Document
+// mentions carry the source's name as excerpt; the API replaces it with the containing block.
 func Edges(ctx context.Context, q Queryer, query Query) ([]model.GraphEdge, error) {
 	resolved, err := resolveEdges(ctx, q, query)
 	if err != nil {
@@ -300,8 +304,28 @@ type resolvedNode struct {
 	refKey string
 }
 
-// resolveNodes loads every distinct other end by kind. Artifact ids are uuids on the from side
-// of an edge and ref_keys on the to side; byRefKey says which the ids are.
+// nodeLoader loads the nodes of one kind whose ids are ids into nodes. Artifact ids are uuids on
+// the from side of an edge and ref_keys on the to side; byRefKey says which the ids are.
+type nodeLoader func(ctx context.Context, q Queryer, kind string, byRefKey bool, ids []string, nodes map[[2]string]resolvedNode) error
+
+// nodeLoaders resolves each node kind this build knows. These are node kinds, the ends of an
+// edge, not edge kinds: a node kind a newer build adds to the graph is addressable, listed and
+// counted only once it has an entry here.
+var nodeLoaders = map[string]nodeLoader{
+	"issue":     loadIssueNodes,
+	"artifact":  loadArtifactNodes,
+	"ask":       loadItemNodes,
+	"comment":   loadItemNodes,
+	"message":   loadMessageNodes,
+	"component": loadComponentNodes,
+	"session":   loadSessionNodes,
+}
+
+// nodeKinds is every node kind nodeLoaders resolves, sorted, as the reads that filter
+// graph_edges in SQL bind it.
+var nodeKinds = slices.Sorted(maps.Keys(nodeLoaders))
+
+// resolveNodes loads every distinct other end by kind.
 func resolveNodes(ctx context.Context, q Queryer, byRefKey bool, rows []edgeRow) (map[[2]string]resolvedNode, error) {
 	byKind := make(map[string][]string)
 	seen := make(map[[2]string]struct{})
@@ -315,33 +339,29 @@ func resolveNodes(ctx context.Context, q Queryer, byRefKey bool, rows []edgeRow)
 	}
 	nodes := make(map[[2]string]resolvedNode, len(seen))
 	for kind, ids := range byKind {
-		var err error
-		switch kind {
-		case "issue":
-			err = loadIssueNodes(ctx, q, ids, nodes)
-		case "artifact":
-			err = loadArtifactNodes(ctx, q, byRefKey, ids, nodes)
-		case "ask", "comment":
-			err = loadItemNodes(ctx, q, kind, ids, nodes)
-		case "message":
-			err = loadMessageNodes(ctx, q, ids, nodes)
-		case "component":
-			err = loadComponentNodes(ctx, q, ids, nodes)
-		case "session":
-			for _, id := range ids {
-				nodes[[2]string{kind, id}] = resolvedNode{GraphNode: model.GraphNode{Kind: kind, ID: id}}
-			}
-		default:
-			return nil, fmt.Errorf("graph node kind %q is not addressable", kind)
+		load, known := nodeLoaders[kind]
+		if !known {
+			// A kind this build cannot address is a node a newer build added, read while both
+			// builds serve one graph_edges: its edges are omitted, as an edge whose other end no
+			// longer exists is.
+			continue
 		}
-		if err != nil {
+		if err := load(ctx, q, kind, byRefKey, ids, nodes); err != nil {
 			return nil, err
 		}
 	}
 	return nodes, nil
 }
 
-func loadIssueNodes(ctx context.Context, q Queryer, keys []string, nodes map[[2]string]resolvedNode) error {
+// loadSessionNodes addresses a session node by its id alone.
+func loadSessionNodes(_ context.Context, _ Queryer, kind string, _ bool, ids []string, nodes map[[2]string]resolvedNode) error {
+	for _, id := range ids {
+		nodes[[2]string{kind, id}] = resolvedNode{GraphNode: model.GraphNode{Kind: kind, ID: id}}
+	}
+	return nil
+}
+
+func loadIssueNodes(ctx context.Context, q Queryer, _ string, _ bool, keys []string, nodes map[[2]string]resolvedNode) error {
 	rows, err := q.Query(ctx, `select key, project_key, title from issues where key = any($1)`, keys)
 	if err != nil {
 		return fmt.Errorf("load issue nodes: %w", err)
@@ -360,7 +380,7 @@ func loadIssueNodes(ctx context.Context, q Queryer, keys []string, nodes map[[2]
 	return rows.Err()
 }
 
-func loadArtifactNodes(ctx context.Context, q Queryer, byRefKey bool, ids []string, nodes map[[2]string]resolvedNode) error {
+func loadArtifactNodes(ctx context.Context, q Queryer, _ string, byRefKey bool, ids []string, nodes map[[2]string]resolvedNode) error {
 	predicate := `id::text = any($1)`
 	if byRefKey {
 		predicate = `ref_key = any($1)`
@@ -392,7 +412,7 @@ func loadArtifactNodes(ctx context.Context, q Queryer, byRefKey bool, ids []stri
 	return rows.Err()
 }
 
-func loadItemNodes(ctx context.Context, q Queryer, kind string, ids []string, nodes map[[2]string]resolvedNode) error {
+func loadItemNodes(ctx context.Context, q Queryer, kind string, _ bool, ids []string, nodes map[[2]string]resolvedNode) error {
 	table, column := "asks", "question"
 	if kind == "comment" {
 		table, column = "comments", "body"
@@ -421,7 +441,7 @@ func loadItemNodes(ctx context.Context, q Queryer, kind string, ids []string, no
 	return rows.Err()
 }
 
-func loadMessageNodes(ctx context.Context, q Queryer, ids []string, nodes map[[2]string]resolvedNode) error {
+func loadMessageNodes(ctx context.Context, q Queryer, _ string, _ bool, ids []string, nodes map[[2]string]resolvedNode) error {
 	rows, err := q.Query(ctx, `
 		select m.id::text, m.issue_key, coalesce(i.project_key, ''), m.body
 		from messages m
@@ -448,7 +468,7 @@ func loadMessageNodes(ctx context.Context, q Queryer, ids []string, nodes map[[2
 // loadComponentNodes resolves component nodes addressed '<project>/<id>' from the current
 // model. A component a re-import retired resolves to nothing, so edges at it are omitted like
 // any edge whose other end no longer exists.
-func loadComponentNodes(ctx context.Context, q Queryer, ids []string, nodes map[[2]string]resolvedNode) error {
+func loadComponentNodes(ctx context.Context, q Queryer, _ string, _ bool, ids []string, nodes map[[2]string]resolvedNode) error {
 	rows, err := q.Query(ctx, `
 		select project_key, id, title from components
 		where project_key || '/' || id = any($1)`, ids)

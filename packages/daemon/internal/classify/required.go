@@ -19,9 +19,12 @@ type Standing struct {
 }
 
 // Red is whether the check keeps GitHub from merging the head until something changes: it failed,
-// was cancelled, timed out or needs action. A check still running is not red yet, and neither is
-// one the head reports no result for (Missing): READY refuses that on its own, and it leaves the
-// workflow's verdict undecided (HeadVerdict), since a later settlement or run can still bring it.
+// was cancelled, timed out or needs action. GitHub refuses the merge of such a head under the base
+// branch's own rules, so Legion needs no refusal of its own; what the verdict decides is Legion's
+// own scheduling - the issue goes back to its implementer rather than waiting on a merge GitHub
+// will not make. A check still running is not red yet, and neither is one the head reports no
+// result for (Missing): a later settlement or run can still bring it, so it leaves the workflow's
+// verdict undecided (HeadVerdict) and the merge waits on GitHub for it.
 func (s Standing) Red() bool {
 	return s.Result != Success && s.Result != Pending && s.Result != Missing
 }
@@ -44,8 +47,8 @@ func RunResult(status, conclusion string) string {
 // the base branch requires (requiredchecks.Required) - in order, with its result in results (a
 // check's name to Success, Pending, or what it failed with), and a required check results does not
 // name Missing. A check results names that required does not is no part of the answer. The
-// merger's READY judges the results it reads from GitHub by it, and the workflow the settlement
-// that stands for the head (HeadChecks).
+// workflow judges the settlement that stands for the head by it (HeadChecks); the merger's READY
+// reads no check of the head at all, since GitHub decides its merge.
 func Judge(required []string, results map[string]string) []Standing {
 	standings := make([]Standing, 0, len(required))
 	for _, name := range required {
@@ -74,8 +77,9 @@ const Cancelled = "cancelled"
 // since the listener settles a commit once every check it has seen is terminal and the commit is
 // quiet, which an aggregator job with needs: is not yet queued for, and which a run that
 // concurrency cancels has reached before its replacement shows; the next settlement of the head
-// decides it. It may never report: a head with no verdict is sent nowhere by the workflow and is
-// refused at READY (READY_CHECKS_NOT_GREEN), where the merger reads the head's checks on GitHub.
+// decides it. It may never report: a head with no verdict is sent nowhere by the workflow, and
+// nothing refuses the merger's READY for it - GitHub, under the base branch's own rules, decides
+// whether the merge happens, and the daemon's submission waits on GitHub for it.
 // A workflow's result stands only when the daemon read it at the settlement's head (WorkflowHead),
 // and is Pending otherwise, until the daemon's next read: a run that succeeded passed, one still
 // running is Pending, one the head has no run of is Missing, and one that ended any other way
@@ -138,13 +142,17 @@ func WorkflowHead(pr record.PullRequest) string {
 }
 
 // HeadVerdict is the CI verdict that stands for the pull request's current head: "red" when a check
-// or workflow its base branch requires failed there (HeadChecks), "green" when every one passed,
-// and none when HeadChecks has nothing to judge or a required check or workflow is pending or has
-// no result. A check the base branch does not require never makes a head red, whatever it settled,
-// and a base that requires nothing has nothing red, as READY then has nothing to refuse.
+// or workflow its base branch requires failed there (HeadChecks), "green" only when every check and
+// workflow it requires passed, and none when HeadChecks has nothing to judge or a required check or
+// workflow is pending or has no result. A base branch that requires no check and no workflow gives
+// the head no verdict either, as an unread required set or a head no settlement stands for does:
+// nothing there was judged, so nothing there passed. A check the base branch does not require never
+// makes a head red, whatever it settled, so a base that requires nothing sends nothing back: GitHub
+// merges such a head under rules of its own, and the verdict decides only where Legion sends the
+// issue.
 func HeadVerdict(pr record.PullRequest) string {
 	checks, ok := HeadChecks(pr)
-	if !ok {
+	if !ok || len(checks) == 0 {
 		return ""
 	}
 	verdict := "green"
@@ -157,6 +165,15 @@ func HeadVerdict(pr record.PullRequest) string {
 		}
 	}
 	return verdict
+}
+
+// nothingRequired says whether a settlement stands for the pull request's head and its base branch
+// requires no check and no workflow there: what HeadChecks would judge as nothing, read from the
+// record itself. HeadVerdict leaves such a head without a verdict, yet CI sends nothing back from
+// it, so a push on top of it leaves the counted attempt as a push onto a green verdict does
+// (AdvancePullRequestHead).
+func nothingRequired(pr record.PullRequest) bool {
+	return settled(pr) && pr.Required != nil && len(pr.Required) == 0 && len(pr.Workflows) == 0
 }
 
 // RedOnlyByWorkflows says whether CI is red at the pull request's head only because a workflow its

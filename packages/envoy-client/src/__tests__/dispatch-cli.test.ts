@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ArtifactBlock } from "@legion/contracts";
 import { DISPATCH_BODY_MAX, PROJECT_KEY_RULE } from "@legion/contracts";
-import { fitOutput, runDispatchCli } from "../dispatch-cli";
+import { cliRefusals, fitOutput, runDispatchCli } from "../dispatch-cli";
 import { resetAdviceMemory } from "../dispatch-execute";
 import { forgetShownPictures } from "../dispatch-picture-tools";
 
@@ -176,11 +176,15 @@ const olderServerIssue = {
  *  text and another token. */
 let blocksServer = { tableRows: true, editedBetweenReads: false };
 let textReads = 0;
+/** DSP-4's event log: the issue reads `last_seq` `last`, and the events route serves seq 1 to
+ *  `served` (past `last` once events were written after the issue was read), each a message, by
+ *  `after` and `limit` as Dispatch pages them. `queries` records each events request's query. */
+let eventLog = { last: 40, served: 40, queries: [] as string[] };
 
 const server = Bun.serve({
   port: 0,
   async fetch(request) {
-    const { pathname } = new URL(request.url);
+    const { pathname, search, searchParams } = new URL(request.url);
     const text = await request.text();
     const body = text === "" ? undefined : JSON.parse(text);
     requests.push({ method: request.method, path: pathname, body });
@@ -227,7 +231,41 @@ const server = Bun.serve({
     if (pathname === "/api/v1/issues/DSP-3/events") {
       return Response.json([]);
     }
-    if (pathname === "/api/v1/issues/DSP-3/references" || pathname === "/api/v1/references") {
+    if (pathname === "/api/v1/issues/DSP-4" && request.method === "GET") {
+      return Response.json({
+        ...olderServerIssue,
+        key: "DSP-4",
+        title: "A long history",
+        last_seq: eventLog.last,
+        repo: null,
+        resolved_repo: null,
+      });
+    }
+    if (pathname === "/api/v1/issues/DSP-4/events") {
+      eventLog.queries.push(search);
+      const after = Number(searchParams.get("after"));
+      const through = Math.min(after + Number(searchParams.get("limit")), eventLog.served);
+      const seqs = Array.from(
+        { length: Math.max(0, through - after) },
+        (_, index) => after + index + 1
+      );
+      return Response.json(
+        seqs.map((seq) => ({
+          id: `event-${seq}`,
+          issue_key: "DSP-4",
+          seq,
+          type: "message.created",
+          actor: human,
+          payload: { body: `Event ${seq}` },
+          created_at: "2026-10-25T00:00:00Z",
+        }))
+      );
+    }
+    if (
+      pathname === "/api/v1/issues/DSP-3/references" ||
+      pathname === "/api/v1/issues/DSP-4/references" ||
+      pathname === "/api/v1/references"
+    ) {
       return Response.json({ node: { kind: "issue", id: "DSP-3" }, edges: [], members: [] });
     }
     if (pathname === "/api/v1/issues/DSP-1" && request.method === "GET") {
@@ -305,6 +343,7 @@ beforeEach(() => {
   triage = false;
   blocksServer = { tableRows: true, editedBetweenReads: false };
   textReads = 0;
+  eventLog = { last: 40, served: 40, queries: [] };
   interests = () => Response.json({ error: "unset" }, { status: 500 });
   stateDir = mkdtempSync(join(tmpdir(), "dispatch-cli-"));
   // Each run is its own process in production: nothing the library remembers carries over.
@@ -528,6 +567,194 @@ describe("the dispatch CLI", () => {
     expect(stderr).toBe(
       "dispatch: warning: Dispatch issue is missing resolved_repo: this Dispatch server predates repository fields, so DSP-3's repository is unknown; upgrade the server\n"
     );
+  });
+
+  // An issue read lists the issue's last 10 events unless it is asked for more: --events N lists
+  // the last N and --all-events every one, read 200 at a time, the most one events request returns.
+  describe("read --events and --all-events", () => {
+    const listed = (stdout: string) => stdout.split("\n").filter((line) => /^- #\d+ /.test(line));
+
+    test("--events 25 on an issue whose last_seq is 40 asks for the events after 15 through 40 and prints 25", async () => {
+      const { code, stdout } = await run(["read", "--issue", "DSP-4", "--events", "25"], omp);
+      expect(code, stdout).toBe(0);
+      expect(eventLog.queries).toEqual(["?after=15&limit=25"]);
+      const events = listed(stdout);
+      expect(events).toHaveLength(25);
+      expect(events[0]).toStartWith("- #16 message.created · human h · ");
+      expect(events.at(-1)).toStartWith("- #40 message.created · human h · ");
+    });
+
+    test("without either flag the read lists the last 10, as before", async () => {
+      const { code, stdout } = await run(["read", "--issue", "DSP-4"], omp);
+      expect(code, stdout).toBe(0);
+      expect(eventLog.queries).toEqual(["?after=30&limit=10"]);
+      expect(listed(stdout).map((line) => line.split(" ")[1])).toEqual(
+        Array.from({ length: 10 }, (_, index) => `#${31 + index}`)
+      );
+    });
+
+    test("--all-events and an --events count over one page read every page up to last_seq", async () => {
+      eventLog = { last: 450, served: 450, queries: [] };
+      const all = await run(["read", "--issue", "DSP-4", "--all-events"], omp);
+      expect(all.code, all.stdout).toBe(0);
+      expect(eventLog.queries).toEqual([
+        "?after=0&limit=200",
+        "?after=200&limit=200",
+        "?after=400&limit=50",
+      ]);
+      expect(listed(all.stdout).map((line) => line.split(" ")[1])).toEqual(
+        Array.from({ length: 450 }, (_, index) => `#${index + 1}`)
+      );
+
+      eventLog.queries.length = 0;
+      const last = await run(["read", "--issue", "DSP-4", "--events", "250"], omp);
+      expect(last.code, last.stdout).toBe(0);
+      expect(eventLog.queries).toEqual(["?after=200&limit=200", "?after=400&limit=50"]);
+      const events = listed(last.stdout);
+      expect(events).toHaveLength(250);
+      expect(events[0]).toStartWith("- #201 ");
+      expect(events.at(-1)).toStartWith("- #450 ");
+    });
+
+    test("an --events count past the issue's history lists every event through the captured last_seq", async () => {
+      const { code, stdout } = await run(["read", "--issue", "DSP-4", "--events", "500"], omp);
+      expect(code, stdout).toBe(0);
+      expect(eventLog.queries).toEqual(["?after=0&limit=40"]);
+      expect(listed(stdout)).toHaveLength(40);
+    });
+
+    test("events written after the issue was read are left to the next read", async () => {
+      eventLog.served = 45;
+      const last = await run(["read", "--issue", "DSP-4", "--events", "25"], omp);
+      expect(last.code, last.stdout).toBe(0);
+      expect(listed(last.stdout).at(-1)).toStartWith("- #40 ");
+      const all = await run(["read", "--issue", "DSP-4", "--all-events"], omp);
+      expect(all.code, all.stdout).toBe(0);
+      expect(listed(all.stdout)).toHaveLength(40);
+      expect(listed(all.stdout).at(-1)).toStartWith("- #40 ");
+      const oversized = await run(["read", "--issue", "DSP-4", "--events", "500"], omp);
+      expect(oversized.code, oversized.stdout).toBe(0);
+      expect(eventLog.queries).toEqual([
+        "?after=15&limit=25",
+        "?after=0&limit=40",
+        "?after=0&limit=40",
+      ]);
+      expect(listed(oversized.stdout)).toHaveLength(40);
+      expect(listed(oversized.stdout).at(-1)).toStartWith("- #40 ");
+    });
+
+    test("--all-events on an issue with no events sends no events request", async () => {
+      eventLog = { last: 0, served: 0, queries: [] };
+      const { code, stdout } = await run(["read", "--issue", "DSP-4", "--all-events"], omp);
+      expect(code, stdout).toBe(0);
+      expect(eventLog.queries).toEqual([]);
+      expect(stdout).toContain("\nEvents:\n- none\n");
+    });
+
+    test("--no-all-events beside --events keeps the count", async () => {
+      const argv = ["read", "--issue", "DSP-4", "--events", "25", "--no-all-events"];
+      const { code, stdout } = await run(argv, omp);
+      expect(code, stdout).toBe(0);
+      expect(eventLog.queries).toEqual(["?after=15&limit=25"]);
+    });
+
+    test("the issue's ref and its log read the same count", async () => {
+      for (const argv of [
+        ["--ref", "dispatch://DSP-4", "--events", "25"],
+        ["--ref", "dispatch://DSP-4/log", "--events", "25"],
+      ]) {
+        eventLog.queries.length = 0;
+        const { code, stdout } = await run(["read", ...argv], omp);
+        expect(code, stdout).toBe(0);
+        expect(eventLog.queries, argv.join(" ")).toEqual(["?after=15&limit=25"]);
+        expect(listed(stdout), argv.join(" ")).toHaveLength(25);
+      }
+      eventLog.queries.length = 0;
+      const log = await run(["read", "--ref", "dispatch://DSP-4/log", "--all-events"], omp);
+      expect(log.code, log.stdout).toBe(0);
+      expect(eventLog.queries).toEqual(["?after=0&limit=40"]);
+      expect(listed(log.stdout)).toHaveLength(40);
+    });
+
+    test("--help names both flags", async () => {
+      const { code, stdout } = await run(["read", "--help"], omp);
+      expect(code).toBe(0);
+      expect(stdout).toContain("\n  --events <n>\n");
+      expect(stdout).toContain("\n  --all-events\n");
+    });
+
+    // A read that lists no events would drop the count without a word, so it is refused before any
+    // request, naming what the read prints instead.
+    test("two counts, a count that is not a positive integer, or one the read would drop is refused before any request", async () => {
+      const id = "6f1d2c3b-4a5e-4f60-8b7c-9d0e1f2a3b4c";
+      const dropped = (flag: string, read: string) =>
+        `${flag} lists an issue's events, which dispatch read prints only for an issue or its dispatch://KEY/log, not for ${read}: drop ${flag}`;
+      const cases: [string[], string][] = [
+        [
+          ["--issue", "DSP-4", "--events", "5", "--all-events"],
+          "--events and --all-events both say how many events the read lists: name one, --events N for the last N or --all-events for every one",
+        ],
+        [["--issue", "DSP-4", "--events", "0"], "--events: Too small: expected number to be >=1"],
+        [["--issue", "DSP-4", "--events", "2.5"], "--events must be an integer, not 2.5"],
+        [["--message", id, "--events", "5"], dropped("--events", "a message's conversation")],
+        [
+          ["--issue", "DSP-4", "--artifact", "spec", "--all-events"],
+          dropped("--all-events", "a document summary"),
+        ],
+        [
+          ["--project", "CORE", "--artifact", "runbook", "--events", "5"],
+          dropped("--events", "a document summary"),
+        ],
+        [
+          ["--ref", "dispatch://DSP-4/spec", "--events", "5"],
+          dropped("--events", "a document summary"),
+        ],
+        [
+          ["--ref", "dispatch://CORE/artifact/runbook", "--all-events"],
+          dropped("--all-events", "a document summary"),
+        ],
+        [
+          ["--ref", "dispatch://DSP-4/children", "--events", "5"],
+          dropped("--events", "the issue's children"),
+        ],
+        [["--ref", `dispatch://DSP-4/ask/${id}`, "--events", "5"], dropped("--events", "an ask")],
+        [
+          ["--ref", `dispatch://CORE/artifact/runbook/ask/${id}`, "--events", "5"],
+          dropped("--events", "an ask"),
+        ],
+        [
+          ["--ref", `dispatch://CORE/artifact/runbook/comment/${id}`, "--all-events"],
+          dropped("--all-events", "a comment"),
+        ],
+        [
+          ["--ref", `dispatch://DSP-4/comment/${id}`, "--all-events"],
+          dropped("--all-events", "a comment"),
+        ],
+        [
+          ["--ref", `dispatch://DSP-4/message/${id}`, "--events", "5"],
+          dropped("--events", "a message's conversation"),
+        ],
+      ];
+      for (const [flags, problem] of cases) {
+        const { code, stdout } = await run(["read", ...flags], omp);
+        expect(code, flags.join(" ")).toBe(1);
+        expect(stdout, flags.join(" ")).toContain(`\n- ${problem}\n`);
+      }
+      expect(requests).toEqual([]);
+    });
+
+    // The log lists events, so beside an --artifact the log ref cannot use, only the artifact is
+    // refused: dropping it, as the refusal says, reads the log with the count.
+    test("an --artifact beside dispatch://KEY/log is refused alone, keeping the count", async () => {
+      const { code, stdout } = await run(
+        ["read", "--ref", "dispatch://DSP-4/log", "--artifact", "spec", "--events", "5"],
+        omp
+      );
+      expect(code).toBe(1);
+      expect(stdout).toContain("drop --artifact to read the ref");
+      expect(stdout).not.toContain("drop --events");
+      expect(requests).toEqual([]);
+    });
   });
 
   test("a picture is written to a file the agent opens", async () => {
@@ -1171,6 +1398,172 @@ describe("the dispatch CLI's subscription note", () => {
     const { code } = await run(["projects"], withListener);
     expect(code).toBe(0);
     expect(requests.some((request) => request.path.startsWith("/v1/interests/"))).toBe(false);
+  });
+});
+
+// A reader of a transcript, the skill-scenario scorer among them, finds a refusal the CLI printed
+// even when a pipe hid its exit: each path below is the real CLI's, and its first line is the one
+// refusal cliRefusals reads. The CLI's other `dispatch:` lines refuse nothing.
+describe("cliRefusals", () => {
+  const fromFile = { ...omp, DISPATCH_URL: undefined, DISPATCH_TOKEN: undefined };
+  /** The one refusal `stdout` holds: its first line, and the command it names. */
+  const refusal = (stdout: string, command: string | null) => [
+    { line: stdout.split("\n")[0], command },
+  ];
+
+  test("an argument check's refusal names its command, in the call and in its dry run (exit 1)", async () => {
+    for (const argv of [
+      ["message", "--issue", "DSP-1", "--isue", "X"],
+      ["issue-update", "--status", "done"],
+      ["issue-update", "--status", "done", "--dry-run"],
+    ]) {
+      const { code, stdout } = await run(argv, omp);
+      expect(code, argv.join(" ")).toBe(1);
+      expect(cliRefusals(stdout), argv.join(" ")).toEqual(refusal(stdout, argv[0] ?? ""));
+    }
+    expect(requests).toEqual([]);
+  });
+
+  test("each usage refusal is a refusal of no command (exit 2)", async () => {
+    const off = join(stateDir, "off.json");
+    writeFileSync(off, JSON.stringify({ dispatch: { enabled: false } }));
+    const cases: [string, readonly string[], Record<string, string | undefined>][] = [
+      ["unknown command", ["frobnicate"], omp],
+      ["no host", ["projects"], { DISPATCH_SESSION_ID: "ses-1" }],
+      ["another host", ["projects"], { DISPATCH_HOST: "vim", DISPATCH_SESSION_ID: "ses-1" }],
+      ["no omp session", ["projects"], { DISPATCH_HOST: "omp" }],
+      ["no Claude Code session", ["projects"], { DISPATCH_HOST: "claude" }],
+      ["a session id of two segments", ["projects"], { ...omp, DISPATCH_SESSION_ID: "a/b" }],
+      ["a relative ENVOY_CONFIG_FILE", ["projects"], { ...fromFile, ENVOY_CONFIG_FILE: "e.json" }],
+      ["a relative XDG_CONFIG_HOME", ["projects"], { ...fromFile, XDG_CONFIG_HOME: "rel" }],
+      ["no envoy.json", ["projects"], fromFile],
+      ["a file that turns Dispatch off", ["projects"], { ...fromFile, ENVOY_CONFIG_FILE: off }],
+      ["DISPATCH_URL with no token", ["projects"], { ...omp, DISPATCH_TOKEN: undefined }],
+    ];
+    for (const [name, argv, env] of cases) {
+      const { code, stdout } = await run(argv, env);
+      expect(code, name).toBe(2);
+      expect(stdout, name).toStartWith("dispatch: ");
+      expect(cliRefusals(stdout), name).toEqual(refusal(stdout, null));
+    }
+    expect(requests).toEqual([]);
+  });
+
+  test("a session state the CLI cannot read is a refusal (exit 2)", async () => {
+    const corrupt = join(stateDir, "sessions", "ses-1");
+    mkdirSync(corrupt, { recursive: true });
+    writeFileSync(join(corrupt, "state.json"), "{not json");
+    const unreadable = await run(["projects"], omp);
+    expect(unreadable.code).toBe(2);
+    expect(cliRefusals(unreadable.stdout)).toEqual(refusal(unreadable.stdout, null));
+
+    stateDir = mkdtempSync(join(tmpdir(), "dispatch-cli-"));
+    writeFileSync(join(stateDir, "sessions"), "a file where the directory goes");
+    const unlisted = await run(["projects"], omp);
+    expect(unlisted.code).toBe(2);
+    expect(unlisted.stdout).toStartWith("dispatch: ENOTDIR: ");
+    expect(cliRefusals(unlisted.stdout)).toEqual(refusal(unlisted.stdout, null));
+    expect(requests).toEqual([]);
+  });
+
+  test("a warning, the note that the state was not written, and a moved file's notice refuse nothing", async () => {
+    const warned = await run(["read", "--issue", "DSP-3"], omp);
+    expect(warned.code).toBe(0);
+    expect(warned.stderr).toStartWith("dispatch: warning: ");
+    expect(cliRefusals(`${warned.stderr}${warned.stdout}`)).toEqual([]);
+
+    stateDir = mkdtempSync(join(tmpdir(), "dispatch-cli-"));
+    mkdirSync(join(stateDir, "sessions", "ses-1", "results.jsonl"), { recursive: true });
+    const unrecorded = await run(["message", "--issue", "DSP-1", "--body", "x"], omp);
+    expect(unrecorded.code).toBe(0);
+    expect(unrecorded.stdout).toContain("\ndispatch: Dispatch took the call, but this session's");
+    expect(cliRefusals(unrecorded.stdout)).toEqual([]);
+
+    stateDir = mkdtempSync(join(tmpdir(), "dispatch-cli-"));
+    mkdirSync(join(stateDir, ".config", "legion"), { recursive: true });
+    writeFileSync(
+      join(stateDir, ".config", "legion", "envoy.json"),
+      JSON.stringify({
+        dispatch: { enabled: true, serverUrl: `http://127.0.0.1:${server.port}`, token: "t" },
+      })
+    );
+    mkdirSync(join(stateDir, ".opencode"), { recursive: true });
+    writeFileSync(join(stateDir, ".opencode", "envoy.json"), "{}");
+    const moved = await run(["projects"], fromFile);
+    expect(moved.code).toBe(0);
+    expect(moved.stdout).toStartWith("dispatch: ");
+    expect(cliRefusals(moved.stdout)).toEqual([]);
+  });
+
+  // A refusal the CLI prints before it reaches Dispatch is logged too, whenever the call knows its
+  // session: a reader of the ledger (pi-envoy's run-end check, the skill-scenario rig) sees a call
+  // whose output a pipe, `$(…)` or another program swallowed. The host and the command need not be
+  // known for the session to be: a Python `subprocess.run(["dispatch", …])` inherits the session id
+  // without `DISPATCH_HOST`.
+  test("an early refusal is logged when the call knows its session, with no request", async () => {
+    const cases: [string, readonly string[], Record<string, string | undefined>, string][] = [
+      ["an unknown flag", ["message", "--issue", "X", "--isue", "Y"], omp, "dispatch_message"],
+      ["an unknown command", ["frobnicate"], omp, "dispatch"],
+      // The CLI checks the command's name before its flags, so a help call of an unknown command
+      // is refused, and a dry run with a bad argument is refused before it is a dry run. The
+      // skill-scenario scorer matches each ledger line to its command on this.
+      ["an unknown command's help", ["frobnicate", "--help"], omp, "dispatch"],
+      [
+        "a dry run's bad argument",
+        ["message", "--issue", "X", "--isue", "Y", "--dry-run"],
+        omp,
+        "dispatch_message",
+      ],
+      ["no host", ["projects"], { DISPATCH_SESSION_ID: "ses-1" }, "dispatch_projects"],
+      [
+        "another host",
+        ["projects"],
+        { DISPATCH_HOST: "vim", DISPATCH_SESSION_ID: "ses-1" },
+        "dispatch_projects",
+      ],
+      [
+        "Dispatch turned off",
+        ["projects"],
+        { ...omp, DISPATCH_URL: undefined, DISPATCH_TOKEN: undefined },
+        "dispatch_projects",
+      ],
+    ];
+    for (const [name, argv, env, tool] of cases) {
+      stateDir = mkdtempSync(join(tmpdir(), "dispatch-cli-"));
+      const { code, stdout } = await run(argv, env);
+      expect(code, name).toBeGreaterThan(0);
+      const logged = ledger("ses-1");
+      expect(
+        logged.map((line) => line.tool),
+        name
+      ).toEqual([tool]);
+      expect(logged[0]?.error, name).toBe(stdout.trimEnd());
+      expect(cliRefusals(`${logged[0]?.error}\n`), name).toHaveLength(1);
+    }
+    expect(requests).toEqual([]);
+  });
+
+  // Catches: a crash, or an empty ledger file, when no session id is set at all, and a help or dry
+  // run logged as a refusal.
+  test("a call with no session logs nothing, and help and a dry run log no refusal", async () => {
+    const { code } = await run(["projects"], { DISPATCH_HOST: "omp" });
+    expect(code).toBe(2);
+    expect(existsSync(join(stateDir, "sessions"))).toBe(false);
+
+    stateDir = mkdtempSync(join(tmpdir(), "dispatch-cli-"));
+    await run(["doc-edit", "--help"], omp);
+    await run(["message", "--issue", "DSP-1", "--body", "hi", "--dry-run"], omp);
+    expect(existsSync(join(stateDir, "sessions", "ses-1", "results.jsonl"))).toBe(false);
+  });
+
+  test("help, a dry run's arguments, and a refusal quoted inside a line refuse nothing", async () => {
+    const help = await run(["doc-edit", "--help"], omp);
+    const dry = await run(["message", "--issue", "DSP-1", "--body", "hi", "--dry-run"], omp);
+    for (const { code, stdout } of [help, dry]) {
+      expect(code).toBe(0);
+      expect(cliRefusals(stdout)).toEqual([]);
+    }
+    expect(cliRefusals("It said: dispatch message was not called: 1 problem")).toEqual([]);
   });
 });
 

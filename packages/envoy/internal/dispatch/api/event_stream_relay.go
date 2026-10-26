@@ -11,8 +11,8 @@ import (
 
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
-	"github.com/sjawhar/envoy/internal/dispatch/pglisten"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
+	"github.com/sjawhar/envoy/internal/pglisten"
 )
 
 const (
@@ -123,6 +123,7 @@ func (r *eventStreamRelay) start(ctx context.Context) error {
 		dial = r.server.deps.Store.Pool.Listener
 	}
 	listener := &pglisten.Listener{
+		Owner:       "dispatch",
 		Dial:        dial,
 		Channels:    []string{dispatchEventsChannel},
 		ListenIdle:  r.listenIdle,

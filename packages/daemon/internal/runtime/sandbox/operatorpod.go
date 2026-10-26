@@ -10,18 +10,22 @@ import (
 	"strings"
 	"unicode"
 
+	"github.com/sjawhar/legion/daemon/internal/ompsessions"
 	"github.com/sjawhar/legion/daemon/internal/podsafety"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 )
 
 // imageEnv are the variables the worker image's final stage sets (packages/daemon/docker/
-// worker.Dockerfile, ENV), which every container inherits: COREPACK_DEFAULT_TO_LATEST=0 keeps the
-// corepack shims on the pnpm and yarn their corepack ships; HOME and OMP_PROFILE place Oh My Pi's
-// profile, whose sessions directory a pod mounts from the tree volume; LEGION_OMP_PATH is the Oh
-// My Pi the image probe proves the workers run; DO_NOT_TRACK=1 is CodeGraph's telemetry and
-// update-check opt-out; and PATH, which the runtime sets as well.
+// worker.Dockerfile, ENV), which every container inherits, and which a pod's env therefore may not
+// override: CGO_ENABLED=0 keeps cgo off by default in every process that inherits the image's
+// environment, the image's gcc on PATH notwithstanding, so a role opts in per command
+// (`CGO_ENABLED=1 go test -race …`) rather than a deployment for every build;
+// COREPACK_DEFAULT_TO_LATEST=0 keeps the corepack shims on the pnpm and yarn their corepack ships;
+// HOME and OMP_PROFILE place Oh My Pi's profile, whose sessions directory a pod mounts from the tree
+// volume; LEGION_OMP_PATH is the Oh My Pi the image probe proves the workers run; DO_NOT_TRACK=1 is
+// CodeGraph's telemetry and update-check opt-out; and PATH, which the runtime sets as well.
 // TestImageEnvIsWhatTheWorkerImageSets holds the list to the Dockerfile.
-var imageEnv = []string{"COREPACK_DEFAULT_TO_LATEST", "DO_NOT_TRACK", "HOME", "LEGION_OMP_PATH", "OMP_PROFILE", "PATH"}
+var imageEnv = []string{"CGO_ENABLED", "COREPACK_DEFAULT_TO_LATEST", "DO_NOT_TRACK", "HOME", "LEGION_OMP_PATH", "OMP_PROFILE", "PATH"}
 
 // setter is who sets a variable a worker's Oh My Pi starts with, and whether the operator's pod
 // env may set it too: the pod baseline yields to the operator's own value, and the operator's
@@ -35,8 +39,8 @@ type setter struct {
 // provider key (shim.ReadProviderEnv) to who sets it: the runtime (runtimeOwned, the session
 // store's two variables named apart, since they are Legion's under either store, the controller's
 // Slack channel list, which the runtime sets in the controller's pod alone, and the name the
-// providers volume mounts the session database's URL under, sessionDSNFile), the worker image
-// (imageEnv), every launch's spec (the role App's git identity, and each launch secret's
+// providers volume mounts the session database's URL under, ompsessions.DSNFileName), the worker
+// image (imageEnv), every launch's spec (the role App's git identity, and each launch secret's
 // `<NAME>_FILE` pointer), the pod baseline, and the operator's own pod env. The first setter of a
 // name is the one named.
 func podVariables(pod Pod, launchSecrets []string) map[string]setter {
@@ -49,7 +53,7 @@ func podVariables(pod Pod, launchSecrets []string) map[string]setter {
 	for _, name := range sessionStoreVariables {
 		add(name, "Legion sets to place the sessions a resume reads (runtime.kubernetes.session_store)", false)
 	}
-	add(sessionDSNFile, "is the name the providers volume mounts the session database's URL under (runtime.kubernetes.session_store)", false)
+	add(ompsessions.DSNFileName, "is the name the providers volume mounts the session database's URL under (runtime.kubernetes.session_store)", false)
 	add(slackChannelsVariable, "Legion's runtime sets for the controller it launches, from the project's slack_channels alone", false)
 	for _, name := range slices.Sorted(maps.Keys(runtimeOwned)) {
 		add(name, "Legion's runtime sets in every pod", false)
@@ -96,12 +100,14 @@ func podVariables(pod Pod, launchSecrets []string) map[string]setter {
 // and would replace one Oh My
 // Pi's environment gains after (the pod baseline), and skips one whose `<NAME>_FILE` pointer the
 // pod sets (shim.ReadProviderEnv); and it must read neither a providers secret's key nor the
-// session database's URL key (sessionDSNKey, "" when sessions are files), which the shim would
-// export into Oh My Pi's environment under the provider key's name. launchSecrets are the
-// secrets every launch's spec carries, by name, and providersSecrets those of them the providers
-// Secret carries, none of which may be the session database's URL key. configure runs it, and
-// the daemon before its boot and for `legion start --check-config`.
-func CheckPod(pod Pod, providerKeys map[string]string, tools Tools, launchSecrets, providersSecrets []string, sessionDSNKey string) error {
+// providers Secret's key that holds the session database's URL (Store.DSNSecretKey, which the
+// postgres store alone has: under cloudsql-iam each pod signs in as itself and mounts no session
+// key at all), which the shim would export into Oh My Pi's environment under the provider key's
+// name. launchSecrets are the secrets every launch's spec carries, by name, and providersSecrets
+// those of them the providers Secret carries, none of which may be the session database's URL
+// key. configure runs it, and the daemon before its boot and for `legion start --check-config`.
+func CheckPod(pod Pod, providerKeys map[string]string, tools Tools, launchSecrets, providersSecrets []string, store ompsessions.Store) error {
+	sessionDSNKey := store.DSNSecretKey()
 	if slices.Contains(providersSecrets, sessionDSNKey) {
 		return fmt.Errorf("runtime.kubernetes.session_dsn_secret %s is the providers Secret's key the pod mounts as the launch secret %s: name a key of its own for the session database's URL",
 			sessionDSNKey, sessionDSNKey)
@@ -154,7 +160,7 @@ func CheckPod(pod Pod, providerKeys map[string]string, tools Tools, launchSecret
 		}
 	}
 	for _, name := range slices.Sorted(maps.Keys(providerKeys)) {
-		if name == sessionDSNFile {
+		if name == ompsessions.DSNFileName {
 			return fmt.Errorf("provider_keys names %s, the file the providers volume mounts the session database's URL as (runtime.kubernetes.session_store): two of the volume's items would share that path", name)
 		}
 		if s, set := variables[name]; set {

@@ -143,6 +143,22 @@ describe("DispatchClient", () => {
     }
   });
 
+  // `--all` exists to read the exact set, so a page answered to the unpaged request is refused by
+  // name: read as the listing, its first rows would pass for every issue that matched.
+  test("refuses a page answered to the unpaged request, naming the request and the cause", async () => {
+    const { fetchImpl, requests } = fakeFetch([
+      jsonResponse({ issues: [issue("DSP-1")], total: 251, limit: 50, offset: 0 }),
+    ]);
+    const client = new DispatchClient("http://dispatch.test", "secret", fetchImpl);
+
+    await expect(client.listAllIssues({ project: "DSP", status: "needs_review" })).rejects.toThrow(
+      "GET http://dispatch.test/api/v1/issues?project=DSP&status=needs_review asked for the " +
+        "unpaged listing and got a page, so this Dispatch pages a request that carries no limit " +
+        "and no offset."
+    );
+    expect(requests).toHaveLength(1);
+  });
+
   test("search encodes q, project, limit, and offset and returns the response body", async () => {
     const body = fakeSearchResponse(
       [
@@ -879,6 +895,39 @@ describe("DispatchClient", () => {
     ]);
   });
 
+  // A full page the read goes past must end past its cursor, or the next page would repeat it; a
+  // page that ends the read is taken as served, as the single-page read always took it.
+  test("read refuses a full page that does not move past its cursor only when it must read on", async () => {
+    const page = (from: number, to: number) =>
+      jsonResponse(Array.from({ length: to - from + 1 }, (_, index) => ({ seq: from + index })));
+    const stuck = fakeFetch([
+      jsonResponse({ key: "DSP-1", last_seq: 450 }),
+      page(1, 200),
+      page(1, 200),
+    ]);
+    await expect(
+      new DispatchClient("http://dispatch.test", "secret", stuck.fetchImpl).read("DSP-1", {
+        events: "all",
+      })
+    ).rejects.toThrow("GET /api/v1/issues/DSP-1/events?after=200 answered no event after seq 200");
+    expect(stuck.requests.map((request) => new URL(request.url).search)).toEqual([
+      "",
+      "?after=0&limit=200",
+      "?after=200&limit=200",
+    ]);
+
+    const last = fakeFetch([jsonResponse({ key: "DSP-1", last_seq: 50 }), page(1, 10)]);
+    const read = await new DispatchClient("http://dispatch.test", "secret", last.fetchImpl).read(
+      "DSP-1"
+    );
+    expect(read.events.map((event) => event.seq)).toEqual(
+      Array.from({ length: 10 }, (_, index) => index + 1)
+    );
+    expect(last.requests.map((request) => new URL(request.url).search)).toEqual([
+      "",
+      "?after=40&limit=10",
+    ]);
+  });
   test("maps comment reply-chain reads to the API", async () => {
     const { fetchImpl, requests } = fakeFetch([
       jsonResponse({

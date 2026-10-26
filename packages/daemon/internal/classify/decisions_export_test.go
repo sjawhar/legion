@@ -56,6 +56,51 @@ func TestTheCountedMarkStaysUntilAHeadIsPushedOntoGreen(t *testing.T) {
 	}
 }
 
+// A push onto a settled head whose base branch requires no check and no workflow leaves the
+// counted attempt, as a push onto green does, though that head has no verdict: both markers clear
+// and the count stays. A head without a verdict for any other reason - the required set unread, no
+// settlement standing for it, a required workflow still running - is the same attempt, so the push
+// keeps both markers.
+func TestAdvancePullRequestHeadLeavesTheAttemptOnAPushOntoABaseThatRequiresNothing(t *testing.T) {
+	marked := record.PullRequest{HeadSHA: "h3", CheckedHead: "h3", Failing: []string{}, Required: []string{},
+		FixAttempts: 3, HeadCounted: "h3", HeadCountedBefore: "h2"}
+	for _, tc := range []struct {
+		name    string
+		pr      func(record.PullRequest) record.PullRequest
+		cleared bool
+	}{
+		{"a settled head whose base requires nothing", func(pr record.PullRequest) record.PullRequest { return pr }, true},
+		{"a settled head whose required set was never read", func(pr record.PullRequest) record.PullRequest {
+			pr.Required = nil
+			return pr
+		}, false},
+		{"a head no settlement stands for, whose base requires nothing", func(pr record.PullRequest) record.PullRequest {
+			pr.CheckedHead = "h1"
+			return pr
+		}, false},
+		{"a settled head whose base requires only a workflow still running", func(pr record.PullRequest) record.PullRequest {
+			pr.Workflows, pr.WorkflowsHead = []record.RequiredWorkflow{{Path: "review.yml", Result: Pending}}, "h3"
+			return pr
+		}, false},
+		{"a settled head whose base requires only a workflow that succeeded", func(pr record.PullRequest) record.PullRequest {
+			pr.Workflows, pr.WorkflowsHead = []record.RequiredWorkflow{{Path: "review.yml", Result: Success}}, "h3"
+			return pr
+		}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := AdvancePullRequestHead(tc.pr(marked), "h4")
+			wantCounted, wantBefore := "h3", "h2"
+			if tc.cleared {
+				wantCounted, wantBefore = "", ""
+			}
+			if got.FixAttempts != 3 || got.HeadCounted != wantCounted || got.HeadCountedBefore != wantBefore {
+				t.Fatalf("fixAttempts=%d headCounted=%q headCountedBefore=%q, want 3, %q and %q",
+					got.FixAttempts, got.HeadCounted, got.HeadCountedBefore, wantCounted, wantBefore)
+			}
+		})
+	}
+}
+
 // An uncounted push onto a red inside the counted attempt - the review App's red tests, or a
 // handoff-only push - leaves the attempt's mark where it stood, whichever of the push webhook and
 // the synchronize arrives first: synchronize first counts the head until its push is classified,
@@ -164,8 +209,8 @@ func TestRedOnlyByWorkflowsNamesARedNoRequiredCheckMakes(t *testing.T) {
 
 // A READY stands until the head's own CI turns red: a red the head's own settlement and run bring
 // withdraws it, a head a .legion/-only push reached included, while a red carried to it from the
-// head before it, which READY found green on GitHub since, does not; nor does any red on a pull
-// request that is no longer open.
+// head before it, which stood before the READY and says nothing new about the submitted head, does
+// not; nor does any red on a pull request that is no longer open.
 func TestRedWithdrawsReadyOnlyOnTheHeadsOwnRed(t *testing.T) {
 	handoff := []record.ClassifiedPush{{SHA: "ready", Before: "code", HandoffOnly: true}}
 	for _, tc := range []struct {

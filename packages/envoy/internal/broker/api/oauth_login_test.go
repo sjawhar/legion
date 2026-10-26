@@ -633,7 +633,7 @@ func revokeAsync(rig *brokertest.Rig, credentialID string) <-chan int {
 	go func() {
 		req, _ := http.NewRequest(http.MethodPost, rig.URL+"/v1/launcher-credentials/"+credentialID+"/revoke-by-approver",
 			strings.NewReader(`{"approver":"`+rig.Operator+`"}`))
-		req.Header.Set("Authorization", "Bearer "+brokertest.UIToken)
+		req.Header.Set("Authorization", "Bearer "+rig.UIToken)
 		req.Header.Set("Content-Type", "application/json")
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {

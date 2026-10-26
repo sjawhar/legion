@@ -12,9 +12,10 @@ import {
   useAuiState,
 } from "@assistant-ui/react";
 import type { AgentStreamCommand } from "@legion/contracts";
-import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
+import { type ReactNode, useEffect, useId, useMemo, useRef, useState } from "react";
 
 import { ChevronIcon } from "../../components/DisclosureToggle";
+import { RefusableButton } from "../../components/RefusableButton";
 import { TruncatedText } from "../../components/TruncatedText";
 import {
   borderDefault,
@@ -25,8 +26,6 @@ import {
   disclosureButtonText,
   inputClasses,
   primaryButtonBg,
-  primaryButtonDisabled,
-  primaryButtonEnabledHoverBg,
   primaryButtonHoverBg,
   selectedCardBg,
   selectedCardBorder,
@@ -354,6 +353,7 @@ export function AgentThread({
   placeholder,
   replayCount,
   resetKey,
+  sending,
   sessionId,
 }: {
   /** The slash commands the composer completes; none is offered while this is undefined or
@@ -369,6 +369,8 @@ export function AgentThread({
   /** Bumped once per rebuild of the whole transcript from the session's replay. */
   replayCount: number;
   resetKey: string;
+  /** Whether this session's own send is out: Send reads "Sending…" until Dispatch answers. */
+  sending: boolean;
   /** The session being read: moving to another one lands at its live end. */
   sessionId: string;
 }): ReactNode {
@@ -377,6 +379,13 @@ export function AgentThread({
   // listener and its observers to whichever node it is given.
   const [viewport, setViewport] = useState<HTMLDivElement | null>(null);
   const follow = useLiveFollow({ contentIds, ownSendCount, replayCount, sessionId, viewport });
+  // An empty box is the one thing that refuses Send, and only while no send is out: a send in
+  // flight already disables Send and names why, so the line below says that instead. A turn
+  // still streaming does not refuse: the session decides what a message does mid-turn by its
+  // delivery mode, as at its terminal.
+  const boxEmpty = useAuiState((state) => state.composer.isEmpty);
+  const refusal = boxEmpty && !sending ? "Type a message first." : null;
+  const hintId = useId();
   return (
     <ThreadPrimitive.Root className="flex min-h-0 flex-1 flex-col">
       <ErrorBoundary region="this conversation" resetKey={resetKey}>
@@ -437,25 +446,45 @@ export function AgentThread({
         </div>
       </ErrorBoundary>
       {/* The trigger root always wraps the composer, so commands arriving or going never
-          remounts the input under the person's caret. */}
+          remounts the input under the person's caret. The form stays the composer's one box,
+          `relative`, so the command list is anchored to it and the whole composer, hint line
+          included, is what a layout measures. */}
       <ComposerPrimitive.Unstable_TriggerPopoverRoot>
         <ComposerPrimitive.Root
-          className={`relative mt-3 flex items-end gap-2 border-t pt-3 ${borderDefault}`}
+          className={`relative mt-3 flex flex-col gap-1 border-t pt-3 ${borderDefault}`}
           data-testid="agent-composer"
         >
           {commands === undefined || commands.length === 0 ? null : (
             <SlashCommands commands={commands} />
           )}
-          <ComposerPrimitive.Input
-            className={`min-h-11 flex-1 rounded-lg px-3 py-2 text-sm ${inputClasses(false)}`}
-            placeholder={placeholder}
-            rows={1}
-          />
-          <ComposerPrimitive.Send
-            className={`min-h-11 rounded-lg px-4 text-sm font-medium ${primaryButtonBg} ${primaryButtonEnabledHoverBg} ${primaryButtonDisabled}`}
-          >
-            Send
-          </ComposerPrimitive.Send>
+          <div className="flex items-end gap-2">
+            <ComposerPrimitive.Input
+              className={`min-h-11 flex-1 rounded-lg px-3 py-2 text-sm ${inputClasses(false)}`}
+              placeholder={placeholder}
+              rows={1}
+            />
+            {/* A submit button, so a click and Enter both reach the form's submit, which the
+                composer root turns into assistant-ui's own send: one way out for a message. */}
+            <RefusableButton
+              busy={sending ? "Sending…" : undefined}
+              className="min-h-11"
+              describedBy={sending ? hintId : undefined}
+              refusal={refusal}
+              refusalShownBy={hintId}
+              type="submit"
+            >
+              Send
+            </RefusableButton>
+          </div>
+          {/* While a send is out, this line says Enter waits for it - Send is disabled and Enter
+              does nothing until Dispatch answers - and is the disabled button's description.
+              Otherwise, while Send refuses, it says why - on screen, for a reader with no pointer
+              to hover it - and else how to send. */}
+          <p className={`text-xs ${textMutedOnCanvas}`} id={hintId}>
+            {sending
+              ? "Sending… Enter sends again once Dispatch answers."
+              : (refusal ?? "Enter to send · Shift+Enter for a new line")}
+          </p>
         </ComposerPrimitive.Root>
       </ComposerPrimitive.Unstable_TriggerPopoverRoot>
     </ThreadPrimitive.Root>

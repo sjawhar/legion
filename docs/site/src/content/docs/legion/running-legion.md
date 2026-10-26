@@ -61,8 +61,9 @@ are exactly what Legion's agents can do on GitHub:
 The implement App cannot create a check run, and a review never comes from the App that wrote the
 change. `gh api /apps/<app slug> --jq .permissions` shows what an App holds. The daemon itself reads
 GitHub with the implement App too: every two minutes it reads each open pull request's base branch
-and the checks that branch requires (its rulesets and its branch protection), the set the merger's
-`READY` checks, since only those decide whether CI is red at a head.
+and the checks that branch requires (its rulesets and its branch protection), since only those
+decide whether CI is red at a head, and so where Legion sends the issue. Whether the merge happens
+is GitHub's to decide, under those same rules.
 
 `scripts/github-apps/create.ts` registers all three from the manifests beside it:
 `scripts/github-apps/implement.json` and `review.json` hold the permissions above and carry no
@@ -88,10 +89,10 @@ an installation that Dispatch searches.
 
 `--webhook-url` becomes the Envoy App's webhook. That App's webhook secret is the listener's
 `ENVOY_GITHUB_WEBHOOK_SECRET`, its client id is Dispatch's `DISPATCH_APP_CLIENT_ID`, and its
-private key, base64-encoded, is `DISPATCH_APP_PEM_B64`. The review App's id is the listener's
-`ENVOY_REVIEWER_APP_ID`. Store the private keys where `github_apps.<role>` and Dispatch read them,
-delete the files, then install every App from `https://github.com/apps/<slug>/installations/new`
-on the same repositories.
+private key, as the PEM GitHub gives or its base64, is `DISPATCH_APP_PEM_B64`. The review App's id
+is the listener's `ENVOY_REVIEWER_APP_ID`. Store the private keys where `github_apps.<role>` and
+Dispatch read them, delete the files, then install every App from
+`https://github.com/apps/<slug>/installations/new` on the same repositories.
 
 ## The cluster
 
@@ -183,8 +184,12 @@ on the same repositories.
 ## The worker image
 
 Every agent runs from `ghcr.io/sjawhar/legion-worker`, which carries Oh My Pi, Legion's two plugins
-(`@sjawhar/pi-envoy` and `@sjawhar/pi-legion`), the `legion` CLI and a general toolchain (git, jj, gh,
-Node, uv, the AWS CLI, kubectl).
+(`@sjawhar/pi-envoy` and `@sjawhar/pi-legion`), the `legion` CLI, a general toolchain (git, jj, gh,
+Go (with gcc for cgo and the race detector), Node, uv, the AWS CLI, kubectl) and the client tools a
+role's own work needs (`psql`, `redis-cli`, `sqlite3`, `nc`, `dig`): `apt` cannot write a system
+prefix in an unprivileged container, unpacking
+one by hand works for some tools and not others, and what rules out a client a role unpacks onto
+its own `PATH` is the withheld `operator-setup` capability, not the unpacking itself.
 `legion.yaml` accepts the image only by digest (`ghcr.io/sjawhar/legion-worker@sha256:…`). A digest
 is published in each Worker Image workflow run's summary and in the body of each `legion-v<version>`
 GitHub release; for a `sha-` or release-version worker-image tag,
@@ -230,7 +235,26 @@ What each part is for:
   ([Envoy](/legion/dispatch/envoy/#how-slack-mentions-arrive-and-how-an-agent-replies) says how
   the mentions arrive and where the controller's reply token is stored). A channel belongs to one
   project: the loader refuses one named twice. A daemon restarted with a changed list relaunches the
-  controller, which resumes its session hearing the new list.
+  controller, which resumes its session hearing the new list. Its optional `deploys` names the
+  workflows that deploy its repositories to production, each a repository, a workflow file
+  directly under `.github/workflows/` (ending `.yml` or `.yaml`, the top-level file a run names,
+  not one it calls) and the step whose success is the deploy:
+
+  ```yaml
+  projects:
+    WIDGETS:
+      deploys: [{repo: <owner>/<name>, workflow: .github/workflows/<file>.yaml, step: Apply}]
+  ```
+
+  Each time a run of that workflow on the repository's default branch completes, the daemon reads
+  the run and its jobs from GitHub as the implement App, and wakes each open
+  [production check](/legion/legion/concepts/#the-production-check) of that repository once for
+  every job of the run whose named step succeeded after the check's pull request merged. A run a
+  pull request triggered, a step that was skipped or failed, and a step that finished before the
+  merge wake nothing. The run's `workflow_run` webhook reaches the daemon through Envoy, so the
+  Envoy App (or a repository webhook) must deliver the repository's events. The loader refuses one
+  repository's workflow named twice, and a daemon that predates the key refuses it at boot, as it
+  does any key it does not know.
 - **`daemon_url`**, **`envoy_url`**, **`dispatch_url`**, every **`nats_urls`** entry and the
   worker-stream host (**`advertise_host`** when set, **`bind`** otherwise) are handed to pods, so
   none of them may be a loopback or unspecified address. `advertise_host` (optional, Kubernetes
@@ -571,8 +595,8 @@ Closing the terminal leaves the project without one, and the daemon logs
 
   The `open production checks` line counts the closed issues whose production check is still
   open and names the oldest: its pull request, merge commit, which look it is on, what woke that
-  look (`merge`, `issue.deployed`, `daemon boot`, `dispatch start`, `dispatch build` or `bound`)
-  and when, and when the check's bound comes due (`none` when no check is open).
+  look (`merge`, `issue.deployed`, `deploy run`, `daemon boot`, `dispatch start`, `dispatch build`
+  or `bound`) and when, and when the check's bound comes due (`none` when no check is open).
 
   `--json` prints everything the daemon records: `admission` (`cap`, `active`, `waiting`), each
   issue under `issues` with its `phase`, `status`, `repo` and `defaultBranch`, `holdReason`,

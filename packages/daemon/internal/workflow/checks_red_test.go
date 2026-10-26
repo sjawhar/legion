@@ -240,8 +240,8 @@ func TestAPushClassifiedLateThatCompletesTheCarryOfARedSendsTheWorkBackFromEvery
 // implementer's start waiting on the role the red took the phase from, and the architect told the
 // phase the red stopped. In awaiting_merge the READY head arriving over its handoff push withdraws
 // nothing, as the late push does not (TestAPushClassifiedLateThatCarriesARedToTheREADYHeadWithdrawsNothing):
-// READY found the head's own CI green on GitHub, so the issue stays, nobody is told and nothing is
-// started.
+// that red stood before the READY and says nothing new about the submitted head, so the issue
+// stays, nobody is told and nothing is started.
 func TestAHeadArrivingOverAKnownPushThatCompletesTheCarryOfARedSendsTheWorkBackFromEveryPhase(t *testing.T) {
 	for _, tc := range []struct {
 		from    phase.Phase
@@ -314,9 +314,9 @@ func TestAHeadArrivingOverAKnownPushThatCompletesTheCarryOfARedSendsTheWorkBackF
 // READY is withdrawn, the return counted as a round, and the round returns through testing, review
 // and READY. A head a push that changed only .legion/ reached is no exception, as it is none before
 // READY either: no worker is at work in awaiting_merge, and only the implementer can change the
-// red. A red carried to the READY head from the code head before it moves nothing: READY found the
-// head's own CI green on GitHub, which is what GitHub merges by. Nor does a red only on a check the
-// base branch does not require.
+// red. A red carried to the READY head from the code head before it moves nothing: that red stood
+// before the READY and says nothing new about the submitted head. Nor does a red only on a check
+// the base branch does not require.
 func TestARedVerdictInAwaitingMergeSendsTheTreeBackToImplementing(t *testing.T) {
 	const required = "pr-checks-result"
 	for _, tc := range []struct {
@@ -711,13 +711,15 @@ func TestAnExhaustedFixAttemptCountStillTakesTheReviewersRequestForChanges(t *te
 // implementer's answer to a request for changes after a re-run turned the counted head green -
 // raises no count and leaves that attempt, so a red there in testing is new and not the loop's: it
 // sends the work back with a checks-red, as below the cap, whether or not the count was already
-// reported. The next push onto that red raises the count and is reported then. Every other push
-// stays in the attempt: a code head pushed while the counted head had no verdict yet, directly or
-// over a handoff-only head, and an uncounted push onto the held red - the tester's red tests, its
-// handoff-only test.json, the implementer's fix onto the planned red - so the attempt's red is
-// held and reports the count once, and no push sequence slips a round past the cap. A red reaching
-// a handoff-only head from the counted code head it replaced is the loop's too: the cap holds it,
-// and it reports the count once.
+// reported. The next push onto that red raises the count and is reported then. A code head pushed
+// onto a settled head whose base branch has stopped requiring anything leaves the attempt the same
+// way, though that head has no verdict, so a red once the base requires the check again is new.
+// Every other push stays in the attempt: a code head pushed while the counted head had no verdict
+// yet, directly or over a handoff-only head, and an uncounted push onto the held red - the tester's
+// red tests, its handoff-only test.json, the implementer's fix onto the planned red - so the
+// attempt's red is held and reports the count once, and no push sequence slips a round past the
+// cap. A red reaching a handoff-only head from the counted code head it replaced is the loop's too:
+// the cap holds it, and it reports the count once.
 //
 // GitHub delivers a head's push webhook and its synchronize in either order, and a head whose push
 // has not arrived is counted until the push proves handoff-only or the review App's. So every case
@@ -725,14 +727,19 @@ func TestAnExhaustedFixAttemptCountStillTakesTheReviewersRequestForChanges(t *te
 // and the same notices.
 func TestAnExhaustedFixAttemptCountHoldsTheCountedAttemptUntilAHeadIsPushedOntoGreen(t *testing.T) {
 	const required, implementer = "pr-checks-result", "legion-implementer[bot]"
-	// step is a settlement, or a head's arrival: its push webhook and its synchronize, in the order
-	// the subtest delivers them.
+	// step is a settlement or a read of the base branch's required set, delivered as it is, or a
+	// head's arrival: its push webhook and its synchronize, in the order the subtest delivers them.
 	type step struct {
-		settle                  intake.Fact
+		fact                    intake.Fact
 		from, to, paths, pusher string
 	}
 	settled := func(head string, attempt int, failing ...string) step {
-		return step{settle: settledAt(head, required, attempt, failing...)}
+		return step{fact: settledAt(head, required, attempt, failing...)}
+	}
+	// reads is the daemon's read of the required set naming exactly names: none is a base that
+	// requires nothing, never a set left unread.
+	reads := func(names ...string) step {
+		return step{fact: intake.RequiredChecks{Repo: "sjawhar/legion", Number: 42, Names: append([]string{}, names...)}}
 	}
 	arrives := func(from, to, paths, pusher string) step {
 		return step{from: from, to: to, paths: paths, pusher: pusher}
@@ -775,6 +782,12 @@ func TestAnExhaustedFixAttemptCountHoldsTheCountedAttemptUntilAHeadIsPushedOntoG
 		{"the tester's handoff pushed onto the held red, the red carried to it", 0,
 			[]step{settled("h3", 1, required), arrives("h3", "h3t", handoff, testReviewApp), settled("h3", 2, required)},
 			phase.Testing, 0, 1, 3, "h3"},
+		// The base stops requiring anything while the counted head's red is held, so that head has
+		// no verdict and nothing there is red; the implementer's push onto it leaves the attempt as a
+		// push onto green does, and once the base requires the check again the new head's red is new.
+		{"a head pushed onto a base that stopped requiring anything", 0,
+			[]step{settled("h3", 1, required), reads(), arrives("h3", "h4", code, implementer), reads(required), settled("h4", 1, required)},
+			phase.Implementing, 1, 1, 3, ""},
 	} {
 		for _, pushFirst := range []bool{false, true} {
 			order := "synchronize first"
@@ -785,7 +798,7 @@ func TestAnExhaustedFixAttemptCountHoldsTheCountedAttemptUntilAHeadIsPushedOntoG
 				var facts []intake.Fact
 				for _, s := range tc.steps {
 					if s.to == "" {
-						facts = append(facts, s.settle)
+						facts = append(facts, s.fact)
 						continue
 					}
 					arrival := []intake.Fact{syncedTo(s.to), pushedFromTo(s.from, s.to, s.paths, s.pusher)}

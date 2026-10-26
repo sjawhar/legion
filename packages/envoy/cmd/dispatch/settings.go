@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"strings"
 )
 
 // setting is one row of envoy-dispatch's settings table: a Dispatch setting, an environment
@@ -87,7 +86,7 @@ var settings = []setting{
 	{Name: "DISPATCH_APP_CLIENT_ID", Required: "no",
 		Description: "GitHub App client ID, which names the App in the JWT its private key signs. Set, the App comes from the `DISPATCH_APP_*` variables instead of `~/.local/share/dispatch/app.json`."},
 	{Name: "DISPATCH_APP_PEM_B64", Required: "no",
-		Description: "Base64-encoded GitHub App private key, which signs every App call: the web app's GitHub reads, the architecture import and webhook redelivery are off without one."},
+		Description: "GitHub App private key, as a PEM or the base64 of a PEM, which signs every App call: the web app's GitHub reads, the architecture import and webhook redelivery are off without one."},
 	{Name: "DISPATCH_APP_ID", Required: "no",
 		Description: "The GitHub App's numeric ID."},
 	{Name: "DISPATCH_APP_SLUG", Required: "no",
@@ -106,8 +105,8 @@ var settings = []setting{
 		Description: "Audience those service-account tokens must carry."},
 	{Name: "DISPATCH_AGENT_SECRETS_URL", Required: "no",
 		Description: "Base URL of the secrets broker's API, an absolute http(s) URL with no path; set, the credential-request pages are on."},
-	{Name: "DISPATCH_AGENT_SECRETS_TOKEN", File: true, Required: "when `DISPATCH_AGENT_SECRETS_URL` is set",
-		Description: "Bearer token Dispatch sends the secrets broker."},
+	{Name: "DISPATCH_AGENT_SECRETS_ACCOUNT_TOKEN_FILE", Required: "when `DISPATCH_AGENT_SECRETS_URL` is set",
+		Description: "File holding Dispatch's own projected Kubernetes service-account token, which every call to the secrets broker presents; the broker verifies it and reads the caller from `BROKER_API_ACCOUNTS`. In the cluster it is the projected-token volume's path (`/var/run/secrets/…/token`), which the kubelet rewrites in place; the file is read at call time, so a rotation needs no restart, and a local run writes a token into a file of its own and names that."},
 	{Name: "DISPATCH_WEB_DIST", Default: "the `packages/dispatch/web/dist` directory found from the binary's location", Required: "no",
 		Description: "Directory of the built dashboard the server serves."},
 	{Name: "DISPATCH_ASSET_STORE_BUCKET", Required: "no",
@@ -128,7 +127,14 @@ var removedSettings = []struct{ Name, Replacement string }{
 	{"DISPATCH_ALLOWED_LOGINS", "people sign in; DISPATCH_SIGNIN_GROUP or DISPATCH_SIGNIN_DOMAIN names who may"},
 	{"DISPATCH_APP_CLIENT_SECRET", "nobody signs in through the GitHub App; its JWT needs only DISPATCH_APP_CLIENT_ID and DISPATCH_APP_PEM_B64"},
 	{"COHERE_API_KEY", "meaning search (LEGION-549) calls Cohere Embed v4 through AWS Bedrock on the AWS SDK's default credential chain (the task role in production), never a Cohere API key"},
+	{"DISPATCH_AGENT_SECRETS_TOKEN", noSharedBrokerBearer},
+	{"DISPATCH_AGENT_SECRETS_TOKEN_FILE", noSharedBrokerBearer},
 }
+
+// noSharedBrokerBearer is why the secrets broker's shared bearer and its file are gone: the
+// broker (BROKER_UI_TOKEN removed with it) now identifies Dispatch by Dispatch's own projected
+// Kubernetes ServiceAccount token, which DISPATCH_AGENT_SECRETS_ACCOUNT_TOKEN_FILE names.
+const noSharedBrokerBearer = "the secrets broker takes Dispatch's own projected Kubernetes service-account token, not a shared bearer: name the file holding it in DISPATCH_AGENT_SECRETS_ACCOUNT_TOKEN_FILE and list that account in the broker's BROKER_API_ACCOUNTS"
 
 // refuseRemovedSettings names the first removed setting env still sets, and what replaced it.
 // resolveBootConfig runs it before it reads anything else.
@@ -195,25 +201,6 @@ func (values settingValues) lookup(name string) (string, bool) {
 func (values settingValues) get(name string) string {
 	value, _ := values.lookup(name)
 	return value
-}
-
-// agentSecretsToken resolves the secrets broker's UI bearer, reading
-// DISPATCH_AGENT_SECRETS_TOKEN_FILE (trimmed contents) ahead of
-// DISPATCH_AGENT_SECRETS_TOKEN; a set-but-unreadable or blank file is an error naming both,
-// never a silent fallback to the bare variable.
-func agentSecretsToken(env settingValues) (string, error) {
-	if path := strings.TrimSpace(env.get("DISPATCH_AGENT_SECRETS_TOKEN_FILE")); path != "" {
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return "", fmt.Errorf("DISPATCH_AGENT_SECRETS_TOKEN_FILE names %s, which could not be read: %w", path, err)
-		}
-		value := strings.TrimSpace(string(data))
-		if value == "" {
-			return "", fmt.Errorf("DISPATCH_AGENT_SECRETS_TOKEN_FILE names %s, which is empty", path)
-		}
-		return value, nil
-	}
-	return strings.TrimSpace(env.get("DISPATCH_AGENT_SECRETS_TOKEN")), nil
 }
 
 // settingEntry is a row as `envoy-dispatch settings` prints it. Default and File are null when the
