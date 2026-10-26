@@ -17,10 +17,13 @@
 -- A new table: no existing row is read or rewritten, and the release before this one neither
 -- reads nor writes it. It is not lock-free, though: the foreign key takes ShareRowExclusiveLock
 -- on artifacts for the length of the migration, which holds off writes to artifacts (an
--- outside reviewer of #2137 measured about 11 ms, and pgmigrate.LockTimeout's five seconds
--- bounds only the wait to take the lock, not the hold). The foreign key's on delete cascade
--- keeps that release's artifact deletes working: a deleted document takes its pending notice
--- with it.
+-- outside reviewer of #2137 measured about 11 ms for the table alone). The migration is one
+-- transaction, so that lock is still held while the alter below waits for ACCESS EXCLUSIVE on
+-- doc_settlements_pending, which every document append writes: a long transaction holding that
+-- table can hold artifacts writes and every append behind it for up to pgmigrate.LockTimeout's
+-- five seconds, after which the migration fails the boot. The foreign key's on
+-- delete cascade keeps that release's artifact deletes working: a deleted document takes its
+-- pending notice with it.
 create table document_edit_notices (
   artifact_id uuid primary key references artifacts(id) on delete cascade,
   from_version integer not null,
