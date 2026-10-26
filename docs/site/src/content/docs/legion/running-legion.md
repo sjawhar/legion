@@ -89,10 +89,10 @@ an installation that Dispatch searches.
 
 `--webhook-url` becomes the Envoy App's webhook. That App's webhook secret is the listener's
 `ENVOY_GITHUB_WEBHOOK_SECRET`, its client id is Dispatch's `DISPATCH_APP_CLIENT_ID`, and its
-private key, base64-encoded, is `DISPATCH_APP_PEM_B64`. The review App's id is the listener's
-`ENVOY_REVIEWER_APP_ID`. Store the private keys where `github_apps.<role>` and Dispatch read them,
-delete the files, then install every App from `https://github.com/apps/<slug>/installations/new`
-on the same repositories.
+private key, as the PEM GitHub gives or its base64, is `DISPATCH_APP_PEM_B64`. The review App's id
+is the listener's `ENVOY_REVIEWER_APP_ID`. Store the private keys where `github_apps.<role>` and
+Dispatch read them, delete the files, then install every App from
+`https://github.com/apps/<slug>/installations/new` on the same repositories.
 
 ## The cluster
 

@@ -116,6 +116,10 @@
 
 ### Added
 
+- The plugin ships a fifth skill, `claude-envoy:asd-ste100`, as a symlink into the root
+  `skills/`: the ASD-STE100 rules (Simplified Technical English) for text a reader must not
+  misread. It is Legion's copy of the MIT-licensed `danyuchn/asd-ste100-skill` at 32511c69, with
+  its licence and without its linter.
 - The `dispatch` command (`dist/dispatch.js`) takes `dispatch read --events N` (an issue's last N
   events) and `--all-events` (every one), on an issue read and its `dispatch://KEY/log`, which list
   the last 10 without either; the bundled tool specs in `dist/envoy-channel.js` and
