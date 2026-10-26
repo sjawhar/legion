@@ -19,15 +19,17 @@ on:
   pull_request_review:
     types: [submitted, edited]
 
-# Every run of one pull request shares one group and cancels the run before it, whatever event
-# started either, so a pull request holds at most one running and one pending PR Title run however
-# many edits and reviews arrive. Nothing is lost: each run checks the title and body its event
-# names and reads the commits, comments and reviews live, so the newest repeats every check of the
-# runs it cancels, and the newest `pr-title` on the head is the one that stands. A review run
-# checks with main's copy of check-pr-text.sh; the required lint job checks a pull request that
-# changes it with its own copy at every push.
+# A run cancels the run before it of the same pull request and event, so a pull request holds at
+# most one running and one pending PR Title run per event however many edits and reviews arrive.
+# Nothing is lost: each run checks the title and body its event names and reads the commits,
+# comments and reviews live, so the newest repeats every check of the runs it cancels. The event is
+# in the group because GitHub lists a pull request's checks once per check name and event (as
+# `gh pr checks` does): a review run that cancelled a pull_request run would leave that event's
+# latest `pr-title` cancelled on the head until the next push or edit. A review run checks with
+# main's copy of check-pr-text.sh; the required lint job checks a pull request that changes it with
+# its own copy at every push.
 concurrency:
-  group: pr-title-${{ github.event.pull_request.number }}
+  group: pr-title-${{ github.event_name }}-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
 # The job clones the repository for check-pr-text.sh, which reads the pull request's commits
