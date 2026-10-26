@@ -22,6 +22,34 @@ check=setup
 note() { echo "   $*"; }
 fail() { echo "FAIL $check: $*" >&2; exit 1; }
 for tool in go docker jq curl python3 tmux bun mise jj asciinema; do command -v "$tool" >/dev/null || fail "$tool is required"; done
+# The real gh `legion controller start` hands its `legion gh` wrapper, resolved as the controller
+# resolves it (controllerRealGH): LEGION_GH_PATH when set, else the first gh on PATH, which must not
+# be a script. The operator's shell below starts from `env -i`, so it names it.
+real_gh() {
+  local dir gh first
+  if [ -n "${LEGION_GH_PATH:-}" ]; then
+    [[ $LEGION_GH_PATH == /* ]] || fail "LEGION_GH_PATH $LEGION_GH_PATH is not an absolute path"
+    if [ ! -f "$LEGION_GH_PATH" ] || [ ! -x "$LEGION_GH_PATH" ]; then
+      fail "LEGION_GH_PATH $LEGION_GH_PATH is not an executable file"
+    fi
+    printf '%s\n' "$LEGION_GH_PATH"
+    return
+  fi
+  local IFS=:
+  for dir in $PATH; do
+    [[ $dir == /* ]] || continue
+    gh=$dir/gh
+    if [ ! -f "$gh" ] || [ ! -x "$gh" ]; then continue; fi
+    first=
+    IFS= read -r -n 2 first <"$gh" || true
+    [ "$first" != '#!' ] ||
+      fail "the first gh on PATH, $gh, is a script, not the real gh, which legion controller start refuses: set LEGION_GH_PATH to the real gh's install path (mise which gh)"
+    printf '%s\n' "$gh"
+    return
+  done
+  fail "gh is not on PATH: legion controller start's gh wrapper runs it; install gh or set LEGION_GH_PATH"
+}
+legion_gh_path=$(real_gh)
 
 here=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$here/../../../../.." && pwd)
@@ -167,11 +195,13 @@ nats_urls: [$nats_url]
 state_dir: ./controller-state
 EOF
 
-# The operator's shell: this checkout's `legion` first on PATH, the run's HOME and profile, and
-# none of the running session's own Oh My Pi or Envoy variables.
+# The operator's shell: this checkout's `legion` first on PATH, the run's HOME and profile, the real
+# gh `legion controller start` runs (real_gh), and none of the running session's own Oh My Pi or
+# Envoy variables.
 shell_env=(env -i "PATH=$work/bin:$PATH" "HOME=$omp_home" "OMP_PROFILE=$profile" "TERM=xterm-256color"
   "LANG=C.UTF-8" "XDG_STATE_HOME=$work/xdg" "TMUX_TMPDIR=$work/tmux" "XDG_CONFIG_HOME=$XDG_CONFIG_HOME"
-  "MISE_DATA_DIR=$MISE_DATA_DIR" "JJ_CONFIG=$JJ_CONFIG" "LEGION_OMP_PATH=$work/bin/omp")
+  "MISE_DATA_DIR=$MISE_DATA_DIR" "JJ_CONFIG=$JJ_CONFIG" "LEGION_OMP_PATH=$work/bin/omp"
+  "LEGION_GH_PATH=$legion_gh_path")
 legion() { (cd "$operator" && "${shell_env[@]}" "$work/bin/legion" "$@"); }
 
 check=daemon

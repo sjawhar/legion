@@ -432,20 +432,21 @@ pass
 
 begin gate-refuses-a-missing-skill
 # The gate's load probe resolves every skill Legion's prompts load through the pane's own Oh My Pi.
-# The installed plugin without the rubric that its thermonuclear-deep-review agent and the
-# reviewer's role prompt load is refused, naming the skill and both files that load it.
+# The installed plugin without the rubric that thermonuclear-code-quality, the
+# thermonuclear-deep-review agent and the reviewer's role prompt load is refused, naming the skill
+# and every file that loads it.
 mv "$work/pi-legion/dist/skills/thermonuclear-deep-review" "$work/rubric.aside"
-expect_refusal missing-skill "finds no skill thermonuclear-deep-review (loaded by agents/thermonuclear-deep-review.md, roles/core/reviewer.md)"
+expect_refusal missing-skill "finds no skill thermonuclear-deep-review (loaded by dist/skills/thermonuclear-code-quality/SKILL.md, agents/thermonuclear-deep-review.md, roles/core/reviewer.md)"
 mv "$work/rubric.aside" "$work/pi-legion/dist/skills/thermonuclear-deep-review"
 [ -f "$work/pi-legion/dist/skills/thermonuclear-deep-review/SKILL.md" ] || fail "the rubric was not restored"
 pass
 
 begin gate-refuses-a-skill-only-a-role-prompt-loads
-# The gate also resolves the skills the daemon's role prompts load, beside the plugin's own:
-# legion-controller is loaded by roles/controller-root.md alone, so only a gate that reads the
-# daemon's own role prompts can refuse the plugin without it.
+# The gate also resolves the skills the daemon's role prompts load, beside the plugin's own: the
+# refusal of the plugin without legion-controller names roles/controller-root.md, which only a gate
+# that reads the daemon's own role prompts can name.
 mv "$work/pi-legion/dist/skills/legion-controller" "$work/controller-skill.aside"
-expect_refusal prompt-only-skill "finds no skill legion-controller (loaded by roles/controller-root.md)"
+expect_refusal prompt-only-skill "finds no skill legion-controller (loaded by dist/skills/legion-worker/references/findings.md, roles/controller-root.md)"
 mv "$work/controller-skill.aside" "$work/pi-legion/dist/skills/legion-controller"
 [ -f "$work/pi-legion/dist/skills/legion-controller/SKILL.md" ] || fail "the legion-controller skill was not restored"
 pass

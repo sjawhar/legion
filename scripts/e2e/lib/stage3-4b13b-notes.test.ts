@@ -27,7 +27,7 @@ function acceptanceRun(ending: string) {
       `set -Eeuo pipefail
 work=${JSON.stringify(join(run, "work"))} evidence=${JSON.stringify(evidence)}
 unserved_reader=${JSON.stringify(join(import.meta.dir, "model-gateway-unserved.sh"))}
-ok= audited= prod_baseline= daemon_pid= watcher_pid= dispatch_pid= listener_pid= bridge_pid= nats_pid= ptoken=x
+ok= audited= prod_baseline= daemon_pid= watcher_pid= dispatch_pid= listener_pid= bridge_pid= nats_pid= daemon_keeper_pid= ptoken=x
 check=setup check_started=2026-09-30T11:00:00Z
 soft_failures="$evidence/soft-failures.txt"
 mkdir -p "$work" "$evidence/model-gateway"

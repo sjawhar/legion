@@ -168,7 +168,7 @@ pass`;
 const stage3 = (tail: string) => `${shell3.set}
 root=${JSON.stringify(root)} work="$RUN/work" evidence="$RUN/evidence" profile_agent="$RUN/no-profile"
 check=setup check_started=2026-10-08T00:00:00Z
-ok= audited= prod_baseline= watcher_pid= daemon_pid= dispatch_pid= listener_pid= bridge_pid= pg_container=none nats_container=none
+ok= audited= prod_baseline= watcher_pid= daemon_pid= dispatch_pid= listener_pid= bridge_pid= daemon_keeper_pid= dispatch_keeper_pid= pg_container=none nats_container=none
 project=S312345678 ptoken=s312345678 repo=sjawhar/legion-smoke
 mkdir -p "$work" "$evidence/model-gateway" "$evidence/transcripts"
 ${fn3("begin")}
