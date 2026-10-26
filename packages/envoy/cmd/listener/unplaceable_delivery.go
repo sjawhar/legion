@@ -187,10 +187,10 @@ func unplaceableAgentDelivery(cfg listenerDeliveryHandlerConfig, message deliver
 	// reason names which of the three causes this is, for the operator and for the counter
 	// label. session.ReasonNone keeps no_push_target's label only because the switch needs a
 	// default: in a deployed listener nothing reaches here with it. HandleAgentMessage
-	// answers undelivered, error-free and ReasonNone only for session.ErrWrongMachine, and
-	// no production code returns that error - its one producer is the test transport in
-	// TestE2E_AgentToAgent_RemoteMachine (internal/integration/e2e_test.go). The arm is
-	// defensive, and no_push_target on a dashboard never means it.
+	// answers undelivered, error-free and ReasonNone only for a session another listener owns
+	// (session.ErrWrongMachine), which it reports as OwnedElsewhere, and agentSubjectDelivery
+	// acknowledges that result before it calls here. The arm is defensive, and no_push_target
+	// on a dashboard never means it.
 	reason := "no_push_target"
 	giveUpStatus := "unplaceable_no_push_target"
 	switch result.Reason {
@@ -222,9 +222,9 @@ func unplaceableAgentDelivery(cfg listenerDeliveryHandlerConfig, message deliver
 	if result.Reason == session.ReasonPushFailed {
 		windowDeferrals = min(windowDeferrals, pushFailedDeferrals)
 	}
-	// What does not hold the retry open is session.ReasonNone, the defensive arm above:
-	// should a deliverer ever return session.ErrWrongMachine, the session it names is
-	// another listener's to place, however often this one sees the message. Every outcome a
+	// What does not hold the retry open is session.ReasonNone, the defensive arm above: an
+	// undelivered result that carries it is another listener's session to place, however often
+	// this one sees the message. Every outcome a
 	// deployed listener reaches here with carries one of the three reasons - no entry is
 	// ReasonNoSessionRecord, a record with no port ReasonNoPushTarget, and any error the
 	// push itself returns, a refusal or an unreachable peer, ReasonPushFailed

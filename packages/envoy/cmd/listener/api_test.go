@@ -2445,6 +2445,63 @@ func TestSubscribeHandlerStoresAndListsCapabilities(t *testing.T) {
 	}
 }
 
+// A session on a serving port is reached at the host its registration records, so a registration
+// whose host could move the delivery to another authority or path is refused before anything is
+// written: neither the session's interests nor its session entry appear. The same registration
+// without a host is accepted, as an older plugin's is, and a host on a registration with no port,
+// which nothing dials, is stored as it came.
+func TestAServingPortRegistrationWithAMalformedHostIsRefused(t *testing.T) {
+	registry, sessions := setupSessionsTest(t, nil, nil)
+	handler := subscribeHandler(&listenerDeps{registry: registry, sessions: sessions}, "test-machine", logging.New("test"))
+	subscribe := func(t *testing.T, body map[string]any) *httptest.ResponseRecorder {
+		t.Helper()
+		encoded, err := json.Marshal(body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/interests/subscribe", strings.NewReader(string(encoded))))
+		return recorder
+	}
+	for index, host := range []string{"example-host:80", "example-host/path", "user@example-host", "[::1]", "example host", "example-host?x", "example-host#x", "example%2fhost", "example-host\n"} {
+		t.Run(fmt.Sprintf("%q", host), func(t *testing.T) {
+			sessionID := fmt.Sprintf("ses_malformed_host_%d", index)
+			recorder := subscribe(t, map[string]any{"session_id": sessionID, "topics": []string{"notifications.team.example"}, "port": 4242, "host": host})
+			if recorder.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400; body = %s", recorder.Code, recorder.Body.String())
+			}
+			var answer apiError
+			if err := json.NewDecoder(recorder.Body).Decode(&answer); err != nil {
+				t.Fatalf("decode the refusal: %v", err)
+			}
+			if answer.Error != "host is not a host name or address" || !reflect.DeepEqual(answer.Expected, []string{"host"}) {
+				t.Fatalf("refusal = %+v, want error %q expecting [host]", answer, "host is not a host name or address")
+			}
+			if interest, err := registry.Get(context.Background(), sessionID); err == nil {
+				t.Fatalf("a refused registration wrote interests %+v", interest)
+			}
+			if entry, err := sessions.Get(sessionID); err == nil {
+				t.Fatalf("a refused registration wrote the session entry %+v", entry)
+			}
+		})
+	}
+
+	recorder := subscribe(t, map[string]any{"session_id": "ses_no_host", "topics": []string{"notifications.team.example"}, "port": 4242})
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("the registration without a host: status = %d, want 200; body = %s", recorder.Code, recorder.Body.String())
+	}
+	if _, err := sessions.Get("ses_no_host"); err != nil {
+		t.Fatalf("the registration without a host wrote no session entry: %v", err)
+	}
+	recorder = subscribe(t, map[string]any{"session_id": "ses_no_port", "topics": []string{}, "self_subscribed": true, "host": "example-host:80"})
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("the registration with no port: status = %d, want 200; body = %s", recorder.Code, recorder.Body.String())
+	}
+	if entry, err := sessions.Get("ses_no_port"); err != nil || entry.Host != "example-host:80" {
+		t.Fatalf("the registration with no port stored %+v, %v; want its host as it came", entry, err)
+	}
+}
+
 // sessionEntryRoute asks d's per-session route for sessionID, as a caller holding a session id and
 // about to address it does.
 func sessionEntryRoute(t *testing.T, d *listenerDeps, sessionID string) *httptest.ResponseRecorder {

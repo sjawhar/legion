@@ -214,10 +214,10 @@ Legion uses GitHub's own review mechanisms rather than labels:
   leaves no verdict until the daemon's next read of its runs, and one with no run on the head
   leaves none either. A failing check the base branch does not
   require, such as a lane started by hand or an advisory review check, never makes CI red, and on
-  a base branch that requires nothing, nothing does: there Legion submits a merge GitHub completes
-  whatever the head's checks say, and the scheduling that sends work back to an implementer never
-  fires, because a base that requires nothing reads green (`HeadVerdict` in
-  `packages/daemon/internal/classify/required.go`). The daemon judges the check runs GitHub
+  a base branch that requires nothing, nothing does: a base that requires no check and no workflow
+  gives the head no verdict (`HeadVerdict` in `packages/daemon/internal/classify/required.go`), so
+  nothing there sends work back to an implementer, and Legion submits a merge GitHub completes
+  whatever the head's checks say. The daemon judges the check runs GitHub
   reports, so a required check that only a commit status reports never reports to it: the head
   has no verdict and is sent nowhere, and GitHub, which reads that status, holds the merge on it.
   Legion matches a required workflow to a run by its path and the repository that defines it, and
@@ -239,19 +239,19 @@ Legion uses GitHub's own review mechanisms rather than labels:
   the issue and tells the architect; neither stops a worker. At the round cap the architect decides,
   in the turn the notice wakes, whether to narrow the next rounds, split work off (into a sibling
   child, or, on a root, an ask whether the rest needs an issue of its own), or let converging rounds
-  run, and posts that decision on the issue. Every move back to an earlier phase
-  counts a round: a tester's fail, a review's request for changes, a worker's move back, and the
-  daemon's own move when CI turns red or the head starts conflicting with its base. Once
-  `max_fix_attempts` runs out, CI red within the attempt that ran it out - the head whose push was
-  counted, and every head pushed on top of it until a push lands on a head CI judged green - no
-  longer sends the work back from testing, review, retro or merging by itself: the issue stays in
-  its phase through every red in that attempt until the architect moves it, or a worker's own
-  decision does (a tester's fail, a review's request for changes). A head pushed onto green CI
-  raises no count and leaves the attempt, so its red sends the work back as usual. Every other push
-  stays in the attempt, whether it is counted or not: one onto a head CI has not judged yet, and
-  one onto the held red that counts nothing, such as the tester's red tests or its handoff. The
-  next push onto a red raises the count and is told again. A `READY` is withdrawn on red CI at any
-  count (below).
+  run, and posts that decision on the issue. Every move back to an earlier phase counts a round: a
+  tester's fail, a review's request for changes, a worker's move back, and the daemon's own move
+  when CI turns red or the head starts conflicting with its base. Once `max_fix_attempts` runs out,
+  CI red within the attempt that ran it out - the head whose push was counted, and every head pushed
+  on top of it until a push lands on a head CI judged green or on a settled head whose base requires
+  nothing - no longer sends the work back from testing, review, retro or merging by itself: the
+  issue stays in its phase through every red in that attempt until the architect moves it, or a
+  worker's own decision does (a tester's fail, a review's request for changes). A head pushed onto
+  green CI, or onto a settled head whose base branch requires no check and no workflow, raises no
+  count and leaves the attempt, so its red sends the work back as usual. Every other push stays in
+  the attempt, whether it is counted or not: one onto a head CI has not judged yet, and one onto the
+  held red that counts nothing, such as the tester's red tests or its handoff. The next push onto a
+  red raises the count and is told again. A `READY` is withdrawn on red CI at any count (below).
 
 ## READY and the merge
 
@@ -330,11 +330,17 @@ The record lives on the pull request alone: Dispatch refuses a write on a closed
 Nothing waits for the deploy: a `pending` look ends, the implementer's pod goes with its
 conversation and the issue's volume kept, and the daemon wakes the check — the pod comes back and
 the same agent takes the next look — when Dispatch's delivery timeline reports the pull request
-deployed (its `issue.deployed` event), or, for Legion's own repository, when a Legion daemon boots
-or Dispatch starts on a build that contains the merge. A look is bounded at two hours, and the
-whole check at `production_check_hours` (336, fourteen days, by default): the wake at that bound is
-the last look, and a `pending` there closes the check as not run, which the implementer writes on
-the pull request. `legion state` prints how many checks are open and the oldest of them.
+deployed (its `issue.deployed` event); when the project names the repository's deploy workflow
+(`projects.<KEY>.deploys` in `legion.yaml`: the repository, the workflow file and a step such as
+`Apply`), at each completed run of that workflow on the repository's default branch whose step
+succeeded after the pull request merged, once per such job; or, for Legion's own repository, when
+a Legion daemon boots or Dispatch starts on a build that contains the merge. A run of another
+workflow or branch, a run a pull request triggered, a step that was skipped or failed, and a step
+that finished before the merge wake nothing. A wake while a look is open is kept for the next look.
+A look is bounded at two hours, and the whole check at `production_check_hours` (336, fourteen
+days, by default): the wake at that bound is the last look, and a `pending` there closes the check
+as not run, which the implementer writes on the pull request. `legion state` prints how many checks
+are open and the oldest of them.
 
 A child's close releases its pod at once and its volume when the check closes; a root's close
 frees its admission slot once no other issue of its tree is still in the workflow, and the

@@ -15,11 +15,9 @@ type HandleAgentReason uint8
 
 const (
 	// ReasonNone is every outcome that is none of the three causes below: a push that landed, a
-	// self-subscribed skip (the session reads the message off its own subscription), and the
-	// ErrWrongMachine answer both paths keep for a session another listener owns - which no
-	// production deliverer produces: the one producer of ErrWrongMachine is a test transport
-	// (TestE2E_AgentToAgent_RemoteMachine, internal/integration/e2e_test.go), so in a deployed
-	// listener an undelivered, error-free result never carries this reason.
+	// self-subscribed skip (the session reads the message off its own subscription), and a
+	// session another listener owns (ErrWrongMachine), which both paths answer as OwnedElsewhere:
+	// that listener delivers the message, so this one has no cause to report.
 	ReasonNone HandleAgentReason = iota
 	// ReasonNoSessionRecord is a session the resolution found no record of. A caller holding a
 	// record source that trails the store - or one whose read did not answer - may ask again.
@@ -42,8 +40,7 @@ const (
 // reasonFor maps the delivery sentinels onto the reason the caller acts on. Every other error -
 // a refused push, an unreachable machine - is ReasonPushFailed: it is a failure of this attempt,
 // not a statement about the session's record, and a later attempt may well land. ErrWrongMachine
-// never reaches here: both call sites answer it before they map, as defence only, since nothing
-// outside a test returns it (see ReasonNone).
+// never reaches here: both call sites answer it as OwnedElsewhere before they map.
 func reasonFor(err error) HandleAgentReason {
 	switch {
 	case errors.Is(err, ErrNoSessionRecord):
@@ -59,14 +56,18 @@ func reasonFor(err error) HandleAgentReason {
 type HandleAgentResult struct {
 	Delivered bool
 	Skipped   bool
-	ShouldNAK bool
-	Err       error
+	// OwnedElsewhere reports a session another listener owns (see ErrWrongMachine). That listener
+	// reads the same inbox message from its own durable and delivers it, so this one acknowledges
+	// it with nothing to report: no delivery, no exception, no NAK.
+	OwnedElsewhere bool
+	ShouldNAK      bool
+	Err            error
 	// Reason tells apart the three causes of an undelivered message that carries no error for
 	// the caller to act on: the registry path's undelivered result, which the listener's delivery
 	// retries or gives up on by this field alone. The NAKing interest path sets it too, but its
 	// result carries Err and ShouldNAK, and the listener answers that result by those before it
 	// ever reads Reason (cmd/listener/delivery.go, agentSubjectDelivery), so there it is read by
-	// nothing.
+	// nothing. An OwnedElsewhere result carries ReasonNone.
 	Reason HandleAgentReason
 }
 
@@ -86,26 +87,32 @@ func HandleAgentMessage(
 	entry *SessionEntry,
 	deliverer *Deliverer,
 ) HandleAgentResult {
-	// Interest path: direct delivery if interest matches this machine
+	// Interest path: the stored subscription names this listener, which owns the session.
 	if interest != nil && interest.MachineID == machineID {
 		delivery, err := deliverer.DeliverWithResultForEntry(item, *interest, entry)
+		if errors.Is(err, ErrWrongMachine) {
+			return HandleAgentResult{OwnedElsewhere: true}
+		}
 		if err != nil {
-			if errors.Is(err, ErrWrongMachine) {
-				return HandleAgentResult{Delivered: false}
-			}
 			return HandleAgentResult{ShouldNAK: true, Err: err, Reason: reasonFor(err)}
 		}
 		return HandleAgentResult{Delivered: true, Skipped: delivery.Skipped}
 	}
+	// A stored subscription naming another listener makes the session that listener's, whatever
+	// listener the session last registered through: the stored MachineID is the one its topics
+	// are fanned out on (store.Registry.Match), so ownership reads the same on both paths.
+	if interest != nil && interest.MachineID != "" {
+		return HandleAgentResult{OwnedElsewhere: true}
+	}
 
-	// No interest on this machine — deliver through the resolved session entry directly, which
-	// carries the port/machine the registry holds.
-	synth := store.Interest{SessionID: sessionID, MachineID: machineID}
-	delivery, err := deliverer.DeliverWithResultForEntry(item, synth, entry)
+	// No stored subscription names an owner, so the session registry entry does: an interest
+	// naming no machine leaves the decision to the entry's MachineID. The entry is the one the
+	// caller resolved, delivered through directly rather than read a second time.
+	delivery, err := deliverer.DeliverWithResultForEntry(item, store.Interest{SessionID: sessionID}, entry)
+	if errors.Is(err, ErrWrongMachine) {
+		return HandleAgentResult{OwnedElsewhere: true}
+	}
 	if err != nil {
-		if errors.Is(err, ErrWrongMachine) {
-			return HandleAgentResult{Delivered: false}
-		}
 		// Session not found or delivery failed without interest — don't NAK,
 		// another listener may own this session.
 		return HandleAgentResult{Delivered: false, Reason: reasonFor(err)}

@@ -38,7 +38,11 @@ type Config struct {
 	// build): a build the daemon boots on, or Dispatch starts on, is compared only against the
 	// open production checks of that repository, since no other repository's merge can be in it.
 	// Empty, no build is compared.
-	BuiltFrom      string
+	BuiltFrom string
+	// Deploys are the project's deploy workflows (config.Project.Deploys, `projects.<KEY>.deploys`):
+	// a completed run of one on the default branch of its repository is read from GitHub for each
+	// open production check of that repository (deployRunCompleted). Empty, no run wakes a check.
+	Deploys        []config.Deploy
 	MergeQueueRole string
 	Clock          func() time.Time
 	// ReviewAppLogin is the review App's bot login (<slug>[bot]) from its boot token lease. A push
@@ -146,6 +150,8 @@ func (e *Engine) Apply(ctx context.Context, tx pgx.Tx, fact intake.Fact) (intake
 		return e.issueDeployed(ctx, tx, fact)
 	case intake.ServerStarted:
 		return e.serverStarted(ctx, tx, fact)
+	case intake.WorkflowRunCompleted:
+		return e.deployRunCompleted(ctx, tx, fact)
 	case intake.CheckWake:
 		return e.checkWake(ctx, tx, fact)
 	case intake.CheckLookEnded:

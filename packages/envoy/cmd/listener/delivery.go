@@ -80,18 +80,24 @@ type deliveryMode uint8
 const (
 	coreDelivery deliveryMode = iota
 	durableDelivery
+	// liveDelivery is a message the live lane took off core NATS (liveDeliveryHandler). Like
+	// coreDelivery it is delivered to whoever is there and never retried; unlike it, its envelope
+	// must name the subject it arrived on as its topic.
+	liveDelivery
 )
 
 type deliveryMessage struct {
 	data []byte
 	mode deliveryMode
-	msg  *nats.Msg
+	// msg is the NATS message: set for durableDelivery, which acknowledges it, and liveDelivery,
+	// which reads its subject.
+	msg *nats.Msg
 }
 
 // finalize makes core delivery's loss-on-failure semantics explicit: only a
-// durable JetStream message receives an acknowledgement or retry request.
-// A retry takes the standard delay; a path that needs its own asks for it
-// through finalizeAfter.
+// durable JetStream message receives an acknowledgement or retry request. A role-lane or live-lane
+// message is core NATS, sent once to whoever was subscribed, so nothing acknowledges or retries it.
+// A retry takes the standard delay; a path that needs its own asks for it through finalizeAfter.
 func (message deliveryMessage) finalize(retry bool) {
 	if retry {
 		message.finalizeAfter(30 * time.Second)
@@ -285,6 +291,13 @@ func listenerDeliveryHandler(cfg listenerDeliveryHandlerConfig) func(deliveryMes
 		if err := item.Validate(); err != nil {
 			cfg.logger.Error("listener invalid envelope", slog.String("error", err.Error()))
 			message.finalize(false)
+			return
+		}
+		// The live lane chose this message by its subject, so an envelope naming another topic would
+		// be routed past that choice: to a role lane or an agent's inbox, or to sessions subscribed
+		// to a topic nobody published on.
+		if message.mode == liveDelivery && item.Topic != message.msg.Subject {
+			cfg.logger.Warn("listener live envelope names a topic other than its subject", slog.String("subject", message.msg.Subject), slog.String("topic", item.Topic), slog.String("event_id", item.EventID))
 			return
 		}
 		cfg.messagesReceived.Inc([2]string{"source", item.Source}, [2]string{"topic_prefix", metrics.TopicPrefix(item.Topic)})
@@ -528,7 +541,8 @@ const deliverySessionReadTimeout = 2 * time.Second
 // agentSubjectDelivery delivers directly to the session named by the topic
 // (notifications.agent.<session>), pushing over HTTP/WebSocket when the
 // session is live and falling back to whatever session.HandleAgentMessage
-// decides (e.g. queuing) otherwise.
+// decides (e.g. queuing) otherwise. A session another listener owns is that
+// listener's to deliver, so this one acknowledges the message silently.
 func agentSubjectDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMessage, item contracts.Envelope) {
 	sessionID := strings.TrimPrefix(item.Topic, contracts.AgentTopicPrefix)
 	// The JetStream metadata carries everything unplaceableAgentDelivery bounds this message
@@ -599,6 +613,14 @@ func agentSubjectDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMes
 	cfg.attemptCache.Record(item.DedupeKey, sessionID)
 	deliveryTimer := metrics.NewTimer()
 	result := session.HandleAgentMessage(item, sessionID, cfg.machineID, interestPtr, entryPtr, cfg.deliverer)
+	if result.OwnedElsewhere {
+		// Every listener on the bus reads each inbox message from its own durable, and the owner
+		// delivers it from its copy: a no_holder exception here would report a delivered message
+		// as undeliverable, once per listener that does not own the session.
+		cfg.logger.DeliveryLog(slog.LevelDebug, "listener agent session owned by another listener", sessionID, item.Topic, item.EventID, "owned_elsewhere")
+		message.finalize(false)
+		return
+	}
 	if result.Err != nil {
 		applyDeliveryOutcome(cfg, item, deliveryOutcome{
 			sessionID:    sessionID,

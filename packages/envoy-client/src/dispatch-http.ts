@@ -37,6 +37,7 @@ import type {
   IssueRead,
   IssueReferences,
   IssueRouteStatus,
+  IssueSummary,
   IssueSummaryPage,
   Message,
   MessageRead,
@@ -50,6 +51,7 @@ import type {
   Version,
   WhoamiResponse,
 } from "@legion/contracts";
+import { DEFAULT_ISSUE_READ_EVENTS } from "@legion/contracts";
 
 import { textHead } from "./ask-answer";
 
@@ -154,6 +156,16 @@ export type GraphReferencesQuery = ({ readonly to: string } | { readonly from: s
   readonly since?: number;
 };
 
+/** Which of an issue's events `read` returns, oldest first: the newest `events`, or every one. */
+export interface IssueReadOptions {
+  /** `DEFAULT_ISSUE_READ_EVENTS` when absent or undefined. */
+  readonly events?: number | "all" | undefined;
+}
+
+/** The most events one `GET /api/v1/issues/{key}/events` page holds: Dispatch refuses a larger
+ *  `limit` (`parseEventLimit` in packages/envoy/internal/dispatch/api/events.go). */
+const ISSUE_EVENTS_PAGE_MAX = 200;
+
 export const DISPATCH_TOOL_DEADLINE_MS = 60_000;
 
 function requestSignal(signal: AbortSignal | undefined): AbortSignal {
@@ -193,6 +205,22 @@ function whyNotAPage(answer: unknown): string | undefined {
     `${what}. Retrying will not help: the same request gets the same answer until that ` +
     "Dispatch is upgraded or fixed."
   );
+}
+
+/**
+ * Why `answer` is not the bare array `listAllIssues` asked for. A page here is the telling case:
+ * it means Dispatch paged a request that carried neither `limit` nor `offset`, so the caller did
+ * not get the exact set it needs. Text looks like a proxy in the way, which a retry can get past.
+ */
+function whyNotAnArray(answer: unknown): string {
+  if (typeof answer === "string")
+    return `text that is not JSON, ${GATEWAY_PAGE}, so a retry may succeed`;
+  if (answer === null) return "null";
+  if (typeof answer !== "object") return `a ${typeof answer}`;
+  if ("issues" in answer && Array.isArray(answer.issues)) {
+    return "a page, so this Dispatch pages a request that carries no limit and no offset";
+  }
+  return "an object that is not the listing";
 }
 
 /**
@@ -360,6 +388,25 @@ export class DispatchClient {
     );
   }
 
+  /**
+   * Every issue the filters match, in one read: `GET /api/v1/issues` with neither `limit` nor
+   * `offset`, which Dispatch answers as a bare array rather than a page (`parseIssuePage` returns
+   * no page when the query carries neither). A caller whose own writes move issues out of what it
+   * filtered on cannot walk offsets safely, because a row that shifts across a page boundary is
+   * served twice or never; this read is the exact set at one moment. Any answer that is not an
+   * array is refused, naming what arrived: a page here means a Dispatch that still pages a request
+   * carrying no paging parameters.
+   */
+  async listAllIssues(options: ListIssuesOptions): Promise<IssueSummary[]> {
+    const path = ["api", "v1", "issues"];
+    const query = { ...options };
+    const answer: unknown = await this.#json("GET", path, undefined, query);
+    if (Array.isArray(answer)) return answer as IssueSummary[];
+    throw new Error(
+      `GET ${this.#url(path, query)} asked for the unpaged listing and got ${whyNotAnArray(answer)}.`
+    );
+  }
+
   async listProjectArtifacts(project: string, unlinked = false): Promise<Artifact[]> {
     return this.#json(
       "GET",
@@ -446,7 +493,7 @@ export class DispatchClient {
     );
   }
 
-  async getIssueEvents(issue: string, after = 0, limit = 200): Promise<Event[]> {
+  async getIssueEvents(issue: string, after = 0, limit = ISSUE_EVENTS_PAGE_MAX): Promise<Event[]> {
     return this.#json(
       "GET",
       ["api", "v1", "issues", await this.#resolveIssue(issue), "events"],
@@ -454,10 +501,38 @@ export class DispatchClient {
       { after, limit }
     );
   }
-  async read(issueReference: string): Promise<IssueRead> {
+
+  /** The issue and its newest `options.events` events (every one for `"all"`), oldest first, up
+   *  to the issue's `last_seq` as read. An issue's events are numbered 1 to `last_seq`, so the
+   *  newest N are the N after `last_seq - N`, read a page of at most `ISSUE_EVENTS_PAGE_MAX` at a
+   *  time, and an event written after the issue was read is left to the next read. */
+  async read(issueReference: string, options: IssueReadOptions = {}): Promise<IssueRead> {
     const issueKey = await this.#resolveIssue(issueReference);
     const issue = await this.getIssue(issueKey);
-    const events = await this.getIssueEvents(issueKey, Math.max(0, issue.last_seq - 10), 10);
+    const requested = options.events;
+    const count =
+      requested === undefined
+        ? DEFAULT_ISSUE_READ_EVENTS
+        : requested === "all"
+          ? issue.last_seq
+          : Math.min(requested, issue.last_seq);
+    const events: Event[] = [];
+    let after = Math.max(0, issue.last_seq - count);
+    while (events.length < count) {
+      const limit = Math.min(ISSUE_EVENTS_PAGE_MAX, count - events.length);
+      const page = await this.getIssueEvents(issueKey, after, limit);
+      events.push(...page);
+      const last = page.at(-1);
+      // A short page is the end of the issue's events; a full one ends the read once it holds
+      // `count`. Only a page the read goes past must have moved past `after`.
+      if (page.length < limit || last === undefined || events.length >= count) break;
+      if (last.seq <= after) {
+        throw new Error(
+          `GET /api/v1/issues/${issueKey}/events?after=${after} answered no event after seq ${after}`
+        );
+      }
+      after = last.seq;
+    }
     return { issue, events };
   }
 

@@ -341,6 +341,10 @@ func TestE2E_AgentToAgent_LocalMachine(t *testing.T) {
 	recorder.expectNoDelivery(t, 300*time.Millisecond)
 }
 
+// TestE2E_AgentToAgent_RemoteMachine delivers to a session that runs on, and last registered
+// through, another machine while its stored subscription still names this listener: the stored
+// subscription makes this listener its owner (session.ErrWrongMachine is for a session another
+// listener owns), and the owner pushes to the machine the session's record names.
 func TestE2E_AgentToAgent_RemoteMachine(t *testing.T) {
 	env := setupTestEnv(t)
 	defer func(originalClient *http.Client) {
@@ -353,7 +357,7 @@ func TestE2E_AgentToAgent_RemoteMachine(t *testing.T) {
 		if r.URL.Hostname() != "remote-machine" {
 			t.Errorf("expected remote-machine host, got %s", r.URL.Hostname())
 		}
-		return nil, session.ErrWrongMachine
+		return &http.Response{StatusCode: http.StatusNoContent, Body: http.NoBody, Header: make(http.Header)}, nil
 	})}
 	// The session's own record names the machine it runs on, and the listener resolves that
 	// record before it pushes, so the push is addressed to remote-machine rather than to this
@@ -364,7 +368,7 @@ func TestE2E_AgentToAgent_RemoteMachine(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("register the remote session: %v", err)
 	}
-	if _, err := env.registry.Upsert(store.Interest{SessionID: "ses_remote", MachineID: "remote-machine", Dir: "/remote"}, []string{contracts.AgentSubject("ses_remote")}); err != nil {
+	if _, err := env.registry.Upsert(store.Interest{SessionID: "ses_remote", MachineID: "test-machine", Dir: "/remote"}, []string{contracts.AgentSubject("ses_remote")}); err != nil {
 		t.Fatalf("upsert remote interest: %v", err)
 	}
 

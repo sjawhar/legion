@@ -4,6 +4,21 @@
 
 ### Added
 
+- `dispatch_issues` takes `all` (`--all`), which asks Dispatch for the whole filtered listing in
+  one read instead of a page: the request goes out with neither `limit` nor `offset`, the two
+  parameters whose absence makes the server answer every match
+  (`api/issue_page.go`'s `parseIssuePage`). It is for a caller that must not miss or repeat a row
+  while other writers change the list, and above all for one whose own writes move issues out of
+  what it filtered on: offset paging shifts such a row across a page boundary, so it comes back
+  twice or never. `--all` beside `--limit` or `--offset` is refused with a usage error naming
+  both ways. The default call is unchanged, still a page of `DEFAULT_ISSUE_PAGE_LIMIT` rows at
+  offset 0.
+- `dispatch_read` takes `events` (a positive integer, the issue's last N events) and `all_events`
+  (every event), for an issue read and its `dispatch://KEY/log`, and its description says an issue
+  read lists the last 10 without either.
+- `DEFAULT_ISSUE_READ_EVENTS` (10), how many of an issue's newest events `dispatch_read` lists
+  without `events` or `all_events`: the number its description names and `DispatchClient.read`'s
+  default.
 - The project default assignee the create chain ends on: `dispatch_issue`'s `assignee` help and
   `CreateIssueInput.assignee` say an omitted assignee falls to the project's default when that
   still names a person who has signed in, and `dispatch_whoami` says a session under the shared

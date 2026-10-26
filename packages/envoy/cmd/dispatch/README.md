@@ -63,7 +63,7 @@ carry rules beyond their row:
 
 | Variable | Purpose |
 | --- | --- |
-| `DISPATCH_APP_PEM_B64` | Base64-encoded GitHub App private key. With `DISPATCH_DEV_SIGNIN=1` this is the only source a key may come from (a `pem` in `app.json` is refused), it must be a throwaway, and `DISPATCH_GITHUB_API_BASE` must name a loopback host. |
+| `DISPATCH_APP_PEM_B64` | GitHub App private key, as a PEM or the base64 of a PEM: a value holding `-----BEGIN` is the PEM itself, and any other is base64-decoded. A key that does not parse stops boot with an error naming the variable, never the key. With `DISPATCH_DEV_SIGNIN=1` this is the only source a key may come from (a `pem` in `app.json` is refused), it must be a throwaway, and `DISPATCH_GITHUB_API_BASE` must name a loopback host. |
 | `DISPATCH_GITHUB_API_BASE` | GitHub API origin override for App calls (tests and e2e point it at a fake); empty means `https://api.github.com`. With `DISPATCH_DEV_SIGNIN=1` and an App private key loaded, it must name `127.0.0.1`, `[::1]` or `localhost`. That checks the host, not what listens there: every App call hands a signed App JWT to whatever owns the port, so the key must be a throwaway. |
 
 When no GitHub App credentials are configured, the server still starts, but
@@ -383,11 +383,12 @@ What the two processes share, and what each keeps to itself:
 
 **Two processes do not share a live document session.** Durable convergence is unconditional:
 every edit is appended under the document's advisory lock, Yjs updates commute, and the stored
-history is the union of them, so no edit is lost whichever process took it, and no process writes
-a version, a settlement or an ask retraction from a document state it does not hold
-(`ErrRoomBehindHead`). What is per-process is the live room: while a room is resident in one
-process it does not receive the other's updates, so presence and cursors show only the peers on
-that process. A write committed elsewhere closes the room within a notification round trip
+history is the union of them, so no edit is lost whichever process took it, no process writes a
+settlement or an ask retraction from a document state it does not hold (`ErrRoomBehindHead`), and
+a version whose room is behind the head is rendered from the stored document (`storedTree`). What
+is per-process is the live room: while a room is resident in one process it does not receive the
+other's updates, so presence and cursors show only the peers on that process. A write committed
+elsewhere closes the room within a notification round trip
 (`dispatch_doc_changed`, `docs/stale_room.go`), unless that room was evicted less than
 `staleRoomEvictInterval` (two seconds) ago, in which case its notification is refused and the
 room is re-examined when that window ends — the case the trailing write of an editing burst

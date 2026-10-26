@@ -1,5 +1,6 @@
 import {
   DEFAULT_ISSUE_PAGE_LIMIT,
+  DEFAULT_ISSUE_READ_EVENTS,
   ISSUE_TITLE_MAX,
   MAX_ISSUE_BLOCKERS,
   MAX_ISSUE_PAGE_LIMIT,
@@ -1144,6 +1145,8 @@ export const dispatchToolSpecs = [
       "An issue read carries a `Progress:` line, `tasks 3/7, children 2/5`: its spec's task-list items " +
       "(`- [ ]` / `- [x]`, nested lists included) and its direct children, each done of total and each only " +
       "when it has any (`Progress: none` otherwise). " +
+      `An issue read, and its dispatch://KEY/log, lists the issue's last ${DEFAULT_ISSUE_READ_EVENTS} events, oldest first; ` +
+      "--events N lists the last N, and --all-events every one. " +
       "Every read ends with `Referenced by:` (what cites or hangs off this node, each with its dispatch:// address, " +
       "an excerpt, and when) and `Links:` (what it cites), so tracing provenance is one call. " +
       "The pictures the shown messages, asks and comments embed come back as images you see, newest first, at most 8 " +
@@ -1166,6 +1169,18 @@ export const dispatchToolSpecs = [
         .describe(
           "A message id (uuid): reads the conversation it belongs to, the root message and every " +
             "reply. Name nothing else with it."
+        )
+        .optional(),
+      events: z
+        .number({ int: true, min: 1 })
+        .describe(
+          `How many of the issue's newest events an issue read or its dispatch://KEY/log lists, oldest first; default ${DEFAULT_ISSUE_READ_EVENTS}. Name no --all-events with it.`
+        )
+        .optional(),
+      all_events: z
+        .boolean()
+        .describe(
+          `List every one of the issue's events, oldest first, on an issue read or its dispatch://KEY/log, in place of the last ${DEFAULT_ISSUE_READ_EVENTS}. Name no --events with it.`
         )
         .optional(),
     }),
@@ -1231,7 +1246,10 @@ export const dispatchToolSpecs = [
       "(default 0), and the answer names how many issues match, so repeat with the next offset to " +
       "walk every matching issue. A walk is exact only while the list does not change: an issue " +
       "that enters or leaves what the filters match, or whose status or rank changes, between two " +
-      "pages shifts rows across a page boundary, so one issue can come back twice and another never.",
+      "pages shifts rows across a page boundary, so one issue can come back twice and another never. " +
+      "all takes the whole filtered list in one read instead, for a caller that must not miss or " +
+      "repeat a row while other writers change the list, and especially for one whose own writes " +
+      "move issues out of what it filtered on.",
     arguments: (z) => ({
       project: z.string().describe("Project key to list issues from."),
       status: z.enum(ISSUE_STATUSES).describe("Optional lifecycle status filter.").optional(),
@@ -1263,6 +1281,13 @@ export const dispatchToolSpecs = [
       offset: z
         .number({ int: true, min: 0 })
         .describe("Rows to skip before the page; nonnegative integer; default 0.")
+        .optional(),
+      all: z
+        .boolean()
+        .describe(
+          "Take every matching issue in one unpaged read, so no row is missed or repeated while " +
+            "the list changes. Refused with limit or offset."
+        )
         .optional(),
     }),
   },
