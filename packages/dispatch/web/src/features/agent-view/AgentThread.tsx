@@ -379,10 +379,12 @@ export function AgentThread({
   // listener and its observers to whichever node it is given.
   const [viewport, setViewport] = useState<HTMLDivElement | null>(null);
   const follow = useLiveFollow({ contentIds, ownSendCount, replayCount, sessionId, viewport });
-  // An empty box is the one thing that refuses Send. A turn still streaming does not: the session
-  // decides what a message does mid-turn by its delivery mode, as at its terminal.
+  // An empty box is the one thing that refuses Send, and only while no send is out: a send in
+  // flight already disables Send and names why, so the line below says that instead. A turn
+  // still streaming does not refuse: the session decides what a message does mid-turn by its
+  // delivery mode, as at its terminal.
   const boxEmpty = useAuiState((state) => state.composer.isEmpty);
-  const refusal = boxEmpty ? "Type a message first." : null;
+  const refusal = boxEmpty && !sending ? "Type a message first." : null;
   const hintId = useId();
   return (
     <ThreadPrimitive.Root className="flex min-h-0 flex-1 flex-col">
@@ -466,6 +468,7 @@ export function AgentThread({
             <RefusableButton
               busy={sending ? "Sending…" : undefined}
               className="min-h-11"
+              describedBy={sending ? hintId : undefined}
               refusal={refusal}
               refusalShownBy={hintId}
               type="submit"
@@ -473,10 +476,14 @@ export function AgentThread({
               Send
             </RefusableButton>
           </div>
-          {/* While Send refuses, this line says why - on screen, for a reader with no pointer to
-              hover it - and otherwise how to send. */}
+          {/* While a send is out, this line says Enter waits for it - Send is disabled and Enter
+              does nothing until Dispatch answers - and is the disabled button's description.
+              Otherwise, while Send refuses, it says why - on screen, for a reader with no pointer
+              to hover it - and else how to send. */}
           <p className={`text-xs ${textMutedOnCanvas}`} id={hintId}>
-            {refusal ?? "Enter to send · Shift+Enter for a new line"}
+            {sending
+              ? "Sending… Enter sends again once Dispatch answers."
+              : (refusal ?? "Enter to send · Shift+Enter for a new line")}
           </p>
         </ComposerPrimitive.Root>
       </ComposerPrimitive.Unstable_TriggerPopoverRoot>

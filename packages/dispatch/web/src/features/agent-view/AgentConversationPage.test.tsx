@@ -865,6 +865,10 @@ test("while a send is out Send is busy, and two refused sends each come back onc
     expect(createAgentMessage).toHaveBeenCalledWith(SESSION, { body: "first", delivery: "steer" })
   );
   await waitFor(() => expect(sendButton("Sending…").hasAttribute("disabled")).toBe(true));
+  expect(
+    within(composer()).getByText("Sending… Enter sends again once Dispatch answers.")
+  ).toBeTruthy();
+  expect(within(composer()).queryByText("Enter to send · Shift+Enter for a new line")).toBeNull();
   type(composerInput(), "second");
   fireEvent.keyDown(composerInput(), { key: "Enter" });
   await Bun.sleep(50);
@@ -874,6 +878,7 @@ test("while a send is out Send is busy, and two refused sends each come back onc
     held[0]?.reject(new Error("the server is down"));
   });
   await waitFor(() => expect(composerInput().value).toBe("first\n\nsecond"));
+  expect(within(composer()).getByText("Enter to send · Shift+Enter for a new line")).toBeTruthy();
 
   fireEvent.click(sendButton());
   await waitFor(() => expect(createAgentMessage).toHaveBeenCalledTimes(2));

@@ -163,8 +163,8 @@ While a dialog is open, only its own keys work.
 ## Writing
 
 These keys belong to the message boxes rather than to a page, so `?` does not list them. The live
-view's message box is the exception to the first two rows: there `Enter` sends, as at the agent's
-terminal, and `Shift+Enter` starts a new line.
+view's message box is the exception to the `Enter` row only: there `Enter` sends, as at the agent's
+terminal, `Shift+Enter` starts a new line, and `Ctrl+Enter` sends as everywhere.
 
 | Keys | Action |
 | --- | --- |

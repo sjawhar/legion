@@ -162,8 +162,9 @@ at the end of the page, so you can still read what it said.
   and **Shift+Enter** starts a new line. With an empty box, Send cannot be pressed, and the line
   under the box says "Type a message first."
 - While your message is on its way, Send reads **Sending…** until Dispatch answers; you can go on
-  typing. If Dispatch refuses the message, the reason shows above the thread and your message comes
-  back into the box, ahead of anything you typed since.
+  typing, but **Enter** waits too, and the line under the box says so. If Dispatch refuses the
+  message, the reason shows above the thread and your message comes back into the box, ahead of
+  anything you typed since.
 - What you type for one agent stays with that agent: moving to another agent's live view shows that
   agent's own box, and coming back finds your text. Leaving the live view drops it.
 
