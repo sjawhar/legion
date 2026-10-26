@@ -491,7 +491,9 @@ document of the session's own, `askgate-decisions-<session id>.md`.
   Dispatch call.
 - **When.** After the decision is computed and before the call returns, with a 5 second stop. It
   never changes the decision and never throws: a write that fails leaves `recordError` on the
-  entry and the call goes on. The session's first decision uploads the document; every later one
+  entry and the call goes on. Once the session is shutting down, the stop comes 1.25 s after
+  shutdown began, inside the 1.5 s the gate holds shutdown for, so the entry is still written
+  before the session is sealed. The session's first decision uploads the document; every later one
   appends a fenced JSON line to it.
 - **What is lost.** A session killed between a decision and its upload loses that one record, and
   a session that never reached a gated call writes no document. Both show in the reader's counts

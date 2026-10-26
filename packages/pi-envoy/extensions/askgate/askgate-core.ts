@@ -321,9 +321,14 @@ const WARN_DEADLINE_MS = 30_000;
 const RECOMMENDED_CEILING_MS = 120_000;
 // The runner gives a session_shutdown handler 2 s (SESSION_SHUTDOWN_HANDLER_TIMEOUT_MS) and then seals
 // the session, dropping any later entry: gates abandoned there get a shorter grace, and the handler
-// waits at most SHUTDOWN_WAIT_MS for their records.
+// waits at most SHUTDOWN_WAIT_MS for their records. A decision record (`decision-record.ts`) still
+// in flight then, or started after, is cut SHUTDOWN_RECORD_MARGIN_MS before that wait runs out, so
+// the entry it precedes is appended while the handler still holds the session.
 const SHUTDOWN_GRACE_MS = 1_000;
 const SHUTDOWN_WAIT_MS = 1_500;
+const SHUTDOWN_RECORD_MARGIN_MS = 250;
+/** The entry's `recordError` when the session's shutdown cut its decision record short. */
+const RECORD_SHUT_DOWN = "the session shut down before Dispatch answered the record";
 // What bounds the snapshots the gate keeps: a backgrounded call's snapshot stays until the session
 // shuts down, and a session the host kills leaves its own behind, so each gated call that takes a
 // snapshot first removes every snapshot directory older than this.
@@ -2922,6 +2927,10 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
     // Set once the session starts shutting down (only dispose emits session_shutdown): a scoped call
     // that reaches the gate after that asks no model and takes the shutdown branch at once.
     let closing = false;
+    /** Once the session is shutting down, when (`deps.now()`) every decision record must have ended. */
+    let recordDeadline: number | undefined;
+    /** The stop of each decision record in flight, which shutdown cuts at `recordDeadline`. */
+    const recordStops = new Set<AbortController>();
     // A gate still waiting when its tool's execution ends was abandoned: the runner gave up on the
     // handler (a user abort, or its ceiling) and the call already went its way. Cancel the model call.
     // An eval-bridged write never shows its own id on a loop tool_execution_end, so a run the user
@@ -3048,12 +3057,18 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
     const handling = new Set<Promise<ToolCallResult>>();
     pi.on("session_shutdown", async () => {
       closing = true;
+      const recordMs = SHUTDOWN_WAIT_MS - SHUTDOWN_RECORD_MARGIN_MS;
+      recordDeadline = deps.now() + recordMs;
+      const cut = setTimeout(() => {
+        for (const stop of recordStops) stop.abort(RECORD_SHUT_DOWN);
+      }, recordMs);
       for (const abandon of inflight.values()) abandon("shutdown", SHUTDOWN_GRACE_MS);
       for (const toolCallId of snapshots.keys()) releaseSnapshots(toolCallId);
       const { promise: waited, resolve: stopWaiting } = Promise.withResolvers<void>();
       const timer = setTimeout(stopWaiting, SHUTDOWN_WAIT_MS);
       await Promise.race([Promise.allSettled([...handling]), waited]);
       clearTimeout(timer);
+      clearTimeout(cut);
     });
 
     /** A call without a verdict counts toward the halt; a verdict resets the count; anything else leaves it. */
@@ -4009,10 +4024,19 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
       // The entry below reaches only this machine's disk, so a rules decision also goes to
       // Dispatch, where a session with no access to this machine counts it (`decision-record.ts`).
       // The gated call's own stop is closed by now, so the write gets a stop of its own; whatever
-      // it costs or loses, the decision above and the call's result stand.
+      // it costs or loses, the decision above and the call's result stand. Once the session is
+      // shutting down, that stop comes by `recordDeadline`, so the entry still lands in the session.
       let recordError: string | undefined;
       const recordStop = new AbortController();
-      const recordTimer = setTimeout(() => recordStop.abort(), RECORD_TIMEOUT_MS);
+      const recordMs =
+        recordDeadline === undefined
+          ? RECORD_TIMEOUT_MS
+          : Math.max(0, Math.min(RECORD_TIMEOUT_MS, recordDeadline - deps.now()));
+      const recordTimer = setTimeout(
+        () => recordStop.abort(recordMs < RECORD_TIMEOUT_MS ? RECORD_SHUT_DOWN : undefined),
+        recordMs
+      );
+      recordStops.add(recordStop);
       try {
         recordError = await recordDecision({
           entry,
@@ -4024,7 +4048,11 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
         recordError = messageOf(error);
       } finally {
         clearTimeout(recordTimer);
+        recordStops.delete(recordStop);
       }
+      // A record the shutdown cut short says so, not that it ran to its own stop.
+      if (recordError !== undefined && recordStop.signal.reason === RECORD_SHUT_DOWN)
+        recordError = RECORD_SHUT_DOWN;
       try {
         pi.appendEntry(ADVISOR_GATE_ENTRY_TYPE, {
           ...entry,

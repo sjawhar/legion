@@ -212,7 +212,9 @@ Dispatch client that the core passes in, so it never imports `askgate-core.ts`.
 `decision-record.ts` publishes each rule decision to a Dispatch project document of the session's
 own, through the same Dispatch client, under a 5 s stop of its own and with no ask text in it; it
 too is free of the core, reading the entry's fields structurally, and a write that fails leaves
-`recordError` on the entry and changes no decision.
+`recordError` on the entry and changes no decision. Once the session is shutting down, the core
+cuts every record `SHUTDOWN_RECORD_MARGIN_MS` before its shutdown wait runs out, so the entry,
+which the record precedes, is appended before the session is sealed.
 `text.ts` is the leaf that holds the text helpers both checks share. The model walk (`walk` in
 `createAskGate`) is the one path either check takes to the model. The review's deadline is held
 10,000 ms under `extensionHandlers.toolCallTimeoutMs` (`CEILING_MARGIN_MS`: 5 s for the aborted

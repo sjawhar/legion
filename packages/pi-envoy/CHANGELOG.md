@@ -155,12 +155,14 @@
   latencies, and **no ask text and no quote**. `OMP_ASKGATE_RECORD_PROJECT` names the project,
   else `LEGION_PROJECT` does, and with neither set nothing is written. The write takes a 5 second
   stop of its own, never changes the decision, and leaves `recordError` on the `advisor-gate`
-  entry when it fails. `scripts/askgate-report.ts --dispatch-project <KEY> --since <RFC 3339>
-  [--json]` reads those documents back and counts them, split by `source`. The review's deadline
-  is held 10 s under `extensionHandlers.toolCallTimeoutMs`: 5 s for the aborted call's usage
-  report and the entry, and 5 s for this record. So the 30 s default gives a 20,000 ms deadline,
-  and the key must be at least 20,000 ms: set below that, the gate does not load, and so refuses
-  every Dispatch write it would have reviewed.
+  entry when it fails. Once the session is shutting down, the write is cut 1.25 s after shutdown
+  began, so the entry still lands before the session is sealed. `scripts/askgate-report.ts
+  --dispatch-project <KEY> --since <RFC 3339> [--json]` reads those documents back and counts
+  them, split by `source`. The review's deadline is held 10 s under
+  `extensionHandlers.toolCallTimeoutMs`: 5 s for the aborted call's usage report and the entry,
+  and 5 s for this record. So the 30 s default gives a 20,000 ms deadline, and the key must be at
+  least 20,000 ms: set below that, the gate does not load, and so refuses every Dispatch write it
+  would have reviewed.
 - The `advisor-gate` entry gains `charterLatencyMs`, the charter call's own time on the clock
   `ruleLatencyMs` uses: the two calls run side by side, and the entry's `latencyMs` alone never
   said which of them the gate waited on.

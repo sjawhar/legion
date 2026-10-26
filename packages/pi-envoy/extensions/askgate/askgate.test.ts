@@ -5412,6 +5412,80 @@ describe("rules check", () => {
     await shut.gated;
     expect(shut.g.entries).toHaveLength(1);
   });
+  test("at shutdown a slow decision record is cut short, so the gated call's entry is written before the handler returns", async () => {
+    // Fake timers, and a clock that moves with them: the shutdown grace and wait run their full
+    // length without the test waiting for them.
+    jest.useFakeTimers();
+    try {
+      let clock = 0;
+      // A Dispatch whose upload answers only after 800 ms: the record of a call given up at the
+      // end of the shutdown grace (1 s) would land past the handler's 1.5 s wait.
+      const recordSignals: AbortSignal[] = [];
+      const client = {
+        projectArtifact: () =>
+          new Promise<{ artifact: { id: string } }>((resolve) =>
+            setTimeout(() => resolve({ artifact: { id: "doc-1" } }), 800)
+          ),
+        docEdit: async (_id, input) => ({ applied: input.ops.length }),
+      } satisfies RecordClient;
+      const signals: AbortSignal[] = [];
+      const both = Promise.withResolvers<void>();
+      const g = bind({
+        now: () => clock,
+        env: { OMP_ASKGATE_RECORD_PROJECT: "INFRA" },
+        dispatch: (_directory, signal) => {
+          recordSignals.push(signal);
+          return {
+            client: client as unknown as DispatchClient,
+            serverUrls: ["https://dispatch.example"],
+          };
+        },
+        // Neither model call ever answers, not even once it is aborted.
+        complete: (req) => {
+          signals.push(req.signal);
+          if (signals.length === 2) both.resolve();
+          return Promise.withResolvers<Completion>().promise;
+        },
+      });
+      const gated = g.device(
+        "js-write-00000000-0000-4000-8000-000000000002",
+        "dispatch_ask",
+        KEEP_INPUT
+      );
+      await both.promise;
+      let returnedAt: number | undefined;
+      let atReturn: GateEntry[] = [];
+      const shutdown = g.event("session_shutdown")?.then(() => {
+        returnedAt = clock;
+        atReturn = [...g.entries];
+      });
+      while (returnedAt === undefined && clock < 5_000) {
+        for (let i = 0; i < 50; i++) await Promise.resolve();
+        if (returnedAt !== undefined) break;
+        clock += 50;
+        jest.advanceTimersByTime(50);
+      }
+      await shutdown;
+      expect(atReturn).toMatchObject([
+        {
+          decision: "allow",
+          outcome: "shutdown",
+          ruleOutcome: "shutdown",
+          recordError: "the session shut down before Dispatch answered the record",
+        },
+      ]);
+      // The record started at the end of the grace and was cut before the handler's wait ran out.
+      expect(returnedAt).toBeGreaterThanOrEqual(1_000);
+      expect(returnedAt).toBeLessThan(1_500);
+      expect(signals.map((s) => s.aborted)).toEqual([true, true]);
+      expect(recordSignals).toHaveLength(1);
+      expect(recordSignals[0]?.aborted).toBe(true);
+      expect((await gated)?.block).toBeUndefined();
+      expect(g.entries).toHaveLength(1);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
   for (const [mode, blocked] of [
     ["block", true],
     ["warn", undefined],
