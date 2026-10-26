@@ -838,11 +838,12 @@ export function quiesceDocuments(options: ApiOptions = {}): Promise<{ ok: boolea
 
 /**
  * Makes every keyed `method` request to `path` (the exact request path) take `delayMs` longer on
- * the server: once Dispatch has claimed its key, the run sleeps that long on the handler's own
+ * the server: once Dispatch has claimed its key, the run waits that long on the handler's own
  * context before the handler runs, so a write Dispatch is slow to finish is slow server-side
- * rather than held in the browser. Each call replaces the delay for that method and path, and
- * `delayMs` 0 removes it. Test-only endpoint (mounted when DISPATCH_TEST_HOOKS=1, see
- * run-server.sh).
+ * rather than held in the browser; a context that ends during the wait answers
+ * `503 SLOW_WRITE_CUT_OFF` and the handler never runs. Each call replaces the delay for that
+ * method and path, and `delayMs` 0 removes it. Test-only endpoint (mounted when
+ * DISPATCH_TEST_HOOKS=1, see run-server.sh), called as a person: its body takes no `actor`.
  */
 export function slowWrites(
   method: "PATCH" | "POST",
@@ -854,7 +855,7 @@ export function slowWrites(
     "/api/v1/writes/_test/slow",
     "POST",
     { delay_ms: delayMs, method, path },
-    { as: "agent", ...options }
+    options
   );
 }
 
