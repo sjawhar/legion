@@ -8,11 +8,16 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 ### Added
 
 - A ninth Legion skill, `leading-a-work-stream`, rebuilt from dotfiles
-  `356f3111d2e01697a996cbbba69aa426cc3047bd`: the current source removes the Common mistakes
-  table and adds dates, the speed loop and `references/speed-tick.md`. The Legion copy removes
-  names and private tool paths, keeps the speed-tick link, and keeps two Legion additions: the
-  workflow-and-role sequence and the rule that a lead proves its stream facts with a command and
-  its output. The dotfiles copy goes once a release carries this one.
+  `feb1271d4f5021f2e0b9b22b7496a300e6f46790`: a `SKILL.md` and seven references (daily plan,
+  decision rights, direction and coaching, Dispatch upkeep, sources, the speed tick, the record of
+  a person's words), and a section on checking a thing itself before calling work blocked. The
+  Legion copy links each reference as `skill://leading-a-work-stream/references/<file>.md`, removes
+  names, a private benchmark name, a private tool path and the dotfiles path in the timer, names
+  the skills Legion does not ship without `skill://`, and keeps each accepted request and wait in
+  the issue's `open-items.md` artifact, never its spec, since a spec edit after approval closes the
+  design gate. It keeps two Legion additions: the workflow-and-role sequence and the rule that a
+  lead proves its stream facts with a command and its output. The dotfiles copy goes once a release
+  carries this one.
 
 - `STRATEGY.md` at the repository root holds Legion's and Dispatch's strategy: purpose, users, key
   metrics, tracks, principles, and the boundaries that need the owner's decision. It replaces

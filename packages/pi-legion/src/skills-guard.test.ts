@@ -37,7 +37,7 @@ afterAll(() => {
 // artifact of its own and never in the spec.
 test("leading-a-work-stream keeps open items in their own artifact, never the spec", () => {
   const skill = readFileSync(path.join(staged, "leading-a-work-stream", "SKILL.md"), "utf8");
-  expect(skill).toContain("It is a line in that issue's `open-items.md` artifact, never its spec");
+  expect(skill).toContain("a line in that issue's `open-items.md` artifact, never its spec");
   expect(skill).not.toContain("## Open items");
 });
 
