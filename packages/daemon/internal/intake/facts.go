@@ -54,6 +54,13 @@ type DispatchIssue struct {
 	// not yet recorded, and clears this; the workflow fills a recorded issue's from its record, and
 	// never records an issue from a fact still missing it.
 	ResolvedRepoMissing bool
+	// ClaimedBy is who the observation shows holding the issue's Dispatch claim, `<kind>:<id>`, or
+	// "" for nobody, and ClaimKnown says the observation showed the claim at all: an event retained
+	// from a Dispatch that did not yet send it, or one whose claim names no actor, says nothing of
+	// it. blockers.Mirror writes a known claim at the observation's Seq, behind the claim's own
+	// fence (record.DispatchIssueRow.ClaimSeq).
+	ClaimedBy  string
+	ClaimKnown bool
 	// Observed is a fact made from Dispatch's view of an issue the workflow did not record when the
 	// fact was prepared (ObservedIssue), not from one event, so no actor is known to have written
 	// its state. It reaches only an issue still unrecorded when it applies: ApplyFact, under the fact
@@ -76,7 +83,8 @@ func ObservedIssue(issue dispatch.Issue) DispatchIssue {
 		parent = *issue.Parent
 	}
 	return DispatchIssue{Key: issue.Key, Seq: issue.LastSeq, Status: issue.Status, Title: issue.Title, Parent: parent,
-		Rank: issue.Rank, HandedOver: issue.HandedOver, ResolvedRepo: issue.ResolvedRepo, Blockers: issue.BlockedBy, Observed: true}
+		Rank: issue.Rank, HandedOver: issue.HandedOver, ResolvedRepo: issue.ResolvedRepo, Blockers: issue.BlockedBy,
+		ClaimedBy: issue.Claim.Holder(), ClaimKnown: true, Observed: true}
 }
 
 // ListedIssue is issue as Dispatch's issue listing shows it, as a fact at the issue's sequence, with
@@ -87,7 +95,8 @@ func ListedIssue(issue dispatch.IssueSummary) DispatchIssue {
 		parent = *issue.Parent
 	}
 	return DispatchIssue{Key: issue.Key, Seq: issue.LastSeq, Status: issue.Status, Title: issue.Title, Parent: parent,
-		Rank: issue.Rank, HandedOver: issue.HandedOver, ResolvedRepo: issue.ResolvedRepo, Blockers: issue.BlockedBy}
+		Rank: issue.Rank, HandedOver: issue.HandedOver, ResolvedRepo: issue.ResolvedRepo, Blockers: issue.BlockedBy,
+		ClaimedBy: issue.ClaimedBy, ClaimKnown: true}
 }
 
 // Handover is the outbox's direct completion of a hand-over whose Dispatch state is already todo
@@ -152,6 +161,75 @@ type GateAboveDispatch struct {
 
 func (GateAboveDispatch) isFact() {}
 
+// DispatchAskOpened is an ask a session or a person opened on an issue, with its kind (Kind:
+// record.AskQuestion, record.AskApproval, or "" for a kind this daemon does not know, such as an
+// event retained from before Dispatch had the two), the session that opened it (AuthorSession, ""
+// for a person), and its event's place in the issue's Dispatch event log (Mark). On a root it
+// opens the ask's mirror row (record.RootAsk).
+type DispatchAskOpened struct {
+	Key           string
+	Ask           string
+	Kind          string
+	AuthorSession string
+	Mark          record.EventMark
+}
+
+func (DispatchAskOpened) isFact() {}
+
+// DispatchAskRestored is Dispatch's settlement restoring a decision block it retracted: the ask
+// opened again (Open), or closed again with the answer given before the retraction. Nobody acted,
+// so it moves the ask's mirror row alone and is never a person's act.
+type DispatchAskRestored struct {
+	Key  string
+	Ask  string
+	Kind string
+	Open bool
+	Mark record.EventMark
+}
+
+func (DispatchAskRestored) isFact() {}
+
+// DispatchAskClosed is an answered or resolved ask (State `answered` or `resolved`), its kind as
+// DispatchAskOpened names one, the actor who closed it, and where Dispatch recorded that act
+// (Mark).
+type DispatchAskClosed struct {
+	Key   string
+	Ask   string
+	Kind  string
+	State string
+	Actor dispatch.Actor
+	Mark  record.EventMark
+}
+
+func (DispatchAskClosed) isFact() {}
+
+// DispatchAskReply is a comment on an ask (comment.created, or comment.answered for a reply sent
+// through a delivery's callback), or Dispatch's ask.handed_back of an approval request (Kind
+// record.AskApproval; a comment names no kind), with whose turn it leaves the ask on (WaitingOn:
+// `agent` or `human` on an open ask, a hand-back `human`, and "" on a closed one), the actor who
+// made it, and its event's place in the issue's Dispatch event log (Mark).
+type DispatchAskReply struct {
+	Key       string
+	Ask       string
+	Kind      string
+	WaitingOn string
+	Actor     dispatch.Actor
+	Mark      record.EventMark
+}
+
+func (DispatchAskReply) isFact() {}
+
+// DispatchClaim is the holder Dispatch records for an issue at Seq, from its issue.claimed or
+// issue.released event: ClaimedBy is `<kind>:<id>`, or "" when the release cleared the claim.
+// blockers.Mirror writes it into the issue's mirror row behind the claim's own fence.
+type DispatchClaim struct {
+	Key       string
+	Seq       int64
+	ClaimedBy string
+}
+
+func (DispatchClaim) isFact() {}
+
 // DispatchConsumerPosition is one measurement of the Dispatch consumer's own position: its ack
 // floor as a stream sequence — the point before which every matching message is acknowledged,
 // redeliveries and naks included — and whether it is idle, nothing pending or unacknowledged at
@@ -181,12 +259,15 @@ func (p DispatchConsumerPosition) Reached(target int64) bool {
 // the keys it says it is blocked by, and the Dispatch sequence that view stands at. The periodic
 // turn's re-read carries them on its ControllerTick, and blockers.Mirror writes each through the
 // same sequence-fenced write an event's own row takes, so a view older than an event already
-// applied changes nothing.
+// applied changes nothing. ClaimedBy and ClaimKnown are DispatchIssue's: the issue reads behind
+// this view always show the claim.
 type IssueStatus struct {
-	Key      string
-	Status   string
-	Blockers []string
-	Seq      int64
+	Key        string
+	Status     string
+	Blockers   []string
+	Seq        int64
+	ClaimedBy  string
+	ClaimKnown bool
 }
 
 // ControllerTick is the daemon's periodic wake for the project's controller, applied as a
@@ -516,6 +597,10 @@ func (SignOff) isFact() {}
 // and the gate is registered at the newer of the two. Since is the issue's event sequence read
 // before the approval, with no time, so every review the read did not show comes after it
 // (record.EventMark.After): a review the gate already applied after Since is newer than the read.
+// RequestAsk is the approval request the read found open (dispatch.Approval.AskID, "" when none
+// was), and RequestWaitsOnAgent says it waited on the agent (a reply or a newer version since it
+// was handed to the person): the registration writes that request's mirror row as the read found
+// it, at Since.
 type GateRegistered struct {
 	Issue                   string
 	ArtifactID              string
@@ -527,6 +612,8 @@ type GateRegistered struct {
 	ChangesRequestedMark    record.EventMark
 	DispatchVersion         int
 	Since                   record.EventMark
+	RequestAsk              string
+	RequestWaitsOnAgent     bool
 }
 
 func (GateRegistered) isFact() {}
