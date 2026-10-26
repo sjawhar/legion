@@ -403,13 +403,15 @@ func LatestReview(gate record.DesignGate) (record.EventMark, int, bool) {
 
 // StaleReview reports whether a review of version at mark is older than the review the gate has
 // already applied at that version: the person reviewed again after it, so this one changes no gate
-// state and answers no wait. It covers an approval delivered after the changes request that
-// superseded it, and a changes request delivered after a newer approval. A review Dispatch placed
-// neither by sequence nor by time against the recorded one is not stale (record.EventMark.After),
-// which keeps today's behaviour for marks a Dispatch did not give.
+// state. It covers an approval delivered after the changes request that superseded it, and a
+// changes request delivered after a newer approval. A review Dispatch placed neither by sequence
+// nor by time against the recorded one is not stale (record.EventMark.After), which keeps today's
+// behaviour for marks a Dispatch did not give, and neither is the recorded review itself
+// (record.EventMark.Same): a read that gave only its time and the live event that carries its
+// sequence are one review, and the sequenced one completes what the gate records of it.
 func StaleReview(gate record.DesignGate, version int, mark record.EventMark) bool {
 	recorded, reviewed, ok := LatestReview(gate)
-	return ok && reviewed == version && !mark.After(recorded)
+	return ok && reviewed == version && !mark.Same(recorded) && !mark.After(recorded)
 }
 
 // ReviewAfter reports whether the review the gate has applied at version was recorded after since.

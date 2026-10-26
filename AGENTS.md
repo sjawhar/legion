@@ -217,24 +217,29 @@ and suspends the architect's session after its current turn. The controller rece
 `awaiting-person`; state shows `waitingOn` with the gate version or ask and then `answeredAt`.
 Neither the notice nor the slot it frees is a reason for the controller to label or admit anything:
 a labelled root in `todo` takes that slot through the waiting line, as for any free slot.
-Only a person's act answers that wait. A wait on a question is answered by a person's answer,
-resolution or reply on that ask (its thread, closed or not), by the person's approval or changes
+A root waits on a person, not on one ask: a person's act on any ask of it — an answer, a
+resolution, or a reply that hands an open ask to the agent — answers the wait, whichever ask the
+wait names, since the architect is the tree's only agent while it waits and may have superseded
+the question it asked. A wait on a question is also answered by the person's approval or changes
 request of the root's spec while a design gate registered on the root's own document holds that
 spec (the daemon applies a review only through such a gate, so a review of a document no gate of
-the root names answers nothing), or, once the question's decision block has left the spec, by
-Dispatch's settlement retracting it, since no person can answer a retracted question; the resume
-task then says it was retracted. A wait on the design gate is answered by approval, requested
-changes, a person's answer or resolution of an ask of the root, a person's reply that hands an open
-ask of the root to the agent, and a newer spec version, whoever wrote it, when Dispatch then shows
-the approval request waiting on the architect. A session's reply, answer or resolution, Dispatch's
-settlement restoring a decision block it retracted (an event marked `restored`), and a person's act
+the root names answers nothing), and a wait on the design gate by a newer spec version, whoever
+wrote it, when Dispatch then shows the approval request waiting on the architect. The ask the wait
+names ends it in two more ways, because nobody will answer a closed question: Dispatch's settlement
+retracting it once its decision block has left the spec, and a session of the tree closing it. A
+session's reply, answer or resolution of any other ask, Dispatch's settlement restoring a decision
+block it retracted (an event marked `restored`) or reopening a retracted ask, and a person's act
 Dispatch recorded before the wait began, which the architect read before it handed the work back,
 answer nothing; so does a version the architect wrote before it handed the request back, whose late
-event moves the wait to that version. A person's act delivered before the event that would start
-the wait (Dispatch retries a delivery) is kept on the root, and that event then starts no wait: the
-architect, still running, has the act. Admission gives an answered root the next free slot and
-resumes the same architect session with a task naming what answered it (a changes request with its
-version and reason, a newer version, a reply, a retracted question). Its
+event moves the wait to that version, and a registration of another document for the root, which
+moves the wait to that document at the version Dispatch shows. A review the gate has already
+applied, or one of a version below its latest, changes no gate state and tells the architect
+nothing, and still answers a wait it follows. A person's act delivered before the event that would
+start the wait (Dispatch retries a delivery) is kept on the root, and that event then starts no
+wait: the architect, still running, has the act. Admission gives an answered root the next free
+slot and resumes the same architect session with a task naming what answered it (a changes request
+with its version and reason, a newer version, an act on another ask, a question retracted or
+closed). Its
 tree remains live while it waits, so children do not become orphans or start planning before the
 root returns. Taking the `legion` label off such a root, or a human or foreign session claiming it,
 takes it out of the workflow with an `unslotted` notice; it is never resumed under another owner,

@@ -661,6 +661,13 @@ func (a *Admission) readmit(ctx context.Context, tx pgx.Tx, stored record.Issue,
 	stored.Rank = rank
 	stored.LingerUntil = nil
 	stored.LastDispatchSeq = seq
+	// A generation that ended takes its waits with it: the acts a person took on its asks are
+	// forgotten with the issue's departure (workflow's leave), so an ask.opened or a hand-back of
+	// the old run, delivered late, would start a wait in this generation on a question already
+	// answered. Both fences rise to the observation that re-admits, which every event of the old
+	// run is below.
+	stored.RaiseWaitFence(seq)
+	stored.RaiseGateFence(seq)
 	if err := a.store.PutIssue(ctx, tx, stored); err != nil {
 		return fmt.Errorf("record re-admission %s: %w", stored.Key, err)
 	}

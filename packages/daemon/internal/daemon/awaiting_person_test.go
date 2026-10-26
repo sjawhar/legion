@@ -140,21 +140,21 @@ func TestCatchUpAwaitingAppliesAPersonsAnswerMissedAtBoot(t *testing.T) {
 		gate     *record.DesignGate
 		client   awaitingDispatch
 	}{
-		{name: "approved gate", awaiting: record.Awaiting{GateVersion: 3},
+		{name: "approved gate", awaiting: record.Awaiting{GateVersion: 3, Artifact: "artifact-root"},
 			client: awaitingDispatch{approval: dispatch.Approval{State: "approved", LatestVersion: 3, Version: new(3)}}},
-		{name: "changes requested on the gate's version", awaiting: record.Awaiting{GateVersion: 3},
+		{name: "changes requested on the gate's version", awaiting: record.Awaiting{GateVersion: 3, Artifact: "artifact-root"},
 			client: awaitingDispatch{approval: dispatch.Approval{State: "changes_requested", LatestVersion: 3, Version: new(3)}}},
-		{name: "a newer version, whoever wrote it", awaiting: record.Awaiting{GateVersion: 3},
+		{name: "a newer version, whoever wrote it", awaiting: record.Awaiting{GateVersion: 3, Artifact: "artifact-root"},
 			client: awaitingDispatch{approval: dispatch.Approval{State: "awaiting", LatestVersion: 4, AskID: "ask-approval", WaitingOn: "agent"},
 				events: []json.RawMessage{specVersion(9, 4)}}},
-		{name: "a newer version a registration recorded on the gate", awaiting: record.Awaiting{GateVersion: 3},
+		{name: "a newer version a registration recorded on the gate", awaiting: record.Awaiting{GateVersion: 3, Artifact: "artifact-root"},
 			gate: &record.DesignGate{ArtifactID: "artifact-root", LatestVersion: 4},
 			client: awaitingDispatch{approval: dispatch.Approval{State: "awaiting", LatestVersion: 4, AskID: "ask-approval", WaitingOn: "agent"},
 				events: []json.RawMessage{specVersion(9, 4)}}},
-		{name: "a second changes request at the version an earlier one answered", awaiting: record.Awaiting{GateVersion: 3},
+		{name: "a second changes request at the version an earlier one answered", awaiting: record.Awaiting{GateVersion: 3, Artifact: "artifact-root"},
 			gate:   &record.DesignGate{ArtifactID: "artifact-root", LatestVersion: 3, ToldChangesVersion: new(3), ToldChangesReason: "name the rollback path"},
 			client: awaitingDispatch{approval: dispatch.Approval{State: "changes_requested", LatestVersion: 3, Version: new(3), Reason: new("and name who runs the restore")}}},
-		{name: "a person's reply on the approval request", awaiting: record.Awaiting{GateVersion: 3},
+		{name: "a person's reply on the approval request", awaiting: record.Awaiting{GateVersion: 3, Artifact: "artifact-root"},
 			client: awaitingDispatch{approval: dispatch.Approval{State: "awaiting", LatestVersion: 3, AskID: "ask-approval", WaitingOn: "agent"},
 				events: []json.RawMessage{askReplied(9, "ask-approval", "agent", alice)}}},
 		{name: "a person's answer", awaiting: record.Awaiting{Ask: "ask-root"},
@@ -167,6 +167,8 @@ func TestCatchUpAwaitingAppliesAPersonsAnswerMissedAtBoot(t *testing.T) {
 			client: awaitingDispatch{events: []json.RawMessage{askClosed(9, "resolved", "ask-root", "question", architectSession), askReplied(10, "ask-root", "", alice)}}},
 		{name: "settlement's retraction of the ask", awaiting: record.Awaiting{Ask: "ask-root"},
 			client: awaitingDispatch{events: []json.RawMessage{askClosed(9, "resolved", "ask-root", "question", settler)}}},
+		{name: "a session of the tree closed the ask the root waits on", awaiting: record.Awaiting{Ask: "ask-root"},
+			client: awaitingDispatch{events: []json.RawMessage{askClosed(9, "resolved", "ask-root", "question", architectSession)}}},
 		{name: "a person's approval of the spec while the root waits on its question", awaiting: record.Awaiting{Ask: "ask-root"},
 			gate:   &record.DesignGate{ArtifactID: "artifact-root", LatestVersion: 3},
 			client: awaitingDispatch{approval: dispatch.Approval{State: "approved", LatestVersion: 3, Version: new(3), Seq: 9}}},
@@ -205,26 +207,26 @@ func TestCatchUpAwaitingLeavesARootNoPersonAnswered(t *testing.T) {
 	}{
 		{name: "an ask still waiting on the person", awaiting: record.Awaiting{Ask: "ask-root"},
 			client: awaitingDispatch{events: []json.RawMessage{askReplied(9, "ask-root", "human", architectSession)}}},
-		{name: "a session's resolution", awaiting: record.Awaiting{Ask: "ask-root"},
-			client: awaitingDispatch{events: []json.RawMessage{askClosed(9, "resolved", "ask-root", "question", architectSession)}}},
+		{name: "a session's resolution of another ask", awaiting: record.Awaiting{Ask: "ask-root"},
+			client: awaitingDispatch{events: []json.RawMessage{askClosed(9, "resolved", "ask-other", "question", architectSession)}}},
 		{name: "a session's progress note", awaiting: record.Awaiting{Ask: "ask-root"},
 			client: awaitingDispatch{events: []json.RawMessage{askReplied(9, "ask-root", "agent", architectSession)}}},
-		{name: "an approval request a session's reply moved to the agent", awaiting: record.Awaiting{GateVersion: 3},
+		{name: "an approval request a session's reply moved to the agent", awaiting: record.Awaiting{GateVersion: 3, Artifact: "artifact-root"},
 			client: awaitingDispatch{approval: dispatch.Approval{State: "awaiting", LatestVersion: 3, AskID: "ask-approval", WaitingOn: "agent"},
 				events: []json.RawMessage{askReplied(9, "ask-approval", "agent", architectSession)}}},
 		{name: "a person's answer Dispatch recorded before the wait began", awaiting: record.Awaiting{Ask: "ask-root", Since: record.EventMark{Seq: 10}},
 			client: awaitingDispatch{events: []json.RawMessage{askClosed(9, "answered", "ask-root", "question", alice)}}},
-		{name: "a person's reply Dispatch recorded before a registration's read began", awaiting: record.Awaiting{GateVersion: 3, Since: record.EventMark{Seq: 10}},
+		{name: "a person's reply Dispatch recorded before a registration's read began", awaiting: record.Awaiting{GateVersion: 3, Artifact: "artifact-root", Since: record.EventMark{Seq: 10}},
 			client: awaitingDispatch{approval: dispatch.Approval{State: "awaiting", LatestVersion: 3, AskID: "ask-approval", WaitingOn: "human"},
 				events: []json.RawMessage{askReplied(9, "ask-approval", "agent", alice), askReplied(10, "ask-approval", "human", architectSession)}}},
-		{name: "a version the architect wrote before it handed the request back", awaiting: record.Awaiting{GateVersion: 3, Since: record.EventMark{Seq: 10}},
+		{name: "a version the architect wrote before it handed the request back", awaiting: record.Awaiting{GateVersion: 3, Artifact: "artifact-root", Since: record.EventMark{Seq: 10}},
 			client: awaitingDispatch{approval: dispatch.Approval{State: "awaiting", LatestVersion: 4, AskID: "ask-approval", WaitingOn: "human"},
 				events: []json.RawMessage{specVersion(9, 4), askReplied(10, "ask-approval", "human", architectSession)}}},
-		{name: "the changes request that answered an earlier wait", awaiting: record.Awaiting{GateVersion: 3},
+		{name: "the changes request that answered an earlier wait", awaiting: record.Awaiting{GateVersion: 3, Artifact: "artifact-root"},
 			gate: &record.DesignGate{ArtifactID: "artifact-root", LatestVersion: 3, ToldChangesVersion: &told, ToldChangesReason: "name the rollback path",
 				ToldChangesMark: record.EventMark{Seq: 5, At: reviewed}},
 			client: awaitingDispatch{approval: dispatch.Approval{State: "changes_requested", LatestVersion: 3, Version: new(3), Reason: new("name the rollback path"), Seq: 5, At: reviewed}}},
-		{name: "a changes request recorded before the wait began", awaiting: record.Awaiting{GateVersion: 3, Since: record.EventMark{Seq: 10, At: reviewed.Add(time.Minute)}},
+		{name: "a changes request recorded before the wait began", awaiting: record.Awaiting{GateVersion: 3, Artifact: "artifact-root", Since: record.EventMark{Seq: 10, At: reviewed.Add(time.Minute)}},
 			client: awaitingDispatch{approval: dispatch.Approval{State: "changes_requested", LatestVersion: 3, Version: new(3), Reason: new("name the rollback path"), Seq: 8, At: reviewed}}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -257,7 +259,7 @@ func TestCatchUpAwaitingSkipsARootItCannotReadAndStillFailsWhenDispatchIsDown(t 
 	records := record.NewStore()
 	broken := record.Issue{Key: "CAPTURE-1", Tree: "CAPTURE-1", Project: "CAPTURE", Title: "broken", Phase: phase.AwaitingPerson,
 		Generation: 1, Status: "in_progress", Rank: "A", HandedOver: true, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets",
-		Awaiting: &record.Awaiting{GateVersion: 3}}
+		Awaiting: &record.Awaiting{GateVersion: 3, Artifact: "artifact-root"}}
 	asking := record.Issue{Key: "CAPTURE-2", Tree: "CAPTURE-2", Project: "CAPTURE", Title: "asking", Phase: phase.AwaitingPerson,
 		Generation: 1, Status: "in_progress", Rank: "B", HandedOver: true, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets",
 		Awaiting: &record.Awaiting{Ask: "ask-2"}}
@@ -334,7 +336,7 @@ func TestCatchUpAwaitingRecoversSuccessiveReviewsAtOneVersion(t *testing.T) {
 			}
 			root := record.Issue{Key: "CAPTURE-100", Tree: "CAPTURE-100", Project: "CAPTURE", Title: "root", Phase: phase.AwaitingPerson,
 				Generation: 1, Status: "in_progress", Rank: "A", HandedOver: true, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets",
-				Awaiting: &record.Awaiting{GateVersion: 4, Since: next()}}
+				Awaiting: &record.Awaiting{GateVersion: 4, Artifact: "artifact-root", Since: next()}}
 			if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
 				if err := records.PutIssue(ctx, tx, root); err != nil {
 					return err
@@ -364,7 +366,7 @@ func TestCatchUpAwaitingRecoversSuccessiveReviewsAtOneVersion(t *testing.T) {
 			waitAgain := func() {
 				t.Helper()
 				again := read()
-				again.Awaiting = &record.Awaiting{GateVersion: 4, Since: next()}
+				again.Awaiting = &record.Awaiting{GateVersion: 4, Artifact: "artifact-root", Since: next()}
 				if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error { return records.PutIssue(ctx, tx, again) }); err != nil {
 					t.Fatalf("start the next wait: %v", err)
 				}
@@ -418,7 +420,7 @@ func TestCatchUpAnswersWithAPersonsActOnAnyAskOfTheRoot(t *testing.T) {
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got := catchUpRoot(t, record.Awaiting{GateVersion: 3}, gate, &tc.client)
+			got := catchUpRoot(t, record.Awaiting{GateVersion: 3, Artifact: "artifact-root"}, gate, &tc.client)
 			if got == nil || !got.Answered() {
 				t.Fatalf("root after the catch-up = %#v, want a person's act to have answered its gate wait", got)
 			}
@@ -436,7 +438,7 @@ func TestCatchUpAppliesTheApprovalOfANewerVersion(t *testing.T) {
 	ctx := context.Background()
 	root := record.Issue{Key: "CAPTURE-100", Tree: "CAPTURE-100", Project: "CAPTURE", Title: "root", Phase: phase.AwaitingPerson,
 		Generation: 1, Status: "in_progress", Rank: "A", HandedOver: true, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets",
-		Awaiting: &record.Awaiting{GateVersion: 3}}
+		Awaiting: &record.Awaiting{GateVersion: 3, Artifact: "artifact-root"}}
 	if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
 		if err := records.PutIssue(ctx, tx, root); err != nil {
 			return err

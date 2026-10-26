@@ -91,7 +91,7 @@ func TestProjectShowsWhatAnAwaitingRootWaitsOn(t *testing.T) {
 		{
 			Key: "LEGION-GATE", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-GATE",
 			Phase: phase.AwaitingPerson, Status: "in_progress", Rank: "B", HandedOver: true,
-			Awaiting: &record.Awaiting{GateVersion: 4},
+			Awaiting: &record.Awaiting{GateVersion: 4, Artifact: "artifact-gate"},
 		},
 	}}
 

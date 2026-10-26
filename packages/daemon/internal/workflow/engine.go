@@ -404,9 +404,10 @@ func (e *Engine) ResumeAwaitedRoot(ctx context.Context, tx pgx.Tx, root record.I
 }
 
 // resumeTask is the task an answered root's architect resumes with: what answered its wait
-// (Awaiting.AnsweredBy), with the version and the reason a changes request gave, and, while the
-// gate is closed, how to hand the request back. A gate open at the resume says the spec was
-// approved, whatever answered: the work it opens is the architect's next step.
+// (Awaiting.AnsweredBy) and that act's own detail (Awaiting.AnsweredDetail, recorded when the wait
+// was answered, so a later review of the same version does not rename it), and, while the gate is
+// closed, how to hand the request back. A gate open at the resume says the spec was approved,
+// whatever answered: the work it opens is the architect's next step.
 func resumeTask(key string, waiting record.Awaiting, gate *record.DesignGate) string {
 	const handBack = "Then hand the request back to the person: request approval again and register that version with register_gate, or answer in the request's thread. " +
 		"Handing it back starts your next wait and returns the slot; then end your turn."
@@ -414,18 +415,26 @@ func resumeTask(key string, waiting record.Awaiting, gate *record.DesignGate) st
 	switch {
 	case open && (waiting.GateVersion != 0 || waiting.AnsweredBy == record.AnsweredByApproval):
 		return fmt.Sprintf("Your spec version %d on %s was approved; continue.", gate.LatestVersion, key)
-	case waiting.AnsweredBy == record.AnsweredByChanges && gate != nil && gate.ToldChangesVersion != nil:
-		return fmt.Sprintf("A person requested changes to your spec on %s at version %d: %q. Read the review, and revise the spec as they ask. %s",
-			key, *gate.ToldChangesVersion, gate.ToldChangesReason, handBack)
+	case waiting.AnsweredBy == record.AnsweredByChanges:
+		return fmt.Sprintf("A person requested changes to your spec on %s, %s. Read the review, and revise the spec as they ask. %s",
+			key, waiting.AnsweredDetail, handBack)
 	case waiting.AnsweredBy == record.AnsweredByVersion:
-		return fmt.Sprintf("A newer version of your spec on %s, version %d, handed the approval request back to you. Read it and the request's thread. %s",
-			key, waiting.GateVersion, handBack)
-	case waiting.AnsweredBy == record.AnsweredByReply:
-		return fmt.Sprintf("Your spec on %s is not approved at version %d: a person replied in a thread of one of its asks. Read the thread, and revise the spec as they ask. %s",
-			key, waiting.GateVersion, handBack)
+		return fmt.Sprintf("A newer version of your spec on %s, %s, handed the approval request back to you. Read it and the request's thread. %s",
+			key, waiting.AnsweredDetail, handBack)
 	case waiting.AnsweredBy == record.AnsweredByRetraction:
 		return fmt.Sprintf("Your ask %s on %s was retracted when its decision block left the spec, so no person will answer it. Read the spec as it stands and continue; "+
 			"if you still need the decision, ask again.", waiting.Ask, key)
+	case waiting.AnsweredBy == record.AnsweredByClosed:
+		return fmt.Sprintf("Your ask %s on %s was closed by a session of your tree, so no person will answer it. Read it and continue; "+
+			"if you still need the decision, ask again.", waiting.Ask, key)
+	case waiting.AnsweredBy == record.AnsweredByAsk:
+		return fmt.Sprintf("A person answered your ask %s on %s, or replied in its thread; read it and continue.", waiting.Ask, key)
+	case waiting.AnsweredBy == record.AnsweredByReply && waiting.Ask != "":
+		return fmt.Sprintf("A person answered or replied in the thread of ask %s on %s while you waited on ask %s; read that thread and continue.",
+			waiting.AnsweredDetail, key, waiting.Ask)
+	case waiting.AnsweredBy == record.AnsweredByReply:
+		return fmt.Sprintf("Your spec on %s is not approved at version %d: a person answered or replied in the thread of ask %s of this issue. "+
+			"Read that thread, and revise the spec as they ask. %s", key, waiting.GateVersion, waiting.AnsweredDetail, handBack)
 	case waiting.Ask != "":
 		return fmt.Sprintf("A person answered your ask %s on %s, or replied in its thread; read it and continue.", waiting.Ask, key)
 	case waiting.GateVersion != 0:

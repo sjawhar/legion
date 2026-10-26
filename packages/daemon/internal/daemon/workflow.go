@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -459,9 +460,6 @@ func (w *workflowRuntime) reconcile(ctx context.Context) error {
 		return fmt.Errorf("reconcile admission: %w", err)
 	}
 	committed()
-	if err := w.catchUpAwaiting(ctx); err != nil {
-		return fmt.Errorf("catch up roots awaiting people: %w", err)
-	}
 	return nil
 }
 
@@ -584,40 +582,46 @@ func (w *workflowRuntime) catchUpAwaitingGate(ctx context.Context, root awaiting
 	return nil
 }
 
-// catchUpAwaitingAsks applies every ask event and document version Dispatch recorded on the root
-// after its wait began, while the daemon was down: it reads the root's Dispatch event log past the
-// wait's start (Awaiting.Since) and applies each through the live decoder and the live handlers,
-// with its own sequence. What each act answers is the workflow's, as on the live path: a root
-// waiting on one of its asks is answered by a person's act on that ask, and one waiting on its
-// design gate by a person's act on any ask of the root, the approval request included — the
-// architect is the tree's only agent while it waits — or by a newer version of its spec; a
-// session's or Dispatch's own act answers nothing. Each fact's id names the event's sequence and
-// the root's generation, so a second catch-up of the same event is dropped as processed.
+// catchUpAwaitingAsks applies every ask event, review and document version Dispatch recorded on
+// the root after its wait began, while the daemon was down: it reads the root's Dispatch event log
+// past the wait's start (Awaiting.Since) and applies each through the live decoder and the live
+// handlers, with its own sequence. The approval read alone would lose a review a newer version
+// followed, which the log still holds. What each act answers is the workflow's, as on the live
+// path: a person's act on any ask of the root answers its wait, the approval request included —
+// the architect is the tree's only agent while it waits — and so do a review of its spec and a
+// newer version; a session's or Dispatch's own act answers nothing. Each fact's id names the
+// event's sequence and the root's generation, so a second catch-up of the same event is dropped as
+// processed. An event of a type this release does not read is passed over before it is decoded,
+// and one the decoder refuses is logged and passed over too, so one unreadable event never stops
+// the rest of a root's catch-up at every boot.
 func (w *workflowRuntime) catchUpAwaitingAsks(ctx context.Context, root awaitingRoot) error {
 	events, err := w.dispatch.EventsAfter(ctx, root.issue.Key, root.issue.Awaiting.Since.Seq)
 	if err != nil {
 		return fmt.Errorf("read the events of %s after %d: %w", root.issue.Key, root.issue.Awaiting.Since.Seq, err)
 	}
 	for _, event := range events {
-		fact, err := intake.DecodeDispatchEvent(w.dispatchProject, root.issue.Key, event)
-		if err != nil {
+		var header struct {
+			Seq  int64  `json:"seq"`
+			Type string `json:"type"`
+		}
+		if err := json.Unmarshal(event, &header); err != nil {
 			return fmt.Errorf("read the events of %s: %w", root.issue.Key, err)
 		}
-		var mark record.EventMark
-		switch fact := fact.(type) {
-		case intake.DispatchAskClosed:
-			mark = fact.Mark
-		case intake.DispatchAskReply:
-			mark = fact.Mark
-		case intake.DispatchArtifact:
-			if fact.Kind != intake.DispatchArtifactVersion {
-				continue
-			}
-			mark = fact.Mark
+		switch header.Type {
+		case "ask.answered", "ask.resolved", "ask.handed_back", "comment.created", "comment.answered",
+			"artifact.version", "artifact.approved", "artifact.changes_requested":
 		default:
 			continue
 		}
-		if err := w.applyAwaitingCatchUp(ctx, fmt.Sprintf("event:%s:%d:%d", root.issue.Key, root.issue.Generation, mark.Seq), fact); err != nil {
+		fact, err := intake.DecodeDispatchEvent(w.dispatchProject, root.issue.Key, event)
+		if err != nil {
+			w.log.Warn("boot catch-up passed over an event it could not read", "issue", root.issue.Key, "seq", header.Seq, "type", header.Type, "error", err)
+			continue
+		}
+		if fact == nil {
+			continue
+		}
+		if err := w.applyAwaitingCatchUp(ctx, fmt.Sprintf("event:%s:%d:%d", root.issue.Key, root.issue.Generation, header.Seq), fact); err != nil {
 			return err
 		}
 	}

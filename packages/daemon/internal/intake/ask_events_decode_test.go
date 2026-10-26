@@ -38,34 +38,51 @@ func TestACallbackReplyDecodesAsTheReplyItIs(t *testing.T) {
 	}
 }
 
-// Settlement restoring a decision block it retracted appends ask.answered with the answer given
-// before the retraction, credited to the person whose edit restored it, and marks it restored: no
-// one answered anything, so it decodes to no fact, while a person's own answer still decodes.
-func TestARestoredAnswerIsNoPersonsAnswer(t *testing.T) {
+// Settlement restoring a decision block it retracted appends the ask's event again — ask.answered
+// with the answer given before the retraction, or ask.opened with the block's original author —
+// and marks it restored: nobody asked or answered anything, so each decodes to no fact, while the
+// same event without the mark decodes as the act it is.
+func TestARestoredAskEventIsNobodysAct(t *testing.T) {
 	at := time.Date(2026, 10, 25, 12, 0, 0, 0, time.UTC)
 	for _, tc := range []struct {
-		name     string
-		restored bool
-	}{{name: "a person's answer"}, {name: "settlement's restoration", restored: true}} {
-		t.Run(tc.name, func(t *testing.T) {
-			payload := map[string]any{"id": "ask-question", "kind": "question", "state": "answered"}
-			if tc.restored {
-				payload["restored"] = true
+		name      string
+		eventType string
+		actor     map[string]any
+		payload   map[string]any
+	}{
+		{name: "an answer", eventType: "ask.answered", actor: map[string]any{"kind": "user", "id": "alice"},
+			payload: map[string]any{"id": "ask-question", "kind": "question", "state": "answered"}},
+		{name: "a question opened", eventType: "ask.opened", actor: map[string]any{"kind": "session", "id": "session-architect"},
+			payload: map[string]any{"id": "ask-question", "kind": "question", "author": map[string]any{"kind": "session", "id": "session-architect"}}},
+	} {
+		for _, restored := range []bool{false, true} {
+			name := tc.name
+			if restored {
+				name += ", restored by settlement"
 			}
-			event, err := json.Marshal(map[string]any{
-				"id": 41, "issue_key": "LEGION-7", "seq": 13, "type": "ask.answered", "notify": true, "created_at": at,
-				"actor": map[string]any{"kind": "user", "id": "alice"}, "payload": payload,
+			t.Run(name, func(t *testing.T) {
+				payload := map[string]any{}
+				for key, value := range tc.payload {
+					payload[key] = value
+				}
+				if restored {
+					payload["restored"] = true
+				}
+				event, err := json.Marshal(map[string]any{
+					"id": 41, "issue_key": "LEGION-7", "seq": 13, "type": tc.eventType, "notify": true, "created_at": at,
+					"actor": tc.actor, "payload": payload,
+				})
+				if err != nil {
+					t.Fatalf("encode the event: %v", err)
+				}
+				fact, err := DecodeDispatchEvent("LEGION", "LEGION-7", event)
+				if err != nil {
+					t.Fatalf("decode: %v", err)
+				}
+				if restored != (fact == nil) {
+					t.Fatalf("%s decoded to %#v, want a fact %t", name, fact, !restored)
+				}
 			})
-			if err != nil {
-				t.Fatalf("encode the event: %v", err)
-			}
-			fact, err := DecodeDispatchEvent("LEGION", "LEGION-7", event)
-			if err != nil {
-				t.Fatalf("decode: %v", err)
-			}
-			if tc.restored != (fact == nil) {
-				t.Fatalf("%s decoded to %#v, want a fact %t", tc.name, fact, !tc.restored)
-			}
-		})
+		}
 	}
 }

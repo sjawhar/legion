@@ -3,10 +3,12 @@
 -- Phase `awaiting_person` is a root admitted tree whose design gate is closed on the spec version
 -- its architect registered, or whose architect opened a question on it: it holds no slot, and its
 -- architect is suspended. What it waits on is recorded beside the phase (awaiting_ask, the ask's
--- id, or awaiting_gate_version, the registered spec version), awaiting_answered_at is when a
--- person answered it, which puts it at the front of the waiting line, and awaiting_answered_by the
--- act that answered it (the person's act on the ask, settlement's retraction of that ask, a reply
--- on another ask, an approval, a changes request, a newer version), which the task resuming the
+-- id, or awaiting_gate_version, the registered spec version on the document awaiting_artifact),
+-- awaiting_answered_at is when the wait was answered, which puts it at the front of the waiting
+-- line, awaiting_answered_by the act that answered it (the person's act on the ask, settlement's
+-- retraction of that ask, a session of the tree closing it, a person's act on another ask, an
+-- approval, a changes request, a newer version) and awaiting_answered_detail that act's own
+-- detail (the ask acted on, or the version and reason of the review), which the task resuming the
 -- architect names. awaiting_since_seq and
 -- awaiting_since are where the wait began on Dispatch: the issue's event sequence and Dispatch's
 -- time of the event that started it (a hand-back, a question opened), or, for a registration, the
@@ -35,17 +37,22 @@ alter table issues add constraint issues_phase_check check (phase in (
 
 alter table issues add column awaiting_ask text check (awaiting_ask <> '');
 alter table issues add column awaiting_gate_version integer check (awaiting_gate_version > 0);
+alter table issues add column awaiting_artifact text check (awaiting_artifact <> '');
 alter table issues add column awaiting_answered_at timestamptz;
 alter table issues add column awaiting_answered_by text check (
-  awaiting_answered_by in ('ask', 'retracted', 'reply', 'approved', 'changes_requested', 'version'));
+  awaiting_answered_by in ('ask', 'retracted', 'closed', 'reply', 'approved', 'changes_requested', 'version'));
+alter table issues add column awaiting_answered_detail text check (awaiting_answered_detail <> '');
 alter table issues add column awaiting_since_seq bigint check (awaiting_since_seq > 0);
 alter table issues add column awaiting_since timestamptz;
 alter table issues add constraint issues_awaiting_shape check (
   case when phase = 'awaiting_person'
     then (awaiting_ask is null) <> (awaiting_gate_version is null) and held_from is null
+      and (awaiting_gate_version is null or awaiting_artifact is not null)
       and (awaiting_answered_by is null or awaiting_answered_at is not null)
-    else awaiting_ask is null and awaiting_gate_version is null and awaiting_answered_at is null
-      and awaiting_answered_by is null and awaiting_since_seq is null and awaiting_since is null
+      and (awaiting_answered_detail is null or awaiting_answered_by is not null)
+    else awaiting_ask is null and awaiting_gate_version is null and awaiting_artifact is null
+      and awaiting_answered_at is null and awaiting_answered_by is null and awaiting_answered_detail is null
+      and awaiting_since_seq is null and awaiting_since is null
   end);
 alter table issues add column wait_fence_seq bigint not null default 0 check (wait_fence_seq >= 0);
 alter table issues add column gate_fence_seq bigint not null default 0 check (gate_fence_seq >= 0);

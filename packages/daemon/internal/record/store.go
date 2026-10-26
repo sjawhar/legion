@@ -39,7 +39,7 @@ func (s *Postgres) MarkProcessed(ctx context.Context, tx pgx.Tx, source, eventID
 	return tag.RowsAffected() == 1, nil
 }
 
-const issueColumns = `key, tree, project, title, parent, phase, generation, status, rank, handed_over, linger_until, held_from, last_dispatch_seq, ready_pending_version, coalesce(hold_reason, ''), dispatch_status, repo, default_branch, github_repo, awaiting_ask, awaiting_gate_version, awaiting_answered_at, coalesce(awaiting_answered_by, ''), awaiting_since_seq, awaiting_since, claimed_by, claim_seq, wait_fence_seq, gate_fence_seq`
+const issueColumns = `key, tree, project, title, parent, phase, generation, status, rank, handed_over, linger_until, held_from, last_dispatch_seq, ready_pending_version, coalesce(hold_reason, ''), dispatch_status, repo, default_branch, github_repo, awaiting_ask, awaiting_gate_version, coalesce(awaiting_artifact, ''), awaiting_answered_at, coalesce(awaiting_answered_by, ''), coalesce(awaiting_answered_detail, ''), awaiting_since_seq, awaiting_since, claimed_by, claim_seq, wait_fence_seq, gate_fence_seq`
 
 func (s *Postgres) Issue(ctx context.Context, tx pgx.Tx, key string) (*Issue, error) {
 	issue, err := scanIssue(tx.QueryRow(ctx, "select "+issueColumns+" from issues where key = $1", key))
@@ -90,8 +90,9 @@ func (s *Postgres) PutIssue(ctx context.Context, tx pgx.Tx, issue Issue) error {
 	if issue.Hold != nil {
 		heldFrom, holdReason = string(issue.Hold.From), issue.Hold.Reason
 	}
-	var awaitingAsk, awaitingGate, answeredAt, sinceSeq, since any
+	var awaitingAsk, awaitingGate, awaitingArtifact, answeredAt, sinceSeq, since any
 	var answeredBy Answer
+	var answeredDetail string
 	if issue.Awaiting != nil {
 		if issue.Awaiting.Ask != "" {
 			awaitingAsk = issue.Awaiting.Ask
@@ -99,33 +100,38 @@ func (s *Postgres) PutIssue(ctx context.Context, tx pgx.Tx, issue Issue) error {
 		if issue.Awaiting.GateVersion != 0 {
 			awaitingGate = issue.Awaiting.GateVersion
 		}
+		if issue.Awaiting.Artifact != "" {
+			awaitingArtifact = issue.Awaiting.Artifact
+		}
 		if issue.Awaiting.AnsweredAt != nil {
 			answeredAt = *issue.Awaiting.AnsweredAt
 		}
-		answeredBy = issue.Awaiting.AnsweredBy
+		answeredBy, answeredDetail = issue.Awaiting.AnsweredBy, issue.Awaiting.AnsweredDetail
 		sinceSeq, since = markValues(issue.Awaiting.Since)
 	}
 	// The update's condition keeps a recorded issue on the repository, default branch and GitHub
 	// spelling it was recorded with: a write naming others changes no row, and is refused below.
 	tag, err := tx.Exec(ctx, `insert into issues (key, tree, project, title, parent, phase, generation, status, rank, handed_over, linger_until, held_from, last_dispatch_seq, ready_pending_version, hold_reason, dispatch_status, repo, default_branch, github_repo,
-		awaiting_ask, awaiting_gate_version, awaiting_answered_at, awaiting_answered_by, awaiting_since_seq, awaiting_since, claimed_by, claim_seq, wait_fence_seq, gate_fence_seq)
-		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, nullif($15::text, ''), $16, $17, $18, $19, $20, $21, $22, nullif($23::text, ''), $24, $25, $26, $27, $28, $29)
+		awaiting_ask, awaiting_gate_version, awaiting_artifact, awaiting_answered_at, awaiting_answered_by, awaiting_answered_detail, awaiting_since_seq, awaiting_since, claimed_by, claim_seq, wait_fence_seq, gate_fence_seq)
+		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, nullif($15::text, ''), $16, $17, $18, $19, $20, $21, $22, $23, nullif($24::text, ''), nullif($25::text, ''), $26, $27, $28, $29, $30, $31)
 		on conflict (key) do update set tree = excluded.tree, project = excluded.project, title = excluded.title,
 		parent = excluded.parent, phase = excluded.phase, generation = excluded.generation,
 		status = excluded.status, rank = excluded.rank, handed_over = excluded.handed_over, linger_until = excluded.linger_until,
 		held_from = excluded.held_from, last_dispatch_seq = excluded.last_dispatch_seq,
 		ready_pending_version = excluded.ready_pending_version, hold_reason = excluded.hold_reason, dispatch_status = excluded.dispatch_status,
 		awaiting_ask = excluded.awaiting_ask, awaiting_gate_version = excluded.awaiting_gate_version,
+		awaiting_artifact = excluded.awaiting_artifact,
 		awaiting_answered_at = excluded.awaiting_answered_at, awaiting_answered_by = excluded.awaiting_answered_by,
+		awaiting_answered_detail = excluded.awaiting_answered_detail,
 		awaiting_since_seq = excluded.awaiting_since_seq, awaiting_since = excluded.awaiting_since,
-		claimed_by = excluded.claimed_by, claim_seq = excluded.claim_seq,
+		claimed_by = excluded.claimed_by, claim_seq = greatest(issues.claim_seq, excluded.claim_seq),
 		wait_fence_seq = greatest(issues.wait_fence_seq, excluded.wait_fence_seq),
 		gate_fence_seq = greatest(issues.gate_fence_seq, excluded.gate_fence_seq)
 		where issues.repo = excluded.repo and issues.default_branch = excluded.default_branch and issues.github_repo = excluded.github_repo`,
 		issue.Key, issue.Tree, issue.Project, issue.Title, issue.Parent, string(issue.Phase), int64(issue.Generation), issue.Status,
 		issue.Rank, issue.HandedOver, issue.LingerUntil, heldFrom, issue.LastDispatchSeq, issue.ReadyPendingVersion, string(holdReason), issue.DispatchStatus,
-		issue.Repo, issue.DefaultBranch, issue.GitHubRepo, awaitingAsk, awaitingGate, answeredAt, string(answeredBy), sinceSeq, since, issue.ClaimedBy, issue.ClaimSeq,
-		issue.WaitFenceSeq, issue.GateFenceSeq,
+		issue.Repo, issue.DefaultBranch, issue.GitHubRepo, awaitingAsk, awaitingGate, awaitingArtifact, answeredAt, string(answeredBy), answeredDetail,
+		sinceSeq, since, issue.ClaimedBy, issue.ClaimSeq, issue.WaitFenceSeq, issue.GateFenceSeq,
 	)
 	if err != nil {
 		return fmt.Errorf("put issue %s: %w", issue.Key, err)
@@ -243,14 +249,15 @@ func scanIssue(row scanner) (*Issue, error) {
 	var holdReason string
 	var awaitingAsk *string
 	var awaitingGate *int
+	var awaitingArtifact string
 	var answeredAt *time.Time
-	var answeredBy string
+	var answeredBy, answeredDetail string
 	var sinceSeq *int64
 	var since *time.Time
 	if err := row.Scan(&issue.Key, &issue.Tree, &issue.Project, &issue.Title, &issue.Parent, &phaseValue, &generation, &issue.Status,
 		&issue.Rank, &issue.HandedOver, &issue.LingerUntil, &heldFrom, &issue.LastDispatchSeq, &issue.ReadyPendingVersion, &holdReason, &issue.DispatchStatus,
-		&issue.Repo, &issue.DefaultBranch, &issue.GitHubRepo, &awaitingAsk, &awaitingGate, &answeredAt, &answeredBy, &sinceSeq, &since, &issue.ClaimedBy, &issue.ClaimSeq,
-		&issue.WaitFenceSeq, &issue.GateFenceSeq); err != nil {
+		&issue.Repo, &issue.DefaultBranch, &issue.GitHubRepo, &awaitingAsk, &awaitingGate, &awaitingArtifact, &answeredAt, &answeredBy, &answeredDetail,
+		&sinceSeq, &since, &issue.ClaimedBy, &issue.ClaimSeq, &issue.WaitFenceSeq, &issue.GateFenceSeq); err != nil {
 		return nil, err
 	}
 	if generation < 0 {
@@ -261,7 +268,8 @@ func scanIssue(row scanner) (*Issue, error) {
 		issue.Hold = &Hold{From: phase.Phase(*heldFrom), Reason: HoldReason(holdReason)}
 	}
 	if awaitingAsk != nil || awaitingGate != nil {
-		issue.Awaiting = &Awaiting{AnsweredAt: answeredAt, AnsweredBy: Answer(answeredBy), Since: scannedMark(sinceSeq, since)}
+		issue.Awaiting = &Awaiting{Artifact: awaitingArtifact, AnsweredAt: answeredAt, AnsweredBy: Answer(answeredBy),
+			AnsweredDetail: answeredDetail, Since: scannedMark(sinceSeq, since)}
 		if awaitingAsk != nil {
 			issue.Awaiting.Ask = *awaitingAsk
 		}

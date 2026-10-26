@@ -129,14 +129,18 @@ const (
 // architect from hearing one changes request twice. Mark places the event in the issue's Dispatch
 // event log: the event's sequence and Dispatch's time of it, from the event itself, or, for a
 // review, from the read's latest review (dispatch.Approval's Seq and At), whichever of them that
-// read gave. A version the gate seed read from Dispatch carries none.
+// read gave. A version the gate seed read from Dispatch carries none, and says instead whether
+// that read showed the document's approval request waiting on the agent (RequestWaitsOnAgent),
+// which is what a newer version does to it: a version with neither cannot be placed against a
+// root's wait and answers none.
 type DispatchArtifact struct {
-	Key        string
-	ArtifactID string
-	Kind       DispatchArtifactKind
-	Version    int
-	Reason     string
-	Mark       record.EventMark
+	Key                 string
+	ArtifactID          string
+	Kind                DispatchArtifactKind
+	Version             int
+	Reason              string
+	Mark                record.EventMark
+	RequestWaitsOnAgent bool
 }
 
 func (DispatchArtifact) isFact() {}

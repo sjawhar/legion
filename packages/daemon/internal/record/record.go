@@ -168,18 +168,21 @@ type HoldReason string
 const HoldEscalated HoldReason = "escalated"
 
 // Awaiting is what a root in awaiting_person waits on: an ask its architect opened on the root
-// (Ask, the ask's id), or the closed design gate at the spec version it registered (GateVersion),
-// when a person answered it (AnsweredAt, nil until then) and with what (AnsweredBy), and where on
-// Dispatch the wait began (Since): the event that started it (a hand-back, a question opened), or,
-// for a registration, the point its read of Dispatch began at. A person's act Dispatch recorded
-// before Since never answers the wait. An answered root waits for a slot ahead of every root that
-// never ran (Waiting).
+// (Ask, the ask's id), or the closed design gate at the spec version it registered (GateVersion)
+// on the document it registered (Artifact), when a person answered it (AnsweredAt, nil until then),
+// with what (AnsweredBy) and that act's own detail (AnsweredDetail: the ask acted on, or the
+// version and reason of the review), and where on Dispatch the wait began (Since): the event that
+// started it (a hand-back, a question opened), or, for a registration, the point its read of
+// Dispatch began at. A person's act Dispatch recorded before Since never answers the wait. An
+// answered root waits for a slot ahead of every root that never ran (Waiting).
 type Awaiting struct {
-	Ask         string
-	GateVersion int
-	AnsweredAt  *time.Time
-	AnsweredBy  Answer
-	Since       EventMark
+	Ask            string
+	GateVersion    int
+	Artifact       string
+	AnsweredAt     *time.Time
+	AnsweredBy     Answer
+	AnsweredDetail string
+	Since          EventMark
 }
 
 // Answer is the act that answered a root's wait, which the task resuming its architect names.
@@ -191,7 +194,10 @@ const (
 	// AnsweredByRetraction is Dispatch's settlement retracting the ask the root waits on, whose
 	// decision block left the spec: no person can answer it any more.
 	AnsweredByRetraction Answer = "retracted"
-	// AnsweredByReply is a person's act on another ask of a root waiting on its design gate.
+	// AnsweredByClosed is a session of the tree closing the ask the root waits on: the question is
+	// gone, so nobody will answer it.
+	AnsweredByClosed Answer = "closed"
+	// AnsweredByReply is a person's act on another ask of the root.
 	AnsweredByReply Answer = "reply"
 	// AnsweredByApproval is a person's approval that opened the root's design gate.
 	AnsweredByApproval Answer = "approved"

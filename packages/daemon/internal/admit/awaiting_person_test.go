@@ -92,7 +92,7 @@ func TestAnApprovedGateAnswersAnAwaitingRootAndReturnsItBeforeANeverRunRoot(t *t
 	root := record.Issue{
 		Key: "LEGION-ROOT", Tree: "LEGION-ROOT", Project: testProject, Title: "root", Phase: phase.AwaitingPerson,
 		Generation: 1, Status: "in_progress", Rank: "Z", HandedOver: true, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets",
-		Awaiting: &record.Awaiting{GateVersion: 3},
+		Awaiting: &record.Awaiting{GateVersion: 3, Artifact: "artifact-root"},
 	}
 	putIssue(t, pool, root)
 	seedWaiting(t, pool, "LEGION-NEXT", "A")
@@ -321,7 +321,7 @@ func TestANewerSpecVersionWakesARootAwaitingAGate(t *testing.T) {
 	root := record.Issue{
 		Key: "LEGION-ROOT", Tree: "LEGION-ROOT", Project: testProject, Title: "root", Phase: phase.AwaitingPerson,
 		Generation: 1, Status: "in_progress", Rank: "B", HandedOver: true, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets",
-		Awaiting: &record.Awaiting{GateVersion: 3},
+		Awaiting: &record.Awaiting{GateVersion: 3, Artifact: "artifact-root"},
 	}
 	putIssue(t, pool, root)
 	inTx(t, pool, func(tx pgx.Tx) {
@@ -488,7 +488,7 @@ func TestAResumeWithTheGateOpenAdvancesTheAdmittedChildren(t *testing.T) {
 	putIssue(t, pool, record.Issue{
 		Key: "LEGION-ROOT", Tree: "LEGION-ROOT", Project: testProject, Title: "root", Phase: phase.AwaitingPerson,
 		Generation: 1, Status: "in_progress", Rank: "B", HandedOver: true, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets",
-		Awaiting: &record.Awaiting{GateVersion: 3},
+		Awaiting: &record.Awaiting{GateVersion: 3, Artifact: "artifact-root"},
 	})
 	parent := "LEGION-ROOT"
 	putIssue(t, pool, record.Issue{

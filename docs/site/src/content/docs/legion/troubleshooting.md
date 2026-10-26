@@ -262,14 +262,15 @@ legion state --config legion.yaml --json |
 
 `waitingOn.kind` is `gate` with `gateVersion`, or `ask` with its ask identifier. `answeredAt` means
 the person answered; the root is ahead of never-run roots and resumes itself at the next free slot.
-Do not park or manually start it. Only a person's act wakes it. A wait on a question wakes on a
-person's answer, resolution or reply on that ask (closed or not), on their approval or changes
-request of the spec, or on Dispatch retracting the question because its decision block left the
-spec. A wait on the gate wakes on an approval, requested changes, a person's answer or resolution
-of one of the root's asks, a person's reply that hands one of them to the agent, and a newer spec
-version whose approval request then waits on the architect. An agent session's reply, answer or
-resolution never wakes it, nor does a person's act from before the wait began, nor Dispatch
-restoring a decision block it retracted. The architect's resume task names what woke it. A
+Do not park or manually start it. Only a person's act wakes it, and their act on any ask of the
+root does, whichever ask the wait names: an answer, a resolution, or a reply that hands an open ask
+to the agent. A wait on a question also wakes on their approval or changes request of the spec, and
+one on the gate on a newer spec version whose approval request then waits on the architect. The ask
+a wait names also ends it when nobody can answer it any more: Dispatch retracts the question
+because its decision block left the spec, or a session of the tree closes it. An agent session's
+reply, answer or resolution of another ask never wakes it, nor does a person's act from before the
+wait began, nor Dispatch restoring a decision block it retracted. The architect's resume task names
+what woke it. A
 root still `admitted` after its architect replied in an approval request's thread waits on a
 person only once the architect hands the request back (a reply leaving the turn with the human, or
 `dispatch request-approval`). A missing `legion` label or a foreign Dispatch claim instead produces

@@ -363,6 +363,14 @@ func run(ctx context.Context, cfg config.Config, build Build, log *slog.Logger, 
 			err = bootprobe.Run(ctx, "list Dispatch issues for admission", readinessRetry, log,
 				readinessAttempt(workflow.reconcile, bootTimeout, dispatch.Unreachable))
 		}
+		// The catch-up of the roots waiting on a person is its own probe, after the reconcile it
+		// depends on: it reads Dispatch once per waiting root (the claim, the approval, the event
+		// log), so a deployment with many of them would not fit the one boot attempt the reconcile
+		// gets, and every retry would start again from the first root.
+		if err == nil {
+			err = bootprobe.Run(ctx, "catch up the roots waiting on a person", readinessRetry, log,
+				readinessAttempt(workflow.catchUpAwaiting, bootTimeout, dispatch.Unreachable))
+		}
 		if err != nil {
 			s.stop()
 			listener.Close()

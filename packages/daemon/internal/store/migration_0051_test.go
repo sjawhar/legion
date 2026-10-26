@@ -41,11 +41,11 @@ func TestAwaitingPersonArrivesWith0051AndItsShapeIsEnforced(t *testing.T) {
 	}
 
 	for _, accepted := range []string{
-		`update issues set phase = 'awaiting_person', awaiting_gate_version = 3 where key = 'LEGION-208'`,
-		`update issues set awaiting_answered_at = now(), awaiting_answered_by = 'changes_requested' where key = 'LEGION-208'`,
+		`update issues set phase = 'awaiting_person', awaiting_gate_version = 3, awaiting_artifact = '7d1e3a5c-9b2f-4c6e-8a40-3f5d7b9e1c26' where key = 'LEGION-208'`,
+		`update issues set awaiting_answered_at = now(), awaiting_answered_by = 'changes_requested', awaiting_answered_detail = 'version 3: name the rollback path' where key = 'LEGION-208'`,
 		`update issues set awaiting_since_seq = 10, awaiting_since = now() where key = 'LEGION-208'`,
-		`update issues set awaiting_gate_version = null, awaiting_ask = '6c83cb7f-8f4e-4820-9e05-7c94fa725007' where key = 'LEGION-208'`,
-		`update issues set phase = 'admitted', awaiting_ask = null, awaiting_answered_at = null, awaiting_answered_by = null, awaiting_since_seq = null, awaiting_since = null where key = 'LEGION-208'`,
+		`update issues set awaiting_gate_version = null, awaiting_artifact = null, awaiting_ask = '6c83cb7f-8f4e-4820-9e05-7c94fa725007' where key = 'LEGION-208'`,
+		`update issues set phase = 'admitted', awaiting_ask = null, awaiting_answered_at = null, awaiting_answered_by = null, awaiting_answered_detail = null, awaiting_since_seq = null, awaiting_since = null where key = 'LEGION-208'`,
 		// Each fence outlives the wait: both are kept at admitted, after the wait's columns cleared.
 		`update issues set wait_fence_seq = 10, gate_fence_seq = 12 where key = 'LEGION-208'`,
 	} {
@@ -60,8 +60,10 @@ func TestAwaitingPersonArrivesWith0051AndItsShapeIsEnforced(t *testing.T) {
 		{"a wait outside awaiting_person", `update issues set awaiting_gate_version = 3 where key = 'LEGION-208'`},
 		{"an answer outside awaiting_person", `update issues set awaiting_answered_at = now() where key = 'LEGION-208'`},
 		{"what answered a wait, outside awaiting_person", `update issues set awaiting_answered_by = 'ask' where key = 'LEGION-208'`},
-		{"what answered a wait nobody answered", `update issues set phase = 'awaiting_person', awaiting_gate_version = 3, awaiting_answered_by = 'approved' where key = 'LEGION-208'`},
-		{"an answer of no known kind", `update issues set phase = 'awaiting_person', awaiting_gate_version = 3, awaiting_answered_at = now(), awaiting_answered_by = 'guess' where key = 'LEGION-208'`},
+		{"what answered a wait nobody answered", `update issues set phase = 'awaiting_person', awaiting_gate_version = 3, awaiting_artifact = 'a', awaiting_answered_by = 'approved' where key = 'LEGION-208'`},
+		{"an answer of no known kind", `update issues set phase = 'awaiting_person', awaiting_gate_version = 3, awaiting_artifact = 'a', awaiting_answered_at = now(), awaiting_answered_by = 'guess' where key = 'LEGION-208'`},
+		{"a gate wait with no document", `update issues set phase = 'awaiting_person', awaiting_ask = null, awaiting_gate_version = 3 where key = 'LEGION-208'`},
+		{"an answer's detail with no answer", `update issues set phase = 'awaiting_person', awaiting_gate_version = 3, awaiting_artifact = 'a', awaiting_answered_detail = 'why' where key = 'LEGION-208'`},
 		{"a wait's start sequence outside awaiting_person", `update issues set awaiting_since_seq = 10 where key = 'LEGION-208'`},
 		{"a wait's start time outside awaiting_person", `update issues set awaiting_since = now() where key = 'LEGION-208'`},
 		{"a wait's start sequence of zero", `update issues set phase = 'awaiting_person', awaiting_gate_version = 3, awaiting_since_seq = 0 where key = 'LEGION-208'`},

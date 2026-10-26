@@ -279,12 +279,19 @@ func decodeDispatchFact(subject, project, payload string) (Fact, error) {
 				Kind string `json:"kind"`
 				ID   string `json:"id"`
 			} `json:"author"`
+			Restored bool `json:"restored"`
 		}
 		if err := json.Unmarshal(event.Payload, &ask); err != nil {
 			return nil, fmt.Errorf("decode Dispatch ask.opened payload: %w", err)
 		}
 		if ask.ID == "" || ask.Kind == "" {
 			return nil, fmt.Errorf("Dispatch ask.opened payload has no id or kind")
+		}
+		// Settlement restoring a decision block it retracted appends ask.opened with the block's
+		// original author, the architect's session: no agent asked anything, so it is no fact, as
+		// the restored ask.answered is not.
+		if ask.Restored {
+			return nil, nil
 		}
 		session := ""
 		if ask.Author.Kind == "session" {

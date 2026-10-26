@@ -1185,7 +1185,8 @@ func (r *outbox) seedGate(ctx context.Context, row record.OutboxRow, payload rec
 	// log (Seq, At), which identifies it in the told record, places it against a wait's start, and
 	// names it in the fact's id, so a second registration of one version in one generation, whose
 	// seed reads a newer review, is not dropped as the first seed's.
-	fact := intake.DispatchArtifact{Key: row.Issue, ArtifactID: payload.ArtifactID, Kind: intake.DispatchArtifactVersion, Version: approval.LatestVersion}
+	fact := intake.DispatchArtifact{Key: row.Issue, ArtifactID: payload.ArtifactID, Kind: intake.DispatchArtifactVersion, Version: approval.LatestVersion,
+		RequestWaitsOnAgent: approval.State == "awaiting" && approval.WaitingOn == "agent"}
 	review := record.EventMark{Seq: approval.Seq, At: approval.At}
 	changes, reason := approval.ChangesRequestedLatest()
 	switch {
