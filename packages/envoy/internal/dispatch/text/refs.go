@@ -242,6 +242,15 @@ func parseArtifactSlug(value string) (string, bool) {
 	return slug, true
 }
 
+// MaxBlockIDBytes bounds a block id, decoded, in UTF-8 bytes. The reference graph keys a block by
+// it - document_blocks' primary key and its node id `<ref_key>#<block id>`, document_block_texts'
+// and block_refs' keys, and a reference's refs.to_id - and a Postgres B-tree key holds at most
+// 2704 bytes, so an unbounded id fails every write that indexes it. A reference naming a longer
+// id names nothing (blockID), the index makes no node of a block carrying one (refs.IndexBlocks),
+// and a write through the API that names one is refused (pmdoc.LongBlockID). Its twin is
+// MAX_BLOCK_ID_BYTES in @legion/contracts.
+const MaxBlockIDBytes = 256
+
 // EncodeBlockID writes a block id as a reference's `#b-` fragment carries it: every UTF-8 byte
 // percent-encoded in upper-case hex except ASCII letters, digits and `-`, so no character a
 // reference ends at or the grammar trims, and no `@` a pin could be read from, is written bare.
@@ -269,8 +278,8 @@ func EncodeBlockID(id string) string {
 // id is read with any valid percent-encoding (EncodeBlockID writes one), so `%40` is an `@` in the
 // id and a raw `@` is only ever the pin. Any other fragment, a raw `@` that does not start a
 // well-formed pin, a versioned document, an agent conversation's document, an item, or an id that
-// is empty or does not decode names nothing. A document version shows only as an `@` in the
-// document part: no key or slug holds one.
+// is empty, does not decode or is longer than MaxBlockIDBytes names nothing. A document version
+// shows only as an `@` in the document part: no key or slug holds one.
 func parseBlock(document, fragment string) (Ref, bool) {
 	encoded, ok := strings.CutPrefix(fragment, "b-")
 	if !ok || strings.Contains(document, "@") {
@@ -301,13 +310,13 @@ func parseBlock(document, fragment string) (Ref, bool) {
 }
 
 // blockID decodes the id part of a `#b-` fragment: not empty, holding no raw `@`, and decoding
-// as decodeItemID decodes an item id to a non-empty id.
+// as decodeItemID decodes an item id to a non-empty id of at most MaxBlockIDBytes.
 func blockID(encoded string) (string, bool) {
 	if encoded == "" || strings.Contains(encoded, "@") {
 		return "", false
 	}
 	id, ok := decodeItemID(encoded)
-	return id, ok && id != ""
+	return id, ok && id != "" && len(id) <= MaxBlockIDBytes
 }
 
 // itemSegment is an item id as a reference writes it, decoded, as the dashboard reads one: written

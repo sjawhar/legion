@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -17,7 +18,10 @@ import (
 // graph nodes, and each mention written inside a block as an edge out of the innermost block
 // holding its start, in the caller's transaction, which holds the document's owner row. blocks
 // are the version's rendered blocks in document order, each parent before its children; the first
-// holder of a repeated id is the node. located must be text.ExtractAt(markdown, …).
+// holder of a repeated id is the node. located must be text.ExtractAt(markdown, …). A block whose
+// id is longer than text.MaxBlockIDBytes, which no key of the index can hold, is no node: a
+// mention inside it starts at the innermost node holding it, if any, and the indexing logs a
+// warning naming the document, the longest such id's length and the bound.
 //
 // A block whose text (markdown[From:To]) is unchanged keeps its changed version; a new, changed
 // or restored block takes this version, and its text is recorded in document_block_texts; a
@@ -46,7 +50,11 @@ func IndexBlocks(
 		return nil, err
 	}
 	firstIndexing := len(stored) == 0
-	nodes := uniqueBlocks(blocks)
+	nodes, long, longest := uniqueBlocks(blocks)
+	if long > 0 {
+		slog.Warn("dispatch: block ids past the bound are not graph nodes; a mention inside one of their blocks starts at the block holding it",
+			"artifact", artifactID, "version", version, "blocks", long, "longest_bytes", longest, "bound_bytes", text.MaxBlockIDBytes)
+	}
 
 	// The blocks whose text this version changed (new, changed or restored), and those it deleted.
 	var ids, types, sums, excerpts []string
@@ -288,12 +296,18 @@ func BlockLinks(ctx context.Context, q Queryer, fromArtifact, toArtifact string)
 // uniqueBlocks keeps the first block of each id, in order, as the node GET …/blocks addresses by
 // that id: a rendered version can repeat an id (pmdoc/block_ids.go), and document_blocks holds one
 // row per id. It skips an empty id, and one that is not valid UTF-8 or holds a NUL, which a
-// Postgres text[] cannot hold.
-func uniqueBlocks(blocks []model.ArtifactBlock) []model.ArtifactBlock {
-	nodes := make([]model.ArtifactBlock, 0, len(blocks))
+// Postgres text[] cannot hold. It skips an id longer than text.MaxBlockIDBytes too, which a
+// B-tree key of the index cannot hold, and reports how many blocks it skipped for that and the
+// longest such id's bytes.
+func uniqueBlocks(blocks []model.ArtifactBlock) (nodes []model.ArtifactBlock, long, longest int) {
+	nodes = make([]model.ArtifactBlock, 0, len(blocks))
 	seen := make(map[string]struct{}, len(blocks))
 	for _, block := range blocks {
 		if block.ID == "" || !text.Storable(block.ID) {
+			continue
+		}
+		if len(block.ID) > text.MaxBlockIDBytes {
+			long, longest = long+1, max(longest, len(block.ID))
 			continue
 		}
 		if _, dup := seen[block.ID]; dup {
@@ -302,7 +316,7 @@ func uniqueBlocks(blocks []model.ArtifactBlock) []model.ArtifactBlock {
 		seen[block.ID] = struct{}{}
 		nodes = append(nodes, block)
 	}
-	return nodes
+	return nodes, long, longest
 }
 
 // innermostBlocks names, for each start (ascending), the index of the tightest block whose

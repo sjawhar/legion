@@ -1,3 +1,5 @@
+import { MAX_BLOCK_ID_BYTES } from "./dispatch-block-ref";
+
 /**
  * Markdown bodies with the `dispatch://` references each one cites, in order of first appearance,
  * as read against the server origin `https://dispatch.test`, or the row's `origin` where it names
@@ -10,8 +12,8 @@
  * pipe; the sentence punctuation, emphasis and strikethrough delimiters and unbalanced closing
  * parenthesis after it are dropped. External URLs cite nothing. A block reference is its
  * document's reference, `#b-` and the block id as `encodeBlockId` writes it (readers take any
- * percent-encoding), optionally pinned to version N of the document by a trailing `@v<N>`; each
- * `refs` entry for one is written that canonical way.
+ * percent-encoding; an id past MAX_BLOCK_ID_BYTES names nothing), optionally pinned to version N
+ * of the document by a trailing `@v<N>`; each `refs` entry for one is written that canonical way.
  */
 export const DISPATCH_TEXT_REFERENCES: readonly {
   body: string;
@@ -168,6 +170,17 @@ export const DISPATCH_TEXT_REFERENCES: readonly {
   { body: "dispatch://CORE-1#b-x", refs: [] },
   { body: "dispatch://CORE-1/spec#b-%E0%A4", refs: [] },
   { body: "dispatch://CORE-1/spec#b-%0A", refs: [] },
+  // An id of MAX_BLOCK_ID_BYTES UTF-8 bytes (an `é` is two) is a block; one byte more names
+  // nothing, and a dashboard page whose fragment holds it is the document.
+  {
+    body: `dispatch://CORE-1/spec#b-${"%C3%A9".repeat(MAX_BLOCK_ID_BYTES / 2)}`,
+    refs: [`dispatch://CORE-1/spec#b-${"%C3%A9".repeat(MAX_BLOCK_ID_BYTES / 2)}`],
+  },
+  { body: `dispatch://CORE-1/spec#b-${"%C3%A9".repeat(MAX_BLOCK_ID_BYTES / 2)}x`, refs: [] },
+  {
+    body: `https://dispatch.test/issues/CORE-1/spec#b-${"%C3%A9".repeat(MAX_BLOCK_ID_BYTES / 2)}x`,
+    refs: ["dispatch://CORE-1/spec"],
+  },
   // A dashboard page's `#b-` fragment names the block it lands on.
   {
     body: "https://dispatch.test/issues/CORE-1/spec#b-ship-it",

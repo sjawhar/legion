@@ -25,10 +25,18 @@ export function encodeBlockId(id: string): string {
 }
 
 /**
+ * The most UTF-8 bytes a block id, decoded, may hold. The reference graph keys a block by its id
+ * in Postgres B-tree keys, which hold at most 2704 bytes, so a reference naming a longer id names
+ * nothing, the server makes no graph node of a block carrying one, and a write through the API
+ * naming one is refused. Go's twin is `text.MaxBlockIDBytes`.
+ */
+export const MAX_BLOCK_ID_BYTES = 256;
+
+/**
  * The block id a `#b-` fragment (`encoded`, after the `b-`) names, or undefined when it names
  * none: empty, holding a raw `@` (a pin is no part of the id; `encodeBlockId` writes `@` as `%40`),
- * not decoding, or decoding to an empty id or one holding a control character. Any valid
- * percent-encoding is read, as the server's `text` package reads it.
+ * not decoding, or decoding to an empty id, one holding a control character, or one longer than
+ * MAX_BLOCK_ID_BYTES. Any valid percent-encoding is read, as the server's `text` package reads it.
  */
 export function decodeBlockId(encoded: string): string | undefined {
   if (encoded === "" || encoded.includes("@")) {
@@ -40,7 +48,11 @@ export function decodeBlockId(encoded: string): string | undefined {
   } catch {
     return undefined;
   }
-  return id === "" || hasControlCharacter(id) ? undefined : id;
+  return id === "" ||
+    hasControlCharacter(id) ||
+    new TextEncoder().encode(id).length > MAX_BLOCK_ID_BYTES
+    ? undefined
+    : id;
 }
 
 /**

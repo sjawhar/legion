@@ -2,9 +2,11 @@ package refs
 
 import (
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/text"
 )
 
 // A mention starts at the tightest block whose [From, To) holds its start: a child inside its
@@ -21,14 +23,19 @@ func TestInnermostBlocksPicksTheTightestRangeHoldingEachStart(t *testing.T) {
 
 // A rendered version can repeat an id, and document_blocks holds one row per id: the first holder
 // is the node. An id Postgres cannot store in a text[] (empty, holding a NUL, or not UTF-8) is
-// no node.
+// no node, nor is one longer than text.MaxBlockIDBytes, which no key of the index can hold; those
+// are counted, with the longest one's bytes. An id at the bound is a node.
 func TestUniqueBlocksKeepsTheFirstHolderOfEachID(t *testing.T) {
-	got := uniqueBlocks([]model.ArtifactBlock{
+	atBound := strings.Repeat("é", text.MaxBlockIDBytes/2)
+	got, long, longest := uniqueBlocks([]model.ArtifactBlock{
 		{ID: "a", From: 0, To: 10},
 		{ID: "a", From: 20, To: 30},
 		{ID: "", From: 40, To: 50},
 		{ID: "x\x00", From: 60, To: 70},
 		{ID: "\xff", From: 70, To: 75},
+		{ID: atBound + "x", From: 75, To: 78},
+		{ID: atBound, From: 78, To: 79},
+		{ID: strings.Repeat("f", 3200), From: 79, To: 80},
 		{ID: "b", From: 80, To: 90},
 	})
 	type node struct {
@@ -39,8 +46,8 @@ func TestUniqueBlocksKeepsTheFirstHolderOfEachID(t *testing.T) {
 	for i, block := range got {
 		nodes[i] = node{block.ID, block.From, block.To}
 	}
-	want := []node{{"a", 0, 10}, {"b", 80, 90}}
-	if !slices.Equal(nodes, want) {
-		t.Fatalf("uniqueBlocks = %#v, want %#v", nodes, want)
+	want := []node{{"a", 0, 10}, {atBound, 78, 79}, {"b", 80, 90}}
+	if !slices.Equal(nodes, want) || long != 2 || longest != 3200 {
+		t.Fatalf("uniqueBlocks = %#v, %d long, longest %d; want %#v, 2 long, longest 3200", nodes, long, longest, want)
 	}
 }

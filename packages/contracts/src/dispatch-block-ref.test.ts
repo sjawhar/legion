@@ -4,8 +4,16 @@ import {
   DISPATCH_BLOCK_ID_ENCODINGS,
   decodeBlockId,
   encodeBlockId,
+  MAX_BLOCK_ID_BYTES,
   parseBlockFragment,
 } from "./dispatch-block-ref";
+
+// Ids at the bound and one byte past it, in UTF-8 bytes: an `é` is two, so the multi-byte pair
+// is one a count of UTF-16 code units would take the wrong way.
+const atBound = "x".repeat(MAX_BLOCK_ID_BYTES);
+const pastBound = `${atBound}x`;
+const multiByteAtBound = "é".repeat(MAX_BLOCK_ID_BYTES / 2);
+const multiBytePastBound = `${multiByteAtBound}x`;
 
 test.each([...DISPATCH_BLOCK_ID_ENCODINGS])("encodes block id %p", (row) => {
   expect(encodeBlockId(row.id)).toBe(row.encoded);
@@ -18,13 +26,18 @@ test("an encoded id decodes back to the id", () => {
 });
 
 // No id: a raw `@` (`encodeBlockId` writes `@` as `%40`, so one is only ever a pin), an empty
-// fragment, a percent-encoding that is not UTF-8, and a control character.
+// fragment, a percent-encoding that is not UTF-8, a control character, and an id longer than
+// MAX_BLOCK_ID_BYTES.
 test.each([
   ["ship-it@v2", undefined],
   ["", undefined],
   ["%E0%A4", undefined],
   ["%0A", undefined],
   ["%00", undefined],
+  [encodeBlockId(atBound), atBound],
+  [encodeBlockId(pastBound), undefined],
+  [encodeBlockId(multiByteAtBound), multiByteAtBound],
+  [encodeBlockId(multiBytePastBound), undefined],
 ])("decodes block id %p", (encoded, want) => {
   expect(decodeBlockId(encoded)).toBe(want);
 });
@@ -47,6 +60,8 @@ test.each([
   ["ship-it@vx", undefined],
   ["a@b", undefined],
   ["a@v1@v2", undefined],
+  [`${encodeBlockId(multiByteAtBound)}@v2`, { block: multiByteAtBound, pin: 2 }],
+  [`${encodeBlockId(multiBytePastBound)}@v2`, undefined],
 ])("parses block fragment %p", (fragment, want) => {
   expect(parseBlockFragment(fragment)).toEqual(want);
 });
