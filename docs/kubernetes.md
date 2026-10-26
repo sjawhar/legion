@@ -42,7 +42,7 @@ merger — runs from one image, `ghcr.io/sjawhar/legion-worker` (public). It car
   backed by the CodeGraph CLI (`@colbymchenry/codegraph`, pinned) at `/opt/codegraph/bin` (`PATH`) — the
   `codegraph` tool a tester queries for `affected` tests and a reviewer for `impact`/`callers` blast
   radius (`packages/daemon/internal/prompts/roles/core/tester.md`, `core/reviewer.md`). A pod's agent has that tool because its launch loads profile plugins (dispatch://LEGION-629), which the capability report's `codegraph` row says ([The deployment's capability report](#the-deployments-capability-report));
-- OMP's native modules, pre-downloaded into `/home/legion/.omp/natives/<version>/` so a pod never fetches them;
+- OMP's native module, extracted at build into `/home/legion/.omp/natives/<version>/`: from 18.11.0 OMP writes only the variant the CPU selects (AVX2 or not), so this is the build runner's variant, and a pod whose node selects the same one extracts nothing, while a node that selects the other has each role container write that one (111 MiB) into its own writable layer at its first OMP run;
 - pinned Bun, `jj` (Sami's fork, the version the dogfood daemon runs) and `gh` at `/usr/local/bin`, and
   `git` at `/usr/bin/git` from the `debian:trixie-slim` base — jj's git backend requires git >= 2.42
   (bookworm's 2.39.5 made every `jj git clone` in the init container fail), so the build also proves the
@@ -100,7 +100,7 @@ merger — runs from one image, `ghcr.io/sjawhar/legion-worker` (public). It car
   ([Running a workload in the cluster from a role](#running-a-workload-in-the-cluster-from-a-role))
   — a declaration the capability report
   renders, not a network control this repository ships; the package's setuid
-  `/usr/lib/openssh/ssh-keysign` and setgid `/usr/bin/ssh-agent` lose those bits in the runtime stage,
+  `/usr/lib/openssh/ssh-keysign` and setgid `/usr/bin/ssh-agent` lose those bits in the `runtime-base` stage,
   and the build's final step refuses an image where any file under `/usr/lib/openssh` or
   `/usr/bin/ssh-agent` carries one),
   `psql` (from `postgresql-client`: the Dispatch browser suite `bun run e2e`, which a
@@ -272,7 +272,7 @@ name (`task(agent="…")`, `skill://…`) resolved by name through the same laun
 `oracle`, `deep-worker`, `thermonuclear-deep-review` and `thermonuclear-code-quality`, and the
 planner's `plan-gap-analyst` and `plan-reviewer`, in `agents/`, and the pair's rubrics and
 `ce-simplify-code` with Legion's other skills in its `dist/skills`; the Envoy plugin ships the
-`dispatch`, `dispatch-first`, `dispatch-writing-specs` and `envoy` skills in its), so a build whose OMP or plugins are
+`asd-ste100`, `dispatch`, `dispatch-first`, `dispatch-writing-specs` and `envoy` skills in its), so a build whose OMP or plugins are
 broken fails instead of publishing. The build has none of the operator's model configuration, so it
 leaves those agents' models unresolved (`--skip-agent-models`). It then checks every image-site row of
 the capability table (`packages/daemon/internal/capabilities`) against the image, as a worker's Oh My Pi
@@ -3014,30 +3014,33 @@ password=$(python3 -c 'import secrets; print(secrets.token_hex(16))')
 cleanup() {
   status=$?
   trap - EXIT INT TERM HUP
+  trap '' INT TERM HUP                         # this shell ignores any further stop
+  # Each kubectl below runs under setsid -w, in a session of its own, out of the stopped group:
+  # kubectl dies of a SIGTERM it inherited ignored, and its waits catch SIGINT and SIGHUP too.
   set +e
   if [ -z "$workload" ]; then                  # no name read: find this run's Job by its label
     echo "cleanup: no Job name was read; deleting by label sequence-run=$run"
-    kubectl delete job -l sequence-run="$run" --cascade=foreground --ignore-not-found \
+    setsid -w kubectl delete job -l sequence-run="$run" --cascade=foreground --ignore-not-found \
       || { echo "cleanup: the Job's delete failed"; [ "$status" -ne 0 ] || status=1; }
-    kubectl get jobs -l sequence-run="$run"    # "No resources found"
+    setsid -w kubectl get jobs -l sequence-run="$run"   # empty is no proof none is left: see below
     rm -rf "$dir"
     echo "sequence: exit $status"
     exit "$status"
   fi
   if [ "$status" -ne 0 ]; then                 # what the readings below send a role to look at
-    kubectl get pods -l job-name="$workload" --show-labels
-    kubectl logs -l job-name="$workload" --tail=20
-    kubectl get pods -l job-name="$workload" \
+    setsid -w kubectl get pods -l job-name="$workload" --show-labels
+    setsid -w kubectl logs -l job-name="$workload" --tail=20
+    setsid -w kubectl get pods -l job-name="$workload" \
       -o jsonpath='{range .items[*].status.containerStatuses[*]}{.name}: {.state}{"\n"}{end}'
-    kubectl get service "$workload" --ignore-not-found \
+    setsid -w kubectl get service "$workload" --ignore-not-found \
       -o jsonpath='{range .spec.ports[*]}port {.port} -> targetPort {.targetPort}{"\n"}{end}'
   fi
-  kubectl delete job "$workload" --cascade=foreground --ignore-not-found \
+  setsid -w kubectl delete job "$workload" --cascade=foreground --ignore-not-found \
     || { echo "cleanup: the Job's delete failed"; [ "$status" -ne 0 ] || status=1; }
-  kubectl wait --for=delete service/"$workload" --timeout=60s \
+  setsid -w kubectl wait --for=delete service/"$workload" --timeout=60s \
     || { echo "cleanup: the Service is still there"; [ "$status" -ne 0 ] || status=1; }
-  kubectl get job,service "$workload" --ignore-not-found   # prints nothing once both are gone
-  kubectl get pods -l job-name="$workload"                 # "No resources found"
+  setsid -w kubectl get job,service "$workload" --ignore-not-found   # nothing once both are gone
+  setsid -w kubectl get pods -l job-name="$workload"                 # "No resources found"
   rm -rf "$dir"
   echo "sequence: exit $status"
   exit "$status"
@@ -3128,7 +3131,11 @@ PY
 kubectl logs -l job-name="$workload" --tail=5                    # and what it says it is doing
 
 # The work itself goes here, inside this script: "$address" port 5432, user postgres, password
-# "$password". However it ends, the trap above removes the workload, short of a SIGKILL.
+# "$password". The trap above tries to remove the workload on every exit it runs on, and prints
+# `sequence: exit <status>` last. It can leave the workload: on a SIGKILL or the role's pod going
+# away, or on another signal the trap neither catches nor ignores, which can end the sequence or
+# its trap part-way with no `sequence: exit` line; on a clean-up step that fails, which it prints;
+# and on a create the API server stores after its label delete has listed the Jobs (see below).
 SEQUENCE
 echo "sequence: $sequence, its output in $sequence.log"
 flock "$sequence" setsid -f bash "$sequence" > "$sequence.log" 2>&1 < /dev/null   # out of the tool's reach
@@ -3152,17 +3159,35 @@ found`; and exits with the status it began with, or 1 when a clean-up step faile
 had succeeded, printing it last as `sequence: exit <status>`, since the call that waits for a
 detached sequence prints its output and not its status. A trap that runs before the sequence has
 read its Job's name from the create's answer — the create refused, or a stop that landed first —
-finds the Job by this run's label instead. The sequence draws eight random hexadecimal characters
-before the create, prints them as `run: sequence-run=<value>`, and writes them as a label on the
-Job's own metadata, not its pod template, so the label is never one a pod carries and cannot be
-read as the reachability label. That trap prints `cleanup: no Job name was read; deleting by label
-sequence-run=<value>`, deletes every Job carrying that label with `--cascade=foreground`, lists the
-Jobs carrying it, which prints `No resources found`, and exits with its status. After a refused
-create, or a stop before the create's request left, the delete finds nothing; a stop that landed
-while the create was in flight, or between its answer and the line that reads it, finds the Job
-the create made. Another run's Job carries a value drawn for that run, so the delete leaves it
-alone. No Service exists on that path: the sequence applies its Service only once it has read the
-name.
+looks for the Job by this run's label instead. The sequence draws eight random hexadecimal
+characters before the create, prints them as `run: sequence-run=<value>`, and writes them as a
+label on the Job's own metadata, not its pod template, so the label is never one a pod carries and
+cannot be read as the reachability label. That trap prints `cleanup: no Job name was read; deleting
+by label sequence-run=<value>`, deletes every Job the server lists with that label, with
+`--cascade=foreground`, lists the Jobs carrying it, and exits with its status. After a refused
+create, or a stop before the create's request left, there is no Job, and the delete finds nothing.
+Otherwise the delete finds the Job only if the API server has stored it by the time the delete
+lists the Jobs. In every run measured on 2026-10-25 for dispatch://INFRA-232 whose label delete
+found a Job — the stop placed between the create's answer and the line that reads it, and two of
+the twenty-six stops in the bullet below, sent 0.33 s and 0.35 s after the first line (that
+issue's tester measured two more, at 0.318 s and 0.320 s, sjawhar/legion#2195) — the delete
+removed it, and none of the twenty-six left a Job. Nothing the 0.33 s and 0.35 s runs printed
+shows whether their stop landed while the create was in flight or after its answer. A
+create the server finishes only after that listing — its request still in flight when a stop or a
+failed connection ended `kubectl create` — leaves a Job the delete never saw. No run measured that
+case, and none rules it out. The trap's own listing shows such a Job only if the server stored it
+before that listing, and prints `No resources found` if later, so an empty listing there does not
+show that no such Job exists; the block's closing comment names this case among those the trap can
+miss. Such a Job would run until the 3600 s deadline it and its pod carry, holding the four
+processors it requested. So after every run whose trap printed `cleanup: no Job name was read`,
+list `kubectl get jobs -l sequence-run=<the printed value>` once more after the sequence has ended,
+and remove any Job it lists with
+`kubectl delete job -l sequence-run=<the printed value> --cascade=foreground`, the recovery that
+removed a Job a `SIGKILL` left before its name was printed, measured on 2026-10-25. No wait was
+measured either: how long after its client is gone the server can still store a create is not
+known, so an empty listing shows only that no such Job was stored by the time the listing ran.
+Another run's Job carries a value drawn for that run, so neither command touches it. No Service
+exists on that path: the sequence applies its Service only once it has read the name.
 
 **A timeout of the role's own bash tool is what the detaching is for.** The tool ends a call that
 runs past its timeout by signalling the command and every process under it and killing them almost
@@ -3185,8 +3210,28 @@ only when the step in progress returns, which each step's own timeout bounds. Me
 left; `SIGHUP` and `SIGINT` sent to the group during the Ready wait, and `SIGINT` and `SIGTERM`
 sent to it during the check, each ran the trap within a second; `SIGTERM` sent to the `bash` alone
 during the Ready wait ran it 76 s later, when the wait returned, and `SIGINT` sent to it alone
-during a check that was being refused ran it 58 s later, when the check gave up. A `SIGKILL`, or
-the role's pod going away, runs no trap: the Job's two deadlines bound what is left, and a role
+during a check that was being refused ran it 58 s later, when the check gave up. Once the trap
+runs, its shell ignores further `SIGINT`, `SIGTERM` and `SIGHUP`, and it runs each of its `kubectl`
+commands under `setsid -w`, in a session of its own, so a stop sent to the sequence's group while
+the trap runs — a second stop, or one sent after a failed step or the work's end started the trap —
+reaches neither the shell nor its `kubectl`, and the clean-up runs to its end. The sessions are
+needed because `kubectl`, a Go program, dies of a `SIGTERM` it inherited ignored, and while it waits
+it catches `SIGINT` and `SIGHUP` too: on 2026-10-25, `kubectl wait --for=delete` started with all
+three ignored, against an API server whose watch never answered, ended on each of them, and
+kubectl's source shows its `delete` waiting through the same code. Of the stop signals, only a
+`SIGKILL` ends a clean-up in progress, and it ends the shell alone: the `kubectl` then running
+finishes in its own session, and `flock … cat` waits for it. A signal the trap neither catches nor
+ignores can end the clean-up too. Measured on 2026-10-25 on this block, filled in, with one fixture
+line for the work, each stop sent to the group: `SIGTERM` once it had answered and then a second
+`SIGTERM` 0.5 s later, a `SIGINT` 0.3 s later or a `SIGHUP` 0.3 s later, each printed
+`sequence: exit 143` and left nothing; with failing work, one `SIGINT` or one `SIGTERM` sent as the
+trap began its readings printed `sequence: exit 1` and left nothing. The block without these lines
+failed those runs: a `SIGTERM` during the readings ended the trap there, and with the ignore but no
+sessions a second `SIGTERM` killed the trap's `kubectl delete` (it printed `cleanup: the Job's
+delete failed`); each left the Job, its Service and its pod. A `SIGKILL` before the trap runs, or
+the role's pod going away, ends the sequence with no trap and no `sequence: exit` line: a
+`kill -KILL -- -<process>` once it had answered left the Job, its Service and its pod, and the two
+lines below removed them in 1 s. The Job's two deadlines bound what such a run leaves, and a role
 that stopped that way — or that ran the sequence in its tool's foreground and saw the call time
 out — removes it with the name the sequence printed once its Job was created:
 
@@ -3196,10 +3241,14 @@ kubectl wait --for=delete service/<the printed workload name> --timeout=60s
 ```
 
 A role that lost the name lists the Jobs with `kubectl get jobs`. Its issue's start with its issue
-key, and so do its sibling roles', so it deletes only the one it started. A run whose name never
-printed — a `SIGKILL` that landed during the create — printed its label first, and
-`kubectl delete job -l sequence-run=<the printed value> --cascade=foreground` removes its Job; it
-had no Service yet.
+key, and so do its sibling roles', so it deletes only the one it started. A run can leave a Job
+with no name printed: a `SIGKILL` or the role's pod going away before the name printed; a label
+delete that failed, printing `cleanup: the Job's delete failed`; and a stop or failed connection
+whose create the server stored only after the trap's label delete had listed the Jobs (above).
+Each printed its label first, and
+`kubectl delete job -l sequence-run=<the printed value> --cascade=foreground` removes that Job once
+the server has stored it, as it removed the one a `SIGKILL` left on 2026-10-25; it had no Service
+yet.
 
 That check is `python3`, which the image carries, because **the role container had no client for
 any of these servers** when it was written ([Worker image](#worker-image)), a role may not `exec`
@@ -3257,9 +3306,11 @@ dispatch://INFRA-206's declarations on 2026-10-25 turned two of the gate's three
 to `yes`. So each bullet below carries the date of the run behind it, and a reader runs the three
 gate commands itself rather than trusting the answers recorded here:
 
-- *Executed from a role container on 2026-10-25, for dispatch://INFRA-232, with the sequence
-  exactly as published above, through the role's own bash tool*: the block taken from this page
-  with only its three bracketed lines filled in, each run under the name the API server gave it
+- *Executed from a role container on 2026-10-25, for dispatch://INFRA-232, with the sequence as
+  this page published it then, through the role's own bash tool* (dispatch://INFRA-386 has since
+  added the trap's ignore line, put `setsid -w` in front of the trap's `kubectl` commands and
+  changed comments in the block): the block taken from this page with only its three bracketed
+  lines filled in, each run under the name the API server gave it
   and a run label of its own, and a fixture changing one line of it where named. As published,
   with reads of the workload pod's labels and of the Jobs carrying the run label added:
   `run: sequence-run=` and eight characters printed first, `workload: infra-232-postgres-` and five
@@ -3275,11 +3326,13 @@ gate commands itself rather than trusting the answers recorded here:
   `cleanup: no Job name was read; nothing removed` and left its Job running until a delete by name
   removed it. Twenty-six more runs, each sent `kill -TERM -- -<process>` between 0.10 s and 0.45 s
   after its first line while the first run was still under way: the earliest, before the trap was
-  installed, printed nothing and made nothing; those that landed before the create's request found
-  nothing by the label; two that landed inside the create deleted the Job it had made by the
-  label; the later ones had read the name and deleted their Job by it. Each of the others ended
-  `sequence: exit 143`, and no Job of theirs was left. A `kill -KILL -- -<process>` that landed
-  inside the create left a Job with no name printed, and
+  installed, printed nothing and made nothing; of those that took the label path, two found the Job
+  the create had made and deleted it by the label, and the rest found nothing; the later ones had
+  read the name and deleted their Job by it. Each of the others ended `sequence: exit 143`, and no
+  Job of theirs was left. For the two that found a Job, nothing they printed shows whether the stop
+  landed while the create was in flight or after its answer; for the rest, whether it landed
+  before the create's request left or while it was in flight. A `kill -KILL -- -<process>` that
+  landed before the name printed left a Job with no name printed, and
   `kubectl delete job -l sequence-run=<the printed value> --cascade=foreground` removed it in
   31 s, its pod still initialising. With the Job's `cpu` request `"1"`: the create refused by
   admission naming the four-processor rule, under a name the server had already generated, the

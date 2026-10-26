@@ -46,7 +46,7 @@ the task agents Legion's prompts dispatch (`oracle`; the reviewer's pair
 `plan-gap-analyst` and `plan-reviewer`, which also review a root spec before every approval
 request, `plan-reviewer` checking each of its factual claims), each
 declaring its model as a role the operator maps (`docs/kubernetes.md`, "Model roles"). The Dispatch
-and Envoy skills (`dispatch`, `dispatch-first`,
+and Envoy skills (`asd-ste100`, `dispatch`, `dispatch-first`,
 `dispatch-writing-specs`, `envoy`) ship in `@sjawhar/pi-envoy`; a link from a Legion skill into one
 of them is written `skill://dispatch/...`, which resolves by name once both are installed.
 

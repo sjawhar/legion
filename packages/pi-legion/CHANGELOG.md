@@ -8,11 +8,16 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 ### Added
 
 - A ninth Legion skill, `leading-a-work-stream`, rebuilt from dotfiles
-  `356f3111d2e01697a996cbbba69aa426cc3047bd`: the current source removes the Common mistakes
-  table and adds dates, the speed loop and `references/speed-tick.md`. The Legion copy removes
-  names and private tool paths, keeps the speed-tick link, and keeps two Legion additions: the
-  workflow-and-role sequence and the rule that a lead proves its stream facts with a command and
-  its output. The dotfiles copy goes once a release carries this one.
+  `feb1271d4f5021f2e0b9b22b7496a300e6f46790`: a `SKILL.md` and seven references (daily plan,
+  decision rights, direction and coaching, Dispatch upkeep, sources, the speed tick, the record of
+  a person's words), and a section on checking a thing itself before calling work blocked. The
+  Legion copy links each reference as `skill://leading-a-work-stream/references/<file>.md`, removes
+  names, a private benchmark name, a private tool path and the dotfiles path in the timer, names
+  the skills Legion does not ship without `skill://`, and keeps each accepted request and wait in
+  the issue's `open-items.md` artifact, never its spec, since a spec edit after approval closes the
+  design gate. It keeps two Legion additions: the workflow-and-role sequence and the rule that a
+  lead proves its stream facts with a command and its output. The dotfiles copy goes once a release
+  carries this one.
 
 - `STRATEGY.md` at the repository root holds Legion's and Dispatch's strategy: purpose, users, key
   metrics, tracks, principles, and the boundaries that need the owner's decision. It replaces
@@ -57,6 +62,24 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   or risk the person would weigh is now also a reason for a new version of an approved spec. The
   deployment's owner said Legion's architects asked him too many questions that did not need him.
 
+- The skill-scenarios rig (`scripts/skill-scenarios/`, not shipped in the package) measures how
+  agents write Dispatch specs:
+  - `label-comments.ts` labels the comments people wrote on Dispatch in a window with the eleven
+    questions of the INFRA-140 labels, and prints the share of comments that complain about
+    writing. It reads production Dispatch with GET only.
+  - `fetch-spec-sources.ts` reads an issue's or a project document's input from Dispatch into a
+    work directory outside the checkout.
+  - `rig.sh batch spec-writing` and `spec-rewrite` seed a scratch issue with that input and let a
+    fresh agent design the change with a person stand-in that answers its asks and approves its
+    spec.
+  - `rig.sh judge` runs ten judge prompts over each run, and `rig.sh score` scores the spec's
+    outline, checks, refusals, plan, questions, quoting and self-naming.
+- `rig.sh profile` takes the key-file model route (`LEGION_E2E_MODEL_ROUTE=key-file` with
+  `LEGION_E2E_ANTHROPIC_KEY_FILE`). It refuses a work directory with a `.omp` in it or above it,
+  because Oh My Pi would load that directory's plugins and not the label's.
+- `rig.sh judge-omp` runs each judge in a Docker container that sees only the judge's own
+  directory. On the gateway route, the gateway's key command runs on the host once for each judge,
+  and the container gets only its token, which is removed when the judge ends.
 - Daemon API contract 36 (INFRA-229): `legion state` and the controller's `read_state` carry
   `state` on an issue's pull request, its `open`, `merged` or `closed`. An architect's acceptance
   is refused while an issue beneath it is still in the workflow and a merged root's close waits
@@ -227,7 +250,7 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 - `legion-architect`, `legion-worker` and `legion-controller` point to
   `skill://dispatch-writing-specs` (INFRA-140) for a spec's outline, its questions, its approval and
   the rules for text a person reads, and `legion-architect` drops its own copy of those rules. The
-  controller's board-rank link points to `skill://dispatch/SKILL.md#setup-and-the-http-api`. A
+  controller's board-order step names `dispatch issue-update --before`/`--after`. A
   daemon role prompt now names `skill://dispatch-writing-specs`, so the daemon's boot gate refuses
   a `@sjawhar/pi-envoy` released before it: install the pi-envoy of the same release.
 - `legion-architect`: after approval, a corrected citation, a better sentence, a measurement that
@@ -235,6 +258,11 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   comment on the issue or the next handoff, and every change that needs approval goes into one
   version, so the person approves the spec again only when scope, acceptance or their decision
   changes.
+- The `legion-worker` skill's tools reference no longer tells a role to add a new image package to
+  the licence file by hand: the worker image lists every Debian package it carries in
+  `/usr/share/doc/legion/THIRD_PARTY_NOTICES` from its own dpkg database (INFRA-255). The
+  Dockerfile's comments and its toolchain smoke step stay hand-kept.
+
 - The merger's READY, as the `legion` tool's `handoff_complete` with `ready: true` reaches it,
   refuses one ground fewer: `READY_CHECKS_NOT_GREEN` is gone, and the daemon reads none of the
   head's check runs or commit statuses. GitHub, under the base branch's own rules, decides whether
