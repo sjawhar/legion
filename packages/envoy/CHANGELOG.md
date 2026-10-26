@@ -10,7 +10,10 @@
   (`artifact_reviews.event_seq`, migration 0117, written in the same transaction). The owner's row
   lock orders those events as they commit, so `seq` places a review among them where `at`, its
   transaction's start, cannot; the Legion daemon orders a review against the start of a root's wait
-  by it. A review recorded before the migration reads with its `at` and no `seq`. Deploy order:
+  by it. A review recorded before the migration reads with its `at` and no `seq`. A review the
+  release before it writes while a rollout or a rollback runs both releases gets its sequence too,
+  from the migration's trigger at its commit, so it reads as the newest review it is rather than
+  ranking below every sequenced one. Deploy order:
   Dispatch (migration 0117) deploys before the Legion daemon (its migration 0051); a daemon against
   a Dispatch without `seq` falls back to a review's `at`.
 - A project's default assignee, the last step of an issue create's assignee chain: an issue created

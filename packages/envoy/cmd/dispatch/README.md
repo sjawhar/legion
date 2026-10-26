@@ -675,6 +675,24 @@ inline check would read every row of the table while it held that lock, and `not
 refuses every row written or updated after it. Nothing validates it later — every row below the
 migration carries no sequence at all — so the constraint stays `not valid` for good.
 
+The release before `0117` keeps serving beside it while the app Deployment rolls (below), and again
+for as long as a rollback lasts, and it inserts every review naming no `event_seq`. Left null, such
+a review — newer than every sequenced one — would rank below them all in `docs.ReviewOrder`
+(`event_seq desc nulls last`): a person's approval an old pod wrote would read back as the changes
+requested before it, and a changes request an old pod wrote would be overridden by the approval
+before it. So `0117` also adds a trigger, which the rule below allows a migration to add:
+`artifact_reviews_event_seq`, a constraint trigger on `artifact_reviews` deferred to the commit, gives
+every review inserted without a sequence, by either release, the sequence of the `artifact.*` event
+its own transaction appended for it (its type, document and version, among the events on the
+owner that carry the transaction's `now()`, which the owner's row lock keeps the newest there until
+the commit). It is deferred because every release inserts a review before it appends the event.
+Every row that carries no sequence was therefore committed before `0117`, whose `ACCESS EXCLUSIVE`
+lock waits out every transaction that has inserted a review, and every sequenced row is newer.
+The trigger is on `artifact_reviews`, the table `0117` already locks, so the migration holds no
+second lock: a trigger on `events` would need that table's `SHARE ROW EXCLUSIVE` while holding
+`artifact_reviews`, against a transaction that appended an event and then waits to insert a
+review (a carried approval), and the census holds every table a migration names to its 1 GiB limit.
+
 Migration `0009_project_artifacts` deletes malformed derived artifact references, reports their
 count, and re-derives them from source text on the next write. It aborts server boot before a
 migration record or schema change only when an existing artifact has no owning issue. On success

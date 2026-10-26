@@ -24,10 +24,12 @@ const ReviewColumns = `id::text, artifact_id::text, version, state, actor, reaso
 
 // ReviewOrder sorts a document's reviews newest first by the order their events committed: the
 // event sequence each review kept on its document's owner, then, for a review recorded before the
-// sequence was kept, its own time and id. Every row that carries a sequence was written after the
-// migration that added it, so it is newer than every row without one, which `nulls last` says.
-// created_at is the review's transaction start, so it places two reviews only when neither carries
-// a sequence.
+// sequence was kept, its own time and id. Every review written once migration 0117 committed
+// carries a sequence, whichever release wrote it: this release's WriteReview writes it, and the
+// migration's deferred trigger gives one to a review the release before it writes during a
+// rollout or a rollback. A row without one was committed before that migration, so every row that
+// carries a sequence is newer than every row without one, which `nulls last` says. created_at is
+// the review's transaction start, so it places two reviews only when neither carries a sequence.
 const ReviewOrder = `event_seq desc nulls last, created_at desc, id desc`
 
 // ScanReview decodes one ReviewColumns row.
@@ -47,11 +49,14 @@ func ScanReview(row pgx.Row) (model.ArtifactReview, error) {
 // artifact.approved or artifact.changes_requested, on the document's owner: its issue when it
 // belongs to one, else the document itself. askID is the approval ask the review answers, nil
 // when it was given from the document header with no request open. The review row keeps the
-// event's sequence on that owner (event_seq), written in the same transaction, which places a read
-// of the review among the owner's events. The row is inserted before the event is appended and
-// its sequence written after, so the review's foreign-key locks are still taken before the owner's
-// row lock and the commit-order lock, as they were before the sequence was kept. The caller owns
-// the transaction and publishes the event.
+// event's sequence on that owner (event_seq), which places a read of the review among the owner's
+// events. The row is inserted before the event is appended and its sequence written after, so the
+// review's foreign-key locks are still taken before the owner's row lock and the commit-order
+// lock, as they were before the sequence was kept. Migration 0117's trigger, which gives the release
+// before this one's reviews their sequence, would give this row its sequence too, but only at the
+// commit, the first moment the event exists for every release; so WriteReview writes it itself,
+// and the row is right for any read the caller makes before it commits. The trigger then finds the
+// row sequenced and leaves it. The caller owns the transaction and publishes the event.
 func WriteReview(ctx context.Context, tx pgx.Tx, broker *events.Broker, artifact model.Artifact, version int, state string, actor model.Actor, reason *string, askID *string) (model.ArtifactReview, model.Event, error) {
 	actorJSON, err := json.Marshal(actor)
 	if err != nil {

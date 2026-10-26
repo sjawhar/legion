@@ -12,7 +12,9 @@ const artifactReviewsEventSeqVersion = 117
 
 // TestMigrationAddsTheReviewsEventSequence: a review recorded before the column reads back with no
 // sequence, so the approval read gives it its time alone; the release before it keeps inserting
-// reviews without the column; its check is added `not valid`, so the migration reads no row of the
+// reviews without the column, and its trigger gives such a review the sequence of the artifact.*
+// event its own transaction appended, at the commit, and leaves a review whose transaction
+// appended none without one; its check is added `not valid`, so the migration reads no row of the
 // table it locks; and a sequence below 1 is refused all the same.
 func TestMigrationAddsTheReviewsEventSequence(t *testing.T) {
 	ctx := context.Background()
@@ -40,16 +42,42 @@ func TestMigrationAddsTheReviewsEventSequence(t *testing.T) {
 	if err := store.migrate(ctx, migrationsThrough(t, artifactReviewsEventSeqVersion)); err != nil {
 		t.Fatalf("migrate to %d: %v", artifactReviewsEventSeqVersion, err)
 	}
-	// The release before the column inserts a review naming no sequence.
+	// The release before the column inserts a review naming no sequence, then appends its event in
+	// the same transaction; the trigger gives the review that event's sequence when it commits.
+	tx, err := store.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin the old release's review: %v", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	var oldRelease string
+	if err := tx.QueryRow(ctx, review+` returning id::text`, artifactID).Scan(&oldRelease); err != nil {
+		t.Fatalf("insert the old release's review: %v", err)
+	}
+	if _, err := tx.Exec(ctx, `insert into events (issue_key, seq, type, actor, payload, notify)
+		values ('TEST-1', 7, 'artifact.changes_requested', '{"kind":"user","id":"alice"}',
+		        jsonb_build_object('artifact_id', $1::text, 'version', 1), true)`, artifactID); err != nil {
+		t.Fatalf("append the old release's review event: %v", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit the old release's review: %v", err)
+	}
+	var oldReleaseSeq int64
+	if err := store.Pool.QueryRow(ctx, `select coalesce(event_seq, 0) from artifact_reviews where id = $1`, oldRelease).Scan(&oldReleaseSeq); err != nil {
+		t.Fatalf("read the old release's review sequence: %v", err)
+	}
+	if oldReleaseSeq != 7 {
+		t.Fatalf("the old release's review sequence = %d (0 is none), want its event's 7", oldReleaseSeq)
+	}
+	// A review whose transaction appends no event stays without a sequence.
 	if _, err := store.Pool.Exec(ctx, review, artifactID); err != nil {
-		t.Fatalf("insert a review without its sequence after the migration: %v", err)
+		t.Fatalf("insert a review with no event after the migration: %v", err)
 	}
 	var unsequenced int
 	if err := store.Pool.QueryRow(ctx, `select count(*) from artifact_reviews where artifact_id = $1 and event_seq is null`, artifactID).Scan(&unsequenced); err != nil {
 		t.Fatalf("count reviews with no sequence: %v", err)
 	}
 	if unsequenced != 2 {
-		t.Fatalf("reviews with no sequence = %d, want both: the one before the column and the one the old release wrote", unsequenced)
+		t.Fatalf("reviews with no sequence = %d, want two: the one before the column and the one with no event", unsequenced)
 	}
 	if _, err := store.Pool.Exec(ctx, `update artifact_reviews set event_seq = 0 where artifact_id = $1`, artifactID); err == nil || !strings.Contains(err.Error(), "check constraint") {
 		t.Fatalf("a review sequence of zero = %v, want a check constraint to refuse it", err)
