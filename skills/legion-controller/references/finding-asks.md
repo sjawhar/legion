@@ -42,10 +42,12 @@ The work goes to whoever already owns that code. You file an issue only when nob
    component match, read from `read_state` and `dispatch read`. When one matches, hand it over.
    `envoy_publish` the defect, its evidence reference and the fix to that tree's architect topic,
    `notifications.role.<issues.<KEY>.architect.locator.claim>`. The architect decides whether it
-   is a child of the tree or part of an open issue's work. When the root has no locator, or the
-   publish answers no holder, comment the evidence on that root instead, where its architect reads
-   it. Reply `Handed dispatch://<that KEY>` under the evidence either way. File nothing: the work
-   is already owned, and a second issue splits it.
+   is a child of the tree or part of an open issue's work. Reply `Handed dispatch://<that KEY>`
+   under the evidence only when the publish names a holder. When the root has no locator, or the
+   publish answers no holder, reply nothing: no architect reads a comment on its root, so the
+   evidence stays unhandled, and catch-up step 4 lists it again at your next start. Publish it
+   again at your next wake. Once the root leaves `admission.active`, no running tree owns the
+   code, and step 4 files it. File nothing while a tree owns it: a second issue splits the work.
 4. No running tree owns that code: file it on the repository where the fix belongs, in the
    project that repository maps to:
 
@@ -161,7 +163,9 @@ finding asks roles opened on their own issues while no controller ran:
    ```
 
    It reads as step 3's read does: exit 0 with `[]` is nothing waiting, anything else failed.
-   Take each as [Hand over a clear defect](#hand-over-a-clear-defect) says. When one is not clear,
+   Take each as [Hand over a clear defect](#hand-over-a-clear-defect) says. One you could not hand
+   over at an earlier wake, because no architect held its tree's topic, has no reply, so this list
+   brings it back until a tree takes it or step 4 of the hand-over files it. When one is not clear,
    reply `Not filed: <reason>` under it and open an ask for it instead.
 
 A read that fails, and an assignment Dispatch refuses, are handled as
