@@ -4,6 +4,13 @@
 
 ### Changed
 
+- `dispatch issue-update --status done --reason` refuses, before it posts anything, a close of an
+  issue whose read shows it already closed (`closed_at` set), with the `ISSUE_CLOSED` refusal a
+  409 from Dispatch carries (`ISSUE_CLOSED: issue is closed; KEY closed at <time>, so the reason
+  was not posted and the close was not sent`). It used to rely on a closed issue refusing the
+  reason's message; Dispatch now takes messages on a closed issue, so the old order would have left
+  a stray reason on it. An open issue still gets its reason posted, then the PATCH (INFRA-448).
+
 - A session refreshes its Envoy registration every 90 s rather than every 120 s: the listener
   expires a session record 300 s after its last write, and three refresh attempts plus one whole
   listener call's budget (10 250 ms: two 5 000 ms attempts and the 250 ms retry delay between

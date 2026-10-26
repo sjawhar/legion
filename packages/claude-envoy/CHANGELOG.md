@@ -13,6 +13,11 @@
 
 ### Changed
 
+- The `dispatch` command (`dist/dispatch.js`) refuses `dispatch issue-update --status done
+  --reason` on an issue already closed, `ISSUE_CLOSED`, before it posts the reason, since Dispatch
+  now takes messages on a closed issue; the bundled `dispatch_issue_update` description no longer
+  says a closed issue takes no messages or comments (INFRA-448).
+
 - The plugin's regenerated `legion/` copy of the `legion-worker` skill's tools reference no longer
   tells a role to add a new image package to the licence file by hand: the worker image lists every
   Debian package it carries in `/usr/share/doc/legion/THIRD_PARTY_NOTICES` from its own dpkg

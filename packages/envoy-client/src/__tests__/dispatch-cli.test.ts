@@ -450,7 +450,7 @@ describe("the dispatch CLI", () => {
 
   // --reason is the close's note: a reopen (or any update but a close) that carries one is
   // refused by the argument check, in a dry run as in the call, naming that rule, before any
-  // request; never by a closed issue's refusal of the note it would have posted.
+  // request, so no stray note is ever posted.
   test("--reason without --status done is refused by the argument check, dry run included", async () => {
     const argv = ["issue-update", "--issue", "DSP-1", "--status", "in_progress", "--reason", "x"];
     const rule =

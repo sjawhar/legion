@@ -131,6 +131,11 @@
 
 ### Changed
 
+- `dispatch_issue_update`'s close rule and description give the reason for posting the reason
+  first as what it is, so the close carries its note, and drop the claim that a closed issue
+  takes no messages or comments: Dispatch now accepts both on a closed issue (asks and artifacts
+  are still refused). The description says a close of an issue already closed is refused
+  `ISSUE_CLOSED` before anything is posted (INFRA-448).
 - `LegionHandoffCompleteResponse.note` carries one case fewer: READY no longer reads or judges the
   head's checks, so a base branch that requires none produces no note at all. What is left is the
   already-merged sentence, for a pull request a person merged before READY, and the by-hand

@@ -105,6 +105,10 @@
 
 ### Changed
 
+- The bundled `dispatch` command refuses `dispatch issue-update --status done --reason` on an issue
+  already closed, `ISSUE_CLOSED`, before it posts the reason, since Dispatch now takes messages on
+  a closed issue and the reason would otherwise land there as a stray message (INFRA-448).
+
 - The `dispatch`, `dispatch-first` and `dispatch-brainstorming` skills are rewritten shorter
   (the dispatch skill and its references from about 20,300 words to 9,400), with detail moved to
   references and `dispatch <command> --help`; a blind comparison of old and new text on each
