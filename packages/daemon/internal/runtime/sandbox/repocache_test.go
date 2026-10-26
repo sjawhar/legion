@@ -288,6 +288,9 @@ func TestEnsureRepositoryCacheCreatesSuspendedWritesTheSecretThenSetsRunning(t *
 	if spec.RestartPolicy != corev1.RestartPolicyAlways {
 		t.Errorf("the cache pod restarts %s, want Always", spec.RestartPolicy)
 	}
+	if sc := spec.SecurityContext; sc == nil || sc.FSGroupChangePolicy == nil || *sc.FSGroupChangePolicy != corev1.FSGroupChangeOnRootMismatch {
+		t.Errorf("the cache pod's security context is %+v, want fsGroupChangePolicy OnRootMismatch, so a restart does not re-own the clone", sc)
+	}
 	if templates := stored.Spec.VolumeClaimTemplates; len(templates) != 1 || templates[0].Metadata.Name != cacheVolume || templates[0].Spec.Resources.Requests.Storage().String() != "20Gi" {
 		t.Errorf("the cache Sandbox owns %+v, want one %s claim of 20Gi", templates, cacheVolume)
 	}
