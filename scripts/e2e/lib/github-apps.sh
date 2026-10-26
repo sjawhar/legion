@@ -4,9 +4,12 @@
 # writes anything there.
 #
 # Sourced, never run. The caller defines fail (which exits) and note, and sets work, the run's
-# scratch directory. Each App is an id and the name of the secret-store key holding its private
-# key, read by require_app_inputs from two inputs that default to this repository's own
-# deployment:
+# scratch directory. The gated Go proofs (packages/daemon/internal/api/real_github_test.go,
+# liveProofApps and proveLiveProofApps) are callers too: they define fail and note themselves,
+# set work for check_github_apps alone, and read require_app_inputs's results and app_key_command
+# from stdout, so neither of those two writes anything else to stdout. Each App is an id and the
+# name of the secret-store key holding its private key, read by require_app_inputs from two inputs
+# that default to this repository's own deployment:
 #   LEGION_E2E_<ROLE>_APP_ID        the App's numeric id (ROLE is IMPLEMENT or REVIEW)
 #   LEGION_E2E_<ROLE>_APP_KEY_NAME  the secret-store key the `secrets` CLI resolves to the App's
 #                                   private key, base64-encoded PEM
@@ -47,6 +50,9 @@ default_review_app_key_name=GH_REVIEW_APP_PRIVATE_KEY_B64
 github_apps_read=()
 app_key_unsets=()
 require_app_inputs() {
+  # The checks below use bracket ranges, which bash's =~ reads in the caller's locale: under a
+  # UTF-8 locale [0-9] and [A-Za-z] admit fullwidth digits and accented letters. C keeps them ASCII.
+  local LC_ALL=C
   local role upper id_var key_var id_default key_default id key name roles_read=()
   for role in "$@"; do
     case "$role" in implement | review) ;; *) fail "require_app_inputs: no App role '$role'" ;; esac

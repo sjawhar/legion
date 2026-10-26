@@ -2899,8 +2899,13 @@ by the permission, since the implement App holds `checks: read` alone. The key n
 script's shell, an argv or a file. A run
 refuses before its first write anywhere: Stage 3, 4b.13b, the Claude Code backend and Stage 4b
 check both Apps (`read_app_logins`), Stage 4a, which acts as the implement App alone, checks that
-one. `TestRealGitHubCredentialSurface` and `TestRealGitHubReadyHoldsTheHeadToRetrosCommits` read the
-same four inputs with the same defaults. `require_app_inputs` also fills `app_key_unsets`, the
+one. `TestRealGitHubCredentialSurface` and `TestRealGitHubReadyHoldsTheHeadToRetrosCommits` source
+this lib and run its `require_app_inputs`, `app_key_command`, `write_github_apps` and
+`check_github_apps` (`liveProofApps` and `proveLiveProofApps` in
+`packages/daemon/internal/api/real_github_test.go`), so they hold no copy of the pair, its checks or
+its key command, and they prove both Apps as the stage proofs do before they act. The checks run in
+the C locale whatever the caller's, so a UTF-8 locale does not admit fullwidth digits or accented
+letters. `require_app_inputs` also fills `app_key_unsets`, the
 `env` argument list (`-u NAME` …) every proof passes to a process it starts, which strips each
 role's key name, this deployment's own two, and every exported variable whose name holds
 `PRIVATE_KEY`, the proof human's App key included. `lib/app-logins.test.ts` drives the three

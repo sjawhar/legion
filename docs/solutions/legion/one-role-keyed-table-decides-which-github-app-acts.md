@@ -33,8 +33,8 @@ symptoms:
 ## Context
 
 Legion acts on GitHub through two Apps: the implement App (the code-writing App) and the review
-App (their ids and slugs are in the table below). Until LEGION-42 the daemon held **two** functions that decided
-which App a role acts as, and they disagreed:
+App (their ids and slugs are in the table below). Until LEGION-42 the daemon held **two**
+functions that decided which App a role acts as, and they disagreed:
 
 | function | where | used by | mapping |
 | --- | --- | --- | --- |
@@ -131,17 +131,19 @@ implement-only fixtures (#1016, see the rebase note in
 
 Read from GitHub itself (`GET /app` with each App's JWT, 2026-09-13):
 
-| App id | slug (unauthenticated `GET /apps/<slug>`, 2026-10-26) | permissions |
-| --- | --- | --- |
-| 3202636 (implement) | `trajectory-s-legion-implementer` | actions:write, checks:**read**, contents:write, issues:write, metadata:read, organization_projects:write, packages:read, pull_requests:write, repository_projects:write, **statuses:write**, workflows:write |
-| 3202653 (review) | `trajectory-s-legion-reviewer` | actions:write, **checks:write**, issues:write, metadata:read, packages:read, pull_requests:write |
+| App id | slug on 2026-09-13 | slug since 2026-10-16 | permissions |
+| --- | --- | --- | --- |
+| 3202636 (implement) | `legion-implementer` | `trajectory-s-legion-implementer` | actions:write, checks:**read**, contents:write, issues:write, metadata:read, organization_projects:write, packages:read, pull_requests:write, repository_projects:write, **statuses:write**, workflows:write |
+| 3202653 (review) | `legion-reviewer` | `trajectory-s-legion-reviewer` | actions:write, **checks:write**, issues:write, metadata:read, packages:read, pull_requests:write |
 
-(2026-10-26 correction: this table first named the two Apps `legion-implementer` and
-`legion-reviewer`. GitHub answers ids 3202636 and 3202653 with the slugs above, and the slugs
-`legion-implementer` and `legion-reviewer` belong to two other Apps. The bot names this entry
-quotes elsewhere (`legion-implementer[bot]`, `app.slug: legion-reviewer`) are as its sources
-recorded them. Identify an App by its id, which `GET /app` answers with the App's own JWT, not by
-its slug.)
+(2026-10-26: the two Apps were renamed on 2026-10-16. Main's commits by bot user 271566630 read
+`legion-implementer[bot]` up to 2026-10-16T05:11Z and `trajectory-s-legion-implementer[bot]` from
+05:53Z, and GitHub now shows the review App's earlier reviews as `trajectory-s-legion-reviewer[bot]`
+(bot user 271566912). So the `legion-implementer[bot]` and `legion-reviewer[bot]` this entry and
+older entries quote, before 2026-10-16, are these two Apps. The slugs `legion-implementer` and
+`legion-reviewer` have since gone to two other Apps, whose bots also commit here under other bot
+user ids. Identify an App by its id, which `GET /app` answers with the App's own JWT, or a bot by
+its user id, never by a slug or login.)
 
 (2026-09-25: the review App's installations have since gained `contents: write`; the current record
 is in `packages/daemon/src/daemon/AGENTS.md`, GitHub Apps.)

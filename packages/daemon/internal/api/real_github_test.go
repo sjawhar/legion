@@ -84,8 +84,31 @@ func TestRealGitHubCredentialSurface(t *testing.T) {
 // command are written.
 var githubAppsLib = filepath.Join("..", "..", "..", "..", "scripts", "e2e", "lib", "github-apps.sh")
 
+// liveProofAppInputs is the four inputs githubAppsLib reads, each overriding one default.
+var liveProofAppInputs = []string{
+	"LEGION_E2E_IMPLEMENT_APP_ID", "LEGION_E2E_IMPLEMENT_APP_KEY_NAME",
+	"LEGION_E2E_REVIEW_APP_ID", "LEGION_E2E_REVIEW_APP_KEY_NAME",
+}
+
 // liveProofApp is one role's App as githubAppsLib resolves it.
 type liveProofApp struct{ id, keyName, keyCommand string }
+
+// runGitHubAppsLib runs script in bash with githubAppsLib as $1 and args after it, in environ less
+// the variables that make bash run other code or trace its own: an exported SHELLOPTS with xtrace
+// would print a refused input's value on stderr, and a BASH_ENV file could write to the stdout
+// the caller parses.
+func runGitHubAppsLib(environ []string, script string, args ...string) (stdout []byte, stderr string, err error) {
+	command := exec.Command("bash", append([]string{"-c", script, "bash", githubAppsLib}, args...)...)
+	command.Env = slices.DeleteFunc(slices.Clone(environ), func(entry string) bool {
+		name, _, _ := strings.Cut(entry, "=")
+		return strings.HasPrefix(name, "BASH_FUNC_") || slices.Contains(
+			[]string{"SHELLOPTS", "BASHOPTS", "BASH_ENV", "ENV", "BASH_XTRACEFD", "PS4"}, name)
+	})
+	var errOut bytes.Buffer
+	command.Stderr = &errOut
+	stdout, err = command.Output()
+	return stdout, strings.TrimSpace(errOut.String()), err
+}
 
 // liveProofApps resolves the implement and review Apps by running githubAppsLib's own
 // require_app_inputs and app_key_command in an environment of environ, so the gated proofs here
@@ -101,13 +124,9 @@ for role in implement review; do
   id=${role}_app_id key=${role}_app_key_name
   printf '%s\0%s\0%s\0' "${!id}" "${!key}" "$(app_key_command "${!key}")"
 done`
-	command := exec.Command("bash", "-c", script, "bash", githubAppsLib)
-	command.Env = environ
-	var stderr bytes.Buffer
-	command.Stderr = &stderr
-	stdout, runErr := command.Output()
+	stdout, stderr, runErr := runGitHubAppsLib(environ, script)
 	if runErr != nil {
-		return liveProofApp{}, liveProofApp{}, fmt.Errorf("%s refused the App inputs (%v): %s", githubAppsLib, runErr, strings.TrimSpace(stderr.String()))
+		return liveProofApp{}, liveProofApp{}, fmt.Errorf("%s refused the App inputs (%v): %s", githubAppsLib, runErr, stderr)
 	}
 	fields := strings.Split(strings.TrimSuffix(string(stdout), "\x00"), "\x00")
 	if len(fields) != 6 {
@@ -116,16 +135,51 @@ done`
 	return liveProofApp{fields[0], fields[1], fields[2]}, liveProofApp{fields[3], fields[4], fields[5]}, nil
 }
 
+// proveLiveProofApps proves both Apps against GitHub as every stage proof does, with the lib's own
+// write_github_apps and check_github_apps in the scratch directory work: each key signs an App JWT
+// and GitHub's GET /app must answer its configured id and the write permission its role needs,
+// which also refuses the two Apps configured the other way round. It returns the lib's notes, and
+// on a refusal the lib's reason, which names the App by role and id and never the key.
+func proveLiveProofApps(environ []string, work string) (notes string, err error) {
+	const script = `set -euo pipefail
+fail() { printf '%s\n' "$*" >&2; exit 1; }
+note() { printf '%s\n' "$*" >&2; }
+work=$2
+source "$1"
+require_app_inputs implement review
+write_github_apps implement review
+check_github_apps implement review`
+	_, stderr, runErr := runGitHubAppsLib(environ, script, work)
+	if runErr != nil {
+		return stderr, fmt.Errorf("%s could not prove the Apps against GitHub (%v): %s", githubAppsLib, runErr, stderr)
+	}
+	return stderr, nil
+}
+
 // realGitHubApps is Legion's implement and review Apps: this repository's own deployment by
 // default, another deployment's through the same four inputs the stage proofs read, each App's id
 // and the secrets-store key the devbox's `secrets` CLI resolves to its private key, all as
-// liveProofApps reads them from the lib.
+// liveProofApps reads them from the lib, and each proved against GitHub before a proof acts as it.
 func realGitHubApps(t *testing.T) config.GitHubApps {
 	t.Helper()
+	// go test's result cache keys a test on the variables it looks up and the files it opens, and
+	// sees neither through the bash child, so name them here: a changed input or a changed lib runs
+	// the gated proof again rather than replaying a pass made as other Apps.
+	for _, name := range liveProofAppInputs {
+		os.LookupEnv(name)
+	}
+	if _, err := os.ReadFile(githubAppsLib); err != nil {
+		t.Fatalf("read the live proofs' App lib: %v", err)
+	}
 	implement, review, err := liveProofApps(os.Environ())
 	if err != nil {
 		t.Fatal(err)
 	}
+	notes, err := proveLiveProofApps(os.Environ(), t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Log(notes)
 	apps, err := config.ResolveGitHubApps(config.GitHubApps{
 		Implement: config.GitHubApp{AppID: implement.id, PrivateKeyCommand: implement.keyCommand},
 		Review:    config.GitHubApp{AppID: review.id, PrivateKeyCommand: review.keyCommand},
@@ -140,10 +194,7 @@ func realGitHubApps(t *testing.T) config.GitHubApps {
 // the pair the lib's default_<role>_app_* assignments hold, each set input replaces its value, and
 // a malformed or empty input is refused naming the input and never its value.
 func TestLiveProofAppsReadTheLib(t *testing.T) {
-	inputs := []string{
-		"LEGION_E2E_IMPLEMENT_APP_ID", "LEGION_E2E_IMPLEMENT_APP_KEY_NAME",
-		"LEGION_E2E_REVIEW_APP_ID", "LEGION_E2E_REVIEW_APP_KEY_NAME",
-	}
+	inputs := liveProofAppInputs
 	base := make([]string, 0, len(os.Environ()))
 	for _, entry := range os.Environ() {
 		name, _, _ := strings.Cut(entry, "=")
@@ -197,15 +248,34 @@ func TestLiveProofAppsReadTheLib(t *testing.T) {
 	}
 
 	pasted := strings.Repeat("Zm9vYmFy", 9) // 72 base64 characters: a value, not a store key's name
-	for _, refused := range []struct{ input, value string }{
-		{"LEGION_E2E_REVIEW_APP_KEY_NAME", pasted},
-		{"LEGION_E2E_IMPLEMENT_APP_ID", ""},
-		{"LEGION_E2E_IMPLEMENT_APP_ID", "0123"},
+	// The last four run where bash would otherwise read the checks in a UTF-8 locale, trace itself
+	// to stderr, or run a startup file first; a runner without the en_US.UTF-8 locale falls back
+	// to C, so those cases still hold there.
+	startup := filepath.Join(t.TempDir(), "bash_env")
+	if err := os.WriteFile(startup, []byte("printf 'noise from BASH_ENV\\n'\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, refused := range []struct {
+		input, value string
+		extra        []string
+	}{
+		{"LEGION_E2E_REVIEW_APP_KEY_NAME", pasted, nil},
+		{"LEGION_E2E_IMPLEMENT_APP_ID", "", nil},
+		{"LEGION_E2E_IMPLEMENT_APP_ID", "0123", nil},
+		{"LEGION_E2E_IMPLEMENT_APP_ID", "３２０２６３６", []string{"LC_ALL=en_US.UTF-8"}},
+		{"LEGION_E2E_REVIEW_APP_KEY_NAME", "K\u00e9Y", []string{"LC_ALL=en_US.UTF-8"}},
+		{"LEGION_E2E_REVIEW_APP_KEY_NAME", pasted, []string{"SHELLOPTS=braceexpand:hashall:interactive-comments:xtrace"}},
+		{"LEGION_E2E_REVIEW_APP_KEY_NAME", pasted, []string{"BASH_ENV=" + startup, "BASH_XTRACEFD=2", "PS4=+ "}},
 	} {
-		_, _, err := liveProofApps(with(refused.input + "=" + refused.value))
+		_, _, err := liveProofApps(append(with(refused.input+"="+refused.value), refused.extra...))
 		if err == nil || !strings.Contains(err.Error(), refused.input) || (refused.value != "" && strings.Contains(err.Error(), refused.value)) {
-			t.Errorf("%s=%q: err = %v, want a refusal naming the input and not its value", refused.input, refused.value, err)
+			t.Errorf("%s=%q with %v: err = %v, want a refusal naming the input and not its value", refused.input, refused.value, refused.extra, err)
 		}
+	}
+
+	implement, _, err = liveProofApps(append(with(), "BASH_ENV="+startup))
+	if err != nil || implement.id != defaults["implement_app_id"] {
+		t.Errorf("with a BASH_ENV file that writes to stdout the implement App is %q (err %v), want the lib's default %s", implement.id, err, defaults["implement_app_id"])
 	}
 }
 
