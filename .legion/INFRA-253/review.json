@@ -2,36 +2,24 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-253",
-  "completed": "2026-10-26T10:36:00Z",
-  "round": 1,
-  "reviewedCodeHead": "bd64de9846128dea7244472e02a6a91a36299424",
+  "completed": "2026-10-26T12:28:00Z",
+  "round": 2,
+  "reviewedCodeHead": "c432d8ef102884a3e7751707556ec8f03fe38a4e",
   "decision": "changes_requested",
   "critical": 0,
-  "important": 3,
-  "minor": 1,
+  "important": 1,
+  "minor": 0,
   "keyFindings": [
     {
       "severity": "important",
-      "file": ".github/workflows/envoy-and-contracts.yaml",
-      "description": "The workflow's own on.push.paths and on.pull_request.paths do not list scripts/e2e/lib/held-port.py, so the dispatch-filter entry the PR adds at :415 never fires on a pull request that changes only that file, and the Playwright suite that serves Dispatch through it does not run. The dispatch filter also lacks packages/envoy/listenfd/**, though `go list -deps ./cmd/dispatch` now lists it and the filter's comment (:383-385) says it follows that list."
-    },
-    {
-      "severity": "important",
       "file": "packages/dispatch/e2e/playwright.config.ts",
-      "description": "Main's playwright.config.ts let a bare `playwright test --list` evaluate with no server and no port probe (isListMode). At the head it throws unless every port is set, and through e2e/run.ts it needs DATABASE_URL and a full Dispatch build and boot. packages/dispatch/AGENTS.md:1165's manual grep check now carries that cost. A listing needs no server: let it evaluate without the harness."
-    },
-    {
-      "severity": "important",
-      "file": "PR body",
-      "description": "No `## Contract change census`, though the PR adds refusals at process boundaries (DISPATCH_LISTEN_FD, ENVOY_LISTEN_FD, LEGION_LISTEN_FD; the Playwright config's bare-run refusal), changes daemon.Run's signature, removes cmdtest.FreeTCPPort and rig.sh's pick_port, changes await_start's arity, drops e2e-local.sh's default ports, and changes the wildcard `addr`/`address` log text to `[::]:p`."
-    },
-    {
-      "severity": "minor",
-      "file": "scripts/e2e/lib/held-port.py",
-      "description": "receive() requires SO_ACCEPTCONN == 1 and passes socket.MSG_CMSG_CLOEXEC; darwin answers the option's bit (0x2), as listenfd/inspect_unix.go:50-53 says, and CPython has no MSG_CMSG_CLOEXEC there, so `exec --from` (DISPATCH_E2E_LISTEN_FROM, documented in packages/dispatch/README.md:114-117) fails on macOS. Test != 0 as Go does and set close-on-exec after receipt where the flag is missing."
+      "description": "isListMode (:39-44) exempts any argv carrying `--list` from both refusals, the DISPATCH_E2E_REUSE_SERVERS one (:69) included. Playwright reads `--grep --list` or `--grep-invert --list` as a grep value and runs specs. With harness ports in the shell and no reuse flag, such a run targets those servers, and seed.ts truncates their database, which is what :69 refuses. On main the same argv met Playwright's own refusal, because webServer would not reuse a taken port. The comment at :37-38 and packages/dispatch/AGENTS.md:1102-1104 claim no spec runs. Fix: a listing exempts only the unset-ports refusal; the reuse refusal stands whenever a targeted port is set."
     }
   ],
-  "ci": "At 10:35Z every pull_request run at code head bd64de98 was still queued (Tests 40302789174, Legion Envoy and Contracts 40302789136, Docs 40302789101, Worker Image 40302789098, PR Title 40302906150). envoy-smoke, the first held-socket hand-over into a host-network container, has not run on any head; the next round reads it before any approval.",
-  "thermonuclear": "Pair run once at bd64de98. thermonuclear-deep-review: APPROVE at bd64de98, 2 Minor (path filters; held-port.py on darwin), mixed providers: 83 assistant turns anthropic/claude-opus-5-5, 1 openai/gpt-6.1-sol. thermonuclear-code-quality: APPROVE at bd64de98, 7 Minor cleanup items, mixed providers: 42 turns anthropic/claude-opus-5-5, 1 openai/gpt-6.1-sol. Counts read from each subagent's stored session transcript.",
-  "fastFollow": "Cleanup batch: daemon_test.go:217 heldSocket registers no t.Cleanup (cmd/legion/main_test.go:281 is a near-copy); overrides.inherited beside overrides.listen in daemon.go:138-142 could be one listener parameter; an empty DISPATCH_PORT with DISPATCH_LISTEN_FD is refused where the listener treats an empty PORT as unset; memory_harness_test.go:145-147 repeats cmdtest.Start's ExtraFiles close; startListenerConfig takes the port twice; search-smoke.sh/searchbench.sh repeat rig.sh's port-file wait."
+  "roundOneThreads": "PRRT_kwDORFy7ds6wOS84, PRRT_kwDORFy7ds6wOS88 and PRRT_kwDORFy7ds6wOS9B: each fixed in 9729362306a9, verified in the diff afa62a4a..9a26a4a6 and answered on its thread.",
+  "census": "Present. Its searches were re-run at c432d8ef: no deploy setter of the three *_LISTEN_FD variables; one daemon.Run caller (cmd/legion/main.go:385); no FreeTCPPort, pick_port, log_size or free-port.sh caller; every await_start call uses the 4+ argument form; the log readers all read a loopback line. The rollouts are opt-in, plus an immediate refusal for the Playwright config naming the port race it closes.",
+  "checks": "`bun test scripts/e2e/lib` at the head in the pod: 567 pass, 2 fail (nats-stream.test.ts needs Docker, which the pod lacks).",
+  "ci": "At 12:26Z every pull_request run at c432d8ef was still queued or pending (Tests 40318328337, Legion Envoy and Contracts 40318328338, Docs 40318328416, Worker Image 40318328341, PR Title 40318626250). At bd64de98, envoy-smoke passed in run 40302789136, job 121530727669, on the architect's reading; the next round reads every required check and envoy-smoke at its own head before any approval.",
+  "thermonuclear": "Pair run once at c432d8ef. thermonuclear-deep-review: APPROVE with 1 Minor (the `--list` guard bypass, which I rank Important because it lets a run past a safety refusal). thermonuclear-code-quality: APPROVE with 3 Minor cleanup items. Both answered mixed, read from each subagent's stored transcript: 58 assistant turns from anthropic/claude-opus-5-5 and 1 from openai/gpt-6.1-sol for the deep review; 47 and 1 for code quality. Each subagent's own claim to be openai/gpt-6.1-sol came from its system context and is wrong.",
+  "fastFollow": "stage2-tmux-supervision.sh:321-322,359 and verifiers-staging-token.sh:233-241 wait for the port file without lib/port-file.sh: stage2's wait does not stop on a dead keeper and ends in a generic 30 s timeout. cmd/legion/main_test.go:279-280's heldSocket comment lacks the cleanup sentence its daemon_test.go twin got."
 }
