@@ -60,7 +60,9 @@ sending — Dispatch has not confirmed it yet. It keeps trying, and the message 
 The page keeps sending it under one key, so however many tries reach Dispatch, the agent gets the
 message once, and it keeps trying while your connection is down as well. When your connection or
 Dispatch comes back, it tries again at once. **Stop trying** ends the tries: the message comes back
-with **Retry**, which sends it again under the same key, and **Discard**, which drops it. A message
+with **Retry**, which sends it again under the same key, and **Discard**, which drops it. Dispatch
+keeps a key for 24 hours from the first try, so a Retry within that is still delivered at most once,
+and a later one is a new message and may be delivered twice; the message says so. A message
 belongs to the agent, not to the page you sent it from: it keeps going when you close the row or
 leave the live view. Each message sent from the live view shows as its own turn, on the live view
 and on the agent's row alike, until Dispatch makes it, and **Retry**, **Discard** and **Stop
@@ -73,8 +75,10 @@ unconfirmed, the browser asks you to confirm before you leave or reload the page
 A message a reload brings back is yours alone, and only for a while. It belongs to the person who
 pressed it: if someone else signs in at that browser, in this tab or another, or you sign out, it
 is dropped unsent. And a tab reopened more than five minutes later does not send it behind your
-back — it comes back as **Not sent: this page was closed before Dispatch confirmed it. Retry sends
-it under the same key, so it is delivered at most once.**, with **Retry** and **Discard**.
+back — it comes back as **Not sent: this page was closed before Dispatch confirmed it. Retry asks
+again under the same key, so it is delivered at most once if you retry within 24 hours of the first
+try. After that Dispatch no longer knows the key: a Retry is a new write and may be delivered
+twice.**, with **Retry** and **Discard**.
 
 ### Send, Aside, and BTW
 
@@ -156,10 +160,10 @@ N agents — Dispatch has not confirmed it yet. It keeps trying, and the broadca
 offers **Stop trying**. A stopped row says `Stopped sending to N agents:` with the reason, and
 offers **Retry**, which tries the same request again under the same key, and **Restore draft**, as
 a refused one does. Broadcasts go out in the order you sent them: one still being tried holds back
-the ones you send after it, and one refused or stopped does not. A kept broadcast follows the same two rules a message to one agent
-does: it comes back for the person who pressed it and for nobody else, and one reopened more than
-five minutes later comes back as `Not sent: this page was closed before Dispatch confirmed it.
-Retry sends it under the same key, so it is delivered at most once.` rather than going out on its
+the ones you send after it, and one refused or stopped does not. A kept broadcast follows the same
+two rules a message to one agent does: it comes back for the person who pressed it and for nobody
+else, and one reopened more than five minutes later comes back as `Not sent: this page was closed
+before Dispatch confirmed it.` with the same note on a Retry within 24 hours, rather than going out on its
 own. A recipient Dispatch had not reached when it restarted or was deployed is reached by
 Dispatch itself within a few minutes, so every agent gets it exactly once.
 

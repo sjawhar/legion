@@ -187,7 +187,10 @@ unconfirmed the browser asks you to confirm before you leave or reload the page,
 reload interrupted, an upload's file included, is picked up again when the page comes back, for
 the person who made it and for nobody else: a change pending when someone else signs in at that
 browser, in this tab or another, is dropped unsent. One interrupted more than five minutes ago is
-not sent on its own: the corner lists it as **Not saved: …** with **Retry** and **Discard**.
+not sent on its own: the corner lists it as **Not saved: …** with **Retry** and **Discard**. A
+Retry of a stopped or interrupted change asks again under its first name, so it is saved at most
+once if you retry within 24 hours of the first try; after that Dispatch no longer knows the name,
+and the change may be made twice. The corner says so.
 
 Now and then Dispatch makes a change but its answer is lost on the way back. The change is made;
 the page says so (for example **The issue “…” was made, but Dispatch lost its answer, so it may
