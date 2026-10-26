@@ -89,8 +89,8 @@ func UnfinishedOf(rows map[string]Row, blockedBy []string) []string {
 //
 // It is the two decisions themselves, read rather than made: a root of waiting — the line
 // admission promotes from, which the caller passes as it computes it — that promotion skips
-// (WaitsOn), and a recorded child the workflow holds at `admitted` (Holdable, which
-// workflow.Engine.StartUnblockedChildren starts from there). A candidate the rule exempts is
+// (WaitsOn), and a recorded child the workflow holds at `admitted` (Holds, the hold
+// workflow.Engine.StartUnblockedChildren starts it from). A candidate the rule exempts is
 // never judged, as the decider that would admit it does not judge it either (Exempt): what
 // promotion starts whatever its links say is never reported as waiting on them.
 func Blocked(rows map[string]Row, issues, waiting []record.Issue) []record.BlockedIssue {
@@ -101,11 +101,8 @@ func Blocked(rows map[string]Row, issues, waiting []record.Issue) []record.Block
 		}
 	}
 	for _, issue := range issues {
-		if !Holdable(issue) {
-			continue
-		}
-		if unfinished := Unfinished(rows, issue.Key); len(unfinished) > 0 {
-			blocked = append(blocked, record.BlockedIssue{Issue: issue.Key, BlockedBy: unfinished})
+		if waits := Holds(rows, issue); len(waits) > 0 {
+			blocked = append(blocked, record.BlockedIssue{Issue: issue.Key, BlockedBy: waits})
 		}
 	}
 	slices.SortFunc(blocked, func(a, b record.BlockedIssue) int { return cmp.Compare(a.Issue, b.Issue) })
@@ -113,8 +110,9 @@ func Blocked(rows map[string]Row, issues, waiting []record.Issue) []record.Block
 }
 
 // Exempt says whether an issue starts whatever its links say, and so is neither held by the
-// promotion skip (WaitsOn) nor reported here. It is the one definition both readings share,
-// so an issue one of them exempts can never be reported blocked by the other.
+// promotion skip (WaitsOn) nor reported here. It is the one definition the promotion skip and the
+// state's reading of waiting roots share, so a root one of them exempts can never be reported
+// blocked by the other.
 //
 // Two kinds of issue are exempt. One that carries a run into a tree of its own — a handed-over
 // child, a re-admitted tree — is work already under way, which is never stopped and never
@@ -130,14 +128,15 @@ func Blocked(rows map[string]Row, issues, waiting []record.Issue) []record.Block
 // back, and a child handed over from a finished tree as a root of its own without its run, whether
 // or not it ran there, a done child a person labels as an orphan root among them. A child held at
 // phase.Admitted in its own tree is no candidate here at all: the workflow holds it, and Blocked
-// reports it, by Holdable and Unfinished, whatever its mark — and a re-entered child carries none.
+// reports it, by Holds, whatever its mark — and a re-entered child carries none.
 func Exempt(issue record.Issue) bool { return issue.CarriesRun() || issue.TakenBack }
 
 // WaitsOn is what issue still waits on, from rows: the issues Dispatch says it is blocked by
 // that are not done (Unfinished, which counts a blocker the daemon has no row of as not done),
 // and nothing at all for an issue the rule exempts, which starts whatever its links say — the
-// one definition the promotion skip, the workflow's hold and the state's `blocked` all read the
-// exemption from (Exempt).
+// one definition the promotion skip and the root half of the state's `blocked` both read, the
+// exemption included (Exempt). The workflow's hold of a child reads Holds instead, which exempts
+// nothing.
 func WaitsOn(rows map[string]Row, issue record.Issue) []string {
 	if Exempt(issue) {
 		return nil
@@ -151,4 +150,17 @@ func WaitsOn(rows map[string]Row, issue record.Issue) []string {
 // over record.Waiting by the promotion that skips it.
 func Holdable(issue record.Issue) bool {
 	return !claim.IsTreeRoot(issue.Key, issue.Tree) && issue.Phase == phase.Admitted
+}
+
+// Holds is what holds issue where it stands: the issues it waits on that are not done
+// (Unfinished) when a blocker can hold it there (Holdable), and nothing otherwise. It exempts
+// nothing: a child held at phase.Admitted is held whatever its mark (Exempt). It is the one
+// statement of the child hold rule — what a held child waits on — which the workflow's hold
+// (workflow.Engine.enterChild, its advanceAdmittedTree and StartUnblockedChildren, and the
+// linger's hand-over in settleUnfinished) and the child half of Blocked all read.
+func Holds(rows map[string]Row, issue record.Issue) []string {
+	if !Holdable(issue) {
+		return nil
+	}
+	return Unfinished(rows, issue.Key)
 }

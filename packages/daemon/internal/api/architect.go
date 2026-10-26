@@ -45,8 +45,10 @@ type WaveReleaseRequest struct {
 // WaveReleaseResponse answers release_children. A release is accepted whatever the children's
 // links say, so released is every issue the request named, unchanged: no child of a wave is lost,
 // and the architect is never asked to send the request again. started and held then say what the
-// release did with each of them, read back from the children's records once the request's writes
-// are in.
+// release did with each of them: started compares each child's record read before the request's
+// writes with its record read after them (startedByRelease), and held is judged from the blockers
+// Dispatch showed the request, against the mirror (blockers.UnfinishedOf) — the same list the
+// child's own todo event carries — not from the child's record.
 //
 // started names the children whose first phase this request started, and held each child the
 // request did not start because it waits on an unfinished issue, with the issues it waits on. A

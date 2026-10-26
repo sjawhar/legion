@@ -252,7 +252,7 @@ func (e *Engine) beginLinger(ctx context.Context, tx pgx.Tx, root record.Issue) 
 // the phase's role again in that phase. A child finished or parked has no run to carry on.
 //
 // A child still admitted never started under its tree's design, so it is left where it is — with
-// one exception: one the mirror still shows waiting on an unfinished issue (blockers.Unfinished)
+// one exception: one the mirror still shows waiting on an unfinished issue (blockers.Holds)
 // is handed over, so that a child whose blockers outlive its tree is not parked for good but comes
 // back as a root of its own once they close. A never-gated child of a finishing tree, which waits
 // on nothing, would instead take an admission slot for work its tree's design never opened. The
@@ -275,7 +275,7 @@ func (e *Engine) settleUnfinished(ctx context.Context, tx pgx.Tx, root record.Is
 					return err
 				}
 			}
-			if len(blockers.Unfinished(rows, member.Key)) == 0 {
+			if len(blockers.Holds(rows, member)) == 0 {
 				continue
 			}
 		}

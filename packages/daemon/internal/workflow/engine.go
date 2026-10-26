@@ -439,7 +439,7 @@ func (e *Engine) enterChild(ctx context.Context, tx pgx.Tx, root record.Issue, f
 	if err != nil {
 		return err
 	}
-	if waits := blockers.Unfinished(rows, child.Key); len(waits) > 0 {
+	if waits := blockers.Holds(rows, child); len(waits) > 0 {
 		e.logOnCommit(ctx, "workflow: the child waits on unfinished work, so it is recorded admitted and not started",
 			"issue", child.Key, "tree", child.Tree, "blockers", waits)
 		return nil
@@ -920,7 +920,7 @@ func (e *Engine) row(from phase.Phase, trigger TriggerKind, target phase.Phase, 
 }
 
 // advanceAdmittedTree starts every member of root's tree the opening of its design gate releases.
-// A child that waits on an unfinished Dispatch issue is not one of them (blockers.Holdable): the
+// A child that waits on an unfinished Dispatch issue is not one of them (blockers.Holds): the
 // gate it was held by is its tree's, the issues it waits on are its own, and only
 // StartUnblockedChildren, when the last of them closes, starts it.
 //
@@ -945,12 +945,10 @@ func (e *Engine) advanceAdmittedTree(ctx context.Context, tx pgx.Tx, root record
 		if issue.Phase != phase.Admitted {
 			continue
 		}
-		if blockers.Holdable(issue) {
-			if waits := blockers.Unfinished(rows, issue.Key); len(waits) > 0 {
-				e.logOnCommit(ctx, "workflow: the tree's gate opened, but this member waits on unfinished work",
-					"issue", issue.Key, "tree", root.Tree, "blockers", waits)
-				continue
-			}
+		if waits := blockers.Holds(rows, issue); len(waits) > 0 {
+			e.logOnCommit(ctx, "workflow: the tree's gate opened, but this member waits on unfinished work",
+				"issue", issue.Key, "tree", root.Tree, "blockers", waits)
+			continue
 		}
 		if err := e.gateOpened(ctx, tx, issue); err != nil {
 			return err
@@ -979,7 +977,7 @@ func (e *Engine) advanceAdmittedTree(ctx context.Context, tx pgx.Tx, root record
 func (e *Engine) StartUnblockedChildren(ctx context.Context, tx pgx.Tx, issues []record.Issue, rows map[string]blockers.Row) error {
 	starts := make(map[string]bool)
 	for _, issue := range issues {
-		if !blockers.Holdable(issue) || len(blockers.Unfinished(rows, issue.Key)) > 0 {
+		if !blockers.Holdable(issue) || len(blockers.Holds(rows, issue)) > 0 {
 			continue
 		}
 		open, read := starts[issue.Tree]
