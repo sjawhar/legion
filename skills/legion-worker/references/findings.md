@@ -91,7 +91,10 @@ of these that holds, so a person sees it and the controller finds it when it ret
    other issue can hold an answerable ask, so this is the one case a role writes the report issue.
    - It exists and is closed: `dispatch issue-update --issue <REPORT KEY> --status icebox`. Send
      the status by itself. A closed issue takes a reopening status alone, and refuses it beside
-     an assignee or any other field (`api/issue_patch.go`, the `before.ClosedAt` branch).
+     an assignee or any other field (`api/issue_patch.go`, the `before.ClosedAt` branch). This is
+     the one lifecycle status your own prompt lets you write. The report issue is in no tree, so
+     the daemon re-asserts nothing on it: `workflow`'s `sessionStatusWrite` acts only for a
+     session that claims the issue's tree, or for an admitted root.
    - A search finds none: create it as "Where it goes" names it, `dispatch issue --project
      <PROJECT> --title 'Legion daily report' --spec-file -`, with the Summary the controller's
      "Daily report" gives, then park it with `dispatch issue-update --issue <NEW KEY> --status
