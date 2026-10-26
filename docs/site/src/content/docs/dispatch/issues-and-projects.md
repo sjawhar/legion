@@ -114,8 +114,10 @@ Each active filter shows as a chip next to **Filters · N active**. Choose a chi
 Filters live in the page address, so a filtered view survives a reload and can be shared as a
 link.
 
-An issue an agent is implementing shows **Claimed by** and the agent's name. When that agent is no
-longer running, the chip says **not running**, and the issue counts as unclaimed.
+An issue an agent is implementing shows **Claimed by** and the agent's name, which opens its
+[live view](/legion/dispatch/agents/#the-live-view). When that agent is no longer running, its
+[running mark](/legion/dispatch/agents/#how-dispatch-shows-an-agent) is a hollow ring, the chip
+says **not running**, and the issue counts as unclaimed.
 
 ## Creating an issue
 

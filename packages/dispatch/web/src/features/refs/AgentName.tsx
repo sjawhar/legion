@@ -20,7 +20,11 @@ import { relativeTimeLabel } from "./Timestamp";
  * when the registry lists it, else by today's rule (the title stamped on the write, else
  * `session:<8>…`), with its running state from the registry and a link to its live
  * conversation. This module owns the SPA's use of the contracts naming functions; the reference
- * short form in `routes.ts` is the one other reader, and it does not show an agent.
+ * short form in `routes.ts` is the one other reader, and it does not show an agent. The root
+ * `biome.json` bans importing them anywhere else in `web/src` (and `AGENT_LIVE_PATH` outside
+ * `app.tsx`, which mounts the route), but not through a namespace import
+ * (`import * as contracts from "@legion/contracts"`): the review audit in
+ * `packages/dispatch/AGENTS.md` ("How an agent is shown") catches that member use.
  */
 
 type SessionActor = Extract<Actor, { kind: "session" }>;
