@@ -2,50 +2,50 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-303",
-  "completed": "2026-10-26T01:44:30Z",
+  "completed": "2026-10-26T03:30:40Z",
+  "round": 2,
   "pullRequest": "https://github.com/sjawhar/legion/pull/2221",
+  "answers": "test.json failures[0]: the tester's red row 'on a phone, a reader who leaves the Conversation while it loads lands on its newest message when they come back' (commit 33f66ffe) now passes unmodified.",
   "proof": [
     {
-      "criterion": "1. Forced order: the newest message arrives while the asks read is held; once rendered, with no scroll/focus, the newest conversation is in the viewport and not covered by the composer; red at the commit before the fix, green at head, both quoted on the PR",
-      "surface": "Real Chromium (chromium and iphone Playwright projects) at 390x664 against the production web build bun run e2e makes, the Go Dispatch server (e2e/run-server.sh) and Postgres 17 + pgvector, in the issue pod",
-      "command": "cd packages/dispatch && source /legion/harness/env.sh && bun run e2e -- --project=chromium --project=iphone --repeat-each=10 --grep \"newest message in view whichever read answers last\"",
-      "observed": "20 passed (26.9m) at head; quoted on the PR at https://github.com/sjawhar/legion/pull/2221#issuecomment-6406372277",
-      "headSha": "d6d382936fb184500c7ec903b878291f737333ab",
-      "negativeControl": "Same command at the test commit 6afa7e0995cd50a3cd223957fb2fdeb95279d572 (row without the fix): 20 failed, every one at phone-conversation.e2e.ts:1012 'forced open: the newest card shares a point with the composer: the newest card at {x:24,y:494,width:342,height:140}, the composer at {x:0,y:423,width:390,height:177}, the 390x664 viewport at window.scrollY 0'"
+      "criterion": "Fix (tester failure, ruled in scope by the architect): a reader who leaves the Conversation while it loads and comes back lands on the newest conversation, while a return to a list they were placed in still restores their scroll",
+      "surface": "Real Chromium (chromium and iphone projects) at 390x664 against the production web build bun run e2e makes, the Go Dispatch server and Postgres 17 + pgvector, in the issue pod",
+      "command": "cd packages/dispatch && source /legion/harness/env.sh && bun run e2e -- --project=chromium --project=iphone --repeat-each=5 --grep \"leaves the Conversation while it loads|whose read failed|newest message in view whichever read answers last\"",
+      "observed": "30 passed (15.5m): the tester's two rows and the forced-order row, 5 repeats on each project; the real restore row doc.e2e.ts 'tab round-trips keep one document connection, the typed text, and the Conversation scroll position' passed in the criterion-3 run",
+      "headSha": "f62bbb199fcdc2931aa1b6cfce4a6bb94a8ef0b2",
+      "negativeControl": "The tester's row at 18b0d4ba6e07 (before this fix): `--repeat-each=2 --grep \"leaves the Conversation while it loads\"` → 4 failed, each at phone-conversation.e2e.ts:1157 'back on the Conversation: the newest card shares a point with the composer: the newest card at {x:24,y:494,width:342,height:140}, the composer at {x:0,y:423,width:390,height:177}, the 390x664 viewport at window.scrollY 0'"
     },
     {
-      "criterion": "2. The same test opens the Conversation 20 more times with no forced order; every time the newest conversation is in view and not covered",
-      "surface": "Same row and harness: each unforced open on a fresh page (history.length 1, scrollY 0 asserted before navigating)",
-      "command": "Same command as criterion 1 (the 20-open loop runs inside the row, after the forced open)",
-      "observed": "All 20 unforced opens passed in each of the 20 repeats (20 passed); the row's sensitivity guard (scrollTo(0,0) → newest card under the composer) also held, so the fixture still discriminates",
-      "headSha": "d6d382936fb184500c7ec903b878291f737333ab",
-      "negativeControl": "During development on the unfixed code, unforced opens also failed (chromium at unforced open 5, iphone at unforced open 1), the race occurring without the hold"
+      "criterion": "1 and 2. Forced order and 20 unforced opens: the newest conversation in view and clear of the composer (round 1's row, still green with the round-2 change)",
+      "surface": "Same harness and projects",
+      "command": "Same command as above (the forced-order row runs inside it, 5 repeats per project)",
+      "observed": "All 10 runs of 'on a phone, the Conversation opens with its newest message in view whichever read answers last' passed",
+      "headSha": "f62bbb199fcdc2931aa1b6cfce4a6bb94a8ef0b2",
+      "negativeControl": "Round 1: the row at test commit 6afa7e09 (no fix) → 20 failed at phone-conversation.e2e.ts:1012, the newest card under the composer at scrollY 0"
     },
     {
       "criterion": "3. Existing Conversation rows for returning to the tab, older-item links, Jump to latest, own send and others' reply still pass",
-      "surface": "Same harness; chromium, iphone and firefox projects (WebKit cannot launch in an issue pod; its share is CI's dispatch job)",
-      "command": "cd packages/dispatch && source /legion/harness/env.sh && bun run e2e -- --project=chromium --project=iphone --project=firefox attention.e2e.ts conversation.e2e.ts phone-conversation.e2e.ts phone.e2e.ts doc.e2e.ts deep-links.e2e.ts; bun test web/src/features/conversation",
-      "observed": "159 passed, 16 skipped (each a row's own project gate), 0 failed (13.6m), every row the plan names among the passes; unit: 161 pass, 0 fail",
-      "headSha": "d6d382936fb184500c7ec903b878291f737333ab",
-      "negativeControl": "The forced-order row is the discriminating check for this change (red 20/20 without the fix); these rows are regression locks that the fix must leave green"
+      "surface": "Same harness; chromium, iphone and firefox (WebKit cannot launch in an issue pod; its share is CI's dispatch job)",
+      "command": "cd packages/dispatch && source /legion/harness/env.sh && bun run e2e -- --project=chromium --project=iphone --project=firefox attention.e2e.ts conversation.e2e.ts phone-conversation.e2e.ts phone.e2e.ts doc.e2e.ts deep-links.e2e.ts; bun test web/src/features/conversation web/src/features/issue",
+      "observed": "163 passed, 16 skipped (each a row's own project gate), 0 failed (14.0m); unit 290 pass, 0 fail",
+      "headSha": "f62bbb199fcdc2931aa1b6cfce4a6bb94a8ef0b2",
+      "negativeControl": "doc.e2e.ts's tab round-trip row is the guard against over-correcting: forgetting the recorded scroll on every return would fail it; it passed because onFirstPlacement fires only on the hook's first placement"
     }
   ],
   "filesChanged": [
-    "packages/dispatch/web/src/features/conversation/ConversationTab.tsx: one loading/failed predicate drives both early returns and withholds latestItemSeq",
-    "packages/dispatch/web/src/features/conversation/use-follow-latest.ts: latestItemSeq doc only",
-    "packages/dispatch/e2e/phone-conversation.e2e.ts: new row 'on a phone, the Conversation opens with its newest message in view whichever read answers last' with settle/landing helpers and the 390x664 iphone constant",
-    "packages/dispatch/e2e/layout.ts: exported Box and boxesApart, used by expectUncovered and the new row",
-    "packages/dispatch/e2e/phone.e2e.ts: comment at 393-396 no longer describes a missed jump as live",
-    "packages/dispatch/AGENTS.md: Jump to latest paragraph says where the tab lands and why"
+    "packages/dispatch/web/src/features/conversation/use-follow-latest.ts: optional onFirstPlacement, called once in the layout effect that spends the first placement, held in a ref so its identity never re-runs the effect",
+    "packages/dispatch/web/src/features/conversation/ConversationTab.tsx: optional onFirstPlacement prop passed to the hook",
+    "packages/dispatch/web/src/features/issue/IssuePage.tsx: forgetConversationScroll deletes panelScroll.current.conversation; passed as onFirstPlacement",
+    "packages/dispatch/web/src/features/conversation/use-follow-latest.test.tsx: unit test that onFirstPlacement fires exactly once, with the reader already placed, and not on a later arrival, own send or re-enable",
+    "packages/dispatch/AGENTS.md: the INFRA-303 sentence also says the first placement replaces a tab-switch scroll recorded before the list was on the page"
   ],
   "trickyParts": [
-    "Harness: /legion/harness/setup.sh (idempotent; Postgres 17 + pgvector from Debian debs, started only if pg_isready on 55432 fails, three role databases, proof-sdk src copy, playwright chromium+firefox, dispatch-e2e binary) and env.sh (source for harness commands only; lanes by LEGION_ROLE: implementer 18780-18787/dispatch_impl_e2e, tester 18800-18807/dispatch_test_e2e, reviewer 18820-18827/dispatch_review_e2e). packages/contracts needs `bun run build` once (gitignored dist) before e2e loads.",
-    "The red needs the 390x664 viewport: at the file's 844 phone the composer sits below the newest card at y494.",
-    "The green row takes ~80 s per run (21 opens with a 1.5 s settle each); 20 repeats is ~27 min.",
-    "The simplify pass was applied before the first push and folded into the two unpushed commits; red and green were re-run on the applied commits (the test commit is 6afa7e09, not the earlier 2bcaaf80)."
+    "Ordering: React runs child layout effects before the parent's in one commit, so the hook's first placement (child) runs before IssuePage's [activeTab] restore (parent); the callback deletes the stale record in between, so the restore finds nothing to apply.",
+    "Chosen over relying on sibling effect order (moving the restore into a component rendered before the panels): the callback states the contract instead of depending on tree position."
   ],
   "deviations": [
-    "The in-view check is a one-shot boundingBox comparison against innerWidth/innerHeight inside a shared landing() helper rather than toBeInViewport, so one measurement feeds the in-view check, the composer check and the sensitivity guard."
+    "plan.json decisions[2] put leaving the tab mid-load out of scope; the architect ruled it in scope (test.json failures[0]), and this round fixes it.",
+    "No second ce-simplify-code pass: the skill runs it once, in the first implementing round."
   ],
   "openQuestions": []
 }
