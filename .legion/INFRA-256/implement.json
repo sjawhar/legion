@@ -2,9 +2,8 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-256",
-  "completed": "2026-10-26T18:58:00Z",
+  "completed": "2026-10-26T21:20:00Z",
   "generation": 4,
-  "regeneration": "Generation 4 restart after a daemon upgrade: no code change. The head still carries the code commit 9bb73cab40630765aeb55fccef6f1cd7cb34acf8 unchanged (only .legion/ differs above it); its CI is green there (Tests 40343447424, PR Title 40343447459, Legion Envoy and Contracts 40343447519, Docs 40343447584, all success). Re-checked 2026-10-26T18:57Z: actionlint v1.7.7 exits 0 on pr-title.yaml, the group is pr-title-${{ github.event_name }}-${{ github.event.pull_request.number }} as plan amendment 2 states, acceptance grep A prints nothing. The proof below is the generation 3 proof on scratch sjawhar/legion#2255 and is recorded in sjawhar/legion#2247's E2E (implementer) line.",
   "proof": [
     {
       "criterion": "E1: a body edit starts a pull_request run whose pr-title is in the pull request's rollup, SUCCESS; a newer pull_request run cancels the older one",
@@ -45,6 +44,22 @@
       "observed": "actionlint exit 0; both greps print nothing; check-private-names.test.sh 237 passed, 0 failed (244 at main; 7 removed checks were issue_comment/review_comment cases); guard and the three workflow scripts exit 0; CI at 9bb73cab: Tests 40343447424 success, PR Title 40343447459 success",
       "headSha": "9bb73cab40630765aeb55fccef6f1cd7cb34acf8",
       "negativeControl": "Test 'a payload with no pull_request is refused': an issue-shaped payload exits 1 with '::error::the event payload carries no pull request'"
+    },
+    {
+      "criterion": "Scope addition: the checks pill shows what GitHub's merge reads (cancelled-then-passed is green; failed for one event beside a pass for another is red)",
+      "surface": "Dispatch's own browser suite (packages/dispatch/e2e, Playwright chromium and iphone) against the real Dispatch server and web build with the e2e fake GitHub serving a pull request, its head's check runs and its workflow runs",
+      "command": "bun run e2e e2e/github-checks.e2e.ts (from packages/dispatch; harness $TMPDIR/infra-256/harness/e2e.sh)",
+      "observed": "At the change: 4 passed (checks: success for a pr-title pull_request run cancelled then passed; checks: failure for pr-title failed on pull_request and passed on pull_request_review). Real GitHub data through the same join rule: scratch #2250 head 672e3e1a -> pill failure, GitHub rollup FAILURE; scratch #2255 head 88e0dffe -> pill success, GitHub rollup SUCCESS (old any-red rule: failure).",
+      "headSha": "13bd6a70498903ef7f142e9255d69f72904e16a3",
+      "negativeControl": "GitHubLink.tsx and proxy.go as of 4dffee8f9cdc (the commit before the change), same test: 2 failed, 2 passed, Expected \"checks: success\", Received \"checks: failure\"; proxy_test refuses 20 actions/runs shapes (no head_sha, short sha, event=, repeated params, runs/123, jobs, logs) before any GitHub call"
+    },
+    {
+      "criterion": "Review round 1: the re-run hint gives one instruction for every kind of text and never sends a person to an older run",
+      "surface": "check-pr-text.sh run by its own suite with a stand-in gh over real event payloads (the same script the required lint job and pr-title run)",
+      "command": "bash .github/scripts/check-private-names.test.sh",
+      "observed": "237 passed, 0 failed; the comment and review-comment cases print the new hint (delete each comment and review comment or edit the review, then re-run the newest failed run of each check that reported it, lint and pr-title per red event, never an older run)",
+      "headSha": "13bd6a70498903ef7f142e9255d69f72904e16a3",
+      "negativeControl": "A clean comment set prints no hint (the 'a clean set of comments...passes' case exits 0 with no hint lines)"
     }
   ],
   "filesChanged": [
@@ -55,15 +70,30 @@
     ".github/workflows/pr-and-main.yaml",
     "AGENTS.md",
     "docs/solutions/legion/a-trailered-head-is-missing-the-checks-a-push-starts-not-every-check-run-INFRA-149.md",
-    "docs/solutions/github/merge-queue-required-checks-need-a-merge-group-trigger-on-the-workflow-that-produces-them.md"
+    "docs/solutions/github/merge-queue-required-checks-need-a-merge-group-trigger-on-the-workflow-that-produces-them.md",
+    "packages/envoy/internal/dispatch/githubapi/proxy.go",
+    "packages/envoy/internal/dispatch/githubapi/proxy_test.go",
+    "packages/envoy/cmd/dispatch/AGENTS.md",
+    "packages/envoy/cmd/dispatch/README.md",
+    "packages/dispatch/web/src/features/issue/GitHubLink.tsx",
+    "packages/dispatch/web/src/features/issue/IssuePage.test.tsx",
+    "packages/dispatch/e2e/fake-github.ts",
+    "packages/dispatch/e2e/fake-github-helpers.ts",
+    "packages/dispatch/e2e/github-checks.e2e.ts"
   ],
   "trickyParts": [
     "GitHub lists a pull request's checks once per check name and event: a single concurrency group across events lets a review run cancel a pull_request run, leaving that event's latest pr-title cancelled and the commit rollup FAILURE (scratch #2250). The group is therefore pr-title-<event>-<number>.",
-    "An inline comment posted alone also fires pull_request_review submitted, so it still starts exactly one PR Title run; the header never says an inline comment starts no run."
+    "An inline comment posted alone also fires pull_request_review submitted, so it still starts exactly one PR Title run; the header never says an inline comment starts no run.",
+    "A check run carries no event and every workflow run has its own check suite, so newest-per-name alone shows green where GitHub blocks; the pill joins check_suite.id to actions/runs check_suite_id and keys by name, workflow and event (external App checks by name and App)."
   ],
   "deviations": [
     "The architect's first concurrency addition asked for group pr-title-${{ github.event.pull_request.number }}; the head uses pr-title-${{ github.event_name }}-${{ github.event.pull_request.number }} for the per-event check listing above (reported to the architect with evidence, and now plan amendment 2 in the generation 4 plan handoff 23e66cc4). At most one running and one pending run per event, so at most four per pull request.",
-    "ce-simplify-code applied one change: as_event became as_review_event (no argument)."
+    "ce-simplify-code applied one change: as_event became as_review_event (no argument).",
+    "Scope added in round 2 at the architect's direction: the Dispatch checks pill and the GitHub proxy's fourth read (actions/runs for one head_sha). packages/envoy/CHANGELOG.md's historical entry naming the proxy's three paths is left as release history."
   ],
-  "openQuestions": []
+  "openQuestions": [
+    "Production check for the pill: run the dispatch-production-check.sh command from the deployment instructions with --page set to an issue page; it adds no new /api route (the proxy path is under the existing /api/github/rest/)."
+  ],
+  "round": 2,
+  "roundSummary": "Review round 1 (review 5658487797) and the architect's scope addition (dispatch://INFRA-49/ask/404474ab-ce40-4508-a692-e090ed18220e, fix in place): 4dffee8f9cdc rewrites the re-run hint in check-pr-text.sh and AGENTS.md:148; 13bd6a70498903ef7f142e9255d69f72904e16a3 makes Dispatch's checks pill judge the newest run per check name, workflow and event, with the GitHub proxy forwarding one commit's actions/runs. The PR body Outcome line is rewritten as the reviewer asked. The workflow (9bb73cab) is unchanged; its proof entries below stand."
 }
