@@ -2,45 +2,45 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-366",
-  "completed": "2026-10-26T14:48:47Z",
-  "headSha": "a50fe967975ecf415f90c1d1149cb450bd1f676d",
-  "round": 7,
-  "standard": "The architect's decision after review round 3 (2026-10-26T12:55Z): finding 1 (dispatch read of a dispatch search ask-block link must not fail where main printed the document) and finding 2 (the dashboard draws and opens what an author named explicitly for every key the head stores), under the round-2 rule; both driven on builds of main and of the head.",
-  "provider": "312 assistant turns of this test run, all provider anthropic, model claude-opus-5-5, read from the run's own session transcript (omp_session_files, session 01a175a2-1036-71da-aaba-a9b28d0f2e1b) at 2026-10-26T14:48Z; no subagent was used.",
+  "completed": "2026-10-26T15:51:48Z",
+  "headSha": "9b1586c546bac138cdf6e51ae3cd92d97901dc6b",
+  "round": 8,
+  "standard": "The architect's decision after review round 4 (2026-10-26T15:06Z): a bare dashboard URL GFM autolinks is read with the bounded parser, so the dashboard links exactly where the server records a reference, while an author-written link to the same long-named document still opens; and the PR body sentence on deleting an ask block is corrected. Both driven on builds of the head and of main.",
+  "provider": "328 assistant turns of this test run, all provider anthropic, model claude-opus-5-5, read from the run's own session transcript (omp_session_files, session 01a175a2-1036-71da-aaba-a9b28d0f2e1b) at 2026-10-26T15:51Z; no subagent was used.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Drove the search-then-read cases myself on servers I built from the head a50fe967 (code of 811b7261), the previous head 0c21e81b and current main 3f34ba12 (the merge's main parent; contains INFRA-364's merge d5a8e37a), each with its own CLI and a fresh database; ran the implementer's new browser test at the head, on a git archive of main and on a git archive of the previous head."
+    "how": "Ran the implementer's updated pictures.e2e.ts test (bare page URL stays a plain link) at the head and in git archives of main 3f34ba12 and the previous head a50fe967, and drove the bare and author forms in my own throwaway browser test on all three, reading the server's references of the comment beside each drawn link."
   },
   "failures": [],
   "failed": 0,
   "proof": [
     {
-      "criterion": "Finding 1: dispatch read of the link dispatch search prints for an ask hit does not fail where main printed the document, for an ask block whose id is over 256 bytes and for one whose block a later edit removed",
-      "surface": "Head server built from a50fe967 on port 8801 (infra366_t7) with the workspace's real dispatch CLI; the previous head 0c21e81b on 8802 (infra366_t7prev); main 3f34ba12 on 8803 (infra366_t7main) with main's own CLI from a git archive",
-      "command": "dispatch issue --spec-file <three ask blocks: a 3,200-byte id, short_one, gone_one>; dispatch resolve-ask --ask <gone_one's ask> --kind retracted; dispatch doc-edit delete block gone_one; for each question: dispatch search --query <its unique word>, then dispatch read --ref <the spec link it printed>",
-      "observed": "Head: the 3,200-byte-id ask → …/spec?ask=066cbfd0-… → 'Question: Should lngfac046 ship?' exit 0; the removed block's ask → …/spec?ask=e0565ff3-… → 'Question: Should gonfac046 ship?' exit 0; the kept block → …/spec#b-short%5Fone → 'Block: short_one' exit 0. Main: the removed block's hit …/spec#b-gone_one → 'Document: CORE-2 / spec.md' exit 0; main opens no ask under a 3,200-byte id (its settlement fails), so it gives no such hit. No SQLSTATE 54000 or level=ERROR in the head's log",
-      "headSha": "a50fe967975ecf415f90c1d1149cb450bd1f676d",
-      "negativeControl": "Previous head 0c21e81b, same steps and CLI: the 3,200-byte-id ask's hit …/spec#b-<3,200 bytes> and the removed block's hit …/spec#b-gone%5Fone each read 'No block … in dispatch://CORE-1/spec.' with exit 1"
+      "criterion": "Item 1: a bare dashboard URL to a document whose key is 2,049-2,692 bytes stays a plain link, matching the server, and an author-written link to the same document still opens it",
+      "surface": "Dispatch's browser harness (Playwright, chromium and iphone) with a real server built from each tree: the head 9b1586c5 (code ea0496c2), git archives of main 3f34ba12 and of the previous head a50fe967",
+      "command": "bun run e2e -- e2e/tester-bare-url.e2e.ts e2e/pictures.e2e.ts -g 'bare vs author|long-named picture' in each tree (tester-bare-url.e2e.ts throwaway, deleted): one comment holding a bare URL, an angle-bracket URL, [url](url), [designurl](url) and [designref](dispatch://…) to a document named with 2,680 characters (key 2,710 bytes), and a bare URL of short.md; GET /api/v1/references?from=<comment>; each link's href, words and data-dispatch-ref; click of both author links",
+      "observed": "Head: server records only artifact short-md; BARE, ANGLE and SELF keep href = the URL, words = the URL, no data-dispatch-ref; AUTHURL and AUTHREF draw with href /issues/CORE-1/artifacts/<slug> and open the document ('The long-named design.' visible); SHORTBARE is a reference link (short.md). pictures.e2e.ts updated test passes on both projects (4 passed in this run)",
+      "headSha": "9b1586c546bac138cdf6e51ae3cd92d97901dc6b",
+      "negativeControl": "Previous head a50fe967: the server records the same single reference, but BARE, ANGLE and SELF draw as reference links to the long document (href the route, data-dispatch-ref set), and the pictures test fails 2/2 on the bare link's href. Main 3f34ba12 records the long document as a reference (artifact key 2,710) and draws it as one, so it agrees with itself; the updated pictures test fails there too, as it asserts the head's bound"
     },
     {
-      "criterion": "Finding 2: the dashboard draws a picture and opens an explicit link an author named, for an artifact whose key is 2,049-2,692 bytes; bare text past the 2,048-byte bound stays text",
-      "surface": "Dispatch's browser suite (Playwright, chromium and iphone) against servers built from the head, from a git archive of main 3f34ba12 and from a git archive of the previous head 0c21e81b",
-      "command": "cd packages/dispatch && bun run e2e -- e2e/pictures.e2e.ts e2e/block-references.e2e.ts (head); the head's pictures.e2e.ts copied into each archive (sends.ts' ONE_PIXEL_PNG exported) and run with -g 'long-named picture'; a throwaway test (deleted) with a bare long reference in a comment and a long-named picture in a spec",
-      "observed": "Head: 20 passed, including 'a long-named picture in a comment draws, and its link to a long-named document opens it' on both projects; main: 2 passed; throwaway: the bare reference draws no link (0 dispatch links), and the spec's picture of the long-named PNG has src /api/v1/issues/CORE-1/artifacts/<slug>/versions/1 and naturalWidth 1",
-      "headSha": "a50fe967975ecf415f90c1d1149cb450bd1f676d",
-      "negativeControl": "Previous head 0c21e81b: 2 failed, the picture's src stays 'dispatch://CORE-1/artifact/aaaa…' instead of the version URL"
+      "criterion": "Regression of the dashboard surfaces round 8 touched (reference links, Referenced by, pictures)",
+      "surface": "Dispatch's browser suite at the head, chromium and iphone",
+      "command": "cd packages/dispatch && bun run e2e -- e2e/block-references.e2e.ts e2e/references.e2e.ts e2e/pictures.e2e.ts",
+      "observed": "40 passed (2.7m). git diff 811b7261 ea0496c2 touches no server file, so round 7's driver (37 PASS) and A12 at 811b7261 still describe the server",
+      "headSha": "9b1586c546bac138cdf6e51ae3cd92d97901dc6b",
+      "negativeControl": "The same pictures test on main and a50fe967 fails (above)"
     },
     {
-      "criterion": "Regression: A1, A2 (pinned), A4, A5, R6, R7, A10, A15 (document halves), the older references route; A12",
-      "surface": "Head server on 8801 and the real CLI; three builds on one database",
-      "command": "DISPATCH_URL=http://127.0.0.1:8801 DISPATCH_TOKEN=e2e-token PROJECT=CORE bash packages/dispatch/e2e/acceptance/block-graph.sh; OLD=dispatch-main7 NEW=dispatch-head7 NEG=dispatch-371d6c879565 bash $TMPDIR/t366/a12.sh",
-      "observed": "driver exit 0, 37 PASS; A12 exit 0, 8 PASS lines, old build count 3 = list 3, no SQLSTATE 54000 in the new build's log",
-      "headSha": "a50fe967975ecf415f90c1d1149cb450bd1f676d",
-      "negativeControl": "371d6c87 (no INFRA-364) on the A12 database: ?to=dispatch://ACME-1 → 500, log 'graph node kind \"block\" is not addressable'"
+      "criterion": "Item 2: the PR body no longer says deleting an ask block deletes its ask",
+      "surface": "The live PR body read with gh api repos/sjawhar/legion/pulls/2210",
+      "command": "gh api repos/sjawhar/legion/pulls/2210 --jq .body | grep -n -i 'ask block'",
+      "observed": "Line 14 now says 'One E2E (implementer) sentence says deleting an ask block deletes its ask; the settlement retracts it', and the round-7 E2E line says the settlement retracts the ask and search still finds it; this matches round 7's run, where the retracted ask of a deleted block stayed searchable as ?ask=<id>",
+      "headSha": "9b1586c546bac138cdf6e51ae3cd92d97901dc6b",
+      "negativeControl": "Round 7's run: the deleted block's ask stayed in asks, retracted, and dispatch read of its search hit printed its question"
     }
   ],
   "attempted": [
-    "Both findings on the head, the previous head and main; the round's browser files on both projects; a throwaway browser check of bare long text and of a long-named picture inside a document; the driver and A12. Rounds 1-6's other cases were not re-driven: round 7's diff touches search.go, the dashboard's picture and link parsing, and two forward merges of main, which the driver, the browser files and A12 cover."
+    "Bare, angle-bracket, self-titled, author-URL and author-dispatch links to a long-named document and a bare short-document URL on the head, main and the previous head, with the server's references beside each; the implementer's updated pictures test on all three; the three browser files at the head; the body sentence."
   ],
-  "ci": "At 811b7261: Tests 40339439555, Legion Envoy and Contracts 40339439493, Docs 40339439666 and Worker Image 40339439473 queued; PR Title 40339715624 queued."
+  "ci": "At ea0496c2: Tests 40350833191, Docs 40350833884 and Worker Image 40350834203 queued; Legion Envoy and Contracts 40350833276 pending; PR Title 40350953141 queued."
 }
