@@ -14,6 +14,7 @@ import { createServer } from "node:net";
 import { hostname, tmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 import { dispatchIssueSubject } from "@legion/contracts";
+import { askgateState } from "@legion/envoy-client/askgate-marker";
 import { shownPictures } from "@legion/envoy-client/dispatch-picture-tools";
 import {
   appendResult,
@@ -4033,6 +4034,44 @@ console.log(JSON.stringify(args));
         expect(recordOf("ses_parent")?.owners).toMatchObject([{ pid: process.pid }]);
       } finally {
         transcripts.remove();
+      }
+    }, 30_000);
+    // A shell command that changes HOME or XDG_STATE_HOME (a test harness with a temporary home)
+    // would resolve another state root, find no record there, and post with no marker.
+    test("the session's processes are told DISPATCH_STATE_DIR, the root its record is under, and a value already set stays", async () => {
+      const preset = process.env.DISPATCH_STATE_DIR ?? "";
+      const originalStateHome = process.env.XDG_STATE_HOME;
+      const stateHome = mkdtempSync(join(tmpdir(), "envoy-state-home-"));
+      try {
+        delete process.env.DISPATCH_STATE_DIR;
+        process.env.XDG_STATE_HOME = stateHome;
+        gateOn();
+        const { default: envoyExtension } = await import("./envoy.ts?askgate-state-dir");
+        const fixture = allHandlers();
+        envoyExtension(fixture.pi);
+        await fixture.handlers.get("session_start")?.({}, gateContext([]));
+        const root = join(stateHome, "dispatch");
+        expect(process.env.DISPATCH_STATE_DIR).toBe(root);
+        // The host refreshes the shell's environment after session_start.
+        procmgr.refreshShellConfigCache();
+        const shell = procmgr.getShellConfig().env;
+        expect(shell.DISPATCH_STATE_DIR).toBe(root);
+        const moved = { ...shell, HOME: "/elsewhere", XDG_STATE_HOME: "/elsewhere/state" };
+        expect(askgateState(sessionDirectory(moved, "ses_askgate")).kind).toBe("on");
+        await fixture.handlers.get("session_shutdown")?.({}, gateContext([]));
+
+        process.env.DISPATCH_STATE_DIR = preset;
+        const again = await import("./envoy.ts?askgate-state-dir-set");
+        const fixtureAgain = allHandlers();
+        again.default(fixtureAgain.pi);
+        await fixtureAgain.handlers.get("session_start")?.({}, gateContext([]));
+        expect(process.env.DISPATCH_STATE_DIR).toBe(preset);
+        expect(askgateState(sessionDirectory(process.env, "ses_askgate")).kind).toBe("on");
+        await fixtureAgain.handlers.get("session_shutdown")?.({}, gateContext([]));
+      } finally {
+        if (originalStateHome === undefined) delete process.env.XDG_STATE_HOME;
+        else process.env.XDG_STATE_HOME = originalStateHome;
+        rmSync(stateHome, { recursive: true, force: true });
       }
     }, 30_000);
     test("a gated write the CLI logged as unmarked becomes an advisor-gate entry the report counts", async () => {

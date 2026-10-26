@@ -879,9 +879,12 @@ export default function envoyExtension(pi: PiApi): void {
 
   // Names the top-level session in the environment every later shell command takes, and starts
   // its ledger at the end, so a resumed or switched session never reads an earlier run's calls.
-  // Oh My Pi refreshes the shell's environment after `session_start`, `session_switch` and
-  // `session_branch`; any other caller refreshes it itself.
+  // It also names the CLI state root (`DISPATCH_STATE_DIR`, unless it is already set), so a
+  // command that changes HOME or XDG_STATE_HOME still finds the session's ledger and AskGate
+  // record. Oh My Pi refreshes the shell's environment after `session_start`, `session_switch`
+  // and `session_branch`; any other caller refreshes it itself.
   const bindDispatchSession = (id: string): void => {
+    process.env.DISPATCH_STATE_DIR ||= sessionStateRoot(process.env);
     if (id === "") {
       delete process.env.DISPATCH_SESSION_ID;
       dispatchLedger = undefined;
