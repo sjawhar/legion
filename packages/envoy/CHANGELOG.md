@@ -722,12 +722,14 @@
   `500 {"error":"envoy: the interest record of session <id> is unreadable: <reason>"}` with no
   `Retry-After`, and `GET /v1/sessions` lists that session with no topics and roles, as it did,
   rather than refusing the list, while the registry logs `registry read an interest record it
-  cannot decode` at WARN naming the session. The list is refused only for a read that did not
-  answer: a session whose id the interest bucket refuses as a key (`bus.ErrRefused`, an earlier
-  listener's id past `envoy_interests`' get bound that `envoy_sessions` still lists, or one outside
-  nats.go's key alphabet), or whose read fails any other way, is listed with no topics and roles as
-  it was, logged `session listed with no topics: its interest record could not be read` at WARN
-  naming the session, while the two single-session routes still answer that id's 413 or 400. An
+  cannot decode` at WARN naming the session. A read counts as answered only for its named answers:
+  no key, that undecodable record, or an id the interest bucket refuses as a key (`bus.ErrRefused`,
+  an earlier listener's id past `envoy_interests`' get bound that `envoy_sessions` still lists, or
+  one outside nats.go's key alphabet), which the list shows with no topics and roles, logged
+  `session listed with no topics: its interest record could not be read` at WARN naming the
+  session, while the two single-session routes answer that id's 413 or 400. Every other error is a
+  read that did not answer, whatever it names, a raw socket error from a broken connection among
+  them, and all three routes answer it with the 503 and `Retry-After: 1`. An
   interest record this build cannot decode no longer locks out the routes that write it, which
   failed on the read and every retry: `DELETE /v1/interests/<session_id>` deletes
   it and releases the session's role claims (204, where it answered 500); `POST

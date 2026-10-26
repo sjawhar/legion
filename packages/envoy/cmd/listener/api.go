@@ -659,15 +659,11 @@ const sessionInterestReadTimeout = 1 * time.Second
 // sessionInfoFor joins one session entry with its interests (its topics, and the roles those topics
 // name), so a row of GET /v1/sessions and the single answer of GET /v1/registry/<session_id> are
 // one shape built one way. A session the interest registry holds no key for keeps its empty topics
-// and roles: a session that registered and subscribed to nothing is not an error here. A read that
-// did not answer (interestReadDidNotAnswer) is returned alone: a caller answers it as the
-// bus-unavailable 503, never as a session with no topics. Every other error is one the bus or this
-// client answered and will answer the same way again, and is returned with the session's info, its
-// topics and roles empty, so the list can still show the session while the single read names the
-// error: an interest record this build cannot decode (store.ErrMalformedInterest, the 500
-// writeInterestRecordUnreadable writes), a key the interest bucket refuses (bus.ErrRefused: a legacy
-// id past envoy_interests' get bound that envoy_sessions still lists, or one outside nats.go's key
-// alphabet, the 413 or 400 writeBusUnavailable writes), and anything else.
+// and roles: a session that registered and subscribed to nothing is not an error here. The other
+// answers about the record (interestReadAnswered) are returned with the session's info, its topics
+// and roles empty, so the list can still show the session while the single read names the error.
+// Every other error is a read that did not answer and is returned alone: a caller answers it as
+// the bus-unavailable 503, never as a session with no topics.
 func sessionInfoFor(ctx context.Context, registry *store.Registry, sessionID string, entry session.SessionEntry) (sessionInfo, error) {
 	info := sessionInfo{
 		SessionID:      sessionID,
@@ -687,40 +683,29 @@ func sessionInfoFor(ctx context.Context, registry *store.Registry, sessionID str
 	switch {
 	case errors.Is(err, nats.ErrKeyNotFound):
 		return info, nil
-	case interestReadDidNotAnswer(err):
-		return sessionInfo{}, err
-	case err != nil:
+	case interestReadAnswered(err):
 		return info, err
+	case err != nil:
+		return sessionInfo{}, err
 	}
 	info.Topics = interest.Topics
 	info.Roles = roleNames(interest.Topics)
 	return info, nil
 }
 
-// interestReadDidNotAnswer reports whether err, from a read of an interest record, is a read that
-// did not answer rather than an answer. store.Registry.Get waits for the bucket no longer than its
-// ctx and then wraps ctx's own error (context.DeadlineExceeded or context.Canceled); nats.go's direct
-// get runs under a context of the JetStream MaxWait and returns that context's
-// context.DeadlineExceeded when no reply comes; and nats.go's request returns nats.ErrTimeout,
-// nats.ErrConnectionClosed, nats.ErrConnectionReconnecting, nats.ErrConnectionDraining,
-// nats.ErrReconnectBufExceeded or nats.ErrNoResponders when the connection could not carry the
-// request or nothing behind it took it. Each of those is a bus that may answer the next read.
-func interestReadDidNotAnswer(err error) bool {
-	for _, unanswered := range []error{
-		context.DeadlineExceeded,
-		context.Canceled,
-		nats.ErrTimeout,
-		nats.ErrConnectionClosed,
-		nats.ErrConnectionReconnecting,
-		nats.ErrConnectionDraining,
-		nats.ErrReconnectBufExceeded,
-		nats.ErrNoResponders,
-	} {
-		if errors.Is(err, unanswered) {
-			return true
-		}
-	}
-	return false
+// interestReadAnswered reports whether err, from a read of an interest record other than the
+// bucket's word that it holds no key (nats.ErrKeyNotFound), is an answer about that record, which
+// a retry reads again: a record this build cannot decode (store.ErrMalformedInterest, the 500
+// writeInterestRecordUnreadable writes), or a key the interest bucket refuses (bus.ErrRefused: a
+// legacy id past envoy_interests' get bound that envoy_sessions still lists, or one outside
+// nats.go's key alphabet, the 413 or 400 writeBusUnavailable writes). Any other error is a read
+// that did not answer, whatever it names. In nats.go v1.50.0 that includes ctx's end
+// (store.Registry.Get's bound, or the JetStream MaxWait context nats.go's direct get always runs
+// under, so it always takes requestWithContext), nats.ErrConnectionClosed, nats.ErrNoResponders,
+// and whatever nats.go's publish returns, the raw *net.OpError of a write buffer flushed onto a
+// broken connection among them; the rule does not rest on that list being complete.
+func interestReadAnswered(err error) bool {
+	return errors.Is(err, store.ErrMalformedInterest) || errors.Is(err, bus.ErrRefused)
 }
 
 // writeInterestRecordUnreadable answers a read of one session's interest record that this build
@@ -738,11 +723,12 @@ func writeInterestRecordUnreadable(w http.ResponseWriter, sessionID string, err 
 // (envoy_sessions, 5-min TTL — only live sessions) and enriching each with
 // topic data from the interests registry (envoy_interests). Every interest read shares one
 // sendRequestBudget deadline, so however many rows miss the interest cache the list answers
-// inside it, and the first read that did not answer (interestReadDidNotAnswer) ends the request
-// with the bus-unavailable 503. Any other error reading one session's interest record lists that
-// session with no topics and roles rather than refusing the list (sessionInfoFor). The registry
-// logs a record this build cannot decode at WARN itself; every other such error is logged here at
-// WARN, once per listed session, through the registry's logger, the listener's own.
+// inside it. A session whose interest read answered with no topics to give - a record this build
+// cannot decode or a key the bucket refuses (interestReadAnswered) - is listed with no topics and
+// roles rather than refusing the list (sessionInfoFor); any other error is a read that did not
+// answer and ends the request with the bus-unavailable 503. The registry logs a record this build
+// cannot decode at WARN itself; a key the bucket refuses is logged here at WARN, once per listed
+// session, through the registry's logger, the listener's own.
 func sessionsHandler(registry *store.Registry, sessions *session.SessionRegistry) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
@@ -764,11 +750,11 @@ func sessionsHandler(registry *store.Registry, sessions *session.SessionRegistry
 				continue
 			}
 			info, err := sessionInfoFor(ctx, registry, entry.SessionID, entry.SessionEntry)
-			if interestReadDidNotAnswer(err) {
+			if err != nil && !interestReadAnswered(err) {
 				writeBusUnavailable(w, err)
 				return
 			}
-			if err != nil && !errors.Is(err, store.ErrMalformedInterest) {
+			if errors.Is(err, bus.ErrRefused) {
 				registry.Logger().Warn("session listed with no topics: its interest record could not be read",
 					slog.String("session_id", entry.SessionID),
 					slog.String("error", err.Error()),
