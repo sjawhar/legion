@@ -1,0 +1,36 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-80",
+  "completed": "2026-10-26T03:31:59Z",
+  "round": "generation 4, forward merge (plan.json round M1-M2); no product change, no simplify pass",
+  "proof": [
+    {
+      "criterion": "M1/M2: the forward merge of main leaves the branch's diff unchanged (the unchanged-diff check, skill://legion-worker/references/conflicts-and-rewrites.md)",
+      "surface": "the reference fingerprint command over the real branch history in the issue workspace (jj 0.45 on the shared clone), base read from GitHub with gh pr view 2173",
+      "command": "base=$(gh pr view 2173 -R sjawhar/legion --json baseRefName -q '.baseRefName | @json') && jj git fetch && jj diff --from \"fork_point(${base}@origin | <head>)\" --to <head> --git --context 0 '~(.legion | docs/solutions)' | sed -e '/^@@/d' -e '/^index /d' | sha256sum, at <head> = 8f540bec91d892f3cbb1f03c0533b54d0f5cb6ac (old tip) and 0c7467a987478e91383b4f692202a435e93be5bd (merged head, pushed)",
+      "observed": "before fc66319c54fa9634463392d22e921ddb1f0cfa4b0c5a5afb3a3057670ac3c0c9, after fc66319c54fa9634463392d22e921ddb1f0cfa4b0c5a5afb3a3057670ac3c0c9: unchanged, equal to the plan's prediction and to the value at b247931acbca (tester) and 06f26ab1eb6a (reviewer). Recorded on the PR: https://github.com/sjawhar/legion/pull/2173#issuecomment-6407591723. GitHub reports the head MERGEABLE (was CONFLICTING/DIRTY); two-dot and three-dot path lists both 142, equal to changedFiles.",
+      "headSha": "0c7467a987478e91383b4f692202a435e93be5bd",
+      "negativeControl": "the same command on the merge commit before the two changelog conflicts were resolved (adaa2bcbcb2f2aa2106968262f7df54de24b76c1, jj still recording both files as 2-sided conflicts) printed d5dde5e010d36c87b655d014973a40f44a0be772f37dbaafc0fbed0783ab8eb6, not fc66319c…: the check sees a wrong resolution"
+    },
+    {
+      "criterion": "M1: the merge resolves both conflicts by keeping both sides word for word and the merged tree builds and passes the plan's checks",
+      "surface": "the merged working tree at 0c7467a98747 in the issue workspace: jj, bun, go toolchains of the worker image, scratch Postgres 55432 and a local nats-server on the issue volume",
+      "command": "jj resolve --list; grep -nE '^(<<<<<<<|>>>>>>>|%%%%%%%|\\+\\+\\+\\+\\+\\+\\+)' on both CHANGELOGs; per-file comparison of added lines (fork point->old tip vs main@origin->merge); cd packages/claude-envoy && bun run check-dist && bun run test; cd packages/pi-legion && bun test src/skills-guard.test.ts; cd packages/daemon && gofmt -l . && go build ./... && go vet ./... && go vet -tags e2e ./...; go test over the 13 non-DB packages; CGO_ENABLED=0 go test ./internal/daemon ./internal/store with LEGION_TEST_PG_DSN and LEGION_TEST_NATS_URL/MONITOR_URL; acceptance-5 grep over tracked files",
+      "observed": "resolve --list: 'No conflicts found'; no markers; each changelog's added lines identical to the branch's own; check-dist 'dist/ and legion/ match a fresh build'; claude-envoy 191 pass 2 skip 0 fail; skills-guard 11 pass; gofmt empty, build and both vets clean; 12 of 13 packages ok (supervise ok under CGO_ENABLED=0, this pod has no gcc); internal/store ok; internal/daemon ok except environment-blocked tests listed in deviations, each failing identically at main@origin 135d22e0 in this pod; acceptance-5 hits identical in file and count to the old tip (history and removal records only)",
+      "headSha": "0c7467a987478e91383b4f692202a435e93be5bd",
+      "negativeControl": "before resolution jj reported 'packages/claude-envoy/CHANGELOG.md 2-sided conflict' and 'packages/pi-legion/CHANGELOG.md 2-sided conflict' and the marker grep printed the conflict lines (pi-legion :10/:11/:23/:42, claude-envoy :16/:17/:26/:33)"
+    }
+  ],
+  "filesChanged": [
+    "packages/pi-legion/CHANGELOG.md (merge resolution: INFRA-80 contract 37 entry, then main's skill-scenarios rig entries)",
+    "packages/claude-envoy/CHANGELOG.md (merge resolution: INFRA-80 contract 37 entry, then main's INFRA-255 tools-reference entry)"
+  ],
+  "deviations": [
+    "Main moved after the plan was written (06170c71a6b0 -> 135d22e0f63b, 19 commits, adding the pi-legion v10.29.0 and envoy-plugin v8.30.0 release commits); the same two files conflicted, DaemonAPIVersion on main is still 36, so contract 37 stays free and the plan's contingency did not apply.",
+    "This pod (new worker image after the re-admission) lacks gcc, tmux, Docker and pgvector. Run with CGO_ENABLED=0 as earlier rounds did. Tests that still cannot run here, each failing identically on an export of main@origin 135d22e0 in this pod: runtime/tmux TestNewRefusesLaunchersItCannotRun (no tmux on PATH); internal/daemon TestTmuxBootRewritesEveryOlderClonesCredentialHelper, TestATerminalAttemptLeavesLaterChildrenSIGTTOUsDefault and TestATerminalAttemptIgnoresSIGTSTP (gVisor /proc has no SigIgn), TestDaemonPermissionsOnRealServers, TestTheWorkflowConnectsAsTheNatsSeedTheDaemonResolved and TestTheWorkflowConnectsAsTheDaemonSeedOverThePaneSeed (rootless Docker), TestABootWaitsOutAGitHubRequestThatNeverAnswers (Docker, skipped by the plan), and the three scratch-Dispatch tests (Postgres here has no vector extension for migration 0072). None is in a file INFRA-80 changed; CI's Tests run 40264431582 runs them all.",
+    "The scratch Postgres data directory had mode 2770 and refused to start; set to 0700. packages/dispatch/web/dist was built locally (not tracked) for the scratch-Dispatch tests.",
+    "The planner's side commit 24f071cffcc8 holding .legion/INFRA-80/workspace-recovered.json was never on the bookmark; merging from legion/INFRA-80 left it out, as the plan requires."
+  ],
+  "openQuestions": []
+}
