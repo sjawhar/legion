@@ -1936,6 +1936,95 @@ func TestAFeedOnTheVolumeTakesTheNarrowedDeltaAndDropsADeletedIssueBranch(t *tes
 	}
 }
 
+// A feed kept on the volume holds no branch outside the delta's two that is not GitHub's own tip:
+// when GitHub's default is switched from main to another branch and main then moves, the next
+// fetch takes the new default and deletes main, which it does not bring, so a workspace provisioned
+// again there for an issue whose recorded default is main finds it absent and is refused, rather
+// than starting from the tip main had when the feed was first streamed. A branch outside the two
+// that GitHub has not moved stays.
+func TestAFeedOnTheVolumeKeepsNoStaleBranchAfterTheDefaultIsSwitched(t *testing.T) {
+	run := newLocalRunner(t)
+	pushRemoteBranch(t, run.remote, "trunk", "trunk.txt")
+	pushRemoteBranch(t, run.remote, "release/v7.1", "unmoved.txt")
+	served := &fakeCache{body: cacheTar(t, cacheOf(t, run.remote))}
+	req := fetchRequest(t)
+	var logged []string
+	req.CacheURL, req.CacheToken, req.Log = served.serve(t), testCacheToken, func(line string) { logged = append(logged, line) }
+	if _, err := Fetch(context.Background(), run, req); err != nil {
+		t.Fatalf("the first Fetch: %v", err)
+	}
+	feed := filepath.Join(req.Feed, "acme", "widgets.git")
+	runSetup(t, t.TempDir(), "git", "--git-dir="+run.remote, "symbolic-ref", "HEAD", "refs/heads/trunk")
+	pushRemoteBranch(t, run.remote, "main", "moved.txt")
+	trunk := pushRemoteBranch(t, run.remote, "trunk", "newer.txt")
+
+	if _, err := Fetch(context.Background(), run, req); err != nil {
+		t.Fatalf("the second Fetch: %v", err)
+	}
+	refs := runSetup(t, feed, "git", "--git-dir="+feed, "for-each-ref", "--format=%(refname)")
+	for ref, want := range map[string]bool{"refs/heads/main": false, "refs/heads/trunk": true, "refs/heads/release/v7.1": true} {
+		if got := strings.Contains(refs, ref+"\n"); got != want {
+			t.Errorf("the feed holds %s: %t, want %t; its refs are %q", ref, got, want, refs)
+		}
+	}
+	if got := strings.TrimSpace(runSetup(t, feed, "git", "--git-dir="+feed, "rev-parse", "refs/heads/trunk")); got != trunk {
+		t.Errorf("the feed's trunk is %s, want the remote's %s", got, trunk)
+	}
+	if want := "removed main from the feed: GitHub has moved it, and this fetch brings only the default branch and the issue branches"; !slices.Contains(logged, want) {
+		t.Errorf("Fetch logged %q, want %q", logged, want)
+	}
+}
+
+// A default branch GitHub renamed leaves a feed kept on the volume: the next fetch takes the new
+// name, deletes the old one, and points HEAD at the new one.
+func TestAFeedOnTheVolumeFollowsARenamedDefaultBranch(t *testing.T) {
+	run := newLocalRunner(t)
+	served := &fakeCache{body: cacheTar(t, cacheOf(t, run.remote))}
+	req := fetchRequest(t)
+	req.CacheURL, req.CacheToken, req.Log = served.serve(t), testCacheToken, func(string) {}
+	if _, err := Fetch(context.Background(), run, req); err != nil {
+		t.Fatalf("the first Fetch: %v", err)
+	}
+	feed := filepath.Join(req.Feed, "acme", "widgets.git")
+	runSetup(t, t.TempDir(), "git", "--git-dir="+run.remote, "branch", "-m", "main", "trunk")
+	if _, err := Fetch(context.Background(), run, req); err != nil {
+		t.Fatalf("the second Fetch: %v", err)
+	}
+	refs := runSetup(t, feed, "git", "--git-dir="+feed, "for-each-ref", "--format=%(refname)")
+	if strings.Contains(refs, "refs/heads/main\n") || !strings.Contains(refs, "refs/heads/trunk\n") {
+		t.Errorf("the feed's refs are %q, want trunk and no main", refs)
+	}
+	if head := strings.TrimSpace(runSetup(t, feed, "git", "--git-dir="+feed, "symbolic-ref", "HEAD")); head != "refs/heads/trunk" {
+		t.Errorf("the feed's HEAD names %s, want refs/heads/trunk", head)
+	}
+}
+
+// A GitHub that names no default branch (its HEAD unborn: nothing pushed to it) leaves the delta
+// taking every branch, pruned, as a fetch with no cache does, and nothing is deleted from the feed
+// on the strength of a listing that names no default.
+func TestADeltaWithNoDefaultBranchTakesEveryBranch(t *testing.T) {
+	run := newLocalRunner(t)
+	req := fetchRequest(t)
+	req.CacheURL, req.CacheToken, req.Log = (&fakeCache{body: cacheTar(t, cacheOf(t, run.remote))}).serve(t), testCacheToken, func(string) {}
+	runSetup(t, t.TempDir(), "git", "--git-dir="+run.remote, "symbolic-ref", "HEAD", "refs/heads/unborn")
+	report, err := Fetch(context.Background(), run, req)
+	if err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	var fetch Command
+	for _, call := range run.Calls() {
+		if commandWith(call.Argv, "git", "--git-dir="+report.Feed, "fetch") {
+			fetch = call
+		}
+	}
+	if want := []string{"--prune", "--quiet", "https://github.com/acme/widgets", "+refs/heads/*:refs/heads/*"}; fetch.Argv == nil || !slices.Equal(fetch.Argv[len(fetch.Argv)-4:], want) {
+		t.Errorf("the delta ran %q, want it ending in %q", fetch.Argv, want)
+	}
+	if got := strings.TrimSpace(runSetup(t, report.Feed, "git", "--git-dir="+report.Feed, "rev-parse", "--verify", "refs/heads/main")); got == "" {
+		t.Errorf("the feed lost main")
+	}
+}
+
 // The narrowed delta takes the default branch GitHub's HEAD names, which need not be main and may
 // hold a slash.
 func TestTheDeltaTakesTheDefaultBranchGitHubNames(t *testing.T) {

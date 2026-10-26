@@ -432,10 +432,10 @@ func TestHealthzIsUnavailableUntilTheFirstCloneFinishes(t *testing.T) {
 	}
 }
 
-// /tar streams the bare clone's refs and packs alone — HEAD, packed-refs, refs/ and
-// objects/pack/pack-<id>.pack — and nothing the feed builds itself (a pack's index), no loose
-// object, and nothing of the clone's own configuration, hooks or descriptions: indexed, it is a
-// repository whose connectivity git checks and whose default branch is the remote's, holding
+// /tar streams the bare clone's refs and packs alone — HEAD, packed-refs, refs/,
+// objects/pack/pack-<id>.pack and the index git reads each pack through — and no reverse index,
+// loose object, or anything of the clone's own configuration, hooks or descriptions: unpacked, it
+// is a repository whose connectivity git checks and whose default branch is the remote's, holding
 // regular files and directories alone and no temporary pack or lock file git was writing.
 func TestTarStreamsTheBareRepositorysRefsAndPacks(t *testing.T) {
 	remote := newRemote(t)

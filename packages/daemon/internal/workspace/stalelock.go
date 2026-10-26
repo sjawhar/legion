@@ -59,7 +59,16 @@ func RemoveStaleFeedLocks(gitDir string, now time.Time, log func(string)) error 
 	if err := removeLocksUnder(gitDir, "", now, log, why); err != nil {
 		return err
 	}
-	partial, err := filepath.Glob(filepath.Join(gitDir, "objects", "pack", "tmp_*"))
+	// The partial packs are looked for only where git writes them, and only when neither objects
+	// nor objects/pack is a link: a glob follows one, and would remove files outside the feed.
+	// A linked or missing directory is left for foreignFeed, which refuses the feed after this.
+	pack := filepath.Join(gitDir, "objects", "pack")
+	for _, dir := range []string{filepath.Dir(pack), pack} {
+		if info, err := os.Lstat(dir); err != nil || !info.IsDir() {
+			return nil
+		}
+	}
+	partial, err := filepath.Glob(filepath.Join(pack, "tmp_*"))
 	if err != nil {
 		return err
 	}
