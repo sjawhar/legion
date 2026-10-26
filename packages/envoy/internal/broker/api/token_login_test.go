@@ -216,6 +216,33 @@ func TestATokenLoginTheBrokerCouldNotCompleteSpendsNoAddressBucket(t *testing.T)
 	}
 }
 
+// TestATokenThatDoesNotVerifySpendsItsAddressBucketWhileTheDatabaseIsAway: the give-back a login
+// the broker could not complete earns applies only once its token has verified. A token that does
+// not verify keeps its address's request spent whatever it is answered, even while the database
+// is away and verified logins are refunded, since that bucket is what guards the verifier's
+// fetches of the issuer's keys: a key-fetch or other failure answered 5xx after a failed
+// verification must never refund a forged token's attempt, or a flood of forged tokens would
+// cost the broker a fetch each without limit. Here tokens claiming the daemon's account, signed
+// by a key the issuer never published, are refused 401 until the address's bucket of 2 is empty,
+// then 429.
+func TestATokenThatDoesNotVerifySpendsItsAddressBucketWhileTheDatabaseIsAway(t *testing.T) {
+	ts := newTestServerWith(t, func(d *api.Deps) {
+		d.LauncherLimits = &api.LauncherLimits{
+			PerAddress: ratelimit.Limit{Every: time.Hour, Burst: 2},
+			PerLogin:   ratelimit.Limit{Every: time.Hour, Burst: 100},
+		}
+	})
+	ts.Store.Close()
+	forger := oidctest.NewKey(t, "forger")
+	for i, want := range []int{http.StatusUnauthorized, http.StatusUnauthorized, http.StatusTooManyRequests} {
+		claims := ts.podIssuer.Claims(daemonAccount, podAudience)
+		status, body := ts.tokenLogin(t, ts.podIssuer.Mint(t, forger, claims), ts.daemonRequest(t, newSigningKey(t)))
+		if status != want {
+			t.Fatalf("forged token claiming %s with the database away, attempt %d = %d %s, want %d", daemonAccount, i, status, body, want)
+		}
+	}
+}
+
 // TestARefusedTokenLoginStillSpendsItsAccountBucket: a verified token login whose request the
 // broker refuses, here one naming a service the account does not log in as (403
 // ACCOUNT_NOT_LISTED), keeps its account's login spent, since the limit exists to slow guessing:

@@ -42,11 +42,14 @@ type tokenLoginResponse struct {
 // the token is verified (refuseAddress), so no flood of tokens, forged or real, costs the broker a
 // verification (and a fetch of the issuer's keys) past that bucket; a verified account then spends a
 // bucket of its own too (refuseAccount). The pair is the device-code route's, address then login.
-// A login the broker could not complete (5xx, such as one the database was away for) gives back
-// what it spent of both: the Legion daemon retries such a login every few seconds through a
-// database outage, and the broker decided nothing about its token, so there is nothing to slow,
-// and spent, those retries would leave the daemon's first login after the outage refused 429. A
-// refused credential (any 4xx) keeps what it spent, since the limits exist to slow guessing.
+// A login whose token verified and that the broker then could not complete (5xx, such as one the
+// database was away for) gives back what it spent of both: the Legion daemon retries such a login
+// every few seconds through a database outage, and the broker decided nothing about its request,
+// so there is nothing to slow, and spent, those retries would leave the daemon's first login after
+// the outage refused 429. A refused credential (any 4xx) keeps what it spent, since the limits
+// exist to slow guessing, and a token that does not verify always keeps its address's request,
+// whatever it is answered, since that bucket is what guards the verifier's fetches of the issuer's
+// keys.
 // A token that has expired is 401 TOKEN_EXPIRED, one that does not verify 401 TOKEN_INVALID, one
 // that lives longer than an hour from its issue 401 TOKEN_TOO_LONG_LIVED, one whose account
 // BROKER_SERVICE_LOGINS does not name
@@ -66,9 +69,7 @@ func (s *server) tokenLogin(w http.ResponseWriter, r *http.Request) {
 	login := s.deps.MachineLogin
 	account, err := login.VerifyServiceToken(r.Context(), body.Token)
 	if err != nil {
-		if writeTokenLoginRefusal(w, err) {
-			giveBackAddress()
-		}
+		writeTokenLoginRefusal(w, err)
 		return
 	}
 	giveBackAccount, refused := s.launcherLimiter.refuseAccount(w, account.Subject)
@@ -88,8 +89,8 @@ func (s *server) tokenLogin(w http.ResponseWriter, r *http.Request) {
 
 // writeTokenLoginRefusal answers a token login's refusal with the code tokenLogin documents, and
 // reports couldNotComplete when it answered 500: a refusal that is none of the documented ones,
-// such as the database being away, which decided nothing about the token, so tokenLogin gives back
-// what the login spent of its buckets.
+// such as the database being away, which decided nothing about the token. tokenLogin gives back
+// what the login spent of its buckets on that report only once the token has verified.
 func writeTokenLoginRefusal(w http.ResponseWriter, err error) (couldNotComplete bool) {
 	switch {
 	case errors.Is(err, machine.ErrTokenLoginsOff):
