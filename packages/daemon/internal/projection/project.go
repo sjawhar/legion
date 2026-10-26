@@ -129,11 +129,15 @@ func Project(ctx context.Context, tx pgx.Tx, s record.Store, project string, cla
 				view.Architect = &claimView
 				continue
 			}
-			view.Workers[item.Role] = api.PhaseView{
+			worker := api.PhaseView{
 				Claim:         claimView,
 				HandoffCommit: item.HandoffCommit,
 				Rounds:        item.Rounds,
 			}
+			if item.HandoffRecord != "" {
+				worker.HandoffRecord = &api.HandoffRecordView{ID: item.HandoffRecord, Version: item.HandoffVersion}
+			}
+			view.Workers[item.Role] = worker
 		}
 
 		pr, err := s.PullRequest(ctx, tx, issue.Key)

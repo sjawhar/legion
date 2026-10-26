@@ -288,6 +288,41 @@ func TestApprovalReturnsCurrentDocumentApproval(t *testing.T) {
 	}
 }
 
+// A handoff record reads back with its issue, phase, version and the actor that wrote it; the body
+// Dispatch answers with is not the daemon's to read. A record Dispatch does not have is Missing.
+func TestHandoffReadsTheRecordAndItsAuthor(t *testing.T) {
+	const id = "6f1d2c3b-4a5e-4f60-8a7b-9c0d1e2f3a4b"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assertBearer(t, r)
+		if r.Method != http.MethodGet {
+			t.Fatalf("request = %s %s, want GET", r.Method, r.URL.Path)
+		}
+		if r.URL.Path != "/api/v1/handoffs/"+id {
+			writeJSONStatus(t, w, http.StatusNotFound, map[string]string{"code": "HANDOFF_NOT_FOUND", "error": "handoff not found"})
+			return
+		}
+		writeJSON(t, w, map[string]any{
+			"id": id, "issue_key": "LEGION-6", "phase": "implement", "version": 2,
+			"author":     map[string]any{"kind": "session", "id": "ses_implementer_6", "origin": map[string]any{"title": "implementer"}},
+			"created_at": "2026-10-26T08:00:00Z", "body": `{"schemaVersion":1}`,
+		})
+	}))
+	defer server.Close()
+
+	client := New(server.URL, dispatchToken)
+	handoff, err := client.Handoff(context.Background(), id)
+	if err != nil {
+		t.Fatalf("read handoff: %v", err)
+	}
+	want := Handoff{ID: id, IssueKey: "LEGION-6", Phase: "implement", Version: 2, Author: HandoffAuthor{Kind: "session", ID: "ses_implementer_6"}}
+	if handoff != want {
+		t.Fatalf("handoff = %#v, want %#v", handoff, want)
+	}
+	if _, err := client.Handoff(context.Background(), "00000000-0000-0000-0000-000000000001"); !Missing(err) {
+		t.Fatalf("an unknown handoff = %v, want Dispatch's 404", err)
+	}
+}
+
 func TestClientReturnsDispatchErrorForCoded4xx(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		writeJSONStatus(t, w, http.StatusConflict, map[string]string{"code": "ISSUE_CLOSED", "error": "issue is closed"})

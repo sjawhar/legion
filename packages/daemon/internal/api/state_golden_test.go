@@ -238,7 +238,7 @@ func populatedState(t *testing.T) State {
 								},
 							},
 						},
-						HandoffCommit: "9f2c1d7a4b6e8c3f5a90d2e14b7c6f8a3d5e0b21",
+						HandoffRecord: &HandoffRecordView{ID: "6f1d2c3b-4a5e-4f60-8a7b-9c0d1e2f3a4b", Version: 1},
 						Rounds:        0,
 					},
 					claim.RoleImplementer: {

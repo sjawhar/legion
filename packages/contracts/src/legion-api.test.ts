@@ -243,6 +243,50 @@ test("a check report is a completion without a commit", () => {
   ).toBeFalse();
 });
 
+// A file-backed phase's completion names the Dispatch handoff record the worker wrote: the
+// planner, tester and reviewer report it alone, the implementer with the commit it pushed. A record
+// is named by a non-empty id and a positive version.
+test("a phase completion names its handoff record", () => {
+  const planner = {
+    grantId: "grant-208",
+    summary: "Planned.",
+    verdict: "",
+    ready: false,
+    handoffId: "6f1d2c3b-4a5e-4f60-8a7b-9c0d1e2f3a4b",
+    handoffVersion: 1,
+  };
+  expect(LegionHandoffCompleteRequest.safeParse(planner).success).toBeTrue();
+  expect(
+    LegionHandoffCompleteRequest.safeParse({ ...planner, commit: "abc123" }).success
+  ).toBeTrue();
+  expect(LegionHandoffCompleteRequest.safeParse({ ...planner, handoffId: "" }).success).toBeFalse();
+  for (const handoffVersion of [0, -1, 1.5]) {
+    expect(
+      LegionHandoffCompleteRequest.safeParse({ ...planner, handoffVersion }).success
+    ).toBeFalse();
+  }
+});
+
+// The state shows the record a worker's completion of its current file-backed phase named, its id
+// and positive version; a worker that named none shows no field.
+test("the state golden carries a worker's handoff record", () => {
+  const state = fixture("state.json") as {
+    issues: Record<string, { workers: Record<string, { handoffRecord?: unknown }> }>;
+  };
+  const planner = state.issues["LEGION-208"]?.workers.planner;
+  if (planner === undefined) {
+    throw new Error("state fixture lacks LEGION-208's planner");
+  }
+  expect(planner.handoffRecord).toEqual({ id: "6f1d2c3b-4a5e-4f60-8a7b-9c0d1e2f3a4b", version: 1 });
+
+  planner.handoffRecord = { id: "6f1d2c3b-4a5e-4f60-8a7b-9c0d1e2f3a4b", version: 0 };
+  expect(LegionStateResponse.safeParse(state).success).toBeFalse();
+  planner.handoffRecord = { id: "", version: 1 };
+  expect(LegionStateResponse.safeParse(state).success).toBeFalse();
+  planner.handoffRecord = undefined;
+  expect(LegionStateResponse.safeParse(state).error?.issues ?? []).toEqual([]);
+});
+
 // An architect's backward move names the issue it moves from accepting; a phase worker's may
 // leave it out, since its grant names its own.
 test("a backward move may name its issue", () => {
@@ -267,7 +311,15 @@ test("every workflow request has a strict schema", () => {
     [
       "handoff complete",
       LegionHandoffCompleteRequest,
-      { grantId: "grant-208", summary: "completed", verdict: "", ready: false, commit: "abc123" },
+      {
+        grantId: "grant-208",
+        summary: "completed",
+        verdict: "",
+        ready: false,
+        commit: "abc123",
+        handoffId: "6f1d2c3b-4a5e-4f60-8a7b-9c0d1e2f3a4b",
+        handoffVersion: 2,
+      },
     ],
     [
       "issue status",

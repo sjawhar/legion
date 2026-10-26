@@ -222,6 +222,9 @@ func (d *pilotDispatch) Approval(context.Context, string) (dispatch.Approval, er
 	return dispatch.Approval{}, nil
 }
 func (d *pilotDispatch) BuildCommit(context.Context) (string, error) { return "", nil }
+func (d *pilotDispatch) Handoff(context.Context, string) (dispatch.Handoff, error) {
+	return dispatch.Handoff{}, nil
+}
 func (d *pilotDispatch) ListRepoProjects(context.Context) ([]dispatch.RepoProject, error) {
 	return nil, nil
 }
@@ -264,6 +267,9 @@ func (d *filteringDispatch) Approval(context.Context, string) (dispatch.Approval
 	return dispatch.Approval{}, nil
 }
 func (d *filteringDispatch) BuildCommit(context.Context) (string, error) { return "", nil }
+func (d *filteringDispatch) Handoff(context.Context, string) (dispatch.Handoff, error) {
+	return dispatch.Handoff{}, nil
+}
 func (d *filteringDispatch) ListRepoProjects(context.Context) ([]dispatch.RepoProject, error) {
 	return nil, nil
 }

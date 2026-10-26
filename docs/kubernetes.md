@@ -1987,6 +1987,41 @@ at 53, and a second run changed nothing. Applying 0054 again afterwards, as the 
 `pg_dump`, run as a login that cannot read the session tables, exited 1 without the two `-T`
 options and 0 with them.
 
+**Handoff records on the Dispatch issue (daemon API contract 40).** A release at contract 40
+takes a file-backed phase's completion (planning, implementing, testing, reviewing) only when it
+names the handoff record its worker wrote on the Dispatch issue with `dispatch handoff-write`, and
+reads that record back from Dispatch (`GET /api/v1/handoffs/{id}`) before it records anything;
+its workers' plugins report the record, so the daemon and the plugins move together, as every
+contract bump does. Store migration 0055 adds two columns to `phases`, `handoff_record` and
+`handoff_version`: the record a role's completion of its current phase named, and its version.
+
+To roll this release back to contract 39, stop the daemon and drop both columns, with the row
+`schema_version` records for 0055:
+
+```sh
+psql '<postgres_dsn>' -X -v ON_ERROR_STOP=1 <<'SQL'
+begin;
+alter table phases drop column if exists handoff_record, drop column if exists handoff_version;
+delete from schema_version where version = 55;
+commit;
+SQL
+```
+
+It prints `ALTER TABLE` and `DELETE 1`; a rerun prints two `NOTICE`s that the columns do not
+exist, `ALTER TABLE` and `DELETE 0`. The earlier release names every column it reads and writes on
+`phases` (`Phases` and `PutPhase` in `internal/record/store.go`), so it would boot with the columns
+left in place, but it never clears them: a role it starts on a new phase or round keeps the record
+of its last one, and an upgrade back to this release would read that record as the new phase's
+completion (`record.PhaseRow.Completed`), ending a review round on an approval alone or starting
+the implementer on a red without waiting for the tester's turn. Dropping the columns and the row
+makes that upgrade apply 0055 again, to empty columns. `last_handoff` keeps the record id each role
+last named; the earlier release compares a completion's commit with it, which no record id equals,
+so no completion is refused `HANDOFF_NOT_NEW` for it. The records themselves stay on their Dispatch
+issues. The `55` is the number of `0055_handoff_records.up.sql`; where that file carries another
+number in the release you roll back from, use that number. The SQL was run on 2026-10-26 against
+PostgreSQL 17 on a scratch schema holding `phases` and `schema_version` after 0055: the first run
+dropped both columns and the row, and a second printed the two notices and changed nothing.
+
 ### Contract discipline
 
 `DaemonAPIVersion` (`packages/daemon/internal/api/version.go`) is the Go daemon's own contract

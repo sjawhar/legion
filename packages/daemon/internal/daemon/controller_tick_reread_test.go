@@ -231,6 +231,9 @@ func (d *tickDispatch) Approval(context.Context, string) (dispatch.Approval, err
 	return dispatch.Approval{}, nil
 }
 func (d *tickDispatch) BuildCommit(context.Context) (string, error) { return "", nil }
+func (d *tickDispatch) Handoff(context.Context, string) (dispatch.Handoff, error) {
+	return dispatch.Handoff{}, nil
+}
 func (d *tickDispatch) ListRepoProjects(context.Context) ([]dispatch.RepoProject, error) {
 	return nil, nil
 }

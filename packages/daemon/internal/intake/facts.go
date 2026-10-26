@@ -432,7 +432,16 @@ type HandoffComplete struct {
 	Summary    string
 	Verdict    string
 	Ready      bool
-	Commit     string
+	// Commit is the commit the completion reports: the implementer's pushed tip for an implementing
+	// round, the commit retro stands on, the head the merger's READY names; none for the planner,
+	// the tester or the reviewer.
+	Commit string
+	// HandoffRecord and HandoffVersion name the Dispatch handoff record a file-backed phase's
+	// completion ends with (phase.FileBacked): the route read it back from Dispatch and held it to
+	// the issue, the phase's word, this version and the claim's session before it applied the fact.
+	// Empty and zero for a phase that writes none.
+	HandoffRecord  string
+	HandoffVersion int
 	// MergeNote is READY's by-hand note, empty for any other completion: the MANUAL_MERGE_REQUIRED
 	// answer the route's READY checks give a pull request whose change touches a path the project's
 	// merge.by_hand names. The workflow keeps it with the merger's packet and tells it at its head.

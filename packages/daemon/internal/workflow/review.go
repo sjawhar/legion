@@ -440,7 +440,7 @@ func (e *Engine) reviewRound(issue record.Issue, row record.PhaseRow, pr *record
 	if issue.Phase != phase.Reviewing {
 		return round{}
 	}
-	completed := row.HandoffCommit != ""
+	completed := row.Completed()
 	decided := ""
 	if row.Decision != nil {
 		decided = row.Decision.State

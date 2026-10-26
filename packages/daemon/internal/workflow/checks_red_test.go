@@ -94,9 +94,9 @@ func TestARedVerdictSendsTheTreeBackToImplementing(t *testing.T) {
 			// entered retro, so no completion is recorded there either.
 			seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim"})
 			if tc.from == phase.Reviewing {
-				reviewer := record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "review-claim", HandoffCommit: "head", Summary: "reviewed"}
+				reviewer := record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "review-claim", HandoffRecord: "review-1", HandoffVersion: 1, Summary: "reviewed"}
 				if tc.uncompleted {
-					reviewer.HandoffCommit, reviewer.Summary = "", ""
+					reviewer.HandoffRecord, reviewer.HandoffVersion, reviewer.Summary = "", 0, ""
 				}
 				if tc.decided {
 					reviewer.Decision = &record.ReviewDecision{State: "changes_requested", Body: "rename the widget", Head: "head"}
@@ -595,7 +595,7 @@ func TestAnExhaustedFixAttemptCountHoldsEveryRedAtThatCount(t *testing.T) {
 			CheckRuns: []record.AttemptRun{{Name: required, ID: int64(attempt)}}, Generation: int64(attempt),
 			Snapshot: "settled-" + strconv.Itoa(attempt), Failing: append([]string{}, failing...)}
 	}
-	completion := intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "review-claim", Commit: "review-1", Summary: "reviewed"}
+	completion := intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "review-claim", HandoffRecord: "review-1", HandoffVersion: 1, Summary: "reviewed"}
 	for _, tc := range []struct {
 		name   string
 		from   phase.Phase
@@ -669,7 +669,7 @@ func TestAnExhaustedFixAttemptCountStillTakesTheReviewersRequestForChanges(t *te
 		CheckRuns: []record.AttemptRun{{Name: required, ID: 1}}, Generation: 1, Snapshot: "settled-1", Failing: []string{required}}
 	review := intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, State: "changes_requested", CommitID: "head", HeadSHA: "head",
 		Author: testReviewApp, Body: "rename the widget"}
-	completion := intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "review-claim", Commit: "review-1", Summary: "reviewed"}
+	completion := intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "review-claim", HandoffRecord: "review-1", HandoffVersion: 1, Summary: "reviewed"}
 	for _, tc := range []struct {
 		name  string
 		facts []intake.Fact
@@ -919,9 +919,9 @@ func TestAReopenedPullRequestJudgesItsNewHeadAsASynchronizeWould(t *testing.T) {
 // again.
 func TestAnExhaustedFixAttemptCountNeverHoldsARedInAwaitingMerge(t *testing.T) {
 	const required, implementer = "pr-checks-result", "legion-implementer[bot]"
-	tester := intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleTester, Claim: "test-claim", Commit: "test-1", Summary: "passed", Verdict: "pass"}
+	tester := intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleTester, Claim: "test-claim", HandoffRecord: "test-1", HandoffVersion: 1, Summary: "passed", Verdict: "pass"}
 	approval := intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, State: "approved", CommitID: "h3", HeadSHA: "h3", Author: testReviewApp, Body: "approved"}
-	reviewer := intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "review-claim", Commit: "review-1", Summary: "reviewed"}
+	reviewer := intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "review-claim", HandoffRecord: "review-1", HandoffVersion: 1, Summary: "reviewed"}
 	accepted := intake.SignOff{Issue: "LEGION-208"}
 	retro := intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim", Commit: "retro-1", Summary: "retro"}
 	ready := intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleMerger, Claim: "merge-claim", Ready: true, Summary: readyPacket, Commit: "h4"}
@@ -1095,7 +1095,7 @@ func TestACompletionOnARedThatSettledWhileImplementingSendsTheWorkBack(t *testin
 				}
 			}
 			assertOutboxCount(t, pool, "supervise", 0)
-			applyRefusingNothing(t, pool, engine, intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim", Commit: "head", Summary: "implemented"})
+			applyRefusingNothing(t, pool, engine, intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim", Commit: "head", HandoffRecord: "implement-1", HandoffVersion: 1, Summary: "implemented"})
 			if got := issuePhase(t, pool); got != tc.want {
 				t.Fatalf("after the implementer's completion the issue is in %s, want %s", got, tc.want)
 			}
@@ -1144,7 +1144,7 @@ func TestACompletionBeforeItsPushesWebhooksIsNotSentBackOnTheRedItFixed(t *testi
 			seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim"})
 			engine := testEngine(config.DesignGateRootIssues, nil)
 			applyRefusingNothing(t, pool, engine, settledAt("red", required, 1, required),
-				intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim", Commit: "fixed", Summary: "fixed the red"})
+				intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim", Commit: "fixed", HandoffRecord: "implement-1", HandoffVersion: 1, Summary: "fixed the red"})
 			for i, fact := range tc.after {
 				applyRefusingNothing(t, pool, engine, fact)
 				if got := issuePhase(t, pool); got != phase.Testing {
@@ -1202,7 +1202,7 @@ func TestALatePushOfTheRecordedHeadActsOnItsRed(t *testing.T) {
 			seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim"})
 			engine := testEngine(config.DesignGateRootIssues, nil)
 			applyRefusingNothing(t, pool, engine, tc.before...)
-			applyRefusingNothing(t, pool, engine, intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim", Commit: tc.commit, Summary: "implemented"})
+			applyRefusingNothing(t, pool, engine, intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim", Commit: tc.commit, HandoffRecord: "implement-1", HandoffVersion: 1, Summary: "implemented"})
 			if got := issuePhase(t, pool); got != phase.Testing {
 				t.Fatalf("after the completion the issue is in %s, want testing: the completion judges no head it did not report, nor a red the cap holds", got)
 			}
@@ -1249,7 +1249,7 @@ func TestAWorkflowOnlyRedTheCompletionDefersIsSentBackByTheNextRead(t *testing.T
 			seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim"})
 			engine := testEngine(config.DesignGateRootIssues, nil)
 			applyRefusingNothing(t, pool, engine, tc.before...)
-			applyRefusingNothing(t, pool, engine, intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim", Commit: tc.commit, Summary: "implemented"})
+			applyRefusingNothing(t, pool, engine, intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim", Commit: tc.commit, HandoffRecord: "implement-1", HandoffVersion: 1, Summary: "implemented"})
 			if len(tc.after) > 0 {
 				if got := issuePhase(t, pool); got != phase.Testing {
 					t.Fatalf("after the completion the issue is in %s, want testing: the completion leaves a workflow-only red to the next read", got)

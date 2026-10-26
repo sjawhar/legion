@@ -90,10 +90,10 @@ func reviewReadRuntime(pool *pgxpool.Pool, api string) *workflowRuntime {
 	}
 }
 
-// completedReviewer is CAPTURE-1's reviewer having completed its round with commit, no review
-// recorded as deciding it.
-func completedReviewer(commit string) record.PhaseRow {
-	return record.PhaseRow{Issue: "CAPTURE-1", Role: claim.RoleReviewer, Claim: "review-claim", HandoffCommit: commit, LastHandoff: commit,
+// completedReviewer is CAPTURE-1's reviewer having completed its round naming handoff record
+// handoff, no review recorded as deciding it.
+func completedReviewer(handoff string) record.PhaseRow {
+	return record.PhaseRow{Issue: "CAPTURE-1", Role: claim.RoleReviewer, Claim: "review-claim", HandoffRecord: handoff, HandoffVersion: 1, LastHandoff: handoff,
 		Summary: "reviewed", CompletedAt: time.Date(2026, 10, 8, 22, 16, 6, 0, time.UTC)}
 }
 
@@ -279,9 +279,9 @@ func TestAReviewDecisionDeliveredTwiceActsOnce(t *testing.T) {
 				t.Fatalf("the pass in implementing read no reviews")
 			}
 
-			apply("implementer-round-2", intake.HandoffComplete{Generation: 1, Issue: "CAPTURE-1", Role: claim.RoleImplementer, Claim: "implement-claim", Summary: "fixed", Commit: "round-2"})
-			apply("tester-round-2", intake.HandoffComplete{Generation: 1, Issue: "CAPTURE-1", Role: claim.RoleTester, Claim: "test-claim", Summary: "tested", Verdict: "pass", Commit: "test-2"})
-			apply("reviewer-round-2", intake.HandoffComplete{Generation: 1, Issue: "CAPTURE-1", Role: claim.RoleReviewer, Claim: "review-claim", Summary: "reviewed", Commit: "review-2"})
+			apply("implementer-round-2", intake.HandoffComplete{Generation: 1, Issue: "CAPTURE-1", Role: claim.RoleImplementer, Claim: "implement-claim", Summary: "fixed", Commit: "round-2", HandoffRecord: "implement-2", HandoffVersion: 2})
+			apply("tester-round-2", intake.HandoffComplete{Generation: 1, Issue: "CAPTURE-1", Role: claim.RoleTester, Claim: "test-claim", Summary: "tested", Verdict: "pass", HandoffRecord: "test-2", HandoffVersion: 2})
+			apply("reviewer-round-2", intake.HandoffComplete{Generation: 1, Issue: "CAPTURE-1", Role: claim.RoleReviewer, Claim: "review-claim", Summary: "reviewed", HandoffRecord: "review-2", HandoffVersion: 2})
 			expect("round 2's completion", phase.Reviewing, "", 1)
 			apply("delivery-11-in-round-2", webhook)
 			w.readRequiredChecks(ctx)
@@ -340,10 +340,10 @@ func TestADecidingReviewOutsideARoundDecidesNoLaterRound(t *testing.T) {
 			w.readRequiredChecks(ctx)
 			expect("the pass in "+string(tc.from), tc.from)
 			if tc.from == phase.Implementing {
-				apply("implementer", intake.HandoffComplete{Generation: 1, Issue: "CAPTURE-1", Role: claim.RoleImplementer, Claim: "implement-claim", Summary: "fixed", Commit: "round-1"})
+				apply("implementer", intake.HandoffComplete{Generation: 1, Issue: "CAPTURE-1", Role: claim.RoleImplementer, Claim: "implement-claim", Summary: "fixed", Commit: "round-1", HandoffRecord: "implement-1", HandoffVersion: 1})
 			}
-			apply("tester", intake.HandoffComplete{Generation: 1, Issue: "CAPTURE-1", Role: claim.RoleTester, Claim: "test-claim", Summary: "tested", Verdict: "pass", Commit: "test-1"})
-			apply("reviewer", intake.HandoffComplete{Generation: 1, Issue: "CAPTURE-1", Role: claim.RoleReviewer, Claim: "review-claim", Summary: "reviewed", Commit: "review-1"})
+			apply("tester", intake.HandoffComplete{Generation: 1, Issue: "CAPTURE-1", Role: claim.RoleTester, Claim: "test-claim", Summary: "tested", Verdict: "pass", HandoffRecord: "test-1", HandoffVersion: 1})
+			apply("reviewer", intake.HandoffComplete{Generation: 1, Issue: "CAPTURE-1", Role: claim.RoleReviewer, Claim: "review-claim", Summary: "reviewed", HandoffRecord: "review-1", HandoffVersion: 1})
 			w.readRequiredChecks(ctx)
 			expect("the reviewer's completion and the next pass", phase.Reviewing)
 			stuck := noticeReasons(t, pool, "review-stuck")
@@ -393,9 +393,9 @@ func TestADecidingReviewBetweenRoundsDecidesNoLaterRound(t *testing.T) {
 			listed = append(listed, listedReview(21, "a-writer", state, "code", "2026-10-08T22:40:00Z"))
 			w.readRequiredChecks(ctx)
 			expect("the pass in implementing", phase.Implementing, "changes_requested", 1)
-			apply("implementer-round-2", intake.HandoffComplete{Generation: 1, Issue: "CAPTURE-1", Role: claim.RoleImplementer, Claim: "implement-claim", Summary: "fixed", Commit: "round-2"})
-			apply("tester-round-2", intake.HandoffComplete{Generation: 1, Issue: "CAPTURE-1", Role: claim.RoleTester, Claim: "test-claim", Summary: "tested", Verdict: "pass", Commit: "test-2"})
-			apply("reviewer-round-2", intake.HandoffComplete{Generation: 1, Issue: "CAPTURE-1", Role: claim.RoleReviewer, Claim: "review-claim", Summary: "reviewed", Commit: "review-2"})
+			apply("implementer-round-2", intake.HandoffComplete{Generation: 1, Issue: "CAPTURE-1", Role: claim.RoleImplementer, Claim: "implement-claim", Summary: "fixed", Commit: "round-2", HandoffRecord: "implement-2", HandoffVersion: 2})
+			apply("tester-round-2", intake.HandoffComplete{Generation: 1, Issue: "CAPTURE-1", Role: claim.RoleTester, Claim: "test-claim", Summary: "tested", Verdict: "pass", HandoffRecord: "test-2", HandoffVersion: 2})
+			apply("reviewer-round-2", intake.HandoffComplete{Generation: 1, Issue: "CAPTURE-1", Role: claim.RoleReviewer, Claim: "review-claim", Summary: "reviewed", HandoffRecord: "review-2", HandoffVersion: 2})
 			w.readRequiredChecks(ctx)
 			expect("round 2's completion and the next pass", phase.Reviewing, "", 1)
 		})

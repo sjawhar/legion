@@ -120,7 +120,7 @@ func TestARequiredCheckCancelledOrMissingLeavesTheHeadUndecided(t *testing.T) {
 	failed := intake.PullRequestChecks{CheckRuns: []record.AttemptRun{{Name: "lint", ID: 1}, gateRun(2)}, Failing: []string{requiredGate}}
 	approval := []intake.Fact{
 		intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, State: "approved", CommitID: "head", Author: testReviewApp, Body: "looks right"},
-		intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "review-claim", Summary: "approved", Commit: "review-1"},
+		intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "review-claim", Summary: "approved", HandoffRecord: "review-1", HandoffVersion: 1},
 	}
 	for _, tc := range []struct {
 		name   string
@@ -205,7 +205,7 @@ func seedRoundOnRedsBesideTheGate(t *testing.T, pool *pgxpool.Pool, required []s
 func TestARedTheBaseBranchDoesNotRequireSendsNothingBack(t *testing.T) {
 	approval := []intake.Fact{
 		intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, State: "approved", CommitID: "handoff", Author: testReviewApp, Body: "looks right"},
-		intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "review-claim", Summary: "approved", Commit: "handoff"},
+		intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "review-claim", Summary: "approved", HandoffRecord: "review-1", HandoffVersion: 1},
 	}
 	for _, tc := range []struct {
 		name     string

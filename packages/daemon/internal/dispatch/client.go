@@ -220,6 +220,22 @@ func (c *HTTPClient) Approval(ctx context.Context, artifactID string) (Approval,
 	}, nil
 }
 
+// Handoff reads GET /api/v1/handoffs/{id}: one handoff record with its issue, phase, version and
+// author. A record Dispatch does not have is its 404 HANDOFF_NOT_FOUND (Missing).
+func (c *HTTPClient) Handoff(ctx context.Context, id string) (Handoff, error) {
+	var response handoffResponse
+	if err := c.request(ctx, http.MethodGet, "/api/v1/handoffs/"+url.PathEscape(id), nil, &response); err != nil {
+		return Handoff{}, err
+	}
+	return Handoff{
+		ID:       response.ID,
+		IssueKey: response.IssueKey,
+		Phase:    response.Phase,
+		Version:  response.Version,
+		Author:   HandoffAuthor{Kind: response.Author.Kind, ID: response.Author.ID},
+	}, nil
+}
+
 // BuildCommit reads GET /healthz and returns the build commit Dispatch reports itself built from
 // (its `commit`), "" when it reports none: null, from a build that stamped no commit
 // (packages/envoy/cmd/dispatch's buildCommit). The route is served above Dispatch's API and
@@ -378,6 +394,14 @@ type approvalResponse struct {
 	LatestVersion int     `json:"latest_version"`
 	Version       *int    `json:"version"`
 	Reason        *string `json:"reason"`
+}
+
+type handoffResponse struct {
+	ID       string `json:"id"`
+	IssueKey string `json:"issue_key"`
+	Phase    string `json:"phase"`
+	Version  int    `json:"version"`
+	Author   actor  `json:"author"`
 }
 
 type actor struct {

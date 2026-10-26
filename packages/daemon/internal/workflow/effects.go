@@ -200,12 +200,15 @@ func refusedLingering(issue record.Issue, request string) intake.Result {
 	return refused("TREE_LINGERING", fmt.Sprintf("the tree %s is lingering after it left the workflow, so %s of %s changed nothing", issue.Tree, request, issue.Key))
 }
 
-// clearHandoff empties the handoff a role reported for its previous phase — its commit, verdict,
-// summary and by-hand note, and the review round's decision, which ends with the round — keeping
-// its claim and the review rounds, when a transition starts it on a new phase. A role's recorded
-// handoff is then always its current phase's: the implementer's round-1 commit cannot advance
-// round 2, a merger sent back to verify again has no READY packet until its next one, and no round
-// inherits an earlier decision. The architect reports no handoff and has no row to clear.
+// clearHandoff empties the handoff a role reported for its previous phase — its commit, the
+// Dispatch handoff record it named, its verdict, summary and by-hand note, and the review round's
+// decision, which ends with the round — keeping its claim, the record it last named (LastHandoff)
+// and the review rounds, when a transition starts it on a new phase. A role's recorded handoff is
+// then always its current phase's: the implementer's round-1 commit cannot advance round 2, a
+// reviewer starting round 2 or a tester starting a new round reads as not completed until it
+// completes again (record.PhaseRow.Completed), a merger sent back to verify again has no READY
+// packet until its next one, and no round inherits an earlier decision. The architect reports no
+// handoff and has no row to clear.
 func (e *Engine) clearHandoff(ctx context.Context, tx pgx.Tx, issue string, role claim.Role) error {
 	if role == "" || role == claim.RoleArchitect {
 		return nil
@@ -215,7 +218,8 @@ func (e *Engine) clearHandoff(ctx context.Context, tx pgx.Tx, issue string, role
 		return err
 	}
 	cleared := row
-	cleared.HandoffCommit, cleared.Verdict, cleared.Summary, cleared.Decision, cleared.CompletedAt, cleared.MergeNote = "", "", "", nil, time.Time{}, ""
+	cleared.HandoffCommit, cleared.HandoffRecord, cleared.HandoffVersion = "", "", 0
+	cleared.Verdict, cleared.Summary, cleared.Decision, cleared.CompletedAt, cleared.MergeNote = "", "", nil, time.Time{}, ""
 	if cleared == row {
 		return nil
 	}
@@ -280,12 +284,19 @@ func withApprovedHead(ctx context.Context, store record.Store, tx pgx.Tx, issue 
 // task is what a started worker is told. It names the phase the worker starts, which the issue
 // record already holds: one role runs several phases (the implementer runs implementing and
 // retro), and a resumed session cannot otherwise tell a new phase from its last.
+// The handoff a file-backed phase ended with is a Dispatch handoff record on the issue, which the
+// line names by its phase word and version with the command that reads it; a commit is named only
+// when the completion reported one (the implementer's, retro's, the merger's).
 // A handoff's verdict is always the tester's, since the daemon accepts one from no other role on
 // a phase completion (api/handoff.go, VERDICT_ROLE_FORBIDDEN; the implementer's check report is no
 // phase completion and starts nobody), so the line names the tester: the reviewer it starts on a
 // pass reads it as the tester's report, never as a field of its own completion.
 func task(issue record.Issue, handoff record.PhaseRow, pr *record.PullRequest, reason string) string {
 	text := continueLine(issue)
+	if handoff.HandoffRecord != "" {
+		word := handoffWord(handoff.Role)
+		text += fmt.Sprintf(" Handoff: %s version %d (dispatch handoff-read --issue %s --phase %s).", word, handoff.HandoffVersion, issue.Key, word)
+	}
 	if handoff.HandoffCommit != "" {
 		text += " Handoff commit: " + handoff.HandoffCommit + "."
 	}
@@ -303,6 +314,17 @@ func task(issue record.Issue, handoff record.PhaseRow, pr *record.PullRequest, r
 
 func continueLine(issue record.Issue) string {
 	return fmt.Sprintf("Continue %s. Issue: %s. Phase: %s.", issue.Title, issue.Key, issue.Phase)
+}
+
+// handoffWord is the word of the Dispatch handoff record role's file-backed phase ends with
+// (phase.HandoffFile), "" for a role that runs none.
+func handoffWord(role claim.Role) string {
+	for _, p := range phase.All {
+		if word, ok := phase.HandoffFile(p); ok && RoleFor(p) == role {
+			return word
+		}
+	}
+	return ""
 }
 
 // ResumePhaseTask is what a worker started for a phase already under way is told. No handoff

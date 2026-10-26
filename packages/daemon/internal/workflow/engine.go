@@ -498,16 +498,22 @@ func (e *Engine) handoff(ctx context.Context, tx pgx.Tx, fact intake.HandoffComp
 			return result, err
 		}
 	}
-	if phase.FileBacked(issue.Phase) {
-		// The commit a completion carries is the pushed commit carrying the phase's handoff, which
-		// the `legion` tool's handoff_complete found in the pane: the one the role reported for its
-		// previous phase means this phase wrote none.
-		if fact.Commit == row.LastHandoff {
-			return refused("HANDOFF_NOT_NEW", fmt.Sprintf("the %s reported commit %s for its previous phase of %s; write and commit this phase's handoff before completing", fact.Role, fact.Commit, issue.Key)), nil
+	if word, ok := phase.HandoffFile(issue.Phase); ok {
+		// A file-backed phase ends with a Dispatch handoff record, which the route read back and
+		// held to this issue, the phase's word, the reported version and the claim's session: the
+		// record the role named for its previous phase means this phase wrote none.
+		if fact.HandoffRecord == "" {
+			return refused("HANDOFF_RECORD_REQUIRED", fmt.Sprintf("the %s's completion of phase %s of %s names no handoff record: write it with `dispatch handoff-write --issue %s --phase %s --body-file <file>`, then complete again; this completion changed nothing",
+				fact.Role, issue.Phase, issue.Key, issue.Key, word)), nil
 		}
-		row.LastHandoff = fact.Commit
+		if fact.HandoffRecord == row.LastHandoff {
+			return refused("HANDOFF_NOT_NEW", fmt.Sprintf("the %s named handoff record %s for its previous phase of %s; write this phase's handoff with `dispatch handoff-write --issue %s --phase %s --body-file <file>` before completing",
+				fact.Role, fact.HandoffRecord, issue.Key, issue.Key, word)), nil
+		}
+		row.LastHandoff = fact.HandoffRecord
 	}
 	row.Claim, row.HandoffCommit, row.Verdict, row.Summary, row.CompletedAt = fact.Claim, fact.Commit, fact.Verdict, fact.Summary, e.now()
+	row.HandoffRecord, row.HandoffVersion = fact.HandoffRecord, fact.HandoffVersion
 	row.MergeNote = fact.MergeNote
 	if err := e.store.PutPhase(ctx, tx, row); err != nil {
 		return intake.Result{}, err
@@ -904,7 +910,7 @@ func (e *Engine) takenOver(ctx context.Context, tx pgx.Tx, issue string, trigger
 		return "", nil
 	}
 	row, err := e.phaseRow(ctx, tx, issue, leaving)
-	if err != nil || row.HandoffCommit != "" {
+	if err != nil || row.Completed() {
 		return "", err
 	}
 	return leaving, nil

@@ -33,6 +33,7 @@ type Client interface {
 	PostMessage(ctx context.Context, key, body string) error
 	MessageBodiesSince(ctx context.Context, key string, since time.Time) ([]string, error)
 	Approval(ctx context.Context, artifactID string) (Approval, error)
+	Handoff(ctx context.Context, id string) (Handoff, error)
 	BuildCommit(ctx context.Context) (string, error)
 	ListRepoProjects(ctx context.Context) ([]RepoProject, error)
 }
@@ -114,6 +115,26 @@ type Approval struct {
 	LatestVersion int
 	Version       *int
 	Reason        *string
+}
+
+// Handoff is one phase handoff record Dispatch keeps on an issue, as a phase completion names it:
+// the issue carrying it, its phase word (plan, implement, test or review; phase.HandoffFile), its
+// version among that phase's records, and the actor that wrote it. The body is not read: the
+// daemon holds a completion to who wrote which record, and what a handoff says is the next role's
+// to read with `dispatch handoff-read`.
+type Handoff struct {
+	ID       string
+	IssueKey string
+	Phase    string
+	Version  int
+	Author   HandoffAuthor
+}
+
+// HandoffAuthor is the actor that wrote a handoff record: Kind is `session` for a record a session
+// wrote with `dispatch handoff-write`, ID that session.
+type HandoffAuthor struct {
+	Kind string
+	ID   string
 }
 
 // Error is a non-success response from Dispatch. Code is empty only when the response did not

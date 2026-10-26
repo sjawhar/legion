@@ -25,7 +25,7 @@ func seedAccepting(t *testing.T, pool *pgxpool.Pool) {
 	seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head",
 		CheckedHead: "head", Required: []string{acceptingRequired}, CheckRuns: []record.AttemptRun{{Name: acceptingRequired, ID: 1}}, Failing: []string{}})
 	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim", HandoffCommit: "implement-1"})
-	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "review-claim", HandoffCommit: "review-1", Summary: "reviewed",
+	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "review-claim", HandoffRecord: "review-1", HandoffVersion: 1, Summary: "reviewed",
 		Decision: &record.ReviewDecision{State: "approved", Head: "head"}})
 }
 
@@ -36,7 +36,7 @@ func seedAccepting(t *testing.T, pool *pgxpool.Pool) {
 func TestAnApprovalMovesTheIssueToAcceptingAndStartsNobody(t *testing.T) {
 	pool := migratedPool(t)
 	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Reviewing, Generation: 1, Status: "needs_review", Rank: "U"})
-	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "review-claim", HandoffCommit: "review-1", Summary: "looks right"})
+	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "review-claim", HandoffRecord: "review-1", HandoffVersion: 1, Summary: "looks right"})
 	seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head", CheckedHead: "head", Failing: []string{}, Required: []string{}})
 
 	applyRefusingNothing(t, pool, testEngine(config.DesignGateRootIssues, nil),
@@ -78,8 +78,8 @@ func TestSignOffIsRefusedOutsideAccepting(t *testing.T) {
 }
 
 // The architect's sign_off in accepting moves the issue to retro with the status retro and starts
-// the implementer there, its task naming the phase, the review's handoff and the pull request; the
-// architect that just acted is told nothing.
+// the implementer there, its task naming the phase, the review's handoff record (the reviewer
+// reports no commit) and the pull request; the architect that just acted is told nothing.
 func TestSignOffInAcceptingStartsRetro(t *testing.T) {
 	pool := migratedPool(t)
 	seedAccepting(t, pool)
@@ -95,10 +95,13 @@ func TestSignOffInAcceptingStartsRetro(t *testing.T) {
 		t.Fatalf("status write = %q, %v; want retro", written, err)
 	}
 	task := startTask(t, pool, claim.RoleImplementer)
-	for _, want := range []string{"Phase: retro.", "Handoff commit: review-1.", "Pull request: #42."} {
+	for _, want := range []string{"Phase: retro.", "Handoff: review version 1 (dispatch handoff-read --issue LEGION-208 --phase review).", "Pull request: #42."} {
 		if !strings.Contains(task, want) {
 			t.Fatalf("the implementer's retro task %q does not carry %q", task, want)
 		}
+	}
+	if strings.Contains(task, "Handoff commit:") {
+		t.Fatalf("the implementer's retro task %q names a commit the reviewer never reported", task)
 	}
 	if rounds := implementerRounds(t, pool); rounds != 0 {
 		t.Fatalf("acceptance counted the implementer %d rounds, want none", rounds)

@@ -295,6 +295,9 @@ func (d *blockingDispatch) Approval(context.Context, string) (dispatch.Approval,
 	return dispatch.Approval{}, nil
 }
 func (d *blockingDispatch) BuildCommit(context.Context) (string, error) { return "", nil }
+func (d *blockingDispatch) Handoff(context.Context, string) (dispatch.Handoff, error) {
+	return dispatch.Handoff{}, nil
+}
 func (d *blockingDispatch) ListRepoProjects(context.Context) ([]dispatch.RepoProject, error) {
 	return nil, nil
 }
@@ -449,6 +452,9 @@ func (d *refusingDispatch) Approval(context.Context, string) (dispatch.Approval,
 	return dispatch.Approval{}, nil
 }
 func (d *refusingDispatch) BuildCommit(context.Context) (string, error) { return "", nil }
+func (d *refusingDispatch) Handoff(context.Context, string) (dispatch.Handoff, error) {
+	return dispatch.Handoff{}, nil
+}
 func (d *refusingDispatch) ListRepoProjects(context.Context) ([]dispatch.RepoProject, error) {
 	return nil, nil
 }
@@ -484,6 +490,9 @@ func (d *boardDispatch) Approval(context.Context, string) (dispatch.Approval, er
 	return dispatch.Approval{}, nil
 }
 func (d *boardDispatch) BuildCommit(context.Context) (string, error) { return "", nil }
+func (d *boardDispatch) Handoff(context.Context, string) (dispatch.Handoff, error) {
+	return dispatch.Handoff{}, nil
+}
 func (d *boardDispatch) ListRepoProjects(context.Context) ([]dispatch.RepoProject, error) {
 	return nil, nil
 }

@@ -108,7 +108,7 @@ func TestACompletionFromAnInterruptedRunIsRefused(t *testing.T) {
 
 	result, err := intake.ApplyFact(ctx, pool, "api", "stale-handoff", intake.HandoffComplete{
 		Issue: "LEGION-209", Role: claim.RolePlanner, Claim: "child-planner", Summary: "the plan of the run that was interrupted",
-		Commit: "plan-of-generation-1", Generation: 1,
+		HandoffRecord: "plan-of-generation-1", HandoffVersion: 1, Generation: 1,
 	}, engine, admissionStub{})
 	if err != nil {
 		t.Fatalf("apply the stale completion: %v", err)
@@ -136,7 +136,7 @@ func TestACompletionFromAnInterruptedRunIsRefused(t *testing.T) {
 	// The run the child is actually on reports the same phase, and it moves.
 	if _, err := intake.ApplyFact(ctx, pool, "api", "live-handoff", intake.HandoffComplete{
 		Issue: "LEGION-209", Role: claim.RolePlanner, Claim: "child-planner", Summary: "the new run's plan",
-		Commit: "plan-of-generation-2", Generation: 2,
+		HandoffRecord: "plan-of-generation-2", HandoffVersion: 2, Generation: 2,
 	}, engine, admissionStub{}); err != nil {
 		t.Fatalf("apply the live completion: %v", err)
 	}

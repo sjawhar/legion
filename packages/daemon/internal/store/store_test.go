@@ -887,7 +887,7 @@ func TestReadyMergeDedupMigrationHoldsOffAConcurrentEnqueue(t *testing.T) {
 func TestTheUpgradeQueuesTheMergeOfAREADYAlreadyAwaitingIt(t *testing.T) {
 	seed := func(t *testing.T, store *Store) {
 		t.Helper()
-		ctx, records := context.Background(), record.NewStore()
+		ctx := context.Background()
 		until, root := time.Now().Add(time.Hour), "LEGION-212"
 		awaiting := func(key, status string) record.Issue {
 			return record.Issue{Key: key, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: key, Project: "LEGION", Title: key, Phase: phase.AwaitingMerge, Generation: 1, Status: status, Rank: "U"}
@@ -921,7 +921,10 @@ func TestTheUpgradeQueuesTheMergeOfAREADYAlreadyAwaitingIt(t *testing.T) {
 				if seeded.pr == "" {
 					continue
 				}
-				if err := records.PutPhase(ctx, tx, record.PhaseRow{Issue: seeded.issue.Key, Role: claim.RoleMerger, Claim: "merge-claim", HandoffCommit: "ready-head", MergeNote: seeded.mergeNote}); err != nil {
+				// So is the merger's row: the record store's has columns later migrations add
+				// (0055's handoff_record and handoff_version).
+				if _, err := tx.Exec(ctx, `insert into phases (issue, role, claim, handoff_commit, rounds, verdict, merge_note)
+					values ($1, $2, 'merge-claim', 'ready-head', 0, '', $3)`, seeded.issue.Key, string(claim.RoleMerger), seeded.mergeNote); err != nil {
 					return err
 				}
 				// The pull request is written as the schema under test holds it, not through the

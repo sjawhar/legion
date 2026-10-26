@@ -200,6 +200,9 @@ type harness struct {
 	// context was the agent's request's or one that outlives its connection.
 	reported           *[]capabilities.Report
 	reportedContextErr *[]error
+	// handoffs is the Dispatch a completion route's harness reads handoff records from
+	// (newHandoffHarness), which writeHandoff fills; nil for a harness serving no completion.
+	handoffs *statusRecorder
 }
 
 func newHarness(t *testing.T) *harness {

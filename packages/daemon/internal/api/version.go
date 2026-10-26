@@ -361,4 +361,24 @@ package api
 // merges after another takes the next free contract number and renumbers its store migration past
 // main's, every site that names either included, among them the rollback's
 // `delete from schema_version where version = 54` in docs/kubernetes.md.)
-const DaemonAPIVersion = 39
+//
+// 40: INFRA-177 (sjawhar/legion) -- a phase's handoff is a record on its Dispatch issue, which the
+// worker writes with `dispatch handoff-write` under its own session, rather than a committed
+// `.legion/<KEY>/<phase>.json`. `api.HandoffCompleteRequest` gains `handoffId` and
+// `handoffVersion`, the record a file-backed phase's completion (planning, implementing, testing,
+// reviewing) names, and the daemon refuses such a completion without one
+// (HANDOFF_RECORD_REQUIRED); it reads the record back from Dispatch and refuses one Dispatch has
+// not (HANDOFF_RECORD_NOT_FOUND), cannot read (DISPATCH_READ_FAILED), of another issue, phase or
+// version (HANDOFF_RECORD_MISMATCH), or written by another session than the claim's
+// (HANDOFF_SESSION_MISMATCH), and `HANDOFF_NOT_NEW` and the completion's idempotency key name the
+// record id in place of the commit. `commit` stays the implementer's (its pushed tip, and retro's
+// commit) and the merger's; the planner, tester and reviewer send none, and the daemon no longer
+// requires one of them. `api.PhaseView` gains `handoffRecord`, `{id, version}`, absent until the
+// worker's completion of its current file-backed phase names one; store migration 0055 keeps it
+// on the phase row. A 39 plugin posts a commit and no record, which this daemon refuses, and its
+// strict reader refuses a state carrying `handoffRecord`, so the boot gate and `legion
+// probe-image` refuse the mixed pair. (Other open branches may declare 40 or a store migration
+// 0055 too: whichever merges after another takes the next free contract number and renumbers its
+// store migration past main's, every site that names either included, among them the rollback's
+// `delete from schema_version where version = 55` in docs/kubernetes.md.)
+const DaemonAPIVersion = 40

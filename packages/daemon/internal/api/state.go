@@ -355,11 +355,21 @@ func CapabilityReportViewOf(report capabilities.Report) *CapabilityReportView {
 	return view
 }
 
-// PhaseView is one phase worker's claim, its committed handoff, and the rounds the phase has run.
+// PhaseView is one phase worker's claim, the handoff of its current phase — the commit its
+// completion reported, the Dispatch handoff record it named — and the rounds the phase has run.
 type PhaseView struct {
-	Claim         ClaimView `json:"claim"`
-	HandoffCommit string    `json:"handoffCommit,omitempty"`
-	Rounds        int       `json:"rounds"`
+	Claim         ClaimView          `json:"claim"`
+	HandoffCommit string             `json:"handoffCommit,omitempty"`
+	HandoffRecord *HandoffRecordView `json:"handoffRecord,omitempty"`
+	Rounds        int                `json:"rounds"`
+}
+
+// HandoffRecordView is the Dispatch handoff record a worker's completion of its current
+// file-backed phase named: the record's id, and its version among its phase's records, which
+// `dispatch handoff-read --issue <KEY> --phase <word> --version <n>` reads.
+type HandoffRecordView struct {
+	ID      string `json:"id"`
+	Version int    `json:"version"`
 }
 
 // PullRequestView is the issue's pull request as the daemon observes it from GitHub.
