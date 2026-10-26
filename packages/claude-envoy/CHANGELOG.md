@@ -33,8 +33,8 @@
   comment that mentions it arrives once, as the mention, when the mention reached it, and still
   reaches it directly when the mention's send fails (a mention whose receipt timed out can arrive
   twice: the second copy is the same comment). A `session:` route to the session brings a person's
-  answers, comments and messages as a claim does; only a subscription to the issue brings other
-  agents' activity (INFRA-278).
+  answers, comments and messages as a claim does; a subscription to the issue brings other agents'
+  activity, beyond a reply in an ask the session follows (INFRA-278).
 - The plugin declares daemon API contract 38 in `package.json`'s `legion.daemonApiVersion`
   (INFRA-225): `GET /legion/v1/state` carries `admission.blocked`, every root and child Legion is
   waiting to start behind an unfinished Dispatch issue, each `{issue, blockedBy}`, and

@@ -140,8 +140,8 @@
   no comments: a person's answers, comments and messages on the claimed issue reach the session,
   and a new comment that mentions it arrives as the mention alone once that mention was delivered,
   or twice when the mention's receipt timed out. A `session:` route to the session brings a
-  person's answers, comments and messages as a claim does; only a subscription to the issue brings
-  other agents' activity (INFRA-278).
+  person's answers, comments and messages as a claim does; a subscription to the issue brings
+  other agents' activity, beyond a reply in an ask the session follows (INFRA-278).
 - Three Dispatch skills ship, under 2,000 words together, from four skills and the
   dispatch skill's eight references of 10,908 words. `dispatch-writing-specs` replaces
   `dispatch-brainstorming`, and `skill://dispatch-brainstorming` no longer resolves. It sets a

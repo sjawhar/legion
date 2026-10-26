@@ -796,8 +796,8 @@
   reaches only that session. The claim is read when the event is published, so a retry after the
   claim changed hands reaches the new holder, and a claimant that is also the route, a follower or
   an author gets one copy. A claim or a `session:` route brings a person's answers, comments and
-  messages, and a route a person's other changes on the issue too; only a subscription to the
-  issue brings other agents' activity (INFRA-278).
+  messages, and a route a person's other changes on the issue too; a subscription to the issue
+  brings other agents' activity, beyond a reply in an ask the session follows (INFRA-278).
 - A new comment (`comment.created`) is left to its mention only once the mention delivered it: the
   route, claimant, author and ask follower copies skip a session the comment's mentions resolved
   to only when `comment_deliveries` records the mention `sent` to that session, so such a comment
