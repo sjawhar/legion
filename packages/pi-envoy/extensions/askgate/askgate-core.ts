@@ -2384,6 +2384,10 @@ const UNREVIEWED_CAUSE: Partial<Record<GateEntry["outcome"], string>> = {
   timeout: "the review did not answer within its deadline",
   error: "the review failed",
   "no-verdict": "the review answered with no verdict AskGate could read",
+  // Given up in warn mode (`givenUp`). The note still reaches an agent whose call goes on: an eval
+  // cell that keeps running after the user's stop reads it on its call's own result.
+  abandoned: "its call or its run ended before the review answered",
+  shutdown: "the session shut down before the review answered",
   skipped: "this session's model is on another provider than the gate's",
   halted:
     "AskGate is paused for this session after three calls without a verdict, and reviews no Dispatch write until the session changes",
@@ -2709,8 +2713,8 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
     };
     /**
      * The write goes out. Every outcome `UNREVIEWED_CAUSE` names hands the agent a note saying it
-     * went out unreviewed and why; `abandoned` and `shutdown` get none, their own tool or session
-     * having ended before anything could reach the agent.
+     * went out unreviewed and why, also `abandoned` and `shutdown`, whose note reaches the agent
+     * only where its call goes on after its tool, run or session ended.
      */
     const pass = (
       outcome: GateEntry["outcome"],

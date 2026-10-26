@@ -1211,7 +1211,12 @@ describe("deadline and abandonment", () => {
       const gated = g.device(id, "dispatch_comment", COMMENT);
       await started.promise;
       g.event("tool_execution_end", { toolCallId: id, toolName: "write", isError: true });
-      expect(await gated).toBeUndefined();
+      // Warn mode lets it go, and says it went out unreviewed (the attack review, non-blocking 2).
+      const result = await gated;
+      expect(result?.block).toBeUndefined();
+      expect(result?.additionalContext).toContain(
+        'outcome="abandoned">\nAskGate did not review this Dispatch write: its call or its run ended before the review answered.'
+      );
     }
     expect(signals.every((s) => s.aborted)).toBe(true);
     expect(g.entries.map((e) => e.outcome)).toEqual(["abandoned", "abandoned", "abandoned"]);
@@ -1254,7 +1259,15 @@ describe("deadline and abandonment", () => {
   test("a run the user stopped abandons every gate still waiting, whichever path dispatched its call", async () => {
     const { g, gated, signals } = await bridgedGate();
     g.event("agent_end", { messages: [fx.user("Post it."), lastAssistant("aborted")] });
-    expect(await gated).toBeUndefined();
+    const result = await gated;
+    expect(result?.block).toBeUndefined();
+    expect(result?.additionalContext).toContain('outcome="abandoned"');
+    // A cell still running after the stop reads the note on its call's own result.
+    const carried = await g.event("tool_result", {
+      toolCallId: "js-write-00000000-0000-4000-8000-000000000000",
+      content: [{ type: "text", text: "posted" }],
+    });
+    expect(carried?.content?.at(-1)).toEqual({ type: "text", text: result?.additionalContext });
     expect(signals[0].aborted).toBe(true);
     expect(g.entries).toMatchObject([{ decision: "allow", outcome: "abandoned", usage: PARTIAL }]);
     expect(g.notices).toHaveLength(0);
@@ -1308,7 +1321,11 @@ describe("deadline and abandonment", () => {
   test("in warn mode it goes out, recorded as shutdown so it counts as ungated, not as the user's stop", async () => {
     const { g, gated } = await bridgedGate();
     await g.event("session_shutdown");
-    expect(await gated).toBeUndefined();
+    const result = await gated;
+    expect(result?.block).toBeUndefined();
+    expect(result?.additionalContext).toContain(
+      'outcome="shutdown">\nAskGate did not review this Dispatch write: the session shut down before the review answered.'
+    );
     expect(g.entries).toMatchObject([
       { decision: "allow", outcome: "shutdown", verdictMode: "warn" },
     ]);
@@ -1328,7 +1345,9 @@ describe("deadline and abandonment", () => {
   test("in warn mode such a call goes out unasked, recorded as shutdown, not as the user's stop", async () => {
     const g = bind();
     await g.event("session_shutdown");
-    expect(await g.device("late", "dispatch_comment", COMMENT)).toBeUndefined();
+    const result = await g.device("late", "dispatch_comment", COMMENT);
+    expect(result?.block).toBeUndefined();
+    expect(result?.additionalContext).toContain('outcome="shutdown"');
     expect(g.calls).toHaveLength(0);
     expect(g.entries).toMatchObject([
       { decision: "allow", outcome: "shutdown", verdictMode: "warn" },
