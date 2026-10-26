@@ -13,7 +13,9 @@
   one. One answer holds at most 32 subjects, 500 messages (100 by default), 2 MiB and 5 s of
   reading, and says `more` for a subject it cut short. NATS refusing the read is
   `503 {"code":"REPLAY_UNAVAILABLE"}` naming NATS's error; a listener without the route answers
-  404, which a session reads as "does not replay" (INFRA-439).
+  404, which a session reads as "does not replay". A `session_id` that is not one literal NATS
+  token (`.`, `*`, `>`, whitespace or a control character) is a 400, so a wildcard cannot make
+  `notifications.agent.>` its own subject and read every session's inbox (INFRA-439).
 - `envoy-infra`'s `ListenerPermissions`, and through it `HostPermissions` and
   `DispatchPermissions`, grant `$JS.API.STREAM.MSG.GET.ENVOY_NOTIFICATIONS`, the stored-message
   read `/v1/replay` makes; it reads one message at a time and can create, change or delete
