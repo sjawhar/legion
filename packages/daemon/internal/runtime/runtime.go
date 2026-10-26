@@ -46,10 +46,12 @@ type Runtime interface {
 	// when it recorded none, and a hint: a runtime that finds a claim's process by the claim's own
 	// place, as a sandbox finds a role's launcher in its issue's pod, waits out whatever runs
 	// there even when prev is nil. A claim resumes the agent it recorded or none: a fresh agent on
-	// a claim that had one is the failure the same-agent refusal exists to catch. A runtime that
-	// reads the session file where the agent runs, and finds none there, returns an error wrapping
-	// ErrSessionFileMissing, having started nothing and waited prev out: the caller then forgets
-	// the session and starts a fresh agent rather than ask again for a file that is not there. On
+	// a claim that had one is the failure the same-agent refusal exists to catch, so a session file
+	// found nowhere is a refusal, charged as any launch failure is, and the claim keeps its
+	// session. The one exception is the operator's takeover of another runtime's claims (the tmux
+	// runtime's `runtime.tmux.take_over`): a Resume over a prev that runtime recorded, whose session
+	// file is found nowhere the agent would run, returns an error wrapping ErrSessionFileMissing,
+	// having started nothing, and the caller then forgets the session and starts a fresh agent. On
 	// an error the caller owns stopping prev (Suspend), and Resume has stopped any process it
 	// started itself.
 	Resume(ctx context.Context, prev *Locator, spec SpawnSpec) (Locator, error)
@@ -113,9 +115,11 @@ type Runtime interface {
 	CleanupTree(ctx context.Context, tree string) error
 }
 
-// ErrSessionFileMissing is a Resume that found no file at the spec's ResumeSessionFile where the
-// agent would run: a session recorded under another runtime, or on a volume that is gone. Nothing
-// was started; the claim's recorded session can never be resumed there.
+// ErrSessionFileMissing is a Resume over a previous incarnation of a runtime the operator chose to
+// take over (the tmux runtime's `runtime.tmux.take_over: kubernetes`) that found the spec's
+// ResumeSessionFile nowhere the agent would run: the session was that runtime's, kept where this
+// one cannot read it. Nothing was started, and the caller starts a fresh agent in the session's
+// place. A session file missing on any other Resume is a refusal that does not wrap it.
 var ErrSessionFileMissing = errors.New("the recorded session file is missing")
 
 // IssueSuspender stops an issue's pod once authorize, called under the runtime's issue launch
@@ -261,14 +265,15 @@ type Observation struct {
 	Kind    ObservationKind
 	At      time.Time
 	Detail  string
-	// Displaced is a Gone or NotRecordedProcess of a process the daemon itself ended: it replaced
-	// the process's pod while the process ran, to launch another role there. Only the Sandbox
-	// runtime reports it, for a replacement of a live issue or controller pod — one on another
-	// image, one holding a worker stream, secrets broker enrollment or session database URL key a
-	// pod created now is not handed, or one whose role launcher Secret no longer binds it. The
-	// process did nothing wrong, so the supervisor resumes its session at once, charging nothing,
-	// rather than count a death. It is a field rather than a shape of Detail, which is prose for an
-	// operator and nothing else.
+	// Displaced is a Gone or NotRecordedProcess of a process that ended through no fault of its
+	// own. The Sandbox runtime reports it when the daemon itself replaced the process's pod while
+	// the process ran, to launch another role there — a replacement of a live issue or controller
+	// pod on another image, one holding a worker stream, secrets broker enrollment or session
+	// database URL key a pod created now is not handed, or one whose role launcher Secret no longer
+	// binds it. The tmux runtime reports it, under `runtime.tmux.take_over`, for a process another
+	// runtime recorded, which this daemon takes over and cannot see. The process did nothing wrong,
+	// so the supervisor resumes its session at once, charging nothing, rather than count a death. It
+	// is a field rather than a shape of Detail, which is prose for an operator and nothing else.
 	Displaced bool
 }
 

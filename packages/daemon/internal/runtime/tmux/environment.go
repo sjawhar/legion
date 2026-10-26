@@ -82,15 +82,19 @@ func readProviderKeyNames(dir string, dispatchConfigured bool) ([]string, error)
 // checkPaneEnv refuses an operator's pane variable (Options.PaneEnv, `runtime.tmux.pane_env`) that
 // would change what a pane is told by anything but the operator: a name the runtime sets on a tree
 // or controller pane itself, PATH, which the runtime composes, the git identity each launch sets for
-// its role (runtime.GitIdentity.Env), a provider key or its pointer, which the shim would then
-// refuse to start over or skip (internal/shim/config.go), and a credential-shaped name, since a
-// secret reaches a pane as a file and never as a value on tmux's command line. The loader refuses
-// what it can see without the runtime (config.readPaneEnv); this is the rest, at boot, before any
-// pane opens.
+// its role (runtime.GitIdentity.Env), a credential-shaped name, since a secret reaches a pane as a
+// file and never as a value on tmux's command line, every variable runtime.PaneVariableRefusal
+// refuses (one that places the session a resume reads, one a Claude Code pane is told after the
+// operator's, a launch secret's pointer, a value that is a URL carrying a password), and a provider
+// key or its pointer, which the shim would then refuse to start over or skip
+// (internal/shim/config.go). The loader refuses what it can see without the runtime
+// (config.readPaneEnv); this refuses that again and the rest, at boot, before any pane opens. A
+// refusal names the variable and why, never its value.
 func checkPaneEnv(env map[string]string, providerKeys []string) error {
 	identity := runtime.GitIdentity{}.Env()
 	for _, name := range slices.Sorted(maps.Keys(env)) {
 		_, isIdentity := identity[name]
+		why := runtime.PaneVariableRefusal(name, env[name])
 		switch {
 		case !runtime.IsEnvName(name):
 			return fmt.Errorf("tmux runtime: pane variable %q is not an environment variable name", name)
@@ -100,6 +104,8 @@ func checkPaneEnv(env map[string]string, providerKeys []string) error {
 			return fmt.Errorf("tmux runtime: pane variable %s is part of the git identity each launch sets for its role", name)
 		case runtime.HoldsSecretValue(name):
 			return fmt.Errorf("tmux runtime: pane variable %s is credential-shaped: a secret reaches a pane as a file (provider_keys), never as a value", name)
+		case why != "":
+			return fmt.Errorf("tmux runtime: pane variable %s: %s", name, why)
 		}
 		for _, key := range providerKeys {
 			if name == key || name == key+"_FILE" {

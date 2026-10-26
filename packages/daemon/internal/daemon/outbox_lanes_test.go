@@ -371,7 +371,7 @@ func startLaneTree(t *testing.T, log *slog.Logger) *laneTree {
 			tree.provisions.Add(1)
 			return workspace.Workspace{}, nil
 		},
-		remove: func(context.Context, workspace.Workspace) error { return nil },
+		remove: func(context.Context, workspace.Workspace, sync.Locker) error { return nil },
 	}
 	tree.records = wakingRecords(tree.runner)
 	runLanes(t, tree.runner, tree.clock, tree.spawn.gate.open)

@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -327,7 +328,7 @@ func readmissionRig(t *testing.T, suspend func(*supervisor, claim.Token)) (rt *f
 		provision: func(context.Context, workspace.Request) (workspace.Workspace, error) {
 			return workspace.Workspace{Dir: t.TempDir(), Bookmark: "legion/LEGION-208"}, nil
 		},
-		remove: func(context.Context, workspace.Workspace) error { return nil },
+		remove: func(context.Context, workspace.Workspace, sync.Locker) error { return nil },
 	}
 	tick = func(by time.Duration) {
 		t.Helper()

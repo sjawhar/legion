@@ -76,6 +76,51 @@ func TestNewRefusesAnOperatorPaneVariableTheRuntimeOwns(t *testing.T) {
 	}
 }
 
+// At boot the runtime also refuses, before any pane opens, a pane variable that places the session
+// a resume reads, one a Claude Code pane is told after the operator's, a launch secret's pointer,
+// which every launch would then be refused over, and a value that is a URL carrying a password:
+// each named with why, never with its value.
+func TestNewRefusesAPaneVariableThatMovesSessionsOrHoldsAPassword(t *testing.T) {
+	const password = "hunter2-boot"
+	for _, tc := range []struct {
+		name, value, want string
+	}{
+		{"OMP_SESSION_STORAGE", "sql", "tmux runtime: pane variable OMP_SESSION_STORAGE: it decides where Oh My Pi keeps the session a resume reads, which the runtime places itself"},
+		{"OMP_SESSION_SQL_DSN", "/etc/acme/dsn", "tmux runtime: pane variable OMP_SESSION_SQL_DSN: it decides where Oh My Pi keeps the session a resume reads, which the runtime places itself"},
+		{"OMP_SESSION_SQL_DSN_FILE", "/etc/acme/dsn", "tmux runtime: pane variable OMP_SESSION_SQL_DSN_FILE: it decides where Oh My Pi keeps the session a resume reads, which the runtime places itself"},
+		{"PI_CODING_AGENT_DIR", "/srv/agent", "tmux runtime: pane variable PI_CODING_AGENT_DIR: it decides where Oh My Pi keeps the session a resume reads, which the runtime places itself"},
+		{"PI_CONFIG_DIR", ".elsewhere", "tmux runtime: pane variable PI_CONFIG_DIR: it decides where Oh My Pi keeps the session a resume reads, which the runtime places itself"},
+		{"CLAUDE_CONFIG_DIR", "/srv/claude", "tmux runtime: pane variable CLAUDE_CONFIG_DIR: the runtime sets it on every Claude Code pane itself, after the operator's variables"},
+		{"CLAUDE_CODE_DISABLE_BACKGROUND_TASKS", "0", "tmux runtime: pane variable CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: the runtime sets it on every Claude Code pane itself, after the operator's variables"},
+		{"CLAUDE_CODE_DISABLE_CRON", "0", "tmux runtime: pane variable CLAUDE_CODE_DISABLE_CRON: the runtime sets it on every Claude Code pane itself, after the operator's variables"},
+		{"ENVOY_TOKEN_FILE", "/etc/acme/envoy", "tmux runtime: pane variable ENVOY_TOKEN_FILE: it points at the launch secret ENVOY_TOKEN, which the runtime hands every launch as a file of the launch's own"},
+		{"NATS_NKEY_SEED_FILE", "/etc/acme/seed", "tmux runtime: pane variable NATS_NKEY_SEED_FILE: it points at the launch secret NATS_NKEY_SEED, which the runtime hands every launch as a file of the launch's own"},
+		{"WIDGETS_DATABASE_URL", "postgres://acme:" + password + "@db.internal.example/widgets", "tmux runtime: pane variable WIDGETS_DATABASE_URL: its value is a URL carrying a password: a secret reaches a pane as a file (provider_keys), never as a value on tmux's command line"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := checkPaneEnv(map[string]string{"ELAN_HOME": "/opt/elan", tc.name: tc.value}, nil)
+			if err == nil || err.Error() != tc.want {
+				t.Fatalf("checkPaneEnv = %v, want %q", err, tc.want)
+			}
+			if strings.Contains(err.Error(), password) {
+				t.Errorf("the refusal %q holds the value's password", err)
+			}
+		})
+	}
+	// The Claude Code pane's pairs are exactly the names refused: none is told after the operator's
+	// variables without the operator being refused it first.
+	pairs := claudeEnvironment("/state/claude/c")
+	for i := 1; i < len(pairs); i += 2 {
+		name, _, _ := strings.Cut(pairs[i], "=")
+		if checkPaneEnv(map[string]string{name: "x"}, nil) == nil {
+			t.Errorf("a Claude Code pane is told %s after the operator's variables, and the operator may set it", name)
+		}
+	}
+	if err := checkPaneEnv(map[string]string{"WIDGETS_URL": "https://widgets.example/acme", "LEDGER_DSN_FILE": "/etc/legion-ledger/dsn"}, nil); err != nil {
+		t.Errorf("checkPaneEnv with a URL holding no password and a _FILE pointer of the operator's: %v", err)
+	}
+}
+
 // paneEnvOptions are the Options of a runtime given the operator's pane variables and overlays.
 func paneEnvOptions(t *testing.T, env map[string]string, overlays []string) Options {
 	t.Helper()

@@ -515,7 +515,7 @@ type plan struct {
 	// workflow does not record); nil without a workflow.
 	repository func(ctx context.Context, issue string) (ghrepo.Repository, string, error)
 	// ensureWorkspace provisions an issue's workspace on the daemon's host when a launch finds it
-	// missing (workflowRuntime.ensureWorkspace); nil without a workflow.
+	// missing or not checked out (workflowRuntime.ensureWorkspace); nil without a workflow.
 	ensureWorkspace func(ctx context.Context, issue string, repo ghrepo.Repository, defaultBranch string) error
 	// repositories is the project's repository mapping as the workflow serves it, empty until the
 	// workflow reads it at boot: every role's gh bundle holds a directory for each of its owners.
@@ -797,7 +797,7 @@ func claimRepositoryOwner(issueOf func(context.Context, claim.Token) (string, er
 
 // tmuxOptions translates the configuration into the tmux runtime's Options, all but the worker
 // stream and the GitHub credential function, which boot hands the factory: the `runtime.tmux`
-// block's pane variables and Oh My Pi overlays among them.
+// block's pane variables, Oh My Pi overlays and take_over among them.
 func tmuxOptions(cfg config.Config, project string, launchers map[runtime.Backend]tmux.Launcher, providerEnvDir, dispatchTokenFile string, log *slog.Logger) tmux.Options {
 	opts := tmux.Options{
 		Project:           project,
@@ -815,7 +815,7 @@ func tmuxOptions(cfg config.Config, project string, launchers map[runtime.Backen
 		Log:               log,
 	}
 	if block := cfg.Runtime.Tmux; block != nil {
-		opts.PaneEnv, opts.PiConfigFiles = block.PaneEnv, block.PiConfigFiles
+		opts.PaneEnv, opts.PiConfigFiles, opts.TakeOver = block.PaneEnv, block.PiConfigFiles, block.TakeOver
 	}
 	return opts
 }
@@ -1351,6 +1351,11 @@ func (s *supervision) stop() {
 	})
 }
 
+// phaseRole is the role that works a phase (workflow.RoleFor), which the operator's retry of a
+// held phase checks (api.Options.RoleFor). It is named at package level because serve's own
+// workflow parameter hides the package there.
+var phaseRole = workflow.RoleFor
+
 // serve runs the API on the listener the daemon already took until ctx is done or the server
 // fails, and returns once it is closed: one goroutine serves, the other shuts down, and the
 // shutdown runs on a context of its own so a cancelled ctx still drains the connections it has.
@@ -1411,6 +1416,7 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 		Pool:               st.Pool(),
 		Handlers:           handlers,
 		PrepareRepository:  prepare,
+		RoleFor:            phaseRole,
 		Record:             records,
 		Dispatch:           client,
 		Tokens:             tokens,

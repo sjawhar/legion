@@ -488,9 +488,9 @@ func (w *workflowRuntime) identity(ctx context.Context, role claim.Role, owner s
 }
 
 // ensureWorkspace provisions an issue's workspace on the daemon's host when a launch finds it
-// missing (outbox.ensureWorkspace), through the outbox, which orders every provision of the shared
-// clones (provisionLocks). The outbox exists from attach on, and attach runs before supervision
-// restores or launches any claim.
+// missing or not checked out (outbox.ensureWorkspace), through the outbox, which orders every
+// provision of the shared clones (provisionLocks). The outbox exists from attach on, and attach
+// runs before supervision restores or launches any claim.
 func (w *workflowRuntime) ensureWorkspace(ctx context.Context, issue string, repo ghrepo.Repository, defaultBranch string) error {
 	if w.outbox == nil {
 		return fmt.Errorf("provision the workspace of %s: the workflow's outbox is not attached yet", issue)

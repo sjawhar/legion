@@ -291,18 +291,28 @@ func TestMaterializeProviderKeysReadsAFileKey(t *testing.T) {
 	}
 }
 
-// A file provider key that cannot be read, or holds nothing, is a refusal naming the variable and
-// the file, and the boot writes no key at all.
+// A file provider key is read by ReadPrivateSecretPointer's rules: a file that cannot be read, holds
+// nothing, is not a regular file, or that its group or others can read is a refusal naming the
+// variable and the file, never its contents, and the boot writes no key at all.
 func TestMaterializeProviderKeysRefusesAFileKeyItCannotUse(t *testing.T) {
 	dir := t.TempDir()
 	empty := filepath.Join(dir, "empty")
 	if err := os.WriteFile(empty, []byte(" \n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	shared := filepath.Join(dir, "shared")
+	if err := os.WriteFile(shared, []byte("file-value\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(shared, 0o644); err != nil {
+		t.Fatal(err)
+	}
 	missing := filepath.Join(dir, "missing")
 	for _, tc := range []struct{ name, file, want string }{
-		{"a missing file", missing, "provider_keys.ANTHROPIC_API_KEY: read " + missing + ": open " + missing + ": no such file or directory"},
-		{"an empty file", empty, "provider_keys.ANTHROPIC_API_KEY: " + empty + " holds no value"},
+		{"a missing file", missing, "provider_keys.ANTHROPIC_API_KEY names " + missing + ", which could not be read: open " + missing + ": no such file or directory"},
+		{"an empty file", empty, "provider_keys.ANTHROPIC_API_KEY names " + empty + ", which is empty"},
+		{"a file others can read", shared, "provider_keys.ANTHROPIC_API_KEY " + shared + " is readable by its group or others (mode 0644); chmod 0600 it"},
+		{"a directory", dir, "provider_keys.ANTHROPIC_API_KEY names " + dir + ", which is not a regular file"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			environ, _ := secretsStub(t)

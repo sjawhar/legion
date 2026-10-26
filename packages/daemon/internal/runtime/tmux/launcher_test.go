@@ -3,6 +3,7 @@ package tmux
 import (
 	"context"
 	"errors"
+	"maps"
 	"os"
 	"path/filepath"
 	"strings"
@@ -32,6 +33,46 @@ func TestOmpLauncherLaunchIsInnerCommand(t *testing.T) {
 		if want := innerCommand(prefix, "/opt/oh-my-pi/18.0.3/omp", resume, spec.Prompt); inner != want {
 			t.Errorf("Launch(resume %q) = %q, want %q", resume, inner, want)
 		}
+	}
+}
+
+// A pane's Oh My Pi keeps its sessions in its agent directory's `sessions` under the config root —
+// the named profile's under `.omp/profiles` — unless an XDG data root already holds the profile,
+// which flattens the `agent/` prefix (getSessionsDir); a Claude Code pane keeps its transcripts in
+// its claim's own projects directory.
+func TestEachLauncherNamesWhereItsPaneKeepsSessions(t *testing.T) {
+	spec := testSpec()
+	host := Host{StateDir: "/state", Legion: "/opt/legion"}
+	for _, tc := range []struct {
+		name    string
+		profile map[string]string // the profile variable the pane carries, if any
+		layout  string            // the directory made under XDG_DATA_HOME first, if any
+		root    string            // "home" or "data": the directory want is under
+		want    string
+	}{
+		{"the default profile under the config root", nil, "", "home", ".omp/agent/sessions"},
+		{"a named profile under the config root", map[string]string{"OMP_PROFILE": "legion"}, "", "home", ".omp/profiles/legion/agent/sessions"},
+		{"the default profile under an XDG data root", nil, "omp", "data", "omp/sessions"},
+		{"a named profile under an XDG data root", map[string]string{"PI_PROFILE": "legion"}, "omp/profiles/legion", "data", "omp/profiles/legion/sessions"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dirs := map[string]string{"home": t.TempDir(), "data": t.TempDir()}
+			if tc.layout != "" {
+				if err := os.MkdirAll(filepath.Join(dirs["data"], tc.layout), 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			env := map[string]string{"HOME": dirs["home"], "XDG_DATA_HOME": dirs["data"]}
+			maps.Copy(env, tc.profile)
+			want := filepath.Join(dirs[tc.root], tc.want)
+			if got, err := NewOmpLauncher(nil, "omp").SessionsDir(spec, host, env, "/state/workspaces/LEGION-43"); err != nil || got != want {
+				t.Fatalf("SessionsDir = %q, %v; want %s", got, err, want)
+			}
+		})
+	}
+	got, err := NewClaudeLauncher(testClaude).SessionsDir(spec, host, nil, "/state/workspaces/LEGION-43")
+	if want := filepath.Join(ClaudeConfigDir("/state", spec.Claim), "projects"); err != nil || got != want {
+		t.Errorf("the Claude Code launcher's SessionsDir = %q, %v; want %s", got, err, want)
 	}
 }
 
@@ -109,8 +150,9 @@ func TestAgentMarkersNameEveryConfiguredHarness(t *testing.T) {
 }
 
 // A launch whose backend the daemon resolved no launcher for is refused naming it, before any
-// file is written or tmux is run, and a missing session is runtime.ErrSessionFileMissing naming the
-// harness it was recorded for.
+// file is written or tmux is run, and a resume of a session found nowhere with no previous
+// incarnation of another runtime to take over is the refusal to start fresh, naming the harness it
+// was recorded for and every sessions directory searched.
 func TestLaunchRefusesWhatItsLaunchersCannotRun(t *testing.T) {
 	stateDir := t.TempDir()
 	bin := t.TempDir()
@@ -120,7 +162,7 @@ func TestLaunchRefusesWhatItsLaunchersCannotRun(t *testing.T) {
 	rt, err := New(Options{
 		Project: "omp", StateDir: stateDir, StreamAddress: "unix:///s", DaemonURL: "http://127.0.0.1:1",
 		EnvoyURL: "http://127.0.0.1:2", Launchers: ompOnly("omp"), StopGrace: time.Second, ProbeInterval: time.Second,
-		AdoptTimeout: time.Second, Conns: fake.NewConns(), Environ: []string{"PATH=" + bin},
+		AdoptTimeout: time.Second, Conns: fake.NewConns(), Environ: []string{"PATH=" + bin, "HOME=" + filepath.Join(stateDir, "home")},
 		Executable: func() (string, error) { return "/opt/legion", nil },
 	})
 	if err != nil {
@@ -143,9 +185,11 @@ func TestLaunchRefusesWhatItsLaunchersCannotRun(t *testing.T) {
 
 	resumed := spec
 	resumed.ResumeSessionFile = filepath.Join(stateDir, "sessions", "--work--", "2026-10-26T00-00-00-000Z_ses-gone.jsonl")
-	want = "resume legion-omp-legion-43-tester: the recorded session file is missing: no OMP session at " + resumed.ResumeSessionFile
-	if _, err := rt.Resume(context.Background(), nil, resumed); !errors.Is(err, runtime.ErrSessionFileMissing) || !strings.HasPrefix(err.Error(), want) {
-		t.Errorf("Resume from a missing session = %v, want runtime.ErrSessionFileMissing, %q", err, want)
+	want = "Refusing to start LEGION-43 fresh while respawning: recorded OMP session file is missing: " + resumed.ResumeSessionFile +
+		", and no other folder of " + filepath.Join(stateDir, "sessions") + " or of the pane's sessions directory " +
+		filepath.Join(stateDir, "home", ".omp", "agent", "sessions") + " holds that session"
+	if _, err := rt.Resume(context.Background(), nil, resumed); err == nil || errors.Is(err, runtime.ErrSessionFileMissing) || err.Error() != want {
+		t.Errorf("Resume from a missing session = %v, want %q", err, want)
 	}
 	if entries, _ := os.ReadDir(filepath.Join(stateDir, "secrets")); len(entries) != 0 {
 		t.Errorf("a refused launch wrote %d secret files", len(entries))

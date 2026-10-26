@@ -107,6 +107,23 @@ type Request struct {
 	// clone's one lock, so their checkouts run side by side and nothing else of the clone ever does.
 	// Nil holds nothing: a pod provisions its one issue alone.
 	StoreLock sync.Locker
+	// CheckoutSlot, when set, waits for one of the places a daemon bounds its checkouts by and
+	// returns the release of the place it took, or ctx's error once ctx ends first. Provision waits
+	// for a place only after it has let StoreLock go, and holds it around the checkout alone, the
+	// step the bound exists for: a provision waiting on its repository's store lock holds no place,
+	// so no other repository's checkout waits behind it. The order is StoreLock, let go, then a
+	// place, and nothing that holds a place waits on a store lock. Nil bounds nothing: a pod checks
+	// out its one issue alone.
+	CheckoutSlot func(ctx context.Context) (release func(), err error)
+}
+
+// checkoutPlace waits for one of request's checkout places (CheckoutSlot) and returns its release;
+// a request with no CheckoutSlot takes none.
+func (r Request) checkoutPlace(ctx context.Context) (func(), error) {
+	if r.CheckoutSlot == nil {
+		return func() {}, nil
+	}
+	return r.CheckoutSlot(ctx)
 }
 
 // storeLock is a Request's StoreLock, or nothing when it names none, and whether this provision

@@ -1026,7 +1026,7 @@ func TestRemoveForgetsTheWorkspace(t *testing.T) {
 	if err != nil {
 		t.Fatalf("provision: %v", err)
 	}
-	if err := Remove(context.Background(), run, workspace); err != nil {
+	if err := Remove(context.Background(), run, workspace, nil); err != nil {
 		t.Fatalf("remove: %v", err)
 	}
 	if _, err := os.Stat(workspace.Dir); !errors.Is(err, os.ErrNotExist) {
@@ -1079,7 +1079,7 @@ func TestProvisioningAndRemovalTouchOnlyTheirOwnGitWorktree(t *testing.T) {
 	if got := strings.TrimSpace(runSetup(t, workspace.Dir, "git", "rev-parse", "--show-toplevel")); got != workspace.Dir {
 		t.Errorf("git in the re-added workspace answers %q, want %q", got, workspace.Dir)
 	}
-	if err := Remove(context.Background(), run, workspace); err != nil {
+	if err := Remove(context.Background(), run, workspace, nil); err != nil {
 		t.Fatalf("remove: %v", err)
 	}
 	if locked, registered := gitWorktreeLocks(t, workspace.Clone)[workspace.Dir]; registered {
@@ -1143,7 +1143,7 @@ func TestProvisionRecordsWhenItCreatedTheWorkspace(t *testing.T) {
 		t.Errorf("Created after provisioning the existing workspace = %v, %v; want %v unchanged", again, err, created)
 	}
 
-	if err := Remove(context.Background(), run, workspace); err != nil {
+	if err := Remove(context.Background(), run, workspace, nil); err != nil {
 		t.Fatalf("remove: %v", err)
 	}
 	if _, ok, err := Created(workspace.Dir); ok || err != nil {
@@ -1290,7 +1290,7 @@ func TestGitWorktreeEntriesThroughASymlinkedClone(t *testing.T) {
 	if got := strings.TrimSpace(runSetup(t, workspace.Dir, "git", "rev-parse", "--show-toplevel")); got != physical {
 		t.Errorf("git in the re-added workspace answers %q, want %q", got, physical)
 	}
-	if err := Remove(context.Background(), run, workspace); err != nil {
+	if err := Remove(context.Background(), run, workspace, nil); err != nil {
 		t.Fatalf("remove: %v", err)
 	}
 	if locks := gitWorktreeLocks(t, workspace.Clone); len(locks) != 0 {
@@ -1618,7 +1618,7 @@ func TestRemoveDeletesTheEntryACrashAfterTheForgetLeft(t *testing.T) {
 	if _, registered := gitWorktreeLocks(t, workspace.Clone)[workspace.Dir]; !registered {
 		t.Fatal("the forget already removed the git worktree entry; the crash shape is not reproduced")
 	}
-	if err := Remove(context.Background(), run, workspace); err != nil {
+	if err := Remove(context.Background(), run, workspace, nil); err != nil {
 		t.Fatalf("remove: %v", err)
 	}
 	if locks := gitWorktreeLocks(t, workspace.Clone); len(locks) != 0 {
@@ -1750,7 +1750,7 @@ func TestAnIssueWithADotSegmentIsRefused(t *testing.T) {
 		filepath.Join(state, "workspaces", "acme"),
 		filepath.Join(state, "workspaces", "acme", "other", "widgets-7"),
 	} {
-		err := Remove(context.Background(), run, Workspace{Dir: dir, Bookmark: "legion/WIDGETS-42", Clone: clone})
+		err := Remove(context.Background(), run, Workspace{Dir: dir, Bookmark: "legion/WIDGETS-42", Clone: clone}, nil)
 		if err == nil || !strings.Contains(err.Error(), "is not a workspace Location names") {
 			t.Errorf("Remove(%s) = %v, want it refused as no workspace Location names", dir, err)
 		}

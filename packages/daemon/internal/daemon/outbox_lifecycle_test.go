@@ -6,6 +6,7 @@ import (
 	"errors"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -69,7 +70,7 @@ func TestAnEarlierGenerationsSuperviseRowNeverActsOnTheNextGeneration(t *testing
 		provision: func(context.Context, workspace.Request) (workspace.Workspace, error) {
 			return workspace.Workspace{}, nil
 		},
-		remove: func(context.Context, workspace.Workspace) error { return nil },
+		remove: func(context.Context, workspace.Workspace, sync.Locker) error { return nil },
 	}
 
 	for _, observed := range []intake.DispatchIssue{

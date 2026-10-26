@@ -91,6 +91,7 @@ var settingsEmitted = map[string]string{
 	"Runtime.Tmux":                                   "runtime.tmux",
 	"Tmux.PaneEnv":                                   "runtime.tmux.pane_env (the variable names alone)",
 	"Tmux.PiConfigFiles":                             "runtime.tmux.pi_config_files",
+	"Tmux.TakeOver":                                  "runtime.tmux.take_over",
 	"Kubernetes.Namespace":                           "runtime.kubernetes.namespace",
 	"Kubernetes.Image":                               "runtime.kubernetes.image",
 	"Kubernetes.StorageClass":                        "runtime.kubernetes.storage_class",
@@ -200,6 +201,26 @@ func TestSettingsOfClassifiesEveryConfigField(t *testing.T) {
 			if !seen[path] {
 				t.Errorf("%s names %s, which is no exported field of a struct reachable from config.Config", name, path)
 			}
+		}
+	}
+}
+
+// The tmux block shows the runtime whose claims the daemon takes over, and leaves the key out when
+// the file names none.
+func TestTheTmuxSettingsShowTheTakeOver(t *testing.T) {
+	for _, tc := range []struct {
+		block *config.Tmux
+		want  string
+	}{
+		{&config.Tmux{TakeOver: config.TakeOverKubernetes}, `{"pane_env":[],"pi_config_files":[],"take_over":"kubernetes"}`},
+		{&config.Tmux{}, `{"pane_env":[],"pi_config_files":[]}`},
+	} {
+		encoded, err := json.Marshal(tmuxSettingsOf(tc.block))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(encoded) != tc.want {
+			t.Errorf("tmuxSettingsOf(%+v) = %s, want %s", tc.block, encoded, tc.want)
 		}
 	}
 }

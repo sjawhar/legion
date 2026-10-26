@@ -85,10 +85,12 @@ func (r *Runtime) sweep(ctx context.Context, out chan<- runtime.Observation) boo
 //
 // A known claim with no locator holds no pane, so it protects nothing here. The located ones also
 // join the watch: they are the processes the daemon recorded before it restarted, and the sweep
-// reports on them from now on. A located claim whose locator another runtime recorded (foreign: a
-// Sandbox role process of a daemon that ran the project under kubernetes before this one) names no
-// pane, protects nothing and joins no watch: it becomes displaced, and the next sweep reports it
-// Gone and Displaced, so the claim relaunches here on its session, charged nothing.
+// reports on them from now on. Under runtime.tmux.take_over, a located claim whose locator the
+// runtime it takes over recorded (foreign: a Sandbox role process of a daemon that ran the project
+// under kubernetes before this one) names no pane, protects nothing and joins no watch: it becomes
+// displaced, and the next sweep reports it Gone and Displaced, so the claim relaunches here,
+// charged nothing. Without the key such a locator is an error naming its claim and the key, and
+// nothing is reaped (paneOf).
 //
 // A listing with nothing behind it (no server, no session) reaps nothing; a listing that failed
 // otherwise is an error, as is a kill that failed for a reason other than its target being gone,
@@ -102,11 +104,11 @@ func (r *Runtime) ReconcileOrphans(ctx context.Context, known []runtime.Known, g
 		if entry.Locator == nil {
 			continue
 		}
-		if foreign(*entry.Locator) {
+		if r.foreign(*entry.Locator) {
 			foreigners = append(foreigners, *entry.Locator)
 			continue
 		}
-		if _, _, err := paneOf(*entry.Locator); err != nil {
+		if _, _, err := r.paneOf(*entry.Locator); err != nil {
 			return fmt.Errorf("reconcile orphans: %w", err)
 		}
 		located = append(located, *entry.Locator)

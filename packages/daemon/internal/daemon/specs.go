@@ -67,8 +67,8 @@ type specs struct {
 	backend func(claim.Role) runtime.Backend
 	// hostWorkspaces is the runtime leaving each claim's workspace to the daemon's own host
 	// (runtime.Runtime.ProvisionsWorkspaces false: tmux). ensureWorkspace then provisions an
-	// issue's workspace a launch finds missing there (outbox.ensureWorkspace, through the
-	// workflow); nil for a daemon with no workflow, whose launches work no repository.
+	// issue's workspace a launch finds missing or not checked out there (outbox.ensureWorkspace,
+	// through the workflow); nil for a daemon with no workflow, whose launches work no repository.
 	hostWorkspaces  bool
 	ensureWorkspace func(ctx context.Context, issue string, repo ghrepo.Repository, defaultBranch string) error
 }

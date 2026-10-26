@@ -601,7 +601,7 @@ Closing the terminal leaves the project without one, and the daemon logs
    `strandedClaims` in `--json`), and skip those you drained on purpose: resume a suspended
    architect, retry a failed one (`legion claims retry --claim <token>`, which relaunches its
    session with fresh budgets; `legion claims retry --failed` retries every failed claim, and a
-   failed phase worker whose issue is held retries its phase), and bring a suspended phase worker back as
+   failed phase worker whose issue is held for its own role retries that phase), and bring a suspended phase worker back as
    [A tree does not move after a restart](/legion/legion/troubleshooting/#a-tree-does-not-move-after-a-restart)
    shows for its `suspendedBy`. Never resume or retry by hand a claim of a lingering tree or of an
    issue parked out of the workflow: re-admission or the issue's return to `todo` starts it.

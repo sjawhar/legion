@@ -308,12 +308,14 @@ its tree stands:
   ```
 
 `legion claims retry --claim <token>` relaunches a failed architect on its session with fresh
-budgets, and retries a failed phase worker whose issue is held by applying the held phase's retry,
-as its architect's `retry_or_escalate` would. It refuses a claim in any other state, naming the
-state, a failed phase worker whose issue is not held, and a failed controller, naming who retries
-it. `legion claims retry --failed` asks the same of every failed claim the daemon holds, in turn,
-prints each one it retried, and exits 1 naming each it refused: run it once the cause of a run of
-failed launches is gone (a host moved onto tmux, a broken key replaced).
+budgets, and retries a failed phase worker whose issue is held for that worker's own role by
+applying the held phase's retry, as its architect's `retry_or_escalate` would. It refuses a claim
+in any other state, naming the state, a failed phase worker whose issue is not held or is held for
+another role, and a failed controller, naming who retries it; a retry that leaves the issue held,
+as a lingering tree's does, is refused naming the issue. `legion claims retry --failed` asks the
+same of every failed claim the daemon holds, in turn, prints each one it retried, and exits 1
+naming each it refused: run it once the cause of a run of failed launches is gone (a host moved
+onto tmux, a broken key replaced).
 
 To see why the launches failed, read the failed role's lines of the `roles` container's log in the
 issue's pod. The launcher prefixes each role's lines with the role's name:

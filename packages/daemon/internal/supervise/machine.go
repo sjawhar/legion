@@ -957,12 +957,15 @@ func (m *Machine) backOff(ctx context.Context) error {
 }
 
 // start launches the claim's process for this try: a Resume of its recorded session, or a Spawn
-// when it records none. A Resume the runtime answers with runtime.ErrSessionFileMissing — the
-// session was recorded where it no longer is, such as another runtime's pod — would fail the same
-// way on every try and wedge the claim until its launch budget ran out, so the claim forgets the
-// session and the same try spawns a fresh agent, which registers its own session; the runtime has
-// waited out the previous process and started nothing first. It is logged, never charged: the
-// session's place went, the launch did nothing wrong.
+// when it records none. A Resume the runtime answers with runtime.ErrSessionFileMissing is the
+// operator's takeover of another runtime's claims (the tmux runtime's `runtime.tmux.take_over`): the
+// previous process was that runtime's, and its session is found nowhere this one runs the agent. It
+// would fail the same way on every try and wedge the claim until its launch budget ran out, so the
+// claim forgets the session and the same try spawns a fresh agent, which registers its own session;
+// the runtime has started nothing first. It is logged, never charged: the session stayed with the
+// runtime the operator moved the project off. Any other refusal of a Resume, a session file missing
+// elsewhere among them, is a launch failure the caller charges, and the claim keeps its session:
+// a fresh agent on a claim that had one is what the same-agent refusal exists to catch.
 func (m *Machine) start(ctx context.Context, token string) (runtime.Locator, error) {
 	spec, err := m.deps.Specs.SpawnSpec(ctx, m.claim)
 	if err != nil {
@@ -978,7 +981,7 @@ func (m *Machine) start(ctx context.Context, token string) (runtime.Locator, err
 	if !errors.Is(err, runtime.ErrSessionFileMissing) {
 		return loc, err
 	}
-	m.log.Warn("supervise: the recorded session file is missing; starting a fresh session in its place",
+	m.log.Warn("supervise: the session of the process another runtime ran is found nowhere this runtime runs the agent; taking the claim over with a fresh session",
 		"session", m.claim.Session, "sessionFile", m.claim.SessionFile, "error", err)
 	m.forgetSession()
 	spec.ResumeSessionFile = ""

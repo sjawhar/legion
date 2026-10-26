@@ -2,6 +2,7 @@ package workspace
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -115,6 +116,208 @@ func TestProvisionFinishesACheckoutThatNeverRan(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(first.Dir, "kept.txt")); err != nil {
 		t.Errorf("the workspace's files are not back: %v", err)
 	}
+}
+
+// failingCheckoutRunner fails the first checkout (`jj sparse reset`) it is asked to run, as a jj
+// error, a full disk or a daemon stopped mid-checkout does, and runs every other command.
+type failingCheckoutRunner struct {
+	*recordingRunner
+	failed atomic.Bool
+}
+
+func (r *failingCheckoutRunner) Run(ctx context.Context, command Command) (Result, error) {
+	if isCheckout(command.Argv) && r.failed.CompareAndSwap(false, true) {
+		return Result{ExitCode: 1, Stderr: "Error: No space left on device (os error 28)"}, nil
+	}
+	return r.recordingRunner.Run(ctx, command)
+}
+
+// A checkout that fails leaves the workspace registered with no files: Provision returns the
+// failure, CheckedOut reads the workspace as not checked out, and the next Provision checks it out.
+func TestTheProvisionAfterAFailedCheckoutFinishesIt(t *testing.T) {
+	base := newLocalRunner(t)
+	pushRemoteBranch(t, base.remote, "main", "kept.txt")
+	run := &failingCheckoutRunner{recordingRunner: base}
+	req := provisionRequest(t)
+	if _, err := Provision(context.Background(), run, req); err == nil || !strings.Contains(err.Error(), "check out workspace") || !strings.Contains(err.Error(), "No space left on device") {
+		t.Fatalf("Provision with a failing checkout = %v, want the checkout's failure", err)
+	}
+	working, err := Location(req.StateDir, req.Repo, req.Issue)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(working.Dir, "kept.txt")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the workspace whose checkout failed holds the tree's files (%v), want none", err)
+	}
+	if whole, err := CheckedOut(context.Background(), run, working); err != nil || whole {
+		t.Fatalf("CheckedOut of the workspace whose checkout failed = %t, %v; want false", whole, err)
+	}
+	if _, err := Provision(context.Background(), run, req); err != nil {
+		t.Fatalf("Provision after the failed checkout: %v", err)
+	}
+	if whole, err := CheckedOut(context.Background(), run, working); err != nil || !whole {
+		t.Errorf("CheckedOut after the next provision = %t, %v; want true", whole, err)
+	}
+	if _, err := os.Stat(filepath.Join(working.Dir, "kept.txt")); err != nil {
+		t.Errorf("the workspace's files are not there after the next provision: %v", err)
+	}
+}
+
+// CheckedOut reads a workspace's sparse patterns without snapshotting its working copy, which a
+// pane may be writing: a file the pane wrote is not recorded in the repository's log.
+func TestCheckedOutNeverSnapshotsTheWorkingCopy(t *testing.T) {
+	run := newLocalRunner(t)
+	working, err := Provision(context.Background(), run, provisionRequest(t))
+	if err != nil {
+		t.Fatalf("Provision: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(working.Dir, "pane-edit.txt"), []byte("written by the pane\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	before := cloneSnapshots(t, working.Clone)
+	if whole, err := CheckedOut(context.Background(), run, working); err != nil || !whole {
+		t.Fatalf("CheckedOut of a provisioned workspace = %t, %v; want true", whole, err)
+	}
+	if after := cloneSnapshots(t, working.Clone); after != before {
+		t.Errorf("CheckedOut snapshotted the working copy (%d snapshots, then %d)", before, after)
+	}
+}
+
+// placeReadingRunner records, per command, whether the store lock and a checkout place were held
+// as it started.
+type placeReadingRunner struct {
+	*recordingRunner
+	lock  *heldLock
+	place *atomic.Bool
+	mu    sync.Mutex
+	seen  []placeRead
+}
+
+type placeRead struct {
+	argv         string
+	store, place bool
+}
+
+func (r *placeReadingRunner) Run(ctx context.Context, command Command) (Result, error) {
+	r.mu.Lock()
+	r.seen = append(r.seen, placeRead{argv: strings.Join(command.Argv, " "), store: r.lock.held.Load(), place: r.place.Load()})
+	r.mu.Unlock()
+	return r.recordingRunner.Run(ctx, command)
+}
+
+// A provision holds one of the request's checkout places (CheckoutSlot) around its checkout alone:
+// it waits for a place only once it has let the store lock go, runs nothing else while it holds
+// one, and lets it go before it returns; a provision of a workspace already checked out takes
+// none. A wait for a place that ends with its context fails the provision, naming the wait, with
+// the workspace registered and not checked out, which the next provision checks out.
+func TestProvisionHoldsACheckoutPlaceAroundTheCheckoutAlone(t *testing.T) {
+	lock := &heldLock{}
+	var place atomic.Bool
+	places := 0
+	run := &placeReadingRunner{recordingRunner: newLocalRunner(t), lock: lock, place: &place}
+	req := provisionRequest(t)
+	req.StoreLock = lock
+	req.CheckoutSlot = func(context.Context) (func(), error) {
+		if lock.held.Load() {
+			t.Error("Provision waited for a checkout place holding the store lock")
+		}
+		if !place.CompareAndSwap(false, true) {
+			t.Error("Provision took a second checkout place")
+		}
+		places++
+		return func() { place.Store(false) }, nil
+	}
+	for _, issue := range []string{"WIDGETS-42", "WIDGETS-42"} {
+		req.Issue = issue
+		if _, err := Provision(context.Background(), run, req); err != nil {
+			t.Fatalf("Provision %s: %v", issue, err)
+		}
+		if place.Load() {
+			t.Fatalf("Provision %s returned holding its checkout place", issue)
+		}
+	}
+	if places != 1 {
+		t.Errorf("two provisions of one issue took %d checkout places, want one (the second found the workspace checked out)", places)
+	}
+	for _, read := range run.seen {
+		checkout := isCheckout(strings.Fields(read.argv))
+		if read.place != checkout || (checkout && read.store) {
+			t.Errorf("ran %q holding the store lock=%t and a checkout place=%t; want the place for the checkout alone, without the lock", read.argv, read.store, read.place)
+		}
+	}
+
+	req.Issue = "WIDGETS-43"
+	req.CheckoutSlot = func(context.Context) (func(), error) { return nil, context.Canceled }
+	if _, err := Provision(context.Background(), run, req); err == nil || !errors.Is(err, context.Canceled) || !strings.Contains(err.Error(), "wait for a checkout's place") {
+		t.Fatalf("Provision whose wait for a place ended = %v, want the wait's end named", err)
+	}
+	if lock.held.Load() {
+		t.Fatal("Provision whose wait for a place ended returned with the store lock held")
+	}
+	working, err := Location(req.StateDir, req.Repo, req.Issue)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if whole, err := CheckedOut(context.Background(), run, working); err != nil || whole {
+		t.Fatalf("CheckedOut of the workspace that never had a place = %t, %v; want false", whole, err)
+	}
+	req.CheckoutSlot = nil
+	if _, err := Provision(context.Background(), run, req); err != nil {
+		t.Fatalf("Provision after the wait for a place ended: %v", err)
+	}
+	if whole, err := CheckedOut(context.Background(), run, working); err != nil || !whole {
+		t.Errorf("CheckedOut after the next provision = %t, %v; want true", whole, err)
+	}
+}
+
+// unlockWatch is a store lock that runs onUnlock each time it is let go, before it is free.
+type unlockWatch struct {
+	heldLock
+	onUnlock func()
+}
+
+func (l *unlockWatch) Unlock() { l.onUnlock(); l.heldLock.Unlock() }
+
+// Remove holds the repository's store lock for every command on the shared clone and the rename
+// aside, and lets it go before it deletes the workspace's files, whose time follows the
+// workspace's size: when the lock is let go the renamed-aside directory is still there, and once
+// Remove returns it is gone, with the workspace, and the lock is free.
+func TestRemoveLetsTheStoreLockGoBeforeItDeletesTheWorkspace(t *testing.T) {
+	base := newLocalRunner(t)
+	working, err := Provision(context.Background(), base, provisionRequest(t))
+	if err != nil {
+		t.Fatalf("Provision: %v", err)
+	}
+	lock := &unlockWatch{}
+	var asideAtUnlock []bool
+	lock.onUnlock = func() {
+		_, err := os.Stat(removingPath(working.Dir))
+		asideAtUnlock = append(asideAtUnlock, err == nil)
+	}
+	run := &lockReadingRunner{recordingRunner: base, lock: &lock.heldLock}
+	if err := Remove(context.Background(), run, working, lock); err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+	if len(asideAtUnlock) != 1 || !asideAtUnlock[0] {
+		t.Errorf("Remove let the store lock go %d times, the aside directory there each time: %v; want once, before the delete", len(asideAtUnlock), asideAtUnlock)
+	}
+	if len(run.seen) == 0 {
+		t.Fatal("Remove ran no command on the shared clone")
+	}
+	for _, line := range run.seen {
+		if held, argv, _ := strings.Cut(line, " "); held != "true" {
+			t.Errorf("Remove ran %q with the store lock let go", argv)
+		}
+	}
+	for _, dir := range []string{working.Dir, removingPath(working.Dir)} {
+		if _, err := os.Stat(dir); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("%s is still there after Remove: %v", dir, err)
+		}
+	}
+	if lock.held.Load() || !lock.mu.TryLock() {
+		t.Fatal("Remove returned with the store lock held")
+	}
+	lock.mu.Unlock()
 }
 
 // overlapRunner holds the first checkout until a second one starts, so two provisions' checkouts

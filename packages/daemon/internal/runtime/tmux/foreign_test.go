@@ -2,6 +2,8 @@ package tmux
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -10,13 +12,16 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
+	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
 )
 
 // A tmux daemon that takes over a project's store from a daemon that ran it under runtime
 // kubernetes finds claims whose recorded process is a Sandbox role container: a locator another
-// runtime recorded (foreign). Their pods are gone before the tmux daemon boots (docs/deployment.md,
-// "Moving a project onto tmux"); this runtime can neither see nor stop them, so each is reported
-// Gone and Displaced — relaunched here on its session, charged nothing — and asks tmux nothing.
+// runtime recorded. Under `runtime.tmux.take_over: kubernetes` (foreign) their pods are gone before
+// the tmux daemon boots (docs/deployment.md, "Moving a project onto tmux"); this runtime can neither
+// see nor stop them, so each is reported Gone and Displaced — relaunched here on its session,
+// charged nothing — and asks tmux nothing. Without the key, every such locator is refused, naming
+// the claim and the key.
 
 // sandboxLocator is a valid locator of the sandbox runtime for the claim of role on issue: every
 // role of an issue pod runs in its one container (runtime.IssuePodContainer).
@@ -36,11 +41,37 @@ func sandboxLocator(t *testing.T, project, issue string, role claim.Role) runtim
 	return loc
 }
 
+// takingOver is a fake server runtime under `runtime.tmux.take_over: kubernetes`, its panes' HOME
+// under its state directory, so the pane's Oh My Pi sessions directory is
+// `<state_dir>/home/.omp/agent/sessions`.
+func takingOver(t *testing.T) *fakeServerRuntime {
+	t.Helper()
+	return newFakeServerRuntimeWith(t, staticCredential, nil, func(o *Options) {
+		o.TakeOver = TakeOverKubernetes
+		o.Environ = append(o.Environ, "HOME="+filepath.Join(o.StateDir, "home"))
+	})
+}
+
+// paneSessions is the Oh My Pi sessions directory of a takingOver runtime's panes.
+func paneSessions(f *fakeServerRuntime) string {
+	return filepath.Join(f.stateDir, "home", ".omp", "agent", "sessions")
+}
+
+// opened is whether any recorded argv opened a pane.
+func opened(argvs [][]string) bool {
+	return slices.ContainsFunc(argvs, func(argv []string) bool { v := verb(argv); return v == "new-window" || v == "split-window" })
+}
+
+// takeOverRefusal is the refusal of a Sandbox locator by a runtime without runtime.tmux.take_over.
+func takeOverRefusal(loc runtime.Locator) string {
+	return fmt.Sprintf(`tmux runtime cannot act on a "sandbox" locator (%s): a daemon that ran the project under runtime kubernetes recorded it; once every pod of that daemon is stopped, runtime.tmux.take_over: kubernetes lets this daemon take the claim over`, loc.Claim)
+}
+
 // Probe, Suspend and Release of a foreign locator answer at once and run no tmux: the probe is
 // Gone and Displaced, naming the pod, and a stop has nothing of it to stop.
 func TestAForeignLocatorIsGoneDisplacedAndRunsNoTmux(t *testing.T) {
 	ctx := context.Background()
-	f := newFakeServerRuntime(t, staticCredential, nil)
+	f := takingOver(t)
 	loc := sandboxLocator(t, "omp", "LEGION-43", claim.RoleTester)
 
 	obs, err := f.Probe(ctx, loc)
@@ -61,13 +92,57 @@ func TestAForeignLocatorIsGoneDisplacedAndRunsNoTmux(t *testing.T) {
 	}
 }
 
+// Without runtime.tmux.take_over nothing is foreign: a Sandbox locator is refused by Probe, by a
+// stop, by a resume over it, and by boot's ReconcileOrphans, which reaps nothing then — each
+// refusal naming the claim and the key that would let this daemon take it over — and none runs
+// tmux or opens a pane.
+func TestWithoutTakeOverASandboxLocatorIsRefusedNamingTheKey(t *testing.T) {
+	ctx := context.Background()
+	f := newFakeServerRuntime(t, staticCredential, nil)
+	loc := sandboxLocator(t, "omp", "LEGION-43", claim.RoleTester)
+	want := takeOverRefusal(loc)
+
+	if _, err := f.Probe(ctx, loc); err == nil || err.Error() != want {
+		t.Errorf("Probe = %v, want %q", err, want)
+	}
+	if err := f.Suspend(ctx, loc); err == nil || err.Error() != want {
+		t.Errorf("Suspend = %v, want %q", err, want)
+	}
+	known := []runtime.Known{{Claim: loc.Claim, Locator: &loc}, {Claim: "legion-omp-legion-45-architect"}}
+	if err := f.ReconcileOrphans(ctx, known, 0); err == nil || err.Error() != "reconcile orphans: "+want {
+		t.Errorf("ReconcileOrphans = %v, want %q", err, "reconcile orphans: "+want)
+	}
+	spec := f.spec(t, claim.RoleTester)
+	spec.ResumeSessionFile = filepath.Join(t.TempDir(), "--legion-workspace--", "2026-10-20T10-00-00-000Z_ses-abc.jsonl")
+	writeSession(t, spec.ResumeSessionFile, time.Now())
+	if _, err := f.Resume(ctx, &loc, spec); err == nil || err.Error() != "resume "+string(loc.Claim)+": "+want {
+		t.Errorf("Resume over a Sandbox locator = %v, want %q", err, "resume "+string(loc.Claim)+": "+want)
+	}
+	if len(f.argvs) != 0 {
+		t.Errorf("a refused Sandbox locator ran tmux: %q", f.argvs)
+	}
+}
+
+// New takes over kubernetes alone.
+func TestNewRefusesATakeOverOfAnotherRuntime(t *testing.T) {
+	_, err := New(Options{
+		Project: "omp", StateDir: t.TempDir(), StreamAddress: "unix:///s", DaemonURL: "http://127.0.0.1:1",
+		EnvoyURL: "http://127.0.0.1:2", Launchers: ompOnly("omp"), StopGrace: time.Second, ProbeInterval: time.Second,
+		AdoptTimeout: time.Second, Conns: fake.NewConns(), Environ: []string{"PATH=/usr/bin:/bin"}, TakeOver: "sandbox",
+		Executable: func() (string, error) { return "/opt/legion", nil },
+	})
+	if err == nil || err.Error() != `tmux runtime: take_over "sandbox" is not a runtime it takes claims over from (kubernetes)` {
+		t.Errorf("New with take_over sandbox = %v", err)
+	}
+}
+
 // ReconcileOrphans takes the known claims of a store another runtime ran: a foreign locator is not
 // refused, protects nothing and joins no watch; the next sweep reports it Gone and Displaced once,
 // then never again. The roles of one issue share its pod, and two of them at the same generation
 // share an incarnation (`PodUID/Generation`): each claim is still displaced on its own.
 func TestReconcileOrphansDisplacesForeignLocatorsAndTheSweepReportsEachOnce(t *testing.T) {
 	ctx := context.Background()
-	f := newFakeServerRuntime(t, staticCredential, nil)
+	f := takingOver(t)
 	tester := sandboxLocator(t, "omp", "LEGION-43", claim.RoleTester)
 	planner := sandboxLocator(t, "omp", "LEGION-43", claim.RolePlanner)
 	if tester.Incarnation != planner.Incarnation {
@@ -114,7 +189,7 @@ func TestReconcileOrphansDisplacesForeignLocatorsAndTheSweepReportsEachOnce(t *t
 // machine already acted on it. Another role of the same pod, at the same incarnation, still is.
 func TestAForeignLocatorStoppedBeforeTheSweepIsNotReported(t *testing.T) {
 	ctx := context.Background()
-	f := newFakeServerRuntime(t, staticCredential, nil)
+	f := takingOver(t)
 	tester := sandboxLocator(t, "omp", "LEGION-43", claim.RoleTester)
 	planner := sandboxLocator(t, "omp", "LEGION-43", claim.RolePlanner)
 	if err := f.ReconcileOrphans(ctx, []runtime.Known{{Claim: tester.Claim, Locator: &tester}, {Claim: planner.Claim, Locator: &planner}}, 0); err != nil {
@@ -136,17 +211,18 @@ func TestAForeignLocatorStoppedBeforeTheSweepIsNotReported(t *testing.T) {
 }
 
 // A resume whose previous incarnation another runtime recorded waits for nothing — this runtime
-// cannot see that process — and opens the pane at once, continuing the session from the folder it
-// was carried into when its recorded path is not on this host.
+// cannot see that process — and opens the pane at once on the session the pod recorded under the
+// image's home (`/home/legion/.omp/profiles/legion/…`), which is not this host's: the session was
+// carried into the pane's own sessions directory, and is found there by its name, in the pod's
+// folder.
 func TestAResumeOverAForeignIncarnationOpensThePaneOnTheCarriedSession(t *testing.T) {
 	ctx := context.Background()
-	f := newFakeServerRuntime(t, staticCredential, nil)
+	f := takingOver(t)
 	f.stopGrace = time.Hour
 	spec := f.spec(t, claim.RoleTester)
 	prev := sandboxLocator(t, spec.Project, spec.Issue, claim.RoleTester)
-	sessions := filepath.Join(f.stateDir, "home", ".omp", "agent", "sessions")
-	spec.ResumeSessionFile = filepath.Join(sessions, "--legion-workspace--", "2026-10-20T10-00-00-000Z_ses-abc.jsonl")
-	carried := filepath.Join(sessions, "--pod-work--", "2026-10-20T10-00-00-000Z_ses-abc.jsonl")
+	spec.ResumeSessionFile = podSession
+	carried := filepath.Join(paneSessions(f), filepath.Base(filepath.Dir(podSession)), filepath.Base(podSession))
 	writeSession(t, carried, time.Now())
 
 	done := make(chan error, 1)
@@ -170,5 +246,56 @@ func TestAResumeOverAForeignIncarnationOpensThePaneOnTheCarriedSession(t *testin
 	}
 	if !strings.Contains(command, "--resume="+carried) {
 		t.Errorf("the pane's command = %q, want it to resume %s", command, carried)
+	}
+}
+
+// A resume over a foreign incarnation whose session is found nowhere on this host — neither in its
+// recorded sessions directory nor in the pane's — starts nothing and is runtime.ErrSessionFileMissing,
+// which the claim's machine answers with a fresh agent, charged nothing: the operator chose the
+// takeover, and a session kept in the other runtime's database is not carried.
+func TestAResumeOverAForeignIncarnationWithItsSessionNowhereIsTheMissingSession(t *testing.T) {
+	ctx := context.Background()
+	f := takingOver(t)
+	spec := f.spec(t, claim.RoleTester)
+	prev := sandboxLocator(t, spec.Project, spec.Issue, claim.RoleTester)
+	spec.ResumeSessionFile = podSession
+
+	_, err := f.Resume(ctx, &prev, spec)
+	want := "resume " + string(spec.Claim) + ": the recorded session file is missing: no OMP session at " + podSession +
+		", and no other folder of " + filepath.Dir(filepath.Dir(podSession)) + " or of the pane's sessions directory " + paneSessions(f) + " holds that session"
+	if !errors.Is(err, runtime.ErrSessionFileMissing) || err.Error() != want {
+		t.Fatalf("Resume = %v, want runtime.ErrSessionFileMissing: %q", err, want)
+	}
+	if opened(f.argvs) {
+		t.Errorf("a resume of a missing session opened a pane: %q", f.argvs)
+	}
+}
+
+// Under take_over too, a missing session file over a previous pane of this runtime, or with no
+// previous incarnation at all, is the refusal to start fresh, never runtime.ErrSessionFileMissing:
+// the claim resumes the agent it recorded or none, and the refusal is charged by the claim's
+// machine, which keeps the recorded session.
+func TestUnderTakeOverAMissingSessionOverAPaneOrNoneIsRefused(t *testing.T) {
+	ctx := context.Background()
+	for name, prev := range map[string]func(spec runtime.SpawnSpec) *runtime.Locator{
+		"a previous pane": func(spec runtime.SpawnSpec) *runtime.Locator {
+			return &runtime.Locator{Runtime: runtime.RuntimeTmux, Claim: spec.Claim, Incarnation: "4242:77", Tmux: &runtime.TmuxLocator{Window: "@1", Pane: "%1"}}
+		},
+		"no previous incarnation": func(runtime.SpawnSpec) *runtime.Locator { return nil },
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := takingOver(t)
+			spec := f.spec(t, claim.RoleTester)
+			spec.ResumeSessionFile = filepath.Join(paneSessions(f), "--legion-workspace--", "2026-10-20T10-00-00-000Z_ses-gone.jsonl")
+			_, err := f.Resume(ctx, prev(spec), spec)
+			want := "Refusing to start LEGION-43 fresh while respawning: recorded OMP session file is missing: " + spec.ResumeSessionFile +
+				", and no other folder of " + paneSessions(f) + " holds that session"
+			if err == nil || errors.Is(err, runtime.ErrSessionFileMissing) || err.Error() != want {
+				t.Fatalf("Resume = %v, want %q", err, want)
+			}
+			if opened(f.argvs) {
+				t.Errorf("a refused resume opened a pane: %q", f.argvs)
+			}
+		})
 	}
 }

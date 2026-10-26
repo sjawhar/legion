@@ -86,12 +86,13 @@ type RuntimeSettings struct {
 	Tmux       *TmuxSettings       `json:"tmux,omitempty"`
 }
 
-// TmuxSettings is the settled `runtime.tmux` block: its Oh My Pi overlays as resolved, and the
-// names alone of its pane variables, whose values are the operator's free text, delivered to every
-// pane.
+// TmuxSettings is the settled `runtime.tmux` block: its Oh My Pi overlays as resolved, the names
+// alone of its pane variables, whose values are the operator's free text, delivered to every pane,
+// and the runtime whose claims the daemon takes over (`take_over`), empty for none.
 type TmuxSettings struct {
 	PaneEnv       []string `json:"pane_env"`
 	PiConfigFiles []string `json:"pi_config_files"`
+	TakeOver      string   `json:"take_over,omitempty"`
 }
 
 // KubernetesSettings is the settled `runtime.kubernetes` block without its credential file
@@ -306,7 +307,7 @@ func tmuxSettingsOf(block *config.Tmux) *TmuxSettings {
 	if block == nil {
 		return nil
 	}
-	return &TmuxSettings{PaneEnv: stringsOf(slices.Sorted(maps.Keys(block.PaneEnv))), PiConfigFiles: stringsOf(block.PiConfigFiles)}
+	return &TmuxSettings{PaneEnv: stringsOf(slices.Sorted(maps.Keys(block.PaneEnv))), PiConfigFiles: stringsOf(block.PiConfigFiles), TakeOver: block.TakeOver}
 }
 
 // kubernetesSettingsOf is block as the state shows it, nil under another runtime.

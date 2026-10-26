@@ -103,18 +103,12 @@ type secretsStatus struct {
 	Tier string `json:"tier"`
 }
 
-// readProviderKeyFile is one entry's value from the file it names: its contents, trimmed, refused
-// when the file cannot be read or holds nothing.
+// readProviderKeyFile is one entry's value from the file it names, read by
+// ReadPrivateSecretPointer's rules, as every other secret file the daemon reads: refused, naming the
+// file and never its contents, when it cannot be read, is not a regular file, holds nothing, or is
+// readable by its group or others.
 func readProviderKeyFile(key ProviderKey, _ []string, _ *slog.Logger) (string, error) {
-	body, err := os.ReadFile(key.File)
-	if err != nil {
-		return "", fmt.Errorf("provider_keys.%s: read %s: %w", key.Env, key.File, err)
-	}
-	value := strings.TrimSpace(string(body))
-	if value == "" {
-		return "", fmt.Errorf("provider_keys.%s: %s holds no value", key.Env, key.File)
-	}
-	return value, nil
+	return ReadPrivateSecretPointer("provider_keys."+key.Env, key.File)
 }
 
 // resolveProviderKey is one entry's value: its secretsd key's tier checked, then the value read.

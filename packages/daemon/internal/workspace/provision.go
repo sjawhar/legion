@@ -19,7 +19,10 @@ import (
 // The clone and the fetch reach the repository through request.Source: a pod's feed with no
 // credential, or GitHub with the one-shot credential. An issue with no branch starts at
 // request.DefaultBranch, which the request must name. Every command on the shared clone runs under
-// request.StoreLock, but for the `jj workspace add` that writes the issue's working copy.
+// request.StoreLock, the `jj workspace add` that registers the issue's workspace with no files
+// among them. Only the checkout (`jj sparse reset`), which writes the issue's own working copy and
+// nothing of the clone's, runs with the lock let go, holding one of request.CheckoutSlot's places
+// instead.
 func Provision(ctx context.Context, run Runner, request Request) (Workspace, error) {
 	workspace, err := Location(request.StateDir, request.Repo, request.Issue)
 	if err != nil {
@@ -83,11 +86,14 @@ func Provision(ctx context.Context, run Runner, request Request) (Workspace, err
 	}
 	checkout := !exists
 	if exists {
-		// A workspace whose checkout never finished — registered with no files, then the daemon
-		// stopped — is checked out now, or its pane would start in an empty working copy.
-		if checkout, err = sparse(ctx, run, workspace); err != nil {
+		// A workspace whose checkout never finished — registered with no files, then the checkout
+		// failed or the daemon stopped — is checked out now, or its pane would start in an empty
+		// working copy.
+		whole, err := CheckedOut(ctx, run, workspace)
+		if err != nil {
 			return Workspace{}, err
 		}
+		checkout = !whole
 	}
 	// Every workspace provisioning touches has its git worktree entry locked, one added before
 	// provisioning locked any included, so a bare `git worktree prune` that cannot see it skips it.
@@ -117,24 +123,36 @@ func Provision(ctx context.Context, run Runner, request Request) (Workspace, err
 	// The checkout writes the issue's working copy, every file of the tree, into the workspace the
 	// registration made with no files: the one step whose time follows the repository's size, and
 	// it writes nothing of the shared clone's, so it runs with the store lock let go, beside other
-	// issues' checkouts.
+	// issues' checkouts, holding one of the places the daemon bounds checkouts by.
 	store.unlock()
 	if checkout {
-		if _, err := RunCheckedIn(ctx, run, workspace, []string{"jj", "sparse", "reset"}); err != nil {
+		release, err := request.checkoutPlace(ctx)
+		if err != nil {
+			return Workspace{}, fmt.Errorf("check out workspace %s: wait for a checkout's place: %w", workspace.Dir, err)
+		}
+		_, err = RunCheckedIn(ctx, run, workspace, []string{"jj", "sparse", "reset"})
+		release()
+		if err != nil {
 			return Workspace{}, fmt.Errorf("check out workspace %s: %w", workspace.Dir, err)
 		}
 	}
 	return workspace, nil
 }
 
-// sparse is whether workspace's sparse patterns leave out any of the tree: anything but the whole
-// tree (`.`), which a workspace registered with no files and never checked out holds.
-func sparse(ctx context.Context, run Runner, workspace Workspace) (bool, error) {
-	listed, err := RunCheckedIn(ctx, run, workspace, []string{"jj", "sparse", "list"})
+// CheckedOut is whether workspace's checkout finished: its sparse patterns are the whole tree
+// (`.`). Provision registers a workspace with no files (`jj workspace add --sparse-patterns
+// empty`) and checks it out after (`jj sparse reset`), so a workspace whose checkout failed or was
+// cut short — a jj error, a full disk, a daemon stopped mid-checkout — holds no pattern and no
+// file until a provision checks it out. The read never snapshots the working copy
+// (--ignore-working-copy): a pane may be writing it, and a snapshot would run the working-copy
+// filters, fsmonitor and signing programs a tree agent can configure. A directory with no `.jj` is
+// refused, as every jj command in a workspace is (guardWorkspace).
+func CheckedOut(ctx context.Context, run Runner, workspace Workspace) (bool, error) {
+	listed, err := RunCheckedIn(ctx, run, workspace, []string{"jj", "sparse", "list", "--ignore-working-copy", "--color=never"})
 	if err != nil {
 		return false, err
 	}
-	return strings.TrimSpace(listed.Stdout) != ".", nil
+	return strings.TrimSpace(listed.Stdout) == ".", nil
 }
 
 // excludeCodegraphDirectory appends ".codegraph/" to cloneDir's ".git/info/exclude" unless a

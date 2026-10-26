@@ -96,9 +96,15 @@ type outbox struct {
 	now       func() time.Time
 	clock     supervise.Clock
 	provision func(context.Context, workspace.Request) (workspace.Workspace, error)
-	remove    func(context.Context, workspace.Workspace) error
+	// remove removes a workspace from the daemon's host, handed its repository's store lock, which
+	// it holds for every step on the shared clone and lets go before it deletes the workspace's
+	// files (workspace.Remove).
+	remove func(context.Context, workspace.Workspace, sync.Locker) error
+	// checkedOut is whether a workspace on the daemon's host finished its checkout
+	// (workspace.CheckedOut): a launch provisions one that did not (ensureWorkspace).
+	checkedOut func(context.Context, workspace.Workspace) (bool, error)
 	// provisions orders the workspace provisions and removals (provisionLocks): up to
-	// provisionConcurrency provisions at once, one at a time per issue, and one command at a time
+	// provisionConcurrency checkouts at once, one at a time per issue, and one command at a time
 	// on each repository's shared clone but for the checkouts — the clone's `jj git fetch`, its
 	// git configuration and its bookmarks corrupt or refuse when two write at once. Lanes and
 	// launches run issues side by side, so several issues' provisions are in flight together.
@@ -150,8 +156,11 @@ func newOutbox(pool *pgxpool.Pool, records record.Store, client dispatch.Client,
 			workspace.WarmCodegraphIndexInBackground(provisioned.Dir)
 			return provisioned, nil
 		},
-		remove: func(ctx context.Context, working workspace.Workspace) error {
-			return workspace.Remove(ctx, workspace.NewRunner(workspace.CommandTimeout, tools), working)
+		remove: func(ctx context.Context, working workspace.Workspace, store sync.Locker) error {
+			return workspace.Remove(ctx, workspace.NewRunner(workspace.CommandTimeout, tools), working, store)
+		},
+		checkedOut: func(ctx context.Context, working workspace.Workspace) (bool, error) {
+			return workspace.CheckedOut(ctx, workspace.NewRunner(workspace.CommandTimeout, tools), working)
 		},
 	}
 }
@@ -1151,48 +1160,53 @@ func (r *outbox) provisionWorkspace(ctx context.Context, issue record.Issue) err
 	return r.provisionIn(ctx, issue.Key, repo, issue.DefaultBranch, false)
 }
 
-// ensureWorkspace provisions key's workspace when a launch finds it missing on the daemon's host
-// (the launch's spec, specs.ensureWorkspace): a claim resumed, relaunched or recovered rather than
-// created, whose workspace this host never had — its issue ran in another runtime's pods before —
-// or no longer has. An existing workspace is left as it is. Provisioning checks out the issue's
-// branch legion/<KEY> when GitHub has it, and starts at defaultBranch otherwise
-// (workspace.Provision).
+// ensureWorkspace provisions key's workspace when a launch finds it missing or not checked out on
+// the daemon's host (the launch's spec, specs.ensureWorkspace): a claim resumed, relaunched or
+// recovered rather than created, whose workspace this host never had — its issue ran in another
+// runtime's pods before — or no longer has, or whose checkout failed or was cut short (a provision
+// registers a workspace with no files and checks it out after, workspace.Provision), where the pane
+// would start in an empty working copy. A whole workspace is left as it is. Provisioning checks out
+// the issue's branch legion/<KEY> when GitHub has it, and starts at defaultBranch otherwise; on a
+// workspace already there it finishes the checkout (workspace.Provision). The workspace is read
+// under the issue's turn (provisionIn), so a launch never reads one the issue's provision is still
+// making.
 func (r *outbox) ensureWorkspace(ctx context.Context, key string, repo ghrepo.Repository, defaultBranch string) error {
 	if r.podsProvision() {
 		return nil
 	}
-	missing, err := workspaceMissing(r.stateDir, repo, key)
-	if err != nil || !missing {
-		return err
-	}
-	r.log.Warn("provisioning the workspace a claim's launch found missing", "issue", key, "repository", repo.String())
 	return r.provisionIn(ctx, key, repo, defaultBranch, true)
 }
 
-// workspaceMissing is whether key's workspace directory is absent from the daemon's host.
-func workspaceMissing(stateDir string, repo ghrepo.Repository, key string) (bool, error) {
-	working, err := workspace.Location(stateDir, repo, key)
+// unprovisioned is why key's workspace, working, needs a provision before a launch works in it, or
+// "" when it is whole: its directory is absent from the daemon's host ("missing"), or its checkout
+// never finished ("not checked out", checkedOut).
+func (r *outbox) unprovisioned(ctx context.Context, key string, working workspace.Workspace) (string, error) {
+	if _, err := os.Stat(working.Dir); errors.Is(err, os.ErrNotExist) {
+		return "missing", nil
+	} else if err != nil {
+		return "", fmt.Errorf("read the workspace of %s: %w", key, err)
+	}
+	whole, err := r.checkedOut(ctx, working)
 	if err != nil {
-		return false, err
+		return "", fmt.Errorf("read whether the workspace of %s finished its checkout: %w", key, err)
 	}
-	if _, err := os.Stat(working.Dir); err == nil {
-		return false, nil
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return false, fmt.Errorf("read the workspace of %s: %w", key, err)
+	if whole {
+		return "", nil
 	}
-	return true, nil
+	return "not checked out", nil
 }
 
 // provisionIn provisions key's workspace in repo, at defaultBranch for an issue with no branch, as
-// the implement App for repo's owner; with onlyMissing, only when the workspace is still missing
-// once this provision's turn comes, so two launches that both found it missing provision it once.
-// Provisions of one issue take turns; once it has its turn, a provision waits for one of the
-// provisionConcurrency places, and runs beside other issues' provisions, handed its repository's
-// store lock (provisionLocks).
+// the implement App for repo's owner; with onlyMissing, only when the workspace is still missing or
+// not checked out once this provision's turn comes (unprovisioned), so two launches that both need
+// it provision it once. Provisions of one issue take turns; once it has its turn, a provision runs
+// beside other issues' provisions, handed its repository's store lock (provisionLocks.stores) and
+// the wait for one of the provisionConcurrency checkout places (provisionLocks.slot), which
+// workspace.Provision takes for the checkout alone, once it has let the store lock go. The order is
+// issue turn, store lock, checkout place, and nothing that holds a place waits on a store lock, so
+// the three never wait in a cycle, and a provision waiting on its repository's store lock holds no
+// place another repository's checkout needs.
 func (r *outbox) provisionIn(ctx context.Context, key string, repo ghrepo.Repository, defaultBranch string, onlyMissing bool) error {
-	if r.tokens == nil {
-		return errors.New("supervise executor has no GitHub App token manager")
-	}
 	located, err := workspace.Location(r.stateDir, repo, key)
 	if err != nil {
 		return fmt.Errorf("provision workspace for %s: %w", key, err)
@@ -1202,15 +1216,15 @@ func (r *outbox) provisionIn(ctx context.Context, key string, repo ghrepo.Reposi
 	issue.Lock()
 	defer issue.Unlock()
 	if onlyMissing {
-		if missing, err := workspaceMissing(r.stateDir, repo, key); err != nil || !missing {
+		found, err := r.unprovisioned(ctx, key, located)
+		if err != nil || found == "" {
 			return err
 		}
+		r.log.Warn("provisioning the workspace a claim's launch found missing or not checked out", "issue", key, "repository", repo.String(), "found", found)
 	}
-	releaseSlot, err := r.provisions.slot(ctx)
-	if err != nil {
-		return fmt.Errorf("provision workspace for %s: wait for a provision's turn: %w", key, err)
+	if r.tokens == nil {
+		return errors.New("supervise executor has no GitHub App token manager")
 	}
-	defer releaseSlot()
 	lease, err := r.tokens.Token(ctx, appauth.Implement, repo.Owner())
 	if err != nil {
 		return fmt.Errorf("mint the implement App token for %s to provision %s: %w", repo.Owner(), key, err)
@@ -1219,9 +1233,10 @@ func (r *outbox) provisionIn(ctx context.Context, key string, repo ghrepo.Reposi
 	defer releaseStore()
 	if _, err := r.provision(ctx, workspace.Request{
 		StateDir: r.stateDir, Repo: repo, Issue: key, DefaultBranch: defaultBranch, CredentialHelper: workspace.GitHubCredentialHelper,
-		Source:    workspace.FromGitHub(lease.Token, r.stateDir),
-		Log:       func(line string) { r.log.Warn("provisioning: "+line, "issue", key) },
-		StoreLock: store,
+		Source:       workspace.FromGitHub(lease.Token, r.stateDir),
+		Log:          func(line string) { r.log.Warn("provisioning: "+line, "issue", key) },
+		StoreLock:    store,
+		CheckoutSlot: r.provisions.slot,
 	}); err != nil {
 		return fmt.Errorf("provision workspace for %s: %w", key, err)
 	}
@@ -1786,17 +1801,17 @@ func (r *outbox) removeWorkspace(ctx context.Context, row record.OutboxRow, payl
 		return fmt.Errorf("locate workspace for %s: %w", row.Issue, err)
 	}
 	// The removal forgets the workspace in the same shared clone a provision adds to: it takes its
-	// issue's turn, so it never runs under that issue's provision, and holds the clone's store lock
-	// throughout, so nothing of another issue's provision but its checkout runs beside it.
+	// issue's turn, so it never runs under that issue's provision, then hands workspace.Remove the
+	// clone's store lock, the order a provision takes them in. Remove holds the lock for every step
+	// on the clone and the rename aside, and lets it go before it deletes the workspace's files, so
+	// nothing of another issue's provision waits for that delete.
 	issueTurn, releaseIssue := r.provisions.issues.take(working.Dir)
 	defer releaseIssue()
 	issueTurn.Lock()
 	defer issueTurn.Unlock()
 	store, releaseStore := r.provisions.stores.take(working.Clone)
 	defer releaseStore()
-	store.Lock()
-	defer store.Unlock()
-	if err := r.remove(ctx, working); err != nil {
+	if err := r.remove(ctx, working, store); err != nil {
 		return fmt.Errorf("remove workspace for %s: %w", row.Issue, err)
 	}
 	return nil

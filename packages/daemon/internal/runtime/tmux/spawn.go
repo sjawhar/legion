@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"maps"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -367,18 +368,22 @@ func (r *Runtime) Spawn(ctx context.Context, spec runtime.SpawnSpec) (runtime.Lo
 	if spec.ResumeSessionFile != "" {
 		return runtime.Locator{}, fmt.Errorf("spawn %s: a ResumeSessionFile is Resume's to set", spec.Claim)
 	}
-	return r.launch(ctx, spec)
+	return r.launch(ctx, spec, false)
 }
 
 // Resume starts the agent prev's claim recorded, again, from spec.ResumeSessionFile — after
 // waiting, up to the stop grace, for prev's incarnation to be gone: one claim, one process. A nil
 // prev means no previous incarnation is known (a claim suspended across a daemon restart) and
-// there is nothing to wait for, and so does a prev another runtime recorded (foreign), whose
-// process this runtime cannot see. The session is resumed where it is: at its recorded path, or,
-// by its name, in another working directory's folder of the same sessions directory
-// (sessionFileOf), where a session carried over from a pod lands. One found nowhere starts
-// nothing: the error wraps runtime.ErrSessionFileMissing, which the claim's machine answers by
-// forgetting the session and spawning a fresh agent.
+// there is nothing to wait for; under runtime.tmux.take_over, so does a prev of the runtime this
+// one takes over (foreign), whose process this runtime cannot see, and without the key such a prev
+// is refused, naming the key (paneOf). The session is resumed where it is: at its recorded path,
+// or, by its name, in another working directory's folder of the recorded path's sessions directory
+// or of the pane's own (sessionFileOf), where a session carried over from a pod lands. One found
+// nowhere starts nothing. Over a foreign prev the error wraps runtime.ErrSessionFileMissing, which
+// the claim's machine answers by forgetting the session and spawning a fresh agent: the session was
+// another runtime's, and the operator chose the takeover. Over any other prev, or none, it is a
+// refusal, never a fresh agent: the claim resumes the agent it recorded or none
+// (assertResumeSessionFile, runtime.ts), and the refusal is charged as any launch failure is.
 func (r *Runtime) Resume(ctx context.Context, prev *runtime.Locator, spec runtime.SpawnSpec) (runtime.Locator, error) {
 	if spec.ResumeSessionFile == "" {
 		return runtime.Locator{}, fmt.Errorf("resume %s: no session file to resume from", spec.Claim)
@@ -386,18 +391,19 @@ func (r *Runtime) Resume(ctx context.Context, prev *runtime.Locator, spec runtim
 	if err := (runtime.Known{Claim: spec.Claim, Locator: prev}).Validate(); err != nil {
 		return runtime.Locator{}, fmt.Errorf("resume: %w", err)
 	}
-	if prev != nil && !foreign(*prev) {
+	takenOver := prev != nil && r.foreign(*prev)
+	if prev != nil && !takenOver {
 		if err := r.awaitGone(ctx, *prev); err != nil {
 			return runtime.Locator{}, err
 		}
 	}
-	return r.launch(ctx, spec)
+	return r.launch(ctx, spec, takenOver)
 }
 
 // awaitGone waits, up to the stop grace, until loc's incarnation is no longer its pane's process,
 // then stops watching it.
 func (r *Runtime) awaitGone(ctx context.Context, loc runtime.Locator) error {
-	pane, inc, err := paneOf(loc)
+	pane, inc, err := r.paneOf(loc)
 	if err != nil {
 		return fmt.Errorf("resume %s: %w", loc.Claim, err)
 	}
@@ -421,8 +427,10 @@ func (r *Runtime) awaitGone(ctx context.Context, loc runtime.Locator) error {
 }
 
 // launch is Spawn's and Resume's shared half: every check that needs no tmux, the secret files,
-// the claim's gh bundle, then the pane.
-func (r *Runtime) launch(ctx context.Context, spec runtime.SpawnSpec) (runtime.Locator, error) {
+// the claim's gh bundle, then the pane. takenOver is a resume over a previous incarnation of the
+// runtime this one takes over (Resume), whose session found nowhere is runtime.ErrSessionFileMissing
+// rather than a refusal.
+func (r *Runtime) launch(ctx context.Context, spec runtime.SpawnSpec, takenOver bool) (runtime.Locator, error) {
 	if err := validateSpawnSpec(spec, r.providerKeys, r.operatorEnv); err != nil {
 		return runtime.Locator{}, err
 	}
@@ -446,15 +454,30 @@ func (r *Runtime) launch(ctx context.Context, spec runtime.SpawnSpec) (runtime.L
 	}
 	if spec.ResumeSessionFile != "" {
 		harness := runtime.Backends[backend].Name
-		found, err := sessionFileOf(spec.ResumeSessionFile, harness)
-		if err != nil {
-			if errors.Is(err, runtime.ErrSessionFileMissing) {
-				return runtime.Locator{}, fmt.Errorf("resume %s: %w", spec.Claim, err)
+		found, searched, err := sessionFileOf(spec.ResumeSessionFile, func() (string, error) {
+			env := maps.Clone(r.paneEnv)
+			maps.Copy(env, r.operatorEnv)
+			dir, err := launcher.SessionsDir(spec, Host{StateDir: r.stateDir, Legion: r.legion}, env, workDir)
+			if err != nil {
+				return "", fmt.Errorf("the pane's %s sessions directory: %w", harness, err)
 			}
+			return dir, nil
+		})
+		switch {
+		case err != nil:
 			return runtime.Locator{}, fmt.Errorf("spawn %s: %w", spec.Claim, err)
-		}
-		if found != spec.ResumeSessionFile {
-			r.log.Warn("tmux runtime: the recorded session is in another folder of its sessions directory; resuming it there",
+		case found == "" && takenOver:
+			return runtime.Locator{}, fmt.Errorf("resume %s: %w: no %s session at %s, and no other folder of %s holds that session",
+				spec.Claim, runtime.ErrSessionFileMissing, harness, spec.ResumeSessionFile, searchedIn(searched))
+		case found == "":
+			verb := "respawning"
+			if claim.IsTreeArchitect(spec.Role, spec.Issue, spec.Tree) {
+				verb = "resurrecting"
+			}
+			return runtime.Locator{}, fmt.Errorf("Refusing to start %s fresh while %s: recorded %s session file is missing: %s, and no other folder of %s holds that session",
+				spec.Issue, verb, harness, spec.ResumeSessionFile, searchedIn(searched))
+		case found != spec.ResumeSessionFile:
+			r.log.Warn("tmux runtime: the recorded session is in another folder; resuming it there",
 				"claim", spec.Claim, "backend", backend, "recorded", spec.ResumeSessionFile, "session", found)
 			spec.ResumeSessionFile = found
 		}
@@ -610,7 +633,7 @@ func (r *Runtime) refuseLiveIncarnation(ctx context.Context, token claim.Token) 
 		if entry.locator.Claim != token {
 			continue
 		}
-		pane, inc, err := paneOf(entry.locator)
+		pane, inc, err := r.paneOf(entry.locator)
 		if err != nil {
 			return err
 		}
@@ -639,7 +662,7 @@ func (r *Runtime) issueWindow(ctx context.Context, issue string) (string, error)
 		if entry.issue != issue {
 			continue
 		}
-		pane, inc, err := paneOf(entry.locator)
+		pane, inc, err := r.paneOf(entry.locator)
 		if err != nil {
 			return "", err
 		}
