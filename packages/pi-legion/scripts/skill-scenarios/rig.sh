@@ -404,6 +404,17 @@ cmd_profile() {
   cat "$P/built-from"
 }
 
+# pinned_omp PIN prints the path of the omp binary mise installed for PIN. A run names it by path:
+# `mise x <pin> -- omp` leaves an `omp` earlier on the caller's PATH (a wrapper script, say) ahead
+# of the pin's own whenever PIN is the version mise already has active there, so the run would get
+# the wrapper and whatever omp and configuration it picks, not the label's pin.
+pinned_omp() {
+  local omp
+  omp=$(mise where "$1")/bin/omp || fail "mise has no install of $1"
+  [ -x "$omp" ] || fail "$omp, the pin $1's binary, is not executable"
+  printf '%s\n' "$omp"
+}
+
 # install_superpowers P PROFILE PIN copies SKILL_SCENARIOS_SUPERPOWERS's writing-plans and
 # brainstorming skills into the profile's user skill directory, the one the pinned Oh My Pi reads
 # for a named profile ($HOME/.omp/profiles/<profile>/agent/skills/<name>/SKILL.md). Then one
@@ -413,7 +424,8 @@ cmd_profile() {
 # pass. It records the plugin's version and each skill's digest in built-from. It marks the label
 # with a `superpowers` file, which a spec run needs.
 install_superpowers() {
-  local P=$1 profile=$2 pin=$3 src=$SKILL_SCENARIOS_SUPERPOWERS skill dest probe version
+  local P=$1 profile=$2 pin=$3 src=$SKILL_SCENARIOS_SUPERPOWERS skill dest probe version omp
+  omp=$(pinned_omp "$pin") || exit 1
   dest=$P/home/.omp/profiles/$profile/agent/skills
   mkdir -p "$dest"
   for skill in "${superpowers_skills[@]}"; do
@@ -436,7 +448,7 @@ install_superpowers() {
       env -i HOME="$P/home" USER="$USER" TERM=xterm-256color TMPDIR="$probe/tmp" PATH="$PATH" \
         MISE_DATA_DIR="${MISE_DATA_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/mise}" OMP_PROFILE="$profile" \
         PI_NOTIFICATIONS=off PI_NO_TITLE=1 ENVOY_URL=http://127.0.0.1:1 timeout "${SKILL_SCENARIOS_TIMEOUT:-1500}" \
-        mise x "$pin" -- omp -p 'Call the read tool once on the path skill://writing-plans, and nothing else. Then reply with the first line of what it returned.' \
+        mise x "$pin" -- "$omp" -p 'Call the read tool once on the path skill://writing-plans, and nothing else. Then reply with the first line of what it returned.' \
         --session-dir "$probe/sessions" </dev/null
   ) >"$probe/out.txt" 2>&1 || fail "the read of skill://writing-plans under profile $profile failed; see $probe/out.txt"
   ! grep -q 'Unknown skill' "$probe/out.txt" "$probe"/sessions/*.jsonl 2>/dev/null ||
@@ -498,7 +510,8 @@ EOF
 # until_true. A spec run's later turn passes --continue. Each launch starts out.txt again, so its
 # wait reads only its own exit line.
 launch() {
-  local system='' extra=''
+  local system='' extra='' omp
+  omp=$(pinned_omp "$pin") || exit 1
   session=$tag-$1
   shift
   [ $# = 0 ] || extra=" $(printf '%q ' "$@")" extra=${extra% }
@@ -507,7 +520,7 @@ launch() {
 #!/usr/bin/env bash
 cd $(printf %q "$R/cwd")
 mapfile -t vars <$(printf %q "$R/pane.env")
-exec env -i "\${vars[@]}" mise x $(printf %q "$pin") -- omp -p "\$(cat $(printf %q "$R/prompt.txt"))"$extra$system --session-dir $(printf %q "$R/sessions") >$(printf %q "$R/out.txt") 2>&1
+exec env -i "\${vars[@]}" mise x $(printf %q "$pin") -- $(printf %q "$omp") -p "\$(cat $(printf %q "$R/prompt.txt"))"$extra$system --session-dir $(printf %q "$R/sessions") >$(printf %q "$R/out.txt") 2>&1
 EOF
   chmod +x "$R/launch.sh"
   : >"$R/out.txt"

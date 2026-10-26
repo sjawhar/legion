@@ -697,9 +697,15 @@ describe("install_superpowers", () => {
       path.join(bin, "probe.jsonl"),
       `${JSON.stringify({ message: { role: "toolResult", content: [{ type: "text", text: result }] } })}\n`
     );
+    // `mise where` names the pin's install, whose bin/omp the probe runs by path; any other call is
+    // the probe's `mise x <pin> -- <omp> -p …`.
+    mkdirSync(path.join(bin, "pin", "bin"), { recursive: true });
+    writeFileSync(path.join(bin, "pin", "bin", "omp"), "#!/bin/sh\n", { mode: 0o755 });
     writeFileSync(
       path.join(bin, "mise"),
       `#!/usr/bin/env bash
+if [ "$1" = where ]; then echo "$(dirname "$0")/pin"; exit 0; fi
+printf '%s\\n' "$@" >"$(dirname "$0")/argv.txt"
 env >"$(dirname "$0")/env.txt"
 while [ $# -gt 0 ] && [ "$1" != --session-dir ]; do shift; done
 mkdir -p "$2"
@@ -710,7 +716,7 @@ echo done
     );
     const run = () =>
       bash(
-        `${fn("fail")}\n${fn("install_superpowers")}\nsuperpowers_skills=(writing-plans brainstorming)\ninstall_superpowers "$1" skills-s1 omp@pin`,
+        `${fn("fail")}\n${fn("pinned_omp")}\n${fn("install_superpowers")}\nsuperpowers_skills=(writing-plans brainstorming)\ninstall_superpowers "$1" skills-s1 omp@pin`,
         [label],
         { PATH: `${bin}:${childEnv.PATH}`, SKILL_SCENARIOS_SUPERPOWERS: src, USER: "rig" }
       );
@@ -734,6 +740,10 @@ echo done
     expect(env).toContain(`HOME=${label}/home\n`);
     expect(readFileSync(path.join(label, "built-from"), "utf8")).toContain(
       "superpowers-skill writing-plans "
+    );
+    // The probe names the pin's own binary, so no omp earlier on PATH stands in for it.
+    expect(readFileSync(path.join(bin, "argv.txt"), "utf8")).toStartWith(
+      `x\nomp@pin\n--\n${bin}/pin/bin/omp\n-p\n`
     );
   });
 
@@ -1143,17 +1153,24 @@ describe("launch", () => {
     writeFileSync(path.join(run, "prompt.txt"), "The person answered your asks on LWEVAL-2.\n");
     writeFileSync(path.join(run, "pane.env"), `PATH=${bin}:${process.env.PATH ?? ""}\n`);
     writeFileSync(path.join(run, "out.txt"), "the first turn\nexit=0\n");
-    writeFileSync(path.join(bin, "mise"), '#!/bin/sh\nshift 3\necho "$@"\n', { mode: 0o755 });
+    mkdirSync(path.join(bin, "pin", "bin"), { recursive: true });
+    writeFileSync(path.join(bin, "pin", "bin", "omp"), "#!/bin/sh\n", { mode: 0o755 });
+    writeFileSync(
+      path.join(bin, "mise"),
+      `#!/bin/sh\nif [ "$1" = where ]; then echo "${bin}/pin"; exit 0; fi\nshift 3\necho "$@"\n`,
+      { mode: 0o755 }
+    );
     const standIns = `
 tmux() { case $1 in new-session) (command sleep 0.3 && bash -c "\${@: -1}") & ;; esac; }
 sleep() { command sleep 0.05; }`;
     const result = bash(
-      `${fn("launch")}\n${standIns}\nR=$1 tag=t pin=omp@pin\nlaunch spec-writing-s1-1 --continue\ncp "$R/out.txt" "$R/seen"`,
-      [run]
+      `${fn("fail")}\n${fn("pinned_omp")}\n${fn("launch")}\n${standIns}\nR=$1 tag=t pin=omp@pin\nlaunch spec-writing-s1-1 --continue\ncp "$R/out.txt" "$R/seen"`,
+      [run],
+      { PATH: `${bin}:${childEnv.PATH}` }
     );
     expect(result.code).toBe(0);
     expect(readFileSync(path.join(run, "seen"), "utf8")).toBe(
-      `omp -p The person answered your asks on LWEVAL-2. --continue --session-dir ${run}/sessions\nexit=0\n`
+      `${bin}/pin/bin/omp -p The person answered your asks on LWEVAL-2. --continue --session-dir ${run}/sessions\nexit=0\n`
     );
   });
 });
