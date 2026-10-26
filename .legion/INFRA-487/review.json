@@ -1,0 +1,38 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-487",
+  "completed": "2026-10-26T21:36:00Z",
+  "round": 1,
+  "reviewedHead": "04740773da906f0865c1b12e5ff2287ee3cc38d7 (code head fa1312aac8e9; only .legion/ above it)",
+  "decision": "changes_requested",
+  "critical": 0,
+  "important": 3,
+  "minor": 0,
+  "keyFindings": [
+    {
+      "severity": "important",
+      "file": "packages/envoy/cmd/broker/main.go:407",
+      "description": "go clock.Run(serving) starts before the broker serves: srv.Serve starts at :525-527, and between them oauthStore.Secret (:420-423, bounded by oauthSecretTimeout), exchange.NewSet (:428-429), exchangeKeys (:432-438, up to oidc.DiscoveryTimeout 30 s each) and oauth.New (:448-455) can each fatal(). A broker crash-looping at one of those steps beats every sweep while answering nothing, so its boot windows read as 'serving': a lease that runs out inside one is older than the next last_serving_at, enrollment_lease_live turns false for it (0019, lease > last_serving_at), Beat gives it nothing (serving.go:89-90), and the next sweep ends it (enroll.go:514), which is the exit-76 failure this issue fixes. Fix: start the clock right before srv.Serve (beside close(serveStarted), :525), still on serving."
+    },
+    {
+      "severity": "important",
+      "file": "packages/envoy/internal/broker/enroll/serving.go:64",
+      "description": "Beat has no deadline: its select ... for update (:75) waits forever on a broker_serving row lock another transaction holds (a replica's connection half-open mid-beat, an operator's open session; the store sets no lock_timeout or statement_timeout). Run never returns from Beat, so the 'could not beat' WARN never fires, and after three sweeps the guard turns on while brokers serve: leases that lapsed while serving stay live and unswept, then get that time back. This hides an error. Fix: bound each beat (context.WithTimeout or SET LOCAL lock_timeout) so a stuck beat fails, logs, and retries."
+    },
+    {
+      "severity": "important",
+      "file": "packages/envoy/internal/broker/config/config.go:650",
+      "description": "The PR adds a refusal at the broker's configuration boundary (config.Load refuses 2*BROKER_LEASE_SECONDS <= 9*BROKER_SWEEP_SECONDS) and the body carries no '## Contract change census'. Required: the search commands (this repository and theorem-labs/agent-infra, e.g. rg -n 'BROKER_LEASE_SECONDS|BROKER_SWEEP_SECONDS' across packages scripts deploy docs/site skills AGENTS.md .github, and a code search of the deployment repository), every hit with a disposition, and a rollout line (warn-first, or an immediate refusal naming what it closes). My own run at the head finds only config_test.go, outage_test.go and doc/comment hits, and GitHub code search finds none in theorem-labs/agent-infra."
+    }
+  ],
+  "notDefects": [
+    "Config bound ignores the renewer's 10 s retry cap (config.go:647-653): the same thing happened before this change for tiny leases, the defaults are 900/5, and serving.go:20-22 is literally true (no lease runs out inside the tolerated gap). Minor, not a defect.",
+    "Daemon classifies every transport error, a malformed URL or TLS failure included, as broker-unavailable (client.go:216-219): the plan chose 'no HTTP answer' as the class, and the cost is one ERROR line per <=10 s on a misconfigured daemon, with no extra broker load. Minor, not a defect.",
+    "TakeAt/CancelAt(now) in ratelimit.go: under x/time/rate v0.15.0 the under-restore and the backward move of last cancel to exactly one token, capped at burst; no over-credit.",
+    "Nine predicate sites all use enrollment_lease_live (enroll.go:412,514,623,786,973; machine_read.go:63; machine_state.go:622,932,945); no lease_expires_at > now() is left. Beat alone locks broker_serving; readers take no lock; no cycle. Outage test margin (restored >=30 s against the renewer's <=10 s wait) holds."
+  ],
+  "fastFollow": "One definition of the outage rule in SQL: serving.go:83-90 restates 0019's enrollment_lease_live condition, and the two must agree exactly.",
+  "ci": "Required checks (rulesets: lint, typecheck, test, pr-title) at CI head 7dcf3ff9 were all queued at 21:35Z; compare 7dcf3ff9...04740773 is handoffsOnly true, 1 file. A request for changes does not wait on CI.",
+  "thermonuclear": "deep-review and code-quality ran once at 04740773: deep-review CHANGES (findings 1 and 2 above, two minors judged not defects); code-quality CHANGES with cleanup-only findings, carried as the one fast-follow."
+}
