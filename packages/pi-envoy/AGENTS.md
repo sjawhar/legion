@@ -167,10 +167,15 @@ left on when the switch's event runs, and a wake dropped there would be lost.
 
 AskGate (`extensions/askgate/`) reviews each Dispatch write of a main agent before it posts. The
 README's "AskGate" section says what it reviews, the switch, the modes and the model role.
-`envoy.ts` reads the switch at load (`askgateSetting` in `@legion/envoy-client/envoy-config`, the
-top-level `askgate` section of the session's envoy.json) and calls `registerAskGate` unless that
-switch is off. It does not use the checkout-merged Dispatch setting, because a later command can
-reach Dispatch with `DISPATCH_URL`. `registerAskGate` (`askgate.ts`) registers the gate's one
+`envoy.ts` binds it only in a session that has Dispatch: it reads the session's own envoy.json
+with the variables over it (`readEnvoyConfig` and `dispatchSettings`, with `checkout: null`), so a
+checkout can turn off the Dispatch of its own directory but not the gate, which a later command
+can still pass with `DISPATCH_URL`. A session or a pod with no Dispatch has no write to review and
+gets no gate; the test runs at load, so a session that turns Dispatch on later has none either. In
+such a session `envoy.ts` reads the switch (`askgateSetting` in
+`@legion/envoy-client/envoy-config`, the top-level `askgate` section of that file) and calls
+`registerAskGate` unless that switch is off.
+`registerAskGate` (`askgate.ts`) registers the gate's one
 `tool_call` handler at once, in the factory, after `envoy.ts`'s own, and starts the load of Oh My
 Pi's own modules through string-literal `import()`, declared in `../pi-shared/src/omp-host.d.ts`.
 Each call waits for the load. Once the modules load, the core binds to a `pi` that keeps its
@@ -178,16 +183,22 @@ Each call waits for the load. Once the modules load, the core binds to a `pi` th
 so no call passes between the load and the binding. A load that fails (a module, an
 `OMP_ASKGATE_TIMEOUT_MS` that is no positive integer, a handler ceiling too short for a verdict)
 is no off switch: `loadFailureGate` refuses each write the gate would review, in both modes, naming
-the error and `askgate.enabled`, and records a `load-failed` entry. Neither is a session whose
-envoy.json location cannot be worked out, which holds no switch to read: `registerAskGateRefusal`
-binds that same refusal with no module loaded. `session_start` waits for the
+the error and `askgate.enabled`, and records a `load-failed` entry. A session with no envoy.json
+location has no Dispatch either, since its `dispatch` command works the file out by the same rule,
+so nothing binds there. `session_start` waits for the
 load and shows a load failure, a switch that does not parse or a location it could not work out as
 a notice. `askgate-core.ts` holds
 every rule of the gate and takes the host through its dependencies, so `askgate.test.ts` drives it
 with fakes. The reader takes one form, the literal grammar of one `dispatch` call
 (`dispatchCommandHead`, the README's "The form the gate reads"): anything else, a gated write in
 the call's own text included, is `unreadable` (`unreadableDispatchWrite`), which block mode
-refuses and warn mode lets run with the reason as context. Every other way a write passes
+refuses and warn mode lets run with the reason as context. That scan reads text another command
+runs (a shell's `-c` operand, `eval`'s arguments, a here-document, a here-string, a pipe into a
+shell) as that command runs it, and any other text for `dispatch` as a program word alone; a
+`dispatch` before a glob, a brace or an expansion counts only under a runner (the runner table and
+`find -exec`). An `eval` cell that starts the CLI as a process of its own is unreadable too.
+Precision comes first: a call that holds no Dispatch write is never refused.
+Every other way a write passes
 unreviewed records its outcome and tells the agent so (`renderUnreviewed`), and each one hands
 back the agent's own command, never the one naming a snapshot (`UNREVIEWED_OUTCOMES`): a gate that
 fails breaks no valid write. A snapshot goes when the command that reads it has run, which for a
@@ -204,9 +215,18 @@ AskGate reviews the writes of a cooperating agent. It is no sandbox, and nothing
 designed as one: a process that runs as the same user defeats it. That process can replace a
 snapshot's bytes between the review and the open (a snapshot is `0600` in a `0700` directory,
 which keeps out other users, not this one), turn the gate off in its own envoy.json, point the
-session at another envoy.json through `ENVOY_CONFIG_FILE`, `PI_CODING_AGENT_DIR` or
-`XDG_CONFIG_HOME` in the launching shell, or call Dispatch's HTTP API and send no command at all.
+session at another envoy.json through `OMP_PROFILE`, `PI_CODING_AGENT_DIR`, `ENVOY_CONFIG_FILE`,
+`XDG_CONFIG_HOME` or `HOME` in the launching shell (the variables `envoyConfigPath` reads, in that
+order), or call Dispatch's HTTP API and send no command at all.
 Keep every check that is there; add none that only an attacker of that kind would need.
+
+The scan catches none of these, and is not made to: an alias or a shell function defined in the
+call or left in the persistent shell; a brace or a glob as the program word (`{,dispatch}`,
+`dispatc?`); a script another tool writes that the call then runs; a copy or a link of the CLI
+under another name; a command the call builds at run time; text nested deeper than
+`NESTED_DEPTH`; and any other program that reaches Dispatch's HTTP API. Record such a form here
+rather than chase it: a refusal that stops a call holding no Dispatch write costs more than a
+construct a cooperating agent never writes.
 
 ## Legion
 

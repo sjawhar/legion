@@ -1,6 +1,19 @@
 // Reports on AskGate's advisor-gate session entries and samples the reviews it sent back.
 // Usage: bun askgate-report.ts --sessions <dir> --since <RFC 3339> --sample <n> --out <dir>
 //   [--seed <n>]
+//
+// What the counts mean, as `isSentBack`, `isRefusal` and `isUnreviewed` read an entry:
+//   - sent back: the gate did not pass the write as sent. Every entry whose decision is
+//     `revise` — a revise verdict, `no-model-role`, and, in block mode, `abandoned` and
+//     `shutdown`, the two causes of a call given up with no verdict — and every `unreadable` or
+//     `load-failed` entry, whatever its mode.
+//   - refusal: a write that did not post. Every sent-back entry of a session in block mode,
+//     plus `no-model-role` and `load-failed` in warn mode too, since neither gate can review
+//     anything and a gate that cannot review is no off switch. A warn-mode `unreadable`,
+//     `abandoned` or `shutdown` is sent back and no refusal: its write posted.
+//   - unreviewed: a write that posted with no review behind it. Every `allow` whose outcome is
+//     not `verdict`: timeout, error, no-verdict, halted, skipped, rebuttal, breaker, and in
+//     warn mode `unreadable`, `abandoned` and `shutdown`.
 import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 

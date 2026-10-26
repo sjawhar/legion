@@ -4357,7 +4357,12 @@ issue's pod (every role container of it alike) and the image probe's.
   `extensionHandlers.toolCallTimeoutMs: 120000` in the operator's `overlay.yml`, as the example
   overlay does (pi-envoy's README, "The time limit"). Legion's own turn-scoping overlay does not set
   it. Without it, the gate logs one warning at start, `AskGate: the review deadline is 25000 ms`,
-  through Oh My Pi's logger.
+  through Oh My Pi's logger. The gate binds in a pod because the pod has Dispatch; one without it
+  gets no gate. It reviews the writes of a cooperating agent and is no sandbox: a process of the
+  pod's own user defeats it, and its scan catches no alias or shell function, no brace or glob
+  program word, no script another tool writes and the call then runs, no copy or link of the CLI
+  under another name, no command built at run time, nothing nested past its scan depth, and no
+  other program that reaches Dispatch's HTTP API (pi-envoy's README, "What AskGate is not").
 - **`runtime.kubernetes.agent_secrets`** enrolls every pod the daemon runs with the secrets broker
   (the broker design's pod-enrollment plan), so an agent in a pod runs
   `agent-secrets <SECRET> -- <command>` and gets only

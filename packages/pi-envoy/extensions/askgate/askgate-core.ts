@@ -7,9 +7,18 @@
 // process running as the same user defeats it. It can replace a snapshot's bytes between the
 // review and the open (the snapshot is 0600 in a 0700 directory, which keeps out other users, not
 // this one), turn the gate off in its own envoy.json, point the session at another envoy.json
-// through ENVOY_CONFIG_FILE, PI_CODING_AGENT_DIR or XDG_CONFIG_HOME in the launching shell, or
+// through OMP_PROFILE, PI_CODING_AGENT_DIR, ENVOY_CONFIG_FILE, XDG_CONFIG_HOME or HOME in the
+// launching shell (the variables `envoyConfigPath` reads, in that order), or
 // call Dispatch's HTTP API and send no command at all. Every check here is for a write an agent
 // meant to send; none of them is weakened, and none is added for an attacker of that kind.
+//
+// What the scan does not catch, and is not made to: an alias or a shell function defined in the
+// call or left in the persistent shell; a brace or a glob as the program word (`{,dispatch}`,
+// `dispatc?`); a script another tool writes that the call then runs; a copy or a link of the CLI
+// under another name; a command the call builds at run time, whose words its text does not hold;
+// text nested deeper than NESTED_DEPTH; and any other program that reaches Dispatch's HTTP API.
+// A cooperating agent writes none of these. Precision comes first: the gate must not refuse a
+// call that holds no Dispatch write, since a false refusal in block mode stops real work.
 //
 // Scope: eight calls on the command line and six of them as devices, each recorded under one tool
 // name (dispatch_ask, …).
@@ -69,21 +78,37 @@
 //     `dispatch`, or a program an expansion names, whose subcommand an expansion names
 //     (`dispatch $SUB …`, `"$D" "$S" …`), is `unreadable`. So is an `issue` or an `artifact` that
 //     holds a word only bash resolves (`$F`, a glob, a brace), since that word may be its
-//     `--spec` or its markdown name; and so is a write in text another command would run
-//     (`bash -c '…'`, `eval '…'`, a here-document `bash` reads, `xargs dispatch …`), its quotes
-//     removed as that command removes them. In `block` mode the call is refused before anything
+//     `--spec` or its markdown name. So is a write in text another command runs: a shell's `-c`
+//     operand (`$'…'` decoded), `eval`'s arguments, a here-document, a here-string or a pipe a
+//     shell reads (`… | bash`, with `printf` and `echo -e` escapes decoded and an unquoted
+//     here-document's backslashes removed), each read with its quotes removed as that command
+//     removes them. Only text a shell runs is read that way: in any other text (a quoted word,
+//     a here-document `cat` writes, a Makefile line) the scan looks for `dispatch` as the
+//     program word alone, so `echo "$a $b"`, `msg="$x $y $z"` and `perl -pe 's/(\w+) (\w+)/$2
+//     $1/'` hold no write. A program word of unknown subcommand (`dispatch` before a glob, a
+//     brace or an expansion) is a write only where a runner runs it: the runner table (`xargs`,
+//     `sudo`, `env`, `nice`, `nohup`, `timeout`, `stdbuf`, `setsid`, `command`, `exec`, `time`)
+//     and `find -exec`/`-execdir`, each prefix's own options read as its parser reads them, so
+//     `grep -rn dispatch packages/*/src`, `grep -l dispatch "$f"` and `rg dispatch src | head`
+//     hold none. The CLI is also `bun <path>/dispatch.js` and any path whose last segment is
+//     `dispatch` or `dispatch.js`. An `eval` call is read too (`evalDispatchWrite`): a cell that
+//     starts the CLI as a process of its own — a JS or Python spawn, exec, `subprocess` or `os`
+//     call with an argv array or a shell string, or the Bun shell — sends with no `bash` call to
+//     read, so it is unreadable; a cell that only names `dispatch` in text, or calls the bash
+//     tool, is not. In `block` mode the call is refused before anything
 //     in it runs; in `warn` mode it runs and the same explanation comes back as additional
 //     context, with the entry's decision `allow`. The explanation states the literal grammar and
 //     tells the agent to send that `dispatch` command on its own; when the word that runs it or
 //     names its subcommand is what AskGate cannot read, it names the characters in it
 //     (`unreadableDispatchWrite`, a scan aware of quotes, backslashes, here-documents and command
 //     substitutions, for a scoped write at a command position, then of each word, `eval`
-//     argument list and here-document body as a script of its own, four levels deep, then of
-//     the call's own text for a write another command would run). The
+//     argument list and here-document body as a script of its own, NESTED_DEPTH levels deep, then
+//     of the call's own text for a write another command would run). The
 //     entry reads `unreadable`; it never counts toward the halt. A halt, or a session the gate
 //     would skip (a primary on another provider), lets it run; a session with no model role
 //     refuses it in both modes, as a gate that did not load does: neither can review anything,
-//     and a gate that cannot review is no off switch.
+//     and a gate that cannot review is no off switch. A call that holds no Dispatch write is
+//     never refused: every rule above asks first whether a gated write could post.
 //   - `write xd://<device>` calls, seen on the nested `tool_call` event the device wrapper emits
 //     with `toolName = <device>` and the validated arguments, for dispatch_ask, dispatch_message,
 //     dispatch_edit_ask, dispatch_comment, dispatch_doc_edit, and dispatch_issue when its
