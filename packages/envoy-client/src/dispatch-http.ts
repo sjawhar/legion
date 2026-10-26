@@ -52,12 +52,12 @@ import type {
   WhoamiResponse,
 } from "@legion/contracts";
 import {
+  DEFAULT_ISSUE_READ_EVENTS,
   IDEMPOTENCY_ANSWER_NOT_KEPT,
   IDEMPOTENCY_KEY_COMMITTED,
   IDEMPOTENCY_KEY_HEADER,
   IDEMPOTENCY_KEY_IN_FLIGHT,
 } from "@legion/contracts";
-import { DEFAULT_ISSUE_READ_EVENTS } from "@legion/contracts";
 
 import { textHead } from "./ask-answer";
 

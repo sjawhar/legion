@@ -145,7 +145,7 @@ describe("DispatchClient's writes", () => {
     await dispatch.comment("DSP-1", comment);
     await dispatch.comment("DSP-1", comment);
     await dispatch.updateIssue("DSP-1", { status: "testing", actor });
-    await dispatch.syncArchitectureSource("DSP");
+    await dispatch.syncArchitectureSource("DSP", "acme/infra");
     await dispatch.getIssue("DSP-1");
     await dispatch.followAsk("ask-1", "session-1", actor);
     await dispatch.unfollowAsk("ask-1", "session-1", actor);
