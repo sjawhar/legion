@@ -560,8 +560,9 @@ approval_requests_in() { jq '[.[] | select(.type == "ask.opened" and .payload.ki
 begin prerequisites
 refuse_leftovers legion-e2e3
 for tool in go docker jq curl ss tmux bun mise secrets gh shellcheck jj pgrep; do command -v "$tool" >/dev/null || fail "$tool is required"; done
-# Legion's two role Apps are the operator's inputs, proved against GitHub here, before the run
-# writes anything (lib/github-apps.sh); legion.yaml's github_apps is the block proved.
+# Legion's two role Apps, this deployment's own unless the App inputs name another's, proved
+# against GitHub here, before the run writes anything (lib/github-apps.sh); legion.yaml's
+# github_apps is the block proved.
 require_app_inputs implement review
 write_github_apps implement review
 read_app_logins

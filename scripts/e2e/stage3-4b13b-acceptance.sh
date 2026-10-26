@@ -573,8 +573,9 @@ until_true_quiet() {
 
 begin prerequisites
 for tool in go psql jq curl ss tmux bun mise secrets gh jj hawk-token; do command -v "$tool" >/dev/null || fail "$tool is required"; done
-# Legion's two role Apps are the operator's inputs, proved against GitHub here, before the run
-# writes anything (lib/github-apps.sh, which the lib sourced from ACCEPT_ROOT must carry).
+# Legion's two role Apps, this deployment's own unless the App inputs name another's, proved
+# against GitHub here, before the run writes anything (lib/github-apps.sh, which the lib sourced
+# from ACCEPT_ROOT must carry).
 declare -F require_app_inputs >/dev/null ||
   fail "ACCEPT_ROOT's scripts/e2e/lib/workflow.sh ($root) predates lib/github-apps.sh: point ACCEPT_ROOT at a checkout that has it"
 require_app_inputs implement review

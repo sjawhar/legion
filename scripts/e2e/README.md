@@ -33,8 +33,10 @@ LEGION_REAL_GITHUB=1 LEGION_TEST_PG_DSN=postgres://… \
     -run '^TestRealGitHubCredentialSurface$' -v
 ```
 
-The test is intentionally gated because it calls GitHub as both installed Apps, which the four App
-inputs name ([`lib/github-apps.sh`](#libgithub-appssh)); a gated run without one fails naming it.
+The test is intentionally gated because it calls GitHub as both installed Apps: this deployment's
+own unless the four App inputs name another's
+([`lib/github-apps.sh`](#libgithub-appssh)), each unset input taking this deployment's value and a
+malformed one failing the run by name, never printing it.
 It resolves each
 App key through its `private_key_command`, mints each App's lease through the real token source,
 writes the gh files the daemon would render for a pane, and drives the real `gh` and `git` against
@@ -292,7 +294,8 @@ submission on its accepted READY: the repository allows no auto-merge, so the da
 GitHub reports it mergeable, and the proof only reads it (`await_ready_merge`), never merging it by
 hand.
 The run needs `go`, `docker`, `jq`, `curl`, `ss`, `tmux`, `bun`, `mise`, `gh`, `shellcheck`, the
-`secrets` CLI holding this deployment's two role App keys, and
+`secrets` CLI holding the two role App keys (this deployment's own unless the App inputs name
+another deployment's), and
 `LEGION_E2E_MODEL_ROUTE` (required, `gateway` or `key-file`), which picks how
 the agents reach Anthropic, independently of which devbox this runs on:
 - `gateway`: the operator's model gateway access — `LEGION_E2E_MODEL_GATEWAY_URL` naming the
@@ -2798,8 +2801,8 @@ changed` line for a move (`sign_off`, `pull_request_merged`).
 ## lib/github-apps.sh
 
 Legion's two role Apps as a live proof takes them, sourced by `lib/workflow.sh` (so by every stage
-proof that sources it) and by Stage 4a directly. Each App is two required operator inputs, never a
-literal of this repository:
+proof that sources it) and by Stage 4a directly. Each App is an id and a secret-store key name,
+which two optional operator inputs give:
 
 | input | what it names |
 | :--- | :--- |

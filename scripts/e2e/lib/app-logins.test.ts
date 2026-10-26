@@ -417,13 +417,20 @@ echo "wrote the block"`
   });
 
   test("app_key_unsets strips each role's key, this deployment's own two, and every PRIVATE_KEY variable", async () => {
+    // Each name is exported first, so the strip list has something to remove: without it the
+    // child would print them all.
     const { code, stdout, stderr } = await githubApps(
       { ...appInputs, SOME_OTHER_APP_PRIVATE_KEY_B64: "irrelevant" },
-      `require_app_inputs implement review
-env "\${app_key_unsets[@]}" sh -c 'echo "left $(env | grep -c -E "^(IMPLEMENT_KEY|REVIEW_KEY|SOME_OTHER_APP_PRIVATE_KEY_B64|$default_implement_app_key_name|$default_review_app_key_name)=" || true)"'`
+      `export IMPLEMENT_KEY=x REVIEW_KEY=x
+require_app_inputs implement review
+export "$default_implement_app_key_name=x" "$default_review_app_key_name=x"
+names="IMPLEMENT_KEY|REVIEW_KEY|SOME_OTHER_APP_PRIVATE_KEY_B64|$default_implement_app_key_name|$default_review_app_key_name"
+echo "set $(env | grep -c -E "^($names)=")"
+env "\${app_key_unsets[@]}" sh -c "echo \\"left \\$(env | grep -c -E '^($names)=' || true)\\""`
     );
     expect(stderr).toBe("");
     expect(code).toBe(0);
+    expect(stdout).toContain("set 5");
     expect(stdout).toContain("left 0");
   });
 
@@ -442,15 +449,20 @@ env "\${app_key_unsets[@]}" sh -c 'echo "left $(env | grep -c -E "^(IMPLEMENT_KE
     }
   });
 
-  test("a malformed input is refused without printing its value", async () => {
-    const pem = readFileSync(join(store, "IMPLEMENT_KEY"), "utf8");
-    const { code, stderr } = await githubApps(
-      { ...appInputs, LEGION_E2E_IMPLEMENT_APP_KEY_NAME: pem },
-      proveBoth
-    );
-    expect(code).toBe(1);
-    expect(stderr).toContain("LEGION_E2E_IMPLEMENT_APP_KEY_NAME must be");
-    expect(stderr).not.toContain(pem.slice(0, 40));
+  test("a malformed input is refused without printing its value, a key-shaped one by its length", async () => {
+    const pasted = readFileSync(join(store, "IMPLEMENT_KEY"), "utf8")
+      .trim()
+      .replace(/[^A-Za-z0-9_]/g, "A");
+    expect(pasted.length).toBeGreaterThan(64);
+    for (const [name, value] of [
+      ["LEGION_E2E_IMPLEMENT_APP_KEY_NAME", pasted],
+      ["LEGION_E2E_REVIEW_APP_ID", "1234567890123"],
+    ]) {
+      const { code, stderr } = await githubApps({ ...appInputs, [name]: value }, proveBoth);
+      expect(code).toBe(1);
+      expect(stderr).toContain(`${name} must be`);
+      expect(stderr).not.toContain(value.slice(0, 13));
+    }
   });
 
   test("a key GitHub answers for another App id fails the check, naming both ids and never the key", async () => {

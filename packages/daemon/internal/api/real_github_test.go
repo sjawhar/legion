@@ -90,12 +90,14 @@ func realGitHubApps(t *testing.T) config.GitHubApps {
 			return fallback
 		}
 		if !valid.MatchString(value) {
-			t.Fatalf("%s is malformed (want %s; the value is not printed): it names this deployment's App, not another's", name, valid)
+			t.Fatalf("%s is malformed (want %s; the value is not printed): unset, it takes this deployment's own App", name, valid)
 		}
 		return value
 	}
-	id := regexp.MustCompile(`^[1-9][0-9]*$`)
-	key := regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+	// The bounds are lib/github-apps.sh's: a pasted base64 key is letters and digits too, so only
+	// its length tells it from a store key's name, and a refusal prints neither.
+	id := regexp.MustCompile(`^[1-9][0-9]{0,11}$`)
+	key := regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]{0,63}$`)
 	apps, err := config.ResolveGitHubApps(config.GitHubApps{
 		Implement: config.GitHubApp{
 			AppID: input("LEGION_E2E_IMPLEMENT_APP_ID", "3202636", id),
