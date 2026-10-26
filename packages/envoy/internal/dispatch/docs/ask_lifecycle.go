@@ -56,7 +56,13 @@ func isLifecycleWrite(ctx context.Context) bool {
 // has an ask of its own on its document nor is a copy of another document's ask, and returns each
 // one it changed for the caller to log: a block no settlement has indexed yet, which no longer
 // reads open once its issue has closed, and which settlement indexes as a new open ask once the
-// issue reopens.
+// issue reopens. Among these is every readable ask block that repeats the id an earlier ask block
+// of its document holds and does not read state="resolved" - a browser's paste copies a block
+// with its id - which a write addressed by id cannot reach, since such a write lands on the id's
+// first holder (repairLive). It is written by its place among the document's ask blocks instead
+// (markRepeatedAskBlocks) and returned under the id it repeats. Its id is left as it is: stamping
+// it an id of its own is settlement's job, and the reopen's settlement stamps it and indexes it
+// as a new open ask.
 //
 // It runs in the transaction ctx joined (errUnjoined otherwise), and its caller holds the issue's
 // row, as settlement holds it, so the writes are owner-verified: they reach a document whose room
@@ -117,8 +123,11 @@ func (s *Service) writeDocumentAskStates(
 			slog.Warn("dispatch: leave the ask blocks of a document outside Proof schema as they are", "artifact", artifactID)
 			return nil
 		}
-		blocks := readableAskBlocks(current)
-		if len(blocks) == 0 {
+		blocks, repeats := readableAskBlocks(current)
+		if !markUnindexed {
+			repeats = nil
+		}
+		if len(blocks) == 0 && len(repeats) == 0 {
 			return nil
 		}
 		rows, err := loadAskBlocks(ctx, tx, artifactID)
@@ -131,8 +140,9 @@ func (s *Service) writeDocumentAskStates(
 		if err != nil {
 			return err
 		}
-		// The writes are made on the fork as it stands (writeLive), each on the block carrying its
-		// id, as settlement makes its repairs.
+		// The writes are made on the fork as it stands (rewriteLive), each on the block carrying its
+		// id, as settlement makes its repairs (repairLive), and each repeat on the block at its place
+		// (markRepeatedAskBlocks), all in one rewrite of the fork, whose tree is the one current read.
 		var writes settlementReconciliation
 		for _, block := range blocks {
 			if row, indexed := rows[block.id]; indexed {
@@ -159,10 +169,15 @@ func (s *Service) writeDocumentAskStates(
 				}})
 			}
 		}
-		if len(writes.repairs) == 0 {
+		if len(writes.repairs) == 0 && len(repeats) == 0 {
 			return nil
 		}
-		_, err = writes.writeLive(doc, nil)
+		_, _, err = rewriteLive(doc, nil, func(live *pmdoc.Node) bool {
+			repaired := writes.repairLive(live)
+			repeated := markRepeatedAskBlocks(live, artifactID, repeats)
+			marked = append(marked, repeated...)
+			return repaired || len(repeated) > 0
+		})
 		return err
 	})
 	if err != nil && !errors.Is(err, websocket.ErrNoChanges) {
@@ -172,19 +187,32 @@ func (s *Service) writeDocumentAskStates(
 }
 
 // readableAskBlocks is every ask block of tree settlement reads (parseAskBlock), each id's first
-// holder alone: a write lands on the first block carrying its id (repairLive), and a later block
-// repeating it is no ask until settlement stamps it an id of its own. Unlike
+// holder alone: a write addressed by id lands on the first block carrying it (repairLive), and a
+// later block repeating it is no ask until settlement stamps it an id of its own. Unlike
 // collectAskBlocksForSettlement, a repeated id leaves the rest of the document readable, so a
 // browser's paste does not stop an issue from closing.
-func readableAskBlocks(tree *pmdoc.Node) []askBlock {
+//
+// It returns apart, as repeats, every later holder settlement reads that carries a non-empty id an
+// earlier ask block of tree already holds and does not read state="resolved", each with its place
+// among tree's ask blocks in document order: the address a write to it takes, which its id is not
+// (markRepeatedAskBlocks).
+func readableAskBlocks(tree *pmdoc.Node) ([]askBlock, []repeatedAskBlock) {
 	var blocks []askBlock
+	var repeats []repeatedAskBlock
 	seen := map[string]struct{}{}
+	index := -1
 	pmdoc.Walk(tree, func(node *pmdoc.Node) bool {
 		if node.Type != "ask" {
 			return true
 		}
+		index++
 		id, _ := node.Attrs[pmdoc.BlockIDAttr].(string)
 		if _, repeated := seen[id]; repeated {
+			if id != "" && node.Attrs["state"] != "resolved" {
+				if _, err := parseAskBlock(node); err == nil {
+					repeats = append(repeats, repeatedAskBlock{index: index, id: id})
+				}
+			}
 			return true
 		}
 		seen[id] = struct{}{}
@@ -193,7 +221,45 @@ func readableAskBlocks(tree *pmdoc.Node) []askBlock {
 		}
 		return true
 	})
-	return blocks
+	return blocks, repeats
+}
+
+// repeatedAskBlock is an ask block that repeats the id an earlier ask block of its document holds
+// (readableAskBlocks): index is its place among the document's ask blocks in document order, and
+// id the id it repeats.
+type repeatedAskBlock struct {
+	index int
+	id    string
+}
+
+// markRepeatedAskBlocks writes state="resolved" into each of repeats in live, the tree of the
+// document artifactID that readableAskBlocks read them from: into the ask block at the repeat's
+// place among live's ask blocks, while that block still carries the id the repeat names and does
+// not read resolved already. It returns a BlockRef, under the repeated id, for each block it
+// changed. repeats are in document order, as readableAskBlocks returns them.
+func markRepeatedAskBlocks(live *pmdoc.Node, artifactID string, repeats []repeatedAskBlock) []BlockRef {
+	if len(repeats) == 0 {
+		return nil
+	}
+	var marked []BlockRef
+	next, index := 0, -1
+	pmdoc.Walk(live, func(node *pmdoc.Node) bool {
+		if node.Type != "ask" {
+			return true
+		}
+		index++
+		if index < repeats[next].index {
+			return true
+		}
+		repeat := repeats[next]
+		next++
+		if id, _ := node.Attrs[pmdoc.BlockIDAttr].(string); id == repeat.id && node.Attrs["state"] != "resolved" {
+			node.Attrs["state"] = "resolved"
+			marked = append(marked, BlockRef{ArtifactID: artifactID, BlockID: repeat.id})
+		}
+		return next < len(repeats)
+	})
+	return marked
 }
 
 // The bounds on SettleIssueDocuments' retries. Every settlement it runs is one the close of an

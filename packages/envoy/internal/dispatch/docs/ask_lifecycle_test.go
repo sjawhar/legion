@@ -15,6 +15,7 @@ import (
 	ygws "github.com/reearth/ygo/provider/websocket"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
@@ -107,6 +108,78 @@ func TestWritingIssueAskStatesReachesTheAsksBlocksAndTheirCopiesAlone(t *testing
 	}
 	if pending := pendingAuthorRows(t, service.store, copied); !slices.Contains(pending, closer) || !slices.Contains(pending, asker) {
 		t.Fatalf("the copy's pending authors = %+v, want %+v and %+v among them", pending, closer, asker)
+	}
+}
+
+// A block repeating an ask's id - a browser's paste copies the block with its id - is no ask, and
+// a write addressed by that id lands on the ask's own block. A write that marks no unindexed block
+// leaves the copy as it is; one that marks them writes it resolved by its place in the document
+// and names it under the id it repeats, which it leaves alone for settlement to stamp.
+func TestWritingIssueAskStatesMarksABlockRepeatingAnAsksIDByItsPlace(t *testing.T) {
+	service, original := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, original, "Context\n\n"+regionBlock)
+	settleCurrentGeneration(t, service, original)
+	region := blockAskOn(t, service, original, "region")
+	appendLiveBlock(t, service, original, regionBlock)
+	pastedBefore := documentText(t, service, original)
+	if count := strings.Count(pastedBefore, ":::ask{#region "); count != 2 {
+		t.Fatalf("the document holds %d blocks under region, want the ask's and its pasted copy:\n%s", count, pastedBefore)
+	}
+	closer := model.Actor{Kind: "user", ID: "carol"}
+	withdrawn := []model.Ask{withdrawnAsk(region, closer)}
+	resolved := `:::ask{#region urgency="med" multiple="false" state="resolved"}`
+
+	if marked := writeIssueAskStates(t, service, withdrawn, closer, false); len(marked) != 0 {
+		t.Fatalf("a write that marks no unindexed block marked %+v", marked)
+	}
+	want := strings.Replace(pastedBefore, `:::ask{#region urgency="med" multiple="false" state="open"}`, resolved, 1)
+	if want == pastedBefore {
+		t.Fatalf("the document lacks the ask's open block:\n%s", pastedBefore)
+	}
+	requireText(t, service, original, want)
+
+	marked := writeIssueAskStates(t, service, withdrawn, closer, true)
+	if want := []BlockRef{{ArtifactID: original, BlockID: "region"}}; !reflect.DeepEqual(marked, want) {
+		t.Fatalf("the sweep marked %+v, want %+v", marked, want)
+	}
+	text := documentText(t, service, original)
+	if strings.Count(text, ":::ask{") != 2 || strings.Count(text, resolved) != 2 {
+		t.Fatalf("the document after the sweep:\n%s\nwant the ask's block and its pasted copy under region, both resolved", text)
+	}
+	if marked := writeIssueAskStates(t, service, withdrawn, closer, true); len(marked) != 0 {
+		t.Fatalf("a second sweep marked %+v, which the first already wrote", marked)
+	}
+	requireText(t, service, original, text)
+	if count := asksOn(t, service, original); count != 1 {
+		t.Fatalf("the document holds %d asks after the writes, want its one", count)
+	}
+}
+
+// appendLiveBlock appends the blocks markdown parses to, ids and all, to the live document, as a
+// browser's paste does, past the id repair every server write runs.
+func appendLiveBlock(t *testing.T, service *Service, artifactID, markdown string) {
+	t.Helper()
+	pasted, err := pmdoc.Parse(markdown)
+	if err != nil {
+		t.Fatalf("parse the pasted block: %v", err)
+	}
+	err = service.srv.Apply(context.Background(), artifactID, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {
+		fragment := doc.GetXmlFragment(fragmentName)
+		tree, err := treeOf(doc)
+		if err != nil {
+			t.Errorf("read live tree: %v", err)
+			return
+		}
+		tree.Children = append(tree.Children, pasted.Children...)
+		transact(func(txn *crdt.Transaction) {
+			if err := pmdoc.Update(txn, fragment, tree); err != nil {
+				t.Errorf("paste the block: %v", err)
+			}
+		})
+	})
+	if err != nil {
+		t.Fatalf("apply the paste: %v", err)
 	}
 }
 

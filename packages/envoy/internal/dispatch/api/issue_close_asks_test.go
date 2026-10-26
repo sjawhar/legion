@@ -16,6 +16,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
@@ -344,6 +345,135 @@ func TestClosingAnIssueWithdrawsADecisionBlockNotYetSettled(t *testing.T) {
 			requireLiveText(t, handler, issue.PrimaryArtifactID, `#late-decision urgency="high" multiple="false" state="open"`)
 		})
 	}
+}
+
+// pastedCloseDecision is the spec's decision block as a browser's paste copies it, with the id
+// and the state the block it copies carries.
+const pastedCloseDecision = ":::ask{#close-decision urgency=\"med\" multiple=\"false\" state=\"open\"}\nShip it?\n\n- Yes: Now.\n- No: Later.\n:::\n"
+
+// A decision block a browser pasted a moment before the close repeats the id of the block it
+// copies, so it is no ask until a settlement stamps it an id of its own. The close settles the
+// issue's documents first, so the pasted block is an ask under a new id, withdrawn with the block
+// it copies, each with a record naming the closer. When that settlement fails, the pasted block is
+// no ask to withdraw, and a write addressed by its id lands on the block it copies; the close's
+// sweep still leaves it reading resolved beside that block, and the reopen's settlement stamps it
+// and opens it as a new ask, beside the restored one.
+func TestClosingAnIssueWithdrawsADecisionBlockPastedUnderARepeatedID(t *testing.T) {
+	for _, settlementFails := range []bool{false, true} {
+		name := "settled by the close"
+		if settlementFails {
+			name = "settlement fails"
+		}
+		t.Run(name, func(t *testing.T) {
+			var documentService *docs.Service
+			handler, database := newInteractionHandler(t, func(database *store.Store) docs.API {
+				documentService = docs.New(docs.Deps{Store: database, Identity: headerIdentity(database), Settle: time.Hour})
+				t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
+				if settlementFails {
+					return failingSettlement{API: documentService}
+				}
+				return documentService
+			})
+			issue := createInteractionIssue(t, handler, "TEST", "A pasted decision", closeDecision)
+			if err := documentService.SettleIssueDocuments(context.Background(), issue.Key); err != nil {
+				t.Fatalf("settle the spec: %v", err)
+			}
+			awaitSettled(t, database, issue.PrimaryArtifactID)
+			original := requireBlockAsk(t, handler, issue.Key, issue.PrimaryArtifactID, "close-decision")
+
+			pasted, err := pmdoc.Parse(pastedCloseDecision)
+			if err != nil {
+				t.Fatal(err)
+			}
+			peer := connectBrowserPeer(t, documentService, issue.PrimaryArtifactID)
+			peer.edit(t, func(tree *pmdoc.Node) error {
+				tree.Children = append(tree.Children, pasted.Children...)
+				return nil
+			})
+			peer.barrier(t)
+			if live, _ := documentTexts(t, handler, issue.PrimaryArtifactID); strings.Count(live, `#close-decision urgency="med" multiple="false" state="open"`) != 2 {
+				t.Fatalf("the document does not hold the pasted copy under the repeated id:\n%s", live)
+			}
+			if asks := documentBlockAsks(t, handler, issue.Key, issue.PrimaryArtifactID); len(asks) != 1 {
+				t.Fatalf("the document holds %d asks before any settlement of the paste, want the spec's alone", len(asks))
+			}
+
+			closed := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+issue.Key, map[string]string{"status": "done"}, "alice")
+			if closed.Code != http.StatusOK {
+				t.Fatalf("close: status=%d body=%s", closed.Code, closed.Body.String())
+			}
+			closer := model.Actor{Kind: "user", ID: "alice"}
+			requireWithdrawn(t, handler, issue.Key, original, closer)
+			live, _ := documentTexts(t, handler, issue.PrimaryArtifactID)
+			if strings.Contains(live, `state="open"`) {
+				t.Fatalf("a block of the closed issue still reads open:\n%s", live)
+			}
+			if !settlementFails {
+				pastedAsk := pastedBlockAsk(t, handler, issue.Key, issue.PrimaryArtifactID)
+				requireWithdrawn(t, handler, issue.Key, pastedAsk.ID, closer)
+				if strings.Count(live, `state="resolved"`) != 2 || !strings.Contains(live, "#"+*pastedAsk.BlockID+` urgency="med" multiple="false" state="resolved"`) {
+					t.Fatalf("live text:\n%s\nwant the spec's block and the pasted block %s resolved", live, *pastedAsk.BlockID)
+				}
+				return
+			}
+			if strings.Count(live, `#close-decision urgency="med" multiple="false" state="resolved"`) != 2 {
+				t.Fatalf("live text:\n%s\nwant both blocks under close-decision resolved", live)
+			}
+			if asks := documentBlockAsks(t, handler, issue.Key, issue.PrimaryArtifactID); len(asks) != 1 {
+				t.Fatalf("the document holds %d asks although the paste's settlement failed, want the spec's alone", len(asks))
+			}
+
+			if reopened := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+issue.Key, map[string]string{"status": "todo"}, "alice"); reopened.Code != http.StatusOK {
+				t.Fatalf("reopen: status=%d body=%s", reopened.Code, reopened.Body.String())
+			}
+			if err := documentService.SettleIssueDocuments(context.Background(), issue.Key); err != nil {
+				t.Fatalf("settle the reopened issue's documents: %v", err)
+			}
+			if restored := readAskRecord(t, handler, original); restored.State != "open" || restored.Resolution != nil {
+				t.Fatalf("the spec's ask after the reopen = %s %#v, want open", restored.State, restored.Resolution)
+			}
+			pastedAsk := pastedBlockAsk(t, handler, issue.Key, issue.PrimaryArtifactID)
+			if pastedAsk.State != "open" {
+				t.Fatalf("the pasted block's ask after the reopen = %s, want open", pastedAsk.State)
+			}
+			requireLiveText(t, handler, issue.PrimaryArtifactID,
+				`#close-decision urgency="med" multiple="false" state="open"`,
+				"#"+*pastedAsk.BlockID+` urgency="med" multiple="false" state="open"`,
+			)
+		})
+	}
+}
+
+// documentBlockAsks is every ask, in any state, indexed for a block of document.
+func documentBlockAsks(t *testing.T, handler http.Handler, issue, document string) []model.Ask {
+	t.Helper()
+	listed := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+issue+"/asks?state=all", nil, "alice")
+	if listed.Code != http.StatusOK {
+		t.Fatalf("list asks: status=%d body=%s", listed.Code, listed.Body.String())
+	}
+	var asks []model.Ask
+	for _, ask := range decodeBody[[]model.Ask](t, listed) {
+		if ask.BlockID != nil && ask.BlockArtifact != nil && ask.BlockArtifact.ID == document {
+			asks = append(asks, ask)
+		}
+	}
+	return asks
+}
+
+// pastedBlockAsk is the one ask of document indexed for a block other than close-decision: the
+// pasted copy of the spec's decision block, under the id a settlement stamped it.
+func pastedBlockAsk(t *testing.T, handler http.Handler, issue, document string) model.Ask {
+	t.Helper()
+	var found []model.Ask
+	for _, ask := range documentBlockAsks(t, handler, issue, document) {
+		if *ask.BlockID != "close-decision" {
+			found = append(found, ask)
+		}
+	}
+	if len(found) != 1 || found[0].Question != "Ship it?" {
+		t.Fatalf("asks for the pasted block = %#v, want one asking %q under an id of its own", found, "Ship it?")
+	}
+	return found[0]
 }
 
 // otherProcessHandler mounts the API stack of a second envoy-dispatch process on database, as
