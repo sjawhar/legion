@@ -56,7 +56,10 @@ Dispatch status) inside `intake.ApplyFact`, where no handler does I/O:
   whose blocker nobody had handed to Legion waited about 58 s for the controller tick. Every exit
   now promotes; the same step admits it in under 110 ms with both tick intervals at an hour.
 - `release_children` first answered `held` from the children's records. A child released out of
-  backlog has none until its `todo` event lands after the answer, so it read `held: []`. It now
-  judges `blockers.UnfinishedOf` over the blocked-by list Dispatch showed the request.
+  backlog then had none until its `todo` event landed after the answer, so it read `held: []`. It
+  judges `blockers.UnfinishedOf` over the blocked-by list Dispatch showed the request. The release
+  now records such a child from its own write in the request (`api.applyOwnStatusWrite`), and the
+  answer still judges the wait from Dispatch's list, which also covers a written child the
+  workflow could not record yet (its parent unrecorded).
 - A root already in its slot was first judged like a child by the gate's opening and froze at
   `admitted` holding its slot, named nowhere: `Holdable` excludes tree roots for that reason.
