@@ -2,63 +2,76 @@
   "schemaVersion": 1,
   "phase": "plan",
   "issue": "INFRA-158",
-  "completed": "2026-10-25T16:22:34Z",
-  "plan": "dispatch://INFRA-158/artifact/plan-md",
-  "summary": "Closing an issue withdraws every open ask of the issue (asks.issue_key = key, state open) with a new server-only resolution kind `withdrawn` naming the closer, writes the blocks' state (and their copies') into the live documents before closed_at is set, and runs a final owner-verified sweep after SetIssueClosed so no block reads open; reopening restores exactly the withdrawn asks and writes their blocks back to open, so no version is cut; an idempotent repair pass at boot and every 10 minutes withdraws asks left open on closed issues (attributed to the latest issue.closed actor, dated at the pass) and restores withdrawn asks on open issues; the SPA card on a closed issue's current document shows the row's record; contracts add `withdrawn` and read `legion-daemon:<PROJECT>` whole.",
+  "completed": "2026-10-26T06:21:30Z",
+  "plan": "dispatch://INFRA-158/artifact/plan-md (version 2)",
+  "summary": "Third run of INFRA-158, re-planned after the tree was parked and re-admitted. The pushed branch (089cd6ea) already implements the first plan's tasks 1-5 and decisions 1-15; the implementer continues on it: R1 open the pull request, wait for GitHub's CONFLICTING (merge-tree of main 54267e3b predicts docs/roomstate.go) and forward-merge main; R2 the pre-close settlement retries transient refusals (room behind the durable head, updates not yet durable) within 3 attempts / 3 s so an unsettled block gets a withdrawn record; R3 a repeated block id never reads open on a closed issue; R4 the close/resolve and close/settlement race tests under -race and a -tags multiprocess repair-sweep test; R5 documentation with targets corrected for main; R6 claude-envoy rebuild and six CHANGELOGs; R7 full verification at the merged head; R8 proof on dispatch:local including latency against the daemon's 10 s bound and a 400-issue repair pass; R9 simplify, PR body, re-check PR #2212.",
   "tasks": [
-    "1 contracts: AskResolution kind and event zod enum add withdrawn; resolve input stays retracted|resolved; actor-label reads legion-daemon:<PROJECT> whole",
-    "2 docs service: WriteIssueAskStates (own blocks + copiedAskSources copies, optional markUnindexed, owner-verified) and SettleIssueDocuments (synchronous pre-close settlement, no tx)",
-    "3 patchIssue close/reopen: pre-close settle, Docs.Join, LockOwners before first append, doc writes before events, ask events before status event, load after after ask events, ledger.Commit, SetIssueClosed, final sweep; update pinned tests; new api tests",
-    "4 repair pass: exported entry in api, wired in cmd/dispatch/main.go at boot and every 10 minutes; both directions; per-issue tx under the issue row; no invented closer",
-    "5 SPA: actor.ts withdrawn wording, Withdrawn badge, AskBlockCard record on closed current document only (not VersionView), EventBody uses describeAskResolution; new e2e close-withdraws-asks.e2e.ts failing at base, passing at head",
-    "6 docs and changelogs: packages/envoy/AGENTS.md, packages/envoy/cmd/dispatch/README.md, packages/dispatch/AGENTS.md:750, skills/legion-controller/SKILL.md:315, skills/dispatch/references/asks.md, regenerated packages/claude-envoy/legion copy, CHANGELOGs envoy/contracts/pi-envoy/pi-legion(/claude-envoy)",
-    "7 implementer proof on dispatch:local with the INFRA-42/INFRA-43 Postgres harness: three closes, branch CLI dispatch read and doc-read, reopen, repair on restart, browser spec base/head"
+    "R1 open the PR at the pushed head (Dispatch: INFRA-158); read PR #2212 state; when GitHub reports CONFLICTING, forward-merge main@origin per conflicts-and-rewrites.md with fingerprint comment; roomstate.go keeps lifecycleAuthors and main's roomGeneration comment, gofmt",
+    "R2 SettleIssueDocuments retries a settlement refused behind the durable head or stopped on not-yet-durable updates (<=3 attempts, <=3 s per issue); api-package tests: block becomes an ask with its author and resolution.kind withdrawn",
+    "R3 the sweep marks a later holder of a repeated block id resolved by position; tests for settlement working and failing",
+    "R4 close vs concurrent resolve and close vs in-flight settlement under -race -count=20 with stated outcomes; multiprocess test of the repair sweep for a browser on the other process's room",
+    "R5 docs: packages/envoy/AGENTS.md; cmd/dispatch/AGENTS.md:432,447; cmd/dispatch/README.md:578,779-783,1002,1008; routes_table.go:87,128; dispatch-tools.ts issue_update and resolve_ask; packages/dispatch/AGENTS.md:777; skills/legion-controller/references/daily-report.md:34; skills/legion-worker/references/findings.md:37-38; skills/dispatch/references/asks.md:27-34 and issues.md:40; grep check after R6",
+    "R6 rebuild packages/claude-envoy (check-dist, dist/dispatch.js carries withdrawn); CHANGELOGs envoy, contracts, envoy-client, pi-envoy, pi-legion, claude-envoy",
+    "R7 go test (internal/dispatch, cmd/dispatch), -race on docs and api, -tags multiprocess, bun test contracts and envoy-client, dispatch typecheck/test/e2e, biome, check-dist, all at the merged head",
+    "R8 proof on dispatch:local: three closes and reopen read with the branch CLI; daemon-actor close latency vs 10 s; 400-issue repair at scale within the 5-minute pass bound; browser spec failing at the merge's main parent and passing at the merged head, runs posted as PR comments and linked from E2E (implementer)",
+    "R9 simplify pass, PR body naming decisions 16-21 and residuals, re-check PR #2212 before completing"
+  ],
+  "decisionsThisRun": [
+    "16 close order as built: status UPDATE before the withdrawal in one transaction; LockOwners unchanged (single owner locked in appendEvent)",
+    "17 repair pass as built: lease issue-ask-repair, 5-minute pass bound, 30 s boot bound, sweep of closed issues owing a settlement; writes block state only, no records; departs from README's 'repair on the read path' rule with a <=10-minute roll window, README rewritten to say so",
+    "18 pre-close settlement retries transient refusals so an unsettled block gets its withdrawn record; use PR #2212's reload-and-settle-again if it lands first",
+    "19 a repeated block id never reads open on a closed issue",
+    "20 a close or reopen is never a document's latest editor (lifecycleAuthors); carried through PR #2212's room record if it lands first",
+    "21 open the PR first, merge main only once GitHub reports CONFLICTING (architect's rule and conflicts-and-rewrites.md)"
   ],
   "verification": [
     "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=<url> go test ./internal/dispatch/... ./cmd/dispatch/...",
-    "bun test packages/contracts",
-    "cd packages/dispatch && bun test && bun run e2e -- close-withdraws-asks.e2e.ts issue.e2e.ts ask-blocks.e2e.ts approval.e2e.ts",
-    "bunx biome check packages/contracts packages/dispatch && bunx tsc --noEmit"
+    "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=<url> go test -race ./internal/dispatch/docs/ ./internal/dispatch/api/",
+    "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=<url> go test -tags multiprocess ./cmd/dispatch",
+    "bun test packages/contracts packages/envoy-client",
+    "cd packages/dispatch && bun run typecheck && bun test && bun run e2e",
+    "bunx biome check .",
+    "cd packages/claude-envoy && bun run check-dist"
   ],
-  "productionCheck": "dispatch-production-check.sh --commit <merged sha> --page /issues/INFRA-116 --route /api/v1/issues/INFRA-116 --route /api/v1/issues/INFRA-116/asks; then GET each of the 12 measured closed issues' asks?state=all and confirm the 20 ask ids read resolution.kind withdrawn with the recorded closer (7 people, 4 sessions, legion-daemon:INFRA for INFRA-73) and open_asks empty; close and reopen a scratch issue holding one ask.",
+  "productionCheck": "On the pull request only (Dispatch refuses writes on a closed issue), naming no private repository or host: the deployment's dispatch-production-check.sh with --commit <merged sha> --page /issues/INFRA-116 --route /api/v1/issues/INFRA-116 --route /api/v1/issues/INFRA-116/asks; then for the 12 issues and 20 ask ids listed in plan.md: open_asks empty, each ask withdrawn naming the actor of that issue's latest issue.closed event read at check time and dated after the deploy, each block's state resolved via dispatch doc-read, BET-39 not awaiting approval, dispatch read prints Open asks: - none; every closed issue of every project has open_asks empty (per-issue GET, not the list count); close and reopen a scratch issue holding one ask.",
   "residuals": [
-    "Two-process deployments: a browser on the other process's room keeps writing into a closed issue's document until that room reloads, since SetIssueClosed reaches only its own process's rooms (pre-existing, issue_patch.go:469-471); a block written that way is indexed at the next reopen.",
-    "dispatch://INFRA-352 (in progress elsewhere) changes room closed-state handling in docs/service.go; whichever lands second adapts."
+    "PR #2212 (INFRA-352/INFRA-218, open) conflicts with this branch in docs/pending_authors.go, roomstate.go and service.go; whichever lands second adapts per decisions 18 and 20."
   ],
   "requiredSkills": {
     "implement": [
-      "legion-worker: the implementer's phase rules, PR body template, proof on a production-like surface, simplify pass and production check after the close",
+      "legion-worker: the implementer's phase rules, opening the PR, the forward merge on CONFLICTING (conflicts-and-rewrites.md), PR body template and proof (pr-body.md), the production check after the close (merge-gate.md)",
       "ce-simplify-code: the simplify pass pr-body.md requires on the settled diff",
-      "dispatch: the agent-facing ask rules the change alters (skills/dispatch/references/asks.md, resolve-ask) and how the CLI reads asks, which the proof drives"
+      "dispatch: the agent-facing ask and issue rules the change rewrites (skills/dispatch/references/asks.md, issues.md) and the CLI reads (dispatch read, doc-read) the proof drives"
     ],
     "test": [
-      "legion-worker: the tester drives the changed surface for real (browser suite on the real Go server, branch CLI on dispatch:local), tries to break it, and reads CI for static checks",
+      "legion-worker: the tester drives the changed surface for real (browser suite on the real Go server, branch CLI on dispatch:local), tries to break it (close/resolve races, reopen cycles, a room behind the durable head), and reads CI for static checks",
       "dispatch: how an agent reads an issue, an ask and a document with the dispatch CLI, the surfaces the acceptance names"
     ],
     "review": [
-      "legion-worker: merge-gate review rules, review threads and approval of the head by SHA",
+      "legion-worker: merge-gate review rules, review threads and approval of the head by SHA, and that the forward merge's fingerprint comment matches",
       "dispatch: judging the changed agent-facing ask contract and skill text against the dispatch skill's rules"
     ]
   },
   "gapAnalysis": {
     "findings": [
-      {"finding": "F1: live writes on closed issues meet closed-owner and closed-room guards; warm/cold path dependence.", "answer": "Decision 4: close, reopen and repair hold the issue row and run their document writes owner-verified (withOwnerVerified, honoured by allowInject docs/websocket.go:351-373); the close's in-transaction writes precede the status UPDATE; ordinary edits/answers/resolutions keep 409 ISSUE_CLOSED. Task 2 tests a resident room flagged closed and a non-resident document."},
-      {"finding": "F2: Docs.Join requires the ledger commit protocol and lock order; no settlement wait under locks; multi-issue repair locking.", "answer": "Decision 7: Docs.Join, deferred Discard, ledger.Commit before SetIssueClosed (still WithoutCancel). Decision 5: pre-close settlement runs with no transaction or lock. Lock order in Risks; the repair runs one transaction per issue under its row."},
-      {"finding": "F3: event order and last_seq in the PATCH response; daemon reads LastSeq through GET.", "answer": "Decision 6 and Task 3: LockOwners before the first append, document writes before events, ask events before the status event, after loaded once ask and ledger events are in; test compares response last_seq with GET and expected_sequence success/ISSUE_CHANGED."},
-      {"finding": "F4: unindexed blocks in the settle window get no record; state-only marking incomplete.", "answer": "Decision 5: synchronous pre-close settlement indexes them so the close withdraws them with a record; a final owner-verified sweep after SetIssueClosed marks any block settlement did not index (failure, concurrent edit) state=resolved, which a reopen's settlement indexes as an open ask with its author. Tests with a 1-hour settle delay, a failing settlement hook and a browser edit after the fork."},
-      {"finding": "F5: copy classification: answered-source copies, same-id unrelated blocks, live-only copies, earlier-wording rule.", "answer": "Decision 2: only own blocks and blocks copiedAskSources classifies as copies of the withdrawn asks, classified over the live fork before the rows change; answered/resolved-source copies and unrelated blocks untouched; Task 2 tests each."},
-      {"finding": "F6: no-version claim unsupported; spec requires earlier versions unchanged, not no later version.", "answer": "Decision 3: stored versions never rewritten (version hashes tested); a fully settled document writes no version across close+reopen; real pending text is versioned by the existing protocol (pre-close settlement)."},
-      {"finding": "F7: lifecycle writes credit the closer/reopener as pending authors.", "answer": "Decision 9: credited like resolveAsk/answerAsk credit their block-state writes; existing pending authors never cleared."},
-      {"finding": "F8: approval carry reads rows; restored approval requests must keep version, requested_version, hand-back and turn; no review from the close.", "answer": "Decision 8: withdrawal writes only the resolution; reopen sets only state/resolution; tests assert no ask.answered/artifact.approved/changes_requested/review rows and the restored request's id, approval, requested_version and waiting_on."},
-      {"finding": "F9: rolling deploy and boot-pass failure policy.", "answer": "Decision 10: the repair runs at boot and every 10 minutes, both directions, per-issue transaction re-reading under the issue row; tests for two concurrent runs, idempotence and restore direction."},
-      {"finding": "F10: no fallback system closer.", "answer": "Decision 10: actor of the latest issue.closed event with all its fields; an issue with none is logged and skipped."},
-      {"finding": "F11: version view must not show a later withdrawal.", "answer": "Decision 12: the record shows only on a closed issue's current document (ProofDocument); VersionView keeps reading its own attributes; browser spec checks a saved version."},
-      {"finding": "F12: legion-daemon:INFRA renders as session:legion-d….", "answer": "Decision 11: actor-label reads a session id beginning legion-daemon: whole; INFRA-73's closing actor read from production is exactly {kind:session,id:legion-daemon:INFRA}."},
-      {"finding": "F13: older-client compatibility claim too broad.", "answer": "Decision 14: old close callers valid; envoy-client falls back to the raw payload; an SPA bundle loaded before the deploy needs a reload."},
-      {"finding": "F14: acceptance matrix missing.", "answer": "Plan's acceptance matrix maps each acceptance clause to its check and surface (Go API, Playwright on the real Go server, branch CLI on dispatch:local, production check)."},
-      {"finding": "F15: documentation deliverables missing.", "answer": "Task 6 lists envoy AGENTS.md, dispatch README, dispatch AGENTS.md, controller and dispatch skill text with the claude-envoy copy, and CHANGELOG entries."}
+      {"finding": "1: claude-envoy dist bundles still carry the old contracts schema and label; CI runs check-dist.", "answer": "R6 rebuilds packages/claude-envoy after R5, checks check-dist and that dist/dispatch.js carries withdrawn, and adds a claude-envoy CHANGELOG entry for the bundled schema, label, tool descriptions and skills."},
+      {"finding": "2: PR #2212 changes the mechanisms the branch extends; the adaptation is unstated.", "answer": "Decisions 18 and 20 state it (lifecycleAuthors travels with #2212's kept or handed-over room record; the pre-close settlement uses #2212's reload-and-settle-again instead of its own retry); R1 and R9 read #2212's state; R2's behind-the-head test decides it."},
+      {"finding": "3: after main's f1ea47 a settlement refused behind the head reaches failed and the block is swept with no record.", "answer": "Treated as a defect fixed in this PR (architect's rule): decision 18 and R2 retry transient refusals within 3 attempts / 3 s, with a test pinning a withdrawn record and the block's author."},
+      {"finding": "4: forward merge before any PR exists conflicts with the base-reintegration rule.", "answer": "Decision 21 and R1: open the PR first, merge only once GitHub reports CONFLICTING, fingerprint comment on the PR; roomstate.go resolution given; 'the merged head' defined."},
+      {"finding": "5: the repair's first pass sweeps every closed issue owing a settlement, beyond the 20 approved records, with unmeasured cost.", "answer": "Decision 17: the sweep writes block state only, no ask row or record, so the 20-record cost of 'Withdraw them' is unchanged, and the spec's acceptance forbids an open decision block on a closed issue; R8 measures a 400-issue first pass inside its 5-minute bound and must fix a pass that cannot finish. Named to the architect in the completion summary."},
+      {"finding": "6: the Risks race test has no expected outcome.", "answer": "R4 states the outcomes (exactly one of resolved-by-resolve or withdrawn-by-close, one ask.resolved per ask, block state matches row, both requests return within 10 s) and the -race -count=20 command."},
+      {"finding": "7: the generation-1 production check cannot work as written (writes on a closed issue, rows only, list counts filtered, closer may change, truncated ids).", "answer": "The production check is rewritten: PR only; full 20 UUIDs in plan.md; block state via doc-read; BET-39 approval; expected closer read from the latest issue.closed at check time; every closed issue checked by per-issue GET."},
+      {"finding": "8: the two-process residual is claimed fixed without proof.", "answer": "R4 adds a -tags multiprocess test of the repair sweep for a browser on the other process's room; the PR names the residual fixed only with it passing."},
+      {"finding": "9: Task 6 misses routes_table.go, dispatch-tools.ts, both route tables, findings.md, README census paragraph, dispatch/AGENTS.md line, envoy-client CHANGELOG.", "answer": "R5 lists each target with main's line numbers (plus skills/dispatch/references/issues.md:40) and a grep check run after R6; R6 adds the envoy-client CHANGELOG entry."},
+      {"finding": "10: the five departures from the generation-1 plan need a disposition; readableAskBlocks leaves a repeated id reading open.", "answer": "Decisions 16, 17 and 13's note record the departures (order, LockOwners, repair extras, EventBody helpers); decision 19 and R3 fix the repeated-id case with tests for both paths."},
+      {"finding": "11: close latency against the daemon's 10 s request bound is unmeasured.", "answer": "R8 times a daemon-actor close of a three-document issue with an unsettled block; over 5 s is reported to the architect; decision 18 bounds the pre-close settlement at 3 s."},
+      {"finding": "12: the interval repair departs from README's 'at boot and on the read path' rule.", "answer": "Decision 17 records the departure, its reason and its <=10-minute roll window; R5 rewrites the README paragraph to name it."},
+      {"finding": "13: 'full suites' names no commands; -race, multiprocess, typecheck, check-dist missing.", "answer": "R7 lists the exact commands, each at the merged head."},
+      {"finding": "14: the browser spec's base commit and the E2E line's link are unstated.", "answer": "R8: base is the merge's main parent, head is the merged head; both runs posted as PR comments and linked from the E2E (implementer) line."},
+      {"finding": "15: the production command names the private deployment repository; PR text must not.", "answer": "The production check section says the PR text names no private repository, host or URL ('the deployment repository')."},
+      {"finding": "16: several planner claims were unverified by the analyst (build, merge-tree, no PR, logs).", "answer": "The planner ran each: go build/vet pass at 089cd6ea; git merge-tree reports one conflict in roomstate.go; gh pr list --head legion/INFRA-158 returns []; R7 re-runs every suite at the merged head rather than relying on the first run's logs."}
     ]
   },
-  "planReview": {"verdict": "approved", "rounds": 3},
+  "planReview": {"verdict": "approved", "rounds": 1},
   "specDepartures": []
 }
