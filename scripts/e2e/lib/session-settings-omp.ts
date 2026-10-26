@@ -2,7 +2,7 @@
 // one process per `Omp`, its RPC requests by id, and what an `/effort` prompt prints.
 import { appendFileSync } from "node:fs";
 import type { FileSink, Subprocess } from "bun";
-import { decoder, fail, type Rig, sleep, until } from "./session-settings-common";
+import { fail, type Rig, sleep, until } from "./session-settings-common";
 
 export interface RpcEvent {
   readonly type?: string;
@@ -109,6 +109,9 @@ export class Omp {
 
   async #read(): Promise<void> {
     let buffer = "";
+    // This stream's own decoder: in stream mode it holds a character split across two chunks, so a
+    // decoder shared with another reader would join those bytes to that reader's text.
+    const decoder = new TextDecoder();
     const stdout = this.#proc.stdout as ReadableStream<Uint8Array>;
     for await (const chunk of stdout) {
       buffer += decoder.decode(chunk, { stream: true });

@@ -94,6 +94,3 @@ export async function until<T>(
     await sleep(250);
   }
 }
-
-/** The one decoder Oh My Pi's stdout and the bus's messages are read with. */
-export const decoder = new TextDecoder();

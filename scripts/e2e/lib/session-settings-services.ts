@@ -4,7 +4,7 @@
 import { readFileSync } from "node:fs";
 import { connect } from "nats";
 import { agentStreamControlSubject } from "../../../packages/contracts/src/agent-stream";
-import { decoder, expect, PERSON, type Rig, sleep, until } from "./session-settings-common";
+import { expect, PERSON, type Rig, sleep, until } from "./session-settings-common";
 
 export interface StoredMessage {
   readonly id: string;
@@ -204,7 +204,7 @@ export class Services {
       const subscription = nc.subscribe(agentStreamControlSubject(session), { max: 1 });
       await nc.flush();
       const first = async () => {
-        for await (const message of subscription) return decoder.decode(message.data);
+        for await (const message of subscription) return new TextDecoder().decode(message.data);
         return undefined;
       };
       return await Promise.race([first(), sleep(limitMs).then(() => undefined)]);
