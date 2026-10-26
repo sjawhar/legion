@@ -277,7 +277,7 @@ func (r *Registry) deleteInterest(sessionID string) error {
 
 	entries, err := kv.History(sessionID)
 	r.mu.Lock()
-	if !r.currentLocked(epoch, sessionID) {
+	if !r.marks.MarkCurrent(r.watcher, epoch, sessionID) {
 		r.mu.Unlock()
 		return nil
 	}
@@ -338,7 +338,7 @@ func (c interestCache) BeginRead(read kvwatch.Read) {
 	r := c.r
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.marks.Reset()
+	r.marks.Begin()
 	r.readEpoch = read.Epoch
 	if read.Recreated {
 		clear(r.cacheRevisions)
@@ -372,7 +372,7 @@ func (c interestCache) CompleteRead(kvwatch.Read) {
 	defer r.mu.Unlock()
 	kvwatch.Sweep(&r.marks, r.cache, nil)
 	kvwatch.Sweep(&r.marks, r.cacheRevisions, nil)
-	r.marks.Reset()
+	r.marks.End()
 }
 
 // applyEntryLocked applies one record of the bucket, delivered or read, to the cache under r.mu.
@@ -390,19 +390,6 @@ func (r *Registry) applyEntryLocked(entry nats.KeyValueEntry) error {
 	}
 	r.cacheInterestLocked(entry.Key(), item, entry.Revision())
 	return nil
-}
-
-// currentLocked reports, under r.mu, whether the result of a KV call made through a handle of
-// epoch (kvwatch.Watcher.Handle) may reach the cache, and marks sessionID for the read under way
-// when it may. A result from a bucket since recreated is dropped and marks nothing: its revision
-// would fence out the new bucket's, which number from 1 again, and the new bucket's read delivers
-// what it holds for the session.
-func (r *Registry) currentLocked(epoch uint64, sessionID string) bool {
-	if r.watcher.Epoch() != epoch {
-		return false
-	}
-	r.marks.Mark(sessionID)
-	return true
 }
 
 // WaitForCacheReady blocks until the watcher has delivered every existing interest, or until ctx
@@ -429,7 +416,7 @@ func (r *Registry) Upsert(item Interest, topics []string) (Interest, error) {
 		return Interest{}, err
 	}
 	r.mu.Lock()
-	if r.currentLocked(epoch, merged.SessionID) {
+	if r.marks.MarkCurrent(r.watcher, epoch, merged.SessionID) {
 		r.cacheInterestLocked(merged.SessionID, merged, revision)
 	}
 	r.mu.Unlock()
@@ -636,7 +623,7 @@ func (r *Registry) removeInterestTopics(sessionID string, topics []string) error
 		return err
 	}
 	r.mu.Lock()
-	if r.currentLocked(epoch, sessionID) {
+	if r.marks.MarkCurrent(r.watcher, epoch, sessionID) {
 		r.cacheInterestLocked(sessionID, item, revision)
 	}
 	r.mu.Unlock()
@@ -781,7 +768,7 @@ func (r *Registry) Get(sessionID string) (Interest, error) {
 	err = json.Unmarshal(entry.Value(), &fresh)
 	if err == nil {
 		r.mu.Lock()
-		if r.currentLocked(epoch, sessionID) {
+		if r.marks.MarkCurrent(r.watcher, epoch, sessionID) {
 			r.cacheInterestLocked(sessionID, fresh, entry.Revision())
 		}
 		r.mu.Unlock()

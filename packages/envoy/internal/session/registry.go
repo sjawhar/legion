@@ -236,7 +236,7 @@ func (c sessionCache) BeginRead(read kvwatch.Read) {
 	r := c.r
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.marks.Reset()
+	r.marks.Begin()
 	r.readEpoch = read.Epoch
 	if read.Recreated {
 		clear(r.cacheRevisions)
@@ -254,7 +254,9 @@ func (c sessionCache) Apply(entry nats.KeyValueEntry, _ kvwatch.Read) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.marks.Mark(entry.Key())
-	r.applyEntryLocked(entry)
+	if err := r.applyEntryLocked(entry); err != nil {
+		r.logger().Warn("session registry watcher evicted malformed value", slog.String("key", entry.Key()), slog.Uint64("revision", entry.Revision()), slog.String("error", err.Error()))
+	}
 }
 
 // CompleteRead removes every row and fence entry the read found no evidence of: the bucket no
@@ -271,35 +273,23 @@ func (c sessionCache) CompleteRead(kvwatch.Read) {
 		r.retainLastSeenLocked(sessionID, removed.entry.UpdatedAt, now)
 	})
 	kvwatch.Sweep(&r.marks, r.cacheRevisions, nil)
-	r.marks.Reset()
+	r.marks.End()
 }
 
 // applyEntryLocked applies one record of the bucket, delivered or read, to the cache under r.mu.
-func (r *SessionRegistry) applyEntryLocked(entry nats.KeyValueEntry) {
+// A value it cannot decode evicts the session, and is returned for the caller to log.
+func (r *SessionRegistry) applyEntryLocked(entry nats.KeyValueEntry) error {
 	if entry.Operation() == nats.KeyValueDelete || entry.Operation() == nats.KeyValuePurge {
 		r.evictCachedSessionLocked(entry.Key(), entry.Revision())
-		return
+		return nil
 	}
 	var item SessionEntry
 	if err := json.Unmarshal(entry.Value(), &item); err != nil {
 		r.evictCachedSessionLocked(entry.Key(), entry.Revision())
-		r.logger().Warn("session registry watcher evicted malformed value", slog.String("key", entry.Key()), slog.Uint64("revision", entry.Revision()), slog.String("error", err.Error()))
-		return
+		return err
 	}
 	r.cacheSessionLocked(entry.Key(), item, r.expiryFor(entry.Created(), item.UpdatedAt), entry.Revision())
-}
-
-// currentLocked reports, under r.mu, whether the result of a KV call made through a handle of
-// epoch (kvwatch.Watcher.Handle) may reach the cache, and marks sessionID for the read under way
-// when it may. A result from a bucket since recreated is dropped and marks nothing: its revision
-// would fence out the new bucket's, which number from 1 again, and the new bucket's read delivers
-// what it holds for the session.
-func (r *SessionRegistry) currentLocked(epoch uint64, sessionID string) bool {
-	if r.watcher.Epoch() != epoch {
-		return false
-	}
-	r.marks.Mark(sessionID)
-	return true
+	return nil
 }
 
 // expiryFor computes the local TTL deadline for a cached entry. It prefers the
@@ -383,7 +373,7 @@ func (r *SessionRegistry) Put(sessionID string, entry SessionEntry) error {
 		return err
 	}
 	r.mu.Lock()
-	if r.currentLocked(epoch, sessionID) {
+	if r.marks.MarkCurrent(r.watcher, epoch, sessionID) {
 		r.cacheSessionLocked(sessionID, entry, r.expiryFor(time.Time{}, entry.UpdatedAt), revision)
 	}
 	r.mu.Unlock()
@@ -441,8 +431,10 @@ func (r *SessionRegistry) Refresh(ctx context.Context, sessionID string) (Sessio
 		return SessionEntry{}, got.err
 	}
 	r.mu.Lock()
-	if r.currentLocked(epoch, sessionID) {
-		r.applyEntryLocked(got.entry)
+	if r.marks.MarkCurrent(r.watcher, epoch, sessionID) {
+		if err := r.applyEntryLocked(got.entry); err != nil {
+			r.logger().Warn("session registry watcher evicted malformed value", slog.String("key", got.entry.Key()), slog.Uint64("revision", got.entry.Revision()), slog.String("error", err.Error()))
+		}
 	}
 	r.mu.Unlock()
 	return r.Get(sessionID)
@@ -485,27 +477,19 @@ func (r *SessionRegistry) Delete(sessionID string) error {
 	entries, err := kv.History(sessionID)
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if !r.currentLocked(epoch, sessionID) {
+	if !r.marks.MarkCurrent(r.watcher, epoch, sessionID) {
 		return nil
 	}
 	r.pruneLastSeenLocked(r.now())
 	if err == nil && len(entries) > 0 {
 		latest := entries[len(entries)-1]
-		if latest.Operation() == nats.KeyValueDelete || latest.Operation() == nats.KeyValuePurge {
-			r.evictCachedSessionLocked(sessionID, latest.Revision())
-			return nil
-		}
-		var item SessionEntry
-		if err := json.Unmarshal(latest.Value(), &item); err != nil {
-			r.evictCachedSessionLocked(sessionID, latest.Revision())
+		if err := r.applyEntryLocked(latest); err != nil {
 			r.logger().Warn("session registry cache evicted malformed value",
 				slog.String("key", latest.Key()),
 				slog.Uint64("revision", latest.Revision()),
 				slog.String("error", err.Error()),
 			)
-			return nil
 		}
-		r.cacheSessionLocked(sessionID, item, r.expiryFor(latest.Created(), item.UpdatedAt), latest.Revision())
 		return nil
 	}
 	r.evictCachedSessionLocked(sessionID, revision+1)

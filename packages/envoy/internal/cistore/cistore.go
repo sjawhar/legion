@@ -388,7 +388,7 @@ func (c ciCache) BeginRead(read kvwatch.Read) {
 	s := c.s
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.marks.Reset()
+	s.marks.Begin()
 	if read.Recreated {
 		clear(s.cacheRevisions)
 	}
@@ -445,7 +445,7 @@ func (c ciCache) CompleteRead(kvwatch.Read) {
 	defer s.mu.Unlock()
 	kvwatch.Sweep(&s.marks, s.cache, nil)
 	kvwatch.Sweep(&s.marks, s.cacheRevisions, nil)
-	s.marks.Reset()
+	s.marks.End()
 }
 
 func (s *Store) cacheStateLocked(key string, state State, revision uint64) {
@@ -659,8 +659,7 @@ func (s *Store) casState(key string, apply func(st *State) (ok bool, err error))
 		revision, err := kv.Update(key, buf, entry.Revision())
 		if err == nil {
 			s.mu.Lock()
-			if s.watcher.Epoch() == epoch {
-				s.marks.Mark(key)
+			if s.marks.MarkCurrent(s.watcher, epoch, key) {
 				s.cacheStateLocked(key, state, revision)
 			}
 			s.mu.Unlock()

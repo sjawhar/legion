@@ -47,7 +47,7 @@ func (s *seen) Apply(entry natsgo.KeyValueEntry, _ kvwatch.Read) {
 func (s *seen) BeginRead(read kvwatch.Read) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.marks.Reset()
+	s.marks.Begin()
 	s.begun = append(s.begun, read)
 }
 
@@ -55,7 +55,7 @@ func (s *seen) CompleteRead(read kvwatch.Read) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	kvwatch.Sweep(&s.marks, s.keys, nil)
-	s.marks.Reset()
+	s.marks.End()
 	s.completed = append(s.completed, read)
 }
 
