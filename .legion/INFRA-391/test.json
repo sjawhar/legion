@@ -2,16 +2,15 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-391",
-  "completed": "2026-10-26T02:18:30Z",
-  "round": 3,
-  "headSha": "127dfc6e1426590a135ab0905c58a25e94e7fd9e",
-  "codeHeadSha": "64cdb1b013e278f992717b56e5780f7399266ff2",
-  "evidence": "https://github.com/sjawhar/legion/pull/2209#issuecomment-6406751633",
-  "fingerprint": "The implementer reports the forward merge 64cdb1b0 left the fingerprint unchanged (6d9f92ce…). The round-2 code under it (de00bf0aac74, b64d85e642ad) had never been tested, so on the architect's instruction this is a full round at the merged head.",
-  "ci": "At 64cdb1b013e2 (read 2026-10-26T02:17Z): Tests 40257293218 in progress, Legion Envoy and Contracts 40257293231 queued, Docs 40257293227 in progress, Worker Image 40257293220 in progress, PR Title 40257326388 success (40257293253 cancelled, superseded). Not waited for; not re-run. The claude-envoy tmux timing failure the implementer saw locally is CI's to decide.",
+  "completed": "2026-10-26T02:39:30Z",
+  "round": 4,
+  "headSha": "dea3c6b07957fcf9e9fd1d150a3971eda99b350b",
+  "codeHeadSha": "95a9fd1abf7328c895e061eccae9a619c8c00fbd",
+  "scope": "The acceptance send-back's one commit, 95a9fd1abf73, moves branchServer and the four TestBranch* tests from githubapp/client_test.go to githubapp/branch_test.go. `git diff --name-only 64cdb1b013e2 95a9fd1abf73 -- . ':!.legion'` lists those two _test.go files and nothing else, so the binary, the API and the SPA are byte-identical to round 3's tested head 127dfc6e (code 64cdb1b013e2). Round 3's real-surface proofs therefore stand unchanged, and this round verifies the move itself.",
+  "ci": "At 95a9fd1abf73 (read 2026-10-26T02:38Z): Tests 40259896808 in progress, Docs 40259896797 in progress, Legion Envoy and Contracts 40259896822 queued, PR Title 40259934952 success, Worker Image 40259896809 failure. The Worker Image failure is not required (the required set is lint, typecheck, test, pr-title) and is a registry fetch: `resolve image config for docker-image://mirror.gcr.io/docker/dockerfile:1.7 \u2026 could not fetch content descriptor sha256:68ebc061\u2026 from remote: not found` at worker.Dockerfile:1, before any build step. The same workflow passed at 64cdb1b013e2 (40257293220), and nothing the image builds changed. Not re-run by the tester. At 64cdb1b013e2, Tests 40257293218 success.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "I drove the same surface independently. /legion/scratch/tmp/infra391/tester/r3/branch3.sh tries a superset of the implementer's commitish.sh values against my own merged-head server (:18727, database t3_real) and a server built from my own git archive of fa2dacfbb399 (:18728, t3_prev). Both read real GitHub through the two-call shim with the tester's gh. The head results matched the implementer's: 409 for every commit-ish, 200 for branch names, sync through Ref. The fa2dacfbb399 results matched its negative control: 200 for the SHA, ~1, ^, HEAD and refs/heads/. I re-ran a2/real.sh and the A6 browser specs at the merged head in the tester lane."
+    "how": "I checked the move independently with git at 64cdb1b013e2 and 95a9fd1abf73. Every `func` declaration in internal/dispatch/githubapp is the same at both (90 lines each, diff empty). Comparing sorted removed and added lines, every line removed from client_test.go is added in branch_test.go, and the only additions are branch_test.go's package clause, import block and closing parenthesis. No non-test file changed."
   },
   "failures": [],
   "failed": 0,
@@ -20,14 +19,14 @@
       "criterion": "Review round 2: a source save accepts only the name of a branch that exists; a SHA, a relative ref, HEAD, a refs/ path or a branch-name prefix is refused 409 SOURCE_ACCESS with nothing written; a real branch saves and syncs through Ref; a re-save onto a refused value keeps the saved branch",
       "surface": "The merged head's Dispatch server (packages/dispatch/e2e/run-server.sh, :18727, rootless Postgres 17 database t3_real) reading real GitHub (sjawhar/legion-smoke, sjawhar/legion) through the throwaway two-call shim, with reads forwarded through the tester's own gh (review App); the head's dispatch CLI",
       "command": "bash /legion/scratch/tmp/infra391/tester/r3/branch3.sh (log branch3.log)",
-      "observed": "On a new source, the full SHA cc50e1512a12…, the short SHA cc50e15, infra-391/architecture~1, ^, HEAD, refs/heads/infra-391/architecture, heads/infra-391/architecture, infra-391 (a prefix), infra-391/arch, INFRA-391/ARCHITECTURE, infra-391/architecture@{0} and a missing branch each answer 409 `the branch does not exist: <value> on sjawhar/legion-smoke`, and sources stay []. infra-391/architecture and sjawhar/legion main save 200. architecture-sync prints `Synced … sjawhar/legion-smoke@infra-391/architecture: commit cc50e1512a12…` and `Synced … sjawhar/legion@main: commit 167e30b9c674…`. A re-save onto the SHA, ~1, HEAD, refs/heads/… or the prefix answers 409 and keeps infra-391/architecture, cc50e1512a12 and 3 components. A re-save onto infra-391/architecture-collision answers 200 and its sync reads that branch. Only the three real-branch saves wrote a settings.architecture_source.updated event. The shim log shows git/ref/heads/<escaped value> answered 404 for every refused value and 200 for the branches.",
+      "observed": "On a new source, the full SHA cc50e1512a12\u2026, the short SHA cc50e15, infra-391/architecture~1, ^, HEAD, refs/heads/infra-391/architecture, heads/infra-391/architecture, infra-391 (a prefix), infra-391/arch, INFRA-391/ARCHITECTURE, infra-391/architecture@{0} and a missing branch each answer 409 `the branch does not exist: <value> on sjawhar/legion-smoke`, and sources stay []. infra-391/architecture and sjawhar/legion main save 200. architecture-sync prints `Synced \u2026 sjawhar/legion-smoke@infra-391/architecture: commit cc50e1512a12\u2026` and `Synced \u2026 sjawhar/legion@main: commit 167e30b9c674\u2026`. A re-save onto the SHA, ~1, HEAD, refs/heads/\u2026 or the prefix answers 409 and keeps infra-391/architecture, cc50e1512a12 and 3 components. A re-save onto infra-391/architecture-collision answers 200 and its sync reads that branch. Only the three real-branch saves wrote a settings.architecture_source.updated event. The shim log shows git/ref/heads/<escaped value> answered 404 for every refused value and 200 for the branches.",
       "headSha": "127dfc6e1426590a135ab0905c58a25e94e7fd9e",
       "negativeControl": "A server built from fa2dacfbb399 (git archive, :18728, database t3_prev) on the same shim saved the full SHA, the short SHA, ~1, ^, HEAD, refs/heads/infra-391/architecture, heads/infra-391/architecture and infra-391/architecture@{0} with HTTP 200, the last stored as the source's branch. Only the prefix, infra-391/arch, the case-changed name and the missing branch were refused."
     },
     {
       "criterion": "Settings tells a person that a commit or relative ref is not a branch, and the help text says the branch must exist and be a branch name",
       "surface": "Chromium (Playwright) on /settings as alice against the merged-head real-GitHub server; SPA bundle built at 01:52Z, after de00bf0aac74",
-      "command": "Throwaway Playwright script (log /legion/scratch/tmp/infra391/tester/r3/settings.log): Add source BR3 · sjawhar/legion-smoke · cc50e1512a12…, then BR3 · sjawhar/legion · main~1",
+      "command": "Throwaway Playwright script (log /legion/scratch/tmp/infra391/tester/r3/settings.log): Add source BR3 \u00b7 sjawhar/legion-smoke \u00b7 cc50e1512a12\u2026, then BR3 \u00b7 sjawhar/legion \u00b7 main~1",
       "observed": "The help text reads `Saving verifies the Dispatch GitHub App can read the repository and that the branch exists in it (a branch name, not a commit or tag)`. Each add answers HTTP 409 and shows `the branch does not exist: <value> on <repo>` inline, and the BR3 rows are unchanged.",
       "headSha": "127dfc6e1426590a135ab0905c58a25e94e7fd9e",
       "negativeControl": "The fa2dacfbb399 server stores the same SHA with 200 (branch3.log), so the same form would have added a row."
@@ -36,31 +35,30 @@
       "criterion": "Root A2: two sources import in a row with each head and no error; one --components-json update with an id from each reads back; one source's failed import leaves the other's components and attachments",
       "surface": "The merged-head server (:18727) on real GitHub through the two-call shim with the tester's gh; the head's dispatch CLI",
       "command": "DISPATCH_E2E_PORT=18727 bash /legion/scratch/tmp/infra391/a2/real.sh (log /legion/scratch/tmp/infra391/tester/r3/real.log)",
-      "observed": "Both saves 200. Two architecture-sync runs print Synced for sjawhar/legion@main 167e30b9c674 and sjawhar/legion-smoke@infra-391/architecture cc50e1512a12, equal to `gh api …/commits`. The list shows 36 + 3 components with last_error null. CORE-1 reads `Components: daemon-api, smoke-worker`. On the collision branch the sync prints `component id \"daemon\" is already a component of CORE from sjawhar/legion` and `The previous model of sjawhar/legion-smoke stays up (3 components)`. The issue is unchanged.",
+      "observed": "Both saves 200. Two architecture-sync runs print Synced for sjawhar/legion@main 167e30b9c674 and sjawhar/legion-smoke@infra-391/architecture cc50e1512a12, equal to `gh api \u2026/commits`. The list shows 36 + 3 components with last_error null. CORE-1 reads `Components: daemon-api, smoke-worker`. On the collision branch the sync prints `component id \"daemon\" is already a component of CORE from sjawhar/legion` and `The previous model of sjawhar/legion-smoke stays up (3 components)`. The issue is unchanged.",
       "headSha": "127dfc6e1426590a135ab0905c58a25e94e7fd9e",
-      "negativeControl": "ids [daemon-api, not-a-component] → `COMPONENTS_INPUT: CORE has no component not-a-component in its current architecture model`, exit 1"
+      "negativeControl": "ids [daemon-api, not-a-component] \u2192 `COMPONENTS_INPUT: CORE has no component not-a-component in its current architecture model`, exit 1"
     },
     {
       "criterion": "A dispatch CLI and a Dispatch of different releases give no false architecture advice, and architecture-sync works across them (kept singular routes, client fallbacks)",
       "surface": "The merged-head server (:18725, t3_head) and the base 83f6320140ec server (:18726, t3_base) on the harness's fake GitHub; head, base and pre-fix 97ddf0a4 dispatch CLIs",
       "command": "bash /legion/scratch/tmp/infra391/tester/r3/skew.sh, sync-fallback.sh, probe2.sh (logs alongside)",
-      "observed": "All six head and base pairings print no advice for NOARCH, `Project ARCH has an architecture model …` for ARCH, and `not found` (exit 1) for NOPE. On this server the base CLI's sync prints `Synced ARCH …`. After a collision it names acme/infra's failure, and with the first source uninstalled it names legion/arch's. The head CLI on the base server syncs through the singular route. The head server logged one warning per kept-route call (10).",
+      "observed": "All six head and base pairings print no advice for NOARCH, `Project ARCH has an architecture model \u2026` for ARCH, and `not found` (exit 1) for NOPE. On this server the base CLI's sync prints `Synced ARCH \u2026`. After a collision it names acme/infra's failure, and with the first source uninstalled it names legion/arch's. The head CLI on the base server syncs through the singular route. The head server logged one warning per kept-route call (10).",
       "headSha": "127dfc6e1426590a135ab0905c58a25e94e7fd9e",
-      "negativeControl": "The pre-fix 97ddf0a4 CLI on the base server prints `Could not check whether project NOARCH has an architecture model: no route for GET …/architecture-sources` (and the same for ARCH). The head CLI with a wrong token on the base server prints `invalid bearer token`, exit 1."
+      "negativeControl": "The pre-fix 97ddf0a4 CLI on the base server prints `Could not check whether project NOARCH has an architecture model: no route for GET \u2026/architecture-sources` (and the same for ARCH). The head CLI with a wrong token on the base server prints `invalid bearer token`, exit 1."
     },
     {
       "criterion": "Root A6: a browser-suite test proves Settings, the project page, the architecture page and an issue's components line show components from both sources; fails on the base build, passes at the head",
       "surface": "Dispatch's browser suite (Playwright chromium, real Go server, production SPA bundle, Postgres database t3_e2e) in the issue pod, tester lane ports",
-      "command": "cd packages/dispatch && DATABASE_URL=…/t3_e2e bun run e2e -- e2e/architecture-sources.e2e.ts e2e/architecture.e2e.ts e2e/settings.e2e.ts e2e/live.e2e.ts e2e/keyboard-palette.e2e.ts --project=chromium --reporter=line",
+      "command": "cd packages/dispatch && DATABASE_URL=\u2026/t3_e2e bun run e2e -- e2e/architecture-sources.e2e.ts e2e/architecture.e2e.ts e2e/settings.e2e.ts e2e/live.e2e.ts e2e/keyboard-palette.e2e.ts --project=chromium --reporter=line",
       "observed": "57 passed, 1 skipped (3.6m) (log /legion/scratch/tmp/infra391/tester/r3/a6-head.log)",
       "headSha": "127dfc6e1426590a135ab0905c58a25e94e7fd9e",
       "negativeControl": "The spec is unchanged since round 1, whose run on the base 83f6320140ec export failed at architecture-sources.e2e.ts:89 `legion/arch is still a CORE source`"
     }
   ],
   "notes": [
-    "No defect found, so no red test. The refusals I drove are pinned by TestArchitectureSourcePutRefusesACommitThatIsNoBranch and the githubapp TestBranch* tests (exact read, missing, another ref answered, other failures). The re-save path is pinned by TestArchitectureSourceRePutRefusesAMissingBranch.",
-    "Test move b64d85e642ad: the set of `func Test…` and `captureSourceWarnings` declarations in internal/dispatch/api is identical at de00bf0aac74 and b64d85e642ad (990 lines each, diff empty), so no test was dropped.",
-    "Not observed: a literal `..` branch. The shim parses URLs with Bun's URL, which collapses dot segments; Client.Branch path-escapes the name and compares the answered ref to refs/heads/<branch>, so a normalized 200 is refused.",
-    "The base CLI's `No model has ever imported for this project.` when the first source fails (round 2 observation) still holds; it is the base CLI's own text for the kept route's one row."
+    "The proof entries are round 3's, at 127dfc6e1426 (code 64cdb1b013e2). No line outside githubapp/*_test.go changed between that code head and 95a9fd1abf73, so re-driving the same binary would observe nothing new. Evidence: https://github.com/sjawhar/legion/pull/2209#issuecomment-6406751633.",
+    "Move check (throwaway, /legion/scratch/tmp/infra391/tester/r4): `git grep -h -E '^func ' <rev> -- packages/envoy/internal/dispatch/githubapp/` is equal at both revisions. `comm` of removed and added lines prints nothing removed that was not re-added. Whether client_test.go still uses every import it keeps is the typecheck and test lanes' to settle; Tests at 95a9fd1abf73 was in progress at the read.",
+    "No defect found, so no red test."
   ]
 }
