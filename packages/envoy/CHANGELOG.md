@@ -1143,6 +1143,29 @@
 
 ### Fixed
 
+- Closing an issue withdraws its open asks, and reopening it brings them back (INFRA-158). Every
+  close through `PATCH /api/v1/issues/{key}` - a person's Close or board drag,
+  `dispatch issue-update --status done`, the Legion daemon's close when a pull request merges -
+  withdraws every open ask of the issue, whoever's turn it is: decision blocks in its documents,
+  plain asks and requests to approve one of its documents. Each is recorded `resolved` with
+  resolution kind `withdrawn`, the closer as its actor and the reason
+  `Withdrawn by the close of <KEY>.`, and gets one `ask.resolved` before `issue.closed`; its
+  block, and each copy in another document of the issue, reads `state="resolved"` in the live
+  document, with no version written. Asks answered or resolved before the close are left as they
+  were, and a withdrawn approval request writes no review. The close first settles the issue's
+  documents that owe a settlement, so a decision block written seconds before the close is
+  withdrawn with a record. A reopen opens again exactly the asks the close withdrew, each with one
+  `ask.opened` before `issue.updated`, and they return to the Inbox.
+  `withdrawn` is the server's alone: `POST /api/v1/asks/{id}/resolve` still takes only `retracted`
+  and `resolved`, and an ask on a closed issue is still `409 ISSUE_CLOSED`. A repair pass,
+  `api.RepairIssueAsks`, runs at boot (bounded at 30 s) and then every 10 minutes under the lease
+  `issue-ask-repair`: it withdraws the asks left open on issues closed before this release, each
+  naming its issue's earlier closer, restores the withdrawn asks of an issue a process of the
+  earlier release reopened during the roll, and logs `withdrawn`, `restored` and `swept` counts.
+  The dashboard, which ships in this server, shows a withdrawn decision block on a closed issue's
+  current document with the badge `Withdrawn` and `Withdrawn when <closer> closed the issue`, as
+  the activity feed's `ask.resolved` line reads; a saved version shows its own attributes, so a
+  later withdrawal never appears on it.
 - An agent woken by a Slack message now reads the words the message carries, wherever it carries
   them. A Slack delivery's `text` is the message's own text and then every display string its
   blocks and then its attachments hold — the strings under `pretext`, `author_name`,

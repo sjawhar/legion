@@ -32,6 +32,7 @@ dispatch resolve-ask --ask <id> --kind retracted --reason 'A newer ask supersede
 
 - Use `retracted` for obsolete, `resolved` for found. Always give a reason: the question stays in its card. Resolution never records a human decision. An answered ask cannot be resolved.
 - `doc-edit` refuses to delete an open ask's block. A block deleted another way (an upload, the browser) closes its ask. Restoring it reopens the ask.
+- Closing an issue withdraws its open asks, whoever's turn it is. Each is resolved with kind `withdrawn`, naming whoever closed the issue. Only Dispatch writes `withdrawn`: `resolve-ask` takes `retracted` or `resolved`. A reopen brings back exactly the asks the close withdrew. An ask on a closed issue cannot be answered, resolved or retracted (`409 ISSUE_CLOSED`): reopen the issue first.
 - Reply under an ask with `dispatch comment --reply-to-ask <id>`. Close your review comment with `dispatch resolve-comment` ([Documents](skill://dispatch/references/documents.md#comments-and-suggestions)).
 - A human reply while the ask is open (`ask_state: open`) is a request for clarification, not an answer. Answer in the thread with `--reply-to-ask`, or reword with `edit-ask`. Do not open a second ask.
 - Each reply sets whose turn it is. Your default reply (`--turn human`) puts the ask in the human's `Waiting on you`. For any progress or working-on-it note, use `--turn agent`. A human reply hands the turn to you. Reads show it as `waiting_on`.

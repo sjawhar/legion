@@ -4,6 +4,10 @@
 
 ### Added
 
+- `withdrawn`, a third `AskResolution.kind` beside `retracted` and `resolved`, which the ask event
+  payload schema (`AskEventPayloadSchema`) now parses: Dispatch writes it alone, on each open ask
+  an issue's close withdraws, and reopening the issue opens those asks again. `dispatch_resolve_ask`
+  still takes only `retracted` and `resolved`, so no caller can write one (INFRA-158).
 - `dispatch_read` takes `events` (a positive integer, the issue's last N events) and `all_events`
   (every event), for an issue read and its `dispatch://KEY/log`, and its description says an issue
   read lists the last 10 without either.
@@ -127,6 +131,13 @@
 
 ### Changed
 
+- `shortSessionId` reads the Legion daemon's write identity, a session id beginning
+  `legion-daemon:`, whole rather than as `session:` and its first 8 characters, which name nobody,
+  so the shared actor label names the daemon that closed an issue. `dispatch_issue_update`'s
+  description says closing an issue withdraws its open asks and reopening it brings them back, and
+  `dispatch_resolve_ask`'s says a closed issue's asks were withdrawn by its close, that only
+  Dispatch writes `withdrawn`, and that an ask on a closed issue is `409 ISSUE_CLOSED` until the
+  issue reopens (INFRA-158).
 - `LegionHandoffCompleteResponse.note` carries one case fewer: READY no longer reads or judges the
   head's checks, so a base branch that requires none produces no note at all. What is left is the
   already-merged sentence, for a pull request a person merged before READY, and the by-hand

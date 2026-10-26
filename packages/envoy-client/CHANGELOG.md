@@ -39,6 +39,11 @@
 
 ### Fixed
 
+- A delivered `ask.resolved` whose record is the `withdrawn` kind an issue's close writes now
+  parses through the contracts' ask payload schema, which refused the kind before, so the
+  delivery carries its resolution (`withdrawn: Withdrawn by the close of <KEY>.`) like any other;
+  `dispatch read --ref dispatch://<KEY>/ask/<id>` prints `Kind: withdrawn`, the closer and the
+  reason (INFRA-158).
 - The `dispatch` command logs a refusal it makes before the call reaches Dispatch (an unknown
   flag or command, a missing or unknown host, a session it cannot name a directory for, a file
   that turns Dispatch off) to the session's ledger, whenever the call knows its session. A reader

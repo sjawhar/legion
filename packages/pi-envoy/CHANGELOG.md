@@ -105,6 +105,10 @@
 
 ### Changed
 
+- The `dispatch` skill this plugin ships says closing an issue withdraws its open asks (record kind
+  `withdrawn`, naming the closer, written only by Dispatch), a reopen brings back exactly those,
+  and an ask on a closed issue cannot be answered, resolved or retracted (`409 ISSUE_CLOSED`) until
+  the issue reopens (INFRA-158).
 - The `envoy` skill is rewritten to the minimum text that carries its instructions (INFRA-353),
   from 21,146 bytes to about 7,500, with the delivery fields, role-claim lifetime, Legion lanes,
   Slack, Ghost Wispr and WhatsApp topics and the check-settlement contract moved whole to

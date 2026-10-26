@@ -34,9 +34,9 @@ On the controller's report issue, always: the issue the deployment instructions 
 reports, else the project's `Legion daily report`, which
 `dispatch search --query '"Legion daily report"' --project <PROJECT>` finds. It stays open in
 `icebox`, so the ask stays answerable whatever happens to the issue it came from; once an issue
-closes, Dispatch takes its open asks out of the Inbox and refuses their answers
-(`409 ISSUE_CLOSED`). The question names the issue the finding came from by its `dispatch://`
-reference.
+closes, its close withdraws its open asks (a reopen brings them back), and Dispatch refuses their
+answers (`409 ISSUE_CLOSED`). The question names the issue the finding came from by its
+`dispatch://` reference.
 
 When the project has no report issue yet, or a person closed it (`dispatch read` shows `Status:
 done`, and Dispatch refuses the ask with `409 ISSUE_CLOSED`), do not create or reopen one yourself

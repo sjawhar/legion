@@ -13,6 +13,11 @@
 
 ### Changed
 
+- The bundled `dist/` and `legion/` were regenerated for INFRA-158: the contracts' ask payload
+  schema parses the `withdrawn` resolution kind an issue's close writes, the actor label reads a
+  `legion-daemon:` session id whole, the `dispatch_issue_update` and `dispatch_resolve_ask`
+  descriptions say a close withdraws an issue's open asks and a reopen brings them back, and the
+  plugin's copies of the `legion-controller` and `legion-worker` skills say the same.
 - The plugin's regenerated `legion/` copy of the `legion-worker` skill's tools reference no longer
   tells a role to add a new image package to the licence file by hand: the worker image lists every
   Debian package it carries in `/usr/share/doc/legion/THIRD_PARTY_NOTICES` from its own dpkg

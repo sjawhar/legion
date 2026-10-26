@@ -37,7 +37,7 @@ dispatch claim --issue LEGION-234 --release   # I have stopped; it is free
 ## Priority is yours to set
 
 - `0` (P0, highest) to `3` (P3), `null` clears. Set it on creation and on grooming passes over issues with none. Say what you set and why. The human overrides from the dashboard.
-- A closed issue takes only a board move (`--before` / `--after`), `components`, a reopening status, and an external-links write that adds no link. Reopen first, then set priority, in two commands (`409 ISSUE_CLOSED`).
+- A closed issue takes only a board move (`--before` / `--after`), `components`, a reopening status, and an external-links write that adds no link. Reopen first, then set priority, in two commands (`409 ISSUE_CLOSED`). The close withdrew the issue's open asks, and a reopen brings them back.
 - Labels are optional. Dispatch trims them, keeps their case, and drops case-insensitive duplicates.
 
 ## Board rank, priority, and assignee

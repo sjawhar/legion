@@ -98,6 +98,9 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 
 ### Changed
 
+- The `legion-controller` skill's daily-report reference and the `legion-worker` skill's findings
+  reference this plugin ships say a closed issue's close withdrew its open asks and a reopen brings
+  them back, where they said Dispatch hides them or takes them out of the Inbox (INFRA-158).
 - The Legion skills this plugin ships are rewritten to the minimum text that carries their
   instructions (INFRA-353): `legion-architect`, `legion-controller`, `legion-worker`,
   `legion-retro`, `legion-oracle`, `thermonuclear-code-quality` and `thermonuclear-deep-review`,
