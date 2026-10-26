@@ -2,56 +2,33 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-487",
-  "completed": "2026-10-26T22:23:30Z",
-  "round": 5,
-  "headTested": "24da304f68928a72de33e7e2652d5bdd752cd460 (code head 301addfdb1bd: review round 1 fixes; serving clock redesigned to one broker_serving row per process, a bounded beat, an advisory lock for the give-back, and the clock started beside srv.Serve; migration 0019 rewritten)",
+  "completed": "2026-10-26T22:46:08Z",
+  "round": 6,
+  "headTested": "68d3f6c0b7f1ac4cc2077b60341dd1d4aaa7b48a (code head e847db828666: migration 0019 adds index broker_serving_latest on broker_serving (last_serving_at desc), review round 2)",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran the implementer's commands at the head on the tester's Postgres 16: `cd packages/envoy && BROKER_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:54488/postgres?sslmode=disable go test -count=1 -v -run 'TestABrokerOutageLongerThanALease|TestABrokerThatDiesBeforeServingRecordsNoServingBeat' ./cmd/broker` -> both PASS, 0 SKIP; `go test -count=1 -v ./internal/broker/enroll` -> ok, TestAHeldServingLockFailsTheBeatAndAnotherBrokerKeepsTheGuardOff and TestTwoBeatsAtOnceGiveTheTimeBackOnce PASS. Drove both review findings end to end on the real broker binary (proofs below), each with a negative control. Read the PR body's Contract change census and drove its one person-invoked entry, the config refusal, through the real binary at its boundary."
+    "how": "Migrated a fresh schema with the broker binary built at the head (`\\d broker_serving` shows broker_serving_latest btree (last_serving_at DESC)) and measured enrollment_lease_live on the tester's Postgres 16, 20000 calls each (`select count(*) filter (where enrollment_lease_live(now() - interval '1 second')) from generate_series(1,20000)`): 5050 serving rows with the index 575.5 ms, EXPLAIN of the function's lookup 'Limit -> Index Scan using broker_serving_latest'; the same 5050 rows with the index dropped 44990.7 ms, 'Limit -> Sort -> Seq Scan'; 1 row with the index 618.1 ms. Guard semantics unchanged with the index: latest row 10 s old against a 3 s threshold, a lease that ran out after it is live (t) and one that ran out before it is not (f). Re-ran the real-binary outage test once (proof)."
   },
   "failures": [],
   "failed": 0,
-  "ci": "At 24da304f, Tests 40410278188, Docs 40410278039, Legion Envoy and Contracts 40410278041, Worker Image 40410278086 and the PR Title runs were queued or pending at 22:23Z; read as queued, not waited for. 7dcf3ff9's Tests and Legion Envoy and Contracts were cancelled by the 24da304f push before they ran (its Docs and PR Title succeeded). This handoff push carries skip-checks: true, so it starts and cancels no run.",
+  "ci": "At 68d3f6c0 Tests 40413885348, Legion Envoy and Contracts 40413885347, Docs 40413885301 and Worker Image 40413885320 were queued at 22:46Z; read as queued, not waited for. 24da304f's runs were cancelled by this head's push before they ran, so no Tests or Legion Envoy and Contracts run has completed on any head of #2269 yet. This handoff push carries skip-checks: true, so it starts and cancels no run.",
+  "localNotes": "`go test ./internal/broker/enroll` ok at the head; `./internal/broker/store` fails only TestOpenSignsEveryNewConnectionInWithAFreshlyMintedToken ('signed in to a role that has a password; the test proves nothing'), because the tester's Postgres trusts every login: environmental, the same skip the implementer names, untouched by this change; CI runs it.",
   "proof": [
     {
-      "criterion": "After an outage longer than the lease, a pod fetches again within one renewal interval of the broker serving, with no relaunch and no person; an ended enrollment stays ended",
+      "criterion": "After an outage longer than the lease, a pod fetches again within one renewal interval of the broker serving, with no relaunch and no person; an ended enrollment stays ended; a broker that dies before serving records no beat",
       "surface": "the real broker binary twice on one real Postgres 16 database and the real agent-secrets binary behind one forwarded address",
-      "command": "cd packages/envoy && BROKER_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:54488/postgres?sslmode=disable go test -count=1 -v -run TestABrokerOutageLongerThanALease ./cmd/broker",
-      "observed": "--- PASS (83.84s), 0 SKIP; survivor held 39.948s at the stop; fetch served 121ms after the second broker listened; renewer (never exited) renewed to 44.952s past now 5.917s after; 'gave back ... gap=58.355207s ... enrollments=2'; revoked and lapsed pods refused 401, mismatch renewals 403",
-      "headSha": "24da304f68928a72de33e7e2652d5bdd752cd460",
-      "negativeControl": "round 1: the same test on eee16056 failed 'agent-secrets: proof invalid: not live (PROOF_INVALID)'"
+      "command": "cd packages/envoy && BROKER_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:54488/postgres?sslmode=disable go test -count=1 -v -run 'TestABrokerOutageLongerThanALease|TestABrokerThatDiesBeforeServingRecordsNoServingBeat' ./cmd/broker",
+      "observed": "both --- PASS (91.52s, 10.09s), 0 SKIP; survivor held 39.947s at the stop; fetch served 81ms after the second broker listened; renewer renewed to 44.912s past now 5.976s after; 'gave back ... gap=58.36687s ... enrollments=2'",
+      "headSha": "68d3f6c0b7f1ac4cc2077b60341dd1d4aaa7b48a",
+      "negativeControl": "round 1: the same outage test on eee16056 failed 'agent-secrets: proof invalid: not live (PROOF_INVALID)'"
     },
     {
-      "criterion": "Review finding 1: a broker crash-looping before it serves during an outage does not count as serving, so a lease that runs out meanwhile is given back, not swept",
-      "surface": "real broker binaries on real Postgres: a serving broker stopped, then a broker whose GitHub exchange issuer answers discovery 404 after 3 s booted again and again for 30 s (each binds, then fatals before srv.Serve), then a good broker",
-      "command": "throwaway cmd/broker TestZZCrashLoopingBrokerDuringOutage (removed after the run)",
-      "observed": "PASS: 10 crash-looping boots over 31.072s left broker_serving at the stopped broker's one row (981f9df2@22:17:32.745); the pod's lease ran out during the loop; the good broker logged 'gave back ... gap=31.474329s ... enrollments=1', the pod was not ended, its lease ran 3.2s past now and it was granted and served its secret",
-      "headSha": "24da304f68928a72de33e7e2652d5bdd752cd460",
-      "negativeControl": "the same rig on a git-archive export of 7dcf3ff9's packages/envoy (clock started before the boot's failing steps), GOWORK=off: --- FAIL, 'the pod whose lease ran out during the crash loop was ended' (revoked=true after the good broker's first sweep)"
-    },
-    {
-      "criterion": "Review finding 2: a beat held on its row fails within its bound and says so, another broker keeps beating, and the guard stays off",
-      "surface": "two real broker binaries on one schema; a separate session holds broker A's broker_serving row FOR UPDATE for 8 s",
-      "command": "throwaway TestZZHeldServingRow",
-      "observed": "PASS: A logged once 'WARN broker: the serving clock could not beat ... error=\"timeout: context deadline exceeded\" timed_out=true' and 'the serving clock beats again' after the release; B's row moved from 22:18:18.591 to 22:18:26.595 while A's stayed at 22:18:18.985; B logged no clock line; a pod whose lease ran out 2 s into the hold was not live and the sweeper ended it at 22:18:21; no time was given back by either broker",
-      "headSha": "24da304f68928a72de33e7e2652d5bdd752cd460",
-      "negativeControl": "the lapsing pod itself: with B serving, its lapsed lease is refused (live=false) and ended, so the guard did not switch on"
-    },
-    {
-      "criterion": "Break attempts on the redesigned clock: a database outage while the broker runs; two brokers both stopped and started at once with a revoke written during the outage; outages below and above the threshold",
-      "surface": "real broker and agent-secrets binaries on the tester's Postgres 16 (stopped with pg_ctl -m fast for the database outage)",
-      "command": "throwaway TestZZDatabaseOutageWhileBrokerRuns, TestZZTwoBrokersBothStoppedAndStarted, TestZZShortAndMediumOutages",
-      "observed": "all PASS. Database 58.2 s away: broker stayed up, one WARN timed_out=false, 'gave back ... gap=1m0.051035s ... enrollments=2', survivor fetch 952 ms and renewal 3.979 s after the database came back, renewer never exited, idle pod whose lease ran out not swept and served. Two brokers: 'gave back' once across both (p1=1, p2=0), lease moved 30.53 s (the gap once), later lapsed and ended 19.151 s after the restart. Below threshold (0.5 s stop, sweep 2): nothing given back, lease unmoved. 12 s stop: gap=13.096093s given back, not revoked",
-      "headSha": "24da304f68928a72de33e7e2652d5bdd752cd460",
-      "negativeControl": "a pod revoked by its launcher before the database outage, and one revoked by SQL during the two-broker outage: each refused fetch 401 PROOF_INVALID not live and renew 401 ENROLLMENT_NOT_LIVE, the latter's lease unmoved by the beat"
-    },
-    {
-      "criterion": "Contract change census entry: config.Load refuses 2*BROKER_LEASE_SECONDS <= 9*BROKER_SWEEP_SECONDS, an immediate refusal",
-      "surface": "the real broker binary's start",
-      "command": "throwaway TestZZConfigBoundary",
-      "observed": "lease=23 sweep=5 and lease=14 sweep=3 listen; lease=22 sweep=5 and lease=13 sweep=3 exit 1 'BROKER_LEASE_SECONDS (22) must be more than four and a half times BROKER_SWEEP_SECONDS (5) ...'",
-      "headSha": "24da304f68928a72de33e7e2652d5bdd752cd460",
-      "negativeControl": "lease=22 sweep=5 refused at start, exit 1, naming both settings"
+      "criterion": "Review round 2: the latest serving row is an index lookup, so enrollment_lease_live does not seq-scan and sort broker_serving per call",
+      "surface": "a schema migrated by the head's broker binary on real Postgres 16",
+      "command": "psql -f idx.sql: 5050 broker_serving rows, analyze, EXPLAIN of `select ... from broker_serving order by last_serving_at desc limit 1`, then 20000 enrollment_lease_live calls; repeated with the index dropped",
+      "observed": "with the index: 'Limit -> Index Scan using broker_serving_latest', 20000 calls 575.5 ms",
+      "headSha": "68d3f6c0b7f1ac4cc2077b60341dd1d4aaa7b48a",
+      "negativeControl": "index dropped: 'Limit -> Sort -> Seq Scan on broker_serving', 20000 calls 44990.7 ms"
     }
   ]
 }
