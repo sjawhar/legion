@@ -715,8 +715,26 @@ so the script opens the transcript on fd 8 and calls `transcript_to /dev/fd/8`
 ## claude-backend-tmux.sh
 
 ```sh
-LEGION_E2E_CLAUDE_KEY_FILE=<file holding an Anthropic API key> LEGION_E2E_MODEL_GATEWAY_URL=<gateway>/anthropic \
+LEGION_E2E_MODEL_ROUTE=gateway LEGION_E2E_CLAUDE_KEY_FILE=<file holding an Anthropic API key> LEGION_E2E_MODEL_GATEWAY_URL=<gateway>/anthropic \
   bash scripts/e2e/claude-backend-tmux.sh     # → "claude backend e2e: PASS", exit 0
+LEGION_E2E_MODEL_ROUTE=key-file LEGION_E2E_ANTHROPIC_KEY_FILE=<0600 file> \
+  bash scripts/e2e/claude-backend-tmux.sh     # the same, for a devbox with no Hawk gateway: one key file for both halves
+```
+
+The key-file route's file may come from the agent-secrets broker, which serves
+`LEGION_ANTHROPIC_API_KEY` to a session without an approval wait. The key is written 0600, never
+printed and never in an argv, and the subshell's `EXIT` trap removes the file however the run ends
+(a failure, Ctrl-C, or a deadline that kills the shell), where a plain `rm` at the end would leave
+it behind:
+
+```sh
+(
+  key=$(mktemp)   # 0600 already
+  trap 'rm -f "$key"' EXIT
+  agent-secrets LEGION_ANTHROPIC_API_KEY -- sh -c 'umask 077; printf %s "$LEGION_ANTHROPIC_API_KEY" >"$1"' sh "$key" &&
+    LEGION_E2E_MODEL_ROUTE=key-file LEGION_E2E_CLAUDE_KEY_FILE=$key LEGION_E2E_ANTHROPIC_KEY_FILE=$key \
+      bash scripts/e2e/claude-backend-tmux.sh
+)
 ```
 
 Claude Code has no box-login route: Claude Code 2.1.309 writes `~/.claude/.credentials.json` by
@@ -756,18 +774,35 @@ pane. The checks:
 
 Inputs. The App inputs ([`lib/github-apps.sh`](#libgithub-appssh), optional) name another
 deployment's two role Apps; a run here sets none and takes the default pair.
-`LEGION_E2E_CLAUDE_KEY_FILE` (required) names a file holding the Anthropic API key the
-Claude Code implementer reaches its model with. `prerequisites` refuses a run without it, naming
-the variable, before it writes anything, and refuses a key Anthropic's `GET /v1/models` does not accept
+`LEGION_E2E_MODEL_ROUTE` (required, as Stage 2's and Stage 3's is) picks the Oh My Pi agents'
+route — the architect's and the planner's:
+
+- `gateway`: the Hawk model gateway, as in
+  [`stage3-devbox-workflow.sh`](#stage3-devbox-workflowsh), with `LEGION_E2E_MODEL_GATEWAY_URL`
+  (required in this mode) and `hawk-token` on `PATH`
+  ([`lib/install-model-gateway.sh`](#libinstall-model-gatewaysh)).
+- `key-file`: `LEGION_E2E_ANTHROPIC_KEY_FILE` (required in this mode unless
+  `LEGION_E2E_CLAUDE_KEY_FILE` names the file), a 0600 file holding a plaintext Anthropic key, for
+  a devbox with no Hawk gateway at all
+  ([`lib/install-key-file-model-route.sh`](#libinstall-key-file-model-routesh)). `hawk-token` is
+  not required here.
+
+`prerequisites` refuses any other value, naming it, before it writes anything.
+
+`LEGION_E2E_CLAUDE_KEY_FILE` names a file holding the Anthropic API key the
+Claude Code implementer reaches its model with. It is required under `gateway`; under `key-file`,
+left unset, it falls back to `LEGION_E2E_ANTHROPIC_KEY_FILE`, so one key file serves both halves of
+the run, and naming both puts the Claude Code pane on `LEGION_E2E_CLAUDE_KEY_FILE` and the Oh My Pi
+agents on `LEGION_E2E_ANTHROPIC_KEY_FILE`, with both paths in the run's notes.
+`prerequisites` refuses a run with neither, naming the variables, before it writes anything, and
+refuses a key Anthropic's `GET /v1/models` does not accept
 (the key goes by a 0600 header file, never an argv). The run copies the key once into its work
 directory, 0600, and writes the implementer's claim directory (`<state>/claude/<claim token>`, which
 the daemon creates only when missing) before the claim exists: a `settings.json` whose
 `apiKeyHelper` is a command that prints that copy, and whose `model` is `claude-sonnet-5`. So no
 pane's environment carries `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_OAUTH_TOKEN`,
 `ANTHROPIC_FOUNDRY_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN`, which the watcher checks for every agent
-process, and the key is in no argv and no transcript. `LEGION_E2E_MODEL_GATEWAY_URL` (required) is
-the Oh My Pi agents' route, as in [`stage3-devbox-workflow.sh`](#stage3-devbox-workflowsh)
-([`lib/install-model-gateway.sh`](#libinstall-model-gatewaysh)). `CLAUDE_E2E_EVIDENCE_DIR` names
+process, and the key is in no argv and no transcript. `CLAUDE_E2E_EVIDENCE_DIR` names
 the evidence directory; by default it is a fresh one under `/tmp`.
 
 The rig is Stage 3's without the GitHub ingress bridge: scratch Postgres, NATS, Envoy listener and

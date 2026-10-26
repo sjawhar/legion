@@ -597,7 +597,7 @@ spec_event_in() {
   ' >/dev/null
 }
 # The decision block the proof inserts into the spec as an architect would (skills/dispatch/
-# references/documents.md, "Typed blocks"), and its question, by which the ask settlement indexes
+# SKILL.md, "Asks and ask blocks"), and its question, by which the ask settlement indexes
 # from it is found.
 carry_question='Stage 3 proof question: keep or drop the smoke paragraph?'
 carry_block=$(printf ':::ask{urgency="high" multiple="false"}\n%s\n\n- Keep: the paragraph stays.\n- Drop: the paragraph goes.\n:::\n' "$carry_question")

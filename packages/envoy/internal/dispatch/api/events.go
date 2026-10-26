@@ -228,7 +228,7 @@ func (s *server) streamEvents(w http.ResponseWriter, r *http.Request) {
 		case <-heartbeat.C:
 			// The caller is resolved again on every heartbeat, so a stream outlives its session
 			// (a logout, a membership the sign-in issuer no longer confirms) by one beat at most.
-			if _, _, err := s.optionalActor(r); err != nil {
+			if _, _, err := s.optionalActor(heartbeatRequest(r)); err != nil {
 				return
 			}
 			if _, err := fmt.Fprint(w, ": heartbeat\n\n"); err != nil {
