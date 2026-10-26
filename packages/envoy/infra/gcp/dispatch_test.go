@@ -325,7 +325,7 @@ func TestDispatchResolverRefusesInvalidInputs(t *testing.T) {
 		{name: "an empty app priority class", edit: func(a *gcp.DispatchArgs) { a.AppPriorityClassName = pulumi.StringRef("") }, err: []string{"appPriorityClassName is empty", "leave it unset for no priority class"}},
 		{name: "an app priority class that is no DNS subdomain", edit: func(a *gcp.DispatchArgs) { a.AppPriorityClassName = pulumi.StringRef("Example_Priority") }, err: []string{`appPriorityClassName "Example_Priority"`, "DNS subdomain"}},
 		{name: "an app priority class with trailing whitespace", edit: func(a *gcp.DispatchArgs) { a.AppPriorityClassName = pulumi.StringRef("example-priority ") }, err: []string{`appPriorityClassName "example-priority "`, "DNS subdomain"}},
-		{name: "an app priority class longer than 253 characters", edit: func(a *gcp.DispatchArgs) { a.AppPriorityClassName = pulumi.StringRef(strings.Repeat("a", 254)) }, err: []string{"appPriorityClassName", "DNS subdomain"}},
+		{name: "an app priority class longer than 253 characters", edit: func(a *gcp.DispatchArgs) { a.AppPriorityClassName = pulumi.StringRef(strings.Repeat("a.", 127) + "a") }, err: []string{"appPriorityClassName", "DNS subdomain"}},
 		{name: "a system cluster-critical app priority class", edit: func(a *gcp.DispatchArgs) { a.AppPriorityClassName = pulumi.StringRef("system-cluster-critical") }, err: []string{`appPriorityClassName "system-cluster-critical"`, "reserves for its own system components"}},
 		{name: "a system node-critical app priority class", edit: func(a *gcp.DispatchArgs) { a.AppPriorityClassName = pulumi.StringRef("system-node-critical") }, err: []string{`appPriorityClassName "system-node-critical"`, "reserves for its own system components"}},
 		{name: "a disruption budget of no pod", edit: func(a *gcp.DispatchArgs) { a.AppPdbMinAvailable = pulumi.IntRef(0) }, err: []string{"appPdbMinAvailable 0", "from 1 to replicas (1)", "leave it unset for no PodDisruptionBudget"}},
@@ -1581,6 +1581,9 @@ func TestDispatchAppPriorityClassReachesTheAppPodAlone(t *testing.T) {
 			read := m.Named(t, priorityClassType, "example-dispatch-priority-class")
 			require.Equal(t, class, read.ID)
 			require.Nil(t, read.RPC, "the PriorityClass is read, never registered")
+			require.Equal(t, "urn:pulumi:s::p::"+dispatchType+"::example-dispatch", read.ReadRPC.GetParent())
+			require.Contains(t, read.ReadRPC.GetProvider(), "pulumi:providers:kubernetes::example-dispatch-kubernetes::")
+			require.Contains(t, read.ReadRPC.GetDependencies(), "urn:pulumi:s::p::"+dispatchType+"$gcp:container/cluster:Cluster::example-dispatch")
 			deps := m.Named(t, "kubernetes:apps/v1:Deployment", "example-dispatch").RPC.GetDependencies()
 			require.Contains(t, deps, "urn:pulumi:s::p::"+dispatchType+"$"+priorityClassType+"::example-dispatch-priority-class")
 			require.ElementsMatch(t, append(defaults.Types(), priorityClassType), m.Types())

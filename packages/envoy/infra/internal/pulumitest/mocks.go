@@ -17,12 +17,13 @@ import (
 	"github.com/sjawhar/envoy/infra/provider"
 )
 
-// Registration is one resource the mock engine was asked to register or read. ID is the id a read
-// asked for, and empty for a registration, whose RPC is set; a read has no RPC.
+// Registration is one resource the mock engine was asked to register or read. A registration has
+// RPC; a read has ReadRPC instead, and ID, the id it asked for.
 type Registration struct {
 	Type, Name, ID string
 	Inputs         resource.PropertyMap
 	RPC            *pulumirpc.RegisterResourceRequest
+	ReadRPC        *pulumirpc.ReadResourceRequest
 }
 
 // Mocks is a mock engine, for pulumi.WithMocks and integration.WithMocks, that records every
@@ -44,7 +45,7 @@ func (m *Mocks) NewResource(args pulumi.MockResourceArgs) (string, resource.Prop
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.registered = append(m.registered, Registration{
-		Type: args.TypeToken, Name: args.Name, ID: args.ID, Inputs: args.Inputs, RPC: args.RegisterRPC,
+		Type: args.TypeToken, Name: args.Name, ID: args.ID, Inputs: args.Inputs, RPC: args.RegisterRPC, ReadRPC: args.ReadRPC,
 	})
 	state := resource.PropertyMap{}
 	for k, v := range args.Inputs {

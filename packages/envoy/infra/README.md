@@ -212,13 +212,15 @@ what it always did.
 PriorityClass that already exists in the cluster. The component never creates the class, but it
 reads it, and the app Deployment waits on that read: Kubernetes refuses every pod that names a
 class the cluster does not have, and at one replica `Recreate` would already have stopped the old
-pod, so a missing class fails the preview or the update instead of leaving Dispatch down. Create
-the class before, or outside, the program that sets the name. The `system-` prefix is refused:
-Kubernetes reserves it for `system-cluster-critical` and `system-node-critical`, which outrank
-every workload so the cluster's own components are placed first. A pod's priority decides which
-pods the scheduler may preempt to place it, when its class allows preemption, and ranks it among
-pods a node under memory or disk pressure evicts once their use above their requests is equal.
-Like `appCpu`, a change to it replaces the app's pods.
+pod, so a missing class fails the update, and the preview too once the cluster exists (on a first
+deploy the cluster's provider is unknown at preview, so the read waits for the update), instead of
+leaving Dispatch down. Create the class before, or outside, the program that sets the name. The
+`system-` prefix is refused: Kubernetes reserves it for `system-cluster-critical` and
+`system-node-critical`, which outrank every workload so the cluster's own components are placed
+first. A pod's priority decides which pods the scheduler may preempt to place it, when its class
+allows preemption, and ranks it among the pods a node under memory or disk pressure evicts that
+alike do, or alike do not, use more than they request. Like `appCpu`, a change to it replaces the
+app's pods.
 
 `appPdbMinAvailable`, from 1 to `replicas`, registers the PodDisruptionBudget `<hostname>` with
 that `minAvailable`. The `safe-to-evict` annotation above already holds off the autoscaler's
@@ -232,11 +234,11 @@ cold restart. A drain of a pod that stays broken waits the longer for it: GKE re
 up to an hour while it drains a node for an upgrade and then evicts anyway
 ([Autopilot cluster upgrades](https://cloud.google.com/kubernetes-engine/docs/concepts/cluster-upgrades-autopilot)).
 The budget never slows the app's own rollouts, which Kubernetes does not run through the eviction
-API. Before the first update that sets it, delete any budget made by hand over the app's pods
-under another name (`kubectl -n <namespace> delete pdb <name>`): the eviction API refuses to evict
-a pod that two budgets select. One already named `<hostname>` is taken over by the update, since
-the component's Kubernetes provider applies server-side, and fails it with a field conflict if
-its spec differs.
+API. Delete every budget made by hand over the app's pods (`kubectl -n <namespace> delete pdb
+<name>`) just before the first update that sets it, one named `<hostname>` included: the
+component's Kubernetes provider does not adopt an object that already exists, so the update fails
+with the budget's `AlreadyExists`, and a hand-made budget under another name would select the
+same pod, which makes the eviction API refuse every eviction of it.
 
 The component refuses, each by name, before it registers a resource, an empty or malformed
 `appPriorityClassName`, one with the `system-` prefix, and an `appPdbMinAvailable` below 1 or
