@@ -272,7 +272,21 @@ test("an out-of-order lower id never lowers the cursor", () => {
   }
 });
 
+/** Moves the fake clock `ms` on in steps, letting each timer's continuation and React's updates
+ *  run as it fires. */
+async function advance(ms: number): Promise<void> {
+  for (let left = ms; left > 0; left -= 50) {
+    await act(async () => {
+      jest.advanceTimersByTime(Math.min(50, left));
+      for (let turn = 0; turn < 10; turn += 1) await Promise.resolve();
+    });
+  }
+}
+
+// On the fake clock, at the production window: the burst, the trailing refresh and the event
+// after the window are each read at the moment they are due, not waited out for real.
 test("an unknown event type refreshes everything, at most once per window", async () => {
+  jest.useFakeTimers();
   const queryClient = newClient({ staleTime: Number.POSITIVE_INFINITY });
   for (const key of [["issues"], ["inbox"], ["user-state"], ["user-agent-state"]]) {
     queryClient.setQueryData(key, { loaded: true });
@@ -289,7 +303,8 @@ test("an unknown event type refreshes everything, at most once per window", asyn
     // The server may add an event this client cannot parse: rather than leave a rendered field
     // stale until the next gap, every query refreshes, a key no hand-written list named included.
     receive(socket, eventFrame(sub, futureEvent(1)));
-    await waitFor(() => expect(isStale(["issues"])).toBe(true));
+    await advance(200);
+    expect(isStale(["issues"])).toBe(true);
     expect(isStale(["inbox"])).toBe(true);
     expect(isStale(["user-state"])).toBe(true);
     expect(isStale(["user-agent-state"])).toBe(true);
@@ -298,29 +313,30 @@ test("an unknown event type refreshes everything, at most once per window", asyn
     // which reaches the GitHub proxy queries.
     for (let index = 2; index <= 50; index += 1) {
       receive(socket, eventFrame(sub, futureEvent(index)));
-      await sleep(20);
+      await advance(20);
     }
-    await waitFor(() => expect(wholeCache.count()).toBe(1));
-    await sleep(500);
+    await advance(500);
     expect(wholeCache.count()).toBe(1);
 
-    // One trailing refresh carries everything the burst asked for.
-    await waitFor(() => expect(wholeCache.count()).toBe(2), { timeout: 8_000 });
-    await sleep(500);
+    // One trailing refresh carries everything the burst asked for, once the window is out.
+    await advance(WHOLE_CACHE_REFRESH_MS);
+    expect(wholeCache.count()).toBe(2);
+    await advance(500);
     expect(wholeCache.count()).toBe(2);
 
     // And an event after the window refreshes again: a second change of that same new type is one
-    // this tab would otherwise never learn. This test overrides no window - it is the one that
-    // runs at the production one, since its 50-event burst is what bounds its runtime - so it
-    // waits out the real constant rather than a copy of its value.
-    await sleep(WHOLE_CACHE_REFRESH_MS);
+    // this tab would otherwise never learn.
+    await advance(WHOLE_CACHE_REFRESH_MS);
     receive(socket, eventFrame(sub, futureEvent(99)));
-    await waitFor(() => expect(wholeCache.count()).toBe(3));
+    await advance(200);
+    expect(wholeCache.count()).toBe(3);
   } finally {
     hook.unmount();
     wholeCache.restore();
+    jest.advanceTimersByTime(1);
+    jest.useRealTimers();
   }
-}, 40_000);
+});
 
 test("an event this page cannot read is skipped and refreshes everything", async () => {
   const queryClient = newClient({ staleTime: Number.POSITIVE_INFINITY });
@@ -344,14 +360,10 @@ test("an event this page cannot read is skipped and refreshes everything", async
 });
 
 test("repeated gaps cost one refresh plus a trailing one", async () => {
+  jest.useFakeTimers();
   const queryClient = newClient({ staleTime: Number.POSITIVE_INFINITY });
   const wholeCache = countWholeCacheRefreshes(queryClient);
-  // A short injected window, so the test waits out its own trailing refresh rather than the
-  // production 5 s. The unknown-event test keeps the real window: its burst is what bounds its
-  // runtime, and shortening the window there without tightening the burst proves less.
-  const hook = renderHook(() => useEventFeed({ wholeCacheRefreshMs: 3_000 }), {
-    wrapper: wrapperFor(queryClient),
-  });
+  const hook = renderHook(() => useEventFeed(), { wrapper: wrapperFor(queryClient) });
   try {
     openFeed();
     // Dispatch restarting node by node closes the socket again and again (1012), and every
@@ -360,22 +372,24 @@ test("repeated gaps cost one refresh plus a trailing one", async () => {
     for (let index = 0; index < 6; index += 1) {
       act(() => sockets.latest().drop(1012));
       openFeed();
-      await sleep(100);
+      await advance(100);
     }
     expect(sockets.sockets).toHaveLength(7);
-    await waitFor(() => expect(wholeCache.count()).toBe(1));
-    await sleep(500);
+    await advance(500);
     expect(wholeCache.count()).toBe(1);
 
-    // One trailing refresh carries whatever the later gaps asked for.
-    await waitFor(() => expect(wholeCache.count()).toBe(2), { timeout: 4_000 });
-    await sleep(300);
+    // One trailing refresh carries whatever the later gaps asked for, once the window is out.
+    await advance(WHOLE_CACHE_REFRESH_MS);
+    expect(wholeCache.count()).toBe(2);
+    await advance(500);
     expect(wholeCache.count()).toBe(2);
   } finally {
     hook.unmount();
     wholeCache.restore();
+    jest.advanceTimersByTime(1);
+    jest.useRealTimers();
   }
-}, 30_000);
+});
 
 test("the credential list held null is asked again after a gap", async () => {
   const getCredentialPending = spyOn(api, "getCredentialPending").mockResolvedValue(null);
