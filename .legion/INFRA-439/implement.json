@@ -2,24 +2,42 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-439",
-  "completed": "2026-10-26T20:46:26Z",
+  "completed": "2026-10-26T22:13:34Z",
   "pr": 2228,
-  "round": "tester round 11 fail: smoke-replay.sh remote mode read-back passed its cursor as $1 while replay_read read $2",
+  "round": "architect's acceptance send-back: the PR body's Fast-follow batch done in this PR (five items), Fast-follow set to none",
   "proof": [
     {
-      "criterion": "smoke-replay.sh remote mode, run as committed, reads each publish back from /v1/replay after the cursor it passes",
-      "surface": "packages/pi-envoy/scripts/smoke-replay.sh in remote mode against a loopback natsd -js and an Envoy listener built from this head, real omp 18.12.2",
-      "command": "SMOKE_REPLAY_ENVOY_URL=http://127.0.0.1:24080 SMOKE_REPLAY_NATS_URL=nats://127.0.0.1:24222 bash packages/pi-envoy/scripts/smoke-replay.sh (exit 0; https://github.com/sjawhar/legion/pull/2228#issuecomment-6426833042)",
-      "observed": "leg 1: '/v1/replay starts a cursor ... at 0', then '/v1/replay after 0 holds it: {\"seq\":1,...}'; every later read-back also holds its publish; the run ends SMOKE REPLAY PASS",
-      "headSha": "b9e0c62a888e2d431313426d7c7243258d505c93",
-      "negativeControl": "with the old ${2:-}/$2 lines restored, the same command exits 1 at leg 1's first read-back: 'SMOKE REPLAY FAIL (leg-1-reconnect): /v1/replay after 20 does not hold ...' with messages []"
+      "criterion": "Replay notices (stream recreated, retention gap) are held while a turn streams and handed at the first settled heartbeat, so no extra model turn runs for them (item 4)",
+      "surface": "pi-envoy bun test: src/unwritten-frames.test.ts 'a replay notice' and extensions/envoy.test.ts 'a retention gap found while the host's turn streams is told once, at the first idle heartbeat'",
+      "command": "cd packages/pi-envoy && bun test (1004 pass, 0 fail)",
+      "observed": "a notice raised while the host streams is not sent on a busy tick, is sent once (details LOCAL_ENVOY_NOTICE) at the first idle tick, and not again; held notices retry after a failed hand and are dropped on a session move",
+      "headSha": "232a541eb40c27720c9bab0f17bb42fa4e5c0dad",
+      "negativeControl": "with the card route back to the direct pi.sendMessage the envoy test fails (Expected length 0, Received 1); with sendNotice handing at once, three unit tests fail"
+    },
+    {
+      "criterion": "smoke-replay.sh, with its card predicate defined once, still passes in local and remote mode (items 1 and 5 do not change behaviour)",
+      "surface": "packages/pi-envoy/scripts/smoke-replay.sh on real omp 18.12.2: local mode, and remote mode against a loopback natsd -js and a listener built from this head",
+      "command": "bash packages/pi-envoy/scripts/smoke-replay.sh; SMOKE_REPLAY_ENVOY_URL=http://127.0.0.1:24080 SMOKE_REPLAY_NATS_URL=nats://127.0.0.1:24222 bash packages/pi-envoy/scripts/smoke-replay.sh (https://github.com/sjawhar/legion/pull/2228#issuecomment-6428572513)",
+      "observed": "both exit 0 with SMOKE REPLAY PASS (legs 1-7 and the released-plugin controls; leg 6 local only)",
+      "headSha": "232a541eb40c27720c9bab0f17bb42fa4e5c0dad",
+      "negativeControl": "the old and new jq filters of card_entries, cards and assistant_after gave identical output on a crafted session file (string, array and null content, other customTypes, non-JSON lines) for present and missing ids"
     }
   ],
   "filesChanged": [
+    "packages/pi-envoy/src/unwritten-frames.ts",
+    "packages/pi-envoy/src/unwritten-frames.test.ts",
+    "packages/pi-envoy/extensions/envoy.ts",
+    "packages/pi-envoy/extensions/envoy.test.ts",
+    "packages/pi-envoy/AGENTS.md",
+    "packages/pi-envoy/CHANGELOG.md",
     "packages/pi-envoy/scripts/smoke-replay.sh",
-    "packages/envoy/CHANGELOG.md (forward-merge resolution only)"
+    "packages/pi-envoy/scripts/README.md",
+    "packages/envoy-client/src/replay.ts",
+    "packages/envoy/AGENTS.md",
+    "docs/site/src/content/docs/dispatch/envoy.md"
   ],
   "deviations": [
-    "Forward merge of main because GitHub reported CONFLICTING: b9e0c62a -> 2f95f13f, fingerprint 247399ae... unchanged (https://github.com/sjawhar/legion/pull/2228#issuecomment-6426926113)."
+    "Item 4 needed a behaviour change, not only a doc line: the replay notices went to omp directly as steers, so a streaming turn ran one more model turn for them. They now go through UnwrittenFrames.sendNotice and wait for a settled host, which makes the AGENTS.md statement ('held until settled, no extra turn') true.",
+    "One existing envoy.test.ts test ('a session back four days later ... says older ones may be missing') now boots its second session with turn 'idle', since the harness defaults to a streaming turn and the notice is now held there; its assertions are unchanged."
   ]
 }
