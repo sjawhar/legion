@@ -24,42 +24,13 @@ Usage: DISPATCH_URL=http://127.0.0.1:8777 DISPATCH_TOKEN=e2e-token PROJECT=CORE 
 USAGE
 }
 
-for variable in DISPATCH_URL PROJECT; do
-  if [[ -z "${!variable:-}" ]]; then
-    printf 'required environment variable %s is unset\n' "$variable" >&2
-    usage
-    exit 2
-  fi
-done
-for command in bun curl jq; do
-  command -v "$command" >/dev/null || {
-    printf 'required command %s is unavailable\n' "$command" >&2
-    exit 2
-  }
-done
-
-if [[ -n "${DISPATCH_TOKEN:-}" ]]; then
-  token="$DISPATCH_TOKEN"
-elif [[ -n "${DISPATCH_TOKEN_FILE:-}" ]]; then
-  [[ -r "$DISPATCH_TOKEN_FILE" ]] || {
-    printf 'DISPATCH_TOKEN_FILE names %s, which cannot be read\n' "$DISPATCH_TOKEN_FILE" >&2
-    exit 2
-  }
-  token="$(<"$DISPATCH_TOKEN_FILE")"
-  token="${token#"${token%%[![:space:]]*}"}"
-  token="${token%"${token##*[![:space:]]}"}"
-else
-  printf 'set DISPATCH_TOKEN or DISPATCH_TOKEN_FILE to an agent bearer\n' >&2
-  usage
-  exit 2
-fi
-[[ -n "$token" ]] || {
-  printf 'the agent bearer is empty\n' >&2
-  exit 2
-}
-# No child process inherits the bearer from here: curl reads it from a header file, and the CLI
-# gets it in an environment this script builds.
-unset DISPATCH_TOKEN DISPATCH_TOKEN_FILE
+# shellcheck source-path=SCRIPTDIR source=lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+require_env DISPATCH_URL PROJECT
+require_commands bun curl jq
+read_bearer
+# No child process inherits the bearer from here: read_bearer has unset it from the environment,
+# curl reads it from a header file, and the CLI gets it in an environment this script builds.
 
 readonly base="${DISPATCH_URL%/}"
 # shellcheck disable=SC2153 # PROJECT is the caller's input, checked by name above

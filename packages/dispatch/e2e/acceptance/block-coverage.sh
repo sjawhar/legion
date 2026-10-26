@@ -19,38 +19,11 @@ Usage: DISPATCH_URL=http://127.0.0.1:8777 DISPATCH_TOKEN=e2e-token [PROJECT=CORE
 USAGE
 }
 
-if [[ -z "${DISPATCH_URL:-}" ]]; then
-  printf 'required environment variable DISPATCH_URL is unset\n' >&2
-  usage
-  exit 2
-fi
-for command in curl jq; do
-  command -v "$command" >/dev/null || {
-    printf 'required command %s is unavailable\n' "$command" >&2
-    exit 2
-  }
-done
-
-if [[ -n "${DISPATCH_TOKEN:-}" ]]; then
-  token="$DISPATCH_TOKEN"
-elif [[ -n "${DISPATCH_TOKEN_FILE:-}" ]]; then
-  [[ -r "$DISPATCH_TOKEN_FILE" ]] || {
-    printf 'DISPATCH_TOKEN_FILE names %s, which cannot be read\n' "$DISPATCH_TOKEN_FILE" >&2
-    exit 2
-  }
-  token="$(<"$DISPATCH_TOKEN_FILE")"
-  token="${token#"${token%%[![:space:]]*}"}"
-  token="${token%"${token##*[![:space:]]}"}"
-else
-  printf 'set DISPATCH_TOKEN or DISPATCH_TOKEN_FILE to an agent bearer\n' >&2
-  usage
-  exit 2
-fi
-[[ -n "$token" ]] || {
-  printf 'the agent bearer is empty\n' >&2
-  exit 2
-}
-unset DISPATCH_TOKEN DISPATCH_TOKEN_FILE
+# shellcheck source-path=SCRIPTDIR source=lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+require_env DISPATCH_URL
+require_commands curl jq
+read_bearer
 
 readonly base="${DISPATCH_URL%/}"
 

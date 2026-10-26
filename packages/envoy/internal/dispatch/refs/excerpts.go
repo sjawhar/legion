@@ -18,11 +18,15 @@ type Execer interface {
 	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
 }
 
-// MentionExcerpts is, for each target the mentions located in markdown name, the innermost block
-// holding its first mention that lies inside a block - the block with the tightest byte range,
-// the one IndexBlocks writes the mention from - as the references route shows it: the block's id
-// and its markdown cut to BlockExcerptRunes. A target none of whose mentions lies inside a block
-// has none. located is text.ExtractAt(markdown, …), the one extraction a version's index reads.
+// MentionExcerpts is, for each target the mentions located in markdown name, the innermost of
+// blocks holding its first mention that lies inside a block - the block with the tightest byte
+// range - as the references route shows it: the block's id and its markdown cut to
+// BlockExcerptRunes. A target none of whose mentions lies inside a block has none. The block is
+// any of blocks, not only a graph node: IndexBlocks makes no node of a block whose id is past
+// text.MaxBlockIDBytes, empty or unstorable, nor of a later holder of a repeated id
+// (uniqueBlocks), and writes the mention from the innermost node holding it, if any. Such a block
+// still gives the excerpt, so its excerpt_block_id can name a block the graph does not hold.
+// located is text.ExtractAt(markdown, …), the one extraction a version's index reads.
 func MentionExcerpts(markdown string, blocks []model.ArtifactBlock, located []text.Located) map[Target]model.GraphExcerpt {
 	starts := make([]int, len(located))
 	for i, mention := range located {

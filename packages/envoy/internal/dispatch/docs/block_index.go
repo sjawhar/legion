@@ -261,11 +261,11 @@ func (s *Service) owedDocuments(ctx context.Context, after string) ([]owedDocume
 }
 
 // indexOwedDocument indexes one owed document at its latest version with the full version index
-// (indexVersion): references, excerpts, blocks, block texts and the indexed version. It reads the
-// document the server serves (TextWithBlocks) with no transaction held, then, under the document's
-// owner row, which every version write holds first, re-checks that the latest version is still
-// the one listed and the document still owed; otherwise another writer has indexed it or will,
-// and it does nothing.
+// (indexRenderedVersion): references, excerpts, blocks, block texts and the indexed version. It
+// reads the document the server serves (TextWithBlocks) with no transaction held, then, under the
+// document's owner row, which every version write holds first, re-checks that the latest version
+// is still the one listed and the document still owed; otherwise another writer has indexed it or
+// will, and it does nothing.
 //
 // The live text is indexed only where it is the latest version's text: when the document owes no
 // settlement, or owes one but its live markdown equals the version's stored markdown byte for
@@ -339,7 +339,7 @@ func (s *Service) indexOwedDocument(ctx context.Context, document owedDocument) 
 	case pending && markdown != stored:
 		return false, true, nil
 	}
-	if _, err := s.indexVersion(ctx, tx, document.id, version, versionAt, markdown, blocks, true); err != nil {
+	if _, err := s.indexRenderedVersion(ctx, tx, document.id, version, versionAt, markdown, blocks); err != nil {
 		return false, false, err
 	}
 	if err := stampVersionEvent(ctx, tx, owner, document.id, version, versionAt); err != nil {
