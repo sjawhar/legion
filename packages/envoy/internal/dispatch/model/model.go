@@ -338,10 +338,45 @@ type SearchResponse struct {
 	Offset    int   `json:"offset"`
 	TookMS    int64 `json:"took_ms"`
 	// Degraded names why search fell back to keyword-only ranking this request - today only
-	// "embedder_unavailable" (contracts.SearchDegradedEmbedderUnavailable; LEGION-549: no Bedrock
-	// credentials configured, the query's own embedding timed out, or Bedrock answered an error) -
-	// and is empty when meaning search ran normally.
+	// "embedder_unavailable" (contracts.SearchDegradedEmbedderUnavailable; LEGION-549: no
+	// embedder configured, the query's own embedding timed out, or the model service answered an
+	// error) - and is empty when meaning search ran normally.
 	Degraded string `json:"degraded,omitempty"`
+}
+
+// SearchCoverage is how much of what meaning search covers has a current vector from the
+// configured embedder (INFRA-393, GET /api/v1/search/coverage). Identity is the embedder's
+// identity (embed.Embedder.Identity), Place ("bedrock" or "azure") and Model are read from it;
+// all three are null when no embedder is configured, and then nothing is current.
+type SearchCoverage struct {
+	Identity *string              `json:"identity"`
+	Place    *string              `json:"place"`
+	Model    *string              `json:"model"`
+	Total    SearchCoverageCounts `json:"total"`
+	Kinds    SearchCoverageKinds  `json:"kinds"`
+}
+
+// SearchCoverageKinds is SearchCoverage's counts for each kind meaning search ranks.
+type SearchCoverageKinds struct {
+	Issue    SearchCoverageCounts `json:"issue"`
+	Document SearchCoverageCounts `json:"document"`
+	Comment  SearchCoverageCounts `json:"comment"`
+	Ask      SearchCoverageCounts `json:"ask"`
+	Message  SearchCoverageCounts `json:"message"`
+}
+
+// SearchCoverageCounts splits Items, the searchable items of a kind (or of all of them), into
+// Current (embedded at the item's current text by the configured identity), Failed (dead and not
+// current) and Lacking (the rest). An item whose text is empty or only white space is not
+// searchable by meaning and is in none of them: it needs no vector. OldestLackingSeconds is how
+// long the longest-waiting lacking item has waited for its vector, counted from when its row last
+// became pending or from when the item was written, whichever is later; null when nothing lacks.
+type SearchCoverageCounts struct {
+	Items                int64  `json:"items"`
+	Current              int64  `json:"current"`
+	Lacking              int64  `json:"lacking"`
+	Failed               int64  `json:"failed"`
+	OldestLackingSeconds *int64 `json:"oldest_lacking_seconds"`
 }
 
 // DuplicateCandidate is a potential duplicate issue proposed before creation.
