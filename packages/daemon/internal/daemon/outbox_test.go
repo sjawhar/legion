@@ -1257,6 +1257,40 @@ func TestAnEarlierLingersRowsActOnNothingInALaterLinger(t *testing.T) {
 	}
 }
 
+// A queued root that never ran joins the live tree it is made a child of. A workspace removal its
+// own former tree's linger queued, still backing off, names that tree, and finishes without acting
+// even when its new tree lingers at the same root generation: the adopted work goes on in its
+// workspace. A removal its new tree's linger queued removes it.
+func TestAWorkspaceRemovalOfATreeTheIssueLeftActsOnNothing(t *testing.T) {
+	pool := isolatedOutboxPool(t)
+	records := record.NewStore()
+	ctx := context.Background()
+	until := time.Now().Add(2 * time.Hour)
+	root := record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION", Tree: "LEGION-208", Title: "root", Phase: phase.Done, Generation: 4, Status: "done", Rank: "U", LingerUntil: &until}
+	putOutboxIssue(t, pool, records, root)
+	parent := root.Key
+	adopted := record.Issue{Key: "LEGION-209", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION", Tree: root.Key, Parent: &parent, Title: "adopted", Phase: phase.Planning, Generation: 5, Status: "in_progress", Rank: "V"}
+	putOutboxIssue(t, pool, records, adopted)
+	sup, _ := newOutboxSupervisor(t, "legion", t.TempDir())
+	removals := 0
+	runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", records: records, supervisor: sup, trees: outboxTreeStore(t, pool, root.Key), tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(),
+		remove: func(context.Context, workspace.Workspace) error { removals++; return nil },
+	}
+
+	if err := runner.execute(ctx, mustOutboxRow(t, adopted.Key, record.WorkspaceRemove{Linger: root.Generation, Tree: adopted.Key}, time.Now())); err != nil {
+		t.Fatalf("the former tree's removal = %v, want it finished without acting", err)
+	}
+	if removals != 0 {
+		t.Fatalf("workspace removals after the former tree's row = %d, want none", removals)
+	}
+	if err := runner.execute(ctx, mustOutboxRow(t, adopted.Key, record.WorkspaceRemove{Linger: root.Generation, Tree: root.Key}, time.Now())); err != nil {
+		t.Fatalf("the new tree's removal: %v", err)
+	}
+	if removals != 1 {
+		t.Fatalf("workspace removals after the new tree's row = %d, want the workspace removed", removals)
+	}
+}
+
 // A linger's workspace removal waits until the close has retired every claim of the issue. A
 // worker whose release the runtime refused still runs in that workspace. The close reserved the
 // tree's cleanup before its release failed, so the tree's re-admission waits for that cleanup: the

@@ -368,6 +368,10 @@ type WorkspaceRemove struct {
 	// only while the tree lingers at that root generation: once re-admission moves the root on, the
 	// workspace there is the tree's next run's, whatever generation the issue itself keeps.
 	Linger uint64 `json:"linger"`
+	// Tree is the tree whose linger queued the removal. An issue adopted into another tree since
+	// (workflow.Engine.Adopt) works there now, so the removal finishes without acting. A row queued
+	// by an earlier release has none, and is fenced by Linger against the issue's current tree.
+	Tree string `json:"tree,omitempty"`
 }
 
 func (WorkspaceRemove) OutboxKind() OutboxKind { return OutboxKindWorkspaceRemove }

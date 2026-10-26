@@ -1663,6 +1663,12 @@ func (r *outbox) createBranch(ctx context.Context, issue record.Issue) error {
 	return ghbranch.Create(ctx, github, repo, workspace.Bookmark(issue.Key), issue.DefaultBranch)
 }
 
+// removeWorkspace removes the workspace of the row's issue once its tree's linger expired. The
+// removal belongs to the tree whose linger queued it and to that linger's root generation: an issue
+// adopted into another tree since (workflow.Engine.Adopt) works in its new tree, and a tree
+// re-admitted since runs in the workspace again, so either row finishes without acting. A row
+// queued by an earlier release names no tree and is fenced by its linger alone, against the
+// issue's current tree.
 func (r *outbox) removeWorkspace(ctx context.Context, row record.OutboxRow, payload record.WorkspaceRemove) error {
 	if r.supervisor == nil {
 		return errors.New("workspace removal has no claim supervisor")
@@ -1674,9 +1680,15 @@ func (r *outbox) removeWorkspace(ctx context.Context, row record.OutboxRow, payl
 	if err != nil {
 		return err
 	}
+	if payload.Tree != "" && payload.Tree != issue.Tree {
+		r.log.Info("outbox workspace removal of a tree the issue left; finished without acting", "row", row.ID, "issue", issue.Key,
+			"tree", payload.Tree, "current", issue.Tree, "linger", payload.Linger)
+		return nil
+	}
 	// The removal belongs to the linger it expired, the root generation it names. Once
 	// re-admission ends that linger, the tree's new run may already work in the workspace again,
 	// even in a later linger of the tree, so a removal still backing off finishes without acting.
+	// Past the fence above, the tree the row names is the issue's own.
 	root, err := r.root(ctx, issue)
 	if err != nil {
 		return err
