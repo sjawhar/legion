@@ -246,7 +246,15 @@ dependency mechanism to encode.
 
 Release admits nothing. A child never takes an admission slot or becomes a root tree of its own
 while your tree is live: it runs inside your tree from its release. A child you have not released
-stays out of the workflow.
+stays out of the workflow. A root that waited in the admission queue and never ran joins your tree
+once a person makes it your child, if it is `todo`, and otherwise at your release of it (the
+`child-status` row of [wake routing](skill://legion-architect/references/wake-routing.md)). A
+labelled `todo` issue under a child you have not released waits for no slot until your release of
+it or of that child brings it in. A release that cannot take a child in is refused 409 and writes
+nothing, its message naming the child and why: release the rest of the wave again without it.
+`CHILD_NOT_ADOPTABLE` is an issue that runs or ran as a tree of its own (or carries a run handed
+over to it): leave it there, or ask the controller. `CHILD_IN_OTHER_TREE` is another tree's child:
+re-parent it back in Dispatch, or ask that tree's architect or the controller.
 
 ## 3. Children complete
 

@@ -8,11 +8,12 @@ waits, or neither. Read its key against `admission` and its tree's root.
 |---|---|---|
 | The key is in `admission.active` | A root holding a slot: its tree runs, `admitted` until its architect starts the first phase | Nothing, beyond [trees waiting on a root claim](skill://legion-controller/SKILL.md#trees-waiting-on-a-root-claim-go-daemon) |
 | The key is in `admission.waiting` | A root handed to Legion in `todo`, queued in Dispatch rank order for the next free slot | Nothing: it takes the next free slot by itself |
-| `phase: admitted`, in neither list, and Dispatch shows a `child_of` parent | A child: it runs or waits with its tree, the root its `child_of` chain reaches. Under a parked root (its `phase` is `done`) it is parked with it | Leave it to its tree. It runs again when its root does, or as a root of its own once it is `todo` with the `legion` label |
+| `phase: admitted`, in neither list, and Dispatch shows a `child_of` parent | A child: it runs or waits with its tree, the root its `child_of` chain reaches. Under a parked root (its `phase` is `done`) it is parked with it. A labelled `todo` issue here is not waiting either: one whose recorded parent is in a live tree runs in that tree (the daemon adopted it there), and one whose parent is not recorded but sits under a live tree waits for that tree's architect to release it or its parent | Leave it to its tree. It runs again when its root does, or as a root of its own once it is `todo` with the `legion` label and no live tree is above it |
 | `phase: admitted`, `status: todo`, in neither list, no parent | A root a person took out of the line by taking its label off | Nothing: the label puts it back in the line, and a person's label is their decision |
 | `phase: done` while `status` is `in_progress`, `testing`, `needs_review` or `retro` | Someone other than Legion moved it to a running tree's status while Legion was not running it. A root that waited for a slot is taken out of the workflow at that move, since no slot would ever reach it, and the daemon sends the `unslotted` wake; a parked child stays parked. Legion starts nothing for either | Re-admit nothing yourself: `dispatch read` shows who works it now. Name it in your summary; `todo` with the `legion` label queues it again |
 
-A root in the workflow with no slot that is neither waiting nor paused by its label does not stay
-that way: every pass of admission (a Dispatch event, the daemon's boot read, its tick) takes it out
-of the workflow and sends the `unslotted` wake. The wake is live only, so a controller that starts
-later finds such a root by the row above, as its start procedure does.
+A root in the workflow with no slot that is neither waiting, nor paused by its label, nor `todo`
+under a live tree does not stay that way: every pass of admission (a Dispatch event, the daemon's
+boot read, its tick) takes it out of the workflow and sends the `unslotted` wake. The wake is live
+only, so a controller that starts later finds such a root by the row above, as its start procedure
+does.

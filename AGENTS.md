@@ -187,7 +187,17 @@ A root in `todo` without the label is never admitted, and a root in `triage` wit
 the controller. A child needs none: it runs under its tree's architect once its root is admitted,
 and its architect's `release_children` records it in the tree even when Dispatch already showed it
 `todo`. A child whose tree is not live is an orphan, admitted as a root of its own, so it needs the
-label as any root does. An issue is recorded on the repository Dispatch resolves for it (its own,
+label as any root does. A `todo` root that never ran as a tree of its own (no slot reached it and no
+run was handed over to it) joins the live tree its recorded parent is in, a waiting root's
+included: a person made it a child of that tree, or it is an orphan whose old root was admitted
+again. It waits for no slot, gets no architect, runs there as a `todo` child does, and the tree's
+architect gets a `child-status` notice. `release_children` adopts such a child the same way before it
+answers `released`, and refuses one it cannot, writing nothing: `CHILD_NOT_ADOPTABLE` for a root
+that ran as a tree of its own or carries a handed-over run, `CHILD_IN_OTHER_TREE` for a child
+recorded in another tree. A labelled `todo` issue whose parent is not recorded but sits under a
+live tree (a child that tree's architect has not released) waits for no slot until that release,
+or its parent's, brings it into the tree, and queues as a root of its own once that tree lingers or
+leaves the workflow. An issue is recorded on the repository Dispatch resolves for it (its own,
 else its nearest ancestor's, else the project's default) and keeps it: an issue whose repository
 resolves to none, or to one the daemon does not serve, is not admitted, and the daemon says why on
 the issue; a later change of an admitted issue's repository is not applied, which the daemon says
