@@ -2,41 +2,45 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-278",
-  "completed": "2026-10-26T22:26:00Z",
+  "completed": "2026-10-26T22:45:00Z",
   "generation": 3,
-  "round": 3,
-  "headSha": "9e0adee48d6e231d9aa1a5757c93441c4035c679",
-  "codeHeadSha": "bc62db616f0e1adee66148369c546612f407f51f",
+  "round": 4,
+  "headSha": "1cf77c593aa5e6b104b8058718e813d41395b033",
+  "codeHeadSha": "73874ccb5a5c037e50301f87d58105a15a1a25d1",
+  "fingerprint": "The forward merge of main ba9a24e2 changed the diff fingerprint (PR comment 6428853595), so this is a full test round",
   "verdictProvider": "provider not verified: no subagent ran, and the tester did not read the provider of its own turns from its transcript",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran `bash scripts/e2e/dispatch-claimant-delivery.sh` at 9e0adee4: summary 9 ok, 0 FAIL. Re-ran the browser suites recipients-claim, followers and issue with the tester's spec added: 39 passed, 1 skipped. Read skills/dispatch/SKILL.md:46,48 and the word count (1998)."
+    "how": "Re-ran `bash scripts/e2e/dispatch-claimant-delivery.sh` at 1cf77c59: summary 9 ok, 0 FAIL. Read skills/dispatch/SKILL.md:48 and the three changelog clauses, and counted the skill words (1997)."
   },
-  "failures": [
+  "failures": [],
+  "failed": 0,
+  "proof": [
     {
-      "criterion": "Agent-facing text is true (A7): skills/dispatch/SKILL.md:48 and the three CHANGELOG entries",
-      "evidence": "The line reads \"A claim, or `dispatch issue-update --route session:<your id>` (`--route ''` on release), brings a person's answers, comments and messages; only `envoy_subscribe notifications.dispatch.issue.<KEY>.>` brings agents' activity.\" The 'only' is false. Live at this head (real envoy-dispatch, natsd, Postgres 17 + pgvector, fake Envoy listener; throwaway driver case 'agent-ask-reply-reaches-asker (no subscription)'): session C opened an ask on the claimed issue and P followed it, with no subscription to the issue for either. Agent Q's reply in that ask reached notifications.agent.adv-c and notifications.agent.adv-p ({\"adv-c\":1,\"adv-p\":1}). The follower route (publishFollowerRoutes) runs outside `if event.Notify` (publisher.go:480), so agents' replies reach followers; the previous-claimant route does the same for a claim taken over. skills/dispatch no longer says anywhere that a session follows its asks, so nothing qualifies the absolute. Corrected line 48 (three Dispatch skills at 1997 words by `find skills/dispatch skills/dispatch-first skills/dispatch-writing-specs -type f | xargs cat | wc -w`, under the guard's < 2,000): \"A claim, or `dispatch issue-update --route session:<your id>` (`--route ''` on release), brings a person's answers, comments and messages; for agents' activity, `envoy_subscribe notifications.dispatch.issue.<KEY>.>`.\" The same absolute is in packages/claude-envoy/CHANGELOG.md:36, packages/pi-envoy/CHANGELOG.md:143 and packages/envoy/CHANGELOG.md:799 ('only a subscription to the issue brings (other) agents' activity'). Suggested replacement: 'a subscription to the issue brings other agents' activity, beyond a reply in an ask the session follows'. packages/envoy/AGENTS.md is accurate as written, because it limits the statement to the claimant route's event types. The tester's own correction last round ('for anything else, route or subscribe') was wrong as well; the reviewer's round 4 caught it and it is fixed. No red test was written: a test of the skill's wording is a source-text test, which the repository's test rules forbid."
-    }
-  ],
-  "failed": 1,
-  "passedChecks": [
-    {
-      "criterion": "Claimant delivery at this head",
-      "surface": "real envoy-dispatch built from the head, natsd, Postgres 17 + pgvector, fake Envoy listener; throwaway driver $TMPDIR/infra278-test/adversarial.ts, 9 s settle window",
-      "command": "DATABASE_URL='postgres://postgres@127.0.0.1:5433/tester_claimant?sslmode=disable' bash $TMPDIR/infra278-test/adv.sh",
-      "observed": "17 ok, 0 FAIL: the 16 cases of the previous round, plus the agent ask reply above. The implementer's script gives 9 ok, 0 FAIL",
-      "headSha": "9e0adee48d6e231d9aa1a5757c93441c4035c679",
-      "negativeControl": "Main 16e4bb0f fails 9 of the 16 (previous round). No Go file changed since: the diff 17dd17ec..bc62db61 touches text and the web marker only"
+      "criterion": "The previous round's failure: the skill line and the changelogs no longer say a subscription is the only way agents' activity arrives",
+      "surface": "repository text and the word budget the skills guard measures",
+      "command": "sed -n 48p skills/dispatch/SKILL.md; grep -rn \"only a subscription\\|brings agents' activity\\|other agents' activity\" skills/dispatch packages/*/CHANGELOG.md packages/envoy/AGENTS.md docs/site/src/content/docs/dispatch; find skills/dispatch skills/dispatch-first skills/dispatch-writing-specs -type f | xargs cat | wc -w",
+      "observed": "Line 48 is the corrected text: '…; for agents' activity, `envoy_subscribe notifications.dispatch.issue.<KEY>.>`.' The changelogs (claude-envoy:36-37, pi-envoy:143-144, envoy:799-800) read 'a subscription to the issue brings other agents' activity, beyond a reply in an ask the session follows'. No 'only a subscription' clause is left. The count is 1997 words",
+      "headSha": "1cf77c593aa5e6b104b8058718e813d41395b033",
+      "negativeControl": "At bc62db61 the line said 'only `envoy_subscribe …` brings agents' activity', which the live case agent-ask-reply-reaches-asker disproved"
     },
     {
-      "criterion": "RouteReachUnknownMarker renders both markers unchanged",
-      "surface": "Dispatch browser suite, Chromium",
-      "command": ". /legion/harness/e2e-env.sh && cd packages/dispatch && bun run e2e -- recipients-claim.e2e.ts followers.e2e.ts issue.e2e.ts zz-tester-tmp.e2e.ts --project chromium --retries 0 (the throwaway spec was copied in and deleted after the run)",
-      "observed": "39 passed, 1 skipped",
-      "headSha": "9e0adee48d6e231d9aa1a5757c93441c4035c679",
-      "negativeControl": "The implementer's unknown-role scenario asserts the ask card's marker title equals the header's; it failed with the dialog fix removed (generation 3, round 1)"
+      "criterion": "Claimant delivery at the merged head",
+      "surface": "real envoy-dispatch built from the head, natsd, Postgres 17 + pgvector, fake Envoy listener; throwaway driver $TMPDIR/infra278-test/adversarial.ts, 9 s settle window",
+      "command": "DATABASE_URL='postgres://postgres@127.0.0.1:5433/tester_claimant?sslmode=disable' bash $TMPDIR/infra278-test/adv.sh",
+      "observed": "17 ok, 0 FAIL. A person's comment, edit, resolve and reopen: {P:1} each. Delivered mention: {}. Mention 404: {P:1}. A follower-claimant's mention 404: {C:1,P:1}. Ask answered and resolved: {C:1,P:1}. Route session:R: {P:1,R:1}. Route session:P: {P:1}. message.answered: {P:1,Q:1}. Targeted message and agent comment: {}. An agent's ask reply with no subscription: {C:1,P:1}. Claim moved to Q: {Q:1}. A person's claim: {}",
+      "headSha": "1cf77c593aa5e6b104b8058718e813d41395b033",
+      "negativeControl": "Main 16e4bb0f fails 9 of these cases (generation 3, round 2). Main ba9a24e2 changed none of the outbox, events, model, comment and message write paths, ask reads, sse.ts, Inbox features or RouteReach.tsx since 16e4bb0f (empty diff over those paths)"
+    },
+    {
+      "criterion": "The Reaches panel, the issue header markers and AgentName at the merged head",
+      "surface": "Dispatch browser suite: real Go server, production SPA bundle, Chromium",
+      "command": ". /legion/harness/e2e-env.sh && cd packages/dispatch && bun run e2e -- recipients-claim.e2e.ts followers.e2e.ts issue.e2e.ts agent-name.e2e.ts zz-tester-tmp.e2e.ts --project chromium --retries 0 (the throwaway spec was copied in and deleted after the run)",
+      "observed": "44 passed, 3 skipped (main's phone-only cases). The throwaway spec covers a claimant that is not running, a claim moving with no reload, a role route nobody holds, and a role route another session holds",
+      "headSha": "1cf77c593aa5e6b104b8058718e813d41395b033",
+      "negativeControl": "The implementer's run of recipients-claim on a build of main: all 6 of its own scenarios fail"
     }
   ],
-  "ci": "At code head bc62db61, read at 22:21Z: Tests 40409924977, Docs 40409924715 and Worker Image 40409924719 queued; Legion Envoy and Contracts 40409924706 pending. GitHub reports MERGEABLE.",
-  "evidenceComment": "https://github.com/sjawhar/legion/pull/2225#issuecomment-6428735182"
+  "ci": "At code head 73874ccb, read at 22:40Z: Tests 40412726624, Docs 40412726756 and Legion Envoy and Contracts 40412726713 queued; Worker Image 40412726529 pending. Cited as running, not waited for. GitHub reports MERGEABLE.",
+  "evidenceComment": "https://github.com/sjawhar/legion/pull/2225#issuecomment-6429045756"
 }
