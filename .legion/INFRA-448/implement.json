@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-448",
-  "completed": "2026-10-26T22:55:00Z",
+  "completed": "2026-10-26T23:40:00Z",
   "proof": [
     {
       "criterion": "C1: on a closed issue a person's and an agent's new comment and message post; a new ask and a document edit stay 409 ISSUE_CLOSED; reopening works",
@@ -125,7 +125,8 @@
     "Review round 2 (review.json at e5363042): the three findings fixed in c8b202a69ac5 (registry open retried in the background with backoff and the reviewer's wording; connection.ts re-runs pending-sync's restore when a later admission turns read-write, and pending-sync's restore skips this page's own unacknowledged rows so a second restore cannot drop them; Get puts the session-key entry into the role listing before succession). Two forward merges of main because GitHub reported the pull request CONFLICTING and main moved during the round: 27a6de48 \u2192 a97f0749 fingerprint unchanged; c8b202a6 \u2192 7912696a fingerprint changed only in the regenerated claude-envoy dist bundles (https://github.com/sjawhar/legion/pull/2234#issuecomment-6425388970). The workspace and scratch volume were recreated before this round; the Postgres and browser harness was rebuilt under /legion/scratch/tmp/infra448 (Postgres 17.11 + pgvector from Debian .debs, ICU en-US collation, port 55448; e2e ports 18448, 19448-19451). The two cleanups the review named are on the PR's Fast-follow line.",
     "Review round 3 (review at aceea5e1, two inline threads): both fixed in 05b29be5dd91 with a test each and resolved. The failure-once log flag became the kind of failure (open or move), so a failed move logs once even after a failed open. The nats async error wording is on the PR's Fast-follow line, as the architect directed; no merge of main (GitHub reported MERGEABLE).",
     "Forward merge after INFRA-440 (#2237) merged: 05b29be5 \u2192 51c56482, fingerprint changed only in ConversationTab.tsx, its test and the regenerated claude-envoy dist (https://github.com/sjawhar/legion/pull/2234#issuecomment-6428218975). Resolution as sent to INFRA-278's architect: INFRA-440's code kept, only the isClosed prop and its checks removed; nothing else changed.",
-    "Forward merge of main (#2160, #2258) because GitHub reported the pull request CONFLICTING: 51c56482 \u2192 19aaa96f, fingerprint changed only in the conflicted prose files (AGENTS.md, the implementer prompts, skills/legion-architect/references/acceptance.md, skills/legion-worker/references/merge-gate.md) where main's new text is kept and the closed-issue correction re-applied, plus regenerated claude-envoy copies (https://github.com/sjawhar/legion/pull/2234#issuecomment-6428886616). No code changed; the browser proof at 51c56482 stands for the code."
+    "Forward merge of main (#2160, #2258) because GitHub reported the pull request CONFLICTING: 51c56482 \u2192 19aaa96f, fingerprint changed only in the conflicted prose files (AGENTS.md, the implementer prompts, skills/legion-architect/references/acceptance.md, skills/legion-worker/references/merge-gate.md) where main's new text is kept and the closed-issue correction re-applied, plus regenerated claude-envoy copies (https://github.com/sjawhar/legion/pull/2234#issuecomment-6428886616). No code changed; the browser proof at 51c56482 stands for the code.",
+    "Forward merge of main (#2264) because GitHub reported the pull request CONFLICTING: rebase re-check 19aaa96f \u2192 a2d4b6ee: fingerprint unchanged (8a20f939\u2026), bare gates only; the one conflict was packages/envoy/CHANGELOG.md, both sides kept (https://github.com/sjawhar/legion/pull/2234#issuecomment-6429894885)."
   ],
   "openQuestions": [],
   "discoveredComplexity": [
