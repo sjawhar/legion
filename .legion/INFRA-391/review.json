@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-391",
+  "completed": "2026-10-26T04:56:00Z",
+  "generation": 2,
+  "decision": "approved",
+  "critical": 0,
+  "important": 0,
+  "minor": 0,
+  "keyFindings": [],
+  "reviewedCodeHead": "5f5b6c18fb6fea3e23d8fecd28a00f1502b337c1",
+  "lastApprovedHead": "38c8f111953999cc552ee1a35714982f3678b175",
+  "fingerprint": {
+    "atLastApproval": "f1a51e277bb18c5637d3da606320e8564ef1a2ad88872050a67b3cb01afe9044",
+    "atHead": "ef86905a9a4d96975e9df01cb00df4b6473775acd1990fef9545be8a71710507",
+    "result": "changed: a new round. The two fingerprint inputs differ only in skills/legion-architect/SKILL.md -> references/decomposition.md and their claude-envoy copies; the branch's insertions are carried word for word."
+  },
+  "mergeCheck": "5f5b6c18 parents 08a478fdb44c (branch) and af460a46bb16 (main). jj diff --from af460a46bb16 --to 5f5b6c18fb6f --name-only (minus .legion, docs/solutions) = the branch's own 82 files vs fc379b99147a..e7b6ab1259b9, with only SKILL.md swapped for references/decomposition.md in both trees. SKILL.md equals main's byte for byte; decomposition.md equals its claude-envoy copy.",
+  "ci": "Code head 5f5b6c18 (read 2026-10-26T04:55Z): required lint, typecheck, test (Tests run 40268395138) and pr-title (runs 40268395139, 40269317014) completed success; compare 5f5b6c18...e6b87246 touches only .legion/.",
+  "thermonuclear": "Not run: this round's diff since the approved code e7b6ab12 is architect-skill prose only (docs-only rule).",
+  "census": "Re-ran at e6b87246: patterns 3-5 and 7 give the body's counts (5, 19, 24, 25). Pattern 1 gives 54 hits in 22 files against the body's 53/21; the extra hit is the retro learning docs/solutions/envoy/a-route-the-dispatch-cli-reads-stays-a-release-warned-...-INFRA-391.md:51, prose quoting the census search itself (Unaffected), present since my round-5 approval; not a consumer, no correctness finding.",
+  "migrationGuard": "main's migrations list ends at 0116_project_default_assignee; no 0117_ (read 2026-10-26).",
+  "threads": "3 threads, all mine, all answered and resolved; no new thread."
+}
