@@ -55,7 +55,7 @@ at READY's head.
 
 ## The owner audit
 
-At each pass, read every page of `dispatch issues --project <KEY> --priority 0 --priority 1 --limit 250`:
+At each pass, read `dispatch issues --project <KEY> --priority 0 --priority 1 --all`:
 
 - An unclaimed row in `triage`, `icebox`, `backlog` or `todo` is a decision: someone builds it, or
   it closes. A claimed or in-flight row already has an owner.
@@ -71,7 +71,7 @@ At each pass, read every page of `dispatch issues --project <KEY> --priority 0 -
 ## Recovering stopped-session work
 
 Treat a session route as stopped only after two reads of
-`dispatch issues --project <KEY> --route-status no_holder --limit 250` at least ten minutes apart
+`dispatch issues --project <KEY> --route-status no_holder --all` at least ten minutes apart
 both list it, as `dispatch issues --help` says for `route_status`, because a
 restarting session is absent for minutes. Do not poll to create the second read; use the next
 controller wake. Then confirm with `envoy_sessions` that no live session owns the work (the
