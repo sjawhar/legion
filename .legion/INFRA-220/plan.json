@@ -2,168 +2,111 @@
   "schemaVersion": 1,
   "phase": "plan",
   "issue": "INFRA-220",
-  "completed": "2026-10-26T11:05:00Z",
-  "generation": 3,
-  "scope": "Generation 3 plans only what is left: forward-merge main 383b889d (INFRA-80 makes an issue pod's disk die with the pod; contract 38), keep a Claude Code worker's transcript and phase-reminder record in Oh My Pi's session table so its resume survives a pod replacement, fix claude-backend-sandbox.sh (planner budget 2700 s, lib/github-apps.sh, a scratch session database), record that the flaky TestAnOpenPhaseGetsOneFollowUp is already deleted, then pass both live proofs on the devbox. Full plan: dispatch://INFRA-220/artifact/plan-md version 6, section 'Generation 3'.",
+  "completed": "2026-10-26T19:20:00Z",
+  "generation": 4,
+  "scope": "Generation 4 plans only what is left: the sandbox proof's daemon cannot boot under bridge because agent-secrets refuses a key command run inside its container (NOT_A_SESSION); per the architect's decision both App keys are resolved outside the container into owner-only files on the user's tmpfs, mounted read-only, read by cat, and removed at teardown; then both live proofs pass at the new code head. Full plan: dispatch://INFRA-220/artifact/plan-md version 7, section 'Generation 4'.",
   "requiredSkills": {
     "implement": [
-      "legion-worker: references/conflicts-and-rewrites.md for the forward merge of main and the fingerprint; references/pr-body.md for the E2E lines and the delegated devbox runs; references/default-branch-check.md before the push; references/cleanup-deletion.md for the superseded lost-disk code the merge removes.",
-      "ce-simplify-code: the simplify pass over the merged head, chiefly that the launcher's table keeping reuses ompsessions rather than a second writer, and no dead lost-disk code survives the merge.",
-      "envoy: the devbox runs are requested from session 01a13c57-d826-7242-80fe-5f0670188b11 with envoy_send.",
-      "dispatch-first and dispatch: run transcripts uploaded with dispatch artifact; a dispatch ask on this issue if the devbox agent does not answer."
+      "legion-worker: references/pr-body.md for the E2E lines and the delegated devbox runs; references/default-branch-check.md before the push.",
+      "ce-simplify-code: one resolve path in lib/github-apps.sh reusing app_key_command, and the runner-in-container code removed rather than left beside it.",
+      "envoy: the devbox runs via envoy_send to Proofs2229 (session 01a13c57-d826-7242-80fe-5f0670188b11).",
+      "dispatch-first and dispatch: transcripts uploaded with dispatch artifact."
     ],
     "test": [
-      "legion-worker: references/pr-body.md - a full test round (the fingerprint changed): drive the issue-pod suites including both real-binary tests with main's Oh My Pi pin, verify the implementer's uploaded runs, and direct its own devbox runs of both scripts; read CI for the Postgres-backed launcher tests.",
-      "envoy: the tester's devbox runs via envoy_send to the devbox agent.",
-      "dispatch-first: search before any Dispatch write; findings outside this issue are asks."
+      "legion-worker: references/pr-body.md - verify the implementer's uploaded runs and direct its own devbox runs of both proofs, including the SIGINT negative control for the key files; read CI for the bun and Go suites.",
+      "envoy: devbox runs via envoy_send.",
+      "dispatch-first: search before any Dispatch write."
     ],
     "review": [
-      "legion-worker: references/merge-gate.md and references/review-threads.md - a new review round on the merged head, with the thermonuclear pair, judged from the diff and the uploaded run evidence.",
-      "ce-simplify-code: whether the merge kept main's INFRA-80 model whole and the Claude table keeping is one writer with Oh My Pi's write shape.",
-      "dispatch-first: search before any Dispatch write; findings outside this issue are asks."
+      "legion-worker: references/merge-gate.md and references/review-threads.md - a review round on the new head.",
+      "ce-simplify-code: whether the default key commands are byte-for-byte unchanged and the key files cannot outlive a run.",
+      "dispatch-first: search before any Dispatch write."
     ]
   },
   "decisions": {
-    "J1": "Forward-merge main (jj new, never rebase): main's INFRA-80 model wins; the branch's Claude lane re-applied; dead branch code removed (expectVolume Claude term, SessionOnIssueVolume, Deps.SessionOnVolume, WorkspaceLost fix and tests, recovered golden, mark-lost Claude cases, the sessionsInDatabase split, import's Claude refusal); git grep -l comparison with main.",
-    "J2": "DaemonAPIVersion 38 with the collision note; fixture, both package.json, claude-envoy dist and CHANGELOGs.",
-    "J3": "LEGION_CLAUDE_SESSION_ID marks a Claude pod launch; the launcher restores and saves the transcript and phase-stall record as session-table rows (resumable -> restore -> child -> saver; never shorten; 2 s saves to the last newline; Oh My Pi's append form; compare-and-set; byte_len never NULL; bounded best-effort final save before proxy.Close); <transcript>.legion-saved gates claude-envoy's registration in pods; every role pod told both Oh My Pi session variables.",
-    "J4": "Sandbox proof: plan_seconds=2700 with the planner's time printed; lib/github-apps.sh; LEGION_E2E_SESSION_DB_PORT scratch session Postgres (session_store postgres, SESSION_DSN), sixth bridged port; table and restored-prefix assertions; architect and planner relaunch asserted.",
-    "J5": "claude-backend-tmux.sh unchanged here, re-run at the final head."
+    "M1": "lib/github-apps.sh resolve_app_keys DIR ROLE...: runs each role's ordinary key command once on the devbox into DIR/<key name>.pem (0600), failing by role and id; then app_key_dir=DIR makes app_key_command print cat -- '<DIR>/<NAME>.pem'; unset, output unchanged.",
+    "M2": "Under bridge: app_keys_dir=$(mktemp -d $XDG_RUNTIME_DIR/legion-e2eccs-app-keys.$$.XXXXXXXX) after checking XDG_RUNTIME_DIR is the user's 0700 tmpfs; resolve before write_github_apps; the container mounts it read-only and no longer gets the runner or AGENT_SECRETS_*; the probe runs both key commands and the auth plugin inside; aws-private-ip unchanged.",
+    "M3": "cleanup removes app_keys_dir after the daemon is stopped and fails cleanup if it remains; prerequisites removes stale key directories of dead drivers (leftover_owner).",
+    "M4": "Docs: script header and comments, README sandbox section and lib entry, the lib's file promise, r1-state's lane note."
   },
   "order": [
-    "J1+J2 merge, leftover comparison, contract 38, fingerprints (changed)",
-    "J3 launcher, sandbox runtime, claude-envoy, docs",
-    "J4 sandbox script, README, AGENTS.md",
-    "Issue-pod checks (go, bun, check-dist, bash -n, both real-binary tests with main's omp pin, claudebridge -count=20)",
-    "Push, PR body, Worker Image digest",
-    "R1: devbox runs of both scripts (plus the -v PG tests) until they pass; transcripts uploaded; implement.json",
+    "M1 with bun cases",
+    "M2, M3, M4",
+    "Issue-pod checks: bun test scripts/e2e/lib; go test ./internal/api -run TestLiveProofAppsReadTheLib; bash -n and shellcheck",
+    "Push, PR body, image check",
+    "R1: Proofs2229 runs tmux, sandbox and the SIGINT negative control at the code head; transcripts uploaded; implement.json; complete only when both pass",
     "R2: tester verifies and directs its own runs"
   ],
   "acceptance": [
     {
-      "criterion": "K1 branch carries main, contract 38",
-      "surface": "issue pod",
-      "command": "gh pr view 2186 --json mergeable; J1 git grep -l comparison; J2 grep; bun run check-dist",
-      "seen": "MERGEABLE; only version.go/CHANGELOG differ; no 37 outside history; check-dist passes"
+      "criterion": "N1 the lib resolves keys to files and proves them; default output unchanged",
+      "surface": "issue pod and CI",
+      "command": "bun test scripts/e2e/lib; cd packages/daemon && go test ./internal/api -run TestLiveProofAppsReadTheLib",
+      "seen": "new cases pass; existing pins pass unedited"
     },
     {
-      "criterion": "K2 a Claude Code session survives losing its pod's disk",
-      "surface": "CI test job and devbox",
-      "command": "CI go test ./... (ok for internal/launcher, internal/ompsessions); devbox LEGION_TEST_PG_DSN=<scratch> go test -count=1 -v -run 'TestAClaude' ./internal/launcher/ ./internal/ompsessions/",
-      "seen": "--- PASS, no --- SKIP, for restore order/never-shorten, newline saves, compare-and-set, non-NULL byte_len beside an Oh My Pi row, stall record restored, LEGION_WORKSPACE_RECREATED from saved mtime, SIGKILL keeps saved prefix, final save at the floor, marker after first save"
-    },
-    {
-      "criterion": "K3 claude-envoy registers a pod transcript only once saved",
-      "surface": "issue pod",
-      "command": "bun test in packages/claude-envoy",
-      "seen": "waits for the marker with LEGION_CLAUDE_SESSION_ID set; does not wait unset"
-    },
-    {
-      "criterion": "K4 sandbox proof passes, resuming through the table",
-      "surface": "devbox against GKE namespace legion",
-      "command": "README GKE example plus LEGION_E2E_SESSION_DB_PORT, bash scripts/e2e/claude-backend-sandbox.sh",
-      "seen": "claude backend sandbox e2e: PASS, exit 0 after cleanup; row and restored prefix asserted; architect and planner ready in the new pod; planner time beside 2700 s; namespace snapshots identical"
-    },
-    {
-      "criterion": "K5 tmux proof still passes",
+      "criterion": "N2 the daemon boots under bridge",
       "surface": "devbox",
-      "command": "LEGION_E2E_MODEL_ROUTE=key-file ... bash scripts/e2e/claude-backend-tmux.sh",
-      "seen": "claude backend e2e: PASS, exit 0; check_github_apps names both Apps"
+      "command": "the sandbox proof at the code head (r1-state.md step 3)",
+      "seen": "probe notes both key commands exit 0 in the container and the plugin's token length; evidence/legion.yaml reads files under XDG_RUNTIME_DIR; ok daemon"
     },
     {
-      "criterion": "K6 flaky test cannot recur",
-      "surface": "issue pod",
-      "command": "grep -rn TestAnOpenPhaseGetsOneFollowUp packages/daemon; go test ./internal/claudebridge/ -count=20",
-      "seen": "empty; ok"
+      "criterion": "N3 the key files never outlive a run",
+      "surface": "devbox",
+      "command": "ls -d \"$XDG_RUNTIME_DIR\"/legion-e2eccs-app-keys.* after the passing run and after a SIGINT once ok prerequisites prints",
+      "seen": "no match after either; no FAIL cleanup line"
     },
     {
-      "criterion": "K7 spec bullets 1-13 hold after the merge",
-      "surface": "issue pod and devbox",
-      "command": "bullet 1: K2, K4 and a sandbox test of LEGION_CLAUDE_SESSION_ID and both session variables; bullets 2-13: generation 1's suites G, U, R (main's omp pin), P, and K5",
-      "seen": "each passes at the code head"
+      "criterion": "N4 both proofs pass at the code head",
+      "surface": "devbox",
+      "command": "Proofs2229's runs of claude-backend-tmux.sh and claude-backend-sandbox.sh",
+      "seen": "both PASS, exit 0 after cleanup, with generation 3's K4/K5 checks"
     }
   ],
   "risks": [
-    "The merge is large (30 conflicts plus clean-merging dead code).",
-    "Claude Code may need more than the main transcript to resume [UNVERIFIED]; the live resume proves it.",
-    "The final save is best effort: up to 2 s of lines lost on a hard kill.",
-    "A NULL byte_len would stop every Oh My Pi session; never written, and tested."
+    "The auth plugin may not mint a token inside busybox; the probe fails early and the remedy is written.",
+    "The human-tier grant must arrive while prerequisites waits.",
+    "A driver SIGKILL leaves the key directory until the next run's prerequisites or the tmpfs is cleared."
   ],
   "gapAnalysis": {
     "findings": [
       {
-        "finding": "1 (blocking) H2 kept the transcript but not the Claude phase-reminder record (legion-phase-hook.ts:26-29), which dies with the pod; a missing record defaults to closed, so spec bullets 6 and 11 (resume reminder, kept count) fail after a pod replacement.",
-        "answer": "J3 keeps two rows: the transcript and <CLAUDE_CONFIG_DIR>/legion-phase-stall-<id>.json, both restored before the child starts; K2 tests the record restored with its count."
+        "finding": "1 (blocking) Teardown keyed on app_key_dir would miss a partly written key directory (a failure or signal during resolution, e.g. while the human-tier grant waits).",
+        "answer": "M2/M3: the mktemp result is assigned to the script's own app_keys_dir before resolve_app_keys; cleanup removes that directory whatever happened, then fails cleanup if it remains; empty variable is a no-op."
       },
       {
-        "finding": "2 (blocking) The final save has no time budget under main's stop ordering (StopGrace floor 9 s, shim spends 5+1+3 s, cleanExitedGeneration, 1 s proxy drain).",
-        "answer": "J3: one connection held for the generation; saves every 2 s on growth; the final save is bounded by the remaining grace minus the drain and is best effort; loss is bounded to the last 2 s of lines; floor not raised; K2 tests StopGrace at the floor (landed or last periodic offset kept)."
+        "finding": "2 (blocking) app_key_command takes a secret-store key name, not a role; liveProofApps and its stubs call it that way.",
+        "answer": "M1 keeps the signature and names the files by key name (DIR/<NAME>.pem); app_key_dir initialised empty on source; DIR restricted to [A-Za-z0-9_./-] since it enters shell text."
       },
       {
-        "finding": "3 (blocking) A pod lost after claude-envoy registers a fresh transcript and before the first save leaves a recorded session the table lacks; the resume is refused and the claim retires after three failures.",
-        "answer": "J3: the launcher writes <transcript>.legion-saved after the first committed save; with LEGION_CLAUDE_SESSION_ID set, claude-envoy registers only after that marker exists (K3); tmux unchanged."
+        "finding": "3 (unverified) The auth plugin has never minted a credential inside the busybox container; by default it shells out to gcloud.",
+        "answer": "M2: the probe runs the plugin as client-go does and requires an ExecCredential with a non-empty token (length only printed); README remedy: --use_application_default_credentials with GOOGLE_APPLICATION_CREDENTIALS, which the container already mounts; any script change it needs is this plan's work."
       },
       {
-        "finding": "4 (blocking) H2 did not say how the launcher learns it is a Claude launch or the transcript path; no claudelaunch rule builds the path.",
-        "answer": "J3: the sandbox runtime sets LEGION_CLAUDE_SESSION_ID in a Claude launch's start-command environment (not a shimwire field); fresh path found by scanning projects/*/<id>.jsonl as the plugin does; resume path from ResumeFile, validated under CLAUDE_CONFIG_DIR/projects; contract 38 names it."
+        "finding": "4 Docs promising the key never touches a file, and the runner-in-container guidance, are wider than listed.",
+        "answer": "M4 lists the header paragraphs, comments, README sections, the lib's promise and r1-state's lane note; AGENTS.md unchanged."
       },
       {
-        "finding": "5 (blocking) Restore semantics for a relaunch into a running pod, ordering against resumable's mtime read, and path validation were unstated.",
-        "answer": "J3 start order: resumable (reads mtime_ms) -> restore -> child -> saver; restore only when the local file is missing or a strict prefix of the row, never shortening; directories created; paths validated; K2 tests each."
+        "finding": "5 A throwaway run leaves no regression guard; app-logins.test.ts already drives the lib.",
+        "answer": "Work step 1 adds bun cases (files 0600 with exact PEM, commands read only DIR files, failing runner leaves no file and names role and id, empty output refused); existing pins and TestLiveProofAppsReadTheLib unchanged."
       },
       {
-        "finding": "6 (non-blocking) Writer rules: a NULL byte_len breaks every Oh My Pi process (sql-session-storage.ts:673-678); compare-and-set failure and rewrite atomicity undefined; tables may be missing.",
-        "answer": "J3: byte_len and mtime_ms always written; appends in Oh My Pi's form in one transaction; whole rewrites in one transaction; a failed compare-and-set stops that writer; createTables; refused saves logged and retried, never blocking the child; K2 tests non-NULL byte_len beside an Oh My Pi row."
+        "finding": "6 The probe should run the daemon's exact key commands.",
+        "answer": "M2: the probe runs each private_key_command from github-apps.yaml inside the container, stdout to /dev/null, requiring exit 0."
       },
       {
-        "finding": "7 (non-blocking) The branch already gives a Claude pod OMP_SESSION_SQL_DSN_FILE; the merge makes the file-branch reasoning false and sessionsInDatabase always true.",
-        "answer": "J1 collapses the split; J3 tells every role pod both Oh My Pi session variables and rewrites the manifest.go:1103-1117 comment; K7's sandbox case asserts it."
+        "finding": "7 Leftover handling departed from refuse_leftovers and judged pid alone.",
+        "answer": "M3: deletes (private keys of a dead run) rather than refuses, judged by leftover_owner with the directory mtime in clock ticks; mktemp -d makes the name unique."
       },
       {
-        "finding": "8 (non-blocking) Superseded branch code also sits in cleanly merging files; legion sessions import's Claude refusal and the skill's workspace-recovered mention need decisions.",
-        "answer": "J1 names each dead piece, drops import's Claude refusal (legion-v10.0.0 claims could not be Claude under Kubernetes), takes main's skill text, and compares git grep -l file lists at the head and at main (only version.go and CHANGELOGs may differ)."
-      },
-      {
-        "finding": "9 (blocking) The unchanged-diff fingerprint must change across this merge, so a confirmation is impossible.",
-        "answer": "Work step 1 records both fingerprints as changed with the reasons; the head gets a full test round and a new review round; recorded as departure 8."
-      },
-      {
-        "finding": "10 (blocking) Main requires a session database; the sandbox proof needs a sixth port, a Secret key, and table-based evidence after the pod is gone.",
-        "answer": "J4: LEGION_E2E_SESSION_DB_PORT, scratch Postgres at bind_host, session_store: postgres, session_dsn_secret SESSION_DSN, sixth bridged port, six-port uniqueness, table row asserted before the relaunch, evidence copied from the table, comments and README port note rewritten."
-      },
-      {
-        "finding": "11 (non-blocking) lib/github-apps.sh needs five things in this script; whether INFRA's App is part of acceptance was unsettled.",
-        "answer": "J4 applies require_app_inputs, github-apps.yaml in legion.yaml, check_github_apps, app_key_unsets everywhere, and deletes the hard-coded tier loop; the architect ruled that which Apps a run uses is the runner's input."
-      },
-      {
-        "finding": "12 (non-blocking) 2700 s is stage4b's stated budget, not a measurement.",
-        "answer": "J4 prints the planner's actual time to implementing beside the budget in the passing run's transcript."
-      },
-      {
-        "finding": "13 (non-blocking) Oh My Pi reads the Claude row only when its roles start after the row exists.",
-        "answer": "J4 asserts the architect's and planner's new generations in the replacement pod reach ready."
-      },
-      {
-        "finding": "14 (non-blocking) Both live proofs and the Oh My Pi real-binary test must be re-run against the merged head and main's new Oh My Pi pin.",
-        "answer": "J5 and work step 4/6: both scripts re-run at the code head; LEGION_TEST_OMP with main's pinned omp; K5, K7."
-      },
-      {
-        "finding": "15 (non-blocking) H6 needed the CI run and commit, and a post-merge check.",
-        "answer": "Fact 6 cites run 40267697737 attempt 1 at 5d49365769e3 on #2227 and the empty claudebridge diff on main; K6: grep empty and go test ./internal/claudebridge/ -count=20."
-      },
-      {
-        "finding": "16 (non-blocking) The bump to 38 touches more sites.",
-        "answer": "J2 lists version.go (main's 37 kept, ours moved to 38), the contracts fixture, both package.json files, claude-envoy's dist (check-dist) and CHANGELOG lines, with a grep check."
-      },
-      {
-        "finding": "17 (non-blocking) Postgres-backed Go tests skip in an issue pod; criteria must name where each runs.",
-        "answer": "K1-K7 each name a surface; the Postgres-backed tests are proven by CI's ok lines (DSN set) and a devbox -v -run 'TestAClaude' run."
+        "finding": "8 The human-tier grant wait and the run's timeouts.",
+        "answer": "M2: one review-key request in prerequisites, unbounded by the script, a denial fails before anything is created; the daemon's boot reads files; risk 2."
       }
     ]
   },
   "planReview": {
     "verdict": "approved",
-    "rounds": 3
+    "rounds": 1
   },
   "specDepartures": [
     {
@@ -229,6 +172,170 @@
       }
     }
   ],
+  "generation3": {
+    "completed": "2026-10-26T11:05:00Z",
+    "scope": "Generation 3 plans only what is left: forward-merge main 383b889d (INFRA-80 makes an issue pod's disk die with the pod; contract 38), keep a Claude Code worker's transcript and phase-reminder record in Oh My Pi's session table so its resume survives a pod replacement, fix claude-backend-sandbox.sh (planner budget 2700 s, lib/github-apps.sh, a scratch session database), record that the flaky TestAnOpenPhaseGetsOneFollowUp is already deleted, then pass both live proofs on the devbox. Full plan: dispatch://INFRA-220/artifact/plan-md version 6, section 'Generation 3'.",
+    "requiredSkills": {
+      "implement": [
+        "legion-worker: references/conflicts-and-rewrites.md for the forward merge of main and the fingerprint; references/pr-body.md for the E2E lines and the delegated devbox runs; references/default-branch-check.md before the push; references/cleanup-deletion.md for the superseded lost-disk code the merge removes.",
+        "ce-simplify-code: the simplify pass over the merged head, chiefly that the launcher's table keeping reuses ompsessions rather than a second writer, and no dead lost-disk code survives the merge.",
+        "envoy: the devbox runs are requested from session 01a13c57-d826-7242-80fe-5f0670188b11 with envoy_send.",
+        "dispatch-first and dispatch: run transcripts uploaded with dispatch artifact; a dispatch ask on this issue if the devbox agent does not answer."
+      ],
+      "test": [
+        "legion-worker: references/pr-body.md - a full test round (the fingerprint changed): drive the issue-pod suites including both real-binary tests with main's Oh My Pi pin, verify the implementer's uploaded runs, and direct its own devbox runs of both scripts; read CI for the Postgres-backed launcher tests.",
+        "envoy: the tester's devbox runs via envoy_send to the devbox agent.",
+        "dispatch-first: search before any Dispatch write; findings outside this issue are asks."
+      ],
+      "review": [
+        "legion-worker: references/merge-gate.md and references/review-threads.md - a new review round on the merged head, with the thermonuclear pair, judged from the diff and the uploaded run evidence.",
+        "ce-simplify-code: whether the merge kept main's INFRA-80 model whole and the Claude table keeping is one writer with Oh My Pi's write shape.",
+        "dispatch-first: search before any Dispatch write; findings outside this issue are asks."
+      ]
+    },
+    "decisions": {
+      "J1": "Forward-merge main (jj new, never rebase): main's INFRA-80 model wins; the branch's Claude lane re-applied; dead branch code removed (expectVolume Claude term, SessionOnIssueVolume, Deps.SessionOnVolume, WorkspaceLost fix and tests, recovered golden, mark-lost Claude cases, the sessionsInDatabase split, import's Claude refusal); git grep -l comparison with main.",
+      "J2": "DaemonAPIVersion 38 with the collision note; fixture, both package.json, claude-envoy dist and CHANGELOGs.",
+      "J3": "LEGION_CLAUDE_SESSION_ID marks a Claude pod launch; the launcher restores and saves the transcript and phase-stall record as session-table rows (resumable -> restore -> child -> saver; never shorten; 2 s saves to the last newline; Oh My Pi's append form; compare-and-set; byte_len never NULL; bounded best-effort final save before proxy.Close); <transcript>.legion-saved gates claude-envoy's registration in pods; every role pod told both Oh My Pi session variables.",
+      "J4": "Sandbox proof: plan_seconds=2700 with the planner's time printed; lib/github-apps.sh; LEGION_E2E_SESSION_DB_PORT scratch session Postgres (session_store postgres, SESSION_DSN), sixth bridged port; table and restored-prefix assertions; architect and planner relaunch asserted.",
+      "J5": "claude-backend-tmux.sh unchanged here, re-run at the final head."
+    },
+    "order": [
+      "J1+J2 merge, leftover comparison, contract 38, fingerprints (changed)",
+      "J3 launcher, sandbox runtime, claude-envoy, docs",
+      "J4 sandbox script, README, AGENTS.md",
+      "Issue-pod checks (go, bun, check-dist, bash -n, both real-binary tests with main's omp pin, claudebridge -count=20)",
+      "Push, PR body, Worker Image digest",
+      "R1: devbox runs of both scripts (plus the -v PG tests) until they pass; transcripts uploaded; implement.json",
+      "R2: tester verifies and directs its own runs"
+    ],
+    "acceptance": [
+      {
+        "criterion": "K1 branch carries main, contract 38",
+        "surface": "issue pod",
+        "command": "gh pr view 2186 --json mergeable; J1 git grep -l comparison; J2 grep; bun run check-dist",
+        "seen": "MERGEABLE; only version.go/CHANGELOG differ; no 37 outside history; check-dist passes"
+      },
+      {
+        "criterion": "K2 a Claude Code session survives losing its pod's disk",
+        "surface": "CI test job and devbox",
+        "command": "CI go test ./... (ok for internal/launcher, internal/ompsessions); devbox LEGION_TEST_PG_DSN=<scratch> go test -count=1 -v -run 'TestAClaude' ./internal/launcher/ ./internal/ompsessions/",
+        "seen": "--- PASS, no --- SKIP, for restore order/never-shorten, newline saves, compare-and-set, non-NULL byte_len beside an Oh My Pi row, stall record restored, LEGION_WORKSPACE_RECREATED from saved mtime, SIGKILL keeps saved prefix, final save at the floor, marker after first save"
+      },
+      {
+        "criterion": "K3 claude-envoy registers a pod transcript only once saved",
+        "surface": "issue pod",
+        "command": "bun test in packages/claude-envoy",
+        "seen": "waits for the marker with LEGION_CLAUDE_SESSION_ID set; does not wait unset"
+      },
+      {
+        "criterion": "K4 sandbox proof passes, resuming through the table",
+        "surface": "devbox against GKE namespace legion",
+        "command": "README GKE example plus LEGION_E2E_SESSION_DB_PORT, bash scripts/e2e/claude-backend-sandbox.sh",
+        "seen": "claude backend sandbox e2e: PASS, exit 0 after cleanup; row and restored prefix asserted; architect and planner ready in the new pod; planner time beside 2700 s; namespace snapshots identical"
+      },
+      {
+        "criterion": "K5 tmux proof still passes",
+        "surface": "devbox",
+        "command": "LEGION_E2E_MODEL_ROUTE=key-file ... bash scripts/e2e/claude-backend-tmux.sh",
+        "seen": "claude backend e2e: PASS, exit 0; check_github_apps names both Apps"
+      },
+      {
+        "criterion": "K6 flaky test cannot recur",
+        "surface": "issue pod",
+        "command": "grep -rn TestAnOpenPhaseGetsOneFollowUp packages/daemon; go test ./internal/claudebridge/ -count=20",
+        "seen": "empty; ok"
+      },
+      {
+        "criterion": "K7 spec bullets 1-13 hold after the merge",
+        "surface": "issue pod and devbox",
+        "command": "bullet 1: K2, K4 and a sandbox test of LEGION_CLAUDE_SESSION_ID and both session variables; bullets 2-13: generation 1's suites G, U, R (main's omp pin), P, and K5",
+        "seen": "each passes at the code head"
+      }
+    ],
+    "risks": [
+      "The merge is large (30 conflicts plus clean-merging dead code).",
+      "Claude Code may need more than the main transcript to resume [UNVERIFIED]; the live resume proves it.",
+      "The final save is best effort: up to 2 s of lines lost on a hard kill.",
+      "A NULL byte_len would stop every Oh My Pi session; never written, and tested."
+    ],
+    "gapAnalysis": {
+      "findings": [
+        {
+          "finding": "1 (blocking) H2 kept the transcript but not the Claude phase-reminder record (legion-phase-hook.ts:26-29), which dies with the pod; a missing record defaults to closed, so spec bullets 6 and 11 (resume reminder, kept count) fail after a pod replacement.",
+          "answer": "J3 keeps two rows: the transcript and <CLAUDE_CONFIG_DIR>/legion-phase-stall-<id>.json, both restored before the child starts; K2 tests the record restored with its count."
+        },
+        {
+          "finding": "2 (blocking) The final save has no time budget under main's stop ordering (StopGrace floor 9 s, shim spends 5+1+3 s, cleanExitedGeneration, 1 s proxy drain).",
+          "answer": "J3: one connection held for the generation; saves every 2 s on growth; the final save is bounded by the remaining grace minus the drain and is best effort; loss is bounded to the last 2 s of lines; floor not raised; K2 tests StopGrace at the floor (landed or last periodic offset kept)."
+        },
+        {
+          "finding": "3 (blocking) A pod lost after claude-envoy registers a fresh transcript and before the first save leaves a recorded session the table lacks; the resume is refused and the claim retires after three failures.",
+          "answer": "J3: the launcher writes <transcript>.legion-saved after the first committed save; with LEGION_CLAUDE_SESSION_ID set, claude-envoy registers only after that marker exists (K3); tmux unchanged."
+        },
+        {
+          "finding": "4 (blocking) H2 did not say how the launcher learns it is a Claude launch or the transcript path; no claudelaunch rule builds the path.",
+          "answer": "J3: the sandbox runtime sets LEGION_CLAUDE_SESSION_ID in a Claude launch's start-command environment (not a shimwire field); fresh path found by scanning projects/*/<id>.jsonl as the plugin does; resume path from ResumeFile, validated under CLAUDE_CONFIG_DIR/projects; contract 38 names it."
+        },
+        {
+          "finding": "5 (blocking) Restore semantics for a relaunch into a running pod, ordering against resumable's mtime read, and path validation were unstated.",
+          "answer": "J3 start order: resumable (reads mtime_ms) -> restore -> child -> saver; restore only when the local file is missing or a strict prefix of the row, never shortening; directories created; paths validated; K2 tests each."
+        },
+        {
+          "finding": "6 (non-blocking) Writer rules: a NULL byte_len breaks every Oh My Pi process (sql-session-storage.ts:673-678); compare-and-set failure and rewrite atomicity undefined; tables may be missing.",
+          "answer": "J3: byte_len and mtime_ms always written; appends in Oh My Pi's form in one transaction; whole rewrites in one transaction; a failed compare-and-set stops that writer; createTables; refused saves logged and retried, never blocking the child; K2 tests non-NULL byte_len beside an Oh My Pi row."
+        },
+        {
+          "finding": "7 (non-blocking) The branch already gives a Claude pod OMP_SESSION_SQL_DSN_FILE; the merge makes the file-branch reasoning false and sessionsInDatabase always true.",
+          "answer": "J1 collapses the split; J3 tells every role pod both Oh My Pi session variables and rewrites the manifest.go:1103-1117 comment; K7's sandbox case asserts it."
+        },
+        {
+          "finding": "8 (non-blocking) Superseded branch code also sits in cleanly merging files; legion sessions import's Claude refusal and the skill's workspace-recovered mention need decisions.",
+          "answer": "J1 names each dead piece, drops import's Claude refusal (legion-v10.0.0 claims could not be Claude under Kubernetes), takes main's skill text, and compares git grep -l file lists at the head and at main (only version.go and CHANGELOGs may differ)."
+        },
+        {
+          "finding": "9 (blocking) The unchanged-diff fingerprint must change across this merge, so a confirmation is impossible.",
+          "answer": "Work step 1 records both fingerprints as changed with the reasons; the head gets a full test round and a new review round; recorded as departure 8."
+        },
+        {
+          "finding": "10 (blocking) Main requires a session database; the sandbox proof needs a sixth port, a Secret key, and table-based evidence after the pod is gone.",
+          "answer": "J4: LEGION_E2E_SESSION_DB_PORT, scratch Postgres at bind_host, session_store: postgres, session_dsn_secret SESSION_DSN, sixth bridged port, six-port uniqueness, table row asserted before the relaunch, evidence copied from the table, comments and README port note rewritten."
+        },
+        {
+          "finding": "11 (non-blocking) lib/github-apps.sh needs five things in this script; whether INFRA's App is part of acceptance was unsettled.",
+          "answer": "J4 applies require_app_inputs, github-apps.yaml in legion.yaml, check_github_apps, app_key_unsets everywhere, and deletes the hard-coded tier loop; the architect ruled that which Apps a run uses is the runner's input."
+        },
+        {
+          "finding": "12 (non-blocking) 2700 s is stage4b's stated budget, not a measurement.",
+          "answer": "J4 prints the planner's actual time to implementing beside the budget in the passing run's transcript."
+        },
+        {
+          "finding": "13 (non-blocking) Oh My Pi reads the Claude row only when its roles start after the row exists.",
+          "answer": "J4 asserts the architect's and planner's new generations in the replacement pod reach ready."
+        },
+        {
+          "finding": "14 (non-blocking) Both live proofs and the Oh My Pi real-binary test must be re-run against the merged head and main's new Oh My Pi pin.",
+          "answer": "J5 and work step 4/6: both scripts re-run at the code head; LEGION_TEST_OMP with main's pinned omp; K5, K7."
+        },
+        {
+          "finding": "15 (non-blocking) H6 needed the CI run and commit, and a post-merge check.",
+          "answer": "Fact 6 cites run 40267697737 attempt 1 at 5d49365769e3 on #2227 and the empty claudebridge diff on main; K6: grep empty and go test ./internal/claudebridge/ -count=20."
+        },
+        {
+          "finding": "16 (non-blocking) The bump to 38 touches more sites.",
+          "answer": "J2 lists version.go (main's 37 kept, ours moved to 38), the contracts fixture, both package.json files, claude-envoy's dist (check-dist) and CHANGELOG lines, with a grep check."
+        },
+        {
+          "finding": "17 (non-blocking) Postgres-backed Go tests skip in an issue pod; criteria must name where each runs.",
+          "answer": "K1-K7 each name a surface; the Postgres-backed tests are proven by CI's ok lines (DSN set) and a devbox -v -run 'TestAClaude' run."
+        }
+      ]
+    },
+    "planReview": {
+      "verdict": "approved",
+      "rounds": 3
+    }
+  },
   "generation2": {
     "completed": "2026-10-25T23:46:00Z",
     "scope": "Generation 2 plans only the gap that kept generation 1 from acceptance: scripts/e2e/claude-backend-tmux.sh and scripts/e2e/claude-backend-sandbox.sh stopped in prerequisites on the devbox, so spec acceptance bullets 1 and 13 have no live run. The code on legion/INFRA-220 (PR sjawhar/legion#2186) stands and is not re-planned. Full plan: dispatch://INFRA-220/artifact/plan-md version 5, section 'Generation 2'.",
