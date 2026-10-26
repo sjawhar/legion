@@ -6,6 +6,14 @@ can ask the `secrets` broker (secretsd) for any agent-tier key. A credential tha
 may hold therefore cannot live in the agent tier without every pane being able to read it.
 Kubernetes deployments (`docs/kubernetes.md`) get a pod boundary instead and do not need this page.
 
+`secrets` and `agent-secrets` are two CLIs over two stores, and a name can exist in both. `secrets`
+is secretsd, shipped from `sjawhar/forward` (the old `sjawhar/secretsd` repository is archived): it
+reads its agent tier from local sops files and its human tier through the local secretsd daemon,
+which asks for a YubiKey touch, and it never reads the agent-secrets broker. `agent-secrets` reads
+that broker, which is backed by a cloud Secret Manager. One key name can therefore hold different
+values in the two stores. `agent-secrets` names its store in output and every refusal; `secrets`
+names none today. This page is about `secrets`.
+
 ## Current decision for the LEGION deployment
 
 On 2026-09-13 Sami decided that the two GitHub App private keys stay in the secrets store's agent

@@ -107,7 +107,7 @@ export function componentPath(index: ComponentIndex, id: string): ArchitectureTr
   return path;
 }
 
-/** How the header's source line reads the sync state (spec item 6). */
+/** How a source's header line reads its sync state (spec item 6). */
 export type SourceState = "never-synced" | "stale" | "fresh";
 
 export function sourceState(source: ArchitectureTreeSource, now: number): SourceState {
@@ -117,9 +117,18 @@ export function sourceState(source: ArchitectureTreeSource, now: number): Source
   return now - new Date(source.last_sync_at).getTime() > STALE_AFTER_MS ? "stale" : "fresh";
 }
 
-/** Whether every row wears the hatched outline: the last import failed, or the source is stale. */
-export function modelDistrusted(source: ArchitectureTreeSource, now: number): boolean {
-  return source.last_error !== null || sourceState(source, now) === "stale";
+/** The repositories whose components wear the hatched outline: the source's last import failed,
+ *  or it is stale. A row is judged by its own source (`component.source`) alone, so one source's
+ *  failure never hatches another's components. */
+export function distrustedSources(
+  sources: readonly ArchitectureTreeSource[],
+  now: number
+): ReadonlySet<string> {
+  return new Set(
+    sources
+      .filter((source) => source.last_error !== null || sourceState(source, now) === "stale")
+      .map((source) => source.repo)
+  );
 }
 
 function statusRank(status: string): number {

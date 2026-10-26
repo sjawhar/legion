@@ -309,21 +309,22 @@ drive_gate() {
 # ---- Legion's role Apps ---------------------------------------------------------------------------
 
 workflow_lib=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
-# read_app_logins sets implement_app_login and review_app_login to the bot login GitHub gives each
-# role App the run's $work/legion.yaml configures, `<slug>[bot]` as REST names it, read by
-# lib/app-logins.ts from GET /app under the App's own key, as the daemon reads its own at boot. A
-# proof names no App: an App renamed on GitHub changes what this reads and no script, and a name
-# another App takes over later is never mistaken for Legion's. A stage proof calls it once, after it
-# first writes legion.yaml and before any check reads role_app, and the check fails, naming what
-# lib/app-logins.ts could not read, rather than leave a login empty.
+# shellcheck source=lib/github-apps.sh
+. "$workflow_lib/github-apps.sh"
+# read_app_logins proves the run's two role Apps against GitHub (check_github_apps,
+# lib/github-apps.sh) and sets implement_app_login and review_app_login to the bot login GitHub
+# gives each, `<slug>[bot]` as REST names it, read by lib/app-logins.ts from GET /app under the
+# App's own key, as the daemon reads its own at boot. A proof names no App: an App renamed on GitHub
+# changes what this reads and no script, and a name another App takes over later is never mistaken
+# for Legion's. A stage proof calls it once in its prerequisites, after require_app_inputs and
+# write_github_apps and before its first write anywhere, and the check fails, naming what
+# lib/app-logins.ts could not read or prove, rather than leave a login empty.
 implement_app_login=
 review_app_login=
 read_app_logins() {
-  local logins
-  logins=$(bun "$workflow_lib/app-logins.ts" "$work/legion.yaml") ||
-    fail "lib/app-logins.ts could not read the Legion role Apps' bot logins from GitHub (its reason is above)"
-  implement_app_login=$(jq -er .implement <<<"$logins") || fail "lib/app-logins.ts printed no implement App login: $logins"
-  review_app_login=$(jq -er .review <<<"$logins") || fail "lib/app-logins.ts printed no review App login: $logins"
+  check_github_apps implement review
+  implement_app_login=$(jq -er .implement <<<"$github_app_logins") || fail "lib/app-logins.ts printed no implement App login: $github_app_logins"
+  review_app_login=$(jq -er .review <<<"$github_app_logins") || fail "lib/app-logins.ts printed no review App login: $github_app_logins"
   note "the implement App acts on GitHub as $implement_app_login and the review App as $review_app_login (GET /app)"
 }
 # role_app ROLE prints the bot login of the App ROLE acts as, as REST names it: the implement App's

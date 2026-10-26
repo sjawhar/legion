@@ -304,4 +304,41 @@ package api
 // tree, so a root stands in `awaiting_merge` for days and an operator must see that its pull
 // request merged rather than guess at it. A 35 plugin's strict reader refuses a state whose pull
 // request views carry the field, so the boot gate and `legion probe-image` refuse the mixed pair.
-const DaemonAPIVersion = 36
+//
+// 37: sjawhar/legion INFRA-80 -- an issue's disk dies with its pod: the pod's one volume is a
+// generic ephemeral volume the pod itself owns (issuePod.disk), which the kubelet creates
+// with the pod and deletes with it, so an issue's Sandbox owns no volume claim template and a
+// stopped issue's Sandbox is always deleted. Nothing carries a disk from one pod to the next, so
+// every provision is the first and the `workspace-init provision` container's environment loses
+// `LEGION_EXPECT_ISSUE_VOLUME`. With it go `workspace-init`'s exit code 3 for a volume holding
+// neither the clone nor a retained session, the `LEGION_WORKSPACE_RECOVERED_FROM` a relaunch after
+// that loss carried and the `.legion/<KEY>/workspace-recovered.json` marker `workspace-init` wrote
+// from it, the daemon's probe for a retained session of the issue that decided whether to expect
+// anything, and `legion sessions mark-lost`, the operator command that marked a claim whose
+// workspace was lost. The controller's pod loses its init container with them, since the sessions
+// directory it made is gone. `runtime.kubernetes.session_store` must name a store that keeps
+// sessions in a database, `postgres` or `cloudsql-iam` — an omitted key is the same refusal as an
+// explicit `pvc` — since a session kept as a file on the pod's disk would die with the pod and the
+// next launch's resume would fail on the missing file, retiring the claim after three failures. A
+// daemon before 37 sets `LEGION_EXPECT_ISSUE_VOLUME=true` on a pod whose `workspace-init` from
+// this commit knows neither that name nor exit 3, so a lost disk is
+// provisioned afresh and reported as provisioned, and that daemon resumes a role onto a session
+// file the new disk does not hold; an image built before 37 runs the whole lost-disk machinery
+// against a daemon that sets none of it. The image probe, which holds the image's pi-legion to
+// this number, refuses either pair. (This branch took 36; main then landed INFRA-229 at 36 and
+// released pi-legion declaring it, so this branch takes the number above it, as the collision
+// note says.)
+//
+// 38: sjawhar/legion INFRA-225 -- Legion starts no issue that waits on an unfinished Dispatch
+// issue, and says what it is waiting for. `api.Admission` gains `blocked`, required: every root
+// and every child Legion is waiting to start, by issue key, each `{issue, blockedBy}` with the
+// keys it waits on that are not done (`blockedBy` is never null, and a key the daemon has no
+// mirror row of counts as unfinished). `waiting` is unchanged, the roots' waiting line.
+// `api.WaveReleaseResponse` gains `started` and `held`, both required, `held` an array of the
+// same `{issue, blockedBy}` row: a release accepts the whole wave whatever its children's links
+// say, and these two say which children it started and which it left held. A 37 plugin's strict
+// reader refuses a state carrying `blocked` and a release answer carrying `started` or `held`,
+// so the boot gate and `legion probe-image` refuse the mixed pair. (This branch took 36, then 37;
+// main landed INFRA-229 at 36 and INFRA-80 at 37 while it was open, so this change takes the
+// number above them, as the collision note says.)
+const DaemonAPIVersion = 38
