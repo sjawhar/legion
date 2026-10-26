@@ -10,8 +10,11 @@
 #
 # Run it once per build (main, a keyword-fusion head, a meaning-search head) against the same
 # corpus copy and compare the printed MRR; a build whose server calls Bedrock needs the usual AWS
-# credentials (AWS_REGION and the default credential chain) in its own environment, not this
-# script'''s.
+# credentials (AWS_REGION and the default credential chain), and one embedding on Azure AI Foundry
+# DISPATCH_EMBEDDER=azure and the DISPATCH_AZURE_* settings, in its own environment, not this
+# script'''s. Search compares a query only with vectors its server's embedder made, and that
+# server's coverage pass drops every other vector from the copy when it boots, so score an
+# embedder on a copy it has finished embedding (GET /api/v1/search/coverage answering lacking 0).
 set -euo pipefail
 
 usage() {

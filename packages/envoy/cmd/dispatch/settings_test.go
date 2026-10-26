@@ -35,6 +35,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/auth"
 	"github.com/sjawhar/envoy/internal/dispatch/config"
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
+	"github.com/sjawhar/envoy/internal/dispatch/embed"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/githubapp/githubapptest"
 	"github.com/sjawhar/envoy/internal/dispatch/routes"
@@ -1273,6 +1274,99 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 					t.Errorf("the broker received %q, want Authorization Bearer account-token", got)
 				}
 			})
+		},
+		"DISPATCH_EMBEDDER": func(t *testing.T) {
+			if boot := resolveWith(t, nil); boot.Embedder.Place != embed.PlaceBedrock {
+				t.Errorf("unset: Embedder.Place = %q, want bedrock", boot.Embedder.Place)
+			}
+			if boot := resolveWith(t, map[string]string{"DISPATCH_EMBEDDER": "bedrock"}); boot.Embedder.Place != embed.PlaceBedrock {
+				t.Errorf("bedrock: Embedder.Place = %q", boot.Embedder.Place)
+			}
+			refusedWith(t, map[string]string{"DISPATCH_EMBEDDER": "cohere"}, `DISPATCH_EMBEDDER="cohere" (expected bedrock or azure)`)
+			// The place newEmbedder builds: Azure's client, named by the endpoint's host.
+			if embedder := azureEmbedderFor(t, nil); !strings.HasPrefix(embedder.Identity(), "azure:") {
+				t.Errorf("DISPATCH_EMBEDDER=azure built %s, want an Azure identity", embedder.Identity())
+			}
+		},
+		"DISPATCH_AZURE_EMBED_ENDPOINT": func(t *testing.T) {
+			boot := resolveWith(t, azureEmbedEnvironment(map[string]string{"DISPATCH_AZURE_EMBED_ENDPOINT": " https://Embed.Example/models/ "}))
+			if boot.Embedder.AzureEndpoint != "https://Embed.Example/models/" {
+				t.Errorf("AzureEndpoint = %q, want the trimmed URL", boot.Embedder.AzureEndpoint)
+			}
+			if embedder := azureEmbedderFor(t, map[string]string{"DISPATCH_AZURE_EMBED_ENDPOINT": "https://Embed.Example/models/"}); embedder.Identity() != "azure:embed.example/embed-v-4-0" {
+				t.Errorf("Identity() = %q, want the endpoint's host", embedder.Identity())
+			}
+			refusedWith(t, azureEmbedEnvironment(map[string]string{"DISPATCH_AZURE_EMBED_ENDPOINT": ""}), "DISPATCH_AZURE_EMBED_ENDPOINT is required")
+			refusedWith(t, azureEmbedEnvironment(map[string]string{"DISPATCH_AZURE_EMBED_ENDPOINT": "http://embed.example/models"}), "DISPATCH_AZURE_EMBED_ENDPOINT=")
+			refusedWith(t, map[string]string{"DISPATCH_AZURE_EMBED_ENDPOINT": "https://embed.example/models"}, "DISPATCH_AZURE_EMBED_ENDPOINT set, but DISPATCH_EMBEDDER is unset")
+		},
+		"DISPATCH_AZURE_EMBED_DEPLOYMENT": func(t *testing.T) {
+			if boot := resolveWith(t, azureEmbedEnvironment(nil)); boot.Embedder.AzureDeployment != "embed-v-4-0" {
+				t.Errorf("unset: AzureDeployment = %q, want embed-v-4-0", boot.Embedder.AzureDeployment)
+			}
+			if embedder := azureEmbedderFor(t, map[string]string{"DISPATCH_AZURE_EMBED_DEPLOYMENT": " cohere-embed "}); embedder.Identity() != "azure:embed.example/cohere-embed" {
+				t.Errorf("Identity() = %q, want the trimmed deployment", embedder.Identity())
+			}
+			refusedWith(t, map[string]string{"DISPATCH_AZURE_EMBED_DEPLOYMENT": "cohere-embed"}, "DISPATCH_AZURE_EMBED_DEPLOYMENT set, but DISPATCH_EMBEDDER is unset")
+		},
+		"DISPATCH_AZURE_EMBED_TOKENS_PER_MINUTE": func(t *testing.T) {
+			if embedder := azureEmbedderFor(t, map[string]string{"DISPATCH_AZURE_EMBED_TOKENS_PER_MINUTE": " 90000 "}); embedder.Limits().BackgroundTokensPerMinute != 60_000 {
+				t.Errorf("BackgroundTokensPerMinute = %d, want two thirds of 90,000", embedder.Limits().BackgroundTokensPerMinute)
+			}
+			refusedWith(t, azureEmbedEnvironment(map[string]string{"DISPATCH_AZURE_EMBED_TOKENS_PER_MINUTE": ""}), "DISPATCH_AZURE_EMBED_TOKENS_PER_MINUTE is required")
+			refusedWith(t, azureEmbedEnvironment(map[string]string{"DISPATCH_AZURE_EMBED_TOKENS_PER_MINUTE": "0"}), `DISPATCH_AZURE_EMBED_TOKENS_PER_MINUTE="0"`)
+			refusedWith(t, map[string]string{"DISPATCH_AZURE_EMBED_TOKENS_PER_MINUTE": "90000"}, "DISPATCH_AZURE_EMBED_TOKENS_PER_MINUTE set, but DISPATCH_EMBEDDER is unset")
+		},
+		"DISPATCH_AZURE_EMBED_KEY": func(t *testing.T) {
+			if boot := resolveWith(t, azureEmbedEnvironment(map[string]string{"DISPATCH_AZURE_EMBED_KEY": " bare-key "})); boot.Embedder.AzureKey != "bare-key" {
+				t.Errorf("bare: AzureKey = %q", boot.Embedder.AzureKey)
+			}
+			file := writeFile(t, "azure-key", "  file-key\n")
+			if boot := resolveWith(t, azureEmbedEnvironment(map[string]string{"DISPATCH_AZURE_EMBED_KEY_FILE": file})); boot.Embedder.AzureKey != "file-key" {
+				t.Errorf("both: AzureKey = %q, want the file's", boot.Embedder.AzureKey)
+			}
+			if boot := resolveWith(t, azureEmbedEnvironment(map[string]string{"DISPATCH_AZURE_EMBED_KEY": "", "DISPATCH_AZURE_EMBED_KEY_FILE": file})); boot.Embedder.AzureKey != "file-key" {
+				t.Errorf("file alone: AzureKey = %q, want the file's", boot.Embedder.AzureKey)
+			}
+			// An unreadable or blank file refuses, naming both variables, rather than falling back to
+			// the bare key.
+			missing := filepath.Join(t.TempDir(), "missing")
+			refusedWith(t, azureEmbedEnvironment(map[string]string{"DISPATCH_AZURE_EMBED_KEY_FILE": missing}),
+				"DISPATCH_AZURE_EMBED_KEY_FILE names "+missing+", which could not be read, and DISPATCH_AZURE_EMBED_KEY is not read in its place")
+			blank := writeFile(t, "blank", "\n")
+			refusedWith(t, azureEmbedEnvironment(map[string]string{"DISPATCH_AZURE_EMBED_KEY_FILE": blank}),
+				"DISPATCH_AZURE_EMBED_KEY_FILE names "+blank+", which is empty, and DISPATCH_AZURE_EMBED_KEY is not read in its place")
+			refusedWith(t, map[string]string{"DISPATCH_AZURE_EMBED_KEY": "bare-key"}, "DISPATCH_AZURE_EMBED_KEY set, but DISPATCH_EMBEDDER is unset")
+			refusedWith(t, map[string]string{"DISPATCH_AZURE_EMBED_KEY_FILE": file}, "DISPATCH_AZURE_EMBED_KEY_FILE set, but DISPATCH_EMBEDDER is unset")
+			if _, ok := azureEmbedderFor(t, map[string]string{"DISPATCH_AZURE_EMBED_KEY_FILE": file}).(*embed.AzureClient); !ok {
+				t.Error("the key form built no Azure client")
+			}
+		},
+		"DISPATCH_AZURE_TENANT_ID": func(t *testing.T) {
+			if boot := resolveWith(t, azureEmbedEnvironment(withOverrides(azureKeyless, map[string]string{"DISPATCH_AZURE_TENANT_ID": " tenant "}))); boot.Embedder.AzureTenantID != "tenant" {
+				t.Errorf("AzureTenantID = %q", boot.Embedder.AzureTenantID)
+			}
+			refusedWith(t, azureEmbedEnvironment(withOverrides(azureKeyless, map[string]string{"DISPATCH_AZURE_TENANT_ID": ""})), "DISPATCH_AZURE_TENANT_ID missing")
+			refusedWith(t, map[string]string{"DISPATCH_AZURE_TENANT_ID": "tenant"}, "DISPATCH_AZURE_TENANT_ID set, but DISPATCH_EMBEDDER is unset")
+			if embedder := azureEmbedderFor(t, azureKeyless); embedder.Identity() != "azure:embed.example/embed-v-4-0" {
+				t.Errorf("keyless: Identity() = %q", embedder.Identity())
+			}
+		},
+		"DISPATCH_AZURE_CLIENT_ID": func(t *testing.T) {
+			if boot := resolveWith(t, azureEmbedEnvironment(withOverrides(azureKeyless, map[string]string{"DISPATCH_AZURE_CLIENT_ID": " client "}))); boot.Embedder.AzureClientID != "client" {
+				t.Errorf("AzureClientID = %q", boot.Embedder.AzureClientID)
+			}
+			refusedWith(t, azureEmbedEnvironment(withOverrides(azureKeyless, map[string]string{"DISPATCH_AZURE_CLIENT_ID": ""})), "DISPATCH_AZURE_CLIENT_ID missing")
+			refusedWith(t, map[string]string{"DISPATCH_AZURE_CLIENT_ID": "client"}, "DISPATCH_AZURE_CLIENT_ID set, but DISPATCH_EMBEDDER is unset")
+		},
+		"DISPATCH_AZURE_FEDERATED_TOKEN_FILE": func(t *testing.T) {
+			// A path, read at each exchange, not at boot: a file that is not there yet boots.
+			missing := filepath.Join(t.TempDir(), "token")
+			if boot := resolveWith(t, azureEmbedEnvironment(withOverrides(azureKeyless, map[string]string{"DISPATCH_AZURE_FEDERATED_TOKEN_FILE": " " + missing + " "}))); boot.Embedder.AzureTokenFile != missing {
+				t.Errorf("AzureTokenFile = %q, want %q", boot.Embedder.AzureTokenFile, missing)
+			}
+			refusedWith(t, azureEmbedEnvironment(withOverrides(azureKeyless, map[string]string{"DISPATCH_AZURE_FEDERATED_TOKEN_FILE": ""})), "DISPATCH_AZURE_FEDERATED_TOKEN_FILE missing")
+			refusedWith(t, map[string]string{"DISPATCH_AZURE_FEDERATED_TOKEN_FILE": missing}, "DISPATCH_AZURE_FEDERATED_TOKEN_FILE set, but DISPATCH_EMBEDDER is unset")
 		},
 		"DISPATCH_ASSET_STORE_BUCKET": func(t *testing.T) {
 			if boot := resolveWith(t, map[string]string{"DISPATCH_ASSET_STORE_BUCKET": " retained-assets "}); boot.AssetStoreBucket != "retained-assets" {
