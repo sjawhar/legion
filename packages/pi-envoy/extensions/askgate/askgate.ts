@@ -17,6 +17,8 @@
 // model only.
 import * as fs from "node:fs";
 import * as os from "node:os";
+import { selfOwner } from "@legion/envoy-client/askgate-marker";
+import { sessionStateRoot } from "@legion/envoy-client/dispatch-session-state";
 import type { PiApi, PiEventContract } from "@legion/pi-shared/pi-types";
 import type { ApiKeyResolver, AssistantMessage, Model } from "@oh-my-pi/pi-ai";
 import type { ModelLookupRegistry } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
@@ -262,6 +264,8 @@ async function loadAskGate(pi: PiApi, host: AskGateHost): Promise<ToolCallHandle
         : EXTENSION_HANDLER_TIMEOUT_MS;
     },
     dryRun: spawnDryRun,
+    // The store envoy.ts names in the session's record: the CLI state root's, for this process.
+    markerStore: selfOwner(sessionStateRoot(process.env)).store,
     contextMessages: (ctx) => {
       const { sessionManager } = ctx as unknown as Ctx;
       return buildSessionContext([...sessionManager.getEntries()], sessionManager.getLeafId())

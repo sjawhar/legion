@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
+import { argsDigest, argvDigest } from "@legion/envoy-client/askgate-marker";
 import * as core from "./askgate-core";
 import {
   ADVISOR_GATE_ENTRY_TYPE,
@@ -20,7 +21,6 @@ import {
   renderTranscript,
   scopedDevice,
   sessionMode,
-  unreadableDispatchWrite,
 } from "./askgate-core";
 import * as fx from "./askgate-fixtures";
 
@@ -50,6 +50,26 @@ const callEnders: Array<() => Promise<void>> = [];
 afterEach(async () => {
   for (const end of callEnders.splice(0)) await end();
 });
+
+/** One marker the gate minted, as the CLI reads it: its file name and its JSON. */
+type MintedMarker = {
+  name: string;
+  v: number;
+  argv: string;
+  args: string | null;
+  toolCallId: string;
+  outcome: string;
+  createdAt: number;
+};
+/** The markers in a store, each with its file name; none when the store has no markers yet. */
+function markersIn(store: string): MintedMarker[] {
+  const dir = path.join(store, "markers");
+  if (!fs.existsSync(dir)) return [];
+  return fs
+    .readdirSync(dir)
+    .filter((name) => !name.startsWith("."))
+    .map((name) => ({ name, ...JSON.parse(fs.readFileSync(path.join(dir, name), "utf8")) }));
+}
 
 const HOME = "/home/tester";
 /** The session's envoy.json, which the notice for an OMP_ASKGATE the gate does not read names. */
@@ -120,6 +140,8 @@ interface BindOptions {
   entries?: readonly unknown[] | (() => readonly unknown[]);
   /** Whether the session has a UI, which a notice needs; true unless a test says otherwise. */
   hasUI?: boolean;
+  /** The gate's marker store: a fresh directory under the suite's TMPDIR unless a test says otherwise. */
+  store?: string;
 }
 
 /** One session binding of the gate, driven through a fake `pi` and `ctx`. */
@@ -132,6 +154,8 @@ interface BoundGate {
   calls: CompleteRequest[];
   fallbackRoles: string[];
   dryRuns: Array<{ script: string; cwd: string; timeoutMs: number }>;
+  /** The marker store the gate mints into and records its mode in. */
+  store: string;
   write(toolCallId: string, path: string, content: string): Promise<Result>;
   device(toolCallId: string, toolName: string, input: Record<string, unknown>): Promise<Result>;
   bash(toolCallId: string, command: string, extra?: Record<string, unknown>): Promise<Result>;
@@ -150,6 +174,7 @@ function bind(opts: BindOptions = {}): BoundGate {
   const fallbackRoles: string[] = [];
   /** Every dry-run the gate started: its script, working directory and time limit. */
   const dryRuns: Array<{ script: string; cwd: string; timeoutMs: number }> = [];
+  const store = opts.store ?? fs.mkdtempSync(path.join(SUITE_TMP, "store-"));
   const pi = {
     on: (event: string, handler: Handler) => handlers.set(event, handler),
     appendEntry: (customType: string, data: GateEntry) => {
@@ -180,6 +205,7 @@ function bind(opts: BindOptions = {}): BoundGate {
       dryRuns.push({ script, cwd: runOpts.cwd, timeoutMs: runOpts.timeoutMs });
       return (opts.dryRun ?? core.spawnDryRun)(script, runOpts);
     },
+    markerStore: store,
   })(pi as never);
   const roles = opts.roles ?? { askgate: MODEL };
   const sessionEntries = opts.entries ?? [experimentsEntry(false)];
@@ -224,6 +250,7 @@ function bind(opts: BindOptions = {}): BoundGate {
     calls,
     fallbackRoles,
     dryRuns,
+    store,
     write: (toolCallId: string, path: string, content: string) =>
       emit({ toolName: "write", toolCallId, input: { path, content } }),
     device: (toolCallId: string, toolName: string, input: Record<string, unknown>) =>
@@ -354,12 +381,11 @@ describe("mode and model role (plan tests c-g)", () => {
       expect(g.notices).toHaveLength(0);
     }
   });
-  test("(g) a dispatch write the gate cannot read is refused the same way when neither role resolves", async () => {
+  test("(g) a call outside the literal grammar is no call the gate refuses, with no role either: the CLI refuses its write", async () => {
     const g = bind({ env: { OMP_ASKGATE: "warn" }, roles: {} });
-    const result = await g.bash("u", "cd $X && dispatch comment --issue X-1 --body b");
-    expect(result?.block).toBe(true);
-    expect(result?.reason).toContain("modelRoles.default");
-    expect(g.entries).toMatchObject([{ decision: "revise", outcome: "no-model-role" }]);
+    expect(await g.bash("u", "cd $X && dispatch comment --issue X-1 --body b")).toBeUndefined();
+    expect(g.entries).toHaveLength(0);
+    expect(markersIn(g.store)).toEqual([]);
   });
   // Outside review of #2159 at 31c5cca3b, finding 7: a rebuttal, a halt, a breaker trip, a
   // shutdown and a failed dry run each returned an allow before the gate looked for a model role,
@@ -420,13 +446,19 @@ describe("mode and model role (plan tests c-g)", () => {
       expect(refused?.reason).toContain("modelRoles.askgate");
       expect(failing.entries.map((e) => e.outcome)).toEqual(["no-model-role"]);
       expect(failing.dryRuns).toHaveLength(0);
-      // An unreadable call, which warn mode would otherwise run.
+      // A literal call whose file the gate cannot capture, which warn mode would otherwise run.
       const unreadable = bind({ env, roles: {} });
-      const wrapped = await unreadable.bash("u1", "cd $X && dispatch comment --issue X-1 --body b");
-      expect(wrapped?.block).toBe(true);
+      const fromStdin = await unreadable.bash(
+        "u1",
+        "dispatch comment --issue X-1 --body-file /dev/stdin"
+      );
+      expect(fromStdin?.block).toBe(true);
       expect(unreadable.entries.map((e) => e.outcome)).toEqual(["no-model-role"]);
       // No halt from any of them: a halt would let the next writes out.
       for (const g of [rebutted, closing, failing, unreadable]) expect(g.notices).toHaveLength(0);
+      // And no marker: the CLI refuses each of them too.
+      for (const g of [rebutted, closing, failing, unreadable])
+        expect(markersIn(g.store)).toEqual([]);
     }
   }, 30_000);
 });
@@ -1489,51 +1521,95 @@ console.log(JSON.stringify(args, null, 2));
     expect(g.entries).toHaveLength(0);
   });
   /**
-   * What a call the gate cannot read gives back, by mode: block refuses it before anything runs,
-   * warn runs it and hands the same explanation back as context. The text the test then checks.
+   * What a literal call whose file the gate cannot capture gives back, by mode: block refuses it
+   * before it sends, warn runs it and hands the same explanation back as context.
    */
   const unreadableText = (result: Result, mode: string): string => {
     if (mode === "block") {
       expect(result?.block).toBe(true);
-      expect(result?.reason).toContain("Nothing in the call ran");
+      expect(result?.reason).toContain("The write was not sent");
       return result?.reason ?? "";
     }
     expect(result?.block).toBeUndefined();
     expect(result?.additionalContext).toContain("The call ran unreviewed");
     return result?.additionalContext ?? "";
   };
-  test("a scoped dispatch write the gate cannot read is refused in block mode and warned about in warn mode", async () => {
-    const compound = [
-      "cd $X && dispatch ask --issue X-1 --question q",
-      "cd ~/x && dispatch ask --issue X-1 --question q",
-      "cd /tmp/* && dispatch ask --issue X-1 --question q",
-      'cd "$HOME" && dispatch ask --issue X-1 --question q',
-      "cd -P /tmp && dispatch ask --issue X-1 --question q",
-      "cd /tmp || dispatch ask --issue X-1 --question q",
-      "cd && dispatch ask --issue X-1 --question q",
-      "make && dispatch ask --issue X-1 --question q",
-      "cat > /tmp/q.md <<EOF\nShould it wait?\nEOF\ndispatch ask --issue X-1 --question-file /tmp/q.md",
-      'cd ~/x && FOO=1 timeout 30 dispatch comment --issue X-1 --body "$(cat note.md)"',
-      'dispatch issue --project P --title t --spec "$SPEC"',
-      "(cd sub; /usr/local/bin/dispatch doc-edit --issue X-1 --artifact spec --ops-json x)",
-    ];
+  // The gate reads the literal grammar alone. A call in any other form runs as written, with no
+  // entry and no marker, and the dispatch CLI, which a live record makes ask for a marker, refuses
+  // a gated write in it (envoy-client's dispatch-askgate.test.ts). The rows are compound calls,
+  // and every example the two confirm reviews at 0aa47421c gave of a refusal by the old text
+  // scan: B3 (a quoted pattern that starts with `dispatch`), B4 and X3 (text that only names a
+  // write) and X2 (a redirect after `xargs dispatch`, which the CLI now refuses when it runs).
+  const OUTSIDE_THE_GRAMMAR = [
+    "cd $X && dispatch ask --issue X-1 --question q",
+    "cd ~/x && dispatch ask --issue X-1 --question q",
+    "make && dispatch ask --issue X-1 --question q",
+    "cat > /tmp/q.md <<EOF\nShould it wait?\nEOF\ndispatch ask --issue X-1 --question-file /tmp/q.md",
+    'dispatch issue --project P --title t --spec "$SPEC"',
+    "(cd sub; /usr/local/bin/dispatch doc-edit --issue X-1 --artifact spec --ops-json x)",
+    // B3.
+    "rg 'dispatch .*--body' skills/",
+    'grep -rn "dispatch $sub" skills/',
+    "grep -E 'dispatch [a-z-]+ --issue' -r skills",
+    'echo "dispatch {ask,comment}"',
+    "cat > notes.md <<'EOF'\ndispatch $SUB --issue X-1\nEOF",
+    "gh pr create --title t --body-file - <<'EOF'\nRun `dispatch $SUB --issue X-1` to reply.\nEOF",
+    // B4.
+    'git commit -m "fix: dispatch comment now names the issue"',
+    "grep -rn 'dispatch ask' skills/",
+    "echo 'run dispatch.js comment later'",
+    // X3.
+    'git commit -m "docs: say how dispatch comment works"',
+    'jj describe -m "fix: dispatch ask refuses empty question"',
+    'echo "use dispatch comment to reply"',
+    'rg -n "dispatch comment" src',
+    "grep -rn 'dispatch comment' packages/",
+    "cat > notes.md <<'EOF'\nRun dispatch comment --issue X-1 to reply.\nEOF",
+    "printf 'dispatch comment is the verb\\n' > notes.txt",
+    // X2.
+    "printf '%s\\n' comment --issue X-1 --body hi | xargs dispatch 2>&1",
+    "printf '%s\\n' comment --issue X-1 --body hi | xargs dispatch 2>/dev/null",
+    "printf '%s\\n' comment --issue X-1 --body hi | xargs dispatch > out.json",
+    "printf '%s\\0' comment --issue X-1 --body hi | xargs -0 dispatch 2>&1 | tail -5",
+    "xargs dispatch < args.txt",
+    "xargs -0 dispatch < a",
+    "xargs -r dispatch < a",
+    "xargs --null dispatch < a",
+    "<args.txt xargs dispatch",
+  ];
+  test("a call outside the literal grammar runs unrefused in every mode, with no entry and no marker", async () => {
     for (const mode of ["warn", "block"]) {
       const g = bind({ env: { ...STUB, OMP_ASKGATE: mode }, cwd: work });
-      for (const [index, command] of compound.entries()) {
-        const text = unreadableText(await g.bash(`b${index}`, command), mode);
-        expect(text).toContain("AskGate reads one form only");
-        expect(text).toMatch(/`dispatch (ask|comment|issue|doc-edit)`/);
-      }
+      for (const [index, command] of OUTSIDE_THE_GRAMMAR.entries())
+        expect(await g.bash(`o${index}`, command)).toBeUndefined();
       expect(g.dryRuns).toHaveLength(0);
       expect(g.calls).toHaveLength(0);
-      const decision = mode === "block" ? "revise" : "allow";
-      expect(g.entries.map((e) => [e.tool, e.outcome, e.decision, e.verdictMode])).toEqual([
-        ...Array(9).fill(["dispatch_ask", "unreadable", decision, mode]),
-        ["dispatch_comment", "unreadable", decision, mode],
-        ["dispatch_issue", "unreadable", decision, mode],
-        ["dispatch_doc_edit", "unreadable", decision, mode],
-      ]);
+      expect(g.entries).toHaveLength(0);
       expect(g.notices).toHaveLength(0);
+      expect(markersIn(g.store)).toEqual([]);
+    }
+  });
+  // X3's eval-cell examples, and the cells the old eval scan refused: the gate reads no cell. A
+  // process a cell starts carries no marker, so the CLI refuses a gated write it sends.
+  test("an eval cell is not the gate's to refuse, whatever it runs", async () => {
+    const cells: Array<[string, string]> = [
+      ["py", `import os\nos.system("git commit -m 'dispatch comment fix'")`],
+      ["js", 'await Bun.$`rg -n "dispatch comment" src`'],
+      ["py", `import subprocess\nsubprocess.run("rg -n 'dispatch comment' src", shell=True)`],
+      ["py", `exec("print('dispatch comment')")`],
+      ["py", `client.run("dispatch comment --issue X")`],
+      [
+        "py",
+        `import subprocess\nsubprocess.run(["dispatch", "comment", "--issue", "X-1", "--body", "hi"])`,
+      ],
+      ["js", `Bun.spawnSync(["dispatch", "comment", "--issue", "X-1", "--body", "hi"])`],
+    ];
+    for (const mode of ["warn", "block"]) {
+      const g = bind({ env: { OMP_ASKGATE: mode } });
+      for (const [index, [language, code]] of cells.entries())
+        expect(await g.device(`e${index}`, "eval", { language, code })).toBeUndefined();
+      expect(g.entries).toHaveLength(0);
+      expect(markersIn(g.store)).toEqual([]);
     }
   });
   test("in warn mode an unreadable call runs and its file refusal comes back as context", async () => {
@@ -1549,7 +1625,7 @@ console.log(JSON.stringify(args, null, 2));
   });
   test("warn mode is no off switch for a gate that cannot review at all: no model role and a load failure still refuse", async () => {
     const noRole = bind({ env: { ...STUB, OMP_ASKGATE: "warn" }, cwd: work, roles: {} });
-    const refusedByRole = await noRole.bash("role", "dispatch comment --issue X-1 --body hi | cat");
+    const refusedByRole = await noRole.bash("role", "dispatch comment --issue X-1 --body hi");
     expect(refusedByRole?.block).toBe(true);
     expect(refusedByRole?.reason).toContain("modelRoles.askgate");
     expect(noRole.entries).toMatchObject([
@@ -1572,47 +1648,31 @@ console.log(JSON.stringify(args, null, 2));
     expect(refusedByLoad?.block).toBe(true);
     expect(entries).toMatchObject([{ outcome: "load-failed", verdictMode: "warn" }]);
   });
-  test("a scoped write after a prefix's options or its -- terminator is unreadable in every mode", async () => {
-    const prefixed = [
-      "command -- dispatch ask --issue X-1 --question q",
-      "command -p -- dispatch ask --issue X-1 --question q",
-      "command -p dispatch ask --issue X-1 --question q",
-      "exec -- dispatch ask --issue X-1 --question q",
-      "(exec -a name dispatch ask --issue X-1 --question q)",
-      "nohup -- dispatch ask --issue X-1 --question q",
-      "env -- dispatch ask --issue X-1 --question q",
-      "env -u HOME dispatch ask --issue X-1 --question q",
-      "env -C /tmp -- FOO=1 dispatch ask --issue X-1 --question q",
-      "timeout -- 30 dispatch ask --issue X-1 --question q",
-      "timeout -s KILL 30 dispatch ask --issue X-1 --question q",
-      "timeout -k 5 --signal=TERM 30 dispatch ask --issue X-1 --question q",
-      "time -p -- dispatch ask --issue X-1 --question q",
-      "timeout 30 env -- command -- dispatch ask --issue X-1 --question q",
-      "/usr/bin/env -- dispatch ask --issue X-1 --question q",
-    ];
-    for (const command of prefixed)
-      expect(unreadableDispatchWrite(command)).toEqual({
-        tool: "dispatch_ask",
-        label: "dispatch ask",
-      });
-    // `command -v` prints where a program is and runs nothing, but the text still names a write:
-    // when in doubt, the call is unreadable.
-    expect(unreadableDispatchWrite("command -v dispatch ask --issue X-1")).toEqual({
-      tool: "dispatch_ask",
-      label: "dispatch ask",
-      wrapped: true,
-    });
+  /**
+   * A call the gate does not read, in both modes: it runs as written, and the gate runs no dry
+   * run, asks no model, records no entry and mints no marker, so the CLI refuses a gated write in
+   * it when it runs.
+   */
+  const expectUnread = async (command: string) => {
     for (const mode of ["warn", "block"]) {
       const g = bind({ env: { ...STUB, OMP_ASKGATE: mode }, cwd: work });
-      for (const [index, command] of prefixed.entries()) {
-        unreadableText(await g.bash(`p${index}`, command), mode);
-      }
+      expect(await g.bash("u", command)).toBeUndefined();
       expect(g.dryRuns).toHaveLength(0);
       expect(g.calls).toHaveLength(0);
-      expect(g.entries.map((e) => [e.tool, e.outcome])).toEqual(
-        Array(prefixed.length).fill(["dispatch_ask", "unreadable"])
-      );
+      expect(g.entries).toHaveLength(0);
+      expect(markersIn(g.store)).toEqual([]);
     }
+  };
+  test("a write after a prefix, or after a prefix's options, is outside the literal grammar", async () => {
+    for (const command of [
+      "command -- dispatch ask --issue X-1 --question q",
+      "exec -- dispatch ask --issue X-1 --question q",
+      "env -u HOME dispatch ask --issue X-1 --question q",
+      "timeout -s KILL 30 dispatch ask --issue X-1 --question q",
+      "/usr/bin/env -- dispatch ask --issue X-1 --question q",
+      "command -v dispatch ask --issue X-1",
+    ])
+      await expectUnread(command);
   });
   // Only the literal grammar of one `dispatch` call is read. Each form below changes what the call
   // posts in a way AskGate cannot follow, and the outside review of #2159 showed the first eight
@@ -1709,41 +1769,20 @@ console.log(JSON.stringify(args, null, 2));
       "dispatch_comment",
     ],
   ];
-  for (const [form, command, tool] of NOT_LITERAL)
-    test(`outside the literal grammar, refused before anything runs: ${form}`, async () => {
-      const g = bind({ env: { ...STUB, OMP_ASKGATE: "block" }, cwd: work });
-      const result = await g.bash("n", command);
-      expect(result?.block).toBe(true);
-      expect(result?.reason).toContain("AskGate reads one form only");
-      expect(result?.reason).toContain("Nothing in the call ran");
-      expect(g.dryRuns).toHaveLength(0);
-      expect(g.calls).toHaveLength(0);
-      expect(g.entries.map((e) => [e.tool, e.outcome])).toEqual([[tool, "unreadable"]]);
+  for (const [form, command] of NOT_LITERAL)
+    test(`outside the literal grammar, the call runs unread: ${form}`, async () => {
+      await expectUnread(command);
     });
   // Outside review of #2159 at 31c5cca3b, finding 1: bash removes a backslash or empty quotes
-  // inside the program word and runs `dispatch`. The raw text holds no contiguous `dispatch`, so
-  // a prefilter on that text let the write through with no verdict, no note and no entry.
-  test("F1: a backslash or empty quotes inside the program name do not hide a write", async () => {
-    const hidden: Array<[string, string]> = [
-      ["a backslash in the program name", "d\\ispatch comment --issue X-1 --body hi"],
-      ["empty quotes after another command", 'true; di""spatch comment --issue X-1 --body hi'],
-      ["a backslash after another command", "true && dispatc\\h comment --issue X-1 --body hi"],
-    ];
-    for (const [, command] of hidden)
-      expect(unreadableDispatchWrite(command)).toMatchObject({
-        tool: "dispatch_comment",
-        label: "dispatch comment",
-      });
-    for (const mode of ["warn", "block"]) {
-      const g = bind({ env: { ...STUB, OMP_ASKGATE: mode }, cwd: work });
-      for (const [index, [, command]] of hidden.entries())
-        unreadableText(await g.bash(`h${index}`, command), mode);
-      expect(g.dryRuns).toHaveLength(0);
-      expect(g.calls).toHaveLength(0);
-      expect(g.entries.map((e) => [e.tool, e.outcome])).toEqual(
-        Array(hidden.length).fill(["dispatch_comment", "unreadable"])
-      );
-    }
+  // inside the program word and runs `dispatch`. Such a call is outside the literal grammar and
+  // runs unread; the CLI it reaches refuses it, carrying no marker.
+  test("F1: a backslash or empty quotes inside the program name leave the call outside the grammar", async () => {
+    for (const command of [
+      "d\\ispatch comment --issue X-1 --body hi",
+      'true; di""spatch comment --issue X-1 --body hi',
+      "true && dispatc\\h comment --issue X-1 --body hi",
+    ])
+      await expectUnread(command);
     // Alone, empty quotes or quotes around the whole name leave one literal word, and bash runs
     // `dispatch`: the literal grammar reads it, so it is reviewed as bare `dispatch` is.
     const quoted = [
@@ -1760,7 +1799,11 @@ console.log(JSON.stringify(args, null, 2));
     expect(g.entries.map((e) => [e.tool, e.outcome, e.decision])).toEqual(
       Array(quoted.length).fill(["dispatch_comment", "verdict", "allow"])
     );
-    // A gate that did not load refuses every one of them, in both modes.
+    // The argv the CLI receives is the same for both: quotes removed.
+    expect(markersIn(g.store).map((m) => m.argv)).toEqual(
+      Array(quoted.length).fill(argvDigest(["comment", "--issue", "X-1", "--body", "hi"]))
+    );
+    // A gate that did not load refuses each of them, in both modes.
     for (const mode of ["warn", "block"]) {
       const entries: Array<Record<string, unknown>> = [];
       const refuse = core.loadFailureGate(
@@ -1768,7 +1811,7 @@ console.log(JSON.stringify(args, null, 2));
         { env: { OMP_ASKGATE: mode }, configFile: CONFIG_FILE },
         { appendEntry: (_type, data) => entries.push(data as Record<string, unknown>) }
       );
-      for (const [index, command] of [...hidden.map(([, c]) => c), ...quoted].entries())
+      for (const [index, command] of quoted.entries())
         expect(
           refuse({ toolName: "bash", toolCallId: `l${index}`, input: { command } }, {
             agent: { kind: "main" },
@@ -1776,7 +1819,7 @@ console.log(JSON.stringify(args, null, 2));
           } as never)?.block
         ).toBe(true);
       expect(entries.map((e) => [e.tool, e.outcome])).toEqual(
-        Array(hidden.length + quoted.length).fill(["dispatch_comment", "load-failed"])
+        Array(quoted.length).fill(["dispatch_comment", "load-failed"])
       );
     }
   }, 30_000);
@@ -1822,27 +1865,18 @@ console.log(JSON.stringify(args, null, 2));
       "dispatch_issue",
     ],
   ];
-  for (const [form, command, tool] of STILL_REFUSED)
-    test(`still unreadable in every mode: ${form}`, async () => {
-      for (const mode of ["warn", "block"]) {
-        const g = bind({ env: { ...STUB, OMP_ASKGATE: mode }, cwd: work });
-        unreadableText(await g.bash("r", command), mode);
-        expect(g.dryRuns).toHaveLength(0);
-        expect(g.entries.map((e) => [e.tool, e.outcome])).toEqual([[tool, "unreadable"]]);
-      }
+  for (const [form, command] of STILL_REFUSED)
+    test(`outside the literal grammar, the call runs unread: ${form}`, async () => {
+      await expectUnread(command);
     });
-  test("astra 1: a backslash-continued here-document delimiter is refused before bash runs", async () => {
+  // astra 1: the gate runs nothing of a call whose here-document delimiter a backslash continues.
+  test("astra 1: a backslash-continued here-document delimiter is outside the grammar, and the gate runs nothing of it", async () => {
     const marker = path.join(work, "heredoc-marker");
     fs.rmSync(marker, { force: true });
-    const command = `dispatch ask --issue X-1 --question-file - <<E\\\nOF\n$(printf marker > ${marker}; printf reviewed)\nEOF`;
-    const g = bind({ env: { ...STUB, OMP_ASKGATE: "block" }, cwd: work });
-
-    const result = await g.bash("continued-heredoc", command);
-
-    expect(result?.block).toBe(true);
+    await expectUnread(
+      `dispatch ask --issue X-1 --question-file - <<E\\\nOF\n$(printf marker > ${marker}; printf reviewed)\nEOF`
+    );
     expect(fs.existsSync(marker)).toBe(false);
-    expect(g.dryRuns).toHaveLength(0);
-    expect(g.entries).toMatchObject([{ tool: "dispatch_ask", outcome: "unreadable" }]);
   });
   const UNPROVED: Array<[string, string, string]> = [
     [
@@ -1916,15 +1950,9 @@ console.log(JSON.stringify(args, null, 2));
       "dispatch_comment",
     ],
   ];
-  for (const [form, command, tool] of UNPROVED)
-    test(`${form} is refused before it sends`, async () => {
-      const g = bind({ env: { ...STUB, OMP_ASKGATE: "block" }, cwd: work });
-      const result = await g.bash("unproved", command);
-      expect(result?.block).toBe(true);
-      expect(result?.reason).toContain("Nothing in the call ran");
-      expect(g.dryRuns).toHaveLength(0);
-      expect(g.calls).toHaveLength(0);
-      expect(g.entries.map((e) => [e.tool, e.outcome])).toEqual([[tool, "unreadable"]]);
+  for (const [form, command] of UNPROVED)
+    test(`outside the literal grammar, the call runs unread: ${form}`, async () => {
+      await expectUnread(command);
     });
   test("a compound command whose dispatch sends nothing is not refused", async () => {
     const g = bind({ env: { ...STUB, OMP_ASKGATE: "block" }, cwd: work });
@@ -1940,255 +1968,32 @@ console.log(JSON.stringify(args, null, 2));
     }
     expect(g.entries).toHaveLength(0);
   });
-  // A write another command runs escapes every scan of the call's commands: the text inside
-  // `bash -c`, `eval`, `xargs`, a function or a variable is one word to the shell. AskGate takes
-  // `dispatch` beside a write subcommand anywhere in the call's text as a write it cannot read.
-  const WRAPPED: Array<[string, string, string]> = [
-    ["bash -c", "bash -c 'dispatch comment --issue X-1 --body hi'", "dispatch_comment"],
-    ["sh -c", 'sh -c "dispatch ask --issue X-1 --question q"', "dispatch_ask"],
-    ["eval", "eval 'dispatch comment --issue X-1 --body hi'", "dispatch_comment"],
-    ["xargs", "echo X-1 | xargs -I{} dispatch comment --issue {} --body hi", "dispatch_comment"],
-    ["a function", 'f(){ dispatch comment "$@"; }; f --issue X-1 --body hi', "dispatch_comment"],
-    [
-      "a readable write and a wrapped one",
-      "dispatch comment --issue X-1 --body one; bash -c 'dispatch comment --issue X-1 --body two'",
-      "dispatch_comment",
-    ],
-    [
-      "a here-document another command runs",
-      "cat > /tmp/n.sh <<'EOF'\ndispatch ask --issue X-1 --question q\nEOF\nbash /tmp/n.sh",
-      "dispatch_ask",
-    ],
+  // The forms the old text scan refused as a write another command runs, or a write whose word
+  // only bash resolves (outside review of #2159 at 31c5cca3b, findings 2 and 3, and the second
+  // re-gate's blocking finding): each is outside the literal grammar, runs unread, and reaches a
+  // CLI that refuses its write for want of a marker.
+  const WRAPPED_OR_UNRESOLVED = [
+    "bash -c 'dispatch comment --issue X-1 --body hi'",
+    'sh -c "dispatch ask --issue X-1 --question q"',
+    "eval 'dispatch comment --issue X-1 --body hi'",
+    "echo X-1 | xargs -I{} dispatch comment --issue {} --body hi",
+    'f(){ dispatch comment "$@"; }; f --issue X-1 --body hi',
+    "cat > /tmp/n.sh <<'EOF'\ndispatch ask --issue X-1 --question q\nEOF\nbash /tmp/n.sh",
+    `bash -c 'dispatch "comment" --issue X-1 --body hi'`,
+    `eval '"dispatch"' '"ask"' --issue X-1 --question q`,
+    `bash <<'EOF'\ndispatch "comment" --issue X-1 --body hi\nEOF`,
+    'SUB=comment; bash -c "dispatch $SUB --issue DSP-1 --body hi"',
+    "F='--spec=hello'; dispatch issue --project P --title t $F",
+    "dispatch artifact --issue X-1 $NAME --path b.md",
+    `D=dispatch; S=comment; "$D" "$S" --issue X-1 --body hi`,
+    "dispatch {comment,} --issue X-1 --body hi",
+    'out="$(dispatch comment --issue X --body y)"',
+    "grep -n 'dispatch comment --issue' notes.md",
   ];
-  for (const [form, command, tool] of WRAPPED)
-    test(`a gated write another command would run is refused: ${form}`, async () => {
-      const g = bind({ env: { ...STUB, OMP_ASKGATE: "block" }, cwd: work });
-      const result = await g.bash("w", command);
-      expect(result?.block).toBe(true);
-      expect(result?.reason).toContain("Nothing in the call ran");
-      expect(g.dryRuns).toHaveLength(0);
-      expect(g.calls).toHaveLength(0);
-      expect(g.entries.map((e) => [e.tool, e.outcome])).toEqual([[tool, "unreadable"]]);
+  for (const command of WRAPPED_OR_UNRESOLVED)
+    test(`outside the literal grammar, the call runs unread: ${JSON.stringify(command)}`, async () => {
+      await expectUnread(command);
     });
-  // Outside review of #2159 at 31c5cca3b, finding 2: the text scan needed `dispatch` beside an
-  // unquoted subcommand, so quotes the inner shell removes hid the write from it. The gate now
-  // reads the text a wrapper would run (a word's value, `eval`'s joined arguments, a
-  // here-document's body) with the same quote-aware scan, and `dispatch` as any word's value.
-  const QUOTED_WRAPPED: Array<[string, string, string]> = [
-    [
-      "bash -c with a quoted subcommand",
-      `bash -c 'dispatch "comment" --issue X-1 --body hi'`,
-      "dispatch_comment",
-    ],
-    [
-      "sh -c with a quoted program",
-      `sh -c '"dispatch" comment --issue X-1 --body hi'`,
-      "dispatch_comment",
-    ],
-    [
-      "zsh -c with a backslash in the program",
-      "zsh -c 'd\\ispatch comment --issue X-1 --body hi'",
-      "dispatch_comment",
-    ],
-    [
-      "dash -c with options first",
-      `dash -e -c 'dispatch "ask" --issue X-1 --question q'`,
-      "dispatch_ask",
-    ],
-    ["eval of quoted words", `eval '"dispatch" "ask" --issue X-1 --question q'`, "dispatch_ask"],
-    [
-      "eval of split arguments",
-      `eval '"dispatch"' '"ask"' --issue X-1 --question q`,
-      "dispatch_ask",
-    ],
-    [
-      "two shells deep",
-      `bash -c "sh -c 'dispatch \\"comment\\" --issue X-1 --body hi'"`,
-      "dispatch_comment",
-    ],
-    [
-      "xargs with a quoted subcommand",
-      `echo X-1 | xargs -I{} dispatch "comment" --issue {} --body hi`,
-      "dispatch_comment",
-    ],
-    [
-      "a here-document bash runs, its subcommand quoted",
-      `bash <<'EOF'\ndispatch "comment" --issue X-1 --body hi\nEOF`,
-      "dispatch_comment",
-    ],
-    // The second re-gate of #2159 at 31c5cca3b, its one blocking finding: a wrapper whose
-    // subcommand is an expansion. The text pattern needs a literal subcommand, and the
-    // command-position scan sees only `bash`, so this passed with no review and no entry.
-    [
-      "bash -c whose subcommand is an expansion",
-      'SUB=comment; bash -c "dispatch $SUB --issue DSP-1 --body hi"',
-      "dispatch_unknown",
-    ],
-    [
-      "sh -c whose subcommand is an expansion",
-      'SUB=comment; sh -c "dispatch $SUB --issue DSP-1 --body hi"',
-      "dispatch_unknown",
-    ],
-    [
-      "eval whose subcommand is an expansion",
-      'SUB=comment; eval "dispatch $SUB --issue DSP-1 --body hi"',
-      "dispatch_unknown",
-    ],
-    [
-      "xargs whose subcommand is an expansion",
-      "SUB=comment; echo DSP-1 | xargs -I{} dispatch $SUB --issue {} --body hi",
-      "dispatch_unknown",
-    ],
-  ];
-  for (const [form, command, tool] of QUOTED_WRAPPED)
-    test(`F2: a quoted write another command would run is unreadable: ${form}`, async () => {
-      expect(unreadableDispatchWrite(command)).toMatchObject({ tool, wrapped: true });
-      const g = bind({ env: { ...STUB, OMP_ASKGATE: "block" }, cwd: work });
-      const result = await g.bash("w", command);
-      expect(result?.block).toBe(true);
-      expect(result?.reason).toContain("Nothing in the call ran");
-      expect(g.dryRuns).toHaveLength(0);
-      expect(g.calls).toHaveLength(0);
-      expect(g.entries.map((e) => [e.tool, e.outcome])).toEqual([[tool, "unreadable"]]);
-      const refuse = core.loadFailureGate(
-        new Error("a host module did not load"),
-        { env: { OMP_ASKGATE: "warn" }, configFile: CONFIG_FILE },
-        { appendEntry: () => {} }
-      );
-      expect(
-        refuse({ toolName: "bash", toolCallId: "l", input: { command } }, {
-          agent: { kind: "main" },
-          sessionManager: { getEntries: () => [] },
-        } as never)?.block
-      ).toBe(true);
-    });
-  // Outside review of #2159 at 31c5cca3b, finding 3: a word whose value only bash knows was taken
-  // as proof that a conditional write was out of scope. In a call AskGate cannot read, such a word
-  // on `issue` or `artifact` may be the spec or a markdown name, and such a subcommand after
-  // `dispatch` or after a program an expansion names may be any subcommand.
-  const UNRESOLVED: Array<[string, string, string]> = [
-    [
-      "a spec flag from a variable",
-      "F='--spec=hello'; dispatch issue --project P --title t $F",
-      "dispatch_issue",
-    ],
-    [
-      "a quoted spec flag from a variable",
-      `F='--spec=hello'; dispatch issue --project P --title t "$F"`,
-      "dispatch_issue",
-    ],
-    [
-      "an upload's name flag from a variable",
-      "dispatch artifact --issue X-1 $NAME --path b.md",
-      "dispatch_artifact",
-    ],
-    [
-      "a program and a subcommand both from variables",
-      `D=dispatch; S=comment; "$D" "$S" --issue X-1 --body hi`,
-      "dispatch_unknown",
-    ],
-    [
-      "a subcommand from a brace expansion",
-      "dispatch {comment,} --issue X-1 --body hi",
-      "dispatch_unknown",
-    ],
-    [
-      "a program and a subcommand from bash -c's own arguments",
-      `bash -c '"$0" "$1" --issue X-1 --body hi' "$P" "$S"`,
-      "dispatch_unknown",
-    ],
-  ];
-  for (const [form, command, tool] of UNRESOLVED)
-    test(`F3: an unresolved word is not proof that a write is out of scope: ${form}`, async () => {
-      expect(unreadableDispatchWrite(command)).toMatchObject({ tool });
-      for (const mode of ["warn", "block"]) {
-        const g = bind({ env: { ...STUB, OMP_ASKGATE: mode }, cwd: work });
-        unreadableText(await g.bash("u", command), mode);
-        expect(g.dryRuns).toHaveLength(0);
-        expect(g.calls).toHaveLength(0);
-        expect(g.entries.map((e) => [e.tool, e.outcome])).toEqual([[tool, "unreadable"]]);
-      }
-    });
-  test("F3: the reason for an unknown program and subcommand says to call dispatch by name with the subcommand written out", async () => {
-    const g = bind({ env: { ...STUB, OMP_ASKGATE: "block" }, cwd: work });
-    const reason =
-      (await g.bash("u", `D=dispatch; S=comment; "$D" "$S" --issue X-1 --body hi`))?.reason ?? "";
-    expect(reason).toContain("its program's name and the word after it hold `$`");
-    expect(reason).toContain("calling `dispatch` by name, with its subcommand written out");
-    // The literal grammar is unchanged: an issue with no spec and literal words is no write.
-    expect(await g.bash("plain", "dispatch issue --project P --title t")).toBeUndefined();
-    expect(await g.bash("unscoped", "$D search --query x")).toBeUndefined();
-    expect(g.entries.map((e) => e.toolCallId)).toEqual(["u"]);
-  });
-  test("the text scan reads a write it cannot run, and says to keep such text off the command line", async () => {
-    const g = bind({ env: { ...STUB, OMP_ASKGATE: "block" }, cwd: work });
-    const result = await g.bash("t", "grep -n 'dispatch comment --issue' notes.md");
-    expect(result?.block).toBe(true);
-    expect(result?.reason).toContain("in this call's text");
-    expect(result?.reason).toContain("put that text in a file and name the file");
-    expect(g.entries.map((e) => [e.tool, e.outcome])).toEqual([["dispatch_comment", "unreadable"]]);
-  });
-  test("a halt or a session the gate would skip lets a compound write run", async () => {
-    const compound = "cd $X && dispatch comment --issue X-1 --body b";
-    const elsewhere = bind({
-      env: { OMP_ASKGATE: "block" },
-      primary: { provider: "openai-codex", id: "gpt-5.5" },
-    });
-    expect((await elsewhere.bash("s", compound))?.block).toBeUndefined();
-    const halted = bind({
-      env: { OMP_ASKGATE: "block", OMP_ASKGATE_TIMEOUT_MS: "20" },
-      complete: untilAborted,
-    });
-    for (const id of ["a", "b", "c"]) await halted.device(id, "dispatch_comment", COMMENT);
-    expect((await halted.bash("h", compound))?.block).toBeUndefined();
-    expect([elsewhere, halted].map((g) => g.entries.at(-1)?.outcome)).toEqual([
-      "skipped",
-      "halted",
-    ]);
-  });
-  test("unreadableDispatchWrite finds the write a here-document or quotes do not hide", () => {
-    expect(
-      unreadableDispatchWrite(
-        "cat <<'EOF' > f\ndispatch ask --issue X\nEOF\ndispatch comment --issue X --body-file f"
-      )
-    ).toEqual({ tool: "dispatch_comment", label: "dispatch comment" });
-    expect(
-      unreadableDispatchWrite(
-        "git commit -m 'dispatch ask'; dispatch message --issue X --body \"a; b\" | cat"
-      )
-    ).toEqual({ tool: "dispatch_message", label: "dispatch message" });
-    // Text alone is read too: AskGate cannot tell a quoted write from one a wrapper would run.
-    expect(unreadableDispatchWrite('echo "run dispatch ask later"')).toEqual({
-      tool: "dispatch_ask",
-      label: "dispatch ask",
-      wrapped: true,
-    });
-    expect(unreadableDispatchWrite("rg dispatch src | head")).toBeUndefined();
-  });
-  test("unreadableDispatchWrite reads a command substitution, quoted or not, as a command of its own", () => {
-    expect(unreadableDispatchWrite('out="$(dispatch comment --issue X --body y)"')).toEqual({
-      tool: "dispatch_comment",
-      label: "dispatch comment",
-    });
-    expect(unreadableDispatchWrite('echo "posted: `dispatch message --issue X --body y`"')).toEqual(
-      { tool: "dispatch_message", label: "dispatch message" }
-    );
-    // A write in a here-document body, and one in backquotes the shell does not run, are text the
-    // scan reads: AskGate cannot prove the text never reaches a shell.
-    expect(
-      unreadableDispatchWrite(
-        "git commit -m \"$(cat <<'EOF'\nThen dispatch ask --issue X.\nEOF\n)\""
-      )
-    ).toEqual({ tool: "dispatch_ask", label: "dispatch ask", wrapped: true });
-    expect(
-      unreadableDispatchWrite('echo "$((1 + 2))" "$(echo "a)b")" && dispatch read --issue X')
-    ).toBeUndefined();
-    expect(unreadableDispatchWrite('echo "run \\`dispatch ask\\` later"')).toEqual({
-      tool: "dispatch_ask",
-      label: "dispatch ask",
-      wrapped: true,
-    });
-  });
   test("dispatch called by a literal path is reviewed as bare dispatch is: absolute, relative or quoted", async () => {
     // No stub on PATH: only the path the command names reaches it.
     const g = bind({ env: { PATH: "/usr/bin:/bin" }, cwd: work });
@@ -2207,22 +2012,12 @@ console.log(JSON.stringify(args, null, 2));
       "cd bin >/dev/null && ./dispatch ask --dry-run --issue X-1 --question q",
     ]);
     expect(g.calls[0].user).toContain('"body": "The run finished."');
-    // A literal path in a call AskGate cannot read gets the plain resend reason: the path is not why.
+    // A literal path in a call outside the grammar runs unread, as any such call does.
     const blocking = bind({ env: { PATH: "/usr/bin:/bin", OMP_ASKGATE: "block" }, cwd: work });
-    const joined = await blocking.bash(
-      "joined",
-      `cd $X && ${bin}/dispatch comment --issue X-1 --body hi`
-    );
-    expect(joined?.block).toBe(true);
-    expect(joined?.reason).toContain("send that `dispatch comment` again on its own.");
-    expect(joined?.reason).not.toContain("Here ");
-    // The reason states the one form the gate reads.
-    expect(joined?.reason).toContain("cannot know the text it would send");
-    expect(joined?.reason).toContain("AskGate reads one form only");
-    expect(joined?.reason).toContain("no second command, no pipe");
-    expect(blocking.entries.map((e) => [e.tool, e.outcome, e.decision])).toEqual([
-      ["dispatch_comment", "unreadable", "revise"],
-    ]);
+    expect(
+      await blocking.bash("joined", `cd $X && ${bin}/dispatch comment --issue X-1 --body hi`)
+    ).toBeUndefined();
+    expect(blocking.entries).toHaveLength(0);
     expect(g.entries.map((e) => [e.toolCallId, e.tool, e.outcome, e.decision])).toEqual([
       ["abs", "dispatch_message", "verdict", "allow"],
       ["rel", "dispatch_comment", "verdict", "allow"],
@@ -2230,68 +2025,19 @@ console.log(JSON.stringify(args, null, 2));
       ["cd", "dispatch_ask", "verdict", "allow"],
     ]);
   }, 30_000);
-  test("a dispatch write called by a path the shell expands is unreadable in every mode, its reason naming what AskGate cannot read", async () => {
-    // A `~/` path and a backslash-quoted `\dispatch` are read (the variable test above); these are not.
-    const expanded: Array<[string, string]> = [
-      ["$HOME/bin/dispatch comment --issue X-1 --body hi", "`$`"],
-      ["/opt/*/bin/dispatch comment --issue X-1 --body hi", "`*`"],
-      ["~/x/$V/dispatch ask --issue X-1 --question q", "`~` and `$`"],
-    ];
-    for (const mode of ["warn", "block"]) {
-      const g = bind({ env: { ...STUB, OMP_ASKGATE: mode }, cwd: work });
-      for (const [command, holds] of expanded) {
-        const text = unreadableText(await g.bash("b", command), mode);
-        expect(text).toContain(
-          `Here the word that calls \`dispatch\` holds ${holds}, which AskGate does not take as literal.`
-        );
-        expect(text).toContain("calling `dispatch` by name");
-      }
-      expect(g.dryRuns).toHaveLength(0);
-      expect(g.calls).toHaveLength(0);
-      const decision = mode === "block" ? "revise" : "allow";
-      expect(g.entries.map((e) => [e.tool, e.outcome, e.decision])).toEqual(
-        ["dispatch_comment", "dispatch_comment", "dispatch_ask"].map((tool) => [
-          tool,
-          "unreadable",
-          decision,
-        ])
-      );
-    }
-  });
-  test("a scoped subcommand run by a program an expansion names is unreadable in every mode, telling the agent to call dispatch by name", async () => {
-    /** The shell's braced expansion of D, `${D}`, written without a JavaScript template's look. */
-    const bracedD = `$${"{"}D}`;
-    const viaExpansion: Array<[string, string, string]> = [
-      ["$D comment --issue X-1 --body y", "dispatch_comment", "`$`"],
-      [`${bracedD} message --issue X-1 --body y`, "dispatch_message", "`$`"],
-      ['"$D" ask --issue X-1 --question q', "dispatch_ask", "`$`"],
-      [`"${bracedD}" edit-ask --ask a-1 --question q`, "dispatch_edit_ask", "`$`"],
-      ["env $D doc-edit --issue X-1 --artifact spec --ops-json x", "dispatch_doc_edit", "`$`"],
-      ["$D issue --project P --title t --spec-file s.md", "dispatch_issue", "`$`"],
-      [
-        "$(command -v dispatch) request-approval --issue X-1 --summary s",
-        "dispatch_request_approval",
-        "`$`",
-      ],
-      ["`command -v dispatch` comment --issue X-1 --body y", "dispatch_comment", "a backtick"],
-    ];
-    for (const mode of ["warn", "block"]) {
-      const g = bind({ env: { ...STUB, OMP_ASKGATE: mode }, cwd: work });
-      for (const [index, [command, , holds]] of viaExpansion.entries()) {
-        const text = unreadableText(await g.bash(`v${index}`, command), mode);
-        expect(text).toContain(
-          `Here its program's name holds ${holds}, so AskGate cannot tell which program would run.`
-        );
-        expect(text).toContain("calling `dispatch` by name");
-      }
-      expect(g.dryRuns).toHaveLength(0);
-      expect(g.calls).toHaveLength(0);
-      const decision = mode === "block" ? "revise" : "allow";
-      expect(g.entries.map((e) => [e.tool, e.outcome, e.decision])).toEqual(
-        viaExpansion.map(([, tool]) => [tool, "unreadable", decision])
-      );
-    }
-  });
+  // A program word an expansion names or the shell expands, the old scan's "unreadable program".
+  for (const command of [
+    "$HOME/bin/dispatch comment --issue X-1 --body hi",
+    "/opt/*/bin/dispatch comment --issue X-1 --body hi",
+    "$D comment --issue X-1 --body y",
+    '"$D" ask --issue X-1 --question q',
+    "env $D doc-edit --issue X-1 --artifact spec --ops-json x",
+    "$(command -v dispatch) request-approval --issue X-1 --summary s",
+    "`command -v dispatch` comment --issue X-1 --body y",
+  ])
+    test(`outside the literal grammar, the call runs unread: ${JSON.stringify(command)}`, async () => {
+      await expectUnread(command);
+    });
   test("an expansion before an unscoped subcommand, or before a scoped one that sends nothing, is not refused", async () => {
     const g = bind({ env: { ...STUB, OMP_ASKGATE: "block" }, cwd: work });
     for (const command of [
@@ -2309,7 +2055,7 @@ console.log(JSON.stringify(args, null, 2));
   });
   // Final review of #2159 at 0cf9f1902, B1: every quoted word and here-document body was read as
   // a script with the unknown-program rule, so text with two expansions and no `dispatch` was
-  // refused. That rule now applies only to text a shell runs.
+  // refused. The gate scans no text now, so it refuses none.
   const NO_SHELL_RUNS = [
     'echo "$a $b"',
     'while read -r a b; do echo "$a $b"; done <f',
@@ -2317,28 +2063,37 @@ console.log(JSON.stringify(args, null, 2));
     "perl -pe 's/(\\w+) (\\w+)/$2 $1/'",
     "cat >Makefile <<'EOF'\napp: main.c\n\t$(CC) $(CFLAGS) -o app main.c\nEOF",
   ];
-  test("B1: text no shell runs is read for dispatch only, so two expansions in it are not refused", async () => {
-    for (const command of NO_SHELL_RUNS) expect(unreadableDispatchWrite(command)).toBeUndefined();
+  test("B1: text with two expansions in it is not refused", async () => {
     const g = bind({ env: { ...STUB, OMP_ASKGATE: "block" }, cwd: work });
     for (const command of NO_SHELL_RUNS) expect(await g.bash("b1", command)).toBeUndefined();
     expect(g.entries).toHaveLength(0);
   });
-  test("B1: text a shell runs keeps the unknown-program rule", () => {
-    for (const command of [
-      `bash -c '"$0" "$1" --issue X-1 --body hi' "$P" "$S"`,
-      `eval '"$D" "$S" --issue X-1 --body hi'`,
-      `bash <<'EOF'\n"$D" "$S" --issue X-1 --body hi\nEOF`,
-      `bash <<< '"$D" "$S" --issue X-1 --body hi'`,
-      `printf '%s\\n' '"$D" "$S" --issue X-1 --body hi' | bash`,
-    ])
-      expect(unreadableDispatchWrite(command)).toMatchObject({
-        tool: "dispatch_unknown",
-        wrapped: true,
-      });
-  });
+  // The attack review at 0cf9f1902: shells, runners and escapes the old scan followed. Each runs
+  // unread now, and the CLI it reaches refuses its write.
+  for (const command of [
+    `bash -c '"$0" "$1" --issue X-1 --body hi' "$P" "$S"`,
+    `printf '%s\\n' '"$D" "$S" --issue X-1 --body hi' | bash`,
+    "find . -name x -exec dispatch {} --issue X-1 \\;",
+    "printf '%s\\n' comment --issue X-1 --body hi | xargs dispatch",
+    "xargs -a args.txt dispatch",
+    "printf 'comment\\n' | xargs -I % dispatch % --issue X-1 --body hi",
+    'D=dispatch; nice "$D" comment --issue X-1 --body hi',
+    'D=dispatch; sudo -E "$D" comment --issue X-1 --body hi',
+    "sudo -u me nice -n 5 dispatch $SUB --issue X-1 --body hi",
+    "bash -c $'true\\ndispatch comment --issue X-1 --body hi'",
+    "printf 'true\\ndispatch comment --issue X-1 --body hi\\n' | bash",
+    "echo -e 'dispatch\\tcomment --issue X-1 --body hi' | sh",
+    "bash <<EOF\nSUB=comment\ndispatch \\$SUB --issue X-1 --body hi\nEOF",
+    "cd $X && bun /opt/x/dist/dispatch.js comment --issue X-1 --body hi",
+    "true; /opt/x/dist/dispatch.js ask --issue X-1 --question q",
+    "make && dispatch request-approval --issue X-1 --summary-file s.md",
+  ])
+    test(`outside the literal grammar, the call runs unread: ${JSON.stringify(command)}`, async () => {
+      await expectUnread(command);
+    });
   // The same review, B2: `dispatch` before a glob, brace or variable word was a write of unknown
-  // subcommand wherever it stood, so a search for the word was refused. Only a runner that runs
-  // `dispatch` makes it one now.
+  // subcommand wherever it stood, so a search for the word was refused. The gate scans no text
+  // now, so it refuses none.
   const SEARCHES = [
     "grep -rn dispatch packages/*/src",
     'grep -l dispatch "$f"',
@@ -2349,46 +2104,9 @@ console.log(JSON.stringify(args, null, 2));
     "command -v dispatch",
   ];
   test("B2: a search for the word dispatch with a glob, brace or variable after it is not refused", async () => {
-    for (const command of SEARCHES) expect(unreadableDispatchWrite(command)).toBeUndefined();
     const g = bind({ env: { ...STUB, OMP_ASKGATE: "block" }, cwd: work });
     for (const command of SEARCHES) expect(await g.bash("b2", command)).toBeUndefined();
     expect(g.entries).toHaveLength(0);
-  });
-  test("B2: dispatch that find -exec runs, its subcommand unknown, is still refused", () => {
-    for (const command of [
-      "find . -name x -exec dispatch {} --issue X-1 \\;",
-      "find . -name x -execdir dispatch $SUB --issue X-1 --body hi \\;",
-    ])
-      expect(unreadableDispatchWrite(command)).toMatchObject({ tool: "dispatch_unknown" });
-  });
-  // The attack review at 0cf9f1902, A4 and A5: a program that runs its arguments (`xargs`,
-  // `nice`, `sudo` and the like) hid a `dispatch` whose subcommand it supplies, and an expansion
-  // as the program it runs.
-  const RUNNERS: Array<[string, string]> = [
-    ["printf '%s\\n' comment --issue X-1 --body hi | xargs dispatch", "dispatch_unknown"],
-    ["xargs -a args.txt dispatch", "dispatch_unknown"],
-    ["printf 'comment\\n' | xargs -I % dispatch % --issue X-1 --body hi", "dispatch_unknown"],
-    ["printf 'comment\\n' | xargs -I SUB dispatch SUB --issue X-1 --body hi", "dispatch_unknown"],
-    ['D=dispatch; nice "$D" comment --issue X-1 --body hi', "dispatch_comment"],
-    ['D=dispatch; sudo -E "$D" comment --issue X-1 --body hi', "dispatch_comment"],
-    ['D=dispatch; stdbuf -oL "$D" comment --issue X-1 --body hi', "dispatch_comment"],
-    ['D=dispatch; setsid "$D" comment --issue X-1 --body hi', "dispatch_comment"],
-    ['D=dispatch; xargs "$D" comment --issue X-1 --body hi </dev/null', "dispatch_comment"],
-    ["sudo -u me nice -n 5 dispatch $SUB --issue X-1 --body hi", "dispatch_unknown"],
-  ];
-  for (const [command, tool] of RUNNERS)
-    test(`A4, A5: dispatch or an expansion that a runner runs is a write: ${command}`, async () => {
-      expect(unreadableDispatchWrite(command)).toMatchObject({ tool });
-      const g = bind({ env: { ...STUB, OMP_ASKGATE: "block" }, cwd: work });
-      const result = await g.bash("r", command);
-      expect(result?.block).toBe(true);
-      expect(result?.reason).toContain("Nothing in the call ran");
-      expect(g.entries.map((e) => [e.tool, e.outcome])).toEqual([[tool, "unreadable"]]);
-    });
-  test("A4: the reason for a subcommand xargs supplies names xargs", async () => {
-    const g = bind({ env: { ...STUB, OMP_ASKGATE: "block" }, cwd: work });
-    const reason = (await g.bash("x", "xargs -a args.txt dispatch"))?.reason ?? "";
-    expect(reason).toContain("the word after `dispatch` comes from `xargs` when the call runs");
   });
   test("A4, A5: a runner that runs no dispatch, or runs nothing, is not refused", async () => {
     const g = bind({ env: { ...STUB, OMP_ASKGATE: "block" }, cwd: work });
@@ -2403,43 +2121,6 @@ console.log(JSON.stringify(args, null, 2));
       expect(await g.bash("n", command)).toBeUndefined();
     expect(g.entries).toHaveLength(0);
   });
-  // The attack review, A2: escapes that the shell decodes before a shell runs the text hid the
-  // write from the scan.
-  const ESCAPED: Array<[string, string, string]> = [
-    [
-      "ANSI-C quoting given to bash -c",
-      "bash -c $'true\\ndispatch comment --issue X-1 --body hi'",
-      "dispatch_comment",
-    ],
-    [
-      "ANSI-C quoting given to eval",
-      "eval $'true\\ndispatch comment --issue X-1 --body hi'",
-      "dispatch_comment",
-    ],
-    [
-      "printf escapes piped into bash",
-      "printf 'true\\ndispatch comment --issue X-1 --body hi\\n' | bash",
-      "dispatch_comment",
-    ],
-    [
-      "echo -e escapes piped into sh",
-      "echo -e 'dispatch\\tcomment --issue X-1 --body hi' | sh",
-      "dispatch_comment",
-    ],
-    [
-      "an escaped expansion in an unquoted here-document bash reads",
-      "bash <<EOF\nSUB=comment\ndispatch \\$SUB --issue X-1 --body hi\nEOF",
-      "dispatch_unknown",
-    ],
-  ];
-  for (const [form, command, tool] of ESCAPED)
-    test(`A2: a write that escapes hide from the text is refused: ${form}`, async () => {
-      expect(unreadableDispatchWrite(command)).toMatchObject({ tool, wrapped: true });
-      const g = bind({ env: { ...STUB, OMP_ASKGATE: "block" }, cwd: work });
-      const result = await g.bash("e", command);
-      expect(result?.block).toBe(true);
-      expect(g.entries.map((e) => [e.tool, e.outcome])).toEqual([[tool, "unreadable"]]);
-    });
   // The attack review, A3: the CLI by path. `bin/dispatch` runs `bun …/dist/dispatch.js`, so that
   // bundle, run by bun or by its own path, is the CLI too.
   test("A3: the CLI bundle run by bun or by its path is reviewed in the literal form", async () => {
@@ -2459,18 +2140,6 @@ console.log(JSON.stringify(args, null, 2));
       ["dispatch_ask", "verdict"],
     ]);
   }, 30_000);
-  test("A3: the CLI bundle in a call AskGate cannot read is unreadable", () => {
-    for (const [command, tool] of [
-      ["cd $X && bun /opt/x/dist/dispatch.js comment --issue X-1 --body hi", "dispatch_comment"],
-      ["true; /opt/x/dist/dispatch.js ask --issue X-1 --question q", "dispatch_ask"],
-      [
-        "bash -c 'bun /opt/x/dist/dispatch.js \"comment\" --issue X-1 --body hi'",
-        "dispatch_comment",
-      ],
-      ["echo 'run dispatch.js comment later'", "dispatch_comment"],
-    ])
-      expect(unreadableDispatchWrite(command)).toMatchObject({ tool });
-  });
   test("dispatch issue is reviewed with --spec or --spec-file and not without", async () => {
     const g = bind({ env: STUB, cwd: work });
     await g.bash("plain", "dispatch issue --project P --title 'A new issue'");
@@ -2516,15 +2185,6 @@ console.log(JSON.stringify(args, null, 2));
     );
     expect(g.calls[4].user).toContain('"summary": "A live sync replaces the nightly export."');
   }, 30_000);
-  test("a request-approval joined to another command is unreadable like any other scoped write", async () => {
-    const g = bind({ env: { ...STUB, OMP_ASKGATE: "block" }, cwd: work });
-    const result = await g.bash(
-      "r",
-      "make && dispatch request-approval --issue X-1 --summary-file s.md"
-    );
-    expect(result?.block).toBe(true);
-    expect(result?.reason).toContain("send that `dispatch request-approval` again on its own");
-  });
   test("a command the agent already runs with --dry-run or --help sends nothing and is not reviewed", async () => {
     const g = bind({ env: STUB, cwd: work });
     await g.bash("a", "dispatch ask --dry-run --issue X-1 --question q");
@@ -2779,11 +2439,182 @@ console.log(JSON.stringify(args, null, 2));
     expect(result.timedOut).toBe(true);
     expect(Date.now() - began).toBeLessThan(2_000);
   });
-  test("a subagent's dispatch command is never gated or recorded", async () => {
+  test("a subagent's dispatch command is never reviewed or recorded, and gets an argv-only marker", async () => {
     const g = bind({ env: STUB, cwd: work, kind: "sub" });
     expect(await g.bash("b1", ASK)).toBeUndefined();
     expect(g.dryRuns).toHaveLength(0);
     expect(g.entries).toHaveLength(0);
+    // A task subagent shares its parent's session id, so the CLI asks it for a marker too.
+    expect(markersIn(g.store)).toMatchObject([
+      {
+        argv: argvDigest(["ask", "--issue", "X-1", "--question-file", "-"]),
+        args: null,
+        outcome: "subagent",
+        toolCallId: "b1",
+      },
+    ]);
+    // A call outside the grammar gets none, from a subagent as from the main agent.
+    expect(await g.bash("b2", "dispatch comment --issue X-1 --body hi | cat")).toBeUndefined();
+    expect(markersIn(g.store)).toHaveLength(1);
+  });
+
+  // The marker the CLI consumes before it posts a gated write: minted for each literal call the
+  // gate lets run, never for one it refuses, and released when the call ends.
+  describe("markers", () => {
+    const QUESTION_ARGS = { issue: "X-1", question: QUESTION };
+    const ASK_ARGV = ["ask", "--issue", "X-1", "--question-file", "-"];
+
+    test("an allowed write mints one owner-only marker: the argv the CLI receives, bound to its dry run's arguments", async () => {
+      const g = bind({ env: STUB, cwd: work });
+      expect(await g.bash("m1", ASK)).toBeUndefined();
+      const [marker, ...rest] = markersIn(g.store);
+      expect(rest).toEqual([]);
+      expect(marker).toMatchObject({
+        v: 1,
+        argv: argvDigest(ASK_ARGV),
+        args: argsDigest(QUESTION_ARGS),
+        toolCallId: "m1",
+        outcome: "verdict",
+      });
+      expect(marker?.name.startsWith(`${argvDigest(ASK_ARGV)}.`)).toBe(true);
+      expect(fs.statSync(path.join(g.store, "markers", marker?.name ?? "")).mode & 0o777).toBe(
+        0o600
+      );
+      // The marker is nowhere in the command the agent's transcript shows.
+      expect(g.entries[0]?.argsDigest).toBe(argsDigest(QUESTION_ARGS));
+    });
+
+    test("a write that names a file is keyed by the command that names the snapshot, the one that runs", async () => {
+      fs.writeFileSync(path.join(work, "marker-note.md"), "Body from a file.\n");
+      const g = bind({ env: STUB, cwd: work });
+      const result = await g.bash("m2", "dispatch comment --issue X-1 --body-file marker-note.md");
+      const ran = result?.input?.command;
+      expect(ran).toContain("/askgate-");
+      const argv = core.commandArgv(ran);
+      expect(argv?.at(-1)).toContain("/askgate-");
+      expect(markersIn(g.store)).toMatchObject([
+        {
+          argv: argvDigest(argv ?? []),
+          args: argsDigest({ issue: "X-1", body: "Body from a file.\n" }),
+          outcome: "verdict",
+        },
+      ]);
+    });
+
+    test("block mode mints none for a revise, an unreadable file or a session with no model role; warn mode's revise mints a bound one", async () => {
+      const revise = async (): Promise<Completion> => ({ text: REVISE });
+      const block = bind({ env: { ...STUB, OMP_ASKGATE: "block" }, cwd: work, complete: revise });
+      expect((await block.bash("r", ASK))?.block).toBe(true);
+      expect(
+        (await block.bash("u", "dispatch ask --issue X-1 --question-file /dev/stdin"))?.block
+      ).toBe(true);
+      expect(markersIn(block.store)).toEqual([]);
+      const noRole = bind({ env: { ...STUB, OMP_ASKGATE: "warn" }, cwd: work, roles: {} });
+      expect((await noRole.bash("n", ASK))?.block).toBe(true);
+      expect(markersIn(noRole.store)).toEqual([]);
+      const warn = bind({ env: { ...STUB, OMP_ASKGATE: "warn" }, cwd: work, complete: revise });
+      expect((await warn.bash("w", ASK))?.additionalContext).toContain("The call ran.");
+      expect(markersIn(warn.store)).toMatchObject([
+        { argv: argvDigest(ASK_ARGV), args: argsDigest(QUESTION_ARGS), outcome: "verdict" },
+      ]);
+    });
+
+    test("a call no verdict stands behind mints an argv-only marker for the agent's own command, its override flag removed", async () => {
+      const failed = bind({ env: { ...STUB, OMP_ASKGATE: "block" }, cwd: work });
+      // The stub refuses `--fail` at its dry run: the review fails, and the call runs as written.
+      await failed.bash("e", "dispatch message --issue X-1 --fail --advisor-rebuttal 'a link'");
+      const noVerdict = bind({
+        env: { ...STUB, OMP_ASKGATE: "block" },
+        cwd: work,
+        complete: async () => ({ text: "I think it is fine." }),
+      });
+      await noVerdict.bash("v", ASK);
+      const unreadable = bind({ env: { ...STUB, OMP_ASKGATE: "warn" }, cwd: work });
+      await unreadable.bash("u", "dispatch ask --issue X-1 --question-file /dev/stdin");
+      expect([failed, noVerdict, unreadable].map((g) => markersIn(g.store))).toMatchObject([
+        [
+          {
+            argv: argvDigest(["message", "--issue", "X-1", "--fail"]),
+            args: null,
+            outcome: "error",
+          },
+        ],
+        [{ argv: argvDigest(ASK_ARGV), args: null, outcome: "no-verdict" }],
+        [
+          {
+            argv: argvDigest(["ask", "--issue", "X-1", "--question-file", "/dev/stdin"]),
+            args: null,
+            outcome: "unreadable",
+          },
+        ],
+      ]);
+    });
+
+    test("a rebuttal binds the dry run's arguments, its flag gone from the argv", async () => {
+      const g = bind({ env: { ...STUB, OMP_ASKGATE: "block" }, cwd: work });
+      await g.bash("r", "dispatch comment --issue X-1 --body hi --advisor-rebuttal 'a link'");
+      expect(markersIn(g.store)).toMatchObject([
+        {
+          argv: argvDigest(["comment", "--issue", "X-1", "--body", "hi"]),
+          args: argsDigest({ issue: "X-1", body: "hi" }),
+          outcome: "rebuttal",
+        },
+      ]);
+    });
+
+    test("an upload that is no markdown document, and an ungated command, mint none", async () => {
+      fs.writeFileSync(path.join(work, "marker-shot.png"), "image bytes");
+      const g = bind({ env: STUB, cwd: work });
+      await g.bash("p", "dispatch artifact --issue DSP-1 --name shot.png --path marker-shot.png");
+      await g.bash("s", "dispatch search --query landed");
+      await g.bash("h", "dispatch comment --issue X-1 --help");
+      expect(markersIn(g.store)).toEqual([]);
+    });
+
+    test("a marker is released when its call ends or reports its result, and on a background call only at shutdown", async () => {
+      const g = bind({ env: STUB, cwd: work });
+      await g.bash("ended", ASK);
+      await g.bash("reported", ASK);
+      await g.bash("background", ASK);
+      expect(
+        markersIn(g.store)
+          .map((m) => m.toolCallId)
+          .sort()
+      ).toEqual(["background", "ended", "reported"]);
+      await g.event("tool_execution_end", { toolCallId: "ended" });
+      await g.event("tool_result", { toolCallId: "reported", content: [] });
+      const running = { async: { state: "running" } };
+      await g.event("tool_result", { toolCallId: "background", details: running, content: [] });
+      await g.event("tool_execution_end", {
+        toolCallId: "background",
+        result: { details: running },
+      });
+      expect(markersIn(g.store).map((m) => m.toolCallId)).toEqual(["background"]);
+      await g.event("session_shutdown");
+      expect(markersIn(g.store)).toEqual([]);
+    });
+
+    test("the gate records its mode in the store for the CLI, on every main-agent bash or eval call", async () => {
+      const warn = bind({ env: STUB, cwd: work });
+      await warn.bash("n", "ls");
+      expect(fs.readFileSync(path.join(warn.store, "mode"), "utf8")).toBe("warn");
+      let arm = false;
+      const switching = bind({ env: STUB, cwd: work, entries: () => [experimentsEntry(arm)] });
+      await switching.device("e", "eval", { language: "js", code: "1" });
+      expect(fs.readFileSync(path.join(switching.store, "mode"), "utf8")).toBe("warn");
+      arm = true;
+      await switching.bash("n", "ls");
+      expect(fs.readFileSync(path.join(switching.store, "mode"), "utf8")).toBe("block");
+    });
+
+    test("a marker that cannot be minted refuses the call, naming why", async () => {
+      const store = path.join(SUITE_TMP, `not-a-directory-${Date.now()}`);
+      fs.writeFileSync(store, "a file where the store goes");
+      const g = bind({ env: { ...STUB, OMP_ASKGATE: "warn" }, cwd: work, store });
+      const result = await g.bash("m", ASK);
+      expect(result?.block).toBe(true);
+      expect(result?.reason).toContain("could not mint one");
+    });
   });
 
   describe("dispatch artifact uploads of markdown (Task 4.3)", () => {
@@ -3320,15 +3151,8 @@ console.log(JSON.stringify(args, null, 2));
       ).toBeUndefined();
       expect(g.entries).toHaveLength(0);
     });
-    test("a markdown upload piped into a reader is refused: the pipe is outside the literal grammar", async () => {
-      const g = bind({ env: { ...STUB, OMP_ASKGATE: "block" }, cwd: work });
-      const result = await g.bash(
-        "u7",
-        "dispatch artifact --issue DSP-1 --name brief.md --path brief.md | cat"
-      );
-      expect(result?.block).toBe(true);
-      expect(g.dryRuns).toHaveLength(0);
-      expect(g.entries).toMatchObject([{ tool: "dispatch_artifact", outcome: "unreadable" }]);
+    test("a markdown upload piped into a reader is outside the literal grammar and runs unread", async () => {
+      await expectUnread("dispatch artifact --issue DSP-1 --name brief.md --path brief.md | cat");
     });
     // What Dispatch stores as a markdown document: an upload of inline text (`--content`,
     // `--content-file`), whatever its name, or a `--path` file the CLI sends as text/markdown (its
@@ -3359,22 +3183,13 @@ console.log(JSON.stringify(args, null, 2));
       expect(g.calls).toHaveLength(0);
       expect(g.entries).toHaveLength(0);
     });
-    test("(k) an expansion in --name or --path is unreadable, in every mode", async () => {
-      const expanded = [
+    test("(k) an expansion in --name or --path leaves the upload outside the literal grammar", async () => {
+      for (const command of [
         'dispatch artifact --issue DSP-1 --name "$NAME" --path shot.png',
         "dispatch artifact --issue DSP-1 --name $NAME --path shot.png",
         'dispatch artifact --issue DSP-1 --name shot.png --path "$F"',
-      ];
-      for (const mode of ["warn", "block"]) {
-        const g = bind({ env: { ...STUB, OMP_ASKGATE: mode }, cwd: work });
-        for (const [index, command] of expanded.entries()) {
-          unreadableText(await g.bash(`x${index}`, command), mode);
-        }
-        expect(g.dryRuns).toHaveLength(0);
-        expect(g.entries.map((e) => [e.tool, e.outcome])).toEqual(
-          Array(expanded.length).fill(["dispatch_artifact", "unreadable"])
-        );
-      }
+      ])
+        await expectUnread(command);
     });
     test("(l) inline text is a markdown document whatever its name, and so is a --path file named .md", async () => {
       const g = bind({ env: STUB, cwd: work });
@@ -3399,132 +3214,50 @@ console.log(JSON.stringify(args, null, 2));
 });
 
 // The attack review at 0cf9f1902, A1: an eval cell that starts the CLI as a process of its own
-// posts with no `bash` call for the gate to see. The gate now reads the cell's code.
+// posts with no `bash` call for the gate to see. The gate no longer reads cells: such a process
+// carries no marker, and the CLI refuses its gated write (the real-binary rows in
+// askgate-omp.test.ts drive both languages).
 describe("eval cells that run the dispatch CLI (A1)", () => {
   /** Main's spec scorer fixture of an agent that ran the CLI from a Python cell (score.test.ts). */
   const SCORER_PYTHON =
     "import subprocess\nr = subprocess.run(['dispatch', 'doc-edit', '--issue', 'LWEVAL-7', '--artifact', 'spec', '--ops-json-file', 'ops.json'], capture_output=True, text=True)\nprint(r.stdout)";
-  const CELLS: Array<[string, string, string, string]> = [
+  const CELLS: Array<[string, string]> = [
+    ["js", 'Bun.spawnSync(["dispatch", "comment", "--issue", "X-1", "--body", "hi"])'],
+    ["js", 'require("node:child_process").execSync("dispatch comment --issue X-1 --body hi")'],
+    ["js", 'spawnSync("dispatch", ["message", "--issue", "X-1", "--body", "hi"])'],
     [
-      "Bun.spawnSync with an argv",
-      "js",
-      'Bun.spawnSync(["dispatch", "comment", "--issue", "X-1", "--body", "hi"])',
-      "dispatch_comment",
-    ],
-    [
-      "Bun.spawn with a cmd field",
-      "js",
-      'const p = Bun.spawn({ cmd: ["dispatch", "ask", "--issue", "X-1", "--question", "q"] });',
-      "dispatch_ask",
-    ],
-    [
-      "child_process execSync with a shell string",
-      "js",
-      'require("node:child_process").execSync("dispatch comment --issue X-1 --body hi")',
-      "dispatch_comment",
-    ],
-    [
-      "spawnSync with a program and its arguments",
-      "js",
-      'spawnSync("dispatch", ["message", "--issue", "X-1", "--body", "hi"])',
-      "dispatch_message",
-    ],
-    [
-      "the bundle run by bun",
-      "js",
-      'Bun.spawnSync(["bun", "/opt/pi-envoy/dist/dispatch.js", "comment", "--issue", "X-1", "--body", "hi"])',
-      "dispatch_comment",
-    ],
-    [
-      "a subcommand from a variable",
-      "js",
-      'const sub = "comment";\nBun.spawnSync(["dispatch", sub, "--issue", "X-1", "--body", "hi"])',
-      "dispatch_unknown",
-    ],
-    [
-      "a template string",
-      "js",
-      `execSync(\`dispatch $${"{"}sub} --issue X-1 --body hi\`)`,
-      "dispatch_unknown",
-    ],
-    [
-      "Python subprocess.run with DISPATCH_HOST set",
       "py",
       'subprocess.run(["dispatch", "comment", "--issue", "X-1", "--body", "hi"], env={**os.environ, "DISPATCH_HOST": "omp"})',
-      "dispatch_comment",
     ],
-    ["Python, the scorer's fixture", "py", SCORER_PYTHON, "dispatch_doc_edit"],
+    ["py", SCORER_PYTHON],
+    ["py", 'os.system("dispatch ask --issue X-1 --question q")'],
+    ["py", 'print("dispatch comment --issue X-1 --body hi")'],
     [
-      "Python os.system",
-      "py",
-      'os.system("dispatch ask --issue X-1 --question q")',
-      "dispatch_ask",
-    ],
-    [
-      "a Python f-string",
-      "py",
-      'subprocess.run(f"dispatch {sub} --issue X-1 --body hi", shell=True)',
-      "dispatch_unknown",
+      "js",
+      `return await tool.bash({ command: "/opt/pi-envoy/bin/dispatch ask --issue DSP-1 --question 'Ship the release today?'" })`,
     ],
   ];
-  for (const [form, language, code, tool] of CELLS)
-    test(`refused in block mode, noted in warn mode: ${form}`, async () => {
-      expect(core.evalDispatchWrite({ language, code })).toMatchObject({ tool, cell: true });
-      const block = bind({ env: { OMP_ASKGATE: "block" } });
-      const refused = await block.device("e", "eval", { language, code });
-      expect(refused?.block).toBe(true);
-      expect(refused?.reason).toContain("Nothing in the call ran");
-      expect(refused?.reason).toContain("one `bash` call");
-      const warn = bind({ env: { OMP_ASKGATE: "warn" } });
-      const noted = await warn.device("e", "eval", { language, code });
-      expect(noted?.block).toBeUndefined();
-      expect(noted?.additionalContext).toContain("The call ran unreviewed");
-      for (const g of [block, warn]) {
-        expect(g.calls).toHaveLength(0);
-        expect(g.entries.map((e) => [e.tool, e.outcome])).toEqual([[tool, "unreadable"]]);
-      }
+  test("no cell is refused, recorded or given a marker, in any mode or by a gate that did not load", async () => {
+    for (const mode of ["warn", "block"]) {
+      const g = bind({ env: { OMP_ASKGATE: mode } });
+      for (const [index, [language, code]] of CELLS.entries())
+        expect(await g.device(`c${index}`, "eval", { language, code })).toBeUndefined();
+      expect(g.calls).toHaveLength(0);
+      expect(g.entries).toHaveLength(0);
+      expect(markersIn(g.store)).toEqual([]);
       const refuse = core.loadFailureGate(
         new Error("a host module did not load"),
-        { env: { OMP_ASKGATE: "warn" }, configFile: CONFIG_FILE },
+        { env: { OMP_ASKGATE: mode }, configFile: CONFIG_FILE },
         { appendEntry: () => {} }
       );
-      expect(
-        refuse({ toolName: "eval", toolCallId: "l", input: { language, code } }, {
-          agent: { kind: "main" },
-          sessionManager: { getEntries: () => [] },
-        } as never)?.block
-      ).toBe(true);
-    });
-  test("each cell of an input that holds several is read", () => {
-    expect(
-      core.evalDispatchWrite({
-        cells: [
-          { language: "js", code: "1 + 1" },
-          { language: "py", code: 'os.system("dispatch comment --issue X-1 --body hi")' },
-        ],
-      })
-    ).toMatchObject({ tool: "dispatch_comment", cell: true });
-  });
-  test("a cell that only mentions dispatch, or calls the bash tool, is not refused", async () => {
-    const g = bind({ env: { OMP_ASKGATE: "block" } });
-    for (const [language, code] of [
-      ["js", "// dispatch comment --issue X-1 runs from bash, not from here\n1"],
-      ["js", 'console.log("see dispatch docs")'],
-      ["py", 'print("dispatch comment --issue X-1 --body hi")'],
-      ["js", 'Bun.spawnSync(["dispatch", "search", "--query", "x"])'],
-      ["js", 'Bun.spawnSync(["rg", "dispatch", "src"])'],
-      ["js", `execSync(\`$${"{"}cmd} $${"{"}args}\`)`],
-      [
-        "js",
-        `return await tool.bash({ command: "/opt/pi-envoy/bin/dispatch ask --issue DSP-1 --question 'Ship the release today?'" })`,
-      ],
-      [
-        "py",
-        `print(await tool.bash({"command": "/opt/pi-envoy/bin/dispatch ask --issue DSP-1 --question 'Ship the release today?'"}))`,
-      ],
-    ])
-      expect(await g.device("c", "eval", { language, code })).toBeUndefined();
-    expect(g.entries).toHaveLength(0);
+      for (const [language, code] of CELLS)
+        expect(
+          refuse({ toolName: "eval", toolCallId: "l", input: { language, code } }, {
+            agent: { kind: "main" },
+            sessionManager: { getEntries: () => [] },
+          } as never)
+        ).toBeUndefined();
+    }
   });
 });
 
@@ -4012,7 +3745,7 @@ describe("askgate.ts, the entry", () => {
         );
       for (const command of [
         "dispatch ask --issue X-1 --question 'Ship it?'",
-        "dispatch comment --issue X-1 --body b | cat",
+        "dispatch comment --issue X-1 --body b",
         "dispatch artifact --issue X-1 --name-file n.txt --path p.txt",
       ]) {
         const result = await bash(command);
@@ -4027,7 +3760,10 @@ describe("askgate.ts, the entry", () => {
         mainCtx()
       );
       expect(device?.block).toBe(true);
-      // Not a write it reviews, a subagent's write, and an upload that is no markdown document pass.
+      // Not a write it reviews, a subagent's write, an upload that is no markdown document, and a
+      // call outside the literal grammar pass: the CLI refuses each gated write in them, since a
+      // gate that did not load mints no marker.
+      expect(await bash("dispatch comment --issue X-1 --body b | cat")).toBeUndefined();
       expect(await bash("ls -la")).toBeUndefined();
       expect(await bash("dispatch read --issue X-1")).toBeUndefined();
       expect(await bash("dispatch ask --issue X-1 --question q", "sub")).toBeUndefined();

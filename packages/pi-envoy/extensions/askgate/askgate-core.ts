@@ -6,19 +6,24 @@
 // What this is not: AskGate reviews the writes of a cooperating agent, and it is no sandbox. A
 // process running as the same user defeats it. It can replace a snapshot's bytes between the
 // review and the open (the snapshot is 0600 in a 0700 directory, which keeps out other users, not
-// this one), turn the gate off in its own envoy.json, point the session at another envoy.json
+// this one), turn the gate off in its own envoy.json, or point the session at another envoy.json
 // through OMP_PROFILE, PI_CODING_AGENT_DIR, ENVOY_CONFIG_FILE, XDG_CONFIG_HOME or HOME in the
-// launching shell (the variables `envoyConfigPath` reads, in that order), or
-// call Dispatch's HTTP API and send no command at all. Every check here is for a write an agent
-// meant to send; none of them is weakened, and none is added for an attacker of that kind.
+// launching shell (the variables `envoyConfigPath` reads, in that order). Every check here is for
+// a write an agent meant to send; none of them is weakened, and none is added for an attacker of
+// that kind.
 //
-// What the scan does not catch, and is not made to: an alias or a shell function defined in the
-// call or left in the persistent shell; a brace or a glob as the program word (`{,dispatch}`,
-// `dispatc?`); a script another tool writes that the call then runs; a copy or a link of the CLI
-// under another name; a command the call builds at run time, whose words its text does not hold;
-// text nested deeper than NESTED_DEPTH; and any other program that reaches Dispatch's HTTP API.
-// A cooperating agent writes none of these. Precision comes first: the gate must not refuse a
-// call that holds no Dispatch write, since a false refusal in block mode stops real work.
+// Enforcement is the `dispatch` CLI's, not a scan of the call's text. The gate reads one form, the
+// literal grammar below, and refuses no call by reading any other: a call in another form runs as
+// written. For each literal call it lets run it mints one single-use marker
+// (`@legion/envoy-client/askgate-marker`), keyed by the argv the CLI will receive and, behind a
+// review or a deliberate pass, bound to the digest of the dry run's arguments. The CLI posts a
+// gated write in a session whose record a live Oh My Pi process keeps (envoy.ts writes it) only
+// when it consumes such a marker, so a write sent in any other form, from a pipe, a script,
+// `python3 -c`, an eval cell's process or anything else, is refused when it runs. The CLI's check
+// does not cover a direct HTTP request to Dispatch, an older or a different CLI, or a same-user
+// process that removes the record or a marker, acts as another session id or state directory, or
+// otherwise goes around the CLI. Precision comes first: the gate must not refuse a call that holds
+// no Dispatch write, since a false refusal in block mode stops real work.
 //
 // Scope: eight calls on the command line and six of them as devices, each recorded under one tool
 // name (dispatch_ask, …).
@@ -70,51 +75,20 @@
 //     `unreadable`, since a failed lookup is no proof that the write would fail. An upload is
 //     judged against failure 10 alone (askgate-upload.md), since a plan or a report is long by
 //     nature.
-//   - A `bash` call that holds a scoped `dispatch` write in any other form — after another
-//     command, with an expansion, a redirect or a pipe, sent to the background, beside a second
-//     reviewed write, or calling `dispatch` by a path the shell expands (`$HOME/…/dispatch`) or
-//     by a name with a backslash in it (`d\ispatch`) — or a scoped subcommand run by a program an
-//     expansion names (`$D comment …`, `"${D}" ask …`, `$(command -v dispatch) …`), or a
-//     `dispatch`, or a program an expansion names, whose subcommand an expansion names
-//     (`dispatch $SUB …`, `"$D" "$S" …`), is `unreadable`. So is an `issue` or an `artifact` that
-//     holds a word only bash resolves (`$F`, a glob, a brace), since that word may be its
-//     `--spec` or its markdown name. So is a write in text another command runs: a shell's `-c`
-//     operand (`$'…'` decoded), `eval`'s arguments, a here-document, a here-string or a pipe a
-//     shell reads (`… | bash`, with `printf` and `echo -e` escapes decoded and an unquoted
-//     here-document's backslashes removed), each read with its quotes removed as that command
-//     removes them. Only text a shell runs is read that way: in any other text (a quoted word,
-//     a here-document `cat` writes, a Makefile line) the scan looks for `dispatch` as the
-//     program word alone, so `echo "$a $b"`, `msg="$x $y $z"` and `perl -pe 's/(\w+) (\w+)/$2
-//     $1/'` hold no write. A program word of unknown subcommand (`dispatch` before a glob, a
-//     brace or an expansion) is a write only where a runner runs it: the runner table (`xargs`,
-//     `sudo`, `env`, `nice`, `nohup`, `timeout`, `stdbuf`, `setsid`, `command`, `exec`, `time`)
-//     and `find -exec`/`-execdir`, each prefix's own options read as its parser reads them, so
-//     `grep -rn dispatch packages/*/src`, `grep -l dispatch "$f"` and `rg dispatch src | head`
-//     hold none. The CLI is also `bun <path>/dispatch.js` and any path whose last segment is
-//     `dispatch` or `dispatch.js`. An `eval` call is read too (`evalDispatchWrite`): a cell that
-//     starts the CLI as a process of its own — a JS or Python spawn, exec, `subprocess` or `os`
-//     call with an argv array or a shell string, or the Bun shell — sends with no `bash` call to
-//     read, so it is unreadable; a cell that only names `dispatch` in text, or calls the bash
-//     tool, is not. In `block` mode the call is refused before anything
-//     in it runs; in `warn` mode it runs and the same explanation comes back as additional
-//     context, with the entry's decision `allow`. The explanation states the literal grammar and
-//     tells the agent to send that `dispatch` command on its own; when the word that runs it or
-//     names its subcommand is what AskGate cannot read, it names the characters in it
-//     (`unreadableDispatchWrite`, a scan aware of quotes, backslashes, here-documents and command
-//     substitutions, for a scoped write at a command position, then of each word, `eval`
-//     argument list and here-document body as a script of its own, NESTED_DEPTH levels deep, then
-//     of the call's own text for a write another command would run). The
-//     entry reads `unreadable`; it never counts toward the halt. A halt, or a session the gate
-//     would skip (a primary on another provider), lets it run; a session with no model role
-//     refuses it in both modes, as a gate that did not load does: neither can review anything,
-//     and a gate that cannot review is no off switch. A call that holds no Dispatch write is
-//     never refused: every rule above asks first whether a gated write could post.
+//   - Any other call is not the gate's: a `bash` call in any other form, or an `eval` call, runs
+//     with no entry and no marker, and the CLI refuses a gated write it sends. The gate records
+//     the mode in its marker store at each main-agent `bash` or `eval` call (the CLI reads it:
+//     `warn` lets an unmarked write post with a warning), and envoy.ts records an `unmarked`
+//     entry for each such write the CLI logged.
 //   - `write xd://<device>` calls, seen on the nested `tool_call` event the device wrapper emits
 //     with `toolName = <device>` and the validated arguments, for dispatch_ask, dispatch_message,
 //     dispatch_edit_ask, dispatch_comment, dispatch_doc_edit, and dispatch_issue when its
 //     arguments carry `spec`. Only sessions started before the `dispatch` CLI still have them.
+//     They never reach the CLI, so they take no marker.
 // Top-level sessions only (`ctx.agent.kind === "main"`); the factory is rebound in every
-// subagent, which this check keeps out.
+// subagent, which this check keeps out of review. A task subagent shares its parent's session id,
+// so its literal `dispatch` write gets an argv-only marker with no review and no entry, as before
+// the CLI asked for one.
 //
 // The switch is not here: the session's envoy.json turns AskGate off (`askgate.enabled`, read in
 // envoy.ts), and with it off nothing is bound. The mode, read for each gated call: OMP_ASKGATE when
@@ -186,6 +160,7 @@ import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { gatedWrite, mintMarker, setStoreMode } from "@legion/envoy-client/askgate-marker";
 import requestTemplate from "./askgate-request.md" with { type: "text" };
 import systemTemplate from "./askgate-system.md" with { type: "text" };
 import uploadRule from "./askgate-upload.md" with { type: "text" };
@@ -304,10 +279,11 @@ export interface GateEntry {
   path: string;
   toolCallId: string;
   /**
-   * `revise`: the gate did not pass the call as sent (a revise verdict, or in block mode a call given up
-   * without a verdict, or in any mode a command it cannot read or a gate that did not load). A call was
-   * refused exactly when this is `revise` and either `verdictMode` is `block` or `outcome` is
-   * `unreadable`, `no-model-role` or `load-failed`.
+   * `revise`: the call was not passed as sent (a revise verdict; in block mode a call given up
+   * without a verdict, a literal call whose file the gate could not capture, or a gated write the
+   * CLI found no marker for, `unmarked`; in any mode no model role or a gate that did not load). A
+   * call was refused exactly when this is `revise` and either `verdictMode` is `block` or
+   * `outcome` is `no-model-role` or `load-failed`.
    */
   decision: "allow" | "revise";
   outcome:
@@ -323,7 +299,8 @@ export interface GateEntry {
     | "abandoned"
     | "shutdown"
     | "unreadable"
-    | "load-failed";
+    | "load-failed"
+    | "unmarked";
   verdictMode: Mode;
   reason?: string;
   rebuttal?: string;
@@ -396,6 +373,12 @@ interface Deps {
   handlerCeilingMs: () => number;
   /** Runs a `dispatch` command's --dry-run script under bash; `spawnDryRun` in the entry. */
   dryRun: (script: string, opts: DryRunOptions) => Promise<DryRunResult>;
+  /**
+   * This process's AskGate marker store (`@legion/envoy-client/askgate-marker`): the directory
+   * the session's record names, where the gate mints a marker for each literal call it lets run
+   * and records its mode, and where the CLI consumes the marker.
+   */
+  markerStore: string;
 }
 // Handlers of any event shape register here (`never` parameters accept every typed handler), so the
 // fork's ExtensionAPI is assignable to it.
@@ -553,10 +536,6 @@ function headLine(
  * expands (`~`, globs, braces, `$`), interprets (`\`) or reads as an operator. */
 const LITERAL_UNQUOTED = /^[A-Za-z0-9._/+@%:,=-]$/;
 
-/** The characters that start an expansion, unquoted or in double quotes: a program word holding
- * one names a program AskGate cannot know. */
-const EXPANSIONS = "$`";
-
 /** Whether a program word's value names the Dispatch CLI: its last path segment is `dispatch`,
  * or `dispatch.js`, the bundle the plugin's `bin/dispatch` runs with bun. */
 const namesCli = (value: string): boolean =>
@@ -702,8 +681,8 @@ function literalWords(text: string): boolean {
   return true;
 }
 
-/** A word as written and with its quotes removed; `hereString` marks the word after `<<<`. */
-type Word = { raw: string; value: string; start?: number; end?: number; hereString?: true };
+/** A word as written and with its quotes removed. */
+type Word = { raw: string; value: string; start?: number; end?: number };
 
 /**
  * Whether `name` with `flags` is a write the gate reviews: a scoped command, with no flag under
@@ -719,27 +698,6 @@ function reviewedWrite(name: string, flags: readonly Word[]): boolean {
 }
 
 const flagName = (flag: Word) => flag.value.split("=", 1)[0];
-
-/**
- * The characters that leave a word's value to bash alone: an expansion, a glob or a brace. A
- * backslash or a quote is not one: bash removes it, and the scan removes it the same way.
- */
-const UNRESOLVED = "$`*?[{";
-const unresolvedCharacters = (word: Word): string[] =>
-  [...new Set(scanWord(word.raw, 0).unread)].filter((char) => UNRESOLVED.includes(char));
-
-/**
- * `reviewedWrite` for a call AskGate cannot read, where a word only bash can resolve is no proof
- * that a conditional write is out of scope: on `issue` it may be `--spec`, and on `artifact` it may
- * be inline text or a markdown name or path (`F='--spec=x'; dispatch issue … $F`). The literal
- * grammar keeps `reviewedWrite`: none of its words is unresolved.
- */
-function mayBeReviewedWrite(name: string, flags: readonly Word[]): boolean {
-  if (reviewedWrite(name, flags)) return true;
-  if (name !== SPEC_ONLY_COMMAND && name !== UPLOAD_COMMAND) return false;
-  if (flags.some((flag) => NO_SEND_FLAGS.includes(flag.value))) return false;
-  return flags.some((flag) => unresolvedCharacters(flag).length > 0);
-}
 
 /**
  * Whether an upload's words leave it possibly a markdown document: inline text, a name or path read
@@ -770,15 +728,6 @@ function uploadMayBeDocument(flags: readonly Word[]): boolean {
     !file.literal ||
     MARKDOWN_NAME.test(named.value) ||
     MARKDOWN_PATH.test(file.value)
-  );
-}
-
-/** Whether an upload's arguments, as its dry run prints them, make a markdown document. */
-function uploadIsDocument(args: Input): boolean {
-  return (
-    typeof args.content === "string" ||
-    (typeof args.name === "string" && MARKDOWN_NAME.test(args.name)) ||
-    (typeof args.path === "string" && MARKDOWN_PATH.test(args.path))
   );
 }
 
@@ -941,7 +890,7 @@ function fileInputs(
 /**
  * The `bash` command as a scoped `dispatch` call, or undefined for any other command. Only the
  * literal grammar of one call is read (`dispatchCommandHead`). A call in any other form is no
- * scoped call; the gate then refuses it when `unreadableDispatchWrite` finds a write in it.
+ * scoped call: it runs, and the CLI refuses a gated write in it, which carries no marker.
  */
 export function scopedCommand(command: unknown): ScopedCommand | undefined {
   if (typeof command !== "string") return undefined;
@@ -1005,904 +954,27 @@ export function scopedCommand(command: unknown): ScopedCommand | undefined {
   };
 }
 
-/**
- * Words that may stand before a command's name without being it: assignments are matched apart. A
- * set, not a record: `then` as an object key would make the table a thenable.
- */
-const COMMAND_PREFIXES: ReadonlySet<string> = new Set([
-  "!",
-  "{",
-  "then",
-  "do",
-  "else",
-  "elif",
-  "if",
-  "while",
-  "until",
-  "time",
-  "command",
-  "exec",
-  "nohup",
-  "env",
-  "timeout",
-]);
-/** The prefixes that are programs of their own, also called by a path (`/usr/bin/env`). Each runs
- * the command its arguments name. */
-const PROGRAM_PREFIXES: Record<string, true> = {
-  env: true,
-  nohup: true,
-  timeout: true,
-  time: true,
-  sudo: true,
-  nice: true,
-  stdbuf: true,
-  setsid: true,
-  xargs: true,
-};
-/**
- * How a prefix that runs the command after it reads its own options, as its parser (getopt, or
- * bash's for a builtin) reads them: up to `--`, which it consumes, or the first word that is no
- * option. `values` are the short options that take a value (the rest of the word, else the next
- * word), `optional` the short options whose value is only the rest of the word (`xargs -i`), and
- * `longValues` the long ones (after `=`, else the next word). An option in `runsNothing`
- * makes the prefix run nothing (`command -v` only prints), `split` names the options whose value
- * holds the command's own words (`env -S`), `dash` lets a lone `-` be an option (`env -`, as
- * `env -i`), and `operands` counts the words after the options that are not the command
- * (`timeout`'s duration). Every other word that starts with `-` there is an option with no value.
- */
-interface PrefixOptions {
-  values?: string;
-  optional?: string;
-  longValues?: readonly string[];
-  runsNothing?: string;
-  split?: readonly string[];
-  dash?: true;
-  operands?: number;
-}
-const PREFIX_OPTIONS: Record<string, PrefixOptions> = {
-  command: { runsNothing: "vV" },
-  exec: { values: "a" },
-  nohup: {},
-  time: { values: "fo", longValues: ["--format", "--output"] },
-  env: {
-    values: "uCSa",
-    longValues: ["--unset", "--chdir", "--split-string", "--argv0"],
-    split: ["-S", "--split-string"],
-    dash: true,
-  },
-  timeout: { values: "sk", longValues: ["--signal", "--kill-after"], operands: 1 },
-  sudo: {
-    values: "CDghprRtTuU",
-    longValues: [
-      "--close-from",
-      "--chdir",
-      "--group",
-      "--host",
-      "--prompt",
-      "--chroot",
-      "--role",
-      "--type",
-      "--command-timeout",
-      "--user",
-      "--other-user",
-    ],
-    runsNothing: "eKlvV",
-  },
-  nice: { values: "n", longValues: ["--adjustment"] },
-  stdbuf: { values: "ioe", longValues: ["--input", "--output", "--error"] },
-  setsid: {},
-  xargs: {
-    values: "adEILnPs",
-    optional: "eil",
-    longValues: [
-      "--arg-file",
-      "--delimiter",
-      "--max-args",
-      "--max-procs",
-      "--max-chars",
-      "--process-slot-var",
-    ],
-  },
-};
 const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
 
 /**
- * Where the command a simple command runs starts, past its assignments and prefixes and each
- * prefix's options; undefined when a prefix runs nothing. `words` comes back with the words an
- * `env -S` value splits into put where the command starts. `bun` before the CLI bundle's path is
- * a prefix too. `xargs` is set when xargs runs the command, with its replacement strings (`-I`,
- * `-i`, `--replace`): xargs puts the words it reads in their place, or after the command's words.
+ * The argument vector the Dispatch CLI receives from a `bash` command in the literal grammar: the
+ * words after the program, with their quotes removed, as `Bun.argv.slice(2)` holds them. A marker
+ * is keyed by it. Undefined for any other command.
  */
-function commandStart(
-  segment: readonly Word[]
-): { words: Word[]; at: number; xargs?: string[] } | undefined {
-  let words = [...segment];
-  let at = 0;
-  let xargs: string[] | undefined;
-  while (at < words.length) {
-    const prefix = words[at];
-    if (ASSIGNMENT.test(prefix.raw)) {
-      at++;
-      continue;
-    }
-    const base = prefix.value.split("/").at(-1) ?? "";
-    if (base === "bun" && words[at + 1]?.value.split("/").at(-1) === "dispatch.js") {
-      at++;
-      break;
-    }
-    const name = COMMAND_PREFIXES.has(prefix.value)
-      ? prefix.value
-      : Object.hasOwn(PROGRAM_PREFIXES, base)
-        ? base
-        : undefined;
-    if (name === undefined) break;
-    at++;
-    if (name === "xargs") xargs ??= [];
-    if (!Object.hasOwn(PREFIX_OPTIONS, name)) continue;
-    const options = PREFIX_OPTIONS[name];
-    const split: Word[] = [];
-    while (at < words.length) {
-      const word = words[at].value;
-      if (word === "--") {
-        at++;
-        break;
-      }
-      if (!word.startsWith("-") || (word === "-" && !options.dash)) break;
-      at++;
-      let flag = word;
-      let value: string | undefined;
-      if (word.startsWith("--")) {
-        const eq = word.indexOf("=");
-        if (eq !== -1) {
-          flag = word.slice(0, eq);
-          value = word.slice(eq + 1);
-        } else if (options.longValues?.includes(word)) value = words[at++]?.value;
-      } else {
-        for (let index = 1; index < word.length; index++) {
-          const char = word[index];
-          if (options.runsNothing?.includes(char)) return undefined;
-          const optional = options.optional?.includes(char) === true;
-          if (!optional && !options.values?.includes(char)) continue;
-          flag = `-${char}`;
-          value =
-            index + 1 < word.length
-              ? word.slice(index + 1)
-              : optional
-                ? undefined
-                : words[at++]?.value;
-          break;
-        }
-      }
-      if (value !== undefined && options.split?.includes(flag))
-        split.push(...commandWords(value).flat());
-      if (name === "xargs" && ["-I", "-i", "--replace"].includes(flag)) xargs?.push(value ?? "{}");
-    }
-    at += options.operands ?? 0;
-    words = [...words.slice(0, at), ...split, ...words.slice(at)];
-  }
-  return { words, at, ...(xargs === undefined ? {} : { xargs }) };
+export function commandArgv(command: unknown): string[] | undefined {
+  if (typeof command !== "string") return undefined;
+  const found = dispatchCommandHead(command);
+  if (found === undefined) return undefined;
+  const words = headWords(found.head);
+  return words.slice(cliProgramLength(words)).map((word) => word.value);
 }
 
-/** An open subshell, or an open command substitution with the command and word it sits in, which
- * go on at its end. */
-type Open =
-  | { kind: "(" }
-  | {
-      kind: "$(" | "`";
-      words: Word[];
-      start: number;
-      value: string;
-      quote: '"' | undefined;
-      pipeFrom: Word[] | undefined;
-    };
-
-/** A here-document's body and the command whose input it is. The body of an unquoted delimiter
- * has the backslashes bash removes there removed: before `$`, a backtick, a backslash and a
- * newline. */
-interface Body {
-  text: string;
-  words: Word[];
-}
-/** What `commandWords` finds beside the commands: each here-document body, and for each command
- * whose standard input is a pipe, the command that writes into it. */
-interface CommandScan {
-  bodies: Body[];
-  pipes: Map<Word[], Word[]>;
-}
-
-/** The escapes `$'…'`, `printf` and `echo -e` decode, by the letter after the backslash. */
-const NAMED_ESCAPES: Record<string, string> = {
-  a: "\x07",
-  b: "\b",
-  e: "\x1b",
-  E: "\x1b",
-  f: "\f",
-  n: "\n",
-  r: "\r",
-  t: "\t",
-  v: "\v",
-  "\\": "\\",
-  "'": "'",
-  '"': '"',
-  "?": "?",
-};
-
-/** `text` with the backslash escapes of `$'…'`, `printf` and `echo -e` decoded: the named ones,
- * `\xHH`, `\uHHHH`, `\UHHHHHHHH` and octal `\NNN` or `\0NNN`. Any other backslash stays. */
-function decodeEscapes(text: string): string {
-  return text.replace(
-    /\\(?:x([0-9A-Fa-f]{1,2})|u([0-9A-Fa-f]{1,4})|U([0-9A-Fa-f]{1,8})|0?([0-7]{1,3})|(.))/gs,
-    (match, hex?: string, short?: string, long?: string, octal?: string, char?: string) => {
-      const code = hex ?? short ?? long;
-      if (code !== undefined) {
-        const point = Number.parseInt(code, 16);
-        return point > 0x10ffff ? match : String.fromCodePoint(point);
-      }
-      if (octal !== undefined) return String.fromCharCode(Number.parseInt(octal, 8) & 0xff);
-      return (char !== undefined && NAMED_ESCAPES[char]) || match;
-    }
-  );
-}
-
-/** The ANSI-C quoted text `$'…'` whose body starts at `from`: its value as bash decodes it, and
- * the index of its closing quote (the text's length when it has none). */
-function ansiC(text: string, from: number): { value: string; end: number } {
-  let end = from;
-  while (end < text.length && text[end] !== "'") end += text[end] === "\\" ? 2 : 1;
-  end = Math.min(end, text.length);
-  return { value: decodeEscapes(text.slice(from, end)), end };
-}
-
-/**
- * The words of each simple command in a `bash` command, each as written and with its quotes
- * removed, as far as a character scan can tell them apart: a new command starts at an unquoted
- * newline, `;`, `&`, `|`, `(` or `)` (a `&` inside `2>&1` or `&>` is a redirect, not a separator).
- * A command substitution, `$(…)` or backticks, quoted or not, holds commands of its own and is part
- * of the word it sits in, which goes on after it. Single and double quotes and backslashes are
- * honoured, a comment runs to the line's end, and a here-document body is skipped, so text a
- * command only writes (`cat > f <<EOF … EOF`, `echo "dispatch ask"`) is never a command. Not a
- * shell parser: a `)` in a `case` pattern ends a substitution early.
- */
-function commandWords(command: string, scan?: CommandScan): Word[][] {
-  const segments: Word[][] = [];
-  const pending: Array<{ delimiter: string; stripTabs: boolean; quoted: boolean; words: Word[] }> =
-    [];
-  const open: Open[] = [];
-  let words: Word[] = [];
-  /** The word being read: where it starts in `command`, and its value so far; undefined between words. */
-  let start = 0;
-  let value: string | undefined;
-  let quote: '"' | "'" | undefined;
-  /** The command before an unquoted `|`, whose output the next command reads. */
-  let pipeFrom: Word[] | undefined;
-  /** The next word is a here-string, after `<<<`. */
-  let hereString = false;
-  const add = (at: number, text: string) => {
-    if (value === undefined) {
-      start = at;
-      value = "";
-    }
-    value += text;
-  };
-  const endWord = (at: number) => {
-    if (value !== undefined) {
-      words.push({
-        raw: command.slice(start, at),
-        value,
-        ...(hereString ? { hereString: true as const } : {}),
-      });
-      hereString = false;
-    }
-    value = undefined;
-  };
-  const endSegment = (at: number, piped = false) => {
-    endWord(at);
-    if (words.length > 0) {
-      segments.push(words);
-      if (pipeFrom !== undefined) scan?.pipes.set(words, pipeFrom);
-      pipeFrom = piped ? words : undefined;
-    }
-    words = [];
-  };
-  /** A command substitution opens at `at`: the command and word it sits in wait for its end. */
-  const openSubstitution = (kind: "$(" | "`", at: number) => {
-    add(at, "");
-    open.push({
-      kind,
-      words,
-      start,
-      value: value ?? "",
-      quote: quote === '"' ? quote : undefined,
-      pipeFrom,
-    });
-    words = [];
-    value = undefined;
-    quote = undefined;
-    pipeFrom = undefined;
-  };
-  /** The innermost command substitution, `outer`, ends at `at`: its last command ends and the word around it goes on. */
-  const closeSubstitution = (at: number, outer: Exclude<Open, { kind: "(" }>) => {
-    endSegment(at);
-    open.pop();
-    ({ words, start, value, quote, pipeFrom } = outer);
-  };
-  /** Past the bodies of the here-documents opened on the line that ended just before `from`; each
-   * body goes to the scan when the caller asks for it. */
-  const skipBodies = (from: number): number => {
-    let at = from;
-    for (const { delimiter, stripTabs, quoted, words: owner } of pending.splice(0)) {
-      const body = at;
-      let bodyEnd = command.length;
-      while (at < command.length) {
-        const lineStart = at;
-        const end = command.indexOf("\n", at);
-        const line = command.slice(at, end === -1 ? command.length : end);
-        at = end === -1 ? command.length : end + 1;
-        if ((stripTabs ? line.replace(/^\t+/, "") : line) === delimiter) {
-          bodyEnd = lineStart;
-          break;
-        }
-      }
-      const text = command.slice(body, bodyEnd);
-      scan?.bodies.push({
-        text: quoted
-          ? text
-          : text.replace(/\\([$`\\\n])/g, (_, char: string) => (char === "\n" ? "" : char)),
-        words: owner,
-      });
-    }
-    return at;
-  };
-  for (let i = 0; i < command.length; i++) {
-    const c = command[i];
-    const top = open.at(-1);
-    if (quote === "'") {
-      if (c === "'") quote = undefined;
-      else value += c;
-      continue;
-    }
-    if (quote === '"') {
-      if (c === '"') quote = undefined;
-      else if (c === "\\" && '$`"\\\n'.includes(command[i + 1] ?? "")) {
-        if (command[i + 1] !== "\n") value += command[i + 1];
-        i++;
-      } else if (c === "$" && command[i + 1] === "(") {
-        openSubstitution("$(", i);
-        i++;
-      } else if (c === "`") openSubstitution("`", i);
-      else value += c;
-      continue;
-    }
-    if (c === "\\") {
-      if (command[i + 1] !== "\n") add(i, command[i + 1] ?? "");
-      i++;
-    } else if (c === "$" && command[i + 1] === "'") {
-      // ANSI-C quoting: bash decodes the escapes, so the word's value holds what they stand for.
-      const quoted = ansiC(command, i + 2);
-      add(i, quoted.value);
-      i = quoted.end;
-    } else if (c === "'" || c === '"') {
-      add(i, "");
-      quote = c;
-    } else if (c === "#" && value === undefined) {
-      const end = command.indexOf("\n", i);
-      i = (end === -1 ? command.length : end) - 1;
-    } else if (c === "\n") {
-      endSegment(i);
-      i = skipBodies(i + 1) - 1;
-    } else if (c === " " || c === "\t") {
-      endWord(i);
-    } else if (c === "<" && command[i + 1] === "<" && command[i + 2] === "<") {
-      // A here-string: the next word is the command's standard input.
-      endWord(i);
-      i += 2;
-      hereString = true;
-    } else if (c === "<" && command[i + 1] === "<") {
-      // A here-document opener: its delimiter, quotes removed, ends the body that starts on the next line.
-      endWord(i);
-      i += 2;
-      const stripTabs = command[i] === "-";
-      if (stripTabs) i++;
-      while (command[i] === " " || command[i] === "\t") i++;
-      let delimiter = "";
-      let quoted = false;
-      for (; i < command.length && !" \t\n;&|<>()".includes(command[i]); i++)
-        if (command[i] === "'" || command[i] === '"' || command[i] === "\\") quoted = true;
-        else delimiter += command[i];
-      pending.push({ delimiter, stripTabs, quoted, words });
-      i--;
-    } else if (c === "$" && command[i + 1] === "(") {
-      openSubstitution("$(", i);
-      i++;
-    } else if (c === "`") {
-      if (top?.kind === "`") closeSubstitution(i, top);
-      else openSubstitution("`", i);
-    } else if (c === ")" && top?.kind === "$(") {
-      closeSubstitution(i, top);
-    } else if (
-      c === "&" &&
-      (command[i - 1] === ">" || command[i - 1] === "<" || command[i + 1] === ">")
-    ) {
-      endWord(i);
-    } else if (c === "(") {
-      endSegment(i);
-      open.push({ kind: "(" });
-    } else if (c === ")") {
-      if (top?.kind === "(") open.pop();
-      endSegment(i);
-    } else if (";&|".includes(c)) {
-      endSegment(i, c === "|" && command[i + 1] !== "|" && command[i - 1] !== "|");
-    } else if (c === "<" || c === ">") {
-      endWord(i);
-    } else {
-      add(i, c);
-    }
-  }
-  endSegment(command.length);
-  return segments;
-}
-
-/** A scoped `dispatch` write the gate cannot review: the tool it calls, the command's name and
- * which word AskGate could not read, with the characters in it AskGate does not take as literal. */
+/** A literal `dispatch` write whose file the gate cannot capture: the tool, the command's name, and
+ * the flag, the path and why. */
 export interface UnreadableCommand {
   tool: string;
   label: string;
-  /** The word that runs the write is not literal: whether it calls `dispatch` by name or by path. */
-  program?: { namesDispatch: boolean; unread: string[] };
-  /** The word after `dispatch` is not literal, so the subcommand it names is unknown; `from` names
-   * the runner that puts the subcommand there when the call runs (`xargs`). */
-  subcommand?: { unread: string[]; from?: string };
-  /** The write is in the call's text, where another command (`bash -c`, `eval`, a function) runs it. */
-  wrapped?: true;
-  /** A file the call would make Dispatch read cannot be captured safely. */
-  file?: { flag: string; path: string; reason: string };
-  /** The write is a process an eval cell starts, which AskGate does not read. */
-  cell?: true;
-}
-
-/**
- * `dispatch`, or the CLI bundle `dispatch.js`, by name or by a path ending in it, with a gated
- * write subcommand after it. The pattern is applied to the whole command's text, quotes and
- * here-document bodies included: the text a `bash -c '…'`, `sh -c`, `eval`, `xargs`, a function
- * or a variable would run is one word to the shell, so no scan of the call's own commands finds
- * the write inside it.
- */
-const DISPATCH_IN_TEXT = new RegExp(
-  `(?:^|[^A-Za-z0-9_.-])(?:[^\\s'";|&<>()]*/)?dispatch(?:\\.js)?[ \\t]+(${SCOPED_COMMANDS.join("|")})(?![A-Za-z0-9_-])`,
-  "g"
-);
-
-/**
- * A gated write in the command's own text, with the flags that follow it to the end of its line,
- * which say whether it would send anything (`--dry-run`, `--help`, an `issue` with no spec, an
- * upload that is no markdown document).
- */
-function textDispatchWrite(command: string): FoundWrite | undefined {
-  for (const match of command.matchAll(DISPATCH_IN_TEXT)) {
-    const name = match[1];
-    const from = (match.index ?? 0) + match[0].length;
-    const lineEnd = command.indexOf("\n", from);
-    const flags = commandWords(command.slice(from, lineEnd === -1 ? command.length : lineEnd))[0];
-    if (!mayBeReviewedWrite(name, flags ?? [])) continue;
-    return writeNamed(name);
-  }
-  return undefined;
-}
-
-/** The tool and the label of the `dispatch` write `name` names. */
-const writeNamed = (name: string): FoundWrite => ({
-  tool: `dispatch_${name.replaceAll("-", "_")}`,
-  label: `dispatch ${name}`,
-});
-
-/**
- * How many levels of text inside text the scan reads: a word that `bash -c` runs, inside a word
- * that `eval` runs, and so on. Past it, only the text pattern above applies.
- */
-const NESTED_DEPTH = 4;
-
-/** The write without the field that says where it sits: a nested write is always `wrapped`. */
-type FoundWrite = Omit<UnreadableCommand, "wrapped">;
-
-/**
- * A scoped `dispatch` write in a `bash` command AskGate does not read. In order: a write at a
- * command's position (after any assignments and prefixes such as `env -u HOME --`, `timeout -s
- * KILL 30`, `sudo -u me` or `xargs -I %`, each prefix's options and its `--` read as its own
- * parser reads them: `commandStart`), or a scoped subcommand run by a program an expansion names
- * (`$D comment …`, `$(command -v dispatch) ask …`), which may be `dispatch`; then a write in text
- * another command would run (`nestedWrite`, then `textDispatchWrite`); then a `dispatch` whose own
- * subcommand an expansion or `xargs` supplies (`dispatch $SUB …`, `xargs dispatch`), which may be
- * a write. One carrying `--dry-run` or `--help`, or a `dispatch issue` without
- * `--spec`/`--spec-file`, sends nothing for review and is not one. Only for a command
- * `scopedCommand` could not read.
- */
-export function unreadableDispatchWrite(command: unknown): UnreadableCommand | undefined {
-  // No prefilter on the raw text: bash removes a backslash or empty quotes inside a word
-  // (`d\ispatch`, `di""spatch`), so a write need not hold `dispatch` as written. `commandWords`
-  // removes them as bash does and names the program.
-  if (typeof command !== "string") return undefined;
-  return findWrite(command, 0, true);
-}
-
-/** A write of a subcommand AskGate cannot know. */
-const UNKNOWN_WRITE = { tool: "dispatch_unknown", label: "dispatch" } as const;
-
-/**
- * The write the simple command `segment` runs, or the write of unknown subcommand it may run.
- * `runs` says whether a shell runs the text the command is in: only then may a program an
- * expansion names be `dispatch`, and only then is a subcommand `xargs` supplies one. In text no
- * shell runs (a quoted word, a here-document `cat` writes) only `dispatch` as the program counts.
- */
-function segmentWrite(
-  segment: readonly Word[],
-  runs: boolean
-): { write?: UnreadableCommand; unknown?: UnreadableCommand } | undefined {
-  const start = commandStart(segment);
-  if (start === undefined) return undefined;
-  const [program, name, ...flags] = start.words.slice(start.at);
-  if (program === undefined) return undefined;
-  const named = namesCli(program.value);
-  const unread = [...new Set(scanWord(program.raw, 0).unread)];
-  const expansions = unread.filter((char) => EXPANSIONS.includes(char));
-  if (!named && !(runs && expansions.length > 0)) return undefined;
-  // A write xargs runs is in the call's text, where another command runs it.
-  const wrapped = start.xargs === undefined ? {} : { wrapped: true as const };
-  if (name === undefined || !mayBeReviewedWrite(name.value, flags)) {
-    // `dispatch $SUB …`, or `$D $SUB …`, may be any subcommand, a write among them.
-    const subcommand = name === undefined ? [] : unresolvedCharacters(name);
-    if (subcommand.length > 0)
-      return {
-        unknown: {
-          ...UNKNOWN_WRITE,
-          subcommand: { unread: subcommand },
-          ...(named ? {} : { program: { namesDispatch: false, unread: expansions } }),
-          ...wrapped,
-        },
-      };
-    // `xargs dispatch`, `xargs -I % dispatch % …`: xargs puts the words it reads after the
-    // command's words, or in place of its replacement string.
-    if (
-      named &&
-      runs &&
-      start.xargs !== undefined &&
-      (name === undefined || start.xargs.includes(name.value))
-    )
-      return {
-        unknown: { ...UNKNOWN_WRITE, subcommand: { unread: [], from: "xargs" }, ...wrapped },
-      };
-    return undefined;
-  }
-  const found = writeNamed(name.value);
-  return {
-    write: {
-      ...found,
-      ...(unread.length === 0
-        ? {}
-        : { program: { namesDispatch: named, unread: named ? unread : expansions } }),
-      ...wrapped,
-    },
-  };
-}
-
-function findWrite(command: string, depth: number, runs: boolean): UnreadableCommand | undefined {
-  const scan: CommandScan = { bodies: [], pipes: new Map() };
-  const segments = commandWords(command, scan);
-  let unknownSubcommand: UnreadableCommand | undefined;
-  for (const segment of segments) {
-    const found = segmentWrite(segment, runs);
-    if (found?.write !== undefined) return found.write;
-    unknownSubcommand ??= found?.unknown;
-  }
-  const wrapped = nestedWrite(segments, scan, depth, runs) ?? textDispatchWrite(command);
-  return wrapped === undefined ? unknownSubcommand : { ...wrapped, wrapped: true as const };
-}
-
-/** The words of `find` after which it runs a command of its own, up to `;` or `+`. */
-const FIND_EXEC = ["-exec", "-execdir", "-ok", "-okdir"];
-
-/**
- * A write in text another command would run, read with the same quote-aware scan, never only by
- * the text pattern: quotes and backslashes the inner shell removes (`bash -c 'dispatch "comment"
- * …'`) hide a write from that pattern. `dispatch` before a literal write as any word of a command
- * is a write some runner may run; the words after `find`'s `-exec` are a command of their own.
- * Each text `nestedScripts` names is read as a script of its own, down to NESTED_DEPTH levels.
- */
-function nestedWrite(
-  segments: readonly Word[][],
-  scan: CommandScan,
-  depth: number,
-  runs: boolean
-): FoundWrite | undefined {
-  let unknownSubcommand: FoundWrite | undefined;
-  for (const words of segments)
-    for (const [index, word] of words.entries()) {
-      const name = words[index + 1];
-      if (
-        namesCli(word.value) &&
-        name !== undefined &&
-        mayBeReviewedWrite(name.value, words.slice(index + 2))
-      )
-        return writeNamed(name.value);
-      if (FIND_EXEC.includes(word.value)) {
-        const end = words.findIndex(
-          (next, at) => at > index && (next.value === ";" || next.value === "+")
-        );
-        const found = segmentWrite(words.slice(index + 1, end === -1 ? undefined : end), runs);
-        if (found?.write !== undefined) {
-          const { wrapped: _, ...write } = found.write;
-          return write;
-        }
-        unknownSubcommand ??= found?.unknown;
-      }
-    }
-  if (depth >= NESTED_DEPTH) return unknownSubcommand;
-  for (const script of nestedScripts(segments, scan)) {
-    const found = findWrite(script.text, depth + 1, runs && script.runs);
-    if (found === undefined) continue;
-    const { wrapped: _, ...write } = found;
-    return write;
-  }
-  return unknownSubcommand;
-}
-
-/** The shells whose `-c` operand, here-document, here-string or piped input is a script they run. */
-const SHELLS = ["bash", "sh", "zsh", "dash", "ksh"];
-
-/** What a shell whose options start at `from` runs: its `-c` operand, else its standard input
- * when no script file is named or `-s` is set. */
-function shellScript(words: readonly Word[], from: number): { operand?: Word; stdin: boolean } {
-  let command = false;
-  let stdin = false;
-  for (let at = from; at < words.length; at++) {
-    const value = words[at].value;
-    if (value === "--")
-      return command
-        ? { operand: words[at + 1], stdin: false }
-        : { stdin: stdin || at + 1 >= words.length };
-    if (/^[-+][A-Za-z]+$/.test(value)) {
-      if (value[0] === "-" && value.includes("c")) command = true;
-      if (value.includes("s")) stdin = true;
-      // `-o pipefail`, `-O extglob`: the option's value is the next word.
-      if (/[oO]$/.test(value)) at++;
-      continue;
-    }
-    if (value === "--rcfile" || value === "--init-file") {
-      at++;
-      continue;
-    }
-    if (value.startsWith("--")) continue;
-    return command ? { operand: words[at], stdin: false } : { stdin };
-  }
-  return { stdin: !command };
-}
-
-/**
- * The texts inside a command that a shell may read, each with whether a shell runs it. A shell
- * runs `eval`'s arguments joined as `eval` joins them, a shell's `-c` operand, and the
- * here-document, here-string or pipe a shell reads as its script (the text piped in with the
- * escapes of `printf` and `echo -e` decoded). Every other quoted word and here-document body is
- * only text, which the scan reads for `dispatch` as a program alone.
- */
-function nestedScripts(
-  segments: readonly Word[][],
-  scan: CommandScan
-): Array<{ text: string; runs: boolean }> {
-  const scripts: Array<{ text: string; runs: boolean }> = [];
-  /** The commands whose standard input a shell runs: a shell reading its script there, and the
-   * command piped into it. */
-  const fed = new Set<readonly Word[]>();
-  for (const words of segments) {
-    const start = commandStart(words);
-    const program = start?.words[start.at];
-    let operand: Word | undefined;
-    let shell = false;
-    if (start !== undefined && program !== undefined) {
-      if (program.value === "eval")
-        scripts.push({
-          text: start.words
-            .slice(start.at + 1)
-            .map((arg) => arg.value)
-            .join(" "),
-          runs: true,
-        });
-      if (SHELLS.includes(program.value.split("/").at(-1) ?? "")) {
-        shell = true;
-        const script = shellScript(start.words, start.at + 1);
-        operand = script.operand;
-        const from = script.stdin ? scan.pipes.get(words) : undefined;
-        if (script.stdin) fed.add(words);
-        if (from !== undefined) {
-          fed.add(from);
-          const fromStart = commandStart(from);
-          const args =
-            fromStart === undefined ? [...from] : fromStart.words.slice(fromStart.at + 1);
-          // `echo -e …`, `printf -- …`: the options are not text the shell reads.
-          while (args[0]?.value.startsWith("-")) args.shift();
-          scripts.push({ text: decodeEscapes(args.map((arg) => arg.value).join(" ")), runs: true });
-        }
-      }
-    }
-    // A word bash takes as written splits into the same words again: nothing new to read.
-    for (const word of words)
-      if (word.value !== word.raw)
-        scripts.push({
-          text: word.value,
-          runs: word === operand || (shell && word.hereString === true),
-        });
-  }
-  for (const body of scan.bodies) scripts.push({ text: body.text, runs: fed.has(body.words) });
-  return scripts;
-}
-
-/** A string literal of an eval cell's code: its value with its escapes decoded (an interpolation
- * becomes `$X`), whether it interpolates, and where it ends. */
-interface CodeString {
-  value: string;
-  expansion: boolean;
-  end: number;
-}
-
-/** The string literal at `at` in `code`, JavaScript's or Python's (with a prefix such as `f` or
- * `r`, triple-quoted or not), or undefined when none starts there. */
-function codeString(code: string, at: number): CodeString | undefined {
-  const opening = /^([rRbBuUfF]{0,2})("""|'''|"|'|`)/.exec(code.slice(at));
-  if (opening === null) return undefined;
-  const prefix = opening[1].toLowerCase();
-  const quote = opening[2];
-  let index = at + opening[0].length;
-  let text = "";
-  while (index < code.length && !code.startsWith(quote, index)) {
-    // A backslash takes the next character with it, so an escaped quote ends nothing.
-    const length = code[index] === "\\" ? 2 : 1;
-    text += code.slice(index, index + length);
-    index += length;
-  }
-  let value = prefix.includes("r") ? text : decodeEscapes(text);
-  let expansion = false;
-  if (quote === "`" && value.includes("${")) expansion = true;
-  if (prefix.includes("f")) {
-    const replaced = value.replace(/\{[^{}]*\}/g, "$X");
-    expansion = replaced !== value;
-    value = replaced;
-  }
-  return { value, expansion, end: Math.min(index + quote.length, code.length) };
-}
-
-const skipBlank = (code: string, at: number): number => {
-  let index = at;
-  while (index < code.length && /\s/.test(code[index])) index++;
-  return index;
-};
-
-/** The elements of the array literal whose `[` is at `at`: each string literal, or undefined for
- * any other expression. */
-function codeArray(code: string, at: number): Array<CodeString | undefined> {
-  const items: Array<CodeString | undefined> = [];
-  let index = at + 1;
-  while (items.length < 256) {
-    index = skipBlank(code, index);
-    if (index >= code.length || code[index] === "]") break;
-    const literal = codeString(code, index);
-    const next = literal === undefined ? index : skipBlank(code, literal.end);
-    if (literal !== undefined && (code[next] === "," || code[next] === "]")) {
-      items.push(literal);
-      index = next;
-    } else {
-      items.push(undefined);
-      // Past the expression, to the `,` or `]` at its own depth.
-      let depth = 0;
-      while (index < code.length) {
-        const char = code[index];
-        const inner = codeString(code, index);
-        if (inner !== undefined && /["'`]/.test(char)) {
-          index = inner.end;
-          continue;
-        }
-        if (depth === 0 && (char === "," || char === "]")) break;
-        if ("([{".includes(char)) depth++;
-        else if (")]}".includes(char)) depth--;
-        index++;
-      }
-    }
-    if (code[index] === ",") index++;
-  }
-  return items;
-}
-
-/** The write an argument vector runs, when its program is the Dispatch CLI. */
-function argvWrite(items: ReadonlyArray<CodeString | undefined>): FoundWrite | undefined {
-  const words: Word[] = items.map((item) =>
-    item === undefined || item.expansion
-      ? { raw: "$X", value: item?.value ?? "$X" }
-      : { raw: `'${item.value.replaceAll("'", "")}'`, value: item.value }
-  );
-  const lead = cliProgramLength(words);
-  if (lead === 0) return undefined;
-  const [name, ...flags] = words.slice(lead);
-  if (name === undefined) return undefined;
-  if (mayBeReviewedWrite(name.value, flags)) return writeNamed(name.value);
-  const subcommand = unresolvedCharacters(name);
-  return subcommand.length > 0
-    ? { ...UNKNOWN_WRITE, subcommand: { unread: subcommand } }
-    : undefined;
-}
-
-/** The calls of an eval cell that start a process: Node's and Bun's spawn and exec functions, and
- * Python's `subprocess` and `os` ones. The bridge's `tool.bash` is none: the gate reviews that
- * `bash` call on its own. */
-const PROCESS_CALL =
-  /\b(?:spawnSync|spawn|execSync|exec|execFileSync|execFile|execaSync|execa|system|popen|run|call|check_call|check_output|Popen|getoutput|getstatusoutput)\s*\(/g;
-/** Bun's shell, `` $`…` ``. */
-const BUN_SHELL = /\$`/g;
-
-/** A write a shell string runs: only `dispatch` as its program counts (`segmentWrite`). */
-function shellStringWrite(text: string): FoundWrite | undefined {
-  const found = findWrite(text, 0, false);
-  if (found === undefined) return undefined;
-  const { wrapped: _, ...write } = found;
-  return write;
-}
-
-/** The Dispatch write one cell's code starts as a process, or the write of unknown subcommand it
- * may start. */
-function cellWrite(code: string): FoundWrite | undefined {
-  let unknown: FoundWrite | undefined;
-  const writes: Array<FoundWrite | undefined> = [];
-  for (const match of code.matchAll(PROCESS_CALL)) {
-    let at = skipBlank(code, (match.index ?? 0) + match[0].length);
-    // `Bun.spawn({ cmd: [...] })`.
-    const field = /^\{\s*cmd\s*:\s*/.exec(code.slice(at));
-    if (field !== null) at += field[0].length;
-    if (code[at] === "[") {
-      writes.push(argvWrite(codeArray(code, at)));
-      continue;
-    }
-    const literal = codeString(code, at);
-    if (literal === undefined) continue;
-    const next = skipBlank(code, literal.end);
-    const array = code[next] === "," ? skipBlank(code, next + 1) : -1;
-    if (array !== -1 && code[array] === "[")
-      // `spawnSync("dispatch", ["comment", …])`.
-      writes.push(argvWrite([literal, ...codeArray(code, array)]));
-    // `"dispatch " + sub`: what follows the `+` is an expansion.
-    else writes.push(shellStringWrite(`${literal.value}${code[next] === "+" ? "$X" : ""}`));
-  }
-  for (const match of code.matchAll(BUN_SHELL)) {
-    const literal = codeString(code, (match.index ?? 0) + 1);
-    if (literal !== undefined) writes.push(shellStringWrite(literal.value));
-  }
-  for (const write of writes) {
-    if (write === undefined) continue;
-    if (write.tool !== UNKNOWN_WRITE.tool) return write;
-    unknown ??= write;
-  }
-  return unknown;
-}
-
-/**
- * A Dispatch write an `eval` call's code starts as a process of its own (`Bun.spawnSync`,
- * `child_process`, `subprocess`, `os.system`): `dispatch` or its bundle as the program of an
- * argument vector or a shell string, before a gated write subcommand or an expansion. Such a
- * process sends with no `bash` call for AskGate to read, so the call is unreadable. A cell that
- * only names `dispatch` in text, or calls the bash tool, is none. Each cell is read when the input
- * holds several.
- */
-export function evalDispatchWrite(input: Input): UnreadableCommand | undefined {
-  const cells = Array.isArray(input.cells) ? (input.cells as unknown[]) : [];
-  const codes = [
-    input.code,
-    ...cells.map((cell) =>
-      typeof cell === "object" && cell !== null ? (cell as Input).code : undefined
-    ),
-  ].filter((code): code is string => typeof code === "string");
-  let unknown: FoundWrite | undefined;
-  for (const code of codes) {
-    const found = cellWrite(code);
-    if (found === undefined) continue;
-    if (found.tool !== UNKNOWN_WRITE.tool) return { ...found, cell: true };
-    unknown ??= found;
-  }
-  return unknown === undefined ? undefined : { ...unknown, cell: true };
+  file: { flag: string; path: string; reason: string };
 }
 
 /** Runs `script` under bash in a process group of its own, which is killed at the limit or on the signal. */
@@ -2392,6 +1464,9 @@ const NO_MODEL_ROLE_REFUSAL = `AskGate did not send this call: it reviews each D
  */
 const recordFailureRefusal = (message: string, configFile: string) =>
   `AskGate did not send this call: no review stands behind it, and AskGate could not record that in the session (${message}). Every Dispatch write that posts unreviewed is recorded, so AskGate holds this one back. Send it again once the session takes its entries. To turn AskGate off for this session, set askgate.enabled to false in ${configFile}.`;
+/** The refusal for a call whose marker could not be minted: the CLI would refuse it with none. */
+const mintFailureRefusal = (message: string, configFile: string) =>
+  `AskGate did not send this call: the dispatch CLI posts a Dispatch write in this session only with a marker AskGate mints for it, and AskGate could not mint one (${message}). Send the call again once the CLI's state directory takes files. To turn AskGate off for this session, set askgate.enabled to false in ${configFile}.`;
 // A comment or message cannot be edited or deleted, so its only fix is one more post; the note says so,
 // rather than offering an edit the agent cannot make (two lanes resent whole comments chasing one).
 const renderWarn = (reason: string, second: boolean) =>
@@ -2425,13 +1500,6 @@ const renderUnreviewed = (outcome: GateEntry["outcome"], reason: string | undefi
     outcome === "halted" ? cause : `AskGate did not review this Dispatch write: ${cause}`;
   return `<advisor-gate advisor="AskGate" outcome="${outcome}">\n${opening}${why}. The call ran unreviewed.\n</advisor-gate>`;
 };
-/** Characters for a reason, each in code; a backtick, which inline code cannot hold, is named. */
-function characters(chars: readonly string[]): string {
-  const named = chars.map((char) => (char === "`" ? "a backtick" : `\`${char}\``));
-  return named.length < 2
-    ? (named[0] ?? "")
-    : `${named.slice(0, -1).join(", ")} and ${named.at(-1)}`;
-}
 /**
  * The flags a refused file's text can go through instead: a `--<field>-file` reads `-` as stdin and
  * any other path as a file. An upload's `--path` (and `--path-file`, which names it) is a path the
@@ -2443,77 +1511,35 @@ function resendFlags(flag: string): { stdin: string; regular: string } {
     return { stdin: "--content-file", regular: "`--path` or `--content-file`" };
   return { stdin: flag, regular: `\`${flag}\`` };
 }
-/** The one form AskGate reads, as the refusal states it to the agent. */
-const LITERAL_GRAMMAR =
-  "AskGate reads one form only: one `dispatch` call alone, with at most one `cd <path> &&` before it, one `2>&1` after it, and one here-document opened with a quoted delimiter (`<<'EOF'`). Every word is literal: no `$`, backtick, `~`, `*`, `?`, `[`, `{`, `}` or backslash. Nothing else is in the call: no second command, no pipe, no `;`, `&&`, `||` or `&`, no assignment and no other redirect.";
 /**
- * What a scoped `dispatch` write inside a command the gate cannot read tells the agent. In `block`
- * mode nothing in the call ran, and this is the call's refusal. In `warn` mode the call ran with
- * no review, and this is its note: the same explanation of why AskGate could not read it and of
- * the form it reads, so the next write goes in that form.
+ * What a literal `dispatch` write whose file the gate cannot capture tells the agent. In `block`
+ * mode the write was not sent, and this is the call's refusal. In `warn` mode the call ran with no
+ * review, and this is its note.
  */
-function renderUnreadable(
-  { label, program, subcommand, wrapped, file, cell }: UnreadableCommand,
-  mode: Mode
-): string {
+function renderUnreadable({ file }: UnreadableCommand, mode: Mode): string {
   const ran = mode === "warn";
-  const note = (body: string) =>
-    ran ? `<advisor-gate advisor="AskGate" outcome="unreadable">\n${body}\n</advisor-gate>` : body;
-  const ending = ran ? "The call ran unreviewed." : "Nothing in the call ran.";
-  if (file !== undefined) {
-    const { stdin, regular } = resendFlags(file.flag);
-    // The file refusals come after AskGate read the call: to find where a relative operand
-    // resolves it ran the command's own `cd` and `pwd -P`, and for an upload the command with
-    // `--dry-run`. Neither sends anything, and nothing else in the call ran, so the claim here
-    // says that and not "nothing ran".
-    const read = ran
-      ? "The call ran unreviewed."
-      : "The write was not sent. To read the call AskGate ran the command's own `cd` and `pwd -P`, and the command with `--dry-run`, which send nothing; nothing else in the call ran.";
-    return note(
-      `AskGate ${ran ? "did not review" : "did not send"} this call: \`${file.flag}\` names ${JSON.stringify(file.path)}, which ${file.reason}. AskGate reads and posts only a regular file it captured before review. Send the text with \`${stdin} -\` and a quoted here-document (\`<<'EOF'\`), or name a regular file with ${regular}. ${read}`
-    );
-  }
-  // `$D $S …`: neither the program nor its subcommand is known, so either may be a write.
-  const unknownProgram =
-    subcommand !== undefined && program !== undefined && !program.namesDispatch;
-  const opening =
-    subcommand === undefined
-      ? `AskGate ${ran ? "did not review" : "did not run"} this call: it holds a \`${label}\`, which AskGate reviews before it is sent, and in this call AskGate cannot know the text it would send.`
-      : subcommand.from !== undefined
-        ? `AskGate ${ran ? "did not review" : "did not run"} this call: the word after \`dispatch\` comes from \`${subcommand.from}\` when the call runs, so AskGate cannot tell which subcommand would run, and AskGate reviews each Dispatch write before it is sent.`
-        : unknownProgram
-          ? `AskGate ${ran ? "did not review" : "did not run"} this call: its program's name and the word after it hold ${characters([...new Set([...program.unread, ...subcommand.unread])])}, so AskGate cannot tell which program or subcommand would run, and either may be \`dispatch\` and a write AskGate reviews before it is sent.`
-          : `AskGate ${ran ? "did not review" : "did not run"} this call: the word after \`dispatch\` holds ${characters(subcommand.unread)}, so AskGate cannot tell which subcommand would run, and AskGate reviews each Dispatch write before it is sent.`;
-  // A write in the call's text is named as such first: a resend of it in the same wrapper is
-  // refused again, whatever its program word holds.
-  const why =
-    cell === true
-      ? " Here an eval cell starts `dispatch` as a process of its own, and AskGate does not read what that process sends."
-      : wrapped === true
-        ? ` Here \`${label}\` is in this call's text, where another command (\`bash -c\`, \`sh -c\`, \`eval\`, \`xargs\`, a function or a variable) can run it.`
-        : program !== undefined && !unknownProgram
-          ? program.namesDispatch
-            ? ` Here the word that calls \`dispatch\` holds ${characters(program.unread)}, which AskGate does not take as literal.`
-            : ` Here its program's name holds ${characters(program.unread)}, so AskGate cannot tell which program would run.`
-          : "";
-  const resend =
-    cell === true
-      ? ` Send the \`dispatch\` command as one \`bash\` call on its own, not from an eval cell.`
-      : subcommand === undefined
-        ? ` ${ran ? "Send the next one" : `Run any other commands it held in a call of their own first, then send that \`${label}\` again`} on its own${program === undefined ? "" : ", calling `dispatch` by name"}.`
-        : ` Send the \`dispatch\` command again${unknownProgram ? ", calling `dispatch` by name," : ""} with its subcommand written out.`;
-  return note(
-    `${opening} ${LITERAL_GRAMMAR}${why} ${ending}${resend} Text it posts from a file goes in a \`--<field>-file <path>\` flag or in one here-document opened with a quoted delimiter (\`<<'EOF'\`) as the call's only other content.${wrapped === true ? ` If \`${label}\` here is text and no Dispatch write (a search pattern, a message, a file's content), keep it out of the command line: put that text in a file and name the file.` : ""}`
-  );
+  const { stdin, regular } = resendFlags(file.flag);
+  // The file refusals come after AskGate read the call: to find where a relative operand resolves
+  // it ran the command's own `cd` and `pwd -P`, and for an upload the command with `--dry-run`.
+  // Neither sends anything, and nothing else in the call ran, so the claim here says that and not
+  // "nothing ran".
+  const read = ran
+    ? "The call ran unreviewed."
+    : "The write was not sent. To read the call AskGate ran the command's own `cd` and `pwd -P`, and the command with `--dry-run`, which send nothing; nothing else in the call ran.";
+  const body = `AskGate ${ran ? "did not review" : "did not send"} this call: \`${file.flag}\` names ${JSON.stringify(file.path)}, which ${file.reason}. AskGate reads and posts only a regular file it captured before review. Send the text with \`${stdin} -\` and a quoted here-document (\`<<'EOF'\`), or name a regular file with ${regular}. ${read}`;
+  return ran
+    ? `<advisor-gate advisor="AskGate" outcome="unreadable">\n${body}\n</advisor-gate>`
+    : body;
 }
 
 /**
  * The gate of a session where AskGate did not load: a host module that did not import, an
  * OMP_ASKGATE_TIMEOUT_MS that is no positive integer, or a handler ceiling too short for a
- * verdict. Only `askgate.enabled: false` turns AskGate off, so none is an off switch: each call of
- * the main agent the gate would review (`scopedCommand`, `unreadableDispatchWrite`, `scopedDevice`,
- * an upload counted as the gate counts it) is refused in both modes, naming the error and the
- * switch, and recorded as `load-failed`. Every other call runs.
+ * verdict. Only `askgate.enabled: false` turns AskGate off, so none is an off switch: each literal
+ * write of the main agent the gate would review (`scopedCommand`, `scopedDevice`) is refused in
+ * both modes, naming the error and the switch, and recorded as `load-failed`. It mints no marker,
+ * so the CLI refuses every other gated write of a process that acts as the session, a subagent's
+ * included, since the session's record stays live. Every other call runs.
  */
 export function loadFailureGate(
   error: unknown,
@@ -2527,11 +1553,7 @@ export function loadFailureGate(
     if (ctx.agent.kind !== "main") return undefined;
     let found: { tool: string; path: string } | undefined;
     if (event.toolName === "bash") {
-      const write =
-        scopedCommand(event.input.command) ?? unreadableDispatchWrite(event.input.command);
-      if (write !== undefined) found = { tool: write.tool, path: write.label };
-    } else if (event.toolName === "eval") {
-      const write = evalDispatchWrite(event.input);
+      const write = scopedCommand(event.input.command);
       if (write !== undefined) found = { tool: write.tool, path: write.label };
     } else if (scopedDevice(event.toolName, event.input))
       found = { tool: event.toolName, path: `xd://${event.toolName}` };
@@ -2631,6 +1653,25 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
       removeSnapshots(snapshot);
     };
     /**
+     * The markers minted for each call (`mintFor`), by tool call id: each goes as its snapshot
+     * goes, once its call ends, is refused, or the session shuts down. A marker the CLI consumed
+     * is gone already, and its release is a no-op.
+     */
+    const markers = new Map<string, string>();
+    const releaseMarker = (toolCallId: string) => {
+      const file = markers.get(toolCallId);
+      if (file === undefined) return;
+      markers.delete(toolCallId);
+      fs.rmSync(file, { force: true });
+    };
+    /** The mode last written to the store, so the file is rewritten only when it changes. */
+    let storeMode: Mode | undefined;
+    const recordMode = (mode: Mode) => {
+      if (storeMode === mode) return;
+      setStoreMode(deps.markerStore, mode);
+      storeMode = mode;
+    };
+    /**
      * What each gated call is owed back: the note of a write that went out unreviewed, a warn
      * mode revise, a rebuttal or a breaker trip, by tool call id. The `tool_call` result's
      * `additionalContext` reaches the agent only through the loop's own sink, which a call made
@@ -2665,17 +1706,22 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
     };
     pi.on("session_switch", reset);
     pi.on("session_branch", reset);
-    // A snapshot goes only once the command that reads it has run, whichever session is current
-    // then. A result that reports a backgrounded job's start comes before the shell runs it
-    // (`startedInBackground`), and nothing later names that call's id, so its snapshot is kept
-    // until `session_shutdown`; a new gated call sweeps whatever is older than SNAPSHOT_MAX_AGE_MS.
+    // A snapshot and a marker go only once the command that reads them has run, whichever session
+    // is current then. A result that reports a backgrounded job's start comes before the shell
+    // runs it (`startedInBackground`), and nothing later names that call's id, so its snapshot and
+    // its marker are kept until `session_shutdown`; a new gated call sweeps the snapshots older
+    // than SNAPSHOT_MAX_AGE_MS, and each mint the markers older than MARKER_MAX_AGE_MS.
     pi.on("tool_execution_end", (event: { toolCallId: string; result?: unknown }) => {
       inflight.get(event.toolCallId)?.("abandoned");
       if (isRecord(event.result) && startedInBackground(event.result.details)) return;
       releaseSnapshots(event.toolCallId);
+      releaseMarker(event.toolCallId);
     });
     pi.on("tool_result", (event: ToolResultEvent): ToolResultResult => {
-      if (!startedInBackground(event.details)) releaseSnapshots(event.toolCallId);
+      if (!startedInBackground(event.details)) {
+        releaseSnapshots(event.toolCallId);
+        releaseMarker(event.toolCallId);
+      }
       return deliverNotice(event);
     });
     pi.on("agent_end", (event: { messages?: readonly Message[]; willContinue?: boolean }) => {
@@ -2696,6 +1742,8 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
       const timer = setTimeout(stopWaiting, SHUTDOWN_WAIT_MS);
       await Promise.race([Promise.allSettled([...handling]), waited]);
       clearTimeout(timer);
+      // After the wait, so a call that settled during it leaves no marker behind.
+      for (const toolCallId of markers.keys()) releaseMarker(toolCallId);
     });
 
     /** A call without a verdict counts toward the halt; a verdict resets the count; anything else leaves it. */
@@ -2785,10 +1833,10 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
       effect: "none",
     };
     /**
-     * A call the gate cannot read: a judgment on one call's form, not a gate that failed. `block`
-     * mode refuses it before anything in it runs, so the agent sends the write in a form AskGate
-     * reads; `warn` mode runs it and hands the same explanation back as context, with the entry
-     * recording `unreadable` and `allow`. Neither counts toward the halt.
+     * A literal call whose file the gate cannot capture: a judgment on one call's file, not a gate
+     * that failed. `block` mode refuses it before it sends, so the agent sends the text in a form
+     * AskGate reads; `warn` mode runs it and hands the same explanation back as context, with the
+     * entry recording `unreadable` and `allow`. Neither counts toward the halt.
      */
     const unreadableCall = (found: UnreadableCommand, mode: Mode): Decision =>
       mode === "block"
@@ -3256,14 +2304,9 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
           ...execution,
         };
       }
-      if (scoped.upload) {
-        // The name and the path as the CLI sends them: Dispatch trims the name it stores.
-        const resolved = {
-          ...args,
-          ...(typeof args.name === "string" ? { name: args.name.trim() } : {}),
-        };
-        if (!uploadIsDocument(resolved)) return { unscoped: true, ...execution };
-      }
+      // The CLI's own predicate, over the arguments it will parse: an upload that is no markdown
+      // document is no gated write, and needs neither a review nor a marker.
+      if (!gatedWrite(scoped.tool, args)) return { unscoped: true, ...execution };
       // The artifact dry run prints its snapshot path rather than its body. Read only the owned
       // snapshot here, so the model sees the exact bytes the rewritten command will post.
       if (!scoped.upload || typeof args.path !== "string" || args.content !== undefined)
@@ -3311,6 +2354,31 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
       argsDigest: "",
     });
 
+    /**
+     * Mints the marker the CLI consumes for a literal call that will run: keyed by the argument
+     * vector of the command that runs, bound to the dry run's arguments when a review or a
+     * deliberate pass stands behind them (`args`), argv-only otherwise. Undefined when it was
+     * minted; else the refusal of a mint that failed, since the CLI would refuse the call anyway.
+     */
+    const mintFor = (
+      toolCallId: string,
+      command: unknown,
+      args: Input | null,
+      outcome: string
+    ): ToolCallResult => {
+      const argv = commandArgv(command);
+      if (argv === undefined) return undefined;
+      try {
+        markers.set(
+          toolCallId,
+          mintMarker(deps.markerStore, { argv, args, toolCallId, outcome }, deps.now())
+        );
+        return undefined;
+      } catch (error) {
+        return { block: true, reason: mintFailureRefusal(messageOf(error), deps.configFile) };
+      }
+    };
+
     const handleCall = async (event: ToolCallEvent, ctx: GateCtx): Promise<ToolCallResult> => {
       const started = deps.now();
       let base: Base | undefined;
@@ -3319,83 +2387,79 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
       // and, once a file operand is rewritten, the command that names the snapshot.
       let withoutRebuttal: Input | undefined;
       let revised: Input | undefined;
+      // The arguments the call's dry run printed, which a marker for the command it ran binds.
+      let dryArgs: Input | undefined;
       // OMP_ASKGATE when it is a mode; else this session's latest experiments entry, read per call
       // because one binding serves every session the process switches to.
       let mode: Mode = envMode ?? "block";
       try {
-        if (ctx.agent.kind !== "main") return undefined;
+        // A task subagent's literal write is neither reviewed nor recorded, as before the CLI
+        // checked markers; it shares its parent's session, so it gets an argv-only marker.
+        if (ctx.agent.kind !== "main")
+          return event.toolName === "bash" && scopedCommand(event.input.command) !== undefined
+            ? mintFor(event.toolCallId, event.input.command, null, "subagent")
+            : undefined;
         if (event.toolName === "write") return stripRebuttal(event);
         if (envMode === undefined) mode = sessionMode(ctx.sessionManager.getEntries());
-        // An eval cell holds no `dispatch` command AskGate reads; one that starts the CLI as a
-        // process is unreadable as a `bash` call is.
+        // The CLI reads the mode from the store: every shell or cell could run it.
         if (event.toolName === "bash" || event.toolName === "eval") {
-          const scoped = event.toolName === "bash" ? scopedCommand(event.input.command) : undefined;
-          if (scoped === undefined) {
-            const unreadable =
-              event.toolName === "bash"
-                ? unreadableDispatchWrite(event.input.command)
-                : evalDispatchWrite(event.input);
-            if (unreadable === undefined) return undefined;
-            // A judgment on one call's form: block mode refuses it before anything in it runs, and
-            // warn mode runs it and hands the reason back (`unreadableCall`). A session with no
-            // model role refuses it first, as it would refuse the resend; a halt, or a session
-            // whose primary is off the gate's provider, lets it run as the resend would.
-            base = { ...identity(event, mode), tool: unreadable.tool, path: unreadable.label };
-            const resolved = resolveRole(ctx);
-            if (resolved === undefined) decision = noModelRole;
-            else if (halted) decision = pass("halted");
-            else if (ctx.model?.provider !== resolved.model.provider)
-              decision = pass("skipped", {
-                reason: `primary on ${ctx.model?.provider ?? "no model"}`,
-              });
-            else decision = unreadableCall(unreadable, mode);
-          } else {
-            if (scoped.rebuttal !== undefined) {
-              withoutRebuttal = { ...event.input, command: scoped.command };
-              revised = withoutRebuttal;
+          try {
+            recordMode(mode);
+          } catch {
+            // A store that takes no mode leaves the CLI's default, block, which refuses more.
+          }
+        }
+        // Only a `bash` call in the literal grammar is read. Any other call runs, and the CLI
+        // refuses a gated write in it, which carries no marker.
+        if (event.toolName === "bash") {
+          const scoped = scopedCommand(event.input.command);
+          if (scoped === undefined) return undefined;
+          if (scoped.rebuttal !== undefined) {
+            withoutRebuttal = { ...event.input, command: scoped.command };
+            revised = withoutRebuttal;
+          }
+          base = { ...identity(event, mode), tool: scoped.tool, path: scoped.label };
+          // Before the dry run and before any path that lets the write out: with no model role
+          // the gate can review nothing, and every one of those paths would otherwise allow.
+          if (resolveRole(ctx) === undefined) decision = noModelRole;
+          else {
+            const run = await readArgs(scoped, event.input, ctx, event.toolCallId);
+            if ("command" in run && run.command !== undefined)
+              revised = { ...event.input, command: run.command };
+            // An upload its dry run shows is no markdown document passes as an ungated call
+            // does, with no entry and no marker, which the CLI needs for no such upload; an
+            // override flag on it is still removed, since the CLI would refuse it.
+            if ("unscoped" in run) return revised === undefined ? undefined : { input: revised };
+            if ("cause" in run) decision = givenUp(mode, run.cause);
+            else if ("unreadable" in run) {
+              if (halted) decision = pass("halted");
+              else if (ctx.model?.provider !== resolveRole(ctx)?.model.provider)
+                decision = pass("skipped", {
+                  reason: `primary on ${ctx.model?.provider ?? "no model"}`,
+                });
+              else decision = unreadableCall(run.unreadable, mode);
             }
-            base = { ...identity(event, mode), tool: scoped.tool, path: scoped.label };
-            // Before the dry run and before any path that lets the write out: with no model role
-            // the gate can review nothing, and every one of those paths would otherwise allow.
-            if (resolveRole(ctx) === undefined) decision = noModelRole;
+            // The CLI refuses arguments it cannot parse before it sends anything, so the
+            // command runs.
+            else if ("failure" in run) decision = pass("error", { reason: run.failure });
             else {
-              const run = await readArgs(scoped, event.input, ctx, event.toolCallId);
-              if ("command" in run && run.command !== undefined)
-                revised = { ...event.input, command: run.command };
-              // An upload its dry run shows is no markdown document passes as an unscoped call
-              // does, with no entry; an override flag on it is still removed, since the CLI
-              // would refuse it.
-              if ("unscoped" in run) return revised === undefined ? undefined : { input: revised };
-              if ("cause" in run) decision = givenUp(mode, run.cause);
-              else if ("unreadable" in run) {
-                if (halted) decision = pass("halted");
-                else if (ctx.model?.provider !== resolveRole(ctx)?.model.provider)
-                  decision = pass("skipped", {
-                    reason: `primary on ${ctx.model?.provider ?? "no model"}`,
-                  });
-                else decision = unreadableCall(run.unreadable, mode);
-              }
-              // The CLI refuses arguments it cannot parse before it sends anything, so the
-              // command runs.
-              else if ("failure" in run) decision = pass("error", { reason: run.failure });
-              else {
-                const key = breakerKey(scoped.tool, run.args);
-                base = {
-                  ...base,
-                  revisesForKey: breaker.reasons(key).length,
-                  argsDigest: createHash("sha256").update(JSON.stringify(run.args)).digest("hex"),
-                };
-                decision = await decide(
-                  { toolName: scoped.tool, toolCallId: event.toolCallId, input: run.args },
-                  ctx,
-                  started,
-                  base,
-                  key,
-                  scoped.rebuttal,
-                  scoped.readsFile ? FILE_OVERRIDE : COMMAND_OVERRIDE,
-                  scoped.upload === true
-                );
-              }
+              dryArgs = run.args;
+              const key = breakerKey(scoped.tool, run.args);
+              base = {
+                ...base,
+                revisesForKey: breaker.reasons(key).length,
+                argsDigest: createHash("sha256").update(JSON.stringify(run.args)).digest("hex"),
+              };
+              decision = await decide(
+                { toolName: scoped.tool, toolCallId: event.toolCallId, input: run.args },
+                ctx,
+                started,
+                base,
+                key,
+                scoped.rebuttal,
+                scoped.readsFile ? FILE_OVERRIDE : COMMAND_OVERRIDE,
+                scoped.upload === true
+              );
             }
           }
         } else {
@@ -3461,6 +2525,21 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
             block: true,
             reason: recordFailureRefusal(messageOf(error), deps.configFile),
           };
+        }
+      }
+      // The marker the CLI needs to post a literal write that will run, minted once its record is
+      // written (a write whose record failed is refused above). A review, or a pass the gate took
+      // over the dry run's arguments (a rebuttal, a breaker trip, a halt, another provider), binds
+      // those arguments; a call no verdict stands behind runs the agent's own command, argv-only.
+      if (event.toolName === "bash" && base !== undefined && !decision.result?.block) {
+        const { outcome } = decision.fields;
+        const bound =
+          dryArgs !== undefined && !UNREVIEWED_OUTCOMES.includes(outcome) ? dryArgs : null;
+        const refused = mintFor(event.toolCallId, (revised ?? event.input).command, bound, outcome);
+        if (refused !== undefined) {
+          releaseSnapshots(event.toolCallId);
+          notices.delete(event.toolCallId);
+          return refused;
         }
       }
       // The same note goes on the call's own result (`deliverNotice`), which every caller reads:

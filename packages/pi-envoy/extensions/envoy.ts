@@ -17,6 +17,14 @@ import {
   zodSchemaApi,
 } from "@legion/contracts";
 import {
+  type AskgateOwner,
+  closeStore,
+  dropAskgateRecord,
+  openStore,
+  selfOwner,
+  writeAskgateRecord,
+} from "@legion/envoy-client/askgate-marker";
+import {
   createDeliveryDedupe,
   DedupeIdentitySchema,
   type DispatchDelivery,
@@ -27,6 +35,7 @@ import {
   renderInbound,
   senderLabel,
 } from "@legion/envoy-client/delivery";
+import { commandName } from "@legion/envoy-client/dispatch-command";
 import {
   type ActiveDispatchConfig,
   activeDispatchSettings,
@@ -43,6 +52,7 @@ import {
   sessionDirectory as dispatchSessionDirectory,
   readResultsSince,
   resultsEnd,
+  sessionStateRoot,
   writeSessionTitle,
 } from "@legion/envoy-client/dispatch-session-state";
 import { subscriptionRemovedTopics } from "@legion/envoy-client/dispatch-subscribe";
@@ -124,6 +134,7 @@ import { opensAsk } from "../src/opens-ask";
 import { sideTurn } from "../src/side-turn";
 import { TypedPictures } from "../src/typed-pictures";
 import { registerAskGate } from "./askgate/askgate";
+import { ADVISOR_GATE_ENTRY_TYPE, type GateEntry } from "./askgate/askgate-core";
 import { registerEnvoyMessageRenderer } from "./envoy-message-renderer";
 import { registerEnvoyWhoamiCommand } from "./envoy-whoami-command";
 
@@ -566,6 +577,15 @@ export default function envoyExtension(pi: PiApi): void {
     if (setting.error !== null) askgateNotices.push(setting.error);
     if (setting.enabled) askgateFile = configPath;
   }
+  // The record that makes the `dispatch` CLI require AskGate's marker for a gated write
+  // (`@legion/envoy-client/askgate-marker`): written, while the gate is bound, for each session id
+  // this top-level instance binds (`bindDispatchSession`; a subagent's instance binds none), and
+  // kept for every one of them until shutdown, since a shell or kernel started before a switch
+  // still acts as the session it started in. A gate that did not load mints no marker, so the CLI
+  // refuses each gated write it would have reviewed.
+  const askgateOwner: AskgateOwner | undefined =
+    askgateFile === null ? undefined : selfOwner(sessionStateRoot(process.env));
+  const askgateRecords = new Set<string>();
   // The listener client exists only while Envoy is on. The listener calls and the NATS connection
   // reach it through `requireEnvoy`, which refuses, saying why Envoy is off, so this session
   // reaches no listener and no NATS server its configuration does not name. Tools, `/whoami`,
@@ -868,6 +888,18 @@ export default function envoyExtension(pi: PiApi): void {
       return;
     }
     process.env.DISPATCH_SESSION_ID = id;
+    if (askgateOwner !== undefined) {
+      const dir = dispatchSessionDirectory(process.env, id);
+      try {
+        openStore(askgateOwner.store);
+        writeAskgateRecord(dir, askgateOwner);
+        askgateRecords.add(dir);
+      } catch (error) {
+        const notice = `AskGate could not write its record for session ${id} (${messageFor(error)}), so the dispatch CLI does not ask for AskGate's marker there: a Dispatch write AskGate cannot read posts unreviewed.`;
+        logger.warn(notice);
+        askgateNotices.push(notice);
+      }
+    }
     dispatchLedger = {
       sessionID: id,
       offset: resultsEnd(dispatchSessionDirectory(process.env, id)),
@@ -2705,6 +2737,19 @@ export default function envoyExtension(pi: PiApi): void {
       sessionFile: undefined,
       sessionID: "",
     });
+    // The process ends, and with it every record it keeps live; removing them, and its store, is
+    // tidiness (a dead process's record is inert). Only the instance that wrote records has any.
+    if (askgateOwner !== undefined && askgateRecords.size > 0) {
+      for (const dir of askgateRecords) {
+        try {
+          dropAskgateRecord(dir, askgateOwner);
+        } catch {
+          // A record left behind names a process that is gone.
+        }
+      }
+      askgateRecords.clear();
+      closeStore(askgateOwner.store);
+    }
     const deadline = Promise.withResolvers<void>();
     const timer = setTimeout(deadline.resolve, 1_000);
     try {
@@ -3084,6 +3129,32 @@ export default function envoyExtension(pi: PiApi): void {
     // Read, and the offset advanced, on every result, failed or not and armed period or not, so a
     // later result never counts the calls this one ran.
     const entries = readNewDispatchResults();
+    // A gated write the CLI found no AskGate marker for (refused in block mode, posted with a
+    // warning in warn mode) becomes an `advisor-gate` entry, so AskGate's report counts it. Only
+    // the top-level instance records it: it reads each line of the session's ledger once, the
+    // lines of a subagent's calls included.
+    if (
+      askgateOwner !== undefined &&
+      entries.some((entry) => entry.askgate !== undefined) &&
+      !(await isSubagent(context))
+    ) {
+      for (const { tool, askgate } of entries) {
+        if (askgate === undefined) continue;
+        pi.appendEntry(ADVISOR_GATE_ENTRY_TYPE, {
+          advisor: "AskGate",
+          tool,
+          path: `dispatch ${commandName(tool)}`,
+          toolCallId: event.toolCallId,
+          decision: askgate.mode === "block" ? "revise" : "allow",
+          outcome: "unmarked",
+          verdictMode: askgate.mode,
+          reason: askgate.why,
+          latencyMs: 0,
+          revisesForKey: 0,
+          argsDigest: "",
+        } satisfies GateEntry);
+      }
+    }
     if (event.isError) return;
     // The host's live id, never the module's `sessionID`, for the reason the stop guard reads
     // it: in a fresh TUI's drift window the two disagree, and the period is armed against the

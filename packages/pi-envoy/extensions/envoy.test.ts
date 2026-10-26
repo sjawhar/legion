@@ -3914,6 +3914,178 @@ console.log(JSON.stringify(args));
       ]);
       expect(notifications).toEqual([]);
     }, 30_000);
+    /** The AskGate record of `sessionID` in this test's CLI state directory, or null when none. */
+    const recordOf = (
+      sessionID: string
+    ): { v: number; owners: { pid: number; store: string }[] } | null => {
+      const file = join(sessionDirectory(process.env, sessionID), "askgate.json");
+      return existsSync(file) ? JSON.parse(readFileSync(file, "utf8")) : null;
+    };
+    const gateOn = () => {
+      writeFileSync(process.env.ENVOY_CONFIG_FILE ?? "", "{}\n");
+      process.env.DISPATCH_URL = "http://dispatch.test";
+      process.env.DISPATCH_TOKEN = "dispatch-token";
+      standInHost();
+    };
+    /**
+     * A fixture whose handlers map runs every handler an event has, in order: the gate binds its own
+     * `session_switch`, `tool_result` and `session_shutdown` beside the extension's, and the plain
+     * fixture keeps only the last one registered.
+     */
+    const allHandlers = () => {
+      const fixture = createPi();
+      const registered = new Map<
+        string,
+        Array<(event: unknown, context: SessionContext) => Promise<unknown>>
+      >();
+      const pi: TestPi = {
+        ...fixture.pi,
+        on: (event, handler) => {
+          const list = registered.get(event) ?? [];
+          list.push(handler);
+          registered.set(event, list);
+          fixture.handlers.set(event, async (payload, context) => {
+            let last: unknown;
+            for (const each of list) last = await each(payload, context);
+            return last;
+          });
+        },
+      };
+      return { ...fixture, pi };
+    };
+    // The record that makes the dispatch CLI ask for AskGate's marker: written by the top-level
+    // instance for every session id it binds while the gate is bound, kept across a switch, since
+    // a shell or kernel started before it still acts as the old session, and removed at shutdown.
+    test("session_start writes the session's record, a switch writes the new one's and keeps the old, and shutdown removes both", async () => {
+      gateOn();
+      const { default: envoyExtension } = await import("./envoy.ts?askgate-record");
+      const fixture = allHandlers();
+      envoyExtension(fixture.pi);
+      const notifications: string[] = [];
+      await fixture.handlers.get("session_start")?.({}, gateContext(notifications));
+      const first = recordOf("ses_askgate");
+      expect(first?.v).toBe(1);
+      expect(first?.owners).toMatchObject([{ pid: process.pid }]);
+      const store = first?.owners[0]?.store ?? "";
+      expect(store.startsWith(join(process.env.DISPATCH_STATE_DIR ?? "", "askgate"))).toBe(true);
+      expect(statSync(join(store, "markers")).mode & 0o777).toBe(0o700);
+      expect(
+        statSync(join(sessionDirectory(process.env, "ses_askgate"), "askgate.json")).mode & 0o777
+      ).toBe(0o600);
+
+      const next = {
+        ...gateContext(notifications),
+        sessionManager: {
+          ...topLevelSession,
+          getSessionId: () => "ses_askgate_next",
+          getLeafId: () => null,
+        },
+      } as SessionContext;
+      await fixture.handlers.get("session_switch")?.({ reason: "new" }, next);
+      expect(recordOf("ses_askgate_next")?.owners).toMatchObject([{ pid: process.pid, store }]);
+      expect(recordOf("ses_askgate")?.owners).toMatchObject([{ pid: process.pid, store }]);
+
+      await fixture.handlers.get("session_shutdown")?.({}, next);
+      expect(recordOf("ses_askgate")).toBeNull();
+      expect(recordOf("ses_askgate_next")).toBeNull();
+      expect(existsSync(store)).toBe(false);
+      expect(notifications).toEqual([]);
+    }, 30_000);
+    test("no record is written with the switch off, with Dispatch off, or by a task subagent's instance", async () => {
+      // The switch off: this suite's default envoy.json turns AskGate off.
+      process.env.DISPATCH_URL = "http://dispatch.test";
+      process.env.DISPATCH_TOKEN = "dispatch-token";
+      standInHost();
+      const off = await import("./envoy.ts?askgate-record-off");
+      const offFixture = createPi();
+      off.default(offFixture.pi);
+      await offFixture.handlers.get("session_start")?.({}, gateContext([]));
+      expect(recordOf("ses_askgate")).toBeNull();
+      // Dispatch off.
+      writeFileSync(process.env.ENVOY_CONFIG_FILE ?? "", "{}\n");
+      delete process.env.DISPATCH_URL;
+      delete process.env.DISPATCH_TOKEN;
+      const noDispatch = await import("./envoy.ts?askgate-record-no-dispatch");
+      const noDispatchFixture = createPi();
+      noDispatch.default(noDispatchFixture.pi);
+      await noDispatchFixture.handlers.get("session_start")?.({}, gateContext([]));
+      expect(recordOf("ses_askgate")).toBeNull();
+      // A task subagent: its instance binds no session id, so it writes no record.
+      gateOn();
+      const transcripts = transcriptFixture();
+      try {
+        const parentFile = transcripts.transcript("2026-09-23T00-00-00-000Z_ses_parent.jsonl");
+        const childFile = transcripts.transcript("2026-09-23T00-00-00-000Z_ses_parent/Scout.jsonl");
+        const sub = await import("./envoy.ts?askgate-record-subagent");
+        const child = createPi();
+        sub.default(child.pi);
+        await child.handlers.get("session_start")?.(
+          {},
+          sessionWithTranscript("ses_child", childFile, [])
+        );
+        expect(recordOf("ses_child")).toBeNull();
+        const parent = createPi();
+        sub.default(parent.pi);
+        await parent.handlers.get("session_start")?.(
+          {},
+          sessionWithTranscript("ses_parent", parentFile, [])
+        );
+        expect(recordOf("ses_parent")?.owners).toMatchObject([{ pid: process.pid }]);
+      } finally {
+        transcripts.remove();
+      }
+    }, 30_000);
+    test("a gated write the CLI logged as unmarked becomes an advisor-gate entry the report counts", async () => {
+      gateOn();
+      const { default: envoyExtension } = await import("./envoy.ts?askgate-unmarked");
+      const fixture = allHandlers();
+      envoyExtension(fixture.pi);
+      const context = gateContext([]);
+      await fixture.handlers.get("session_start")?.({}, context);
+      const dir = sessionDirectory(process.env, "ses_askgate");
+      appendResult(dir, {
+        tool: "dispatch_comment",
+        error: "dispatch comment was not called: AskGate is on for this session, and …",
+        askgate: { mode: "block", why: "this call carries no AskGate marker" },
+      });
+      appendResult(dir, {
+        tool: "dispatch_message",
+        details: {},
+        askgate: { mode: "warn", why: "this call carries no AskGate marker" },
+      });
+      appendResult(dir, { tool: "dispatch_read", details: {} });
+      await fixture.handlers.get("tool_result")?.(
+        {
+          toolName: "bash",
+          toolCallId: "call-py",
+          input: { command: "python3 post.py" },
+          content: [],
+          isError: false,
+        },
+        context
+      );
+      expect(fixture.entries.filter((entry) => entry.customType === "advisor-gate")).toMatchObject([
+        {
+          data: {
+            tool: "dispatch_comment",
+            path: "dispatch comment",
+            toolCallId: "call-py",
+            outcome: "unmarked",
+            decision: "revise",
+            verdictMode: "block",
+            reason: "this call carries no AskGate marker",
+          },
+        },
+        {
+          data: {
+            tool: "dispatch_message",
+            outcome: "unmarked",
+            decision: "allow",
+            verdictMode: "warn",
+          },
+        },
+      ]);
+    }, 30_000);
     // The second re-gate of #2159, non-blocking: at the host's default handler limit of 30 s the
     // review deadline is 25 s, which measured reviews often pass, and the warning that says so
     // went only to the log. A profile that sets nothing is the case this gate is for.
