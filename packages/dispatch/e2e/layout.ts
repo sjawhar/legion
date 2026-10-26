@@ -70,6 +70,6 @@ export async function expectConsecutiveLinksClear(
   ).toBeLessThanOrEqual(0.5);
   expect(
     measured.clearance,
-    `the padded box of "${lower}" starts above the own text of "${upper}", so a tap on the upper line can open the lower link`
+    `the padded box of "${lower}" reaches above the bottom of the text of "${upper}", so a tap on the upper line can open the lower link`
   ).toBeGreaterThanOrEqual(0);
 }
