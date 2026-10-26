@@ -2,10 +2,34 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-158",
-  "completed": "2026-10-26T20:13:59Z",
+  "completed": "2026-10-26T22:24:17Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2233",
-  "head": "337c577d886069b322cefb3b9acc36304f47a89f",
+  "head": "de6daaffe1cd",
   "proof": [
+    {
+      "criterion": "Review round 4 finding A: a rebuild of a closed issue's document that the close skipped shows its withdrawn decision block resolved",
+      "surface": "Go API on real Postgres 17 through POST /api/v1/artifacts/{id}/rebuild as a person, after PATCH /api/v1/issues/{key} closed the issue beside a document whose history cannot load",
+      "command": "go test -run TestRebuildingAClosedIssuesUnloadableDocumentShowsItsWithdrawnDecisionBlockResolved ./internal/dispatch/api/, at 26538847 and with docs/rebuild.go and ask_lifecycle.go from 24e90b2c",
+      "observed": "Live text after the rebuild shows state=\"resolved\" and no state=\"open\"; the ask stays withdrawn; after a reopen ask and block read open.",
+      "headSha": "de6daaffe1cd",
+      "negativeControl": "Without the change the rebuilt notes read ':::ask{#rebuilt-decision urgency=\"med\" multiple=\"false\" state=\"open\"}'"
+    },
+    {
+      "criterion": "Review round 4 finding B: a reconnect's writable admission restores another tab's unsent row only after that reconnect's sync has applied",
+      "surface": "the real Hocuspocus provider over a scripted socket (pending-sync.test.ts), and Dispatch's browser suite (Playwright, chromium and iphone) on the real Go server and production SPA",
+      "command": "bun test web/src/features/doc (169 pass); bun run e2e -- offline-edits.e2e.ts close-withdraws-asks.e2e.ts --project chromium --project iphone (18 passed) at 988beb33",
+      "observed": "The reconnect test reads \"shared added typed\", rebuiltAt never set, admitted called once after the sync; 18 browser tests pass.",
+      "headSha": "de6daaffe1cd",
+      "negativeControl": "With connection.ts from before 988beb33 the document reads \"shared added\": the other tab's row was dropped"
+    },
+    {
+      "criterion": "Review round 4 finding C: a withdrawn ask folds in a document's margin; census lists the daemon API's status writes and the margin",
+      "surface": "dashboard margin unit tests; PR body census",
+      "command": "bun test web/src/features/margin (112 pass, useMarginSheet.test.ts new)",
+      "observed": "Withdrawn and retracted asks fold; open and resolved-kind asks do not. Census rows added for set_status, rerun_child, release_children (502 with Dispatch's code) and the margin.",
+      "headSha": "de6daaffe1cd",
+      "negativeControl": "An open ask does not fold (asserted in the same test)"
+    },
     {
       "criterion": "Round 4 (review plumbing items, no deferral): pending-sync reads what a document shows through Yjs's public API, and a person's unsent edit is still kept and restored across a read-only admission",
       "surface": "Dispatch's browser suite (Playwright, chromium and iphone) on the real Go server, the production SPA bundle and real Postgres in the issue pod",
@@ -120,6 +144,7 @@
     }
   ],
   "filesChanged": [
+    "round 5: eighth forward merge 24e90b2c (main's AgentName resolution line now carries the withdrawn wording; actor.ts keeps askResolutionBadge/askResolutionReason); docs/rebuild.go and ask_lifecycle.go (rebuild writes the close's states); dispatch web connection.ts, pending-sync.ts, roots.ts (one admission gate, one own-row helper, shared root names); margin/useMarginSheet.ts (withdrawn folds); docs/service.go settleReloaded carries no err; README/AGENTS.md repair retry list is per process",
     "round 4: docs/service.go and docs/ask_lifecycle.go (settleOutcome, followUpSettlement), dispatch web pending-sync.ts and pending-sync.test.ts (public Yjs reads); sixth and seventh forward merges (89be96d2, 337c577d; main deleted skills/dispatch/references/, the fact stays in the issue-update and resolve-ask --help text)",
     "round 3: docs/ask_lifecycle.go (unloadable document skipped), api/issue_ask_lifecycle.go, issue_ask_repair.go, issue_patch.go (window, retry set, WithoutCancel, one write per repair), docs/{ledger,livewrite,mutation,pending_authors,roomstate,service,websocket}.go (lifecycleAuthors deleted, lifecycle writes credit no author), dispatch web pending-sync.ts and connection.ts (admitted), tests; fifth forward merge 3fef5314",
     "round 2: packages/envoy/internal/dispatch/docs/mutation.go (applyLive drops a write whose fork did not move, via forkHeld), docs/ask_lifecycle.go (writer-specific guard removed), docs/mutation_test.go (new test)",
@@ -152,5 +177,5 @@
     "R7 local runs at 39c12172 (from a git archive of the head): api ok (1562 s), store ok, cmd/dispatch ok, -tags multiprocess cmd/dispatch ok (350 s); docs failed only TestAHealthyRoomUnderWritesIsNeverRefused ('too few to say anything' under load), which passes alone (ok 6.6 s) and is not in the diff; pmdoc failed only its timing tests and the differential tests that need the workspace's @legion/proof-editor link absent from the archive (pmdoc is not in the diff). bun test packages/contracts packages/envoy-client: one envoy-config timing test failed under load and passes alone. packages/dispatch: typecheck clean; bun test 2388 pass on the re-run (the first run under load had 2 failures not reproduced). biome check of contracts, dispatch, claude-envoy, envoy-client: no errors. claude-envoy check-dist passes. -race was not run locally (the pod has no C compiler); CI's envoy-go-race lane runs it."
   ],
   "openQuestions": [],
-  "round": 4
+  "round": 5
 }
