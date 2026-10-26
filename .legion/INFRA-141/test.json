@@ -2,32 +2,54 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-141",
-  "completed": "2026-10-26T08:50:00Z",
+  "completed": "2026-10-26T09:45:00Z",
   "generation": 3,
-  "round": "the round retro sent back (dc06110d: bounded interest reads of GET /v1/sessions, /v1/registry/<id>, /v1/interests/<id>) and the forward merge of main 748e8d95 (5aee84d6); head 8d8816be",
-  "verdictProvenance": "provider not verified: this verdict was written in my own session and no subagent ran; the model name in my configuration is the one requested, not one read from the run's transcript",
+  "round": "unreadable-interest round: fixes 0ad64d7f (reads) and 849dbb98 (write paths), head 76e46d40",
+  "verdictProvenance": "provider not verified: written in my own session, no subagent ran; the model in my configuration is the one requested, not one read from the run's transcript",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Drove its frozen-relay case on the merged binary with my own rig (python relay frozen with the connection open, curl): GET /v1/sessions 503 in 1.004 s, GET /v1/registry/<miss> 503 in 1.002 s, GET /v1/interests/<miss> 503 in 3.505 s, each Retry-After: 1 with the busUnansweredPrefix body, cached interests still 200. Re-ran scripts/e2e-local.sh (exit 0, both PASS lines) with the A6' jq, TestTheInterestReadRoutesAnswerABusThatStoppedAnsweringInsideTheBudget and both AgentToAgent integration tests. Its proof is accurate for a read that does not answer; the failure below is a read that answers with a record it cannot decode, which its proof did not drive."
+    "how": "Drove its read and write cases on my own rig (real binary, real natsd, raw values written into envoy_interests with my own nats.go writer, curl), plus the two write paths its proof did not show: a role claim and a one-topic unsubscribe over an unreadable record. Its negative control re-run independently: the listener built from git archive of 8d8816be answered every read 503 bus-unavailable with Retry-After: 1 and failed every write."
   },
-  "failures": [
+  "failures": [],
+  "failed": 0,
+  "proof": [
     {
-      "criterion": "Bus-unavailable means the bus did not answer (spec, bus-down case; the distinction review 5647344074 required for an unreadable role claim): an interest record the bucket holds and this build cannot decode is answered by GET /v1/sessions, GET /v1/registry/<id> and GET /v1/interests/<id> as 503 'envoy: the message bus did not answer: <decode error>' with Retry-After: 1, and GET /v1/sessions refuses its whole listing for that one record",
-      "evidence": "Real envoy-listener binary at this head, real NATS: sessions ses_sub (subscribed), ses_bare and ses_badinterest registered; the raw value 'not json at all' written into envoy_interests under ses_badinterest. GET /v1/sessions -> 503 Retry-After: 1 {\"error\":\"envoy: the message bus did not answer: invalid character 'o' in literal null (expecting 'u')\"}; GET /v1/registry/ses_badinterest and GET /v1/interests/ses_badinterest -> the same 503. The same rig on the previous head's binary (0cfb5c6c, built from git archive of packages/envoy): GET /v1/sessions 200 listing ses_badinterest with topics null, GET /v1/registry/ses_badinterest 200 with topics null, GET /v1/interests/ses_badinterest 503 {\"error\":\"invalid character ...\"} with no Retry-After (that route's pre-existing false 503, on the line dc06110d edited). Cause: sessionInfoFor's switch and adminInterestsHandler's GET (packages/envoy/cmd/listener/api.go, dc06110d) send every error other than nats.ErrKeyNotFound to writeBusUnavailable, and store.Registry.Get returns json.Unmarshal's error for a record it cannot decode. Red test TestAnUnreadableInterestRecordIsNotAnsweredAsTheBusNotAnswering in packages/envoy/cmd/listener/interest_record_unreadable_test.go, commit 5c5ee4f3ed2db2024d36a9132866fc8e0e5665d7: `cd packages/envoy && go test ./cmd/listener -count=1 -run '^TestAnUnreadableInterestRecordIsNotAnsweredAsTheBusNotAnswering$' -v` fails at this head on all three subtests, each 'status 503, body {\"error\":\"envoy: the message bus did not answer: invalid character 'o' in literal null (expecting 'u')\"}; want anything but the bus-unavailable 503'. It asserts only that the answer is not the bus's (not 503, no busUnansweredPrefix, no Retry-After); whether a route names the unreadable record (as writeRoleClaimUnreadable does) or lists the session without its topics is the implementer's to choose. Its control, a readable session on the same rig, is served 200 with its topics."
+      "criterion": "Last round's failure fixed: an unreadable interest record is not answered as the bus not answering, and GET /v1/sessions keeps its listing",
+      "surface": "the real envoy-listener binary at this head against a real NATS (internal/testnats/cmd/natsd); 'not json at all' written into envoy_interests for ses_bad1..3 and the wrong-typed {\"session_id\":\"ses_bad4\",\"topics\":\"not-a-list\"} for ses_bad4; curl",
+      "command": "GET /v1/sessions; GET /v1/registry/ses_bad1; GET /v1/interests/ses_bad1; GET /v1/registry/ses_bad4; GET /v1/registry/ses_sub",
+      "observed": "sessions 200 listing ses_bad1..4 with topics null and ses_sub with its topics; registry/ses_bad1 and interests/ses_bad1 500 with no Retry-After, body 'envoy: the interest record of session ses_bad1 is unreadable: malformed interest record: invalid character ...'; registry/ses_bad4 500 '... json: cannot unmarshal string into Go struct field Interest.topics of type []string'; registry/ses_sub 200 with topics and roles. Red test TestAnUnreadableInterestRecordIsNotAnsweredAsTheBusNotAnswering --- PASS, its file unchanged since 303377a3",
+      "headSha": "76e46d409561edfb89327d6d334e5ef73442a8c8",
+      "negativeControl": "the listener built from 8d8816be on the same rig: sessions, registry and interests all 503 'envoy: the message bus did not answer: invalid character ...' with Retry-After: 1, the listing refused whole"
+    },
+    {
+      "criterion": "Every write path gets past an unreadable interest record, and a delivery to such a session still lands",
+      "surface": "the same real binary and rig, with a fake session server counting prompt_async posts",
+      "command": "send to ses_bad1 (serve port) from ses_bad2; DELETE /v1/interests/ses_bad1; subscribe ses_bad2; POST /v1/roles/set ses_bad3 r6c; POST /v1/interests/unsubscribe ses_bad4 one topic; read each record back raw and through the routes; separately POST /v1/roles/set for a session with no interest record, to compare the record written",
+      "observed": "send 200, pushed once to /session/ses_bad1/prompt_async. DELETE 204, then GET 404. Subscribe 200 and the record decodes with notifications.agent.ses_bad2 and notifications.role.r6b. Role claim 200, GET /v1/roles/r6c 200 holder ses_bad3, record {dir \"\", topics [notifications.role.r6c]}, the same shape a claim over no record writes. Unsubscribe 200 {removed: [notifications.role.x]}, the raw record left unchanged. WARN lines: 2 'registry replaced an interest record it cannot decode', 1 'registry left an interest record it cannot decode unchanged'",
+      "headSha": "76e46d409561edfb89327d6d334e5ef73442a8c8",
+      "negativeControl": "the listener built from 8d8816be: DELETE 500, subscribe 503, role claim 500 with the role left unclaimed, unsubscribe 500, every record left unreadable"
+    },
+    {
+      "criterion": "A read that does not answer is still the bus's answer when an unreadable record is present",
+      "surface": "the same real binary, NATS through a TCP relay frozen with the connection open",
+      "command": "rewrite ses_bad1 unreadable, freeze the relay, GET /v1/sessions and GET /v1/registry/ses_bad1",
+      "observed": "both 503 in 1.0 s, Retry-After: 1, 'envoy: the message bus did not answer: read ses_bad1's interest record: context deadline exceeded'",
+      "headSha": "76e46d409561edfb89327d6d334e5ef73442a8c8",
+      "negativeControl": "the same requests before the freeze answered 200 and 500 (unreadable), so the 503 comes from the freeze"
+    },
+    {
+      "criterion": "Earlier behaviour unchanged (A1, A3, A5, A6, A6', unreadable role claims, frozen send/publish/lookup)",
+      "surface": "the real binary (frozen relay rig, deferral rig) and scripts/e2e-local.sh; go test of the named tests",
+      "command": "the round-four drivers (roles, defer) on this head's binary; bash scripts/e2e-local.sh and the A6' jq; go test ./cmd/listener (my four red tests, the implementer's read and write tests, the A1/A2 cold-cache tests, the records test) and ./internal/store (the undecodable-record tests)",
+      "observed": "frozen: sends, publishes and role lookups 503 within 3.55 s, 20+20 concurrent all 503; unreadable role claims 500 on both routes; no_push_target 12 deferrals and a give-up at 60 s, push_failed once, naked_total 13; cold-cache sends 300/300; e2e exit 0, both PASS, absent 404, client EnvoyApiError 503; A6' three WARN bus_unavailable records (09:34:16.605Z, 09:34:20.538Z, 09:34:24.295Z) after 'Initiating Shutdown...' at 09:34:13.049Z; every named test --- PASS",
+      "headSha": "76e46d409561edfb89327d6d334e5ef73442a8c8",
+      "negativeControl": "the e2e send answered 200 before NATS was stopped; the identical frozen-rig requests answered 200 before the freeze"
     }
   ],
-  "failed": 1,
-  "breakAttemptsThatHeld": [
-    "Merge with #2199 (INFRA-122) on the real binary: two listeners (machines ma, mb) on one NATS and a fake session server counting prompt_async posts. A session subscribed through A with a serve port, sent through B: pushed once, by A. A session with no interest record whose entry names mb, sent through A: pushed once, by B. Neither listener logged a deferral, give-up or failed delivery; each counted delivered 1.",
-    "Frozen bus on the merged binary: the interest routes as in implementerProof; 20 concurrent GET /v1/sessions all 503, slowest 1.095 s. Sends, publishes and role lookups 503 with Retry-After: 1 within 3.53 s, 20 concurrent sends and 20 concurrent lookups.",
-    "Unreadable role claims on the merged binary: empty, blank, number and string records 500 with no Retry-After on both role routes, 4 role_claim_unreadable records; the legacy bare record and a live claim 200; a lapsed holder 404 with the claim released.",
-    "Unplaceable delivery on the merged binary: no_push_target deferred 12 times and given up at 61 s; push_failed deferred once; naked_total 13; no attempt-dedupe skip. Cold-cache sends 300/300 200.",
-    "scripts/e2e-local.sh exit 0, both PASS lines, absent 404, client EnvoyApiError 503; A6' exactly three WARN bus_unavailable records (08:33:18.426Z, 08:33:22.167Z, 08:33:25.927Z), all after nats.log's 'Initiating Shutdown...' at 08:33:14.869Z.",
-    "go test at this head: the implementer's interest-route test, my three earlier tests (unchanged since 5dcda609), the unreadable-claim tests and the plan's A1-A6 set, 14 tests --- PASS, ok 54.891 s; internal/integration TestE2E_AgentToAgent_LocalMachine and _RemoteMachine --- PASS."
+  "notes": [
+    "GET /v1/sessions writes one WARN 'registry read an interest record it cannot decode' per unreadable record per listing (14 lines in my run's few requests). It names the record an operator has to fix, so it is useful, but a session list that is polled often repeats it once per poll.",
+    "The PR body is now 51,916 characters, past the ~48,000 at which pr-body.md says each round should link its evidence rather than inline it; GitHub's limit is 65,536."
   ],
-  "ci": "At 8d8816be: Tests 40292608158, Legion Envoy and Contracts 40292608289, Docs 40292608328 and Worker Image 40292608679 queued when read, cited unsettled and not waited for. GitHub reports the pull request MERGEABLE (BLOCKED on review).",
-  "notesForTheImplementer": [
-    "The red test is mine and stays as written; make it pass. It drives the three routes with the handlers' own constructors and writes the bad record straight into bus.InterestBucket.",
-    "GET /v1/interests/<id> answered this record 503 before dc06110d too (writeNATSError with StatusServiceUnavailable); dc06110d's edit of that line added the bus prefix and Retry-After. The test covers it because the line is this pull request's."
-  ]
+  "ci": "At 76e46d40: Tests 40300245127, Legion Envoy and Contracts 40300245215, Docs 40300245120 queued and Worker Image 40300245121 pending when read, cited unsettled and not waited for. The runs at 303377a3 were cancelled by this head. GitHub reports MERGEABLE (BLOCKED on review).",
+  "regressionLocksAdded": []
 }
