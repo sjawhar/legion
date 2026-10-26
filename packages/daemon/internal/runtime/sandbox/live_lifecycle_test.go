@@ -27,6 +27,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/api"
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/launcher"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/workspace"
 )
@@ -510,8 +511,12 @@ func (r *liveRig) checkWorkerSharesIssuePod() error {
 	return nil
 }
 
-// suspend: stopping the worker's process leaves its issue Sandbox, pod, root role and the issue's
-// PVC intact. The stopped locator probes Gone; the root remains Alive in its separate role container.
+// suspend: stopping the worker's process leaves its issue Sandbox, pod, root role and the pod's
+// own disk intact — the disk lives and dies with the pod, and a role stop takes neither. The
+// stopped locator probes Gone; the root remains Alive in its separate role container. The issue's
+// Sandbox owns no claim of its own any more (INFRA-80), so there is no PVC under the name an
+// issue's Sandbox-owned volume carried (IssueClaimName, now the project controller's alone): what
+// is there is the pod's, named for the pod and owned by it.
 func (r *liveRig) checkSuspend() error {
 	root, worker := r.claim("root"), r.claim("worker")
 	if err := r.ensureRunning(root); err != nil {
@@ -554,17 +559,17 @@ func (r *liveRig) checkSuspend() error {
 		return fmt.Errorf("the root process after Suspend(%s) is %s: %v", worker.token, rootObs.Kind, err)
 	}
 	worker.loc, worker.state = nil, stateSuspended
-	// The worker and the root are claims of one issue, so either token names the issue's PVC.
-	pvc := IssueClaimName(worker.token)
-	phase, err := r.kubectl("get", "pvc", pvc, "-o", "jsonpath={.status.phase}")
+	if out, err := r.kubectl("get", "pvc", IssueClaimName(worker.token), "--ignore-not-found", "-o", "name"); err != nil || strings.TrimSpace(out) != "" {
+		return fmt.Errorf("the issue has a Sandbox-owned claim %s (%q, %v); its Sandbox owns no volume claim template, so nothing may answer to that name", IssueClaimName(worker.token), strings.TrimSpace(out), err)
+	}
+	// The worker and the root are claims of one issue, so either token names its pod's disk.
+	disk, err := r.assertPodOwnedDisk(worker)
 	if err != nil {
 		return err
 	}
-	if phase != "Bound" {
-		return fmt.Errorf("the issue's PVC %s is %q", pvc, phase)
-	}
 	note("runtime", "Suspend(%s) stopped only its role process; issue Sandbox %s and root process stayed running in pod uid %s", worker.token, name, pod.UID)
-	note("operator", "PVC %s: Bound; Probe(stopped %s): Gone", pvc, short(loc.Incarnation))
+	note("operator", "no PVC %s: the issue's Sandbox owns none; its pod's own disk %s (uid %s) is %s, owned by %s; Probe(stopped %s): Gone",
+		IssueClaimName(worker.token), disk.name, short(disk.uid), disk.phase, disk.owner, short(loc.Incarnation))
 	return nil
 }
 
@@ -599,7 +604,8 @@ func (r *liveRig) checkRoleContainerIsolation() error {
 }
 
 // resume: the first worker comes back as a new process generation of the same agent in the same
-// issue pod beside the root.
+// issue pod beside the root, from the session the table holds for it (recordSession). Its pod
+// never went, so the marker on that pod's disk still holds both its incarnations.
 func (r *liveRig) checkResume() error {
 	root, worker := r.claim("root"), r.claim("worker")
 	if err := r.ensureSuspended(worker); err != nil {
@@ -610,7 +616,7 @@ func (r *liveRig) checkResume() error {
 	}
 	old := *worker.last
 	since := time.Now()
-	loc, err := r.resume(worker, worker.marker)
+	loc, err := r.resume(worker, worker.session)
 	if err != nil {
 		return err
 	}
@@ -734,7 +740,7 @@ func (r *liveRig) checkStalePluginInstall() error {
 
 	old := *worker.last
 	since := time.Now()
-	loc, err := r.resumeWithPlugins(worker, worker.marker, &runtime.PluginInstall{PiLegion: legionTar, PiEnvoy: envoyTar, Contract: api.DaemonAPIVersion})
+	loc, err := r.resumeWithPlugins(worker, worker.session, &runtime.PluginInstall{PiLegion: legionTar, PiEnvoy: envoyTar, Contract: api.DaemonAPIVersion})
 	if err != nil {
 		return err
 	}
@@ -808,7 +814,7 @@ func (r *liveRig) checkStalePluginInstall() error {
 	// .../g*` has run — but the wrapper's own check ends the child before `exec`, and the runtime
 	// observes it Gone.
 	mark := r.obs.mark()
-	negLoc, err := r.resumeWithPlugins(worker, worker.marker, &runtime.PluginInstall{PiLegion: "9.6.1", PiEnvoy: envoyTar, Contract: api.DaemonAPIVersion})
+	negLoc, err := r.resumeWithPlugins(worker, worker.session, &runtime.PluginInstall{PiLegion: "9.6.1", PiEnvoy: envoyTar, Contract: api.DaemonAPIVersion})
 	if err != nil {
 		return err
 	}
@@ -838,10 +844,11 @@ func (r *liveRig) checkStalePluginInstall() error {
 	return nil
 }
 
-// same-agent-negative: a resume naming a session the issue's volume does not hold never starts a
-// fresh agent. The role launcher's start refuses before any child runs (manager.start's stat of
-// ResumeFile, packages/daemon/internal/launcher/launcher.go), so Resume fails synchronously —
-// there is no process to observe Gone — and the shared pod stays available to peers.
+// same-agent-negative: a resume naming a session the table does not hold never starts a fresh
+// agent. The role launcher's start refuses before any child runs (sessionWritten's lookup in the
+// session table, packages/daemon/internal/launcher/launcher.go), so Resume fails synchronously —
+// there is no process to observe Gone — and the shared pod stays available to peers. A file on the
+// pod's disk would decide nothing either way: the launcher never looks there.
 func (r *liveRig) checkSameAgentNegative() error {
 	root, second := r.claim("root"), r.claim("second")
 	if err := r.ensureSuspended(second); err != nil {
@@ -852,7 +859,7 @@ func (r *liveRig) checkSameAgentNegative() error {
 	}
 	// The marker is the issue pod's (SandboxName), shared by every resident role that started in
 	// it; second's own "tester:" lines include role-container-isolation's gen-1 line only once
-	// its stub agent's write has actually landed on the issue's volume — a race against how quickly
+	// its stub agent's write has actually landed on the pod's disk — a race against how quickly
 	// that check moved on to suspend it (it waits only for the hello, never the write). Snapshot
 	// second's own lines now, before this check's own writes, so what follows asserts only what
 	// this check itself causes.
@@ -861,14 +868,18 @@ func (r *liveRig) checkSameAgentNegative() error {
 		return err
 	}
 	beforeOwn := len(roleIncarnations(before, second.role))
-	absent := ompSessionsDir + "/absent-" + SandboxName(second.token) + ".marker"
+	// absent is a session *name* the table does not hold, not a place on any disk: it keeps the
+	// ompSessionsDir spelling only because that is the shape Oh My Pi recorded sessions under, and
+	// the launcher refuses it from the table before any child runs — nothing creates or needs this
+	// directory, which no pod mounts any more.
+	absent := ompSessionsDir + "/absent-" + SandboxName(second.token) + "-" + string(second.role) + ".jsonl"
 	_, err = r.resume(second, absent)
 	if err == nil {
 		return fmt.Errorf("Resume naming %s started a fresh agent, want the role launcher's refusal before any child runs", absent)
 	}
-	want := "resume session file " + absent + ": stat " + absent + ": no such file or directory"
+	want := "resume session " + absent + ": the session table holds no such session"
 	if !strings.Contains(err.Error(), want) {
-		return fmt.Errorf("Resume naming %s failed with %q, want it to quote the missing session file %q", absent, err, want)
+		return fmt.Errorf("Resume naming %s failed with %q, want the table's refusal of a session it does not hold, %q", absent, err, want)
 	}
 	note("runtime", "Resume naming %s refused before any child started: %s", absent, oneLine(err.Error()))
 	if regs := r.reg.registrations(second.token); len(regs) > 0 && regs[len(regs)-1].gen == second.gen {
@@ -876,7 +887,7 @@ func (r *liveRig) checkSameAgentNegative() error {
 	}
 
 	since := time.Now()
-	fixed, err := r.resume(second, second.marker)
+	fixed, err := r.resume(second, second.session)
 	if err != nil {
 		return err
 	}
@@ -909,7 +920,9 @@ func (r *liveRig) checkSameAgentNegative() error {
 func oneLine(s string) string { return strings.Join(strings.Fields(s), " ") }
 
 // kill-launcher: a worker role's launcher PID 1 ends in place, is reported Gone for that role
-// process, and Resume(prev=dead) starts a new generation in the same issue pod.
+// process, and Resume(prev=dead) starts a new generation in the same issue pod. This is no pod
+// replacement — only one container's PID 1 died — so the pod's own disk is the same claim it was,
+// the same uid, and the workspace on it is the one the dead generation worked in.
 func (r *liveRig) checkKillLauncher() error {
 	root, worker := r.claim("root"), r.claim("worker")
 	if err := r.ensureRunning(root); err != nil {
@@ -920,6 +933,10 @@ func (r *liveRig) checkKillLauncher() error {
 	}
 	old := *worker.loc
 	name := SandboxName(worker.token)
+	disk, err := r.assertPodOwnedDisk(worker)
+	if err != nil {
+		return err
+	}
 	mark := r.obs.mark()
 	if _, err := r.exec(worker, "sh", "-c", "kill 1"); err != nil {
 		return err
@@ -948,7 +965,7 @@ func (r *liveRig) checkKillLauncher() error {
 		return fmt.Errorf("the issue pod Sandbox is %s before the relaunch", before.mode())
 	}
 	since := time.Now()
-	fresh, err := r.resume(worker, worker.marker)
+	fresh, err := r.resume(worker, worker.session)
 	if err != nil {
 		return err
 	}
@@ -962,10 +979,18 @@ func (r *liveRig) checkKillLauncher() error {
 	if fresh.Incarnation == old.Incarnation || fresh.Sandbox.PodUID != old.Sandbox.PodUID || after.Generation != before.Generation {
 		return fmt.Errorf("Resume(prev=dead) returned %+v over Sandbox generation %d → %d, want a new process in unchanged pod %s and Sandbox generation", fresh.Sandbox, before.Generation, after.Generation, old.Sandbox.PodUID)
 	}
+	kept, err := r.assertPodOwnedDisk(worker)
+	if err != nil {
+		return err
+	}
+	if kept.uid != disk.uid {
+		return fmt.Errorf("the pod's disk %s is uid %s after the launcher restart, not the %s it was: the pod never went, so neither may its disk", kept.name, kept.uid, disk.uid)
+	}
 	if rootObs, err := r.rt.Probe(r.ctx, *root.loc); err != nil || rootObs.Kind != runtime.Alive {
 		return fmt.Errorf("root after worker launcher restart is %s: %v", rootObs.Kind, err)
 	}
 	note("runtime", "Resume(prev=dead %s) returned %s in the same pod uid %s; root stayed Alive", short(old.Incarnation), short(fresh.Incarnation), fresh.Sandbox.PodUID)
+	note("operator", "the pod's own disk %s is unchanged across the restart: uid %s, %s, owned by %s", kept.name, short(kept.uid), kept.phase, kept.owner)
 	r.killed.old, r.killed.fresh, r.killed.gone = old, fresh, gone
 	return nil
 }
@@ -1077,11 +1102,12 @@ func (r *liveRig) checkRespawnBeforeRegister() error {
 }
 
 // independent-provision: a new tree's root and its child, spawned at once, each get an issue pod of
-// their own: a Sandbox with one `issue` claim template, a PersistentVolumeClaim of its own selected
-// by the issue's label and Bound, a clone with no lock beside it and a jj workspace of that issue
-// alone, standing at the repository's default branch as GitHub names it (its init log names the
-// branch, and the workspace's @- is the clone's <default branch>@origin), each clone passing git
-// fsck. Nothing orders the two provisions: each works on its own volume. Its negative control is
+// their own: a Sandbox owning no volume claim template at all, a disk of its own that is that pod's
+// generic ephemeral volume — named for the pod, owned by it, Bound, and no other issue's — a clone
+// with no lock beside it and a jj workspace of that issue alone, standing at the repository's
+// default branch as GitHub names it (its init log names the branch, and the workspace's @- is the
+// clone's <default branch>@origin), each clone passing git fsck. Nothing orders the two
+// provisions: each works on its own disk. Its negative control is
 // the other issue's workspace: the root's pod cannot list the child's workspace directory, which
 // exists in the child's pod, and the child's pod cannot list the root's. Which node each pod lands
 // on is not checked: no pod asks for or keeps off another pod's node (LEGION-632), and what a pod
@@ -1124,17 +1150,14 @@ func (r *liveRig) checkIndependentProvision() error {
 		if err != nil {
 			return err
 		}
-		if len(s.Spec.VolumeClaimTemplates) != 1 || s.Spec.VolumeClaimTemplates[0].Metadata.Name != issueVolume {
-			return fmt.Errorf("Sandbox %s carries %d volume claim templates %v, want one named %s", name, len(s.Spec.VolumeClaimTemplates), templateNames(s), issueVolume)
+		if len(s.Spec.VolumeClaimTemplates) != 0 {
+			return fmt.Errorf("Sandbox %s carries %d volume claim templates %v, want none: an issue's disk is its pod's own ephemeral volume", name, len(s.Spec.VolumeClaimTemplates), templateNames(s))
 		}
-		bound, err := r.issuePVCs(c.issue)
+		disk, err := r.assertPodOwnedDisk(c)
 		if err != nil {
 			return err
 		}
-		if want := IssueClaimName(c.token) + " Bound"; !slices.Equal(bound, []string{want}) {
-			return fmt.Errorf("the PVCs labelled %s=%s are %v, want exactly [%s]", labelIssue, labelValue(c.issue), bound, want)
-		}
-		pvcs[c.name] = IssueClaimName(c.token)
+		pvcs[c.name] = disk.uid
 		listing, err := r.exec(c, "ls", "-A", filepath.Dir(clone))
 		if err != nil {
 			return err
@@ -1172,12 +1195,12 @@ func (r *liveRig) checkIndependentProvision() error {
 		if err != nil {
 			return fmt.Errorf("git fsck of %s's clone: %w", c.name, err)
 		}
-		note("runtime", "%s: init log %q; Sandbox %s owns one claim template %s", c.name, strings.TrimSpace(want), name, issueVolume)
-		note("operator", "%s: PVC %s (by %s=%s): Bound; exec ls -A %s: %v; jj workspace list: %s; git fsck --connectivity-only: ok %s",
-			c.name, IssueClaimName(c.token), labelIssue, labelValue(c.issue), filepath.Dir(clone), entries, oneLine(workspaces), oneLine(fsck))
+		note("runtime", "%s: init log %q; Sandbox %s owns no claim template", c.name, strings.TrimSpace(want), name)
+		note("operator", "%s: its pod's own disk %s (uid %s): %s, owned by %s; exec ls -A %s: %v; jj workspace list: %s; git fsck --connectivity-only: ok %s",
+			c.name, disk.name, short(disk.uid), disk.phase, disk.owner, filepath.Dir(clone), entries, oneLine(workspaces), oneLine(fsck))
 	}
 	if pvcs["root2"] == pvcs["child2"] {
-		return fmt.Errorf("root2 and child2 share PVC %s", pvcs["root2"])
+		return fmt.Errorf("root2 and child2 run on one disk, uid %s", pvcs["root2"])
 	}
 	// The negative control: each pod holds its own issue's workspace and cannot see the other's.
 	for _, pair := range [][2]*liveClaim{{root2, child}, {child, root2}} {
@@ -1315,12 +1338,16 @@ func templateNames(s *sandbox) []string {
 }
 
 // re-adopt: a fresh runtime and listener take over every live claim, with nothing relaunched; a
-// separate issue pod killed while no runtime ran is reported dead with its recorded incarnation.
-// The Agent Sandbox controller (sandbox_controller.go's reconcilePod, v1.0.3) recreates a Running
-// Sandbox's pod under the identical name the moment the old one is gone — the name is
-// deterministic (resolvePodName) and the Pod is Owns()-watched — so only the killed pod's own uid
-// ever actually ends; the daemon's own evaluate() reports a differently-uid'd pod at that name as
-// NotRecordedProcess, never Gone, and the supervisor treats the two identically (machine.go).
+// separate issue pod killed while no runtime ran is reported dead with its recorded incarnation,
+// and its disk went with it. The Agent Sandbox controller (sandbox_controller.go's reconcilePod,
+// v1.0.3) recreates a Running Sandbox's pod under the identical name the moment the old one is
+// gone — the name is deterministic (resolvePodName) and the Pod is Owns()-watched — so only the
+// killed pod's own uid ever actually ends; the daemon's own evaluate() reports a differently-uid'd
+// pod at that name as NotRecordedProcess, never Gone, and the supervisor treats the two
+// identically (machine.go). The replacement pod's disk is a claim of its own: the same name, since
+// Kubernetes names it for the pod, owned by the new pod, and a new uid — the killed pod's went
+// with it (INFRA-80). The claim then resumes into that fresh disk from the session table, which is
+// where everything it carries across the replacement now lives.
 func (r *liveRig) checkReAdopt() error {
 	victim := r.claim("orphan")
 	for _, name := range []string{"root", "worker", "fresh", "root2", "child2", "orphan"} {
@@ -1343,6 +1370,10 @@ func (r *liveRig) checkReAdopt() error {
 	note("runtime", "listener and runtime closed")
 	name := SandboxName(victim.token)
 	oldUID := victim.loc.Sandbox.PodUID
+	oldDisk, err := r.assertPodOwnedDisk(victim)
+	if err != nil {
+		return err
+	}
 	if _, err := r.kubectl("delete", "pod", name, "--wait=false"); err != nil {
 		return err
 	}
@@ -1427,6 +1458,33 @@ func (r *liveRig) checkReAdopt() error {
 			return fmt.Errorf("re-adoption observed %s for %s: %s", o.Kind, o.Locator.Claim, o.Detail)
 		}
 	}
+
+	since := time.Now()
+	resumed, err := r.resume(victim, victim.session)
+	if err != nil {
+		return fmt.Errorf("resume %s into the replacement pod from the session table: %w", victim.name, err)
+	}
+	if _, err := r.awaitRunning(victim, since); err != nil {
+		return err
+	}
+	if resumed.Sandbox.PodUID == oldUID {
+		return fmt.Errorf("%s resumed into the killed pod %s, which cannot still be there", victim.name, oldUID)
+	}
+	freshDisk, err := r.assertPodOwnedDisk(victim)
+	if err != nil {
+		return err
+	}
+	if freshDisk.uid == oldDisk.uid {
+		return fmt.Errorf("the replacement pod's disk %s is the killed pod's own uid %s: a pod's disk goes with the pod", freshDisk.name, oldDisk.uid)
+	}
+	if lines, err := r.markerLines(victim); err != nil {
+		return err
+	} else if own := roleIncarnations(lines, victim.role); !slices.Equal(own, []string{resumed.Incarnation}) {
+		return fmt.Errorf("the marker on the replacement pod's disk holds %s incarnations %v, want the resumed %s alone: the killed pod's disk, and its marker, are gone", victim.role, own, resumed.Incarnation)
+	}
+	note("runtime", "Resume(%s) into the replacement pod %s from its recorded session %s", victim.name, short(resumed.Sandbox.PodUID), victim.session)
+	note("operator", "the disk %s is uid %s after the replacement, not the killed pod's %s, and is owned by %s; its marker holds the resumed incarnation alone",
+		freshDisk.name, short(freshDisk.uid), short(oldDisk.uid), freshDisk.owner)
 	return nil
 }
 
@@ -1434,8 +1492,8 @@ func (r *liveRig) checkReAdopt() error {
 // past it, it survives while its tree's lifecycle is open (a claim launched after the daemon read
 // the claims it sweeps with), and is deleted once its tree's cleanup confirmed, by a fresh runtime
 // as by any: what a launch that reached the API after its tree's cleanup listed it leaves. The
-// issue's volume goes with its Sandbox, which owns it (the sweep's delete propagates in the
-// background, so the PVC follows the Sandbox through its owner reference). A suspended claim's
+// issue's disk goes too, by the pod rather than the Sandbox: the Sandbox owns no claim, its delete
+// takes its pod, and the pod's own ephemeral volume is deleted with the pod. A suspended claim's
 // Sandbox, of a live tree, survives every sweep.
 func (r *liveRig) checkOrphanSweep() error {
 	orphan, suspended := r.claim("orphan"), r.claim("second")
@@ -1493,13 +1551,10 @@ func (r *liveRig) checkOrphanSweep() error {
 		}
 	}
 	note("runtime", "sweep with grace 1s: %s deleted; every known claim's Sandbox, the suspended %s included, survives", name, keep)
-	if err := r.poll(liveGoneLimit, "the swept issue "+orphan.issue+"'s PVC to be gone", func() (bool, error) {
-		pvcs, err := r.issuePVCs(orphan.issue)
-		return len(pvcs) == 0, err
-	}); err != nil {
+	if err := r.awaitDiskGone(orphan); err != nil {
 		return err
 	}
-	note("operator", "get pvc -l %s=%s: none; the swept Sandbox took the issue's volume %s with it", labelIssue, labelValue(orphan.issue), IssueClaimName(orphan.token))
+	note("operator", "get pvc %s: none; the swept Sandbox took its pod, and the pod took its own disk", issueDiskName(orphan.token))
 	orphan.loc, orphan.state = nil, stateReleased
 	for _, c := range r.live() {
 		if _, err := r.awaitHelloAgain(c, restarted); err != nil {
@@ -1509,10 +1564,16 @@ func (r *liveRig) checkOrphanSweep() error {
 	return nil
 }
 
-// release-preserves-issue: release ends only the named role process. The shared issue Sandbox,
-// root process and the issue's PVC stay until the daemon's durable whole-issue cleanup effect runs;
-// this direct runtime harness deliberately has no store/outbox and never substitutes a local cleanup.
-func (r *liveRig) checkReleasePreservesIssue() error {
+// cleanup-reaps-the-issue: the two halves of what a stop now leaves, on the run's first issue,
+// which no later check needs. Release ends only the named role process: the shared issue Sandbox,
+// the root process and the pod they live in stay, and so does the pod's own disk, which lives
+// exactly as long as that pod. Then the tree's cleanup — the daemon's durable whole-issue effect,
+// which this direct runtime harness calls itself since it has no store or outbox — deletes every
+// issue Sandbox of the tree and hands none over (CleanupTree), and the issue is left nothing: its
+// pod goes with its Sandbox, and the disk goes with the pod. The check's name said the opposite
+// before INFRA-80, when a released role left the issue's volume for a cleanup that could hand it
+// to another tree.
+func (r *liveRig) checkCleanupReapsTheIssue() error {
 	if err := r.startRuntimeOnce(); err != nil {
 		return err
 	}
@@ -1581,14 +1642,114 @@ func (r *liveRig) checkReleasePreservesIssue() error {
 	if settled.Kind != runtime.Alive {
 		return fmt.Errorf("root %s read Alive after Release(%s), and %s later is %s: %s", root.token, worker.name, liveSettle, settled.Kind, settled.Detail)
 	}
-	// The released worker and the root are claims of one issue, so either token names its PVC.
-	pvc := IssueClaimName(worker.token)
-	phase, err := r.kubectl("get", "pvc", pvc, "-o", "jsonpath={.status.phase}")
-	if err != nil || phase != "Bound" {
-		return fmt.Errorf("the issue's PVC %s after Release(%s) is %q: %v", pvc, worker.name, phase, err)
+	// The released worker and the root are claims of one issue, so either token names its pod's disk.
+	disk, err := r.assertPodOwnedDisk(worker)
+	if err != nil {
+		return err
 	}
 	note("runtime", "Release(%s) ended only that role; issue Sandbox %s and root %s stayed Alive", worker.name, name, root.token)
-	note("operator", "PVC %s: Bound", pvc)
+	note("operator", "the pod's own disk %s: uid %s, %s, owned by %s", disk.name, short(disk.uid), disk.phase, disk.owner)
+
+	// The tree's cleanup, the effect a daemon runs once every stored claim of the tree has retired.
+	// Every claim of this tree is a claim of this one issue, so the run is done with all four.
+	if err := r.rt.CleanupTree(r.ctx, root.tree); err != nil {
+		return fmt.Errorf("CleanupTree(%s): %w", root.tree, err)
+	}
+	for _, c := range r.claims {
+		if c.tree == root.tree {
+			c.loc, c.last, c.state = nil, nil, stateReleased
+		}
+	}
+	if _, err := r.getSandbox(name); !apierrors.IsNotFound(err) {
+		return fmt.Errorf("the issue Sandbox %s outlived its tree's cleanup: %v", name, err)
+	}
+	if err := r.awaitDiskGone(worker); err != nil {
+		return err
+	}
+	r.trees.close(root.tree)
+	note("runtime", "CleanupTree(%s) deleted issue Sandbox %s, handing nothing over", root.tree, name)
+	note("operator", "get sandbox %s: NotFound; get pvc %s: none — the Sandbox took its pod, and the pod took the disk %s (uid %s) this issue's work was on",
+		name, disk.name, disk.name, short(disk.uid))
+	return nil
+}
+
+// issue-suspend-resume: the whole of INFRA-80 on an issue of its own. Its role runs, its session is
+// in the table, and the issue is then closed the way the daemon's durable close effect closes one:
+// SuspendIssue suspends the Sandbox, waits its pod out and deletes the Sandbox with the six role
+// Secrets it owned. Nothing of the issue is left — the Sandbox is gone, and the pod's own disk went
+// with the pod — so the resume that follows is a launch from nothing: a new Sandbox, a new pod, and
+// that pod's own disk, under the same name, since Kubernetes derives it from the pod's, with a new
+// uid and the new pod as its owner. The agent carries on all the same, resumed from the session the
+// table holds, and its environment says its workspace was recreated since that session was last
+// written — the disk the earlier turns worked on is gone, and only what was pushed is in this one.
+func (r *liveRig) checkIssueSuspendResume() error {
+	c := r.claim("closed")
+	if err := r.ensureRunning(c); err != nil {
+		return err
+	}
+	name := SandboxName(c.token)
+	old := *c.loc
+	disk, err := r.assertPodOwnedDisk(c)
+	if err != nil {
+		return err
+	}
+	note("operator", "%s runs in pod uid %s on its pod's own disk %s (uid %s), owned by %s", c.name, short(old.Sandbox.PodUID), disk.name, short(disk.uid), disk.owner)
+	// authorize is the store's check of the close against the issue's starts, stops and stored
+	// roles; the harness is the store here, and this close is the one it means to make.
+	if err := r.rt.SuspendIssue(r.ctx, c.issue, c.tree, func(context.Context) (bool, error) { return true, nil }); err != nil {
+		return fmt.Errorf("SuspendIssue(%s): %w", c.issue, err)
+	}
+	c.loc, c.state = nil, stateSuspended
+	if _, err := r.getSandbox(name); !apierrors.IsNotFound(err) {
+		return fmt.Errorf("the closed issue's Sandbox %s is still there: %v", name, err)
+	}
+	if err := r.awaitDiskGone(c); err != nil {
+		return err
+	}
+	note("runtime", "SuspendIssue(%s) deleted Sandbox %s once its pod was gone", c.issue, name)
+	note("operator", "get sandbox %s: NotFound; get pvc %s: none — the close left the issue neither", name, issueDiskName(c.token))
+
+	since := time.Now()
+	loc, err := r.resume(c, c.session)
+	if err != nil {
+		return fmt.Errorf("Resume(%s) after its issue was closed, from the session the table holds: %w", c.name, err)
+	}
+	reg, err := r.awaitRunning(c, since)
+	if err != nil {
+		return err
+	}
+	if loc.Sandbox.PodUID == old.Sandbox.PodUID || reg.hash != tokenHash(c.bootToken) {
+		return fmt.Errorf("the resumed %s is in pod %s registering %s, want a pod other than the closed %s with generation %d's token",
+			c.name, loc.Sandbox.PodUID, short(reg.hash), old.Sandbox.PodUID, c.gen)
+	}
+	fresh, err := r.assertPodOwnedDisk(c)
+	if err != nil {
+		return err
+	}
+	if fresh.name != disk.name {
+		return fmt.Errorf("the new pod's disk is %s, not %s: Kubernetes names a pod's ephemeral claim for the pod, whose name the issue fixes", fresh.name, disk.name)
+	}
+	if fresh.uid == disk.uid {
+		return fmt.Errorf("the disk %s is the closed issue's own uid %s: the close deleted it, so this one is a fresh claim of the same name", fresh.name, disk.uid)
+	}
+	agent, err := r.agentEnviron(c)
+	if err != nil {
+		return err
+	}
+	if agent[launcher.WorkspaceRecreatedVariable] != "true" {
+		return fmt.Errorf("the resumed agent has %s=%q, want true: its workspace was provisioned on a disk made after its session was recorded",
+			launcher.WorkspaceRecreatedVariable, agent[launcher.WorkspaceRecreatedVariable])
+	}
+	lines, err := r.markerLines(c)
+	if err != nil {
+		return err
+	}
+	if own := roleIncarnations(lines, c.role); !slices.Equal(own, []string{loc.Incarnation}) {
+		return fmt.Errorf("the marker on the new disk holds %s incarnations %v, want the resumed %s alone", c.role, own, loc.Incarnation)
+	}
+	note("runtime", "Resume(%s) from %s made Sandbox %s afresh and started pod %s", c.name, c.session, name, short(loc.Sandbox.PodUID))
+	note("operator", "the disk %s is uid %s, owned by %s, not the closed issue's %s; the agent's %s=true, and the marker holds its resumed incarnation alone",
+		fresh.name, short(fresh.uid), fresh.owner, short(disk.uid), launcher.WorkspaceRecreatedVariable)
 	return nil
 }
 

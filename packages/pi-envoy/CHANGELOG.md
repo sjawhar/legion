@@ -4,6 +4,18 @@
 
 ### Added
 
+- The agent stream reports the model and thinking level the session runs now, so Dispatch's live
+  view can show and switch them: a `settings` frame carrying the current model (`provider/id`),
+  every model the session lists as available, the configured thinking level `/effort` reports
+  (`null` for the model's default) and the levels `/effort` offers (`thinking: null` for a model
+  with no adjustable thinking), read from the live `AgentSession`'s own getters. Ids are never
+  truncated and the list is never cut. A host that cannot be read (no `AgentRegistry` export, no
+  live session under this id, or a missing getter) sends `reported: false`. The session re-reads
+  the getters on every replay and watch, on `turn_start` and `retry_fallback_applied`, and after a
+  person's typed input runs, before its reply is posted, and publishes the frame only when it
+  changed and a viewer is attached; a getter that throws is logged and never blocks the replay
+  answer. A replay ends with the history, the settings, then the commands; the settings frame is
+  paid for first and whole, and the commands keep the prefix that fits what is left (INFRA-195).
 - The `dispatch` skill this plugin ships teaches the board move as a command: a card moves with
   `dispatch issue-update --issue <KEY> --before <OTHER>`, which puts it above that issue,
   `--after <OTHER>`, which puts it below, or both together, which land it between them, where the
@@ -22,6 +34,16 @@
 
 ### Fixed
 
+- A live view held open while its session is relaunched with `--resume` now shows the resumed
+  process's model, thinking level and command changes. Two things stopped it. Every process
+  numbered its agent-stream frames from 0, and the page keeps a `settings` or `commands` frame only
+  when its `seq` beats the one it already applied, so it ignored everything the resumed process sent
+  below the earlier process's count: the publisher now seeds `seq` from its clock (milliseconds ×
+  1,000) and never moves it back on a reset, so a later process of the session numbers above every
+  frame an earlier one sent. And the page's relay asks the new process for no replay, only re-arms
+  it with bare watches, so the settings and commands the process read before the first watch never
+  reached the page: a control message that arms a publisher nobody was watching now also sends the
+  settings and commands as they stand (INFRA-195).
 - A pass or a role move that never settles no longer stops the registration heartbeat. Both serial
   queues (`passes`, `roleMoves`) give each task a deadline, never shorter than the heartbeat
   interval: past it the caller's call rejects, the queue starts the next task, and the abandoned

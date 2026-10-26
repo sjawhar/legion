@@ -145,10 +145,39 @@ at the end of the page, so you can still read what it said.
 **Open** on an agent's row shows its conversation as it happens, at `/agents/<session>/live`.
 
 - The header shows whether the session is connected, and its machine and directory.
-- When the session reports which model it's running, the header shows it, and each assistant turn
-  shows the model that produced it. It updates as the session switches models, and a label too
-  long for its space truncates, showing the full name on hover. Claude Code and OpenCode sessions
-  don't publish this today, so their view is unchanged.
+- The header shows the model and thinking level the session runs now, as Oh My Pi's own `/model`
+  and `/effort` report them, before any turn runs on them. A change made anywhere else (at the
+  session's terminal, by a `/model` or `/effort` message, or a fallback to another model) shows
+  within about 20 seconds. A model name too long for its space truncates, showing the full name on
+  hover. Each assistant turn shows the model that produced it.
+- Where the session can switch from Dispatch, the model and thinking level are pickers. The model
+  picker lists every model the session can use, grouped by provider; the thinking picker lists the
+  levels `/effort` offers for the current model. A pick sends `/model <provider/id>` or
+  `/effort <level>` to the session as your own message, always as **Send** whatever **Send as**
+  says, and it appears in the conversation under your name, which is the record of who switched
+  and to what. The header changes only when the session reports the new value. With the keyboard,
+  the arrow keys move a picker's choice without switching anything, and **Enter** switches to the
+  choice reached; leaving the picker without pressing **Enter** puts it back on the current value.
+- Under the header, a line says what happened to your switch: `The session answered: …` with the
+  session's reply as written, such as `Model set to anthropic/claude-opus-5.` or the reason it
+  refused (`Failed to set model: No API key for …`). When no answer comes within 30 seconds, or the
+  message could not reach the session, it says no answer came, and the header keeps the values the
+  session last reported; an answer that arrives later replaces that line. No answer does not mean
+  the switch was not applied: if it runs late, the header shows the result.
+- While a switch waits for its answer, **Send** is disabled, so your next message from this page
+  reaches the session after the switch. The pickers are held and look disabled: they keep focus,
+  and the arrow keys still move their choice, but nothing switches until the answer comes; then
+  **Enter** switches to the choice reached. The session's next turn runs on the picked model. A
+  turn already running when the switch lands finishes on the model it started with, and a prompt
+  that another person, or the session's terminal, starts between your pick and the answer is
+  outside the page's control.
+- When the header shows less, it says why: "This session does not report its model and thinking
+  level. Restart it on a newer pi-envoy to show and switch them here." (it shows the last turn's
+  model instead), "This session's Oh My Pi does not tell Dispatch its model and thinking level.",
+  or "This session switches its model and thinking level only at its own terminal." A model with
+  no adjustable thinking shows `no adjustable thinking`, and a level the model decides shows
+  `model default`. Claude Code and OpenCode sessions don't publish their model or thinking level,
+  so their header is unchanged.
 - The agent's turns stream in while the page is open. They are relayed, not stored.
 - Your messages to the agent, and its replies through Dispatch, are stored and shown in the same
   thread. A reply through Dispatch is labelled **Reply via Dispatch**.

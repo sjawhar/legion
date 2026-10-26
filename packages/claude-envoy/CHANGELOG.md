@@ -31,6 +31,14 @@
   `legion-daemon:` session id whole, the `dispatch_issue_update` and `dispatch_resolve_ask`
   descriptions say a close withdraws an issue's open asks and a reopen brings them back, and the
   plugin's copies of the `legion-controller` and `legion-worker` skills say the same.
+- The plugin declares daemon API contract 37 in `package.json`'s `legion.daemonApiVersion`
+  (INFRA-80): under the Kubernetes runtime an issue's disk is a generic ephemeral volume its pod
+  owns, created with the pod and deleted with it, so the `workspace-init provision` container is
+  no longer told `LEGION_EXPECT_ISSUE_VOLUME` and the lost-disk machinery it drove — the
+  provisioning exit code 3, the recovery marker and the probe for an issue's retained sessions,
+  with the `legion sessions mark-lost` command — is gone, and `runtime.kubernetes.session_store`
+  must name a store that keeps sessions in a database, `postgres` or `cloudsql-iam`. Nothing this
+  plugin reads or writes moved; a session of it registers with a daemon at 37.
 - The plugin's regenerated `legion/` copy of the `legion-worker` skill's tools reference no longer
   tells a role to add a new image package to the licence file by hand: the worker image lists every
   Debian package it carries in `/usr/share/doc/legion/THIRD_PARTY_NOTICES` from its own dpkg
@@ -176,7 +184,7 @@
 - A Legion phase worker can run on Claude Code (sjawhar/legion#2032). When `legion claude-bridge`
   launches Claude Code, the MCP server sees `LEGION_BOOT_TOKEN_FILE`, `LEGION_DAEMON_URL` and
   `CLAUDE_CONFIG_DIR`: it waits for the session's transcript, registers with the daemon (daemon API
-  contract 35, pinned in `package.json`'s `legion.daemonApiVersion`), claims the issue's Envoy role
+  contract 37, pinned in `package.json`'s `legion.daemonApiVersion`), claims the issue's Envoy role
   soft and reports ready, and readies again whenever it regains the role. A registration the daemon
   refuses stops Claude Code so the daemon relaunches it.
 - The MCP tool `legion` (`read_record`, `handoff_complete`, `request_backward_move`) serves the

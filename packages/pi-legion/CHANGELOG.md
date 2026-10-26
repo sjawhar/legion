@@ -7,6 +7,16 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 
 ### Added
 
+- Daemon API contract 37 (INFRA-80): under the Kubernetes runtime an issue's disk is a generic
+  ephemeral volume its own pod owns, created with the pod and deleted with it, so an issue pod's
+  `workspace-init provision` container is no longer told `LEGION_EXPECT_ISSUE_VOLUME`, and the
+  lost-disk machinery that variable drove is gone with it: `workspace-init`'s exit code 3 for a
+  volume holding neither the clone nor a retained session, the recovery marker a relaunch after
+  that loss wrote, the probe for an issue's retained sessions, and `legion sessions mark-lost`.
+  `runtime.kubernetes.session_store` must name a store that keeps sessions in a database,
+  `postgres` or `cloudsql-iam` (`pvc` and an omitted key are refused), since a session kept as a
+  file on that disk would die with the pod. Install this release with a `legion` built from the
+  same commit.
 - The skill-scenarios rig (`scripts/skill-scenarios/`, not shipped in the package) measures how
   agents write Dispatch specs:
   - `label-comments.ts` labels the comments people wrote on Dispatch in a window with the eleven

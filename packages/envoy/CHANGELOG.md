@@ -4,6 +4,22 @@
 
 ### Added
 
+- Dispatch's conversation view (`/agents/<id>/live`) shows the model and thinking level an Oh My
+  Pi session runs now, from the `settings` frame pi-envoy publishes, before any turn runs on them
+  and within about 20 seconds of a change made anywhere else (INFRA-195). Where the session runs
+  `/model` and `/effort` from Dispatch, each is a native picker in the header: the model picker
+  lists every model the session can use, grouped by provider, and the thinking picker the levels
+  `/effort` offers. On a focused picker the arrows and type-ahead only move its choice, `Enter`
+  switches to it, and leaving the picker without `Enter` puts it back on the reported value, as
+  the Agents issue picker's keyboard rule does. A pick is the person's own Send of
+  `/model <provider/id>` or `/effort <level>`, always as Send and stored under their name; while
+  it waits for the session's answer Send is disabled and the pickers are held, keeping focus, and
+  the line under the header quotes the session's reply, or says no answer came within 30 seconds
+  or that the message could not reach the session. The header
+  changes only when the session reports the new value. A session on an older pi-envoy shows the
+  last turn's model and asks to be restarted on a newer one; a session whose Oh My Pi cannot tell
+  its settings, or that runs neither built-in from Dispatch, says so. No route changes: an agent's
+  token is still refused on `POST /api/v1/agents/{id}/messages` (`403 HUMAN_ONLY`).
 - A Dispatch project imports its component model from any number of architecture sources, one
   per repository, each on its own branch, and its model is every source's components together
   (INFRA-391). `GET /api/v1/projects/{key}/architecture-sources` lists a project's sources (`[]`
@@ -1286,6 +1302,12 @@
   current document with the badge `Withdrawn` and `Withdrawn when <closer> closed the issue`, as
   the activity feed's `ask.resolved` line reads; a saved version shows its own attributes, so a
   later withdrawal never appears on it.
+- A Dispatch page in Firefox now shows what changed while its live event stream was reconnecting,
+  such as a session's answer to a model switch, without waiting for the stream's heartbeat.
+  Firefox opened the stream only once its first byte arrived, and a stream with no backlog and no
+  new event sent none until the first heartbeat, fifteen seconds later: until then the page stayed
+  "Reconnecting…" and skipped the refresh a reconnect owes every view. `GET /api/v1/events` now
+  sends an SSE comment, `: open`, with its headers, so the stream opens at once in every browser.
 - A browser that opens a document while Dispatch closes that document's room now keeps getting the
   document's edits. Dispatch closes a room when an issue closes, when it evicts a stale or failed
   room, and at shutdown, and each close takes ygo a moment: it closes the browsers it found, waits
