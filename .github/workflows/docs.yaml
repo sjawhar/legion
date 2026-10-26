@@ -4,7 +4,8 @@ name: Docs
 # publishes it to GitHub Pages (https://sjawhar.github.io/legion/) on every push to main. The site's
 # reference pages are generated from packages/ and skills/ at build time, so those paths rebuild it,
 # and scripts/third-party-notices.ts writes the THIRD_PARTY_NOTICES.txt it publishes, and so does
-# a change to the private-name guard the built site is checked with.
+# a change to the private-name guard the built site is checked with, or to
+# scripts/e2e/lib/held-port.py, which holds the port the screenshots' Dispatch server serves on.
 on:
   push:
     branches: [main]
@@ -13,6 +14,7 @@ on:
       - "packages/**"
       - "skills/**"
       - "scripts/third-party-notices.ts"
+      - "scripts/e2e/lib/held-port.py"
       - ".github/workflows/docs.yaml"
       - ".github/scripts/check-private-names.sh"
   pull_request:
@@ -21,6 +23,7 @@ on:
       - "packages/**"
       - "skills/**"
       - "scripts/third-party-notices.ts"
+      - "scripts/e2e/lib/held-port.py"
       - ".github/workflows/docs.yaml"
       - ".github/scripts/check-private-names.sh"
 

@@ -28,10 +28,13 @@ bun install
 ```
 
 The first command installs the workspace, the second builds the dashboard the harness serves and
-the browser it is captured in. You also need Go, `psql`, and a Postgres database the run may
+the browser it is captured in. You also need Go, Python 3, `psql`, and a Postgres database the run may
 truncate, named by `DATABASE_URL`.
-The harness listens on 8786, 9086, 9087 and 9088 (`DISPATCH_E2E_PORT`, `FAKE_ENVOY_PORT`,
-`FAKE_GITHUB_PORT` and `FAKE_BROKER_PORT` move them) and refuses to start if one is taken. Every
+The harness starts the e2e suite's harness through `packages/dispatch/e2e/harness-start.ts`, on
+ports the OS chooses, so it never collides with an e2e run or another docs run; `DISPATCH_E2E_PORT`,
+`FAKE_ENVOY_PORT`, `FAKE_GITHUB_PORT`, `FAKE_BROKER_PORT` and `PLAIN_HTTP_PORT` pin one, and an
+occupied pinned port fails with `address already in use`. Its processes' output goes to
+`.work/harness/<name>.log`. Every
 row it writes is example data; nothing here reaches a real Dispatch, Envoy, GitHub or secrets
 broker.
 

@@ -107,9 +107,10 @@ merger — runs from one image, `ghcr.io/sjawhar/legion-worker` (public). It car
   reader-facing Dispatch change must pass before it merges, reaches `psql` through
   `packages/dispatch/e2e/psql.ts` — `packages/dispatch/e2e/seed.ts` calls it for every spec's
   database reset — and the local stack `bun run dispatch:local`
-  (`packages/dispatch/e2e/local-instance.ts`) refuses to start without `go`, `psql`, `flock` and
-  `openssl` on `PATH`, and without `docker` too unless a `DATABASE_URL` is given; the image
-  carries `go`, `flock` and `openssl`, a `DATABASE_URL` stands in for `docker`, and `psql` was the
+  (`packages/dispatch/e2e/local-instance.ts`) refuses to start without `go`, `psql`, `flock`,
+  `openssl` and `python3` on `PATH`, and without `docker` too unless a `DATABASE_URL` is given; the
+  image carries `go`, `flock`, `openssl` and `python3`, a `DATABASE_URL` stands in for `docker`,
+  and `psql` was the
   one a role had no way to supply, so a role on a digest without it cannot run the suite its own
   change owes — Debian's `psql` is a Perl wrapper around the versioned client, and it resolves
   because `perl-base` is in the image),

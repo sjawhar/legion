@@ -48,11 +48,14 @@ export async function resetFakeGithub(): Promise<void> {
 }
 
 async function putFakeGithubRepos(repos: Record<string, FakeGithubRepo>): Promise<void> {
-  const response = await fetch(`http://127.0.0.1:${harnessPorts.fakeGithub.port}/__fixture/repos`, {
-    body: JSON.stringify(repos),
-    headers: { "Content-Type": "application/json" },
-    method: "PUT",
-  });
+  const response = await fetch(
+    `http://127.0.0.1:${harnessPorts().fakeGithub.port}/__fixture/repos`,
+    {
+      body: JSON.stringify(repos),
+      headers: { "Content-Type": "application/json" },
+      method: "PUT",
+    }
+  );
   if (!response.ok) {
     throw new Error(`seed fake github: ${response.status}`);
   }

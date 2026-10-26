@@ -38,9 +38,11 @@ function permissionsOf(repo: FakeRepo): Record<string, string | undefined> {
 // installed).
 let repos = new Map<string, FakeRepo>();
 
-Bun.serve({
+// FAKE_GITHUB_PORT, or with it unset port 0, so the OS chooses; the line at the end reports the
+// port bound, which e2e/harness-start.ts reads.
+const server = Bun.serve({
   hostname: "127.0.0.1",
-  port: harnessPorts.fakeGithub.port,
+  port: harnessPorts().fakeGithub.port,
   async fetch(request) {
     const url = new URL(request.url);
     if (request.method === "PUT" && url.pathname === "/__fixture/repos") {
@@ -185,4 +187,4 @@ Bun.serve({
   },
 });
 
-console.log(`fake github listener on 127.0.0.1:${harnessPorts.fakeGithub.port}`);
+console.log(`fake github listener on 127.0.0.1:${server.port}`);

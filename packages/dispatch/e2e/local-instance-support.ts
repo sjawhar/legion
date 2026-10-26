@@ -1,6 +1,7 @@
-/** What `e2e/local-instance.ts` runs on: the processes it starts and stops, its refusal of a
- *  database it must not truncate, and the quoting of the commands it prints. Nothing here runs on
- *  import, so `e2e/__tests__/local-instance-support.test.ts` drives it without a server. */
+/** What `e2e/local-instance.ts` and `e2e/harness-start.ts` run on: the processes they start and
+ *  stop, the refusal of a database the command must not truncate, and the quoting of the commands
+ *  it prints. Nothing here runs on import, so `e2e/__tests__/local-instance-support.test.ts`
+ *  drives it without a server. */
 import type { Subprocess } from "bun";
 
 export class Interrupted extends Error {}
@@ -8,6 +9,11 @@ export class Interrupted extends Error {}
 interface Running {
   readonly name: string;
   readonly child: Subprocess;
+}
+
+/** A process started by `startPiped`: its output is the caller's to read. */
+export interface PipedRunning extends Running {
+  readonly child: Subprocess<"ignore", "pipe", "pipe">;
 }
 
 /** Every process the command starts, as the leader of a process group of its own, and the one
@@ -57,6 +63,27 @@ export class Supervisor {
     return running;
   }
 
+  /** As `start`, in the environment `env`, with its output piped to the caller, which reads both
+   *  streams to their end: a pipe nobody drains stops the process once it fills. */
+  startPiped(
+    name: string,
+    argv: readonly string[],
+    cwd: string,
+    env: Record<string, string | undefined>
+  ): PipedRunning {
+    const child = Bun.spawn([...argv], {
+      cwd,
+      detached: true,
+      env,
+      stderr: "pipe",
+      stdin: "ignore",
+      stdout: "pipe",
+    });
+    const running = { child, name };
+    this.#children.push(running);
+    return running;
+  }
+
   /** A foreground step. It throws on a non-zero exit, so a failed web build or dev-postgres.sh
    *  reaches the command's one catch (and `stop`) like every other failure. */
   async run(argv: readonly string[], cwd: string): Promise<void> {
@@ -71,7 +98,7 @@ export class Supervisor {
     return Promise.race(
       this.#children.map(async ({ child, name }): Promise<never> => {
         const code = await child.exited;
-        throw new Error(`${name} exited ${code ?? child.signalCode} while the instance was up`);
+        throw new Error(`${name} exited ${code ?? child.signalCode} while the harness was up`);
       })
     );
   }

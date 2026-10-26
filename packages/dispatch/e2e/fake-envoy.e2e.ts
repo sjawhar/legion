@@ -1,7 +1,6 @@
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { createServer, request as httpRequest } from "node:http";
-import type { AddressInfo } from "node:net";
+import { request as httpRequest } from "node:http";
 import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { expect, test } from "@playwright/test";
@@ -9,36 +8,30 @@ import { expect, test } from "@playwright/test";
 import type { FakeInterest, FakeSession } from "./agents";
 
 // The fake Envoy is the harness's own fixture, so this row starts a second one on a port of its
-// own rather than reseeding the listener every other row in the run shares.
+// own rather than reseeding the listener every other row in the run shares: with FAKE_ENVOY_PORT
+// unset it binds a port the OS chooses, and the row reads it from the fake's listening line.
 const fakeEnvoyModule = fileURLToPath(new URL("./fake-envoy.ts", import.meta.url));
 
 test("an interests seed whose body arrives during a session reseed is kept", async () => {
   test.skip(test.info().project.name !== "chromium", "the fixture has no browser to vary");
-  const probe = createServer().listen(0, "127.0.0.1");
-  await once(probe, "listening");
-  const port = (probe.address() as AddressInfo).port;
-  probe.close();
-  await once(probe, "close");
-  const fake = spawn("bun", [fakeEnvoyModule], {
-    env: { ...process.env, FAKE_ENVOY_PORT: String(port) },
-    stdio: ["ignore", "pipe", "inherit"],
-  });
+  const { FAKE_ENVOY_PORT: _harnessFake, ...env } = process.env;
+  const fake = spawn("bun", [fakeEnvoyModule], { env, stdio: ["ignore", "pipe", "inherit"] });
   const exited = once(fake, "exit");
   try {
-    const ready = Promise.withResolvers<void>();
+    const ready = Promise.withResolvers<number>();
     let output = "";
     fake.stdout.setEncoding("utf8");
     fake.stdout.on("data", (chunk: string) => {
       output += chunk;
-      if (output.includes("fake envoy listener on")) ready.resolve();
+      const listening = /fake envoy listener on 127\.0\.0\.1:(\d+)\n/.exec(output);
+      if (listening !== null) ready.resolve(Number(listening[1]));
     });
     fake.once("exit", (code) => {
       ready.reject(new Error(`the fake Envoy exited ${code} before it listened: ${output}`));
     });
     fake.once("error", ready.reject);
-    await ready.promise;
+    const port = await ready.promise;
     const origin = `http://127.0.0.1:${port}`;
-
     // The interests PUT's headers go first and its body last, with a whole session reseed in
     // between: `conversation.e2e.ts` and `inbox.e2e.ts` send the two seeds at once, and a client
     // that splits a request's headers from its body puts the reseed inside the handler's await.

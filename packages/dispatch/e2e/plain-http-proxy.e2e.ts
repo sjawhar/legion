@@ -93,36 +93,29 @@ test("a page that closes leaves no request open upstream of the proxy", async ({
   upstream.listen(0, "127.0.0.1");
   await once(upstream, "listening");
   const upstreamPort = (upstream.address() as AddressInfo).port;
-
-  // A second proxy, on a port of its own, in front of the stand-in: the harness's own proxy
-  // forwards to the server under test, whose subscribers this spec cannot count.
-  const probe = createServer().listen(0, "127.0.0.1");
-  await once(probe, "listening");
-  const proxyPort = (probe.address() as AddressInfo).port;
-  probe.close();
-  await once(probe, "close");
+  // A second proxy in front of the stand-in: the harness's own proxy forwards to the server under
+  // test, whose subscribers this spec cannot count. With PLAIN_HTTP_PORT unset it binds a port the
+  // OS chooses, which this row reads from the proxy's listening line.
+  const { PLAIN_HTTP_PORT: _harnessProxy, ...env } = process.env;
   const proxy = spawn("bun", [proxyModule], {
-    env: {
-      ...process.env,
-      PLAIN_HTTP_PORT: String(proxyPort),
-      PLAYWRIGHT_BASE_URL: `http://127.0.0.1:${upstreamPort}`,
-    },
+    env: { ...env, PLAYWRIGHT_BASE_URL: `http://127.0.0.1:${upstreamPort}` },
     stdio: ["ignore", "pipe", "inherit"],
   });
   const exited = once(proxy, "exit");
   try {
-    const ready = Promise.withResolvers<void>();
+    const ready = Promise.withResolvers<number>();
     let output = "";
     proxy.stdout.setEncoding("utf8");
     proxy.stdout.on("data", (chunk: string) => {
       output += chunk;
-      if (output.includes("plain-HTTP proxy on")) ready.resolve();
+      const listening = /plain-HTTP proxy on http:\/\/[^/:]+:(\d+) /.exec(output);
+      if (listening !== null) ready.resolve(Number(listening[1]));
     });
     proxy.once("exit", (code) => {
       ready.reject(new Error(`the proxy exited ${code} before it listened: ${output}`));
     });
     proxy.once("error", ready.reject);
-    await ready.promise;
+    const proxyPort = await ready.promise;
 
     const context = await browser.newContext();
     const page = await context.newPage();

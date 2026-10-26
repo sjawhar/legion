@@ -839,10 +839,11 @@ import each other under `web/src`, confirm `bun run lint` fails naming both, and
 ## End-to-end tests
 
 `bun run e2e` drives Playwright against the real Go Dispatch server and
-Postgres. The harness runs `e2e/run-server.sh` unless
-`PLAYWRIGHT_BASE_URL` selects an already deployed server. The harness defaults
-to `DISPATCH_E2E_PORT=8777`, which keeps its temporary server separate from
-the production listener on port 8766, but `DATABASE_URL` is required: the
+Postgres. It runs Playwright through `e2e/run.ts`, which starts the harness
+(`e2e/run-server.sh` and its fakes) unless `PLAYWRIGHT_BASE_URL` selects an
+already deployed server. Every harness server serves on a port the OS chooses
+unless its variable sets one (below), so the temporary server never meets the
+production listener on port 8766, but `DATABASE_URL` is required: the
 database must be isolated because `e2e/seed.ts` truncates it before every
 scenario and never falls back to `dispatch_c`. It runs the server in cookie
 identity, the production mode, and signs `alice` and `bob` in through the
@@ -871,9 +872,17 @@ project's title `grep`; its fallback is the one-time manual check beside the `we
 environment, and execs the binary with every server
 setting pinned. It execs the binary rather than `go run`: the go command ignores
 only SIGINT and SIGQUIT, so a SIGTERM to `go run` ends the go command and leaves
-its server listening. Playwright kills the whole process group and the
+its server listening. The harness stops each process group it started and the
 skill-scenarios rig the whole process tree, so neither noticed, but a caller
-that signals the one pid it started (`kill $!`) needs it to be the server. The binary is one per
+that signals the one pid it started (`kill $!`) needs it to be the server. With
+`DISPATCH_E2E_PORT` unset the script execs the server through
+`scripts/e2e/lib/held-port.py exec --fd-env DISPATCH_LISTEN_FD`, which holds a
+socket on `127.0.0.1:0` from the moment the kernel chooses its port, sets
+`DISPATCH_PORT` and `DISPATCH_SERVER_URL` from it and execs in place, so the pid
+is still the server's; the server serves on that socket and reports it on
+stderr as `msg="dispatch: listening" addr=127.0.0.1:<port>`, the line a caller
+reads the port from (`e2e/harness-start.ts` does). Set, the server binds that
+port, and an occupied one fails with `address already in use`. The binary is one per
 checkout, `packages/envoy/dispatch-e2e` (gitignored), built under
 `flock packages/envoy/.dispatch-e2e.lock` so two harnesses starting at once in
 one checkout serialise their builds; Go rewrites it only when the source
@@ -884,11 +893,12 @@ key, passes no cookie signing key (the server generates one for its process, as
 directory. A caller's environment or `~/.config/legion/envoy.json` /
 `~/.local/share/dispatch/{app.json,signing-key}` therefore cannot point the
 test server at a live Envoy, dashboard origin or GitHub App (every Legion pane
-exports `ENVOY_URL`). The harness ports stay inputs because the server script reads them too; on
-the TypeScript side `e2e/harness-ports.ts` is the one place they are resolved. The secrets broker
+exports `ENVOY_URL`). `FAKE_ENVOY_PORT` and `FAKE_GITHUB_PORT` are required inputs, the fakes'
+reported ports; on the TypeScript side `e2e/harness-ports.ts` is the one place the harness ports
+are resolved. The secrets broker
 the server relays credential requests to is one switch, `DISPATCH_E2E_AGENT_SECRETS_URL`, which
 `run-server.sh` and `e2e/harness-broker.ts` read alike (`${VAR-default}`, so empty and unset
-differ): unset, the default, is `e2e/fake-broker.ts` on `FAKE_BROKER_PORT` (default `9024`), which
+differ): unset, the default, is `e2e/fake-broker.ts` on `FAKE_BROKER_PORT` (then required), which
 verifies no caller, so the server presents the throwaway token in
 `e2e/fake-broker-account-token` and the credential-request feature is on; empty is no broker, the
 feature off as in a deployment that configures none (`DISPATCH_E2E_AGENT_SECRETS_URL= bun run
@@ -897,7 +907,7 @@ lists the ServiceAccount whose token `run-server.sh` hands the server by
 `DISPATCH_E2E_AGENT_SECRETS_ACCOUNT_TOKEN_FILE`, a path it makes absolute against the caller's
 directory before it changes into `packages/envoy`. The broker's docs rig
 (`docs/site/media/broker/rig.sh`) sets a URL, and keeps that token with
-`packages/envoy/cmd/dev-oidc-issuer`, the local issuer its broker trusts. Playwright starts the
+`packages/envoy/cmd/dev-oidc-issuer`, the local issuer its broker trusts. The harness starts the
 fake broker only for the default, and the skill-scenarios rig sets the switch empty.
 
 Proof uses collaborative cursor decorations at the desktop `xl` breakpoint and above. Compact
@@ -907,8 +917,8 @@ post-update text selection; Yjs document transport and local editing remain acti
 `e2e/failed-room.e2e.ts` is opt-in and skipped without `DISPATCH_FAILED_ROOM_PROBE=1`: it holds
 the room's next durable append for 20 s with a `doc_updates` trigger and cancels that backend, so
 it costs about 40 s and does not belong in the suite CI runs. Run it as
-`DISPATCH_FAILED_ROOM_PROBE=1 bunx playwright test --config e2e/playwright.config.ts --project=chromium e2e/failed-room.e2e.ts`.
-That recipe loads the same config, so it refuses the harness ports while another run holds them.
+`DISPATCH_FAILED_ROOM_PROBE=1 bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts --project=chromium e2e/failed-room.e2e.ts`,
+which starts a harness of its own on ports the OS chooses.
 It is the end-to-end check for a failed document room: the writer inside the docs layer when the
 room fails is answered `503 DOC_SERVICE_UNAVAILABLE` rather than waiting for a recovery that
 cannot finish, the writer behind it is answered the same way or admitted once the room has
@@ -919,11 +929,12 @@ behind. Run it on a change and on its base whenever the docs layer's locking, re
 paths move; the two runs' `FAILED-ROOM` lines are the comparison.
 
 `e2e/fake-envoy.ts` is a stub Envoy listener the harness starts on
-`FAKE_ENVOY_PORT` (default `9021`) and the only Envoy a local harness server talks to:
-`run-server.sh` builds `ENVOY_URL` from that port alone. Playwright starts the same listener for a
-deployed run; `deploy/compose/dispatch.acceptance.compose.yml` requires `FAKE_ENVOY_PORT` and
-derives the target's Envoy URL from it. Before any row runs, `e2e/preflight.ts` (the config's
-`globalSetup`, which runs once the web servers are up) puts a session in this run's fake and
+`FAKE_ENVOY_PORT` (unset, a port the OS chooses, which it reports) and the only Envoy a local
+harness server talks to: `run-server.sh` builds `ENVOY_URL` from that port alone. The harness
+starts the same listener for a deployed run; `deploy/compose/dispatch.acceptance.compose.yml`
+requires `FAKE_ENVOY_PORT` and derives the target's Envoy URL from it, so a deployed run sets it.
+Before any row runs, `e2e/preflight.ts` (the config's `globalSetup`) puts a session in this run's
+fake and
 requires the target's `GET /api/v1/agents` to list it, then clears the fake: a target that reads
 another Envoy listener refuses the run naming the fake's port, rather than answering every row
 from sessions none of them seeded. Tests seed live sessions and their capabilities with
@@ -1030,49 +1041,57 @@ a Dispatch server from an earlier run still listening on `DISPATCH_E2E_PORT`, ma
 `resetDatabase` throw in `beforeEach`. Because it throws in the hook, **every** spec in the file
 reports failed, each carrying the `psql … DO $$` lock step and the holders it names in its message,
 which reads as a catastrophic regression in the change under test. Recognise that shape as the
-rig: stop whatever holds those tables (most often whatever holds the port) and run again. With
-reuse off a run cannot reach that shape through the port at all, and this paragraph is where the
-harness-port rule lives — `README.md` and the `docs/solutions` learning point here rather than
-restating it.
+rig: stop whatever holds those tables and run again. A run through `e2e/run.ts` cannot reach
+that shape through a port at all, since its servers serve on ports the OS chose for it alone, and
+this paragraph is where the harness-port rule lives — `README.md` and the `docs/solutions`
+learnings point here rather than restating it.
 
-`e2e/harness-ports.ts` resolves `DISPATCH_E2E_PORT` (default `8777`), `FAKE_ENVOY_PORT` (default
-`9021`), `FAKE_GITHUB_PORT` (default `9022`), `PLAIN_HTTP_PORT` (default `9023`) and
-`FAKE_BROKER_PORT` (default `9024`) once for every reader in `e2e/`, the Playwright config and the
-four Bun listeners included. An empty value means the default for all five alike, matching
-`run-server.sh`'s `${VAR:-default}` for the four ports it reads; anything that is not a port in
-canonical decimal is
-refused naming its variable (so `1e4`, `8777.0`, `0x2249`, `+8777`, `" 8777"` and a leading-zero
-`08777` are all refused, rather than binding one port while every URL built from the raw string
-points somewhere else, or writing one port two ways). Two variables naming one port are refused
-together, naming both: each port passes a per-port check on its own, and every consumer would
-otherwise fail in its own words — Playwright refusing the second `webServer` without naming a
-variable, the second Bun listener dying on `EADDRINUSE`. Because the check lives with the
-resolution, those listeners refuse it too, not only the Playwright config.
+`e2e/harness-ports.ts` resolves `DISPATCH_E2E_PORT`, `FAKE_ENVOY_PORT`, `FAKE_GITHUB_PORT`,
+`PLAIN_HTTP_PORT` and `FAKE_BROKER_PORT` for every reader in `e2e/`, the Playwright config and the
+four Bun listeners included. `harnessPorts()` reads the environment when it is called, not when the
+module is imported, because the starters import it before the listeners have reported. Unset or
+empty is port `0`: the listener serves on a port the OS chooses and holds until it serves (the
+server on a socket `scripts/e2e/lib/held-port.py` hands it, each Bun listener by binding port 0)
+and prints it on its listening line. A set value is used as given: its listener binds exactly
+that port, and an occupied one fails with `address already in use`, never replaced by another.
+A set value that is not a port in canonical decimal is
+refused naming its variable (so `0`, `1e4`, `8777.0`, `0x2249`, `+8777`, `" 8777"` and a
+leading-zero `08777` are all refused, rather than binding one port while every URL built from the
+raw string points somewhere else, or writing one port two ways). Two set variables naming one port
+are refused together, naming both: each port passes a per-port check on its own, and every
+consumer would otherwise fail in its own words — the second Bun listener dying on `EADDRINUSE`.
+Because the check lives with the resolution, those listeners refuse it too, not only the
+Playwright config.
 
-`e2e/playwright.config.ts` probes every port it starts before any web server starts and fails the
-run with one message listing every taken port beside its own variable, before a single spec runs.
-One table, `e2e/harness-listeners.ts`, names each listener, its command, its port's variable and
-whether a deployed run starts it; the config's probe and `webServer` read the rows it starts: all
-five ports for a local run, and `FAKE_ENVOY_PORT` plus `PLAIN_HTTP_PORT` for a deployed run. The
-probe is `e2e/port-probe.ts`: `isPortUsed` is Playwright's own predicate, and `takenPorts` lists
-the taken ports of a set of rows, which the config and `e2e/local-instance.ts` both refuse on. The
-refusal names only the variables the run probes. Its remedies are
-to stop whatever listens there, or to move a local run to free ports **and its own
-`DATABASE_URL`** — moving only the ports starts this run's servers elsewhere and still truncates
-the database the leftover server holds, and `e2e/seed.ts`'s quiesce reaches only the server at the
-new port, so that server's live rooms stay open across the truncate. Reuse is
-opt-in through `DISPATCH_E2E_REUSE_SERVERS`, whose only accepted value is `1`: unset or empty
-starts this run's own servers, and any other value is refused at config load naming the variable
-and the value. `CI` takes no part in that decision, so a shell that exports it and one that does
-not behave alike; a lane that shares one hand-started harness across runs sets
-`DISPATCH_E2E_REUSE_SERVERS=1`. A deployed run passes `FAKE_ENVOY_PORT` to the acceptance Compose
-file, which derives the target's `ENVOY_URL` from that same value; the README's acceptance recipe
-wires the pair. A listing run starts no web server, so it skips the probe. The port validation above
-is not gated on that mode, so a malformed or duplicated port is refused in every invocation.
+`e2e/harness-start.ts` is the harness's one starter. It starts the rows of
+`e2e/harness-listeners.ts` a run needs, in the table's order — the fakes, then the server (its
+environment names the fakes' ports), then the plain-HTTP proxy (it forwards to the server's
+origin) — each as the leader of a process group of its own, reads each row's report line for its
+port, waits for the server's `/healthz`, and returns the ports by variable with a stop function.
+A row that exits before it reports fails the start with its last lines, naming the variable when
+its set port was taken. A deployed run (`PLAYWRIGHT_BASE_URL`) starts only the rows marked
+`deployed`, the fake Envoy and the plain-HTTP proxy. `e2e/run.ts`
+(`bun e2e/run.ts -- <command>`) starts it, exports the ports and
+`DISPATCH_E2E_REUSE_SERVERS=1`, runs the command, stops the harness when the command exits (a
+Ctrl-C reaches the command, a SIGTERM to the wrapper is passed on), and exits with the command's
+status; `bun run e2e`, `bun run e2e:deployed` and CI's browser step run Playwright through it, so
+the config, every worker that re-imports it and every helper that reads a port at import
+(`e2e/api.ts`'s `baseUrl`, `e2e/plain-http-origin.ts`'s `plainHttpOrigin`) see the real ports.
+
+`e2e/playwright.config.ts` starts no server. It refuses, before a single spec runs, a run whose
+targeted ports are not all set — all five for a local run, `FAKE_ENVOY_PORT` and
+`PLAIN_HTTP_PORT` for a deployed run — naming the unset variables and `e2e/run.ts`, and a run
+without `DISPATCH_E2E_REUSE_SERVERS=1`, whose only accepted value is `1` (any other is refused
+naming the variable and the value). Every port set by hand plus that flag runs against a harness
+a person started and left listening; pair it with that harness's own `DATABASE_URL`, since
+`e2e/seed.ts` truncates the database the server holds. `CI` takes no part in that decision. A
+deployed run passes `FAKE_ENVOY_PORT` to the acceptance Compose file, which derives the target's
+`ENVOY_URL` from that same value; the README's acceptance recipe wires the pair. Even a listing
+run (`--list`) goes through `e2e/run.ts`, since the config refuses without the ports.
 
 `bun run dispatch:local` (`e2e/local-instance.ts`) is that harness, left running and seeded: it
-starts every row of `e2e/harness-listeners.ts`, each as the leader of a process group of its own,
-waits for the server's `/healthz` and every other listener's port, empties the database with
+starts the harness through `e2e/harness-start.ts`, then imports the e2e modules that read a port
+(they read it once, at import) with the reported ports in its environment, empties the database with
 `resetDatabase`, seeds `e2e/workspace.ts`, and prints the signed-in URL; `README.md`'s "Local
 instance" section is its user's guide. Its database is `DATABASE_URL` or the `dispatch_local`
 database on `packages/envoy/scripts/dev-postgres.sh`'s container. Before it hands out the URL its
@@ -1083,8 +1102,9 @@ assertion, so the command has to start on a server without that fix for the spec
 against it. What it runs on lives in `e2e/local-instance-support.ts`, which runs nothing on
 import: `Supervisor`, which starts each process and stops them all (Ctrl-C, a SIGTERM, a failure
 at any step), signalling every process group, SIGKILLing whatever still runs after 10 s, aborting
-the signal its psql calls carry, and returning once every leader has exited; `databaseUrlRefusal`,
-its own `DATABASE_URL` check; and `shellQuote`, for the commands it prints.
+the signal its psql calls carry, and returning once every leader has exited, and which
+`e2e/harness-start.ts` starts the harness's processes on, their output piped to it;
+`databaseUrlRefusal`, its own `DATABASE_URL` check; and `shellQuote`, for the commands it prints.
 `e2e/__tests__/local-instance-support.test.ts` (`bun run test`) drives them with real processes
 and no server. That check reads the URL with `new URL`, as libpq would only in part; the order
 closes the gap, since the reset runs only after the server's `/healthz` answered, and the server
@@ -1136,7 +1156,7 @@ its title can resize an ask card and make Firefox or WebKit anchor the margin's 
 
 The `webkit-iphone` project runs, in WebKit with the iPhone 13 profile, the live view's two phone-layout rows in `e2e/agent-view.e2e.ts` and the rows of `e2e/phone-conversation.e2e.ts` titled `covers none of`, which check what the Conversation's floating pills cover on a phone: iOS Safari is the engine the keyboard cap and those layouts exist for, and the `iphone` project is Chromium. Its project `grep` selects those rows by title, so renaming any of them silently drops its WebKit run with no failure; rename the `grep` with it. WebKit delivers a scroll container's `scroll` event a frame later than Chromium, and the thread follows its bottom only once that event has arrived, so the live view's rows scroll the thread through `scrollThreadTo`, which waits for the event, before they raise a keyboard.
 
-No Playwright hook asserts what a project's title `grep` selected, so that guard is a one-time manual check: rename one selected test in a scratch copy and confirm `bunx playwright test --config e2e/playwright.config.ts --project=webkit-iphone --list` drops it (the count falls by one, with no error), then restore it. Repeat it whenever the `grep` or the titles change.
+No Playwright hook asserts what a project's title `grep` selected, so that guard is a one-time manual check: rename one selected test in a scratch copy and confirm `bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts --project=webkit-iphone --list` drops it (the count falls by one, with no error), then restore it. Repeat it whenever the `grep` or the titles change.
 
 The `firefox` Playwright project runs `e2e/code-line-replace.e2e.ts`, `e2e/deep-links.e2e.ts`,
 `e2e/keyboard-agents-picker.e2e.ts`, `e2e/offline-edits.e2e.ts`, and

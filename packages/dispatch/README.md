@@ -42,8 +42,10 @@ runs the Vite development server for interface work.
 ## End-to-end tests
 
 `bun run e2e` builds the SPA and drives Playwright against the real Go Dispatch
-server and Postgres. The harness starts `e2e/run-server.sh` unless
-`PLAYWRIGHT_BASE_URL` selects a deployed server. The script builds the server
+server and Postgres. It runs Playwright through `e2e/run.ts`, which starts the
+harness (`e2e/harness-start.ts`: the fakes, then `e2e/run-server.sh`, then the
+plain-HTTP proxy) unless `PLAYWRIGHT_BASE_URL` selects a deployed server. The
+script builds the server
 with the caller's `go` into `packages/envoy/dispatch-e2e` and execs it, so a
 SIGTERM to the pid it hands its caller stops the server. It pins every server
 setting: cookie identity, the production mode, with `alice` and `bob` signed in through the
@@ -67,25 +69,28 @@ requests at a broker the caller runs, as the secrets broker's docs rig
 `e2e/seed.ts` truncates it before every scenario and never selects a shared
 default, and the dev sign-in flag refuses a non-loopback host. psql runs without
 `PGHOSTADDR` (`e2e/psql.ts`), which would otherwise send it somewhere the server
-never checked. The harness ports `DISPATCH_E2E_PORT` (default `8777`),
-`FAKE_ENVOY_PORT` (default `9021`), `FAKE_GITHUB_PORT` (default `9022`),
-`PLAIN_HTTP_PORT` (default `9023`) and `FAKE_BROKER_PORT` (default `9024`) are
-its other inputs, resolved for the whole suite by `e2e/harness-ports.ts`. A
-local run starts its own servers on those five ports and refuses before any of
-them starts if one is taken, so it never
-truncates the database behind a server it did not start;
-`DISPATCH_E2E_REUSE_SERVERS=1` is the opt-in for running against a harness you
-started yourself. `AGENTS.md`'s end-to-end section states that rule in full —
-the accepted values, what a bad or duplicated port does, and which invocations
-skip the probe. The harness starts `e2e/fake-envoy.ts` on `FAKE_ENVOY_PORT`
-and that listener is the only Envoy the server ever talks to; tests seed its
+never checked. The harness ports `DISPATCH_E2E_PORT`, `FAKE_ENVOY_PORT`,
+`FAKE_GITHUB_PORT`, `PLAIN_HTTP_PORT` and `FAKE_BROKER_PORT` are its other
+inputs, resolved for the whole suite by `e2e/harness-ports.ts`. Unset, each
+server serves on a port the OS chooses and holds until it serves: the Dispatch
+server on a socket `scripts/e2e/lib/held-port.py` hands it, each Bun listener by
+binding port 0. Each reports its port on its listening line, and `e2e/run.ts`
+exports them before Playwright starts, so no run shares a port with another and
+none truncates the database behind a server it did not start. Set, a port is
+used as given, and an occupied one fails with `address already in use`.
+Running `playwright test` without the wrapper refuses, naming `e2e/run.ts`,
+unless every port is set and `DISPATCH_E2E_REUSE_SERVERS=1` says they name a
+harness you started yourself. `AGENTS.md`'s end-to-end section states that
+rule in full — the accepted values and what a bad or duplicated port does. The
+harness starts `e2e/fake-envoy.ts` and that listener is the only Envoy the
+server ever talks to; tests seed its
 live sessions with `setLiveSessions` from `e2e/agents.ts`. It starts
-`e2e/fake-broker.ts` on `FAKE_BROKER_PORT` as the secrets broker, so the
+`e2e/fake-broker.ts` as the secrets broker, so the
 credential-request feature is on, and tests seed its pending requests with
 `setPendingCredentialRequests` from `e2e/fake-broker-helpers.ts`; an empty
 `DISPATCH_E2E_AGENT_SECRETS_URL` runs the suite with no broker instead, as a
 deployment that configures none (`AGENTS.md` has the switch). It also starts
-`e2e/plain-http-proxy.ts` on `PLAIN_HTTP_PORT` for the plain-HTTP project.
+`e2e/plain-http-proxy.ts` for the plain-HTTP project.
 
 Run the local harness with its isolated database available:
 
@@ -95,14 +100,28 @@ DATABASE_URL='postgres://postgres:dispatch@127.0.0.1:55432/dispatch_<issue>?sslm
   bun run e2e
 ```
 
+Arguments after the config go to Playwright, as in
+`bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts --project=chromium e2e/broadcast.e2e.ts`
+(`bun run e2e` runs the same after the SPA build). `e2e/run.ts` stops the harness
+when Playwright exits and exits with Playwright's status.
+
+`e2e/run-server.sh` on its own is the server for a shell caller: with
+`DATABASE_URL`, `FAKE_ENVOY_PORT`, `FAKE_GITHUB_PORT` and the broker switch's
+input (`FAKE_BROKER_PORT`, or an empty `DISPATCH_E2E_AGENT_SECRETS_URL`) set and
+`DISPATCH_E2E_PORT` unset, it writes
+`msg="dispatch: listening" addr=127.0.0.1:<port>` to stderr once the server
+serves; read the port from that line. `$!` of a backgrounded run is the server's
+pid.
+
 ## Local instance
 
 `bun run dispatch:local`, from the repository root or from this package, brings up a seeded
 Dispatch signed in as a person, to prove a change to a surface only a human acts on (the Inbox and
 its snooze, the Agents page and its direct messages, a broadcast) with no production step. It is
-the end-to-end harness, left running: it builds the SPA, starts every listener the Playwright
-config starts (the fake Envoy, the plain-HTTP proxy, the fake GitHub, the fake secrets broker and
-`e2e/run-server.sh`) on the same ports, empties the database, seeds `e2e/workspace.ts`, checks over
+the end-to-end harness, left running: it builds the SPA, starts the harness through
+`e2e/harness-start.ts` as `e2e/run.ts` does (the fake Envoy, the fake GitHub, the fake secrets
+broker, `e2e/run-server.sh` and the plain-HTTP proxy) on ports the OS chooses, empties the
+database, seeds `e2e/workspace.ts`, checks over
 HTTP that a cookie from the dev sign-in route reads `/auth/whoami`, the Inbox, the broadcasts and
 the agents, and prints:
 
@@ -110,7 +129,7 @@ the agents, and prints:
 - the seeded broadcast's page,
 - the agent bearer (`e2e-token`) a local Oh My Pi session reaches this instance with,
 - the database, the fake Envoy's session list and its reseed endpoint,
-- the command that runs a spec against it.
+- the command that runs a spec against it, with the ports it serves on.
 
 Open exactly the printed `127.0.0.1` origin: `localhost` is another `Host`, and the server refuses
 it (`421 HOST_MISMATCH`). Ctrl-C stops every process it started, and so does a failure at any
@@ -125,11 +144,14 @@ That script refuses a `dispatch-pg` on any image but its pinned pgvector one, si
 migrations need the `vector` extension, and prints the commands that move the container's data
 volume onto that image, quoted so they paste as they read. The harness ports
 (`DISPATCH_E2E_PORT`, `FAKE_ENVOY_PORT`, `PLAIN_HTTP_PORT`, `FAKE_GITHUB_PORT`,
-`FAKE_BROKER_PORT`) move the instance, and the command refuses before anything starts when one is
-taken. psql runs without `PGHOSTADDR` (`e2e/psql.ts`), and a Ctrl-C ends a psql in flight too.
+`FAKE_BROKER_PORT`) are unset unless you need a fixed one: unset, the OS chooses each, so two
+instances never collide; set, the port is used as given, and an occupied one fails with
+`address already in use`. psql runs without `PGHOSTADDR` (`e2e/psql.ts`), and a Ctrl-C ends a
+psql in flight too.
 
 A spec runs against the instance with the printed command, which sets
-`DISPATCH_E2E_REUSE_SERVERS=1` and the same `DATABASE_URL`; each spec empties the database and the
+`DISPATCH_E2E_REUSE_SERVERS=1`, the five ports and the same `DATABASE_URL`; each spec empties the
+database and the
 fake Envoy, so restart the command to reseed it. `bun run build:web` while it runs refreshes the
 SPA, which the server reads from `web/dist` on each request. `docker rm -f dispatch-pg` removes the
 container and every database in it.
@@ -141,18 +163,19 @@ it for Playwright with its own Postgres volume and database. It signs `alice` an
 the dev sign-in route, as the local harness does. It also uses an acceptance-only agent token,
 disabled NATS, and a private loopback fake Envoy with no token. `FAKE_ENVOY_PORT` and
 `ENVOY_IMAGE_TAG` are its only required inputs: the acceptance service derives its `ENVOY_URL`
-from `FAKE_ENVOY_PORT`, and `e2e:deployed` starts the fake listener on it. Before any row runs,
+from `FAKE_ENVOY_PORT`, so it is the one harness port this recipe sets, and `e2e:deployed` starts
+the fake listener on it. Before any row runs,
 `e2e:deployed` puts a session in that fake and requires the server's `GET /api/v1/agents` to list
 it, so a server reading another Envoy listener refuses the run instead of answering it from the
-wrong sessions (`e2e/preflight.ts`). `e2e:deployed` also starts the plain-HTTP proxy on
-`PLAIN_HTTP_PORT`. The fake Envoy makes subscriber, Agents-page, and fixture-hook rows exercise
+wrong sessions (`e2e/preflight.ts`). `e2e:deployed` runs Playwright through `e2e/run.ts`, which
+with `PLAYWRIGHT_BASE_URL` set starts only the fake Envoy and the plain-HTTP proxy, the latter on a
+port the OS chooses. The fake Envoy makes subscriber, Agents-page, and fixture-hook rows exercise
 the deployed server instead of a real session. Fake GitHub rows still skip because the acceptance
 service does not configure that listener.
 
 ```bash
 cd packages/envoy/deploy/compose
 acceptance_envoy_port=19061
-acceptance_plain_http_port=19062
 acceptance_dispatch_port=18767
 acceptance_pg_port=55660
 acceptance_image_tag=dispatch-acceptance-local
@@ -162,7 +185,6 @@ compose=(env FAKE_ENVOY_PORT="$acceptance_envoy_port" DISPATCH_ACCEPTANCE_PORT="
 "${compose[@]}" up -d dispatch-acceptance
 cd ../../../dispatch
 FAKE_ENVOY_PORT="$acceptance_envoy_port" \
-PLAIN_HTTP_PORT="$acceptance_plain_http_port" \
 PLAYWRIGHT_BASE_URL="http://127.0.0.1:${acceptance_dispatch_port}" \
 PLAYWRIGHT_DATABASE_URL="postgres://postgres:dispatch@127.0.0.1:${acceptance_pg_port}/dispatch_acceptance?sslmode=disable" \
 E2E_AGENT_TOKEN=acceptance-token \

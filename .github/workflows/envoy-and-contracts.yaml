@@ -411,6 +411,8 @@ jobs:
               - *bun_toolchain
               # The SPA build writes dist/THIRD_PARTY_NOTICES.txt.
               - 'scripts/third-party-notices.ts'
+              # e2e/run-server.sh serves the browser tests' server on the socket this holds.
+              - 'scripts/e2e/lib/held-port.py'
 
   contracts:
     needs: changes
@@ -731,11 +733,13 @@ jobs:
         working-directory: packages/dispatch
       - name: Browser-test dispatch dashboard
         # `bun run e2e` builds the SPA itself, which would rebuild it a second time in this job.
-        # Calling Playwright directly reuses the "Build dispatch dashboard" step's dist above and
+        # Calling the wrapper directly reuses the "Build dispatch dashboard" step's dist above and
         # drops this job to one Vite build. Safe because that build and this one are now the same
         # binary: `packages/dispatch` no longer has an E2E-only build flag (removed with its sole,
-        # unconsumed consumer, the `window.__dispatchDocument` inspection probe).
-        run: bunx playwright test --config e2e/playwright.config.ts
+        # unconsumed consumer, the `window.__dispatchDocument` inspection probe). e2e/run.ts starts
+        # the harness on ports the OS chooses and runs Playwright with them; the config starts no
+        # server.
+        run: bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts
         working-directory: packages/dispatch
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: failure()
