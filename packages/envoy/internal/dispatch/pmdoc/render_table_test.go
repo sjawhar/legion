@@ -298,3 +298,161 @@ func TestRenderWritesTableCellPipesAsTheBrowserEditorReadsThem(t *testing.T) {
 		t.Fatalf("Parse(Render()) = %s, want the fixture's tree, %s", got, fx.PMJSON)
 	}
 }
+
+// A table row is split into cells before inline parsing, so in a cell a `|` is written `\|`, in code
+// too, and one after an even run of backslashes ends the cell: code holding a `|` after an odd run
+// of backslashes has no spelling there, and written `\\|` it read back as two cells. A browser edit
+// can leave such code in a cell, and its rendering is what is stored, so each such `|` is written as
+// text under the code's other marks after the code: both parsers read the row back as wide as it
+// was, the cell holding every character, that `|` no longer code. The backslashes can end the code
+// node before the `|`, where the two are written in one code span. Code holding a `|` after an even
+// run of backslashes, none included, text holding a backslash before a `|`, and code ending in a
+// backslash that a `|` outside it follows read back as they are.
+func TestRenderWritesACodePipeAfterAnOddRunOfBackslashesAsTextAfterTheCode(t *testing.T) {
+	code, strong := Mark{Type: "inlineCode"}, Mark{Type: "strong", Attrs: Attrs{"marker": "*"}}
+	authored := Mark{Type: "proofAuthored", Attrs: Attrs{"by": "human:alice"}}
+	text := func(value string, marks ...Mark) *Node { return &Node{Type: "text", Text: value, Marks: marks} }
+	const table = "| Cmd | Note |\n| --- | --- |\n| run | x |\n"
+	for _, test := range []struct {
+		name   string
+		header bool
+		cell   []*Node
+		// written is the cell as its markdown writes it, and back what that reads back holding, or
+		// nil where it is cell.
+		written string
+		back    []*Node
+	}{
+		{name: "one backslash", cell: []*Node{text("a\\|b", code)}, written: "`a\\`\\|`b`",
+			back: []*Node{text("a\\", code), text("|"), text("b", code)}},
+		{name: "one backslash in a header cell", header: true, cell: []*Node{text("a\\|b", code)}, written: "`a\\`\\|`b`",
+			back: []*Node{text("a\\", code), text("|"), text("b", code)}},
+		{name: "three backslashes", cell: []*Node{text("a\\\\\\|b", code)}, written: "`a\\\\\\`\\|`b`",
+			back: []*Node{text("a\\\\\\", code), text("|"), text("b", code)}},
+		{name: "two such pipes in a row", cell: []*Node{text("a\\|\\|b", code)}, written: "`a\\`\\|`\\`\\|`b`",
+			back: []*Node{text("a\\", code), text("|"), text("\\", code), text("|"), text("b", code)}},
+		{name: "the pipe ending the code", cell: []*Node{text("\\|", code)}, written: "`\\`\\|",
+			back: []*Node{text("\\", code), text("|")}},
+		{name: "the production row's code", cell: []*Node{text("git log --oneline X..origin/main \\| wc -l", code)},
+			written: "`git log --oneline X..origin/main \\`\\|` wc -l`",
+			back:    []*Node{text("git log --oneline X..origin/main \\", code), text("|"), text(" wc -l", code)}},
+		{name: "bold code", cell: []*Node{text("a\\|b", strong, code)}, written: "**`a\\`\\|`b`**",
+			back: []*Node{text("a\\", strong, code), text("|", strong), text("b", strong, code)}},
+		{name: "the backslash ending the code node before, in one span", cell: []*Node{text("a\\", code, authored), text("|b", code)}, written: "`a\\`\\|`b`",
+			back: []*Node{text("a\\", code), text("|"), text("b", code)}},
+		{name: "code holding a pipe", cell: []*Node{text("a|b", code)}, written: "`a\\|b`"},
+		{name: "code holding a pipe after two backslashes", cell: []*Node{text("a\\\\|b", code)}, written: "`a\\\\\\|b`"},
+		{name: "text holding a backslash before a pipe", cell: []*Node{text("a\\|b")}, written: "a\\\\\\|b"},
+		{name: "code ending in a backslash before a pipe in text", cell: []*Node{text("a\\", code), text("|b")}, written: "`a\\`\\|b"},
+		{name: "bold code ending in a backslash before code in a span of its own", cell: []*Node{text("a\\", strong, code), text("|b", code)}, written: "**`a\\`**`\\|b`"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			doc, err := Parse(table)
+			if err != nil {
+				t.Fatal(err)
+			}
+			row, want := 1, "| Cmd | Note |\n| --- | --- |\n| run | "+test.written+" |\n"
+			if test.header {
+				row, want = 0, "| Cmd | "+test.written+" |\n| --- | --- |\n| run | x |\n"
+			}
+			doc.Children[0].Children[row].Children[1].Children[0].Children = test.cell
+			markdown, err := Render(doc)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if markdown != want {
+				t.Fatalf("Render() = %q, want %q", markdown, want)
+			}
+			back, err := Parse(markdown)
+			if err != nil {
+				t.Fatalf("Parse(%q) = %v", markdown, err)
+			}
+			if len(back.Children) != 1 || len(back.Children[0].Children) != 2 {
+				t.Fatalf("Parse(%q) reads %d blocks, want the table", markdown, len(back.Children))
+			}
+			for index, read := range back.Children[0].Children {
+				if len(read.Children) != 2 {
+					t.Fatalf("Parse(%q) reads row %d holding %d cells, want 2", markdown, index, len(read.Children))
+				}
+			}
+			cell := back.Children[0].Children[row].Children[1].Children[0]
+			wantBack := test.back
+			if wantBack == nil {
+				wantBack = test.cell
+			}
+			if !inlineEqual(wantBack, cell.Children) {
+				got, _ := cell.JSON()
+				t.Fatalf("Parse(%q) reads the cell as %s", markdown, got)
+			}
+			if wrote := TextContent(doc.Children[0].Children[row].Children[1]); TextContent(cell) != wrote {
+				t.Fatalf("the cell reads back holding %q, want every character of %q", TextContent(cell), wrote)
+			}
+		})
+	}
+}
+
+// A write a caller makes that leaves a table cell's code holding a `|` after an odd run of
+// backslashes is refused (TableCodePipeError), naming the cell as GET /blocks places it - the
+// table's block id, the row (0 the header row), the column, the header cell drawn above it, a
+// colspan before it counted - and what to write instead. A table inside a quote is found too. Code
+// whose `|` an even run of backslashes stands before, none included, and text holding a backslash
+// before a `|`, are no refusal.
+func TestTableCodePipeErrorNamesTheCellAndWhatToWriteInstead(t *testing.T) {
+	code := Mark{Type: "inlineCode"}
+	text := func(value string, marks ...Mark) []*Node { return []*Node{{Type: "text", Text: value, Marks: marks}} }
+	for _, test := range []struct {
+		name, markdown string
+		row, column    int
+		cell           []*Node
+		// span gives the first header cell a colspan of two, the second removed.
+		span bool
+		says []string
+	}{
+		{name: "a body cell", markdown: "| Cmd | Note |\n| --- | --- |\n| run | x |\n", row: 1, column: 1, cell: text("git log \\| wc -l", code),
+			says: []string{`table "t1" holds code in row 1, column 1 (under the header "Note") whose text has a | right after a backslash, "git log \| wc -l"`, `drop the backslash before the |, or end the code before the | and write the | as text`}},
+		{name: "a header cell", markdown: "| Cmd | Note |\n| --- | --- |\n| run | x |\n", row: 0, column: 1, cell: text("a\\|b", code),
+			says: []string{`table "t1" holds code in row 0, column 1 (the header row)`}},
+		{name: "a cell under a spanning header", markdown: "| Owner | x |\n| --- | --- |\n| a | b |\n", row: 1, column: 1, span: true, cell: text("a\\|b", code),
+			says: []string{`row 1, column 1 (under the header "Owner")`}},
+		{name: "a table in a quote", markdown: "> | Cmd | Note |\n> | --- | --- |\n> | run | x |\n", row: 1, column: 0, cell: text("a\\\\\\|b", code),
+			says: []string{`table "t1" holds code in row 1, column 0 (under the header "Cmd")`, `"a\\\|b"`}},
+		{name: "code holding a pipe", markdown: "| Cmd | Note |\n| --- | --- |\n| run | x |\n", row: 1, column: 1, cell: text("a|b", code)},
+		{name: "code holding a pipe after two backslashes", markdown: "| Cmd | Note |\n| --- | --- |\n| run | x |\n", row: 1, column: 1, cell: text("a\\\\|b", code)},
+		{name: "text holding a backslash before a pipe", markdown: "| Cmd | Note |\n| --- | --- |\n| run | x |\n", row: 1, column: 1, cell: text("a\\|b")},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			doc, err := Parse(test.markdown)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var table *Node
+			Walk(doc, func(node *Node) bool {
+				if node.Type == "table" {
+					table = node
+				}
+				return table == nil
+			})
+			table.Attrs[BlockIDAttr] = "t1"
+			if test.span {
+				header := table.Children[0]
+				header.Children[0].Attrs["colspan"] = 2
+				header.Children = header.Children[:1]
+			}
+			table.Children[test.row].Children[test.column].Children[0].Children = test.cell
+			err = TableCodePipeError(doc.Children[0])
+			if test.says == nil {
+				if err != nil {
+					t.Fatalf("TableCodePipeError() = %v, want none", err)
+				}
+				return
+			}
+			if !errors.Is(err, ErrSchema) {
+				t.Fatalf("TableCodePipeError() = %v, want a schema refusal", err)
+			}
+			for _, says := range test.says {
+				if !strings.Contains(err.Error(), says) {
+					t.Errorf("TableCodePipeError() = %q, want it to say %q", err, says)
+				}
+			}
+		})
+	}
+}

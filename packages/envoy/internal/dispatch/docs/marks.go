@@ -342,6 +342,9 @@ func (s *Service) applySuggestion(ctx context.Context, artifactID, id, replaceWi
 		if next, err = settleAccepted(tree, next, range_, with); err != nil {
 			return err
 		}
+		if err := refuseCodePipeInTableCell(tree, next, range_, "replace_with", fmt.Sprintf("replace_with %q", with), "reject the suggestion, or reply asking for text the cell can hold"); err != nil {
+			return err
+		}
 		if !insideAsk(at) {
 			if err := refuseUnreadableAccept(tree, next, range_, at, with, replacement); err != nil {
 				return err

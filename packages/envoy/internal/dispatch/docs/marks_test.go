@@ -1177,6 +1177,60 @@ func TestAcceptSuggestionLeavesASiblingItemsSpread(t *testing.T) {
 	}
 }
 
+// An accepted suggestion's text is read as a paragraph's, where `\|` in code is the code's own text;
+// in a table cell no markdown writes such code (pmdoc.TableCodePipeError), so the accept is refused
+// naming the cell and what the person accepting can do, nothing is written, and the suggestion
+// stays open. Code holding a `|` with no backslash before it is accepted.
+func TestAcceptSuggestionRefusesCodeWithAPipeAfterABackslashInATableCell(t *testing.T) {
+	for _, test := range []struct {
+		name, with string
+		// says is what the refusal says, or "" when the accept is taken; stored is then the body
+		// row the document is stored with.
+		says, stored string
+	}{
+		{name: "code holding a backslash before a pipe", with: "`git log \\| wc -l`",
+			says: `holds code in row 1, column 1 (under the header "Note") whose text has a | right after a backslash, "git log \| wc -l"`},
+		{name: "code holding a pipe", with: "`git log | wc -l`", stored: "| run | `git log \\| wc -l` |"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			service, artifactID := newTestService(t)
+			service.settle = time.Hour
+			seedServiceText(t, service, artifactID, "| Cmd | Note |\n| --- | --- |\n| run | Body. |\n")
+			spec := MarkSpec{Kind: MarkSuggestion, ID: "s1", By: model.Actor{Kind: "session", ID: "s1"}}
+			if _, err := joinedMarkQuote(service, artifactID, spec, "Body.", nil); err != nil {
+				t.Fatal(err)
+			}
+			before := liveTree(t, service, artifactID)
+			err := joinedAcceptSuggestion(service, artifactID, "s1", test.with, model.Actor{Kind: "user", ID: "alice"})
+			if test.says == "" {
+				if err != nil {
+					t.Fatalf("accept: %v", err)
+				}
+				text, err := service.Text(context.Background(), artifactID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !strings.Contains(text, test.stored+"\n") {
+					t.Fatalf("after the accept the document is %q, want the row %q", text, test.stored)
+				}
+				return
+			}
+			var invalid *ErrInvalidOp
+			if !errors.As(err, &invalid) || invalid.Field != "replace_with" {
+				t.Fatalf("accept = %v, want an invalid op on replace_with", err)
+			}
+			for _, says := range []string{fmt.Sprintf("table %q %s", blockID(before.Children[0]), test.says), "reject the suggestion, or reply asking for text the cell can hold"} {
+				if !strings.Contains(invalid.Reason, says) {
+					t.Errorf("accept refused with %q, want it to say %q", invalid.Reason, says)
+				}
+			}
+			if after := liveTree(t, service, artifactID); !after.Equal(before) {
+				t.Fatal("the refused accept changed the document")
+			}
+		})
+	}
+}
+
 // A repeat the live document already holds is settlement's to repair, not a write's to refuse or
 // to repair: beside one, an accept whose replacement names no held id (inline, or a typed block
 // with an id of its own), the reject of a browser insert, and an upload of the document's own text

@@ -848,6 +848,9 @@ func applyOperation(tree *pmdoc.Node, op model.EditOp, budget *pmdoc.WriteBudget
 		if code {
 			return next, refuseCodeThatReshapesItsBlock(tree, next, r, at, "with", op.With)
 		}
+		if err := refuseCodePipeInTableCell(tree, next, r, "with", fmt.Sprintf("with %q", op.With), ""); err != nil {
+			return nil, err
+		}
 		if err := refuseUnreadableReplacement(tree, next, r, op.With); err != nil {
 			return nil, err
 		}
@@ -875,7 +878,10 @@ func applyOperation(tree *pmdoc.Node, op model.EditOp, budget *pmdoc.WriteBudget
 			return nil, err
 		}
 		out, err := pmdoc.Splice(tree, r, empty)
-		return out, invalidSchemaOp("find", err)
+		if err != nil {
+			return nil, invalidSchemaOp("find", err)
+		}
+		return out, refuseCodePipeInTableCell(tree, out, r, "find", fmt.Sprintf("deleting find %q", op.Find), "")
 	case "insert":
 		if op.Markdown == "" {
 			return nil, invalidOp("markdown")
@@ -1223,6 +1229,26 @@ func refuseReshapedReplacement(before, after *pmdoc.Node, match pmdoc.Range, wit
 		"with %q is text the document reads back as another block where it lands (%v); write it inside a line of text",
 		with, reshaped,
 	)}
+}
+
+// refuseCodePipeInTableCell refuses a write that leaves a table cell, in a document-level block it
+// changed, holding code with a `|` after an odd run of backslashes (pmdoc.TableCodePipeError): no
+// markdown of a cell writes that code, so what the document stored would read back otherwise. A
+// replace's `with` is read as a paragraph's text, where `\|` in code is the code's text, and a
+// delete can cut code down to it. A block that held such a cell before the write is no reason to
+// refuse it (replacementBroke), so a document a browser edit left one in still takes writes. field
+// is the field the refusal names, written the words it opens with (what the caller sent), and
+// advice what the caller can do beside what pmdoc's refusal says, or "".
+func refuseCodePipeInTableCell(before, after *pmdoc.Node, match pmdoc.Range, field, written, advice string) error {
+	_, unwritable, err := replacementBroke(before, after, match, pmdoc.TableCodePipeError)
+	if err != nil || unwritable == nil {
+		return err
+	}
+	reason := fmt.Sprintf("%s leaves code the document cannot store where it lands: %v", written, unwritable)
+	if advice != "" {
+		reason += "; " + advice
+	}
+	return &ErrInvalidOp{Field: field, Reason: reason}
 }
 
 // unreadableReason says why a replace left its block unreadable and what to do instead, by cause.

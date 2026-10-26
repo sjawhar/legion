@@ -195,6 +195,13 @@ func TestRenderReadsBackInBothParsersAsTheEditorShowsIt(t *testing.T) {
 		// as an autolink, whose text neither parser unescapes.
 		{"bare URL holding a backtick", bareURL("https://x.com/a`b"), "<https://x.com/a`b> b\n"},
 		{"bare URL holding a backtick and a reference", bareURL("https://x.com/a&amp;`b"), "<https://x.com/a&amp;`b> b\n"},
+		// 10. A `|` in a cell's code after an odd run of backslashes has no spelling in a cell, where
+		// `\\|` ends the cell, so it is written as text after the code: the cell keeps every
+		// character, that one no longer code.
+		{"code holding a backslash before a pipe in a body cell", cells(table, cellChange{row: 1, inline: "`a\\|b`\n"}), "| h |\n| --- |\n| `a\\`\\|`b` |\n"},
+		{"code holding a backslash before a pipe in a header cell", cells(table, cellChange{row: 0, inline: "`a\\|b`\n"}), "| `a\\`\\|`b` |\n| --- |\n| c |\n"},
+		{"bold code holding a backslash before a pipe", cells(table, cellChange{row: 1, inline: "**`a\\|b`**\n"}), "| h |\n| --- |\n| **`a\\`\\|`b`** |\n"},
+		{"the production row's code", cells(table2, cellChange{row: 1, cell: 1, inline: "`git log --oneline X..origin/main \\| wc -l`\n"}), "| h1 | h2 |\n| --- | --- |\n| c1 | `git log --oneline X..origin/main \\`\\|` wc -l` |\n"},
 	}
 	rendered := make([]string, len(rows))
 	for index, row := range rows {

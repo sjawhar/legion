@@ -1,6 +1,10 @@
 package pmdoc
 
-import "fmt"
+import (
+	"fmt"
+	"slices"
+	"strings"
+)
 
 func (r *renderer) table(table *Node, prefix string) {
 	if len(table.Children) == 0 || table.Children[0].Type != "table_header_row" {
@@ -31,6 +35,8 @@ func (r *renderer) table(table *Node, prefix string) {
 // tableRow writes row as cells, its cells in the columns tableGrid places them in. A cell is one
 // line, so a hard break in it is written as a space, as the browser editor writes it: written as a
 // break, it would end the row, and `<br>` reads back as inline HTML the editor shows as that text.
+// A `|` in a cell's code after an odd run of backslashes, which no markdown of a cell writes, is
+// written as text after the code (codePipesOutOfCode).
 func (r *renderer) tableRow(row *Node, cells []*Node, header bool, prefix string) {
 	want := "table_cell"
 	rowType := "table_row"
@@ -55,10 +61,150 @@ func (r *renderer) tableRow(row *Node, cells []*Node, header bool, prefix string
 			r.err = fmt.Errorf("%w: table cell requires one paragraph", ErrSchema)
 			return
 		}
-		r.tableCellInline(hardBreaksAsSpaces(cell.Children[0].Children), prefix)
+		written, _ := codePipesOutOfCode(hardBreaksAsSpaces(cell.Children[0].Children))
+		r.tableCellInline(written, prefix)
 	}
 	r.writeSyntax(" |")
 }
+
+// codePipesOutOfCode is nodes, a table cell's inline content, with each `|` its code holds after an
+// odd run of backslashes taken out of the code: the code before it ends there, and the `|` is text
+// under the code's other marks, so every character stays and that one loses its code mark. It also
+// returns the text of the first code span that held one, or "" when none does and nodes are
+// returned as they are. A code span is the code-marked text nodes written in one: one after
+// another under the same written marks (writtenMarks), as writeInlineRun keeps a span open across
+// them, so the backslashes before a `|` can end the node before it.
+//
+// A table row is split into cells before inline parsing, so in a cell a `|` is written `\|`, in
+// code too, where both parsers take the backslash out; one after an even run of backslashes ends
+// the cell (escapedByBackslashes); and a backslash escapes nothing in code. So code holding `\|`
+// has no spelling in a cell: written `\\|`, the cell ends between the backslashes and the `|`.
+// Text outside code takes the escapes it needs (needsInlineEscape), so the `|` taken out is
+// written `\|` after the code's closing backtick, which both parsers read back as the `|`.
+func codePipesOutOfCode(nodes []*Node) ([]*Node, string) {
+	var out []*Node
+	var held string
+	// run is how many backslashes the code span written so far ends with, from opens, the index of
+	// its first node, under marks; opens is -1 outside code.
+	run, opens := 0, -1
+	var marks []Mark
+	for index, node := range nodes {
+		if node.Type != "text" || !nodeHasMark(node, "inlineCode") {
+			run, opens = 0, -1
+			if out != nil {
+				out = append(out, node)
+			}
+			continue
+		}
+		written := writtenMarks(node, true, true)
+		if opens < 0 || !slices.EqualFunc(written, marks, sameMark) {
+			run, opens, marks = 0, index, written
+		}
+		from := 0
+		for at := range len(node.Text) {
+			char := node.Text[at]
+			if char == '|' && run%2 == 1 {
+				if out == nil {
+					out = append(make([]*Node, 0, len(nodes)+2), nodes[:index]...)
+				}
+				if held == "" {
+					held = codeSpanText(nodes, opens, marks)
+				}
+				if at > from {
+					out = append(out, &Node{Type: "text", Text: node.Text[from:at], Marks: node.Marks})
+				}
+				out = append(out, &Node{Type: "text", Text: "|", Marks: withoutMark(slices.Clone(node.Marks), "inlineCode")})
+				from = at + 1
+			}
+			if char == '\\' {
+				run++
+			} else {
+				run = 0
+			}
+		}
+		switch {
+		case out == nil:
+		case from == 0:
+			out = append(out, node)
+		case from < len(node.Text):
+			out = append(out, &Node{Type: "text", Text: node.Text[from:], Marks: node.Marks})
+		}
+	}
+	if out == nil {
+		return nodes, ""
+	}
+	return out, held
+}
+
+// codeSpanText is the text of the code span whose first node is nodes[opens], written under marks
+// (codePipesOutOfCode).
+func codeSpanText(nodes []*Node, opens int, marks []Mark) string {
+	var text strings.Builder
+	for _, node := range nodes[opens:] {
+		if node.Type != "text" || !nodeHasMark(node, "inlineCode") || !slices.EqualFunc(writtenMarks(node, true, true), marks, sameMark) {
+			break
+		}
+		text.WriteString(node.Text)
+	}
+	return text.String()
+}
+
+// TableCodePipeError is the refusal (ErrSchema) of a table in block, a document-level block, whose
+// cell holds code with a `|` after an odd run of backslashes, which no markdown of a cell writes
+// (codePipesOutOfCode), or nil when no cell does. It names the first such cell as GET /blocks
+// places one: the table's block id, the row's index among the table's rows (0 the header row), the
+// cell's index in its row (the indexes delete_row and delete_column take), and the header cell
+// drawn above it (tableLayout), and says what to write instead. A write a caller makes is refused
+// so; a browser edit holding the shape is stored with the `|` written after the code, as tableRow
+// writes it.
+func TableCodePipeError(block *Node) error {
+	var refusal error
+	Walk(block, func(node *Node) bool {
+		if node.Type != "table" {
+			return true
+		}
+		for rowIndex, row := range node.Children {
+			for column, cell := range row.Children {
+				if len(cell.Children) != 1 {
+					continue
+				}
+				if _, code := codePipesOutOfCode(hardBreaksAsSpaces(cell.Children[0].Children)); code != "" {
+					refusal = tableCodePipe{table: node, row: rowIndex, column: column, code: code}
+					return false
+				}
+			}
+		}
+		return true
+	})
+	return refusal
+}
+
+// tableCodePipe is a table cell holding code with a `|` after an odd run of backslashes
+// (TableCodePipeError): the table, the cell's row and column, and the code span's text.
+type tableCodePipe struct {
+	table       *Node
+	row, column int
+	code        string
+}
+
+func (cell tableCodePipe) Error() string {
+	table := "a table"
+	if id := blockIDOf(cell.table); id != "" {
+		table = fmt.Sprintf("table %q", id)
+	}
+	where := fmt.Sprintf("row %d, column %d", cell.row, cell.column)
+	if cell.row == 0 {
+		where += " (the header row)"
+	} else if header := layoutTable(&renderer{spanBudget: maxSpanCells}, cell.table).cellHeaders(cell.table, cell.row)[cell.column]; header >= 0 {
+		where += fmt.Sprintf(" (under the header \"%s\")", oneLineText(cell.table.Children[0].Children[header]))
+	}
+	// The code is quoted as written, so its backslashes are not doubled.
+	return fmt.Sprintf("%s holds code in %s whose text has a | right after a backslash, \"%s\", which a table cell's markdown cannot write: "+
+		"in a cell a | is written \\|, in code too, \\\\| ends the cell, and a backslash escapes nothing in code; "+
+		"drop the backslash before the |, or end the code before the | and write the | as text", table, where, cell.code)
+}
+
+func (tableCodePipe) Unwrap() error { return ErrSchema }
 
 // tableGrid is each of table's rows as its markdown writes them, cell by cell. GFM carries no span,
 // so a cell spanning columns or rows (colspan, rowspan: a pasted HTML table can hold them) is

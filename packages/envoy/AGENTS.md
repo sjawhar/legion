@@ -1563,8 +1563,10 @@ table is no paragraph and ends there, reading the line as that block. So is a ta
 which holds text in a cell past its delimiter row's width (`markWideRows`), naming the row and both
 fixes (a pipe inside a cell written `\|`, or header and delimiter rows as wide as the row):
 goldmark drops the cells past the table's width, where that parser keeps them, and a cell ends at
-every `|` not written `\|`, inside code and links too, so a code span holding a bare `|` in a row
-that fills its table lost the rest of the row's text when it was stored. A row whose cells past
+every `|` not written `\|`, inside code and links too, and at a `|` after an even run of
+backslashes (`\\|`), which `splitAtEvenEscapedPipes` splits where goldmark's cell runs on, so a
+code span holding a bare `|` in a row that fills its table lost the rest of the row's text when it
+was stored. A row whose cells past
 the width are blank loses nothing and is read at the table's width. A bare-row insert
 (`InsertTableRows`) decides in three steps. First, its fragment, less its blank lines at either
 end, must have every line yield a cell and an unescaped `|` (a lone `|` yields no cell, and a line

@@ -1532,6 +1532,113 @@ func TestApplyOperationReplaceRefusesAHardBreakInAHeadingOrTableCell(t *testing.
 	}
 }
 
+// A replace's `with` is read as a paragraph's text, where `\|` in code is the code's own text, and a
+// delete can cut code down to a backslash before a `|`; in a table cell no markdown writes such code
+// (pmdoc.TableCodePipeError), so the write is refused, naming the operation's field, the table, the
+// cell's row and column, the header above it, and what to write instead. Code holding a `|` with no
+// backslash or two before it, and text holding a backslash before a `|`, are stored as written. A
+// table a browser edit already left such code in still takes writes, the one that rewrites that
+// code among them.
+func TestApplyOperationRefusesCodeWithAPipeAfterABackslashInATableCell(t *testing.T) {
+	const table = "| Cmd | Note |\n| --- | --- |\n| run | x |\n"
+	replace := func(find, with string) model.EditOp { return model.EditOp{Op: "replace", Find: find, With: with} }
+	for _, test := range []struct {
+		name, document string
+		// browser puts code holding `a\|b` in the body row's first cell first, as a browser edit can.
+		browser bool
+		op      model.EditOp
+		// field is the field a refusal names, "" when the write is stored; says is what the refusal
+		// says after naming the table, and stored a line of the markdown stored.
+		field, says, stored string
+	}{
+		{name: "code holding a backslash before a pipe replaced into a body cell", document: table, op: replace("x", "`git log \\| wc -l`"),
+			field: "with", says: `holds code in row 1, column 1 (under the header "Note") whose text has a | right after a backslash, "git log \| wc -l"`},
+		{name: "code holding a backslash before a pipe replaced into a header cell", document: table, op: replace("Note", "`a\\|b`"),
+			field: "with", says: `holds code in row 0, column 1 (the header row)`},
+		{name: "a delete that leaves code holding a backslash before a pipe", document: "| Cmd |\n| --- |\n| `a\\\\\\|b` |\n", op: model.EditOp{Op: "delete", Find: "a\\"},
+			field: "find", says: `holds code in row 1, column 0 (under the header "Cmd") whose text has a | right after a backslash, "\|b"`},
+		{name: "code holding a pipe", document: table, op: replace("x", "`a|b`"), stored: "| run | `a\\|b` |"},
+		{name: "code holding a pipe after two backslashes", document: table, op: replace("x", "`a\\\\|b`"), stored: "| run | `a\\\\\\|b` |"},
+		{name: "text holding a backslash before a pipe", document: table, op: replace("x", "a\\\\\\|b"), stored: "| run | a\\\\\\|b |"},
+		{name: "a replace beside code a browser edit left", document: table, browser: true, op: replace("x", "y"), stored: "| `a\\`\\|`b` | y |"},
+		{name: "the rewrite of code a browser edit left", document: table, browser: true, op: replace("a\\|b", "`a|b`"), stored: "| `a\\|b` | x |"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			tree, err := parseInput(test.document)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if test.browser {
+				tree.Children[0].Children[1].Children[0].Children[0].Children = []*pmdoc.Node{{Type: "text", Text: "a\\|b", Marks: []pmdoc.Mark{{Type: "inlineCode"}}}}
+			}
+			out, err := applyAlone(tree, test.op)
+			if test.field == "" {
+				if err != nil {
+					t.Fatalf("%s = %v, want it stored", test.op.Op, err)
+				}
+				markdown, err := renderTree(out)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !strings.Contains(markdown, test.stored+"\n") {
+					t.Fatalf("%s stored %q, want the line %q", test.op.Op, markdown, test.stored)
+				}
+				return
+			}
+			var invalid *ErrInvalidOp
+			if !errors.As(err, &invalid) || invalid.Field != test.field {
+				t.Fatalf("%s = %v, want an invalid op on %s", test.op.Op, err, test.field)
+			}
+			for _, says := range []string{fmt.Sprintf("table %q %s", blockID(tree.Children[0]), test.says), "drop the backslash before the |, or end the code before the | and write the | as text"} {
+				if !strings.Contains(invalid.Reason, says) {
+					t.Errorf("%s refused with %q, want it to say %q", test.op.Op, invalid.Reason, says)
+				}
+			}
+		})
+	}
+}
+
+// A browser edit can leave code holding a `|` after a backslash in a table cell, which no markdown of
+// a cell writes and a caller's write is refused for
+// (TestApplyOperationRefusesCodeWithAPipeAfterABackslashInATableCell). Settlement versions a browser
+// edit as its rendering, as it does every tree whose markdown reads back otherwise, so the `|` is
+// written as text after the code: the version reads back as the table it was, each row as wide and
+// every character in its cell, never as the `\\|` that ends the cell between the backslash and the
+// `|`.
+func TestSettlementVersionsCodeWithAPipeAfterABackslashInATableCellWithThePipeAfterTheCode(t *testing.T) {
+	for _, test := range []struct{ name, code, row string }{
+		{"one backslash", "a\\|b", "| run | `a\\`\\|`b` |"},
+		{"the production row's code", "git log --oneline X..origin/main \\| wc -l", "| run | `git log --oneline X..origin/main \\`\\|` wc -l` |"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			service, artifactID := newTestService(t)
+			service.settle = time.Hour
+			seedServiceText(t, service, artifactID, "| Cmd | Count |\n| --- | --- |\n| run | n |\n")
+			editLiveTree(t, service, artifactID, func(tree *pmdoc.Node) *pmdoc.Node {
+				tree.Children[0].Children[1].Children[1].Children[0].Children = []*pmdoc.Node{{Type: "text", Text: test.code, Marks: []pmdoc.Mark{{Type: "inlineCode"}}}}
+				return tree
+			})
+			settleCurrentGeneration(t, service, artifactID)
+			markdown, _ := latestVersionOf(t, service.store, artifactID)
+			if want := "| Cmd | Count |\n| --- | --- |\n" + test.row + "\n"; markdown != want {
+				t.Fatalf("the settled version is %q, want %q", markdown, want)
+			}
+			back, err := pmdoc.Parse(markdown)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for index, row := range back.Children[0].Children {
+				if len(row.Children) != 2 {
+					t.Fatalf("the version reads back with row %d holding %d cells, want 2", index, len(row.Children))
+				}
+			}
+			if got := pmdoc.TextContent(back.Children[0].Children[1].Children[1]); got != test.code {
+				t.Fatalf("the version's cell reads back holding %q, want %q", got, test.code)
+			}
+		})
+	}
+}
+
 // Whitespace at the edges of a replacement continues the text around it; at the start or the end
 // of the textblock it lands in there is no text to continue, and whitespace kept there would be
 // stripped on the next read - or, after a footnote's marker, open indented code.
