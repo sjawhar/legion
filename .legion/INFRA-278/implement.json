@@ -2,81 +2,60 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-278",
-  "completed": "2026-10-26T05:14:02Z",
-  "round": 2,
-  "answersReview": "review round 1 at code head 15e414ed9b6b (review.json; threads PRRT_kwDORFy7ds6wIQHp, Hr, Hv, Hw, Hx, H0, H3, each replied to and resolved)",
+  "completed": "2026-10-26T06:40:10Z",
+  "round": 3,
+  "answersReview": "review round 2 at code head 5ab9e45980a5 (threads PRRT_kwDORFy7ds6wJl9x, Jl9z, Jl91, Jl94, Jl96, each replied to and resolved)",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2225",
-  "headSha": "5ab9e45980a5beaba06fa76edf53c1841bfa27b9",
-  "rebaseRecheck": "fdff63121189a6914411c8ccdb7def1e9ced548e → 5ab9e45980a5beaba06fa76edf53c1841bfa27b9: forward merge of main after GitHub reported CONFLICTING (packages/pi-envoy/CHANGELOG.md, both entries kept); fingerprint f0430decf27d9d0a94cb822d1142b34da28092d374a48be8223576b9f59ce4c3 unchanged (PR comment 6408736349); the live script re-run at 5ab9e459: summary 9 ok, 0 FAIL. Browser proof ran at fdff6312.",
+  "headSha": "7a7fd8066cf75be9347324b2cb85cc66e1b76465",
   "proof": [
     {
-      "criterion": "Review finding 1 (claimant): a new comment whose mention resolved to the claimant but failed to send still reaches the claimant's own topic; a delivered mention leaves it to the mention",
-      "surface": "real envoy-dispatch built from the head, natsd, Postgres 17 + pgvector, the repo's fake Envoy listener answering the mention send 404",
-      "command": ". /legion/harness/env.sh && DATABASE_URL='postgres://postgres@127.0.0.1:5433/claimant?sslmode=disable' bash scripts/e2e/dispatch-claimant-delivery.sh",
-      "observed": "ok mention-failed-claimant: delivery row state=failed error=\"no live session claimant-e2e-p\", dispatch-16 (comment.created) on notifications.agent.claimant-e2e-p; ok mention-delivered-claimant: row state=sent, dispatch-14 on no agent topic; summary: 9 ok, 0 FAIL, PASS in 54s",
-      "headSha": "5ab9e45980a5beaba06fa76edf53c1841bfa27b9",
-      "negativeControl": "DISPATCH_BIN built from the previous head 15e414ed9b6b (git archive into $TMPDIR, go build ./cmd/dispatch) -> FAIL mention-failed-claimant (no agent copy), exit 1"
-    },
-    {
-      "criterion": "Review finding 1 (followers, regression): a mentioned ask follower whose mention failed gets its follower copy, as on base",
-      "surface": "same live script",
-      "command": "same run",
-      "observed": "ok mention-failed-follower: unclaimed issue, C's ask, a person's reply mentioning C, row state=failed, dispatch-20 on notifications.agent.claimant-e2e-c",
-      "headSha": "5ab9e45980a5beaba06fa76edf53c1841bfa27b9",
-      "negativeControl": "15e414ed9b6b binary -> FAIL mention-failed-follower; base 81a3b5ef7b47 binary -> ok (base always sent the follower copy)"
-    },
-    {
-      "criterion": "Delivered-only rule for every session copy (route, claimant, author, follower), pending send deferred without a failed attempt, claimant read in the scan",
-      "surface": "Go outbox suite on real Postgres (regression lock; the live script is the proof)",
-      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL='postgres://postgres@127.0.0.1:5433/outbox_test?sslmode=disable' go test -count=1 -v ./internal/dispatch/outbox/",
-      "observed": "ok, 136 PASS, no SKIP: claimant/follower/route/author rows for sent, failed, pending (errMentionPending, issue topic published), abandoned and no row; TestAScanDefersAClaimantCopyWhileItsMentionIsBeingSent (published_at null, attempt_count 0, next_attempt_at future, then failed -> copy once / sent -> none); TestARetryReachesTheClaimantTheScanReads",
-      "headSha": "3befbe7e0eca",
-      "negativeControl": "resolution-only rule for claimant, follower, route or author each fails rows; a deferral that counts an attempt fails the scan test (attempt_count = 1 after a deferral, want 0)"
-    },
-    {
-      "criterion": "Review finding 2: Reaches N counts distinct sessions and names a role route's holder",
-      "surface": "Dispatch browser suite: real Go server, production SPA bundle, Chromium",
+      "criterion": "Round-1 finding 3 in the browser: an issue.closed that carries a route change moves the open card's route row without a reload",
+      "surface": "Dispatch browser suite: real Go server built from the checkout, production SPA bundle, Chromium",
       "command": ". /legion/harness/e2e-env.sh && cd packages/dispatch && bun run e2e -- recipients-claim.e2e.ts followers.e2e.ts --project chromium --retries 0",
-      "observed": "5 passed, including 'a role route held by the claimant is counted once, under the claim that names its holder' (API route_holder = claimant, card Reaches 2) and the existing role-route row naming 'Reviewer (e2e)' via route (role:reviewer)",
-      "headSha": "fdff63121189a6914411c8ccdb7def1e9ced548e",
-      "negativeControl": "re-adding the double count to reachRows -> the role-route scenario fails 'Expected Reaches 2, Received Reaches 3', and 5 AskRecipients unit tests fail"
+      "observed": "7 passed, including 'a route change that closes the issue moves the open card's route row without a reload' (one PATCH sets session:e2e-reach-routed-next and done, emitting issue.closed only; the row shows 'Routed next (e2e)' via route, Reaches 2); --repeat-each 3 on the two new scenarios -> 6 passed",
+      "headSha": "7a7fd8066cf75be9347324b2cb85cc66e1b76465",
+      "negativeControl": "the same scenario on a checkout of 15e414ed9b6b with this head's test file -> failed, Expected substring 'Routed next (e2e)' not found; at the head, removing issue.closed from askThreadsIssue fails it"
     },
     {
-      "criterion": "Ask reads carry route_holder",
-      "surface": "the live script's Dispatch and the api suite",
-      "command": "same live run (case3 and mention-failed-follower print the reads); DISPATCH_TEST_DATABASE_URL=...api_test go test -run 'TestAskReads|TestInboxHydrates|TestIssueAskList|QueryPlan|RouteStatus' ./internal/dispatch/api/",
-      "observed": "GET /api/v1/asks/{id} and the Inbox row's thread print claimant=\"claimant-e2e-p\" route=null route_holder=null; api ok, TestAskReadsCarryTheIssueClaimantAndRoute checks route_holder for session route, held role, unheld role, no route and a document ask, and one listener read per request",
-      "headSha": "5ab9e45980a5beaba06fa76edf53c1841bfa27b9",
-      "negativeControl": "15e414ed9b6b and base binaries -> route_holder=absent"
+      "criterion": "Round-1 finding 3 in the browser: a claim landing while the Inbox fetch is in flight reaches the card that mounts from the stale body",
+      "surface": "same browser suite (page.route holds the Inbox; the body fetched before the claim is fulfilled after it)",
+      "command": "same run",
+      "observed": "'a claim that lands while the Inbox is loading reaches the card that mounts from the earlier list' passed: the card shows Reaches 2 with 'Claimant (e2e)' via claim",
+      "headSha": "7a7fd8066cf75be9347324b2cb85cc66e1b76465",
+      "negativeControl": "on 15e414ed9b6b -> failed, Expected 'Reaches 2' Received 'Reaches 1'; at the head, a no-op markPendingAskThreadsOnIssue fails it the same way"
     },
     {
-      "criterion": "Review finding 3: the ask card refreshes on issue.closed and after an issue change during an in-flight Inbox fetch",
-      "surface": "web unit suite (sse.test drives a held inboxQuery and useAskAnswerForm hooks)",
-      "command": "cd packages/dispatch && bun test web/src/__tests__/sse.test.ts web/src/features/inbox web/src/api web/src/__tests__/ask-card.test.tsx",
-      "observed": "322 pass, 0 fail: issue.closed refreshes only its issue's threads; an issue.claimed during an in-flight Inbox fetch makes a CORE-1 card read the endpoint, a CORE-2 card not, a second CORE-1 card still reads after the first, a newer Inbox fetch clears the mark",
-      "headSha": "fdff63121189a6914411c8ccdb7def1e9ced548e",
-      "negativeControl": "before 5fab07a1 the issue-scoped marker reached no in-flight mark (the review's finding); the race test asserts the endpoint read that the old code skipped"
+      "criterion": "Round-2 finding 2: ask reads carry route_status, and an unknown reach is not shown as reaching nobody",
+      "surface": "api suite on real Postgres with a failing and an unconfigured listener; AskRecipients unit suite",
+      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL='postgres://postgres@127.0.0.1:5433/api_test?sslmode=disable' go test -count=1 -timeout 30m -run 'Ask|Inbox|RouteStatus|Comment|Mention|Delivery' ./internal/dispatch/api/; cd packages/dispatch && bun test web/src/features/inbox",
+      "observed": "api ok: TestAskReadsReachUnknownWhenTheListenerDoesNotAnswer and TestAskReadsReachUnknownWithoutAConfiguredListener read route_status unknown, route_holder null on all three reads; web 327 pass incl. unknown role (bare row with 'Route reach unknown', label 'Reaches N + route (unknown)') and unknown session (counted, no offline claim)",
+      "headSha": "7a7fd8066cf75be9347324b2cb85cc66e1b76465",
+      "negativeControl": "at 5ab9e459 the reads carried no route_status and reachRows rendered a role route with route_holder null as unheld and uncounted (the review's finding)"
+    },
+    {
+      "criterion": "Delivery unchanged by the shared claim-lapse constant",
+      "surface": "real envoy-dispatch built from the head, natsd, Postgres 17 + pgvector, fake Envoy listener",
+      "command": ". /legion/harness/env.sh && DATABASE_URL='postgres://postgres@127.0.0.1:5433/claimant?sslmode=disable' bash scripts/e2e/dispatch-claimant-delivery.sh",
+      "observed": "summary: 9 ok, 0 FAIL, PASS in 54s (mention-failed-claimant and mention-failed-follower ok)",
+      "headSha": "7a7fd8066cf75be9347324b2cb85cc66e1b76465",
+      "negativeControl": "the 15e414ed9b6b binary fails mention-failed-claimant and mention-failed-follower (recorded in round 2)"
     }
   ],
   "filesChanged": [
-    "packages/envoy/internal/dispatch/outbox/publisher.go (leftToMention, loadMentionDeliveries, errMentionPending, deferEvent, routing{route, claimant} from the scan; loadSessionClaimant removed) and its tests",
-    "packages/envoy/internal/dispatch/model/model.go (suppression fields' comment)",
-    "packages/envoy/internal/dispatch/api/{inbox.go,inbox_queries.go,asks.go,routes_table.go,ask_reach_test.go,asks_test.go,inbox_test.go} (route_holder; getAsk serialises through askThread)",
-    "packages/contracts/src/dispatch-api.ts (AskReach) and test; web fixtures gain route_holder",
-    "packages/dispatch/web/src/features/inbox/{AskRecipients.tsx,AskRecipients.test.tsx,AskCard.tsx,ask-thread-freshness.ts,useAskAnswerForm.ts}, web/src/api/sse.ts, web/src/__tests__/sse.test.ts, packages/dispatch/e2e/recipients-claim.e2e.ts, packages/dispatch/AGENTS.md",
-    "scripts/e2e/dispatch-claimant-delivery.{sh,ts}, scripts/e2e/README.md (three mention cases)",
-    "docs/site dispatch for-agents.md and envoy.md, skills/dispatch/SKILL.md, packages/envoy/AGENTS.md, packages/contracts/src/dispatch-tools.ts, claude-envoy dist regenerated, CHANGELOGs (envoy, contracts, pi-envoy, claude-envoy)",
-    "PR body: ## Contract change census"
+    "packages/envoy/internal/dispatch/api/{inbox.go,inbox_queries.go,envoy_resolve.go,ask_reach_test.go,asks_test.go,inbox_test.go}",
+    "packages/envoy/internal/dispatch/model/model.go (DeliveryClaimLapse, DeliveryClaimLapseInterval)",
+    "packages/envoy/internal/dispatch/outbox/publisher.go (mentionDeliveryQuery from the constant; reorder note on errMentionPending)",
+    "packages/contracts/src/dispatch-api.ts (AskReach extends IssueRouteReach) and fixtures across packages/dispatch/web/src",
+    "packages/dispatch/web/src/features/inbox/{AskRecipients.tsx,AskRecipients.test.tsx,AskCard.tsx}, packages/dispatch/AGENTS.md",
+    "packages/dispatch/e2e/recipients-claim.e2e.ts (two refresh scenarios)",
+    "packages/envoy/AGENTS.md, docs/site dispatch envoy.md and for-agents.md, skills/dispatch/SKILL.md, packages/contracts/src/dispatch-tools.ts, claude-envoy dist, CHANGELOGs (envoy, contracts, pi-envoy, claude-envoy)"
   ],
   "trickyParts": [
-    "A pending mention send is undecided for one minute from its claim (or creation when unclaimed), matching the API's claimLapsed; the outbox publishes every other destination, holds that one copy and re-schedules the event 2 s out without counting an attempt.",
-    "The delivered-only rule now also governs the route and author copies (before, a resolved mention suppressed them even when its send failed).",
-    "route_holder comes from one listener read per request, made after the reach query releases its connection, and only when some ask has a route."
+    "The in-flight Inbox scenario holds the first two Inbox requests: holding only the first let the post-claim refresh cancel it, so the issue mark was never exercised and the mutation passed.",
+    "The closing-route scenario uses an unclaimed issue: closing a claimed issue also emits issue.released, which would refresh the card without the issue.closed path."
   ],
   "deviations": [
-    "Applied the delivered-only rule to the route and author copies too, beyond the claimant and follower named in the review, so one rule governs every session copy (the review suggested one suppression set).",
-    "Folded the review's fast-follow (one AskReach interface; getAsk serialising through askThread) into this round, so Fast-follow stays none.",
-    "Forward-merged main once more after GitHub reported CONFLICTING (packages/pi-envoy/CHANGELOG.md); fingerprint unchanged."
+    "The unknown-reach label wording is 'Reaches N + route (unknown)'; the row reuses the issue page's 'Route reach unknown' marker and title."
   ],
   "openQuestions": []
 }
