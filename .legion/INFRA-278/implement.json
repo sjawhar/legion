@@ -2,47 +2,38 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-278",
-  "completed": "2026-10-26T20:34:08Z",
+  "completed": "2026-10-26T21:25:52Z",
   "generation": 3,
-  "round": 1,
-  "plan": "plan.json generation 3 (forward merge of main, reviewer Minors 1 and 2, re-proof); the architect chose option A, merging now (Envoy 19:01Z)",
+  "round": 2,
+  "answersTest": "test.json generation 3 round 1 (fail): skills/dispatch/SKILL.md:46 and :48, the tester's corrected text from PR comment 6427016640; the architect's scope (Envoy 20:52Z): that text plus a forward merge because GitHub reported CONFLICTING",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2225",
-  "headSha": "48d9dd1c08c165fa6de3126a8d9cc758154aaab9",
-  "mergedMain": "d1f4b8a64a964d962d1a2991fd6b926a39cd0756 (M), merge commit 9a8af2f1743e4823a91b86c714c4974727dad932; fingerprint e40fb5bd… → ed31f5f8…, changed (PR comment 6426673319); main then moved to ffe540b4, and a trial merge of it was clean, so there was no second merge; GitHub reports MERGEABLE at 48d9dd1c",
+  "headSha": "17dd17ec2c37800125a455277722cc286f5293e2",
+  "mergedMain": "acd8341b merges main 1f8e03f5 (fingerprint b3030c96 → ff19c894). Main then moved to 16e4bb0f, which carries #2237 (INFRA-440 AgentName) and conflicted again, so 17dd17ec merges it (ff19c894 → df22cb72). PR comment 6427702588 has both. Main moved on to 5c4548f0 after that; a trial merge with it was clean, so there was no third merge. GitHub reports MERGEABLE at 17dd17ec",
   "proof": [
     {
-      "criterion": "G2: the claimant route works at the merged head",
-      "surface": "real envoy-dispatch built from the head, natsd, Postgres 17 + pgvector, fake Envoy listener",
-      "command": ". /legion/harness/env.sh && DATABASE_URL='postgres://postgres@127.0.0.1:5433/claimant?sslmode=disable' bash scripts/e2e/dispatch-claimant-delivery.sh",
-      "observed": "summary: 9 ok, 0 FAIL, PASS in 122s (case3-ask-answer, case2-thread-reply, untargeted-message, the three controls, and the delivered, failed-claimant and failed-follower mention cases)",
-      "headSha": "48d9dd1c08c165fa6de3126a8d9cc758154aaab9",
-      "negativeControl": "DISPATCH_BIN built from main d1f4b8a6 (git archive into $TMPDIR, go build ./cmd/dispatch) -> 5 ok, 4 FAIL (case3-ask-answer, case2-thread-reply, untargeted-message, mention-failed-claimant), exit 1"
+      "criterion": "The tester's text defect: the dispatch skill's claim line is true and unambiguous",
+      "surface": "repository text and the skills word guard",
+      "command": "sed -n 46,48p skills/dispatch/SKILL.md; find skills/dispatch skills/dispatch-first skills/dispatch-writing-specs -type f | xargs cat | wc -w; cd packages/pi-envoy && bun test src/skills-guard.test.ts; cd packages/pi-legion && bun test src/skills-guard.test.ts",
+      "observed": "line 46 ends 'Never write the status of, or route, an issue with the `legion` label, or under one.'; line 48 reads 'A claim brings a person's answers, comments and messages; for anything else, `dispatch issue-update --route session:<your id>` (`--route ''` on release) or `envoy_subscribe notifications.dispatch.issue.<KEY>.>`.'; 1997 words; guards 10 pass and 13 pass",
+      "headSha": "17dd17ec2c37800125a455277722cc286f5293e2",
+      "negativeControl": "at 48d9dd1c the line said 'otherwise, …' and 'Never route such an issue', the tester's failure"
     },
     {
-      "criterion": "G4 and Minor 1: the Reaches panel at the merged head, and the Unfollow text under an unknown role route",
-      "surface": "Dispatch browser suite: real Go server built from the checkout, production SPA bundle, Chromium",
-      "command": ". /legion/harness/e2e-env.sh && cd packages/dispatch && bun run e2e -- recipients-claim.e2e.ts followers.e2e.ts --project chromium --retries 0",
-      "observed": "8 passed, including 'unfollowing a follower while a role route's holder is unknown says the route may still reach it, under the issue page's marker' (the dialog reads 'A person's answer and replies may still reach them through the route: Dispatch could not tell who holds it.', and the marker title equals the header's)",
-      "headSha": "48d9dd1c08c165fa6de3126a8d9cc758154aaab9",
-      "negativeControl": "recipients-claim.e2e.ts on a checkout of main d1f4b8a6 with the head's test file -> 6 failed; the Minor 1 scenario with only its dialog fix removed -> Received '… Its answer and replies will no longer reach them. …'"
-    },
-    {
-      "criterion": "G3: the outbox rules hold after the merge",
-      "surface": "Go suites on real Postgres (regression lock)",
-      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=... go test -count=1 -timeout 30m -v -run Claimant ./internal/dispatch/outbox/; then go test -count=1 -timeout 50m ./internal/dispatch/...",
-      "observed": "Claimant run ok, 47 PASS, no SKIP; whole tree ok except the documented pod-environment failures: TestIssueRanksStayOrderedPastLowercaseDigitsAndProductionShapedMoves (C collation), TestS3AgainstAnS3CompatibleServer (no rootless Docker), and pmdoc linearity under gVisor",
-      "headSha": "48d9dd1c08c165fa6de3126a8d9cc758154aaab9",
-      "negativeControl": "the live script's main-built binary run above fails the claimant cases"
+      "criterion": "Delivery and the Reaches panel hold after merging #2237's AgentName",
+      "surface": "real envoy-dispatch built from the head, natsd, Postgres 17 + pgvector, fake Envoy listener; the Dispatch browser suite (Chromium)",
+      "command": ". /legion/harness/env.sh && DATABASE_URL='postgres://postgres@127.0.0.1:5433/claimant?sslmode=disable' bash scripts/e2e/dispatch-claimant-delivery.sh; . /legion/harness/e2e-env.sh && cd packages/dispatch && bun run e2e -- recipients-claim.e2e.ts followers.e2e.ts --project chromium --retries 0",
+      "observed": "summary: 9 ok, 0 FAIL; 8 passed (claim and route rows drawn with AgentName, the claim row linking to /agents/<id>/live); main's agent-name.e2e.ts 5 passed, 2 skipped (phone-only)",
+      "headSha": "17dd17ec2c37800125a455277722cc286f5293e2",
+      "negativeControl": "the round-1 controls stand: a binary built from main d1f4b8a6 fails 4 live cases, and recipients-claim on a build of main fails all 6 of its own scenarios"
     }
   ],
   "filesChanged": [
-    "merge 9a8af2f1: five CHANGELOGs and scripts/e2e/README.md with both sides kept; skills/dispatch/SKILL.md takes main's rewrite (and main's deletion of references/asks.md), with its claim line rewritten to say what a claim brings while keeping the route option and 'Never route such an issue' under the 2,000-word guard; pi-envoy and claude-envoy CHANGELOG entries reworded to match; claude-envoy rebuilt with Bun 1.3.14 (no file changed, check-dist fresh)",
-    "c99f2708 (Minor 2): ROUTE_REACH_UNKNOWN and ROUTE_REACH_UNKNOWN_TITLE exported from features/issue/RouteReach.tsx, used by IssueHeader.tsx and AskRecipients.tsx",
-    "48d9dd1c (Minor 1): AskRecipients.tsx issueReach under an unknown role route, AskRecipients.test.tsx, e2e/recipients-claim.e2e.ts scenario, packages/dispatch/AGENTS.md"
+    "488da04c: skills/dispatch/SKILL.md (the tester's text)",
+    "acd8341b: packages/envoy/CHANGELOG.md, both sides kept",
+    "17dd17ec: packages/dispatch/web/src/features/inbox/AskRecipients.tsx, AskRecipients.test.tsx, e2e/recipients-claim.e2e.ts and packages/dispatch/AGENTS.md take main's AgentName drawing and keep this PR's reachRows, reachLabel, unknown-reach marker and dialogs; packages/claude-envoy/dist rebuilt with Bun 1.3.14 because the textually merged bundles were stale"
   ],
   "deviations": [
-    "The skill's claim sentence no longer carries the mention detail: the three Dispatch skills sit at the 2,000-word guard, so it lives in the docs, the dispatch_claim description and packages/envoy/AGENTS.md.",
-    "The Minor commits were made before the merge and then moved onto it (unpushed, own commits, no other descendants) so the merge commit carries only the merge."
+    "Main deleted LiveDot in #2237. The bare row of a role route nobody holds now shows the existing UnreachableRouteMarker ('Nobody holds it right now') where it showed an offline dot, and a session row's running state comes from AgentName's registry."
   ],
   "openQuestions": []
 }
