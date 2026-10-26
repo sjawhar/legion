@@ -113,9 +113,14 @@ a {
 
      No fallback declaration: Tailwind v4's browser floor supports `lh`, and a browser
      without it drops the declaration and gives the link no padding, which never overlaps.
-     A font whose text box is above about 1.27em still reaches into the line above at 12px on
-     16px: Segoe UI (`system-ui` on Windows, about 1.33em by its published metrics) by about
-     0.8px, in a window narrower than 1280px. */
+     A font whose text box is r em tall leaves a clearance of
+     (line-height - (2r - 1.2) * font-size) / 2, so it reaches into the line above wherever
+     (2r - 1.2) * font-size > line-height. Segoe UI (`system-ui` on Windows, in a window
+     narrower than 1280px) has r = 1.33 by its published metrics, ascent 2210 plus descent 514
+     of 2048 units per em, not measured here; at each pitch above that gives: reasoning,
+     12px on 16px, -0.76px (overlaps); an agent-view message body, 14px on 20px, -0.22px
+     (overlaps); a message turn, 16px on 24px, 0.32px; a document, 16px on 25.6px, 1.12px; an
+     Inbox ask card, 15px on 24.375px, 1.24px. */
   .prose a {
     padding-block: calc((1lh - 1.2em) / 2);
   }
