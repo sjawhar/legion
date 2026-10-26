@@ -2,52 +2,27 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-168",
-  "completed": "2026-10-26T09:20:00Z",
-  "round": "the implementing round after tester round 6 (verdict fail at a3fc5c94)",
+  "completed": "2026-10-26T09:45:00Z",
+  "round": "the implementing round after tester round 7 (verdict fail at 2b7369f4)",
   "proof": [
     {
-      "criterion": "A2's override: after an --advisor-rebuttal pass, the agent's record of its own call still shows the flag it sent, so it does not report a rebuttal it never wrote (tester round 6 failure 1; red test cf8b4bb3).",
+      "criterion": "Every --advisor-rebuttal a call carries stays where the agent reads its call back, so it reports no flag the gate dropped (tester round 7 failure; red test ee316eba).",
       "surface": "Nested headless Oh My Pi sessions on this branch's build in this Legion pod, every assistant turn anthropic/claude-opus-5-5, production Dispatch, scratch issue INFRA-465.",
-      "command": "env -u LEGION_WORKSPACE -u LEGION_ROLE -u LEGION_BOOT_TOKEN_FILE -u LEGION_TREE -u LEGION_GENERATION -u LEGION_DAEMON_URL -u LEGION_STATE_DIR LEGION_ISSUE=INFRA-465 OMP_SESSION_STORAGE=file OMP_ASKGATE=<warn|block> OMP_ASKGATE_RECORD_PROJECT=INFRA /opt/omp/bin/omp --extension \"$LEGION_WORKSPACE/packages/pi-envoy\" --session-dir <run dir> -p \"$(cat <prompt>)\", with the tester's prompt /legion/scratch/tmp/t6/p/b5.txt twice per mode and the case-2 rebuttal prompt once per mode (runs b6r5, b6r6, c2r8 under /legion/scratch/tmp/g4); then grep for report_issue and jq of each session's toolCall commands.",
-      "observed": "0 of 6 sessions wrote xd://report_issue or said they had left the flag out. Each of the six recorded bash commands ends its first line with '# --advisor-rebuttal '<line>''. Both case-2 agents reported that AskGate turned the flag into a shell comment so dispatch never saw it. The four tester-prompt sessions each opened one ask after one no_change refusal and one rebuttal, with no retry. All six asks opened are retracted (72f87dc3, 1216e25c, 626ccadd, 97689011, b29d0249, 2af38ea5).",
-      "headSha": "2b7369f4928821781445af6d7ea998462737c949",
-      "negativeControl": "At 23f42a77, which changed only the acknowledgement (quoting the flag as sent and saying AskGate removed it), the same six sessions (b6r1, b6r2, c2r7) gave 4 of 6 agents saying the flag was never in their command, and 2 wrote xd://report_issue; so the shell-comment change, not the wording, is what fixed it."
-    },
-    {
-      "criterion": "A5's session reader refuses a flag given twice rather than reading only its last value (tester round 6 failure 2; red test b4f74b8b).",
-      "surface": "scripts/askgate-report.ts run against the real session files of this round's runs.",
-      "command": "bun packages/pi-envoy/scripts/askgate-report.ts --sessions $TMPDIR/g4/sessions/c2r8-warn --sessions $TMPDIR/g4/sessions/c2r8-block --since 2026-10-26T09:00:00Z --sample 0 --out $TMPDIR/g4/s2",
-      "observed": "exit 2, stderr 'askgate-report: --sessions is given more than once; give it once', nothing on stdout.",
-      "headSha": "2b7369f4928821781445af6d7ea998462737c949",
-      "negativeControl": "The parent directory given once, --sessions $TMPDIR/g4/sessions, reads every run: gated calls 20, refusals 8, unreviewed sends 12."
-    },
-    {
-      "criterion": "The notice after three rules failures in a row states what happened (those calls' asks went unchecked) and that the check still runs (architect, 08:53Z, from the tester's observation).",
-      "surface": "pi-envoy's own suite: the gate bound through envoy.ts with a stand-in model whose answers are no rules verdict.",
-      "command": "cd packages/pi-envoy && bun test (1425 pass, 0 fail), including envoy.test.ts 'three rules-check failures in a row raise the rules notice, and a new session start does not show it again' and askgate.test.ts's RULES_NOTICE tests.",
-      "observed": "The notice reads 'AskGate's rule check failed 3 times in a row, so the new asks of those 3 calls were not checked against the two rules. The check still runs on each new ask, and refuses a match again as soon as it answers.', in the UI notice and the third call's result, and not at the next session start.",
-      "headSha": "2b7369f4928821781445af6d7ea998462737c949",
-      "negativeControl": "The old text in either test makes it fail on the exact-match assertion; no live session can force three rules failures in a row on purpose, so this one is unit-pinned and said so in the PR body."
+      "command": "env -u LEGION_WORKSPACE -u LEGION_ROLE -u LEGION_BOOT_TOKEN_FILE -u LEGION_TREE -u LEGION_GENERATION -u LEGION_DAEMON_URL -u LEGION_STATE_DIR LEGION_ISSUE=INFRA-465 OMP_SESSION_STORAGE=file OMP_ASKGATE=<warn|block> OMP_ASKGATE_RECORD_PROJECT=INFRA /opt/omp/bin/omp --extension \"$LEGION_WORKSPACE/packages/pi-envoy\" --session-dir <run dir> -p \"$(cat p8.txt)\", p8.txt being the tester's run 7-r4-block prompt (run `dispatch ask --issue INFRA-465 --advisor-rebuttal 'first reason' --question '…' --advisor-rebuttal 'second reason'` exactly as given), runs d8-warn and d8-block under /legion/scratch/tmp/g4; then jq of each session's toolCall commands and advisor-gate entries, and grep for report_issue.",
+      "observed": "Both recorded commands: `dispatch ask --issue INFRA-465 --question '…' # --advisor-rebuttal 'first reason' --advisor-rebuttal 'second reason'`. Both acknowledgements: `You sent this call with --advisor-rebuttal 'first reason' --advisor-rebuttal 'second reason'. AskGate recorded your rebuttal \"first reason; second reason\", and the call was sent without review.` Both entries: outcome rebuttal, rebuttal \"first reason; second reason\". 0 report_issue writes. Asks 8132f2a9-d8c9-4596-ab51-979056a159d3 and 59016086-d980-4ea1-b48c-684feecdfa4f opened and were retracted in their runs.",
+      "headSha": "a3fc16aad2523c535e232f23e097f30333677007",
+      "negativeControl": "At 2b7369f4 the same call was recorded with only `# --advisor-rebuttal 'second reason'`, its note and entry named only the second line, and that agent wrote xd://report_issue (tester round 7, run 7-r4-block)."
     }
   ],
   "filesChanged": [
-    "packages/pi-envoy/extensions/askgate/askgate-core.ts — Rebuttal {line, sent}; splitRebuttal and extractRebuttal keep the override as sent; keepOverrideVisible puts a command's flag back as a shell comment at the end of its first line; renderRebuttalAck per path; the rules notice text; header comment.",
-    "packages/pi-envoy/extensions/askgate/askgate.test.ts — rebuttal tests brought to the new form, a device-path ack test, a test that runs the rewritten command in bash with a here-document and checks the CLI's arguments lack the flag, the notice text.",
-    "packages/pi-envoy/extensions/envoy.test.ts — the notice text.",
-    "packages/pi-envoy/scripts/askgate-report.ts — a flag given twice is refused by name.",
-    "packages/pi-envoy/README.md, packages/pi-envoy/CHANGELOG.md — the rebuttal comment, the repeated-flag refusal, the notice."
+    "packages/pi-envoy/extensions/askgate/askgate-core.ts — splitRebuttal keeps every override: `sent` all their words as written in order, `line` all their lines joined with \"; \".",
+    "packages/pi-envoy/CHANGELOG.md — the rebuttal sentence says each flag and every line."
   ],
   "trickyParts": [
-    "Oh My Pi records a bash call as the tool_call hook returns it, so any input rewrite is what the agent reads back. A note explaining the rewrite did not move the agents (4 of 6 still disbelieved it); keeping the flag visible in the command they read did (0 of 6).",
-    "The comment goes on the first line only, so a quoted here-document's body is never touched; an override whose raw text spans lines is not put back."
+    "The red test requires the call to pass (block undefined), so the architect's preferred refusal of a repeated flag would fail it; keeping both, which the architect named as acceptable, is what it allows."
   ],
-  "deviations": [
-    "The device path cannot keep the field (the device validates its JSON), so its acknowledgement says AskGate removed it. No Legion pod mounts a dispatch device, so that path is unit-covered only."
-  ],
+  "deviations": [],
   "openQuestions": [
     "sjawhar/legion#2159 is still open at 0aa47421c; sign-off waits on its merge per plan rev 10."
-  ],
-  "discoveredComplexity": [
-    "The tester's charter-only 20,000 ms timeout under 22 parallel sessions is load on the shared model route; nothing in this change's code adds to the charter call's time (its request is #2159's, unchanged here)."
   ]
 }
