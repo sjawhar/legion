@@ -2,32 +2,28 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-366",
-  "completed": "2026-10-26T15:03:46Z",
-  "reviewedHead": "1da5b47c6c1076fbc4887782bc04490b512702b7",
-  "codeHead": "811b7261e7",
-  "round": 4,
-  "standard": "The architect's decision of 2026-10-26T12:55Z: round 4 is judged by the two round-3 findings, by the round-2 rule (a length bound only decides which keys go into an index; it never makes a read fail and never refuses a write main accepts; the bound stays only where the dashboard decides what plain text cites), and by any defect in round 4's own diff. Rounds 1-3's accepted code is not re-read.",
+  "completed": "2026-10-26T16:40:50Z",
+  "reviewedHead": "9a6ee1414d48665f33cd9408ef3a96125b24e1f4",
+  "codeHead": "ea0496c2f4",
+  "round": 5,
+  "standard": "The architect's decision of 2026-10-26T15:06Z: round 5 is judged only by round 4's two items (RefLink.tsx:163, a bare autolinked dashboard URL read with the bounded parser; the PR-body sentence on deleted ask blocks) and by round 5's own diff.",
   "decision": "changes_requested",
   "critical": 0,
   "important": 1,
-  "minor": 1,
+  "minor": 0,
   "keyFindings": [
     {
       "severity": "important",
-      "file": "packages/dispatch/web/src/features/refs/RefLink.tsx:163",
-      "description": "collectReferenceAnchors also handles a bare same-origin dashboard URL that GFM autolinked from plain text (RefLink.tsx:134-136, useRenderedMarkdown.tsx:62-66). Round 4 switched it to the unbounded nodeRouteFromHref, so plain text past the bounds now renders as a resolved reference (title, hover card) while the server records no reference for it (text.Extract, pageInBound). Round 3 left it a raw link. With a #b-<over 256 bytes> fragment, the server cites the document and the dashboard names a block that reads 404. This breaks the round's instruction that the bound stays where plain text becomes a link, and the CHANGELOG claim 'only bare text it links is held to the index's bounds'. Fix: read an autolinked anchor (no data-dispatch-href, text equal to its href) with referenceRouteFromHref, keep nodeRouteFromHref for links an author wrote, and add a MarkdownBody case."
-    },
-    {
-      "severity": "minor",
-      "file": "PR body, E2E (implementer) round-9 bullet",
-      "description": "The bullet says 'an edit that deletes an ask block also deletes its ask'. The settlement retracts the ask (docs/ask_blocks.go:168-171), and TestSearchLinksAnAskBlockOnlyWhileTheBlockIsANode still finds that ask after the delete, linked ?ask=. Correct the proof sentence."
+      "file": "packages/dispatch/web/src/features/refs/RefLink.tsx:143",
+      "description": "isTextUrl excludes every anchor carrying data-dispatch-href, but Proof's serializer gives a dispatch:// autolink exactly that (href '', target in data-dispatch-href; proof-editor/src/dispatch-links.ts:17-19). So `<dispatch://CORE-1/artifact/<2683-char slug>>` and `[dispatch://X](dispatch://X)`, which the server reads as text and drops past the bounds (text/refs.go:14-22, 87-92), are still titled and opened through nodeRouteFromHref. That contradicts isTextUrl's own doc comment (angle brackets; a link whose words are its target) and AGENTS.md. Both thermonuclear passes reproduced it through the real render pipeline. Fix: compare the words with the target already read at :178 (data-dispatch-href ?? href) instead of excluding data-dispatch-href, and add MarkdownBody rows for both dispatch:// shapes."
     }
   ],
-  "roundItems": "Finding 1 of round 3 (search ask link) holds, census corrected. Finding 2 (pictures, explicit links, click handler, hover cards for 2,049-2,692-byte keys) holds, except the autolinked-bare-URL case above, which round 4's change brought in. Merges 6fdbd78e and 811b7261 keep both sides; the only conflicts were packages/envoy/CHANGELOG.md and dispatch-command.ts:363, where both sides made the same fix.",
-  "threads": "Replied on PRRT_kwDORFy7ds6wRCAf (accepted) and PRRT_kwDORFy7ds6wRCAk (accepted for what the round asked; the autolink defect is the new inline finding).",
+  "roundItems": "Item 1 holds for https:// URLs (bare, angle-bracket, [url](url), www.); the dispatch:// form is the finding. Item 2 holds: the body now says the settlement retracts the ask and search still finds it, linked ?ask=<id>.",
+  "notCounted": "GitHub reports the PR CONFLICTING (DIRTY) with main eee16056, 5 commits ahead of the merge base 3f34ba12. Main added migrations 0118_embeddings_pending_since and 0119_drop_embeddings_backfill_progress, which collide with this PR's 0118-0125, so the forward merge must renumber this PR's migrations after 0119. This is outside round 5's diff and is the implementer's conflict procedure, but the head cannot merge until it is done.",
+  "threads": "Replied on PRRT_kwDORFy7ds6wUaFb and unresolved it: fixed for https:// URLs, not for the dispatch:// autolink forms.",
   "thermonuclear": {
-    "deepReview": "Verdict: APPROVE at 1da5b47c, with Low finding 1 (the autolink case, verified and raised here as Important because it breaks the round's stated rule) and a PR-body nit. Provider: mixed, 61 assistant turns anthropic/claude-opus-5-5 and 1 openai/gpt-6.1-sol, read from its session transcript.",
-    "codeQuality": "Verdict: APPROVE at 1da5b47c, with three Low items: partly duplicated routes.test.ts coverage (cleanup, not counted), no long-target RefPreview test (not a defect; MarkdownBody and the browser test cover the paths), and the same PR-body sentence. Provider: mixed, 38 assistant turns anthropic/claude-opus-5-5 and 1 openai/gpt-6.1-sol, read from its session transcript."
+    "deepReview": "Verdict: CHANGES at 9a6ee141 (the dispatch:// autolink finding, reproduced through the real render pipeline). Provider: 26 assistant turns, all anthropic/claude-opus-5-5, read from its session transcript.",
+    "codeQuality": "Verdict: CHANGES at 9a6ee141 (the same finding, plus the unit test missing the dispatch:// shapes). Provider: 27 assistant turns, all anthropic/claude-opus-5-5, read from its session transcript."
   },
-  "ci": "At code head 811b7261: lint, typecheck, test, Docs, Worker Image and Legion Envoy and Contracts queued. The compare 811b7261...1da5b47c touches only .legion/. REQUEST_CHANGES does not wait for CI."
+  "ci": "At code head ea0496c2: lint, typecheck and test still queued at 16:34Z (created 15:35Z; 188 runs queued repository-wide). The compare ea0496c2...9a6ee141 touches only .legion/. REQUEST_CHANGES does not wait for CI."
 }
