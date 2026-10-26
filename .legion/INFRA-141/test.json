@@ -2,35 +2,55 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-141",
-  "completed": "2026-10-26T11:55:00Z",
+  "completed": "2026-10-26T15:45:00Z",
   "generation": 3,
-  "round": "review 5651306714's round: comment fix f7d39001 on writeBusUnavailable, head e739b034",
+  "round": "the round retro sent back for R1 and R2: fixes acafc88f (write routes bounded; registry answers a live session whose interest key is refused) and 7093f375 (GitHub CI record, webhook publishes, /healthz); head 1d7b96f0",
   "verdictProvenance": "provider not verified: written in my own session, no subagent ran; the model in my configuration is the one requested, not one read from the run's transcript",
   "implementerProof": {
     "verdict": "verified",
-    "how": "The round changes no compiled code: jj diff --name-only 8a84f45c..f7d39001 lists packages/envoy/cmd/listener/api.go and .legion/INFRA-141/review.json, and api.go's comment-stripped form (go/parser mode 0, go/printer, sha256) is 8e2e8858b98ad73b29887e0837276410ce7992ca9728c5eb8d6e1f2982891dd2 at both commits. The binary is built from the source I drove last round at 31173bae (commit 8a84f45c's test.json), and that evidence carries. I checked the corrected sentence against the code and drove the three refusals it names on the real binary."
+    "how": "Drove its write-route case on my own rig (real binary, real natsd behind a python relay that can freeze and thaw a live connection, curl) and its negative control with the listener built from git archive of 69fdd6bc. Extended it to the webhook routes, to a thaw after the freeze (do abandoned writes leave half-done state; is a redelivered webhook deduplicated), and to R1 on the real binary. Re-ran its named tests, including the /healthz JetStream-stall test that my rig cannot reproduce."
   },
   "failures": [],
   "failed": 0,
   "proof": [
     {
-      "criterion": "The delta is a comment: no statement of the shipped code moved",
-      "surface": "the diff from my last verified head 8a84f45c to f7d39001, and api.go parsed with its comments discarded",
-      "command": "jj diff --name-only --from 8a84f45cb5ce --to f7d39001d5df; go/parser (mode 0) + go/printer + sha256 of api.go at both commits; go build ./... && go vet ./cmd/listener && gofmt -l cmd internal",
-      "observed": "changed: .legion/INFRA-141/review.json, packages/envoy/cmd/listener/api.go; the comment-stripped hash 8e2e8858...91dd2 on both sides; build, vet and gofmt clean",
-      "headSha": "e739b0344a822678b20f320f76cbfedf131c1c0d",
-      "negativeControl": "the AST hash is the control for the prose claim: a moved statement would change it"
+      "criterion": "R2: every write route answers a bus that is connected but silent with the named 503 and Retry-After: 1 inside the 3.5 s budget",
+      "surface": "the real envoy-listener binary at this head against a real NATS (internal/testnats/cmd/natsd) reached through a TCP relay frozen with the connection open; sessions ses_a and ses_b registered, ses_a subscribed and holding role r10",
+      "command": "after the freeze: POST /v1/interests/subscribe (ses_new), POST /v1/roles/set (ses_a r10b), POST /v1/roles/set soft (ses_b r10), POST /v1/interests/unsubscribe (ses_a one topic), DELETE /v1/interests/ses_a, DELETE /v1/sessions/ses_a, 20 concurrent subscribes",
+      "observed": "each 503 in 3.502-3.504 s with Retry-After: 1 and a body naming the call ('read ses_new's interest record', 'refresh role claimant registration: write session ses_a to the bucket', 'read role r10a's claim', 'read role r10's claim', 'delete session ses_a from the bucket', each ': context deadline exceeded'); 20 concurrent subscribes all 503, slowest 3.519 s",
+      "headSha": "1d7b96f0049166f3b27f8f320d07ca669cfe8bbb",
+      "negativeControl": "the listener built from 69fdd6bc on the same rig: all six write routes 'curl: (52) Empty reply from server' at ~10.0 s, and the 20 concurrent subscribes timed out the same way"
     },
     {
-      "criterion": "The corrected comment is true: every member of bus.ErrRefused is answered by writeNATSError as what it is (ErrTooLarge 413; ErrInvalidSubject and ErrInvalidKey 400), and writeBusUnavailable's guard keeps Retry-After off every bus.ErrRefused",
-      "surface": "packages/envoy/internal/bus/nats.go:803-833 and cmd/listener/api.go:207-263 at this head; the real envoy-listener binary at this head against a real NATS, with curl",
-      "command": "read ErrRefused and its three refusal values, writeNATSError and writeBusUnavailable; GET /v1/interests/ses:bad, GET /v1/registry/ses:bad, GET /v1/interests/<3987-byte id>, GET /v1/interests/ses_absent",
-      "observed": "nats.go: ErrRefused 'is ErrTooLarge, ErrInvalidSubject or ErrInvalidKey', each a refusal whose Is matches ErrRefused; writeNATSError maps ErrTooLarge to 413 and any other ErrRefused to 400; writeBusUnavailable sets Retry-After only when !errors.Is(err, bus.ErrRefused). Binary: interests/ses:bad 400 'not a key nats.go accepts: key \"ses:bad\": nats: invalid key' with no Retry-After; registry/ses:bad 400 with no Retry-After; interests/<3987-byte id> 413 'too large to publish whole: a key of 3987 bytes, past 3974' with no Retry-After",
-      "headSha": "e739b0344a822678b20f320f76cbfedf131c1c0d",
-      "negativeControl": "GET /v1/interests/ses_absent on the same binary answered 404 'nats: key not found', so the 400 and 413 come from the key refusals and not from the route refusing everything"
+      "criterion": "R2 sweep: a GitHub webhook answers a frozen bus inside its caller's wait, and an abandoned write leaves no half-done state once the bus returns",
+      "surface": "the same real binary with ENVOY_WEBHOOKS=github and a signing secret; the relay frozen and then thawed; a core NATS subscriber on notifications.github.> straight on NATS; StreamInfo of ENVOY_NOTIFICATIONS",
+      "command": "frozen: signed pull_request (pull-request-opened.json) and check_run (check-run-first.json); thaw; redeliver both with the same X-GitHub-Delivery; count stream messages per subject. Separately, after the write-route freeze: thaw and read the interest, session and role records and GET /v1/roles/<role>",
+      "observed": "frozen: check_run 503 in 4.0 s (69fdd6bc: 10.0 s), pull_request 503 in 5.0 s (unchanged); redelivered after thaw: both 200. The core subscriber saw the pr.42 envelope twice (the 503'd publish landed late), but the stream holds exactly 1 message on pr.42 and 1 on pr.42.checks, so the durable sessions read from sees one. After the write-route thaw: role r10b unclaimed (its claim failed), role r10 still held by ses_a, ses_a's interest and session records unchanged, ses_new never written; a repeated subscribe and a repeated claim then got 200",
+      "headSha": "1d7b96f0049166f3b27f8f320d07ca669cfe8bbb",
+      "negativeControl": "the same webhook deliveries answered 200 before the freeze"
+    },
+    {
+      "criterion": "R1: GET /v1/registry/<id> answers a live session whose key only the interest bucket refuses as live (200, no topics)",
+      "surface": "the same real binary; a 3,987-byte legacy session id written into envoy_sessions",
+      "command": "GET /v1/registry/<3987-byte id>; GET /v1/registry/ses_absent",
+      "observed": "200 with topics null and its title; ses_absent 404 'no live session ses_absent'",
+      "headSha": "1d7b96f0049166f3b27f8f320d07ca669cfe8bbb",
+      "negativeControl": "the listener built from 69fdd6bc answered the same request 413 'too large to publish whole: a key of 3987 bytes, past 3974'"
+    },
+    {
+      "criterion": "Earlier behaviour unchanged (A1-A6, A6', frozen send/publish/lookup, unreadable role claims, unplaceable delivery)",
+      "surface": "the real binary on the frozen-relay and deferral rigs; scripts/e2e-local.sh; go test of the named tests",
+      "command": "the round-four roles and defer drivers; bash scripts/e2e-local.sh and the A6' jq; go test ./cmd/listener of the implementer's seven new tests, my tests and the cold-cache tests; go test ./internal/cistore ./internal/webhook/...",
+      "observed": "frozen sends, publishes and lookups 503 within 3.52 s, 20 concurrent sends and 20 concurrent lookups all 503; unreadable role claims 500; no_push_target 12 deferrals and a give-up at 61 s, push_failed once; e2e exit 0, both PASS lines, client EnvoyApiError 503; A6' three WARN bus_unavailable records (15:27:12.251Z, 15:27:16.157Z, 15:27:19.915Z) after 'Initiating Shutdown...' at 15:27:08.709Z; every named test --- PASS (ok 46.599 s), cistore ok, webhook ok. My test files have no diff since 43a5a5eb",
+      "headSha": "1d7b96f0049166f3b27f8f320d07ca669cfe8bbb",
+      "negativeControl": "the e2e send answered 200 before NATS was stopped; the frozen-rig requests answered before the freeze"
     }
   ],
-  "carriedEvidence": "Real-binary proof of every behaviour at the identical compiled source 31173bae (commit 8a84f45c's .legion/INFRA-141/test.json): named interest answers list or give 413/500, four bus-failure modes give 503 with Retry-After, unreadable-record writes, frozen send/publish/lookup, unreadable role claims, e2e-local and A6'.",
-  "ci": "At e739b034: Docs 40316229170 and Worker Image 40316229146 pending, Legion Envoy and Contracts 40316229147 and Tests 40316229156 queued when read, cited unsettled and not waited for. The runs at 31173bae were cancelled by this head, so this code's first settled CI is these runs.",
+  "notes": [
+    "/healthz on my frozen relay answers 503 unhealthy in 3.0 s at both heads (the flush already had a 3 s bound). The case this round adds, a JetStream that stops answering while the connection still flushes, cannot be made from outside the process; it rests on TestHealthzAnswersAJetStreamThatStoppedAnsweringInsideItsBudget, which passes.",
+    "A GitHub delivery answered 503 can still publish once the bus returns; JetStream's duplicate window keeps it to one stream message when GitHub redelivers with the same delivery id, as observed. A core subscriber sees both copies.",
+    "PR body is 59,193 characters, close to GitHub's 65,536 limit; later rounds must replace evidence rather than add to it."
+  ],
+  "ci": "At 1d7b96f0: Tests 40348211149, Docs 40348211618, Worker Image 40348211751 and Legion Envoy and Contracts 40348211642 queued when read, cited unsettled and not waited for.",
   "regressionLocksAdded": []
 }
