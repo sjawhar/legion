@@ -2,61 +2,66 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-168",
-  "completed": "2026-10-26T09:30:00Z",
-  "round": 7,
-  "headSha": "2b7369f4928821781445af6d7ea998462737c949",
-  "handoffHead": "1816eea7ac13051f46d4c4d3650291d4430b632a",
-  "provider": "anthropic/claude-opus-5-5 answered all 95 assistant turns of the 24 nested sessions and all 12 rules calls (ruleModel), read from each session's own turns and advisor-gate entries.",
-  "fingerprint": "Full round: fe8e12ee… at a3fc5c94 (round 6's head), 663e47fa… at 1816eea7, computed by the tester with the skill's command. The code changed (five commits after round 6), so this is a full round.",
+  "completed": "2026-10-26T09:42:00Z",
+  "round": 8,
+  "headSha": "a3fc16aad2523c535e232f23e097f30333677007",
+  "handoffHead": "63e6a8b63a51f357f706854de1b59ba0b4327184",
+  "provider": "anthropic/claude-opus-5-5 answered all 102 assistant turns of the 25 nested sessions and all 12 rules calls (ruleModel), read from each session's own turns and advisor-gate entries.",
+  "fingerprint": "Full round: 663e47fa… at round 7's head 1816eea7, 3d254fb4… at 63e6a8b6, computed by the tester with the skill's command.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Drove the same surface independently at 2b7369f4. Rebuttal criterion: four sessions of the tester's natural rebuttal prompt (two warn, two block; runs 7-b5-* under /legion/scratch/tmp/t6/runs) each refused once, rebutted and opened one ask, and none wrote xd://report_issue or said the flag was missing (0 of 4; round 6 had 2 of 3). Every recorded command ends its first line with '# --advisor-rebuttal …'. Reader criterion: `askgate-report.ts --sessions <a> --sessions <b> …` and `--dispatch-project INFRA --dispatch-project INFRA …` each exit 2 with '<flag> is given more than once; give it once'. Round 6's two red tests (cf8b4bb3, b4f74b8b) pass unchanged. The rules notice's new text is unit-pinned as the implementer says."
+    "how": "Drove the same surface independently at a3fc16aa: the two-flag call in block and in warn (runs 8-r4-block, 8-r4-warn under /legion/scratch/tmp/t6/runs) recorded both flags in the comment, the note and the entry ('first reason; second reason'), and a three-flag call of the tester's own (8-r8-block) kept all three and the --urgency low between them. Red test ee316eba passes unchanged, as do round 6's cf8b4bb3 and b4f74b8b (15 of 15 rebuttal tests in askgate.test.ts pass)."
   },
-  "failed": 1,
-  "failures": [
-    {
-      "criterion": "Round 6 failure 1's contract, as the fix states it: after a rebuttal pass, the agent's record of its call still shows the flag it sent, so it does not report a rebuttal it never wrote or a flag the gate dropped.",
-      "evidence": "Run 7-r4-block at 2b7369f4: `dispatch ask --issue INFRA-465 --advisor-rebuttal 'first reason' --question '…' --advisor-rebuttal 'second reason'` was recorded as `dispatch ask --issue INFRA-465 --question '…' # --advisor-rebuttal 'second reason'`, and the acknowledgement names only 'second reason'. The first flag is gone from the command, the note and the entry. The agent wrote xd://report_issue: 'Recorded command dropped 'first reason' entirely with no mention'. Cause: splitRebuttal (askgate-core.ts:1006-1024) removes every override's words but keeps only the last as `sent`, and keepOverrideVisible puts back that one. Red test, commit ee316eba: packages/pi-envoy/extensions/askgate/askgate.test.ts 'every --advisor-rebuttal flag a call carries stays where the agent reads its call back' — `cd packages/pi-envoy && bun test extensions/askgate/askgate.test.ts -t 'every --advisor-rebuttal flag'` gives 0 pass, 1 fail. Likelihood is low (an agent writes the flag twice), but the outcome is the same false-record escalation round 6 found."
-    }
-  ],
+  "failed": 0,
+  "failures": [],
   "proof": [
     {
-      "criterion": "A2 — a no-change dispatch ask is refused in warn and in block; with --advisor-rebuttal it opens, and the agent's record keeps the flag.",
+      "criterion": "Round 7's failure: every --advisor-rebuttal a call carries stays where the agent reads its call back, in the note and in the entry.",
       "surface": "Nested headless Oh My Pi sessions on this branch's packages/pi-envoy in this Legion pod, production Dispatch, scratch issue dispatch://INFRA-465.",
-      "command": "/legion/scratch/tmp/t6/run-case.sh <name> <warn|block> <prompt> (env -u LEGION_WORKSPACE … LEGION_ISSUE=INFRA-465 OMP_SESSION_STORAGE=file OMP_ASKGATE=<mode> OMP_ASKGATE_RECORD_PROJECT=INFRA /opt/omp/bin/omp --extension $LEGION_WORKSPACE/packages/pi-envoy --session-dir <run> -p '<prompt>'); prompts p/c1.txt, p/c2.txt, p/b5.txt, r/r1-r7.txt.",
-      "observed": "c1 refused no_change in both modes. c2 opened in both, recorded with '# --advisor-rebuttal 'Tester proof run: …'' at the end of the first line. b5 x4: one refusal, one rebuttal, one ask each, 0 report_issue. r1 (--question-file after cd), r2 (quoted here-document: '<<'EOF' # --advisor-rebuttal …', opened ask text equals the here-document body), r3 (double-quoted value with ' and #, before 2>&1), r5 (inline =), r6 (markdown upload) each opened with the flag in the record and out of dispatch's arguments.",
-      "headSha": "2b7369f4928821781445af6d7ea998462737c949",
-      "negativeControl": "r7 in warn, `… --advisor-rebuttal '…' | cat` (a form the gate cannot read, so it rewrites nothing): dispatch itself refused 'unknown flag --advisor-rebuttal' and nothing posted, showing that the comment rewrite is what keeps the flag away from dispatch in the readable forms. In block the gate refused the same call as unreadable."
+      "command": "/legion/scratch/tmp/t6/run-case.sh 8-r4-<block|warn> <mode> r/r4.txt and 8-r8-block block r/r8.txt: dispatch ask --issue INFRA-465 --advisor-rebuttal 'first reason' [--urgency low --advisor-rebuttal=\"third; reason\"] --question '…' --advisor-rebuttal 'second reason'",
+      "observed": "r4 (both modes): recorded `dispatch ask --issue INFRA-465 --question '…' # --advisor-rebuttal 'first reason' --advisor-rebuttal 'second reason'`; note 'You sent this call with --advisor-rebuttal 'first reason' --advisor-rebuttal 'second reason''; entry rebuttal 'first reason; second reason'. r8: recorded `dispatch ask --issue INFRA-465 --urgency low --question '…' # --advisor-rebuttal 'first reason' --advisor-rebuttal=\"third; reason\" --advisor-rebuttal 'second reason'`; the ask opened at urgency low (baf073fb, retracted). 0 of 25 sessions wrote xd://report_issue.",
+      "headSha": "a3fc16aad2523c535e232f23e097f30333677007",
+      "negativeControl": "Round 7's run of the same r4 call at 2b7369f4 recorded only 'second reason' and its agent filed xd://report_issue; r7, the unreadable `| cat` rebuttal, is refused in block, so no flag the gate does not move reaches dispatch unannounced."
     },
     {
-      "criterion": "A3, A4 and the charter-only call at the new head.",
+      "criterion": "A2 — a no-change ask is refused in warn and in block; with --advisor-rebuttal it opens, the agent keeping the flag in its record.",
       "surface": "The same sessions and Dispatch.",
-      "command": "p/c3.txt (doc-edit inserting :::ask{#log-retention}), p/c4.txt (ask for an untried gh read), p/c5.txt (gh read first, then ask quoting its error), p/c0.txt (dispatch comment); warn and block.",
-      "observed": "c3 refused in both modes naming #log-retention, rule no_change. c4 refused untried_access in both. c5 opened in both with ruleOutcome none (cada623c warn, where the charter's revise let the call run; 6b91e1f3 block, where the charter timed out at the 20,000 ms limit), each retracted in its run. c0 allowed in both with no rules call.",
-      "headSha": "2b7369f4928821781445af6d7ea998462737c949",
-      "negativeControl": "c5 is the ask that must pass, and the rules check answered none for it in both modes while it matched c4's untried read."
+      "command": "run-case.sh with p/c1.txt, p/c2.txt (warn and block), p/b5.txt (two warn, two block), r/r1, r2, r3, r5, r6.txt (block).",
+      "observed": "c1 refused no_change in both modes; c2 opened in both, recorded with '# --advisor-rebuttal …'. b5 x4: one no_change refusal, one rebuttal, one ask each, none saying a flag was missing. r1 (--question-file after cd), r2 (quoted here-document, body intact), r3 (double-quoted value with ' and # before 2>&1), r5 (inline =) and r6 (upload) all ran with the flag in a comment.",
+      "headSha": "a3fc16aad2523c535e232f23e097f30333677007",
+      "negativeControl": "c1's refusal against c2's rebuttal of the same ask opening."
     },
     {
-      "criterion": "A5 — the reader refuses a repeated flag, and the Dispatch counts match the session files.",
+      "criterion": "A3, A4 and the charter-only call.",
+      "surface": "The same sessions and Dispatch.",
+      "command": "run-case.sh with p/c3.txt, p/c4.txt, p/c5.txt, p/c0.txt in warn and block.",
+      "observed": "c3 refused in both modes naming #log-retention (no_change). c4 refused untried_access in both. c5, the ask quoting the agent's own gh error: rules check none in both modes; opened in warn; in block #2159's charter check refused it under Access 7 (the error names a per-owner gh directory, so a peer might hold the access), entry with no rule. c0 allowed with no rules call in both.",
+      "headSha": "a3fc16aad2523c535e232f23e097f30333677007",
+      "negativeControl": "c4's untried read matched untried_access where c5's tried read answered none in both modes."
+    },
+    {
+      "criterion": "A5 — the decisions are counted through Dispatch alone, matching the session files.",
       "surface": "scripts/askgate-report.ts against this round's session files and production Dispatch.",
-      "command": "bun packages/pi-envoy/scripts/askgate-report.ts --sessions <7-c1-warn> --sessions <7-c1-block> --since 2026-10-26T09:19:00Z --sample 0 --out <dir>; the same with --dispatch-project INFRA twice; then --sessions /legion/scratch/tmp/t6/runs --since 2026-10-26T09:19:00Z --sample 0 --out <dir>, and --dispatch-project INFRA --since 2026-10-26T09:19:00Z.",
-      "observed": "Both repeated-flag runs: exit 2, '--sessions is given more than once; give it once' and '--dispatch-project is given more than once; give it once'. Sessions: 28 gated calls, 12 rules calls (match 10, none 2), 4 of 10 rules refusals overridden (rebuttal 4). Dispatch: 135 documents, 0 unreadable, 20 sessions, 12 rules calls, 10 refusals (no_change 8, untried_access 2), 4 overrides, 0 errors, all pod — the same numbers.",
-      "headSha": "2b7369f4928821781445af6d7ea998462737c949",
-      "negativeControl": "The parent directory given once reads every run; the 4 sessions with no rules record (c0 x2, r7 x2) are the difference between 24 sessions run and 20 counted."
+      "command": "bun packages/pi-envoy/scripts/askgate-report.ts --sessions /legion/scratch/tmp/t6/runs --since 2026-10-26T09:33:00Z --sample 0 --out <dir>; the same with --dispatch-project INFRA in place of --sessions and with no --sample or --out",
+      "observed": "Sessions: 29 gated calls, 12 refusals, 14 unreviewed sends, rules match 10 none 2, 4 of 10 rules refusals overridden. Dispatch: 159 documents, 0 unreadable, 22 sessions, 12 rules calls, 10 refusals (no_change 8, untried_access 2), 4 overrides, 0 errors, all pod.",
+      "headSha": "a3fc16aad2523c535e232f23e097f30333677007",
+      "negativeControl": "The 3 sessions with no rules record (c0 x2, r7) are the difference between 25 run and 22 counted; the 2 refusals the session reader counts beyond the 10 rules refusals are c5's charter refusal and r7's unreadable call, which carry no rules record."
     }
   ],
   "observations": [
-    "#2159's design, not a failure: a rebuttal call whose file the gate snapshots (`--question-file q.txt`, `--path note.md`) is recorded with the snapshot path (/legion/scratch/tmp/askgate-…/0.md), which is gone afterwards; the acknowledgement names the flag, not the path. Two agents asked to compare noticed it; neither retried, escalated or opened an extra ask. The same rewrite applies to every reviewed call with a file operand, rebuttal or not.",
-    "Under 24 parallel sessions one block-mode charter call timed out at the 20,000 ms limit again (c5-block), as in round 6.",
-    "Every ask the runs opened is retracted; the four left open by the natural-prompt rebuttal runs (ff8d9ee1, 2f4e8774, b7292dca, a07932de) by the tester. The upload t7-upload.md stays on dispatch://INFRA-465 with its ask (785ca208) retracted. INFRA-465 is left open for the next round."
+    "For the architect, on A4's second sentence ('The same ask with the error from the agent's own attempt opens'): the rules check this change adds answered none for that ask in every round (6, 7, 8, both modes). In round 8 block mode #2159's charter check refused it under Access 7 (ask a peer that may hold the access first), where rounds 6 and 7 let it out; the charter's verdict follows the ask's wording. Not a defect of this change.",
+    "The entry joins several rebuttal lines with '; ', so a line that itself holds '; ' (r8's \"third; reason\") cannot be split back out of the entry. The note and the recorded command keep each flag as sent.",
+    "The refusal texts still say an override's flag 'is removed before sending'; it is removed from what dispatch receives and kept as a comment in the agent's record, which the acknowledgement states. Wording only.",
+    "Every ask the runs opened is retracted; the four left open by the natural-prompt rebuttal runs (d5455556, 86fd7a2c, f6f100a0, 2ded28e4) by the tester. dispatch://INFRA-465 is left open with no open ask."
   ],
-  "ci": "Read at 09:25Z at 2b7369f4, nothing re-run: Tests 40298289432, Legion Envoy and Contracts 40298289487 and Docs 40298289415 queued; Worker Image 40298289427 pending; PR Title 40298381391 pending, 40298289454 cancelled. The runs at a3fc5c94 were cancelled by the new push (Worker Image 40292451337 success).",
+  "ci": "Read at 09:37Z at a3fc16aa, nothing re-run: Tests 40300284213, Legion Envoy and Contracts 40300284272 (pi-envoy, A1's pin) and Docs 40300284241 queued; Worker Image 40300284260 pending; PR Title 40300372551 pending, 40300284245 cancelled. The runs at 2b7369f4 were all cancelled by this push before they ran. MERGEABLE, BLOCKED.",
   "priorRounds": [
     { "round": 1, "headSha": "61c02aafab8daea79654fd44f0042588765adc8a", "fixture": "dispatch://INFRA-301, closed", "verdict": "pass", "summary": "Thirteen runs: A2 in both modes with the rebuttal and the breaker, A3 on three new-ask surfaces, A4 both ways, A5's two halves." },
     { "round": 2, "headSha": "58cf263e4b6fa6d28e937712b2b0ccaf5a548888", "fixture": "dispatch://INFRA-362, closed", "verdict": "pass", "summary": "Ten runs: the four round-1 fixes, a footnote ask Dispatch itself minted, a de-duplicated re-upload, and the 16,000/17,000 ms handler-ceiling boundary." },
     { "round": 3, "headSha": "cff21b26fe3865de128dcf0d4df30ad3f8fa4424", "fixture": "dispatch://INFRA-365, closed", "verdict": "pass", "summary": "Twelve runs: the middle clip and the id bound measured from the rendered request, the breaker's two properties, and the reader's new counts; fingerprint re-check after the forward merge." },
     { "round": 4, "headSha": "34920d4b1caa90dc7d84faedda408ab1e7c9ed47", "fixture": "dispatch://INFRA-373", "verdict": "pass", "summary": "Five runs: the unjudged path reproduced independently, the breaker's single increment per refused call, and the README's list bound measured on both sides." },
     { "round": 5, "headSha": "ed71442efb596491a3b08fad9679fdd7b1ff2169", "verdict": "pass", "summary": "Rebase re-check from 34920d4b: fingerprint ecad3d1a unchanged, bare gates and one live smoke." },
-    { "round": 6, "headSha": "a3fc5c940e4fa6c3f907bc7245bea47a0e449226", "fixture": "dispatch://INFRA-465", "verdict": "fail", "summary": "25 runs after the merge of #2159 at 0aa47421c: the cases and merge seams held; two red tests, the rebuttal leaving the agent a record without its flag (cf8b4bb3) and the report reading a repeated flag as its last value (b4f74b8b). Both green at 2b7369f4. Full record in commit 0bee4245's test.json." }
+    { "round": 6, "headSha": "a3fc5c940e4fa6c3f907bc7245bea47a0e449226", "fixture": "dispatch://INFRA-465", "verdict": "fail", "summary": "25 runs after the merge of #2159 at 0aa47421c: two red tests, the rebuttal leaving the agent a record without its flag (cf8b4bb3) and the report reading a repeated flag as its last value (b4f74b8b). Full record in commit 0bee4245's test.json." },
+    { "round": 7, "headSha": "2b7369f4928821781445af6d7ea998462737c949", "fixture": "dispatch://INFRA-465", "verdict": "fail", "summary": "24 runs: round 6's two fixes verified live (0 of 4 rebuttal agents misread their record); one red test, a second --advisor-rebuttal flag dropped from the record (ee316eba). Full record in commit a4aeeaa8's test.json." }
   ]
 }
