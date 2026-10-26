@@ -1,0 +1,60 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-442",
+  "completed": "2026-10-26T03:44:30Z",
+  "headTested": "9d7dc548a81fb5382f0160b95fbdac256c634f39 (code identical to 404c8295e2c9; the handoff commit touches only .legion/)",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "Re-ran the implementer's AC9-AC10 command at head 9d7dc548 after a fresh bun run build:web on the tester lane (ports 18720-18724, db dispatch_e2e_tester): bunx playwright test --config e2e/playwright.config.ts e2e/agent-view.e2e.ts e2e/btw.e2e.ts e2e/inbox-drawer.e2e.ts --project chromium --project iphone --project webkit-iphone -> 50 passed, 10 skipped (3.1m), E1/E2/E3 and the extended refusal row among them. Read the red/green comment https://github.com/sjawhar/legion/pull/2227#issuecomment-6407522425 (red at 090df44068a3: E1 toBeEnabled Received disabled, E2 Received array [], E3 accessible description Received \"\"). Reproduced the red independently by mutation: isRunning set back to conversation.messages.some(m => m.streaming), web rebuilt -> E1 and E2 fail (E3 passes there, since the mutation leaves the new empty-box refusal and reason line in place)."
+  },
+  "failures": [],
+  "failed": 0,
+  "proof": [
+    {
+      "criterion": "AC1: mid-turn Send enabled; click and Enter post with the picked mode while the turn streams",
+      "surface": "Real Dispatch server on rootless Postgres 17 in the issue pod; Playwright Desktop Chromium, Desktop Safari (WebKit), Desktop Firefox and iPhone 13 (WebKit)",
+      "command": "cd packages/dispatch && ( . /legion/scratch/harness/env.sh && bunx playwright test --config <throwaway config adding probe-webkit/probe-firefox/probe-iphone-webkit projects> e2e/zz-tester-probe.e2e.ts ) plus --project chromium; probe kept at /legion/scratch/tmp/infra-442-tester-probe.e2e.ts, not committed",
+      "observed": "15/15 passed in WebKit, Firefox and iPhone-WebKit, 6/6 in Chromium. P1: mid-turn Enter posts 'one' (steer); a second Enter and a forced click while it is held post nothing (holdPosts counts 1), Send reads 'Sending…' and is disabled, the box keeps 'two' typed meanwhile; after release Enter sends 'two' -> fake Envoy received [one, two] in order. P4: Delivery mode BTW, mid-turn click posts mode btw.",
+      "headSha": "9d7dc548a81fb5382f0160b95fbdac256c634f39",
+      "negativeControl": "Mutation isRunning: conversation.messages.some(m => m.streaming) in AgentRuntimeThread.tsx, web rebuilt: E1, E2, P1 and P6 fail (Send disabled mid-turn); reverted and rebuilt before every other run."
+    },
+    {
+      "criterion": "AC2: an empty draft refuses Send (click or Enter), says 'Type a message first.'",
+      "surface": "Same harness, Chromium, WebKit, Firefox, iPhone-WebKit",
+      "command": "P3 of the probe spec (same runs as above)",
+      "observed": "A whitespace-only draft ('   \\n  ') counts as empty: Send disabled, 'Type a message first.' visible in the composer, Enter and click({force:true}) post nothing after 500 ms. Shift+Enter inserts a newline and posts nothing; Enter then posts 'line one\\nline two' whole.",
+      "headSha": "9d7dc548a81fb5382f0160b95fbdac256c634f39",
+      "negativeControl": "Whitespace-only input and forced click on the refused button: no POST reached the fake Envoy (getSentMessages stayed [])."
+    },
+    {
+      "criterion": "AC4-AC7: refused text returns to its own session's box, ahead of text typed since; late refusal after a switch; per-session busy state and drafts",
+      "surface": "Same harness, in-app navigation (history.pushState + popstate) between two live sessions, four browser projects",
+      "command": "P2, P4, P5 of the probe spec (same runs as above)",
+      "observed": "P4: POST held then answered 503, 'second' typed meanwhile -> box 'first\\n\\nsecond', error line shown; resending it lands and clears the error. P2: A's send refused after moving to B -> B's box keeps 'bravo draft', no error on B; back on A the box holds 'for alpha' and the error reads 'the server is down'; back on B its draft is still there. P5: A's send held, on B Send is enabled and 'to bravo' is delivered; back on A Send still reads 'Sending…' until release, then A's message is delivered and the box is empty.",
+      "headSha": "9d7dc548a81fb5382f0160b95fbdac256c634f39",
+      "negativeControl": "Mutation sending = sendingTo.size > 0 (one busy state for all sessions): the unit suite fails U4 ('a refusal that lands after switching sessions…'), so a per-session regression is caught; reverted."
+    },
+    {
+      "criterion": "AC8: a session advertising no delivery mode, mid-turn: Send pressable, posts as aside, warning shown",
+      "surface": "Same harness, Chromium, capabilities: [] fake session",
+      "command": "P6 of the probe spec: --project chromium --grep P6",
+      "observed": "Mid-turn Send enabled; the POST body is {body: 'are you there', delivery: 'aside'}; 'This session advertises no delivery mode…' visible; no send error; box cleared. Screenshot /legion/scratch/tmp/infra-442-p6-mute.png shows the composer with the 'Type a message first.' line under it.",
+      "headSha": "9d7dc548a81fb5382f0160b95fbdac256c634f39",
+      "negativeControl": "Same isRunning mutation: P6 fails (Send disabled mid-turn)."
+    },
+    {
+      "criterion": "AC9-AC10: streaming rendering intact, no empty extra turn, layout unchanged where measured",
+      "surface": "Same harness, chromium, iphone, webkit-iphone projects",
+      "command": "bunx playwright test --config e2e/playwright.config.ts e2e/agent-view.e2e.ts e2e/btw.e2e.ts e2e/inbox-drawer.e2e.ts --project chromium --project iphone --project webkit-iphone",
+      "observed": "50 passed, 10 skipped (desktop-only rows on phone projects); E1 asserts exactly 2 assistant turns after a mid-turn send and continued streaming.",
+      "headSha": "9d7dc548a81fb5382f0160b95fbdac256c634f39",
+      "negativeControl": "The isRunning mutation fails E1 at toBeEnabled before its count assertion; the count assertion itself rests on the implementer's red run."
+    }
+  ],
+  "ci": "Tests run 40263952601 (lint, typecheck, test) success at 404c8295e2c9; PR Title 40263952564 success; Docs 40263952573 success; Legion Envoy and Contracts 40263952591 in progress (dispatch job running, the rest success or skipped) at 404c8295e2c9. Not re-run by the tester.",
+  "notes": [
+    "AC3 (unit pin through production wiring) and AC11 (docs) are the reviewer's to read; the docs' claims (Enter sends, Shift+Enter new line, Sending…, refused text back ahead of text typed since, per-agent drafts) each match what P1-P5 observed.",
+    "D6 as documented: a refusal landing after leaving the live view altogether is lost; not probed further since the plan records it as accepted."
+  ]
+}
