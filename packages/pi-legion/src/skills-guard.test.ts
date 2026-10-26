@@ -1,8 +1,6 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
-import * as os from "node:os";
+import { readFileSync, rmSync, statSync } from "node:fs";
 import * as path from "node:path";
-import { linkOmpNatives } from "@legion/pi-shared/test/omp-natives";
 import {
   brokenRelativeLinks,
   brokenSkillLinks,
@@ -13,6 +11,7 @@ import {
   REPO_ROOT,
   skillLinks,
   stageSkills,
+  unhiddenSkills,
 } from "@legion/pi-shared/test/skills-guard";
 
 // The rules (`@legion/pi-shared/test/skills-guard`) over the skills this package stages into
@@ -62,56 +61,16 @@ test("every relative link resolves to a file inside the staged partition", () =>
 // The three skills upstream marks `disable-model-invocation: true` carry `hide: true` in its place:
 // Claude Code's Skill tool refuses only `disable-model-invocation`, so the Claude Code plugin's
 // copies load, and Oh My Pi hides a skill from its listing on either key. The loader is Oh My Pi's
-// own, `loadSkills` run inside the pinned binary as the daemon's load probe runs it
-// (packages/daemon/internal/daemon/probe.mjs): an extension handed to `omp models`, under a fresh
-// HOME holding only the binary's natives, with the staged partition as its one custom directory.
-// Each skill must still be found, since `skill://` resolves a hidden skill by name.
+// own, run inside the pinned binary by `unhiddenSkills` (`@legion/pi-shared/test/skills-guard`)
+// with the staged partition as its one custom directory. Each skill must still be found, since
+// `skill://` resolves a hidden skill by name.
 const HIDDEN_SKILLS = ["ce-dogfood", "thermonuclear-deep-review", "thermonuclear-code-quality"];
-const HIDE_PROBE = `export default async function probeSkillsHide() {
-  // The module exists only inside the Oh My Pi binary that loads this extension.
-  const { loadSkills } = await import("@oh-my-pi/pi-coding-agent/extensibility/skills");
-  const { skills } = await loadSkills({
-    cwd: process.cwd(),
-    customDirectories: [process.env.LEGION_HIDE_PROBE_SKILLS],
-  });
-  const answer = skills.map((skill) => ({ name: skill.name, hide: skill.hide }));
-  process.stderr.write("LEGION_HIDE_PROBE=" + JSON.stringify(answer) + "\\n");
-}
-`;
 
 test.skipIf(omp === undefined && !onActions)(
   "Oh My Pi's skill loader finds ce-dogfood and the thermonuclear pair, each hidden",
   async () => {
     if (omp === undefined) throw new Error("LEGION_TEST_OMP is unset on GitHub Actions");
-    const dir = mkdtempSync(path.join(os.tmpdir(), "omp-skills-hide-"));
-    try {
-      const home = path.join(dir, "home");
-      const cwd = path.join(dir, "cwd");
-      mkdirSync(cwd);
-      await linkOmpNatives(omp, home);
-      const probe = path.join(dir, "probe.mjs");
-      writeFileSync(probe, HIDE_PROBE);
-      const run = Bun.spawnSync([omp, "models", "--extension", probe, "--json"], {
-        cwd,
-        env: { HOME: home, PATH: "/usr/local/bin:/usr/bin:/bin", LEGION_HIDE_PROBE_SKILLS: staged },
-      });
-      const stderr = run.stderr.toString();
-      const line = stderr.split("\n").find((entry) => entry.startsWith("LEGION_HIDE_PROBE="));
-      if (run.exitCode !== 0 || line === undefined) {
-        throw new Error(`${omp} models with the probe exited ${run.exitCode}:\n${stderr}`);
-      }
-      const loaded: { name: string; hide: boolean }[] = JSON.parse(
-        line.slice("LEGION_HIDE_PROBE=".length)
-      );
-      const wrong = HIDDEN_SKILLS.flatMap((name) => {
-        const skill = loaded.find((entry) => entry.name === name);
-        if (skill === undefined) return [`${name} is not found by Oh My Pi's skill loader`];
-        return skill.hide === true ? [] : [`${name} is listed by Oh My Pi (hide: ${skill.hide})`];
-      });
-      expect(wrong).toEqual([]);
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
+    expect(await unhiddenSkills(omp, staged, HIDDEN_SKILLS)).toEqual([]);
   },
   120_000
 );
