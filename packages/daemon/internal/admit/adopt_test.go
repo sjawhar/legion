@@ -1,0 +1,270 @@
+package admit
+
+import (
+	"context"
+	"io"
+	"log/slog"
+	"reflect"
+	"testing"
+	"time"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/dispatch"
+	"github.com/sjawhar/legion/daemon/internal/intake"
+	"github.com/sjawhar/legion/daemon/internal/phase"
+	"github.com/sjawhar/legion/daemon/internal/record"
+)
+
+// seedOpenTree seeds root holding an admission slot with its design gate approved at its latest
+// version, so a todo child entering its tree starts planning at once.
+func seedOpenTree(t *testing.T, pool *pgxpool.Pool, root string) {
+	t.Helper()
+	seedSlotted(t, pool, root, "A")
+	approved := 1
+	inTx(t, pool, func(tx pgx.Tx) {
+		if err := record.NewStore().PutGate(context.Background(), tx, record.DesignGate{Issue: root, ArtifactID: "7d1e3a5c-9b2f-4c6e-8a40-3f5d7b9e1c26", LatestVersion: 1, ApprovedVersion: &approved}); err != nil {
+			t.Fatalf("seed gate: %v", err)
+		}
+	})
+}
+
+// queuedRoot is a root recorded waiting for a slot that never ran: its own tree, admitted at
+// generation 1, todo with the label, its parent recorded as parent ("" for none).
+func queuedRoot(key, parent, rank string, seq int64) record.Issue {
+	return record.Issue{Key: key, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: testProject, Title: key, Tree: key,
+		Parent: record.ParentOf(parent), Phase: phase.Admitted, Generation: 1, Status: "todo", DispatchStatus: "todo", Rank: rank, HandedOver: true, LastDispatchSeq: seq}
+}
+
+// applyFact applies a fact that is not a Dispatch issue event through admission's own engine and
+// admission, as intake does.
+func applyFact(t *testing.T, pool *pgxpool.Pool, admission *Admission, id string, fact intake.Fact) {
+	t.Helper()
+	if _, err := intake.ApplyFact(context.Background(), pool, "test", id, fact, admission.engine, admission); err != nil {
+		t.Fatalf("ApplyFact %s: %v", id, err)
+	}
+}
+
+// joinedNotices is the reason of every child-status notice queued on child.
+func joinedNotices(t *testing.T, pool *pgxpool.Pool, child string) []string {
+	t.Helper()
+	var reasons []string
+	for _, got := range effects(t, pool) {
+		if notice, ok := got.payload.(record.Notice); ok && got.issue == child && notice.Kind == "child-status" {
+			reasons = append(reasons, notice.Reason)
+		}
+	}
+	return reasons
+}
+
+// assertJoinedAndPlanning asserts child left admission's queue for tree's run: recorded in tree at
+// generation, planning under the open gate with its planner's start queued at that generation, the
+// tree's architect told once, and — read again by a later admission pass with a slot to spare —
+// no slot, no tree lifecycle and no architect of its own.
+func assertJoinedAndPlanning(t *testing.T, pool *pgxpool.Pool, child, tree string, generation uint64) {
+	t.Helper()
+	got := issue(t, pool, child)
+	if got.Tree != tree || got.Generation != generation || got.Phase != phase.Planning {
+		t.Fatalf("%s = %#v, want it planning in the tree of %s at generation %d", child, got, tree, generation)
+	}
+	planners := 0
+	for _, effect := range effects(t, pool) {
+		if request, ok := effect.payload.(record.SuperviseRequest); ok && effect.issue == child && request.Op == "start" && request.Role == claim.RolePlanner {
+			if request.Tree != tree || request.Generation != generation || request.Phase != phase.Planning {
+				t.Fatalf("planner start of %s = %#v, want it in the tree of %s at generation %d", child, request, tree, generation)
+			}
+			planners++
+		}
+	}
+	if planners != 1 {
+		t.Fatalf("%s has %d planner starts queued, want one", child, planners)
+	}
+	if want := []string{child + " joined the tree of " + tree + " from the admission queue"}; !reflect.DeepEqual(joinedNotices(t, pool, child), want) {
+		t.Fatalf("child-status notices of %s = %q, want %q", child, joinedNotices(t, pool, child), want)
+	}
+	assertWaiting(t, pool, nil)
+
+	spare := newAdmission(t, 2, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	applyFact(t, pool, spare, "tick-after-"+child, intake.ControllerTick{})
+	for _, slot := range slots(t, pool) {
+		if slot.Issue == child {
+			t.Fatalf("%s holds slot %#v, want none: it runs in the tree of %s", child, slot, tree)
+		}
+	}
+	var lifecycles int
+	if err := pool.QueryRow(context.Background(), `select count(*) from tree_lifecycles where tree = $1`, child).Scan(&lifecycles); err != nil {
+		t.Fatalf("count lifecycles: %v", err)
+	}
+	if lifecycles != 0 {
+		t.Fatalf("%s has %d tree lifecycles, want none: it never ran as a tree of its own", child, lifecycles)
+	}
+	for _, effect := range effects(t, pool) {
+		if request, ok := effect.payload.(record.SuperviseRequest); ok && request.Op == "start" && request.Role == claim.RoleArchitect && request.Tree == child {
+			t.Fatalf("queued an architect start %#v of a tree %s, want none", request, child)
+		}
+	}
+}
+
+// A labelled root waiting in admission's queue that a person makes a child of a running tree
+// leaves the queue on that event: it joins the tree at its next generation and, the tree's gate
+// open, starts planning there, as any todo child of the tree does. It never takes a slot or an
+// architect of its own, even once a slot stands free.
+func TestAQueuedRootReparentedUnderALiveTreeJoinsItAndTakesNoSlot(t *testing.T) {
+	pool := migratedPool(t)
+	admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	const tree, child = "LEGION-168", "LEGION-214"
+	seedOpenTree(t, pool, tree)
+
+	apply(t, pool, admission, "queued", intake.DispatchIssue{Key: child, ResolvedRepo: "acme/widgets", Seq: 1, Type: "issue.updated", Status: "todo", Title: child, Rank: "B", HandedOver: handed}, admission.engine)
+	assertWaiting(t, pool, []string{child})
+
+	apply(t, pool, admission, "reparented", intake.DispatchIssue{Key: child, ResolvedRepo: "acme/widgets", Seq: 2, Type: "issue.updated", Status: "todo", Title: child, Parent: tree, Rank: "B", HandedOver: handed}, admission.engine)
+	if got := issue(t, pool, child); got.Parent == nil || *got.Parent != tree {
+		t.Fatalf("%s = %#v, want its parent recorded as %s", child, got, tree)
+	}
+	assertJoinedAndPlanning(t, pool, child, tree, 2)
+}
+
+// The boot read adopts the same queued root when the re-parent happened while the daemon was down:
+// the listing's parent reaches the record and the root joins the running tree before promotion.
+func TestBootReconcileAdoptsAQueuedRootUnderALiveTree(t *testing.T) {
+	pool := migratedPool(t)
+	admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	const tree, child = "LEGION-168", "LEGION-214"
+	seedOpenTree(t, pool, tree)
+	putIssue(t, pool, queuedRoot(child, "", "B", 1))
+	parent := tree
+
+	reconcileWithPosition(t, pool, admission, []dispatch.IssueSummary{
+		{Key: child, ResolvedRepo: "acme/widgets", Title: child, Status: "todo", Parent: &parent, Rank: "B", HandedOver: handed, LastSeq: 2},
+	}, 10, 10, true)
+	assertJoinedAndPlanning(t, pool, child, tree, 2)
+}
+
+// A root that already ran as a tree of its own keeps queueing as its own root under a running
+// tree: its tree lifecycle says it ran, and it takes the slot that frees.
+func TestARootThatRanAsATreeOfItsOwnKeepsQueueingUnderALiveTree(t *testing.T) {
+	pool := migratedPool(t)
+	admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	const tree, child = "LEGION-168", "LEGION-214"
+	seedOpenTree(t, pool, tree)
+	putIssue(t, pool, queuedRoot(child, tree, "B", 2))
+	if _, err := pool.Exec(context.Background(), `insert into tree_lifecycles (project, tree, epoch, authority) values ('legion', $1, 1, 'workflow')`, child); err != nil {
+		t.Fatalf("seed lifecycle: %v", err)
+	}
+
+	applyFact(t, pool, admission, "tick", intake.ControllerTick{})
+	if got := issue(t, pool, child); got.Tree != child || got.Generation != 1 {
+		t.Fatalf("%s = %#v, want it still its own root at generation 1", child, got)
+	}
+	assertWaiting(t, pool, []string{child})
+
+	if _, err := intake.ApplyFact(context.Background(), pool, "test", "tree-done", intake.ControllerTick{}, engineStub{store: record.NewStore(), done: tree}, admission); err != nil {
+		t.Fatalf("ApplyFact tree-done: %v", err)
+	}
+	if got := issue(t, pool, child); got.Tree != child || got.Status != "in_progress" {
+		t.Fatalf("%s = %#v, want it promoted as its own root", child, got)
+	}
+	assertSlots(t, pool, []record.Slot{{Issue: child, Index: 0, AdmittedAt: fixedNow}})
+}
+
+// An orphan that carries a run handed over to it stays its own root when its old root comes back:
+// it keeps its tree and takes its slot, as the hand-over contract says.
+func TestACarriedOrphanUnderAReopenedOldRootStillGetsItsSlot(t *testing.T) {
+	pool := migratedPool(t)
+	admission := newAdmission(t, 2, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	const old, child = "LEGION-100", "LEGION-214"
+	seedOpenTree(t, pool, old)
+	carried := queuedRoot(child, old, "B", 2)
+	carried.Phase, carried.Generation = phase.Planning, 2
+	putIssue(t, pool, carried)
+	inTx(t, pool, func(tx pgx.Tx) {
+		if err := record.NewStore().PutHandedOverRoot(context.Background(), tx, record.HandedOverRoot{Issue: child, Generation: 2}); err != nil {
+			t.Fatalf("seed handed-over root: %v", err)
+		}
+	})
+
+	applyFact(t, pool, admission, "tick", intake.ControllerTick{})
+	if got := issue(t, pool, child); got.Tree != child || got.Generation != 2 || got.Status != "in_progress" {
+		t.Fatalf("%s = %#v, want its own root, promoted at generation 2", child, got)
+	}
+	assertSlots(t, pool, []record.Slot{{Issue: old, Index: 0, AdmittedAt: fixedNow}, {Issue: child, Index: 1, AdmittedAt: fixedNow}})
+}
+
+// Queued roots nested under each other join the running tree at the top: each takes one new
+// generation, and the tree's architect is told each joined its own tree.
+func TestNestedQueuedRootsJoinTheLiveTreeAtTheTop(t *testing.T) {
+	pool := migratedPool(t)
+	admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	const tree, middle, leaf = "LEGION-168", "LEGION-214", "LEGION-213"
+	seedOpenTree(t, pool, tree)
+	putIssue(t, pool, queuedRoot(middle, tree, "B", 2))
+	putIssue(t, pool, queuedRoot(leaf, middle, "C", 2))
+
+	applyFact(t, pool, admission, "tick", intake.ControllerTick{})
+	for _, key := range []string{middle, leaf} {
+		got := issue(t, pool, key)
+		if got.Tree != tree || got.Generation != 2 || got.Phase != phase.Planning {
+			t.Fatalf("%s = %#v, want it planning in the tree of %s at generation 2", key, got, tree)
+		}
+		if want := []string{key + " joined the tree of " + tree + " from the admission queue"}; !reflect.DeepEqual(joinedNotices(t, pool, key), want) {
+			t.Fatalf("child-status notices of %s = %q, want %q", key, joinedNotices(t, pool, key), want)
+		}
+	}
+	if got := issue(t, pool, leaf); got.Parent == nil || *got.Parent != middle {
+		t.Fatalf("%s = %#v, want its parent kept as %s", leaf, got, middle)
+	}
+	assertWaiting(t, pool, nil)
+	assertSlots(t, pool, []record.Slot{{Issue: tree, Index: 0, AdmittedAt: fixedNow}})
+}
+
+// An orphan that never ran waits as its own root while its old root lingers. When a person sets
+// that old root back to todo with the label, the orphan rejoins it: it waits admitted in the old
+// root's tree, whose readmission cleared its gate, and takes no slot of its own.
+func TestAnUncarriedOrphanRejoinsItsReadmittedOldTree(t *testing.T) {
+	pool := migratedPool(t)
+	admission := newAdmission(t, 2, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	const old, orphan = "LEGION-100", "LEGION-101"
+	until := fixedNow.Add(time.Hour)
+	putIssue(t, pool, record.Issue{Key: old, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: testProject, Title: old, Tree: old,
+		Phase: phase.Done, Generation: 1, Status: "done", DispatchStatus: "done", Rank: "A", HandedOver: true, LastDispatchSeq: 1, LingerUntil: &until})
+	putIssue(t, pool, queuedRoot(orphan, old, "B", 2))
+
+	apply(t, pool, admission, "old-reopened", intake.DispatchIssue{Key: old, ResolvedRepo: "acme/widgets", Seq: 2, Type: "issue.updated", Status: "todo", Title: old, Rank: "A", HandedOver: handed}, admission.engine)
+	if got := issue(t, pool, orphan); got.Tree != old || got.Generation != 2 || got.Phase != phase.Admitted {
+		t.Fatalf("%s = %#v, want it admitted in the tree of %s at generation 2", orphan, got, old)
+	}
+	if want := []string{orphan + " joined the tree of " + old + " from the admission queue"}; !reflect.DeepEqual(joinedNotices(t, pool, orphan), want) {
+		t.Fatalf("child-status notices of %s = %q, want %q", orphan, joinedNotices(t, pool, orphan), want)
+	}
+	assertSlots(t, pool, []record.Slot{{Issue: old, Index: 0, AdmittedAt: fixedNow}})
+}
+
+// A queued root the boot read holds for the Dispatch consumer to catch up is not adopted on the
+// record the stream may still correct; it is adopted once the consumer reaches the stream position.
+func TestAHeldQueuedRootIsAdoptedOnlyOnceTheHoldReleases(t *testing.T) {
+	pool := migratedPool(t)
+	admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	const tree, child = "LEGION-168", "LEGION-214"
+	seedOpenTree(t, pool, tree)
+	putIssue(t, pool, queuedRoot(child, tree, "B", 2))
+	parent := tree
+
+	reconcileWithPosition(t, pool, admission, []dispatch.IssueSummary{
+		{Key: child, ResolvedRepo: "acme/widgets", Title: child, Status: "todo", Parent: &parent, Rank: "B", HandedOver: handed, LastSeq: 3},
+	}, 5, 2, false)
+	if !admission.Held() {
+		t.Fatal("Reconcile held nothing, want the queued root held behind the stream")
+	}
+	if got := issue(t, pool, child); got.Tree != child || got.Generation != 1 {
+		t.Fatalf("held %s = %#v, want it left its own root at generation 1", child, got)
+	}
+
+	applyFact(t, pool, admission, "position-reached", intake.DispatchConsumerPosition{AckFloorStream: 5})
+	if admission.Held() {
+		t.Fatal("the hold is still standing once the consumer reached its position")
+	}
+	assertJoinedAndPlanning(t, pool, child, tree, 2)
+}

@@ -33,6 +33,8 @@ func OutOfWorkflow(status string) bool {
 
 // Waiting returns the slotless todo roots and orphans handed to Legion, in Dispatch rank order. A
 // root without the label waits for nothing; a child's tree holds its place, so a child needs none.
+// A root that never ran, whose recorded parent is a live tree's member, is adopted into that tree
+// before admission reads the line (admit's adoptQueuedRoots), so it is not read as waiting there.
 func Waiting(issues []Issue, slots []Slot) []Issue {
 	slotted := make(map[string]struct{}, len(slots))
 	for _, slot := range slots {

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"maps"
+	"slices"
 	"sync"
 	"time"
 
@@ -574,7 +575,9 @@ type observed struct {
 // sequence fence, the boot read's — and this writes what they let through. The engine, which runs
 // first, writes the observation itself when it keeps its own status over the event's (its
 // keepStatus: a session's write it sets back, or an edit that changed no status), and a live event
-// it wrote then stops at the sequence fence here.
+// it wrote then stops at the sequence fence here. A re-parent never changes the record's tree
+// here: the only path that does is adoption, which the same fact's promote runs next
+// (adoptQueuedRoots) for a todo root that never ran and whose new parent is in a live tree.
 func (a *Admission) recordObservation(ctx context.Context, tx pgx.Tx, stored record.Issue, o observed) error {
 	if stored.Title == o.Title && stored.Rank == o.Rank && stored.Status == o.Status && stored.DispatchStatus == o.Shown &&
 		stored.HandedOver == o.HandedOver && sameParent(stored.Parent, record.ParentOf(o.Parent)) && stored.LastDispatchSeq == o.Seq {
@@ -763,8 +766,12 @@ func (a *Admission) promote(ctx context.Context, tx pgx.Tx) (int, error) {
 // hold, never a subset, since it only ever runs once the consumer has caught up to every key
 // Reconcile deferred. The in-memory pending set itself only clears after that whole call's
 // transaction commits (see release), so without this, promote's own membership check would hold
-// every one of them back in the very call that released them.
+// every one of them back in the very call that released them. A queued root a live tree took in
+// (adoptQueuedRoots) leaves the line before anything else reads it.
 func (a *Admission) promoteHolds(ctx context.Context, tx pgx.Tx, respectHolds bool) (int, error) {
+	if err := a.adoptQueuedRoots(ctx, tx, respectHolds); err != nil {
+		return 0, err
+	}
 	issues, err := a.store.Issues(ctx, tx)
 	if err != nil {
 		return 0, fmt.Errorf("list admission issues: %w", err)
@@ -854,6 +861,70 @@ func (a *Admission) held(key string) bool {
 	defer a.mu.Unlock()
 	_, held := a.pending[key]
 	return held
+}
+
+// adoptQueuedRoots moves every todo root of this project, waiting in admission's queue or not yet
+// handed to Legion, into the live tree its recorded parent runs in, when that root never ran as a
+// tree of its own (workflow's AdoptionRefusal, Engine.Adopt): a person made it a child of that tree,
+// so it takes no slot and no architect of its own, and runs in the tree as any of its todo children
+// does. A candidate is a recorded root of this project in todo whose parent is recorded in a tree
+// other than its own. One that ran as a tree of its own, or carries a run handed over to it, keeps
+// queueing as its own root: taking it out of the line would strand its run with nobody told. A
+// key Reconcile holds, the candidate's or its target's, is left for release to apply first, when
+// respectHolds is set.
+//
+// It loops until a pass adopts nothing. Each adoption makes a root a member, never a root again,
+// so the roots bound the passes. A candidate whose target root is itself a candidate waits for
+// the next pass, so nested queued roots join the live tree at the top once each, rather than
+// passing through the queued tree between; candidates whose parents form a cycle are each other's
+// targets and stay roots of their own.
+func (a *Admission) adoptQueuedRoots(ctx context.Context, tx pgx.Tx, respectHolds bool) error {
+	type adoption struct{ issue, target record.Issue }
+	for {
+		issues, err := a.store.Issues(ctx, tx)
+		if err != nil {
+			return fmt.Errorf("list admission issues: %w", err)
+		}
+		recorded := make(map[string]record.Issue, len(issues))
+		for _, issue := range issues {
+			recorded[issue.Key] = issue
+		}
+		var candidates []adoption
+		for _, issue := range issues {
+			if issue.Project != a.project || !claim.IsTreeRoot(issue.Key, issue.Tree) || issue.Status != "todo" || issue.Parent == nil {
+				continue
+			}
+			parent, ok := recorded[*issue.Parent]
+			if !ok {
+				continue
+			}
+			target, ok := recorded[parent.Tree]
+			if !ok || target.Key == issue.Key || respectHolds && (a.held(issue.Key) || a.held(target.Key)) {
+				continue
+			}
+			// The refusal reads whether target's tree is live, the one tree a member runs in.
+			refusal, err := a.engine.AdoptionRefusal(ctx, tx, issue, target.Key)
+			if err != nil {
+				return fmt.Errorf("read whether %s joins the tree of %s: %w", issue.Key, target.Key, err)
+			}
+			if refusal == nil {
+				candidates = append(candidates, adoption{issue: issue, target: target})
+			}
+		}
+		adopted := false
+		for _, candidate := range candidates {
+			if slices.ContainsFunc(candidates, func(other adoption) bool { return other.issue.Key == candidate.target.Key }) {
+				continue
+			}
+			if err := a.engine.Adopt(ctx, tx, candidate.issue, candidate.target, *candidate.issue.Parent); err != nil {
+				return fmt.Errorf("adopt %s into the tree of %s: %w", candidate.issue.Key, candidate.target.Key, err)
+			}
+			adopted = true
+		}
+		if !adopted {
+			return nil
+		}
+	}
 }
 
 // unslotted says whether issue is a root of this project left in the workflow (workflow's
