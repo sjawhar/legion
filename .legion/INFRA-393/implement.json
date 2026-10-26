@@ -2,35 +2,19 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-393",
-  "completed": "2026-10-26T09:15:00Z",
-  "round": "forward merge of main (7f6ef46fd42f) into the approved head 5b39834357873eda556fc65bea2c3ea1b7c61683, which GitHub reported CONFLICTING; merge commit ec6ea9e0b9ad4cb4cf072d6e0424e6ebed64e5eb (jj new legion/INFRA-393 \"main\"@origin, no rebase). Main gained its own migration 0117 (0117_architecture_sources_per_repo), so this branch's 0117_embeddings_pending_since and 0118_drop_embeddings_backfill_progress are now 0118 and 0119, with every reference updated.",
-  "fingerprint": {
-    "before": "6a1249c243518bfa396fa76c11c72279e76b00c493c526c337249351b723ab24 at 5b39834357873eda556fc65bea2c3ea1b7c61683 (fork point f2c17ded5305)",
-    "after": "337b617b2a85409abb1f3a62ea309c046801380cf48692fec142a1e160b9f4ea at ec6ea9e0b9ad4cb4cf072d6e0424e6ebed64e5eb (fork point 7f6ef46fd42f)",
-    "verdict": "changed",
-    "whatChanged": "diff of the two normalized diffs: the four migration files renamed 0117→0118 and 0118→0119 with their header lines; embeddingsPendingSinceVersion 117→118; the migration numbers in coverage.go (2 comments), coverage_test.go (2 comments), packages/envoy/CHANGELOG.md (1 line) and cmd/dispatch/README.md (the migrations paragraph, now after main's 0117 paragraph, and the Search section's '(0119)'); routes_table_test.go's registeredRoutes pin, which main moved 134→137 and this branch adds one route to, now 137→138. Nothing else."
-  },
+  "completed": "2026-10-26T11:40:30Z",
+  "round": "review round 3 at 3f6155a5281a asked for no code change: the required check `test` was red at code head ec6ea9e0b9ad on a daemon timing flake (TestRunEndsAnOperatorSpawnInFlightWithTheDrainAndNamesIt, dispatch://INFRA-436) in a package this pull request does not touch. I re-ran the failed jobs and pushed no code. The code head stays ec6ea9e0b9ad4cb4cf072d6e0424e6ebed64e5eb, and round 4's proof (the forward merge) stands unchanged.",
   "proof": [
     {
-      "criterion": "The merged head migrates after main's 0117 and the server embeds everything it holds with no command, reporting full coverage (the coverage route re-checked on the merged head)",
-      "surface": "real envoy-dispatch built at the merge head on a fresh Postgres 17.11 + pgvector 0.8.0 database in the issue pod, DISPATCH_EMBEDDER=azure keyless (the pod's projected token exchanged at Entra) against the live embed-v-4-0 deployment",
-      "command": "serve2.sh EMBED_MODE=azure DB=infra393_m1 BIN=envoy-dispatch-ec6ea9e0; a project, 3 issues and a comment through the API; one comment inserted with session_replication_role = replica; restart; psql the last four schema_migrations versions; curl -H 'Authorization: Bearer e2e-token' …/api/v1/search/coverage | jq -e '.place==\"azure\" and .total.items > 0 and .total.current == .total.items and .total.lacking == 0 and .total.failed == 0 and .total.oldest_lacking_seconds == null'; GET /api/v1/search?q=acetone smell after warm night&project=MRGE",
-      "observed": "schema_migrations ends 116,117,118,119; the boot pass logged 'coverage pass … added=1 … items=5 current=4 lacking=1 failed=0', then coverage read place azure, model embed-v-4-0, items 5 current 5 lacking 0 failed 0 oldest null and the jq check printed true; the search found the comment no trigger saw, degraded null",
+      "criterion": "Every required check (lint, typecheck, test, pr-title) is green at the code head, with no code change",
+      "surface": "GitHub Actions on sjawhar/legion PR #2208 at ec6ea9e0b9ad4cb4cf072d6e0424e6ebed64e5eb",
+      "command": "gh run rerun 40297256033 --failed (twice) and gh run rerun 40297256195 --failed; gh run list -R sjawhar/legion --commit ec6ea9e0b9ad4cb4cf072d6e0424e6ebed64e5eb",
+      "observed": "Tests run 40297256033 attempt 3: lint, typecheck and test success; Legion Envoy and Contracts run 40297256195 attempt 2 success; PR Title 40297256135, Docs 40297256157 and Worker Image 40297256247 success; the Envoy checks settlement at 11:39:06Z listed 22 passed, 0 failed, 2 skipped (attest, deploy)",
       "headSha": "ec6ea9e0b9ad4cb4cf072d6e0424e6ebed64e5eb",
-      "negativeControl": "GET /api/v1/search/coverage with no bearer → 401; the local test database the branch's old numbering had migrated to 118 (its 0117 and 0118 being the embeddings migrations) refused 0119 ('table \"embeddings_backfill_progress\" does not exist'), and store passed once that database was recreated: a scratch database that applied the pre-renumbering branch cannot be reused; no deployed database ever ran the branch's migrations"
+      "negativeControl": "attempt 1 of the same Tests run failed `test` at inflight_test.go:546 (the flake). Attempt 2 was cancelled before it got a runner; its annotation reads 'The run was canceled by @sjawhar-agent[bot]', and I reported that cancellation to the architect"
     }
   ],
-  "localChecks": [
-    "cd packages/envoy && go build ./... → ok; gofmt -l ./internal/dispatch ./cmd/dispatch → no output; go vet ./internal/dispatch/... ./cmd/dispatch/... → clean",
-    "DISPATCH_TEST_DATABASE_URL=<fresh local Postgres 17 + pgvector> go test -count=1 ./internal/dispatch/embed/... ./internal/dispatch/embedqueue/... ./cmd/dispatch/... → ok; ./internal/dispatch/store/... → ok (198.9 s, after recreating the stale local database above)",
-    "go test -count=1 -run 'TestRoutesTable|TestWriteRouteIndex|Coverage' ./internal/dispatch/api/ → ok"
-  ],
-  "filesChanged": [
-    "merge commit only: packages/envoy/internal/dispatch/store/migrations/0118_embeddings_pending_since.{up,census}.sql and 0119_drop_embeddings_backfill_progress.{up,census}.sql (renamed from 0117/0118), store/embeddings_pending_since_migration_test.go, embedqueue/coverage.go and coverage_test.go (comments), api/routes_table_test.go, packages/envoy/CHANGELOG.md, packages/envoy/cmd/dispatch/README.md, packages/contracts/CHANGELOG.md (both sides' Added entries kept)"
-  ],
-  "trickyParts": [
-    "Main's 0117 is a stop-the-world migration; this branch's 0118 and 0119 still run beside a server of the release before them, as their comments say, so a release carrying both is deployed stop-the-world because of 0117 alone."
-  ],
+  "filesChanged": [],
   "deviations": [],
   "openQuestions": []
 }
