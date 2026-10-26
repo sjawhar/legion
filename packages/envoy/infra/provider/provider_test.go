@@ -141,7 +141,9 @@ func TestSchemaServesTheDispatchComponentWithItsSecrets(t *testing.T) {
 	require.True(t, dispatch.IsComponent)
 	require.True(t, dispatch.InputProperties["tailnetAuthKey"].Secret)
 	require.True(t, dispatch.InputProperties["signInClientSecret"].Secret)
-	require.False(t, dispatch.InputProperties["agentSecretsTokenSecret"].Secret)
+	require.Contains(t, dispatch.InputProperties, "agentSecretsAudience")
+	require.False(t, dispatch.InputProperties["agentSecretsAudience"].Secret)
+	require.NotContains(t, dispatch.InputProperties, "agentSecretsTokenSecret")
 	require.NotContains(t, dispatch.InputProperties, "agentSecretsToken")
 	require.NotContains(t, dispatch.InputProperties, "appPrivateKey")
 	for _, input := range []string{"appClientId", "appId", "appPrivateKeySecretName", "appPrivateKeySecretKey"} {
@@ -180,10 +182,13 @@ func TestSchemaServesTheWebhookListenerComponentWithNoSecretInput(t *testing.T) 
 	for name, input := range listener.InputProperties {
 		require.False(t, input.Secret, "%s is not a secret input", name)
 	}
-	// Every input is required but the seed, each webhook's inputs and adopt.
+	// Every input is required but the seed, each webhook's inputs, the opt-in to every
+	// notification topic and adopt.
 	require.ElementsMatch(t, []string{
-		"seedSecretArn", "githubWebhookSecretArn", "slackSigningSecretArn", "reviewerAppId", "mentionTrigger", "adopt",
+		"seedSecretArn", "githubWebhookSecretArn", "slackSigningSecretArn", "reviewerAppId", "mentionTrigger",
+		"subscribeAllTopics", "adopt",
 	}, optionalInputs(listener.InputProperties, listener.RequiredInputs))
+	require.Equal(t, "boolean", listener.InputProperties["subscribeAllTopics"].Type)
 }
 
 // optionalInputs are the names in properties that required does not list.

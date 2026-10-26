@@ -1,12 +1,9 @@
 package bus_test
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net"
-	"net/http"
 	"slices"
 	"strings"
 	"sync"
@@ -20,15 +17,13 @@ import (
 	"github.com/sjawhar/envoy/internal/goroutinetest"
 	"github.com/sjawhar/envoy/internal/testnats"
 	"github.com/sjawhar/envoy/internal/testsocks5"
-	tcnats "github.com/testcontainers/testcontainers-go/modules/nats"
 )
 
-// startNATS launches a real NATS container and returns it with the connection
-// URI. The container is terminated when the test completes.
-func startNATS(t *testing.T) (*tcnats.NATSContainer, string) {
+// startNATS runs a NATS server for the test and returns it with the connection
+// URI. The server is shut down when the test completes.
+func startNATS(t *testing.T) (*testnats.Server, string) {
 	t.Helper()
-	ctr, uri := testnats.Start(t)
-	return ctr, uri
+	return testnats.Start(t)
 }
 
 // waitFor polls a condition with timeout. Returns true if condition was met.
@@ -89,17 +84,14 @@ func TestPublishBoundsReconnectWhenNATSUnavailable(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			ctr, uri := startNATS(t)
+			srv, uri := startNATS(t)
 			client, err := bus.ConnectOwningStream([]string{uri})
 			if err != nil {
 				t.Fatalf("connect: %v", err)
 			}
 			t.Cleanup(client.Close)
 
-			ctx := context.Background()
-			if err := ctr.Terminate(ctx); err != nil {
-				t.Fatalf("stop NATS: %v", err)
-			}
+			srv.Terminate(t)
 			client.Conn.Close()
 
 			result := make(chan error, 1)
@@ -160,6 +152,49 @@ func TestCoreSubscriptionRestoresAfterConnectionRecovery(t *testing.T) {
 		}
 		if err := publisher.Flush(); err != nil {
 			t.Fatalf("flush recovered core role publish: %v", err)
+		}
+		return received.Load() > 0
+	})
+}
+
+// CoreSubOK answers for the core subscription the client holds now. After the client replaces a
+// closed connection, the handle SubscribeCore returned stays invalid for good while the replacement
+// the recovery bound delivers, and CoreSubOK must report the replacement: read from the returned
+// handle, a recovered lane would read inactive forever.
+func TestCoreSubOKReportsTheReplacementAfterTheClientReplacesAClosedConnection(t *testing.T) {
+	_, uri := startNATS(t)
+	client, err := bus.Connect([]string{uri})
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer client.Close()
+	publisher := testnats.Connect(t, uri)
+	defer publisher.Close()
+
+	if client.CoreSubOK() {
+		t.Fatal("CoreSubOK is true before SubscribeCore")
+	}
+	var received atomic.Int32
+	const subject = "notifications.team.core-sub-ok"
+	returned, err := client.SubscribeCore(subject, func(*natsgo.Msg) { received.Add(1) }, "core-sub-ok")
+	if err != nil {
+		t.Fatalf("subscribe core: %v", err)
+	}
+	if !client.CoreSubOK() {
+		t.Fatal("CoreSubOK is false after SubscribeCore")
+	}
+
+	client.Conn.Close()
+	waitFor(t, 30*time.Second, "the client to bind a replacement core subscription", client.CoreSubOK)
+	if returned.IsValid() {
+		t.Fatal("the handle SubscribeCore returned is still valid after its connection closed; the test proves nothing")
+	}
+	waitFor(t, 5*time.Second, "the replacement core subscription to deliver", func() bool {
+		if err := publisher.Publish(subject, []byte("recovered")); err != nil {
+			t.Fatalf("publish: %v", err)
+		}
+		if err := publisher.Flush(); err != nil {
+			t.Fatalf("flush: %v", err)
 		}
 		return received.Load() > 0
 	})
@@ -936,41 +971,14 @@ func TestAClosedConnectionIsReplacedOnceAndCloseLeavesNoneOpen(t *testing.T) {
 // body; through, when not nil, gives the client's connect options for the server at uri.
 func closedConnectionIsReplacedOnce(t *testing.T, through func(uri string) []bus.ConnectOption) {
 	unsetNkeyEnvironment(t)
-	ctr, uri := testnats.StartImageConfig(t, testnats.Image, "jetstream {}\nhttp_port: 8222\n", []string{"-js"}, true)
-	ctx := context.Background()
-	host, err := ctr.Host(ctx)
-	if err != nil {
-		t.Fatalf("NATS host: %v", err)
-	}
-	port, err := ctr.MappedPort(ctx, "8222/tcp")
-	if err != nil {
-		t.Fatalf("NATS monitoring port: %v", err)
-	}
+	srv, uri := testnats.StartConfig(t, "jetstream {}\n", []string{"-js"}, true)
 	const name = "replaced-once"
+	byName := serverConnections(t, srv)
 	// connections is how many connections the server holds under the client's name, which nats.go
 	// sends in its CONNECT, so the observer's own connection is not counted.
 	connections := func() int {
 		t.Helper()
-		response, err := http.Get("http://" + net.JoinHostPort(host, port.Port()) + "/connz")
-		if err != nil {
-			t.Fatalf("read /connz: %v", err)
-		}
-		defer response.Body.Close()
-		var connz struct {
-			Connections []struct {
-				Name string `json:"name"`
-			} `json:"connections"`
-		}
-		if err := json.NewDecoder(response.Body).Decode(&connz); err != nil {
-			t.Fatalf("decode /connz: %v", err)
-		}
-		open := 0
-		for _, connection := range connz.Connections {
-			if connection.Name == name {
-				open++
-			}
-		}
-		return open
+		return len(byName()[name])
 	}
 	// settle waits up to within for the server to hold want of the client's connections, and fails
 	// with the count it last read.

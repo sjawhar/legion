@@ -236,6 +236,38 @@ describe("sessionSettings", () => {
     );
   });
 
+  // The floor under the pass deadline is silent nowhere: an operator who reads the deadline he set
+  // in the plugin's behaviour, and not in the session's start notice, debugs a queue that waits
+  // several times longer than he asked against a value that was never in force.
+  test("an ENVOY_PASS_DEADLINE_MS raised to the heartbeat is said, naming both values", () => {
+    const file = writeFile(path.join(tempDir(), "envoy.json"), { envoy: envoyOn });
+    const settings = sessionSettings(
+      { path: file, error: null },
+      { ENVOY_HEARTBEAT_MS: "5000", ENVOY_PASS_DEADLINE_MS: "1500" },
+      { cwd: tempDir() }
+    );
+    expect(settings.envoy).toMatchObject({ heartbeatMs: 5000, passDeadlineMs: 5000 });
+    expect(settings.notice).toBe(
+      "Envoy's pass deadline is 5000 ms, not the 1500 ms ENVOY_PASS_DEADLINE_MS names: a deadline inside one 5000 ms heartbeat interval would abandon every pass before the next tick, so the registration refresh the heartbeat posts for a stalled pass would never run"
+    );
+  });
+
+  // Saying a deadline that is in force was raised would teach a reader to ignore the notice, and
+  // the start notice is the one place a session says what it refused to use.
+  test("a pass deadline at or above the heartbeat, unusable, or unset says nothing", () => {
+    const file = writeFile(path.join(tempDir(), "envoy.json"), { envoy: envoyOn });
+    const noticeFor = (env: Record<string, string>): string | null =>
+      sessionSettings({ path: file, error: null }, env, { cwd: tempDir() }).notice;
+    expect(noticeFor({ ENVOY_HEARTBEAT_MS: "5000", ENVOY_PASS_DEADLINE_MS: "5000" })).toBeNull();
+    expect(noticeFor({ ENVOY_HEARTBEAT_MS: "5000", ENVOY_PASS_DEADLINE_MS: "7500" })).toBeNull();
+    for (const unusable of ["soon", "0", "-5000", ""]) {
+      expect(
+        noticeFor({ ENVOY_HEARTBEAT_MS: "5000", ENVOY_PASS_DEADLINE_MS: unusable })
+      ).toBeNull();
+    }
+    expect(noticeFor({ ENVOY_HEARTBEAT_MS: "5000" })).toBeNull();
+  });
+
   test("a location that cannot be worked out turns both off with that error", () => {
     const error = "XDG_CONFIG_HOME is rel, which is not an absolute path";
     expect(sessionSettings({ path: null, error }, {}, { cwd: tempDir() })).toEqual({

@@ -297,4 +297,11 @@ package api
 // 30; main then landed sjawhar/legion#1986 at 30, 31 and 32, LEGION-781 at 33 and INFRA-31 at 34,
 // each released without this shape, so this branch takes the number above them, as the collision
 // note says.)
-const DaemonAPIVersion = 35
+//
+// 36: INFRA-229 (sjawhar/legion) -- `api.PullRequestView` gains `state`, the pull request's
+// `open`, `merged` or `closed`, always emitted: an architect's acceptance is now refused while an
+// issue beneath it is still in the workflow and a merged root's close waits for the rest of its
+// tree, so a root stands in `awaiting_merge` for days and an operator must see that its pull
+// request merged rather than guess at it. A 35 plugin's strict reader refuses a state whose pull
+// request views carry the field, so the boot gate and `legion probe-image` refuse the mixed pair.
+const DaemonAPIVersion = 36

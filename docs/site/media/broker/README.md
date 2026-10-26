@@ -24,13 +24,16 @@ private hostname or production service is involved.
 DATABASE_URL=<url> bash docs/site/media/broker/rig.sh
 ```
 
-It builds the broker, `agent-secrets` and `agent-secrets-helper`; creates the broker's database
-beside `DATABASE_URL`'s and starts the broker on its development secrets file, which stands in for
-Secrets Manager and tags `DEMO_API_KEY` `owner=alice@example.com`, `tier=human`, with grants
-lasting until their session ends; starts the Dispatch e2e harness's three servers
-on `DATABASE_URL` with the server pointed at the broker (`packages/dispatch/e2e/run-server.sh`'s
-`DISPATCH_E2E_AGENT_SECRETS_URL`), and empties its database; and starts the agent machine,
-`agent-secrets-helper` for `alice@example.com` under the hostname
+It builds the broker, `dev-oidc-issuer`, `agent-secrets` and `agent-secrets-helper`; creates the
+broker's database beside `DATABASE_URL`'s; starts `dev-oidc-issuer`, the local stand-in for a
+cluster's ServiceAccount token issuer, which keeps Dispatch's own token in a file; starts the broker
+on its development secrets file, which stands in for Secrets Manager and tags `DEMO_API_KEY`
+`owner=alice@example.com`, `tier=human`, with grants lasting until their session ends, trusting
+that issuer and listing Dispatch's account as its caller; starts the Dispatch e2e harness's three
+servers on `DATABASE_URL` with the server pointed at the broker
+(`packages/dispatch/e2e/run-server.sh`'s `DISPATCH_E2E_AGENT_SECRETS_URL`, with Dispatch's token
+file in `DISPATCH_E2E_AGENT_SECRETS_ACCOUNT_TOKEN_FILE`), and empties its database; and starts the
+agent machine, `agent-secrets-helper` for `alice@example.com` under the hostname
 `example-host-build`, alone in a UTS namespace of its own, with the agent's shells on this
 machine. It prints the addresses, then waits; Ctrl-C stops everything it started and drops the
 broker's database.

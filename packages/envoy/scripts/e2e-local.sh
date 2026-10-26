@@ -2,13 +2,13 @@
 # shellcheck disable=SC2016,SC2317 # Bun code uses literal template syntax; cleanup is trap-invoked
 # e2e-local.sh — Runs the local Envoy webhook, delivery, and renderer acceptance path.
 #
-# Starts a throwaway NATS server and listener, then leaves evidence in out/e2e/.
+# Builds and starts a NATS server of its own (internal/testnats/cmd/natsd) and the
+# listener, then leaves evidence in out/e2e/.
 # The listener needs ENVOY_HOST_BRIDGE=127.0.0.1 because it runs on this host and
 # delivers to the host-local fake session. ENVOY_CI_DEBOUNCE=250ms keeps this
 # bounded acceptance run responsive while retaining the production settle logic.
 #
 # Optional ports: E2E_NATS_PORT (14222), E2E_PORT (19020), E2E_SESSION_PORT (19021).
-# Optional NATS container name: E2E_NATS_CONTAINER (envoy-e2e-nats).
 set -euo pipefail
 # This rig's NATS is a throwaway server with no users. nats.go refuses an nkey when the server sends
 # no nonce ("nats: nkeys not supported by the server"), so no process here inherits an operator's
@@ -52,8 +52,7 @@ readonly out_dir
 nats_port="${E2E_NATS_PORT:-14222}"
 listener_port="${E2E_PORT:-19020}"
 session_port="${E2E_SESSION_PORT:-19021}"
-nats_container="${E2E_NATS_CONTAINER:-envoy-e2e-nats}"
-readonly nats_port listener_port session_port nats_container
+readonly nats_port listener_port session_port
 listener_url="http://127.0.0.1:${listener_port}"
 readonly listener_url
 nats_url="nats://127.0.0.1:${nats_port}"
@@ -68,6 +67,8 @@ readonly session_prompts_file="${out_dir}/session-prompts.jsonl"
 readonly rendered_ts_file="${out_dir}/rendered-ts.txt"
 readonly rendered_go_file="${out_dir}/rendered-go.txt"
 readonly direct_response_file="${out_dir}/direct-send-response.json"
+readonly registry_session_response_file="${out_dir}/registry-session-response.json"
+readonly registry_missing_response_file="${out_dir}/registry-missing-response.json"
 readonly unwired_response_file="${out_dir}/unwired-subscribe-response.json"
 readonly unheld_role_response_file="${out_dir}/unheld-role-response.json"
 readonly role_claim_response_file="${out_dir}/role-claim-response.json"
@@ -75,63 +76,115 @@ readonly held_role_response_file="${out_dir}/held-role-response.json"
 readonly listener_log_file="${out_dir}/listener.log"
 readonly session_log_file="${out_dir}/session.log"
 readonly subscriber_log_file="${out_dir}/subscriber.log"
+readonly nats_log_file="${out_dir}/nats.log"
 readonly listener_binary="${out_dir}/listener"
+readonly nats_binary="${out_dir}/natsd"
+readonly nats_store_dir="${out_dir}/nats-store"
+readonly lock_file="${out_dir}/run.lock"
 readonly session_ready_fifo="${out_dir}/session-ready.fifo"
 readonly subscriber_ready_fifo="${out_dir}/subscriber-ready.fifo"
 
 listener_pid=""
 session_pid=""
 subscriber_pid=""
-nats_started=0
+nats_pid=""
 
+# cleanup stops what this run started and exits with rc, the status the trap that ran it passes:
+# the script's own for EXIT, and the conventional 128 plus the signal's number for INT and TERM, so
+# a run that was interrupted never reports success: inside a signal's trap, $? is the status of the
+# last command that finished, usually 0, not the signal's.
 cleanup() {
-  local rc=$?
+  local rc=$1
   trap - EXIT INT TERM
   set +e
-  for pid in "$subscriber_pid" "$session_pid" "$listener_pid"; do
+  for pid in "$subscriber_pid" "$session_pid" "$listener_pid" "$nats_pid"; do
     if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
       kill "$pid" 2>/dev/null || true
       wait "$pid" 2>/dev/null || true
     fi
   done
-  rm -f "$session_ready_fifo" "$subscriber_ready_fifo"
-  if [[ "$nats_started" -eq 1 ]]; then
-    docker stop "$nats_container" >/dev/null 2>&1 || true
-    docker rm "$nats_container" >/dev/null 2>&1 || true
-  fi
+  rm -rf "$session_ready_fifo" "$subscriber_ready_fifo" "$nats_store_dir"
   exit "$rc"
 }
-trap cleanup EXIT INT TERM
 
-for command in bun curl docker go jq openssl; do
+for command in bun curl flock go jq openssl; do
   command -v "$command" >/dev/null || {
     printf 'ERR: required command is unavailable: %s\n' "$command" >&2
     exit 3
   }
 done
 
-if docker container inspect "$nats_container" >/dev/null 2>&1; then
-  printf 'ERR: %s already exists; leave it untouched and set E2E_NATS_CONTAINER to a free name.\n' "$nats_container" >&2
-  exit 3
-fi
-
+# out/e2e belongs to one run at a time. Everything below removes what is in it — the evidence, the
+# logs, the binaries and the JetStream store — so this run claims it first, and a second run of this
+# script in the same checkout is refused before it touches anything a running first run is using.
+# The lock is held by this shell, and the servers it starts, for as long as they live, and needs no
+# cleanup of its own; a directory left by a run that is gone holds no lock and is cleaned as usual.
+# After a SIGKILL of this script, which runs no cleanup, the natsd and listener it started inherit
+# the lock's descriptor and outlive it, so a later run is refused until they are gone, as it would
+# be anyway: they still hold the NATS port.
 mkdir -p "$out_dir"
+exec {lock_fd}>"$lock_file"
+flock -n "$lock_fd" || {
+  printf 'ERR: another run of e2e-local.sh is using %s; this run removed nothing.\n' "$out_dir" >&2
+  exit 3
+}
+trap 'cleanup "$?"' EXIT
+trap 'cleanup 130' INT
+trap 'cleanup 143' TERM
+
 rm -f "$envelopes_file" "$session_prompts_file" "$rendered_ts_file" "$rendered_go_file" \
   "$direct_response_file" "$unwired_response_file" "$unheld_role_response_file" "$role_claim_response_file" "$held_role_response_file" \
-  "$listener_log_file" "$session_log_file" "$subscriber_log_file" "$listener_binary" "$session_ready_fifo" "$subscriber_ready_fifo"
+  "$registry_session_response_file" "$registry_missing_response_file" \
+  "$listener_log_file" "$session_log_file" "$subscriber_log_file" "$nats_log_file" \
+  "$listener_binary" "$nats_binary" "$session_ready_fifo" "$subscriber_ready_fifo"
+rm -rf "$nats_store_dir"
 : >"$envelopes_file"
 : >"$session_prompts_file"
 mkfifo "$session_ready_fifo" "$subscriber_ready_fifo"
 
-printf 'starting NATS: %s on 127.0.0.1:%s\n' "$nats_container" "$nats_port"
-docker run --name "$nats_container" -d -p "${nats_port}:4222" mirror.gcr.io/library/nats:2.10-alpine -js >/dev/null
-nats_started=1
-
-printf 'building listener\n'
+printf 'building listener and NATS server\n'
 (
   cd "$envoy_dir"
   go build -o "$listener_binary" ./cmd/listener
+  go build -o "$nats_binary" ./internal/testnats/cmd/natsd
 )
+
+printf 'starting NATS: 127.0.0.1:%s\n' "$nats_port"
+"$nats_binary" -p "$nats_port" -store_dir "$nats_store_dir" >"$nats_log_file" 2>&1 &
+nats_pid=$!
+
+# wait_for_nats returns once the server this script started is answering, and fails otherwise. It
+# must never pass on another server: something already holding the port — a run left behind, or a
+# second run of this script — greets a connection exactly as ours would, while ours exits with
+# "address already in use". So the greeting is read only after our own server's log says it is
+# ready, and the wait ends the moment our own process is gone.
+wait_for_nats() {
+  local deadline=$((SECONDS + 30))
+  local banner
+  while ((SECONDS < deadline)); do
+    if ! kill -0 "$nats_pid" 2>/dev/null; then
+      printf 'ERR: the NATS server this script started ended before it was ready.\n' >&2
+      cat "$nats_log_file" >&2
+      return 1
+    fi
+    if grep -q 'Server is ready' "$nats_log_file"; then
+      # A NATS server greets every connection it accepts with its INFO line; curl's telnet
+      # scheme reads that greeting, then waits out its own --max-time, so only the text proves
+      # the port answers.
+      banner="$(curl -s --max-time 1 "telnet://127.0.0.1:${nats_port}" </dev/null 2>/dev/null || true)"
+      if [[ "$banner" == 'INFO '* ]]; then
+        return 0
+      fi
+    fi
+    sleep 0.25
+  done
+  printf 'ERR: NATS did not accept connections on 127.0.0.1:%s within 30 seconds.\n' "$nats_port" >&2
+  cat "$nats_log_file" >&2
+  return 1
+}
+
+printf 'waiting for NATS\n'
+wait_for_nats
 
 printf 'starting listener: %s\n' "$listener_url"
 PORT="$listener_port" \
@@ -308,6 +361,27 @@ jq -e --arg recipient "$session_id" --arg message "$direct_message" \
   printf 'ERR: direct send response did not retain the three-paragraph message contract.\n' >&2
   exit 1
 }
+
+# The one question a caller holding a session id asks before it addresses that session: is this
+# session live? The per-session registry read answers with the row GET /v1/sessions would carry,
+# and an id that never registered is refused with the exact reason Dispatch classifies on.
+registry_status="$(curl -sS -o "$registry_session_response_file" -w '%{http_code}' \
+  "${listener_url}/v1/registry/${session_id}")"
+if [[ "$registry_status" != 200 ]] || ! jq -e --arg session_id "$session_id" \
+  '.session_id == $session_id and (.title | length > 0) and (.capabilities | type == "array")' \
+  "$registry_session_response_file" >/dev/null; then
+  printf 'ERR: the registry read of the live session did not answer its own session row.\n' >&2
+  exit 1
+fi
+
+missing_session_id="ses_e2e_local_never_registered"
+missing_status="$(curl -sS -o "$registry_missing_response_file" -w '%{http_code}' \
+  "${listener_url}/v1/registry/${missing_session_id}")"
+if [[ "$missing_status" != 404 ]] || ! jq -e --arg session_id "$missing_session_id" \
+  '. == {error: ("no live session " + $session_id)}' "$registry_missing_response_file" >/dev/null; then
+  printf 'ERR: an unregistered session id was not refused 404 with "no live session <id>".\n' >&2
+  exit 1
+fi
 
 role="e2e-reviewer"
 unheld_status="$(curl -sS -o "$unheld_role_response_file" -w '%{http_code}' \

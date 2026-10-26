@@ -388,3 +388,106 @@ func TestRolePreservesListenerNotFoundText(t *testing.T) {
 		t.Fatalf("role error = %v, want listener error text", err)
 	}
 }
+
+// A per-session read is the question "is this session live, and how is it named", so the body it
+// decodes is one row of GET /v1/sessions: the same fields, filled the same way. The listener may
+// leave the id out of its own answer, and leaves a session with no roles or no capabilities
+// without those keys; a caller comparing capabilities must not have to nil-check first.
+func TestSessionDecodesTheListenerRowAndFillsWhatItOmits(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+		want Session
+	}{
+		{
+			name: "a full row",
+			body: `{"session_id":"s1","machine_id":"m1","host":"h1","dir":"/w/legion","port":9100,` +
+				`"title":"planner","self_subscribed":true,"topics":["notifications.agent.s1"],` +
+				`"roles":["legion-planner"],"capabilities":["aside","btw"],` +
+				`"updated_at":1700000000000,"last_seen":1700000000001}`,
+			want: Session{
+				SessionID: "s1", Title: "planner", Dir: "/w/legion", MachineID: "m1", Host: "h1",
+				Roles: []string{"legion-planner"}, Capabilities: []string{"aside", "btw"},
+				LastSeen: 1700000000001,
+			},
+		},
+		{
+			name: "a row naming neither the session nor any role or capability",
+			body: `{"machine_id":"m1","host":"h1","dir":"/w/legion","title":"planner","last_seen":42}`,
+			want: Session{
+				SessionID: "s1", Title: "planner", Dir: "/w/legion", MachineID: "m1", Host: "h1",
+				Roles: []string{}, Capabilities: []string{}, LastSeen: 42,
+			},
+		},
+	} {
+		listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path != "/v1/registry/s1" || r.Method != http.MethodGet {
+				t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+			}
+			if got := r.Header.Get("Authorization"); got != "Bearer listener-token" {
+				t.Errorf("Authorization = %q, want Bearer listener-token", got)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(tc.body))
+		}))
+		session, err := New(listener.URL, WithToken("listener-token")).Session(context.Background(), "s1")
+		listener.Close()
+		if err != nil {
+			t.Fatalf("%s: %v", tc.name, err)
+		}
+		if !reflect.DeepEqual(session, tc.want) {
+			t.Fatalf("%s: session = %#v, want %#v", tc.name, session, tc.want)
+		}
+	}
+}
+
+// The two answers Session must never confuse are "the listener holds no record under that id" -
+// which ends a caller's wait - and "the listener could not say", which only means ask again. A
+// 400 (an id outside nats.go's key alphabet, or holding an empty token) and a 413 (one too long)
+// are the first: NATS refuses such an id as a key, so no session ever registered under it. Every
+// other status, and a 200 whose body does not decode, are the second, and a 503 carries the
+// listener's own reason because a person reads it.
+func TestSessionSeparatesNoRecordFromNoAnswer(t *testing.T) {
+	const busSilent = "envoy: the message bus did not answer: context deadline exceeded"
+	for _, tc := range []struct {
+		name   string
+		status int
+		body   string
+		want   error
+		reason string
+	}{
+		{name: "unknown session", status: http.StatusNotFound, body: `{"error":"no live session s1"}`, want: ErrNotFound},
+		{name: "id NATS refuses as a key", status: http.StatusBadRequest, body: `{"error":"session_id is invalid"}`, want: ErrNotFound},
+		{name: "id too long for a key", status: http.StatusRequestEntityTooLarge, body: `{"error":"session_id is too long"}`, want: ErrNotFound},
+		{name: "the bus did not answer", status: http.StatusServiceUnavailable, body: `{"error":"` + busSilent + `"}`,
+			want: ErrUnavailable, reason: busSilent},
+		{name: "the listener broke", status: http.StatusInternalServerError, body: ``, want: ErrUnavailable},
+		{name: "a body that does not decode", status: http.StatusOK, body: `{"session_id":`, want: ErrUnavailable},
+	} {
+		listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(tc.status)
+			_, _ = w.Write([]byte(tc.body))
+		}))
+		_, err := New(listener.URL).Session(context.Background(), "s1")
+		listener.Close()
+		if !errors.Is(err, tc.want) {
+			t.Fatalf("%s (%d): err = %v, want %v", tc.name, tc.status, err, tc.want)
+		}
+		if tc.reason != "" && !strings.Contains(err.Error(), tc.reason) {
+			t.Fatalf("%s (%d): err = %q, want it to carry the listener's reason %q", tc.name, tc.status, err, tc.reason)
+		}
+	}
+}
+
+// A listener that cannot be reached at all says nothing about the session either, so it is the
+// same "ask again" a 503 is - never grounds to call the session gone.
+func TestSessionReportsAnUnreachableListenerAsUnavailable(t *testing.T) {
+	closed := httptest.NewServer(http.NotFoundHandler())
+	closed.Close()
+
+	if _, err := New(closed.URL).Session(context.Background(), "s1"); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("refused: err = %v, want ErrUnavailable", err)
+	} else if errors.Is(err, ErrNotFound) {
+		t.Fatalf("refused: err = %v, want it not to read as a missing session", err)
+	}
+}

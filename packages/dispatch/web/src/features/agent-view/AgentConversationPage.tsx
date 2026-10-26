@@ -1,6 +1,6 @@
 import { DELIVERY_CAPABILITIES, type MessageDeliveryMode } from "@legion/contracts";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { type ReactNode, useCallback, useState } from "react";
+import { type ReactNode, useCallback, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 
 import { api } from "../../api/client";
@@ -24,7 +24,7 @@ import { useAgents } from "../conversation/useAgents";
 import { sessionLabel } from "../refs/actor";
 import { ErrorBoundary } from "../shell/ErrorBoundary";
 import { useDocumentTitle } from "../shell/useDocumentTitle";
-import { AgentRuntimeThread } from "./AgentRuntimeThread";
+import { AgentRuntimeThread, type SendOutcome } from "./AgentRuntimeThread";
 import { currentModel, sessionCommands } from "./conversation";
 import { type AgentStreamStatus, useAgentStream } from "./useAgentStream";
 
@@ -89,7 +89,11 @@ export function AgentConversationPage(): ReactNode {
   const listed = sessionCommands(conversation);
   const commands =
     mode === "btw" || listed === undefined || listed.length === 0 ? undefined : listed;
-  const [sendError, setSendError] = useState<string | null>(null);
+  // Why Dispatch refused each session's latest send, by session: a refusal belongs to the
+  // session that sent the message, shows only while the reader is on it (even if it landed
+  // while they were on another), and clears on that session's next send.
+  const [sendErrors, setSendErrors] = useState<ReadonlyMap<string, string>>(() => new Map());
+  const sendError = sendErrors.get(sessionId);
   // The human's direct messages and the session's replies to them, as Dispatch stores them. A
   // person's Send or Aside to an Oh My Pi session becomes the session's own user turn, which the
   // stream carries tagged with this message's id, and the thread shows it once; one the stream
@@ -105,32 +109,41 @@ export function AgentConversationPage(): ReactNode {
   useMarkRepliesRead(sessionId, stored.data);
   const viewer = useQuery(whoAmIQuery()).data;
   // One per message of this viewer's the session accepted, which takes the thread back to its
-  // live end (`use-live-follow.ts`). Bumped after the write lands and never on a refusal: the
-  // reason renders above the transcript, where a reader who has scrolled back can read it
-  // without being taken away from what they were reading.
+  // live end (`use-live-follow.ts`). Bumped after the write lands, only if the reader is still on
+  // the session it went to, and never on a refusal: the reason renders above the transcript,
+  // where a reader who has scrolled back can read it without being taken away from what they
+  // were reading.
   const [ownSendCount, setOwnSendCount] = useState(0);
+  // The session on screen now, for a send that lands after the reader may have moved on.
+  const onScreen = useRef(sessionId);
+  onScreen.current = sessionId;
 
   // Talking to the agent is Dispatch's existing targeted delivery: the stream itself stays
   // read-only and this adds no write path of its own. The session confirms a Send or Aside with
-  // Dispatch before it takes one as its user's own turn.
-  const onNew = useCallback(
-    async (message: { content: readonly { type: string; text?: string }[] }) => {
-      const body = message.content
-        .filter((part) => part.type === "text")
-        .map((part) => part.text ?? "")
-        .join("\n")
-        .trim();
-      if (body === "") return;
-      setSendError(null);
+  // Dispatch before it takes one as its user's own turn. `session` and `mode` are the ones the
+  // send was made under; refused means exactly that Dispatch did not take the message.
+  const onSend = useCallback(
+    async (session: string, body: string): Promise<SendOutcome> => {
+      setSendErrors((previous) => {
+        if (!previous.has(session)) return previous;
+        const next = new Map(previous);
+        next.delete(session);
+        return next;
+      });
       try {
-        await api.createAgentMessage(sessionId, { body, delivery: mode });
-        setOwnSendCount((previous) => previous + 1);
-        await queryClient.invalidateQueries({ queryKey: agentMessagesQuery(sessionId).queryKey });
+        await api.createAgentMessage(session, { body, delivery: mode });
       } catch (error) {
-        setSendError(error instanceof Error ? error.message : "could not reach the session");
+        const reason = error instanceof Error ? error.message : "could not reach the session";
+        setSendErrors((previous) => new Map(previous).set(session, reason));
+        return "refused";
       }
+      if (session === onScreen.current) setOwnSendCount((previous) => previous + 1);
+      // The message is Dispatch's now, so refreshing the stored list is outside the send: a
+      // refresh that fails is never a refusal, and Send is free again without waiting on it.
+      void queryClient.invalidateQueries({ queryKey: agentMessagesQuery(session).queryKey });
+      return "sent";
     },
-    [mode, queryClient, sessionId]
+    [mode, queryClient]
   );
   const presence = STATUS[status];
 
@@ -203,7 +216,7 @@ export function AgentConversationPage(): ReactNode {
           A Claude Code session takes messages only when it was started with its Envoy channel.
         </p>
       ) : null}
-      {sendError === null ? null : (
+      {sendError === undefined ? null : (
         <p className={`mt-2 text-sm ${dangerText}`} data-testid="agent-send-error">
           Could not send: {sendError}
         </p>
@@ -220,7 +233,7 @@ export function AgentConversationPage(): ReactNode {
           commands={commands}
           conversation={conversation}
           empty={emptyText(responding)}
-          onNew={onNew}
+          onSend={onSend}
           ownSendCount={ownSendCount}
           placeholder={`Message ${label} — delivered as ${MODE_LABELS[mode]}${commands === undefined ? "" : ", / for commands"}…`}
           replayCount={replays}

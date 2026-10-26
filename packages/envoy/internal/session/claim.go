@@ -8,8 +8,9 @@ import (
 )
 
 // ClaimStaleAfter is how long a claim may go unrefreshed before another holder
-// may take the route. The plugin heartbeats every 2 minutes, so this allows two
-// missed heartbeats before assuming the claiming process is gone.
+// may take the route. The plugin heartbeats every 90 seconds
+// (DEFAULT_HEARTBEAT_MS, packages/envoy-client/src/envoy-settings.ts), so this
+// allows three missed heartbeats before assuming the claiming process is gone.
 const ClaimStaleAfter = 5 * time.Minute
 
 // mergeForClaim decides which of two competing claims on a session route wins.

@@ -334,7 +334,7 @@ func TestCapturedApprovedReviewFlowsThroughConsumeToAccepting(t *testing.T) {
 	pool := migratedPool(t)
 	ctx := context.Background()
 	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "captured review", Phase: phase.Reviewing, Generation: 1, Status: "needs_review", Rank: "U"})
-	// The base requires no check, so the head's green settlement, which names none, is green.
+	// The base requires no check, so the head's settlement gives no verdict, and an approval waits on none.
 	seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head-captured", CheckedHead: "head-captured", Failing: []string{}, Required: []string{}})
 	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "review-claim", HandoffCommit: "review-1"})
 	var mu sync.Mutex
@@ -514,23 +514,26 @@ func TestAPhaseFinishedNoticeCarriesTheWorkersSummaryAndItsVerdict(t *testing.T)
 	}
 }
 
-// The merge of a root's pull request while it awaits the merge closes it: linger suspends, and its
-// expiry stops, every claim the tree holds — the root architect admission started and a worker that
-// never reported a handoff included, neither of which has a phase row. A redelivered merge changes
-// nothing. Every expiry row names the root generation whose linger it expires, a child's too, which
-// keeps the earlier generation of the run that admitted it. The close opens the root's production
-// check, whose first look the implementer reports here before the linger ends, since the tree's
-// close waits for an open check (check_test.go).
-func TestTheMergeLingersOnceAndExpiryStopsTreeAndRemovesEveryWorkspace(t *testing.T) {
+// A root's merge while a child runs records the merge and waits, so the close is the one its last
+// child's departure brings. That close lingers once: linger suspends, and its expiry stops, every
+// claim the tree holds — the root architect admission started and a worker that never reported a
+// handoff included, neither of which has a phase row. A redelivered merge changes nothing. Every
+// expiry row names the root generation whose linger it expires, a child's too, which keeps the
+// earlier generation of the run that admitted it. The close opens the root's production check,
+// whose first look the implementer reports here before the linger ends, since the tree's close
+// waits for an open check (check_test.go). No child of such a tree is left mid-run, so the expiry
+// hands none over; the hand-over of a root a person closed is admit's cover (finished_root_test.go).
+func TestTheCloseLingersOnceAndExpiryStopsTreeAndRemovesEveryWorkspace(t *testing.T) {
 	pool := migratedPool(t)
 	ctx := context.Background()
 	now := time.Date(2026, 9, 23, 4, 0, 0, 0, time.UTC)
 	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.AwaitingMerge, Generation: 7, Status: "retro", Rank: "U"})
 	parent := "LEGION-208"
-	seedIssue(t, pool, record.Issue{Key: "LEGION-209", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "child", Parent: &parent, Phase: phase.Implementing, Generation: 3, Status: "in_progress", Rank: "V"})
+	seedIssue(t, pool, record.Issue{Key: "LEGION-209", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "child", Parent: &parent, Phase: phase.AwaitingMerge, Generation: 3, Status: "retro", Rank: "V", LastDispatchSeq: 1})
 	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleMerger, Claim: "merger", HandoffCommit: "head"})
 	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-209", Role: claim.RoleImplementer, Claim: "child-implementer"})
 	seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head", Failing: []string{}})
+	seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-209", Repo: "sjawhar/legion", Number: 43, Branch: "legion/LEGION-209", HeadSHA: "head-43", Failing: []string{}})
 	engine := New(record.NewStore(), Config{Project: "LEGION", Linger: time.Hour, Repositories: testRepositories, Clock: func() time.Time { return now }}, nil)
 
 	merged := intake.PullRequestMerged{Repo: "sjawhar/legion", Number: 42, MergeSHA: "merge"}
@@ -539,6 +542,13 @@ func TestTheMergeLingersOnceAndExpiryStopsTreeAndRemovesEveryWorkspace(t *testin
 	}
 	if _, err := intake.ApplyFact(ctx, pool, "github", "merged-echo", merged, engine, admissionStub{}); err != nil {
 		t.Fatalf("ApplyFact merged echo: %v", err)
+	}
+	assertPhase(t, pool, phase.AwaitingMerge)
+	assertOutboxCount(t, pool, "linger_close", 0)
+	assertOutboxCount(t, pool, "dispatch_status", 0)
+
+	if _, err := intake.ApplyFact(ctx, pool, "github", "child-merged", intake.PullRequestMerged{Repo: "sjawhar/legion", Number: 43, MergeSHA: "merge-43"}, engine, admissionStub{}); err != nil {
+		t.Fatalf("ApplyFact the child's merge: %v", err)
 	}
 	assertPhase(t, pool, phase.Done)
 	var lingerUntil time.Time
@@ -561,9 +571,13 @@ func TestTheMergeLingersOnceAndExpiryStopsTreeAndRemovesEveryWorkspace(t *testin
 		t.Fatalf("linger suspended %v, want each tree claim once: %v", suspended, everyClaim)
 	}
 	assertOutboxCount(t, pool, "linger_close", 1)
-	assertOutboxCount(t, pool, "dispatch_status", 1)
-	if result, err := intake.ApplyFact(ctx, pool, "api", "check:LEGION-208:1:pass", intake.CheckReport{Issue: "LEGION-208", Look: 1, Verdict: "pass", Summary: "driven"}, engine, admissionStub{}); err != nil || result.Refusal != nil {
-		t.Fatalf("ApplyFact the check's pass = %+v, %v", result.Refusal, err)
+	assertOutboxCount(t, pool, "dispatch_status", 2)
+	// Both checks the two closes opened are reported before the linger ends: the tree's close waits
+	// for any member's open check (check_test.go).
+	for _, issue := range []string{"LEGION-208", "LEGION-209"} {
+		if result, err := intake.ApplyFact(ctx, pool, "api", "check:"+issue+":1:pass", intake.CheckReport{Issue: issue, Look: 1, Verdict: "pass", Summary: "driven"}, engine, admissionStub{}); err != nil || result.Refusal != nil {
+			t.Fatalf("ApplyFact %s's check pass = %+v, %v", issue, result.Refusal, err)
+		}
 	}
 	if _, err := intake.ApplyFact(ctx, pool, "timer", "linger-current", intake.LingerExpired{Issue: "LEGION-208", Generation: 7}, engine, admissionStub{}); err != nil {
 		t.Fatalf("ApplyFact current linger expiry: %v", err)
@@ -575,13 +589,9 @@ func TestTheMergeLingersOnceAndExpiryStopsTreeAndRemovesEveryWorkspace(t *testin
 		t.Fatalf("linger expiry stopped %v, want each tree claim once: %v", stopped, everyClaim)
 	}
 	assertOutboxCount(t, pool, "workspace_remove", 2)
-	// The root stayed done through its linger, so its expiry hands the child it left implementing
-	// to Legion, fenced on this linger (admit's finished-root tests follow the write to the child's
-	// own admission); the stale expiry hands nothing over.
 	var handedOver int
-	if err := pool.QueryRow(ctx, `select count(*) from outbox where kind = 'dispatch_status' and issue = 'LEGION-209' and payload->>'status' = 'todo'
-		and payload->>'observedStatus' = 'in_progress' and payload->>'handOver' = 'true' and payload->>'handOverTree' = 'LEGION-208' and payload->>'handOverLinger' = '7'`).Scan(&handedOver); err != nil || handedOver != 1 {
-		t.Fatalf("the child's hand-over writes = %d, %v; want one, fenced on LEGION-208's linger 7", handedOver, err)
+	if err := pool.QueryRow(ctx, `select count(*) from outbox where kind = 'dispatch_status' and payload->>'handOver' = 'true'`).Scan(&handedOver); err != nil || handedOver != 0 {
+		t.Fatalf("hand-over writes = %d, %v; want none: the close waited until no child was running", handedOver, err)
 	}
 	assertOutboxCount(t, pool, "dispatch_status", 2)
 	var other int

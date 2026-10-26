@@ -36,6 +36,10 @@ func TestGithubEnvelopeGoldens(t *testing.T) {
 		// A finished Actions job on the default branch, of a run with no pull request, on its run's
 		// job topic.
 		{name: "check-run-actions-job-without-pr", event: "check_run"},
+		// A completed run of a workflow on the default branch, of a run with no pull request (a real
+		// sjawhar/legion release.yaml push run on main), on its workflow's topic: the Legion daemon
+		// wakes a production check from it when the project names the workflow a deploy.
+		{name: "workflow-run-completed", event: "workflow_run"},
 	}
 
 	for _, fixture := range fixtures {

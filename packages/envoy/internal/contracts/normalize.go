@@ -242,6 +242,7 @@ func SlackEnvelope(input SlackEnvelopeInput) Envelope {
 	if channel == "" {
 		channel = "unknown"
 	}
+	text := slackDeliveredText(input.Body)
 	return Envelope{
 		EventID:        input.EventID,
 		Source:         "slack",
@@ -249,8 +250,8 @@ func SlackEnvelope(input SlackEnvelopeInput) Envelope {
 		Topic:          SlackSubject(team, channel, slackKind(input.Body)),
 		DedupeKey:      "slack." + stringValue(input.Body["event_id"]),
 		IssuedAt:       NowMillis(),
-		PayloadSummary: slackSummary(input.Body),
-		Payload:        slackPayload(input.Body),
+		PayloadSummary: slackSummary(input.Body, text),
+		Payload:        slackPayload(input.Body, text),
 		TraceID:        input.TraceID,
 	}
 }
@@ -949,17 +950,14 @@ func slackKind(body map[string]any) string {
 	return "message"
 }
 
-func slackSummary(body map[string]any) string {
+// slackSummary describes a message in one line, text being the words it delivers.
+func slackSummary(body map[string]any, text string) string {
 	event := mapValue(body["event"])
 	message := slackMessage(event)
 	subtype := stringValue(event["subtype"])
 	channel := slackEventString(event, message, "channel")
 	if channel == "" {
 		channel = "unknown"
-	}
-	text := ""
-	if subtype != "message_deleted" {
-		text = slackEventString(event, message, "text")
 	}
 
 	var summary string
@@ -1003,13 +1001,14 @@ func slackSummary(body map[string]any) string {
 	default:
 		summary = fmt.Sprintf("slack %s message in %s: %s", subtype, channel, first(text, 100))
 	}
-	if suffix := slackFilesSuffix(slackFiles(event, message)); suffix != "" {
+	if suffix := slackFilesSuffix(slackEventSlice(event, message, "files")); suffix != "" {
 		summary += suffix
 	}
 	return OneLineSummary(summary)
 }
 
-func slackPayload(body map[string]any) string {
+// slackPayload encodes a message's fields, text being the words it delivers.
+func slackPayload(body map[string]any, text string) string {
 	event := mapValue(body["event"])
 	message := slackMessage(event)
 	subtype := stringValue(event["subtype"])
@@ -1028,13 +1027,11 @@ func slackPayload(body map[string]any) string {
 	if subtype == "thread_broadcast" {
 		data["root_ts"] = nestedString(event, "root", "ts")
 	}
-	if subtype != "message_deleted" {
-		if text := slackEventString(event, message, "text"); text != "" {
-			capped, truncated := capBody(text)
-			data["text"] = capped
-			if truncated {
-				data["body_truncated"] = "true"
-			}
+	if text != "" {
+		capped, truncated := capBody(text)
+		data["text"] = capped
+		if truncated {
+			data["body_truncated"] = "true"
 		}
 	}
 	if subtype == "message_changed" {
@@ -1043,7 +1040,7 @@ func slackPayload(body map[string]any) string {
 	if subtype == "message_deleted" {
 		data["deleted_ts"] = stringValue(event["deleted_ts"])
 	}
-	files := slackFiles(event, message)
+	files := slackEventSlice(event, message, "files")
 	if len(files) > 0 {
 		data["file_count"] = strconv.Itoa(len(files))
 		var filePairs []string
@@ -1059,12 +1056,8 @@ func slackPayload(body map[string]any) string {
 		}
 		data["files"] = strings.Join(filePairs, ",")
 	}
-	if attachments := sliceValue(message["attachments"]); len(attachments) > 0 {
+	if attachments := slackEventSlice(event, message, "attachments"); len(attachments) > 0 {
 		data["attachment_count"] = strconv.Itoa(len(attachments))
-	} else if subtype == "message_changed" {
-		if attachments := sliceValue(event["attachments"]); len(attachments) > 0 {
-			data["attachment_count"] = strconv.Itoa(len(attachments))
-		}
 	}
 	return payloadJSON(data)
 }
@@ -1095,14 +1088,271 @@ func slackBotName(event map[string]any) string {
 	return stringValue(event["bot_id"])
 }
 
-func slackFiles(event, message map[string]any) []any {
-	if files := sliceValue(message["files"]); len(files) > 0 {
-		return files
+// slackEventSlice is the list a message carries under key, or, when the message carries none and
+// the event is an edit, the one the event carries beside the edited message.
+func slackEventSlice(event, message map[string]any, key string) []any {
+	if items := sliceValue(message[key]); len(items) > 0 {
+		return items
 	}
 	if stringValue(event["subtype"]) == "message_changed" {
-		return sliceValue(event["files"])
+		return sliceValue(event[key])
 	}
 	return nil
+}
+
+// slackDisplayFields are the field names an attachment or a block shows words under, ranked in
+// the order Slack renders them. alt_text is the string Slack renders in an image block's place,
+// and author_subname the one it renders beside author_name. The ninth, slackFallbackField, is not
+// ranked among them: it is read after everything else its object carries.
+var slackDisplayFields = []string{
+	"pretext", "author_name", "author_subname", "title", "text", "alt_text", "value", "footer",
+}
+
+// slackFallbackField is an attachment's fallback: the plain-text copy of the attachment that Slack
+// shows only where the attachment itself cannot be shown, so nobody who sees the attachment's own
+// fields and blocks render sees it. It is read last, once the object's whole subtree has been read,
+// and only when that subtree has not already yielded it, so it never stands ahead of the body it
+// copies and never says that body's words a second time.
+const slackFallbackField = "fallback"
+
+// slackOwnTextEntities resolves the three entities Slack escapes in a message's own text, in one
+// left-to-right pass, so that a rich_text segment's unescaped copy of those same words reads as
+// the copy it is.
+var slackOwnTextEntities = strings.NewReplacer("&amp;", "&", "&lt;", "<", "&gt;", ">")
+
+// slackDeliveredText is every word a Slack message delivers: its own text, then each display
+// string its blocks and its attachments carry that neither repeats the message's own words nor a
+// string the object showing it has already shown, a line apiece. Blocks come first because Slack
+// renders them as the message body and an attachment after it, so an attachment's fallback is
+// never read ahead of the body. An app posts its words there as often as in the message's own text,
+// and a deleted message delivers none. A rich_text block that only repeats the message's own
+// words is left unread: it is the Slack client's structured copy of them.
+func slackDeliveredText(body map[string]any) string {
+	event := mapValue(body["event"])
+	if stringValue(event["subtype"]) == "message_deleted" {
+		return ""
+	}
+	message := slackMessage(event)
+	own := slackEventString(event, message, "text")
+	var walk slackTextWalk
+	if strings.TrimSpace(own) != "" {
+		walk.own = slackOwnTextEntities.Replace(own)
+	}
+	walk.takeOwn(own)
+	walk.walk(slackEventSlice(event, message, "blocks"))
+	walk.walk(slackEventSlice(event, message, "attachments"))
+	return walk.text
+}
+
+// slackTextWalk collects the display strings of an attachment or block tree into one text.
+type slackTextWalk struct {
+	text string
+	// runes is the rune count of text, kept as it grows so no piece recounts the whole.
+	runes int
+	// ownWords is the message's own text and each of its non-blank lines, and it is the only
+	// thing a piece is compared against walk-wide: those words the message already says itself,
+	// so a block or an attachment saying them again, anywhere in the tree, says nothing new. No
+	// piece gathered from the tree joins them — two objects carrying the same string are two
+	// words a reader sees, and dropping the second loses one of them; what one object repeats
+	// under its own keys is slackWalkPieces's to drop. takeOwn builds the set, so a message
+	// with no text of its own allocates none.
+	ownWords map[string]struct{}
+	// own is the message's own text with Slack's entities resolved, kept only when that text
+	// holds a word at all. It is what the outermost rich_text object is measured against before
+	// the walk reads it, and it is read for nothing else: it never removes a piece already taken
+	// and never bears on a piece gathered elsewhere in the message.
+	own string
+}
+
+// full reports that the text has run past what an envelope carries. It bounds the work the walk
+// does and nothing else: where the delivered text is cut is capBody's decision.
+func (w *slackTextWalk) full() bool {
+	return w.runes > maxEnvelopeTextRunes
+}
+
+// take appends a display string, unless it holds no word or is exactly the message's own words or
+// one of their lines, which the message has delivered already.
+func (w *slackTextWalk) take(piece string) {
+	if w.full() || strings.TrimSpace(piece) == "" {
+		return
+	}
+	if _, own := w.ownWords[piece]; own {
+		return
+	}
+	if w.text == "" {
+		w.text = piece
+		w.runes = utf8.RuneCountInString(piece)
+	} else {
+		w.text += "\n" + piece
+		w.runes += 1 + utf8.RuneCountInString(piece)
+	}
+}
+
+// takeOwn delivers the message's own text as the one piece it is, and records it and each of its
+// lines in ownWords beside it. Slack tells app authors to put a message's plain-text copy in text
+// and its formatting in a rich_text block, which carries those same words a segment apiece, so a
+// block that adds one line to them delivers that line and not the rest a second time. These are
+// the only words compared across the whole walk, because they are the only ones the message is
+// known to have delivered before the tree is read at all.
+func (w *slackTextWalk) takeOwn(own string) {
+	w.take(own)
+	if strings.TrimSpace(own) == "" {
+		return
+	}
+	w.ownWords = map[string]struct{}{own: {}}
+	for _, line := range strings.Split(own, "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		w.ownWords[line] = struct{}{}
+	}
+}
+
+// walk delivers every display string an attachment or block tree carries, in the order
+// slackWalkPieces reads them, and stops once the text has run past what an envelope carries.
+func (w *slackTextWalk) walk(value any) {
+	if w.full() {
+		return
+	}
+	slackWalkPieces(value, w.own, func(piece string) bool {
+		w.take(piece)
+		return !w.full()
+	})
+}
+
+// slackWalkPieces yields to visit every display string value carries, in the one order the walk
+// reads them, and stops as soon as visit asks for no more; it reports whether to go on. An object
+// is read through the key order slackWalkKeys gives it, a string under a display name is a piece
+// and every other value is descended into, so that a block's nested text reaches visit in the
+// place the object shows it; an array is descended in index order. A string that holds no word is
+// never yielded.
+//
+// An object yields a given string once: an attachment whose title is also its text shows one word
+// under two of its own names, and that is one piece. The comparison reaches the object's own keys
+// and never its subtree — a nested text object, and each element of a fields array, is an object
+// of its own with a tally of its own — because a subtree-wide tally would drop a nested block's
+// word for matching a title above it, and nothing is compared across objects, so two attachments
+// reading "web-1 ok" and "web-2 ok" both deliver their ok. At most one string is yielded per ranked
+// display name, so the tally holds eight at the most and is scanned straight through.
+//
+// fallback is the one exception to both, and slackWalkFallback reads it: a string fallback that
+// holds a word is yielded after every other key of its object, and only when nothing anywhere in
+// that object's subtree yielded the same string, because it is the plain-text copy of exactly that
+// subtree. An attachment whose fallback repeats its title, or the text of its own section block,
+// delivers that line once. A fallback that is not a string is no piece, and is descended into in
+// the alphabetical tail like any other container.
+//
+// measure is the message's own text, with Slack's entities resolved, while a rich_text object is
+// still to be measured against it, and empty once one has been. rich_text is the only kind name
+// the walk recognises, and only to skip the whole object — yielding nothing, descending nothing —
+// when the object says nothing that text does not say already. The Slack client's structured copy
+// of a person's words satisfies that by construction, since it is built from those words; an app's
+// own rich text, which Slack tells app authors to post beside a short text field, does not, and so
+// is read like any other block. The question is asked once, for the outermost rich_text object: an
+// object that is read is read with measure cleared, so every rich_text nested inside it is read as
+// part of it, and a chain of them costs one pass and not one per level.
+func slackWalkPieces(value any, measure string, visit func(string) bool) bool {
+	switch node := value.(type) {
+	case map[string]any:
+		if measure != "" && stringValue(node["type"]) == "rich_text" {
+			if slackOwnWordsOnly(node, measure) {
+				return true
+			}
+			measure = ""
+		}
+		if fallback, isString := node[slackFallbackField].(string); isString && strings.TrimSpace(fallback) != "" {
+			return slackWalkFallback(node, fallback, measure, visit)
+		}
+		return slackWalkObject(node, measure, visit)
+	case []any:
+		for _, item := range node {
+			if !slackWalkPieces(item, measure, visit) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// slackWalkFallback reads an object that carries fallback, a string holding a word: every other key
+// of it first, through slackWalkObject, with visit wrapped to note whether the subtree yields
+// fallback, then fallback itself unless it did. Only such an object pays for the wrapper, so every
+// other object's pieces reach visit with no call in between.
+func slackWalkFallback(node map[string]any, fallback, measure string, visit func(string) bool) bool {
+	said := false
+	if !slackWalkObject(node, measure, func(piece string) bool {
+		said = said || piece == fallback
+		return visit(piece)
+	}) {
+		return false
+	}
+	return said || visit(fallback)
+}
+
+// slackWalkObject reads an object's keys in the order slackWalkKeys gives them, as slackWalkPieces
+// describes: a string under a display name is a piece unless the object has already yielded it
+// under another, and every other value is descended into.
+func slackWalkObject(node map[string]any, measure string, visit func(string) bool) bool {
+	var yielded []string
+	for _, key := range slackWalkKeys(node) {
+		text, isString := node[key].(string)
+		switch {
+		case !isString:
+			if !slackWalkPieces(node[key], measure, visit) {
+				return false
+			}
+		case strings.TrimSpace(text) == "" || slices.Contains(yielded, text):
+			// No word to read, or this object's own word under a second of its names.
+		default:
+			yielded = append(yielded, text)
+			if !visit(text) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// slackOwnWordsOnly reports that every display string anywhere in value is already held by own,
+// the message's own text with Slack's entities resolved. It reads value through slackWalkPieces,
+// as the walk itself does, so the strings it measures are the strings the walk would deliver, and
+// it stops at the first one own does not hold. It reads with no measurement left to make, so a
+// rich_text object nested in value is traversed here once and measured nowhere. It reads nothing
+// but value and own.
+func slackOwnWordsOnly(value any, own string) bool {
+	ownWords := true
+	slackWalkPieces(value, "", func(piece string) bool {
+		ownWords = strings.Contains(own, piece)
+		return ownWords
+	})
+	return ownWords
+}
+
+// slackWalkKeys is the order an object's keys are read in: the display names it carries, ranked as
+// slackDisplayFields ranks them, then its remaining keys alphabetically. A remaining key whose
+// value is a string is left out: a string under a name Slack does not display is not a word a
+// person reads, and a string is nothing to descend into, so such a key can contribute nothing. A
+// string fallback is left out with them, because slackWalkFallback reads it once the rest is read;
+// a fallback holding anything else is a remaining key like any other.
+func slackWalkKeys(node map[string]any) []string {
+	var keys []string
+	for _, field := range slackDisplayFields {
+		if _, has := node[field]; has {
+			keys = append(keys, field)
+		}
+	}
+	display := len(keys)
+	for key, item := range node {
+		if _, isString := item.(string); isString {
+			continue
+		}
+		if slices.Contains(slackDisplayFields, key) {
+			continue
+		}
+		keys = append(keys, key)
+	}
+	slices.Sort(keys[display:])
+	return keys
 }
 
 func slackFilesSuffix(files []any) string {

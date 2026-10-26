@@ -1980,6 +1980,7 @@ func TestV1RoutesAnswerAKeyNATSWouldRefuseWith4xx(t *testing.T) {
 		{"read a long session id's interests", http.MethodGet, "/v1/interests/" + long, "", http.StatusRequestEntityTooLarge},
 		{"remove a long session id's interests", http.MethodDelete, "/v1/interests/" + long, "", http.StatusRequestEntityTooLarge},
 		{"remove a long session id", http.MethodDelete, "/v1/sessions/" + long, "", http.StatusRequestEntityTooLarge},
+		{"read a long session id's entry", http.MethodGet, "/v1/registry/" + long, "", http.StatusRequestEntityTooLarge},
 		{"read a long role", http.MethodGet, "/v1/roles/" + long, "", http.StatusRequestEntityTooLarge},
 		{"claim a long role", http.MethodPost, "/v1/roles/set", `{"session_id":"ses_live","role":"` + longRole + `"}`, http.StatusRequestEntityTooLarge},
 		{"publish to a long role", http.MethodPost, "/v1/messages/publish", `{"topic":"notifications.role.` + longRole + `","message":"hi"}`, http.StatusRequestEntityTooLarge},
@@ -1988,6 +1989,7 @@ func TestV1RoutesAnswerAKeyNATSWouldRefuseWith4xx(t *testing.T) {
 		{"read the interests of a session id outside the key alphabet", http.MethodGet, "/v1/interests/ses:bad", "", http.StatusBadRequest},
 		{"remove the interests of a session id outside the key alphabet", http.MethodDelete, "/v1/interests/ses:bad", "", http.StatusBadRequest},
 		{"remove a session id outside the key alphabet", http.MethodDelete, "/v1/sessions/ses:bad", "", http.StatusBadRequest},
+		{"read the entry of a session id outside the key alphabet", http.MethodGet, "/v1/registry/ses:bad", "", http.StatusBadRequest},
 		{"read a role outside the key alphabet", http.MethodGet, "/v1/roles/bad:role", "", http.StatusBadRequest},
 		{"publish to a role outside the key alphabet", http.MethodPost, "/v1/messages/publish", `{"topic":"notifications.role.bad:role","message":"hi"}`, http.StatusBadRequest},
 	} {
@@ -2369,5 +2371,222 @@ func TestSubscribeHandlerStoresAndListsCapabilities(t *testing.T) {
 	}
 	if payload[1].SessionID != "ses_legacy" || len(payload[1].Capabilities) != 0 {
 		t.Fatalf("legacy session = %#v, want empty capabilities", payload[1])
+	}
+}
+
+// A session on a serving port is reached at the host its registration records, so a registration
+// whose host could move the delivery to another authority or path is refused before anything is
+// written: neither the session's interests nor its session entry appear. The same registration
+// without a host is accepted, as an older plugin's is, and a host on a registration with no port,
+// which nothing dials, is stored as it came.
+func TestAServingPortRegistrationWithAMalformedHostIsRefused(t *testing.T) {
+	registry, sessions := setupSessionsTest(t, nil, nil)
+	handler := subscribeHandler(&listenerDeps{registry: registry, sessions: sessions}, "test-machine", logging.New("test"))
+	subscribe := func(t *testing.T, body map[string]any) *httptest.ResponseRecorder {
+		t.Helper()
+		encoded, err := json.Marshal(body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/interests/subscribe", strings.NewReader(string(encoded))))
+		return recorder
+	}
+	for index, host := range []string{"example-host:80", "example-host/path", "user@example-host", "[::1]", "example host", "example-host?x", "example-host#x", "example%2fhost", "example-host\n"} {
+		t.Run(fmt.Sprintf("%q", host), func(t *testing.T) {
+			sessionID := fmt.Sprintf("ses_malformed_host_%d", index)
+			recorder := subscribe(t, map[string]any{"session_id": sessionID, "topics": []string{"notifications.team.example"}, "port": 4242, "host": host})
+			if recorder.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400; body = %s", recorder.Code, recorder.Body.String())
+			}
+			var answer apiError
+			if err := json.NewDecoder(recorder.Body).Decode(&answer); err != nil {
+				t.Fatalf("decode the refusal: %v", err)
+			}
+			if answer.Error != "host is not a host name or address" || !reflect.DeepEqual(answer.Expected, []string{"host"}) {
+				t.Fatalf("refusal = %+v, want error %q expecting [host]", answer, "host is not a host name or address")
+			}
+			if interest, err := registry.Get(sessionID); err == nil {
+				t.Fatalf("a refused registration wrote interests %+v", interest)
+			}
+			if entry, err := sessions.Get(sessionID); err == nil {
+				t.Fatalf("a refused registration wrote the session entry %+v", entry)
+			}
+		})
+	}
+
+	recorder := subscribe(t, map[string]any{"session_id": "ses_no_host", "topics": []string{"notifications.team.example"}, "port": 4242})
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("the registration without a host: status = %d, want 200; body = %s", recorder.Code, recorder.Body.String())
+	}
+	if _, err := sessions.Get("ses_no_host"); err != nil {
+		t.Fatalf("the registration without a host wrote no session entry: %v", err)
+	}
+	recorder = subscribe(t, map[string]any{"session_id": "ses_no_port", "topics": []string{}, "self_subscribed": true, "host": "example-host:80"})
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("the registration with no port: status = %d, want 200; body = %s", recorder.Code, recorder.Body.String())
+	}
+	if entry, err := sessions.Get("ses_no_port"); err != nil || entry.Host != "example-host:80" {
+		t.Fatalf("the registration with no port stored %+v, %v; want its host as it came", entry, err)
+	}
+}
+
+// sessionEntryRoute asks d's per-session route for sessionID, as a caller holding a session id and
+// about to address it does.
+func sessionEntryRoute(t *testing.T, d *listenerDeps, sessionID string) *httptest.ResponseRecorder {
+	t.Helper()
+	recorder := httptest.NewRecorder()
+	sessionEntryHandler(d).ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/v1/registry/"+sessionID, nil))
+	return recorder
+}
+
+// decodeSessionInfo reads the route's or the list's view of one session.
+func decodeSessionInfo(t *testing.T, recorder *httptest.ResponseRecorder) sessionInfo {
+	t.Helper()
+	var info sessionInfo
+	if err := json.NewDecoder(recorder.Body).Decode(&info); err != nil {
+		t.Fatalf("decode the session entry answer: %v", err)
+	}
+	return info
+}
+
+// A listener's session cache trails the session bucket, and refills from nothing after the bucket
+// is recreated. A session the bucket holds and the cache has not caught up with is live, so the
+// route reads the bucket itself and answers it: anything else tells a Dispatch mention, a broadcast
+// or an issue claim that a working session is gone.
+func TestSessionEntryRouteAnswersASessionTheCacheHasNotRefilled(t *testing.T) {
+	claimant, observer := trailingListeners(t)
+	entry := session.SessionEntry{
+		Port:           4242,
+		MachineID:      "test-machine",
+		Host:           "worker-7",
+		Dir:            "/test/ses_unseen",
+		Title:          "a session this cache has not seen",
+		Capabilities:   []string{"aside", "btw"},
+		SelfSubscribed: true,
+	}
+	if err := claimant.sessions.Put("ses_unseen", entry); err != nil {
+		t.Fatalf("register ses_unseen: %v", err)
+	}
+	if _, err := observer.sessions.Get("ses_unseen"); err == nil {
+		t.Fatal("the observer's cache already holds ses_unseen, so its read-through is not under test")
+	}
+
+	answer := sessionEntryRoute(t, observer, "ses_unseen")
+	if answer.Code != http.StatusOK {
+		t.Fatalf("GET /v1/registry/ses_unseen on a listener whose cache has not refilled: status %d %s, want 200",
+			answer.Code, answer.Body.String())
+	}
+	got := decodeSessionInfo(t, answer)
+	if got.SessionID != "ses_unseen" || got.Title != entry.Title || got.Host != entry.Host ||
+		strings.Join(got.Capabilities, ",") != "aside,btw" {
+		t.Fatalf("answer = %#v, want the registered session's id, title, host and capabilities", got)
+	}
+}
+
+// Only the session bucket's word that it holds no record for an id is "no live session", and that
+// text is the contract: Dispatch classifies a delivery failure on the "no live session " prefix
+// (internal/dispatch/api/comment_delivery.go). A session that is registered answers itself.
+func TestSessionEntryRouteAnswers404OnlyForAGoneRecord(t *testing.T) {
+	registry, sessions := setupSessionsTest(t, nil, map[string]int{"ses_live": 4242})
+	state := &listenerDeps{registry: registry, sessions: sessions}
+
+	gone := sessionEntryRoute(t, state, "ses_gone")
+	if gone.Code != http.StatusNotFound {
+		t.Fatalf("GET /v1/registry/ses_gone for a session that never registered: status %d %s, want 404",
+			gone.Code, gone.Body.String())
+	}
+	const want = `{"error":"no live session ses_gone"}`
+	if body := strings.TrimSpace(gone.Body.String()); body != want {
+		t.Fatalf("body = %s, want exactly %s, which Dispatch classifies a delivery failure on", body, want)
+	}
+
+	if live := sessionEntryRoute(t, state, "ses_live"); live.Code != http.StatusOK {
+		t.Fatalf("GET /v1/registry/ses_live for a registered session: status %d %s, want 200",
+			live.Code, live.Body.String())
+	}
+}
+
+// A session bucket read that does not answer is the listener's failure, not a gone session: the
+// route answers 503 with a reason and Retry-After, inside its bound (roleHolderReadTimeout, well
+// under the listener's 10 s HTTP write timeout), and never in the words a caller takes for a
+// session that has ended.
+func TestSessionEntryRouteAnswersServiceUnavailableWhenTheStoreReadDoesNotAnswer(t *testing.T) {
+	const bound = 5 * time.Second
+	claimant, observer := trailingListeners(t)
+	if err := claimant.sessions.Put("ses_unread", session.SessionEntry{MachineID: "test-machine", SelfSubscribed: true}); err != nil {
+		t.Fatalf("register ses_unread: %v", err)
+	}
+	stallSessionReads(t, observer.sessions)
+
+	started := time.Now()
+	answer := sessionEntryRoute(t, observer, "ses_unread")
+	elapsed := time.Since(started)
+	if answer.Code != http.StatusServiceUnavailable || elapsed > bound {
+		t.Fatalf("GET /v1/registry/ses_unread while the session bucket cannot be read: status %d %s after %s, want 503 within %s",
+			answer.Code, answer.Body.String(), elapsed, bound)
+	}
+	if retryAfter := answer.Header().Get("Retry-After"); retryAfter != "1" {
+		t.Fatalf("Retry-After = %q, want \"1\"", retryAfter)
+	}
+	var body apiError
+	if err := json.NewDecoder(answer.Body).Decode(&body); err != nil {
+		t.Fatalf("decode the unavailable answer: %v", err)
+	}
+	if !strings.HasPrefix(body.Error, "envoy: the message bus did not answer") {
+		t.Fatalf("error = %q, want it to begin with the bus's own unavailable wording", body.Error)
+	}
+	if strings.HasPrefix(body.Error, "no live session ") {
+		t.Fatalf("error = %q, which Dispatch classifies as a gone session; a read that did not answer is not one", body.Error)
+	}
+}
+
+// The route and GET /v1/sessions answer one shape built one way, so a caller that reads one session
+// sees exactly the row the list would have given it, joined interests and all.
+func TestSessionEntryRouteAnswersTheSameBodyAsTheSessionsRow(t *testing.T) {
+	registry, sessions := setupSessionsTest(t,
+		map[string][]string{"ses_listed": {"notifications.role.reviewer"}},
+		map[string]int{"ses_listed": 4242})
+	state := &listenerDeps{registry: registry, sessions: sessions}
+
+	list := httptest.NewRecorder()
+	sessionsHandler(registry, sessions).ServeHTTP(list, httptest.NewRequest(http.MethodGet, "/v1/sessions", nil))
+	if list.Code != http.StatusOK {
+		t.Fatalf("GET /v1/sessions: status %d %s, want 200", list.Code, list.Body.String())
+	}
+	var rows []sessionInfo
+	if err := json.NewDecoder(list.Body).Decode(&rows); err != nil {
+		t.Fatalf("decode the session list: %v", err)
+	}
+	var row sessionInfo
+	for _, candidate := range rows {
+		if candidate.SessionID == "ses_listed" {
+			row = candidate
+		}
+	}
+	if row.SessionID == "" || len(row.Roles) == 0 {
+		t.Fatalf("rows = %#v, want ses_listed's row carrying its joined roles", rows)
+	}
+
+	answer := sessionEntryRoute(t, state, "ses_listed")
+	if answer.Code != http.StatusOK {
+		t.Fatalf("GET /v1/registry/ses_listed: status %d %s, want 200", answer.Code, answer.Body.String())
+	}
+	if got := decodeSessionInfo(t, answer); !reflect.DeepEqual(got, row) {
+		t.Fatalf("the route answered %#v, want the list's row %#v", got, row)
+	}
+}
+
+// The route reads; every other method on it is the caller's mistake, answered as every other /v1
+// handler answers one.
+func TestSessionEntryRouteRefusesANonGETMethod(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	sessionEntryHandler(&listenerDeps{}).ServeHTTP(recorder,
+		httptest.NewRequest(http.MethodDelete, "/v1/registry/ses_live", nil))
+	if recorder.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("DELETE /v1/registry/ses_live: status %d %s, want 405", recorder.Code, recorder.Body.String())
+	}
+	if body := strings.TrimSpace(recorder.Body.String()); body != `{"error":"method not allowed"}` {
+		t.Fatalf("body = %s, want the file's own method refusal", body)
 	}
 }

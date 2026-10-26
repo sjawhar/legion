@@ -1,16 +1,11 @@
 package bus_test
 
 import (
-	"context"
 	"encoding/json"
-	"net"
 	"net/http"
 	"slices"
 	"testing"
 	"time"
-
-	"github.com/testcontainers/testcontainers-go"
-	tcnats "github.com/testcontainers/testcontainers-go/modules/nats"
 
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/testnats"
@@ -24,17 +19,8 @@ import (
 // closed` says which of a process's clients it came from.
 func TestWithNameNamesEveryConnectionTheClientDials(t *testing.T) {
 	logs := captureBusLogs(t)
-	ctx := context.Background()
-	container, err := tcnats.Run(ctx, testnats.Image, testcontainers.WithCmd("-js", "-m", "8222"))
-	testcontainers.CleanupContainer(t, container)
-	if err != nil {
-		t.Fatalf("start NATS: %v", err)
-	}
-	uri, err := container.ConnectionString(ctx)
-	if err != nil {
-		t.Fatalf("NATS connection string: %v", err)
-	}
-	connections := serverConnections(t, ctx, container)
+	srv, uri := testnats.Start(t)
+	connections := serverConnections(t, srv)
 
 	named, err := bus.Connect([]string{uri}, bus.WithName("dispatch-intake"))
 	if err != nil {
@@ -89,26 +75,14 @@ func loggedWithName(logs *busLogs, msg, name string) bool {
 	return false
 }
 
-// serverConnections reads the open connections of the server container runs from its monitoring
-// endpoint, which it serves on 8222 when started with -m 8222, as each name's connection ids.
-func serverConnections(t *testing.T, ctx context.Context, container *tcnats.NATSContainer) func() map[string][]uint64 {
+// serverConnections reads the open connections of the server srv runs from its monitoring
+// endpoint, as each name's connection ids.
+func serverConnections(t *testing.T, srv *testnats.Server) func() map[string][]uint64 {
 	t.Helper()
-	host, err := container.Host(ctx)
-	if err != nil {
-		t.Fatalf("NATS host: %v", err)
-	}
-	port, err := container.MappedPort(ctx, "8222/tcp")
-	if err != nil {
-		t.Fatalf("NATS monitoring port: %v", err)
-	}
-	endpoint := "http://" + net.JoinHostPort(host, port.Port()) + "/connz"
 	return func() map[string][]uint64 {
 		t.Helper()
-		request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
-		if err != nil {
-			t.Fatalf("build the connections request: %v", err)
-		}
-		response, err := http.DefaultClient.Do(request)
+		endpoint := srv.MonitorURL() + "/connz"
+		response, err := http.Get(endpoint)
 		if err != nil {
 			t.Fatalf("read %s: %v", endpoint, err)
 		}
@@ -120,7 +94,7 @@ func serverConnections(t *testing.T, ctx context.Context, container *tcnats.NATS
 			} `json:"connections"`
 		}
 		if err := json.NewDecoder(response.Body).Decode(&connz); err != nil {
-			t.Fatalf("decode %s: %v", endpoint, err)
+			t.Fatalf("decode the connections: %v", err)
 		}
 		byName := map[string][]uint64{}
 		for _, connection := range connz.Connections {
