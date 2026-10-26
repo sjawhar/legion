@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -541,12 +542,19 @@ func TestAFailedRoomsUpdatesEndOrMoveWithTheRecordThatReplacesIt(t *testing.T) {
 	state := service.room(artifactID)
 
 	// The update the failure drops, handed on while the room is failed, and the one the room's
-	// persistence never took, which ygo hands on after the eviction clears that failure. The
-	// second is a browser's own update, since the adapter appends it for real.
+	// persistence never took, which ygo hands on after the eviction clears that failure. Each
+	// carries a browser's credit, as the room's update observer gives it, and the second is a
+	// browser's own update, since the adapter appends it for real.
+	bob := model.Actor{Kind: "user", ID: "bob"}
+	service.addConnection(artifactID, 11, bob)
+	hold := &roomHold{}
 	dropped := []byte("the update the failure dropped")
-	service.recordUpdateClass(artifactID, dropped, documentUpdateClass{contentChanged: true, durable: true})
+	droppedCredit := service.creditContentChange(artifactID, nil, hold)
+	service.recordUpdateClass(artifactID, dropped,
+		documentUpdateClass{contentChanged: true, durable: true, credit: droppedCredit})
 	_, stranded := peerEdit(t, service.srv.GetDoc(artifactID), appendBlocks(t, "typed while the room was failing.\n"))
-	service.recordUpdateClass(artifactID, stranded, documentUpdateClass{contentChanged: true, durable: true})
+	service.recordUpdateClass(artifactID, stranded,
+		documentUpdateClass{contentChanged: true, durable: true, credit: service.creditContentChange(artifactID, nil, hold)})
 	state.mu.Lock()
 	state.failed = errors.New("the room failed on an append")
 	state.mu.Unlock()
@@ -555,12 +563,16 @@ func TestAFailedRoomsUpdatesEndOrMoveWithTheRecordThatReplacesIt(t *testing.T) {
 	}
 	state.mu.Lock()
 	pending, appends := state.pendingUpdates, state.durableAppends.Load()
+	inflight := len(state.inflight)
 	state.failed = nil
 	service.handOverFailedRoomLocked(artifactID, state)
 	state.mu.Unlock()
 	if pending != 1 || appends != 1 {
 		t.Fatalf("the failed room's record counts %d pending updates and %d appends after an update it dropped, want 1 and 1: the dropped update's own count must end with it",
 			pending, appends)
+	}
+	if inflight != 1 {
+		t.Fatalf("the failed room's record holds %d in-flight credits after an update it dropped, want 1: the dropped update's own credit must land with it", inflight)
 	}
 
 	// The update the room's persistence never took moves to the record registered in its place,
@@ -589,5 +601,8 @@ func TestAFailedRoomsUpdatesEndOrMoveWithTheRecordThatReplacesIt(t *testing.T) {
 	}
 	if stored := storedMarkdown(t, service.store, artifactID); !strings.Contains(stored, "typed while the room was failing.") {
 		t.Fatalf("the stored document after the stranded append = %q, want the paragraph it carried", stored)
+	}
+	if authors := pendingAuthorRows(t, service.store, artifactID); !slices.Contains(authors, bob) {
+		t.Fatalf("the document's pending authors after the stranded append = %v, want %v among them: that keystroke's author is credited to nobody otherwise", authors, bob)
 	}
 }
