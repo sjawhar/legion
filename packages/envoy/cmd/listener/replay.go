@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/nats-io/nats.go"
 	"github.com/sjawhar/envoy/internal/bus"
@@ -107,6 +108,11 @@ func writeReplayReadError(w http.ResponseWriter, err error) {
 // A subject that is neither the session's agent subject nor one of its registered interests is
 // refused not_followed; one no subject of the deployed stream's configuration contains is refused
 // not_retained. Either has no messages and next_after its after.
+//
+// The session_id must be one literal NATS subject token (replaySessionToken), else the request is
+// refused 400: it becomes the agent subject as it is and is matched against requested subjects by
+// equality, so a session_id of `>` or `*` would make a wildcard such as notifications.agent.> pass
+// as the caller's own agent subject and read every other session's inbox.
 func replayHandler(d *listenerDeps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -121,6 +127,11 @@ func replayHandler(d *listenerDeps) http.HandlerFunc {
 		body.SessionID = strings.TrimSpace(body.SessionID)
 		if body.SessionID == "" {
 			writeJSONError(w, http.StatusBadRequest, "session_id is required", "session_id")
+			return
+		}
+		if !replaySessionToken(body.SessionID) {
+			writeJSONError(w, http.StatusBadRequest,
+				"session_id must be one NATS subject token: no ., *, >, whitespace or control character", "session_id")
 			return
 		}
 		if len(body.Subjects) > replayMaxSubjects {
@@ -191,6 +202,15 @@ func replayHandler(d *listenerDeps) http.HandlerFunc {
 		}
 		writeJSON(w, http.StatusOK, response)
 	}
+}
+
+// replaySessionToken reports whether id is one literal NATS subject token, so that
+// contracts.AgentSubject(id) names that one session's agent subject and no other: it is not empty
+// and holds no `.`, `*`, `>`, whitespace or control character.
+func replaySessionToken(id string) bool {
+	return id != "" && !strings.ContainsFunc(id, func(r rune) bool {
+		return r == '.' || r == '*' || r == '>' || unicode.IsSpace(r) || unicode.IsControl(r)
+	})
 }
 
 // replayFollowed returns whether the session follows a subject: it is the session's agent subject

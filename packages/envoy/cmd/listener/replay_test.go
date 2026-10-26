@@ -328,6 +328,45 @@ func TestReplayRefusesAMalformedRequest(t *testing.T) {
 	}
 }
 
+// A session_id that is not one literal NATS token is refused 400 naming session_id, before anything
+// is read: as a wildcard it would pass notifications.agent.> as its own agent subject and read every
+// session's inbox. A plain session id is still answered.
+func TestReplayRefusesASessionIDThatIsNotOneNATSToken(t *testing.T) {
+	rig := newReplayRig(t)
+	rig.store(t, contracts.AgentSubject("ses_other"))
+	_, ownSeq := rig.store(t, contracts.AgentSubject(replaySession))
+
+	for _, sessionID := range []string{">", "*", "a.b", "a b", "a\tb", "a\u0001b", "ses_replay.>"} {
+		t.Run(sessionID, func(t *testing.T) {
+			body, err := json.Marshal(replayRequest{SessionID: sessionID, Subjects: []replaySubjectRequest{
+				{Subject: "notifications.agent.>", After: new(uint64(0))},
+				{Subject: contracts.AgentSubject(sessionID), After: new(uint64(0))},
+			}})
+			if err != nil {
+				t.Fatalf("marshal replay request: %v", err)
+			}
+			recorder := postReplay(t, rig.mux, string(body))
+			if recorder.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400; body = %s", recorder.Code, recorder.Body.String())
+			}
+			var refusal apiError
+			if err := json.Unmarshal(recorder.Body.Bytes(), &refusal); err != nil {
+				t.Fatalf("decode refusal %s: %v", recorder.Body.String(), err)
+			}
+			if !slices.Equal(refusal.Expected, []string{"session_id"}) {
+				t.Fatalf("refusal = %+v, want expected [session_id]", refusal)
+			}
+		})
+	}
+
+	response := replayOK(t, rig.mux, replayBody(t, []replaySubjectRequest{
+		{Subject: contracts.AgentSubject(replaySession), After: new(uint64(0))},
+	}, 0))
+	if own := response.Subjects[0]; own.Refused != "" || !equalSeqs(own.Messages, ownSeq) {
+		t.Fatalf("own agent subject = %+v, want seq %d", own, ownSeq)
+	}
+}
+
 // Only POST is served.
 func TestReplayAnswers405ForGet(t *testing.T) {
 	mux := replayMux(&listenerDeps{})
