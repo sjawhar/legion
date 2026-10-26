@@ -1,0 +1,79 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-448",
+  "completed": "2026-10-26T13:05:00Z",
+  "proof": [
+    {
+      "criterion": "C1: on a closed issue a person's and an agent's new comment and message post; a new ask and a document edit stay 409 ISSUE_CLOSED; reopening works",
+      "surface": "the real Dispatch server, Envoy listener and nats-server (go.mod pin) built at the head, on Postgres 17 with pgvector, driven with curl",
+      "command": "the steps in https://github.com/sjawhar/legion/pull/2234#issuecomment-6409933131 (start.sh and lib.sh under the tester's own scratch copy; ports 24222/24020/24777)",
+      "observed": "person comment, agent comment, person message, agent message 201; mention delivery attempt 1 sent; comment and message retries 201; agent replies 201; new ask, suggestion, document edit, upload, claim, comment resolve 409 ISSUE_CLOSED with the spec unchanged; reopen 200 then ask 201",
+      "headSha": "2ef0fb930e64401225e520e5881c09447ba42067",
+      "negativeControl": "Dispatch built at base 135d22e0f63b on the same steps: person and agent comment and message on the closed issue 409 ISSUE_CLOSED"
+    },
+    {
+      "criterion": "C1 (Go tests): the Dispatch server's Go tests for the closed-issue rule run on real Postgres with no skip",
+      "surface": "packages/envoy Go tests against Postgres 17 + pgvector",
+      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:55448/infra448_impl?sslmode=disable go test -count=1 -v ./internal/dispatch/api -run 'TestDoneIssue|TestClosedIssue|TestAskReply|TestTargetedMessage|TestACommentItsOwner|TestIssueCollaborators' and ./internal/dispatch/docs -run TestClosedIssue",
+      "observed": "every listed test PASS, 0 SKIP (TestClosedIssueTakesCommentsAndMessagesFromPeopleAndAgents, ...DeliversACommentMentionItsRetryAndTheAgentsReply, ...DeliversAMessageItsRetryAndTheAgentsReply, ...TakesAnAnchoredCommentAndItsThread, ...StillRefusesEveryOtherWriteUntilReopened, TestAskReplyOnClosedIssueIsPosted, TestDoneIssueRejectsEveryMutation, TestClosedIssueTakesOnlyCommentMarksUnderWithCommentMarks, the five TestIssueCollaborators); re-run after the merge of main",
+      "headSha": "dadb5f515a3eeafd4b4693c5dcde97fa19073c62",
+      "negativeControl": "on a closed issue a suggestion, a new ask, a document edit, an upload, a claim and a comment resolve still answer 409 ISSUE_CLOSED in TestClosedIssueStillRefusesEveryOtherWriteUntilReopened"
+    },
+    {
+      "criterion": "C2: on a closed issue, writing a comment and a message, Reply, Retry and a margin comment on its document are each proven by a browser test red at the main commit before the change and green at the head",
+      "surface": "Dispatch browser suite (packages/dispatch/e2e), projects chromium and iphone, real Dispatch server and web build with the fake Envoy listener",
+      "command": "cd packages/dispatch && bun run e2e -- --project=chromium --project=iphone e2e/closed-issue-posting.e2e.ts e2e/mention-composer.e2e.ts e2e/keyboard-agents-picker.e2e.ts e2e/phone-conversation.e2e.ts e2e/margin-composer-hold.e2e.ts (env: PLAYWRIGHT_BROWSERS_PATH, DATABASE_URL, the five port variables); red: the same spec from a tree exported at 135d22e0 with the head's e2e/ copied in",
+      "observed": "133 passed, 5 skipped (the specs' own iPhone-only skips); the five closed-issue-posting tests read back the comment (listComments), the message to the agent (listIssueMessages, target session:<planner>, received by the fake listener), the thread reply, the retry (deliveries [[1,failed],[2,sent]]) and the margin comment's anchor quote with the server's mark; red/green quoted at https://github.com/sjawhar/legion/pull/2234#issuecomment-6415148941",
+      "headSha": "dadb5f515a3eeafd4b4693c5dcde97fa19073c62",
+      "negativeControl": "at main 135d22e0f63b all 10 fail on behaviour assertions: Comment composer not found (:116), message Reply not found (:147), thread Reply not found (:183), Retry not found (:211), selection bar not Comment-only (:248)"
+    },
+    {
+      "criterion": "Legion agent registry in the listener (read and write routes) and the collaborators route",
+      "surface": "the real envoy-listener binary on nats-server, and the real Dispatch server reading it",
+      "command": "curl PUT /v1/legion/agents (5 entries), GET /v1/legion/agents?issue=PRF-1, /v1/legion/agents/roles/<token>, /v1/legion/agents/sessions/<id>; kill and restart the listener; GET /api/v1/issues/PRF-1/collaborators with the listener up and stopped (same comment as C1)",
+      "observed": "200 with the older reviewer replaced_by the newer and the live tester live:true; entries unchanged after the listener restart; collaborators lists people, posting agents and registry entries with legion_registry ok, and with the listener stopped 200 with legion_registry unavailable",
+      "headSha": "2ef0fb930e64401225e520e5881c09447ba42067",
+      "negativeControl": "unknown session 404; batch with a malformed member 400 naming entries[1] with nothing written; role token built from the Dispatch project 400; a re-put changing a session's role 409; Dispatch at base answers the collaborators route 404"
+    },
+    {
+      "criterion": "C3: no remaining statement that a closed issue refuses comments or messages",
+      "surface": "the repository at the head",
+      "command": "bash c3.sh (the plan's Part 5 script: joins each file's lines, searches skills/, docs/ minus plans, solutions and superpowers, daemon prompts, packages/claude-envoy/legion, packages/contracts/src, the envoy-client and scripts/e2e READMEs, every AGENTS.md)",
+      "observed": "five kept lines: four about an issue's repo field and a document rebuild (packages/contracts/AGENTS.md, packages/envoy/AGENTS.md, packages/envoy/cmd/dispatch/AGENTS.md x2) and one about a closed document room, not an issue (packages/envoy/AGENTS.md)",
+      "headSha": "dadb5f515a3eeafd4b4693c5dcde97fa19073c62",
+      "negativeControl": "the same script at base 135d22e0 printed 30 hits, the corrected statements among them"
+    }
+  ],
+  "filesChanged": [
+    "packages/envoy/internal/legionagents/ (new: registry store, entry validation, tests)",
+    "packages/envoy/cmd/listener/{main.go,api.go,api_test.go,legion_agents_test.go,legion_agents_client_test.go}",
+    "packages/envoy/internal/bus/{stream.go,listener_names_test.go}",
+    "packages/envoy/infra/core/permissions{,_test}.go, packages/envoy/infra/gcp/testdata/*.golden, packages/envoy/infra/README.md",
+    "packages/envoy/internal/dispatch/envoy/client{,_test}.go (Agent, RoleAgents, IssueAgents)",
+    "packages/envoy/internal/dispatch/api/{server.go,owner.go,comment_create.go,comment_actions.go,comment_delivery.go,messages.go,message_delivery.go,issue_collaborators.go,routes_table.go} and tests",
+    "packages/envoy/internal/dispatch/docs/{websocket.go,marks.go,mutation.go,mutation_test.go}",
+    "packages/envoy-client/src/dispatch-execute.ts and tests; packages/contracts/src/{dispatch-tools.ts,dispatch-api.ts}",
+    "packages/dispatch/web/src/features/{conversation,margin,doc,agents}/..., packages/dispatch/web/src/styles.css, packages/dispatch/web/src/api/{client,types}.ts",
+    "packages/proof-editor/src/{dispatch-action-bar.ts,dispatch-marks.ts,lib.ts} and tests",
+    "packages/dispatch/e2e/{closed-issue-posting.e2e.ts (new),editor.ts,mention-composer,keyboard-agents-picker,phone-conversation,margin-composer-hold}.e2e.ts",
+    "docs and skills: AGENTS.md, skills/legion-*, packages/daemon/internal/prompts, docs/site, scripts/e2e, packages/*/AGENTS.md, CHANGELOGs, packages/claude-envoy regenerated"
+  ],
+  "trickyParts": [
+    "Anchored comments on a closed issue: the document service refuses every injection on a closed issue (allowInject); docs.WithCommentMarks marks the comment's own mark, snapshot, projection and thread-root read as owner-verified, and a suggestion's mark and every content edit stay refused.",
+    "A closed issue's document socket is admitted read-only, so the browser cannot write a comment mark there: the selection bar offers Comment only and the web sends {artifact, quote, occurrence}; quote-anchor.ts counts occurrences as pmdoc FindQuote does (cross-checked against the Go function).",
+    "Message delivery keeps its issue-row lock first (lockIssue, same `for no key update`), so the lock order its comments state still holds.",
+    "Registry reads are filtered key watches ended at the initial-values marker, never a cache, so an absence is the bucket's."
+  ],
+  "deviations": [
+    "Spec version 4 (INFRA-204 architect, 2026-10-26 10:34Z): the Collaborators tab and the mention picker's stopped agents moved to dispatch://INFRA-470; their code is attached there as dispatch://INFRA-470/artifact/collaborators-web-patch; C2 is now the closed-issue posting browser test.",
+    "The plan's write routes and Agent/RoleAgents client methods are built here (planned spec departure).",
+    "main merged forward once because GitHub reported the pull request CONFLICTING (fingerprint comment https://github.com/sjawhar/legion/pull/2234#issuecomment-6415546614); main's rewrite of the retro skill dropped the paragraph this branch had corrected, and main's moved architect and controller text in references/ was corrected instead.",
+    "Margin comments on a closed issue's document needed a packages/proof-editor change (a comment-only selection action in read-only mode); a read-only view on an open issue (schema mismatch) still offers nothing.",
+    "Postgres-backed packages that cannot pass in this pod for environment reasons: internal/dispatch/files (needs Docker), the rank collation test (database initialised with C collation), pmdoc linearity timing; CI runs them."
+  ],
+  "openQuestions": [],
+  "discoveredComplexity": [
+    "On a closed issue a browser holding a stale document schema after a deploy cannot be told from a plain close (the server admits both read-only), so its quote occurrence could anchor elsewhere or be refused."
+  ]
+}
