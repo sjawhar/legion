@@ -1,5 +1,5 @@
 import { actorLabel, actorName, sessionLabel } from "@legion/contracts";
-import { type ReactNode, useMemo } from "react";
+import { Fragment, type ReactNode, useMemo } from "react";
 import { generatePath, Link } from "react-router-dom";
 
 import type { Actor, AskResolution } from "../../api/types";
@@ -238,8 +238,50 @@ export function AskResolutionLine({ resolution }: { resolution: AskResolution })
   );
 }
 
-/** `Resolved by <label> - <reason>` as one plain string, for the description builders that
- *  still return text (the activity and event descriptions). Names by the stamped title. */
-export function describeAskResolution(resolution: AskResolution): string {
-  return `${RESOLUTION_VERB[resolution.kind]} by ${actorLabel(resolution.actor)} - ${resolution.reason}`;
+/**
+ * A sentence that names agents, kept as parts until it is rendered: text, or an agent that
+ * `AgentParts` draws through `AgentName`. A builder that describes an event returns these, so
+ * the agent keeps its identity (its current name, state and live link) instead of being
+ * flattened into a label. A role address is text; only a recorded session is an agent part.
+ */
+export type AgentPart =
+  | string
+  | { actor: Actor }
+  | { sessionId: string; storedTitle: string | undefined };
+
+/** Draws `AgentPart`s in a line of text: each text part as is (or through `text`, which the
+ *  host uses to mark up its own text), each agent part as an inline `AgentName`. */
+export function AgentParts({
+  parts,
+  text,
+}: {
+  parts: readonly AgentPart[];
+  text?: (part: string, index: number) => ReactNode;
+}): ReactNode {
+  return parts.map((part, index) => (
+    // biome-ignore lint/suspicious/noArrayIndexKey: the parts are one fixed sentence, in order.
+    <Fragment key={index}>
+      {typeof part === "string" ? (
+        text === undefined ? (
+          part
+        ) : (
+          text(part, index)
+        )
+      ) : "actor" in part ? (
+        <AgentName actor={part.actor} inline />
+      ) : (
+        <AgentName inline sessionId={part.sessionId} storedTitle={part.storedTitle} />
+      )}
+    </Fragment>
+  ));
+}
+
+/** `Resolved by <agent> - <reason>` / `Retracted by <agent> - <reason>` as `AgentPart`s, for
+ *  the description builders (the activity and event descriptions). */
+export function askResolutionParts(resolution: AskResolution): AgentPart[] {
+  return [
+    `${RESOLUTION_VERB[resolution.kind]} by `,
+    { actor: resolution.actor },
+    ` - ${resolution.reason}`,
+  ];
 }

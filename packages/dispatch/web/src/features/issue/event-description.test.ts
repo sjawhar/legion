@@ -62,15 +62,15 @@ function editedAskEvent(): Extract<Event, { type: "ask.edited" }> {
 }
 
 test("eventDescription labels a reopened comment", () => {
-  expect(eventDescription(commentEvent("comment.reopened"))).toBe("Comment reopened");
+  expect(eventDescription(commentEvent("comment.reopened"))).toEqual(["Comment reopened"]);
 });
 
 test("eventDescription labels an edited comment", () => {
-  expect(eventDescription(commentEvent("comment.edited"))).toBe("Comment edited");
+  expect(eventDescription(commentEvent("comment.edited"))).toEqual(["Comment edited"]);
 });
 
 test("eventDescription labels an edited ask with its new question", () => {
-  expect(eventDescription(editedAskEvent())).toBe("Ask edited: Publish?");
+  expect(eventDescription(editedAskEvent())).toEqual(["Ask edited: Publish?"]);
 });
 
 function answeredAskEvent(
@@ -105,7 +105,7 @@ function answeredAskEvent(
 }
 
 test("eventDescription says an answer changed when it replaced an earlier one", () => {
-  expect(eventDescription(answeredAskEvent())).toBe("Ask answered: Publish?");
+  expect(eventDescription(answeredAskEvent())).toEqual(["Ask answered: Publish?"]);
   expect(
     eventDescription(
       answeredAskEvent({
@@ -115,7 +115,7 @@ test("eventDescription says an answer changed when it replaced an earlier one", 
         user: "alice",
       })
     )
-  ).toBe("Answer changed: Publish?");
+  ).toEqual(["Answer changed: Publish?"]);
 });
 
 test("eventDescription labels a malformed decision", () => {
@@ -135,9 +135,9 @@ test("eventDescription labels a malformed decision", () => {
     type: "block.invalid",
   };
 
-  expect(eventDescription(event)).toBe(
-    'marked decision ask-block malformed: ask block "ask-block" has an option without a label'
-  );
+  expect(eventDescription(event)).toEqual([
+    'marked decision ask-block malformed: ask block "ask-block" has an option without a label',
+  ]);
 });
 
 test("eventDescription names an added artifact", () => {
@@ -165,7 +165,7 @@ test("eventDescription names an added artifact", () => {
     type: "artifact.created",
   };
 
-  expect(eventDescription(event)).toBe("Added cu-update-2026-09-15.md");
+  expect(eventDescription(event)).toEqual(["Added cu-update-2026-09-15.md"]);
 });
 
 test("eventDescription names a saved artifact version", () => {
@@ -190,7 +190,7 @@ test("eventDescription names a saved artifact version", () => {
     type: "artifact.version",
   };
 
-  expect(eventDescription(event)).toBe("Saved cu-update-2026-09-15.md v2");
+  expect(eventDescription(event)).toEqual(["Saved cu-update-2026-09-15.md v2"]);
 });
 
 test("eventDescription names the child a reparent adds or removes", () => {
@@ -203,10 +203,12 @@ test("eventDescription names the child a reparent adds or removes", () => {
     payload: { child_key: "CORE-12" },
     seq: 2,
   };
-  expect(eventDescription({ ...base, type: "child.added" } as Event)).toBe("Added child CORE-12");
-  expect(eventDescription({ ...base, type: "child.removed" } as Event)).toBe(
-    "Removed child CORE-12"
-  );
+  expect(eventDescription({ ...base, type: "child.added" } as Event)).toEqual([
+    "Added child CORE-12",
+  ]);
+  expect(eventDescription({ ...base, type: "child.removed" } as Event)).toEqual([
+    "Removed child CORE-12",
+  ]);
 });
 
 // The issue log names the same five movements, in its own voice: it has no actor column beside
@@ -238,23 +240,43 @@ test.each([
   [
     "a first claim",
     claimLogEvent("issue.claimed", { claim: held, reason: "claimed" }),
-    "Issue claimed",
+    ["Issue claimed"],
   ],
   [
     "a takeover",
     claimLogEvent("issue.claimed", { claim: held, previous_claim: held, reason: "takeover" }),
-    "Claim taken from Implementer",
+    ["Claim taken from ", { actor: held.actor }],
   ],
   [
     "a release",
     claimLogEvent("issue.released", { previous_claim: held, reason: "released" }),
-    "Claim released",
+    ["Claim released"],
   ],
   [
     "a close",
     claimLogEvent("issue.released", { previous_claim: held, reason: "closed" }),
-    "Claim released on close",
+    ["Claim released on close"],
   ],
 ])("the issue log line for %s", (_name, event, expected) => {
-  expect(eventDescription(event)).toBe(expected);
+  expect(eventDescription(event)).toEqual(expected);
+});
+
+// A session the log names by id (an unsubscribe, a follower) stays that session, for `AgentName`
+// to name by its current title and link, rather than the raw id it printed before.
+test("the issue log keeps the session an unsubscribe or a follower names", () => {
+  const sessionEvent = (type: string) =>
+    ({
+      actor: { id: "alice", kind: "user" },
+      created_at: "2026-09-24T07:00:00Z",
+      id: 10,
+      issue_key: "CORE-1",
+      notify: false,
+      payload: { ask_id: "ask-1", by: { id: "alice", kind: "user" }, session_id: "session-two" },
+      seq: 10,
+      type,
+    }) as Event;
+  const agent = { sessionId: "session-two", storedTitle: undefined };
+
+  expect(eventDescription(sessionEvent("subscription.removed"))).toEqual(["Unsubscribed ", agent]);
+  expect(eventDescription(sessionEvent("ask.follower_added"))).toEqual([agent, " follows an ask"]);
 });

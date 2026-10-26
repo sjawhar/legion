@@ -200,6 +200,47 @@ test("a resolved comment thread names its resolver and exposes Reopen", () => {
   }
 });
 
+// An agent's comment and an agent's resolution name it through `AgentName`: a link to its live
+// conversation, with the service attribution as text after it. Following that link is not a
+// click on the card, so it does not select the thread.
+test("an agent author and resolver link to their live conversations", () => {
+  const listAgents = spyOn(api, "listAgents").mockResolvedValue([]);
+  const onSelect = jest.fn();
+  const agent = {
+    id: "legion-worker-session",
+    kind: "session" as const,
+    origin: { session_title: "Implementer" },
+    service: "system:serviceaccount:legion:legion-worker",
+  };
+  const agentRoot = comment("root-1", "Root comment", "2026-09-10T00:00:00Z", {
+    author: agent,
+    resolved: true,
+    resolved_at: "2026-09-10T00:02:00Z",
+    resolved_by: agent,
+  });
+  const view = renderCard(
+    thread({ replies: [], resolved: true, root: { comment: agentRoot, kind: "comment" } }),
+    { onSelect }
+  );
+  try {
+    const card = screen.getByTestId(`margin-comment-${root.id}`);
+    expect(card.textContent).toContain("Implementer (as legion/legion-worker) ·");
+    expect(card.textContent).toContain("Resolved by Implementer (as legion/legion-worker) ·");
+    const names = within(card).getAllByRole("link", {
+      name: "Implementer (as legion/legion-worker)",
+    });
+    expect(names.map((name) => name.getAttribute("href"))).toEqual([
+      "/agents/legion-worker-session/live",
+      "/agents/legion-worker-session/live",
+    ]);
+    fireEvent.click(names[0] as HTMLElement);
+    expect(onSelect).not.toHaveBeenCalled();
+  } finally {
+    view.unmount();
+    listAgents.mockRestore();
+  }
+});
+
 test("the author can edit a comment and an edited comment carries its marker", async () => {
   const onEdit = spyOn({ call: async () => undefined }, "call");
   const view = renderCard(undefined, { onEdit: onEdit });
