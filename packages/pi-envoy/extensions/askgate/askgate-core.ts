@@ -2605,24 +2605,24 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
     };
     /**
      * The session changed, so nothing of the one before it stands: its halt, its count, its
-     * revise reasons, its unspent rebuttals, the notes its calls are owed, and the snapshots of
-     * its calls, which only a result carrying one of those call ids would have released. Nothing
-     * in the new session names them, so they would live until shutdown or the day-old sweep.
+     * revise reasons, its unspent rebuttals and the notes its calls are owed. Its snapshots stay:
+     * a call whose own result has not come, or a job still in the background, may not have read
+     * its snapshot yet, and a write whose snapshot is gone fails without posting. Each goes on its
+     * own call's end event below, or at shutdown.
      */
     const reset = () => {
       rebuttals.clear();
       breaker.clear();
       notices.clear();
-      for (const toolCallId of [...snapshots.keys()]) releaseSnapshots(toolCallId);
       failures = 0;
       halted = false;
     };
     pi.on("session_switch", reset);
     pi.on("session_branch", reset);
-    // A snapshot goes only once the command that reads it has run. A result that reports a
-    // backgrounded job's start comes before the shell runs it (`startedInBackground`), and nothing
-    // later names that call's id, so its snapshot is kept until `session_shutdown`; a new gated
-    // call sweeps whatever is older than SNAPSHOT_MAX_AGE_MS.
+    // A snapshot goes only once the command that reads it has run, whichever session is current
+    // then. A result that reports a backgrounded job's start comes before the shell runs it
+    // (`startedInBackground`), and nothing later names that call's id, so its snapshot is kept
+    // until `session_shutdown`; a new gated call sweeps whatever is older than SNAPSHOT_MAX_AGE_MS.
     pi.on("tool_execution_end", (event: { toolCallId: string; result?: unknown }) => {
       inflight.get(event.toolCallId)?.("abandoned");
       if (isRecord(event.result) && startedInBackground(event.result.details)) return;

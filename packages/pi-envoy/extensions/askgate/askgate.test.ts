@@ -3493,21 +3493,27 @@ describe("sessions", () => {
     expect(g.entries.map((e) => e.outcome)).toEqual(["verdict", "verdict", "verdict", "verdict"]);
     expect(g.calls[2].user).not.toContain("You answered revise");
   });
-  // The second re-gate of #2159, non-blocking: a backgrounded call's snapshot was released only
-  // by a result naming that call, which the next session never emits, so it lived until the
-  // session shut down or the day-old sweep.
-  test("a session switch removes the snapshots of the session before it", async () => {
+  // The second final review of #2159, N5: a switch released every snapshot, also the snapshot of
+  // a call whose shell had not read it yet, so that write failed. A snapshot now goes only on its
+  // own call's end event, or at shutdown.
+  test("N5: a session switch keeps each snapshot until its own call's end event, or until shutdown", async () => {
     const work = fs.mkdtempSync(path.join(tmpdir(), "askgate-switch-"));
     fs.writeFileSync(path.join(work, "note.txt"), "Body from the session before.\n");
     const g = bind({ env: { PATH: "/usr/bin:/bin" }, cwd: work });
     const before = snapshotDirs().length;
+    await g.bash("waiting", "dispatch comment --issue X-1 --body-file note.txt");
     await g.bash("bg", "dispatch comment --issue X-1 --body-file note.txt");
-    await g.handlers.get("tool_result")?.(
-      { type: "tool_result", toolCallId: "bg", details: { async: { state: "running" } } },
-      {}
-    );
+    await g.event("tool_result", {
+      toolCallId: "bg",
+      toolName: "bash",
+      details: { async: { state: "running" } },
+    });
+    expect(snapshotDirs().length).toBe(before + 2);
+    await g.event("session_switch", { reason: "new" });
+    expect(snapshotDirs().length).toBe(before + 2);
+    await g.event("tool_execution_end", { toolCallId: "waiting", toolName: "bash" });
     expect(snapshotDirs().length).toBe(before + 1);
-    g.event("session_switch", { reason: "new" });
+    await g.event("session_shutdown");
     expect(snapshotDirs().length).toBe(before);
     fs.rmSync(work, { recursive: true, force: true });
   }, 30_000);
