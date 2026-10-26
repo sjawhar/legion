@@ -2,38 +2,37 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-278",
-  "completed": "2026-10-26T21:25:52Z",
+  "completed": "2026-10-26T22:08:06Z",
   "generation": 3,
-  "round": 2,
-  "answersTest": "test.json generation 3 round 1 (fail): skills/dispatch/SKILL.md:46 and :48, the tester's corrected text from PR comment 6427016640; the architect's scope (Envoy 20:52Z): that text plus a forward merge because GitHub reported CONFLICTING",
+  "round": 3,
+  "answersReview": "review round 4 (5659622475) at code head 17dd17ec: threads PRRT_kwDORFy7ds6weGXu and PRRT_kwDORFy7ds6weGXy, each replied to and resolved; the review's Fast-follow, which the architect said to do now, is done (RouteReachUnknownMarker)",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2225",
-  "headSha": "17dd17ec2c37800125a455277722cc286f5293e2",
-  "mergedMain": "acd8341b merges main 1f8e03f5 (fingerprint b3030c96 → ff19c894). Main then moved to 16e4bb0f, which carries #2237 (INFRA-440 AgentName) and conflicted again, so 17dd17ec merges it (ff19c894 → df22cb72). PR comment 6427702588 has both. Main moved on to 5c4548f0 after that; a trial merge with it was clean, so there was no third merge. GitHub reports MERGEABLE at 17dd17ec",
+  "headSha": "bc62db616f0e1adee66148369c546612f407f51f",
   "proof": [
     {
-      "criterion": "The tester's text defect: the dispatch skill's claim line is true and unambiguous",
+      "criterion": "Finding 1: the skill line says what a claim and a route bring and that only a subscription brings agents' activity",
       "surface": "repository text and the skills word guard",
       "command": "sed -n 46,48p skills/dispatch/SKILL.md; find skills/dispatch skills/dispatch-first skills/dispatch-writing-specs -type f | xargs cat | wc -w; cd packages/pi-envoy && bun test src/skills-guard.test.ts; cd packages/pi-legion && bun test src/skills-guard.test.ts",
-      "observed": "line 46 ends 'Never write the status of, or route, an issue with the `legion` label, or under one.'; line 48 reads 'A claim brings a person's answers, comments and messages; for anything else, `dispatch issue-update --route session:<your id>` (`--route ''` on release) or `envoy_subscribe notifications.dispatch.issue.<KEY>.>`.'; 1997 words; guards 10 pass and 13 pass",
-      "headSha": "17dd17ec2c37800125a455277722cc286f5293e2",
-      "negativeControl": "at 48d9dd1c the line said 'otherwise, …' and 'Never route such an issue', the tester's failure"
+      "observed": "line 48: 'A claim, or `dispatch issue-update --route session:<your id>` (`--route ''` on release), brings a person's answers, comments and messages; only `envoy_subscribe notifications.dispatch.issue.<KEY>.>` brings agents' activity.'; line 46 keeps the legion-label sentence; 1998 words; guards 10 pass and 13 pass",
+      "headSha": "bc62db616f0e1adee66148369c546612f407f51f",
+      "negativeControl": "at 17dd17ec, line 48 offered the route 'for anything else', which publisher.go:480 contradicts for agents' events (Notify is false for agent actors)"
     },
     {
-      "criterion": "Delivery and the Reaches panel hold after merging #2237's AgentName",
-      "surface": "real envoy-dispatch built from the head, natsd, Postgres 17 + pgvector, fake Envoy listener; the Dispatch browser suite (Chromium)",
-      "command": ". /legion/harness/env.sh && DATABASE_URL='postgres://postgres@127.0.0.1:5433/claimant?sslmode=disable' bash scripts/e2e/dispatch-claimant-delivery.sh; . /legion/harness/e2e-env.sh && cd packages/dispatch && bun run e2e -- recipients-claim.e2e.ts followers.e2e.ts --project chromium --retries 0",
-      "observed": "summary: 9 ok, 0 FAIL; 8 passed (claim and route rows drawn with AgentName, the claim row linking to /agents/<id>/live); main's agent-name.e2e.ts 5 passed, 2 skipped (phone-only)",
-      "headSha": "17dd17ec2c37800125a455277722cc286f5293e2",
-      "negativeControl": "the round-1 controls stand: a binary built from main d1f4b8a6 fails 4 live cases, and recipients-claim on a build of main fails all 6 of its own scenarios"
+      "criterion": "Fast-follow: one RouteReachUnknownMarker renders the issue header's and the ask card's marker unchanged",
+      "surface": "Dispatch browser suite: real Go server built from the checkout, production SPA bundle, Chromium",
+      "command": ". /legion/harness/e2e-env.sh && cd packages/dispatch && bun run e2e -- recipients-claim.e2e.ts followers.e2e.ts --project chromium --retries 0",
+      "observed": "8 passed, including 'unfollowing a follower while a role route's holder is unknown says the route may still reach it, under the issue page's marker', which reads the header's issue-route-unknown marker and asserts the ask card's marker title equals it",
+      "headSha": "bc62db616f0e1adee66148369c546612f407f51f",
+      "negativeControl": "the scenario failed with only the unknown-role dialog fix removed (generation 3 round 1); web unit tests for inbox and issue 273 pass"
     }
   ],
   "filesChanged": [
-    "488da04c: skills/dispatch/SKILL.md (the tester's text)",
-    "acd8341b: packages/envoy/CHANGELOG.md, both sides kept",
-    "17dd17ec: packages/dispatch/web/src/features/inbox/AskRecipients.tsx, AskRecipients.test.tsx, e2e/recipients-claim.e2e.ts and packages/dispatch/AGENTS.md take main's AgentName drawing and keep this PR's reachRows, reachLabel, unknown-reach marker and dialogs; packages/claude-envoy/dist rebuilt with Bun 1.3.14 because the textually merged bundles were stale"
+    "c897583f: skills/dispatch/SKILL.md",
+    "2324017e: packages/claude-envoy/CHANGELOG.md, packages/pi-envoy/CHANGELOG.md, packages/envoy/CHANGELOG.md (claim/route/subscription split; Reaches entry without the removed dot), packages/envoy/AGENTS.md (an agent's events reach a claimant only through a subscription)",
+    "bc62db61: packages/dispatch/web/src/features/issue/RouteReach.tsx (RouteReachUnknownMarker), IssueHeader.tsx, features/inbox/AskRecipients.tsx, packages/dispatch/AGENTS.md"
   ],
   "deviations": [
-    "Main deleted LiveDot in #2237. The bare row of a role route nobody holds now shows the existing UnreachableRouteMarker ('Nobody holds it right now') where it showed an offline dot, and a session row's running state comes from AgentName's registry."
+    "RouteReachUnknownMarker takes the test id as a prop: the issue header passes issue-route-unknown and the ask card none, since the issue page can show both and a duplicate test id would break getByTestId."
   ],
   "openQuestions": []
 }
