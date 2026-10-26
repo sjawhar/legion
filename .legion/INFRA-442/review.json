@@ -2,24 +2,29 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-442",
-  "completed": "2026-10-26T03:54:46Z",
-  "decision": "changes_requested",
-  "reviewedCodeHead": "404c8295e2c9bc3b3355eac849078dac71c7216e",
-  "ci": "Required set (ruleset): lint, typecheck, test, pr-title, all completed success at CI head 404c8295e2c9 (newest pull_request run); compare 404c8295e2c9...c9607a12d3cd touches only .legion/. Non-required `dispatch` job of Legion Envoy and Contracts still in_progress at read time.",
-  "thermo": "thermonuclear-deep-review at 404c8295e2c9: no critical or important; minor: hint line ignores `sending`, test gap A->B->A with a send out. thermonuclear-code-quality at 404c8295e2c9: keyboard.md misstates Ctrl+Enter; a second per-session send store beside held-sends (recorded plan decision D6, not a defect against the plan); ownSendCount/onScreen placement (structure, not a defect).",
+  "completed": "2026-10-26T05:08:08Z",
+  "round": 2,
+  "decision": "approved",
+  "reviewedCodeHead": "5d49365769e39d6ea5cb3ca13f48e2681d0dba4e",
+  "ci": "Required set (ruleset): lint, typecheck, test, pr-title, all completed success at CI head 5d49365769e3. Tests run 40267697737 attempt 1 failed only in the Go daemon test TestAnOpenPhaseGetsOneFollowUp (packages/daemon/internal/claudebridge/bridge_test.go:336, got agent_end, want a response frame); the diff touches no Go code, and the test passed 200 of 200 times locally (go test -run TestAnOpenPhaseGetsOneFollowUp -count=200). Re-ran the failed job once; attempt 2 success. Compare 5d49365769e3...a0a67efda936 touches only .legion/.",
+  "thermo": "thermonuclear-deep-review at 5d49365769e3: no critical or important; minor test gap (U5 asserts the wait line's text, not Send's aria-describedby or the absence of aria-disabled/title while sending). thermonuclear-code-quality at 5d49365769e3: rated the same test gap important; minors on duplicated comments, agents.md 'Enter waits too' wording, keyboard.md prose repeating table rows. Judged: the behaviour is right and the tester drove the description and the gate in four browsers (P7); none changes behaviour, hides an error or breaks a gate.",
+  "threads": [
+    "PRRT_kwDORFy7ds6wIULg: accepted, fixed in 5d49365769e3 (keyboard.md names only the Enter row; Ctrl+Enter sends)",
+    "PRRT_kwDORFy7ds6wIULh: accepted, fixed in 5d49365769e3 (wait line while a send is out, Send described by it, no empty-box refusal then)"
+  ],
   "critical": 0,
-  "important": 2,
-  "minor": 0,
+  "important": 0,
+  "minor": 2,
   "keyFindings": [
     {
-      "severity": "important",
-      "file": "docs/site/src/content/docs/dispatch/keyboard.md",
-      "description": "Line 166 says the live view's box is the exception to the first two rows (Ctrl+Enter Send, Enter New line). Ctrl+Enter still sends there: assistant-ui ComposerInput.tsx:263-268 submits on any non-Shift Enter in submitMode 'enter'. Only the Enter row differs; the prose also repeats the two new table rows. AC11 asks the docs to describe the live view's keys correctly."
+      "severity": "minor",
+      "file": "packages/dispatch/web/src/features/agent-view/AgentConversationPage.test.tsx",
+      "description": "Lines 867-871 assert the wait line's text only; reverting `&& !sending` (AgentThread.tsx:387) or `describedBy` (:471) passes the unit suite. Behaviour verified by the tester's P7 in four browsers; not a defect."
     },
     {
-      "severity": "important",
-      "file": "packages/dispatch/web/src/features/agent-view/AgentThread.tsx",
-      "description": "Line 479: while this session's send is out (button 'Sending…') and the box holds text, the line under the box says 'Enter to send · Shift+Enter for a new line', but Enter does nothing: requestSubmit reaches ComposerRoot, and send() returns because canSend is false under isSendDisabled. The on-screen instruction is false for the whole send; say what holds Enter instead, and pin it."
+      "severity": "minor",
+      "file": "packages/daemon/internal/claudebridge/bridge_test.go",
+      "description": "Outside this diff: CI flake in packages/daemon/internal/claudebridge TestAnOpenPhaseGetsOneFollowUp failed Tests run 40267697737 attempt 1; sent to the controller as a drafted finding ask."
     }
   ]
 }
