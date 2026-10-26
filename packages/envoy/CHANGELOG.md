@@ -1152,6 +1152,12 @@
 
 ### Fixed
 
+- A Dispatch page in Firefox now shows what changed while its live event stream was reconnecting,
+  such as a session's answer to a model switch, without waiting for the stream's heartbeat.
+  Firefox opened the stream only once its first byte arrived, and a stream with no backlog and no
+  new event sent none until the first heartbeat, fifteen seconds later: until then the page stayed
+  "Reconnecting…" and skipped the refresh a reconnect owes every view. `GET /api/v1/events` now
+  sends an SSE comment, `: open`, with its headers, so the stream opens at once in every browser.
 - A Dispatch reference read no longer fails while the database holds an edge a newer build wrote.
   `GET /api/v1/references` (`?to=` and `?from=`) and `GET /api/v1/artifacts/{id}/references`
   answered `500` on a row whose other end is a node kind the running build does not know, which a
