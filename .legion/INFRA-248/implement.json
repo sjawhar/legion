@@ -1,0 +1,92 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-248",
+  "completed": "2026-10-26T02:12:00Z",
+  "pullRequest": "https://github.com/sjawhar/legion/pull/2219",
+  "codeHead": "a8a963219106c464ca64034e37578d224fbc5fb0",
+  "proof": [
+    {
+      "criterion": "A1 The Legion skills guard passes with ce-dogfood in pi-legion",
+      "surface": "the staged plugin partitions and the real Oh My Pi (/opt/omp/bin/omp) loading both plugins packed from the branch",
+      "command": "bun test packages/pi-legion/src/skills-guard.test.ts packages/pi-legion/scripts/prepack.test.ts packages/pi-shared/test/skills-partition.test.ts packages/pi-envoy/src/skills-guard.test.ts; LEGION_TEST_OMP=/opt/omp/bin/omp bun test packages/pi-envoy/src/skills-guard.test.ts; cd packages/daemon && LEGION_TEST_OMP=/opt/omp/bin/omp go test ./internal/daemon -run 'TestTheRealPluginsOnTheRealOhMyPi|TestThePromptReferenceProbeOnTheRealOhMyPi' -count=1",
+      "observed": "26 pass 1 skip 0 fail; 9 pass 0 fail; ok github.com/sjawhar/legion/daemon/internal/daemon 78.549s (skill://ce-dogfood resolves with upstream's disable-model-invocation: true kept). CI Legion Envoy and Contracts run 40249977360 (pi-legion, pi-envoy, pi-shared, claude-envoy jobs) success.",
+      "headSha": "a8a963219106c464ca64034e37578d224fbc5fb0",
+      "negativeControl": "Scratch copy with legion-worker linking skill://ce-dogfood-missing: TestTheRealPluginsOnTheRealOhMyPi/both FAIL 'finds no skill ce-dogfood-missing (loaded by dist/skills/legion-worker/SKILL.md)'; with skill://ce-dogfood/references/missing.md: skills-guard.test.ts 1 fail '… names no file'."
+    },
+    {
+      "criterion": "A2 The worker image builds; in a worker pod (gVisor, uid 1000) agent-browser --version prints the pin and agent-browser open https://example.com loads the page with its title read back",
+      "surface": "Worker Image run 40249977303 on the PR head, and a Job in namespace builds (runtimeClassName gvisor, runAsUser 1000, compute class build) on its digest",
+      "command": "/legion/scratch/tmp/infra-248-job/run-job.sh ghcr.io/sjawhar/legion-worker@sha256:1110a7b7bcb6e5badec167e274643e74ec005c3f44fc079a48836b3026010664 branch-a8a963219106 (id -u; agent-browser --version; agent-browser open https://example.com; agent-browser get title; agent-browser close; sha256sum of the three shipped skill files)",
+      "observed": "pod runtimeClassName=gvisor imageID=…@sha256:1110a7b7…; 1000; 4.19.0-gvisor; agent-browser 0.39.2; [agent-browser] launched browser / ✓ Example Domain; get title → Example Domain; ✓ Browser closed; skill hashes caee76a6…, 89f56440…, 563735f2… equal to the branch files. Job deleted by its trap, sequence: exit 0.",
+      "headSha": "a8a963219106c464ca64034e37578d224fbc5fb0",
+      "negativeControl": "Same Job on main's image sha256:60562f59… (sha-a9c9542fb738): 'sh: agent-browser: not found', ce-dogfood/SKILL.md and dogfood.md absent. The Dockerfile's download/check/install lines with a wrong AGENT_BROWSER_SHA256: 'FAILED … 1 computed checksum did NOT match', exit 1."
+    },
+    {
+      "criterion": "A3 A tester run on a slice with a browser page posts a ce-dogfood report on the slice's Dispatch issue and sends its findings back to the implementer",
+      "surface": "fixture slice INFRA-441 (Dispatch project page status strip, 3 planted defects) on a seeded local Dispatch stack with real Chromium via agent-browser; fresh tester agent on the branch's tester contract, fresh implementer agent",
+      "command": "dispatch read --issue INFRA-441 --artifact dogfood-report-md; git -C /legion/scratch/tmp/infra-248-dogfood/arm-step log --oneline; key/assert.sh http://127.0.0.1:18830",
+      "observed": "dispatch://INFRA-441/artifact/dogfood-report-md versions 1 and 2 posted by the with-step tester; round-1 test.json with 4 failures and red tests ebd74d8d8, dd175a94b, 58fd4e2d9, e01e03963; the implementer's fix bf9c43a68 makes them pass; sealed assertions at the cutoff: D1 PASS, D2 PASS, D3 PASS (fixture head: 3 FAIL).",
+      "headSha": "a8a963219106c464ca64034e37578d224fbc5fb0",
+      "negativeControl": "The control tester on main's contract (arm-control) posted no Dispatch report (its only Dispatch call was dispatch read --issue INFRA-441)."
+    },
+    {
+      "criterion": "A4 The try-the-options step is tested against a run without it; result recorded on INFRA-245",
+      "surface": "six runs (INFRA-224 #numbers-per-row, INFRA-204 #bf4fb1f3, INFRA-258 #113f0f1a; control and with-step), stand-in ask_person tool answering from recorded answer sheets",
+      "command": "/legion/scratch/tmp/infra-248-options/{manifest.md, ask_person.jsonl, coordinator.jsonl, launches.json, <spec>/<arm>/decision-block.md}; dispatch comment --issue INFRA-245 (comment 0c252bba-d40e-4954-8f08-78f5c4c1bec7)",
+      "observed": "settled in one round (proxy): control 1/3, step 0/3 (all with-step blocks end 'the person picks', as the approved text says); recorded answer offered: control 2/3, step 3/3; overturn 3/3; with-step wall time 2-3x. Below the pre-declared rule; the architect decided to ship as written (Envoy 2026-10-26T01:58Z), recorded in the INFRA-245 comment with the costs.",
+      "headSha": "a8a963219106c464ca64034e37578d224fbc5fb0",
+      "negativeControl": "The control arms (main's dispatch-brainstorming, no coordinator tool, clean re-runs) built nothing."
+    },
+    {
+      "criterion": "A5 The tester's ce-dogfood step is tested the same way; defects fixed before the reviewer counted; result recorded on INFRA-245",
+      "surface": "two arms on the fixture slice, each its own clone, database and lane; cutoff at the end of tester round 2",
+      "command": "/legion/scratch/tmp/infra-248-dogfood/key/assert.sh on each lane at the cutoff (key/assert-control-cutoff.txt, key/assert-step-cutoff.txt); dispatch comment --issue INFRA-245 (comment cb088ae4-c77f-42c8-b406-763c9ce8449e)",
+      "observed": "control: found 3/3, sent back 3/3, fixed 3/3, 1 unplanted finding; with step: found 3/3, sent back 3/3, fixed 3/3, 3 unplanted findings. Rule (step fixes at least as many as control) met.",
+      "headSha": "a8a963219106c464ca64034e37578d224fbc5fb0",
+      "negativeControl": "Every sealed assertion fails on the fixture head 11e9e2d8 (key/assert-fixture.txt: D1 FAIL clipped, D2 FAIL Not Found, D3 FAIL no message)."
+    },
+    {
+      "criterion": "A6 The with-step runs asked the person their questions before building",
+      "surface": "ask_person JSONL and the with-step arms' transcripts (history://opt-INFRA-224-step, opt-INFRA-204-step, opt-INFRA-258-step)",
+      "command": "ordering of ask_person, coordinator and builder task calls in each transcript; ask_person.jsonl timestamps against step-judgment.md and check.md times",
+      "observed": "INFRA-224: 2 asks (00:11:40Z) → judgment 00:11:59Z → builders; INFRA-204: 4 asks (00:12:56Z) → judgment 00:13:41Z → builders; INFRA-258: 1 ask (00:16:27Z) → judgment 00:16:54Z → builders. 3 of 3 asked before building.",
+      "headSha": "a8a963219106c464ca64034e37578d224fbc5fb0",
+      "negativeControl": "A run that builds before asking would fail this measure; none did. The control arms' question counts (0, 1, 1) show the stand-in log records control runs too."
+    }
+  ],
+  "filesChanged": [
+    "skills/ce-dogfood/** (new, vendored from sjawhar/compound-engineering-plugin 8a776c13 with LICENSE and one Legion paragraph)",
+    "skills/legion-worker/references/dogfood.md (new), skills/legion-worker/SKILL.md",
+    "skills/dispatch-brainstorming/SKILL.md",
+    "packages/daemon/docker/worker.Dockerfile",
+    "packages/claude-envoy/legion/** (regenerated)",
+    "scripts/pi-plugin-prepack.sh, packages/pi-legion/scripts/prepack.test.ts, .github/workflows/release.yaml, .github/workflows/envoy-and-contracts.yaml",
+    "skills/AGENTS.md, packages/pi-legion/{AGENTS.md,README.md,CHANGELOG.md}, packages/pi-envoy/CHANGELOG.md, packages/claude-envoy/{README.md,CHANGELOG.md}, .dispatch/architecture/pi-legion.md, docs/kubernetes.md, docs/site/src/content/docs/legion/running-legion.md"
+  ],
+  "trickyParts": [
+    "The diff scope in dogfood.md uses jj's fork_point(<default>@origin | @-): a plain --from <default>@origin shows the default branch's later commits as deletions once it has moved.",
+    "agent-browser embeds axe-core (MPL-2.0); its two licence files are in the image notices. Its Rust lockfile is cli/Cargo.lock, so crates() takes an optional lockfile path.",
+    "Image proof namespace is builds (compute class 'build'); legion refuses Job creation from this pod.",
+    "The eval kernel's default completion model is refused by the gateway (context_management); the stand-in ran on the 'slow' model, the arms on the default agent model."
+  ],
+  "deviations": [
+    "Control arms of the try-the-options experiment were re-run: run 1 was given the coordinator tool by mistake (INFRA-258's run 1 called it and built; invalid). Kept on disk as control-run1-tool-visible / control-invalid-run1.",
+    "Dogfood tester round 2 ran as a fresh tester agent given its round-1 handoff (the round-1 agent's handle had expired), not the same session.",
+    "Leak check edits to four brief/answer-sheet passages before any arm ran (manifest.md).",
+    "The fixture child issue INFRA-441 is in triage, not backlog (architect's call: a status written on its own tree is set back by the daemon).",
+    "Simplify pass: 0 applied; the efficiency reviewer's split-RUN suggestion was skipped (file convention, build cost only)."
+  ],
+  "dogfoodExperiment": {
+    "fixtureHead": "11e9e2d84ce0af7651ee788c8e0333957e268c99",
+    "fixturePatch": "dispatch://INFRA-441/artifact/fixture-patch",
+    "key": "D1 StatusCounts.tsx:24 w-14 overflow-hidden clips 'In progress'/'Needs review'; D2 StatusCounts.tsx:63 Done links to /projects/<KEY>/issues/done (Not Found); D3 StatusCounts.tsx:39-41 returns null on an empty project so its message never shows. Assertions in /legion/scratch/tmp/infra-248-dogfood/key/assert.sh.",
+    "report": "dispatch://INFRA-441/artifact/dogfood-report-md"
+  },
+  "infra245Comments": [
+    "dispatch://INFRA-245/comment/0c252bba-d40e-4954-8f08-78f5c4c1bec7",
+    "dispatch://INFRA-245/comment/cb088ae4-c77f-42c8-b406-763c9ce8449e"
+  ],
+  "resultsArtifact": "dispatch://INFRA-248/artifact/experiment-results-md",
+  "openQuestions": []
+}
