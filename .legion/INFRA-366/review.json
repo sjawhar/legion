@@ -2,27 +2,44 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-366",
-  "completed": "2026-10-26T19:21:38Z",
-  "reviewedHead": "60888697ba3b36850fdd11107310e608df8c1e25",
-  "codeHead": "e3d0925139",
-  "round": 6,
-  "standard": "The architect's decisions of 2026-10-26T16:42Z and 18:53Z: round 6 is judged only by its two items (the dispatch:// autolink case at RefLink.tsx:143; the forward merge with this branch's migrations after main's) and the merge's own changes.",
+  "completed": "2026-10-26T20:58:28Z",
+  "reviewedHead": "9d993b51fc293893db690d85555e77896d7408fa",
+  "codeHead": "1d4f991ece",
+  "round": 7,
+  "standard": "The architect's decision of 2026-10-26T19:23Z: round 7 is judged only by the behaviour at RefLink.tsx:183 (a dispatch:// URL left as text that names nothing becomes its words), the tests failing at e3d09251 and passing at the head, and round 7's own diff.",
   "decision": "changes_requested",
   "critical": 0,
-  "important": 1,
-  "minor": 0,
+  "important": 0,
+  "minor": 4,
   "keyFindings": [
     {
-      "severity": "important",
-      "file": "packages/dispatch/web/src/features/refs/RefLink.tsx:183",
-      "description": "Past the bounds, `<dispatch://…>` and `[dispatch://X](dispatch://X)` now reach the bounded referenceRouteFromHref, which returns undefined, so collectReferenceAnchors continues and leaves Proof's anchor as written: href=\"\" plus data-dispatch-href. A click on href=\"\" reloads the current page; main and round 5 opened the document. RefPreview's TRIGGER_SELECTOR matches [data-dispatch-href] (RefPreview.tsx:41) and routeOf reads it unbounded (:171-174), so the hover card still shows the document: the dashboard still presents a reference the server does not record. The deep pass rendered MarkdownBody at the head and saw both anchors as {href:\"\", data-dispatch-href:…}. The new tests check only the words and the missing data-dispatch-ref. Fix: when the target is a dispatch:// URL left as text and the bounded read names nothing, replace the anchor with its words as text (as a bare dispatch:// past the bounds already renders), and make both tests assert no link and no hover trigger."
+      "severity": "minor",
+      "file": "packages/dispatch/web/src/features/refs/RefLink.tsx:150-157 and packages/dispatch/AGENTS.md:291",
+      "description": "The doc comment of collectReferenceAnchors and the package AGENTS.md still say a URL left as text past the bounds 'stays the link it is' and that an href that fails to parse 'is left untouched'. Round 7 makes that false for dispatch://, which now becomes plain text. Reword both: the dispatch:// form becomes its words; the http(s) form stays a link."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/dispatch/e2e/pictures.e2e.ts:446",
+      "description": "The no-tooltip check waits a hard-coded 600 ms. If REF_PREVIEW_OPEN_DELAY_MS (ref-preview-timing.ts:5, 300 today) grows past it, the assertion passes with a card still on its way. Import the constant, as hover-preview.e2e.ts imports its sibling."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/dispatch/e2e/pictures.e2e.ts:432",
+      "description": "The old comment line ('keep their words and name no reference either') was left above the new one that replaces it."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/claude-envoy/CHANGELOG.md:11-13",
+      "description": "Merge 1d4f991e kept main's deletion of skills/dispatch/references/{reading,document-edits}.md, but this entry still says the dispatch skill teaches the block forms, the 256-byte bound, the pin and block-links. Reword it as the pi-envoy entry was, to point at the commands' --help."
     }
   ],
-  "roundItems": "Item 1: the routing holds, the rendered result is the finding. Item 2 holds: merges 56d31191, 44f6cfa2 and e3d09251 keep both sides; migrations renumbered 0120-0127, each .up/.census pair moved together and byte-identical but for the numbers; no stale number; migrator keys by version; no order dependency on main's 0118/0119; the fingerprint 2e83582a… is unchanged from 44f6cfa2 and 2cef697c to e3d09251 (recomputed by the deep pass). Targeted store migration tests pass on a scratch Postgres 17.",
-  "threads": "PRRT_kwDORFy7ds6wUaFb: replied, accepted (https:// case). PRRT_kwDORFy7ds6wW-46: replied and unresolved (the finding above).",
+  "whyRequestChanges": "No correctness finding stands: the behaviour and the before/after tests hold. These four are the round's fast-follow batch, which the architect's standing rule (2026-10-26T07:58Z) has fixed in this pull request, not later. The head must also be merged forward anyway: GitHub reports it CONFLICTING (main moved 5 commits past b4bea385, packages/envoy/CHANGELOG.md).",
+  "roundItems": "Behaviour holds: RefLink.tsx:185-191 replaces the anchor with createTextNode(text) only for a dispatch:// text URL the bounded read names nothing for; replaceWith over the static NodeList is safe (index only counts pushed anchors; consumers get only pushed anchors). Tests fail before and pass after: the deep pass ran MarkdownBody.test.tsx with e3d09251's RefLink.tsx (22 pass, 1 fail on the dead <a data-dispatch-href>) and at the head (23 pass); the tester and implementer ran pictures.e2e.ts at e3d09251 (2/2 fail) and at the head (pass). Merge 1d4f991e keeps both sides; migrations now 0121-0128 after main's 0120_artifact_reviews_event_seq, pairs intact, no stale names.",
+  "threads": "PRRT_kwDORFy7ds6wauf1 and PRRT_kwDORFy7ds6wW-46: replied, accepted.",
   "thermonuclear": {
-    "deepReview": "Verdict: CHANGES at 60888697 (the finding above, rated High there; I rate it Important, reach limited to targets past 2048 bytes or block ids past 256 bytes in these two forms). Provider: 62 assistant turns, all anthropic/claude-opus-5-5, read from its session transcript.",
-    "codeQuality": "Verdict: APPROVE at 60888697. Provider: 37 assistant turns, all anthropic/claude-opus-5-5, read from its session transcript."
+    "deepReview": "Verdict: APPROVE at 9d993b51 with three Minor items (CHANGELOG claim, lost skill guidance, stale doc comment). Provider: 46 assistant turns, all anthropic/claude-opus-5-5, read from its session transcript.",
+    "codeQuality": "Verdict: CHANGES at 9d993b51 on three cleanup-only items (stale doc comment and AGENTS.md, hard-coded wait, leftover comment). Provider: 36 assistant turns, all anthropic/claude-opus-5-5, read from its session transcript.",
+    "notCounted": "The deep pass's lost-guidance item (the 2048/256-byte citation rules no longer in any skill after main moved reading.md into --help): the block refusals name the arguments to use, and where main keeps such rules is main's layout, so I did not raise it. Upper-case DISPATCH:// staying a dead anchor predates round 7 and is outside its stated scope."
   },
-  "ci": "At code head e3d09251 the first runs were cancelled at 19:05Z. I re-ran Tests (run 40383011699) once at 19:10Z; lint, typecheck and test were queued at 19:21Z, and pr-title was queued. The compare e3d09251...60888697 touches only .legion/. REQUEST_CHANGES does not wait for CI."
+  "ci": "At code head 1d4f991e: lint, typecheck and test success (pr-title success on the latest run). The compare 1d4f991e...9d993b51 touches only .legion/."
 }
