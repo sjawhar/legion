@@ -72,12 +72,24 @@ export function referenceRetry(
   };
 }
 
+/** Whether an issue query asks again on a remount, a refocus or a reconnect, as the app's defaults
+ *  have it: not once it answered 404, which only the event stream's `issue.created` (`api/sse.ts`,
+ *  which refetches every issue query) can change. */
+function asksAgain(query: { state: { error: Error | null } }): boolean {
+  return !(query.state.error instanceof ApiError && query.state.error.status === 404);
+}
+
 /** One issue with its documents, as the issue page reads it: a reference's title, and whether a
- *  key written bare names an issue that exists (`useRenderedMarkdown`). */
+ *  key written bare names an issue that exists (`useRenderedMarkdown`). An issue that does not
+ *  exist is asked about once (`asksAgain`, with `referenceRetry` in each reader's options), and a
+ *  key written before its issue exists links once `issue.created` refetches it. */
 export const issueQuery = (key: string | undefined) =>
   queryOptions({
     queryKey: ["issue", key],
     queryFn: () => api.getIssue(key ?? ""),
+    refetchOnReconnect: asksAgain,
+    refetchOnWindowFocus: asksAgain,
+    retryOnMount: asksAgain,
   });
 
 /** One issue message and its replies, as the Conversation and the hover card read it. */

@@ -1,13 +1,30 @@
-import { expect, spyOn, test } from "bun:test";
+import { afterAll, beforeAll, expect, spyOn, test } from "bun:test";
 import { DISPATCH_BODY_MAX } from "@legion/contracts/dispatch-tools";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen, waitFor, within } from "@testing-library/react";
+import type { Window as HappyDOMWindow } from "happy-dom";
 
 import { commentDeliveryFields } from "../../__tests__/comment-fixture";
 import { ApiError, api, type ReferenceSource } from "../../api/client";
 import type { Artifact, AskRead, CommentRead, IssueDetails } from "../../api/types";
+import { warmMarkdownRenderer } from "./markdown-engine";
 import type { BareReferences } from "./RefLink";
-import { isReferenceOnlyBody, Unfurl } from "./Unfurl";
+import { issueQuery, referenceQuestionsQuery } from "./reference-target";
+import { Unfurl } from "./Unfurl";
+
+const origin = "https://dispatch.test";
+const testWindow = window as unknown as HappyDOMWindow;
+let pageBefore = "about:blank";
+
+beforeAll(async () => {
+  pageBefore = window.location.href;
+  testWindow.happyDOM.setURL(`${origin}/issues/CORE-1/conversation`);
+  await warmMarkdownRenderer();
+});
+
+afterAll(() => {
+  testWindow.happyDOM.setURL(pageBefore);
+});
 
 test("Unfurl resolves a body that is one GitHub reference", async () => {
   const githubRest = spyOn(api, "githubRest").mockResolvedValue(
@@ -347,59 +364,115 @@ test("Unfurl unfurls a dispatch comment reference with its own words, not the is
   }
 });
 
-const origin = "https://dispatch.test";
 const resolved: BareReferences = {
   issues: new Set(["CORE-12"]),
   questions: new Map([["q2", "dispatch://CORE-1/ask/ask-2"]]),
 };
 const nothingResolved: BareReferences = { issues: new Set(), questions: new Map() };
 
-test("isReferenceOnlyBody accepts a body that is one reference in each form Dispatch reads", () => {
-  expect(isReferenceOnlyBody("dispatch://CORE-1", nothingResolved, origin)).toBe(true);
-  expect(isReferenceOnlyBody("https://dispatch.test/issues/CORE-2", nothingResolved, origin)).toBe(
-    true
+/**
+ * The cards `Unfurl` shows for body once it has rendered, each as the address it opens, or `null`
+ * when it shows none: `bare`'s keys are the issues that exist and its map is the question map of
+ * the body's document, both already read, and no other target exists.
+ */
+function cardsShown(body: string, bare: BareReferences): (string | null)[] | null {
+  const issues = new Map(
+    Array.from(
+      bare.issues,
+      (key) =>
+        [key, { artifacts: [], key, status: "todo", title: `Title of ${key}` } as never] as const
+    )
   );
-  expect(isReferenceOnlyBody("CORE-12", resolved, origin)).toBe(true);
-  expect(isReferenceOnlyBody("#q2", resolved, origin)).toBe(true);
-  expect(isReferenceOnlyBody("https://github.com/owner/repository/pull/2", resolved, origin)).toBe(
-    true
+  const questionMap = {
+    document: "dispatch://CORE-1/spec",
+    questions: Array.from(bare.questions, ([block_id, ask]) => ({ ask, block_id })),
+  };
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  for (const [key, issue] of issues) {
+    queryClient.setQueryData(issueQuery(key).queryKey, issue);
+  }
+  queryClient.setQueryData(referenceQuestionsQuery(commentSource).queryKey, questionMap);
+  const spies = [
+    spyOn(api, "getIssue").mockImplementation(async (key: string) => {
+      const issue = issues.get(key);
+      if (issue === undefined) {
+        throw notFound();
+      }
+      return issue;
+    }),
+    spyOn(api, "getReferenceQuestions").mockResolvedValue(questionMap),
+    spyOn(api, "getAsk").mockRejectedValue(notFound()),
+    spyOn(api, "githubRest").mockRejectedValue(notFound()),
+  ];
+  const view = render(
+    <QueryClientProvider client={queryClient}>
+      <Unfurl body={body} source={commentSource} />
+    </QueryClientProvider>
   );
-  expect(isReferenceOnlyBody("  CORE-12 \n", resolved, origin)).toBe(true);
+  try {
+    const section = within(view.container).queryByRole("region", { name: "References" });
+    return section === null
+      ? null
+      : within(section)
+          .getAllByRole("link")
+          .map((card) => card.getAttribute("href"));
+  } finally {
+    view.unmount();
+    for (const spy of spies) {
+      spy.mockRestore();
+    }
+  }
+}
+
+test("Unfurl shows a card for a body that is one reference in each form Dispatch reads", () => {
+  expect(cardsShown("dispatch://CORE-1", nothingResolved)).toEqual(["/issues/CORE-1"]);
+  expect(cardsShown("https://dispatch.test/issues/CORE-2", nothingResolved)).toEqual([
+    "/issues/CORE-2",
+  ]);
+  expect(cardsShown("CORE-12", resolved)).toEqual(["/issues/CORE-12"]);
+  expect(cardsShown("#q2", resolved)).toEqual(["/issues/CORE-1/asks/ask-2"]);
+  expect(cardsShown("https://github.com/owner/repository/pull/2", resolved)).toEqual([
+    "https://github.com/owner/repository/pull/2",
+  ]);
+  expect(cardsShown("  CORE-12 \n", resolved)).toEqual(["/issues/CORE-12"]);
 });
 
-test("isReferenceOnlyBody accepts several references with only whitespace between them", () => {
-  expect(isReferenceOnlyBody("dispatch://CORE-1 dispatch://CORE-2", resolved, origin)).toBe(true);
-  expect(
-    isReferenceOnlyBody("CORE-12\n#q2\thttps://dispatch.test/issues/CORE-2", resolved, origin)
-  ).toBe(true);
+test("Unfurl shows a card per reference for references with only whitespace between them", () => {
+  expect(cardsShown("dispatch://CORE-1 dispatch://CORE-2", resolved)).toEqual([
+    "/issues/CORE-1",
+    "/issues/CORE-2",
+  ]);
+  expect(cardsShown("CORE-12\n#q2\thttps://dispatch.test/issues/CORE-2", resolved)).toEqual([
+    "/issues/CORE-12",
+    "/issues/CORE-1/asks/ask-2",
+    "/issues/CORE-2",
+  ]);
 });
 
-test("isReferenceOnlyBody refuses a key or #id that names nothing", () => {
+test("Unfurl shows no card for a body with a key or #id that names nothing", () => {
   // A key whose issue does not exist, or has not answered yet, is text.
-  expect(isReferenceOnlyBody("CORE-999999", resolved, origin)).toBe(false);
-  expect(isReferenceOnlyBody("CORE-12", nothingResolved, origin)).toBe(false);
-  // A #id no question of the body's document holds, or one read with no source.
-  expect(isReferenceOnlyBody("#q9", resolved, origin)).toBe(false);
-  expect(isReferenceOnlyBody("#q2", nothingResolved, origin)).toBe(false);
+  expect(cardsShown("CORE-999999", resolved)).toBeNull();
+  expect(cardsShown("CORE-12", nothingResolved)).toBeNull();
+  // A #id no question of the body's document holds.
+  expect(cardsShown("#q9", resolved)).toBeNull();
+  expect(cardsShown("#q2", nothingResolved)).toBeNull();
   // One unresolved word makes the whole body text.
-  expect(isReferenceOnlyBody("dispatch://CORE-1 CORE-999999", resolved, origin)).toBe(false);
+  expect(cardsShown("dispatch://CORE-1 CORE-999999", resolved)).toBeNull();
 });
 
-test("isReferenceOnlyBody refuses a body with anything beside its references", () => {
-  expect(isReferenceOnlyBody("See dispatch://CORE-1", resolved, origin)).toBe(false);
-  expect(isReferenceOnlyBody("dispatch://CORE-1 for details", resolved, origin)).toBe(false);
-  expect(isReferenceOnlyBody("Blocked on CORE-12", resolved, origin)).toBe(false);
-  expect(isReferenceOnlyBody("CORE-12.", resolved, origin)).toBe(false);
-  expect(isReferenceOnlyBody("**CORE-12**", resolved, origin)).toBe(false);
-  expect(isReferenceOnlyBody("#q2_", resolved, origin)).toBe(false);
-  expect(
-    isReferenceOnlyBody("See **https://github.com/owner/repository/pull/2**.", resolved, origin)
-  ).toBe(false);
+test("Unfurl shows no card for a body with anything beside its references", () => {
+  expect(cardsShown("See dispatch://CORE-1", resolved)).toBeNull();
+  expect(cardsShown("dispatch://CORE-1 for details", resolved)).toBeNull();
+  expect(cardsShown("Blocked on CORE-12", resolved)).toBeNull();
+  expect(cardsShown("CORE-12.", resolved)).toBeNull();
+  expect(cardsShown("**CORE-12**", resolved)).toBeNull();
+  expect(cardsShown("#q2_", resolved)).toBeNull();
+  expect(cardsShown("See **https://github.com/owner/repository/pull/2**.", resolved)).toBeNull();
   // An address that names nothing Dispatch or GitHub has is not a reference.
-  expect(isReferenceOnlyBody("https://example.com/notes", resolved, origin)).toBe(false);
-  expect(isReferenceOnlyBody("dispatch://", resolved, origin)).toBe(false);
-  expect(isReferenceOnlyBody("", resolved, origin)).toBe(false);
-  expect(isReferenceOnlyBody("   ", resolved, origin)).toBe(false);
+  expect(cardsShown("https://example.com/notes", resolved)).toBeNull();
+  expect(cardsShown("dispatch://", resolved)).toBeNull();
+  expect(cardsShown("", resolved)).toBeNull();
+  expect(cardsShown("   ", resolved)).toBeNull();
 });
 
 // Every comment body and ask question passes this check as it renders, and a comment holds up to
@@ -407,22 +480,44 @@ test("isReferenceOnlyBody refuses a body with anything beside its references", (
 // exponentially many ways, and a pattern that tried them ran for minutes in V8 on one of these
 // bodies, hanging every reader's tab; JavaScriptCore, which runs these tests, gives up after a
 // second or so per body.
-test(`isReferenceOnlyBody reads ${DISPATCH_BODY_MAX}-character bodies in one pass`, () => {
+test(`Unfurl reads ${DISPATCH_BODY_MAX}-character bodies in one pass`, () => {
   const start = performance.now();
   for (const scheme of ["http://", "https://", "dispatch://"]) {
     // The repeat leaves room for the two units the ` x` and `\nx` cases append, so every body
     // here is at or just under the cap.
     const references = scheme.repeat(Math.floor((DISPATCH_BODY_MAX - 2) / scheme.length));
-    expect(isReferenceOnlyBody(`${references} x`, resolved, origin)).toBe(false);
-    expect(isReferenceOnlyBody(`${references}\nx`, resolved, origin)).toBe(false);
+    expect(cardsShown(`${references} x`, resolved)).toBeNull();
+    expect(cardsShown(`${references}\nx`, resolved)).toBeNull();
     // One word that names nothing.
-    expect(isReferenceOnlyBody(references, resolved, origin)).toBe(false);
+    expect(cardsShown(references, resolved)).toBeNull();
   }
   const word = "CORE-12 ";
   const keys = word.repeat(Math.floor(DISPATCH_BODY_MAX / word.length));
-  expect(isReferenceOnlyBody(keys, resolved, origin)).toBe(true);
-  expect(isReferenceOnlyBody(`${keys.slice(0, -1)}x`, resolved, origin)).toBe(false);
+  expect(cardsShown(keys, resolved)).toEqual(["/issues/CORE-12"]);
+  expect(cardsShown(`${keys.slice(0, -1)}x`, resolved)).toBeNull();
   expect(performance.now() - start).toBeLessThan(2000);
+});
+
+test("Unfurl shows a dashboard address whose issue does not exist as written on its card", async () => {
+  const getIssue = spyOn(api, "getIssue").mockRejectedValue(notFound());
+  const address = "https://dispatch.test/issues/CORE-999999";
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const view = render(
+    <QueryClientProvider client={queryClient}>
+      <Unfurl body={address} />
+    </QueryClientProvider>
+  );
+
+  try {
+    await waitFor(() => expect(getIssue).toHaveBeenCalledWith("CORE-999999"));
+    await waitFor(() => expect(queryClient.isFetching()).toBe(0));
+    const card = within(view.container).getByRole("link");
+    expect(card.getAttribute("href")).toBe("/issues/CORE-999999");
+    expect(card.textContent).toBe(address);
+  } finally {
+    getIssue.mockRestore();
+    view.unmount();
+  }
 });
 
 test("Unfurl shows no card, and asks GitHub nothing, for references with text beside them", async () => {
@@ -577,6 +672,8 @@ test("Unfurl shows the question's card for a #id its source's document holds", a
     followers: [],
     replies: [],
   } as never);
+  // The ask's own issue, which the card's target reads beside the ask.
+  const getIssue = spyOn(api, "getIssue").mockRejectedValue(notFound());
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const view = render(
     <QueryClientProvider client={queryClient}>
@@ -590,6 +687,7 @@ test("Unfurl shows the question's card for a #id its source's document holds", a
     expect(getReferenceQuestions).toHaveBeenCalledWith(commentSource);
   } finally {
     getAsk.mockRestore();
+    getIssue.mockRestore();
     getReferenceQuestions.mockRestore();
     view.unmount();
   }

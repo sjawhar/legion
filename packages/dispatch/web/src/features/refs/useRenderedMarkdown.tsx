@@ -5,7 +5,7 @@ import { createPortal } from "react-dom";
 
 import type { ReferenceSource } from "../../api/client";
 import { collectPictureAnchors, DispatchPicture, type PictureAnchor } from "./DispatchPicture";
-import { renderWithEngine, type SoftBreaks } from "./markdown-engine";
+import { linkableTexts, renderWithEngine, type SoftBreaks } from "./markdown-engine";
 import {
   type BareReferences,
   collectReferenceAnchors,
@@ -28,26 +28,59 @@ const NO_PICTURES: readonly PictureAnchor[] = [];
  * it (the issue query a reference's title reads, so the link costs no second request), and a `#id`
  * a question once the question map of the document source's text belongs to names it
  * (`referenceQuestionsQuery`), which is asked only for a body that writes a `#id` and a surface
- * that names its source. A 404 is final (`referenceRetry`). Until an answer lands, and when
- * it is a 404, the key or `#id` names nothing, and the body shows it as written. The unfurl cards
- * read a body through it too (`Unfurl`), from the same cached queries.
+ * that names its source. Only what a renderer can link is asked about: a key or `#id` the
+ * server's reading of the source finds (`textReferences`) that also stands in the text the parsed
+ * document links in (`linkableTexts`, the engine's own parse), so one written only in code or in a
+ * link's destination costs no request; without an engine or a parse, the whole source is that
+ * text, as the element then shows it. A 404 is final (`referenceRetry`, and `issueQuery` asks no
+ * second time on a remount or a refocus; `issue.created` refetches it). Until an answer lands, and
+ * when it is a 404, the key or `#id` names nothing, and the body shows it as written. The unfurl
+ * cards read a body through it too (`Unfurl`), from the same cached queries.
  */
 export function useBareReferences(
   markdown: string,
   source: ReferenceSource | undefined
 ): BareReferences {
-  const { keys, writesQuestion } = useMemo(() => {
-    const distinct = new Set<string>();
+  const written = useMemo(() => {
+    const keys = new Set<string>();
     let question = false;
     for (const reference of textReferences(markdown)) {
       if (reference.kind === "key") {
-        distinct.add(reference.key);
+        keys.add(reference.key);
       } else if (reference.kind === "question") {
         question = true;
       }
     }
-    return { keys: [...distinct], writesQuestion: question };
+    return { keys, question };
   }, [markdown]);
+  // The linkable keys, joined, and whether a linkable `#id` is written: primitives, so a scan that
+  // finds what the last one found re-renders nothing.
+  const [linkableKeys, setLinkableKeys] = useState("");
+  const [writesQuestion, setWritesQuestion] = useState(false);
+  useLayoutEffect(() => {
+    if (written.keys.size === 0 && !written.question) {
+      setLinkableKeys("");
+      setWritesQuestion(false);
+      return;
+    }
+    return renderWithEngine((engine) => {
+      const parsed = engine?.parse(markdown);
+      const keys = new Set<string>();
+      let question = false;
+      for (const text of parsed === undefined ? [markdown] : linkableTexts(parsed)) {
+        for (const reference of textReferences(text)) {
+          if (reference.kind === "key" && written.keys.has(reference.key)) {
+            keys.add(reference.key);
+          } else if (reference.kind === "question" && written.question) {
+            question = true;
+          }
+        }
+      }
+      setLinkableKeys([...keys].join(" "));
+      setWritesQuestion(question);
+    });
+  }, [markdown, written]);
+  const keys = useMemo(() => (linkableKeys === "" ? [] : linkableKeys.split(" ")), [linkableKeys]);
   const retry = referenceRetry(useQueryClient());
   // The keys whose issue exists, joined: a string, so an answer that changes nothing re-renders
   // nothing.

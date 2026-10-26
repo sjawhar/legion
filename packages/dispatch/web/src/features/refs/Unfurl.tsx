@@ -17,7 +17,6 @@ import { useReferenceData, useReferenceTarget } from "./reference-target";
 import {
   buildDispatchReference,
   buildReferencePath,
-  type ComposerReference,
   type DispatchReferenceRoute,
   parseDispatchReference,
   questionReference,
@@ -70,19 +69,19 @@ function targetSource(
     : undefined;
 }
 
-function DispatchUnfurl({ reference }: { reference: ComposerReference }): ReactNode {
-  const route = parseDispatchReference(reference.reference);
+function DispatchUnfurl({ card }: { card: DispatchCard }): ReactNode {
+  const route = parseDispatchReference(card.reference);
   const { title, titleKey, description } = useReferenceTarget(route);
   const { artifact } = useReferenceData(route);
 
   return (
     <a
       className={`block rounded-lg border px-3 py-2 text-sm ${surfaceMutedBg} ${borderDefault} ${cardHoverBorder}`}
-      href={reference.href}
+      href={card.href}
     >
       <span className={`block font-medium ${linkText}`}>
         {title === undefined ? (
-          reference.reference
+          card.text
         ) : (
           <ReferenceTitleWords title={title} titleKey={titleKey} />
         )}
@@ -134,9 +133,18 @@ interface GitHubReference {
   readonly path: string;
 }
 
+/** A card for a Dispatch item: its `dispatch://` form, the page it opens, and the words the body
+ *  wrote for it, which the card shows while its target's title loads and for a target that does
+ *  not exist, as `RefLink` shows a reference inline. */
+interface DispatchCard {
+  readonly href: string;
+  readonly reference: string;
+  readonly text: string;
+}
+
 /** The cards a reference-only body shows, one per distinct reference, in order. */
 interface ReferenceCards {
-  readonly dispatch: readonly ComposerReference[];
+  readonly dispatch: readonly DispatchCard[];
   readonly github: readonly GitHubReference[];
 }
 
@@ -157,7 +165,7 @@ function referenceCards(
   resolved: BareReferences,
   appOrigin: string
 ): ReferenceCards | undefined {
-  const dispatch: ComposerReference[] = [];
+  const dispatch: DispatchCard[] = [];
   const github: GitHubReference[] = [];
   const seen = new Set<string>();
   let covered = 0;
@@ -194,7 +202,11 @@ function referenceCards(
       const written = buildDispatchReference(route);
       if (!seen.has(written)) {
         seen.add(written);
-        dispatch.push({ href: buildReferencePath(route), reference: written });
+        dispatch.push({
+          href: buildReferencePath(route),
+          reference: written,
+          text: body.slice(reference.start, end),
+        });
       }
     }
     covered = end;
@@ -206,26 +218,13 @@ function referenceCards(
 }
 
 /**
- * Whether body is a reference-only body (`referenceCards`): trimmed, every whitespace-separated
- * word of it is one whole reference that names its target, as `resolved` reads the keys and
- * `#id`s it writes. Such a body shows a card per reference beside its rendered text, in the
- * margin, the Inbox thread and the Conversation alike (`Unfurl`); a body with anything else
- * beside its references shows none, since `MarkdownBody` already draws each reference inline with
- * its title.
- */
-export function isReferenceOnlyBody(
-  body: string,
-  resolved: BareReferences,
-  appOrigin: string = window.location.origin
-): boolean {
-  return referenceCards(body, resolved, appOrigin) !== undefined;
-}
-
-/**
- * The cards of a reference-only body (`isReferenceOnlyBody`), one per distinct reference, and
- * nothing for any other body. The issue keys and `#id`s are read through the same cached
- * queries `MarkdownBody` reads them through (`useBareReferences`), the `#id`s against `source`'s
- * document, so a key or `#id` still loading shows no card until it resolves.
+ * The cards of a reference-only body (`referenceCards`): trimmed, every whitespace-separated word
+ * of it is one whole reference that names its target. Such a body shows a card per distinct
+ * reference beside its rendered text, in the margin, the Inbox thread and the Conversation alike;
+ * a body with anything else beside its references shows none, since `MarkdownBody` already draws
+ * each reference inline with its title. The issue keys and `#id`s are read through the same
+ * cached queries `MarkdownBody` reads them through (`useBareReferences`), the `#id`s against
+ * `source`'s document, so a key or `#id` still loading shows no card until it resolves.
  */
 export function Unfurl({ body, source }: UnfurlProps): ReactNode {
   const resolved = useBareReferences(body, source);
@@ -238,8 +237,8 @@ export function Unfurl({ body, source }: UnfurlProps): ReactNode {
   }
   return (
     <section aria-label="References" className="mt-3 space-y-2">
-      {cards.dispatch.map((reference) => (
-        <DispatchUnfurl key={reference.reference} reference={reference} />
+      {cards.dispatch.map((card) => (
+        <DispatchUnfurl card={card} key={card.reference} />
       ))}
       {cards.github.map((reference) => (
         <GitHubUnfurl href={reference.href} key={reference.href} path={reference.path} />

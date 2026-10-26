@@ -4,13 +4,18 @@ import { fireEvent, render, waitFor, within } from "@testing-library/react";
 import type { Window as HappyDOMWindow } from "happy-dom";
 import type { ReactNode } from "react";
 
-import { api } from "../../api/client";
+import { ApiError, api } from "../../api/client";
 import type { Artifact, AskRead } from "../../api/types";
 import { MarkdownBody } from "./MarkdownBody";
 
 function withQueries(children: ReactNode): ReactNode {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>;
+}
+
+/** The answer to a read these tests supply nothing for: an ask's issue, which its link reads too. */
+function notFound(): ApiError {
+  return new ApiError(404, { code: "NOT_FOUND", error: "not found" });
 }
 
 /** An image artifact of CORE-1 with two versions, as the issue read lists it. */
@@ -331,6 +336,7 @@ test("a bare dispatch ask reference renders an inline link to the ask route with
     replies: [],
   };
   const getAsk = spyOn(api, "getAsk").mockResolvedValue(askRead);
+  const getIssue = spyOn(api, "getIssue").mockRejectedValue(notFound());
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const view = render(
     <QueryClientProvider client={queryClient}>
@@ -349,6 +355,7 @@ test("a bare dispatch ask reference renders an inline link to the ask route with
     expect(getAsk).toHaveBeenCalledWith("ask-1");
   } finally {
     getAsk.mockRestore();
+    getIssue.mockRestore();
     view.unmount();
   }
 });
@@ -420,7 +427,13 @@ test("two references in one body each resolve their own inline link and title", 
     versions: [],
   };
   const getAsk = spyOn(api, "getAsk").mockResolvedValue(askRead);
+  const getIssue = spyOn(api, "getIssue").mockRejectedValue(notFound());
   const getProjectArtifact = spyOn(api, "getProjectArtifact").mockResolvedValue(projectArtifact);
+  const getArtifactText = spyOn(api, "getArtifactText").mockResolvedValue({
+    markdown: "",
+    token: "sha256:runbook",
+    version: null,
+  });
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const view = render(
     <QueryClientProvider client={queryClient}>
@@ -435,7 +448,9 @@ test("two references in one body each resolve their own inline link and title", 
     expect(documentLink.getAttribute("href")).toBe("/projects/CORE/documents/runbook-md");
     expect(within(view.container).getAllByRole("link")).toHaveLength(2);
   } finally {
+    getArtifactText.mockRestore();
     getProjectArtifact.mockRestore();
+    getIssue.mockRestore();
     getAsk.mockRestore();
     view.unmount();
   }
@@ -484,6 +499,7 @@ test("a hand-authored Markdown link to a dispatch:// target resolves through dat
     replies: [],
   };
   const getAsk = spyOn(api, "getAsk").mockResolvedValue(askRead);
+  const getIssue = spyOn(api, "getIssue").mockRejectedValue(notFound());
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   // @legion/proof-editor's Markdown link serializer sanitizes a dispatch:// href to "" (Milkdown
   // only allows http/https/mailto/tel/ftp) and carries the real target in data-dispatch-href
@@ -502,6 +518,7 @@ test("a hand-authored Markdown link to a dispatch:// target resolves through dat
     expect(getAsk).toHaveBeenCalledWith("ask-1");
   } finally {
     getAsk.mockRestore();
+    getIssue.mockRestore();
     view.unmount();
   }
 });

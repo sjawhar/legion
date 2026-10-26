@@ -300,6 +300,33 @@
     ]
   },
   {
+    "body": "Blocked on&#x20;CORE-1 today.",
+    "issues": [
+      "CORE-1"
+    ],
+    "refs": [
+      "dispatch://CORE-1"
+    ]
+  },
+  {
+    "body": "Blocked on&#9;CORE-1 today.",
+    "issues": [
+      "CORE-1"
+    ],
+    "refs": [
+      "dispatch://CORE-1"
+    ]
+  },
+  {
+    "body": "Blocked on&#10;CORE-1 today.",
+    "issues": [
+      "CORE-1"
+    ],
+    "refs": [
+      "dispatch://CORE-1"
+    ]
+  },
+  {
     "body": "See XCORE-1 here.",
     "issues": [
       "XCORE-1"
@@ -319,6 +346,15 @@
   },
   {
     "body": "Done in CORE-1.",
+    "issues": [
+      "CORE-1"
+    ],
+    "refs": [
+      "dispatch://CORE-1"
+    ]
+  },
+  {
+    "body": "Blocked on CORE-1, then shipped.",
     "issues": [
       "CORE-1"
     ],
@@ -592,6 +628,36 @@
     "links": []
   },
   {
+    "body": "Blocked on `&#x20;CORE-1` today.",
+    "issues": [
+      "CORE-1"
+    ],
+    "refs": [
+      "dispatch://CORE-1"
+    ],
+    "links": []
+  },
+  {
+    "body": "Blocked on `&#9;CORE-1` today.",
+    "issues": [
+      "CORE-1"
+    ],
+    "refs": [
+      "dispatch://CORE-1"
+    ],
+    "links": []
+  },
+  {
+    "body": "Blocked on `&#10;CORE-1` today.",
+    "issues": [
+      "CORE-1"
+    ],
+    "refs": [
+      "dispatch://CORE-1"
+    ],
+    "links": []
+  },
+  {
     "body": "See `XCORE-1` here.",
     "issues": [
       "XCORE-1"
@@ -613,6 +679,16 @@
   },
   {
     "body": "Done in `CORE-1.`",
+    "issues": [
+      "CORE-1"
+    ],
+    "refs": [
+      "dispatch://CORE-1"
+    ],
+    "links": []
+  },
+  {
+    "body": "Blocked on `CORE-1,` then shipped.",
     "issues": [
       "CORE-1"
     ],

@@ -448,6 +448,8 @@ test("a reply quote renders the quoted parent formatted on one line after the ap
 
 test("the margin's collapsed thread preview renders the root formatted on one line", async () => {
   const getIssue = spyOn(api, "getIssue").mockResolvedValue(issue);
+  // The card reads who is signed in, as the margin does.
+  const whoAmI = spyOn(api, "whoAmI").mockResolvedValue({ kind: "user", login: "alice" });
   const thread: Thread = {
     anchor: null,
     key: comment.id,
@@ -488,6 +490,7 @@ test("the margin's collapsed thread preview renders the root formatted on one li
   } finally {
     view.unmount();
     getIssue.mockRestore();
+    whoAmI.mockRestore();
   }
 });
 
@@ -814,6 +817,7 @@ describe("a Dispatch picture on every surface", () => {
   });
 
   test("the margin's collapsed thread preview shows it as a thumbnail linked to the picture's page", async () => {
+    const whoAmI = spyOn(api, "whoAmI").mockResolvedValue({ kind: "user", login: "alice" });
     const thread: Thread = {
       anchor: null,
       key: comment.id,
@@ -852,6 +856,7 @@ describe("a Dispatch picture on every surface", () => {
       expectOneLine(body);
     } finally {
       view.unmount();
+      whoAmI.mockRestore();
     }
   });
 

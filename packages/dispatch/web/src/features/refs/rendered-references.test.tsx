@@ -1,17 +1,20 @@
 import { afterAll, afterEach, beforeAll, describe, expect, spyOn, test } from "bun:test";
 import { DISPATCH_TEXT_REFERENCES } from "@legion/contracts";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { focusManager, QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, render, renderHook, waitFor, within } from "@testing-library/react";
 import type { Window as HappyDOMWindow } from "happy-dom";
 import type { ReactNode } from "react";
 
 import { ApiError, api, isRetryableQueryError, type ReferenceSource } from "../../api/client";
-import type { IssueDetails, MessageRead } from "../../api/types";
+import { coalescePrefixKeys, refreshQueries } from "../../api/query-refresh";
+import { eventQueryKeys } from "../../api/sse";
+import type { Event, IssueDetails, MessageRead } from "../../api/types";
 import { MarkdownBody } from "./MarkdownBody";
 import { MarkdownPreview } from "./MarkdownPreview";
 import { warmMarkdownRenderer } from "./markdown-engine";
 import { issueQuery, referenceQuestionsQuery, useReferenceTarget } from "./reference-target";
 import type { DispatchReferenceRoute } from "./routes";
+import { Unfurl } from "./Unfurl";
 
 /**
  * The renderers' half of the shared text table (`DISPATCH_TEXT_REFERENCES`, which the server's
@@ -228,6 +231,8 @@ describe("bare references", () => {
       document: "dispatch://CORE-1/spec",
       questions: [{ ask: "dispatch://CORE-1/ask/ask-2", block_id: "q2" }],
     });
+    // The ask's own issue, which the link's target reads beside the ask.
+    const getIssue = spyOn(api, "getIssue").mockResolvedValue(issueNamed("CORE-1"));
     const getAsk = spyOn(api, "getAsk").mockResolvedValue({
       answers: [],
       ask: { id: "ask-2", issue_key: "CORE-1", question: "**Ship** the docs too?" },
@@ -250,6 +255,7 @@ describe("bare references", () => {
     } finally {
       view.unmount();
       getAsk.mockRestore();
+      getIssue.mockRestore();
       getReferenceQuestions.mockRestore();
     }
   });
@@ -265,6 +271,97 @@ describe("bare references", () => {
       await Bun.sleep(50);
       expect(getIssue).toHaveBeenCalledTimes(1);
       expect(link.textContent).toBe("dispatch://CORE-999999/spec");
+    } finally {
+      view.unmount();
+      getIssue.mockRestore();
+    }
+  });
+
+  test.each([
+    ["a code span", "Run `CORE-1` before CORE-5."],
+    ["a code block", "Before CORE-5:\n\n```\nCORE-1\n```"],
+    ["a link's destination", "See [the blocker](CORE-1), then CORE-5."],
+  ])("a key written only in %s is asked about by no reader", async (_where, markdown) => {
+    const getIssue = spyOn(api, "getIssue").mockRejectedValue(notFound());
+    const queryClient = appQueryClient();
+    const view = render(
+      withClient(
+        queryClient,
+        <>
+          <MarkdownBody markdown={markdown} source={source} />
+          <Unfurl body={markdown} source={source} />
+        </>
+      )
+    );
+    try {
+      // CORE-5, written in prose, is asked about, so both readers have read the body.
+      await waitFor(() => expect(getIssue).toHaveBeenCalledWith("CORE-5"));
+      await waitFor(() => expect(queryClient.isFetching()).toBe(0));
+      expect(getIssue.mock.calls.map(([key]) => key)).toEqual(["CORE-5"]);
+    } finally {
+      view.unmount();
+      getIssue.mockRestore();
+    }
+  });
+
+  test("a key whose issue does not exist is asked about again on no refocus or remount", async () => {
+    const getIssue = spyOn(api, "getIssue").mockRejectedValue(notFound());
+    const queryClient = appQueryClient();
+    const body = <MarkdownBody markdown="Blocked on CORE-404." />;
+    const first = render(withClient(queryClient, body));
+    try {
+      await waitFor(() => expect(getIssue).toHaveBeenCalledTimes(1));
+      await waitFor(() => expect(queryClient.isFetching()).toBe(0));
+      focusManager.setFocused(false);
+      focusManager.setFocused(true);
+      await Bun.sleep(50);
+      expect(getIssue).toHaveBeenCalledTimes(1);
+      first.unmount();
+      const second = render(withClient(queryClient, body));
+      await waitFor(() => expect(second.container.textContent).toBe("Blocked on CORE-404."));
+      await Bun.sleep(50);
+      expect(getIssue).toHaveBeenCalledTimes(1);
+      expect(second.container.querySelector("a")).toBeNull();
+    } finally {
+      cleanup();
+      focusManager.setFocused(undefined);
+      getIssue.mockRestore();
+    }
+  });
+
+  test("a key written before its issue exists links once issue.created arrives", async () => {
+    let created = false;
+    const getIssue = spyOn(api, "getIssue").mockImplementation(async (key: string) => {
+      if (created) {
+        return issueNamed(key);
+      }
+      throw notFound();
+    });
+    const queryClient = appQueryClient();
+    const view = render(withClient(queryClient, <MarkdownBody markdown="Blocked on CORE-77." />));
+    try {
+      await waitFor(() => expect(getIssue).toHaveBeenCalledTimes(1));
+      await waitFor(() => expect(queryClient.isFetching()).toBe(0));
+      expect(view.container.querySelector("a")).toBeNull();
+      created = true;
+      const event = {
+        actor: { id: "alice", kind: "user" },
+        created_at: "2026-10-26T00:00:00Z",
+        id: 12,
+        issue_key: "CORE-77",
+        notify: true,
+        payload: {},
+        project: "CORE",
+        seq: 1,
+        type: "issue.created",
+      } as Event;
+      // What the event stream does with an event (`api/sse.ts`).
+      refreshQueries(queryClient, coalescePrefixKeys(eventQueryKeys(event)));
+      const link = await within(view.container).findByRole("link", {
+        name: "CORE-77 Title of CORE-77",
+      });
+      expect(link.getAttribute("href")).toBe("/issues/CORE-77");
+      expect(getIssue).toHaveBeenCalledTimes(2);
     } finally {
       view.unmount();
       getIssue.mockRestore();

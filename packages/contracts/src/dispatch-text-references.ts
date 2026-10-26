@@ -14,13 +14,14 @@
  *
  * A text also cites what it writes bare: an issue key (`CORE-12`) that names an existing issue, as
  * `dispatch://CORE-12`, and `#` with a question block's id of the text's document, as that
- * question's ask. Either stands alone: after the start of the text, whitespace (or the numeric
- * reference `&#32;` stored markdown writes it as), or one of ( [ " ' * _ > ` ~ |. A key ends at the
- * end of the text or a character that is not a letter, a digit, `-`, `/`, `#` or `@`, and the
- * sentence punctuation and delimiters `.` `,` `:` `;` `_` `*` `~` end it only when no letter or
- * digit follows them. A `#id` is the longest run of `[A-Za-z0-9_-]`, or that run without its
- * trailing `_` and `-` when no question holds the whole run. Neither is read inside an address.
- * The server reads both in code and in a link's destination, where no renderer links them.
+ * question's ask. Either stands alone: after the start of the text, whitespace (or a numeric
+ * reference to whitespace, such as the `&#32;` stored markdown writes a space as), or one of
+ * ( [ " ' * _ > ` ~ |. A key ends at the end of the text or a character that is not a letter, a
+ * digit, `-`, `/`, `#` or `@`, and the sentence punctuation and delimiters `.` `,` `:` `;` `_` `*`
+ * `~` end it only when no letter or digit follows them. A `#id` is the longest run of
+ * `[A-Za-z0-9_-]`, or that run without its trailing `_` and `-` when no question holds the whole
+ * run. Neither is read inside an address. The server reads both in code and in a link's
+ * destination, where no renderer links them.
  */
 export const DISPATCH_TEXT_REFERENCES: readonly {
   body: string;
@@ -179,11 +180,15 @@ export const DISPATCH_TEXT_REFERENCES: readonly {
     issues: ["CORE-1"],
     refs: ["dispatch://CORE-1"],
   },
-  // Stored markdown writes the space at a mark's edge as its numeric reference.
+  // Stored markdown writes the whitespace at a mark's edge as its numeric reference, decimal or hex.
   { body: "Blocked on&#32;CORE-1 today.", issues: ["CORE-1"], refs: ["dispatch://CORE-1"] },
+  { body: "Blocked on&#x20;CORE-1 today.", issues: ["CORE-1"], refs: ["dispatch://CORE-1"] },
+  { body: "Blocked on&#9;CORE-1 today.", issues: ["CORE-1"], refs: ["dispatch://CORE-1"] },
+  { body: "Blocked on&#10;CORE-1 today.", issues: ["CORE-1"], refs: ["dispatch://CORE-1"] },
   { body: "See XCORE-1 here.", issues: ["XCORE-1"], refs: ["dispatch://XCORE-1"] },
   { body: "CORE-1's spec is done.", issues: ["CORE-1"], refs: ["dispatch://CORE-1"] },
   { body: "Done in CORE-1.", issues: ["CORE-1"], refs: ["dispatch://CORE-1"] },
+  { body: "Blocked on CORE-1, then shipped.", issues: ["CORE-1"], refs: ["dispatch://CORE-1"] },
   // A link's destination is a key the server reads and no renderer links: it is inside a link.
   {
     body: "See [the blocker](CORE-1).",
@@ -312,6 +317,24 @@ export const DISPATCH_TEXT_REFERENCES: readonly {
     refs: ["dispatch://CORE-1"],
     links: [],
   },
+  {
+    body: "Blocked on `&#x20;CORE-1` today.",
+    issues: ["CORE-1"],
+    refs: ["dispatch://CORE-1"],
+    links: [],
+  },
+  {
+    body: "Blocked on `&#9;CORE-1` today.",
+    issues: ["CORE-1"],
+    refs: ["dispatch://CORE-1"],
+    links: [],
+  },
+  {
+    body: "Blocked on `&#10;CORE-1` today.",
+    issues: ["CORE-1"],
+    refs: ["dispatch://CORE-1"],
+    links: [],
+  },
   { body: "See `XCORE-1` here.", issues: ["XCORE-1"], refs: ["dispatch://XCORE-1"], links: [] },
   {
     body: "`CORE-1's` spec is done.",
@@ -320,6 +343,12 @@ export const DISPATCH_TEXT_REFERENCES: readonly {
     links: [],
   },
   { body: "Done in `CORE-1.`", issues: ["CORE-1"], refs: ["dispatch://CORE-1"], links: [] },
+  {
+    body: "Blocked on `CORE-1,` then shipped.",
+    issues: ["CORE-1"],
+    refs: ["dispatch://CORE-1"],
+    links: [],
+  },
   {
     body: "See `[the blocker](CORE-1)`.",
     issues: ["CORE-1"],
