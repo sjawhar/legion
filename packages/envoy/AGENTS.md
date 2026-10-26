@@ -39,6 +39,7 @@ events to the right session.
 | Migration runners' shared rules | `internal/pgmigrate/` | Dispatch's and the secrets broker's runners: the set loader that refuses a set before anything applies (`Load`), the lock bound on every migration (`LockTimeout`), the watch that names the lock a timed-out migration wanted, and the pre-deploy census of pending migrations (`Census`, and `CensusTables`, its one reading of what a migration locks; the `<version>_<name>.census.sql` a migration declares; `envoy-dispatch census`); a migration runs while the build before it is still serving, which is what it may add and what it must split across two releases (`cmd/dispatch/README.md`, "Database migrations") |
 | Postgres LISTEN loop's shared rules | `internal/pglisten/` | Dispatch's and the secrets broker's listeners: one LISTEN connection that dials, reports each notification, pings itself when idle, wakes a caller on its own goroutine, and redials on every failure (`Listener`, `Run`, `RedialBackoff`), because a connection waiting for a notification must outlive every failure between it and the server (INFRA-66). Shared the way `internal/pgmigrate` is, since the broker's cross-pod secret-reread fan-out (`internal/broker/reread`) listens on the same kind of connection as Dispatch's delivery hub and event stream relay (`internal/dispatch/api`) and its stale-room evictor (`internal/dispatch/docs`); each caller sets `Listener.Owner`, the prefix of the one line the loop logs, and an unset `Owner` logs `dispatch` |
 | GitHub webhook redelivery | `internal/dispatch/redeliver/`, `cmd/dispatch/redeliver.go` | Dispatch's sweep of the App webhook's failed deliveries; `internal/dispatch/githubapp/githubapptest` fakes GitHub's delivery API |
+| Meaning search's embedder and coverage | `internal/dispatch/embed/`, `internal/dispatch/embedqueue/`, `cmd/dispatch/embedder.go` | Cohere Embed v4 on AWS Bedrock (`bedrock.go`, the default) or Azure AI Foundry (`azure.go`, `azuretoken.go` for the keyless Entra exchange), chosen by `DISPATCH_EMBEDDER`; each client's `Identity` is what `embeddings.model` records and search compares, and its `Limits` pace the queue. `embedqueue/coverage.go` is the coverage pass the server runs at start and every 10 minutes (no backfill subcommand) and the report `GET /api/v1/search/coverage` serves (`cmd/dispatch/README.md`, "Search") |
 | Document tree (Proof schema) | `internal/dispatch/pmdoc/` | render/parse/diff of Proof documents; fixtures from the fork's headless engine |
 | Delivery measures | `internal/dispatch/delivery/measures/` | pure DORA computation (`measures.go`) and the Pipeline page's timings (`pipeline.go`), each ported formula by formula from the delivery prototype; `api/delivery_measures.go` serves the first as `GET /api/v1/delivery/measures`, and as the timeline's `measures`, over the timeline's facet pipeline (`filteredDeliveryPullRequests`), and `api/delivery_pipeline.go` the second as `GET /api/v1/delivery/pipeline`, its clock `?at=` or now; `delivery/reconcile_backfill.go`'s `backfillRuns` fills older runs' `head_branch` and `event` once, and deploy runs' `created_at` once more under its own step; a pull request ships with the earliest-finishing successful production deploy whose run GitHub created after its merge (`delivery/containment.go`, `DeliveryRun.Created`) |
 | `issue.deployed`: a merged pull request reached production | `internal/dispatch/delivery/deployed.go` | The delivery timeline writes one `issue.deployed` event on a pull request's issue the moment it first knows which production run shipped it, by intake (`intake.go`) or by the reconcile (`reconcile.go`), once per pull request, as the system actor `delivery-timeline`; the outbox publishes it on the issue's subject (`notifications.dispatch.issue.<KEY>.issue.deployed`), where the Legion daemon consumes it to wake the production check the issue's close opened. Payload shape: `IssueDeployedEventPayload` in `packages/contracts/src/dispatch-api.ts` |
@@ -503,11 +504,11 @@ each read had before. Websocket admission still uses `loadTree`, because it need
 update to preload the room.
 
 A read of a resident room outside a write never walks the live tree. It reads the room as of one
-moment under its document lock (`readLive`): the replica the room's update observer keeps
-(`renderedReplica`, below), brought up to date under that lock with what the room gained since, or a
-copy taken under the lock (`snapshotDocument`, `crdt.EncodeStateAsUpdateV1`) while the room has no
-replica - no update has reached it since it loaded - or another holds the replica or the observer
-waits for it.
+moment (`readLive`): the replica the room's update observer keeps (`renderedReplica`, below), when
+it holds every update the room has committed, or a copy taken under the room's document lock
+(`snapshotDocument`, `crdt.EncodeStateAsUpdateV1`) while the room has no replica - no transaction
+has reached it since it loaded - while another holds the replica or the observer waits for it, and
+in the moment between a commit and the observer that classifies it. A read never moves the replica.
 `GET /text`, `GET /blocks` and the block route use this resident tree through `heldTree`; the
 document websocket's admission check (`loadTree`), a read outside any transaction (`docTree`), a
 published write's loss check (`recordPublishedLoss`), a version's capture
@@ -532,22 +533,22 @@ reader that edits its tree changes nothing a later read of the replica meets
 (`TestEditingALiveReadsTreeChangesNoLaterRead`).
 
 A read takes up to three locks, in one order: the room's state lock; then the replica's, which a
-read only tries; then the live document's, for the catch-up's or the copy's encode. A version's
+read only tries; then the live document's, for the copy's encode. A version's
 capture takes its authors under the state lock and releases it before it takes the room through
 `holdLive`, which keeps the replica's lock, when it reads the replica, until the capture has walked
 it: an author the update observer credits after that take is numbered past it and stays pending
 for the next version, whether or not the copy holds the edit (`captureLiveTextAndAuthors`,
 LEGION-503). The update observer's own turn with the replica (`renderedReplica.observe`) is the
 one exception to that order: it holds the replica's lock for its whole call (`lockForUpdate`, a
-blocking acquisition, unlike every other caller's), and its `onChanged` callback
-(`observeAskBlocksForUpdate`) takes the state lock from inside it, nested the other way around
-(LEGION-503). This stays deadlock-free because every other acquisition of the replica's lock only
+blocking acquisition, unlike every other caller's), and the classification it runs for each update
+it drains (`observeAskBlocksForUpdate`, `creditContentChange`, `recordUpdateClass`) takes the state
+lock from inside it, nested the other way around (LEGION-503). This stays deadlock-free because every other acquisition of the replica's lock only
 tries it (`hold`, under `holdLive`/`readLive`) rather than blocking on it, and always after
 releasing the state lock first, never while holding it - so nothing can be waiting on the state
 lock while the observer waits for anyone else to release the replica's; only a Yjs transaction's
 own function holds a document's lock, and it takes neither of the others. So the
 caller of `readLive` or `holdLive` may hold the room's state lock, and must not hold the live
-document's lock - run inside a Yjs transaction on it - since the catch-up and the copy encode under
+document's lock - run inside a Yjs transaction on it - since the copy encodes under
 that lock. A read that may load its room (a version's capture, `docTree`, `VerifyMark`'s
 subscription) takes what it reads inside the `Server.Apply` that loads and holds the room: a room
 looked up again with `GetDoc` once that Apply returned can have been evicted in between.
@@ -560,7 +561,7 @@ therefore only tries the lock, and
 reads a copy when another read holds it or an observer waits for it (`lockForUpdate`), so reads
 never queue behind each other or ahead of a waiting observer. `BenchmarkKeystrokeBesideReads`
 measures the wait: a keystroke's transaction and the observer's whole turn with the replica -
-the catch-up and the render (`renderedReplica.observe`, through `renderDocumentForUpdate` since
+the drain of the room's update log, the update applied to the replica and the render (`renderedReplica.observe`, through `renderDocumentForUpdate` since
 the copy's removal), 120 keystrokes 20 ms apart on a 524 KiB document, beside reads. One run of
 each - the render's own cost, hundreds of ms a keystroke regardless of which read mechanism races
 beside it, put repeated sampling out of this pass's time budget - keystroke latency p50 / p90 /
@@ -743,18 +744,30 @@ never documents touched since the process started (LEGION-513). A room an `Apply
 peer is idle-evicted only by a ygo whose `Apply` stamps the empty room idle (LEGION-484).
 `PgVersioned`'s per-room locks likewise live only while a caller holds or waits for one.
 
-The room's update observer (`updateChangesMarkdown`) renders a replica of the room, the one its
-reads walk, not the live tree, since ygo fires it after the transaction has
-released the document's lock and another write can be integrating meanwhile (`renderedReplica`). It
-keeps the rendering it compares the next one with in that replica (`renderedReplica.markdown`), so
-each instance of a room compares with its own, and it takes the room's state lock only once it has
-released the replica. The replica is copied from the room on its first update and then brought up
-to date under the room's lock with what the room gained since its state vector, as `forkLive`
-brings a fork up to date. The update the observer is handed cannot stand in: two transactions'
-observers run concurrently in either order, and each update carries the room's whole delete set.
-On a 1 MiB document a catch-up after one typed character took about 8 ms where the render took
-about 160 ms and a whole copy about 420 ms, and the replica holds a whole copy's heap (above) while
-its room is resident.
+The room's update observer renders a replica of the room, the one its reads walk, not the live
+tree, since ygo fires it after the transaction has released the document's lock and another write
+can be integrating meanwhile (`renderedReplica`). The replica moves only through the room's commits,
+one at a time and in commit order: ygo appends each committed transaction's update to the room's
+update log under the document's lock, before any observer of that transaction runs
+(`crdt.UpdateLog`, sjawhar/ygo v1.51.3-sami.4), and the observer that holds the replica's lock drains
+the log, applying and rendering each update in turn and comparing each rendering with the one
+before it (`updateChangesMarkdown`). So every committed update is classified, and its authors
+credited, exactly once, by whichever observer reaches the log first, against the room as the
+commit before it left it. Catching the replica up to the room instead took in every commit since
+the last one rendered: when a published write's observer ran first, it counted a browser's edit in
+its own change, which credits no one, and the browser's own observer then found nothing changed,
+so the browser was on no version and in no pending row. The update an observer is
+handed cannot stand in for the log: two transactions' observers run concurrently in either order,
+and each update carries the room's whole delete set. The log records the room's state as of just
+before its first transaction since the load, which the replica starts from, so a room that is only
+read holds no replica; a replica that cannot apply an update starts again from a fresh base at the
+room's next commit (`UpdateLog.Reset`), and counts the updates it could not place as content
+changes. A repair's update is applied and rendered like any other, so the update after it is
+measured against the room it left, but its class is recorded by its own observer. The test hooks
+around the observer (`beforeObserveUpdate`, `afterCreditUpdate`) hold an observer, not an update:
+another transaction's observer classifies a held one's update if it reaches the log first. On a
+1 MiB document the render took about 160 ms and a whole copy about 420 ms, and the replica holds a
+whole copy's heap (above) while its room is resident.
 
 Document edits (`POST /api/v1/artifacts/{id}/edits`, `docs/edits.go` `applyOperation`) are
 `replace`, `delete`, `insert`, `retype`, `move`, `delete_row`, and `delete_column`. Inside a code
@@ -2293,7 +2306,7 @@ the synchronous listener call records the sent or failed attempt instead of blin
   human's new comment on a document it wrote.
 - `artifact.human_edited` goes to the issue's route and to each session the document credits,
   never to a person. Dispatch appends it once a document has been quiet for 30 seconds after a
-  person's last settled browser version (`document_edit_notices`, migration 0118, swept every 5 s
+  person's last settled browser version (`document_edit_notices`, migration 0120, swept every 5 s
   under the `edit-notices` lease by `docs.RunEditNotices`); its actor is the last person the
   window knows edited, and its payload names the document, the two versions the quiet window spans, each person
   who edited, and the unified diff of the two versions, cut at its last line end within 4,096

@@ -891,6 +891,109 @@ func TestConcurrentBrowserAndVersionedWritesListEveryAuthorOnceAfterEveryRound(t
 	}
 }
 
+// A browser's edit is credited when another transaction's update observer reaches the room first.
+// ygo runs a transaction's update observers after it has released the document's lock, so the
+// observers of a browser's edit and of an agent's write published beside it run in either order.
+// Here the browser's observer is held before it classifies anything, and the published write's
+// observer runs first. It used to catch the room's rendered replica up past both commits, count the
+// browser's change in its own, and credit no one, as a published write is credited when it
+// commits; the browser's own observer then found the rendering unchanged and credited no one
+// either. The browser was on no version and in no pending row, which is how the concurrent rounds
+// above lost round1-browser once in CI. The room's update log now hands the first
+// observer both commits in commit order, each measured against the room the commit before it left.
+//
+// Each row is one shape of the browser's edit: a paragraph added before the agent's write forks
+// the room, one added after the write commits and before it is published (the agent's version
+// then lacks it), and a paragraph deleted, which no update's own inserts can show. The last row is
+// an edit no rendering carries, a heading id the browser editor derives, which must credit nobody.
+func TestABrowserEditAnotherTransactionsObserverReachesFirstIsCreditedExactly(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		seed string
+		edit func(t *testing.T) func(*pmdoc.Node) *pmdoc.Node
+		// afterCommit applies the browser's edit once the agent's write has committed and before
+		// its publish reaches the room, rather than before the write forks the room.
+		afterCommit bool
+		// places is where bob must be once the updates are durable: listed on one version or
+		// owed (1), or neither (0) for an edit that changes nothing a version records.
+		places int
+	}{
+		{
+			name:   "a paragraph added before the write forks the room",
+			seed:   "# Decision\n\nContext.\n",
+			edit:   func(t *testing.T) func(*pmdoc.Node) *pmdoc.Node { return appendBlocks(t, "Bob's paragraph.\n") },
+			places: 1,
+		},
+		{
+			name:        "a paragraph added after the write commits",
+			seed:        "# Decision\n\nContext.\n",
+			edit:        func(t *testing.T) func(*pmdoc.Node) *pmdoc.Node { return appendBlocks(t, "Bob's paragraph.\n") },
+			afterCommit: true,
+			places:      1,
+		},
+		{
+			name:   "a paragraph deleted",
+			seed:   "# Decision\n\nContext.\n\nGone soon.\n",
+			edit:   func(*testing.T) func(*pmdoc.Node) *pmdoc.Node { return withoutTopLevelBlock("Gone soon.") },
+			places: 1,
+		},
+		{
+			name:   "a heading id the editor derives",
+			seed:   "# Decision\n\nContext.\n",
+			edit:   func(*testing.T) func(*pmdoc.Node) *pmdoc.Node { return setHeadingID("decision") },
+			places: 0,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			service, artifactID := newTestService(t)
+			service.settle = time.Hour
+			seedServiceText(t, service, artifactID, test.seed)
+			settleCurrentGeneration(t, service, artifactID)
+			bob := model.Actor{Kind: "user", ID: "bob"}
+			agent := model.Actor{Kind: "session", ID: "agent"}
+			service.addConnection(artifactID, 1, bob)
+
+			var release func()
+			hold := func() {
+				release = holdPeerEdit(t, service, artifactID, &service.beforeObserveUpdate, test.edit(t))
+			}
+			if test.afterCommit {
+				service.afterLiveCommit = func(room string) {
+					if room == artifactID && release == nil {
+						hold()
+					}
+				}
+			} else {
+				hold()
+			}
+			// The agent's write forks the room, versions it, commits and publishes; the
+			// publish's own observer reaches the room's update log while bob's is held.
+			writeThroughLedger(t, service, artifactID, agent, "Agent's paragraph.\n", withSnapshotVersion)
+			service.afterLiveCommit = nil
+			if release == nil {
+				t.Fatal("bob's edit never reached the room, so nothing here is tested")
+			}
+			// Bob's own observer is still held, and so is the append his update's persistence
+			// makes after it: whatever credits him by now is the published write's observer,
+			// which reached the room's update log first.
+			if credited := slices.Contains(pendingAuthors(t, service, artifactID), bob); credited != (test.places == 1) {
+				t.Fatalf("with bob's own observer held, bob is credited = %t, want %t: the published write's observer classifies his edit", credited, test.places == 1)
+			}
+			release()
+			waitForLandedAppends(t, service, artifactID)
+
+			listed := countVersionAuthor(t, service.store, artifactID, bob)
+			owed := slices.Contains(pendingAuthors(t, service, artifactID), bob)
+			if places := listed + map[bool]int{true: 1}[owed]; places != test.places {
+				t.Fatalf("bob is listed on %d versions and owed %t, want %d place(s)", listed, owed, test.places)
+			}
+			if listed := countVersionAuthor(t, service.store, artifactID, agent); listed != 1 {
+				t.Fatalf("the agent is listed on %d versions, want the one its write committed", listed)
+			}
+		})
+	}
+}
+
 // Each browser append records its credit in the document's pending authors and pending-settlement
 // row: authors accumulate, a later credit for the same actor replaces the earlier one, a credit
 // naming authors sets the row's latest edit source to its own, none after an edit no one actor can

@@ -153,9 +153,10 @@
   `process.exit` dropped whatever a pipe had not yet taken, so every omp session, which reads the
   command through one, lost the end of any output over the pipe's buffer (8 KB to 16 KB) with exit
   code 0.
-- A `dispatch` command that takes `--issue` takes a bare issue key as its `--issue`
-  (`dispatch read ACME-12` is `dispatch read --issue ACME-12`), once and only when `--issue` is
-  not also given. Every other positional value is still refused.
+- A `dispatch` command that takes `--issue` takes a bare issue key as its first argument as its
+  `--issue` (`dispatch read ACME-12` is `dispatch read --issue ACME-12`), only when `--issue` is
+  not also given. A key-shaped word anywhere later (`message --body hi SHA-256`) is refused, as is
+  every other positional value.
 - `dispatch comment`, `suggest`, `doc-edit` and `doc-read` refuse an ask, comment or message link
   as `--ref`, before any request. They take `--ref` as the issue or document they act on, so such
   a link used to post or read on its owner and drop the item: a comment meant for an ask's thread
