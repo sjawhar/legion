@@ -2,88 +2,112 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-252",
-  "completed": "2026-10-26T07:38:12Z",
+  "completed": "2026-10-26T09:20:29Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2226",
   "proof": [
     {
       "criterion": "AC1: a labelled root waiting in the admission queue, then made a child of a live tree, leaves the queue and gets no admission slot or architect of its own",
       "surface": "whole daemon over real PostgreSQL and its own nats-server, driven by JetStream Dispatch envelopes and the Legion HTTP API (scripts/e2e/child-adoption.sh, step queued-root-leaves-the-line)",
-      "command": "LEGION_TEST_PG_DSN=<postgres> LEGION_E2E_NATS_BIN=<nats-server> bash scripts/e2e/child-adoption.sh (transcript: https://github.com/sjawhar/legion/pull/2226#issuecomment-6410739648)",
-      "observed": "the root is in admission.waiting; after its re-parent envelope it is out of admission.waiting, recorded in the live tree at generation 2, planning with its planner's claim, no slot, no architect, and the tree's architect got '<C> joined the tree of <T> from the admission queue' (re-run at ee9ec60b7930: PASS in 37s, ten steps ok)",
-      "headSha": "ee9ec60b7930b8dfa78c78701791aaa6cc959bce",
+      "command": "LEGION_TEST_PG_DSN=<postgres> LEGION_E2E_NATS_BIN=<nats-server> bash scripts/e2e/child-adoption.sh (transcript: https://github.com/sjawhar/legion/pull/2226#issuecomment-6412488350)",
+      "observed": "the root is in admission.waiting; after its re-parent envelope it is out of admission.waiting, recorded in the live tree at generation 2, planning with its planner's claim, no slot, no architect, and the tree's architect got '<C> joined the tree of <T> from the admission queue' (re-run at 5f1f78dc08ae: PASS in 40s, eleven steps ok)",
+      "headSha": "5f1f78dc08ae5ae3c7e276f856265eb8fb59efe6",
       "negativeControl": "the same driver against the base commit e5062b7987bb's daemon: FAIL at proof, 'timed out waiting for <C> planning with its planner's claim' in queued-root-leaves-the-line"
     },
     {
       "criterion": "AC2: one release_children adopts it, from todo and from backlog; park_child no longer answers ISSUE_OUTSIDE_TREE; planning starts under an open gate; in the tree when the release answers",
       "surface": "POST /legion/v1/waves/release and /legion/v1/children/park on the whole daemon (steps release-adopts-from-todo, release-adopts-from-backlog)",
-      "command": "LEGION_TEST_PG_DSN=<postgres> LEGION_E2E_NATS_BIN=<nats-server> bash scripts/e2e/child-adoption.sh (transcript: https://github.com/sjawhar/legion/pull/2226#issuecomment-6410739648)",
-      "observed": "release answers 200; before any further envelope the record is in the caller's tree (todo: planning at generation 2 and no Dispatch write; backlog: parked at done, one PATCH todo, and planning once that write's echo arrives); park_child answers 200 (re-run at ee9ec60b7930: PASS in 37s, ten steps ok)",
-      "headSha": "ee9ec60b7930b8dfa78c78701791aaa6cc959bce",
+      "command": "LEGION_TEST_PG_DSN=<postgres> LEGION_E2E_NATS_BIN=<nats-server> bash scripts/e2e/child-adoption.sh (transcript: https://github.com/sjawhar/legion/pull/2226#issuecomment-6412488350)",
+      "observed": "release answers 200; before any further envelope the record is in the caller's tree (todo: planning at generation 2 and no Dispatch write; backlog: parked at done, one PATCH todo, and planning once that write's echo arrives); park_child answers 200 (re-run at 5f1f78dc08ae: PASS in 40s, eleven steps ok)",
+      "headSha": "5f1f78dc08ae5ae3c7e276f856265eb8fb59efe6",
       "negativeControl": "the base daemon fails the run at the first adoption step (queued-root-leaves-the-line) and never reaches a release that adopts"
     },
     {
       "criterion": "AC3: the INFRA-214 state (label off, backlog, back to todo, record at done) is adopted the same way, and the old root's linger expiry does not stop it",
       "surface": "whole daemon (step release-adopts-infra-214-state): release, then the old linger's deadline and the outbox",
-      "command": "LEGION_TEST_PG_DSN=<postgres> LEGION_E2E_NATS_BIN=<nats-server> bash scripts/e2e/child-adoption.sh (transcript: https://github.com/sjawhar/legion/pull/2226#issuecomment-6410739648)",
-      "observed": "the record reaches todo/phase done/lingering in its own tree; release answers 200 with it planning in the live tree; past its old linger deadline it is still planning with its planner, no tree_close and no workspace_remove row is queued for it, and the runtime got no suspend, release or cleanup for it (re-run at ee9ec60b7930: PASS in 37s, ten steps ok)",
-      "headSha": "ee9ec60b7930b8dfa78c78701791aaa6cc959bce",
+      "command": "LEGION_TEST_PG_DSN=<postgres> LEGION_E2E_NATS_BIN=<nats-server> bash scripts/e2e/child-adoption.sh (transcript: https://github.com/sjawhar/legion/pull/2226#issuecomment-6412488350)",
+      "observed": "the record reaches todo/phase done/lingering in its own tree; release answers 200 with it planning in the live tree; past its old linger deadline it is still planning with its planner, no tree_close and no workspace_remove row is queued for it, and the runtime got no suspend, release or cleanup for it (re-run at 5f1f78dc08ae: PASS in 40s, eleven steps ok)",
+      "headSha": "5f1f78dc08ae5ae3c7e276f856265eb8fb59efe6",
       "negativeControl": "outbox test TestAWorkspaceRemovalOfATreeTheIssueLeftActsOnNothing fails with the tree fence removed ('workspace removals after the former tree's row = 1, want none')"
     },
     {
       "criterion": "AC4: a release that cannot adopt a child returns an error naming the child and why, not released",
       "surface": "POST /legion/v1/waves/release on the whole daemon (step release-refuses)",
-      "command": "LEGION_TEST_PG_DSN=<postgres> LEGION_E2E_NATS_BIN=<nats-server> bash scripts/e2e/child-adoption.sh (transcript: https://github.com/sjawhar/legion/pull/2226#issuecomment-6410739648)",
-      "observed": "409 CHILD_IN_OTHER_TREE — '<G> runs in the tree of <U>, not <T>'; G's record unchanged and no Dispatch write (re-run at ee9ec60b7930: PASS in 37s, ten steps ok)",
-      "headSha": "ee9ec60b7930b8dfa78c78701791aaa6cc959bce",
+      "command": "LEGION_TEST_PG_DSN=<postgres> LEGION_E2E_NATS_BIN=<nats-server> bash scripts/e2e/child-adoption.sh (transcript: https://github.com/sjawhar/legion/pull/2226#issuecomment-6412488350)",
+      "observed": "409 CHILD_IN_OTHER_TREE — '<G> runs in the tree of <U>, not <T>'; G's record unchanged and no Dispatch write (re-run at 5f1f78dc08ae: PASS in 40s, eleven steps ok)",
+      "headSha": "5f1f78dc08ae5ae3c7e276f856265eb8fb59efe6",
       "negativeControl": "a release of an adoptable child in the same run answers 200 and adopts it (release-adopts-from-todo), so the 409 is the refusal, not a broken route"
     },
     {
       "criterion": "D2 (architect's reversal, Envoy 495d1feb672177477e891f5fdec91938): a labelled todo root under an unrecorded child of a live tree gets no slot and no architect after a slot frees, and one release_children of it adopts it",
       "surface": "whole daemon (step held-under-an-unreleased-child)",
-      "command": "LEGION_TEST_PG_DSN=<postgres> LEGION_E2E_NATS_BIN=<nats-server> bash scripts/e2e/child-adoption.sh (transcript: https://github.com/sjawhar/legion/pull/2226#issuecomment-6410739648)",
-      "observed": "H is recorded as its own root and is not in admission.waiting; with a slot freed (admission.active [T] of cap 2) it holds no slot and no architect over 3 s; release {H} answers 200 and H is planning in T, park_child 200 (re-run at ee9ec60b7930: PASS in 37s, ten steps ok)",
-      "headSha": "ee9ec60b7930b8dfa78c78701791aaa6cc959bce",
+      "command": "LEGION_TEST_PG_DSN=<postgres> LEGION_E2E_NATS_BIN=<nats-server> bash scripts/e2e/child-adoption.sh (transcript: https://github.com/sjawhar/legion/pull/2226#issuecomment-6412488350)",
+      "observed": "H is recorded as its own root and is not in admission.waiting; with a slot freed (admission.active [T] of cap 2) it holds no slot and no architect over 3 s; release {H} answers 200 and H is planning in T, park_child 200 (re-run at 5f1f78dc08ae: PASS in 40s, eleven steps ok)",
+      "headSha": "5f1f78dc08ae5ae3c7e276f856265eb8fb59efe6",
       "negativeControl": "with record.Waiting's ancestor filter disabled, TestAQueuedRootUnderAnUnreleasedChildOfALiveTreeTakesNoSlot, TestBootReconcileHoldsATodoUnderAnUnreleasedChildOfALiveTree and TestReleaseAdoptsAHeldRootUnderAnUnreleasedChild fail with the root promoted to in_progress"
     },
     {
       "criterion": "Tester's failure (test.json failures[0]): a todo held under an unreleased child of a live tree queues as a root of its own once a person moves that parent out from under the tree, without an event of its own",
       "surface": "whole daemon (scripts/e2e/child-adoption.sh step held-root-queues-once-its-parent-leaves) and the tester's red test TestATodoHeldUnderAnUnreleasedChildQueuesOnceItsParentLeavesTheLiveTree (packages/daemon/internal/daemon, unmodified)",
-      "command": "LEGION_TEST_PG_DSN=<postgres> LEGION_E2E_NATS_BIN=<nats-server> bash scripts/e2e/child-adoption.sh (transcript: https://github.com/sjawhar/legion/pull/2226#issuecomment-6410739648)",
-      "observed": "H2 held under unreleased P2 (not waiting, no slot, no architect over 3 s with admission.active [T] of cap 2); P2's own issue.updated envelope moving it to no parent → H2 holds the free slot with its architect's claim launching, recorded in its own tree, P2 still unrecorded; the red test passes (re-run at ee9ec60b7930: PASS in 37s, ten steps ok)",
-      "headSha": "ee9ec60b7930b8dfa78c78701791aaa6cc959bce",
+      "command": "LEGION_TEST_PG_DSN=<postgres> LEGION_E2E_NATS_BIN=<nats-server> bash scripts/e2e/child-adoption.sh (transcript: https://github.com/sjawhar/legion/pull/2226#issuecomment-6412488350)",
+      "observed": "H2 held under unreleased P2 (not waiting, no slot, no architect over 3 s with admission.active [T] of cap 2); P2's own issue.updated envelope moving it to no parent → H2 holds the free slot with its architect's claim launching, recorded in its own tree, P2 still unrecorded; the red test passes (re-run at 5f1f78dc08ae: PASS in 40s, eleven steps ok)",
+      "headSha": "5f1f78dc08ae5ae3c7e276f856265eb8fb59efe6",
       "negativeControl": "the same seven-step driver against the previous head 9c706cb12173's daemon (fresh database): FAIL at proof, 'timed out waiting for <H2> in the free slot with an architect of its own' in held-root-queues-once-its-parent-leaves; the red test failed there with '<C> holds no slot with one free after its parent <P> left the tree of <T>'"
     },
     {
       "criterion": "Review finding 1: a todo child of a held root waits with it (no slot, no architect) and moves with it when it is adopted",
       "surface": "whole daemon (step child-of-a-held-root-waits-with-it); admit TestAChildOfAHeldRootWaitsWithIt",
-      "command": "LEGION_TEST_PG_DSN=<postgres> LEGION_E2E_NATS_BIN=<nats-server> bash scripts/e2e/child-adoption.sh (transcript: https://github.com/sjawhar/legion/pull/2226#issuecomment-6410739648)",
-      "observed": "K3 labelled todo under held H3 is recorded in H3's tree; over 3 s with a slot free neither has a slot, an architect or a launch; release {H3} by T's architect answers 200 and both are recorded in T at generation 2, then planning",
-      "headSha": "ee9ec60b7930b8dfa78c78701791aaa6cc959bce",
+      "command": "LEGION_TEST_PG_DSN=<postgres> LEGION_E2E_NATS_BIN=<nats-server> bash scripts/e2e/child-adoption.sh (transcript: https://github.com/sjawhar/legion/pull/2226#issuecomment-6412488350)",
+      "observed": "K3 labelled todo under held H3 is recorded in H3's tree; over 3 s with a slot free neither has a slot, an architect or a launch; release {H3} by T's architect answers 200 and both are recorded in T at generation 2, then planning (re-run at 5f1f78dc08ae: PASS in 40s, eleven steps ok)",
+      "headSha": "5f1f78dc08ae5ae3c7e276f856265eb8fb59efe6",
       "negativeControl": "the same ten-step driver against the reviewed code head 6c58a2716d7c's daemon (exported tree, fresh database): FAIL at proof, 'the daemon records <K3> in the tree of <K3>, want <H3>' in child-of-a-held-root-waits-with-it"
     },
     {
       "criterion": "Review finding 2 (architect ruling: D1 wins): a root that ran as a tree of its own, or carries a handed-over run, keeps queueing under an unreleased child of a live tree and is never held",
       "surface": "whole daemon (step a-root-that-ran-keeps-queueing); admit TestARootThatRanKeepsQueueingUnderAnUnreleasedChild (lifecycle row and carried orphan)",
-      "command": "LEGION_TEST_PG_DSN=<postgres> LEGION_E2E_NATS_BIN=<nats-server> bash scripts/e2e/child-adoption.sh (transcript: https://github.com/sjawhar/legion/pull/2226#issuecomment-6410739648)",
-      "observed": "R with a tree_lifecycles row, labelled todo under unreleased P4 under T, takes the free slot with its architect's claim launching and records no recorded ancestor",
-      "headSha": "ee9ec60b7930b8dfa78c78701791aaa6cc959bce",
+      "command": "LEGION_TEST_PG_DSN=<postgres> LEGION_E2E_NATS_BIN=<nats-server> bash scripts/e2e/child-adoption.sh (transcript: https://github.com/sjawhar/legion/pull/2226#issuecomment-6412488350)",
+      "observed": "R with a tree_lifecycles row, labelled todo under unreleased P4 under T, takes the free slot with its architect's claim launching and records no recorded ancestor (re-run at 5f1f78dc08ae: PASS in 40s, eleven steps ok)",
+      "headSha": "5f1f78dc08ae5ae3c7e276f856265eb8fb59efe6",
       "negativeControl": "at 6c58a2716d7c (driver copy skipping the earlier new step): 'timed out waiting for <R> in the free slot with an architect of its own'"
     },
     {
       "criterion": "Review finding 3: moving a recorded ancestor out from under the tree frees the held root (AGENTS.md now states the behaviour the code has)",
       "surface": "whole daemon (step held-root-queues-once-a-recorded-ancestor-leaves); daemon TestAHeldRootQueuesOnceARecordedAncestorLeavesTheLiveTree",
-      "command": "LEGION_TEST_PG_DSN=<postgres> LEGION_E2E_NATS_BIN=<nats-server> bash scripts/e2e/child-adoption.sh (transcript: https://github.com/sjawhar/legion/pull/2226#issuecomment-6410739648)",
-      "observed": "H5 held under unrecorded P5 under Q, a recorded parked member of T; Q's own envelope moving it to no parent → H5 holds the free slot with its architect launching, recorded in its own tree with no recorded ancestor; P5 still unrecorded",
-      "headSha": "ee9ec60b7930b8dfa78c78701791aaa6cc959bce",
+      "command": "LEGION_TEST_PG_DSN=<postgres> LEGION_E2E_NATS_BIN=<nats-server> bash scripts/e2e/child-adoption.sh (transcript: https://github.com/sjawhar/legion/pull/2226#issuecomment-6412488350)",
+      "observed": "H5 held under unrecorded P5 under Q, a recorded parked member of T; Q's own envelope moving it to no parent → H5 holds the free slot with its architect launching, recorded in its own tree with no recorded ancestor; P5 still unrecorded (re-run at 5f1f78dc08ae: PASS in 40s, eleven steps ok)",
+      "headSha": "5f1f78dc08ae5ae3c7e276f856265eb8fb59efe6",
       "negativeControl": "at 6c58a2716d7c (driver copy skipping the earlier new steps): '<H5> ... with recorded ancestor \"<Q>\", want a root of its own held under <T>'"
     },
     {
       "criterion": "Review findings 4 and 5: Observed→Delivered keeps RecordedAncestor; the boot reads each listed ancestor from the listing, an unlabelled todo costs no Dispatch read, and one unreadable chain skips only its root during a re-read",
       "surface": "daemon package tests over real PostgreSQL (TestApplyFactSettlesAViewByWhetherItsIssueIsRecorded, TestBootReconcileHoldsATodoUnderAnUnreleasedChildOfALiveTree with GetIssue counts, TestPrepareReadsTheRecordedAncestorAboveAnUnrecordedParent unlabelled rows, TestARereadSkipsARootWhoseChainItCannotRead, TestParentedQueuedRootsListsTheLabelledTodoRootsUnderUnrecordedParents)",
       "command": "cd packages/daemon && LEGION_TEST_PG_DSN=<postgres> LEGION_TEST_NATS_URL=<nats> LEGION_TEST_NATS_MONITOR_URL=<monitor> go test -count=1 ./internal/intake/ ./internal/record/ ./internal/daemon/ -run 'Settles|BootReconcileHolds|PrepareReads|Reread|ParentedQueuedRoots'",
-      "observed": "all pass; the boot reads no listed ancestor from Dispatch, the unlabelled cases read none, the re-read applies the event and re-reads the other root",
-      "headSha": "ee9ec60b7930b8dfa78c78701791aaa6cc959bce",
+      "observed": "all pass; the boot reads no listed ancestor from Dispatch, the unlabelled cases read none, the re-read applies the event and re-reads the other root (re-run at 5f1f78dc08ae: PASS in 40s, eleven steps ok)",
+      "headSha": "5f1f78dc08ae5ae3c7e276f856265eb8fb59efe6",
       "negativeControl": "each reverted in turn by the worker: delivered RecordedAncestor '' ; 'the boot read map[CAPTURE-169:1] from Dispatch, want nothing'; the re-read failing the event 'Dispatch is restarting'"
+    },
+    {
+      "criterion": "Review round 2 finding 1: a hold walk does not stop at a recorded root that is not live; an issue whose Dispatch chain reaches live T past a parked root is held under T",
+      "surface": "whole daemon (step held-past-a-parked-root-on-its-chain); daemon TestARootHeldPastAParkedRootOnItsChainTakesNoSlot (grandparent and direct-parent variants); admit TestARootHeldPastAParkedRootOnItsChainQueuesOnceTheTreeLingers",
+      "command": "LEGION_TEST_PG_DSN=<postgres> LEGION_E2E_NATS_BIN=<nats-server> bash scripts/e2e/child-adoption.sh (transcript: https://github.com/sjawhar/legion/pull/2226#issuecomment-6412488350)",
+      "observed": "R6 under unrecorded P6 under Q6, a root parked in backlog under T: no slot, no architect, no launch over 3 s with admission.active [T] of cap 2; its record's chain [P6 Q6 T]; release {R6} answers 200 and R6 is in T at generation 2",
+      "headSha": "5f1f78dc08ae5ae3c7e276f856265eb8fb59efe6",
+      "negativeControl": "the same driver against code head ee9ec60b7930 (fresh database, export's copy reading the older field): 'held under <T>, <R6> is waiting false, slot &{1 …}: want out of the line with no slot and no architect'"
+    },
+    {
+      "criterion": "Review round 2 finding 2: a CHILD_IN_OTHER_TREE refusal naming a held root has a working remedy: release that root",
+      "surface": "skills/legion-architect/SKILL.md section 2 and its generated copy; whole daemon (step child-of-a-held-root-waits-with-it)",
+      "command": "LEGION_TEST_PG_DSN=<postgres> LEGION_E2E_NATS_BIN=<nats-server> bash scripts/e2e/child-adoption.sh (transcript: https://github.com/sjawhar/legion/pull/2226#issuecomment-6412488350)",
+      "observed": "release {K3} alone by T's architect: 409 CHILD_IN_OTHER_TREE '<K3> runs in the tree of <H3>, not <T>', K3's record unchanged, no Dispatch write; release {H3}: 200, H3 and K3 both in T, then planning",
+      "headSha": "5f1f78dc08ae5ae3c7e276f856265eb8fb59efe6",
+      "negativeControl": "the refusal itself is the negative case; the release of H3 in the same step adopts both, so the route is live"
+    },
+    {
+      "criterion": "Review round 2 findings 3 and 4: the re-read reads only roots whose stored chain holds the event's key, none on the release path, and none from a stale event",
+      "surface": "daemon package tests over real PostgreSQL: TestARereadReadsOnlyTheRootsWhoseChainHoldsTheEventsIssue, TestAStaleEventOfAMovedAncestorBringsBackNoHold, TestQueuedRootsUnderListsTheLabelledTodoRootsWhoseChainHoldsTheKey",
+      "command": "cd packages/daemon && LEGION_TEST_PG_DSN=<postgres> LEGION_TEST_NATS_URL=<nats> LEGION_TEST_NATS_MONITOR_URL=<monitor> go test -count=1 ./internal/daemon/ ./internal/record/ -run 'Reread|StaleEvent|QueuedRootsUnder'",
+      "observed": "pass: an unrelated event makes no Dispatch read and no Reread; a key on a held root's chain re-reads that root only; prepareObserved re-reads nothing; a seq-4 event after a seq-5 re-parent leaves the root unheld",
+      "headSha": "5f1f78dc08ae5ae3c7e276f856265eb8fb59efe6",
+      "negativeControl": "each reverted by the worker in turn fails its test (unbounded candidates, a re-read in prepareObserved, the stale-sequence guard removed)"
     }
   ],
   "filesChanged": [
@@ -116,7 +140,11 @@
     "review round 1: intake settleObserved carries RecordedAncestor; intake.ChildInOtherTree shared by api and workflow",
     "review round 1 fast-follow done in-PR: adoptQueuedRoots moved to admit/adopt.go with one adoption type; one settle tail in applyFact; AdoptionRefusal takes the caller's liveness",
     "review round 1: live steps child-of-a-held-root-waits-with-it, a-root-that-ran-keeps-queueing, held-root-queues-once-a-recorded-ancestor-leaves; AGENTS.md, architect SKILL.md, controller admission.md; generated copy rebuilt",
-    "merge of main at ee9ec60b7930 (PR CONFLICTING): README conflict; child_adoption_live_test.go and child-adoption.sh ported to main's shared live-proof harness (live_proof_test.go liveDispatch extended with parent/label per issue and 404 for an unknown key; lib/live-daemon-proof.sh)"
+    "merge of main at ee9ec60b7930 (PR CONFLICTING): README conflict; child_adoption_live_test.go and child-adoption.sh ported to main's shared live-proof harness (live_proof_test.go liveDispatch extended with parent/label per issue and 404 for an unknown key; lib/live-daemon-proof.sh)",
+    "review round 2: RecordedAncestor replaced by Ancestry []string (the whole Dispatch chain) in intake, dispatch, record; migration rewritten as 0051_issue_ancestry (ancestry text[]); record.Waiting holds while any live root is on the chain; Engine.Ancestry policy (blank for a root that ran)",
+    "review round 2: daemon/repositories.go chainOf walk reads no record; re-read only roots whose chain holds the event's key (record.Store.QueuedRootsUnder); no re-read in prepareObserved or for a stale recorded event; daemon/workflow.go boot walk from the listing",
+    "review round 2: skills/legion-architect/SKILL.md CHILD_IN_OTHER_TREE remedy for a held root's child; generated copy rebuilt",
+    "review round 2: live step held-past-a-parked-root-on-its-chain, and child-of-a-held-root-waits-with-it reads the refusal of the child alone; README rows"
   ],
   "trickyParts": [
     "Adoption bumps every adopted record's generation: that is the fence the old self-tree's LingerClose, supervise and issue-suspend rows already check; WorkspaceRemove had none, so it now names its tree.",
@@ -134,13 +162,16 @@
     "Live proof runs admission at cap 2, not 1: a second slotted root lets step 5 free a slot without the live tree leaving.",
     "Simplify skipped two findings: moving the daemon-only AncestorTree off dispatch.IssueSummary (the held pending summaries need it), and an in-memory ancestor walk for the boot listing (few todo issues sit under unrecorded parents).",
     "The reviewer's fast-follow tidy-up was done in this pull request rather than deferred.",
-    "The merge with main changed the shared liveDispatch stand-in (404 for an unknown key, parent and label per issue); merged-root-waits.sh and no-required-checks.sh pass on it."
+    "The merge with main changed the shared liveDispatch stand-in (404 for an unknown key, parent and label per issue); merged-root-waits.sh and no-required-checks.sh pass on it.",
+    "Ledger: the tester's red test TestATodoHeldUnderAnUnreleasedChildQueuesOnceItsParentLeavesTheLiveTree gained one fixture line, `tree: shownUnder(tree, \"in_progress\", \"\", true)` in its fake Dispatch's issues. The walk now reads the chain to the top, and that fake did not show the tree root, which real Dispatch always does. Its steps and assertions are unchanged, and it passes.",
+    "Narrowed by the architect (review_round_cap reached): the reviewer's fast-follow tidy-up beyond the code the four fixes touch is listed in the PR's Fast-follow line, not done here.",
+    "The shared pod test database had the old 0051 column; it was brought in line by hand (recorded_ancestor dropped, ancestry added). CI and production run the rewritten migration fresh; 0051 was never released."
   ],
   "openQuestions": [],
   "discoveredComplexity": [
     "Every todo event of an unrecorded issue or a recorded root under an unrecorded Dispatch parent now costs one Dispatch read per ancestor at preparation, labelled or not.",
     "Every event of an unrecorded issue now reads the issues table once at preparation; Dispatch is read only when a parented queued root exists (normally none)."
   ],
-  "round": 3,
-  "reviewRound": 1
+  "round": 4,
+  "reviewRound": 2
 }
