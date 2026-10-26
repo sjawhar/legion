@@ -1028,8 +1028,11 @@ with no workflow policy that runs every workflow role — `architect`, `planner`
 each authenticated with that role's own token, and starts or stops that role's
 `legion worker-shim` and Oh My Pi when the daemon tells it to, each role's generation in Linux
 namespaces of its own. Every role of the issue
-shares the issue's checkout, the issue's own volume, the sessions directory on it and the pod's network;
-each role keeps its own home, config home, temporary directories, state directory, agent-secrets key, GitHub App credential and launch credentials. A role's Secret holds
+shares the issue's checkout, the issue's own volume, the sessions directory on it, the temporary
+directory every role's agent is told (`TMPDIR=/legion/scratch/tmp`, one directory of the issue's
+scratch, below) and the pod's network;
+each role keeps its own home, config home, `/tmp`, `/var/tmp`, `/run/lock` and `/dev/shm` mounts,
+state directory, agent-secrets key, GitHub App credential and launch credentials. A role's Secret holds
 its launcher token, projected under that role's own directory of the container and bound to the
 pod's uid, which no role's process sees, and the
 two gh files its `gh` and `git` read the role's App token from
@@ -1290,8 +1293,9 @@ runs the earlier release:
      entry where it set a `resources.<role>` entry per workflow role, and `resources.controller`
      as `{cpu, memory}` (with `cpu_request` and `memory_request` below them where the requests
      were lower) where it set that entry's `requests` and `limits` ([Configuration](#configuration)
-     names each refusal); keep a copy of the file's `runtime.kubernetes.resources` block as it
-     was, since a rollback puts it back (the earlier release refuses the `issue` entry);
+     names each refusal); keep a copy of the file's whole `runtime.kubernetes` block as it was,
+     since a rollback puts `tree_volume` and the `resources` block back, the earlier release
+     refusing `issue_volume` and the `issue` entry ([Rolling back](#rolling-back-the-upgrade));
    - `runtime.kubernetes.image` pinned to a worker image built from it, since the image probe
      refuses a worker image whose `pi-legion` declares another daemon API contract (`ProbeImage` in
      `internal/runtime/sandbox/probe.go`); and
@@ -1379,6 +1383,29 @@ issue>-architect` (`TreeClaimName` in `names.go` at `legion-v10.0.0`), and its s
 Sandboxes alone. The controller's Sandbox and the repository caches' are left to the earlier
 release's sweep, which deletes them with their volumes: the controller's session and the caches'
 clones, which hold no issue's work.
+
+**Put `legion.yaml` back before the re-pin**, the copy step 6 said to keep. The earlier release
+reads the file before it opens the database or the cluster, and refuses this release's shape key by
+key, so a daemon re-pinned on the file as this release left it never starts: `tree_volume` where
+this release's file sets `issue_volume` (`unknown key runtime.kubernetes.issue_volume`, `members`
+in `internal/config/config.go` at `legion-v10.0.0`), one `resources.<role>` entry per workflow role
+where it sets `resources.issue` (`runtime.kubernetes.resources key "issue" must be a role
+(architect, planner, implementer, tester, reviewer, merger, controller)`, `readResources` in
+`internal/config/kubernetes.go` at that tag), and `resources.controller` as that entry's `requests`
+and `limits` where it sets `cpu`, `memory`, `cpu_request` and `memory_request` (`unknown key
+runtime.kubernetes.resources.controller.cpu`, the same `members`). Every other key of the block
+this release added goes with them, each refused by name the same way: `session_database`,
+`plugins`, `repository_cache` and `setup`. A deployment that turned a database store on puts
+`session_store` back to `pvc`, or leaves it unset, and removes `session_dsn_secret` with it: the
+earlier release refuses `postgres` (`runtime.kubernetes.session_store postgres is not supported
+until Stage 6: a pod's session lives on the tree volume (pvc)`), refuses `cloudsql-iam` as
+`runtime.kubernetes.session_store must be 'pvc' or 'postgres'`, and refuses the secret beside
+`pvc` (`runtime.kubernetes.session_dsn_secret is not used when runtime.kubernetes.session_store is
+pvc; remove it`), all three in `checkSessionStore` of the same file; it reads no session of that
+table in any case, since the claims the dump restores are the drained ones (below). No data is lost
+to any of these refusals — each comes before the daemon's first write and names its key — but the
+daemon stays down until the file is back, so run the earlier release's `legion start
+--check-config` on it before re-pinning.
 
 What the rollback loses, then: the record of every tree this release ran (the restored claims are
 the drained ones, so the earlier release resumes no role and knows no issue of those trees), every
@@ -1756,7 +1783,7 @@ each init container (server dry runs, 2026-10-24), and GKE clamps a container's 
 request, so a GKE deployment sets
 `issue: {ephemeral_storage: 10Gi, ephemeral_storage_request: 10Gi}`.
 
-The image probe pod's reservation is the daemon's own and no role's share (`probeReservation`,
+The image probe pod's reservation is the daemon's own and no issue pod's share (`probeReservation`,
 `packages/daemon/internal/daemon/kubernetes.go`): `legion probe-image` starts one Oh My Pi at a
 time and runs no lane or browser, so 250m and 1Gi hold it, and the probe runs at every boot before
 anything is served — a probe that reserved a larger share, as it did the controller's 1 CPU and 4Gi
@@ -2671,7 +2698,17 @@ through any of these:
   of the issue can write;
 - the caches every role shares on the issue volume, which `go run`, `uvx` and `bunx` run code
   from: `GOMODCACHE` and `GOCACHE` (`/legion/go`), uv's cache and Pythons (`/legion/uv`), bun's
-  install cache, and `XDG_CACHE_HOME` and `XDG_DATA_HOME` (`/legion/scratch`).
+  install cache, and `XDG_CACHE_HOME` and `XDG_DATA_HOME` (`/legion/scratch`);
+- the one temporary directory every role's agent is told, `TMPDIR=/legion/scratch/tmp` (below):
+  a script, an archive or a patch a role writes there to run or read a moment later is a file
+  every sibling can replace first, and a tool that names a file in it by a fixed name reads
+  whatever is there;
+- under `session_store: pvc`, the sessions directory on the issue's volume (`/legion/sessions`),
+  which every role can write: the transcript a sibling's Oh My Pi reads back when its session
+  resumes. Under `postgres` the transcripts are rows instead, and the database's URL is in the
+  providers mount the container holds for the pod rather than for a role, so every role of the
+  issue reaches them there; under `cloudsql-iam` each generation's connection is its own role's,
+  in that role's private directory, and no sibling reaches it ([Session store](#session-store)).
 
 The issue's roles trust one another's writes to the volume as they did when each ran in a container
 of its own. The namespaces keep a role's tokens and private files out of a sibling's own reads, and
@@ -2902,8 +2939,9 @@ no tree or issue label, one init container (`workspace-init controller`) and one
 The image probe runs as a Sandbox of its own, `legion-probe-<project>-<digest12>`, with
 `shutdownPolicy: Delete`, its one container carrying the probe's own fixed reservation — 250m and
 1Gi, over a 5Gi disk bound and a 1Gi disk request (`probeReservation`,
-`internal/daemon/kubernetes.go`), no role's share, since `legion probe-image` starts one Oh My Pi
-at a time and runs no lane or browser, and a probe sized as a role could keep the daemon from
+`internal/daemon/kubernetes.go`), none of an issue pod's, since `legion probe-image` starts one Oh
+My Pi at a time and runs no lane or browser, and a probe sized as an issue pod could keep the
+daemon from
 booting on a full pool ([The image is probed before it publishes](#the-image-is-probed-before-it-publishes),
 [Issue sizing](#issue-sizing-one-reservation-per-pod)).
 

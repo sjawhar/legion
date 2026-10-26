@@ -158,7 +158,7 @@ Dispatch read them, delete the files, then install every App from
   past its disk limit has its own pod evicted, the offending issue's alone, rather than the node
   reaching `DiskPressure` where another tree's pod can go; the 1Gi request reserves almost no disk,
   so a node's root volume can be oversubscribed by the pods' limits — an operator who knows the
-  root volume raises `ephemeral_storage_request` toward a role's expected use so the scheduler
+  root volume raises `ephemeral_storage_request` toward the issue pod's expected use so the scheduler
   reserves disk and places no pod a full node could not hold. Legion sets no affinity on a pod (GKE
   Autopilot adds its own to an issue or controller pod): each issue pod owns its volume, so the
   scheduler places it wherever the pool has room and Karpenter

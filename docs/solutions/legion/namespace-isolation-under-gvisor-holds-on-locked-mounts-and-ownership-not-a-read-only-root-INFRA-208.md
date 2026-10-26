@@ -66,8 +66,10 @@ probes were throwaway shell scripts run in a pod (`nstest*.sh`) and server-side 
   `/run/shm`, the image's links to them) or made root-owned in the image (the two plugin
   directories). The `/usr/lib/systemd/system/*.service` files stay writable and shared by every
   role: nothing in the pod runs or reads them.
-- **A shared writable thing is a channel between roles, not only a file.** The first layout still
-  shared three: the pod's config home, where one role's git `core.fsmonitor` or jj alias ran in a
+- **A shared writable thing is a channel between roles, not only a file.** The one-container pod as
+  this issue first built it — the `roles` container before these covers, not the layout of a
+  container per role that preceded it — still shared three:
+  the pod's config home, where one role's git `core.fsmonitor` or jj alias ran in a
   sibling's git or jj with the sibling's credentials; the container's `/dev/pts`, where any role
   could open a sibling's terminal; and the container's `/dev/mqueue`, whose POSIX queues every role
   could read. Each role now gets its own copy of the config home on `role-homes`, its own devpts
@@ -77,8 +79,11 @@ probes were throwaway shell scripts run in a pod (`nstest*.sh`) and server-side 
   by design, so code one role plants still runs in a sibling with the sibling's credentials: the
   checkout's tests and scripts, the clone's other git settings (a filter driver, `diff.external`,
   `http.proxy`) and its `.jj/repo/config.toml`, the workspace's `.omp/` extensions, the plugins an
-  installing launch puts under each role's state home, and the caches `go run`, `uvx` and `bunx`
-  run code from (`docs/kubernetes.md`, "Anatomy of a Sandbox pod", after the git pins).
+  installing launch puts under each role's state home, the caches `go run`, `uvx` and `bunx`
+  run code from, the one temporary directory every role is told
+  (`TMPDIR=/legion/scratch/tmp`), and, under `session_store: pvc`, the sessions directory on the
+  volume, where a sibling's transcript is what its Oh My Pi reads back on a resume
+  (`docs/kubernetes.md`, "Anatomy of a Sandbox pod", after the git pins).
 - **role-init stays the PID namespace's init.** Its exit ends every process of the generation, so
   a stop leaves nothing behind, and no role can signal a sibling.
 - **The home overlay's upper needs a disk `emptyDir`.** An upper on the root filesystem does not
