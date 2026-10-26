@@ -440,11 +440,18 @@ gate_send() {
   gate_artifacts[$issue]=$(dispatch_get "issues/$issue" | jq -er .primary_artifact_id)
   architect_registers_gate "$issue" "$issue"
 }
+# gate_finish ISSUE: the root waits on a person at its closed gate without a slot, its architect
+# suspended (await_gate_wait); the proof human approves, the root takes a slot back
+# (await_answered_slot), and only then reaches planning. admission_cap 3 is the run's three roots
+# (the child takes none), so the slots every waiting root gave back stand free and the answered root
+# takes one at once.
 gate_finish() {
   local issue=$1 artifact=${gate_artifacts[$1]}
   until_true 600 "$issue architect to register primary artifact $artifact" sh -c \
     "'$work/legion' state --json --port '$port_daemon' | jq -e --arg issue '$issue' --arg artifact '$artifact' '.issues[\$issue].designGate.artifactId == \$artifact and .issues[\$issue].designGate.currentVersion > 0'"
+  await_gate_wait "$issue" "$issue"
   dispatch_human POST "artifacts/$artifact/reviews" '{"state":"approved"}' >/dev/null
+  await_answered_slot "$issue" "$issue"
   wait_for_phase "$issue" planning
   wait_for_worker "$issue" planner
 }
@@ -753,7 +760,7 @@ set_status "$child" todo
 until_true 180 "$child recorded under $root1" sh -c \
   "'$work/legion' state --json --port '$port_daemon' | jq -e --arg c '$child' '.issues[\$c].phase == \"admitted\"'"
 note "roots $root1 $root2 $root3; child $child admitted under $root1"
-for issue in "$root1" "$root2" "$root3"; do wait_for_worker "$issue" architect; done
+for issue in "$root1" "$root2" "$root3"; do wait_for_architect "$issue"; done
 printf '%s\n' "$root1" "$root2" "$root3" "$child" >"$work/instructor-issues"
 instructor &
 instructor_pid=$!
