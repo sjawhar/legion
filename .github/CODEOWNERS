@@ -1,0 +1,6 @@
+# review.md is what the CI reviewer checks for (.github/workflows/ci-review.yaml reads it from main). With main's
+# protection requiring a code owner's approval, only its owner can change it, or this file, which would otherwise let
+# a pull request lift that protection. Keep these two the last pattern lines: the last matching pattern wins, so a
+# line added below them could name another owner.
+/review.md @sjawhar
+/.github/CODEOWNERS @sjawhar

@@ -1,0 +1,227 @@
+# ci-review.yaml: the CI reviewer. Claude reviews each pull request into main against review.md and posts the review
+# on the pull request.
+#
+#   review   .github/ci-review/gather writes what the review reads (the pull request, its diff, its files at its head,
+#            and on a later push the diff since the last reviewed head); .github/ci-review/run runs Claude Code on them
+#   keep     saves the review's session in the Actions cache, for the next push's review to resume
+#   comment  posts the review as a pull request review
+#
+# The reviewer cannot be changed by the pull request it reviews. The workflow runs on pull_request_target, so every run
+# uses this file, the scripts and review.md as main has them, never the pull request's copy, and it runs no code of the
+# pull request: gather reads its commits as git objects and writes its files out as plain data. review.md, what the
+# reviewer checks for, and .github/CODEOWNERS have a code owner (.github/CODEOWNERS); with main's protection requiring
+# a code owner's approval, only that person changes them.
+#
+# The same reviewer session on every push. The review's session goes from one push to the next in the Actions cache,
+# under the key ci-review/<pull request>/<run id>-<attempt>. The review job restores the newest one of the pull
+# request; run resumes that same session (claude --resume <id>, the same id on every push), and its prompt says that
+# this review looks only at the diff since the head the session last reviewed, which run records in the cache beside
+# the session. The first review of a pull request, and any review with no session to resume, covers the whole pull
+# request. The keep job saves the session once the review has written one; after a run that wrote none it saves
+# nothing, and the next push resumes the last session kept. The review step's log says which it did ("resuming the
+# session <id> (the review of <last head>), to review only <last head>..<head>", then "kept the session <id>, the
+# review of <head>, for the next push's review to resume"), and the posted review's first line names the scope and
+# the session. GitHub drops a cache that no run has read for 7 days, and the review then starts fresh.
+# A pull_request_target run gets read-only access to the cache unless a job declares a cache-mode that writes: the
+# workflow declares `none`, the review job `read`, and only the keep job, which has no permissions and runs no script,
+# writes (`write-only`). To review a pull request by hand, or start a fresh review:
+#   gh workflow run ci-review.yaml -f pr=123 [-f fresh=true]
+#
+# The review reaches Anthropic's API by workload identity federation, with no stored key: the review job's GitHub
+# identity token (issuer https://token.actions.githubusercontent.com, audience https://api.anthropic.com) is traded for
+# a short-lived Anthropic token by the operator's Anthropic federation rule. That rule admits only this repository's
+# workflow named ci-review (this file's name:) on refs/heads/main with a workflow_ref of this file, and gives its
+# service account model calls only. Its ids are the repository variables CI_REVIEW_FEDERATION_RULE_ID,
+# CI_REVIEW_ORGANIZATION_ID, CI_REVIEW_SERVICE_ACCOUNT_ID and CI_REVIEW_WORKSPACE_ID. Renaming this file or its name:
+# needs the rule changed. Only the review job asks for an identity token, and it holds no write permission; the comment
+# job holds the only one.
+name: ci-review
+run-name: ${{ github.event.pull_request.title || format('Pull request {0}', inputs.pr) }}
+on:
+  pull_request_target:
+    types: [opened, reopened, synchronize, ready_for_review]
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: "Number of the pull request to review"
+        required: true
+        type: number
+      fresh:
+        description: "Start a fresh review of the whole pull request: do not resume the last review's session"
+        required: false
+        type: boolean
+        default: false
+permissions: {}
+concurrency:
+  # A new push cancels the pull request's older run.
+  group: ci-review-${{ github.event.pull_request.number || inputs.pr }}
+  cancel-in-progress: true
+cache-mode: none
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  review:
+    # Not a draft: a draft gets its review when it is marked ready.
+    if: ${{ github.event_name == 'workflow_dispatch' || !github.event.pull_request.draft }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    cache-mode: read
+    permissions:
+      contents: read
+      pull-requests: read
+      # Only for the GitHub identity token that workload identity federation trades for an Anthropic token.
+      id-token: write
+    outputs:
+      review: ${{ steps.review.outputs.review }}
+      about: ${{ steps.review.outputs.about }}
+      head: ${{ steps.gather.outputs.head }}
+      failure: ${{ steps.review.outputs.failure || steps.gather.outputs.failure }}
+      session: ${{ steps.review.outputs.session }}
+      artifact: review-session-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: restore the last review's session
+        if: ${{ inputs.fresh != true }}
+        uses: actions/cache/restore@5a3ec84eff668545956fd18022155c47e93e2684  # v4.2.3
+        with:
+          path: ${{ runner.temp }}/review-session
+          key: ci-review/${{ github.event.pull_request.number || inputs.pr }}/${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: ci-review/${{ github.event.pull_request.number || inputs.pr }}/
+
+      - name: gather what the review reads
+        id: gather
+        timeout-minutes: 10
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number || inputs.pr }}
+          REVIEW_SESSION: ${{ runner.temp }}/review-session
+        run: |
+          set -euo pipefail
+          code=0
+          .github/ci-review/gather .review || code=$?
+          if [ "$code" != 0 ]; then
+            echo "failure=gathering what the review reads ended with exit status $code (the log of this job says why)" \
+              >> "$GITHUB_OUTPUT"
+            exit "$code"
+          fi
+          grep -m1 -E '^head=[0-9a-f]{40}$' .review/reviewed.txt >> "$GITHUB_OUTPUT"
+
+      - name: install Claude Code
+        run: npm install --global @anthropic-ai/claude-code@2.1.310
+
+      - name: get the GitHub identity token for Anthropic
+        run: |
+          set -euo pipefail
+          [ "${{ github.repository_id }}" = 1146927990 ] ||
+            { echo "::error::no federation rule for repository id ${{ github.repository_id }}"; exit 1; }
+          mkdir -m 700 "$RUNNER_TEMP/oidc"
+          # The request token goes to curl on standard input: a command's arguments can be read by every process.
+          printf 'Authorization: Bearer %s\n' "$ACTIONS_ID_TOKEN_REQUEST_TOKEN" |
+            curl -sSf --max-time 30 -H @- "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=https://api.anthropic.com" |
+            jq -r .value > "$RUNNER_TEMP/oidc/jwt"
+
+      - name: review
+        id: review
+        timeout-minutes: 45
+        env:
+          PR: ${{ github.event.pull_request.number || inputs.pr }}
+          # run writes a new identity token into the file every minute, so Claude Code's refresh reads an unused one.
+          ANTHROPIC_IDENTITY_TOKEN_FILE: ${{ runner.temp }}/oidc/jwt
+          ANTHROPIC_FEDERATION_RULE_ID: ${{ vars.CI_REVIEW_FEDERATION_RULE_ID }}
+          ANTHROPIC_ORGANIZATION_ID: ${{ vars.CI_REVIEW_ORGANIZATION_ID }}
+          ANTHROPIC_SERVICE_ACCOUNT_ID: ${{ vars.CI_REVIEW_SERVICE_ACCOUNT_ID }}
+          ANTHROPIC_WORKSPACE_ID: ${{ vars.CI_REVIEW_WORKSPACE_ID }}
+          REVIEW_SESSION: ${{ runner.temp }}/review-session
+        run: |
+          # Until the token is printed again, the runner reads none of the review's output as a workflow command.
+          resume="$(openssl rand -hex 16)"
+          echo "::stop-commands::$resume"
+          code=0
+          .github/ci-review/run .review || code=$?
+          rm -f "$ANTHROPIC_IDENTITY_TOKEN_FILE"
+          echo "::$resume::"
+          if [ "$code" = 0 ] && [ -s "$REVIEW_SESSION/session" ]; then echo "session=kept" >> "$GITHUB_OUTPUT"; fi
+          if [ "$code" != 0 ]; then
+            failure=$(grep -m1 -xE "[][A-Za-z0-9 ,.:;@+?/*()'_-]{1,2100}" .review/failure.txt 2> /dev/null) || failure=""
+            failure=${failure:-run ended with exit status $code}
+            echo "::error::the CI review did not finish: $failure"
+            echo "failure=$failure" >> "$GITHUB_OUTPUT"
+            exit "$code"
+          fi
+          delimiter="review-$(openssl rand -hex 16)"
+          { echo "review<<$delimiter"; cat .review/review.md; echo; echo "$delimiter"; } >> "$GITHUB_OUTPUT"
+          delimiter="about-$(openssl rand -hex 16)"
+          { echo "about<<$delimiter"; cat .review/about.txt; echo "$delimiter"; } >> "$GITHUB_OUTPUT"
+
+      - name: hand this review's session to the keep job
+        continue-on-error: true
+        if: ${{ !cancelled() && steps.review.outputs.session == 'kept' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: review-session-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/review-session
+          if-no-files-found: error
+          retention-days: 1
+
+  keep:
+    needs: review
+    # The only job that may write the cache: it has no permissions, checks out nothing and runs no script.
+    if: ${{ !cancelled() && needs.review.outputs.session == 'kept' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    cache-mode: write-only
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
+        with:
+          name: ${{ needs.review.outputs.artifact }}
+          path: ${{ runner.temp }}/review-session
+      - name: keep this review's session for the next push's review
+        uses: actions/cache/save@5a3ec84eff668545956fd18022155c47e93e2684  # v4.2.3
+        with:
+          path: ${{ runner.temp }}/review-session
+          key: ci-review/${{ github.event.pull_request.number || inputs.pr }}/${{ github.run_id }}-${{ github.run_attempt }}
+
+  comment:
+    needs: review
+    if: ${{ !cancelled() && needs.review.result != 'skipped' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      pull-requests: write
+    steps:
+      - name: post the review
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number || inputs.pr }}
+          REVIEW: ${{ needs.review.outputs.review }}
+          ABOUT: ${{ needs.review.outputs.about }}
+          HEAD_SHA: ${{ needs.review.outputs.head }}
+          RESULT: ${{ needs.review.result }}
+          FAILURE: ${{ needs.review.outputs.failure }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          field() { sed -n "s/^$1=//p" <<< "$ABOUT"; }
+          {
+            if [ "$RESULT" = success ] && [ -n "$REVIEW" ]; then
+              echo "**CI review** of ${HEAD_SHA:0:12}: $(field scope)."
+              echo
+              printf '%s\n' "$REVIEW"
+              echo
+              echo "---"
+              echo "Session $(field session); answered by $(field answered); [run]($RUN_URL)."
+            else
+              echo "**CI review** of ${HEAD_SHA:-this pull request}: no review. ${FAILURE:-the review job ended with the result $RESULT}. [run]($RUN_URL)"
+            fi
+          } > "$RUNNER_TEMP/body.md"
+          args=(-f event=COMMENT)
+          [[ $HEAD_SHA =~ ^[0-9a-f]{40}$ ]] && args+=(-f commit_id="$HEAD_SHA")
+          gh api --method POST "repos/$REPO/pulls/$PR/reviews" "${args[@]}" -F body=@"$RUNNER_TEMP/body.md" --jq .html_url

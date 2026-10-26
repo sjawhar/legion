@@ -753,6 +753,21 @@ PYEOF
 run_check "$root"
 check "an action known to build nothing passes" "$(is "$status" 0)"
 
+root=$(fixture uses-cache-sub-actions)
+python3 - "$root/.github/workflows/image.yaml" <<'PYEOF'
+import sys
+path = sys.argv[1]
+text = open(path).read()
+open(path, "w").write(text.replace(
+    "      - uses: docker/build-push-action@v6\n",
+    "      - uses: actions/cache/restore@v4\n        with: {path: x, key: k}\n"
+    "      - uses: actions/cache/save@v4\n        with: {path: x, key: k}\n"
+    "      - uses: docker/build-push-action@v6\n",
+))
+PYEOF
+run_check "$root"
+check "actions/cache/restore and actions/cache/save, known to build nothing, pass" "$(is "$status" 0)"
+
 root=$(fixture tripwire-not-a-build)
 run_step "$root" 'docker pull debian:trixie-slim'
 run_check "$root"

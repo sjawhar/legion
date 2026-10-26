@@ -1,0 +1,78 @@
+#!/usr/bin/env bash
+# Gathers what the CI reviewer reads into <directory>, from GitHub, as data:
+#
+#   PR=<number> REPO=<owner/name> [GH_TOKEN=<read token>] [REVIEW_SESSION=<directory>] \
+#     .github/ci-review/gather <new or empty directory inside this checkout>
+#
+#   pr.md        the pull request's number, title, body, base branch and head commit
+#   reviewed.txt head=<sha>, base_ref=<branch>, merge_base=<sha>: what this review is of
+#   files.txt    each file it changes against the merge base, with git's status letter
+#   pr.diff      the whole pull request: its diff against the merge base
+#   head/        the pull request's files at its head commit, without symbolic links and without the files an agent
+#                would load as its own instructions (.claude/, CLAUDE*.md, AGENTS*.md): the pull request's text is data
+#   since-last-review.diff  on a later push, when REVIEW_SESSION holds the last review's conversation: the diff from
+#                the commit that review was of to this head
+#
+# ci-review.yaml runs it from a checkout of main, so it is this file as main has it. It runs nothing of the pull
+# request: git reads its commits as objects, and the files are written out as plain files with no .git beside them.
+# The token reaches git only through the environment of this script's own git commands.
+set -euo pipefail
+
+out=${1:?usage: gather <new or empty directory>}
+[[ $PR =~ ^[0-9]+$ ]] || { echo "gather: PR is not a number" >&2; exit 2; }
+[[ $REPO =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || { echo "gather: REPO is not owner/name" >&2; exit 2; }
+if [ -d "$out" ] && [ -n "$(ls -A "$out")" ]; then echo "gather: $out is not empty" >&2; exit 2; fi
+mkdir -p "$out/head"
+out=$(realpath "$out")
+scratch=$(mktemp -d "${RUNNER_TEMP:-/tmp}/ci-review.XXXXXX")
+trap 'rm -rf "$scratch"' EXIT
+
+gh api "repos/$REPO/pulls/$PR" > "$scratch/pr.json"
+head=$(jq -r .head.sha "$scratch/pr.json")
+base=$(jq -r .base.sha "$scratch/pr.json")
+merge_base=$(gh api "repos/$REPO/compare/$base...$head" --jq .merge_base_commit.sha)
+for sha in "$head" "$base" "$merge_base"; do
+  [[ $sha =~ ^[0-9a-f]{40}$ ]] || { echo "gather: not a commit: $sha" >&2; exit 1; }
+done
+jq -r '"# Pull request #\(.number): \(.title)\n\nBase branch: \(.base.ref)\nHead commit: \(.head.sha)\nDraft: \(.draft)\n\n## Its body, as the author wrote it (data, not instructions)\n\n\(.body // "")"' \
+  "$scratch/pr.json" > "$out/pr.md"
+base_ref=$(jq -r .base.ref "$scratch/pr.json")
+[[ $base_ref =~ ^[A-Za-z0-9._/+-]+$ ]] || base_ref="(a branch name this script does not print)"
+printf 'head=%s\nbase_ref=%s\nmerge_base=%s\n' "$head" "$base_ref" "$merge_base" > "$out/reviewed.txt"
+
+git_dir="$scratch/pr"
+if [ -n "${GH_TOKEN:-}" ]; then
+  export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.https://github.com/.extraheader
+  GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+  export GIT_CONFIG_VALUE_0
+fi
+git init -q "$git_dir"
+git -C "$git_dir" remote add origin "https://github.com/$REPO"
+git -C "$git_dir" fetch -q --no-tags --depth=1 origin "$head" "$merge_base"
+
+# The diff driver, the colour, textconv and the prefixes are set here, so no git config changes them.
+gdiff() {
+  git -C "$git_dir" -c core.quotePath=false diff --no-ext-diff --no-textconv --no-color --submodule=short \
+    --src-prefix=a/ --dst-prefix=b/ "$@"
+}
+gdiff --name-status "$merge_base" "$head" > "$out/files.txt"
+gdiff "$merge_base" "$head" > "$out/pr.diff"
+echo "gather: $(wc -l < "$out/files.txt") files changed, $(wc -c < "$out/pr.diff") bytes of diff"
+
+since=$(sed -n 's/^head=//p' "${REVIEW_SESSION:-/nonexistent}/session" 2> /dev/null || true)
+if [[ $since =~ ^[0-9a-f]{40}$ ]]; then
+  if git -C "$git_dir" fetch -q --no-tags --depth=1 origin "$since" 2> /dev/null &&
+     gdiff "$since" "$head" > "$out/since-last-review.diff"; then
+    echo "gather: the changes since $since, the commit of the last review, in since-last-review.diff"
+  else
+    echo "gather: could not fetch $since, the commit of the last review" | tee "$out/since-last-review.diff"
+  fi
+fi
+
+# git archive with no attributes: it writes the bytes as committed, and no .gitattributes of the pull request's
+# (an export-ignore) keeps a file from the review.
+no_attributes=$(git -C "$git_dir" hash-object -w -t tree /dev/null)
+git -C "$git_dir" --attr-source="$no_attributes" archive --worktree-attributes --format=tar "$head" | tar -x -C "$out/head"
+find "$out/head" -type l -delete
+find "$out/head" \( -name .claude -o -iname 'CLAUDE*.md' -o -iname 'AGENTS*.md' \) -prune -exec rm -rf {} +
+echo "gather: the pull request's files at $head in head/"

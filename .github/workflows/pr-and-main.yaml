@@ -271,6 +271,9 @@ jobs:
       - name: Test the release credential check
         run: .github/scripts/check-release-credentials.test.sh
 
+      - name: Test the CI reviewer's model check (served, a stand-in claude)
+        run: .github/ci-review/served.test.sh
+
       - name: Test the session import pods script (a stand-in kubectl)
         run: bash scripts/sessions-import-pods.test.sh
 

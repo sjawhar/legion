@@ -131,6 +131,7 @@ repository both GitHub Apps are installed on, and leaves out, and reports in `le
 | Secrets broker | `packages/envoy/cmd/broker`, `packages/envoy/internal/broker` | See `packages/envoy/AGENTS.md` |
 | Envoy Pulumi components | `packages/envoy/infra/` | The `envoy-infra` Pulumi plugin and the `envoy-infra` command (`seed`, `render`), a Go module outside the root `go.work`. Operators: `packages/envoy/infra/README.md`; changing it: `packages/envoy/infra/AGENTS.md` |
 | Documentation site | `docs/site/` | Astro Starlight, published to GitHub Pages by `.github/workflows/docs.yaml`. See `docs/site/README.md`; generated reference pages come from `docs/site/generators/` |
+| CI reviewer | `.github/workflows/ci-review.yaml`, `.github/ci-review/`, `review.md` | Claude Code reviews each pull request into main against `review.md` and posts a COMMENT review per head. It runs on `pull_request_target` from main's copy of the workflow, scripts and `review.md`, reads the pull request's files as data, resumes one session per pull request from the Actions cache and reviews only the diff since its last head. It reaches Anthropic by workload identity federation, its ids in the repository variables `CI_REVIEW_FEDERATION_RULE_ID`, `CI_REVIEW_ORGANIZATION_ID`, `CI_REVIEW_SERVICE_ACCOUNT_ID` and `CI_REVIEW_WORKSPACE_ID`. `.github/CODEOWNERS` gives `review.md` and itself a code owner; `served.test.sh` tests the model check |
 
 ## Conventions
 
