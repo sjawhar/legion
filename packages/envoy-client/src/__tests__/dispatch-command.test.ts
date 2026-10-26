@@ -254,9 +254,18 @@ describe("the dispatch command surface", () => {
     expect(parseCommand(["read", "--issue", "ACME-1", "ACME-12"], noFiles)).toEqual({
       kind: "refused",
       tool: "dispatch_read",
-      problems: [
-        "unexpected argument ACME-12: a bare issue key is the --issue only as the first argument; otherwise write --issue ACME-12",
-      ],
+      problems: ["unexpected argument ACME-12: --issue is already ACME-1"],
+    });
+    const issueFile = {
+      readText: (path: string): string => {
+        if (path === "issue.txt") return "ACME-1";
+        throw new Error(`unexpected read ${path}`);
+      },
+    };
+    expect(parseCommand(["read", "--issue-file", "issue.txt", "ACME-12"], issueFile)).toEqual({
+      kind: "refused",
+      tool: "dispatch_read",
+      problems: ["unexpected argument ACME-12: --issue-file already set --issue to ACME-1"],
     });
     expect(parseCommand(["read", "ACME-12", "--issue", "ACME-1"], noFiles)).toEqual({
       kind: "refused",

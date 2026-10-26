@@ -38074,7 +38074,14 @@ function parseCommand(argv, io) {
           if (claim("issue", `the issue key ${token}`, false))
             args["issue"] = token;
         } else {
-          problems.push(`unexpected argument ${quoteWord(token)}: a bare issue key is the --issue only as the first argument; otherwise write --issue ${quoteWord(token)}`);
+          const earlier = setBy.get("issue");
+          const current = quoteWord(String(args["issue"]));
+          let reason = `a bare issue key is the --issue only as the first argument; otherwise write --issue ${quoteWord(token)}`;
+          if (earlier === "--issue")
+            reason = `--issue is already ${current}`;
+          else if (earlier?.startsWith("--"))
+            reason = `${earlier} already set --issue to ${current}`;
+          problems.push(`unexpected argument ${quoteWord(token)}: ${reason}`);
         }
         continue;
       }

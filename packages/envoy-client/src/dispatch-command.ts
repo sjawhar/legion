@@ -364,9 +364,14 @@ export function parseCommand(
         if (index === 0) {
           if (claim("issue", `the issue key ${token}`, false)) args["issue"] = token;
         } else {
-          problems.push(
-            `unexpected argument ${quoteWord(token)}: a bare issue key is the --issue only as the first argument; otherwise write --issue ${quoteWord(token)}`
-          );
+          // Advising `--issue` when a flag already set it would only lead to a second refusal.
+          const earlier = setBy.get("issue");
+          const current = quoteWord(String(args["issue"]));
+          let reason = `a bare issue key is the --issue only as the first argument; otherwise write --issue ${quoteWord(token)}`;
+          if (earlier === "--issue") reason = `--issue is already ${current}`;
+          else if (earlier?.startsWith("--"))
+            reason = `${earlier} already set --issue to ${current}`;
+          problems.push(`unexpected argument ${quoteWord(token)}: ${reason}`);
         }
         continue;
       }
