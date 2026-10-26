@@ -266,13 +266,15 @@ func TestDecodeCapturedProducerEnvelopes(t *testing.T) {
 			name:    "Dispatch ask answered",
 			subject: "notifications.dispatch.issue.CAPTURE-4.ask.answered",
 			file:    "dispatch/ask-answered.json",
-			want:    DispatchAskClosed{Key: "CAPTURE-4", Ask: "6c83cb7f-8f4e-4820-9e05-7c94fa725007", State: "answered", Actor: dispatch.Actor{Kind: "user", ID: "human"}},
+			want: DispatchAskClosed{Key: "CAPTURE-4", Ask: "6c83cb7f-8f4e-4820-9e05-7c94fa725007", State: "answered", Actor: dispatch.Actor{Kind: "user", ID: "human"},
+				Mark: mark(9, "2026-09-23T00:46:34Z")},
 		},
 		{
 			name:    "Dispatch ask resolved",
 			subject: "notifications.dispatch.issue.CAPTURE-4.ask.resolved",
 			file:    "dispatch/ask-resolved.json",
-			want:    DispatchAskClosed{Key: "CAPTURE-4", Ask: "6c83cb7f-8f4e-4820-9e05-7c94fa725007", State: "resolved", Actor: dispatch.Actor{Kind: "session", ID: "session-architect"}},
+			want: DispatchAskClosed{Key: "CAPTURE-4", Ask: "6c83cb7f-8f4e-4820-9e05-7c94fa725007", State: "resolved", Actor: dispatch.Actor{Kind: "session", ID: "session-architect"},
+				Mark: mark(10, "2026-09-23T00:46:35Z")},
 		},
 		{
 			name:    "Dispatch ask reply returning the turn to the agent",

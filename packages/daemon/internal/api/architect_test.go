@@ -321,7 +321,8 @@ func TestArchitectAndPhaseRoutesApplyTheRequiredFacts(t *testing.T) {
 	if gate.Code != http.StatusOK {
 		t.Fatalf("gate register = %d: %s", gate.Code, gate.Body)
 	}
-	assertProcessedEvent(t, h, "gate:LEGION-208:0:d2f1c6b4-8e07-4a53-9c1d-6b8f2e5a7093:7")
+	// The id names the read as well as the version: Dispatch shows LEGION-208 at sequence 7.
+	assertProcessedEvent(t, h, "gate:LEGION-208:0:d2f1c6b4-8e07-4a53-9c1d-6b8f2e5a7093:7:7")
 
 	retryGrant := architect.grant(t)
 	retry := h.request(http.MethodPost, "/legion/v1/phase/retry", map[string]any{
