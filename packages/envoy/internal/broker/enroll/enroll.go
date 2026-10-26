@@ -409,7 +409,7 @@ func (s *Service) recoverConflict(ctx context.Context, cred Credential, in Enrol
 	defer tx.Rollback(ctx)
 	var existing Enrollment
 	var live bool
-	err = tx.QueryRow(ctx, `select id, thumbprint, lease_expires_at, lease_expires_at > now() from enrollments
+	err = tx.QueryRow(ctx, `select id, thumbprint, lease_expires_at, enrollment_lease_live(lease_expires_at) from enrollments
 		where launcher_credential_id=$1 and runtime_id=$2 and slot=$3 and revoked_at is null for update`, cred.ID, in.RuntimeID, in.Slot).
 		Scan(&existing.ID, &existing.Thumbprint, &existing.LeaseExpires, &live)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -484,13 +484,15 @@ const lapsedBatch = 100
 // grants are revoked and its pending requests cancelled and dropped from the approver's list,
 // rather than waiting there for their own expiry with an approval that could grant nothing.
 //
-// Lapsed means what Lookup means by not live: lease_expires_at no later than Postgres's now(). A
-// session that keeps renewing keeps its lease ahead of now() and is never selected, and Renew
-// refuses an enrollment once its lease has lapsed, so ending one takes nothing a session could
-// still use. Rows a concurrent Renew or Revoke has locked are skipped (the next sweep sees them
-// as they are then), and an ended row has revoked_at set and is never selected again, so a sweep
-// that finds nothing changes nothing. It works in batches of lapsedBatch, each one transaction,
-// and returns what it ended.
+// Lapsed means what Lookup means by not live: lease_expires_at no later than Postgres's now(), and
+// not a lease that ran out while no broker was serving (enrollment_lease_live, migration 0019). A
+// lease that ran out while no broker was serving is not lapsed, so it is never ended for that: the
+// next ServingClock beat gives it the time back. A session that keeps renewing keeps its lease
+// ahead of now() and is never selected, and Renew refuses an enrollment once its lease has lapsed,
+// so ending one takes nothing a session could still use. Rows a concurrent Renew or Revoke has
+// locked are skipped (the next sweep sees them as they are then), and an ended row has revoked_at
+// set and is never selected again, so a sweep that finds nothing changes nothing. It works in
+// batches of lapsedBatch, each one transaction, and returns what it ended.
 func (s *Service) EndLapsed(ctx context.Context) ([]LapsedEnrollment, error) {
 	var ended []LapsedEnrollment
 	for {
@@ -509,7 +511,7 @@ func (s *Service) endLapsedBatch(ctx context.Context) ([]LapsedEnrollment, error
 	}
 	defer tx.Rollback(ctx)
 	rows, err := tx.Query(ctx, `select id, kind, runtime_id, slot, lease_expires_at from enrollments
-		where revoked_at is null and lease_expires_at <= now()
+		where revoked_at is null and lease_expires_at <= now() and not enrollment_lease_live(lease_expires_at)
 		order by lease_expires_at limit $1 for update skip locked`, lapsedBatch)
 	if err != nil {
 		return nil, err
@@ -618,7 +620,7 @@ func (s *Service) Renew(ctx context.Context, id, podToken string) (Renewal, erro
 	var subject *string
 	renewal := Renewal{}
 	err = tx.QueryRow(ctx, `select kind, runtime_id, slot, subject from enrollments
-		where id=$1 and revoked_at is null and lease_expires_at > now() for update`, id).
+		where id=$1 and revoked_at is null and enrollment_lease_live(lease_expires_at) for update`, id).
 		Scan(&kind, &renewal.RuntimeID, &renewal.Slot, &subject)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Renewal{}, ErrNotLive
@@ -781,7 +783,7 @@ func (s *Service) liveCredentials(ctx context.Context, person string, services b
 		left join credential_requests r on r.id = c.record_id and r.kind = 'launcher_credential'
 		where ((c.service is null and r.approver = $1) or ($2 and c.service is not null and (r.id is not null or c.subject is not null)))
 			and c.revoked_at is null
-			and (c.expires_at > now() or exists (select 1 from enrollments e where e.launcher_credential_id = c.id and e.revoked_at is null and e.lease_expires_at > now()))
+			and (c.expires_at > now() or exists (select 1 from enrollments e where e.launcher_credential_id = c.id and e.revoked_at is null and enrollment_lease_live(e.lease_expires_at)))
 		order by c.created_at desc, c.id`, person, services)
 	if err != nil {
 		return nil, err
@@ -968,7 +970,7 @@ func (s *Service) Lookup(ctx context.Context, id string) (string, bool, error) {
 	}
 	var thumbprint string
 	var live bool
-	err := s.Store.Pool.QueryRow(ctx, `select thumbprint, revoked_at is null and lease_expires_at > now() from enrollments where id=$1`, id).Scan(&thumbprint, &live)
+	err := s.Store.Pool.QueryRow(ctx, `select thumbprint, revoked_at is null and enrollment_lease_live(lease_expires_at) from enrollments where id=$1`, id).Scan(&thumbprint, &live)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return "", false, nil
 	}

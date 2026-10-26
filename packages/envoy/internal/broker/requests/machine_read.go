@@ -47,7 +47,7 @@ func (m *Machine) Values(ctx context.Context, grantID, enrollmentID string) (map
 	var lifetime *int
 	var live bool
 	enr := enrollmentRow{ID: enrollmentID}
-	err := m.Store.Pool.QueryRow(ctx, `select g.enrollment_id, g.expires_at, g.revoked_at is null and `+grantUnexpired("g")+` and e.revoked_at is null and e.lease_expires_at > now(),
+	err := m.Store.Pool.QueryRow(ctx, `select g.enrollment_id, g.expires_at, g.revoked_at is null and `+grantUnexpired("g")+` and e.revoked_at is null and enrollment_lease_live(e.lease_expires_at),
 		g.request_id, r.rules_version, coalesce(r.decided_by, ''), r.lifetime_seconds, e.kind, e.operator, e.subject, c.service
 		from grants g join enrollments e on e.id=g.enrollment_id join requests r on r.id=g.request_id
 		left join launcher_credentials c on c.id = e.launcher_credential_id where g.id=$1`, grantID).

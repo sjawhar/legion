@@ -611,7 +611,7 @@ func (m *Machine) ApplyDecision(ctx context.Context, recordID string, approve bo
 	}
 	var live bool
 	enr := enrollmentRow{ID: enrollmentID}
-	if err := tx.QueryRow(ctx, `select e.revoked_at is null and e.lease_expires_at > now(), e.kind, e.operator, e.subject, c.service from enrollments e
+	if err := tx.QueryRow(ctx, `select e.revoked_at is null and enrollment_lease_live(e.lease_expires_at), e.kind, e.operator, e.subject, c.service from enrollments e
 		left join launcher_credentials c on c.id = e.launcher_credential_id where e.id=$1 for share of e`, enrollmentID).
 		Scan(&live, &enr.Kind, &enr.Operator, &enr.Subject, &enr.Service); err != nil {
 		return Decision{}, err
@@ -921,7 +921,7 @@ func (m *Machine) enrollment(ctx context.Context, id string) (enrollmentRow, err
 	var e enrollmentRow
 	err := m.Store.Pool.QueryRow(ctx, `select e.id, e.kind, e.operator, c.service, e.subject, e.thumbprint, e.runtime_id, e.slot from enrollments e
 		left join launcher_credentials c on c.id = e.launcher_credential_id
-		where e.id=$1 and e.revoked_at is null and e.lease_expires_at > now()`, id).
+		where e.id=$1 and e.revoked_at is null and enrollment_lease_live(e.lease_expires_at)`, id).
 		Scan(&e.ID, &e.Kind, &e.Operator, &e.Service, &e.Subject, &e.Thumbprint, &e.RuntimeID, &e.Slot)
 	return e, err
 }
@@ -934,7 +934,7 @@ func (m *Machine) enrollment(ctx context.Context, id string) (enrollmentRow, err
 // Postgres rechecks the row, so tx writes nothing on it.
 func lockLiveEnrollment(ctx context.Context, tx pgx.Tx, id string) error {
 	var one int
-	return tx.QueryRow(ctx, `select 1 from enrollments where id=$1 and revoked_at is null and lease_expires_at > now() for share`, id).Scan(&one)
+	return tx.QueryRow(ctx, `select 1 from enrollments where id=$1 and revoked_at is null and enrollment_lease_live(lease_expires_at) for share`, id).Scan(&one)
 }
 
 // anyServiceOwned reports whether set serves any of granted as a service's secret, whose grant is

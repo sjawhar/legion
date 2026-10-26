@@ -399,7 +399,12 @@ func main() {
 	}
 	slog.Info("broker listening", "addr", listener.Addr().String())
 
-	enr := &enroll.Service{Store: st, Lease: time.Duration(cfg.LeaseSeconds) * time.Second, Pod: pod, ServiceLogins: cfg.ServiceLogins}
+	lease, sweep := time.Duration(cfg.LeaseSeconds)*time.Second, time.Duration(cfg.SweepSeconds)*time.Second
+	enr := &enroll.Service{Store: st, Lease: lease, Pod: pod, ServiceLogins: cfg.ServiceLogins}
+	// The serving clock beats on serving, not ctx: this pod still answers renewals through its
+	// drain, so it is still a broker serving, and a gap in the beats there would read as an outage.
+	clock := &enroll.ServingClock{Store: st, Interval: sweep, NotServingAfter: 3 * sweep, Lease: lease}
+	go clock.Run(serving)
 	enr.Chain = enroll.NewChainVerifier(st, cfg.PublicURL, time.Duration(cfg.ProofSkewSeconds)*time.Second)
 	reqMachine := newRequestMachine(cfg, st, current, secretStore, enr.Replay)
 	credentialLifetime := time.Duration(cfg.LauncherCredentialSeconds) * time.Second
@@ -470,7 +475,7 @@ func main() {
 	}
 	sweeper := &requests.Sweeper{
 		Enrollments: enr, Machine: reqMachine, MachineLogins: mach, OAuth: oauthStore,
-		Interval: time.Duration(cfg.SweepSeconds) * time.Second, Wake: waker,
+		Interval: sweep, Wake: waker,
 	}
 	go sweeper.Run(ctx)
 

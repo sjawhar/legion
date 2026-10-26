@@ -175,7 +175,9 @@ type Config struct {
 	// BROKER_ENVOY_URL is set.
 	EnvoyToken string
 	// BROKER_LEASE_SECONDS: an enrollment's lease. A session renews it while it runs; one whose
-	// lease runs out is no longer enrolled and its calls are refused.
+	// lease runs out is no longer enrolled and its calls are refused. Time while no broker was
+	// serving is not counted against it: a lease that ran out then stays live until a broker serves
+	// again, which gives it that time back. More than four and a half times BROKER_SWEEP_SECONDS.
 	LeaseSeconds int
 	// BROKER_PROOF_SKEW_SECONDS: how far the issue time of a signed proof or request object may
 	// differ from the broker's clock.
@@ -190,7 +192,10 @@ type Config struct {
 	// from then; past it the machine logs in again, with a new key, a new code and a new approval.
 	LauncherCredentialSeconds int
 	// BROKER_SWEEP_SECONDS: how often the broker ends the enrollments whose lease lapsed and expires
-	// the pending requests and machine logins nobody decided in time.
+	// the pending requests and machine logins nobody decided in time. It is also how often a serving
+	// broker records that it serves: a gap of more than three sweeps between two such records is
+	// time no broker was serving, which the broker gives back to every lease still running when the
+	// gap began.
 	SweepSeconds int
 	// BROKER_DRAIN_SECONDS: how long the broker goes on serving after SIGTERM while answering
 	// GET /healthz with 503, so Kubernetes has stopped sending it new requests before it stops
@@ -634,6 +639,13 @@ func Load(getenv func(string) string) (Config, error) {
 			return Config{}, fmt.Errorf("%s must be a whole number between %d and %d, got %q", i.name, i.min, i.max, raw)
 		}
 		*i.dst = n
+	}
+	// A live session renews with at least two thirds of its lease left, and a gap of up to three
+	// sweeps reads as a broker still serving, so a lease that ran out inside such a gap would be
+	// ended rather than given back. Three sweeps must fall short of two thirds of a lease.
+	if 2*cfg.LeaseSeconds <= 9*cfg.SweepSeconds {
+		return Config{}, fmt.Errorf("BROKER_LEASE_SECONDS (%d) must be more than four and a half times BROKER_SWEEP_SECONDS (%d): a live session holds at least two thirds of its lease, and the gap the broker tolerates before giving back the time no broker was serving is three sweeps",
+			cfg.LeaseSeconds, cfg.SweepSeconds)
 	}
 	return cfg, nil
 }
