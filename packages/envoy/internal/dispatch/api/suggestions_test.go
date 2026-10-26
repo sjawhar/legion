@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
@@ -258,7 +259,11 @@ const lockedSuggestionAllowance = 5 * time.Second
 
 // suggestionsBehindLock locks table in ACCESS EXCLUSIVE mode, runs computeAndPersistSuggestions on
 // a server whose suggestion allowance is lockedSuggestionAllowance, and answers what it returned.
-// It fails at once when the call answers before any backend has queued behind that lock, so a
+// The call runs on a one-connection store of its own, so the backend the poll watches in pg_locks
+// is the call's and no other. Counting every backend queued behind the lock is not enough: the
+// issue create the tests seed schedules the spec's settlement, which queues behind the same locks
+// on the shared pool, so that count passed a call that never waited (sjawhar/legion#2217 review).
+// It fails at once when the call answers before its own backend has queued behind that lock, so a
 // passing caller's answer is one the allowance ended while the query waited there. Nothing here
 // times the call: a step run outside the allowance waits behind the lock until go test's
 // -timeout ends the run, naming the test.
@@ -266,7 +271,27 @@ func suggestionsBehindLock(
 	t *testing.T, deps Deps, table, project, text string, source suggestionSource,
 ) *model.Suggestions {
 	t.Helper()
-	srv := directServer(deps)
+	config := deps.Store.Pool.Config()
+	config.MaxConns = 1
+	config.MinConns = 0
+	config.MinIdleConns = 0
+	opened, err := pgxpool.NewWithConfig(context.Background(), config)
+	if err != nil {
+		t.Fatalf("open the call's one-connection pool: %v", err)
+	}
+	callStore := &store.Store{Pool: store.NewPool(opened)}
+	// Registered before the lock's rollback, so the rollback runs first and this closes after.
+	t.Cleanup(callStore.Pool.Close)
+	conn, err := callStore.Pool.Acquire(context.Background())
+	if err != nil {
+		t.Fatalf("acquire the call's connection: %v", err)
+	}
+	callPID := conn.Conn().PgConn().PID()
+	conn.Release()
+
+	callDeps := deps
+	callDeps.Store = callStore
+	srv := directServer(callDeps)
 	srv.suggestionTimeout = lockedSuggestionAllowance
 
 	lockTx, err := deps.Store.Pool.Begin(context.Background())
@@ -291,14 +316,16 @@ func suggestionsBehindLock(
 			t.Fatalf("computeAndPersistSuggestions answered %+v before its query waited behind the lock on %s, want the %s allowance to end while it waits", s, table, lockedSuggestionAllowance)
 		default:
 		}
-		var waiting int
+		var waiting bool
 		if err := lockTx.QueryRow(context.Background(), `
-			select count(*) from pg_locks
-			where not granted and pg_backend_pid() = any(pg_blocking_pids(pid))
-		`).Scan(&waiting); err != nil {
-			t.Fatalf("read the backends waiting on the lock on %s: %v", table, err)
+			select exists (
+				select 1 from pg_locks
+				where pid = $1 and not granted and pg_backend_pid() = any(pg_blocking_pids(pid))
+			)
+		`, callPID).Scan(&waiting); err != nil {
+			t.Fatalf("read whether the call's backend waits on the lock on %s: %v", table, err)
 		}
-		if waiting > 0 {
+		if waiting {
 			break
 		}
 		time.Sleep(2 * time.Millisecond)
