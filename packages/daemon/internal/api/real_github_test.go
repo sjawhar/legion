@@ -2,6 +2,7 @@ package api
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -99,9 +100,11 @@ type liveProofApp struct{ id, keyName, keyCommand string }
 // variables that make bash run other code or trace its own: an exported SHELLOPTS with xtrace
 // would print a refused input's value on stderr, BASHOPTS sets shell options, a BASH_ENV or ENV
 // file could write to the stdout the caller parses, BASH_XTRACEFD and PS4 steer a trace, and an
-// exported function replaces a builtin the lib calls.
+// exported function replaces a builtin the lib calls. --norc keeps out the rc files a
+// non-interactive bash built with SSH_SOURCE_BASHRC (Debian's and Ubuntu's) reads when SSH_CLIENT
+// is set at a shell level below 2, as under a plain `ssh host go test …`.
 func runGitHubAppsLib(lib string, environ []string, script string, args ...string) (stdout []byte, stderr string, err error) {
-	command := exec.Command("bash", append([]string{"-c", script, "bash", lib}, args...)...)
+	command := exec.Command("bash", append([]string{"--norc", "-c", script, "bash", lib}, args...)...)
 	command.Env = slices.DeleteFunc(slices.Clone(environ), func(entry string) bool {
 		name, _, _ := strings.Cut(entry, "=")
 		return strings.HasPrefix(name, "BASH_FUNC_") || slices.Contains(
@@ -277,11 +280,35 @@ func TestLiveProofAppsReadTheLib(t *testing.T) {
 	if got := []string{implement.id, implement.keyName, review.id, review.keyName}; !slices.Equal(got, []string{"101", "EXAMPLE_IMPLEMENT_KEY", "202", "EXAMPLE_REVIEW_KEY"}) {
 		t.Errorf("with every input set the Apps are %v, want the inputs", got)
 	}
-	// The key command is what the proofs sign with, so it must read the input's key, not a default's.
+	// The key command is what the proofs sign with, so it must read the input's key, not a default's,
+	// and decode it as the store holds it: Node-style base64, URL-safe and unpadded, perhaps with one
+	// dangling sextet. A stand-in `secrets` puts each value in the command's environment as the
+	// real one does, and the command's output must be the value's bytes.
+	stub := t.TempDir()
+	if err := os.WriteFile(filepath.Join(stub, "secrets"), []byte("#!/bin/sh\nname=$1\nshift 2\nexport \"$name=$STUB_VALUE\"\nexec \"$@\"\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
 	for role, app := range map[string]liveProofApp{"implement": implement, "review": review} {
 		want := "secrets EXAMPLE_" + strings.ToUpper(role) + "_KEY -- sh -c "
 		if !strings.HasPrefix(app.keyCommand, want) || !strings.Contains(app.keyCommand, "${EXAMPLE_"+strings.ToUpper(role)+"_KEY}") {
 			t.Errorf("with every input set the %s App's key command reads %q, want `%s…` reading that key", role, app.keyCommand, want)
+		}
+		for _, stored := range []struct {
+			text  string
+			value []byte
+		}{
+			{base64.RawURLEncoding.EncodeToString([]byte{0xfb, 0xef, 0xbe, 0xff, 0xfe}), []byte{0xfb, 0xef, 0xbe, 0xff, 0xfe}}, // 7 characters, '-' and '_'
+			{base64.RawURLEncoding.EncodeToString([]byte{0xfb, 0xff, 0x3e, 0x01}), []byte{0xfb, 0xff, 0x3e, 0x01}},             // 6 characters
+			{base64.RawURLEncoding.EncodeToString([]byte{0xfb, 0xff, 0x3e}), []byte{0xfb, 0xff, 0x3e}},                         // 4 characters
+			// A dangling sextet after a whole quantum, 5 characters, which a Node-style decode drops.
+			{base64.RawURLEncoding.EncodeToString([]byte{0xfb, 0xff, 0x3e}) + "A", []byte{0xfb, 0xff, 0x3e}},
+		} {
+			run := exec.Command("sh", "-c", app.keyCommand)
+			run.Env = append(with(), "PATH="+stub+string(os.PathListSeparator)+os.Getenv("PATH"), "STUB_VALUE="+stored.text)
+			got, err := run.Output()
+			if err != nil || !bytes.Equal(got, stored.value) {
+				t.Errorf("the %s App's key command decodes stored %q to %x (err %v), want %x", role, stored.text, got, err, stored.value)
+			}
 		}
 	}
 
@@ -315,10 +342,20 @@ func TestLiveProofAppsReadTheLib(t *testing.T) {
 	if err := os.WriteFile(startup, []byte("printf 'noise from BASH_ENV\\n'\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	for _, inherited := range []string{"BASH_ENV=" + startup, "BASH_FUNC_printf%%=() { builtin printf 'HIJACK|'; builtin printf \"$@\"; }"} {
-		implement, _, err = liveProofApps(append(with(), inherited))
+	// A non-interactive bash built with SSH_SOURCE_BASHRC reads ~/.bashrc when SSH_CLIENT is set at
+	// a shell level below 2; this one writes to stdout and exports a function.
+	sshHome := t.TempDir()
+	if err := os.WriteFile(filepath.Join(sshHome, ".bashrc"), []byte("echo 'bashrc ran'\nhijack() { :; }\nexport -f hijack\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, inherited := range [][]string{
+		{"BASH_ENV=" + startup},
+		{"BASH_FUNC_printf%%=() { builtin printf 'HIJACK|'; builtin printf \"$@\"; }"},
+		{"SSH_CLIENT=192.0.2.1 1 22", "SHLVL=0", "HOME=" + sshHome},
+	} {
+		implement, _, err = liveProofApps(append(with(), inherited...))
 		if err != nil || implement.id != defaults["implement_app_id"] {
-			t.Errorf("with %s inherited the implement App is %q (err %v), want the lib's default %s", inherited, implement.id, err, defaults["implement_app_id"])
+			t.Errorf("with %v inherited the implement App is %q (err %v), want the lib's default %s", inherited, implement.id, err, defaults["implement_app_id"])
 		}
 	}
 
