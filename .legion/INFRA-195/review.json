@@ -2,30 +2,22 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-195",
-  "completed": "2026-10-26T00:58:30Z",
+  "completed": "2026-10-26T03:31:30Z",
+  "round": 2,
   "decision": "changes_requested",
-  "reviewedCodeHead": "e9d5f5ac7a0513a3410fe75edeacb0cd722b9252",
+  "reviewedCodeHead": "2451b5dcba7766ceea944be791e461b5162fecdb",
   "critical": 0,
   "important": 1,
-  "minor": 2,
+  "minor": 0,
   "keyFindings": [
     {
       "severity": "important",
-      "file": "scripts/e2e/dispatch-session-settings.sh",
-      "description": "Lines 162-166 install @sjawhar/pi-envoy@latest as the 'older' plugin, and check 17 older-plugin-notice (scripts/e2e/lib/dispatch-session-settings.ts:1885-1909) requires it to send no settings frame. Once this PR's merge releases pi-envoy, latest carries the settings frame and the rig fails check 17 on correct code. Pin an exact pre-settings release (npm latest today is 10.24.0) and say so in the script comment and in scripts/e2e/README.md (index row at :1728 says 'newest released')."
-    },
-    {
-      "severity": "minor",
-      "file": "scripts/e2e/dispatch-session-settings.sh",
-      "description": "Line 148 expands ${#ANTHROPIC_API_KEY} and ${#OPENAI_API_KEY} under set -u; README :1689 and the check at :125-130 make each key required only for a model of its provider, so SESSION_SETTINGS_MODELS naming two models of one provider with the other key unset exits 'unbound variable' (reproduced by the deep reviewer: env -u OPENAI_API_KEY bash -uc ... exit 127). Use ${VAR:-} in the note."
-    },
-    {
-      "severity": "minor",
-      "file": "scripts/e2e/README.md",
-      "description": "Lines 1647-1649 say the rig passes the provider keys 'to Oh My Pi and to no other process', but the scrub at dispatch-session-settings.sh:45-47 leaves them exported, so bun install, the builds, bun add and nats-server inherit them. Make the claim true (unset them from the script's exported environment and hand them to the Oh My Pi spawn only) or state what the rig actually does."
+      "file": "packages/dispatch/e2e/keyboard-session-pickers.e2e.ts",
+      "description": "CI's dispatch job 121364414957 (run 40258016033, Legion Envoy and Contracts) at code head 2451b5dcba77 failed in Firefox on 2 of the 5 new rows: :193 (11a, line 227: the Thinking level picker is still aria-disabled after the model switch was answered) and :339 (11d, line 372: the status is still 'Switching model to anthropic/model-b…' after the answer). The same rows pass in chromium, iphone and webkit, and the 3 Firefox rows that need no answer pass. Both traces (artifact dispatch-e2e-test-results-1) show the same thing: after the POST and its refetch of /agents/<id>/messages, the page never refetches the messages again, and its /api/v1/events request is opened again about 1 s after the POST and ends with status -1. So the page never sees the session's answer, and in Firefox a switch the session answered stays pending until the 30 s deadline. The plan (decision 6a, rows 11a-11d in every engine) makes these rows part of the A2 proof."
     }
   ],
-  "ci": "Required set (ruleset): lint, typecheck, test, pr-title, all completed success at CI head e9d5f5ac7a05 (Tests run 40249460491, PR Title run 40249460525); compare e9d5f5ac7a05...f3a38b752b29 touches only .legion/. Legion Envoy and Contracts run 40249460482 still running at 00:57Z: its dispatch job 121338038983 (the webkit and firefox rows of keyboard-session-pickers.e2e.ts) was installing Playwright; dispatch-memory, envoy-go, envoy-go-race in progress. Not required, so the next round reads its conclusion before approval.",
-  "thermonuclear": "Both run at f3a38b75: thermonuclear-deep-review CHANGES (F1 latest fixture, F2 unset key; hardening: provider keys reach non-OMP children), thermonuclear-code-quality CHANGES (F1 same; AgentConversationPage.test.tsx grows 610 to 1105 lines with SessionSettings-only tests, taken as the fast-follow).",
-  "fastFollow": "Move the SessionSettings rendering and keyboard unit tests out of AgentConversationPage.test.tsx into a SessionSettings.test.tsx, and drop the unused webkit-iphone entry of PHONE_PROJECTS in keyboard-session-pickers.e2e.ts (no project selects that file there)."
+  "roundOneFindings": "All three fixed and verified at 2451b5dcba77: pinned older_pi_envoy=10.24.0 (dispatch-session-settings.sh:62,177); key copies with :- (:54-55,159); keys unset before anything starts (:56), given only to the driver (:277), deleted from process.env at driver load (lib/dispatch-session-settings.ts:35-41) and given only to Oh My Pi (:191). The reviewer replied on threads PRRT_kwDORFy7ds6wG368, PRRT_kwDORFy7ds6wG369 and PRRT_kwDORFy7ds6wG37A and accepts the implementer's resolutions.",
+  "ci": "Required (ruleset lint, typecheck, test, pr-title): all success at CI head 2451b5dcba77 (Tests 40258016015, PR Title 40258069476); compare 2451b5dcba77...03a4f8abf412 touches only .legion/. Not required: Legion Envoy and Contracts run 40258016033, dispatch job 121364414957 failure (Browser-test dispatch dashboard: 2 failed, 158 skipped, 1503 passed); every other job of that run success.",
+  "thermonuclear": "At 03a4f8ab: deep review APPROVE (one nit: the pin's 'last release before the settings frame' wording, since 10.24.1 and 10.25.0 exist), code quality CHANGES (the 2045-line rig driver with a ~1060-line run(); judged a structural cleanup, not a correctness finding, so taken as the fast-follow; and four low items).",
+  "fastFollow": "Split scripts/e2e/lib/dispatch-session-settings.ts: move Omp, Services and Browser into their own modules and make run() a table of named checks; and fix the pin's comment and README row to say 'a release before the settings frame' (10.24.1 and 10.25.0 also lack it)."
 }
