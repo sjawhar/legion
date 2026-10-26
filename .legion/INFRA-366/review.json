@@ -1,0 +1,45 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-366",
+  "completed": "2026-10-26T01:44:26Z",
+  "reviewedHead": "216fa1470ec8495b8f7ff8d63b86251c107e8aaa",
+  "codeHead": "73e2394d99bbf7fd476692e7c94fd8abbb9ba29c",
+  "round": 1,
+  "decision": "changes_requested",
+  "critical": 0,
+  "important": 4,
+  "minor": 1,
+  "keyFindings": [
+    {
+      "severity": "important",
+      "file": "packages/envoy/internal/dispatch/refs/blocks.go:296",
+      "description": "A block id over the B-tree key limit (about 2.7 kB incompressible, e.g. a callout {#<3200 hex chars>}, which pmdoc accepts) makes every version write of that document fail: reproduced with a throwaway test on Postgres 17, NamedVersion at the head fails 'index row size 3232 exceeds btree version 4 maximum 2704 for index \"document_blocks_pkey\"' and stores no version; the same test on main 81a3b5ef stores version 1. The reconciler then retries the owed document forever."
+    },
+    {
+      "severity": "important",
+      "file": "packages/dispatch/web/src/features/refs/ReferencedBy.tsx:246",
+      "description": "Row key `${node.kind}:${node.id}:${kind}:${direction}` repeats when one source cites two blocks of the viewed document (refs/graph.go returns one edge per target block, edge.block differs): duplicate React keys among siblings, with per-row Excerpt state. Main keyed rows by kind:direction:created_at. Key must include edge.block; add the one-source-two-blocks case to ReferencedBy.test.tsx."
+    },
+    {
+      "severity": "important",
+      "file": "packages/envoy-client/src/dispatch-execute.ts:1086",
+      "description": "New refusal at the CLI/tool boundary without a '## Contract change census': on main dispatchRefFromUrl mapped a dashboard URL ending #b-<id> to its document, so comment/suggest/doc-edit/doc-read acted on the document; now the URL becomes a block ref and those tools refuse it. The PR body needs the census (search commands, hits with dispositions, rollout line)."
+    },
+    {
+      "severity": "important",
+      "file": "packages/dispatch/web/src/features/refs/routes.ts:262 and packages/envoy/internal/dispatch/api/references_test.go:858",
+      "description": "Both files cross 1000 lines (routes.ts 910 -> 1027, references_test.go 662 -> 1549) with separable responsibilities: move block-reference parsing/formatting out of routes.ts and the block tests into a block-specific test file, as block_links_test.go already is."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/contracts/src/dispatch-block-ref.ts:62",
+      "description": "parseBlockFragment turns any digit string into a JS number; Go's parseBlock refuses a pin past int64. A pin past 2^53 is rounded (and past 1e21 printed in exponent form) when the dashboard rebuilds the reference, so the dashboard links text the server does not treat as a reference and requests a different one. Bound the pin as Go does and add the overflow rows to the shared text-reference table."
+    }
+  ],
+  "thermonuclear": {
+    "deepReview": "Verdict: CHANGES at 216fa147 (the long block id finding, which this review reproduced)",
+    "codeQuality": "Verdict: CHANGES at 216fa147 (ReferencedBy key, pin precision, files past 1000 lines; its fourth item, the block-index test of the live-ahead cache, is judged not a defect)"
+  },
+  "ci": "At code head 73e2394d: lint, typecheck, pr-title success; test in progress; compare 73e2394d...216fa147 touches only .legion/."
+}
