@@ -516,7 +516,7 @@ describe("rebuttal (test 3)", () => {
     // The agent's record of its call no longer shows the field; the acknowledgement says why.
     expect(ack).toContain('outcome="rebuttal"');
     expect(ack).toContain('"a link"');
-    expect(ack).toContain("AskGate removed it, you did not leave it out");
+    expect(ack).toContain("not because you left it out");
     expect(g.calls).toHaveLength(0);
     expect(g.entries).toMatchObject([
       {
@@ -542,8 +542,8 @@ describe("rebuttal (test 3)", () => {
       'You sent this call with "advisor_rebuttal": " the owner said \\"go\\" ".'
     );
     expect(ack).toContain('AskGate recorded your rebuttal "the owner said "go""');
-    expect(ack).toContain("removed that field before the call ran");
-    expect(ack).toContain("has no field: AskGate removed it, you did not leave it out");
+    expect(ack).toContain("AskGate removed it before the call ran");
+    expect(ack).toContain("lacks it because AskGate removed it, not because you left it out");
   });
   test("a rebuttal is spent by its device event: the same id is gated afterwards", async () => {
     const g = bind();
@@ -1087,7 +1087,7 @@ describe("a write that passes unreviewed is recorded and said", () => {
       '{"issue":"X-1","body":"b","advisor_rebuttal":"a"}'
     );
     const rebutted = await g.device("r1", "dispatch_comment", { issue: "X-1", body: "b" });
-    expect(rebutted?.additionalContext).toContain("The call was sent without review.");
+    expect(rebutted?.additionalContext).toContain("the call was sent without review.");
     for (const id of ["b1", "b2"]) await g.device(id, "dispatch_comment", COMMENT);
     const tripped = await g.device("b3", "dispatch_comment", COMMENT);
     expect(tripped?.additionalContext).toContain("sent without review and recorded");
@@ -2738,7 +2738,7 @@ console.log(JSON.stringify(args, null, 2));
     expect(result?.additionalContext).toContain('verdict="revise"');
     expect(result?.additionalContext).toContain("see the message above");
   });
-  test("--advisor-rebuttal sends the command unreviewed, with the flag removed before it runs", async () => {
+  test("--advisor-rebuttal sends the command unreviewed, its flag kept only as a shell comment", async () => {
     const g = bind({
       env: { ...STUB, OMP_ASKGATE: "block" },
       cwd: work,
@@ -2747,7 +2747,13 @@ console.log(JSON.stringify(args, null, 2));
     const command = `dispatch ask --issue X-1 --advisor-rebuttal 'the plan is linked in the question' --question-file - <<'EOF'\n${QUESTION}EOF`;
     const result = await g.bash("b1", command, { cwd: work });
     expect(result?.block).toBeUndefined();
-    expect(result?.input).toEqual({ command: ASK, cwd: work });
+    expect(result?.input).toEqual({
+      command: ASK.replace(
+        "<<'EOF'",
+        "<<'EOF' # --advisor-rebuttal 'the plan is linked in the question'"
+      ),
+      cwd: work,
+    });
     expect(result?.additionalContext).toContain('outcome="rebuttal"');
     expect(result?.additionalContext).toContain('"the plan is linked in the question"');
     expect(g.dryRuns[0].script).toBe(
@@ -2767,9 +2773,29 @@ console.log(JSON.stringify(args, null, 2));
       "b2",
       "dispatch comment --issue X-1 --advisor-rebuttal='a link' --body hi"
     );
-    expect(inline?.input).toEqual({ command: "dispatch comment --issue X-1 --body hi" });
+    expect(inline?.input).toEqual({
+      command: "dispatch comment --issue X-1 --body hi # --advisor-rebuttal='a link'",
+    });
     expect(inline?.additionalContext).toContain(
-      "You sent this call with --advisor-rebuttal='a link'. AskGate recorded your rebuttal \"a link\" and removed that flag before the call ran"
+      "You sent this call with --advisor-rebuttal='a link'. AskGate recorded your rebuttal \"a link\", and the call was sent without review. dispatch does not take that flag, so AskGate moved it into a shell comment at the end of the command's first line"
+    );
+  });
+  test("a rebuttal's command, its flag a comment, runs in bash with the flag out of the CLI's arguments and the here-document intact", async () => {
+    const g = bind({
+      env: { ...STUB, OMP_ASKGATE: "block" },
+      cwd: work,
+      complete: async () => ({ text: REVISE }),
+    });
+    const sent = `dispatch ask --issue X-1 --advisor-rebuttal 'the plan is linked' --question-file - <<'EOF' 2>&1\n${QUESTION}EOF`;
+    const ran = (await g.bash("b1", sent))?.input?.command;
+    expect(ran).toContain("# --advisor-rebuttal 'the plan is linked'");
+    // A stand-in `dispatch` prints each argument it gets, then its standard input.
+    const shell = Bun.spawnSync({
+      cmd: ["bash", "-c", `dispatch() { printf 'arg:%s\\n' "$@"; cat; }\n${ran}`],
+    });
+    expect(shell.exitCode).toBe(0);
+    expect(shell.stdout.toString()).toBe(
+      `arg:ask\narg:--issue\narg:X-1\narg:--question-file\narg:-\n${QUESTION}`
     );
   });
   test("after an --advisor-rebuttal pass, what the agent reads back of its call still shows the flag it sent", async () => {
@@ -2941,7 +2967,7 @@ console.log(JSON.stringify(args, null, 2));
       "cd 'sub' && dispatch comment --issue X-1 --advisor-rebuttal 'r' --body hi 2>&1"
     );
     expect(result?.input).toEqual({
-      command: "cd 'sub' && dispatch comment --issue X-1 --body hi 2>&1",
+      command: "cd 'sub' && dispatch comment --issue X-1 --body hi 2>&1 # --advisor-rebuttal 'r'",
     });
     expect(g.dryRuns[0].script).toBe(
       "cd 'sub' >/dev/null && dispatch comment --dry-run --issue X-1 --body hi"

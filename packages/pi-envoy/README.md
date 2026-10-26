@@ -356,9 +356,10 @@ instead and how to send the call anyway. The agent sends the call anyway in one 
   again.
 
 A rebuttal sends the call with no review by either check, and the entry records the line. The
-gate removes the flag or field before the call runs, since neither the CLI nor the device takes
-it, so the call the agent reads back lacks it; the acknowledgement quotes the override exactly as
-the agent sent it and says AskGate removed it. A rules call that ends in an error, a timeout or an
+CLI takes no such flag, so the gate moves it into a shell comment at the end of the command's
+first line, where the agent's record of its call still shows it; a device takes no such field,
+so the gate removes it and says so. Either way the acknowledgement quotes the override exactly
+as the agent sent it. A rules call that ends in an error, a timeout or an
 answer that does not parse refuses nothing: the charter check decides. The third such rules call
 in a row writes one warning, saying that the new asks of those three calls went unchecked and
 that the check still runs on each new ask, to the host's plain log, shows it as a notice in a

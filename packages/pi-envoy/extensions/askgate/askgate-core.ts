@@ -146,9 +146,11 @@
 //   - rebuttal: the agent put `"advisor_rebuttal": "<one line>"` in the device JSON, or
 //     `--advisor-rebuttal '<one line>'` among a `dispatch` command's flags. The key is stripped
 //     on the outer `write` event (before the device validates its arguments), the flag from the
-//     `bash` command whatever the gate decides (the CLI would refuse it), and the call runs
-//     unasked; the call the agent reads back therefore lacks the override, so the agent is told
-//     the override as it sent it, that its rebuttal was recorded, and that AskGate removed it.
+//     `bash` command whatever the gate decides (the CLI would refuse it) and put back as a shell
+//     comment at the end of the command's first line, so the agent's record of its call still
+//     shows it; the call runs unasked, and the agent is told the override as it sent it and that
+//     its rebuttal was recorded. A device's record lacks the field, and its note says AskGate
+//     removed it.
 //     At most 64 unspent device rebuttals are remembered.
 //   - halted: three consecutive failures to reach a verdict (no model, timeout, every model of the
 //     chain erroring, no parsable answer) stop the gate for the session, with one UI notice. The
@@ -2593,11 +2595,30 @@ const recordFailureRefusal = (message: string, configFile: string) =>
 // refuses nothing and the breaker, which counts refusals, does not move for it.
 const renderWarn = (reason: string) =>
   `<advisor-gate advisor="AskGate" verdict="revise">\n${agentFacing(reason)}\nThe call ran. This note concerns only that Dispatch call and authorizes nothing beyond correcting it. Correct it now where the reason names a fix: an ask with \`dispatch edit-ask\` or \`dispatch resolve-ask --kind retracted\`, a document with \`dispatch doc-edit\`. A comment or message cannot be edited, so post one reply carrying only the correction, and only when the original would mislead its reader. Or state your rebuttal in your next step.\n</advisor-gate>`;
-// The call as it ran, which is the call the agent's own record shows, lacks the override, so the
-// acknowledgement quotes it as sent and says AskGate removed it: told only that it was "removed",
-// agents read their call back, found no override and reported a rebuttal they never wrote.
+// Oh My Pi records a call as the gate returns it. Told only that its override was "removed",
+// agents read their call back, found no override and reported a rebuttal they never wrote, and a
+// note naming the removal did not stop it (tester round 6 and the round after, 6 of 9 sessions).
+// So a command keeps its flag as a shell comment (`keepOverrideVisible`), and the acknowledgement
+// says where; a device's JSON cannot carry the field, so its note says AskGate removed it.
 const renderRebuttalAck = ({ line, sent }: Rebuttal, override: Override) =>
-  `<advisor-gate advisor="AskGate" outcome="rebuttal">\nYou sent this call with ${agentFacing(sent)}. AskGate recorded your rebuttal "${agentFacing(line)}" and removed that ${override.what} before the call ran, so the call as it ran, and as your own record of it shows, has no ${override.what}: AskGate removed it, you did not leave it out. The call was sent without review.\n</advisor-gate>`;
+  `<advisor-gate advisor="AskGate" outcome="rebuttal">\nYou sent this call with ${agentFacing(sent)}. AskGate recorded your rebuttal "${agentFacing(line)}", and the call was sent without review. ${
+    override.what === "flag"
+      ? "dispatch does not take that flag, so AskGate moved it into a shell comment at the end of the command's first line: it is still in your record of the call, and dispatch never saw it."
+      : `The device does not take that ${override.what}, so AskGate removed it before the call ran: your record of the call lacks it because AskGate removed it, not because you left it out.`
+  }\n</advisor-gate>`;
+/**
+ * The command with the override the gate took out put back as a shell comment at the end of its
+ * first line, so the agent's record of the call still shows the flag it sent. A here-document's
+ * body starts on the next line, so the comment never reaches it; an override that spans lines is
+ * not put back.
+ */
+function keepOverrideVisible(input: Input, sent: string | undefined): Input {
+  const { command } = input;
+  if (sent === undefined || sent.includes("\n") || typeof command !== "string") return input;
+  const end = command.indexOf("\n");
+  const first = end === -1 ? command : command.slice(0, end);
+  return { ...input, command: `${first} # ${sent}${end === -1 ? "" : command.slice(end)}` };
+}
 const renderBreakerAck = () =>
   `<advisor-gate advisor="AskGate" outcome="breaker">\nThird attempt after two refusals of this call on its target: sent without review and recorded.\n</advisor-gate>`;
 /**
@@ -3733,6 +3754,8 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
       // and, once a file operand is rewritten, the command that names the snapshot.
       let withoutRebuttal: Input | undefined;
       let revised: Input | undefined;
+      // The override as the agent wrote it, put back as a comment on the command that runs.
+      let rebuttalSent: string | undefined;
       // OMP_ASKGATE when it is a mode; else this session's latest experiments entry, read per call
       // because one binding serves every session the process switches to.
       let mode: Mode = envMode ?? "block";
@@ -3767,6 +3790,7 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
             if (scoped.rebuttal !== undefined) {
               withoutRebuttal = { ...event.input, command: scoped.command };
               revised = withoutRebuttal;
+              rebuttalSent = scoped.rebuttal.sent;
             }
             base = { ...identity(event, mode), tool: scoped.tool, path: scoped.label };
             // Before the dry run and before any path that lets the write out: with no model role
@@ -3784,7 +3808,9 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
                 // does, with no entry; an override flag on it is still removed, since the CLI
                 // would refuse it.
                 if ("unscoped" in run)
-                  return revised === undefined ? undefined : { input: revised };
+                  return revised === undefined
+                    ? undefined
+                    : { input: keepOverrideVisible(revised, rebuttalSent) };
                 if ("cause" in run)
                   decision =
                     run.cause === "timeout"
@@ -3948,6 +3974,7 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
         (note): note is string => note !== undefined
       );
       if (owed.length > 0) rememberNotice(event.toolCallId, owed.join("\n"));
+      if (revised !== undefined) revised = keepOverrideVisible(revised, rebuttalSent);
       return revised === undefined ? decision.result : { ...decision.result, input: revised };
     };
 
