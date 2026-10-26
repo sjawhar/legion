@@ -2,8 +2,16 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-366",
-  "completed": "2026-10-26T03:35:00Z",
+  "completed": "2026-10-26T04:05:00Z",
   "proof": [
+    {
+      "criterion": "Tester round 4 (review round 1's finding as proven): a version write succeeds whatever its keys are - a document whose own reference key is long (a name of 2680 random characters, which main stores) is uploaded, edited and indexed; red test TestADocumentWhoseReferenceKeyLeavesNoRoomForABlockIDIsStillWritten",
+      "surface": "Local Dispatch harness: the real Go server built from the head (packages/dispatch/e2e/run-server.sh on port 8777, database infra366_r4) and the real dispatch CLI; throwaway script $TMPDIR/infra366/r4-proof.sh",
+      "command": "PORT=8777 bash $TMPDIR/infra366/r4-proof.sh (dispatch artifact --name <2680 random hex>.md, dispatch doc-edit insert on it, ?to=<it>&kind=part_of, ?to=<its issue>)",
+      "observed": "upload exit 0 'Uploaded …'; doc-edit 'Applied 1 ops (version 2)'; part_of lists 2 blocks; the issue's ?to= lists the document's mention from its block, whose node id is 2749 bytes. The red test passes unmodified (go test -run TestADocumentWhoseReferenceKeyLeavesNoRoomForABlockIDIsStillWritten ./internal/dispatch/api/), with the migration and graph_edges tests in ./internal/dispatch/store/.",
+      "headSha": "384ff72f9f4a942caa1ee0395913b70f10aa6ea9",
+      "negativeControl": "The previous build (9d4fb04e, port 8779, fresh database infra366_r4prev): the same upload answers 500 'internal server error'; before the change the red test fails 'index row size 2744 exceeds btree version 4 maximum 2704 for index \"document_blocks_node_id_key\"'"
+    },
     {
       "criterion": "Review round 1, Important (refs/blocks.go): a version write succeeds whatever its block ids are; a block id past the bound is refused where it is written (400 naming the bound), is no reference and no graph node, and a document already holding one is still written and indexed",
       "surface": "Local Dispatch harness: the real Go server built from the head (packages/dispatch/e2e/run-server.sh on port 8777, database infra366_r3) and the real dispatch CLI; throwaway script $TMPDIR/infra366/r3-proof.sh",
@@ -80,12 +88,14 @@
     "Round 3: contracts parseBlockFragment pin as digits bounded at 2^63-1; envoy-client ParsedDispatchRef.pin string; dashboard routes (383ffe51)",
     "Round 3: packages/dispatch/web/src/features/refs/block-reference.ts (moved out of routes.ts, 13430a18)",
     "Round 3: ReferencedBy.tsx row key and cited-block link, ReferencedBy.test.tsx, e2e/block-references.e2e.ts (446d1f3b)",
-    "Round 3: AGENTS.md, CHANGELOGs, skills/dispatch, docs/site, claude-envoy dist; shared text table's long-id rows written as literals so bundles leave the table out (9d4fb04e)"
+    "Round 3: AGENTS.md, CHANGELOGs, skills/dispatch, docs/site, claude-envoy dist; shared text table's long-id rows written as literals so bundles leave the table out (9d4fb04e)",
+    "Round 4: migration 0117 (document_blocks.node_id hash index, no unique; block_refs_from_node hash), store_test.go index list, text/refs.go MaxBlockIDBytes comment, packages/envoy/AGENTS.md (384ff72f)"
   ],
   "trickyParts": [
     "Every document version write now also indexes its blocks (about eight more statements in the version's transaction). TestAHealthyRoomUnderWritesIsNeverRefused passes on an idle pod at the head (27-41 writes against its floor of 20, main 36-54), but failed twice under CPU contention while other Go packages ran in parallel (11-15 writes); main passed the same contended run (24 writes). CI's runners are the judge.",
     "A12 needs every build on one public origin (text.Extract keeps a link outside DISPATCH_SERVER_URL a plain URL); the throwaway driver fronts the second build with a Host-rewriting proxy, as one load balancer does in production.",
-    "Bun keeps an exported array in a bundle when any element is a non-literal expression (a template with a computed value), so the long-id fixture rows of DISPATCH_TEXT_REFERENCES are written out as literals; otherwise the test table ships in claude-envoy's dist."
+    "Bun keeps an exported array in a bundle when any element is a non-literal expression (a template with a computed value), so the long-id fixture rows of DISPATCH_TEXT_REFERENCES are written out as literals; otherwise the test table ships in claude-envoy's dist.",
+    "A block node id is <ref_key>#<block id>, and ref_key (artifact slug) is unbounded, so node_id and from_node are hash indexed: their reads are all equalities (= and = any, bitmap scan), and uniqueness already follows from (artifact_id, block_id) and the unique ref_key. Migration 0117 is this PR's own and unreleased, so it was edited in place."
   ],
   "deviations": [
     "Local checks that failed for environmental reasons: api TestIssueRanksStayOrderedPastLowercaseDigitsAndProductionShapedMoves (the harness database's collation is C, which the test refuses), pi-envoy prepack's 'bin/dispatch' mode (the workspace checkout is 0775), and four load-sensitive tests in the parallel suite runs (envoy-client's 10 s command timeout, claude-envoy's tmux SIGTERM bound, dispatch's AgentsPage and ConversationTab O(1) scroll test), each passing when re-run alone at this head (envoy-client's three times by name; main's copy also passes).",
