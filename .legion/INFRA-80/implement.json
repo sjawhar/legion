@@ -2,24 +2,29 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-80",
-  "completed": "2026-10-26T04:33:31Z",
-  "round": "generation 4, answer to the tester's fail at e4ebfb39daa4: the tenth merge's resolution of skills/legion-worker/SKILL.md to main's file kept main's instruction to read .legion/<issue>/workspace-recovered.json; skill text only",
+  "completed": "2026-10-26T04:47:09Z",
+  "round": "generation 4, answer to review round 14 (review 5647511344 at 152c849ca282) and the architect's note: skill text only",
   "proof": [
     {
-      "criterion": "Spec acceptance 5: the recovery marker workspace-init wrote is gone from the tree, so no skill or prompt sends a resumed agent to it (tester's red test, commit 585076d4e409, unmodified)",
-      "surface": "the skills the plugins ship: pi-legion's skills guard over the prepack-staged skills and the daemon's role prompts, and claude-envoy's regenerated legion/ copy",
-      "command": "cd packages/claude-envoy && bun run build && bun run check-dist && bun run test; cd packages/pi-legion && bun test src/skills-guard.test.ts; grep -l workspace-recovered over every tracked file; jj diff --from 585076d4e409 --to @ packages/pi-legion/src/skills-guard.test.ts",
-      "observed": "skills guard 12 pass 0 fail, the tester's test included; check-dist 'dist/ and legion/ match a fresh build'; claude-envoy 191 pass 2 skip 0 fail; the grep finds the marker only in .legion handoffs, packages/daemon/internal/api/version.go (the removal's record), the red test itself, scripts/e2e/README.md and stage4b-sandbox-tree.sh (which assert its absence); the red test's file shows 0 changes against the tester's commit; bunx biome check and check-private-names pass",
-      "headSha": "4bee7ec164de2dfea41c9a3bba7a757474b5859f",
-      "negativeControl": "with skills/legion-worker/SKILL.md put back as it was at e4ebfb39 (main's sentence 'read .legion/<issue>/workspace-recovered.json too, once') the guard fails, 11 pass 1 fail, naming skills/legion-worker/SKILL.md; restored afterwards"
+      "criterion": "Review round 14 finding 1: merge-gate.md says what closeCheck does, that a pass or fail takes the issue's Sandbox for a root as for a child (packages/daemon/internal/workflow/check.go:275-302 enqueues record.IssueSuspend for every issue not back in the workflow)",
+      "surface": "the skills the plugins ship: skills/legion-worker/references/merge-gate.md and its claude-envoy legion/ copy, the pi-legion skills guard, and claude-envoy's build",
+      "command": "grep -rn 'Sandbox and volume\\|volume are released\\|volume kept' skills/ packages/daemon/internal/prompts/; cd packages/claude-envoy && bun run build && bun run check-dist; cd packages/pi-legion && bun test src/skills-guard.test.ts; bash .github/scripts/check-private-names.sh",
+      "observed": "merge-gate.md:282-284 now reads '`pass` or `fail` closes the check: your claim is retired and the issue's Sandbox goes with its pod and disk, for a root as for a child.'; the grep finds no remaining claim that a disk is kept or released only for a child; check-dist 'dist/ and legion/ match a fresh build'; skills guard 12 pass 0 fail; check-private-names passes",
+      "headSha": "ae3f92ecd6c70b56788567507ef568be04aa1007",
+      "negativeControl": "the same grep at 152c849ca282 counts 1 hit in skills/legion-worker/references/merge-gate.md ('for a child, the issue's Sandbox and volume are released'), the false sentence the review names"
+    },
+    {
+      "criterion": "Reviewer's fast-follow, done now under dispatch://INFRA-49/ask/2d080aec-ce9a-4c7c-a235-ae998d2b0830: the child-closed bullet in acceptance.md links merge-gate.md for when the pod goes, rather than restating the look lifecycle",
+      "surface": "skills/legion-architect/references/acceptance.md 'The close' and its claude-envoy copy, read by the architect skill; the skills guard checks its skill:// link",
+      "command": "cd packages/pi-legion && bun test src/skills-guard.test.ts; cd packages/claude-envoy && bun run check-dist; grep -n 'no report\\|bounded at' skills/legion-worker/references/merge-gate.md",
+      "observed": "the bullet keeps the five retired claims and the running implementer, and points to skill://legion-worker/references/merge-gate.md, *The production check after the close*, for when the pod and Sandbox go. That section covers every case the old bullet listed: a pending with no wake queued (pod and disk go), a queued wake (next look on the same pod), a look that reports nothing ('ends as a `pending`', line 272), and pass/fail (line 283). Guard 12 pass, link resolved; check-dist in sync",
+      "headSha": "ae3f92ecd6c70b56788567507ef568be04aa1007",
+      "negativeControl": "with the link temporarily respelled skill://legion-worker/references/merge-gates.md, the skills guard fails (11 pass 1 fail: 'every skill://<name>/<path> link names a file that exists' — '...acceptance.md: skill://legion-worker/references/merge-gates.md names no file'); restored afterwards, 12 pass"
     }
   ],
   "filesChanged": [
-    "skills/legion-worker/SKILL.md (step 1 'Read first': the last sentence now says that after a 'Your workspace was recreated…' message anything unpushed is gone and no file in the workspace says so, which is this change's own wording at the approved head, carried into main's rewritten step)",
-    "packages/claude-envoy/legion/skills/legion-worker/SKILL.md (regenerated)"
-  ],
-  "trickyParts": [
-    "My earlier search for leftover disk text in main's rewritten skills cut every match line at 300 characters. That hid this match, which sits at the end of a long line. This round's grep lists files, not truncated lines."
+    "skills/legion-worker/references/merge-gate.md and packages/claude-envoy/legion/skills/legion-worker/references/merge-gate.md",
+    "skills/legion-architect/references/acceptance.md and packages/claude-envoy/legion/skills/legion-architect/references/acceptance.md"
   ],
   "deviations": [],
   "openQuestions": []
