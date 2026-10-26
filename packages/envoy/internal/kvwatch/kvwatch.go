@@ -1,11 +1,20 @@
 // Package kvwatch keeps an in-memory cache fed by one JetStream KV bucket's watcher, and owns that
 // cache's whole watch lifecycle: the first start, readiness, moving to a replacement connection,
 // telling the current watcher from one it replaced, recording the terminal error when the current
-// watcher ends on its own, emptying the cache when the bucket was recreated, and arming nothing
-// once stopped. The interest registry, the session registry and the CI store each keep one, so
-// the listener rewatches, health-checks and stops all three the same way. It also owns the
-// one-shot scan of a bucket's existing keys (ScanExistingKeys), and the one reading of how
-// nats.go ended a scan that both share (idleTimeout).
+// watcher ends on its own, and arming nothing once stopped. The interest registry, the session
+// registry and the CI store each keep one, so the listener rewatches, health-checks and stops all
+// three the same way. It also owns the one-shot scan of a bucket's existing keys
+// (ScanExistingKeys), and the one reading of how nats.go ended a scan that both share
+// (idleTimeout).
+//
+// Every watcher a watch installs is a read of the whole bucket (Cache). The cache keeps every entry
+// through the read, takes each delivered record as an update, and only once the read has delivered
+// every record removes the entries it never touched: a read is never preceded by emptying the
+// cache, so a list served from it during the read is the copy it had, not a part of the bucket. A
+// read that times out or ends early removes nothing, and a timed-out one is read again by the
+// watcher itself. The watcher records whether its copy can be served (Servable): never before its
+// first complete read, and not once the copy has stopped following the bucket for longer than a
+// bound (the stale episode).
 package kvwatch
 
 import (
@@ -21,18 +30,69 @@ import (
 	"github.com/sjawhar/envoy/internal/bus"
 )
 
+// Cache is what a watcher feeds: one in-memory copy of a bucket, read again whole by every watcher
+// a watch installs. Each hook is called with the watcher's own locks taken as its ordering needs
+// and its state lock released, so a hook may take the cache's own mutex and, under it, call the
+// watcher's read accessors (Handle, Epoch, Following): the order is the cache's mutex, then the
+// watcher's, never the reverse. No two hooks of one watcher run at once.
+type Cache interface {
+	// Apply takes one record the current read delivered. A record from a watcher already replaced
+	// is dropped before it reaches the cache.
+	Apply(entry nats.KeyValueEntry, read Read)
+	// BeginRead says a new read of the whole bucket starts. The cache keeps every entry through it.
+	// A read whose Recreated is set reads a bucket that was deleted and created again, whose
+	// revisions number from 1 again, so the cache drops its revision fence (and keeps its entries).
+	BeginRead(read Read)
+	// CompleteRead says the read delivered every record of its bucket: the cache removes the entries
+	// the read found no evidence of (Marks, Sweep). A read that times out or ends before its end
+	// marker never completes, and removes nothing.
+	CompleteRead(read Read)
+}
+
+// Read names one read of the bucket: the watcher generation that reads it, as the cache sees it.
+type Read struct {
+	// Epoch counts the bucket's incarnations the watcher has read: it moves only when a watch
+	// installs onto a stream other than the one the watcher read before (the bucket was recreated),
+	// and a Rewatch onto the same stream keeps it. A write a store made through a handle of an
+	// earlier epoch (Handle) is not applied to the cache.
+	Epoch uint64
+	// Recreated says this read is the first of a new epoch.
+	Recreated bool
+	// MaxAge is the stream's MaxAge, the bucket's TTL, as the watch read it before it installed
+	// this read: a bucket recreated with another TTL moves it. 0 keeps records for good.
+	MaxAge time.Duration
+}
+
+// ErrRefilling is what Servable answers while the copy cannot be served: no read has completed
+// yet, or the copy has not followed the bucket for longer than the stale bound.
+var ErrRefilling = errors.New("kvwatch: the cache has no complete read of its bucket recent enough to serve")
+
+// defaultStaleBound is how long a copy that stopped following its bucket is still served. It is
+// under half the 5-minute record lifetime of the session bucket, so a copy past it would mostly
+// list sessions that already ended; within it the reconnect hook and the listener's 30 s
+// self-health rebuild normally complete a read.
+const defaultStaleBound = 2 * time.Minute
+
+// rereadDelay is how long a watcher waits before it reads its bucket again after the current
+// read's scan timed out.
+const rereadDelay = 5 * time.Second
+
 // Watcher is one cache's KV watcher, from New.
 type Watcher struct {
 	name   string
 	bucket string
-	apply  func(nats.KeyValueEntry)
-	reset  func()
+	cache  Cache
 	log    *slog.Logger
+	// now is the clock the stale episode is measured on, time.Now unless WithNow replaced it.
+	now func() time.Time
+	// staleBound is the longest stale episode served (defaultStaleBound unless WithStaleBound
+	// replaced it); a stream's MaxAge can shorten it (boundFor).
+	staleBound time.Duration
 
 	ready     chan struct{}
 	readyOnce sync.Once
 
-	// applyMu serializes apply and reset, and lets watch wait out an entry already being applied
+	// applyMu serializes the cache's hooks, and lets watch wait out an entry already being applied
 	// by the watcher it replaces. It is taken before mu.
 	applyMu sync.Mutex
 
@@ -40,7 +100,8 @@ type Watcher struct {
 	first bus.KeyValue
 
 	// after arms the wait between a stop nobody asked for and the ERROR that says no repair came,
-	// time.AfterFunc unless WithAfterFunc replaced it, so a test fires that wait itself.
+	// and the wait before a timed-out read is read again: time.AfterFunc unless WithAfterFunc
+	// replaced it, so a test fires those waits itself.
 	after AfterFunc
 
 	mu sync.RWMutex
@@ -59,9 +120,34 @@ type Watcher struct {
 	// generation it was armed for, so one still running after a repair cleared it reports nothing
 	// (reportUnrepaired).
 	repairTimer Timer
+	// rereadTimer is the armed wait before the current generation's timed-out read is read again
+	// (reread), and the marker that such a read is due. The two places the generation moves (watch,
+	// Stop) clear it, and its callback carries the generation it was armed for, so one still running
+	// after that reads nothing.
+	rereadTimer Timer
 	// stream is when the bucket's stream the current watcher reads was created. A different time
 	// on the next watch means the bucket was deleted and created again.
 	stream time.Time
+	// epoch is the current read's Read.Epoch, and bound its stale bound (boundFor).
+	epoch uint64
+	bound time.Duration
+
+	// completedOnce is set by the first read that completed, and following while the copy follows
+	// the bucket: from a read's completion until the next stop (stopFollowing, watch). staleSince is
+	// when the current stale episode began, zero while following and before any stop: an episode
+	// lasts from the first stop until a read completes, across any number of failed reads.
+	completedOnce bool
+	following     bool
+	staleSince    time.Time
+	// reading is set while the current generation's read is under way: installed, its scan not yet
+	// ended, and nothing has taken from it the right to complete (Check, Disconnected).
+	reading bool
+	// disconnects counts the disconnects Disconnected has reported, and readDisconnects is the
+	// count when the current generation's watch began. A read a disconnect overlapped completes
+	// nothing (completes): what the watcher delivered across the outage is no proof it delivered
+	// every record, and a copy whose connection is down does not follow its bucket.
+	disconnects     uint64
+	readDisconnects uint64
 
 	// watching counts the watches in flight, so End can wait for one that may still arm a watcher.
 	// A watch joins it under mu, and only while the watcher is not stopped, so once Stop has run it
@@ -81,15 +167,17 @@ type Watcher struct {
 // Option configures a Watcher.
 type Option func(*Watcher)
 
-// WithLogger sets the logger the watcher writes its lines through: its warm-up, a first start that
-// failed, a recreated bucket and its own end. The listener passes its own, so they are JSON records
-// with machine_id, as internal/store's are (store.WithLogger says why the listener never sets the
-// default instead). Without it the watcher logs where slog.Default() points.
+// WithLogger sets the logger the watcher writes its lines through: each read's warm-up, a first
+// start that failed, a recreated bucket, a re-read that failed and its own end. The listener passes
+// its own, so they are JSON records with machine_id, as internal/store's are (store.WithLogger says
+// why the listener never sets the default instead). Without it the watcher logs where
+// slog.Default() points.
 func WithLogger(log *slog.Logger) Option {
 	return func(w *Watcher) { w.log = log }
 }
 
-// Timer is a pending wait an AfterFunc armed, which a repair that worked stops. *time.Timer is one.
+// Timer is a pending wait an AfterFunc armed, which a repair that worked, or a read that made the
+// wait moot, stops. *time.Timer is one.
 type Timer interface{ Stop() bool }
 
 // AfterFunc arms f to run once d has passed, as time.AfterFunc does.
@@ -104,36 +192,59 @@ const unrepairedDelay = time.Minute
 // ran and did not work, so the ERROR need not wait out unrepairedDelay.
 const repairFailedReason = "repair failed"
 
-// WithAfterFunc sets how the watcher arms its unrepairedDelay wait, time.AfterFunc by default. The
-// production wait is a minute, so a test hands in its own, keeps the callback and fires it itself
-// rather than sleeping for it.
+// WithAfterFunc sets how the watcher arms its waits, time.AfterFunc by default: the unrepairedDelay
+// wait for a repair, and the rereadDelay wait before a timed-out read is read again. The
+// production waits are a minute and seconds, so a test hands in its own, keeps each callback and
+// fires it itself rather than sleeping for it.
 func WithAfterFunc(after AfterFunc) Option {
 	return func(w *Watcher) { w.after = after }
 }
 
-// New returns the watcher for the bucket kv is a handle on. name labels its log lines and its
-// terminal error ("<name> watcher stopped"). apply takes each entry the current watcher delivers,
-// one at a time; an entry from a watcher already replaced is dropped rather than applied. reset
-// empties the cache and its revision fence: a recreated bucket numbers its revisions from 1
-// again, so the old fence would drop every entry the new bucket delivers. New watches nothing
-// until Start. kv is a bus.KeyValue, the handle bus.EnsureKeyValue opens, and each Rewatch opens its
-// replacement with bus.OpenKeyValue, so every handle the store reads and writes through checks its
-// keys.
-func New(name string, kv bus.KeyValue, apply func(nats.KeyValueEntry), reset func(), options ...Option) *Watcher {
+// WithNow sets the clock the stale episode is measured on (Servable), time.Now by default, so a
+// test moves past the stale bound without waiting it out. Elapsed time is never read from record
+// timestamps.
+func WithNow(now func() time.Time) Option {
+	return func(w *Watcher) { w.now = now }
+}
+
+// WithStaleBound sets the longest stale episode served, in place of the 2-minute default, for
+// tests. A stream with a MaxAge still caps it at half that MaxAge.
+func WithStaleBound(bound time.Duration) Option {
+	return func(w *Watcher) { w.staleBound = bound }
+}
+
+// New returns the watcher that feeds cache from the bucket kv is a handle on. name labels its log
+// lines and its terminal error ("<name> watcher stopped"). Every watcher it installs is a read of
+// the whole bucket (Cache): the cache keeps its entries through the read and removes what the read
+// did not find only once it completes. New watches nothing until Start. kv is a bus.KeyValue, the
+// handle bus.EnsureKeyValue opens, and each Rewatch opens its replacement with bus.OpenKeyValue,
+// so every handle the store reads and writes through checks its keys.
+func New(name string, kv bus.KeyValue, cache Cache, options ...Option) *Watcher {
 	w := &Watcher{
-		name:   name,
-		bucket: kv.Bucket(),
-		apply:  apply,
-		reset:  reset,
-		ready:  make(chan struct{}),
-		first:  kv,
-		kv:     kv,
-		after:  func(d time.Duration, f func()) Timer { return time.AfterFunc(d, f) },
+		name:       name,
+		bucket:     kv.Bucket(),
+		cache:      cache,
+		now:        time.Now,
+		staleBound: defaultStaleBound,
+		ready:      make(chan struct{}),
+		first:      kv,
+		kv:         kv,
+		after:      func(d time.Duration, f func()) Timer { return time.AfterFunc(d, f) },
 	}
 	for _, option := range options {
 		option(w)
 	}
+	w.bound = w.staleBound
 	return w
+}
+
+// boundFor is the stale bound of a stream whose MaxAge is maxAge: staleBound, or half the MaxAge
+// when that is shorter, so a copy is never served once most of its records would have expired.
+func (w *Watcher) boundFor(maxAge time.Duration) time.Duration {
+	if maxAge > 0 {
+		return min(w.staleBound, maxAge/2)
+	}
+	return w.staleBound
 }
 
 // logger is the logger WithLogger set, or the default one.
@@ -146,12 +257,13 @@ func (w *Watcher) logger() *slog.Logger {
 
 // Start arms the first watcher in the background, so a store's Open never waits on WatchAll. A
 // first start that fails logs its error. When no watcher is current it records the error and
-// releases readiness, so a caller waiting for the cache sees the empty cache rather than hanging.
-// When a reconnect hook's Rewatch has armed one meanwhile, it does neither: the error is not that
-// watcher's, and that watcher releases readiness once it has delivered every existing key.
+// releases readiness, so a caller waiting for the cache sees a cache with no complete read (which
+// Servable refuses) rather than hanging. When a reconnect hook's Rewatch has armed one meanwhile,
+// it does neither: the error is not that watcher's, and that watcher releases readiness once it has
+// delivered every existing key.
 func (w *Watcher) Start() {
 	go func() {
-		err := w.watch(w.first)
+		err := w.watch(w.first, 0)
 		if err == nil {
 			return
 		}
@@ -169,13 +281,15 @@ func (w *Watcher) Start() {
 }
 
 // Rewatch opens the bucket on conn and replaces the current watcher with one there, clearing a
-// recorded terminal error once the replacement has started. The handle (KV) moves with it, so the
-// store writes through the connection its cache reads. After a server restart conn is the
-// connection the store opened on, reconnected in place; when the bus replaces a closed connection,
-// conn is the new one and the cache moves to it. A failure leaves the watcher and the handle as
-// they were. After Stop it arms nothing and still moves the handle. A failure repairs nothing, so
-// when a stop nobody asked for is still outstanding it reports that stop as unrepaired
-// (reportFailedRepair) before returning the error unchanged, which its caller already logs.
+// recorded terminal error once the replacement has started; the replacement reads the whole bucket
+// again (Cache). The handle (KV) moves with it, so the store writes through the connection its
+// cache reads. After a server restart conn is the connection the store opened on, reconnected in
+// place; when the bus replaces a closed connection, conn is the new one and the cache moves to it.
+// A failure leaves the watcher, the handle and whether the copy follows its bucket as they were: a
+// healthy watcher stays following, and one that had stopped already began its stale episode.
+// After Stop it arms nothing and still moves the handle. A failure repairs nothing, so when a stop
+// nobody asked for is still outstanding it reports that stop as unrepaired (reportFailedRepair)
+// before returning the error unchanged, which its caller already logs.
 func (w *Watcher) Rewatch(conn *nats.Conn) error {
 	js, err := conn.JetStream(nats.MaxWait(10 * time.Second))
 	if err != nil {
@@ -187,7 +301,7 @@ func (w *Watcher) Rewatch(conn *nats.Conn) error {
 		w.reportFailedRepair()
 		return fmt.Errorf("open %s KV bucket: %w", w.name, err)
 	}
-	if err := w.watch(kv); err != nil {
+	if err := w.watch(kv, 0); err != nil {
 		w.reportFailedRepair()
 		return fmt.Errorf("watch %s KV bucket: %w", w.name, err)
 	}
@@ -201,22 +315,106 @@ func (w *Watcher) KV() bus.KeyValue {
 	return w.kv
 }
 
+// Handle is the bucket handle the store reads and writes through and the epoch of the bucket it is
+// a handle on, read together: a store captures both before a KV call and applies the call's result
+// to its cache only while Epoch is still that epoch, so a result from a bucket since recreated
+// never fences out the new bucket's revisions.
+func (w *Watcher) Handle() (bus.KeyValue, uint64) {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	return w.kv, w.epoch
+}
+
+// Epoch is the current read's Read.Epoch: it moves only when a watch installs onto a recreated
+// bucket.
+func (w *Watcher) Epoch() uint64 {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	return w.epoch
+}
+
+// Servable reports whether the copy can be served: nil once a read has completed and the copy
+// either follows its bucket or stopped following it no longer ago than the stale bound (2 minutes,
+// or half the stream's MaxAge when that is shorter), and ErrRefilling otherwise. It reads the
+// watcher's state only, never the cache, so a caller may ask it under the cache's mutex.
+func (w *Watcher) Servable() error {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	if w.completedOnce && (w.following || w.now().Sub(w.staleSince) <= w.bound) {
+		return nil
+	}
+	return ErrRefilling
+}
+
+// Following reports whether the copy follows its bucket: a read has completed since the copy last
+// stopped following (a watch installing a new read, the current watcher's own end, a recreated
+// bucket Check found, or a disconnect).
+func (w *Watcher) Following() bool {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	return w.following
+}
+
+// Disconnected says the connection the watcher reads through was lost. nats.go reconnects forever
+// and keeps the watcher's subscription open through the outage, so the watcher does not end and
+// nothing else would say its copy stopped following the bucket: the listener calls this from the
+// bus's disconnect hook (bus.Client.AddDisconnectHook). The copy stops following, its stale episode
+// begins unless one is under way, and a read under way completes nothing. The reconnect hook's
+// Rewatch then reads the bucket again, and that read's completion follows it once more.
+func (w *Watcher) Disconnected() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.stopped {
+		return
+	}
+	w.disconnects++
+	w.stopFollowing()
+}
+
+// NeedsRead reports whether the copy does not follow its bucket and no read is under way to make
+// it: the current generation's scan has ended or never began, and no re-read of a timed-out scan
+// is armed. Such a copy is repaired by nothing but a Rewatch, for instance when the reconnect
+// hook's Rewatch failed while the old watcher survived, so the listener's self-health check reads
+// it as a watcher to rebuild. A stopped watcher needs nothing.
+func (w *Watcher) NeedsRead() bool {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	return !w.stopped && !w.following && !w.reading && w.rereadTimer == nil
+}
+
+// stopFollowing records that the copy no longer follows its bucket, under mu: the read under way,
+// if any, can no longer restore following, and the stale episode begins unless one already has, so
+// one episode runs from the first stop to the next completed read across any number of failed
+// reads.
+func (w *Watcher) stopFollowing() {
+	w.following = false
+	w.reading = false
+	w.markStale()
+}
+
+// markStale begins the stale episode unless one is under way, under mu.
+func (w *Watcher) markStale() {
+	if w.staleSince.IsZero() {
+		w.staleSince = w.now()
+	}
+}
+
 // Check reads the bucket's status through KV, the round trip a store's health probe makes,
 // returning its error, and records a terminal error (Err) when the bucket's stream is not the one
 // the current watcher reads: the bucket was deleted and created again while the watcher ran.
 // nats.go's ordered consumer can reset onto the new stream without ending the watcher, and its
-// revisions number from 1 again, so the cache would stay frozen behind a live watcher. The
-// recorded error makes the listener's self-health rebuild the watcher, and that Rewatch resets the
-// cache.
+// revisions number from 1 again, so the cache would stay frozen behind a live watcher. The copy
+// stops following then, and the read under way, if any, completes nothing. The recorded error
+// makes the listener's self-health rebuild the watcher, and that Rewatch reads the new bucket.
 //
 // The stream is known by its creation time, and one path moves that time with no recreate.
 // nats-server before v2.14.6 re-stamps a recovered stream's creation time in its file store, and
 // an in-place config update persists the re-stamped time (nats-io/nats-server#8471, fixed in
 // v2.14.6 and v2.15.0). So a stream config update after a server restart, followed by another
 // restart, reads as a recreate. The reconnect hook's Rewatch after that restart usually meets it
-// first: it resets and refills the cache from the same bucket and adopts the new time, with no
-// 503. When Check meets it first, /healthz answers 503 until the next self-health rebuild does
-// the same. Either way the cost is one refill, and Check is quiet from then on.
+// first: it reads the same bucket again as a new epoch and adopts the new time, with no 503. When
+// Check meets it first, /healthz answers 503 until the next self-health rebuild does the same.
+// Either way the cost is one read, and Check is quiet from then on.
 func (w *Watcher) Check() error {
 	stream, err := bus.ReadStreamState(w.KV())
 	if err != nil {
@@ -226,6 +424,7 @@ func (w *Watcher) Check() error {
 	defer w.mu.Unlock()
 	if !w.stopped && w.err == nil && !w.stream.IsZero() && !stream.Created.Equal(w.stream) {
 		w.err = fmt.Errorf("%s bucket %s was recreated under its watcher", w.name, w.bucket)
+		w.stopFollowing()
 	}
 	return nil
 }
@@ -237,8 +436,9 @@ func (w *Watcher) Err() error {
 	return w.err
 }
 
-// Ready reports whether the cache is ready: the current watcher delivered every key's current
-// value or ended on its own, or the first start failed with no watcher current.
+// Ready reports whether the cache is ready: the current watcher's scan ended (complete or timed
+// out) or the watcher ended on its own, or the first start failed with no watcher current. It is
+// the one-shot release of a startup's warm-up, not whether the copy can be served (Servable).
 func (w *Watcher) Ready() bool {
 	select {
 	case <-w.ready:
@@ -272,6 +472,7 @@ func (w *Watcher) Stop() {
 	}
 	w.watcher = nil
 	w.clearRepairArm()
+	w.clearRereadArm()
 	w.generation++
 	w.mu.Unlock()
 }
@@ -404,17 +605,20 @@ func (w *Watcher) watchDone() {
 	}
 }
 
-// watch arms a watcher on kv and replaces the current one, moving the handle to kv. The replaced
-// watcher is stopped, and an entry it still delivers is dropped. The switch to the new watcher
-// and, for a recreated bucket, the cache reset happen under applyMu, so no apply runs between
-// them: an apply the replaced watcher already started finishes first, and a watch that switches
-// after this one computes recreated against the new stream and applies only after the reset. Two
-// Rewatches do overlap, the bus's reconnect hook and the listener's self-health rebuild. A watch
-// reads its stream before it arms its watcher and takes the locks, so it can arrive after a
-// newer watch has switched to a recreated bucket: a watch whose stream is older than a running,
-// healthy watcher's is discarded, and that watcher stays. After Stop it arms nothing and only
-// moves the handle; a watcher it armed while Stop ran is kept for End.
-func (w *Watcher) watch(kv bus.KeyValue) error {
+// watch arms a watcher on kv and replaces the current one, moving the handle to kv; the new watcher
+// is a new read of the whole bucket. The replaced watcher is stopped, and an entry it still
+// delivers is dropped. The switch to the new watcher and the read's BeginRead happen under
+// applyMu, so no cache hook runs between them: an apply the replaced watcher already started
+// finishes first, and a watch that switches after this one computes recreated against the new
+// stream and applies only after this read began. Two Rewatches do overlap, the bus's reconnect
+// hook and the listener's self-health rebuild. A watch reads its stream before it arms its watcher
+// and takes the locks, so it can arrive after a newer watch has switched to a recreated bucket: a
+// watch whose stream is older than a running, healthy watcher's is discarded, and that watcher
+// stays. A watch with a nonzero expect, the re-read of a timed-out read (reread), installs only
+// while generation expect is still current, and is discarded the same way otherwise: whatever
+// moved the generation began a read of its own. After Stop it arms nothing and only moves the
+// handle; a watcher it armed while Stop ran is kept for End.
+func (w *Watcher) watch(kv bus.KeyValue, expect uint64) error {
 	w.mu.Lock()
 	stopped := w.stopped
 	if stopped {
@@ -422,6 +626,7 @@ func (w *Watcher) watch(kv bus.KeyValue) error {
 	} else {
 		w.watching++
 	}
+	disconnects := w.disconnects
 	w.mu.Unlock()
 	if stopped {
 		return nil
@@ -460,15 +665,15 @@ func (w *Watcher) watch(kv bus.KeyValue) error {
 		}
 		return nil
 	}
-	if w.err == nil && stream.Before(w.stream) {
-		// A newer watch already switched to a recreated bucket and its watcher is running. This
-		// watcher may be on the old stream, so installing it would reset the cache the current
-		// watcher filled and feed it the old bucket's keys. The rule holds only against a live,
-		// healthy watcher (an installed stream with no recorded error has one running): creation
-		// times do not always grow (a JetStream restore keeps the snapshot's, and a recreate can
-		// follow a clock step back), so when the current watcher has ended or Check has flagged
-		// its bucket, the watch installs and resets as usual, and if it did read the old stream
-		// the next Check flags that too.
+	// A newer watch already switched to a recreated bucket and its watcher is running. This
+	// watcher may be on the old stream, so installing it would begin a read of the old bucket over
+	// the copy the current watcher reads. The rule holds only against a live, healthy watcher (an
+	// installed stream with no recorded error has one running): creation times do not always grow
+	// (a JetStream restore keeps the snapshot's, and a recreate can follow a clock step back), so
+	// when the current watcher has ended or Check has flagged its bucket, the watch installs as
+	// usual, and if it did read the old stream the next Check flags that too.
+	older := w.err == nil && stream.Before(w.stream)
+	if older || (expect != 0 && w.generation != expect) {
 		w.mu.Unlock()
 		w.applyMu.Unlock()
 		discard(watcher)
@@ -477,55 +682,72 @@ func (w *Watcher) watch(kv bus.KeyValue) error {
 	}
 	previous := w.watcher
 	recreated := !w.stream.IsZero() && !stream.Equal(w.stream)
+	if recreated {
+		w.epoch++
+	}
 	w.generation++
 	generation := w.generation
 	w.watcher = watcher
 	w.kv = kv
 	w.stream = stream
 	w.err = nil
-	// The replacement runs, so the stop it repaired needs no ERROR.
+	w.bound = w.boundFor(state.MaxAge)
+	// A new read begins: the copy stops following until it completes.
+	w.stopFollowing()
+	w.reading = true
+	w.readDisconnects = disconnects
+	// The replacement runs, so the stop it repaired needs no ERROR, and the read a timed-out scan
+	// was waiting to begin is this one.
 	w.clearRepairArm()
+	w.clearRereadArm()
+	read := Read{Epoch: w.epoch, Recreated: recreated, MaxAge: state.MaxAge}
 	w.mu.Unlock()
-	if recreated {
-		w.reset()
-	}
+	w.cache.BeginRead(read)
 	w.applyMu.Unlock()
 	if recreated {
-		w.logger().Info(w.name+" bucket was recreated; its cache is refilled from the new bucket",
+		w.logger().Info(w.name+" bucket was recreated; its cache is re-read from the new bucket and kept until the read completes",
 			slog.String("bucket", w.bucket))
 	}
 	if previous != nil {
 		// Stop reports a consumer the server has lost to its caller, never at ERROR.
 		_ = previous.Stop()
 	}
-	go w.consume(watcher, generation, started)
+	go w.consume(watcher, generation, read, started)
 	return nil
 }
 
-func (w *Watcher) consume(watcher nats.KeyWatcher, generation uint64, started time.Time) {
+// consume feeds the cache what the watcher of generation delivers, as the read read. The first nil
+// ends the read's scan: a complete scan completes the read (completeRead), and one nats.go's idle
+// timer gave up on arms a re-read (scanTimedOut). A watcher that ends before its scan's nil
+// completes nothing either: the cache removes nothing for a read it cannot vouch for.
+func (w *Watcher) consume(watcher nats.KeyWatcher, generation uint64, read Read, started time.Time) {
 	var scan KeyScan
 	scanning := true
 	for entry := range watcher.Updates() {
 		if entry == nil {
 			// WatchAll emits a nil sentinel once it has delivered the current value of every key,
 			// and nats.go's idle timer emits the same sentinel when it gives up on that scan. Only
-			// the current watcher's releases readiness, or logs: a replaced one's scan says nothing
-			// about what the current watcher has delivered.
-			current := w.current(generation)
+			// the current watcher's completes a read, releases readiness, or logs: a replaced
+			// one's scan says nothing about what the current watcher has delivered.
 			if scanning {
 				scanning = false
 				// A scan the idle timer ended is logged and never recorded as this watcher's
-				// error: the watcher is still running and its cache still follows the bucket, so
-				// Err(), Ping(), /healthz and the self-health rebuild must not read it as dead.
-				// Reading the timeout consumes nats.go's one buffered error (idleTimeout), so a
-				// watcher that later ends after a timed-out scan records "<name> watcher stopped"
-				// instead of the timeout -- a non-nil error either way.
+				// error: the watcher is still running, so Err(), Ping(), /healthz and the
+				// self-health rebuild must not read it as dead; the watcher reads the bucket again
+				// itself. Reading the timeout consumes nats.go's one buffered error (idleTimeout),
+				// so a watcher that later ends after a timed-out scan records "<name> watcher
+				// stopped" instead of the timeout -- a non-nil error either way.
 				timedOut := idleTimeout(watcher) != nil
-				if current {
+				if w.current(generation) {
 					w.logWarmUp(scan, time.Since(started), timedOut)
 				}
+				if timedOut {
+					w.scanTimedOut(generation)
+				} else {
+					w.completeRead(generation, read)
+				}
 			}
-			if current {
+			if w.current(generation) {
 				w.signalReady()
 			}
 			continue
@@ -533,7 +755,7 @@ func (w *Watcher) consume(watcher nats.KeyWatcher, generation uint64, started ti
 		if scanning {
 			scan.count(entry)
 		}
-		w.applyCurrent(entry, generation)
+		w.applyCurrent(entry, generation, read)
 	}
 	w.mu.Lock()
 	if generation != w.generation {
@@ -544,6 +766,7 @@ func (w *Watcher) consume(watcher nats.KeyWatcher, generation uint64, started ti
 	w.watcher = nil
 	err := terminalError(watcher, w.name)
 	w.err = err
+	w.stopFollowing()
 	// The watcher ended on its own: the connection it was on closed, or the bucket went away. The
 	// cache is frozen until a Rewatch replaces it, and Err says so. The stop is logged at WARN and
 	// not at ERROR, because nothing repairs a watcher while the listener's connection to NATS is
@@ -557,6 +780,98 @@ func (w *Watcher) consume(watcher nats.KeyWatcher, generation uint64, started ti
 	w.mu.Unlock()
 	w.logger().Warn(w.name+" watcher stopped", slog.String("error", err.Error()))
 	w.signalReady()
+}
+
+// completeRead completes generation's read, whose scan delivered every record: under applyMu, so
+// no other hook runs between the check and the state write, it checks the read may still complete
+// (completes), has the cache sweep what the read did not find (CompleteRead), and only then
+// records that the copy follows its bucket, so expiry that waits on following resumes only after
+// the sweep. A recreated bucket Check found, or a disconnect, between the sweep and the state write
+// skips the write: the read did deliver every record of the stream it read, so its sweep stands,
+// and the copy stays not following until the next read.
+func (w *Watcher) completeRead(generation uint64, read Read) {
+	w.applyMu.Lock()
+	defer w.applyMu.Unlock()
+	w.mu.Lock()
+	if generation == w.generation {
+		w.reading = false
+	}
+	completes := w.completes(generation)
+	w.mu.Unlock()
+	if !completes {
+		return
+	}
+	w.cache.CompleteRead(read)
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.completes(generation) {
+		w.following = true
+		w.completedOnce = true
+		w.staleSince = time.Time{}
+	}
+}
+
+// completes reports, under mu, whether generation's read may complete: it is still the current
+// one, the watcher is not stopped, Check has recorded no recreated bucket, and no disconnect came
+// since its watch began.
+func (w *Watcher) completes(generation uint64) bool {
+	return generation == w.generation && !w.stopped && w.err == nil && w.disconnects == w.readDisconnects
+}
+
+// scanTimedOut handles the timed-out scan of generation's read: the read completes nothing, so the
+// cache removes nothing, and the watcher reads the bucket again after rereadDelay (reread) rather
+// than wait for a Rewatch that nothing would start: the watcher still runs, so Err stays nil and
+// the listener's self-health rebuild has nothing to rebuild.
+func (w *Watcher) scanTimedOut(generation uint64) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if generation != w.generation || w.stopped {
+		return
+	}
+	w.reading = false
+	w.armReread(generation)
+}
+
+// armReread arms the re-read of generation's read (reread), under mu, in place of any armed
+// before.
+func (w *Watcher) armReread(generation uint64) {
+	w.clearRereadArm()
+	w.rereadTimer = w.after(rereadDelay, func() { w.reread(generation) })
+}
+
+// reread reads the bucket again for generation, whose read timed out: only while generation is
+// still current and the watcher not stopped, since whatever moved the generation began a read of
+// its own, and through watch's expect, so a Rewatch that installs first wins. A re-read whose setup
+// fails (the stream read or WatchAll) is armed again for the same generation.
+func (w *Watcher) reread(generation uint64) {
+	w.mu.RLock()
+	due := generation == w.generation && !w.stopped
+	kv := w.kv
+	w.mu.RUnlock()
+	if !due {
+		return
+	}
+	err := w.watch(kv, generation)
+	if err == nil {
+		return
+	}
+	w.logger().Warn(w.name+" re-read of a timed-out scan failed; it is tried again",
+		slog.String("bucket", w.bucket), slog.String("error", err.Error()))
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if generation == w.generation && !w.stopped {
+		w.armReread(generation)
+	}
+}
+
+// clearRereadArm drops the armed re-read, under mu: the caller moves the generation under the same
+// lock, so a callback of the wait already running reads nothing either (reread).
+func (w *Watcher) clearRereadArm() {
+	if w.rereadTimer == nil {
+		return
+	}
+	w.rereadTimer.Stop()
+	w.rereadTimer = nil
 }
 
 // reportFailedRepair reports the stop nobody asked for that is outstanding when a Rewatch fails, if
@@ -612,14 +927,15 @@ func (w *Watcher) clearRepairArm() {
 	w.repairTimer = nil
 }
 
-// logWarmUp logs the line that says what one initial scan cost: the cache, the bucket, how long it
+// logWarmUp logs the line that says what one read's scan cost: the cache, the bucket, how long it
 // took, the live keys the scan delivered, the delete markers it streamed past to find them, and how
-// it ended, so a restart's own log names what a slow readiness spent (LEGION-374). The two counts
-// are disjoint, as the role restore line's are: a marker is not a key the cache keeps, and one
-// total of both reads as keys the warm-up failed to apply.
+// it ended, so a restart's own log names what a slow readiness spent (LEGION-374). Every read logs
+// one, so a re-read after a timed-out scan or a recreate is in the log too. The two counts are
+// disjoint, as the role restore line's are: a marker is not a key the cache keeps, and one total of
+// both reads as keys the warm-up failed to apply.
 // entries counts what the scan delivered, which is what sizes the replay; a cache can hold fewer,
 // since each one evicts a value it cannot decode. A scan the idle timer gave up on logs the same
-// line at WARN, since the cache behind it is short of the bucket.
+// line at WARN, since the read behind it is incomplete and is read again.
 func (w *Watcher) logWarmUp(scan KeyScan, elapsed time.Duration, timedOut bool) {
 	level, outcome := slog.LevelInfo, "completed"
 	if timedOut {
@@ -634,12 +950,13 @@ func (w *Watcher) logWarmUp(scan KeyScan, elapsed time.Duration, timedOut bool) 
 	)
 }
 
-// applyCurrent applies entry only while generation is still the current watcher's.
-func (w *Watcher) applyCurrent(entry nats.KeyValueEntry, generation uint64) {
+// applyCurrent applies entry, a record of read, only while generation is still the current
+// watcher's.
+func (w *Watcher) applyCurrent(entry nats.KeyValueEntry, generation uint64, read Read) {
 	w.applyMu.Lock()
 	defer w.applyMu.Unlock()
 	if w.current(generation) {
-		w.apply(entry)
+		w.cache.Apply(entry, read)
 	}
 }
 

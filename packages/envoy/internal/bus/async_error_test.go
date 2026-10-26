@@ -19,7 +19,7 @@ import (
 func TestAConsumerNotActiveReportIsAWarning(t *testing.T) {
 	logs := captureLogs(t)
 
-	report := options("async-error-test", nil, nil, nil, nil).AsyncErrorCB
+	report := options("async-error-test", nil, nil, nil, nil, nil).AsyncErrorCB
 	report(nil, &nats.Subscription{Subject: "_INBOX.watcher"}, nats.ErrConsumerNotActive)
 	report(nil, &nats.Subscription{Subject: "_INBOX.other"}, nats.ErrSlowConsumer)
 	report(nil, &nats.Subscription{Subject: "_INBOX.recreate"}, fmt.Errorf("%w: recreating ordered consumer", nats.ErrConsumerNotFound))

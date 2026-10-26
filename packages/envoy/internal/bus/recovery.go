@@ -104,6 +104,32 @@ func (c *Client) AddReconnectHook(hook func(*nats.Conn) error) {
 	c.reconnectHooksMu.Unlock()
 }
 
+// AddDisconnectHook registers what state attached to NATS, such as a KV watcher's cache, does when
+// the client's connection is lost. nats.go reconnects forever and keeps a watcher's subscription
+// open through the outage, so the watcher never ends and nothing else says its cache has stopped
+// following the bucket. The hooks run on every disconnect of the client's connection, in the order
+// they were added, on nats.go's callback goroutine and so before the reconnect hooks of the
+// reconnect that follows. A hook returns at once: it runs inside that callback.
+func (c *Client) AddDisconnectHook(hook func()) {
+	if hook == nil {
+		return
+	}
+	c.reconnectHooksMu.Lock()
+	c.disconnectHooks = append(c.disconnectHooks, hook)
+	c.reconnectHooksMu.Unlock()
+}
+
+// onDisconnect is wired as the DisconnectedErrCB callback, after its log line: it runs the
+// disconnect hooks.
+func (c *Client) onDisconnect() {
+	c.reconnectHooksMu.Lock()
+	hooks := slices.Clone(c.disconnectHooks)
+	c.reconnectHooksMu.Unlock()
+	for _, hook := range hooks {
+		hook()
+	}
+}
+
 // AddDrainHook registers an end Drain gives to state attached to NATS that the client does not
 // subscribe for itself, such as KV watchers, while the connection still carries requests. Drain
 // runs each hook once, in the order they were added, after the delivery subscriptions have drained

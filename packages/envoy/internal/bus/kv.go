@@ -196,15 +196,17 @@ func (kv KeyValue) History(key string, opts ...nats.WatchOpt) ([]nats.KeyValueEn
 }
 
 // StreamState is what one STREAM.INFO read says about the stream behind a KV bucket: its name, the
-// sequence space it holds, how many messages are in it, and when it was created. A KV revision is
-// a stream sequence, so a caller comparing revisions against the bucket's sequence space reads
-// them from here.
+// sequence space it holds, how many messages are in it, when it was created and how long it keeps
+// a message (its MaxAge, the bucket's TTL; 0 keeps them for good). A KV revision is a stream
+// sequence, so a caller comparing revisions against the bucket's sequence space reads them from
+// here.
 type StreamState struct {
 	Name     string
 	FirstSeq uint64
 	LastSeq  uint64
 	Msgs     uint64
 	Created  time.Time
+	MaxAge   time.Duration
 }
 
 // ReadStreamState reads the stream behind kv (one KV Status round trip, which is a STREAM.INFO).
@@ -224,5 +226,6 @@ func ReadStreamState(kv nats.KeyValue) (StreamState, error) {
 		LastSeq:  info.State.LastSeq,
 		Msgs:     info.State.Msgs,
 		Created:  info.Created,
+		MaxAge:   info.Config.MaxAge,
 	}, nil
 }

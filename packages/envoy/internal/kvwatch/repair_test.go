@@ -147,7 +147,7 @@ func TestAWatcherRepairedAfterItsConsumerWentLogsOneWarn(t *testing.T) {
 	into := newSeen()
 	arm := &armed{}
 	logger, records := jsonLogger(t)
-	w := kvwatch.New("test cache", kv, into.apply, into.reset,
+	w := kvwatch.New("test cache", kv, into,
 		kvwatch.WithLogger(logger), kvwatch.WithAfterFunc(arm.afterFunc()))
 	w.Start()
 	eventually(t, "the first scan", w.Ready)
@@ -178,7 +178,7 @@ func TestAWatcherWhoseBucketIsGoneLogsTheFailedRepair(t *testing.T) {
 	conn, kv := bucket(t, uri)
 	arm := &armed{}
 	logger, records := jsonLogger(t)
-	w := kvwatch.New("test cache", kv, newSeen().apply, func() {},
+	w := kvwatch.New("test cache", kv, newSeen(),
 		kvwatch.WithLogger(logger), kvwatch.WithAfterFunc(arm.afterFunc()))
 	w.Start()
 	eventually(t, "the first scan", w.Ready)
@@ -213,7 +213,7 @@ func TestAWatcherNothingRepairsLogsWhenItsMinutePasses(t *testing.T) {
 	conn, kv := bucket(t, uri)
 	arm := &armed{}
 	logger, records := jsonLogger(t)
-	w := kvwatch.New("test cache", kv, newSeen().apply, func() {},
+	w := kvwatch.New("test cache", kv, newSeen(),
 		kvwatch.WithLogger(logger), kvwatch.WithAfterFunc(arm.afterFunc()))
 	w.Start()
 	eventually(t, "the first scan", w.Ready)
@@ -249,7 +249,7 @@ func TestAWaitARepairClearedReportsNotTheNextStop(t *testing.T) {
 	conn, kv := bucket(t, uri)
 	arm := &armed{}
 	logger, records := jsonLogger(t)
-	w := kvwatch.New("test cache", kv, newSeen().apply, func() {},
+	w := kvwatch.New("test cache", kv, newSeen(),
 		kvwatch.WithLogger(logger), kvwatch.WithAfterFunc(arm.afterFunc()))
 	w.Start()
 	eventually(t, "the first scan", w.Ready)
@@ -293,7 +293,7 @@ func TestAWatcherStoppedOnPurposeLogsNeither(t *testing.T) {
 	_, kv := bucket(t, uri)
 	arm := &armed{}
 	logger, records := jsonLogger(t)
-	w := kvwatch.New("test cache", kv, newSeen().apply, func() {},
+	w := kvwatch.New("test cache", kv, newSeen(),
 		kvwatch.WithLogger(logger), kvwatch.WithAfterFunc(arm.afterFunc()))
 	w.Start()
 	eventually(t, "the first scan", w.Ready)

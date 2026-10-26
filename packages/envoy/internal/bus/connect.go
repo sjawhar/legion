@@ -52,13 +52,16 @@ func (t *reconnectErrThrottle) reset() {
 // options starts from nats.GetDefaultOptions: Connect fills in only some zero fields, and the
 // defaults are what turn on reconnecting, the client's pings and the drain and flusher timeouts. A
 // lost server is reconnected in place, forever, so JetStream handles taken from the connection
-// keep working; ReconnectedCB re-subscribes and runs the reconnect hooks. ClosedCB fires on Close
-// or Drain, and also when nats.go gives up on the connection itself: the same authorization error
-// twice in a row, or a server -ERR it does not classify. Those two are why onClosed still starts a
-// recovery that dials a replacement. The reconnect buffer is off, so nothing is held and sent after its caller
-// saw an error: a publish while reconnecting waits for the reconnect instead
-// (ensureConnWithContext), and a publish that fails was not sent.
-func options(name string, urls []string, reconnectCB func(*nats.Conn), closedCB func(), now func() time.Time) nats.Options {
+// keep working; ReconnectedCB re-subscribes and runs the reconnect hooks. DisconnectedErrCB runs
+// the disconnect hooks: the reconnect loop keeps every subscription open through an outage, so a
+// KV watcher never ends on its own and only this callback says its cache stopped following the
+// bucket. ClosedCB fires on Close or Drain, and also when nats.go gives up on the connection
+// itself: the same authorization error twice in a row, or a server -ERR it does not classify.
+// Those two are why onClosed still starts a recovery that dials a replacement. The reconnect
+// buffer is off, so nothing is held and sent after its caller saw an error: a publish while
+// reconnecting waits for the reconnect instead (ensureConnWithContext), and a publish that fails
+// was not sent.
+func options(name string, urls []string, reconnectCB func(*nats.Conn), disconnectCB func(), closedCB func(), now func() time.Time) nats.Options {
 	if now == nil {
 		now = time.Now
 	}
@@ -80,9 +83,12 @@ func options(name string, urls []string, reconnectCB func(*nats.Conn), closedCB 
 	opts.DisconnectedErrCB = func(_ *nats.Conn, err error) {
 		if err != nil {
 			slog.Info("envoy nats disconnected", slog.String("name", name), slog.String("error", err.Error()))
-			return
+		} else {
+			slog.Info("envoy nats disconnected", slog.String("name", name))
 		}
-		slog.Info("envoy nats disconnected", slog.String("name", name))
+		if disconnectCB != nil {
+			disconnectCB()
+		}
 	}
 	// A reconnect attempt that fails is otherwise silent: nats.go retries in place forever, so a
 	// broker that is down leaves no line at all in the process's log. The servers come from urls,
@@ -154,8 +160,8 @@ func options(name string, urls []string, reconnectCB func(*nats.Conn), closedCB 
 // deadline cuts either to what remains of it.
 const connectTimeout = 5 * time.Second
 
-func connect(name string, urls []string, credential nats.Option, dialer *socks5Dialer, reconnectCB func(*nats.Conn), closedCB func(), now func() time.Time) (*nats.Conn, error) {
-	return connectWithContext(context.Background(), name, urls, credential, dialer, reconnectCB, closedCB, now)
+func connect(name string, urls []string, credential nats.Option, dialer *socks5Dialer, reconnectCB func(*nats.Conn), disconnectCB func(), closedCB func(), now func() time.Time) (*nats.Conn, error) {
+	return connectWithContext(context.Background(), name, urls, credential, dialer, reconnectCB, disconnectCB, closedCB, now)
 }
 
 // connectWithContext dials urls with envoy's options, when credential is not nil as the NATS user
@@ -169,7 +175,7 @@ func connect(name string, urls []string, credential nats.Option, dialer *socks5D
 // nats.go's ErrNoServers alone, which names neither, so the proxy's own dial error stands in for
 // it. The address carries no credentials: CheckSOCKS5Proxy admits only an IP address with no zone
 // or a DNS name.
-func connectWithContext(ctx context.Context, name string, urls []string, credential nats.Option, dialer *socks5Dialer, reconnectCB func(*nats.Conn), closedCB func(), now func() time.Time) (_ *nats.Conn, err error) {
+func connectWithContext(ctx context.Context, name string, urls []string, credential nats.Option, dialer *socks5Dialer, reconnectCB func(*nats.Conn), disconnectCB func(), closedCB func(), now func() time.Time) (_ *nats.Conn, err error) {
 	if dialer != nil {
 		defer func() {
 			if err != nil {
@@ -182,7 +188,7 @@ func connectWithContext(ctx context.Context, name string, urls []string, credent
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		next := options(name, urls, reconnectCB, closedCB, now)
+		next := options(name, urls, reconnectCB, disconnectCB, closedCB, now)
 		if credential != nil {
 			if err := credential(&next); err != nil {
 				return nil, err

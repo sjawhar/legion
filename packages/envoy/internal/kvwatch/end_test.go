@@ -50,7 +50,7 @@ func TestEndEndsAWatcherArmedAfterTheStop(t *testing.T) {
 	conn, kv := bucket(t, uri)
 	held := &heldWatchKV{KeyValue: kv, watched: make(chan struct{}), release: make(chan struct{})}
 	logger, records := jsonLogger(t)
-	w := kvwatch.New("test cache", bus.KeyValue{KeyValue: held}, newSeen().apply, func() {}, kvwatch.WithLogger(logger))
+	w := kvwatch.New("test cache", bus.KeyValue{KeyValue: held}, newSeen(), kvwatch.WithLogger(logger))
 	w.Start()
 	select {
 	case <-held.watched:
@@ -88,7 +88,7 @@ func TestAWatchStillStartingAtEndsDeadlineIsAnError(t *testing.T) {
 	conn, kv := bucket(t, uri)
 	held := &heldWatchKV{KeyValue: kv, watched: make(chan struct{}), release: make(chan struct{})}
 	logger, records := jsonLogger(t)
-	w := kvwatch.New("test cache", bus.KeyValue{KeyValue: held}, newSeen().apply, func() {}, kvwatch.WithLogger(logger))
+	w := kvwatch.New("test cache", bus.KeyValue{KeyValue: held}, newSeen(), kvwatch.WithLogger(logger))
 	w.Start()
 	select {
 	case <-held.watched:
@@ -135,7 +135,7 @@ func TestALateWatchAfterALostConnectionIsAWarning(t *testing.T) {
 	_, kv := bucket(t, uri)
 	held := &drainingStopKV{heldWatchKV{KeyValue: kv, watched: make(chan struct{}), release: make(chan struct{})}}
 	logger, records := jsonLogger(t)
-	w := kvwatch.New("test cache", bus.KeyValue{KeyValue: held}, newSeen().apply, func() {}, kvwatch.WithLogger(logger))
+	w := kvwatch.New("test cache", bus.KeyValue{KeyValue: held}, newSeen(), kvwatch.WithLogger(logger))
 	w.Start()
 	select {
 	case <-held.watched:
@@ -177,7 +177,7 @@ func TestEndCalledTwiceAtOnceReturnsForBoth(t *testing.T) {
 	conn, kv := bucket(t, uri)
 	held := &heldWatchKV{KeyValue: kv, watched: make(chan struct{}), release: make(chan struct{})}
 	logger, records := jsonLogger(t)
-	w := kvwatch.New("test cache", bus.KeyValue{KeyValue: held}, newSeen().apply, func() {}, kvwatch.WithLogger(logger))
+	w := kvwatch.New("test cache", bus.KeyValue{KeyValue: held}, newSeen(), kvwatch.WithLogger(logger))
 	w.Start()
 	select {
 	case <-held.watched:
@@ -217,7 +217,7 @@ func TestAFailedConsumerDeleteAtTheEndIsAnError(t *testing.T) {
 	uri := testnats.URL(t)
 	conn, kv := bucket(t, uri)
 	logger, records := jsonLogger(t)
-	w := kvwatch.New("test cache", kv, newSeen().apply, func() {}, kvwatch.WithLogger(logger))
+	w := kvwatch.New("test cache", kv, newSeen(), kvwatch.WithLogger(logger))
 	w.Start()
 	eventually(t, "the first scan", w.Ready)
 	js, err := conn.JetStream()
@@ -241,7 +241,7 @@ func TestEndIsBoundedByItsContext(t *testing.T) {
 	srv, uri := testnats.Start(t)
 	_, kv := bucket(t, uri)
 	logger, records := jsonLogger(t)
-	w := kvwatch.New("test cache", kv, newSeen().apply, func() {}, kvwatch.WithLogger(logger))
+	w := kvwatch.New("test cache", kv, newSeen(), kvwatch.WithLogger(logger))
 	w.Start()
 	eventually(t, "the first scan", w.Ready)
 

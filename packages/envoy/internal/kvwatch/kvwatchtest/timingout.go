@@ -8,7 +8,8 @@ import "github.com/nats-io/nats.go"
 // does (nats.go v1.50.0 kv.go:1145-1156): after `after` entries of the real bucket it puts
 // ErrKeyWatcherTimeout on Error() and sends the nil marker a complete scan also sends. The watcher
 // stays open afterwards and forwards whatever the bucket delivers next, as nats.go's does: the timer
-// gives up on the initial values, it does not end the subscription.
+// gives up on the initial values, it does not end the subscription. The real scan's own nil marker,
+// when it comes later, is dropped: nats.go sends that marker once, and the timer already sent it.
 func TimingOut(kv nats.KeyValue, after int) nats.KeyValue {
 	return timingOutKV{KeyValue: kv, after: after}
 }
@@ -37,7 +38,9 @@ func (k timingOutKV) Watch(keys string, opts ...nats.WatchOpt) (nats.KeyWatcher,
 		timed.faults <- nats.ErrKeyWatcherTimeout
 		timed.updates <- nil
 		for entry := range watcher.Updates() {
-			timed.updates <- entry
+			if entry != nil {
+				timed.updates <- entry
+			}
 		}
 	}()
 	return timed, nil

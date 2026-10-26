@@ -812,6 +812,38 @@ func TestReconnectHookRunsAfterReconnect(t *testing.T) {
 	}
 }
 
+// A lost connection runs the disconnect hooks before the reconnect hooks of the reconnect that
+// follows: a KV watcher's subscription survives the outage, so the hook is what tells its cache it
+// stopped following the bucket, and the reconnect hook's read starts after that.
+func TestDisconnectHookRunsBeforeTheReconnectHook(t *testing.T) {
+	_, uri := startNATS(t)
+	client, err := bus.ConnectOwningStream([]string{uri})
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer client.Close()
+
+	events := make(chan string, 4)
+	client.AddDisconnectHook(func() { events <- "disconnected" })
+	client.AddReconnectHook(func(*natsgo.Conn) error {
+		events <- "reconnected"
+		return nil
+	})
+	if err := client.Conn.ForceReconnect(); err != nil {
+		t.Fatalf("force reconnect: %v", err)
+	}
+	for _, want := range []string{"disconnected", "reconnected"} {
+		select {
+		case got := <-events:
+			if got != want {
+				t.Fatalf("hook ran %q, want %q next", got, want)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("the %s hook did not run", want)
+		}
+	}
+}
+
 func TestJetStreamPublishDeduplicatesAStableEnvelopeDestination(t *testing.T) {
 	_, uri := startNATS(t)
 	client, err := bus.ConnectOwningStream([]string{uri})

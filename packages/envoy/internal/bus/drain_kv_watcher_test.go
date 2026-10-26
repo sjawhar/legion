@@ -46,7 +46,7 @@ func TestADrainEndsTheKVWatchersBeforeTheConnection(t *testing.T) {
 			if err != nil {
 				t.Fatalf("create bucket: %v", err)
 			}
-			watcher := kvwatch.New("drain-test", kv, func(natsgo.KeyValueEntry) {}, func() {})
+			watcher := kvwatch.New("drain-test", kv, discardingCache{})
 			watcher.Start()
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
