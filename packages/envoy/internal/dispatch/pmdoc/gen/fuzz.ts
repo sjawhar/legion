@@ -526,6 +526,23 @@ tagNames.flatMap(tagForms).forEach((start, startIndex) => {
   emit(document(lazy, image(nextField(), `t\n${start}\nz`, true), true));
 });
 
+// A title's delimiter row under a paragraph line over 4 KiB, its header, with one to three cells,
+// so the row is no wider than the header or is, each title field, raw and `&#10;`.
+const longText = "x".repeat(5000);
+for (const header of ["", "p | ", "p | q | "]) {
+  for (const delimiter of ["|-|", "-|-", "| - | - |", ":-|-:"]) {
+    for (const raw of [false, true]) {
+      emit(
+        document(
+          containers[0] as Container,
+          `${header}${longText} ${image(nextField(), `a\n${delimiter}\nb`, raw)}`,
+          true
+        )
+      );
+    }
+  }
+}
+
 // Seeded mixing: one to four lines per title, each line a start and a tail.
 const firsts = ["t", "a b", "x", "T", "", "a |", "*e*", "1."];
 const tails = ["", "", " b", "x", " | c |", " *e*", "-", " <b>", "&#10;"];
