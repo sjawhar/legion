@@ -30,8 +30,9 @@ type SessionEntry struct {
 	SelfSubscribed bool `json:"self_subscribed,omitempty"`
 	// Host is the machine the client-reported `machineID()` (envoy-client's
 	// os.hostname()/ENVOY_MACHINE_ID) names as where the session process actually runs, and the
-	// address its owning listener reaches it at (Deliverer.hostFor), unless the session registered
-	// through that listener and its configured HostBridge wins. Only the owning listener delivers
+	// address its owning listener reaches it at (Deliverer.hostFor), unless the session runs on
+	// that listener's machine (it registered through it, or Host is that listener's machine id)
+	// and its configured HostBridge wins. Only the owning listener delivers
 	// to the session; another leaves it to the owner (ErrWrongMachine), whatever Host says. The
 	// owner is the listener the session's stored subscription names, the one store.Registry.Match
 	// fans its topics out on, else, with no subscription stored, the one MachineID names (any
