@@ -2,26 +2,16 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-393",
-  "completed": "2026-10-26T10:06:00Z",
-  "round": 3,
-  "codeHeadReviewed": "ec6ea9e0b9ad4cb4cf072d6e0424e6ebed64e5eb",
-  "fingerprint": "5b39834357873eda556fc65bea2c3ea1b7c61683 6a1249c243518bfa396fa76c11c72279e76b00c493c526c337249351b723ab24 -> 842cc8f985c22b98a36cf191cda018e95ae22ea7 337b617b2a85409abb1f3a62ea309c046801380cf48692fec142a1e160b9f4ea: changed, so a new round; the interdiff of the two normalized diffs is only the migration renumbering 0117/0118 -> 0118/0119 with its references, embeddingsPendingSinceVersion 117 -> 118, and the route pin 137 -> 138",
-  "decision": "changes_requested",
+  "completed": "2026-10-26T12:56:00Z",
+  "round": "3, continued after the second conflict-forced forward merge of main",
+  "codeHeadReviewed": "9925ae620014aeba2a3eca43c7f9fae25a012815",
+  "fingerprint": "3f6155a5281aa411ebc1acbd73f94e74f01146cf (my last review, REQUEST_CHANGES) 337b617b2a85409abb1f3a62ea309c046801380cf48692fec142a1e160b9f4ea -> 20ba792092e76ce012bedb5dac44fcccc9de561e 337b617b2a85409abb1f3a62ea309c046801380cf48692fec142a1e160b9f4ea: unchanged, so round 3 continues against the new head (no thermonuclear pass, its approval at 842cc8f9 stands)",
+  "decision": "approved",
   "critical": 0,
-  "important": 1,
+  "important": 0,
   "minor": 0,
-  "keyFindings": [
-    {
-      "severity": "important",
-      "file": "CI: Tests run 40297256033, job test (step 'Test the concurrent packages under the race detector')",
-      "description": "The required check `test` is red at the code head ec6ea9e0: TestRunEndsAnOperatorSpawnInFlightWithTheDrainAndNamesIt in packages/daemon/internal/daemon (inflight_test.go:546: 'stopped in 2.417283157s with the operator's spawn ... waiting in the runtime; it was answered 500'). This PR touches nothing under packages/daemon, and the same workflow passed on main at 7f6ef46fd42f (run 40294298505), so the failure reads as a timing flake; a head whose required check is red cannot be approved. Remedy: `gh run rerun 40297256033 --failed`, then complete so the round reads the rerun."
-    }
-  ],
-  "verifiedThisRound": [
-    "Thermonuclear deep review APPROVE at 842cc8f9: migration set contiguous (main's 0117, then 0118 and 0119 with censuses), the four migration-set tests pass, main's changes since f2c17ded touch none of embed, embedqueue, search or gcp:Dispatch, and every in-tree reference to this PR's migrations reads 0118/0119.",
-    "Thermonuclear code quality APPROVE at 842cc8f9: no conflict-resolution artifacts in the CHANGELOGs or README.",
-    "E2E (implementer) and E2E (tester) both cover round 4 at ec6ea9e0, with negative controls; the provider that answered in each live run is Azure AI Foundry (Cohere Embed v4, deployment embed-v-4-0) through a keyless Entra sign-in; the Bedrock runs had no AWS credential, so no Bedrock call answered.",
-    "Reviewer's own PR-body lines 'Look at first' and 'Not proven / risk' renumbered to 0118, as the architect asked."
-  ],
-  "ci": "Required set (rulesets): lint, typecheck, test, pr-title; branch protection lists none. CI head ec6ea9e0b9ad (newest pull_request run): lint, typecheck, pr-title success; test failure (run 40297256033). Compare to 842cc8f9 touches only .legion/."
+  "keyFindings": [],
+  "roundThreeFinding": "The red required check `test` (Tests run 40297256033 at ec6ea9e0, an unrelated packages/daemon timing failure) is answered: at the new code head 9925ae620014 Tests run 40317776949 passed lint, typecheck and test, and PR Title run 40317889859 passed pr-title (the two earlier PR Title runs at that head were cancelled and superseded).",
+  "ci": "Required set (rulesets): lint, typecheck, test, pr-title; branch protection lists none. CI head 9925ae620014 (newest pull_request run): all four completed success; compare to 20ba7920 touches only .legion/INFRA-393/implement.json and test.json. The non-required 'Legion Envoy and Contracts' run 40317776875 was still queued.",
+  "threads": "PRRT_kwDORFy7ds6wGpIQ and PRRT_kwDORFy7ds6wGpIS: answered by me in round 2 and resolved; no other thread."
 }
