@@ -892,6 +892,8 @@ exit "$(cat "$PWD/exit-status" 2>/dev/null || echo 0)"
   // Catches: a judge-omp that starts a container when the profile's host key command is gone, or
   // that leaves the judge's key directory behind when it refuses.
   test("refuses a profile with no key command before docker runs, and leaves no key directory", () => {
+    // Builds the judge profiles when this test runs alone, so the refusal below is tested.
+    expect(judge("bare", judgeDir()).exitCode).toBe(0);
     const { command } = judgeKey("bare");
     const kept = `${command}.kept`;
     cpSync(command, kept);

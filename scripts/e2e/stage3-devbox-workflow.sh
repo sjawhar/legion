@@ -554,6 +554,8 @@ approval_requests_in() { jq '[.[] | select(.type == "ask.opened" and .payload.ki
 begin prerequisites
 refuse_leftovers legion-e2e3
 for tool in go docker jq curl ss tmux bun mise secrets gh shellcheck jj pgrep; do command -v "$tool" >/dev/null || fail "$tool is required"; done
+key_file=${LEGION_E2E_ANTHROPIC_KEY_FILE:-}
+[ -n "$key_file" ] || fail "LEGION_E2E_ANTHROPIC_KEY_FILE is unset: name a 0600 file holding a plaintext Anthropic key"
 # Legion's two role Apps, this deployment's own unless the App inputs name another's, proved
 # against GitHub here, before the run writes anything (lib/github-apps.sh); legion.yaml's
 # github_apps is the block proved.
@@ -579,8 +581,6 @@ case "$until" in
   *) fail "STAGE3_UNTIL must be prerequisites or rework, not $until" ;;
 esac
 [ -z "$from" ] || [ -z "$until" ] || fail "set STAGE3_FROM or STAGE3_UNTIL, not both"
-key_file=${LEGION_E2E_ANTHROPIC_KEY_FILE:-}
-[ -n "$key_file" ] || fail "LEGION_E2E_ANTHROPIC_KEY_FILE is unset: name a 0600 file holding a plaintext Anthropic key"
 # The bridge dials the production Envoy NATS by the operator's fully-qualified name for it, never
 # a bare alias a resolver's search domain would complete. The value is never printed.
 upstream_nats=${SMOKE_UPSTREAM_NATS:-}
