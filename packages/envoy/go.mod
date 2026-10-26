@@ -130,7 +130,7 @@ require (
 )
 
 // The sjawhar/ygo fork is upstream ygo v1.51.2 plus fixes Dispatch depends on while each waits in
-// an upstream pull request (reearth/ygo #258, #260, #263, #266, #268, #269, #291, #331; the fork
+// an upstream pull request (reearth/ygo #258, #260, #263, #266, #268, #269, #291, #331, #332; the fork
 // carries #258's fix as its own closed duplicate, #262): an iterative delete cascade and nested
 // reads, so the stack a delete or read needs does not grow with a tree a peer nested; the
 // transactional GC range search; a whole document state resolves its own dependencies before the
@@ -145,4 +145,4 @@ require (
 // logs each committed transaction's update in commit order under its own lock (UpdateLog), so the
 // room's update observer measures each update against the room the commit before it left. A merged
 // update's skip parking the items after it (reearth/ygo#257) is upstream since v1.51.0.
-replace github.com/reearth/ygo => github.com/sjawhar/ygo v1.50.1-0.20261026071617-4c08406bef18
+replace github.com/reearth/ygo => github.com/sjawhar/ygo v1.51.3-sami.4

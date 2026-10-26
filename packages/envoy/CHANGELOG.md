@@ -1153,7 +1153,8 @@
   they committed, from an update log ygo fills under the document's lock, so each change is
   measured against the room the change before it left, whichever observer gets there first; a
   deleted paragraph is credited too, and a heading id the editor derives still credits no one. The
-  ygo pin moves from `v1.51.3-sami.3` to `v1.51.3-sami.4`, which adds that log (INFRA-458).
+  ygo pin moves from `v1.51.3-sami.3` to `v1.51.3-sami.4`, which adds that log (reearth/ygo#332,
+  INFRA-458).
 
 - A browser that opens a document while Dispatch closes that document's room now keeps getting the
   document's edits. Dispatch closes a room when an issue closes, when it evicts a stale or failed

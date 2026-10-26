@@ -159,7 +159,9 @@ type Service struct {
 	beforeObserveUpdate func(room string)
 	// afterCreditUpdate runs in a room's update observer once its drain of the update log has
 	// classified a content change and credited its authors, outside the replica's lock, and before
-	// it arms the room's settlement. Nil outside tests; tests use it to hold that window.
+	// it records its own update's class and arms the room's settlement. Nil outside tests; tests
+	// use it to hold that window, in which the observer's own update is credited but neither
+	// pending (recordUpdateClass) nor handed to persistence, whose observer runs after this one.
 	afterCreditUpdate func(room string)
 	// afterLiveCommit runs once a transaction's writes to a document have committed and the
 	// document's advisory lock is gone with them, before the publish applies them to the room.
