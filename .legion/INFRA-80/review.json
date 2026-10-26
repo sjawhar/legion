@@ -1,0 +1,31 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-80",
+  "completed": "2026-10-26T04:11:00Z",
+  "decision": "approved",
+  "critical": 0,
+  "important": 0,
+  "minor": 0,
+  "kind": "fingerprint-confirmation",
+  "lastReview": {
+    "id": 5645277340,
+    "state": "APPROVED",
+    "commitId": "06f26ab1eb6a2aacd43042eaad87cd6da09610ba"
+  },
+  "fingerprint": {
+    "command": "jj diff --from \"fork_point(\\\"main\\\"@origin | <head>)\" --to <head> --git --context 0 '~(.legion | docs/solutions)' | sed -e '/^@@/d' -e '/^index /d' | sha256sum, after jj git fetch",
+    "atLastReview": "06f26ab1eb6a2aacd43042eaad87cd6da09610ba fc66319c54fa9634463392d22e921ddb1f0cfa4b0c5a5afb3a3057670ac3c0c9",
+    "atNewHead": "befa6151099c176b808db8fbfdde2bc24ccca033 fc66319c54fa9634463392d22e921ddb1f0cfa4b0c5a5afb3a3057670ac3c0c9",
+    "result": "unchanged"
+  },
+  "ci": {
+    "requiredSet": ["lint", "typecheck", "test", "pr-title"],
+    "requiredSource": "rulesets of main; branch protection lists none",
+    "codeHead": "0c7467a987478e91383b4f692202a435e93be5bd",
+    "checks": "lint success 03:35:25Z, pr-title success 03:35:54Z, typecheck success 03:36:26Z, test success 03:49:23Z (check-runs of the code head, read 04:10Z); Tests run 40264431582 and Worker Image run 40264431578 completed success",
+    "compare": "0c7467a98747...befa6151099c: ahead, 2 files, all under .legion/"
+  },
+  "e2eLines": "E2E (implementer) and E2E (tester) both present; the tester's round 14 is a rebase re-check b247931acbca -> 0c7467a98747, fingerprint unchanged",
+  "keyFindings": []
+}
