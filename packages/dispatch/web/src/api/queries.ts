@@ -1,7 +1,13 @@
-import { keepPreviousData, type QueryFunctionContext, queryOptions } from "@tanstack/react-query";
+import {
+  keepPreviousData,
+  type QueryFunctionContext,
+  queryOptions,
+  replaceEqualDeep,
+} from "@tanstack/react-query";
 
 import { beginInboxFetch, finishInboxFetch } from "../features/inbox/ask-thread-freshness";
 import { projectIssuesQueryKey } from "../features/project/issue-filters";
+import { compareTimestamps, isTimestamp } from "../lib/timestamps";
 
 import { api } from "./client";
 import { liveSocketFor } from "./live-socket";
@@ -11,6 +17,7 @@ import type {
   DeliveryPipelineResponse,
   DeliveryTimelineResponse,
   InboxRow,
+  IssueDetails,
 } from "./types";
 
 /** The signed-in principal (`/auth/whoami`). One key shared by every surface that reads it; it
@@ -42,6 +49,43 @@ export const userStateQuery = () =>
   queryOptions({
     queryKey: ["user-state"],
     queryFn: () => api.getMyState(),
+  });
+
+/** Whether `next`, an issue put in the cache, is older than `cached`, the issue there: its
+ *  `updated_at` names an earlier instant. */
+function olderIssue(next: unknown, cached: unknown): boolean {
+  const at = (issue: unknown) =>
+    typeof issue === "object" && issue !== null ? Reflect.get(issue, "updated_at") : undefined;
+  const nextAt = at(next);
+  const cachedAt = at(cached);
+  return (
+    typeof nextAt === "string" &&
+    typeof cachedAt === "string" &&
+    isTimestamp(nextAt) &&
+    isTimestamp(cachedAt) &&
+    compareTimestamps(nextAt, cachedAt) < 0
+  );
+}
+
+/**
+ * One issue with its details (`GET /api/v1/issues/{key}`), the one query every view of an issue
+ * reads. Dispatch answers a read with the issue as it was when the read reached it, so a read
+ * already out when a write changed the issue - a slow GET started before a PATCH - can be answered
+ * after the write's own answer was put in its place (`mergeIssue`). Such an answer is older than
+ * the cached issue, and is dropped: the cache never takes an issue whose `updated_at` is earlier
+ * than the one it holds, as the event log never lets a fetched page take back the events above
+ * its head (`mergeEventPages`). The rule is the query's own, so it holds for every writer of the
+ * key: a read from any of its views, a PATCH's answer, an optimistic pick and its rollback.
+ */
+export const issueQuery = (key: string | undefined) =>
+  queryOptions({
+    queryKey: ["issue", key],
+    queryFn: (): Promise<IssueDetails> => {
+      if (key === undefined) throw new Error("An issue read needs the issue's key.");
+      return api.getIssue(key);
+    },
+    structuralSharing: (cached: unknown, next: unknown) =>
+      olderIssue(next, cached) ? cached : replaceEqualDeep(cached, next),
   });
 
 /** The viewer's per-agent conversation state: each session's Clear, read mark, and count of

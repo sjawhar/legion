@@ -3,9 +3,9 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useLocation } from "react-router-dom";
 
-import { api, type WriteBounds } from "../../api/client";
+import type { WriteBounds } from "../../api/client";
 import { primarySpec } from "../../api/issue-cache";
-import { whoAmIQuery } from "../../api/queries";
+import { issueQuery, whoAmIQuery } from "../../api/queries";
 import type { Ask } from "../../api/types";
 import { useSending } from "../../hooks/useSending";
 import { useHeldSend, useHeldSends, useHeldSendsUnder } from "../conversation/held-sends";
@@ -141,16 +141,7 @@ export function useMarginSheet(): MarginSheetModel {
     if (sheetThreadKey !== undefined) store.discard(marginReplySendKey(sheetThreadKey));
   }, [sheetReplySendingNow, sheetThreadKey, store]);
   const marginRef = useRef<HTMLElement>(null);
-  const issue = useQuery({
-    enabled: issueKey !== undefined,
-    queryKey: ["issue", issueKey],
-    queryFn: () => {
-      if (issueKey === undefined) {
-        throw new Error("Issue margin query requires an issue owner.");
-      }
-      return api.getIssue(issueKey);
-    },
-  });
+  const issue = useQuery({ ...issueQuery(issueKey), enabled: issueKey !== undefined });
   const viewer = useQuery(whoAmIQuery());
   const visibleArtifact =
     documentRoute === undefined

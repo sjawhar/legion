@@ -2,7 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import type { ReactNode } from "react";
 import { Link } from "react-router-dom";
 
-import { api } from "../../api/client";
+import { issueQuery } from "../../api/queries";
 import type { Artifact, Event } from "../../api/types";
 import { linkText } from "../../theme/classes";
 import { buildIssuePath, buildReferencePath, documentRoute } from "../refs/routes";
@@ -47,7 +47,7 @@ function SavedVersionLine({
   event: ArtifactVersionEvent;
   issueKey: string;
 }): ReactNode {
-  const issue = useQuery({ queryKey: ["issue", issueKey], queryFn: () => api.getIssue(issueKey) });
+  const issue = useQuery(issueQuery(issueKey));
   const artifact: Artifact | undefined = issue.data?.artifacts.find(
     ({ id }) => id === event.payload.artifact_id
   );

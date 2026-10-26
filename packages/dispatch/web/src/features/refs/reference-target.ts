@@ -2,6 +2,7 @@ import { type QueryClient, queryOptions, useQuery } from "@tanstack/react-query"
 
 import { api, artifactVersionPath } from "../../api/client";
 import { primarySpec } from "../../api/issue-cache";
+import { issueQuery } from "../../api/queries";
 import type {
   Artifact,
   ArtifactText,
@@ -39,12 +40,6 @@ export interface ReferenceTarget {
 /** How much of a target's own text becomes a reference link's title: an ask's question, a
  *  comment's body. Long enough to recognise, short enough for a link inside a sentence. */
 const TITLE_HEADLINE_MAX = 60;
-
-const issueQuery = (key: string | undefined) =>
-  queryOptions({
-    queryKey: ["issue", key],
-    queryFn: () => api.getIssue(key ?? ""),
-  });
 
 /** One issue message and its replies, as the Conversation and the hover card read it. */
 export const messageQuery = (key: string | undefined, id: string | undefined) =>
