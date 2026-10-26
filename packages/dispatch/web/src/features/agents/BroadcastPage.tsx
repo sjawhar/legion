@@ -24,7 +24,6 @@ import {
   textPrimaryOnCanvas,
   textSecondaryOnCanvas,
 } from "../../theme/classes";
-import { resolveAuthor } from "../conversation/authors";
 import { MODE_LABELS, strandedRetryGuidance } from "../conversation/delivery";
 import {
   capabilitiesForTarget,
@@ -32,6 +31,7 @@ import {
   DeliveryStatus,
 } from "../conversation/TargetedMessageCard";
 import { useAgents } from "../conversation/useAgents";
+import { AgentName } from "../refs/AgentName";
 import { sessionLabel } from "../refs/actor";
 import { MarkdownBody } from "../refs/MarkdownBody";
 import { Timestamp } from "../refs/Timestamp";
@@ -82,7 +82,7 @@ function BroadcastRecipientRow({
   useMarkShownRepliesRead(recipient.session_id, recipient.replies);
   const label = sessionLabel(recipient.session_id, titles.get(recipient.session_id) ?? "");
   const answer = recipient.replies.find((reply) => reply.author.kind === "session");
-  const answeredBy = answer === undefined ? undefined : resolveAuthor(answer.author, titles).label;
+  const answeredBy = answer?.author;
   const attempts = deliveryAttempts(recipient.message.deliveries, label);
   const latest = attempts.at(-1);
   // A pending attempt nobody has come back to. The server frees a claim after a minute
@@ -141,7 +141,7 @@ function BroadcastRecipientRow({
       {recipient.replies.map((reply) => (
         <div className={`mt-2 border-t pt-2 ${borderDefault}`} key={reply.id}>
           <p className={`flex items-baseline gap-2 text-xs ${textSecondaryOnCanvas}`}>
-            <span className="font-semibold">{resolveAuthor(reply.author, titles).label}</span>
+            <AgentName actor={reply.author} className="font-semibold" inline />
             <Timestamp at={reply.created_at} />
           </p>
           <div className={textPrimaryOnCanvas}>
@@ -189,7 +189,7 @@ export function BroadcastPage(): ReactNode {
         </h1>
         <p className={`mt-1 flex flex-wrap items-center gap-2 text-sm ${textMutedOnCanvas}`}>
           <LabelPill>{MODE_LABELS[sent.delivery]}</LabelPill>
-          <span>{resolveAuthor(sent.author, titles).label}</span>
+          <AgentName actor={sent.author} inline />
           <Timestamp at={sent.created_at} />
           <span>
             {answered} of {sent.recipients.length} answered

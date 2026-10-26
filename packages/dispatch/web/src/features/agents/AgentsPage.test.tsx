@@ -4,6 +4,7 @@ import { focusManager, QueryClient, QueryClientProvider } from "@tanstack/react-
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter, useLocation } from "react-router-dom";
 
+import { wholeText } from "../../__tests__/whole-text";
 import { api } from "../../api/client";
 import type {
   Agent,
@@ -919,7 +920,7 @@ test("Agents renders each targeted message and its reply beneath the matching ca
     });
     await expect(within(conversation).findByText("Can this ship?")).resolves.toBeTruthy();
     await expect(within(conversation).findByText("Yes, it can.")).resolves.toBeTruthy();
-    expect(within(conversation).getByText("Answered by Planner")).toBeTruthy();
+    expect(within(conversation).getByText(wholeText("Answered by Planner"))).toBeTruthy();
   } finally {
     page.view.unmount();
     page.restore();
@@ -1632,7 +1633,9 @@ test("Agents replies to an issue-less exchange through the agent route, threaded
 
     fireEvent.click(within(answer).getByRole("button", { name: "Reply" }));
     const composer = within(planner).getByRole("form", { name: "Comment composer" });
-    expect(within(composer).getByText("Replying to Planner — Yes, it can.")).toBeTruthy();
+    expect(
+      within(composer).getByText(wholeText("Replying to Planner — Yes, it can."))
+    ).toBeTruthy();
     // A reply lives in its parent's direct-session conversation; it hides the issue picker.
     expect(within(planner).queryByRole("button", { name: "Choose issue" })).toBeNull();
     fireEvent.change(within(planner).getByRole("textbox", { name: "Comment" }), {
@@ -1647,7 +1650,9 @@ test("Agents replies to an issue-less exchange through the agent route, threaded
       })
     );
     await waitFor(() =>
-      expect(within(planner).queryByText("Replying to Planner — Yes, it can.")).toBeNull()
+      expect(
+        within(planner).queryByText(wholeText("Replying to Planner — Yes, it can."))
+      ).toBeNull()
     );
     expect(within(planner).getByRole("button", { name: "Choose issue" })).toBeTruthy();
   } finally {

@@ -103,6 +103,21 @@ function subscriber(sessionId: string, title: string, live = true): Subscriber {
   };
 }
 
+function listedAgent(sessionId: string, title: string): Agent {
+  return {
+    capabilities: [],
+    dir: "/workspaces/legion",
+    host: "example-host-devbox",
+    last_activity: null,
+    last_seen: 1_700_000_000_000,
+    machine_id: "example-host-devbox",
+    open_asks: 0,
+    roles: [],
+    session_id: sessionId,
+    title,
+  };
+}
+
 const openIssueAsk: Ask = {
   anchor: null,
   answer: null,
@@ -214,10 +229,13 @@ async function openSubscribedAgents(count: number) {
   return screen.findByRole("region", { name: "Subscribed agents" });
 }
 
-async function expectCreator(label: string): Promise<void> {
+async function expectCreator(label: string): Promise<HTMLElement> {
   const rail = await screen.findByTestId("issue-metadata-rail");
-  const creator = await within(rail).findByText(label);
+  // `AgentName` draws the name; the span around it carries the whole label as its `title`.
+  const creator = await within(rail).findByTitle(label);
+  expect(creator.textContent).toBe(label);
   expect(creator.parentElement?.textContent).toBe(`Opened by:${label}`);
+  return creator;
 }
 
 test("IssuePage shows a session creator's live title and personal-token owner", async () => {
@@ -252,7 +270,13 @@ test("IssuePage shows a session creator's live title and personal-token owner", 
   const view = renderIssuePage();
 
   try {
-    await expectCreator("chief of staff (for sami)");
+    const creator = await expectCreator("chief of staff (for sami)");
+    expect(
+      within(creator).getByRole("link", { name: "chief of staff (for sami)" }).getAttribute("href")
+    ).toBe("/agents/creator-session/live");
+    expect(creator.querySelector("[data-agent-name]")?.getAttribute("data-agent-state")).toBe(
+      "running"
+    );
   } finally {
     view.unmount();
     restore();
@@ -264,7 +288,8 @@ test("IssuePage shows a human creator by login", async () => {
   const view = renderIssuePage();
 
   try {
-    await expectCreator("alice");
+    const creator = await expectCreator("alice");
+    expect(within(creator).queryByRole("link")).toBeNull();
   } finally {
     view.unmount();
     restore();
@@ -347,26 +372,39 @@ test("IssuePage omits creator metadata when an issue response omits it", async (
   }
 });
 
-test("IssuePage shows subscribed agents with a live indicator and their title", async () => {
+test("IssuePage shows subscribed agents with their title and their running state from the agent registry", async () => {
   const restore = stubIssuePage(
     issue,
     [],
     [
       subscriber("0123456789abcdef", "Planner (live)", true),
-      subscriber("fedcba9876543210", "Historical (offline)", false),
-    ]
+      // The subscribers endpoint's own `live` is a second snapshot of the listener; the chip
+      // shows the registry's state, as every agent on the page does.
+      subscriber("fedcba9876543210", "Historical (offline)", true),
+    ],
+    undefined,
+    [listedAgent("0123456789abcdef", "Planner (live)")]
   );
   const view = renderIssuePage();
 
   try {
     const subscribed = await openSubscribedAgents(2);
     expect(within(subscribed).getAllByRole("listitem")).toHaveLength(2);
-    expect(within(subscribed).getByText("Planner (live)").getAttribute("title")).toBe(
-      "0123456789abcdef"
+    const planner = within(subscribed).getByRole("link", { name: "Planner (live)" });
+    expect(planner.getAttribute("href")).toBe("/agents/0123456789abcdef/live");
+    expect(planner.closest("[title]")?.getAttribute("title")).toBe("0123456789abcdef");
+    expect(within(subscribed).getByRole("link", { name: "Historical (offline)" })).toBeDefined();
+    const states = () =>
+      [...subscribed.querySelectorAll("[data-agent-name]")].map((agent) => [
+        agent.getAttribute("data-agent-name"),
+        agent.getAttribute("data-agent-state"),
+      ]);
+    await waitFor(() =>
+      expect(states()).toEqual([
+        ["0123456789abcdef", "running"],
+        ["fedcba9876543210", "not-running"],
+      ])
     );
-    expect(within(subscribed).getByText("Historical (offline)")).toBeDefined();
-    expect(within(subscribed).getAllByTitle("Live")).toHaveLength(1);
-    expect(within(subscribed).getAllByTitle("Not live")).toHaveLength(1);
   } finally {
     view.unmount();
     restore();
@@ -409,7 +447,7 @@ test("IssuePage shortens a subscriber id when its title is blank", async () => {
   try {
     const subscribed = await openSubscribedAgents(1);
     const label = within(subscribed).getByText("session:01234567…");
-    expect(label.getAttribute("title")).toBe("0123456789abcdef");
+    expect(label.closest("[title]")?.getAttribute("title")).toBe("0123456789abcdef");
   } finally {
     view.unmount();
     restore();

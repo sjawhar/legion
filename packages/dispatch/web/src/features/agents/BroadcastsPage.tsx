@@ -15,9 +15,9 @@ import {
   textMutedOnCanvas,
   textPrimaryOnCanvas,
 } from "../../theme/classes";
-import { resolveAuthor } from "../conversation/authors";
 import { MODE_LABELS } from "../conversation/delivery";
 import { useAgents } from "../conversation/useAgents";
+import { useAgentText } from "../refs/AgentName";
 import { MarkdownPreview } from "../refs/MarkdownPreview";
 import { Timestamp } from "../refs/Timestamp";
 import { useDocumentTitle } from "../shell/useDocumentTitle";
@@ -26,7 +26,10 @@ import { useDocumentTitle } from "../shell/useDocumentTitle";
  *  again after the sender navigated away from it. */
 export function BroadcastsPage(): ReactNode {
   useDocumentTitle("Broadcasts · Dispatch");
-  const { titles } = useAgents(true);
+  // The registry the senders are named from; `useAgentText` reads what it caches. The sender sits
+  // inside the row's link, so it is text here, not an `AgentName` link.
+  useAgents(true);
+  const text = useAgentText();
   const broadcasts = useQuery({
     queryFn: () => api.listBroadcasts(),
     queryKey: ["broadcast", "list"],
@@ -72,7 +75,7 @@ export function BroadcastsPage(): ReactNode {
                   className={`flex flex-wrap items-center gap-2 self-stretch text-xs ${textMutedOnCanvas}`}
                 >
                   <LabelPill>{MODE_LABELS[sent.delivery]}</LabelPill>
-                  <span>{resolveAuthor(sent.author, titles).label}</span>
+                  <span>{text.label(sent.author)}</span>
                   <Timestamp at={sent.created_at} />
                   <span>
                     {sent.replies} of {sent.recipients} answered

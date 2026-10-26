@@ -8,6 +8,7 @@ import {
   installIntersectionObserver,
   type Placement,
 } from "../../__tests__/intersection-observer";
+import { wholeText } from "../../__tests__/whole-text";
 import { ApiError, api } from "../../api/client";
 import type {
   Actor,
@@ -593,11 +594,18 @@ test("a mention its session answered with an error is pointed at a new comment, 
   let view = render(tab({ "CORE-1": issueState() }, true, queryClient));
 
   try {
+    // The recipient is the session the attempt recorded, drawn by `AgentName` (an unlisted
+    // session reads by its short id) with its live link.
     await screen.findByText(
-      `session:worker · failed · worker failed. ${answeredWithErrorGuidance("mention")}`
+      wholeText(`session:worker… · failed · worker failed. ${answeredWithErrorGuidance("mention")}`)
+    );
+    expect(document.querySelector('[data-agent-name="worker"] a')?.getAttribute("href")).toBe(
+      "/agents/worker/live"
     );
     screen.getByText(
-      `session:reviewer · failed · reviewer failed. ${safeRetryGuidance("mention", "reviewer failed")}`
+      wholeText(
+        `session:reviewer… · failed · reviewer failed. ${safeRetryGuidance("mention", "reviewer failed")}`
+      )
     );
     expect(screen.getAllByRole("button", { name: "Retry" })).toHaveLength(1);
     view.unmount();
@@ -605,8 +613,8 @@ test("a mention its session answered with an error is pointed at a new comment, 
     // A closed issue shows no Retry and takes no new comment, so neither sentence is said: the
     // same rule the card follows, where each sentence names a control in the retry row.
     view = render(tab({ "CORE-1": issueState() }, true, queryClient, true));
-    await screen.findByText("session:worker · failed · worker failed");
-    screen.getByText("session:reviewer · failed · reviewer failed");
+    await screen.findByText(wholeText("session:worker… · failed · worker failed"));
+    screen.getByText(wholeText("session:reviewer… · failed · reviewer failed"));
     expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
   } finally {
     view.unmount();
@@ -633,8 +641,14 @@ test("a targeted message asked by a session names that session as the asker", as
   const view = render(tab({ "CORE-1": issueState() }, true, queryClient));
 
   try {
-    await screen.findByText("Asking planner (BTW) ·");
-    expect(screen.getByText("reviewer")).toBeTruthy();
+    // The recipient is the session the attempt reached, by its registry title, and links to it.
+    // The headline comes first; the retry row's sentences name the same session.
+    const [recipient] = await screen.findAllByRole("link", { name: "planner" });
+    expect(recipient?.getAttribute("href")).toBe("/agents/s1/live");
+    expect(recipient?.closest("p")?.textContent?.startsWith("Asking planner (BTW) ·")).toBe(true);
+    expect(screen.getByRole("link", { name: "reviewer" }).getAttribute("href")).toBe(
+      "/agents/s2/live"
+    );
     expect(screen.queryByText("alice")).toBeNull();
   } finally {
     view.unmount();
@@ -1131,7 +1145,7 @@ test("on a phone, another comment's Reply opens the thread whose reply was refus
 
     fireEvent.click(within(turn("comment-b")).getByRole("button", { name: "Reply" }));
     dialog = await screen.findByRole("dialog", { name: "Thread" });
-    expect(within(dialog).getByText("Comment A")).toBeTruthy();
+    expect(dialog.querySelector('[data-turn="comment:comment-a"]')).not.toBeNull();
     expect(within(dialog).queryByText("Comment B")).toBeNull();
     expect(within(dialog).getByText(refusedText)).toBeTruthy();
     expect(
@@ -1432,7 +1446,7 @@ test("a comment-delivery retry disables when the target no longer advertises the
   try {
     await screen.findByText(/no live session worker/);
     expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
-    expect(screen.getByText(/session:worker-session no longer supports Send\./)).toBeTruthy();
+    expect(screen.getByText(wholeText("Worker no longer supports Send."))).toBeTruthy();
   } finally {
     view.unmount();
     stub.restore();

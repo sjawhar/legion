@@ -59,7 +59,6 @@ import {
   textPrimaryOnCanvas,
   textSecondaryOnCanvas,
 } from "../../theme/classes";
-import { resolveAuthor } from "../conversation/authors";
 import type { ReplyTarget } from "../conversation/composer-model";
 import {
   broadcastDelivery,
@@ -72,6 +71,7 @@ import { ReplyTurn, ThreadReplies } from "../conversation/ReplyTurn";
 import { capabilitiesForTarget, TargetedMessageCard } from "../conversation/TargetedMessageCard";
 import { useAgents } from "../conversation/useAgents";
 import { waitingOnYou } from "../inbox/BlockedOnYou";
+import { AgentName, useAgentText } from "../refs/AgentName";
 import { sessionLabel } from "../refs/actor";
 import { MarkdownBody } from "../refs/MarkdownBody";
 import { buildInboxPath, buildIssuePath } from "../refs/routes";
@@ -247,6 +247,7 @@ function agentReplyTo(agent: Agent, read: MessageRead, node: Message, author: st
   return {
     issueKey: read.message.issue_key,
     target: {
+      actor: node.author,
       author,
       excerpt: node.body,
       id: node.id,
@@ -266,7 +267,6 @@ function AgentExchangeReply({
   read,
   reply,
   replyDisabled,
-  titles,
 }: {
   agent: Agent;
   liveAgents: readonly Agent[];
@@ -274,7 +274,6 @@ function AgentExchangeReply({
   read: MessageRead;
   reply: Message;
   replyDisabled: boolean;
-  titles: ReadonlyMap<string, string>;
 }): ReactNode {
   const queryClient = useQueryClient();
   const retry = useMutation({
@@ -285,7 +284,7 @@ function AgentExchangeReply({
       }),
   });
   const label = sessionLabel(agent.session_id, agent.title);
-  const author = resolveAuthor(reply.author, titles);
+  const text = useAgentText();
   const parent = [read.message, ...read.replies].find((item) => item.id === reply.in_reply_to);
   const answer = read.replies.find(
     (candidate) => candidate.in_reply_to === reply.id && candidate.author.kind === "session"
@@ -294,7 +293,7 @@ function AgentExchangeReply({
   return (
     <ReplyTurn
       at={reply.created_at}
-      author={author}
+      author={reply.author}
       body={
         <div className={textPrimaryOnCanvas}>
           <MarkdownBody markdown={reply.body} />
@@ -304,8 +303,7 @@ function AgentExchangeReply({
         reply.deliveries.length === 0
           ? undefined
           : {
-              answeredBy:
-                answer === undefined ? undefined : resolveAuthor(answer.author, titles).label,
+              answeredBy: answer?.author,
               attempts: deliveryAttempts(reply.deliveries, label),
               retry: {
                 canAside: capabilities?.includes("aside") !== false,
@@ -317,12 +315,12 @@ function AgentExchangeReply({
               targetName: label,
             }
       }
-      onReply={() => onReply(agentReplyTo(agent, read, reply, author.label))}
+      onReply={() => onReply(agentReplyTo(agent, read, reply, text.label(reply.author)))}
       quote={
         parent === undefined
           ? undefined
           : {
-              author: resolveAuthor(parent.author, titles).label,
+              author: parent.author,
               excerpt: parent.body,
               ...(parent.issue_key === null
                 ? {}
@@ -360,19 +358,15 @@ function AgentTargetedMessage({
       }),
   });
   const label = sessionLabel(agent.session_id, agent.title);
-  const titles = useMemo(
-    () => new Map([[agent.session_id, agent.title]]),
-    [agent.session_id, agent.title]
-  );
-  const asker = resolveAuthor(read.message.author, titles);
+  const text = useAgentText();
   const answer = read.replies.find((reply) => reply.author.kind === "session");
   return (
     <TargetedMessageCard
-      answeredBy={answer === undefined ? undefined : resolveAuthor(answer.author, titles).label}
+      answeredBy={answer?.author}
       body={
         <>
           <p className={`flex items-baseline gap-2 text-sm ${textSecondaryOnCanvas}`}>
-            <span className="font-semibold">{asker.label}</span>
+            <AgentName actor={read.message.author} className="font-semibold" inline />
             <Timestamp at={read.message.created_at} />
           </p>
           <div className={textPrimaryOnCanvas}>
@@ -386,7 +380,9 @@ function AgentTargetedMessage({
       deliveries={deliveryAttempts(read.message.deliveries, label)}
       header={null}
       isClosed={false}
-      onReply={() => onReply(agentReplyTo(agent, read, read.message, asker.label))}
+      onReply={() =>
+        onReply(agentReplyTo(agent, read, read.message, text.label(read.message.author)))
+      }
       onRetry={retry.mutate}
       replyDisabled={replyDisabled}
       retrying={retry.isPending}
@@ -403,7 +399,6 @@ function AgentTargetedMessage({
                 read={read}
                 reply={reply}
                 replyDisabled={replyDisabled}
-                titles={titles}
               />
             ))}
           </ThreadReplies>

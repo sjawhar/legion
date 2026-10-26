@@ -931,7 +931,7 @@ export function MentionComposer({
       {replyTo === null ? null : (
         <div className="flex items-center gap-1">
           <ReplyQuote
-            author={replyTo.author}
+            author={replyTo.actor ?? replyTo.author}
             className="min-w-0 flex-1"
             excerpt={replyTo.excerpt}
             to={replyTo.to}

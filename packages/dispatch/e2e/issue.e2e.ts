@@ -642,7 +642,11 @@ test("a human can unsubscribe an agent from an issue and the session is told", a
     await page.getByRole("button", { name: "Subscribers: 1" }).click();
     const subscribedAgents = page.getByRole("region", { name: "Subscribed agents" });
     await expect(subscribedAgents.getByText("Worker (e2e)", { exact: true })).toBeVisible();
-    await expect(subscribedAgents.locator("[title='Live']")).toHaveCount(1);
+    // Its running state is the agent registry's, which lists it.
+    await expect(subscribedAgents.locator('[data-agent-name="e2e-unsub-session"]')).toHaveAttribute(
+      "data-agent-state",
+      "running"
+    );
 
     await subscribedAgents.getByRole("button", { name: "Unsubscribe" }).click();
     const dialog = page.getByRole("dialog", { name: "Unsubscribe" });
