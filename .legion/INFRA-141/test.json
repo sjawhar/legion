@@ -2,33 +2,50 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-141",
-  "completed": "2026-10-26T03:40:00Z",
+  "completed": "2026-10-26T04:00:00Z",
   "generation": 3,
-  "round": "review round requesting changes at e5185432; implementer head 278ff802 (code e6372254)",
+  "round": "red-test round: implementer head 57d8d3bb (code ef828fd6), answering the two failures recorded at 52dd9f17",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Rebuilt envoy-listener at this head and drove the implementer's frozen-relay case on my own rig (real natsd, a TCP relay frozen with the connection kept open): GET /v1/roles/stall-role 500 in 3.503 s 'read role stall-role's claim: context deadline exceeded', publish to notifications.role.stall-role 503 in 3.502 s with Retry-After: 1, as its proof says. Re-ran bash scripts/e2e-local.sh (exit 0, both PASS lines, bus-down 503 in 3.503371 s, client EnvoyApiError 503) and the A6' jq (exactly three WARN bus_unavailable records, 03:12:36.873Z, 03:12:40.666Z, 03:12:44.426Z, all after nats.log's 'Initiating Shutdown...' at 03:12:33.335Z). Ran the new tests it names, all --- PASS. The proof is accurate; its first entry is itself the evidence of failure 1 below."
+    "how": "Drove the same surface independently: the real envoy-listener binary built at this head, NATS through a TCP relay frozen with the connection kept open (a python relay of my own, not the implementer's rig), curl for every request. The lookup, both sends and both publishes answer 503 with Retry-After: 1 inside 3.55 s, where the binary at e6372254 gave the lookup 500 and held the send 10 s. Re-ran both red tests (bodies unchanged), the implementer's TestTheSenderStampReadsAnInterestTheCacheMissedThroughToTheBucket and its flipped lookup/* subtests, the plan's A1-A6 tests, and scripts/e2e-local.sh with the A6' jq."
   },
-  "failures": [
+  "failures": [],
+  "failed": 0,
+  "proof": [
     {
-      "criterion": "Bus unreachable or not answering: a named 503 with Retry-After: 1 and the busUnansweredPrefix body (spec, bus-down case; architect's instruction of 2026-10-26T03:08Z): GET /v1/roles/<role>, whose budget this round added, answers a role store that did not answer inside sendRequestBudget with 500",
-      "evidence": "Real binary, frozen relay: GET /v1/roles/stall-role, /held-role and /lapsed-role each 500 in 3.50 s with no Retry-After, body {\"error\":\"read role <role>'s claim: context deadline exceeded\"}; 20 concurrent lookups all 500 (slowest 3.507 s); the same frozen bus on the role-lane publish answers 503, Retry-After: 1, 'envoy: the message bus did not answer: …'. Cause: roleGetHandler's err != nil branch (api.go:874-876 at e6372254) calls writeNATSError(w, err, http.StatusInternalServerError, …) rather than writeBusUnavailable(w, err). Red test TestARoleLookupWhoseStoreDoesNotAnswerIsRefusedAsTheBusNotAnswering in packages/envoy/cmd/listener/publish_refusal_answers_test.go, commit f45801ddc27c9f499326928c2714471453d5f64e: `cd packages/envoy && go test ./cmd/listener -count=1 -run '^TestARoleLookupWhoseStoreDoesNotAnswerIsRefusedAsTheBusNotAnswering$' -v` fails at this head with 'lookup whose role store did not answer: status 500, body {\"error\":\"read role reviewer's claim: context deadline exceeded\"}' and the same for the stalled conditional release ('drop expired role claim: release role reviewer's expired claim held by ses_lookup_unanswered_holder: …'). With go test -overlay replacing that one call with writeBusUnavailable(w, err), it passes in 4.05 s per subtest. The implementer's own subtests lookup/the_claim_read and lookup/the_conditional_release of TestARoleResolutionWhoseStoreCallDoesNotAnswerAnswersInsideTheBudget assert 500 and fail under that fix: they are the implementer's to change, and the doc comment above roleGetHandler ('keeps this route's 500') with them. Other handlers this pull request edits, checked for the same mistake: sendHandler, publishHandler and sessionEntryHandler already answer through writeBusUnavailable; no other edited handler answers a bus that did not answer with 500."
+      "criterion": "Failure 1 of 52dd9f17 fixed: GET /v1/roles/<role> answers a role store that did not answer as a bus that did not answer (503, Retry-After: 1, busUnansweredPrefix), inside the caller's 5 s",
+      "surface": "the real envoy-listener binary at this head against a real NATS server (internal/testnats/cmd/natsd) reached through a TCP relay that is frozen mid-run; curl",
+      "command": "start natsd, relay, listener; claim held-role for ses_target via POST /v1/roles/set; GET /v1/roles/held-role; freeze the relay (SIGUSR1); GET /v1/roles/held-role and /v1/roles/nobody-role; 20 concurrent GET /v1/roles/held-role",
+      "observed": "bus up: 200 with holder ses_target. Frozen: 503 in 3.505 s and 3.504 s, Retry-After: 1, body 'envoy: the message bus did not answer: read role held-role's claim: context deadline exceeded'; the 20 concurrent lookups all 503, slowest 3.522 s. Red test TestARoleLookupWhoseStoreDoesNotAnswerIsRefusedAsTheBusNotAnswering --- PASS (both subtests, ~4.07 s each)",
+      "headSha": "57d8d3bb67e3d1cea5bf7b3ee62495482bd939a1",
+      "negativeControl": "the identical lookup before the freeze answered 200; at e6372254, the code head of the previous round, the same frozen lookup answered 500 with no Retry-After"
     },
     {
-      "criterion": "Bus unreachable: 503 naming Envoy's bus, inside the caller's five seconds (spec A3): with the bus connection open but silent, a send to a cached target and a publish to a non-role topic answer after 10 s, past the client's 5 s attempt",
-      "evidence": "Real binary, frozen relay (the client still reports itself connected; nats.go notices only after its pings go unanswered, minutes later): `send ses_live` (target in the warm session cache) and `publish notifications.github.example.topic` both got no answer, curl/Go client EOF at 10.006 s and 10.003 s, the listener's HTTP write timeout. Goroutine dump (SIGQUIT at 6 s into the send): sendHandler.func1 api.go:452 -> senderStamp api.go:343 -> store.(*Registry).Get internal/store/kv.go:710 -> bus.KeyValue.Get -> nats.go kvs.Get -> js.getMsg -> requestWithContext, waiting out the JetStream MaxWait (10 s): the source session's interest record was not in the registry cache, so Registry.Get reads it through to the bucket with no context, outside sendRequestBudget. publishHandler makes the same call at api.go:592. Such a sender is any pane with no interest record, and every sender while the interest cache refills after a reconnect, the case this issue began with. With NATS stopped instead (connection closed), the same read fails at once, which is why e2e-local.sh and TestSendAnswersServiceUnavailableWhileTheBusIsUnreachable (relay cut) never reach it. Red test TestASendAndAPublishAnswerABusThatStoppedAnsweringInsideTheBudget in packages/envoy/cmd/listener/send_route_acceptance_test.go, commit b5ab689632f3065bdf31fa8b24ade6b08f471adf: `cd packages/envoy && go test ./cmd/listener -count=1 -run '^TestASendAndAPublishAnswerABusThatStoppedAnsweringInsideTheBudget$' -v` fails at this head with 'the send answered after 10.001217784s (status 503, body {\"error\":\"envoy: the message bus did not answer: context deadline exceeded\"}), want inside 4s' and the same for the publish after 10.000271711s. With go test -overlay leaving senderStamp's registry read out, both subtests pass, answering 503 in about 3.55 s (-count=4, all pass), so the rest of each route is already bounded."
+      "criterion": "Failure 2 of 52dd9f17 fixed: with the bus connection open but silent, a send and a non-role publish answer the named 503 inside the caller's 5 s, whether or not the sender's interest record is cached",
+      "surface": "the same real binary and frozen relay; ses_target and ses_sender registered in envoy_sessions and subscribed, ses_nobody with no interest record",
+      "command": "after the freeze: POST /v1/messages/send to ses_target from ses_sender and from ses_nobody; send to ses_never from ses_nobody; POST /v1/messages/publish to notifications.github.example.topic from both senders and to notifications.role.held-role; 20 concurrent sends from ses_nobody; jq over listener.log for listener send/publish records",
+      "observed": "sends to the cached target 503 in 3.503 s and 3.504 s; to the uncached target 503 in 1.005 s; topic publishes 503 in 3.503 s and 3.506 s; role-lane publish 503 in 3.504 s; every one with Retry-After: 1 and the busUnansweredPrefix body; 20 concurrent sends all 503, slowest 3.543 s. Records: 23 WARN listener send bus_unavailable 503 and 3 WARN listener publish bus_unavailable 503. Red test TestASendAndAPublishAnswerABusThatStoppedAnsweringInsideTheBudget --- PASS (send 3.58 s, publish 3.56 s, setup included)",
+      "headSha": "57d8d3bb67e3d1cea5bf7b3ee62495482bd939a1",
+      "negativeControl": "the identical sends answered 200 before the freeze; the binary at e6372254 held the frozen send to a cached target with no answer until the 10 s write timeout (EOF)"
+    },
+    {
+      "criterion": "Bounding the stamp's read costs a healthy bus nothing: the sender stamp still carries machine, cwd and roles",
+      "surface": "the same real binary with the bus answering",
+      "command": "POST /v1/messages/send to ses_target from ses_sender (subscribed to notifications.role.sender-role, session entry registered) and from ses_nobody; jq .sender on each response",
+      "observed": "ses_sender: 200, sender {\"session_id\":\"ses_sender\",\"machine\":\"rig3\",\"cwd\":\"/work/ses_sender\",\"title\":\"t ses_sender\",\"roles\":[\"sender-role\"]}; ses_nobody: 200, sender {\"session_id\":\"ses_nobody\"}. TestTheSenderStampReadsAnInterestTheCacheMissedThroughToTheBucket (the cold interest cache read through to the bucket) --- PASS on both routes",
+      "headSha": "57d8d3bb67e3d1cea5bf7b3ee62495482bd939a1",
+      "negativeControl": "the sender with no interest record gets only its session id, so the full stamp above comes from the interest record and is not a constant"
+    },
+    {
+      "criterion": "The original acceptance still holds: absent destination 404, bus down 503 inside 3.5 s through the real client, one WARN record per refused request (A1, A3, A5, A6, A6')",
+      "surface": "scripts/e2e-local.sh (real binary, real NATS, @legion/envoy-client) and its out/e2e/ evidence; go test of the plan's named tests",
+      "command": "cd packages/envoy && bash scripts/e2e-local.sh; jq A6' filter over out/e2e/listener.log; go test ./cmd/listener -count=1 -v -run '<the two red tests, the implementer's touched tests and the plan's A1-A6 set>'",
+      "observed": "e2e exit 0, both PASS lines, absent 404 {\"error\":\"no live session ses_e2e_local_absent\"}, bus-down send HTTP 503 in 3.504553 s, client EnvoyApiError 503; A6' exactly three WARN bus_unavailable records at 03:48:51.527Z, 03:48:55.351Z and 03:48:59.113Z; go test: 12 tests --- PASS, ok 41.121 s",
+      "headSha": "57d8d3bb67e3d1cea5bf7b3ee62495482bd939a1",
+      "negativeControl": "the same script's send answered 200 before NATS was stopped; all three WARN records are later than nats.log's 'Initiating Shutdown...' at 03:48:47.950Z"
     }
   ],
-  "failed": 2,
-  "breakAttemptsThatHeld": [
-    "Deferral slot expiry on the real binary: 64 sends to no_push_target sessions all deferred; the notification stream purged so none returns; the next unplaceable message was given up on its first delivery (set full); 131 s after the purge the next one was deferred at attempt 1 (unplaceableDeferralExpiry 125 s); no orphan was redelivered.",
-    "Frozen relay, the paths already bounded: GET /v1/registry/ses_never_registered 503 in 2.003 s, a send to an uncached target 503 in 1.003 s, 20 concurrent role-lane publishes all 503 (slowest 3.513 s), each with Retry-After: 1.",
-    "Refactor regression on the real binary: cold-cache sends 300/300 200; NATS stopped: send to a cached target 503 in 3.503 s, to an uncached one 503 in 0.003 s.",
-    "S1: 21 named cmd/listener tests (the plan's set, the implementer's new TestARoleLookupThatLosesTheRoleClaimRaceSaysSoRatherThanFailing, TestARoleResolutionWhoseStoreCallDoesNotAnswerAnswersInsideTheBudget, TestAnOrphanedDeferralSlotIsReclaimedAtItsExpiry, TestListenerDeliveryHandlersShareOneDeferralSet, and TestAWindowPastTheDurablesMaxDeliverStillGivesUpBeforeIt) ok 65.948 s; 6 internal/bus tests incl. TestAPublishCancelledAsTheReconnectCompletesSendsNothing ok 9.178 s."
-  ],
-  "ci": "At 278ff802 (the implementer pushed code and handoff together, so the runs are this head's): Docs 40262311739 and Worker Image 40262311657 success; Tests 40262311636 and Legion Envoy and Contracts 40262311717 in progress, cited unsettled and not waited for; PR Title success. No run at e6372254 itself (it was never a branch head).",
-  "notesForTheImplementer": [
-    "Both red tests are mine and stay as written; make them pass. Failure 1's fix also flips your two lookup/* subtests that assert 500.",
-    "Failure 2: senderStamp's two reads only enrich the envelope's sender, so a fix that bounds the interest read by the route's ctx (or reads the cache alone, as sessions.Get already does) keeps the route inside sendRequestBudget; the red test checks only the status, the 503 body prefix, Retry-After and elapsed < 4 s, not how."
-  ]
+  "redTestsUnchanged": "jj diff --from 52dd9f17 --to ef828fd6: packages/envoy/cmd/listener/send_route_acceptance_test.go untouched; the one hunk in publish_refusal_answers_test.go is TestARoleResolutionWhoseStoreCallDoesNotAnswerAnswersInsideTheBudget's lookup/* subtests (implementer's), flipped from 500 to 503 with Retry-After and the prefix.",
+  "ci": "At 57d8d3bb: Docs 40265664436 success; Tests 40265664429 and Worker Image 40265664443 in progress, Legion Envoy and Contracts 40265664591 queued, cited unsettled and not waited for; PR Title one success, one cancelled (superseded).",
+  "regressionLocksAdded": []
 }
