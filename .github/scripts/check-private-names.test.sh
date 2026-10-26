@@ -414,6 +414,46 @@ set -e
 check "exits 2" "$(is "$status" 2)"
 check "names it" "$(contains "$out" '^check-private-names:  does not exist')"
 
+echo "case: a relative path from a directory outside the repository is read from that directory"
+root=$(fixture relative-outside)
+outside="$work/relative-outside-caller"
+mkdir -p "$outside"
+printf 'line one\n%s\n' "$key-7" > "$outside/body.md"
+set +e
+out=$(cd "$outside" && "$root/.github/scripts/check-private-names.sh" body.md 2>&1)
+status=$?
+set -e
+check "fails" "$(is "$status" 1)"
+check "names the file by its absolute path" "$(contains "$out" '^::error file=/.*/relative-outside-caller/body\.md,line=2::')"
+
+echo "case: an exported CDPATH does not move the repository root"
+root=$(fixture relative-cdpath)
+set +e
+out=$(cd "$root" && CDPATH=. .github/scripts/check-private-names.sh docs/notes.md 2>&1)
+status=$?
+set -e
+check "exits 0" "$(is "$status" 0)"
+check "scans the file" "$(contains "$out" '(1 files under docs/notes\.md)')"
+
+echo "case: a relative path from a directory whose name ends in a newline"
+root=$(fixture relative-newline)
+newline_dir="$root/work"$'\n'
+mkdir -p "$newline_dir"
+printf 'line one\n%s\n' "$key-7" > "$newline_dir/body.md"
+set +e
+out=$(cd "$newline_dir" && ../.github/scripts/check-private-names.sh body.md 2>&1)
+status=$?
+set -e
+check "fails" "$(is "$status" 1)"
+check "names the file's line" "$(contains "$out" '/body\.md:2: names the private deployment repository')"
+
+echo "case: a repository whose directory name ends in a newline"
+root=$(fixture relative-newline-root$'\n'; printf x)
+root=${root%$'\n'x}
+run_check "$root" docs/notes.md
+check "exits 0" "$(is "$status" 0)"
+check "scans the file" "$(contains "$out" '(1 files under docs/notes\.md)')"
+
 # write_pr_text <title> <body> <commit message> [branch] [author email] [committer email]: writes
 # the fixture check-pr-text.sh reads as CI runs it. A pull_request event payload carries the title,
 # body, branch name and the head the run checks (its base and head sha, and its one commit); a

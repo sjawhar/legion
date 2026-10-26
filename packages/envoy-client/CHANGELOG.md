@@ -198,6 +198,15 @@
 
 ### Changed
 
+- The notice after a primary spec with no ask block reads: "This spec holds no ask blocks. A person
+  does not watch your chat. They see that you need them only through an open ask or a spec that
+  waits for their approval. If the design needs a person's choice, add an ask block. If it does not,
+  request approval with `dispatch request-approval`." The notice for a typed-block
+  opening stored as text cites the `dispatch-writing-specs` skill, "Questions". A test holds each
+  skill section a notice cites to a heading of that skill.
+- `dispatch read` names each message, comment and ask on an issue's event log by its
+  `dispatch://KEY/message|comment|ask/<id>` reference, after the event type. A message had no other
+  address there, so an agent that read the log could not open or link one.
 - `dispatch whoami` under the shared token says an issue you create without an assignee takes its
   parent's assignee, else the project's default assignee, else nobody, rather than calling it
   unassigned: a project whose default a person set on the Settings page is the create chain's last
