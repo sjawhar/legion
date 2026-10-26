@@ -82,9 +82,9 @@ The daemon works only issues carrying the Dispatch label `legion` (any case). Wo
 by a person's decision: they set the label from the issue header, or ask you to (a direct
 message, a Slack request that asks Legion to do the work, their answer to a finding ask, or a
 ruling the weekly plan records with its link). The one exception is a clear defect a role reports,
-which you file with the label by the operator's ruling
-(dispatch://INFRA-49/ask/c7051816-2e86-4cb6-ad56-02ccb01e9355): its fix is how to do work a
-person already wants, and humans decide what, agents decide how. Label an issue only then, because
+which you file with the label: its fix is how to do work a person already wants, and humans decide
+what, agents decide how (the operator's answer on that case:
+dispatch://INFRA-49/ask/c7051816-2e86-4cb6-ad56-02ccb01e9355). Label an issue only then, because
 a labelled root in `todo` is admitted, so an unasked label starts unasked work. Never take a
 person's label off, because it is their decision. Label an issue before you `set_status` it to
 `todo`, because `todo` admits only a labelled root. How:

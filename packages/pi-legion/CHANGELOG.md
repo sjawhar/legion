@@ -164,11 +164,11 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   the issue with `--repo` naming the repository where the fix belongs, since without it Dispatch
   records the project's default repository and the daemon would start the work there. The
   controller's rule never to label work nobody asked for names a clear defect as its one
-  exception, by the operator's ruling on
-  dispatch://INFRA-49/ask/c7051816-2e86-4cb6-ad56-02ccb01e9355 ("This should not have been asked
-  of me. You found a clear architectural issue. Fix it."): a clear defect's fix is "how" inside
-  work a person already wants, as `STRATEGY.md` puts the split. The root `AGENTS.md` Handover
-  paragraph carries the same link.
+  exception: a clear defect's fix is "how" inside work a person already wants, as `STRATEGY.md`
+  puts the split. The design follows the deciding facts of the operator's answer on one such
+  case, dispatch://INFRA-49/ask/c7051816-2e86-4cb6-ad56-02ccb01e9355, which selected "File it for
+  Legion": "This should not have been asked of me. You found a clear architectural issue. Fix it.
+  Done." The root `AGENTS.md` Handover paragraph carries the same link.
   `legion-worker/references/findings.md` holds the two paths. `legion-controller` (its "Free
   slots", triage row, report wake and daily-report text), `legion-architect`, `legion-worker`,
   `legion-retro`, the production check's `fail` in `merge-gate.md`, `dispatch`, `dispatch-first`,
