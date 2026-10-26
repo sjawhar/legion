@@ -21,16 +21,18 @@
 # git backend requires it); gh; trixie's socat, which carries a connection over `kubectl exec` to a
 # loopback port inside the pod (the runtime-base stage says why); what the capability check
 # (packages/daemon/internal/capabilities, which `legion probe-image` runs) requires of the image: the Go
-# toolchain at go.work's version (go and gofmt, /opt/go), gopls, typescript-language-server with
-# TypeScript's tsc and tsserver, pyright with its pyright-langserver, and trixie's python3, curl, wget,
-# jq, openssh-client (ssh-keygen), util-linux (flock), postgresql-client (psql), redis-tools
-# (redis-cli), sqlite3, netcat-openbsd (nc), bind9-dnsutils (dig) and chromium (the browser Oh My Pi
-# finds on PATH); agent-browser, the browser driver ce-dogfood (the tester's skill) runs, which
-# launches that chromium; and a generic toolchain for the repositories the workers work, specific to
-# none of them: uv and uvx, Node LTS with npm and corepack's pnpm and yarn, the AWS CLI v2 and
-# kubectl — each of these on PATH at /usr/local/bin or /usr/bin; and the license of every third-party
-# piece of all that at /usr/share/doc/legion/THIRD_PARTY_NOTICES (the notices stage; its Debian list
-# comes from the image's own dpkg database).
+# toolchain at go.work's version (go and gofmt, /opt/go) with trixie's gcc and libc6-dev, the C
+# compiler and headers Go's cgo and race detector need (cgo stays off by default), gopls,
+# typescript-language-server with TypeScript's tsc and tsserver, pyright with its pyright-langserver,
+# and trixie's python3, curl, wget, jq, openssh-client (ssh-keygen), util-linux (flock),
+# postgresql-client (psql), redis-tools (redis-cli), sqlite3, netcat-openbsd (nc), bind9-dnsutils
+# (dig) and chromium (the browser Oh My Pi finds on PATH); agent-browser, the browser driver
+# ce-dogfood (the tester's skill) runs, which launches that chromium; and a generic toolchain for the
+# repositories the workers work, specific to none of them: uv and uvx, Node LTS with npm and
+# corepack's pnpm and yarn, the AWS CLI v2 and kubectl —
+# each of these on PATH at /usr/local/bin or /usr/bin; and the license of every third-party piece of
+# all that at /usr/share/doc/legion/THIRD_PARTY_NOTICES (the notices stage; its Debian list comes from
+# the image's own dpkg database).
 # The last three RUNs gate the publish, as the runtime user: the first checks every binary runs on
 # the base, proves jj accepts the image's git with a network-free `jj git clone` of a scratch
 # repository, and links the CodeGraph plugin into the profile, which fetches Oh My Pi's natives; the second
@@ -291,7 +293,15 @@ RUN test -n "$LEGION_REVISION" \
 # version that package.json pins unless the repository's own node_modules holds one, which the
 # server prefers. go finds its GOROOT, /opt/go, by resolving the /usr/local/bin/go
 # symlink (cmd/go's findGOROOT tries the executable's own path, then its symlink target), so the image
-# sets no GOROOT; the toolchain step below checks it.
+# sets no GOROOT; the toolchain step below checks it. Right after unpacking Go, the RUN appends
+# `CGO_ENABLED=0` to /opt/go/go.env, the file Go reads for a distributor's defaults: the runtime-base
+# stage installs gcc for the race detector, and stock Go turns cgo on whenever it finds a C compiler on PATH,
+# so without the line gcc's presence alone would flip the default of every build in a pod. The final
+# stage's `ENV CGO_ENABLED=0` sets the same value for every process that inherits the image's
+# environment; this line holds where that environment is scrubbed — Oh My Pi's Python eval kernel
+# starts with an allowlisted environment that drops CGO_ENABLED, and a test may build with go under an
+# environment it constructs. It is only a default: a role's `CGO_ENABLED=1` overrides it, as the final
+# stage's ENV comment says.
 FROM mirror.gcr.io/library/debian:trixie-slim AS toolchain
 ARG UV_VERSION
 ARG UV_SHA256
@@ -337,6 +347,7 @@ RUN set -eu; \
       ln -s "/opt/language-servers/node_modules/.bin/$tool" "/out/bin/$tool"; \
     done; \
     tar -xzf "$t/go.tar.gz" -C /opt --no-same-owner; \
+    printf 'CGO_ENABLED=0\n' >> /opt/go/go.env; \
     for tool in go gofmt; do ln -s "/opt/go/bin/$tool" "/out/bin/$tool"; done; \
     unzip -q "$t/awscli.zip" -d "$t"; \
     "$t/aws/install" --install-dir /opt/aws-cli --bin-dir /out/bin; \
@@ -413,12 +424,19 @@ FROM mirror.gcr.io/library/debian:trixie-slim AS runtime-base
 # virtual `dnsutils`, which trixie has no candidate for: apt resolves it to this single provider
 # today, and a second provider the day one appears would fail the build on a name that was never
 # the package.
+# gcc and libc6-dev: the C compiler and the libc headers and startup files Go's cgo builds with. Go
+# refuses -race without cgo, so these are what lets a role run the race detector — the
+# `go test -race …` of CI's envoy-go-race lane — as `CGO_ENABLED=1 go test -race …`, with no CC or
+# linker override; gcc joins go in the toolchain row. libc6-dev is named rather than left to gcc
+# because it is only a Recommends of gcc-14, and Recommends stay out here as everywhere. cgo stays off
+# by default all the same (the final stage's `ENV CGO_ENABLED=0` and the toolchain stage's go.env line
+# say how).
 # /opt/legion and /opt/legion/bin are created here, root-owned, before any COPY into them: a COPY
 # creates a missing parent with its own --chown, so the plugin's legion:legion copy below would
 # otherwise leave the runtime user free to rename bin/ and plant its own `legion`. The final step
 # refuses an image where either is not root's.
 # hadolint ignore=DL3008
-RUN apt-get update && apt-get install -y --no-install-recommends bind9-dnsutils ca-certificates chromium curl git jq netcat-openbsd openssh-client postgresql-client python3 redis-tools socat sqlite3 util-linux wget \
+RUN apt-get update && apt-get install -y --no-install-recommends bind9-dnsutils ca-certificates chromium curl gcc git jq libc6-dev netcat-openbsd openssh-client postgresql-client python3 redis-tools socat sqlite3 util-linux wget \
     && rm -rf /var/lib/apt/lists/* \
     && chmod u-s /usr/lib/openssh/ssh-keysign \
     && chmod g-s /usr/bin/ssh-agent \
@@ -664,7 +682,17 @@ COPY --from=go /out/gopls /usr/local/bin/gopls
 # Corepack resolves a project with no `packageManager` to the pnpm and yarn it ships as defaults,
 # never to npm's newest release, so every place the image runs (a pod, `docker run`, the check below)
 # gets one version until the Node pin moves. It is image ENV, not a pod variable, for that reason.
-ENV COREPACK_DEFAULT_TO_LATEST=0
+# CGO_ENABLED=0 keeps cgo off by default now that gcc is on PATH (the apt line above says why gcc is
+# there), for every process that inherits the image's environment: the bash tool, subagents, and go
+# test's test binaries. The toolchain stage's go.env line alone would not reach two of them: a go/build
+# reader such as go/types' source importer (packages/daemon/internal/supervise/table_test.go) reads only
+# the process environment, never go.env, so this ENV is what makes its cgo setting match the go
+# command's; and a toolchain Go switches to for GOTOOLCHAIN or a go.mod `toolchain` line has its own
+# go.env, which lacks the line. A role opts in per command, `CGO_ENABLED=1 go test -race …`;
+# `go env -w CGO_ENABLED=1` does not override it, since Go ranks the environment above its go env file;
+# and as image ENV a deployment's runtime.kubernetes.pod.env may not set it (sandbox/operatorpod.go
+# imageEnv).
+ENV COREPACK_DEFAULT_TO_LATEST=0 CGO_ENABLED=0
 # The toolchain step: every toolchain command runs as the runtime user from the image PATH, the
 # corepack shims fetching their shipped default pnpm and yarn, with TMPDIR, COREPACK_HOME and
 # XDG_CONFIG_HOME in a scratch directory the step removes, so the layer keeps nothing (go, gofmt and
@@ -672,7 +700,11 @@ ENV COREPACK_DEFAULT_TO_LATEST=0
 # Go's default; XDG_CONFIG_HOME is where they look for it). The image's own Python is checked here,
 # python3 --version; uv still installs each project's own at run time. `go version` alone would pass
 # with a GOROOT go cannot find, and every `go build` would then fail, so the step requires GOROOT to
-# resolve to /opt/go through the /usr/local/bin/go symlink. gofmt takes no --version; formatting a
+# resolve to /opt/go through the /usr/local/bin/go symlink. gcc answers --version and is checked beside
+# go, whose cgo (and so whose race detector) needs it. The step then reads cgo's default with
+# CGO_ENABLED removed from the environment (XDG_CONFIG_HOME in scratch, so no `go env -w` file is
+# read), where only /opt/go/go.env's line holds it at 0, so the build fails if that line, the default
+# a scrubbed environment depends on, is ever lost. gofmt takes no --version; formatting a
 # line from stdin is its check. pyright-langserver takes none either (it opens its LSP connection
 # first and refuses without --stdio), so `pyright --version`, the same package's CLI, answers for it.
 # Being its own layer above `legion`, it reruns only when the toolchain or a layer before it changes,
@@ -697,7 +729,8 @@ RUN set -eu; \
     aws --version; kubectl version --client; \
     for shim in pnpm yarn yarnpkg; do "$shim" --version; done; \
     pnpx --help > "$scratch/pnpx-help"; sed -n 1p "$scratch/pnpx-help"; \
-    go version; goroot="$(go env GOROOT)"; echo "GOROOT: $goroot"; test "$goroot" = /opt/go; \
+    go version; goroot="$(go env GOROOT)"; echo "GOROOT: $goroot"; test "$goroot" = /opt/go; gcc --version; \
+    test "$(env -u CGO_ENABLED go env CGO_ENABLED)" = 0; \
     printf 'package main\n' | gofmt; gopls version; \
     typescript-language-server --version; tsc --version; pyright --version; \
     python3 --version; curl --version; wget --version; jq --version; chromium --version; agent-browser --version; \
@@ -757,7 +790,7 @@ COPY --chmod=0755 packages/daemon/docker/gh /opt/legion/bin/gh
 # brings. Then it checks every image-site row of the capability table against this image, as a
 # worker's Oh My Pi would find each: `omp setup python --check`, the chromium on PATH (or the browser a
 # PUPPETEER_EXECUTABLE_PATH names) run with --version, gopls, typescript-language-server and pyright-langserver on PATH, the
-# CodeGraph CLI on PATH with its plugin enabled in the profile's lock, and go, curl, wget, python3,
+# CodeGraph CLI on PATH with its plugin enabled in the profile's lock, and go, gcc, curl, wget, python3,
 # node, bun, uv, kubectl, jq, ssh-keygen, flock, psql, redis-cli, sqlite3, nc and dig on PATH with
 # `go version` running (packages/daemon/internal/capabilities/image.go).
 # It prints the table, one `probe-image: capability <name>: <status> (<detail>)` line per row, then

@@ -57,7 +57,7 @@ func TestSecretDeleteAndRestoreAreServedByTheBrokerAtOnce(t *testing.T) {
 		code int
 		want string
 	}{
-		{[]string{"delete", "TEST_AUTO_SECRET"}, 0, "broker: TEST_AUTO_SECRET is deleted (restorable until "},
+		{[]string{"delete", "TEST_AUTO_SECRET"}, 0, "broker: TEST_AUTO_SECRET is deleted in "},
 		{[]string{"restore", "TEST_AUTO_SECRET"}, 0, "broker: serving TEST_AUTO_SECRET"},
 		{[]string{"retag", "TEST_AUTO_SECRET", "--tier", "human"}, 0, "broker: serving TEST_AUTO_SECRET"},
 	} {
@@ -70,7 +70,7 @@ func TestSecretDeleteAndRestoreAreServedByTheBrokerAtOnce(t *testing.T) {
 	// stands and the broker's refusal is reported, exit 1.
 	rig.Secrets.Put(secretsLocalWithoutValue("NO_VALUE_KEY", rig.Operator))
 	stdout, stderr, code := runSecret("retag", "NO_VALUE_KEY", "--tier", "human")
-	if code != 1 || !strings.Contains(stdout, "broker: refusing NO_VALUE_KEY (reason=no-current-value)") {
+	if code != 1 || !strings.Contains(stdout, "broker: refusing NO_VALUE_KEY from ") || !strings.Contains(stdout, "(reason=no-current-value)") {
 		t.Fatalf("retag of a secret with no value: exit %d, stdout %q, stderr %q; want 1 with the broker's refusal", code, stdout, stderr)
 	}
 }

@@ -394,8 +394,8 @@ test("the conversation view replays what the session held, streams its next turn
 
     // The next turn arrives as snapshots of one message. The host delivers a message's last few
     // updates AFTER its end, so the late streaming snapshot carries the HIGHER sequence number;
-    // it must not rewind the settled text or leave the turn looking like it is still running,
-    // which is what disables the composer.
+    // it must not rewind the settled text or leave the finished turn rendered as still
+    // streaming.
     await publishAgentStreamFrame(planner.session_id, assistantFrame(4, "Ther", true));
     await expect(page.getByTestId("agent-message-assistant").last()).toContainText("Ther");
     await publishAgentStreamFrame(planner.session_id, assistantFrame(5, "There are two.", false));
@@ -410,9 +410,6 @@ test("the conversation view replays what the session held, streams its next turn
 
     // Talking to the agent is the delivery the Agents page already uses, not a new write path,
     // and its default is Send - Enter at the session's terminal - since the session takes a steer.
-    // Send being usable here is also what the late-snapshot rule above buys: a thread left
-    // looking like it is still running disables the composer, and a viewer who opens a finished
-    // session cannot talk to it.
     await expect(page.getByRole("combobox", { name: "Delivery mode" })).toHaveValue("steer");
     await page.getByTestId("agent-composer").locator("textarea").fill("try the other branch");
     await expect(page.getByRole("button", { name: "Send" })).toBeEnabled();
@@ -428,6 +425,135 @@ test("the conversation view replays what the session held, streams its next turn
         message: "try the other branch",
         payload: expect.objectContaining({ delivery: expect.objectContaining({ mode: "steer" }) }),
       });
+  } finally {
+    await context.close();
+  }
+});
+
+// A person talks to a session while it works, as at its terminal: a turn still streaming does
+// not hold Send, and the message goes out at once, before the turn ends. Taking it does not
+// stop the turn, and the thread grows no empty extra turn while it streams on.
+test("Send stays pressable while the session is mid-turn: a click sends as Send at once, and the turn streams on with no empty extra turn", async ({
+  browser,
+}) => {
+  await publishAgentStreamFrame(planner.session_id, replay, "replay");
+  const context = await asUser(browser, "alice");
+  const page = await context.newPage();
+  try {
+    await page.goto(`/agents/${planner.session_id}/live`);
+    const assistant = page.getByTestId("agent-message-assistant");
+    await expect(assistant.first()).toContainText("Checking the notes.");
+    await publishAgentStreamFrame(planner.session_id, assistantFrame(4, "Working", true));
+    await expect(assistant.last()).toContainText("Working");
+
+    await expect(page.getByRole("combobox", { name: "Delivery mode" })).toHaveValue("steer");
+    const composer = page.getByTestId("agent-composer");
+    await composer.locator("textarea").fill("stop after this file");
+    const send = composer.getByRole("button", { exact: true, name: "Send" });
+    await expect(send).toBeEnabled();
+    await send.click();
+    // No frame ends the turn before the send lands.
+    await expect
+      .poll(async () =>
+        (await getSentMessages()).map((sent) => ({
+          message: sent.message,
+          payload: JSON.parse(String(sent.payload)),
+        }))
+      )
+      .toContainEqual({
+        message: "stop after this file",
+        payload: expect.objectContaining({ delivery: expect.objectContaining({ mode: "steer" }) }),
+      });
+    await expect(
+      page.getByTestId("agent-message-user").filter({ hasText: "stop after this file" })
+    ).toBeVisible();
+
+    // The turn streams on: the replay's reply and this one, and no empty turn after the
+    // reader's message.
+    await publishAgentStreamFrame(planner.session_id, assistantFrame(5, "Working on it", true));
+    await expect(assistant.last()).toContainText("Working on it");
+    await expect(assistant).toHaveCount(2);
+    await publishAgentStreamFrame(
+      planner.session_id,
+      assistantFrame(6, "Working on it. Done.", false)
+    );
+    await expect(assistant.last()).toContainText("Working on it. Done.");
+  } finally {
+    await context.close();
+  }
+});
+
+// Enter is the keyboard's Send, mid-turn too, and it sends in the mode the person picked.
+test("Enter sends mid-turn in the delivery mode the person picked", async ({ browser }) => {
+  await publishAgentStreamFrame(planner.session_id, replay, "replay");
+  const context = await asUser(browser, "alice");
+  const page = await context.newPage();
+  try {
+    await page.goto(`/agents/${planner.session_id}/live`);
+    const assistant = page.getByTestId("agent-message-assistant");
+    await expect(assistant.first()).toContainText("Checking the notes.");
+    await publishAgentStreamFrame(planner.session_id, assistantFrame(4, "Working", true));
+    await expect(assistant.last()).toContainText("Working");
+
+    await page.getByRole("combobox", { name: "Delivery mode" }).selectOption("aside");
+    const field = page.getByTestId("agent-composer").locator("textarea");
+    await field.fill("note the flaky test for later");
+    await field.press("Enter");
+    // The turn is still streaming: no frame has ended it.
+    await expect
+      .poll(async () =>
+        (await getSentMessages()).map((sent) => ({
+          message: sent.message,
+          payload: JSON.parse(String(sent.payload)),
+        }))
+      )
+      .toContainEqual({
+        message: "note the flaky test for later",
+        payload: expect.objectContaining({ delivery: expect.objectContaining({ mode: "aside" }) }),
+      });
+  } finally {
+    await context.close();
+  }
+});
+
+// An empty box is the one thing that refuses Send mid-turn, and Send says why: on its title, as
+// its accessible description, and on a line in the composer a reader with no pointer can see.
+// Neither a click nor Enter sends. With text, Send is pressable and the line says how to send.
+test("mid-turn, an empty box refuses Send, says why on screen, and sends nothing", async ({
+  browser,
+}) => {
+  await publishAgentStreamFrame(planner.session_id, replay, "replay");
+  const context = await asUser(browser, "alice");
+  const page = await context.newPage();
+  try {
+    await page.goto(`/agents/${planner.session_id}/live`);
+    const assistant = page.getByTestId("agent-message-assistant");
+    await expect(assistant.first()).toContainText("Checking the notes.");
+    await publishAgentStreamFrame(planner.session_id, assistantFrame(4, "Working", true));
+    await expect(assistant.last()).toContainText("Working");
+
+    const composer = page.getByTestId("agent-composer");
+    const field = composer.locator("textarea");
+    const send = composer.getByRole("button", { exact: true, name: "Send" });
+    const reason = composer.getByText("Type a message first.", { exact: true });
+    const hint = composer.getByText("Enter to send · Shift+Enter for a new line", { exact: true });
+    await expect(send).toBeDisabled();
+    await expect(send).toHaveAccessibleDescription("Type a message first.");
+    await expect(send).toHaveAttribute("title", "Type a message first.");
+    // `toBeVisible` passes for an `sr-only` line, a 1 px box, so its height is the check.
+    await expect(reason).toBeVisible();
+    expect((await reason.boundingBox())?.height ?? 0).toBeGreaterThan(8);
+    const sent = (await getSentMessages()).length;
+    await send.click({ force: true });
+    await field.press("Enter");
+    await page.waitForTimeout(500);
+    expect(await getSentMessages()).toHaveLength(sent);
+
+    await field.fill("status?");
+    await expect(send).toBeEnabled();
+    await expect(send).not.toHaveAttribute("aria-describedby");
+    await expect(reason).toHaveCount(0);
+    await expect(hint).toBeVisible();
   } finally {
     await context.close();
   }
@@ -1060,6 +1186,8 @@ test("sending a message from the live view while scrolled back takes the reader 
     await page.getByRole("button", { name: "Send" }).click();
     refuse();
     await expect(page.getByTestId("agent-send-error")).toBeVisible();
+    // A refused message is not lost: it is back in the box, to send again.
+    await expect(input).toHaveValue("and this one is refused");
     expect((await liveViewLayout(page)).threadScrollTop).toBe(1_200);
   } finally {
     await context.close();

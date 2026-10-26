@@ -14,6 +14,31 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   tests, commits only those tests and its handoff, sends a contradiction the branch intends to the
   architect, and posts the report on the slice's Dispatch issue rather than committing it
   (INFRA-248).
+- Daemon API contract 38 (INFRA-225): Legion admits no root and starts no child while Dispatch
+  shows it blocked by an issue that is not `done`, and says what it is waiting for. `legion state`
+  and the controller's `read_state` carry `admission.blocked`, every root and child Legion is
+  waiting to start, each `{issue, blockedBy}` with the keys it waits on that are not done, and
+  `release_children` answers `started` and `held` beside `released`: the children it started,
+  and each child it left held with the issues it waits on. All three required, so a plugin built
+  before it refuses the state and the release answer. Install this release with a `legion` built
+  from the same commit.
+- The skills this plugin ships carry that rule (INFRA-225). The `legion-architect` skill links
+  children that depend on one another with `dispatch issue-update --blocked-by`, releases a child
+  Legion holds all the same, and says a never-started child that still waits is handed over from
+  a finished tree as a root carrying no run; its wake routing's `child-status` row says what
+  cleared a held child's hold. The `legion-controller` skill names the tick's `blocked` waits in
+  the day's report and counts the free slots without the waiting roots in `admission.blocked`,
+  which take none, and its admission reference reads a root both waiting and blocked.
+- Daemon API contract 37 (INFRA-80): under the Kubernetes runtime an issue's disk is a generic
+  ephemeral volume its own pod owns, created with the pod and deleted with it, so an issue pod's
+  `workspace-init provision` container is no longer told `LEGION_EXPECT_ISSUE_VOLUME`, and the
+  lost-disk machinery that variable drove is gone with it: `workspace-init`'s exit code 3 for a
+  volume holding neither the clone nor a retained session, the recovery marker a relaunch after
+  that loss wrote, the probe for an issue's retained sessions, and `legion sessions mark-lost`.
+  `runtime.kubernetes.session_store` must name a store that keeps sessions in a database,
+  `postgres` or `cloudsql-iam` (`pvc` and an omitted key are refused), since a session kept as a
+  file on that disk would die with the pod. Install this release with a `legion` built from the
+  same commit.
 - The skill-scenarios rig (`scripts/skill-scenarios/`, not shipped in the package) measures how
   agents write Dispatch specs:
   - `label-comments.ts` labels the comments people wrote on Dispatch in a window with the eleven
@@ -32,6 +57,11 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 - `rig.sh judge-omp` runs each judge in a Docker container that sees only the judge's own
   directory. On the gateway route, the gateway's key command runs on the host once for each judge,
   and the container gets only its token, which is removed when the judge ends.
+- The `legion-architect` skill this plugin ships says a project may import its architecture
+  model from several source repositories: a root's `.dispatch/architecture/<id>.md` file goes in
+  the branch of the source whose repository holds it, `parent` and `depends_on` name components of
+  that same source, an id must be one no other source of the project uses, and
+  `dispatch architecture-sync --repo <owner/name>` imports one source alone (INFRA-391).
 - Daemon API contract 36 (INFRA-229): `legion state` and the controller's `read_state` carry
   `state` on an issue's pull request, its `open`, `merged` or `closed`. An architect's acceptance
   is refused while an issue beneath it is still in the workflow and a merged root's close waits

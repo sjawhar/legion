@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"maps"
 	"net"
@@ -66,11 +67,12 @@ func cacheObject(t *testing.T, repo ghrepo.Repository, uid, mode, annotated stri
 	return u
 }
 
-// cachePod is the pod of the cache Sandbox with ownerUID, running image, in phase.
+// cachePod is the pod of the cache Sandbox with ownerUID, running image, in phase. A cache pod
+// mounts no providers Secret, so its spec holds the cache container alone.
 func cachePod(repo ghrepo.Repository, uid, ownerUID, image string, phase corev1.PodPhase) *corev1.Pod {
 	name := CacheSandboxName(testProject, repo)
 	pod := podObject(name, uid, ownerUID, map[string]string{labelProject: testProject, labelCache: cacheMarker}, corev1.PodStatus{Phase: phase})
-	pod.Spec.Containers = []corev1.Container{{Name: cacheContainer, Image: image}}
+	pod.Spec = corev1.PodSpec{Containers: []corev1.Container{{Name: cacheContainer, Image: image}}}
 	return pod
 }
 
@@ -557,7 +559,7 @@ func TestCensusAcceptsACacheSandboxAndRefusesAMalformedOne(t *testing.T) {
 	}
 	g.spawn(rootSpec(t))
 	sandboxes := g.dyn.Resource(sandboxGVR).Namespace(testNamespace)
-	if err := rejectLegacyIssueSandboxes(g.ctx, sandboxes, testProject); err != nil {
+	if err := rejectLegacyIssueSandboxes(g.ctx, sandboxes, testProject, slogTo(io.Discard)); err != nil {
 		t.Fatalf("census of a cache Sandbox and an issue pod = %v, want none", err)
 	}
 	malformed := map[string]func(u *unstructured.Unstructured){
@@ -589,7 +591,7 @@ func TestCensusAcceptsACacheSandboxAndRefusesAMalformedOne(t *testing.T) {
 	if err := g.dyn.Tracker().Create(sandboxGVR, issue, testNamespace); err != nil {
 		t.Fatal(err)
 	}
-	err := rejectLegacyIssueSandboxes(g.ctx, sandboxes, testProject)
+	err := rejectLegacyIssueSandboxes(g.ctx, sandboxes, testProject, slogTo(io.Discard))
 	if err == nil {
 		t.Fatal("census of malformed caches passed")
 	}
@@ -875,6 +877,9 @@ func TestAnIssuePodsFetchIsToldItsRepositorysCacheAndItsToken(t *testing.T) {
 	}
 	if env["LEGION_REPOSITORY_CACHE_TOKEN_FILE"] != ProvisionDir+"/"+cacheTokenKey {
 		t.Errorf("the fetch is told LEGION_REPOSITORY_CACHE_TOKEN_FILE=%q", env["LEGION_REPOSITORY_CACHE_TOKEN_FILE"])
+	}
+	if want := rootSpec(t).DefaultBranch; want == "" || env["LEGION_DEFAULT_BRANCH"] != want {
+		t.Errorf("the fetch is told LEGION_DEFAULT_BRANCH=%q, want the issue's recorded default %q", env["LEGION_DEFAULT_BRANCH"], want)
 	}
 	if issueSecret := g.secret(secretName(loc.Sandbox.Name)); issueSecret == nil || string(issueSecret.Data[cacheTokenKey]) != bearer || bearer == "" {
 		t.Errorf("the issue pod's provisioning Secret holds %v, want the cache's bearer %q", issueSecret, bearer)

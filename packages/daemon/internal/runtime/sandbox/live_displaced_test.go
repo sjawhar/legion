@@ -22,10 +22,13 @@ import (
 // architect still runs in it. The replacement's Suspended patch, one merge patch under the
 // restricted identity, names the replaced pod on the Sandbox (displacedAnnotation); the
 // architect's process ends with the pod and is observed Displaced at its recorded locator, the
-// verdict the supervisor resumes uncharged (supervise's displaced); and the architect's Resume from
-// its marker starts in the displacer's new pod. The fault is an operator's (the restricted
-// identity may not delete a Secret), as kill-launcher's `kill 1` is; the replacement it causes is
-// the runtime's alone.
+// verdict the supervisor resumes uncharged (supervise's displaced); and the architect's Resume
+// starts in the displacer's new pod. The fault is an operator's (the restricted identity may not
+// delete a Secret), as kill-launcher's `kill 1` is; the replacement it causes is the runtime's
+// alone. The pod that went took its disk with it, so the new pod's is a claim of its own: the same
+// name, which Kubernetes derives from the pod's, owned by the new pod, and a new uid. What the
+// architect carries across the replacement is its session, which the table holds (recordSession);
+// the marker, on the disk that went, holds only what the new pod wrote.
 func (r *liveRig) checkDisplaced() error {
 	displaced, displacer := r.claim("displaced"), r.claim("displacer")
 	if err := r.ensureRunning(displaced); err != nil {
@@ -42,6 +45,10 @@ func (r *liveRig) checkDisplaced() error {
 	}
 	if named, ok := before.Annotations[displacedAnnotation]; ok {
 		return fmt.Errorf("the Sandbox %s already names %s as a displaced pod before any replacement", name, named)
+	}
+	oldDisk, err := r.assertPodOwnedDisk(displaced)
+	if err != nil {
+		return err
 	}
 	secret := roleSecretName(name, displacer.role)
 	if _, err := r.kubectl("delete", "secret", secret); err != nil {
@@ -81,15 +88,15 @@ func (r *liveRig) checkDisplaced() error {
 	if !ok {
 		return fmt.Errorf("no end of %s's %s within %s", displaced.name, old.Incarnation, liveGoneLimit)
 	}
-	if !sameLocator(ended.Locator, old) || !ended.Displaced || ended.WorkspaceLost {
-		return fmt.Errorf("%s's end is %s at %s, Displaced %t, WorkspaceLost %t: %s; want Displaced at its recorded %s",
-			displaced.name, ended.Kind, ended.Locator.Incarnation, ended.Displaced, ended.WorkspaceLost, ended.Detail, old.Incarnation)
+	if !sameLocator(ended.Locator, old) || !ended.Displaced {
+		return fmt.Errorf("%s's end is %s at %s, Displaced %t: %s; want Displaced at its recorded %s",
+			displaced.name, ended.Kind, ended.Locator.Incarnation, ended.Displaced, ended.Detail, old.Incarnation)
 	}
 	note("runtime", "Observe: %s for %s's recorded %s, Displaced — %s", ended.Kind, displaced.name, short(old.Incarnation), oneLine(firstLine(ended.Detail)))
 	displaced.loc, displaced.state = nil, stateDead
 
 	since = time.Now()
-	resumed, err := r.resume(displaced, displaced.marker)
+	resumed, err := r.resume(displaced, displaced.session)
 	if err != nil {
 		return fmt.Errorf("the %s's Resume into the new pod: %w", displaced.name, err)
 	}
@@ -105,14 +112,23 @@ func (r *liveRig) checkDisplaced() error {
 	if err != nil {
 		return err
 	}
-	if got := roleIncarnations(lines, displaced.role); !slices.Contains(got, old.Incarnation) || !slices.Contains(got, resumed.Incarnation) {
-		return fmt.Errorf("the marker holds %s incarnations %v, want the replaced %s and the resumed %s", displaced.role, got, old.Incarnation, resumed.Incarnation)
+	if got := roleIncarnations(lines, displaced.role); !slices.Contains(got, resumed.Incarnation) || slices.Contains(got, old.Incarnation) {
+		return fmt.Errorf("the marker holds %s incarnations %v, want the resumed %s and not the replaced %s, whose disk went with its pod", displaced.role, got, resumed.Incarnation, old.Incarnation)
+	}
+	newDisk, err := r.assertPodOwnedDisk(displaced)
+	if err != nil {
+		return err
+	}
+	if newDisk.uid == oldDisk.uid {
+		return fmt.Errorf("the new pod's disk %s is the replaced pod's own uid %s: a pod's disk goes with the pod", newDisk.name, oldDisk.uid)
 	}
 	if obs, err := r.rt.Probe(r.ctx, resumed); err != nil || obs.Kind != runtime.Alive {
 		return fmt.Errorf("the resumed %s probes %s: %v", displaced.name, obs.Kind, err)
 	}
 	note("runtime", "Resume(%s, prev=%s) returned %s in the new pod %s; Alive", displaced.name, short(old.Incarnation), short(resumed.Incarnation), short(resumed.Sandbox.PodUID))
-	note("harness", "%s: hello registered at generation %d with that generation's token; the marker holds its replaced and resumed incarnations", displaced.name, reg.gen)
+	note("harness", "%s: hello registered at generation %d with that generation's token, resumed from its recorded session %s", displaced.name, reg.gen, displaced.session)
+	note("operator", "the disk %s is uid %s after the replacement, not the replaced pod's %s, and is owned by %s; its marker holds the resumed incarnation and not the replaced one",
+		newDisk.name, short(newDisk.uid), short(oldDisk.uid), newDisk.owner)
 
 	for _, c := range []*liveClaim{displacer, displaced} {
 		if err := r.suspend(c); err != nil {

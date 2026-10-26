@@ -78,9 +78,9 @@ variables (`ENVOY_URL`, `ENVOY_NATS_URL`, `ENVOY_TOKEN_FILE`, read by `@legion/e
 `NATS_NKEY_SEED_FILE` when the daemon has a NATS nkey seed, and `DISPATCH_URL`/`DISPATCH_TOKEN_FILE`
 when the daemon has `dispatch_url` configured — and, beside the pane, the environment of a pod's
 `workspace-init provision` init container (`initEnvironment`, `internal/runtime/sandbox/manifest.go`:
-the image's `PATH`, `LEGION_EXPECT_ISSUE_VOLUME` when the issue's volume must already hold the clone
-or a retained session, `LEGION_WORKSPACE_RECOVERED_FROM` on a relaunch after that volume was lost,
-and the XDG base directories), which the image's own `legion`, built from the same commit as this
+the image's `PATH` and the XDG base directories, and nothing of a disk carried forward — the pod's
+disk is created with the pod and empty, so every provision is the first), which the image's own
+`legion`, built from the same commit as this
 plugin, reads. A change to any of these surfaces bumps the field and the
 daemon's `DaemonAPIVersion` (`internal/api/version.go`, whose doc comment is the contract's
 history) in the same commit: `packages/contracts/fixtures/daemon-api/version.json`, written by the
@@ -90,7 +90,18 @@ field from `legion.goDaemonApiVersion` when the plugin dropped its TypeScript-da
 (LEGION-223): a release before it declares the TypeScript daemon's 9 under this name and is
 refused naming that number. The split of the one plugin into this package and `@sjawhar/pi-envoy`
 (LEGION-247) moved no request, response or pane variable, so it bumped nothing of its own: the
-number is the one `DaemonAPIVersion` declares, last bumped by contract 35's `settings` on
+number is the one `DaemonAPIVersion` declares, last bumped by contract 38's blocked issues on
+`GET /legion/v1/state` (INFRA-225: `admission.blocked` lists every root and child Legion is waiting
+to start behind an unfinished Dispatch issue, and `release_children` answers `started` and `held`
+beside `released`), after contract 37's pod-owned issue disk
+(INFRA-80: an issue's disk is a generic ephemeral volume its pod owns, created with the pod and
+deleted with it, so the init container above is no longer told `LEGION_EXPECT_ISSUE_VOLUME` and the
+lost-disk machinery that variable drove — `workspace-init`'s exit code 3, its recovery marker, the
+probe for an issue's retained sessions and `legion sessions mark-lost` — is gone, and
+`runtime.kubernetes.session_store` must name a store that keeps sessions in a database, `postgres`
+or `cloudsql-iam`), after contract 36's pull request `state`
+on `GET /legion/v1/state` (INFRA-229: `open`, `merged` or `closed`, always emitted, since a merged
+root's close now waits for the rest of its tree), after contract 35's `settings` on
 `GET /legion/v1/state` (LEGION-791: the daemon's resolved legion.yaml with every credential,
 credential source and credential file path left out, parsed loosely so a later legion.yaml key
 bumps nothing), after contract 34's shared issue scratch
@@ -140,7 +151,8 @@ credential-helper variable and `LEGION_GRANT_FILE`; `POST /legion/v1/handoff/com
 `commit` and answers `note`; `POST /legion/v1/threads/resolve` is deleted), contract 18's
 independent issue pods, each on a volume of its own (LEGION-632: the init container's environment
 is the four surfaces above and nothing of a shared disk — no removable-workspaces list, no lock
-wait, no role or generation — and its volume expectation is `LEGION_EXPECT_ISSUE_VOLUME`), contract 17's `dispatch`
+wait, no role or generation — and its volume expectation is `LEGION_EXPECT_ISSUE_VOLUME`, the
+variable contract 37 removed), contract 17's `dispatch`
 command instructions in every daemon role prompt (LEGION-588), contract 16's `capabilities` list on
 `GET /legion/v1/state` (LEGION-578), contract 15's Sandbox locator in an issue's shared pod
 (LEGION-462), contract 14's daemon-launched controller pod (LEGION-592) and contract 13's `push`

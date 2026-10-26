@@ -915,6 +915,8 @@ runtime:
     namespace: legion
     image: ghcr.io/sjawhar/legion-worker@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
     storage_class: gp2
+    session_store: postgres
+    session_dsn_secret: SESSION_DSN
 %s`, filepath.Join(dir, "state"), command, command, tc.runtime)
 			config := filepath.Join(dir, "legion.yaml")
 			for name, contents := range map[string]string{config: body, "envoy-token": "envoy\n", "operator-token": "operator\n", "dispatch-token": "dispatch\n"} {
@@ -967,6 +969,8 @@ runtime:
     namespace: legion
     image: ghcr.io/sjawhar/legion-worker@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
     storage_class: gp2
+    session_store: postgres
+    session_dsn_secret: SESSION_DSN
     kubeconfig: ./kubeconfig
     context: legion-daemon
 %s`, filepath.Join(dir, "state"), extra)
@@ -1395,6 +1399,53 @@ func TestPlainStateNamesTheClaimsNothingWillWake(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			served := "{" + daemon + `,"strandedClaims":` + tc.stranded + "}"
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(served))
+			}))
+			defer server.Close()
+			t.Chdir(t.TempDir())
+			t.Setenv("LEGION_DAEMON_URL", server.URL)
+			t.Setenv("LEGION_ISSUE", "")
+
+			var out, errb bytes.Buffer
+			if code := run(context.Background(), []string{"legion", "state"}, &out, &errb); code != 0 {
+				t.Fatalf("legion state = %d, stderr %q", code, errb.String())
+			}
+			if !strings.Contains(out.String(), tc.want) {
+				t.Fatalf("legion state printed %q, want the line %q", out.String(), tc.want)
+			}
+		})
+	}
+}
+
+// An operator reading plain `legion state` is told which issues Legion is waiting to start behind
+// a Dispatch issue nobody has finished (api.Admission.Blocked): each by issue and what it waits
+// on, roots and held children alike, on one line however many there are; with none the line says
+// so. Nothing here is the daemon's to clear, so the line names them and stops.
+func TestPlainStateNamesWhatLegionIsBlockedOn(t *testing.T) {
+	admission := func(blocked string) string {
+		return `"admission":{"cap":2,"active":["LEGION-208"],"waiting":["LEGION-211"],"blocked":` + blocked + `}`
+	}
+	daemon := `"daemon":{"project":"LEGION","schemaVersion":6,"boots":1,"firstBootAt":"2026-09-23T00:00:00Z","startedAt":"2026-09-23T00:00:00Z"},`
+	for _, tc := range []struct {
+		name, blocked, want string
+	}{
+		{
+			name: "a held child and a waiting root",
+			blocked: `[{"issue":"LEGION-209","blockedBy":["LEGION-300"]},` +
+				`{"issue":"LEGION-211","blockedBy":["LEGION-301","LEGION-302"]}]`,
+			want: "blocked on Dispatch links: 2 — LEGION-209 waits on LEGION-300; LEGION-211 waits on LEGION-301, LEGION-302\n",
+		},
+		{
+			name:    "one",
+			blocked: `[{"issue":"LEGION-209","blockedBy":["LEGION-300"]}]`,
+			want:    "blocked on Dispatch links: 1 — LEGION-209 waits on LEGION-300\n",
+		},
+		{name: "none", blocked: `[]`, want: "blocked on Dispatch links: none\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			served := "{" + daemon + admission(tc.blocked) + `,"issues":{},"pendingStatusWrites":[]}`
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("Content-Type", "application/json")
 				_, _ = w.Write([]byte(served))
