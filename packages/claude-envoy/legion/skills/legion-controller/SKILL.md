@@ -44,7 +44,9 @@ because Envoy keeps no copy of a wake sent while no controller ran.
    Name in your summary each root at `phase: done` whose `status` is `in_progress`, `testing`,
    `needs_review` or `retro`: Legion runs it no longer, as the `unslotted` wake reports — someone
    else moved it there while it waited, or it waited on a person and lost its label or its
-   Dispatch claim, which leaves the `in_progress` it ran with.
+   Dispatch claim, which leaves the `in_progress` it ran with. Name too each root at `phase: done`
+   whose `status` is `todo` and that came out of `awaiting_person` the same way after a person set
+   it back to `todo` (`skill://legion-controller/references/admission.md`).
 2. Triage the roots handed to Legion while you were away, as
    `skill://legion-controller/references/triage.md` "At every start" says.
 3. Catch up on the report issue

@@ -12,10 +12,11 @@ waits, or neither. Read its key against `admission` and its tree's root.
 | `phase: admitted`, in neither list, and Dispatch shows a `child_of` parent | A child: it runs or waits with its tree, the root its `child_of` chain reaches. Under a root whose `phase` is `done` it waits with it | Leave it to its tree. It runs again when its root does, or as a root of its own once it is `todo` with the `legion` label |
 | `phase: admitted`, `status: todo`, in neither list, no parent | A root a person took out of the line by taking its label off | Nothing: the label puts it back in the line, and a person's label is their decision |
 | `phase: done` while `status` is `in_progress`, `testing`, `needs_review` or `retro` | Legion is not running it under that status, and it sent the `unslotted` wake. Either someone other than Legion moved a root that waited for a slot there, so the daemon took it out of the workflow at that move since no slot would ever reach it; or a root waiting on a person could not be resumed — its `legion` label is gone, or a person or an outside session took its Dispatch claim — and the daemon took it out the same way, leaving the `in_progress` it ran with. A parked child stays parked. Legion starts nothing for any of them | Re-admit nothing yourself: `dispatch read` shows who works it now. Name it in your summary; `todo` with the `legion` label queues it again |
+| `phase: done`, `status: todo`, no parent | A root that waited on a person (`awaiting_person`) while a person set its Dispatch status back to `todo`, then lost its `legion` label or its Dispatch claim to a person or an outside session: the daemon took it out of the workflow at the status it stood at and sent the `unslotted` wake. With its label still on, `admission.waiting` lists it again, as `todo` with the label queues any root; with the label off it is in neither list | Re-admit nothing yourself: `dispatch read` shows who works it now. Name it in your summary |
 
 A root in the workflow with no slot that is in neither `admission.waiting` nor the label-removed
 row above does not stay that way: every pass of admission (a Dispatch event, the daemon's boot
 read, its tick) takes it out of the workflow and sends the `unslotted` wake — an unanswered
 `awaiting_person` root only when its label or its Dispatch claim makes a resume unsafe. The wake
-is live only, so a controller that starts later finds such a root by the last row, as its start
+is live only, so a controller that starts later finds such a root by the last two rows, as its start
 procedure does.
