@@ -111,14 +111,22 @@ test("hovering a board card previews the issue and moving onto the card keeps it
     if (box === null) {
       throw new Error("board card is not visible");
     }
+    // The lift travels straight down and back. At 1280 px Todo is the board's rightmost visible
+    // column, so its card sits in dnd-kit's auto-scroll zone (the board's right fifth); any
+    // rightward travel in the drag arms a rightward scroll that keeps sliding the board under the
+    // still pointer while the button is held, and once Todo has slid out from under it the drop
+    // lands on In progress and really moves the card. dnd-kit scrolls an axis only in a direction
+    // the drag has moved, so a vertical lift leaves the board where it is and the drop lands on
+    // Todo.
     await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
     await page.mouse.down();
-    await page.mouse.move(box.x + box.width / 2 + 12, box.y + box.height / 2 + 12, { steps: 4 });
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2 + 12, { steps: 4 });
     await expect(card).toHaveCount(0);
     await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2, { steps: 4 });
     await page.mouse.up();
     await expect(page).toHaveURL(/\/projects\/CORE/);
     await expect(page.getByRole("tooltip")).toHaveCount(0);
+    await expect(link).toBeVisible();
 
     // Hovering again reopens it - and the drop left keyboard focus on the title link, so the
     // press on the card must not blur the card away. The hover bridge still holds: the pointer
