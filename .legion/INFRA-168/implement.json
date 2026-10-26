@@ -2,40 +2,34 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-168",
-  "completed": "2026-10-26T10:30:00Z",
-  "round": "the implementing round answering the review of 83ff55cf (REQUEST_CHANGES, five findings; the architect's Narrow decision, dispatch://INFRA-168/comment/169d9f23)",
+  "completed": "2026-10-26T11:20:00Z",
+  "round": "the narrowed round answering the review of 868cd58b (two findings; the architect's Narrow decision recorded on #2161)",
   "proof": [
     {
-      "criterion": "Finding 3: AskGate reads its own output — the command a rebuttal hands back, resent as recorded, is recorded as the rebuttal it carries, not refused as unreadable.",
-      "surface": "Nested headless Oh My Pi sessions on this branch's build in this Legion pod, every assistant turn anthropic/claude-opus-5-5, production Dispatch, scratch issue INFRA-465.",
-      "command": "The run.sh invocation of earlier rounds (env -u LEGION_* … OMP_ASKGATE=<warn|block> OMP_ASKGATE_RECORD_PROJECT=INFRA /opt/omp/bin/omp --extension \"$LEGION_WORKSPACE/packages/pi-envoy\" --session-dir <dir> -p …) with prompt /legion/scratch/tmp/g4/p9.txt: step 1 `dispatch comment --issue INFRA-465 --body '…' --advisor-rebuttal 'the probe needs this comment as written'`, step 2 the command the session recorded for step 1, resent character for character; runs e9-warn and e9-block, at 139059f1.",
-      "observed": "In both modes both sends posted (comments 83cb3e8e, cde6565c warn; 51ce9f5b, a0f55db1 block); both entries are outcome rebuttal, decision allow, rebuttal 'the probe needs this comment as written'; both recorded commands are `dispatch comment --issue INFRA-465 --body '…' # --advisor-rebuttal 'the probe needs this comment as written'`; 0 xd://report_issue. One agent said the note's 'moved it into a shell comment' did not fit the resend; 403f240f words it 'it stays a shell comment', true for both (unit-pinned).",
-      "headSha": "403f240f20d59c2538399b61e927920288e24697",
-      "negativeControl": "At a3fc16aa the same resend was unreadable to the gate: scopedCommand undefined, refused in block mode with a refusal that never mentions the comment (the reviewer's reproduction at 83ff55cf); the new test 'the command a rebuttal hands back, sent again, is recorded as the same rebuttal and comes back unchanged' fails on that code."
+      "criterion": "Finding 1 (charter path): no refusal counts an ask block an upload's stored version holds, so a third upload's new ask is reviewed, not passed by the breaker.",
+      "surface": "The real AskGate handler under pi-envoy's suite, with the fake Dispatch serving a stored brief.md holding #window (no live session can make the charter revise an upload twice in block mode on purpose).",
+      "command": "cd packages/pi-envoy && bun test extensions/askgate/askgate.test.ts -t \"charter refusals|sent again unchanged\"",
+      "observed": "'an upload's charter refusals count only the asks the rules check judged, never a block its stored version holds, so a third upload with a new ask is reviewed' passes: three charter calls, three rules calls, no outcome=\"breaker\". 'an upload sent again unchanged after two charter refusals goes out on the breaker, its judged new ask the thing refused' passes, so the breaker still ends an unchanged loop.",
+      "headSha": "70bc570bd7e619d19218d5a5eab223a2e3fe6fa7",
+      "negativeControl": "With the charter path's count put back to `breakerThings(callAsks())`, the first test fails: the third upload's result is `<advisor-gate advisor=\"AskGate\" outcome=\"breaker\">` (the reviewer's reproduction)."
     },
     {
-      "criterion": "Findings 1, 2, 4 and 5, each with a test that fails before its fix.",
-      "surface": "The real AskGate handler and the real Envoy extension under pi-envoy's and pi-shared's suites (no live session can force a held upload block, Envoy's run-end check or a shutdown mid-record on purpose).",
-      "command": "cd packages/pi-envoy && bun test (1432 pass, 0 fail) && bunx tsc --noEmit && bun run lint; cd packages/pi-shared && bun test (73 pass) && bunx tsc --noEmit; bun test extensions/askgate/askgate.test.ts -t 'byte for byte' (A1 pin, unedited, green).",
-      "observed": "(1) 'an upload's rules refusals count only the asks the check judged, never a block its stored version holds, so a third upload with a new ask is reviewed'; (2) pi-shared 'drops the comment that ends the head line, as bash does, and the override AskGate keeps there', the differential bash test's 21-case comment corpus, envoy.test.ts 'a rebutted dispatch command, recorded with its override as a trailing comment, does not re-arm the check'; (4) 'each refusal says what becomes of the override on its surface: a command's flag stays a shell comment, a device's field is removed'; (5) 'at shutdown a slow decision record is cut short, so the gated call's entry is written before the handler returns'. All green.",
-      "headSha": "403f240f20d59c2538399b61e927920288e24697",
-      "negativeControl": "Each new test was run against its file reverted to the code before the fix and failed: (1) the second upload carried the second-refusal line and the third went out as outcome breaker; (2) dispatchCommandHead returned undefined for the rebutted command and Envoy delivered 3 times for 1; (4) the refusal said 'is removed before sending'; (5) the shutdown handler returned at 1,500 ms with 0 entries."
+      "criterion": "Finding 2: a decision record already in flight when shutdown begins is cut, and its entry is written before the shutdown handler returns.",
+      "surface": "The real AskGate handler under pi-envoy's suite, fake timers and an injected clock, a fake Dispatch record that answers only when aborted.",
+      "command": "cd packages/pi-envoy && bun test extensions/askgate/askgate.test.ts -t \"at shutdown a\" (run 3 times: 2 pass, 0 fail each)",
+      "observed": "'at shutdown a decision record already in flight is cut short, so the gated call's entry is written before the handler returns': at return the entries are [{decision allow, outcome verdict, ruleOutcome none, recordError 'the session shut down before Dispatch answered the record'}], returned before 1,500 ms, record signal aborted. askgate-core.ts unchanged by this commit.",
+      "headSha": "70bc570bd7e619d19218d5a5eab223a2e3fe6fa7",
+      "negativeControl": "With the shutdown `cut` callback made a no-op, the test fails with no entry at return (the reviewers' probe); the earlier post-shutdown test still passes in that state, which is why it did not cover this."
     }
   ],
   "filesChanged": [
-    "packages/pi-envoy/extensions/askgate/askgate-core.ts — breaker count from the judged asks; overrideComment read by headLine/scopedCommand; Override.fate; renderRevise; Rebuttal doc; acknowledgement wording; shutdown record deadline (recordDeadline, recordStops, SHUTDOWN_RECORD_MARGIN_MS, RECORD_SHUT_DOWN).",
-    "packages/pi-envoy/extensions/askgate/rules-check.ts — RulesCheck.judged; RuleOverride.fate in the refusal sentence.",
-    "packages/pi-shared/src/shell-command.ts and its test — withoutComment on the head line.",
-    "packages/pi-envoy/extensions/askgate/askgate.test.ts, packages/pi-envoy/extensions/envoy.test.ts — the tests above.",
-    "packages/pi-envoy/{README.md,AGENTS.md,CHANGELOG.md}, packages/pi-shared/AGENTS.md — the comment grammar, per-surface override text, shutdown record bound."
+    "packages/pi-envoy/extensions/askgate/askgate-core.ts — refusalThings: one count rule for both refusal paths (f1f55963).",
+    "packages/pi-envoy/extensions/askgate/askgate.test.ts — the charter-path three-upload test, the unchanged-upload termination test (f1f55963), the in-flight shutdown record test (70bc570b)."
   ],
   "trickyParts": [
-    "Finding 3 accepts only a trailing comment whose words are exactly override words, so no other comment widens the literal grammar; the gate hands back its normalised `# <sent>`, so its own output round-trips byte for byte.",
-    "Finding 5 keeps record-before-entry (plan invariant 5) and bounds the record once shutdown begins rather than reordering, so the entry still carries recordError."
+    "Where nothing tells an upload's new asks from its stored blocks (rules check judged none, read partial, or no rules run), a charter refusal counts the call as a whole: an upload carrying asks never trips on that, so it is reviewed again rather than passed; `--advisor-rebuttal` still ends such a loop."
   ],
-  "deviations": [
-    "The reviewer's structure items are recorded on the PR body's Fast-follow line and not done, as the architect directed."
-  ],
+  "deviations": [],
   "openQuestions": [
     "sjawhar/legion#2159 is still open at 0aa47421c; sign-off waits on its merge per plan rev 10."
   ]
