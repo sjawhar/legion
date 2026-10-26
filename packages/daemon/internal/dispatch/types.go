@@ -91,6 +91,19 @@ type IssueSummary struct {
 	ClaimUnread bool
 }
 
+// Issue is the summary as an Issue, for a reader that has only Dispatch's listing of the issue:
+// every field the listing carries, the claim from its holder (Claim.Holder's `<kind>:<id>`). A
+// summary carries no project, no labels beyond the hand-over and no primary document, so those are
+// empty.
+func (s IssueSummary) Issue() Issue {
+	var claim *Claim
+	if kind, id, ok := strings.Cut(s.ClaimedBy, ":"); ok {
+		claim = &Claim{Kind: kind, ID: id}
+	}
+	return Issue{Key: s.Key, Title: s.Title, Status: s.Status, Parent: s.Parent, Rank: s.Rank, HandedOver: s.HandedOver,
+		LastSeq: s.LastSeq, ResolvedRepo: s.ResolvedRepo, BlockedBy: s.BlockedBy, Claim: claim, ClaimUnread: s.ClaimUnread}
+}
+
 // Issue is the workflow data from Dispatch's issue-detail route. HandedOver is resolved here, at
 // the client boundary, as IssueSummary's is. Labels remain available to readers, while HandOver
 // adds LegionLabel through Dispatch's additive labels_add update rather than rewriting them.

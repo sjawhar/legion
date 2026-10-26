@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
@@ -47,37 +48,53 @@ func (s *server) setDispatchStatus(w http.ResponseWriter, r *http.Request, issue
 // gives the event no fence to find, so nothing applies here and the event applies the write, as
 // before.
 //
-// Once the write has landed, a failure here leaves the record to the event and answers the caller
-// so: its retry writes the same status again, which Dispatch answers with the issue at the same
-// sequence and no new event, and applies it then.
+// Once the write has landed, a failure here leaves the record to the event, and the caller is
+// answered so (recordOwnStatusWrite says which failure). A route that writes the same status again
+// on its retry gets the issue back from Dispatch at the same sequence, with no new event, and
+// applies it then.
 func (s *server) applyOwnStatusWrite(w http.ResponseWriter, r *http.Request, written dispatch.Issue) bool {
+	if failure := s.recordOwnStatusWrite(r.Context(), written); failure != nil {
+		writeFailure(w, failure.status, failure.code, failure.message)
+		return false
+	}
+	return true
+}
+
+// ownWriteFailure is why the record did not take the daemon's own status write in the request that
+// made it, as a route answers it.
+type ownWriteFailure struct {
+	status        int
+	code, message string
+}
+
+// recordOwnStatusWrite is applyOwnStatusWrite's work, answering nothing, for a route that does not
+// fail its call when the record does not take a write that landed: release_children, whose write's
+// event records the child when the consumer delivers it. It reports why the record did not take the
+// write, or nil when it did or when there was nothing to apply.
+func (s *server) recordOwnStatusWrite(ctx context.Context, written dispatch.Issue) *ownWriteFailure {
 	if written.LastSeq <= 0 {
-		return true
+		return nil
 	}
 	event := intake.OwnStatusWrite(written)
 	fact := intake.ObservedIssue(written)
 	fact.Delivered = &event
 	if s.prepare != nil {
-		prepared, err := s.prepare(r.Context(), fact)
+		prepared, err := s.prepare(ctx, fact)
 		var later *intake.RetryLater
 		switch {
 		case errors.As(err, &later):
-			writeFailure(w, http.StatusConflict, "STATUS_APPLY_BACKOFF", fmt.Sprintf("%s: Dispatch shows %s; %v; retry after %s", written.Key, written.Status, err, later.After))
-			return false
+			return &ownWriteFailure{http.StatusConflict, "STATUS_APPLY_BACKOFF", fmt.Sprintf("%s: Dispatch shows %s; %v; retry after %s", written.Key, written.Status, err, later.After)}
 		case err != nil:
-			writeFailure(w, http.StatusBadGateway, "REPOSITORY_READ_FAILED", fmt.Sprintf("Dispatch shows %s %s, but its repository could not be read: %v; retry", written.Key, written.Status, err))
-			return false
+			return &ownWriteFailure{http.StatusBadGateway, "REPOSITORY_READ_FAILED", fmt.Sprintf("Dispatch shows %s %s, but its repository could not be read: %v; retry", written.Key, written.Status, err)}
 		}
 		fact = prepared
 	}
-	result, err := intake.ApplyFact(r.Context(), s.pool, "api", requestFactID("status/own-write"), fact, s.handlers...)
+	result, err := intake.ApplyFact(ctx, s.pool, "api", requestFactID("status/own-write"), fact, s.handlers...)
 	if err != nil {
-		writeFailure(w, http.StatusInternalServerError, "FACT_APPLY_FAILED", fmt.Sprintf("Dispatch shows %s %s, but the record did not take it; retry", written.Key, written.Status))
-		return false
+		return &ownWriteFailure{http.StatusInternalServerError, "FACT_APPLY_FAILED", fmt.Sprintf("Dispatch shows %s %s, but the record did not take it (%v); retry", written.Key, written.Status, err)}
 	}
 	if result.Refusal != nil {
-		writeFailure(w, result.Refusal.Status, result.Refusal.Code, result.Refusal.Message)
-		return false
+		return &ownWriteFailure{result.Refusal.Status, result.Refusal.Code, result.Refusal.Message}
 	}
-	return true
+	return nil
 }

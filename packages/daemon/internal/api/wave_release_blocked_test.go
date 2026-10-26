@@ -2,10 +2,12 @@ package api
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -372,5 +374,96 @@ func TestStartedByReleaseIsAFirstPhaseTheReleaseBegan(t *testing.T) {
 		if got := startedByRelease(tc.before, tc.after); got != tc.want {
 			t.Errorf("%s: startedByRelease = %v, want %v", tc.name, got, tc.want)
 		}
+	}
+}
+
+// A child whose detail read Dispatch keeps failing is still released and recorded: the release
+// reads it from the project listing, which carries its status, its parent and its sequence. In a
+// deployment, children already todo under a live root — released earlier, or given their parent
+// link only after their release — were never recorded, and every release_children naming one
+// answered 502 DISPATCH_FAILED "Dispatch read of <child> failed", while Dispatch's own reader read
+// it. The listing is read once for the whole wave.
+func TestWaveReleaseRecordsAChildWhoseDispatchDetailReadFails(t *testing.T) {
+	h, statuses := releaseHarness(t, true)
+	alreadyTodo, unreleased := "LEGION-209", "LEGION-210"
+	statuses.issues[alreadyTodo] = todoChild(alreadyTodo)
+	triage := todoChild(unreleased)
+	triage.Status = "triage"
+	statuses.issues[unreleased] = triage
+	readFailure := errors.New("call Dispatch GET /api/v1/issues: context deadline exceeded")
+	statuses.readFails = map[string]error{alreadyTodo: readFailure, unreleased: readFailure}
+	architect := newLiveClaim(t, h, releaseRoot, claim.RoleArchitect)
+
+	response, _ := releaseWave(t, h, architect, alreadyTodo, unreleased)
+
+	want := WaveReleaseResponse{Released: []string{alreadyTodo, unreleased}, Started: []string{alreadyTodo, unreleased}, Held: []HeldChild{}}
+	if !reflect.DeepEqual(response, want) {
+		t.Fatalf("release answered %#v, want %#v", response, want)
+	}
+	for key, seq := range map[string]int64{alreadyTodo: 7, unreleased: 8} {
+		if recorded := recordedChild(t, h, key); recorded == nil || recorded.Tree != releaseRoot || recorded.Phase != phase.Planning || recorded.LastDispatchSeq != seq {
+			t.Fatalf("the record of %s = %#v, want it in %s's tree, planning, at sequence %d", key, recorded, releaseRoot, seq)
+		}
+	}
+	if wantWrites := []statusWrite{{unreleased, "todo"}}; !reflect.DeepEqual(statuses.writes, wantWrites) {
+		t.Fatalf("Dispatch writes = %#v, want only the triage child's release", statuses.writes)
+	}
+	if listings := slices.Index(statuses.reads, "listing"); listings < 0 || slices.Contains(statuses.reads[listings+1:], "listing") {
+		t.Fatalf("Dispatch reads = %q, want the listing read exactly once", statuses.reads)
+	}
+}
+
+// A child whose detail read fails and that the listing does not carry either (the listing failed
+// too) is not released: the answer names both failures, so the next one says what Dispatch
+// answered, and nothing is written or recorded.
+func TestWaveReleaseNamesAFailedReadTheListingDoesNotCover(t *testing.T) {
+	h, statuses := releaseHarness(t, true)
+	child := "LEGION-209"
+	statuses.issues[child] = todoChild(child)
+	statuses.readFails = map[string]error{child: errors.New("detail read timed out")}
+	statuses.listFails = errors.New("listing read timed out")
+	architect := newLiveClaim(t, h, releaseRoot, claim.RoleArchitect)
+
+	recorder := h.request(http.MethodPost, "/legion/v1/waves/release", map[string]any{"grantId": architect.grant(t), "issues": []string{child}}, nil)
+
+	body := recorder.Body.String()
+	assertFailure(t, recorder, http.StatusBadGateway, "DISPATCH_FAILED")
+	if !strings.Contains(body, "detail read timed out") || !strings.Contains(body, "listing read timed out") {
+		t.Fatalf("answer = %s, want it to name both Dispatch failures", body)
+	}
+	if len(statuses.writes) != 0 || recordedChild(t, h, child) != nil {
+		t.Fatalf("writes = %#v, record = %#v, want neither", statuses.writes, recordedChild(t, h, child))
+	}
+}
+
+// A release whose write landed stands even when the record does not take the write in the request
+// (here the repository read the workflow needs fails): Dispatch shows the child todo, the release
+// answers it released, and the write's todo event, when the consumer delivers it, records it.
+// Failing the call would send the architect to retry a release that already happened.
+func TestWaveReleaseStandsWhenTheRecordDoesNotTakeALandedWrite(t *testing.T) {
+	h, statuses := releaseHarness(t, true)
+	child := "LEGION-209"
+	statuses.issues[child] = backlogChild(child)
+	h.handler = NewServer("127.0.0.1", 8437, Options{
+		Supervisor: h.supervisor, BootTokens: h.tokens, Project: testProject, DispatchProject: testDispatchProject,
+		OperatorToken: testOperatorToken, Controller: h.store, Grants: credential.New(nil), Pool: h.store.Pool(), Record: record.NewStore(),
+		Handlers: releaseHandlers(), Dispatch: statuses,
+		PrepareRepository: func(context.Context, intake.DispatchIssue) (intake.DispatchIssue, error) {
+			return intake.DispatchIssue{}, errors.New("GitHub did not answer the default branch read")
+		},
+	}).Handler
+	architect := newLiveClaim(t, h, releaseRoot, claim.RoleArchitect)
+
+	response, _ := releaseWave(t, h, architect, child)
+
+	if want := (WaveReleaseResponse{Released: []string{child}, Started: []string{}, Held: []HeldChild{}}); !reflect.DeepEqual(response, want) {
+		t.Fatalf("release answered %#v, want %#v", response, want)
+	}
+	if recorded := recordedChild(t, h, child); recorded != nil {
+		t.Fatalf("the record of %s = %#v, want none before its todo event", child, recorded)
+	}
+	deliverEcho(t, h, statuses.issues[child])
+	if recorded := recordedChild(t, h, child); recorded == nil || recorded.Tree != releaseRoot || recorded.LastDispatchSeq != 8 {
+		t.Fatalf("the record of %s after its todo event = %#v, want it in %s's tree at sequence 8", child, recorded, releaseRoot)
 	}
 }
