@@ -1,0 +1,25 @@
+name: Install the pinned Claude Code
+description: >-
+  Installs the Claude Code release CLAUDE_CODE_VERSION below names (npm @anthropic-ai/claude-code,
+  exact), the one packages/daemon/internal/conversation/claude follows (its PinnedVersion, which
+  its real-binary tests check `claude --version` against), under $RUNNER_TEMP with the job's Bun.
+  It lands off PATH, and the native executable's path is exported as LEGION_TEST_CLAUDE for the
+  tests that run it; they refuse on GitHub Actions without one. Needs Bun
+  (.github/actions/setup-bun).
+runs:
+  using: composite
+  steps:
+    - name: Install the pinned Claude Code
+      shell: bash
+      env:
+        # Raising the pin is this line and PinnedVersion in
+        # packages/daemon/internal/conversation/claude/read.go, together.
+        CLAUDE_CODE_VERSION: 2.1.310
+      run: |
+        set -euo pipefail
+        dir="$RUNNER_TEMP/claude-code"
+        mkdir -p "$dir"
+        bun add --cwd "$dir" --exact "@anthropic-ai/claude-code@$CLAUDE_CODE_VERSION"
+        claude=$(readlink -f "$dir/node_modules/.bin/claude")
+        "$claude" --version
+        echo "LEGION_TEST_CLAUDE=$claude" >> "$GITHUB_ENV"
