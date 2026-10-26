@@ -440,10 +440,11 @@ func TestACloseOfARoomBehindTheHeadLeavesTheRoomThatReplacedIt(t *testing.T) {
 			if evictor.documentChanged(context.Background(), pair.artifactID) {
 				t.Fatal("the evictor reports a close of the room it checked, which was retired before the close reached it")
 			}
-			// A close that closed nothing is an attempt that got no answer: the room is armed
-			// again rather than its window spent (armRetry).
-			if wake := evictor.wakeIn(); wake <= 0 {
-				t.Fatalf("the close that closed nothing spent the room's window (wakeIn = %s)", wake)
+			// The room no longer holds the instance the close checked, and what replaced it loaded
+			// at the head after that check, so this window has done its work (reachedVerdict): a
+			// write that leaves the replacement behind notifies again.
+			if wake := evictor.wakeIn(); wake != 0 {
+				t.Fatalf("the close of a replaced room left a window armed (wakeIn = %s) for a room at the head", wake)
 			}
 		}},
 	} {
@@ -629,6 +630,78 @@ func TestAWriteThatOpensBeforeTheCloseTakesItsLockLeavesTheRoomOpen(t *testing.T
 		t.Fatal("the close of the room whose write has ended closed nothing")
 	}
 	waitForNoLiveDocument(t, pair.taskA, pair.artifactID)
+}
+
+// A room behind the head that is already another close's is a verdict for the stale-room
+// evictor, not an attempt to try again: one that failed is closed and reloaded by its own
+// eviction (evictFailed), and one a refused settlement has reserved is closed by that close or
+// has the settlement armed again on it (reloadRoomBehindHead). Either answers for the room, so the
+// window that brought the evictor here has done its work. Armed again instead, the room is
+// re-examined a window later for nothing, and a re-examination that meets the settlement's own
+// close of a room the evictor's confirmation found behind (the INFRA-396 race) leaves a window
+// armed beside that close.
+func TestARoomBehindTheHeadThatIsAnotherClosesIsAVerdictForTheEvictor(t *testing.T) {
+	for _, other := range []struct {
+		name string
+		take func(t *testing.T, pair processPair, live *crdt.Doc) (finish func())
+	}{
+		{"its failure's own eviction", func(t *testing.T, pair processPair, live *crdt.Doc) func() {
+			hold := make(chan struct{})
+			release := sync.OnceFunc(func() { close(hold) })
+			t.Cleanup(release)
+			pair.taskA.beforeFailedEviction = func(room string) {
+				if room == pair.artifactID {
+					<-hold
+				}
+			}
+			pair.taskA.failRoom(pair.artifactID, errors.New("test: the room failed"))
+			state := pair.taskA.lockExistingState(pair.artifactID)
+			done := state.failedDone
+			pair.taskA.unlockState(pair.artifactID, state)
+			return func() {
+				release()
+				select {
+				case <-done:
+				case <-time.After(roomWait(t)):
+					t.Fatal("the failed room's eviction never finished")
+				}
+			}
+		}},
+		{"a refused settlement's reservation", func(t *testing.T, pair processPair, live *crdt.Doc) func() {
+			state := pair.taskA.lockState(pair.artifactID)
+			reservation, reserved := pair.taskA.reserveRoomCloseLocked(pair.artifactID, state, live)
+			pair.taskA.unlockState(pair.artifactID, state)
+			if !reserved {
+				t.Fatal("the room could not be reserved, so nothing here is tested")
+			}
+			return func() {
+				if _, err := pair.taskA.closeReservedRoom(context.Background(), reservation); err != nil {
+					t.Fatalf("make the reserved close: %v", err)
+				}
+			}
+		}},
+	} {
+		t.Run(other.name, func(t *testing.T) {
+			pair := newProcessPair(t)
+			evictor := newStaleRoomEvictor(pair.taskA)
+			pair.leaveTaskABehind(t, 1, model.Actor{Kind: "user", ID: "bob"}, "Bob's paragraph.\n")
+			live := pair.taskA.srv.GetDoc(pair.artifactID)
+			finish := other.take(t, pair, live)
+
+			if evictor.documentChanged(context.Background(), pair.artifactID) {
+				t.Fatal("the evictor reports a close of a room another close holds")
+			}
+			if pair.taskA.srv.GetDoc(pair.artifactID) != live {
+				t.Fatal("the room was closed before the other close ran, so nothing here is tested")
+			}
+			if wake := evictor.wakeIn(); wake != 0 {
+				t.Fatalf("the evictor armed a window (wakeIn = %s) for a room another close answers for", wake)
+			}
+
+			finish()
+			waitForNoLiveDocument(t, pair.taskA, pair.artifactID)
+		})
+	}
 }
 
 // The close of a room behind the head holds the room it checked against ygo's idle sweep until it

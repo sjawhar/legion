@@ -94,8 +94,9 @@ the settlement the move scheduled. A repair is written only into the document th
 close of a room the service makes - a failed room's eviction, the close of a room behind the
 durable head (`closeRoomInstance`), `Evict` (tests) and `Quiesce`, an issue's close, `Shutdown`'s
 close of a room with an editor - goes through its server's close gate (`roomServer`: its
-`CloseRoom`, which shadows ygo's, so a call written against ygo's API is gated too, or its
-`closeInstance`). That close waits for a repair committing into the room and refuses new repairs
+`CloseRoom`, which shadows ygo's, so a call written against ygo's API is gated too, its
+`closeInstance` for the instance-only close, or its `closeOwned` for a failed room's eviction).
+That close waits for a repair committing into the room and refuses new repairs
 while it closes; a repair never waits for a close and gives the write up as for a replaced room
 (`holdOpen`). `roomServer` says why a close retiring the room's worker under a repair's commit
 hung (LEGION-498). A room's close gate lives only while a close or a repair holds or waits on it.

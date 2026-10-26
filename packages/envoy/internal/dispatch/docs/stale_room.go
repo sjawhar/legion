@@ -2,6 +2,7 @@ package docs
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -341,26 +342,27 @@ func (e *staleRoomEvictor) documentChanged(ctx context.Context, artifactID strin
 	// settlement's own reload, reloadRoomBehindHead, a failed room's eviction, or ygo's idle sweep
 	// and a load) is left as it is.
 	closed, err := service.closeRoomBehindHead(ctx, artifactID, live)
+	if errors.Is(err, errRoomHasOpenLiveWrite) {
+		// A live write opened on the room between the check above and the hold that reserves
+		// the close: the same attempt with no answer as that check's, so the room is armed again.
+		e.armRetry(artifactID)
+		return false
+	}
 	if err != nil {
 		slog.Warn("dispatch: close a document room another process's write left behind", "room", artifactID, "error", err)
 		e.armRetry(artifactID)
 		return false
 	}
 	if !closed {
-		if service.srv.GetDoc(artifactID) != live {
-			// The room no longer holds live: something closed it after this decision read it,
-			// such as the eviction of the failure a browser append refused on it makes. Whatever
-			// instance is there now loaded from the store after that read, and a write that leaves
-			// it behind notifies again. Closed by name, that instance would be taken from the
-			// browser that has just reconnected to it.
-			e.reachedVerdict(artifactID)
-			return false
-		}
-		// The room still holds live, so the close was held off: a live write opened on it
-		// between the check above and the hold that reserves the close, or the room failed and
-		// its own eviction is under way. An attempt that got no answer, so the room is armed
-		// again.
-		e.armRetry(artifactID)
+		// Another close or another instance answers for the room now, so this window has done
+		// its work. The room no longer holds live - something closed it after this decision read
+		// it, and whatever instance is there now loaded from the store after that read, so a write
+		// that leaves it behind notifies again; closed by name, that instance would be taken from
+		// the browser that has just reconnected to it - or the room holds live but is another
+		// close's: it failed, and its own eviction reloads it (evictFailed), or a refused
+		// settlement has reserved it, and that close either closes it or arms the settlement
+		// again on it (reloadRoomBehindHead, closeReservedRoom).
+		e.reachedVerdict(artifactID)
 		return false
 	}
 	e.recordEviction(artifactID)

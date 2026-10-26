@@ -380,8 +380,8 @@ func TestTheLastWriteOfABurstEvictsTheRoomWithoutAnotherNotification(t *testing.
 //
 // The no-answer path here is the unlocked head read: the pool refuses a caller already holding
 // one of its connections (store.ErrNestedAcquire), which documentChanged meets as it would any
-// failed read. A close that closed nothing is the other way to reach no verdict; its re-arm is
-// asserted by the evictor row of TestACloseOfARoomBehindTheHeadLeavesTheRoomThatReplacedIt.
+// failed read. A close an open live write held off is the other way to reach no verdict; its
+// re-arm is asserted by TestAWriteThatOpensBeforeTheCloseTakesItsLockLeavesTheRoomOpen.
 func TestAStaleRoomWhoseReExaminationGetsNoAnswerIsTriedAgainAtTheNextWindow(t *testing.T) {
 	pair := newProcessPair(t)
 	evictor := newStaleRoomEvictor(pair.taskA)
@@ -646,7 +646,9 @@ func TestARoomReExaminedWithAWriteInFlightKeepsItsWindow(t *testing.T) {
 // it on the same two seconds, so the two met again: the reader held text the store replaced for a
 // second window, or until the settlement's third refusal failed the room. The settlement takes the
 // document's lock before it reads anything, and on a room behind the head it is refused under it,
-// so the evictor's confirmation under that lock waits for the refusal and then closes the room.
+// so the evictor's confirmation under that lock waits for the refusal, and the room is then closed
+// by whichever close reserves it first: the evictor's, or the refused settlement's own
+// (reloadRoomBehindHead), which the evictor finds reserved and leaves to it as a verdict.
 func TestAStaleRoomWhoseWindowEndsAsItsSettlementRunsIsEvicted(t *testing.T) {
 	pair := newProcessPair(t)
 	evictor := newStaleRoomEvictor(pair.taskA)
@@ -724,7 +726,7 @@ func TestAStaleRoomWhoseWindowEndsAsItsSettlementRunsIsEvicted(t *testing.T) {
 		t.Fatal("the room behind the head is still resident once its settlement let go of the lock")
 	}
 	if wake := evictor.wakeIn(); wake != 0 {
-		t.Fatalf("the re-examination that closed the room left a window armed (wakeIn = %s), so it reached no verdict", wake)
+		t.Fatalf("the re-examination left a window armed (wakeIn = %s) for a room one of the two closes closed, so it reached no verdict", wake)
 	}
 	if err := stale.failure(); err != nil {
 		t.Fatalf("the room left by failing, not by its eviction: %v", err)
