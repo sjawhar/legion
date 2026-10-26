@@ -535,7 +535,7 @@ func (v *issueVolume) provisioned(t *testing.T, issue string) string {
 // A git or jj process interrupted mid-write leaves its lock beside the file it was writing, and
 // every later git or jj write to that file fails on it until someone deletes it (LEGION-731: a
 // worktree's index.lock failed every provisioning of an issue's pods with "Could not acquire lock
-// for index file"). provision runs before any role container of the issue's pod starts, on a
+// for index file"). provision runs before the issue pod's launcher container starts, on a
 // volume no other pod mounts, so nothing can hold a lock there: it removes the workspace's stale
 // index.lock, logging its path and age, and the update-stale that failed on it succeeds.
 func TestWorkspaceInitRemovesTheWorkspacesStaleIndexLock(t *testing.T) {
