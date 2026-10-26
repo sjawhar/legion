@@ -123,3 +123,40 @@ test("the checks pill keeps a check that failed for one event and passed for ano
     "failure"
   );
 });
+
+// GitHub evaluates a workflow job's check for a pull request only when a push, pull_request,
+// pull_request_review, pull_request_target, deployment or deployment_status event started its run
+// ("Checks from some workflow jobs are not evaluated"): an inline review comment's PR Title run
+// that failed, or a workflow_dispatch run still queued, is not in the pull request's checks.
+test("the checks pill ignores checks of events GitHub does not evaluate for a pull request", async ({
+  browser,
+}) => {
+  await expectChecksPill(
+    browser,
+    "3333333333333333333333333333333333333333",
+    "A review comment check failed",
+    [
+      {
+        check_suite_id: 701,
+        conclusion: "success",
+        id: 9201,
+        name: "pr-title",
+        status: "completed",
+      },
+      {
+        check_suite_id: 702,
+        conclusion: "failure",
+        id: 9202,
+        name: "pr-title",
+        status: "completed",
+      },
+      { check_suite_id: 703, conclusion: null, id: 9203, name: "build", status: "queued" },
+    ],
+    [
+      { check_suite_id: 701, event: "pull_request", id: 901, name: "PR Title" },
+      { check_suite_id: 702, event: "pull_request_review_comment", id: 902, name: "PR Title" },
+      { check_suite_id: 703, event: "workflow_dispatch", id: 903, name: "Build" },
+    ],
+    "success"
+  );
+});
