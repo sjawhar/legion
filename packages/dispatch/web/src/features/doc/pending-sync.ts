@@ -168,6 +168,12 @@ function refusal(scratch: Y.Doc, update: Uint8Array): "parks" | "strips-link" | 
   return stripsLink ? "strips-link" : undefined;
 }
 
+/** The clients whose items or deletes `update` carries. */
+function writersOf(update: Uint8Array): Set<number> {
+  const { structs, ds } = Y.decodeUpdate(update);
+  return new Set([...structs.map((struct) => struct.id.client), ...ds.clients.keys()]);
+}
+
 export function startPendingSync({
   doc,
   onChange,
@@ -417,17 +423,28 @@ export function startPendingSync({
         // only after a row it refused, which it took and the live document did not: its parked
         // structs would otherwise hide the next stale row from the same lost history. One document
         // encode, plus one per refused row.
+        // A row refused for stripping a link leaves a gap in its client's clock, so every later
+        // row of that client parks: those rows are the stripping edit's continuation, typed in the
+        // same tab, and are reported with it, not as a history the server rebuilt.
         let scratch = scratchOf(doc);
+        const strippingClients = new Set<number>();
         const handled: PendingKey[] = [];
         const rerecorded: Promise<void>[] = [];
         for (const row of restored) {
           handled.push(row.key);
           const refused = refusal(scratch, row.update);
           if (refused !== undefined) {
-            if (refused === "parks") {
-              rebuiltAt = Math.min(rebuiltAt ?? row.at, row.at);
-            } else {
+            const clients = writersOf(row.update);
+            if (
+              refused === "strips-link" ||
+              (clients.size > 0 && [...clients].every((client) => strippingClients.has(client)))
+            ) {
               strippedAt = Math.min(strippedAt ?? row.at, row.at);
+              for (const client of clients) {
+                strippingClients.add(client);
+              }
+            } else {
+              rebuiltAt = Math.min(rebuiltAt ?? row.at, row.at);
             }
             scratch = scratchOf(doc);
             continue;
