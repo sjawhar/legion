@@ -12,7 +12,6 @@ import type {
   IssueDetails,
   MessageRead,
 } from "../../api/types";
-import { routeBlock } from "./block-reference";
 import { useMarkdownHeadline } from "./markdown-engine";
 import {
   buildDispatchReference,
@@ -21,8 +20,8 @@ import {
   type IssueRoute,
   isProjectRoute,
   referencedArtifact,
-  referenceTargetKind,
 } from "./routes";
+import { referenceTargetKind } from "./target-id";
 
 /**
  * The queries behind a `dispatch://` reference's target, shared by every surface that resolves
@@ -133,7 +132,7 @@ export function prefetchReference(queryClient: QueryClient, route: DispatchRefer
     void queryClient.prefetchQuery(messageQuery(route.key, route.id));
     return;
   }
-  if (routeBlock(route) !== undefined) {
+  if ("block" in route && route.block !== undefined) {
     void queryClient.prefetchQuery(referencesQuery(buildDispatchReference(route)));
     if (route.kind === "document") {
       void queryClient.prefetchQuery(projectArtifactQuery(route.project, route.slug));
@@ -184,7 +183,7 @@ export function useReferenceData(route: DispatchReferenceRoute | undefined): Ref
       : route.key;
   const document = route?.kind === "document" ? route : undefined;
   const blockReference =
-    route !== undefined && routeBlock(route) !== undefined
+    route !== undefined && "block" in route && route.block !== undefined
       ? buildDispatchReference(route)
       : undefined;
   const agentArtifact = route?.kind === "agent-artifact" ? route : undefined;
@@ -333,8 +332,8 @@ export function useReferenceTarget(route: DispatchReferenceRoute | undefined): R
  *  opens that version under the spec's own slug, which only the issue names. */
 export function needsSpecSlug(
   route: DispatchReferenceRoute
-): route is Extract<IssueRoute, { kind: "spec" }> & { pin: string } {
-  return route.kind === "spec" && route.pin !== undefined;
+): route is Extract<IssueRoute, { kind: "spec" }> & { block: { id: string; pin: string } } {
+  return route.kind === "spec" && route.block?.pin !== undefined;
 }
 
 /** The SPA path a reference opens (`buildReferencePath`). A block of an issue's spec pinned to a

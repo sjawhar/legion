@@ -31,9 +31,9 @@ import {
   isProjectRoute,
   parseDispatchReference,
   parseNodeReference,
-  referenceTargetKind,
   shortForm,
 } from "./routes";
+import { referenceTargetKind } from "./target-id";
 
 const CARD_ID = "ref-preview";
 /** Every hover-card trigger: a Markdown anchor `collectReferenceAnchors` tagged, a Proof link

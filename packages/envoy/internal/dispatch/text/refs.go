@@ -86,10 +86,10 @@ type Located struct {
 
 // Extract parses Dispatch links from body. Links outside serverURL stay URL
 // references so a post never loses an ordinary external link. It reads what text cites, which the
-// graph indexes, so a reference whose target id is past MaxTargetBytes (targetFits) names nothing
-// there: a `dispatch://` one is dropped, a dashboard page whose block is past it names its
-// document (pageInBound), and one whose document or item is past it is the URL it is, as one that
-// names no page is.
+// graph indexes, so a reference past the bounds the index keys (inBound) names nothing there: a
+// `dispatch://` one is dropped, a dashboard page whose block is past them names its document
+// (pageInBound), and one whose document or item is past them is the URL it is, as one that names
+// no page is.
 func Extract(body, serverURL string) []Ref {
 	located := ExtractAt(body, serverURL)
 	refs := make([]Ref, len(located))
@@ -106,11 +106,11 @@ func ExtractAt(body, serverURL string) []Located {
 }
 
 // ParseRef reads value, the one reference a request names - an API route's `?to=` or `?from=`, or
-// a block-links document - by the grammar Extract reads text by, without the target bound: the
-// bound decides only which references text indexes, so a node whatever the length of its name is
-// read by its own reference. value names a reference when it starts with one and holds no other,
-// as Extract would find it in text; an external URL or a dashboard URL that names no page is
-// none.
+// a block-links document - by the grammar Extract reads text by, without the bounds: they decide
+// only which references text indexes, so a node whatever the length of its name, and a block
+// whatever the length of its id, is read by its own reference (a block no index keys is simply
+// no node). value names a reference when it starts with one and holds no other, as Extract would
+// find it in text; an external URL or a dashboard URL that names no page is none.
 func ParseRef(value, serverURL string) (Ref, bool) {
 	located := extractAt(value, serverURL, false)
 	if len(located) != 1 || located[0].Offset != 0 || located[0].Kind == "url" {
@@ -119,8 +119,8 @@ func ParseRef(value, serverURL string) (Ref, bool) {
 	return located[0].Ref, true
 }
 
-// extractAt is ExtractAt, holding what each reference names to the target bound when bounded
-// (Extract's reading of text) and not when not (ParseRef's of a request).
+// extractAt is ExtractAt, holding what each reference names to the bounds the index keys when
+// bounded (Extract's reading of text, inBound) and not when not (ParseRef's of a request).
 func extractAt(body, serverURL string, bounded bool) []Located {
 	refs := []Located{}
 	var base *url.URL
@@ -131,7 +131,7 @@ func extractAt(body, serverURL string, bounded bool) []Located {
 			continue
 		}
 		if strings.HasPrefix(raw, "dispatch://") {
-			if ref, ok := parseDispatch(strings.TrimPrefix(raw, "dispatch://")); ok && (!bounded || targetFits(ref)) {
+			if ref, ok := parseDispatch(strings.TrimPrefix(raw, "dispatch://")); ok && (!bounded || inBound(ref)) {
 				refs = append(refs, Located{Ref: ref, Offset: span[0]})
 			}
 			continue
@@ -154,11 +154,11 @@ func extractAt(body, serverURL string, bounded bool) []Located {
 	return refs
 }
 
-// pageInBound is what a dashboard page cites in text: what the page names while its target id
-// fits (targetFits), else the document of a block that does not, while the document's fits - the
+// pageInBound is what a dashboard page cites in text: what the page names while it is in bound
+// (inBound), else the document of a block that is not, while the document's target id fits - the
 // page still opens that document - else nothing.
 func pageInBound(ref Ref) (Ref, bool) {
-	if targetFits(ref) {
+	if inBound(ref) {
 		return ref, true
 	}
 	if ref.Kind != "block" {
@@ -289,23 +289,24 @@ func parseArtifactSlug(value string) (string, bool) {
 // it in B-tree keys - document_blocks', document_block_texts' and block_refs' primary keys, and a
 // reference's refs.to_id - and a Postgres B-tree key holds at most 2704 bytes, so an unbounded id
 // fails every write that indexes it. (A block's node id `<ref_key>#<block id>` holds the
-// document's unbounded ref_key too, so it is hash indexed, never a B-tree key.) A reference naming
-// a longer id names nothing (blockID), and the index makes no node of a block carrying one
+// document's unbounded ref_key too, so it is hash indexed, never a B-tree key.) Text citing a
+// longer id cites nothing (inBound), and the index makes no node of a block carrying one
 // (refs.IndexBlocks). It decides only which blocks the graph keys: a block whose id is longer is
-// written, stored, read and rendered as any other. Its twin is MAX_BLOCK_ID_BYTES in
-// @legion/contracts.
+// written, stored, read and rendered as any other, and a request naming it (ParseRef) finds no
+// node. Its twin is MAX_BLOCK_ID_BYTES in @legion/contracts.
 const MaxBlockIDBytes = 256
 
 // MaxTargetBytes bounds a reference's target id in text, in bytes: TargetID, which refs.to_id and
 // block_refs.to_id store in B-tree keys (refs_pkey, refs_to, block_refs_pkey, block_refs_to) of
-// at most 2704 bytes. The grammar bounds no part of that id but a block id (MaxBlockIDBytes) and a
-// project key, so text citing a target whose id is past this cites nothing (targetFits): Extract
-// finds no reference there, and a live document page whose fragment names a block past it names
-// the document. The bound decides only what text indexes: data stored under a longer name - a
-// document whose ref_key is longer - is read and written all the same, and a request naming it
-// reads it (ParseRef). At the bound the widest of those keys, block_refs_pkey with a citing block
-// id of MaxBlockIDBytes, is about 2360 bytes, and refs_pkey with a uuid source and a `component`
-// target about 2120. Its twin is MAX_REFERENCE_TARGET_BYTES in @legion/contracts.
+// at most 2704 bytes. The grammar bounds no part of that id but a project key, and text no part
+// but a block id (MaxBlockIDBytes), so text citing a target whose id is past this cites nothing
+// (inBound): Extract finds no reference there, and a live document page whose fragment names a
+// block past it names the document. The bound decides only what text indexes: data stored under
+// a longer name - a document whose ref_key is longer - is read and written all the same, and a
+// request naming it reads it (ParseRef). At the bound the widest of those keys, block_refs_pkey
+// with a citing block id of MaxBlockIDBytes, is about 2360 bytes, and refs_pkey with a uuid
+// source and a `component` target about 2120. Its twin is MAX_REFERENCE_TARGET_BYTES in
+// @legion/contracts.
 const MaxTargetBytes = 2048
 
 // TargetID is the durable id the reference graph stores an edge to ref under, refs.to_id and
@@ -341,6 +342,12 @@ func targetFits(ref Ref) bool {
 	return len(TargetID(ref)) <= MaxTargetBytes
 }
 
+// inBound reports whether text citing ref cites it, the bounds the graph's index keys: its target
+// id fits (targetFits) and a block's id holds at most MaxBlockIDBytes.
+func inBound(ref Ref) bool {
+	return len(ref.Block) <= MaxBlockIDBytes && targetFits(ref)
+}
+
 // EncodeBlockID writes a block id as a reference's `#b-` fragment carries it: every UTF-8 byte
 // percent-encoded in upper-case hex except ASCII letters, digits and `-`, so no character a
 // reference ends at or the grammar trims, and no `@` a pin could be read from, is written bare.
@@ -368,9 +375,9 @@ func EncodeBlockID(id string) string {
 // id is read with any valid percent-encoding (EncodeBlockID writes one), so `%40` is an `@` in the
 // id and a raw `@` is only ever the pin. Any other fragment, a raw `@` that does not start a
 // well-formed pin, a versioned document, an agent conversation's document, an item, or an id that
-// is empty, does not decode or is longer than MaxBlockIDBytes names nothing. (Extract holds the
-// block's whole target id to MaxTargetBytes in text, as every reference's.) A document version
-// shows only as an `@` in the document part: no key or slug holds one.
+// is empty or does not decode names nothing. (Extract holds the block's id to MaxBlockIDBytes and
+// its whole target id to MaxTargetBytes in text, inBound.) A document version shows only as an
+// `@` in the document part: no key or slug holds one.
 func parseBlock(document, fragment string) (Ref, bool) {
 	encoded, ok := strings.CutPrefix(fragment, "b-")
 	if !ok || strings.Contains(document, "@") {
@@ -401,13 +408,13 @@ func parseBlock(document, fragment string) (Ref, bool) {
 }
 
 // blockID decodes the id part of a `#b-` fragment: not empty, holding no raw `@`, and decoding
-// as decodeItemID decodes an item id to a non-empty id of at most MaxBlockIDBytes.
+// as decodeItemID decodes an item id to a non-empty id, of any length.
 func blockID(encoded string) (string, bool) {
 	if encoded == "" || strings.Contains(encoded, "@") {
 		return "", false
 	}
 	id, ok := decodeItemID(encoded)
-	return id, ok && id != "" && len(id) <= MaxBlockIDBytes
+	return id, ok && id != ""
 }
 
 // itemSegment is an item id as a reference writes it, decoded, as the dashboard reads one: written
@@ -507,8 +514,8 @@ func parseServer(raw string, base *url.URL) (Ref, bool) {
 // documentItem reads it, else the block its `#b-<block id>` fragment names (blockID; a raw `@` is
 // no pin here, since pins are written only as `dispatch://` references), else the document. A
 // version page (`versionParam` set) is the document whatever its fragment: a version's stored
-// markdown carries no block ids to land on. Extract holds what this names to MaxTargetBytes in
-// text (pageInBound): a block past it is the document, a document or item past it nothing.
+// markdown carries no block ids to land on. Extract holds what this names to the bounds in text
+// (pageInBound): a block past them is the document, a document or item past them nothing.
 func documentPage(document Ref, query url.Values, versionParam string, page *url.URL) (Ref, bool) {
 	ref, ok := documentItem(document, query)
 	if !ok || ref.Kind != "artifact" || query.Get(versionParam) != "" {

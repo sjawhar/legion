@@ -10,6 +10,7 @@ import {
   documentRoute,
   issueTabForRoute,
   itemRoute,
+  nodeRouteFromHref,
   parseAgentArtifactPath,
   parseDispatchReference,
   parseInboxSearch,
@@ -18,11 +19,11 @@ import {
   parseProjectPath,
   pictureReference,
   referenceRouteFromHref,
-  referenceTargetKind,
   routeHasMargin,
   routeProjectOf,
   shortForm,
 } from "./routes";
+import { referenceTargetKind } from "./target-id";
 
 function browserPath(path: string): string {
   const url = new URL(path, "https://dispatch.test/");
@@ -48,11 +49,47 @@ test("a long-named document's own reference is its node, though text past the bo
   expect(parseDispatchReference(document)).toBeUndefined();
   expect(parseNodeReference(document)).toEqual({ key: "CORE-1", kind: "artifact", slug });
   expect(parseNodeReference(`${document}#b-p1`)).toEqual({
-    block: "p1",
+    block: { id: "p1" },
     key: "CORE-1",
     kind: "artifact",
     slug,
   });
+  // A search hit or a copied-from link the server returned is read the same way, its page too.
+  const origin = "https://dispatch.test";
+  const page = `/issues/CORE-1/artifacts/${slug}`;
+  expect(referenceRouteFromHref(page, origin)).toBeUndefined();
+  expect(nodeRouteFromHref(page, origin)).toEqual({ key: "CORE-1", kind: "artifact", slug });
+  expect(nodeRouteFromHref(`${page}#b-p1`, origin)).toEqual({
+    block: { id: "p1" },
+    key: "CORE-1",
+    kind: "artifact",
+    slug,
+  });
+  expect(nodeRouteFromHref(document, origin)).toEqual({ key: "CORE-1", kind: "artifact", slug });
+});
+
+// A block id past the 256 bytes the graph keys a block by, counted in UTF-8 bytes (`é` is two),
+// is cited by no text: the reference names nothing and its page is the document. The server's
+// own reference to such a block, and its page, still name the block.
+test("a block id past the bound is no citation in text, but the server's reference reads it", () => {
+  const origin = "https://dispatch.test";
+  const atBound = "é".repeat(128);
+  for (const [id, cited] of [
+    [atBound, true],
+    [`${atBound}a`, false],
+    [`${"a".repeat(3200)}é`, false],
+  ] as const) {
+    const block = { block: { id }, key: "CORE-1", kind: "spec" as const };
+    const reference = buildDispatchReference(block);
+    const page = buildReferencePath(block);
+    expect(parseDispatchReference(reference)).toEqual(cited ? block : undefined);
+    expect(referenceRouteFromHref(page, origin)).toEqual(
+      cited ? block : { key: "CORE-1", kind: "spec" }
+    );
+    expect(parseNodeReference(reference)).toEqual(block);
+    expect(parseNodeReference(`${reference}@v2`)).toEqual({ ...block, block: { id, pin: "2" } });
+    expect(nodeRouteFromHref(page, origin)).toEqual(block);
+  }
 });
 
 test("dispatch references reject plural artifact paths", () => {
@@ -108,7 +145,7 @@ test("every block link writes its id as encodeBlockId does, so `_` is %5F", () =
   expect(documentItemPath(notes, { blockID: "ship_it", id: "a1", kind: "ask" })).toBe(
     "/issues/CORE-1/artifacts/notes-md#b-ship%5Fit"
   );
-  const block = { block: "ship_it", key: "CORE-1", kind: "spec" as const };
+  const block = { block: { id: "ship_it" }, key: "CORE-1", kind: "spec" as const };
   expect(buildDispatchReference(block)).toBe("dispatch://CORE-1/spec#b-ship%5Fit");
   expect(buildReferencePath(block)).toBe("/issues/CORE-1/spec#b-ship%5Fit");
   // Read back with any percent-encoding, the reference and the page name the same block.
@@ -121,10 +158,9 @@ test("every block link writes its id as encodeBlockId does, so `_` is %5F", () =
 test("a pinned block reference round-trips with its pin, and opens the version it pins", () => {
   const pinned = parseDispatchReference("dispatch://CORE-1/artifact/notes-md#b-ship%5Fit@v2");
   expect(pinned).toEqual({
-    block: "ship_it",
+    block: { id: "ship_it", pin: "2" },
     key: "CORE-1",
     kind: "artifact",
-    pin: "2",
     slug: "notes-md",
   });
   if (pinned === undefined) throw new Error("the pinned reference did not parse");
@@ -212,6 +248,17 @@ test("a block names nothing on a versioned document, an item, an issue or a malf
     key: "CORE-1",
     kind: "comment",
   });
+  // A version of the spec is the spec's artifact at that version, as the server and `dispatch
+  // read` read the page, and names no block; a malformed version is the spec, with no block.
+  for (const read of [referenceRouteFromHref, nodeRouteFromHref]) {
+    expect(read("/issues/CORE-1/spec?v=2#b-p1", origin)).toEqual({
+      key: "CORE-1",
+      kind: "artifact",
+      slug: "spec",
+      version: 2,
+    });
+    expect(read("/issues/CORE-1/spec?v=x#b-p1", origin)).toEqual({ key: "CORE-1", kind: "spec" });
+  }
 });
 
 test("artifact route parser accepts the plural and singular browser paths", () => {

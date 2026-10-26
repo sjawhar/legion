@@ -1,6 +1,7 @@
 import { type ReactNode, useLayoutEffect, useState } from "react";
 
 import { borderDefault } from "../../theme/classes";
+import { referenceSpans } from "./reference-spans";
 import { useReferencePath, useReferenceTarget } from "./reference-target";
 import {
   buildDispatchReference,
@@ -8,7 +9,6 @@ import {
   type DispatchReferenceRoute,
   parseDispatchReference,
   referenceRouteFromHref,
-  referenceSpans,
   shortForm,
 } from "./routes";
 

@@ -1,5 +1,7 @@
 import { hasControlCharacter } from "./dispatch-href";
 
+const encoder = new TextEncoder();
+
 /**
  * The `#b-` fragment of a block reference: every UTF-8 byte of the block id percent-encoded in
  * upper-case hex except ASCII letters, digits and `-`, so no character a reference ends at or the
@@ -7,36 +9,44 @@ import { hasControlCharacter } from "./dispatch-href";
  * fragment) could be read from, is ever written bare. Readers accept any percent-encoding; every
  * writer writes this one. Go's twin is `text.EncodeBlockID`; both are tested against
  * DISPATCH_BLOCK_ID_ENCODINGS, whose JSON copy is
- * `packages/envoy/internal/dispatch/text/testdata/dispatch-block-id-encodings.json`.
+ * `packages/envoy/internal/dispatch/text/testdata/dispatch-block-id-encodings.json`. Each code
+ * point is encoded on its own: Bun 1.3's `encode` writes a non-ASCII Latin-1 character of a string
+ * past 1024 characters as a NUL, and an id has no length bound.
  */
 export function encodeBlockId(id: string): string {
   let encoded = "";
-  for (const byte of new TextEncoder().encode(id)) {
-    const bare =
-      (byte >= 0x30 && byte <= 0x39) ||
-      (byte >= 0x41 && byte <= 0x5a) ||
-      (byte >= 0x61 && byte <= 0x7a) ||
-      byte === 0x2d;
-    encoded += bare
-      ? String.fromCharCode(byte)
-      : `%${byte.toString(16).toUpperCase().padStart(2, "0")}`;
+  for (const character of id) {
+    for (const byte of encoder.encode(character)) {
+      const bare =
+        (byte >= 0x30 && byte <= 0x39) ||
+        (byte >= 0x41 && byte <= 0x5a) ||
+        (byte >= 0x61 && byte <= 0x7a) ||
+        byte === 0x2d;
+      encoded += bare
+        ? String.fromCharCode(byte)
+        : `%${byte.toString(16).toUpperCase().padStart(2, "0")}`;
+    }
   }
   return encoded;
 }
 
 /**
- * The most UTF-8 bytes a block id, decoded, may hold. The reference graph keys a block by its id
- * in Postgres B-tree keys, which hold at most 2704 bytes, so a reference naming a longer id names
- * nothing, the server makes no graph node of a block carrying one, and a write through the API
- * naming one is refused. Go's twin is `text.MaxBlockIDBytes`.
+ * The most UTF-8 bytes (`utf8Bytes`) a block id, decoded, may hold for text to cite its block. The
+ * reference graph keys a block by its id in Postgres B-tree keys, which hold at most 2704 bytes,
+ * so the server makes no graph node of a block carrying a longer one, and text naming one cites
+ * nothing: a reader of text (the dashboard's composer and links, as the server's `text.Extract`)
+ * holds a block id to it. It decides only what the graph keys: such a block is written and read as
+ * any other, and a request naming it, which `decodeBlockId` and `parseBlockFragment` read whatever
+ * its length, finds no node. Go's twin is `text.MaxBlockIDBytes`.
  */
 export const MAX_BLOCK_ID_BYTES = 256;
 
 /**
- * The block id a `#b-` fragment (`encoded`, after the `b-`) names, or undefined when it names
- * none: empty, holding a raw `@` (a pin is no part of the id; `encodeBlockId` writes `@` as `%40`),
- * not decoding, or decoding to an empty id, one holding a control character, or one longer than
- * MAX_BLOCK_ID_BYTES. Any valid percent-encoding is read, as the server's `text` package reads it.
+ * The block id a `#b-` fragment (`encoded`, after the `b-`) names, of any length, or undefined when
+ * it names none: empty, holding a raw `@` (a pin is no part of the id; `encodeBlockId` writes `@`
+ * as `%40`), not decoding, or decoding to an empty id or one holding a control character. Any
+ * valid percent-encoding is read, as the server's `text` package reads it. A reader of text holds
+ * the id to MAX_BLOCK_ID_BYTES as well.
  */
 export function decodeBlockId(encoded: string): string | undefined {
   if (encoded === "" || encoded.includes("@")) {
@@ -48,11 +58,7 @@ export function decodeBlockId(encoded: string): string | undefined {
   } catch {
     return undefined;
   }
-  return id === "" ||
-    hasControlCharacter(id) ||
-    new TextEncoder().encode(id).length > MAX_BLOCK_ID_BYTES
-    ? undefined
-    : id;
+  return id === "" || hasControlCharacter(id) ? undefined : id;
 }
 
 /**

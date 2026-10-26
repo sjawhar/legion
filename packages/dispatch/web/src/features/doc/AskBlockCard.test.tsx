@@ -311,6 +311,29 @@ test("a project document's copied block links to its source under the project", 
   }
 });
 
+// The source document's reference is the server's, so a document whose name is past the bound
+// text is held to (2683 characters, which a new upload's reference key still holds) is linked
+// all the same, at the block, for an issue's document and a project's.
+test.each([
+  ["CORE-1", "CORE-1 ", "/issues/CORE-1/artifacts/"],
+  ["CORE", "CORE/", "/projects/CORE/documents/"],
+] as const)("a block copied from a long-named %s document links to it", (owner, name, path) => {
+  const slug = "a".repeat(2683);
+  const card = renderCard({
+    indexed: false,
+    node: askNode({
+      copied_from: "ask-source",
+      copied_from_document: `dispatch://${owner}/artifact/${slug}`,
+    }),
+  });
+  try {
+    const link = card.header.getByRole("link", { name: `${name}${slug}` });
+    expect(link.getAttribute("href")).toBe(`${path}${slug}#b-b-1`);
+  } finally {
+    card.unmount();
+  }
+});
+
 test("three copied blocks render their sources without reading one ask", () => {
   const cards = ["open", "answered", "resolved"].map((state) =>
     renderCard({

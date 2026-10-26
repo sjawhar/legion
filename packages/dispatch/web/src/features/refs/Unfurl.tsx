@@ -11,13 +11,9 @@ import {
 } from "../../theme/classes";
 
 import { MarkdownPreview } from "./MarkdownPreview";
+import { referenceSpans } from "./reference-spans";
 import { useReferencePath, useReferenceTarget } from "./reference-target";
-import {
-  type ComposerReference,
-  composerReferences,
-  parseDispatchReference,
-  referenceSpans,
-} from "./routes";
+import { type ComposerReference, composerReferences, parseDispatchReference } from "./routes";
 
 interface UnfurlProps {
   body: string;

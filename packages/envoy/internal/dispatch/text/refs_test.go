@@ -258,6 +258,50 @@ func TestABlockReferenceIsBoundedByItsWholeTargetID(t *testing.T) {
 	}
 }
 
+// A block id one byte past MaxBlockIDBytes, decoded, is cited by no text: the `dispatch://` text
+// is no reference, and a dashboard page whose fragment names it is its document. A request naming
+// the block (ParseRef) reads it whatever the length of its id, by the reference and by the page,
+// pinned or not; the index keys no such block, so the read finds no node rather than failing. An
+// id at the bound is cited.
+func TestABlockIDPastTheBoundIsReadByARequestAndCitedByNoText(t *testing.T) {
+	const server = "https://dispatch.test"
+	document := Ref{Kind: "artifact", IssueKey: "CORE-1", ID: "spec"}
+	// `é` is two bytes, written %C3%A9: the count is of the decoded id's bytes.
+	atBound := strings.Repeat("é", MaxBlockIDBytes/2)
+	for _, test := range []struct {
+		name, id string
+		cited    bool
+	}{
+		{"at the bound", atBound, true},
+		{"one byte past it", atBound + "a", false},
+		{"3200 bytes", strings.Repeat("a", 3200), false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			block := document
+			block.Kind, block.Block = "block", test.id
+			pinned := block
+			pinned.Pin = 2
+			reference := "dispatch://CORE-1/spec#b-" + EncodeBlockID(test.id)
+			page := server + "/issues/CORE-1/spec#b-" + EncodeBlockID(test.id)
+			wantReference, wantPage := []Ref{}, []Ref{document}
+			if test.cited {
+				wantReference, wantPage = []Ref{block}, []Ref{block}
+			}
+			if got := Extract(reference, server); !reflect.DeepEqual(got, wantReference) {
+				t.Errorf("the dispatch:// text cites %.200v; want %.200v", got, wantReference)
+			}
+			if got := Extract(page, server); !reflect.DeepEqual(got, wantPage) {
+				t.Errorf("the dashboard page cites %.200v; want %.200v", got, wantPage)
+			}
+			for request, want := range map[string]Ref{reference: block, reference + "@v2": pinned, page: block} {
+				if got, ok := ParseRef(request, server); !ok || got != want {
+					t.Errorf("ParseRef(%.60s…) = %.200v, %t; want %.200v", request, got, ok, want)
+				}
+			}
+		})
+	}
+}
+
 // Every reference names its target in text only while the target id TargetID writes for it holds
 // at most MaxTargetBytes: an issue's key, a document's `<owner>/<slug>` or
 // `agent/<session id>/<slug>`, an item's id (counted decoded) and a component's `<project>/<id>`.

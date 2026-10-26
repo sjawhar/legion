@@ -10,7 +10,7 @@ import {
   textMutedOnSurface,
   textSecondaryOnSurface,
 } from "../../theme/classes";
-import { blockFragment, routeBlock } from "./block-reference";
+import { blockFragment } from "./block-reference";
 import { referenceTriggerProps } from "./RefPreview";
 import { referencesQuery } from "./reference-target";
 import type { DispatchReferenceRoute } from "./routes";
@@ -68,7 +68,9 @@ function referencePath(reference: string | undefined, block?: string): SourcePat
   }
   return {
     href: `${buildReferencePath(route)}${
-      routeBlock(route) !== undefined || block === undefined ? "" : blockFragment(block)
+      ("block" in route && route.block !== undefined) || block === undefined
+        ? ""
+        : blockFragment(block)
     }`,
     route,
   };

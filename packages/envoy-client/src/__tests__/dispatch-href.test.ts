@@ -37,15 +37,10 @@ test("an issue document URL carrying both item parameters is refused", () => {
 });
 
 // A block's link on a live document page names the block, its id written as `encodeBlockId`
-// writes it; a version page, an item in the query, or a fragment that names no block leaves it.
+// writes it; an item in the query, or a fragment that names no block, leaves it. (A version page
+// is the shared table's.)
 test.each([
   ["/issues/CORE-1/spec#b-ship_it", "dispatch://CORE-1/spec#b-ship%5Fit"],
-  ["/issues/CORE-1/artifacts/notes-md?v=2#b-ship-it", "dispatch://CORE-1/artifact/notes-md@v2"],
-  ["/issues/CORE-1/spec?v=2#b-ship-it", "dispatch://CORE-1/artifact/spec@v2"],
-  [
-    "/projects/CORE/documents/handbook-md?version=3#b-ship-it",
-    "dispatch://CORE/artifact/handbook-md@v3",
-  ],
   [
     "/issues/CORE-1/spec?comment=44444444-4444-4444-8444-444444444444#b-ship-it",
     "dispatch://CORE-1/comment/44444444-4444-4444-8444-444444444444",

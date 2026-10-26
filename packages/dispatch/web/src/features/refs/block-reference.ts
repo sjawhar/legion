@@ -2,23 +2,22 @@ import { encodeBlockId, parseBlockFragment } from "@legion/contracts";
 
 import type { DispatchReferenceRoute } from "./routes";
 
-/** A block of a document, as a reference to it names one (`<document>#b-<id>[@v<N>]`): `block` is
- *  the block's id as the document writes it, and `pin` the version of the document a pinned
- *  reference names, N's decimal digits as written (`parseBlockFragment`), so a pin past what a
- *  number holds exactly is written back unrounded. A route with a block names no version or item
- *  of its own; a pin comes only with a block. */
+/** A block of a document, as a reference to it names one (`<document>#b-<id>[@v<N>]`): `block.id`
+ *  is the block's id as the document writes it, and `block.pin` the version of the document a
+ *  pinned reference names, N's decimal digits as written (`parseBlockFragment`), so a pin past
+ *  what a number holds exactly is written back unrounded. A route with a block names no version or
+ *  item of its own. */
 export interface BlockTarget {
-  block?: string;
-  pin?: string;
+  block?: { id: string; pin?: string };
 }
 
-/** `route` naming its document's block `block`, pinned to version `pin` when one is given: only a
+/** `route` naming its document's block `id`, pinned to version `pin` when one is given: only a
  *  spec, an issue artifact or a project document, at no version and naming no item, holds blocks
- *  a reference can name; undefined for any other route. Whether the block's target id fits is the
- *  caller's to ask (`referenceTargetFits` of `routeTarget`), as it is for every route. */
+ *  a reference can name; undefined for any other route. Whether text cites the block is the
+ *  caller's to ask (`routeInBound`, `target-id.ts`), as it is for every route. */
 export function withBlock(
   route: DispatchReferenceRoute | undefined,
-  block: string,
+  id: string,
   pin?: string
 ): DispatchReferenceRoute | undefined {
   if (
@@ -29,7 +28,7 @@ export function withBlock(
   ) {
     return undefined;
   }
-  return pin === undefined ? { ...route, block } : { ...route, block, pin };
+  return { ...route, block: pin === undefined ? { id } : { id, pin } };
 }
 
 /** The block, and the pin, a `<document reference>#b-<block id>[@v<N>]` reference names, as the
@@ -50,21 +49,4 @@ export function parseBlockReference(
  *  writes it, the one encoding the server's `text.EncodeBlockID` shares. */
 export function blockFragment(blockId: string): string {
   return `#b-${encodeBlockId(blockId)}`;
-}
-
-/** The block of its document a reference names (`#b-`) and the version of the document it pins,
- *  or undefined for a reference to anything else. */
-export function blockTarget(
-  route: DispatchReferenceRoute
-): { block: string; pin?: string } | undefined {
-  if (!("block" in route) || route.block === undefined) {
-    return undefined;
-  }
-  return route.pin === undefined ? { block: route.block } : { block: route.block, pin: route.pin };
-}
-
-/** The block of its document a reference names (`#b-`), or undefined for a reference to anything
- *  else. */
-export function routeBlock(route: DispatchReferenceRoute): string | undefined {
-  return blockTarget(route)?.block;
 }

@@ -55,7 +55,9 @@ export function itemFromSearch(search: string): DispatchHrefItem | undefined | n
  * shape cannot reach one of them and not the others.
  *
  * A `#b-<block>` href names that block of its document: its reference is the document's with
- * `#b-` and the id written by `encodeBlockId`. Any other fragment leaves the document.
+ * `#b-` and the id written by `encodeBlockId`. Any other fragment leaves the document, and so
+ * does a version page whatever its fragment, a version's stored text holding no block ids: the
+ * version of an issue's spec (`/spec?v=N`) is the spec's artifact at that version.
  */
 export const DISPATCH_HREF_REFERENCES: readonly { href: string; ref: string }[] = [
   { href: "/issues/CORE-1", ref: "dispatch://CORE-1" },
@@ -115,4 +117,13 @@ export const DISPATCH_HREF_REFERENCES: readonly { href: string; ref: string }[] 
     ref: "dispatch://CORE-1/spec#b-d%C3%A9cision%3A1",
   },
   { href: "/issues/CORE-1/spec#top", ref: "dispatch://CORE-1/spec" },
+  { href: "/issues/CORE-1/spec?v=2#b-ship-it", ref: "dispatch://CORE-1/artifact/spec@v2" },
+  {
+    href: "/issues/CORE-1/artifacts/notes-md?v=2#b-ship-it",
+    ref: "dispatch://CORE-1/artifact/notes-md@v2",
+  },
+  {
+    href: "/projects/CORE/documents/handbook-md?version=3#b-ship-it",
+    ref: "dispatch://CORE/artifact/handbook-md@v3",
+  },
 ];

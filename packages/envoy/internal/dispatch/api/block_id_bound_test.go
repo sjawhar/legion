@@ -129,7 +129,9 @@ func TestAWriteNamingABlockIDPastTheBoundIsWritten(t *testing.T) {
 // A document already holding a block id past the bound - a browser's edit wrote it, as any write
 // can - takes the writes that leave that id where it is: an inserted block and an
 // uploaded version that keeps it are written, each storing its version, and the id stays in the
-// document. The block is no graph node, so a reference naming it is malformed.
+// document. The block is no graph node, so a read naming it, pinned or not, is 404 NOT_FOUND
+// `no block … in <document>`, as for any block the index does not hold, never a refusal of the
+// reference for its length.
 func TestADocumentHoldingABlockIDPastTheBoundTakesUnrelatedWrites(t *testing.T) {
 	documentService, handler, database := browserDocumentService(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Held long block id", "Context paragraph.\n")
@@ -163,8 +165,14 @@ func TestADocumentHoldingABlockIDPastTheBoundTakesUnrelatedWrites(t *testing.T) 
 		!strings.Contains(markdown, "An agent's line.") || !strings.Contains(markdown, "An uploaded line.") {
 		t.Fatalf("document = %.400q, want the long id kept beside both writes", markdown)
 	}
-	if read := graphRequest(t, handler, url.Values{"to": {"dispatch://" + issue.Key + "/spec#b-" + long}}); read.Code != http.StatusBadRequest || responseCode(t, read) != "INVALID_REFERENCE" {
-		t.Fatalf("read the long-id block: status=%d body=%.400s, want 400 INVALID_REFERENCE", read.Code, read.Body.String())
+	for _, reference := range []string{
+		"dispatch://" + issue.Key + "/spec#b-" + long,
+		"dispatch://" + issue.Key + "/spec#b-" + long + "@v1",
+	} {
+		read := graphRequest(t, handler, url.Values{"to": {reference}})
+		if read.Code != http.StatusNotFound || responseCode(t, read) != "NOT_FOUND" || !strings.Contains(read.Body.String(), "no block ") {
+			t.Fatalf("read the long-id block as %.80s…: status=%d body=%.400s, want 404 NOT_FOUND no block", reference, read.Code, read.Body.String())
+		}
 	}
 }
 

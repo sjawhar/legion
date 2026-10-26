@@ -18,7 +18,7 @@ import { URGENCY_LABELS } from "../inbox/ask-urgency";
 import { actorLabel } from "../refs/actor";
 import { blockFragment } from "../refs/block-reference";
 import { CopyRefButton } from "../refs/CopyRefButton";
-import { buildReferencePath, itemRoute, parseDispatchReference, shortForm } from "../refs/routes";
+import { buildReferencePath, itemRoute, parseNodeReference, shortForm } from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
 import { type AskBlockFacts, type AskBlockHost, askBlockFacts } from "./ask-block";
 
@@ -159,7 +159,8 @@ const COPY_STATE_LABELS: Record<string, string> = {
 
 /** Where a copied block is answered: the document settlement names in the block's
  * `copied_from_document`, linked at the block, and the source's state there, which settlement
- * wrote into the block. Both come from the block, so the card reads no ask to show them. */
+ * wrote into the block. Both come from the block, so the card reads no ask to show them; the
+ * document's reference is the server's, read whatever the length of its name. */
 function CopiedFromLink({
   blockId,
   copied,
@@ -169,7 +170,7 @@ function CopiedFromLink({
   copied: NonNullable<AskBlockFacts["copiedFrom"]>;
   state: string;
 }): ReactNode {
-  const route = parseDispatchReference(copied.document);
+  const route = parseNodeReference(copied.document);
   const there = COPY_STATE_LABELS[state] ?? "closed there";
   return (
     <span className="inline-flex items-center gap-x-2" data-dispatch-ask-copied-from={copied.ask}>

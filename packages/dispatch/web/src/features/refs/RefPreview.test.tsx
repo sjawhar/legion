@@ -652,7 +652,7 @@ test.each([
 ] as const)("a pinned block's card names its document, the version it pins, how it stands since (%s), and that version's text", async (_state, read, standing) => {
   const getIssue = spyOn(api, "getIssue").mockResolvedValue(issueWithSpec());
   const getReferences = spyOn(api, "getReferences").mockResolvedValue(read);
-  const route = { block: "p1", key: "CORE-1", kind: "spec" as const, pin: "2" };
+  const route = { block: { id: "p1", pin: "2" }, key: "CORE-1", kind: "spec" as const };
   const view = render(
     <Harness>
       <Link to="/issues/CORE-1/spec" {...referenceTriggerProps(route)}>
@@ -693,10 +693,13 @@ test("an unpinned block's card shows its current text, and a block that cannot b
   );
   const view = render(
     <Harness>
-      <Link to="/" {...referenceTriggerProps({ block: "p1", key: "CORE-1", kind: "spec" })}>
+      <Link to="/" {...referenceTriggerProps({ block: { id: "p1" }, key: "CORE-1", kind: "spec" })}>
         the block
       </Link>
-      <Link to="/" {...referenceTriggerProps({ block: "gone", key: "CORE-1", kind: "spec" })}>
+      <Link
+        to="/"
+        {...referenceTriggerProps({ block: { id: "gone" }, key: "CORE-1", kind: "spec" })}
+      >
         the deleted block
       </Link>
     </Harness>

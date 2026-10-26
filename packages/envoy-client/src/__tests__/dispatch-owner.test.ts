@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 
-import { parseDispatchRef } from "../dispatch-owner";
+import { dispatchRefFromUrl } from "../dispatch-execute";
+import { type ParsedDispatchRef, parseDispatchRef } from "../dispatch-owner";
 
 test("a block of an issue's spec names the block, decoded, and the document it is in", () => {
   expect(parseDispatchRef("dispatch://CORE-1/spec#b-d%C3%A9cision%3A1")).toEqual({
@@ -104,6 +105,27 @@ test.each([
     document,
     ...project,
   });
+});
+
+// A block id past the 256 bytes the server's graph keys a block by is read too: the bound decides
+// only what text cites, and the server answers a read of such a block with the 404 any block it
+// holds no node for gets. Its page's link is the same reference.
+test("a block id of any length parses, pinned or not, from its reference and its page", () => {
+  const id = `${"a".repeat(3200)}é`;
+  const reference = `dispatch://CORE-1/spec#b-${"a".repeat(3200)}%C3%A9`;
+  const block: ParsedDispatchRef = {
+    owner: { kind: "issue", issue: "CORE-1" },
+    kind: "block",
+    id: "spec",
+    block: id,
+    document: "dispatch://CORE-1/spec",
+  };
+  expect(parseDispatchRef(reference)).toEqual(block);
+  expect(parseDispatchRef(`${reference}@v2`)).toEqual({ ...block, pin: "2" });
+  const server = "http://dispatch.test";
+  expect(
+    dispatchRefFromUrl(`${server}/issues/CORE-1/spec#b-${"a".repeat(3200)}%c3%a9`, server)
+  ).toBe(reference);
 });
 
 // So does an issue whose number is long, and an item whose id is.

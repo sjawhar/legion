@@ -70,5 +70,17 @@
   {
     "href": "/issues/CORE-1/spec#top",
     "ref": "dispatch://CORE-1/spec"
+  },
+  {
+    "href": "/issues/CORE-1/spec?v=2#b-ship-it",
+    "ref": "dispatch://CORE-1/artifact/spec@v2"
+  },
+  {
+    "href": "/issues/CORE-1/artifacts/notes-md?v=2#b-ship-it",
+    "ref": "dispatch://CORE-1/artifact/notes-md@v2"
+  },
+  {
+    "href": "/projects/CORE/documents/handbook-md?version=3#b-ship-it",
+    "ref": "dispatch://CORE/artifact/handbook-md@v3"
   }
 ]
