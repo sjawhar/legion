@@ -52,6 +52,8 @@ const LINK_CLASS = `rounded outline-none focus-visible:ring-2 ${focusVisibleRing
 
 const MARK_CLASS = "mr-1 inline-block h-2 w-2 shrink-0 rounded-full align-middle";
 
+const AGENT_SPAN_CLASS = "min-w-0 [overflow-wrap:anywhere]";
+
 /** Filled, hollow and dashed: the states read apart without colour. */
 const STATE_MARK_CLASS: Record<AgentState, string> = {
   "not-running": `${MARK_CLASS} border-2 border-solid ${offlineDotBorder}`,
@@ -173,8 +175,14 @@ function SessionAgentName({
     );
   }
 
+  // The name never widens its host: a flex item may shrink below its text (`min-w-0`), and a
+  // long title with no space breaks mid-word; a host's `truncate` (nowrap) still ellipsizes.
   return (
-    <span className={className} data-agent-name={sessionId} data-agent-state={state}>
+    <span
+      className={className === undefined ? AGENT_SPAN_CLASS : `${AGENT_SPAN_CLASS} ${className}`}
+      data-agent-name={sessionId}
+      data-agent-state={state}
+    >
       <AgentStateMark lastSeen={registry.lastSeen(sessionId)} state={state} />
       {named}
       {suffix}

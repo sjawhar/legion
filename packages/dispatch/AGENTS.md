@@ -420,8 +420,11 @@ registry lists it, else by the contracts rule (`packages/contracts/src/actor-lab
 stamped on the write, else `session:<8>…`), followed by its attribution (` (for <owner>)`,
 ` (as ns/name)`) as text, all in one `<span data-agent-name=<id> data-agent-state=…>`. A `user`
 or `system` actor renders its id as plain text and reads no registry. A role address (`role:…`)
-is an address, not an agent, and stays text. The host keeps its own truncation and wrapping
-(`TruncatedText`, `break-words`) around the name, and `className` lands on the outer span.
+is an address, not an agent, and stays text. `className` lands on the outer span, which is always
+`min-w-0 [overflow-wrap:anywhere]`, so a name can never widen its host: in a flex row it shrinks
+below its text, and a long title with no space breaks mid-word rather than pushing a 390 px page
+wider (`e2e/agent-name.e2e.ts`). A host that wants one line keeps its own truncation around or on
+the name (`TruncatedText`, `min-w-0 truncate`), and its `nowrap` still ellipsizes.
 
 It has three variants, one `kind` prop:
 
