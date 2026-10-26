@@ -682,7 +682,8 @@ it behind:
   key=$(mktemp)   # 0600 already
   trap 'rm -f "$key"' EXIT
   agent-secrets LEGION_ANTHROPIC_API_KEY -- sh -c 'umask 077; printf %s "$LEGION_ANTHROPIC_API_KEY" >"$1"' sh "$key" &&
-    LEGION_E2E_MODEL_ROUTE=key-file LEGION_E2E_ANTHROPIC_KEY_FILE=$key bash scripts/e2e/claude-backend-tmux.sh
+    LEGION_E2E_MODEL_ROUTE=key-file LEGION_E2E_CLAUDE_KEY_FILE=$key LEGION_E2E_ANTHROPIC_KEY_FILE=$key \
+      bash scripts/e2e/claude-backend-tmux.sh
 )
 ```
 
