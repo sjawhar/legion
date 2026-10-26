@@ -14086,6 +14086,74 @@ describe("messages missed while the subscription was down", () => {
     });
   });
 
+  // While a turn streams, omp holds a card sent with `deliverAs: "steer"` in memory and writes
+  // its `custom_message` entry to the session file only once the turn takes it. A process that
+  // ends in between (a SIGKILL, a pod stopped mid-turn) leaves a session file without the card,
+  // so the card never reached the session: the restarted session must show it.
+  describe("a card the host had not written to the transcript when the process ended", () => {
+    /** The `custom_message` entry omp writes once a turn takes a card: what a shown card leaves. */
+    function writtenCard(
+      session: {
+        readonly cards: (
+          eventID: string
+        ) => readonly { content: string; customType?: string; display?: boolean }[];
+      },
+      eventID: string
+    ) {
+      const [card] = session.cards(eventID);
+      if (card === undefined) throw new Error(`no card for ${eventID}`);
+      return {
+        type: "custom_message",
+        customType: card.customType,
+        content: card.content,
+        display: card.display,
+      };
+    }
+
+    test("a replayed card still queued is shown again after the restart; one written is not", async () => {
+      const model = new StreamModel();
+      const first = await bootReplay("replay-queued-replayed-a", model);
+      model.store(first.agentSubject, peerMessage("ses_replay", "queued-written"));
+      model.store(first.agentSubject, peerMessage("ses_replay", "queued-held"));
+      await first.reconnect();
+      expect(first.cards("evt-queued-written")).toHaveLength(1);
+      expect(first.cards("evt-queued-held")).toHaveLength(1);
+      await first.stop();
+
+      // The turn took the first card before the process ended; the second was still queued.
+      const second = await bootReplay("replay-queued-replayed-b", model, {
+        entries: [...first.entries(), writtenCard(first, "evt-queued-written")],
+      });
+      await second.tick();
+
+      expect(second.cards("evt-queued-written")).toHaveLength(0);
+      expect(second.cards("evt-queued-held")).toHaveLength(1);
+    });
+
+    test("a live card still queued is shown again after the restart; one written is not", async () => {
+      const model = new StreamModel();
+      const first = await bootReplay("replay-queued-live-a", model);
+      for (const label of ["live-written", "live-held"]) {
+        const frame = peerMessage("ses_replay", label);
+        model.store(first.agentSubject, frame);
+        first.live(first.agentSubject).push(frame);
+      }
+      await until(() => first.cards("evt-live-held").length > 0, "the live cards");
+      await first.tick();
+      expect(first.cards("evt-live-written")).toHaveLength(1);
+      expect(first.cards("evt-live-held")).toHaveLength(1);
+      await first.stop();
+
+      const second = await bootReplay("replay-queued-live-b", model, {
+        entries: [...first.entries(), writtenCard(first, "evt-live-written")],
+      });
+      await second.tick();
+
+      expect(second.cards("evt-live-written")).toHaveLength(0);
+      expect(second.cards("evt-live-held")).toHaveLength(1);
+    });
+  });
+
   describe("on a followed issue topic", () => {
     test("a frame stored while the topic's iterator was down is shown once it resubscribes", async () => {
       const model = new StreamModel();
