@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"maps"
@@ -781,7 +782,7 @@ func TestProbeImageRefusesAProvidersSecretThePodCannotMount(t *testing.T) {
 			err := g.probe(p)
 
 			if testCase.refused {
-				wantContains(t, err, "cannot mount the providers Secret "+ProvidersSecretName(testProject), "(anthropic)", testCase.message)
+				wantContains(t, err, "cannot mount the providers Secret "+ProvidersSecretName(testProject), "(SESSION_DSN, anthropic)", testCase.message)
 				if n := g.creates.Load(); n != 1 {
 					t.Errorf("ran the probe %d times for a Secret the pod cannot mount, want once", n)
 				}
@@ -1489,15 +1490,19 @@ func TestProbeImagesCapacityStopNeedsTheBudgetToOutliveTheBootTimeout(t *testing
 }
 
 // The probe runs as a worker runs: it resolves the daemon's role prompts' references, always, and
-// with provider keys configured it exports the providers Secret's keys as the worker's shim does.
+// reads the providers Secret's keys as the worker's shim does, with or without a provider key —
+// under the postgres store goldenOptions configures, the probe's pod mounts that Secret for the
+// session database's URL key at least (mountsProviders). A pod that mounts none is told no
+// directory (TestTheProvidersDirectoryIsToldWhereThePodMountsIt). It also runs a role generation's
+// namespaces over its own volume at RoleProbeDir, as an issue pod's launcher runs every role.
 func TestTheProbeRunsAsAWorkerRuns(t *testing.T) {
 	for _, testCase := range []struct {
 		name string
 		keys map[string]string
 		want []string
 	}{
-		{"no provider keys", nil, []string{"--role-references", testRoleReferencesJSON}},
-		{"provider keys", map[string]string{"ANTHROPIC_API_KEY": "anthropic"}, []string{"--provider-env-dir", ProvidersDir, "--role-references", testRoleReferencesJSON}},
+		{"no provider keys", nil, []string{"--provider-env-dir", ProvidersDir, "--role-references", testRoleReferencesJSON, "--role-namespaces", RoleProbeDir}},
+		{"provider keys", map[string]string{"ANTHROPIC_API_KEY": "anthropic"}, []string{"--provider-env-dir", ProvidersDir, "--role-references", testRoleReferencesJSON, "--role-namespaces", RoleProbeDir}},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			opts := goldenOptions()
@@ -1510,6 +1515,15 @@ func TestTheProbeRunsAsAWorkerRuns(t *testing.T) {
 			base := []string{opts.Tools.Legion, "probe-image", "--daemon-api-version", "3", "--plugin-root", legionPlugin, "--envoy-plugin-root", envoyPlugin, "--pod-safety"}
 			if want := append(base, testCase.want...); !slices.Equal(command, want) {
 				t.Errorf("the probe's command = %q, want %q", command, want)
+			}
+			pod := r.probeManifest(probeSandboxName, ImageProbe{Contract: 3, RoleReferences: testRoleReferences}, time.Now()).Spec.PodTemplate.Spec
+			if mount := mountHolding(pod.Containers[0], RoleProbeDir); mount == nil || mount.MountPath != RoleProbeDir || mount.Name != roleProbeVolume {
+				t.Errorf("the probe's %s is on mount %+v, want the %s volume's own", RoleProbeDir, mount, roleProbeVolume)
+			}
+			if !slices.ContainsFunc(pod.Volumes, func(v corev1.Volume) bool {
+				return v.Name == roleProbeVolume && v.EmptyDir != nil && v.EmptyDir.Medium == corev1.StorageMediumDefault
+			}) {
+				t.Errorf("the probe pod's volumes %+v hold no disk emptyDir %s", pod.Volumes, roleProbeVolume)
 			}
 		})
 	}
@@ -1662,6 +1676,49 @@ func TestLastBytesKeepsTheEndOfTheTail(t *testing.T) {
 			t.Fatalf("lastBytes of an exactly-keep stream was not returned unchanged (len %d, want %d)", len(got), keep)
 		}
 	})
+}
+
+// tailBytes holds a log's newest keep bytes and no more, however long the log: a log of a hundred
+// times keep is read to its end, its last keep bytes come back with the cut reported, and the
+// buffer never grew past the 2×keep it started with, so a log's size never decides what the daemon
+// holds (readLog's memory, which io.ReadAll let a 2000-line tail grow to its whole size).
+func TestTailBytesHoldsOnlyTheNewestBytes(t *testing.T) {
+	const keep = 4 << 10
+	var log strings.Builder
+	for i := 0; log.Len() < 100*keep; i++ {
+		fmt.Fprintf(&log, "line %d %s\n", i, strings.Repeat("x", i%300))
+	}
+	full := log.String()
+	counted := &countingReader{r: strings.NewReader(full)}
+	got, cut, err := tailBytes(counted, keep)
+	if err != nil {
+		t.Fatalf("tailBytes = %v", err)
+	}
+	if counted.n != len(full) {
+		t.Fatalf("tailBytes read %d bytes of %d, want the whole log", counted.n, len(full))
+	}
+	if !cut || string(got) != full[len(full)-keep:] {
+		t.Fatalf("tailBytes = %d bytes, cut %v; want the log's last %d bytes and the cut reported", len(got), cut, keep)
+	}
+	if cap(got) > 2*keep {
+		t.Fatalf("tailBytes' buffer grew to %d bytes reading a %d-byte log, want at most %d", cap(got), len(full), 2*keep)
+	}
+	short := "a short log\n"
+	if got, cut, err := tailBytes(strings.NewReader(short), keep); err != nil || cut || string(got) != short {
+		t.Fatalf("tailBytes of a short log = %q, cut %v, %v; want it whole and no cut", got, cut, err)
+	}
+}
+
+// countingReader counts the bytes read through it.
+type countingReader struct {
+	r io.Reader
+	n int
+}
+
+func (c *countingReader) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	c.n += n
+	return n, err
 }
 
 // A probe pod's log a hundred lines of a kilobyte, the OK line last, still passes: probeLog keeps

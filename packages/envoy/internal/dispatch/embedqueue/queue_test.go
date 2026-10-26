@@ -1,7 +1,6 @@
 package embedqueue
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -19,9 +18,18 @@ import (
 
 func TestMain(m *testing.M) { os.Exit(storetest.Main(m)) }
 
+// bedrockShaped gives a test embedder the Identity and Limits embed.Embedder asks for: Bedrock's
+// own, so the batch size and token ceiling the tests below count against are Bedrock's. Every
+// fake in this file embeds it.
+type bedrockShaped struct{}
+
+func (bedrockShaped) Identity() string     { return embed.BedrockModel }
+func (bedrockShaped) Limits() embed.Limits { return new(embed.BedrockClient).Limits() }
+
 // fakeEmbedder is a controllable stand-in for Cohere: Embed answers vectors or err, and records
 // every call so a test can assert how many batches ran.
 type fakeEmbedder struct {
+	bedrockShaped
 	vector func(text string) []float32
 	err    error
 	calls  [][]string
@@ -64,6 +72,7 @@ func fakeVectors(n int) [][]float32 {
 // throttleThenSucceedEmbedder throttles its first throttleFor calls, then delegates to inner -
 // standing in for a provider that recovers partway through an unattended run.
 type throttleThenSucceedEmbedder struct {
+	bedrockShaped
 	inner       embed.Embedder
 	throttleFor int
 	calls       int
@@ -165,8 +174,8 @@ func TestProcessBatchEmbedsAPendingRowTheWriteTimeTriggerEnqueued(t *testing.T) 
 	`).Scan(&model, &embeddedAt); err != nil {
 		t.Fatalf("read embedded row: %v", err)
 	}
-	if model != embed.Model || embeddedAt == nil {
-		t.Errorf("model=%q embeddedAt=%v, want model=%q and a timestamp", model, embeddedAt, embed.Model)
+	if model != embedder.Identity() || embeddedAt == nil {
+		t.Errorf("model=%q embeddedAt=%v, want model=%q (the embedder's Identity) and a timestamp", model, embeddedAt, embedder.Identity())
 	}
 }
 
@@ -208,10 +217,10 @@ func TestProcessBatchRetriesWithBackoffOnEmbedFailure(t *testing.T) {
 }
 
 // TestProcessBatchNeverDeadLettersAThrottledBatchHoweverManyTimesItRecurs is the round-3
-// blocking finding: a whole-batch Bedrock failure is infrastructure, never evidence about a
-// row's content, so it must never count toward the dead-letter threshold - a sustained throttle
-// episode outlasting retry.DeadLetterAttempts cycles must still be retrying afterward, not
-// permanently abandoned.
+// blocking finding: a whole-batch throttle from the model service is infrastructure, never
+// evidence about a row's content, so it must never count toward the dead-letter threshold - a
+// sustained throttle episode outlasting retry.DeadLetterAttempts cycles must still be retrying
+// afterward, not permanently abandoned.
 func TestProcessBatchNeverDeadLettersAThrottledBatchHoweverManyTimesItRecurs(t *testing.T) {
 	database := storetest.Open(t)
 	seedIssue(t, database, "THRO", "THRO-1", "A title")
@@ -239,7 +248,7 @@ func TestProcessBatchNeverDeadLettersAThrottledBatchHoweverManyTimesItRecurs(t *
 		t.Errorf("dead = true after %d throttled attempts (more than retry.DeadLetterAttempts=%d), want false: throttling is never permanent", attempts, retry.DeadLetterAttempts)
 	}
 
-	// Bedrock recovers: the very next attempt, once eligible, succeeds normally.
+	// The model service recovers: the very next attempt, once eligible, succeeds normally.
 	embedder.err = nil
 	forceEligible(t, database, "issue", "THRO-1")
 	succeeded, failed, blocked, throttled, err := ProcessBatch(ctx, deps)
@@ -255,9 +264,10 @@ func TestProcessBatchRefusesToMarkStaleContentEmbedded(t *testing.T) {
 	database := storetest.Open(t)
 	seedIssue(t, database, "STAL", "STAL-1", "Original title")
 	ctx := context.Background()
-	rows, err := scanPending(ctx, Deps{Store: database})
-	if err != nil || len(rows) != 1 {
-		t.Fatalf("scanPending = %v, %v, want one row", rows, err)
+	deps := Deps{Store: database, Embedder: &fakeEmbedder{}}
+	rows, settled, err := scanPending(ctx, deps)
+	if err != nil || len(rows) != 1 || settled != 0 {
+		t.Fatalf("scanPending = %v, %d settled, %v, want one row", rows, settled, err)
 	}
 	stale := rows[0]
 	// A concurrent write changes the title (and so the trigger re-enqueues with a new hash)
@@ -265,7 +275,7 @@ func TestProcessBatchRefusesToMarkStaleContentEmbedded(t *testing.T) {
 	if _, err := database.Pool.Exec(ctx, `update issues set title = $1 where key = 'STAL-1'`, "Changed title"); err != nil {
 		t.Fatalf("update title: %v", err)
 	}
-	succeeded, permanent, err := commitEmbeddings(ctx, Deps{Store: database}, []pendingRow{stale}, [][]float32{oneVector()})
+	succeeded, permanent, err := commitEmbeddings(ctx, deps, []pendingRow{stale}, [][]float32{oneVector()})
 	if err != nil {
 		t.Fatalf("commitEmbeddings: %v", err)
 	}
@@ -284,172 +294,17 @@ func TestProcessBatchRefusesToMarkStaleContentEmbedded(t *testing.T) {
 	}
 }
 
-// TestBackfillEnqueuesAndEmbedsContentNoTriggerEverSaw proves the backfill path: content
-// written before the migration existed (simulated here by disabling the trigger, inserting, then
-// re-enabling it - the same "no trigger ever saw this row" state a pre-LEGION-549 database is in)
-// is still found, enqueued and embedded by Backfill.
-func TestBackfillEnqueuesAndEmbedsContentNoTriggerEverSaw(t *testing.T) {
-	database := storetest.Open(t)
-	ctx := context.Background()
-	if _, err := database.Pool.Exec(ctx, `alter table issues disable trigger issues_embeddings_enqueue`); err != nil {
-		t.Fatalf("disable trigger: %v", err)
-	}
-	seedIssue(t, database, "PRED", "PRED-1", "Pre-existing content")
-	if _, err := database.Pool.Exec(ctx, `alter table issues enable trigger issues_embeddings_enqueue`); err != nil {
-		t.Fatalf("enable trigger: %v", err)
-	}
-	if got := pendingCount(t, database); got != 0 {
-		t.Fatalf("pending before backfill = %d, want 0 (no trigger ever saw this row)", got)
-	}
-
-	var out bytes.Buffer
-	embedder := &fakeEmbedder{}
-	report, err := Backfill(ctx, Deps{Store: database, Embedder: embedder}, &out)
-	if err != nil {
-		t.Fatalf("Backfill: %v", err)
-	}
-	if report.Enqueued["issue"] != 1 {
-		t.Errorf("Enqueued[issue] = %d, want 1", report.Enqueued["issue"])
-	}
-	if report.Embedded != 1 {
-		t.Errorf("Embedded = %d, want 1", report.Embedded)
-	}
-	if report.Dead != 0 || report.Pending != 0 {
-		t.Errorf("Dead=%d Pending=%d, want 0, 0", report.Dead, report.Pending)
-	}
-	if got := pendingCount(t, database); got != 0 {
-		t.Errorf("pending after Backfill = %d, want 0", got)
-	}
-	if out.Len() == 0 {
-		t.Error("Backfill wrote no progress to out")
-	}
-}
-
-// TestBackfillResumesFromItsCheckpointRatherThanRescanning is the resumability acceptance
-// criterion: a second Backfill call, after the first enqueued everything, advances no further
-// and rescans nothing (the checkpoint is already at "done"), and a kind grown after the first run
-// finished is picked up without resetting the others' checkpoints.
-func TestBackfillResumesFromItsCheckpointRatherThanRescanning(t *testing.T) {
-	database := storetest.Open(t)
-	seedIssue(t, database, "RES1", "RES1-1", "First issue")
-	embedder := &fakeEmbedder{}
-	var out bytes.Buffer
-	if _, err := Backfill(context.Background(), Deps{Store: database, Embedder: embedder}, &out); err != nil {
-		t.Fatalf("first Backfill: %v", err)
-	}
-	firstCallCount := len(embedder.calls)
-
-	// A second issue arrives after the first run finished (its own trigger enqueues it; this is
-	// not what Backfill's resumability is about, so remove its pending row to isolate the "did
-	// Backfill rescan issue RES1" question).
-	if _, err := database.Pool.Exec(context.Background(), `delete from embeddings where kind = 'issue' and id != 'RES1-1'`); err != nil {
-		t.Fatalf("clear unrelated pending rows: %v", err)
-	}
-
-	report, err := Backfill(context.Background(), Deps{Store: database, Embedder: embedder}, &out)
-	if err != nil {
-		t.Fatalf("second Backfill: %v", err)
-	}
-	if report.Enqueued["issue"] != 0 {
-		t.Errorf("second run's Enqueued[issue] = %d, want 0 (resumed past the done checkpoint)", report.Enqueued["issue"])
-	}
-	if len(embedder.calls) != firstCallCount {
-		t.Errorf("second Backfill made %d embed calls beyond the first run's %d, want 0 more (nothing left pending)", len(embedder.calls)-firstCallCount, 0)
-	}
-	var done bool
-	if err := database.Pool.QueryRow(context.Background(), `select done from embeddings_backfill_progress where kind = 'issue'`).Scan(&done); err != nil {
-		t.Fatalf("read checkpoint: %v", err)
-	}
-	if !done {
-		t.Error("embeddings_backfill_progress.done = false after a full pass, want true")
-	}
-}
-
-// TestBackfillDoesNotOverwriteAConcurrentWritesFresherEmbedding proves
-// Backfill used to ON CONFLICT DO UPDATE with its own page's snapshot, which could
-// clobber a trigger's fresher enqueue of the same row with stale text. ON CONFLICT DO NOTHING
-// means an existing row - whichever wrote it, and whenever - is never touched by Backfill at all.
-func TestBackfillDoesNotOverwriteAConcurrentWritesFresherEmbedding(t *testing.T) {
-	database := storetest.Open(t)
-	ctx := context.Background()
-	seedIssue(t, database, "RACE", "RACE-1", "Original title")
-	// A write lands after the issue exists - exactly the kind of row a real Backfill run (content
-	// this Dispatch was already carrying) would otherwise see as stale, since the issue already
-	// has an embeddings row from its own insert trigger.
-	if _, err := database.Pool.Exec(ctx, `update issues set title = $1 where key = 'RACE-1'`, "Changed title"); err != nil {
-		t.Fatalf("update title: %v", err)
-	}
-	var wantHash string
-	if err := database.Pool.QueryRow(ctx, `select content_hash from embeddings where kind = 'issue' and id = 'RACE-1'`).Scan(&wantHash); err != nil {
-		t.Fatalf("read content_hash before backfill: %v", err)
-	}
-
-	var out bytes.Buffer
-	embedder := &fakeEmbedder{}
-	if _, err := Backfill(ctx, Deps{Store: database, Embedder: embedder}, &out); err != nil {
-		t.Fatalf("Backfill: %v", err)
-	}
-
-	var snapshot, gotHash string
-	if err := database.Pool.QueryRow(ctx, `
-		select text_snapshot, content_hash from embeddings where kind = 'issue' and id = 'RACE-1'
-	`).Scan(&snapshot, &gotHash); err != nil {
-		t.Fatalf("read row after backfill: %v", err)
-	}
-	if snapshot != "Changed title" {
-		t.Errorf("text_snapshot after Backfill = %q, want the write's own %q (Backfill must not revert it)", snapshot, "Changed title")
-	}
-	if gotHash != wantHash {
-		t.Errorf("content_hash after Backfill = %q, want unchanged from before Backfill ran (%q)", gotHash, wantHash)
-	}
-}
-
-// TestBackfillWaitsOutASustainedThrottleAndFinishesWithZeroDeadRows is the round-3 acceptance
-// criterion in full, against Backfill itself rather than one ProcessBatch call: a sustained
-// Bedrock throttle - outlasting more attempts than the old dead-letter threshold would have
-// tolerated for a permanent failure - must still finish unattended, with the row embedded and
-// nothing dead-lettered, once the provider recovers.
-func TestBackfillWaitsOutASustainedThrottleAndFinishesWithZeroDeadRows(t *testing.T) {
-	database := storetest.Open(t)
-	seedIssue(t, database, "SUST", "SUST-1", "A title")
-	inner := &fakeEmbedder{}
-	// 3 throttled batches: the per-row test above already proves the dead-letter threshold itself
-	// is never crossed by throttling (forcing each row eligible immediately, bypassing real wait
-	// time); this test's job is proving the drain loop waits out *real* backoff across *multiple*
-	// throttled batches rather than giving up - a small, fast number of them is enough for that.
-	embedder := &throttleThenSucceedEmbedder{inner: inner, throttleFor: 3}
-
-	var out bytes.Buffer
-	report, err := Backfill(context.Background(), Deps{Store: database, Embedder: embedder}, &out)
-	if err != nil {
-		t.Fatalf("Backfill: %v", err)
-	}
-	if report.Dead != 0 {
-		t.Errorf("Dead = %d, want 0: a sustained throttle must never dead-letter", report.Dead)
-	}
-	if report.Pending != 0 {
-		t.Errorf("Pending = %d, want 0: Backfill should wait out the throttle and finish", report.Pending)
-	}
-	if report.Embedded != 1 {
-		t.Errorf("Embedded = %d, want 1", report.Embedded)
-	}
-	if embedder.calls <= embedder.throttleFor {
-		t.Errorf("embedder was called %d times, want more than throttleFor=%d (at least one call must have succeeded)", embedder.calls, embedder.throttleFor)
-	}
-	if pendingCount(t, database) != 0 {
-		t.Errorf("pending embeddings after Backfill = %d, want 0", pendingCount(t, database))
-	}
-}
-
 // TestRetryRowsMarksARowDeadAfterRepeatedPermanentFailuresAndStopsRetrying is the dead-letter
 // acceptance criterion for the one failure class that does dead-letter: past
 // retry.DeadLetterAttempts *permanent* failures, a row stops consuming poller cycles rather than
-// retrying with a five-minute ceiling forever, but is still visible and still recoverable.
+// retrying with a five-minute ceiling forever, records the identity it died under, and is still
+// visible and still recoverable (a text change clears dead and dead_model).
 func TestRetryRowsMarksARowDeadAfterRepeatedPermanentFailuresAndStopsRetrying(t *testing.T) {
 	database := storetest.Open(t)
 	seedIssue(t, database, "DEAD", "DEAD-1", "A title")
 	ctx := context.Background()
-	deps := Deps{Store: database}
+	embedder := &fakeEmbedder{}
+	deps := Deps{Store: database, Embedder: embedder}
 	row := pendingRow{kind: "issue", id: "DEAD-1"}
 	if err := database.Pool.QueryRow(ctx, `select content_hash from embeddings where kind = 'issue' and id = 'DEAD-1'`).Scan(&row.contentHash); err != nil {
 		t.Fatalf("read content_hash: %v", err)
@@ -460,14 +315,18 @@ func TestRetryRowsMarksARowDeadAfterRepeatedPermanentFailuresAndStopsRetrying(t 
 
 	var dead bool
 	var attempts int
-	if err := database.Pool.QueryRow(ctx, `select dead, attempt_count from embeddings where kind = 'issue' and id = 'DEAD-1'`).Scan(&dead, &attempts); err != nil {
+	var deadModel *string
+	if err := database.Pool.QueryRow(ctx, `select dead, attempt_count, dead_model from embeddings where kind = 'issue' and id = 'DEAD-1'`).Scan(&dead, &attempts, &deadModel); err != nil {
 		t.Fatalf("read row: %v", err)
 	}
 	if !dead {
 		t.Fatalf("dead = false after %d permanent attempts (retry.DeadLetterAttempts=%d), want true", attempts, retry.DeadLetterAttempts)
 	}
+	if deadModel == nil || *deadModel != embedder.Identity() {
+		t.Errorf("dead_model = %v, want the embedder's Identity %q", deadModel, embedder.Identity())
+	}
 
-	rows, err := scanPending(ctx, deps)
+	rows, _, err := scanPending(ctx, deps)
 	if err != nil {
 		t.Fatalf("scanPending: %v", err)
 	}
@@ -481,11 +340,11 @@ func TestRetryRowsMarksARowDeadAfterRepeatedPermanentFailuresAndStopsRetrying(t 
 	if _, err := database.Pool.Exec(ctx, `update issues set title = $1 where key = 'DEAD-1'`, "Recovered title"); err != nil {
 		t.Fatalf("update title: %v", err)
 	}
-	if err := database.Pool.QueryRow(ctx, `select dead from embeddings where kind = 'issue' and id = 'DEAD-1'`).Scan(&dead); err != nil {
+	if err := database.Pool.QueryRow(ctx, `select dead, dead_model from embeddings where kind = 'issue' and id = 'DEAD-1'`).Scan(&dead, &deadModel); err != nil {
 		t.Fatalf("read dead after recovery write: %v", err)
 	}
-	if dead {
-		t.Error("dead is still true after the row's own text changed; embeddings_enqueue should have cleared it")
+	if dead || deadModel != nil {
+		t.Errorf("dead = %t, dead_model = %v after the row's own text changed; embeddings_enqueue should have cleared both", dead, deadModel)
 	}
 }
 
@@ -495,6 +354,7 @@ func TestRetryRowsMarksARowDeadAfterRepeatedPermanentFailuresAndStopsRetrying(t 
 // it embed cleanly, exactly as a real "this one row's content is invalid" failure would behave
 // isolated from the rest.
 type poisonTextEmbedder struct {
+	bedrockShaped
 	poison string
 	calls  [][]string
 }
@@ -673,6 +533,7 @@ func TestProcessBatchNeverDeadLettersAUniformNonThrottledFailureHoweverManyTimes
 // embed.RateLimitedEmbedder's pacing wait ending early does in production) without needing real
 // timing or concurrency.
 type cancelAfterNCallsEmbedder struct {
+	bedrockShaped
 	cancelOn int
 	cancel   context.CancelFunc
 	calls    int
@@ -751,10 +612,10 @@ func TestClaimRenewalExtendsNextAttemptAtPastClaimWindow(t *testing.T) {
 }
 
 // TestReserveTokensSharesItsBudgetAcrossConnections proves the cross-process design:
-// embeddings_rate_limit (migration 0077) is one row in the shared
-// database, not in-process memory, so two distinct Deps values - standing in for the server's
-// poller and a separately run `backfill-embeddings`, two OS processes that share nothing else -
-// draw from, and wait out debt against, the very same budget.
+// embeddings_rate_limit (migration 0078) is one row in the shared database, not in-process
+// memory, so two distinct Deps values - standing in for the pollers of two envoy-dispatch
+// processes, which share nothing else - draw from, and wait out debt against, the very same
+// budget.
 func TestReserveTokensSharesItsBudgetAcrossConnections(t *testing.T) {
 	database := storetest.Open(t)
 	ctx := context.Background()
@@ -781,10 +642,11 @@ func TestReserveTokensSharesItsBudgetAcrossConnections(t *testing.T) {
 }
 
 // TestWaitOutDebtRenewsTheClaimMidWaitSoNoSecondWorkerClaimsIt proves a single reservation's own
-// wait can run past claimWindow (a full batchSize batch of maximum-length documents can need far
-// more than one minute's token ceiling to wait out), so waitOutDebt must renew the claim partway through a long wait, not only before
-// or after it. A tiny segment stands in for renewClaimInterval's real one minute so the test
-// itself takes a little over a second, not several minutes, while exercising the identical loop.
+// wait can run past claimWindow (a full batch of maximum-length documents can need far more than
+// one minute's token ceiling to wait out), so waitOutDebt must renew the claim partway through a
+// long wait, not only before or after it. A tiny segment stands in for renewClaimInterval's real
+// one minute so the test itself takes a little over a second, not several minutes, while
+// exercising the identical loop.
 func TestWaitOutDebtRenewsTheClaimMidWaitSoNoSecondWorkerClaimsIt(t *testing.T) {
 	database := storetest.Open(t)
 	seedIssue(t, database, "LONG", "LONG-1", "A title")
@@ -894,6 +756,7 @@ func seedManyIssues(t *testing.T, database *store.Store, projectKey string, coun
 // group) and otherwise succeeds, recording every call's own size so a test can prove exactly how
 // many Embed calls ran and how many total rows they carried.
 type countingGroupEmbedder struct {
+	bedrockShaped
 	poison   string
 	calls    int
 	rowsSent int
@@ -912,15 +775,16 @@ func (e *countingGroupEmbedder) Embed(_ context.Context, texts []string, _ embed
 
 // TestChunkForBudgetSplitsAnOverCeilingBatchAndEmbedRowsCommitsEachGroupOnlyOnce proves both
 // halves of embedRows' own contract at once: chunkForBudget actually produces more than one
-// group once a batch's combined estimated tokens exceed tokenRateCeiling (25 rows at
-// maxInputChars, each truncated to exactly 8,000 estimated tokens, fill one 200,000-token group
-// exactly; a 26th, poisoned row starts a second), and a later group's failure never re-embeds an
-// earlier group's already-committed rows: Embed is called exactly three times (once for each
-// group, plus confirmSoloFailure's own canary probe once the poisoned row is isolated to one -
-// never once per row or once per bisection level), carrying 26 real rows plus the one canary.
+// group once a batch's combined estimated tokens exceed the embedder's BackgroundTokensPerMinute
+// (Bedrock's 200,000: 25 rows at maxInputChars, each truncated to exactly 8,000 estimated tokens,
+// fill one 200,000-token group exactly; a 26th, poisoned row starts a second), and a later
+// group's failure never re-embeds an earlier group's already-committed rows: Embed is called
+// exactly three times (once for each group, plus confirmSoloFailure's own canary probe once the
+// poisoned row is isolated to one - never once per row or once per bisection level), carrying 26
+// real rows plus the one canary.
 func TestChunkForBudgetSplitsAnOverCeilingBatchAndEmbedRowsCommitsEachGroupOnlyOnce(t *testing.T) {
 	database := storetest.Open(t)
-	const healthyCount = 25                    // 25 * 8,000 = 200,000 = tokenRateCeiling exactly
+	const healthyCount = 25                    // 25 * 8,000 = 200,000 = Bedrock's BackgroundTokensPerMinute exactly
 	healthyTitle := strings.Repeat("h", 32000) // embed.maxInputChars (unexported): truncates to exactly 8,000 estimated tokens
 	poisonTitle := "poisoned"
 	seedManyIssues(t, database, "CHNK", healthyCount+1, func(i int) string {
@@ -958,6 +822,7 @@ func TestChunkForBudgetSplitsAnOverCeilingBatchAndEmbedRowsCommitsEachGroupOnlyO
 // (nil means always succeed), canaryOK decides embedCanary's own outcome (nil means always
 // succeed) - so a test only ever supplies the one or two closures it actually needs to vary.
 type canaryAwareEmbedder struct {
+	bedrockShaped
 	rowOK    func(texts []string) bool
 	canaryOK func() bool
 	calls    int
@@ -983,6 +848,7 @@ func (e *canaryAwareEmbedder) Embed(_ context.Context, texts []string, _ embed.I
 // call is a row's own or embedCanary's - Deep's and Qual's own probes are both specified this
 // way ("call 1 fails, call 2 succeeds, ...").
 type sequencedEmbedder struct {
+	bedrockShaped
 	results   []bool // results[i] is call i's outcome (0-indexed)
 	afterward bool   // every call past len(results)
 	calls     int
@@ -1376,7 +1242,7 @@ func TestProcessBatchACanaryThatIsItselfThrottledNeverConfirmsAndPropagatesThrot
 
 // canaryThrottledEmbedder fails every row's own call non-throttled, and throttles embedCanary's
 // call specifically - confirmSoloFailure's one branch no other committed test exercises.
-type canaryThrottledEmbedder struct{}
+type canaryThrottledEmbedder struct{ bedrockShaped }
 
 func (canaryThrottledEmbedder) Embed(_ context.Context, texts []string, _ embed.InputType) ([][]float32, error) {
 	if len(texts) == 1 && texts[0] == embedCanary {
@@ -1396,6 +1262,7 @@ func (canaryThrottledEmbedder) Embed(_ context.Context, texts []string, _ embed.
 // which would otherwise hide an intermediate renewal from a check made after ProcessBatch
 // returns. The token budget is checked the ordinary way: it must be measurably drawn down.
 type wiringCheckEmbedder struct {
+	bedrockShaped
 	t          *testing.T
 	database   *store.Store
 	ids        []string

@@ -2645,6 +2645,9 @@ func (s *Service) recordActor(t *testing.T, room string, actor model.Actor) {
 		t.Fatalf("commit %s as a pending author: %v", actor.ID, err)
 	}
 	state := s.lockState(room)
+	// Every recorder of an edit source moves creditSeq (creditContentChange, Ledger.creditRooms),
+	// which a room's load reads to tell a source recorded after its row read (editSourceMark).
+	state.creditSeq.Add(1)
 	state.lastActor = new(actor)
 	state.unsettled = true
 	s.unlockState(room, state)
@@ -3259,7 +3262,9 @@ func assertTableCellPipeVersionAndEventCounts(t *testing.T, database *store.Stor
 // Quiesce is what lets the browser-test harness truncate its database between scenarios: it
 // leaves the server with no live document and no settlement of its own to run. It has to flush
 // each room before it closes it, or an edit that had only reached the room would be lost, and
-// it has to leave the service able to load the document again afterwards.
+// it has to leave the service able to load the document again afterwards. The record of a room it
+// closes goes with the settlement it cancels, unless a browser that joined while it ran still
+// holds it (evictRoom).
 func TestQuiesceFlushesEveryLiveDocumentAndLeavesTheServiceUsable(t *testing.T) {
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour

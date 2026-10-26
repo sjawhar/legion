@@ -42,8 +42,8 @@ func (r *Runtime) refreshGitHubCredentialsEvery(ctx context.Context, interval ti
 // refreshGitHubCredentials brings the role Secrets of every live pod to the current render of each
 // role's GitHub credential, so the gh files its container projects (GHConfigDir) carry the tokens
 // the daemon holds now: the kubelet rewrites the projection in place once the Secret changes. It
-// walks the pod store for the pods of this project (every launcher role's container holds its
-// App's gh bundle, the controller's included; a repository cache's pod names no kind and holds
+// walks the pod store for the pods of this project (every launcher role holds its App's gh
+// bundle, the controller's included; a repository cache's pod names no kind and holds
 // none, so it is passed over, its token refreshCacheTokens') that are Pending or Running and not
 // being deleted —
 // a pod waiting to be scheduled starts its launchers from the Secret as it is then — and, for each

@@ -11,6 +11,39 @@
   `route_holder` (the live session that route reaches), resolved per read as on the issue reads, so
   a reader counts each session once and tells a route nobody holds from one Dispatch could not
   judge; each is null when absent and on a project document's ask (INFRA-278).
+- `dispatch doc-edit --help` says the spec, not every document, holds no progress or status, and that a record of open items or progress is a document of its own.
+
+- `SearchCoverage`, `SearchCoverageKinds` and `SearchCoverageCounts`, the body of
+  `GET /api/v1/search/coverage`: the configured embedder's identity, place (`bedrock` or `azure`)
+  and model, and per kind and in total how many searchable items have a current vector, lack one or
+  failed, with the oldest lacking item's wait (INFRA-393). `SearchResponse.degraded`'s doc names the
+  model service rather than Bedrock.
+- `AskEventPayload.restored`: `true` on the `ask.opened` or `ask.answered` Dispatch's settlement
+  appends when an edit restores a decision block it retracted, which records no new answer. A
+  restore the release before it writes (every one already in the event log, and one written during
+  a rollout or an image rollback) carries no mark, so a missing field proves nothing.
+- `ArtifactApproval.seq`, the latest review's event sequence on the document's owner, beside its
+  `at`: the owner's row lock orders its events as they commit, so `seq` places the review among them
+  where `at`, its transaction's start, cannot. Absent for a review recorded before Dispatch kept
+  it, and on every read the release before it serves during a rollout or a rollback, so a missing
+  `seq` does not prove an older review.
+- The agent stream's `settings` frame (`AgentStreamSettings`, in `AgentStreamFrame`): the model
+  and thinking level an Oh My Pi session runs now, the whole state each time it changes and the
+  frame before `commands` in every replay. `AgentStreamSettingsReported` carries `model`
+  (`provider/id`, absent with no model selected), `models` (every model the session lists as
+  available, never cut or truncated) and `thinking` (`level`, what `/effort` reports, `null` for the
+  model's default, and `levels`, what `/effort` offers; `thinking` is `null` when the model has no
+  adjustable thinking). `AgentStreamSettingsUnreported` (`reported: false`) is a session whose
+  plugin cannot read them from its host. A viewer older than the frame ignores it (INFRA-195).
+- `dispatch_issues` takes `all` (`--all`), which asks Dispatch for the whole filtered listing in
+  one read instead of a page: the request goes out with neither `limit` nor `offset`, the two
+  parameters whose absence makes the server answer every match
+  (`api/issue_page.go`'s `parseIssuePage`). It is for a caller that must not miss or repeat a row
+  while other writers change the list, and above all for one whose own writes move issues out of
+  what it filtered on: offset paging shifts such a row across a page boundary, so it comes back
+  twice or never. `--all` beside `--limit` or `--offset` is refused with a usage error naming
+  both ways. The default call is unchanged, still a page of `DEFAULT_ISSUE_PAGE_LIMIT` rows at
+  offset 0.
 - `dispatch_read` takes `events` (a positive integer, the issue's last N events) and `all_events`
   (every event), for an issue read and its `dispatch://KEY/log`, and its description says an issue
   read lists the last 10 without either.
@@ -140,6 +173,37 @@
   reaches it directly when the mention's send fails (a mention whose receipt timed out can arrive
   twice, and the second copy is the same comment), and that an agent's events and every other
   change on the issue still need a subscription (INFRA-278).
+- `dispatch_issue`'s `spec` and `dispatch_doc_edit` point at `skill://dispatch-writing-specs` in
+  place of the dispatch skill's "Writing a spec". Five descriptions take a rule the
+  dispatch skill's references held, so `dispatch <command> --help` prints it: `dispatch_resolve_ask`
+  (which kind to use, and that resolving records no decision), `dispatch_comment` (a reply under an
+  open ask asks for clarification), `dispatch_doc_edit` (one replace per paragraph, then one
+  insert, then a read back), `dispatch_artifact` (never upload a document's own name to change
+  it) and `dispatch_architecture_sync` (what a failed source's line still shows, and that a
+  credential or branch problem with `repo` is `409 SOURCE_ACCESS`).
+- `dispatch ask --help` says never to create an issue to park a question, and `dispatch issue
+  --help` says to create a project only when a person asks for one, and that work across projects
+  goes in the project that owns most of it.
+
+- The daemon API fixtures (`fixtures/daemon-api/`) are at contract 39 (INFRA-208): `state.json`'s
+  `settings.runtime.kubernetes.resources` is `{issue, controller}`, each pod's six reservation
+  fields, in place of one entry per role, and the `resource-limits` capability row's detail names
+  pods (`no CPU and memory requests and limits under runtime.kubernetes.resources for the issue
+  pod`) rather than roles. `LegionStateResponse` reads `settings` loosely, so its schema is
+  unchanged.
+- **Breaking:** a project's architecture model comes from any number of sources, one per
+  repository (INFRA-391). `ArchitectureTree.sources`, each source's sync bookkeeping in the order
+  the project added them, replaces `source`; `ArchitectureTreeComponent.source` names the
+  repository whose files define the component; `ArchitectureSource.components` counts the
+  components that source projects now; and `ArchitectureSyncedEventPayload` and
+  `ArchitectureSyncFailedEventPayload` gain optional `repo` and `branch`, optional because events
+  retained from before projects had several sources lack them. `dispatch_architecture_sync` takes
+  an optional `repo` (`owner/name`; any other shape, a name of `.` or `..` included, is refused
+  before a request) to sync that one source, and without it syncs every source; its description
+  says a project may have several sources, that one source's failure leaves every other source
+  untouched, and that sources are saved in Settings or with
+  `PUT /api/v1/projects/{key}/architecture-sources/{owner}/{repo}`. Its `example` is now
+  `{ project: "CORE", repo: "acme/infra" }`.
 - `LegionHandoffCompleteResponse.note` carries one case fewer: READY no longer reads or judges the
   head's checks, so a base branch that requires none produces no note at all. What is left is the
   already-merged sentence, for a pull request a person merged before READY, and the by-hand

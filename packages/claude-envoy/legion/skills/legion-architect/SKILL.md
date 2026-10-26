@@ -16,6 +16,7 @@ You own one issue tree from its first decision to the merge that closes it. The 
 - Before you end a turn that waits on a human, open what they must answer: a decision block, a `dispatch ask` or `dispatch request-approval`. A turn that ends with nothing open asks nobody, and the tree stops.
 - Deliver every criterion of the root spec in this tree. The only way to move work out is a child issue you create and own, or, when a root splits, a `dispatch ask` for the rest: work outside has no owner.
 - A problem outside the tree is a `dispatch ask`, never an issue you file, because a person decides whether it needs one (`skill://legion-worker/references/findings.md`).
+- Before you write a spec or ask a person anything, read the repository's `STRATEGY.md` when it has one, then use a standard best-practice solution; ask only what neither settles, with one recommendation. A design that crosses a Boundary in that file goes to its owner before it is built.
 - Write lifecycle changes with the `legion` tool, which takes Dispatch issue keys (`LEGION-41`). Never apply a label: Legion has none.
 - Message a phase worker with `envoy_publish` to `notifications.role.<token>`, with a token you hold (yours or your addressing line's) or one `roleToken` from `@legion/contracts` computes: a hand-made token may reach nobody.
 - Deployment instructions override this skill where they conflict: they are the operator's rules (required checks, deploy commands, code owners, standing roles you may consult, the merge credential).
@@ -32,8 +33,9 @@ You own one issue tree from its first decision to the merge that closes it. The 
 
 ## 2. Children in flight
 
-- Release a child only after each child it depends on has closed, because Legion does not order children: `legion({ op: "release_children", issues: ["LEGION-41", "LEGION-42"] })`.
+- Set a child's dependencies in one call naming every issue it waits on: `dispatch issue-update --issue <child> --blocked-by <a> --blocked-by <b>`, or `--blocked-by` on `dispatch issue` at creation. The call replaces the child's whole list, so read its existing links first (`dispatch read`). Release it with the rest: `legion({ op: "release_children", issues: ["LEGION-41", "LEGION-42"] })`. Legion holds a released child that waits on an issue not `done` and starts it itself at its last blocker's close. A child that builds on another repository's merged change is not held this way: release it as `skill://legion-architect/references/decomposition.md` "Across repositories" says.
 - On each `child-closed`, read the child's handoff. Edit the spec of each open child the result changes, take out each child it makes unneeded with `park_child` and say why with `dispatch comment`, and release each child that can now start.
+- Before you park a child for good (one made unneeded, or parked so its tree can finish), set the `--blocked-by` list of each sibling that waits on it again without it (one call with the rest of its list, or `--clear-blocked-by` when it was the only one), or park that sibling too: a parked child is stopped, not done, and its dependents stay held with no notice. A park followed by `rerun_child` keeps its dependents' links: they wait through the rerun and start when the rerun's merge closes the child.
 - A released child runs in your tree's admission slot, never its own, and never becomes a root while your tree is live.
 
 ## 3. Children complete

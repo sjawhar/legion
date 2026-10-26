@@ -23,7 +23,8 @@ import (
 // releasing the expired claim as it answers (cmd/listener resolveLiveRoleHolder), so a read
 // would mutate role state and the next read would see "unclaimed" with no last_seen, and the
 // last-seen memory behind it is the answering listener's own process cache, not the shared
-// registry. The owner audit (skills/dispatch) asks for two reads ten minutes apart instead.
+// registry. The owner audit (skills/legion-controller/references/backlog-stewardship.md) and
+// `dispatch issues --help` (route_status) ask for two reads ten minutes apart instead.
 
 // routeRoster is one listener answer about who is running, read once per request. answered is
 // false when the listener is unconfigured or did not answer; every route then reads unknown.

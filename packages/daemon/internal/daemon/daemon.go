@@ -121,6 +121,9 @@ type overrides struct {
 	// stopBudget is how long the daemon's stop waits for its own work once it begins; zero is
 	// stopBudget.
 	stopBudget time.Duration
+	// controllerFirstWake is how soon after the workflow runtime starts it applies its first
+	// controller tick (workflowRuntime.controllerFirstWake); zero is firstControllerTick.
+	controllerFirstWake time.Duration
 	// gate stands in for the plugin gate when runtime is replaced: nil is none, since a replaced
 	// runtime launches no Oh My Pi to gate. With the tmux runtime, the gate is always the real one.
 	gate func(ctx context.Context) error
@@ -263,6 +266,7 @@ func run(ctx context.Context, cfg config.Config, build Build, log *slog.Logger, 
 		var cancelAfterMint context.CancelFunc
 		boot, cancelAfterMint = context.WithTimeout(context.WithoutCancel(ctx), bootTimeout)
 		defer cancelAfterMint()
+		workflow.controllerFirstWake = o.controllerFirstWake
 		plan.identity = workflow.identity
 		plan.repository = workflow.issueRepository
 		// Only a daemon with the workflow configured has issue records to read a phase or a tree
@@ -987,7 +991,6 @@ func openSupervision(boot context.Context, cfg config.Config, log *slog.Logger, 
 		Secrets:      p.secretsEnroller,
 		PhaseHolds:   p.phaseHolds,
 		TreeClosable: p.treeClosable,
-		VolumeLost:   sup.volumeLost,
 		Clock:        p.clock,
 		Log:          log,
 		Limits: supervise.Limits{
@@ -1205,7 +1208,7 @@ func (s *supervision) launchUnfinishedClaim(token claim.Token, m *supervise.Mach
 // relaunchUnfinished launches tokens' unfinished launches on a goroutine of its own, never on the
 // boot: at once when the boot reconciliation succeeded (reconciled), then on the normal orphan-sweep
 // cadence, until none is left or the daemon stops. A relaunched worker reaches the daemon only once
-// the daemon is up — a Sandbox pod's launchers dial it through its Service, which routes only to a
+// the daemon is up — a Sandbox pod's launcher dials it through its Service, which routes only to a
 // pod whose probes pass, so only once the API answers /healthz, and a shim's hello is resolved only
 // once restoration has closed — so a relaunch the boot waited on could not register: it spent its
 // whole launch budget, launch_failure_limit × worker_boot_timeout_seconds, with the API unanswered.
@@ -1386,6 +1389,7 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 		Supervisor:         s.supervisor,
 		BootTokens:         s.tokens,
 		Project:            p.project,
+		DispatchProject:    cfg.Project,
 		OperatorToken:      p.operatorToken,
 		Controller:         st,
 		DesignGate:         cfg.Gates.Design,

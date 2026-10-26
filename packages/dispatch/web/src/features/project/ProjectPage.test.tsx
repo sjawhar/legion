@@ -60,16 +60,16 @@ function inboxRow(overrides: Partial<InboxRow> = {}): InboxRow {
   };
 }
 
-/** `source` is what `GET /projects/CORE/architecture-source` answers: the source (the project
- *  opens on Architecture), `undefined` for 404 SOURCE_NOT_FOUND (it opens on Issues, as every
- *  render here expects unless it says otherwise), an `ApiError` for any other failure, or
- *  `"pending"` for a lookup that never settles. */
+/** `sources` is what `GET /projects/CORE/architecture-sources` answers: the project's sources (a
+ *  non-empty list opens it on Architecture; `[]`, the default, on Issues, as every render here
+ *  expects unless it says otherwise), an `ApiError` for a failure, or `"pending"` for a lookup
+ *  that never settles. */
 function renderPage(
   path: string,
   projects = [{ created_at: "2026-09-10T00:00:00Z", key: "CORE", name: "Core", open_asks: 0 }],
   login: string | null = "alice",
   inboxRows: InboxRow[] = [],
-  source: ArchitectureSource | ApiError | "pending" | undefined = undefined
+  sources: ArchitectureSource[] | ApiError | "pending" = []
 ) {
   const getInbox = spyOn(api, "getInbox").mockResolvedValue(inboxRows);
   const whoAmI = spyOn(api, "whoAmI");
@@ -83,16 +83,13 @@ function renderPage(
   const listIssues = spyOn(api, "listIssues").mockResolvedValue([]);
   const getMyState = spyOn(api, "getMyState").mockResolvedValue({});
   const listProjectArtifacts = spyOn(api, "listProjectArtifacts").mockResolvedValue([]);
-  const getArchitectureSource = spyOn(api, "getArchitectureSource");
-  if (source === undefined) {
-    // No source configured: the read answers null, not a refusal.
-    getArchitectureSource.mockResolvedValue(null);
-  } else if (source === "pending") {
-    getArchitectureSource.mockImplementation(() => Promise.withResolvers<never>().promise);
-  } else if (source instanceof ApiError) {
-    getArchitectureSource.mockRejectedValue(source);
+  const listProjectArchitectureSources = spyOn(api, "listProjectArchitectureSources");
+  if (sources === "pending") {
+    listProjectArchitectureSources.mockImplementation(() => Promise.withResolvers<never>().promise);
+  } else if (sources instanceof ApiError) {
+    listProjectArchitectureSources.mockRejectedValue(sources);
   } else {
-    getArchitectureSource.mockResolvedValue(source);
+    listProjectArchitectureSources.mockResolvedValue(sources);
   }
   // The Architecture pane's own tree fetch is not under test here; it never settles.
   const getArchitecture = spyOn(api, "getArchitecture").mockImplementation(
@@ -112,7 +109,7 @@ function renderPage(
   const restore = () => {
     view.unmount();
     getArchitecture.mockRestore();
-    getArchitectureSource.mockRestore();
+    listProjectArchitectureSources.mockRestore();
     getInbox.mockRestore();
     getMyState.mockRestore();
     listIssues.mockRestore();
@@ -121,7 +118,7 @@ function renderPage(
     whoAmI.mockRestore();
   };
   return {
-    getArchitectureSource,
+    listProjectArchitectureSources,
     getInbox,
     getMyState,
     listIssues,
@@ -135,6 +132,7 @@ function renderPage(
 
 const coreSource: ArchitectureSource = {
   branch: "main",
+  components: 0,
   created_at: "2026-09-10T00:00:00Z",
   created_by: { id: "alice", kind: "user" },
   enabled: true,
@@ -145,8 +143,14 @@ const coreSource: ArchitectureSource = {
   repo: "legion/legion",
 };
 
-test("the bare project path opens on Architecture when the project has a source, forwarding nothing", async () => {
-  const page = renderPage("/projects/CORE", undefined, "alice", [], coreSource);
+test("the bare project path opens on Architecture when the project has sources, forwarding nothing, from one read", async () => {
+  const page = renderPage(
+    "/projects/CORE",
+    undefined,
+    "alice",
+    [],
+    [coreSource, { ...coreSource, repo: "acme/infra" }]
+  );
   try {
     await screen.findByRole("heading", { name: "Core" });
     expect(screen.getByTestId("location").textContent).toBe("/projects/CORE/architecture");
@@ -159,6 +163,9 @@ test("the bare project path opens on Architecture when the project has a source,
     // `v` is inert here.
     fireEvent.keyDown(document.body, { key: "v" });
     expect(window.localStorage.getItem("dispatch.project.issue-view:alice")).toBeNull();
+    // One read of the project's source list decides it; the Architecture pane reads the tree.
+    expect(page.listProjectArchitectureSources).toHaveBeenCalledTimes(1);
+    expect(page.listProjectArchitectureSources).toHaveBeenCalledWith("CORE");
   } finally {
     page.restore();
   }
@@ -186,7 +193,7 @@ test("any other failure of the source lookup is shown, never silently turned int
   try {
     expect(await screen.findByRole("alert")).toHaveProperty(
       "textContent",
-      expect.stringContaining("Could not load this project's architecture source.")
+      expect.stringContaining("Could not load this project's architecture sources.")
     );
     expect(screen.getByTestId("location").textContent).toBe("/projects/CORE");
     expect(screen.queryByRole("tab", { name: "Issues" })).toBeNull();
@@ -204,7 +211,7 @@ test("/architecture renders nothing while the source lookup is pending, like the
     await waitForElementToBeRemoved(() =>
       within(page.view.container).queryByText("Loading project…")
     );
-    expect(page.getArchitectureSource).toHaveBeenCalledTimes(1);
+    expect(page.listProjectArchitectureSources).toHaveBeenCalledTimes(1);
     expect(page.view.container.innerHTML).toBe(
       '<output data-testid="location">/projects/CORE/architecture</output>'
     );

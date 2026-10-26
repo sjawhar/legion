@@ -140,6 +140,14 @@ func (s *server) streamEvents(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 	w.WriteHeader(http.StatusOK)
+	// One comment line with the headers, so the stream opens in every browser now. Firefox (the
+	// browser suite's, e2e/keyboard-session-pickers.e2e.ts) resolved its fetch of this stream only
+	// once a body byte arrived, and a connection with no backlog and no new event sends none until
+	// the first heartbeat: until then the page held its "Reconnecting…" state and skipped the
+	// refresh a reconnect owes every query, so what committed while it was away stayed unshown.
+	if _, err := fmt.Fprint(w, ": open\n\n"); err != nil {
+		return
+	}
 	flusher.Flush()
 	// Ids are assigned by nextval() when the insert statement runs, before commit,
 	// so a lower id can commit after a higher one is already visible to a catch-up
@@ -220,7 +228,7 @@ func (s *server) streamEvents(w http.ResponseWriter, r *http.Request) {
 		case <-heartbeat.C:
 			// The caller is resolved again on every heartbeat, so a stream outlives its session
 			// (a logout, a membership the sign-in issuer no longer confirms) by one beat at most.
-			if _, _, err := s.optionalActor(r); err != nil {
+			if _, _, err := s.optionalActor(heartbeatRequest(r)); err != nil {
 				return
 			}
 			if _, err := fmt.Fprint(w, ": heartbeat\n\n"); err != nil {

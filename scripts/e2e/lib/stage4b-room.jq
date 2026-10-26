@@ -3,17 +3,15 @@
 # place now, and whether an instance type the pool allows can hold two of them. No pod asks for or
 # keeps off another pod's node (LEGION-632), so room is counted in pods of the run's largest
 # reservation, never in nodes per tree. Loaded with `jq -L scripts/e2e/lib` and
-# `include "stage4b-room";`; quantity and roles come from stage4b-pods.jq.
+# `include "stage4b-room";`; quantity comes from stage4b-pods.jq.
 include "stage4b-pods";
 
-# issue_pod_reservation($expected) is an issue pod's reservation, cores and bytes: the sum of its
-# six role containers' cpu and memory (EXPECTED maps each role to its {cpu, memory}). The init
-# containers take one role's reservation and add nothing: a pod's effective request is the larger of
-# its largest init container and its containers' sum (the Kubernetes pod-resources rule), and no
-# one role's reservation exceeds the sum of the six.
+# issue_pod_reservation($expected) is an issue pod's reservation, cores and bytes: its one
+# container's cpu and memory (EXPECTED maps each pod the daemon builds to its {cpu, memory}). The
+# init containers carry the same reservation and add nothing: a pod's effective request is the
+# larger of its largest init container and its containers' sum (the Kubernetes pod-resources rule).
 def issue_pod_reservation($expected):
-  {cpu: ([roles[] | $expected[.].cpu | quantity] | add),
-   memory: ([roles[] | $expected[.].memory | quantity] | add)};
+  {cpu: ($expected.issue.cpu | quantity), memory: ($expected.issue.memory | quantity)};
 
 # pod_request is a pod's effective request, cores and bytes, as the scheduler counts it against a
 # node: the larger of its containers' summed requests and its largest init container's, a container

@@ -24,6 +24,9 @@ type projectionStore struct {
 	pullRequests map[string]*record.PullRequest
 	checks       []record.ProductionCheck
 	held         []record.HeldRow
+	// mirror is what Dispatch says each issue of the project waits on, as the store lists it: by
+	// key, which is the order the state's `blocked` is judged from.
+	mirror []record.DispatchIssueRow
 }
 
 func (s projectionStore) Issues(context.Context, pgx.Tx) ([]record.Issue, error) {
@@ -47,6 +50,9 @@ func (projectionStore) Gate(context.Context, pgx.Tx, string) (*record.DesignGate
 }
 func (s projectionStore) OpenProductionChecks(context.Context, pgx.Tx) ([]record.ProductionCheck, error) {
 	return s.checks, nil
+}
+func (s projectionStore) DispatchIssues(context.Context, pgx.Tx, string) ([]record.DispatchIssueRow, error) {
+	return s.mirror, nil
 }
 
 // projectedAt is the fixed instant every test here projects at.
@@ -295,5 +301,54 @@ func TestProjectShowsTheHeldLifecycleRowsWithTheirWaits(t *testing.T) {
 	}
 	if none.HeldOutboxRows == nil || len(none.HeldOutboxRows) != 0 {
 		t.Fatalf("heldOutboxRows with nothing held = %#v, want an empty list", none.HeldOutboxRows)
+	}
+}
+
+// The state names every issue Legion is waiting to start behind a Dispatch issue nobody has
+// finished, judged from the project's mirror in the same transaction the rest of the state is
+// read in: the waiting root admission skips and the child the workflow holds at `admitted`, in
+// one list sorted by issue key. A root carrying a run is never judged, whatever its links say,
+// and a state with nothing blocked carries an empty list rather than none.
+func TestProjectNamesWhatEveryBlockedRootAndChildWaitsOn(t *testing.T) {
+	store := projectionStore{
+		issues: []record.Issue{
+			{Key: "LEGION-208", Tree: "LEGION-208", Status: "in_progress", Phase: phase.Implementing},
+			{Key: "LEGION-209", Tree: "LEGION-208", Status: "todo", Phase: phase.Admitted},
+			{Key: "LEGION-212", Tree: "LEGION-212", Status: "todo", Phase: phase.Admitted, Rank: "00012", HandedOver: true},
+			// A re-admitted root waiting for a slot with its run already under way: promotion
+			// admits it whatever its links say, so the state reports no wait for it either.
+			{Key: "LEGION-211", Tree: "LEGION-211", Status: "todo", Phase: phase.Testing, Rank: "00011", HandedOver: true},
+		},
+		slots: []record.Slot{{Issue: "LEGION-208", Index: 0, AdmittedAt: projectedAt}},
+		mirror: []record.DispatchIssueRow{
+			{Key: "LEGION-209", Project: "LEGION", Status: "todo", Blockers: []string{"LEGION-300", "LEGION-301"}},
+			{Key: "LEGION-211", Project: "LEGION", Status: "todo", Blockers: []string{"LEGION-301"}},
+			{Key: "LEGION-212", Project: "LEGION", Status: "todo", Blockers: []string{"LEGION-302"}},
+			{Key: "LEGION-300", Project: "LEGION", Status: "done"},
+			{Key: "LEGION-301", Project: "LEGION", Status: "in_progress"},
+		},
+	}
+	got, err := Project(context.Background(), nil, store, "LEGION", nil, nil, projectedAt)
+	if err != nil {
+		t.Fatalf("Project: %v", err)
+	}
+	// LEGION-302 has no row of its own, which is not a finished issue: the wait stands.
+	want := []api.BlockedIssue{
+		{Issue: "LEGION-209", BlockedBy: []string{"LEGION-301"}},
+		{Issue: "LEGION-212", BlockedBy: []string{"LEGION-302"}},
+	}
+	if !reflect.DeepEqual(got.Admission.Blocked, want) {
+		t.Fatalf("blocked = %#v, want %#v", got.Admission.Blocked, want)
+	}
+	if !reflect.DeepEqual(got.Admission.Waiting, []string{"LEGION-211", "LEGION-212"}) {
+		t.Fatalf("waiting = %#v, want the roots' waiting line unchanged", got.Admission.Waiting)
+	}
+
+	none, err := Project(context.Background(), nil, projectionStore{}, "LEGION", nil, nil, projectedAt)
+	if err != nil {
+		t.Fatalf("Project with nothing blocked: %v", err)
+	}
+	if none.Admission.Blocked == nil || len(none.Admission.Blocked) != 0 {
+		t.Fatalf("blocked with nothing waiting on a link = %#v, want an empty list", none.Admission.Blocked)
 	}
 }

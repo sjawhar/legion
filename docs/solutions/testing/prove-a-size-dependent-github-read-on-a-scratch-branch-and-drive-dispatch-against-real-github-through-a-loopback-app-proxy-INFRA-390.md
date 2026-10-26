@@ -42,8 +42,8 @@ related_issues:
   - The proxy answers the App-JWT endpoints (installation lookup, token mint) itself.
   - It forwards every `/repos/{o}/{r}/…` read to `api.github.com` unchanged (path, query,
     `Accept`), under the role App's installation token.
-  - Drive Dispatch over its own API (`PUT …/architecture-source`, `POST …/sync`,
-    `GET …/architecture`).
+  - Drive Dispatch over its own API (`PUT …/architecture-sources/{owner}/{repo}`,
+    `POST …/architecture-sources/sync`, `GET …/architecture`).
   - The same proxy is the fault injector: drop or rewrite a header to show the client fails safe.
 
   State its limit in the proof: GitHub never checks a JWT that this binary signed.

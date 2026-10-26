@@ -81,6 +81,9 @@ type IssueSummary struct {
 	// ResolvedRepo is the repository (owner/name) Dispatch resolves the issue to: its own, else its
 	// nearest ancestor's, else its project's default; empty when it resolves to none.
 	ResolvedRepo string
+	// BlockedBy is the keys of the issues, in this issue's own project, that this issue waits on,
+	// in the order Dispatch lists them; none when it waits on nothing.
+	BlockedBy []string
 }
 
 // Issue is the workflow data from Dispatch's issue-detail route. HandedOver is resolved here, at
@@ -99,6 +102,8 @@ type Issue struct {
 	LastSeq           int64
 	// ResolvedRepo is IssueSummary.ResolvedRepo.
 	ResolvedRepo string
+	// BlockedBy is IssueSummary.BlockedBy.
+	BlockedBy []string
 }
 
 // Approval is the current approval state Dispatch derives for a document, and the issue carrying
