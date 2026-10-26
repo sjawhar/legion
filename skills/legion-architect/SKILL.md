@@ -40,11 +40,11 @@ You own one issue tree from its first decision to the merge that closes it. The 
 
 ## 3. Children complete
 
-No notice marks the last child's close. The root can reach `accepting` before any child merges, but its `sign_off` waits for them (section 6).
+No notice marks the last child's close. The root can reach `accepting` before any child merges; accept its own pull request then (section 6), and its close waits for the rest of the tree.
 
 ## 4. Integration verification
 
-- File a final integration child whose acceptance is every parent criterion proven on the default branch your addressing line names (never a hard-coded `main`), in each repository a criterion spans. Release it only after every other child has closed, because it must test a branch that carries their merges; accept the root only after it closes.
+- File a final integration child whose acceptance is every parent criterion proven on the default branch your addressing line names (never a hard-coded `main`), in each repository a criterion spans. Release it only after every other child has closed, because it must test a branch that carries their merges. The root's close waits for it, so the root is done only once it closes.
 - Read its tester evidence, not a child pull request's check status. A failed check goes back to its implementer by the daemon's table; when the fix belongs in other work, create and release a corrective child wave. Never downgrade a parent criterion or carry the failure forward.
 
 ## 5. Retro
@@ -60,9 +60,9 @@ The reviewer's `phase-finished` with an `APPROVED` review puts the issue in `acc
 - the reviewer's approval of that head by SHA (`gh api --paginate repos/<o>/<r>/pulls/<n>/reviews`);
 - each of the reviewer's prose findings, checked against the code at that head and command output, not against the reviewer's own verdict: no other agent has read that prose.
 
-Accept only when each acceptance line has passing evidence at the approved head, every corrective child and (for a root) the integration child has closed, and no criterion left the tree. A finding ask on the issue holds the acceptance until it is resolved or carries the controller's reply (`skill://legion-architect/references/acceptance.md`). Post that evidence as a `dispatch comment`, then `legion({ op: "sign_off", issue: "<KEY>" })`.
+Accept only when each acceptance line of the issue's own pull request has passing evidence at the approved head and no criterion left the tree; a criterion only the tree as a whole meets is the integration child's (section 4), not a reason to hold the root's own pull request. A finding ask on the issue holds the acceptance until it is resolved or carries the controller's reply (`skill://legion-architect/references/acceptance.md`). Post that evidence as a `dispatch comment`, then `legion({ op: "sign_off", issue: "<KEY>" })`.
 
-- `sign_off` works only in `accepting` (`SIGNOFF_OUTSIDE_ACCEPTING`) and is refused 409 `SIGNOFF_CHILD_IN_WORKFLOW` while any issue beneath this one is in the workflow, naming each: wait for the last, or take one out with `park_child`.
+- `sign_off` works only in `accepting` (`SIGNOFF_OUTSIDE_ACCEPTING`). Children still in the workflow do not hold it: a root whose pull request merges waits at its close for the rest of its tree.
 - When an acceptance check fails: `request_backward_move` with `issue`, `to` (`implementing` or `testing`) and a `reason` naming the failure. It counts a review round.
 - On every end-game wake (`phase-finished`, `catch-up`, `checks-red`, `review-stuck`), read `gh pr view <n> --json mergeable,mergeStateStatus`, because a `CONFLICTING` pull request gets no CI and no wake. Then, and after acceptance, follow `skill://legion-architect/references/acceptance.md`.
 

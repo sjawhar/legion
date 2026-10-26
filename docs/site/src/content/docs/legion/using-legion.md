@@ -136,8 +136,8 @@ The merge closes the issue: it moves to `done` the moment GitHub reports the pul
 A root with work still running beneath it is the exception: its merge is recorded and the issue
 waits until the last other issue of its tree is done or parked, so no child's finished work is cut
 off, and then it closes. The architect accepted the change before that, when the reviewer approved
-it, with a comment on the issue summarizing the evidence; Legion refuses that acceptance while any
-issue beneath it is still running, so a parent is accepted after its children. After the close the
+it, with a comment on the issue summarizing the evidence; work still running beneath a parent does
+not hold that acceptance, since the parent's close waits for it. After the close the
 implementer checks the change in production, once your deploy carries it, and records what it saw
 on the pull request's `Production:` line; a closed issue takes no further write, so look there.
 The tree's workspace is kept for three days (`linger_hours`, 72 by default) in case the work
