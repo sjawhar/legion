@@ -1,4 +1,4 @@
--- 0051_dispatch_issues.up.sql -- the daemon's mirror of what Dispatch says about every issue of
+-- 0052_dispatch_issues.up.sql -- the daemon's mirror of what Dispatch says about every issue of
 -- its project: the status it stands at, the keys it waits on, and the Dispatch sequence the row
 -- was observed at (INFRA-225).
 --

@@ -43,7 +43,7 @@ async function seedArchitecture() {
   await createProject({ key: "CORE", name: "Core" });
   await seedFakeGithub({ "legion/arch": { contents: "read", files: model, installation_id: 101 } });
   await putArchitectureSource("CORE", { branch: "main", repo: "legion/arch" });
-  const source = await syncArchitectureSource("CORE");
+  const source = await syncArchitectureSource("CORE", "legion/arch");
   expect(source.last_error).toBeNull();
 
   const login = await createIssue({ project: "CORE", title: "Web login" });
@@ -273,10 +273,13 @@ test("Refresh with a broken model keeps the last model up behind an error banner
     const synced = page.waitForResponse(
       (response) =>
         response.request().method() === "POST" &&
-        response.url().endsWith("/api/v1/projects/CORE/architecture-source/sync") &&
+        response.url().endsWith("/api/v1/projects/CORE/architecture-sources/legion/arch/sync") &&
         response.ok()
     );
-    await page.getByTestId("architecture-source").getByRole("button", { name: "Refresh" }).click();
+    await page
+      .getByTestId("architecture-source")
+      .getByRole("button", { name: "Refresh legion/arch" })
+      .click();
     await synced;
     const banner = page.getByRole("alert");
     await expect(banner).toContainText("Last import failed:");
@@ -288,7 +291,9 @@ test("Refresh with a broken model keeps the last model up behind an error banner
       `at ${modelCommit.slice(0, 8)}`
     );
     const tree = await getArchitecture("CORE");
-    expect(tree.source.last_commit).toBe(modelCommit);
+    expect(tree.sources.map((source) => [source.repo, source.last_commit])).toEqual([
+      ["legion/arch", modelCommit],
+    ]);
     expect(tree.components.map((component) => component.id).sort()).toEqual([
       "api",
       "docs",
@@ -335,9 +340,9 @@ test("a project with no architecture source answers the read, so its pages make 
     });
 
     // The read itself: having no source is an answer, not a refusal.
-    const read = await page.request.get("/api/v1/projects/CORE/architecture-source");
+    const read = await page.request.get("/api/v1/projects/CORE/architecture-sources");
     expect(read.status()).toBe(200);
-    expect(await read.json()).toBeNull();
+    expect(await read.json()).toEqual([]);
 
     // Both surfaces that ask the question on every visit.
     await page.goto(`/issues/${issue.key}`);

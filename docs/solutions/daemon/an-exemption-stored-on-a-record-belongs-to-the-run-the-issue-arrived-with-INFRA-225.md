@@ -35,7 +35,7 @@ and the judgement happens later than the event that earned it:
 
 ## Evidence
 
-The `TakenBack` mark (`issues.taken_back`, migration 0052) took three tester rounds:
+The `TakenBack` mark (`issues.taken_back`, migration 0053) took three tester rounds:
 
 1. `readmit` wrote it for every returning root, so a waiting root moved to backlog and back was
    admitted past its unfinished blocker.

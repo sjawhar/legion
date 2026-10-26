@@ -4,26 +4,47 @@
 
 ### Added
 
+- The `dispatch` command (`dist/dispatch.js`) takes `dispatch issues --all`, which reads the whole
+  filtered issue listing in one request rather than a page, for a caller that must not miss or
+  repeat a row while the list changes under it. `--all` with `--limit` or `--offset` is a usage
+  error. The bundled tool descriptions carry the new argument.
 - The `dispatch` command (`dist/dispatch.js`) moves an issue on its project's board:
   `dispatch issue-update --issue <KEY> --before <OTHER>` puts it above that issue,
   `--after <OTHER>` below, and both together land it between them, printed as `rank -> before KEY`
   or `rank -> after KEY`. The bundled tool descriptions carry the two arguments, and the plugin's
   own copy of the `legion-controller` skill carries the corrected backlog rule, since `dist/` and
   `legion/` were regenerated (INFRA-188).
+- The `dispatch` command (`dist/dispatch.js`) imports every architecture source of a project, one
+  per repository: `dispatch architecture-sync --project <KEY>` prints a line for each source, and
+  `--repo <owner/name>` imports that one alone. Against a Dispatch older than this release,
+  `dispatch architecture-sync --project <KEY>` falls back to that server's single-source sync and
+  prints its one line, and `--repo` needs a Dispatch of this release. The `dispatch` skill says an
+  issue's component ids may come from any of its project's source repositories, and the plugin's
+  own copy of the `legion-architect` skill says a component file goes in the branch of the source
+  repository that holds it, with an id no other source of the project uses, since `dist/` and
+  `legion/` were regenerated (INFRA-391).
 
 ### Changed
 
-- The plugin declares daemon API contract 37 in `package.json`'s `legion.daemonApiVersion`
+- The plugin declares daemon API contract 38 in `package.json`'s `legion.daemonApiVersion`
   (INFRA-225): `GET /legion/v1/state` carries `admission.blocked`, every root and child Legion is
   waiting to start behind an unfinished Dispatch issue, each `{issue, blockedBy}`, and
   `release_children` answers `started` and `held` beside `released`, all required, so the MCP
   server's strict readers admit the fields and a plugin built before it refuses them; a session of
-  it registers with a daemon at 37. Install it with a `legion` built from the same commit. Its
+  it registers with a daemon at 38. Install it with a `legion` built from the same commit. Its
   `legion/` copies of the `legion-architect` and `legion-controller` skills carry the blocked-by
   rule, since `legion/` was regenerated: children linked with `--blocked-by`, a held child
   released all the same, a never-started child that still waits handed over carrying no run, the
   controller's free slots counted without the waiting roots in `admission.blocked`, and a root both
   waiting and blocked read in its admission reference.
+- The plugin declares daemon API contract 37 in `package.json`'s `legion.daemonApiVersion`
+  (INFRA-80): under the Kubernetes runtime an issue's disk is a generic ephemeral volume its pod
+  owns, created with the pod and deleted with it, so the `workspace-init provision` container is
+  no longer told `LEGION_EXPECT_ISSUE_VOLUME` and the lost-disk machinery it drove — the
+  provisioning exit code 3, the recovery marker and the probe for an issue's retained sessions,
+  with the `legion sessions mark-lost` command — is gone, and `runtime.kubernetes.session_store`
+  must name a store that keeps sessions in a database, `postgres` or `cloudsql-iam`. Nothing this
+  plugin reads or writes moved; a session of it registers with a daemon at 37.
 - The plugin's regenerated `legion/` copy of the `legion-worker` skill's tools reference no longer
   tells a role to add a new image package to the licence file by hand: the worker image lists every
   Debian package it carries in `/usr/share/doc/legion/THIRD_PARTY_NOTICES` from its own dpkg
@@ -33,6 +54,12 @@
   (INFRA-229): `GET /legion/v1/state` carries `state` on an issue's pull request, its `open`,
   `merged` or `closed`, always emitted, so the MCP server's strict state reader admits the field
   and nothing this plugin reads or writes moved; a session of it registers with a daemon at 36.
+- The bundled `envoy_publish` description (`dist/` regenerated) and the `envoy` skill say a team
+  topic, any `notifications.` topic the stream does not store, reaches a session on a serve port
+  through its machine's listener when that listener subscribes to every topic
+  (`ENVOY_SUBSCRIBE_ALL_TOPICS=1`; the shared hub's listener does not), where they said such a
+  session received none. A session of this plugin holds its own NATS connection and receives such
+  a topic as before (INFRA-122).
 
 ### Fixed
 
@@ -163,7 +190,7 @@
 - A Legion phase worker can run on Claude Code (sjawhar/legion#2032). When `legion claude-bridge`
   launches Claude Code, the MCP server sees `LEGION_BOOT_TOKEN_FILE`, `LEGION_DAEMON_URL` and
   `CLAUDE_CONFIG_DIR`: it waits for the session's transcript, registers with the daemon (daemon API
-  contract 35, pinned in `package.json`'s `legion.daemonApiVersion`), claims the issue's Envoy role
+  contract 38, pinned in `package.json`'s `legion.daemonApiVersion`), claims the issue's Envoy role
   soft and reports ready, and readies again whenever it regains the role. A registration the daemon
   refuses stops Claude Code so the daemon relaunches it.
 - The MCP tool `legion` (`read_record`, `handoff_complete`, `request_backward_move`) serves the
