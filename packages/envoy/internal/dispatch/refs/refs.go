@@ -53,8 +53,12 @@ type Target struct {
 }
 
 // ReplaceCounted reconciles one source's references and resolves the counted targets the event
-// that source appends has to name. Every write that indexes a body goes through it, so no
-// producer can reconcile the graph without holding what moved: replace itself is unexported.
+// that source appends has to name. Every write that indexes a body goes through it or one of its
+// two variants below, so no producer can reconcile the graph without holding what moved: replace
+// itself is unexported. It names the targets whose edges it inserted or deleted, which is all a
+// first write of a body moves; an edit whose event names what it moved goes through
+// ReplaceCountedEdit, and a document's version through ReplaceDocumentCounted, since a kept edge's
+// excerpt can move too.
 func ReplaceCounted(
 	ctx context.Context,
 	tx pgx.Tx,
@@ -65,6 +69,60 @@ func ReplaceCounted(
 		return model.ReferenceChanges{}, err
 	}
 	return CountedChanges(ctx, tx, changed)
+}
+
+// ReplaceCountedEdit is ReplaceCounted for an edit of an ask's question or a comment's body from
+// previous to body. Every edge such a source writes shows the head of its text as its excerpt
+// (Edges, excerptRunes), so when the edit moves that head, the panel of every target the source
+// still cites changes although its edge stays: those targets are named too, beside the ones whose
+// edges the edit inserted or deleted.
+func ReplaceCountedEdit(
+	ctx context.Context,
+	tx pgx.Tx,
+	fromKind, fromID, previous, body, serverURL string,
+) (model.ReferenceChanges, error) {
+	changed, err := replace(ctx, tx, fromKind, fromID, body, serverURL)
+	if err != nil {
+		return model.ReferenceChanges{}, err
+	}
+	if text.HeadRunes(previous, excerptRunes) != text.HeadRunes(body, excerptRunes) {
+		kinds, ids := targets(body, serverURL)
+		for index := range kinds {
+			changed = append(changed, Target{Kind: kinds[index], ID: ids[index]})
+		}
+	}
+	return CountedChanges(ctx, tx, changed)
+}
+
+// ReplaceDocumentCounted is ReplaceCounted for a document's version, which also stores the excerpt
+// of each mention the version writes (RecordExcerpts), or, with excerpts nil (a version with no
+// rendering to cut them from), marks them owed (ClearExcerpts). A document mention shows the block
+// holding it as its excerpt, so a target whose kept edge now stores another block is named beside
+// the ones whose edges the version inserted or deleted.
+func ReplaceDocumentCounted(
+	ctx context.Context,
+	tx pgx.Tx,
+	artifactID string,
+	version int,
+	markdown string,
+	excerpts map[Target]model.GraphExcerpt,
+	serverURL string,
+) (model.ReferenceChanges, error) {
+	changed, err := replace(ctx, tx, "artifact", artifactID, markdown, serverURL)
+	if err != nil {
+		return model.ReferenceChanges{}, err
+	}
+	if excerpts == nil {
+		if err := ClearExcerpts(ctx, tx, artifactID); err != nil {
+			return model.ReferenceChanges{}, err
+		}
+		return CountedChanges(ctx, tx, changed)
+	}
+	moved, err := RecordExcerpts(ctx, tx, artifactID, version, excerpts)
+	if err != nil {
+		return model.ReferenceChanges{}, err
+	}
+	return CountedChanges(ctx, tx, append(changed, moved...))
 }
 
 // replace reconciles the Dispatch references written by one source with body: targets no

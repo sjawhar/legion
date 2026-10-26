@@ -6,8 +6,6 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/jackc/pgx/v5"
-
 	"github.com/sjawhar/envoy/internal/dispatch/duty"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
@@ -15,9 +13,9 @@ import (
 )
 
 // IndexDocumentReferences indexes the mentions of version's markdown, which the calling
-// transaction has just stored as the document's version (refs.ReplaceCounted), and stores each
-// mention's excerpt from the rendering of the tree that transaction wrote: an upload's
-// replacement, or a seeded spec. A seed renders its tree once. An upload that changes the
+// transaction has just stored as the document's version (refs.ReplaceDocumentCounted), and
+// stores each mention's excerpt from the rendering of the tree that transaction wrote: an
+// upload's replacement, or a seeded spec. A seed renders its tree once. An upload that changes the
 // document renders it twice - ReplaceText's render of the replacement, which is the version's
 // markdown, and applyLive's render of the fork, which the ledger records - so the excerpts are cut
 // from applyLive's render only when the two agree. It refuses a context that was not joined.
@@ -26,33 +24,29 @@ func (s *Service) IndexDocumentReferences(ctx context.Context, artifactID string
 	if !joined {
 		return model.ReferenceChanges{}, errUnjoined
 	}
-	changes, err := refs.ReplaceCounted(ctx, tx, "artifact", artifactID, markdown, s.serverURL)
-	if err != nil {
-		return model.ReferenceChanges{}, err
-	}
 	rendered := ledgerFrom(ctx).writtenRendering(artifactID)
 	if rendered.tree != nil && rendered.markdown != markdown {
 		slog.Warn("dispatch: a document version left its reference excerpts to the reconciliation: the tree its transaction wrote does not render as the version's markdown",
 			"artifact", artifactID, "version", version)
 		rendered = renderedTree{}
 	}
-	return changes, s.recordTreeExcerpts(ctx, tx, artifactID, version, rendered)
+	return refs.ReplaceDocumentCounted(ctx, tx, artifactID, version, markdown, s.treeExcerpts(rendered), s.serverURL)
 }
 
-// recordTreeExcerpts stores the excerpt of every mention the document's version writes, cut from
-// rendered, the render the version's markdown came from, so the block ids are the ones the
-// document carries. A version with no rendering - an upload whose replacement changed nothing,
-// which writes no tree - marks its mentions owed (refs.ClearExcerpts) for the reconciliation,
-// which reads the document itself.
-func (s *Service) recordTreeExcerpts(ctx context.Context, tx pgx.Tx, artifactID string, version int, rendered renderedTree) error {
+// treeExcerpts is the excerpt of every mention a document's version writes, cut from rendered, the
+// render the version's markdown came from, so the block ids are the ones the document carries. A
+// version with no rendering - an upload whose replacement changed nothing, which writes no tree -
+// has none (nil), and refs.ReplaceDocumentCounted marks its mentions owed (refs.ClearExcerpts) for
+// the reconciliation, which reads the document itself.
+func (s *Service) treeExcerpts(rendered renderedTree) map[refs.Target]model.GraphExcerpt {
 	if rendered.tree == nil {
-		return refs.ClearExcerpts(ctx, tx, artifactID)
+		return nil
 	}
 	blocks := make([]model.ArtifactBlock, len(rendered.offsets))
 	for index, offset := range rendered.offsets {
 		blocks[index] = model.ArtifactBlock{ID: offset.ID, Type: offset.Type, From: offset.From, To: offset.To}
 	}
-	return refs.RecordExcerpts(ctx, tx, artifactID, version, refs.MentionExcerpts(rendered.markdown, blocks, s.serverURL))
+	return refs.MentionExcerpts(rendered.markdown, blocks, s.serverURL)
 }
 
 // referenceExcerptBatch is how many documents one reconciliation tick reads; referenceExcerptStep
@@ -166,7 +160,9 @@ func (s *Service) ReconcileReferenceExcerpts(ctx context.Context) (documents int
 		default:
 			excerpts = refs.MentionExcerpts(markdown, blocks, s.serverURL)
 		}
-		if err := refs.RecordExcerpts(ctx, s.store.Pool, document.FromID, document.Version, excerpts); err != nil {
+		// The reconciliation appends no event, so what it moved is named nowhere: until it stores
+		// an excerpt, the route answers a mention owed one with the document's name.
+		if _, err := refs.RecordExcerpts(ctx, s.store.Pool, document.FromID, document.Version, excerpts); err != nil {
 			if ctx.Err() != nil {
 				return documents, false, ctx.Err()
 			}

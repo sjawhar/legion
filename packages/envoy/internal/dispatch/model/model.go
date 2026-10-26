@@ -846,6 +846,11 @@ type AskEventPayload struct {
 	Ask
 	ReferenceChangesPayload
 	Restored bool `json:"restored,omitempty"`
+	// ThreadLogins is carried by ask.opened, ask.answered and ask.resolved: every login with a
+	// Replies row (user_threads) on the ask's thread once the write is in, read in its own
+	// transaction (events.ThreadLogins), so a viewer knows whether their Replies count can have
+	// moved. Absent on every other ask event; [] when nobody has a row.
+	ThreadLogins []string `json:"thread_logins,omitzero"`
 }
 
 // NewReferenceChangesPayload states what a write moved on a typed event payload.
@@ -876,9 +881,21 @@ type AskAnsweredEventPayload struct {
 // IssueEventPayload is the wire payload of every `issue.*` event: the issue's own fields, flat,
 // plus what the write moved in the reference graph. A new issue's spec text is indexed in the
 // creating transaction, so `issue.created` names the nodes that body cited.
+//
+// issue.created, issue.updated and issue.closed also say what the write changed, read in its own
+// transaction: Changed names each field whose value the write moved (title, status, rank,
+// priority, assignee, parent, labels, route, repo, components, blocked_by, external_links; for
+// issue.created every field the new issue holds a value in), Ancestors the issue's parent chain,
+// parent first up to the root ([] for a root), and ThreadLogins, only when the status moved,
+// whose Replies count the move can change: for a close or a reopen every login with a Replies row
+// on one of the issue's open asks (events.IssueThreadLogins), for any other status move [].
+// Each is absent from an event written before them.
 type IssueEventPayload struct {
 	Issue
 	ReferenceChangesPayload
+	Changed      []string `json:"changed,omitzero"`
+	Ancestors    []string `json:"ancestors,omitzero"`
+	ThreadLogins []string `json:"thread_logins,omitzero"`
 }
 
 // NewIssueEventPayload builds the payload of an `issue.*` event. A write that indexes no text
@@ -1215,6 +1232,10 @@ type CommentEventPayload struct {
 	// ReferenceChangesPayload names the nodes whose inbound reference edges this write moved,
 	// so a reader carrying their batched backlink counts refreshes exactly those rows.
 	ReferenceChangesPayload
+	// ThreadLogins is carried by comment.created and comment.answered: every login with a
+	// Replies row on the comment's thread (its ask, else its root) once the comment is in, read
+	// in its own transaction (events.ThreadLogins). Absent on every other comment event.
+	ThreadLogins []string `json:"thread_logins,omitzero"`
 }
 
 // Message is a short update, optionally linked to an issue and threaded under another message.
@@ -1274,6 +1295,11 @@ type MessageEventPayload struct {
 	ThreadTarget string `json:"thread_target,omitempty"`
 	// ReferenceChangesPayload carries the same signal comment events do.
 	ReferenceChangesPayload
+	// ThreadLogins is every login with a Replies row on the message's thread (its root, up
+	// in_reply_to) once the message is in, read in its own transaction (events.ThreadLogins).
+	// Carried by an issue message's message.created and message.answered; absent on a direct
+	// (issue-less) conversation's, which has no Replies thread, and on a delivery frame.
+	ThreadLogins []string `json:"thread_logins,omitzero"`
 }
 
 // UserAgentStateEventPayload is `user_agent_state.updated`: one viewer's Clear or read mark on

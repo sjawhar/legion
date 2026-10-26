@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -409,7 +410,31 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	after.LastSeq++
-	event, err := s.appendEvent(r.Context(), tx, issueOwner(key).event(eventType, actor, model.NewIssueEventPayload(after, model.ReferenceChanges{})))
+	// What the write changed, the issue's ancestors, and, for a status move, whose Replies count
+	// it can move, all read in this transaction. A retitle keeps the issue's child_of and
+	// blocked_by edges but moves the excerpt they show, so it names their targets.
+	changedFields := issueChangedFields(before, after)
+	var titleChanges model.ReferenceChanges
+	if slices.Contains(changedFields, "title") {
+		titleChanges, err = titleExcerptChanges(r.Context(), tx, after)
+		if err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+	}
+	payload, err := newIssueEventPayload(r.Context(), tx, after, titleChanges, changedFields)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	if statusChanged {
+		payload.ThreadLogins, err = issueThreadLogins(r.Context(), tx, key, (before.ClosedAt == nil) != (after.ClosedAt == nil))
+		if err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+	}
+	event, err := s.appendEvent(r.Context(), tx, issueOwner(key).event(eventType, actor, payload))
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return

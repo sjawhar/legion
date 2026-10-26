@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"slices"
 	"strings"
 	"testing"
 
@@ -195,21 +196,39 @@ func TestPatchIssueReassignsClearsAndLeavesAssigneeAlone(t *testing.T) {
 		Type    string `json:"type"`
 		Actor   model.Actor
 		Payload struct {
-			Assignee *string `json:"assignee"`
+			Assignee     *string  `json:"assignee"`
+			Changed      []string `json:"changed"`
+			ThreadLogins []string `json:"thread_logins"`
 		} `json:"payload"`
 	}
 	if err := json.NewDecoder(eventsResponse.Body).Decode(&events); err != nil {
 		t.Fatalf("decode events: %v", err)
 	}
-	sawReassign := false
+	sawReassign, sawStatus := false, false
 	for _, event := range events {
 		if event.Type == "issue.updated" && event.Actor.Kind == "user" && event.Actor.ID == "bob" {
 			sawReassign = true
 			expectAssignee(t, event.Payload.Assignee, "bob")
+			if !slices.Equal(event.Payload.Changed, []string{"assignee"}) || event.Payload.ThreadLogins != nil {
+				t.Fatalf("reassignment's issue.updated changed = %#v, thread_logins %#v; want [assignee] and none", event.Payload.Changed, event.Payload.ThreadLogins)
+			}
+		}
+		if event.Type == "issue.updated" && event.Actor.Kind == "session" {
+			sawStatus = true
+			// Nobody has written in the issue's threads, so the status move names nobody, as [].
+			if !slices.Equal(event.Payload.Changed, []string{"status"}) || event.Payload.ThreadLogins == nil || len(event.Payload.ThreadLogins) != 0 {
+				t.Fatalf("status write's issue.updated changed = %#v, thread_logins %#v; want [status] and []", event.Payload.Changed, event.Payload.ThreadLogins)
+			}
 		}
 		if event.Type == "issue.created" {
 			expectAssignee(t, event.Payload.Assignee, "alice")
+			if !slices.Contains(event.Payload.Changed, "assignee") {
+				t.Fatalf("issue.created changed = %#v, want the defaulted assignee among them", event.Payload.Changed)
+			}
 		}
+	}
+	if !sawStatus {
+		t.Fatalf("the status write did not emit issue.updated by its session: %#v", events)
 	}
 	if !sawReassign {
 		t.Fatalf("reassignment did not emit issue.updated by bob: %#v", events)

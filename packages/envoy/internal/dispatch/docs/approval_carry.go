@@ -429,10 +429,15 @@ func answerApprovalAsk(ctx context.Context, tx pgx.Tx, broker *events.Broker, as
 	}
 	ask.State = "answered"
 	ask.Answer = &answer
+	payload := model.NewAskEventPayload(*ask, model.ReferenceChanges{})
+	payload.ThreadLogins, err = events.ThreadLogins(ctx, tx, ask.ID)
+	if err != nil {
+		return model.Event{}, err
+	}
 	event, err := broker.Append(ctx, tx, model.Event{
 		IssueKey: ask.IssueKey, ArtifactID: ask.ArtifactID,
 		Type: "ask.answered", Actor: actor,
-		Payload: model.AskAnsweredEventPayload{AskEventPayload: model.NewAskEventPayload(*ask, model.ReferenceChanges{})},
+		Payload: model.AskAnsweredEventPayload{AskEventPayload: payload},
 	})
 	if err != nil {
 		return model.Event{}, fmt.Errorf("append approval ask answer: %w", err)

@@ -2,6 +2,7 @@ package refs
 
 import (
 	"context"
+	"slices"
 	"strings"
 	"testing"
 
@@ -38,8 +39,14 @@ func TestOwedExcerptsAreFoundThroughTheDriftIndexAndRecordedOnce(t *testing.T) {
 		t.Fatalf("drift before recording = %#v, %v; want the document at version 1", drifted, err)
 	}
 	excerpt := model.GraphExcerpt{BlockID: "b1", Text: "see dispatch://CORE-1"}
-	if err := RecordExcerpts(ctx, database.Pool, document, 1, map[Target]model.GraphExcerpt{{Kind: "issue", ID: "CORE-1"}: excerpt}); err != nil {
+	moved, err := RecordExcerpts(ctx, database.Pool, document, 1, map[Target]model.GraphExcerpt{{Kind: "issue", ID: "CORE-1"}: excerpt})
+	if err != nil {
 		t.Fatalf("record: %v", err)
+	}
+	// CORE-1 was answered with the document's name and now shows its block; CORE-2 lies in no
+	// block, so it is answered with the document's name still and did not move.
+	if want := []Target{{Kind: "issue", ID: "CORE-1"}}; !slices.Equal(moved, want) {
+		t.Fatalf("moved by the first record = %#v, want %#v", moved, want)
 	}
 	if drifted, err := DriftedExcerpts(ctx, database.Pool, 20); err != nil || len(drifted) != 0 {
 		t.Fatalf("drift after recording = %#v, %v; want none", drifted, err)
@@ -95,5 +102,59 @@ func TestOwedExcerptsAreFoundThroughTheDriftIndexAndRecordedOnce(t *testing.T) {
 	}
 	if marked, err := MarkStaleExcerpts(ctx, database.Pool); err != nil || marked != 0 {
 		t.Fatalf("marking again = %d, %v; want none, owed rows are not stale", marked, err)
+	}
+}
+
+// A version write names the targets whose excerpt it moved (ReplaceDocumentCounted): a version
+// that rewrites the block a kept mention sits in moves that mention's excerpt and no other's, and
+// one that writes the same excerpts again moves nothing.
+func TestRecordExcerptsReportsTheMentionsWhoseExcerptMoved(t *testing.T) {
+	database := storetest.Open(t)
+	ctx := context.Background()
+	tx, err := database.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	createReferenceProject(t, tx, "CORE")
+	document, _ := createReferenceArtifact(t, tx, "", "CORE", "design")
+	if _, err := replace(ctx, tx, "artifact", document, "see dispatch://CORE-1, later dispatch://CORE-2", "https://dispatch.example"); err != nil {
+		t.Fatalf("index mentions: %v", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	core1, core2 := Target{Kind: "issue", ID: "CORE-1"}, Target{Kind: "issue", ID: "CORE-2"}
+	record := func(version int, excerpts map[Target]model.GraphExcerpt) []Target {
+		t.Helper()
+		moved, err := RecordExcerpts(ctx, database.Pool, document, version, excerpts)
+		if err != nil {
+			t.Fatalf("record version %d: %v", version, err)
+		}
+		return moved
+	}
+	first := map[Target]model.GraphExcerpt{
+		core1: {BlockID: "b1", Text: "see dispatch://CORE-1"},
+		core2: {BlockID: "b2", Text: "later dispatch://CORE-2"},
+	}
+	if moved := record(1, first); !slices.Equal(moved, []Target{core1, core2}) {
+		t.Fatalf("moved by the first record = %#v, want both mentions", moved)
+	}
+	rewritten := map[Target]model.GraphExcerpt{
+		core1: {BlockID: "b1", Text: "now see dispatch://CORE-1"},
+		core2: first[core2],
+	}
+	if moved := record(2, rewritten); !slices.Equal(moved, []Target{core1}) {
+		t.Fatalf("moved by a rewritten block = %#v, want CORE-1 alone", moved)
+	}
+	if moved := record(3, rewritten); len(moved) != 0 {
+		t.Fatalf("moved by unchanged blocks = %#v, want none", moved)
+	}
+	// A mention moved into another block keeps its text but jumps elsewhere, which moves it too.
+	reblocked := map[Target]model.GraphExcerpt{
+		core1: rewritten[core1],
+		core2: {BlockID: "b3", Text: first[core2].Text},
+	}
+	if moved := record(4, reblocked); !slices.Equal(moved, []Target{core2}) {
+		t.Fatalf("moved by a mention's new block = %#v, want CORE-2 alone", moved)
 	}
 }

@@ -1503,13 +1503,10 @@ func (s *Service) writeVersionTx(ctx context.Context, tx pgx.Tx, artifactID stri
 	if err := json.Unmarshal(authorsRaw, &version.Authors); err != nil {
 		return versionWriteResult{}, fmt.Errorf("decode document version authors: %w", err)
 	}
-	changes, err := refs.ReplaceCounted(ctx, tx, "artifact", artifactID, markdown, s.serverURL)
-	if err != nil {
-		return versionWriteResult{}, err
-	}
 	// The mentions' excerpts are cut from the render this version's markdown came from, in its own
 	// transaction, so GET /api/v1/references serves them without rendering the document.
-	if err := s.recordTreeExcerpts(ctx, tx, artifactID, version.Number, rendered); err != nil {
+	changes, err := refs.ReplaceDocumentCounted(ctx, tx, artifactID, version.Number, markdown, s.treeExcerpts(rendered), s.serverURL)
+	if err != nil {
 		return versionWriteResult{}, err
 	}
 	// The open approval request follows the document version without leaving its thread or opening

@@ -495,6 +495,72 @@ func TestAskWritesNameChangedTargets(t *testing.T) {
 	requireIssueBacklinkCount(t, handler, target.Key, 1)
 }
 
+// An edge a write keeps still shows its source's text as its excerpt in the target's
+// referenced-by panel - a comment's or an ask's head, a document's block - so an edit that moves
+// that excerpt names the target although its count stays; an edit that leaves it alone names
+// nothing.
+func TestEditsThatKeepAnEdgeNameItsTargetWhenItsExcerptMoves(t *testing.T) {
+	handler := newTestHandler(t)
+	createReferenceAPIProject(t, handler, "CORE")
+	createReferenceAPIProject(t, handler, "OPS")
+	target := createReferenceAPIIssue(t, handler, "CORE")
+	source := createReferenceAPIIssue(t, handler, "OPS")
+	cited := "dispatch://" + target.Key
+	want := []model.ChangedReference{{Kind: "issue", ID: target.Key}}
+
+	comment := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+source.Key+"/comments", map[string]any{
+		"body": "Waiting on " + cited + ".",
+	}, "alice")
+	if comment.Code != http.StatusCreated {
+		t.Fatalf("create citing comment: status=%d body=%s", comment.Code, comment.Body.String())
+	}
+	commentID := decodeBody[writtenRecord](t, comment).ID
+	editComment := func(body string) {
+		t.Helper()
+		if response := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/comments/"+commentID, map[string]any{"body": body}, "alice"); response.Code != http.StatusOK {
+			t.Fatalf("edit comment: status=%d body=%s", response.Code, response.Body.String())
+		}
+	}
+	editComment("Still waiting on " + cited + ".")
+	requireReferencesChanged(t, handler, source.Key, "comment.edited", commentID, want)
+	// Past the excerpt's 240 characters an edit moves nothing the panel shows.
+	head := "Still waiting on " + cited + ". " + strings.Repeat("x", 260)
+	editComment(head + " One.")
+	requireReferencesChanged(t, handler, source.Key, "comment.edited", commentID, want)
+	editComment(head + " Two.")
+	requireReferencesChanged(t, handler, source.Key, "comment.edited", commentID, nil)
+
+	opened := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+source.Key+"/asks", map[string]any{
+		"question": "Does " + cited + " ship first?",
+	}, "alice")
+	if opened.Code != http.StatusCreated {
+		t.Fatalf("open a citing ask: status=%d body=%s", opened.Code, opened.Body.String())
+	}
+	askID := decodeBody[writtenRecord](t, opened).ID
+	if response := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/asks/"+askID, map[string]any{
+		"question": "Does " + cited + " still ship first?",
+	}, "alice"); response.Code != http.StatusOK {
+		t.Fatalf("reword the citing ask: status=%d body=%s", response.Code, response.Body.String())
+	}
+	requireReferencesChanged(t, handler, source.Key, "ask.edited", askID, want)
+	requireIssueBacklinkCount(t, handler, target.Key, 3)
+
+	document := createProjectDocument(t, handler, "CORE", "Rollout notes", "# Rollout notes\n\nWaiting on "+cited+".\n\nAn unrelated paragraph.\n")
+	events := "/api/v1/artifacts/" + document.ID + "/events"
+	edit := func(find, with string) {
+		t.Helper()
+		if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+document.ID+"/edits", map[string]any{
+			"ops": []map[string]string{{"op": "replace", "find": find, "with": with}},
+		}, "alice"); response.Code != http.StatusOK {
+			t.Fatalf("edit the document: status=%d body=%s", response.Code, response.Body.String())
+		}
+	}
+	edit("An unrelated paragraph.", "Another unrelated paragraph.")
+	requireArtifactEventNames(t, handler, events, document.ID, nil)
+	edit("Waiting on", "Still waiting on")
+	requireArtifactEventNames(t, handler, events, document.ID, want)
+}
+
 // An open page refreshes from the live stream, which carries each event as its handler published
 // it, not as the log stored it: an ask citing an issue must name that issue there too, or the
 // cited issue's header keeps its old count until something unrelated refetches it.

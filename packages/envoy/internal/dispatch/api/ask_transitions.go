@@ -19,7 +19,9 @@ type askTransition struct {
 	EventType      string
 	ReplacesAnswer *time.Time
 	Apply          func(context.Context, pgx.Tx, model.Ask) (model.Ask, error)
-	Payload        func(model.Ask) any
+	// Payload builds the event's payload from the one every transition carries (the ask after
+	// the transition, with its thread_logins); nil appends that payload as it is.
+	Payload func(model.AskEventPayload) any
 	// After runs once the transition's own event is appended, still inside the
 	// transaction; the events it returns are published with it.
 	After func(context.Context, pgx.Tx, model.Ask) ([]model.Event, error)
@@ -111,9 +113,9 @@ func answerTransition(actor model.Actor, selected []string, text *string, option
 			ask.Answer = &answer
 			return ask, nil
 		},
-		Payload: func(ask model.Ask) any {
+		Payload: func(payload model.AskEventPayload) any {
 			return model.AskAnsweredEventPayload{
-				AskEventPayload: model.NewAskEventPayload(ask, model.ReferenceChanges{}),
+				AskEventPayload: payload,
 				PreviousAnswer:  previousAnswer,
 			}
 		},
@@ -334,10 +336,16 @@ func (s *server) closeAskTx(ctx context.Context, tx pgx.Tx, id string, actor mod
 	if err != nil {
 		return model.Ask{}, nil, err
 	}
-	// A transition writes no question text, so it moves no references and says so.
-	payload := any(model.NewAskEventPayload(ask, model.ReferenceChanges{}))
+	// A transition writes no question text, so it moves no references and says so. The answer
+	// it may have written is in tx, so the ask's Replies rows are read after it.
+	base := model.NewAskEventPayload(ask, model.ReferenceChanges{})
+	base.ThreadLogins, err = askThreadLogins(ctx, tx, ask.ID)
+	if err != nil {
+		return model.Ask{}, nil, err
+	}
+	payload := any(base)
 	if transition.Payload != nil {
-		payload = transition.Payload(ask)
+		payload = transition.Payload(base)
 	}
 	event, err := s.appendEvent(ctx, tx, ownerOf(ask.IssueKey, ask.ArtifactID).event(
 		transition.EventType, actor, payload,

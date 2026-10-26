@@ -75,6 +75,12 @@ func parseEventListOptions(r *http.Request) (eventListOptions, error) {
 	}, nil
 }
 
+// eventReplayHeader is the response header GET /api/v1/events answers "complete" on a resuming
+// connection (since=, or Last-Event-ID) whose since is at or below the event log's head when it
+// subscribed: the stream replays every event after since before it goes live, so the client has
+// missed nothing. The browser reads it same-origin, so no CORS exposure is needed.
+const eventReplayHeader = "X-Dispatch-Event-Replay"
+
 func (s *server) streamEvents(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAuthenticated(w, r) {
 		return
@@ -131,6 +137,12 @@ func (s *server) streamEvents(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
+	// A resuming connection whose since is at or below the head is replayed every event after it
+	// below, so it missed nothing while it was away, and says so in eventReplayHeader: a client
+	// may then skip the whole refresh it owes a gap. A cold connect asked for no backlog and a
+	// since above the head names an id of a log this one replaced; neither was replayed what it
+	// missed, so neither carries the header.
+	replayComplete := sinceProvided && since <= head
 	// A cold client asked for no backlog, and a since above the head can only be an id of a log
 	// this one replaced; both start at the head this connection just read.
 	if !sinceProvided || since > head {
@@ -139,6 +151,9 @@ func (s *server) streamEvents(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
+	if replayComplete {
+		w.Header().Set(eventReplayHeader, "complete")
+	}
 	w.WriteHeader(http.StatusOK)
 	// One comment line with the headers, so the stream opens in every browser now. Firefox (the
 	// browser suite's, e2e/keyboard-session-pickers.e2e.ts) resolved its fetch of this stream only

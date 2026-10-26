@@ -28,6 +28,16 @@ func (s *server) replaceReferences(
 	return refs.ReplaceCounted(ctx, tx, fromKind, fromID, body, s.deps.ServerURL)
 }
 
+// replaceEditedReferences is refs.ReplaceCountedEdit bound to this server's URL: an edit of an
+// ask's question or a comment's body from previous to body.
+func (s *server) replaceEditedReferences(
+	ctx context.Context,
+	tx pgx.Tx,
+	fromKind, fromID, previous, body string,
+) (model.ReferenceChanges, error) {
+	return refs.ReplaceCountedEdit(ctx, tx, fromKind, fromID, previous, body, s.deps.ServerURL)
+}
+
 // getReferences reads one node's edges in the reference graph: ?to= lists every edge pointing
 // at the node (backlinks), ?from= every edge it writes; exactly one is required. ?kind= narrows
 // edge types and ?since= keeps mentions introduced after an events.id, which excludes

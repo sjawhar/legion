@@ -375,11 +375,13 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	issue.LastSeq++
-	event, err := s.appendEvent(r.Context(), tx, issueOwner(key).event(
-		"issue.created",
-		actor,
-		model.NewIssueEventPayload(issue, specChanges),
-	))
+	// A new issue changed every field it holds a value in, measured from an issue with none.
+	payload, err := newIssueEventPayload(r.Context(), tx, issue, specChanges, issueChangedFields(unsetIssue, issue))
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	event, err := s.appendEvent(r.Context(), tx, issueOwner(key).event("issue.created", actor, payload))
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return

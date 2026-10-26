@@ -8,8 +8,14 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
+	"slices"
+	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
 func TestReadEventsKeepsNonAskPayloadRaw(t *testing.T) {
@@ -219,4 +225,195 @@ func TestEventPayloadsAreServedAsStoredForEveryEventKind(t *testing.T) {
 		}
 	}
 	checkServed("SSE replay", frames)
+}
+
+// issueEventFields is what an issue.created, issue.updated or issue.closed says about its write.
+type issueEventFields struct {
+	Key               string                   `json:"key"`
+	Title             string                   `json:"title"`
+	Status            string                   `json:"status"`
+	Changed           []string                 `json:"changed"`
+	Ancestors         []string                 `json:"ancestors"`
+	ThreadLogins      []string                 `json:"thread_logins"`
+	ReferencesChanged []model.ChangedReference `json:"references_changed"`
+}
+
+// newestEventPayload decodes the stored payload of the newest eventType event on issueKey, or on
+// no issue when issueKey is "" (a project's or a conversation's).
+func newestEventPayload[T any](t *testing.T, database *store.Store, eventType, issueKey string) T {
+	t.Helper()
+	var payload []byte
+	if err := database.Pool.QueryRow(context.Background(), `
+		select payload from events where type = $1 and coalesce(issue_key, '') = $2 order by id desc limit 1
+	`, eventType, issueKey).Scan(&payload); err != nil {
+		t.Fatalf("read the newest %s event of %q: %v", eventType, issueKey, err)
+	}
+	var decoded T
+	if err := json.Unmarshal(payload, &decoded); err != nil {
+		t.Fatalf("decode %s payload %s: %v", eventType, payload, err)
+	}
+	return decoded
+}
+
+func createChildIssue(t *testing.T, handler http.Handler, title, parent string) model.Issue {
+	t.Helper()
+	response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]any{
+		"project": "TEST", "title": title, "parent": parent, "force": true,
+	}, "alice")
+	if response.Code != http.StatusCreated {
+		t.Fatalf("create %q under %s: status=%d body=%s", title, parent, response.Code, response.Body.String())
+	}
+	return decodeBody[model.Issue](t, response)
+}
+
+// An issue event says what its write changed, beside the issue's fields as the write left them:
+// issue.created every field the new issue holds, a PATCH the fields whose values it moved, each
+// with the issue's ancestors, parent first. A status move names everyone with a Replies row on the
+// issue's threads, and nobody else; a retitle names the issues whose panels show the title.
+func TestIssueEventsSayWhatTheWriteChanged(t *testing.T) {
+	handler, database := newTestHandlerWithStore(t)
+	root := createInteractionIssue(t, handler, "TEST", "Root of the tree", "A spec")
+	child := createChildIssue(t, handler, "Middle of the tree", root.Key)
+	grandchild := createChildIssue(t, handler, "Leaf of the tree", child.Key)
+
+	rootCreated := newestEventPayload[issueEventFields](t, database, "issue.created", root.Key)
+	if rootCreated.Ancestors == nil || len(rootCreated.Ancestors) != 0 {
+		t.Fatalf("a root's issue.created ancestors = %#v, want []", rootCreated.Ancestors)
+	}
+	created := newestEventPayload[issueEventFields](t, database, "issue.created", grandchild.Key)
+	if want := []string{"title", "status", "rank", "assignee", "parent"}; !slices.Equal(created.Changed, want) {
+		t.Fatalf("issue.created changed = %#v, want every field the new issue holds, %#v", created.Changed, want)
+	}
+	if want := []string{child.Key, root.Key}; !slices.Equal(created.Ancestors, want) {
+		t.Fatalf("a grandchild's issue.created ancestors = %#v, want %#v", created.Ancestors, want)
+	}
+	if created.Key != grandchild.Key || created.Title != "Leaf of the tree" || created.ThreadLogins != nil {
+		t.Fatalf("issue.created = %#v, want the issue's own fields and no thread_logins", created)
+	}
+
+	patch := func(body map[string]any) {
+		t.Helper()
+		if response := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+grandchild.Key, body, "alice"); response.Code != http.StatusOK {
+			t.Fatalf("patch %v: status=%d body=%s", body, response.Code, response.Body.String())
+		}
+	}
+	patch(map[string]any{"title": "Renamed leaf"})
+	retitled := newestEventPayload[issueEventFields](t, database, "issue.updated", grandchild.Key)
+	if !slices.Equal(retitled.Changed, []string{"title"}) || retitled.Title != "Renamed leaf" {
+		t.Fatalf("a title-only PATCH's issue.updated = %#v, want changed [title] and the new title", retitled)
+	}
+	if want := []string{child.Key, root.Key}; !slices.Equal(retitled.Ancestors, want) || retitled.ThreadLogins != nil {
+		t.Fatalf("a title-only PATCH's issue.updated = %#v, want ancestors %#v and no thread_logins", retitled, want)
+	}
+	// The child_of edge to the parent stays, and the parent's referenced-by panel shows this title.
+	if want := []model.ChangedReference{{Kind: "issue", ID: child.Key}}; !reflect.DeepEqual(retitled.ReferencesChanged, want) {
+		t.Fatalf("a retitle's references_changed = %#v, want the parent whose panel shows the title, %#v", retitled.ReferencesChanged, want)
+	}
+	patch(map[string]any{"priority": 1})
+	if reprioritised := newestEventPayload[issueEventFields](t, database, "issue.updated", grandchild.Key); !slices.Equal(reprioritised.Changed, []string{"priority"}) || reprioritised.ReferencesChanged != nil {
+		t.Fatalf("a priority-only PATCH's issue.updated = %#v, want changed [priority] naming no reference", reprioritised)
+	}
+
+	// Alice writes in the thread of one of the issue's open asks, the rows a close or reopen moves
+	// between the Inbox and the Replies page; Bob writes only in a plain comment thread, which no
+	// close moves.
+	ask := createAnswerListAsk(t, handler, grandchild.Key, "Still needed?")
+	createThreadComment(t, handler, grandchild.Key, map[string]any{"body": "Is this still needed?", "ask_id": ask.ID}, "alice")
+	createThreadComment(t, handler, grandchild.Key, map[string]any{"body": "Unrelated."}, "bob")
+	patch(map[string]any{"status": "done"})
+	closed := newestEventPayload[issueEventFields](t, database, "issue.closed", grandchild.Key)
+	if !slices.Equal(closed.Changed, []string{"status"}) || !slices.Equal(closed.ThreadLogins, []string{"alice"}) {
+		t.Fatalf("issue.closed = %#v, want changed [status] and thread_logins [alice]", closed)
+	}
+	patch(map[string]any{"status": "backlog"})
+	reopened := newestEventPayload[issueEventFields](t, database, "issue.updated", grandchild.Key)
+	if !slices.Equal(reopened.Changed, []string{"status"}) || reopened.Status != "backlog" {
+		t.Fatalf("a reopen's issue.updated = %#v, want changed [status] and the new status", reopened)
+	}
+	if !slices.Equal(reopened.ThreadLogins, []string{"alice"}) || slices.Contains(reopened.ThreadLogins, "bob") {
+		t.Fatalf("a reopen's thread_logins = %#v, want alice, who wrote in a thread, and not bob", reopened.ThreadLogins)
+	}
+	if want := []string{child.Key, root.Key}; !slices.Equal(reopened.Ancestors, want) {
+		t.Fatalf("a reopen's ancestors = %#v, want %#v", reopened.Ancestors, want)
+	}
+}
+
+// user_state.updated says which of pinned, last_read_seq and dismissed the write moved, so a tab
+// refreshes its pinned list for a pin and not for a read mark. It carries no issue key.
+func TestUserStateEventSaysWhichFieldsMoved(t *testing.T) {
+	handler, database := newTestHandlerWithStore(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Pinned", "A spec")
+	type stateEvent struct {
+		Login   string   `json:"login"`
+		Changed []string `json:"changed"`
+		Key     *string  `json:"key"`
+	}
+	put := func(body map[string]any, want []string) {
+		t.Helper()
+		if response := dispatchRequest(t, handler, http.MethodPut, "/api/v1/me/issues/"+issue.Key+"/state", body, "alice"); response.Code != http.StatusOK {
+			t.Fatalf("put state %v: status=%d body=%s", body, response.Code, response.Body.String())
+		}
+		event := newestEventPayload[stateEvent](t, database, "user_state.updated", "")
+		if event.Login != "alice" || event.Key != nil || event.Changed == nil || !slices.Equal(event.Changed, want) {
+			t.Fatalf("user_state.updated after %v = %#v, want alice's changed %#v and no issue key", body, event, want)
+		}
+	}
+	put(map[string]any{"pinned": true}, []string{"pinned"})
+	put(map[string]any{"last_read_seq": 3}, []string{"last_read_seq"})
+	put(map[string]any{"dismissed": []string{"ask-1"}}, []string{"dismissed"})
+	put(map[string]any{"pinned": true, "last_read_seq": 3}, []string{})
+	put(map[string]any{"pinned": false, "last_read_seq": 5}, []string{"pinned", "last_read_seq"})
+}
+
+// A resuming connection whose since is at or below the log's head is replayed everything after it,
+// and says so in X-Dispatch-Event-Replay, by since= or by Last-Event-ID alike; a cold connect
+// (nothing replayed) and a since above the head (an id of a log since replaced) do not.
+func TestEventStreamSaysWhenItsReplayCoversTheGap(t *testing.T) {
+	handler, database := newTestHandlerWithStore(t)
+	createInteractionIssue(t, handler, "TEST", "Replayed", "A spec")
+	head := eventHead(t, database)
+	httpServer := httptest.NewServer(handler)
+	t.Cleanup(httpServer.Close)
+
+	for _, connection := range []struct {
+		name   string
+		resume func(*http.Request)
+		want   string
+	}{
+		{name: "cold", resume: func(*http.Request) {}, want: ""},
+		{name: "resuming below the head by since", resume: func(request *http.Request) {
+			request.URL.RawQuery = fmt.Sprintf("since=%d", head-1)
+		}, want: "complete"},
+		{name: "resuming at the head by since", resume: func(request *http.Request) {
+			request.URL.RawQuery = fmt.Sprintf("since=%d", head)
+		}, want: "complete"},
+		{name: "resuming below the head by Last-Event-ID", resume: func(request *http.Request) {
+			request.Header.Set("Last-Event-ID", strconv.FormatInt(head-1, 10))
+		}, want: "complete"},
+		{name: "since above the head", resume: func(request *http.Request) {
+			request.URL.RawQuery = fmt.Sprintf("since=%d", head+100)
+		}, want: ""},
+	} {
+		t.Run(connection.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(t.Context(), sseStreamDeadline)
+			defer cancel()
+			request, err := http.NewRequestWithContext(ctx, http.MethodGet, httpServer.URL+"/api/v1/events", nil)
+			if err != nil {
+				t.Fatalf("construct SSE request: %v", err)
+			}
+			request.Header.Set("Authorization", "Bearer agent-token")
+			connection.resume(request)
+			stream, err := http.DefaultClient.Do(request)
+			if err != nil {
+				t.Fatalf("open SSE stream: %v", err)
+			}
+			defer stream.Body.Close()
+			if stream.StatusCode != http.StatusOK {
+				t.Fatalf("SSE status = %d, want 200", stream.StatusCode)
+			}
+			if got := stream.Header.Get(eventReplayHeader); got != connection.want {
+				t.Fatalf("%s = %q, want %q", eventReplayHeader, got, connection.want)
+			}
+		})
+	}
 }

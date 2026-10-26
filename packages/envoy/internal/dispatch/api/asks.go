@@ -250,9 +250,13 @@ func (s *server) createAskFor(w http.ResponseWriter, r *http.Request, owner owne
 		}
 		events = append(events, snapshotEvent)
 	}
-	event, err := s.appendEvent(r.Context(), tx, owner.event(
-		"ask.opened", actor, model.NewAskEventPayload(ask, askChanges),
-	))
+	openedPayload := model.NewAskEventPayload(ask, askChanges)
+	openedPayload.ThreadLogins, err = askThreadLogins(r.Context(), tx, ask.ID)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	event, err := s.appendEvent(r.Context(), tx, owner.event("ask.opened", actor, openedPayload))
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -462,7 +466,7 @@ func (s *server) editAsk(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ask.EditedAt = timestampPtr(&editedAt)
-	askChanges, err := s.replaceReferences(documentCtx, tx, "ask", ask.ID, ask.Question)
+	askChanges, err := s.replaceEditedReferences(documentCtx, tx, "ask", ask.ID, previous.Question, ask.Question)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return

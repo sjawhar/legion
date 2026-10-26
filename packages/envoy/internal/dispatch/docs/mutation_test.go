@@ -914,7 +914,12 @@ func TestVersionWritersReportChangedReferenceTargets(t *testing.T) {
 	if err != nil {
 		t.Fatalf("name version: %v", err)
 	}
-	want = []model.ChangedReference{{Kind: "ask", ID: askIDs[1], IssueKey: &issueKey}}
+	// The new mention lands in the paragraph that holds the first one, so the first ask's edge is
+	// kept but the block its referenced-by panel shows moved: it is named too, after the new one.
+	want = []model.ChangedReference{
+		{Kind: "ask", ID: askIDs[1], IssueKey: &issueKey},
+		{Kind: "ask", ID: askIDs[0], IssueKey: &issueKey},
+	}
 	if !reflect.DeepEqual(named.Changes.Targets, want) {
 		t.Fatalf("named version changes = %#v, want %#v", named.Changes.Targets, want)
 	}

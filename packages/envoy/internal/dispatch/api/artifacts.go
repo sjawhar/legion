@@ -1060,13 +1060,33 @@ const documentHintLimit = 8
 // loadArtifactByDocumentReference reads an issue's or a project's artifact at slug reference, or
 // the one document whose filename it is.
 func (s *server) loadArtifactByDocumentReference(ctx context.Context, q queryer, target artifactTarget, reference string) (model.Artifact, error) {
-	artifact, err := s.loadArtifactByRefKey(ctx, q, target.refPrefix()+"/"+reference)
+	return resolveDocumentReference(ctx, s, q, target, reference,
+		func(refKey string) (model.Artifact, error) { return s.loadArtifactByRefKey(ctx, q, refKey) },
+		func(id string) (model.Artifact, error) { return s.loadArtifact(ctx, q, id) },
+	)
+}
+
+// resolveDocumentReference is the one resolution of an issue's or a project's document reference,
+// shared by the full read and the summary: the artifact at slug reference (byRefKey, given the
+// ref_key), else the one document whose filename it is (byID, given its id). Each reader answers
+// ARTIFACT_NOT_FOUND for no row, and reads only the shape its route serves.
+func resolveDocumentReference[T any](
+	ctx context.Context,
+	s *server,
+	q queryer,
+	target artifactTarget,
+	reference string,
+	byRefKey func(refKey string) (T, error),
+	byID func(id string) (T, error),
+) (T, error) {
+	found, err := byRefKey(target.refPrefix() + "/" + reference)
 	if err == nil || !isArtifactNotFound(err) {
-		return artifact, err
+		return found, err
 	}
+	var none T
 	documents, listErr := s.loadDocumentReferences(ctx, q, target)
 	if listErr != nil {
-		return model.Artifact{}, listErr
+		return none, listErr
 	}
 	matches := make([]model.Artifact, 0, 1)
 	for index := range documents {
@@ -1076,11 +1096,11 @@ func (s *server) loadArtifactByDocumentReference(ctx context.Context, q queryer,
 	}
 	switch len(matches) {
 	case 0:
-		return model.Artifact{}, documentReferenceError(target, reference, documents)
+		return none, documentReferenceError(target, reference, documents)
 	case 1:
-		return s.loadArtifact(ctx, q, matches[0].ID)
+		return byID(matches[0].ID)
 	default:
-		return model.Artifact{}, ambiguousDocumentReferenceError(target, reference, matches)
+		return none, ambiguousDocumentReferenceError(target, reference, matches)
 	}
 }
 

@@ -492,9 +492,12 @@ func (s *server) openApprovalAsk(
 	if err != nil {
 		return nil, model.Event{}, err
 	}
-	event, err := s.appendEvent(ctx, tx, owner.event(
-		"ask.opened", actor, model.NewAskEventPayload(ask, askChanges),
-	))
+	payload := model.NewAskEventPayload(ask, askChanges)
+	payload.ThreadLogins, err = askThreadLogins(ctx, tx, ask.ID)
+	if err != nil {
+		return nil, model.Event{}, err
+	}
+	event, err := s.appendEvent(ctx, tx, owner.event("ask.opened", actor, payload))
 	if err != nil {
 		return nil, model.Event{}, err
 	}

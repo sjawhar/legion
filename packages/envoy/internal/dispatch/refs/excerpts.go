@@ -62,7 +62,13 @@ func MentionExcerpts(markdown string, blocks []model.ArtifactBlock, serverURL st
 // document the reconciliation read, so the excerpt stored under the older number is the one the
 // version would have stored. StoredExcerpts hides an owed row, and the reconciliation's non-null
 // version makes that same excerpt current again.
-func RecordExcerpts(ctx context.Context, q Execer, fromID string, version int, excerpts map[Target]model.GraphExcerpt) error {
+//
+// It returns the targets whose excerpt the route answers differently after the write, in kind and
+// id order: the route serves a row's stored block and text only once its version is set and its
+// text is not null (StoredExcerpts), and the document's name otherwise, so a row moves when what it
+// served before differs from what it serves now. A version write names them on its event
+// (ReplaceDocumentCounted).
+func RecordExcerpts(ctx context.Context, q Queryer, fromID string, version int, excerpts map[Target]model.GraphExcerpt) ([]Target, error) {
 	kinds := make([]string, 0, len(excerpts))
 	ids := make([]string, 0, len(excerpts))
 	blockIDs := make([]string, 0, len(excerpts))
@@ -74,18 +80,34 @@ func RecordExcerpts(ctx context.Context, q Execer, fromID string, version int, e
 		texts = append(texts, excerpt.Text)
 	}
 	// The target's excerpt is one row-valued subquery, so a mention whose target excerpts lacks
-	// (no block holds it) is still updated, with no excerpt, and leaves the drift index.
-	if _, err := q.Exec(ctx, `
-		with e(kind, id, block_id, text) as (select * from unnest($3::text[], $4::text[], $5::text[], $6::text[]))
-		update refs r
-		set excerpt_version = $2,
-		    (excerpt_block_id, excerpt_text) = (select e.block_id, e.text from e where e.kind = r.to_kind and e.id = r.to_id)
-		where r.from_kind = 'artifact' and r.from_id = $1
-		  and coalesce(r.excerpt_version, 0) <= $2
-	`, fromID, version, kinds, ids, blockIDs, texts); err != nil {
-		return fmt.Errorf("record reference excerpts of %s: %w", fromID, err)
+	// (no block holds it) is still updated, with no excerpt, and leaves the drift index. Every
+	// part of the statement reads the one snapshot, so prior holds each row as it was.
+	moved, err := scanTargets(q.Query(ctx, `
+		with e(kind, id, block_id, text) as (select * from unnest($3::text[], $4::text[], $5::text[], $6::text[])),
+		prior as (
+			select to_kind, to_id,
+			       case when excerpt_version is not null then excerpt_text end as served_text,
+			       case when excerpt_version is not null and excerpt_text is not null then coalesce(excerpt_block_id, '') end as served_block
+			from refs
+			where from_kind = 'artifact' and from_id = $1 and coalesce(excerpt_version, 0) <= $2
+		),
+		written as (
+			update refs r
+			set excerpt_version = $2,
+			    (excerpt_block_id, excerpt_text) = (select e.block_id, e.text from e where e.kind = r.to_kind and e.id = r.to_id)
+			where r.from_kind = 'artifact' and r.from_id = $1
+			  and coalesce(r.excerpt_version, 0) <= $2
+			returning r.to_kind, r.to_id, r.excerpt_text as served_text,
+			          case when r.excerpt_text is not null then coalesce(r.excerpt_block_id, '') end as served_block
+		)
+		select w.to_kind, w.to_id from written w join prior p on p.to_kind = w.to_kind and p.to_id = w.to_id
+		where (p.served_block, p.served_text) is distinct from (w.served_block, w.served_text)
+		order by w.to_kind, w.to_id
+	`, fromID, version, kinds, ids, blockIDs, texts))
+	if err != nil {
+		return nil, fmt.Errorf("record reference excerpts of %s: %w", fromID, err)
 	}
-	return nil
+	return moved, nil
 }
 
 // StoredExcerpts is, by citing document, the excerpt stored on each mention of (toKind, toID) a

@@ -95,7 +95,7 @@ func RewriteApprovalAsk(
 		return model.Event{}, fmt.Errorf("rewrite approval ask: %w", err)
 	}
 	ask.EditedAt = askTimestamp(&editedAt)
-	changes, err := refs.ReplaceCounted(ctx, tx, "ask", ask.ID, ask.Question, serverURL)
+	changes, err := refs.ReplaceCountedEdit(ctx, tx, "ask", ask.ID, previous.Question, ask.Question, serverURL)
 	if err != nil {
 		return model.Event{}, fmt.Errorf("index approval ask: %w", err)
 	}
