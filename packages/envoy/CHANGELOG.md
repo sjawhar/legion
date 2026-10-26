@@ -4,6 +4,19 @@
 
 ### Added
 
+- Dispatch writes one access-log line per served request, so the callers behind a load spike can
+  be named: `dispatch: request` at INFO when the request ends, with the method, the route's own
+  pattern, the escaped request path, the caller (a person's email, a bearer's session, a personal
+  token's owner, a verified service-account subject, or the shared token with no owner to name),
+  the credential that named a session, the forwarded address and the user agent, the status, the
+  milliseconds it took and the response bytes. It covers every `/api/v1` route, the document and
+  delivery websockets, `/auth/*`, the GitHub proxy and the 404 of a path no route answers, still
+  writes its line when a handler panics, names the caller a websocket or stream was admitted as
+  however many heartbeats it lives, cuts every field a caller wrote to 256 bytes, and never
+  carries a token, a cookie, a query string, a request body or a response body. It is always on:
+  it costs about 2.6 µs and 12 allocations per request and makes no database call
+  (`internal/dispatch/api/access_log_bench_test.go`), and the question it answers is asked when a
+  deployment is already in trouble (`cmd/dispatch/README.md`, "Access log").
 - A release of a `github-app` secret can be narrowed: `POST /v1/grants/{id}/values` takes an
   optional `github_app` body (`owner`, `repositories`, `read_only`) that mints the token of one
   account `github-owners` lists alone, sent to GitHub as the `access_tokens` body, limited to
