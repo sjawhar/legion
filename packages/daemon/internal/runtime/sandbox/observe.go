@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"slices"
 	"strings"
 	"time"
@@ -419,21 +420,41 @@ func initContainerStatus(pod *corev1.Pod, name string) *corev1.ContainerStatus {
 }
 
 // logTail is a container's last log lines, or why they could not be read: a detail's quote never
-// changes its verdict, so the read is bounded whole (call).
+// changes its verdict, so the read is bounded whole (call), in time and in bytes off the API
+// (readLog).
 func (r *Runtime) logTail(ctx context.Context, pod, container string) string {
-	text, _, err := r.readLog(ctx, pod, container, logTailLines, 64<<10)
+	text, _, bounded, err := r.readLog(ctx, pod, container, logTailLines, logTailBytes, logTailReadBytes)
 	if err != nil {
 		return fmt.Sprintf("(the log could not be read: %v)", err)
+	}
+	if bounded {
+		text += "\n" + logBoundNote(logTailReadBytes)
 	}
 	return text
 }
 
 // sharedLogLines and sharedLogBytes bound how much of an issue pod's one container's log roleLog
-// reads to find one role's last lines among every role's.
+// reads to find one role's last lines among every role's, and sharedLogReadBytes how much of the
+// stream that read takes off the API. logTailBytes and logTailReadBytes are the same pair for one
+// container's own tail. A line is bounded at 64 KiB where the launcher writes it
+// (launcher.maxLogLine) and nowhere else, so 2000 lines are up to 128 MiB on the wire, read once
+// per role of a terminal pod: the read bound holds that to sharedLogReadBytes, enough for 2000
+// lines of 4 KiB, past what any quote keeps. A read the bound cut keeps the oldest of the tail,
+// since a stream is read from its start, so the quote says so (logBoundNote) rather than passing
+// off older lines as the container's last.
 const (
-	sharedLogLines = 2000
-	sharedLogBytes = 1 << 20
+	sharedLogLines     = 2000
+	sharedLogBytes     = 1 << 20
+	sharedLogReadBytes = 8 << 20
+	logTailBytes       = 64 << 10
+	logTailReadBytes   = 1 << 20
 )
+
+// logBoundNote says a quote is short of the container's newest lines because the read stopped at
+// its byte bound.
+func logBoundNote(read int) string {
+	return fmt.Sprintf("(the log was read to its %d-byte bound: these are not the container's newest lines)", read)
+}
 
 // containerLinesHeader introduces, in a role's quote of an issue pod's one container, the lines
 // no role wrote (containerLines).
@@ -457,7 +478,7 @@ func (r *Runtime) roleLog(ctx context.Context, pod, container string, role claim
 	if container != runtime.IssuePodContainer {
 		return r.logTail(ctx, pod, container)
 	}
-	text, whole, err := r.readLog(ctx, pod, container, sharedLogLines, sharedLogBytes)
+	text, whole, bounded, err := r.readLog(ctx, pod, container, sharedLogLines, sharedLogBytes, sharedLogReadBytes)
 	if err != nil {
 		return fmt.Sprintf("(the log could not be read: %v)", err)
 	}
@@ -471,34 +492,56 @@ func (r *Runtime) roleLog(ctx context.Context, pod, container string, role claim
 	if own := containerLines(text, logTailLines); own != "" {
 		quote += "\n" + containerLinesHeader + "\n" + own
 	}
+	if bounded {
+		quote += "\n" + logBoundNote(sharedLogReadBytes)
+	}
 	return quote
 }
 
 // readLog is container's last lines of log, at most limit bytes of them, read under one bound
-// (call). TailLines bounds the read to lines, and the stream is read through tailBytes, which holds
-// only its newest limit bytes, so a log's size never decides how much the daemon holds, and a
-// quote never ends before the lines nearest the container's end. When the byte bound dropped older
+// (call) and at most read bytes off the API, as probeLog reads the probe pod's log through an
+// io.LimitReader. TailLines bounds the read to lines, and the stream is read through tailBytes,
+// which holds only its newest limit bytes, so a log's size never decides how much the daemon
+// holds, and a quote never ends before the lines nearest the container's end. The read bound is
+// what a log's size cannot make the daemon pull: a line is bounded only where the launcher writes
+// it (64 KiB), so lines alone leave the stream in the hundreds of megabytes. A read the bound cut
+// ends before the container's newest lines, since a stream is read from its start, and bounded
+// says so, for the caller to say so in its quote. When the byte bound dropped older
 // bytes, the read starts from the first whole line it kept, and whole says so: the text then starts
 // just after a newline of the log. Otherwise it starts where the kubelet's line count did, which
 // may be inside a line.
-func (r *Runtime) readLog(ctx context.Context, pod, container string, lines int64, limit int) (text string, whole bool, err error) {
+func (r *Runtime) readLog(ctx context.Context, pod, container string, lines int64, limit, read int) (text string, whole, bounded bool, err error) {
 	reading, cancel := call(ctx)
 	defer cancel()
 	stream, err := r.kube.CoreV1().Pods(r.namespace).GetLogs(pod, &corev1.PodLogOptions{Container: container, TailLines: &lines}).Stream(reading)
 	if err != nil {
-		return "", false, err
+		return "", false, false, err
 	}
 	defer stream.Close()
-	kept, cut, err := tailBytes(stream, limit)
+	counted := &logByteCounter{r: io.LimitReader(stream, int64(read)+1)}
+	kept, cut, err := tailBytes(counted, limit)
 	if err != nil {
-		return "", false, err
+		return "", false, false, err
 	}
 	if cut {
 		if newline := bytes.IndexByte(kept, '\n'); newline >= 0 {
 			kept, whole = kept[newline+1:], true
 		}
 	}
-	return strings.TrimRight(string(kept), "\n"), whole, nil
+	return strings.TrimRight(string(kept), "\n"), whole, counted.n > int64(read), nil
+}
+
+// logByteCounter counts the bytes read through it, so a read that stopped at an io.LimitReader's
+// bound is told from one that reached the stream's end.
+type logByteCounter struct {
+	r io.Reader
+	n int64
+}
+
+func (c *logByteCounter) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	c.n += int64(n)
+	return n, err
 }
 
 // roleLines is role's last n lines of log, each with the launcher's `<role>: ` prefix dropped: the

@@ -177,12 +177,16 @@ func legionMountPaths() []string {
 // those links.
 var roleNamespacePaths = []string{"/dev/shm", "/run/lock", "/tmp", "/var/tmp"}
 
-// roleDevicePaths are the device filesystems each role's namespace replaces with its own
-// (role-init's privateDevices): a new devpts instance at /dev/pts and its own IPC namespace's
-// mqueue at /dev/mqueue. role-init carries no mount back onto either, so an operator's mount at,
-// under or above one would vanish from every role; CheckPod refuses all three, where it refuses
-// only a mount at or above a roleNamespacePaths entry.
-var roleDevicePaths = []string{"/dev/mqueue", "/dev/pts"}
+// roleReplacedPaths are the paths each role's namespace replaces with a filesystem of its own and
+// carries no mount back onto: role-init's privateDevices mounts a new devpts instance at /dev/pts,
+// binds that instance's ptmx over /dev/ptmx, and mounts its own IPC namespace's mqueue at
+// /dev/mqueue, and prepareRoleNamespace mounts the role's own /proc last of all. An operator's
+// mount at, under or above one would vanish from every role, so CheckPod refuses every one, where
+// it refuses only a mount at or above a roleNamespacePaths entry, whose mounts role-init carries
+// back. role-init's other mounts are guarded elsewhere: its binds under launcher.FixedRoot and its
+// covers of RolesDir and HomeMountsDir are legionMountPaths, and its home overlay carries every
+// operator mount under the home back (homeMountsView), xdgStateHome refusing one at or above it.
+var roleReplacedPaths = []string{"/dev/mqueue", "/dev/ptmx", "/dev/pts", "/proc"}
 
 // launch is one relaunch's inputs, checked and resolved before anything touches the cluster.
 type launch struct {

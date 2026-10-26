@@ -480,6 +480,51 @@ func TestARolesQuoteIsItsNewestLinesOfALogPastTheBound(t *testing.T) {
 	}
 }
 
+// A line is bounded only where the launcher writes it (64 KiB), so the shared log's 2000-line tail
+// can be hundreds of megabytes, read once per role of a terminal pod. The read is bounded in bytes
+// too: a log past sharedLogReadBytes is read to that bound and no further, so the quote carries
+// what the read reached and says the container's newest lines are not in it.
+func TestTheSharedLogsReadIsBoundedInBytes(t *testing.T) {
+	labels := claimLabels(claim.RoleTester)
+	name := SandboxName(workerToken)
+	status := corev1.PodStatus{Phase: corev1.PodRunning, ContainerStatuses: []corev1.ContainerStatus{{
+		Name: "roles", State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 137, Reason: "OOMKilled"}},
+	}}}
+	g := newRig(t, []k8sruntime.Object{sandboxObject(t, name, sandboxUID, modeRunning, labels), podObject(name, recorded, sandboxUID, labels, status)}, withoutController())
+	// 2000 lines of 64 KiB, the most the launcher's line bound lets a role write into the tail.
+	padding := strings.Repeat("x", 64<<10)
+	var log strings.Builder
+	for i := range sharedLogLines {
+		fmt.Fprintf(&log, "tester: line %d %s\n", i, padding)
+	}
+	if log.Len() <= 8*sharedLogReadBytes {
+		t.Fatalf("the log is %d bytes, not far past the %d-byte read bound", log.Len(), sharedLogReadBytes)
+	}
+	served := 0
+	g.kube.PrependReactor("get", "pods", func(action k8stesting.Action) (bool, k8sruntime.Object, error) {
+		if action.GetSubresource() != "log" {
+			return false, nil, nil
+		}
+		served++
+		return true, &k8sruntime.Unknown{Raw: []byte(log.String())}, nil
+	})
+	obs, err := g.r.Probe(g.ctx, rolesLocator(workerToken, recorded))
+	if err != nil {
+		t.Fatalf("Probe: %v", err)
+	}
+	if !strings.HasSuffix(obs.Detail, logBoundNote(sharedLogReadBytes)) {
+		t.Fatalf("the quote is %.300q…%.200q, want it ending with %q", obs.Detail, obs.Detail[max(0, len(obs.Detail)-200):], logBoundNote(sharedLogReadBytes))
+	}
+	// The read stopped at its bound, so the tail it kept ends inside the log rather than at its
+	// last line: the container's newest line is not in the quote.
+	if last := fmt.Sprintf("line %d ", sharedLogLines-1); strings.Contains(obs.Detail, last) {
+		t.Fatalf("the quote carries %q, so the whole %d-byte log was read", last, log.Len())
+	}
+	if served != 1 {
+		t.Fatalf("the log was read %d times for one role, want once", served)
+	}
+}
+
 // The one container's log interleaves every role's lines, each prefixed `<role>: ` by the
 // launcher: a role's quote is its own last lines alone, the prefix dropped, and a sibling's, the
 // launcher's own unprefixed ones and a role whose name another's begins with are none of it.
@@ -634,6 +679,12 @@ func TestCheckPodRefusesAMountARolesNamespaceHides(t *testing.T) {
 	for _, path := range []string{
 		"/tmp", "/var/tmp", "/run/lock", "/var/lock", "/dev/shm", "/run", "/dev", "/var/run/legion/roles", "/var/run/legion/roles/tester", "/var/run/legion/roles/.homes",
 		"/var/run/lock", "/run/shm", "/var/run/shm", "/var/run", "/run/legion/roles", "/run/legion/roles/tester/gh", "/run/legion/home",
+		// The rest of what role-init mounts, binds or covers: its home overlay and config home,
+		// its binds of each role's own directories, and its covers of the roles and home mounts
+		// directories, each at, under and above.
+		"/home", "/home/legion", "/home/legion/.config", "/home/legion/.config/jj", "/var/run/legion",
+		"/var/run/legion/gh", "/var/run/legion/gh/x", "/var/run/legion/private", "/var/run/legion/state", "/var/run/legion/agent-secrets",
+		"/var/run/legion/home", "/var/run/legion/home/.config",
 	} {
 		if err := CheckPod(mountAt(path), nil, testOptions().Tools, nil, nil, ompsessions.Store{}); err == nil {
 			t.Errorf("a mount at %s passed, want it refused", path)
@@ -649,11 +700,12 @@ func TestCheckPodRefusesAMountARolesNamespaceHides(t *testing.T) {
 	}
 }
 
-// A role's namespace mounts a new devpts instance at /dev/pts and its own IPC namespace's mqueue at
-// /dev/mqueue, and carries no mount back onto either: an operator's mount at or under one would
-// vanish from every role without a word, so it is refused like a mount at /dev/shm, and refused
-// under it too, naming the device filesystem it overlaps. A mount beside them in /dev's other
-// directories is not one role-init replaces.
+// A role's namespace mounts a new devpts instance at /dev/pts, binds its ptmx over /dev/ptmx,
+// mounts its own IPC namespace's mqueue at /dev/mqueue and its own /proc, and carries no mount
+// back onto any of them: an operator's mount at or under one would vanish from every role without
+// a word, so it is refused like a mount at /dev/shm, and refused under it too, naming the
+// filesystem it overlaps. A mount beside them in /dev's other directories is not one role-init
+// replaces.
 func TestCheckPodRefusesAMountAtOrUnderARolesOwnDevices(t *testing.T) {
 	mountAt := func(path string) Pod {
 		return Pod{
@@ -663,6 +715,7 @@ func TestCheckPodRefusesAMountAtOrUnderARolesOwnDevices(t *testing.T) {
 	}
 	for path, device := range map[string]string{
 		"/dev/pts": "/dev/pts", "/dev/pts/operator": "/dev/pts", "/dev/mqueue": "/dev/mqueue", "/dev/mqueue/x": "/dev/mqueue",
+		"/dev/ptmx": "/dev/ptmx", "/proc": "/proc", "/proc/sys": "/proc", "/proc/self/fd": "/proc",
 	} {
 		err := CheckPod(mountAt(path), nil, testOptions().Tools, nil, nil, ompsessions.Store{})
 		if err == nil || !strings.Contains(err.Error(), "overlaps "+device+", which every role's namespace in an issue pod replaces with a filesystem of its own") {

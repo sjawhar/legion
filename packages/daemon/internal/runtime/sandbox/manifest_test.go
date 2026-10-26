@@ -600,6 +600,12 @@ func TestBothContainersShareOneInMemoryXDGConfigHome(t *testing.T) {
 		t.Errorf("XDG_CONFIG_HOME: init %q, main %q; the two containers must agree",
 			envOf(init)["XDG_CONFIG_HOME"], configHome)
 	}
+	// The rendered value is the path role-init binds the role's own config home at, under the
+	// image's home: a value that moved off it would leave every role's XDG_CONFIG_HOME pointing
+	// where role-init binds nothing (launcher.Home, launcher.ConfigHomeDir).
+	if want := launcher.Home + "/" + launcher.ConfigHomeDir; configHome != want {
+		t.Errorf("XDG_CONFIG_HOME is rendered %q, want %q, the path each role's role-init binds its own config home at", configHome, want)
+	}
 	for name, want := range map[string]string{
 		"XDG_CACHE_HOME": podHome + "/.cache",
 		"XDG_DATA_HOME":  podHome + "/.local/share",
@@ -989,8 +995,9 @@ func TestTheManifestCarriesADNSNamedStreamAndDaemonURL(t *testing.T) {
 // What the boundary protects is identity, not a repository-write token kept off the tree volume:
 // an implement role now holds the implement App's token — the same lease as the
 // provisioning token — read-only in its own gh directory (GHConfigDir), and a review role the
-// review App's. What the fetch container's boundary still keeps is that no review role ever holds the implement App's token, which is what lets the reviewer's approval
-// count and the daemon's fix-attempt counting read a push's App from the App that made it.
+// review App's. What the fetch container's boundary still keeps is that no review role ever holds
+// the implement App's token, which is what lets the daemon's fix-attempt counting read a push's App
+// from the App that made it.
 func TestTheProvisionTokenSharesNoContainerWithAnythingTheTreeCanWrite(t *testing.T) {
 	r, err := configure(goldenOptions())
 	if err != nil {
