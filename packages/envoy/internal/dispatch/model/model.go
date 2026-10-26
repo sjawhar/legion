@@ -217,17 +217,30 @@ const (
 	// RouteNoHolder is a role nobody live holds (unclaimed, or its holder's session lapsed), or
 	// a session the listener does not list.
 	RouteNoHolder = "no_holder"
-	// RouteUnknown is a route read while the listener did not answer; it is never read as live.
+	// RouteUnknown is a route read while the listener gave no list to judge it by; it is never
+	// read as live, nor as no_holder.
 	RouteUnknown = "unknown"
+)
+
+// Route status reasons: why a route reads RouteUnknown.
+const (
+	// RouteReasonRefilling is a listener that answered its refilling 503: its copy of the agent
+	// list cannot be served yet, so a missing row there says nothing about the route.
+	RouteReasonRefilling = "refilling"
+	// RouteReasonUnreachable is a listener that is not configured, did not answer in time, or
+	// failed in any other way.
+	RouteReasonUnreachable = "unreachable"
 )
 
 // IssueRouteReach is whether an issue's route reaches anyone: resolved on read from one
 // listener roster per request, stored nowhere, and never part of an event payload, which is
-// why it sits beside Issue in a read response rather than in it. Both fields are null for an
-// issue with no route; RouteHolder names the session only when RouteStatus is RouteLive.
+// why it sits beside Issue in a read response rather than in it. Every field is null for an
+// issue with no route; RouteHolder names the session only when RouteStatus is RouteLive, and
+// RouteStatusReason says why only when RouteStatus is RouteUnknown.
 type IssueRouteReach struct {
-	RouteStatus *string `json:"route_status"`
-	RouteHolder *string `json:"route_holder"`
+	RouteStatus       *string `json:"route_status"`
+	RouteHolder       *string `json:"route_holder"`
+	RouteStatusReason *string `json:"route_status_reason"`
 }
 
 // IssueSummary is the lightweight issue listing representation.

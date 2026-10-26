@@ -1,6 +1,7 @@
 package api
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -409,10 +410,31 @@ func (s *server) unsubscribeSession(
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// writeEnvoyError answers a listener failure: the listener's refilling answer as 503
+// ENVOY_REFILLING (writeEnvoyRefilling), any other ErrUnavailable as 503 ENVOY_UNAVAILABLE.
 func (s *server) writeEnvoyError(w http.ResponseWriter, err error) {
+	var refilling *envoy.RefillingError
+	if errors.As(err, &refilling) {
+		writeEnvoyRefilling(w, refilling.RetryAfter)
+		return
+	}
 	if errors.Is(err, envoy.ErrUnavailable) {
 		writeError(w, "ENVOY_UNAVAILABLE", http.StatusServiceUnavailable, err.Error())
 		return
 	}
 	s.writeHandlerError(w, err)
+}
+
+// envoyRefillingRetryAfter is the Retry-After a refilling answer gives when the listener sent
+// none: the listener's own (cmd/listener listRefillingRetryAfter).
+const envoyRefillingRetryAfter = "5"
+
+// writeEnvoyRefilling answers a read that needed the listener's agent list while the listener
+// refused it as refilling (envoy.ErrRefilling): 503 ENVOY_REFILLING with the listener's
+// Retry-After passed through. Its own code, apart from ENVOY_UNAVAILABLE, because the listener
+// did answer and said the list will be back in a moment; either way a client must not read the
+// missing list as "no agents".
+func writeEnvoyRefilling(w http.ResponseWriter, retryAfter string) {
+	w.Header().Set("Retry-After", cmp.Or(retryAfter, envoyRefillingRetryAfter))
+	writeError(w, "ENVOY_REFILLING", http.StatusServiceUnavailable, "The agent list is refilling. Try again in a moment.")
 }

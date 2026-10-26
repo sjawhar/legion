@@ -3,7 +3,6 @@ package api
 import (
 	"cmp"
 	"context"
-	"errors"
 	"fmt"
 	"net/http"
 	"sort"
@@ -90,11 +89,7 @@ func (s *server) listAgents(w http.ResponseWriter, r *http.Request) {
 
 	sessions, err := s.deps.Envoy.Sessions(r.Context())
 	if err != nil {
-		if errors.Is(err, envoy.ErrUnavailable) {
-			writeError(w, "ENVOY_UNAVAILABLE", http.StatusServiceUnavailable, err.Error())
-			return
-		}
-		s.writeHandlerError(w, err)
+		s.writeEnvoyError(w, err)
 		return
 	}
 	if len(sessions) == 0 {

@@ -35,6 +35,7 @@ const issue: Issue = {
 const details: IssueDetails = {
   route_status: null,
   route_holder: null,
+  route_status_reason: null,
   ...issue,
   artifacts: [],
   children: [],
@@ -48,6 +49,7 @@ const summary: IssueSummary = {
   resolved_repo: null,
   route_status: null,
   route_holder: null,
+  route_status_reason: null,
   key: issue.key,
   labels: [],
   last_seq: 1,

@@ -29,6 +29,34 @@ var ErrReceiptTimeout = errors.New("envoy listener did not answer the send in ti
 // ErrNotFound reports that the listener has no record of the requested session.
 var ErrNotFound = errors.New("envoy listener: session not found")
 
+// ErrRefilling reports a list read (Sessions, ListInterests) the listener refused because its
+// copy of the bucket cannot be served yet: it has not completed a read of the bucket, or has not
+// followed it for longer than its stale bound (cmd/listener writeListRefilling). It is not
+// ErrUnavailable: the listener answered, and said exactly that a list from it now could be
+// missing a live agent, so a caller says "refilling" rather than "unreachable", and never reads
+// it as an empty list. Every *RefillingError matches it under errors.Is; errors.As reaches the
+// RefillingError for the Retry-After the listener sent.
+var ErrRefilling = errors.New("envoy listener: the agent list is refilling")
+
+// listenerRefillingCode is the code of the listener's refilling answer (cmd/listener
+// listRefillingCode). A 503 under any other code, or none, is an ordinary failure.
+const listenerRefillingCode = "refilling"
+
+// RefillingError is ErrRefilling as one list read met it.
+type RefillingError struct {
+	// RetryAfter is the listener's Retry-After header as sent, empty when it sent none.
+	RetryAfter string
+	route      string
+	reason     string
+}
+
+func (e *RefillingError) Error() string {
+	return fmt.Sprintf("%v: %s returned %d: %s", ErrRefilling, e.route, http.StatusServiceUnavailable, e.reason)
+}
+
+// Is makes every RefillingError match ErrRefilling.
+func (e *RefillingError) Is(target error) bool { return target == ErrRefilling }
+
 // Interest is a session's persisted Envoy topic subscriptions.
 type Interest struct {
 	SessionID string   `json:"session_id"`
@@ -119,7 +147,8 @@ func (c *Client) authorize(request *http.Request) {
 	}
 }
 
-// Sessions returns the listener's live sessions.
+// Sessions returns the listener's live sessions, ErrRefilling (a *RefillingError) while the
+// listener refuses the list as refilling, or ErrUnavailable.
 func (c *Client) Sessions(ctx context.Context) ([]Session, error) {
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/v1/sessions", nil)
 	if err != nil {
@@ -132,7 +161,7 @@ func (c *Client) Sessions(ctx context.Context) ([]Session, error) {
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("%w: GET /v1/sessions returned %d", ErrUnavailable, response.StatusCode)
+		return nil, listFailure(response, "GET /v1/sessions")
 	}
 
 	var sessions []Session
@@ -155,7 +184,7 @@ func (c *Client) Sessions(ctx context.Context) ([]Session, error) {
 
 // ListInterests returns every session's persisted topic subscriptions,
 // live or not: the source Dispatch reads to find which sessions would
-// receive an issue's or document's events.
+// receive an issue's or document's events. Its failures are Sessions'.
 func (c *Client) ListInterests(ctx context.Context) ([]Interest, error) {
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/v1/interests/", nil)
 	if err != nil {
@@ -168,7 +197,7 @@ func (c *Client) ListInterests(ctx context.Context) ([]Interest, error) {
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("%w: GET /v1/interests/ returned %d", ErrUnavailable, response.StatusCode)
+		return nil, listFailure(response, "GET /v1/interests/")
 	}
 
 	var interests []Interest
@@ -437,4 +466,22 @@ func listenerResponseError(response *http.Response) error {
 		return errors.New(body.Error)
 	}
 	return fmt.Errorf("%w: listener returned %d", ErrUnavailable, response.StatusCode)
+}
+
+// listFailure classifies a list read's non-200 answer from its body: the listener's refilling 503
+// is a *RefillingError, anything else ErrUnavailable carrying the listener's own reason when its
+// body names one.
+func listFailure(response *http.Response, route string) error {
+	var body struct {
+		Error string `json:"error"`
+		Code  string `json:"code"`
+	}
+	decoded := json.NewDecoder(response.Body).Decode(&body) == nil
+	if decoded && response.StatusCode == http.StatusServiceUnavailable && body.Code == listenerRefillingCode {
+		return &RefillingError{RetryAfter: response.Header.Get("Retry-After"), route: route, reason: body.Error}
+	}
+	if !decoded || body.Error == "" {
+		return fmt.Errorf("%w: %s returned %d", ErrUnavailable, route, response.StatusCode)
+	}
+	return fmt.Errorf("%w: %s returned %d: %s", ErrUnavailable, route, response.StatusCode, body.Error)
 }

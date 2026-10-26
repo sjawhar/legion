@@ -35,6 +35,7 @@ const issue: Issue = {
 const details: IssueDetails = {
   route_status: null,
   route_holder: null,
+  route_status_reason: null,
   ...issue,
   artifacts: [],
   children: [],
@@ -48,6 +49,7 @@ const summary: IssueSummary = {
   resolved_repo: null,
   route_status: null,
   route_holder: null,
+  route_status_reason: null,
   assignee: issue.assignee,
   claim: null,
   components: { mode: "inherit", ids: [], unknown: [], reason: null, inherited_from: null },

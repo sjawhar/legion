@@ -319,19 +319,28 @@ export interface Issue {
  * Whether an issue's route reaches a running session right now: `live` when a live session
  * holds the role or the routed session is live, `no_holder` when nobody live holds the role (it
  * is unclaimed or its holder's session lapsed) or the session is not live, `unknown` when the
- * Envoy listener did not answer (never read as live).
+ * Envoy listener gave no list to judge it by (never read as live, nor as `no_holder`).
  */
 export type IssueRouteStatus = (typeof ISSUE_ROUTE_STATUSES)[number];
 
 /**
+ * Why a route reads `unknown`: `refilling` when the Envoy listener answered that its agent list
+ * is refilling (it will be back in a moment, and a missing holder there says nothing), and
+ * `unreachable` when the listener is not configured, did not answer, or failed otherwise.
+ */
+export type IssueRouteStatusReason = "refilling" | "unreachable";
+
+/**
  * Every issue read (the detail, the list, the pinned list) resolves this from one listener read
  * per request. It is stored nowhere and is never on an event payload, which is why it is not a
- * field of `Issue`. Both are null when the issue has no route.
+ * field of `Issue`. All three are null when the issue has no route.
  */
 export interface IssueRouteReach {
   readonly route_status: IssueRouteStatus | null;
   /** The live session the route reaches; set only when `route_status` is `live`. */
   readonly route_holder: string | null;
+  /** Why the route could not be judged; set exactly when `route_status` is `unknown`. */
+  readonly route_status_reason: IssueRouteStatusReason | null;
 }
 
 /**

@@ -821,6 +821,7 @@ const coreIssue: IssueSummary = {
   resolved_repo: null,
   route_holder: null,
   route_status: null,
+  route_status_reason: null,
   status: "todo",
   title: "Core work",
   updated_at: "2026-09-14T00:00:00Z",

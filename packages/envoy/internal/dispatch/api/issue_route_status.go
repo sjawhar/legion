@@ -2,10 +2,12 @@ package api
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"strings"
 	"time"
 
+	"github.com/sjawhar/envoy/internal/dispatch/envoy"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 )
 
@@ -26,10 +28,14 @@ import (
 // registry. The owner audit (skills/dispatch) asks for two reads ten minutes apart instead.
 
 // routeRoster is one listener answer about who is running, read once per request. answered is
-// false when the listener is unconfigured or did not answer; every route then reads unknown.
+// false when the listener is unconfigured or gave no list; every route then reads unknown, and
+// reason says why: model.RouteReasonRefilling for the listener's refilling answer, whose
+// Retry-After rides in retryAfter, model.RouteReasonUnreachable for anything else.
 type routeRoster struct {
-	answered bool
-	live     map[string]struct{}
+	answered   bool
+	reason     string
+	retryAfter string
+	live       map[string]struct{}
 	// holders maps a role to the live session holding it. The listener gives a role one holder
 	// (last claim wins); should two live rows ever name one role, the most recently seen session
 	// is named, and the id breaks a tie, so a read never flips between them.
@@ -42,17 +48,21 @@ type routeRoster struct {
 const routeRosterTimeout = 2 * time.Second
 
 // readRouteRoster asks the listener who is running. A read never fails on the listener's
-// account: a listener that is unconfigured, does not answer, or answers late leaves every route
-// unknown.
+// account: a listener that is unconfigured, does not answer, answers late, or is refilling its
+// list leaves every route unknown.
 func (s *server) readRouteRoster(ctx context.Context) routeRoster {
 	if s.deps.Envoy == nil {
-		return routeRoster{}
+		return routeRoster{reason: model.RouteReasonUnreachable}
 	}
 	ctx, cancel := context.WithTimeout(ctx, routeRosterTimeout)
 	defer cancel()
 	sessions, err := s.deps.Envoy.Sessions(ctx)
-	if err != nil {
-		return routeRoster{}
+	var refilling *envoy.RefillingError
+	switch {
+	case errors.As(err, &refilling):
+		return routeRoster{reason: model.RouteReasonRefilling, retryAfter: refilling.RetryAfter}
+	case err != nil:
+		return routeRoster{reason: model.RouteReasonUnreachable}
 	}
 	roster := routeRoster{
 		answered: true,
@@ -75,16 +85,16 @@ func (s *server) readRouteRoster(ctx context.Context) routeRoster {
 	return roster
 }
 
-// reach judges one route against the roster: null for no route, unknown when the listener did
-// not answer, live with the holder when a running session receives it, no_holder otherwise. A
-// stored route that no longer parses reaches nobody.
+// reach judges one route against the roster: null for no route, unknown with the roster's reason
+// when the listener gave no list, live with the holder when a running session receives it,
+// no_holder otherwise. A stored route that no longer parses reaches nobody.
 func (r routeRoster) reach(route *string) model.IssueRouteReach {
 	if route == nil {
 		return model.IssueRouteReach{}
 	}
 	status := func(value string) *string { return &value }
 	if !r.answered {
-		return model.IssueRouteReach{RouteStatus: status(model.RouteUnknown)}
+		return model.IssueRouteReach{RouteStatus: status(model.RouteUnknown), RouteStatusReason: status(r.reason)}
 	}
 	parsed, err := model.ParseRoute(*route)
 	if err != nil {

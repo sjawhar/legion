@@ -4,6 +4,11 @@
 
 ### Added
 
+- `IssueRouteReach.route_status_reason` (`IssueRouteStatusReason`: `"refilling" | "unreachable"`,
+  or null), on `IssueSummary` and `IssueDetails`: why a route reads `unknown`, set exactly then.
+  `refilling` is an Envoy listener that answered that its agent list is refilling, so the route
+  stays `unknown`, never `no_holder`, until the list is back; `unreachable` is a listener that is
+  not configured, did not answer, or failed otherwise (INFRA-261).
 - `dispatch_read` takes `events` (a positive integer, the issue's last N events) and `all_events`
   (every event), for an issue read and its `dispatch://KEY/log`, and its description says an issue
   read lists the last 10 without either.
