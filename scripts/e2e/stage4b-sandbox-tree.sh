@@ -2755,7 +2755,7 @@ cleanup() {
     fi
   fi
   for p in $(run_processes); do kill -KILL "$p" 2>/dev/null; done
-  docker rm -f "$pg_container" "$session_db_container" >/dev/null 2>&1
+  docker rm -f -v "$pg_container" "$session_db_container" >/dev/null 2>&1
   rm -rf "$work"
   # The notes are for a checkpoint that failed itself: none once ok is set, after a blocked
   # checkpoint, or after a signal (129, 130, 143, as trapped below). Otherwise a failed teardown
@@ -3321,7 +3321,7 @@ session_db_password=$(od -An -N24 -tx1 /dev/urandom | tr -d ' \n')
   printf 'postgres://legion:%s@%s:%s/sessions?sslmode=disable\n' "$session_db_password" "$host" "$port_session_db" >"$work/session-dsn"
 )
 unset session_db_password
-docker run -d --name "$session_db_container" --cpus 2 --memory 2g --mount type=tmpfs,destination=/var/lib/postgresql/data \
+docker run -d --name "$session_db_container" --cpus 2 --memory 4g --mount type=tmpfs,destination=/var/lib/postgresql/data \
   --env-file "$work/session-db.env" -p "$host:$port_session_db:5432" "$session_db_image" >/dev/null ||
   fail "docker could not start the scratch session database $session_db_container on $host:$port_session_db"
 until_true 60 "the session database to accept TCP connections" docker exec "$session_db_container" pg_isready -h 127.0.0.1 -p 5432 -U legion -d sessions

@@ -9,15 +9,20 @@ the stage scripts share: standalone helpers they run, and the files they source
 [`lib/namespace-rig.sh`](#libnamespace-rigsh), [`lib/kind-sandbox.sh`](#libkind-sandboxsh), [`lib/omp-home.sh`](#libomp-homesh), [`lib/box-login.sh`](#libbox-loginsh)), which `shellcheck` follows from this directory
 through `scripts/e2e/.shellcheckrc`.
 
-Every container these scripts start carries a CPU and a memory limit, set inline on its
-`docker run`, and is removed when the run ends (an `EXIT` trap's `docker rm -f`, or `--rm`): the
-proofs run on a shared devbox, where an unbounded container takes cores and memory from every other
-run there. A scratch Postgres (Stage 1, 2, 3, 4a's and 4b's session databases, the pgvector stores)
-gets `--cpus 2 --memory 2g`, which also holds its `tmpfs` data directory, since tmpfs is charged to
-the container's memory; NATS gets `--cpus 1 --memory 512m`, enough for its JetStream streams of a
-single run; a kind proof's driver, a static Go test binary that runs the daemon against the kind
-cluster, gets `--cpus 2 --memory 2g`. The kind cluster's own node container is kind's, not a
-`docker run` of these scripts.
+Every `docker run` in these scripts sets a CPU and a memory limit inline, and its container is
+removed when the run ends (an `EXIT` trap's `docker rm -f -v`, or `--rm`): the proofs run on a
+shared devbox, where an unbounded container takes cores and memory from every other run there.
+Every scratch Postgres keeps its data directory on `tmpfs`, so no run leaves a volume behind, and
+tmpfs is charged to the container's memory. Every scratch Postgres gets `--cpus 2 --memory 2g`,
+except the session databases of Stage 4a and Stage 4b, which get `--cpus 2 --memory 4g`: they hold
+every pod's Oh My Pi session for the whole run, hours for Stage 4b. NATS gets `--cpus 1 --memory
+512m`, enough for one run's JetStream streams. A kind proof's containers on the kind network get
+`--cpus 2 --memory 2g`: each runs one static binary from the work directory, a Go test driver that
+runs the daemon against the cluster or, in `share-volumes-kind.sh`'s probe, `legion probe-boot`.
+The one exception is kind's node container, which `kind create cluster` starts
+([`lib/kind-sandbox.sh`](#libkind-sandboxsh)): it has no limit, because the kubelet inside it
+reads the host's capacity, not a cgroup cap. The test pods declare 8 to 32 Gi memory limits, so a
+cap on the node would kill those pods without the kubelet knowing why.
 
 | script | proves |
 | :--- | :--- |

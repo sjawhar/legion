@@ -31,7 +31,7 @@ listener_pid=
 cleanup() {
   if [ -n "${dispatch_pid:-}" ]; then kill -TERM "$dispatch_pid" 2>/dev/null || true; fi
   if [ -n "${listener_pid:-}" ]; then kill -TERM "$listener_pid" 2>/dev/null || true; fi
-  docker rm -f "$pg_name" "$nats_name" >/dev/null 2>&1 || true
+  docker rm -f -v "$pg_name" "$nats_name" >/dev/null 2>&1 || true
   return 0
 }
 
@@ -127,9 +127,10 @@ echo "  issuer=$issuer"
 absent_issuer="${issuer%/*}/00000000000000000000000000000000"
 
 echo "== pgvector/pgvector (pinned digest) and nats:2.10 on ephemeral loopback ports"
-docker rm -f "$pg_name" "$nats_name" >/dev/null 2>&1 || docker ps >/dev/null # a missing container is fine; a broken docker is not
+docker rm -f -v "$pg_name" "$nats_name" >/dev/null 2>&1 || docker ps >/dev/null # a missing container is fine; a broken docker is not
 trap cleanup EXIT
-docker run -d --name "$pg_name" --cpus 2 --memory 2g -e POSTGRES_USER=dispatch -e POSTGRES_PASSWORD=dispatch \
+docker run -d --name "$pg_name" --cpus 2 --memory 2g --mount type=tmpfs,destination=/var/lib/postgresql/data \
+  -e POSTGRES_USER=dispatch -e POSTGRES_PASSWORD=dispatch \
   -e POSTGRES_DB=dispatch -p 127.0.0.1::5432 pgvector/pgvector@sha256:7b822b0aac60967beb1ea5e576b8602c94c300a157d187f385ae3e0da199b90a >/dev/null
 docker run -d --name "$nats_name" --cpus 1 --memory 512m -p 127.0.0.1::4222 -p 127.0.0.1::8222 nats:2.10 -js -m 8222 >/dev/null
 # Over TCP, not the container's unix socket: the entrypoint's bootstrap phase answers on the

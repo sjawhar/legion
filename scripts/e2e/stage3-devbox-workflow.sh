@@ -194,7 +194,7 @@ cleanup() {
   fi
   TMUX_TMPDIR="$work/tmux" tmux -L "legion-$ptoken" kill-server >/dev/null 2>&1 || true
   for p in $(run_processes); do kill -KILL "$p" 2>/dev/null || true; done
-  docker rm -f "$pg_container" "$nats_container" >/dev/null 2>&1 || true
+  docker rm -f -v "$pg_container" "$nats_container" >/dev/null 2>&1 || true
   collect_transcripts
   close_unpassed_run_pull_requests
   rm -rf "$work/model-gateway-cache" || true
@@ -1452,7 +1452,7 @@ if [ "$model_route" = box-login ]; then
   unlink_box_login_db "$profile_agent"
 fi
 TMUX_TMPDIR="$work/tmux" tmux -L "legion-$ptoken" kill-server >/dev/null 2>&1 || true
-docker rm -f "$pg_container" "$nats_container" >/dev/null 2>&1 || true
+docker rm -f -v "$pg_container" "$nats_container" >/dev/null 2>&1 || true
 for p in $(run_processes); do kill -KILL "$p" 2>/dev/null || true; done
 [ "$(docker ps -aq --filter "name=^/$pg_container$" --filter "name=^/$nats_container$")" = "" ] || fail "a proof container remains"
 TMUX_TMPDIR="$work/tmux" tmux -L "legion-$ptoken" has-session 2>/dev/null && fail "the proof tmux server remains"

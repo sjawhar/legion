@@ -138,7 +138,7 @@ cleanup() {
   stop_pid "$listener_pid"
   TMUX_TMPDIR="$work/tmux" tmux -L "legion-$ptoken" kill-server >/dev/null 2>&1 || true
   for p in $(run_processes); do kill -KILL "$p" 2>/dev/null || true; done
-  docker rm -f "$pg_container" "$nats_container" >/dev/null 2>&1 || true
+  docker rm -f -v "$pg_container" "$nats_container" >/dev/null 2>&1 || true
   collect_transcripts
   remove_run_branch
   rm -rf "$work/model-gateway-cache" || true

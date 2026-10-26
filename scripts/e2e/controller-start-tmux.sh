@@ -71,7 +71,7 @@ cleanup() {
   TMUX_TMPDIR=$work/tmux tmux -L "legion-$ptoken" kill-server >/dev/null 2>&1
   stop_pid "$listener_pid"
   for p in $(run_processes); do kill -KILL "$p" 2>/dev/null; done
-  docker rm -f "$nats_container" "$pg_container" >/dev/null 2>&1
+  docker rm -f -v "$nats_container" "$pg_container" >/dev/null 2>&1
   rm -rf "$work"
   [ -n "$ok" ] || echo "controller start e2e: FAIL (check $check)"
   echo "evidence: $evidence (transcript.log, logs/daemon.log, logs/listener.log, and checks/: each check's own output and the controller panes)"

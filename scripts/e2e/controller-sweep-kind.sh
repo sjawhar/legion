@@ -48,7 +48,7 @@ fail() { echo "FAIL $check: $*" >&2; exit 1; }
 
 cleanup() {
   local status=$?
-  docker rm -f "$driver" "$pg" >/dev/null 2>&1 || true
+  docker rm -f -v "$driver" "$pg" >/dev/null 2>&1 || true
   kind_sandbox_teardown "$status" "$evidence"
   rm -rf "$work"
   if [ "$status" -eq 0 ]; then
