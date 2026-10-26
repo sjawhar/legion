@@ -869,16 +869,44 @@ describe("fail-open", () => {
     expect(g.entries).toMatchObject([{ decision: "allow", outcome: "error" }]);
     expect(g.entries[0].reason).toContain("context unavailable");
   });
-  test("a call whose record cannot be written still counts once toward the halt", async () => {
+  // Outside review of #2159 at 31c5cca3b, finding 9: the catch around the entry discarded its
+  // error and let the write go, which the committed test pinned. "Every write that posts
+  // unreviewed is recorded" then held only while the session file took the record. A write that
+  // no review stands behind is refused when its record fails; the call still counts once toward
+  // the halt, since the gate did reach no verdict.
+  test("F9: a call that would pass unreviewed is refused when its record cannot be written, and counts once toward the halt", async () => {
+    for (const mode of ["warn", "block"]) {
+      const g = bind({
+        recordThrows: true,
+        env: { OMP_ASKGATE: mode, OMP_ASKGATE_TIMEOUT_MS: "20" },
+        complete: untilAborted,
+      });
+      for (const id of ["a", "b", "c", "d"]) {
+        const result = await g.device(id, "dispatch_comment", COMMENT);
+        expect(result?.block).toBe(true);
+        expect(result?.reason).toContain("AskGate did not send this call");
+        expect(result?.reason).toContain("session file unavailable");
+        expect(result?.reason).toContain("askgate.enabled");
+      }
+      expect(g.calls).toHaveLength(3);
+      expect(g.notices).toHaveLength(1);
+    }
+  });
+  test("F9: a write the model allowed still posts when its record fails, since it was reviewed", async () => {
+    const g = bind({ recordThrows: true, env: { OMP_ASKGATE: "block" } });
+    expect((await g.device("t1", "dispatch_comment", COMMENT))?.block).toBeUndefined();
+    expect(g.calls).toHaveLength(1);
+  });
+  test("F9: a refused write whose record fails keeps its own refusal", async () => {
     const g = bind({
       recordThrows: true,
-      env: { OMP_ASKGATE_TIMEOUT_MS: "20" },
-      complete: untilAborted,
+      env: { OMP_ASKGATE: "block" },
+      complete: async () => ({ text: REVISE }),
     });
-    for (const id of ["a", "b", "c", "d"])
-      expect((await g.device(id, "dispatch_comment", COMMENT))?.block).toBeUndefined();
-    expect(g.calls).toHaveLength(3);
-    expect(g.notices).toHaveLength(1);
+    const result = await g.device("t1", "dispatch_comment", COMMENT);
+    expect(result?.block).toBe(true);
+    expect(result?.reason).toContain("AskGate did not send this call.");
+    expect(result?.reason).toContain("failure 7");
   });
 });
 

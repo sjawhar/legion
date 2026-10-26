@@ -128,7 +128,10 @@
 //     as `deliveredReason`.
 // Every outcome other than an unscoped or subagent call appends one `advisor-gate` entry
 // (pi.appendEntry, never sent to the model) with the deadline it raced and every attempt's
-// usage, the aborted one included. Every path fails open but
+// usage, the aborted one included. That record is what lets a write out unreviewed: when the
+// entry of a call the gate did not review throws, the call is refused in both modes, with a
+// reason naming the failure and the switch. A write the model allowed was reviewed, so its own
+// record failing does not hold it back. Every path fails open but
 // one: a throw inside the handler is recorded as `error` and the call runs, and the deadline keeps
 // the handler inside the runner's ceiling, whose expiry would refuse the call. The exception is a
 // call given up without a verdict. When the call's tool ends first anyway (a user abort, or that
@@ -1823,6 +1826,13 @@ const NO_VERDICT_REFUSAL: Record<"abandoned" | "shutdown", string> = {
 };
 /** The refusal for a call in a session where no model role the gate asks resolves. */
 const NO_MODEL_ROLE_REFUSAL = `AskGate did not send this call: it reviews each Dispatch write before it posts, and this session has no model for it. Set modelRoles.askgate or modelRoles.default in the Oh My Pi settings, then send the call again. To turn AskGate off for this session, set askgate.enabled to false in the session's envoy.json.`;
+/**
+ * The refusal for a write that no review stands behind and whose record could not be written.
+ * Every such write is recorded, so that a reader of the session knows what went out unreviewed;
+ * with no record the write does not go.
+ */
+const recordFailureRefusal = (message: string, configFile: string) =>
+  `AskGate did not send this call: no review stands behind it, and AskGate could not record that in the session (${message}). Every Dispatch write that posts unreviewed is recorded, so AskGate holds this one back. Send it again once the session takes its entries. To turn AskGate off for this session, set askgate.enabled to false in ${configFile}.`;
 // A comment or message cannot be edited or deleted, so its only fix is one more post; the note says so,
 // rather than offering an edit the agent cannot make (two lanes resent whole comments chasing one).
 const renderWarn = (reason: string, second: boolean) =>
@@ -2842,8 +2852,19 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
           ...decision.fields,
           latencyMs: deps.now() - started,
         } satisfies GateEntry);
-      } catch {
-        // The entry is best effort; the call still runs.
+      } catch (error) {
+        // A write no review stands behind posts only when the record of that is written: the
+        // record is the whole account of what went out unreviewed. So a record that fails
+        // refuses the call, in both modes. A write the model allowed was reviewed, and still
+        // posts; a call already refused keeps its own refusal.
+        if (decision.fields.decision === "allow" && decision.fields.outcome !== "verdict") {
+          releaseSnapshots(event.toolCallId);
+          notices.delete(event.toolCallId);
+          return {
+            block: true,
+            reason: recordFailureRefusal(messageOf(error), deps.configFile),
+          };
+        }
       }
       // The same note goes on the call's own result (`deliverNotice`), which every caller reads:
       // a call an eval cell made has no loop sink for `additionalContext`, and a note the agent
