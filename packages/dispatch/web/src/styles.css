@@ -105,10 +105,11 @@ a {
      15px and 14px at 12px (padding / clearance from the lower link's padded box to the upper
      link's text): a message turn, 16px on 24px lines, 2.4px / 2.6px; an Inbox ask card
      (`AskCard.tsx`), 15px on 24.375px, 3.2px / 3.2px; an agent-view message body (`text-sm`),
-     14px on 20px, 1.6px / 2.4px; document prose, 16px on 28px, 4.4px / 4.6px; an agent turn's
-     reasoning (`AgentThread.tsx`, `text-xs`), 12px on 16px, 0.8px / 1.2px. A fixed 3px there
-     measured -1px, reaching into the letters of the line above, and a fixed 4px on a message
-     turn measured a clearance of 1px (INFRA-95).
+     14px on 20px, 1.6px / 2.4px; a document in the editor (`.milkdown p` in proof-editor's
+     `lib.css`, line height 1.6), 16px on 25.6px, 3.2px / 3.4px; an agent turn's reasoning
+     (`AgentThread.tsx`, `text-xs`), 12px on 16px, 0.8px / 1.2px. A fixed 3px there measured
+     -1px, reaching into the letters of the line above, and a fixed 4px on a message turn
+     measured a clearance of 1px (INFRA-95).
 
      No fallback declaration: Tailwind v4's browser floor supports `lh`, and a browser
      without it drops the declaration and gives the link no padding, which never overlaps.
