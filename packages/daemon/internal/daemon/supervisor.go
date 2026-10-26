@@ -300,10 +300,11 @@ func (s *supervisor) wait() {
 // way and supervision.stop cancels s.ctx before the stream closes, releasing every held hello
 // rather than leaving one to time out mid-boot naming a credential problem that does not exist.
 // The token is resolved again once restoration ends, under a fresh bound: the hold lasts as long
-// as the boot's readiness gate waits, and the first resolve's generation and Stale flag are only
-// ever as fresh as the moment they were read. Judging the hold by that first result would accept a
-// generation its claim has left meanwhile, taking the stream slot the new generation's own hello
-// then finds "already bound to a live stream".
+// as the boot's readiness gate waits and its terminal replay runs (supervision.start), and the
+// first resolve's generation and Stale flag are only ever as fresh as the moment they were read.
+// Judging the hold by that first result would accept a generation its claim has left meanwhile,
+// taking the stream slot the new generation's own hello then finds "already bound to a live
+// stream".
 //
 // A store that fails either read answers the hello with that error, never as an unknown token: the
 // failure says nothing about the token, and the listener closes the connection unrefused for the

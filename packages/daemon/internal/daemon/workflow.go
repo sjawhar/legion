@@ -496,31 +496,47 @@ func (w *workflowRuntime) attach(supervision *supervision) {
 }
 
 // replayTerminal applies the ready or failure fact of every stored claim in either state that no
-// earlier daemon applied: a claim that reached it while no daemon ran, or whose live apply
-// (terminal) failed. Nearly all were applied when they happened, and each one replayed through
-// ApplyFact would still take the fact lock to find so, so the replay reads which are applied in one
-// query (intake.Applied) and applies only the rest. A boot over hundreds of ready and failed claims
-// pays one read for them, not a serial transaction each that waits behind every live fact on the
-// lock and on the database, inside the boot's budget (supervision.start runs it before any hello).
-func (w *workflowRuntime) replayTerminal(ctx context.Context, claims []supervise.Claim) error {
+// daemon applied: one whose live apply (terminal) failed, or whose fact a daemon's stop cut off
+// after the claim's state was written. Nearly all were applied when they happened, and ApplyFact
+// would take the fact lock only to find so, so the replay reads which are applied in one query
+// (intake.Applied) and applies only the rest, one at a time as every fact applies.
+//
+// The read and each fact get budget of their own, on ctx, the daemon's lifetime, rather than one
+// budget shared by the whole replay. A fact may wait its turn on the lock behind a live one (a
+// restored claim's failure, a daemon of another project on the same database), so a replay of
+// hundreds of facts takes as long as they take, and the boot never exits on their count; a
+// Postgres that never answers still ends the boot within one budget, and the daemon's stop ends
+// the replay. supervision.start runs it before any hello is admitted.
+func (w *workflowRuntime) replayTerminal(ctx context.Context, claims []supervise.Claim, budget time.Duration) error {
 	var terminal []supervise.Claim
 	var ids []string
 	for _, c := range claims {
-		if c.State != supervise.StateReady && c.State != supervise.StateFailed {
+		if (c.State != supervise.StateReady && c.State != supervise.StateFailed) || c.Role == claim.RoleController {
 			continue
 		}
 		terminal = append(terminal, c)
 		ids = append(ids, terminalEventID(c, c.State))
 	}
-	applied, err := intake.Applied(ctx, w.pool, terminalSource, ids)
+	read, cancel := context.WithTimeout(ctx, budget)
+	applied, err := intake.Applied(read, w.pool, terminalSource, ids)
+	cancel()
 	if err != nil {
 		return fmt.Errorf("replay the stored claims' terminal facts: %w", err)
 	}
+	var unapplied []supervise.Claim
 	for i, c := range terminal {
-		if applied[ids[i]] {
-			continue
+		if !applied[ids[i]] {
+			unapplied = append(unapplied, c)
 		}
-		if err := w.applyTerminal(ctx, c, c.State); err != nil {
+	}
+	if len(unapplied) > 0 {
+		w.log.Info("legion daemon is replaying the terminal facts no daemon applied", "count", len(unapplied), "terminalClaims", len(terminal))
+	}
+	for _, c := range unapplied {
+		fact, cancel := context.WithTimeout(ctx, budget)
+		err := w.applyTerminal(fact, c, c.State)
+		cancel()
+		if err != nil {
 			return err
 		}
 	}

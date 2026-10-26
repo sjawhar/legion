@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/sjawhar/legion/daemon/internal/api"
@@ -45,8 +46,8 @@ func terminalClaims(t *testing.T, project string, n int) []supervise.Claim {
 
 // A boot replays the ready or failure fact of every stored claim in either state, and nearly all
 // were applied when they happened. Those duplicates must not queue on the fact lock behind a live
-// fact: a boot over hundreds of them, each waiting there in turn on the boot's budget, ran out of it
-// and exited with `serialize fact supervise/…: context deadline exceeded`. Here a live fact holds
+// fact: a boot over hundreds of them, each waiting there in turn on its budget, ran out of it and
+// exited with `serialize fact supervise/…: context deadline exceeded`. Here a live fact holds
 // the lock for the whole replay; the replay of facts already applied finishes anyway and applies
 // nothing again, and a claim's fact no daemon applied is still applied, once the lock is free.
 func TestTheBootsReplayOfAppliedTerminalFactsWaitsBehindNoLiveFact(t *testing.T) {
@@ -54,7 +55,7 @@ func TestTheBootsReplayOfAppliedTerminalFactsWaitsBehindNoLiveFact(t *testing.T)
 	handler := &outboxFactHandler{}
 	w := &workflowRuntime{pool: pool, handlers: []intake.Handler{handler}, log: quietLogger()}
 	claims := terminalClaims(t, "legion", 300)
-	if err := w.replayTerminal(context.Background(), claims); err != nil {
+	if err := w.replayTerminal(context.Background(), claims, bootTimeout); err != nil {
 		t.Fatalf("the first replay: %v", err)
 	}
 	if got := len(handler.facts()); got != len(claims) {
@@ -71,10 +72,8 @@ func TestTheBootsReplayOfAppliedTerminalFactsWaitsBehindNoLiveFact(t *testing.T)
 	if err := intake.SerializeFacts(context.Background(), live); err != nil {
 		t.Fatalf("take the fact lock as a live fact does: %v", err)
 	}
-	budget, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
 	started := time.Now()
-	err = w.replayTerminal(budget, claims)
+	err = w.replayTerminal(context.Background(), claims, 5*time.Second)
 	took := time.Since(started)
 	if err != nil {
 		t.Fatalf("the replay behind a live fact holding the lock = %v after %s, want it done without the lock", err, took)
@@ -86,23 +85,122 @@ func TestTheBootsReplayOfAppliedTerminalFactsWaitsBehindNoLiveFact(t *testing.T)
 		t.Fatal(err)
 	}
 
-	unapplied := terminalClaims(t, "legion", len(claims)+1)
-	if err := w.replayTerminal(context.Background(), unapplied); err != nil {
+	// The next boot's claims mix every state a boot reads: a working claim, a launch the boot left
+	// uncertain and the controller's ready, none of them a workflow fact, then the 300 applied, then
+	// one ready claim no daemon applied, which alone is applied.
+	project := "legion"
+	working, _ := claim.NewToken(project, "LEGION-901", claim.RoleImplementer)
+	uncertain, _ := claim.NewToken(project, "LEGION-902", claim.RoleTester)
+	mixed := []supervise.Claim{
+		{Token: working, Project: project, Tree: "LEGION-901", Issue: "LEGION-901", Role: claim.RoleImplementer, Generation: 1, State: supervise.StateWorking},
+		{Token: uncertain, Project: project, Tree: "LEGION-902", Issue: "LEGION-902", Role: claim.RoleTester, Generation: 1, State: supervise.StateLaunchUncertain},
+		{Token: claim.ControllerToken(project), Project: project, Role: claim.RoleController, Generation: 1, State: supervise.StateReady},
+	}
+	next := terminalClaims(t, project, len(claims)+1)
+	mixed = append(mixed, next...)
+	if err := w.replayTerminal(context.Background(), mixed, bootTimeout); err != nil {
 		t.Fatalf("the replay with one claim's fact unapplied: %v", err)
 	}
 	facts := handler.facts()
 	if len(facts) != len(claims)+1 {
 		t.Fatalf("the replay with one claim's fact unapplied applied %d, want exactly that one", len(facts)-len(claims))
 	}
-	last := unapplied[len(unapplied)-1]
+	last := next[len(next)-1]
 	if want := (intake.ClaimReady{Issue: last.Issue, Role: last.Role, Launch: last.Generation}); facts[len(facts)-1] != want {
 		t.Fatalf("the replay applied %#v, want %#v", facts[len(facts)-1], want)
 	}
 }
 
+// slowFactHandler is a workflow handler each of whose facts takes delay to apply, as a handler's
+// reads and writes take time on a loaded database, and that counts the facts it applied.
+type slowFactHandler struct {
+	delay time.Duration
+	mu    sync.Mutex
+	seen  map[intake.Fact]int
+}
+
+func (h *slowFactHandler) Apply(ctx context.Context, _ pgx.Tx, fact intake.Fact) (intake.Result, error) {
+	select {
+	case <-time.After(h.delay):
+	case <-ctx.Done():
+		return intake.Result{}, ctx.Err()
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.seen[fact]++
+	return intake.Result{}, nil
+}
+
+func (h *slowFactHandler) applied(fact intake.Fact) int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.seen[fact]
+}
+
+// A boot must not die on the number of terminal facts no daemon applied. Those it replays one at a
+// time, each taking the fact lock, and each may wait there behind live facts: here 100 restored
+// claims fail while the replay runs, and their failures (terminal) apply beside it. The 300
+// replayed facts and the 100 live ones take several times the replay's budget between them; the
+// replay still finishes, since the budget is each fact's own, and every fact, replayed or live, is
+// applied exactly once.
+func TestAReplayOfHundredsOfUnappliedFactsBesideLiveFailuresOutlastsItsBudget(t *testing.T) {
+	const budget = 5 * time.Second
+	pool := isolatedOutboxPool(t)
+	handler := &slowFactHandler{delay: 20 * time.Millisecond, seen: map[intake.Fact]int{}}
+	w := &workflowRuntime{pool: pool, handlers: []intake.Handler{handler}, log: quietLogger(), failed: make(chan error, 1)}
+	replayed := terminalClaims(t, "legion", 300)
+	failing := make([]supervise.Claim, 100)
+	for i := range failing {
+		issue := fmt.Sprintf("LEGION-%d", 1001+i)
+		token, err := claim.NewToken("legion", issue, claim.RoleTester)
+		if err != nil {
+			t.Fatal(err)
+		}
+		failing[i] = supervise.Claim{Token: token, Project: "legion", Tree: issue, Issue: issue, Role: claim.RoleTester, Generation: 1, State: supervise.StateFailed, Failure: "pane exited"}
+	}
+
+	var live sync.WaitGroup
+	live.Add(len(failing))
+	started := time.Now()
+	for _, c := range failing {
+		go func() {
+			defer live.Done()
+			w.terminal(c, supervise.StateFailed)
+		}()
+	}
+	err := w.replayTerminal(context.Background(), replayed, budget)
+	took := time.Since(started)
+	live.Wait()
+	if err != nil {
+		t.Fatalf("the replay of %d unapplied facts beside %d live failures = %v after %s, want it finished", len(replayed), len(failing), err, took)
+	}
+	if took <= budget {
+		t.Fatalf("the replay took %s, within its budget of %s, so it proves nothing about outlasting it", took, budget)
+	}
+	select {
+	case err := <-w.failed:
+		t.Fatalf("a live failure failed to apply: %v", err)
+	default:
+	}
+	for _, c := range replayed {
+		var fact intake.Fact = intake.ClaimReady{Issue: c.Issue, Role: c.Role, Launch: c.Generation}
+		if c.State == supervise.StateFailed {
+			fact = intake.ClaimFailed{Issue: c.Issue, Role: c.Role, Reason: c.Failure}
+		}
+		if got := handler.applied(fact); got != 1 {
+			t.Fatalf("replayed %#v was applied %d times, want once", fact, got)
+		}
+	}
+	for _, c := range failing {
+		if fact := (intake.ClaimFailed{Issue: c.Issue, Role: c.Role, Reason: c.Failure}); handler.applied(fact) != 1 {
+			t.Fatalf("live %#v was applied %d times, want once", fact, handler.applied(fact))
+		}
+	}
+}
+
 // bootReconcileHeld is the fake runtime holding the boot's orphan reconciliation, the step of
-// supervision.start just before hellos are resolved, until every shim the test runs has said hello,
-// so each hello is in flight while the boot settles rather than arriving after it.
+// supervision.start before the terminal replay and the release of held hellos, until every shim
+// the test runs has sent its hello, so no hello arrives only after the boot has settled.
 type bootReconcileHeld struct {
 	*fake.Runtime
 	once  sync.Once
@@ -124,8 +222,8 @@ func (r *bootReconcileHeld) ReconcileOrphans(ctx context.Context, known []runtim
 // a fact under the fact lock, so a boot whose terminal replay ran after hellos were admitted
 // replayed behind all of that, on its 30 s budget, and exited when the budget ran out. The boot
 // settles first: no hello is acknowledged until the replay has applied every stored claim's ready
-// fact. Here every one of 200 ready claims' shims has said hello before the boot resolves hellos,
-// and each, as its hello_ack arrives, finds all 200 facts applied.
+// fact. Here every one of 200 ready claims' shims has sent its hello before the boot's orphan
+// reconciliation returns, and each, as its hello_ack arrives, finds all 200 facts applied.
 func TestABootReplaysEveryTerminalFactBeforeItAdmitsAnyHello(t *testing.T) {
 	const n = 200
 	cfg := workflowConfig(t, workflowNATS(t))
@@ -168,7 +266,15 @@ func TestABootReplaysEveryTerminalFactBeforeItAdmitsAnyHello(t *testing.T) {
 		}
 		events[i] = terminalEventID(c, c.State)
 	}
-	reader, err := pgxpool.New(ctx, cfg.PostgresDSN)
+
+	// The 200 shims count through a few connections of their own: a pool sized by the host's CPUs
+	// would open one per shim and can exhaust the test server's max_connections.
+	counting, err := pgxpool.ParseConfig(cfg.PostgresDSN)
+	if err != nil {
+		t.Fatal(err)
+	}
+	counting.MaxConns = 4
+	reader, err := pgxpool.NewWithConfig(ctx, counting)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -192,8 +298,11 @@ func TestABootReplaysEveryTerminalFactBeforeItAdmitsAnyHello(t *testing.T) {
 	}()
 	go func() {
 		var address string
-		for address == "" {
-			time.Sleep(5 * time.Millisecond)
+		for deadline := time.Now().Add(60 * time.Second); address == ""; time.Sleep(5 * time.Millisecond) {
+			if time.Now().After(deadline) {
+				// The daemon never built its runtime; startDaemonWithin fails the test.
+				return
+			}
 			record.mu.Lock()
 			address = record.address
 			record.mu.Unlock()
