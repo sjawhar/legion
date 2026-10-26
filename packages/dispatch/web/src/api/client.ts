@@ -562,8 +562,8 @@ export class DispatchApiClient {
       // An answer Dispatch gave stays its answer and the caller's abort stays the caller's: only
       // what the deadline cut short is a timeout.
       if (deadline.signal.aborted && !(error instanceof ApiError) && caller?.aborted !== true) {
-        // Dispatch went silent on it: it cannot be reached, as far as the page knows.
-        unreachable();
+        // Dispatch went silent on it: its route cannot be reached, as far as the page knows.
+        unreachable(path);
         throw new RequestTimeoutError(path, limit);
       }
       throw error;
@@ -573,12 +573,12 @@ export class DispatchApiClient {
   }
 
   /** Dispatch's response to one request, or its refusal as an `ApiError`; a connection that
-   *  failed is a `NetworkError`, and says Dispatch cannot be reached (`unreachable`). `arrived`,
-   *  for a request held to a deadline, runs as the request's body goes up (an upload's), as the
-   *  response's headers arrive and as each piece of its body does, the body of a refusal included;
-   *  `uploaded` is told how much of an upload's body has gone up. Any answer of Dispatch's own -
-   *  one below 500, which no gateway gives for a Dispatch that is down - says it can be reached
-   *  (`reachable`), which matters only once it could not be. */
+   *  failed is a `NetworkError`, and says Dispatch cannot be reached on its route
+   *  (`unreachable`). `arrived`, for a request held to a deadline, runs as the request's body goes
+   *  up (an upload's), as the response's headers arrive and as each piece of its body does, the
+   *  body of a refusal included; `uploaded` is told how much of an upload's body has gone up. Any
+   *  answer of Dispatch's own - one below 500, which no gateway gives for a Dispatch that is down -
+   *  says it can be reached on that route (`reachable`), which matters only once it could not be. */
   private async answered(
     path: string,
     init: RequestInit,
@@ -599,10 +599,10 @@ export class DispatchApiClient {
     } catch (error) {
       // An abort is the deadline's or the caller's (`exchange`), never the network's.
       if (init.signal?.aborted === true) throw error;
-      unreachable();
+      unreachable(path);
       throw new NetworkError(path, error);
     }
-    if (answer.status < 500) reachable("answer");
+    if (answer.status < 500) reachable("answer", path);
     arrived?.();
     const response = arrived === undefined ? answer : watchBody(answer, arrived);
     if (!response.ok) throw await errorFrom(response);

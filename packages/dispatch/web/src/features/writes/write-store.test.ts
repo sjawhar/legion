@@ -935,7 +935,8 @@ test("a write waiting its turn and never sent can be discarded; one out cannot",
 
 // W39. Only Dispatch becoming reachable again resets a failing write's backoff. A route that keeps
 // answering 503 while every other request the page makes succeeds backs off 1 s, 2 s, 4 s … to its
-// 30 s cap; once a request has failed to reach Dispatch, the next answer starts it over.
+// 30 s cap; once a request on its route has failed to reach Dispatch, the next answer there starts
+// it over.
 test("a route that keeps answering 503 backs off to its cap while other requests succeed", async () => {
   await onFakeClock(async () => {
     const { writes } = storeOf();
@@ -947,16 +948,85 @@ test("a route that keeps answering 503 backs off to its cap while other requests
     }).catch(() => {});
     for (let elapsed = 0; elapsed < 91_500; elapsed += 500) {
       // Another route's 2xx, while Dispatch was reachable all along.
-      reachable("answer");
+      reachable("answer", "/api/v1/projects");
       await tick(500);
     }
     const gaps = times.slice(1).map((at, index) => at - (times[index] ?? 0));
     expect(gaps.map((gap) => Math.round(gap / 1_000))).toEqual([1, 2, 4, 8, 16, 30, 30]);
 
-    unreachable();
-    reachable("answer");
+    unreachable(patch.path);
+    reachable("answer", patch.path);
     const made = times.length;
     await tick(2_200);
     expect(times.length).toBe(made + 2);
+  });
+});
+
+// W47. A failing write's backoff starts over only once the browser is online again, the live
+// socket reopens, or Dispatch answers on the write's own route. A route whose requests keep failing
+// at the connection - a proxy dropping one request shape - backs off 1 s, 2 s, 4 s … to its 30 s
+// cap however often the page's other routes answer meanwhile, even a route that came back after
+// failing too; an answer on its own route, after it failed there, starts it over.
+test("a route that keeps failing at the connection backs off to its cap while other routes answer", async () => {
+  await onFakeClock(async () => {
+    const { writes } = storeOf();
+    const times: number[] = [];
+    const start = Date.now();
+    let projectsUp = false;
+    const fetched = spyOn(globalThis, "fetch").mockImplementation((async (
+      input: RequestInfo | URL,
+      init?: RequestInit
+    ) => {
+      const path = String(input);
+      if (path === patch.path && init?.method === "PATCH") {
+        times.push(Date.now() - start);
+        throw new TypeError("Failed to fetch");
+      }
+      if (path === "/api/v1/projects" && !projectsUp) throw new TypeError("Failed to fetch");
+      return new Response("{}", { headers: { "Content-Type": "application/json" }, status: 200 });
+    }) as typeof fetch);
+    try {
+      void writes
+        .run({
+          detail: null,
+          kind: plainWrite,
+          label: "CORE-1 set to done",
+          presentation: "indicator",
+          write: (bounds) => api.send(patch, bounds),
+        })
+        .catch(() => {});
+      for (let elapsed = 0; elapsed < 91_500; elapsed += 500) {
+        // Another route, failing at the connection and answering by turns, after the write's own
+        // attempt failed at the connection.
+        projectsUp = !projectsUp;
+        void api.listProjects().catch(() => {});
+        await tick(500);
+      }
+      const gaps = times.slice(1).map((at, index) => at - (times[index] ?? 0));
+      expect(gaps.map((gap) => Math.round(gap / 1_000))).toEqual([1, 2, 4, 8, 16, 30, 30]);
+
+      // Its own route answering - a read of the issue, after another route answered last - starts
+      // it over.
+      projectsUp = false;
+      void api.listProjects().catch(() => {});
+      await settle();
+      projectsUp = true;
+      void api.listProjects().catch(() => {});
+      await settle();
+      const made = times.length;
+      void api.getIssue("CORE-1").catch(() => {});
+      await tick(2_200);
+      expect(times.length).toBe(made + 2);
+
+      // So does the live socket reopening after it was lost, once the backoff has grown again.
+      await tick(20_000);
+      const grown = times.length;
+      unreachable();
+      reachable("socket");
+      await tick(2_200);
+      expect(times.length).toBe(grown + 2);
+    } finally {
+      fetched.mockRestore();
+    }
   });
 });

@@ -12,7 +12,7 @@ import {
   type WriteBounds,
   type WriteRequest,
 } from "../../api/client";
-import { onReachable } from "../../api/reachability";
+import { onReachable, type Reachable } from "../../api/reachability";
 
 /**
  * How long a write may go unanswered before the page says so: past it the write is late, still
@@ -30,8 +30,9 @@ export const SEND_DEADLINE_MS = 30_000;
 export const KEYED_SEND_ATTEMPT_MS = 15_000;
 
 /** The wait before a write's first retry, doubling after each attempt that ends without Dispatch's
- *  verdict, up to `MAX_BACKOFF_MS`; it starts over only once Dispatch can be reached again after
- *  it could not (`reachability.ts`), never because Dispatch answered something else meanwhile. */
+ *  verdict, up to `MAX_BACKOFF_MS`; it starts over only once the page learns Dispatch can be
+ *  reached again on the write's own route (`reachability.ts`), never because Dispatch answered
+ *  something else meanwhile. */
 export const FIRST_BACKOFF_MS = 1_000;
 export const MAX_BACKOFF_MS = 30_000;
 
@@ -123,11 +124,17 @@ function retryAfter(
 /**
  * Waits `ms`, and says whether it waited for a reason to try again: `false` once `signal`
  * aborts, at once. A wait that `wakes` ends early - but never before `FIRST_BACKOFF_MS` of it,
- * so a write is not asked again in a tight loop - when the page learns Dispatch can be reached
- * again after it could not: the browser came back online, the live socket reopened after it was
- * lost, or Dispatch answered a request after one failed to reach it (`reachability.ts`).
+ * so a write is not asked again in a tight loop - when `regained` says the page learned Dispatch
+ * can be reached again on the write's route: the browser came back online, the live socket
+ * reopened after it was lost, or Dispatch answered on that route after a request there failed to
+ * reach it (`reachability.ts`).
  */
-function pause(ms: number, wakes: boolean, signal: AbortSignal | undefined): Promise<boolean> {
+function pause(
+  ms: number,
+  wakes: boolean,
+  signal: AbortSignal | undefined,
+  regained: (how: Reachable, path: string | undefined) => boolean
+): Promise<boolean> {
   if (signal?.aborted === true) return Promise.resolve(false);
   const { promise, resolve } = Promise.withResolvers<boolean>();
   const startedAt = Date.now();
@@ -142,7 +149,8 @@ function pause(ms: number, wakes: boolean, signal: AbortSignal | undefined): Pro
     end(false);
   }
   const stopWaking = wakes
-    ? onReachable(() => {
+    ? onReachable((how, path) => {
+        if (!regained(how, path)) return;
         clearTimeout(timer);
         const floor = Math.min(ms, FIRST_BACKOFF_MS) - (Date.now() - startedAt);
         timer = setTimeout(() => end(true), Math.max(0, floor));
@@ -185,11 +193,12 @@ export class OneRequestPerWriteError extends Error {
  * not JSON (`UnreadableAnswerError`), the person's session lapsed (`401`, told to `unauthorized`),
  * or Dispatch answered a 5xx, a 408, a 429 or `409 KEY_IN_FLIGHT` (`retriesUnderKey`) - is made
  * again after 1 s, 2 s, 4 s … never more than 30 s apart, or after Dispatch's `Retry-After`. Only
- * Dispatch becoming reachable again after it could not be reached - a transport failure or a
- * timeout, then an answer to any request; the browser coming back online; the live socket
- * reopening after it was lost - starts that backoff over and ends a wait early: an answer while it
- * was reachable all along resets nothing. However many attempts reach Dispatch, the key makes it
- * act once. Resolves with the 2xx,
+ * the page learning Dispatch can be reached again on the write's own route - the browser coming
+ * back online, the live socket reopening after it was lost, or an answer on this write's route
+ * after a request there failed at the connection or went silent - starts that backoff over and ends
+ * a wait early: the write's own transport failure followed by another route's answer resets
+ * nothing, nor does an answer while it was reachable all along. However many attempts reach
+ * Dispatch, the key makes it act once. Resolves with the 2xx,
  * or `null` for a write that landed with no answer to give - `409 KEY_COMMITTED`, or a replay
  * that did not keep the first answer - and for a `DELETE` an earlier attempt of which may have
  * landed and which Dispatch now answers `404` (the thing is gone either way). Rejects with
@@ -216,13 +225,16 @@ export async function writeUnderKey<T>(
     }
     sent?.(request);
   };
-  // Whether Dispatch became reachable again since the backoff last grew - after a transport
-  // failure or a timeout, the browser's `online`, the live socket reopening: the backoff starts
-  // over. An answer while it was reachable all along (another route's 2xx, this route's 5xx)
-  // changes nothing, so a route that keeps failing backs off to its cap.
+  // Whether Dispatch became reachable again on this write's route since the backoff last grew -
+  // the browser's `online`, the live socket reopening, an answer on the write's own path after a
+  // request there could not reach it: the backoff starts over. Another route's answer says nothing
+  // of this one, and an answer while it was reachable all along (this route's 5xx) changes nothing,
+  // so a route that keeps failing backs off to its cap.
+  const ownRoute = (how: Reachable, path: string | undefined) =>
+    how !== "answer" || (first !== undefined && path === first.path);
   let regained = false;
-  const stopListening = onReachable(() => {
-    regained = true;
+  const stopListening = onReachable((how, path) => {
+    if (ownRoute(how, path)) regained = true;
   });
   try {
     for (;;) {
@@ -247,7 +259,7 @@ export async function writeUnderKey<T>(
         if (isUnauthorized(error)) unauthorized?.();
         failed?.();
         unanswered ||= !(error instanceof ApiError) || error.status >= 500;
-        if (!(await pause(wait.ms, wait.wakes, signal))) throw new SendStoppedError();
+        if (!(await pause(wait.ms, wait.wakes, signal, ownRoute))) throw new SendStoppedError();
         if (wait.grows) backoff = Math.min(backoff * 2, MAX_BACKOFF_MS);
       }
     }
