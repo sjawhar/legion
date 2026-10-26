@@ -1411,6 +1411,13 @@
 
 ### Fixed
 
+- Every `envoy-infra` component refuses a number in an integer input that is not a whole number
+  within the 64-bit integer range, at any depth (an object type's property, an array element, a
+  map value), naming the component and the input's path and never quoting a secret value, before
+  anything registers. Pulumi decoded such a number into the component's integer by conversion, so
+  a typed SDK or Pulumi YAML program sending `replicas: 2.5` got 2 replicas with no error, and one
+  past the range got whatever the conversion gave. The check reads the plugin's own schema, so an
+  integer input added later is covered with no list to keep.
 - A Dispatch page in Firefox now shows what changed while its live event stream was reconnecting,
   such as a session's answer to a model switch, without waiting for the stream's heartbeat.
   Firefox opened the stream only once its first byte arrived, and a stream with no backlog and no
