@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"maps"
 	"net/http"
 	"net/http/httptest"
@@ -1344,13 +1345,22 @@ func TestSSEReplaysThenStreamsCommittedEvent(t *testing.T) {
 	}
 }
 
+// readSSEFrame reads the next frame that carries an event, the way an SSE client reads the
+// stream: a comment line (one starting with ":") is ignored, so a frame made only of comments --
+// the ": open" every stream starts with, and its heartbeats -- dispatches nothing and is skipped.
 func readSSEFrame(t *testing.T, scanner *bufio.Scanner) []string {
 	t.Helper()
 	frame := []string{}
 	for scanner.Scan() {
 		line := scanner.Text()
 		if line == "" {
-			return frame
+			if len(frame) > 0 {
+				return frame
+			}
+			continue
+		}
+		if strings.HasPrefix(line, ":") {
+			continue
 		}
 		frame = append(frame, line)
 	}
@@ -2491,6 +2501,62 @@ func TestSSEResumesAfterTheEventLogIsResetBeneathTheReader(t *testing.T) {
 		if id > live {
 			t.Fatalf("frame id = %d, above the %d committed after the reset", id, live)
 		}
+	}
+}
+
+// TestSSEStreamOpensAtOnceForABrowserWaitingOnItsFirstByte: a browser can hold its fetch of the
+// event stream unresolved until a body byte arrives (Firefox does), and so holds its reconnect
+// unopened, with the refresh it owes every query on open not yet run. A connection with no
+// backlog to replay and nothing new committing would send it nothing until the first heartbeat,
+// so the stream writes ": open" with its headers: the first body bytes arrive at once, cold or
+// resuming at the head, however long the heartbeat.
+func TestSSEStreamOpensAtOnceForABrowserWaitingOnItsFirstByte(t *testing.T) {
+	const heartbeat = time.Minute
+	const opened = ": open\n\n"
+	handler, database, _ := newTestServer(t, testServerOptions{streamHeartbeat: heartbeat})
+	createInteractionIssue(t, handler, "TEST", "Issue", "A spec")
+	head := eventHead(t, database)
+	httpServer := httptest.NewServer(handler)
+	t.Cleanup(httpServer.Close)
+
+	for _, connection := range []struct {
+		name   string
+		resume func(*http.Request)
+	}{
+		{name: "cold", resume: func(*http.Request) {}},
+		{name: "resuming at the head by since", resume: func(request *http.Request) {
+			request.URL.RawQuery = fmt.Sprintf("since=%d", head)
+		}},
+		{name: "resuming at the head by Last-Event-ID", resume: func(request *http.Request) {
+			request.Header.Set("Last-Event-ID", strconv.FormatInt(head, 10))
+		}},
+	} {
+		t.Run(connection.name, func(t *testing.T) {
+			// The deadline covers the request and the read of its first body bytes alike.
+			ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+			defer cancel()
+			request, err := http.NewRequestWithContext(ctx, http.MethodGet, httpServer.URL+"/api/v1/events", nil)
+			if err != nil {
+				t.Fatalf("construct SSE request: %v", err)
+			}
+			request.Header.Set("Authorization", "Bearer agent-token")
+			connection.resume(request)
+			started := time.Now()
+			stream, err := http.DefaultClient.Do(request)
+			if err != nil {
+				t.Fatalf("open SSE stream: %v", err)
+			}
+			defer stream.Body.Close()
+			if stream.StatusCode != http.StatusOK {
+				t.Fatalf("SSE status = %d, want 200", stream.StatusCode)
+			}
+			first := make([]byte, len(opened))
+			read, err := io.ReadFull(stream.Body, first)
+			if err != nil || string(first) != opened {
+				t.Fatalf("first body bytes = %q after %s (%v), want %q long before the %s heartbeat",
+					first[:read], time.Since(started).Round(time.Millisecond), err, opened, heartbeat)
+			}
+		})
 	}
 }
 

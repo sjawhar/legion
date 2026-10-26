@@ -79,7 +79,7 @@ func (s *Store) CheckLaunch(ctx context.Context, c supervise.Claim) error {
 // reserves nothing either, and the outbox's ordinary fences finish it. So does a close of a tree
 // that never had a lifecycle: a root that left admission's waiting line before a slot opened its
 // tree lingers like any root, but its tree holds nothing a cleanup releases (a carried child's
-// Sandbox its old tree handed over is the orphan sweep's once that linger ends, IssueSandboxHome).
+// own Sandbox is the orphan sweep's once that linger ends, IssueSandboxHome).
 func (s *Store) ReserveWorkflowTreeCleanup(ctx context.Context, project, tree string, rootGeneration uint64) (treelifecycle.Lifecycle, bool, error) {
 	var lifecycle treelifecycle.Lifecycle
 	var reserved bool
@@ -243,9 +243,9 @@ func (s *Store) TreeLive(ctx context.Context, project, tree string) (bool, error
 //
 // So a carried child that leaves the line before admission opens its tree — set to backlog,
 // icebox or done, or its label taken off — keeps its Sandbox for its own linger at most, and a
-// tree whose cleanup confirmed holds none. The tree cleanup hands a Sandbox whose home is another
-// tree over to it (sandbox.Runtime.CleanupTree), and the orphan sweep keeps one whose home is the
-// tree it is labelled with.
+// tree whose cleanup confirmed holds none. The orphan sweep keeps a Sandbox whose home is the
+// tree it is labelled with; a tree's cleanup deletes every Sandbox of its own tree, carrying
+// nothing over, since an issue pod's disk goes with its pod and its next launch makes both again.
 func (s *Store) IssueSandboxHome(ctx context.Context, project, issue string) (string, error) {
 	var home string
 	err := s.pool.QueryRow(ctx, `select coalesce((select case

@@ -29,9 +29,8 @@ import (
 
 var controllerToken = claim.ControllerToken(testProject)
 
-// controllerSession is a session the controller saved, as the supervisor records it: under Oh My
-// Pi's sessions directory, which the controller's launcher mounts from its volume's sessions
-// directory, as every launcher does.
+// controllerSession is a session the controller saved, as the supervisor records it: the path Oh
+// My Pi wrote it at in the pod it ran in.
 const controllerSession = ompSessionsDir + "/--legion--/2026-10-06T12-00-00-000Z_0001.jsonl"
 
 // controllerSpec is the project controller's launch under `controller: daemon`: its role, its
@@ -44,12 +43,13 @@ func controllerSpec(t *testing.T) runtime.SpawnSpec {
 }
 
 // The controller's pod is the runtime's other kind of pod: the controller's launcher alone, on a
-// volume of its own the Sandbox owns, so a relaunch resumes its session. It provisions no
-// workspace but holds the review App's GitHub credential like any workflow role's: its one init
-// container makes the sessions directory and holds a resume to its session, and its labels name
-// the controller and no tree or issue, so no tree's cleanup takes it for one of the tree's issue
-// pods. Where the runtime enrolls pods with the secrets broker it is enrolled as every workflow
-// role's launcher is, so its agent can be granted the secrets the Legion daemon's service owns.
+// volume of its own the Sandbox owns, so a relaunch finds its workspace where it left it. It
+// provisions no workspace but holds the review App's GitHub credential like any workflow role's:
+// it runs no init container, since nothing on its volume needs preparing before the launcher
+// starts, and its labels name the controller and no tree or issue, so no tree's cleanup takes it
+// for one of the tree's issue pods. Where the runtime enrolls pods with the secrets broker it is
+// enrolled as every workflow role's launcher is, so its agent can be granted the secrets the
+// Legion daemon's service owns.
 func TestTheControllersPodIsOneLauncherOnAVolumeOfItsOwn(t *testing.T) {
 	opts := goldenOptions()
 	opts.AgentSecrets = &AgentSecrets{URL: "https://secrets.internal.example", Audience: "agent-secrets", TokenExpiry: time.Hour}
@@ -82,18 +82,8 @@ func TestTheControllersPodIsOneLauncherOnAVolumeOfItsOwn(t *testing.T) {
 	}
 
 	pod := r.podTemplate(l).Spec
-	if len(pod.InitContainers) != 1 || pod.InitContainers[0].Name != initContainer {
-		t.Fatalf("init containers %v, want %s alone", pod.InitContainers, initContainer)
-	}
-	init := pod.InitContainers[0]
-	if want := []string{opts.Tools.Legion, "workspace-init", "controller", "--root", TreeRoot}; !slices.Equal(init.Command, want) {
-		t.Errorf("init command %q, want %q", init.Command, want)
-	}
-	if got := envOf(init)["LEGION_RESUME_SESSION_FILE"]; got != TreeRoot+"/"+SessionsSubPath+"/--legion--/2026-10-06T12-00-00-000Z_0001.jsonl" {
-		t.Errorf("init LEGION_RESUME_SESSION_FILE = %q, want the session on the controller's volume", got)
-	}
-	if mounts := init.VolumeMounts; len(mounts) != 1 || mounts[0].Name != issueVolume || mounts[0].MountPath != TreeRoot {
-		t.Errorf("init mounts %+v, want the controller's volume at %s alone", mounts, TreeRoot)
+	if len(pod.InitContainers) != 0 {
+		t.Fatalf("init containers %v, want none", pod.InitContainers)
 	}
 
 	if len(pod.Containers) != 1 || pod.Containers[0].Name != string(claim.RoleController) {
@@ -213,7 +203,7 @@ func TestTheControllersAgentIsToldItIsTheControllerAndNothingOfATree(t *testing.
 		"GIT_CONFIG_VALUE_0", "GIT_CONFIG_VALUE_1", "GIT_CONFIG_VALUE_2", "GIT_TERMINAL_PROMPT", "GOCACHE", "GOMODCACHE",
 		"LEGION_BOOT_TOKEN_FILE", "LEGION_CONTROLLER", "LEGION_DAEMON_URL",
 		"LEGION_GENERATION", "LEGION_GH_OWNERS_DIR", "LEGION_GH_PATH", "LEGION_PROJECT", "LEGION_ROLE", "LEGION_SLACK_CHANNELS", "LEGION_STATE_DIR",
-		"PATH", "PI_SHELL_PREFIX", "POD_UID", "TMPDIR",
+		"OMP_SESSION_SQL_DSN_FILE", "OMP_SESSION_STORAGE", "PATH", "PI_SHELL_PREFIX", "POD_UID", "TMPDIR",
 		"XDG_CACHE_HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME",
 	}; !slices.Equal(told, want) {
 		t.Errorf("the controller is told the runtime's variables %v, want exactly %v", told, want)
@@ -351,8 +341,8 @@ func TestAControllerWithNoOwnerRunsWithAnEmptyGhDirectory(t *testing.T) {
 }
 
 // The controller's pod is sized by its own entry under runtime.kubernetes.resources, as a workflow
-// role's pod is by that role's: both its containers carry it, the init container included, so a
-// controller the operator sized larger than the default runs at that size on every container.
+// role's pod is by that role's: its one container, the launcher, carries it, so a controller the
+// operator sized larger than the default runs at that size.
 func TestTheControllersPodTakesItsOwnResources(t *testing.T) {
 	opts := goldenOptions()
 	sized := corev1.ResourceRequirements{
@@ -365,10 +355,10 @@ func TestTheControllersPodTakesItsOwnResources(t *testing.T) {
 		t.Fatal(err)
 	}
 	pod := podOf(t, r, controllerSpec(t))
-	if containers := slices.Concat(pod.InitContainers, pod.Containers); len(containers) != 2 {
-		t.Fatalf("the controller's pod runs %d containers, want its init container and its launcher", len(containers))
+	if containers := slices.Concat(pod.InitContainers, pod.Containers); len(containers) != 1 {
+		t.Fatalf("the controller's pod runs %d containers, want its launcher alone", len(containers))
 	}
-	for _, c := range slices.Concat(pod.InitContainers, pod.Containers) {
+	for _, c := range pod.Containers {
 		if !reflect.DeepEqual(c.Resources, sized) {
 			t.Errorf("container %s carries resources %+v, want the controller's %+v", c.Name, c.Resources, sized)
 		}
