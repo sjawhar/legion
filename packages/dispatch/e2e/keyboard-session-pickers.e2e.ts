@@ -31,8 +31,8 @@ import { asUser } from "./users";
  * its own assertion.
  */
 
-/** The phone layout runs on Chromium (the `iphone` project) and on WebKit (`webkit-iphone`). */
-const PHONE_PROJECTS = ["iphone", "webkit-iphone"];
+/** The phone layout's project: the file runs in Chromium's `iphone`, never in `webkit-iphone`. */
+const PHONE_PROJECTS = ["iphone"];
 
 const MODELS = ["anthropic/model-a", "anthropic/model-b", "openai/model-c"];
 const LEVELS = ["auto", "low", "medium", "high"];
