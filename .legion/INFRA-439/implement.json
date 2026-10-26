@@ -2,60 +2,57 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-439",
-  "completed": "2026-10-26T04:25:00Z",
+  "completed": "2026-10-26T05:45:00Z",
   "pr": "https://github.com/sjawhar/legion/pull/2228",
+  "round": "Answers the tester's failure (test.json failures[0], https://github.com/sjawhar/legion/pull/2228#issuecomment-6408420209): a card omp held behind a streaming turn was recorded shown at once and lost when the process ended.",
   "proof": [
     {
-      "criterion": "Live proof: break a real Oh My Pi session's NATS connection, publish an event to its own topic, restore the connection, and show the event in the session's transcript with no second copy",
+      "criterion": "Outcome: an event reaches the session once when it comes back under the same session id, including a card omp held behind a streaming turn when the process ended (the tester's failure)",
       "surface": "real `omp --mode rpc` session (workspace pi-envoy via -e, scratch HOME, file sessions), real nats-server with JetStream (packages/envoy/internal/testnats/cmd/natsd -js) and the listener built from this head, the session's NATS behind a socat proxy",
-      "command": "bash packages/pi-envoy/scripts/smoke-replay.sh (output: https://github.com/sjawhar/legion/pull/2228#issuecomment-6408188386)",
-      "observed": "after the proxy was killed natsd /connz?subs=1 showed no connection and no notifications.agent.<id> subscription for the session; dispatch-1792988534320 published through JetStream with Nats-Msg-Id was stored; 1 s after the proxy restarted the session file held exactly one envoy-message entry for it ('Published at … while this session's connection was down.'), still one three heartbeats (15 s) later",
-      "headSha": "ac39a6818481897fca2b421dd4e5914bda0e8706",
-      "negativeControl": "the same leg with the released plugin /opt/legion/pi-envoy/dist/envoy.js (10.17.7): five heartbeats after the proxy restarted the control session held no entry for dispatch-1792988534322, while its live dispatch-1792988534323 published right after showed at once"
+      "command": "bash packages/pi-envoy/scripts/smoke-replay.sh, leg 3 (output: https://github.com/sjawhar/legion/pull/2228#issuecomment-6409086718)",
+      "observed": "long turn started (get_state isStreaming true); dispatch-1792992898836 and -837 published live and held by omp (queuedMessageCount 2, card=0); proxy killed, -838 and -839 stored, proxy restarted, replay handed them over mid-turn (queuedMessageCount 4); session file card=0 for all four; omp SIGKILLed; resumed on the same session file: once idle card=1 for each of the four, still card=1 three heartbeats later",
+      "headSha": "e3cd19814820b14ddc23d52d77caa091c884304d",
+      "negativeControl": "the released plugin /opt/legion/pi-envoy/dist/envoy.js (10.17.7) through the same live-during-turn + SIGKILL path: dispatch-1792992898840 and -841 card=0 after the resumed session went idle (lost)"
     },
     {
-      "criterion": "Outcome: an event reaches the session once when it comes back under the same session id (process stopped and resumed)",
+      "criterion": "Live proof: break a real Oh My Pi session's NATS connection, publish an event to its own topic, restore the connection, and show the event in the session's transcript with no second copy",
+      "surface": "same real omp session and stack",
+      "command": "bash packages/pi-envoy/scripts/smoke-replay.sh, leg 1 (same run)",
+      "observed": "with natsd /connz?subs=1 showing no connection for the session, dispatch-1792992898832 published through JetStream with Nats-Msg-Id; 1 s after the proxy restarted exactly one envoy-message entry for it, still one three heartbeats later",
+      "headSha": "e3cd19814820b14ddc23d52d77caa091c884304d",
+      "negativeControl": "released plugin 10.17.7: no entry for dispatch-1792992898834 published the same way, five heartbeats after the proxy restarted, while its live -835 showed at once"
+    },
+    {
+      "criterion": "Outcome: an event published while the session was stopped reaches it once when it resumes under the same session id",
       "surface": "same real omp session and stack, omp stopped and resumed on the same session file",
-      "command": "bash packages/pi-envoy/scripts/smoke-replay.sh, leg 2 (same run as above)",
-      "observed": "omp exited, dispatch-1792988534321 published and stored, omp resumed with --resume on the same session file showed exactly one envoy-message entry for it within 0 s, still one three heartbeats later, and leg 1's dispatch-1792988534320 still exactly one",
-      "headSha": "ac39a6818481897fca2b421dd4e5914bda0e8706",
-      "negativeControl": "the released plugin 10.17.7 shows no entry for an event published while its connection was down (control leg of the same run)"
+      "command": "bash packages/pi-envoy/scripts/smoke-replay.sh, leg 2 (same run)",
+      "observed": "dispatch-1792992898833 published while omp was stopped appeared as exactly one entry 0 s after --resume, still one three heartbeats later, and leg 1's entry still one",
+      "headSha": "e3cd19814820b14ddc23d52d77caa091c884304d",
+      "negativeControl": "released plugin 10.17.7 shows no entry for an event published while its connection was down (control leg of the same run)"
     },
     {
-      "criterion": "Automated tests: own topic and followed issue topic, subscription down, exactly once; a failed injection retried or reported; replay engine rules; route and grant on real NATS",
-      "surface": "pi-envoy extension under the mocked host and NATS with /v1/replay served from an in-test stream model; claude-envoy channel and Legion bridge inbox; envoy-client engine with a fake stream; listener route on in-process nats-server (testnats)",
-      "command": "cd packages/pi-envoy && bun test (936 pass); cd packages/claude-envoy && bun test (208 pass); cd packages/envoy-client && bun test (859 pass); cd packages/envoy && go test ./cmd/listener -run Replay -count=1 (ok); cd packages/envoy/infra && go test ./core -count=1 (ok)",
-      "observed": "all pass at the merged tree; the 'messages missed while the subscription was down' describe covers iterator resubscribe, nats reconnect, restart restore, issue topic, reaped interests, four-day-old state, failures and notices; the listener tests return stored messages after a cursor and answer 503 REPLAY_UNAVAILABLE without the MSG.GET grant",
-      "headSha": "ac39a6818481897fca2b421dd4e5914bda0e8706",
-      "negativeControl": "route answering 404: no card and one start notice (pi-envoy test 'a listener without the replay route shows nothing and says so once'); listener user without $JS.API.STREAM.MSG.GET.ENVOY_NOTIFICATIONS: 503 REPLAY_UNAVAILABLE (TestReplayAnswersReplayUnavailableWhenNATSDeniesTheRead)"
+      "criterion": "Automated: the tester's red tests and the outage, failure and notice cases",
+      "surface": "pi-envoy extension under the mocked host (which now writes a card only when it takes it) with /v1/replay served from an in-test stream model; envoy-client engine with a fake stream",
+      "command": "cd packages/pi-envoy && bun test extensions/envoy.test.ts -t \"a card the host had not written\" (2 pass, unmodified from 6e3e5519); cd packages/pi-envoy && bun test (944 pass); cd packages/envoy-client && bun test (861 pass)",
+      "observed": "the held card is shown once after the restart and the written card is not shown again, for replayed and live cards; all other suites pass",
+      "headSha": "e3cd19814820b14ddc23d52d77caa091c884304d",
+      "negativeControl": "at 5f73b9e8 (before the fix) the same two red tests fail (2 fail)"
     }
   ],
   "filesChanged": [
-    "packages/envoy/cmd/listener/replay.go, replay_test.go, api.go (POST /v1/replay)",
-    "packages/envoy/internal/bus/stored.go, stored_test.go (STREAM.MSG.GET next_by_subj read, SubjectContains)",
-    "packages/envoy/infra/core/permissions.go, permissions_test.go, permissions_live_test.go, gcp goldens, README.md, docs/nats-hub.md (listener grant)",
-    "packages/envoy-client/src/replay.ts (engine, ledger, cards), transport.ts (replay()), delivery.ts (settle(), pending()), package.json export, tests",
-    "packages/pi-envoy/extensions/envoy.ts, src/missed-messages.ts, extensions/envoy.test.ts, scripts/smoke-replay.sh, scripts/README.md",
-    "packages/claude-envoy/src/envoy-channel-server.ts, channel-forwarder.ts, missed-messages.ts, replay-state.ts, tests, dist/ rebuilt",
-    "docs: pi-envoy/claude-envoy/envoy-client/envoy AGENTS.md and README.md, skills/envoy/SKILL.md and references/deliveries.md, docs/site dispatch/envoy.md, for-agents.md, how-it-fits.md, contracts dispatch-api.ts comment, four CHANGELOGs"
+    "packages/envoy-client/src/replay.ts: `queued` delivery outcome (no record, no failure count, hole), notice may be `queued`, exported `replayLedgerIdentity`; tests",
+    "packages/pi-envoy/extensions/envoy.ts: `sendCard` puts the frame's identity in the card's `details`; cards, failure notices and the person's turns stay pending (dedupe claim) until omp's `message_end` for that message, then `recordDelivered` + settle; pending frames of a session left on a switch are settled unrecorded",
+    "packages/pi-envoy/src/missed-messages.ts: `replaySnapshot` also reads back every written envoy-message card (`writtenCardIdentity`, from details or the rendered `id:` / `event_id:` line)",
+    "packages/pi-envoy/extensions/envoy.test.ts: harness models omp writing a card only when it takes it (`turn: idle|streaming`, `take()`); two restart tests boot idle; six new tests; the red describe untouched",
+    "packages/pi-envoy/scripts/smoke-replay.sh and README.md: leg 3 and its control",
+    "packages/claude-envoy/dist/envoy-channel.js rebuilt; docs: pi-envoy AGENTS.md, envoy-client README, both CHANGELOGs, docs/site dispatch/envoy.md"
   ],
   "trickyParts": [
-    "Live claims are 'pending' until the host settles them; a sweep leaves a hole at a pending identity so a later live failure is retried, and a live frame the renderer suppressed must not stay pending (pi-envoy never claims skipped frames; claude-envoy releases them).",
-    "Whether a failed live frame is retried by a sweep comes from the engine (liveFailed): only a non-role frame on a subject the latest successful replay answered and that has a cursor; anything else (old listener 404, REPLAY_UNAVAILABLE, team topic, role forward, uncursored subject) gets the notice at once, so nothing is silently dropped.",
-    "Strict stream order across subjects in one sweep: the engine buffers what a page read and shows only below the lowest cut point of cut-short subjects; persisted cursors are capped there.",
-    "Heartbeat sweeps that only move cursors to the watermark write no state (at most hourly), so the Oh My Pi transcript does not grow per heartbeat.",
-    "A local go run rewrites packages/envoy/infra/go.work.sum with this pod's Go; the head keeps main's copy."
+    "Measured on omp 18.8.9: a card sent while a turn streams fires no event and is not in the file until the turn ends; then each gets message_start/message_end and its custom_message entry (details kept). Idle, message_end follows within ~25 ms. A SIGKILL before then leaves nothing. After an abort the queued cards are written.",
+    "A frame omp withdraws and never writes keeps its claim pending for the process's life: its subject's cursor stays before it (re-read each sweep) and the restarted session shows it."
   ],
   "deviations": [
-    "Replayed targeted frames are shown as cards; the plan's stated reason ('Dispatch already recorded that attempt as not delivered') is wrong — the listener answers 200 once it publishes, so Dispatch records the send. Code comments and docs give only the stale-input reason.",
-    "Failure counts are kept in memory, so after a restart a failing frame gets three more tries before its notice; a shown notice is in the ledger and is never repeated.",
-    "The one-time 404/REPLAY_UNAVAILABLE/401/403 notice is raised at the first failed replay call (not only at start) and can be raised again after a later success; pi-envoy shows it as a UI warning, claude-envoy on stderr.",
-    "go test ./cmd/listener has 4 tests needing docker (TestDispatch*Resolves*, RefusesABroadcastWhen…, RefusesAClaimTakeover…) and packages/envoy/infra/gcp has 2 needing mkfs.ext4; neither is available on this pod, CI runs them. permissions_live_test.go (natslive, docker) compiles under go vet and was not run here."
-  ],
-  "openQuestions": [
-    "Rollout after merge: the person approved 'Replace when ready' for the hub VM replacement (dispatch://INFRA-439/ask/ebd2e9e8-6b7c-426a-bd06-243e70d98bf0); the agent-infra pull request pinning the new envoy-infra and listener images follows the releases."
-  ],
-  "discoveredComplexity": [
-    "The person asked on the ask why sessions do not read JetStream; the self-subscribed receive path dates from https://github.com/sjawhar/legion/pull/729 (2026-08-15). Answered on the ask; no design change requested."
+    "claude-envoy keeps its documented boundary (the channel or bridge-inbox write succeeding counts as shown); only its dist was rebuilt.",
+    "claude-envoy tests/session-title.test.ts 'queryTmux is bounded even by a tmux that ignores SIGTERM' fails intermittently on this pod (1 of 3 isolated runs, 5 s bun timeout); untouched by this change."
   ]
 }
