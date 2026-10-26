@@ -140,6 +140,15 @@ export interface AgentEndEvent {
   readonly messages?: readonly AgentEndMessage[];
 }
 
+/** A retry moved the session to the next model of its fallback chain (`shared-events.ts` in the
+ * host). Each model is `provider/id`; `role` is the model role the chain serves. */
+export interface RetryFallbackAppliedEvent {
+  readonly from: string;
+  readonly to: string;
+  readonly role: string;
+  readonly reason?: string;
+}
+
 /** A message entering the session: a user prompt (the daemon's RPC `prompt` among them), a custom
  * message, an assistant reply, or a tool result. `message_update` carries the same shape for a
  * message still being produced — one per streamed delta, with the partial message — and
@@ -234,6 +243,15 @@ export interface PiEventContract {
   readonly message_start: { readonly event: MessageStartEvent; readonly result: undefined };
   readonly message_update: { readonly event: MessageStartEvent; readonly result: undefined };
   readonly message_end: { readonly event: MessageStartEvent; readonly result: undefined };
+  /** Every turn of a run, each provider request and each tool round; it carries nothing an
+   *  extension reads here. */
+  readonly turn_start: { readonly event: unknown; readonly result: undefined };
+  /** A retry moved the session onto another model; the host fires no event for any other model or
+   *  thinking-level change. */
+  readonly retry_fallback_applied: {
+    readonly event: RetryFallbackAppliedEvent;
+    readonly result: undefined;
+  };
   /** Every provider request the session's agent loop sends, each turn and each tool round. */
   readonly context: { readonly event: ContextEvent; readonly result: ContextEventResult };
   /** Every input before it runs: the host's typed-input ingress, `sendUserInput` included. */
