@@ -32,16 +32,20 @@ func decodeEvent(t *testing.T, eventType string, actor, payload map[string]any) 
 var askEventMark = record.EventMark{Seq: 12, At: time.Date(2026, 10, 25, 12, 0, 0, 0, time.UTC)}
 
 // A session's reply sent through a delivery's callback arrives as comment.answered, with the
-// thread's ask and whose turn it leaves, as a comment.created reply does: both decode to the same
-// reply. A comment on no ask is no fact.
+// thread's ask, its state and whose turn it leaves, as a comment.created reply does: both decode to
+// the same reply, and a reply on a closed ask decodes with no turn. A comment on no ask is no fact.
 func TestACallbackReplyDecodesAsTheReplyItIs(t *testing.T) {
 	architect := map[string]any{"kind": "session", "id": "session-architect"}
 	for _, eventType := range []string{"comment.created", "comment.answered"} {
-		decoded := decodeEvent(t, eventType, architect, map[string]any{"id": "comment-1", "ask_id": "ask-approval", "ask_waiting_on": "human"})
+		decoded := decodeEvent(t, eventType, architect, map[string]any{"id": "comment-1", "ask_id": "ask-approval", "ask_state": "open", "ask_waiting_on": "human"})
 		want := DispatchAskReply{Key: "LEGION-7", Ask: "ask-approval", WaitingOn: "human",
 			Actor: dispatch.Actor{Kind: "session", ID: "session-architect"}, Mark: askEventMark}
 		if !reflect.DeepEqual(decoded.Fact, want) {
 			t.Fatalf("%s decoded to %#v, want %#v", eventType, decoded.Fact, want)
+		}
+		closed := decodeEvent(t, eventType, architect, map[string]any{"id": "comment-3", "ask_id": "ask-approval", "ask_state": "answered"})
+		if want.WaitingOn = ""; !reflect.DeepEqual(closed.Fact, want) || len(closed.Unread) != 0 {
+			t.Fatalf("%s on a closed ask decoded to %#v, unread %q; want %#v", eventType, closed.Fact, closed.Unread, want)
 		}
 		if plain := decodeEvent(t, eventType, architect, map[string]any{"id": "comment-2"}); plain.Fact != nil {
 			t.Fatalf("%s on no ask decoded to %#v, want no fact", eventType, plain.Fact)
@@ -180,6 +184,8 @@ func TestAnUnreadableClaimOrTurnIsNoFact(t *testing.T) {
 		{name: "a claim naming no actor", eventType: "issue.claimed", payload: map[string]any{"key": "LEGION-7", "claim": map[string]any{"actor": map[string]any{"kind": "user"}}}},
 		{name: "a release with no claim field", eventType: "issue.released", payload: map[string]any{"key": "LEGION-7"}},
 		{name: "a reply on no turn", eventType: "comment.created", payload: map[string]any{"ask_id": "ask-q", "ask_waiting_on": "someone"}},
+		{name: "a reply on an open ask with no turn", eventType: "comment.created", payload: map[string]any{"ask_id": "ask-q", "ask_state": "open"}},
+		{name: "a reply on a closed ask with a turn", eventType: "comment.created", payload: map[string]any{"ask_id": "ask-q", "ask_state": "answered", "ask_waiting_on": "human"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			decoded := decodeEvent(t, tc.eventType, person, tc.payload)

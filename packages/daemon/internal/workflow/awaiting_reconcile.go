@@ -183,8 +183,10 @@ func decideAwait(v awaitView) awaitDecision {
 }
 
 // withHuman is what of a root is still with the person: its tree's open questions that wait on the
-// person, oldest event first. A root never waits on its gate's approval request here, so that
-// request keeps the root's slot as it did before this release.
+// person, the one on the person's turn longest first (the turn's own place, WaitingOnSeq; an open
+// ask no event gave a turn is the person's since it opened, so it sorts first). A root never waits
+// on its gate's approval request here, so that request keeps the root's slot as it did before this
+// release.
 func withHuman(asks []record.RootAsk) []record.RootAsk {
 	var questions []record.RootAsk
 	for _, ask := range asks {
@@ -192,7 +194,9 @@ func withHuman(asks []record.RootAsk) []record.RootAsk {
 			questions = append(questions, ask)
 		}
 	}
-	slices.SortFunc(questions, func(a, b record.RootAsk) int { return cmp.Or(cmp.Compare(a.Seq, b.Seq), cmp.Compare(a.Ask, b.Ask)) })
+	slices.SortFunc(questions, func(a, b record.RootAsk) int {
+		return cmp.Or(cmp.Compare(a.WaitingOnSeq, b.WaitingOnSeq), cmp.Compare(a.Seq, b.Seq), cmp.Compare(a.Ask, b.Ask))
+	})
 	return questions
 }
 
@@ -229,18 +233,19 @@ func owed(run record.RoleRun) (string, bool) {
 
 // answeredSince names a person's act the record already holds that Dispatch recorded after waiting
 // began: their act on the subject question, or on any other ask of the root the mirror recorded one
-// on (record.RootAsk.PersonSeq, which the ask handlers write under one rule, personAnswers). A
-// review of the root's spec is not read here: the architect it would resume is running, and the
-// daemon's own design-changes-requested notice is the work that reaches it (a handout of its own).
+// on (record.RootAsk.PersonActSeq, read from the acts the ask handlers record under one rule,
+// personAct). A review of the root's spec is not read here: the architect it would resume is
+// running, and the daemon's own design-changes-requested notice is the work that reaches it (a
+// handout of its own).
 func answeredSince(waiting record.Awaiting, asks []record.RootAsk) (record.Answer, string, bool) {
 	since := waiting.Since.Seq
 	for _, ask := range asks {
-		if ask.Ask == waiting.Ask && ask.PersonSeq > since {
+		if ask.Ask == waiting.Ask && ask.PersonActSeq() > since {
 			return record.AnsweredByAsk, ask.Ask, true
 		}
 	}
 	for _, ask := range asks {
-		if ask.PersonSeq > since {
+		if ask.PersonActSeq() > since {
 			return record.AnsweredByReply, ask.Ask, true
 		}
 	}

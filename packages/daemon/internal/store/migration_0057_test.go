@@ -9,8 +9,9 @@ import (
 // 0057 adds the awaiting_person phase, what a root waiting on a person waits on, and the two
 // sequences the decision rests on. Its backfill takes each issue's handout from the highest
 // sequence the record already holds of it — its last Dispatch observation, the claim its mirror
-// row shows, its mirrored asks and its gate's review marks — so no event the daemon applied
-// before this release, and none of the same work redelivered after it, declares a hand-back.
+// row shows, every fence and person's act of its mirrored asks and its gate's review marks — so no
+// event the daemon applied before this release, and none of the same work redelivered after it,
+// declares a hand-back.
 func TestTheMigrationBackfillDeclaresNothingOld(t *testing.T) {
 	store := emptyStore(t)
 	ctx := context.Background()
@@ -27,8 +28,11 @@ func TestTheMigrationBackfillDeclaresNothingOld(t *testing.T) {
 		values ('LEGION-300', 'LEGION-300', 'LEGION', 'waiting root', 'admitted', 1, 'todo', 'B', 2)`)
 	exec(`insert into dispatch_issues (key, project, status, blockers, dispatch_seq, claimed_by, claim_seq)
 		values ('LEGION-208', 'LEGION', 'in_progress', '{}', 4, 'session:ses_architect', 9)`)
-	exec(`insert into root_asks (issue, ask, kind, open, waiting_on, seq, by_tree)
-		values ('LEGION-208', 'ask-q', 'question', true, 'human', 11, true)`)
+	exec(`insert into root_asks (issue, ask, kind, open, seq, waiting_on, waiting_on_seq, by_tree)
+		values ('LEGION-208', 'ask-q', 'question', true, 11, 'human', 11, true)`)
+	// A gate's request only a version's turn reached: its highest sequence is its turn's, not seq.
+	exec(`insert into root_asks (issue, ask, kind, open, seq, waiting_on, waiting_on_seq, gate_request)
+		values ('LEGION-300', 'ask-approval', 'approval', false, 0, 'agent', 6, true)`)
 	exec(`insert into design_gates (issue, artifact_id, latest_version, told_changes_version, told_changes_reason, told_changes_seq)
 		values ('LEGION-208', '7d1e3a5c-9b2f-4c6e-8a40-3f5d7b9e1c26', 4, 4, 'say more', 14)`)
 	if _, err := store.Migrate(ctx); err != nil {
@@ -41,8 +45,8 @@ func TestTheMigrationBackfillDeclaresNothingOld(t *testing.T) {
 	}{
 		// The gate's told review (14) is the highest the record holds of the admitted root.
 		{"LEGION-208", 14},
-		// A root with nothing but its own observation takes that.
-		{"LEGION-300", 2},
+		// The turn of its gate's request (6) is the highest the record holds of the waiting root.
+		{"LEGION-300", 6},
 	} {
 		var handout int64
 		var declared *int64

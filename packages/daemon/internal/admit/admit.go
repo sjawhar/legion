@@ -752,7 +752,7 @@ func (a *Admission) readmit(ctx context.Context, tx pgx.Tx, stored record.Issue,
 		// The copy keeps the old root's review state but not its approval request, which is an
 		// ask on the old root: the new root's own registration binds its own.
 		if gate != nil {
-			gate.Issue, gate.RequestAsk = stored.Key, ""
+			gate.Issue, gate.RequestAsk, gate.RequestArtifact = stored.Key, "", ""
 			if err := a.store.PutGate(ctx, tx, *gate); err != nil {
 				return fmt.Errorf("carry gate to re-admitted orphan %s: %w", stored.Key, err)
 			}

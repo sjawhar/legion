@@ -59,7 +59,7 @@ func seedHandBack(t *testing.T, pool *pgxpool.Pool, issue, ask string, seq int64
 	inTx(t, pool, func(tx pgx.Tx) {
 		records := record.NewStore()
 		if err := records.PutRootAsk(context.Background(), tx, record.RootAsk{Issue: issue, Ask: ask, Kind: record.AskQuestion,
-			Open: true, WaitingOn: "human", ByTree: true, Seq: seq}); err != nil {
+			Open: true, Seq: seq, WaitingOn: "human", WaitingOnSeq: seq, ByTree: true}); err != nil {
 			t.Fatalf("record the question of %s: %v", issue, err)
 		}
 		if err := records.Declare(context.Background(), tx, issue, seq); err != nil {
@@ -217,7 +217,8 @@ func TestAnAnsweredHandBackDoesNotStartTheNextWait(t *testing.T) {
 			inTx(t, pool, func(tx pgx.Tx) {
 				records := record.NewStore()
 				if err := records.PutRootAsk(context.Background(), tx, record.RootAsk{Issue: "LEGION-208", Ask: "ask-q1",
-					Kind: record.AskQuestion, Open: false, ByTree: true, Seq: 7, PersonSeq: 7, ClosedSeq: 7, ClosedBy: record.ClosedByPerson}); err != nil {
+					Kind: record.AskQuestion, Open: false, Seq: 7, WaitingOn: "human", WaitingOnSeq: 5, ClosedBy: record.ClosedByPerson, ClosedSeq: 7,
+					ByTree: true, PersonAnswerSeq: 7}); err != nil {
 					t.Fatalf("record the answered question: %v", err)
 				}
 			})

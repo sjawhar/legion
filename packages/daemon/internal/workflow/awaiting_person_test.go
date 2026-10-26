@@ -27,7 +27,7 @@ func seedQuestion(t *testing.T, pool *pgxpool.Pool, ask string, seq int64) {
 	t.Helper()
 	seedRecord(t, pool, func(tx pgx.Tx) error {
 		return record.NewStore().PutRootAsk(context.Background(), tx, record.RootAsk{
-			Issue: "LEGION-208", Ask: ask, Kind: record.AskQuestion, Open: true, WaitingOn: "human", ByTree: true, Seq: seq})
+			Issue: "LEGION-208", Ask: ask, Kind: record.AskQuestion, Open: true, Seq: seq, WaitingOn: "human", WaitingOnSeq: seq, ByTree: true})
 	})
 }
 
@@ -105,11 +105,11 @@ func TestAReplyOnAnAskTheRootCannotWaitOnDeclaresNothing(t *testing.T) {
 		want int64
 	}{
 		{"a question of the root's own tree", record.RootAsk{Issue: "LEGION-208", Ask: "ask-q", Kind: record.AskQuestion,
-			Open: true, WaitingOn: "agent", ByTree: true, Seq: 4}, 6},
+			Open: true, WaitingOn: "agent", WaitingOnSeq: 4, ByTree: true, Seq: 4}, 6},
 		{"a question the root's tree did not open", record.RootAsk{Issue: "LEGION-208", Ask: "ask-q", Kind: record.AskQuestion,
-			Open: true, WaitingOn: "agent", Seq: 4}, 0},
+			Open: true, WaitingOn: "agent", WaitingOnSeq: 4, Seq: 4}, 0},
 		{"the gate's approval request", record.RootAsk{Issue: "LEGION-208", Ask: "ask-q", Kind: record.AskApproval,
-			Open: true, WaitingOn: "agent", ByTree: true, Seq: 4}, 0},
+			Open: true, WaitingOn: "agent", WaitingOnSeq: 4, ByTree: true, Seq: 4}, 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pool, apply := askRig(t)

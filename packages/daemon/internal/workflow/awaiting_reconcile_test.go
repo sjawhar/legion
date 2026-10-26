@@ -20,7 +20,7 @@ func awaitRootView() awaitView {
 		Slotted: true,
 		Run:     record.RoleRun{Claim: &record.RoleClaim{State: supervise.StateWorking}},
 		Asks: []record.RootAsk{
-			{Issue: "LEGION-208", Ask: "ask-q", Kind: record.AskQuestion, Open: true, WaitingOn: "human", ByTree: true, Seq: 5},
+			{Issue: "LEGION-208", Ask: "ask-q", Kind: record.AskQuestion, Open: true, Seq: 5, WaitingOn: "human", WaitingOnSeq: 5, ByTree: true},
 		},
 	}
 }
@@ -66,10 +66,18 @@ func TestDecideAwaitsTable(t *testing.T) {
 		}, actEnter, "awaiting an answer"},
 		{"a person who already acted after the hand-back", func(v *awaitView) { v.Asks[0].PersonSeq = 7 }, actTellInPlace, "already acted"},
 		{"a person who acted before it", func(v *awaitView) { v.Asks[0].PersonSeq = 4 }, actEnter, "awaiting an answer"},
+		{"a person's answer of the gate's approval request after it", func(v *awaitView) {
+			v.Asks = append(v.Asks, record.RootAsk{Issue: "LEGION-208", Ask: "ask-approval", Kind: record.AskApproval, Seq: 7,
+				WaitingOn: "human", WaitingOnSeq: 4, ClosedBy: record.ClosedByPerson, ClosedSeq: 7, GateRequest: true, PersonAnswerSeq: 7})
+		}, actEnter, "awaiting an answer"},
 		{"a wait on the oldest question still with the person", func(v *awaitView) {
 			v.Asks = append(v.Asks, record.RootAsk{Issue: "LEGION-208", Ask: "ask-older", Kind: record.AskQuestion,
-				Open: true, WaitingOn: "human", ByTree: true, Seq: 3})
+				Open: true, Seq: 3, WaitingOn: "human", WaitingOnSeq: 3, ByTree: true})
 		}, actEnter, "question ask-older"},
+		{"a wait on the question longest on the person's turn, whatever reopened it since", func(v *awaitView) {
+			v.Asks = append(v.Asks, record.RootAsk{Issue: "LEGION-208", Ask: "ask-restored", Kind: record.AskQuestion,
+				Open: true, Seq: 9, WaitingOn: "human", WaitingOnSeq: 3, ClosedBy: record.ClosedBySettlement, ClosedSeq: 4, ByTree: true})
+		}, actEnter, "question ask-restored"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			view := awaitRootView()
@@ -96,9 +104,11 @@ func TestAnActAlreadyRecordedTellsTheArchitectInPlace(t *testing.T) {
 		detail string
 	}{
 		{"on the subject question", record.RootAsk{Issue: "LEGION-208", Ask: "ask-q", Kind: record.AskQuestion, Open: true,
-			WaitingOn: "human", ByTree: true, Seq: 5, PersonSeq: 7}, record.AnsweredByAsk, "ask-q"},
+			Seq: 5, WaitingOn: "human", WaitingOnSeq: 5, ByTree: true, PersonSeq: 7}, record.AnsweredByAsk, "ask-q"},
 		{"on another ask of the root", record.RootAsk{Issue: "LEGION-208", Ask: "ask-other", Kind: record.AskQuestion, Open: false,
 			Seq: 6, PersonSeq: 7}, record.AnsweredByReply, "ask-other"},
+		{"a person's answer of another ask", record.RootAsk{Issue: "LEGION-208", Ask: "ask-other", Kind: record.AskQuestion, Open: false,
+			Seq: 7, ClosedBy: record.ClosedByPerson, ClosedSeq: 7, PersonAnswerSeq: 7}, record.AnsweredByReply, "ask-other"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			view := awaitRootView()

@@ -561,9 +561,11 @@ const (
 // seed, tells the architect nothing new; another review does, even at that version with that
 // reason. An approval clears the told record and a changes request clears the approval, so the two
 // marks never stand together: the one that is set is the gate's newest applied review
-// (classify.LatestReview). RequestAsk is the approval request a registration read open on the
-// document, "" when none was ever read open: a registration that finds none open keeps the one
-// recorded for the same document, and only a registration of another document rebinds it. Its
+// (classify.LatestReview). RequestAsk is the approval request a registration read open on a
+// document, and RequestArtifact that document, both "" when none was ever read open: they are
+// written together, and the request is the gate's only while RequestArtifact is ArtifactID
+// (BoundRequest), since an earlier release moves ArtifactID alone. A registration that finds none
+// open keeps the request recorded for the same document; any other registration rebinds it. Its
 // RootAsk says whether the request is still with the person.
 type DesignGate struct {
 	Issue              string
@@ -575,29 +577,50 @@ type DesignGate struct {
 	ToldChangesReason  string
 	ToldChangesMark    EventMark
 	RequestAsk         string
+	RequestArtifact    string
 }
 
-// RootAsk is the daemon's mirror of Dispatch's state of one ask of a root, last writer wins by the
-// issue's event sequence. Seq is the newest event or read applied to its state (Open, WaitingOn,
-// ClosedSeq, ClosedBy): an older one changes none of it. Kind (AskQuestion, AskApproval, "" until
-// an event names a kind this daemon knows) and ByTree (a session of the root's tree opened it) are
-// facts of its opening, kept whatever order its events arrive in. PersonSeq is the newest act of a
-// person on the ask that would answer a root waiting on that person (workflow's personAnswers):
-// any answer or resolution but an answer of the approval request a gate of the root names, and
-// any reply that does not leave the ask with the person. WaitingOn is the turn the ask was last on,
-// `human` or `agent` ("" when no event has named one); a closed ask keeps it, so an ask Dispatch's
-// settlement restores reopens on that turn. ClosedBy is who closed it, "" while it is open.
+// BoundRequest is the approval request of the gate's own document, "" when the gate names none or
+// names another document's.
+func (g DesignGate) BoundRequest() string {
+	if g.RequestArtifact != g.ArtifactID {
+		return ""
+	}
+	return g.RequestAsk
+}
+
+// RootAsk is the daemon's mirror of Dispatch's state of one ask of a root. Each part has a fence of
+// its own, the issue's event sequence of the newest event that gave it, so an older event changes
+// none of that part and the same events in any order leave the same row: Open is fenced by Seq (0
+// while no event has said whether the ask is open), WaitingOn by WaitingOnSeq, and ClosedBy by
+// ClosedSeq.
+//
+// WaitingOn is the turn the ask was last on, `human` or `agent` ("" when no event has named one,
+// which on an open ask is the person's: an ask opens on it); a close names no turn, so a closed ask
+// keeps the turn it last had and an ask Dispatch's settlement restores reopens on it. ClosedBy is
+// who made the ask's newest close, at ClosedSeq, kept when the ask reopens: a reply on a closed ask
+// says it is closed but not who closed it, so a closed row whose close has not arrived yet has no
+// ClosedBy, and one reopened and closed again by such a reply shows the earlier close until the
+// later one arrives. Kind (AskQuestion, AskApproval, "" until an event names a kind this daemon
+// knows), ByTree (a session of the root's tree opened it) and GateRequest (a registration bound it
+// as the root's design gate's approval request) are facts of the ask, kept whatever order its
+// events arrive in. PersonAnswerSeq is the newest answer of the ask by a person, and PersonSeq the
+// newest other act of a person that would answer a root waiting on that person (workflow's
+// personAct); PersonActSeq is the newest of the two that does.
 type RootAsk struct {
-	Issue     string
-	Ask       string
-	Kind      string
-	Open      bool
-	WaitingOn string
-	Seq       int64
-	ByTree    bool
-	PersonSeq int64
-	ClosedSeq int64
-	ClosedBy  string
+	Issue           string
+	Ask             string
+	Kind            string
+	Open            bool
+	Seq             int64
+	WaitingOn       string
+	WaitingOnSeq    int64
+	ClosedBy        string
+	ClosedSeq       int64
+	ByTree          bool
+	GateRequest     bool
+	PersonSeq       int64
+	PersonAnswerSeq int64
 }
 
 // The ask kinds the mirror knows (RootAsk.Kind): an ordinary question, and the approval request
@@ -616,7 +639,19 @@ const (
 )
 
 // WithHuman says whether the ask is open and waits on the person.
-func (a RootAsk) WithHuman() bool { return a.Open && a.WaitingOn == "human" }
+func (a RootAsk) WithHuman() bool { return a.Open && a.WaitingOn != "agent" }
+
+// PersonActSeq is the newest act of a person on the ask that would answer a root waiting on that
+// person, 0 for none: every act PersonSeq records, and an answer of the ask unless it is a design
+// gate's approval request, whose answer is a review that answers through its own artifact.* event.
+// It reads only the row's own facts, so the request bound before its answer arrives or after it
+// gives the same.
+func (a RootAsk) PersonActSeq() int64 {
+	if a.GateRequest {
+		return a.PersonSeq
+	}
+	return max(a.PersonSeq, a.PersonAnswerSeq)
+}
 
 // Question says whether the ask is an ordinary question (AskQuestion): an approval request, and
 // an ask no event has named a kind this daemon knows of, are not.
@@ -770,15 +805,16 @@ type Store interface {
 	PutGate(ctx context.Context, tx pgx.Tx, gate DesignGate) error
 	// RootAsk is the mirror row of ask on issue, nil when it has none.
 	RootAsk(ctx context.Context, tx pgx.Tx, issue, ask string) (*RootAsk, error)
-	// PutRootAsk writes ask's mirror row, unless the stored row's Seq is newer than ask's: the
-	// caller merges an event into the row it read, and a row it did not read is never rolled back.
+	// PutRootAsk writes ask's mirror row, unless any of the stored row's fences (Seq, WaitingOnSeq,
+	// ClosedSeq) or person's acts is newer than ask's: the caller merges an event into the row it
+	// read, and a row it did not read is never rolled back.
 	PutRootAsk(ctx context.Context, tx pgx.Tx, ask RootAsk) error
 	// RootAsks is the mirror rows of each of issues, by issue and then ask, in one read.
 	RootAsks(ctx context.Context, tx pgx.Tx, issues []string) (map[string][]RootAsk, error)
 	// StartHandout records that the daemon gives issue's architect work now: HandoutSeq rises to
 	// the highest Dispatch sequence the record holds of the issue (its last observation, the claim
-	// its Dispatch mirror shows, its wait's start, its mirrored asks, its gate's reviews), and
-	// DeclaredSeq clears.
+	// its Dispatch mirror shows, its wait's start, every fence and person's act of its mirrored
+	// asks, its gate's reviews), and DeclaredSeq clears.
 	StartHandout(ctx context.Context, tx pgx.Tx, issue string) error
 	// Declare records a hand-back to a person at seq: DeclaredSeq becomes the greater of itself and
 	// seq.

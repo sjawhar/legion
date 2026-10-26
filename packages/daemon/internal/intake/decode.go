@@ -369,9 +369,10 @@ func decodeDispatchEvent(event dispatchEvent, unread *[]string) (Fact, error) {
 	case "comment.created", "comment.answered":
 		// comment.answered is a reply a session sends through a delivery's callback (Dispatch's
 		// comment_delivery), which joins its thread as comment.created does and carries the same
-		// ask_id and ask_waiting_on. A comment on no ask is no fact.
+		// ask_id, ask_state and ask_waiting_on. A comment on no ask is no fact.
 		var comment struct {
 			Ask       string `json:"ask_id"`
+			State     string `json:"ask_state"`
 			WaitingOn string `json:"ask_waiting_on"`
 		}
 		if err := json.Unmarshal(event.Payload, &comment); err != nil {
@@ -385,6 +386,13 @@ func decodeDispatchEvent(event dispatchEvent, unread *[]string) (Fact, error) {
 		case "", "human", "agent":
 		default:
 			*unread = append(*unread, fmt.Sprintf("ask_waiting_on %q is no turn", comment.WaitingOn))
+			return nil, nil
+		}
+		// Only an open ask has a turn, so a reply with no turn is on a closed ask (DispatchAskReply).
+		// The ask's state says so outright where Dispatch sends it; a reply whose state and turn
+		// disagree could mean either, so it moves nothing.
+		if comment.State != "" && (comment.State == "open") != (comment.WaitingOn != "") {
+			*unread = append(*unread, fmt.Sprintf("ask_state %q disagrees with ask_waiting_on %q", comment.State, comment.WaitingOn))
 			return nil, nil
 		}
 		return DispatchAskReply{Key: event.IssueKey, Ask: comment.Ask, WaitingOn: comment.WaitingOn, Actor: dispatch.Actor(event.Actor), Mark: event.mark()}, nil
