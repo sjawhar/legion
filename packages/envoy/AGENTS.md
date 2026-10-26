@@ -1859,7 +1859,9 @@ Settlement retracts an ask whose block left the document in its own name,
 person's or a session's retract stands however the document moves, which is why `resolve`
 refuses a caller reason beginning `removed from the document in version`. The `ask.opened` or
 `ask.answered` a restore appends carries `restored: true` (`model.AskEventPayload.Restored`): it
-records the ask's return to the state it had, never a new answer.
+records the ask's return to the state it had, never a new answer. A restore the release before the
+mark writes - every one already in the event log, and one written during a rollout or an image
+rollback - carries none, so a missing mark does not prove a new answer.
 An invalid browser-edited ask retains its indexed ask, carries the server-owned `invalid` parse-error
 attribute, and emits `block.invalid`; repairing its body clears `invalid` before updating the ask row.
 Markdown that becomes a whole document - a spec at issue creation, an uploaded document or version -

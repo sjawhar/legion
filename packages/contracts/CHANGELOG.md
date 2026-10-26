@@ -5,7 +5,9 @@
 ### Added
 
 - `AskEventPayload.restored`: `true` on the `ask.opened` or `ask.answered` Dispatch's settlement
-  appends when an edit restores a decision block it retracted, which records no new answer.
+  appends when an edit restores a decision block it retracted, which records no new answer. A
+  restore the release before it writes (every one already in the event log, and one written during
+  a rollout or an image rollback) carries no mark, so a missing field proves nothing.
 - `ArtifactApproval.seq`, the latest review's event sequence on the document's owner, beside its
   `at`: the owner's row lock orders its events as they commit, so `seq` places the review among them
   where `at`, its transaction's start, cannot. Absent for a review recorded before Dispatch kept

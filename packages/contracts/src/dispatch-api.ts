@@ -1024,8 +1024,10 @@ export type IssueEventPayload = Issue & ReferenceChangesPayload;
 /** Every `ask.*` event payload is the ask row, flat, plus what the write moved in the reference
  *  graph. `restored` is true on the `ask.opened` or `ask.answered` settlement appends when an edit
  *  restores a decision block it retracted: the ask returns to the state it had, and no one answered
- *  anything new. */
-export type AskEventPayload = Ask & ReferenceChangesPayload & { readonly restored?: true };
+ *  anything new. A restore the release before Dispatch kept the mark writes - every one already in
+ *  the event log, and one written during a rollout or an image rollback - carries no mark, so a
+ *  missing `restored` does not prove an event is a new answer. */
+export type AskEventPayload = Ask & ReferenceChangesPayload & { readonly restored?: boolean };
 
 /** An `ask.answered` payload. `previous_answer` is present when the answer replaced an earlier
  *  one; the asker and every follower receive it as they received the first. */

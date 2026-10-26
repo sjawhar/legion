@@ -459,8 +459,9 @@ func TestCarryVerdictOverTheBlocksOfTheApprovedAndTheNewVersion(t *testing.T) {
 	}
 }
 
-// approveStoredVersion records login's approval of version number of artifactID as the review
-// route stores it, the row alone: the row is what the carry reads.
+// approveStoredVersion records login's approval of version number of artifactID as a row alone,
+// with no event and so no event sequence: a review recorded before migration 0118, which the
+// carry reads as it reads any other.
 func approveStoredVersion(t *testing.T, database *store.Store, artifactID string, number int, login string) {
 	t.Helper()
 	if _, err := database.Pool.Exec(context.Background(), `
@@ -468,6 +469,57 @@ func approveStoredVersion(t *testing.T, database *store.Store, artifactID string
 		values ($1, $2, 'approved', $3)
 	`, artifactID, number, `{"kind":"user","id":"`+login+`"}`); err != nil {
 		t.Fatalf("approve version %d as %s: %v", number, login, err)
+	}
+}
+
+// A changes request committed after an approval stops a carry of that approval, and one committed
+// before it does not, in the order their events committed: by sequence, though each one's
+// created_at, its transaction's start, says the opposite. A request that carries a sequence is
+// after an approval that carries none, and the time and id decide only when neither does.
+func TestChangesRequestedSinceFollowsTheOrderTheReviewsCommitted(t *testing.T) {
+	database := storetest.Open(t)
+	artifactID := createDocument(t, database, "Context\n")
+	early := time.Date(2026, 10, 2, 12, 0, 0, 0, time.UTC)
+	late := early.Add(time.Minute)
+	insert := func(state string, at time.Time, seq *int64) model.ArtifactReview {
+		t.Helper()
+		review, err := ScanReview(database.Pool.QueryRow(context.Background(), `
+			insert into artifact_reviews (artifact_id, version, state, actor, created_at, event_seq)
+			values ($1, 1, $2, '{"kind":"user","id":"alice"}', $3, $4)
+			returning `+ReviewColumns, artifactID, state, at, seq))
+		if err != nil {
+			t.Fatalf("insert %s review: %v", state, err)
+		}
+		return review
+	}
+	sequence := func(n int64) *int64 { return &n }
+	for _, test := range []struct {
+		name                    string
+		approvalAt, requestAt   time.Time
+		approvalSeq, requestSeq *int64
+		since                   bool
+	}{
+		{"a request committed after the approval though its transaction began first", late, early, sequence(5), sequence(6), true},
+		{"a request committed before the approval though its transaction began last", early, late, sequence(6), sequence(5), false},
+		{"a sequenced request after an approval recorded before the sequence was kept", late, early, nil, sequence(6), true},
+		{"an unsequenced request before a sequenced approval", early, late, sequence(6), nil, false},
+		{"neither sequenced, the request later", early, late, nil, nil, true},
+		{"neither sequenced, the request earlier", late, early, nil, nil, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := database.Pool.Exec(context.Background(), `delete from artifact_reviews where artifact_id = $1`, artifactID); err != nil {
+				t.Fatal(err)
+			}
+			approval := insert("approved", test.approvalAt, test.approvalSeq)
+			insert("changes_requested", test.requestAt, test.requestSeq)
+			got, err := changesRequestedSince(context.Background(), database.Pool, approval)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != test.since {
+				t.Fatalf("changes requested since the approval = %v, want %v", got, test.since)
+			}
+		})
 	}
 }
 

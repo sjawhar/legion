@@ -57,8 +57,11 @@ func ScanReview(row pgx.Row) (model.ArtifactReview, error) {
 // when it was given from the document header with no request open. The review row keeps the
 // event's sequence on that owner (event_seq), which places a read of the review among the owner's
 // events. The row is inserted before the event is appended and its sequence written after, so the
-// review's foreign-key locks are still taken before the owner's row lock and the commit-order
-// lock, as they were before the sequence was kept. Migration 0118's trigger, which gives the release
+// review's foreign-key locks are first taken before the owner's row lock and the commit-order
+// lock, as they were before the sequence was kept. The update that writes the sequence runs the
+// foreign-key checks again, since Postgres re-checks a row its own transaction inserted, and so asks
+// for the same FOR KEY SHARE locks after those two: the transaction already holds them from its
+// insert, so the request never waits. Migration 0118's trigger, which gives the release
 // before this one's reviews their sequence, would give this row its sequence too, but only at the
 // commit, the first moment the event exists for every release; so WriteReview writes it itself,
 // and the row is right for any read the caller makes before it commits. The trigger then finds the
