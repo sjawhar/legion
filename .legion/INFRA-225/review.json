@@ -2,31 +2,28 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-225",
-  "completed": "2026-10-26T06:17:34Z",
-  "round": 5,
-  "decision": "changes_requested",
-  "reviewedCodeHead": "b2be8c44abcb11a95a89192e27ef40932bc09c18",
-  "scope": "The corrective delta since round 4 (code head e2c36e93): 93cfafc9 (skill text answering round 4's two findings and the wording fast-follow) and b2be8c44 (the tick re-read moved to controller_tick_reread.go; StartUnblockedChildren asks Holdable then Unfinished). No merge of main since, so no fingerprint question.",
-  "ci": "Required set (main ruleset): lint, typecheck, test, pr-title; branch protection none. CI head b2be8c44 (newest pull_request run; compare b2be8c44...935d2839 is .legion/ only). At 06:15Z every check run at b2be8c44 queued (lint, typecheck, test, changes, build, pr-title; one pr-title cancelled). Not waited on: this round requests changes.",
+  "completed": "2026-10-26T07:03:47Z",
+  "round": 6,
+  "decision": "approved",
+  "reviewedCodeHead": "24d58a97d324210c84faf24a5d70ad6d8d330348",
+  "scope": "The corrective delta since round 5 (code head b2be8c44): 24d58a97, skill prose (park rule scoped to a child parked for good; a park followed by rerun_child keeps its dependents' links; 'the blocker's own merge'; 'a person or you taking its blocked-by links off') and comment-only edits in blockers.go, effects.go and controller_wake_test.go. No merge of main since round 4.",
+  "ci": "Required set (main ruleset): lint, typecheck, test, pr-title; branch protection none. CI head 24d58a97 (newest pull_request run; compare 24d58a97...7c94db10 is .legion/ only). Tests run 40279753303 completed success (lint, typecheck, test success) at 06:56Z; pr-title success in PR Title runs 40279854802, 40279753149 and 40279753897 (40279753194 cancelled, superseded). Docs 40279753207 and Worker Image 40279753172 success; Legion Envoy and Contracts 40279753279 still queued (not required).",
   "critical": 0,
-  "important": 1,
+  "important": 0,
   "minor": 0,
-  "keyFindings": [
-    {
-      "severity": "important",
-      "file": "skills/legion-architect/SKILL.md",
-      "description": "Line 37's new park rule applies to every park_child, but the skill's own restart path is park_child then rerun_child (wake-routing.md:31 pr-closed-unmerged, :39 ready-refused READY_PACKET_MISSING; architect-common.md:2; api/architect.go:897 refuses rerun_child with CHILD_RUNNING until the child is parked). An architect that follows line 37 during a restart takes the restarted child off each dependent's list, and StartUnblockedChildren (engine.go:977-982) starts the dependent at the next look, before the rerun's work exists; nothing says to restore the link. Without the rule a restart was already right: backlog counts as unfinished (blockers.go:24-26), so dependents wait through the rerun. Fix: scope the bullet to a child taken out for good (made unneeded, or parked so its tree can finish), and say that a park followed by rerun_child keeps its dependents' links. Same in packages/claude-envoy/legion/ and the child-closed row of wake-routing.md:23 if its wording needs it."
-    }
-  ],
-  "fastFollow": "Wording, in the same push: (a) controller admission.md:11, daily-report.md:65-66, wakes.md:47-48 list a blocker's close as '(a person's close, or a child's own merge)', which leaves out a root's merge (a waiting root blocked by another tree's root is the common case): say '(a person's close, or the blocker's own merge)'; (b) 'a person taking its blocked-by links off' / 'a person took its blocked-by links off' / 'Only a person finishes a blocker' still stand in wake-routing.md:22 child-status row, workflow/effects.go:343-344 and admit/controller_wake_test.go:180-181, though the architect now takes links off too; (c) blockers.go:92-93 (Blocked's doc) still says StartUnblockedChildren starts a held child from Holds, which it no longer calls.",
+  "keyFindings": [],
   "verifiedThisRound": [
-    "b2be8c44's move is verbatim: the lines removed from daemon/workflow.go and controller_tick_reread.go from line 16 differ by one trailing blank line (diff run here); workflow.go is 959 lines; go vet of internal/daemon, internal/workflow and internal/blockers exits 0 at the head.",
-    "engine.go:982 `!Holdable || len(Unfinished) > 0` is the predicate the old `!Holdable || len(Holds) > 0` computed (Holds = Holdable ? Unfinished : nil, blockers.go:163-168).",
-    "SKILL.md:35's CLI claims hold: dispatch issue-update --help ('Replacement list ... One item per flag, repeated'; --clear-blocked-by exists), writeBlockedBy deletes then inserts (issue_parent.go:310-343). The cross-repository exemption and decomposition.md:61-63 are accurate: a held child starts at its blocker's close before the architect can name a merged commit. wake-routing.md:29's 'Release it now' matches the hold.",
-    "Comment-only changes in legion-api.ts:294 and record/outbox.go:203-204; skill mirrors byte-identical (thermonuclear-deep-review, cmp).",
-    "Round 4's two threads (PRRT_kwDORFy7ds6wJKrQ, PRRT_kwDORFy7ds6wJKrS) are resolved by the implementer; both answered by the reviewer as accepted, the second naming the new finding at SKILL.md:37. All eight threads resolved.",
-    "Tester round 8 at b2be8c44: implementerProof verified, failures empty, proof drives the link-and-park procedure (but not a park followed by rerun_child)."
+    "SKILL.md:37's park-then-rerun sentence holds: park_child writes backlog (api/architect.go:881), rerun_child requires phase done and writes todo (:896-909), blockers.Unfinished counts any status but done as unfinished (blockers.go:24-26,79), so dependents stay held until the rerun's merge writes done (workflow/table.go:75) and StartUnblockedChildren (engine.go:977-1011) starts them.",
+    "'For good' matches the skill's other park uses: made unneeded (SKILL.md:36) and parked so the tree can finish (sign_off's SIGNOFF_CHILD_IN_WORKFLOW, acceptance.md:142); the restart rows of wake-routing.md:31,39 are covered by the rerun sentence.",
+    "The Go diff is comments only (no non-comment line added or removed); the new Blocked and ChildUnblockedNotice docs match engine.go:982 and effects.go:353.",
+    "The five changed skill files are byte-identical to their packages/claude-envoy/legion/ copies (thermonuclear pair, cmp and sha256).",
+    "Thread PRRT_kwDORFy7ds6wJ58k (round 5's finding) resolved by the implementer and answered by the reviewer as accepted; all nine threads resolved, each of the reviewer's carrying its answer. No bot threads.",
+    "Tester round 9 at 24d58a97: implementerProof verified, failures empty, drives the park-then-rerun sentence on the booted daemon."
   ],
-  "thermo": "thermonuclear-deep-review and thermonuclear-code-quality once at b2be8c44: both CHANGES on the park-then-rerun finding; the rest is the fast-follow.",
+  "notADefect": [
+    "ChildUnblockedNotice names its waited list as done when the architect re-sets a sibling's list without a parked child and the remaining blockers are already done; the reason ('every issue it waited on (X) is done') is literally true, and the architect made the edit itself.",
+    "'(a person's close, or the blocker's own merge)' does not name close_root's done write (workflow/close_root.go:32), which records a human's decision that no change is needed; the controller takes nothing either way."
+  ],
+  "thermo": "thermonuclear-deep-review and thermonuclear-code-quality once at 24d58a97: both APPROVE; the quality pass's two minor wording notes judged not defects above. Provider not verified: the subagent transcripts render without provider or model, and the sql session store is not readable from this pod (no psql).",
   "acceptedRisks": "The two event-lag windows and the whole-mirror read stay on the PR's Not proven / risk line, as the architect ruled."
 }
