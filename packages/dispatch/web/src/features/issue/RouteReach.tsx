@@ -1,18 +1,40 @@
 import type { ReactNode } from "react";
 
 import type { IssueRouteReach } from "../../api/types";
-import { calloutWarningBg, calloutWarningBorder, calloutWarningText } from "../../theme/classes";
+import {
+  calloutWarningBg,
+  calloutWarningBorder,
+  calloutWarningText,
+  textMutedOnSurface,
+} from "../../theme/classes";
 import { AgentName, useAgentText } from "../refs/AgentName";
 import { sessionOfAddress } from "../refs/routes";
 
 type RoutedIssue = IssueRouteReach & { readonly route: string | null };
 
-/** The marker for a route the Envoy listener could not judge (`route_status: unknown`), shown in
- *  the issue header and on an ask's route row (`AskRecipients`). */
-export const ROUTE_REACH_UNKNOWN = "Route reach unknown";
-/** The title that explains `ROUTE_REACH_UNKNOWN`. */
-export const ROUTE_REACH_UNKNOWN_TITLE =
-  "The Envoy listener did not answer, so Dispatch cannot tell whether anyone receives this route.";
+/** The `Route reach unknown` marker for a route the Envoy listener could not judge
+ *  (`route_status: unknown`), shown in the issue header and on an ask's route row
+ *  (`AskRecipients`), with a title that says why. It claims neither that the route reaches
+ *  someone nor that nobody holds it; the caller decides when to show it. `className` adds the
+ *  call site's layout classes and `testId` its test id: the header's marker carries
+ *  `issue-route-unknown` and an ask card's none, since the issue page shows both. */
+export function RouteReachUnknownMarker({
+  className,
+  testId,
+}: {
+  className?: string;
+  testId?: string;
+}): ReactNode {
+  return (
+    <span
+      className={`${className === undefined ? "" : `${className} `}text-xs ${textMutedOnSurface}`}
+      data-testid={testId}
+      title="The Envoy listener did not answer, so Dispatch cannot tell whether anyone receives this route."
+    >
+      Route reach unknown
+    </span>
+  );
+}
 
 /**
  * The warning an issue carries wherever it is shown - the issue header, a List row, a Board

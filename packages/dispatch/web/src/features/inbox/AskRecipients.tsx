@@ -7,11 +7,7 @@ import { DisclosureToggle } from "../../components/DisclosureToggle";
 import { QueryError } from "../../components/QueryError";
 import { useIsHuman } from "../../hooks/useIsHuman";
 import { textMutedOnSurface } from "../../theme/classes";
-import {
-  ROUTE_REACH_UNKNOWN,
-  ROUTE_REACH_UNKNOWN_TITLE,
-  UnreachableRouteMarker,
-} from "../issue/RouteReach";
+import { RouteReachUnknownMarker, UnreachableRouteMarker } from "../issue/RouteReach";
 import { UnsubscribeDialog } from "../issue/UnsubscribeDialog";
 import { AgentName, useAgentText } from "../refs/AgentName";
 import { sessionChipClassName, sessionRemoveButtonClassName } from "../refs/SessionChip";
@@ -92,8 +88,9 @@ export interface IssueReachRow {
    *  (`UnreachableRouteMarker`), and `Reaches N` leaves it out. */
   reaches: boolean;
   /** Set on the route's row while the listener did not answer (`route_status: unknown`): the row
-   *  carries the `Route reach unknown` marker and claims neither that the route reaches someone
-   *  nor that nobody holds it. A `session:<id>` route still names and counts its session, which
+   *  carries the issue's `Route reach unknown` marker (`RouteReachUnknownMarker`) and claims
+   *  neither that the route reaches someone nor that nobody holds it. A `session:<id>` route still
+   *  names and counts its session, which
    *  is published to either way (its running state is the registry's, as for every agent); a
    *  role route names the bare route, uncounted, and the count says the route reaches an unknown
    *  number more (`reachLabel`). */
@@ -351,12 +348,7 @@ export function AskRecipients({
                   )}
                   <span className="text-xs italic">{row.via}</span>
                   {row.reachUnknown ? (
-                    <span
-                      className={`text-xs ${textMutedOnSurface}`}
-                      title={ROUTE_REACH_UNKNOWN_TITLE}
-                    >
-                      {ROUTE_REACH_UNKNOWN}
-                    </span>
+                    <RouteReachUnknownMarker />
                   ) : row.reaches ? null : (
                     <UnreachableRouteMarker
                       issue={{ route: row.id, route_holder: null, route_status: routeStatus }}
