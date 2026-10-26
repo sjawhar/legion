@@ -353,7 +353,7 @@ test("a broadcast reaches sessions the listener's list has dropped while their r
     await expect(page.getByText(/Excluded:/)).toHaveCount(0);
     await expect
       .poll(async () => (await getSentMessages()).map((entry) => entry.target_session).sort())
-      .toEqual(["planner-session", "tester-session"]);
+      .toEqual([planner.session_id, tester.session_id].sort());
   } finally {
     await alice.close();
   }
