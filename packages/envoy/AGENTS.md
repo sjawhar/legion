@@ -2316,10 +2316,12 @@ the synchronous listener call records the sent or failed attempt instead of blin
   under `notify` and never for a targeted message (`message.created` or `message.answered` with a
   `target`), which reaches only its session. An agent's event of these types takes no claimant
   route, and neither does any other type, a person's `ask.opened`, `ask.edited`, issue update or
-  document version included: those reach a claimant only through a subscription to the issue
-  topic, or as the route. A `comment.created` whose mentions resolved to the claimant is left to
-  the mention once the mention delivered it (the mention rule below); its edit, resolution and
-  reopening are not. The claim is read when the event is published, not when it was written: the
+  document version included. A person's reaches a claimant only through a subscription to the
+  issue topic, or as the route when it notifies; an agent's only through that subscription, since
+  an agent's event of these types never notifies and so takes no route copy either. A
+  `comment.created` whose mentions resolved to the claimant is left to the mention once the
+  mention delivered it (the mention rule below); its edit, resolution and reopening are not. The
+  claim is read when the event is published, not when it was written: the
   scan's issues join in `scanPendingEvents` reads `issues.claimed_by` beside the route on every
   attempt (`routing`), so a retry after the claim moved reaches the current claimant. A project
   document's event names no issue and takes none. A claimant that is also the route, a follower or
