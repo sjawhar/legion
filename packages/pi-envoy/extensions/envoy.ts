@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { delimiter, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -188,6 +189,31 @@ const codec = StringCodec();
 const NATS_RETRY_INTERVAL_MS = 15_000;
 /** How long a delivery waits for the pictures it embeds before it goes out as text alone. */
 const DELIVERY_PICTURES_TIMEOUT_MS = 20_000;
+
+/** What every card `deliver` sends carries in its `details`, which the host keeps on the record
+ *  and its persisted entry: an id no other card in the process shares, and whether the card was a
+ *  targeted Aside. The session's own notices carry `LOCAL_ENVOY_NOTICE` instead. */
+type EnvoyCardMarker = {
+  readonly envoyCard: string;
+  readonly targetedAside: boolean;
+};
+
+/** The card marker a host message's or a branch entry's `details` carries; undefined for none. */
+function envoyCardMarker(details: unknown): EnvoyCardMarker | undefined {
+  if (typeof details !== "object" || details === null) return undefined;
+  if (!("envoyCard" in details) || !("targetedAside" in details)) return undefined;
+  const { envoyCard, targetedAside } = details;
+  return typeof envoyCard === "string" && typeof targetedAside === "boolean"
+    ? { envoyCard, targetedAside }
+    : undefined;
+}
+
+/** The `errorMessage` of the assistant message an interrupt ends a run with: the host's
+ *  `USER_INTERRUPT_LABEL` (`@oh-my-pi/pi-tui`), which RPC `abort`, Esc and `ctx.abort` all pass. */
+const USER_INTERRUPT_LABEL = "Interrupted by user";
+
+/** The `finalError` of a retry saga an abort cancelled in its backoff or credential wait. */
+const RETRY_CANCELLED = "Retry cancelled";
 
 /** Whether the task that was handed this fence is still the one the queue is waiting on: false
  *  once that task was abandoned at its deadline. */
@@ -1210,15 +1236,23 @@ export default function envoyExtension(pi: PiApi): void {
             // run, where an Esc dropped a queued steer and an RPC `abort` resumed the run on it. An
             // idle session has no queue to wait in, and there a card stays a steer with
             // `triggerTurn`, which starts a turn after an interrupt (an Esc, or the RPC `abort` a
-            // Legion daemon sends) and in plan mode, where an idle aside starts none. A targeted
-            // Aside stays an aside in both states. The limit is in `AGENTS.md` ("Overview").
+            // Legion daemon sends) and in plan mode, where an idle aside starts none. A host
+            // context with no `isIdle` cannot say whether a turn runs, and its cards stay steers
+            // too: the wake for a card the host folds (`foldedCards`) needs `isIdle`. A targeted
+            // Aside stays an aside in every case. Each card carries a marker (`EnvoyCardMarker`)
+            // the wake finds it by in the branch. The limit is in `AGENTS.md` ("Overview").
+            const targetedAside = rendered.delivery?.mode === "aside";
+            const marker: EnvoyCardMarker = { envoyCard: randomUUID(), targetedAside };
             pi.sendMessage(
-              { customType: "envoy-message", content: card.content, display: true },
+              {
+                customType: "envoy-message",
+                content: card.content,
+                display: true,
+                details: marker,
+              },
               {
                 deliverAs:
-                  rendered.delivery?.mode !== "aside" && activeSessionContext?.isIdle?.() === true
-                    ? "steer"
-                    : "aside",
+                  targetedAside || activeSessionContext?.isIdle?.() === false ? "aside" : "steer",
                 triggerTurn: true,
               }
             );
@@ -1596,8 +1630,125 @@ export default function envoyExtension(pi: PiApi): void {
   pi.on("message_update", async (event) => {
     recordAgentStreamMessage(event.message, true);
   });
-  pi.on("message_end", async (event) => {
-    recordAgentStreamMessage(event.message, false);
+
+  // The wake for a folded card. The host folds an aside left over when a run settles (one taken
+  // after the run's last step, during its post-run maintenance or auto-compaction) into the
+  // context with no turn while an interrupt's latch is set or plan mode is on, emitting the
+  // record's `message_end` and persisting it (`agent-session.ts` `#resumeStrandedIrcAsides`), and
+  // folds an aside that reaches an idle host in either state the same way (`#sendCustomMessage`).
+  // A card sent as an aside while a turn ran would then sit unread, where as a steer it started a
+  // turn. So a card's `message_end` arms one check on the host's managed timer, and the check
+  // sends one wake when the host is idle, no run started since the card's, no interrupt is in
+  // effect, and no assistant message follows the card in the branch. The branch's order decides
+  // rather than the events', because the host emits the extension `agent_end` unawaited after its
+  // post-run maintenance and does not serialise separate emits: a fold's `message_end` can reach
+  // this extension before or after it. A card a run read has the model's reply after it, and one
+  // not yet in the branch has nothing after it, since the host persists every `message_end` in one
+  // first-in, first-out chain (`#queueMessageEndPersistence`).
+  //
+  // The wake goes as `nextTurn` with `triggerTurn`: on an idle host that starts a turn with no
+  // latch or plan-mode check, and on a host that turned busy since the check it waits in the
+  // hidden next-turn queue, never in the steering queue ahead of a person's Send. It carries
+  // `LOCAL_ENVOY_NOTICE`, so it is no card itself and Legion's phase-stall check does not count it
+  // as a second inbound event.
+  //
+  // An interrupt keeps the cards it finds folded until the person's next turn. Extensions see one
+  // only as the interrupted run's last assistant message (aborted, `USER_INTERRUPT_LABEL`), an
+  // aborted post-run auto-compaction, or a retry cancelled in its backoff; each sets
+  // `foldInterrupted` until the next run starts. Any other abort sets no latch, and the host wakes
+  // for the asides it strands itself, so it sets nothing here.
+  let foldedCards: { readonly id: string; readonly run: number }[] = [];
+  let foldInterrupted = false;
+  let foldCheckArmed = false;
+  // Bumped to drop an armed check, since the host's managed timer has no cancel handle.
+  let foldCheckGeneration = 0;
+  const cancelFoldCheck = (): void => {
+    foldCheckGeneration += 1;
+    foldCheckArmed = false;
+    foldedCards = [];
+  };
+  const checkFoldedCards = (context: SessionContext): void => {
+    // A card fed to a run that has since started is that run's to read.
+    const pending = new Set(
+      foldedCards.filter((folded) => folded.run === runSeq).map((folded) => folded.id)
+    );
+    foldedCards = [];
+    if (pending.size === 0 || foldInterrupted || context.isIdle?.() !== true) return;
+    // Walked from the end, stopping once every card is placed: a card with an assistant message
+    // anywhere after it was read by a run.
+    let unread = 0;
+    let replied = false;
+    const branch = context.sessionManager.getBranch?.() ?? [];
+    for (let index = branch.length - 1; index >= 0 && pending.size > 0; index -= 1) {
+      const entry = branch[index];
+      if (typeof entry !== "object" || entry === null || !("type" in entry)) continue;
+      if (entry.type === "message" && "message" in entry) {
+        const { message } = entry;
+        if (typeof message === "object" && message !== null && "role" in message) {
+          replied ||= message.role === "assistant";
+        }
+      } else if (entry.type === "custom_message" && "details" in entry) {
+        const marker = envoyCardMarker(entry.details);
+        if (marker !== undefined && pending.delete(marker.envoyCard) && !replied) unread += 1;
+      }
+    }
+    unread += pending.size;
+    if (unread === 0) return;
+    pi.sendMessage(
+      {
+        customType: "envoy-message",
+        content:
+          unread === 1
+            ? "1 Envoy message above arrived after your last turn ended: read it and act on it."
+            : `${unread} Envoy messages above arrived after your last turn ended: read them and act on them.`,
+        display: false,
+        details: LOCAL_ENVOY_NOTICE,
+      },
+      { deliverAs: "nextTurn", triggerTurn: true }
+    );
+  };
+
+  pi.on("message_end", async (event, context) => {
+    const { message } = event;
+    if (typeof message === "object" && message !== null && "role" in message) {
+      if (message.role === "assistant") {
+        if (
+          "stopReason" in message &&
+          message.stopReason === "aborted" &&
+          "errorMessage" in message &&
+          message.errorMessage === USER_INTERRUPT_LABEL
+        ) {
+          foldInterrupted = true;
+        }
+      } else if (
+        !shuttingDown &&
+        message.role === "custom" &&
+        "customType" in message &&
+        message.customType === "envoy-message" &&
+        "details" in message
+      ) {
+        const marker = envoyCardMarker(message.details);
+        if (marker !== undefined && !marker.targetedAside) {
+          foldedCards.push({ id: marker.envoyCard, run: runSeq });
+          if (!foldCheckArmed) {
+            foldCheckArmed = true;
+            const generation = foldCheckGeneration;
+            context.setTimeout(() => {
+              if (generation !== foldCheckGeneration) return;
+              foldCheckArmed = false;
+              checkFoldedCards(context);
+            }, 0);
+          }
+        }
+      }
+    }
+    recordAgentStreamMessage(message, false);
+  });
+  pi.on("auto_compaction_end", async (event) => {
+    if (event.aborted) foldInterrupted = true;
+  });
+  pi.on("auto_retry_end", async (event) => {
+    if (!event.success && event.finalError === RETRY_CANCELLED) foldInterrupted = true;
   });
 
   // A turn runs on the model and level set when it starts, and a retry's fallback moves the session
@@ -2706,6 +2857,8 @@ export default function envoyExtension(pi: PiApi): void {
     reason: SessionSwitchReason | undefined,
     context: SessionContext
   ): Promise<void> => {
+    // The cards a check was armed for belong to the session the host left.
+    cancelFoldCheck();
     if (await isSubagent(context)) return;
     const host = context.sessionManager.getSessionId();
     noteMove(host, { kind: reason });
@@ -2747,6 +2900,7 @@ export default function envoyExtension(pi: PiApi): void {
   // a session the host has yet to give an id have nothing to leave. A switch another extension
   // cancels changes nothing: the host's id never moves, so the announcement teaches nothing.
   const announce = (reason: SessionSwitchReason | undefined, context: SessionContext): void => {
+    cancelFoldCheck();
     const from = context.sessionManager.getSessionId();
     // An earlier announcement whose move came with no event and no pass since is learned from now,
     // before this one replaces it.
@@ -2759,6 +2913,7 @@ export default function envoyExtension(pi: PiApi): void {
 
   pi.on("session_shutdown", async (_event, context) => {
     shuttingDown = true;
+    cancelFoldCheck();
     if (publishedInterface !== undefined) {
       const bound = publishedInterface.roleClaim.instances.indexOf(claimInstance);
       if (bound !== -1) publishedInterface.roleClaim.instances.splice(bound, 1);
@@ -2866,11 +3021,13 @@ export default function envoyExtension(pi: PiApi): void {
 
   // Every run the host starts, typed or not: the user's prompt, an Envoy delivery waking the
   // session, another extension's continuation. `agent_end` compares it with what it read at the
-  // settle, so a verdict that arrives after the session has moved on steers nothing. A run that
-  // starts on the session a switch announced leaving is marked, and its end tells whether that
-  // switch went ahead (`runUnderAnnouncement`).
+  // settle, so a verdict that arrives after the session has moved on steers nothing, and so does
+  // the wake for a folded card. A run that starts on the session a switch announced leaving is
+  // marked, and its end tells whether that switch went ahead (`runUnderAnnouncement`). A run
+  // started after an interrupt ends it: the cards folded from here on get their wake.
   pi.on("agent_start", async (_event, context) => {
     runSeq += 1;
+    foldInterrupted = false;
     runUnderAnnouncement =
       announced?.from === context.sessionManager.getSessionId() ? announced : undefined;
   });

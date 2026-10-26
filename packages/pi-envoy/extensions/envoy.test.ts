@@ -13432,24 +13432,331 @@ describe("envoy OMP extension", () => {
     ).toHaveLength(1);
   });
 
-  // A context without `isIdle` cannot say no turn runs, so its cards go as asides, which an idle
-  // host still runs a turn for (outside an interrupt and plan mode).
-  test("delivers an inbound card as an aside on a host that reports no idle state", async () => {
-    globalThis.fetch = async (input, init) => responseWithRegistration(input, init, []);
-    const { default: envoyExtension } = await import("./envoy.ts?deliver-as-aside");
-    const fixture = createPi();
+  // A context without `isIdle` cannot say no turn runs, and the wake for a folded card needs it, so
+  // its cards stay steers with `triggerTurn`: an aside there could fold into the context with no
+  // turn after an interrupt or in plan mode, where a steer starts one.
+  test("delivers an inbound card as a steer on a host that reports no idle state", async () => {
+    const { agent, delivered, fixture } = await bootDirectSession("deliver-as-steer");
 
-    envoyExtension(fixture.pi);
-    await fixture.handlers.get("session_start")?.({}, sessionContext("ses_steer"));
-    const controls = natsState.controls.get("notifications.agent.ses_steer");
-    expect(controls).toBeDefined();
-
-    controls?.push(forwardedRoleEnvelope("legion-controller", "fold me in mid-turn", "aside"));
-    await new Promise((resolve) => setTimeout(resolve, 10));
+    agent.push(forwardedRoleEnvelope("legion-controller", "steer me in", "steer"));
+    await delivered(1);
 
     expect(fixture.deliveries.length).toBe(1);
-    expect(fixture.deliveries[0]?.content).toContain("fold me in mid-turn");
-    expect(fixture.deliveries[0]?.options).toEqual({ deliverAs: "aside", triggerTurn: true });
+    expect(fixture.deliveries[0]?.content).toContain("steer me in");
+    expect(fixture.deliveries[0]?.options).toEqual({ deliverAs: "steer", triggerTurn: true });
+  });
+
+  // The host folds an aside left over when a run settles into the context with no turn while an
+  // interrupt's latch is set or plan mode is on: the record's `message_end` reaches the extension
+  // and the host persists it as a `custom_message` entry, and no run reads it. The extension sends
+  // one wake for such cards, decided by the branch's order, because the host does not order a
+  // fold's `message_end` against the extension's `agent_end`.
+  describe("a card the host folds into the context with no turn", () => {
+    type HostMessage = { readonly role: string } & Record<string, unknown>;
+
+    /**
+     * Boots ses_delivery with a branch the test writes and a managed timer it runs (`fire`).
+     * `card` delivers one card while a turn runs, as the host is handed it, and returns the
+     * record the host would fold and the entry it would persist; `fold` marks the host idle and
+     * hands it those records, persisted in order; `reply` is an assistant message ending a step.
+     * `reportsIdle: false` is a host context without `isIdle`.
+     */
+    async function foldSession(query: string, options: { readonly reportsIdle?: boolean } = {}) {
+      let idle = false;
+      const session = await bootDirectSession(query, {
+        ...(options.reportsIdle !== false && { idle: () => idle }),
+      });
+      const branch: unknown[] = [];
+      const timers: (() => void | Promise<void>)[] = [];
+      const context = {
+        ...session.context,
+        setTimeout: (callback: () => void | Promise<void>) => {
+          timers.push(callback);
+        },
+        sessionManager: { ...session.context.sessionManager, getBranch: () => branch },
+      };
+      const handle = async (event: string, payload: unknown): Promise<void> => {
+        const handler = session.fixture.handlers.get(event);
+        if (handler === undefined) throw new Error(`no ${event} handler`);
+        await handler(payload, context);
+      };
+      let step = 0;
+      const card = async (label: string, targeted = false) => {
+        const sent = session.fixture.deliveries.length;
+        session.agent.push(
+          targeted
+            ? targetedDispatchEnvelope("aside", label)
+            : forwardedRoleEnvelope("legion-controller", label, label)
+        );
+        await session.delivered(sent + 1);
+        const delivery = session.fixture.deliveries.at(-1);
+        if (delivery === undefined) throw new Error("the card was not delivered");
+        const fields = {
+          customType: delivery.customType,
+          content: delivery.content,
+          display: delivery.display,
+          details: delivery.details,
+        };
+        step += 1;
+        return {
+          message: { role: "custom", ...fields, timestamp: step } as HostMessage,
+          entry: { type: "custom_message", id: `entry-${label}`, ...fields },
+        };
+      };
+      const message = async (record: HostMessage, persisted = true): Promise<void> => {
+        if (persisted) {
+          step += 1;
+          branch.push(
+            record.role === "custom"
+              ? { type: "custom_message", id: `entry-${step}`, ...record }
+              : { type: "message", id: `entry-${step}`, message: record }
+          );
+        }
+        await handle("message_end", { message: record });
+      };
+      return {
+        branch,
+        context,
+        handle,
+        card,
+        message,
+        session,
+        timers,
+        setIdle: (value: boolean) => {
+          idle = value;
+        },
+        fold: async (...cards: { readonly message: HostMessage; readonly entry: unknown }[]) => {
+          idle = true;
+          for (const folded of cards) {
+            branch.push(folded.entry);
+            await handle("message_end", { message: folded.message });
+          }
+        },
+        reply: (fields: Record<string, unknown> = {}): HostMessage => ({
+          role: "assistant",
+          content: [{ type: "text", text: "done" }],
+          stopReason: "stop",
+          ...fields,
+        }),
+        fire: async (): Promise<void> => {
+          for (const timer of timers.splice(0)) await timer();
+        },
+        wakes: () =>
+          session.fixture.deliveries.filter(
+            ({ options }) =>
+              typeof options === "object" &&
+              options !== null &&
+              "deliverAs" in options &&
+              options.deliverAs === "nextTurn"
+          ),
+      };
+    }
+
+    const interrupted = { stopReason: "aborted", errorMessage: "Interrupted by user" };
+
+    for (const order of ["before", "after"] as const) {
+      test(`wakes the session once for a card folded ${order} the run's agent_end`, async () => {
+        const fold = await foldSession(`fold-wake-${order}`);
+        const card = await fold.card(`folded-${order}`);
+        await fold.handle("agent_start", {});
+        await fold.message(fold.reply());
+        if (order === "after") await fold.handle("agent_end", { messages: [fold.reply()] });
+        await fold.fold(card);
+        if (order === "before") await fold.handle("agent_end", { messages: [fold.reply()] });
+        await fold.fire();
+
+        expect(fold.wakes()).toEqual([
+          {
+            content: expect.stringContaining("Envoy message"),
+            customType: "envoy-message",
+            details: LOCAL_ENVOY_NOTICE,
+            display: false,
+            options: { deliverAs: "nextTurn", triggerTurn: true },
+          },
+        ]);
+      });
+    }
+
+    test("wakes the session once for three cards folded in one window", async () => {
+      const fold = await foldSession("fold-wake-three");
+      const cards = [await fold.card("one"), await fold.card("two"), await fold.card("three")];
+      await fold.handle("agent_start", {});
+      await fold.message(fold.reply());
+      await fold.handle("agent_end", { messages: [fold.reply()] });
+      await fold.fold(...cards);
+      await fold.fire();
+
+      expect(fold.wakes()).toHaveLength(1);
+      expect(fold.wakes()[0]?.content).toContain("3 Envoy messages");
+    });
+
+    test("counts only the folded card when a card a run read is handled in the same window", async () => {
+      const fold = await foldSession("fold-wake-read-and-folded");
+      const read = await fold.card("read");
+      const folded = await fold.card("folded");
+      await fold.handle("agent_start", {});
+      fold.branch.push(read.entry);
+      await fold.message(fold.reply());
+      await fold.handle("agent_end", { messages: [fold.reply()] });
+      await fold.fold(folded);
+      await fold.handle("message_end", { message: read.message });
+      await fold.fire();
+
+      expect(fold.wakes()).toHaveLength(1);
+      expect(fold.wakes()[0]?.content).toContain("1 Envoy message ");
+    });
+
+    test("sends no wake for a card the run read, handled after its agent_end", async () => {
+      const fold = await foldSession("fold-no-wake-read");
+      const card = await fold.card("read-mid-run");
+      await fold.handle("agent_start", {});
+      fold.branch.push(card.entry);
+      await fold.message(fold.reply());
+      fold.setIdle(true);
+      await fold.handle("agent_end", { messages: [fold.reply()] });
+      await fold.handle("message_end", { message: card.message });
+      await fold.fire();
+
+      expect(fold.wakes()).toEqual([]);
+    });
+
+    test("sends no wake for a folded targeted Aside", async () => {
+      const fold = await foldSession("fold-no-wake-targeted-aside");
+      const card = await fold.card("targeted-aside", true);
+      await fold.fold(card);
+      await fold.fire();
+
+      expect(fold.wakes()).toEqual([]);
+    });
+
+    test("sends no wake for a card folded after a user interrupt", async () => {
+      const fold = await foldSession("fold-no-wake-interrupt");
+      const card = await fold.card("after-interrupt");
+      await fold.handle("agent_start", {});
+      await fold.message(fold.reply(interrupted));
+      await fold.handle("agent_end", { messages: [fold.reply(interrupted)] });
+      await fold.fold(card);
+      await fold.fire();
+
+      expect(fold.wakes()).toEqual([]);
+    });
+
+    test("sends no wake for a card folded after an interrupted auto-compaction", async () => {
+      const fold = await foldSession("fold-no-wake-compaction");
+      const card = await fold.card("after-compaction");
+      await fold.handle("agent_start", {});
+      await fold.message(fold.reply());
+      await fold.handle("auto_compaction_end", { aborted: true });
+      await fold.fold(card);
+      await fold.handle("agent_end", { messages: [fold.reply()] });
+      await fold.fire();
+
+      expect(fold.wakes()).toEqual([]);
+    });
+
+    test("sends no wake for a card folded after an interrupt during a retry's backoff", async () => {
+      const fold = await foldSession("fold-no-wake-retry");
+      const card = await fold.card("after-retry");
+      await fold.handle("agent_start", {});
+      await fold.message(fold.reply({ stopReason: "error", errorMessage: "overloaded" }));
+      await fold.handle("auto_retry_end", { success: false, finalError: "Retry cancelled" });
+      await fold.handle("agent_end", { messages: [fold.reply()] });
+      await fold.fold(card);
+      await fold.fire();
+
+      expect(fold.wakes()).toEqual([]);
+    });
+
+    test("sends no wake when a run starts between the fold and the check", async () => {
+      const fold = await foldSession("fold-no-wake-run-started");
+      const card = await fold.card("run-started");
+      await fold.fold(card);
+      await fold.handle("agent_start", {});
+      await fold.fire();
+
+      expect(fold.wakes()).toEqual([]);
+    });
+
+    test("sends no wake when the host is busy at the check", async () => {
+      const fold = await foldSession("fold-no-wake-busy");
+      const card = await fold.card("busy");
+      await fold.fold(card);
+      fold.setIdle(false);
+      await fold.fire();
+
+      expect(fold.wakes()).toEqual([]);
+    });
+
+    test("sends no wake on a host that reports no idle state", async () => {
+      const fold = await foldSession("fold-no-wake-no-idle", { reportsIdle: false });
+      const card = await fold.card("no-idle");
+      await fold.fold(card);
+      await fold.fire();
+
+      expect(fold.wakes()).toEqual([]);
+    });
+
+    test("sends no wake for the session's own identity-changed notice", async () => {
+      const fold = await foldSession("fold-no-wake-notice");
+      fold.setIdle(true);
+      await fold.message({
+        role: "custom",
+        customType: "envoy-message",
+        content: "session id changed",
+        display: true,
+        details: LOCAL_ENVOY_NOTICE,
+      });
+      await fold.fire();
+
+      expect(fold.wakes()).toEqual([]);
+    });
+
+    test("sends no wake when the session shuts down before the check", async () => {
+      const fold = await foldSession("fold-no-wake-shutdown");
+      const card = await fold.card("shutdown");
+      await fold.fold(card);
+      await fold.handle("session_shutdown", {});
+      await fold.fire();
+
+      expect(fold.wakes()).toEqual([]);
+    });
+
+    test("wakes the session for a card folded after an abort that was not the user's", async () => {
+      const fold = await foldSession("fold-wake-other-abort");
+      const card = await fold.card("other-abort");
+      const aborted = { stopReason: "aborted", errorMessage: "Request was aborted" };
+      await fold.handle("agent_start", {});
+      await fold.message(fold.reply(aborted));
+      await fold.handle("agent_end", { messages: [fold.reply(aborted)] });
+      await fold.fold(card);
+      await fold.fire();
+
+      expect(fold.wakes()).toHaveLength(1);
+    });
+
+    test("wakes the session again once a run starts after an interrupt", async () => {
+      const fold = await foldSession("fold-wake-after-interrupt-cleared");
+      await fold.handle("agent_start", {});
+      await fold.message(fold.reply(interrupted));
+      await fold.handle("agent_end", { messages: [fold.reply(interrupted)] });
+      fold.setIdle(true);
+      // A card reaching the idle session starts a run of its own, which reads it.
+      const idleCard = await fold.card("idle-card");
+      fold.setIdle(false);
+      await fold.handle("agent_start", {});
+      await fold.message(idleCard.message);
+      await fold.fire();
+      await fold.message(fold.reply());
+      fold.setIdle(true);
+      await fold.handle("agent_end", { messages: [fold.reply()] });
+      await fold.fire();
+      fold.setIdle(false);
+      const folded = await fold.card("folded-later");
+      await fold.fold(folded);
+      await fold.fire();
+
+      expect(fold.wakes()).toHaveLength(1);
+    });
   });
 
   test("acknowledges an agent-subject request before any Dispatch call or the injection", async () => {

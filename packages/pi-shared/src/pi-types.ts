@@ -154,6 +154,20 @@ export interface RetryFallbackAppliedEvent {
   readonly reason?: string;
 }
 
+/** Post-run auto-compaction ended (`shared-events.ts` in the host); `aborted` is an interrupt
+ * during it, which leaves no aborted assistant message behind. Only the field read is typed. */
+export interface AutoCompactionEndEvent {
+  readonly aborted: boolean;
+}
+
+/** A retry saga ended (`shared-events.ts` in the host); an abort during its backoff or credential
+ * wait ends it with `success: false` and `finalError` "Retry cancelled". Only the fields read are
+ * typed. */
+export interface AutoRetryEndEvent {
+  readonly success: boolean;
+  readonly finalError?: string;
+}
+
 /** A message entering the session: a user prompt (the daemon's RPC `prompt` among them), a custom
  * message, an assistant reply, or a tool result. `message_update` carries the same shape for a
  * message still being produced — one per streamed delta, with the partial message — and
@@ -257,6 +271,13 @@ export interface PiEventContract {
     readonly event: RetryFallbackAppliedEvent;
     readonly result: undefined;
   };
+  /** Post-run auto-compaction ended, finished, skipped or interrupted. */
+  readonly auto_compaction_end: {
+    readonly event: AutoCompactionEndEvent;
+    readonly result: undefined;
+  };
+  /** A retry saga ended, succeeded, exhausted or cancelled. */
+  readonly auto_retry_end: { readonly event: AutoRetryEndEvent; readonly result: undefined };
   /** Every provider request the session's agent loop sends, each turn and each tool round. */
   readonly context: { readonly event: ContextEvent; readonly result: ContextEventResult };
   /** Every input before it runs: the host's typed-input ingress, `sendUserInput` included. */
@@ -420,7 +441,10 @@ export interface PiApi {
           readonly details?: Readonly<Record<string, unknown>>;
         }
       | { readonly type: string },
-    options?: { readonly deliverAs: "steer" | "aside"; readonly triggerTurn: boolean }
+    options?: {
+      readonly deliverAs: "steer" | "aside" | "nextTurn";
+      readonly triggerTurn: boolean;
+    }
   ) => void;
   /**
    * Sends a user prompt, exactly as Enter at the terminal does: idle, it starts a turn; streaming,
