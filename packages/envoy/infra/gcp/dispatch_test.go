@@ -325,6 +325,9 @@ func TestDispatchResolverRefusesInvalidInputs(t *testing.T) {
 		{name: "an empty app priority class", edit: func(a *gcp.DispatchArgs) { a.AppPriorityClassName = pulumi.StringRef("") }, err: []string{"appPriorityClassName is empty", "leave it unset for no priority class"}},
 		{name: "an app priority class that is no DNS subdomain", edit: func(a *gcp.DispatchArgs) { a.AppPriorityClassName = pulumi.StringRef("Example_Priority") }, err: []string{`appPriorityClassName "Example_Priority"`, "DNS subdomain"}},
 		{name: "an app priority class with trailing whitespace", edit: func(a *gcp.DispatchArgs) { a.AppPriorityClassName = pulumi.StringRef("example-priority ") }, err: []string{`appPriorityClassName "example-priority "`, "DNS subdomain"}},
+		{name: "an app priority class longer than 253 characters", edit: func(a *gcp.DispatchArgs) { a.AppPriorityClassName = pulumi.StringRef(strings.Repeat("a", 254)) }, err: []string{"appPriorityClassName", "DNS subdomain"}},
+		{name: "a system cluster-critical app priority class", edit: func(a *gcp.DispatchArgs) { a.AppPriorityClassName = pulumi.StringRef("system-cluster-critical") }, err: []string{`appPriorityClassName "system-cluster-critical"`, "reserves for its own system components"}},
+		{name: "a system node-critical app priority class", edit: func(a *gcp.DispatchArgs) { a.AppPriorityClassName = pulumi.StringRef("system-node-critical") }, err: []string{`appPriorityClassName "system-node-critical"`, "reserves for its own system components"}},
 		{name: "a disruption budget of no pod", edit: func(a *gcp.DispatchArgs) { a.AppPdbMinAvailable = pulumi.IntRef(0) }, err: []string{"appPdbMinAvailable 0", "from 1 to replicas (1)", "leave it unset for no PodDisruptionBudget"}},
 		{name: "a negative disruption budget", edit: func(a *gcp.DispatchArgs) { a.AppPdbMinAvailable = pulumi.IntRef(-1) }, err: []string{"appPdbMinAvailable -1", "from 1 to replicas (1)"}},
 		{name: "a disruption budget above the default replica count", edit: func(a *gcp.DispatchArgs) { a.AppPdbMinAvailable = pulumi.IntRef(2) }, err: []string{"appPdbMinAvailable 2", "from 1 to replicas (1)"}},
@@ -1530,70 +1533,98 @@ func TestDispatchRefusesAppResourcesBeforeRegistering(t *testing.T) {
 	require.ElementsMatch(t, []string{gcpProviderType, randomProviderType}, m.Types())
 }
 
-const podDisruptionBudgetType = "kubernetes:policy/v1:PodDisruptionBudget"
+const (
+	podDisruptionBudgetType = "kubernetes:policy/v1:PodDisruptionBudget"
+	priorityClassType       = "kubernetes:scheduling.k8s.io/v1:PriorityClass"
+)
 
 // Unset, appPriorityClassName and appPdbMinAvailable leave the component as it was before they
-// existed: no PodDisruptionBudget, and an app pod naming no priority class
+// existed: no PodDisruptionBudget, no PriorityClass read, and an app pod naming no priority class
 // (TestDispatchPodMatchesGolden pins the whole template).
 func TestDispatchRegistersNoBudgetOrPriorityClassUnset(t *testing.T) {
-	settings, err := gcp.ResolveDispatch(dispatchArgs())
-	require.NoError(t, err)
-	require.Empty(t, settings.AppPriorityClassName)
-	require.Zero(t, settings.AppPdbMinAvailable)
 	m, err := runDispatch(t, dispatchArgs(), true)
 	require.NoError(t, err)
 	require.Zero(t, countRegistrations(m, podDisruptionBudgetType))
+	require.Zero(t, countRegistrations(m, priorityClassType))
 	require.NotContains(t, deploymentPodTemplate(t, m, "example-dispatch")["spec"], "priorityClassName")
 }
 
+// requireKubernetesChild asserts that r is a child of the component on its own Kubernetes
+// provider, waiting on the cluster, as AGENTS.md has every Kubernetes child do.
+func requireKubernetesChild(t *testing.T, r pulumitest.Registration) {
+	t.Helper()
+	require.Equal(t, "urn:pulumi:s::p::"+dispatchType+"::example-dispatch", r.RPC.GetParent())
+	require.Contains(t, r.RPC.GetProvider(), "pulumi:providers:kubernetes::example-dispatch-kubernetes::")
+	require.Contains(t, r.RPC.GetDependencies(), "urn:pulumi:s::p::"+dispatchType+"$gcp:container/cluster:Cluster::example-dispatch")
+}
+
 // appPriorityClassName reaches the app's pod and nothing else: its template is the default's with
-// priorityClassName added, the front door's and the listener's pods match their goldens, and the
-// component registers no resource it did not before, no PriorityClass among them.
+// priorityClassName added, and the front door's and the listener's pods match their goldens. The
+// component creates no PriorityClass; it reads the named one, and the app Deployment waits on
+// that read, so a class the cluster lacks fails the update before any pod is replaced.
 func TestDispatchAppPriorityClassReachesTheAppPodAlone(t *testing.T) {
 	defaults, err := runDispatch(t, dispatchArgs(), true)
 	require.NoError(t, err)
-	args := dispatchArgs()
-	args.AppPriorityClassName = pulumi.StringRef("example-priority")
-	m, err := runDispatch(t, args, true)
-	require.NoError(t, err)
+	for _, class := range []string{"example-priority", "example.priority"} {
+		t.Run(class, func(t *testing.T) {
+			args := dispatchArgs()
+			args.AppPriorityClassName = pulumi.StringRef(class)
+			m, err := runDispatch(t, args, true)
+			require.NoError(t, err)
 
-	want := deploymentPodTemplate(t, defaults, "example-dispatch")
-	want["spec"].(map[string]any)["priorityClassName"] = "example-priority"
-	require.Equal(t, want, deploymentPodTemplate(t, m, "example-dispatch"))
-	requirePodGolden(t, m, "example-dispatch-listener", "dispatch-listener-pod.golden")
-	requirePodGolden(t, m, "example-dispatch-tailnet", "dispatch-tailnet-pod.golden")
-	require.ElementsMatch(t, defaults.Types(), m.Types())
+			want := deploymentPodTemplate(t, defaults, "example-dispatch")
+			want["spec"].(map[string]any)["priorityClassName"] = class
+			require.Equal(t, want, deploymentPodTemplate(t, m, "example-dispatch"))
+			requirePodGolden(t, m, "example-dispatch-listener", "dispatch-listener-pod.golden")
+			requirePodGolden(t, m, "example-dispatch-tailnet", "dispatch-tailnet-pod.golden")
+
+			read := m.Named(t, priorityClassType, "example-dispatch-priority-class")
+			require.Equal(t, class, read.ID)
+			require.Nil(t, read.RPC, "the PriorityClass is read, never registered")
+			deps := m.Named(t, "kubernetes:apps/v1:Deployment", "example-dispatch").RPC.GetDependencies()
+			require.Contains(t, deps, "urn:pulumi:s::p::"+dispatchType+"$"+priorityClassType+"::example-dispatch-priority-class")
+			require.ElementsMatch(t, append(defaults.Types(), priorityClassType), m.Types())
+		})
+	}
 }
 
 // appPdbMinAvailable registers one PodDisruptionBudget, named for the app, in its namespace,
 // selecting the app's pods by the label the app Deployment's own selector matches, and no other
-// workload's; a pod that is not ready may still be evicted. The app's pod template is unchanged.
+// workload's, with Kubernetes' default unhealthyPodEvictionPolicy. It is a Kubernetes child of the
+// component like every other, and the app's pod template is unchanged.
 func TestDispatchAppPdbCoversTheAppPods(t *testing.T) {
 	defaults, err := runDispatch(t, dispatchArgs(), true)
 	require.NoError(t, err)
-	for _, row := range []struct{ replicas, minAvailable int }{{1, 1}, {3, 2}, {3, 3}} {
-		t.Run(fmt.Sprintf("%d of %d", row.minAvailable, row.replicas), func(t *testing.T) {
+	for _, row := range []struct {
+		replicas, minAvailable int
+		namespace              string
+	}{{1, 1, ""}, {3, 2, ""}, {3, 3, ""}, {1, 1, "example-namespace"}} {
+		t.Run(fmt.Sprintf("%d of %d in %q", row.minAvailable, row.replicas, row.namespace), func(t *testing.T) {
 			args := dispatchArgs()
 			args.Replicas = pulumi.IntRef(row.replicas)
 			args.AppPdbMinAvailable = pulumi.IntRef(row.minAvailable)
-			settings, err := gcp.ResolveDispatch(args)
-			require.NoError(t, err)
-			require.Equal(t, row.minAvailable, settings.AppPdbMinAvailable)
+			namespace := "dispatch"
+			if row.namespace != "" {
+				args.Namespace = pulumi.StringRef(row.namespace)
+				namespace = row.namespace
+			}
 			m, err := runDispatch(t, args, true)
 			require.NoError(t, err)
 
-			require.Equal(t, 1, countRegistrations(m, podDisruptionBudgetType))
-			budget := m.Named(t, podDisruptionBudgetType, "example-dispatch").Inputs.Mappable()
-			require.Equal(t, map[string]any{"name": "example-dispatch", "namespace": "dispatch"}, budget["metadata"])
+			registration := m.Named(t, podDisruptionBudgetType, "example-dispatch")
+			requireKubernetesChild(t, registration)
+			budget := registration.Inputs.Mappable()
+			require.Equal(t, map[string]any{"name": "example-dispatch", "namespace": namespace}, budget["metadata"])
 			require.Equal(t, map[string]any{
-				"minAvailable":               float64(row.minAvailable),
-				"selector":                   map[string]any{"matchLabels": map[string]any{"app": "example-dispatch"}},
-				"unhealthyPodEvictionPolicy": "AlwaysAllow",
+				"minAvailable": float64(row.minAvailable),
+				"selector":     map[string]any{"matchLabels": map[string]any{"app": "example-dispatch"}},
 			}, budget["spec"])
 			deploymentSpec := m.Named(t, "kubernetes:apps/v1:Deployment", "example-dispatch").Inputs.Mappable()["spec"].(map[string]any)
 			require.Equal(t, deploymentSpec["selector"], budget["spec"].(map[string]any)["selector"])
-			require.Equal(t, deploymentPodTemplate(t, defaults, "example-dispatch"), deploymentPodTemplate(t, m, "example-dispatch"))
-			require.ElementsMatch(t, append(defaults.Types(), podDisruptionBudgetType), m.Types())
+			if row.namespace == "" {
+				require.Equal(t, deploymentPodTemplate(t, defaults, "example-dispatch"), deploymentPodTemplate(t, m, "example-dispatch"))
+				require.ElementsMatch(t, append(defaults.Types(), podDisruptionBudgetType), m.Types())
+			}
 		})
 	}
 }

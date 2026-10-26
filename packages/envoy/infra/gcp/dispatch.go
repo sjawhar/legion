@@ -144,8 +144,10 @@ type DispatchArgs struct {
 	PprofPort *int `pulumi:"pprofPort,optional"`
 
 	// AppPriorityClassName is the app pod's priorityClassName, the name of a PriorityClass that
-	// already exists in the cluster, which this component never creates. Unset, the pod names none
-	// and runs at the cluster's default priority. The front door and the listener are unchanged.
+	// already exists in the cluster, which this component reads but never creates: a missing class
+	// fails the preview or update before the app Deployment changes, since Kubernetes refuses every
+	// pod naming one. Unset, the pod names none and runs at the cluster's default priority. The
+	// front door and the listener are unchanged.
 	AppPriorityClassName *string `pulumi:"appPriorityClassName,optional"`
 
 	// AppPdbMinAvailable turns on a PodDisruptionBudget, <hostname>, over the app's pods: its
@@ -278,7 +280,7 @@ type dispatchSettings struct {
 	appCPU, appMemory                           string
 	pprofPort                                   int
 	appPriorityClassName                        string
-	appPdbMinAvailable                          int
+	appPDBMinAvailable                          int
 	strategy                                    dispatchStrategy
 	serveConfig                                 string
 	azure                                       dispatchAzure
@@ -537,22 +539,8 @@ func newDispatchSettings(args *DispatchArgs) (dispatchSettings, error) {
 	if s.pprofPort, err = newDispatchPprofPort(args); err != nil {
 		return dispatchSettings{}, err
 	}
-	if args.AppPriorityClassName != nil {
-		if *args.AppPriorityClassName == "" {
-			return dispatchSettings{}, errors.New("appPriorityClassName is empty; leave it unset for no priority class")
-		}
-		if !dnsSubdomain(*args.AppPriorityClassName) {
-			return dispatchSettings{}, fmt.Errorf("appPriorityClassName %q must be a DNS subdomain, the shape of a PriorityClass's name", *args.AppPriorityClassName)
-		}
-		s.appPriorityClassName = *args.AppPriorityClassName
-	}
-	if args.AppPdbMinAvailable != nil {
-		// A budget of 0 allows every eviction, and one above replicas can never be met, so it
-		// would block every eviction as replicas itself does.
-		if n := *args.AppPdbMinAvailable; n < 1 || n > s.replicas {
-			return dispatchSettings{}, fmt.Errorf("appPdbMinAvailable %d must be from 1 to replicas (%d); leave it unset for no PodDisruptionBudget", n, s.replicas)
-		}
-		s.appPdbMinAvailable = *args.AppPdbMinAvailable
+	if s.appPriorityClassName, s.appPDBMinAvailable, err = newDispatchAppDisruption(args, s.replicas); err != nil {
+		return dispatchSettings{}, err
 	}
 	s.existingNamespace = args.ExistingNamespace != nil && *args.ExistingNamespace
 	if args.Namespace != nil {
@@ -611,6 +599,34 @@ func newDispatchPprofPort(args *DispatchArgs) (int, error) {
 		return 0, fmt.Errorf("pprofPort %d is the cloud-sql-proxy sidecar's port in the same pod; choose another, such as 6060", port)
 	}
 	return port, nil
+}
+
+// newDispatchAppDisruption resolves appPriorityClassName and appPdbMinAvailable, the app pod's
+// priority class and its PodDisruptionBudget's minAvailable: "" and 0, rendering nothing, when
+// unset. It refuses a class name that is empty or not a DNS subdomain, and one with the system-
+// prefix, which Kubernetes reserves for its own system-cluster-critical and system-node-critical
+// classes: those outrank every workload so the cluster's own components are scheduled first, and
+// an application pod holding one could preempt them. It refuses a budget below 1, which protects
+// no pod, and above replicas, which no number of ready pods can meet.
+func newDispatchAppDisruption(args *DispatchArgs, replicas int) (priorityClass string, pdbMinAvailable int, err error) {
+	if args.AppPriorityClassName != nil {
+		priorityClass = *args.AppPriorityClassName
+		switch {
+		case priorityClass == "":
+			return "", 0, errors.New("appPriorityClassName is empty; leave it unset for no priority class")
+		case !dnsSubdomain(priorityClass):
+			return "", 0, fmt.Errorf("appPriorityClassName %q must be a DNS subdomain, the shape of a PriorityClass's name", priorityClass)
+		case strings.HasPrefix(priorityClass, "system-"):
+			return "", 0, fmt.Errorf("appPriorityClassName %q is a class Kubernetes reserves for its own system components (the system- prefix); name a PriorityClass of your own", priorityClass)
+		}
+	}
+	if args.AppPdbMinAvailable != nil {
+		pdbMinAvailable = *args.AppPdbMinAvailable
+		if pdbMinAvailable < 1 || pdbMinAvailable > replicas {
+			return "", 0, fmt.Errorf("appPdbMinAvailable %d must be from 1 to replicas (%d); leave it unset for no PodDisruptionBudget", pdbMinAvailable, replicas)
+		}
+	}
+	return priorityClass, pdbMinAvailable, nil
 }
 
 // newDispatchAppResources resolves appCpu and appMemory, the envoy-dispatch container's request

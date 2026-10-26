@@ -30,6 +30,7 @@ func schemaJSON(t *testing.T) string {
 type property struct {
 	Type   string `json:"type"`
 	Secret bool   `json:"secret"`
+	Plain  bool   `json:"plain"`
 	Ref    string `json:"$ref"`
 	Items  struct {
 		Ref string `json:"$ref"`
@@ -173,6 +174,7 @@ func TestSchemaServesTheDispatchComponentWithItsSecrets(t *testing.T) {
 	// The app pod's disruption protection is an optional plain string and an optional plain integer.
 	for input, typ := range map[string]string{"appPriorityClassName": "string", "appPdbMinAvailable": "integer"} {
 		require.Equal(t, typ, dispatch.InputProperties[input].Type, input)
+		require.True(t, dispatch.InputProperties[input].Plain, input)
 		require.False(t, dispatch.InputProperties[input].Secret, input)
 		require.NotContains(t, dispatch.RequiredInputs, input)
 	}

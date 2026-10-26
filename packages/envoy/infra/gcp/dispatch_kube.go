@@ -14,6 +14,7 @@ import (
 	networkingv1 "github.com/pulumi/pulumi-kubernetes/sdk/v4/go/kubernetes/networking/v1"
 	policyv1 "github.com/pulumi/pulumi-kubernetes/sdk/v4/go/kubernetes/policy/v1"
 	rbacv1 "github.com/pulumi/pulumi-kubernetes/sdk/v4/go/kubernetes/rbac/v1"
+	schedulingv1 "github.com/pulumi/pulumi-kubernetes/sdk/v4/go/kubernetes/scheduling/v1"
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
 
 	"github.com/sjawhar/envoy/infra/core"
@@ -506,26 +507,36 @@ func newDispatchKubernetes(ctx *pulumi.Context, comp *Dispatch, name string, arg
 		},
 		Volumes: appVolumes,
 	}
-	// Unset, the pod names no priority class, so its template is the one it always had.
+	// Unset, the pod names no priority class, so its template is the one it always had. Set, the
+	// class is read first and the Deployment waits on the read: Kubernetes refuses every pod naming
+	// a class that does not exist, and at one replica Recreate would already have stopped the old
+	// pod, so a missing class fails the preview or update instead of leaving Dispatch down.
+	appOpts := []pulumi.ResourceOption{frontDoor, pulumi.DependsOn(appGrants)}
 	if s.appPriorityClassName != "" {
+		class, err := schedulingv1.GetPriorityClass(ctx, s.hostname+"-priority-class", pulumi.ID(s.appPriorityClassName), nil, child...)
+		if err != nil {
+			return nil, err
+		}
 		appPod.PriorityClassName = pulumi.String(s.appPriorityClassName)
+		appOpts = append(appOpts, pulumi.DependsOn([]pulumi.Resource{class}))
 	}
-	if _, err := deployment(s.hostname, s.replicas, deploymentStrategy(s.strategy), appPod, frontDoor, pulumi.DependsOn(appGrants)); err != nil {
+	if _, err := deployment(s.hostname, s.replicas, deploymentStrategy(s.strategy), appPod, appOpts...); err != nil {
 		return nil, err
 	}
 	if _, err := service(s.hostname, 8766); err != nil {
 		return nil, err
 	}
-	// The budget covers the app's pods alone, by the label its Deployment and Service select on. A
-	// pod that is not ready may always be evicted (AlwaysAllow): the budget keeps a healthy pod
-	// from a drain, and holding a failing one would only stall the drain for nothing.
-	if s.appPdbMinAvailable > 0 {
+	// The budget covers the app's pods alone, by the label its Deployment and Service select on. It
+	// keeps the default unhealthyPodEvictionPolicy (IfHealthyBudget), so it also holds a pod that
+	// is not ready while the budget is not met: envoy-dispatch reports not ready whenever NATS or
+	// Postgres is briefly unreachable, the front door's own eviction in the same drain among the
+	// causes, and evicting the app then would turn a blip into a cold restart.
+	if s.appPDBMinAvailable > 0 {
 		if _, err := policyv1.NewPodDisruptionBudget(ctx, s.hostname, &policyv1.PodDisruptionBudgetArgs{
 			Metadata: metadata(s.hostname),
 			Spec: &policyv1.PodDisruptionBudgetSpecArgs{
-				MinAvailable:               pulumi.Int(s.appPdbMinAvailable),
-				Selector:                   &metav1.LabelSelectorArgs{MatchLabels: pulumi.StringMap{"app": pulumi.String(s.hostname)}},
-				UnhealthyPodEvictionPolicy: pulumi.String("AlwaysAllow"),
+				MinAvailable: pulumi.Int(s.appPDBMinAvailable),
+				Selector:     &metav1.LabelSelectorArgs{MatchLabels: pulumi.StringMap{"app": pulumi.String(s.hostname)}},
 			},
 		}, child...); err != nil {
 			return nil, err
