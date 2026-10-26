@@ -183,6 +183,36 @@ func TestRenderIsLinearOnRunsFootnoteLabelsAndLineFeeds(t *testing.T) {
 	}
 }
 
+// A document of many images whose titles hold a line feed their paragraph cannot hold as written
+// (a blank line) renders in time linear in the image count. Render writes such a title as it is,
+// reads the whole document back, and writes the document again with one more title `&#10;` for
+// each image it finds misread, so n such images took n whole-document reads: 2,000 of them (56 KB,
+// far inside one write's element limit) took about 2.5 minutes to render in a pod at ad3351ac,
+// where 2,000 images with plain titles took 0.04 s. The bound is far above a linear
+// render's time and far below the quadratic one's.
+func TestRenderIsLinearInImagesWhoseTitlesHoldABlankLine(t *testing.T) {
+	const images = 2000
+	doc := &Node{Type: "doc"}
+	for range images {
+		doc.Children = append(doc.Children, &Node{Type: "paragraph", Children: []*Node{{Type: "image", Attrs: Attrs{
+			"src": "i.png", "alt": "x", "title": "a\n\nb", "link": nil, "linkTitle": nil,
+		}}}})
+	}
+	const deadline = 30 * time.Second
+	what := fmt.Sprintf("rendering %d images whose titles hold a blank line", images)
+	_, onTime, _, err := runWithDeadline(what, deadline, func() (time.Duration, error) {
+		started := time.Now()
+		_, err := Render(doc)
+		return time.Since(started), err
+	})
+	if !onTime {
+		t.Fatalf("%s took more than %s, want time linear in the image count", what, deadline)
+	}
+	if err != nil {
+		t.Fatalf("%s: %v", what, err)
+	}
+}
+
 // A table whose every row holds an escaped pipe in a code span parses in time linear in its size,
 // up to the 1 MiB a document may be. goldmark's table transformer checked every code span's text
 // against every escaped pipe in the document: on one machine at a load of about 300, 16 KiB of such
