@@ -2,9 +2,10 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-278",
-  "completed": "2026-10-26T03:08:29Z",
+  "completed": "2026-10-26T03:22:00Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2225",
-  "headSha": "c5a3bc5ae3ce27a32abe81abcd150774ef5359c0",
+  "headSha": "15e414ed9b6bcda8eb0751074ad16e9f9bb06a4f",
+  "rebaseRecheck": "rebase re-check c5a3bc5ae3ce27a32abe81abcd150774ef5359c0 → 15e414ed9b6bcda8eb0751074ad16e9f9bb06a4f: forward merge of main after GitHub reported CONFLICTING (packages/claude-envoy/CHANGELOG.md); fingerprint 5a03465872755074ebd8434b6a0b848ba8470aa6831a2d2574c319ec86e5520c unchanged, bare gates only (tsc of dispatch, contracts, envoy-client; go build/vet; claude-envoy check-dist; envoy-client dispatch tests) plus the live script at 15e414ed: summary 6 ok, 0 FAIL. Proof entries below ran at c5a3bc5a.",
   "proof": [
     {
       "criterion": "A1 case 3: a person's answer to an ask another session opened reaches the claimant's own topic",
