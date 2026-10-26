@@ -2,48 +2,47 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-439",
-  "completed": "2026-10-26T08:45:00Z",
+  "completed": "2026-10-26T09:50:00Z",
   "pr": "https://github.com/sjawhar/legion/pull/2228",
-  "round": "Answers review round 1 at 19cadc8d (code head 2aef017d), the six findings and the minor line, and the reviewer's structural item, which the architect's NARROW decision (dispatch://INFRA-439) puts in this PR. Seven threads answered and resolved; main forward-merged once on a GitHub-reported conflict (docs and CHANGELOG text only).",
+  "round": "Answers the tester's failure at b3e92f8b and the architect's ACCEPT decision (the remaining part of review finding 4 alone): an interest registered for another session's agent subject, or a wildcard covering agent subjects, let /v1/replay return other sessions' stored inboxes.",
   "proof": [
     {
-      "criterion": "Finding 4 (security authz): /v1/replay must not let a wildcard session_id read every session's inbox",
+      "criterion": "Review finding 4: /v1/replay can return only the caller's own agent subject and topics it may follow, through /v1/interests/subscribe",
       "surface": "a real listener and natsd built from this head, called over HTTP",
-      "command": "/legion/scratch/tmp/infra439/f4live/run.sh (output in https://github.com/sjawhar/legion/pull/2228#issuecomment-6411765212)",
-      "observed": "session_id '>', '*' and 'a.b' with subject notifications.agent.> each answered 400 {\"error\":\"session_id must be one NATS subject token: …\",\"expected\":[\"session_id\"]}; session_id ses_ok answered 200 (its own subject; notifications.agent.> refused not_followed)",
-      "headSha": "466c24da87a097f7d26958ce121fed242851cd8e",
-      "negativeControl": "before the fix (2aef017d) the reviewer's request {session_id:'>', subject notifications.agent.>, after 0} passed replayFollowed's equality and returned every stored inbox message (replay.go 121, 200-211)"
+      "command": "/legion/scratch/tmp/infra439/f4live/run3.sh (output in https://github.com/sjawhar/legion/pull/2228#issuecomment-6412963406)",
+      "observed": "ses_attacker registered notifications.agent.>, notifications.agent.ses_victim, notifications.> and notifications.dispatch.issue.KEY-1.>: only its own agent subject and the issue topic were stored, the other three named in warnings; two messages sent to ses_victim; ses_attacker's replay of notifications.agent.>, notifications.agent.ses_victim and notifications.> each refused not_followed with no messages; ses_victim's own replay returned its 2 messages",
+      "headSha": "e0ed6d23865cbab8741dd57e3efce5546d9a1698",
+      "negativeControl": "before the fix (466c24da) the tester's live run had the same registrations return the victim's 2 stored messages through both notifications.agent.> and the victim's agent subject (test.json failures[0])"
     },
     {
-      "criterion": "Outcome and the injection criterion on a real session after this round's changes (shared host policy, unwritten-frame module, refused BTW, removal unregister, receive-time notice, TOON notices)",
-      "surface": "real `omp --mode rpc` session (workspace pi-envoy via -e, scratch HOME, file sessions), real nats-server with JetStream and the listener built from this head, the session's NATS behind a socat proxy",
-      "command": "bash packages/pi-envoy/scripts/smoke-replay.sh (output: https://github.com/sjawhar/legion/pull/2228#issuecomment-6411765212)",
-      "observed": "leg 1 dispatch-1793003578700 one entry 2 s after the proxy restart; leg 2 -701 one entry after --resume; leg 3 -704..707 held through a SIGKILL, one each; leg 4 -710..712 after abort_and_restore_queue (card=0 right after), one each in the same process; leg 5 -713..715 plain abort, one each; leg 6 -716..718 new_session, switch back, SIGKILL, resume, one each; each still one three heartbeats later",
-      "headSha": "466c24da87a097f7d26958ce121fed242851cd8e",
-      "negativeControl": "released plugin 10.17.7: no entry for -702 published while its connection was down; -708 and -709 lost through a SIGKILL; -719..721 not shown after abort_and_restore_queue"
+      "criterion": "Review finding 4 for rows already in the interest store",
+      "surface": "the listener route on in-process nats-server (testnats) with the interest store seeded directly",
+      "command": "cd packages/envoy && go test ./cmd/listener -run TestReplayNeverReturnsAnotherSessionsInboxThroughARegisteredInterest -count=1 -v (the tester's 9f8ac8ff, unmodified)",
+      "observed": "--- PASS: the three out-of-bounds subjects are refused with no other session's message, and the own agent subject returns its stored seq",
+      "headSha": "e0ed6d23865cbab8741dd57e3efce5546d9a1698",
+      "negativeControl": "at b3e92f8b the same test failed: notifications.agent.> returned notifications.agent.ses_other's stored message (seq 1)"
     },
     {
-      "criterion": "Findings 1-3, 5, 6, the minor line and the withdrawn typed turn, as behaviour",
-      "surface": "the repository's own checks and suites",
-      "command": "bash .github/scripts/check-heartbeat-margin.sh; bash .github/scripts/check-heartbeat-margin.test.sh (99 passed); cd packages/envoy-client && bun test (893 pass); cd packages/pi-envoy && bun test (965 pass); cd packages/claude-envoy && bun test (210 pass) && bun run check-dist; bunx biome check . (no errors); cd packages/envoy && go test ./cmd/listener -run Replay",
-      "observed": "all pass at the merged tree; new tests: 'a BTW refused live > whose side turn failed is not shown by a sweep, and its Retry still runs the side turn', 'a removal replayed after a resume re-registered the topic takes it out of the registry…', 'a live frame received before its subject's cursor started gets one notice when it fails', 'a notice's text keeps a sender's multi-line summary inside its own field', 'a person's Send run as a turn through typed input > one a person's interrupt withdrew unwritten is shown as a card that runs nothing, once', unwritten-frames.test.ts (13), replay-host-policy.test.ts (7)",
-      "headSha": "466c24da87a097f7d26958ce121fed242851cd8e",
-      "negativeControl": "at 2aef017d CI's required lint and test failed on check-heartbeat-margin.sh (run 40281287850), which now passes locally"
+      "criterion": "No regression of the outage paths on a real session (pi-envoy and claude-envoy now leave such topics out of what they register)",
+      "surface": "real `omp --mode rpc` session, real nats-server with JetStream and the listener built from this head",
+      "command": "bash packages/pi-envoy/scripts/smoke-replay.sh (same comment)",
+      "observed": "legs 1-6 each show every event exactly once (connection cut, omp stopped, held through SIGKILL, abort_and_restore_queue, plain abort, switch away and back); exit 0",
+      "headSha": "e0ed6d23865cbab8741dd57e3efce5546d9a1698",
+      "negativeControl": "released plugin 10.17.7 in the same run loses its messages on the outage, SIGKILL and interrupt paths"
     }
   ],
   "filesChanged": [
-    "packages/envoy/cmd/listener/replay.go, replay_test.go: session_id must be one literal NATS token (400)",
-    "packages/envoy-client/src/transport.ts: the `attempts` declaration the margin check reads; `tries` per request",
-    "packages/envoy-client/src/replay.ts: cursorStarts and liveFailed(…, receivedAt); envoyNoticeText (TOON); replayFollowedSubjects, rememberedTopics, closeReplayedRemoval, routeReplayNotice; tests incl. replay-host-policy.test.ts",
-    "packages/envoy-client/src/delivery.ts: comment cites pending()",
-    "packages/pi-envoy/src/unwritten-frames.ts (+ test): UnwrittenFrames owns unwritten cards and turns, their claims, the hand-back and the switch release",
-    "packages/pi-envoy/extensions/envoy.ts: refuseBTW; replayed removal unregisters; receive time to liveFailed; shared host policy; withdrawn turns released",
-    "packages/claude-envoy/src: shared notice renderer and host policy, receive time; missed-messages.ts deleted; dist rebuilt",
-    "docs: pi-envoy and claude-envoy AGENTS.md, envoy AGENTS.md (session_id rule), envoy-client README, CHANGELOGs"
+    "packages/envoy/internal/bus/stored.go (+ test): CoversAnotherAgentSubject(sessionID, topic), on the existing subjectsOverlap",
+    "packages/envoy/cmd/listener/replay.go: replayFollowed refuses such a subject even when stored",
+    "packages/envoy/cmd/listener/api.go: subscribeHandler stores the rest and names each refused topic in warnings",
+    "packages/envoy/cmd/listener/replay_test.go: TestInterestSubscribeStoresOnlyTopicsThatReplayCannotTurnIntoAnotherSessionsInbox; TestReplayRefusesAFollowedSubjectTheStreamDoesNotRetain now uses notifications.* as its wide unretained topic",
+    "packages/envoy-client/src/replay.ts (+ test): coversAnotherAgentSubject; replayFollowedSubjects uses it",
+    "packages/pi-envoy/extensions/envoy.ts, packages/claude-envoy/src/envoy-channel-server.ts (+ tests, dist): such topics followed live but never registered",
+    "docs: packages/envoy/AGENTS.md, packages/envoy/docs/architecture.md, four CHANGELOGs; PR body contract change census"
   ],
   "deviations": [
-    "One existing pi-envoy test changed: 'runs a BTW side turn again for a Retry of one whose side turn failed' sent its Retry with the first copy's event id; the listener mints a new event id per send (internal/dispatch/envoy/client.go, api/message_delivery.go), so the Retry now carries its own event id under the same dedupe key.",
-    "On a host without sendUserInput (older omp), a sendUserMessage turn is still recorded at the run's end, so one an interrupt withdrew is not shown again; real omp 18.8.9 has sendUserInput, whose withdrawn turn is released and shown as a card.",
-    "Two pre-existing timing tests fail intermittently under load on this pod (envoy-client envoy-config.test.ts 'still running after 10 s', claude-envoy session-title.test.ts 'queryTmux is bounded'); both pass alone; neither file is touched."
+    "Per-topic refusal at /v1/interests/subscribe (200 with warnings), not a whole-request 400: pi-envoy 10.17.7, claude-envoy and the OpenCode plugin can send such a topic, and a 400 would fail every heartbeat registration of those sessions.",
+    "One existing test changed: TestReplayRefusesAFollowedSubjectTheStreamDoesNotRetain used notifications.> as its unretained topic, which the new rule refuses as not_followed; it now uses notifications.*; notifications.> is asserted in the new subscribe test.",
+    "Rows stored before the upgrade stay in the interest store (replay refuses them); GET /v1/interests/<id> still lists them."
   ]
 }
