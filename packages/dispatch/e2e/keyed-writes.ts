@@ -63,6 +63,29 @@ export function replayed(page: Page, method: string, path: string): Promise<Resp
   );
 }
 
+/** How many writes the tab keeps in its storage for a reload to resume (`dispatch.write:<key>`),
+ *  leaving out read marks: a mark is a quiet write, kept as an entry of its own until Dispatch
+ *  answers it, which a row about the writes the reader made does not count. */
+export function keptWrites(page: Page): Promise<number> {
+  return page.evaluate(
+    () =>
+      Object.entries(window.sessionStorage).filter(([name, value]) => {
+        if (!name.startsWith("dispatch.write:")) return false;
+        try {
+          const kept: unknown = JSON.parse(value);
+          return !(
+            typeof kept === "object" &&
+            kept !== null &&
+            "presentation" in kept &&
+            kept.presentation === "quiet"
+          );
+        } catch {
+          return true;
+        }
+      }).length
+  );
+}
+
 /** One answer the page got to a write, as a row reads it: the key its request went under, its
  *  status, its error code, and the two headers a keyed answer may carry. */
 export interface KeyedAnswer {

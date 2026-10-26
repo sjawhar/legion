@@ -11,7 +11,7 @@ import {
   setSessionSendDelay,
 } from "./agents";
 import { listComments, publishAgentStreamFrame, slowWrites } from "./api";
-import { dropFirstAnswer, replayed, watchAnswers, watchWrites } from "./keyed-writes";
+import { dropFirstAnswer, keptWrites, replayed, watchAnswers, watchWrites } from "./keyed-writes";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
@@ -177,15 +177,7 @@ test("a send held through a reload is resumed under its key, and delivered once"
     ]);
     expect(await getSentMessages()).toHaveLength(1);
     // A landed send leaves the tab's storage, so the next load resumes nothing.
-    await expect
-      .poll(() =>
-        page.evaluate(
-          () =>
-            Object.keys(window.sessionStorage).filter((name) => name.startsWith("dispatch.write:"))
-              .length
-        )
-      )
-      .toBe(0);
+    await expect.poll(() => keptWrites(page)).toBe(0);
   } finally {
     await alice.close();
   }
@@ -282,15 +274,7 @@ test("a broadcast held through a reload is resumed under its key, and each agent
       .toEqual([plannerSession.session_id, reviewerSession.session_id].sort());
     expect(await getSentMessages()).toHaveLength(2);
     // A landed broadcast leaves the tab's storage, so the next load resumes nothing.
-    await expect
-      .poll(() =>
-        page.evaluate(
-          () =>
-            Object.keys(window.sessionStorage).filter((name) => name.startsWith("dispatch.write:"))
-              .length
-        )
-      )
-      .toBe(0);
+    await expect.poll(() => keptWrites(page)).toBe(0);
   } finally {
     await alice.close();
   }

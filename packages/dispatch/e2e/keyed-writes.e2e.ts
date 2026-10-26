@@ -13,7 +13,7 @@ import {
   getMyState,
   slowWrites,
 } from "./api";
-import { dropFirstAnswer, replayed, watchAnswers, watchWrites } from "./keyed-writes";
+import { dropFirstAnswer, keptWrites, replayed, watchAnswers, watchWrites } from "./keyed-writes";
 import { sql } from "./psql";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
@@ -68,14 +68,6 @@ async function outage(page: Page, pattern: string, method: string): Promise<{ en
       down = false;
     },
   };
-}
-
-/** How many writes the tab keeps in its storage for a reload to resume (`dispatch.write:<key>`). */
-function keptWrites(page: Page): Promise<number> {
-  return page.evaluate(
-    () =>
-      Object.keys(window.sessionStorage).filter((name) => name.startsWith("dispatch.write:")).length
-  );
 }
 
 test("a comment whose answer is lost lands once, under one key", async ({ browser }) => {
@@ -153,15 +145,7 @@ test("a status change whose answer is lost survives a reload, lands once, and th
     expect(await getIssue(issue.key)).toMatchObject({ status: "todo" });
     expect(await statusEvents(issue.key, "todo")).toHaveLength(1);
     // A landed write leaves the tab's queue, so the next load resumes nothing.
-    await expect
-      .poll(() =>
-        page.evaluate(
-          () =>
-            Object.keys(window.sessionStorage).filter((name) => name.startsWith("dispatch.write:"))
-              .length
-        )
-      )
-      .toBe(0);
+    await expect.poll(() => keptWrites(page)).toBe(0);
   } finally {
     await alice.close();
   }
