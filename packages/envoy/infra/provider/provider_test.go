@@ -160,6 +160,16 @@ func TestSchemaServesTheDispatchComponentWithItsSecrets(t *testing.T) {
 		require.NotContains(t, dispatch.RequiredInputs, input)
 	}
 	require.NotContains(t, dispatch.InputProperties, "azureEmbedKey")
+	// The profiler's port is an optional plain integer.
+	require.Equal(t, "integer", dispatch.InputProperties["pprofPort"].Type)
+	require.False(t, dispatch.InputProperties["pprofPort"].Secret)
+	require.NotContains(t, dispatch.RequiredInputs, "pprofPort")
+	// The app container's size is two optional plain strings, Kubernetes quantities.
+	for _, input := range []string{"appCpu", "appMemory"} {
+		require.Equal(t, "string", dispatch.InputProperties[input].Type, input)
+		require.False(t, dispatch.InputProperties[input].Secret, input)
+		require.NotContains(t, dispatch.RequiredInputs, input)
+	}
 	require.True(t, dispatch.Properties["agentToken"].Secret)
 	for _, output := range []string{"serviceAccountIssuer", "serviceAccountSubject"} {
 		require.Equal(t, "string", dispatch.Properties[output].Type, output)

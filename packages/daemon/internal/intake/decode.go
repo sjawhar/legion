@@ -71,7 +71,7 @@ func decodeMessage(subject, project string, repositories []ghrepo.Repository, da
 		if envelope.Source != "dispatch" {
 			return decodedMessage{}, fmt.Errorf("Dispatch subject has envelope source %q", envelope.Source)
 		}
-		fact, err = decodeDispatchFact(subject, project, envelope.Payload)
+		fact, unread, err = decodeDispatchFact(subject, project, envelope.Payload)
 	case strings.HasPrefix(subject, dispatchProjectPrefix):
 		if envelope.Source != "dispatch" {
 			return decodedMessage{}, fmt.Errorf("Dispatch subject has envelope source %q", envelope.Source)
@@ -140,33 +140,54 @@ type dispatchEvent struct {
 		Kind string `json:"kind"`
 		ID   string `json:"id"`
 	} `json:"actor"`
-	Notify  *bool           `json:"notify"`
-	Type    string          `json:"type"`
-	Payload json.RawMessage `json:"payload"`
+	Notify *bool  `json:"notify"`
+	Type   string `json:"type"`
+	// CreatedAt is Dispatch's time of the event, zero when the event carries none. A review's
+	// event shares it with the review's own row, which Dispatch writes in the same transaction.
+	CreatedAt time.Time       `json:"created_at"`
+	Payload   json.RawMessage `json:"payload"`
+}
+
+// mark is the event's place in its issue's event log.
+func (e dispatchEvent) mark() record.EventMark {
+	return record.EventMark{Seq: e.Seq, At: e.CreatedAt.UTC()}
 }
 
 // decodeDispatchFact decodes one Dispatch issue event of project. The stream carries every
 // project's events; one whose subject key is not a project issue key is another daemon's, and is
-// skipped before its payload is read, so it is never poison here.
-func decodeDispatchFact(subject, project, payload string) (Fact, error) {
+// skipped before its payload is read, so it is never poison here. A field the mirror only records
+// (an issue's claim, an ask's kind) that cannot be read is taken as unknown and named in unread,
+// rather than making the event poison: an event the workflow acts on is never lost to a field it
+// does not act on.
+func decodeDispatchFact(subject, project, payload string) (Fact, []string, error) {
 	subjectKey, ok := dispatchSubjectKey(subject)
 	if !ok {
-		return nil, fmt.Errorf("Dispatch durable subject has no issue key: %s", subject)
+		return nil, nil, fmt.Errorf("Dispatch durable subject has no issue key: %s", subject)
 	}
 	if keyProject, _, _ := strings.Cut(subjectKey, "-"); keyProject != project || !claim.IsIssueKey(subjectKey) {
-		return nil, nil
+		return nil, nil, nil
 	}
 	var event dispatchEvent
 	if err := json.Unmarshal([]byte(payload), &event); err != nil {
-		return nil, fmt.Errorf("decode Dispatch event: %w", err)
+		return nil, nil, fmt.Errorf("decode Dispatch event: %w", err)
 	}
 	if event.ID <= 0 || event.Seq <= 0 || event.Notify == nil || !claim.IsIssueKey(event.IssueKey) || event.Type == "" || !isJSONObject(event.Payload) {
-		return nil, fmt.Errorf("Dispatch durable message payload is not a valid Dispatch event")
+		return nil, nil, fmt.Errorf("Dispatch durable message payload is not a valid Dispatch event")
 	}
 	if subjectKey != event.IssueKey {
-		return nil, fmt.Errorf("Dispatch durable subject key %s disagrees with event issue_key %s", subjectKey, event.IssueKey)
+		return nil, nil, fmt.Errorf("Dispatch durable subject key %s disagrees with event issue_key %s", subjectKey, event.IssueKey)
 	}
+	var unread []string
+	fact, err := decodeDispatchEvent(event, &unread)
+	if err != nil {
+		return nil, nil, err
+	}
+	return fact, unread, nil
+}
 
+// decodeDispatchEvent decodes a checked Dispatch event of the daemon's project by its type, adding
+// to unread each field it took as unknown.
+func decodeDispatchEvent(event dispatchEvent, unread *[]string) (Fact, error) {
 	switch event.Type {
 	case "issue.created", "issue.updated", "issue.closed":
 		var issue struct {
@@ -181,6 +202,9 @@ func decodeDispatchFact(subject, project, payload string) (Fact, error) {
 			// blockers, as an issue waiting on nothing does: unlike a missing repository, which the
 			// consumer fills, nothing reads an absence here.
 			BlockedBy []string `json:"blocked_by"`
+			// Claim is present on every issue event of a Dispatch that has claims (null for none),
+			// and absent from an event retained from before it did, which says nothing of the claim.
+			Claim json.RawMessage `json:"claim"`
 		}
 		if err := json.Unmarshal(event.Payload, &issue); err != nil {
 			return nil, fmt.Errorf("decode Dispatch issue payload: %w", err)
@@ -211,9 +235,10 @@ func decodeDispatchFact(subject, project, payload string) (Fact, error) {
 		if event.Actor.Kind == "session" && !daemonActor {
 			actorSession = event.Actor.ID
 		}
+		claimedBy, claimKnown := issueEventClaim(issue.Claim, unread)
 		return DispatchIssue{Key: event.IssueKey, Seq: event.Seq, Type: event.Type, Status: issue.Status, Title: issue.Title, Parent: parent, Rank: issue.Rank,
 			HandedOver: dispatch.CarriesLegionLabel(issue.Labels), ActorSession: actorSession, DaemonActor: daemonActor, ResolvedRepo: deref(resolved),
-			ResolvedRepoMissing: missing, Blockers: issue.BlockedBy}, nil
+			ResolvedRepoMissing: missing, Blockers: issue.BlockedBy, ClaimedBy: claimedBy, ClaimKnown: claimKnown}, nil
 	case "artifact.approved", "artifact.changes_requested":
 		var artifact struct {
 			ArtifactID string `json:"artifact_id"`
@@ -236,7 +261,7 @@ func decodeDispatchFact(subject, project, payload string) (Fact, error) {
 			}
 			kind = DispatchArtifactChangesRequested
 		}
-		return DispatchArtifact{Key: event.IssueKey, ArtifactID: artifact.ArtifactID, Kind: kind, Version: artifact.Version, Reason: artifact.Reason}, nil
+		return DispatchArtifact{Key: event.IssueKey, ArtifactID: artifact.ArtifactID, Kind: kind, Version: artifact.Version, Reason: artifact.Reason, Mark: event.mark()}, nil
 	case "artifact.version":
 		var artifact struct {
 			ArtifactID string `json:"artifact_id"`
@@ -253,7 +278,7 @@ func decodeDispatchFact(subject, project, payload string) (Fact, error) {
 		if artifact.Version.Number <= 0 {
 			return nil, fmt.Errorf("Dispatch artifact.version payload has no positive integer version.number")
 		}
-		return DispatchArtifact{Key: event.IssueKey, ArtifactID: artifact.ArtifactID, Kind: DispatchArtifactVersion, Version: artifact.Version.Number}, nil
+		return DispatchArtifact{Key: event.IssueKey, ArtifactID: artifact.ArtifactID, Kind: DispatchArtifactVersion, Version: artifact.Version.Number, Mark: event.mark()}, nil
 	case "issue.deployed":
 		var deployed struct {
 			Repo        string `json:"repo"`
@@ -275,6 +300,119 @@ func decodeDispatchFact(subject, project, payload string) (Fact, error) {
 			return nil, fmt.Errorf("Dispatch issue.deployed payload has no RFC 3339 completed_at: %w", err)
 		}
 		return IssueDeployed{Issue: event.IssueKey, Repo: deployed.Repo, Number: deployed.Number, RunID: deployed.RunID, CompletedAt: completedAt.UTC()}, nil
+	case "ask.opened":
+		ask, err := decodeAskPayload(event, unread)
+		if err != nil {
+			return nil, err
+		}
+		// Settlement restoring a decision block it retracted appends ask.opened with the block's
+		// original author: nobody asked anything, so it is the ask's state alone.
+		if ask.Restored {
+			return DispatchAskRestored{Key: event.IssueKey, Ask: ask.ID, Kind: ask.kind, Artifact: ask.artifact(), Open: true, Mark: event.mark()}, nil
+		}
+		// A session author with no id cannot be matched to the tree, so the ask is mirrored as one no
+		// session of the tree opened, and the author is reported, rather than the event lost.
+		session := ""
+		if ask.Author.Kind == "session" {
+			if ask.Author.ID == "" {
+				*unread = append(*unread, "ask.opened has a session author with no id")
+			}
+			session = ask.Author.ID
+		}
+		return DispatchAskOpened{Key: event.IssueKey, Ask: ask.ID, Kind: ask.kind, Artifact: ask.artifact(), AuthorSession: session, Mark: event.mark()}, nil
+	case "ask.answered", "ask.resolved":
+		ask, err := decodeAskPayload(event, unread)
+		if err != nil {
+			return nil, err
+		}
+		// Settlement restoring a decision block it retracted appends ask.answered with the answer
+		// given before the retraction, credited to the editor who restored the block: nobody
+		// answered anything, so it is the ask's state alone.
+		if ask.Restored {
+			return DispatchAskRestored{Key: event.IssueKey, Ask: ask.ID, Kind: ask.kind, Artifact: ask.artifact(), Mark: event.mark()}, nil
+		}
+		return DispatchAskClosed{Key: event.IssueKey, Ask: ask.ID, Kind: ask.kind, Artifact: ask.artifact(), State: strings.TrimPrefix(event.Type, "ask."),
+			Actor: dispatch.Actor(event.Actor), Mark: event.mark()}, nil
+	case "ask.handed_back":
+		// An approval request its asker returned to the person (Dispatch's handBackApprovalAsk):
+		// whatever the thread held, it now waits on the human, as a session's human-turn reply does.
+		ask, err := decodeAskPayload(event, unread)
+		if err != nil {
+			return nil, err
+		}
+		return DispatchAskReply{Key: event.IssueKey, Ask: ask.ID, Kind: ask.kind, Artifact: ask.artifact(), WaitingOn: "human",
+			Actor: dispatch.Actor(event.Actor), Mark: event.mark()}, nil
+	case "ask.edited":
+		// An edit changes an ask's turn only when it moves an approval request: Dispatch appends
+		// ask.edited in a version's own transaction for the document's open approval request
+		// (docs.MoveApprovalAsk), and shows a request whose requested_version is below its version
+		// waiting on its agent (approvalMoved in waitingOnExpression). Any other edit, of a question
+		// or of a request still at the version handed to the person, leaves the turn as it was, and
+		// is no fact. A request edit with no requested_version or no version (an event recorded
+		// before Dispatch kept them) cannot say whether it moved, so it is no fact, and reported.
+		ask, err := decodeAskPayload(event, unread)
+		if err != nil {
+			return nil, err
+		}
+		if ask.kind != record.AskApproval || ask.Approval == nil || ask.Approval.ArtifactID == "" {
+			return nil, nil
+		}
+		if ask.Approval.Version == nil || ask.Approval.RequestedVersion == nil {
+			*unread = append(*unread, "ask.edited of an approval request has no version or requested_version")
+			return nil, nil
+		}
+		if *ask.Approval.RequestedVersion >= *ask.Approval.Version {
+			return nil, nil
+		}
+		return DispatchApprovalMoved{Key: event.IssueKey, Ask: ask.ID, Artifact: ask.Approval.ArtifactID, Mark: event.mark()}, nil
+	case "comment.created", "comment.answered":
+		// comment.answered is a reply a session sends through a delivery's callback (Dispatch's
+		// comment_delivery), which joins its thread as comment.created does and carries the same
+		// ask_id, ask_state and ask_waiting_on. A comment on no ask is no fact.
+		var comment struct {
+			Ask       string `json:"ask_id"`
+			State     string `json:"ask_state"`
+			WaitingOn string `json:"ask_waiting_on"`
+		}
+		if err := json.Unmarshal(event.Payload, &comment); err != nil {
+			return nil, fmt.Errorf("decode Dispatch %s payload: %w", event.Type, err)
+		}
+		if comment.Ask == "" {
+			return nil, nil
+		}
+		// A turn the daemon cannot read could be either, so the reply moves nothing.
+		switch comment.WaitingOn {
+		case "", "human", "agent":
+		default:
+			*unread = append(*unread, fmt.Sprintf("ask_waiting_on %q is no turn", comment.WaitingOn))
+			return nil, nil
+		}
+		// Only an open ask has a turn, so a reply with no turn is on a closed ask (DispatchAskReply).
+		// The ask's state says so outright where Dispatch sends it; a reply whose state and turn
+		// disagree could mean either, so it moves nothing.
+		if comment.State != "" && (comment.State == "open") != (comment.WaitingOn != "") {
+			*unread = append(*unread, fmt.Sprintf("ask_state %q disagrees with ask_waiting_on %q", comment.State, comment.WaitingOn))
+			return nil, nil
+		}
+		return DispatchAskReply{Key: event.IssueKey, Ask: comment.Ask, WaitingOn: comment.WaitingOn, Actor: dispatch.Actor(event.Actor), Mark: event.mark()}, nil
+	case "issue.claimed", "issue.released":
+		var payload struct {
+			Claim json.RawMessage `json:"claim"`
+		}
+		if err := json.Unmarshal(event.Payload, &payload); err != nil {
+			return nil, fmt.Errorf("decode Dispatch %s payload: %w", event.Type, err)
+		}
+		// A claim event whose claim cannot be named records nothing: the next issue event, the
+		// periodic re-read or the next boot's listing carries the claim Dispatch shows.
+		holder, known := issueEventClaim(payload.Claim, unread)
+		if known && event.Type == "issue.claimed" && holder == "" {
+			*unread = append(*unread, "claim is null on issue.claimed")
+			known = false
+		}
+		if !known {
+			return nil, nil
+		}
+		return DispatchClaim{Key: event.IssueKey, Seq: event.Seq, ClaimedBy: holder}, nil
 	default:
 		return nil, nil
 	}
@@ -285,6 +423,86 @@ func dispatchSubjectKey(subject string) (string, bool) {
 	remaining := strings.TrimPrefix(subject, prefix)
 	key, _, _ := strings.Cut(remaining, ".")
 	return key, key != ""
+}
+
+// issueEventClaim reads an issue event's claim, `<kind>:<id>`, "" for null, and whether the event
+// showed it at all: an absent field, or a claim naming no actor, is unknown, the latter named in
+// unread.
+func issueEventClaim(raw json.RawMessage, unread *[]string) (string, bool) {
+	if raw == nil {
+		return "", false
+	}
+	var claimed *struct {
+		Actor struct {
+			Kind string `json:"kind"`
+			ID   string `json:"id"`
+		} `json:"actor"`
+	}
+	if err := json.Unmarshal(raw, &claimed); err != nil {
+		*unread = append(*unread, fmt.Sprintf("claim %s is not a claim: %v", raw, err))
+		return "", false
+	}
+	if claimed == nil {
+		return "", true
+	}
+	if claimed.Actor.Kind == "" || claimed.Actor.ID == "" {
+		*unread = append(*unread, fmt.Sprintf("claim %s names no actor", raw))
+		return "", false
+	}
+	return claimed.Actor.Kind + ":" + claimed.Actor.ID, true
+}
+
+// askPayload is what the daemon reads of an ask.* event's payload, which is the ask itself
+// (Dispatch's model.AskEventPayload and AskEditEventPayload): its id, its kind, the author of an
+// opening, settlement's restored mark, and an approval request's document with the version it now
+// names and the version its agent last handed to the person.
+type askPayload struct {
+	ID     string `json:"id"`
+	Kind   string `json:"kind"`
+	Author struct {
+		Kind string `json:"kind"`
+		ID   string `json:"id"`
+	} `json:"author"`
+	Restored bool `json:"restored"`
+	Approval *struct {
+		ArtifactID       string `json:"artifact_id"`
+		Version          *int   `json:"version"`
+		RequestedVersion *int   `json:"requested_version"`
+	} `json:"approval"`
+	kind string
+}
+
+// decodeAskPayload reads event's ask, refusing one with no id, with its kind as askKind keeps it.
+func decodeAskPayload(event dispatchEvent, unread *[]string) (askPayload, error) {
+	var ask askPayload
+	if err := json.Unmarshal(event.Payload, &ask); err != nil {
+		return askPayload{}, fmt.Errorf("decode Dispatch %s payload: %w", event.Type, err)
+	}
+	if ask.ID == "" {
+		return askPayload{}, fmt.Errorf("Dispatch %s payload has no id", event.Type)
+	}
+	ask.kind = askKind(ask.Kind, unread)
+	return ask, nil
+}
+
+// artifact is the document an approval request asks a person to approve, "" for any other ask.
+func (a askPayload) artifact() string {
+	if a.kind != record.AskApproval || a.Approval == nil {
+		return ""
+	}
+	return a.Approval.ArtifactID
+}
+
+// askKind is an ask event's kind as the mirror keeps it: record.AskQuestion or record.AskApproval,
+// and "" for an absent kind or one this daemon does not know (an event retained from before
+// Dispatch had the two, whose kind is `action`), the latter named in unread.
+func askKind(kind string, unread *[]string) string {
+	switch kind {
+	case record.AskQuestion, record.AskApproval, "":
+		return kind
+	}
+	*unread = append(*unread, fmt.Sprintf("ask kind %q is not one the daemon knows", kind))
+	return ""
 }
 
 // dispatchProjectPrefix begins every Dispatch event of a project rather than an issue
