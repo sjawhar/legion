@@ -13,7 +13,9 @@ HOME is one the agent writes to: a planted `hashlib.py` or `.pth` would otherwis
 file and forge the answer. <trusted root> is empty in a pod; a test points it at a directory laid out
 like the image so the prober's absolute paths below resolve to fakes.
 
-Which process is the role's agent: the one child of the one `worker-shim` (own parent PID 1, which
+Which process is the role's agent: the one child of the one `worker-shim` (the process whose
+argv[1] is worker-shim, as every reader of a Legion process tree takes it, never one naming it in
+a later argv word; own parent PID 1, which
 inside the role's PID namespace is its role-init, so /proc shows that role's processes alone;
 executing the image's root-owned /opt/legion/bin/legion, which rules out a renamed process or a
 copy of the binary) whose argv equals the shim's own argv after its first `--`, or, when that argv
@@ -114,7 +116,7 @@ def resolve_agent(proc_root):
             parent = parent_of(proc_root, pid)
         except OSError:
             continue
-        if b"worker-shim" in fields and parent == "1" and runs_legion(proc_root, pid):
+        if fields[1:2] == [b"worker-shim"] and parent == "1" and runs_legion(proc_root, pid):
             shims.append(pid)
     if len(shims) != 1:
         fail(

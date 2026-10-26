@@ -600,7 +600,6 @@ claim_view() {
 }
 claim_sandbox() { claim_view "$1" "$2" | jq -er '.locator.sandbox.name'; }
 claim_pod_uid() { claim_view "$1" "$2" | jq -er '.locator.sandbox.podUid'; }
-claim_container() { claim_view "$1" "$2" | jq -er '.locator.sandbox.container'; }
 # claim_moved_or_held ISSUE ROLE POD_UID: the daemon holds ISSUE, or ROLE's process now names
 # another pod - its reaction to the end of POD_UID.
 claim_moved_or_held() {
@@ -1043,7 +1042,9 @@ assert_claim_endpoints() {
 }
 # agent_pid_sh is the POSIX sh that finds ROLE's Oh My Pi in its namespaces, the one rule pod_env and
 # agent_pid share: the process whose argv[0] is omp and whose parent is the role's `legion
-# worker-shim`. It exits 1 naming both pids when two such processes run and saying so when none
+# worker-shim` - the parent whose argv[1] is worker-shim, as every other reader of a pod's processes
+# takes it (lib/role-namespaces.sh), never a process naming it in a later argv word. It exits 1
+# naming both pids when two such processes run and saying so when none
 # does; otherwise it leaves the pid in $pid for the line each caller appends.
 # shellcheck disable=SC2016  # expanded by the pod's shell
 agent_pid_sh='
@@ -1052,7 +1053,7 @@ agent_pid_sh='
       argv0=$(tr "\0" "\n" 2>/dev/null <"$d/cmdline" | sed -n 1p)
       [ "${argv0##*/}" = omp ] || continue
       parent=$(sed -n "s/^PPid:[[:space:]]*//p" "$d/status" 2>/dev/null)
-      tr "\0" "\n" 2>/dev/null <"/proc/$parent/cmdline" | grep -qx worker-shim || continue
+      [ "$(tr "\0" "\n" 2>/dev/null <"/proc/$parent/cmdline" | sed -n 2p)" = worker-shim ] || continue
       if [ -n "$found" ]; then
         echo "more than one Oh My Pi under a legion worker-shim: pids ${found#/proc/} and ${d#/proc/}" >&2
         exit 1
@@ -1455,11 +1456,16 @@ end_claim_process() {
 # container, or a peer gone, is a kill that reached more than its role: it is written as the run's
 # violation, which until_true's next poll aborts on, naming it (a fail inside a poll would only end
 # the poll's own output, which until_true discards). A read of the pod, its container or its
-# role-inits that fails says nothing either way: the poll waits and the next one reads again.
+# role-inits that fails says nothing either way: the poll waits and the next one reads again. A pod
+# the API server answers for but does not have (`--ignore-not-found`: an empty read, exit 0) is
+# another matter, and not a wait: the kill deleted the whole pod, which is written as the run's
+# violation naming it, rather than polled for 300 s and failed with nothing said.
 role_generation_ended() {
   local inits identity lost uid violation=
-  if ! uid=$(op get pod "$ended_pod" -o jsonpath='{.metadata.uid}'); then
+  if ! uid=$(op get pod "$ended_pod" -o jsonpath='{.metadata.uid}' --ignore-not-found); then
     return 1
+  elif [ -z "$uid" ]; then
+    violation="the kill of $ended_role generation $ended_generation deleted pod $ended_pod (uid $ended_pod_uid)"
   elif [ "$uid" != "$ended_pod_uid" ]; then
     violation="the kill of $ended_role generation $ended_generation replaced pod $ended_pod_uid"
   elif ! identity=$(roles_container_identity "$ended_pod"); then
@@ -3366,7 +3372,7 @@ stream_url="tcp://$host:$port_worker_stream"
 bad=$(pod_shape_verdict "$evidence/pod-watch.json")
 [ -z "$bad" ] || fail "Sandbox pods depart from the pod shape: $(tr '\n' ' ' <<<"$bad")"
 judged=$(jq -r -L "$root/scripts/e2e/lib" 'include "stage4b-pods"; ready_pods | .metadata.uid' "$evidence/pod-watch.json" | sort -u)
-note "$(grep -c . <<<"$judged") pods seen ready so far, each one's role launchers dialing advertise_host at $stream_url: $(jq -r -L "$root/scripts/e2e/lib" 'include "stage4b-pods"; ready_pods | "\(.metadata.labels["legion.dev/tree"]) \(.metadata.labels["legion.dev/issue"])"' "$evidence/pod-watch.json" | sort -u | paste -sd ',' -)"
+note "$(grep -c . <<<"$judged") pods seen ready so far, each one's launcher dialing advertise_host at $stream_url: $(jq -r -L "$root/scripts/e2e/lib" 'include "stage4b-pods"; ready_pods | "\(.metadata.labels["legion.dev/tree"]) \(.metadata.labels["legion.dev/issue"])"' "$evidence/pod-watch.json" | sort -u | paste -sd ',' -)"
 for issue in "${specs[@]}"; do
   architect=$(claim_view "$issue" architect)
   uid=$(jq -r '.locator.sandbox.podUid // empty' <<<"$architect")
@@ -3376,9 +3382,9 @@ for issue in "${specs[@]}"; do
     *) fail "$issue's architect is $state, not registered from its pod $uid" ;;
   esac
   grep -qxF -- "$uid" <<<"$judged" || fail "$issue's architect runs on pod $uid, which the pod watch never saw ready"
-  note "$issue's architect registered ($state) from pod $uid, whose role launchers the verdict above holds to --connect $stream_url"
+  note "$issue's architect registered ($state) from pod $uid, whose launcher, the one its roles share, the verdict above holds to --connect $stream_url"
 done
-# Negative control: the last ready pod the watch recorded, its role launchers' --connect edited in
+# Negative control: the last ready pod the watch recorded, its launcher's --connect edited in
 # place to the address the daemon binds, departs from the pod shape for that --connect.
 jq -c -L "$root/scripts/e2e/lib" 'include "stage4b-pods"; ready_pod_event' "$evidence/pod-watch.json" | tail -1 |
   jq -c --arg bound "tcp://$bind:$port_worker_stream" '.object.spec.containers |= map(if ((.command // []) | index("--connect")) != null
@@ -3387,7 +3393,7 @@ cat "$evidence/pod-watch.json" "$work/wildcard-connect.json" >"$evidence/control
 control=$(pod_shape_verdict "$evidence/controls/pod-watch-wildcard-connect.json")
 grep -qF "launcher dials tcp://$bind:$port_worker_stream, not advertise_host at $stream_url" <<<"$control" ||
   fail "the pod shape did not refuse a pod told --connect tcp://$bind:$port_worker_stream for it: ${control:-no departure}"
-note "negative control: a recorded pod whose role launchers are told --connect tcp://$bind:$port_worker_stream departs from the pod shape: $control"
+note "negative control: a recorded pod whose launcher is told --connect tcp://$bind:$port_worker_stream departs from the pod shape: $control"
 # The daemon's loader on the proof's own file: advertise_host dropped, then a loopback bind beside it.
 sed '/^advertise_host: /d' "$work/legion.yaml" >"$work/legion-no-advertise-host.yaml"
 if out=$("$work/legion" start --check-config --config "$work/legion-no-advertise-host.yaml" 2>&1); then
@@ -3509,8 +3515,8 @@ until_true 300 "the memory hog on $root_node to be OOMKilled" hog_oomkilled
 op delete pod "legion-e2e4b-memory-hog-$$" --wait=false >/dev/null
 note "the memory hog on tree 1's root's node $root_node was OOMKilled by its own 64Mi limit: the pod watch's negative control (pod-watch-verdict)"
 # The architect's GitHub credential as it is now, for github-credential-refresh: the hash of its
-# hosts.yml and the token itself, read into this shell alone. The architect container is the pod's
-# longest-lived, so the hour boundary is observed on it.
+# hosts.yml and the token itself, read into this shell alone. The architect's claim is the tree's
+# longest-lived, so the hour boundary is observed on its pod.
 gh_pod=$(claim_sandbox "$tree1" architect) || fail "tree 1's architect has no Sandbox locator"
 gh_before_hash=$(gh_hosts_hash "$gh_pod" architect) || fail "could not hash the architect's hosts.yml in $gh_pod"
 gh_before_token=$(gh_hosts_token "$gh_pod" architect) || fail "could not read the architect's hosts.yml in $gh_pod"
@@ -3677,7 +3683,7 @@ note "tree 2's workspace $fixture_dir carries the fixture: $(tr '\n' ' ' <<<"$pr
 markers=$(fixture_markers "$pod" planner) || fail "the fixture markers could not be read in $pod: $markers"
 printf '%s\n' "$markers" >"$evidence/fixture-markers.txt"
 argv=$(pod_commands "$pod" planner)
-note "tree 2 planner container $pod: fixture markers [${markers:-none}]; process argv $(tr '\n' ';' <<<"$argv")"
+note "tree 2's planner in pod $pod: fixture markers [${markers:-none}]; process argv $(tr '\n' ';' <<<"$argv")"
 # The agent's lane: discovery on, the image's two plugin roots as the explicit extensions, the Envoy
 # plugin first (packages/daemon/internal/runtime/sandbox/manifest.go agentArgv). $argv is one line
 # per process, its words space-separated, so the two flags are one run of text on the agent's line.
@@ -3808,7 +3814,7 @@ note "tree 2's planner loaded the fixture's extension, tool and both MCP servers
 # through PI_CONFIG_FILES in its environment, which is what the agent's reads ran under, and
 # nothing else. A leaked or missing overlay shows as the two reads agreeing where they must differ,
 # or differing where they must agree.
-pid=$(agent_pid "$pod" planner) || fail "tree 2's planner container $pod does not hold exactly one Oh My Pi under a legion worker-shim: $(pod_commands "$pod" planner | tr '\n' ';')"
+pid=$(agent_pid "$pod" planner) || fail "tree 2's planner in pod $pod does not hold exactly one Oh My Pi under a legion worker-shim: $(pod_commands "$pod" planner | tr '\n' ';')"
 settings=
 for key in compaction.remoteEndpoint memory.backend dev.autoqa images.urls.enabled retry.modelFallback; do
   got=$(agent_setting "$pod" planner "$pid" "$fixture_dir" "$key" 2>"$work/setting-stderr") || fail "omp config get $key under tree 2's planner's environment (pid $pid) in $fixture_dir failed: $got $(tr '\n' ' ' <"$work/setting-stderr")"
@@ -4747,7 +4753,7 @@ done <<<"$lease_lines"
 note "the architect's lease chain holds $(grep -c refreshed <<<"$lease_lines") refresh(es), each at least fifteen minutes before the expiry of the lease it replaced; the first after the read at $gh_before_at was at $refreshed_at"
 # The kubelet's projection: the file in the container changes within its sync period.
 hosts_changed() { [ "$(gh_hosts_hash "$gh_pod" architect)" != "$gh_before_hash" ]; }
-until_true 300 "the architect container's hosts.yml to carry a refreshed token" hosts_changed
+until_true 300 "the architect's gh bundle in its pod to carry a refreshed token" hosts_changed
 propagated_at=$(date -u +%FT%TZ)
 [ "$(op get pod "$gh_pod" -o jsonpath='{.metadata.uid}')" = "$gh_before_uid" ] || fail "the architect's pod $gh_pod was replaced while the refresh was awaited"
 propagation=$(( $(date -d "$propagated_at" +%s) - refreshed_s ))
@@ -6202,9 +6208,9 @@ leaks_pid=
 jq -e '.leaks == [] and .unseen == [] and .unreadable == 0' "$work/secret-leaks.json" >/dev/null ||
   fail "Sandbox pods carry a value of their Sandbox's Secret, name a Secret the check never saw, or the pod watch holds unreadable lines: $(jq -c '{leaks, unseen, unreadable}' "$work/secret-leaks.json")"
 note "$judged Sandbox pods judged from the pod watch's record, deleted ones included; every pod another source names is in it"
-note "every container of each, the init containers included, reserves its role's cpu and memory as both request and limit and its role's ephemeral-storage limit over its request (the node-disk bound) under the run's reservations $run_resources (overrides: $(resources_block | tail -n +2 | sed 's/^ *//' | paste -sd ';' -)); each pod is Guaranteed and carries no affinity"
+note "every container of each, the init containers included, carries the issue pod's one reservation: cpu and memory as both request and limit and an ephemeral-storage request no greater than its limit (the node-disk bound) under the run's reservations $run_resources (overrides: $(resources_block | tail -n +2 | sed 's/^ *//' | paste -sd ';' -)); each pod is Guaranteed and carries no affinity"
 note "no pod's command, args or environment carries a credential of its Sandbox's Secrets: $(jq -r '"\(.pods) pods, \(.secrets) Secrets, \(.values) values held in memory, none printed; keys judged: \(.judged | join(", ")); keys excluded as no credential: \(.excluded | join(", "))"' "$work/secret-leaks.json")"
-# Negative controls: a recorded pod with another runtime class, one whose tester container bursts
+# Negative controls: a recorded pod with another runtime class, one whose roles container bursts
 # past its request, one pinned to a node by an affinity, and a pod the watch never recorded. Each
 # of the first three is the last ready pod event the watch recorded (wrong_runtime_control, and
 # the same event read here for the other two), edited, appended to a copy of the record as the
