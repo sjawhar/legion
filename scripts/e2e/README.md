@@ -35,9 +35,11 @@ LEGION_REAL_GITHUB=1 LEGION_TEST_PG_DSN=postgres://… \
 ```
 
 The test is intentionally gated because it calls GitHub as both installed Apps: this deployment's
-own unless the four App inputs name another's
-([`lib/github-apps.sh`](#libgithub-appssh)), each unset input taking this deployment's value and a
-malformed one failing the run by name, never printing it.
+own unless the four App inputs name another's. It reads both Apps by running
+[`lib/github-apps.sh`](#libgithub-appssh) itself, so it takes that lib's defaults, input checks and
+key command, with no copy of its own: each unset input takes this deployment's value, and a
+malformed one fails the run by name, never printing it. The ungated `TestLiveProofAppsReadTheLib`
+proves that read in every `go test`.
 It resolves each
 App key through its `private_key_command`, mints each App's lease through the real token source,
 writes the gh files the daemon would render for a pane, and drives the real `gh` and `git` against

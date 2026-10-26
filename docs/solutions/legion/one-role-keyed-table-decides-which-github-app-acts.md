@@ -32,8 +32,8 @@ symptoms:
 
 ## Context
 
-Legion acts on GitHub through two Apps: `legion-implementer` (the code-writing App) and
-`legion-reviewer` (the review App). Until LEGION-42 the daemon held **two** functions that decided
+Legion acts on GitHub through two Apps: the implement App (the code-writing App) and the review
+App (their ids and slugs are in the table below). Until LEGION-42 the daemon held **two** functions that decided
 which App a role acts as, and they disagreed:
 
 | function | where | used by | mapping |
@@ -131,10 +131,17 @@ implement-only fixtures (#1016, see the rebase note in
 
 Read from GitHub itself (`GET /app` with each App's JWT, 2026-09-13):
 
-| App | id | permissions |
+| App id | slug (unauthenticated `GET /apps/<slug>`, 2026-10-26) | permissions |
 | --- | --- | --- |
-| `legion-implementer` | 3202636 | actions:write, checks:**read**, contents:write, issues:write, metadata:read, organization_projects:write, packages:read, pull_requests:write, repository_projects:write, **statuses:write**, workflows:write |
-| `legion-reviewer` | 3202653 | actions:write, **checks:write**, issues:write, metadata:read, packages:read, pull_requests:write |
+| 3202636 (implement) | `trajectory-s-legion-implementer` | actions:write, checks:**read**, contents:write, issues:write, metadata:read, organization_projects:write, packages:read, pull_requests:write, repository_projects:write, **statuses:write**, workflows:write |
+| 3202653 (review) | `trajectory-s-legion-reviewer` | actions:write, **checks:write**, issues:write, metadata:read, packages:read, pull_requests:write |
+
+(2026-10-26 correction: this table first named the two Apps `legion-implementer` and
+`legion-reviewer`. GitHub answers ids 3202636 and 3202653 with the slugs above, and the slugs
+`legion-implementer` and `legion-reviewer` belong to two other Apps. The bot names this entry
+quotes elsewhere (`legion-implementer[bot]`, `app.slug: legion-reviewer`) are as its sources
+recorded them. Identify an App by its id, which `GET /app` answers with the App's own JWT, not by
+its slug.)
 
 (2026-09-25: the review App's installations have since gained `contents: write`; the current record
 is in `packages/daemon/src/daemon/AGENTS.md`, GitHub Apps.)
