@@ -29,8 +29,10 @@ is `Clear defect from <role>`. When the report issue was missing or closed, the 
 evidence: create or reopen the report issue (`skill://legion-controller/references/daily-report.md`)
 and post it there with that first line. A clear defect you find yourself gets the same comment, with
 `controller` as the role. A clear-defect ask (`findings.md`, "When no controller takes it") needs
-no answer: take it as below, the ask its evidence, then reply under it and resolve it
-(`dispatch resolve-ask --kind resolved`).
+no answer: take it as below, the ask its evidence. Resolve it (`dispatch resolve-ask --kind
+resolved`) only once it carries your reply: `Handed` or `Filed` from step 2, 3 or 5, or, when
+step 1 finds it is not clear, `Moved dispatch://<REPORT KEY>/ask/<new id>` naming the decision ask
+you open. With no reply, leave it open: catch-up step 2 takes it again at your next start.
 
 The work goes to whoever already owns that code. You file an issue only when nobody does.
 
@@ -130,8 +132,9 @@ finding asks roles opened on their own issues while no controller ran:
    another issue whose question opens `Finding from ` or `Clear defect from ` is a role's
    own-issue ask. Take a clear defect the same way. Move a finding that needs a
    decision: ask it again on the report issue with the same question, options and `--ref`, then
-   reply `Moved dispatch://<REPORT KEY>/ask/<new id>` under the old ask. Resolve the old ask either
-   way.
+   reply `Moved dispatch://<REPORT KEY>/ask/<new id>` under the old ask. Resolve the old ask once it
+   carries a `Moved`, `Handed` or `Filed` reply. A clear defect no holder took stays open, and the
+   next start takes it again.
 3. List the answered asks still waiting on you, which no `dispatch` command lists:
 
    ```text
