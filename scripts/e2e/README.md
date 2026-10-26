@@ -673,13 +673,17 @@ LEGION_E2E_MODEL_ROUTE=key-file LEGION_E2E_ANTHROPIC_KEY_FILE=<0600 file> \
 
 The key-file route's file may come from the agent-secrets broker, which serves
 `LEGION_ANTHROPIC_API_KEY` to a session without an approval wait. The key is written 0600, never
-printed and never in an argv, and the file goes at the end of the run:
+printed and never in an argv, and the subshell's `EXIT` trap removes the file however the run ends
+(a failure, Ctrl-C, or a deadline that kills the shell), where a plain `rm` at the end would leave
+it behind:
 
 ```sh
-key=$(mktemp)   # 0600 already
-agent-secrets LEGION_ANTHROPIC_API_KEY -- sh -c 'umask 077; printf %s "$LEGION_ANTHROPIC_API_KEY" >"$1"' sh "$key"
-LEGION_E2E_MODEL_ROUTE=key-file LEGION_E2E_ANTHROPIC_KEY_FILE=$key bash scripts/e2e/claude-backend-tmux.sh
-rm -f "$key"
+(
+  key=$(mktemp)   # 0600 already
+  trap 'rm -f "$key"' EXIT
+  agent-secrets LEGION_ANTHROPIC_API_KEY -- sh -c 'umask 077; printf %s "$LEGION_ANTHROPIC_API_KEY" >"$1"' sh "$key" &&
+    LEGION_E2E_MODEL_ROUTE=key-file LEGION_E2E_ANTHROPIC_KEY_FILE=$key bash scripts/e2e/claude-backend-tmux.sh
+)
 ```
 
 **Devbox only; CI does not run this script.** It proves `worker_backends` on the tmux runtime: a
@@ -732,7 +736,8 @@ route — the architect's and the planner's:
 `LEGION_E2E_CLAUDE_KEY_FILE` names a file holding the Anthropic API key the
 Claude Code implementer reaches its model with. It is required under `gateway`; under `key-file`,
 left unset, it falls back to `LEGION_E2E_ANTHROPIC_KEY_FILE`, so one key file serves both halves of
-the run, and naming both puts the Claude Code pane and the Oh My Pi agents on different keys.
+the run, and naming both puts the Claude Code pane on `LEGION_E2E_CLAUDE_KEY_FILE` and the Oh My Pi
+agents on `LEGION_E2E_ANTHROPIC_KEY_FILE`, with both paths in the run's notes.
 `prerequisites` refuses a run with neither, naming the variables, before it writes anything, and
 refuses a key Anthropic's `GET /v1/models` does not accept
 (the key goes by a 0600 header file, never an argv). The run copies the key once into its work

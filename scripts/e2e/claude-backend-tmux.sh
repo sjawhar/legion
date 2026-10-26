@@ -17,7 +17,9 @@
 #   - `key-file`: Anthropic's own endpoint keyed by a 0600 file read fresh on every call
 #     (lib/install-key-file-model-route.sh), for a devbox with no Hawk gateway. The file is
 #     LEGION_E2E_ANTHROPIC_KEY_FILE, and LEGION_E2E_CLAUDE_KEY_FILE unset falls back to it, so one
-#     key file serves both halves of the run; naming both puts them on different keys.
+#     key file serves both halves of the run; naming both puts the Claude Code pane on
+#     LEGION_E2E_CLAUDE_KEY_FILE and the Oh My Pi agents on LEGION_E2E_ANTHROPIC_KEY_FILE, and the
+#     notes name both paths.
 # The Claude Code pane's key file holds the Anthropic API key the Claude Code implementer reaches
 # its model with, and Anthropic's own `GET /v1/models` must accept it before any pane starts: the
 # run copies it once into its work directory (0600), and the implementer's claim directory names a
@@ -124,7 +126,12 @@ cleanup() {
   # Teardown is best effort: a failing command here is a warning about the teardown, never a check's
   # FAIL line, and the run's exit status stays the one the checks set.
   trap 'printf "cleanup warning: line %s exited %s\n" "$LINENO" "$?" >&2' ERR
+  # First, before anything slower (stopping panes, docker, the gh calls in remove_run_branch) can
+  # hang or be ended by a second signal: the Claude pane's key copy and the key-file route's own
+  # key command, which bakes in --key-file's resolved path. Neither may survive this script on any
+  # exit, so neither is conditioned on how the rest of cleanup goes. Stages 2 and 3 do the same.
   rm -f "$work/claude-model-key" "$work/claude-key-header"
+  rm -rf "$work/model-gateway-key" || true
   stop_tree "$watcher_pid"
   stop_pid "$daemon_pid"
   stop_pid "$dispatch_pid"
@@ -134,7 +141,7 @@ cleanup() {
   docker rm -f "$pg_container" "$nats_container" >/dev/null 2>&1 || true
   collect_transcripts
   remove_run_branch
-  rm -rf "$work/model-gateway-cache" "$work/model-gateway-key" || true
+  rm -rf "$work/model-gateway-cache" || true
   if [ -n "${ok:-}" ]; then
     rm -rf "$work" || true
   else
@@ -514,8 +521,9 @@ gateway | key-file) ;;
 *) fail "LEGION_E2E_MODEL_ROUTE must be gateway or key-file, not '$model_route'" ;;
 esac
 # The Claude Code pane's own key file. Under the key-file route the Oh My Pi agents read a key
-# file too, so one file can serve both halves: LEGION_E2E_CLAUDE_KEY_FILE unset there falls back
-# to LEGION_E2E_ANTHROPIC_KEY_FILE, and naming both puts the two halves on different keys.
+# file too, so one file can serve both halves: whichever of the two variables is set serves both,
+# and naming both puts the Claude pane on LEGION_E2E_CLAUDE_KEY_FILE and the agents on
+# LEGION_E2E_ANTHROPIC_KEY_FILE. Both paths are in the notes, so a split is visible.
 key_file_var=LEGION_E2E_CLAUDE_KEY_FILE
 key_file=${LEGION_E2E_CLAUDE_KEY_FILE:-}
 if [ -z "$key_file" ] && [ "$model_route" = key-file ]; then
@@ -527,6 +535,12 @@ fi
 [ -n "$key_file" ] ||
   fail "LEGION_E2E_CLAUDE_KEY_FILE is unset: name a file holding the Anthropic API key the Claude Code implementer reaches its model with"
 [ -f "$key_file" ] && [ -r "$key_file" ] || fail "$key_file_var names $key_file, which is not a readable file"
+agent_key_file=$key_file
+if [ "$model_route" = key-file ]; then
+  agent_key_file=${LEGION_E2E_ANTHROPIC_KEY_FILE:-$key_file}
+  [ -f "$agent_key_file" ] && [ -r "$agent_key_file" ] ||
+    fail "LEGION_E2E_ANTHROPIC_KEY_FILE names $agent_key_file, which is not a readable file"
+fi
 refuse_leftovers legion-e2ecc
 for tool in go docker jq curl ss tmux bun mise secrets gh jj pgrep claude; do command -v "$tool" >/dev/null || fail "$tool is required"; done
 [ "$model_route" != gateway ] || command -v hawk-token >/dev/null || fail "hawk-token is required under LEGION_E2E_MODEL_ROUTE=gateway"
@@ -570,11 +584,11 @@ gateway)
     fail "the Oh My Pi agents' model route through the Hawk model gateway could not be installed (the reason is above)"
   ;;
 key-file)
-  key_command=$(bash "$root/scripts/e2e/lib/install-key-file-model-route.sh" --profile "$profile" --home "$omp_home" --dest "$evidence/model-gateway" --key-dir "$work/model-gateway-key" --key-file "$key_file") ||
+  key_command=$(bash "$root/scripts/e2e/lib/install-key-file-model-route.sh" --profile "$profile" --home "$omp_home" --dest "$evidence/model-gateway" --key-dir "$work/model-gateway-key" --key-file "$agent_key_file") ||
     fail "the Oh My Pi agents' model route through the key file could not be installed (the reason is above)"
   ;;
 esac
-note "the Oh My Pi agents' model route ($model_route): keyed by $key_command"
+note "the Oh My Pi agents' model route ($model_route): keyed by $key_command$([ "$model_route" = key-file ] && printf ', from %s' "$agent_key_file")"
 export XDG_STATE_HOME="$work/xdg"
 export TMUX_TMPDIR="$work/tmux"
 pass
