@@ -2,21 +2,30 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-141",
-  "completed": "2026-10-26T12:42:30Z",
+  "completed": "2026-10-26T16:00:30Z",
   "generation": 3,
-  "round": "the round after review 5651306714; code commit f7d39001d5df, handoff head 43a5a5eb",
-  "scope": "The architect's ruling (Envoy 8e46a3aa33c4b26347c27cab892bd7d7): confirm that the writeBusUnavailable comment names all three bus.ErrRefused members, and that nothing outside .legion/ changed after f804579e except comment or doc text; approve by SHA if both hold and no defect is found.",
-  "decision": "approved",
-  "verified": [
-    "The comment on writeBusUnavailable (api.go:233-240) now says the guard keeps Retry-After off every bus.ErrRefused: ErrTooLarge answered 413, ErrInvalidSubject and ErrInvalidKey answered 400. That matches writeNATSError (api.go:207-216) and the refusal type's Is (internal/bus/nats.go:814).",
-    "From f804579e to 43a5a5eb, the only path outside .legion/ is packages/envoy/cmd/listener/api.go, and every changed line in it is a // comment (git diff with comment lines filtered out shows no remaining +/- line). No runtime code changed, so this round gets no thermonuclear pass.",
-    "Proofs: E2E (implementer) and E2E (tester) are both in the PR body. The code under them is f804579e's runtime code, unchanged since (comment-only delta)."
+  "round": "the round retro sent back for R1 and R2: code commits acafc88f1e8b and 7093f375b213, handoff head c95e2fec",
+  "scope": "The architect's ruling (Envoy 68afced19a93134d0f0c20764853e9c5). Confirm R2 (every HTTP route bounds every store or bus call it reaches with sendRequestBudget from r.Context()) and R1 (GET /v1/registry/<id> answers 200 with no topics when only the interest bucket refuses the key), each with a test that fails before the fix. Run my own grep for unbounded HTTP-reachable calls. Confirm that nothing else changed after f7d39001. Raise only defects.",
+  "decision": "changes_requested",
+  "confirmed": [
+    "R2: no HTTP route reaches an unbounded store or bus call. My grep of cmd/listener, internal/webhook and internal/cistore finds context.Background() only on paths that answer no request: role delivery (delivery.go:374, 590, 608), the role reaper's roleHolderSession (main.go:91), startup and shutdown. The deep review's per-route table agrees for every /v1 route, /healthz and the three webhooks.",
+    "Tests fail before the fixes: on a git archive of f7d39001 with the new test files copied in, TestTheWriteRoutesAnswerABusThatStoppedAnsweringInsideTheBudget fails on all seven frozen routes at 10.00 s, and TestTheSessionListKeepsASessionWhoseIDTheInterestBucketRefuses fails on registry/* (413/400) and dispatch/* (Dispatch's client says 'session not found'). Both pass at the head, as does TestAClaimWhoseRoleStoreStopsAnsweringIsAnsweredInsideTheBudget. The code-quality pass found that the webhook, /healthz and cistore queue tests also fail before their fixes and are deterministic.",
+    "R1: GET /v1/registry/<id> answers 200 with no topics and roles, logged at WARN, when only the interest bucket refuses the key. GET /v1/interests/<id> keeps its 413/400.",
+    "Scope: everything in 7093f375 (webhooks, cistore, /healthz) is the R2 sweep of HTTP-reachable bus calls. No other path changed."
   ],
-  "ci": "CI head e739b0344a82 (compare to 43a5a5eb: ahead, only .legion/). Required: lint, typecheck, test completed/success (Tests 40316229156), pr-title completed/success (PR Title 40316523191). Legion Envoy and Contracts 40316229147 was still queued behind a repository-wide runner backlog; it is not required.",
-  "verdictProvenance": "Read from the session store's transcript (omp_session_files): this session, which wrote the verdict, anthropic/claude-opus-5-5, 221 of 221 assistant turns. No subagent ran this round.",
+  "ci": "CI head 1d7b96f00491. At reading, Tests, Legion Envoy and Contracts and PR Title were queued, and Worker Image was in progress. A request for changes does not wait for CI.",
+  "thermonuclear": "Both run at c95e2fec under the defect-only rule. deep-review: CHANGES (findings 1 and 2 below, plus a non-blocking consumer risk, now in the PR body's risk section). code-quality: CHANGES (finding 3); every target test fails before its fix and is deterministic.",
+  "verdictProvenance": "Read from the session store's transcripts (omp_session_files). This session, which wrote the verdict: anthropic/claude-opus-5-5, 247 of 247 assistant turns. DeepReview7: anthropic/claude-opus-5-5, 84 of 84. CodeQuality7: anthropic/claude-opus-5-5, 44 of 44.",
   "critical": 0,
-  "important": 0,
-  "minor": 0,
-  "keyFindings": [],
-  "threads": "50 threads, all resolved. I replied 'Accepted: fixed in f7d39001d5df' on 5651306714's thread PRRT_kwDORFy7ds6wPZyZ. No bot threads."
+  "important": 1,
+  "minor": 2,
+  "keyFindings": [
+    {"severity": "important", "file": "packages/envoy/internal/store/kv.go", "description": "Regression from acafc88f. Once the request ctx has ended, SetRoleWithPrevious starts neither the rollback of a claim that failed nor the old holder's topic cleanup after a claim that succeeded, because bus.Bounded returns at once under an ended ctx. The claimant's own UpsertWithin put can also land after the 503 with no claim behind it. Before, these ran under context.Background(), so a bus slower than the remaining budget but inside 10 s still cleaned up. A record then keeps notifications.role.<role> for a role its session does not hold, and heartbeat upserts only add topics (mergeForUpsert), so the topic stays until that session unsubscribes or ends. Roles are derived from topics: GET /v1/sessions and /v1/registry report it as a holder, Dispatch's route roster (internal/dispatch/api/issue_route_status.go) can name it the live holder (route_status live where it should be no_holder), and senderStamp puts the role in sender.roles, so recipients get a Reply Role hint (session/session.go:137-138). AGENTS.md:2038-2041 says this lasts 'until the next claim or unsubscribe', which is false for the old holder: a later claim cleans the holder it replaces, not this one. It also says only 'a claim whose write did not answer' skips the cleanup, but the old holder's cleanup is skipped after a claim that succeeded too."},
+    {"severity": "minor", "file": "packages/envoy/cmd/listener/api.go", "description": "storeAnswered (api.go:271-277) runs errors.Is over a joined error. SetRoleWithPrevious joins a lost compare-and-swap (nats.ErrKeyExists, an answer) with holderErr and rollbackErr. With ctx still live, when either is a call that did not answer (nats.ErrNoResponders, ErrConnectionClosed, a raw socket error), POST /v1/roles/set answers 500 'key exists ...' with no Retry-After and no busUnansweredPrefix, against the settled rule. Count the error as answered only when no joined part is unanswered."},
+    {"severity": "minor", "file": "packages/envoy/cmd/listener/write_routes_frozen_bus_test.go", "description": "The comment at :200-201 says the negative control is 'the same claim' asked before the freeze. The control at :215 is a hard claim of another role (role-store-control), and the same claim could not be its control, since the frozen write is described as the conditional create."}
+  ],
+  "risksRecorded": [
+    "/healthz now answers a JetStream-only stall '200 degraded' inside 3 s. Before, the 10 s wait timed out the Fargate container health check (curl -sf, timeout 5 s, 3 retries; infra/aws/rendering/listener.go:196), and ECS replaced the task. The self-health monitor does not restart on an unclassified JetStream timeout, so such a task is no longer replaced automatically. This follows from the architect's bound on /healthz together with the existing degraded-is-200 classification. It is recorded in the PR body's risk section for the architect, not held as a code defect."
+  ],
+  "threads": "50 threads, all resolved, none opened since the last round, no bot threads."
 }
