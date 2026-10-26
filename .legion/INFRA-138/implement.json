@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-138",
+  "completed": "2026-10-26T18:07:00Z",
+  "proof": [
+    {
+      "criterion": "RC4: GitHub squash-merges a pull request that has commits but changes no file.",
+      "surface": "GitHub on sjawhar/legion-smoke, as the implement App",
+      "command": "gh api -X POST repos/sjawhar/legion-smoke/git/refs (infra-138-empty-base and infra-138-empty-head at main 6d843f28732dd82163065cb4d2248e488f68ca0b); contents PUT of infra-138-rc4.txt on the head (commit 54591afbc87a4f43355c7a2d325a1e65ce8f177a) then contents DELETE (commit 0b33835e1daa23d375750c1bad611ffcd0fb184b); gh pr create -R sjawhar/legion-smoke --base infra-138-empty-base --head infra-138-empty-head -> https://github.com/sjawhar/legion-smoke/pull/805; gh api repos/sjawhar/legion-smoke/pulls/805 --jq .changed_files; gh api -X PUT repos/sjawhar/legion-smoke/pulls/805/merge -f merge_method=squash -f sha=0b33835e1daa23d375750c1bad611ffcd0fb184b; then both scratch refs deleted",
+      "observed": "PR 805: commits 2, changed_files 0, mergeable true; merge answered {\"merged\":true,\"sha\":\"4b346f7fe975849352ee7141c68580d3c6120164\"}; merge commit 4b346f7f has 0 files and parent 6d843f28; sjawhar/legion-smoke main still 6d843f28 (untouched); no infra-138 branch remains",
+      "headSha": "0b33835e1daa23d375750c1bad611ffcd0fb184b",
+      "negativeControl": "gh pr create -R sjawhar/legion-smoke --base infra-138-empty-base --head infra-138-empty-head with both refs at 6d843f28 (no commits beyond base) -> 'GraphQL: No commits between infra-138-empty-base and infra-138-empty-head (createPullRequest)', exit 1"
+    }
+  ],
+  "filesChanged": [
+    ".legion/INFRA-138/implement.json"
+  ],
+  "deviations": [
+    "Pushed with no skip-checks trailer, as plan section 4 step 5 directs, so lint, typecheck, test and pr-title run on this head (RC2).",
+    "RC1 and RC3 proofs are added once the pull request exists; the daemon drain at 18:12Z parks the tree, so RC4's evidence is pushed first."
+  ]
+}
