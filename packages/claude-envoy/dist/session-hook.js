@@ -14900,9 +14900,13 @@ function parseCommand(argv, io) {
   for (let index = 0;index < rest.length; index++) {
     const token = rest[index];
     if (!token.startsWith("--")) {
-      if (ISSUE_KEY.test(token) && surface.flags.has("--issue") && !setBy.has("issue")) {
-        if (claim("issue", "--issue", false))
-          args["issue"] = token;
+      if (ISSUE_KEY.test(token) && surface.flags.has("--issue")) {
+        if (index === 0) {
+          if (claim("issue", `the issue key ${token}`, false))
+            args["issue"] = token;
+        } else {
+          problems.push(`unexpected argument ${quoteWord(token)}: a bare issue key is the --issue only as the first argument; otherwise write --issue ${quoteWord(token)}`);
+        }
         continue;
       }
       problems.push(`unexpected argument ${quoteWord(token)}: every value follows its flag`);

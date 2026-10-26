@@ -358,9 +358,16 @@ export function parseCommand(
     const token = rest[index] as string;
     if (!token.startsWith("--")) {
       // `dispatch read ACME-12` names an issue as plainly as `--issue ACME-12` does, so a bare
-      // key is that command's --issue, once, when the command takes one and nothing else set it.
-      if (ISSUE_KEY.test(token) && surface.flags.has("--issue") && !setBy.has("issue")) {
-        if (claim("issue", "--issue", false)) args["issue"] = token;
+      // key is that command's --issue when it is the first argument. Later, a key-shaped word is
+      // more likely a flag's unquoted value spilling over (`--body hi SHA-256`), so it is refused.
+      if (ISSUE_KEY.test(token) && surface.flags.has("--issue")) {
+        if (index === 0) {
+          if (claim("issue", `the issue key ${token}`, false)) args["issue"] = token;
+        } else {
+          problems.push(
+            `unexpected argument ${quoteWord(token)}: a bare issue key is the --issue only as the first argument; otherwise write --issue ${quoteWord(token)}`
+          );
+        }
         continue;
       }
       problems.push(`unexpected argument ${quoteWord(token)}: every value follows its flag`);
