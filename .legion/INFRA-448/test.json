@@ -2,29 +2,37 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-448",
-  "completed": "2026-10-26T19:56:15Z",
-  "round": 4,
-  "testedCodeHead": "7912696a2f26f91538f631c13f95fe07b3e84059",
+  "completed": "2026-10-26T20:32:02Z",
+  "round": 5,
+  "testedCodeHead": "05b29be5dd913cc247b7632092bf74775a91c456",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Full round (review round 2's fixes in c8b202a6 and two main merges changed the diff), after the workspace and scratch volume were recreated: the tester's lane rebuilt on the issue's Postgres 17 with its own databases and ports. Drove each claim of the implementer's review-round-2 proof independently: the registry open recovering without a reconnect (grant applied by nats-server config reload), saved edits restored on reopen without a reload, and Get after an ended claim (simulated with a raw session-key put); re-ran its browser specs (closed-issue-posting, offline-edits, margin-composer-hold) in the tester's lane."
+    "how": "The implementer's proof was in-process tests; drove the same change on the real listener binary against a real nkey-authorized nats-server: SIGTERM during the background open (head vs the round-4 listener at 7912696a), and registry recovery across a config-reload grant, a NATS restart and a revoked-then-restored grant. Only cmd/listener/legion_agents.go and its test changed since round 4, so round 4's live runs at 7912696a stand for the other surfaces."
   },
   "failures": [],
   "failed": 0,
   "proof": [
     {
-      "criterion": "Review round 2: a failed registry open recovers without a reconnect, worded as a failed open",
-      "surface": "the real envoy-listener on a real nkey-authorized nats-server v2.10.29 whose one user holds core.ListenerPermissions(grant-host) minus legion_agents, then the full grant by config reload",
-      "command": "nats-server -c drop config; listener with NATS_NKEY_SEED_FILE; curl the registry and /v1/sessions; wait 40 s; copy the full-grant config over and kill -s HUP the nats-server; poll GET /v1/legion/agents?issue=TST-1; PUT and the three reads",
-      "observed": "listener healthy, /v1/sessions 200, registry 503 'could not open the legion_agents bucket (a missing grant is the usual cause): ...', one ERROR line after 40 s more; after 'Reloaded server configuration' the same listener process answers 200 after 8 s with 0 reconnect or disconnect lines and 0 violations, PUT and issue/role/session reads 200, log 'legion agent registry opened'",
-      "headSha": "7912696a2f26f91538f631c13f95fe07b3e84059",
-      "negativeControl": "the registry routes answer 503 on the grant without legion_agents (before the reload)"
+      "criterion": "Review round 3: the drain hook does not wait for a registry open under way",
+      "surface": "the real envoy-listener binary on a real nkey-authorized nats-server v2.10.29 whose user holds core.ListenerPermissions minus legion_agents",
+      "command": "/legion/scratch/tmp/infra448-tester/drain.sh: start the listener, wait for the first failed open's ERROR, SIGTERM 3 s into the retry's open; time from 'received signal' to 'envoy-listener shutdown complete' in the listener log; head and the 7912696a listener, two runs each",
+      "observed": "head 05b29be5: 0.03 s and 0.03 s",
+      "headSha": "05b29be5dd913cc247b7632092bf74775a91c456",
+      "negativeControl": "the round-4 listener built at 7912696a: 7.81 s and 7.74 s on the same SIGTERM"
+    },
+    {
+      "criterion": "Review round 3: the registry is not left on a replaced connection; it recovers in one listener process",
+      "surface": "the real envoy-listener binary on a real nkey-authorized nats-server v2.10.29",
+      "command": "/legion/scratch/tmp/infra448-tester/recover.sh: grant-less start then SIGHUP with the full grant; NATS restarted with the store open; NATS restarted with the grant revoked then SIGHUP with it restored",
+      "observed": "A: /v1/sessions 200, registry 503, then 200 after 8 s of the reload, PUT and GET 200; B: 200 within 1 s of the restart, entry kept; C: registry 503 while /v1/sessions 200, then 200 after the reload; one ERROR line in total, same process throughout. A failing move during an open is not timeable on the binary; the implementer's -race test covers it and fails at 7912696a",
+      "headSha": "05b29be5dd913cc247b7632092bf74775a91c456",
+      "negativeControl": "with the grant revoked the registry routes answer 503 while every other route serves"
     },
     {
       "criterion": "Review round 2: a readmitted document restores the edits saved while its issue was closed, with no reload, once",
       "surface": "Dispatch browser suite harness, chromium and iphone, real Dispatch server and web build, the tester's own lane",
       "command": "throwaway probe: documentTransport sever, type a paragraph, close the issue, reload, release; then Reopen issue from the page (or PATCH backlog through the API); poll getArtifactText; type again; reload",
-      "observed": "4/4 passed: the read-only status shows and the server lacks the paragraph while closed; after the reopen the paragraph reaches the server, the status goes, the editor is editable and a new edit saves; after a reload each edit appears exactly once in the markdown",
+      "observed": "4/4 passed: the read-only status shows and the server lacks the paragraph while closed; after the reopen the paragraph reaches the server, the status goes, the editor is editable and a new edit saves; after a reload each edit appears exactly once in the markdown (round 4 at 7912696a; unchanged surface since)",
       "headSha": "7912696a2f26f91538f631c13f95fe07b3e84059",
       "negativeControl": "while the issue is closed the page shows 'can't be sent: this document is read-only' and the server's markdown does not contain the paragraph"
     },
@@ -32,7 +40,7 @@
       "criterion": "Review round 2: a registry Get after a write that ended between its claim and its index keys answers the session key's entry and its replacement",
       "surface": "the real listener on nats-server, with the ended write simulated by a raw KV put of session.<id> only (throwaway nats.go program)",
       "command": "PUT a (01:00) and c (03:00) for legion-tstleg-tst-31-tester; raw put session.half-a with a new title and session.half-b (02:00); GET sessions/half-a, half-b, half-c; PUT half-b to TST-32; retry the batch; GET the role and issue listings",
-      "observed": "half-a answers its new title with replaced_by half-c; half-b answers with replaced_by half-c; the retry completes both writes and the role listing reads c <- b <- a with a's new title",
+      "observed": "half-a answers its new title with replaced_by half-c; half-b answers with replaced_by half-c; the retry completes both writes and the role listing reads c <- b <- a with a's new title (round 4 at 7912696a; unchanged surface since)",
       "headSha": "7912696a2f26f91538f631c13f95fe07b3e84059",
       "negativeControl": "moving the half-written half-b to TST-32 is 409: its claim stands"
     },
@@ -40,7 +48,7 @@
       "criterion": "C1: on a closed issue a person's and an agent's new comment and message post; a new ask and a document edit stay 409 ISSUE_CLOSED; reopening still works",
       "surface": "real Dispatch server, Envoy listener and nats-server built at the head, Postgres 17 + pgvector, driven with curl",
       "command": "/legion/scratch/tmp/infra448-tester/c1.sh against :25777/:25020/:25222, database infra448_tester_live",
-      "observed": "201: person and agent comment and message, thread reply, reply to a resolved root (root reopened), reply on an open ask, reply on an anchored root, quote-anchored comment with occurrence, anchored mention (attempt 1 sent), both retries, both agent replies. 409 ISSUE_CLOSED: suggestion with and without a mention, new ask, comment edit, resolve, claim, document edit, named version; spec unchanged. Reopen 200 then ask 201",
+      "observed": "201: person and agent comment and message, thread reply, reply to a resolved root (root reopened), reply on an open ask, reply on an anchored root, quote-anchored comment with occurrence, anchored mention (attempt 1 sent), both retries, both agent replies. 409 ISSUE_CLOSED: suggestion with and without a mention, new ask, comment edit, resolve, claim, document edit, named version; spec unchanged. Reopen 200 then ask 201 (round 4 at 7912696a; unchanged surface since)",
       "headSha": "7912696a2f26f91538f631c13f95fe07b3e84059",
       "negativeControl": "round 1: Dispatch at main bc307fb5 answered the same person and agent comment, message and anchored comment 409 ISSUE_CLOSED"
     },
@@ -48,7 +56,7 @@
       "criterion": "C2: on a closed issue, a comment, a message, Reply, Retry and a margin comment post from the browser, including a spec whose issue closed while open and a spec reopened from its page",
       "surface": "Dispatch browser suite (packages/dispatch/e2e), chromium and iphone, the tester's own lane",
       "command": "bun run e2e -- --project=chromium --project=iphone closed-issue-posting, mention-composer, keyboard-agents-picker, phone-conversation, margin-composer-hold, phone, offline-edits; playwright --project=chromium margin, margin-thread-reply, margin-kind-switch, doc, document, overlapping-marks, keyboard-document, anchors, failed-room, collab-cursor, issue, paste-recovery",
-      "observed": "159 passed, 7 skipped (8.7m), all 14 closed-issue-posting rows and 10 offline-edits rows green; 85 passed, 3 skipped (8.1m)",
+      "observed": "159 passed, 7 skipped (8.7m), all 14 closed-issue-posting rows and 10 offline-edits rows green; 85 passed, 3 skipped (8.1m) (round 4 at 7912696a; unchanged surface since)",
       "headSha": "7912696a2f26f91538f631c13f95fe07b3e84059",
       "negativeControl": "closed-issue-posting failed 10/10 at main bc307fb5 (round 1); :278 and :321 failed at adb397f9 (round 2)"
     },
@@ -56,12 +64,12 @@
       "criterion": "C3: no remaining statement that a closed issue refuses comments or messages",
       "surface": "the repository at the head",
       "command": "bash /legion/scratch/tmp/infra448/c3.sh",
-      "observed": "only the five kept lines (repo field and document rebuild, the closed document room)",
+      "observed": "only the five kept lines (repo field and document rebuild, the closed document room) (round 4 at 7912696a; unchanged surface since)",
       "headSha": "7912696a2f26f91538f631c13f95fe07b3e84059",
       "negativeControl": "30 hits at base 135d22e0 (implementer's run)"
     }
   ],
-  "ci": "At 7912696a: PR Title 40387909076 success; Docs 40387176890 in progress; Tests 40387176786, Legion Envoy and Contracts 40387177104 and Worker Image 40387176721 queued. Not re-run by the tester.",
+  "ci": "At 05b29be5: Tests 40395674480, Legion Envoy and Contracts 40395674481, Docs 40395674611, Worker Image 40395674507 and PR Title queued. At 7912696a Worker Image 40387176721 failed and Tests was cancelled. Not re-run by the tester.",
   "observations": [
     "Until an ended write's retry, another session's derived replaced_by can name the wrong successor: with b's session key written and its role key not, a's Get answered replaced_by half-c rather than half-b; the retry corrects it. Display-only, transient.",
     "The Comment chord ($mod+Alt+m) runs only on an editable view; the bar's Comment button is the closed document's path (implement.json deviations)."
