@@ -188,6 +188,42 @@ func TestPanePairs(t *testing.T) {
 	}
 }
 
+// Under runtime.tmux.session_store postgres a pane is told Oh My Pi's two session variables, as a
+// pod's role container is: OMP_SESSION_STORAGE=sql and OMP_SESSION_SQL_DSN_FILE naming the file
+// that holds the session database's URL, never the URL itself. Under the files store it is told
+// neither, and its pairs are the files store's exactly.
+func TestPanePairsCarryTheSessionVariablesUnderASessionDatabaseAlone(t *testing.T) {
+	spec := testSpec()
+	files := secretFiles("/state", spec)
+	in := PaneInputs{StateDir: "/state", Workspace: "/state/workspaces/LEGION-43", DaemonURL: "http://127.0.0.1:13370", EnvoyURL: "http://127.0.0.1:9020"}
+	told := func(pairs []string) map[string]string {
+		values := map[string]string{}
+		for i := 1; i < len(pairs); i += 2 {
+			name, value, _ := strings.Cut(pairs[i], "=")
+			values[name] = value
+		}
+		return values
+	}
+
+	onFiles := panePairs(spec, in, files)
+	for _, name := range []string{"OMP_SESSION_STORAGE", "OMP_SESSION_SQL_DSN_FILE"} {
+		if value, ok := told(onFiles)[name]; ok {
+			t.Errorf("a pane under the files store is told %s=%s", name, value)
+		}
+	}
+
+	in.SessionDSNFile = "/etc/legion/session-dsn"
+	inDatabase := panePairs(spec, in, files)
+	values := told(inDatabase)
+	if values["OMP_SESSION_STORAGE"] != "sql" || values["OMP_SESSION_SQL_DSN_FILE"] != "/etc/legion/session-dsn" {
+		t.Errorf("a pane under a session database is told OMP_SESSION_STORAGE=%q, OMP_SESSION_SQL_DSN_FILE=%q; want sql and the URL file",
+			values["OMP_SESSION_STORAGE"], values["OMP_SESSION_SQL_DSN_FILE"])
+	}
+	if len(inDatabase) != len(onFiles)+4 {
+		t.Errorf("a pane under a session database is told %d pairs, want the files store's %d and the two session variables", len(inDatabase)/2, len(onFiles)/2)
+	}
+}
+
 // The tmux runtime never reads spec.Plugins: a pane always resumes on the plugin installed on
 // the daemon's host, which the boot gate already holds to the daemon's contract, so a stale-plugin
 // relaunch (LEGION-164) needs nothing of it here. panePairs and secretFiles — what builds the
@@ -384,6 +420,7 @@ func TestRuntimeOwnedIsWhatEveryPaneIsToldByTheRuntime(t *testing.T) {
 		EnvoyURL: "http://127.0.0.1:9020", NATSURLs: []string{"nats://a:4222"},
 		DispatchURL: "http://127.0.0.1:18766", DispatchTokenFile: "/state/secrets/" + runtime.DispatchTokenFileName,
 		GHOwnersDir: "/state/secrets/legion-omp-legion-43-tester-gh", GHDefault: "acme", GH: "/usr/bin/gh",
+		SessionDSNFile: "/etc/legion/session-dsn",
 	}
 	told := map[string]bool{}
 	pairs := panePairs(spec, in, secretFiles("/state", spec))

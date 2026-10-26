@@ -26,6 +26,11 @@
 
 ### Changed
 
+- The plugin declares daemon API contract 38 in `package.json`'s `legion.daemonApiVersion`
+  (INFRA-204): `GET /legion/v1/state` carries `questionsForController`, the questions to stopped
+  agents the daemon's answer loop passed to the controller in the last seven days, always emitted,
+  so the MCP server's strict state reader admits the field and nothing this plugin reads or writes
+  moved; a session of it registers with a daemon at 38.
 - The plugin declares daemon API contract 37 in `package.json`'s `legion.daemonApiVersion`
   (INFRA-80): under the Kubernetes runtime an issue's disk is a generic ephemeral volume its pod
   owns, created with the pod and deleted with it, so the `workspace-init provision` container is

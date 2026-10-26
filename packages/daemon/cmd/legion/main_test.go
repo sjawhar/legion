@@ -1418,3 +1418,46 @@ func TestPlainStateNamesTheClaimsNothingWillWake(t *testing.T) {
 		})
 	}
 }
+
+// An operator reading plain `legion state` is told the questions to stopped agents the daemon
+// passed to the controller in the last seven days, newest first, each with when, the agent's issue,
+// role and session, who asked, where and why; with none the line says so.
+func TestPlainStateListsTheQuestionsForTheController(t *testing.T) {
+	daemon := `"daemon":{"project":"LEGION","schemaVersion":6,"boots":1,"firstBootAt":"2026-09-23T00:00:00Z","startedAt":"2026-09-23T00:00:00Z"},` +
+		`"admission":{"cap":2,"active":[],"waiting":[]},"issues":{},"pendingStatusWrites":[]`
+	for _, tc := range []struct {
+		name, questions, want string
+	}{
+		{
+			name: "two",
+			questions: `[{"id":"q-2","issue":"LEGION-9","role":"tester","session":"ses_tester","asker":"session:ses_asker (LEGION-9 implementer)",` +
+				`"ref":"envoy:evt-2","reason":"answer_seconds","passedAt":"2026-10-26T11:00:00Z"},` +
+				`{"id":"q-1","issue":"LEGION-8","role":"reviewer","session":"ses_reviewer","asker":"user:octocat",` +
+				`"ref":"dispatch://LEGION-8/message/m-1","reason":"not_answered","passedAt":"2026-10-20T09:30:00Z"}]`,
+			want: "questions for the controller: 2 in the last 7 days, newest first\n" +
+				"  2026-10-26T11:00:00Z LEGION-9 tester ses_tester: from session:ses_asker (LEGION-9 implementer) at envoy:evt-2, answer_seconds (question q-2)\n" +
+				"  2026-10-20T09:30:00Z LEGION-8 reviewer ses_reviewer: from user:octocat at dispatch://LEGION-8/message/m-1, not_answered (question q-1)\n",
+		},
+		{name: "none", questions: `[]`, want: "questions for the controller: none in the last 7 days\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			served := "{" + daemon + `,"questionsForController":` + tc.questions + "}"
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(served))
+			}))
+			defer server.Close()
+			t.Chdir(t.TempDir())
+			t.Setenv("LEGION_DAEMON_URL", server.URL)
+			t.Setenv("LEGION_ISSUE", "")
+
+			var out, errb bytes.Buffer
+			if code := run(context.Background(), []string{"legion", "state"}, &out, &errb); code != 0 {
+				t.Fatalf("legion state = %d, stderr %q", code, errb.String())
+			}
+			if !strings.Contains(out.String(), tc.want) {
+				t.Fatalf("legion state printed %q, want the lines %q", out.String(), tc.want)
+			}
+		})
+	}
+}

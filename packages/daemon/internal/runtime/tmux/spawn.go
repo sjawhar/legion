@@ -17,6 +17,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/ghconfig"
+	"github.com/sjawhar/legion/daemon/internal/ompsessions"
 	"github.com/sjawhar/legion/daemon/internal/podsafety"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/shellprefix"
@@ -52,6 +53,7 @@ var runtimeOwned = map[string]bool{
 	"GH_CONFIG_DIR": true, "GH_TOKEN": true, "GITHUB_TOKEN": true, "GH_HOST": true,
 	"LEGION_GH_OWNERS_DIR": true, "LEGION_GH_PATH": true,
 	"PI_SHELL_PREFIX": true, "PI_CONFIG_FILES": true,
+	ompsessions.StorageVariable: true, ompsessions.DSNFileVariable: true,
 }
 
 // validateSpawnSpec refuses a spec the runtime cannot honour exactly, before anything touches the
@@ -152,6 +154,12 @@ type PaneInputs struct {
 	// GHOwnersDir is none, and the pane is then told no gh variable at all: every pane of a runtime
 	// whose GitHubCredential function is nil.
 	GHOwnersDir, GHDefault, GH string
+	// SessionDSNFile is the file holding the session database's postgres:// URL under
+	// runtime.tmux.session_store postgres (Options.SessionDSNFile), and the pane is then told
+	// OMP_SESSION_STORAGE=sql and OMP_SESSION_SQL_DSN_FILE naming it, so its Oh My Pi keeps its
+	// session as a row of that database's session table; "" is the files store, and the pane is
+	// told neither.
+	SessionDSNFile string
 }
 
 // panePairs are a pane's -e pairs, in one order: the variables every Legion pane is told (the
@@ -159,14 +167,15 @@ type PaneInputs struct {
 // GH_CONFIG_DIR, its default owner's directory of gh files, with GH_TOKEN, GITHUB_TOKEN and GH_HOST
 // set to the empty string, which gh ignores, so no token in the daemon's environment outranks the
 // file — a non-empty GH_TOKEN would — then LEGION_GH_OWNERS_DIR, the bundle's root, and
-// LEGION_GH_PATH, the real gh the `legion gh` wrapper first on the pane's PATH runs;
+// LEGION_GH_PATH, the real gh the `legion gh` wrapper first on the pane's PATH runs; under a
+// session database, Oh My Pi's two session variables, as a pod's role container is told them;
 // PI_SHELL_PREFIX, which keeps this daemon's launcher directory (its legion and gh) first in the
 // agent's bash tool; PI_CONFIG_FILES, which names the turn-scoping overlay writeTurnScopeOverlay
 // writes (podsafety.TurnScopeOverlay) — the one settings overlay a pane gets at all), the four XDG
 // base directories under `<state_dir>/home`, the spec's own variables sorted, then a `<NAME>_FILE`
 // pointer per secret file. PATH is never among them — tmux would replace it (LEGION-91) — and
-// neither is any secret's value. No other tool path is told: a pane's git and jj are whatever its
-// PATH, the daemon's, gives.
+// neither is any secret's value, the session database's URL included. No other tool path is told:
+// a pane's git and jj are whatever its PATH, the daemon's, gives.
 func panePairs(spec runtime.SpawnSpec, in PaneInputs, files []runtime.SecretFile) []string {
 	var pairs []string
 	add := func(name, value string) { pairs = append(pairs, "-e", name+"="+value) }
@@ -193,6 +202,10 @@ func panePairs(spec runtime.SpawnSpec, in PaneInputs, files []runtime.SecretFile
 		add("GH_HOST", "")
 		add("LEGION_GH_OWNERS_DIR", in.GHOwnersDir)
 		add("LEGION_GH_PATH", in.GH)
+	}
+	if in.SessionDSNFile != "" {
+		add(ompsessions.StorageVariable, ompsessions.SQLStorage)
+		add(ompsessions.DSNFileVariable, in.SessionDSNFile)
 	}
 	add("PI_SHELL_PREFIX", shellprefix.For(workerbin.LauncherDir(in.StateDir)))
 	add("PI_CONFIG_FILES", filepath.Join(in.StateDir, podsafety.TurnScopeFile))
@@ -301,8 +314,10 @@ func (r *Runtime) Spawn(ctx context.Context, spec runtime.SpawnSpec) (runtime.Lo
 // Resume starts the agent prev's claim recorded, again, from spec.ResumeSessionFile — after
 // waiting, up to the stop grace, for prev's incarnation to be gone: one claim, one process. A nil
 // prev means no previous incarnation is known (a claim suspended across a daemon restart) and
-// there is nothing to wait for. A session file that is missing is a refusal, never a fresh agent:
-// the claim resumes the agent it recorded or none (assertResumeSessionFile, runtime.ts).
+// there is nothing to wait for. A session that is missing — a file that is not there, or under a
+// session database a row the session table lacks (recordedSessionGone) — is a refusal, never a
+// fresh agent: the claim resumes the agent it recorded or none (assertResumeSessionFile,
+// runtime.ts).
 func (r *Runtime) Resume(ctx context.Context, prev *runtime.Locator, spec runtime.SpawnSpec) (runtime.Locator, error) {
 	if spec.ResumeSessionFile == "" {
 		return runtime.Locator{}, fmt.Errorf("resume %s: no session file to resume from", spec.Claim)
@@ -369,16 +384,17 @@ func (r *Runtime) launch(ctx context.Context, spec runtime.SpawnSpec) (runtime.L
 		return runtime.Locator{}, fmt.Errorf("spawn %s: %w", spec.Claim, err)
 	}
 	if spec.ResumeSessionFile != "" {
-		if _, err := os.Stat(spec.ResumeSessionFile); err != nil {
-			if errors.Is(err, os.ErrNotExist) {
-				verb := "respawning"
-				if claim.IsTreeArchitect(spec.Role, spec.Issue, spec.Tree) {
-					verb = "resurrecting"
-				}
-				return runtime.Locator{}, fmt.Errorf("Refusing to start %s fresh while %s: recorded %s session file is missing: %s",
-					spec.Issue, verb, runtime.Backends[backend].Name, spec.ResumeSessionFile)
-			}
+		gone, err := r.recordedSessionGone(ctx, backend, spec.ResumeSessionFile)
+		if err != nil {
 			return runtime.Locator{}, fmt.Errorf("spawn %s: %w", spec.Claim, err)
+		}
+		if gone != "" {
+			verb := "respawning"
+			if claim.IsTreeArchitect(spec.Role, spec.Issue, spec.Tree) {
+				verb = "resurrecting"
+			}
+			return runtime.Locator{}, fmt.Errorf("Refusing to start %s fresh while %s: recorded %s %s: %s",
+				spec.Issue, verb, runtime.Backends[backend].Name, gone, spec.ResumeSessionFile)
 		}
 		r.log.Info("tmux runtime: resuming a recorded "+runtime.Backends[backend].Name+" session", "claim", spec.Claim, "backend", backend, "session", spec.ResumeSessionFile)
 	}
@@ -420,8 +436,47 @@ func (r *Runtime) launch(ctx context.Context, spec runtime.SpawnSpec) (runtime.L
 	pairs := panePairs(spec, PaneInputs{
 		StateDir: r.stateDir, Workspace: workDir, DaemonURL: r.daemonURL, EnvoyURL: r.envoyURL, NATSURLs: r.natsURLs,
 		DispatchURL: r.dispatchURL, DispatchTokenFile: r.dispatchToken, GHOwnersDir: ghRoot, GHDefault: ghDefault, GH: r.gh,
+		SessionDSNFile: r.sessionDSNFile,
 	}, files)
 	return r.openPane(ctx, spec, ghWriter, paneCommand(append(pairs, backendPairs...), command))
+}
+
+// sessionLookupTimeout bounds a resume's look-up of its session in the session table: connecting
+// to the database and reading the row.
+const sessionLookupTimeout = 30 * time.Second
+
+// recordedSessionGone is how the session a resume names is gone, "" when it is there, read where
+// the backend's harness keeps it. Under a session database (Options.SessionDSNFile) an Oh My Pi
+// session is a row of the session table, keyed by the path its file would have had, and only a row
+// is there (ompsessions.Written), as a pod's launcher holds a resume (internal/launcher); every
+// other session, a Claude Code transcript under either store, is a file. An error is a look-up
+// that could not say: a file it could not stat, a database it could not reach or read.
+func (r *Runtime) recordedSessionGone(ctx context.Context, backend runtime.Backend, file string) (string, error) {
+	if r.sessionDSNFile == "" || backend != runtime.BackendOmp {
+		_, err := os.Stat(file)
+		switch {
+		case errors.Is(err, os.ErrNotExist):
+			return "session file is missing", nil
+		case err != nil:
+			return "", err
+		}
+		return "", nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, sessionLookupTimeout)
+	defer cancel()
+	conn, err := ompsessions.Connect(ctx, r.sessionDSNFile)
+	if err != nil {
+		return "", fmt.Errorf("resume session %s: %w", file, err)
+	}
+	defer conn.Close(context.Background())
+	_, ok, err := ompsessions.Written(ctx, conn, file)
+	switch {
+	case err != nil:
+		return "", err
+	case !ok:
+		return "session is not in the session table", nil
+	}
+	return "", nil
 }
 
 // openPane puts the pane on the server under the launch lock: into the window of a pane of the

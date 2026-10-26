@@ -649,6 +649,42 @@ test("the state golden names the held lifecycle rows, and the list cannot be dro
   expect(LegionStateResponse.safeParse(dropped).success).toBeFalse();
 });
 
+// The questions passed to the controller (contract 38): the golden carries the question LEGION-207's
+// stopped tester could not answer, a state with none carries an empty list rather than none, a
+// question names its role and when it was passed, and the list cannot be dropped: a plugin from
+// before the field refuses the state, which is what the bump is for.
+test("the state golden lists the questions passed to the controller, and the list cannot be dropped", () => {
+  const state = LegionStateResponse.parse(fixture("state.json"));
+  expect(state.questionsForController).toEqual([
+    {
+      id: "5f0c2a9e7b14d3866a1e0c4b9d2f7a35",
+      issue: "LEGION-207",
+      role: "tester",
+      session: "ses_tester_207",
+      asker: "user:octocat",
+      ref: "dispatch://LEGION-207/message/m-4411",
+      reason: "not_answered",
+      passedAt: "2026-09-22T09:14:03Z",
+    },
+  ]);
+  expect(LegionStateResponse.parse(fixture("state-stage3.json")).questionsForController).toEqual(
+    []
+  );
+
+  const unrolled = fixture("state.json") as { questionsForController: Record<string, unknown>[] };
+  unrolled.questionsForController = [{ ...unrolled.questionsForController[0], role: "controller" }];
+  expect(LegionStateResponse.safeParse(unrolled).success).toBeFalse();
+
+  const undated = fixture("state.json") as { questionsForController: Record<string, unknown>[] };
+  const { passedAt: _, ...withoutPassedAt } = undated.questionsForController[0] ?? {};
+  undated.questionsForController = [withoutPassedAt];
+  expect(LegionStateResponse.safeParse(undated).success).toBeFalse();
+
+  const dropped = fixture("state.json") as Record<string, unknown>;
+  delete dropped.questionsForController;
+  expect(LegionStateResponse.safeParse(dropped).success).toBeFalse();
+});
+
 // The daemon's resolved legion.yaml (contract 35): the golden carries the file's `max_fix_attempts`
 // and `worker_boot_timeout_seconds` and its GitHub Apps' ids and installations with no key, a
 // Stage 3 state carries the defaults, the two typed keys are positive integers, the rest rides

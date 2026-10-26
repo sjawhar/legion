@@ -7,6 +7,13 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 
 ### Added
 
+- Daemon API contract 38 (INFRA-204): `legion state` and the controller's `read_state` carry
+  `questionsForController`, every question to a stopped agent that the daemon's answer loop passed
+  to the controller in the last seven days (`id`, `issue`, `role`, `session`, `asker`, `ref`,
+  `reason`, `passedAt`), newest first and at most 100. The daemon's `agent-question` notice on the
+  controller topic is a live wake only, so a controller that starts later reads what it missed
+  here. Always emitted, so a plugin built before it refuses the state. Install this release with a
+  `legion` built from the same commit.
 - Daemon API contract 37 (INFRA-80): under the Kubernetes runtime an issue's disk is a generic
   ephemeral volume its own pod owns, created with the pod and deleted with it, so an issue pod's
   `workspace-init provision` container is no longer told `LEGION_EXPECT_ISSUE_VOLUME`, and the

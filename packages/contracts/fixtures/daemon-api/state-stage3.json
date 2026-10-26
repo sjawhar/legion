@@ -85,5 +85,6 @@
       "decided": {}
     },
     "worker_backends": {}
-  }
+  },
+  "questionsForController": []
 }

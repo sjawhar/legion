@@ -14,14 +14,14 @@ import (
 // the deployment and anything else that reaches the daemon's API port; the block therefore leaves
 // out every credential, every source of one (a secretsd or Secret key, a key command) and every
 // path of a file holding one, and carries only what every pod may already know. Of the strings it
-// carries, the four address keys (`daemon_url`, `envoy_url`, `nats_urls`, `dispatch_url`) ride
-// endpointOf, which masks their userinfo as `xxxxx@`; a `runtime.kubernetes.plugins` source in
-// URL form rides it too (pluginSourceOf), losing its userinfo, query and fragment; and
-// `runtime.kubernetes.agent_secrets.url` rides as written, since the loader refuses userinfo, a
-// path, a query and a fragment on it. Every other string is a name, a path, a quantity or a
-// version, never a URL. SettingsOf is an allowlist: it names each field it emits, and a
-// `config.Config` field added without a place in settings_test.go's emitted or excluded table
-// fails TestSettingsOfClassifiesEveryConfigField.
+// carries, the four address keys (`daemon_url`, `envoy_url`, `nats_urls`, `dispatch_url`) and each
+// `answers.providers.<provider>.base_url` ride endpointOf, which masks their userinfo as `xxxxx@`; a
+// `runtime.kubernetes.plugins` source in URL form rides it too (pluginSourceOf), losing its
+// userinfo, query and fragment; and `runtime.kubernetes.agent_secrets.url` rides as written, since
+// the loader refuses userinfo, a path, a query and a fragment on it. Every other string is a name,
+// a path, a quantity or a version, never a URL. SettingsOf is an allowlist: it names each field it
+// emits, and a `config.Config` field added without a place in settings_test.go's emitted or
+// excluded table fails TestSettingsOfClassifiesEveryConfigField.
 type Settings struct {
 	Project string `json:"project"`
 	Port    int    `json:"port"`
@@ -75,12 +75,24 @@ type Settings struct {
 	// WorkerBackends is `worker_backends`, the roles that run on a backend other than Oh My Pi by
 	// role, `{}` while the file names none.
 	WorkerBackends map[string]string `json:"worker_backends"`
+	// Answers is absent while the file sets no `answers` block, the loop then off.
+	Answers *AnswersSettings `json:"answers,omitempty"`
 }
 
-// RuntimeSettings is `runtime`: its name, and the kubernetes block under that runtime alone.
+// RuntimeSettings is `runtime`: its name, and the block of that runtime alone. Tmux is absent under
+// the tmux runtime's files store, the default, so the scalar `runtime: tmux` shows what it always
+// has.
 type RuntimeSettings struct {
 	Name       string              `json:"name"`
 	Kubernetes *KubernetesSettings `json:"kubernetes,omitempty"`
+	Tmux       *TmuxSettings       `json:"tmux,omitempty"`
+}
+
+// TmuxSettings is the settled `runtime.tmux` block without `session_dsn_file`, the path of the file
+// holding the session database's URL, password and all.
+type TmuxSettings struct {
+	// SessionStore is the store's kind, "postgres": the files store shows no block.
+	SessionStore string `json:"session_store"`
 }
 
 // KubernetesSettings is the settled `runtime.kubernetes` block without its credential file
@@ -203,13 +215,52 @@ type CapabilitiesSettings struct {
 	Decided map[string]string `json:"decided"`
 }
 
+// AnswersSettings is `answers` without its credentials: each provider's base URL and which key
+// source the file names, never the key, the command that prints it or the path of its file; the
+// prices; and the settled bounds. The conversation store's connection (`conversation_store`, the
+// path of a file holding the store's URL or the login the daemon signs in as) is left out whole.
+type AnswersSettings struct {
+	Providers map[string]AnswerProviderSettings `json:"providers"`
+	Prices    map[string]AnswerPriceSettings    `json:"prices"`
+	Bounds    AnswerBoundsSettings              `json:"bounds"`
+}
+
+// AnswerProviderSettings is one `answers.providers.<provider>` entry: its base URL, and
+// `api_key_source`, the key the file names its key with (`api_key_file` or `api_key_command`).
+type AnswerProviderSettings struct {
+	BaseURL      string `json:"base_url"`
+	APIKeySource string `json:"api_key_source"`
+}
+
+// AnswerPriceSettings is one model's `answers.prices` entry, USD per million tokens.
+type AnswerPriceSettings struct {
+	Input      float64 `json:"input"`
+	Output     float64 `json:"output"`
+	CacheWrite float64 `json:"cache_write"`
+	CacheRead  float64 `json:"cache_read"`
+}
+
+// AnswerBoundsSettings is `answers.bounds`, every bound filled, the durations in whole seconds as
+// the file takes them.
+type AnswerBoundsSettings struct {
+	AnswerSeconds int     `json:"answer_seconds"`
+	ModelCalls    int     `json:"model_calls"`
+	OutputTokens  int     `json:"output_tokens"`
+	GHSeconds     int     `json:"gh_seconds"`
+	GHOutputChars int     `json:"gh_output_chars"`
+	GHCalls       int     `json:"gh_calls"`
+	Concurrent    int     `json:"concurrent"`
+	DailyUSD      float64 `json:"daily_usd"`
+}
+
 // SettingsOf is cfg as the state shows it: every setting of the resolved file the audience of an
 // unauthenticated route may read, and no credential, credential source or credential file path
-// (Settings). Of the URLs it emits, the four address keys ride endpointOf and a plugin source in
-// URL form rides pluginSourceOf, so no userinfo reaches the wire; `agent_secrets.url` is the one
-// URL that rides as written, which the loader has made safe by refusing userinfo, a path, a query
-// and a fragment on it (internal/config/kubernetes.go, readAgentSecrets). Every slice and map it
-// emits is non-nil, so the state marshals no `null` inside it.
+// (Settings). Of the URLs it emits, the four address keys and each answer provider's base URL ride
+// endpointOf and a plugin source in URL form rides pluginSourceOf, so no userinfo reaches the wire;
+// `agent_secrets.url` is the one URL that rides as written, which the loader has made safe by
+// refusing userinfo, a path, a query and a fragment on it (internal/config/kubernetes.go,
+// readAgentSecrets). Every slice and map it emits is non-nil, so the state marshals no `null`
+// inside it.
 func SettingsOf(cfg config.Config) Settings {
 	settings := Settings{
 		Project:                                 cfg.Project,
@@ -217,7 +268,7 @@ func SettingsOf(cfg config.Config) Settings {
 		Bind:                                    cfg.Bind,
 		AdvertiseHost:                           cfg.AdvertiseHost,
 		StateDir:                                cfg.StateDir,
-		Runtime:                                 RuntimeSettings{Name: cfg.Runtime.Name, Kubernetes: kubernetesSettingsOf(cfg.Runtime.Kubernetes)},
+		Runtime:                                 runtimeSettingsOf(cfg.Runtime),
 		AdmissionCap:                            cfg.AdmissionCap,
 		DaemonURL:                               endpointOf(cfg.DaemonURL),
 		WorkerStreamPort:                        cfg.WorkerStreamPort,
@@ -279,14 +330,54 @@ func SettingsOf(cfg config.Config) Settings {
 	for role, backend := range cfg.WorkerBackends {
 		settings.WorkerBackends[string(role)] = string(backend)
 	}
+	settings.Answers = answersSettingsOf(cfg.Answers)
 	return settings
 }
 
-// kubernetesSettingsOf is block as the state shows it, nil under another runtime.
-func kubernetesSettingsOf(block *config.Kubernetes) *KubernetesSettings {
-	if block == nil {
+// answersSettingsOf is answers as the state shows it, nil while the loop is off: each base URL
+// rides endpointOf, and each credential is the name of its source alone.
+func answersSettingsOf(answers *config.Answers) *AnswersSettings {
+	if answers == nil {
 		return nil
 	}
+	bounds := answers.Bounds
+	settings := &AnswersSettings{
+		Providers: make(map[string]AnswerProviderSettings, len(answers.Providers)),
+		Prices:    make(map[string]AnswerPriceSettings, len(answers.Prices)),
+		Bounds: AnswerBoundsSettings{
+			AnswerSeconds: seconds(bounds.Answer), ModelCalls: bounds.ModelCalls, OutputTokens: bounds.OutputTokens,
+			GHSeconds: seconds(bounds.GHCall), GHOutputChars: bounds.GHOutputChars, GHCalls: bounds.GHCalls,
+			Concurrent: bounds.Concurrent, DailyUSD: bounds.DailyUSD,
+		},
+	}
+	for provider, endpoint := range answers.Providers {
+		source := "api_key_command"
+		if endpoint.Credential.File != "" {
+			source = "api_key_file"
+		}
+		settings.Providers[string(provider)] = AnswerProviderSettings{BaseURL: endpointOf(endpoint.BaseURL), APIKeySource: source}
+	}
+	for model, price := range answers.Prices {
+		settings.Prices[model] = AnswerPriceSettings{Input: price.Input, Output: price.Output, CacheWrite: price.CacheWrite, CacheRead: price.CacheRead}
+	}
+	return settings
+}
+
+// runtimeSettingsOf is rt as the state shows it: its name, and the kubernetes block under that
+// runtime, or under tmux the tmux block's session store when it is a database.
+func runtimeSettingsOf(rt config.Runtime) RuntimeSettings {
+	settings := RuntimeSettings{Name: rt.Name}
+	switch {
+	case rt.Kubernetes != nil:
+		settings.Kubernetes = kubernetesSettingsOf(rt.Kubernetes)
+	case rt.Tmux.InDatabase():
+		settings.Tmux = &TmuxSettings{SessionStore: rt.Tmux.SessionStore()}
+	}
+	return settings
+}
+
+// kubernetesSettingsOf is block as the state shows it.
+func kubernetesSettingsOf(block *config.Kubernetes) *KubernetesSettings {
 	settings := &KubernetesSettings{
 		Namespace:    block.Namespace,
 		Image:        block.Image,

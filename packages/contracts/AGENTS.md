@@ -19,6 +19,7 @@ the Dispatch specs behind the `dispatch` command:
 | Task | Location | Notes |
 | --- | --- | --- |
 | Envelope and subject contracts | `src/envelope.ts`, `src/subject.ts` | canonical TypeScript surface |
+| Legion agent hand-off | `src/legion-handoff.ts` | `LegionAgentHandoffSchema` (strict: `original_topic`, `target_session`, `role_token`, `project`, `envelope`) is what the Envoy listener publishes on `legionAgentHandoffSubject(project, session)` (`notifications.legion.<project>.agents.<session>`) for a stopped Legion agent's message; hand-written, mirrored in Go as `intake.Handoff` (`packages/daemon/internal/intake/handoff.go`), which the daemon's answer loop consumes. Change both together |
 | Dispatch tool specifications | `src/dispatch-tools.ts`, `src/tool-schema.ts` | builders over `zodSchemaApi(hostZod)` |
 | Go generation | `scripts/gen-go.ts` | writes the Envelope Go contract and the shared constants into two files, one per Go module (`bun run gen:go`); `bun run check:go` (`--check`) compares a fresh render of each with its committed file without writing either, naming the one it finds stale, and CI runs it in place of regenerating |
 | Generated Go contract | `packages/envoy/internal/contracts/generated.go` | generated; do not hand-edit |

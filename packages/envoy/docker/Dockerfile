@@ -37,7 +37,7 @@ RUN cd packages/contracts && bun run gen:go
 RUN cd packages/dispatch && bun run build:web
 
 # Go version must match go.mod.
-FROM mirror.gcr.io/library/golang:1.27.1-alpine AS build
+FROM mirror.gcr.io/library/golang:1.27.3-alpine AS build
 
 WORKDIR /src
 

@@ -320,6 +320,12 @@ jobs:
       # without one (.github/actions/install-uv).
       - uses: ./.github/actions/install-uv
 
+      # internal/conversation/claude's contract tests resume sessions with the pinned Claude Code
+      # (2.1.310, the action's CLAUDE_CODE_VERSION and the package's PinnedVersion) against a
+      # stand-in model endpoint, and refuse on GitHub Actions without one
+      # (.github/actions/install-claude-code, through the Bun set up above).
+      - uses: ./.github/actions/install-claude-code
+
       # The daemon's NATS tests start testnats.Image and, for its grant test, Envoy's HubImage
       # (packages/envoy/testnatsimages), pulled first for the reason the action gives.
       - name: Pull the NATS test container images

@@ -14557,6 +14557,14 @@ function agentSubject(session) {
   return `${AGENT_TOPIC_PREFIX}${session}`;
 }
 
+// ../contracts/src/legion-handoff.ts
+var LegionAgentHandoffSchema = exports_external.object({
+  original_topic: exports_external.string().min(1),
+  target_session: exports_external.string().min(1),
+  role_token: exports_external.string().min(1),
+  project: exports_external.string().min(1),
+  envelope: EnvelopeSchema
+}).strict();
 // ../contracts/src/legion-roles.ts
 var LEGION_ROLES = [
   "architect",

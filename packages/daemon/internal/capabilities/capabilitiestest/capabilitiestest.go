@@ -17,7 +17,7 @@ var binaries = []string{"gopls", "typescript-language-server", "pyright-langserv
 // --version` a Chromium one.
 const BinaryScript = `#!/bin/sh
 case "$1" in
-version) echo "go version go1.27.1 linux/amd64" ;;
+version) echo "go version go1.27.3 linux/amd64" ;;
 --version) echo "Chromium 141.0.0.0" ;;
 esac
 `

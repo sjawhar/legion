@@ -13,6 +13,14 @@ func OMP(t *testing.T) string {
 	return binary(t, "LEGION_TEST_OMP", "Oh My Pi")
 }
 
+// Claude is the pinned Claude Code binary LEGION_TEST_CLAUDE names
+// (.github/actions/install-claude-code, which installs the release
+// conversation/claude.PinnedVersion names).
+func Claude(t *testing.T) string {
+	t.Helper()
+	return binary(t, "LEGION_TEST_CLAUDE", "Claude Code")
+}
+
 // UV is the uv the worker image ships, which LEGION_TEST_UV names (.github/actions/install-uv,
 // from worker.Dockerfile's ARG UV_VERSION and ARG UV_SHA256).
 func UV(t *testing.T) string {

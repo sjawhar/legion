@@ -1,4 +1,4 @@
-package main
+package ghroute
 
 import (
 	"bytes"
@@ -145,7 +145,7 @@ func (s *selectors) fromCommand(cmd *ghCommand, parsed ghArgs) error {
 // whose quirk reads every remote counts them whatever names its repository. So an option or a
 // second repository naming one owner while gh acts on another's repository names two owners, and
 // is refused.
-func (s *selectors) fromOwnRepository(cmd *ghCommand, parsed ghArgs, env map[string]string, remotes func() ([]ghRemote, error)) error {
+func (s *selectors) fromOwnRepository(cmd *ghCommand, parsed ghArgs, env map[string]string, remotes func() ([]Remote, error)) error {
 	if quirkOf(cmd.path).readsAllRemotes {
 		return s.fromWorkingDirectory(remotes)
 	}
@@ -403,16 +403,16 @@ func checkedOwner(owner, what string, api bool) (string, error) {
 	return lower, nil
 }
 
-// ghRemote is one setting of the working directory's git remotes that gh reads to find the
+// Remote is one setting of the working directory's git remotes that gh reads to find the
 // repository of a command naming none: a remote's fetch or push URL as `git remote -v` prints it,
 // or its gh-resolved setting (`gh repo set-default`'s), "base" for the remote's own repository or
 // [HOST/]OWNER/REPO for another.
-type ghRemote struct {
+type Remote struct {
 	name, url, resolved string
 }
 
 // what is the remote setting as a refusal names it.
-func (r ghRemote) what() string {
+func (r Remote) what() string {
 	if r.resolved != "" {
 		return fmt.Sprintf("remote.%s.gh-resolved %s", r.name, r.resolved)
 	}
@@ -459,7 +459,7 @@ func ghParseGitURL(raw string) (*url.URL, error) {
 // says why a setting is one this cannot read: a URL gh's parser refuses, an ssh remote on another
 // host, which gh may read as an alias of github.com from ssh's configuration, and a github.com one
 // naming no OWNER/REPO whose owner is a GitHub login.
-func (r ghRemote) owner() (owner, why string) {
+func (r Remote) owner() (owner, why string) {
 	if r.resolved != "" {
 		if r.resolved == "base" {
 			return "", ""
@@ -493,7 +493,7 @@ func (r ghRemote) owner() (owner, why string) {
 // those remotes, an `upstream` before an `origin` and a gh-resolved one before either, so every
 // one counts, and a workspace whose remotes name two owners names two. A remote this cannot read
 // is refused; a working directory that is no git repository names none.
-func (s *selectors) fromWorkingDirectory(remotes func() ([]ghRemote, error)) error {
+func (s *selectors) fromWorkingDirectory(remotes func() ([]Remote, error)) error {
 	advice := "name the repository with -R <owner>/<repo>"
 	if s.api {
 		advice = "name it in the endpoint, repos/<owner>/<repo>/…"
@@ -526,19 +526,19 @@ var gitRemoteLine = regexp.MustCompile(`^([^\t]+)\t([^\t\n\f\r ]+) \((fetch|push
 // whitespace-preceded `(fetch)` or `(push)`, and trims the name and URL it captures.
 var ghRemoteLine = regexp.MustCompile(`(.+)\s+(.+)\s+\((push|fetch)\)`)
 
-// readGitRemotes is the working directory's git remotes as gh reads them, with git itself: every
+// ReadGitRemotes is the working directory's git remotes as gh reads them, with git itself: every
 // fetch and push URL `git remote -v` prints, a partial clone's fetch line included (git prints the
 // remote's filter after it, `(fetch) [blob:none]`), and every remote's gh-resolved setting; none
 // for a directory that is no git repository, or where no git runs, since gh then reads none either.
 // A line is read only when it has git's shape (gitRemoteLine, a filter on a fetch line alone) and
 // gh's own reading of it (ghRemoteLine) names the same remote, URL and kind; any other line is
 // refused, since gh could act on a repository this reading never counted.
-func readGitRemotes() ([]ghRemote, error) {
+func ReadGitRemotes() ([]Remote, error) {
 	lines, err := gitLines("remote", "-v")
 	if err != nil {
 		return nil, err
 	}
-	var remotes []ghRemote
+	var remotes []Remote
 	for _, line := range lines {
 		git := gitRemoteLine.FindStringSubmatch(line)
 		gh := ghRemoteLine.FindStringSubmatch(line)
@@ -546,7 +546,7 @@ func readGitRemotes() ([]ghRemote, error) {
 			strings.TrimSpace(gh[1]) != git[1] || strings.TrimSpace(gh[2]) != git[2] || gh[3] != git[3] {
 			return nil, fmt.Errorf("git remote -v printed %q", line)
 		}
-		remotes = append(remotes, ghRemote{name: git[1], url: git[2]})
+		remotes = append(remotes, Remote{name: git[1], url: git[2]})
 	}
 	if lines == nil {
 		return nil, nil
@@ -558,7 +558,7 @@ func readGitRemotes() ([]ghRemote, error) {
 	for _, line := range resolved {
 		key, value, _ := strings.Cut(line, " ")
 		name := strings.TrimSuffix(strings.TrimPrefix(key, "remote."), ".gh-resolved")
-		remotes = append(remotes, ghRemote{name: name, resolved: value})
+		remotes = append(remotes, Remote{name: name, resolved: value})
 	}
 	return remotes, nil
 }

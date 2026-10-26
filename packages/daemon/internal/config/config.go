@@ -9,11 +9,13 @@
 //
 // Load reads the file and nothing it names: a path key (`instructions`, `envoy_token_file`,
 // `nats_nkey_seed_file`, `nats_daemon_nkey_seed_file`, `operator_token_file`,
-// `runtime.kubernetes.kubeconfig`) is resolved
+// `runtime.kubernetes.kubeconfig`, `answers.conversation_store.dsn_file`) is resolved
 // against the file's directory and kept as a path. What sits at that path is read at boot, by
 // ReadSecretPointer, ReadDeploymentInstructions, and the runtime's client, so a configuration loads
 // on a machine that has none of the files it names; `legion start --check-config` then reads them
-// as boot does (daemon.CheckStart).
+// as boot does (daemon.CheckStart). A model provider's key (`answers.providers.<provider>`'s
+// `api_key_file` or `api_key_command`) is read at none of these: AnswerCredential reads it again
+// for every model call.
 package config
 
 import (
@@ -37,11 +39,13 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/shim"
 )
 
-// Runtime is the `runtime` block: its name, and under kubernetes the settled `runtime.kubernetes`
-// block (nil under tmux).
+// Runtime is the `runtime` block: its name, under kubernetes the settled `runtime.kubernetes`
+// block (nil under tmux), and under tmux the settled `runtime.tmux` block (the zero value under
+// kubernetes, and under the scalar `runtime: tmux`).
 type Runtime struct {
 	Name       string
 	Kubernetes *Kubernetes
+	Tmux       Tmux
 }
 
 // ControllerLaunch is who launches the project's controller (`controller`).
@@ -162,6 +166,10 @@ type Config struct {
 	// WorkerBackends is `worker_backends`: the phase-worker roles that run on a backend other than
 	// Oh My Pi, by role; a role it leaves out runs on Oh My Pi (BackendFor).
 	WorkerBackends map[claim.Role]runtime.Backend
+	// Answers is the `answers` block, settled: the model loop that answers a question to an agent
+	// that is not running, from its own conversation. Nil when the file sets none, and the daemon
+	// then answers nothing, as before the block existed.
+	Answers *Answers
 }
 
 const (
@@ -245,6 +253,7 @@ type fileConfig struct {
 	StateDir          *string
 	AdmissionCap      *int
 	Kubernetes        *Kubernetes
+	Tmux              Tmux
 	DaemonURL         *string
 	OmpInvocation     *string
 	OmpLaunchPrefix   []string
@@ -272,6 +281,7 @@ type fileConfig struct {
 	Durations              map[string]int
 	Counts                 map[string]int
 	WorkerBackends         map[claim.Role]runtime.Backend
+	Answers                *answersFile
 }
 
 // Load reads the daemon's complete runtime configuration. App private-key commands and secrets
@@ -358,7 +368,7 @@ func readKeys(root *yaml.Node) (fileConfig, error) {
 		case "admission_cap":
 			file.AdmissionCap, err = readInt(value, key)
 		case "runtime":
-			file.Kubernetes, err = readRuntime(value)
+			file.Kubernetes, file.Tmux, err = readRuntime(value)
 		case "daemon_url":
 			file.DaemonURL, err = readString(value, key)
 		case "omp_invocation":
@@ -407,6 +417,8 @@ func readKeys(root *yaml.Node) (fileConfig, error) {
 			file.Capabilities, err = readCapabilities(value, key)
 		case "worker_backends":
 			file.WorkerBackends, err = readWorkerBackends(value, key)
+		case "answers":
+			file.Answers, err = readAnswers(value, key)
 		default:
 			if isDurationKey(key) || isCountKey(key) {
 				err = readPositive(value, key, file)
@@ -472,29 +484,39 @@ func classify(key string) error {
 	return fmt.Errorf("unknown key %s", key)
 }
 
-// readRuntime reads `runtime`: the `tmux` scalar (nil), or the shipped one-key `{kubernetes: {...}}`
+// readRuntime reads `runtime`: the `tmux` scalar (the default session store), a one-key
+// `{tmux: {...}}` mapping, whose block it reads, or the shipped one-key `{kubernetes: {...}}`
 // mapping, whose block it reads. A bare `kubernetes` scalar is refused: it carries no block, and
 // the block is the only source of what a pod needs.
-func readRuntime(value *yaml.Node) (*Kubernetes, error) {
+func readRuntime(value *yaml.Node) (*Kubernetes, Tmux, error) {
 	if value.Tag == "!!null" {
-		return nil, nil
+		return nil, Tmux{}, nil
 	}
 	if value.Kind == yaml.ScalarNode {
 		switch value.Value {
 		case "tmux":
-			return nil, nil
+			return nil, Tmux{}, nil
 		case "kubernetes":
-			return nil, errors.New("runtime.kubernetes is required when runtime is kubernetes")
+			return nil, Tmux{}, errors.New("runtime.kubernetes is required when runtime is kubernetes")
 		}
-		return nil, errors.New("runtime must be 'tmux' or 'kubernetes'")
+		return nil, Tmux{}, errors.New("runtime must be 'tmux' or 'kubernetes'")
 	}
-	if value.Kind != yaml.MappingNode ||
-		len(value.Content) != 2 ||
-		value.Content[0].Value != "kubernetes" {
-		return nil, errors.New("runtime accepts tmux, kubernetes, or a mapping with the single key kubernetes")
+	if value.Kind != yaml.MappingNode || len(value.Content) != 2 {
+		return nil, Tmux{}, errors.New(runtimeShapes)
 	}
-	return readKubernetes(value.Content[1])
+	switch value.Content[0].Value {
+	case "tmux":
+		tmux, err := readTmux(value.Content[1])
+		return nil, tmux, err
+	case "kubernetes":
+		k, err := readKubernetes(value.Content[1])
+		return k, Tmux{}, err
+	}
+	return nil, Tmux{}, errors.New(runtimeShapes)
 }
+
+// runtimeShapes is readRuntime's refusal of a `runtime` of no shape it reads.
+const runtimeShapes = "runtime accepts tmux, kubernetes, or a mapping with the single key tmux or kubernetes"
 
 // readString reads a string key; nil for an unset one (absent from its mapping, or null).
 func readString(value *yaml.Node, key string) (*string, error) {
@@ -600,14 +622,7 @@ func readNatsURLs(value *yaml.Node, key string) ([]string, error) {
 // daemon's HTTP client as "unsupported protocol scheme", which the boot's readiness gate would
 // otherwise wait out forever as if Dispatch were merely unreachable (LEGION-580).
 func dispatchBase(value, key string) (string, error) {
-	parsed, err := validURL(value, key)
-	if err != nil {
-		return "", err
-	}
-	if parsed.Scheme != "http" && parsed.Scheme != "https" {
-		return "", fmt.Errorf("%s must be http or https, not %q", key, parsed.Scheme)
-	}
-	base, err := trimmedBase(parsed, key)
+	base, err := httpBase(value, key)
 	if err != nil {
 		return "", err
 	}
@@ -615,6 +630,19 @@ func dispatchBase(value, key string) (string, error) {
 		return "", fmt.Errorf("%s must be the dispatch service base URL, not the /mcp endpoint", key)
 	}
 	return base, nil
+}
+
+// httpBase is a base URL an HTTP client appends paths to: an http or https scheme, a host, no
+// query or fragment, and its trailing slashes dropped (trimmedBase).
+func httpBase(value, key string) (string, error) {
+	parsed, err := validURL(value, key)
+	if err != nil {
+		return "", err
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return "", fmt.Errorf("%s must be http or https, not %q", key, parsed.Scheme)
+	}
+	return trimmedBase(parsed, key)
 }
 
 // readStrings reads a sequence of non-empty strings, in order and with repeats — the shipped
@@ -880,6 +908,9 @@ func resolve(file fileConfig, env func(string) string, configDir string) (Config
 			return Config{}, err
 		}
 	}
+	if file.Tmux.InDatabase() {
+		cfg.Runtime.Tmux = Tmux{SessionDSNFile: underConfig(file.Tmux.SessionDSNFile, configDir)}
+	}
 
 	switch {
 	case file.AdmissionCap != nil:
@@ -912,6 +943,9 @@ func resolve(file fileConfig, env func(string) string, configDir string) (Config
 	}
 	cfg.WorkerBackends = file.WorkerBackends
 	if err := checkWorkerBackends(cfg); err != nil {
+		return Config{}, err
+	}
+	if err := resolveAnswers(file, configDir, &cfg); err != nil {
 		return Config{}, err
 	}
 	if cfg.Runtime.Name == "kubernetes" {

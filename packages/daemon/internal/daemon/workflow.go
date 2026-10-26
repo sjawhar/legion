@@ -56,7 +56,9 @@ type workflowRuntime struct {
 	log             *slog.Logger
 	conn            *nats.Conn
 	consumers       *intake.Consumers
-	outbox          *outbox
+	// answers is the answer loop with `answers` set, nil without it.
+	answers *answering
+	outbox  *outbox
 	// outboxWake is the outbox as the records' wake reaches it (wakeOutbox): the records are built
 	// at open, before the outbox exists, and the facts the boot applies before attach write rows
 	// through them, so the wake forwards to whatever attach has stored, and to nothing before
@@ -344,6 +346,18 @@ func (w *workflowRuntime) connect(ctx context.Context, cfg config.Config, nc nat
 		w.conn = nil
 		return natsauth.WithLastError(err, conn)
 	}
+	if w.answers != nil {
+		// The answer loop's hand-offs (intake.HandoffSubject): the listener hands this project's
+		// stopped agents' messages to the daemon there.
+		w.answers.handoffs, err = intake.OpenHandoffs(ctx, js, intake.HandoffSpec{
+			Project: w.answers.project, AckWait: cfg.WorkerRPCTimeout, NakDelay: time.Second, Logger: w.log,
+		})
+		if err != nil {
+			conn.Close()
+			w.conn = nil
+			return natsauth.WithLastError(err, conn)
+		}
+	}
 	w.bootID = fmt.Sprintf("%d", time.Now().UnixNano())
 	return nil
 }
@@ -609,6 +623,18 @@ func (w *workflowRuntime) run(ctx context.Context) error {
 		w.outbox.Run(running)
 		return nil
 	})
+	if w.answers != nil {
+		group.Go(func() error {
+			if err := w.answers.handoffs.Run(running, w.answers.loop.Receive); err != nil {
+				return fmt.Errorf("the answer loop's hand-offs stopped: %w", natsauth.WithLastError(err, w.conn))
+			}
+			return nil
+		})
+		group.Go(func() error {
+			w.answers.loop.Run(running)
+			return nil
+		})
+	}
 	group.Go(func() error {
 		w.pollHoldRelease(running)
 		return nil

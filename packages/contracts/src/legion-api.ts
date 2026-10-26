@@ -245,6 +245,24 @@ const legionHeldOutboxRow = z.strictObject({
   waitsOn: z.number().int().positive(),
 });
 
+/** `api.QuestionForController` — one question to a stopped agent that the daemon's answer loop
+ * passed to the controller (its `agent-question` notice, contract 38): the question's id, the
+ * agent's issue, role and session, who asked (`user:<login>`, or `session:<id>` with the asking
+ * session's title when known), where (a `dispatch://` reference, or `envoy:<event id>`), why it was
+ * passed on (`not_answered`, `needs_work`, a bound or fault, `over_limit`, `unknown_format`,
+ * `no_provider`, `no_price`, `no_conversation`, `post_refused`), and when. `asker` and `ref` are
+ * empty for a question whose recorded hand-off no longer reads. */
+const legionQuestionForController = z.strictObject({
+  id: nonEmptyString,
+  issue: issueKey,
+  role: z.enum(LEGION_ROLES),
+  session: nonEmptyString,
+  asker: z.string(),
+  ref: z.string(),
+  reason: nonEmptyString,
+  passedAt: timestamp,
+});
+
 /** `api.Issue` — `workers` is keyed by role and partial: a phase that has not run has no entry
  * (Zod's plain `record` over an enum demands every key). `check` is the issue's open production
  * check, present only on a `done` issue while the check is open. */
@@ -386,7 +404,10 @@ const legionRepositories = z.strictObject({
  * id, never null (contract 28); `repositories` is the project's repository mapping as the daemon
  * serves it (contract 31); `settings` is the daemon's resolved legion.yaml with no credential,
  * credential source or credential file path, required, and loose like `payload` above so a
- * legion.yaml key added later changes no strictly parsed shape (contract 35). */
+ * legion.yaml key added later changes no strictly parsed shape (contract 35);
+ * `questionsForController` is every question the answer loop passed to the controller in the last
+ * seven days, newest first, at most 100, never null: the `agent-question` notice is a live wake
+ * only, so a controller that starts later reads here what it missed (contract 38). */
 export const LegionStateResponse = z.strictObject({
   daemon: daemonInfo,
   admission: legionAdmission,
@@ -399,6 +420,7 @@ export const LegionStateResponse = z.strictObject({
   capabilities: z.array(legionCapabilityState),
   repositories: legionRepositories,
   settings: legionSettings,
+  questionsForController: z.array(legionQuestionForController).max(100),
 });
 
 export type LegionState = z.output<typeof LegionStateResponse>;

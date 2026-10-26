@@ -137,7 +137,7 @@ func TestCheckImageRendersEveryRowWhenEveryImageRowIsPresent(t *testing.T) {
 		Browser:              filepath.Join(s.bin, "chromium") + " (chromium on PATH) --version: Chromium 141.0.0.0",
 		LSP:                  s.onPATH("gopls", "typescript-language-server", "pyright-langserver"),
 		CodeGraph:            filepath.Join(s.bin, "codegraph") + " on PATH; @bopstack/pi-codegraph enabled in " + s.lock(),
-		Toolchain:            s.onPATH("go", "gcc", "curl", "wget", "python3", "node", "bun", "uv", "kubectl", "jq", "ssh-keygen", "flock", "psql", "redis-cli", "sqlite3", "nc", "dig") + "; go version go1.27.1 linux/amd64",
+		Toolchain:            s.onPATH("go", "gcc", "curl", "wget", "python3", "node", "bun", "uv", "kubectl", "jq", "ssh-keygen", "flock", "psql", "redis-cli", "sqlite3", "nc", "dig") + "; go version go1.27.3 linux/amd64",
 		RepositoryExtensions: "each session reports it at start; `legion state` renders it: loads the Oh My Pi extensions the repository it works carries",
 	} {
 		if got[name].Detail != want {

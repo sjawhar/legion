@@ -247,6 +247,8 @@ func run(ctx context.Context, cfg config.Config, build Build, log *slog.Logger, 
 	if cfg.DispatchURL != "" {
 		log.Info("legion workflow boot stage", "stage", "store")
 	}
+	history := newConversationHistory(cfg, plan, st, o.environment(), log)
+	plan.registered = history.recorder.Registered
 	// The mapping read and the App mint wait out GitHub's and Dispatch's transient failures, which the
 	// boot budget does not bound, as it does not bound the plugin gate or the image probe: the work
 	// after them has a budget of its own.
@@ -269,6 +271,10 @@ func run(ctx context.Context, cfg config.Config, build Build, log *slog.Logger, 
 		// from; Stage 2's supervision runs on claims alone, where every delivery holds and every
 		// tree closes.
 		plan.phaseHolds, plan.treeClosable = workflow.phaseHolds, workflow.treeClosable
+		if cfg.Answers != nil {
+			// The answer loop reads its hand-offs from the connection connect opens.
+			workflow.answers = &answering{project: plan.project}
+		}
 	}
 	if cfg.Runtime.Name == "tmux" {
 		executable, err := os.Executable()
@@ -376,6 +382,13 @@ func run(ctx context.Context, cfg config.Config, build Build, log *slog.Logger, 
 		}
 		log.Info("legion workflow boot stage", "stage", "admission")
 		workflow.attach(s)
+		if err := workflow.attachAnswers(cfg, plan, s, st); err != nil {
+			s.stop()
+			listener.Close()
+			workflow.stop()
+			st.Close()
+			return err
+		}
 		// Both waited out whatever they waited out on ctx, which the boot budget does not bound:
 		// what follows gets a budget of its own, as the App mint and the image probe's callers
 		// already do.
@@ -393,6 +406,9 @@ func run(ctx context.Context, cfg config.Config, build Build, log *slog.Logger, 
 		st.Close()
 		return err
 	}
+	// The backfill and the registry mirror run beside the daemon from here, blocking nothing, and
+	// end before the store closes.
+	stopHistory := history.start(ctx)
 	// From here every way the daemon ends halts supervision before anything waits: the signal, at
 	// once, serve's end, or a start that failed. The signal also ends the boot's own steps, which run
 	// on starting. Everything after the boot record runs on a goroutine of its own, so run waits for
@@ -444,6 +460,7 @@ func run(ctx context.Context, cfg config.Config, build Build, log *slog.Logger, 
 		lived <- err
 	}()
 	liveErr := s.awaitStop(lived, failed, bootID)
+	stopHistory()
 
 	// The stop cancelled store queries in flight, and a pooled connection one of them ran on can
 	// still carry the read deadline that cancellation set, which failed the stamp with `stop boot N:
@@ -516,6 +533,11 @@ type plan struct {
 	// nil without a workflow, where every delivery holds and every tree closes.
 	phaseHolds   func(ctx context.Context, issue string, p phase.Phase) (bool, error)
 	treeClosable func(ctx context.Context, c supervise.Claim) (bool, error)
+	// registered is supervise's Deps.Registered: the daemon's record of its agents' conversations
+	// (conversationHistory), which run sets once the store is open.
+	registered func(ctx context.Context, c supervise.Claim)
+	// answers is what readBoot read for the answer loop; the zero value when `answers` is unset.
+	answers answersReads
 	// tools are the git and jj boot resolved on the host, by name, for workspace provisioning;
 	// nil without a repository, and under a runtime whose agents run the worker image's own.
 	tools         map[string]string
@@ -653,7 +675,7 @@ func prepare(cfg config.Config, log *slog.Logger, o overrides) (plan, error) {
 	p := plan{
 		repositories: newRepositories(cfg.Project),
 		project:      reads.project, operatorToken: reads.operatorToken, secrets: reads.secrets, nats: reads.nats, instructions: instructions,
-		dispatchToken: reads.dispatchToken, prompts: composer, roleReferences: prompts.RoleReferences(),
+		dispatchToken: reads.dispatchToken, prompts: composer, roleReferences: prompts.RoleReferences(), answers: reads.answers,
 		tools: reads.tmux.tools, clock: clock, orphanSweep: orphanSweep, controllerRetry: controllerRetry, stopBudget: stop,
 		secretsEnroller: secretsEnroller, secretsLogin: secretsLogin, strandedReported: o.strandedReported,
 		pluginRelaunchable: pluginRelaunchable, plugins: plugins, pluginsSource: pluginsSource, checkLaunch: o.checkLaunch,
@@ -670,11 +692,13 @@ func prepare(cfg config.Config, log *slog.Logger, o overrides) (plan, error) {
 }
 
 // prepareTmux is what panes on this host need beyond readBoot's: the plugin gate on the OMP
-// invocation readBoot resolved, the Dispatch bearer written where every pane reads it, and the
-// provider keys resolved from secretsd into the files every pane's shim reads. The worker stream is
-// a unix socket under the state directory (decision 2 — no configuration key). The runtime gets a
-// Launcher for each backend readBoot resolved (tmuxReads.launches); the gate and the model-fallback
-// read are Oh My Pi's, since the architect runs on it alone (runtime.Backends).
+// invocation readBoot resolved, with the session database's probes under
+// runtime.tmux.session_store postgres (verifyPanes), the Dispatch bearer written where every pane
+// reads it, and the provider keys resolved from secretsd into the files every pane's shim reads.
+// The worker stream is a unix socket under the state directory (decision 2 — no configuration
+// key). The runtime gets a Launcher for each backend readBoot resolved (tmuxReads.launches); the
+// gate and the model-fallback read are Oh My Pi's, since the architect runs on it alone
+// (runtime.Backends).
 func prepareTmux(cfg config.Config, log *slog.Logger, o overrides, dispatchToken string, reads tmuxReads, p *plan) error {
 	invocation := reads.launches[runtime.BackendOmp].invocation
 	p.newRuntime, p.gate = o.runtime, o.gate
@@ -717,8 +741,9 @@ func prepareTmux(cfg config.Config, log *slog.Logger, o overrides, dispatchToken
 			retry:          bootprobe.Daemon,
 			contract:       api.DaemonAPIVersion,
 			roleReferences: p.roleReferences,
+			sessionDSN:     reads.sessionDSN,
 			log:            log,
-		}.verify
+		}.verifyPanes
 		image := capabilities.Image{Launch: omplaunch.WithPrefix(cfg.OmpLaunchPrefix, invocation), Env: environPairs(env), WorkDir: cfg.StateDir}
 		p.modelFallback = func(ctx context.Context) string {
 			state, err := capabilities.ReadModelFallback(ctx, image)
@@ -803,6 +828,7 @@ func tmuxOptions(cfg config.Config, project string, launchers map[runtime.Backen
 		ProbeInterval:     cfg.ProbeInterval,
 		AdoptTimeout:      cfg.SlowCommandTimeout,
 		ProviderEnvDir:    providerEnvDir,
+		SessionDSNFile:    cfg.Runtime.Tmux.SessionDSNFile,
 		Log:               log,
 	}
 }
@@ -870,6 +896,9 @@ type supervision struct {
 	supervisor *supervisor
 	tokens     *api.BootTokens
 	claims     []supervise.Claim
+	// answerGate keeps the answer loop and a claim's start off one conversation (answergate.go);
+	// nil without `answers`.
+	answerGate *answerGate
 	// imageReport is what the worker image's passed probe reported: of the image, from its OK line,
 	// and of the pool, the attempts that waited on its capacity (bootprobe.ImageReport); under
 	// tmux, the model-fallback mark alone, read by plan.modelFallback. probed is whether the probe
@@ -971,10 +1000,23 @@ func openSupervision(boot context.Context, cfg config.Config, log *slog.Logger, 
 		endDrain()
 		return nil, fmt.Errorf("build the %s runtime: %w", cfg.Runtime.Name, err)
 	}
+	// Every start passes the store's CheckLaunch; with `answers` set, the answer gate's first.
+	launches := gateLaunch(tokens.Recording(st), p.checkLaunch)
+	var gate *answerGate
+	if cfg.Answers != nil {
+		gate = newAnswerGate(launches, func(token claim.Token) (supervise.ClaimView, bool) {
+			machine, ok := sup.Machine(token)
+			if !ok {
+				return supervise.ClaimView{}, false
+			}
+			return machine.View(), true
+		}, log)
+		launches = gate
+	}
 	sup.deps = supervise.Deps{
 		Runtime: rt,
 		Conns:   listener,
-		Store:   pruning(gateLaunch(tokens.Recording(st), p.checkLaunch), runtime.SecretsDir(cfg.StateDir), log),
+		Store:   pruning(launches, runtime.SecretsDir(cfg.StateDir), log),
 		Specs: specs{
 			stateDir: cfg.StateDir, project: p.project, instructions: p.instructions, secrets: p.secrets, prompts: p.prompts,
 			identity: p.identity, repository: p.repository,
@@ -987,6 +1029,7 @@ func openSupervision(boot context.Context, cfg config.Config, log *slog.Logger, 
 		Secrets:      p.secretsEnroller,
 		PhaseHolds:   p.phaseHolds,
 		TreeClosable: p.treeClosable,
+		Registered:   p.registered,
 		Clock:        p.clock,
 		Log:          log,
 		Limits: supervise.Limits{
@@ -1007,7 +1050,7 @@ func openSupervision(boot context.Context, cfg config.Config, log *slog.Logger, 
 	}
 	stopping, beginStop := context.WithCancel(context.Background())
 	return &supervision{
-		cfg: cfg, log: log, plan: p, stream: listener, runtime: rt, supervisor: sup, tokens: tokens, claims: claims,
+		cfg: cfg, log: log, plan: p, stream: listener, runtime: rt, supervisor: sup, tokens: tokens, claims: claims, answerGate: gate,
 		reports: reportsOfClaims(reports, claims), reportStore: st,
 		cancel: cancel, draining: draining, endDrain: endDrain, decided: api.NewRouteDecisions(),
 		stopping: stopping, beginStop: beginStop,
@@ -1628,6 +1671,10 @@ func (s *source) State(ctx context.Context, tx pgx.Tx) (api.State, error) {
 			caches = s.caches()
 		}
 		state.Repositories = s.repositories.view(caches)
+	}
+	state.QuestionsForController, err = questionsForController(ctx, tx, s.store, s.projectToken, time.Now())
+	if err != nil {
+		return api.State{}, err
 	}
 	return state, nil
 }

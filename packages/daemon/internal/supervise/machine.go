@@ -285,6 +285,12 @@ type Deps struct {
 	// owner of the repository the issue works. Every delivery hands it to the agent's working copy
 	// before the task. nil, for a daemon with no workflow or no GitHub Apps, adopts nothing.
 	Identity func(ctx context.Context, role claim.Role, issue string) (runtime.GitIdentity, error)
+	// Registered is told of every registration the claim persisted, a first one (register) and the
+	// recorded session registering again (reregister), with the claim as written: the daemon's record
+	// of the conversations its agents have had (agent_conversations), which no close, suspension or
+	// retirement takes back. It is called while the machine decides, so it must not wait on anything
+	// slower than a store write. nil tells no one.
+	Registered func(ctx context.Context, c Claim)
 	// PhaseHolds says whether issue is still in phase: the workflow enqueues a task for the phase
 	// its issue was in, and the outbox refuses to start a role for a phase the issue has left
 	// (daemon/outbox.go), so a delivery queued before the phase moved on is that same staleness
@@ -1208,6 +1214,13 @@ func (m *Machine) persist(ctx context.Context) error {
 	// in the runtime, and View then shows the launch rather than what it replaced.
 	m.publish()
 	return m.deps.Store.PutClaim(ctx, c)
+}
+
+// registered tells Deps.Registered of the registration persist just wrote.
+func (m *Machine) registered(ctx context.Context) {
+	if m.deps.Registered != nil {
+		m.deps.Registered(ctx, StoredClaim(m.claim))
+	}
 }
 
 // NormalizeClaim clears state a claim can hold only while it records a compatible running process.

@@ -328,4 +328,11 @@ package api
 // this number, refuses either pair. (This branch took 36; main then landed INFRA-229 at 36 and
 // released pi-legion declaring it, so this branch takes the number above it, as the collision
 // note says.)
-const DaemonAPIVersion = 37
+//
+// 38: INFRA-204 (sjawhar/legion) -- api.State gains `questionsForController`, every question to a
+// stopped agent that the daemon's answer loop passed to the controller in the last seven days
+// (id, issue, role, session, asker, ref, reason, passedAt), newest first and at most 100: the
+// controller's `agent-question` notice is a live wake only, so a controller that starts later
+// reads what it missed here. Never null, so a 37 plugin's strict reader refuses the state, and the
+// boot gate and `legion probe-image` refuse the mixed pair.
+const DaemonAPIVersion = 38

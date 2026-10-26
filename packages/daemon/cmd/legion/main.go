@@ -463,6 +463,7 @@ func runState(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 	fmt.Fprintln(stdout, pendingSummary(state.PendingStatusWrites))
 	fmt.Fprintln(stdout, heldSummary(state.HeldOutboxRows))
 	fmt.Fprintln(stdout, strandedSummary(state.StrandedClaims))
+	fmt.Fprint(stdout, questionsSummary(state.QuestionsForController))
 	// In a pane, the issue record is what a relaunched worker re-reads.
 	if key := os.Getenv("LEGION_ISSUE"); key != "" {
 		issue, ok := state.Issues[key]
@@ -577,6 +578,24 @@ func strandedSummary(stranded []api.StrandedClaim) string {
 		}
 	}
 	return fmt.Sprintf("claims nothing will wake: %d — %s", len(stranded), strings.Join(groups, "; "))
+}
+
+// questionsSummary is what an operator reads of the questions to stopped agents the daemon's answer
+// loop passed to the controller (api.State.QuestionsForController): how many in the window, then
+// one line each, newest first, naming when, the agent's issue, role and session, who asked, where
+// and why. With none the line says so.
+func questionsSummary(questions []api.QuestionForController) string {
+	days := int(api.QuestionsForControllerWindow / (24 * time.Hour))
+	if len(questions) == 0 {
+		return fmt.Sprintf("questions for the controller: none in the last %d days\n", days)
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "questions for the controller: %d in the last %d days, newest first\n", len(questions), days)
+	for _, q := range questions {
+		fmt.Fprintf(&b, "  %s %s %s %s: from %s at %s, %s (question %s)\n",
+			q.PassedAt.UTC().Format(time.RFC3339), q.Issue, q.Role, q.Session, q.Asker, q.Ref, q.Reason, q.ID)
+	}
+	return b.String()
 }
 
 // stateAddress is where a daemon answers: the configured bind and port, with --port overriding

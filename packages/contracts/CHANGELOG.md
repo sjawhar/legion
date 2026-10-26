@@ -4,6 +4,11 @@
 
 ### Added
 
+- `LegionAgentHandoffSchema` and `legionAgentHandoffSubject(project, session)`: the message the
+  Envoy listener hands a stopped Legion agent's daemon in place of refusing or dropping it,
+  `{original_topic, target_session, role_token, project, envelope}` with the envelope as it would
+  have been delivered, on `notifications.legion.<project>.agents.<session>`. The Go daemon decodes
+  it as `intake.Handoff` (INFRA-204).
 - `dispatch_issues` takes `all` (`--all`), which asks Dispatch for the whole filtered listing in
   one read instead of a page: the request goes out with neither `limit` nor `offset`, the two
   parameters whose absence makes the server answer every match
