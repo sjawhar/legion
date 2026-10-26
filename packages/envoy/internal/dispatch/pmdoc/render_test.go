@@ -538,6 +538,21 @@ func TestRenderWritesEachImageFieldSoItReadsBackAsHeld(t *testing.T) {
 		"a\n<![CDATA[\nz", "a\n]]>\nz", "a\n<div\nz", "a\n</div>\nz", "a\n<DIV class=\"x\">\nz", "a\n<table>\nz",
 		"a\n</p>\nz", "a\n<x-y z=\"1\"/>\nz", "a\n</x-y>\nz", "a\n<a>b</a>\nz", "a\n</b> c\nz", "a\n<\nz",
 		"a\n<!\nz", "a\n&amp;\nz", "a\n\\- b\nz", "a\n\"b\"\nz", "a\n10\nz", "a\n10.5\nz", "a\nb\n", "a\né\nz",
+		// Each line class the allow-list admits (opensAsText), beside the block start it is told
+		// apart from, in the middle of a title, where no `")` ends the line.
+		"a\n#b\nz", "a\n####### b\nz", "a\n#\tb\nz", "a\n-b\nz", "a\n--\nz", "a\n-\tb\nz", "a\n*b\nz", "a\n**\nz",
+		"a\n* * *\nz", "a\n+b\nz", "a\n_b\nz", "a\n__\nz", "a\n===\nz", "a\n=\nz", "a\n=b\nz", "a\n-|-\nz",
+		"a\n:-\nz", "a\n:b\nz", "a\n::b\nz", "a\n:::\nz", "a\n``b\nz", "a\n```\nz", "a\n```b\nz", "a\n~~b~~\nz",
+		"a\n|b|\nz", "a\n|-|\nz", "a\n[b]\nz", "a\n[b]: /u \"t\"\nz", "a\n[^b]\nz", "a\n[^b]: c\nz",
+		"a\n<b x=\"1\">c\nz", "a\n< b\nz", "a\n<=\nz", "a\n<1@x.test>\nz", "a\n<!1\nz", "a\n<!-\nz", "a\n<b/>\nz",
+		"a\n<B>\nz", "a\n</B>\nz", "a\n<b >\nz", "a\n<b\nz", "a\n<bx\nz", "a\n<Div>\nz", "a\n</TEXTAREA>\nz",
+		"a\n<x:y>\nz", "a\n<b c>\nz", "a\n<b c='d' e>\nz", "a\n<b c=d>\nz", "a\n<b c=\"d>\nz", "a\n<span> \nz",
+		"a\n1.\nz", "a\n1)\nz", "a\n1. b\nz", "a\n01. b\nz", "a\n2) b\nz", "a\n1234567890. b\nz", "a\n1.b\nz",
+		"a\n{b}\nz", "a\n%b\nz", "a\n\u00a0b\nz", "a\n\u3000b\nz", "a\n!b\nz", "a\n'b'\nz", "a\n(b)\nz",
+		"a\n@b\nz", "a\n]b\nz", "a\n}\nz", "a\n$b$\nz", "a\n.b\nz", "a\n,b\nz",
+		"a\n| - |\n| - |\nz", "a\nb|c\n-|-\nz", "a\n| b | c |\n| - | - |\nz", "a\n:::b\nz", "a\n::: \nz",
+		"a\n</script> c\nz", "a\n<script>\nz", "a\n<!--\nz", "a\n<!-- c -->\nz",
+		"a\n::{b}\nz", "a\n:b{c}\nz", "a\n:b c\nz", "a\n\u00a0:::b{}\nz", "a\n\u00a0# b\nz", "a\n\u3000- b\nz",
 	}
 	titles := []string{`"`, `say "hi"`, `\"`, `a\"b`, "'", `"\`, `a"`}
 	image := func(src string, title any, link, linkTitle any) *Node {

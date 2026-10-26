@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"slices"
 	"strings"
-	"unicode"
 	"unicode/utf8"
 
 	"github.com/yuin/goldmark/util"
@@ -521,7 +520,7 @@ func (r *renderer) writeInlineRun(nodes []*Node, prefix string, context inlineCo
 			// table cell, whose line it would end, and wherever a line it creates opens otherwise.
 			image := imageSyntax(n, writtenAlt, escapePipes, false)
 			if !context.tableCell && !context.heading && (strings.Contains(title, "\n") || strings.Contains(linkTitle, "\n")) {
-				if raw := imageSyntax(n, writtenAlt, escapePipes, true); r.rawTitleLinesHold(raw) {
+				if raw := imageSyntax(n, writtenAlt, escapePipes, true); r.rawTitleLinesHold(raw, prefix != "") {
 					image = raw
 				}
 			}
@@ -588,50 +587,6 @@ func (r *renderer) endLine(continues bool) {
 	r.b.Truncate(candidate.at)
 	r.b.WriteString(escape)
 	r.b.WriteString(tail)
-}
-
-// rawTitleLinesHold reports whether raw, an image written with its titles' line feeds as they are,
-// keeps every line those line feeds create in the paragraph the image stands in, as the line
-// before's continuation, in both Go's reader and the browser editor's engine, so that the image
-// reads back as held in both. It judges each line by how it starts (opensAsText), never reading the
-// document back, so the judgement is linear in the document: a line is held only where it opens as
-// text alone can. A typed block behind a list item's or a quote's prefix takes no line written
-// without that prefix at all, and ends before it.
-//
-// The judgement is an allow-list, not a reading of the line, because the two readers disagree on
-// lines Go reads as the paragraph's text: in a list item, a quote or a footnote definition each
-// such line is a lazy continuation, written without the container's prefix, and the engine's open
-// container there is the list item or the quote, not the paragraph, so it opens there blocks that
-// cannot interrupt a paragraph (an HTML block of the complete-tag kind, an ordered list item not
-// starting at 1); and its HTML block rules are not Go's even in a top-level paragraph (it reads
-// `</script>` as a complete closing tag and `<!x>` as a declaration, which Go's leaves out).
-// Judging the lines by Go's reading missed one such shape a round (INFRA-190).
-func (r *renderer) rawTitleLinesHold(raw string) bool {
-	if typed := r.scope().typed; typed != nil && typed.prefix != "" {
-		return false
-	}
-	_, rest, _ := strings.Cut(raw, "\n")
-	for line := range strings.SplitSeq(rest, "\n") {
-		if !opensAsText(line) {
-			return false
-		}
-	}
-	return true
-}
-
-// opensAsText reports whether line opens as only text can open in both readers: with a letter;
-// with a run of digits not followed by `.` or `)`; or with `"`, `\` or `&`, which the writer puts
-// at a title line's start for the title's closing quote, an escaped quote or backslash, and an
-// escaped or literal ampersand. No block start in either reader, nor any extension the editor
-// reads (directives, math, footnotes, tables), begins with one of these. A blank line, which ends
-// the paragraph, and one opening with a space or a tab, which the paragraph strips, open with none.
-func opensAsText(line string) bool {
-	first, _ := utf8.DecodeRuneInString(line)
-	if unicode.IsLetter(first) || first == '"' || first == '\\' || first == '&' {
-		return true
-	}
-	digits := len(line) - len(strings.TrimLeft(line, "0123456789"))
-	return digits > 0 && (digits == len(line) || line[digits] != '.' && line[digits] != ')')
 }
 
 func (r *renderer) closeMarks(marks []Mark, escapePipes bool) {
