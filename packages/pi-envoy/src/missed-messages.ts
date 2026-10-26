@@ -27,6 +27,20 @@ export const REPLAY_DELIVERED_ENTRY = "envoy-replay-delivered";
  */
 export const REPLAY_STATE_ENTRY = "envoy-replay-state";
 
+/**
+ * Transcript entry recording a replay notice (`stream_recreated`, `retention_gap`) held until the
+ * host settled (`UnwrittenFrames.sendNotice`): `{id, content}` when it is held, `{id, handed:
+ * true}` once it is handed. A notice still held when the process ended is held again from it on
+ * restore (`heldReplayNotices`), since the replay state that raised it no longer shows its cause.
+ */
+export const REPLAY_NOTICE_ENTRY = "envoy-replay-notice";
+
+/** A replay notice recorded as held (`REPLAY_NOTICE_ENTRY`), by the id its records share. */
+export interface HeldReplayNotice {
+  readonly id: string;
+  readonly content: string;
+}
+
 /** The data of every `customType` entry among a session's entries, in the order written. */
 function customEntries(entries: readonly unknown[], customType: string): unknown[] {
   const found: unknown[] = [];
@@ -174,4 +188,27 @@ function writtenCards(
  *  (`rememberedTopics`: neither an agent subject nor a role lane). */
 export function rememberedSubjects(entries: readonly unknown[]): readonly string[] {
   return rememberedTopics(newestState(entries));
+}
+
+/** The replay notices a session's entries record as held and not as handed, in the order held
+ *  (`REPLAY_NOTICE_ENTRY`). An entry that does not parse is passed over. */
+export function heldReplayNotices(entries: readonly unknown[]): HeldReplayNotice[] {
+  const held = new Map<string, string>();
+  const handed = new Set<string>();
+  for (const data of customEntries(entries, REPLAY_NOTICE_ENTRY)) {
+    if (typeof data !== "object" || data === null) continue;
+    const id = stringField(data, "id");
+    if (id === undefined) continue;
+    if (Reflect.get(data, "handed") === true) {
+      handed.add(id);
+      continue;
+    }
+    const content = stringField(data, "content");
+    if (content !== undefined && !held.has(id)) held.set(id, content);
+  }
+  const notices: HeldReplayNotice[] = [];
+  for (const [id, content] of held) {
+    if (!handed.has(id)) notices.push({ id, content });
+  }
+  return notices;
 }

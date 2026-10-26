@@ -140,7 +140,9 @@ import {
 } from "../src/dispatch-user-turn";
 import { recordEnvoySession, resolveEnvoySession } from "../src/envoy-session";
 import {
+  heldReplayNotices,
   REPLAY_DELIVERED_ENTRY,
+  REPLAY_NOTICE_ENTRY,
   REPLAY_STATE_ENTRY,
   rememberedSubjects,
   replaySnapshot,
@@ -891,11 +893,14 @@ export default function envoyExtension(pi: PiApi): void {
       awarenessGeneration++;
     }
     legionManagedTranscript = branch.some(isLegionManagedEntry);
-    handledDispatchAttempts = handledAttempts(context.sessionManager.getEntries());
+    const entries = context.sessionManager.getEntries();
+    handledDispatchAttempts = handledAttempts(entries);
     // The replay ledger and cursors, from every entry of the session file as handled attempts are:
     // what this session was shown, live or replayed, on any branch, with the cards the host wrote,
-    // and where it read the stream to.
-    replay?.restore(replaySnapshot(context.sessionManager.getEntries()));
+    // and where it read the stream to. The replay notices it records held and not handed, which a
+    // restart or a session change cut short, are held again for the first settled heartbeat.
+    replay?.restore(replaySnapshot(entries));
+    unwritten.requeueNotices(heldReplayNotices(entries));
     // The pictures the transcript the session is now on already shows (a fork's, a handoff's, a
     // resume's, a restart's) are in the history every request sends, so they count as shown. The
     // id the session left is no longer served: what it was shown is forgotten, and so are the
@@ -1091,6 +1096,20 @@ export default function envoyExtension(pi: PiApi): void {
     },
     handNoticeFailed: (error) => {
       logger.warn("envoy: a replay notice waiting for a settled host could not be handed", {
+        error: messageFor(error),
+      });
+    },
+    // A held notice goes to the transcript of the session it was raised for, which the host is on
+    // while this instance serves it.
+    recordNotice: (id, content) => {
+      if (hostSessionID() !== sessionID) throw new Error("the host is on another session");
+      pi.appendEntry(REPLAY_NOTICE_ENTRY, { id, content });
+    },
+    noticeHanded: (id) => {
+      pi.appendEntry(REPLAY_NOTICE_ENTRY, { id, handed: true });
+    },
+    recordNoticeFailed: (error) => {
+      logger.warn("envoy: a held replay notice could not be recorded in the session file", {
         error: messageFor(error),
       });
     },

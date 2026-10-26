@@ -344,8 +344,11 @@ the stream was recreated, so messages from before it may be lost, or that a curs
 stream's oldest message, so messages older than 72 hours may be missing. It is a steer with
 `triggerTurn: false`, so like an inert card it is handed only while the host is settled: raised
 while a turn streams, it is held, and the first settled heartbeat hands it, so no extra model turn
-runs for it; a notice held for a session the host has left is dropped. A listener without the
-route answers 404; one whose NATS
+runs for it; a notice held for a session the host has left is dropped. A held notice is recorded in
+the session file (`envoy-replay-notice`, `{id, content}`, then `{id, handed: true}` once handed), and
+the restore of that session's state (a start, a resume, a switch back) holds each one still unhanded
+again, by its id, since the replay state that raised it no longer shows its cause. A listener
+without the route answers 404; one whose NATS
 user lacks the read, or that has no stream, answers 503 `REPLAY_UNAVAILABLE`; either, or a 401 or
 403, is said once as a `logger.warn` and a UI warning that messages published while the
 connection is down are not recovered, live delivery goes on as before, and every heartbeat asks

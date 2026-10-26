@@ -1,7 +1,7 @@
 import type { DedupeIdentity, DeliveryClaim } from "@legion/envoy-client/delivery";
 import { replayLedgerIdentity } from "@legion/envoy-client/replay";
 import type { ContentBlock } from "@legion/pi-shared/pi-types";
-import { writtenCardIdentity } from "./missed-messages";
+import { type HeldReplayNotice, writtenCardIdentity } from "./missed-messages";
 
 /**
  * How a card is handed to the host: as a steer or an aside, each starting a turn when the host is
@@ -72,6 +72,13 @@ export interface HandedTurn {
   readonly via: "text" | "typed";
 }
 
+/** A replay notice not handed yet, for the session it was raised for. `recorded`: the session's
+ *  transcript records it held, so its hand-off is marked there too. */
+interface HeldNotice extends HeldReplayNotice {
+  readonly sessionID: string;
+  recorded: boolean;
+}
+
 /** What `UnwrittenFrames` asks of the extension around it. */
 export interface UnwrittenFramesHost {
   /** The session this instance serves now: a frame written once it is on another records nothing. */
@@ -104,6 +111,14 @@ export interface UnwrittenFramesHost {
   handBackFailed(identity: DedupeIdentity, error: unknown): void;
   /** A replay notice could not be handed; it stays held, and the next settled moment tries again. */
   handNoticeFailed(error: unknown): void;
+  /** Records the replay notice `id` held until the host settles in the transcript of the session
+   *  this instance serves (`REPLAY_NOTICE_ENTRY`), so a restart that cuts the hold short holds it
+   *  again (`requeueNotices`); a throw means it was not recorded. */
+  recordNotice(id: string, content: string): void;
+  /** Records in that transcript that the held notice `id` was handed; a throw means it was not. */
+  noticeHanded(id: string): void;
+  /** A held notice's record could not be written: it is held in this process only. */
+  recordNoticeFailed(error: unknown): void;
 }
 
 /**
@@ -134,15 +149,19 @@ export function unwrittenCardKeys(identity: {
  *
  * It also holds the replay notices (`sendNotice`) sent while the host is not settled, in order,
  * until the first settled moment hands them. A notice names no frame and has no claim: nothing
- * waits on its write, and nothing records it.
+ * waits on its write. A held notice is recorded in the session's transcript, and marked handed
+ * there once it is, so a restart that cuts the hold short holds it again (`requeueNotices`).
  */
 export class UnwrittenFrames {
   readonly #host: UnwrittenFramesHost;
   readonly #cards = new Map<string, UnwrittenCard>();
   readonly #turns = new Map<string, UnwrittenTurn>();
   // The replay notices not handed yet, in the order they were sent, each with the session it was
-  // raised for.
-  #notices: { readonly sessionID: string; readonly content: string }[] = [];
+  // raised for, and whether the transcript records it held.
+  #notices: HeldNotice[] = [];
+  // The notices recorded held that this process handed: a restore that reads a transcript whose
+  // mark of that failed to be written does not hold them again.
+  readonly #handedNotices = new Set<string>();
   // The moments the host had to queue or write a card handed before it: each heartbeat, and each
   // run that ended aborted (`handBackWithdrawn`, `runAborted`).
   #moments = 0;
@@ -209,11 +228,40 @@ export class UnwrittenFrames {
    * Hands the host a replay notice (`stream_recreated`, `retention_gap`) for the session this
    * instance serves now, at once when the host is settled; otherwise it is held, after any held
    * before it, until the first settled moment (`handBackWithdrawn`). A notice the host cannot be
-   * handed is held too (`handNoticeFailed`). Nothing waits on a notice's write.
+   * handed is held too (`handNoticeFailed`). Nothing waits on a notice's write. A notice held is
+   * recorded in the session's transcript (`UnwrittenFramesHost.recordNotice`); one that cannot be
+   * is held in this process only (`recordNoticeFailed`).
    */
   sendNotice(content: string): void {
-    this.#notices.push({ sessionID: this.#host.sessionID(), content });
+    const notice: HeldNotice = {
+      id: crypto.randomUUID(),
+      sessionID: this.#host.sessionID(),
+      content,
+      recorded: false,
+    };
+    this.#notices.push(notice);
     if (this.#host.settled()) this.#handNotices();
+    if (!this.#notices.includes(notice)) return;
+    try {
+      this.#host.recordNotice(notice.id, content);
+      notice.recorded = true;
+    } catch (error) {
+      this.#host.recordNoticeFailed(error);
+    }
+  }
+
+  /**
+   * Holds again, for the session this instance serves now, the notices its transcript records as
+   * held and not handed (`heldReplayNotices`), after those held already, until the first settled
+   * moment hands them. They are recorded already; one held or handed by this process already is
+   * passed over, so a restore that reads the same transcript twice holds each once.
+   */
+  requeueNotices(notices: readonly HeldReplayNotice[]): void {
+    const sessionID = this.#host.sessionID();
+    for (const { id, content } of notices) {
+      if (this.#handedNotices.has(id) || this.#notices.some((held) => held.id === id)) continue;
+      this.#notices.push({ id, sessionID, content, recorded: true });
+    }
   }
 
   /**
@@ -353,7 +401,8 @@ export class UnwrittenFrames {
    * turn held when RPC `new_session` ran got no `message_end`). Its claim is released and nothing
    * records it, so a sweep of that session, once the host is back on it or resumes it, shows the
    * stream's copy again and waits on it anew. A notice held for the session it left is dropped:
-   * it concerns only the session it was raised for.
+   * it concerns only the session it was raised for, whose transcript records it, so the restore
+   * once the host is back on that session holds it again (`requeueNotices`).
    */
   releaseOtherSessions(sessionID: string): void {
     for (const waiting of [this.#cards, this.#turns]) {
@@ -366,8 +415,9 @@ export class UnwrittenFrames {
     this.#notices = this.#notices.filter((notice) => notice.sessionID === sessionID);
   }
 
-  // Hands the held notices of the session this instance serves, in order. One the host cannot be
-  // handed stays held, with every notice after it, so the next settled moment keeps their order.
+  // Hands the held notices of the session this instance serves, in order, and marks each the
+  // transcript records held as handed. One the host cannot be handed stays held, with every notice
+  // after it, so the next settled moment keeps their order.
   #handNotices(): void {
     const sessionID = this.#host.sessionID();
     for (let index = 0; index < this.#notices.length; ) {
@@ -383,6 +433,13 @@ export class UnwrittenFrames {
         return;
       }
       this.#notices.splice(index, 1);
+      if (!notice.recorded) continue;
+      this.#handedNotices.add(notice.id);
+      try {
+        this.#host.noticeHanded(notice.id);
+      } catch (error) {
+        this.#host.recordNoticeFailed(error);
+      }
     }
   }
 

@@ -15063,6 +15063,41 @@ describe("messages missed while the subscription was down", () => {
       }
     });
 
+    test("a retention gap held while the host's turn streams is told once after the host switches away and back", async () => {
+      const restartAt = Date.now();
+      try {
+        setSystemTime(new Date(restartAt - 4 * DAY_MS));
+        const model = new StreamModel();
+        const first = await bootReplay("replay-issue-gap-switch-a", model);
+        await first.follow(ISSUE_TOPIC);
+        await first.stop();
+        model.store(ISSUE_SUBJECT, issueEvent(ISSUE_SUBJECT, 13));
+        model.expireThrough(model.lastSeq);
+        setSystemTime(new Date(restartAt));
+        model.store(ISSUE_SUBJECT, issueEvent(ISSUE_SUBJECT, 14));
+        const second = await bootReplay("replay-issue-gap-switch-b", model, {
+          entries: first.entries(),
+          turn: "streaming",
+        });
+        await second.tick();
+
+        // The notice is held for the session it was raised in, through the switch and back, until
+        // the turn the host streams again ends and the host is idle with nothing queued.
+        await second.switchAwayAndBack("ses_replay_other");
+        await second.interrupt();
+        await second.tick();
+        await second.tick();
+
+        const gapNotices = second.fixture.deliveries.filter((delivery) =>
+          delivery.content.includes("messages older than 72 hours may be missing")
+        );
+        expect(gapNotices).toHaveLength(1);
+        expect(gapNotices[0]?.details).toEqual(LOCAL_ENVOY_NOTICE);
+      } finally {
+        setSystemTime();
+      }
+    });
+
     test("a topic the session unfollowed stays unfollowed after a restart", async () => {
       const model = new StreamModel();
       const first = await bootReplay("replay-issue-unfollowed-a", model);

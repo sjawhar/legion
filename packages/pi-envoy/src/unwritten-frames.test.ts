@@ -51,6 +51,7 @@ function harness() {
     session: "s1",
     settled: true,
     refuseHand: false,
+    refuseRecord: false,
     matched: undefined as string | undefined,
   };
   const recorded: DedupeIdentity[] = [];
@@ -59,6 +60,9 @@ function harness() {
   const handBackFailures: string[] = [];
   const notices: string[] = [];
   const noticeFailures: string[] = [];
+  // The notice records the transcript of the session they were made on got, in order.
+  const noticeRecords: { session: string; id: string; content?: string; handed?: true }[] = [];
+  const recordFailures: string[] = [];
   const frames = new UnwrittenFrames({
     sessionID: () => state.session,
     settled: () => state.settled,
@@ -78,6 +82,15 @@ function harness() {
     handBackFailed: (identity, error) =>
       handBackFailures.push(`${identity.event_id}: ${(error as Error).message}`),
     handNoticeFailed: (error) => noticeFailures.push((error as Error).message),
+    recordNotice: (id, content) => {
+      if (state.refuseRecord) throw new Error("the session file refused the record");
+      noticeRecords.push({ session: state.session, id, content });
+    },
+    noticeHanded: (id) => {
+      if (state.refuseRecord) throw new Error("the session file refused the record");
+      noticeRecords.push({ session: state.session, id, handed: true });
+    },
+    recordNoticeFailed: (error) => recordFailures.push((error as Error).message),
   });
   /** A claim of `identity`, as the live path takes one before it hands a frame on. */
   const claim = (identity: DedupeIdentity) => {
@@ -102,6 +115,8 @@ function harness() {
     withdrawn,
     handBackFailures,
     noticeFailures,
+    noticeRecords,
+    recordFailures,
     claim,
     claimState,
   };
@@ -387,6 +402,103 @@ describe("a replay notice", () => {
     frames.handBackWithdrawn();
 
     expect(notices).toEqual([]);
+  });
+
+  test("held while the host is not settled is recorded in the transcript of its session", () => {
+    const { frames, state, notices, noticeRecords } = harness();
+    state.settled = false;
+
+    frames.sendNotice("stream recreated");
+    frames.sendNotice("retention gap");
+
+    expect(notices).toEqual([]);
+    expect(noticeRecords).toEqual([
+      { session: "s1", id: expect.any(String), content: "stream recreated" },
+      { session: "s1", id: expect.any(String), content: "retention gap" },
+    ]);
+    expect(noticeRecords[0]?.id).not.toBe(noticeRecords[1]?.id);
+  });
+
+  test("held, then handed at a settled moment, is recorded handed under the id it was held by", () => {
+    const { frames, state, notices, noticeRecords } = harness();
+    state.settled = false;
+    frames.sendNotice("retention gap");
+    const id = noticeRecords[0]?.id;
+
+    state.settled = true;
+    frames.handBackWithdrawn();
+    frames.handBackWithdrawn();
+
+    expect(notices).toEqual(["retention gap"]);
+    expect(noticeRecords).toEqual([
+      { session: "s1", id: expect.any(String), content: "retention gap" },
+      { session: "s1", id, handed: true },
+    ]);
+  });
+
+  test("handed at once records nothing", () => {
+    const { frames, notices, noticeRecords } = harness();
+
+    frames.sendNotice("retention gap");
+    frames.handBackWithdrawn();
+
+    expect(notices).toEqual(["retention gap"]);
+    expect(noticeRecords).toEqual([]);
+  });
+
+  test("the host refused at once is held and recorded", () => {
+    const { frames, state, notices, noticeRecords } = harness();
+    state.refuseHand = true;
+    frames.sendNotice("retention gap");
+    expect(noticeRecords).toEqual([
+      { session: "s1", id: expect.any(String), content: "retention gap" },
+    ]);
+
+    state.refuseHand = false;
+    frames.handBackWithdrawn();
+
+    expect(notices).toEqual(["retention gap"]);
+    expect(noticeRecords[1]).toEqual({ session: "s1", id: noticeRecords[0]?.id, handed: true });
+  });
+
+  test("whose record the session file refuses is reported and still held in this process", () => {
+    const { frames, state, notices, noticeRecords, recordFailures } = harness();
+    state.settled = false;
+    state.refuseRecord = true;
+    frames.sendNotice("retention gap");
+    expect(recordFailures).toEqual(["the session file refused the record"]);
+
+    state.settled = true;
+    frames.handBackWithdrawn();
+
+    expect(notices).toEqual(["retention gap"]);
+    // Recorded nowhere as held, so nothing is marked handed.
+    expect(noticeRecords).toEqual([]);
+    expect(recordFailures).toHaveLength(1);
+  });
+
+  test("requeued from the transcript by its id is handed once, however often it is requeued", () => {
+    const { frames, state, notices, noticeRecords } = harness();
+    state.settled = false;
+    frames.sendNotice("stream recreated");
+    const recordedHeld = noticeRecords.length;
+    const held = [{ id: "notice-1", content: "retention gap" }];
+
+    frames.requeueNotices(held);
+    frames.requeueNotices(held);
+    // Recorded held already: requeuing records nothing.
+    expect(noticeRecords).toHaveLength(recordedHeld);
+    state.settled = true;
+    frames.handBackWithdrawn();
+    // A restore that reads the transcript again, its handed mark unread, holds nothing again.
+    frames.requeueNotices(held);
+    frames.handBackWithdrawn();
+
+    expect(notices).toEqual(["stream recreated", "retention gap"]);
+    expect(noticeRecords.slice(recordedHeld)).toEqual([
+      { session: "s1", id: noticeRecords[0]?.id, handed: true },
+      { session: "s1", id: "notice-1", handed: true },
+    ]);
   });
 });
 

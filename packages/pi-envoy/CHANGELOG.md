@@ -33,8 +33,10 @@
   failure notice naming a BTW: it is handed only once the host is idle with nothing queued, since a
   streaming turn would run another model turn for it, and waits for the first such heartbeat while
   a turn runs. The replay's one-time notices (the stream was recreated, older messages may be
-  missing) wait for an idle host the same way. A replayed subscription removal takes the
-  topic out of the listener's registry too, so a later restart does not follow it again.
+  missing) wait for an idle host the same way. A held notice is recorded in the session file
+  and shown after a restart, or a switch away and back, that cut the hold short. A replayed
+  subscription removal takes the topic out of the listener's registry too, so a later restart
+  does not follow it again.
   The session file keeps what the session was shown (`envoy-replay-delivered`, and the written
   cards themselves, read back by the event they name) and where it read to
   (`envoy-replay-state`), so a restart shows nothing again (up to 20,000 frames in 72 hours) — a
