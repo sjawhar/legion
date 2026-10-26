@@ -84,6 +84,11 @@ type IssueSummary struct {
 	// BlockedBy is the keys of the issues, in this issue's own project, that this issue waits on,
 	// in the order Dispatch lists them; none when it waits on nothing.
 	BlockedBy []string
+	// ClaimedBy is who Dispatch shows holding the issue's claim, as Claim.Holder writes it, or
+	// empty for nobody. ClaimUnread says Dispatch showed a claim naming no actor: neither nobody
+	// nor anyone the daemon can name, so the read says nothing of the claim.
+	ClaimedBy   string
+	ClaimUnread bool
 }
 
 // Issue is the workflow data from Dispatch's issue-detail route. HandedOver is resolved here, at
@@ -104,16 +109,81 @@ type Issue struct {
 	ResolvedRepo string
 	// BlockedBy is IssueSummary.BlockedBy.
 	BlockedBy []string
+	// Claim is the issue's claim Dispatch shows, nil for none; ClaimUnread is IssueSummary's.
+	Claim       *Claim
+	ClaimUnread bool
 }
 
+// Claim is the actor Dispatch records as an issue's holder: a session or a person.
+type Claim struct {
+	Kind string
+	ID   string
+}
+
+// Holder is the claim as the daemon keeps it, `<kind>:<id>`, or empty for no claim.
+func (c *Claim) Holder() string {
+	if c == nil {
+		return ""
+	}
+	return c.Kind + ":" + c.ID
+}
+
+// Actor is who Dispatch names as having made a change: Kind `user` is a person, `session` an agent
+// session, and `system` Dispatch itself (its document settlement among them). Every Dispatch event
+// carries one.
+type Actor struct {
+	Kind string
+	ID   string
+}
+
+// Person says whether the actor is a person.
+func (a Actor) Person() bool { return a.Kind == "user" }
+
+// SettlementActor is Dispatch's document settlement, which closes an ask whose decision block left
+// its document in its own name (Dispatch's docs.SettlementActor).
+var SettlementActor = Actor{Kind: "system", ID: "document-settlement"}
+
 // Approval is the current approval state Dispatch derives for a document, and the issue carrying
-// the document (empty for a project document).
+// the document (empty for a project document). While an approval request is open (State
+// `awaiting`), AskID names it and WaitingOn is whose reply it needs next, `human` or `agent`; both
+// are empty in every other state. At and Seq identify the document's latest review,
+// whatever State shows: At is Dispatch's time of it (its `created_at`, which its artifact.* event
+// shares, since one transaction writes both), and Seq that event's sequence on the issue. Each is
+// zero when Dispatch gave none: At when the document has no review, Seq also for a review Dispatch
+// recorded before it kept the sequence, and from a Dispatch that predates it.
 type Approval struct {
 	IssueKey      string
 	State         string
 	LatestVersion int
 	Version       *int
 	Reason        *string
+	AskID         string
+	WaitingOn     string
+	At            time.Time
+	Seq           int64
+}
+
+// ApprovedLatest is the version Dispatch shows approved when that approval is of its latest
+// version, and 0 otherwise.
+func (a Approval) ApprovedLatest() int {
+	if a.State == "approved" && a.Version != nil && *a.Version == a.LatestVersion {
+		return *a.Version
+	}
+	return 0
+}
+
+// ChangesRequestedLatest is the version of the changes request Dispatch shows on its latest version
+// and the request's reason, or 0 when the latest version has none: a newer version superseded it,
+// the latest review approves, or an approval request is open again.
+func (a Approval) ChangesRequestedLatest() (int, string) {
+	if a.State != "changes_requested" || a.Version == nil || *a.Version != a.LatestVersion {
+		return 0, ""
+	}
+	reason := "Dispatch reports changes requested"
+	if a.Reason != nil && *a.Reason != "" {
+		reason = *a.Reason
+	}
+	return *a.Version, reason
 }
 
 // Error is a non-success response from Dispatch. Code is empty only when the response did not

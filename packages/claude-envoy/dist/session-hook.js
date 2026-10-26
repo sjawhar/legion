@@ -13829,19 +13829,17 @@ function actorName(actor, titles) {
   const live = titles?.get(actor.id)?.trim();
   return sessionLabel(actor.id, live === undefined || live === "" ? actor.origin?.session_title : live);
 }
-function actorLabel(actor, titles) {
-  const name = actorName(actor, titles);
+function actorAttribution(actor) {
   if (actor.kind !== "session") {
-    return name;
+    return "";
   }
   if (actor.owner !== undefined) {
-    return `${name} (for ${actor.owner})`;
+    return ` (for ${actor.owner})`;
   }
-  const service = actor.service;
-  if (service === undefined) {
-    return name;
-  }
-  return `${name} (as ${serviceSubjectLabel(service)})`;
+  return actor.service === undefined ? "" : ` (as ${serviceSubjectLabel(actor.service)})`;
+}
+function actorLabel(actor, titles) {
+  return `${actorName(actor, titles)}${actorAttribution(actor)}`;
 }
 // ../contracts/src/agent-stream.ts
 var AGENT_STREAM_LIMITS = {
@@ -14358,12 +14356,12 @@ var dispatchToolSpecs = [
   {
     name: "dispatch_request_approval",
     example: { issue: "DSP-1", summary: "A live sync replaces the nightly export." },
-    description: "Ask a human to approve a document at its current version. Before calling, have a fresh read-only reader check the spec against the code and the human's words, then resolve every finding; a Legion architect uses `plan-gap-analyst`. Opens an approval ask (Approve / " + "Request changes) in the human's Inbox whose question names the document and version, " + "followed by the summary; the answer pins a review to that version and arrives as " + "artifact.approved or artifact.changes_requested. An open request follows the document: a " + "later version moves it to that version and leaves it waiting on you, as a human's reply in " + "its thread does. Only the first move since the request was opened or handed back sends an " + "event, and never to the session whose version made it; dispatch doc-read shows whom it " + "waits on. Once the revision is complete and " + HUMAN_AGREED_TO_DOCUMENT + ", call this again to hand that same Inbox row back. The request carries nothing new. A " + "call while it already waits on the human hands nothing back: the same summary changes " + "nothing, and a different one is refused, since it would rewrite the card the human is " + "reading. Approve and Request changes each close the request, so the next call opens a new " + "one. Call it once per revision, when the revision is complete, never after each edit. An " + "approval goes stale when the document changes outside its decision blocks after it: " + "request approval again once that revision is complete and " + HUMAN_AGREED_TO_DOCUMENT + ", with a one-sentence summary naming what changed since the earlier approval: the card " + "names that approval (version, date, reviewer) and its Show diff control carries the detail. " + "A human's own answer to a decision block carries the approval to the version it writes when " + "that answer is the whole change since the approved version, so nothing is requested for " + "it. A new version of a Legion root spec closes its armed design gate until a human " + "approves it; the carried approval reopens it too. " + "Refused, with nothing sent, while the document holds an open decision block, even when a " + "human asked for approval: the refusal names each block; ask the human to answer or waive " + "it first. " + OWNER_REFERENCE,
+    description: "Ask a human to approve a document at its current version. Before calling, have a fresh read-only reader check the spec against the code and the human's words, then resolve every finding; a Legion architect runs `plan-gap-analyst` and `plan-reviewer`. Opens an approval ask (Approve / " + "Request changes) in the human's Inbox whose question names the document and version, " + "followed by the summary; the answer pins a review to that version and arrives as " + "artifact.approved or artifact.changes_requested. An open request follows the document: a " + "later version moves it to that version and leaves it waiting on you, as a human's reply in " + "its thread does. Only the first move since the request was opened or handed back sends an " + "event, and never to the session whose version made it; dispatch doc-read shows whom it " + "waits on. Once the revision is complete and " + HUMAN_AGREED_TO_DOCUMENT + ", call this again to hand that same Inbox row back. The request carries nothing new. A " + "call while it already waits on the human hands nothing back: the same summary changes " + "nothing, and a different one is refused, since it would rewrite the card the human is " + "reading. Approve and Request changes each close the request, so the next call opens a new " + "one. Call it once per revision, when the revision is complete, never after each edit. An " + "approval goes stale when the document changes outside its decision blocks after it: " + "request approval again once that revision is complete and " + HUMAN_AGREED_TO_DOCUMENT + ", with a one-sentence summary naming what changed since the earlier approval: the card " + "names that approval (version, date, reviewer) and its Show diff control carries the detail. " + "A human's own answer to a decision block carries the approval to the version it writes when " + "that answer is the whole change since the approved version, so nothing is requested for " + "it. A new version of a Legion root spec closes its armed design gate until a human " + "approves it; the carried approval reopens it too. " + "Refused, with nothing sent, while the document holds an open decision block, even when a " + "human asked for approval: the refusal names each block; ask the human to answer or waive " + "it first. " + OWNER_REFERENCE,
     arguments: (z2) => ({
       issue: z2.string().describe(ISSUE_REFERENCE).optional(),
       project: z2.string().describe("Project key owning the document.").optional(),
       artifact: z2.string().describe("Project document artifact id, slug, or filename; primary document by default for an issue.").optional(),
-      summary: z2.string({ min: 1 }).describe(`What the human is approving, in one to three sentences, and nothing else: no commentary on itself or the conversation, and no question; after an earlier approval, one sentence naming what changed since it, since the card shows that approval and a diff. Request approval only once ${HUMAN_AGREED_TO_DOCUMENT}.`)
+      summary: z2.string({ min: 1 }).describe(`What the human is approving, in one to three sentences, and nothing else: no commentary on itself or the conversation, and no question; after an earlier approval, one sentence naming what changed since it, since the card shows that approval and a diff. A Legion architect adds one last sentence with its two spec reviews' results. Request approval only once ${HUMAN_AGREED_TO_DOCUMENT}.`)
     }),
     validation: documentOwnerValidation(true)
   },

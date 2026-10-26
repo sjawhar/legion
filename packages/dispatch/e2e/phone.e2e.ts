@@ -846,7 +846,7 @@ test("a long name ends in an ellipsis wherever a link or control truncates it", 
     await expectEllipsis(authorChip);
     await expect
       .soft(authorChip.getByText(longTitle, { exact: true }))
-      .toHaveAttribute("title", longTitle);
+      .toHaveAttribute("title", `${longTitle} · e2e-long-title`);
 
     await page.goto(`/issues/${issue.key}`);
     await expectEllipsis(page.getByRole("link", { name: longUrl }));

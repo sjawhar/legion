@@ -192,6 +192,17 @@ that does not, Autopilot also rounds the pod's CPU up to a multiple of 250m (the
 A change to either replaces the app's pods as any change to its pod template does: recreated at
 one replica, rolled above one.
 
+`pprofPort`, unset by default, turns on `envoy-dispatch`'s Go profiler: the component sets
+`DISPATCH_PPROF_PORT` to it on the `envoy-dispatch` container alone, and Dispatch serves
+`net/http/pprof` on `127.0.0.1` at that port inside the pod. No Service, NetworkPolicy or other
+container changes, so the profiler is reached only through `kubectl port-forward <pod>
+<port>:<port>`, then `go tool pprof -seconds 30 http://127.0.0.1:<port>/debug/pprof/profile`
+(`packages/envoy/cmd/dispatch/README.md`, "Profiling"). Unset, nothing is rendered, so a
+deployment that leaves it unset renders the pod it always had. Before it registers a resource the
+component refuses, by name, a value outside 1-65535 and the two ports the app pod already binds on
+its loopback, `envoy-dispatch`'s `8766` and the `cloud-sql-proxy` sidecar's `5432`. Setting or
+unsetting it replaces the app's pods as any change to its pod template does.
+
 Two optional groups each come as all their inputs or none. Neither takes a secret value: the
 broker relay's credential is a token the kubelet mints and the App key is read at run time, so no
 broker credential or App key ever enters the component or its Pulumi state. Both reach the app's
@@ -280,7 +291,8 @@ Every image must be pinned by SHA-256 digest. Verify an `envoyImage` digest from
 [Running Dispatch](https://sjawhar.github.io/legion/dispatch/running-dispatch/) gives. The
 component refuses invalid hostnames, tailnet DNS names, tags, image references, sign-in domains,
 namespaces, allowed namespaces, an `appCpu` or `appMemory` outside Autopilot's bounds for the app
-pod (above), missing inputs, and nkey seeds in its own name and in plain inputs
+pod (above), a `pprofPort` outside 1-65535 or on a port the app pod already binds (above), missing
+inputs, and nkey seeds in its own name and in plain inputs
 before it registers a resource; it refuses an
 `agentSecretsUrl` or an `agentSecretsAudience` whose partner input is missing, an `appClientId`,
 `appId`, `appPrivateKeySecretName` or `appPrivateKeySecretKey` set without the others (each missing
