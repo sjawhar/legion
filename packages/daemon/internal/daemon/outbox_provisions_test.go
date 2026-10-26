@@ -173,3 +173,18 @@ func TestTwoLaunchesThatFindOneWorkspaceMissingProvisionItOnce(t *testing.T) {
 		t.Errorf("two launches provisioned the missing workspace %d times, want once", got)
 	}
 }
+
+// hostWorkspace makes issue's workspace directory under stateDir, as a provision before it left it:
+// a launch under a runtime that leaves workspaces to the daemon's host (the fake runtime's
+// default, as tmux) then finds it there and provisions nothing (specs.ensureWorkspace), so a test
+// about something else never reaches GitHub.
+func hostWorkspace(t *testing.T, stateDir, repo, issue string) {
+	t.Helper()
+	located, err := workspace.Location(stateDir, ghrepo.MustParse(repo), issue)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(located.Dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+}

@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"slices"
@@ -8,7 +9,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
@@ -388,6 +392,67 @@ func TestTheOperatorsRetryOfAFailedPhaseWorkerIsRefused(t *testing.T) {
 	if got := h.runtime.Calls()[calls:]; len(got) != 0 {
 		t.Errorf("the refused retry asked the runtime %+v", got)
 	}
+}
+
+// A failed phase worker whose issue the workflow holds — its working role failed — is retried by
+// the operator as its architect's retry_or_escalate retries it: the route applies the held phase's
+// retry (intake.RetryOrEscalate, decision retry), whose start relaunches the role, and answers 202
+// with the claim as it is until that start runs, asking the runtime nothing itself. A refusal of the
+// fact is the route's answer. `legion claims retry --failed` relies on this to relaunch every
+// claim a runtime failed to launch once the cause is gone.
+func TestTheOperatorsRetryOfAFailedPhaseWorkerOnAHeldIssueRetriesThePhase(t *testing.T) {
+	h := newHarness(t)
+	facts := &factRecorder{}
+	h.handler = NewServer("127.0.0.1", 8437, Options{
+		Supervisor: h.supervisor, BootTokens: h.tokens, Project: testProject, OperatorToken: testOperatorToken, Controller: h.store,
+		Pool: h.store.Pool(), Record: record.NewStore(), Releaser: h.runtime, Trees: h.store, Handlers: []intake.Handler{facts},
+	}).Handler
+	h.operator(http.MethodPost, "/legion/v1/operator/claims", spawnBody())
+	refused := fake.SpawnResult{Err: errors.New("the runtime refused the launch")}
+	h.runtime.ScriptSpawn(refused, refused, refused)
+	worker := spawnBody()
+	worker.Issue, worker.Role = "LEGION-209", claim.RoleImplementer
+	if recorder := h.operator(http.MethodPost, "/legion/v1/operator/claims", worker); recorder.Code != http.StatusInternalServerError {
+		t.Fatalf("spawn of a worker whose every launch the runtime refused = %d, want 500; body %s", recorder.Code, recorder.Body)
+	}
+	workerToken, err := claim.NewToken(testProject, worker.Issue, worker.Role)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parent := "LEGION-208"
+	if err := h.store.Tx(context.Background(), func(tx pgx.Tx) error {
+		return record.NewStore().PutIssue(context.Background(), tx, record.Issue{
+			Key: "LEGION-209", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-208", Project: testProject,
+			Title: "LEGION-209", Parent: &parent, Phase: phase.Held, Hold: &record.Hold{From: phase.Implementing}, Generation: 1, Status: "in_progress",
+		})
+	}); err != nil {
+		t.Fatalf("seed the held issue: %v", err)
+	}
+	calls := len(h.runtime.Calls())
+
+	recorder := h.operator(http.MethodPost, "/legion/v1/operator/claims/"+string(workerToken)+"/retry", nil)
+
+	if recorder.Code != http.StatusAccepted {
+		t.Fatalf("retry of a failed worker on a held issue = %d, want 202; body %s", recorder.Code, recorder.Body)
+	}
+	var got OperatorClaim
+	decodeInto(t, recorder, &got)
+	if got.Token != workerToken || got.State != string(supervise.StateFailed) {
+		t.Errorf("retry answered %+v, want the worker as it is until the phase's start runs", got)
+	}
+	applied := facts.recorded()
+	if len(applied) != 1 {
+		t.Fatalf("the retry applied %d facts, want the held phase's retry alone: %#v", len(applied), applied)
+	}
+	if fact, ok := applied[0].(intake.RetryOrEscalate); !ok || fact.Issue != "LEGION-209" || fact.Decision != intake.RetryDecision {
+		t.Errorf("the retry applied %#v, want RetryOrEscalate{LEGION-209, retry}", applied[0])
+	}
+	if got := h.runtime.Calls()[calls:]; len(got) != 0 {
+		t.Errorf("the route asked the runtime %+v itself, want the phase's start to", got)
+	}
+
+	facts.refusal = &intake.Refusal{Status: http.StatusConflict, Message: "LEGION-209 is not held"}
+	wantRefusal(t, h.operator(http.MethodPost, "/legion/v1/operator/claims/"+string(workerToken)+"/retry", nil), http.StatusConflict, "LEGION-209 is not held")
 }
 
 // A registered agent holds a secret that authenticates its requests, and no timer runs on it until

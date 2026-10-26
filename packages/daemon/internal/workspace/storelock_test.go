@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -191,5 +192,44 @@ func TestTwoIssuesProvisionedAtOnceOverlapOnlyInTheirCheckouts(t *testing.T) {
 			t.Errorf("%s's bookmark is on %s, want its working copy %s", issue, bookmark, at)
 		}
 		runSetup(t, working.Dir, "jj", "status", "-R", working.Dir)
+	}
+}
+
+// A host provision runs its fetch under the store lock, so it fetches only what the issue needs —
+// the repository's default branch and the issue's own branch, each by its exact name — never every
+// branch GitHub has: another issue's branch pushed since is not brought, and the issue's own branch,
+// made on GitHub before its workspace, is.
+func TestAHostProvisionFetchesOnlyTheBranchesItNeeds(t *testing.T) {
+	run := newLocalRunner(t)
+	req := provisionRequest(t)
+	req.Issue = "WIDGETS-41"
+	first, err := Provision(context.Background(), run, req)
+	if err != nil {
+		t.Fatalf("Provision of the first issue: %v", err)
+	}
+	own := pushRemoteBranch(t, run.remote, "legion/WIDGETS-42", "own.txt")
+	pushRemoteBranch(t, run.remote, "legion/WIDGETS-99", "other.txt")
+	before := len(run.Calls())
+	req.Issue = "WIDGETS-42"
+	working, err := Provision(context.Background(), run, req)
+	if err != nil {
+		t.Fatalf("Provision of WIDGETS-42: %v", err)
+	}
+	var fetch Command
+	for _, call := range run.Calls()[before:] {
+		if commandWith(call.Argv, "jj", "git", "fetch") {
+			fetch = call
+		}
+	}
+	for _, branch := range []string{"main", "legion/WIDGETS-42"} {
+		if !slices.Contains(fetch.Argv, "exact:"+jjString(branch)) {
+			t.Errorf("the fetch %q does not name %s exactly", fetch.Argv, branch)
+		}
+	}
+	if parent := commitOf(t, working.Dir, "@-"); parent != own {
+		t.Errorf("WIDGETS-42's workspace starts at %s, want its own branch's %s", parent, own)
+	}
+	if listed := runSetup(t, first.Clone, "jj", "bookmark", "list", "--all-remotes", "--ignore-working-copy", "-R", first.Clone); strings.Contains(listed, "WIDGETS-99") {
+		t.Errorf("the fetch brought another issue's branch: %q", listed)
 	}
 }

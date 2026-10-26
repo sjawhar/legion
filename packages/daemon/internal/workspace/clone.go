@@ -150,7 +150,11 @@ func (dir feedSource) open(repository ghrepo.Repository, bookmark, defaultBranch
 }
 
 // FromGitHub is GitHub itself, reached with the one-shot credential holding token, created under
-// credentialDir and removed again: the tmux runtime, which names its state directory.
+// credentialDir and removed again: the tmux runtime, which names its state directory. Its fetch
+// brings only the repository's default branch and the issue's own branch, by their exact names: it
+// runs under the shared clone's store lock (Request.StoreLock), and every branch of a busy
+// repository would hold every other issue's provision behind it. A pane's own `jj git fetch`
+// brings the rest when it needs them.
 func FromGitHub(token, credentialDir string) Source {
 	return gitHubSource{token: token, credentialDir: credentialDir}
 }
@@ -164,8 +168,13 @@ func (s gitHubSource) check(ghrepo.Repository) error {
 	return nil
 }
 
-func (s gitHubSource) open(ghrepo.Repository, string, string) (remote, error) {
-	return newProvisioningCredential(s.credentialDir, s.token)
+func (s gitHubSource) open(_ ghrepo.Repository, bookmark, defaultBranch string) (remote, error) {
+	r, err := newProvisioningCredential(s.credentialDir, s.token)
+	if err != nil {
+		return remote{}, err
+	}
+	r.branches = []string{defaultBranch, bookmark}
+	return r, nil
 }
 
 // FeedRepository is where Fetch clones repository under a feed directory, and where a feed

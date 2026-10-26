@@ -454,6 +454,7 @@ func TestABootResumesASuspendedClaimThatOwnsItsIssuesPhase(t *testing.T) {
 		supervise.Claim{Token: implementer, Project: project, Tree: root, Issue: root, Role: claim.RoleImplementer, Generation: 1,
 			State: supervise.StateSuspended, SuspendedBy: supervise.SuspendedByDaemon, Session: "ses_implementer", SessionFile: filepath.Join(cfg.StateDir, "implementer.jsonl")})
 	writePrompt(t, cfg, implementer)
+	hostWorkspace(t, cfg.StateDir, "acme/widgets", root)
 	rt := fake.NewRuntime()
 	o := fakeRuntime(rt, &built{})
 	o.workflowTokens = &workflowTokenRecorder{}
