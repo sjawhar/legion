@@ -2,32 +2,20 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-448",
-  "completed": "2026-10-26T20:13:39Z",
-  "round": 3,
-  "decision": "changes_requested",
+  "completed": "2026-10-26T21:30:21Z",
+  "round": 4,
+  "decision": "approved",
   "critical": 0,
   "important": 0,
-  "minor": 2,
-  "reviewedCodeHead": "7912696a2f26f91538f631c13f95fe07b3e84059",
-  "scope": "Narrow (INFRA-204 architect): C1-C4 of spec v4, the round-1 and round-2 fixes, the tester's two closed-document fixes; cleanup on the Fast-follow line only.",
-  "keyFindings": [
-    {
-      "severity": "minor",
-      "file": "packages/envoy/cmd/listener/legion_agents.go:120",
-      "description": "When a connection event lands during the open, open moves the new store to the latest connection with store.Reopen and, on failure, only logs and still returns true. The retry ends, reconnect already returned nil for that event, and the store stays on the replaced, closed connection, so the routes fail until another connection event that a healthy connection never brings. Fix: on a Reopen failure store the unavailable state and return false so the retry opens again; correct the comment at :111-114."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/envoy/cmd/listener/legion_agents.go:159",
-      "description": "close cancels the retry's context but openBucket takes none, so a drain that starts during an open waits up to its 10 s, and can eat the drain's hook reserve so conn.Drain passes its deadline. Fix: close calls r.stop() without waiting (an open finishing later only stores state), or pass a context into legionagents.Open."
-    }
+  "minor": 0,
+  "reviewedCodeHead": "05b29be5dd913cc247b7632092bf74775a91c456",
+  "scope": "Narrow (INFRA-204 architect): C1-C4 of spec v4, the earlier rounds' fixes, the tester's two closed-document fixes; cleanup on the Fast-follow line only.",
+  "keyFindings": [],
+  "roundThreeFixesVerified": [
+    "legion_agents.go open: a failed move to the latest connection stores the unavailable state and returns false, so the retry opens again; the INFO line follows the move; TestALegionAgentRegistryWhoseMoveToANewConnectionFailsOpensAgainOnTheLatest fails on the old code",
+    "legion_agents.go close: only stops the retry; an open under way ends in its own timeouts and only stores state; TestClosingALegionAgentRegistryDoesNotWaitForAnOpenUnderWay fails on the old code"
   ],
-  "roundTwoFixesVerified": [
-    "registry open retried in the background with a backoff and at once after a reconnect; first open synchronous, one retry goroutine, no lost wakeup (conn/state ordering); log and 503 no longer blame only the grant",
-    "connection.ts re-runs firstSync(false) when a later admission turns read-write; authenticated reset on close; pending-sync restore skips this page's own rows (row.key[1] is the clientId the store was opened with, read in the same step as ownClient)",
-    "Get replaces the session's sibling with the session-key entry before succession(); IndexFunc always finds it"
-  ],
-  "fastFollow": "AGENTS.md:2098,2104, CHANGELOG.md:33, legion_agents_test.go:370-371 and the PR body's Deploy order say a missing grant logs one ERROR, but each retry's open makes the bus log one 'envoy nats async error' (permissions violation), about one per 70 s at the capped backoff; say so. connection.ts announced/restoredReadOnly could be one boolean|undefined; close's nil-stop guard is dead.",
-  "thermonuclear": "deep-review: CHANGES (repeated async ERROR vs docs; drain waits on open); code-quality: CHANGES (failed Reopen ends the retry); both at c600b111; provider not verified",
-  "ci": "At code head 7912696a (newest pull_request run; compare to c600b111 is .legion/ only, 2 files): typecheck and pr-title success, lint in progress, test queued; a request for changes does not wait. Mergeable."
+  "fastFollow": "A rare self-healing interleaving: a hook can move the store while the open's own move fails, leaving 503 until the backoff timer (at most 1 min); wake the retry in the move-failure branch and correct the comment at legion_agents.go:104-106. retried is read only by a test; the two failure branches could share one helper with named kinds. The 'one ERROR' docs (each retry makes the bus log one nats async error) and the round-2 cleanups stay on the PR's Fast-follow line.",
+  "thermonuclear": "deep-review: APPROVE; code-quality: APPROVE; both at 44eab33b, both ran go test -race -count=3 ./cmd/listener/ -run 'Legion|Registry' green; provider not verified",
+  "ci": "At code head 05b29be5 (newest pull_request run; compare to 44eab33b is .legion/ only, 2 files): required lint, typecheck, test and pr-title success. GitHub reports the pull request CONFLICTING with main after INFRA-440 (#2237) merged; the conflict merge goes through the implementer and the fingerprint rule."
 }
