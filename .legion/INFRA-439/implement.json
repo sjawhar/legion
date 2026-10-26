@@ -2,33 +2,61 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-439",
-  "completed": "2026-10-26T17:05:00Z",
-  "pr": "https://github.com/sjawhar/legion/pull/2228",
-  "round": "Answers the tester's failure at a17a6e6f (review finding 1, the architect's NARROW scope): a BTW whose side turn answered, with its reply POST in flight when the process died, came back after the resume as a steering card. A process death interrupted this round once; the fix it left uncommitted was re-verified and committed as 3f7f2fc7.",
+  "completed": "2026-10-26T17:19:05Z",
+  "pr": 2228,
+  "round": "send-back after testing round 9: a BTW reaching replay must be one inert notice in both plugins",
   "proof": [
     {
-      "criterion": "Review finding 1: a BTW is never replayed as a steering card on any path (reply fails, sweep during the reply POST, process death with the reply POST in flight)",
-      "surface": "real `omp --mode rpc` session (omp 18.8.9, workspace pi-envoy with tools), a real Dispatch server on embedded Postgres, the listener and natsd built from this checkout, a proxy holding or failing Dispatch's reply route",
-      "command": "bash /legion/scratch/tmp/infra439/r14b.sh (the tester's r14 driver cut before leg B3; output: https://github.com/sjawhar/legion/pull/2228#issuecomment-6422119936)",
-      "observed": "RESULT: B1-no-card:PASS B1-retry-answers:PASS B1-no-card-after-retry:PASS B2-sweep-in-flight:PASS B2-killed-in-flight:PASS. B2-killed-in-flight: alice's BTW ac957758, side turn answered, reply POST held, omp SIGKILLed and resumed on the same session file: 0 cards or turns with the BTW body",
-      "headSha": "3f7f2fc7736610e32d5e0a774a5e78e8bda3228e",
-      "negativeControl": "the tester's run of the same leg at 9ccd956d (/legion/scratch/tmp/adv/r14-b1b2.log, 16:34:11Z): after resume, 1 card with the BTW body"
+      "criterion": "A BTW published while an Oh My Pi session's NATS connection is down reaches replay as at most one card that starts no turn",
+      "surface": "real omp --mode rpc 18.8.9 with workspace pi-envoy, real Dispatch, natsd -js, listener built from this head (tester's r17.sh leg B5, verdict tightened to the architect's requirement)",
+      "command": "bash /legion/scratch/tmp/infra439/r17b.sh (output https://github.com/sjawhar/legion/pull/2228#issuecomment-6422658695)",
+      "observed": "R17B RESULT: B5-inert:PASS(cards=1,turns=0,assistant_after=0); the card ends with the inert note 'This BTW was asked while this session was not taking messages... runs no side turn and needs no answer'",
+      "headSha": "cdc5696f34f2d1808cbe31aca29f80a13e8dddf2",
+      "negativeControl": "the tester's run of the same leg at 3f7f2fc7 (/legion/scratch/tmp/smoke-replay.s68Zbl): card at 17:01:30.798Z followed by an assistant 'ok' at 17:01:31.257Z, a turn the steer card started"
     },
     {
-      "criterion": "The tester's red test and the BTW tests",
-      "surface": "pi-envoy extension under the mocked host",
-      "command": "cd packages/pi-envoy && bun test (990 pass); the red test file is identical to f2828f31",
-      "observed": "'whose side turn answered is not shown after a restart that cut its reply's POST short' passes, with every earlier BTW test (503 refusal, sweep during the POST, shutdown refusal then resume, Retry still runs)",
-      "headSha": "3f7f2fc7736610e32d5e0a774a5e78e8bda3228e",
-      "negativeControl": "at a17a6e6f the red test fails: expected 0 cards, received 1"
+      "criterion": "The tester's red test 8c4e89118e1b passes unmodified; a failure notice naming a BTW is inert too",
+      "surface": "pi-envoy bun test (extensions/envoy.test.ts)",
+      "command": "cd packages/pi-envoy && bun test (992 pass, 0 fail); the red test's body diffed against 8c4e8911: identical",
+      "observed": "'one the session never received live reaches replay as at most one card that starts no turn' and the new 'whose replayed card the host refuses three times gets a failure notice that starts no turn' pass",
+      "headSha": "cdc5696f34f2d1808cbe31aca29f80a13e8dddf2",
+      "negativeControl": "with the failure notice handed as 'steer' instead of the BTW check, the new notice test fails"
+    },
+    {
+      "criterion": "Claude Code: a BTW that reaches replay is never handed, on either delivery path",
+      "surface": "claude-envoy bun test (tests/envoy-channel-replay.test.ts), channel notification and the Legion bridge inbox socket",
+      "command": "cd packages/claude-envoy && bun test (214 pass, 0 fail); bun run build && bun run check-dist",
+      "observed": "the stored BTW reaches neither sink while the peer message stored after it is shown once",
+      "headSha": "cdc5696f34f2d1808cbe31aca29f80a13e8dddf2",
+      "negativeControl": "with the btw branch disabled, both new tests fail (the BTW is handed to each sink)"
+    },
+    {
+      "criterion": "Replay still shows each missed event exactly once on a real omp session",
+      "surface": "packages/pi-envoy/scripts/smoke-replay.sh on real omp, natsd -js and the workspace-built listener",
+      "command": "bash packages/pi-envoy/scripts/smoke-replay.sh",
+      "observed": "SMOKE REPLAY PASS: events published while the connection was down and while omp was stopped each shown exactly once",
+      "headSha": "cdc5696f34f2d1808cbe31aca29f80a13e8dddf2",
+      "negativeControl": "the released plugin 10.17.7 shows no entry for an event published while its connection was down (earlier run, https://github.com/sjawhar/legion/pull/2228#issuecomment-6411765212)"
     }
   ],
   "filesChanged": [
-    "packages/pi-envoy/extensions/envoy.ts: every BTW is recorded by its event id (recordDeliveredFor, the delivering session) before its side turn and before any reply; refuseBTW folded into that",
-    "packages/pi-envoy/AGENTS.md, CHANGELOG.md, packages/envoy-client/README.md: the BTW recording point"
+    "packages/pi-envoy/extensions/envoy.ts",
+    "packages/pi-envoy/src/unwritten-frames.ts",
+    "packages/pi-envoy/extensions/envoy.test.ts",
+    "packages/pi-envoy/AGENTS.md",
+    "packages/pi-envoy/CHANGELOG.md",
+    "packages/claude-envoy/src/envoy-channel-server.ts",
+    "packages/claude-envoy/tests/envoy-channel-replay.test.ts",
+    "packages/claude-envoy/dist/envoy-channel.js",
+    "packages/claude-envoy/CHANGELOG.md",
+    "docs/site/src/content/docs/dispatch/envoy.md"
+  ],
+  "trickyParts": [
+    "CardDelivery gains 'inert' (a steer with triggerTurn false), stored on the unwritten card, so UnwrittenFrames.handBackWithdrawn hands a withdrawn BTW notice back inert too.",
+    "A failure notice is built from the replay engine's notice, which carries no delivery mode, so the instance remembers BTW event ids it met (live or replayed, bounded at 1,000) and hands a notice naming one inert.",
+    "Claude Code has no way to show a message without starting a turn (the bridge inbox starts one when idle, and the channel notification is a turn too), and the listener never sends it a BTW, so a replayed BTW is passed over ('suppressed') and named on stderr."
   ],
   "deviations": [
-    "smoke-replay.sh was not re-run this round: the change is confined to the BTW branch, which the smoke script does not drive; r14 B1/B2 drove it live.",
-    "After the pod restart, scratch files were group-writable: packages/pi-envoy/bin/dispatch (on disk 775, recorded 755) failed prepack.test.ts's mode check, and the tester's Postgres data directory refused to start; both were restored to their correct modes, no content changed."
+    "Claude Code passes a replayed BTW over instead of showing an inert notice, because neither of its delivery paths can show a message without starting a turn. This was the alternative the architect allowed: report precisely why the inert notice is impossible there."
   ]
 }
