@@ -426,7 +426,7 @@ ships no earlier than the next release, once no running build reads the old shap
 
 A migration that cannot be written that way is a stop-the-world migration: it is deployed with no
 server of the earlier release running, and that is an exception named in the pull request, not a
-default (`0113` below was one). The pre-deploy census ("Pre-deploy census" below) is unchanged by
+default (`0113` and `0117` below are the two). The pre-deploy census ("Pre-deploy census" below) is unchanged by
 that rule and still applies to every migration: it is taken before any migration of the release
 applies, and a census that refuses fails the deploy before the service moves. The rule in brief
 is `internal/dispatch/store/README.md`, beside the migrations directory rather than in it, since
@@ -664,13 +664,55 @@ image and confirms the stop before it reads the schema, and when the schema has 
 the previous image runs against, it refuses to start that image again and exits `1` for a forward
 recovery.
 
-Migration `0117_ask_followers_session` adds the index `ask_followers_session_id` on
+Migration `0117_architecture_sources_per_repo` lets a project import its components from more than
+one repository (`packages/envoy/AGENTS.md`). `architecture_sources` gains `id`, which names a
+source within its project, and its primary key moves from `(project_key)` to `(project_key, id)`,
+with a unique index on `(project_key, repo)`, so a repository is a source of a project at most
+once. `components` gains `source_id` and a foreign key on `(project_key, source_id)` to its
+source's row, `on delete cascade`, so deleting a source deletes its components. Both columns are
+added with the constant default `0`, which rewrites no row, and the default is then dropped:
+every existing source reads `id` 0, every existing component `source_id` 0 (its project's one
+existing source), and a source added later gets an `id` from 1 on. It takes `architecture_sources`
+and `components` in `ACCESS EXCLUSIVE` first and holds both to commit. Its census counts the
+components whose project has no source, the rows the foreign key would refuse:
+
+```sql
+select count(*) from components c
+where not exists (select 1 from architecture_sources s where s.project_key = c.project_key);
+```
+
+Only direct SQL writes such a component: the importer writes components under their source's row
+lock, and deleting a source deletes its components. A census that refuses on it is repaired on the
+release still serving, before the deploy, by deleting them:
+`delete from components c where not exists (select 1 from architecture_sources s where s.project_key = c.project_key)`;
+then take the census again.
+
+**`0117` is a stop-the-world migration: deploy it with no server of the earlier release running,
+and never start a release older than `0117` over it again.** Stop the earlier release, or scale it
+to zero, before the new release boots and migrates: a Kubernetes Deployment's
+`strategy: Recreate`, which `envoy-infra:gcp:Dispatch` uses at its default one replica
+(`packages/envoy/infra/README.md`); a deployment running more than one replica, which rolls, is
+scaled to zero first. The compose auto-deployer above stops the old container before it starts the
+new one. A failed deploy recovers forward, not by rolling the image back. The earlier release does
+not work over the new schema, and nothing at boot stops it from serving:
+
+- Its save of a project's source upserts `on conflict (project_key)`, which no unique index covers
+  once `0117` commits, so Postgres refuses the statement and the save answers `500`.
+- Its import takes one source row of the project as the project's one source, whichever row
+  Postgres returns first. When the model changed, it deletes every component of the project, every
+  source's, and inserts that source's components with no `source_id`, which has no default. A model
+  holding a component fails on the not-null column and rolls back, and its failure record writes
+  the error onto every source row of the project. A model holding none (no file in that branch's
+  `.dispatch/architecture/`) commits the delete, and every source's components are gone.
+- Its delete removes every source of the project and every component of the project.
+
+Migration `0118_ask_followers_session` adds the index `ask_followers_session_id` on
 `ask_followers (session_id)`, the one inbound arm of `graph_edges` that had none: the table's primary
 key leads with `ask_id`. `refs.BacklinkCounts` counts a node's inbound edges by reading the view's
 arms that can point at its kind, each through its own index, rather than the view. `create index`
 holds `SHARE` on `ask_followers` while it builds, which waits out an open write of a follower and
 holds off a new one for that moment; reads are not held. The table holds about 1,200 rows. Its
-census answers `0`.
+census answers `0`. It is an ordinary migration: an earlier release serves beside it.
 
 Migration `0009_project_artifacts` deletes malformed derived artifact references, reports their
 count, and re-derives them from source text on the next write. It aborts server boot before a

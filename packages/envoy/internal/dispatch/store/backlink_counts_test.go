@@ -92,10 +92,12 @@ func seedEveryInboundArm(t *testing.T, ctx context.Context, store *Store) {
 		insert into ask_followers (ask_id, session_id)
 			select id, 's2' from asks where question = 'plain one?';
 
+		insert into architecture_sources (project_key, id, repo, branch, installation_id, created_by)
+			values ('CORE', 0, 'acme/core', 'main', 1, '{"kind":"user","id":"alice"}');
 		insert into architecture_snapshots (project_key, commit, files)
 			values ('CORE', 'abc123', '{}'::jsonb);
-		insert into components (project_key, id, title, prose, parent, snapshot_id)
-			select 'CORE', c.id, c.title, '', c.parent, s.id
+		insert into components (project_key, id, title, prose, parent, snapshot_id, source_id)
+			select 'CORE', c.id, c.title, '', c.parent, s.id, 0
 			from architecture_snapshots s,
 			     (values ('web', 'Web', null), ('store', 'Store', null),
 			             ('api', 'API', 'web'), ('ui', 'UI', 'web')) as c(id, title, parent)

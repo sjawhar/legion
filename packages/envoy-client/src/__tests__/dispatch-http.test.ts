@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import type { IssueSummary } from "@legion/contracts";
+import type { ArchitectureSource, IssueSummary } from "@legion/contracts";
 import { DispatchClient, DispatchGatewayError } from "../dispatch-http";
 import { fakeSearchResponse } from "./fake-search-response";
 
@@ -1023,5 +1023,155 @@ test("createProject surfaces PROJECT_EXISTS as the refusal's code", async () => 
     code: "PROJECT_EXISTS",
     status: 409,
     fromDispatch: true,
+  });
+});
+
+test("syncArchitectureSource refuses a repository with an empty owner or name without a request", async () => {
+  const { fetchImpl, requests } = fakeFetch([]);
+  const client = new DispatchClient("http://dispatch.test", "secret", fetchImpl);
+
+  for (const repo of ["acme/", "/infra"]) {
+    await expect(client.syncArchitectureSource("CORE", repo)).rejects.toThrow(
+      `repository must be owner/name, got ${JSON.stringify(repo)}`
+    );
+  }
+  expect(requests).toEqual([]);
+});
+
+// A server older than the list route answers it with no route; the client reads the singular
+// route that server does serve, so a rollout that mixes versions still reads the project's model.
+describe("listArchitectureSources against a server older than the list route", () => {
+  const noRoute = jsonResponse(
+    {
+      code: "NOT_FOUND",
+      error: "no route for GET /api/v1/projects/CORE/architecture-sources",
+      hint: "GET /api/v1 lists every route",
+    },
+    404
+  );
+  const source: ArchitectureSource = {
+    project: "CORE",
+    repo: "legion/arch",
+    branch: "main",
+    enabled: true,
+    created_by: { kind: "user", id: "alice" },
+    created_at: "2026-09-23T00:00:00Z",
+    last_sync_at: null,
+    last_commit: null,
+    last_error: null,
+    components: 2,
+  };
+
+  test.each([
+    ["200 null as no source", jsonResponse(null), []],
+    [
+      "a pre-#1522 404 SOURCE_NOT_FOUND as no source",
+      jsonResponse({ code: "SOURCE_NOT_FOUND", error: "no architecture source configured" }, 404),
+      [],
+    ],
+    ["a row as that one source", jsonResponse(source), [source]],
+  ])("reads the singular route's %s", async (_answer, singular, want) => {
+    const { fetchImpl, requests } = fakeFetch([noRoute.clone(), singular]);
+    const client = new DispatchClient("http://dispatch.test", "secret", fetchImpl);
+
+    expect(await client.listArchitectureSources("CORE")).toEqual(want);
+    expect(requests.map((request) => new URL(request.url).pathname)).toEqual([
+      "/api/v1/projects/CORE/architecture-sources",
+      "/api/v1/projects/CORE/architecture-source",
+    ]);
+  });
+
+  test("throws any other answer to the singular read", async () => {
+    const { fetchImpl } = fakeFetch([
+      noRoute.clone(),
+      jsonResponse({ code: "NOT_FOUND", error: "not found" }, 404),
+    ]);
+    const client = new DispatchClient("http://dispatch.test", "secret", fetchImpl);
+
+    await expect(client.listArchitectureSources("CORE")).rejects.toMatchObject({
+      code: "NOT_FOUND",
+      status: 404,
+      message: "not found",
+    });
+  });
+
+  test("throws a current server's 404 for a project it does not know without the singular read", async () => {
+    const { fetchImpl, requests } = fakeFetch([
+      jsonResponse({ code: "NOT_FOUND", error: "not found" }, 404),
+    ]);
+    const client = new DispatchClient("http://dispatch.test", "secret", fetchImpl);
+
+    await expect(client.listArchitectureSources("CORE")).rejects.toMatchObject({
+      code: "NOT_FOUND",
+      status: 404,
+      message: "not found",
+    });
+    expect(requests).toHaveLength(1);
+  });
+});
+
+// A server older than the every-source sync route answers it with no route; the client asks that
+// server's singular sync, so a rollout that mixes versions still syncs the project's one source.
+describe("syncArchitectureSources against a server older than the every-source sync route", () => {
+  const noRoute = jsonResponse(
+    {
+      code: "NOT_FOUND",
+      error: "no route for POST /api/v1/projects/CORE/architecture-sources/sync",
+      hint: "GET /api/v1 lists every route",
+    },
+    404
+  );
+  const source: ArchitectureSource = {
+    project: "CORE",
+    repo: "legion/arch",
+    branch: "main",
+    enabled: true,
+    created_by: { kind: "user", id: "alice" },
+    created_at: "2026-09-23T00:00:00Z",
+    last_sync_at: "2026-09-24T00:00:00Z",
+    last_commit: "abc123",
+    last_error: null,
+    components: 2,
+  };
+
+  test("returns the singular sync's row as that one source", async () => {
+    const { fetchImpl, requests } = fakeFetch([noRoute.clone(), jsonResponse(source)]);
+    const client = new DispatchClient("http://dispatch.test", "secret", fetchImpl);
+
+    expect(await client.syncArchitectureSources("CORE")).toEqual([source]);
+    expect(
+      requests.map((request) => `${request.init.method} ${new URL(request.url).pathname}`)
+    ).toEqual([
+      "POST /api/v1/projects/CORE/architecture-sources/sync",
+      "POST /api/v1/projects/CORE/architecture-source/sync",
+    ]);
+  });
+
+  test("throws the singular sync's 404 SOURCE_NOT_FOUND for a project with no source", async () => {
+    const { fetchImpl } = fakeFetch([
+      noRoute.clone(),
+      jsonResponse({ code: "SOURCE_NOT_FOUND", error: "no architecture source configured" }, 404),
+    ]);
+    const client = new DispatchClient("http://dispatch.test", "secret", fetchImpl);
+
+    await expect(client.syncArchitectureSources("CORE")).rejects.toMatchObject({
+      code: "SOURCE_NOT_FOUND",
+      status: 404,
+      message: "no architecture source configured",
+    });
+  });
+
+  test("throws a current server's 404 for a project it does not know without the singular sync", async () => {
+    const { fetchImpl, requests } = fakeFetch([
+      jsonResponse({ code: "NOT_FOUND", error: "not found" }, 404),
+    ]);
+    const client = new DispatchClient("http://dispatch.test", "secret", fetchImpl);
+
+    await expect(client.syncArchitectureSources("CORE")).rejects.toMatchObject({
+      code: "NOT_FOUND",
+      status: 404,
+      message: "not found",
+    });
+    expect(requests).toHaveLength(1);
   });
 });

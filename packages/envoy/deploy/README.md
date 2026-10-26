@@ -94,8 +94,8 @@ it rolls, is supported under the preconditions the server's own guidance names â
 `DISPATCH_SIGNING_KEY` every process is given, and every migration written to leave the release
 before it able to read and write the schema (`../cmd/dispatch/README.md`, "Running more than one
 process" and "Database migrations"). What no deployment does is start an image older than its
-database's schema: migration `0113` was deployed with no earlier release running, and none is
-started over it again.
+database's schema: migrations `0113` and `0117` are each deployed with no earlier release running,
+and none is started over either again.
 
 Run it continuously in its supervised host service, or use one pass for a
 smoke check:

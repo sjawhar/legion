@@ -113,7 +113,7 @@ var inboundArms = map[string][]inboundArm{
 		{"replies_to", `select in_reply_to::text as to_id from messages where in_reply_to is not null and in_reply_to::text = any($1)`},
 	},
 	"session": {
-		// The asks a session follows. Index ask_followers_session_id (migration 0117).
+		// The asks a session follows. Index ask_followers_session_id (migration 0118).
 		{"followed_by", `select session_id as to_id from ask_followers where session_id = any($1)`},
 	},
 	"component": {
