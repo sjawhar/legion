@@ -219,7 +219,9 @@ Neither the notice nor the slot it frees is a reason for the controller to label
 a labelled root in `todo` takes that slot through the waiting line, as for any free slot.
 Only a person's act answers that wait. A wait on a question is answered by a person's answer,
 resolution or reply on that ask (its thread, closed or not), by the person's approval or changes
-request of the root's spec, or, once the question's decision block has left the spec, by
+request of the root's spec while a design gate registered on the root's own document holds that
+spec (the daemon applies a review only through such a gate, so a review of a document no gate of
+the root names answers nothing), or, once the question's decision block has left the spec, by
 Dispatch's settlement retracting it, since no person can answer a retracted question; the resume
 task then says it was retracted. A wait on the design gate is answered by approval, requested
 changes, a person's answer or resolution of an ask of the root, a person's reply that hands an open
