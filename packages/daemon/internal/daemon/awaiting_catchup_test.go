@@ -211,6 +211,9 @@ func TestCatchUpReadsAnAdmittedRootsAsksFromItsLastHandout(t *testing.T) {
 		if err := records.StartHandout(ctx, tx, "CAPTURE-100"); err != nil {
 			return err
 		}
+		if err := records.PutSlot(ctx, tx, record.Slot{Issue: "CAPTURE-100", Index: 0, AdmittedAt: catchUpClock()}); err != nil {
+			return err
+		}
 		return seedCaptureArchitect(ctx, tx, true)
 	})
 	if err := bootCatchUp(t, w); err != nil {

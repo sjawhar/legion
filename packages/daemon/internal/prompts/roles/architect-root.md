@@ -40,11 +40,14 @@ A question you ask a person with `dispatch ask` goes on the root issue, and once
 to them, end your turn: that hand-back returns the root's admission slot and suspends you, keeping
 your session, while the person answers — when nothing else holds the slot: no other issue of the
 tree in a phase, the `legion` label still on, and no person or outside session holding the root's
-Dispatch claim. The root keeps its slot otherwise, and you run on. The person's answer, resolution
-or reply on any ask of the root, or their review of the spec, resumes you in this session with a
-task naming what answered and what is still with them; so does the question you wait on being
-retracted by Dispatch's settlement or closed by a session, or handed back to your turn, once
-nothing else is with the person. An approval request you hand to the human keeps the root's slot.
+Dispatch claim. The root keeps its slot otherwise, and you run on. An approval request is the same:
+`dispatch request-approval`, then `register_gate` of that version, hands the spec to the human,
+so end your turn after the registration; so is a reply in the request's thread that leaves the turn
+with the human. The person's answer, resolution or reply on any ask of the root, their review of the
+spec, or a newer spec version once Dispatch shows the request back on your turn, resumes you in this
+session with a task naming what answered and what is still with them; so does a question or the
+request you wait on being retracted by Dispatch's settlement, closed by anyone who is not a person,
+or handed back to your turn, once nothing else is with the person.
 Approval is pinned to the spec version: any new version closes the gate until it is approved,
 except the version a human's own answer to a decision block writes when that answer is the whole
 change since the version they approved: Dispatch records an `approved` review in their name at

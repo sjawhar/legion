@@ -18,7 +18,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/record"
 )
 
-// The boot catch-up of the roots that run or wait on a person (admitted, awaiting_person): what a
+// The boot catch-up of the roots that run or wait on a person (admitted in a slot, awaiting_person): what a
 // root's durable Dispatch stream may not have delivered while this daemon was down, read from the
 // root's Dispatch event log and applied through the live decoder and handlers, so the record — the
 // asks' mirror, the architect's hand-backs, the gate, the answers — stands as the live events would
@@ -55,10 +55,28 @@ const (
 )
 
 // catchesUp says whether the boot's catch-up reads issue: a tree root of the daemon's project, not
-// lingering, at admitted or in awaiting_person.
-func (w *workflowRuntime) catchesUp(issue record.Issue) bool {
-	return issue.Project == w.dispatchProject && claim.IsTreeRoot(issue.Key, issue.Tree) && !issue.Lingers() &&
-		(issue.Phase == phase.Admitted || issue.Phase == phase.AwaitingPerson)
+// lingering, in awaiting_person, or at admitted holding a slot (slotted). A root waiting in line
+// for its first slot never ran: its architect has handed nothing back, and its admission is a
+// handout of its own.
+func (w *workflowRuntime) catchesUp(issue record.Issue, slotted map[string]struct{}) bool {
+	if issue.Project != w.dispatchProject || !claim.IsTreeRoot(issue.Key, issue.Tree) || issue.Lingers() {
+		return false
+	}
+	_, holds := slotted[issue.Key]
+	return issue.Phase == phase.AwaitingPerson || issue.Phase == phase.Admitted && holds
+}
+
+// slottedIssues is the key of every issue holding an admission slot.
+func (w *workflowRuntime) slottedIssues(ctx context.Context, tx pgx.Tx) (map[string]struct{}, error) {
+	slots, err := w.records.Slots(ctx, tx)
+	if err != nil {
+		return nil, fmt.Errorf("list admission slots: %w", err)
+	}
+	slotted := make(map[string]struct{}, len(slots))
+	for _, slot := range slots {
+		slotted[slot.Issue] = struct{}{}
+	}
+	return slotted, nil
 }
 
 // holdForCatchUp holds every root the catch-up will read, and has not finished in an earlier
@@ -73,9 +91,13 @@ func (w *workflowRuntime) holdForCatchUp(ctx context.Context, tx pgx.Tx) error {
 	if err != nil {
 		return fmt.Errorf("list the roots to catch up: %w", err)
 	}
+	slotted, err := w.slottedIssues(ctx, tx)
+	if err != nil {
+		return err
+	}
 	var keys []string
 	for _, issue := range issues {
-		if _, done := w.caughtUp[caughtUpKey(issue)]; w.catchesUp(issue) && !done {
+		if _, done := w.caughtUp[caughtUpKey(issue)]; w.catchesUp(issue, slotted) && !done {
 			keys = append(keys, issue.Key)
 		}
 	}
@@ -114,8 +136,12 @@ func (w *workflowRuntime) catchUpAwaiting(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
+		slotted, err := w.slottedIssues(listing, tx)
+		if err != nil {
+			return err
+		}
 		for _, issue := range issues {
-			if !w.catchesUp(issue) {
+			if !w.catchesUp(issue, slotted) {
 				continue
 			}
 			root := catchUpRoot{issue: issue}

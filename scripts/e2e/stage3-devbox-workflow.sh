@@ -751,9 +751,10 @@ pass
 begin panes-pinned-to-the-rig-before-any-agent-turn
 # The two admitted architects are the only panes before any phase worker: each takes its first turn
 # from the daemon's catch-up notice, not from the proof. Every later pane is checked when it
-# registers and again before each instruction.
-wait_for_worker "$root_issue" architect
-wait_for_worker "$held_issue" architect
+# registers and again before each instruction. An architect whose root already waits on a person
+# (it registered its closed gate and was suspended) was checked by the pane watcher at its launch.
+wait_for_architect "$root_issue"
+wait_for_architect "$held_issue"
 note "$(wc -l <"$evidence/pane-endpoints-checked.txt") pane checks: DISPATCH_URL=http://127.0.0.1:$port_dispatch, DISPATCH_TOKEN_FILE=$state/secrets/dispatch-token, ENVOY_URL=http://127.0.0.1:$port_listener, ENVOY_NATS_URL=nats://127.0.0.1:$port_nats"
 pass
 
@@ -762,9 +763,15 @@ pass
 # close, through the bound's last look.
 primary_issue() {
   begin primary-architect-posts-and-registers-spec
-  drive_gate "$root_issue" "Stage 3 proof gate operation"
+  # Every root's architect registers a closed gate on its own and gives its slot back, so the slot
+  # the root left at registration went to a waiting root (no-change, restart), and the approved root
+  # takes one back only once one of those registers its own gate in turn: the bound is twice
+  # architect_registers_gate's 900 s for that registration. admission_cap stays 2: admission order
+  # and the slotless child above are proved against it, and every root of the run gives its slot
+  # back at its registration, so the slot always comes back within that bound.
+  drive_gate "$root_issue" "Stage 3 proof gate operation" 1800
   artifact_id=$gate_artifact
-  note "architect registered $artifact_id version $gate_version; human approval advanced the daemon to planning"
+  note "architect registered $artifact_id version $gate_version and $root_issue waited on the person without a slot; the human's approval answered it, the root took a slot back, and the daemon moved it to planning"
   pass
 
   begin primary-planner-handoff
@@ -1087,7 +1094,9 @@ held_worker() {
   # The second admitted root is driven just far enough to own a real implementer pane. A launch that
   # never becomes ready spends the claim's launch budget (three) and a ready agent resets it, so the
   # first kill takes the ready implementer and every later kill takes the relaunch as soon as the pane
-  # watcher has checked it, until the claim fails and the issue is held.
+  # watcher has checked it, until the claim fails and the issue is held. Its architect registered its
+  # closed gate early in the run, so the root has waited on a person since, without a slot; the first
+  # root's close freed one, which it takes back once the human approves.
   drive_gate "$held_issue" "Stage 3 held-worker proof"
   send_agent "$held_issue" planner "Stage 3 held-worker proof: write a minimal plan handoff and complete planning."
   wait_for_phase "$held_issue" implementing
@@ -1144,21 +1153,27 @@ else
   pass
 fi
 
-# no_change_close: a root whose human decides at the design gate that no change is needed. Closing
-# the first root freed its slot, so this root, first in the waiting line, is admitted; its architect
-# registers its spec, the human requests changes saying no change is needed, and the architect ends
-# the tree itself (close_root) while the root is still admitted. The daemon posts the architect's
-# reason on the issue before it writes done, and the freed slot goes to the next waiting root with
-# no human status write. Each step of the tree's close is one journal line.
+# no_change_close: a root whose human decides at the design gate that no change is needed. The
+# no-change root took the slot the first or held root gave back at its registration early in the
+# run, its architect registered its own closed gate, and it has waited on a person since, without a
+# slot and with its architect suspended. The human requests changes saying no change is needed: that
+# answers the wait, and the root takes a slot back at admitted (the held root holds the other one),
+# its architect's session resumed with a task naming the changes request. close_root is refused
+# while a root is not at admitted holding its slot, so the proof waits for both before it tells the
+# architect to end the tree itself. The daemon posts the architect's reason on the issue before it
+# writes done, and the freed slot goes to the next answered or waiting root with no human status
+# write. Each step of the tree's close is one journal line.
 no_change_close() {
   begin architect-closes-a-no-change-root
   local artifact reason token
-  until_true 240 "the no-change root to take the first root's freed admission slot" sh -c \
-    "'$work/legion' state --json --port '$port_daemon' | jq -e --arg issue '$nochange_issue' '.issues[\$issue].slot != null'"
   architect_registers_gate "$nochange_issue" "Stage 3 no-change proof"
+  await_gate_wait "$nochange_issue" "Stage 3 no-change proof"
   artifact=$(daemon_state | jq -er --arg issue "$nochange_issue" '.issues[$issue].designGate.artifactId')
   reason="No change is needed: $repo already has what this issue asks for. Close this issue without a change."
   dispatch_human POST "artifacts/$artifact/reviews" "$(jq -cn --arg reason "$reason" '{state: "changes_requested", reason: $reason}')" >/dev/null
+  await_answered_slot "$nochange_issue" "Stage 3 no-change proof"
+  wait_for_phase "$nochange_issue" admitted 60
+  until_true 300 "the no-change architect's session to resume once its root holds its slot" issue_worker_live "$nochange_issue" architect
   send_agent "$nochange_issue" architect "Stage 3 no-change proof: the human reviewing your spec requested changes: \"$reason\" End your tree as your role says, and change nothing else."
   until_true 600 "the no-change root to be done in Dispatch" dispatch_status_is "$nochange_issue" "done"
   dispatch_events "$nochange_issue" >"$evidence/nochange-events.json"
@@ -1173,17 +1188,24 @@ no_change_close() {
   token=$(claim_token "$nochange_issue" architect)
   await_tree_suspended "$nochange_issue" "the no-change tree's architect to be suspended"
   # daemon.log carries the daemon's stderr too, so each line is parsed on its own, as every other
-  # reader of it does: one line that is not JSON must not end the run.
+  # reader of it does: one line that is not JSON must not end the run. The root gives its slot back
+  # twice: once when it waits on the person at its gate, once at its close.
   jq -R -c --arg issue "$nochange_issue" --arg token "$token" 'fromjson? | select(
-      (.msg == "workflow: design gate changes requested" and .issue == $issue)
+      (.msg == "workflow: root waits on a person and returns its admission slot" and .issue == $issue)
+      or (.msg == "workflow: design gate changes requested" and .issue == $issue)
       or (.msg == "workflow: issue left the workflow" and .issue == $issue)
       or (.msg == "workflow: tree lingers" and .tree == $issue)
       or (.msg == "admission: slot released" and .issue == $issue)
+      or (.msg == "admission: slot taken" and .issue == $issue)
       or (.msg == "supervise: suspended" and .claim == $token))
     | {msg, issue, tree, status, reason, slots, cap}' "$evidence/logs/daemon.log" >"$evidence/nochange-journal.txt"
-  for line in "design gate changes requested" "issue left the workflow" "tree lingers" "admission: slot released" "supervise: suspended"; do
+  for line in "root waits on a person and returns its admission slot" "design gate changes requested" "issue left the workflow" "tree lingers" "admission: slot released" "supervise: suspended"; do
     grep -qF "$line\"" "$evidence/nochange-journal.txt" || fail "the journal has no \"$line\" line for $nochange_issue; see $evidence/nochange-journal.txt"
   done
+  [ "$(grep -cF '"admission: slot released"' "$evidence/nochange-journal.txt")" -ge 2 ] ||
+    fail "the journal of $nochange_issue lacks a slot release at the wait and another at the close; see $evidence/nochange-journal.txt"
+  [ "$(grep -cF '"admission: slot taken"' "$evidence/nochange-journal.txt")" -ge 2 ] ||
+    fail "the journal of $nochange_issue lacks its first admission and its return after the person's answer; see $evidence/nochange-journal.txt"
   grep -F '"workflow: issue left the workflow"' "$evidence/nochange-journal.txt" | grep -qF '"status":"done"' ||
     fail "the close line of $nochange_issue does not name done"
   grep -F '"supervise: suspended"' "$evidence/nochange-journal.txt" | grep -qF "\"reason\":\"the tree of $nochange_issue lingers\"" ||
@@ -1196,11 +1218,10 @@ no_change_close() {
 # write, all on the fourth root.
 restart_scenarios() {
   begin restart-mid-implementer
-  # The fourth root was waiting behind the no-change root. That root's close freed the slot, so it
-  # must now be admitted in rank order, with no human status write; this validates promotion before
-  # exercising the mid-phase restart.
-  until_true 240 "the waiting root to take the freed admission slot" sh -c \
-    "'$work/legion' state --json --port '$port_daemon' | jq -e --arg issue '$restart_issue' '.issues[\$issue].slot != null'"
+  # The fourth root took a slot another root gave back early in the run, its architect registered
+  # its closed gate, and it has waited on a person since, without a slot. The no-change root's close
+  # freed a slot, so once the human approves, it takes that slot back with no human status write;
+  # this validates the answered root's return before exercising the mid-phase restart.
   drive_gate "$restart_issue" "Stage 3 restart proof"
   send_agent "$restart_issue" planner "Stage 3 restart proof: write the minimal planner handoff and complete planning."
   wait_for_phase "$restart_issue" implementing
@@ -1261,8 +1282,8 @@ restart_scenarios() {
   for dir in "$cred_root" "$cred_dir"; do
     [ "$(stat -c %a "$dir")" = 700 ] || fail "$dir is mode $(stat -c %a "$dir"), want 700"
   done
-  [ "$(ls -A "$cred_root" | tr '\n' ' ')" = "$owner " ] || fail "$cred_root holds $(ls -A "$cred_root" | tr '\n' ' '), want $owner's directory alone"
-  [ "$(ls -A "$cred_dir" | sort | tr '\n' ' ')" = "config.yml hosts.yml " ] || fail "$cred_dir holds $(ls -A "$cred_dir" | tr '\n' ' '), want config.yml and hosts.yml alone"
+  [ "$(find "$cred_root" -mindepth 1 -maxdepth 1 -printf '%f\n' | sort | tr '\n' ' ')" = "$owner " ] || fail "$cred_root holds $(find "$cred_root" -mindepth 1 -maxdepth 1 -printf '%f\n' | tr '\n' ' '), want $owner's directory alone"
+  [ "$(find "$cred_dir" -mindepth 1 -maxdepth 1 -printf '%f\n' | sort | tr '\n' ' ')" = "config.yml hosts.yml " ] || fail "$cred_dir holds $(find "$cred_dir" -mindepth 1 -maxdepth 1 -printf '%f\n' | tr '\n' ' '), want config.yml and hosts.yml alone"
   [ "$(stat -c %a "$cred_dir/hosts.yml")" = 600 ] || fail "$cred_dir/hosts.yml is mode $(stat -c %a "$cred_dir/hosts.yml"), want 600"
   jq -R -s -e '[split("\n")[] | fromjson? | select(.msg == "tmux runtime: github credential written" and .role == "implementer")] | length > 0' <"$evidence/logs/daemon.log" >/dev/null ||
     fail "the daemon log has no 'github credential written' line for an implementer pane"
@@ -1275,7 +1296,7 @@ restart_scenarios() {
   # Negative control: a directory with no gh files is no credential — the same gh with it set is
   # refused by gh itself, naming GH_TOKEN, so the pane's identity comes from the daemon's files and
   # nothing else on this box.
-  if GH_CONFIG_DIR="$work/empty-gh" GH_TOKEN= GITHUB_TOKEN= GH_HOST= "$real_gh" api graphql -f query='{viewer{login}}' >/dev/null 2>"$evidence/cred-negative.txt"; then
+  if GH_CONFIG_DIR="$work/empty-gh" GH_TOKEN='' GITHUB_TOKEN='' GH_HOST='' "$real_gh" api graphql -f query='{viewer{login}}' >/dev/null 2>"$evidence/cred-negative.txt"; then
     fail "gh with an empty GH_CONFIG_DIR and no token still answered"
   fi
   grep -q GH_TOKEN "$evidence/cred-negative.txt" || fail "gh with an empty GH_CONFIG_DIR failed without naming GH_TOKEN: $(cat "$evidence/cred-negative.txt")"

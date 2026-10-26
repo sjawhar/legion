@@ -412,7 +412,8 @@ is seen slotless, which is all it was filed for, so it holds up no acceptance ab
 drives a root from `todo` through an
 architect's spec and gate registration, which the architect does on its own (the proof never
 prompts it: its first turn is the daemon's `catch-up` notice, and the root's primary document is
-the proof's one-file smoke spec), the human approval, planner, implementer pull request,
+the proof's one-file smoke spec), the root's wait on the human at its gate (`awaiting_person`, no
+slot, the architect suspended), the human approval, the root's return to a slot, planner, implementer pull request,
 tester, reviewer, the architect's acceptance at `accepting`, retro, merger READY, the daemon's
 merge of the READY head, which closes the issue (`daemon-merge`), and the implementer's production
 check after the close, its first look and the bound's last look
@@ -450,10 +451,13 @@ approval request is opened, and the proof writes no review through the reviews r
 refusal and the release), a held
 worker after its launch budget and the architect's retry relaunching it, a root whose human
 decides at the design gate that no change is needed (`architect-closes-a-no-change-root`: the
-architect ends its admitted tree with `close_root`, the daemon posts its reason on the issue before
+root waits on the person without a slot, the human's changes request answers it and the root
+takes a slot back at `admitted` with its architect's session resumed, which `close_root` requires;
+the architect then ends its tree with `close_root`, the daemon posts its reason on the issue before
 it writes `done`, every status write on the issue is the daemon's, the freed slot goes to the next
-waiting root, and the journal has the gate's changes request, the close, the linger, the slot
-release and the architect's suspension), restart during
+root, and the journal has the root's wait, the gate's changes request, two slot releases (the wait
+and the close) and two slot takes (its admission and its return), the close, the linger and the
+architect's suspension), restart during
 implementation, a pending status write while Dispatch is down, and the Go pane's
 credentials (`in-agent-credentials`): in one bash tool call of a real implementer pane, `gh` — the
 launcher directory's `legion gh` wrapper, over the daemon's PATH's real gh (`LEGION_GH_PATH`) —
@@ -1308,7 +1312,11 @@ changes; the revision raises a block; the human answers it; and the architect ha
 back, or requests approval again, which opens a new request since Request changes answered the old
 one. It keeps the issue's asks as `<issue>-asks.json`, approval events as
 `<issue>-events.json`, each requested version as `<issue>-spec-v<N>.json`, and the verdict as
-`<issue>-gate-verdict.json`.
+`<issue>-gate-verdict.json`. While tree 1 waits on the human (its question, or a closed gate it
+registered) it is in `awaiting_person` with no slot and its architect suspended; once the gate
+opens, `spec-posted` waits for the root to hold a slot again (`await_root_slot`, which tree 1, the
+run's one root under `admission_cap: 2`, takes at once) before it waits for planning, and notes how
+many times the daemon logged the root giving its slot back.
 
 `LEGION_E2E_POD_FILE` names a JSON file holding a deployment's own worker pod block, the
 `runtime.kubernetes.pod` value its configuration renders (`service_account`, `env`, `volumes`,
@@ -2983,6 +2991,21 @@ retro, and planning, whose planner runs its gap analyst and up to three plan-rev
 its handoff (Stage 4b's `plan_seconds`, 2700 s). `round_correction_pushed ROUND` accepts the round's
 line only as an addition in `smoke_file`'s patch, never in a notes file or in a `.legion/` handoff
 that quotes it.
+
+With the design gate armed (`gates.design: root-issues`), a root whose architect registers a closed
+gate while no worker of its tree runs waits on a person: `drive_gate ISSUE LABEL [SECONDS]` runs
+`architect_registers_gate`, then `await_gate_wait` (the root in `awaiting_person` with
+`waitingOn.kind` `gate` and no `answeredAt`, no `.slot` and absent from `admission.active`, then its
+architect `suspended` within `phase_seconds`), approves the registered version as the proof human,
+then `await_answered_slot`: the answer (`waitingOn.answeredAt`, or the root already holding a slot,
+since a slot free at the answer is taken in the same transaction) within 120 s, then
+`await_root_slot`, the root out of `awaiting_person` holding a slot in `admission.active`, within
+`SECONDS` (`phase_seconds` by default; Stage 3's first root passes 1800, since its slot comes back
+only when a root that took the slot it gave up registers its own gate in turn). A timeout in any of
+them prints the root's phase, slot, `waitingOn` and architect state and the admission state. Only
+then does it wait for planning. `wait_for_architect ISSUE` and so `architect_registers_gate` accept
+an architect already suspended in `awaiting_person`, whose pane the watcher checked at its launch,
+since a proof may look after the root's wait began.
 
 `request_changes_as_reviewer ISSUE ROUND BODY [NOTE]` is a scripted changes-requested round: it
 tells the reviewer pane its decision and the review's text, quoted, which the reviewer ends with

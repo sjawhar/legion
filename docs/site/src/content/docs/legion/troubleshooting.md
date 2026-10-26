@@ -278,11 +278,15 @@ it by hand. Without `answeredAt`, check, in order:
    with an `unslotted` notice: Legion never resumes work another owner took. Release the claim,
    then `todo` with the label queues the root again.
 
-A root still `admitted` while its architect waits on the design gate's approval request keeps its
-slot and is not in `awaiting_person`. The root's phase stays `admitted` until a person approves the
-spec at its current version; `designGate.approvedVersion` is `null`, or lower than `currentVersion`, until someone approves the
-latest version from the document's header or the Inbox. An approval of an earlier version does not
-count: the spec changed since. The merger's `READY` waits on the same approval.
+A root whose architect registered its spec while the approval request waits on the person is in
+`awaiting_person` with `waitingOn.kind` `gate`, once nothing else holds its slot; one still
+`admitted` waiting on its design gate keeps its slot for one of the reasons above, or because
+Dispatch shows the request on the architect's turn (a reply or a newer version since the request),
+when the architect has nothing handed to the person. A root waiting on its gate at a daemon's deploy
+gives its slot back at that daemon's first boot. The gate stays closed until a person approves the
+spec at its current version; `designGate.approvedVersion` is `null`, or lower than `currentVersion`,
+until someone approves the latest version from the document's header or the Inbox. An approval of an
+earlier version does not count: the spec changed since. The merger's `READY` waits on the same approval.
 
 ## An issue is held
 

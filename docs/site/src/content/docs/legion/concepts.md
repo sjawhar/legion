@@ -157,7 +157,7 @@ architect session with a task naming what answered it and what is still with you
 answer or resolution of another ask answers nothing, and an act of yours from before the wait
 began is one the architect already read. Taking the label off, or a person or an outside session
 claiming the root on Dispatch, takes it out of the workflow instead: Legion never resumes work
-another owner took. A root waiting on the design gate's approval request keeps its slot. The slot
+another owner took. A root whose architect requested approval of its spec and registered that version waits the same way, on the design gate, until the person reviews the spec or a newer version hands the request back to the architect. The slot
 a waiting root returns is no reason for the controller to label or admit anything: a root you
 handed to Legion takes it through the waiting line.
 
