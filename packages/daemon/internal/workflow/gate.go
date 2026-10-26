@@ -370,3 +370,22 @@ func (e *Engine) answerAwaitedGate(ctx context.Context, tx pgx.Tx, key string, f
 		"event", fact.Kind, "ask", issue.Awaiting.Ask)
 	return true, e.answerWait(ctx, tx, *issue, by)
 }
+
+// untellUnresumedChanges clears the gate's record that its architect was told a changes request
+// when that request answered root's wait and root leaves the workflow before it resumed. The
+// request was recorded as told because the resume task would name it (applyArtifact), and that
+// task was never written: a root swept for a lost label or a foreign claim, or moved out by a
+// person, never resumed. Cleared, the request reaches the architect when the root is admitted
+// anew, through its registration, the gate seed or the boot catch-up, rather than staying silent.
+func (e *Engine) untellUnresumedChanges(ctx context.Context, tx pgx.Tx, root record.Issue) error {
+	if !root.AwaitingPerson() || root.Awaiting.AnsweredBy != record.AnsweredByChanges {
+		return nil
+	}
+	gate, err := e.store.Gate(ctx, tx, root.Key)
+	if err != nil || gate == nil || gate.ToldChangesVersion == nil {
+		return err
+	}
+	e.logOnCommit(ctx, "workflow: a changes request whose resume never ran is no longer recorded as told", "issue", root.Key, "version", *gate.ToldChangesVersion)
+	gate.ToldChangesVersion, gate.ToldChangesReason, gate.ToldChangesMark = nil, "", record.EventMark{}
+	return e.store.PutGate(ctx, tx, *gate)
+}

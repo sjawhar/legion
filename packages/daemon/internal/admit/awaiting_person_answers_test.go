@@ -852,6 +852,29 @@ func TestASettlementRetractionOfTheAwaitedQuestionResumesTheRoot(t *testing.T) {
 	}
 }
 
+// A changes request that answers a root's wait is recorded as told, since the resume task names
+// it. When the root leaves the workflow before it resumes — here its legion label was taken off —
+// that task is never written, so the record is cleared: a re-admission's registration, gate seed
+// or boot catch-up then tells the architect the request rather than staying silent.
+func TestAChangesRequestARootNeverResumedForIsNotRecordedAsTold(t *testing.T) {
+	pool := migratedPool(t)
+	admission := newAdmission(t, 1, nil)
+	awaitingRoot(t, pool, record.Awaiting{GateVersion: 4, Since: handBack})
+	applyFact(t, pool, admission, "changes-v4", intake.DispatchArtifact{Key: "LEGION-ROOT", ArtifactID: "artifact-root",
+		Kind: intake.DispatchArtifactChangesRequested, Version: 4, Reason: "name the rollback path", Mark: record.EventMark{Seq: 11, At: handedBackAt.Add(time.Minute)}})
+	if gate := storedGate(t, pool, "LEGION-ROOT"); gate.ToldChangesVersion == nil {
+		t.Fatalf("gate after the answering changes request = %#v, want it recorded as told for the resume task", gate)
+	}
+	apply(t, pool, admission, "label-off", intake.DispatchIssue{Key: "LEGION-ROOT", ResolvedRepo: "acme/widgets", Seq: 12, Type: "issue.updated",
+		Status: "in_progress", Title: "root", Rank: "B"}, admission.engine)
+	if got := issue(t, pool, "LEGION-ROOT"); got.AwaitingPerson() {
+		t.Fatalf("root after its label came off = %#v, want it out of the workflow", got)
+	}
+	if gate := storedGate(t, pool, "LEGION-ROOT"); gate.ToldChangesVersion != nil {
+		t.Fatalf("gate after the root left unresumed = %#v, want the changes request no longer recorded as told", gate)
+	}
+}
+
 // The architect hands an ask on its admitted root back to the person: on a registered closed
 // gate the root waits on that gate's latest version, otherwise on the ask itself, and returns its
 // slot either way. A hand-back by a session outside the tree, or by a person, changes nothing.

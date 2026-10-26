@@ -48,6 +48,9 @@ func (e *Engine) leave(ctx context.Context, tx pgx.Tx, issue record.Issue, statu
 	if err := e.store.ForgetPersonActs(ctx, tx, issue.Key); err != nil {
 		return err
 	}
+	if err := e.untellUnresumedChanges(ctx, tx, issue); err != nil {
+		return err
+	}
 	if claim.IsTreeRoot(issue.Key, issue.Tree) {
 		if issue.Lingers() {
 			return nil
