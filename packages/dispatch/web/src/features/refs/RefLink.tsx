@@ -3,13 +3,13 @@ import { type ReactNode, useState } from "react";
 import { borderDefault } from "../../theme/classes";
 import { useReferenceTarget } from "./reference-target";
 import {
+  type BareReferences,
   buildDispatchReference,
   buildReferencePath,
   type DispatchReferenceRoute,
-  parseDispatchReference,
   referenceRouteFromHref,
-  referenceSpans,
-  shortForm,
+  resolveTextReference,
+  textReferences,
 } from "./routes";
 
 export interface ReferenceAnchor {
@@ -19,7 +19,8 @@ export interface ReferenceAnchor {
   readonly key: string;
   readonly route: DispatchReferenceRoute;
   /** The words the anchor showed before they were cleared for the portal: a bare reference's
-   *  `dispatch://…`, or the text a Markdown link gave it. */
+   *  `dispatch://…`, a bare key's `CORE-12`, a `#id`'s `#q2`, or the text a Markdown link gave
+   *  it. */
   readonly text: string;
 }
 
@@ -27,13 +28,41 @@ export interface ReferenceAnchor {
  *  tab's thumbnail. `not-prose` keeps Markdown's figure margins off it. */
 export const pictureThumbnailClassName = `not-prose inline-block h-10 w-10 shrink-0 rounded border object-cover align-middle ${borderDefault}`;
 
-/** Portal content for an inline reference anchor: the resolved title once
- * `useReferenceTarget` has it, the ref's short form until then, and beside it the picture's
+/** A target's title as words: an issue's key in semibold, then the rest of its title, as an issue
+ *  list row draws it (`features/project/IssueList.tsx`), so its accessible name reads
+ *  `CORE-12 Fix the thing`; any other title as it is. */
+export function ReferenceTitleWords({
+  title,
+  titleKey,
+}: {
+  title: string;
+  titleKey: string | undefined;
+}): ReactNode {
+  if (titleKey === undefined || !title.startsWith(titleKey)) {
+    return title;
+  }
+  return (
+    <>
+      <span className="font-semibold">{titleKey}</span>
+      {title.slice(titleKey.length)}
+    </>
+  );
+}
+
+/** Portal content for an inline reference anchor: the target's title once `useReferenceTarget`
+ * has it, and until then, or for a target that does not exist, the words the anchor was written
+ * with (`text`; the reference's address when the link had none). Beside it the picture's
  * thumbnail when the reference names an image artifact. A thumbnail the browser cannot draw (a
  * pinned version the server does not serve) is dropped, leaving the title alone, so a stale or
  * hand-written reference never shows a broken-image glyph. */
-export function RefLink({ route }: { route: DispatchReferenceRoute }): ReactNode {
-  const { picture, title } = useReferenceTarget(route);
+export function RefLink({
+  route,
+  text,
+}: {
+  route: DispatchReferenceRoute;
+  text: string;
+}): ReactNode {
+  const { picture, title, titleKey } = useReferenceTarget(route);
   // The address that failed, not a flag: a plain reference names the latest version, so a version
   // uploaded since gets its own load instead of inheriting the last one's failure.
   const [failedPicture, setFailedPicture] = useState<string>();
@@ -50,7 +79,15 @@ export function RefLink({ route }: { route: DispatchReferenceRoute }): ReactNode
           />{" "}
         </>
       )}
-      {title ?? shortForm(route)}
+      {title === undefined ? (
+        text === "" ? (
+          buildDispatchReference(route)
+        ) : (
+          text
+        )
+      ) : (
+        <ReferenceTitleWords title={title} titleKey={titleKey} />
+      )}
     </>
   );
 }
@@ -71,15 +108,21 @@ function isInsideExcludedAncestor(node: Node, root: Node): boolean {
 }
 
 /**
- * Wraps every bare `dispatch://…` reference in root's text into a real `<a>`, so
- * `collectReferenceAnchors` can then resolve it like any other link; a reference ends where the
- * composer's and the server's do (`referenceSpans`). Text already inside a link, inline code
+ * Wraps every reference root's text writes bare into a real `<a>`, so `collectReferenceAnchors`
+ * can then resolve it like any other link: a `dispatch://…` reference or dashboard URL that names
+ * a Dispatch item; an issue key (`CORE-12`) that `bare` says names an issue that exists, as
+ * `dispatch://CORE-12`; and a `#id` that names a question of the document the text belongs to,
+ * as its ask's reference. A reference starts where the server's reader says (`textReferences`)
+ * and names what, and ends where, the one resolver says (`resolveTextReference`); a key or `#id`
+ * `bare` does not name stays the text it was written as. Text already inside a link, inline code
  * span, or code block is left alone (its ancestor already parsed as a distinct node, so there is
- * no need to re-tokenize raw Markdown to find code/link boundaries by hand). Only `dispatch://`
- * needs this pass — remark-gfm already autolinks bare `http(s)://` URLs into real link marks
- * during Markdown parsing, before this ever runs.
+ * no need to re-tokenize raw Markdown to find code/link boundaries by hand). Each text node is
+ * read on its own, so a reference starts and ends at a formatting boundary as it does at the start
+ * and end of the text. remark-gfm already autolinks most bare `http(s)://` URLs into real link
+ * marks during Markdown parsing, before this runs; a dashboard URL it leaves as text (a server at
+ * an IPv6 literal) is wrapped here.
  */
-export function linkifyDispatchRefs(root: HTMLElement): void {
+export function linkifyDispatchRefs(root: HTMLElement, bare: BareReferences): void {
   const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
   const candidates: Text[] = [];
   for (let node = walker.nextNode(); node !== null; node = walker.nextNode()) {
@@ -87,27 +130,30 @@ export function linkifyDispatchRefs(root: HTMLElement): void {
       candidates.push(node);
     }
   }
+  const readsBare = bare.issues.size > 0 || bare.questions.size > 0;
   for (const textNode of candidates) {
     const value = textNode.data;
-    if (!value.includes("dispatch://")) {
+    if (!readsBare && !value.includes("://")) {
       continue;
     }
     const fragment = document.createDocumentFragment();
     let lastIndex = 0;
-    let replaced = false;
-    for (const { start, value: raw } of referenceSpans(value, "dispatch://")) {
-      if (parseDispatchReference(raw) === undefined) {
+    for (const reference of textReferences(value)) {
+      if (reference.start < lastIndex) {
         continue;
       }
-      fragment.appendChild(document.createTextNode(value.slice(lastIndex, start)));
+      const resolved = resolveTextReference(reference, bare);
+      if (resolved === undefined) {
+        continue;
+      }
       const anchor = document.createElement("a");
-      anchor.href = raw;
-      anchor.textContent = raw;
+      anchor.href = resolved.href;
+      anchor.textContent = value.slice(reference.start, resolved.end);
+      fragment.appendChild(document.createTextNode(value.slice(lastIndex, reference.start)));
       fragment.appendChild(anchor);
-      lastIndex = start + raw.length;
-      replaced = true;
+      lastIndex = resolved.end;
     }
-    if (!replaced) {
+    if (lastIndex === 0) {
       continue;
     }
     fragment.appendChild(document.createTextNode(value.slice(lastIndex)));

@@ -10,7 +10,7 @@ Read this to catch up after a restart, read a node, trace what cites it, or writ
 - The API gives the same facts as `anchor_block` (or `anchor_block_error`) on `GET /api/v1/comments/{id}` and `GET /api/v1/asks/{id}`. `GET /api/v1/artifacts/{id}/blocks/{block_id}` gives them for any block.
 - Each read ends with `Referenced by:` (what cites the node) and `Links:` (what it cites), across projects. "What led to this decision" is one read on the ask.
 - A whole list is one block, so every issue named in one list previews the list's first item. Give each issue its own paragraph when each backlink should read right.
-- Cite with `dispatch://` whenever you name a node. A bare id or title is invisible to the graph.
+- Cite with `dispatch://` whenever you name a node. A bare issue key and a `#<question id>` count too ([Reference forms](#reference-forms)). A bare UUID or a title is invisible to the graph.
 
 ## Reference forms
 
@@ -26,7 +26,10 @@ dispatch://PROJECT/artifact/<document-ref>/ask/<id>
 dispatch://PROJECT/artifact/<document-ref>/comment/<id>
 ```
 
-- A reference renders as a link titled by its target. A body that is only a reference gets an unfurl card.
-- A bare UUID or `KEY#seq` is not a reference. `dispatch read` also takes a dashboard URL, also on the public dashboard when `DISPATCH_PUBLIC_URL` names one. An issue read prints its `Link:`: hand that to a person.
+- A reference renders as a link titled by its target: an issue as its key and title, a document as its name, an ask as its question, a comment or message as its text. A reply or message that is only references, each word one reference, gets a card per reference in the margin, the Inbox thread and the Conversation.
+- A bare issue key (`CORE-12`) links and is indexed when that issue exists when the text is written. It stands alone: it starts the text or follows a space or one of `( [ " ' * _ > ~ |` or a backtick. Trailing `.` `,` `:` `;` end it, so `CORE-12.` and `CORE-12's` cite CORE-12. `CORE-12/spec`, `CORE-12#3`, `CORE-12-3`, `CORE-12.5` and `xCORE-12` cite nothing. A key written before its issue exists links on the page once the issue exists, and is indexed when that text is next written or at the next `rebuild-refs`.
+- `#<question id>` (`#q2`) links and is indexed when a question block of that id is in the same document as the text: the document's own text, or a question, comment, reply or issue message on it. An issue's comments and messages belong to its spec. It stands alone as a key does; `{#q2}`, `owner/repo#1` and a URL's `#q2` are not one. A copied question block's id cites the original ask. In a direct message `#q2` stays text.
+- Inside code the dashboard shows a key, `#id` or `dispatch://` reference as code, but the graph still indexes it.
+- A bare UUID is not a reference. `dispatch read` also takes a dashboard URL, also on the public dashboard when `DISPATCH_PUBLIC_URL` names one. An issue read prints its `Link:`: hand that to a person.
 - An ask or comment id can be a unique 8+ hex prefix. A message id is always the full UUID.
 - An ask or comment on an issue's document is `dispatch://KEY/ask/<id>` or `dispatch://KEY/comment/<id>`, never written through its document.

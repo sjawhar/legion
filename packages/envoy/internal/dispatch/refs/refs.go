@@ -5,7 +5,9 @@
 // every owner's documents and files share one address; artifact sources are the artifact uuid.
 // Closure returns at most eight hops and marks the result truncated when it finds a ninth.
 // References whose target is absent stay stored but are absent from closures and referenced-by
-// results.
+// results. A bare issue key and a `#id` are read only as what they resolve to when the source is
+// written (NewResolver): a key only when its issue exists, a `#id` only as the question its
+// source's document declares under that id (ScopeOf, QuestionMap).
 package refs
 
 import (
@@ -13,6 +15,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -53,27 +56,54 @@ type Target struct {
 }
 
 // ReplaceCounted reconciles one source's references and resolves the counted targets the event
-// that source appends has to name. Every write that indexes a body goes through it, so no
-// producer can reconcile the graph without holding what moved: replace itself is unexported.
+// that source appends has to name. Every write that indexes a body goes through it or
+// ReplaceCountedWith, so no producer can reconcile the graph without holding what moved: replaceAt
+// itself is unexported. It ends by deleting the source's refs_owed row (migration 0120, ClaimOwed),
+// which the write's own trigger made in the same transaction, so a write this build indexes is not
+// re-indexed by the drain (docs.Service.RunReferenceReindex); a build before it never deletes one,
+// so its writes stay owed. A row the drain or a rebuild has claimed is skipped rather than waited
+// for: the claimer re-reads the source, and waiting here while holding this source's edges could
+// close a cycle with it.
 func ReplaceCounted(
 	ctx context.Context,
 	tx pgx.Tx,
 	fromKind, fromID, body, serverURL string,
 ) (model.ReferenceChanges, error) {
-	changed, err := replace(ctx, tx, fromKind, fromID, body, serverURL)
+	return ReplaceCountedWith(ctx, tx, fromKind, fromID, body, serverURL, NewResolver(ctx, tx, fromKind, fromID))
+}
+
+// ReplaceCountedWith is ReplaceCounted reading a bare key and a `#id` through resolver, the
+// source's NewResolver, for a write that reads the same text's mentions again in its transaction
+// (docs.Service.IndexDocumentReferences, which cuts the version's excerpts after it): a resolver
+// remembers what it read, so the second read asks the database nothing the first did.
+func ReplaceCountedWith(
+	ctx context.Context,
+	tx pgx.Tx,
+	fromKind, fromID, body, serverURL string,
+	resolver text.Resolver,
+) (model.ReferenceChanges, error) {
+	changed, err := replaceAt(ctx, tx, fromKind, fromID, body, serverURL, resolver, nil)
 	if err != nil {
+		return model.ReferenceChanges{}, err
+	}
+	if _, err := ClaimOwed(ctx, tx, fromKind, fromID); err != nil {
 		return model.ReferenceChanges{}, err
 	}
 	return CountedChanges(ctx, tx, changed)
 }
 
-// replace reconciles the Dispatch references written by one source with body: targets no
-// longer mentioned are deleted, new ones inserted, and an edge that persists keeps its
-// created_at and source_seq. It returns the targets whose inbound edges moved — deleted or
-// inserted, oldest state first — so ReplaceCounted can resolve the ones whose readers carry a
-// batched backlink count.
-func replace(ctx context.Context, tx pgx.Tx, fromKind, fromID, body, serverURL string) ([]Target, error) {
-	kinds, ids := targets(body, serverURL)
+// replaceAt reconciles the Dispatch references written by one source with body, a bare key and a
+// `#id` read through resolver: targets no longer mentioned are deleted, new ones inserted, and an
+// edge that persists keeps its created_at and source_seq. An edge it inserts is dated writtenAt,
+// the source's own write time, for a re-index of stored text (Reindex), so old text does not sort
+// as new under "Referenced by", and at the transaction's time when nil, for the write that stores
+// the text. It returns the targets whose inbound edges moved — deleted or inserted, oldest state
+// first — so ReplaceCountedWith can resolve the ones whose readers carry a batched backlink count.
+func replaceAt(ctx context.Context, tx pgx.Tx, fromKind, fromID, body, serverURL string, resolver text.Resolver, writtenAt *time.Time) ([]Target, error) {
+	kinds, ids, err := targets(body, serverURL, resolver)
+	if err != nil {
+		return nil, fmt.Errorf("read references: %w", err)
+	}
 	changed, err := scanTargets(tx.Query(ctx, `
 		delete from refs
 		where from_kind = $1 and from_id = $2
@@ -90,11 +120,12 @@ func replace(ctx context.Context, tx pgx.Tx, fromKind, fromID, body, serverURL s
 		return changed, nil
 	}
 	added, err := scanTargets(tx.Query(ctx, `
-		insert into refs (from_kind, from_id, to_kind, to_id)
-		select $1, $2, target.kind, target.id from unnest($3::text[], $4::text[]) as target(kind, id)
+		insert into refs (from_kind, from_id, to_kind, to_id, created_at)
+		select $1, $2, target.kind, target.id, coalesce($5::timestamptz, now())
+		from unnest($3::text[], $4::text[]) as target(kind, id)
 		on conflict (from_kind, from_id, to_kind, to_id) do nothing
 		returning to_kind, to_id
-	`, fromKind, fromID, kinds, ids))
+	`, fromKind, fromID, kinds, ids, writtenAt))
 	if err != nil {
 		return nil, fmt.Errorf("write reference: %w", err)
 	}
@@ -117,15 +148,21 @@ func scanTargets(rows pgx.Rows, err error) ([]Target, error) {
 	return changed, rows.Err()
 }
 
-// targets is the deduplicated (to_kind, to_id) set body mentions, as parallel arrays.
-func targets(body, serverURL string) ([]string, []string) {
+// targets is the deduplicated (to_kind, to_id) set body mentions, as parallel arrays: the
+// references text.Mentions reads in it, a bare key and a `#id` resolved for its source through
+// resolver.
+func targets(body, serverURL string, resolver text.Resolver) ([]string, []string, error) {
+	mentions, err := text.Mentions(body, serverURL, resolver)
+	if err != nil {
+		return nil, nil, err
+	}
 	kinds, ids := []string{}, []string{}
 	seen := make(map[[2]string]struct{})
-	for _, ref := range text.Extract(body, serverURL) {
+	for _, ref := range mentions {
 		if ref.Kind == "url" {
 			continue
 		}
-		target := [2]string{ref.Kind, ToID(ref)}
+		target := [2]string{ref.Kind, ToID(ref.Ref)}
 		if _, dup := seen[target]; dup {
 			continue
 		}
@@ -133,7 +170,7 @@ func targets(body, serverURL string) ([]string, []string) {
 		kinds = append(kinds, target[0])
 		ids = append(ids, target[1])
 	}
-	return kinds, ids
+	return kinds, ids, nil
 }
 
 // Stamp records eventID as the write that introduced every edge of one source that has no
@@ -183,7 +220,7 @@ func CountedChanges(ctx context.Context, q Queryer, changed []Target) (model.Ref
 			ordered = append(ordered, target)
 		}
 	}
-	issues, err := resolveIssueTargets(ctx, q, issueKeys)
+	issues, err := existingIssues(ctx, q, issueKeys)
 	if err != nil {
 		return model.ReferenceChanges{}, err
 	}
@@ -194,7 +231,7 @@ func CountedChanges(ctx context.Context, q Queryer, changed []Target) (model.Ref
 	references := make([]model.ChangedReference, 0, len(ordered))
 	for _, target := range ordered {
 		if target.Kind == "issue" {
-			if _, found := issues[target.ID]; found {
+			if issues[target.ID] {
 				references = append(references, model.ChangedReference{Kind: "issue", ID: target.ID})
 			}
 			continue
@@ -212,22 +249,23 @@ func CountedChanges(ctx context.Context, q Queryer, changed []Target) (model.Ref
 	return model.ReferenceChanges{Targets: references}, nil
 }
 
-func resolveIssueTargets(ctx context.Context, q Queryer, keys []string) (map[string]struct{}, error) {
-	found := map[string]struct{}{}
+// existingIssues is which of keys names an issue that exists, in one select.
+func existingIssues(ctx context.Context, q Queryer, keys []string) (map[string]bool, error) {
+	found := map[string]bool{}
 	if len(keys) == 0 {
 		return found, nil
 	}
 	rows, err := q.Query(ctx, `select key from issues where key = any($1)`, keys)
 	if err != nil {
-		return nil, fmt.Errorf("resolve changed issue references: %w", err)
+		return nil, fmt.Errorf("resolve issue keys: %w", err)
 	}
 	defer rows.Close()
 	for rows.Next() {
 		var key string
 		if err := rows.Scan(&key); err != nil {
-			return nil, fmt.Errorf("scan changed issue reference: %w", err)
+			return nil, fmt.Errorf("scan issue key: %w", err)
 		}
-		found[key] = struct{}{}
+		found[key] = true
 	}
 	return found, rows.Err()
 }

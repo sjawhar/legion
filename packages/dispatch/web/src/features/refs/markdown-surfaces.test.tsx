@@ -42,8 +42,9 @@ const FIXTURE =
   "## Heading\n\n**Bold** then `code` and a [link](https://example.com/docs) to dispatch://CORE-1.\n\n- first\n- second";
 
 /** What the fixture's text reads as once formatted on one line: no syntax, the words in order,
- *  the reference replaced by its resolved title (`Design decision`). */
-const RENDERED = /Heading\s+Bold then code and a link to Design decision\.?\s+first second/;
+ *  the reference replaced by its resolved title (the issue's key and title, `CORE-1 Design
+ *  decision`). */
+const RENDERED = /Heading\s+Bold then code and a link to CORE-1 Design decision\.?\s+first second/;
 
 /** The characters a raw-text surface leaks. The bare reference is listed by its scheme, so a
  *  surface that showed `dispatch://CORE-1` unresolved fails too. */
@@ -169,7 +170,7 @@ function expectFormatted(element: HTMLElement): void {
   }));
   expect(links).toEqual([
     { reference: null, text: "link" },
-    { reference: "dispatch://CORE-1", text: "Design decision" },
+    { reference: "dispatch://CORE-1", text: "CORE-1 Design decision" },
   ]);
 }
 
@@ -187,7 +188,7 @@ function expectFormattedWithLiveLinks(element: HTMLElement): void {
   }));
   expect(links).toEqual([
     { href: "https://example.com/docs", reference: null, text: "link" },
-    { href: "/issues/CORE-1", reference: "dispatch://CORE-1", text: "Design decision" },
+    { href: "/issues/CORE-1", reference: "dispatch://CORE-1", text: "CORE-1 Design decision" },
   ]);
 }
 
@@ -230,7 +231,7 @@ test("the agent transcript renders assistant and reasoning text as Markdown", as
     expectBody(reasoning);
     expect(turn.querySelectorAll("h2")).toHaveLength(2);
     expect(turn.querySelectorAll("ul")).toHaveLength(2);
-    expect(turn.textContent).toContain("Bold then code and a link to Design decision.");
+    expect(turn.textContent).toContain("Bold then code and a link to CORE-1 Design decision.");
     for (const syntax of LITERAL_SYNTAX) {
       expect(turn.textContent).not.toContain(syntax);
     }
@@ -448,6 +449,8 @@ test("a reply quote renders the quoted parent formatted on one line after the ap
 
 test("the margin's collapsed thread preview renders the root formatted on one line", async () => {
   const getIssue = spyOn(api, "getIssue").mockResolvedValue(issue);
+  // The card reads who is signed in, as the margin does.
+  const whoAmI = spyOn(api, "whoAmI").mockResolvedValue({ kind: "user", login: "alice" });
   const thread: Thread = {
     anchor: null,
     key: comment.id,
@@ -488,6 +491,7 @@ test("the margin's collapsed thread preview renders the root formatted on one li
   } finally {
     view.unmount();
     getIssue.mockRestore();
+    whoAmI.mockRestore();
   }
 });
 
@@ -814,6 +818,7 @@ describe("a Dispatch picture on every surface", () => {
   });
 
   test("the margin's collapsed thread preview shows it as a thumbnail linked to the picture's page", async () => {
+    const whoAmI = spyOn(api, "whoAmI").mockResolvedValue({ kind: "user", login: "alice" });
     const thread: Thread = {
       anchor: null,
       key: comment.id,
@@ -852,6 +857,7 @@ describe("a Dispatch picture on every surface", () => {
       expectOneLine(body);
     } finally {
       view.unmount();
+      whoAmI.mockRestore();
     }
   });
 

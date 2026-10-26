@@ -394,6 +394,10 @@ func main() {
 	// version write stored: every mention indexed before migration 0092, and each rebuild-refs
 	// inserts (LEGION-531).
 	go documentService.RunReferenceExcerptReconciliation(ctx, leases)
+	// INFRA-189: re-indexes the reference sources owed one (refs_owed): every text stored before
+	// bare issue keys and `#id`s were references, each one a server of an earlier release writes
+	// while a rolling update runs, and the sources of a document whose question map changed.
+	go documentService.RunReferenceReindex(ctx, leases)
 
 	sweeper, err := webhookSweeper(natsClient, appCfg, boot.GitHubAPIBase)
 	if err != nil {

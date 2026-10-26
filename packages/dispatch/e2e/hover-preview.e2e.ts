@@ -47,7 +47,7 @@ test("hovering a dispatch:// reference in a comment previews the target issue; E
     const page = await alice.newPage();
     await page.goto(`/issues/${source.key}/conversation`);
     const turns = page.getByRole("list", { name: "Conversation turns" });
-    const link = turns.getByRole("link", { name: "Hover target" });
+    const link = turns.getByRole("link", { exact: true, name: `${target.key} Hover target` });
     await expect(link).toBeVisible();
     await expect(page.getByRole("tooltip")).toHaveCount(0);
 
@@ -111,14 +111,22 @@ test("hovering a board card previews the issue and moving onto the card keeps it
     if (box === null) {
       throw new Error("board card is not visible");
     }
+    // The lift travels straight down and back. At 1280 px Todo is the board's rightmost visible
+    // column, so its card sits in dnd-kit's auto-scroll zone (the board's right fifth); any
+    // rightward travel in the drag arms a rightward scroll that keeps sliding the board under the
+    // still pointer while the button is held, and once Todo has slid out from under it the drop
+    // lands on In progress and really moves the card. dnd-kit scrolls an axis only in a direction
+    // the drag has moved, so a vertical lift leaves the board where it is and the drop lands on
+    // Todo.
     await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
     await page.mouse.down();
-    await page.mouse.move(box.x + box.width / 2 + 12, box.y + box.height / 2 + 12, { steps: 4 });
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2 + 12, { steps: 4 });
     await expect(card).toHaveCount(0);
     await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2, { steps: 4 });
     await page.mouse.up();
     await expect(page).toHaveURL(/\/projects\/CORE/);
     await expect(page.getByRole("tooltip")).toHaveCount(0);
+    await expect(link).toBeVisible();
 
     // Hovering again reopens it - and the drop left keyboard focus on the title link, so the
     // press on the card must not blur the card away. The hover bridge still holds: the pointer
@@ -147,7 +155,7 @@ test("a card survives a held-button drag that leaves its reference and comes bac
   browser,
 }, testInfo) => {
   test.skip(testInfo.project.name === "iphone", "a held mouse button is not a touch gesture");
-  const { source } = await seedReference();
+  const { source, target } = await seedReference();
   const alice = await asUser(browser, "alice");
   try {
     const page = await alice.newPage();
@@ -157,7 +165,7 @@ test("a card survives a held-button drag that leaves its reference and comes bac
     await page.clock.install();
     await page.goto(`/issues/${source.key}/conversation`);
     const turns = page.getByRole("list", { name: "Conversation turns" });
-    const link = turns.getByRole("link", { name: "Hover target" });
+    const link = turns.getByRole("link", { exact: true, name: `${target.key} Hover target` });
     await expect(link).toBeVisible();
     await link.hover();
     const card = page.getByRole("tooltip");
@@ -201,14 +209,14 @@ test("a card survives a held-button move from the card back onto its reference",
   browser,
 }, testInfo) => {
   test.skip(testInfo.project.name === "iphone", "a held mouse button is not a touch gesture");
-  const { source } = await seedReference();
+  const { source, target } = await seedReference();
   const alice = await asUser(browser, "alice");
   try {
     const page = await alice.newPage();
     await page.clock.install();
     await page.goto(`/issues/${source.key}/conversation`);
     const turns = page.getByRole("list", { name: "Conversation turns" });
-    const link = turns.getByRole("link", { name: "Hover target" });
+    const link = turns.getByRole("link", { exact: true, name: `${target.key} Hover target` });
     await expect(link).toBeVisible();
     await link.hover();
     const card = page.getByRole("tooltip");
@@ -252,7 +260,7 @@ test("on a phone, tapping a reference follows it and never shows a card", async 
     await page.goto(`/issues/${source.key}/conversation`);
     const link = page
       .getByRole("list", { name: "Conversation turns" })
-      .getByRole("link", { name: "Hover target" });
+      .getByRole("link", { exact: true, name: `${target.key} Hover target` });
     await expect(link).toBeVisible();
     await link.tap();
     await expect(page).toHaveURL(new RegExp(`/issues/${target.key}(/|$)`));

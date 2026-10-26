@@ -37,7 +37,7 @@ import { MarkdownBody } from "../refs/MarkdownBody";
 import { MarkdownPreview } from "../refs/MarkdownPreview";
 import { buildIssuePath, buildProjectPath, itemRoute } from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
-import { isBareReferenceBody, Unfurl } from "../refs/Unfurl";
+import { Unfurl } from "../refs/Unfurl";
 import { useMarkThreadRead } from "../replies/useMarkThreadRead";
 import { useMargin } from "./margin-context";
 import type { CommentActionFailure } from "./useCommentActionQueue";
@@ -183,6 +183,7 @@ function CommentBody({
         </p>
       );
   }
+  const source = { id: comment.id, kind: "comment" } as const;
   return (
     <>
       {anchor === null ? null : (
@@ -191,18 +192,18 @@ function CommentBody({
         </blockquote>
       )}
       {orphanNotice}
-      {suggestion === null ? <MarkdownBody markdown={comment.body} /> : null}
+      {suggestion === null ? <MarkdownBody markdown={comment.body} source={source} /> : null}
       {suggestion !== null && anchor !== null ? (
         <div className="space-y-1 font-mono text-xs">
           <SuggestionDiff clamp={false} quote={anchor.quote} suggestion={suggestion} />
           {comment.body === "Suggested replacement." ? null : (
             <div className={`font-sans ${textSecondaryOnSurface}`}>
-              <MarkdownBody markdown={comment.body} />
+              <MarkdownBody markdown={comment.body} source={source} />
             </div>
           )}
         </div>
       ) : null}
-      {isBareReferenceBody(comment.body) ? <Unfurl body={comment.body} /> : null}
+      <Unfurl body={comment.body} source={source} />
       <p className={`mt-2 flex flex-wrap items-center gap-x-1 text-xs ${textMutedOnSurfaceMuted}`}>
         <span>
           {actorLabel(comment.author)} · <Timestamp at={comment.created_at} />
@@ -245,6 +246,7 @@ export function ThreadCard({
   const { focusBlock } = useMargin();
   const active = expanded || selected;
   const root = thread.root.comment;
+  const rootSource = { id: root.id, kind: "comment" } as const;
   const rootSuggestion = root.suggestion;
   const terminalSuggestion = rootSuggestion !== null && rootSuggestion.accepted !== null;
   // The server refuses accept and reject on an orphaned anchor (409 ANCHOR_ORPHANED), so the
@@ -490,6 +492,7 @@ export function ThreadCard({
                       lines={1}
                       links="live"
                       markdown={root.body}
+                      source={rootSource}
                     />
                   )}
                 </>
@@ -502,8 +505,13 @@ export function ThreadCard({
                       {root.anchor.quote}
                     </blockquote>
                   )}
-                  <MarkdownPreview lines={2} links="live" markdown={root.body} />
-                  {isBareReferenceBody(root.body) ? <Unfurl body={root.body} /> : null}
+                  <MarkdownPreview
+                    lines={2}
+                    links="live"
+                    markdown={root.body}
+                    source={rootSource}
+                  />
+                  <Unfurl body={root.body} source={rootSource} />
                 </>
               )}
               {thread.replies.length === 0 ? null : (

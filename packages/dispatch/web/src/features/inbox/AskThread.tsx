@@ -24,6 +24,7 @@ import { appendToDraft, DraftUploadStatus, useDraftUpload } from "../artifacts/A
 import { actorLabel } from "../refs/actor";
 import { MarkdownBody } from "../refs/MarkdownBody";
 import { Timestamp } from "../refs/Timestamp";
+import { Unfurl } from "../refs/Unfurl";
 import type { DwellRef } from "../shell/useDwell";
 import { clearReplyDraft, useReplyDraft } from "./reply-drafts";
 
@@ -40,6 +41,7 @@ function AskReply({
   current?: boolean;
   markRef?: DwellRef;
 }): ReactNode {
+  const source = { id: comment.id, kind: "comment" } as const;
   return (
     <li
       aria-current={current ? "true" : undefined}
@@ -48,8 +50,9 @@ function AskReply({
       ref={markRef}
     >
       <div className={textPrimaryOnSurfaceMuted}>
-        <MarkdownBody markdown={comment.body} />
+        <MarkdownBody markdown={comment.body} source={source} />
       </div>
+      <Unfurl body={comment.body} source={source} />
       <p className={`mt-1 text-xs ${textMutedOnSurfaceMuted}`}>
         {actorLabel(comment.author)} · <Timestamp at={comment.created_at} />
       </p>

@@ -1153,8 +1153,8 @@ func lockTables(t *testing.T, database *store.Store, tables ...string) pgx.Tx {
 // holds - which is the only way two processes' passes are made to overlap on purpose rather than
 // by luck.
 //
-// Three of the six leases are observable inside a window a test can wait out:
-// reference-excerpts and webhook-redelivery, whose first pass is immediate, and
+// Four of the seven leases are observable inside a window a test can wait out:
+// reference-excerpts, reference-reindex and webhook-redelivery, whose first pass is immediate, and
 // suggestion-outcomes, whose first is one SuggestionSweepInterval (a minute) in. The other three
 // are not, and this row says so rather than pretending: document-compaction's ticker is 24 h;
 // architecture-import's and delivery-reconcile's first pass is jittered uniformly over
@@ -1163,19 +1163,41 @@ func lockTables(t *testing.T, database *store.Store, tables ...string) pgx.Tx {
 func TestEachLeasedMaintenanceLoopRunsOnceAcrossBothProcesses(t *testing.T) {
 	pair := newPair(t)
 	fake := startGitHubFake(t)
+	// The reference re-index is owed the scope of a document that does not exist, so its first
+	// pass names no source and only settles that row: a write to refs_owed and to nothing else.
+	if _, err := pair.database.Pool.Exec(context.Background(), `
+		insert into refs_owed (kind, id) values ('scope', gen_random_uuid()::text)
+	`); err != nil {
+		t.Fatalf("owe the re-index a scope: %v", err)
+	}
 	// refs is where the reference-excerpt reconciliation's first statement writes
-	// (refs.MarkStaleExcerpts), write_suggestions where the suggestion-outcome sweep's does.
+	// (refs.MarkStaleExcerpts), write_suggestions where the suggestion-outcome sweep's does, and
+	// refs_owed where the reference re-index's first write lands. The re-index's table is held
+	// apart, because its interval is 30 s: it is released, and the pass counted, inside the period
+	// the held pass began in, before the next period's pass is due.
 	gate := lockTables(t, pair.database, "refs", "write_suggestions")
+	queue := lockTables(t, pair.database, "refs_owed")
 	pair.start(t, githubAppEnv(t, fake.URL()))
 
 	if waiting := storetest.WaitForLockWaiters(t, gate, 1, 60*time.Second); waiting < 1 {
 		t.Fatalf("no reference-excerpt pass reached the refs lock, so neither process took the lease:\nA:\n%s\nB:\n%s",
 			pair.a.Output.String(), pair.b.Output.String())
 	}
-	waitForLease(t, pair, leaseSkipped, "reference-excerpts", 60*time.Second)
-	if ran := countLease(pair.a, leaseRan, "reference-excerpts") + countLease(pair.b, leaseRan, "reference-excerpts"); ran != 0 {
-		t.Errorf("a reference-excerpt pass reported running %d times while the one holding the lease is still inside the refs lock", ran)
+	if waiting := storetest.WaitForLockWaiters(t, queue, 1, 60*time.Second); waiting < 1 {
+		t.Fatalf("no reference re-index pass reached the refs_owed lock, so neither process took the lease:\nA:\n%s\nB:\n%s",
+			pair.a.Output.String(), pair.b.Output.String())
 	}
+	for _, held := range []struct{ lease, table string }{{"reference-excerpts", "refs"}, {"reference-reindex", "refs_owed"}} {
+		waitForLease(t, pair, leaseSkipped, held.lease, 60*time.Second)
+		if ran := countLease(pair.a, leaseRan, held.lease) + countLease(pair.b, leaseRan, held.lease); ran != 0 {
+			t.Errorf("a %s pass reported running %d times while the one holding the lease is still inside the %s lock", held.lease, ran, held.table)
+		}
+	}
+	if err := queue.Rollback(context.Background()); err != nil {
+		t.Fatalf("release refs_owed: %v", err)
+	}
+	waitForLease(t, pair, leaseRan, "reference-reindex", 20*time.Second)
+	requireLeasedOnce(t, pair, "reference-reindex")
 
 	// The webhook redelivery sweep's first pass is held in its first GitHub call instead: it
 	// lists the App webhook's failed deliveries before it writes anything.

@@ -7,10 +7,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
@@ -116,6 +119,97 @@ func parseReferencesQuery(r *http.Request, serverURL string) (refs.Query, text.R
 		query.Since = &value
 	}
 	return query, ref, nil
+}
+
+// referenceQuestion is one question block of a document as GET /api/v1/references/questions
+// answers it: the id its `:::ask{#id}` line declares and the dispatch:// reference of the ask a `#`
+// and that id names.
+type referenceQuestion struct {
+	BlockID string `json:"block_id"`
+	Ask     string `json:"ask"`
+}
+
+// referenceQuestions is GET /api/v1/references/questions: the document a source's text belongs
+// to, as its dispatch:// reference, and that document's question map, ordered by block id. A text
+// that belongs to no document has a null document and no questions.
+type referenceQuestions struct {
+	Document  *string             `json:"document"`
+	Questions []referenceQuestion `json:"questions"`
+}
+
+// getReferenceQuestions tells the dashboard what a `#id` in one text names, by the rule the
+// server indexes it by: ?kind= (artifact, ask, comment or message) and ?id= (its uuid) name the
+// text, refs.ScopeOf the document it belongs to and refs.QuestionMap that document's question
+// blocks, each to the reference of its ask. Plain selects, no lock. A source that does not exist
+// is 404 NOT_FOUND, as /api/v1/references answers a node that does not; a direct message, which
+// belongs to no document, is 200 with a null document. Cross-project like /api/v1/references.
+func (s *server) getReferenceQuestions(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAuthenticated(w, r) {
+		return
+	}
+	values := r.URL.Query()
+	kind, id := strings.TrimSpace(values.Get("kind")), strings.TrimSpace(values.Get("id"))
+	switch kind {
+	case "artifact", "ask", "comment", "message":
+	default:
+		s.writeHandlerError(w, errorf(http.StatusBadRequest, "INVALID_KIND", "kind %q is not one of artifact, ask, comment, message", kind))
+		return
+	}
+	if _, err := uuid.Parse(id); err != nil {
+		s.writeHandlerError(w, errorf(http.StatusBadRequest, "INVALID_ID", "id %q is not a uuid", id))
+		return
+	}
+	ctx, pool := r.Context(), s.deps.Store.Pool
+	if _, found, err := refs.Node(ctx, pool, kind, id, false); err != nil {
+		s.writeHandlerError(w, err)
+		return
+	} else if !found {
+		s.writeHandlerError(w, errorf(http.StatusNotFound, "NOT_FOUND", "no %s at %s", kind, id))
+		return
+	}
+	result := referenceQuestions{Questions: []referenceQuestion{}}
+	scope, err := refs.ScopeOf(ctx, pool, kind, id)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	if scope == "" {
+		WriteJSON(w, http.StatusOK, result)
+		return
+	}
+	document, found, err := refs.Node(ctx, pool, "artifact", scope, false)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	if !found || document.Ref == "" {
+		WriteJSON(w, http.StatusOK, result)
+		return
+	}
+	result.Document = &document.Ref
+	questions, err := refs.QuestionMap(ctx, pool, scope)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	// One ask can stand for several blocks (copies of one question), so each is read once, and
+	// every ask in one load.
+	blockIDs := slices.Sorted(maps.Keys(questions))
+	askIDs := make([]string, 0, len(blockIDs))
+	for _, blockID := range blockIDs {
+		askIDs = append(askIDs, questions[blockID].ID)
+	}
+	asks, err := refs.Nodes(ctx, pool, "ask", askIDs)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	for _, blockID := range blockIDs {
+		if ask, found := asks[questions[blockID].ID]; found && ask.Ref != "" {
+			result.Questions = append(result.Questions, referenceQuestion{BlockID: blockID, Ask: ask.Ref})
+		}
+	}
+	WriteJSON(w, http.StatusOK, result)
 }
 
 // documentMentionExcerpts replaces the excerpt of every mention written by a document with the

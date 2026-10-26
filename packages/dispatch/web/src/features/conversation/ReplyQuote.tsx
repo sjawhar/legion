@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 import { Link } from "react-router-dom";
+import type { ReferenceSource } from "../../api/client";
 import { linkHoverText, secondaryButtonBorder, textMutedOnCanvas } from "../../theme/classes";
 import { MarkdownPreview } from "../refs/MarkdownPreview";
 
@@ -12,17 +13,20 @@ const quoteClasses = `flex min-w-0 max-w-full items-center border-l-2 pl-2 text-
  *  read the same. The prefix is the app's own words and stays plain; the parent's body is
  *  Markdown and renders as such, bold and code and references formatted, cut to the quote's
  *  one line after rendering. Without a loaded parent the author is unknown and the quote says
- *  so. With `to` it links to the parent's turn. */
+ *  so. With `to` it links to the parent's turn. `source` is the quoted message or comment, which
+ *  a `#id` in its body resolves against; none for a direct message, which has no document. */
 export function ReplyQuote({
   author,
   className = "",
   excerpt,
+  source,
   to,
 }: {
   author: string | undefined;
   className?: string;
   /** The quoted parent's body as its author wrote it (Markdown); `""` when none is known. */
   excerpt: string;
+  source?: ReferenceSource;
   to?: string;
 }): ReactNode {
   const text = (
@@ -31,6 +35,7 @@ export function ReplyQuote({
       lead={`Replying to ${author ?? "a message"}${excerpt === "" ? "" : " — "}`}
       lines={1}
       markdown={excerpt}
+      source={source}
     />
   );
   return to === undefined ? (

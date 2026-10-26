@@ -4,6 +4,14 @@
 
 ### Added
 
+- The `dispatch` skill's reading reference (`references/reading.md`, "Reference forms") teaches
+  the two reference forms Dispatch now reads in text: a bare issue key (`CORE-12`), linked and
+  indexed when its issue exists and it stands alone, and a `#<question id>`, which cites a
+  question block of the same document; a key written before its issue exists links once the issue
+  does and is indexed at the text's next write or the next `rebuild-refs`. It also says a
+  reference reads as its target's title and a reply of references alone shows its cards on every
+  surface (INFRA-189).
+
 - The agent stream reports the model and thinking level the session runs now, so Dispatch's live
   view can show and switch them: a `settings` frame carrying the current model (`provider/id`),
   every model the session lists as available, the configured thinking level `/effort` reports

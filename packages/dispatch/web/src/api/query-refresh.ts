@@ -1,8 +1,15 @@
-import type { Query, QueryClient } from "@tanstack/react-query";
+import type { Query, QueryClient, QueryFilters } from "@tanstack/react-query";
+
+import { ApiError } from "./client";
 
 /** Whether a query is owned by Dispatch's live delivery socket rather than refreshed by events. */
 export function isLiveQuery(query: Pick<Query, "meta">): boolean {
   return query.meta?.live === true;
+}
+
+/** Whether a query's last answer was a 404: a record that does not exist. */
+export function answeredNotFound(query: { state: { error: Error | null } }): boolean {
+  return query.state.error instanceof ApiError && query.state.error.status === 404;
 }
 
 /**
@@ -12,20 +19,42 @@ export function isLiveQuery(query: Pick<Query, "meta">): boolean {
  */
 
 /**
+ * The key an event queues to refresh every issue detail the cache holds: each `["issue", key]`
+ * query but one whose last answer was a 404. Such a query is mostly a key-shaped word a body writes
+ * bare that names no issue (`UTF-8`, `useBareReferences`), and only a new issue can change that
+ * answer, so every event but `issue.created` (an issue's update or close, a child's status, a
+ * mapping write, a truncated count) asks nothing about it, where each would otherwise cost one
+ * request per such word on screen; `issue.created`'s whole `["issue"]` and a whole-cache refresh
+ * (the stream's reconnect) still ask. `coalescePrefixKeys` keeps `["issue"]` over it, and it over
+ * a narrower issue key, when one batch queues both.
+ */
+export const existingIssuesKey = ["issue", "existing"] as const;
+
+function isExistingIssuesKey(key: readonly unknown[]): boolean {
+  return (
+    key.length === existingIssuesKey.length &&
+    key.every((part, index) => part === existingIssuesKey[index])
+  );
+}
+
+/**
  * React Query matches by prefix, so a queued key that another queued key is a prefix of is the
  * same refresh twice: `invalidateQueries` defaults to `cancelRefetch: true`, so the second call
  * cancels the first's in-flight fetch and starts another request for the same query. Keeps the
  * broadest queued key of each family and drops the rest. The relation is element-wise and
  * strict, so a sibling family (`["artifact-ref"]` beside `["artifact"]`) is never swallowed and
- * the shortest queued key is never dropped.
+ * the shortest queued key is never dropped. `existingIssuesKey` stands for the `["issue"]` family
+ * here, so it drops a narrower issue key beside it (`["issue", "CORE-1"]`, the event's own issue,
+ * which exists) and `["issue"]` drops it.
  */
 export function coalescePrefixKeys(keys: readonly (readonly unknown[])[]): (readonly unknown[])[] {
+  const existingIssues = keys.some(isExistingIssuesKey);
   return keys.filter(
     (key) =>
       !keys.some(
         (other) =>
           other.length < key.length && other.every((part, index) => Object.is(part, key[index]))
-      )
+      ) && !(existingIssues && key[0] === "issue" && key.length > 1 && !isExistingIssuesKey(key))
   );
 }
 
@@ -69,7 +98,7 @@ function stateFor(queryClient: QueryClient): FirstLoadState {
 }
 
 /**
- * Cancels the first load of every active query matching `queryKeys` (every query when they are
+ * Cancels the first load of every active query matching `filters` (every query when they are
  * omitted), at most once per query until that query holds data.
  *
  * `invalidateQueries` refetches with `cancelRefetch`, whose whole job is to restart a request
@@ -97,10 +126,7 @@ function stateFor(queryClient: QueryClient): FirstLoadState {
  * full round trips for each query it touches - the orphaned body the client discards, and the
  * post-event one it renders.
  */
-function cancelFirstLoads(
-  queryClient: QueryClient,
-  queryKeys?: readonly (readonly unknown[])[]
-): void {
+function cancelFirstLoads(queryClient: QueryClient, filters?: readonly QueryFilters[]): void {
   const cache = queryClient.getQueryCache();
   const { cancelled, refreshOnSettle } = stateFor(queryClient);
   // A removed query left `cancelled` on the subscription above, so a hash still here names a
@@ -110,14 +136,17 @@ function cancelFirstLoads(
       cancelled.delete(hash);
     }
   }
-  // One `findAll` per key rather than one over the union of the batch's keys: the filters differ
-  // per key, and a query two keys both match is reached twice, which the sets below absorb.
-  for (const queryKey of queryKeys ?? [undefined]) {
+  // One `findAll` per filter rather than one over the union of the batch's keys: the filters
+  // differ per key, and a query two keys both match is reached twice, which the sets below absorb.
+  for (const filter of filters ?? [{}]) {
     const loads = cache.findAll({
       fetchStatus: "fetching",
       predicate: (query) =>
-        query.state.data === undefined && !query.isStatic() && !isLiveQuery(query),
-      queryKey,
+        query.state.data === undefined &&
+        !query.isStatic() &&
+        !isLiveQuery(query) &&
+        (filter.predicate?.(query) ?? true),
+      queryKey: filter.queryKey,
       type: "active",
     });
     for (const load of loads) {
@@ -134,23 +163,30 @@ function cancelFirstLoads(
   }
 }
 
-/** Refreshes `queryKeys`, or every query the app holds but the live-owned ones when they are
- *  omitted: a live query is kept current by its own socket, so a whole-cache refresh (the stream's
- *  reconnect, an unknown event) would only re-subscribe it and have Dispatch send its snapshot
- *  again. */
+/** Refreshes `queryKeys` (each by prefix, `existingIssuesKey` as its own filter), or every
+ *  query the app holds but the live-owned ones when they are omitted: a live query is kept
+ *  current by its own socket, so a whole-cache refresh (the stream's reconnect, an unknown event)
+ *  would only re-subscribe it and have Dispatch send its snapshot again. */
 export function refreshQueries(
   queryClient: QueryClient,
   queryKeys?: readonly (readonly unknown[])[]
 ): void {
+  // Each key by prefix, but the issues that exist: every issue query but one that answered 404.
+  const filters = queryKeys?.map(
+    (queryKey): QueryFilters =>
+      isExistingIssuesKey(queryKey)
+        ? { predicate: (query) => !answeredNotFound(query), queryKey: ["issue"] }
+        : { queryKey }
+  );
   // Every first load this batch touches is cancelled before any of it is refetched: two keys in
   // one batch can match the same query, and interleaving would have the second key cancel the
   // request the first one just started.
-  cancelFirstLoads(queryClient, queryKeys);
-  if (queryKeys === undefined) {
+  cancelFirstLoads(queryClient, filters);
+  if (filters === undefined) {
     queryClient.invalidateQueries({ predicate: (query) => !isLiveQuery(query) });
     return;
   }
-  for (const queryKey of queryKeys) {
-    queryClient.invalidateQueries({ queryKey });
+  for (const filter of filters) {
+    queryClient.invalidateQueries(filter);
   }
 }

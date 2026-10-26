@@ -5,13 +5,30 @@ import { composerReferences } from "./routes";
 
 const origin = "https://dispatch.test";
 
-// The dashboard's half of the shared text table: the composer's reference pills and unfurl cards
-// cite exactly what the server's `text.Extract` indexes for the same body, so the dashboard and
+// The composer's half of the shared text table: the composer's reference pills cite exactly what
+// the server's `text.Mentions` indexes for the same body, so the dashboard and
 // the reference graph never disagree about what a text cites. The Go reader walks the same rows.
+// The composer reads `dispatch://` and dashboard addresses only, so a row that names issues or
+// questions, which is about bare keys and `#id`, holds it only to citing nothing the server does
+// not, in the server's order.
+const addressRows = DISPATCH_TEXT_REFERENCES.filter(
+  (row) => row.issues === undefined && row.questions === undefined
+);
+const bareRows = DISPATCH_TEXT_REFERENCES.filter(
+  (row) => row.issues !== undefined || row.questions !== undefined
+);
+
 test.each(
-  DISPATCH_TEXT_REFERENCES.map((row) => [row.body, row.origin ?? origin, row.refs] as const)
+  addressRows.map((row) => [row.body, row.origin ?? origin, row.refs] as const)
 )("%s cites, read against %s, %p", (body, server, refs) => {
   expect(composerReferences(body, server).map((item) => item.reference)).toEqual([...refs]);
+});
+
+test.each(
+  bareRows.map((row) => [row.body, row.origin ?? origin, row.refs] as const)
+)("%s cites, read against %s, no more than %p", (body, server, refs) => {
+  const cited = composerReferences(body, server).map((item) => item.reference);
+  expect(cited).toEqual(refs.filter((ref) => cited.includes(ref)));
 });
 
 // A body near the server's 1 MiB request cap that trails a reference with a run of closing

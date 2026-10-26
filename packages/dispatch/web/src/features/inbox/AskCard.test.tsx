@@ -387,6 +387,54 @@ test("an answer given after every reply is what the mark watches and reads throu
   }
 });
 
+// R6: a reply whose whole text is references shows each one's card under it, as the margin does;
+// a reply with other text beside a reference shows none, its link drawn inline only.
+test("a reply that is only references shows their cards in the thread, one with text none", async () => {
+  const getIssue = spyOn(api, "getIssue").mockResolvedValue({
+    artifacts: [],
+    key: "CORE-12",
+    status: "todo",
+    title: "Fix the thing",
+  } as never);
+  const getReferenceQuestions = spyOn(api, "getReferenceQuestions").mockResolvedValue({
+    document: "dispatch://CORE-1/spec",
+    questions: [{ ask: "dispatch://CORE-1/ask/ask-2", block_id: "q2" }],
+  });
+  const getAsk = spyOn(api, "getAsk").mockResolvedValue({
+    ...thread(answeredAsk({ id: "ask-2", question: "Ship the docs too?" })),
+  });
+  const ask = answeredAsk();
+  const replies = [
+    { ...askReply("reply-1", "2026-10-08T03:00:00Z"), body: "Blocked on CORE-12" },
+    { ...askReply("reply-2", "2026-10-08T04:00:00Z"), body: "CORE-12 #q2" },
+  ];
+  const { view } = renderCard(<AskCard ask={ask} initialThread={{ ...thread(ask), replies }} />);
+
+  try {
+    const cards = await view.findByRole("region", { name: "References" });
+    await within(cards).findByRole("link", { name: "Ship the docs too?" });
+    expect(
+      within(cards)
+        .getAllByRole("link")
+        .map((card) => card.getAttribute("href"))
+    ).toEqual(["/issues/CORE-12", "/issues/CORE-1/asks/ask-2"]);
+    // The cards sit under the reply that is only references, the newest, listed first.
+    const [onlyReferences, withText] = Array.from(
+      view.container.querySelectorAll<HTMLElement>("li[data-reply]")
+    );
+    expect(onlyReferences?.contains(cards)).toBe(true);
+    await within(withText as HTMLElement).findByRole("link", { name: /^CORE-12 Fix the thing/ });
+    expect(withText?.querySelector("section")).toBeNull();
+    // The #id resolves against the reply's own document, read for the reply comment.
+    expect(getReferenceQuestions).toHaveBeenCalledWith({ id: "reply-2", kind: "comment" });
+  } finally {
+    view.unmount();
+    getAsk.mockRestore();
+    getReferenceQuestions.mockRestore();
+    getIssue.mockRestore();
+  }
+});
+
 /** One of the decision-block fixtures `cutDecisionBlocks` and the Go server's cut share. */
 function decisionBlockFixture(name: string): string {
   return readFileSync(

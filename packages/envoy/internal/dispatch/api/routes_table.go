@@ -93,6 +93,7 @@ func (s *server) routes() []apiRoute {
 		{http.MethodGet, "/api/v1/issues/{key}/events", authAny, "Page an issue's event log (after, before, ids, order, limit).", s.listIssueEvents},
 		{http.MethodGet, "/api/v1/issues/{key}/references", authAny, "Cross-references to and from an issue.", s.getIssueReferences},
 		{http.MethodGet, "/api/v1/references", authAny, "Edges of one node in the reference graph: ?to=<dispatch ref> backlinks or ?from= links; ?kind=, ?since=<events.id> (mentions only).", s.getReferences},
+		{http.MethodGet, "/api/v1/references/questions", authAny, "What a `#<question id>` in one text names: ?kind=artifact|ask|comment|message and ?id=<uuid> name the text; answers {document, questions} - the dispatch:// reference of the document the text belongs to (null for a direct message) and each question block of it as {block_id, ask}, the ask's dispatch:// reference. 404 NOT_FOUND for a text that does not exist.", s.getReferenceQuestions},
 		{http.MethodGet, "/api/v1/issues/{key}/subscribers", authHuman, "Sessions subscribed to an issue's topics.", s.listIssueSubscribers},
 		{http.MethodDelete, "/api/v1/issues/{key}/subscribers/{session_id}", authHuman, "Unsubscribe a session from an issue.", s.unsubscribeIssueSession},
 		{http.MethodGet, "/api/v1/issues/{key}/artifacts", authAny, "List an issue's documents and files.", s.listArtifacts},

@@ -1,8 +1,21 @@
 import { expect, test } from "bun:test";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen } from "@testing-library/react";
+import type { ReactNode } from "react";
 
 import type { Event } from "../../api/types";
 import { EventBody } from "./EventBody";
+
+/** An event's text renders through `MarkdownBody`, which reads whether a key written in it names
+ *  an issue; one client per test, kept across a rerender. */
+function queries(): { wrapper: (props: { children: ReactNode }) => ReactNode } {
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  return {
+    wrapper: ({ children }) => (
+      <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
+    ),
+  };
+}
 
 const markdownMessage: Event = {
   actor: { id: "alice", kind: "user" },
@@ -25,7 +38,7 @@ const markdownMessage: Event = {
 };
 
 test("EventBody renders Markdown event content", async () => {
-  const view = render(<EventBody event={markdownMessage} />);
+  const view = render(<EventBody event={markdownMessage} />, queries());
 
   try {
     expect(await screen.findByRole("heading", { name: "Status" })).toBeDefined();
@@ -45,7 +58,8 @@ test("EventBody renders unsupported raw HTML as literal text", async () => {
         ...markdownMessage,
         payload: { ...markdownMessage.payload, body: '<img src="x">' },
       }}
-    />
+    />,
+    queries()
   );
 
   try {
@@ -88,7 +102,7 @@ test("EventBody shows the answer a change replaced, struck through", async () =>
     seq: 3,
     type: "ask.answered",
   };
-  const view = render(<EventBody event={changed} />);
+  const view = render(<EventBody event={changed} />, queries());
 
   try {
     const was = await screen.findByText("was: Ship - Go now.");

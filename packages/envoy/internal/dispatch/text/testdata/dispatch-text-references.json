@@ -15,7 +15,8 @@
     "body": "Tied to `dispatch://CORE-1` here.",
     "refs": [
       "dispatch://CORE-1"
-    ]
+    ],
+    "links": []
   },
   {
     "body": "_dispatch://CORE-1/spec_, ~~dispatch://CORE-2~~ and __dispatch://CORE-3/ask/22222222-2222-4222-8222-222222222222__.",
@@ -30,7 +31,8 @@
     "refs": [
       "dispatch://CORE-5",
       "dispatch://CORE-6"
-    ]
+    ],
+    "links": []
   },
   {
     "body": "See [dispatch://CORE-7/spec](dispatch://CORE-7/spec).",
@@ -106,7 +108,8 @@
     "body": "`https://dispatch.test/issues/CORE-1/spec?comment=44444444-4444-4444-8444-444444444444`;",
     "refs": [
       "dispatch://CORE-1/comment/44444444-4444-4444-8444-444444444444"
-    ]
+    ],
+    "links": []
   },
   {
     "body": "Pairs part at & alone: https://dispatch.test/issues/CORE-1/spec?comment=c1;c2, https://dispatch.test/issues/CORE-1/artifacts/notes-md?v=2;3 and https://dispatch.test/issues/CORE-2/spec?ask=a1;x&comment=c1.",
@@ -187,5 +190,551 @@
     "refs": [
       "dispatch://LEGION-1/artifact/shot-png@v1"
     ]
+  },
+  {
+    "body": "CORE-1 is blocked.",
+    "issues": [
+      "CORE-1"
+    ],
+    "refs": [
+      "dispatch://CORE-1"
+    ]
+  },
+  {
+    "body": "Blocked on CORE-1 today.",
+    "issues": [
+      "CORE-1"
+    ],
+    "refs": [
+      "dispatch://CORE-1"
+    ]
+  },
+  {
+    "body": "Blocked (CORE-1) today.",
+    "issues": [
+      "CORE-1"
+    ],
+    "refs": [
+      "dispatch://CORE-1"
+    ]
+  },
+  {
+    "body": "Blocked [CORE-1] today.",
+    "issues": [
+      "CORE-1"
+    ],
+    "refs": [
+      "dispatch://CORE-1"
+    ]
+  },
+  {
+    "body": "Blocked on \"CORE-1\" today.",
+    "issues": [
+      "CORE-1"
+    ],
+    "refs": [
+      "dispatch://CORE-1"
+    ]
+  },
+  {
+    "body": "Blocked on 'CORE-1' today.",
+    "issues": [
+      "CORE-1"
+    ],
+    "refs": [
+      "dispatch://CORE-1"
+    ]
+  },
+  {
+    "body": "Blocked on **CORE-1** today.",
+    "issues": [
+      "CORE-1"
+    ],
+    "refs": [
+      "dispatch://CORE-1"
+    ]
+  },
+  {
+    "body": "Blocked on _CORE-1_ today.",
+    "issues": [
+      "CORE-1"
+    ],
+    "refs": [
+      "dispatch://CORE-1"
+    ]
+  },
+  {
+    "body": ">CORE-1 is blocked.",
+    "issues": [
+      "CORE-1"
+    ],
+    "refs": [
+      "dispatch://CORE-1"
+    ]
+  },
+  {
+    "body": "Blocked on ~~CORE-1~~ today.",
+    "issues": [
+      "CORE-1"
+    ],
+    "refs": [
+      "dispatch://CORE-1"
+    ]
+  },
+  {
+    "body": "|issue|state|\n|---|---|\n|CORE-1|open|",
+    "issues": [
+      "CORE-1"
+    ],
+    "refs": [
+      "dispatch://CORE-1"
+    ]
+  },
+  {
+    "body": "Blocked on&#32;CORE-1 today.",
+    "issues": [
+      "CORE-1"
+    ],
+    "refs": [
+      "dispatch://CORE-1"
+    ]
+  },
+  {
+    "body": "Blocked on&#x20;CORE-1 today.",
+    "issues": [
+      "CORE-1"
+    ],
+    "refs": [
+      "dispatch://CORE-1"
+    ]
+  },
+  {
+    "body": "Blocked on&#9;CORE-1 today.",
+    "issues": [
+      "CORE-1"
+    ],
+    "refs": [
+      "dispatch://CORE-1"
+    ]
+  },
+  {
+    "body": "Blocked on&#10;CORE-1 today.",
+    "issues": [
+      "CORE-1"
+    ],
+    "refs": [
+      "dispatch://CORE-1"
+    ]
+  },
+  {
+    "body": "See XCORE-1 here.",
+    "issues": [
+      "XCORE-1"
+    ],
+    "refs": [
+      "dispatch://XCORE-1"
+    ]
+  },
+  {
+    "body": "CORE-1's spec is done.",
+    "issues": [
+      "CORE-1"
+    ],
+    "refs": [
+      "dispatch://CORE-1"
+    ]
+  },
+  {
+    "body": "Done in CORE-1.",
+    "issues": [
+      "CORE-1"
+    ],
+    "refs": [
+      "dispatch://CORE-1"
+    ]
+  },
+  {
+    "body": "Blocked on CORE-1, then shipped.",
+    "issues": [
+      "CORE-1"
+    ],
+    "refs": [
+      "dispatch://CORE-1"
+    ]
+  },
+  {
+    "body": "See [the blocker](CORE-1).",
+    "issues": [
+      "CORE-1"
+    ],
+    "refs": [
+      "dispatch://CORE-1"
+    ],
+    "links": []
+  },
+  {
+    "body": "See legion/CORE-1 here.",
+    "issues": [
+      "CORE-1"
+    ],
+    "refs": []
+  },
+  {
+    "body": "See xCORE-1 here.",
+    "issues": [
+      "CORE-1"
+    ],
+    "refs": []
+  },
+  {
+    "body": "See core-1 here.",
+    "issues": [
+      "CORE-1"
+    ],
+    "refs": []
+  },
+  {
+    "body": "See CORE-1abc here.",
+    "issues": [
+      "CORE-1"
+    ],
+    "refs": []
+  },
+  {
+    "body": "See CORE-1-2 here.",
+    "issues": [
+      "CORE-1"
+    ],
+    "refs": []
+  },
+  {
+    "body": "See CORE-1/spec here.",
+    "issues": [
+      "CORE-1"
+    ],
+    "refs": []
+  },
+  {
+    "body": "See CORE-1.5 here.",
+    "issues": [
+      "CORE-1"
+    ],
+    "refs": []
+  },
+  {
+    "body": "See CORE-1_x here.",
+    "issues": [
+      "CORE-1"
+    ],
+    "refs": []
+  },
+  {
+    "body": "See CORE-1#q2 here.",
+    "issues": [
+      "CORE-1"
+    ],
+    "questions": {
+      "q2": "dispatch://CORE-1/ask/33333333-3333-4333-8333-333333333333"
+    },
+    "refs": []
+  },
+  {
+    "body": "Blocked on CORE-404.",
+    "issues": [
+      "CORE-1"
+    ],
+    "refs": []
+  },
+  {
+    "body": "Blocked on CORE-1, which no issue holds.",
+    "refs": []
+  },
+  {
+    "body": "See #q2 for the rollout.",
+    "questions": {
+      "q2": "dispatch://CORE-1/ask/33333333-3333-4333-8333-333333333333"
+    },
+    "refs": [
+      "dispatch://CORE-1/ask/33333333-3333-4333-8333-333333333333"
+    ]
+  },
+  {
+    "body": "As agreed, _see #q2_.",
+    "questions": {
+      "q2": "dispatch://CORE-1/ask/33333333-3333-4333-8333-333333333333"
+    },
+    "refs": [
+      "dispatch://CORE-1/ask/33333333-3333-4333-8333-333333333333"
+    ]
+  },
+  {
+    "body": "Answered in #q2.",
+    "questions": {
+      "q2": "dispatch://CORE-1/ask/33333333-3333-4333-8333-333333333333"
+    },
+    "refs": [
+      "dispatch://CORE-1/ask/33333333-3333-4333-8333-333333333333"
+    ]
+  },
+  {
+    "body": "See #nope here.",
+    "questions": {
+      "q2": "dispatch://CORE-1/ask/33333333-3333-4333-8333-333333333333"
+    },
+    "refs": []
+  },
+  {
+    "body": "See owner/repo#1 here.",
+    "questions": {
+      "1": "dispatch://CORE-1/ask/33333333-3333-4333-8333-333333333333"
+    },
+    "refs": []
+  },
+  {
+    "body": ":::ask{#q2}\nWhich region first?\n:::",
+    "questions": {
+      "q2": "dispatch://CORE-1/ask/33333333-3333-4333-8333-333333333333"
+    },
+    "refs": []
+  },
+  {
+    "body": "See https://example.com/search?q=(CORE-1) and https://example.com/docs(#q2).",
+    "issues": [
+      "CORE-1"
+    ],
+    "questions": {
+      "q2": "dispatch://CORE-1/ask/33333333-3333-4333-8333-333333333333"
+    },
+    "refs": []
+  },
+  {
+    "body": "`CORE-1` is blocked.",
+    "issues": [
+      "CORE-1"
+    ],
+    "refs": [
+      "dispatch://CORE-1"
+    ],
+    "links": []
+  },
+  {
+    "body": "Blocked on `CORE-1` today.",
+    "issues": [
+      "CORE-1"
+    ],
+    "refs": [
+      "dispatch://CORE-1"
+    ],
+    "links": []
+  },
+  {
+    "body": "Blocked `(CORE-1)` today.",
+    "issues": [
+      "CORE-1"
+    ],
+    "refs": [
+      "dispatch://CORE-1"
+    ],
+    "links": []
+  },
+  {
+    "body": "Blocked `[CORE-1]` today.",
+    "issues": [
+      "CORE-1"
+    ],
+    "refs": [
+      "dispatch://CORE-1"
+    ],
+    "links": []
+  },
+  {
+    "body": "Blocked on `\"CORE-1\"` today.",
+    "issues": [
+      "CORE-1"
+    ],
+    "refs": [
+      "dispatch://CORE-1"
+    ],
+    "links": []
+  },
+  {
+    "body": "Blocked on `'CORE-1'` today.",
+    "issues": [
+      "CORE-1"
+    ],
+    "refs": [
+      "dispatch://CORE-1"
+    ],
+    "links": []
+  },
+  {
+    "body": "Blocked on `**CORE-1**` today.",
+    "issues": [
+      "CORE-1"
+    ],
+    "refs": [
+      "dispatch://CORE-1"
+    ],
+    "links": []
+  },
+  {
+    "body": "Blocked on `_CORE-1_` today.",
+    "issues": [
+      "CORE-1"
+    ],
+    "refs": [
+      "dispatch://CORE-1"
+    ],
+    "links": []
+  },
+  {
+    "body": "`>CORE-1` is blocked.",
+    "issues": [
+      "CORE-1"
+    ],
+    "refs": [
+      "dispatch://CORE-1"
+    ],
+    "links": []
+  },
+  {
+    "body": "Blocked on `~~CORE-1~~` today.",
+    "issues": [
+      "CORE-1"
+    ],
+    "refs": [
+      "dispatch://CORE-1"
+    ],
+    "links": []
+  },
+  {
+    "body": "Cells are written `|CORE-1|open|`.",
+    "issues": [
+      "CORE-1"
+    ],
+    "refs": [
+      "dispatch://CORE-1"
+    ],
+    "links": []
+  },
+  {
+    "body": "Blocked on `&#32;CORE-1` today.",
+    "issues": [
+      "CORE-1"
+    ],
+    "refs": [
+      "dispatch://CORE-1"
+    ],
+    "links": []
+  },
+  {
+    "body": "Blocked on `&#x20;CORE-1` today.",
+    "issues": [
+      "CORE-1"
+    ],
+    "refs": [
+      "dispatch://CORE-1"
+    ],
+    "links": []
+  },
+  {
+    "body": "Blocked on `&#9;CORE-1` today.",
+    "issues": [
+      "CORE-1"
+    ],
+    "refs": [
+      "dispatch://CORE-1"
+    ],
+    "links": []
+  },
+  {
+    "body": "Blocked on `&#10;CORE-1` today.",
+    "issues": [
+      "CORE-1"
+    ],
+    "refs": [
+      "dispatch://CORE-1"
+    ],
+    "links": []
+  },
+  {
+    "body": "See `XCORE-1` here.",
+    "issues": [
+      "XCORE-1"
+    ],
+    "refs": [
+      "dispatch://XCORE-1"
+    ],
+    "links": []
+  },
+  {
+    "body": "`CORE-1's` spec is done.",
+    "issues": [
+      "CORE-1"
+    ],
+    "refs": [
+      "dispatch://CORE-1"
+    ],
+    "links": []
+  },
+  {
+    "body": "Done in `CORE-1.`",
+    "issues": [
+      "CORE-1"
+    ],
+    "refs": [
+      "dispatch://CORE-1"
+    ],
+    "links": []
+  },
+  {
+    "body": "Blocked on `CORE-1,` then shipped.",
+    "issues": [
+      "CORE-1"
+    ],
+    "refs": [
+      "dispatch://CORE-1"
+    ],
+    "links": []
+  },
+  {
+    "body": "See `[the blocker](CORE-1)`.",
+    "issues": [
+      "CORE-1"
+    ],
+    "refs": [
+      "dispatch://CORE-1"
+    ],
+    "links": []
+  },
+  {
+    "body": "See `#q2` for the rollout.",
+    "questions": {
+      "q2": "dispatch://CORE-1/ask/33333333-3333-4333-8333-333333333333"
+    },
+    "refs": [
+      "dispatch://CORE-1/ask/33333333-3333-4333-8333-333333333333"
+    ],
+    "links": []
+  },
+  {
+    "body": "As agreed, `_see #q2_`.",
+    "questions": {
+      "q2": "dispatch://CORE-1/ask/33333333-3333-4333-8333-333333333333"
+    },
+    "refs": [
+      "dispatch://CORE-1/ask/33333333-3333-4333-8333-333333333333"
+    ],
+    "links": []
+  },
+  {
+    "body": "Answered in `#q2.`",
+    "questions": {
+      "q2": "dispatch://CORE-1/ask/33333333-3333-4333-8333-333333333333"
+    },
+    "refs": [
+      "dispatch://CORE-1/ask/33333333-3333-4333-8333-333333333333"
+    ],
+    "links": []
   }
 ]

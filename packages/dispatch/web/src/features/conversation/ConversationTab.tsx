@@ -45,6 +45,7 @@ import { CopyRefButton } from "../refs/CopyRefButton";
 import { MarkdownBody } from "../refs/MarkdownBody";
 import { buildIssuePath, documentItemPath } from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
+import { Unfurl } from "../refs/Unfurl";
 import { useMarkThreadRead } from "../replies/useMarkThreadRead";
 import { PHONE_VIEWPORT_QUERY, useDialog, useMediaQuery } from "../shell/useDialog";
 import { type DwellRef, useDwell } from "../shell/useDwell";
@@ -205,6 +206,7 @@ function ConversationReply({
     onSuccess: () => void queryClient.invalidateQueries({ queryKey: ["issue-messages", issueKey] }),
   });
   const author = resolveAuthor(reply.author, titles);
+  const source = { id: reply.id, kind: "message" } as const;
   const capabilities = capabilitiesForTarget(root.root.target, agents);
   const lastAttempt = reply.deliveries.at(-1);
   const targetName = targetNameOf(reply.deliveries, root.root.target, agents);
@@ -217,7 +219,12 @@ function ConversationReply({
       actions={<CopyRefButton route={{ id: reply.id, key: issueKey, kind: "message" }} />}
       at={reply.created_at}
       author={author}
-      body={<MarkdownBody markdown={reply.body} />}
+      body={
+        <>
+          <MarkdownBody markdown={reply.body} source={source} />
+          <Unfurl body={reply.body} source={source} />
+        </>
+      }
       current={reply.id === currentReplyId}
       markRef={markRef}
       delivery={
@@ -245,6 +252,7 @@ function ConversationReply({
       quote={{
         author: parent === undefined ? undefined : resolveAuthor(parent.author, titles).label,
         excerpt: parent?.body ?? "",
+        source: parent === undefined ? undefined : { id: parent.id, kind: "message" },
         to:
           reply.in_reply_to === null
             ? undefined
@@ -357,6 +365,7 @@ function MessageTurn({
   replyDisabled: boolean;
   titles: ReadonlyMap<string, string>;
 }): ReactNode {
+  const source = { id: item.root.id, kind: "message" } as const;
   return (
     <li
       aria-current={current ? "true" : undefined}
@@ -372,7 +381,8 @@ function MessageTurn({
             <Timestamp at={item.root.created_at} />
             {item.unread ? <UnreadMark /> : null}
           </p>
-          <MarkdownBody markdown={item.root.body} />
+          <MarkdownBody markdown={item.root.body} source={source} />
+          <Unfurl body={item.root.body} source={source} />
         </div>
         <TurnActions>
           <CopyRefButton route={{ id: item.root.id, key: issueKey, kind: "message" }} />
@@ -733,6 +743,7 @@ function TargetedMessageTurn({
   const capabilities = capabilitiesForTarget(item.root.target, agents);
   const targetName = targetNameOf(item.root.deliveries, item.root.target, agents);
   const asker = resolveAuthor(item.root.author, titles);
+  const source = { id: item.root.id, kind: "message" } as const;
 
   return (
     <TargetedMessageCard
@@ -747,7 +758,8 @@ function TargetedMessageTurn({
             <CopyRefButton route={{ id: item.root.id, key: issueKey, kind: "message" }} />
             {item.unread ? <UnreadMark /> : null}
           </p>
-          <MarkdownBody markdown={item.root.body} />
+          <MarkdownBody markdown={item.root.body} source={source} />
+          <Unfurl body={item.root.body} source={source} />
         </>
       }
       canAside={capabilities?.includes("aside") !== false}

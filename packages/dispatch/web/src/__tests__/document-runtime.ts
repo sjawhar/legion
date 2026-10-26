@@ -1,3 +1,4 @@
+import type { ReferenceTarget } from "@legion/proof-editor";
 import { Awareness } from "y-protocols/awareness";
 import * as Y from "yjs";
 
@@ -26,6 +27,8 @@ export interface FakeEditor {
   focusedBlocks: string[];
   options: EditorOptions;
   readOnly: boolean;
+  /** Every map of reference targets the host handed `setReferenceTargets`, in order. */
+  referenceTargets: ReadonlyMap<string, ReferenceTarget | null>[];
   remoteMarks: Record<string, StoredMark>[];
   root: HTMLElement;
   /** Whether the fake view's selection is empty (a caret); a test sets it to select text. */
@@ -102,6 +105,7 @@ export function fakeDocumentRuntime(seed: { text?: string } = {}): FakeDocumentR
       markdown: undefined,
       options,
       readOnly: options.readOnly ?? false,
+      referenceTargets: [],
       remoteMarks: [],
       root,
       selectionEmpty: true,
@@ -141,6 +145,9 @@ export function fakeDocumentRuntime(seed: { text?: string } = {}): FakeDocumentR
       },
       setReadOnly(readOnly: boolean) {
         editor.readOnly = readOnly;
+      },
+      setReferenceTargets(targets: ReadonlyMap<string, ReferenceTarget | null>) {
+        editor.referenceTargets.push(targets);
       },
       view: {
         dispatch() {},

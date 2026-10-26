@@ -854,8 +854,9 @@
 /*
  * @sjawhar/proof-editor additions.
  * Comment/Suggest/Ask selection bar (see ../dispatch-action-bar.ts), the
- * dispatchAsk mark span (see ../dispatch-marks.ts), and the transient
- * focusMark() pulse. Independent of the rules above: this library's own
+ * dispatchAsk mark span (see ../dispatch-marks.ts), the transient
+ * focusMark() pulse, and the reference titles (see
+ * ../reference-decorations.ts). Independent of the rules above: this library's own
  * bar replaces markSelectionBarPlugin's, and dispatchAsk is not part of the
  * unified marks decoration system that styles [data-proof] spans.
  */
@@ -916,4 +917,25 @@ span[data-dispatch="ask"] {
 .dispatch-mark-pulse {
   animation: dispatch-mark-pulse 1.2s ease-out;
   border-radius: 2px;
+}
+
+/* A reference drawn as its target's title: the stored text is hidden while the title shows, and
+   the title keeps to one line, cut with an ellipsis rather than reflowing the paragraph. */
+.dispatch-reference-text {
+  display: none;
+}
+
+.proof-editor a.dispatch-reference {
+  display: inline-block;
+  max-width: min(100%, 40ch);
+  overflow: hidden;
+  padding-block: 0;
+  text-overflow: ellipsis;
+  vertical-align: bottom;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.proof-editor a.dispatch-reference strong {
+  font-weight: 600;
 }

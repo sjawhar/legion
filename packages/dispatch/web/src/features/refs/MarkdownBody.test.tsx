@@ -4,13 +4,18 @@ import { fireEvent, render, waitFor, within } from "@testing-library/react";
 import type { Window as HappyDOMWindow } from "happy-dom";
 import type { ReactNode } from "react";
 
-import { api } from "../../api/client";
+import { ApiError, api } from "../../api/client";
 import type { Artifact, AskRead } from "../../api/types";
 import { MarkdownBody } from "./MarkdownBody";
 
 function withQueries(children: ReactNode): ReactNode {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>;
+}
+
+/** The answer to a read these tests supply nothing for: an ask's issue, which its link reads too. */
+function notFound(): ApiError {
+  return new ApiError(404, { code: "NOT_FOUND", error: "not found" });
 }
 
 /** An image artifact of CORE-1 with two versions, as the issue read lists it. */
@@ -249,9 +254,11 @@ describe("Dispatch pictures", () => {
 
 test("renders a typed callout body through the server schema", async () => {
   const view = render(
-    <MarkdownBody
-      markdown={':::callout{#callout-1 kind="warning" title="Read this"}\nBody text.\n:::\n'}
-    />
+    withQueries(
+      <MarkdownBody
+        markdown={':::callout{#callout-1 kind="warning" title="Read this"}\nBody text.\n:::\n'}
+      />
+    )
   );
 
   try {
@@ -263,7 +270,7 @@ test("renders a typed callout body through the server schema", async () => {
 });
 
 test("a code span containing tag-shaped text renders the literal characters with no backslashes", async () => {
-  const view = render(<MarkdownBody markdown="Use `<img src=x>` here" />);
+  const view = render(withQueries(<MarkdownBody markdown="Use `<img src=x>` here" />));
 
   try {
     const code = await within(view.container).findByText("<img src=x>", { selector: "code" });
@@ -274,7 +281,7 @@ test("a code span containing tag-shaped text renders the literal characters with
 });
 
 test("raw unsupported HTML renders as literal text with no element created", async () => {
-  const view = render(<MarkdownBody markdown="<img src=x onerror=alert(1)>" />);
+  const view = render(withQueries(<MarkdownBody markdown="<img src=x onerror=alert(1)>" />));
 
   try {
     expect(await within(view.container).findByText("<img src=x onerror=alert(1)>")).not.toBeNull();
@@ -290,7 +297,9 @@ test("a clock time such as 16:25Z renders as Markdown, not as the literal-text f
   // every agent progress note with a timestamp into raw Markdown source and leave historical spec
   // versions empty.
   const view = render(
-    <MarkdownBody markdown={"Production deploys **held** since 16:25Z.\n\n- retry at 04:20Z"} />
+    withQueries(
+      <MarkdownBody markdown={"Production deploys **held** since 16:25Z.\n\n- retry at 04:20Z"} />
+    )
   );
 
   try {
@@ -327,6 +336,7 @@ test("a bare dispatch ask reference renders an inline link to the ask route with
     replies: [],
   };
   const getAsk = spyOn(api, "getAsk").mockResolvedValue(askRead);
+  const getIssue = spyOn(api, "getIssue").mockRejectedValue(notFound());
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const view = render(
     <QueryClientProvider client={queryClient}>
@@ -335,19 +345,23 @@ test("a bare dispatch ask reference renders an inline link to the ask route with
   );
 
   try {
-    const link = await within(view.container).findByRole("link", { name: "CORE-1 ask" });
+    // Until its title resolves, the link reads as the reference its author wrote.
+    const link = await within(view.container).findByRole("link", {
+      name: "dispatch://CORE-1/ask/ask-1",
+    });
     expect(link.getAttribute("href")).toBe("/issues/CORE-1/asks/ask-1");
     await waitFor(() => expect(link.textContent).toBe("Ship it?"));
     expect(within(view.container).getAllByRole("link")).toHaveLength(1);
     expect(getAsk).toHaveBeenCalledWith("ask-1");
   } finally {
     getAsk.mockRestore();
+    getIssue.mockRestore();
     view.unmount();
   }
 });
 
 test("a dispatch reference inside a code span stays literal text, not a link", async () => {
-  const view = render(<MarkdownBody markdown="Use `dispatch://CORE-1` as the ref" />);
+  const view = render(withQueries(<MarkdownBody markdown="Use `dispatch://CORE-1` as the ref" />));
 
   try {
     const code = await within(view.container).findByText("dispatch://CORE-1", {
@@ -361,7 +375,9 @@ test("a dispatch reference inside a code span stays literal text, not a link", a
 });
 
 test("an external URL unrelated to the app renders as an ordinary link", async () => {
-  const view = render(<MarkdownBody markdown="See https://example.com/docs for details" />);
+  const view = render(
+    withQueries(<MarkdownBody markdown="See https://example.com/docs for details" />)
+  );
 
   try {
     const link = await within(view.container).findByRole("link", {
@@ -411,7 +427,13 @@ test("two references in one body each resolve their own inline link and title", 
     versions: [],
   };
   const getAsk = spyOn(api, "getAsk").mockResolvedValue(askRead);
+  const getIssue = spyOn(api, "getIssue").mockRejectedValue(notFound());
   const getProjectArtifact = spyOn(api, "getProjectArtifact").mockResolvedValue(projectArtifact);
+  const getArtifactText = spyOn(api, "getArtifactText").mockResolvedValue({
+    markdown: "",
+    token: "sha256:runbook",
+    version: null,
+  });
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const view = render(
     <QueryClientProvider client={queryClient}>
@@ -426,7 +448,9 @@ test("two references in one body each resolve their own inline link and title", 
     expect(documentLink.getAttribute("href")).toBe("/projects/CORE/documents/runbook-md");
     expect(within(view.container).getAllByRole("link")).toHaveLength(2);
   } finally {
+    getArtifactText.mockRestore();
     getProjectArtifact.mockRestore();
+    getIssue.mockRestore();
     getAsk.mockRestore();
     view.unmount();
   }
@@ -434,10 +458,12 @@ test("two references in one body each resolve their own inline link and title", 
 
 test("the inline variant drops a later paragraph's code span instead of leaking it as a bare linkifiable ref", async () => {
   const view = render(
-    <MarkdownBody
-      markdown={"First line.\n\nSecond `dispatch://CORE-1` paragraph."}
-      variant="inline"
-    />
+    withQueries(
+      <MarkdownBody
+        markdown={"First line.\n\nSecond `dispatch://CORE-1` paragraph."}
+        variant="inline"
+      />
+    )
   );
 
   try {
@@ -473,6 +499,7 @@ test("a hand-authored Markdown link to a dispatch:// target resolves through dat
     replies: [],
   };
   const getAsk = spyOn(api, "getAsk").mockResolvedValue(askRead);
+  const getIssue = spyOn(api, "getIssue").mockRejectedValue(notFound());
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   // @legion/proof-editor's Markdown link serializer sanitizes a dispatch:// href to "" (Milkdown
   // only allows http/https/mailto/tel/ftp) and carries the real target in data-dispatch-href
@@ -491,6 +518,7 @@ test("a hand-authored Markdown link to a dispatch:// target resolves through dat
     expect(getAsk).toHaveBeenCalledWith("ask-1");
   } finally {
     getAsk.mockRestore();
+    getIssue.mockRestore();
     view.unmount();
   }
 });
@@ -499,17 +527,23 @@ test("a hand-authored Markdown link to a dispatch:// target resolves through dat
 // re-parses it, so syntax that has closed since the last delta formats, and nothing stays frozen
 // at the first delta's text.
 test("a body re-renders when its text grows, formatting what has closed since", async () => {
-  const view = render(<MarkdownBody markdown="**Bo" />);
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const body = (markdown: string) => (
+    <QueryClientProvider client={queryClient}>
+      <MarkdownBody markdown={markdown} />
+    </QueryClientProvider>
+  );
+  const view = render(body("**Bo"));
   try {
     await waitFor(() => expect(view.container.textContent).toBe("**Bo"));
-    view.rerender(<MarkdownBody markdown={"**Bold** so far\n\n- first\n- sec"} />);
+    view.rerender(body("**Bold** so far\n\n- first\n- sec"));
     await waitFor(() => expect(view.container.querySelector("strong")?.textContent).toBe("Bold"));
     expect(Array.from(view.container.querySelectorAll("li"), (item) => item.textContent)).toEqual([
       "first",
       "sec",
     ]);
     expect(view.container.textContent).not.toContain("**");
-    view.rerender(<MarkdownBody markdown={"**Bold** so far\n\n- first\n- second"} />);
+    view.rerender(body("**Bold** so far\n\n- first\n- second"));
     await waitFor(() =>
       expect(view.container.querySelectorAll("li")[1]?.textContent).toBe("second")
     );

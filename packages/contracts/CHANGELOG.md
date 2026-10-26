@@ -4,6 +4,13 @@
 
 ### Added
 
+- `ReferenceQuestions`, `ReferenceQuestion` and `ReferenceSourceKind` (`dispatch-api.ts`) type
+  `GET /api/v1/references/questions?kind=&id=`, the question map of the document a source's text
+  belongs to. The shared text table (`dispatch-text-references.ts`) gains `issues` (the issues that
+  exist for a row), `questions` (the question ids of the row's document, to their ask references)
+  and `links` (what a renderer links, apart from what the server indexes), with rows for bare
+  issue keys at each boundary and `#<question id>`s, each also inside a code span (INFRA-189).
+
 - `SearchCoverage`, `SearchCoverageKinds` and `SearchCoverageCounts`, the body of
   `GET /api/v1/search/coverage`: the configured embedder's identity, place (`bedrock` or `azure`)
   and model, and per kind and in total how many searchable items have a current vector, lack one or

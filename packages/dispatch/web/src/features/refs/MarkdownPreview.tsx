@@ -1,5 +1,6 @@
 import { type ReactNode, useCallback, useRef } from "react";
 
+import type { ReferenceSource } from "../../api/client";
 import { markdownClassName, useMarkdownHeadline } from "./markdown-engine";
 import {
   type DecorateMarkdown,
@@ -203,11 +204,13 @@ function inertLinks(root: HTMLElement): Map<HTMLElement, HTMLElement> {
  * its caption (`DispatchPicture`'s `inline`), as `MarkdownBody`'s `inline` variant shows it.
  *
  * Every surface a preview sits in is one control already, so its links and references read as
- * links but are not ones (`inertLinks`): the host is what a click follows. A host whose own
- * control is a toggle rather than a navigation (the margin's collapsed card, which opens the
- * thread) passes `links="live"` and keeps them real: there a click on a reference is the one
- * way out of the card to its target, as it was before the preview, and its handler skips a
- * click under an `a`.
+ * links but are not ones (`inertLinks`): the host is what a click follows. A reference still
+ * reads as its target's title there - a `dispatch://` address, a dashboard URL, and a bare issue
+ * key or `#id` once it resolves (`source` names the item whose text this is, which a `#id`
+ * resolves against) - in link-styled text with no link inside it. A host whose own control is a
+ * toggle rather than a navigation (the margin's collapsed card, which opens the thread) passes
+ * `links="live"` and keeps them real: there a click on a reference is the one way out of the card
+ * to its target, as it was before the preview, and its handler skips a click under an `a`.
  *
  * `lines` is the clamp (`1` is `truncate`-like but keeps the inline markup; `2` and `3` wrap
  * then clamp). `className` styles the element, whose `display` is the clamp's own, so a parent
@@ -227,6 +230,7 @@ export function MarkdownPreview({
   lines,
   links = "inert",
   markdown,
+  source,
 }: {
   className?: string;
   /** Whether a pointer reader sees the whole text on hover, for a surface whose text is long
@@ -242,6 +246,9 @@ export function MarkdownPreview({
    *  a host whose own control is a toggle. */
   links?: "inert" | "live";
   markdown: string;
+  /** The item whose text this is, which a `#<question id>` in it resolves against; without one a
+   *  `#id` stays text, and a bare issue key reads as its issue either way. */
+  source?: ReferenceSource;
 }): ReactNode {
   const root = useRef<HTMLSpanElement>(null);
   // Keyed on the phrases' joined text, so a caller handing a fresh array each render with the
@@ -279,6 +286,7 @@ export function MarkdownPreview({
   const { isFallback, portals } = useRenderedMarkdown(root, markdown, paintOneLine, {
     pictures: "inline",
     decorate,
+    source,
   });
   const title = useMarkdownHeadline(fullTitle ? markdown : undefined, Number.POSITIVE_INFINITY);
 

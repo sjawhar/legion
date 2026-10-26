@@ -217,3 +217,50 @@ export function pulseHighlight(view: EditorView, target: HighlightTarget, id: st
     if (!view.isDestroyed) dispatchHighlightChange(view, { kind: "pulse-end", target, id, token });
   }, PULSE_DURATION_MS);
 }
+
+/** How long a block landing follows its block while the document around it settles. */
+const LANDING_SETTLE_MS = 2000;
+/** What hands the viewport back to the reader and ends a landing early. */
+const READER_INPUT = ["keydown", "pointerdown", "touchstart", "wheel"] as const;
+
+/**
+ * Scrolls the block `find` answers to the middle of the viewport and keeps it there while the
+ * document settles. What the host draws after the scroll was aimed - a reference's title in place
+ * of its shorter stored text, a typed block's card - moves the block within the document, and
+ * growth above it would carry the block out of the viewport the scroll was aimed at (INFRA-189).
+ * So each change of the editor's size that moves the block aims again, until the reader scrolls,
+ * presses or types, or `LANDING_SETTLE_MS` has passed. `find` is asked each time, since a redraw
+ * may replace the block's element. Answers what ends the landing early.
+ */
+export function landOnBlock(view: EditorView, find: () => HTMLElement | null): () => void {
+  const element = find();
+  if (element === null) return () => {};
+  const offset = (block: HTMLElement) =>
+    block.getBoundingClientRect().top - view.dom.getBoundingClientRect().top;
+  let aimedAt = offset(element);
+  element.scrollIntoView({ behavior: "smooth", block: "center" });
+  const host = view.dom.ownerDocument.defaultView;
+  if (host === null || host.ResizeObserver === undefined) return () => {};
+  const deadline = host.performance.now() + LANDING_SETTLE_MS;
+  const end = () => {
+    observer.disconnect();
+    for (const type of READER_INPUT) host.removeEventListener(type, end, true);
+  };
+  const observer = new host.ResizeObserver(() => {
+    if (host.performance.now() > deadline || view.isDestroyed) {
+      end();
+      return;
+    }
+    const block = find();
+    if (block === null) return;
+    const now = offset(block);
+    if (Math.abs(now - aimedAt) < 1) return;
+    aimedAt = now;
+    block.scrollIntoView({ behavior: "smooth", block: "center" });
+  });
+  observer.observe(view.dom);
+  for (const type of READER_INPUT) {
+    host.addEventListener(type, end, { capture: true, passive: true });
+  }
+  return end;
+}

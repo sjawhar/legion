@@ -15,7 +15,7 @@ import {
   linkPullRequest,
   PHASE_STATUSES,
   postReady,
-  readyLine,
+  readyLineShown,
   requestSpecApproval,
   SAVED_CART,
   seedProject,
@@ -86,7 +86,7 @@ const legionIssueJourney: Walkthrough<Seeded> = {
         await highlight(page, turns(page).getByText(/^Signed off\./));
         cue("signoff");
         await linger(page, 1.2);
-        await highlight(page, turns(page).getByText(readyLine(seeded.done, SAVED_CART)));
+        await highlight(page, turns(page).getByText(readyLineShown(seeded.done, SAVED_CART)));
         cue("merge");
         await linger(page, 1.8);
       },
@@ -228,11 +228,13 @@ const legionIssueJourney: Walkthrough<Seeded> = {
       open: async (page, seeded) => {
         await postReady(seeded.next, DELIVERY_DATE);
         await openConversation(page, seeded.next);
-        await expect(turns(page).getByText(readyLine(seeded.next, DELIVERY_DATE))).toBeVisible();
+        await expect(
+          turns(page).getByText(readyLineShown(seeded.next, DELIVERY_DATE))
+        ).toBeVisible();
       },
       act: async (page, seeded, cue) => {
         await linger(page, 0.4);
-        await highlight(page, turns(page).getByText(readyLine(seeded.next, DELIVERY_DATE)));
+        await highlight(page, turns(page).getByText(readyLineShown(seeded.next, DELIVERY_DATE)));
         cue("ready");
         await linger(page, 1.2);
         await highlight(page, turns(page).getByText(/^Outcome:/));

@@ -348,9 +348,10 @@ test("an unknown live event conservatively refreshes everything", async () => {
 test("a queued prefix key replaces the narrower key instead of refetching it twice", async () => {
   const originalFetch = globalThis.fetch;
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  // A `child.status` event queues both `["issue"]` and `["issue", "CORE-1"]`. React Query
-  // matches by prefix and `invalidateQueries` defaults to `cancelRefetch: true`, so sending
-  // both cancels this query's in-flight refetch and starts a second request for it.
+  // A `child.status` event queues both the issues that exist (`existingIssuesKey`) and
+  // `["issue", "CORE-1"]`. React Query matches by prefix and `invalidateQueries` defaults to
+  // `cancelRefetch: true`, so sending both cancels this query's in-flight refetch and starts a
+  // second request for it.
   let issueFetches = 0;
   const observer = new QueryObserver(queryClient, {
     queryKey: ["issue", "CORE-1"],

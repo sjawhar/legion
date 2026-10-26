@@ -2,7 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useCallback, useMemo, useState } from "react";
 import { useLocation } from "react-router-dom";
 
-import { api } from "../../api/client";
+import { api, type ReferenceSource } from "../../api/client";
 import { inboxQuery, userStateQuery } from "../../api/queries";
 import type { Actor, Anchor, Artifact, Ask, Comment, Event } from "../../api/types";
 import { compareTimestamps } from "../../lib/timestamps";
@@ -90,6 +90,8 @@ export interface PinnedConversationCard {
   /** The `dismissed` id it is pinned under, which Unpin removes: `<kind>:<id>`. */
   readonly id: string;
   readonly kind: ConversationPinKind;
+  /** The ask, comment or message it draws, whose text a `#id` in it resolves against. */
+  readonly source: ReferenceSource;
 }
 
 const NO_PINS: string[] = [];
@@ -341,6 +343,7 @@ export function useMarginItems(
           body: "question" in row ? row.question : row.body,
           id: conversationItemId(kind, id),
           kind,
+          source: { id, kind },
         },
       ];
     });

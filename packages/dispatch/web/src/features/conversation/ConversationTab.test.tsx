@@ -657,6 +657,84 @@ test("renders a message composer for an open issue but not a closed one", async 
   }
 });
 
+// R6: a message or reply whose whole text is references shows each one's card, as the margin
+// does: a plain message, a targeted message and a reply in a thread; one with text beside shows
+// none. A `#id` resolves against the message's own document.
+test("a message that is only references shows their cards, and one with other text none", async () => {
+  const getIssue = spyOn(api, "getIssue").mockImplementation(async (key: string) => {
+    if (key === "CORE-12") {
+      return { artifacts: [], key, status: "todo", title: "Fix the thing" } as never;
+    }
+    throw new ApiError(404, { code: "NOT_FOUND", error: "not found" });
+  });
+  const getReferenceQuestions = spyOn(api, "getReferenceQuestions").mockResolvedValue({
+    document: "dispatch://CORE-1/spec",
+    questions: [{ ask: "dispatch://CORE-1/ask/ask-2", block_id: "q2" }],
+  });
+  const getAsk = spyOn(api, "getAsk").mockResolvedValue({
+    answers: [],
+    ask: { ...baseAsk, id: "ask-2", question: "Ship the docs too?" },
+    edits: [],
+    followers: [],
+    replies: [],
+  });
+  const stub = stubLists({
+    messages: [
+      thread(message("message-1", { body: "CORE-12" }), [
+        message("reply-1", {
+          body: "dispatch://CORE-1/ask/ask-2",
+          created_at: "2026-09-09T00:01:00Z",
+          in_reply_to: "message-1",
+        }),
+      ]),
+      thread(message("message-2", { body: "See CORE-12", created_at: "2026-09-09T00:02:00Z" })),
+      thread(
+        message("message-3", {
+          body: "#q2",
+          created_at: "2026-09-09T00:03:00Z",
+          deliveries: [attempt({ message_id: "message-3" })],
+          target: "session:s1",
+        })
+      ),
+    ],
+  });
+  const queryClient = newQueryClient();
+  const view = render(tab({ "CORE-1": issueState() }, true, queryClient));
+
+  try {
+    const turns = await screen.findByRole("list", { name: "Conversation turns" });
+    await within(turns).findAllByRole("link", { name: /^CORE-12 Fix the thing$/ });
+    await waitFor(() =>
+      expect(within(turns).getAllByRole("region", { name: "References" })).toHaveLength(3)
+    );
+    // Each card set under the turn whose text it is: its nearest `data-turn`.
+    const cards = new Map(
+      within(turns)
+        .getAllByRole("region", { name: "References" })
+        .map((section) => [
+          section.closest("[data-turn]")?.getAttribute("data-turn"),
+          Array.from(section.querySelectorAll("a"), (card) => card.getAttribute("href")),
+        ])
+    );
+    expect(Object.fromEntries(cards)).toEqual({
+      "message:message-1": ["/issues/CORE-12"],
+      "message:message-3": ["/issues/CORE-1/asks/ask-2"],
+      "message:reply-1": ["/issues/CORE-1/asks/ask-2"],
+    });
+    const withText = turns.querySelector('[data-turn="message:message-2"]');
+    expect(withText?.textContent).toContain("See CORE-12");
+    expect(withText?.querySelector("section")).toBeNull();
+    // A message's `#id` is read against that message's document.
+    expect(getReferenceQuestions).toHaveBeenCalledWith({ id: "message-3", kind: "message" });
+  } finally {
+    view.unmount();
+    stub.restore();
+    getAsk.mockRestore();
+    getReferenceQuestions.mockRestore();
+    getIssue.mockRestore();
+  }
+});
+
 test("renders an anchored comment with the owner controls in Conversation", async () => {
   const stub = stubLists({
     comments: [

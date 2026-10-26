@@ -934,6 +934,10 @@ export function MentionComposer({
             author={replyTo.author}
             className="min-w-0 flex-1"
             excerpt={replyTo.excerpt}
+            source={
+              // A direct message's parent has no document for a `#id` to name.
+              owner.kind === "session" ? undefined : { id: replyTo.id, kind: replyTo.parentKind }
+            }
             to={replyTo.to}
           />
           {/* The reply is part of the message's address, fixed once the send is out, so the

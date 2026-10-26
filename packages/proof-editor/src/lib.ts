@@ -91,12 +91,14 @@ import { remarkSoftBreakAsSpace } from './dispatch-soft-breaks';
 import { configureDispatchLinks } from './dispatch-links';
 import { trailingNewlineInputPlugin } from './trailing-newline-input';
 import { recordMarkHistoryPlugin } from './record-mark-history';
-import { editorHighlightsPlugin, pulseHighlight, setActiveHighlights } from './editor-highlights';
+import { editorHighlightsPlugin, landOnBlock, pulseHighlight, setActiveHighlights } from './editor-highlights';
+import { referenceDecorationsPlugin, setReferenceTargets, type EditorReferences, type ReferenceTarget } from './reference-decorations';
 import { removeRecordMark, retypeMark as retypeRecordMark } from './record-mark-retype';
 import type { RetypeOutcome } from './record-mark-retype';
 
 export type { MarkAction, SelectionBarActionKind, PopoverActionKind } from './dispatch-marks';
 export type { RetypedMark, RetypeRefusal, RetypeOutcome } from './record-mark-retype';
+export type { EditorReferences, ReferenceCandidate, ReferenceTarget } from './reference-decorations';
 export type {
   BlockAttributeKind,
   BlockAttributeSchema,
@@ -150,6 +152,10 @@ export interface CreateProofEditorOptions {
   blockSchema?: BlockSchema;
   /** Renders a host-owned typed block node when the schema declares `render: "host"`. */
   renderBlock?: HostBlockRenderer;
+  /** Draws the references the host's scanner reads as their targets' titles, with no change to
+   *  the stored text; the handle's `setReferenceTargets` says what each one resolves to. See
+   *  ./reference-decorations.ts. */
+  references?: EditorReferences;
 }
 
 export interface ProofEditorHandle extends TypedBlockCommands {
@@ -188,6 +194,9 @@ export interface ProofEditorHandle extends TypedBlockCommands {
   setActiveMarks(markIds: readonly string[]): void;
   /** Highlights the blocks a host has selected without changing the document. */
   setActiveBlocks(blockIds: readonly string[]): void;
+  /** Says what each reference key the host's scanner names resolves to: a target is drawn as its
+   *  title in place of the stored text, a key mapped to `null` or absent as the stored text. */
+  setReferenceTargets(targets: ReadonlyMap<string, ReferenceTarget | null>): void;
   /** The stable id of the block containing the selection head, if any. */
   blockIdAtSelection(): string | null;
   /** Tear down the editor and any collab bindings. */
@@ -283,6 +292,7 @@ export async function createProofEditor(
   root.classList.add('proof-editor');
   setCurrentActor(`human:${opts.user.name}`);
   let alive = true;
+  let endLanding = (): void => {};
   const heatMapMode: HeatMapMode = opts.heatMapMode ?? 'background';
 
   const builder = Editor.make()
@@ -350,6 +360,8 @@ export async function createProofEditor(
     // The composer's own record-mark writes are never undo steps
     .use(recordMarkHistoryPlugin)
     .use(editorHighlightsPlugin)
+    // Reference titles the host resolves, drawn over the stored text
+    .use(opts.references ? referenceDecorationsPlugin(opts.references) : [])
     .use(placeholderPlugin)
     .config((ctx) => {
       ctx.update(remarkStringifyOptionsCtx, (prev) => ({
@@ -465,9 +477,10 @@ export async function createProofEditor(
     },
     focusBlock(blockId: string): void {
       const escaped = cssEscapeAttrValue(blockId);
-      const element = view.dom.querySelector<HTMLElement>(`[${BLOCK_ID_DOM_ATTR}="${escaped}"]`);
-      if (element === null) return;
-      element.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      const find = () => view.dom.querySelector<HTMLElement>(`[${BLOCK_ID_DOM_ATTR}="${escaped}"]`);
+      if (find() === null) return;
+      endLanding();
+      endLanding = landOnBlock(view, find);
       pulseHighlight(view, 'block', blockId);
     },
     setActiveMarks(markIds: readonly string[]): void {
@@ -475,6 +488,9 @@ export async function createProofEditor(
     },
     setActiveBlocks(blockIds: readonly string[]): void {
       setActiveHighlights(view, 'block', blockIds);
+    },
+    setReferenceTargets(targets: ReadonlyMap<string, ReferenceTarget | null>): void {
+      setReferenceTargets(view, targets);
     },
     blockIdAtSelection(): string | null {
       const $head = view.state.selection.$head;
@@ -486,6 +502,7 @@ export async function createProofEditor(
     },
     destroy(): void {
       alive = false;
+      endLanding();
       unregisterPopoverHook();
       editor.action((ctx) => {
         const collabService = ctx.get(collabServiceCtx);

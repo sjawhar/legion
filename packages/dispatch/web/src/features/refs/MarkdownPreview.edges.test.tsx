@@ -92,7 +92,11 @@ test("a preview's clamp is its own display: no display utility that outranks lin
   // Tailwind emits `.block` after `.line-clamp-N` in the same layer, so a root carrying both
   // computes `display: block` and never clamps; prose's own `max-width: 65ch` cuts the line
   // short of its host. Neither may be on the root.
-  const view = render(<MarkdownPreview lines={1} markdown="**held**" />);
+  const view = render(
+    <Providers>
+      <MarkdownPreview lines={1} markdown="**held**" />
+    </Providers>
+  );
   try {
     const classes = preview(view.container).className.split(/\s+/);
     expect(classes).toContain("line-clamp-1");
@@ -128,7 +132,7 @@ test("right-to-left text keeps its characters in order, its marks on the words m
     for (const element of [clamped, body]) {
       await waitFor(() => expect(element.textContent).toContain("Design decision"));
       expect(element.textContent).toBe(
-        "שלום עולם, ראה kubectl get pods ו-Design decision. مرحبا بالعالم"
+        "שלום עולם, ראה kubectl get pods ו-CORE-1 Design decision. مرحبا بالعالم"
       );
       expect(element.querySelector("strong")?.textContent).toBe("עולם");
       expect(element.querySelector("em")?.textContent).toBe("بالعالم");
@@ -172,7 +176,7 @@ test("a preview inside a link holds no link of its own, and a click on its refer
     const reference = element.querySelector<HTMLElement>("[data-dispatch-ref]");
     expect(reference?.getAttribute("data-dispatch-ref")).toBe("dispatch://CORE-1");
     expect(reference?.hasAttribute("href")).toBe(false);
-    expect(reference?.textContent).toBe("Design decision");
+    expect(reference?.textContent).toBe("CORE-1 Design decision");
     const docs = Array.from(element.querySelectorAll("[data-markdown-link]")).find(
       (link) => link.textContent === "the docs"
     );
@@ -205,7 +209,7 @@ test("search hits mark whole words in any case, and a reference the server match
     const element = preview(view.container);
     await waitFor(() => expect(element.textContent).toContain("Design decision"));
     const marks = Array.from(element.querySelectorAll("mark"), (mark) => mark.textContent);
-    expect(marks).toEqual(["port", "Design decision"]);
+    expect(marks).toEqual(["port", "CORE-1 Design decision"]);
     const marked = element.querySelector("mark [data-dispatch-ref]");
     expect(marked?.getAttribute("data-dispatch-ref")).toBe("dispatch://CORE-1");
     expect(element.textContent).not.toContain("dispatch://");
@@ -218,7 +222,11 @@ test("search hits mark whole words in any case, and a reference the server match
 test("a hit after a character whose lower case is longer is marked on the right words", async () => {
   // `İ` lower-cases to two code units, so an index found in the lower-cased text lands one
   // character late in the source.
-  const view = render(<MarkdownPreview highlight={["port"]} lines={1} markdown="İstanbul port" />);
+  const view = render(
+    <Providers>
+      <MarkdownPreview highlight={["port"]} lines={1} markdown="İstanbul port" />
+    </Providers>
+  );
   try {
     const element = preview(view.container);
     await waitFor(() => expect(element.textContent).toBe("İstanbul port"));

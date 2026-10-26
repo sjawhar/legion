@@ -1,6 +1,7 @@
 import type { MessageDeliveryMode } from "@legion/contracts";
 import type { ReactNode } from "react";
 
+import type { ReferenceSource } from "../../api/client";
 import { secondaryButtonBorder, textSecondaryOnSurface } from "../../theme/classes";
 import { Timestamp } from "../refs/Timestamp";
 import type { DwellRef } from "../shell/useDwell";
@@ -77,7 +78,13 @@ export function ReplyTurn({
   /** The Replies page's read mark, on the newest reply of a thread: the element it watches. */
   markRef?: DwellRef;
   onReply?: () => void;
-  quote?: { readonly author: string | undefined; readonly excerpt: string; readonly to?: string };
+  quote?: {
+    readonly author: string | undefined;
+    readonly excerpt: string;
+    /** The quoted parent, which a `#id` in its body resolves against (`ReplyQuote`). */
+    readonly source?: ReferenceSource;
+    readonly to?: string;
+  };
   /** Holds the Reply button while the composer it would address is busy with a send. */
   replyDisabled?: boolean;
   turnID: string;
@@ -108,6 +115,7 @@ export function ReplyTurn({
             author={quote.author}
             className="mb-1"
             excerpt={quote.excerpt}
+            source={quote.source}
             to={quote.to}
           />
         )}

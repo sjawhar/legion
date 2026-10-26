@@ -3,6 +3,7 @@ import { type ReactNode, useEffect, useLayoutEffect, useRef, useSyncExternalStor
 import { createPortal } from "react-dom";
 import { Link } from "react-router-dom";
 
+import type { ReferenceSource } from "../../api/client";
 import { primarySpec } from "../../api/issue-cache";
 import { AttentionBadge } from "../../components/Badge";
 import { LabelPill, StatusPill } from "../../components/Pill";
@@ -234,10 +235,16 @@ function Heading({ children }: { children: ReactNode }): ReactNode {
   return <span className={`block font-semibold ${linkText}`}>{children}</span>;
 }
 
-/** The card's body: three rendered lines of what the target says, formatted, then cut. */
-function Body({ markdown }: { markdown: string }): ReactNode {
+/** The card's body: three rendered lines of what the target says, formatted, then cut. `source`
+ *  is the item that text is, which a `#id` in it resolves against. */
+function Body({ markdown, source }: { markdown: string; source: ReferenceSource }): ReactNode {
   return (
-    <MarkdownPreview className={`mt-1 ${textSecondaryOnSurface}`} lines={3} markdown={markdown} />
+    <MarkdownPreview
+      className={`mt-1 ${textSecondaryOnSurface}`}
+      lines={3}
+      markdown={markdown}
+      source={source}
+    />
   );
 }
 
@@ -280,8 +287,8 @@ function IssuePreview({ route }: { route: DispatchReferenceRoute }): ReactNode {
           </span>
         )}
       </span>
-      {specMarkdown === undefined || specMarkdown.trim() === "" ? null : (
-        <Body markdown={specMarkdown} />
+      {spec === undefined || specMarkdown === undefined || specMarkdown.trim() === "" ? null : (
+        <Body markdown={specMarkdown} source={{ id: spec.id, kind: "artifact" }} />
       )}
     </>
   );
@@ -308,7 +315,9 @@ function DocumentPreview({ route }: { route: DispatchReferenceRoute }): ReactNod
       {latest === undefined ? null : (
         <span className={`mt-1 block text-xs ${textMutedOnSurface}`}>v{latest}</span>
       )}
-      {markdown === undefined || markdown.trim() === "" ? null : <Body markdown={markdown} />}
+      {markdown === undefined || markdown.trim() === "" ? null : (
+        <Body markdown={markdown} source={{ id: artifact.id, kind: "artifact" }} />
+      )}
     </>
   );
 }
@@ -322,7 +331,11 @@ function AskPreview({ route }: { route: DispatchReferenceRoute }): ReactNode {
   return (
     <>
       <Heading>
-        <MarkdownPreview lines={2} markdown={ask.ask.question} />
+        <MarkdownPreview
+          lines={2}
+          markdown={ask.ask.question}
+          source={{ id: ask.ask.id, kind: "ask" }}
+        />
       </Heading>
       <span className={`mt-1 block text-xs ${textMutedOnSurface}`}>
         {ask.ask.state}
@@ -340,7 +353,7 @@ function CommentPreview({ route }: { route: DispatchReferenceRoute }): ReactNode
   return (
     <>
       <Heading>{actorLabel(comment.comment.author)}</Heading>
-      <Body markdown={comment.comment.body} />
+      <Body markdown={comment.comment.body} source={{ id: comment.comment.id, kind: "comment" }} />
     </>
   );
 }
@@ -353,7 +366,7 @@ function MessagePreview({ route }: { route: DispatchReferenceRoute }): ReactNode
   return (
     <>
       <Heading>{actorLabel(message.message.author)}</Heading>
-      <Body markdown={message.message.body} />
+      <Body markdown={message.message.body} source={{ id: message.message.id, kind: "message" }} />
     </>
   );
 }

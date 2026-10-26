@@ -203,7 +203,7 @@ writes it.
 ## References
 
 Link everything you mention. Dispatch reads `dispatch://` references in every document, ask,
-comment, and message, and records what points where:
+comment, and issue message, and records what points where:
 
 ```text
 dispatch://KEY
@@ -214,6 +214,13 @@ dispatch://KEY/comment/<id>
 dispatch://KEY/message/<id>
 dispatch://PROJECT/artifact/<document>
 ```
+
+A bare issue key (`CORE-12`) counts as `dispatch://CORE-12` when that issue exists as the text is
+written, and `#<question id>` (`#q2`) counts as the question block of that id in the text's own
+document: the document itself, a question, comment or reply on it, or, for an issue's comments
+and messages, its spec. Either has to stand alone: it starts the text or follows a space or an
+opening bracket, quote or emphasis mark, and trailing punctuation ends it. Both are recorded inside
+code too, though the dashboard shows code as code.
 
 `dispatch read` on any of them shows what it is and everything that references it.
 

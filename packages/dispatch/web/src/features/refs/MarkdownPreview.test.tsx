@@ -4,7 +4,7 @@ import { cleanup, render, waitFor } from "@testing-library/react";
 import type { Window as HappyDOMWindow } from "happy-dom";
 import type { ComponentProps, ReactNode } from "react";
 
-import { api } from "../../api/client";
+import { ApiError, api } from "../../api/client";
 import type { IssueDetails } from "../../api/types";
 import { MarkdownPreview } from "./MarkdownPreview";
 
@@ -111,7 +111,7 @@ test("a hit inside a dispatch:// reference keeps its highlight on the reference'
     await waitFor(() => expect(preview().textContent).toContain("Design decision"));
     const reference = preview().querySelector<HTMLElement>("[data-dispatch-ref]");
     if (reference === null) throw new Error("the reference did not render as one");
-    expect(reference.textContent).toBe("Design decision");
+    expect(reference.textContent).toBe("CORE-1 Design decision");
     expect(reference.closest("mark") !== null || reference.querySelector("mark") !== null).toBe(
       true
     );
@@ -125,7 +125,9 @@ test("a hit inside a dispatch:// reference keeps its highlight on the reference'
     // gave the link, which the resolved title replaces.
     rerender({ highlight: ["design"], lines: 2, markdown: "See [the design](dispatch://CORE-1)." });
     await waitFor(() =>
-      expect(preview().querySelector("[data-dispatch-ref]")?.textContent).toBe("Design decision")
+      expect(preview().querySelector("[data-dispatch-ref]")?.textContent).toBe(
+        "CORE-1 Design decision"
+      )
     );
     const linked = preview().querySelector<HTMLElement>("[data-dispatch-ref]");
     expect(linked?.closest("mark") !== null || linked?.querySelector("mark") !== null).toBe(true);
@@ -137,6 +139,10 @@ test("a hit inside a dispatch:// reference keeps its highlight on the reference'
 });
 
 test("a hit marks the word the server matched, not the same letters inside other words", async () => {
+  // The key the last body writes bare names no issue, so it stays the text the hit is marked in.
+  const getIssue = spyOn(api, "getIssue").mockRejectedValue(
+    new ApiError(404, { code: "NOT_FOUND", error: "not found" })
+  );
   // q=port: `Report the <mark>port</mark> number to the support team before we export`.
   const { preview, rerender, view } = renderPreview({
     highlight: ["port"],
@@ -161,6 +167,7 @@ test("a hit marks the word the server matched, not the same letters inside other
     await waitFor(() => expect(marks(preview())).toEqual(["CORE", "-1"]));
   } finally {
     view.unmount();
+    getIssue.mockRestore();
   }
 });
 

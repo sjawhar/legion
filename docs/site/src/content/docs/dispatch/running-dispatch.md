@@ -293,6 +293,11 @@ What a reader sees while two servers are serving:
   text. They see a brief reconnect, never stale text they can act on.
 - Live co-editing of one document across two servers — two live sessions with the typing flowing
   between them — is not there yet; it is a separate piece of work.
+- A bare issue key or `#<question id>` written through a server older than the version that
+  reads them still links on the dashboard, which reads the text itself, but joins **Referenced
+  by** only once a server that reads them re-indexes that text, which it does in the background
+  every 30 seconds, or every 2 seconds while a backlog remains. Once no older server runs, every
+  stored text is indexed by the same rules.
 
 ## Migrations
 

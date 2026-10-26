@@ -205,6 +205,28 @@ function plainWords(doc: ProseMirrorNode): string {
   return parts.join("");
 }
 
+/** The text of a parsed document a rendered body links in, one entry per text node, in order:
+ *  what `linkifyDispatchRefs` reads in the element the document renders into - each text node
+ *  outside code (a code span, a code block) and outside a link - and the literal characters of
+ *  raw inline HTML, which a body shows as text. */
+export function linkableTexts(doc: ProseMirrorNode): string[] {
+  const texts: string[] = [];
+  doc.descendants((node) => {
+    if (node.type.spec.code === true) {
+      return false;
+    }
+    if (node.isText) {
+      if (!node.marks.some((mark) => mark.type.spec.code === true || mark.type.name === "link")) {
+        texts.push(node.text ?? "");
+      }
+    } else if (node.type.name === "html") {
+      texts.push(String(node.attrs.value ?? ""));
+    }
+    return true;
+  });
+  return texts;
+}
+
 /** A headline and whether it had to be cut to fit. */
 export interface MarkdownHeadline {
   readonly text: string;
@@ -232,17 +254,21 @@ export function useMarkdownHeadline(
       setHeadline(undefined);
       return;
     }
-    return renderWithEngine((engine) => {
-      const parsed = engine?.parse(markdown);
-      const characters = Array.from(
-        (parsed === undefined ? markdown : plainWords(parsed)).replace(/\s+/g, " ").trim()
-      );
-      const cut = characters.length > max;
-      setHeadline({
-        cut,
-        text: cut ? `${characters.slice(0, max).join("")}…` : characters.join(""),
-      });
-    });
+    return renderWithEngine((engine) => setHeadline(headlineWith(engine, markdown, max)));
   }, [markdown, max]);
   return headline;
+}
+
+/** The headline of markdown read by engine, or of its literal text without one. */
+function headlineWith(
+  engine: MarkdownEngine | undefined,
+  markdown: string,
+  max: number
+): MarkdownHeadline {
+  const parsed = engine?.parse(markdown);
+  const characters = Array.from(
+    (parsed === undefined ? markdown : plainWords(parsed)).replace(/\s+/g, " ").trim()
+  );
+  const cut = characters.length > max;
+  return { cut, text: cut ? `${characters.slice(0, max).join("")}…` : characters.join("") };
 }

@@ -235,6 +235,8 @@ export function AskCard({
   const isCompact = variant === "compact";
   const inBlock = frame === "block";
   const reference = itemRoute("ask", displayedAsk, displayedAsk.document ?? owner);
+  // The ask its question and options are the text of, which a `#id` in them resolves against.
+  const source = { id: displayedAsk.id, kind: "ask" } as const;
   // Where a file pasted or dropped into the answer, or into a reply under the ask, goes: the
   // ask's issue, or the project of the document it was asked on.
   const documentProject = (displayedAsk.document ?? owner ?? displayedAsk.anchor_artifact)?.project;
@@ -520,7 +522,7 @@ export function AskCard({
         ) : null}
         {inBlock ? null : (
           <div className={`text-[15px] leading-relaxed font-medium ${textPrimaryOnSurface}`}>
-            <MarkdownBody markdown={displayedAsk.question} />
+            <MarkdownBody markdown={displayedAsk.question} source={source} />
           </div>
         )}
         {/* A request to approve again names the approval it follows, under the question (the
@@ -631,6 +633,7 @@ export function AskCard({
                     setOwnWordsOpen(requiresReason(option.label) || trimmedAnswer !== "");
                 }}
                 option={option}
+                source={source}
               />
             ))}
             {isApproval ? null : (
