@@ -2836,6 +2836,26 @@ console.log(JSON.stringify(args, null, 2));
         JSON.stringify(`${BRIEF}(the copy beside the link's target)\n`)
       );
     });
+    // The second final review of #2159, N1: the CLI opens `resolvePath(cwd, path)`, which removes
+    // a `..` before the kernel sees the link, also for an absolute operand.
+    test("N1: an absolute --path with .. after a symlink is read and posted as the CLI resolves it", async () => {
+      const posted = path.join(work, "n1-posted.json");
+      fs.rmSync(posted, { force: true });
+      const command = `dispatch artifact --issue DSP-1 --name brief.md --path ${work}/link/../brief.md`;
+      const g = bind({ env: STUB, cwd: work });
+      const result = await g.bash("n1", command);
+      expect(result?.block).toBeUndefined();
+      expect(g.calls).toHaveLength(1);
+      expect(g.calls[0].user).toContain(`"content": ${JSON.stringify(BRIEF)}`);
+      const child = Bun.spawn(["bash", "-c", result?.input?.command as string], {
+        cwd: work,
+        env: { ...process.env, ...STUB, ASKGATE_POSTED: posted },
+        stdout: "ignore",
+        stderr: "ignore",
+      });
+      expect(await child.exited).toBe(0);
+      expect(JSON.parse(fs.readFileSync(posted, "utf8"))).toMatchObject({ content: BRIEF });
+    });
     test("(h) a directory whose name ends in a space keeps that space", async () => {
       fs.mkdirSync(path.join(work, "spaced "), { recursive: true });
       fs.writeFileSync(path.join(work, "spaced ", "brief.md"), `${BRIEF}(the spaced copy)\n`);

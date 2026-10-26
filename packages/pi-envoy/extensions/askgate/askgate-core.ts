@@ -47,8 +47,9 @@
 //     it (the `cd`, then `pwd -P`, run as the dry run runs). A `--<field>-file` operand is joined
 //     to that directory and given to the kernel as written, as the CLI's own `readFileSync`
 //     gives it (so a `..` after a symbolic link leaves the link's target, which a lexical
-//     `path.resolve` would collapse first and name another file); an upload's `--path` keeps the
-//     CLI's own `resolve`. The gate then walks the path one component at a time and follows each
+//     `path.resolve` would collapse first and name another file); an upload's `--path`, relative
+//     or absolute, keeps the CLI's own `resolve`, which removes a `..` first. The gate then walks
+//     the path one component at a time and follows each
 //     link itself, refuses a component that reaches `/proc` or `/dev` (`/proc/self/fd/0`,
 //     `/proc/thread-self/fd/0`, `/dev/fd/0` and every link to one name a descriptor of the
 //     process that opens it, which is Oh My Pi's and not the command's shell), and opens with
@@ -3103,16 +3104,16 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
         /**
          * The path the CLI opens for one operand. A `--*-file` goes to `readFileSync`, which
          * hands the whole string to the kernel: a `..` after a symbolic link leaves the link's
-         * target, so the operand is joined to the physical directory and never normalized
+         * target, so a relative operand is joined to the physical directory and never normalized
          * (`path.resolve` would collapse that `..` first and name another file). An upload's
-         * `--path` is `resolvePath(cwd, path)` in the CLI itself (dispatch-execute.ts), so it
-         * keeps that resolution.
+         * `--path` is `resolvePath(cwd, path)` in the CLI itself (dispatch-execute.ts), which
+         * removes a `..` first, an absolute operand's too, so it keeps that resolution.
          */
         const opened = (file: FileInput): string =>
-          path.isAbsolute(file.source)
-            ? file.source
-            : file.flag === "--path"
-              ? path.resolve(base, file.source)
+          file.flag === "--path"
+            ? path.resolve(base, file.source)
+            : path.isAbsolute(file.source)
+              ? file.source
               : `${base}/${file.source}`;
         // Refused by name, before any `stat`: such a path resolves in whichever process opens it.
         const descriptor = scoped.fileInputs.find(
