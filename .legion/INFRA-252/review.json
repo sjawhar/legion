@@ -2,45 +2,36 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-252",
-  "completed": "2026-10-26T05:01:00Z",
-  "round": 1,
-  "reviewedCodeHead": "6c58a2716d7c3f88f27de83605e3ce7f94530bab",
+  "completed": "2026-10-26T08:05:00Z",
+  "round": 2,
+  "reviewedCodeHead": "ee9ec60b7930b8dfa78c78701791aaa6cc959bce",
   "decision": "changes_requested",
   "critical": 0,
-  "important": 5,
+  "important": 3,
   "minor": 1,
+  "roundOneFindings": "All five fixed at ee9ec60b: one live-tree definition (record/project.go line/liveRoots), RanAsRoot gates every RecordedAncestor write (workflow/adopt.go), re-read on a recorded issue's re-parent (repositories.go:761), settleObserved carries RecordedAncestor (intake/facts.go:799), one listing walk at boot and no walk for unlabelled issues; the per-event re-read is only partly bounded (finding 3).",
   "keyFindings": [
     {
       "severity": "important",
-      "file": "packages/daemon/internal/record/project.go",
-      "description": "Two definitions of a live tree: Waiting (l.63) counts a held root as live from the line before the hold, LiveRoots/TreeLive (l.108-122) from Waiting's output, which drops it. A labelled todo child of a held root is not recorded in its tree (engine.go:329 TreeLive false), is recorded as its own root with no RecordedAncestor, is skipped by the sweep, and takes a slot and an architect. Reproduced by a throwaway admit test at 6c58a271: LEGION-300 under held LEGION-214 under live LEGION-168 took slot index 1 with one architect start."
+      "file": "packages/daemon/internal/daemon/repositories.go",
+      "description": "recordedAncestor stops at the first recorded root on the chain (l.858), and returns '' when the parent itself is recorded (l.836), whether or not that root's tree is live. A labelled todo R under unrecorded P under Q, a recorded root parked in backlog under live T (a once-queued root a person moved under T, INFRA-214's state), is recorded with RecordedAncestor Q, not held (Q is not live), and takes a slot and an architect, though release_children's walk reaches T. Reproduced at ee9ec60b with a throwaway heldLine test: slotted=true, RecordedAncestor LEGION-180. Contradicts AGENTS.md:197-199 and the architect skill l.38."
+    },
+    {
+      "severity": "important",
+      "file": "skills/legion-architect/SKILL.md",
+      "description": "l.39 tells an architect refused CHILD_IN_OTHER_TREE to re-parent the child back or ask that tree's architect. A todo child K of a root H held under the architect's tree is refused exactly so (`K runs in the tree of H, not T`, the tester's round-3 proof), and H has no architect; the remedy is to release H, which brings K. The guidance, or the refusal, must name that case."
     },
     {
       "severity": "important",
       "file": "packages/daemon/internal/daemon/repositories.go",
-      "description": "The D2 hold ignores D1: RecordedAncestor is computed for any todo recorded root (l.704) and Waiting drops it with no lifecycle/hand-over check, while AdoptionRefusal refuses release CHILD_NOT_ADOPTABLE. A root that ran (tree_lifecycles row) or a carried orphan, todo again under an unreleased child of live T, waits in no line and cannot be released until T lingers; nobody is told. Reproduced at 6c58a271: waiting = nil with a slot free; release refusal CHILD_NOT_ADOPTABLE 'it ran as a tree of its own'."
-    },
-    {
-      "severity": "important",
-      "file": "AGENTS.md",
-      "description": "l.200 says a held root queues again once a person moves 'its parent, or an ancestor' out from under the tree. A recorded ancestor's event is prepared with reread=false (repositories.go:662) and its record keeps tree T (a re-parent never moves a recorded tree), so Waiting keeps holding the root while T's release_children answers 403 ISSUE_OUTSIDE_TREE (its Dispatch walk no longer reaches T). Fix the behaviour (re-read on a recorded issue's parent change) or narrow the sentence."
-    },
-    {
-      "severity": "important",
-      "file": "packages/daemon/internal/intake/facts.go",
-      "description": "settleObserved (l.789) carries Reread onto the Delivered event but not RecordedAncestor; withAncestry set it on the Observed view only (repositories.go:685). An issue recorded between preparation and apply has its delivered event write RecordedAncestor '' (recordObservation), dropping the hold, so the root takes a slot."
-    },
-    {
-      "severity": "important",
-      "file": "packages/daemon/internal/daemon/workflow.go",
-      "description": "Avoidable reads: boot reconcile (l.437) runs prepareIssue per todo summary, each withAncestry opening its own transaction, reading the whole issues table and starting a fresh Dispatch cache, inside the readiness attempt; `own` (repositories.go:704) is computed for unlabelled todo issues that never queue; every unrecorded issue's event (any status) re-walks every parented queued root's chain sequentially, so one failing ancestor read naks unrelated events. Build one ancestry for the listing, skip own for !HandedOver, bound the reread."
+      "description": "Round-1 finding 5, partly open: every event of an unrecorded issue (any status) still re-walks the chain of every labelled todo root under an unrecorded parent (l.761, ParentedQueuedRoots includes roots under plain epics), one Dispatch read and one recordOf transaction per key, inside AckWait; a deadline expiry mid-walk is not an ancestorUnread and naks the unrelated event. prepareObserved (l.645) runs the same full re-read synchronously inside release_children's HTTP request for each unrecorded todo child, and settleObserved discards it once the child is recorded."
     },
     {
       "severity": "minor",
-      "file": "packages/daemon/internal/workflow/adopt.go",
-      "description": "AdoptionRefusal reads the target root and TreeLive (all issues and slots) per child (l.57-68) though adoptChildren shares one tree and adoptQueuedRoots already holds LiveRoots; batched into the Fast-follow line."
+      "file": "packages/daemon/internal/daemon/repositories.go",
+      "description": "An out-of-order older event of a recorded issue whose parent differs from its record's (l.761) seeds the walk with its stale parent, and applyReread writes before admission's sequence fence, so a hold a newer re-parent removed comes back until the next re-read; T's release of that root answers 403 ISSUE_OUTSIDE_TREE meanwhile."
     }
   ],
-  "thermonuclear": "thermonuclear-deep-review and thermonuclear-code-quality both CHANGES at 775c4340 (code 6c58a271); findings 1-2 confirmed by throwaway admit tests on the reviewer's own Postgres",
-  "ci": "At 6c58a271, read 2026-10-26T05:00Z: PR Title 40270101341 success; Docs 40270033658 success; Tests 40270033720 in_progress; Worker Image 40270033702 in_progress; Legion Envoy and Contracts 40270033722 queued. Required: lint, typecheck, test, pr-title. Compare 6c58a271...775c4340 touches only .legion/."
+  "thermonuclear": "thermonuclear-deep-review and thermonuclear-code-quality at dc9f8c18 (code ee9ec60b): both CHANGES; deep finding 1 reproduced by the reviewer. Provider not verified: neither run's transcript records its provider or model as the reviewer can read it, and the two runs' self-reports disagree.",
+  "ci": "At ee9ec60b, read 2026-10-26T08:03Z: lint success, typecheck success, pr-title success, changes success; test and build in_progress; pi-* checks queued. Required: lint, typecheck, test, pr-title. Compare ee9ec60b...dc9f8c18 touches only .legion/."
 }
