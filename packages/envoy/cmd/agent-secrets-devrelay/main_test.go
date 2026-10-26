@@ -195,6 +195,29 @@ func TestATokenFileItCannotUseSendsNothing(t *testing.T) {
 	}
 }
 
+// TestABrokerItCannotReachNamesNoCredentialTheURLCarries: devrelay's refusal for a broker that
+// never answers, or a --broker URL that does not parse, names the address with no user name,
+// password, query or bad escape the URL carries.
+func TestABrokerItCannotReachNamesNoCredentialTheURLCarries(t *testing.T) {
+	token := tokenFile(t, "caller-token")
+	for _, row := range []struct{ base, want string }{
+		{"http://tokuser9f3:hunter2pw@127.0.0.1:1", `"http://xxxxx@127.0.0.1:1/`},
+		{"http://127.0.0.1:1/?token=qtok77", `"http://127.0.0.1:1/?xxxxx"`},
+		{"http://tokuser9f3:hunter2pw%zz@127.0.0.1:1", `not a valid URL`},
+	} {
+		var stdout, stderr bytes.Buffer
+		code := run([]string{"approve", "--record", "record-1", "--broker", row.base, "--account-token-file", token, "--login", testApprover}, &stdout, &stderr)
+		if code != 1 || !strings.Contains(stderr.String(), row.want) {
+			t.Errorf("--broker %s: exit %d, stderr %q; want 1 naming %s", row.base, code, stderr.String(), row.want)
+		}
+		for _, secret := range []string{"tokuser9f3", "hunter2pw", "qtok77", "%zz"} {
+			if strings.Contains(stdout.String()+stderr.String(), secret) {
+				t.Errorf("--broker %s: output %q names %q", row.base, stdout.String()+stderr.String(), secret)
+			}
+		}
+	}
+}
+
 // TestDevStackEnrollsRequestsApprovesAndReleases runs the dev stack's whole story end to end: a
 // machine logs in and devrelay approves its typed code by the operator's login, the resulting
 // launcher credential enrolls a box, the box asks for an approval-required secret, devrelay

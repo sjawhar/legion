@@ -28,56 +28,38 @@ import (
 	"github.com/sjawhar/envoy/internal/broker/secrets"
 )
 
-// TestASourceNamesTheBrokerAndTheStoreItsSettingsDescribe: a source carries the broker's host and
-// what the broker says its store is - the kind, and the account or project holding the secrets,
-// which is what tells two deployments' stores apart. A broker from before the `store` field holds
-// them in AWS Secrets Manager.
+// TestASourceNamesTheBrokerAndTheStoreItsSettingsDescribe: as a session's forms print it, a
+// source names the broker AGENT_SECRETS_URL names and the kind of store its settings describe,
+// and no host, account, region or project; the secret forms' store name carries the account or
+// project, which tells the person which one they write to. A broker from before the `store`
+// field holds them in AWS Secrets Manager.
 func TestASourceNamesTheBrokerAndTheStoreItsSettingsDescribe(t *testing.T) {
 	for _, row := range []struct {
 		name     string
 		base     string
 		settings Settings
-		want     []string
-		absent   []string
+		source   string
+		store    string
 	}{
-		{
-			name:     "gcp",
-			base:     "https://secrets.internal.example/",
-			settings: Settings{Store: secrets.StoreGCP, GCPProject: "000000000000"},
-			want:     []string{"secrets.internal.example", "GCP Secret Manager", "000000000000"},
-			absent:   []string{"AWS"},
-		},
-		{
-			name:     "aws",
-			base:     "http://127.0.0.1:13380",
-			settings: Settings{Store: secrets.StoreAWS, AWSAccountID: "111122223333", AWSRegion: "us-east-1"},
-			want:     []string{"127.0.0.1:13380", "AWS Secrets Manager", "111122223333", "us-east-1"},
-			absent:   []string{"GCP"},
-		},
-		{
-			name:     "a broker from before the store field",
-			base:     "http://127.0.0.1:13380",
-			settings: Settings{AWSAccountID: "111122223333"},
-			want:     []string{"127.0.0.1:13380", "AWS Secrets Manager", "111122223333"},
-		},
-		{
-			name:     "a store this release does not know",
-			base:     "http://127.0.0.1:13380",
-			settings: Settings{Store: "vault"},
-			want:     []string{"127.0.0.1:13380", "vault"},
-		},
+		{"gcp", "https://secrets.internal.example/", Settings{Store: secrets.StoreGCP, GCPProject: "000000000000"},
+			"the broker AGENT_SECRETS_URL names (GCP Secret Manager)", "GCP Secret Manager project 000000000000"},
+		{"aws", "http://127.0.0.1:13380", Settings{Store: secrets.StoreAWS, AWSAccountID: "111122223333", AWSRegion: "us-east-1"},
+			"the broker AGENT_SECRETS_URL names (AWS Secrets Manager)", "AWS Secrets Manager account 111122223333 in us-east-1"},
+		{"a broker from before the store field", "http://127.0.0.1:13380", Settings{AWSAccountID: "111122223333"},
+			"the broker AGENT_SECRETS_URL names (AWS Secrets Manager)", "AWS Secrets Manager account 111122223333"},
+		{"a store this release does not know", "http://127.0.0.1:13380", Settings{Store: "vault"},
+			"the broker AGENT_SECRETS_URL names (vault)", "vault"},
 	} {
 		t.Run(row.name, func(t *testing.T) {
-			got := brokerSource(row.base).withSettings(row.settings).String()
-			for _, want := range row.want {
-				if !strings.Contains(got, want) {
-					t.Fatalf("source %q does not name %q", got, want)
-				}
+			src := brokerSource(row.base).withSettings(row.settings)
+			if got := src.String(); got != row.source {
+				t.Fatalf("source %q, want %q", got, row.source)
 			}
-			for _, absent := range row.absent {
-				if strings.Contains(got, absent) {
-					t.Fatalf("source %q names %q, which is another store", got, absent)
-				}
+			if got := src.asked(); got != "; asked "+row.source {
+				t.Fatalf("a refusal's trailer %q, want it to name %q", got, row.source)
+			}
+			if got := src.storeName(); got != row.store {
+				t.Fatalf("store name %q, want %q", got, row.store)
 			}
 		})
 	}
@@ -85,23 +67,20 @@ func TestASourceNamesTheBrokerAndTheStoreItsSettingsDescribe(t *testing.T) {
 
 // TestASourceWithNoSettingsNamesTheBrokerItself: a broker that cannot be asked for its store
 // (an older one, or one that did not answer) still leaves a source naming the broker, which is
-// what tells this CLI's answer from another secrets CLI's for the same name; the store forms say
-// so in place of a store rather than guessing one.
+// what tells this CLI's answer from another secrets CLI's for the same name; the secret forms say
+// which broker by host in place of a store rather than guessing one.
 func TestASourceWithNoSettingsNamesTheBrokerItself(t *testing.T) {
 	src := brokerSource("https://secrets.internal.example")
-	if !strings.Contains(src.String(), "secrets.internal.example") {
-		t.Fatalf("source = %q, want the broker's host", src)
-	}
-	if !strings.Contains(src.asked(), src.String()) {
-		t.Fatalf("a refusal's %q does not name the source %q", src.asked(), src)
+	if got := src.String(); got != "the broker AGENT_SECRETS_URL names" {
+		t.Fatalf("source = %q, want the broker AGENT_SECRETS_URL names alone", got)
 	}
 	if !strings.Contains(src.storeName(), "secrets.internal.example") {
 		t.Fatalf("store name = %q, want it to name the broker whose store it is", src.storeName())
 	}
-	// A URL no parser reads is named as it was given: the line still says which value this
-	// process was pointed at.
-	if got := brokerSource("not a url").String(); !strings.Contains(got, "not a url") {
-		t.Fatalf("source = %q, want the configured value named", got)
+	// A URL no parser reads is named as it was given: the secret forms' line still says which
+	// value this process was pointed at.
+	if got := brokerSource("not a url").brokerAt(); !strings.Contains(got, "not a url") {
+		t.Fatalf("broker = %q, want the configured value named", got)
 	}
 }
 
@@ -169,9 +148,9 @@ func TestExecFormNamesItsSourceBeforeItExecs(t *testing.T) {
 
 // TestNoFormPrintsACredentialTheBrokerURLCarries: a user name, password or query in
 // AGENT_SECRETS_URL reaches no output of any form - a refusal from a broker that answered, a
-// broker that was never reached, a URL no parser reads, the secret forms' own refusals, and a
-// line naming a source - while a line about an unreached broker still names the address it
-// tried, with the credential masked.
+// broker that was never reached, a URL no parser reads, a scheme-less URL whose user name net/url
+// reads as a scheme, the secret forms' own refusals, and a line naming a source - while a line
+// about an unreached broker still names the address it tried, with the credential masked.
 func TestNoFormPrintsACredentialTheBrokerURLCarries(t *testing.T) {
 	binary := buildAgentSecrets(t)
 	keyDir := newKeyDir(t)
@@ -179,6 +158,7 @@ func TestNoFormPrintsACredentialTheBrokerURLCarries(t *testing.T) {
 	defer broker.Close()
 	answering := "http://tokuser9f3:hunter2pw@" + strings.TrimPrefix(broker.URL, "http://")
 	const unreached = "http://tokuser9f3:hunter2pw@127.0.0.1:1"
+	const badEscape = "http://tokuser9f3:hunter2pw%zz@127.0.0.1:1"
 	injection := []string{"GRANT_ME", "--", "sh", "-c", "echo the-child-ran"}
 	for _, row := range []struct {
 		name, base string
@@ -191,17 +171,21 @@ func TestNoFormPrintsACredentialTheBrokerURLCarries(t *testing.T) {
 		{"status, unreached", unreached, []string{"status", "req-approved"}, "GET http://xxxxx@127.0.0.1:1/v1/requests/req-approved"},
 		{"exec, unreached", unreached, injection, "POST http://xxxxx@127.0.0.1:1/v1/requests"},
 		{"secret list, unreached", unreached, []string{"secret", "list"}, "http://xxxxx@127.0.0.1:1"},
-		{"self, answered", answering, []string{"self"}, "source: the broker at 127.0.0.1:"},
-		{"status, answered", answering, []string{"status", "req-approved"}, "source: the broker at 127.0.0.1:"},
-		{"exec, refused by the broker", answering, injection, "asked the broker at 127.0.0.1:"},
-		{"a port no parser reads", "http://tokuser9f3:hunter2pw@127.0.0.1:badport", []string{"self"}, "http://xxxxx@127.0.0.1:badport"},
+		{"self, answered", answering, []string{"self"}, "source: the broker AGENT_SECRETS_URL names (GCP Secret Manager)"},
+		{"status, answered", answering, []string{"status", "req-approved"}, "source: the broker AGENT_SECRETS_URL names (GCP Secret Manager)"},
+		{"exec, refused by the broker", answering, injection, "asked the broker AGENT_SECRETS_URL names"},
+		{"a port no parser reads", "http://tokuser9f3:hunter2pw@127.0.0.1:badport", []string{"self"},
+			"the broker's address is not a valid URL: GET http://xxxxx@127.0.0.1:badport/v1/enrollments/self"},
+		{"a bad escape in the password", badEscape, []string{"self"}, "the broker's address is not a valid URL: GET http://xxxxx@127.0.0.1:1/v1/enrollments/self"},
+		{"a bad escape in the password, injecting", badEscape, injection, "the broker's address is not a valid URL"},
+		{"a scheme-less URL", "tokuser9f3:hunter2pw@127.0.0.1:1", []string{"self"}, "GET xxxxx@127.0.0.1:1/v1/enrollments/self"},
 		{"a plain-http broker on the network, secret list", "http://tokuser9f3:hunter2pw@example.internal", []string{"secret", "list"}, `"http://xxxxx@example.internal" must be https`},
 		{"a token in the query", "http://127.0.0.1:1/?token=hunter2pw", []string{"self"}, "http://127.0.0.1:1/?xxxxx"},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			stdout, stderr, _ := runAgentSecrets(t, binary, row.base, keyDir, nil, row.args...)
 			output := stdout + stderr
-			for _, secret := range []string{"tokuser9f3", "hunter2pw"} {
+			for _, secret := range []string{"tokuser9f3", "hunter2pw", "%zz"} {
 				if strings.Contains(output, secret) {
 					t.Fatalf("output names %q: stdout %q, stderr %q", secret, stdout, stderr)
 				}
@@ -210,6 +194,72 @@ func TestNoFormPrintsACredentialTheBrokerURLCarries(t *testing.T) {
 				t.Fatalf("stdout %q, stderr %q; want them to name %q", stdout, stderr, row.want)
 			}
 		})
+	}
+}
+
+// TestNoSessionLineNamesAHostOrAStoreID: every line a session's forms print about where an
+// answer came from - the injection line, a denial, a refusal, a pending request, a grant that
+// released no value, and the source: line of request, status and self - names the broker
+// AGENT_SECRETS_URL names and the store's kind, and no host, account, region or project, for
+// each store kind the broker's settings can describe; each outcome keeps its exit code.
+func TestNoSessionLineNamesAHostOrAStoreID(t *testing.T) {
+	binary := buildAgentSecrets(t)
+	keyDir := newKeyDir(t)
+	run := func(name string) []string {
+		return []string{name, "--wait", "200ms", "--", "sh", "-c", "echo the-child-ran"}
+	}
+	forms := []struct {
+		args []string
+		exit int
+	}{
+		{[]string{"self"}, 0},
+		{[]string{"status", "req-approved"}, 0},
+		{[]string{"request", "GRANT_ME"}, 0},
+		{[]string{"request", "PENDING_ME"}, exitPending},
+		{[]string{"request", "DENY_ME"}, exitDenied},
+		{[]string{"request", "NO_SUCH_NAME"}, 1},
+		{[]string{"cancel", "req-unknown"}, 1},
+		{run("GRANT_ME"), 0},
+		{run("DENY_ME"), exitDenied},
+		{run("UNRELEASED_ME"), 1},
+		{run("PENDING_ME"), exitPending},
+		{run("NO_SUCH_NAME"), 1},
+	}
+	for _, kind := range []struct {
+		name     string
+		settings *Settings // nil: a broker too old to serve GET /v1/settings
+		source   string
+	}{
+		{"gcp", &fakeSettings, "the broker AGENT_SECRETS_URL names (GCP Secret Manager)"},
+		{"aws", &Settings{Store: secrets.StoreAWS, AWSAccountID: "111122223333", AWSRegion: "us-east-1"}, "the broker AGENT_SECRETS_URL names (AWS Secrets Manager)"},
+		{"a store this release does not know", &Settings{Store: "vault"}, "the broker AGENT_SECRETS_URL names (vault)"},
+		{"no settings route", nil, "the broker AGENT_SECRETS_URL names"},
+	} {
+		broker, counters := fakeBroker(t)
+		defer broker.Close()
+		if kind.settings == nil {
+			counters.hideSettings()
+		} else {
+			counters.serveSettings(*kind.settings)
+		}
+		host := strings.TrimPrefix(broker.URL, "http://")
+		for _, form := range forms {
+			t.Run(kind.name+"/"+strings.Join(form.args, " "), func(t *testing.T) {
+				stdout, stderr, exit := runAgentSecrets(t, binary, broker.URL, keyDir, nil, form.args...)
+				output := stdout + stderr
+				if exit != form.exit {
+					t.Fatalf("exit %d, want %d (stdout %q, stderr %q)", exit, form.exit, redactSecrets(stdout), redactSecrets(stderr))
+				}
+				if !strings.Contains(output, kind.source) {
+					t.Fatalf("stdout %q, stderr %q; want them to name %q", redactSecrets(stdout), redactSecrets(stderr), kind.source)
+				}
+				for _, absent := range []string{host, "127.0.0.1", "000000000000", "111122223333", "us-east-1", "the broker at"} {
+					if strings.Contains(output, absent) {
+						t.Fatalf("stdout %q, stderr %q name %q", redactSecrets(stdout), redactSecrets(stderr), absent)
+					}
+				}
+			})
+		}
 	}
 }
 

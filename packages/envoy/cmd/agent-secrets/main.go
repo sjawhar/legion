@@ -9,13 +9,14 @@
 // Manager) under the person's own cloud sign-in and then ask the broker to reread what they wrote.
 //
 // Every answer and every refusal about a secret names where it came from (source.go): the broker
-// AGENT_SECRETS_URL names, by host, and that broker's store, where its settings give one. This
+// AGENT_SECRETS_URL names, and the kind of that broker's store, where its settings give one. This
 // CLI reads no local secrets file, and another secrets CLI on the same machine can answer the
 // same NAME from a store of its own, so the injection form writes one line to stderr before it
-// execs — the names it injected, that the broker AGENT_SECRETS_URL names answered and its store's
-// kind, never a value, a host, an account or a project — and the status and secret forms print
-// the whole source beside what they report. No form prints a credential AGENT_SECRETS_URL
-// carries (internal/redact).
+// execs — the names it injected and their source, never a value — and the status forms print
+// that source beside what they report. None of those lines names the broker's host or the store's
+// account, region or project, since they are quoted wherever an agent's output is; the secret
+// forms, which a person runs under their own cloud sign-in, name the account or project they
+// write to. No form prints a credential AGENT_SECRETS_URL carries (internal/redact).
 //
 //	agent-secrets keygen --out <dir>
 //	agent-secrets enroll --helper --runtime-id <id> --thumbprint <tp> [--session-id <id>]
@@ -629,7 +630,7 @@ func renewLoop(ctx context.Context, c *client, signer Signer, enrollmentID strin
 				if code == "" {
 					code = "UNKNOWN"
 				}
-				fmt.Fprintf(stderr, "agent-secrets renew: enrollment %s permanently refused by %s: HTTP %d %s: %s\n", enrollmentID, brokerSource(c.baseURL).brokerAt(), refused.Status, code, refused.Message)
+				fmt.Fprintf(stderr, "agent-secrets renew: enrollment %s permanently refused by %s: HTTP %d %s: %s\n", enrollmentID, brokerSource(c.baseURL), refused.Status, code, refused.Message)
 				return exitRenewRefused
 			}
 			if tokenErr != nil {
@@ -993,9 +994,8 @@ func cmdExec(args []string, stdout, stderr io.Writer) int {
 	// The one line the injected command's own output is preceded by: which names this process
 	// puts in its environment, and that this CLI's broker and a store of which kind gave them,
 	// never a value. A reader of the command's log can tell these values from another secrets
-	// CLI's for the same names; the line names no host, account or project (source.injected),
-	// since it is quoted wherever that output is.
-	fmt.Fprintf(stderr, "agent-secrets: %s from %s\n", strings.Join(names, ", "), src().injected())
+	// CLI's for the same names.
+	fmt.Fprintf(stderr, "agent-secrets: %s from %s\n", strings.Join(names, ", "), src())
 	if err := syscall.Exec(path, command, buildChildEnv(os.Environ(), values.Values)); err != nil {
 		fmt.Fprintf(stderr, "agent-secrets: exec %s: %v\n", command[0], err)
 		return 1

@@ -62,7 +62,7 @@ enrollment_id: edd9a18c-41ff-46f9-8a15-bddb30f0abc3
 kind: session
 operator: ada@example.com
 lease_expires_at: 2026-10-03T03:39:03Z
-source: the broker at secrets.internal.example (AWS Secrets Manager account 111122223333 in us-east-1)
+source: the broker AGENT_SECRETS_URL names (AWS Secrets Manager)
 $ agent-secrets DEMO_READ_TOKEN -- printenv DEMO_READ_TOKEN
 agent-secrets: DEMO_READ_TOKEN from the broker AGENT_SECRETS_URL names (AWS Secrets Manager)
 demo-read-token-value
@@ -82,7 +82,7 @@ A box nobody unenrolls ends anyway once `agent-secrets renew` stops. Its lease l
 
 ```console
 $ agent-secrets self
-agent-secrets self: proof invalid: not live (PROOF_INVALID); asked the broker at secrets.internal.example (AWS Secrets Manager account 111122223333 in us-east-1)
+agent-secrets self: proof invalid: not live (PROOF_INVALID); asked the broker AGENT_SECRETS_URL names (AWS Secrets Manager)
 ```
 
 On its next run, within `BROKER_SWEEP_SECONDS`, the broker's sweep ends the

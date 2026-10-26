@@ -26,6 +26,7 @@ import (
 	"github.com/sjawhar/envoy/internal/broker/oauthwire"
 	"github.com/sjawhar/envoy/internal/broker/proof"
 	"github.com/sjawhar/envoy/internal/broker/record"
+	"github.com/sjawhar/envoy/internal/redact"
 )
 
 // noCredentialMsg is the exact instruction returned whenever the helper has no machine
@@ -310,7 +311,7 @@ func (b *Broker) Login(ctx context.Context, hostname string) (string, error) {
 	da, err := cfg.DeviceAuth(context.WithValue(ctx, oauth2.HTTPClient, b.httpClient()),
 		oauth2.SetAuthURLParam("request", compact), oauth2.SetAuthURLParam("dpop_jkt", thumbprint))
 	if err != nil {
-		return "", oauthBrokerError(err)
+		return "", oauthBrokerError(redact.Error(err))
 	}
 	if da.DeviceCode == "" || da.UserCode == "" {
 		return "", errors.New("broker returned no device_code/user_code")
@@ -497,7 +498,7 @@ func (b *Broker) retireReplaced(old *machineCredential) {
 		}
 		req, err := http.NewRequest(http.MethodPost, url, nil)
 		if err != nil {
-			return err
+			return redact.Error(err)
 		}
 		req.Header.Set("Proof", compact)
 		return b.do(req, []int{http.StatusNoContent}, nil)
@@ -822,6 +823,7 @@ func (b *Broker) redeem(ctx context.Context, cred *machineCredential) (next *Mac
 	tok, err := b.oauthConfig().TokenSource(b.tokenContext(ctx, cred.key),
 		&oauth2.Token{RefreshToken: cred.refreshToken, Expiry: time.Unix(1, 0)}).Token()
 	if err != nil {
+		err = redact.Error(err)
 		var re *oauth2.RetrieveError
 		switch {
 		case errors.As(err, &re) && re.Response != nil && re.Response.StatusCode == http.StatusTooManyRequests:
@@ -1159,7 +1161,7 @@ func (b *Broker) enrollAs(ctx context.Context, kind, runtimeID, thumbprint strin
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
-		return "", time.Time{}, err
+		return "", time.Time{}, redact.Error(err)
 	}
 	req.Header.Set("Proof", compact)
 	req.Header.Set("Content-Type", "application/json")
@@ -1184,7 +1186,7 @@ func (b *Broker) Renew(ctx context.Context, s *Session) (time.Time, error) {
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, nil)
 	if err != nil {
-		return time.Time{}, err
+		return time.Time{}, redact.Error(err)
 	}
 	req.Header.Set("Proof", compact)
 	var out leaseReply
@@ -1203,7 +1205,7 @@ func (b *Broker) Revoke(ctx context.Context, enrollmentID string) error {
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, url, nil)
 	if err != nil {
-		return err
+		return redact.Error(err)
 	}
 	req.Header.Set("Proof", compact)
 	if err := b.do(req, []int{http.StatusNoContent, http.StatusNotFound}, nil); err != nil {
@@ -1212,10 +1214,13 @@ func (b *Broker) Revoke(ctx context.Context, enrollmentID string) error {
 	return nil
 }
 
+// do sends req and decodes the broker's answer. An error that names req's URL names it through
+// redact.Error, so no message or log line the helper makes from it carries a credential
+// AGENT_SECRETS_URL holds.
 func (b *Broker) do(req *http.Request, ok []int, out any) error {
 	resp, err := b.httpClient().Do(req)
 	if err != nil {
-		return err
+		return redact.Error(err)
 	}
 	defer resp.Body.Close()
 	data, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))

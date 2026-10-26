@@ -5,22 +5,23 @@
 ### Added
 
 - `agent-secrets` names the store it answered from, so no answer of its own is read as another
-  secrets CLI's about the same name: the broker `AGENT_SECRETS_URL` names, by host, and that
-  broker's store, read once from its public `GET /v1/settings` (`AWS Secrets Manager account <id>
-  in <region>`, or `GCP Secret Manager project <number>`), with the broker named alone where the
-  settings cannot be read. The injection form writes one line to standard error before it execs -
-  `agent-secrets: NAME, NAME from the broker AGENT_SECRETS_URL names (<store kind>)`, the names
-  it injected, and the store's kind alone (`AWS Secrets Manager`, `GCP Secret Manager`, or the
-  kind the broker names), with no `(<store kind>)` where the settings cannot be read. Since that
-  line lands in the command's own output and is quoted wherever that output is, it names no
-  host, account, region or project, and nothing of the values; `request`, `status` and `self`
-  print a `source:` line naming the broker's host and the whole store; `secret show`
-  prints a `store:` line and every row of `secret list` carries `store` in `--json` and a line
-  on standard error naming the store the table is from; `machine list` and `grant list` name
-  their broker the same way; and every refusal names where this CLI looked, from a denied request
-  to `UNKNOWN_SECRET` and a grant that released no value. `--json` output is unchanged for
-  `request`, `status`, `self`, `whoami`, `machine list` and `grant list`, which still print the
-  broker's own body verbatim and make no settings call; `secret list --json` and
+  secrets CLI's about the same name: the broker `AGENT_SECRETS_URL` names, and the kind of that
+  broker's store, read once from its public `GET /v1/settings` (`AWS Secrets Manager`, `GCP Secret
+  Manager`, or the store the broker names when this release does not know it), as `the broker
+  AGENT_SECRETS_URL names (<store kind>)`, with no `(<store kind>)` where the settings cannot be
+  read. The injection form writes one line to standard error before it execs -
+  `agent-secrets: NAME, NAME from the broker AGENT_SECRETS_URL names (<store kind>)`, the names it
+  injected and nothing of their values; `request`, `status` and `self` print a `source:` line;
+  `machine list` and `grant list` name their broker the same way; and every refusal names where
+  this CLI looked, from a denied or pending request to `UNKNOWN_SECRET` and a grant that released
+  no value. None of these lines names the broker's host or the store's account, region or
+  project, since an agent's output is quoted wherever it goes, a public pull request among them.
+  The secret forms, which a person runs under their own cloud sign-in, name the store's account or
+  project (`AWS Secrets Manager account <id> in <region>`, `GCP Secret Manager project <number>`):
+  `secret show` prints a `store:` line and every row of `secret list` carries `store` in `--json`
+  and a line on standard error naming the store the table is from. `--json` output is unchanged
+  for `request`, `status`, `self`, `whoami`, `machine list` and `grant list`, which still print
+  the broker's own body verbatim and make no settings call; `secret list --json` and
   `secret show --json` gain a `store` field. No line names a secret's version: the broker
   releases a grant's values as names and values alone, and a session holds no sign-in of its own
   to the store to read one with (`agent-secrets secret show`, which reads the store directly
@@ -34,13 +35,17 @@
   that inherited a stale address reads a stale address. Such a message carries no `asked the
   broker …` trailer: the broker refused nothing. A local helper refusal or dead helper socket names
   that socket instead, since no broker was asked.
-- No output of `agent-secrets` or `agent-secrets-helper` prints a credential `AGENT_SECRETS_URL`
-  carries: the user name and password before its `@`, and any query or fragment, print as `xxxxx`
-  (`internal/redact`) in every message that names the URL - a broker that could not be reached,
-  a URL the client could not build a request from, the secret forms' refusal of a plain-http
-  broker, and the helper's `listening` log line - and a line naming the broker by host names the
-  host alone. Before, a user name and password there printed in clear in the message about an
-  unreachable broker, twice since the entry above.
+- No output of `agent-secrets`, `agent-secrets-helper` or `agent-secrets-devrelay` prints a
+  credential the broker's URL carries: the user name and password before its `@`, and any query
+  or fragment, print as `xxxxx` (`internal/redact`) in every message that names the URL - a broker
+  that could not be reached, the secret forms' refusal of a plain-http broker, the helper's
+  `listening` log line, and every error the helper's broker calls make (a machine login, an
+  enrollment, a renewal, a refresh or a revoke, which `agent-secrets machine login`, `register
+  --wait` and the helper's log print). A URL the client cannot build a request from says `the
+  broker's address is not a valid URL` and nothing of the parser's own text, which quoted a bad
+  escape in a password. Before, net/http masked a password alone and printed the user name and
+  query, and the message about an unreachable broker printed the whole URL, twice since the entry
+  above.
 - Dispatch's conversation view (`/agents/<id>/live`) shows the model and thinking level an Oh My
   Pi session runs now, from the `settings` frame pi-envoy publishes, before any turn runs on them
   and within about 20 seconds of a change made anywhere else (INFRA-195). Where the session runs

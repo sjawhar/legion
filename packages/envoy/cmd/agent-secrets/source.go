@@ -8,12 +8,17 @@
 // and so does every refusal, whether or not the command reached the broker at all.
 //
 // agent-secrets answers from the secrets broker AGENT_SECRETS_URL names and from nothing else:
-// it reads no local secrets file. A source is therefore that broker, by the host of its URL,
-// plus the store the broker keeps the secrets in (GET /v1/settings: AWS Secrets Manager and its
-// account, or GCP Secret Manager and its project) wherever the CLI has read it. The settings
-// read is best effort and bounded (describe): a broker that cannot be asked leaves a source
-// naming the broker alone, which already tells one CLI's store from another's, rather than
-// failing a command or guessing a store.
+// it reads no local secrets file. A source is therefore that broker, named by the variable that
+// chose it, plus the kind of store the broker keeps the secrets in (GET /v1/settings: AWS Secrets
+// Manager or GCP Secret Manager) wherever the CLI has read it. The settings read is best effort
+// and bounded (describe): a broker that cannot be asked leaves a source naming the broker alone,
+// which already tells one CLI's store from another's, rather than failing a command or guessing
+// a store.
+//
+// A source as a session's forms print it (String) names no host, account, region or project:
+// those lines land in an agent's command output and from there in whatever it quotes, a public
+// pull request among them. Only the secret forms, which a person runs under their own cloud
+// sign-in to write to one account or project, name it (storeName), and their --json carries it.
 //
 // No source names a secret's version: the broker releases a grant's values as names and values
 // alone (POST /v1/grants/{id}/values), and a session holds no sign-in of its own to the store to
@@ -37,17 +42,17 @@ import (
 const sourceSettingsTimeout = 5 * time.Second
 
 // source is where this process's answers about a secret come from: the broker it asks, and that
-// broker's own store where it is known. The zero source names neither and prints as "the
-// broker", for a refusal made before any broker URL was resolved.
+// broker's own store where it is known.
 type source struct {
-	// host is the host (and port) of AGENT_SECRETS_URL, or that URL whole when it has none.
+	// host is the host (and port) of AGENT_SECRETS_URL, or that URL whole when it has none, for
+	// the secret forms alone (brokerAt, storeName).
 	host string
 	// store is the broker's own store, as its settings describe it ("AWS Secrets Manager account
-	// <id> in <region>", "GCP Secret Manager project <number>"); empty until describe has read
-	// them.
+	// <id> in <region>", "GCP Secret Manager project <number>"), for the secret forms alone
+	// (storeName); empty until describe has read them.
 	store string
-	// kind is the store's kind alone ("AWS Secrets Manager", "GCP Secret Manager"), for the
-	// injection line (injected); empty until describe has read the settings.
+	// kind is the store's kind alone ("AWS Secrets Manager", "GCP Secret Manager"), which String
+	// prints; empty until describe has read the settings.
 	kind string
 }
 
@@ -119,15 +124,19 @@ func (s source) withSettings(settings Settings) source {
 	return s
 }
 
-// String names the source in a sentence: the broker, by host, and its store where it is known.
+// String names the source in a sentence, as every form but the secret forms prints it: the
+// broker AGENT_SECRETS_URL names, and its store's kind where it is known. It names no host,
+// account, region or project (see the file comment), so two brokers of one kind read alike here;
+// the line still says the answer came from this CLI's broker, not a local file.
 func (s source) String() string {
-	if s.store == "" {
-		return s.brokerAt()
+	if s.kind == "" {
+		return "the broker " + brokerURLVar + " names"
 	}
-	return s.brokerAt() + " (" + s.store + ")"
+	return "the broker " + brokerURLVar + " names (" + s.kind + ")"
 }
 
-// brokerAt names the broker alone, for a line that names the store itself beside it.
+// brokerAt names the broker by host, for the secret forms' lines, which name the store's account
+// or project beside it (storeName).
 func (s source) brokerAt() string {
 	if s.host == "" {
 		return "the broker"
@@ -139,19 +148,6 @@ func (s source) brokerAt() string {
 // of this CLI's for another CLI's answer about the same name.
 func (s source) asked() string {
 	return "; asked " + s.String()
-}
-
-// injected names the source on the injection line. That line lands in the injected command's
-// own output, and from there in whatever an agent quotes of it, a public pull request among
-// them, so it names the broker by the variable that chose it and the store by its kind alone:
-// never the broker's host, nor the account, region or project that holds the store, which
-// `agent-secrets self` prints for a reader who needs them. Two brokers of one kind read alike
-// here, and the line still says the values came from this CLI's broker, not a local file.
-func (s source) injected() string {
-	if s.kind == "" {
-		return "the broker " + brokerURLVar + " names"
-	}
-	return "the broker " + brokerURLVar + " names (" + s.kind + ")"
 }
 
 // storeName is the store alone, for the secret forms: they read and write it directly under the

@@ -105,17 +105,18 @@ enrollment_id: 2b8627f4-9a2a-4c12-85bf-910144bc0b5c
 kind: session
 operator: ada@example.com
 lease_expires_at: 2026-10-03T03:36:40Z
-source: the broker at 127.0.0.1:62083 (AWS Secrets Manager account 111122223333 in us-east-1)
+source: the broker AGENT_SECRETS_URL names (AWS Secrets Manager)
 $ agent-secrets DEMO_READ_TOKEN -- printenv DEMO_READ_TOKEN
 agent-secrets: DEMO_READ_TOKEN from the broker AGENT_SECRETS_URL names (AWS Secrets Manager)
 demo-read-token-value
 $ agent-secrets DEMO_API_KEY --reason "Deploy the example service" -- sh -c 'echo "deploying with a ${#DEMO_API_KEY}-character key"'
 ```
 
-Every line about a secret names where it came from: the broker this stack runs, and the store that
-broker reads. The local stack's store is `BROKER_FAKE_SECRETS_FILE`, which stands in for AWS
-Secrets Manager, so `self` names the account and region its key ARN carries; the line before an
-injected command names the store's kind alone, since that command's output is often quoted.
+Every line about a secret names where it came from: the broker this stack runs, and the kind of
+store that broker reads. The local stack's store is `BROKER_FAKE_SECRETS_FILE`, which stands in for
+AWS Secrets Manager. No session's line names the broker's host or the store's account or region,
+since an agent's output is often quoted; `agent-secrets secret show` names the account and region
+its key ARN carries.
 
 The last command waits for approval, and names who approves it (`waiting for ada@example.com to
 approve it under Credential requests in their Dispatch Inbox`). In the third shell, list what waits
@@ -143,7 +144,7 @@ enrollment_id: 7cf72ec3-d10f-46fd-984f-ddd856b229c2
 kind: session
 operator: ada@example.com
 lease_expires_at: 2026-10-11T01:51:13Z
-source: the broker at 127.0.0.1:62083 (AWS Secrets Manager account 111122223333 in us-east-1)
+source: the broker AGENT_SECRETS_URL names (AWS Secrets Manager)
 grant: f81251ab-6552-450c-9eca-12a793a29f4c (request 86237327-1f78-4c79-82a5-4f71174e71c5, expires 2026-10-11T01:38:14Z)
 ```
 
@@ -163,11 +164,11 @@ as Dispatch's pages would, under the helper's machine login
 $ agent-secrets machine list
 CREDENTIAL_ID                         HOST                 APPROVED_BY      ISSUED                EXPIRES               STATE
 a0324632-0cc0-4113-bb26-d4123fab9da6  example-host-devbox  ada@example.com  2026-10-10T15:01:31Z  2026-10-17T15:01:31Z  ok
-Every row is a login to the broker at 127.0.0.1:62083.
+Every row is a login to the broker AGENT_SECRETS_URL names.
 $ agent-secrets grant list
 GRANT_ID                              SECRETS          GRANTED    APPROVER  SESSION                                       OPERATOR         EXPIRES
 8fe92a26-b355-4c28-8679-60e8ce98b1d9  DEMO_READ_TOKEN  automatic  -         session/example-host-devbox:2856922:35395441  ada@example.com  session-end
-Every row is a grant from the broker at 127.0.0.1:62083 (AWS Secrets Manager account 111122223333 in us-east-1).
+Every row is a grant from the broker AGENT_SECRETS_URL names (AWS Secrets Manager).
 ```
 
 Each list says on standard error which broker and store its rows are from, so the table on

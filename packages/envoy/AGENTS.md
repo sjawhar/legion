@@ -2326,22 +2326,27 @@ client (a box's or pod's own key, or a machine session's `cmd/agent-secrets-help
 runtime, requests grants, polls a pending decision to completion, and either prints session/grant
 state (`self`, `status --json`) or `syscall.Exec`s a command with the granted values injected into
 its environment. Every line it prints about a secret names the store it answered from
-(`cmd/agent-secrets/source.go`): the broker `AGENT_SECRETS_URL` names, by host, and that broker's
-own store, read once from the public `GET /v1/settings` and named as `AWS Secrets Manager account
-<id> in <region>` or `GCP Secret Manager project <number>`, the broker alone where those settings
-cannot be read. The injection form writes one line to stderr before it execs, naming the injected
-names, the broker as the one `AGENT_SECRETS_URL` names and its store's kind alone (`agent-secrets:
-NAME from the broker AGENT_SECRETS_URL names (GCP Secret Manager)`), never a value, a host, an
-account or a project, since that line is quoted wherever the command's output is (`source.injected`;
-`packages/envoy-client/src/slack-post.ts` matches its `agent-secrets: NAME from ` prefix); `request`,
-`status` and `self` print the whole source as `source:`,
-`secret show` the store as `store:` (and `secret list` one line on stderr, with `store` on each
-row under `--json`), and every refusal carries it, so no answer or refusal of this CLI's is read
-as another secrets CLI's about the same name. No line names a secret's version: a grant's release
-carries names and values alone, and a session holds no sign-in of its own to the store.
-No output of `agent-secrets` or `agent-secrets-helper` prints a user name, password, query or fragment `AGENT_SECRETS_URL`
-carries: every message naming that URL prints it through `internal/redact`'s `URL`, which masks
-each as `xxxxx`.
+(`cmd/agent-secrets/source.go`): the broker `AGENT_SECRETS_URL` names, and the kind of that
+broker's own store, read once from the public `GET /v1/settings` (`AWS Secrets Manager`, `GCP
+Secret Manager`), the broker alone where those settings cannot be read, as `the broker
+AGENT_SECRETS_URL names (GCP Secret Manager)`. The injection form writes one line to stderr before
+it execs, naming the injected names and that source, never a value (`agent-secrets: NAME from the
+broker AGENT_SECRETS_URL names (GCP Secret Manager)`; `packages/envoy-client/src/slack-post.ts`
+matches its `agent-secrets: NAME from ` prefix); `request`, `status` and `self` print it as
+`source:`, and every denial, pending request and refusal carries it, so no answer or refusal of
+this CLI's is read as another secrets CLI's about the same name. None of these lines names the
+broker's host or the store's account, region or project, since an agent's output is quoted
+wherever it goes, a public pull request among them. Only the secret forms, which a person runs
+under their own cloud sign-in, name the store's account or project (`AWS Secrets Manager account
+<id> in <region>`, `GCP Secret Manager project <number>`): `secret show` as `store:`, `secret list`
+one line on stderr, with `store` on each row under `--json`. No line names a secret's version: a
+grant's release carries names and values alone, and a session holds no sign-in of its own to the
+store. No output of `agent-secrets`, `agent-secrets-helper` (`internal/broker/helper`'s broker
+calls included) or `agent-secrets-devrelay` prints a user name, password, query or fragment the
+broker's URL carries: a message names that URL through `internal/redact`'s `URL`, which masks each
+as `xxxxx`, and an error net/http or net/url makes passes through its `Error`, which redacts the
+URL it names and withholds a cause that could repeat a credential (`not a valid URL` for one
+that did not parse).
 `--json` on `request`, `status`, `self`, `whoami`, `machine list` and `grant list` is the broker's
 body verbatim as before, and makes no settings call. The other secrets CLI a box may hold,
 `secrets`, is secretsd, shipped from `sjawhar/forward` (the old `sjawhar/secretsd` repository is

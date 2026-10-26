@@ -61,12 +61,12 @@ $ agent-secrets grant list
 GRANT_ID                              SECRETS          GRANTED    APPROVER         SESSION                                       OPERATOR         EXPIRES
 f26b6b78-2819-4b1d-abbd-d6990ca1a776  DEMO_API_KEY     approval   ada@example.com  session/example-host-laptop:1989345:35362384  ada@example.com  2026-10-10T15:56:07Z
 cc63d479-ddae-4052-b93b-b4b5df37adf0  DEMO_READ_TOKEN  automatic  -                session/example-host-devbox:1989344:35362384  ada@example.com  session-end
-Every row is a grant from the broker at secrets.internal.example (AWS Secrets Manager account 111122223333 in us-east-1).
+Every row is a grant from the broker AGENT_SECRETS_URL names (AWS Secrets Manager).
 $ agent-secrets grant revoke f26b6b78-2819-4b1d-abbd-d6990ca1a776
-revoked f26b6b78-2819-4b1d-abbd-d6990ca1a776 at the broker at secrets.internal.example
+revoked f26b6b78-2819-4b1d-abbd-d6990ca1a776 at the broker AGENT_SECRETS_URL names
 ```
 
-The line after the table goes to standard error, naming the broker and store every row is from, so
+The line after the table goes to standard error, naming the broker and kind of store every row is from, so
 the table stays one row per grant for a script.
 
 `GRANTED` is `automatic` or `approval`, and `APPROVER` is `-` for an automatic grant. `EXPIRES` is
@@ -81,13 +81,13 @@ ending its own grant withholds nothing: its next request is decided as before.
 
 ```console
 $ agent-secrets revoke b51e58bc-3b7b-4144-a2ed-5821f232d612
-revoked at the broker at secrets.internal.example
+revoked at the broker AGENT_SECRETS_URL names
 $ agent-secrets self
 enrollment_id: 2b8627f4-9a2a-4c12-85bf-910144bc0b5c
 kind: session
 operator: ada@example.com
 lease_expires_at: 2026-10-03T03:36:40Z
-source: the broker at secrets.internal.example (AWS Secrets Manager account 111122223333 in us-east-1)
+source: the broker AGENT_SECRETS_URL names (AWS Secrets Manager)
 ```
 
 ## End every session's access to a secret
@@ -117,10 +117,10 @@ approver's list. It names the request by the request id `agent-secrets` printed 
 
 ```console
 $ agent-secrets cancel 715ea84a-6f5c-4230-83c9-1cf258acd88b
-cancelled at the broker at secrets.internal.example
+cancelled at the broker AGENT_SECRETS_URL names
 $ agent-secrets status 715ea84a-6f5c-4230-83c9-1cf258acd88b
 state: cancelled
-source: the broker at secrets.internal.example (AWS Secrets Manager account 111122223333 in us-east-1)
+source: the broker AGENT_SECRETS_URL names (AWS Secrets Manager)
 decided_by: session:2b8627f4-9a2a-4c12-85bf-910144bc0b5c
 ```
 
@@ -189,11 +189,11 @@ $ agent-secrets machine list
 CREDENTIAL_ID                         HOST                 APPROVED_BY      ISSUED                EXPIRES               STATE
 d4187389-953c-4156-90c1-1dd937e9bf0b  example-host-devbox  ada@example.com  2026-10-10T14:56:01Z  2026-10-17T14:56:01Z  ok
 a2df6d16-adc1-434e-b479-496defb3a5c8  example-host-laptop  ada@example.com  2026-10-10T14:55:53Z  2026-10-17T14:55:53Z  ok
-Every row is a login to the broker at secrets.internal.example.
+Every row is a login to the broker AGENT_SECRETS_URL names.
 $ agent-secrets machine revoke 8f4c8ae4-b73e-4a60-a591-725667480f1a
-agent-secrets machine revoke: no such machine login (NOT_FOUND); asked the broker at secrets.internal.example
+agent-secrets machine revoke: no such machine login (NOT_FOUND); asked the broker AGENT_SECRETS_URL names
 $ agent-secrets machine revoke a2df6d16-adc1-434e-b479-496defb3a5c8
-revoked a2df6d16-adc1-434e-b479-496defb3a5c8 at the broker at secrets.internal.example
+revoked a2df6d16-adc1-434e-b479-496defb3a5c8 at the broker AGENT_SECRETS_URL names
 ```
 
 The machine-login page lists the services' logins, the Legion daemon's, beside them, and revokes

@@ -124,7 +124,7 @@ func (e *unreachableError) Unwrap() error { return e.cause }
 // which TLS or a proxy fixes. An error that fits none says no more than that the request failed,
 // rather than name a layer it cannot prove.
 func unreachable(base, method, callURL string, err error) error {
-	cause := withoutURL(err)
+	cause := withoutURL(redact.Error(err))
 	host := brokerHost(base)
 	failed := func(what string) error { return &unreachableError{what, base, method, callURL, cause} }
 	var dns *net.DNSError
@@ -150,8 +150,8 @@ func unreachable(base, method, callURL string, err error) error {
 }
 
 // withoutURL is err without net/http's *url.Error wrapper, which repeats the URL the call was
-// made to (its password masked, its user name and query not), so every message that prints a
-// URL prints it once, through redact.URL.
+// made to, so every message that prints a URL prints it once, through redact.URL. The wrapped
+// cause is redact.Error's, withheld where its own text could repeat a credential.
 func withoutURL(err error) error {
 	var wrapped *url.Error
 	if errors.As(err, &wrapped) {
@@ -185,7 +185,9 @@ func (c *client) do(ctx context.Context, method, url string, body []byte, header
 	}
 	req, err := http.NewRequestWithContext(ctx, method, url, reader)
 	if err != nil {
-		return nil, fmt.Errorf("%s %s: %w", method, redact.URL(url), withoutURL(err))
+		// The parser's own text quotes the part it could not read, a bad escape in a password
+		// among them, so the message says only that the URL is not valid.
+		return nil, &unreachableError{"the broker's address is not a valid URL", c.baseURL, method, url, errNothingSent}
 	}
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
@@ -215,6 +217,9 @@ func (c *client) do(ctx context.Context, method, url string, body []byte, header
 	}
 	return data, nil
 }
+
+// errNothingSent is the cause of a call this client could not even build a request for.
+var errNothingSent = errors.New("nothing was sent")
 
 // doProof signs the request with signer.Sign against exactly this method and URL (no query
 // string appended after signing), the shape proof.Verifier.Verify compares htm/htu against.

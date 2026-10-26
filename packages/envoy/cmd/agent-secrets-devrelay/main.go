@@ -30,6 +30,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/sjawhar/envoy/internal/redact"
 )
 
 const exitUsageError = 2
@@ -154,9 +156,11 @@ func (c *apiClient) do(ctx context.Context, method, path string, body any) ([]by
 		}
 		reader = bytes.NewReader(b)
 	}
+	// Each error naming the URL names it through redact.Error, so no credential the broker's URL
+	// carries prints.
 	req, err := http.NewRequestWithContext(ctx, method, c.base+path, reader)
 	if err != nil {
-		return nil, err
+		return nil, redact.Error(err)
 	}
 	req.Header.Set("Authorization", "Bearer "+c.token)
 	if body != nil {
@@ -164,7 +168,7 @@ func (c *apiClient) do(ctx context.Context, method, path string, body any) ([]by
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, redact.Error(err)
 	}
 	defer resp.Body.Close()
 	raw, err := io.ReadAll(resp.Body)

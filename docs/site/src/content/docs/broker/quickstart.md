@@ -48,9 +48,10 @@ demo-read-token-value
 
 That line is why a reader never has to guess which store answered: another secrets CLI on the same
 machine can hold a different value under the same name, and every `agent-secrets` answer and
-refusal names its own broker and store. The line lands in the command's own output, which is
-often quoted, so it names no host, account or project; `agent-secrets self` names the broker's
-host and the store's account and region.
+refusal names its own broker and the kind of its store. These lines land in the agent's own
+output, which is often quoted, so none names the broker's host or the store's account, region or
+project; `agent-secrets secret show`, which a person runs under their own cloud sign-in, names the
+account or project.
 
 When it needs a person's approval, `agent-secrets` says so, with the request's id, where it was
 made, who approves it, and where (the request's Dispatch page when `AGENT_SECRETS_APPROVE_URL`
@@ -59,7 +60,7 @@ names Dispatch's address, otherwise Credential requests in the Dispatch Inbox), 
 
 ```console
 $ agent-secrets DEMO_API_KEY --reason "Deploy the example service" -- ./deploy.sh
-agent-secrets: request 0eaf43c4-dea5-4d41-8798-c25f6be7d811 to the broker at secrets.internal.example (AWS Secrets Manager account 111122223333 in us-east-1) is waiting for approval; waiting up to 30m0s
+agent-secrets: request 0eaf43c4-dea5-4d41-8798-c25f6be7d811 to the broker AGENT_SECRETS_URL names (AWS Secrets Manager) is waiting for approval; waiting up to 30m0s
 agent-secrets: waiting for ada@example.com to approve it under Credential requests in their Dispatch Inbox
 ```
 
@@ -111,8 +112,8 @@ deploying with a 18-character key
 
 The grant outlives the command: it lasts until the session ends, unless the agent asked for less
 with `--ttl`. Meanwhile the same session asking for exactly the same secrets gets it again without
-asking anyone; `agent-secrets self` lists the session's live grants, and the broker and store they
-are at:
+asking anyone; `agent-secrets self` lists the session's live grants, and the broker and kind of
+store they are at:
 
 ```console
 $ agent-secrets self
@@ -120,7 +121,7 @@ enrollment_id: 2b8627f4-9a2a-4c12-85bf-910144bc0b5c
 kind: session
 operator: ada@example.com
 lease_expires_at: 2026-10-03T03:36:40Z
-source: the broker at secrets.internal.example (AWS Secrets Manager account 111122223333 in us-east-1)
+source: the broker AGENT_SECRETS_URL names (AWS Secrets Manager)
 grant: f5167d29-1789-4719-8e8c-9aec6f1229e7 (request ce11549a-ab03-4a13-95cf-896961c36fc0, until this session ends)
 grant: be34ed2a-78e2-4457-9a75-71283a87c16b (request 7db349e6-ad3c-4f40-86d7-c6a38e899306, until this session ends)
 ```
@@ -134,7 +135,7 @@ From a session with no live grant of `DEMO_API_KEY` (a new session, or one that 
 
 ```console
 $ agent-secrets DEMO_API_KEY --reason "Deploy the example service" -- ./deploy.sh
-agent-secrets: request 2375f92d-bab0-4123-a0cb-d139c98de73c to the broker at secrets.internal.example (AWS Secrets Manager account 111122223333 in us-east-1) was denied
+agent-secrets: request 2375f92d-bab0-4123-a0cb-d139c98de73c to the broker AGENT_SECRETS_URL names (AWS Secrets Manager) was denied
 ```
 
 A request still undecided when `--wait` runs out exits 75 and runs nothing; a name the broker does
@@ -142,7 +143,7 @@ not serve is refused at once, naming the broker it asked:
 
 ```console
 $ agent-secrets NO_SUCH_SECRET -- true
-agent-secrets: no agent secret has this name (UNKNOWN_SECRET); asked the broker at secrets.internal.example (AWS Secrets Manager account 111122223333 in us-east-1)
+agent-secrets: no agent secret has this name (UNKNOWN_SECRET); asked the broker AGENT_SECRETS_URL names (AWS Secrets Manager)
 ```
 
 [Troubleshooting](/legion/broker/guides/troubleshooting/) lists every refusal and what to do about
