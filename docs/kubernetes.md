@@ -2375,14 +2375,17 @@ architect, planner, implementer, tester, reviewer, merger), named for its role:
    refuses the pod's token, names another repository, or streams history that does not verify
    fails the fetch, naming why, and nothing is cloned from GitHub instead, so the cache's own first
    clone is the one full download of the repository ([The repository cache](#the-repository-cache)).
-   A retry of the fetch in the same pod, whose disk already holds the feed, fetches the delta into
-   it alone (`the feed holds <owner>/<repo> already: …`), after removing every git lock file a
-   fetch killed mid-update left in the feed and every partial pack (`objects/pack/tmp_*`) a
-   transfer killed mid-pack left there, each logged with its age, and after deleting every branch
-   outside the delta that GitHub no longer lists or has moved, each logged with its reason, as a
-   fresh feed's fetch does too (below, [The repository cache](#the-repository-cache)): the kubelet
-   retries a failed init container on the pod it failed in, and so on that pod's own disk, where a
-   pod created now starts on an empty disk and fills its feed whole.
+   A fresh feed is filled beside its final path and renamed into place only once the stream, its
+   verification and the delta have all succeeded, so the disk holds a whole and current feed or
+   none. A retry of the fetch in the same pod that does find a feed there fetches the delta into it
+   alone (`the feed holds <owner>/<repo> already: …`), after removing every git lock file a fetch
+   killed mid-update left in the feed and every partial pack (`objects/pack/tmp_*`) a transfer
+   killed mid-pack left there, each logged with its age, and after deleting every branch outside
+   the delta that GitHub no longer lists or has moved, each logged with its reason, as a fresh
+   feed's fetch does too (below, [The repository cache](#the-repository-cache)). Such a retry is
+   rare: the kubelet retries a failed init container on the pod it failed in, but the daemon reads
+   that first failure (`failedInit`, `observe.go`) and replaces the pod within seconds, and a pod
+   created anew starts on an empty disk and fills its feed whole.
    It takes an existing feed only in the shape the
    fetch and Git maintenance write: no symlink anywhere, its owner directory included; no gitfile;
    no hook but git's samples; a configuration holding only the keys git's bare init and clone and
@@ -2403,9 +2406,8 @@ architect, planner, implementer, tester, reviewer, merger), named for its role:
    default branch of <owner>/<repo> is now <name>, which this fetch did not bring: HEAD stays at
    <ref> until a fetch brings it`). Once the fetch may start — at once, or once the cache is ready
    — the cache's stream and its verification share one 30-minute bound (`workspace.FetchTimeout`),
-   each given what remains of it, and the delta from GitHub has a 30-minute bound of its own,
-   started once the verified stream has been moved into the feed, so a fetch killed in the delta
-   leaves the stream for the next one. The fetch's waits, transfers and checks end within 100
+   each given what remains of it, and the delta from GitHub has a 30-minute bound of its own, so a
+   slow stream never leaves the delta minutes to run in. The fetch's waits, transfers and checks end within 100
    minutes (`workspace.FetchBudget`) however long it waited, and the few local
    git commands around them take moments; a step with nothing left fails the fetch, naming the
    bound. Each transfer from GitHub is tried again up to four times after a transient failure,
@@ -2430,7 +2432,9 @@ architect, planner, implementer, tester, reviewer, merger), named for its role:
    it, and logs each with its path and age (`RemoveStaleGitLocks`,
    `internal/workspace/stalelock.go`): the kubelet retries a failed init container on the pod it
    failed in, so a first attempt killed mid-fetch leaves its locks on the same disk the retry
-   works on, and every later write of a locked file fails on it. No process can hold one when the
+   works on, and every later write of a locked file fails on it — when the retry runs before the
+   daemon replaces the pod, which it does within seconds of reading the failure (see
+   `workspace-fetch` above). No process can hold one when the
    retry runs, since no role container of the pod has started and no other pod mounts the disk.
    Another worktree entry of the clone keeps its locks; a lock it cannot remove,
    and a clone whose `.git` or `.git/worktrees` is a symlink (git never makes either one, and it

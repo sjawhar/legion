@@ -82,37 +82,32 @@ type FetchReport struct {
 // repository cache's process (repocache), whose volume is its own. It reaches GitHub as the tmux
 // runtime's Source does, so the token's holders share one credential rule.
 //
-// A feed that holds the repository already — the issue volume's feed on a relaunch, the cache's
-// clone at each refresh — has the delta fetched into it from GitHub, once the locks a killed fetch
-// left are gone (RemoveStaleFeedLocks). A feed that does not is filled in a temporary sibling, its
-// garbage collection turned off (feedConfiguration), and renamed into place once what fills it
-// succeeded, so the feed's repository is either whole or absent. With a cache named, it comes from
-// the cache alone: Fetch waits for the cache to be ready (waitForCache), unpacks its tar
-// (unpackCache), verifies it (verifyCache), moves it into the feed, and only then fetches from
-// GitHub, by name, the default branch GitHub names and the issue's recorded default, and the
-// Legion issue branches, which is what the issue's clone is made from, after deleting every other
-// branch that is not exactly GitHub's tip (pruneToGitHub, fetchInto); a
-// cache that is not ready within CacheWaitTimeout, or whose tar a feed does not take, fails the
-// fetch, and nothing is cloned from GitHub instead, so the cache's own first clone is the one full
-// download of the repository. With none, the feed is cloned bare from GitHub, or has every branch
-// fetched into it and the ones GitHub deleted pruned: what the cache's own process does. Provision
-// then clones the shared clone from the feed with no credential.
-//
-// The feed moves into place before the delta so that a fetch killed in the delta leaves the
-// cache's stream on the pod's disk: the kubelet's retry of this init container, on the same pod and
-// so the same disk, finds the repository and asks GitHub for the delta alone. Nine of one
-// deployment's issue pods died in the delta on 2026-10-26, and each new attempt threw away a
-// verified 2 GB stream and began again (sjawhar/legion#2235); a pod created anew still starts on an
-// empty disk and streams the cache whole. The feed it leaves is a whole repository, no further
-// behind GitHub than the cache is, and provisioning never sees it: `workspace-init provision` runs
-// only after this container exits 0.
+// A feed that holds the repository already — the cache's clone at each refresh, or an issue pod's
+// feed when the kubelet retries its fetch container in the same pod — has the delta fetched into
+// it from GitHub, once the locks and partial packs a killed fetch left are gone
+// (RemoveStaleFeedLocks). A feed that does not is filled in a temporary sibling, its garbage
+// collection turned off (feedConfiguration), and renamed into place once everything that fills it
+// succeeded, so the feed's repository is whole and current, or absent. With a cache named, it comes
+// from the cache alone: Fetch waits for the cache to be ready (waitForCache), unpacks its tar
+// (unpackCache), verifies it (verifyCache), then fetches from GitHub, by name, the default branch
+// GitHub names and the issue's recorded default, and the Legion issue branches, which is what the
+// issue's clone is made from, after deleting every other branch that is not exactly GitHub's tip
+// (pruneToGitHub, fetchInto); a cache that is not ready within CacheWaitTimeout, or whose tar a
+// feed does not take, fails the fetch, and nothing is cloned from GitHub instead, so the cache's
+// own first clone is the one full download of the repository. With none, the feed is cloned bare
+// from GitHub, or has every branch fetched into it and the ones GitHub deleted pruned: what the
+// cache's own process does. Provision then clones the shared clone from the feed with no
+// credential.
 //
 // Each size-following stage of a fetch gets FetchTimeout of its own, and none starts past the one
 // it is in: from the cache, the stream and its verification share one and the delta from GitHub
-// has another; without a cache, the clone or fetch from GitHub has one. So the fetch's waits, transfers and checks end
-// within FetchBudget, however long it waited on the cache; the few local
-// git commands around them (reading refs, writing the feed's configuration) keep CommandTimeout
-// each and take moments. Every attempt of a transfer from GitHub reads
+// has another; without a cache, the clone or fetch from GitHub has one. So the fetch's waits,
+// transfers and checks end within FetchBudget, however long it waited on the cache, and a slow
+// stream never leaves the delta minutes to run in: nine of one deployment's issue pods died in the
+// delta on 2026-10-26, the stream and its verification having used most of the one bound they
+// then shared (sjawhar/legion#2235). The few local git commands around them (reading refs, writing
+// the feed's configuration) keep CommandTimeout each and take moments. Every attempt of a transfer
+// from GitHub reads
 // the provisioning token anew as it starts (FetchRequest.Token, fetchCredential.renew), so it
 // presents the token as its file stands then, not as it stood when the fetch began. A transfer
 // from GitHub that fails transiently (transientCloneFailure) is run again after the next of
@@ -211,26 +206,25 @@ func Fetch(ctx context.Context, run Runner, request FetchRequest) (FetchReport, 
 		return FetchReport{}, fmt.Errorf("fill the feed from the repository cache %s: %w", request.CacheURL, err)
 	}
 	report.CacheBytes, report.CacheDuration, report.VerifyDuration = streamed, verifying.Sub(started), request.Clock.Now().Sub(verifying)
-	if err := settleFeed(ctx, run, staging, feed); err != nil {
-		return FetchReport{}, err
-	}
 	deadline := request.Clock.Now().Add(FetchTimeout)
-	narrowed, heads, err := deltaBranches(ctx, run, request, feed, held, deadline)
+	narrowed, heads, err := deltaBranches(ctx, run, request, staging, held, deadline)
 	if err != nil {
 		return FetchReport{}, err
 	}
-	if err := pruneToGitHub(ctx, run, request, feed, narrowed, heads); err != nil {
+	if err := pruneToGitHub(ctx, run, request, staging, narrowed, heads); err != nil {
 		return FetchReport{}, err
 	}
-	if err := report.fromGitHub(ctx, run, request, fetchInto(feed, request.Repo, narrowed), feed, held, deadline); err != nil {
+	if err := report.fromGitHub(ctx, run, request, fetchInto(staging, request.Repo, narrowed), staging, held, deadline); err != nil {
+		return FetchReport{}, err
+	}
+	if err := settleFeed(ctx, run, staging, feed); err != nil {
 		return FetchReport{}, err
 	}
 	return report, credential.remove()
 }
 
 // settleFeed writes the feed repository's own configuration into staging and moves it to feed,
-// where the next fetch of this pod, or of the pod a killed one is replaced by, finds the
-// repository and asks GitHub for its delta alone.
+// once what fills it has succeeded, so the feed's repository is whole and current, or absent.
 func settleFeed(ctx context.Context, run Runner, staging, feed string) error {
 	if err := feedConfiguration(ctx, run, staging); err != nil {
 		return err
