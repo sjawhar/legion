@@ -2,16 +2,48 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-393",
-  "completed": "2026-10-26T00:03:30Z",
-  "headTested": "55eb49eb71c11bf1b4f5c05566a01a04204ffa78",
-  "round": 2,
+  "completed": "2026-10-26T00:59:30Z",
+  "headTested": "f29797a6693cd2e99908e95cd0e5b9012bfb6e90",
+  "round": 3,
   "implementerProof": {
     "verdict": "verified",
-    "how": "Drove the same surface independently with my own seed and databases: 2,000 comments inserted with triggers off plus the 50 dense CJK comments at boot (proof 1), a misnamed deployment then the right one (proof 2), and the per-call bytes of the 50 CJK comments under the head's binary and under the pre-fix binary (proof 3); each reproduced the implementer's observation, the byte counts exactly (17 calls, at most 3 bodies and 287,988 bytes; pre-fix 1 call of 50 bodies, 4,799,720 bytes)."
+    "how": "Drove the same surface independently: my own 0116 database built through main's binary, with dead and Bedrock-embedded rows. The head's binary on Bedrock left both dead rows dead under us.cohere.embed-v4:0 with no canary; on Azure it re-admitted them once and reached 8/8 current. The pre-fix binary on a copy recorded no dead_model and counted them foreign. This reproduces both proof entries."
   },
   "failed": 0,
   "failures": [],
   "proof": [
+    {
+      "criterion": "Bedrock stays today's behaviour for a deployment that sets nothing new: a row dead before this release stays dead (review round 1, finding 2)",
+      "surface": "main's envoy-dispatch (fork point f2c17ded) built a 0116 database (Postgres 17.11 + pgvector 0.8.0, issue pod) through its API: project TST, 5 issues, 3 comments. SQL then wrote the old queue's state: 6 Bedrock vectors (model us.cohere.embed-v4:0) and TST-4 plus one comment dead at 10 confirmed failures / 12 attempts. The head's binary booted on copies of it",
+      "command": "serve.sh EMBED_MODE=custom EMBED_ENV=AWS_REGION=us-east-1 (no AWS credentials) BIN=envoy-dispatch built at f29797a6 DB=r3a; curl -H 'Authorization: Bearer e2e-token' …/api/v1/search/coverage; psql select dead, dead_model, confirmed_failures, attempt_count from embeddings where dead",
+      "observed": "0117 recorded dead_model us.cohere.embed-v4:0 on both dead rows; the pass logged 'coverage pass identity=us.cohere.embed-v4:0 … foreignDeadReadmitted=0 identityStepsSkipped=false items=8 current=5 lacking=1 failed=2', with no canary for it and no WARN (the only errors are TST-5's own systemic failures without credentials); both rows stayed dead at 10/12; coverage place bedrock, failed 2",
+      "headSha": "f29797a6693cd2e99908e95cd0e5b9012bfb6e90",
+      "negativeControl": "the pre-fix binary (55eb49eb71c1) on copy r3b, same settings → dead_model null on both rows, then the WARN 'coverage pass left other identities' vectors and dead rows in place … foreignDeadLeft=2' after a Bedrock canary (it would re-admit them with working credentials)"
+    },
+    {
+      "criterion": "A row dead before 0117 is re-admitted once when the deployment switches to Azure",
+      "surface": "the same r3a database after the Bedrock run, head binary, DISPATCH_EMBEDDER=azure keyless against the live embed-v-4-0 deployment",
+      "command": "serve.sh EMBED_MODE=azure DB=r3a; coverage route; psql group by kind, model, dead, dead_model, counters; a second boot on the same database",
+      "observed": "'foreignVectorsDropped=5 … foreignDeadReadmitted=2 identityStepsSkipped=false'; 15 s later coverage items 8 current 8 lacking 0 failed 0, every row under the Azure identity with counters 0; the second boot: dropped 0, readmitted 0, 8/8 current",
+      "headSha": "f29797a6693cd2e99908e95cd0e5b9012bfb6e90",
+      "negativeControl": "the Bedrock boot on the same rows just before → foreignDeadReadmitted=0, both rows dead"
+    },
+    {
+      "criterion": "Azure's successful answer is decoded under a 16 MiB cap; past it the call is refused naming the cap and none of the body (review hardening item)",
+      "surface": "the head's binary with DISPATCH_AZURE_EMBED_ENDPOINT=https://127.0.0.1:9443/models (key form), a throwaway Python TLS server with a self-signed certificate (SSL_CERT_FILE) answering every POST 200 with a 17 MiB valid-JSON body; then the live deployment",
+      "command": "serve.sh EMBED_MODE=custom (DISPATCH_EMBEDDER=azure, the local endpoint, KEY_FILE, TPM 100000) EXTRA_ENV=SSL_CERT_FILE=… DB=r3c; GET /api/v1/search?q=faucet&project=TST; coverage route; grep the log; on the live deployment, 192 short comments pending on copy r3e, grouped by embedded_at",
+      "observed": "every background call and the canary failed 'embed: azure response exceeds 16777216 bytes', judged systemic, so no row died (TST-5 attempt_count 3, confirmed_failures 0); search 200 in 0.53 s with degraded embedder_unavailable; 0 log lines carry the body; process RSS 182 MB. Live: 2 calls of 96 texts each, 287/287 current, no error",
+      "headSha": "f29797a6693cd2e99908e95cd0e5b9012bfb6e90",
+      "negativeControl": "the pre-fix binary (55eb49eb71c1) against the same 17 MiB body → decoded it whole and failed only on 'azure returned 0 embeddings for 1 texts'"
+    },
+    {
+      "criterion": "Contract change census, entries a person invokes: the gcp:Dispatch Azure input refusals, the boot refusals, the removed backfill-embeddings",
+      "surface": "pulumi preview (Pulumi CLI 3.268.0, local file backend) of a YAML program with one envoy-infra:gcp:Dispatch resource, plugin pulumi-resource-envoy-infra built at the head; the head's envoy-dispatch",
+      "command": "pulumi preview --non-interactive for four programs (bothcreds, noendpoint, noquota, good); serve.sh with DISPATCH_AZURE_TENANT_ID only, DISPATCH_EMBEDDER=Azure, azure with both credentials; envoy-dispatch backfill-embeddings",
+      "observed": "bothcreds: 'azureEmbedKeySecret is set with azureTenantId or azureClientId: the key and keyless credential forms are exclusive, so set exactly one'; noendpoint: 'azureEmbedEndpoint is required when azureTenantId is set'; noquota: 'azureEmbedTokensPerMinute is required when azureEmbedEndpoint is set', each 1 errored and nothing registered; boot: exit 1 naming the setting in all three; backfill-embeddings exit 2 'unknown subcommand'",
+      "headSha": "f29797a6693cd2e99908e95cd0e5b9012bfb6e90",
+      "negativeControl": "the good keyless shape → past the Azure checks, refused only for the program's missing gcp provider ('needs a \"gcp\" provider in its providers option'), the component's next check"
+    },
     {
       "criterion": "The server itself embeds everything it holds after boot, including items written before the embedding triggers existed, with no command run by a person (round 1's failure: the coverage pass refused while the scan loop holds a cursor)",
       "surface": "real envoy-dispatch built at 55eb49eb71c11bf1b4f5c05566a01a04204ffa78 on copies of the tester's round-1 database (Postgres 17.11 + pgvector 0.8.0 in the issue pod), DISPATCH_EMBEDDER=azure keyless (the pod's projected token exchanged at Entra) against the live embed-v-4-0 deployment",
@@ -101,6 +133,15 @@
       "negativeControl": "the old binary's backfill-embeddings fails on the new schema (person-run, removed with this release)"
     }
   ],
+  "ci": "code head 2bd38f8733e43435607f9d83926f951609eff2ab (f29797a6 plus its handoff): PR Title 40251184426 success, Docs 40251185149 success, typecheck success; Tests 40251184583, Legion Envoy and Contracts 40251184593, Worker Image 40251184603 in progress when read (not waited on, not re-run); 081799e3 is handoff-only (skip-checks)",
+  "round2": {
+    "headTested": "55eb49eb71c11bf1b4f5c05566a01a04204ffa78",
+    "implementerProof": {
+      "verdict": "verified",
+      "how": "Drove the same surface independently with my own seed and databases: 2,000 comments inserted with triggers off plus the 50 dense CJK comments at boot (proof 1), a misnamed deployment then the right one (proof 2), and the per-call bytes of the 50 CJK comments under the head's binary and under the pre-fix binary (proof 3); each reproduced the implementer's observation, the byte counts exactly (17 calls, at most 3 bodies and 287,988 bytes; pre-fix 1 call of 50 bodies, 4,799,720 bytes)."
+    },
+    "note": "round 2's proof entries (headSha 55eb49eb…) follow round 3's in proof"
+  },
   "round1": {
     "headTested": "2135849104505c182a700291ae8546ce8d0843fb",
     "failures": [
@@ -116,8 +157,8 @@
     ],
     "note": "round 1's proof entries (headSha 2135849104505c182a700291ae8546ce8d0843fb) follow round 2's in proof; this round's diff touches only embedqueue's Run and coverage pass, the Azure byte budget and their docs, so they stand"
   },
-  "ci": "Tests 40235645045, PR Title 40235645075, Legion Envoy and Contracts 40235645038, Docs 40235645041, Worker Image 40235645108 — all success at 55eb49eb71c11bf1b4f5c05566a01a04204ffa78 (gh run list --commit); not re-run",
   "risks": [
-    "round 1's risk 3 stands as documented and accepted: EstimateTokens under-counts dense text about 3.5x, so background pacing of dense text can pass the Azure quota and meet 429s, which the queue retries as throttles; not exercised against a full quota here"
+    "round 1's risk 3 stands as documented and accepted: EstimateTokens under-counts dense text about 3.5x, so background pacing of dense text can pass the Azure quota and meet 429s, which the queue retries as throttles; not exercised against a full quota here",
+    "A row the release before 0117 confirms dead during the roll records no dead_model, so a Bedrock deployment re-admits it once (documented in 0117 and the README); not driven"
   ]
 }
