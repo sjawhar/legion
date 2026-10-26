@@ -15527,5 +15527,27 @@ describe("messages missed while the subscription was down", () => {
       // A BTW never falls back to a steering card that starts a turn.
       expect(restarted.session.cards("dispatch-replay-btw-answer-cut")).toHaveLength(0);
     });
+
+    test("one the session never received live reaches replay as at most one card that starts no turn", async () => {
+      const model = new StreamModel();
+      let sideTurns = 0;
+      const { replies, session } = await bootBTW("replay-btw-never-live", model, async () => {
+        sideTurns += 1;
+        return { replyText: "late answer" };
+      });
+      // Published while the session's subscription was down (or its process stopped, or killed
+      // between the frame's arrival and its record): only the stream holds it.
+      model.store(session.agentSubject, targetedDispatchEnvelope("btw", "replay-btw-never-live"));
+      await session.reconnect();
+      await session.tick();
+
+      const cards = session.cards("dispatch-replay-btw-never-live");
+      expect(cards.length).toBeLessThanOrEqual(1);
+      for (const card of cards) {
+        expect(card.options).not.toMatchObject({ triggerTurn: true });
+      }
+      expect(sideTurns).toBe(0);
+      expect(replies).toHaveLength(0);
+    });
   });
 });
