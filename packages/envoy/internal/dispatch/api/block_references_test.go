@@ -891,7 +891,8 @@ func TestAPinPastEveryVersionNumberAnswers404(t *testing.T) {
 // A block reference whose target id, `<KEY>/<slug>#<block id>`, is exactly text.MaxTargetBytes
 // long is a reference the graph holds: a comment citing it and a document citing it are written,
 // and the block lists both. The name is incompressible, so no index holds it by compressing it.
-// One byte more names nothing, so the API answers 400 INVALID_REFERENCE for it.
+// One byte more names no indexed target in text, but a route reads the block it names whatever
+// its length: the document holds no block `xy`, so that is 404 NOT_FOUND.
 func TestABlockReferenceAtTheTargetBoundIsWrittenAndRead(t *testing.T) {
 	_, handler, _ := browserDocumentService(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Cites a block at the target bound", "Context paragraph.\n")
@@ -929,8 +930,8 @@ func TestABlockReferenceAtTheTargetBoundIsWrittenAndRead(t *testing.T) {
 		t.Fatalf("links to the block = %#v, want the comment's and the citing document's block's", edges)
 	}
 	for _, direction := range []string{"to", "from"} {
-		if read := graphRequest(t, handler, url.Values{direction: {block + "y"}}); read.Code != http.StatusBadRequest || responseCode(t, read) != "INVALID_REFERENCE" {
-			t.Fatalf("?%s= a block one byte past the bound: status=%d body=%.400s, want 400 INVALID_REFERENCE", direction, read.Code, read.Body.String())
+		if read := graphRequest(t, handler, url.Values{direction: {block + "y"}}); read.Code != http.StatusNotFound || responseCode(t, read) != "NOT_FOUND" {
+			t.Fatalf("?%s= a block no version holds, one byte past the bound: status=%d body=%.400s, want 404 NOT_FOUND", direction, read.Code, read.Body.String())
 		}
 	}
 }

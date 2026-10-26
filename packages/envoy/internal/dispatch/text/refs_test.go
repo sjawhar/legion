@@ -210,11 +210,11 @@ func TestExtractReadsADashboardPageBlockFragment(t *testing.T) {
 	}
 }
 
-// A block reference names a block only while its target id, `<owner>/<slug>#<block id>` as
-// refs.ToID writes it, holds at most MaxTargetBytes, the id counted in its decoded bytes: one
+// A block reference names a block in text only while its target id, `<owner>/<slug>#<block id>`
+// as TargetID writes it, holds at most MaxTargetBytes, the id counted in its decoded bytes: one
 // byte more and the `dispatch://` text is no reference, and a dashboard page whose fragment names
 // that block is its document. The bound is the whole target's, for an issue's document and a
-// project's alike.
+// project's alike. A request naming the block (ParseRef) reads it whatever its length.
 func TestABlockReferenceIsBoundedByItsWholeTargetID(t *testing.T) {
 	const server = "https://dispatch.test"
 	const id, encoded = "é", "%C3%A9"
@@ -248,17 +248,23 @@ func TestABlockReferenceIsBoundedByItsWholeTargetID(t *testing.T) {
 				if got := Extract(document.page+test.slug+"#b-"+encoded, server); !reflect.DeepEqual(got, []Ref{page}) {
 					t.Errorf("the dashboard page cites %#v; want %#v", got, page)
 				}
+				for _, request := range []string{document.reference + test.slug + "#b-" + encoded, document.page + test.slug + "#b-" + encoded} {
+					if got, ok := ParseRef(request, server); !ok || got != block {
+						t.Errorf("ParseRef(%.60s…) = %#v, %t; want the block", request, got, ok)
+					}
+				}
 			})
 		}
 	}
 }
 
-// Every reference names its target only while the target id refs.ToID writes for it holds at most
-// MaxTargetBytes: an issue's key, a document's `<owner>/<slug>` or `agent/<session id>/<slug>`, an
-// item's id (counted decoded) and a component's `<project>/<id>`. One character more (a byte, or
-// the two of a decoded `é`) and the `dispatch://` text is no reference and the dashboard page is
-// only a URL, whatever part of it is long: the issue number, the slug, the session id or the item
-// id, in the page's path or query.
+// Every reference names its target in text only while the target id TargetID writes for it holds
+// at most MaxTargetBytes: an issue's key, a document's `<owner>/<slug>` or
+// `agent/<session id>/<slug>`, an item's id (counted decoded) and a component's `<project>/<id>`.
+// One character more (a byte, or the two of a decoded `é`) and the `dispatch://` text is no
+// reference and the dashboard page is only a URL, whatever part of it is long: the issue number,
+// the slug, the session id or the item id, in the page's path or query. A request naming the
+// target (ParseRef) reads it whatever its length.
 func TestEveryReferenceIsBoundedByItsTargetID(t *testing.T) {
 	const server = "https://dispatch.test"
 	for _, test := range []struct {
@@ -307,6 +313,9 @@ func TestEveryReferenceIsBoundedByItsTargetID(t *testing.T) {
 			if got := Extract(test.reference+past+test.referenceTail, server); len(got) != 0 {
 				t.Errorf("the dispatch:// reference one byte past the bound cites %.200v; want nothing", got)
 			}
+			if got, ok := ParseRef(test.reference+past+test.referenceTail, server); !ok || got != test.ref(past) {
+				t.Errorf("ParseRef of the dispatch:// reference one byte past the bound = %.200v, %t; want %.200v", got, ok, test.ref(past))
+			}
 			if test.page == "" {
 				return
 			}
@@ -316,6 +325,9 @@ func TestEveryReferenceIsBoundedByItsTargetID(t *testing.T) {
 			page := test.page + past + test.pageTail
 			if got, want := Extract(page, server), []Ref{{Kind: "url", ID: page}}; !reflect.DeepEqual(got, want) {
 				t.Errorf("the dashboard page one byte past the bound cites %.200v; want only its URL", got)
+			}
+			if got, ok := ParseRef(page, server); !ok || got != test.ref(past) {
+				t.Errorf("ParseRef of the dashboard page one byte past the bound = %.200v, %t; want %.200v", got, ok, test.ref(past))
 			}
 		})
 	}

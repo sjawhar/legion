@@ -2,7 +2,6 @@ import {
   dispatchDocumentSubject,
   dispatchIssueSubject,
   parseBlockFragment,
-  referenceTargetFits,
 } from "@legion/contracts";
 
 /**
@@ -93,7 +92,7 @@ export interface ParsedDispatchRef {
  */
 function parseBlockRef(document: string, fragment: string): ParsedDispatchRef | null {
   const target = parseBlockFragment(fragment);
-  const parsed = parseRef(document);
+  const parsed = parseDispatchRef(document);
   if (
     target === undefined ||
     parsed === null ||
@@ -113,43 +112,11 @@ function parseBlockRef(document: string, fragment: string): ParsedDispatchRef | 
   };
 }
 
-/**
- * The target id the server's graph stores an edge to `ref` under (`refs.ToID`): a document's
- * `<owner>/<slug or id>` (`spec` for an issue's spec), a block's `#<block id>` after its
- * document's, an ask's, a comment's or a message's id as the server decodes it, and the issue's
- * key for the issue, its log and its children.
- */
-function refTarget(ref: ParsedDispatchRef): string {
-  const owner = ref.owner.kind === "issue" ? ref.owner.issue : ref.owner.project;
-  switch (ref.kind) {
-    case "spec":
-    case "artifact":
-      return `${owner}/${ref.id}`;
-    case "block":
-      return `${owner}/${ref.id}#${ref.block}`;
-    case "ask":
-    case "comment":
-    case "message":
-      try {
-        return decodeURIComponent(ref.id);
-      } catch {
-        return ref.id;
-      }
-    default:
-      return owner;
-  }
-}
-
-/** `ref` as the issue or project item it names, or null for text that is no such reference, or
- *  one whose target id does not fit (`refTarget`, `referenceTargetFits`), as the server reads it.
- *  An agent conversation's upload (`dispatch://agent/...`) is `parseAgentArtifactRef`'s. */
+/** `ref` as the issue or project item it names, or null for text that is no such reference. A
+ *  tool argument is a read request, so the server's target bound, which decides only what text
+ *  indexes, is no part of this: a document of any name is read by its own reference. An agent
+ *  conversation's upload (`dispatch://agent/...`) is `parseAgentArtifactRef`'s. */
 export function parseDispatchRef(ref: string): ParsedDispatchRef | null {
-  const parsed = parseRef(ref);
-  return parsed !== null && referenceTargetFits(refTarget(parsed)) ? parsed : null;
-}
-
-/** `parseDispatchRef` before it bounds the target id. */
-function parseRef(ref: string): ParsedDispatchRef | null {
   const hash = ref.indexOf("#");
   if (hash !== -1 && ref.startsWith("b-", hash + 1)) {
     return parseBlockRef(ref.slice(0, hash), ref.slice(hash + 3));

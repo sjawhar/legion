@@ -359,29 +359,70 @@ func TestACommentCitingATargetPastTheBoundPosts(t *testing.T) {
 	}
 }
 
-// The API reads a reference by the grammar text is indexed by, so one whose target id is past
-// text.MaxTargetBytes is 400 INVALID_REFERENCE wherever a route parses one - the graph's ?to= and
-// ?from= and block-links' documents - while one at the bound is read: a comment no one wrote is
-// 404 NOT_FOUND there.
-func TestAReferencePastTheTargetBoundIsAnInvalidReference(t *testing.T) {
+// The target bound decides only what text indexes; a route reads the node its parameter names
+// whatever the length of its name. A document whose reference key is 2600 bytes - which the
+// head's uploads still create and main stored - is read by its own reference: ?to= lists the
+// comment anchored in it and, asked for by kind, its block's part_of edge, ?from= its attached_to
+// edge to its issue, its block is read by its block reference, and block-links reads it either
+// side. A comment no one wrote, its id past the bound, is 404 NOT_FOUND as any missing node is.
+func TestALongNamedDocumentIsReadByItsOwnReference(t *testing.T) {
 	_, handler, _ := browserDocumentService(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Reads long targets", "Context paragraph.\n")
-	atBound := "dispatch://" + issue.Key + "/comment/" + randomBlockID(t, text.MaxTargetBytes)
-	if read := graphRequest(t, handler, url.Values{"to": {atBound}}); read.Code != http.StatusNotFound || responseCode(t, read) != "NOT_FOUND" {
-		t.Fatalf("?to= a comment id at the bound: status=%d body=%.400s, want 404 NOT_FOUND", read.Code, read.Body.String())
+	// The slug of `<hex>.md` is `<hex>-md`, so the reference key `<key>/<hex>-md` is 2600 bytes.
+	name := randomBlockID(t, 2600-len(issue.Key+"/-md")) + ".md"
+	uploaded := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/artifacts", map[string]any{
+		"name": name, "content": boundCallout("x"),
+	}, "alice")
+	if uploaded.Code != http.StatusCreated {
+		t.Fatalf("upload the long-named document: status=%d body=%.400s", uploaded.Code, uploaded.Body.String())
 	}
-	longDocument := "dispatch://" + issue.Key + "/artifact/" + randomBlockID(t, text.MaxTargetBytes-len(issue.Key+"/")+1)
-	for _, reference := range []string{atBound + "a", longDocument, "dispatch://CORE/component/" + randomBlockID(t, text.MaxTargetBytes)} {
-		for _, direction := range []string{"to", "from"} {
-			if read := graphRequest(t, handler, url.Values{direction: {reference}}); read.Code != http.StatusBadRequest || responseCode(t, read) != "INVALID_REFERENCE" {
-				t.Fatalf("?%s= %.60s… one byte past the bound: status=%d body=%.400s, want 400 INVALID_REFERENCE", direction, reference, read.Code, read.Body.String())
+	artifact := decodeBody[struct {
+		Artifact model.Artifact `json:"artifact"`
+	}](t, uploaded).Artifact
+	if len(artifact.RefKey) != 2600 {
+		t.Fatalf("the reference key is %d bytes, want 2600", len(artifact.RefKey))
+	}
+	commented := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
+		"body": "A note on the long-named document.", "anchor": map[string]string{"artifact": artifact.Slug, "quote": "A note."},
+	}, "alice")
+	if commented.Code != http.StatusCreated {
+		t.Fatalf("comment on the long-named document: status=%d body=%.400s", commented.Code, commented.Body.String())
+	}
+	comment := decodeBody[model.Comment](t, commented)
+	document := "dispatch://" + issue.Key + "/artifact/" + artifact.Slug
+
+	hasEdge := func(edges []model.GraphEdge, kind, nodeKind, nodeID string) bool {
+		for _, edge := range edges {
+			if edge.Kind == kind && edge.Node.Kind == nodeKind && edge.Node.ID == nodeID {
+				return true
 			}
 		}
+		return false
+	}
+	in := graphEdges(t, handler, url.Values{"to": {document}})
+	if in.Node.Kind != "artifact" || in.Node.ID != artifact.ID || !hasEdge(in.Edges, "anchored_to", "comment", comment.ID) {
+		t.Fatalf("?to= the long-named document = node %s %.60q… edges %#v, want it with the comment anchored in it", in.Node.Kind, in.Node.ID, in.Edges)
+	}
+	if parts := graphEdges(t, handler, url.Values{"to": {document}, "kind": {"part_of"}}); !hasEdge(parts.Edges, "part_of", "block", artifact.RefKey+"#x") {
+		t.Fatalf("?to= the long-named document's part_of edges = %#v, want its block x", parts.Edges)
+	}
+	if out := graphEdges(t, handler, url.Values{"from": {document}}); !hasEdge(out.Edges, "attached_to", "issue", issue.Key) {
+		t.Fatalf("?from= the long-named document = %#v, want its attached_to edge to %s", out.Edges, issue.Key)
+	}
+	if block := graphEdges(t, handler, url.Values{"to": {document + "#b-x"}}); block.Node.Kind != "block" || block.Node.ID != artifact.RefKey+"#x" {
+		t.Fatalf("?to= a block of the long-named document = node %s %.60q…, want block x", block.Node.Kind, block.Node.ID)
 	}
 	spec := "dispatch://" + issue.Key + "/spec"
-	for _, query := range []url.Values{{"from": {longDocument}, "to": {spec}}, {"from": {spec}, "to": {longDocument}}} {
-		if read := blockLinksRequest(t, handler, query); read.Code != http.StatusBadRequest || responseCode(t, read) != "INVALID_REFERENCE" {
-			t.Fatalf("block-links %v naming a document past the bound: status=%d body=%.400s, want 400 INVALID_REFERENCE", query, read.Code, read.Body.String())
+	for _, query := range []url.Values{{"from": {document}, "to": {spec}}, {"from": {spec}, "to": {document}}} {
+		if read := blockLinksRequest(t, handler, query); read.Code != http.StatusOK {
+			t.Fatalf("block-links %.80v… naming the long-named document: status=%d body=%.400s, want 200", query, read.Code, read.Body.String())
+		}
+	}
+
+	missing := "dispatch://" + issue.Key + "/comment/" + randomBlockID(t, text.MaxTargetBytes+1)
+	for _, direction := range []string{"to", "from"} {
+		if read := graphRequest(t, handler, url.Values{direction: {missing}}); read.Code != http.StatusNotFound || responseCode(t, read) != "NOT_FOUND" {
+			t.Fatalf("?%s= a missing comment whose id is past the bound: status=%d body=%.400s, want 404 NOT_FOUND", direction, read.Code, read.Body.String())
 		}
 	}
 }

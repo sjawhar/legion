@@ -178,8 +178,8 @@ func TestABlockTargetAtTheGrammarsBoundIsStoredWhole(t *testing.T) {
 			if len(located) != 1 || located[0].Kind != "block" {
 				t.Fatalf("the reference at the bound parsed as %#v, want one block", located)
 			}
-			if id := ToID(located[0].Ref); len(id) != text.MaxTargetBytes {
-				t.Fatalf("ToID is %d bytes, want the bound %d", len(id), text.MaxTargetBytes)
+			if id := text.TargetID(located[0].Ref); len(id) != text.MaxTargetBytes {
+				t.Fatalf("TargetID is %d bytes, want the bound %d", len(id), text.MaxTargetBytes)
 			}
 			tx, err := database.Pool.Begin(ctx)
 			if err != nil {
@@ -256,8 +256,8 @@ func TestEveryTargetAtTheGrammarsBoundIsStoredWhole(t *testing.T) {
 		t.Fatalf("%d references at the bound parsed as %d", len(references), len(located))
 	}
 	for _, item := range located {
-		if id := ToID(item.Ref); len(id) != text.MaxTargetBytes {
-			t.Fatalf("ToID of a %s is %d bytes, want the bound %d", item.Kind, len(id), text.MaxTargetBytes)
+		if id := text.TargetID(item.Ref); len(id) != text.MaxTargetBytes {
+			t.Fatalf("TargetID of a %s is %d bytes, want the bound %d", item.Kind, len(id), text.MaxTargetBytes)
 		}
 	}
 	tx, err := database.Pool.Begin(ctx)
@@ -283,6 +283,73 @@ func TestEveryTargetAtTheGrammarsBoundIsStoredWhole(t *testing.T) {
 		if count != len(references) || shortest != text.MaxTargetBytes || longest != text.MaxTargetBytes {
 			t.Fatalf("%s holds %d edges of %d to %d bytes, want %d of %d", table, count, shortest, longest, len(references), text.MaxTargetBytes)
 		}
+	}
+}
+
+// Every kind of reference stores its edge under the id the graph names its target node by, the
+// one text.TargetID writes and the target bound counts: an issue's key; a document's own ref_key
+// as the artifacts row stores it, for an issue's spec and document, a project's document and an
+// agent's upload, a version making no difference; a block's `<ref_key>#<block id>` (the block's
+// node id), a pin making none; a component's `<project>/<id>` as graph_edges spells it; and an
+// ask's, a comment's or a message's id, decoded.
+func TestEveryTargetIDIsTheNodeIDTheGraphStores(t *testing.T) {
+	database := storetest.Open(t)
+	ctx := context.Background()
+	tx, err := database.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback(ctx)
+	createReferenceProject(t, tx, "CORE")
+	createReferenceIssue(t, tx, "CORE-1", "CORE")
+	refKey := func(owner, values string, args ...any) string {
+		t.Helper()
+		var key string
+		if err := tx.QueryRow(ctx, `insert into artifacts (`+owner+`, slug, name, kind, is_primary, created_by) values (`+values+`, 'doc', $3, '{"kind":"user","id":"alice"}') returning ref_key`, args...).Scan(&key); err != nil {
+			t.Fatalf("create artifact %v: %v", args, err)
+		}
+		return key
+	}
+	spec := refKey("issue_key, project_key", "$1, 'CORE', $2, $2", "CORE-1", "spec", true)
+	notes := refKey("issue_key, project_key", "$1, 'CORE', $2, $2", "CORE-1", "notes-md", false)
+	handbook := refKey("project_key", "$1, $2, $2", "CORE", "handbook-md", false)
+	shot := refKey("session_id", "$1, $2, $2", "01a1058e-f14f-7684-87eb-3dc885955551", "shot-png", false)
+	if spec != "CORE-1/spec" || notes != "CORE-1/notes-md" || handbook != "CORE/handbook-md" || shot != "agent/01a1058e-f14f-7684-87eb-3dc885955551/shot-png" {
+		t.Fatalf("the documents' ref_keys are %q, %q, %q and %q", spec, notes, handbook, shot)
+	}
+	const server, from = "https://dispatch.example", "00000000-0000-4000-8000-000000000000"
+	for _, test := range []struct{ reference, kind, node string }{
+		{"dispatch://CORE-1", "issue", "CORE-1"},
+		{"dispatch://CORE-1/spec", "artifact", spec},
+		{"dispatch://CORE-1/artifact/notes-md@v2", "artifact", notes},
+		{"dispatch://CORE/artifact/handbook-md", "artifact", handbook},
+		{"dispatch://agent/01a1058e-f14f-7684-87eb-3dc885955551/artifact/shot-png@v3", "artifact", shot},
+		{"dispatch://CORE-1/spec#b-ship%5Fit@v3", "block", spec + "#ship_it"},
+		{"dispatch://CORE-1/artifact/notes-md#b-x", "block", notes + "#x"},
+		{"https://dispatch.example/projects/CORE/documents/handbook-md#b-d%C3%A9", "block", handbook + "#dé"},
+		{"dispatch://CORE/component/api", "component", "CORE/api"},
+		{"dispatch://CORE-1/ask/a1", "ask", "a1"},
+		{"dispatch://CORE/artifact/handbook-md/ask/a2", "ask", "a2"},
+		{"dispatch://CORE-1/comment/c%3B1", "comment", "c;1"},
+		{"https://dispatch.example/issues/CORE-1/spec?comment=c2", "comment", "c2"},
+		{"dispatch://CORE-1/message/m1", "message", "m1"},
+	} {
+		t.Run(test.reference, func(t *testing.T) {
+			ref, ok := text.ParseRef(test.reference, server)
+			if !ok || ref.Kind != test.kind || text.TargetID(ref) != test.node {
+				t.Fatalf("%s parsed as %#v (%t), whose target id is %q; want a %s at %q", test.reference, ref, ok, text.TargetID(ref), test.kind, test.node)
+			}
+			if _, err := replaceRefs(ctx, tx, "comment", from, text.Extract("See "+test.reference+".", server), nil); err != nil {
+				t.Fatalf("write the reference: %v", err)
+			}
+			var stored []string
+			if err := tx.QueryRow(ctx, `select coalesce(array_agg(to_kind || ' ' || to_id), '{}') from refs where from_kind = 'comment' and from_id = $1`, from).Scan(&stored); err != nil {
+				t.Fatal(err)
+			}
+			if want := test.kind + " " + test.node; len(stored) != 1 || stored[0] != want {
+				t.Fatalf("refs stores %q, want only %q", stored, want)
+			}
+		})
 	}
 }
 

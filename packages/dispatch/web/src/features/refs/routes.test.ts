@@ -14,6 +14,7 @@ import {
   parseDispatchReference,
   parseInboxSearch,
   parseIssuePath,
+  parseNodeReference,
   parseProjectPath,
   pictureReference,
   referenceRouteFromHref,
@@ -36,6 +37,22 @@ test("artifact references normalize to the plural browser route", () => {
     throw new Error("artifact reference did not parse as an artifact route");
   }
   expect(buildIssuePath(route)).toBe(browserPath("issues/CORE-1/artifacts/design?v=3"));
+});
+
+// The target bound holds text alone: a long-named document's reference is no citation in text,
+// but the graph returns it as a node's own reference, and the dashboard opens and previews that
+// node by it, a block of it too.
+test("a long-named document's own reference is its node, though text past the bound cites nothing", () => {
+  const slug = "a".repeat(2683);
+  const document = `dispatch://CORE-1/artifact/${slug}`;
+  expect(parseDispatchReference(document)).toBeUndefined();
+  expect(parseNodeReference(document)).toEqual({ key: "CORE-1", kind: "artifact", slug });
+  expect(parseNodeReference(`${document}#b-p1`)).toEqual({
+    block: "p1",
+    key: "CORE-1",
+    kind: "artifact",
+    slug,
+  });
 });
 
 test("dispatch references reject plural artifact paths", () => {

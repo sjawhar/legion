@@ -160,8 +160,10 @@ func (s *server) blockReferenceNode(ctx context.Context, query refs.Query, ref t
 }
 
 // parseReferencesQuery turns ?to=|?from=, ?kind=, and ?since= into an edge query addressed the
-// way graph_edges stores the node: ToID for the to side (ref_key for artifacts), the item id
-// for the from side (the caller swaps an artifact's ref_key for its uuid).
+// way graph_edges stores the node: text.TargetID for the to side (ref_key for artifacts), the
+// item id for the from side (the caller swaps an artifact's ref_key for its uuid). The reference
+// is read by text.ParseRef, so a node is read whatever the length of its name: the target bound
+// decides only what text indexes, and a node no index holds an edge to simply has fewer edges.
 func parseReferencesQuery(r *http.Request, serverURL string) (refs.Query, text.Ref, error) {
 	values := r.URL.Query()
 	to, from := strings.TrimSpace(values.Get("to")), strings.TrimSpace(values.Get("from"))
@@ -172,12 +174,11 @@ func parseReferencesQuery(r *http.Request, serverURL string) (refs.Query, text.R
 	if from != "" {
 		raw, direction = from, "out"
 	}
-	located := text.ExtractAt(raw, serverURL)
-	if len(located) != 1 || located[0].Offset != 0 || located[0].Kind == "url" {
+	ref, ok := text.ParseRef(raw, serverURL)
+	if !ok {
 		return refs.Query{}, text.Ref{}, errorf(http.StatusBadRequest, "INVALID_REFERENCE", "%q is not a dispatch:// reference to an issue, document, block, ask, comment, message, or component", raw)
 	}
-	ref := located[0].Ref
-	query := refs.Query{Direction: direction, Kind: ref.Kind, ID: refs.ToID(ref)}
+	query := refs.Query{Direction: direction, Kind: ref.Kind, ID: text.TargetID(ref)}
 	if kinds := strings.TrimSpace(values.Get("kind")); kinds != "" {
 		for _, kind := range strings.Split(kinds, ",") {
 			kind = strings.TrimSpace(kind)

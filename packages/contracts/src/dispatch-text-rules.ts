@@ -23,24 +23,25 @@ export function isSessionId(value: string): boolean {
 }
 
 /**
- * The most UTF-8 bytes a reference's target id may hold: the id the server's graph stores the edge
- * under (`refs.ToID`), in Postgres B-tree keys of at most 2704 bytes. It is an issue's key, a
- * document's `<issue key or project>/<slug>` (`spec` for an issue's spec) or
+ * The most UTF-8 bytes a reference's target id may hold in text: the id the server's graph stores
+ * the edge under (`text.TargetID`), in Postgres B-tree keys of at most 2704 bytes. It is an
+ * issue's key, a document's `<issue key or project>/<slug>` (`spec` for an issue's spec) or
  * `agent/<session id>/<slug>`, an ask's, a comment's or a message's id (decoded), a component's
  * `<project>/<id>`, or a block's `<document's id>#<block id>`. The grammar bounds none of those
- * parts but a block id (MAX_BLOCK_ID_BYTES) and a project key, so a reference whose target id is
- * past this names nothing (`referenceTargetFits`), and a live document page whose fragment names a
- * block past it is its document. A document stored under a longer name is read and written all the
- * same; only a reference to it names nothing. Go's twin is `text.MaxTargetBytes`.
+ * parts but a block id (MAX_BLOCK_ID_BYTES) and a project key, so text citing a target whose id
+ * is past this cites nothing (`referenceTargetFits`), and a live document page whose fragment names
+ * a block past it is its document. The bound decides only what text indexes: a document stored
+ * under a longer name is read and written all the same, and a request naming it by its own
+ * reference reads it. Go's twin is `text.MaxTargetBytes`.
  */
 export const MAX_REFERENCE_TARGET_BYTES = 2048;
 
 /**
  * Whether `target`, a reference's target id as MAX_REFERENCE_TARGET_BYTES spells it, holds at most
- * that many UTF-8 bytes, as the server's `text.targetFits` counts it. The bytes are counted by code
- * point (a lone surrogate is the three of U+FFFD), not with TextEncoder: Bun 1.3's `encode` writes
- * a non-ASCII Latin-1 character of a string this long as one byte, so 2000 `a`s and an `é` come
- * to 2001.
+ * that many UTF-8 bytes, as the server's `text.targetFits` counts `text.TargetID`. The bytes are
+ * counted by code point (a lone surrogate is the three of U+FFFD), not with TextEncoder: Bun 1.3's
+ * `encode` writes a non-ASCII Latin-1 character of a string this long as one byte, so 2000 `a`s
+ * and an `é` come to 2001.
  */
 export function referenceTargetFits(target: string): boolean {
   let bytes = 0;

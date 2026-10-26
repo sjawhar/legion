@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { DISPATCH_HREF_REFERENCES, MAX_REFERENCE_TARGET_BYTES } from "@legion/contracts";
+import { DISPATCH_HREF_REFERENCES } from "@legion/contracts";
 
 import { dispatchRefFromUrl } from "../dispatch-execute";
 import { parseDispatchRef } from "../dispatch-owner";
@@ -58,27 +58,20 @@ test.each([
   expect(dispatchRefFromUrl(`${server}${href}`, server)).toBe(ref);
 });
 
-// A live document page names its block only while the block's target id `<owner>/<slug>#<block
-// id>` holds at most MAX_REFERENCE_TARGET_BYTES, as the server reads the page; one byte more and
-// the page names its document, for an issue's document and a project's alike. A page whose
-// document's own target id `<owner>/<slug>` is past the bound names nothing: the reference it
-// resolves to is one `parseDispatchRef` refuses.
+// A dashboard URL an agent passes is a read request, so it names what its page shows whatever the
+// length of its document's name: the page of a document whose slug is 2683 characters, which a
+// new upload's reference key still holds, is that document, a block on it is the block, and
+// `parseDispatchRef` reads each, for an issue's document and a project's alike.
 test.each([
   ["CORE-1", "/issues/CORE-1/artifacts/", "dispatch://CORE-1/artifact/"],
   ["CORE", "/projects/CORE/documents/", "dispatch://CORE/artifact/"],
-])("a %s document page is bounded by its block's whole target id", (owner, page, document) => {
+])("a long-named %s document's page is its reference", (_owner, page, document) => {
+  const slug = "a".repeat(2683);
+  const whole = dispatchRefFromUrl(`${server}${page}${slug}`, server);
+  expect(whole).toBe(`${document}${slug}`);
+  expect(parseDispatchRef(whole ?? "")).toMatchObject({ kind: "artifact", id: slug });
   // `é` is two bytes, written %C3%A9.
-  const atBound = "a".repeat(
-    MAX_REFERENCE_TARGET_BYTES - new TextEncoder().encode(`${owner}/#é`).length
-  );
-  expect(dispatchRefFromUrl(`${server}${page}${atBound}#b-%C3%A9`, server)).toBe(
-    `${document}${atBound}#b-%C3%A9`
-  );
-  expect(dispatchRefFromUrl(`${server}${page}${atBound}a#b-%C3%A9`, server)).toBe(
-    `${document}${atBound}a`
-  );
-  const longSlug = "a".repeat(MAX_REFERENCE_TARGET_BYTES - `${owner}/`.length + 1);
-  const longDocument = dispatchRefFromUrl(`${server}${page}${longSlug}#b-x`, server);
-  expect(longDocument).toBe(`${document}${longSlug}`);
-  expect(parseDispatchRef(longDocument ?? "")).toBeNull();
+  const block = dispatchRefFromUrl(`${server}${page}${slug}#b-%C3%A9`, server);
+  expect(block).toBe(`${document}${slug}#b-%C3%A9`);
+  expect(parseDispatchRef(block ?? "")).toMatchObject({ kind: "block", id: slug, block: "é" });
 });

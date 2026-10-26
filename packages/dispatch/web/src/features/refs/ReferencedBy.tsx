@@ -14,7 +14,7 @@ import { blockFragment, routeBlock } from "./block-reference";
 import { referenceTriggerProps } from "./RefPreview";
 import { referencesQuery } from "./reference-target";
 import type { DispatchReferenceRoute } from "./routes";
-import { buildReferencePath, parseDispatchReference } from "./routes";
+import { buildReferencePath, parseNodeReference } from "./routes";
 import { Timestamp } from "./Timestamp";
 
 const NODE_LABELS: Record<GraphEdge["node"]["kind"], string> = {
@@ -58,10 +58,11 @@ interface SourcePath {
   readonly route: DispatchReferenceRoute;
 }
 
-/** Where `reference` opens, with `block` (the block of a document that holds the mention) as its
- *  `#b-` fragment when the reference names no block of its own. */
+/** Where `reference`, a node's own reference as the graph returned it, opens - whatever the length
+ *  of its name - with `block` (the block of a document that holds the mention) as its `#b-`
+ *  fragment when the reference names no block of its own. */
 function referencePath(reference: string | undefined, block?: string): SourcePath | undefined {
-  const route = reference === undefined ? undefined : parseDispatchReference(reference);
+  const route = reference === undefined ? undefined : parseNodeReference(reference);
   if (route === undefined) {
     return undefined;
   }

@@ -254,11 +254,11 @@ function parseIssueReference(key: string, target: string | undefined): IssueRout
   };
 }
 
-/** The target id the server's graph stores a reference to `route` under (`refs.ToID`), which a
- *  reference names only while it fits (`referenceTargetFits`): an ask's, a comment's or a
- *  message's id, a document's `<key or project>/<slug>` (`spec` for an issue's spec) or
+/** The target id the server's graph stores a reference to `route` under, as Go's `text.TargetID`
+ *  writes it, which text cites only while it fits (`referenceTargetFits`): an ask's, a comment's
+ *  or a message's id, a document's `<key or project>/<slug>` (`spec` for an issue's spec) or
  *  `agent/<session id>/<slug>`, a block's `#<block id>` after its document's, and an issue's key
- *  for the issue and each of its tabs. */
+ *  for the issue and each of its tabs. A version or a pin is no part of it. */
 function routeTarget(route: DispatchReferenceRoute): string {
   const block = "block" in route && route.block !== undefined ? `#${route.block}` : "";
   switch (route.kind) {
@@ -279,16 +279,19 @@ function routeTarget(route: DispatchReferenceRoute): string {
   }
 }
 
-/** A `dispatch://` reference's route. One holding a control character names nothing, as the
- * server's `text.Extract` reads it, and so does one whose target id does not fit (`routeTarget`);
- * a fragment names a block (`parseBlockReference`, `withBlock`) or nothing. */
+/** A `dispatch://` reference's route as text cites it, which the server's `text.Extract` indexes:
+ * one holding a control character names nothing, and so does one whose target id does not fit
+ * (`routeTarget`); a fragment names a block (`parseBlockReference`, `withBlock`) or nothing. */
 export function parseDispatchReference(value: string): DispatchReferenceRoute | undefined {
-  const route = parseDispatchRoute(value);
+  const route = parseNodeReference(value);
   return route !== undefined && referenceTargetFits(routeTarget(route)) ? route : undefined;
 }
 
-/** `parseDispatchReference` before it bounds the target id. */
-function parseDispatchRoute(value: string): DispatchReferenceRoute | undefined {
+/** A node's own `dispatch://` reference - one the API returned for a node, or the dashboard wrote
+ * for one it shows - as its route, whatever the length of its target id: the bound
+ * `parseDispatchReference` holds text to decides only what text cites, and the server reads a
+ * node of any name by its own reference. */
+export function parseNodeReference(value: string): DispatchReferenceRoute | undefined {
   if (hasControlCharacter(value)) {
     return undefined;
   }
@@ -298,7 +301,7 @@ function parseDispatchRoute(value: string): DispatchReferenceRoute | undefined {
     const target = parseBlockReference(document, value.slice(hash + 1));
     return target === undefined
       ? undefined
-      : withBlock(parseDispatchRoute(document), target.block, target.pin);
+      : withBlock(parseNodeReference(document), target.block, target.pin);
   }
   const match = value.match(/^dispatch:\/\/([^/]+)(?:\/(.*))?$/);
   if (match === null) {

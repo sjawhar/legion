@@ -56,7 +56,6 @@ import {
   overCapMessage,
   PROJECT_KEY_PATTERN,
   PROJECT_KEY_RULE,
-  referenceTargetFits,
   serviceSubjectLabel,
   zodSchemaApi,
 } from "@legion/contracts";
@@ -1011,17 +1010,10 @@ export function dispatchRefFromUrl(value: string, serverUrl: string): string | u
   };
   // The block a live document page lands on (`#b-<block id>`), written as `encodeBlockId` writes
   // it. A version page names the document whatever its fragment: a version's stored markdown
-  // carries no block ids to land on, and a pin is written only as a dispatch:// reference. So does
-  // a page whose block's target id `<owner>/<slug>#<block id>` does not fit
-  // (`referenceTargetFits`); one whose document's or item's does not names nothing, as
-  // `parseDispatchRef` reads the reference this returns.
-  const blockOf = (versionName: string, owner: string, slug: string): string => {
+  // carries no block ids to land on, and a pin is written only as a dispatch:// reference.
+  const blockOf = (versionName: string): string => {
     const id = url.hash.startsWith("#b-") ? decodeBlockId(url.hash.slice(3)) : undefined;
-    return id === undefined ||
-      url.searchParams.get(versionName) ||
-      !referenceTargetFits(`${owner}/${slug}#${id}`)
-      ? ""
-      : `#b-${encodeBlockId(id)}`;
+    return id === undefined || url.searchParams.get(versionName) ? "" : `#b-${encodeBlockId(id)}`;
   };
   const issuePage = url.pathname.match(
     /^\/issues\/([A-Z][A-Z0-9]{1,9}-[1-9][0-9]*)(?:\/(spec|log|conversation|activity|children)|\/artifacts\/([^/]+)|\/asks\/([^/]+)|\/comments\/([^/]+)|\/messages\/([^/]+))?\/?$/
@@ -1037,13 +1029,13 @@ export function dispatchRefFromUrl(value: string, serverUrl: string): string | u
       if (item !== undefined) return `dispatch://${key}/${item.kind}/${item.id}`;
     }
     if (page === "spec" && version !== "") return `dispatch://${key}/artifact/spec${version}`;
-    if (page === "spec") return `dispatch://${key}/spec${blockOf("v", key, "spec")}`;
+    if (page === "spec") return `dispatch://${key}/spec${blockOf("v")}`;
     // `/conversation` keeps resolving to the reference it always had, `KEY/log`; `/activity`,
     // the tab that now holds the event list, is spelled as its own path is.
     if (page !== undefined) return `dispatch://${key}/${page === "conversation" ? "log" : page}`;
     if (artifact !== undefined) {
       const slug = decodeURIComponent(artifact);
-      return `dispatch://${key}/artifact/${slug}${version}${blockOf("v", key, slug)}`;
+      return `dispatch://${key}/artifact/${slug}${version}${blockOf("v")}`;
     }
     if (ask !== undefined) return `dispatch://${key}/ask/${ask}`;
     if (comment !== undefined) return `dispatch://${key}/comment/${comment}`;
@@ -1070,7 +1062,7 @@ export function dispatchRefFromUrl(value: string, serverUrl: string): string | u
   if (item === null) return undefined;
   // An ask or comment has no version; the page's version selector names the document's.
   return item === undefined
-    ? `${document}${versionOf("version")}${blockOf("version", project ?? "", decodedSlug)}`
+    ? `${document}${versionOf("version")}${blockOf("version")}`
     : `${document}/${item.kind}/${item.id}`;
 }
 

@@ -30,6 +30,7 @@ import {
   type DispatchReferenceRoute,
   isProjectRoute,
   parseDispatchReference,
+  parseNodeReference,
   referenceTargetKind,
   shortForm,
 } from "./routes";
@@ -164,10 +165,16 @@ function inHoverZone(node: EventTarget | null): boolean {
   return state !== undefined && (triggerOf(node) === state.target.anchor || cardContains(node));
 }
 
+/** The route a trigger names: a `data-dispatch-ref`, which the dashboard writes for a route it
+ *  already holds (text it read was bounded then), read whatever the length of its target id, or a
+ *  sanitized mark's `data-dispatch-href`, text, read as text is. */
 function routeOf(trigger: HTMLElement): DispatchReferenceRoute | undefined {
-  const reference =
-    trigger.getAttribute("data-dispatch-ref") ?? trigger.getAttribute("data-dispatch-href");
-  return reference === null ? undefined : parseDispatchReference(reference);
+  const reference = trigger.getAttribute("data-dispatch-ref");
+  if (reference !== null) {
+    return parseNodeReference(reference);
+  }
+  const href = trigger.getAttribute("data-dispatch-href");
+  return href === null ? undefined : parseDispatchReference(href);
 }
 
 /** Delegated hover/focus triggers for every reference trigger in the document, present or

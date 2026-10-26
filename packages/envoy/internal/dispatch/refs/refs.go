@@ -28,31 +28,6 @@ type Queryer interface {
 	Query(context.Context, string, ...any) (pgx.Rows, error)
 }
 
-// ToID returns the durable target identifier for a parsed Dispatch reference: the item id,
-// an artifact's ref_key, a component's '<project>/<id>' node address, or a block's
-// '<document ref_key>#<block id>'. A block's pin is not part of it: a pinned and an unpinned
-// reference to one block are one target.
-func ToID(ref text.Ref) string {
-	switch ref.Kind {
-	case "artifact":
-		if ref.Session != "" {
-			return "agent/" + ref.Session + "/" + ref.ID
-		}
-		key := ref.IssueKey
-		if key == "" {
-			key = ref.Project
-		}
-		return key + "/" + ref.ID
-	case "component":
-		return ref.Project + "/" + ref.ID
-	case "block":
-		document := ref
-		document.Kind, document.Block, document.Pin = "artifact", "", 0
-		return ToID(document) + "#" + ref.Block
-	}
-	return ref.ID
-}
-
 // Target is one end of a reference edge: the kind and durable id `refs` stores.
 type Target struct {
 	Kind string
@@ -146,7 +121,7 @@ func targetOf(ref text.Ref) (Target, bool) {
 	if ref.Kind == "url" {
 		return Target{}, false
 	}
-	return Target{Kind: ref.Kind, ID: ToID(ref)}, true
+	return Target{Kind: ref.Kind, ID: text.TargetID(ref)}, true
 }
 
 // refTargets is the deduplicated (to_kind, to_id) set found names, as parallel arrays.
