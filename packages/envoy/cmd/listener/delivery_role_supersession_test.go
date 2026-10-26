@@ -41,7 +41,7 @@ func (kv *racingRoleDeleteKV) Delete(key string, opts ...natsgo.DeleteOpt) error
 func registryRoleKV(t *testing.T, registry *store.Registry) natsgo.KeyValue {
 	t.Helper()
 	field := reflect.ValueOf(registry).Elem().FieldByName("roleKV")
-	return reflect.NewAt(field.Type(), unsafe.Pointer(field.UnsafeAddr())).Elem().Interface().(natsgo.KeyValue)
+	return reflect.NewAt(field.Type(), unsafe.Pointer(field.UnsafeAddr())).Elem().Interface().(bus.KeyValue).Legacy()
 }
 
 func setRegistryRoleKV(t *testing.T, registry *store.Registry, kv natsgo.KeyValue) {
