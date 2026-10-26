@@ -1447,17 +1447,21 @@ keeps the record, every Sandbox, its uid, its tree label and so its volume. In t
      and cc.locator->>'runtime' = 'sandbox'
      and cc.locator->'sandbox'->>'container' = 'roles'
      and c.role <> 'controller';
+   delete from schema_version where version = 51;
    commit;
    SQL
    ```
 
-   It prints `UPDATE <n>` twice; a rerun prints `UPDATE 0` twice. A claim this release launched
-   first gets its role's container the same way, so the earlier release loads it too. The row
-   `schema_version` records for 0051 stays and is harmless: the earlier release's `Migrate` checks
-   each of its own migrations against `schema_version` and applies only those it has not recorded
-   (`versionRecorded` in `internal/store/store.go`, the same before contract 37), and every one of
-   them is recorded. The SQL changes only these locators, so Oh My Pi's session tables, wherever
-   they are, keep every turn taken under this release.
+   It prints `UPDATE <n>` twice and `DELETE 1`; a rerun prints `UPDATE 0` twice and `DELETE 0`. A
+   claim this release launched first gets its role's container the same way, so the earlier
+   release loads it too. The `delete` removes the row `schema_version` records for 0051, so a later
+   upgrade back to this release applies 0051 again and rewrites every claim the earlier release
+   launched in the meantime; with the row left, that upgrade would skip 0051 (its `Migrate` applies
+   only the migrations `schema_version` does not record, `versionRecorded` in
+   `internal/store/store.go`) and look for each role's own container in a pod that has only
+   `roles`. The earlier release reads `schema_version` the same way and never its highest row, so
+   the row's absence changes nothing for it. The SQL changes only these locators and that row, so
+   Oh My Pi's session tables, wherever they are, keep every turn taken under this release.
 3. **Return every one-container issue Sandbox to the earlier layout's template.** With
    `<namespace>` and `<project>` as in [Upgrading a deployment with running
    trees](#upgrading-a-deployment-with-running-trees) step 4, each patch suspends the Sandbox, which
@@ -1515,9 +1519,11 @@ container had written. Step 2's SQL was run verbatim on 2026-10-26 against Postg
 holding the merge base's migrations 0001 to 0050, with sandbox locators for every workflow role of
 an issue pod, a controller's sandbox locator, a tmux locator, a null locator, one with no
 `container` and one with a null `sandbox`, in both tables: after this release's 0051 and step 2,
-both tables equalled a snapshot taken before 0051, row for row, with `schema_version` still at 51,
-and a second run updated nothing. The safety copy's `pg_dump`, run as a login that cannot read the
-session tables, exited 1 without the two `-T` options and 0 with them.
+both tables equalled a snapshot taken before 0051, row for row, with `schema_version` back at 50,
+and a second run changed nothing. Applying 0051 again afterwards, as the next upgrade's `Migrate`
+does, rewrote the same six claims and six capabilities to `roles`. The safety copy's `pg_dump`, run
+as a login that cannot read the session tables, exited 1 without the two `-T` options and 0 with
+them.
 
 ### Contract discipline
 
