@@ -65,7 +65,9 @@ const mentionsArm = `select to_id from refs where to_kind = $2 and to_id = any($
 // kind, read off the view's own definition (migration 0094, which re-states 0038's arms). A
 // node kind absent from the map is refused rather than counted low. store's equivalence test
 // compares every kind's count with the view's, and fails when the view gains an arm, so an arm
-// added to the view is added here in the same change.
+// added to the view is added here in the same change. A build older than that change does not
+// read the new arm, so while it still serves beside the new schema (a rolling deploy or a
+// rollback) its count is low by the new arm's edges, which its list, reading the view, shows.
 //
 // Each arm selects only the address it is keyed on, so the joins the view makes for an edge's
 // created_at are left out: components.snapshot_id, component_depends' two component keys and
@@ -324,6 +326,10 @@ var nodeLoaders = map[string]nodeLoader{
 // nodeKinds is every node kind nodeLoaders resolves, sorted, as the reads that filter
 // graph_edges in SQL bind it.
 var nodeKinds = slices.Sorted(maps.Keys(nodeLoaders))
+
+// NodeKinds is a copy of nodeKinds, for a test outside this package that holds a count to the
+// view's answer over the same kinds.
+func NodeKinds() []string { return slices.Clone(nodeKinds) }
 
 // resolveNodes loads every distinct other end by kind.
 func resolveNodes(ctx context.Context, q Queryer, byRefKey bool, rows []edgeRow) (map[[2]string]resolvedNode, error) {

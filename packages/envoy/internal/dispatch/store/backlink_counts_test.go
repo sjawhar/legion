@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"reflect"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -126,6 +127,12 @@ func seedEveryInboundArm(t *testing.T, ctx context.Context, store *Store) {
 		insert into refs (from_kind, from_id, to_kind, to_id, source_seq)
 			select 'issue', 'CORE-2', 'message', m.id::text, 45
 			from messages m where m.body = 'hello';
+
+		-- A source of a node kind this build does not read, pointing at one node of every kind:
+		-- the view lists it and the count must leave it out.
+		insert into refs (from_kind, from_id, to_kind, to_id, source_seq)
+			select 'future', 'f1', to_kind, min(to_id), 46
+			from graph_edges group by to_kind;
 	`); err != nil {
 		t.Fatalf("seed every inbound arm: %v", err)
 	}
@@ -155,15 +162,16 @@ func inboundTargets(t *testing.T, ctx context.Context, store *Store, kind string
 	return ids
 }
 
-// viewCounts is what BacklinkCounts counted before it read the arms: the grouped count over
-// graph_edges itself, which is the answer this change may not move.
+// viewCounts is the count BacklinkCounts answered before it read the arms: the grouped count over
+// graph_edges itself, of sources of a node kind this build reads, which is the answer this change
+// may not move.
 func viewCounts(t *testing.T, ctx context.Context, store *Store, kind string, ids, excludeKinds []string) map[string]int {
 	t.Helper()
-	sql := `select to_id, count(*)::int from graph_edges where to_kind = $1 and to_id = any($2)`
-	args := []any{kind, ids}
+	sql := `select to_id, count(*)::int from graph_edges where to_kind = $1 and to_id = any($2) and from_kind = any($3)`
+	args := []any{kind, ids, refs.NodeKinds()}
 	if len(excludeKinds) > 0 {
 		args = append(args, excludeKinds)
-		sql += ` and not (kind = any($3))`
+		sql += ` and not (kind = any($4))`
 	}
 	rows, err := store.Pool.Query(ctx, sql+" group by to_id", args...)
 	if err != nil {
@@ -317,6 +325,27 @@ func TestEveryEdgeKindHasAnInboundArm(t *testing.T) {
 	}
 	if arms := strings.Count(definition, "UNION ALL") + 1; arms != 15 {
 		t.Fatalf("graph_edges has %d arms; refs.BacklinkCounts declares 15 (the mention arm and 14 structural arms): add the new arm to inboundArms and to seedEveryInboundArm", arms)
+	}
+
+	// BacklinkCounts filters only the mention arm by source kind, which is exact only while every
+	// structural arm's source is a node kind this build reads.
+	sources, err := store.Pool.Query(ctx,
+		`select distinct from_kind from graph_edges where kind <> 'mentions' order by from_kind`)
+	if err != nil {
+		t.Fatalf("read structural source kinds: %v", err)
+	}
+	defer sources.Close()
+	for sources.Next() {
+		var kind string
+		if err := sources.Scan(&kind); err != nil {
+			t.Fatalf("scan structural source kind: %v", err)
+		}
+		if !slices.Contains(refs.NodeKinds(), kind) {
+			t.Errorf("a structural arm of graph_edges has source kind %q, which nodeLoaders does not read: filter that arm by source kind in refs.BacklinkCounts", kind)
+		}
+	}
+	if err := sources.Err(); err != nil {
+		t.Fatalf("iterate structural source kinds: %v", err)
 	}
 }
 

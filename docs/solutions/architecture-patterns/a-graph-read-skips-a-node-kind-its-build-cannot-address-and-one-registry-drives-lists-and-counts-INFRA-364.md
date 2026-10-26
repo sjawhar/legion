@@ -23,10 +23,12 @@ related_issues:
   it. Skip what this build cannot address, as an edge whose other end no longer exists is skipped.
 - **One list of node kinds, read by every reader.** In Dispatch it is `nodeLoaders` in
   `refs/graph.go` (kind → loader). `resolveNodes` looks a kind up there; `nodeKinds`, its sorted
-  keys, is the SQL bind of `BacklinkCounts` (`from_kind = any($3)`) and `Outgoing`
+  keys, is the SQL bind of `BacklinkCounts`' mention arm (`from_kind = any($3)`) and `Outgoing`
   (`e.to_kind = any($2)`). A second list beside the loader (a `switch` plus a slice) lets the next
   kind be added to one and forgotten in the other, which silently leaves its edges uncounted or
-  unlisted. Adding a node kind is one map entry: it then resolves, lists and counts at once.
+  unlisted. Adding a node kind as a source is one map entry: it then resolves, lists and counts at
+  once. Counting the edges that point at a new kind also needs its `inboundArms` entry, since
+  `BacklinkCounts` reads the view's arms one by one and refuses a kind it has no arms for.
 - **A count beside a list filters the same rows the list shows.** The list dropped an unknown kind
   in Go (the node did not resolve); the count read SQL and kept it, so `referenced_by_count` was
   one higher than the panel it opens. When a list drops a row after the query, give the count the
