@@ -500,10 +500,15 @@ const CachePoll = 10 * time.Second
 // first clone, which may take up to CacheFetchTimeout, and 10 minutes for its pod to be scheduled
 // and its volume bound. A pod launched while a large repository's first clone runs waits it out
 // rather than failing its fetch, which the daemon would count as one of its claim's launch
-// failures (launch_failure_limit, 3 by default), so a cache that is merely slow never ends a
-// claim failed. The cost is that such a pod holds its node reservation for up to the whole wait,
-// and only while a repository's first cache clone runs: a cache that has cloned is ready again
-// within one refresh of a restart.
+// failures (launch_failure_limit, 3 by default), so a first clone that finishes within
+// CacheFetchTimeout never ends a claim failed. The cost is that a waiting pod holds its node
+// reservation, and its launch the issue's lifecycle lane, for up to the whole wait. That happens
+// while a first clone runs, and also whenever the cache never becomes ready: a cache in a crash
+// loop (a refused token, GitHub down), one whose pod cannot be scheduled or whose volume does not
+// bind, or a first clone that runs past CacheFetchTimeout and starts again from nothing. Nothing
+// cuts the wait short then (the daemon describes the cache only once the fetch has failed), so
+// each launch spends 130 minutes rather than 40 before its fetch fails, and a claim takes about
+// three times as long to reach its launch_failure_limit.
 const CacheWaitTimeout = CacheFetchTimeout + 10*time.Minute
 
 // FetchBudget bounds a fetch's waits, transfers and checks, end to end: at most CacheWaitTimeout

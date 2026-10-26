@@ -2366,8 +2366,11 @@ architect, planner, implementer, tester, reviewer, merger), named for its role:
    the cache's Service, and `LEGION_REPOSITORY_CACHE_TOKEN_FILE`, the cache's own token), and a
    fresh feed comes from that cache alone: the fetch waits for it to be ready (`waiting for the
    repository cache <url> to be ready: <its answer>`, every 10 s, for at most the cache's own first
-   clone's 2 hours and 10 more, `workspace.CacheWaitTimeout`; only a repository's first cache clone
-   takes that long, and a pod waiting it out holds its node reservation all the while), unpacks its
+   clone's 2 hours and 10 more, `workspace.CacheWaitTimeout`; a pod waiting holds its node
+   reservation, and its launch the issue's lifecycle lane, all the while, both while a first clone
+   runs and when the cache never becomes ready — a crash loop, a cache pod that cannot be scheduled
+   or whose volume does not bind, a first clone past its 2 hours — so each such launch spends 130
+   minutes, not 40, before its fetch fails), unpacks its
    copy of the repository, checks each pack and its index against the checksums git wrote into them
    and that every object the refs reach is there, then fetches from GitHub the default branch GitHub
    names, the issue's recorded default while GitHub has it, and the Legion issue branches: its log's last
@@ -2408,8 +2411,8 @@ architect, planner, implementer, tester, reviewer, merger), named for its role:
    <ref> until a fetch brings it`). Once the fetch may start — at once, or once the cache is ready
    — the cache's stream and its verification share one 30-minute bound (`workspace.FetchTimeout`),
    each given what remains of it, and the delta from GitHub has a 30-minute bound of its own, so a
-   slow stream never leaves the delta minutes to run in. The fetch's waits, transfers and checks end within 100
-   minutes (`workspace.FetchBudget`) however long it waited, and the few local
+   slow stream never leaves the delta minutes to run in. The fetch's waits, transfers and checks end
+   within 190 minutes (`workspace.FetchBudget`) however long it waited, and the few local
    git commands around them take moments; a step with nothing left fails the fetch, naming the
    bound. Each transfer from GitHub is tried again up to four times after a transient failure,
    within that bound. It is the only process that holds the provisioning token
@@ -4099,7 +4102,7 @@ The daemon probes a pod by reading it and consulting the worker stream's live re
   6 min): under Kubernetes, the deadline carries an added bound of `sandbox.Runtime.ProvisionBound`
   until the shim's first hello, and from there the daemon re-arms the base deadline alone, the same
   one a tmux pane runs under throughout. A pod that never says hello is retired at the launch's return
-  plus the base deadline plus the bound, armed as one (136 min at the defaults); one that says hello
+  plus the base deadline plus the bound, armed as one (226 min at the defaults); one that says hello
   and never registers is retired at hello plus the base deadline alone (6 min from the hello); and
   one whose agent registers and never says it is ready is retired at its registration plus the base
   deadline alone (6 min from the registration, again from a daemon restart that finds it
