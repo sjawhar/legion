@@ -78,7 +78,7 @@ function secretListing(pod: string) {
 }
 
 // One ready issue pod as the pod watch records it: workspace-fetch and workspace-init carry the
-// repository `<owner>/<repo>` and the cache URL naming the owner; six role containers ready.
+// repository `<owner>/<repo>` and the cache URL naming the owner; its one `roles` container ready.
 function podEvent(pod: string, uid: string, extraArgs: string[] = []) {
   return JSON.stringify({
     type: "MODIFIED",
@@ -107,13 +107,20 @@ function podEvent(pod: string, uid: string, extraArgs: string[] = []) {
             args: ["workspace-init", "provision", "--repo", `${owner}/legion-smoke`, ...extraArgs],
           },
         ],
-        containers: roles.map((role) => ({
-          name: role,
-          args: ["launcher", "--role", role, "--private-dir", "/var/run/legion/private"],
-          env: [{ name: "LEGION_ROLE", value: role }],
-        })),
+        containers: [
+          {
+            name: "roles",
+            args: [
+              "launcher",
+              "--roles-dir",
+              "/var/run/legion/roles",
+              ...roles.flatMap((role) => ["--role", role]),
+            ],
+            env: [{ name: "POD_UID", value: "" }],
+          },
+        ],
       },
-      status: { containerStatuses: roles.map((role) => ({ name: role, ready: true })) },
+      status: { containerStatuses: [{ name: "roles", ready: true }] },
     },
   });
 }
@@ -174,6 +181,19 @@ describe("secret-leaks judges only the values that are secret", () => {
       got.leaks,
       "the owner name github-default holds is no credential; flagging it fails every run since #2008"
     ).toEqual([]);
+  });
+
+  // While the check waited for six role containers, a pod of one `roles` container was never
+  // judged, so every leak in it passed.
+  test("a pod whose one roles container is not yet ready is not judged; once ready, it is", async () => {
+    const unready = JSON.parse(podEvent(pod, uid, ["--token", launcherToken("tester")]));
+    unready.object.status.containerStatuses[0].ready = false;
+    expect((await verdictFor(JSON.stringify(unready), secretListing(pod))).leaks).toEqual([]);
+    const ready = await verdictFor(
+      podEvent(pod, uid, ["--token", launcherToken("tester")]),
+      secretListing(pod)
+    );
+    expect(ready.leaks.map((l) => l.secret)).toEqual([`${pod}-tester-boot`]);
   });
 
   test("negative control: a pod carrying a role's launcher token, its hosts.yml, or the pod's provisioning token in its args is a leak of that Secret", async () => {

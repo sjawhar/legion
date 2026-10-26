@@ -274,7 +274,7 @@ package api
 // is 751 MiB of build cache and 375 MiB of module cache for this repository, so the five
 // redundant copies would be about 5.5 GiB spent on nothing. `XDG_STATE_HOME`, whose
 // `/home/legion/.local/state/<role>` entry 18 declared, is the one directory of the scratch that
-// stays the role's own, `/legion/scratch/state/<role>`: Oh My Pi names its browser broker's lock
+// stays one per role, `/legion/scratch/state/<role>`: Oh My Pi names its browser broker's lock
 // from the state root, the name is an abstract unix socket, and an abstract socket name is one
 // name across every container of the pod, so one state home would block every role's broker but
 // the first. `XDG_CONFIG_HOME` is unchanged, the pod's shared in-memory volume `workspace-init`
@@ -341,4 +341,24 @@ package api
 // so the boot gate and `legion probe-image` refuse the mixed pair. (This branch took 36, then 37;
 // main landed INFRA-229 at 36 and INFRA-80 at 37 while it was open, so this change takes the
 // number above them, as the collision note says.)
-const DaemonAPIVersion = 38
+//
+// 39: INFRA-208 -- an issue pod is one container, `roles`, whose PID 1 is one `legion launcher`
+// serving every workflow role (`--roles-dir /var/run/legion/roles` and one `--role` per role), each
+// role's generation started in namespaces of its own by `legion launcher role-init`; each role's
+// own volumes are mounted under `/var/run/legion/roles/<role>/` and the role homes volume at
+// `/var/run/legion/roles/.homes`. An image whose `legion launcher` lacks multi-role mode cannot run
+// that pod, and the image probe refuses an image whose pi-legion declares another contract, so the
+// bump keeps a daemon from building such pods for an older image. A sandbox locator of an issue
+// pod's role names container `roles`, and store migration 0054 rewrites every stored one at boot;
+// a running pod of the layout before it is StaleAddress for every role and replaced once by the
+// next launch of any of them, uncharged. `settings.runtime.kubernetes.resources` is now
+// `{issue, controller}`, the two pods' reservations, rather than one entry per role; the
+// resource-limits capability row names those pods. (This branch took 36; main then landed
+// INFRA-229 at 36, so this branch took 37; main then landed INFRA-80 at 37 with store migration
+// 0051, so this branch took 38 and store migration 0052; main then landed INFRA-225 at 38 with
+// store migrations 0052 and 0053, so this branch takes 39 and store migration 0054, as the
+// collision note says. Other open branches may declare 39 or a migration 0054 too: whichever
+// merges after another takes the next free contract number and renumbers its store migration past
+// main's, every site that names either included, among them the rollback's
+// `delete from schema_version where version = 54` in docs/kubernetes.md.)
+const DaemonAPIVersion = 39

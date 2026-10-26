@@ -118,7 +118,7 @@ type Config struct {
 	// ends, its build stopped and its lease released, since Run waits for it (bounded by
 	// warmUpDrain) before returning the agent's exit status: a stop mid-build then leaves no lease
 	// behind for the role's relaunch to read as a live build. `launched` is when the shim's Run
-	// began — the role container's launcher starting this generation — which the warm-up's success
+	// began — the role's launcher starting this generation — which the warm-up's success
 	// line reports its build against. Nil on a tmux pane, whose workspace the daemon warms itself,
 	// and on the controller, which has no workspace: nothing runs.
 	WarmCodegraph func(ctx context.Context, dir string, launched time.Time)
