@@ -310,14 +310,22 @@ func (m *Machine) adopt(role claim.Role, loc *runtime.Locator) error {
 // because either half alone is a claim a restart reads wrongly — a working claim whose delivery
 // is unconfirmed is re-sent under the same id and answered by the shim without a second turn, so
 // its worker is never prompted again, and an idle claim holding a confirmed delivery holds one
-// nothing retires.
+// nothing retires. Once the write holds, the workflow is told the agent took its work
+// (Deps.TaskConfirmed): a root whose wait that untaken task held is decided on this fact rather
+// than at the next tick. A write that failed tells no one.
 func (m *Machine) confirm(ctx context.Context) error {
 	p := m.claim.Pending
 	p.ConfirmedAt = m.deps.Clock.Now()
 	m.disarm(TimerTurn)
 	m.askFirst = false
 	m.claim.Budgets.PromptFailures, m.claim.Budgets.PromptRetires = 0, 0
-	return m.saved(m.deps.Store.PutClaimAndDelivery(ctx, m.stored(), *p))
+	if err := m.saved(m.deps.Store.PutClaimAndDelivery(ctx, m.stored(), *p)); err != nil {
+		return err
+	}
+	if m.deps.TaskConfirmed != nil {
+		m.deps.TaskConfirmed(m.stored())
+	}
+	return nil
 }
 
 // settle retires a delivery whose life is over, and runs around every decision, so that two things

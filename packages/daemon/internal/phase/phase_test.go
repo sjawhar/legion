@@ -8,8 +8,8 @@ import (
 // All is the wire contract's phase list, in the transition table's order.
 func TestPhaseValuesMatchWorkflowWireContract(t *testing.T) {
 	want := []string{
-		"admitted", "planning", "implementing", "testing", "reviewing", "accepting", "retro", "merging",
-		"awaiting_merge", "done", "held",
+		"admitted", "awaiting_person", "planning", "implementing", "testing", "reviewing", "accepting", "retro",
+		"merging", "awaiting_merge", "done", "held",
 	}
 	got := make([]string, len(All))
 	for index, value := range All {

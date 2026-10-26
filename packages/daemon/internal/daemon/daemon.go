@@ -273,6 +273,7 @@ func run(ctx context.Context, cfg config.Config, build Build, log *slog.Logger, 
 		// from; Stage 2's supervision runs on claims alone, where every delivery holds and every
 		// tree closes.
 		plan.phaseHolds, plan.treeClosable = workflow.phaseHolds, workflow.treeClosable
+		plan.taskConfirmed = workflow.taskConfirmed
 	}
 	if cfg.Runtime.Name == "tmux" {
 		executable, err := os.Executable()
@@ -520,6 +521,8 @@ type plan struct {
 	// nil without a workflow, where every delivery holds and every tree closes.
 	phaseHolds   func(ctx context.Context, issue string, p phase.Phase) (bool, error)
 	treeClosable func(ctx context.Context, c supervise.Claim) (bool, error)
+	// taskConfirmed tells the workflow each agent that took its task; nil without a workflow.
+	taskConfirmed func(c supervise.Claim)
 	// tools are the git and jj boot resolved on the host, by name, for workspace provisioning;
 	// nil without a repository, and under a runtime whose agents run the worker image's own.
 	tools         map[string]string
@@ -987,12 +990,13 @@ func openSupervision(boot context.Context, cfg config.Config, log *slog.Logger, 
 			mergeRules: cfg.Projects[cfg.Project].Merge, runtimeName: cfg.Runtime.Name, plugins: p.plugins,
 			backend: cfg.BackendFor,
 		},
-		Identity:     adoptIdentity(p.identity, p.repository),
-		Secrets:      p.secretsEnroller,
-		PhaseHolds:   p.phaseHolds,
-		TreeClosable: p.treeClosable,
-		Clock:        p.clock,
-		Log:          log,
+		Identity:      adoptIdentity(p.identity, p.repository),
+		Secrets:       p.secretsEnroller,
+		PhaseHolds:    p.phaseHolds,
+		TreeClosable:  p.treeClosable,
+		TaskConfirmed: p.taskConfirmed,
+		Clock:         p.clock,
+		Log:           log,
 		Limits: supervise.Limits{
 			LaunchFailures: cfg.LaunchFailureLimit,
 			PromptFailures: cfg.PromptFailureLimit,

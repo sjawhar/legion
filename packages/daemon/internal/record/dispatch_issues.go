@@ -2,6 +2,7 @@ package record
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/jackc/pgx/v5"
@@ -50,6 +51,18 @@ func (s *Postgres) PutDispatchClaim(ctx context.Context, tx pgx.Tx, key, holder 
 		return fmt.Errorf("put the Dispatch claim of %s: %w", key, err)
 	}
 	return nil
+}
+
+func (s *Postgres) DispatchClaim(ctx context.Context, tx pgx.Tx, key string) (string, error) {
+	var holder string
+	err := tx.QueryRow(ctx, `select claimed_by from dispatch_issues where key = $1`, key).Scan(&holder)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("read the Dispatch claim of %s: %w", key, err)
+	}
+	return holder, nil
 }
 
 func (s *Postgres) DispatchIssues(ctx context.Context, tx pgx.Tx, project string) ([]DispatchIssueRow, error) {

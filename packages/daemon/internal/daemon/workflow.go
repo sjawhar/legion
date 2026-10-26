@@ -924,6 +924,30 @@ func (w *workflowRuntime) claimReady(c supervise.Claim) {
 	}
 }
 
+// taskConfirmed applies the fact that a role's agent took the work the daemon gave it
+// (supervise's Deps.TaskConfirmed): admission decides on it whether a root whose architect owed
+// that task now waits on a person (workflow's ReconcileAwaiting), which otherwise waits for the
+// next tick. The machine calls it inside its own decision, so the fact is applied on a goroutine
+// of its own, bounded like a terminal fact; a failure is logged and not the daemon's end, since
+// the tick decides the same thing again.
+func (w *workflowRuntime) taskConfirmed(c supervise.Claim) {
+	if c.Issue == "" || c.Role == claim.RoleController {
+		return
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), readyReleaseTimeout)
+		defer cancel()
+		fact := intake.TaskConfirmed{Issue: c.Issue, Role: c.Role, Generation: c.Generation}
+		id := fmt.Sprintf("task-confirmed:%s:%d", c.Token, c.Generation)
+		if p := c.Pending; p != nil {
+			id = fmt.Sprintf("task-confirmed:%s:%s", c.Token, p.ID)
+		}
+		if _, err := intake.ApplyFact(ctx, w.pool, "supervise", id, fact, w.handlers...); err != nil {
+			w.log.Warn("apply the confirmation of a task", "claim", c.Token, "error", err)
+		}
+	}()
+}
+
 // releaseReadied releases, until ctx ends, the waiting notices of the architects claimReady
 // recorded: each wake takes every architect recorded since the last one, in one release.
 func (w *workflowRuntime) releaseReadied(ctx context.Context) {
