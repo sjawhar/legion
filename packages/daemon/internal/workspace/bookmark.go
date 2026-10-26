@@ -47,8 +47,9 @@ var (
 //   - With no local bookmark, an untracked origin row is the issue's own branch, made on GitHub
 //     before this workspace existed: the branch the daemon creates at the default branch before any
 //     role of the issue starts (the daemon's issue_branch outbox row), a repository's fixture, or
-//     the branch a tree pushed before its volume was lost. A fresh clone tracks the default branch
-//     alone, so such a branch is only a remote row. It is tracked, which creates the local bookmark
+//     the branch an earlier pod of the issue pushed before its disk went with it. A fresh clone
+//     tracks the default branch alone, so such a branch is only a remote row. It is tracked, which
+//     creates the local bookmark
 //     at its commit, and the workspace starts there, so its commits are there and the issue's next
 //     push moves it. The bookmark is read again after the track: a fetch between the read and the
 //     track leaves it on a newer commit, where a workspace at the listed one could never move it,

@@ -1048,6 +1048,8 @@ runtime:
     namespace: legion
     image: ghcr.io/sjawhar/legion-worker@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
     storage_class: gp2
+    session_store: postgres
+    session_dsn_secret: SESSION_DSN
 %s`, filepath.Join(dir, "state"), command, command, tc.runtime)
 			config := filepath.Join(dir, "legion.yaml")
 			for name, contents := range map[string]string{config: body, "envoy-token": "envoy\n", "operator-token": "operator\n", "dispatch-token": "dispatch\n"} {
@@ -1100,6 +1102,8 @@ runtime:
     namespace: legion
     image: ghcr.io/sjawhar/legion-worker@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
     storage_class: gp2
+    session_store: postgres
+    session_dsn_secret: SESSION_DSN
     kubeconfig: ./kubeconfig
     context: legion-daemon
 %s`, filepath.Join(dir, "state"), extra)
