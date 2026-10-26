@@ -5,15 +5,20 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"maps"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
 // holdingListener is a fake Envoy listener that holds the first send of every idempotency key
@@ -412,5 +417,339 @@ func TestTheMaintenanceLoopResumesOwedDeliveries(t *testing.T) {
 	served.detached.wait()
 	if keys := keysOf(sends); !equalStrings(keys, []string{id + ":steer"}) {
 		t.Fatalf("the loop sent %v, want the owed attempt of %s", keys, id)
+	}
+}
+
+// sweepRig is a delivery sweep's database seeded straight from SQL, as a process that died
+// mid-delivery leaves it.
+type sweepRig struct {
+	t        *testing.T
+	database *store.Store
+}
+
+func (rig sweepRig) exec(sql string, args ...any) {
+	rig.t.Helper()
+	if _, err := rig.database.Pool.Exec(context.Background(), sql, args...); err != nil {
+		rig.t.Fatalf("seed the sweep: %v\n%s", err, sql)
+	}
+}
+
+func (rig sweepRig) count(sql string, args ...any) int {
+	rig.t.Helper()
+	var count int
+	if err := rig.database.Pool.QueryRow(context.Background(), sql, args...).Scan(&count); err != nil {
+		rig.t.Fatalf("count: %v\n%s", err, sql)
+	}
+	return count
+}
+
+// strandMessages makes count messages to s1 on issue, each with its one attempt in delivery
+// pending under a claim that lapsed ago, as old as that claim, and returns their ids.
+func (rig sweepRig) strandMessages(issue string, count int, ago string) []string {
+	rig.t.Helper()
+	rows, err := rig.database.Pool.Query(context.Background(), `
+		with made as (
+			insert into messages (issue_key, author, body, target)
+			select $1, '{"kind":"user","id":"alice"}', 'Status ' || n, 'session:s1' from generate_series(1, $2) n
+			returning id
+		)
+		insert into message_deliveries (message_id, attempt, delivery, session_id, state, claimed_at, created_at, requested_by)
+		select id, 1, 'steer', 's1', 'pending', now() - $3::interval, now() - $3::interval, '{"kind":"user","id":"alice"}'
+		from made
+		returning message_id::text
+	`, issue, count, ago)
+	if err != nil {
+		rig.t.Fatalf("strand messages: %v", err)
+	}
+	ids, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		rig.t.Fatalf("strand messages: %v", err)
+	}
+	return ids
+}
+
+// strandKeyedSends makes count keyed sends to s1 on issue whose process died between the
+// message's commit and its first attempt, ago: the message, and its key in flight with the
+// message as its recovery point and its lease lapsed. It returns the messages' ids.
+func (rig sweepRig) strandKeyedSends(issue string, count int, ago string) []string {
+	rig.t.Helper()
+	rows, err := rig.database.Pool.Query(context.Background(), `
+		with made as (
+			insert into messages (issue_key, author, body, target)
+			select $1, '{"kind":"user","id":"alice"}', 'Keyed ' || n, 'session:s1' from generate_series(1, $2) n
+			returning id
+		)
+		insert into request_keys (login, idempotency_key, request_digest, method, path, leased_at, recovery, created_at)
+		select 'alice', 'stranded-' || id, 'digest', 'POST', '/api/v1/issues/' || $1 || '/messages',
+		       now() - $3::interval, jsonb_build_object('message_id', id, 'delivery', 'steer'), now() - $3::interval
+		from made
+		returning recovery ->> 'message_id'
+	`, issue, count, ago)
+	if err != nil {
+		rig.t.Fatalf("strand keyed sends: %v", err)
+	}
+	ids, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		rig.t.Fatalf("strand keyed sends: %v", err)
+	}
+	return ids
+}
+
+// strandMentions makes count comments on issue mentioning s1, each with its one attempt pending
+// under a claim that lapsed ago, as old as that claim; mentioned false leaves each comment
+// without its mention row, as a comment that no longer holds it. It returns the comments' ids.
+func (rig sweepRig) strandMentions(issue string, count int, ago string, mentioned bool) []string {
+	rig.t.Helper()
+	rows, err := rig.database.Pool.Query(context.Background(), `
+		insert into comments (issue_key, author, body)
+		select $1, '{"kind":"user","id":"alice"}', '@s1 look ' || n from generate_series(1, $2) n
+		returning id::text
+	`, issue, count)
+	if err != nil {
+		rig.t.Fatalf("strand mentions: %v", err)
+	}
+	ids, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		rig.t.Fatalf("strand mentions: %v", err)
+	}
+	if mentioned {
+		rig.exec(`
+			insert into comment_mentions (comment_id, target, delivery)
+			select id::uuid, 'session:s1', 'steer' from unnest($1::text[]) id
+		`, ids)
+	}
+	rig.exec(`
+		insert into comment_deliveries (comment_id, target, attempt, delivery, session_id, state, claimed_at, created_at)
+		select id::uuid, 'session:s1', 1, 'steer', 's1', 'pending', now() - $2::interval, now() - $2::interval
+		from unnest($1::text[]) id
+	`, ids, ago)
+	return ids
+}
+
+// INFRA-258. The sweep never sticks on an attempt nothing can send. An owed attempt whose issue
+// closed - every sender refuses a delivery there - or whose comment no longer holds its mention
+// is settled failed with that cause, and the receipt its row owes, instead of being picked again
+// on every pass; a keyed send that closed with no attempt at all gets a failed first attempt the
+// same way. However many there are, they never crowd what can be sent out of a pass's batch: a
+// batch's worth and one more of each kind, all older than one sendable attempt of that kind, and
+// one pass delivers the three sendable ones and settles every other. A second pass changes
+// nothing.
+func TestTheDeliverySweepSettlesWhatItCannotSend(t *testing.T) {
+	listener, sends := newBroadcastListener(t, agentSessions)
+	handler, database, _, served := newRegisteredTestServer(t, testServerOptions{envoyURL: listener.URL})
+	rig := sweepRig{t: t, database: database}
+	closed := createTestIssue(t, handler, "STUCK", "Closed under its deliveries")
+	open := createTestIssue(t, handler, "OPEN", "Still open")
+	unsendable := deliverySweepBatch + 1
+
+	closedMessages := rig.strandMessages(closed, unsendable, "10 minutes")
+	closedKeyed := rig.strandKeyedSends(closed, unsendable, "10 minutes")
+	closedMentions := rig.strandMentions(closed, unsendable-1, "10 minutes", true)
+	goneMention := rig.strandMentions(open, 1, "10 minutes", false)[0]
+	sendableMessage := rig.strandMessages(open, 1, "5 minutes")[0]
+	sendableKeyed := rig.strandKeyedSends(open, 1, "5 minutes")[0]
+	posted := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+open+"/comments",
+		sweepRoutes["a comment's mention"].body, "alice")
+	if posted.Code != http.StatusCreated {
+		t.Fatalf("post the sendable comment: status=%d body=%s", posted.Code, posted.Body.String())
+	}
+	sendableMention := decodeBody[struct {
+		ID string `json:"id"`
+	}](t, posted).ID
+	// Its attempt as a sender that died inside the send leaves it.
+	rig.exec(`
+		update comment_deliveries set state = 'pending', envelope_id = null,
+		       claimed_at = now() - interval '5 minutes', created_at = now() - interval '5 minutes'
+		where comment_id = $1
+	`, sendableMention)
+	if closing := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+closed,
+		map[string]string{"status": "done"}, "alice"); closing.Code != http.StatusOK {
+		t.Fatalf("close the issue: status=%d body=%s", closing.Code, closing.Body.String())
+	}
+	if len(closedMessages) != unsendable || len(closedKeyed) != unsendable || len(closedMentions) != unsendable-1 {
+		t.Fatalf("seeded %d, %d and %d undeliverable attempts, want %d of each kind",
+			len(closedMessages), len(closedKeyed), len(closedMentions)+1, unsendable)
+	}
+
+	mentionKey := sendableMention + ":session:s1:steer"
+	want := []string{mentionKey, mentionKey, sendableKeyed + ":steer", sendableMessage + ":steer"}
+	slices.Sort(want)
+	settled := func() map[string]int {
+		return map[string]int{
+			"closed message attempts failed": rig.count(`
+				select count(*) from message_deliveries d join messages m on m.id = d.message_id
+				where m.issue_key = $1 and d.state = 'failed' and d.error = $2`, closed, undeliverableIssueClosed),
+			"closed message attempts pending": rig.count(`
+				select count(*) from message_deliveries d join messages m on m.id = d.message_id
+				where m.issue_key = $1 and d.state = 'pending'`, closed),
+			"closed message receipts": rig.count(`
+				select count(*) from events where type = 'message.delivery' and issue_key = $1
+				  and payload ->> 'state' = 'failed' and payload ->> 'error' = $2`, closed, undeliverableIssueClosed),
+			"closed mention attempts failed": rig.count(`
+				select count(*) from comment_deliveries d join comments c on c.id = d.comment_id
+				where c.issue_key = $1 and d.state = 'failed' and d.error = $2`, closed, undeliverableIssueClosed),
+			"closed mention receipts": rig.count(`
+				select count(*) from events where type = 'comment.delivery' and issue_key = $1
+				  and payload ->> 'state' = 'failed' and payload ->> 'error' = $2`, closed, undeliverableIssueClosed),
+			"gone mention attempts failed": rig.count(`
+				select count(*) from comment_deliveries where comment_id = $1 and state = 'failed' and error = $2`,
+				goneMention, undeliverableMentionGone),
+			"gone mention receipts": rig.count(`
+				select count(*) from events where type = 'comment.delivery' and payload ->> 'comment_id' = $1
+				  and payload ->> 'error' = $2`, goneMention, undeliverableMentionGone),
+			"pending mention attempts": rig.count(`
+				select count(*) from comment_deliveries where state = 'pending'`),
+			"sendable attempts sent": rig.count(`
+				select count(*) from message_deliveries where message_id = any($1::uuid[]) and state = 'sent'`,
+				[]string{sendableMessage, sendableKeyed}) + rig.count(`
+				select count(*) from comment_deliveries where comment_id = $1 and state = 'sent'`, sendableMention),
+		}
+	}
+	wantSettled := map[string]int{
+		// A keyed send with no attempt is settled as its first attempt, so the closed issue holds
+		// one failed attempt per message of either kind.
+		"closed message attempts failed":  2 * unsendable,
+		"closed message attempts pending": 0,
+		"closed message receipts":         2 * unsendable,
+		"closed mention attempts failed":  unsendable - 1,
+		"closed mention receipts":         unsendable - 1,
+		"gone mention attempts failed":    1,
+		"gone mention receipts":           1,
+		"pending mention attempts":        0,
+		"sendable attempts sent":          3,
+	}
+	for pass := range 2 {
+		if err := served.resumeOwedDeliveries(context.Background()); err != nil {
+			t.Fatalf("sweep pass %d: %v", pass+1, err)
+		}
+		if keys := keysOf(sends); !slices.Equal(keys, want) {
+			t.Fatalf("after sweep pass %d the listener was sent %v, want the comment's first send and the three sendable attempts %v",
+				pass+1, keys, want)
+		}
+		if got := settled(); !maps.Equal(got, wantSettled) {
+			t.Fatalf("after sweep pass %d: %v, want %v", pass+1, got, wantSettled)
+		}
+	}
+}
+
+// INFRA-258. The sweep sends exactly the attempt it found owed. A delivery a card retry
+// overtook while its first sender still held it has two pending attempts once both senders die,
+// and the sweep owes only the retry's, the latest: it sends that one, in its own mode and to its
+// own session, and never the older attempt in its place, which stays the retry's to answer.
+func TestTheDeliverySweepSendsTheAttemptItFoundOwed(t *testing.T) {
+	t.Run("a comment's mention", func(t *testing.T) {
+		listener, sends := newBroadcastListener(t, agentSessions)
+		handler, database, _, served := newRegisteredTestServer(t, testServerOptions{envoyURL: listener.URL})
+		rig := sweepRig{t: t, database: database}
+		issue := createTestIssue(t, handler, "BOUND", "Overtaken mentions")
+		posted := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue+"/comments",
+			sweepRoutes["a comment's mention"].body, "alice")
+		if posted.Code != http.StatusCreated {
+			t.Fatalf("post the comment: status=%d body=%s", posted.Code, posted.Body.String())
+		}
+		comment := decodeBody[struct {
+			ID string `json:"id"`
+		}](t, posted).ID
+		// The first attempt in steer, and the card's retry in btw, both left by senders that died.
+		rig.exec(`
+			update comment_deliveries set state = 'pending', envelope_id = null,
+			       claimed_at = now() - interval '10 minutes', created_at = now() - interval '10 minutes'
+			where comment_id = $1 and attempt = 1
+		`, comment)
+		rig.exec(`
+			insert into comment_deliveries (comment_id, target, attempt, delivery, session_id, state, claimed_at, created_at)
+			values ($1, 'session:s1', 2, 'btw', 's1', 'pending', now() - interval '5 minutes', now() - interval '5 minutes')
+		`, comment)
+		before := len(keysOf(sends))
+		if err := served.resumeOwedDeliveries(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		if keys := keysOf(sends); len(keys) != before+1 || !slices.Contains(keys, comment+":session:s1:btw") {
+			t.Fatalf("the sweep sent %v after the comment's own send, want the retry's attempt alone, in btw", keys)
+		}
+		if states := rig.count(`
+			select count(*) from comment_deliveries
+			where comment_id = $1 and (attempt, state) in ((1, 'pending'), (2, 'sent'))
+		`, comment); states != 2 {
+			t.Fatalf("after the sweep the attempts are not the first pending and the retry's sent")
+		}
+	})
+	t.Run("a message", func(t *testing.T) {
+		listener, sends := newBroadcastListener(t, agentSessions)
+		handler, database, _, served := newRegisteredTestServer(t, testServerOptions{envoyURL: listener.URL})
+		rig := sweepRig{t: t, database: database}
+		issue := createTestIssue(t, handler, "BOUND", "An overtaken message")
+		var message string
+		if err := database.Pool.QueryRow(context.Background(), `
+			insert into messages (issue_key, author, body, target)
+			values ($1, '{"kind":"user","id":"alice"}', 'Status?', 'role:planner')
+			returning id::text
+		`, issue).Scan(&message); err != nil {
+			t.Fatal(err)
+		}
+		// The first attempt went to the role's holder then, s1; the retry to its holder now, s2.
+		rig.exec(`
+			insert into message_deliveries (message_id, attempt, delivery, session_id, state, claimed_at, created_at, requested_by)
+			values ($1, 1, 'steer', 's1', 'pending', now() - interval '10 minutes', now() - interval '10 minutes', '{"kind":"user","id":"alice"}'),
+			       ($1, 2, 'steer', 's2', 'pending', now() - interval '5 minutes', now() - interval '5 minutes', '{"kind":"user","id":"alice"}')
+		`, message)
+		if err := served.resumeOwedDeliveries(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		if targets := sends.targets(); !slices.Equal(targets, []string{"s2"}) {
+			t.Fatalf("the sweep sent to %v, want the retry's attempt to s2 alone", targets)
+		}
+		if states := rig.count(`
+			select count(*) from message_deliveries
+			where message_id = $1 and (attempt, state) in ((1, 'pending'), (2, 'sent'))
+		`, message); states != 2 {
+			t.Fatalf("after the sweep the attempts are not the first pending and the retry's sent")
+		}
+	})
+}
+
+// The sweep's read of the keyed sends it owes a first attempt runs once a minute, over a table that
+// holds every keyed write of the last day, so it reads the partial index request_keys_owed_sends
+// (0118), which holds only the keyed sends still in flight, rather than every key. The sweep's own
+// SQL is explained with sequential scans off, since a table this small is cheapest to scan
+// whatever its indexes: the assertion is that the index serves the query, as the custom plan a
+// statement's first runs get and as the generic plan Postgres may cache for it afterwards.
+func TestTheSweepsKeyedSendReadUsesItsPartialIndex(t *testing.T) {
+	_, database, _, served := newRegisteredTestServer(t, testServerOptions{})
+	ctx := context.Background()
+	tx, err := database.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin explain transaction: %v", err)
+	}
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, "set local enable_seqscan = off"); err != nil {
+		t.Fatalf("disable sequential scans: %v", err)
+	}
+	explain := func(query string, args ...any) json.RawMessage {
+		t.Helper()
+		var planJSON []byte
+		if err := tx.QueryRow(ctx, "explain (format json) "+query, args...).Scan(&planJSON); err != nil {
+			t.Fatalf("explain %s: %v", query, err)
+		}
+		var plans []struct {
+			Plan json.RawMessage `json:"Plan"`
+		}
+		if err := json.Unmarshal(planJSON, &plans); err != nil || len(plans) != 1 {
+			t.Fatalf("explain output %s: %v, want one plan", planJSON, err)
+		}
+		return plans[0].Plan
+	}
+	lease, ttl := served.keyLease().Seconds(), contracts.IdempotencyKeyTTL.Seconds()
+	if custom := explain(owedKeyedSendsQuery, lease, ttl, deliverySweepBatch); !planReadsIndex(t, custom, "request_keys_owed_sends") {
+		t.Errorf("the custom plan reads no request_keys_owed_sends:\n%s", custom)
+	}
+	if _, err := tx.Exec(ctx, "prepare owed_keyed_sends (float8, float8, int) as "+owedKeyedSendsQuery); err != nil {
+		t.Fatalf("prepare the read: %v", err)
+	}
+	if _, err := tx.Exec(ctx, "set local plan_cache_mode = force_generic_plan"); err != nil {
+		t.Fatalf("force generic plans: %v", err)
+	}
+	if generic := explain("execute owed_keyed_sends(60, 86400, 100)"); !planReadsIndex(t, generic, "request_keys_owed_sends") {
+		t.Errorf("the generic plan reads no request_keys_owed_sends:\n%s", generic)
 	}
 }

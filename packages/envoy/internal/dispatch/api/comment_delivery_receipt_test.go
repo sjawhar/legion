@@ -143,7 +143,7 @@ func TestInitialMentionDeliveryDoesNotAppendAfterReplyConsumesPending(t *testing
 		event,
 		ResolvedMention{Target: "session:s1", Delivery: "steer", SessionID: new("s1"), attemptSessionID: "s1"},
 		model.Actor{Kind: "user", ID: "alice"},
-		true,
+		1,
 	)
 	if err != nil {
 		t.Fatalf("complete initial mention after its answer: %v", err)
@@ -212,7 +212,7 @@ func TestInitialMentionDeliveryReturnsFailedAttemptAfterErrorReplyConsumesPendin
 		event,
 		ResolvedMention{Target: "session:s1", Delivery: "steer", SessionID: new("s1"), attemptSessionID: "s1"},
 		model.Actor{Kind: "user", ID: "alice"},
-		true,
+		1,
 	)
 	if err != nil {
 		t.Fatalf("complete initial mention after an error reply: %v", err)

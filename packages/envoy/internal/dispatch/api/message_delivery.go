@@ -270,16 +270,30 @@ type pendingMessageDelivery struct {
 // two sessions and leave the first unable to answer the frame it was sent. This runs with
 // nothing held, before the resolution; recordPendingMessageDelivery re-reads the attempt under
 // the message's lock and redoes the pair when the row it locked names a different recipient.
-func (s *server) messageDeliveryRoute(ctx context.Context, message model.Message) (string, error) {
+//
+// A send bound to resumeAttempt routes by that attempt alone, whoever holds it, as its claim
+// judges its recipient: routed by the oldest pending attempt instead - one a later retry overtook,
+// pinned to the session that held the message's role then - it would never match its own attempt,
+// and an owed attempt would be refused its send on every pass of the delivery sweep.
+func (s *server) messageDeliveryRoute(ctx context.Context, message model.Message, resumeAttempt int) (string, error) {
 	var pinned string
 	var lapsed bool
-	err := s.deps.Store.Pool.QueryRow(ctx, `
-		select session_id, `+claimLapsed+`
-		from message_deliveries
-		where message_id = $1 and state = 'pending'
-		order by attempt
-		limit 1
-	`, message.ID).Scan(&pinned, &lapsed)
+	var err error
+	if resumeAttempt > 0 {
+		lapsed = true
+		err = s.deps.Store.Pool.QueryRow(ctx, `
+			select session_id from message_deliveries
+			where message_id = $1 and attempt = $2 and state = 'pending'
+		`, message.ID, resumeAttempt).Scan(&pinned)
+	} else {
+		err = s.deps.Store.Pool.QueryRow(ctx, `
+			select session_id, `+claimLapsed+`
+			from message_deliveries
+			where message_id = $1 and state = 'pending'
+			order by attempt
+			limit 1
+		`, message.ID).Scan(&pinned, &lapsed)
+	}
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return "", err
 	}
@@ -672,7 +686,7 @@ func (s *server) deliverMessageResuming(
 ) (model.MessageDelivery, error) {
 	pending, err := resolveThenLock(ctx,
 		func(ctx context.Context) (ResolvedMention, error) {
-			route, err := s.messageDeliveryRoute(ctx, message)
+			route, err := s.messageDeliveryRoute(ctx, message, resumeAttempt)
 			if err != nil {
 				return ResolvedMention{}, err
 			}

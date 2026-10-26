@@ -42,6 +42,11 @@
 -- IdempotencyKeyTTL (24 hours), on the created_at index, and a repeat that finds an older row not
 -- yet swept treats the key as unused.
 --
+-- request_keys_owed_sends holds the keys of the sends still in flight - a recovery point naming a
+-- message, and no answer yet - which the delivery sweep reads once a minute for a send whose
+-- process died before its first delivery attempt (api/delivery_sweep.go, owedKeyedSend). Without
+-- it that read would scan every key of the last day.
+--
 -- A new table: nothing existing is read, locked or rewritten here, and the release before this one
 -- neither reads nor writes it, which is what a rolling update requires of a migration
 -- (cmd/dispatch/README.md, "Database migrations").
@@ -66,3 +71,5 @@ create table request_keys (
 );
 
 create index request_keys_created_at on request_keys (created_at);
+create index request_keys_owed_sends on request_keys (created_at)
+  where status is null and recovery ? 'message_id';

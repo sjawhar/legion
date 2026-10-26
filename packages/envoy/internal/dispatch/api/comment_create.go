@@ -152,10 +152,10 @@ type commentRecovery struct {
 // answer's shape - its advice and ask_waiting_on kept - under the comment's own 201. A mention owes
 // its delivery when its process died after the comment committed and before the mention's one
 // attempt was sent: that attempt is still pending, and its claim, if any, has lapsed. It is resumed
-// under its own number, so the listener drops a frame that did land, and as the comment's own
-// first delivery (deliverResolvedCommentMention, initial), so an attempt a live sender holds is
-// left to it and no second attempt is opened. A mention someone retried from its card has more
-// than one attempt, and owes nothing here.
+// under its own number, so the listener drops a frame that did land, and bound to it, as the
+// comment's own first delivery is (deliverResolvedCommentMention, attempt 1), so an attempt a
+// live sender holds is left to it and no second attempt is opened. A mention someone retried from
+// its card has more than one attempt, and owes nothing here.
 func (s *server) replayComment(w http.ResponseWriter, r *http.Request, point commentRecovery, stored []byte) {
 	ctx, pool := r.Context(), s.deps.Store.Pool
 	comment, err := s.loadComment(ctx, pool, point.CommentID)
@@ -178,7 +178,7 @@ func (s *server) replayComment(w http.ResponseWriter, r *http.Request, point com
 		// on the repeat must not strand the mention it started.
 		sending := context.WithoutCancel(ctx)
 		for _, mention := range owed {
-			if _, err := s.deliverResolvedCommentMention(sending, comment, created, mention, comment.Author, true); err != nil {
+			if _, err := s.deliverResolvedCommentMention(sending, comment, created, mention, comment.Author, 1); err != nil {
 				s.writeHandlerError(w, err)
 				return
 			}
@@ -755,7 +755,7 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 	// (resumeOwedDeliveries).
 	sending := context.WithoutCancel(r.Context())
 	for _, mention := range resolvedMentions {
-		attempt, err := s.deliverResolvedCommentMention(sending, comment, event, mention, actor, true)
+		attempt, err := s.deliverResolvedCommentMention(sending, comment, event, mention, actor, 1)
 		if err != nil {
 			s.writeHandlerError(w, err)
 			return
