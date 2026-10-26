@@ -111,9 +111,11 @@ func (s *server) createStoredMessage(
 		return model.Message{}, nil, err
 	}
 	defer tx.Rollback(ctx)
+	// The issue row is locked first, the order recordPendingMessageDelivery states, without the
+	// closed refusal: a closed issue still takes a message.
 	var status string
 	if issueKey != nil {
-		status, err = s.requireOpenIssue(ctx, tx, *issueKey)
+		status, err = s.lockIssue(ctx, tx, *issueKey)
 		if err != nil {
 			return model.Message{}, nil, err
 		}

@@ -729,9 +729,9 @@ func TestCommentRouteResolutionIsVerifiedAgainstTheLockedIssue(t *testing.T) {
 }
 
 // A comment the write is going to refuse costs the Envoy listener nothing. Its mentions are
-// resolved before the transaction opens - one lookup each - so an owner that does not exist or
-// is already closed has to be found first, from the pool, or every doomed request wakes the
-// listener once per mention it names.
+// resolved before the transaction opens - one lookup each - so an owner that does not exist, or
+// a suggestion on a closed issue (which still takes every other comment), has to be found first,
+// from the pool, or every doomed request wakes the listener once per mention it names.
 func TestACommentItsOwnerRefusesResolvesNoMention(t *testing.T) {
 	lookups := 0
 	const sessions = `[{"session_id":"s1","title":"planner","capabilities":["steer"]},` +
@@ -769,12 +769,16 @@ func TestACommentItsOwnerRefusesResolvesNoMention(t *testing.T) {
 	if missing.Code != http.StatusNotFound {
 		t.Fatalf("comment on an issue that does not exist: status=%d body=%s", missing.Code, missing.Body.String())
 	}
-	closed := postMentionedComment(t, handler, issue.Key, mentions)
+	suggestion := map[string]any{
+		"body": mentions["body"], "mentions": mentions["mentions"],
+		"anchor": map[string]any{"artifact": "spec", "quote": "before"}, "suggestion": map[string]string{"replace_with": "after"},
+	}
+	closed := postMentionedComment(t, handler, issue.Key, suggestion)
 	if closed.Code != http.StatusConflict || !strings.Contains(closed.Body.String(), `"code":"ISSUE_CLOSED"`) {
-		t.Fatalf("comment on a closed issue: status=%d body=%s", closed.Code, closed.Body.String())
+		t.Fatalf("suggestion on a closed issue: status=%d body=%s", closed.Code, closed.Body.String())
 	}
 	if lookups != 0 {
-		t.Fatalf("the listener answered %d lookups, want none for two comments the owner refuses", lookups)
+		t.Fatalf("the listener answered %d lookups, want none for a missing owner and a closed issue's suggestion", lookups)
 	}
 }
 

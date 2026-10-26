@@ -86,8 +86,12 @@ type Anchored struct {
 	BlockID string
 }
 
-// MarkQuote marks one matching quote and returns what the new mark anchors to.
+// MarkQuote marks one matching quote and returns what the new mark anchors to. A comment mark
+// made under WithCommentMarks is written on a closed issue's document too; a suggestion's is not.
 func (s *Service) MarkQuote(ctx context.Context, artifactID string, mark MarkSpec, quote string, occurrence *int) (Anchored, error) {
+	if mark.Kind == MarkComment {
+		ctx = commentMarkOperation(ctx)
+	}
 	var anchored Anchored
 	err := s.applyLive(ctx, artifactID, mark.By, func(doc *crdt.Doc, current *pmdoc.Node, transact func(func(*crdt.Transaction))) error {
 		fragment := doc.GetXmlFragment(fragmentName)
@@ -151,8 +155,12 @@ func markQuoteInTxn(txn *crdt.Transaction, fragment *crdt.YXmlFragment, doc *pmd
 
 // VerifyMark returns what a browser-written mark anchors to, now or after its next document
 // update. It subscribes to the room's updates inside the Apply that loads and holds the room: a
-// room looked up again once that Apply returned can have been evicted in between.
+// room looked up again once that Apply returned can have been evicted in between. A comment mark
+// read under WithCommentMarks is read on a closed issue's document too.
 func (s *Service) VerifyMark(ctx context.Context, artifactID string, kind MarkKind, id string) (Anchored, error) {
+	if kind == MarkComment {
+		ctx = commentMarkOperation(ctx)
+	}
 	updates := make(chan struct{}, 1)
 	var unsubscribe func()
 	err := s.srv.Apply(ctx, artifactID, func(doc *crdt.Doc, _ func(func(*crdt.Transaction))) {
@@ -212,9 +220,10 @@ func (s *Service) BlockForQuote(ctx context.Context, artifactID, quote string) (
 	return pmdoc.BlockIDForRange(tree, r)
 }
 
-// SuggestionKind returns the kind recorded on a verified browser or server suggestion mark.
+// SuggestionKind returns the kind recorded on a verified browser or server suggestion mark. A
+// reply's projection of its thread root reads it under WithCommentMarks on a closed issue too.
 func (s *Service) SuggestionKind(ctx context.Context, artifactID, id string) (string, error) {
-	tree, err := s.docTree(ctx, artifactID)
+	tree, err := s.docTree(commentMarkOperation(ctx), artifactID)
 	if err != nil {
 		return "", err
 	}
@@ -409,13 +418,15 @@ func suggestionKind(attrs pmdoc.Attrs, id string) (string, error) {
 	}
 }
 
-// ProjectMark writes a comment or suggestion record for Proof's margin projection.
+// ProjectMark writes a comment or suggestion record for Proof's margin projection. Under
+// WithCommentMarks - a comment's own record, or its thread root's that a reply adds itself to -
+// it is written on a closed issue's document too.
 func (s *Service) ProjectMark(ctx context.Context, artifactID, markID string, record MarkRecord, actor model.Actor) error {
 	plain, err := toPlain(record)
 	if err != nil {
 		return err
 	}
-	return s.applyLive(ctx, artifactID, actor, func(doc *crdt.Doc, _ *pmdoc.Node, transact func(func(*crdt.Transaction))) error {
+	return s.applyLive(commentMarkOperation(ctx), artifactID, actor, func(doc *crdt.Doc, _ *pmdoc.Node, transact func(func(*crdt.Transaction))) error {
 		marks := doc.GetMap(marksMapName)
 		transact(func(txn *crdt.Transaction) {
 			marks.Set(txn, markID, plain)

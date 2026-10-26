@@ -96,24 +96,24 @@ func (s *server) requireOpenOwner(ctx context.Context, tx pgx.Tx, owner owner) e
 // requireOpenOwnerStatus also returns the lifecycle status for an issue owner.
 // Project documents have no issue status and return nil.
 func (s *server) requireOpenOwnerStatus(ctx context.Context, tx pgx.Tx, owner owner) (*string, error) {
-	return ownerOpenStatus(ctx, tx, owner, ownerRowLock)
+	return ownerStatus(ctx, tx, owner, ownerRowLock, true)
 }
 
 // ownerRowLock is the clause a refusal adds when it runs inside the transaction that will
 // write, so the owner it decides on cannot close underneath that write.
 const ownerRowLock = " for no key update"
 
-// ownerOpenStatus is the refusal table an owner gets, spelled once for both the check that
-// decides and the one that only spares work: an owner naming neither an issue nor a document,
-// an issue that is closed, a document that does not exist. q is the transaction whose lock the
-// refusal takes, or the pool for a read made before any transaction opens; lock is that lock's
-// clause, empty for the unlocked read.
-func ownerOpenStatus(ctx context.Context, q queryer, owner owner, lock string) (*string, error) {
+// ownerStatus is the refusal table an owner gets, spelled once for both the check that decides
+// and the one that only spares work: an owner naming neither an issue nor a document, an issue
+// that is closed (when refuseClosed says the write refuses one), a document that does not
+// exist. q is the transaction whose lock the refusal takes, or the pool for a read made before
+// any transaction opens; lock is that lock's clause, empty for the unlocked read.
+func ownerStatus(ctx context.Context, q queryer, owner owner, lock string, refuseClosed bool) (*string, error) {
 	if (owner.IssueKey == nil) == (owner.ArtifactID == nil) {
 		return nil, errorf(http.StatusBadRequest, "OWNER_INVALID", "owner requires exactly one issue or artifact")
 	}
 	if owner.IssueKey != nil {
-		status, err := issueOpenStatus(ctx, q, *owner.IssueKey, lock)
+		status, err := issueStatus(ctx, q, *owner.IssueKey, lock, refuseClosed)
 		if err != nil {
 			return nil, err
 		}
@@ -130,17 +130,17 @@ func ownerOpenStatus(ctx context.Context, q queryer, owner owner, lock string) (
 	return nil, nil
 }
 
-// refuseClosedOwnerBeforeResolving answers, from the pool and locking nothing, the refusal
-// requireOpenOwnerStatus will make under the owner's lock. A comment that mentions anyone
+// refuseOwnerBeforeResolving answers, from the pool and locking nothing, the refusal the
+// comment's locked owner check will make (lockCommentOwner). A comment that mentions anyone
 // resolves every mention against the Envoy listener before its transaction opens, and an owner
-// that does not exist or is already closed refuses the comment whatever the listener says, so
-// a request that cannot be written costs no listener call at all. The locked check still
-// decides; this one only spares the calls, and takes no lock of its own so a comment on a busy
-// owner waits for that lock once rather than twice.
-func (s *server) refuseClosedOwnerBeforeResolving(ctx context.Context, owner owner) error {
+// that does not exist - or, for a suggestion, is already closed - refuses the comment whatever
+// the listener says, so a request that cannot be written costs no listener call at all. The
+// locked check still decides; this one only spares the calls, and takes no lock of its own so
+// a comment on a busy owner waits for that lock once rather than twice.
+func (s *server) refuseOwnerBeforeResolving(ctx context.Context, owner owner, refuseClosed bool) error {
 	if s.deps.Store == nil || s.deps.Store.Pool == nil {
 		return errorf(http.StatusServiceUnavailable, "DATABASE_UNAVAILABLE", "database unavailable")
 	}
-	_, err := ownerOpenStatus(ctx, s.deps.Store.Pool, owner, "")
+	_, err := ownerStatus(ctx, s.deps.Store.Pool, owner, "", refuseClosed)
 	return err
 }
