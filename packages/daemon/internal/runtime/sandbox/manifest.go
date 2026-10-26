@@ -723,10 +723,10 @@ const scratchRoot = TreeRoot + "/scratch"
 // roleEnvironment is where a role's agent puts what it writes without being told where:
 // its temporary directory, the three XDG homes a tool caches under, and the three tool caches that
 // resolve to a path of their own (Go's build and module caches, bun's install cache). Every one of
-// them is on the issue's volume, where neither the gigabyte of ephemeral storage the container is
-// admitted with nor the pod's memory bounds it: a bun install cache alone is 1.4 GB for this
-// repository, and charging it to the container's filesystem is what GKE Autopilot evicted issue
-// pods for. All but the state home are the issue's, one directory every role of it is told the
+// them is on the issue's volume, where neither the pod's ephemeral storage nor the pod's memory
+// bounds it: a bun install cache alone is 1.4 GB for this repository, and charging it to the
+// container's filesystem is what GKE Autopilot evicted issue pods for. All but the state home are
+// the issue's, one directory every role of it is told the
 // same: the temporary directory, the cache and data homes and bun's install cache directly under
 // scratchRoot, and the two Go caches (goBuildCache, goModCache), as uv's cache already was
 // (uvCacheDir). A directory per role is what this replaces, by the human's decision of
@@ -772,10 +772,10 @@ func roleEnvironment(role claim.Role) []corev1.EnvVar {
 // visibly apart and no role's name can collide with a shared directory's. The shim makes Oh My
 // Pi's profile directory under it before Oh My Pi starts (podsafety.EnsureStateHome), since Oh My
 // Pi reads the variable only where that directory exists. It is on the issue's volume, which is
-// neither the pod's memory nor the gigabyte of ephemeral storage the container is admitted with,
-// so Oh My Pi's logs, Chromium's `browser-profiles` and the plugin generation an installing launch
-// puts there (plugins.go) are charged to neither — and, unlike both, the state home outlives a
-// restart of the `roles` container, though not the pod, whose own ephemeral volume the issue's disk is.
+// neither the pod's memory nor the pod's ephemeral storage, so Oh My Pi's logs, Chromium's
+// `browser-profiles` and the plugin generation an installing launch puts there (plugins.go) are
+// charged to neither — and, unlike both, the state home outlives a restart of the `roles`
+// container, though not the pod, whose own ephemeral volume the issue's disk is.
 func roleStateHome(role claim.Role) string {
 	return scratchRoot + "/state/" + string(role)
 }
