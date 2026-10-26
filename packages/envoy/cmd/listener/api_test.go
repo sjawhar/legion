@@ -724,7 +724,7 @@ func TestResolveLiveRoleHolderReresolvesSupersededClaim(t *testing.T) {
 		},
 	}
 
-	result, err := resolveLiveRoleHolder(resolver, sessions, "reviewer")
+	result, err := resolveLiveRoleHolder(context.Background(), resolver, sessions, "reviewer")
 	if err != nil {
 		t.Fatalf("resolve superseded role holder: %v", err)
 	}
@@ -751,7 +751,7 @@ func TestRoleHolderLapsedResponseDoesNotClaimConcurrentRemoval(t *testing.T) {
 		},
 	}
 
-	result, err := resolveLiveRoleHolder(resolver, sessions, role)
+	result, err := resolveLiveRoleHolder(context.Background(), resolver, sessions, role)
 	if err != nil {
 		t.Fatalf("resolve concurrently removed role holder: %v", err)
 	}

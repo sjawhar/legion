@@ -933,8 +933,9 @@ func (c *Client) PublishCoreTo(subject string, item contracts.Envelope) error {
 // cancel that lands after the second read here: the publish goes ahead and is answered as if ctx
 // were still live, since a core publish is on its way the moment it is made and no answer can
 // recall it. What makes a spent deadline reachable at all is publishHandler
-// (cmd/listener/api.go), whose holder lookup does not take the route's own context and can spend
-// it on a slow bus before the publish begins.
+// (cmd/listener/api.go), whose role-holder resolution shares the route's own context with the
+// publish: a resolution that answers just as that context's deadline arrives hands the publish a
+// deadline already spent.
 func (c *Client) publishCoreTo(ctx context.Context, subject string, item contracts.Envelope) error {
 	if err := checkSubject(subject); err != nil {
 		return err

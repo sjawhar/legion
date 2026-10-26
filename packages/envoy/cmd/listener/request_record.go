@@ -4,7 +4,6 @@
 package main
 
 import (
-	"fmt"
 	"log/slog"
 	"net/http"
 
@@ -112,16 +111,13 @@ func (rec *requestRecord) refuseBusUnavailable(w http.ResponseWriter, err error)
 }
 
 // refuseRoleHolderChanged answers a publish whose role claim moved under the resolution
-// (errRoleHolderChanged). The 503 and the Retry-After are the same ask as a bus that did not
-// answer - a fresh read wins this race as soon as the replacement claim settles - but the body
-// and the record are not: every bus read answered, so naming it bus_unavailable would send an
-// operator after an outage that never happened, and the route's record is where "never
-// attempted" is told from "attempted and refused" afterwards.
+// (errRoleHolderChanged) with the 503, Retry-After and body writeRoleHolderChanged writes for both
+// routes that resolve a role, and records it under its own outcome rather than bus_unavailable:
+// every bus read answered, so naming it bus_unavailable would send an operator after an outage
+// that never happened, and the route's record is where "never attempted" is told from "attempted
+// and refused" afterwards.
 func (rec *requestRecord) refuseRoleHolderChanged(w http.ResponseWriter, role string) {
-	w.Header().Set("Retry-After", "1")
-	rec.refuse(w, http.StatusServiceUnavailable, outcomeRoleHolderChanged, fmt.Sprintf(
-		"envoy: the holder of role %s changed while this publish was resolving it", role,
-	))
+	rec.write(writeRoleHolderChanged(w, role, "publish"), outcomeRoleHolderChanged)
 }
 
 // refuseRoleHolder answers the publish route's two role-holder refusals. A lapsed holder is the

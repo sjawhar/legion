@@ -351,11 +351,10 @@ func senderStamp(registry *store.Registry, sessions *session.SessionRegistry, so
 	return sender
 }
 
-// sendRequestBudget is the bus work a send or a publish does under the request's own context: the
-// send route's read of the target session and both routes' publish share it. The publish route's
-// role-holder read does not take it - resolveLiveRoleHolder reads through roleHolderSession, which
-// bounds itself at roleHolderReadTimeout from a context of its own, up to
-// roleHolderResolutionAttempts times. The HTTP client gives each attempt 5 s
+// sendRequestBudget is the bus work a send, a publish or a role lookup does under the request's own
+// context: the send route's read of the target session, the publish route's resolution of a role
+// lane's holder (resolveLiveRoleHolder, every attempt of it) and both routes' publish share it, and
+// GET /v1/roles/<role> resolves its holder within it too. The HTTP client gives each attempt 5 s
 // (packages/envoy-client/src/transport.ts) and this listener's HTTP write timeout is 10 s
 // (main.go), so answering inside 3.5 s leaves the rest for TLS, scheduling and the body: a sender
 // whose bus cannot be reached reads the 503 that names the reason, in time to act on it, instead
@@ -364,7 +363,7 @@ const sendRequestBudget = 3500 * time.Millisecond
 
 // sendSessionReadTimeout bounds the send route's read of the target session from the bucket, so a
 // bucket that does not answer still leaves the publish most of sendRequestBudget (~2.5 s). The role
-// paths keep roleHolderReadTimeout instead: no caller holds this deadline over them.
+// paths keep roleHolderReadTimeout as their per-read cap instead.
 const sendSessionReadTimeout = 1 * time.Second
 
 // sendHandler publishes a direct message only while the session store itself, not merely this
@@ -501,14 +500,10 @@ func publishHandler(d *listenerDeps, logger *logging.Logger) http.HandlerFunc {
 			record.refuse(w, http.StatusMethodNotAllowed, outcomeInvalidRequest, "method not allowed")
 			return
 		}
-		// The publish below takes this deadline, derived from the caller's own context, so this
-		// route too answers a bus it cannot reach rather than spending the caller's attempt. The
-		// role-holder read above it does not: resolveLiveRoleHolder takes no context, and the
-		// roleHolderSession it calls reads under context.Background() with roleHolderReadTimeout
-		// per attempt, up to roleHolderResolutionAttempts, so a role-lane publish can spend more
-		// than sendRequestBudget before the bounded publish begins. Bounding that read by this
-		// context would change a path this change did not set out to change; the residual is
-		// recorded in the pull request's Not proven / risk instead.
+		// Every bus call below - the role-holder resolution of a role lane and the publish - takes
+		// this one deadline, derived from the caller's own context, so this route too answers a bus
+		// it cannot reach rather than spending the caller's attempt: a resolution that runs it out
+		// is the 503 below, and one that leaves little of it leaves the publish only that little.
 		ctx, cancel := context.WithTimeout(r.Context(), sendRequestBudget)
 		defer cancel()
 		var request struct {
@@ -570,7 +565,7 @@ func publishHandler(d *listenerDeps, logger *logging.Logger) http.HandlerFunc {
 		result := roleHolderResult{state: roleHolderLive}
 		if role, ok := strings.CutPrefix(request.Topic, contracts.RoleTopicPrefix); ok {
 			var err error
-			result, err = resolveLiveRoleHolder(d.registry, d.sessions, role)
+			result, err = resolveLiveRoleHolder(ctx, d.registry, d.sessions, role)
 			if errors.Is(err, errRoleHolderChanged) {
 				// The claim moved while it was being resolved: the role has a holder, this
 				// publish simply never got a settled one to forward to. Retrying is right, so
@@ -580,9 +575,9 @@ func publishHandler(d *listenerDeps, logger *logging.Logger) http.HandlerFunc {
 				return
 			}
 			if err != nil {
-				// A role holder read that did not answer says nothing about the role: the claim is
-				// not resolved, so the caller is asked to try again rather than told the role has
-				// no live holder.
+				// A role holder read that did not answer - within its own cap or within this
+				// request's budget - says nothing about the role: the claim is not resolved, so the
+				// caller is asked to try again rather than told the role has no live holder.
 				record.refuseBusUnavailable(w, err)
 				return
 			}
@@ -851,6 +846,13 @@ func roleSetHandler(d *listenerDeps, machineID string) http.HandlerFunc {
 	}
 }
 
+// roleGetHandler answers GET /v1/roles/<role> with the role's live holder. It resolves the holder
+// within sendRequestBudget of the request's own context, as a role-lane publish does, so a bus that
+// does not answer is reported inside the caller's attempt. A resolution that lost the race for the
+// role's claim (errRoleHolderChanged) is the publish route's 503 with Retry-After: 1, worded for a
+// lookup, since every read answered and a fresh lookup wins the race once the replacement claim
+// settles. Any other failure, a read that did not answer within its cap or that budget among them,
+// keeps this route's 500 (or the 413 and 400 writeNATSError gives a refused key).
 func roleGetHandler(d *listenerDeps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
@@ -862,7 +864,13 @@ func roleGetHandler(d *listenerDeps) http.HandlerFunc {
 			writeJSONError(w, http.StatusBadRequest, "role is required", "role")
 			return
 		}
-		result, err := resolveLiveRoleHolder(d.registry, d.sessions, role)
+		ctx, cancel := context.WithTimeout(r.Context(), sendRequestBudget)
+		defer cancel()
+		result, err := resolveLiveRoleHolder(ctx, d.registry, d.sessions, role)
+		if errors.Is(err, errRoleHolderChanged) {
+			writeRoleHolderChanged(w, role, "lookup")
+			return
+		}
 		if err != nil {
 			writeNATSError(w, err, http.StatusInternalServerError, err.Error())
 			return

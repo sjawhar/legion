@@ -91,6 +91,48 @@ func writeRoleHolderError(w http.ResponseWriter, role string, result roleHolderR
 
 const roleHolderResolutionAttempts = 2
 
+// writeRoleHolderChanged answers a role-holder resolution that lost the race for the role's claim
+// (errRoleHolderChanged), for both routes that resolve one: asking is what the caller asked for, a
+// "publish" or a "lookup". The 503 and the Retry-After are the same ask as a bus that did not
+// answer - a fresh read wins this race as soon as the replacement claim settles - but the body is
+// not: every bus read answered, so it names the race rather than an outage that never happened. It
+// returns the status it wrote, for the publish route's record (refuseRoleHolderChanged).
+func writeRoleHolderChanged(w http.ResponseWriter, role, asking string) int {
+	w.Header().Set("Retry-After", "1")
+	writeJSONError(w, http.StatusServiceUnavailable, fmt.Sprintf(
+		"envoy: the holder of role %s changed while this %s was resolving it", role, asking,
+	))
+	return http.StatusServiceUnavailable
+}
+
+// withinContext is call, a store call that takes no context, as a caller holding ctx waits for it:
+// nats.go's KV reads and deletes take none and wait out the JetStream MaxWait, so the wait ends at
+// the earlier of call's answer and ctx's end, and an ended ctx is reported as what did not answer.
+// An abandoned call runs on to its own end and its answer is dropped. A ctx that can never end
+// (context.Background, as the callers that answer no request pass) is simply call, in this
+// goroutine.
+func withinContext[T any](ctx context.Context, what string, call func() (T, error)) (T, error) {
+	if ctx.Done() == nil {
+		return call()
+	}
+	type answer struct {
+		value T
+		err   error
+	}
+	answered := make(chan answer, 1)
+	go func() {
+		value, err := call()
+		answered <- answer{value: value, err: err}
+	}()
+	select {
+	case got := <-answered:
+		return got.value, got.err
+	case <-ctx.Done():
+		var zero T
+		return zero, fmt.Errorf("%s: %w", what, ctx.Err())
+	}
+}
+
 // releaseExpiredRoleClaim is the single point in the listener that
 // interprets store.ExpiredRoleClaimRelease's ExpiredRoleClaimSuperseded
 // outcome. Both resolveLiveRoleHolder (HTTP role lookups) and
@@ -101,10 +143,19 @@ const roleHolderResolutionAttempts = 2
 // ExpiredRoleClaimSuperseded is exactly how a live replacement holder ends
 // up reported as this call's stale verdict — the defect this helper exists
 // to make structurally impossible.
-func releaseExpiredRoleClaim(registry roleClaimResolver, role, sessionID string, sessionTTL time.Duration) (release store.ExpiredRoleClaimRelease, superseded bool, err error) {
-	release, err = registry.ReleaseExpiredRoleClaim(role, sessionID, sessionTTL)
+//
+// The release waits no longer than ctx: a route passes its request's own context, role delivery
+// context.Background(). A release ctx abandoned is reported retained with ctx's error, and may
+// still land after that answer. That is safe to leave running: it deletes the claim only if the
+// bucket still holds the very revision it read, naming sessionID, whom the caller has just found
+// gone from the session bucket, so at worst a lapsed holder's claim is released a moment after the
+// caller was told the bus did not answer, and a fresh claim that landed meanwhile is never touched.
+func releaseExpiredRoleClaim(ctx context.Context, registry roleClaimResolver, role, sessionID string, sessionTTL time.Duration) (release store.ExpiredRoleClaimRelease, superseded bool, err error) {
+	release, err = withinContext(ctx, fmt.Sprintf("release role %s's expired claim held by %s", role, sessionID), func() (store.ExpiredRoleClaimRelease, error) {
+		return registry.ReleaseExpiredRoleClaim(role, sessionID, sessionTTL)
+	})
 	if err != nil {
-		return release, false, err
+		return store.ExpiredRoleClaimRetained, false, err
 	}
 	return release, release == store.ExpiredRoleClaimSuperseded, nil
 }
@@ -123,8 +174,8 @@ func releaseExpiredRoleClaim(registry roleClaimResolver, role, sessionID string,
 // session that ended from one it has not caught up with. nats.ErrKeyNotFound is the bucket's word
 // that the session is gone or fails live; any other error is a read that did not answer, on which
 // nothing is taken from a holder and no send is refused as unaddressed. The bucket read gets bound,
-// derived from ctx, so a lookup that cannot read the bucket answers its 500, a soft claim and a
-// send their 503, inside the deadline their own caller holds.
+// derived from ctx, so a lookup that cannot read the bucket answers its 500, a soft claim, a
+// role-lane publish and a send their 503, inside the deadline their own caller holds.
 func liveSessionEntry(
 	ctx context.Context,
 	sessions *session.SessionRegistry,
@@ -144,12 +195,14 @@ func liveSessionEntry(
 	return entry, err
 }
 
-// roleHolderSession is liveSessionEntry as the role paths ask it. They carry no request context of
-// their own - the reaper and role delivery answer no caller at all - and they share one bound, so
-// every decision that can take a role from its holder waits the same roleHolderReadTimeout out of
-// one place rather than out of each call site. It is also the read behind the per-session route
-// GET /v1/registry/<session_id>, whose caller is likewise about to decide that a session is gone,
-// and which therefore reads through to the bucket for the same reason a send does.
+// roleHolderSession is liveSessionEntry as the role paths that hold no request context ask it: the
+// reaper and role delivery answer no caller at all, and a soft claim keeps the bound it had. They
+// share one bound, so every such decision that can take a role from its holder waits the same
+// roleHolderReadTimeout out of one place rather than out of each call site. The two routes that
+// resolve a role's holder (GET /v1/roles/<role> and a role-lane publish) do not come here:
+// resolveLiveRoleHolder reads under their request's own context. It is also the read behind the
+// per-session route GET /v1/registry/<session_id>, whose caller is likewise about to decide that a
+// session is gone, and which therefore reads through to the bucket for the same reason a send does.
 func roleHolderSession(sessions *session.SessionRegistry, sessionID string, live func(session.SessionEntry) bool) (session.SessionEntry, error) {
 	return liveSessionEntry(context.Background(), sessions, sessionID, roleHolderReadTimeout, live)
 }
@@ -158,8 +211,10 @@ func roleHolderSession(sessions *session.SessionRegistry, sessionID string, live
 // the session they name: any entry.
 func registered(session.SessionEntry) bool { return true }
 
-// roleHolderReadTimeout bounds the role paths' bucket read, well inside the listener's 10 s HTTP
-// write timeout (main.go) and the 10 s JetStream MaxWait the read would otherwise wait out.
+// roleHolderReadTimeout bounds each of the role paths' session-bucket reads, well inside the
+// listener's 10 s HTTP write timeout (main.go) and the 10 s JetStream MaxWait the read would
+// otherwise wait out. resolveLiveRoleHolder's read is bounded by its caller's context as well, and
+// so ends at the earlier of the two.
 const roleHolderReadTimeout = 2 * time.Second
 
 // errRoleHolderChanged is resolveLiveRoleHolder's answer when every one of
@@ -167,22 +222,35 @@ const roleHolderReadTimeout = 2 * time.Second
 // session gone and lost its conditional release to a fresh claim another writer had already
 // installed. Every bus read answered, so this is a lost compare-and-swap against a live
 // replacement holder and not a bus failure, and a caller recognises it rather than sweeping it in
-// with the reads that did not answer (publishHandler).
+// with the reads that did not answer (publishHandler, roleGetHandler).
 var errRoleHolderChanged = errors.New("role holder changed while resolving")
 
-func resolveLiveRoleHolder(registry roleClaimResolver, sessions *session.SessionRegistry, role string) (roleHolderResult, error) {
+// resolveLiveRoleHolder resolves role's live holder for an HTTP route, inside ctx: the route's own
+// request context bounded by sendRequestBudget, so a bus that does not answer is reported to the
+// caller within its attempt rather than after it. Every bus call it makes waits no longer than ctx:
+// the claim read and the conditional release through withinContext (neither store call takes a
+// context), the holder's session read through liveSessionEntry, which also keeps
+// roleHolderReadTimeout as its own cap, and a second attempt is not started once ctx has ended.
+// An ended ctx is returned wrapped, naming the call that did not answer, and is answered as a bus
+// that did not answer.
+func resolveLiveRoleHolder(ctx context.Context, registry roleClaimResolver, sessions *session.SessionRegistry, role string) (roleHolderResult, error) {
 	for range roleHolderResolutionAttempts {
-		claim, err := registry.RoleClaim(role)
+		if err := ctx.Err(); err != nil {
+			return roleHolderResult{}, fmt.Errorf("resolve role %s's holder: %w", role, err)
+		}
+		claim, err := withinContext(ctx, fmt.Sprintf("read role %s's claim", role), func() (store.RoleClaim, error) {
+			return registry.RoleClaim(role)
+		})
 		if err != nil {
 			return roleHolderResult{}, err
 		}
 		if claim.HolderSessionID == "" {
 			return roleHolderResult{state: roleHolderUnclaimed}, nil
 		}
-		entry, err := roleHolderSession(sessions, claim.HolderSessionID, registered)
+		entry, err := liveSessionEntry(ctx, sessions, claim.HolderSessionID, roleHolderReadTimeout, registered)
 		if errors.Is(err, nats.ErrKeyNotFound) {
 			lastSeen := sessions.LastSeen(claim.HolderSessionID)
-			release, superseded, err := releaseExpiredRoleClaim(registry, role, claim.HolderSessionID, sessions.TTL())
+			release, superseded, err := releaseExpiredRoleClaim(ctx, registry, role, claim.HolderSessionID, sessions.TTL())
 			if err != nil {
 				return roleHolderResult{}, fmt.Errorf("drop expired role claim: %w", err)
 			}

@@ -358,7 +358,7 @@ func resolveCoreRoleHolder(cfg listenerDeliveryHandlerConfig, item contracts.Env
 			})
 			return "", session.SessionEntry{}, false
 		}
-		_, superseded, err := releaseExpiredRoleClaim(cfg.registry, role, sessionID, cfg.sessions.TTL())
+		_, superseded, err := releaseExpiredRoleClaim(context.Background(), cfg.registry, role, sessionID, cfg.sessions.TTL())
 		if err != nil {
 			applyDeliveryOutcome(cfg, item, deliveryOutcome{
 				sessionID:    sessionID,
