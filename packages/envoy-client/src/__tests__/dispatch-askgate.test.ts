@@ -27,6 +27,10 @@ import { pruneSessions } from "../dispatch-session-state";
 interface Recorded {
   readonly method: string;
   readonly path: string;
+  /** The session's ledger as it stood when the request arrived. */
+  readonly ledger: string;
+  /** What a JSON request posted, or an upload's file as text. */
+  readonly sent?: unknown;
 }
 
 const posts: Recorded[] = [];
@@ -34,21 +38,37 @@ const server = Bun.serve({
   port: 0,
   async fetch(request) {
     const { pathname } = new URL(request.url);
-    posts.push({ method: request.method, path: pathname });
-    if (pathname === "/api/v1/issues/DSP-1/messages" && request.method === "POST") {
+    const ledgerFile = join(stateDir, "sessions", "ses-1", "results.jsonl");
+    const ledgerText = existsSync(ledgerFile) ? readFileSync(ledgerFile, "utf-8") : "";
+    const record = (sent?: unknown) =>
+      posts.push({ method: request.method, path: pathname, ledger: ledgerText, sent });
+    if (request.method === "POST" && pathname === ARTIFACTS) {
+      const file = (await request.formData()).get("file");
+      record(file instanceof Blob ? await file.text() : undefined);
+      return Response.json({
+        artifact: { id: "artifact-1", issue_key: "DSP-1", name: "brief.md", slug: "brief-md" },
+        version: { number: 1 },
+      });
+    }
+    if (request.method === "POST" && (pathname === MESSAGES || pathname === COMMENTS)) {
+      record(await request.json());
       return Response.json({
         id: "message-1",
         issue_key: "DSP-1",
         advice: { issue_status: "in_progress", session_writes_since_human: 0, your_open_asks: [] },
       });
     }
+    record();
     return Response.json({ error: `unexpected ${request.method} ${pathname}` }, { status: 500 });
   },
 });
 afterAll(() => server.stop(true));
 
 const MESSAGES = "/api/v1/issues/DSP-1/messages";
-const messagePosts = () => posts.filter((p) => p.method === "POST" && p.path === MESSAGES);
+const COMMENTS = "/api/v1/issues/DSP-1/comments";
+const ARTIFACTS = "/api/v1/issues/DSP-1/artifacts";
+const postsTo = (route: string) => posts.filter((p) => p.method === "POST" && p.path === route);
+const messagePosts = () => postsTo(MESSAGES);
 
 let stateDir = "";
 beforeEach(() => {
@@ -261,16 +281,37 @@ describe("AskGate at the dispatch CLI", () => {
     expect(existsSync(left)).toBe(false);
   });
 
-  test("in warn mode a write with no marker posts, warns, and is logged for the report", async () => {
+  // The attack on the marker design at cf3f1e021, N4: the ledger line that tells pi-envoy a write
+  // went out unreviewed was written after the post, so a ledger that failed then hid the write.
+  // In warn mode the CLI now writes that line on its own before it sends, and the result's line
+  // after it carries no `askgate` field, so the report counts the write once.
+  test("in warn mode a write with no marker is logged first, then posts and warns", async () => {
     writeRecord("ses-1", undefined, "warn");
     const { code, stdout } = await run(MESSAGE);
     expect(code).toBe(0);
     expect(messagePosts()).toHaveLength(1);
+    const [line] = messagePosts()[0]?.ledger.split("\n") ?? [];
+    expect(JSON.parse(line ?? "")).toMatchObject({
+      tool: "dispatch_message",
+      askgate: { mode: "warn", why: "this call carries no AskGate marker" },
+    });
     expect(stdout).toContain("dispatch: warning: AskGate is on for this session in warn mode");
     expect(cliRefusals(stdout)).toEqual([]);
-    expect(ledger()).toMatchObject([
-      { tool: "dispatch_message", askgate: { mode: "warn", why: expect.any(String) } },
-    ]);
+    const [before, after, ...rest] = ledger();
+    expect(rest).toEqual([]);
+    expect(before).not.toHaveProperty("details");
+    expect(after).toMatchObject({ tool: "dispatch_message", details: expect.any(Object) });
+    expect(after).not.toHaveProperty("askgate");
+  });
+
+  test("in warn mode a write with no marker whose ledger line cannot be written does not post", async () => {
+    writeRecord("ses-1", undefined, "warn");
+    mkdirSync(join(stateDir, "sessions", "ses-1", "results.jsonl"));
+    const { code, stdout } = await run(MESSAGE);
+    expect(code).toBe(1);
+    expect(stdout).toStartWith("dispatch message was not called:");
+    expect(stdout).toContain("could not be written");
+    expect(messagePosts()).toHaveLength(0);
   });
 
   test("with no record the write posts and nothing is required", async () => {

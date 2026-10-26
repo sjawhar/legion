@@ -39,9 +39,11 @@ export interface ResultEntry {
   readonly details?: unknown;
   readonly error?: string;
   /**
-   * A gated write AskGate's record required a marker for, and which carried none: refused in
-   * `block` mode (`error` holds the refusal), posted with a warning in `warn` mode. pi-envoy turns
-   * each into an `advisor-gate` entry, so the report counts it.
+   * A gated write AskGate's record required a marker for, and which carried none or one whose
+   * file or arguments differ: refused in `block` mode (`error` holds the refusal); in `warn` mode a
+   * line of its own, with neither `details` nor `error`, written before the write is sent, and the
+   * result's own line after it. pi-envoy turns each into an `advisor-gate` entry, so the report
+   * counts it.
    */
   readonly askgate?: { readonly mode: "warn" | "block"; readonly why: string };
 }

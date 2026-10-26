@@ -306,7 +306,6 @@ export async function runDispatchCli(
   // AskGate: a session a live Oh My Pi process records with its gate bound (`askgate.json` in
   // this directory) posts a gated write only with one marker the gate minted for this exact argv,
   // whatever ran the CLI. A session no live process records needs none.
-  let unmarked: ResultInput["askgate"];
   if (gatedWrite(parsed.tool, parsed.args)) {
     const notCalled = `dispatch ${commandName(parsed.tool)} was not called:`;
     try {
@@ -330,7 +329,18 @@ export async function runDispatchCli(
           );
         }
         if (!spent.ok) {
-          unmarked = { mode: "warn", why: spent.why };
+          // The ledger line that tells pi-envoy this write went out unreviewed is written before
+          // the write is sent, on its own: a ledger that cannot take it stops the write here, so
+          // no unreviewed write posts unrecorded.
+          try {
+            appendResult(dir, { tool: parsed.tool, askgate: { mode: "warn", why: spent.why } });
+          } catch (error) {
+            return refuse(
+              `${notCalled} AskGate is on for this session in warn mode, and ${spent.why}. A write that posts unreviewed is first recorded in this session's ledger, and the ledger could not be written: ${messageFor(error)}.`,
+              REFUSED,
+              parsed.tool
+            );
+          }
           print(
             `dispatch: warning: AskGate is on for this session in warn mode, and ${spent.why}, so this write posts unreviewed. ${LITERAL_FORM} Send the next one in that form.`
           );
@@ -417,15 +427,11 @@ export async function runDispatchCli(
       follows.add(followed.ask);
       notes.push(followNoticeText(followed, await subscriptions()));
     }
-    entry = {
-      tool,
-      details: result.details,
-      ...(unmarked === undefined ? {} : { askgate: unmarked }),
-    };
+    entry = { tool, details: result.details };
     code = OK;
   } catch (error) {
     text = messageFor(error);
-    entry = { tool, error: text, ...(unmarked === undefined ? {} : { askgate: unmarked }) };
+    entry = { tool, error: text };
     code = REFUSED;
   }
   try {
