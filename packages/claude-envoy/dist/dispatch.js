@@ -18868,6 +18868,10 @@ function writeMemory(dir, sessionId, follows) {
   writeAtomically(join(dir, "state.json"), `${JSON.stringify(state)}
 `);
 }
+function appendResult(dir, entry) {
+  ensureDirectory(dir);
+  writeResult(dir, entry);
+}
 function writeResult(dir, entry) {
   const line = { at: new Date().toISOString(), ...entry };
   appendFileSync(join(dir, "results.jsonl"), `${JSON.stringify(line)}
@@ -20003,45 +20007,49 @@ async function runDispatchCli(argv, rawEnv, io) {
     if (value !== undefined && value !== "")
       env[name] = value;
   }
+  const refuse = (text2, code2, tool2) => {
+    print(text2);
+    const sessionId2 = env.CLAUDE_CODE_SESSION_ID ?? env.DISPATCH_SESSION_ID;
+    if (sessionId2 !== undefined) {
+      try {
+        appendResult(sessionDirectory(env, sessionId2), {
+          tool: tool2 ?? "dispatch",
+          error: text2.trimEnd()
+        });
+      } catch {}
+    }
+    return code2;
+  };
   let parsed;
   try {
     parsed = parseCommand(argv, io);
   } catch (error48) {
-    print(`dispatch: ${messageFor(error48)}`);
-    return USAGE;
+    return refuse(`dispatch: ${messageFor(error48)}`, USAGE);
   }
   if (parsed.kind === "help") {
     print(parsed.tool === undefined ? commandsHelp() : commandHelp(parsed.tool));
     return OK;
   }
   if (parsed.kind === "refused") {
-    if (parsed.tool === undefined) {
-      print([`dispatch: ${parsed.problems.join(`
+    return parsed.tool === undefined ? refuse([`dispatch: ${parsed.problems.join(`
 `)}`, "Run dispatch --help."].join(`
-`));
-      return USAGE;
-    }
-    print(new ToolInputError(parsed.tool, parsed.problems).message);
-    return REFUSED;
+`), USAGE) : refuse(new ToolInputError(parsed.tool, parsed.problems).message, REFUSED, parsed.tool);
   }
   const hostName = env.DISPATCH_HOST ?? (env.CLAUDE_CODE_CHILD_SESSION === "1" ? "claude" : undefined);
   const host = HOSTS.find((name) => name === hostName);
   if (host === undefined) {
-    print(hostName === undefined ? "dispatch: DISPATCH_HOST is not set. The host plugin sets it in an agent's shell; to run dispatch by hand, set DISPATCH_HOST and DISPATCH_SESSION_ID yourself." : `dispatch: DISPATCH_HOST is ${JSON.stringify(hostName)}, not omp, claude or opencode.`);
-    return USAGE;
+    return refuse(hostName === undefined ? "dispatch: DISPATCH_HOST is not set. The host plugin sets it in an agent's shell; to run dispatch by hand, set DISPATCH_HOST and DISPATCH_SESSION_ID yourself." : `dispatch: DISPATCH_HOST is ${JSON.stringify(hostName)}, not omp, claude or opencode.`, USAGE, parsed.tool);
   }
   const sessionVariable = host === "claude" ? "CLAUDE_CODE_SESSION_ID" : "DISPATCH_SESSION_ID";
   const sessionId = env[sessionVariable];
   if (sessionId === undefined) {
-    print(`dispatch: ${sessionVariable} is not set, so this call has no session to act as. The host plugin sets it in an agent's shell.`);
-    return USAGE;
+    return refuse(`dispatch: ${sessionVariable} is not set, so this call has no session to act as. The host plugin sets it in an agent's shell.`, USAGE, parsed.tool);
   }
   let dir;
   try {
     dir = sessionDirectory(env, sessionId);
   } catch (error48) {
-    print(messageFor(error48));
-    return USAGE;
+    return refuse(messageFor(error48), USAGE, parsed.tool);
   }
   const file2 = (env.DISPATCH_HOST === undefined ? null : handedConfigFile(env)) ?? sessionConfigFile(host, env);
   if (parsed.dryRun) {
@@ -20054,22 +20062,19 @@ async function runDispatchCli(argv, rawEnv, io) {
       serverUrls: settings?.enabled === true ? dispatchServerUrls(settings) : []
     });
     if (problems2.length > 0) {
-      print(new ToolInputError(parsed.tool, problems2).message);
-      return REFUSED;
+      return refuse(new ToolInputError(parsed.tool, problems2).message, REFUSED, parsed.tool);
     }
     print(JSON.stringify(parsed.args, null, 2));
     return OK;
   }
   if (file2.path === null) {
-    print(`dispatch: ${file2.error}`);
-    return USAGE;
+    return refuse(`dispatch: ${file2.error}`, USAGE, parsed.tool);
   }
   const { dispatch: resolution, warnings } = sessionDispatchSettings(file2, env, { cwd: io.cwd });
   for (const warning of warnings)
     print(`dispatch: ${warning}`);
   if (!resolution.enabled) {
-    print(resolution.error === null ? `dispatch: ${resolution.notice}` : `dispatch: dispatch config: ${resolution.error}`);
-    return USAGE;
+    return refuse(resolution.error === null ? `dispatch: ${resolution.notice}` : `dispatch: dispatch config: ${resolution.error}`, USAGE, parsed.tool);
   }
   const config2 = resolution;
   let topics;
@@ -20099,8 +20104,7 @@ async function runDispatchCli(argv, rawEnv, io) {
     pruneSessions(sessionStateRoot(env), Date.now());
     follows = loadSessionMemory(dir, sessionId);
   } catch (error48) {
-    print(`dispatch: ${messageFor(error48)}`);
-    return USAGE;
+    return refuse(`dispatch: ${messageFor(error48)}`, USAGE, parsed.tool);
   }
   const { tool, args } = parsed;
   let text;

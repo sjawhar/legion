@@ -1,315 +1,71 @@
 ---
 name: envoy
-description: Use when subscribing sessions to Envoy topics, sending agent-to-agent messages, or reasoning about topic formats for Slack/GitHub/agent routing.
+description: Use when you send a message to another agent session, reply to an Envoy delivery, find your own or a peer's session id, subscribe to a topic (a GitHub pull request, CI checks, a Dispatch issue, Slack), publish to a role or team topic, or wait for CI or a merge. Also when you are a subagent that must report to another session, or a subscription stays silent.
 ---
 
 # Envoy
 
-Envoy delivers external signals and session messages. Deliveries are at-least-once and can arrive
-out of order across topics: use `id` to deduplicate and `at` to judge freshness.
+If this skill disagrees with the code, a command's output or its `--help`, follow those and say which line of this skill is wrong.
 
-## The one subscription you need for a PR
+Envoy delivers external events and messages between sessions. Delivery is at-least-once and can come out of order across topics: drop a repeated `id`, and when two deliveries conflict, act on the one with the later `at`.
 
-Subscribe to the whole PR family, not individual event types:
+## Send a message to another session
 
-```text
-envoy_subscribe([
-  "notifications.github.example-org.example-repo.pr.42.>"
-])
-```
-
-The owner and the repository are one token each, with every dot in the name written `_`:
-`acme/site.io`'s PR family is `notifications.github.acme.site_io.pr.42.>`, and a topic spelled
-`acme.site.io` receives nothing.
-
-NATS `>` matches **one or more** trailing tokens, so it does not match the lifecycle base
-`pr.42` itself. Envoy registers that concrete base automatically when you subscribe to
-`<subject>.>`, making `pr.<n>.>` the recommended default: one call receives both the lifecycle
-subject and its child events.
-
-For a typical push, this receives `pr.42` with `synchronize`, then any comments or reviews, then
-one `pr.42.checks` event when that head's checks settle. A settlement is published for every
-commit of the pull request whose checks settle, the current head or not (a head pushed with
-GitHub's `skip-checks` trailer runs none, so the commit before it settles for it), and its `sha`
-names the commit: compare it with the head you are waiting on. The family is `pr.42` (lifecycle),
-`pr.42.comment`, `pr.42.review`, `pr.42.mention`, and `pr.42.checks`. A closed lifecycle payload
-carries `merged`, `merge_commit_sha`, `merged_by`, and `head_sha`.
-
-The retired literal `pr.<n>.check` and `pr.<n>.ci` topics do not receive events. Existing
-registrations remain dead; subscribe to `pr.<n>.checks` (or the recommended `pr.<n>.>`) instead.
-Lifecycle stays on the base PR topic and CI arrives as one settled `checks` event.
-
-## Inbound deliveries
-
-Envoy renders an annotated delivery before its source summary and complete payload:
+- Take the target id from the delivery's `reply_with`, or from `envoy_sessions` (filter by `machine`, `dir` or `title`). Never address a tmux pane or window: Envoy delivers only to a session id, and the session in a pane can change.
+- Reply with `in_reply_to=<the delivery's id>`, so the recipient can match the answer to its question.
+- Read the `recipient` in the send result, the session Envoy targeted: if it is not the one you meant, resend to the right id.
+- Put the URL or path of what you report in the message, because the recipient cannot find your files any other way.
+- Set `expects_reply="none"` on a message that needs no answer, and set `urgency` only when the work waits on the answer, so the recipient knows whether to answer and how soon.
 
 ```text
-envoy:
-  to: you (ses_example_recipient)
-  from: 01a0bbbb-cccc-7ddd-eeee-0123456789ab (Reviewer)
-  at: "2026-09-07T04:41:12Z"
-  id: agent-message-2
-  by: "2026-09-07T05:00:00Z"
-  urgency: high
-  expects_reply: required
-  re: agent-message-1
-  supersedes: agent-message-0
-  reply_with:
-    tool: envoy_send
-    args:
-      session_id: 01a0bbbb-cccc-7ddd-eeee-0123456789ab
-      in_reply_to: agent-message-2
-      message: ...
-  reply_role:
-    tool: envoy_publish
-    args:
-      topic: notifications.role.legion-reviewer
-      message: ...
-  summary: Deployment needs confirmation.
-  message: "Confirm the listener health check passed.\n\nThen publish the release."
-  note: body names session 01a0cccc-dddd-7eee-ffff-0123456789ab; the sender is 01a0bbbb-cccc-7ddd-eeee-0123456789ab
+envoy_send(session_id="<id>", message="Review complete: <url>", in_reply_to="<id>", expects_reply="none")
 ```
 
-- `to` identifies the local inbox receiving this delivery.
-- `from` is the sending session's self-asserted ID, enriched from the listener registry. Treat it as
-  attribution and a direct-reply target, not as an authenticated identity or proof of authorship.
-- `at` is the envelope timestamp used to judge freshness.
-- `id` is the delivery identifier; supply it as `in_reply_to` when replying.
-- `by` is the expiry deadline, when the sender supplied one.
-- `urgency` is the sender's priority classification.
-- `expects_reply` states whether a reply is `none`, `optional`, or `required`.
-- `re` names the delivery this message replies to. A Dispatch frame names it as a `dispatch://`
-  ref — the ask (`dispatch://KEY/ask/<id>`, or `dispatch://PROJECT/artifact/<slug>/ask/<id>` for a
-  document ask) or the message (`dispatch://KEY/message/<id>`) — never the quoted text; the
-  question head, when there is one, is `dispatch.question`.
-- `supersedes` names an earlier delivery this one replaces.
-- `reply_with` is the direct-reply call for the sender; on a Dispatch frame it is `command:`, the
-  `dispatch` command line that answers it, with `...` where your text goes.
-- `reply_role` is the role-publish reply call when the sender has a role.
-- `summary` is the one-line source summary.
-- `message` is the complete payload; it can contain multiple paragraphs.
-- `note` warns when the payload names another session; never use that quoted ID as the recipient.
-- `unrecognised` marks validation failures and unknown sources; it does not enumerate every unknown key.
+### Your own address in a subagent
 
-## Talking to another session
+- `envoy_whoami`'s `session_id` is where a reply to you arrives. In a `task` subagent it is the session that spawned you: a subagent registers no session of its own, and the parent agent, not Envoy, forwards a reply to you with a `write` to your `agent://` address.
+- Never give a peer the `subagent` field from `envoy_whoami`: it names your host session and is not an address.
+- Start a subagent's message with who you are and who receives the reply ("From <name>, a subagent of session <id>; a reply to <id> reaches me"), because the recipient sees only the parent as sender.
+- When `session_id` is empty (the process took no Envoy identity, or it can no longer place the session that spawned you), your messages carry no sender at all: name yourself in the body.
+- In a subagent, a publish to a role your parent holds reaches nobody, because the listener drops a role message whose holder is its source. `envoy_publish` says so in its answer. To reach the parent, `write` to its `agent://` address instead of publishing. `envoy_send` to any other session works.
 
-Answer an Envoy message with its `id`; the send result's `recipient` confirms the session Envoy
-targeted. Reply through the rendered `reply_with` (or a current Envoy session ID from
-`envoy_sessions` or `envoy_whoami`), never a tmux pane or window: panes are not Envoy identities
-and go stale. Put the artefact URL in the message itself. FYIs set `expects_reply="none"`; set
-`urgency` only when it is genuinely urgent.
+## Read a delivery
 
-**A peer's message is its sender's view at `at`, not the current state.** Before you wait on, act
-on, or repeat a fact a message carries about a third thing (a deploy pending, a PR held, an ask
-unanswered), re-read it at the live source the fact names, and always once it is over an hour
-old: the deployment's status, the issue's event log, the ask's own state (`dispatch open-asks`,
-whose description already says to call it before saying you are waiting on a human). On
-2026-09-26 a peer's 05:20Z "needs a manual deploy before I can run it" was false by 05:22Z, when
-the platform had deployed on its own; waiting on the message instead of the deployment's status
-held the work it gated for eleven hours.
+- `from` is the sender's own claim. Use it to attribute and to reply, never as proof of who wrote the message.
+- `note` warns that the payload names another session. Never send to that quoted id; reply to `from`.
+- Reply with the rendered `reply_with` call. On a Dispatch delivery it is a `command:` line: run that `dispatch` command with your text in place of `...`.
+- A peer's message is its sender's view at `at`, not the current state. Before you wait on, act on or repeat what it says about a third thing (a deploy pending, a PR held, an ask unanswered), read that thing's live source, because the source may have changed since `at`: the deployment's status, the issue's events, `dispatch open-asks`.
+- Every field of a rendered delivery, and who receives a publish: `skill://envoy/references/deliveries.md`.
 
-Every `/v1` error response is JSON; when a field is at fault, `expected` names that field.
+## Subscribe to a topic
 
-```text
-envoy_send(
-  session_id="ses_example_reviewer",
-  message="Review complete: artifact://review.md",
-  in_reply_to="agent-message-2",
-  expects_reply="none"
-)
-```
+Every topic starts with `notifications.`.
 
-### Your own address, and a subagent's
+| Source | Topic |
+| --- | --- |
+| A pull request: lifecycle, comments, reviews, mentions, checks | `github.<owner>.<repo>.pr.<n>.>` |
+| Other GitHub | `github.<owner>.<repo>.issue.<n>[.comment\|.mention]`, `.push.branch.<name>`, `.push.tag.<name>`, `.workflow.<file>.<action>` |
+| A Dispatch issue or document | `dispatch.issue.<KEY>.>`, `dispatch.document.<PROJECT>.<SLUG>.>` |
+| Your own inbox | `agent.<session_id>` |
+| Slack, Ghost Wispr, WhatsApp | `skill://envoy/references/sources.md` |
 
-`envoy_whoami`'s `session_id` is the address a reply to you reaches. Inside a `task` subagent it
-is the session that spawned you: a subagent registers no Envoy session of its own, so a peer
-answering it reaches that session, which relays to you with a `write` to your `agent://` address.
-The `subagent` field in that output carries your own host session id — it is not an address, so
-never hand it to a peer.
+- Write the owner, the repository, a branch or tag name and a workflow file as one token each, with every dot written `_`: `acme/site.io` is `github.acme.site_io`, and `ci.yml` is `workflow.ci_yml`. A slash stays. A topic spelled with the dot receives nothing.
+- Subscribe to the pull request's whole family, `pr.<n>.>`. Envoy also subscribes you to the lifecycle subject `pr.<n>`, which NATS `>` alone does not match, because `>` needs one or more trailing tokens.
+- Read the `warnings` that `envoy_subscribe` returns, and confirm the active topics with `envoy_list`. A warning names the spelling Envoy publishes, or a token that is not a GitHub topic kind; fix the topic it names. "No GitHub event ... in the stream's retention window" means nothing came from that repository in the last 72 hours: check that the GitHub App that sends Envoy its webhooks is installed on that repository before you rely on a wake.
 
-`session_id` is empty when nothing can be reached: a process that took no Envoy identity, or a
-subagent whose spawning session this process can no longer place (it forked away, and other
-top-level sessions are running). Then your messages carry no sender either, so say who you are
-in the message body. An empty address is deliberate — being handed an unrelated live session
-would send your peers to an agent that never spawned you.
+## Wait for CI or a merge
 
-Whether a publish reaches a session turns on where that session takes its deliveries, not on
-whether the topic is a built-in one or your own. A session that holds its own NATS connection —
-every Oh My Pi session, and a Claude Code one — receives every message published on a subject it
-subscribes to, whoever the source: its own publish, and a subagent's publish to a topic the
-session that spawned you subscribes to, included. The listener skips its push to such a session
-entirely, so the push path's skip of the source session never decides anything for it, and a
-topic the stream retains and a team topic that travels live (below) reach it alike while it is
-connected. They differ after an outage: once such a session's connection or subscription is back,
-it recovers from the stream what was published meanwhile on its own topic and on each retained
-topic it follows, up to 72 hours back, and is shown each message once, marked as published while
-its connection was down; what a team topic carried in that time is gone. The session whose own
-publish does not come back is one the listener delivers to by push, one registered with a serve
-port such as the OpenCode plugin; such a session receives no team topic at all, since it holds no
-NATS subscription of its own.
+- Subscribe to `github.<owner>.<repo>.pr.<n>.>` and end the turn. Never start a `gh` poller: the event wakes you, and a poller burns turns.
+- One `pr.<n>.checks` event arrives per commit whose checks settle, the head or not. Compare its `sha` with the head you wait on, because an earlier commit's settlement can arrive first. A push with GitHub's `skip-checks` trailer runs no checks, and several can sit on top (a Legion handoff push is one): wait for the settlement of the nearest ancestor that is not such a push, the CI head `skill://legion-worker/references/merge-gate.md` reads.
+- Settlement waits until the commit has had no check event for 5 seconds (`ENVOY_CI_DEBOUNCE`) and every reported check run and check suite of it has finished. No event arrives before that. Envoy does not read GitHub's required-checks list, so a green settlement does not mean GitHub will merge the PR.
+- A `pr.<n>` event with `closed` and `merged: true` means the PR merged; it carries `merge_commit_sha`, `merged_by` and `head_sha`.
+- A later settlement of the same commit can carry `superseded_settlement: "true"`. Code that orders settlements follows `skill://envoy/references/check-settlement.md`.
+- A Legion implementer waits this way only on a re-run of a red check its task names. Otherwise it pushes and completes its phase, and the daemon reads CI for it (`skill://legion-worker`).
 
-A role lane is the case that needs the `agent://` hop, because a role is not a subject its holder
-subscribes to: the listener resolves the live holder and forwards the message to it, and drops
-the message when that holder is the session the message names as its source. Inside a `task`
-subagent that source is the session that spawned you, so a publish to a role your parent holds is
-accepted, answers with that holder, and reaches nobody — `envoy_publish` says so in its answer.
-Use a `write` to the parent's `agent://` address for that one hop. `envoy_send` to any other
-session, including a reply, is unaffected.
+## Roles and team topics
 
-### Delivery capabilities
-
-Each session row from `envoy_sessions` carries `capabilities`, the targeted-delivery modes that
-session's host honours: `aside` (a message queued beside the model's work), `btw` (an ephemeral
-question the host answers without disturbing the current turn), and `steer` (an interjection at
-the next tool boundary). An OMP session advertises `aside`, `btw`, and `steer` (`aside` and
-`steer` on a host that cannot run a side turn); a Claude Code session advertises `aside` only, because
-its channel notifications queue for the next turn. Target a session only with a mode it
-advertises.
-
-## Waiting for CI or a merge
-
-Subscribe to `notifications.github.example-org.example-repo.pr.42.>` and end the turn. The single
-`pr.42.checks` event whose `sha` is the current head wakes you when it settles (an earlier
-commit's settlement can arrive first); a `pr.42` `closed` event with
-`merged: true` tells you the PR merged. Do not create `gh` pollers. A Legion implementer waits this
-way only on a re-run of a red its task names; otherwise it pushes and completes its phase, and the
-daemon reads CI for it (`skill://legion-worker`).
-Settlement waits for the commit to be quiet for a few seconds, every reported check run to finish,
-and every recorded GitHub check suite to be `completed`. It covers those reported checks and suites
-for that commit, not GitHub's required-checks set; until then, a silent subscription is normal.
-
-Check settlement is at-least-once: a settlement can be followed by a `superseded_settlement: "true"` payload. Every settlement carries its attempt set `check_runs` — the latest GitHub check-run id per check name, sorted by name — plus the listener's `generation` (the record's state version) and `snapshot` (the record's hash). Consumers order settlements of one commit by the attempt set, compared per shared name: no id lower and some id higher (or a new name — a new name counts as higher) is newer; every shared id equal and no new name is the same set; no id higher, no new name, and some id lower is older; anything else (a higher or new alongside a lower) is a mixed view and is dropped as a conflict (names only in the stored set are ignored — a check can vanish from GitHub's view, and a record recreated after the seven-day KV TTL starts sparse). Within one producer record per-name ids never decrease, and a consumer's fence is the per-name maximum over every view it has accepted — an accepted set merges into the fence, nothing is pruned — so the fence never decreases either: a newer attempt is newer whatever its completion time, no timestamps take part in ordering, and a name an incomplete view omitted cannot later reappear as new. At the same set the listener's `generation` orders its own settlements: lower is stale; equal is a duplicate when the `snapshot` matches and otherwise a conflict (an equal pair with a different snapshot cannot occur within one record's lifetime; a recreated record may reuse one and is dropped). A live settlement is a possibly incomplete view of the head (a missed webhook, a record recreated after the KV TTL): it decides the outcome of every name it reports — at any id the ordering accepted, including the same run observed in place — and says nothing about the rest: a known failure among them stands (the consumer keeps failure names, not a per-name status map), and the head is red while any failure remains. A consumer that reconciles a verdict from GitHub's rollup compares the rollup's attempt set the same way, but GitHub's read is complete: its failing check runs and failing commit statuses replace the stored ones wholesale. Statuses have no check run and the listener never sees them, so a consumer keeps them apart from check-run failures: a check run that shares a status's name cannot retire it — only GitHub does (likewise a deleted check's failure). A newer rollup set merges into the fence and takes the identity (no listener generation); the same set applies GitHub's verdict and keeps the listener identity for duplicate detection; an older, mixed, or empty-over-fenced set is ignored. A terminal read (green or red) then holds the tie at that set: a live settlement at the same set is accepted only if its effective outcome — the check-run failures it reports plus the stored ones it omits and the stored commit-status failures — agrees with the reconciled verdict, refreshing the listener identity without releasing GitHub's authority; a disagreeing one is stale whatever its generation until the set advances; a pending or cancelled-only read uncertifies a green head, leaves a red one untouched, and holds nothing — it releases any authority held at that set — so the terminal live settlement that follows applies at once, subject to the ordinary generation and duplicate rules (a replay or a lower generation still does not apply). Pending is therefore not a commutative join: a pending read after a live green uncertifies it until the next terminal view. Two remainders. An in-place conclusion change on an existing run id: GitHub's view stands and the listener's is recovered by the next successful, non-skipped read at that set — the dropped delivery is not replayed. A check whose highest run is deleted on GitHub: the fence keeps that id, so a rollup reporting a lower run under the same name is older until a newer run appears. A consumer that orders head changes by the PR's `updated_at` (GitHub's second resolution) accepts a read of a different head at an equal clock — a stale read returning the previous head within the same second as its replacement rewinds that consumer until its next accurate, non-skipped read. A head publishes only when at least one check has a positive run id; legacy checks without one remain in the status groups and failing names but not in `check_runs`. A legacy in-progress check whose completion is never observed holds the head unsettled until it reruns; rerun the affected check to release it.
-
-## When a subscription is silent
-
-Check the `warnings` returned by `envoy_subscribe`, then inspect the active topics with
-`envoy_list()`:
-
-```text
-envoy_subscribe([
-  "notifications.github.example-org.example-repo.pr.42.>"
-])
-// warnings: ["no GitHub event for example-org/example-repo in the stream's retention window; is the App installed there?"]
-```
-
-A warning says no GitHub event for that repository occurred within the stream's 72-hour retention
-window; it does not mean the repository was never seen. Verify the GitHub App is installed before
-relying on a wakeup. A topic that spells a repository name with its dot, followed by a kind, draws
-a warning naming the spelling Envoy publishes (`acme.site_io` for `acme/site.io`); subscribe to
-that one instead. A token after the repository that is not a GitHub topic kind (`checks` in
-`acme.widgets.checks.>`) draws a warning naming the kinds.
-
-## Team topics
-
-Any `notifications.` topic that no built-in source owns is yours to name: a group of sessions
-subscribes to `notifications.team.deploy-squad.>`, and any of them publishes there with
-`envoy_publish(topic="notifications.team.deploy-squad.all", message=...)`. Such a topic travels
-live, as a role does: it reaches the sessions subscribed when it is published, the publisher
-itself included when it subscribes, it is not retained, and a session that subscribes later does
-not receive earlier messages, nor does a subscribed session whose connection was down when they
-were published. A topic outside `notifications.` is refused. Use a role for one owner, and
-`envoy_send` for one session.
-
-## Roles
-
-Publish to a role; do not subscribe as its holder. A successful `envoy_publish` to a role returns
-its live `holder`; an unheld role returns an error. Use `envoy_role_get(role="reviewer")` to find
-the live holder first when you need one.
-
-A claim belongs to the session, not the process. `omp --resume` re-claims the role recorded in
-the session transcript, including after the listener's stale-interest reaper has removed the old
-row. A `/fork`, `/branch`, `/handoff`, or other transcript-carrying switch checks the
-previous id and moves any held role to the new id while establishing the new session. A `/new`
-or `/resume` switch installs an unrelated transcript and carries nothing. A process that dies and
-is never resumed does not stay a live holder; once liveness expires, role publishes return
-`no holder` until that transcript resumes or another session claims the role.
-
-Automatic reclaim never steals. It is a *soft* claim, which the listener grants only when the role
-is unheld, held by a session that is no longer live, or held by the id this session continues (a
-fork's parent). If a different live session holds it — the parent of a `/fork` whose role moved to
-the child, or a second process on the same transcript — the listener refuses atomically and the
-resumed session logs a warning and holds nothing. Only an explicit `envoy_role_set` is
-last-claim-wins. Re-running `envoy_role_set` for a role this session already holds is harmless.
-Moving to a different role is refused while another plugin holds subscriptions that last only as
-long as this session keeps its current role (the refusal names them), and `envoy_unsubscribe`
-keeps those subscriptions open, listing them as kept.
-
-## Legion role claims
-
-Legion agents receive through a daemon-minted role token. Claim the assigned role with
-`envoy_role_set(role="<assigned-role>")`; a claimant does not manually subscribe to its role
-topic. Claims use last-claim-wins semantics, survive parking and worker re-creation, and remain
-through the issue's post-close linger. The daemon owns the authoritative token-to-issue map, so do
-not construct a token from a partial issue reference.
-
-## Legion exception lane
-
-`no_holder`, `delivery_failed`, and `receipt_timeout` for a Legion role are daemon liveness
-signals, not reasons to add a second subscriber or manually retry. `no_holder`: no live session
-holds the role. `delivery_failed`: the message was not forwarded at all — the holder lookup
-failed, the holder was stale, or the publish errored. `receipt_timeout`: the listener forwarded
-the message to a registered, live holder and no receipt arrived inside the window; its payload
-keeps `original_topic`, `event_id`, `payload`, and the original `dedupe_key`, so the daemon can
-re-send the same message and the receiver's dedupe drops a copy that did arrive. Treat any of
-these wakes as the daemon's responsibility to revive or recreate the backing worker and
-re-deliver; otherwise it resurrects the root process with derived catch-up and the workspace
-handoffs. Raw delivery failures stay out of architect context.
-
-## Slack
-
-Use the real team ID, not a workspace slug. Slack delivers a one-line prose `summary` plus a
-structured `message` payload. The payload records `subtype` for edits, deletes, and bot messages;
-`thread_ts` for replies; and `bot_id` and `bot_name` when a bot supplied the message.
-
-```text
-envoy_subscribe([
-  "notifications.slack.T01234567.C01234567.thread.1_000.>"
-])
-```
-
-This follows every message and mention in one thread. Channel-level topics end in `.message` or
-`.mention`; thread timestamps replace dots with underscores.
-
-Reply in a thread with `slack_post(channel=<channel_id>, thread_ts=<the message's thread_ts, or
-its ts>, text=…)`, which posts as the Legion Slack app with the bot token the secrets broker grants
-the session (`LEGION_SLACK_BOT_TOKEN`). A refusal carries Slack's own error code, or the broker's
-state when it has not granted the token. The post is sent once; when the answer is that Slack did
-not answer, the reply may already be there, so do not post it again.
-
-## Ghost Wispr
-
-Ghost Wispr topics are `notifications.ghostwispr.<session>.<kind>`, where `kind` is
-`session.started`, `session.ended`, or `summary.ready`. Their summary is concise prose and their
-payload is structured; `summary_ready` includes its status, summary, and summary metadata.
-
-```text
-envoy_subscribe([
-  "notifications.ghostwispr.session-example.summary.ready"
-])
-```
-
-## WhatsApp
-
-WhatsApp topics are `notifications.whatsapp.<phone>.<jid>.message` or `.status`. A JID contains
-dots, which become additional NATS segments, so use `>` rather than `*` for a chat.
-
-```text
-envoy_subscribe([
-  "notifications.whatsapp.15551234567.5551234567@s.whatsapp.net.>"
-])
-```
-
-### WhatsApp routing smoke test
-
-This checks Envoy routing, not real WhatsApp ingestion. In Session A, subscribe as above. From a
-different Session B, publish a synthetic message to the same `.message` topic:
-
-```text
-envoy_publish(
-  topic="notifications.whatsapp.15551234567.5551234567@s.whatsapp.net.message",
-  message="Synthetic WhatsApp routing test"
-)
-```
-
-Session A should receive it. Broadcasts do not echo to their publishing session, so one session
-cannot perform both steps. Real WhatsApp delivery additionally requires a configured MCP bridge.
+- Send to one session with `envoy_send`, to the one session that holds a named duty with a role, and to a group with a team topic.
+- Publish to a role with `envoy_publish(topic="notifications.role.<role>", ...)`; never subscribe to a role topic, because the listener forwards a role message to its holder only. A publish returns the live `holder`; an unheld role returns an error. `envoy_role_get(role=...)` finds the holder first.
+- For a team, the group subscribes to `notifications.team.<name>.>`, and any member publishes to `notifications.team.<name>.all`. Envoy treats any other `notifications.` topic that no source in the table uses the same way. It reaches only the sessions subscribed and connected when it is published (yours too, when you subscribe), and is not kept for a session that subscribes later or whose connection was down. A topic outside `notifications.` is refused.
+- How a role claim survives a resume, a fork or a dead process: `skill://envoy/references/roles.md`.
+- In a Legion pane, the plugin claims your role at session start; read `skill://envoy/references/legion.md` before you claim, release or publish to a role, or answer a role delivery failure there.
