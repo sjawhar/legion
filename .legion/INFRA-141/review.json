@@ -2,26 +2,21 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-141",
-  "completed": "2026-10-26T11:32:00Z",
+  "completed": "2026-10-26T12:42:30Z",
   "generation": 3,
-  "round": "the round after review 5650773083; code commit f804579ef795, handoff head 8a84f45c",
-  "scope": "The architect's settled rule (Envoy 959c102233ce019c0ccbbbefaffe8193): a read counts as answered only for its named answers (not found, a refused key, an undecodable record), and any other error is the 503. Confirm the inversion on the session list, the corrected comment and three doc statements, the raw write-error test, that every other read this PR touches follows the rule, and that nothing else changed after 38feffb0; approve if all hold and no defect is found.",
-  "decision": "changes_requested",
-  "confirmed": [
-    "Inversion: interestReadAnswered = ErrMalformedInterest || bus.ErrRefused; sessionsHandler refuses with writeBusUnavailable on err != nil && !interestReadAnswered(err).",
-    "Raw write-error test: TestAnInterestReadFailingWithARawSocketErrorIsTheBusNotAnswering passes at the head. With api.go overlaid from 38feffb0 it fails on /v1/sessions, 'status 200 ... \"topics\":null' (go test -overlay, workspace unchanged). The LegacyKeys, bounded-read and unreadable-interest tests pass at the head.",
-    "Every other read follows the rule (deep review's per-read table, nine reads: send target session, senderStamp (enrichment only), role claim, holder session, conditional release, the registry route's session and interest reads, GET /v1/interests/<id>, GET /v1/sessions). Each named answer gets a non-503 answer and every other error gets the 503 with Retry-After: 1.",
-    "The comment and three doc statements the last review named are true at the head.",
-    "Nothing else changed after 38feffb0: the only paths outside .legion/ are api.go, the new test, AGENTS.md, CHANGELOG.md and docs/architecture.md."
+  "round": "the round after review 5651306714; code commit f7d39001d5df, handoff head 43a5a5eb",
+  "scope": "The architect's ruling (Envoy 8e46a3aa33c4b26347c27cab892bd7d7): confirm that the writeBusUnavailable comment names all three bus.ErrRefused members, and that nothing outside .legion/ changed after f804579e except comment or doc text; approve by SHA if both hold and no defect is found.",
+  "decision": "approved",
+  "verified": [
+    "The comment on writeBusUnavailable (api.go:233-240) now says the guard keeps Retry-After off every bus.ErrRefused: ErrTooLarge answered 413, ErrInvalidSubject and ErrInvalidKey answered 400. That matches writeNATSError (api.go:207-216) and the refusal type's Is (internal/bus/nats.go:814).",
+    "From f804579e to 43a5a5eb, the only path outside .legion/ is packages/envoy/cmd/listener/api.go, and every changed line in it is a // comment (git diff with comment lines filtered out shows no remaining +/- line). No runtime code changed, so this round gets no thermonuclear pass.",
+    "Proofs: E2E (implementer) and E2E (tester) are both in the PR body. The code under them is f804579e's runtime code, unchanged since (comment-only delta)."
   ],
-  "ci": "CI head 31173bae8957. At reading, Tests, Legion Envoy and Contracts and PR Title were queued and Worker Image pending. A request for changes does not wait for CI.",
-  "thermonuclear": "Both run at 8a84f45c under the defect-only rule. deep-review: CHANGES, one false comment; nine reads classified, all following the rule. code-quality: CLEAN; the watcher swap reaches both routes' read path, and the test fails with the change reverted.",
-  "verdictProvenance": "Read from the session store's transcripts (omp_session_files). This session, which wrote the verdict: anthropic/claude-opus-5-5, 200 of 200 assistant turns. DeepReview6: mixed, 53 anthropic/claude-opus-5-5 and 1 openai/gpt-6.1-sol. CodeQuality6: mixed, 26 anthropic/claude-opus-5-5 and 1 openai/gpt-6.1-sol.",
+  "ci": "CI head e739b0344a82 (compare to 43a5a5eb: ahead, only .legion/). Required: lint, typecheck, test completed/success (Tests 40316229156), pr-title completed/success (PR Title 40316523191). Legion Envoy and Contracts 40316229147 was still queued behind a repository-wide runner backlog; it is not required.",
+  "verdictProvenance": "Read from the session store's transcript (omp_session_files): this session, which wrote the verdict, anthropic/claude-opus-5-5, 221 of 221 assistant turns. No subagent ran this round.",
   "critical": 0,
   "important": 0,
-  "minor": 1,
-  "keyFindings": [
-    {"severity": "minor", "file": "packages/envoy/cmd/listener/api.go", "description": "False comment on writeBusUnavailable (api.go:235-238, added by this PR in eb225a9a): 'bus.ErrTooLarge and bus.ErrInvalidSubject both satisfy errors.Is(err, bus.ErrRefused) ... so this one guard keeps the header off exactly those two and off nothing else.' bus.ErrRefused has a third member, bus.ErrInvalidKey (internal/bus/nats.go), which the same comment names seven lines further down. GET /v1/interests/ses:bad answers 400 with no Retry-After through that same guard, as interest_key_refused_list_test.go asserts. Say that the guard keeps the header off every bus.ErrRefused: ErrTooLarge (413), and ErrInvalidSubject and ErrInvalidKey (400)."}
-  ],
-  "threads": "49 threads. I replied 'Accepted' on PRRT_kwDORFy7ds6wNi6I and on 5650773083's three threads (PRRT_kwDORFy7ds6wOaze, -wOazh, -wOazn). All are resolved. No bot threads."
+  "minor": 0,
+  "keyFindings": [],
+  "threads": "50 threads, all resolved. I replied 'Accepted: fixed in f7d39001d5df' on 5651306714's thread PRRT_kwDORFy7ds6wPZyZ. No bot threads."
 }
