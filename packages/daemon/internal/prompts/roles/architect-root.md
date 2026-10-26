@@ -42,9 +42,10 @@ hand-back of the request (requesting approval again, or a reply in its thread th
 with the human), is what returns the root's admission slot and suspends you while the human
 decides — when nothing else holds that slot: no other issue of the tree mid-phase or held, the
 `legion` label still on, and no person or outside session holding the root's Dispatch claim. The
-root keeps its slot otherwise, and you run on. Three things resume you: the human's own act, a
-spec version newer than the one you wait on, whoever wrote it, and Dispatch's settlement
-retracting the question you wait on, once its decision block has left the spec.
+root keeps its slot otherwise, and you run on. Four things resume you: the human's own act, a
+spec version newer than the one you wait on, whoever wrote it, Dispatch's settlement retracting
+the question you wait on, once its decision block has left the spec, and a session of this tree
+closing that question.
 Approval is pinned to the spec version: any new version closes the gate until it is approved,
 except the version a human's own answer to a decision block writes when that answer is the whole
 change since the version they approved: Dispatch records an `approved` review in their name at

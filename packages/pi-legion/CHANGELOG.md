@@ -10,12 +10,13 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 - Daemon API contract 37: a root admitted tree that waits only on a person has the phase
   `awaiting_person`, and its `legion state` and `read_state` issue carries `waitingOn`, the design
   gate version (`kind: "gate"`, `gateVersion`) or the question (`kind: "ask"`, `ask`) that returned
-  its admission slot, and `answeredAt` once the person answered. Three things answer that wait: a
+  its admission slot, and `answeredAt` once the person answered. Four things answer that wait: a
   person's own act (a review, an answer, a resolution or a reply on one of the root's asks), a spec
   version newer than the one waited on, whoever wrote it, since Dispatch then waits on the
-  architect, and Dispatch's settlement retracting the awaited question because its decision block
-  left the spec, since no person can answer a retracted question. A session's reply, answer or
-  resolution never does. The root architect's role prompt and skill say to register each closed spec
+  architect, Dispatch's settlement retracting the awaited question because its decision block
+  left the spec, and a session of the tree closing the awaited question, since no person can answer
+  a retracted or closed question. A session's reply, answer or resolution of any other ask never
+  does. The root architect's role prompt and skill say to register each closed spec
   version with `register_gate` and end the turn, and that handing the approval request back to the
   person (requesting approval again, or a thread reply that leaves the turn with them) starts the
   next wait and returns the slot; the controller skill reads the new `awaiting-person` notice. The
