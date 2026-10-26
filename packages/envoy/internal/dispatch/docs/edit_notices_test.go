@@ -11,6 +11,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/reearth/ygo/crdt"
+
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
@@ -1293,4 +1295,45 @@ func storedLastPerson(t *testing.T, service *Service, artifactID string) *model.
 		t.Fatalf("read the document's latest person sender: %v", err)
 	}
 	return person
+}
+
+// A version rendered from the stored document does not name its notice after an edit it does not
+// hold. Bob types on task B, and his append lands, so the stored person is bob. Task A's room then
+// stands behind the head, and alice's edit is in flight there when an agent names a version on
+// task A: the version is rendered from the stored document, which holds bob's edit and not
+// alice's, and lists bob and not alice (withoutInflight). Its notice must name bob. Named from the
+// room's in-flight credits, its last editor was alice, who is not among the people it lists, so
+// the version held the window and named nobody.
+func TestEditNoticeAVersionFromTheStoreNamesNoEditInFlightInTheRoom(t *testing.T) {
+	pair := newProcessPair(t)
+	bob := model.Actor{Kind: "user", ID: "bob-on-task-b"}
+	alice := model.Actor{Kind: "user", ID: "alice-on-task-a"}
+	pair.leaveTaskABehind(t, 1, bob, "Bob's paragraph.\n")
+	if person := storedLastPerson(t, pair.taskA, pair.artifactID); person == nil || *person != bob {
+		t.Fatalf("the stored latest person sender after bob's edit = %+v, want bob", person)
+	}
+	if row, open := readEditNotice(t, pair.taskA, pair.artifactID); open {
+		t.Fatalf("a window names %+v before any version over bob's edit, want none", row.lastEditor)
+	}
+
+	room := pair.taskA.srv.GetDoc(pair.artifactID)
+	peer, update := peerEdit(t, room, appendBlocks(t, "Alice's paragraph.\n"))
+	pair.taskA.addConnection(pair.artifactID, 2, alice)
+	release := holdObserver(t, pair.taskA, pair.artifactID, &pair.taskA.afterCreditUpdate, func() error {
+		return crdt.ApplyUpdateV1(room, update, "peer")
+	})
+	version := commitNamedVersion(t, pair.taskA, pair.artifactID, model.Actor{Kind: "session", ID: "versioner-a"})
+	release()
+	pair.taskA.removeConnection(pair.artifactID, 2)
+	if slices.Contains(version.Authors, alice) || !slices.Contains(version.Authors, bob) {
+		t.Fatalf("the version named while alice's edit was in flight lists %+v, want bob and no alice", version.Authors)
+	}
+	row, open := readEditNotice(t, pair.taskA, pair.artifactID)
+	if !open {
+		t.Fatal("the version over bob's stored edit opened no window naming anyone, want one naming bob")
+	}
+	if row.lastEditor != bob {
+		t.Fatalf("last editor = %+v, want bob, whose edit the version holds, not alice, whose edit was in flight", row.lastEditor)
+	}
+	resendUntilStored(t, pair.taskA, pair.artifactID, 2, alice, peer)
 }
