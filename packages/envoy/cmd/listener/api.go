@@ -232,10 +232,10 @@ const publishDeniedPrefix = "envoy: the message bus denied the publish under thi
 
 // writeBusUnavailable answers a send, a publish, a role lookup or a session or interest read the
 // bus did not serve, in the one place that writes that 503, so the body's prefix and the hint never
-// drift apart. Retry-After is set only where retrying can help: bus.ErrTooLarge and
-// bus.ErrInvalidSubject both satisfy errors.Is(err, bus.ErrRefused) - a refusal NATS repeats
-// however often the same bytes are sent - and writeNATSError answers those as the 413 and the 400
-// they are, so this one guard keeps the header off exactly those two and off nothing else. The
+// drift apart. Retry-After is set only where retrying can help: every member of bus.ErrRefused -
+// a refusal NATS repeats however often the same bytes are sent - is answered by writeNATSError as
+// what it is, bus.ErrTooLarge as the 413 and bus.ErrInvalidSubject and bus.ErrInvalidKey as the
+// 400, so this one guard keeps the header off every bus.ErrRefused and off nothing else. The
 // status writeNATSError settled on is passed back for the record's sake, as that function's own
 // comment explains.
 //
