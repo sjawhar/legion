@@ -73,9 +73,10 @@ func TestAChildsMergeClosesItAndHandsItsImplementerTheFirstLook(t *testing.T) {
 		t.Fatalf("the check task opens %q, want the line a resumed session tells the check by", lead)
 	}
 	for _, want := range []string{"sjawhar/legion", "#43", "merge-43", "Look 1, woken by the merge.", "handoff_complete", "pass", "pending", "fail", "the daemon wakes the check",
-		// A defect with a clear fix goes to the controller topic, which files it for Legion; one that
-		// needs a decision is a finding ask on the report issue, whose reference the implementer
-		// publishes to the controller, which files only on a person's answer.
+		// A defect with a clear fix goes to the controller topic, which hands it to the tree that
+		// owns the code and files it for Legion only when none does; one that needs a decision is a
+		// finding ask on the report issue, whose reference the implementer publishes to the
+		// controller, which files only on a person's answer.
 		"a defect with a clear fix goes to the controller topic", "dispatch ask", "skill://legion-worker/references/findings.md", "report issue", "controller topic"} {
 		if !strings.Contains(start.Task, want) {
 			t.Fatalf("the check task lacks %q:\n%s", want, start.Task)

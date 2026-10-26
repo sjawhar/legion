@@ -6,9 +6,8 @@ Read this on a `triage` wake, at every start, and when a person hands you an iss
 ## At every start
 
 1. List the project's triage issues handed to Legion:
-   `dispatch issues --project <PROJECT> --status triage --label legion --limit 250 --offset 0`.
-   When the first line ends `(showing 1-250 of N)`, read the next page with `--offset 250`, and so
-   on until you have all N rows.
+   `dispatch issues --project <PROJECT> --status triage --label legion --all`. `--all` reads every
+   match in one request, so no row is missed or repeated while the list changes.
 2. The rows show no parent, so `dispatch read` each one and follow `Links:` up through each
    `child_of` parent. A `child_of` under `Referenced by:` is a child of this issue, not its parent.
 3. Leave a child that has an ancestor in `admission.active` or `admission.waiting`, because that

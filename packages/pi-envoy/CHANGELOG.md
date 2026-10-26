@@ -115,8 +115,9 @@
 ### Changed
 
 - `dispatch` and `dispatch-first` say that a Legion session files no issue for a finding outside its
-  own issue, and point to `legion-worker/references/findings.md`: a defect with a clear fix goes to
-  the Legion controller, and a finding that needs a decision is an ask (INFRA-140).
+  own issue, and point to `legion-worker/references/findings.md`: a defect with a clear fix in code
+  the session's own tree touches is fixed in that tree's pull request, any other goes to the
+  Legion controller, and a finding that needs a decision is an ask (INFRA-140).
 
 - `dispatch request-approval --help`, and `dispatch-writing-specs`, "Each version", name both
   reviewers a Legion architect runs before an approval request, `plan-gap-analyst` and

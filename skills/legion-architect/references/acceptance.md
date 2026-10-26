@@ -38,8 +38,8 @@ legion({ op: "sign_off", issue: "LEGION-40" })
   (`skill://legion-worker/references/findings.md`, "When no controller takes it"). Follow each
   (`dispatch follow --ask <id> --action follow`) and, once it is answered, publish its reference
   to the controller topic. Accept only once each is resolved, or carries the controller's
-  `Filed dispatch://` or `Not filed:` reply, because a closed issue hides its asks from the
-  controller.
+  `Filed dispatch://`, `Handed dispatch://` or `Not filed:` reply, because a closed issue hides its
+  asks from the controller.
 
 ## The order after your acceptance
 

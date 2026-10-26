@@ -197,7 +197,7 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   The root `AGENTS.md` Handover paragraph carries the first link.
   `legion-worker/references/findings.md` holds the three steps. `legion-controller` (its "Free
   slots", triage row, report wake and daily-report text), `legion-architect`, `legion-worker`,
-  `legion-retro`, the production check's `fail` in `merge-gate.md`, `dispatch`, `dispatch-first`,
+  the production check's `fail` in `merge-gate.md`, `dispatch`, `dispatch-first`,
   `skills/AGENTS.md`, and the daemon's role prompts and production-check task say the same. The
   learning `docs/solutions/legion/fix-a-clear-defect-where-you-are-…-INFRA-140.md` supersedes
   the #2130 learning that made every finding an ask. This reverses part of #2130: the owner had to
@@ -237,14 +237,17 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   only by itself (`api/issue_patch.go`). Every finding ask's question opens
   `Finding from <role>`, or `Clear defect from <role>` for a clear defect, which is how the
   acceptance and the controller find one. At every start the controller's catch-up
-  (`legion-controller/references/finding-asks.md`) files a clear-defect ask at once, moves an
-  own-issue decision ask to the report issue, and acts on an answered finding ask of an issue in
-  `needs_review`, reading that list as one unpaged snapshot before it acts on any issue in it:
-  `GET /api/v1/issues?project=<P>&status=needs_review` with neither `limit` nor `offset`, which
-  answers every match in one array (`api/issue_page.go`'s `parseIssuePage`). Offset paging would
-  skip an issue whose status changes between reads, which the acceptance its own reply releases
-  does, and `dispatch issues` always sends a page, so that command cannot take this read.
-  Its reply releases the held acceptance. The planner's core prompt now matches
+  (`legion-controller/references/finding-asks.md`) takes a clear-defect ask as its hand-over says,
+  moves an own-issue decision ask to the report issue, and acts on an answered finding ask of an
+  issue in `needs_review`, reading that list as one snapshot before it acts on any issue in it:
+  `dispatch issues --project <P> --status needs_review --all`, which reads every match in one
+  request. Offset paging would skip an issue whose status changes between reads, which the
+  acceptance its own reply releases does. The controller's triage, finished-issue and owner-audit
+  listings read with `--all` too. Its reply (`Filed`, `Handed` or `Not filed:`) releases the held
+  acceptance; an answered ask whose answer is `Hand it to the owning tree` is handed over as a
+  clear defect. The catch-up's two `curl` reads land in a variable before `jq` sees them, and
+  `jq -n 'input …'` fails on an empty body, so a dead connection or an empty reply admits nothing.
+  The planner's core prompt now matches
   the headless part composed with it: a clear defect goes to whoever coordinates the project's
   work, and a finding that needs a decision is an ask (`roles_test.go` pins both sentences and
   forbids the old one).
@@ -272,9 +275,10 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   reviewer's prose commits at its acceptance, which is no new round: the reviewer's own text had
   no other reader. `legion-worker`, `merge-gate.md`, `legion-architect` and the reviewer's role
   prompt say the same.
-- The base is merged forward only when the pull request conflicts, when the incoming change
-  touches files the pull request touches, when the change needs something that exists only on the
-  base, or after a retarget (INFRA-140). One tree merged main forward five times in a day, four of
+- The base is merged forward only when the pull request conflicts, when the change needs something
+  that exists only on the base (a fix for its only red check among them), or after a retarget
+  (INFRA-140). A merge without a conflict makes a new head, reruns CI and can void a review.
+  One tree merged main forward five times in a day, four of
   them needlessly, and each merge cost a full round. Before racing another tree on shared files, a
   role asks that tree on Envoy when its next push lands. After any forward merge the branch is
   built and its proof run again at the merge head, since a merge with no text conflict can still

@@ -81,7 +81,7 @@ of these that holds, so a person sees it and the controller finds it when it ret
 1. **The report issue is open:** ask there, the question opening `Clear defect from <your role
    token>` and `--ref` naming your evidence comment. Then reply `Asked dispatch://<REPORT
    KEY>/ask/<id>` under that comment, so the controller takes the ask and not the comment. The
-   report issue's assignee sees the ask, and the controller's catch-up files it.
+   report issue's assignee sees the ask, and the controller's catch-up takes it.
 2. **The report issue is missing or closed:** ask on your own issue, the evidence posted there as
    a comment first. Then publish the ask's reference to your tree's architect (`skill://legion-worker`,
    *Stop rules*). An architect holds its own. The architect holds your issue's

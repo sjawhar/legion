@@ -40,10 +40,12 @@ The work goes to whoever already owns that code. You file an issue only when nob
    there, reply `Filed dispatch://<that KEY>` under the evidence, and file nothing.
 3. Find the running tree whose code it is: a root in `admission.active` whose repository and
    component match, read from `read_state` and `dispatch read`. When one matches, hand it over.
-   `envoy_publish` the defect, its evidence reference and the fix to that tree's architect topic
-   (`issues.<KEY>.architect.locator.claim`), which decides whether it is a child of the tree or
-   part of an open issue's work. Reply `Handed dispatch://<that KEY>` under the evidence. File
-   nothing: the work is already owned, and a second issue splits it.
+   `envoy_publish` the defect, its evidence reference and the fix to that tree's architect topic,
+   `notifications.role.<issues.<KEY>.architect.locator.claim>`. The architect decides whether it
+   is a child of the tree or part of an open issue's work. When the root has no locator, or the
+   publish answers no holder, comment the evidence on that root instead, where its architect reads
+   it. Reply `Handed dispatch://<that KEY>` under the evidence either way. File nothing: the work
+   is already owned, and a second issue splits it.
 4. No running tree owns that code: file it on the repository where the fix belongs, in the
    project that repository maps to:
 
@@ -76,10 +78,12 @@ When `dispatch read --ref` shows it answered already, act on its answer now.
 
 Once it is answered (an ask you follow brings its answer to you), read it with
 `dispatch read --ref 'dispatch://<KEY>/ask/<id>'` and act on the newest answer. When its typed
-text asks for a different one of the three actions than the option selected, do what the text
-asks; when the text asks for something that is none of the three, reply under the ask with your
+text asks for a different one of the four actions than the option selected, do what the text
+asks; when the text asks for something that is none of the four, reply under the ask with your
 question and file nothing:
 
+- `Hand it to the owning tree`: take it as [Hand over a clear defect](#hand-over-a-clear-defect)
+  says, from its step 3.
 - `Do not file`: file nothing.
 - `File an issue`: `dispatch issue --project <PROJECT> --title '<the problem, as a title>'
   --spec-file -` in the project where the fix belongs, as the answer or the ask names it; when
@@ -93,7 +97,8 @@ question and file nothing:
 An ask that re-files an escalated child also takes the steps of
 `skill://legion-controller/references/escalation.md`.
 
-Then reply under the ask with what you did, its first line exactly `Filed dispatch://<NEW KEY>` or
+Then reply under the ask with what you did, its first line exactly `Filed dispatch://<NEW KEY>`,
+`Handed dispatch://<KEY>` or
 `Not filed: <reason>`. The ask's issue is the report issue, or the role's own issue for an ask no
 controller took:
 
@@ -118,36 +123,44 @@ finding asks roles opened on their own issues while no controller ran:
 2. Take each open ask: `dispatch open-asks --project <PROJECT>` lists every unanswered ask of the
    project, with no cap, each line naming its issue. It leaves out an ask on a closed issue
    (`asks.go`'s `listOpenAsks` takes `i.closed_at is null`), which is why an architect holds its
-   issue open for one. Follow those on the report issue, and file at once each whose question opens
-   `Clear defect from `. One on another issue whose question opens `Finding from ` or
-   `Clear defect from ` is a role's own-issue ask. File a clear defect. Move a finding that needs a
+   issue open for one. Follow those on the report issue, and take each whose question opens
+   `Clear defect from ` as [Hand over a clear defect](#hand-over-a-clear-defect) says. One on
+   another issue whose question opens `Finding from ` or `Clear defect from ` is a role's
+   own-issue ask. Take a clear defect the same way. Move a finding that needs a
    decision: ask it again on the report issue with the same question, options and `--ref`, then
    reply `Moved dispatch://<REPORT KEY>/ask/<new id>` under the old ask. Resolve the old ask either
    way.
 3. List the answered asks still waiting on you, which no `dispatch` command lists:
-   `curl -sS -H "Authorization: Bearer $(cat "$DISPATCH_TOKEN_FILE")" "$DISPATCH_URL/api/v1/issues/<REPORT KEY>/asks?state=answered&thread=1" | jq -c '[.[] | select(any(.options[]; .label == "Do not file" or .label == "Admit it")) | .answer.at as $t | select([.thread.replies[]? | select(.author.kind == "session" and .created_at > $t and (.body | test("^(Filed dispatch://|Admitted dispatch://|Not filed:|Not admitted:)")))] | length == 0) | {id, question, answer}]'`.
-   Act on each as above, a triage ask as `skill://legion-controller/references/triage.md` says.
-   Run the same for each issue in `needs_review`, whose architect holds its acceptance on a finding
-   ask's answer. Take that list as one snapshot before you act on any issue in it:
 
    ```text
-   rows=$(curl -sS --fail-with-body -H "Authorization: Bearer $(cat "$DISPATCH_TOKEN_FILE")" "$DISPATCH_URL/api/v1/issues?project=<PROJECT>&status=needs_review") || { echo "Dispatch read failed" >&2; exit 1; }
-   printf '%s' "$rows" | jq -r 'if type == "array" then .[].key else error("Dispatch did not answer the listing") end'
+   asks=$(curl -sS --fail-with-body -H "Authorization: Bearer $(cat "$DISPATCH_TOKEN_FILE")" "$DISPATCH_URL/api/v1/issues/<ISSUE KEY>/asks?state=answered&thread=1") || { echo "Dispatch read failed" >&2; exit 1; }
+   printf '%s' "$asks" | jq -cn 'input | if type == "array" then [.[] | select(any(.options[]; .label == "Do not file" or .label == "Admit it")) | .answer.at as $t | select([.thread.replies[]? | select(.author.kind == "session" and .created_at > $t and (.body | test("^(Filed dispatch://|Handed dispatch://|Admitted dispatch://|Not filed:|Not admitted:)")))] | length == 0) | {id, question, answer}] else error("Dispatch did not answer the list") end'
    ```
 
-   With neither `limit` nor `offset`, Dispatch answers every match in one array
-   (`api/issue_page.go`'s `parseIssuePage`). `dispatch issues` always sends a page, so it cannot
-   take this read. Never page it: pages by `offset` skip or repeat an issue whose status changes
-   between reads, and your reply moves issues out of `needs_review`. The read lands in `rows` first,
-   because a pipeline reports only the status of `jq`, which succeeds on a failed read's empty
-   input. Exit 0 with keys is work. Exit 0 with no output means nothing waits. Anything else is a
-   failed read and admits nothing. An issue that enters `needs_review` after the snapshot is read
-   at your next start.
+   Read it for the report issue, then for each issue in `needs_review`, whose architect holds its
+   acceptance on a finding ask's answer. Act on each as above, a triage ask as
+   `skill://legion-controller/references/triage.md` says. The read lands in `asks` first, because a
+   pipeline reports only the status of `jq`. `jq -n 'input …'` fails on an empty body, where a
+   plain `jq` would succeed on it, so exit 0 means the list was read: `[]` is nothing waiting.
+   Anything else is a failed read and admits nothing.
+
+   Take the `needs_review` issues as one snapshot before you act on any of them:
+   `dispatch issues --project <PROJECT> --status needs_review --all`. `--all` reads every match in
+   one request. Never page this list: pages by `offset` skip or repeat an issue whose status
+   changes between reads, and your reply moves issues out of `needs_review`. `No issues in
+   <PROJECT>.` means nothing waits, and a command that fails admits nothing. An issue that enters
+   `needs_review` after the snapshot is read at your next start.
 4. List the clear defects nobody took yet: each evidence comment whose first line starts
    `Clear defect from `, with no session reply under it that starts `Handed dispatch://`,
    `Filed dispatch://`, `Not filed:` or `Asked dispatch://` (a role that asked instead, which step
    2 takes):
-   `curl -sS -H "Authorization: Bearer $(cat "$DISPATCH_TOKEN_FILE")" "$DISPATCH_URL/api/v1/issues/<REPORT KEY>/comments" | jq -c '. as $all | [.[] | select(.reply_to == null and (.body | startswith("Clear defect from "))) | .id as $id | select([$all[] | select(.reply_to == $id and .author.kind == "session" and (.body | test("^(Handed dispatch://|Filed dispatch://|Not filed:|Asked dispatch://)")))] | length == 0) | {id, body}]'`.
+
+   ```text
+   notes=$(curl -sS --fail-with-body -H "Authorization: Bearer $(cat "$DISPATCH_TOKEN_FILE")" "$DISPATCH_URL/api/v1/issues/<REPORT KEY>/comments") || { echo "Dispatch read failed" >&2; exit 1; }
+   printf '%s' "$notes" | jq -cn 'input | if type == "array" then (. as $all | [.[] | select(.reply_to == null and (.body | startswith("Clear defect from "))) | .id as $id | select([$all[] | select(.reply_to == $id and .author.kind == "session" and (.body | test("^(Handed dispatch://|Filed dispatch://|Not filed:|Asked dispatch://)")))] | length == 0) | {id, body}]) else error("Dispatch did not answer the list") end'
+   ```
+
+   It reads as step 3's read does: exit 0 with `[]` is nothing waiting, anything else failed.
    Take each as [Hand over a clear defect](#hand-over-a-clear-defect) says. When one is not clear,
    reply `Not filed: <reason>` under it and open an ask for it instead.
 

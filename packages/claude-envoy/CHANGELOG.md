@@ -134,8 +134,10 @@
 
 ### Changed
 
-- The `legion/` plugin's skills send a clear defect outside a role's issue to the controller, which
-  files it for Legion, and keep a `dispatch ask` for a finding that needs a decision (INFRA-140).
+- The `legion/` plugin's skills fix a clear defect outside a role's issue in its own tree's pull
+  request when the tree touches or depends on that code, and send any other to the controller,
+  which hands it to the tree that owns the code and files it for Legion only when none does. A
+  `dispatch ask` stays for a finding that needs a decision (INFRA-140).
 
 - The `legion/` plugin's `plan-reviewer` reviews a spec as well as a plan, checking each factual
   claim, and it and `plan-gap-analyst` get `Bash` for read-only commands (INFRA-140). Its
