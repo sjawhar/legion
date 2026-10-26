@@ -2,33 +2,25 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-303",
-  "completed": "2026-10-26T04:02:00Z",
-  "round": 2,
-  "testedHead": "f62bbb199fcdc2931aa1b6cfce4a6bb94a8ef0b2",
-  "ci": "At bf43ea0d0c6e (the code push's head): Tests run 40264465393 success, Docs run 40264465390 success, PR Title run 40264510966 success, Legion Envoy and Contracts run 40264465405 in progress when read at 2026-10-26T04:00:53Z (run 40264465369 cancelled, superseded).",
-  "previousFailures": "Round 1 failures[0] (leave the Conversation while it loads, come back: scrollY 0, newest card under the composer) is fixed by f62bbb19: the red row from commit 33f66ffe passes unmodified.",
+  "completed": "2026-10-26T05:00:30Z",
+  "round": 3,
+  "testedHead": "a5a1d3850cead76b83304302e79d53b2a5ffa40a",
+  "ci": "At 26bb37f6d3f2 (the push's head), read 2026-10-26T04:59:32Z: Tests run 40270870455, Docs run 40270870415, Legion Envoy and Contracts run 40270870435 and PR Title runs 40270883744 to 40270924865 all queued (PR Title run 40270870470 cancelled, superseded). Round 2's runs at bf43ea0d: Tests, Docs and PR Title success.",
+  "scope": "Review round 1's three findings, all in tests: the three INFRA-303 rows moved to packages/dispatch/e2e/phone-landing.e2e.ts with one helper each for the seed, the asks-thread read, the newest turn and the phone page, and two comments corrected. Runtime unchanged: `jj diff --from 01a0a9d3 --to 26bb37f6 -- packages/dispatch/web` is empty, and phone-conversation.e2e.ts is byte-identical to base 2be97d63. Read side by side, the moved rows keep each step and assertion of the rows I wrote and the implementer's row. My round-2 break rows (restore of a scrolled list, return while loading, restore after the first landing, a failed read during the leave, desktop) ran on this same runtime at f62bbb19.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran its command in my own lane (ports 18800-18807, database dispatch_test_e2e) at f62bbb19 with --repeat-each=2: `cd packages/dispatch && source /legion/harness/env.sh && bun run e2e -- --project=chromium --project=iphone --repeat-each=2 --grep \"leaves the Conversation while it loads|whose read failed|newest message in view whichever read answers last\"` → 12 passed (6.6m). Its negative control is my round-1 run of the same row at 18b0d4ba: 6 failed at 'back on the Conversation: ... window.scrollY 0'. Criterion 3 command (attention, conversation, phone-conversation, phone, doc, deep-links on chromium, iphone, firefox) at f62bbb19 → 163 passed, 16 skipped (14.1m), the desktop restore row doc.e2e.ts 'tab round-trips keep ... the Conversation scroll position' among them."
+    "how": "Re-ran its command in my own lane (ports 18800-18807, database dispatch_test_e2e) at a5a1d385 with --repeat-each=2: `cd packages/dispatch && source /legion/harness/env.sh && bun run e2e -- --project=chromium --project=iphone --repeat-each=2 phone-landing.e2e.ts` → 12 passed (6.6m)."
   },
   "failures": [],
   "failed": 0,
   "proof": [
     {
-      "criterion": "Fix: a reader who leaves the Conversation while it loads and comes back lands on the newest conversation, and a reader who had scrolled the rendered list still gets that scroll back",
+      "criterion": "Every INFRA-303 row still catches its fault after the move to phone-landing.e2e.ts (forced order and 20 unforced opens, a failed read then a refetch, leaving while it loads then coming back)",
       "surface": "Real Chromium (chromium and iphone projects) at 390x664 against the production web build bun run e2e makes, the Go Dispatch server and Postgres 17 in the issue pod (tester lane)",
-      "command": "cd packages/dispatch && source /legion/harness/env.sh && bun run e2e -- --project=chromium --project=iphone zz-tester-infra303.e2e.ts (throwaway rows, not committed): R2a phone restore of a scrolled list; R2b leave while loading, return while still loading, then the read answers; R2c leave while loading, land on return, scroll to the foot, leave and return again; R2d the asks read fails while the reader is on Activity, return, then a refetch brings the list; R2e the same leave-and-return at 1280x720",
-      "observed": "10 passed (1.1m). R2a and R2c: window.scrollY back at the scrolled position (1924 chromium, 1925 iphone) after Activity and back, so the fix forgets only a position recorded before the first placement. R2b and R2d: the newest card wholly in view and clear of the composer. R2e: the newest card at y222, in the 720px viewport, scrollY 289",
-      "headSha": "f62bbb199fcdc2931aa1b6cfce4a6bb94a8ef0b2",
-      "negativeControl": "R2a first used Playwright's normal click, which scrolls the tab into view before the tap, so the page recorded scrollY 91 and the row failed on 'expected 1924, received 91'. A dispatched click leaves the scroll as the reader left it. This shows the row really reads the restored position. Round 1's red row at 18b0d4ba (before this fix): 6 failed at scrollY 0"
-    },
-    {
-      "criterion": "1 and 2. Forced order and 20 unforced opens: newest conversation in view and clear of the composer; 3. existing Conversation rows still pass",
-      "surface": "Same harness; chromium, iphone and firefox for criterion 3 (WebKit is CI's dispatch job)",
-      "command": "cd packages/dispatch && source /legion/harness/env.sh && bun run e2e -- --project=chromium --project=iphone --project=firefox attention.e2e.ts conversation.e2e.ts phone-conversation.e2e.ts phone.e2e.ts doc.e2e.ts deep-links.e2e.ts",
-      "observed": "163 passed, 16 skipped (14.1m); the forced-order row also passed 4/4 in the --repeat-each=2 run",
-      "headSha": "f62bbb199fcdc2931aa1b6cfce4a6bb94a8ef0b2",
-      "negativeControl": "Round 1: the forced-order row with ConversationTab.tsx:952 put back to `shown.at(0)` → 4/4 failed at the composer assertion"
+      "command": "cd packages/dispatch && source /legion/harness/env.sh && bun run e2e -- --project=chromium --project=iphone --repeat-each=2 phone-landing.e2e.ts",
+      "observed": "12 passed (6.6m)",
+      "headSha": "a5a1d3850cead76b83304302e79d53b2a5ffa40a",
+      "negativeControl": "Mutation tests, each undone afterwards. (1) ConversationTab.tsx:957 changed to `const newestShown = shown.at(0);` (the pre-fix landing): the forced-order and failed-read rows failed 4 of 4, at 'forced open' and 'after the refetch: the newest card shares a point with the composer'. (2) `onFirstPlacement={forgetConversationScroll}` removed from IssuePage.tsx: the leave-while-loading row failed 2 of 2 at 'back on the Conversation: the newest card shares a point with the composer ... {x:24,y:494,...}'."
     }
   ]
 }
