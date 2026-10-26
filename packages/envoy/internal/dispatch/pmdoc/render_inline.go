@@ -1,11 +1,13 @@
 package pmdoc
 
 import (
+	"bytes"
 	"fmt"
 	"slices"
 	"strings"
 	"unicode/utf8"
 
+	gmtext "github.com/yuin/goldmark/text"
 	"github.com/yuin/goldmark/util"
 )
 
@@ -514,19 +516,20 @@ func (r *renderer) writeInlineRun(nodes []*Node, prefix string, context inlineCo
 			alt, _ := n.Attrs["alt"].(string)
 			writtenAlt := imageAlt(alt, context)
 			// A title's line feed is written as it is, so a title the server already stores keeps
-			// its bytes, except in a heading or a table cell, whose line it would end, and in an
-			// image render found misread so written; those take every line feed of both titles as
-			// `&#10;`. Whether the raw form reads back depends on the document around the image -
-			// a list item's or block quote's next line is the paragraph's lazy continuation, a
-			// blank line ends it, a line can open a block - so the image is recorded for render
-			// to judge in the whole document.
-			raw := !context.tableCell && !context.heading && !r.escapedTitles[n]
-			image := imageSyntax(n, writtenAlt, escapePipes, raw)
-			if raw && (strings.Contains(title, "\n") || strings.Contains(linkTitle, "\n")) {
-				if r.rawTitles == nil {
-					r.rawTitles = map[*Node]bool{}
+			// its bytes, wherever every line it creates reads as the paragraph's continuation
+			// (rawTitleLinesHold), and as `&#10;` in both titles elsewhere: in a heading or a table
+			// cell, whose line it would end, where a line it creates would end the paragraph or
+			// open a block, and in an image render's check of the whole document found misread so
+			// written (render).
+			image := imageSyntax(n, writtenAlt, escapePipes, false)
+			if !context.tableCell && !context.heading && !r.escapedTitles[n] && (strings.Contains(title, "\n") || strings.Contains(linkTitle, "\n")) {
+				if raw := imageSyntax(n, writtenAlt, escapePipes, true); r.rawTitleLinesHold(raw, prefix) {
+					image = raw
+					if r.rawTitles == nil {
+						r.rawTitles = map[*Node]bool{}
+					}
+					r.rawTitles[n] = true
 				}
-				r.rawTitles[n] = true
 			}
 			r.writeSyntax(image)
 			position.atLineStart, position.atTextStart = false, false
@@ -591,6 +594,102 @@ func (r *renderer) endLine(continues bool) {
 	r.b.Truncate(candidate.at)
 	r.b.WriteString(escape)
 	r.b.WriteString(tail)
+}
+
+// rawTitleLinesHold reports whether raw, an image written with its titles' line feeds as they are,
+// keeps every line those line feeds create in the paragraph the image stands in, as the line
+// before's continuation, so that the image reads back as held. It judges each line by itself, never
+// reading the document back: whether a line continues an open paragraph turns on the line's own
+// start, and, for a table's delimiter row, on the line before, its header. A line that is blank,
+// other than raw's last, ends the paragraph; one opening with a space or a tab loses them to the
+// paragraph, which strips them; one opening with `>` opens a quote or, in a quote, loses the `>` to
+// it; a lone `:::` closes the typed block around it; and a line that opens any other block ends the
+// paragraph (continuesParagraph). A container's prefix is not written on these lines, so in a list
+// item, a quote or a footnote definition (prefix) each is the paragraph's lazy continuation, which
+// opens a block wherever a prefixed line would, reads no `=` line as a setext underline and makes
+// no table; a typed block behind such a prefix takes no lazy line at all, and ends before it. Each
+// line costs a read of itself after one short line, and a delimiter row a scan of its header, at
+// most maxTableHeaderRead bytes, so the judgement is linear in the document.
+func (r *renderer) rawTitleLinesHold(raw, prefix string) bool {
+	typed := r.scope().typed
+	if typed != nil && typed.prefix != "" {
+		return false
+	}
+	lazy := prefix != ""
+	lines := strings.Split(raw, "\n")
+	for index, line := range lines[1:] {
+		last := index+2 == len(lines)
+		switch {
+		case strings.Trim(line, " \t") == "":
+			if !last {
+				return false
+			}
+			continue
+		case line[0] == ' ' || line[0] == '\t' || line[0] == '>':
+			return false
+		case typed != nil && strings.TrimSpace(line) == ":::":
+			return false
+		}
+		header := "x"
+		if width, ok := delimiterRowWidth(line); ok && !lazy {
+			if r.makesTable(lines, index+1, width) {
+				return false
+			}
+			// Under a header wider than it, the line is no delimiter row, and is read for any
+			// other block it opens.
+			header = strings.Repeat("x|", width) + "x"
+		}
+		if !continuesParagraph(header, line, lazy) {
+			return false
+		}
+	}
+	return true
+}
+
+// maxTableHeaderRead is how much of the line before a raw title's first line feed
+// rawTitleLinesHold reads as the header of a delimiter row the title writes after it. Where that
+// line is longer, the delimiter row is taken to make a table, and the title is written `&#10;`.
+const maxTableHeaderRead = 4 << 10
+
+// makesTable reports whether lines[index], a delimiter row width cells wide that raw's lines
+// (lines) write at the paragraph's own level, makes a table of the paragraph, as the table reader
+// (lazyTableRows) does, under the line before it: lines[index-1], or for raw's first line feed the
+// written line up to it. The reader takes only the paragraph's first delimiter row, under a header
+// no wider than it and holding more than a lone `|`; a delimiter row on an earlier line of the
+// paragraph than the one before is not seen here, and the line is taken to make a table.
+func (r *renderer) makesTable(lines []string, index, width int) bool {
+	header := lines[index-1]
+	if index == 1 {
+		written := r.b.Bytes()
+		from := max(len(written)-maxTableHeaderRead, 0)
+		lineFrom := bytes.LastIndexByte(written[from:], '\n') + 1
+		if lineFrom == 0 && from > 0 {
+			return true
+		}
+		header = string(written[from+lineFrom:]) + header
+	} else if _, delimiter := delimiterRowWidth(header); delimiter {
+		return false
+	}
+	source := []byte(header)
+	return !lonePipe(source) && tableRowWidth(gmtext.NewSegment(0, len(source)), source) <= width
+}
+
+// delimiterRowWidth is the width of line read as a table's delimiter row (tableDelimiterWidth), or
+// false when it is none.
+func delimiterRowWidth(line string) (int, bool) {
+	source := []byte(line)
+	return tableDelimiterWidth(gmtext.NewSegment(0, len(source)), source)
+}
+
+// continuesParagraph reports whether line, written with no prefix after header, a line of an open
+// paragraph, reads as the paragraph's next line as a line of plain text does, lazily where lazy:
+// the paragraph is read inside a quote, whose prefix line does not carry.
+func continuesParagraph(header, line string, lazy bool) bool {
+	opener := header + "\n"
+	if lazy {
+		opener = "> " + opener
+	}
+	return slices.Equal(blockKinds(opener+line), blockKinds(opener+"x"))
 }
 
 func (r *renderer) closeMarks(marks []Mark, escapePipes bool) {

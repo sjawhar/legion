@@ -38,9 +38,9 @@ type renderer struct {
 	// and wroteBlankEmptyCode records one written with a line between them (emptyCodeWrittenBare).
 	bareEmptyCode, wroteBlankEmptyCode bool
 	// rawTitles is every image this render wrote with a title or link title holding a line feed
-	// written as it is, and escapedTitles every image render found misread so written, whose
-	// titles' line feeds are written `&#10;` (render). Each is a set: a run can be written more
-	// than once (inlineWithEscapes).
+	// written as it is (rawTitleLinesHold), and escapedTitles every image whose titles' line feeds
+	// are written `&#10;` regardless, set where render found the document misread so written. Each
+	// is a set: a run can be written more than once (inlineWithEscapes).
 	rawTitles, escapedTitles map[*Node]bool
 	// spanBudget is how many more empty cells the tables' spans may add: maxSpanCells, or none in
 	// a spanless render (renderSpanless).
@@ -145,26 +145,29 @@ func render(doc *Node, spanCells int) (r *renderer, err error) {
 	// An image's title or link title holding a line feed is written as the server has always
 	// written it, the line feed as it is, wherever that reads back as held in the document around
 	// it: in a paragraph, a list item or a block quote the next line is the paragraph's
-	// continuation, lazy or not, so a title the server already stores keeps its bytes. Whether it
-	// does depends on the whole document - a blank line still ends the paragraph, a line of the
-	// title can open a block or lose its indentation, and a container's prefix is not written on
-	// it - so the document is read back, and the image with such a title at or before the first
-	// image that does not read back as held is written again with its line feeds `&#10;`, which
-	// read back as the line feed anywhere, until every image does. A heading and a table cell,
-	// whose line a line feed ends, never hold one (the image case of writeInlineRun). The document
-	// is read only when a title holding a line feed was written as it is, and written again at most
-	// once for each such title.
-	for r.err == nil && len(r.rawTitles) > 0 {
-		misread := misreadRawTitle(doc, r.b.String(), r.rawTitles)
-		if misread == nil {
-			break
+	// continuation, lazy or not, so a title the server already stores keeps its bytes. Elsewhere
+	// both titles' line feeds are written `&#10;`, which reads back as the line feed anywhere: in a
+	// heading and a table cell, whose line a line feed ends, and where a line the title creates
+	// would end the paragraph, open a block or lose its indentation. That is judged as the image is
+	// written, one created line at a time (rawTitleLinesHold), not by reading the document back:
+	// whether a line continues an open paragraph turns only on its own start and, for a table's
+	// delimiter row, the line before it, and a lazy continuation, written without its container's
+	// prefix, opens a block wherever a prefixed line would; the reading differs only in what a lazy
+	// line cannot be, a setext underline or a table row, which the judgement reads lazily. Reading
+	// the whole document back for each such image, and writing it again with one more title
+	// `&#10;` for each it found misread, cost a read and a render of the whole document per image,
+	// quadratic in them (INFRA-190). The judgement is checked once, bounded: when a title was
+	// written raw, the document is read back, and if an image at or after one so written does not
+	// read back as held (rawTitleMisread), the document is written again, once, with every title
+	// `&#10;`, so a wrong judgement costs the raw titles their bytes rather than the write.
+	if r.err == nil && len(r.rawTitles) > 0 {
+		if images := documentImages(doc); rawTitleMisread(images, r.b.String(), r.rawTitles) {
+			escaped := make(map[*Node]bool, len(images))
+			for _, image := range images {
+				escaped[image] = true
+			}
+			r = renderBlocks(doc, labels, r.bareEmptyCode, spanCells, escaped)
 		}
-		escaped := r.escapedTitles
-		if escaped == nil {
-			escaped = map[*Node]bool{}
-		}
-		escaped[misread] = true
-		r = renderBlocks(doc, labels, r.bareEmptyCode, spanCells, escaped)
 	}
 	if r.err != nil {
 		return nil, r.err
@@ -172,22 +175,15 @@ func render(doc *Node, spanCells int) (r *renderer, err error) {
 	return r, nil
 }
 
-// misreadRawTitle is the image whose titles' line feeds, written as they are (rawTitles), keep
-// markdown, written from doc, from reading back with doc's images as held, or nil when every image
-// reads back so or the first that does not stands before every such image. The images are read in
-// document order, each by its source, alt, title, link and link title; the one blamed is the
-// last such image at or before the first misread image, since a title's line feed can only
-// change what is read after it. Where the markdown does not read at all, it is the first.
-func misreadRawTitle(doc *Node, markdown string, rawTitles map[*Node]bool) *Node {
-	written := documentImages(doc)
+// rawTitleMisread reports whether markdown, written with written, doc's images in document order,
+// fails to read back with them as held at or after an image whose titles' line feeds were written
+// as they are (rawTitles), which only a title's line feed written so can cause: each is compared by
+// its source, alt, title, link and link title, and a title's line feed can only change what is read
+// after it. Markdown that does not read at all is misread.
+func rawTitleMisread(written []*Node, markdown string, rawTitles map[*Node]bool) bool {
 	back, err := Parse(markdown)
 	if err != nil {
-		for _, image := range written {
-			if rawTitles[image] {
-				return image
-			}
-		}
-		return nil
+		return true
 	}
 	read := documentImages(back)
 	misread := min(len(written), len(read))
@@ -198,14 +194,14 @@ func misreadRawTitle(doc *Node, markdown string, rawTitles map[*Node]bool) *Node
 		}
 	}
 	if misread == len(written) && len(written) == len(read) {
-		return nil
+		return false
 	}
 	for index := min(misread, len(written)-1); index >= 0; index-- {
 		if rawTitles[written[index]] {
-			return written[index]
+			return true
 		}
 	}
-	return nil
+	return false
 }
 
 // documentImages is doc's images in document order.
@@ -959,8 +955,8 @@ func opensDecodedReference(value string) bool {
 // so a title the server already stores keeps its bytes; otherwise it is written `&#10;`, which
 // decodedTitleOrNil and the browser editor's parser read back as the line feed, where the block
 // around it cannot hold it: a line feed ends a heading or a table row, a blank line ends a
-// paragraph, and a line of the title can open a block or lose its indentation (render judges which
-// in the document).
+// paragraph, and a line of the title can open a block or lose its indentation (rawTitleLinesHold
+// judges which as the image is written).
 func decodedTitleSuffix(title string, escapePipes, rawLineFeeds bool) string {
 	if title == "" {
 		return ""

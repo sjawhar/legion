@@ -213,6 +213,70 @@ func TestRenderIsLinearInImagesWhoseTitlesHoldABlankLine(t *testing.T) {
 	}
 }
 
+// Many images whose titles hold a blank line, all in one paragraph, render in time linear in the
+// image count. Each title's line feeds are judged where the image is written, against the lines
+// they create alone (rawTitleLinesHold); a judgement that read the paragraph, or the line, written so
+// far for each image would be quadratic in one paragraph however many paragraphs the document has,
+// which the test of one image per paragraph above cannot see. The bound is the one above, far above
+// a linear render's time.
+func TestRenderIsLinearInImagesWhoseTitlesHoldABlankLineInOneParagraph(t *testing.T) {
+	const images = 2000
+	paragraph := &Node{Type: "paragraph"}
+	for range images {
+		paragraph.Children = append(paragraph.Children, &Node{Type: "image", Attrs: Attrs{
+			"src": "i.png", "alt": "x", "title": "a\n\nb", "link": nil, "linkTitle": nil,
+		}})
+	}
+	doc := &Node{Type: "doc", Children: []*Node{paragraph}}
+	const deadline = 30 * time.Second
+	what := fmt.Sprintf("rendering %d images whose titles hold a blank line in one paragraph", images)
+	_, onTime, _, err := runWithDeadline(what, deadline, func() (time.Duration, error) {
+		started := time.Now()
+		_, err := Render(doc)
+		return time.Since(started), err
+	})
+	if !onTime {
+		t.Fatalf("%s took more than %s, want time linear in the image count", what, deadline)
+	}
+	if err != nil {
+		t.Fatalf("%s: %v", what, err)
+	}
+}
+
+// Many images whose titles hold a line feed their list items hold as written render in time linear
+// in the image count, every title's line feed kept as it is. Such a document is the one render
+// reads back, once, to check the titles it wrote so (rawTitleMisread): a check that read the
+// document back, or wrote it again, once for each such image would be quadratic in them, as render
+// was before (INFRA-190). The bound is the one above, far above a linear render's time.
+func TestRenderIsLinearInImagesWhoseTitlesItKeepsRaw(t *testing.T) {
+	const images = 2000
+	list := &Node{Type: "bullet_list", Attrs: Attrs{"spread": false}}
+	for range images {
+		list.Children = append(list.Children, &Node{Type: "list_item", Children: []*Node{{Type: "paragraph", Children: []*Node{{Type: "image", Attrs: Attrs{
+			"src": "i.png", "alt": "x", "title": "a\nb", "link": nil, "linkTitle": nil,
+		}}}}}})
+	}
+	doc := &Node{Type: "doc", Children: []*Node{list}}
+	const deadline = 30 * time.Second
+	what := fmt.Sprintf("rendering %d list items whose image titles hold a line feed", images)
+	var markdown string
+	_, onTime, _, err := runWithDeadline(what, deadline, func() (time.Duration, error) {
+		started := time.Now()
+		var err error
+		markdown, err = Render(doc)
+		return time.Since(started), err
+	})
+	if !onTime {
+		t.Fatalf("%s took more than %s, want time linear in the image count", what, deadline)
+	}
+	if err != nil {
+		t.Fatalf("%s: %v", what, err)
+	}
+	if raw := strings.Count(markdown, `![x](i.png "a`+"\n"+`b")`); raw != images {
+		t.Fatalf("%s wrote %d titles with the line feed as it is, want all %d", what, raw, images)
+	}
+}
+
 // A table whose every row holds an escaped pipe in a code span parses in time linear in its size,
 // up to the 1 MiB a document may be. goldmark's table transformer checked every code span's text
 // against every escaped pipe in the document: on one machine at a load of about 300, 16 KiB of such
