@@ -2,37 +2,32 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-440",
-  "completed": "2026-10-26T15:58:35Z",
-  "round": 2,
-  "reviewedCodeHead": "1c08eb908fced3f754e88c058f221d6f8cd60829",
+  "completed": "2026-10-26T16:42:27Z",
+  "round": 3,
+  "scope": "Architect's ruling (16:01Z): judge only the asker tooltip, the credential lines' single status, the forward merge of main, and defects in code they change.",
+  "reviewedCodeHead": "8e8a07df30562494388bae76c999ea7abfa8dbcb",
   "decision": "changes_requested",
   "critical": 0,
-  "important": 0,
-  "minor": 3,
+  "important": 1,
+  "minor": 1,
   "verdictProvider": "provider not verified (this session's system prompt names model anthropic/claude-opus-5-5; the transcript's per-turn provider was not read)",
-  "ci": "At 1c08eb90 when read: lint, typecheck, test, pr-title (the main ruleset's required set) queued; compare 1c08eb90...afc2a781 touches only .legion/. GitHub reports the pull request CONFLICTING with main (packages/contracts/CHANGELOG.md, against c41e4ebd9..c79379d94). A request for changes does not wait on CI.",
-  "thermonuclear": "Round 2 at 1c08eb90: deep review APPROVE with one minor (asker tooltip); code quality CHANGES (credential lines double source; ReplyQuote prop combination; resolveAgent overloads). tsc per package, biome, bun test web/src 2375 pass, contracts 218 pass, envoy-client 260 pass per deep review.",
-  "roundOneFindings": "All 11 round-1 threads fixed (339e0c89, 1c08eb90) and verified; finding 4 (full id behind the short form) is fixed for drawn names but defeated at the Inbox asker's tooltip (keyFindings[0]).",
+  "ci": "At 8e8a07df when read: lint, typecheck, test queued; pr-title queued; compare 8e8a07df...843da0b4 touches only .legion/. GitHub reports the pull request MERGEABLE. A request for changes does not wait on CI.",
+  "merge": "Forward merge c3671e43 (parents abb4fcf4, main c79379d9): unchanged-diff fingerprint 8540279c86e82f008537abe14e696254460db5a04fcef5a9bcd7535c3efb78c4 at both abb4fcf4 and c3671e43; the CHANGELOG resolution keeps the INFRA-440 actorAttribution entry and main's INFRA-393 SearchCoverage entry whole.",
+  "thermonuclear": "Round 3 at 8e8a07df: deep review CHANGES (phone.e2e.ts title assertion), code quality APPROVE with minors (doc comment placement; duplicated running rule; test key order). Per deep review: bun test credentials/ask-card/inbox 247 pass, doc/margin/conversation/answers 433 pass, tsc and biome clean.",
   "keyFindings": [
     {
-      "severity": "minor",
-      "file": "packages/dispatch/web/src/features/inbox/AskCard.tsx:278",
-      "description": "askerTitle is agentText.label(author), the short form for an untitled session, and sits on the innermost TruncatedText inside the AgentName span whose title is the full id, so hovering the asker shows session:<8>… again; the round-1 full-id fix does not reach the place an untitled session is most often named. Include the id in askerTitle for a session asker and adjust the e2e locator at agent-name.e2e.ts:351-353."
+      "severity": "important",
+      "file": "packages/dispatch/web/src/features/inbox/AskCard.tsx:286",
+      "description": "The asker tooltip is now '<label> · <id>' for a session asker, but packages/dispatch/e2e/phone.e2e.ts:847-849 (unchanged, runs on chromium and iphone, part of CI's dispatch job) still asserts the author chip's text element has title exactly longTitle; with session e2e-long-title it now reads '<longTitle> · e2e-long-title', so that test fails. Update the assertion and run phone.e2e.ts on both projects."
     },
     {
       "severity": "minor",
-      "file": "packages/dispatch/web/src/features/credentials/CredentialSessionLines.tsx:30",
-      "description": "The state words come from a second registry read (useAgentRegistry(false)) while session.ts already resolved the same list into place/unresolved; the final else branch (running with no place) cannot run, and the docstring says the component takes the list as props instead of reading it. Carry a status {running, place} | not-running | unknown on CredentialSessionLine from resolveLine and switch on it."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/contracts/CHANGELOG.md",
-      "description": "GitHub reports the pull request CONFLICTING with main in this file (this round's entry against main's newer entries); forward-merge main as the conflict procedure says."
+      "file": "packages/dispatch/web/src/features/credentials/CredentialSessionLines.tsx:19",
+      "description": "The component's doc block (the agent, its full id, the grid it never widens) now sits on the string helper statusText; CredentialSessionLineText has none. Move it to the component and give statusText one line."
     }
   ],
   "judgedNotDefects": [
-    "ReplyQuote's author/excerpt props allow 'no author, non-empty body' that no caller produces, and markdown-surfaces tests exercise it: the formatting under test is MarkdownPreview's, the same component and line count on both paths, so coverage of what a reader sees is not lost.",
-    "resolveAgent's overloads and ResolvedAgent.sessionId: style, no behaviour.",
-    "Confirmation dialogs and RouteReach's explanation use the short form: each acts on the row the person clicked."
+    "resolveLine repeats the registry's three-state rule instead of sharing a function: both read the same [\"agents\"] query with the same isPending/isError rule, and the switch is exhaustive; the AGENTS.md parenthetical stays true in effect.",
+    "session.test.ts literals list keys in two orders: toEqual ignores order."
   ]
 }
