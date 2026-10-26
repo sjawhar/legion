@@ -32,9 +32,10 @@ Extends docs/solutions/github-api/a-capped-github-read-asks-for-the-smallest-med
 - **A fake of an existence check answers 200 only for the names its fixture seeds.** A fake that
   answers any ref hides a check built on the wrong read. The Go fake's `commits/{branch}` answered
   every value, so a save check built on `Ref` passed every SHA and `main~1` in tests.
-- **A fake never copies the requested value into the field the client compares.** If it echoes
-  `ref: refs/heads/<requested name>`, the client's `ref == refs/heads/<name>` check compares the
-  value with itself and always passes.
+- **A fake never answers a name it was not seeded with by echoing it back.** If it answers
+  `ref: refs/heads/<requested name>` for any name, the client's `ref == refs/heads/<name>` check
+  compares the value with itself and always passes. Decide existence from the fixture first; only
+  a seeded name gets its ref.
 
 ## Evidence
 
@@ -45,8 +46,9 @@ Extends docs/solutions/github-api/a-capped-github-read-asks-for-the-smallest-med
 - Proof on real GitHub: https://github.com/sjawhar/legion/pull/2209#issuecomment-6406509456. At
   the head, the SHA, `~1`, `^`, `HEAD`, `refs/heads/…` and the prefix `infra-391` each got `409`
   with no row. The previous head stored the first five with `200`.
-- Left at the approved head: `Ref`'s doc comment (`githubapp/client.go`) still says the call
-  "also proves the branch exists". The browser suite's `packages/dispatch/e2e/fake-github.ts`
-  answers the exact read for any name on a seeded repository and echoes it as `ref`, so no browser
-  spec can observe a refused branch. The refusal is proven only by the Go tests and the
-  real-GitHub rig.
+- The first retro left two things in the code: `Ref`'s doc comment still said the call "also
+  proves the branch exists", and the browser suite's `packages/dispatch/e2e/fake-github.ts`
+  answered the exact read for any name and echoed it back, so no browser spec could see a refused
+  branch. Both were fixed in e7b6ab1259b9. The fake now answers only seeded branches (`["main"]`
+  by default). `settings.e2e.ts` shows the inline 409 for `no-such-branch`, and it fails with the
+  old fake.
