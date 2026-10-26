@@ -234,25 +234,25 @@ pod_exec() {
 # which is why every check of the replacement compares uids and never names.
 implementer_pod() { claim_sandbox "$issue" implementer; }
 # agent_pid_sh is the POSIX sh that finds a role's agent in its container, Oh My Pi's or Claude
-# Code's: the process whose argv[0] is omp or claude and that runs under the role's `legion
-# worker-shim` — directly for Oh My Pi, under `legion claude-bridge` for Claude Code, which is why
-# the walk climbs rather than reading one parent. It exits 1 naming both pids when two such
-# processes run and saying so when none does; otherwise it leaves the pid in $pid.
+# Code's, by its direct parent alone, as stage4b-sandbox-tree.sh's does: an omp whose parent is the
+# role's `legion worker-shim`, or a claude whose parent is the `legion claude-bridge` the shim runs.
+# A process further down is never the agent: Oh My Pi starts its own helpers under its own name
+# (`omp __omp_worker_daemon_broker`, a child of the architect's omp), which a walk up to the shim
+# would count as a second agent. It exits 1 naming both pids when two such processes run and saying
+# so when none does; otherwise it leaves the pid in $pid.
 # shellcheck disable=SC2016  # expanded by the pod's shell
 agent_pid_sh='
     found=
     for d in /proc/[0-9]*; do
       argv0=$(tr "\0" "\n" 2>/dev/null <"$d/cmdline" | sed -n 1p)
-      case "${argv0##*/}" in omp | claude) ;; *) continue ;; esac
-      up=$(sed -n "s/^PPid:[[:space:]]*//p" "$d/status" 2>/dev/null)
-      shimmed=
-      hops=0
-      while [ -n "$up" ] && [ "$up" -gt 1 ] && [ "$hops" -lt 4 ]; do
-        if tr "\0" " " 2>/dev/null <"/proc/$up/cmdline" | grep -q "worker-shim "; then shimmed=1; break; fi
-        up=$(sed -n "s/^PPid:[[:space:]]*//p" "/proc/$up/status" 2>/dev/null)
-        hops=$((hops + 1))
-      done
-      [ -n "$shimmed" ] || continue
+      case "${argv0##*/}" in
+        omp) runner=worker-shim ;;
+        claude) runner=claude-bridge ;;
+        *) continue ;;
+      esac
+      parent=$(sed -n "s/^PPid:[[:space:]]*//p" "$d/status" 2>/dev/null)
+      [ -n "$parent" ] || continue
+      tr "\0" "\n" 2>/dev/null <"/proc/$parent/cmdline" | grep -qx "$runner" || continue
       if [ -n "$found" ]; then
         echo "more than one agent under a legion worker-shim: pids ${found#/proc/} and ${d#/proc/}" >&2
         exit 1
