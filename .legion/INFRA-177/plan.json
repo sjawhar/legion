@@ -1,0 +1,56 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "INFRA-177",
+  "completed": "2026-10-26T19:01:00Z",
+  "plan": "dispatch://INFRA-177/artifact/plan-md (version 2)",
+  "requiredSkills": {
+    "implement": [
+      "legion-worker: pr-body.md for the proof lines and the simplify pass, tools.md for the PostgreSQL and Playwright the proofs need, cleanup-deletion.md for removing the handoff-push machinery and skip-checks-trailer.md",
+      "dispatch: the new handoff-write/handoff-read commands follow the spec-built Dispatch CLI and its write conventions, and the worker texts teach them",
+      "ce-simplify-code: the simplify pass pr-body.md requires on the settled change"
+    ],
+    "test": [
+      "legion-worker: pr-body.md defines the tester's proof, its negative control and what CI covers instead of the tester; tools.md for running the Dispatch browser suite and the live proofs in the pod",
+      "dispatch: the tester reads and writes handoffs with dispatch handoff-read/handoff-write and checks the Conversation entry"
+    ],
+    "review": [
+      "legion-worker: merge-gate.md (the approved head is now the code head, READY's narrowed .legion/ allowance), review-threads.md, cleanup-deletion.md for checking nothing of the removed machinery is left",
+      "dispatch: judging the new Dispatch routes, event and CLI against the existing Dispatch conventions"
+    ]
+  },
+  "gapAnalysis": {
+    "findings": [
+      {"finding": "A root whose code all lands through its children has no commit after the cutover, so GitHub opens no pull request and implementing never ends (engine.go:519-522).", "answer": "D13: the root's implementer pushes one empty commit with no trailer; P7 proves on sjawhar/legion-smoke that GitHub opens and checks it first; if GitHub refuses, the implementer reports to the architect. Listed as an open point."},
+      {"finding": "In-flight branches whose head is a skip-checks handoff push never get required checks once the carry is gone.", "answer": "Spec v6 design 9 and D11: the import pushes one removal commit with no trailer to every branch carrying .legion/, so each head runs its checks; P5 and P7 prove it, the production check reads it (A9)."},
+      {"finding": "With READY_HEAD_CARRIES_HANDOFFS and retro's removal gone, in-flight .legion/ files merge, or READY_UNREVIEWED_CHANGE sends issues back.", "answer": "Spec v6 design 9 keeps READY accepting the removal above the approved head; D10 narrows it to files GitHub lists as removed under .legion/, so nothing can add one; P5 covers both."},
+      {"finding": "The import could write above records workers wrote since.", "answer": "D11: it writes only when the newest record is absent or its own and differs from the file, never above a worker's; a second run writes nothing (P5)."},
+      {"finding": "Imported records break HANDOFF_NOT_NEW and the session check; 'with no session' is impossible.", "answer": "D9/D11: imported records are under the daemon's session legion-daemon:<PROJECT>, so a completion naming one is refused HANDOFF_SESSION_MISMATCH with a message to re-write it under the worker's session (P1 A7 step); HANDOFF_NOT_NEW keys on record id. Spec departure 2."},
+      {"finding": "Import timing: a role could start before its issue's import.", "answer": "D11 run order: import runs while the old daemon still runs, before the rollout, and again after it; old daemon workers keep reading branch files until then."},
+      {"finding": "Reporting @- for every phase departs from 'instead of a commit' and adds a refusal.", "answer": "D8: only the implementer reports a commit (the pushed tip, refused when @- is unpushed), retro and merger as today; planner, tester and reviewer report the record only. Spec departure 6."},
+      {"finding": "claims.session may differ from the CLI's session (Claude ENVOY_SESSION_ID override, session switch).", "answer": "D5: the CLI under claude uses ENVOY_SESSION_ID ?? CLAUDE_CODE_SESSION_ID as claude-envoy's claim does; the mismatch refusal names both sessions; A3 drives the daemon route directly (P1); the pane does no session check (D8)."},
+      {"finding": "Root lines 255 and 258 lack issue checks; A3 lacks a positive control.", "answer": "Spec v6 added A10 and A9; P1 covers A3 with its positive control, A10 and the import refusal; section 4 maps root lines 255-258."},
+      {"finding": "A2 and A8 cannot be proven pre-merge from a pod.", "answer": "Section 4: P1 and P7 are the pre-merge halves; A2 and A8's real-agent run is the production check and INFRA-480; stage4b's updated assertion is operator-run and not claimed."},
+      {"finding": "A4 is not machine-decidable as written.", "answer": "P3 gives the exact git grep with each exclusion and its reason (history, captured GitHub testdata, Envoy's CI store describing GitHub's own trailer)."},
+      {"finding": "A1's negative control depends on commit split.", "answer": "D7 and steps 4-5: the Activity/event/SSE commit lands before the Conversation commit; P2 runs the spec against both builds."},
+      {"finding": "'Every push now counts as a fix attempt' does not match the code.", "answer": "D10: the tester's review-App pushes keep their exceptions; spec departure 5."},
+      {"finding": "Stored pushes JSON keeps handoffOnly.", "answer": "D10: json.Unmarshal drops the key and nothing reads it after the carry goes; no data migration. Migration 0055's rollback is documented (step 6)."},
+      {"finding": "Deploy order and a boot refusal.", "answer": "D11 run order documented; D14: no boot refusal, since the import fails first on a Dispatch without the routes and completions name Dispatch's 404."},
+      {"finding": "Generated copies, contract versions, fixtures and live scripts that must change.", "answer": "Steps 1-13 name each: contract 40 and its pins and fixtures, claude-envoy rebuild, Dispatch migration 0120, route pin, event lists, seed.ts, classifyPush and reduceGithubEvent fixtures, stage3/stage4b/claude-backend-tmux/lib scripts (checked with bash -n, run by the operator)."},
+      {"finding": "dispatch handoff write|read cannot parse.", "answer": "D5: handoff-write and handoff-read; spec departure 1."},
+      {"finding": "Dropping phase/issue/completed from bodies is unrequested.", "answer": "D6: body shape unchanged; completed is INFRA-336's."},
+      {"finding": "workspace-recovered.json is stale in the spec.", "answer": "Spec departure 4; the LEGION_WORKSPACE_RECREATED notice points at the record (step 7)."},
+      {"finding": "Unsupported claims (38 KB, citations, INFRA-149 order, INFRA-157).", "answer": "Cap set at 256 KiB, well above; citations refreshed to main; INFRA-149 is done and this issue removes its rules; no AskGate code exists, so nothing to exempt (open points)."},
+      {"finding": "The {phase} key and event delivery are ambiguous.", "answer": "D1: the handoff word; D4: handoff.recorded carries id/phase/version, no body, no human notification, ignored by the daemon."}
+    ]
+  },
+  "planReview": {"verdict": "approved", "rounds": 2},
+  "specDepartures": [
+    {"spec": "Design 3: `dispatch handoff write|read` calls the routes.", "plan": "The commands are `dispatch handoff-write` and `dispatch handoff-read`.", "evidence": "The CLI takes one word as its command: packages/envoy-client/src/dispatch-command.ts:289-300.", "outcome": {"kind": "unchanged"}},
+    {"spec": "Design 9: the import writes version 1 of each record 'with no session'.", "plan": "The import writes under the daemon's Dispatch session legion-daemon:<PROJECT>, which the completion's session check then refuses as another session's.", "evidence": "Dispatch refuses a bearer write that names no session actor (packages/envoy/internal/dispatch/api/server.go:684-704); the daemon already writes as DaemonSession (packages/daemon/internal/dispatch/client.go:309-316).", "outcome": {"kind": "unchanged"}},
+    {"spec": "Design 9: a one-time command, run before the release rolls out, writes version 1.", "plan": "The same command also runs once after the rollout, writing a later version only above its own earlier record and never above a worker's.", "evidence": "Between the first run and the rollout, workers on the old release can still push new .legion/ files; a second run catches them.", "outcome": {"kind": "unchanged"}},
+    {"spec": "Design 7: `workspace-recovered.json` stays.", "plan": "No such file is kept; the LEGION_WORKSPACE_RECREATED notice points at the Dispatch record.", "evidence": "Nothing writes the file since daemon contract 37 (packages/daemon/internal/api/version.go:314-316).", "outcome": {"kind": "unchanged"}},
+    {"spec": "Design 6: every push now counts as a fix attempt.", "plan": "Only handoff-only pushes lose their exception; the tester's red-test pushes by the review App stay uncounted and keep the planned-red mark.", "evidence": "packages/daemon/internal/classify/decisions.go:31,146-155 exempt ByReviewApp pushes separately from handoff-only ones.", "outcome": {"kind": "changed", "scope": "Design 6's fix-attempt sentence is narrowed to handoff-only pushes; the tester's planned-red pushes are unchanged."}},
+    {"spec": "Design 5 (and the parent spec): handoff_complete reports the record id and version, naming the record instead of a commit.", "plan": "The implementer also reports its pushed tip; retro and the merger keep reporting @-.", "evidence": "implementationReady applies the CI rule only when the pull request's head equals the implementer's reported commit (packages/daemon/internal/workflow/review.go:520); the merger's commit is READY's head (workflow/ready.go).", "outcome": {"kind": "unchanged"}}
+  ]
+}
