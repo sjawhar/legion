@@ -34,6 +34,9 @@ export interface KeyedWriteOptions<TData, TVariables, TContext>
   readonly target?: (variables: TVariables) => string | undefined;
   /** An upload's file, kept across a reload with the write. */
   readonly file?: (variables: TVariables) => File | undefined;
+  /** Whether the write ends the person's session (a sign-out): a lapse of it lets the write go
+   *  rather than holding it for the next sign-in (`WriteSpec.endsWithSession`). */
+  readonly endsWithSession?: boolean;
 }
 
 /** Whether `a` and `b` are the same variables: one value, or two that serialise alike (a form
@@ -82,6 +85,7 @@ export type KeyedWriteResult<TData, TVariables, TContext> = UseMutationResult<
  * to say so, until the next press or `forgetUnanswered`.
  */
 export function useKeyedWrite<TData, TVariables = void, TContext = unknown>({
+  endsWithSession,
   file,
   inline,
   label,
@@ -109,6 +113,7 @@ export function useKeyedWrite<TData, TVariables = void, TContext = unknown>({
       return writes
         .run({
           detail: null,
+          endsWithSession,
           file: file?.(variables),
           inline: typeof inline === "function" ? inline(variables) : inline,
           key,

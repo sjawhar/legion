@@ -100,8 +100,11 @@ export interface WriteKind<D, K = D> {
     answer: unknown,
     awaited: boolean
   ) => void;
-  /** What a write of this kind undoes once it is refused or discarded. */
+  /** What a write of this kind undoes once it is refused, discarded or dropped. */
   readonly undone?: (client: QueryClient, write: Write<D>) => void;
+  /** What a kind lets go of once whoever is signed in changes, or the person signs out: what it
+   *  remembered of their answers, which the next person's writes must not build on. */
+  readonly reset?: () => void;
   /** Whether a write of this kind Dispatch made and answered stays, `made`, until its surface lets
    *  it go (`letGo`); one made with no answer to give has nothing to show, and goes. */
   readonly keepsMade?: boolean;
@@ -159,6 +162,9 @@ export interface WriteSpec<T, D, K> {
   readonly write: Attempt<T>;
   /** An upload's file, kept apart so a reload can make it again (`kept-files.ts`). */
   readonly file?: File;
+  /** Whether the write ends the person's session - a sign-out - so a lapse of that session has
+   *  done what it was for, and lets it go rather than holding it for the next sign-in. */
+  readonly endsWithSession?: boolean;
 }
 
 /** What became of a write: it landed (with Dispatch's answer, `null` for none), was refused, or
@@ -193,6 +199,10 @@ interface Entry {
   turn: { readonly from: From; readonly settled: Settlement } | undefined;
   /** Ends a quiet write left unconfirmed five minutes after its press. */
   expiry: ReturnType<typeof setTimeout> | undefined;
+  /** Whether its trying stopped for a lapsed session (`signedIn(undefined)`), so the attempt loop
+   *  ending puts it back in its line to wait for the sign-in rather than refusing it. */
+  held: boolean;
+  readonly endsWithSession: boolean;
 }
 
 const NO_WRITES: readonly Write[] = Object.freeze([]);
@@ -214,10 +224,12 @@ export function signedInLogin(client: QueryClient): string | undefined {
  * is kept (`write-storage.ts`, an upload's file in `kept-files.ts`) from its press until Dispatch
  * answers, so a reload takes it up again (`resume`). A refusal stays, with Retry and Discard,
  * until the reader takes one - unless its surface shows refusals itself (`inline`), or it is never
- * shown (`quiet`), when it goes at once. A write belongs to the person who pressed it: once
- * someone else is signed in, every write of another login is dropped, its trying stopped
- * (`signedIn`), and Dispatch refuses one that reaches it under another session first
- * (`Dispatch-Login`, `409 LOGIN_CHANGED`).
+ * shown (`quiet`), when it goes at once. A write belongs to the person who pressed it: a session
+ * that lapses (whoami answers 401, or the write itself is answered 401) stops every write's trying
+ * and starts none, but keeps them all, in memory and in storage, until someone signs in - the same
+ * person's sign-in takes them up again, and anyone else's drops every write of another login
+ * (`signedIn`). Dispatch refuses one that reaches it under another session first (`Dispatch-Login`,
+ * `409 LOGIN_CHANGED`).
  */
 export class Writes {
   readonly #client: QueryClient;
@@ -230,6 +242,11 @@ export class Writes {
   #ids = 0;
   #joins = 0;
   #resumed = false;
+  /** Whether the session of the person signed in has lapsed: no write starts until someone signs
+   *  in again. */
+  #lapsed = false;
+  /** Who was signed in last; `undefined` before the first sign-in and once a session lapsed. */
+  #login: string | undefined;
 
   constructor(
     client: QueryClient,
@@ -266,8 +283,10 @@ export class Writes {
     this.#join(
       {
         attempt: spec.write,
+        endsWithSession: spec.endsWithSession ?? false,
         expiry: undefined,
         file: spec.file,
+        held: false,
         press,
         request: null,
         stop: new AbortController(),
@@ -348,20 +367,45 @@ export class Writes {
     this.#update(entry, { ...write, detail: change(write.detail) });
   }
 
-  /** Drops every write not `login`'s - every write, for `undefined` - its trying stopped and its
-   *  press refused, in memory and in storage: someone else signed in, or no one is. */
+  /**
+   * Who is signed in now: `login`, or no one (`undefined`: the session lapsed, whoami answered
+   * 401). A lapse keeps every write, in memory and in storage, a refused one's draft and an
+   * upload's file with it: each one out stops trying after the attempt in flight, and none starts,
+   * until someone signs in. The same person's sign-in takes them up again where they stood, each in
+   * its line; anyone else's drops every write not theirs, its trying stopped and its press refused.
+   * A sign-out still out (`endsWithSession`) has nothing left to do once the session lapses, and
+   * goes. Each kind lets go of what it remembered of the person before (`reset`) whenever who is
+   * signed in changes.
+   */
   signedIn(login: string | undefined): void {
+    if (login !== this.#login) this.#resetKinds();
+    this.#login = login;
+    if (login === undefined) {
+      this.#lapsed = true;
+      for (const entry of [...this.#entries.values()]) this.#hold(entry);
+      return;
+    }
+    this.#lapsed = false;
     for (const entry of [...this.#entries.values()]) {
-      if (login === undefined || entry.write.login !== login) this.#drop(entry);
+      if (entry.write.login !== login) this.#drop(entry);
     }
     void this.#files.keepOnly(login);
+    const targets = new Set([...this.#entries.values()].map((entry) => entry.write.target));
+    for (const target of targets) this.#advance(target);
   }
 
-  /** Lets every write go, out or refused, and everything kept with them: the person who made them
-   *  signed out. */
+  /** Lets every write go, out or refused, and everything kept with them, every kept file
+   *  included: the person who made them signed out. */
   clear(): void {
-    this.signedIn(undefined);
+    for (const entry of [...this.#entries.values()]) this.#drop(entry);
+    this.#resetKinds();
+    void this.#files.keepOnly(undefined);
     this.#kept.clear();
+  }
+
+  /** Has every kind let go of what it remembered of the person signed in until now. */
+  #resetKinds(): void {
+    for (const kind of kinds.values()) kind.reset?.();
   }
 
   /**
@@ -408,8 +452,10 @@ export class Writes {
     }
     const entry: Entry = {
       attempt,
+      endsWithSession: false,
       expiry: undefined,
       file,
+      held: false,
       press: undefined,
       request,
       stop: new AbortController(),
@@ -462,8 +508,10 @@ export class Writes {
   }
 
   /** Starts every write of `target` whose turn has come: in join order, each queued one that no
-   *  earlier one is still being tried ahead of. A write with no target starts at once. */
+   *  earlier one is still being tried ahead of. A write with no target starts at once. None starts
+   *  while the session is lapsed. */
   #advance(target: string | undefined): void {
+    if (this.#lapsed) return;
     const line = [...this.#entries.values()]
       .filter((entry) => entry.write.target === target)
       .sort((a, b) => a.write.joined - b.write.joined);
@@ -508,19 +556,53 @@ export class Writes {
         this.#keep(entry);
       },
       signal: stop.signal,
+      // The person's session lapsed under the write: the page learns who is signed in, and a lapse
+      // holds every write until the sign-in that follows (`signedIn`).
+      unauthorized: () => void this.#client.invalidateQueries({ queryKey: ["whoami"] }),
     })
       .then(
         (answer) => {
+          entry.held = false;
           if (current()) this.#landed(entry, answer);
           turn.settled.resolve(answer);
         },
         (error: unknown) => {
           const refusal = error instanceof Error ? error : new Error(String(error));
-          if (current()) this.#refused(entry, refusal);
+          const held = entry.held;
+          entry.held = false;
+          if (current()) {
+            if (held && refusal instanceof SendStoppedError) this.#rejoin(entry);
+            else this.#refused(entry, refusal);
+          }
           turn.settled.reject(refusal);
         }
       )
       .finally(() => clearTimeout(deadline));
+  }
+
+  /** Stops `entry`'s trying for a lapsed session: one out ends after the attempt in flight, whose
+   *  answer is still its own, and goes back in its line (`#rejoin`); a queued one waits where it
+   *  is. A sign-out goes instead, its session ended, and one the reader was stopping ends as they
+   *  asked. */
+  #hold(entry: Entry): void {
+    if (entry.endsWithSession) {
+      this.#drop(entry);
+      return;
+    }
+    const { write } = entry;
+    if (write.status === "sending" || (write.status === "late" && !write.stopping)) {
+      entry.held = true;
+      entry.stop.abort();
+    }
+  }
+
+  /** Puts `entry`, whose trying a lapse stopped, back in its line where it stood - past its
+   *  deadline already if it was then - to go once its person signs in again. */
+  #rejoin(entry: Entry): void {
+    const late = entry.write.status === "late";
+    entry.stop = new AbortController();
+    entry.write = { ...baseOf(entry.write), status: "queued" };
+    this.#join(entry, late ? "late" : "sending");
   }
 
   /** The write `entry` landed with `answer` (`null` for a landing with none): it leaves, or stays
@@ -569,8 +651,8 @@ export class Writes {
     this.#advance(write.target);
   }
 
-  /** Drops `entry` wherever it stands: its trying stops, its press is refused, and nothing of it
-   *  is kept. */
+  /** Drops `entry` wherever it stands: its trying stops, its press is refused, nothing of it is
+   *  kept, and its kind undoes what it showed of it. */
   #drop(entry: Entry): void {
     if (this.#entries.get(entry.write.id) !== entry) return;
     entry.stop.abort();
@@ -578,6 +660,7 @@ export class Writes {
     entry.press = undefined;
     entry.turn = undefined;
     this.#remove(entry);
+    kinds.get(entry.write.kind)?.undone?.(this.#client, entry.write);
     this.#advance(entry.write.target);
   }
 

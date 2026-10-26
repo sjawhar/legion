@@ -17,7 +17,7 @@ import {
   SendStoppedError,
 } from "./keyed-write";
 import { KEPT_SEND_RESUME_MS } from "./write-storage";
-import { plainWrite, type Write, Writes } from "./write-store";
+import { defineWriteKind, plainWrite, type Write, Writes } from "./write-store";
 
 /** A page's query client, signed in: the store stamps every write with this login at its press
  *  and resumes only this login's, as the app's does. */
@@ -389,6 +389,182 @@ test("a write of another login is dropped, kept or in flight", async () => {
       send.mockRestore();
       tab.close();
     }
+  });
+});
+
+/** A composer's refused send, as far as the store is concerned: a write whose record is the
+ *  reader's draft, kept with it. */
+const draftWrite = defineWriteKind<{ readonly draft: string }>({
+  kept: (value): value is { readonly draft: string } =>
+    typeof value === "object" && value !== null && typeof Reflect.get(value, "draft") === "string",
+  name: "test-draft",
+});
+
+/** Alice's writes when her session lapses: one being tried (an upload, its file kept), and one
+ *  Dispatch refused, holding her draft. */
+async function lapsedWrites() {
+  const tab = keptTab();
+  const files = memoryFiles();
+  const writes = new Writes(signedIn("alice"), tab.page(), files);
+  const file = new File(["spec body"], "spec.md", { type: "text/markdown" });
+  let up = false;
+  let attempts = 0;
+  const out = writes
+    .run({
+      detail: null,
+      file,
+      kind: plainWrite,
+      label: "Upload of spec.md",
+      presentation: "indicator",
+      write: attemptOf(patch, () => {
+        attempts += 1;
+        return up ? Promise.resolve({ ok: true }) : Promise.reject(dropped());
+      }),
+    })
+    .catch((error: unknown) => error);
+  void writes
+    .run({
+      detail: { draft: "My only copy of this" },
+      kind: draftWrite,
+      label: "Message",
+      presentation: "composer",
+      write: attemptOf(patch, () => Promise.reject(verdict)),
+    })
+    .catch(() => {});
+  await settle();
+  const [upload, draft] = writes.rows();
+  writes.signedIn(undefined);
+  await settle();
+  return {
+    attempts: () => attempts,
+    draftKey: draft?.key ?? "",
+    files,
+    out,
+    tab,
+    up: () => {
+      up = true;
+    },
+    uploadKey: upload?.key ?? "",
+    writes,
+  };
+}
+
+// W32. A session that lapses - whoami answers 401 - keeps the person's own writes: every one out
+// stops trying and nothing more is sent, but each stays, in memory and in storage, a refused
+// one's draft and an upload's file with it. Once the same person signs in again they go on: the
+// one out is made again under its key, and the refusal is still there for Retry or Discard.
+test("a lapsed session keeps its writes, and the same login's sign-in resumes them", async () => {
+  await onFakeClock(async () => {
+    const lapsed = await lapsedWrites();
+    const { files, tab, writes } = lapsed;
+    try {
+      expect(writes.rows().map((write) => write.status)).toEqual(["queued", "refused"]);
+      expect(tab.kept(lapsed.uploadKey)).toBeDefined();
+      expect(tab.kept(lapsed.draftKey)).toMatchObject({
+        detail: { draft: "My only copy of this" },
+      });
+      expect(files.rows.has(lapsed.uploadKey)).toBe(true);
+      const stopped = lapsed.attempts();
+      await tick(60_000);
+      expect(lapsed.attempts()).toBe(stopped);
+
+      lapsed.up();
+      writes.signedIn("alice");
+      await settle();
+      expect(await lapsed.out).toEqual({ ok: true });
+      expect(lapsed.attempts()).toBe(stopped + 1);
+      expect(writes.rows()).toMatchObject([
+        { detail: { draft: "My only copy of this" }, status: "refused" },
+      ]);
+      expect(tab.kept(lapsed.draftKey)).toMatchObject({
+        detail: { draft: "My only copy of this" },
+      });
+      expect(files.rows.has(lapsed.uploadKey)).toBe(false);
+    } finally {
+      tab.close();
+    }
+  });
+});
+
+// W32. Only someone else's sign-in after the lapse drops them: then they go, in memory and in
+// storage, files included, and the press is refused.
+test("a lapsed session's writes go once another login signs in", async () => {
+  await onFakeClock(async () => {
+    const lapsed = await lapsedWrites();
+    const { files, tab, writes } = lapsed;
+    try {
+      writes.signedIn("bob");
+      await settle();
+      expect(await lapsed.out).toBeInstanceOf(SendStoppedError);
+      expect(writes.rows()).toEqual([]);
+      expect(tab.kept(lapsed.uploadKey)).toBeUndefined();
+      expect(tab.kept(lapsed.draftKey)).toBeUndefined();
+      expect(files.rows.has(lapsed.uploadKey)).toBe(false);
+    } finally {
+      tab.close();
+    }
+  });
+});
+
+// W32. Dispatch answers a write whose session lapsed `401`, and nothing ran (the key is untouched):
+// the write is not refused - it is asked again under its key - and the page reads who is signed in
+// again, so a lapse it learns of this way holds every write until the sign-in that follows.
+test("a write answered 401 is asked again under its key, and whoami is read again", async () => {
+  await onFakeClock(async () => {
+    const client = signedIn("alice");
+    const invalidate = spyOn(client, "invalidateQueries");
+    const writes = new Writes(client, keptTab().page(), memoryFiles());
+    let answers = 0;
+    const keys: string[] = [];
+    const landed = writes.run({
+      detail: null,
+      kind: plainWrite,
+      label: "CORE-1 set to done",
+      presentation: "indicator",
+      write: (bounds) => {
+        keys.push(bounds.key);
+        answers += 1;
+        return answers === 1
+          ? Promise.reject(new ApiError(401, { error: "unauthorized" }))
+          : Promise.resolve({ key: "CORE-1" });
+      },
+    });
+    await settle();
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ["whoami"] });
+    expect(row(writes)?.status).toBe("sending");
+    await tick(1_000);
+    expect(await landed).toEqual({ key: "CORE-1" });
+    expect(new Set(keys).size).toBe(1);
+  });
+});
+
+// W32. A sign-out still out when the session lapses has done what it was for: it goes, rather than
+// waiting to sign the person out again the moment they sign back in.
+test("a sign-out still out is let go when the session lapses", async () => {
+  await onFakeClock(async () => {
+    const { writes } = storeOf();
+    let attempts = 0;
+    const signOut = writes
+      .run({
+        detail: null,
+        endsWithSession: true,
+        inline: true,
+        kind: plainWrite,
+        label: "Sign out",
+        presentation: "indicator",
+        write: () => {
+          attempts += 1;
+          return Promise.reject(dropped("/auth/logout"));
+        },
+      })
+      .catch((error: unknown) => error);
+    await settle();
+    writes.signedIn(undefined);
+    expect(await signOut).toBeInstanceOf(SendStoppedError);
+    expect(writes.rows()).toEqual([]);
+    writes.signedIn("alice");
+    await tick(5_000);
+    expect(attempts).toBe(1);
   });
 });
 

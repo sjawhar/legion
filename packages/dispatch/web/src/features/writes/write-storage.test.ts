@@ -149,6 +149,31 @@ test("clearing drops every kept write and the leave prompt with it", () => {
   }
 });
 
+// W33. A write the reader never sees - a read mark - is kept across a reload as any write is, but
+// never has the browser ask before the tab is closed: nothing on screen would be lost with it.
+test("a quiet write is kept and never raises the leave prompt", () => {
+  const tab = keptTab();
+  const unload = new EventTarget();
+  const page = new WriteStorage(tab.storage, unload);
+  const asks = () => {
+    const leaving = new Event("beforeunload", { cancelable: true });
+    unload.dispatchEvent(leaving);
+    return leaving.defaultPrevented;
+  };
+  try {
+    page.keep(kept("mark", { presentation: "quiet" }));
+    page.keep(kept("mark", { presentation: "quiet", state: { status: "late", stopping: false } }));
+    expect(tab.kept("mark")).toMatchObject({ presentation: "quiet" });
+    expect(asks()).toBe(false);
+    page.keep(kept("status"));
+    expect(asks()).toBe(true);
+    page.forget("status");
+    expect(asks()).toBe(false);
+  } finally {
+    tab.close();
+  }
+});
+
 // A write the storage refuses - it is full, or the browser refuses the page a quota - must never
 // leave an older state standing for the write: the entry goes instead, so a reload resumes nothing
 // rather than resuming a write the reader has since stopped.

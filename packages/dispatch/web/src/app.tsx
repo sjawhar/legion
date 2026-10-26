@@ -500,6 +500,8 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
     },
   ]);
   const signOut = useKeyedWrite({
+    // A session that lapses while the sign-out is still out has ended as it asked.
+    endsWithSession: true,
     inline: true,
     label: () => "Sign out",
     onSuccess: () => {
@@ -796,9 +798,10 @@ export function AuthGate(): ReactNode {
     queryClient.removeQueries({ predicate: (query) => query.queryKey[0] !== "whoami" });
   }, [queryClient, signedOut]);
   // A write belongs to the person who pressed it: once someone else is signed in here - in place,
-  // from another tab - or no one is, every write of another login is dropped and stops trying
-  // (`Writes.signedIn`), and every other tab of this browser is told to read who is signed in
-  // again, so it drops them too.
+  // from another tab - every write of another login is dropped and stops trying, and once no one
+  // is (the session lapsed), every write stops trying and waits, kept, for the sign-in that
+  // follows: the same person's takes them up again (`Writes.signedIn`). Every other tab of this
+  // browser is told to read who is signed in again, so it does the same.
   const login = signedOut ? undefined : whoAmI.data?.login;
   const known = signedOut || whoAmI.data !== undefined;
   useEffect(() => {

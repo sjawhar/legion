@@ -190,6 +190,108 @@ test("a sign-in from another tab drops every write of the person before, stops i
   }
 }, 15_000);
 
+// W32. A session that lapses keeps the person's own writes: whoami answers 401 and the page shows
+// the sign-in page, every write stops trying and nothing more goes out, but both writes - one out,
+// one refused and holding Retry - stay, in memory and in the tab's storage. Once the same person
+// signs in again, the one out goes on under its key and lands, and the refusal is still there.
+test("a lapsed session keeps every write, and the same person's sign-in resumes them", async () => {
+  const sockets = installFakeLiveSockets();
+  let signedIn = true;
+  const whoAmI = spyOn(api, "whoAmI").mockImplementation(async () => {
+    if (!signedIn) throw new ApiError(401, { error: "unauthorized" });
+    return { event_head: "0", kind: "user", login: "alice" };
+  });
+  const spies = [
+    spyOn(api, "listIssues").mockResolvedValue([]),
+    spyOn(api, "getMyState").mockResolvedValue({}),
+    spyOn(api, "getInbox").mockResolvedValue([]),
+  ];
+  const originalMatchMedia = window.matchMedia;
+  window.matchMedia = (() =>
+    ({
+      addEventListener: () => {},
+      addListener: () => {},
+      dispatchEvent: () => true,
+      matches: false,
+      media: "",
+      onchange: null,
+      removeEventListener: () => {},
+      removeListener: () => {},
+    }) as MediaQueryList) as typeof window.matchMedia;
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const view = render(
+    <MemoryRouter initialEntries={["/"]}>
+      <QueryClientProvider client={queryClient}>
+        <AuthGate />
+      </QueryClientProvider>
+    </MemoryRouter>
+  );
+  const rereadWhoAmI = () =>
+    act(() => void queryClient.invalidateQueries({ queryKey: ["whoami"] }));
+  try {
+    await screen.findByText("Signed in as alice");
+    const keys: string[] = [];
+    let up = false;
+    const out = writesOf(queryClient).run({
+      detail: null,
+      kind: plainWrite,
+      label: "CORE-1 set to done",
+      presentation: "indicator",
+      write: (bounds) => {
+        keys.push(bounds.key);
+        bounds.sent?.({ body: { status: "done" }, method: "PATCH", path: "/api/v1/issues/CORE-1" });
+        return up
+          ? Promise.resolve({ key: "CORE-1" })
+          : Promise.reject(new NetworkError("/api/v1/issues/CORE-1", new TypeError("Failed")));
+      },
+    });
+    const attempts: string[] = [];
+    void aliceWrite(queryClient, attempts, true);
+    await waitFor(() =>
+      expect(
+        writesOf(queryClient)
+          .rows()
+          .map((row) => row.status)
+      ).toEqual(["sending", "refused"])
+    );
+
+    signedIn = false;
+    await rereadWhoAmI();
+    await screen.findByRole("link", { name: "Sign in with Google" });
+    await waitFor(() =>
+      expect(
+        writesOf(queryClient)
+          .rows()
+          .map((row) => row.status)
+      ).toEqual(["queued", "refused"])
+    );
+    expect(keptWrites()).toHaveLength(2);
+    const made = keys.length;
+    const quiet = Promise.withResolvers<void>();
+    setTimeout(quiet.resolve, 2_500);
+    await quiet.promise;
+    expect(keys).toHaveLength(made);
+
+    signedIn = true;
+    up = true;
+    await rereadWhoAmI();
+    await screen.findByText("Signed in as alice");
+    expect(await out).toEqual({ key: "CORE-1" });
+    expect(new Set(keys).size).toBe(1);
+    expect(writesOf(queryClient).rows()).toMatchObject([
+      { label: "CORE-2 set to done", status: "refused" },
+    ]);
+    expect(keptWrites()).toHaveLength(1);
+  } finally {
+    view.unmount();
+    liveSocketFor(queryClient).close();
+    sockets.restore();
+    whoAmI.mockRestore();
+    for (const spy of spies) spy.mockRestore();
+    window.matchMedia = originalMatchMedia;
+  }
+}, 15_000);
+
 // Signing out ends every write with the session that pressed it: one still being tried stops, a
 // refusal waiting for Retry goes, nothing of either is left in the tab for the next person, and
 // the page stops asking to confirm leaving.

@@ -84,8 +84,9 @@ function pinsOut(writes: Writes, issueKey: string): boolean {
  * A pin or an unpin, one write of the store each, ordered on its issue (`pin:<issue>`), shown in
  * the shell's indicator and kept across a reload. The surface applies it to `["user-state"]` at
  * once; once the issue's last pin lands, the state Dispatch answered replaces what the page
- * showed and the next pin reads the state afresh, and a refused or discarded one has the page read
- * its state again.
+ * showed and the next pin reads the state afresh, and a refused, discarded or dropped one has the
+ * page read its state again. The states pins' answers left go with the person signed in
+ * (`reset`), so another person's next pin never writes over them.
  */
 const pinWrite = defineWriteKind<PinWrite>({
   kept: keptPin,
@@ -103,6 +104,7 @@ const pinWrite = defineWriteKind<PinWrite>({
     }));
   },
   name: "pin",
+  reset: () => authoritative.clear(),
   resume: (detail) => pinAttempt(detail),
   undone: (client, write) => {
     authoritative.delete(write.detail.issueKey);

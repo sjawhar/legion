@@ -12,8 +12,9 @@ import { SendInterruptedError, SendStoppedError } from "./keyed-write";
  * of the person who pressed it and when, the target its line is ordered on, where it stood and its
  * refusal, the request as it last went out, and its kind's own record. An entry that does not
  * parse - another version's, or damaged - is dropped when the page loads, as is every entry of
- * another person's. While any of them is unconfirmed the page asks the browser to confirm leaving
- * (`beforeunload`), since a closed tab would lose it.
+ * another person's. While any of them the reader sees is unconfirmed the page asks the browser to
+ * confirm leaving (`beforeunload`), since a closed tab would lose it; a quiet one (a read mark) is
+ * never shown, so it never asks.
  */
 
 const ENTRY_PREFIX = "dispatch.write:";
@@ -235,7 +236,8 @@ export function requestFrom(kept: KeptRequest, file?: File): WriteRequest | unde
 export class WriteStorage {
   readonly #storage: Storage | undefined;
   readonly #unload: EventTarget;
-  /** The keys of the writes still out - queued, sending, late or stopping. */
+  /** The keys of the writes still out - queued, sending, late or stopping - that the reader sees:
+   *  a quiet one (a read mark) is never shown, so leaving never asks for it. */
   readonly #unconfirmed = new Set<string>();
   #retired = false;
 
@@ -259,7 +261,7 @@ export class WriteStorage {
       // The write is still made; only its reload is lost.
       this.#remove(name);
     }
-    this.#confirm(write.key, write.state.status === "refused");
+    this.#confirm(write.key, write.state.status === "refused" || write.presentation === "quiet");
   }
 
   /** Drops the write kept under `key`: it landed, or the reader dropped its refusal. */

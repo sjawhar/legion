@@ -5,6 +5,7 @@ import {
   ApiError,
   isKeyCommitted,
   isKeyInFlight,
+  isUnauthorized,
   NetworkError,
   RequestTimeoutError,
   UnreadableAnswerError,
@@ -84,7 +85,9 @@ export function retriesUnderItsKey(refusal: Error | undefined): boolean {
 /** What ended one attempt without Dispatch's verdict, and so makes the write again under its key:
  *  how long to wait first, and whether the page learning Dispatch can be reached again cuts that
  *  wait short. `undefined` for an answer that is Dispatch's verdict, or an error of the page's
- *  own, which ends the write at once. */
+ *  own, which ends the write at once. A `401` is no verdict either: the person's session lapsed,
+ *  Dispatch ran nothing and keeps nothing under the key, and the write waits for them to sign in
+ *  again (`Writes.signedIn`), asked again meanwhile in case the page is still signed in. */
 function retryAfter(
   error: unknown,
   backoff: number
@@ -96,6 +99,7 @@ function retryAfter(
   ) {
     return { ms: backoff, wakes: true };
   }
+  if (isUnauthorized(error)) return { ms: backoff, wakes: false };
   if (!(error instanceof ApiError) || !retriesUnderKey(error.status, error.code)) return undefined;
   // Dispatch said when to come back: the first request under the key is still running, or it is
   // turning requests away for now. Nothing the page learns elsewhere changes that.
@@ -139,11 +143,13 @@ function pause(ms: number, wakes: boolean, signal: AbortSignal | undefined): Pro
 
 /** How one keyed write is tried: `login` is the person who pressed it, sent on every attempt so
  *  Dispatch refuses it under anyone else's session; `signal` stops the trying; `sent` is told each
- *  attempt's request as it goes out. */
+ *  attempt's request as it goes out; `unauthorized` is told each attempt Dispatch answers `401`,
+ *  the person's session having lapsed. */
 export interface KeyedWriteOptions {
   readonly login?: string;
   readonly sent?: (request: WriteRequest) => void;
   readonly signal?: AbortSignal;
+  readonly unauthorized?: () => void;
 }
 
 /** A write whose attempts made more than one kind of request under one key: a page bug, since
@@ -162,11 +168,12 @@ export class OneRequestPerWriteError extends Error {
  * Makes `attempt` under `key`, the person's action's name, until Dispatch decides it. Each attempt
  * is held to `KEYED_SEND_ATTEMPT_MS` of silence, and one that ends without Dispatch's verdict - the
  * connection failed (`NetworkError`), the attempt went silent (`RequestTimeoutError`), a 2xx was
- * not JSON (`UnreadableAnswerError`), or Dispatch answered a 5xx, a 408, a 429 or `409
- * KEY_IN_FLIGHT` (`retriesUnderKey`) - is made again after 1 s, 2 s, 4 s … never more than 30 s
- * apart, or after Dispatch's `Retry-After`; any answer from Dispatch to any request starts that
- * backoff over, and ends a wait early, as does the browser coming back online or the live socket
- * opening. However many attempts reach Dispatch, the key makes it act once. Resolves with the 2xx,
+ * not JSON (`UnreadableAnswerError`), the person's session lapsed (`401`, told to `unauthorized`),
+ * or Dispatch answered a 5xx, a 408, a 429 or `409 KEY_IN_FLIGHT` (`retriesUnderKey`) - is made
+ * again after 1 s, 2 s, 4 s … never more than 30 s apart, or after Dispatch's `Retry-After`; any
+ * answer from Dispatch to any request starts that backoff over, and ends a wait early, as does the
+ * browser coming back online or the live socket opening. However many attempts reach Dispatch,
+ * the key makes it act once. Resolves with the 2xx,
  * or `null` for a write that landed with no answer to give - `409 KEY_COMMITTED`, or a replay
  * that did not keep the first answer - and for a `DELETE` an earlier attempt of which may have
  * landed and which Dispatch now answers `404` (the thing is gone either way). Rejects with
@@ -179,7 +186,7 @@ export class OneRequestPerWriteError extends Error {
 export async function writeUnderKey<T>(
   attempt: (bounds: WriteBounds) => Promise<T>,
   key: string,
-  { login, sent, signal }: KeyedWriteOptions = {}
+  { login, sent, signal, unauthorized }: KeyedWriteOptions = {}
 ): Promise<T | null> {
   let backoff = FIRST_BACKOFF_MS;
   let first: WriteRequest | undefined;
@@ -213,6 +220,7 @@ export async function writeUnderKey<T>(
         }
         const wait = retryAfter(error, backoff);
         if (wait === undefined) throw error;
+        if (isUnauthorized(error)) unauthorized?.();
         unanswered ||= !(error instanceof ApiError) || error.status >= 500;
         if (!(await pause(wait.ms, wait.wakes, signal))) throw new SendStoppedError();
         backoff = Math.min(backoff * 2, MAX_BACKOFF_MS);
