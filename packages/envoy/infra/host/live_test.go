@@ -23,7 +23,8 @@ import (
 )
 
 // The live tests apply Pulumi YAML programs with the pulumi CLI against this machine's Docker. Each
-// listener runs on the host's network on a free port, with a container name of its own, and
+// listener runs pulumitest.HeldPortImage on the host's network, with a container name of its own,
+// on a loopback port the test holds from before the stack exists until after it is destroyed, and
 // reaches only a loopback NATS from testnats.
 
 // TestMain removes the PULUMI_HOME the live tests share once they have run.
@@ -40,18 +41,13 @@ var dockerProvider = map[string]any{
 	"options": map[string]any{"version": pulumitest.DockerPluginVersion},
 }
 
-// freePorts returns n distinct loopback ports nothing listens on, holding each until all are
-// picked.
-func freePorts(t *testing.T, n int) []int {
+// holdListenerPort holds a loopback port the kernel chooses for one listener container and hands
+// its listening socket to every start and restart of the container (pulumitest.HoldPort), so no
+// other program can take the port while the test runs. Call it before pulumitest.NewStack: the
+// cleanups run in reverse, so the stack's destroy removes the container before the port is let go.
+func holdListenerPort(t *testing.T) int {
 	t.Helper()
-	var ports []int
-	for range n {
-		l, err := net.Listen("tcp", "127.0.0.1:0")
-		require.NoError(t, err)
-		defer l.Close()
-		ports = append(ports, l.Addr().(*net.TCPAddr).Port)
-	}
-	return ports
+	return pulumitest.HoldPort(t).Addr().(*net.TCPAddr).Port
 }
 
 // containerName returns a container name no other run uses.
@@ -125,10 +121,13 @@ func listener(properties map[string]any) map[string]any {
 	}
 }
 
+// The listener reaches "healthy" through the explicit docker provider, serves on the same held port
+// again once Docker restarts its container (the wrapper takes the held socket anew), and is gone
+// after destroy.
 func TestLiveListenerRunsAHealthyListenerWithTheExplicitProvider(t *testing.T) {
-	image := pulumitest.SmokeImage(t)
+	image := pulumitest.HeldPortImage(t)
 	_, natsURL := testnats.Start(t)
-	port := freePorts(t, 1)[0]
+	port := holdListenerPort(t)
 	name := containerName(t)
 
 	s := pulumitest.NewStack(t, pulumitest.Plugin(t), "listener-live")
@@ -145,6 +144,12 @@ func TestLiveListenerRunsAHealthyListenerWithTheExplicitProvider(t *testing.T) {
 	s.Up()
 	requireHealthy(t, port)
 
+	// The test holds the port throughout, so a listener that bound it itself would fail: healthy
+	// again on it means the restarted container took the held socket.
+	out, err := dockerCLI("restart", name)
+	require.NoError(t, err, "docker restart %s:\n%s", name, out)
+	requireHealthy(t, port)
+
 	var providerURN, containerProvider string
 	for _, r := range s.Export() {
 		switch r.Type {
@@ -159,7 +164,7 @@ func TestLiveListenerRunsAHealthyListenerWithTheExplicitProvider(t *testing.T) {
 		"the container's provider is %q, not the explicit docker provider %q", containerProvider, providerURN)
 
 	s.Destroy()
-	out, err := dockerCLI("container", "inspect", name)
+	out, err = dockerCLI("container", "inspect", name)
 	require.Error(t, err, "container %s is still there after destroy:\n%s", name, out)
 	require.Contains(t, out, "No such container")
 }
@@ -167,9 +172,9 @@ func TestLiveListenerRunsAHealthyListenerWithTheExplicitProvider(t *testing.T) {
 // TestLiveAdoptionPreviewsClean applies the Docker-host program's two root-level resources, then
 // previews the same values as a listener that adopts them.
 func TestLiveAdoptionPreviewsClean(t *testing.T) {
-	image := pulumitest.SmokeImage(t)
+	image := pulumitest.HeldPortImage(t)
 	_, natsURL := testnats.Start(t)
-	port := freePorts(t, 1)[0]
+	port := holdListenerPort(t)
 	name := containerName(t)
 	healthURL := fmt.Sprintf("http://127.0.0.1:%d/healthz", port)
 
@@ -257,10 +262,10 @@ func TestLiveAdoptionPreviewsClean(t *testing.T) {
 }
 
 func TestLiveSeedReachesNATS(t *testing.T) {
-	image := pulumitest.SmokeImage(t)
+	image := pulumitest.HeldPortImage(t)
 	seed, public := testnats.User(t)
 	natsURL := testnats.StartNkeyAuthorized(t, public)
-	ports := freePorts(t, 2)
+	ports := []int{holdListenerPort(t), holdListenerPort(t)}
 	seeded, unseeded := containerName(t), containerName(t)
 
 	s := pulumitest.NewStack(t, pulumitest.Plugin(t), "seed-live")

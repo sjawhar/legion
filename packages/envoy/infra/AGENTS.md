@@ -335,14 +335,15 @@ its example inputs.
 
 The live tests (`host/live_test.go`, build tag `pulumilive`) apply Pulumi YAML programs with the
 `pulumi` CLI against this machine's Docker: a listener reaches `"status":"healthy"` on the explicit
-docker provider and is gone after destroy; a listener that adopts a root-level container and image
-previews with both `same`; a listener with a seed connects to an nkey-authorized NATS and one
-without never does; and a Go program builds against the SDK `pulumi package add` generates. They
-take:
+docker provider, again on the same port after `docker restart`, and is gone after destroy; a
+listener that adopts a root-level container and image previews with both `same`; a listener with a
+seed connects to an nkey-authorized NATS and one without never does; and a Go program builds against
+the SDK `pulumi package add` generates. They take:
 
 - the `pulumi` CLI on `PATH`, the version `.github/actions/install-pulumi` installs;
-- `ENVOY_SMOKE_IMAGE`, a listener image built beforehand. A live test without it fails at once
-  and never builds one itself;
+- `ENVOY_SMOKE_HELD_PORT_IMAGE`, the held-port listener image built beforehand from
+  `host/heldportwrapper/Dockerfile` on top of the smoke image (`packages/envoy/docker/Dockerfile`).
+  A live test without it fails at once, printing both builds, and never builds one itself;
 - `ENVOY_INFRA_DOCKER_PLUGIN`, the path of the docker provider plugin tarball of
   `pulumitest.DockerPluginVersion` for this machine's platform, whose SHA-256 the caller has
   checked. The test binary refuses a tarball of another version, installs it into a `PULUMI_HOME`
@@ -350,11 +351,17 @@ take:
   downloads no plugin and the caller's own Pulumi home is untouched.
 
 Each stack runs on a `file://` backend of its own in a temporary directory. Each listener gets a
-container name of its own (`envoy-listener-live-<random>`) and a free port, and reaches only a
-loopback NATS from `testnats`, never a tailnet name. The test binary builds the plugin once, on the
-first test that asks for it, and every test runs that build. A package whose tests use the harness
-calls `os.Exit(pulumitest.Main(m))` from its `TestMain`, which removes that `PULUMI_HOME` and that
-build.
+container name of its own (`envoy-listener-live-<random>`) and reaches only a loopback NATS from
+`testnats`, never a tailnet name. Its port is one the kernel chose and the test holds from before
+the stack exists until after its destroy (`pulumitest.HoldPort`): the test serves the listening
+socket on the abstract unix socket `@legion-envoy-held-port-<port>`, which a container on the
+host's network reaches, and the image's `envoy-listener`, the wrapper in `host/heldportwrapper`,
+receives it there on every start and restart and executes the real listener on it
+(`ENVOY_LISTEN_FD`). No other program can take the port in between. `go test ./...` runs the
+wrapper's own test (`host/heldportwrapper/main_test.go`, Linux only), which runs it on the real
+listener without Docker. The test binary builds the plugin once, on the first test that asks for
+it, and every test runs that build. A package whose tests use the harness calls
+`os.Exit(pulumitest.Main(m))` from its `TestMain`, which removes that `PULUMI_HOME` and that build.
 
 To run them, install the CLI as `.github/actions/install-pulumi` does and download the docker
 provider plugin as the `envoy-smoke` job's "Download the docker provider plugin the live tests pin"
@@ -362,7 +369,9 @@ step does, each checked against the SHA-256 pinned there; then, from the reposit
 
 ```sh
 docker buildx build --load -t legion-envoy-smoke:local -f packages/envoy/docker/Dockerfile .
-cd packages/envoy/infra && ENVOY_SMOKE_IMAGE=legion-envoy-smoke:local \
+docker buildx build --load --build-arg BASE=legion-envoy-smoke:local \
+  -t legion-envoy-smoke-heldport:local -f packages/envoy/infra/host/heldportwrapper/Dockerfile .
+cd packages/envoy/infra && ENVOY_SMOKE_HELD_PORT_IMAGE=legion-envoy-smoke-heldport:local \
   ENVOY_INFRA_DOCKER_PLUGIN=<the tarball> \
   go test -count=1 -tags pulumilive -v -timeout 15m ./host/
 ```

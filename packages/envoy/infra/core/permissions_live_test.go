@@ -254,22 +254,26 @@ func startGrantServer(t *testing.T, image string, grant core.Permissions) (strin
 }
 
 // startListener runs the listener binary as machine liveMachineID against uri, with the environment
-// host:Listener gives its container and the user's seed, and returns it with its port.
+// host:Listener gives its container and the user's seed, on a held loopback port, and returns it
+// with its port.
 func startListener(t *testing.T, binary, uri, seed string) (*cmdtest.Process, int) {
 	t.Helper()
-	port := cmdtest.FreeTCPPort(t)
-	return startListenerConfig(t, binary, uri, seed, core.ListenerConfig{MachineID: liveMachineID, Port: port}), port
+	held := cmdtest.HoldPort(t)
+	return startListenerConfig(t, binary, uri, seed, held, core.ListenerConfig{MachineID: liveMachineID, Port: held.Port}), held.Port
 }
 
 // startListenerConfig runs the listener binary against uri with the environment config renders and
 // the user's seed, so a test that asks what a component's own ListenerConfig does to the running
-// listener starts it from that very config rather than from a hand-written environment.
-func startListenerConfig(t *testing.T, binary, uri, seed string, config core.ListenerConfig) *cmdtest.Process {
+// listener starts it from that very config rather than from a hand-written environment. The
+// listener serves on held, which it inherits as ENVOY_LISTEN_FD, so no other program can take the
+// port before it serves; config's Port names held's port, and the listener checks the two agree.
+func startListenerConfig(t *testing.T, binary, uri, seed string, held *cmdtest.HeldPort, config core.ListenerConfig) *cmdtest.Process {
 	t.Helper()
 	env, err := config.Env([]string{uri})
 	require.NoError(t, err)
 	cmd := exec.Command(binary)
 	cmd.Env = append(env, core.EnvNATSSeed+"="+seed)
+	held.Pass(cmd, "ENVOY_LISTEN_FD")
 	return cmdtest.Start(t, "the listener", cmd)
 }
 

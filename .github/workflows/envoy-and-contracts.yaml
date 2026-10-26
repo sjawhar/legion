@@ -1108,9 +1108,11 @@ jobs:
       # The runner VM is discarded after the job, so testcontainers' Ryuk reaper has nothing to
       # clean up, and its image would be one more registry pull a test could fail on.
       TESTCONTAINERS_RYUK_DISABLED: "true"
-      # The listener image the smoke test and envoy-infra's live tests run, built by its own step
-      # below.
+      # The listener image the smoke test runs, built by its own step below.
       ENVOY_SMOKE_IMAGE: legion-envoy-smoke:${{ github.sha }}
+      # The image envoy-infra's live tests run, built on top of ENVOY_SMOKE_IMAGE by its own step
+      # below.
+      ENVOY_SMOKE_HELD_PORT_IMAGE: legion-envoy-smoke-heldport:${{ github.sha }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -1167,6 +1169,26 @@ jobs:
           load: true
           provenance: false
           tags: ${{ env.ENVOY_SMOKE_IMAGE }}
+      # The image envoy-infra's live tests run (pulumitest.HeldPortImage): the smoke image above with
+      # packages/envoy/infra/host/heldportwrapper as its envoy-listener, which takes the listening
+      # socket the test holds for the container's port over an abstract unix socket and executes the
+      # real listener on it, so the port stays held from the test's bind until the listener serves.
+      # Its Dockerfile builds the wrapper from the tree, on the Go image the smoke image's build
+      # pulled, so this build reads only files this workflow's triggers cover. The smoke test keeps
+      # running the smoke image itself.
+      - name: Build the held-port listener image the envoy-infra live tests run
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        env:
+          # As the smoke image's build above.
+          BUILDX_METADATA_PROVENANCE: disabled
+          DOCKER_BUILD_SUMMARY: "false"
+        with:
+          context: .
+          file: packages/envoy/infra/host/heldportwrapper/Dockerfile
+          build-args: BASE=${{ env.ENVOY_SMOKE_IMAGE }}
+          load: true
+          provenance: false
+          tags: ${{ env.ENVOY_SMOKE_HELD_PORT_IMAGE }}
       # The image's notices (packages/envoy/docker/Dockerfile): the build fails when a license cannot
       # be determined, and the listing shows the image ships both files.
       - name: List the image's third-party notices
@@ -1182,7 +1204,7 @@ jobs:
         working-directory: packages/envoy
       # The envoy-infra plugin's live tests (packages/envoy/infra/host/live_test.go) apply Pulumi
       # YAML programs with the pinned Pulumi CLI (.github/actions/install-pulumi) against this
-      # runner's Docker, on the listener image built above and on the docker provider the plugin's
+      # runner's Docker, on the held-port image built above and on the docker provider the plugin's
       # first consumer pins. Each download is checked against its SHA-256 before it is unpacked or
       # installed.
       - name: Install the Pulumi CLI
