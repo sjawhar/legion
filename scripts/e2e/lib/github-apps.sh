@@ -1,5 +1,5 @@
 # shellcheck shell=bash disable=SC2034,SC2154 # require_app_inputs sets <role>_app_* by name; the caller sets work
-# Legion's two role Apps as a live proof takes them: this deployment's own pair by default, any
+# Legion's two role Apps as a live proof takes them: the default pair below, any
 # other deployment's through its inputs, and either one proved against GitHub before the run
 # writes anything there.
 #
@@ -40,14 +40,14 @@ default_review_app_id=3202653
 default_review_app_key_name=GH_REVIEW_APP_PRIVATE_KEY_B64
 
 # require_app_inputs ROLE... sets <role>_app_id and <role>_app_key_name for each ROLE (implement,
-# review) from its two inputs, each defaulting to this deployment's own value above, and fails
+# review) from its two inputs, each defaulting to the default pair's value above, and fails
 # naming an input that is set but malformed, never echoing its value (an operator who pastes a key
 # where its name goes must not see it in the transcript). A name is letters, digits and
 # underscores, so it is safe in the key command's shell text and as a variable name; when this call
 # reads both roles, one App id or one key name for both is refused, since the daemon refuses two
 # roles on one App at boot. It records the roles it read for
-# write_github_apps, and sets app_key_unsets: `-u NAME` for each role's key name, for this
-# deployment's own two, and for every exported variable whose name holds PRIVATE_KEY, so a process
+# write_github_apps, and sets app_key_unsets: `-u NAME` for each role's key name, for the
+# default pair's two, and for every exported variable whose name holds PRIVATE_KEY, so a process
 # the run starts inherits no App key, the proof human's included.
 github_apps_read=()
 app_key_unsets=()
@@ -64,7 +64,7 @@ require_app_inputs() {
     id_default=default_${role}_app_id
     key_default=default_${role}_app_key_name
     # An input set to an empty value is a command that printed nothing, not a choice of the
-    # default: it is refused, where an unset one takes this deployment's own value.
+    # default: it is refused, where an unset one takes the default.
     id=${!id_var-${!id_default}}
     key=${!key_var-${!key_default}}
     # The bounds keep a pasted credential out of the message: a base64 key is letters and digits

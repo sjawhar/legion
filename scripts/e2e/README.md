@@ -34,10 +34,10 @@ LEGION_REAL_GITHUB=1 LEGION_TEST_PG_DSN=postgres://… \
     -run '^TestRealGitHubCredentialSurface$' -v
 ```
 
-The test is intentionally gated because it calls GitHub as both installed Apps: this deployment's
-own unless the four App inputs name another's. It reads both Apps by running
+The test is intentionally gated because it calls GitHub as both installed Apps: the default
+pair unless the four App inputs name another's. It reads both Apps by running
 [`lib/github-apps.sh`](#libgithub-appssh) itself, so it takes that lib's defaults, input checks and
-key command, with no copy of its own: each unset input takes this deployment's value, and a
+key command, with no copy of its own: each unset input takes the default pair's value, and a
 malformed one fails the run by name, never printing it. Before it acts, it proves both Apps
 against GitHub's `GET /app` as the stage proofs do (the lib's `check_github_apps` on the very block
 it uses), which needs `bun` on `PATH` (and `jq` for its log line). The ungated
@@ -301,7 +301,7 @@ submission on its accepted READY: the repository allows no auto-merge, so the da
 GitHub reports it mergeable, and the proof only reads it (`await_ready_merge`), never merging it by
 hand.
 The run needs `go`, `docker`, `jq`, `curl`, `ss`, `tmux`, `bun`, `mise`, `gh`, `shellcheck`, the
-`secrets` CLI holding the two role App keys (this deployment's own unless the App inputs name
+`secrets` CLI holding the two role App keys (the default pair unless the App inputs name
 another deployment's), and
 `LEGION_E2E_MODEL_ROUTE` (required, `gateway` or `key-file`), which picks how
 the agents reach Anthropic, independently of which devbox this runs on:
@@ -691,7 +691,7 @@ pane. The checks:
   why in the evidence's `pane-endpoints-unchecked.txt`, which this check's failure names.
 
 Inputs. The App inputs ([`lib/github-apps.sh`](#libgithub-appssh), optional) name another
-deployment's two role Apps; a run here sets none and takes this deployment's own.
+deployment's two role Apps; a run here sets none and takes the default pair.
 `LEGION_E2E_CLAUDE_KEY_FILE` (required) names a file holding the Anthropic API key the
 Claude Code implementer reaches its model with. `prerequisites` refuses a run without it, naming
 the variable, before it writes anything, and refuses a key Anthropic's `GET /v1/models` does not accept
@@ -798,7 +798,7 @@ gateway in front of Anthropic). The script needs `go`, `kubectl`, `curl`, `ss`,
 get-token`), and the `secrets` CLI holding the implement App's key under the name
 `LEGION_E2E_IMPLEMENT_APP_KEY_NAME` gives (agent tier: no YubiKey touch), with
 `LEGION_E2E_IMPLEMENT_APP_ID` that App's id ([`lib/github-apps.sh`](#libgithub-appssh); both
-optional, this deployment's own by default, and each refused by name when it is set and
+optional, defaulting to the default pair, and each refused by name when it is set and
 malformed). Stage 4a acts as the implement App alone, so it reads no
 review App input. `prerequisites` proves the key is that id's App (`check_github_apps implement`:
 GitHub's `GET /app` under the key's JWT must answer that id and `contents: write`) before the run writes anything. The
@@ -922,8 +922,8 @@ that reachability with a reverse tunnel, entirely of the run's own:
 | `LEGION_E2E_WORKER_STREAM_PORT` | `13373` | the port the harness binds for the worker stream; the same name and default Stage 4b reads for its own worker-stream port, so two runs — two Stage 4a's, or a Stage 4a and a Stage 4b — collide on it by default and need distinct values to run at once |
 | `LEGION_E2E_SESSION_DB_PORT` | required | a port the scratch session database listens on, reachable everywhere the worker-stream port is (under `aws-private-ip`, one the devbox's security group admits from the Legion nodes; under `bridge`, forwarded through the same tunnel); refused when it is not a number, is the worker stream's port, or is taken |
 | `LEGION_E2E_REPO_SECOND_OWNER` | required | `<owner>/<name>`, a repository under an owner other than `sjawhar` on which both Legion Apps are installed, where `second-owner` provisions an issue; refused when unset, not `<owner>/<name>`, or under `sjawhar`. Nothing is pushed to it |
-| `LEGION_E2E_IMPLEMENT_APP_ID` | this deployment's implement App | the App's numeric id, which GitHub's `GET /app` must answer for its key ([`lib/github-apps.sh`](#libgithub-appssh)) |
-| `LEGION_E2E_IMPLEMENT_APP_KEY_NAME` | this deployment's implement App key | the agent-tier secret-store key the `secrets` CLI resolves to that App's private key; `prerequisites` proves it is that id's App, and the harness mints the App's installation tokens from it |
+| `LEGION_E2E_IMPLEMENT_APP_ID` | the default pair's implement App | the App's numeric id, which GitHub's `GET /app` must answer for its key ([`lib/github-apps.sh`](#libgithub-appssh)) |
+| `LEGION_E2E_IMPLEMENT_APP_KEY_NAME` | the default pair's implement App key | the agent-tier secret-store key the `secrets` CLI resolves to that App's private key; `prerequisites` proves it is that id's App, and the harness mints the App's installation tokens from it |
 | `STAGE4A_FROM` | unset | a development entry point: any check after `identity` except `stale-incarnation`, which rides `kill-launcher`'s relaunch; the harness refuses any other name at `identity`, before it creates anything. `identity` always runs; the checks before the entry point are skipped, and each later check first puts the claims it needs where the full run would have left them, through the same runtime calls. The run ends `stage 4a e2e: every check from <check> passed — a development run, never the proof`, and is never cited as the proof |
 | `STAGE4A_EVIDENCE_DIR` | a fresh `/tmp/legion-e2e4a-evidence.XXXXXXXX` | kept on every outcome and printed at exit: `transcript.log` (the whole run), `runtime.log` (the runtime's and the listener's JSON log lines), and the two namespace snapshots |
 | `LEGION_E2E_AGENT_SECRETS_URL` | unset (the `secrets-*` checks report `SKIPPED-BLOCKED`) | the agent-secrets broker the run enrolls pods with — the **production** broker (Plan D, the broker design's AWS deployment plan), never a development slot (below) |
@@ -2911,7 +2911,7 @@ its checks or its key command, and they prove both Apps as the stage proofs do b
 The checks run in the C locale whatever the caller's, so a UTF-8 locale does not admit fullwidth
 digits or accented letters. `require_app_inputs` also fills `app_key_unsets`, the
 `env` argument list (`-u NAME` …) every proof passes to a process it starts, which strips each
-role's key name, this deployment's own two, and every exported variable whose name holds
+role's key name, the default pair's two, and every exported variable whose name holds
 `PRIVATE_KEY`, the proof human's App key included. `lib/app-logins.test.ts` drives the three
 functions under a stage script's shell options against a stand-in GitHub: an unset input taking its
 default, a malformed one refused by name with its value unprinted, `write_github_apps` refusing an

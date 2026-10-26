@@ -196,13 +196,15 @@ check_github_apps implement review`
 func realGitHubApps(t *testing.T) config.GitHubApps {
 	t.Helper()
 	// go test's result cache keys a test on the variables it looks up and the files it opens, and
-	// sees neither through the bash child, so name them here: a changed input or a changed lib runs
-	// the gated proof again rather than replaying a pass made as other Apps.
+	// sees none of them through the bash child, so name them here: a changed input, lib or GET /app
+	// checker runs the gated proof again rather than replaying a pass made as other Apps.
 	for _, name := range liveProofAppInputs {
 		os.LookupEnv(name)
 	}
-	if _, err := os.ReadFile(githubAppsLib); err != nil {
-		t.Fatalf("read the live proofs' App lib: %v", err)
+	for _, file := range []string{githubAppsLib, filepath.Join(filepath.Dir(githubAppsLib), "app-logins.ts")} {
+		if _, err := os.ReadFile(file); err != nil {
+			t.Fatalf("read the live proofs' App lib: %v", err)
+		}
 	}
 	implement, review, err := liveProofApps(os.Environ())
 	if err != nil {
@@ -329,7 +331,7 @@ func TestLiveProofAppsReadTheLib(t *testing.T) {
 		// Under en_US.UTF-8 bash's [0-9] matches fullwidth digits, which is what the lib's local
 		// LC_ALL=C guards against. Without that locale bash falls back to C, where the case
 		// proves nothing, so it is skipped rather than passed.
-		probe := exec.Command("bash", "-c", `[[ ３ =~ ^[0-9]$ ]]`)
+		probe := exec.Command("bash", "--norc", "-c", `[[ ３ =~ ^[0-9]$ ]]`)
 		probe.Env = append(with(), "LC_ALL=en_US.UTF-8")
 		if probe.Run() != nil {
 			t.Skip("bash under LC_ALL=en_US.UTF-8 does not match a fullwidth digit with [0-9] here: the en_US.UTF-8 locale is absent, so this case cannot show the guard")
@@ -342,22 +344,75 @@ func TestLiveProofAppsReadTheLib(t *testing.T) {
 	if err := os.WriteFile(startup, []byte("printf 'noise from BASH_ENV\\n'\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	// A non-interactive bash built with SSH_SOURCE_BASHRC reads ~/.bashrc when SSH_CLIENT is set at
-	// a shell level below 2; this one writes to stdout and exports a function.
-	sshHome := t.TempDir()
-	if err := os.WriteFile(filepath.Join(sshHome, ".bashrc"), []byte("echo 'bashrc ran'\nhijack() { :; }\nexport -f hijack\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
 	for _, inherited := range [][]string{
 		{"BASH_ENV=" + startup},
 		{"BASH_FUNC_printf%%=() { builtin printf 'HIJACK|'; builtin printf \"$@\"; }"},
-		{"SSH_CLIENT=192.0.2.1 1 22", "SHLVL=0", "HOME=" + sshHome},
 	} {
 		implement, _, err = liveProofApps(append(with(), inherited...))
 		if err != nil || implement.id != defaults["implement_app_id"] {
 			t.Errorf("with %v inherited the implement App is %q (err %v), want the lib's default %s", inherited, implement.id, err, defaults["implement_app_id"])
 		}
 	}
+
+	t.Run("an ssh environment's rc file does not reach the lib's child", func(t *testing.T) {
+		// A non-interactive bash built with SSH_SOURCE_BASHRC reads ~/.bashrc when SSH_CLIENT is set
+		// at a shell level below 2; this one writes to stdout and exports a function. Where bash is
+		// built without it, no rc file is read with or without --norc, so the case is skipped.
+		home := t.TempDir()
+		if err := os.WriteFile(filepath.Join(home, ".bashrc"), []byte("echo 'bashrc ran'\nhijack() { :; }\nexport -f hijack\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		ssh := append(with(), "SSH_CLIENT=192.0.2.1 1 22", "SHLVL=0", "HOME="+home)
+		probe := exec.Command("bash", "-c", ":")
+		probe.Env = ssh
+		if out, _ := probe.Output(); !strings.Contains(string(out), "bashrc ran") {
+			t.Skip("this bash reads no ~/.bashrc for a non-interactive shell under SSH_CLIENT (built without SSH_SOURCE_BASHRC), so this case cannot show --norc")
+		}
+		implement, _, err := liveProofApps(ssh)
+		if err != nil || implement.id != defaults["implement_app_id"] {
+			t.Errorf("under an ssh environment the implement App is %q (err %v), want the lib's default %s", implement.id, err, defaults["implement_app_id"])
+		}
+	})
+
+	t.Run("the GET /app check reads the block the proofs act with", func(t *testing.T) {
+		// A stand-in bun takes app-logins.ts's place: it keeps the block it was given and answers as
+		// GitHub agreed, or refuses as a GitHub that answered another id. The block must be the one
+		// the lib's own write_github_apps writes for the same Apps.
+		stub, work, want := t.TempDir(), t.TempDir(), t.TempDir()
+		bun := "#!/bin/sh\ncp \"$4\" \"$STUB_KEEP\"\n[ -z \"$STUB_REFUSE\" ] || { echo 'app-logins: GET /app as the implement App answered another id' >&2; exit 1; }\necho '{\"implement\":\"implement[bot]\",\"review\":\"review[bot]\"}'\n"
+		if err := os.WriteFile(filepath.Join(stub, "bun"), []byte(bun), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		path := "PATH=" + stub + string(os.PathListSeparator) + os.Getenv("PATH")
+		kept := filepath.Join(stub, "kept.yaml")
+		implement, review, err := liveProofApps(with())
+		if err != nil {
+			t.Fatal(err)
+		}
+		apps := config.GitHubApps{
+			Implement: config.GitHubApp{AppID: implement.id, PrivateKeyCommand: implement.keyCommand},
+			Review:    config.GitHubApp{AppID: review.id, PrivateKeyCommand: review.keyCommand},
+		}
+		if _, err := proveLiveProofApps(append(with(), path, "STUB_KEEP="+kept), work, apps); err != nil {
+			t.Fatalf("a GitHub that agrees: %v", err)
+		}
+		if _, stderr, err := runGitHubAppsLib(githubAppsLib, with(), `set -euo pipefail
+fail() { printf '%s\n' "$*" >&2; exit 1; }
+work=$2
+source "$1"
+require_app_inputs implement review
+write_github_apps implement review`, want); err != nil {
+			t.Fatalf("the lib's write_github_apps: %v: %s", err, stderr)
+		}
+		got, _ := os.ReadFile(kept)
+		lib, _ := os.ReadFile(filepath.Join(want, "github-apps.yaml"))
+		if len(got) == 0 || !bytes.Equal(got, lib) {
+			t.Errorf("the GET /app check read\n%s\nwant the block the lib writes for the same Apps\n%s", got, lib)
+		}
+		if _, err := proveLiveProofApps(append(with(), path, "STUB_KEEP="+kept, "STUB_REFUSE=1"), t.TempDir(), apps); err == nil || !strings.Contains(err.Error(), "answered another id") {
+			t.Errorf("a GitHub that refuses: err = %v, want the checker's refusal", err)
+		}
+	})
 
 	t.Run("the lib's child inherits none of bash's startup or trace variables", func(t *testing.T) {
 		stdout, stderr, err := runGitHubAppsLib(githubAppsLib, append(with(),
