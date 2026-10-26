@@ -71,13 +71,13 @@ func awaitCalls(t *testing.T, calls *atomic.Int32, want int32) {
 }
 
 // The deployment's TTLs are the ones the route_status comment promises: an answer serves five
-// seconds, a listener that did not answer is left alone for one, and a fetch is bounded by
-// routeRosterTimeout, no test's override. It reads the server register mounts, the only one a
+// seconds, a listener that did not answer is left alone for five as well, and a fetch is bounded
+// by routeRosterTimeout, no test's override. It reads the server register mounts, the only one a
 // deployment runs.
-func TestTheDeploymentsRosterCacheKeepsAnAnswerFiveSecondsAndASilenceOne(t *testing.T) {
+func TestTheDeploymentsRosterCacheKeepsAnAnswerAndASilenceFiveSeconds(t *testing.T) {
 	rosters := &register(http.NewServeMux(), Deps{}).rosters
-	if rosters.ttl != 5*time.Second || rosters.silenceTTL != time.Second {
-		t.Fatalf("the server a deployment runs keeps an answer %s and a silence %s, want 5s and 1s", rosters.ttl, rosters.silenceTTL)
+	if rosters.ttl != 5*time.Second || rosters.silenceTTL != 5*time.Second {
+		t.Fatalf("the server a deployment runs keeps an answer %s and a silence %s, want 5s and 5s", rosters.ttl, rosters.silenceTTL)
 	}
 	if rosters.timeout != 0 || routeRosterTimeout != 2*time.Second {
 		t.Fatalf("the server a deployment runs bounds a fetch by %s over routeRosterTimeout %s, want no override of 2s", rosters.timeout, routeRosterTimeout)
@@ -92,7 +92,7 @@ func TestTwoIssueReadsWithinTheTTLMakeOneListenerCall(t *testing.T) {
 	roster.set("ses-sre", "sre")
 	handler, _, served := cachedRouteStatusServer(t, roster)
 	// A minute, not the deployment's five seconds, so a slow machine's second read stays inside it;
-	// the deployment's own value is TestTheDeploymentsRosterCacheKeepsAnAnswerFiveSecondsAndASilenceOne's.
+	// the deployment's own value is TestTheDeploymentsRosterCacheKeepsAnAnswerAndASilenceFiveSeconds's.
 	served.rosters.ttl = time.Minute
 	key := routedIssueKey(t, handler, "role:sre")
 	before := roster.lookups.Load()
@@ -139,8 +139,8 @@ func TestAFailingListenerIsAskedOnceWithinTheSilenceWindow(t *testing.T) {
 	roster := &fakeRoster{}
 	roster.down.Store(true)
 	handler, _, served := cachedRouteStatusServer(t, roster)
-	// A minute, not the deployment's second, so a slow machine's three reads stay inside it;
-	// the deployment's own value is TestTheDeploymentsRosterCacheKeepsAnAnswerFiveSecondsAndASilenceOne's.
+	// A minute, not the deployment's five seconds, so a slow machine's three reads stay inside it;
+	// the deployment's own value is TestTheDeploymentsRosterCacheKeepsAnAnswerAndASilenceFiveSeconds's.
 	served.rosters.ttl, served.rosters.silenceTTL = 0, time.Minute
 	key := routedIssueKey(t, handler, "role:sre")
 	before := roster.lookups.Load()

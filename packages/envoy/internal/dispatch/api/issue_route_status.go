@@ -56,10 +56,13 @@ const routeRosterTimeout = 2 * time.Second
 // minutes apart, so five seconds of age changes no decision; it takes the listener call and the
 // decode of the whole fleet's list off every read but one in five seconds.
 // routeRosterSilenceTTL is how long a listener that failed or did not answer is left alone: every
-// read in that second reads unknown at once rather than waiting out routeRosterTimeout of its own.
+// read in that window reads unknown at once rather than waiting out routeRosterTimeout of its own.
+// It is as long as routeRosterTTL, so a listener that hangs costs one shared routeRosterTimeout
+// wait per routeRosterTimeout+routeRosterSilenceTTL (7 s), and no read is answered from an older
+// listener answer than an answered fetch already allows.
 const (
 	routeRosterTTL        = 5 * time.Second
-	routeRosterSilenceTTL = time.Second
+	routeRosterSilenceTTL = 5 * time.Second
 )
 
 // rosterCache is the process's one copy of the listener's live-session list, and the fetch that
