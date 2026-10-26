@@ -3209,8 +3209,9 @@ HTTP/2 client reads them, `null` without HTTP/2). It exits 1 when `settings.enab
 is true, naming the origin on stderr; 0 when it is false or the server speaks no HTTP/2; 2 on a
 usage error, or when it has no answer: a TLS or certificate failure, or no SETTINGS within 10 s.
 Certificates are verified, so a proxy behind a private CA needs `NODE_EXTRA_CA_CERTS`.
-`h2-settings.test.ts` (`bun test scripts/e2e/lib`) runs it against a local
-`http2.createSecureServer` with and without `settings.enableConnectProtocol`, against an https
+`h2-settings.test.ts` (`bun test scripts/e2e/lib`) runs it against a TLS server that writes a
+SETTINGS frame advertising extended CONNECT by hand (the pinned Bun's `http2.createSecureServer`
+sends none), against a local `http2.createSecureServer` that does not advertise it, against an https
 server with no HTTP/2, against a certificate it cannot verify, and against two servers that answer
 nothing — one that chooses h2 and sends no SETTINGS, one that never finishes the handshake — which
 it leaves after the 10 s deadline with exit 2.

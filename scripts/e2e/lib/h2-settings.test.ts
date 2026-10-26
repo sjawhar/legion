@@ -75,10 +75,33 @@ async function run(
   return { code, stderr, stdout };
 }
 
+/** A TLS server that chooses h2 and sends one SETTINGS frame, SETTINGS_INITIAL_WINDOW_SIZE and
+ *  SETTINGS_ENABLE_CONNECT_PROTOCOL = 1, then holds the connection. The frame is written by hand
+ *  because the pinned Bun's node:http2 server (1.3.14) sends no ENABLE_CONNECT_PROTOCOL whatever
+ *  `settings.enableConnectProtocol` says, so a `createSecureServer` there advertises nothing. */
+function advertisingServer(): tls.Server {
+  const settings: readonly (readonly [id: number, value: number])[] = [
+    [0x4, 65_535],
+    [0x8, 1],
+  ];
+  const frame = Buffer.alloc(9 + settings.length * 6);
+  frame.writeUIntBE(settings.length * 6, 0, 3); // payload length
+  frame.writeUInt8(0x4, 3); // type SETTINGS; flags 0 and stream 0 stay zero
+  settings.forEach(([id, value], index) => {
+    frame.writeUInt16BE(id, 9 + index * 6);
+    frame.writeUInt32BE(value, 11 + index * 6);
+  });
+  const server = tls.createServer({ ...tlsFiles, ALPNProtocols: ["h2"] });
+  server.on("secureConnection", (socket) => {
+    // The probe closes its end once it has read the frame.
+    socket.on("error", () => {});
+    socket.write(frame);
+  });
+  return server;
+}
+
 test("a server advertising ENABLE_CONNECT_PROTOCOL prints its SETTINGS and exits 1", async () => {
-  const port = await listen(
-    http2.createSecureServer({ ...tlsFiles, settings: { enableConnectProtocol: true } })
-  );
+  const port = await listen(advertisingServer());
   const result = await run([`https://localhost:${port}/`]);
   expect(result.code).toBe(1);
   const answer = JSON.parse(result.stdout);
@@ -114,9 +137,7 @@ test("a server that speaks no HTTP/2 exits 0 with no SETTINGS", async () => {
 });
 
 test("a certificate the probe cannot verify is no answer, exit 2", async () => {
-  const port = await listen(
-    http2.createSecureServer({ ...tlsFiles, settings: { enableConnectProtocol: true } })
-  );
+  const port = await listen(advertisingServer());
   const result = await run([`https://localhost:${port}`], {});
   expect(result.code).toBe(2);
   expect(result.stdout).toBe("");
