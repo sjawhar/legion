@@ -18,10 +18,10 @@ request: <request>`, because triage reads it to tell your filing from anyone els
   id: write `direct message to session <your session id>`, for the person by the name they gave,
   else `the person who messaged this session`.
 
-For a clear defect the line is `Filed for Legion from <role> on <issue>: <evidence>`
-([File a clear defect](#file-a-clear-defect)).
+For a clear defect no running tree owns, the line is `Filed for Legion from <role> on <issue>:
+<evidence>` ([Hand over a clear defect](#hand-over-a-clear-defect)).
 
-## File a clear defect
+## Hand over a clear defect
 
 A role sends a clear defect on the controller topic: its role token, the defect, the issue it came
 from, where the fix belongs, the fix, and its evidence comment on the report issue, whose first line
@@ -29,14 +29,23 @@ is `Clear defect from <role>`. When the report issue was missing or closed, the 
 evidence: create or reopen the report issue (`skill://legion-controller/references/daily-report.md`)
 and post it there with that first line. A clear defect you find yourself gets the same comment, with
 `controller` as the role. A clear-defect ask (`findings.md`, "When no controller takes it") needs
-no answer: file it as below, the ask its evidence, then reply under it and resolve it
+no answer: take it as below, the ask its evidence, then reply under it and resolve it
 (`dispatch resolve-ask --kind resolved`).
+
+The work goes to whoever already owns that code. You file an issue only when nobody does.
 
 1. Check that it is clear: the fix needs no choice a person must make, and it belongs in a
    repository your addressing line lists. Otherwise open an ask for it, as `findings.md` says.
 2. Search first (`skill://dispatch-first`). When an open issue tracks it, comment the evidence
    there, reply `Filed dispatch://<that KEY>` under the evidence, and file nothing.
-3. File it on the repository where the fix belongs, in the project that repository maps to:
+3. Find the running tree whose code it is: a root in `admission.active` whose repository and
+   component match, read from `read_state` and `dispatch read`. When one matches, hand it over.
+   `envoy_publish` the defect, its evidence reference and the fix to that tree's architect topic
+   (`issues.<KEY>.architect.locator.claim`), which decides whether it is a child of the tree or
+   part of an open issue's work. Reply `Handed dispatch://<that KEY>` under the evidence. File
+   nothing: the work is already owned, and a second issue splits it.
+4. No running tree owns that code: file it on the repository where the fix belongs, in the
+   project that repository maps to:
 
    ```text
    dispatch issue --project <KEY> --repo <owner/name> --title '<the defect, as a title>' --label legion --spec-file -
@@ -47,9 +56,10 @@ no answer: file it as below, the ask its evidence, then reply under it and resol
    `Filed for Legion from` line: the sending role's token (or `controller`), the `dispatch://<KEY>`
    it came from, and the evidence comment's or the ask's reference. It opens in `triage` with the
    label, and triage admits it (`skill://legion-controller/references/triage.md`).
-4. Reply under the evidence comment (`--reply-to '<comment id>'`) or the ask
+5. Reply under the evidence comment (`--reply-to '<comment id>'`) or the ask
    (`--reply-to-ask '<ask id>'`, on the ask's issue), its first line exactly
-   `Filed dispatch://<NEW KEY>`. A later session reads that reply at triage and at every start.
+   `Filed dispatch://<NEW KEY>` or `Handed dispatch://<KEY>`. A later session reads that reply at
+   triage and at every start.
 
 ## Follow it
 
@@ -133,12 +143,13 @@ finding asks roles opened on their own issues while no controller ran:
    input. Exit 0 with keys is work. Exit 0 with no output means nothing waits. Anything else is a
    failed read and admits nothing. An issue that enters `needs_review` after the snapshot is read
    at your next start.
-4. List the clear defects nobody filed yet: each evidence comment whose first line starts
-   `Clear defect from `, with no session reply under it that starts `Filed dispatch://`,
-   `Not filed:` or `Asked dispatch://` (a role that asked instead, which step 2 takes):
-   `curl -sS -H "Authorization: Bearer $(cat "$DISPATCH_TOKEN_FILE")" "$DISPATCH_URL/api/v1/issues/<REPORT KEY>/comments" | jq -c '. as $all | [.[] | select(.reply_to == null and (.body | startswith("Clear defect from "))) | .id as $id | select([$all[] | select(.reply_to == $id and .author.kind == "session" and (.body | test("^(Filed dispatch://|Not filed:|Asked dispatch://)")))] | length == 0) | {id, body}]'`.
-   File each as [File a clear defect](#file-a-clear-defect) says. When one is not clear, reply
-   `Not filed: <reason>` under it and open an ask for it instead.
+4. List the clear defects nobody took yet: each evidence comment whose first line starts
+   `Clear defect from `, with no session reply under it that starts `Handed dispatch://`,
+   `Filed dispatch://`, `Not filed:` or `Asked dispatch://` (a role that asked instead, which step
+   2 takes):
+   `curl -sS -H "Authorization: Bearer $(cat "$DISPATCH_TOKEN_FILE")" "$DISPATCH_URL/api/v1/issues/<REPORT KEY>/comments" | jq -c '. as $all | [.[] | select(.reply_to == null and (.body | startswith("Clear defect from "))) | .id as $id | select([$all[] | select(.reply_to == $id and .author.kind == "session" and (.body | test("^(Handed dispatch://|Filed dispatch://|Not filed:|Asked dispatch://)")))] | length == 0) | {id, body}]'`.
+   Take each as [Hand over a clear defect](#hand-over-a-clear-defect) says. When one is not clear,
+   reply `Not filed: <reason>` under it and open an ask for it instead.
 
 A read that fails, and an assignment Dispatch refuses, are handled as
 `skill://legion-controller/SKILL.md#rules` and

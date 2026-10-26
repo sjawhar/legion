@@ -138,7 +138,8 @@ func TestPlannerKeepsFindingsAndHumanToDoAsksOutsideDesignQuestions(t *testing.T
 	for _, rule := range []string{
 		"Read the repository's `STRATEGY.md` when it has one",
 		"A finding outside the tree is never an issue you file.",
-		"A clear defect goes to whoever coordinates the project's work, with its evidence, and a finding that needs a decision is an ask.",
+		"A clear defect in code this tree touches or depends on is fixed in this tree's own pull request.",
+		"Any other clear defect goes to whoever coordinates the project's work, with its evidence, and a finding that needs a decision is an ask.",
 		"A to-do only a person can do is always an ask.",
 	} {
 		if !strings.Contains(planner, rule) {

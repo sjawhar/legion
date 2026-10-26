@@ -306,7 +306,8 @@ reviewing until you finish.
 - **The record lives on the pull request alone.** Dispatch refuses a message, a comment or an ask
   on a closed issue (`ISSUE_CLOSED`), so the deployment instructions' "on the pull request and the
   issue" is the pull request for a closed issue. A defect reaches Dispatch by the two paths above:
-  a clear defect as the message to the controller, which files it, and any other as the ask on the
+  a clear defect as the message to the controller, which gives it to the tree that owns that code,
+  and any other as the ask on the
   controller's report issue. The architect accepted the issue before the merge and is asked
   nothing after it. `pass` or
   `fail` closes the check: your claim is retired and, for a child, the issue's Sandbox and volume

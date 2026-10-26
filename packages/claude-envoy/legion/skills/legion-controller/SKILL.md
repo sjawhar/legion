@@ -63,7 +63,7 @@ Wake details: `skill://legion-controller/references/wakes.md`.
 | `worker-died on <KEY>` (`role: "architect"`) | Re-admit once its cause is gone, else park it |
 | An architect's escalation | `skill://legion-controller/references/escalation.md` |
 | A finding ask's reference, or its answer | `skill://legion-controller/references/finding-asks.md` |
-| A clear defect a role sends | `skill://legion-controller/references/finding-asks.md#file-a-clear-defect` |
+| A clear defect a role sends | `skill://legion-controller/references/finding-asks.md#hand-over-a-clear-defect` |
 | A finding sent as text | Open an ask ([Findings](#findings-and-the-issues-you-file)) |
 | READY, a scope question, a routing request | `skill://legion-controller/references/backlog-stewardship.md` |
 | A GitHub mention | Answer it, or route it to the owning architect |
@@ -81,10 +81,11 @@ claim is free; claim it again.` to `notifications.role.<issues.<KEY>.architect.l
 The daemon works only issues carrying the Dispatch label `legion` (any case). Work reaches Legion
 by a person's decision: they set the label from the issue header, or ask you to (a direct
 message, a Slack request that asks Legion to do the work, their answer to a finding ask, or a
-ruling the weekly plan records with its link). The one exception is a clear defect a role reports,
-which you file with the label: its fix is how to do work a person already wants, and humans decide
-what, agents decide how (the operator's answer on that case:
-dispatch://INFRA-49/ask/c7051816-2e86-4cb6-ad56-02ccb01e9355). Label an issue only then, because
+ruling the weekly plan records with its link). The one exception is a clear defect a role hands
+you whose code no running tree owns: you file it with the label, because its fix is how to do work
+a person already wants, and humans decide what, agents decide how (the operator's answer on that
+case: dispatch://INFRA-49/ask/c7051816-2e86-4cb6-ad56-02ccb01e9355). A defect whose code a running
+tree owns is that tree's, and you file nothing for it. Label an issue only then, because
 a labelled root in `todo` is admitted, so an unasked label starts unasked work. Never take a
 person's label off, because it is their decision. Label an issue before you `set_status` it to
 `todo`, because `todo` admits only a labelled root. How:
@@ -99,7 +100,7 @@ run now". Move an issue out of `backlog` or `icebox` only on a request or a plan
 it, and cite that request. The free slots are `admission.cap` minus the roots in
 `admission.active` and `admission.waiting`. Every move to `todo` you make is one of these:
 
-- a root a person handed over, or a clear defect you filed, at triage;
+- a root a person handed over, or a root you filed for a clear defect no tree owns, at triage;
 - an issue a person asks you to start;
 - a tree you re-admit after its architect failed or after a hold, once you checked its cause is
   gone, or because a person asks;
@@ -108,9 +109,10 @@ it, and cite that request. The free slots are `admission.cap` minus the roots in
 ## Findings, and the issues you file
 
 File an issue only when a person asks you to (a direct message, a Slack request, or their answer
-to a finding ask), for a clear defect, and the report issue. A clear defect, yours or a role's, you
-file for Legion as `skill://legion-controller/references/finding-asks.md#file-a-clear-defect`
-says. Every other problem is a finding: one you find, or one a role sends you as text. Open a
+to a finding ask), for a clear defect no running tree owns, and the report issue. A clear defect,
+yours or a role's, goes first to the tree that owns its code, and becomes a Legion root only when
+no tree does: `skill://legion-controller/references/finding-asks.md#hand-over-a-clear-defect`.
+Every other problem is a finding: one you find, or one a role sends you as text. Open a
 `dispatch ask` for it on the report issue, as `skill://legion-worker/references/findings.md` says,
 and file nothing until a person answers, because a person decides whether it needs an issue and
 where. Each issue you file carries a `Filed for` line:

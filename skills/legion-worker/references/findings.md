@@ -4,22 +4,26 @@ Read this when you find a problem the issue you work does not cover: a defect in
 component, repository or tool, a gap in Legion itself, or a production check's `fail`. It holds for
 every Legion role (each phase worker, each architect, the controller) and for each of their
 subagents, and it replaces the filing step of `skill://dispatch-first` and `skill://dispatch`. The
-controller does not send a clear defect to itself: it files it, as `skill://legion-controller`,
-"Findings, and the issues you file", says.
+controller fixes nothing itself: it hands a finding to the tree that owns the code, as
+`skill://legion-controller`, "Findings, and the issues you file", says.
 
-## A clear defect goes to the controller, a decision is an ask
+## Fix it where you are, else hand it over, and ask only for a decision
 
-A finding outside your issue never becomes a `dispatch issue` you file. It takes one of two paths:
+A finding outside your issue never becomes a `dispatch issue` you file. Take the first of these
+three steps that fits:
 
-- **A defect with a clear fix:** something is broken, the evidence shows it, the fix needs no
-  choice a person must make, and the fix belongs in a repository your `Legion addressing` line
-  lists. Send it to the controller, as [Send a clear defect to the
-  controller](#send-a-clear-defect-to-the-controller) says. The controller files it for Legion.
-- **A finding that needs a decision:** whether to fix it at all, which of several fixes, who owns
-  it, or a change of scope, cost or risk. Open a `dispatch ask`, as [Where it
-  goes](#where-it-goes) says, with one recommendation. A person decides.
+1. **Fix it here.** A defect with a clear fix in code your tree touches or depends on goes into
+   your tree's own pull request, while you are in that code. The fix needs no choice a person must
+   make, and the evidence shows the defect. Say in your handoff and in the pull request body what
+   you fixed beside the issue's own work. A fix deferred to another issue is a fix nobody makes.
+2. **Hand it over.** Any other clear defect goes to the controller with its evidence, as [Send a
+   finding to the controller](#send-a-finding-to-the-controller) says. The controller gives it to
+   the running tree whose code it is. Only when no tree owns that code does it file a Legion root.
+3. **Ask.** A finding that needs a person's authority, taste or risk appetite is a `dispatch ask`
+   with one recommendation, as [Where it goes](#where-it-goes) says: whether the work is wanted at
+   all, which of several designs, who owns it, or a change of scope, cost or risk.
 
-When you are not sure whether the fix is clear, it needs a decision: ask.
+A fix you are not sure of is not step 1: hand it over, or ask when a person must decide.
 
 - A problem inside your issue is not such a finding: fix it in your change, since nothing needed
   for correctness is deferred.
@@ -36,7 +40,7 @@ When you are not sure whether the fix is clear, it needs a decision: ask.
 These issues are filed:
 
 - an architect's children of its own tree (`dispatch issue --parent`, `skill://legion-architect`)
-- a clear defect a role sends the controller
+- a Legion root the controller files for a clear defect no running tree owns
 - an issue a person asked the controller to file, in a direct message, in a Slack request, or in
   their answer to an ask
 - the report issue itself, which the controller creates once when the project has none
@@ -44,7 +48,7 @@ These issues are filed:
 `skill://legion-controller`, "Findings, and the issues you file", and
 `skill://legion-controller/references/daily-report.md` say how.
 
-## Send a clear defect to the controller
+## Send a finding to the controller
 
 Post the evidence first as a `dispatch comment` on the report issue ([Where it goes](#where-it-goes)
 says which), its first line exactly `Clear defect from <your role token>`. It prints
@@ -58,7 +62,8 @@ says which), its first line exactly `Clear defect from <your role token>`. It pr
 - the fix
 - the evidence comment, `dispatch://<REPORT KEY>/comment/<id>`
 
-The controller files it for Legion and replies under your evidence comment with the issue it filed.
+The controller hands it to the running tree whose code it is, and files a Legion root only when no
+tree owns that code. Either way it replies under your evidence comment with where the work went.
 You file nothing, and you wait for nothing. When the report issue is missing or closed, put the
 evidence in the message itself. A production check's `Production:` line then names the defect as
 sent to the controller.
@@ -137,8 +142,9 @@ controller's catch-up find a finding ask by that line. Then it carries:
 - where the fix would belong: the repository or layer, and a plain statement that it is not
   Legion's when it is not. A problem is not Legion's because you work in Legion: name the
   component that misbehaved;
-- the decision a person must make, and your recommendation and its reason. For a clear defect, it
-  carries the fix, with `File it for Legion` first and recommended.
+- the decision a person must make, and your recommendation and its reason. A clear defect no
+  controller took carries the fix instead, and its options ask where the work goes, with
+  `Hand it to the owning tree` first and recommended.
 
 The evidence (the commands, their output and its time, the file and line, the pull request) does
 not fit. Post it first as a `dispatch comment` on the issue the ask goes on, which prints `Posted
@@ -150,8 +156,9 @@ it](#when-no-controller-takes-it) says:
 dispatch comment --issue <ASK KEY> --body-file - <<'EOF'
 <the evidence: commands, output with its time, file:line, links>
 EOF
-# Only when your Legion addressing line lists the repository where the fix belongs, keep the
-# `File it for Legion` option; otherwise drop that line.
+# Keep `File it for Legion` only when your Legion addressing line lists the repository where the
+# fix belongs. For a clear defect no controller took, the first option reads
+# 'Hand it to the owning tree: <the tree, when you know it>'.
 dispatch ask --issue <ASK KEY> --ref 'dispatch://<ASK KEY>/comment/<id>' --question-file - \
   --option 'File an issue: <what it would track, and who would own it>' \
   --option 'File it for Legion: Legion works it once it is filed' \

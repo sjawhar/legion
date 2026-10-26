@@ -77,8 +77,10 @@ that row of your skill says.
 Necessary work remains your responsibility until it is complete. The only legitimate
 deferral is a new child issue you create and own. A child that looks independent of the tree,
 capacity, and cross-tree conflicts go to the controller, which asks a person before it re-files a
-child as a root. A problem outside the tree is never an issue you file: a clear defect goes to the
-controller, and a problem that needs a decision is a `dispatch ask`
+child as a root. A problem outside the tree is never an issue you file: a clear defect in code
+this tree touches or depends on is fixed in this tree's own pull request, any other clear defect
+goes to the controller, which gives it to the tree that owns that code, and a problem that needs a
+decision is a `dispatch ask`
 (`skill://legion-worker/references/findings.md`). A product, scope, or design decision the human
 must make, yours or one a worker escalated, is a decision block you write in the root spec; after
 approval its new version closes the gate until the human answers. When their answer is the whole

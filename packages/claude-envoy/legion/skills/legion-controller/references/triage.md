@@ -37,10 +37,10 @@ Read this on a `triage` wake, at every start, and when a person hands you an iss
      `actor` is this session (`dispatch whoami` names it) or an earlier one of yours. For a request
      that is an ask, an earlier session is yours when its reply under that ask (`dispatch read
      --ref`) starts `Filed dispatch://<this KEY>` after a newest answer of `File it for Legion`.
-   - Your own filing of a clear defect hands it over too: its spec as filed holds a `Filed for
-     Legion from <role> on <issue>: <evidence>` line, and its `actor` is a session of yours. An
-     earlier session is yours when its reply under that evidence (a comment or an ask) starts
-     `Filed dispatch://<this KEY>`.
+   - Your own filing for a clear defect no tree owns hands it over too: its spec as filed holds a
+     `Filed for Legion from <role> on <issue>: <evidence>` line, and its `actor` is a session of
+     yours. An earlier session is yours when its reply under that evidence (a comment or an ask)
+     starts `Filed dispatch://<this KEY>`.
    - Any other actor hands over nothing. Leave the issue in `triage` and ask the person on your
      report issue whether Legion should take it, naming the issue and who labelled it, with the
      options `Admit it` and `Leave it`. On `Admit it`, go on to step 3. Either way, reply under the
