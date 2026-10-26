@@ -423,6 +423,109 @@ plainStarts.forEach((start, startIndex) => {
   emit(document(container, image(nextField(), `t\n${start}`, true), true));
 });
 
+// Every tag name either reader's HTML block rules name - CommonMark's block tags (micromark's
+// htmlBlockNames), goldmark's allowedBlockTags, which add `meta`, the raw elements and a few inline
+// tags - in each form the two readers read differently: case, a closing tag with spaces after `</`,
+// self-closing, white space after the name (a tab, a form feed, which Go's `\s` holds and
+// CommonMark's does not), attributes and text after the tag. Each form once with `&#10;` in a
+// rotating container and once raw in a rotating lazy container, the fields cycling.
+const tagNames = [
+  "address",
+  "article",
+  "aside",
+  "base",
+  "basefont",
+  "blockquote",
+  "body",
+  "caption",
+  "center",
+  "col",
+  "colgroup",
+  "dd",
+  "details",
+  "dialog",
+  "dir",
+  "div",
+  "dl",
+  "dt",
+  "fieldset",
+  "figcaption",
+  "figure",
+  "footer",
+  "form",
+  "frame",
+  "frameset",
+  "h1",
+  "h2",
+  "h3",
+  "h4",
+  "h5",
+  "h6",
+  "head",
+  "header",
+  "hr",
+  "html",
+  "iframe",
+  "legend",
+  "li",
+  "link",
+  "main",
+  "menu",
+  "menuitem",
+  "meta",
+  "nav",
+  "noframes",
+  "ol",
+  "optgroup",
+  "option",
+  "p",
+  "param",
+  "search",
+  "section",
+  "summary",
+  "table",
+  "tbody",
+  "td",
+  "tfoot",
+  "th",
+  "thead",
+  "title",
+  "tr",
+  "track",
+  "ul",
+  "pre",
+  "script",
+  "style",
+  "textarea",
+  "b",
+  "span",
+  "x-y",
+  "a",
+];
+const tagForms = (name: string): string[] => {
+  const upper = name.toUpperCase();
+  return [
+    `<${name}`,
+    `<${upper}>`,
+    `</${name}>`,
+    `</ ${name}>`,
+    `</  ${upper}`,
+    `<${name}/>`,
+    `<${name} />`,
+    `<${name}/>x`,
+    `<${name}\tx>`,
+    `<${name}\fx`,
+    `<${name} x="1">`,
+    `<${name}>c`,
+  ];
+};
+tagNames.flatMap(tagForms).forEach((start, startIndex) => {
+  const container = containers[startIndex % containers.length] as Container;
+  emit(document(container, image(nextField(), `t\n${start}\nz`, false), true));
+  const lazy = lazyContainers[startIndex % lazyContainers.length] as Container;
+  emit(document(lazy, image(nextField(), `t\n${start}\nz`, true), true));
+});
+
 // Seeded mixing: one to four lines per title, each line a start and a tail.
 const firsts = ["t", "a b", "x", "T", "", "a |", "*e*", "1."];
 const tails = ["", "", " b", "x", " | c |", " *e*", "-", " <b>", "&#10;"];
