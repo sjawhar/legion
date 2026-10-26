@@ -1,0 +1,260 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "INFRA-80",
+  "completed": "2026-10-26T02:47:33Z",
+  "plan": "dispatch://INFRA-80/artifact/plan-md",
+  "generation": 4,
+  "round": {
+    "kind": "forward-merge",
+    "summary": "Re-adopts the generation-3 plan unchanged (all its tasks are built, tested, reviewed and accepted) and adds plan.md section 'After the re-admission: bringing main into the branch', tasks M1-M5.",
+    "previousPlan": "06f26ab1eb6a:.legion/INFRA-80/plan.json (completed 2026-10-24T23:58:00Z, plan review approved in 1 round)",
+    "branchHead": "119e455f23c29e99e97d18d7acb3351e88742f81",
+    "mainHead": "06170c71a6b0 (17 commits ahead of fork point decf80f922a1)",
+    "conflicts": [
+      "packages/pi-legion/CHANGELOG.md",
+      "packages/claude-envoy/CHANGELOG.md"
+    ],
+    "resolution": "keep both sides verbatim, INFRA-80's contract 37 entry first; nothing else edited in the merge commit; .legion/INFRA-80/workspace-recovered.json is not committed",
+    "expectedFingerprint": "fc66319c54fa9634463392d22e921ddb1f0cfa4b0c5a5afb3a3057670ac3c0c9 (reference command at b247931acbca, 06f26ab1eb6a and 119e455f23c2, computed 2026-10-26T02:40Z; the keep-both resolution preserves every added line, checked per file over git merge-tree)",
+    "behaviour": "No code path INFRA-80 changed is touched by main (main's only packages/daemon/internal files are testbin/natives{,_test}.go; nothing in cmd/legion). The pinned Oh My Pi (18.8.9-sami.20261015 -> 18.12.2-sami.20261025) and the worker image do change; CI's Tests and Worker Image runs at the merged head are their evidence.",
+    "tasks": {
+      "M1 implementer": "fingerprint at the bookmark's tip; jj new legion/INFRA-80 \"${base}@origin\" with base from gh pr view baseRefName; resolve both CHANGELOGs keep-both; checks: jj resolve --list empty, no conflict markers, claude-envoy bun run check-dist + bun run test, pi-legion bun test src/skills-guard.test.ts, daemon gofmt/build/vet/vet -tags e2e, go test over the 13 non-DB packages INFRA-80 touched, internal/daemon and internal/store against the scratch Postgres with -skip TestABootWaitsOutAGitHubRequestThatNeverAnswers, acceptance-5 grep",
+      "M2 implementer": "code push (no skip-checks); fingerprint at new head; PR comment 'rebase <old> → <new>; fingerprint <before> → <after>; unchanged|changed'; rewrite body lines CI, E2E (implementer) (proofs stay at 00516adc, one forward-merge sentence added), Chain (nine merges), Size; body length < 65,536; implement.json proof = merge evidence, negative control = fingerprint of the unresolved merge commit differs; no simplify pass",
+      "M3 tester": "fingerprint at b247931acbca vs new head; equal -> bare gates (CI cited as GitHub shows it, Tests and Worker Image named; smoke = legion built at new head, start --check-config refuses pvc and accepts postgres) and 'rebase re-check' line; different -> full test round",
+      "M4 reviewer": "fingerprint at 06f26ab1eb6a (last review, APPROVED) vs new head; equal -> one confirming APPROVE naming both heads and the fingerprint, no thermo/thread pass; different -> new round with thermo",
+      "M5": "architect sign_off, then retro in full; retro's last commit removes .legion/INFRA-80/ again"
+    },
+    "contingency": "If main takes daemon API contract 37 first, merge again and move INFRA-80 to the next free number in version.go, packages/contracts/fixtures/daemon-api/version.json, both plugins' package.json, the claude-envoy bundle and the changelog entries: a changed diff and a full round.",
+    "forArchitect": "The operator's live run (old task 13, stage4a) has no open ask on the issue; if run at cutover it should use the worker image built from the merged head. Whether to ask again before the merge is the architect's decision."
+  },
+  "requiredSkills": {
+    "implement": [
+      "skill://legion-worker: the implementer is a Legion phase worker in the shared issue workspace; push, handoff and completion rules.",
+      "skill://legion-worker/references/conflicts-and-rewrites.md: this round is a forward merge of main (never a rebase), with the unchanged-diff fingerprint before and after and the PR comment that records it.",
+      "skill://legion-worker/references/pr-body.md: the CI, E2E (implementer), Chain and Size lines it rewrites, and the body length limit.",
+      "skill://legion-worker/references/default-branch-check.md: the identity check before pushing the merge commit."
+    ],
+    "test": [
+      "skill://legion-worker/references/pr-body.md: after a conflict-forced merge the tester compares fingerprints and, when equal, re-runs only the bare gates and writes the 'rebase re-check' line.",
+      "skill://legion-worker/references/conflicts-and-rewrites.md: the exact fingerprint command and where the tester's two heads come from.",
+      "skill://legion-worker: the test handoff's implementerProof, failures and proof fields."
+    ],
+    "review": [
+      "skill://legion-worker/references/merge-gate.md: the fingerprint confirmation after a conflict merge (one more APPROVE naming both heads, no thermo pass) and the new-round branch when it differs.",
+      "skill://legion-worker/references/conflicts-and-rewrites.md: the reviewer's two heads are its last review's commit_id and the new head.",
+      "skill://legion-worker/references/pr-body.md: Look at first and Not proven / risk stay current at the new head."
+    ]
+  },
+  "gapAnalysis": {
+    "findings": [
+      {
+        "finding": "F1: the E2E (implementer) line names 00516adc, not 119e455f, so a 'rebase re-check 119e455f →' rewrite would cite a head the proof never ran at.",
+        "answer": "M2: the implementer's proofs stay at 00516adc and one forward-merge sentence citing its own tip fingerprints is added; the tester's 're-check' uses b247931acbca, the head its line names."
+      },
+      {
+        "finding": "F2: the local checks were narrower than CI and the previous merge round (no go vet -tags e2e, missing internal/daemon, store, runtime, runtime/tmux, podsafety, ompsessions; real-omp tests only run in CI).",
+        "answer": "M1 lists every Go package INFRA-80 touched, go vet -tags e2e, and the two DB packages against the scratch Postgres with the one Docker test skipped; the section says the real-Oh My Pi tests at the new pin are proven only by CI's Tests run."
+      },
+      {
+        "finding": "F3: 'the merge changes no behaviour' omitted the Oh My Pi pin and worker image the merge also changes.",
+        "answer": "The section's behaviour paragraph narrows the claim to code and names the pin (18.8.9-sami.20261015 -> 18.12.2-sami.20261025) and the image, with Tests and Worker Image at the merged head as their evidence; the live-run image question goes to the architect."
+      },
+      {
+        "finding": "F4: 'bare gates ... smoke' named no smoke command and conflicted with not waiting for CI.",
+        "answer": "M3 names the smoke (legion built at the new head; start --check-config refuses pvc, accepts postgres) and says a queued lane is cited as queued, not waited for."
+      },
+      {
+        "finding": "F5: the predicted fingerprint came from a git method excluding the CHANGELOGs and the old tip was hard-coded.",
+        "answer": "Recomputed with the reference jj command: fc66319c… at b247931acbca, 06f26ab1eb6a and 119e455f23c2; the keep-both resolution was checked to preserve each CHANGELOG's added lines; M1 reads the old tip from the bookmark at merge time and adds the resolve --list and marker grep checks."
+      },
+      {
+        "finding": "F6: other checks read the auto-merged files (pi-legion skills guard, claude-envoy tests, the acceptance-5 grep).",
+        "answer": "Added to M1: bun run test in claude-envoy, bun test src/skills-guard.test.ts in pi-legion, and the acceptance-5 search."
+      },
+      {
+        "finding": "F7: more of the PR body goes stale (CI paragraph naming b247931acbca and CONFLICTING, Chain's eight merges, Size), and the body is near the limit.",
+        "answer": "M2 lists the four lines rewritten in place and requires body length < 65,536 (50,303 measured)."
+      },
+      {
+        "finding": "F8: the gate sequence missed the architect's acceptance, retro's full run, and the reviewer's confirmation rule.",
+        "answer": "M4 states the confirmation and new-round branches; M5 the sign_off and a full retro whose last commit removes .legion/INFRA-80/ again."
+      },
+      {
+        "finding": "F9: .legion/INFRA-80/workspace-recovered.json in the working copy could ride into a commit.",
+        "answer": "The planner's handoff commit is split onto the bookmark with plan.json alone, and M1 merges from the bookmark, so the file is committed by no one."
+      },
+      {
+        "finding": "F10: R2 hard-coded main@origin instead of the reference's baseRefName read.",
+        "answer": "M1 uses the reference's base=$(gh pr view … baseRefName | @json) command."
+      }
+    ]
+  },
+  "planReview": {
+    "verdict": "approved",
+    "rounds": 1
+  },
+  "specDepartures": [
+    {
+      "spec": "Acceptance 1: the disk 'still carries the project and issue labels an operator finds it by'.",
+      "plan": "The pod-owned disk carries no labels. Its size and class are unchanged, the issue key stays in the claim's name (<pod name>-issue, and the pod's name is derived from the issue key), and an operator finds it by that name and by its owner reference to the pod.",
+      "evidence": "The only pod-owned shape the pinned agent-sandbox custom-resource definition offers declares ephemeral.volumeClaimTemplate.metadata as a bare 'type: object' with no properties and no x-kubernetes-preserve-unknown-fields (packages/daemon/internal/runtime/sandbox/testdata/sandboxes.agents.x-k8s.io.yaml:3326-3327), so the API server prunes labels there; this repository's own schema walker reproduces that pruning (schema_test.go:88-118, run by TestManifestMatchesTheSandboxCRD). The same stub is on agent-sandbox main, so no version bump recovers it, and Kubernetes copies a claim's labels only from that template. The daemon holds no PersistentVolumeClaim verb to label it afterwards (live_install_test.go:146-149).",
+      "outcome": {
+        "kind": "changed",
+        "acceptance": [
+          "1: the disk carries no labels; it is found by its name and its owner reference instead."
+        ]
+      }
+    },
+    {
+      "spec": "Acceptance 6: no disk of the project is left that a pod does not own, 'read by an operator with kubectl -n legion get pvc -l legion.dev/project=INFRA -o json and checking that each one's owner is a pod'.",
+      "plan": "The audit reads every claim in the namespace and asserts each one's owner is a pod, naming the two the spec keeps Sandbox-owned as exceptions: each repository cache's (cache-legion-...) and the project controller's (issue-legion-<project>-controller).",
+      "evidence": "Follows departure 1: with no labels on the new claims that selector matches none of them, so it answers empty whether the cutover worked or not. The cache's claim is Sandbox-owned by design (repocache.go:104-126) and the controller's stays Sandbox-owned because the spec leaves its disk untouched (controller_test.go:53-162).",
+      "outcome": {
+        "kind": "changed",
+        "acceptance": [
+          "6: the audit command and its two documented exceptions replace the label selector."
+        ]
+      }
+    },
+    {
+      "spec": "'Because no disk is carried forward, the code that carries one forward goes with it: ... the sweep of file locks a killed process left ...'",
+      "plan": "workspace.RemoveStaleGitLocks and its tests stay; only the clone-connectivity report goes from that pair.",
+      "evidence": "A failed init container is retried by the kubelet on the same pod and therefore the same pod-owned disk (docs/kubernetes.md:2978-2982, 'Under restartPolicy: Always a failed init container never turns the pod Failed ... keeps retrying it forever'), so a first attempt killed mid-fetch still leaves locks the retry must clear; the sweep's own rationale (cmd/legion/workspace_init.go:177-181) holds unchanged on a fresh disk.",
+      "outcome": {
+        "kind": "changed",
+        "scope": "The deletion list keeps the stale git-lock sweep; the clone-connectivity report is deleted as written."
+      }
+    },
+    {
+      "spec": "'the runbook clean-up for a disk that has filled up because nothing prunes it' goes, and acceptance 5's 'the runbook's clean-up procedure goes with the test that holds it to the code'.",
+      "plan": "The disk-full paragraph is rewritten rather than deleted: its delete and exempt lists and the two tests that hold them to what the renderer puts on the disk (reclaim_doc_test.go:54,94) stay, under an opening that names restarting the issue as the other remedy.",
+      "evidence": "A 50 GB pod-owned disk fills within one pod's life exactly as today (same clone, same caches, same size), and the new remedy destroys the turn's unpushed work; the existing paragraph is the only non-destructive, in-turn remedy, and its tests are a real accounting check over roleEnvironment and issuePod.agentEnv rather than prose.",
+      "outcome": {
+        "kind": "changed",
+        "acceptance": [
+          "5: the disk-full runbook and its two tests are rewritten, not deleted; the broken-clone procedure is deleted outright as written."
+        ]
+      }
+    },
+    {
+      "spec": "The spec makes the Postgres session store a deployment step taken first (its order of work) and names no guard in Legion.",
+      "plan": "session_store: pvc is refused under runtime: kubernetes at config load, so session_dsn_secret becomes required there.",
+      "evidence": "With a pod-owned disk a file conversation dies with its pod and the next launch's resume fails on the missing file (internal/launcher/launcher.go:459-470), retiring the claim after three failures; the running INFRA deployment is on pvc today (measured through GET /legion/v1/state: settings.runtime.kubernetes.session_store=pvc). The refusal is also what makes the spec's own deletion list mechanical: launch.sessionsInDatabase, the sessions mount on the volume, the controller's LEGION_RESUME_SESSION_FILE and Store.IssueHasSessions are reachable only from the file branch.",
+      "outcome": {
+        "kind": "changed",
+        "scope": "Adds a configuration refusal the spec does not name, and makes the deployment's session-store flip a hard precondition of the release rather than an ordering preference."
+      }
+    }
+  ],
+  "previousRound": {
+    "gapAnalysis": {
+      "findings": [
+        {
+          "finding": "Acceptance 1's project and issue labels cannot be carried by any pod-owned volume: the pinned custom-resource definition declares ephemeral.volumeClaimTemplate.metadata as a bare object (testdata/sandboxes.agents.x-k8s.io.yaml:3326-3327), the API server prunes labels there, and the daemon holds no PersistentVolumeClaim verb to add them afterwards.",
+          "answer": "Recorded as departure 1. The plan keeps size, class and the issue key in the claim's name (<pod>-issue, derived from the issue key) and replaces the operator's label search with an owner-reference check; decision D1 of the plan, and the architect decides whether the acceptance line changes."
+        },
+        {
+          "finding": "Nothing in the change reaps the disks of issues that never launch again (a parked child keeps its suspended Sandbox and its claim until its tree closes), so acceptance 6 is not met by the code alone.",
+          "answer": "Two answers: decision D6 makes every stop delete the issue's Sandbox from now on, and task 10 writes the cutover procedure whose operator step deletes the old-shape Sandboxes left from before the upgrade, ending with the rewritten audit."
+        },
+        {
+          "finding": "Deleting the keep-or-delete split also deletes the orphan sweep's IssueSandboxHome exception and the hand-over's relabel, which do more than keep a disk.",
+          "answer": "Decisions D6 and D7: the release flag goes and the delete becomes unconditional (it also reaps the six role Secrets), handOverSandbox goes, and the sweep's home check stays exactly as it is, because it is what stops the sweep deleting a Sandbox a launch just created for a carried child."
+        },
+        {
+          "finding": "Nothing refuses session_store: pvc under a pod-owned disk, and the running INFRA deployment is on pvc today (measured: GET $LEGION_DAEMON_URL/legion/v1/state returns settings.runtime.kubernetes.session_store=pvc).",
+          "answer": "Decision D5 refuses pvc under runtime: kubernetes at config load, which also makes the file-session deletions mechanical (task 5). Recorded as departure 5 because it is scope the spec does not name, and named to the architect."
+        },
+        {
+          "finding": "Acceptance 6's audit command cannot fail as written once the claims carry no labels, and two claims of the project are Sandbox-owned by design (each repository cache's and the controller's).",
+          "answer": "Departure 2: the audit becomes a read of every claim in the namespace asserting a pod owner, with those two named as the exceptions; written into task 10 and the acceptance table."
+        },
+        {
+          "finding": "workspace-init still re-runs on a disk that already holds a half-written clone, because the kubelet retries a failed init container on the same pod (docs/kubernetes.md:2978-2982), so the stale git-lock sweep still has a case.",
+          "answer": "Decision D10 keeps RemoveStaleGitLocks and its tests; recorded as departure 3."
+        },
+        {
+          "finding": "internal/workspace/connectivity.go has a caller outside Kubernetes (the daemon provisions in-process for the tmux runtime), so deleting it removes a guard there too.",
+          "answer": "Measured instead of assumed: no clone this code makes borrows objects any more (the feed clone is a plain local git clone, clone.go:305) and the report only runs on a clone with .git/objects/info/alternates (connectivity.go:74-88), so it is dead for anything a current release creates. Deleted as the spec says (task 7), with the tmux consequence named in the plan."
+        },
+        {
+          "finding": "Rollback: once issue Sandboxes own no claim template the previous release's boot census refuses them, and a dropped workspace_lost column would break the old binary's reads.",
+          "answer": "Decision D8 keeps the column and stops using it, and task 10 adds a 'Rolling back this release' note saying every issue Sandbox must be deleted before the image is rolled back."
+        },
+        {
+          "finding": "Relaxing the boot census removes the only detector of the pre-per-issue-volume child layout, whose signature is also 'no claim template'.",
+          "answer": "Decision D4 and task 2 make the census kind-aware rather than blanket-permissive: an issue pod accepts no template or the old issue template and still refuses a tree one, the controller still requires its issue template, and legacyIssueSandbox's container-shape check still refuses the old one-worker-container shape."
+        },
+        {
+          "finding": "The controller's pod is rendered by the same function and owns the same claim template, while the spec says the controller's disk is untouched; volumeLostError is also the controller's own check.",
+          "answer": "Decision D3 branches the renderer by pod kind with the controller goldens as the regression fence; the controller's resume check goes only because D5 makes its file-session branch unreachable (task 5)."
+        },
+        {
+          "finding": "The live proof's own evidence (the stub agent's marker file) lives on the issue volume, so it cannot witness a pod replacement, and only one stage4a check runs under a session database today.",
+          "answer": "Task 11: every stage4a check runs under the scratch Postgres the script already creates, the marker proves identity within one pod only, and continuity across pods is read from the session table as postgres-resume already does; stage4b gains the two session-store keys and a database."
+        },
+        {
+          "finding": "Acceptance 4 is ambiguous between 'the conversation resumes' and 'the work survives': the database holds the transcript, not the workspace, and a mid-turn pod death now loses unpushed commits.",
+          "answer": "The plan reads it as the conversation, names the loss in its risks (a phase boundary has already pushed a handoff; an eviction mid-turn has not), and points at LEGION_WORKSPACE_RECREATED, which is now true on every resume. Flagged to the architect as the reading it took."
+        },
+        {
+          "finding": "Acceptance 2 may need no production code: provisioning already starts at the default branch when the issue's branch is gone (bookmark.go:67-69); today's failure is the retained clone's stale bookmark.",
+          "answer": "The plan says so: acceptance 2 is proven by driving the real workspace-init command against a feed whose branch was deleted (acceptance table), not by new code."
+        },
+        {
+          "finding": "Every pod start now depends on the repository cache, and the paths that rebuild have widened (image drift, moved address, failed init, suspend and resume).",
+          "answer": "Named as a risk with the evidence that no timeout moves (the launch budget already covers provisioning, relaunch.go:263-272) and written into the docs task; the 14-day production-check wake is called out as the coldest start, to be measured in the live run."
+        },
+        {
+          "finding": "legion sessions import is kept, but the only way to run it against a disk with no pod running is the runbook half the spec deletes.",
+          "answer": "Decision D9 and task 10: that half is rewritten as a step of the import runbook and stripped of the broken-clone procedure, instead of being deleted outright."
+        },
+        {
+          "finding": "The documentation the change invalidates is larger than the two runbooks the spec names.",
+          "answer": "Task 10 lists the edits by section with line ranges: Volume retention, Anatomy of a Sandbox pod, Selecting the store, the census refusal text, the shell-on-a-volume runbook, the reclaim paragraph, the root AGENTS.md lines, the e2e README rows, three site pages and the deployment example."
+        },
+        {
+          "finding": "Unsupported claim, carried from the spec: that the broken object those six issues died on was in each issue's own carried-forward clone rather than in the shared repository cache, which this change keeps.",
+          "answer": "Named in the plan's closing section as the one unverified claim the change rests on, for the architect to settle; if it could be the cache, this change does not close the stall."
+        },
+        {
+          "finding": "Unverified: that agent-sandbox leaves an ephemeral pod volume alone, and that a pod volume named issue beside a claim template once named issue does not collide.",
+          "answer": "The oracle read the controller's merge of claim templates into pod volumes: it filters by name, so an old-shape Sandbox's template would overwrite a same-named ephemeral volume. That is why task 3 replaces an old-shape Sandbox rather than re-templating it, and the pass-through is on the live run's list (risk 1)."
+        },
+        {
+          "finding": "Removing Observation.WorkspaceLost also changes how an init-failed pod is classified: it is excluded from ends(), which is what makes relaunch replace a pod whose init keeps failing instead of reading it as displaced.",
+          "answer": "Task 6 keeps that classification under its own name and turns init_failure_test.go around to pin it, rather than deleting the field's effect with the field."
+        },
+        {
+          "finding": "Three acceptance clauses have no machine check and no named owner: the first real production check, the six named issues working again or closed, and 'every issue stopped with its work pushed'.",
+          "answer": "The acceptance table names a person for each (the implementer's own production check after the close; the operator for the cutover and the six issues), and the plan's closing section asks the architect to confirm who reads them and what output is pasted back."
+        }
+      ]
+    },
+    "planReview": {
+      "verdict": "approved",
+      "rounds": 1
+    },
+    "requiredSkills": {
+      "implement": [
+        "skill://legion-worker: the implementer is a Legion phase worker in the shared issue workspace; its push, handoff and completion rules are there.",
+        "skill://legion-worker/references/pr-body.md: every acceptance line's proof is an E2E line and a proof array on a production-like surface, and a unit test is never one — this change's cluster half is not reachable from the pod, which that reference tells the implementer to report rather than skip.",
+        "skill://legion-worker/references/cleanup-deletion.md: the change deletes code, a CLI subcommand (legion sessions mark-lost), two runbooks and a whole doc section.",
+        "skill://legion-worker/references/conflicts-and-rewrites.md: the branch touches docs/kubernetes.md and packages/daemon, both of which main moves often, so a forward merge is likely.",
+        "skill://ce-simplify-code: the implementer runs it once in its first implementing round, and this diff is large runtime code.",
+        "skill://dispatch and skill://dispatch-first: task 13 opens the operator ask that carries the live proof, and the gates for asking are there."
+      ],
+      "test": [
+        "skill://legion-worker/references/pr-body.md: the tester drives the changed surface rather than re-running CI, verifies the implementer's proof, and records a missing surface as a failure rather than filling it — which matters here because the cluster surface belongs to an operator.",
+        "skill://legion-worker: the test handoff's implementerProof, failures and proof fields, and the red-test rule for a break no existing test would catch.",
+        "skill://dispatch-first: the live-run ask and its answer are the tester's evidence trail, so it must read them before judging the proof."
+      ],
+      "review": [
+        "skill://legion-worker/references/merge-gate.md: the reviewer approves a head by SHA, and READY compares that head, which this change's retro commit and large doc diff make worth reading first.",
+        "skill://legion-worker/references/review-threads.md: one disposition reply per thread and the implementer's own resolution; a diff this size draws bot threads.",
+        "skill://legion-worker/references/pr-body.md: the reviewer writes Look at first and Not proven / risk, and here at least one claim (the cluster behaviour of the Sandbox controller) is proven only by the operator's run."
+      ]
+    }
+  }
+}
