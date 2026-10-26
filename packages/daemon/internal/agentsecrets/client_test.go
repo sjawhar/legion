@@ -10,13 +10,18 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/http/httputil"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -600,6 +605,83 @@ func TestTokenLoginRetriesSlowlyWhenTheBrokerRefuses(t *testing.T) {
 	eventually(t, func() bool { return c.LoginStatus().State == "issued" }, "the refused login to be retried")
 	if gap := broker.login(1).at.Sub(broker.login(0).at); gap < 300*time.Millisecond {
 		t.Fatalf("the retry came %v after the refusal, want the long schedule's 300 ms wait at least", gap)
+	}
+}
+
+// TestTokenLoginRetriesQuicklyWhileTheFrontDoorAnswersForADownBroker: the daemon reaches the
+// broker through an HTTPS front door, a reverse proxy (Tailscale serve, whose proxy is a plain
+// httputil.ReverseProxy with no error handler), so while no broker serves, every login is
+// answered 502 Bad Gateway by the front door, not left unanswered. The broker decided nothing, so
+// those logins are retried on the short schedule too: with a minute's wait after a refusal, the
+// daemon logs in within seconds once a broker serves behind the front door again.
+func TestTokenLoginRetriesQuicklyWhileTheFrontDoorAnswersForADownBroker(t *testing.T) {
+	withLoginRetry(t, time.Minute, time.Minute)
+	withUnansweredRetry(t, 20*time.Millisecond, 100*time.Millisecond)
+	broker, server := newFakeBroker(t)
+	down, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	downAddr := down.Addr().String()
+	_ = down.Close()
+	brokerURL, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var serving atomic.Bool
+	var proxied atomic.Int32
+	proxy := &httputil.ReverseProxy{
+		Rewrite: func(r *httputil.ProxyRequest) {
+			if serving.Load() {
+				r.SetURL(brokerURL)
+			} else {
+				r.SetURL(&url.URL{Scheme: "http", Host: downAddr})
+			}
+		},
+		ErrorLog: log.New(io.Discard, "", 0),
+	}
+	front := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if proxied.Add(1) > 3 {
+			serving.Store(true)
+		}
+		proxy.ServeHTTP(w, r)
+	}))
+	t.Cleanup(front.Close)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	c := &Client{URL: front.URL, HTTP: front.Client(), TokenFile: tokenFile(t, "token"), Log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	err = c.Start(ctx)
+	var api *APIError
+	if !errors.As(err, &api) || api.Status != http.StatusBadGateway {
+		t.Fatalf("the first login = %v, want the front door's 502", err)
+	}
+	eventually(t, func() bool { return c.LoginStatus().State == "issued" }, "a login to succeed once a broker serves behind the front door, well before a refusal's minute")
+	if n := broker.loginCount(); n != 1 {
+		t.Fatalf("the broker read %d logins, want the one that succeeded", n)
+	}
+}
+
+// TestTokenLoginRetriesQuicklyWhileTheBrokerCannotReachItsDatabase: while the broker's database
+// is away, the broker answers a token login 500 INTERNAL ("token login failed"), which is not a
+// decision about the daemon's token, so those logins are retried on the short schedule too: with
+// a minute's wait after a refusal, the daemon logs in within seconds once the database is back.
+func TestTokenLoginRetriesQuicklyWhileTheBrokerCannotReachItsDatabase(t *testing.T) {
+	withLoginRetry(t, time.Minute, time.Minute)
+	withUnansweredRetry(t, 20*time.Millisecond, 100*time.Millisecond)
+	broker, server := newFakeBroker(t)
+	down := enrollAnswer{http.StatusInternalServerError, `{"code":"INTERNAL","error":"token login failed"}`}
+	broker.refuseLogins = []enrollAnswer{down, down, down}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	c := &Client{URL: server.URL, HTTP: server.Client(), TokenFile: tokenFile(t, "token"), Log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	err := c.Start(ctx)
+	var api *APIError
+	if !errors.As(err, &api) || api.Status != http.StatusInternalServerError {
+		t.Fatalf("the first login = %v, want the broker's 500", err)
+	}
+	eventually(t, func() bool { return c.LoginStatus().State == "issued" }, "a login to succeed once the broker's database is back, well before a refusal's minute")
+	if n := broker.loginCount(); n != 4 {
+		t.Fatalf("%d logins, want the three the broker could not answer and the one that succeeded", n)
 	}
 }
 
