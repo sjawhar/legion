@@ -211,13 +211,24 @@ func (c *HTTPClient) Approval(ctx context.Context, artifactID string) (Approval,
 	if response.IssueKey != nil {
 		issueKey = *response.IssueKey
 	}
-	return Approval{
+	approved := Approval{
 		IssueKey:      issueKey,
 		State:         response.Approval.State,
 		LatestVersion: response.Approval.LatestVersion,
 		Version:       response.Approval.Version,
 		Reason:        response.Approval.Reason,
-	}, nil
+	}
+	if response.Approval.At != nil {
+		at, err := time.Parse(time.RFC3339Nano, *response.Approval.At)
+		if err != nil {
+			return Approval{}, fmt.Errorf("Dispatch artifact %q approval has no RFC 3339 at: %w", artifactID, err)
+		}
+		approved.At = at.UTC()
+	}
+	if response.Approval.Seq != nil {
+		approved.Seq = *response.Approval.Seq
+	}
+	return approved, nil
 }
 
 // BuildCommit reads GET /healthz and returns the build commit Dispatch reports itself built from
@@ -378,6 +389,10 @@ type approvalResponse struct {
 	LatestVersion int     `json:"latest_version"`
 	Version       *int    `json:"version"`
 	Reason        *string `json:"reason"`
+	// At is the latest review's created_at and Seq its event's sequence on the issue; a Dispatch
+	// that predates the sequence, or a review recorded before it kept one, sends no seq.
+	At  *string `json:"at"`
+	Seq *int64  `json:"seq"`
 }
 
 type actor struct {
