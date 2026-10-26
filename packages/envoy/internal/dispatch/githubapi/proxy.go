@@ -4,6 +4,8 @@
 package githubapi
 
 import (
+	"context"
+	"encoding/json"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -28,6 +30,25 @@ var readable = regexp.MustCompile(`^repos/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)/(?
 // sha and the page. The read must name head_sha, and no parameter may repeat.
 var workflowRunsQuery = regexp.MustCompile(`^(head_sha)=[0-9A-Fa-f]{40}$|^(per_page|page)=[0-9]+$`)
 
+// workflowRunsResponseLimit bounds GitHub's workflow-runs answer, which the proxy trims to three
+// fields per run before forwarding. GitHub writes each run's repository, head repository and head
+// commit (about 12.8 KB a run on sjawhar/legion), so a page of 100 runs passes the client's 1 MiB
+// default; this leaves room for 100 runs whose shared head commit message is long.
+const workflowRunsResponseLimit = 16 << 20
+
+// workflowRuns is the part of GitHub's workflow-runs answer the web app reads, and all of it the
+// proxy passes on: the count and, per run in GitHub's order, its check suite, triggering event and
+// workflow name. The rest of a run (its head commit's message and author, the actor, the
+// repository) is never shown, so it never leaves the server.
+type workflowRuns struct {
+	TotalCount   int `json:"total_count"`
+	WorkflowRuns []struct {
+		CheckSuiteID int64  `json:"check_suite_id"`
+		Event        string `json:"event"`
+		Name         string `json:"name"`
+	} `json:"workflow_runs"`
+}
+
 // workflowRunsOfOneCommit reports whether rawQuery reads the workflow runs of one commit and
 // nothing else: head_sha as a full sha, and at most per_page and page beside it.
 func workflowRunsOfOneCommit(rawQuery string) bool {
@@ -47,11 +68,13 @@ func workflowRunsOfOneCommit(rawQuery string) bool {
 }
 
 // ProxyREST answers GET Prefix<path> with GitHub's answer to GET /<path>, read with an
-// installation token of the App installation covering the path's repository. Any other method is
-// 405; a path the web app does not read, or a workflow-runs read whose query is not one commit's
-// head_sha and its page, is 404 GITHUB_PATH_REFUSED; a repository the App is not installed on, or
-// a deployment with no App key, is 503 GITHUB_TOKEN_UNAVAILABLE. The caller has already
-// established that a person is asking.
+// installation token of the App installation covering the path's repository. A workflow-runs read
+// GitHub answers 200 is trimmed to workflowRuns, and a body that does not decode as workflow runs
+// is 502 GITHUB_UPSTREAM; every other answer, and a workflow-runs answer of any other status,
+// passes through as GitHub sent it. Any other method is 405; a path the web app does not read, or
+// a workflow-runs read whose query is not one commit's head_sha and its page, is 404
+// GITHUB_PATH_REFUSED; a repository the App is not installed on, or a deployment with no App key,
+// is 503 GITHUB_TOKEN_UNAVAILABLE. The caller has already established that a person is asking.
 func ProxyREST(w http.ResponseWriter, r *http.Request, client *githubapp.Client) {
 	if r.Method != http.MethodGet {
 		w.Header().Set("Allow", http.MethodGet)
@@ -83,7 +106,13 @@ func ProxyREST(w http.ResponseWriter, r *http.Request, client *githubapp.Client)
 	if r.URL.RawQuery != "" {
 		target += "?" + r.URL.RawQuery
 	}
-	body, status, header, err := client.Read(r.Context(), token, target)
+	read := client.Read
+	if match[3] != "" {
+		read = func(ctx context.Context, token, path string) ([]byte, int, http.Header, error) {
+			return client.ReadWithin(ctx, token, path, workflowRunsResponseLimit)
+		}
+	}
+	body, status, header, err := read(r.Context(), token, target)
 	if err != nil {
 		slog.Warn("dispatch: GitHub proxy read failed", "path", target, "error", err)
 		var tooLarge *githubapp.ResponseTooLargeError
@@ -92,6 +121,16 @@ func ProxyREST(w http.ResponseWriter, r *http.Request, client *githubapp.Client)
 			return
 		}
 		api.WriteJSON(w, http.StatusBadGateway, map[string]string{"error": "GitHub read failed", "code": "GITHUB_UPSTREAM"})
+		return
+	}
+	if match[3] != "" && status == http.StatusOK {
+		var runs workflowRuns
+		if err := json.Unmarshal(body, &runs); err != nil {
+			slog.Warn("dispatch: GitHub proxy could not decode the workflow runs", "path", target, "error", err)
+			api.WriteJSON(w, http.StatusBadGateway, map[string]string{"error": "GitHub answered the workflow runs with a body that does not decode", "code": "GITHUB_UPSTREAM"})
+			return
+		}
+		api.WriteJSON(w, http.StatusOK, runs)
 		return
 	}
 	if contentType := header.Get("Content-Type"); contentType != "" {

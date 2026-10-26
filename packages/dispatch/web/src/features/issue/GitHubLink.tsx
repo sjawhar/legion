@@ -124,13 +124,16 @@ export function GitHubLink({ link }: { link: ExternalLink }): ReactNode {
     queryKey: ["github-link-checks", link.url, headSHA],
     queryFn: async () => {
       const repositoryPath = `repos/${match?.[1]}/${match?.[2]}`;
-      const [allCheckRuns, workflowRuns] = await Promise.all([
-        readEveryPage<CheckRun>(`${repositoryPath}/commits/${headSHA}/check-runs`, "check_runs"),
-        readEveryPage<WorkflowRun>(
-          `${repositoryPath}/actions/runs?head_sha=${headSHA}`,
-          "workflow_runs"
-        ),
-      ]);
+      // Check runs first: a workflow run exists before its check runs, so every suite in the
+      // check-run list is in the workflow-run list read after it.
+      const allCheckRuns = await readEveryPage<CheckRun>(
+        `${repositoryPath}/commits/${headSHA}/check-runs`,
+        "check_runs"
+      );
+      const workflowRuns = await readEveryPage<WorkflowRun>(
+        `${repositoryPath}/actions/runs?head_sha=${headSHA}`,
+        "workflow_runs"
+      );
       const checkRuns = newestCheckRuns(allCheckRuns, workflowRuns);
       if (
         checkRuns.some(({ conclusion }) =>

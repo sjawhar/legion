@@ -47,6 +47,10 @@ func (f *fakeGitHub) handler(t *testing.T) http.Handler {
 			fmt.Fprint(w, f.response)
 			return
 		}
+		if strings.HasSuffix(r.URL.Path, "/actions/runs") {
+			fmt.Fprint(w, `{"total_count":1,"workflow_runs":[{"id":5,"check_suite_id":6,"event":"push","name":"CI"}]}`)
+			return
+		}
 		fmt.Fprint(w, `{"state":"open","title":"Ship it"}`)
 	})
 	return mux
@@ -105,11 +109,15 @@ func TestProxyReadsTheRepositoryAsItsAppInstallation(t *testing.T) {
 		"repos/acme/web/actions/runs?page=3&head_sha=" + headSHA,
 	} {
 		response := proxy(client, http.MethodGet, "/api/github/rest/"+path)
-		if response.Code != http.StatusOK || response.Body.String() != `{"state":"open","title":"Ship it"}` {
+		wantBody, wantContentType := `{"state":"open","title":"Ship it"}`, "application/json; charset=utf-8"
+		if strings.Contains(path, "/actions/runs?") {
+			wantBody, wantContentType = `{"total_count":1,"workflow_runs":[{"check_suite_id":6,"event":"push","name":"CI"}]}`+"\n", "application/json"
+		}
+		if response.Code != http.StatusOK || response.Body.String() != wantBody {
 			t.Fatalf("GET %s: status %d body %s, want GitHub's answer", path, response.Code, response.Body.String())
 		}
-		if contentType := response.Header().Get("Content-Type"); contentType != "application/json; charset=utf-8" {
-			t.Errorf("GET %s: Content-Type %q, want GitHub's", path, contentType)
+		if contentType := response.Header().Get("Content-Type"); contentType != wantContentType {
+			t.Errorf("GET %s: Content-Type %q, want %q", path, contentType, wantContentType)
 		}
 	}
 	want := []string{
@@ -125,6 +133,35 @@ func TestProxyReadsTheRepositoryAsItsAppInstallation(t *testing.T) {
 	}
 }
 
+// A workflow run carries its head commit's message and author, the actor and the repository; the
+// web app reads only each run's check suite, event and workflow name, and the proxy passes on
+// nothing else.
+func TestProxyPassesOnOnlyTheWorkflowRunFieldsTheWebAppReads(t *testing.T) {
+	client, fake := newProxyRig(t)
+	fake.response = `{"total_count":2,"workflow_runs":[` +
+		`{"id":901,"check_suite_id":7001,"event":"pull_request","name":"CI","status":"completed","conclusion":"success",` +
+		`"head_sha":"` + headSHA + `","head_branch":"feature","html_url":"https://github.com/acme/web/actions/runs/901",` +
+		`"head_commit":{"id":"` + headSHA + `","message":"Rotate the staging credentials","author":{"name":"Pat Doe","email":"pat.doe@example.com"}},` +
+		`"repository":{"id":42,"full_name":"acme/web","private":true},"actor":{"login":"patdoe","id":77}},` +
+		`{"id":902,"check_suite_id":7002,"event":"push","name":"Deploy","run_attempt":2,"workflow_id":31,` +
+		`"head_commit":{"message":"Rotate the staging credentials","author":{"email":"pat.doe@example.com"}},` +
+		`"repository":{"full_name":"acme/web"},"actor":{"login":"patdoe"}}]}`
+
+	response := proxy(client, http.MethodGet, "/api/github/rest/repos/acme/web/actions/runs?head_sha="+headSHA)
+	want := `{"total_count":2,"workflow_runs":[{"check_suite_id":7001,"event":"pull_request","name":"CI"},{"check_suite_id":7002,"event":"push","name":"Deploy"}]}` + "\n"
+	if response.Code != http.StatusOK || response.Body.String() != want {
+		t.Fatalf("workflow runs: status %d body %s, want only the fields the web app reads:\n%s", response.Code, response.Body.String(), want)
+	}
+	if contentType := response.Header().Get("Content-Type"); contentType != "application/json" {
+		t.Errorf("workflow runs: Content-Type %q, want application/json", contentType)
+	}
+	for _, extra := range []string{"pat.doe@example.com", "Rotate the staging credentials", "head_commit", "repository", "actor", "patdoe", "html_url", "901"} {
+		if strings.Contains(response.Body.String(), extra) {
+			t.Errorf("workflow runs: body %s carries %q", response.Body.String(), extra)
+		}
+	}
+}
+
 func TestProxyRejectsAResponseLargerThanTheGitHubLimit(t *testing.T) {
 	client, fake := newProxyRig(t)
 	fake.response = strings.Repeat("x", 1<<20+1)
@@ -133,6 +170,33 @@ func TestProxyRejectsAResponseLargerThanTheGitHubLimit(t *testing.T) {
 	if response.Code != http.StatusBadGateway || errorCode(t, response) != "GITHUB_UPSTREAM" ||
 		!strings.Contains(response.Body.String(), "1048576-byte limit") {
 		t.Fatalf("oversized GitHub response: status %d body %s, want 502 naming the response limit", response.Code, response.Body.String())
+	}
+}
+
+// A full page of 100 workflow runs is more than the 1 MiB a pull request's read may be, since
+// GitHub writes each run's repository and head commit; the proxy reads it whole and trims it.
+func TestProxyTrimsAPageOfWorkflowRunsLargerThanTheGeneralLimit(t *testing.T) {
+	client, fake := newProxyRig(t)
+	padding := strings.Repeat("p", 12800)
+	runs := make([]string, 100)
+	for i := range runs {
+		runs[i] = fmt.Sprintf(`{"check_suite_id":%d,"event":"pull_request","name":"CI","head_commit":{"message":%q}}`, 7000+i, padding)
+	}
+	fake.response = `{"total_count":100,"workflow_runs":[` + strings.Join(runs, ",") + `]}`
+	if len(fake.response) <= 1<<20 {
+		t.Fatalf("fixture is %d bytes, want more than 1 MiB", len(fake.response))
+	}
+
+	response := proxy(client, http.MethodGet, "/api/github/rest/repos/acme/web/actions/runs?head_sha="+headSHA+"&per_page=100&page=1")
+	var got struct {
+		TotalCount   int              `json:"total_count"`
+		WorkflowRuns []map[string]any `json:"workflow_runs"`
+	}
+	if response.Code != http.StatusOK || json.Unmarshal(response.Body.Bytes(), &got) != nil {
+		t.Fatalf("a workflow-runs page over 1 MiB: status %d body %.200s, want 200 and the trimmed runs", response.Code, response.Body.String())
+	}
+	if got.TotalCount != 100 || len(got.WorkflowRuns) != 100 || response.Body.Len() > 10_000 {
+		t.Fatalf("trimmed page: total %d, %d runs, %d bytes; want 100, 100 and a few KB", got.TotalCount, len(got.WorkflowRuns), response.Body.Len())
 	}
 }
 

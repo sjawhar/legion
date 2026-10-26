@@ -380,8 +380,18 @@ check runs (`repos/{o}/{r}/commits/{sha}/check-runs`) and a commit's workflow ru
 (`repos/{o}/{r}/actions/runs?head_sha={sha}`, whose query is the full 40-hex `head_sha` and at
 most a numeric `per_page` and `page`, each once), the only reads the web app makes: the checks pill
 joins each check run to its workflow run for the workflow name and event, so it keeps only the
-newest run of each check as GitHub's merge does. Every person shares the one App credential, which
-can read far more of a repository than the web app shows, so the proxy forwards nothing else:
+newest run of each check as GitHub's merge does, and drops the runs of an event GitHub does not
+evaluate for a pull request (only `push`, `pull_request`, `pull_request_review`,
+`pull_request_target`, `deployment` and `deployment_status` count). A workflow-runs answer of `200`
+is trimmed to `total_count` and, per run in GitHub's order, only `check_suite_id`, `event` and
+`name`, so a run's head commit (message, author), actor and repository never reach the browser; a
+body that does not decode is `502 GITHUB_UPSTREAM`, and any other status passes through unchanged.
+GitHub's answer is read within 16 MiB rather than the proxy's usual 1 MiB, since each run carries
+its repository and head commit (about 12.8 KB a run) and a page of 100 passes 1 MiB before it is
+trimmed.
+The pill needs the App's Actions: read, which the delivery reconcile already needs: without it
+`actions/runs` answers `403` and the pill disappears. Every person shares the one App credential,
+which can read far more of a repository than the web app shows, so the proxy forwards nothing else:
 another method is `405 METHOD_NOT_ALLOWED`; another path, a workflow-runs read with any other
 query, or a path under it (`actions/runs/{id}`, its jobs or logs) `404 GITHUB_PATH_REFUSED`; and a
 repository the App is not installed on, or a deployment with no App key,

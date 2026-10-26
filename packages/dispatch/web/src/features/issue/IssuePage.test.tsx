@@ -730,6 +730,51 @@ for (const fixture of [
       { ...prTitleOnPullRequest, check_suite_id: 12, event: "workflow_dispatch" },
     ],
   },
+  // A check run no workflow run made (an external App's) is its name and App: the App's newer run
+  // replaces its older one.
+  {
+    checkRuns: [
+      {
+        app: { id: 50 },
+        check_suite: { id: 20 },
+        conclusion: "failure",
+        id: 1,
+        status: "completed",
+      },
+      {
+        app: { id: 50 },
+        check_suite: { id: 21 },
+        conclusion: "success",
+        id: 2,
+        status: "completed",
+      },
+    ],
+    checks: "success",
+    name: "an external App's failed check its newer run passed",
+    workflowRuns: [prTitleOnPullRequest],
+  },
+  // The same check name from two Apps is two checks: one App's failure still blocks.
+  {
+    checkRuns: [
+      {
+        app: { id: 50 },
+        check_suite: { id: 20 },
+        conclusion: "failure",
+        id: 1,
+        status: "completed",
+      },
+      {
+        app: { id: 51 },
+        check_suite: { id: 21 },
+        conclusion: "success",
+        id: 2,
+        status: "completed",
+      },
+    ],
+    checks: "failure",
+    name: "one check name failed for one external App and passed for another",
+    workflowRuns: [prTitleOnPullRequest],
+  },
 ]) {
   test(`IssuePage renders a merged pull request with ${fixture.name}`, async () => {
     const restore = stubIssuePage(
