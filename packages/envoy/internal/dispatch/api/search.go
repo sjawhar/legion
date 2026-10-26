@@ -26,7 +26,7 @@ const (
 	// scores 1/(searchFusionK+p). 60 is the value of the paper that introduced the method (Cormack,
 	// Clarke and Buettcher, 2009) and Elasticsearch's and OpenSearch's default; nothing tunes it.
 	searchFusionK = 60
-	// searchEmbedTimeout bounds the one Bedrock call search makes (the query's own embedding).
+	// searchEmbedTimeout bounds the one model-service call search makes (the query's own embedding).
 	// Past it, or any other embedder failure, search answers keyword-only and says so (LEGION-549)
 	// rather than making every search wait indefinitely on a degraded embedder.
 	searchEmbedTimeout = 3 * time.Second
@@ -188,9 +188,18 @@ totals as (
 // - pgvector's HNSW index serves that shape directly (confirmed by
 // TestSearchMeaningLegsUseTheHNSWIndexNotASequentialScan) - rather than joining meaning rows into
 // one shared window spanning every kind, which would force a sequential scan of embeddings once
-// per leg. Each candidate set is then floor-filtered (searchMeaningFloor) before kinds ever sees
-// it: a candidate below the floor is noise, not a weak match, and reaching legs at all would rank
-// it by position exactly as the strongest real match in an empty kind.
+// per leg. The vector is the bound parameter itself ($9::vector), never a column of q: the index
+// orders by distance only to a value fixed for the whole scan, and a column joined in from q is
+// not one, so ordering by it sorts every candidate in memory instead. Each candidate CTE reads
+// only vectors whose embeddings.model is $11, the query embedder's own identity
+// (embed.Embedder.Identity, INFRA-393): a vector another model or place made lives in a different
+// space, and its cosine distance to this query means nothing. The coverage pass (embedqueue.Cover)
+// drops such vectors once the configured embedder has answered, so the filter has to catch what a
+// differently configured process writes during a roll, and every vector of the identity before
+// it while a newly configured embedder has not embedded anything yet. Each candidate set is then
+// floor-filtered (searchMeaningFloor) before kinds ever sees it: a candidate below the floor is
+// noise, not a weak match, and reaching legs at all would rank it by position exactly as the
+// strongest real match in an empty kind.
 //
 // kinds unions searchKeywordLegsSQL - the same five-arm keyword text searchQuery's own kinds CTE
 // uses verbatim, each arm already carrying 'keyword' as list - with the five meaning_* CTEs
@@ -208,16 +217,16 @@ totals as (
 //
 // Parameters: $1 q, $2 project, $3 limit, $4 firstTerm, $5 headlineOptions, $6 offset,
 // $7 contracts.SearchKindDepth, $8 searchFusionK, $9 the query's embedding (a vector literal),
-// $10 searchMeaningFloor.
+// $10 searchMeaningFloor, $11 the query embedder's identity.
 var searchQueryMeaning = `
-with q as (select websearch_to_tsquery('english', $1) as tsq, $4::text as term, upper(btrim($1)) as own_key, $9::vector as qvec),
+with q as (select websearch_to_tsquery('english', $1) as tsq, $4::text as term, upper(btrim($1)) as own_key),
 meaning_issue_candidates as (
   select i.key as issue_key, i.key as id, i.title as issue_title, i.status as issue_status, i.updated_at,
-         1 - (e.embedding <=> q.qvec) as r
+         1 - (e.embedding <=> $9::vector) as r
     from embeddings e
-    join issues i on i.key = e.id, q
-   where e.kind = 'issue' and e.embedding is not null and ($2 = '' or i.project_key = $2)
-   order by e.embedding <=> q.qvec
+    join issues i on i.key = e.id
+   where e.kind = 'issue' and e.embedding is not null and e.model = $11 and ($2 = '' or i.project_key = $2)
+   order by e.embedding <=> $9::vector
    limit $7
 ),
 meaning_issue as (
@@ -229,14 +238,14 @@ meaning_issue as (
 meaning_document_candidates as (
   select a.issue_key, a.id, i.title as issue_title, i.status as issue_status, p.key as owner_project, a.slug as owner_slug, a.name as owner_name,
          coalesce(i.updated_at, v.created_at) as updated_at,
-         1 - (e.embedding <=> q.qvec) as r
+         1 - (e.embedding <=> $9::vector) as r
     from embeddings e
     join artifacts a on a.id::text = e.id
     left join issues i on i.key = a.issue_key
     join projects p on p.key = a.project_key
-    join lateral (select created_at from artifact_versions v where v.artifact_id = a.id order by v.number desc limit 1) v on true, q
-   where e.kind = 'document' and a.kind = 'doc' and e.embedding is not null and ($2 = '' or p.key = $2)
-   order by e.embedding <=> q.qvec
+    join lateral (select created_at from artifact_versions v where v.artifact_id = a.id order by v.number desc limit 1) v on true
+   where e.kind = 'document' and a.kind = 'doc' and e.embedding is not null and e.model = $11 and ($2 = '' or p.key = $2)
+   order by e.embedding <=> $9::vector
    limit $7
 ),
 meaning_document as (
@@ -248,14 +257,14 @@ meaning_document as (
 meaning_comment_candidates as (
   select c.issue_key, c.artifact_id, c.anchor, c.id, i.title as issue_title, i.status as issue_status, p.key as owner_project, a.slug as owner_slug, a.name as owner_name,
          coalesce(i.updated_at, c.created_at) as updated_at,
-         1 - (e.embedding <=> q.qvec) as r
+         1 - (e.embedding <=> $9::vector) as r
     from embeddings e
     join comments c on c.id::text = e.id
     left join issues i on i.key = c.issue_key
     left join artifacts a on a.id = c.artifact_id
-    left join projects p on p.key = a.project_key, q
-   where e.kind = 'comment' and e.embedding is not null and ($2 = '' or coalesce(i.project_key, p.key) = $2)
-   order by e.embedding <=> q.qvec
+    left join projects p on p.key = a.project_key
+   where e.kind = 'comment' and e.embedding is not null and e.model = $11 and ($2 = '' or coalesce(i.project_key, p.key) = $2)
+   order by e.embedding <=> $9::vector
    limit $7
 ),
 meaning_comment as (
@@ -267,14 +276,14 @@ meaning_comment as (
 meaning_ask_candidates as (
   select k.issue_key, k.artifact_id, k.block_artifact_id, k.anchor, k.id, k.block_id, i.title as issue_title, i.status as issue_status,
          p.key as owner_project, a.slug as owner_slug, a.name as owner_name, coalesce(i.updated_at, k.created_at) as updated_at,
-         1 - (e.embedding <=> q.qvec) as r
+         1 - (e.embedding <=> $9::vector) as r
     from embeddings e
     join asks k on k.id::text = e.id
     left join issues i on i.key = k.issue_key
     left join artifacts a on a.id = coalesce(k.artifact_id, k.block_artifact_id)
-    left join projects p on p.key = a.project_key, q
-   where e.kind = 'ask' and e.embedding is not null and ($2 = '' or coalesce(i.project_key, p.key) = $2)
-   order by e.embedding <=> q.qvec
+    left join projects p on p.key = a.project_key
+   where e.kind = 'ask' and e.embedding is not null and e.model = $11 and ($2 = '' or coalesce(i.project_key, p.key) = $2)
+   order by e.embedding <=> $9::vector
    limit $7
 ),
 meaning_ask as (
@@ -286,12 +295,12 @@ meaning_ask as (
 ),
 meaning_message_candidates as (
   select m.issue_key, m.id, i.title as issue_title, i.status as issue_status, i.updated_at,
-         1 - (e.embedding <=> q.qvec) as r
+         1 - (e.embedding <=> $9::vector) as r
     from embeddings e
     join messages m on m.id::text = e.id
-    join issues i on i.key = m.issue_key, q
-   where e.kind = 'message' and e.embedding is not null and ($2 = '' or i.project_key = $2)
-   order by e.embedding <=> q.qvec
+    join issues i on i.key = m.issue_key
+   where e.kind = 'message' and e.embedding is not null and e.model = $11 and ($2 = '' or i.project_key = $2)
+   order by e.embedding <=> $9::vector
    limit $7
 ),
 meaning_message as (
@@ -381,7 +390,7 @@ func (s *server) search(w http.ResponseWriter, r *http.Request) {
 // runSearch is the search handler's own entry point (unlike runFusedSearch, LEGION-550's
 // write-time suggestions never call this - suggestions never try meaning search, so they never
 // pay for an embedder call or its timeout). The numnode check runs here, before anything else -
-// including before the one Bedrock call this function ever makes - so a stopword-only or
+// including before the one model-service call this function ever makes - so a stopword-only or
 // operator-only query (the same shape runFusedSearch's and runMeaningSearch's own checks catch)
 // never pays for an embedding it would throw away; runFusedSearch repeats the same check for its
 // other caller, LEGION-550's write-time suggestions, which never reaches this function at all.
@@ -469,7 +478,7 @@ func (s *server) runMeaningSearch(ctx context.Context, q, project string, limit,
 
 	started := time.Now()
 	rows, err := s.deps.Store.Pool.Query(ctx, searchQueryMeaning, q, project, limit, firstTerm(q), headlineOptions,
-		offset, contracts.SearchKindDepth, searchFusionK, embed.Literal(vector), searchMeaningFloor)
+		offset, contracts.SearchKindDepth, searchFusionK, embed.Literal(vector), searchMeaningFloor, s.deps.Embedder.Identity())
 	if err != nil {
 		return model.SearchResponse{}, err
 	}
@@ -549,7 +558,7 @@ func scanSearchRows(rows pgx.Rows, q string, limit, offset int) (model.SearchRes
 
 // embedQuery embeds q for meaning search (embed.InputQuery - Cohere's embed-v4 asymmetric mode
 // embeds a query differently from a stored document), bounded by searchEmbedTimeout so one
-// degraded request never holds the whole search handler open on a slow or wedged Bedrock call.
+// degraded request never holds the whole search handler open on a slow or wedged model service.
 func (s *server) embedQuery(ctx context.Context, q string) ([]float32, error) {
 	ctx, cancel := context.WithTimeout(ctx, searchEmbedTimeout)
 	defer cancel()
