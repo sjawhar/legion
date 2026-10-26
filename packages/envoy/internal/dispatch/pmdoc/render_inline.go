@@ -509,16 +509,21 @@ func (r *renderer) writeInlineRun(nodes []*Node, prefix string, context inlineCo
 		case "image":
 			r.closeMarks(active, escapePipes)
 			active = nil
-			src, _ := n.Attrs["src"].(string)
-			alt, _ := n.Attrs["alt"].(string)
 			title, _ := n.Attrs["title"].(string)
-			// An image's source, title, link and link title are held decoded (decodeDestination,
-			// decodedTitleOrNil), each escaped so it reads back as it is held; a linked image is
-			// written inside its link's syntax.
-			image := "![" + imageAlt(alt, context) + "](" + escapeDecodedLinkDestination(src, escapePipes) + decodedTitleSuffix(title, escapePipes) + ")"
-			if link, _ := n.Attrs["link"].(string); link != "" {
-				linkTitle, _ := n.Attrs["linkTitle"].(string)
-				image = "[" + image + "](" + escapeDecodedLinkDestination(link, escapePipes) + decodedTitleSuffix(linkTitle, escapePipes) + ")"
+			linkTitle, _ := n.Attrs["linkTitle"].(string)
+			alt, _ := n.Attrs["alt"].(string)
+			writtenAlt := imageAlt(alt, context)
+			// A title's line feed is written as it is, so a title the server already stores keeps
+			// its bytes, only in a top-level paragraph, where the image read alone reads back with
+			// its titles; any other block - a heading, a table cell, a list item or a block quote,
+			// whose prefix the line feed would not carry - takes every line feed of both titles as
+			// `&#10;`. Parse is asked only when a title holds a line feed.
+			image := imageSyntax(n, writtenAlt, escapePipes, true)
+			if strings.Contains(title, "\n") || strings.Contains(linkTitle, "\n") {
+				plain := prefix == "" && !context.tableCell && !context.heading
+				if !plain || !rawTitlesReadBack(image, title, linkTitle) {
+					image = imageSyntax(n, writtenAlt, escapePipes, false)
+				}
 			}
 			r.writeSyntax(image)
 			position.atLineStart, position.atTextStart = false, false

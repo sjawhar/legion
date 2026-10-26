@@ -862,11 +862,14 @@ func opensDecodedReference(value string) bool {
 // decodedTitleSuffix writes a title held decoded - an image's title or a linked image's link
 // title, read by decodedTitleOrNil - so that it reads back as it is: as titleSuffix writes a
 // text link's, every backslash doubled, a double quote and a pipe in a table cell escaped, and
-// besides an ampersand opening a reference decodeDestination decodes escaped. A line feed is
-// written as it is, as titleSuffix writes it, so a title the server already stores keeps its bytes;
-// a carriage return, which only a reference puts in a title and a write reads as a line feed, is
-// written as that reference.
-func decodedTitleSuffix(title string, escapePipes bool) string {
+// besides an ampersand opening a reference decodeDestination decodes escaped. A carriage return,
+// which only a reference puts in a title and a write reads as a line feed, is written as that
+// reference. A line feed is written as it is when rawLineFeeds is set, as titleSuffix writes it,
+// so a title the server already stores keeps its bytes; otherwise it is written `&#10;`, which
+// decodedTitleOrNil and the browser editor's parser read back as the line feed, for a block that
+// cannot hold it: a blank line ends a paragraph, a line feed ends a heading or a table row, and a
+// line of the title can open a block or lose its indentation (rawTitlesReadBack judges which).
+func decodedTitleSuffix(title string, escapePipes, rawLineFeeds bool) string {
 	if title == "" {
 		return ""
 	}
@@ -883,11 +886,48 @@ func decodedTitleSuffix(title string, escapePipes bool) string {
 		case char == '\r':
 			written.WriteString("&#13;")
 			continue
+		case char == '\n' && !rawLineFeeds:
+			written.WriteString("&#10;")
+			continue
 		}
 		written.WriteByte(char)
 	}
 	written.WriteByte('"')
 	return written.String()
+}
+
+// imageSyntax writes an image whose label is written as alt, inside its link's syntax when it has
+// a link. Its source, title, link and link title are held decoded (decodeDestination,
+// decodedTitleOrNil), each escaped so it reads back as it is held; rawLineFeeds is passed to
+// decodedTitleSuffix for both titles.
+func imageSyntax(n *Node, alt string, escapePipes, rawLineFeeds bool) string {
+	src, _ := n.Attrs["src"].(string)
+	title, _ := n.Attrs["title"].(string)
+	image := "![" + alt + "](" + escapeDecodedLinkDestination(src, escapePipes) + decodedTitleSuffix(title, escapePipes, rawLineFeeds) + ")"
+	if link, _ := n.Attrs["link"].(string); link != "" {
+		linkTitle, _ := n.Attrs["linkTitle"].(string)
+		image = "[" + image + "](" + escapeDecodedLinkDestination(link, escapePipes) + decodedTitleSuffix(linkTitle, escapePipes, rawLineFeeds) + ")"
+	}
+	return image
+}
+
+// rawTitlesReadBack reports whether image, an image's syntax written with its titles' line feeds
+// as they are, reads back as one paragraph holding one image with the titles title and linkTitle.
+// It is asked only of an image in a top-level paragraph, the one block whose lines a title's line
+// feed can continue: there a blank line still ends the paragraph, and a line of the title can open
+// a heading, a list, a block quote, a fence or a thematic break, or lose its leading spaces.
+func rawTitlesReadBack(image, title, linkTitle string) bool {
+	doc, err := Parse(image + "\n")
+	if err != nil || len(doc.Children) != 1 || doc.Children[0].Type != "paragraph" {
+		return false
+	}
+	nodes := doc.Children[0].Children
+	if len(nodes) != 1 || nodes[0].Type != "image" {
+		return false
+	}
+	gotTitle, _ := nodes[0].Attrs["title"].(string)
+	gotLinkTitle, _ := nodes[0].Attrs["linkTitle"].(string)
+	return gotTitle == title && gotLinkTitle == linkTitle
 }
 
 func titleSuffix(title string, escapePipes bool) string {
