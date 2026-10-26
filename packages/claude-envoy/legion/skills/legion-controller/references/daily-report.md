@@ -30,7 +30,7 @@ unassigned.
 
 Each time you read it:
 
-- `Status: done` means someone closed it, and Dispatch then refuses an ask or a message there
+- `Status: done` means someone closed it, and Dispatch then refuses an ask there
   (`409 ISSUE_CLOSED`) and hides its open asks. Reopen it with `set_status` to `icebox` and say so
   in the day's report.
 - `Assignee: unassigned` with a person known: assign it, naming your session (`dispatch whoami`):

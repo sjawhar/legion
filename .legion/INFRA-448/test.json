@@ -1,0 +1,97 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-448",
+  "completed": "2026-10-26T23:38:07Z",
+  "round": 8,
+  "testedCodeHead": "a2d4b6eef5628a7f5fe09c8ed4fa8b735e12eb26",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "Recomputed the implementer's fingerprint at 19aaa96f and a2d4b6ee: equal (8a20f939…). Bare gates: CI read at a2d4b6ee (queued) and the smoke check, C1 live on the merged head's server."
+  },
+  "failures": [],
+  "failed": 0,
+  "proof": [
+    {
+      "criterion": "Smoke at the merged head (bare gates after an unchanged-fingerprint merge of main)",
+      "surface": "real Dispatch server, listener and nats-server built at a2d4b6ee on Postgres 17, driven with curl",
+      "command": "/legion/scratch/tmp/infra448-tester/c1.sh",
+      "observed": "comments, messages, replies (including a reply to a resolved root), anchored comment, mention delivery, retries and agent replies 201 on the closed issue; reopen 200 then ask 201",
+      "headSha": "a2d4b6eef5628a7f5fe09c8ed4fa8b735e12eb26",
+      "negativeControl": "suggestion with and without a mention, new ask, comment edit, resolve, claim, document edit and named version 409 ISSUE_CLOSED with the spec unchanged"
+    },
+    {
+      "criterion": "C3: no remaining statement that a closed issue refuses comments or messages (after the merge of main's legion-architect and merge-gate rewrites)",
+      "surface": "the repository at the head, and the live Dispatch server for the one new closed-issue sentence",
+      "command": "bash /legion/scratch/tmp/infra448/c3.sh; read the closed-issue sentences of merge-gate.md, acceptance.md, roles/core/implementer.md and AGENTS.md; diff the claude-envoy copies against their sources; PATCH a closed issue with status+assignee and with status alone",
+      "observed": "the five kept lines plus main's findings.md sentence (and copy) that a closed issue takes a reopening status alone; the merged sentences say the record is the pull request's Production: line whether or not the issue is closed and Dispatch opens no ask on a closed issue; copies byte-identical; status+assignee 409 ISSUE_CLOSED, status alone 200",
+      "headSha": "19aaa96fe03bdf0a48bb877a441cf14c962aef69",
+      "negativeControl": "a status sent with an assignee on a closed issue is refused 409 ISSUE_CLOSED, so the findings.md sentence is a true field rule, not a comment or message rule"
+    },
+    {
+      "criterion": "The INFRA-440 merge keeps a closed issue's Conversation posting: a comment mention's Retry and the comment thread's Reply, with INFRA-440's agent names; resolve and edit stay hidden",
+      "surface": "Dispatch browser suite harness, chromium and iphone, real Dispatch server and web build with the fake listener, the tester's own lane",
+      "command": "throwaway probe: Bob's comment mentioning session e2e-r6-tester (send 404), issue closed; open /issues/E2E-1/conversation; Retry with the session answering 200; Reply in the thread and Send",
+      "observed": "both projects pass: the comment turn shows the agent link 'tester', the failure line and guidance, Retry, no Resolve or Edit; Retry posts and deliveries read [[1,failed],[2,sent]]; the thread Reply posts 201 with reply_to the root",
+      "headSha": "51c5648273dfe13c608da49c91ec9fcf8b15ff8f",
+      "negativeControl": "Resolve and Edit are absent on the closed issue's comment turn; earlier rounds: closed-issue-posting failed 10/10 at main bc307fb5"
+    },
+    {
+      "criterion": "C2 and the merged Conversation in the browser suite",
+      "surface": "Dispatch browser suite (packages/dispatch/e2e), the tester's own lane",
+      "command": "bun run e2e -- --project=chromium --project=iphone closed-issue-posting, agent-name, conversation, mention-composer, keyboard-agents-picker, phone-conversation, margin-composer-hold, replies, broadcast, offline-edits; playwright --project=chromium issue, agents, followers, delivery-groups, phone, margin, doc; agent-view on both projects",
+      "observed": "204 passed, 16 skipped (14.9m) with closed-issue-posting 14/14; 81 passed, 3 skipped (7.8m); agent-view and the probe 35 passed, 11 skipped",
+      "headSha": "51c5648273dfe13c608da49c91ec9fcf8b15ff8f",
+      "negativeControl": "closed-issue-posting failed 10/10 at main bc307fb5 (round 1); :278 and :321 failed at adb397f9 (round 2)"
+    },
+    {
+      "criterion": "Review round 3: the drain hook does not wait for a registry open under way",
+      "surface": "the real envoy-listener binary on a real nkey-authorized nats-server v2.10.29 whose user holds core.ListenerPermissions minus legion_agents",
+      "command": "/legion/scratch/tmp/infra448-tester/drain.sh: start the listener, wait for the first failed open's ERROR, SIGTERM 3 s into the retry's open; time from 'received signal' to 'envoy-listener shutdown complete' in the listener log; head and the 7912696a listener, two runs each",
+      "observed": "head 05b29be5: 0.03 s and 0.03 s",
+      "headSha": "05b29be5dd913cc247b7632092bf74775a91c456",
+      "negativeControl": "the round-4 listener built at 7912696a: 7.81 s and 7.74 s on the same SIGTERM"
+    },
+    {
+      "criterion": "Review round 3: the registry is not left on a replaced connection; it recovers in one listener process",
+      "surface": "the real envoy-listener binary on a real nkey-authorized nats-server v2.10.29",
+      "command": "/legion/scratch/tmp/infra448-tester/recover.sh: grant-less start then SIGHUP with the full grant; NATS restarted with the store open; NATS restarted with the grant revoked then SIGHUP with it restored",
+      "observed": "A: /v1/sessions 200, registry 503, then 200 after 8 s of the reload, PUT and GET 200; B: 200 within 1 s of the restart, entry kept; C: registry 503 while /v1/sessions 200, then 200 after the reload; one ERROR line in total, same process throughout. A failing move during an open is not timeable on the binary; the implementer's -race test covers it and fails at 7912696a",
+      "headSha": "05b29be5dd913cc247b7632092bf74775a91c456",
+      "negativeControl": "with the grant revoked the registry routes answer 503 while every other route serves"
+    },
+    {
+      "criterion": "Review round 2: a readmitted document restores the edits saved while its issue was closed, with no reload, once",
+      "surface": "Dispatch browser suite harness, chromium and iphone, real Dispatch server and web build, the tester's own lane",
+      "command": "throwaway probe: documentTransport sever, type a paragraph, close the issue, reload, release; then Reopen issue from the page (or PATCH backlog through the API); poll getArtifactText; type again; reload",
+      "observed": "4/4 passed: the read-only status shows and the server lacks the paragraph while closed; after the reopen the paragraph reaches the server, the status goes, the editor is editable and a new edit saves; after a reload each edit appears exactly once in the markdown (round 4 at 7912696a; unchanged surface since)",
+      "headSha": "7912696a2f26f91538f631c13f95fe07b3e84059",
+      "negativeControl": "while the issue is closed the page shows 'can't be sent: this document is read-only' and the server's markdown does not contain the paragraph"
+    },
+    {
+      "criterion": "Review round 2: a registry Get after a write that ended between its claim and its index keys answers the session key's entry and its replacement",
+      "surface": "the real listener on nats-server, with the ended write simulated by a raw KV put of session.<id> only (throwaway nats.go program)",
+      "command": "PUT a (01:00) and c (03:00) for legion-tstleg-tst-31-tester; raw put session.half-a with a new title and session.half-b (02:00); GET sessions/half-a, half-b, half-c; PUT half-b to TST-32; retry the batch; GET the role and issue listings",
+      "observed": "half-a answers its new title with replaced_by half-c; half-b answers with replaced_by half-c; the retry completes both writes and the role listing reads c <- b <- a with a's new title (round 4 at 7912696a; unchanged surface since)",
+      "headSha": "7912696a2f26f91538f631c13f95fe07b3e84059",
+      "negativeControl": "moving the half-written half-b to TST-32 is 409: its claim stands"
+    }
+  ],
+  "ci": "At a2d4b6ee: Tests 40420818124, Legion Envoy and Contracts 40420818138, Docs 40420818144, Worker Image 40420818478 and PR Title 40420909408 queued. Not re-run by the tester.",
+  "observations": [
+    "Until an ended write's retry, another session's derived replaced_by can name the wrong successor: with b's session key written and its role key not, a's Get answered replaced_by half-c rather than half-b; the retry corrects it. Display-only, transient.",
+    "The Comment chord ($mod+Alt+m) runs only on an editable view; the bar's Comment button is the closed document's path (implement.json deviations)."
+  ],
+  "fingerprint": {
+    "from": {
+      "head": "19aaa96fe03bdf0a48bb877a441cf14c962aef69",
+      "sha256": "8a20f939271d28889edf63a4820718faa7b98ea9702de849fe6bfe92fa48f71f"
+    },
+    "to": {
+      "head": "a2d4b6eef5628a7f5fe09c8ed4fa8b735e12eb26",
+      "sha256": "8a20f939271d28889edf63a4820718faa7b98ea9702de849fe6bfe92fa48f71f"
+    },
+    "verdict": "unchanged"
+  },
+  "rebaseRecheck": "rebase re-check 19aaa96fe03bdf0a48bb877a441cf14c962aef69 → a2d4b6eef5628a7f5fe09c8ed4fa8b735e12eb26: fingerprint unchanged, bare gates only"
+}

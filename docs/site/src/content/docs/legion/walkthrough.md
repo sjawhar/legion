@@ -79,8 +79,8 @@ After the close the implementer gets the production check in its live session. I
 role to carry the merge and waits for no reply; when production does not carry the merge yet it
 reports `pending`, its pod goes, and the daemon wakes it when Dispatch reports the pull request
 deployed. The look that finds the merge in production drives the change and records it on the pull
-request's `Production:` line, naming the merge commit and what woke the look. A closed issue takes
-no comment, so the record is on the pull request.
+request's `Production:` line, naming the merge commit and what woke the look. The record is on the
+pull request, whether or not the issue is closed.
 
 ## The operator's view
 

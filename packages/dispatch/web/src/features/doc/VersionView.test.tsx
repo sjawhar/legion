@@ -73,10 +73,10 @@ test("VersionView renders the version read-only with the highlighted quote focus
       within(view.container).getByRole("region", { name: "Document version 1" })
     ).toBeDefined();
     expect(editors[0]).toMatchObject({
+      access: "read",
       focused: ["comment-1"],
       markdown:
         'Read the <span data-proof="comment" data-id="comment-1" data-by="user:alice">current</span> specification',
-      readOnly: true,
     });
     expect(editors[0]?.options.awareness).toBeNull();
   } finally {

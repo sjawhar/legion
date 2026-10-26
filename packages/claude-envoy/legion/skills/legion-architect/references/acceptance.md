@@ -134,8 +134,8 @@ The merge closes the issue: when GitHub reports the pull request merged while th
   `linger_hours` with every member suspended. The linger's end, the tree's last step, waits until
   every member's open production check has closed.
 
-Nothing of the production check is yours. Its record lives on the pull request alone, since
-Dispatch refuses a write on a closed issue. A defect it finds is never an issue the implementer
+Nothing of the production check is yours. Its record is the pull request's `Production:` line,
+whether or not the issue is closed. A defect it finds is never an issue the implementer
 files: a clear defect goes to the controller, and any other is a `dispatch ask`. `read_record`
 shows a closed issue's open check (`check`: the pull request, the merge commit, the looks, what
 woke the last one and when the next is due).

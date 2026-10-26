@@ -1,0 +1,135 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-448",
+  "completed": "2026-10-26T23:40:00Z",
+  "proof": [
+    {
+      "criterion": "C1: on a closed issue a person's and an agent's new comment and message post; a new ask and a document edit stay 409 ISSUE_CLOSED; reopening works",
+      "surface": "the real Dispatch server, Envoy listener and nats-server (go.mod pin) built at the head, on Postgres 17 with pgvector, driven with curl",
+      "command": "the steps in https://github.com/sjawhar/legion/pull/2234#issuecomment-6409933131 (start.sh and lib.sh under the tester's own scratch copy; ports 24222/24020/24777)",
+      "observed": "person comment, agent comment, person message, agent message 201; mention delivery attempt 1 sent; comment and message retries 201; agent replies 201; new ask, suggestion, document edit, upload, claim, comment resolve 409 ISSUE_CLOSED with the spec unchanged; reopen 200 then ask 201",
+      "headSha": "2ef0fb930e64401225e520e5881c09447ba42067",
+      "negativeControl": "Dispatch built at base 135d22e0f63b on the same steps: person and agent comment and message on the closed issue 409 ISSUE_CLOSED"
+    },
+    {
+      "criterion": "C1 (Go tests): the Dispatch server's Go tests for the closed-issue rule run on real Postgres with no skip",
+      "surface": "packages/envoy Go tests against Postgres 17 + pgvector",
+      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:55448/infra448_impl?sslmode=disable go test -count=1 -v ./internal/dispatch/api -run 'TestDoneIssue|TestClosedIssue|TestAskReply|TestTargetedMessage|TestACommentItsOwner|TestIssueCollaborators' and ./internal/dispatch/docs -run TestClosedIssue",
+      "observed": "every listed test PASS, 0 SKIP (TestClosedIssueTakesCommentsAndMessagesFromPeopleAndAgents, ...DeliversACommentMentionItsRetryAndTheAgentsReply, ...DeliversAMessageItsRetryAndTheAgentsReply, ...TakesAnAnchoredCommentAndItsThread, ...StillRefusesEveryOtherWriteUntilReopened, TestAskReplyOnClosedIssueIsPosted, TestDoneIssueRejectsEveryMutation, TestClosedIssueTakesOnlyCommentMarksUnderWithCommentMarks, the five TestIssueCollaborators); re-run after the merge of main",
+      "headSha": "dadb5f515a3eeafd4b4693c5dcde97fa19073c62",
+      "negativeControl": "on a closed issue a suggestion, a new ask, a document edit, an upload, a claim and a comment resolve still answer 409 ISSUE_CLOSED in TestClosedIssueStillRefusesEveryOtherWriteUntilReopened"
+    },
+    {
+      "criterion": "C2: on a closed issue, writing a comment and a message, Reply, Retry and a margin comment on its document are each proven by a browser test red at the main commit before the change and green at the head",
+      "surface": "Dispatch browser suite (packages/dispatch/e2e), projects chromium and iphone, real Dispatch server and web build with the fake Envoy listener",
+      "command": "cd packages/dispatch && bun run e2e -- --project=chromium --project=iphone e2e/closed-issue-posting.e2e.ts e2e/mention-composer.e2e.ts e2e/keyboard-agents-picker.e2e.ts e2e/phone-conversation.e2e.ts e2e/margin-composer-hold.e2e.ts (env: PLAYWRIGHT_BROWSERS_PATH, DATABASE_URL, the five port variables); red: the same spec from a tree exported at 135d22e0 with the head's e2e/ copied in",
+      "observed": "133 passed, 5 skipped (the specs' own iPhone-only skips); the five closed-issue-posting tests read back the comment (listComments), the message to the agent (listIssueMessages, target session:<planner>, received by the fake listener), the thread reply, the retry (deliveries [[1,failed],[2,sent]]) and the margin comment's anchor quote with the server's mark; red/green quoted at https://github.com/sjawhar/legion/pull/2234#issuecomment-6415148941",
+      "headSha": "dadb5f515a3eeafd4b4693c5dcde97fa19073c62",
+      "negativeControl": "at main 135d22e0f63b all 10 fail on behaviour assertions: Comment composer not found (:116), message Reply not found (:147), thread Reply not found (:183), Retry not found (:211), selection bar not Comment-only (:248)"
+    },
+    {
+      "criterion": "Legion agent registry in the listener (read and write routes) and the collaborators route",
+      "surface": "the real envoy-listener binary on nats-server, and the real Dispatch server reading it",
+      "command": "curl PUT /v1/legion/agents (5 entries), GET /v1/legion/agents?issue=PRF-1, /v1/legion/agents/roles/<token>, /v1/legion/agents/sessions/<id>; kill and restart the listener; GET /api/v1/issues/PRF-1/collaborators with the listener up and stopped (same comment as C1)",
+      "observed": "200 with the older reviewer replaced_by the newer and the live tester live:true; entries unchanged after the listener restart; collaborators lists people, posting agents and registry entries with legion_registry ok, and with the listener stopped 200 with legion_registry unavailable",
+      "headSha": "2ef0fb930e64401225e520e5881c09447ba42067",
+      "negativeControl": "unknown session 404; batch with a malformed member 400 naming entries[1] with nothing written; role token built from the Dispatch project 400; a re-put changing a session's role 409; Dispatch at base answers the collaborators route 404"
+    },
+    {
+      "criterion": "C3: no remaining statement that a closed issue refuses comments or messages",
+      "surface": "the repository at the head",
+      "command": "bash c3.sh (the plan's Part 5 script: joins each file's lines, searches skills/, docs/ minus plans, solutions and superpowers, daemon prompts, packages/claude-envoy/legion, packages/contracts/src, the envoy-client and scripts/e2e READMEs, every AGENTS.md)",
+      "observed": "five kept lines: four about an issue's repo field and a document rebuild (packages/contracts/AGENTS.md, packages/envoy/AGENTS.md, packages/envoy/cmd/dispatch/AGENTS.md x2) and one about a closed document room, not an issue (packages/envoy/AGENTS.md)",
+      "headSha": "dadb5f515a3eeafd4b4693c5dcde97fa19073c62",
+      "negativeControl": "the same script at base 135d22e0 printed 30 hits, the corrected statements among them"
+    },
+    {
+      "criterion": "Review round 1: the listener serves without the legion_agents grant and answers 503 on the registry routes; registry writes keep one issue and role per session under concurrency and half writes",
+      "surface": "the real envoy-listener binary on an in-process NATS whose user lacks the bucket's subjects; the registry store on in-process NATS",
+      "command": "cd packages/envoy && go test -count=1 ./cmd/listener/ ./internal/legionagents/ ./internal/kvwatch/ ./internal/dispatch/envoy/ ./internal/session/ ./internal/store/ ./cmd/dispatch/ (with DISPATCH_TEST_DATABASE_URL); go test -count=1 -v ./internal/dispatch/api -run 'TestDoneIssue|TestClosedIssue|TestAskReply|TestTargetedMessage|TestACommentItsOwner|TestIssueCollaborators|TestRoutes|TestComment|TestMessage'",
+      "observed": "all packages ok, no FAIL or SKIP; the grant-less listener answers /v1/sessions 200 and the five registry calls 503 naming the grant with one ERROR line, then 200 after a NATS restart with the full grant; two concurrent PUTs of one session with different issues give one 200 and one 409 with only the winner listed; a write that died after its claim or after the role key is refused 409 for another issue and completed by its retry",
+      "headSha": "adb397f92a79201124cb3d69954e01bcdb4f47eb",
+      "negativeControl": "before the fix the listener exited at start without the grant (main.go log.Fatal) and the store wrote three plain puts after an unguarded read"
+    },
+    {
+      "criterion": "Review round 1: closed-document comments refuse a selection with no text visibly, under one editor access mode, without breaking the closed-issue posting paths",
+      "surface": "Dispatch browser suite, chromium and iphone",
+      "command": "cd packages/dispatch && bun run e2e -- --project=chromium --project=iphone e2e/closed-issue-posting.e2e.ts e2e/margin-composer-hold.e2e.ts e2e/margin.e2e.ts e2e/margin-thread-reply.e2e.ts e2e/mention-composer.e2e.ts e2e/phone-conversation.e2e.ts e2e/offline-edits.e2e.ts",
+      "observed": "138 passed, 8 skipped (the specs' own iPhone-only skips); proof-editor bun test 99 pass, an image-only or space-only selection offers no Comment",
+      "headSha": "adb397f92a79201124cb3d69954e01bcdb4f47eb",
+      "negativeControl": "a closed document's Comment on a selection holding only an image threw 'The selection holds no text to quote.' into a swallowed catch before the fix; now ProofDocument shows the status notice and opens no composer"
+    },
+    {
+      "criterion": "Test round 2: on a closed issue a margin comment posts on a spec whose issue closed while it was open and focused (phone too), and a page that reopens its issue takes edits to its document again",
+      "surface": "Dispatch browser suite, chromium and iphone",
+      "command": "cd packages/dispatch && bun run e2e -- --project=chromium --project=iphone e2e/closed-issue-posting.e2e.ts e2e/margin-composer-hold.e2e.ts e2e/margin.e2e.ts e2e/offline-edits.e2e.ts e2e/mention-composer.e2e.ts (at 659a3263); closed-issue-posting, margin-composer-hold, mention-composer, phone-conversation again at the merged head",
+      "observed": "94 passed, 6 skipped at 659a3263 with the tester's :278 and :321 green in both projects (test file unchanged from dac91dce); 95 passed, 5 skipped at 27a6de48",
+      "headSha": "27a6de48c023a925cc8297ea2c8212c13d0b28ec",
+      "negativeControl": "at adb397f9 the tester's :278 failed on iphone at :300 (selection bar empty) and :321 failed in both projects at :335 (contenteditable stayed false after the reopen)"
+    },
+    {
+      "criterion": "Review round 2: a failed registry open recovers without a reconnect; a readmitted document restores its saved edits read-write; a registry Get after an ended claim answers the session key's entry and its replacement",
+      "surface": "the envoy-listener's registry holder and store on in-process NATS (and the real listener binary against a grant-less NATS user); the Dispatch document transport with pending-sync; the Dispatch browser suite in chromium and iphone",
+      "command": "cd packages/envoy && go test -count=1 ./internal/legionagents/ && go test -count=1 -v ./cmd/listener/ -run 'Legion|TestAListenerWithoutTheRegistryGrant'; cd packages/dispatch && bun test web/src/features/doc && bun run e2e -- --project=chromium --project=iphone e2e/closed-issue-posting.e2e.ts e2e/offline-edits.e2e.ts e2e/margin-composer-hold.e2e.ts",
+      "observed": "first open failing with the grant present: 503 'could not open the legion_agents bucket (a missing grant is the usual cause): ...', then 200 and a PUT with no reconnect, one ERROR across 4+ opens; grant-less listener serves /v1/sessions 200 and the registry 503; read-only first sync then read-write readmission restores the saved edit and sends it, onSynced once; Get answers the session key's title with replaced_by of the later session; doc unit tests 167 pass; browser 40 passed, 2 skipped at the merged head (130 passed, 6 skipped over six specs at c8b202a6)",
+      "headSha": "7912696a2f26f91538f631c13f95fe07b3e84059",
+      "negativeControl": "at 27a6de48 a failed first open stayed 503 until a NATS reconnect, a readmitted page kept pending-sync readOnly=true from the closed admission, and Get answered replaced_by null for a session whose role key lagged its session key"
+    },
+    {
+      "criterion": "Review round 3: a failed move of the registry to a new connection during the retry's open does not leave the store on the replaced connection; the drain hook does not wait for an open under way",
+      "surface": "the envoy-listener's registry holder over in-process NATS, served through the listener's /v1 mux",
+      "command": "cd packages/envoy && CGO_ENABLED=1 go test -count=3 -race -v ./cmd/listener/ -run 'TestALegionAgentRegistry|TestClosingALegionAgentRegistry' && go test -count=1 ./cmd/listener/",
+      "observed": "all pass under -race three times, and the whole listener package passes; a connection event to a closed connection during the open gives 503, and the next healthy connection serves with a store opened on it and PUT 200; close returns at once with an open held, and no open runs after it",
+      "headSha": "05b29be5dd913cc247b7632092bf74775a91c456",
+      "negativeControl": "the same two tests against legion_agents.go at 7912696a: the first answers GET 200 on the dead connection; close takes 10.000 s with an open held"
+    },
+    {
+      "criterion": "Forward merge after INFRA-440: on a closed issue, comments, messages, Reply, Retry and margin comments still post with INFRA-440's AgentName code in place",
+      "surface": "Dispatch browser suite, chromium and iphone, at the merged head",
+      "command": "cd packages/dispatch && bun run e2e -- --project=chromium --project=iphone e2e/closed-issue-posting.e2e.ts e2e/mention-composer.e2e.ts e2e/keyboard-agents-picker.e2e.ts e2e/phone-conversation.e2e.ts e2e/margin-composer-hold.e2e.ts e2e/conversation.e2e.ts",
+      "observed": "166 passed, 6 skipped; conversation, agents, doc and margin unit tests 535 pass, 0 fail; tsc and biome clean",
+      "headSha": "51c5648273dfe13c608da49c91ec9fcf8b15ff8f",
+      "negativeControl": "main's ConversationTab.tsx and AgentsPage.tsx unchanged (isClosed gating kept) are what the closed-issue-posting spec fails against: at main 135d22e0 and bc307fb5 it failed 10 of 10 on missing Comment composer, Reply and Retry"
+    }
+  ],
+  "filesChanged": [
+    "packages/envoy/internal/legionagents/ (new: registry store, entry validation, tests)",
+    "packages/envoy/cmd/listener/{main.go,api.go,api_test.go,legion_agents_test.go,legion_agents_client_test.go}",
+    "packages/envoy/internal/bus/{stream.go,listener_names_test.go}",
+    "packages/envoy/infra/core/permissions{,_test}.go, packages/envoy/infra/gcp/testdata/*.golden, packages/envoy/infra/README.md",
+    "packages/envoy/internal/dispatch/envoy/client{,_test}.go (Agent, RoleAgents, IssueAgents)",
+    "packages/envoy/internal/dispatch/api/{server.go,owner.go,comment_create.go,comment_actions.go,comment_delivery.go,messages.go,message_delivery.go,issue_collaborators.go,routes_table.go} and tests",
+    "packages/envoy/internal/dispatch/docs/{websocket.go,marks.go,mutation.go,mutation_test.go}",
+    "packages/envoy-client/src/dispatch-execute.ts and tests; packages/contracts/src/{dispatch-tools.ts,dispatch-api.ts}",
+    "packages/dispatch/web/src/features/{conversation,margin,doc,agents}/..., packages/dispatch/web/src/styles.css, packages/dispatch/web/src/api/{client,types}.ts",
+    "packages/proof-editor/src/{dispatch-action-bar.ts,dispatch-marks.ts,lib.ts} and tests",
+    "packages/dispatch/e2e/{closed-issue-posting.e2e.ts (new),editor.ts,mention-composer,keyboard-agents-picker,phone-conversation,margin-composer-hold}.e2e.ts",
+    "docs and skills: AGENTS.md, skills/legion-*, packages/daemon/internal/prompts, docs/site, scripts/e2e, packages/*/AGENTS.md, CHANGELOGs, packages/claude-envoy regenerated"
+  ],
+  "trickyParts": [
+    "Anchored comments on a closed issue: the document service refuses every injection on a closed issue (allowInject); docs.WithCommentMarks marks the comment's own mark, snapshot, projection and thread-root read as owner-verified, and a suggestion's mark and every content edit stay refused.",
+    "A closed issue's document socket is admitted read-only, so the browser cannot write a comment mark there: the selection bar offers Comment only and the web sends {artifact, quote, occurrence}; quote-anchor.ts counts occurrences as pmdoc FindQuote does (cross-checked against the Go function).",
+    "Message delivery keeps its issue-row lock first (lockIssue, same `for no key update`), so the lock order its comments state still holds.",
+    "Registry reads are filtered key watches ended at the initial-values marker, never a cache, so an absence is the bucket's."
+  ],
+  "deviations": [
+    "Spec version 4 (INFRA-204 architect, 2026-10-26 10:34Z): the Collaborators tab and the mention picker's stopped agents moved to dispatch://INFRA-470; their code is attached there as dispatch://INFRA-470/artifact/collaborators-web-patch; C2 is now the closed-issue posting browser test.",
+    "The plan's write routes and Agent/RoleAgents client methods are built here (planned spec departure).",
+    "main merged forward once because GitHub reported the pull request CONFLICTING (fingerprint comment https://github.com/sjawhar/legion/pull/2234#issuecomment-6415546614); main's rewrite of the retro skill dropped the paragraph this branch had corrected, and main's moved architect and controller text in references/ was corrected instead.",
+    "Margin comments on a closed issue's document needed a packages/proof-editor change (a comment-only selection action in read-only mode); a read-only view on an open issue (schema mismatch) still offers nothing.",
+    "Postgres-backed packages that cannot pass in this pod for environment reasons: internal/dispatch/files (needs Docker), the rank collation test (database initialised with C collation), pmdoc linearity timing; CI runs them.",
+    "Second forward merge of main (bc307fb5, #2188) because GitHub reported the pull request CONFLICTING: rebase re-check 61a71207b9b3 \u2192 19e3dfb6ef31: fingerprint unchanged (39aaf690\u2026), bare gates only; the one conflict was a CHANGELOG entry (https://github.com/sjawhar/legion/pull/2234#issuecomment-6416064353). main touched no packages/envoy, packages/dispatch or packages/proof-editor file.",
+    "Review round 1 (review at 034ed9d8): all nine threads fixed in 3d1609ce71f6 and a5770f5d20f2 and resolved one by one; then a third forward merge of main because GitHub reported the pull request CONFLICTING: 3d1609ce \u2192 adb397f9, fingerprint unchanged d4b3f860\u2026 (https://github.com/sjawhar/legion/pull/2234#issuecomment-6419935961); the one conflict was an envoy CHANGELOG entry. The access-mode change also touched VersionView.tsx (readOnly \u2192 access: \"read\"). The stale LEGION-781 testing note was corrected; dated docs/superpowers plans keep requireOpenIssue as history.",
+    "Test round 2: fixed the tester's two red tests (unchanged) in 659a3263: proof-editor's touch focus loss hides the bar only on an editable view, and ProofDocument re-admits its document connection (connection.readmit closes the socket; the provider reconnects) when the issue reopens. Then a fourth forward merge of main because GitHub reported the pull request CONFLICTING: 659a3263 \u2192 27a6de48, fingerprint changed by one line (route-count pin 138 \u2192 139, main added a route) (https://github.com/sjawhar/legion/pull/2234#issuecomment-6422391370). The tester's observation that the Comment chord ($mod+Alt+m) runs only on an editable view stands: a read-only editor cannot hold keyboard focus, and the bar's Comment button is the closed document's path.",
+    "Review round 2 (review.json at e5363042): the three findings fixed in c8b202a69ac5 (registry open retried in the background with backoff and the reviewer's wording; connection.ts re-runs pending-sync's restore when a later admission turns read-write, and pending-sync's restore skips this page's own unacknowledged rows so a second restore cannot drop them; Get puts the session-key entry into the role listing before succession). Two forward merges of main because GitHub reported the pull request CONFLICTING and main moved during the round: 27a6de48 \u2192 a97f0749 fingerprint unchanged; c8b202a6 \u2192 7912696a fingerprint changed only in the regenerated claude-envoy dist bundles (https://github.com/sjawhar/legion/pull/2234#issuecomment-6425388970). The workspace and scratch volume were recreated before this round; the Postgres and browser harness was rebuilt under /legion/scratch/tmp/infra448 (Postgres 17.11 + pgvector from Debian .debs, ICU en-US collation, port 55448; e2e ports 18448, 19448-19451). The two cleanups the review named are on the PR's Fast-follow line.",
+    "Review round 3 (review at aceea5e1, two inline threads): both fixed in 05b29be5dd91 with a test each and resolved. The failure-once log flag became the kind of failure (open or move), so a failed move logs once even after a failed open. The nats async error wording is on the PR's Fast-follow line, as the architect directed; no merge of main (GitHub reported MERGEABLE).",
+    "Forward merge after INFRA-440 (#2237) merged: 05b29be5 \u2192 51c56482, fingerprint changed only in ConversationTab.tsx, its test and the regenerated claude-envoy dist (https://github.com/sjawhar/legion/pull/2234#issuecomment-6428218975). Resolution as sent to INFRA-278's architect: INFRA-440's code kept, only the isClosed prop and its checks removed; nothing else changed.",
+    "Forward merge of main (#2160, #2258) because GitHub reported the pull request CONFLICTING: 51c56482 \u2192 19aaa96f, fingerprint changed only in the conflicted prose files (AGENTS.md, the implementer prompts, skills/legion-architect/references/acceptance.md, skills/legion-worker/references/merge-gate.md) where main's new text is kept and the closed-issue correction re-applied, plus regenerated claude-envoy copies (https://github.com/sjawhar/legion/pull/2234#issuecomment-6428886616). No code changed; the browser proof at 51c56482 stands for the code.",
+    "Forward merge of main (#2264) because GitHub reported the pull request CONFLICTING: rebase re-check 19aaa96f \u2192 a2d4b6ee: fingerprint unchanged (8a20f939\u2026), bare gates only; the one conflict was packages/envoy/CHANGELOG.md, both sides kept (https://github.com/sjawhar/legion/pull/2234#issuecomment-6429894885)."
+  ],
+  "openQuestions": [],
+  "discoveredComplexity": [
+    "On a closed issue a browser holding a stale document schema after a deploy cannot be told from a plain close (the server admits both read-only), so its quote occurrence could anchor elsewhere or be refused."
+  ]
+}

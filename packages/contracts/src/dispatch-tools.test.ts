@@ -120,7 +120,7 @@ function schemaFor(name: keyof typeof validCalls) {
 const ISSUE_UPDATE_FIELDS_RULE =
   "Issue update requires at least one field besides issue: status, title, labels, priority, external_links, route, parent, blocked_by, components, repo, before, or after.";
 const ISSUE_UPDATE_DONE_RULE =
-  "status done requires reason, a non-empty note saying why the issue is closing, posted on the issue before it closes because a closed issue refuses messages, comments, and artifacts.";
+  "status done requires reason, a non-empty note saying why the issue is closing, posted on the issue before it closes so the close carries its note.";
 const reasonOnlyWithDone = (status: string): string =>
   `reason goes only with status done: it is the note posted on the issue as it closes, and ${status} closes nothing. Drop reason, or set status done to close the issue.`;
 
@@ -544,9 +544,8 @@ describe("dispatchToolSpecs", () => {
     expect(schema.safeParse({ issue: "DSP-1", status: "Done" }).success).toBe(false);
   });
 
-  // A closed issue refuses messages, comments, and artifacts, so the reason an issue closed can
-  // only be written before the close: the tool takes it in the same call and refuses the close
-  // without it.
+  // The reason is the close's note, so the tool takes it in the same call, posts it before the
+  // close, and refuses the close without it.
   // Each refusal names the part of the rule the call broke, so a reopen that also passed reason
   // is told reason is the close's, never that it named no field.
   test("dispatch_issue_update closes only with a reason, and takes a reason only to close", () => {

@@ -84,7 +84,8 @@ import {
 
 import { dispatchMarkPlugins, remarkDispatchMarksPlugin, dispatchMarkHandler } from './dispatch-marks';
 import type { MarkAction, SelectionBarActionKind } from './dispatch-marks';
-import { commentOnSelection, dispatchActionBarPlugin } from './dispatch-action-bar';
+import { commentOnSelection, dispatchActionBarPlugin, setAccess } from './dispatch-action-bar';
+import type { ProofEditorAccess } from './dispatch-action-bar';
 import { registerPopoverHookInstance } from './dispatch-popover-hook';
 import { dispatchMarkEventsPlugin } from './dispatch-mark-events';
 import { remarkSoftBreakAsSpace } from './dispatch-soft-breaks';
@@ -96,6 +97,7 @@ import { removeRecordMark, retypeMark as retypeRecordMark } from './record-mark-
 import type { RetypeOutcome } from './record-mark-retype';
 
 export type { MarkAction, SelectionBarActionKind, PopoverActionKind } from './dispatch-marks';
+export type { ProofEditorAccess } from './dispatch-action-bar';
 export type { RetypedMark, RetypeRefusal, RetypeOutcome } from './record-mark-retype';
 export type {
   BlockAttributeKind,
@@ -130,11 +132,16 @@ export interface CreateProofEditorOptions {
   awareness?: Awareness | null;
   /** Local user identity for cursor labels. */
   user: ProofEditorUser;
-  /** Render the document read-only. Defaults to false. */
-  readOnly?: boolean;
+  /** What the reader may do with the document: `'edit'` it, `'comment'` on it alone - the
+   *  selection bar offers Comment alone, for a selection that holds text, which writes no mark
+   *  and reports a `quote-comment` action, for a host whose server anchors the comment by its
+   *  quote - or only `'read'` it. Defaults to `'edit'`. */
+  access?: ProofEditorAccess;
   /** Fired for every mark-affecting user action: Comment/Suggest/Ask on the
    *  selection bar (the editor has already applied the mark locally with a
-   *  fresh markId over [from,to]; a rejected promise removes it), and
+   *  fresh markId over [from,to]; a rejected promise removes it), Comment on
+   *  a document with `'comment'` access (`quote-comment`: no mark is
+   *  written), and
    *  Reply/Resolve/Unresolve/Accept/Reject/Delete on the mark popover (no
    *  local mutation is applied for these — the host's server is expected to
    *  mutate and the change arrives back through the shared Y.Doc). */
@@ -160,8 +167,8 @@ export interface ProofEditorHandle extends TypedBlockCommands {
   setMarkdown(markdown: string): void;
   /** Top offset of each mark's first span relative to the library root. */
   markOffsets(): Map<string, number>;
-  /** Toggle editability (e.g. for a readOnly flag change post-construction). */
-  setReadOnly(readOnly: boolean): void;
+  /** Changes what the reader may do with the document (`access`) post-construction. */
+  setAccess(access: ProofEditorAccess): void;
   /** Apply mark metadata received from a peer, re-anchoring by quote. Unified
    *  Proof marks (comment/suggestion/flagged/approved) only — see
    *  ./dispatch-marks.ts's module doc for why dispatchAsk marks are outside
@@ -177,7 +184,7 @@ export interface ProofEditorHandle extends TypedBlockCommands {
   retypeMark(markId: string, kind: SelectionBarActionKind): RetypeOutcome;
   /** Starts a comment on the current selection exactly as the selection bar's Comment button
    *  does, `onMarkAction` included, and answers whether it did: false for an empty selection and
-   *  while the document is read-only, where the bar offers no Comment. */
+   *  while the document is read-only and takes no comments, where the bar offers no Comment. */
   commentOnSelection(): boolean;
   /** Scrolls a mark's anchor into view and pulses it. Works for both the
    *  unified marks system and dispatchAsk marks: both render `data-id`. */
@@ -371,12 +378,11 @@ export async function createProofEditor(
 
   const view = editor.ctx.get(editorViewCtx);
 
-  let currentReadOnly = Boolean(opts.readOnly);
-  view.setProps({ editable: () => !currentReadOnly });
-  const setReadOnly = (readOnly: boolean) => {
-    currentReadOnly = readOnly;
-    view.setProps({ editable: () => !currentReadOnly });
+  const applyAccess = (access: ProofEditorAccess) => {
+    setAccess(view, access);
+    view.setProps({ editable: () => access === 'edit' });
   };
+  applyAccess(opts.access ?? 'edit');
 
   // --- Collab binding -------------------------------------------------
   // Adapted from ProofEditorImpl's initFromShare() collab-activation block.
@@ -443,7 +449,7 @@ export async function createProofEditor(
       }
       return offsets;
     },
-    setReadOnly,
+    setAccess: applyAccess,
     applyRemoteMarks(metadata: Record<string, StoredMark>, options?: { hydrateAnchors?: boolean }): void {
       applyRemoteMarksMutation(view, metadata, options);
     },

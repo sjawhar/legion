@@ -1,6 +1,6 @@
 import { expect, type Page, test } from "@playwright/test";
 
-import { createComment, createIssue, createProject, patchIssue } from "./api";
+import { createComment, createIssue, createProject, listComments, patchIssue } from "./api";
 import {
   barAction,
   composer,
@@ -310,12 +310,9 @@ test("on a phone, a margin thread opened while the margin's send is out keeps th
   }
 });
 
-// The issue closing under a margin send leaves the composer and the mark the send names. It stays
-// until the send answers, and shows its refusal with the draft, and a way to drop it, as a closed
-// issue's composers do.
-test("a margin send out when its issue closes keeps the draft and shows the refusal", async ({
-  browser,
-}) => {
+// The issue closing under a margin send leaves the composer and the mark the send names, and a
+// closed issue takes a comment anchored to its document, so the send posts.
+test("a margin comment out when its issue closes posts", async ({ browser }) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", spec, title: "Margin closed mid-send" });
   const alice = await asUser(browser, "alice");
@@ -331,14 +328,54 @@ test("a margin send out when its issue closes keeps the draft and shows the refu
     const form = composer(page);
     await expect(form.getByLabel("Comment")).toHaveValue("Before the close");
 
+    const posted = answeredPost(page, `/api/v1/issues/${issue.key}/comments`, 201);
+    send.release();
+    await posted;
+    await expect(composer(page)).toHaveCount(0);
+    const comments = await listComments(issue.key);
+    expect(comments.map((comment) => [comment.body, comment.anchor?.quote])).toEqual([
+      ["Before the close", "brown"],
+    ]);
+  } finally {
+    await alice.close();
+  }
+});
+
+// A suggestion is a proposed edit, which a closed issue refuses: one out when its issue closes
+// keeps its draft and shows the refusal, with no Retry, which would be refused again, and a way
+// to drop it, as a closed issue's composers do for a kind it refuses.
+test("a margin suggestion out when its issue closes keeps the draft and shows the refusal", async ({
+  browser,
+}) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", spec, title: "Suggestion closed mid-send" });
+  const alice = await asUser(browser, "alice");
+
+  try {
+    const page = await alice.newPage();
+    await openSpec(page, issue.key, spec);
+    const send = await holdPosts(page, `**/api/v1/issues/${issue.key}/comments`);
+    await selectEditorText(page, "brown");
+    await barAction(page, "Suggest");
+    const form = composer(page);
+    await expect(form.locator("blockquote")).toHaveText("brown");
+    await form.getByLabel("Replacement").fill("red");
+    await form.getByRole("button", { exact: true, name: "Send" }).click();
+    await expect(form.getByLabel("Replacement")).toBeDisabled();
+
+    await patchIssue(issue.key, { status: "done" }, { login: "bob" });
+    await expect(page.getByRole("button", { name: "Reopen" })).toBeVisible();
+    await expect(form.getByLabel("Replacement")).toHaveValue("red");
+
     const refused = refusal(page, issue.key, 409);
     send.release();
     await refused;
     await expect(form.getByText("Couldn't send — issue is closed")).toBeVisible();
-    await expect(form.getByLabel("Comment")).toHaveValue("Before the close");
+    await expect(form.getByLabel("Replacement")).toHaveValue("red");
     await expect(form.getByRole("button", { name: "Retry" })).toHaveCount(0);
     await form.getByRole("button", { name: "Discard draft" }).click();
     await expect(composer(page)).toHaveCount(0);
+    expect(await listComments(issue.key)).toEqual([]);
   } finally {
     await alice.close();
   }

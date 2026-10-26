@@ -136,6 +136,9 @@
 
 ### Changed
 
+- The bundled `dispatch` command refuses `dispatch issue-update --status done --reason` on an issue
+  already closed, `ISSUE_CLOSED`, before it posts the reason, since Dispatch now takes messages on
+  a closed issue and the reason would otherwise land there as a stray message (INFRA-448).
 - `dispatch` and `dispatch-first` say that a Legion session files no issue for a finding outside its
   own issue, and point to `legion-worker/references/findings.md`: a defect with a clear fix in code
   the session's own tree touches is fixed in that tree's pull request, any other goes to the

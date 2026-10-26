@@ -506,7 +506,8 @@ test("agent authors render the registry title and fall back to a short id", asyn
   }
 });
 
-test("hides targeted-message retries on a closed issue", async () => {
+// A closed issue takes a message's retry and replies, so its card offers them as an open one does.
+test("offers targeted-message retries and Reply on a closed issue", async () => {
   const stub = stubLists({
     messages: [
       thread(
@@ -521,9 +522,10 @@ test("hides targeted-message retries on a closed issue", async () => {
   const view = render(tab({ "CORE-1": issueState() }, true, queryClient, true));
 
   try {
-    await screen.findByText("Failed: no live session s1");
-    expect(screen.queryByRole("button", { name: "Use BTW instead" })).toBeNull();
-    expect(screen.queryByRole("button", { name: "Use Send instead" })).toBeNull();
+    await screen.findByText(/Failed: no live session s1/);
+    expect(screen.getByRole("button", { name: "Retry" })).toBeTruthy();
+    const turns = screen.getByRole("list", { name: "Conversation turns" });
+    expect(within(turns).getByRole("button", { name: "Reply" })).toBeTruthy();
   } finally {
     view.unmount();
     stub.restore();
@@ -610,12 +612,18 @@ test("a mention its session answered with an error is pointed at a new comment, 
     expect(screen.getAllByRole("button", { name: "Retry" })).toHaveLength(1);
     view.unmount();
 
-    // A closed issue shows no Retry and takes no new comment, so neither sentence is said: the
-    // same rule the card follows, where each sentence names a control in the retry row.
+    // A closed issue takes a retry and a new comment, so it says both sentences, with the Retry,
+    // as an open one does.
     view = render(tab({ "CORE-1": issueState() }, true, queryClient, true));
-    await screen.findByText(wholeText("session:worker… · failed · worker failed"));
-    screen.getByText(wholeText("session:reviewer… · failed · reviewer failed"));
-    expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
+    await screen.findByText(
+      wholeText(`session:worker… · failed · worker failed. ${answeredWithErrorGuidance("mention")}`)
+    );
+    screen.getByText(
+      wholeText(
+        `session:reviewer… · failed · reviewer failed. ${safeRetryGuidance("mention", "reviewer failed")}`
+      )
+    );
+    expect(screen.getAllByRole("button", { name: "Retry" })).toHaveLength(1);
   } finally {
     view.unmount();
     stub.restore();
@@ -656,7 +664,8 @@ test("a targeted message asked by a session names that session as the asker", as
   }
 });
 
-test("renders a message composer for an open issue but not a closed one", async () => {
+// A closed issue takes comments and message replies, so its Conversation keeps the composer.
+test("renders the message composer on an open issue and a closed one alike", async () => {
   const stub = stubLists({ messages: [thread(message("message-1"))] });
   const queryClient = newQueryClient();
   const view = render(tab({ "CORE-1": issueState() }, true, queryClient));
@@ -664,7 +673,8 @@ test("renders a message composer for an open issue but not a closed one", async 
   try {
     await screen.findByRole("form", { name: "Comment composer" });
     view.rerender(tab({ "CORE-1": issueState() }, true, queryClient, true));
-    expect(screen.queryByRole("form", { name: "Comment composer" })).toBeNull();
+    expect(screen.getByRole("form", { name: "Comment composer" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Send" })).toBeTruthy();
   } finally {
     view.unmount();
     stub.restore();

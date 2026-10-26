@@ -1,7 +1,7 @@
 import { expect, type Locator, type Page, test } from "@playwright/test";
 
 import { agentRow, openAgents, plannerSession, seedAgents, shownAgentRows } from "./agents";
-import { createAgentMessage, createMessage, patchIssue } from "./api";
+import { createAgentMessage, createMessage, listComments, patchIssue } from "./api";
 import { resetDatabase } from "./seed";
 import { holdPosts, refusePosts } from "./sends";
 import { asUser } from "./users";
@@ -704,8 +704,8 @@ test.describe("agents page", () => {
   // next read. The select keeps showing the committed issue, marked closed - as the issue header's
   // Status select keeps a closed issue's own status among its options - so what the picker shows,
   // what the toggle names and where the message goes stay one issue until the reader picks
-  // another; the server refuses the comment.
-  test("an issue closed after the pick stays named in the select and the toggle, marked closed", async ({
+  // another; a closed issue takes comments, so the message posts there.
+  test("an issue closed after the pick stays named in the select and the toggle, marked closed, and takes the message", async ({
     browser,
   }) => {
     const issueKey = await seedAgents();
@@ -744,8 +744,17 @@ test.describe("agents page", () => {
       await expect(picker.locator("option:checked")).toHaveText(`${issueKey} (closed)`);
       await expect(toggle).toContainText(`${issueKey} (closed)`);
 
+      const posted = page.waitForResponse(
+        (response) =>
+          response.request().method() === "POST" &&
+          response.url().endsWith(`/api/v1/issues/${issueKey}/comments`)
+      );
       expect(await sendAndCapturePath(page, field)).toBe(`/api/v1/issues/${issueKey}/comments`);
-      await expect(row.getByText("Couldn't send — issue is closed")).toBeVisible();
+      expect((await posted).status()).toBe(201);
+      await expect(field).not.toHaveValue(/Status please/);
+      expect(
+        (await listComments(issueKey)).some((comment) => comment.body.includes("Status please"))
+      ).toBe(true);
 
       // Picking another issue ends it: the closed one is no longer offered at all.
       await picker.selectOption("CORE-2");

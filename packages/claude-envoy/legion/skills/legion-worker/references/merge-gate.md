@@ -304,9 +304,10 @@ reviewing until you finish.
   closes the check as any look's would; a `pending` closes it as not run, and before reporting it
   you write on the pull request, in the `Production:` line and a comment, that the check did not
   run because production did not carry the merge within the bound.
-- **The record lives on the pull request alone.** Dispatch refuses a message, a comment or an ask
-  on a closed issue (`ISSUE_CLOSED`), so the deployment instructions' "on the pull request and the
-  issue" is the pull request for a closed issue. A defect reaches Dispatch by the two paths above:
+- **The record lives on the pull request alone.** It is the pull request's `Production:` line, and
+  Legion writes it there whether or not the issue is closed, so the deployment instructions' "on
+  the pull request and the issue" is the pull request for this check. Dispatch opens no ask on a
+  closed issue (`ISSUE_CLOSED`). A defect reaches Dispatch by the two paths above:
   a clear defect as the message to the controller, which gives it to the tree that owns that code,
   and any other as the ask on the
   controller's report issue. The architect accepted the issue before the merge and is asked

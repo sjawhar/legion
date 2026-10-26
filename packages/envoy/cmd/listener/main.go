@@ -22,6 +22,7 @@ import (
 	"github.com/sjawhar/envoy/internal/config"
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dedupe"
+	"github.com/sjawhar/envoy/internal/legionagents"
 	"github.com/sjawhar/envoy/internal/logging"
 	"github.com/sjawhar/envoy/internal/metrics"
 	"github.com/sjawhar/envoy/internal/oidc"
@@ -37,6 +38,9 @@ type listenerDeps struct {
 	client   *bus.Client
 	registry *store.Registry
 	sessions *session.SessionRegistry
+	// legionAgents is the Legion agent registry the /v1/legion/agents routes serve, or why it is
+	// unavailable. It keeps no cache, so it is in no list of caches.
+	legionAgents *legionAgentRegistry
 	// ciStore is nil on a listener that mounts no GitHub webhook route, the one route that uses it.
 	ciStore *cistore.Store
 	// live is the live topics lane's own client (openLiveTopics), nil when ENVOY_SUBSCRIBE_ALL_TOPICS
@@ -726,15 +730,25 @@ func main() {
 	}
 	sessionCacheReadyCancel()
 
+	// The Legion agent registry (internal/legionagents) keeps no cache: every read is a read of its
+	// bucket, so it joins no warm-up or self-health. A listener that cannot open the bucket (a
+	// missing grant is the usual cause) logs one ERROR and serves on, its registry routes answering
+	// 503 while it retries the open in the background, with a backoff and at once after a reconnect
+	// (legionAgentRegistry). Its reconnect hook runs after the caches' rewatch, and moves its bucket
+	// handle onto a connection the bus dialled to replace a closed one; its drain hook ends the retry.
+	legionAgents := openLegionAgentRegistry(client.Conn, logger, legionagents.WithReplicas(cfg.NATSReplicas), legionagents.WithLogger(logger.Slog()))
+
 	// KV watchers are not bus subscriptions, so recreate them after every
 	// recovered NATS connection, and end them in the drain before the connection's own.
 	caches := listenerCaches(registry, sessions, ciStore)
 	client.AddReconnectHook(func(conn *nats.Conn) error {
 		return rewatchListenerKVWatchers(conn, caches)
 	})
+	client.AddReconnectHook(legionAgents.reconnect)
 	client.AddDrainHook(func(ctx context.Context) {
 		endListenerKVWatchers(ctx, caches)
 	})
+	client.AddDrainHook(legionAgents.close)
 
 	deliver := session.Deliverer{
 		MachineID:    cfg.MachineID,
@@ -817,14 +831,15 @@ func main() {
 	defer stop()
 
 	ready := &listenerDeps{
-		client:     client,
-		live:       live,
-		registry:   registry,
-		sessions:   sessions,
-		ciStore:    ciStore,
-		caches:     caches,
-		consumer:   consumer,
-		streamName: bus.Stream,
+		client:       client,
+		live:         live,
+		registry:     registry,
+		sessions:     sessions,
+		legionAgents: legionAgents,
+		ciStore:      ciStore,
+		caches:       caches,
+		consumer:     consumer,
+		streamName:   bus.Stream,
 	}
 	openV1Routes(v1Gate, ready, cfg.MachineID, logger, listeningAt)
 

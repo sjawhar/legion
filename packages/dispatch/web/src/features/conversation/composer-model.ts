@@ -11,11 +11,24 @@ export type ComposerOwner =
 
 export type ComposerKind = "ask" | "comment" | "suggestion";
 
-export interface ComposerAnchor {
-  readonly artifact: string;
-  readonly mark_id: string;
-  readonly quote: string;
-}
+/** The text a margin compose is about. On a document that takes edits, the selection bar wrote a
+ *  provisional mark over it, which the send names (`mark_id`) and the margin removes or retypes
+ *  with the composer. A closed issue's document takes no edit, so there the bar wrote nothing: the
+ *  send names the quote and which `occurrence` of it in the document's text the reader selected
+ *  (`quoteAnchor`), and the server writes the comment's mark there. */
+export type ComposerAnchor =
+  | {
+      readonly artifact: string;
+      readonly mark_id: string;
+      readonly occurrence?: never;
+      readonly quote: string;
+    }
+  | {
+      readonly artifact: string;
+      readonly mark_id?: never;
+      readonly occurrence: number;
+      readonly quote: string;
+    };
 
 export interface ReplyTarget {
   /** The parent's author, which the Replying-to chip draws through `AgentName`. */

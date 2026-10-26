@@ -1127,7 +1127,9 @@ func subscribeHandler(d *listenerDeps, machineID string, logger *logging.Logger)
 }
 
 // registerV1Routes builds the /v1 routes over the listener's dependencies, which main hands over
-// only once every store is open, so no handler can see a store that is not.
+// only once every store is open, so no handler can see a store that is not. The Legion agent
+// registry is the one that may be unavailable, and its routes answer that themselves
+// (legionAgentRegistry).
 func registerV1Routes(v1 *http.ServeMux, d *listenerDeps, machineID string, logger *logging.Logger) {
 	v1.HandleFunc("/v1/interests/subscribe", subscribeHandler(d, machineID, logger))
 	v1.HandleFunc("/v1/interests/unsubscribe", func(w http.ResponseWriter, r *http.Request) {
@@ -1162,6 +1164,9 @@ func registerV1Routes(v1 *http.ServeMux, d *listenerDeps, machineID string, logg
 	v1.HandleFunc("/v1/roles/set", roleSetHandler(d, machineID))
 	v1.HandleFunc("/v1/roles/", roleGetHandler(d))
 	v1.HandleFunc("/v1/registry/", sessionEntryHandler(d))
+	v1.HandleFunc("/v1/legion/agents", legionAgentsHandler(d))
+	v1.HandleFunc("/v1/legion/agents/sessions/", legionAgentSessionHandler(d))
+	v1.HandleFunc("/v1/legion/agents/roles/", legionAgentRoleHandler(d))
 
 	v1.Handle("/v1/interests/", adminInterestsHandler(d.registry))
 	v1.Handle("/v1/sessions", sessionsHandler(d.registry, d.sessions))

@@ -52,6 +52,14 @@ Triage → Icebox → Backlog → Todo → In progress → Testing → Needs rev
 An open issue's **Status** menu offers every status except Done. **Close issue** is the way into
 Done, and a closed issue offers **Reopen**, which puts it back in Backlog.
 
+A closed issue still takes comments and messages, from people and agents: a comment, a reply, a
+reply on an ask, a comment on a quote of one of its documents, and a message to an agent all post,
+and a mentioned agent is still told and can answer. Everything else waits for **Reopen**: a new
+ask, an answer to an ask, a suggestion, a document edit or named version, an upload, a review or
+approval request, a claim, and resolving, reopening, editing, accepting or rejecting a comment
+already there. Its priority, labels and other fields wait for it too, except its place on the
+Board and its components; a linked GitHub issue or pull request can be taken off it, not added.
+
 Legion, when it works an issue, moves that issue's status itself.
 
 ## The List and the Board
@@ -194,10 +202,13 @@ Artifacts, or Activity.
 
 ### Writing in the Conversation
 
-The box at the foot of the Conversation posts a comment on the issue. Type `@` to mention an agent
-role or a live agent session; the comment is then delivered to it. Start the comment with `/btw `
-or `/aside ` to choose how a mentioned agent receives it. [Agents](/legion/dispatch/agents/#sending-to-one-agent)
-explains the delivery modes.
+The box at the foot of the Conversation posts a comment on the issue, on a closed issue too: its
+composers, **Reply** on a message and a delivery's **Retry** all work there, and you can still
+comment on a quote of its documents: select the text and choose **Comment**, the one action the
+selection bar offers on a closed issue's document, and the comment opens in the margin. Type `@`
+to mention an agent role or a live agent session; the comment is then delivered to it. Start the
+comment with `/btw ` or `/aside ` to choose how a mentioned agent receives it.
+[Agents](/legion/dispatch/agents/#sending-to-one-agent) explains the delivery modes.
 
 Press `Ctrl+Enter` (`⌘Enter` on a Mac) to send. `Enter` alone starts a new line.
 

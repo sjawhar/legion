@@ -238,7 +238,8 @@ test("focusItemForMark opens the matching thread in the compact sheet", async ()
   }
 });
 
-test("Margin hides an open composer when its issue closes", async () => {
+// A closed issue refuses an ask, so an unsent ask compose ends when its issue closes.
+test("Margin hides an open ask composer when its issue closes", async () => {
   const queryClient = new QueryClient({
     defaultOptions: {
       mutations: { retry: false },
@@ -279,6 +280,58 @@ test("Margin hides an open composer when its issue closes", async () => {
     );
   } finally {
     view.unmount();
+  }
+});
+
+// A closed issue takes a comment, so an unsent comment compose stays open when its issue closes,
+// offers no Suggest or Ask, and sends.
+test("Margin keeps an open comment composer when its issue closes, and it sends", async () => {
+  const queryClient = new QueryClient({
+    defaultOptions: {
+      mutations: { retry: false },
+      queries: { retry: false, staleTime: Number.POSITIVE_INFINITY },
+    },
+  });
+  queryClient.setQueryData(["issue", issue.key], issue);
+  queryClient.setQueryData(["inbox"], []);
+  queryClient.setQueryData(["asks", issue.key], []);
+  queryClient.setQueryData(["user-state"], {});
+  queryClient.setQueryData(["comments", issue.key], []);
+  const createComment = spyOn(api, "createComment").mockResolvedValue(undefined as never);
+  const view = render(
+    <MemoryRouter initialEntries={[buildIssuePath({ key: issue.key, kind: "issue" })]}>
+      <QueryClientProvider client={queryClient}>
+        <MarginProvider>
+          <MarkComposerProbe />
+          <Margin />
+        </MarginProvider>
+      </QueryClientProvider>
+    </MemoryRouter>
+  );
+
+  try {
+    fireEvent.click(screen.getByRole("button", { name: "Compose first" }));
+    const open = await screen.findByRole("form", { name: "Comment composer" });
+    expect(within(open).getByRole("button", { name: "Suggest" })).toBeTruthy();
+    act(() => {
+      queryClient.setQueryData(["issue", issue.key], {
+        ...issue,
+        closed_at: "2026-09-09T01:00:00Z",
+      });
+    });
+    await waitFor(() => expect(screen.queryByRole("button", { name: "Suggest" })).toBeNull());
+    const composer = screen.getByRole("form", { name: "Comment composer" });
+    expect(within(composer).queryByRole("button", { name: "Ask" })).toBeNull();
+    fireEvent.change(within(composer).getByLabelText("Comment"), { target: { value: "closed" } });
+    fireEvent.click(within(composer).getByRole("button", { name: "Send" }));
+
+    await waitFor(() => {
+      expect(screen.getByLabelText("First composer outcome").textContent).toBe("saved");
+      expect(createComment).toHaveBeenCalledTimes(1);
+    });
+  } finally {
+    view.unmount();
+    createComment.mockRestore();
   }
 });
 

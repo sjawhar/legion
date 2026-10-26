@@ -3343,7 +3343,7 @@ implementer's launches while its task is outstanding, an end that lands after th
 over charges nothing, and the end takes up to a minute to land on a loaded host, so that turn must
 last long enough to be ended inside. A production check's task (its first line `Production check of
 <key>: …`, handed to the implementer once the merge closed its issue) is no phase's task line and
-waits for no targeted message: a closed issue takes no Dispatch write, so none can reach it. Run no
+waits for no targeted message, since the proof sends none to it. Run no
 `sleep 300` on it; act on the task as it is written. This proof has no production and no deploy
 role: no production carries the merge, so the look leaves `Production: pending deploy of <merge
 commit>` on the pull request's body (on the last look, writes on the pull request that the check
@@ -6176,8 +6176,7 @@ first_look_handed() { claim_states_are "$tree1" "ready working idle" suspended |
 until_true 300 "the close to leave the implementer live at its first look, the five other claims of $tree1 suspended" first_look_handed
 first_look_claims=$(issue_claim_states "$tree1" | paste -sd ',' -)
 # The first look. The task the daemon handed the implementer is the whole instruction: the proof
-# sends it nothing, since the issue is closed and a closed issue takes no Dispatch write (409
-# ISSUE_CLOSED), and the fixture's instructions say a check task waits for no targeted message. The
+# sends it nothing, and the fixture's instructions say a check task waits for no targeted message. The
 # smoke repository is neither the deploy repository nor a Legion production, so the look's verdict is
 # pending: the check stays open with its first look reported, and the daemon suspends the
 # implementer's claim, session kept, and deletes the issue's Sandbox, which takes the pod and the

@@ -4,6 +4,10 @@
 
 ### Added
 
+- `IssueCollaborators` and its members (`IssueCollaboratorPerson`, `IssueCollaboratorAgent`,
+  `IssueCollaboratorLegion`, `CollaboratorReason`), the answer of Dispatch's
+  `GET /api/v1/issues/{key}/collaborators`: everyone who worked an issue, running or not, with each
+  Legion agent's role and the session that replaced it (INFRA-448).
 - `dispatch doc-edit --help` says the spec, not every document, holds no progress or status, and that a record of open items or progress is a document of its own.
 
 - `actorAttribution(actor)`, the part of an actor's label after its name: ` (for <owner>)` for a
@@ -166,6 +170,11 @@
 
 ### Changed
 
+- `dispatch_issue_update`'s close rule and description give the reason for posting the reason
+  first as what it is, so the close carries its note, and drop the claim that a closed issue
+  takes no messages or comments: Dispatch now accepts both on a closed issue (asks and artifacts
+  are still refused). The description says a close of an issue already closed is refused
+  `ISSUE_CLOSED` before anything is posted (INFRA-448).
 - `dispatch_issue`'s `spec` and `dispatch_doc_edit` point at `skill://dispatch-writing-specs` in
   place of the dispatch skill's "Writing a spec". Five descriptions take a rule the
   dispatch skill's references held, so `dispatch <command> --help` prints it: `dispatch_resolve_ask`

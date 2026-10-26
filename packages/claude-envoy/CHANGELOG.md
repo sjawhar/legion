@@ -26,6 +26,10 @@
 
 ### Changed
 
+- The `dispatch` command (`dist/dispatch.js`) refuses `dispatch issue-update --status done
+  --reason` on an issue already closed, `ISSUE_CLOSED`, before it posts the reason, since Dispatch
+  now takes messages on a closed issue; the bundled `dispatch_issue_update` description no longer
+  says a closed issue takes no messages or comments (INFRA-448).
 - The plugin declares daemon API contract 38 in `package.json`'s `legion.daemonApiVersion`
   (INFRA-225): `GET /legion/v1/state` carries `admission.blocked`, every root and child Legion is
   waiting to start behind an unfinished Dispatch issue, each `{issue, blockedBy}`, and

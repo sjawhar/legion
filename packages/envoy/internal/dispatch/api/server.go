@@ -886,27 +886,28 @@ func (s *server) begin(ctx context.Context) (pgx.Tx, error) {
 	return tx, nil
 }
 
-// requireOpenIssue locks an issue row and returns its lifecycle status, rejecting mutations
-// after completion without a second issue query.
-func (s *server) requireOpenIssue(ctx context.Context, tx pgx.Tx, key string) (string, error) {
-	return issueOpenStatus(ctx, tx, key, ownerRowLock)
+// lockIssue locks an issue row and returns its lifecycle status, closed or not. It is the
+// lock requireOpenOwnerStatus takes, without the closed refusal, for the writes a closed issue
+// still takes: a message, its deliveries and the agent's reply to one.
+func (s *server) lockIssue(ctx context.Context, tx pgx.Tx, key string) (string, error) {
+	status, _, err := issueStatus(ctx, tx, key, ownerRowLock)
+	return status, err
 }
 
-// issueOpenStatus is that same read and refusal made through q under lock, so the check a
-// comment makes from the pool before its transaction opens refuses exactly what the locked
-// check will.
-func issueOpenStatus(ctx context.Context, q queryer, key, lock string) (string, error) {
+// issueStatus reads an issue's lifecycle status, and whether it is open, through q under
+// lock. It refuses nothing: each write that a closed issue refuses decides that from open.
+func issueStatus(ctx context.Context, q queryer, key, lock string) (string, bool, error) {
 	var status string
 	var open bool
 	if err := q.QueryRow(ctx, `
 		select status, closed_at is null from issues where key = $1`+lock, key).Scan(&status, &open); err != nil {
-		return "", err
+		return "", false, err
 	}
-	if !open {
-		return "", errorf(http.StatusConflict, "ISSUE_CLOSED", "issue is closed")
-	}
-	return status, nil
+	return status, open, nil
 }
+
+// errIssueClosed is the refusal of a write that a closed issue does not take.
+var errIssueClosed error = errorf(http.StatusConflict, "ISSUE_CLOSED", "issue is closed")
 
 // A version event is built by docs.ArtifactVersionEventPayload wherever it is appended; a
 // document's creation is the one other artifact payload, and it states what the write moved

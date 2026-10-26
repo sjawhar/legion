@@ -4,6 +4,42 @@
 
 ### Added
 
+- The listener keeps a Legion agent registry, so a finished issue's agents can still be named and
+  asked (INFRA-448): the `legion_agents` KV bucket (file storage, no TTL, never deleted) holds one
+  entry per Legion session the daemon ran, `{session_id, legion_project, issue, role, role_token,
+  title, harness, started_at, recorded_at}`, under `session.<id>`, `issue.<ISSUE>.<id>` and
+  `role.<role_token>.<id>` (`project.*` is reserved for the daemon and no read reaches it). The
+  daemon writes it with `PUT /v1/legion/agents/sessions/<id>` (one entry) and `PUT
+  /v1/legion/agents` (`{"entries":[…]}`, at most 256 entries and 1 MiB, every entry validated
+  before the first write, a bad one refusing the batch with a 400 naming its index, and a batch
+  that fails after that naming how many were written, `written`, with the failed entry's own
+  status: a 503 to retry for a write the bucket did not answer, a 409 or 400 as a single PUT
+  answers it). `role_token` must be `legion-<legion_project>-<issue lower-cased>-<role>` with the
+  Legion project token, not the Dispatch project, and a write moving a recorded session to another
+  issue or role is `409 {"error":"legion agent <id> is recorded for <issue> <role>"}` with nothing
+  written: every write claims `session.<id>` by compare-and-swap before it writes the index keys,
+  so of two concurrent writes moving one session only one lands, and a write that ends after its
+  claim is completed by its retry; `recorded_at` is the listener's time at a session's first
+  write. `GET /v1/legion/agents/sessions/<id>` (or `404 {"error":"unknown legion agent <id>"}`),
+  `GET
+  /v1/legion/agents/roles/<role_token>` (newest first) and `GET /v1/legion/agents?issue=<KEY>` (by
+  role in workflow order, then newest first) read the bucket itself, never a cache, and add `live`
+  (from the session registry) and `replaced_by`/`replaced_at` (the next session of the role token by
+  `started_at`), both derived at the read. Dispatch's listener client reads them with `Agent`,
+  `RoleAgents` and `IssueAgents`. The listener's NATS grant (`ListenerPermissions`, and so
+  `HostPermissions` and `DispatchPermissions`) gains the bucket's key-value calls, so a hub's
+  rendered authorization changes, which replaces a GCP hub's VM on its next update. Deploy order:
+  a listener that cannot open the bucket (a missing grant is the usual cause) serves everything
+  else and answers 503 on the registry routes, logging one ERROR naming the `legion_agents` bucket,
+  and retries the open in the background (1 s doubling to 1 min, and at once after each NATS
+  reconnect) until it opens, so a grant applied later serves the routes without a restart.
+- `GET /api/v1/issues/{key}/collaborators` lists everyone who worked an issue, running or not
+  (INFRA-448): `people` (one per login: the assignee, everyone who claimed it, posted on it or its
+  documents, or answered one of its asks) and `agents` (one per session: the same writers that are
+  sessions, the daemon's `legion-daemon:<PROJECT>` writer left out, merged with the listener's
+  Legion agent registry entries for the issue, which add `legion: {role, role_token, started_at,
+  replaced_by, replaced_at}`), each with `reasons` and `last_at`. A listener that is not
+  configured or does not answer leaves `legion_registry: "unavailable"` and the rest of the answer.
 - `envoy-infra:gcp:Dispatch` takes `pprofPort`, which sets `DISPATCH_PPROF_PORT` on the app
   Deployment's `envoy-dispatch` container alone, so a deployment turns on Dispatch's loopback-only
   profiler through the component rather than by editing the Deployment, which the next update
@@ -785,6 +821,15 @@
 
 ### Changed
 
+- A closed Dispatch issue takes comments and messages (INFRA-448), where each was
+  `409 ISSUE_CLOSED` before: a new comment (issue-level, a thread reply, a reply on an ask, one
+  anchored to a quote of one of its documents, and that thread's replies) and a new message post
+  from people and agents, and so do their deliveries, retries and the mentioned or targeted agent's
+  reply; a reply still reopens a resolved root there, as it does on an open issue. Every other
+  closed-issue rule stays: a new ask, an ask's edit, answer or resolve, a suggestion, a document
+  edit, a named version, an upload, a review, an approval request, a claim, a PATCH outside the
+  closed allow-list, and the comment actions resolve, reopen, edit, accept and reject on an
+  existing comment are still `409 ISSUE_CLOSED` until the issue reopens.
 - A rate-limited answer to any minter call, a release with no narrowing and a Google login's
   refresh included, is now logged `broker: mint failed … class=upstream` with `…, a rate limit` in
   its error, where a 4xx one was `class=refused`: a 429, GitHub's `X-RateLimit-Remaining: 0`, or a

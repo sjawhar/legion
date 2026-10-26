@@ -25,6 +25,12 @@
  * host is expected to collect the actual comment/suggestion body through its
  * own UI, correlated by `markId`. If the hook's promise rejects, the local
  * mark is removed.
+ *
+ * A read-only view takes no mark. There the bar offers nothing, unless the
+ * host gives the view `'comment'` access (`setAccess`): then it offers Comment
+ * alone, and only for a selection that holds text, which writes nothing and
+ * reports a `quote-comment` action with the selection's range, for a host
+ * whose server anchors the comment by the quote it reads there.
  */
 
 import { $prose } from '@milkdown/kit/utils';
@@ -44,6 +50,9 @@ export interface ActionBarOptions {
   by: string;
   onMarkAction?: (action: MarkAction) => void | Promise<void>;
 }
+
+/** What a reader may do with a document: edit it, comment on it alone, or only read it. */
+export type ProofEditorAccess = 'edit' | 'comment' | 'read';
 
 function getSelectionRange(view: EditorView): MarkRange | null {
   const { from, to } = view.state.selection;
@@ -102,6 +111,28 @@ export function positionBar(bar: HTMLElement, view: EditorView, range: MarkRange
 
 /** Each live view's bar, for `commentOnSelection`. */
 const controllers = new WeakMap<EditorView, ActionBarController>();
+/** Each view's access (`setAccess`). The view keeps the setting rather than its bar, since a
+ *  plugin reconfiguration - the collab cursors' install - builds the bar anew. */
+const accesses = new WeakMap<EditorView, ProofEditorAccess>();
+
+/** What the bar offers on `view`: every action while the view is editable, Comment alone while
+ *  it is read-only with `'comment'` access, and nothing otherwise. The view's own editability
+ *  decides `'edit'`, since that is what ProseMirror edits by. */
+function accessOf(view: EditorView): ProofEditorAccess {
+  if (view.editable) return 'edit';
+  return accesses.get(view) === 'comment' ? 'comment' : 'read';
+}
+
+/** Whether the bar offers anything on `view` for the valid `range`: every action while the view
+ *  is editable, Comment where it takes comments alone and `range` holds text to quote, and
+ *  nothing otherwise. */
+function offersActions(view: EditorView, range: MarkRange): boolean {
+  const access = accessOf(view);
+  if (access !== 'comment') return access === 'edit';
+  // A comment named by its quote needs text to quote; a leaf node such as an image or a hard
+  // break adds none.
+  return view.state.doc.textBetween(range.from, range.to, '', '').trim() !== '';
+}
 
 class ActionBarController {
   private view: EditorView;
@@ -114,6 +145,8 @@ class ActionBarController {
   private destroyed = false;
   private selectionChangedAt: number | null = null;
   private selectionSettleTimer: ReturnType<typeof setTimeout> | null = null;
+  /** The buttons only an editable view offers. */
+  private readonly editButtons: HTMLButtonElement[] = [];
 
   private readonly handleSelectionChange = () => {
     const range = getSelectionRange(this.view);
@@ -215,8 +248,11 @@ class ActionBarController {
 
   update(view: EditorView): void {
     this.view = view;
+    for (const button of this.editButtons) button.hidden = !view.editable;
     const range = getSelectionRange(view);
-    if (!range || this.editorLostFocus) {
+    // A read-only view offers Comment alone where it takes comments and the selection holds text
+    // to quote, and nothing elsewhere.
+    if (!range || this.lostFocus() || !offersActions(view, range)) {
       this.lastRange = range;
       this.hideBar();
       return;
@@ -246,9 +282,18 @@ class ActionBarController {
     }
   }
 
+  /** Whether a touch selection's editor has lost focus to something outside the bar, so its bar
+   *  stays hidden until the editor takes focus again. Only an editable view holds focus: a
+   *  read-only one never takes it again, so a focus it lost - the blur of turning read-only, when
+   *  its issue closes with the editor focused - would hide its bar for good. Its bar follows its
+   *  selection alone. */
+  private lostFocus(): boolean {
+    return this.editorLostFocus && this.view.editable;
+  }
+
   private scheduleTouchBar(): void {
     this.clearSelectionSettleTimer();
-    if (this.pointerDown || !this.lastRange || this.editorLostFocus) return;
+    if (this.pointerDown || !this.lastRange || this.lostFocus()) return;
 
     const elapsed = this.selectionChangedAt === null ? 0 : Date.now() - this.selectionChangedAt;
     this.selectionSettleTimer = setTimeout(() => {
@@ -256,9 +301,10 @@ class ActionBarController {
       this.selectionSettleTimer = null;
       if (
         this.pointerDown ||
-        this.editorLostFocus ||
+        this.lostFocus() ||
         !this.isTouchSelection() ||
-        !isRangeValid(this.view, this.lastRange)
+        !isRangeValid(this.view, this.lastRange) ||
+        !offersActions(this.view, this.lastRange)
       ) {
         return;
       }
@@ -280,15 +326,31 @@ class ActionBarController {
     this.bar.style.display = 'none';
   }
 
-  /** The one path from a selection to a mark, for the bar's buttons and `commentOnSelection`. It
-   *  marks nothing and answers false for an empty or stale range, or while the view is read-only,
-   *  where the bar offers no action. */
+  /** The one path from a selection to an action, for the bar's buttons and `commentOnSelection`.
+   *  It acts on nothing and answers false for an empty or stale range, or for a kind the view does
+   *  not offer: on a read-only view, anything but Comment, and Comment too unless the view takes
+   *  comments there and the range holds text to quote, where it writes no mark and reports a
+   *  `quote-comment` instead. */
   act(kind: SelectionBarActionKind, range: MarkRange | null): boolean {
-    // Dispatch hides this bar on read-only surfaces; this also keeps a reachable button from
-    // writing a provisional mark into a closed or historical document.
-    if (!this.view.editable || !isRangeValid(this.view, range)) return false;
-    void this.runAction(kind, range);
+    if (!isRangeValid(this.view, range)) return false;
+    if (this.view.editable) {
+      void this.runAction(kind, range);
+      return true;
+    }
+    // A reachable button must not write a provisional mark into a closed or historical document.
+    if (kind !== 'comment' || !offersActions(this.view, range)) return false;
+    void this.reportQuoteComment(range);
     return true;
+  }
+
+  private async reportQuoteComment(range: MarkRange): Promise<void> {
+    try {
+      await this.options.onMarkAction?.({ kind: 'quote-comment', from: range.from, to: range.to });
+    } catch (error) {
+      // Nothing was written, so there is nothing to undo; the rejection is reported as the other
+      // actions' are. A host shows its reader any reason of its own before it rejects.
+      console.warn('[@sjawhar/proof-editor] onMarkAction(quote-comment) rejected', error);
+    }
   }
 
   private async runAction(kind: SelectionBarActionKind, range: MarkRange): Promise<void> {
@@ -338,16 +400,26 @@ class ActionBarController {
     };
 
     this.bar.appendChild(makeButton('Comment', 'comment'));
-    this.bar.appendChild(makeButton('Suggest', 'suggest'));
-    this.bar.appendChild(makeButton('Ask', 'ask'));
+    this.editButtons.push(makeButton('Suggest', 'suggest'), makeButton('Ask', 'ask'));
+    for (const button of this.editButtons) this.bar.appendChild(button);
   }
 }
 
 /** Starts a comment on `view`'s selection exactly as the bar's Comment button does - the same
- *  mark, then the same `onMarkAction` - and answers whether it did: not for an empty selection,
- *  nor while the view is read-only, where the bar offers no Comment. */
+ *  mark, or on a view with `'comment'` access the same `quote-comment`, then the same
+ *  `onMarkAction` - and answers whether it did: not for an empty selection, nor where the bar
+ *  offers no Comment - a `'read'` view, or a `'comment'` one whose selection holds no text. */
 export function commentOnSelection(view: EditorView): boolean {
   return controllers.get(view)?.act('comment', getSelectionRange(view)) ?? false;
+}
+
+/** Sets what the bar offers on `view` while the view is read-only: Comment alone with
+ *  `'comment'` access, which marks nothing and reports a `quote-comment`, and nothing otherwise.
+ *  An editable view offers every action whatever its access says, so the caller makes the view
+ *  editable exactly for `'edit'`. It takes effect at the view's next update, which that
+ *  caller's `setProps` makes. */
+export function setAccess(view: EditorView, access: ProofEditorAccess): void {
+  accesses.set(view, access);
 }
 
 export const dispatchActionBarPlugin = (options: ActionBarOptions) =>

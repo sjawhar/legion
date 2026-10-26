@@ -384,11 +384,16 @@ export function useMarginSheet(): MarginSheetModel {
     setTab("comments");
     openCompactSheet();
   }, [openCompactSheet, shownCompose]);
-  // An unsent compose ends when the reader leaves its document, and when its issue closes. One
-  // that was sent is the held-send store's (`MarginProvider` hands it over at Send) and stays.
+  // An unsent compose ends when the reader leaves its document, and an unsent suggestion or ask
+  // when its issue closes, which refuses both; a comment compose stays, since a closed issue takes
+  // comments. One that was sent is the held-send store's (`MarginProvider` hands it over at Send)
+  // and stays.
   useEffect(() => {
     if (pendingCompose === undefined) return;
-    if (pendingCompose.anchor.artifact !== visibleArtifactId || isClosed) {
+    if (
+      pendingCompose.anchor.artifact !== visibleArtifactId ||
+      (isClosed && pendingCompose.kind !== "comment")
+    ) {
       cancelCompose(pendingCompose.seq);
     }
   }, [cancelCompose, isClosed, pendingCompose, visibleArtifactId]);

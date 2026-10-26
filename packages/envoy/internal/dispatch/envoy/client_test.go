@@ -491,3 +491,159 @@ func TestSessionReportsAnUnreachableListenerAsUnavailable(t *testing.T) {
 		t.Fatalf("refused: err = %v, want it not to read as a missing session", err)
 	}
 }
+
+const legionAgentRow = `{"session_id":"ses-old","legion_project":"infra","issue":"INFRA-448","role":"reviewer",` +
+	`"role_token":"legion-infra-infra-448-reviewer","title":"Legion reviewer · INFRA-448","harness":"omp",` +
+	`"started_at":"2026-10-26T01:00:00Z","recorded_at":"2026-10-26T01:00:05Z","live":false,` +
+	`"replaced_by":"ses-new","replaced_at":"2026-10-26T02:00:00Z","added_later":1}`
+
+func wantLegionAgentRow(t *testing.T, got LegionAgent) {
+	t.Helper()
+	newer, at := "ses-new", "2026-10-26T02:00:00Z"
+	want := LegionAgent{
+		SessionID: "ses-old", LegionProject: "infra", Issue: "INFRA-448", Role: "reviewer",
+		RoleToken: "legion-infra-infra-448-reviewer", Title: "Legion reviewer · INFRA-448", Harness: "omp",
+		StartedAt: "2026-10-26T01:00:00Z", RecordedAt: "2026-10-26T01:00:05Z", ReplacedBy: &newer, ReplacedAt: &at,
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("agent = %#v, want %#v", got, want)
+	}
+}
+
+// Agent asks the session's route with the listener's bearer and decodes its entry, ignoring a
+// field it does not know.
+func TestAgentDecodesTheRegistryEntry(t *testing.T) {
+	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.EscapedPath() != "/v1/legion/agents/sessions/ses-old" {
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.EscapedPath())
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer listener-token" {
+			t.Errorf("Authorization = %q, want Bearer listener-token", got)
+		}
+		_, _ = w.Write([]byte(legionAgentRow))
+	}))
+	defer listener.Close()
+	agent, err := New(listener.URL, WithToken("listener-token")).Agent(context.Background(), "ses-old")
+	if err != nil {
+		t.Fatalf("agent: %v", err)
+	}
+	wantLegionAgentRow(t, agent)
+}
+
+// An unknown session, or one the listener refuses as a name, is ErrNotFound: no entry is recorded
+// under it. Every other answer is ErrUnavailable, a 503 carrying the listener's reason.
+func TestAgentSeparatesNoEntryFromNoAnswer(t *testing.T) {
+	const silent = "envoy: the legion agent registry did not answer: context deadline exceeded"
+	for _, tc := range []struct {
+		name   string
+		status int
+		body   string
+		want   error
+		reason string
+	}{
+		{name: "unknown session", status: http.StatusNotFound, body: `{"error":"unknown legion agent ses-old"}`, want: ErrNotFound},
+		{name: "an id the registry refuses", status: http.StatusBadRequest, body: `{"error":"invalid legion agent: session_id"}`, want: ErrNotFound},
+		{name: "an id too long for a key", status: http.StatusRequestEntityTooLarge, body: `{"error":"too large"}`, want: ErrNotFound},
+		{name: "the registry did not answer", status: http.StatusServiceUnavailable, body: `{"error":"` + silent + `"}`, want: ErrUnavailable, reason: silent},
+		{name: "the listener broke", status: http.StatusInternalServerError, want: ErrUnavailable},
+		{name: "a body that does not decode", status: http.StatusOK, body: `{"session_id":`, want: ErrUnavailable},
+	} {
+		listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(tc.status)
+			_, _ = w.Write([]byte(tc.body))
+		}))
+		_, err := New(listener.URL).Agent(context.Background(), "ses-old")
+		listener.Close()
+		if !errors.Is(err, tc.want) {
+			t.Fatalf("%s: err = %v, want %v", tc.name, err, tc.want)
+		}
+		if tc.reason != "" && !strings.Contains(err.Error(), tc.reason) {
+			t.Fatalf("%s: err = %q, want it to carry %q", tc.name, err, tc.reason)
+		}
+	}
+}
+
+// RoleAgents and IssueAgents ask their listing routes, escaping what they name, and decode the
+// entries; an empty listing is no agents, not nil.
+func TestRoleAndIssueAgentsDecodeTheListing(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		path  string
+		query string
+		call  func(*Client) ([]LegionAgent, error)
+	}{
+		{"by role token", "/v1/legion/agents/roles/legion-infra-infra-448-reviewer", "", func(c *Client) ([]LegionAgent, error) {
+			return c.RoleAgents(context.Background(), "legion-infra-infra-448-reviewer")
+		}},
+		{"by issue", "/v1/legion/agents", "issue=INFRA-448", func(c *Client) ([]LegionAgent, error) {
+			return c.IssueAgents(context.Background(), "INFRA-448")
+		}},
+	} {
+		for _, listing := range []struct {
+			body string
+			want int
+		}{{`{"entries":[` + legionAgentRow + `]}`, 1}, {`{"entries":[]}`, 0}} {
+			listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodGet || r.URL.Path != tc.path || r.URL.RawQuery != tc.query {
+					t.Errorf("%s: unexpected request %s %s?%s", tc.name, r.Method, r.URL.Path, r.URL.RawQuery)
+				}
+				if got := r.Header.Get("Authorization"); got != "Bearer listener-token" {
+					t.Errorf("%s: Authorization = %q", tc.name, got)
+				}
+				_, _ = w.Write([]byte(listing.body))
+			}))
+			agents, err := tc.call(New(listener.URL, WithToken("listener-token")))
+			listener.Close()
+			if err != nil || agents == nil || len(agents) != listing.want {
+				t.Fatalf("%s: agents = %#v, %v; want %d", tc.name, agents, err, listing.want)
+			}
+			if listing.want == 1 {
+				wantLegionAgentRow(t, agents[0])
+			}
+		}
+	}
+}
+
+// A listing the listener does not answer with a 200, or answers with a body that does not decode,
+// or that cannot be reached, is ErrUnavailable: never an empty list a caller would take for no
+// agents.
+func TestRoleAndIssueAgentsReportAnyOtherAnswerAsUnavailable(t *testing.T) {
+	calls := map[string]func(*Client) ([]LegionAgent, error){
+		"RoleAgents": func(c *Client) ([]LegionAgent, error) {
+			return c.RoleAgents(context.Background(), "legion-infra-infra-448-reviewer")
+		},
+		"IssueAgents": func(c *Client) ([]LegionAgent, error) { return c.IssueAgents(context.Background(), "INFRA-448") },
+	}
+	for _, tc := range []struct {
+		status int
+		body   string
+		reason string
+	}{
+		{http.StatusServiceUnavailable, `{"error":"envoy: the legion agent registry did not answer"}`, "did not answer"},
+		{http.StatusBadRequest, `{"error":"invalid legion agent: issue"}`, "invalid legion agent"},
+		{http.StatusNotFound, `{"error":"not found"}`, "not found"},
+		{http.StatusOK, `{"entries":`, ""},
+	} {
+		listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(tc.status)
+			_, _ = w.Write([]byte(tc.body))
+		}))
+		for name, call := range calls {
+			agents, err := call(New(listener.URL))
+			if !errors.Is(err, ErrUnavailable) || agents != nil {
+				t.Fatalf("%s (%d): %v, %v; want ErrUnavailable", name, tc.status, agents, err)
+			}
+			if !strings.Contains(err.Error(), tc.reason) {
+				t.Fatalf("%s (%d): err = %q, want it to carry %q", name, tc.status, err, tc.reason)
+			}
+		}
+		listener.Close()
+	}
+	closed := httptest.NewServer(http.NotFoundHandler())
+	closed.Close()
+	for name, call := range calls {
+		if _, err := call(New(closed.URL)); !errors.Is(err, ErrUnavailable) {
+			t.Fatalf("%s on an unreachable listener: %v, want ErrUnavailable", name, err)
+		}
+	}
+}

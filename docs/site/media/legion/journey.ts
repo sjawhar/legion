@@ -283,7 +283,7 @@ export async function accept(issue: Tracked, example: Example): Promise<void> {
 }
 
 /** The merge closes the issue: the daemon writes done. The implementer's production check follows
- *  on the pull request, which the example's GitHub does not show; a closed issue takes no comment. */
+ *  on the pull request, which the example's GitHub does not show; its record is not on the issue. */
 export async function closeAtMerge(issue: Tracked): Promise<void> {
   const api = await dispatchApi();
   await api.patchIssue(issue.key, { status: "done" }, DAEMON);

@@ -101,8 +101,14 @@ export function cursorLabel(page: Page, name: string): Locator {
  * does: a DOM Range plus the selectionchange ProseMirror's DOMObserver listens to. A quote no one
  * text node holds - text another mark's span splits - is found across the text nodes in order. */
 export async function selectEditorText(page: Page, quote: string): Promise<void> {
-  await setEditorRange(page, { extent: "whole", quote });
+  await selectEditorQuote(page, quote);
   await actionBar(page).waitFor({ state: "visible" });
+}
+
+/** Selects `quote` as `selectEditorText` does, without waiting for the selection bar: for a row
+ *  whose assertion is the bar itself. */
+export function selectEditorQuote(page: Page, quote: string): Promise<void> {
+  return setEditorRange(page, { extent: "whole", quote });
 }
 
 /** Puts the caret directly before or after the first occurrence of `quote`, the way a click

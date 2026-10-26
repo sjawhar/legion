@@ -336,7 +336,7 @@ request, the merge commit, what it drove and what failed. A defect with a clear 
 controller, which gives it to the tree that owns that code and files an issue only when none does.
 One that needs a decision is a Dispatch ask on Legion's
 daily report issue, so you decide whether it needs an issue.
-The record lives on the pull request alone: Dispatch refuses a write on a closed issue.
+The record lives on the pull request alone, whether or not the issue is closed.
 
 Nothing waits for the deploy: a `pending` look ends, the implementer's pod goes — and its disk
 with it, since an issue's disk belongs to its pod — while its conversation is kept in the session

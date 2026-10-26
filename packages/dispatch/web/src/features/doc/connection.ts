@@ -60,6 +60,12 @@ export interface DocumentConnection {
   readonly awareness: Awareness;
   readonly doc: Doc;
   destroy(): void;
+  /**
+   * Has the server admit this connection again: the server decides a socket's admission once, as
+   * it connects, so this closes the socket, the provider reconnects as it does after any close the
+   * server makes, and the new socket's admission reaches `onAdmission`.
+   */
+  readmit(): void;
 }
 
 export interface ConnectionCallbacks {
@@ -119,9 +125,14 @@ export async function loadDocumentTransport(): Promise<ConnectDocument> {
   return (artifactId, callbacks) => {
     const doc = new Doc();
     let destroyed = false;
+    // Both describe the current socket, so a reconnect waits for its own admission and sync.
     let synced = false;
     let authenticated = false;
     let announced = false;
+    // Whether the browser's saved rows were last restored under a read-only admission, which
+    // restores none: a later read-write admission restores them then.
+    let restoredReadOnly = false;
+    let restoring: Promise<void> = Promise.resolve();
     let provider: HocuspocusProvider;
     // `connect: false` below means this class cannot instantiate a socket until `sync` is assigned
     // after the provider exists; the explicit `websocket.connect()` is deliberately last.
@@ -145,19 +156,30 @@ export async function loadDocumentTransport(): Promise<ConnectDocument> {
       parameters: { schema_version: callbacks.schemaVersion },
       url: wsUrl(artifactId),
     });
+    const restore = (readOnly: boolean): Promise<void> => {
+      restoredReadOnly = readOnly;
+      restoring = restoring
+        .then(() => sync?.firstSync(readOnly))
+        .catch((error: unknown) => {
+          console.error("Could not restore this document's pending browser edits", error);
+        });
+      return restoring;
+    };
     const notifySynced = () => {
-      if (synced && authenticated && !announced) {
+      if (!synced || !authenticated) {
+        return;
+      }
+      const readOnly = isSchemaReadOnly(provider.authorizedScope);
+      if (!announced) {
         announced = true;
-        void sync
-          ?.firstSync(isSchemaReadOnly(provider.authorizedScope))
-          .catch((error: unknown) => {
-            console.error("Could not restore this document's pending browser edits", error);
-          })
-          .then(() => {
-            if (!destroyed) {
-              callbacks.onSynced();
-            }
-          });
+        void restore(readOnly).then(() => {
+          if (!destroyed) {
+            callbacks.onSynced();
+          }
+        });
+      } else if (restoredReadOnly && !readOnly) {
+        // A readmission (`readmit`) turned read-write after a read-only first sync.
+        void restore(false);
       }
     };
     provider = new HocuspocusProvider({
@@ -169,6 +191,7 @@ export async function loadDocumentTransport(): Promise<ConnectDocument> {
         notifySynced();
       },
       onClose: ({ event }) => {
+        authenticated = false;
         // Hocuspocus answers every other close by reconnecting. This one is the server's decision
         // about the stored document (`DOCUMENT_SCHEMA_CLOSE_CODE`), so the provider stops here and
         // the host reads it again.
@@ -184,10 +207,8 @@ export async function loadDocumentTransport(): Promise<ConnectDocument> {
       },
       onStatus: ({ status }) => callbacks.onStatus(status === "disconnected" ? "offline" : status),
       onSynced: ({ state }) => {
-        if (state) {
-          synced = true;
-          notifySynced();
-        }
+        synced = state;
+        notifySynced();
       },
       // Each document owns its socket. A transport's destroy closes this provider and then the
       // websocket itself, so its connection checker and reconnect attempt cannot outlive it.
@@ -222,6 +243,11 @@ export async function loadDocumentTransport(): Promise<ConnectDocument> {
         doc.destroy();
       },
       doc,
+      readmit() {
+        if (!destroyed) {
+          websocket.webSocket?.close();
+        }
+      },
     };
   };
 }

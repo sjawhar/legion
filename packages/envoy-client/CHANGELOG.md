@@ -4,6 +4,12 @@
 
 ### Changed
 
+- `dispatch issue-update --status done --reason` refuses, before it posts anything, a close of an
+  issue whose read shows it already closed (`closed_at` set), with the `ISSUE_CLOSED` refusal a
+  409 from Dispatch carries (`ISSUE_CLOSED: issue is closed; KEY closed at <time>, so the reason
+  was not posted and the close was not sent`). It used to rely on a closed issue refusing the
+  reason's message; Dispatch now takes messages on a closed issue, so the old order would have left
+  a stray reason on it. An open issue still gets its reason posted, then the PATCH (INFRA-448).
 - **Breaking:** `dispatch architecture-sync` imports every architecture source of the project,
   one per repository, and prints each source's answer in turn: `Synced P architecture from
   repo@branch: commit C (time).`, or `Sync failed for P (repo@branch): error` followed by `The

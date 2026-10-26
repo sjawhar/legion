@@ -21,6 +21,7 @@ import (
 	"github.com/sjawhar/envoy/internal/contracts"
 	dispatchenvoy "github.com/sjawhar/envoy/internal/dispatch/envoy"
 	"github.com/sjawhar/envoy/internal/kvwatch"
+	"github.com/sjawhar/envoy/internal/legionagents"
 	"github.com/sjawhar/envoy/internal/logging"
 	"github.com/sjawhar/envoy/internal/session"
 	"github.com/sjawhar/envoy/internal/store"
@@ -1965,8 +1966,12 @@ func TestV1RoutesAnswerAKeyNATSWouldRefuseWith4xx(t *testing.T) {
 	if err := sessions.Put("ses_live", session.SessionEntry{Port: 1, MachineID: "test-machine"}); err != nil {
 		t.Fatalf("register ses_live: %v", err)
 	}
+	legionAgents, err := legionagents.Open(client.Conn, legionagents.WithReplicas(1))
+	if err != nil {
+		t.Fatalf("open legion agent registry: %v", err)
+	}
 	mux := http.NewServeMux()
-	registerV1Routes(mux, &listenerDeps{client: client, registry: registry, sessions: sessions}, "test-machine", logging.New("test"))
+	registerV1Routes(mux, &listenerDeps{client: client, registry: registry, sessions: sessions, legionAgents: newLegionAgentRegistry(legionAgents)}, "test-machine", logging.New("test"))
 
 	long := strings.Repeat("s", 5000)
 	longRole := strings.Repeat("r", 4100)
@@ -1992,6 +1997,18 @@ func TestV1RoutesAnswerAKeyNATSWouldRefuseWith4xx(t *testing.T) {
 		{"read the entry of a session id outside the key alphabet", http.MethodGet, "/v1/registry/ses:bad", "", http.StatusBadRequest},
 		{"read a role outside the key alphabet", http.MethodGet, "/v1/roles/bad:role", "", http.StatusBadRequest},
 		{"publish to a role outside the key alphabet", http.MethodPost, "/v1/messages/publish", `{"topic":"notifications.role.bad:role","message":"hi"}`, http.StatusBadRequest},
+		// The Legion agent registry bounds and checks every name it keys before NATS sees it, so
+		// each is its 400 naming the field.
+		{"read a long legion agent's entry", http.MethodGet, "/v1/legion/agents/sessions/" + long, "", http.StatusBadRequest},
+		{"record a long legion agent", http.MethodPut, "/v1/legion/agents/sessions/" + long, legionEntry(long, "INFRA-1", "tester", "2026-10-26T03:15:00Z"), http.StatusBadRequest},
+		{"record a batch holding a long legion agent", http.MethodPut, "/v1/legion/agents", `{"entries":[` + legionEntry(long, "INFRA-1", "tester", "2026-10-26T03:15:00Z") + `]}`, http.StatusBadRequest},
+		{"read a long role token's legion agents", http.MethodGet, "/v1/legion/agents/roles/legion-" + long + "-infra-1-tester", "", http.StatusBadRequest},
+		{"read a long issue's legion agents", http.MethodGet, "/v1/legion/agents?issue=INFRA-" + strings.Repeat("1", 5000), "", http.StatusBadRequest},
+		{"read the legion agent entry of a session id outside the key alphabet", http.MethodGet, "/v1/legion/agents/sessions/ses:bad", "", http.StatusBadRequest},
+		{"record a legion agent outside the key alphabet", http.MethodPut, "/v1/legion/agents/sessions/ses:bad", legionEntry("ses:bad", "INFRA-1", "tester", "2026-10-26T03:15:00Z"), http.StatusBadRequest},
+		{"read the legion agent entry of a session id holding an empty token", http.MethodGet, "/v1/legion/agents/sessions/ses..x", "", http.StatusBadRequest},
+		{"read the legion agents of a role token holding an empty token", http.MethodGet, "/v1/legion/agents/roles/legion..infra-1-tester", "", http.StatusBadRequest},
+		{"read the legion agents of an issue outside the key alphabet", http.MethodGet, "/v1/legion/agents?issue=INFRA:1", "", http.StatusBadRequest},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			recorder := httptest.NewRecorder()
