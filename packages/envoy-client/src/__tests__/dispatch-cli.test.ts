@@ -1171,6 +1171,10 @@ describe("the dispatch CLI's envoy.json", () => {
         ...child,
       });
       expect(stdout).toStartWith("dispatch: DISPATCH_HOST is not set.");
+      // An agent in a Python cell reads this first. With a made-up session id, the CLI finds no
+      // AskGate record, so the write posts with no review.
+      expect(stdout).toContain("From an agent's session, send the command as a bash call.");
+      expect(stdout).toContain("set DISPATCH_SESSION_ID to the id of your own session");
       expect(code).toBe(2);
     }
     expect(requests).toEqual([]);

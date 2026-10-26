@@ -1543,7 +1543,7 @@ specRun("spec-writing-head-43", {
 // DISPATCH_SESSION_ID), so the CLI logs nothing, and the cell's code is no shell text: the
 // refusal is in the cell's output alone.
 const noHost =
-  "dispatch: DISPATCH_HOST is not set. The host plugin sets it in an agent's shell; to run dispatch by hand, set DISPATCH_HOST and DISPATCH_SESSION_ID yourself.\n";
+  "dispatch: DISPATCH_HOST is not set. The host plugin sets it in an agent's shell. From an agent's session, send the command as a bash call. To run dispatch by hand, set DISPATCH_HOST, and set DISPATCH_SESSION_ID to the id of your own session.\n";
 const pythonCall =
   "import subprocess\nr = subprocess.run(['dispatch', 'doc-edit', '--issue', 'LWEVAL-7', '--artifact', 'spec', '--ops-json-file', 'ops.json'], capture_output=True, text=True)\nprint(r.stdout)";
 specRun("spec-writing-head-57", {
