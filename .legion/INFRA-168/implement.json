@@ -2,43 +2,23 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-168",
-  "completed": "2026-10-26T11:55:00Z",
-  "round": "the second narrowed round answering the review of 0c1e3cf4 (one finding made by f1f55963, two consequences; the architect's Narrow decision and addendum)",
+  "completed": "2026-10-26T13:35:00Z",
+  "round": "the round answering the review of 1b36825b (tests only: thread PRRT_kwDORFy7ds6wReUY; the architect accepted the rounds and scoped this one to the reviewer's three tests, no code change)",
   "proof": [
     {
-      "criterion": "A refusal warns that a resend goes out unreviewed only when that resend will trip: an unchanged re-upload whose stored version holds every ask is refused twice, warned on the second, and goes out on the breaker the third time (thread PRRT_kwDORFy7ds6wPhQS).",
-      "surface": "The real AskGate handler on the bash path under pi-envoy's suite, with the fake Dispatch serving the stored brief.md holding #window (no live session can make the charter revise an upload on purpose).",
-      "command": "cd packages/pi-envoy && bun test extensions/askgate/askgate.test.ts -t 'upload' (59 pass, 0 fail)",
-      "observed": "'an unchanged re-upload whose stored version holds every ask is refused twice, warned on the second, and goes out on the breaker the third time': sends 1 and 2 refused, the second-refusal warning on send 2 only, send 3 outcome=\"breaker\" with no model call, send 4 reviewed again after the reset.",
-      "headSha": "632f8d02",
-      "negativeControl": "With askgate-core.ts from HEAD (0c1e3cf4) and the new tests kept, this test fails (the third send is refused again, `expect(received).toBeUndefined() Received: true`), as the reviewer reproduced: the warning repeated on every refusal and no pass came."
-    },
-    {
-      "criterion": "Security[authz]: an upload never refused does not pass the breaker on another upload's refusals (thread PRRT_kwDORFy7ds6wPhQY).",
-      "surface": "The same.",
-      "command": "The same filter.",
-      "observed": "'after two charter refusals of one upload on an issue, a different upload there with no ask block is reviewed': notes.md with no ask block, sent on X-1 after two refusals of brief.md, gets its charter call and is refused, with no outcome=\"breaker\".",
-      "headSha": "632f8d02",
-      "negativeControl": "On HEAD's askgate-core.ts it fails: the result is `<advisor-gate advisor=\"AskGate\" outcome=\"breaker\">Third attempt after two refusals of this call on its target…`, the reviewer's reproduction."
-    },
-    {
-      "criterion": "An upload whose rules check judged only part of its asks counts its charter refusals on the judged ask, so the warned third resend trips.",
-      "surface": "The same, with no Dispatch so the stored-version read fails (ruleAsksPartial true).",
-      "command": "The same filter.",
-      "observed": "'an upload whose rules check judged only part of its asks counts its charter refusals on the judged ask, so sent unchanged a third time it goes out on the breaker as warned': warning on refusal 2 only, the third send outcome=\"breaker\".",
-      "headSha": "632f8d02",
-      "negativeControl": "On HEAD's askgate-core.ts it fails (third send refused again), because the partial read counted WHOLE_CALL, which the upload's own scan never holds."
+      "criterion": "Nothing can drop the upload key or its content digest from callKeys with the suite green: each regression that would reopen the review of 0c1e3cf4's findings fails a test.",
+      "surface": "The real AskGate handler on the bash upload path under pi-envoy's suite, with askgate-core.ts mutated in place and restored (the reviewer's two mutants).",
+      "command": "cd packages/pi-envoy && bun test extensions/askgate/askgate.test.ts -t 'after two charter refusals of (an upload with no ask block|a re-upload)' on the unmutated core, then with askgate-core.ts:2538 replaced by M1 `return asks.length === 0 ? [WHOLE_CALL] : asks.map(askIdentity);` and by M2 `return [...asks.map(askIdentity), JSON.stringify([\"upload\", name, null])];`, restoring the file after each (jj diff --stat afterwards: only askgate.test.ts).",
+      "observed": "Unmutated: 3 pass, 0 fail. M1 (upload key dropped): 0 pass, 3 fail. M2 (content digest dropped): 1 pass, 2 fail (the no-ask different-document test passes, as expected, since the names differ). Each failure is the third upload's result carrying `outcome=\"breaker\"`. The tests: 'after two charter refusals of an upload with no ask block, a different document with no ask block on the issue is reviewed'; 'after two charter refusals of an upload with no ask block, the same document name with other text is reviewed'; 'after two charter refusals of a re-upload whose stored version holds every ask, the same document adding a new ask is reviewed'.",
+      "headSha": "2ac8abe5",
+      "negativeControl": "The mutant runs are the negative control: with either regression in askgate-core.ts the suite now goes red, where at 1b36825b the full askgate.test.ts passed 382 of 382 under both (the reviewer's measurement)."
     }
   ],
   "filesChanged": [
-    "packages/pi-envoy/extensions/askgate/askgate-core.ts — callKeys replaces breakerThings: one key set per call (an upload's asks plus its own upload key from its trimmed name and a sha256 of its content, never WHOLE_CALL); tripped() matches it and refusalThings counts a subset of it, filtered against it in one place; doc comments corrected.",
-    "packages/pi-envoy/extensions/askgate/askgate.test.ts — the three tests above and a helper; every earlier test unchanged."
-  ],
-  "trickyParts": [
-    "tripped() runs before the rules check, so the key set cannot depend on the rules result; refusalThings picks the subset after it, so a refusal's keys are always keys the same call sent again yields."
+    "packages/pi-envoy/extensions/askgate/askgate.test.ts — three tests; no other file."
   ],
   "deviations": [
-    "One push carries the code and this handoff, and the PR body is edited once, to add as few runs as possible while CI is flooded (INFRA-256)."
+    "One push carries the test and this handoff, with one PR body edit and the one required thread reply, as the architect asked during the CI backlog."
   ],
   "openQuestions": [
     "sjawhar/legion#2159 is still open at 0aa47421c; sign-off waits on its merge per plan rev 10."
