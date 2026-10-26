@@ -1,4 +1,4 @@
--- 0117_artifact_reviews_event_seq.up.sql
+-- 0118_artifact_reviews_event_seq.up.sql
 -- The sequence of the artifact.approved or artifact.changes_requested event each review appended on
 -- its document's owner (its issue, else the document). The owner's row lock orders those events as
 -- they commit, so the sequence places a review among its issue's other events where created_at, the

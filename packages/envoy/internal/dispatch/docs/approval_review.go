@@ -24,7 +24,7 @@ const ReviewColumns = `id::text, artifact_id::text, version, state, actor, reaso
 
 // ReviewOrder sorts a document's reviews newest first by the order their events committed: the
 // event sequence each review kept on its document's owner, then, for a review recorded before the
-// sequence was kept, its own time and id. Every review written once migration 0117 committed
+// sequence was kept, its own time and id. Every review written once migration 0118 committed
 // carries a sequence, whichever release wrote it: this release's WriteReview writes it, and the
 // migration's deferred trigger gives one to a review the release before it writes during a
 // rollout or a rollback. A row without one was committed before that migration, so every row that
@@ -58,7 +58,7 @@ func ScanReview(row pgx.Row) (model.ArtifactReview, error) {
 // event's sequence on that owner (event_seq), which places a read of the review among the owner's
 // events. The row is inserted before the event is appended and its sequence written after, so the
 // review's foreign-key locks are still taken before the owner's row lock and the commit-order
-// lock, as they were before the sequence was kept. Migration 0117's trigger, which gives the release
+// lock, as they were before the sequence was kept. Migration 0118's trigger, which gives the release
 // before this one's reviews their sequence, would give this row its sequence too, but only at the
 // commit, the first moment the event exists for every release; so WriteReview writes it itself,
 // and the row is right for any read the caller makes before it commits. The trigger then finds the
@@ -103,7 +103,7 @@ func WriteReview(ctx context.Context, tx pgx.Tx, broker *events.Broker, artifact
 
 // latestApprovedReviewQuery selects the newest approval of the document $1 names. Like
 // latestReviewByQuery it reads one row from artifact_reviews_by_artifact_event_seq (migration
-// 0117), the index in ReviewOrder's own order, rather than sorting every review of the document.
+// 0118), the index in ReviewOrder's own order, rather than sorting every review of the document.
 const latestApprovedReviewQuery = `
 	select ` + ReviewColumns + `
 	from artifact_reviews

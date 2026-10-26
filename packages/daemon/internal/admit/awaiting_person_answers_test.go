@@ -599,7 +599,7 @@ var (
 // it before the request was handed back to them. One recorded after it answers the wait, also when
 // its transaction began before the hand-back's and committed after it, so that its time is the
 // earlier one: the issue's event sequence, not Dispatch's time, orders the two. A review carrying
-// no sequence was recorded before Dispatch kept one (its migration 0117), so before every wait,
+// no sequence was recorded before Dispatch kept one (its migration 0118), so before every wait,
 // whatever its time says.
 func TestAChangesRequestGivenBeforeTheWaitBeganAnswersNothingOnTheLivePath(t *testing.T) {
 	for _, tc := range []struct {

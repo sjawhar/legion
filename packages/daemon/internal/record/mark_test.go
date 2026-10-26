@@ -6,7 +6,7 @@ import (
 )
 
 // A wait the daemon records starts at a sequenced event or read, and Dispatch has given every
-// review and every event a sequence since its migration 0117, so an act it shows with no sequence
+// review and every event a sequence since its migration 0118, so an act it shows with no sequence
 // was recorded before that start, whatever its time says: a time is the start of the writing
 // transaction on one clock, and a registration's read has no time of its own to compare with. Two
 // sequences compare as sequences, and two marks without one fall back to their times.

@@ -534,10 +534,11 @@ These arrive as messages on the Dispatch issue, and the architect is told:
   decision that needs your authority.
 - **`Pull request #<n> reached max_fix_attempts=3.`** A check or workflow the base branch requires
   stayed red through three fix attempts. Red CI within the attempt that ran the count out (the
-  counted head and every head pushed on top of it until a push lands on a head CI judged green) no
-  longer sends the work back by itself, so the issue waits in testing, review, acceptance, retro or merging for
-  the architect, or for a worker's own decision such as a reviewer's request for changes. A `READY`
-  is still withdrawn on red CI.
+  counted head and every head pushed on top of it until a push lands on a head CI judged green, or
+  on a settled head whose base branch requires no check and no workflow; such a push raises no
+  count) no longer sends the work back by itself, so the issue waits in testing, review, acceptance,
+  retro or merging for the architect, or for a worker's own decision such as a reviewer's request
+  for changes. A `READY` is still withdrawn on red CI.
 - **A review round that no review decides.** Legion's reviewer must approve the head or request
   changes; a plain comment leaves the issue in `needs_review`, and the architect asks the reviewer
   for the decision. Only the review App or an account with write access to the repository decides a
@@ -605,14 +606,17 @@ workflows the base branch requires:
 legion state --config legion.yaml --json | jq '.issues["<KEY>"].pullRequest'
 ```
 
-No `checksVerdict` on a pull request whose checks have settled means the daemon has not read the
-base branch's required checks yet, or a required workflow's run on the head is still going, has
-not happened, or has not been read since the head settled. A head with no verdict holds nothing
-back - `READY` reads no check of it, and GitHub decides the merge under the base branch's own
-rules - it is only that Legion sends the work nowhere on it. Its log names each read GitHub
-refused,
-with the repository, the pull request and the HTTP status (`read the checks a pull request's base
-branch requires`); the daemon reads again every two minutes.
+No `checksVerdict` on a pull request whose checks have settled has one of these causes: the base
+branch requires no check and no workflow, so the daemon judges nothing there and a failed check
+sends nothing back; the daemon has not read the base branch's required checks yet; a required check
+was cancelled, or the head's checks settled without it; or a required workflow's run on the head is
+still going, has not happened, or has not been read since the head settled. The absent value alone
+does not tell these apart: read on GitHub what the base branch requires and the head's checks. A
+head with no verdict holds nothing back - `READY` reads no check of it, and GitHub decides the merge
+under the base branch's own rules - it is only that Legion sends the work nowhere on it. The
+daemon's log names each read GitHub refused, with the repository, the pull request and the HTTP
+status (`read the checks a pull request's base branch requires`); the daemon reads again every two
+minutes.
 
 ## A repository change was not applied
 

@@ -21,7 +21,7 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   person (requesting approval again, or a thread reply that leaves the turn with them) starts the
   next wait and returns the slot; the controller skill reads the new `awaiting-person` notice. The
   strict state reader refuses a 36 state, and a 36 plugin refuses this one. Install this release
-  with a `legion` built from the same commit. Dispatch (migration 0117) deploys before that daemon
+  with a `legion` built from the same commit. Dispatch (migration 0118) deploys before that daemon
   (its migration 0051).
 - The skill-scenarios rig (`scripts/skill-scenarios/`, not shipped in the package) measures how
   agents write Dispatch specs:
@@ -41,6 +41,11 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 - `rig.sh judge-omp` runs each judge in a Docker container that sees only the judge's own
   directory. On the gateway route, the gateway's key command runs on the host once for each judge,
   and the container gets only its token, which is removed when the judge ends.
+- The `legion-architect` skill this plugin ships says a project may import its architecture
+  model from several source repositories: a root's `.dispatch/architecture/<id>.md` file goes in
+  the branch of the source whose repository holds it, `parent` and `depends_on` name components of
+  that same source, an id must be one no other source of the project uses, and
+  `dispatch architecture-sync --repo <owner/name>` imports one source alone (INFRA-391).
 - Daemon API contract 36 (INFRA-229): `legion state` and the controller's `read_state` carry
   `state` on an issue's pull request, its `open`, `merged` or `closed`. An architect's acceptance
   is refused while an issue beneath it is still in the workflow and a merged root's close waits

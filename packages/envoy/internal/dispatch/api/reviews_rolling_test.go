@@ -15,7 +15,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
-// previousReleaseReview writes a review in tx exactly as the release before migration 0117 does
+// previousReleaseReview writes a review in tx exactly as the release before migration 0118 does
 // (docs.WriteReview before it kept the sequence): the review row, naming no event_seq, then its
 // artifact.* event appended through the real broker. It returns the row's id and the event.
 func previousReleaseReview(t *testing.T, ctx context.Context, tx pgx.Tx, broker *events.Broker, artifact model.Artifact, version int, state string, reason *string) (string, model.Event) {
@@ -67,7 +67,7 @@ func reviewEventSeq(t *testing.T, database *store.Store, reviewID string) int64 
 	return seq
 }
 
-// A review the release before migration 0117 writes while a rollout (or a rollback) runs both
+// A review the release before migration 0118 writes while a rollout (or a rollback) runs both
 // releases names no event_seq. It is newer than the review this release wrote before it, and the
 // approval read must say so: the migration's trigger gives it its event's sequence at its commit.
 // Without the trigger it would rank below the sequenced review (`event_seq desc nulls last`), so a
@@ -200,7 +200,7 @@ func TestTheReviewSequenceTriggerTouchesOnlyItsOwnTransactionsReview(t *testing.
 // first fences the owner's events by. The trigger must still take only its own transaction's event:
 // here another transaction committed, at the review's transaction's start time, an event of the
 // same type, document and version that no review holds (such as one whose review committed before
-// migration 0117, which no trigger sequenced). Matched by time alone, the review would take that
+// migration 0118, which no trigger sequenced). Matched by time alone, the review would take that
 // older event, the oldest one no review holds; it takes its own.
 func TestTheReviewSequenceTriggerTakesNoEventOfATransactionStartedAtTheSameMoment(t *testing.T) {
 	handler, database, deps := newTestServer(t, testServerOptions{})

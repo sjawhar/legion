@@ -12,6 +12,13 @@
   `notifications.role.legion-<project>-controller` — in place of the retired `backlog-order`
   address, and says to raise a wrong order on the issue itself where no Legion controller runs
   (INFRA-188).
+- The `dispatch` command's `architecture-sync` imports every architecture source of the project,
+  one per repository, and prints a line for each, or with `--repo <owner/name>` that one source
+  alone (INFRA-391). Against a Dispatch older than this release,
+  `dispatch architecture-sync --project <KEY>` falls back to that server's single-source sync and
+  prints its one line, and `--repo` needs a Dispatch of this release. The `dispatch` skill this
+  plugin ships says an issue's component ids may come from any of its project's source
+  repositories, and its issues reference gives the per-source output and `--repo`.
 
 ### Fixed
 
@@ -104,6 +111,12 @@
   code 0.
 
 ### Changed
+
+- The `envoy` skill this plugin ships and the `envoy_publish` description say a team topic, any
+  `notifications.` topic the stream does not store, reaches a session on a serve port through its
+  machine's listener when that listener subscribes to every topic (`ENVOY_SUBSCRIBE_ALL_TOPICS=1`;
+  the shared hub's listener does not), where they said such a session received none. A session of
+  this plugin holds its own NATS connection and receives such a topic as before (INFRA-122).
 
 - The `envoy` skill is rewritten to the minimum text that carries its instructions (INFRA-353),
   from 21,146 bytes to about 7,500, with the delivery fields, role-claim lifetime, Legion lanes,

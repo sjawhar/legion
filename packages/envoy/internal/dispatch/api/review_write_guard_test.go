@@ -16,10 +16,10 @@ var (
 )
 
 // TestOnlyWriteReviewWritesReviews enforces what docs.ReviewOrder's `event_seq desc nulls last`
-// rests on: every review committed after migration 0117 carries the sequence of its artifact.*
+// rests on: every review committed after migration 0118 carries the sequence of its artifact.*
 // event, so a row without one is older than every row with one. docs.WriteReview inserts the row
 // and then writes the sequence of the event it appended; the migration's trigger covers the
-// release before 0117 alone, and only when the inserting transaction appended that event on the
+// release before 0118 alone, and only when the inserting transaction appended that event on the
 // document's owner. A review inserted anywhere else, with no event or with the event appended
 // another way, would commit unsequenced and read as older than every sequenced review, so a
 // person's newest approval or changes request would lose to the one before it; and an update

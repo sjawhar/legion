@@ -6,7 +6,7 @@ import (
 	"testing"
 )
 
-// reviewOrderIndex is the index migration 0117 adds in docs.ReviewOrder's own order.
+// reviewOrderIndex is the index migration 0118 adds in docs.ReviewOrder's own order.
 const reviewOrderIndex = "artifact_reviews_by_artifact_event_seq"
 
 // The newest-review reads take one row in ReviewOrder: the approval an approval request names and

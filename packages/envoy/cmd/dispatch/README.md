@@ -383,11 +383,12 @@ What the two processes share, and what each keeps to itself:
 
 **Two processes do not share a live document session.** Durable convergence is unconditional:
 every edit is appended under the document's advisory lock, Yjs updates commute, and the stored
-history is the union of them, so no edit is lost whichever process took it, and no process writes
-a version, a settlement or an ask retraction from a document state it does not hold
-(`ErrRoomBehindHead`). What is per-process is the live room: while a room is resident in one
-process it does not receive the other's updates, so presence and cursors show only the peers on
-that process. A write committed elsewhere closes the room within a notification round trip
+history is the union of them, so no edit is lost whichever process took it, no process writes a
+settlement or an ask retraction from a document state it does not hold (`ErrRoomBehindHead`), and
+a version whose room is behind the head is rendered from the stored document (`storedTree`). What
+is per-process is the live room: while a room is resident in one process it does not receive the
+other's updates, so presence and cursors show only the peers on that process. A write committed
+elsewhere closes the room within a notification round trip
 (`dispatch_doc_changed`, `docs/stale_room.go`), unless that room was evicted less than
 `staleRoomEvictInterval` (two seconds) ago, in which case its notification is refused and the
 room is re-examined when that window ends — the case the trailing write of an editing burst
@@ -425,7 +426,7 @@ ships no earlier than the next release, once no running build reads the old shap
 
 A migration that cannot be written that way is a stop-the-world migration: it is deployed with no
 server of the earlier release running, and that is an exception named in the pull request, not a
-default (`0113` below was one). The pre-deploy census ("Pre-deploy census" below) is unchanged by
+default (`0113` and `0117` below are the two). The pre-deploy census ("Pre-deploy census" below) is unchanged by
 that rule and still applies to every migration: it is taken before any migration of the release
 applies, and a census that refuses fails the deploy before the service moves. The rule in brief
 is `internal/dispatch/store/README.md`, beside the migrations directory rather than in it, since
@@ -663,7 +664,49 @@ image and confirms the stop before it reads the schema, and when the schema has 
 the previous image runs against, it refuses to start that image again and exits `1` for a forward
 recovery.
 
-Migration `0117_artifact_reviews_event_seq` adds `artifact_reviews.event_seq`, the sequence of the
+Migration `0117_architecture_sources_per_repo` lets a project import its components from more than
+one repository (`packages/envoy/AGENTS.md`). `architecture_sources` gains `id`, which names a
+source within its project, and its primary key moves from `(project_key)` to `(project_key, id)`,
+with a unique index on `(project_key, repo)`, so a repository is a source of a project at most
+once. `components` gains `source_id` and a foreign key on `(project_key, source_id)` to its
+source's row, `on delete cascade`, so deleting a source deletes its components. Both columns are
+added with the constant default `0`, which rewrites no row, and the default is then dropped:
+every existing source reads `id` 0, every existing component `source_id` 0 (its project's one
+existing source), and a source added later gets an `id` from 1 on. It takes `architecture_sources`
+and `components` in `ACCESS EXCLUSIVE` first and holds both to commit. Its census counts the
+components whose project has no source, the rows the foreign key would refuse:
+
+```sql
+select count(*) from components c
+where not exists (select 1 from architecture_sources s where s.project_key = c.project_key);
+```
+
+Only direct SQL writes such a component: the importer writes components under their source's row
+lock, and deleting a source deletes its components. A census that refuses on it is repaired on the
+release still serving, before the deploy, by deleting them:
+`delete from components c where not exists (select 1 from architecture_sources s where s.project_key = c.project_key)`;
+then take the census again.
+
+**`0117` is a stop-the-world migration: deploy it with no server of the earlier release running,
+and never start a release older than `0117` over it again.** Stop the earlier release, or scale it
+to zero, before the new release boots and migrates: a Kubernetes Deployment's
+`strategy: Recreate`, which `envoy-infra:gcp:Dispatch` uses at its default one replica
+(`packages/envoy/infra/README.md`); a deployment running more than one replica, which rolls, is
+scaled to zero first. The compose auto-deployer above stops the old container before it starts the
+new one. A failed deploy recovers forward, not by rolling the image back. The earlier release does
+not work over the new schema, and nothing at boot stops it from serving:
+
+- Its save of a project's source upserts `on conflict (project_key)`, which no unique index covers
+  once `0117` commits, so Postgres refuses the statement and the save answers `500`.
+- Its import takes one source row of the project as the project's one source, whichever row
+  Postgres returns first. When the model changed, it deletes every component of the project, every
+  source's, and inserts that source's components with no `source_id`, which has no default. A model
+  holding a component fails on the not-null column and rolls back, and its failure record writes
+  the error onto every source row of the project. A model holding none (no file in that branch's
+  `.dispatch/architecture/`) commits the delete, and every source's components are gone.
+- Its delete removes every source of the project and every component of the project.
+
+Migration `0118_artifact_reviews_event_seq` adds `artifact_reviews.event_seq`, the sequence of the
 `artifact.*` event each review appended on its document's owner, which `docs.WriteReview` writes in
 the transaction that appends the event and the approval read returns as `seq`
 (`packages/envoy/AGENTS.md`). It is nullable, so a review recorded before it reads with no `seq`,
@@ -675,7 +718,7 @@ inline check would read every row of the table while it held that lock, and `not
 refuses every row written or updated after it. Nothing validates it later — every row below the
 migration carries no sequence at all — so the constraint stays `not valid` for good.
 
-`0117` also creates `artifact_reviews_by_artifact_event_seq` on `(artifact_id, event_seq desc nulls
+`0118` also creates `artifact_reviews_by_artifact_event_seq` on `(artifact_id, event_seq desc nulls
 last, created_at desc, id desc)`, `docs.ReviewOrder` per document, so the newest-review reads
 (`docs.LatestApprovedReview`, `latestReviewBy`) take one index entry rather than sort every review
 of the document. It is a plain `create index`, not `concurrently`: the runner applies a migration
@@ -684,14 +727,14 @@ cannot run, and no migration of the set uses it. The build takes no lock the mig
 already hold — its `alter table` statements hold `artifact_reviews`' `ACCESS EXCLUSIVE` — and holds
 it while it reads the table's rows, which the census bounds by its 1 GiB limit; the census still
 answers `0`, since the build refuses and rewrites no row. `artifact_reviews_by_artifact` (`0014`,
-`created_at desc, id desc`) stays, because the release before `0117` orders by it while it serves.
+`created_at desc, id desc`) stays, because the release before `0118` orders by it while it serves.
 
-The release before `0117` keeps serving beside it while the app Deployment rolls (below), and again
+The release before `0118` keeps serving beside it while the app Deployment rolls (below), and again
 for as long as a rollback lasts, and it inserts every review naming no `event_seq`. Left null, such
 a review — newer than every sequenced one — would rank below them all in `docs.ReviewOrder`
 (`event_seq desc nulls last`): a person's approval an old pod wrote would read back as the changes
 requested before it, and a changes request an old pod wrote would be overridden by the approval
-before it. So `0117` also adds a trigger, which the rule below allows a migration to add:
+before it. So `0118` also adds a trigger, which the rule below allows a migration to add:
 `artifact_reviews_event_seq`, a constraint trigger on `artifact_reviews` deferred to the commit, gives
 every review inserted without a sequence, by either release, the sequence of the `artifact.*` event
 its own transaction appended for it (its type, document and version, among the events on the
@@ -701,14 +744,14 @@ commit). An event is the transaction's own when it carries the transaction's `no
 through `pg_xact_status`, so a savepoint's event counts and another transaction's does not, even
 one that started in the same microsecond and so shares `now()`). It is deferred because every
 release inserts a review before it appends the event.
-Every row that carries no sequence was therefore committed before `0117`, whose `ACCESS EXCLUSIVE`
+Every row that carries no sequence was therefore committed before `0118`, whose `ACCESS EXCLUSIVE`
 lock waits out every transaction that has inserted a review, and every sequenced row is newer.
-The trigger is on `artifact_reviews`, the table `0117` already locks, so the migration holds no
+The trigger is on `artifact_reviews`, the table `0118` already locks, so the migration holds no
 second lock: a trigger on `events` would need that table's `SHARE ROW EXCLUSIVE` while holding
 `artifact_reviews`, against a transaction that appended an event and then waits to insert a
 review (a carried approval), and the census holds every table a migration names to its 1 GiB limit.
 
-`0117` is additive — a nullable column, a `not valid` check, an index and a trigger — so rolling Dispatch
+`0118` is additive — a nullable column, a `not valid` check, an index and a trigger — so rolling Dispatch
 back past it is an image rollback alone, with no schema to restore and no backup to take for it:
 the release before it runs over the new schema unchanged, and the trigger gives every review that
 release writes its sequence. The auto-deployer is the exception, by its own rule above: once the

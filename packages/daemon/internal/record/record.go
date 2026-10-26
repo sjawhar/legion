@@ -222,7 +222,7 @@ type EventMark struct {
 // After says whether m comes after start: by sequence when both carry one, otherwise by time when
 // both carry one, strictly, so an event at start's own time is not after it. A start with a
 // sequence is never followed by an m without one: Dispatch has given every review and every event
-// a sequence since its migration 0117 (a review written by any release, through the trigger that
+// a sequence since its migration 0118 (a review written by any release, through the trigger that
 // migration adds), and every wait this daemon records starts at a sequenced event or read, so an
 // act Dispatch shows with no sequence was recorded before it. The time fallback is otherwise blind
 // to two events whose transactions began at one instant, and to an event whose transaction began
@@ -408,7 +408,8 @@ type PullRequest struct {
 	// have not arrived yet. A push that may change code is spent once its head arrives.
 	Pushes []ClassifiedPush
 	// HeadCounted is the head the fix-attempt count last counted, a push onto a red verdict, kept
-	// across every head pushed on top of it until one is pushed onto a green verdict
+	// across every head pushed on top of it until one is pushed onto a green verdict, or onto a
+	// settled head whose base branch requires no check and no workflow
 	// (classify.AdvancePullRequestHead); empty when no such attempt stands. The fix-attempt cap holds
 	// a red within that attempt (classify.FixAttemptCapHolds).
 	HeadCounted string
@@ -424,7 +425,8 @@ type PullRequest struct {
 	// checks and its branch protection's), as the daemon last read them from GitHub
 	// (intake.RequiredChecks). Only a required check or workflow decides the checks verdict
 	// (classify.HeadVerdict), so nil, a set never read, decides none; an empty set, with no
-	// required workflow, is a base that requires nothing, where nothing is red.
+	// required workflow, is a base that requires nothing, which gives the head no verdict and where
+	// nothing is red.
 	Required []string
 	// Workflows is each workflow the base branch's rulesets require to succeed, read with Required,
 	// and the result of its latest run on WorkflowsHead, the head the daemon read the runs of; empty
