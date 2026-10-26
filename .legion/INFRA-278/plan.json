@@ -1,0 +1,113 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "INFRA-278",
+  "completed": "2026-10-26T00:52:33Z",
+  "planDocument": "dispatch://INFRA-278/artifact/plan-md",
+  "summary": "Dispatch also publishes a person's ask answer/hand-back/resolution, comment (new/edited/resolved/reopened) and untargeted message on a session-claimed issue to the claimant's notifications.agent.<session> topic (publishClaimantRoute in packages/envoy/internal/dispatch/outbox/publisher.go, claim read at publish time, skipped when a mention of the new comment resolved to the claimant); the ask follower route gets the same mention rule; the Inbox 'Reaches N' panel lists the claimant (via claim) and the route (via route) from new claimant/route fields on GET /api/v1/asks/{id} and askThread; agent-facing docs, the dispatch skill, the dispatch_claim description and the claim result say what a claim now delivers.",
+  "tasks": [
+    "1. R1: publishClaimantRoute + follower-route mention rule in outbox/publisher.go; table test publisher_claimant_test.go (every listed event, cases 2 and 3 shapes, negatives, overlaps, mention rows, a Run-level published_destinations row).",
+    "2. R2 server: claimant and route on GET /api/v1/asks/{id} (api/asks.go:791), askThread (api/inbox.go:29, api/inbox_queries.go:92, issue ask list api/asks.go:702), contracts AskThread/AskRead, routes_table.go description; Go API tests.",
+    "3. R2 web: AskRecipients.tsx rows 'via claim'/'via route' (minimal markup; INFRA-440 redraws them), count, dialog text, AskCard.tsx props, sse.ts refresh of ask-thread on issue.claimed/released/updated, AskRecipients.test.tsx, browser test packages/dispatch/e2e/recipients-claim.e2e.ts, packages/dispatch/AGENTS.md:274.",
+    "4. R3 text: for-agents.md:174-181, envoy.md:99-116, skills/dispatch/SKILL.md:90 and :196, skills/dispatch/references/asks.md:43, packages/envoy/AGENTS.md:2209-2239, dispatch-tools.ts dispatch_claim, dispatch-execute.ts claim result (+ its test), CHANGELOGs (envoy, envoy-client, contracts, pi-envoy, claude-envoy).",
+    "5. Live proof script scripts/e2e/dispatch-claimant-delivery.sh (DATABASE_URL loopback required, optional DISPATCH_BIN, own natsd, Dispatch with NATS on + dev sign-in, cases case3-ask-answer, case2-thread-reply, untargeted-message, controls targeted-message, agent-comment, unclaimed-issue) + scripts/e2e/README.md row.",
+    "6. Simplify pass, PR body with Dispatch: INFRA-278."
+  ],
+  "acceptance": [
+    {
+      "criterion": "A1 case 3: a person's answer to an ask another session opened reaches the claimant's own topic",
+      "surface": "real envoy-dispatch + natsd + rootless Postgres/pgvector",
+      "command": "DATABASE_URL=postgres://postgres@127.0.0.1:5433/claimant?sslmode=disable bash scripts/e2e/dispatch-claimant-delivery.sh -> ok case3-ask-answer; with DISPATCH_BIN built from the PR base -> FAIL"
+    },
+    {
+      "criterion": "A2 case 2: a person's reply in a person-rooted thread on the issue spec reaches the claimant",
+      "surface": "same",
+      "command": "same run -> ok case2-thread-reply; base binary -> FAIL"
+    },
+    {
+      "criterion": "A3 every listed event type, negatives, one-copy overlaps, mention-only for claimant and followers, edits not suppressed",
+      "surface": "Go suite on real Postgres",
+      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=<url> go test -count=1 -v -run Claimant ./internal/dispatch/outbox/ (no SKIP) then ./internal/dispatch/...; tester mutations of each R1 condition fail a row"
+    },
+    {
+      "criterion": "A4 live controls",
+      "surface": "live script",
+      "command": "same run -> ok targeted-message, ok agent-comment, ok unclaimed-issue"
+    },
+    {
+      "criterion": "A5 Reaches panel shows claimant (via claim) and route (via route), counts them, updates on release, dialogs true",
+      "surface": "Dispatch browser suite",
+      "command": "cd packages/dispatch && bun run e2e -- recipients-claim.e2e.ts passes at head, fails on base build; both runs quoted on the PR"
+    },
+    {
+      "criterion": "A6 ask reads carry claimant and route",
+      "surface": "live script's Dispatch",
+      "command": "curl GET /api/v1/asks/{id} (agent token) and GET /api/v1/inbox (dev sign-in cookie)"
+    },
+    {
+      "criterion": "A7 agent-facing text is true",
+      "surface": "repository text + checkout CLI",
+      "command": "grep -rn 'Claiming does not deliver' skills docs packages -> nothing; dispatch claim via checkout CLI against the live Dispatch prints the new sentence"
+    },
+    {
+      "criterion": "A8 production after merge",
+      "surface": "production Dispatch",
+      "command": "theorem-labs/agent-infra legion/checks/dispatch-production-check.sh --commit <merge> --page / --route /api/v1/inbox --route /api/v1/asks/<id>; then claimant/route on GET /api/v1/asks/<id>; a person's post-deploy event on an issue whose claimant is not follower/author/route found in the claimant's transcript as dispatch-<event id>; pending while Dispatch does not run the merge (INFRA-64)"
+    }
+  ],
+  "requiredSkills": {
+    "implement": [
+      "legion-worker: phase rules, PR body template, proof definition and simplify pass (references/pr-body.md), push and handoff procedure.",
+      "dispatch: the change edits skills/dispatch (SKILL.md, references/asks.md) and the dispatch CLI's claim text; its wording rules and the skills guard apply.",
+      "ce-simplify-code: the simplify pass pr-body.md requires on the settled diff."
+    ],
+    "test": [
+      "legion-worker: tester charter, independent proof on a production-like surface, reading CI rather than rerunning it (references/pr-body.md).",
+      "dispatch: driving the checkout's dispatch CLI (claim, ask, comment) against the live script's Dispatch to exercise the claimant route and the claim result text."
+    ],
+    "review": [
+      "legion-worker: reviewer round order and approval of the head by SHA (references/merge-gate.md), review-thread handling (references/review-threads.md).",
+      "dispatch: judge the skill and docs edits against the dispatch skill's writing rules and the routing contract they describe."
+    ]
+  },
+  "gapAnalysis": {
+    "findings": [
+      {
+        "finding": "The claimant route must not reintroduce duplicates for a mentioned session (for-agents.md:178-179 promises 'arrives once, as the mention').",
+        "answer": "R1 condition 5: on comment.created the claimant route skips a claimant that payload mentions[].session_id resolved to; after plan review round 1 the follower route gets the same rule (it skipped only the actor, publisher.go:507-523). Edits/resolutions/reopens are never suppressed. Table rows cover new comment, thread reply, ask reply, and claimant-also-follower overlap."
+      },
+      {
+        "finding": "The Inbox 'Reaches N' panel (AskRecipients.tsx:73-83) claims to list every recipient but lists followers and subscribers only; the claimant (and the route, already) would be missing.",
+        "answer": "Escalated to the architect, who chose option A (2026-10-26 00:43Z): this PR adds claimant and route to the panel from new fields on the ask reads, with dialog text fixed and SSE refresh, proven by a browser e2e test failing before and passing at head; minimal markup for INFRA-440."
+      },
+      {
+        "finding": "Cases 2 and 3 do not cover the full promised event set or the non-regressions; DB tests skip silently without DISPATCH_TEST_DATABASE_URL.",
+        "answer": "Task 1 table test enumerates every listed event type plus negatives (agent actor, targeted message, no claim, person claim, non-listed person events, project document) and overlaps; A3 requires -v output with no SKIP on a real Postgres; the live script proves API -> outbox -> real NATS for cases 2, 3, untargeted message and three controls, without claiming INFRA-439's offline delivery."
+      },
+      {
+        "finding": "Named doc edits miss skills/dispatch/SKILL.md:90 ('Claiming does not deliver the issue's comments to you') and packages/envoy/AGENTS.md:2209-2239.",
+        "answer": "Both added to R3, plus references/asks.md:43, the dispatch_claim tool description, packages/dispatch/AGENTS.md:274 and CHANGELOGs; A7 greps the categorical sentence away."
+      },
+      {
+        "finding": "Historical production assertions in the spec are unverified here.",
+        "answer": "The plan bases proof on reproducible recipient topologies and states it does not claim the change would have prevented the historical cases."
+      }
+    ]
+  },
+  "planReview": {
+    "verdict": "approved",
+    "rounds": 2
+  },
+  "specDepartures": [],
+  "decisions": [
+    "Claimant read at publish time (one query per notifying person event of a listed type); a retry follows the current claim; no migration.",
+    "Mention suppression reads comment.created payload mentions[].session_id; no new payload field.",
+    "Not routed to the claimant: person ask.edited/ask.opened, artifact.version, suggestion.* (outside the architect's list).",
+    "Claim result text changes; the generic notSubscribed hint stays (it describes every event).",
+    "A claimant who already follows the ask is listed once, as a follower; dialog text accounts for the claim."
+  ],
+  "risks": [
+    "INFRA-439 and INFRA-440 edit docs/site Envoy pages and AskRecipients.tsx: textual conflicts only.",
+    "Once INFRA-439 replays missed events, a resumed parked Legion architect will also receive person events published to its topic while parked, which INFRA-251 also sends to the controller."
+  ]
+}
