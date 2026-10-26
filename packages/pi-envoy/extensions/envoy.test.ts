@@ -1568,6 +1568,35 @@ describe("envoy OMP extension", () => {
     expect(session.fixture.deliveries).toEqual([]);
   });
 
+  test("a rebutted dispatch command, recorded with its override as a trailing comment, does not re-arm the check", async () => {
+    const { default: envoyExtension } = await import("./envoy.ts?ask-nudge-rearm-rebutted");
+    const session = await bootAskNudge(envoyExtension, "ses_nudge_rearm_rebutted", () => ({}), {
+      selfCheck: async () => ({ replyText: "PROCEEDING" }),
+    });
+
+    await session.userTurn();
+    await session.stop();
+    expect(session.asked).toHaveLength(1);
+
+    // AskGate hands a rebutted command back with its override moved into a shell comment at the end
+    // of its first line, and Oh My Pi records the call as handed back: it is still one `dispatch`
+    // command, the agent talking to the humans, so it owes nothing.
+    await session.dispatch(
+      "dispatch comment --issue DSP-1 --body hi # --advisor-rebuttal 'the person asked for it'",
+      "dispatch_comment",
+      { issue: "DSP-1", comment: "c-1" }
+    );
+    await session.stop();
+    await session.dispatch(
+      "dispatch comment --issue DSP-1 --body-file - <<'EOF' # --advisor-rebuttal 'r'\nLooks right.\nEOF",
+      "dispatch_comment",
+      { issue: "DSP-1", comment: "c-2" }
+    );
+    await session.stop();
+    expect(session.asked).toHaveLength(1);
+    expect(session.fixture.deliveries).toEqual([]);
+  });
+
   test("a bash command that is not a dispatch command owes a check, ledger or not", async () => {
     const { default: envoyExtension } = await import("./envoy.ts?ask-nudge-rearm-ls");
     const session = await bootAskNudge(envoyExtension, "ses_nudge_rearm_ls", () => ({}), {

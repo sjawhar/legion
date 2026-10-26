@@ -30,8 +30,11 @@
 //     word is literal: outside quotes it holds only letters, digits and `._/+@%:,=-` (so no `$`,
 //     `{`, `}`, backtick, glob character, `~` or backslash), and inside double quotes no `$`,
 //     backtick or backslash. The one here-document has a quoted delimiter (`'EOF'` or `"EOF"`)
-//     and opens on the command's first line, before or after the one `2>&1`. Nothing else: no
-//     assignment, other statement, pipe, `;`, `||`, `&`, other redirect or line continuation.
+//     and opens on the command's first line, before or after the one `2>&1`. A shell comment may
+//     end that line only when it holds override flags alone (`# --advisor-rebuttal '<line>'`, the
+//     form a rebutted command is handed back in), read as those overrides. Nothing else: no
+//     assignment, other statement, pipe, `;`, `||`, `&`, other redirect, other comment or line
+//     continuation.
 //     The subcommand is `ask`, `message`, `edit-ask`, `comment`, `doc-edit`, `request-approval` (its
 //     `summary` is what the person approves), `issue` with `--spec` or `--spec-file`, or
 //     `artifact` unless its literal `--name` and literal `--path` both show it is no markdown
@@ -148,7 +151,8 @@
 //     on the outer `write` event (before the device validates its arguments), the flag from the
 //     `bash` command whatever the gate decides (the CLI would refuse it) and put back as a shell
 //     comment at the end of the command's first line, so the agent's record of its call still
-//     shows it; the call runs unasked, and the agent is told the override as it sent it and that
+//     shows it; that command sent again reads the comment as the same override and comes back
+//     the same. The call runs unasked, and the agent is told the override as it sent it and that
 //     its rebuttal was recorded. A device's record lacks the field, and its note says AskGate
 //     removed it.
 //     At most 64 unspent device rebuttals are remembered.
@@ -633,13 +637,21 @@ const BLANK_LINE = /^[ \t]*$/;
 /** Inside double quotes bash still expands `$` and backticks and interprets `\`. */
 const REFUSED_DOUBLE_QUOTED = "$`\\";
 
-/** A command's first line, without its here-document opener and its blanks, and where that text
- * starts in the command, when the command is that one line, optionally fed one quoted
- * here-document on stdin; undefined for any other command. `stderr` is where a `2>&1` after the
- * opener starts and ends in the command. */
-function headLine(
-  command: string
-): { text: string; at: number; heredoc?: true; stderr?: [number, number] } | undefined {
+/** A command's first line, without its here-document opener, its override comment and its blanks,
+ * and where that text starts in the command, when the command is that one line, optionally fed one
+ * quoted here-document on stdin; undefined for any other command. `stderr` is where a `2>&1` after
+ * the opener starts and ends in the command; `comment` is the override comment (`overrideComment`)
+ * that ends the first line: where it starts, with the blanks before it, and ends in the command,
+ * and its words. */
+function headLine(command: string):
+  | {
+      text: string;
+      at: number;
+      heredoc?: true;
+      stderr?: [number, number];
+      comment?: { span: [number, number]; words: Word[] };
+    }
+  | undefined {
   if (hasControlCharacter(command)) return undefined;
   // Blank lines before the head and after the command's last line run as no command, so they are
   // dropped whole. No other line is trimmed: bash ends a here-document only at a line that is
@@ -651,7 +663,17 @@ function headLine(
   const last = all.findLastIndex((line) => !BLANK_LINE.test(line));
   const lines = all.slice(first, last + 1);
   const lineAt = all.slice(0, first).reduce((sum, line) => sum + line.length + 1, 0);
-  let head = lines[0] ?? "";
+  const firstLine = lines[0] ?? "";
+  const found = overrideComment(firstLine);
+  if (found === null) return undefined;
+  const comment =
+    found === undefined
+      ? undefined
+      : {
+          span: [lineAt + found.start, lineAt + firstLine.length] as [number, number],
+          words: found.words,
+        };
+  let head = found === undefined ? firstLine : firstLine.slice(0, found.start);
   let stderr: [number, number] | undefined;
   let heredoc = false;
   if (lines.length > 1) {
@@ -676,7 +698,41 @@ function headLine(
     at: lineAt + leading,
     ...(heredoc ? { heredoc: true as const } : {}),
     ...(stderr ? { stderr } : {}),
+    ...(comment ? { comment } : {}),
   };
+}
+
+/**
+ * The comment that ends a command's first line when it holds override flags alone, the form
+ * `keepOverrideVisible` hands a rebutted command back in (`# --advisor-rebuttal '<line>'`), so the
+ * gate reads its own output again as the rebuttal it carries. Bash reads a `#` that starts a word
+ * (at the line's start or after an unquoted blank, outside quotes) and the rest of the line as a
+ * comment; a `#` inside a word or inside quotes is none. Its words must be literal, and each one
+ * part of an override `splitRebuttal` takes. Returns where the comment starts, with the blanks
+ * before it, and its words; undefined for a line with no comment, which the literal grammar reads
+ * as it does any line, and for a backslash before a `#`, an escape the grammar refuses; null for
+ * any other comment, which is no form the gate reads.
+ */
+function overrideComment(line: string): { start: number; words: Word[] } | null | undefined {
+  let quote: '"' | "'" | undefined;
+  for (let index = 0; index < line.length; index++) {
+    const char = line[index];
+    if (quote !== undefined) {
+      if (char === quote) quote = undefined;
+      else if (char === "\\" && quote === '"') return undefined;
+      continue;
+    }
+    if (char === "\\") return undefined;
+    if (char === "'" || char === '"') quote = char;
+    else if (char === "#" && (index === 0 || line[index - 1] === " " || line[index - 1] === "\t")) {
+      const text = line.slice(index + 1);
+      if (!literalWords(text)) return null;
+      const words = headWords(text);
+      if (words.length === 0 || splitRebuttal(words).removed.size !== words.length) return null;
+      return { start: line.slice(0, index).replace(/[ \t]+$/, "").length, words };
+    }
+  }
+  return undefined;
 }
 
 // AskGate's own additions to those rules: the program may be a literal path to `dispatch` as well
@@ -760,7 +816,8 @@ const STDERR_TO_STDOUT = /[ \t]+2>&1$/;
  * line ends, past a trailing `2>&1`, and where a `2>&1` after a here-document opener lies (both
  * `2>&1` forms are left out of the dry-run, whose stdout must be the CLI's JSON). `leadingCd` is
  * that `cd`'s path when the `cd` opens the whole call, which is where Oh My Pi's bash tool looks
- * for one to take as the call's directory (`extractLeadingCdTarget` at the pin). */
+ * for one to take as the call's directory (`extractLeadingCdTarget` at the pin). `comment` is the
+ * override comment that ends the first line (`overrideComment`), after everything else on it. */
 interface DispatchHead {
   head: string;
   at: number;
@@ -769,6 +826,7 @@ interface DispatchHead {
   end: number;
   stderr?: [number, number];
   heredoc?: true;
+  comment?: { span: [number, number]; words: Word[] };
 }
 
 function dispatchCommandHead(command: string): DispatchHead | undefined {
@@ -809,6 +867,7 @@ function dispatchCommandHead(command: string): DispatchHead | undefined {
     end: at + text.length,
     ...(line.heredoc ? { heredoc: true as const } : {}),
     ...(line.stderr ? { stderr: line.stderr } : {}),
+    ...(line.comment ? { comment: line.comment } : {}),
   };
 }
 
@@ -992,8 +1051,11 @@ export interface ScopedCommand {
 
 /**
  * An override the agent sent: the line the entry records, and the override as the agent wrote it.
- * The gate removes the override before the call runs, so the call the agent reads back lacks it;
- * the acknowledgement quotes `sent` so the agent sees it was the gate that removed it.
+ * The gate keeps the override out of what the call hands its program, and the surface decides what
+ * the agent reads back: a command's flags go back as one shell comment at the end of its first line
+ * (`keepOverrideVisible`), so dispatch never sees them and the agent's record of the call still
+ * shows them; a device's field is removed before the call runs, so the record lacks it. The
+ * acknowledgement quotes `sent` either way, so the agent sees what it sent and where it went.
  */
 type Rebuttal = { line: string; sent: string };
 
@@ -1091,19 +1153,30 @@ function fileInputs(
 /**
  * The `bash` command as a scoped `dispatch` call, or undefined for any other command. Only the
  * literal grammar of one call is read (`dispatchCommandHead`). A call in any other form is no
- * scoped call; the gate then refuses it when `unreadableDispatchWrite` finds a write in it.
+ * scoped call; the gate then refuses it when `unreadableDispatchWrite` finds a write in it. The
+ * override comment that ends a call's first line is read as overrides after the call's own flags,
+ * and is left out of `command`, as an override flag is: the gate puts every override back as one
+ * comment (`keepOverrideVisible`), so a rebutted command it handed back, sent again, carries the
+ * same rebuttal and comes back the same.
  */
 export function scopedCommand(command: unknown): ScopedCommand | undefined {
   if (typeof command !== "string") return undefined;
   const found = dispatchCommandHead(command);
   if (found === undefined) return undefined;
-  const { head, at, cdEnd, leadingCd, end, heredoc, stderr } = found;
+  const { head, at, cdEnd, leadingCd, end, heredoc, stderr, comment } = found;
+  // Every position `found` names lies before the comment, so it holds in the text without it.
+  const text =
+    comment === undefined
+      ? command
+      : `${command.slice(0, comment.span[0])}${command.slice(comment.span[1])}`;
   const all = headWords(head);
   const lead = cliProgramLength(all);
   const program = all.slice(0, lead);
   const [name, ...flags] = all.slice(lead);
   if (name === undefined || !reviewedWrite(name.value, flags)) return undefined;
-  const { rebuttal, removed } = splitRebuttal(flags);
+  // Each comment word is part of an override (`overrideComment`), and none is the value of a flag
+  // before it, since each override starts with `--`: `removed` takes them all.
+  const { rebuttal, removed } = splitRebuttal([...flags, ...(comment?.words ?? [])]);
   const kept = flags.filter((_, index) => !removed.has(index));
   const words = [...program, name, ...kept];
   const positioned: Word[] = [];
@@ -1130,16 +1203,16 @@ export function scopedCommand(command: unknown): ScopedCommand | undefined {
   // stdout holds.
   const before =
     cdEnd === undefined
-      ? command.slice(0, at)
-      : `${command.slice(0, cdEnd)} >/dev/null${command.slice(cdEnd, at)}`;
+      ? text.slice(0, at)
+      : `${text.slice(0, cdEnd)} >/dev/null${text.slice(cdEnd, at)}`;
   const after =
     stderr === undefined
-      ? command.slice(end)
-      : `${command.slice(end, stderr[0])}${command.slice(stderr[1])}`;
+      ? text.slice(end)
+      : `${text.slice(end, stderr[0])}${text.slice(stderr[1])}`;
   return {
     tool: `dispatch_${name.value.replaceAll("-", "_")}`,
     label: `dispatch ${name.value}`,
-    command: `${command.slice(0, at)}${commandHead}${command.slice(at + head.length)}`,
+    command: `${text.slice(0, at)}${commandHead}${text.slice(at + head.length)}`,
     dryRunScript: `${before}${[...program.map((word) => word.raw), name.raw, "--dry-run", ...kept.map((word) => word.raw)].join(" ")}${after}`,
     ...(rebuttal === undefined ? {} : { rebuttal }),
     readsFile: files.inputs.length > 0,
@@ -1151,7 +1224,7 @@ export function scopedCommand(command: unknown): ScopedCommand | undefined {
     ...(leadingCd !== undefined && /^\/+$/.test(leadingCd)
       ? { cdToSessionDirectory: true as const }
       : {}),
-    dirScript: cdEnd === undefined ? "pwd -P" : `${command.slice(0, cdEnd)} >/dev/null && pwd -P`,
+    dirScript: cdEnd === undefined ? "pwd -P" : `${text.slice(0, cdEnd)} >/dev/null && pwd -P`,
   };
 }
 
@@ -2552,18 +2625,21 @@ const SECOND_REVISE =
 /**
  * How the agent overrides a revise on each surface: a key in the device JSON, or a flag on the
  * command. `how` completes a charter revise; `again` completes the rules refusal's "send the call
- * again with"; `note` follows either refusal.
+ * again with"; `fate` completes both refusals' "an override is always sent and recorded, and",
+ * saying what becomes of the override on that surface; `note` follows either refusal.
  */
-type Override = { how: string; what: string; again: string; note?: string };
+type Override = { how: string; what: string; again: string; fate: string; note?: string };
 const DEVICE_OVERRIDE: Override = {
   how: `"${REBUTTAL_KEY}": "<one line>" added to the JSON`,
   what: "field",
   again: `\`"${REBUTTAL_KEY}": "<one line>"\` in its JSON`,
+  fate: "the field is removed before the call runs",
 };
 const COMMAND_OVERRIDE: Override = {
   how: `${REBUTTAL_FLAG} '<one line>' added to its flags`,
   what: "flag",
   again: `\`${REBUTTAL_FLAG} '<one line>'\``,
+  fate: "the flag is kept as a shell comment at the end of the command's first line, so dispatch never sees it",
 };
 /** Oh My Pi runs the tool_call hooks of a whole batch before any call of it, so the dry run reads a
  * named file before a sibling call of the same batch changes it. */
@@ -2579,7 +2655,7 @@ const FILE_OVERRIDE: Override = {
 const DRY_RUN_RAN =
   "To read this call AskGate ran the command it names with `--dry-run`, which sends nothing; the write itself was not sent.";
 const renderRevise = (reason: string, second: boolean, override: Override) =>
-  `AskGate did not send this call.\n${agentFacing(reason)}\nSend the corrected call, or resend this one unchanged with ${override.how} to override; an override is always sent and recorded, and the ${override.what} is removed before sending.${override.what === "flag" ? `\n${DRY_RUN_RAN}` : ""}${override.note ? `\n${override.note}` : ""}${second ? `\n${SECOND_REVISE}` : ""}`;
+  `AskGate did not send this call.\n${agentFacing(reason)}\nSend the corrected call, or resend this one unchanged with ${override.how} to override; an override is always sent and recorded, and ${override.fate}.${override.what === "flag" ? `\n${DRY_RUN_RAN}` : ""}${override.note ? `\n${override.note}` : ""}${second ? `\n${SECOND_REVISE}` : ""}`;
 /** The refusal block mode returns for a call given up without a verdict, by cause. */
 const NO_VERDICT_REFUSAL: Record<"abandoned" | "shutdown", string> = {
   abandoned:

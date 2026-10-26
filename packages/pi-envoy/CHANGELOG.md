@@ -126,7 +126,10 @@
   runs as a shell comment at the end of the command's first line, so dispatch never sees it and
   the agent's record of its call still shows it, and the acknowledgement quotes every override as
   the agent sent it and records every line: told only that the flag was removed, agents read their
-  own call back without it and reported a rebuttal they never wrote. The breaker
+  own call back without it and reported a rebuttal they never wrote. That command sent again is
+  read as the same rebuttal and comes back unchanged, any other comment stays unreadable, and the
+  run-end self-check counts it as the one `dispatch` command it is, so it owes no check. A
+  device's field is removed before the call runs, and both refusals say which happens. The breaker
   counts only the calls the gate refused, so a charter revise in `warn` mode, which sends the
   call, never moves it. It counts each thing apart: each new ask a call opens, or the call as a
   whole when it opens none, so its free pass covers only the thing that was refused twice, and an

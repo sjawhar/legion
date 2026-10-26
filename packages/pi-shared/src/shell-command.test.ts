@@ -92,6 +92,39 @@ function hereDocumentCorpus(): string[] {
       lines(`dispatch x <<'EOF'`, "a", "EOF", blank),
       lines(blank, `dispatch x <<'EOF'`, "a", "EOF"),
     ]),
+    ...commentCorpus(),
+  ];
+}
+
+/** Commands whose head line carries a `#`: the trailing comment AskGate puts an override flag in,
+ * with and without a here-document after it, a comment holding what would be a second command, an
+ * expansion or a here-document opener, a `#` inside quotes and inside a word, a `#` after a
+ * backslash or a Unicode blank, and a comment before a second command. */
+function commentCorpus(): string[] {
+  return [
+    "dispatch comment --issue X-1 --body hi # --advisor-rebuttal 'r'",
+    "dispatch x #c",
+    "dispatch x\t# c",
+    "dispatch x # c; echo SECOND",
+    "dispatch x # $(echo SECOND)",
+    "dispatch x # 'unterminated",
+    "dispatch x 'a # b' # c",
+    'dispatch x "a # b"',
+    "dispatch x '#' c",
+    "dispatch x a#b",
+    "dispatch x \\# c",
+    "dispatch x \\ # c",
+    lines("dispatch x # c", "echo SECOND"),
+    lines("dispatch x # <<'EOF'", "echo SECOND", "EOF"),
+    lines(
+      "dispatch ask --issue X-1 --question-file - <<'EOF' # --advisor-rebuttal 'r'",
+      "a",
+      "EOF"
+    ),
+    lines("dispatch x <<-'EOF' # c", "\ta", "\tEOF"),
+    lines("dispatch x <<'EOF' # c", "a", "EOF", "echo SECOND"),
+    lines("dispatch x <<'EOF'# c", "a", "EOF"),
+    ...UNICODE_BLANKS.map((blank) => `dispatch x${blank}# c`),
   ];
 }
 
@@ -126,6 +159,9 @@ describe("a dispatch command's head", () => {
       lines("dispatch message --body-file - <<A <<'EOF'", "$(jj abandon)", "A", "EOF"),
       lines("dispatch x <<'EOF'", "a", "EOF", "rm -rf /", "EOF"),
       lines("dispatch search --query x # <<'EOF'", "jj abandon", "EOF"),
+      "dispatch x a#b",
+      "dispatch x \\ # c",
+      lines("dispatch x # c", "echo SECOND"),
       "dispatch x \\' ; echo SECOND ; echo \\'",
       lines("dispatch x \\<<'EOF'", "jj abandon", "EOF"),
       lines("dispatch x <<'EOF'\r", "a\r", "EOF\r", "echo RAN"),
@@ -149,6 +185,24 @@ describe("a dispatch command's head", () => {
       )
     ).toBe("dispatch message --issue LEGION-2 --body-file -");
     expect(dispatchCommandHead("dispatch search --query x")).toBe("dispatch search --query x");
+  });
+
+  test("drops the comment that ends the head line, as bash does, and the override AskGate keeps there", () => {
+    expect(
+      dispatchCommandHead("dispatch comment --issue X-1 --body hi # --advisor-rebuttal 'r'")
+    ).toBe("dispatch comment --issue X-1 --body hi");
+    expect(
+      dispatchCommandHead(
+        lines(
+          "dispatch ask --issue X-1 --question-file - <<'EOF' # --advisor-rebuttal 'r'",
+          "a question",
+          "EOF"
+        )
+      )
+    ).toBe("dispatch ask --issue X-1 --question-file -");
+    expect(dispatchCommandHead("dispatch x 'a # b' # c")).toBe("dispatch x 'a # b'");
+    expect(dispatchCommandHead('dispatch x "a # b"')).toBe('dispatch x "a # b"');
+    expect(dispatchCommandHead("dispatch x # c; echo SECOND")).toBe("dispatch x");
   });
 
   test("ends a here-document where bash does: a tab before the delimiter counts only under <<-", () => {
@@ -178,12 +232,13 @@ describe("a dispatch command's head", () => {
   });
 
   // The scan may refuse what bash would run as one command (a CRLF command, an unquoted
-  // delimiter), but it never accepts one bash would read otherwise: the class of the tab-stripped
-  // and whitespace-trimmed terminators, each of which let a here-document swallow the next command.
+  // delimiter, a `#` inside a word), but it never accepts one bash would read otherwise: the class
+  // of the tab-stripped and whitespace-trimmed terminators, each of which let a here-document
+  // swallow the next command, and a comment taken to end where bash does not end it.
   (BASH === null ? test.skip : test)(
     BASH === null
-      ? "matches a real bash on every here-document it accepts (skipped: no bash on PATH)"
-      : "matches a real bash on every here-document it accepts",
+      ? "matches a real bash on every here-document and comment it accepts (skipped: no bash on PATH)"
+      : "matches a real bash on every here-document and comment it accepts",
     () => {
       const corpus = hereDocumentCorpus();
       const accepted = corpus.filter(isDispatchCommand);
@@ -194,6 +249,14 @@ describe("a dispatch command's head", () => {
         lines("dispatch message --issue LEGION-2 --body-file - <<'EOF'", "a body", "EOF")
       );
       expect(accepted).toContain(lines("dispatch x <<-'EOF'", "\tEOF\t", "\t\tEOF"));
+      expect(accepted).toContain(
+        lines(
+          "dispatch ask --issue X-1 --question-file - <<'EOF' # --advisor-rebuttal 'r'",
+          "a",
+          "EOF"
+        )
+      );
+      expect(accepted).toContain("dispatch comment --issue X-1 --body hi # --advisor-rebuttal 'r'");
       expect(accepted.length).toBeGreaterThan(20);
     },
     60_000

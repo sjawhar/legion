@@ -196,8 +196,10 @@ export function parseRuleVerdict(
 export interface RuleOverride {
   /** What to add to the call: a flag on a command, a field in a device's JSON. */
   again: string;
-  /** What that addition is called, which the gate removes before sending. */
-  what: string;
+  /** What becomes of that addition on the call's surface, as the clause that ends "an override is
+   * always sent and recorded, and": a command's flag stays as a shell comment dispatch never sees,
+   * a device's field is removed before the call runs. */
+  fate: string;
   /** A line the refusal ends its override with, as the charter's revise does (a file read before its batch ran). */
   note?: string;
 }
@@ -218,7 +220,7 @@ export function renderRuleRefusal(
     "AskGate did not send this call: a rule refuses a new ask in it.",
     delivered,
     ...[...new Set(rules)].map((rule) => `For "${RULES[rule].label}": ${RULES[rule].fix}`),
-    `If the person is needed anyway, send the call again with ${override.again}, naming which of the person's authority, taste or risk appetite it needs. An override is always sent and recorded, and the ${override.what} is removed before sending.`,
+    `If the person is needed anyway, send the call again with ${override.again}, naming which of the person's authority, taste or risk appetite it needs. An override is always sent and recorded, and ${override.fate}.`,
     ...(override.note ? [override.note] : []),
     ...(second ? [secondRevise] : []),
   ].join("\n");

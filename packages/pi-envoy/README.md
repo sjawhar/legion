@@ -253,8 +253,11 @@ file is not reviewed. A `task` subagent is not reviewed.
 - One `cd <literal path> &&` may stand before it, and one `2>&1` after it.
 - One here-document may feed it, with its delimiter in quotes (`<<'EOF'` or `<<"EOF"`), opened on
   the command's first line, before or after the `2>&1`.
+- A shell comment may end the first line when it holds override flags alone
+  (`# --advisor-rebuttal '<line>'`, the form the gate hands a rebutted command back in), and it is
+  read as those overrides.
 - Nothing else is in the call: no second command, no pipe, no `;`, `&&`, `||` or `&`, no
-  assignment, no other redirect and no line continuation.
+  assignment, no other redirect, no other comment and no line continuation.
 
 **Everything else is unreadable.** A gated write in any other form, and a `dispatch` whose
 subcommand an expansion names, is `unreadable`: the gate cannot prove the bytes it reviews are the
@@ -357,9 +360,10 @@ instead and how to send the call anyway. The agent sends the call anyway in one 
 
 A rebuttal sends the call with no review by either check, and the entry records the line. The
 CLI takes no such flag, so the gate moves it into a shell comment at the end of the command's
-first line, where the agent's record of its call still shows it; a device takes no such field,
-so the gate removes it and says so. Either way the acknowledgement quotes the override exactly
-as the agent sent it. A rules call that ends in an error, a timeout or an
+first line, where the agent's record of its call still shows it and dispatch never sees it; that
+command sent again is read as the same rebuttal and comes back unchanged. A device takes no such
+field, so the gate removes it before the call runs and says so. Either way the acknowledgement
+quotes the override exactly as the agent sent it. A rules call that ends in an error, a timeout or an
 answer that does not parse refuses nothing: the charter check decides. The third such rules call
 in a row writes one warning, saying that the new asks of those three calls went unchecked and
 that the check still runs on each new ask, to the host's plain log, shows it as a notice in a
@@ -384,7 +388,7 @@ why. The note reaches a headless session too:
 | `no-verdict` | the model answered with no verdict the gate could read |
 | `halted` | three calls in a row reached no verdict, and the gate is paused for the session |
 | `skipped` | the session's main model is on another provider than the gate's |
-| `rebuttal` | the agent sent `--advisor-rebuttal <line>`, which is recorded and removed |
+| `rebuttal` | the agent sent `--advisor-rebuttal <line>`, which is recorded and kept only as a shell comment, or `"advisor_rebuttal"`, which is recorded and removed |
 | `breaker` | the third attempt at one thing on one target, after the gate refused it twice there |
 | `unreadable` (warn mode) | the gate could not read the call's form |
 | `abandoned` (warn mode) | the call or the run ended before the review answered |

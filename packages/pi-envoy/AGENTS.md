@@ -191,7 +191,9 @@ command works the file out by the same rule, so nothing binds there. `session_st
 load and shows a load failure, a switch that does not parse or a location it could not work out as
 a notice. `askgate-core.ts` holds the gate and takes the host through its dependencies, so
 `askgate.test.ts` drives it with fakes. The reader takes one form, the literal grammar of one
-`dispatch` call (`dispatchCommandHead`, the README's "The form the gate reads"): anything else, a
+`dispatch` call (`dispatchCommandHead`, the README's "The form the gate reads"), which takes the
+override comment the gate hands a rebutted command back with (`keepOverrideVisible`) as those
+overrides, so a resend of that command is the same rebuttal: anything else, a
 gated write in the call's own text included, is `unreadable` (`unreadableDispatchWrite`), which
 block mode refuses and warn mode lets run with the reason as context. That scan reads text another
 command runs (a shell's `-c` operand, `eval`'s arguments, a here-document, a here-string, a pipe
@@ -451,7 +453,9 @@ session's state directory, one line per call: the tool and its result's details)
 `tool_result` from the offset it last reached, under the id in `DISPATCH_SESSION_ID`; the offset
 starts at the ledger's end on `session_start`, `session_switch`, `session_branch` and the
 heartbeat's drift heal, so an earlier run's calls never count. A `bash` result whose command is one
-`dispatch` command (`dispatchCommandHead` in `src/shell-command.ts`), or an `eval` result, during
+`dispatch` command (`dispatchCommandHead` in `src/shell-command.ts`, which drops a comment that
+ends the first line, as bash does, so the command AskGate hands back with its override as that
+comment still counts), or an `eval` result, during
 which the ledger grew owes nothing; a `bash` command that ran `dispatch` beside anything else
 (`dispatch … && make`) is work. A `task` subagent's `dispatch` calls land in the parent's ledger (it
 carries the parent's id), so an `eval` that runs while a subagent writes to Dispatch can count as

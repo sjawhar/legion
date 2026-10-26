@@ -645,7 +645,7 @@ describe("verdicts", () => {
     const g = bind({ env: { OMP_ASKGATE: "block" }, complete: async () => ({ text: REVISE }) });
     const result = await g.device("t1", "dispatch_comment", COMMENT);
     expect(result?.block).toBe(true);
-    expect(result?.reason).toContain("removed before sending");
+    expect(result?.reason).toContain("the field is removed before the call runs");
     expect(result?.reason).toContain("see the message above");
     expect(result?.reason).toContain("advisor_rebuttal");
     expect(g.entries).toMatchObject([{ decision: "revise", verdictMode: "block" }]);
@@ -2835,6 +2835,82 @@ console.log(JSON.stringify(args, null, 2));
     expect(readBack).toContain(first);
     expect(readBack).toContain(second);
   });
+  test("the command a rebuttal hands back, sent again, is recorded as the same rebuttal and comes back unchanged", async () => {
+    // Oh My Pi records the call as the gate hands it back, its overrides in one trailing comment,
+    // and an agent resends what it reads: the gate must read its own output, not refuse it.
+    for (const mode of ["block", "warn"]) {
+      const g = bind({
+        env: { ...STUB, OMP_ASKGATE: mode },
+        cwd: work,
+        complete: async () => ({ text: REVISE }),
+      });
+      const handed = (
+        await g.bash(
+          "b1",
+          "dispatch comment --issue X-1 --advisor-rebuttal 'first reason' --body hi --advisor-rebuttal='second reason'"
+        )
+      )?.input?.command as string;
+      expect(handed).toBe(
+        "dispatch comment --issue X-1 --body hi # --advisor-rebuttal 'first reason' --advisor-rebuttal='second reason'"
+      );
+      const again = await g.bash("b2", handed);
+      expect(again?.block).toBeUndefined();
+      expect(again?.input).toEqual({ command: handed });
+      expect(again?.additionalContext).toContain(
+        "You sent this call with --advisor-rebuttal 'first reason' --advisor-rebuttal='second reason'."
+      );
+      expect(g.dryRuns[1]?.script).toBe("dispatch comment --dry-run --issue X-1 --body hi");
+
+      // The here-document form: the comment ends the opener's line, the body is untouched.
+      const heredoc = (
+        await g.bash(
+          "b3",
+          `dispatch ask --issue X-1 --advisor-rebuttal 'the plan is linked' --question-file - <<'EOF'\n${QUESTION}EOF`
+        )
+      )?.input?.command as string;
+      expect(heredoc).toBe(
+        ASK.replace("<<'EOF'", "<<'EOF' # --advisor-rebuttal 'the plan is linked'")
+      );
+      const resent = await g.bash("b4", heredoc);
+      expect(resent?.block).toBeUndefined();
+      expect(resent?.input).toEqual({ command: heredoc });
+      expect(g.dryRuns[3]?.script).toBe(
+        `dispatch ask --dry-run --issue X-1 --question-file - <<'EOF'\n${QUESTION}EOF`
+      );
+
+      expect(g.calls).toHaveLength(0);
+      expect(g.entries.map((entry) => [entry.tool, entry.outcome, entry.rebuttal])).toEqual([
+        ["dispatch_comment", "rebuttal", "first reason; second reason"],
+        ["dispatch_comment", "rebuttal", "first reason; second reason"],
+        ["dispatch_ask", "rebuttal", "the plan is linked"],
+        ["dispatch_ask", "rebuttal", "the plan is linked"],
+      ]);
+    }
+  });
+  test("a head line ending in any other comment is still unreadable", async () => {
+    for (const comment of [
+      "# a note",
+      "# --advisor-rebuttal 'r' and more",
+      "# --advisor-rebuttal ' '",
+      "# --advisor-rebuttal",
+      "# --advisor-rebuttal $REASON",
+      "# --body bye",
+      "#",
+    ]) {
+      const command = `dispatch comment --issue X-1 --body hi ${comment}`;
+      expect({ command, scoped: core.scopedCommand(command) }).toEqual({
+        command,
+        scoped: undefined,
+      });
+      const g = bind({ env: { ...STUB, OMP_ASKGATE: "block" }, cwd: work });
+      const result = await g.bash("c1", command);
+      expect({ command, block: result?.block }).toEqual({ command, block: true });
+      expect(g.dryRuns).toHaveLength(0);
+      expect(g.entries.map((entry) => [entry.tool, entry.outcome])).toEqual([
+        ["dispatch_comment", "unreadable"],
+      ]);
+    }
+  });
   test("a device call and a command on one target share its breaker", async () => {
     const g = bind({
       env: { ...STUB, OMP_ASKGATE: "block" },
@@ -4657,6 +4733,38 @@ describe("rules check", () => {
       },
     ]);
     expect(g.entries[0].ruleError).toBeUndefined();
+  });
+  test("each refusal says what becomes of the override on its surface: a command's flag stays a shell comment, a device's field is removed", async () => {
+    const FIELD =
+      "An override is always sent and recorded, and the field is removed before the call runs.";
+    const FLAG =
+      "An override is always sent and recorded, and the flag is kept as a shell comment at the end of the command's first line, so dispatch never sees it.";
+    const charterField =
+      "an override is always sent and recorded, and the field is removed before the call runs.";
+    const charterFlag =
+      "an override is always sent and recorded, and the flag is kept as a shell comment at the end of the command's first line, so dispatch never sees it.";
+    const dryRun = async () => ({
+      exitCode: 0,
+      stdout: JSON.stringify(KEEP_INPUT),
+      stderr: "",
+      timedOut: false,
+    });
+    const command = "dispatch ask --issue X-1 --question-file - <<'EOF'\nq\nEOF";
+    const reasons = async (complete: BindOptions["complete"]) => {
+      const g = bind({ env: { OMP_ASKGATE: "block" }, complete, dryRun });
+      return [
+        (await g.device("t1", "dispatch_ask", KEEP_INPUT))?.reason ?? "",
+        (await g.bash("t2", command))?.reason ?? "",
+      ];
+    };
+    const [ruleDevice, ruleCommand] = await reasons(bySystem(ALLOW, NO_CHANGE));
+    expect(ruleDevice).toContain(FIELD);
+    expect(ruleCommand).toContain(FLAG);
+    const [charterDevice, charterCommand] = await reasons(bySystem(REVISE, RULES_NONE));
+    expect(charterDevice).toContain(charterField);
+    expect(charterCommand).toContain(charterFlag);
+    for (const reason of [ruleDevice, ruleCommand, charterDevice, charterCommand])
+      expect(reason).not.toContain("removed before sending");
   });
   test("an ask for a step the agent did not try is refused with the access text (rules test 4, E10)", async () => {
     const g = bind({ complete: bySystem(ALLOW, UNTRIED) });
