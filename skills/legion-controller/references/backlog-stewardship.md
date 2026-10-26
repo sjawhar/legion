@@ -53,6 +53,21 @@ For a READY packet, confirm the Dispatch record and leave the merge to the daemo
 use a GitHub credential to merge from the controller, because the daemon submits the merge itself
 at READY's head.
 
+## The owner audit
+
+At each pass, read every page of `dispatch issues --project <KEY> --priority 0 --priority 1 --limit 250`:
+
+- An unclaimed row in `triage`, `icebox`, `backlog` or `todo` is a decision: someone builds it, or
+  it closes. A claimed or in-flight row already has an owner.
+- A close that says a defect cannot happen cites the code that prevents it; without that, the issue
+  is unread, not foreclosed.
+- A plan or measurement nobody builds needs an owner.
+- A merged pull request names an issue not yet in `testing` or `done`: check it live, then move it.
+- Someone repeats the issue's work by hand: fix its status.
+- A route nobody holds (`--route-status no_holder`, any priority), after the two reads that
+  "Recovering stopped-session work" names: staff the role, route the issue to a live holder, or
+  clear the route and assign it.
+
 ## Recovering stopped-session work
 
 Treat a session route as stopped only after two reads of
