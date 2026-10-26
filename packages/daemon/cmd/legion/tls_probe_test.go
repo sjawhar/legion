@@ -2,7 +2,7 @@ package main
 
 import (
 	"context"
-	"errors"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -24,7 +24,7 @@ func passingImageTLSClients(string, []string, string) []tlsClient {
 		aaaTLSSite.name:     {status: tlsCertificateRefused, detail: "CERT_REVOKED"},
 		controlTLSSite.name: {status: tlsConnectionAccepted, detail: "HTTP 200"},
 	}
-	names := []string{"node", "bun", "omp", "uv", "aws", "curl", "python", "gh"}
+	names := workerTLSClientNames()
 	clients := make([]tlsClient, 0, len(names))
 	for _, name := range names {
 		clients = append(clients, fakeTLSClient{clientName: name, outcomes: outcomes})
@@ -99,9 +99,9 @@ func TestTLSCertificateErrorRecognizesClientRefusals(t *testing.T) {
 }
 
 func TestTLSCommandDetailKeepsCertificateErrorTail(t *testing.T) {
-	detail := tlsCommandDetail(errors.New("exit status 2"), strings.Repeat("x", tlsDetailLimit)+" invalid peer certificate")
+	detail := trimTLSDetail(tlsCommandMessage(nil, strings.Repeat("x", tlsDetailLimit)+" invalid peer certificate"))
 	if !tlsCertificateError(detail) {
-		t.Fatalf("tlsCommandDetail() = %q, dropped the certificate refusal", detail)
+		t.Fatalf("detail = %q, dropped the certificate refusal", detail)
 	}
 }
 
@@ -119,5 +119,42 @@ func TestTLSCommandClientClassifiesApplicationErrorBeforeTruncatingDetail(t *tes
 
 	if outcome.status != tlsConnectionAccepted {
 		t.Fatalf("client.probe() = %+v, want an accepted application response", outcome)
+	}
+}
+
+func TestImageTLSClientsCoverTheWorkerInventory(t *testing.T) {
+	clients := imageTLSClients("omp", nil, "")
+	names := make([]string, 0, len(clients))
+	for _, client := range clients {
+		names = append(names, client.name())
+	}
+	want := []string{"node", "bun", "omp", "codegraph-node", "uv", "aws", "curl", "python3", "gh", "chromium"}
+	if !slices.Equal(workerTLSClientNames(), want) || !slices.Equal(names, want) {
+		t.Fatalf("inventory = %v; imageTLSClients() = %v; want %v", workerTLSClientNames(), names, want)
+	}
+}
+
+func TestTLSPositiveControlsRequireTheExpectedChain(t *testing.T) {
+	for _, testCase := range []struct {
+		name    string
+		outcome tlsOutcome
+		want    string
+	}{
+		{name: "accepts pinned root", outcome: tlsOutcome{status: tlsConnectionAccepted}},
+		{name: "refuses pinned root", outcome: tlsOutcome{status: tlsCertificateRefused, detail: "certificate verify failed"}, want: "emSign positive control"},
+		{name: "cannot reach site", outcome: tlsOutcome{status: tlsNetworkUnavailable, detail: "network is unreachable"}, want: "emSign positive control"},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			err := verifyTLSPositiveControls([]tlsPositiveControl{{site: emSignTLSSite}}, func(tlsPositiveControl) tlsOutcome {
+				return testCase.outcome
+			})
+			if testCase.want == "" {
+				if err != nil {
+					t.Fatalf("verifyTLSPositiveControls() = %v, want success", err)
+				}
+			} else if err == nil || !strings.Contains(err.Error(), testCase.want) {
+				t.Fatalf("verifyTLSPositiveControls() = %v, want error containing %q", err, testCase.want)
+			}
+		})
 	}
 }

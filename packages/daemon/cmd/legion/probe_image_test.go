@@ -143,9 +143,12 @@ func inImage(t *testing.T, contract, omp string) image {
 const capabilityMarks = " capabilities=checked model-fallback=off daemon-api-version="
 
 func probeImage(args ...string) (int, string, string) {
-	previous := newImageTLSClients
+	previousClients, previousControls := newImageTLSClients, newTLSPositiveControls
 	newImageTLSClients = passingImageTLSClients
-	defer func() { newImageTLSClients = previous }()
+	newTLSPositiveControls = func(context.Context, []string, string) error { return nil }
+	defer func() {
+		newImageTLSClients, newTLSPositiveControls = previousClients, previousControls
+	}()
 	var stdout, stderr bytes.Buffer
 	code := run(context.Background(), append([]string{"legion", "probe-image"}, args...), &stdout, &stderr)
 	return code, stdout.String(), stderr.String()
@@ -213,7 +216,7 @@ func TestProbeImagePrintsTheTableAndTheOKLineWithThisBinarysContract(t *testing.
 	if !strings.HasPrefix(stdout, strings.Join(table, "\n")+"\n") || !strings.HasSuffix(stdout, okLine) {
 		t.Fatalf("stdout = %q, want the table, TLS decisions, then the OK line %q", stdout, okLine)
 	}
-	if got, want := strings.Count(stdout, "probe-image: TLS client "), len(tlsSites)*8; got != want {
+	if got, want := strings.Count(stdout, "probe-image: TLS client "), len(tlsSites)*len(workerTLSClients); got != want {
 		t.Fatalf("stdout carries %d TLS decisions, want one for each client and site (%d):\n%s", got, want, stdout)
 	}
 }

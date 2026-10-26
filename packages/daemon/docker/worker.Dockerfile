@@ -79,6 +79,11 @@ ARG UV_SHA256=f68d291c75783122dad58ab77def0e13f3233f358731db5d6d7e8715603b928f
 # Node 24 LTS.
 ARG NODE_VERSION=24.22.1
 ARG NODE_SHA256=6c172a9ab6718f7b801fb5a7bd486af2ee5e32758086a04b84fcce2aa77095e6
+# Chromium for Testing is pinned separately from Debian's chromium package because it carries the
+# Chrome Root Store revision that distrusts the compromised emSign root. Its SHA-256 is for
+# chrome-linux64.zip from Chrome for Testing's public release archive.
+ARG CHROMIUM_VERSION=158.0.8117.2
+ARG CHROMIUM_SHA256=80d11972d4c483716685fed17ca95cf69eb9c849b1146c0da55c07a58617f627
 ARG AWS_CLI_VERSION=2.38.4
 # AWS publishes no SHA-256 for the CLI, only a PGP signature. This pin is the SHA-256 of the zip whose
 # `.sig` gpg verified as a good signature from the AWS CLI Team key
@@ -298,6 +303,8 @@ ARG NODE_VERSION
 ARG NODE_SHA256
 ARG AWS_CLI_VERSION
 ARG AWS_CLI_SHA256
+ARG CHROMIUM_VERSION
+ARG CHROMIUM_SHA256
 ARG KUBECTL_VERSION
 ARG KUBECTL_SHA256
 ARG GO_VERSION
@@ -314,9 +321,11 @@ RUN set -eu; \
     curl -fsSLo "$t/awscli.zip" "https://awscli.amazonaws.com/awscli-exe-linux-x86_64-${AWS_CLI_VERSION}.zip"; \
     curl -fsSLo "$t/go.tar.gz" "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz"; \
     curl -fsSLo "$t/kubectl" "https://dl.k8s.io/release/v${KUBECTL_VERSION}/bin/linux/amd64/kubectl"; \
+    curl -fsSLo "$t/chromium.zip" \
+      "https://storage.googleapis.com/chrome-for-testing-public/${CHROMIUM_VERSION}/linux64/chrome-linux64.zip"; \
     printf '%s  %s\n' "$UV_SHA256" "$t/uv.tar.gz" "$NODE_SHA256" "$t/node.tar.xz" \
       "$AWS_CLI_SHA256" "$t/awscli.zip" "$GO_SHA256" "$t/go.tar.gz" \
-      "$KUBECTL_SHA256" "$t/kubectl" > "$t/SHA256SUMS"; \
+      "$KUBECTL_SHA256" "$t/kubectl" "$CHROMIUM_SHA256" "$t/chromium.zip" > "$t/SHA256SUMS"; \
     sha256sum --check --strict "$t/SHA256SUMS"; \
     tar -xzf "$t/uv.tar.gz" -C /out/bin --strip-components=1 --no-same-owner \
       uv-x86_64-unknown-linux-gnu/uv uv-x86_64-unknown-linux-gnu/uvx; \
@@ -337,6 +346,8 @@ RUN set -eu; \
     "$t/aws/install" --install-dir /opt/aws-cli --bin-dir /out/bin; \
     mkdir -p /out/licenses; \
     cp "$t/aws/THIRD_PARTY_LICENSES" /out/licenses/aws-cli-THIRD_PARTY_LICENSES; \
+    unzip -q "$t/chromium.zip" -d "$t"; \
+    mv "$t/chrome-linux64" /out/chromium; \
     rm -rf "$t"
 
 # ------------------------------------------------------------------------------------------------
@@ -660,6 +671,15 @@ COPY --from=toolchain /opt/go /opt/go
 COPY --from=toolchain /opt/aws-cli /opt/aws-cli
 COPY --from=toolchain /out/bin/ /usr/local/bin/
 COPY --from=go /out/gopls /usr/local/bin/gopls
+USER root
+COPY --from=toolchain /out/chromium /opt/chromium
+COPY packages/daemon/docker/tls-roots /usr/share/legion/tls-roots
+# Keep Debian's chromium package for its shared-library dependency closure, but make its vulnerable
+# executable unreachable and expose the pinned Chrome for Testing binary under the usual name.
+RUN rm -f /opt/codegraph/node /usr/bin/chromium /usr/lib/chromium/chromium \
+    && ln -s /opt/node/bin/node /opt/codegraph/node \
+    && ln -s /opt/chromium/chrome /usr/local/bin/chromium
+USER 1000:1000
 # Corepack resolves a project with no `packageManager` to the pnpm and yarn it ships as defaults,
 # never to npm's newest release, so every place the image runs (a pod, `docker run`, the check below)
 # gets one version until the Node pin moves. It is image ENV, not a pod variable, for that reason.

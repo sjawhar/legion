@@ -49,6 +49,49 @@ type tlsObservation struct {
 	tlsOutcome
 }
 
+// tlsPositiveControl proves a test endpoint still chains to the compromised root it is named for.
+// The roots are the CA-published certificates at repository.emsign.com/certs/emSignECCRootCAG3.crt
+// (SHA-256 86:A1:EC:BA:08:9C:4A:8D:3B:BE:27:34:C6:12:BA:34:1D:81:3E:04:3C:F9:E8:A8:62:CD:5C:57:A3:6B:BE:6B)
+// and crt.sectigo.com/AAACertificateServices.crt
+// (SHA-256 D7:A7:A0:FB:5D:7E:27:31:D7:71:E9:48:4E:BC:DE:F7:1D:5F:0C:3E:0A:29:48:78:2B:C8:3E:E0:EA:69:9E:F4).
+type tlsPositiveControl struct {
+	site tlsSite
+	root string
+}
+
+var tlsPositiveControls = []tlsPositiveControl{
+	{site: emSignTLSSite, root: "/usr/share/legion/tls-roots/emsign-ecc-root-ca-g3.pem"},
+	{site: aaaTLSSite, root: "/usr/share/legion/tls-roots/aaa-certificate-services.pem"},
+}
+
+func verifyTLSPositiveControls(controls []tlsPositiveControl, probe func(tlsPositiveControl) tlsOutcome) error {
+	var failures []string
+	for _, control := range controls {
+		if outcome := probe(control); outcome.status != tlsConnectionAccepted {
+			failures = append(failures, fmt.Sprintf("%s positive control at %s did not accept its pinned root: %s",
+				control.site.name, control.site.url, outcome.detail))
+		}
+	}
+	if len(failures) > 0 {
+		return fmt.Errorf("worker TLS probe cannot verify test chains: %s", strings.Join(failures, "; "))
+	}
+	return nil
+}
+
+func probeTLSPositiveControls(ctx context.Context, env []string, workDir string) error {
+	return verifyTLSPositiveControls(tlsPositiveControls, func(control tlsPositiveControl) tlsOutcome {
+		client := tlsCommandClient{
+			clientName: "positive-control", env: env, workDir: workDir,
+			command: func(site tlsSite) (string, []string, []string) {
+				return "curl", []string{"--cacert", control.root, "--fail", "--silent", "--show-error", site.url}, nil
+			},
+		}
+		return client.probe(ctx, control.site)
+	})
+}
+
+var newTLSPositiveControls = probeTLSPositiveControls
+
 // probeTLSClients holds every TLS client the worker image carries to the two compromised chains and
 // a reachable control. A chain is safe only when its client refuses it for a certificate error; a
 // network failure is neither a refusal nor an acceptance.
@@ -126,10 +169,6 @@ func tlsEnvironmentOverrides(name string, additions []string) bool {
 	return false
 }
 
-func tlsCommandDetail(err error, output string) string {
-	return trimTLSDetail(tlsCommandMessage(err, output))
-}
-
 func tlsCommandMessage(err error, output string) string {
 	var parts []string
 	if err != nil {
@@ -162,6 +201,7 @@ func tlsCertificateError(detail string) bool {
 		"ssl certificate problem",
 		"x509:",
 		"failed to verify certificate",
+		"net::err_cert",
 	} {
 		if strings.Contains(lower, marker) {
 			return true
@@ -172,35 +212,74 @@ func tlsCertificateError(detail string) bool {
 
 const tlsFetchProgram = `const response = await fetch(process.env.LEGION_TLS_URL); if (!response.ok) throw new Error("HTTP " + response.status);`
 
+type tlsClientSpec struct {
+	name  string
+	build func(invocation string, env []string, workDir string) tlsClient
+}
+
+func tlsCommandClientSpec(name, program string, args func(tlsSite) []string, applicationSeen func(string) bool, extraEnv ...string) tlsClientSpec {
+	return tlsClientSpec{
+		name: name,
+		build: func(_ string, env []string, workDir string) tlsClient {
+			return tlsCommandClient{
+				clientName: name, env: env, workDir: workDir, applicationSeen: applicationSeen,
+				command: func(site tlsSite) (string, []string, []string) {
+					return program, args(site), extraEnv
+				},
+			}
+		},
+	}
+}
+
+// workerTLSClients is the complete TLS client inventory the worker image exposes. The probe and
+// its fakes derive their client names from this list, so a client cannot silently fall out of tests.
+var workerTLSClients = []tlsClientSpec{
+	tlsCommandClientSpec("node", "node", func(tlsSite) []string { return []string{"--input-type=module", "--eval", tlsFetchProgram} }, nil),
+	tlsCommandClientSpec("bun", "bun", func(tlsSite) []string { return []string{"--eval", tlsFetchProgram} }, nil),
+	{
+		name: "omp",
+		build: func(invocation string, env []string, workDir string) tlsClient {
+			return tlsCommandClient{
+				clientName: "omp", env: env, workDir: workDir,
+				command: func(tlsSite) (string, []string, []string) {
+					return "sh", []string{"-c", "exec " + invocation + " --eval \"$1\"", "sh", tlsFetchProgram}, []string{"BUN_BE_BUN=1"}
+				},
+			}
+		},
+	},
+	tlsCommandClientSpec("codegraph-node", "/opt/codegraph/node", func(tlsSite) []string { return []string{"--input-type=module", "--eval", tlsFetchProgram} }, nil),
+	tlsCommandClientSpec("uv", "uv", func(site tlsSite) []string {
+		return []string{"pip", "install", "--system", "--break-system-packages", "--dry-run", "--no-deps", "--no-cache", "--index-url", site.url, "legion-tls-probe-not-a-package"}
+	}, uvResponseSeen),
+	tlsCommandClientSpec("aws", "aws", func(site tlsSite) []string {
+		return []string{"sts", "get-caller-identity", "--no-sign-request", "--region", "us-east-1", "--endpoint-url", site.url}
+	}, awsResponseSeen),
+	tlsCommandClientSpec("curl", "curl", func(site tlsSite) []string { return []string{"--fail", "--silent", "--show-error", site.url} }, nil),
+	tlsCommandClientSpec("python3", "python3", func(tlsSite) []string {
+		return []string{"-c", "import os, urllib.request; urllib.request.urlopen(os.environ['LEGION_TLS_URL']).read(1)"}
+	}, nil),
+	tlsCommandClientSpec("gh", "/usr/local/bin/gh", func(site tlsSite) []string { return []string{"api", site.url} }, ghResponseSeen, "GH_TOKEN=legion-tls-probe"),
+	tlsCommandClientSpec("chromium", "chromium", func(site tlsSite) []string {
+		return []string{"--headless", "--no-sandbox", "--dump-dom", site.url}
+	}, nil),
+}
+
 // imageTLSClients returns the image's TLS-capable programs. The gh wrapper manages worker tokens,
 // so the probe runs the real gh binary it wraps; no probe uses an operator token.
 func imageTLSClients(invocation string, env []string, workDir string) []tlsClient {
-	command := func(clientName, program string, args func(tlsSite) []string, applicationSeen func(string) bool, extraEnv ...string) tlsClient {
-		return tlsCommandClient{
-			clientName: clientName, env: env, workDir: workDir, applicationSeen: applicationSeen,
-			command: func(site tlsSite) (string, []string, []string) {
-				return program, args(site), extraEnv
-			},
-		}
+	clients := make([]tlsClient, 0, len(workerTLSClients))
+	for _, spec := range workerTLSClients {
+		clients = append(clients, spec.build(invocation, env, workDir))
 	}
-	return []tlsClient{
-		command("node", "node", func(tlsSite) []string { return []string{"--input-type=module", "--eval", tlsFetchProgram} }, nil),
-		command("bun", "bun", func(tlsSite) []string { return []string{"--eval", tlsFetchProgram} }, nil),
-		command("omp", "sh", func(tlsSite) []string {
-			return []string{"-c", "exec " + invocation + " --eval \"$1\"", "sh", tlsFetchProgram}
-		}, nil, "BUN_BE_BUN=1"),
-		command("uv", "uv", func(site tlsSite) []string {
-			return []string{"pip", "install", "--system", "--break-system-packages", "--dry-run", "--no-deps", "--no-cache", "--index-url", site.url, "legion-tls-probe-not-a-package"}
-		}, uvResponseSeen),
-		command("aws", "aws", func(site tlsSite) []string {
-			return []string{"sts", "get-caller-identity", "--no-sign-request", "--region", "us-east-1", "--endpoint-url", site.url}
-		}, awsResponseSeen),
-		command("curl", "curl", func(site tlsSite) []string { return []string{"--fail", "--silent", "--show-error", site.url} }, nil),
-		command("python3", "python3", func(tlsSite) []string {
-			return []string{"-c", "import os, urllib.request; urllib.request.urlopen(os.environ['LEGION_TLS_URL']).read(1)"}
-		}, nil),
-		command("gh", "/usr/local/bin/gh", func(site tlsSite) []string { return []string{"api", site.url} }, ghResponseSeen, "GH_TOKEN=legion-tls-probe"),
+	return clients
+}
+
+func workerTLSClientNames() []string {
+	names := make([]string, 0, len(workerTLSClients))
+	for _, spec := range workerTLSClients {
+		names = append(names, spec.name)
 	}
+	return names
 }
 
 // newImageTLSClients is a variable so the command's image-environment tests can use fake clients.

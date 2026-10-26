@@ -197,6 +197,11 @@ func runProbeImage(ctx context.Context, args []string, stdout, stderr io.Writer)
 		fmt.Fprintf(stderr, "legion probe-image: %v\n", err)
 		return 1
 	}
+	if err := newTLSPositiveControls(ctx, environ, workDir); err != nil {
+		fmt.Fprintf(stderr, "legion probe-image: %v\n", err)
+		return 1
+	}
+	fmt.Fprintln(stdout, "probe-image: TLS positive controls: emSign and AAA chains verified")
 	observations, err := probeTLSClients(ctx, newImageTLSClients(invocation, environ, workDir))
 	for _, observation := range observations {
 		fmt.Fprintf(stdout, "probe-image: TLS client %s %s: %s (%s)\n",
