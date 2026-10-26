@@ -383,11 +383,12 @@ What the two processes share, and what each keeps to itself:
 
 **Two processes do not share a live document session.** Durable convergence is unconditional:
 every edit is appended under the document's advisory lock, Yjs updates commute, and the stored
-history is the union of them, so no edit is lost whichever process took it, and no process writes
-a version, a settlement or an ask retraction from a document state it does not hold
-(`ErrRoomBehindHead`). What is per-process is the live room: while a room is resident in one
-process it does not receive the other's updates, so presence and cursors show only the peers on
-that process. A write committed elsewhere closes the room within a notification round trip
+history is the union of them, so no edit is lost whichever process took it, no process writes a
+settlement or an ask retraction from a document state it does not hold (`ErrRoomBehindHead`), and
+a version whose room is behind the head is rendered from the stored document (`storedTree`). What
+is per-process is the live room: while a room is resident in one process it does not receive the
+other's updates, so presence and cursors show only the peers on that process. A write committed
+elsewhere closes the room within a notification round trip
 (`dispatch_doc_changed`, `docs/stale_room.go`), unless that room was evicted less than
 `staleRoomEvictInterval` (two seconds) ago, in which case its notification is refused and the
 room is re-examined when that window ends — the case the trailing write of an editing burst
@@ -425,7 +426,7 @@ ships no earlier than the next release, once no running build reads the old shap
 
 A migration that cannot be written that way is a stop-the-world migration: it is deployed with no
 server of the earlier release running, and that is an exception named in the pull request, not a
-default (`0113` below was one). The pre-deploy census ("Pre-deploy census" below) is unchanged by
+default (`0113` and `0117` below are the two). The pre-deploy census ("Pre-deploy census" below) is unchanged by
 that rule and still applies to every migration: it is taken before any migration of the release
 applies, and a census that refuses fails the deploy before the service moves. The rule in brief
 is `internal/dispatch/store/README.md`, beside the migrations directory rather than in it, since
@@ -663,13 +664,55 @@ image and confirms the stop before it reads the schema, and when the schema has 
 the previous image runs against, it refuses to start that image again and exits `1` for a forward
 recovery.
 
-Migration `0117_block_graph` creates the tables behind a document's blocks as graph nodes
+Migration `0117_architecture_sources_per_repo` lets a project import its components from more than
+one repository (`packages/envoy/AGENTS.md`). `architecture_sources` gains `id`, which names a
+source within its project, and its primary key moves from `(project_key)` to `(project_key, id)`,
+with a unique index on `(project_key, repo)`, so a repository is a source of a project at most
+once. `components` gains `source_id` and a foreign key on `(project_key, source_id)` to its
+source's row, `on delete cascade`, so deleting a source deletes its components. Both columns are
+added with the constant default `0`, which rewrites no row, and the default is then dropped:
+every existing source reads `id` 0, every existing component `source_id` 0 (its project's one
+existing source), and a source added later gets an `id` from 1 on. It takes `architecture_sources`
+and `components` in `ACCESS EXCLUSIVE` first and holds both to commit. Its census counts the
+components whose project has no source, the rows the foreign key would refuse:
+
+```sql
+select count(*) from components c
+where not exists (select 1 from architecture_sources s where s.project_key = c.project_key);
+```
+
+Only direct SQL writes such a component: the importer writes components under their source's row
+lock, and deleting a source deletes its components. A census that refuses on it is repaired on the
+release still serving, before the deploy, by deleting them:
+`delete from components c where not exists (select 1 from architecture_sources s where s.project_key = c.project_key)`;
+then take the census again.
+
+**`0117` is a stop-the-world migration: deploy it with no server of the earlier release running,
+and never start a release older than `0117` over it again.** Stop the earlier release, or scale it
+to zero, before the new release boots and migrates: a Kubernetes Deployment's
+`strategy: Recreate`, which `envoy-infra:gcp:Dispatch` uses at its default one replica
+(`packages/envoy/infra/README.md`); a deployment running more than one replica, which rolls, is
+scaled to zero first. The compose auto-deployer above stops the old container before it starts the
+new one. A failed deploy recovers forward, not by rolling the image back. The earlier release does
+not work over the new schema, and nothing at boot stops it from serving:
+
+- Its save of a project's source upserts `on conflict (project_key)`, which no unique index covers
+  once `0117` commits, so Postgres refuses the statement and the save answers `500`.
+- Its import takes one source row of the project as the project's one source, whichever row
+  Postgres returns first. When the model changed, it deletes every component of the project, every
+  source's, and inserts that source's components with no `source_id`, which has no default. A model
+  holding a component fails on the not-null column and rolls back, and its failure record writes
+  the error onto every source row of the project. A model holding none (no file in that branch's
+  `.dispatch/architecture/`) commits the delete, and every source's components are gone.
+- Its delete removes every source of the project and every component of the project.
+
+Migration `0118_block_graph` creates the tables behind a document's blocks as graph nodes
 (`packages/envoy/AGENTS.md`, "References form one graph"): `document_blocks`, `block_refs`,
 `document_block_versions`, `document_block_texts` and `document_indexed_versions`, each with a
 foreign key to `artifacts`, and `block_grammar_owed`, with their indexes, among them the partial
 `document_block_versions_owed` and `block_grammar_owed_enqueued` through which the block-index
 reconciliation reads what is owed. It creates the trigger function `block_grammar_owe`, which no
-trigger calls until `0119`, and re-states the `graph_edges` view with two more arms: a block's
+trigger calls until `0120`, and re-states the `graph_edges` view with two more arms: a block's
 mentions and its `part_of` edge to its document. The five foreign keys take `SHARE ROW EXCLUSIVE`
 on `artifacts` for the migration's short transaction, so an artifact write waits behind it while a
 read does not, and re-stating the view holds `graph_edges` `ACCESS EXCLUSIVE`, so a reference read
@@ -677,7 +720,7 @@ waits too. Its one insert marks every document owed a block index in `document_b
 table it creates, and the server's reconciliation indexes them with no command run. It refuses and
 rewrites no existing row; its census answers `0`.
 
-Migration `0118_artifact_versions_block_index_trigger` creates `document_block_versions_owe` and
+Migration `0119_artifact_versions_block_index_trigger` creates `document_block_versions_owe` and
 an `after insert` trigger on `artifact_versions` that marks a document owed a block index whenever
 any build inserts a version carrying markdown. A version a build without the block index writes
 during the roll is then indexed by the reconciliation, and a block-aware build's own index of the
@@ -685,31 +728,31 @@ version, later in the same transaction, settles the mark. The trigger takes `SHA
 on `artifact_versions` alone, so a version write waits behind it while a read does not. It touches
 no row; its census answers `0`.
 
-Migration `0119_comments_block_grammar_trigger` attaches `block_grammar_owe` to `comments`,
+Migration `0120_comments_block_grammar_trigger` attaches `block_grammar_owe` to `comments`,
 `after insert or update of body`, for a body that holds `#b-`: a comment any build writes that may
 cite a block is owed an index with the block grammar, which a build that predates the grammar does
 not give it. The trigger takes `SHARE ROW EXCLUSIVE` on `comments` alone, so a comment write waits
 behind it while a read does not. It touches no row; its census answers `0`.
 
-Migration `0120_asks_block_grammar_trigger` does the same for `asks`, `after insert or update of
+Migration `0121_asks_block_grammar_trigger` does the same for `asks`, `after insert or update of
 question`, for a question that holds `#b-`. Its trigger takes `SHARE ROW EXCLUSIVE` on `asks` alone,
 so an ask write waits behind it while a read does not. It touches no row; its census answers `0`.
 
-Migration `0121_messages_block_grammar_trigger` does the same for `messages`, `after insert or
+Migration `0122_messages_block_grammar_trigger` does the same for `messages`, `after insert or
 update of body`, for an issue message (`issue_key` set) whose body holds `#b-`; a direct message is
 indexed by nothing, so it owes nothing. Its trigger takes `SHARE ROW EXCLUSIVE` on `messages`
 alone, so a message write waits behind it while a read does not. It touches no row; its census
 answers `0`.
 
-Migration `0122_block_grammar_seed` owes the same index to every comment, ask and issue message
+Migration `0123_block_grammar_seed` owes the same index to every comment, ask and issue message
 already stored whose text holds `#b-`, read with the three triggers' predicates. The triggers are
 live by then, so a write that lands while it runs is owed by its trigger, and a row a trigger has
 already written keeps its `enqueued_at`. It takes `ACCESS SHARE` on `comments`, `asks` and
 `messages`, which no write waits behind, and writes only `block_grammar_owed`. Its census answers
-`0`: the one table it writes is `0117`'s, which holds no row at deploy, and the rows it inserts are
+`0`: the one table it writes is `0118`'s, which holds no row at deploy, and the rows it inserts are
 new work owed, not a rewrite.
 
-Migration `0123_asks_block_id_key` creates `block_id_key(id)`, the SHA-256 of a block id's UTF-8
+Migration `0124_asks_block_id_key` creates `block_id_key(id)`, the SHA-256 of a block id's UTF-8
 bytes, written to be immutable so an index can use it, and rebuilds `asks_block_id_unique`
 (`0018`) and `asks_anchor_block_id_idx` (`0023`) under their names over it. A B-tree entry holds
 at most 2704 bytes, and both indexes keyed the id itself, so an ask block or an ask anchored in a
@@ -722,8 +765,8 @@ write of an ask waits while the two indexes build over its rows. It refuses and 
 rows the old unique index held apart differ in their id, so they differ in its SHA-256. Its census
 answers `0`.
 
-Migration `0124_comments_anchor_block_id_key` rebuilds `comments_anchor_block_id_idx` (`0023`)
-over `0123`'s `block_id_key` the same way, so a comment anchored in a block whose id is any length
+Migration `0125_comments_anchor_block_id_key` rebuilds `comments_anchor_block_id_idx` (`0023`)
+over `0124`'s `block_id_key` the same way, so a comment anchored in a block whose id is any length
 is written. Its own migration, so its transaction holds `comments` alone: the drop holds it
 `ACCESS EXCLUSIVE`, and every read and write of a comment waits while the one index builds. It
 refuses and rewrites no row; its census answers `0`.
@@ -918,7 +961,7 @@ out of every list and every count that build serves (`nodeLoaders`, `refs/graph.
 kinds it knows). The migration refuses to run when an ask or comment anchor carries a non-uuid
 `artifact_id`.
 
-Each block of a document is a node of the graph too (migration `0117`; `packages/envoy/AGENTS.md`,
+Each block of a document is a node of the graph too (migration `0118`; `packages/envoy/AGENTS.md`,
 "References form one graph"). Its reference is the document's with `#b-` and the block's id,
 percent-encoded as `encodeBlockId` (`@legion/contracts`) writes it:
 `dispatch://KEY/spec#b-<id>`, `dispatch://KEY/artifact/<slug>#b-<id>` or
@@ -935,7 +978,7 @@ naming the document, the longest id's length and the bound, and writes the versi
 the reference it is given whatever its length (`text.ParseRef`): `?to=`, `?from=` and
 `GET /api/v1/block-links` read a node of any name, and a block whose id is past 256 bytes is
 `404 NOT_FOUND`, no node. An ask block and an anchor in a block are written under
-an id of any length (migrations `0123` and `0124`, Database migrations above). A mention written
+an id of any length (migrations `0124` and `0125`, Database migrations above). A mention written
 inside a block starts at the
 innermost block holding it, so `?to=` a cited node names that block, whose `document` is the
 citing document; a document's own read also lists the links at its blocks, each edge naming its

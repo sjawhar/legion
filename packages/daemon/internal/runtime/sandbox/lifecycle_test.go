@@ -288,11 +288,10 @@ func TestALaunchBegunDuringAnOrphansDeleteWaitsForIt(t *testing.T) {
 }
 
 // The sweep deletes the project's Sandboxes of a tree whose cleanup confirmed (or that has no
-// lifecycle), only past the grace, and in the foreground, as the tree cleanup does: the issue's
-// next Sandbox names the same PVC, which a background delete would leave Terminating for a
-// re-admission to ask for. A Sandbox of a live tree survives whatever claims are known, with or
-// without a locator: a suspended role holds its session on the issue's volume the Sandbox owns
-// (N3), and a claim launched after the daemon read its claims is missing from known. The image
+// lifecycle), only past the grace, and in the foreground, as the tree cleanup does
+// (deleteSandbox). A Sandbox of a live tree survives whatever claims are known, with or without a
+// locator: a suspended role has no locator while its issue is still in the live tree (N3), and a
+// claim launched after the daemon read its claims is missing from known. The image
 // probe's Sandbox is no claim's and is the probe's own to delete (#1266), and one whose labels name
 // no issue and tree is kept and reported: what cannot be told apart from a live tree's is never
 // deleted.
@@ -345,11 +344,13 @@ func TestTheOrphanSweepDeletesOnlySandboxesOfClosedTreesPastTheGrace(t *testing.
 // The sweep decides on a Sandbox as the informer held it, and takes the pod's launch turn only once
 // its tree looks closed. An issue of that closed tree can be re-admitted in between — a child
 // re-admitted as a root of its own, whose launch keeps the suspended Sandbox, relabelled for the
-// new tree with its UID unchanged (TestAnOrphanRootKeepsTheSandboxAndVolumeItsOldTreeLeft), and
-// runs a pod in it before the sweep's turn comes. The delete is fenced to what the decision read,
-// as the controller branch's is (TestAControllerSandboxWrittenSinceItsDeleteWasDecidedStays): the
-// re-admitted issue keeps its running Sandbox, and with it the volume holding its clone, workspace
-// and sessions, on this sweep and on the next, which reads the Sandbox under its live tree.
+// new tree with its UID unchanged (TestAnOrphanRootKeepsTheSandboxItsOldTreeLeft), and runs a pod
+// in it before the sweep's turn comes. The delete is fenced to what the decision read, as the
+// controller branch's is (TestAControllerSandboxWrittenSinceItsDeleteWasDecidedStays): the
+// re-admitted issue keeps its running Sandbox on this sweep and on the next, which reads the
+// Sandbox under its live tree. Its Sandbox owns no volume claim template, the shape this runtime
+// makes for an issue, so the launch relabels it rather than replacing it
+// (TestALaunchReplacesTheIssueSandboxOfTheSupersededDiskShape).
 func TestAnIssueSandboxReadmittedSinceItsDeleteWasDecidedStays(t *testing.T) {
 	orphan := claim.Token("legion-legion-legion-209-architect")
 	name := SandboxName(orphan)
@@ -375,7 +376,7 @@ func TestAnIssueSandboxReadmittedSinceItsDeleteWasDecidedStays(t *testing.T) {
 		t.Helper()
 		s := g.sandbox(name)
 		if s == nil || s.UID != "uid-sandbox-old-tree" || s.Labels[labelTree] != labelValue("LEGION-209") || s.mode() != modeRunning {
-			t.Fatalf("the re-admitted issue's Sandbox %s = %+v; want the relabelled Sandbox uid-sandbox-old-tree kept Running under tree LEGION-209, its volume and sessions with it", when, s)
+			t.Fatalf("the re-admitted issue's Sandbox %s = %+v; want the relabelled Sandbox uid-sandbox-old-tree kept Running under tree LEGION-209", when, s)
 		}
 		if pod := g.pod(name); pod == nil || string(pod.UID) != loc.Sandbox.PodUID {
 			t.Fatalf("the re-admitted issue's pod %s = %+v; want the launch's pod %s still running", when, pod, loc.Sandbox.PodUID)

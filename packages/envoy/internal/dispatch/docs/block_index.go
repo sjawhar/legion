@@ -52,10 +52,10 @@ type BlockIndexTick struct {
 }
 
 // RunBlockIndexReconciliation indexes what no block-aware version write indexed: every document
-// owed a block index (document_block_versions.version null) - each one at migration 0117, each
-// version any build writes (migration 0118's trigger) that its own writer did not index, and each
+// owed a block index (document_block_versions.version null) - each one at migration 0118, each
+// version any build writes (migration 0119's trigger) that its own writer did not index, and each
 // rebuild-refs marks - and every comment, ask and issue message whose text holds `#b-`, owed an
-// index with the block grammar (block_grammar_owed, migrations 0119-0122), which a build older
+// index with the block grammar (block_grammar_owed, migrations 0120-0123), which a build older
 // than the block grammar indexes without. One tick per lease, at start, then every blockIndexStep
 // while a batch is full and every BlockIndexReconcileInterval once none is, until ctx ends.
 func (s *Service) RunBlockIndexReconciliation(ctx context.Context, leases duty.Leases) {
