@@ -339,7 +339,7 @@ name (`task(agent="…")`, `skill://…`) by name through the same launch (the L
 `oracle`, `deep-worker`, `thermonuclear-deep-review` and `thermonuclear-code-quality`, and the
 planner's `plan-gap-analyst` and `plan-reviewer`, in `agents/`, and the pair's rubrics and
 `ce-simplify-code` with Legion's other skills in its `dist/skills`; the Envoy plugin ships the
-`asd-ste100`, `dispatch`, `dispatch-first`, `dispatch-brainstorming` and `envoy` skills in its), so a build whose OMP or plugins are
+`asd-ste100`, `dispatch`, `dispatch-first`, `dispatch-writing-specs` and `envoy` skills in its), so a build whose OMP or plugins are
 broken fails instead of publishing. The build has none of the operator's model configuration, so it
 leaves those agents' models unresolved (`--skip-agent-models`). It then checks every image-site row of
 the capability table (`packages/daemon/internal/capabilities`) against the image, as a worker's Oh My Pi

@@ -165,7 +165,7 @@ jobs:
               - 'scripts/third-party-notices.ts'
             # The two Oh My Pi plugins, each with the workspace packages its bundle inlines, the
             # skills scripts/pi-plugin-prepack.sh stages into its tarball (the Envoy plugin's five,
-            # the Legion plugin's eight: the partition that script holds), and the two scripts the
+            # the Legion plugin's nine: the partition that script holds), and the two scripts the
             # pack runs.
             pi_envoy:
               - 'packages/pi-envoy/**'
@@ -175,7 +175,7 @@ jobs:
               - 'skills/asd-ste100/**'
               - 'skills/dispatch/**'
               - 'skills/dispatch-first/**'
-              - 'skills/dispatch-brainstorming/**'
+              - 'skills/dispatch-writing-specs/**'
               - 'skills/envoy/**'
               - 'scripts/third-party-notices.ts'
               - 'scripts/pi-plugin-prepack.sh'
@@ -189,6 +189,7 @@ jobs:
               - 'skills/legion-oracle/**'
               - 'skills/legion-retro/**'
               - 'skills/legion-worker/**'
+              - 'skills/leading-a-work-stream/**'
               - 'skills/ce-simplify-code/**'
               - 'skills/thermonuclear-code-quality/**'
               - 'skills/thermonuclear-deep-review/**'
@@ -759,10 +760,10 @@ jobs:
           .github/scripts/release-push.sh version pi-envoy-v \
             --package-dir packages/pi-envoy --first-npm @sjawhar/pi-legion-envoy \
             --patch-path skills/asd-ste100/ --patch-path skills/dispatch/ --patch-path skills/dispatch-first/ \
-            --patch-path skills/dispatch-brainstorming/ --patch-path skills/envoy/ \
+            --patch-path skills/dispatch-writing-specs/ --patch-path skills/envoy/ \
             --patch-path scripts/third-party-notices.ts --patch-path scripts/pi-plugin-prepack.sh \
             -- packages/pi-envoy/ packages/pi-shared/ packages/envoy-client/ packages/contracts/ \
-            skills/asd-ste100/ skills/dispatch/ skills/dispatch-first/ skills/dispatch-brainstorming/ skills/envoy/ \
+            skills/asd-ste100/ skills/dispatch/ skills/dispatch-first/ skills/dispatch-writing-specs/ skills/envoy/ \
             scripts/third-party-notices.ts scripts/pi-plugin-prepack.sh \
             >> "$GITHUB_OUTPUT"
 
@@ -938,7 +939,7 @@ jobs:
       # pi-legion-v* tag is the version line this package continues, @sjawhar/pi-legion-envoy, which
       # it was split from: its own name on npm holds only a placeholder 0.0.0 until its first
       # publish, so reading it would restart the line at 0.x. scripts/pi-plugin-prepack.sh copies
-      # this plugin's eight skills into dist/skills, which a Legion pane's prompts load, so a commit
+      # this plugin's nine skills into dist/skills, which a Legion pane's prompts load, so a commit
       # there releases whatever its type. Its notices generator and the prepack itself are shipped
       # build inputs too, so they get the same patch release.
       - name: Determine next version
@@ -948,13 +949,15 @@ jobs:
             --package-dir packages/pi-legion --first-npm @sjawhar/pi-legion-envoy \
             --patch-path skills/legion-architect/ --patch-path skills/legion-controller/ \
             --patch-path skills/legion-oracle/ --patch-path skills/legion-retro/ \
-            --patch-path skills/legion-worker/ --patch-path skills/ce-simplify-code/ \
+            --patch-path skills/legion-worker/ --patch-path skills/leading-a-work-stream/ \
+            --patch-path skills/ce-simplify-code/ \
             --patch-path skills/thermonuclear-code-quality/ --patch-path skills/thermonuclear-deep-review/ \
             --patch-path scripts/third-party-notices.ts --patch-path scripts/pi-plugin-prepack.sh \
             -- packages/pi-legion/ packages/pi-shared/ packages/envoy-client/ packages/contracts/ \
             skills/legion-architect/ skills/legion-controller/ skills/legion-oracle/ skills/legion-retro/ \
-            skills/legion-worker/ skills/ce-simplify-code/ skills/thermonuclear-code-quality/ \
-            skills/thermonuclear-deep-review/ scripts/third-party-notices.ts scripts/pi-plugin-prepack.sh \
+            skills/legion-worker/ skills/leading-a-work-stream/ skills/ce-simplify-code/ \
+            skills/thermonuclear-code-quality/ skills/thermonuclear-deep-review/ \
+            scripts/third-party-notices.ts scripts/pi-plugin-prepack.sh \
             >> "$GITHUB_OUTPUT"
 
       - uses: ./.github/actions/setup-bun
