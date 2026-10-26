@@ -37,6 +37,11 @@ type renderer struct {
 	// bareEmptyCode writes an empty code block in a typed block in a list item as its fences alone,
 	// and wroteBlankEmptyCode records one written with a line between them (emptyCodeWrittenBare).
 	bareEmptyCode, wroteBlankEmptyCode bool
+	// rawTitles is every image this render wrote with a title or link title holding a line feed
+	// written as it is, and escapedTitles every image render found misread so written, whose
+	// titles' line feeds are written `&#10;` (render). Each is a set: a run can be written more
+	// than once (inlineWithEscapes).
+	rawTitles, escapedTitles map[*Node]bool
 	// spanBudget is how many more empty cells the tables' spans may add: maxSpanCells, or none in
 	// a spanless render (renderSpanless).
 	spanBudget   int
@@ -129,13 +134,37 @@ func render(doc *Node, spanCells int) (r *renderer, err error) {
 		return &renderer{spanBudget: spanCells}, nil
 	}
 	labels := definedFootnoteLabels(doc)
-	r = renderBlocks(doc, labels, false, spanCells)
+	r = renderBlocks(doc, labels, false, spanCells, nil)
 	// An empty code block in a typed block in a spread list item is written with a line between its
 	// fences, as main wrote it, except in a document holding a shape this parser reads only as the
 	// browser editor does, where that line is refused (emptyCodeWrittenBare): there the document is
 	// written again with the fences alone.
 	if r.err == nil && r.wroteBlankEmptyCode && holdsBrowserOnlyShape(r.b.Bytes()) {
-		r = renderBlocks(doc, labels, true, spanCells)
+		r = renderBlocks(doc, labels, true, spanCells, nil)
+	}
+	// An image's title or link title holding a line feed is written as the server has always
+	// written it, the line feed as it is, wherever that reads back as held in the document around
+	// it: in a paragraph, a list item or a block quote the next line is the paragraph's
+	// continuation, lazy or not, so a title the server already stores keeps its bytes. Whether it
+	// does depends on the whole document - a blank line still ends the paragraph, a line of the
+	// title can open a block or lose its indentation, and a container's prefix is not written on
+	// it - so the document is read back, and the image with such a title at or before the first
+	// image that does not read back as held is written again with its line feeds `&#10;`, which
+	// read back as the line feed anywhere, until every image does. A heading and a table cell,
+	// whose line a line feed ends, never hold one (the image case of writeInlineRun). The document
+	// is read only when a title holding a line feed was written as it is, and written again at most
+	// once for each such title.
+	for r.err == nil && len(r.rawTitles) > 0 {
+		misread := misreadRawTitle(doc, r.b.String(), r.rawTitles)
+		if misread == nil {
+			break
+		}
+		escaped := r.escapedTitles
+		if escaped == nil {
+			escaped = map[*Node]bool{}
+		}
+		escaped[misread] = true
+		r = renderBlocks(doc, labels, r.bareEmptyCode, spanCells, escaped)
 	}
 	if r.err != nil {
 		return nil, r.err
@@ -143,10 +172,72 @@ func render(doc *Node, spanCells int) (r *renderer, err error) {
 	return r, nil
 }
 
+// misreadRawTitle is the image whose titles' line feeds, written as they are (rawTitles), keep
+// markdown, written from doc, from reading back with doc's images as held, or nil when every image
+// reads back so or the first that does not stands before every such image. The images are read in
+// document order, each by its source, alt, title, link and link title; the one blamed is the
+// last such image at or before the first misread image, since a title's line feed can only
+// change what is read after it. Where the markdown does not read at all, it is the first.
+func misreadRawTitle(doc *Node, markdown string, rawTitles map[*Node]bool) *Node {
+	written := documentImages(doc)
+	back, err := Parse(markdown)
+	if err != nil {
+		for _, image := range written {
+			if rawTitles[image] {
+				return image
+			}
+		}
+		return nil
+	}
+	read := documentImages(back)
+	misread := min(len(written), len(read))
+	for index := range misread {
+		if !sameImageFields(written[index], read[index]) {
+			misread = index
+			break
+		}
+	}
+	if misread == len(written) && len(written) == len(read) {
+		return nil
+	}
+	for index := min(misread, len(written)-1); index >= 0; index-- {
+		if rawTitles[written[index]] {
+			return written[index]
+		}
+	}
+	return nil
+}
+
+// documentImages is doc's images in document order.
+func documentImages(doc *Node) []*Node {
+	var images []*Node
+	Walk(doc, func(node *Node) bool {
+		if node.Type == "image" {
+			images = append(images, node)
+		}
+		return true
+	})
+	return images
+}
+
+// sameImageFields reports whether two images hold the same source, alt, title, link and link
+// title, an absent one the same as an empty one.
+func sameImageFields(a, b *Node) bool {
+	for _, field := range []string{"src", "alt", "title", "link", "linkTitle"} {
+		first, _ := a.Attrs[field].(string)
+		second, _ := b.Attrs[field].(string)
+		if first != second {
+			return false
+		}
+	}
+	return true
+}
+
 // renderBlocks writes doc's blocks, an empty code block in a typed block in a spread list item as
-// its fences alone when bareEmptyCode says so, its tables' spans adding at most spanCells cells.
-func renderBlocks(doc *Node, labels footnoteLabelSet, bareEmptyCode bool, spanCells int) *renderer {
-	r := &renderer{footnoteLabels: labels, bareEmptyCode: bareEmptyCode, spanBudget: spanCells}
+// its fences alone when bareEmptyCode says so, its tables' spans adding at most spanCells cells,
+// and the titles of each image escapedTitles holds with their line feeds `&#10;`.
+func renderBlocks(doc *Node, labels footnoteLabelSet, bareEmptyCode bool, spanCells int, escapedTitles map[*Node]bool) *renderer {
+	r := &renderer{footnoteLabels: labels, bareEmptyCode: bareEmptyCode, spanBudget: spanCells, escapedTitles: escapedTitles}
 	r.blocks(doc.Children, "")
 	if r.err != nil {
 		return r
@@ -866,9 +957,10 @@ func opensDecodedReference(value string) bool {
 // which only a reference puts in a title and a write reads as a line feed, is written as that
 // reference. A line feed is written as it is when rawLineFeeds is set, as titleSuffix writes it,
 // so a title the server already stores keeps its bytes; otherwise it is written `&#10;`, which
-// decodedTitleOrNil and the browser editor's parser read back as the line feed, for a block that
-// cannot hold it: a blank line ends a paragraph, a line feed ends a heading or a table row, and a
-// line of the title can open a block or lose its indentation (rawTitlesReadBack judges which).
+// decodedTitleOrNil and the browser editor's parser read back as the line feed, where the block
+// around it cannot hold it: a line feed ends a heading or a table row, a blank line ends a
+// paragraph, and a line of the title can open a block or lose its indentation (render judges which
+// in the document).
 func decodedTitleSuffix(title string, escapePipes, rawLineFeeds bool) string {
 	if title == "" {
 		return ""
@@ -899,7 +991,7 @@ func decodedTitleSuffix(title string, escapePipes, rawLineFeeds bool) string {
 // imageSyntax writes an image whose label is written as alt, inside its link's syntax when it has
 // a link. Its source, title, link and link title are held decoded (decodeDestination,
 // decodedTitleOrNil), each escaped so it reads back as it is held; rawLineFeeds is passed to
-// decodedTitleSuffix for both titles.
+// decodedTitleSuffix for both titles, so one image's titles are both written raw or both `&#10;`.
 func imageSyntax(n *Node, alt string, escapePipes, rawLineFeeds bool) string {
 	src, _ := n.Attrs["src"].(string)
 	title, _ := n.Attrs["title"].(string)
@@ -909,25 +1001,6 @@ func imageSyntax(n *Node, alt string, escapePipes, rawLineFeeds bool) string {
 		image = "[" + image + "](" + escapeDecodedLinkDestination(link, escapePipes) + decodedTitleSuffix(linkTitle, escapePipes, rawLineFeeds) + ")"
 	}
 	return image
-}
-
-// rawTitlesReadBack reports whether image, an image's syntax written with its titles' line feeds
-// as they are, reads back as one paragraph holding one image with the titles title and linkTitle.
-// It is asked only of an image in a top-level paragraph, the one block whose lines a title's line
-// feed can continue: there a blank line still ends the paragraph, and a line of the title can open
-// a heading, a list, a block quote, a fence or a thematic break, or lose its leading spaces.
-func rawTitlesReadBack(image, title, linkTitle string) bool {
-	doc, err := Parse(image + "\n")
-	if err != nil || len(doc.Children) != 1 || doc.Children[0].Type != "paragraph" {
-		return false
-	}
-	nodes := doc.Children[0].Children
-	if len(nodes) != 1 || nodes[0].Type != "image" {
-		return false
-	}
-	gotTitle, _ := nodes[0].Attrs["title"].(string)
-	gotLinkTitle, _ := nodes[0].Attrs["linkTitle"].(string)
-	return gotTitle == title && gotLinkTitle == linkTitle
 }
 
 func titleSuffix(title string, escapePipes bool) string {

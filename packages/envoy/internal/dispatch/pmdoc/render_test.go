@@ -504,9 +504,13 @@ func TestRenderWritesALinkedImageInsideItsLink(t *testing.T) {
 // parentheses, spaces, quotes, control characters, non-ASCII text, pipes and line breaks whose
 // next line could open a block, in every block the writer writes an image in: a paragraph, a level
 // 1 and a level 2 heading (written ATX), a table cell, a bullet and an ordered list item, a block
-// quote and a list item in a block quote. A title's line feed is written as it is only in a
-// top-level paragraph that holds it, so a title the server already stores keeps its bytes, and as
-// `&#10;` in every other block.
+// quote, a list item in a block quote, a typed block and a footnote definition.
+//
+// And a document the base wrote is not churned: wherever the base's spelling of the same
+// document - its image written by escapeLinkDestination and titleSuffix, the base's own writers,
+// a title's line feed as it is - reads back as held, the writer writes those bytes. A title's line
+// feed is so written as it is in a paragraph, a list item or a block quote, as the server stores
+// it, and as `&#10;` in a heading, a table cell, and wherever the raw line feed does not read back.
 func TestRenderWritesEachImageFieldSoItReadsBackAsHeld(t *testing.T) {
 	common := []string{
 		"&amp;", "i&amp;.png", "&copy;", "a&copy;b", "&foo;", "a&foo;b", "&#", "a&#b", "&#65;", "&#x41;", "&#X41;x",
@@ -536,6 +540,8 @@ func TestRenderWritesEachImageFieldSoItReadsBackAsHeld(t *testing.T) {
 		{"an ordered list item", "1. ![x](i.png)\n", []int{0, 0, 0}, []string{"ordered_list", "list_item", "paragraph"}},
 		{"a block quote", "> ![x](i.png)\n", []int{0, 0}, []string{"blockquote", "paragraph"}},
 		{"a list item in a block quote", "> - ![x](i.png)\n", []int{0, 0, 0, 0}, []string{"blockquote", "bullet_list", "list_item", "paragraph"}},
+		{"a typed block", ":::callout{#callout-1 kind=\"note\"}\n![x](i.png)\n:::\n", []int{0, 0}, []string{"callout", "paragraph"}},
+		{"a footnote definition", "[^1]\n\n[^1]: ![x](i.png)\n", []int{1, 0}, []string{"footnote_definition", "paragraph"}},
 	}
 	// place parses a context's source and swaps img in for its image, after checking the image
 	// stands alone in the textblock the path names.
@@ -559,10 +565,31 @@ func TestRenderWritesEachImageFieldSoItReadsBackAsHeld(t *testing.T) {
 		block.Children = []*Node{img}
 		return doc
 	}
+	// base is the base's spelling of the document a context writes with img in it: the context's
+	// rendering with a plain image, that image written as the base wrote one. The base never wrote
+	// a link or a link title - it dropped an image's link - so for those fields there is no base
+	// spelling to keep, and the property is vacuous.
+	base := func(contextIndex int, img *Node) string {
+		context := contexts[contextIndex]
+		template, err := Render(place(context.source, context.path, context.types, image("i.png", nil, nil, nil)))
+		if err != nil {
+			t.Fatalf("Render(%s with a plain image): %v", context.name, err)
+		}
+		const plain = "![x](i.png)"
+		if strings.Count(template, plain) != 1 {
+			t.Fatalf("Render(%s with a plain image) = %q, want %q in it once", context.name, template, plain)
+		}
+		src, _ := img.Attrs["src"].(string)
+		title, _ := img.Attrs["title"].(string)
+		cell := context.name == "a table cell"
+		return strings.Replace(template, plain, "![x]("+escapeLinkDestination(src, cell)+titleSuffix(title, cell)+")", 1)
+	}
 	type row struct {
 		name  string
 		doc   *Node
 		image *Node
+		// base is the base's spelling of doc, empty for a field the base never wrote.
+		base string
 	}
 	var rows []row
 	for _, field := range []string{"src", "title", "link", "linkTitle"} {
@@ -582,24 +609,47 @@ func TestRenderWritesEachImageFieldSoItReadsBackAsHeld(t *testing.T) {
 			case "linkTitle":
 				img = func() *Node { return image("i.png", nil, "https://u.com", value) }
 			}
-			for _, context := range contexts {
+			for contextIndex, context := range contexts {
 				placed := img()
-				rows = append(rows, row{field + " " + strconv.Quote(value) + " in " + context.name, place(context.source, context.path, context.types, placed), placed})
+				test := row{field + " " + strconv.Quote(value) + " in " + context.name, place(context.source, context.path, context.types, placed), placed, ""}
+				if field == "src" || field == "title" {
+					test.base = base(contextIndex, placed)
+				}
+				rows = append(rows, test)
 			}
 		}
 	}
-	rendered := make([]string, len(rows))
+	// The engine reads every rendering, and then every base spelling, in one run.
+	markdowns := make([]string, len(rows), 2*len(rows))
+	baseReading := make([]int, len(rows))
 	for index, test := range rows {
 		markdown, err := Render(test.doc)
 		if err != nil {
 			t.Fatalf("%s: Render: %v", test.name, err)
 		}
-		rendered[index] = markdown
+		markdowns[index] = markdown
+		baseReading[index] = -1
+		if test.base != "" {
+			baseReading[index] = len(markdowns)
+			markdowns = append(markdowns, test.base)
+		}
 	}
-	readings := engineReadings(t, rendered)
+	readings := engineReadings(t, markdowns)
+	// engineImage is the first image the engine reads, or nil.
+	engineImage := func(reading *Node) *Node {
+		var image *Node
+		Walk(reading, func(node *Node) bool {
+			if node.Type == "image" {
+				image = node
+			}
+			return image == nil
+		})
+		return image
+	}
+	compared := 0
 	for index, test := range rows {
 		t.Run(test.name, func(t *testing.T) {
-			markdown := rendered[index]
+			markdown := markdowns[index]
 			want, _ := test.doc.JSON()
 			if back, err := Parse(markdown); err != nil || !back.Equal(test.doc) {
 				got, _ := back.JSON()
@@ -609,49 +659,62 @@ func TestRenderWritesEachImageFieldSoItReadsBackAsHeld(t *testing.T) {
 				got, _ := back.JSON()
 				t.Errorf("ParseForWrite(%q) = %s (%v)\nwant: %s", markdown, got, err, want)
 			}
-			var engine *Node
-			if readings[index] != nil {
-				Walk(readings[index], func(node *Node) bool {
-					if node.Type == "image" && engine == nil {
-						engine = node
-					}
-					return engine == nil
-				})
-			}
-			if engine == nil || !engine.Equal(test.image) {
+			if engine := engineImage(readings[index]); engine == nil || !engine.Equal(test.image) {
 				got, _ := readings[index].JSON()
 				t.Errorf("the engine reads %q as %s, want its image %v", markdown, got, test.image.Attrs)
 			}
+			// The base's bytes read back as held when they read so as the rendering must:
+			// Parse and ParseForWrite take them as the tree, and the engine reads the image.
+			if test.base == "" {
+				return
+			}
+			if back, err := Parse(test.base); err != nil || !back.Equal(test.doc) {
+				return
+			}
+			if back, err := ParseForWrite(test.base, nil); err != nil || !back.Equal(test.doc) {
+				return
+			}
+			if engine := engineImage(readings[baseReading[index]]); engine == nil || !engine.Equal(test.image) {
+				return
+			}
+			compared++
+			if markdown != test.base {
+				t.Errorf("Render() = %q, want the base's bytes %q, which read back as held", markdown, test.base)
+			}
 		})
 	}
-	// A title's line feed a top-level paragraph holds is written as it is, as the server stores
-	// it; a heading, a table cell and a block quote take it as `&#10;`.
-	written := map[string][2]string{
-		"a paragraph":       {"", "\n"},
-		"a level 1 heading": {"# ", "\n"},
-		"a table cell":      {"| h |\n| --- |\n| ", " |\n"},
-		"a block quote":     {"> ", "\n"},
-	}
-	for _, context := range contexts {
-		around, ok := written[context.name]
-		if !ok {
-			continue
+	t.Logf("%d rows; the base's bytes read back as held, and are the writer's, in %d of them", len(rows), compared)
+	// A title's line feed is written as it is in a paragraph, a list item and a block quote, as the
+	// server stores it, and as `&#10;` in a heading and a table cell, whose line it would end, and
+	// where a blank line would end the paragraph.
+	for _, test := range []struct {
+		context, title, linkTitle, want string
+	}{
+		{"a paragraph", "a\nb", "", "![x](i.png \"a\nb\")\n"},
+		{"a paragraph", "", "a\nb", "[![x](i.png)](https://u.com \"a\nb\")\n"},
+		{"a block quote", "a\nb", "", "> ![x](i.png \"a\nb\")\n"},
+		{"a block quote", "", "a\nb", "> [![x](i.png)](https://u.com \"a\nb\")\n"},
+		{"a bullet list item", "a\nb", "", "- ![x](i.png \"a\nb\")\n"},
+		{"a bullet list item", "", "a\nb", "- [![x](i.png)](https://u.com \"a\nb\")\n"},
+		{"a level 1 heading", "a\nb", "", "# ![x](i.png \"a&#10;b\")\n"},
+		{"a level 1 heading", "", "a\nb", "# [![x](i.png)](https://u.com \"a&#10;b\")\n"},
+		{"a table cell", "a\nb", "", "| h |\n| --- |\n| ![x](i.png \"a&#10;b\") |\n"},
+		{"a table cell", "", "a\nb", "| h |\n| --- |\n| [![x](i.png)](https://u.com \"a&#10;b\") |\n"},
+		{"a block quote", "a\n\nb", "", "> ![x](i.png \"a&#10;&#10;b\")\n"},
+	} {
+		img := image("i.png", nil, nil, nil)
+		if test.title != "" {
+			img.Attrs["title"] = test.title
 		}
-		lineFeed := "&#10;"
-		if context.name == "a paragraph" {
-			lineFeed = "\n"
+		if test.linkTitle != "" {
+			img.Attrs["link"], img.Attrs["linkTitle"] = "https://u.com", test.linkTitle
 		}
-		for _, test := range []struct {
-			field string
-			img   *Node
-			want  string
-		}{
-			{"title", image("i.png", "a\nb", nil, nil), `![x](i.png "a` + lineFeed + `b")`},
-			{"linkTitle", image("i.png", nil, "https://u.com", "a\nb"), `[![x](i.png)](https://u.com "a` + lineFeed + `b")`},
-		} {
-			want := around[0] + test.want + around[1]
-			if markdown, err := Render(place(context.source, context.path, context.types, test.img)); err != nil || markdown != want {
-				t.Errorf("Render(%s \"a\\nb\" in %s) = %q (%v), want %q", test.field, context.name, markdown, err, want)
+		for _, context := range contexts {
+			if context.name != test.context {
+				continue
+			}
+			if markdown, err := Render(place(context.source, context.path, context.types, img)); err != nil || markdown != test.want {
+				t.Errorf("Render(title %q, link title %q in %s) = %q (%v), want %q", test.title, test.linkTitle, context.name, markdown, err, test.want)
 			}
 		}
 	}

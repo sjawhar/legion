@@ -514,16 +514,19 @@ func (r *renderer) writeInlineRun(nodes []*Node, prefix string, context inlineCo
 			alt, _ := n.Attrs["alt"].(string)
 			writtenAlt := imageAlt(alt, context)
 			// A title's line feed is written as it is, so a title the server already stores keeps
-			// its bytes, only in a top-level paragraph, where the image read alone reads back with
-			// its titles; any other block - a heading, a table cell, a list item or a block quote,
-			// whose prefix the line feed would not carry - takes every line feed of both titles as
-			// `&#10;`. Parse is asked only when a title holds a line feed.
-			image := imageSyntax(n, writtenAlt, escapePipes, true)
-			if strings.Contains(title, "\n") || strings.Contains(linkTitle, "\n") {
-				plain := prefix == "" && !context.tableCell && !context.heading
-				if !plain || !rawTitlesReadBack(image, title, linkTitle) {
-					image = imageSyntax(n, writtenAlt, escapePipes, false)
+			// its bytes, except in a heading or a table cell, whose line it would end, and in an
+			// image render found misread so written; those take every line feed of both titles as
+			// `&#10;`. Whether the raw form reads back depends on the document around the image -
+			// a list item's or block quote's next line is the paragraph's lazy continuation, a
+			// blank line ends it, a line can open a block - so the image is recorded for render
+			// to judge in the whole document.
+			raw := !context.tableCell && !context.heading && !r.escapedTitles[n]
+			image := imageSyntax(n, writtenAlt, escapePipes, raw)
+			if raw && (strings.Contains(title, "\n") || strings.Contains(linkTitle, "\n")) {
+				if r.rawTitles == nil {
+					r.rawTitles = map[*Node]bool{}
 				}
+				r.rawTitles[n] = true
 			}
 			r.writeSyntax(image)
 			position.atLineStart, position.atTextStart = false, false
