@@ -2,57 +2,27 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-252",
-  "completed": "2026-10-26T15:20:00Z",
-  "round": 7,
-  "headSha": "dd04f49c458d1d150d4121204ba8358608f9c0d9",
-  "fingerprint": "3b91e647b693 8f1e6192875b71f7ba5fd225feeb5123010c5050c0814b1adc38317eaa95887d -> dd04f49c458d 1ab2a88188fe0ce166108d2067dabd3e8e0f25af22c3ae5cb75eea1e7b51fed7: changed, full round",
+  "completed": "2026-10-26T17:45:00Z",
+  "round": 8,
+  "headSha": "fd6ddb475d7217c941874c3e5b4b15fa617a4816",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran `LEGION_TEST_PG_DSN=<fresh postgres> LEGION_E2E_NATS_BIN=<nats-server> bash scripts/e2e/child-adoption.sh` at dd04f49c458d: `child adoption e2e: PASS in 42s`, all eleven steps, migrating a fresh database through 0054_issue_ancestry (transcript https://github.com/sjawhar/legion/pull/2226#issuecomment-6419355359)."
+    "how": "Re-ran `LEGION_TEST_PG_DSN=<fresh postgres> LEGION_E2E_NATS_BIN=<nats-server> bash scripts/e2e/child-adoption.sh` at the branch head fd6ddb475d72: `child adoption e2e: PASS in 39s`, all eleven steps (https://github.com/sjawhar/legion/pull/2226#issuecomment-6422838983). The proof holds for the branch alone; the failure below is the merge with current main."
   },
-  "failures": [],
-  "failed": 0,
+  "failures": [
+    {
+      "criterion": "The daemon boots and migrates once this pull request merges: the ancestry migration shares no version with main's migrations",
+      "evidence": "Main moved to ad909178 (#2150), adding 0054_issue_pod_roles_container.up.sql; this branch carries 0054_issue_ancestry.up.sql. GitHub reports MERGEABLE (different names). The merge `git merge-tree --write-tree ad909178 fd6ddb475d72` = tree ffced9be20aa (no conflict), exported with git archive: `bash scripts/e2e/child-adoption.sh` there fails before any step with `migrate the store: migrations 0054_issue_ancestry.up.sql and 0054_issue_pod_roles_container.up.sql share version 54`; `cd packages/daemon && LEGION_TEST_PG_DSN=<fresh postgres> go test -count=1 ./internal/store/` there fails every migrating test with the same message (TestACapabilityReportRoundTrips, TestASecondCapabilityReportReplacesTheClaimsFirst, ...). No new red test: the repository's existing migrating tests already fail on the merge. Fix per the architect: renumber to 0055_issue_ancestry.up.sql, no merge of main (no textual conflict)."
+    }
+  ],
+  "failed": 1,
   "previousFailures": [
     {
       "criterion": "D2: a todo root held under an unrecorded parent of a live tree queues once that parent leaves the tree",
       "round": 1,
-      "status": "fixed; red test TestATodoHeldUnderAnUnreleasedChildQueuesOnceItsParentLeavesTheLiveTree passes at dd04f49c458d"
+      "status": "fixed"
     }
   ],
-  "proof": [
-    {
-      "criterion": "Merge with #2188: an adopted queued root that waits on an unfinished Dispatch issue is held at admitted in the tree and starts once the blocker is done",
-      "surface": "whole daemon over real PostgreSQL and its own nats-server, JetStream Dispatch envelopes carrying blocked_by, the Legion HTTP API (throwaway -tags e2e driver)",
-      "command": "B backlog; W labelled todo with blocked_by [B], waiting; W re-parented under T (blocked_by [B]); B done",
-      "observed": "W recorded in T at phase admitted, no planner, no slot, not waiting, over 3 s; after B's done event W is planning at generation 2 with its planner, no slot, no architect",
-      "headSha": "dd04f49c458d1d150d4121204ba8358608f9c0d9",
-      "negativeControl": "the unfinished blocker is the deliberately withheld input: W did not start until it was done"
-    },
-    {
-      "criterion": "Merge with #2188 (RanAsRoot reads CarriesRun()||TakenBack): a root carrying a taken-back run is refused, not adopted",
-      "surface": "POST /legion/v1/waves/release on the whole daemon (throwaway driver)",
-      "command": "K seeded as its own root, phase implementing, TakenBack, todo; Dispatch shows K todo under T; release {K}",
-      "observed": "409 CHILD_NOT_ADOPTABLE `K cannot join the tree of T: it carries a run handed over to it as a root of its own`; K still its own tree at generation 2, phase implementing; no Dispatch write",
-      "headSha": "dd04f49c458d1d150d4121204ba8358608f9c0d9",
-      "negativeControl": "the release itself is the refused call"
-    },
-    {
-      "criterion": "AC1-AC4 and D2 at the merge head",
-      "surface": "whole daemon (scripts/e2e/child-adoption.sh) and round 1's red test",
-      "command": "LEGION_TEST_PG_DSN=<fresh postgres> LEGION_E2E_NATS_BIN=<nats-server> bash scripts/e2e/child-adoption.sh; go test -run TestATodoHeldUnderAnUnreleasedChildQueuesOnceItsParentLeavesTheLiveTree ./internal/daemon/",
-      "observed": "PASS in 42s, all eleven steps; red test PASS",
-      "headSha": "dd04f49c458d1d150d4121204ba8358608f9c0d9",
-      "negativeControl": "release-refuses: 409 CHILD_IN_OTHER_TREE, record unchanged, no Dispatch write; red test failed at fac524684344 before the fix"
-    },
-    {
-      "criterion": "The tester's round 1-4 scenarios and round 6 daemon restarts at the merge head",
-      "surface": "whole daemon (throwaway -tags e2e drivers)",
-      "command": "twelve scenarios (stale-ancestor ... parked-root-on-chain) and two restarts against a listing Dispatch stand-in (with envelopes; with the parent's move on the listing alone)",
-      "observed": "all ok",
-      "headSha": "dd04f49c458d1d150d4121204ba8358608f9c0d9",
-      "negativeControl": "wave-atomic and not-adoptable drive 409 CHILD_IN_OTHER_TREE and 409 CHILD_NOT_ADOPTABLE with nothing written"
-    }
-  ],
-  "ci": "At dd04f49c458d, read 2026-10-26T15:15Z: Tests 40344153501 queued; Legion Envoy and Contracts 40344153598 queued; Docs 40344153510 queued; Worker Image 40344153589 queued; PR Title 40344385280 pending (40344153549, 40344357516 cancelled). GitHub reports MERGEABLE; main 0587774a744f's highest migration is 0053.",
+  "ci": "At fd6ddb475d72, read 2026-10-26T17:40Z: Tests 40363077934 in progress; Worker Image 40363077970 pending; Legion Envoy and Contracts 40363078099 queued; Docs 40363078052 success; PR Title 40363077921 success (40368096119 queued). These runs started before #2150 reached main, so their merge ref does not carry main's 0054.",
   "verdictProvider": "provider not verified (no review subagents ran)"
 }
