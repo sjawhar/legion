@@ -2,64 +2,57 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-158",
-  "completed": "2026-10-26T14:42:00Z",
-  "round": 2,
-  "head": "bc5dcfe9a7a7d467e6a4b9f3ffb707bcc225cb74",
+  "completed": "2026-10-26T21:10:00Z",
+  "round": 4,
+  "generation": 4,
+  "head": "337c577d886069b322cefb3b9acc36304f47a89f",
+  "verdictProvider": "No subagent judged anything in this round; the tester's own session ran every check, so no provider or model needs naming.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Drove the same surface independently at bc5dcfe9: the tester's red browser test (unchanged, commit 501ea1a3) passes on chromium and iphone; a no-op dispatch doc-edit with doc_updates/artifact_versions/doc_settlements_pending snapshots adds nothing, while a real one adds v2; the repair passes after an upgrade from main's build leave the database identical. The earlier proof entries (closes, reopen, browser spec, latency) were re-driven at this head as listed in proof."
+    "how": "Drove the same surface independently at 337c577d on dispatch:local (the head's Go server, Postgres 17, the web app and dispatch CLI built at the head, and the Legion daemon's dispatch.HTTPClient.SetStatus): closes, reopen, upgrade and roll repair, no-op writes, the unloadable-document close, the round-1 red test and offline-edits.e2e.ts."
   },
   "failed": 0,
   "failures": [],
-  "roundOneFailures": [
-    "False unsent-edit message on a closed issue's read-only document: fixed (red test passes; Chromium shows no message on TT-5 or TT-3).",
-    "applyLive empty update for every writer: fixed (no-op doc-edit writes nothing; suggestions, comments and answers still write)."
-  ],
   "proof": [
     {
-      "criterion": "A closed issue's document names no unsent edit to a person who typed nothing (round-1 failure 1)",
-      "surface": "Dispatch's browser suite (Playwright chromium and iphone) on the head's Go server, the web app built at the head and Postgres 17, plus a manual Chromium load in a new profile",
-      "command": "cd packages/dispatch && bun run e2e -- close-withdraws-asks.e2e.ts offline-edits.e2e.ts ask-blocks.e2e.ts doc.e2e.ts issue.e2e.ts margin-composer-hold.e2e.ts live.e2e.ts; bun /legion/scratch/infra158-test/look.ts 8797 TT-5 and TT-3",
-      "observed": "The red test passes on chromium and iphone; offline-edits.e2e.ts passes on both (real unsent edits named, read-only admission keeps a person's edits until a writable reload). 215 passed on chromium and iphone across the 7 files; the 11 failures are firefox and webkit with 'Executable doesn't exist' (not installed in the pod). Chromium on TT-5 (agent spec with two headings, closed) and TT-3 shows only 'This issue is closed. Its document is read-only.'",
-      "headSha": "bc5dcfe9a7a7d467e6a4b9f3ffb707bcc225cb74",
-      "negativeControl": "The same red test at 39c12172 failed 6 of 6: Expected \"connected\", Received \"connected · 1 edit saved in this browser can't be sent: this document is read-only.\""
+      "criterion": "Close by a person, an agent session and the Legion daemon withdraws every open ask of every kind and names the closer; answered, retracted and resolved asks stay; blocks and copies read resolved; earlier versions are unchanged and no version is written; the page shows nothing waiting; reopen restores exactly those asks",
+      "surface": "dispatch:local with the branch's CLI, the daemon's own SetStatus, and Chromium",
+      "command": "seed.ts TT 3; alice cookie PATCH TT-1; SID=tester-agent-9 dcli issue-update --issue TT-2 --status done; daemonclose TT-3 done; state.ts; look.ts TT-3 (spec and conversation); reopen TT-1 by alice and TT-2 by the agent",
+      "observed": "Closes took 0.08 and 0.13 s. On each issue open_asks is 0 and the approval draft; d1, p1, p3, h1 and ap read withdrawn by alice | tester-agent-9 | legion-daemon:TT; d2 answered, p2 retracted, p4 resolved; the blocks and the copy read resolved; the latest version is the named pre-close version. In Chromium there is no whose-turn header and no Awaiting approval button, and each card reads 'Withdrawn when legion-daemon:TT closed the issue'. The reopens restored the same 5 ids with the same waiting_on, in the Inbox, approval awaiting, blocks open, and wrote no version.",
+      "headSha": "337c577d886069b322cefb3b9acc36304f47a89f",
+      "negativeControl": "The same closes on main's build b4bea385 (UP-1..3) left open_asks 5, the approval awaiting and every block open"
     },
     {
-      "criterion": "A document write that changes nothing appends no update and marks no settlement, for every writer (round-1 failure 2)",
-      "surface": "dispatch:local: the head's Go server on Postgres 17, the branch's dispatch CLI, SQL snapshots",
-      "command": "On TT-4: dispatch doc-edit no-op replace ('Context paragraph stays.' -> same), snapshot of doc_updates, max version, artifact_versions and doc_settlements_pending.marked_at right after the write and 4 s later; then a real replace; then a no-op of the new text; then dispatch suggest x2, accept and reject, an anchored dispatch comment resolved twice",
-      "observed": "no-op: 1|1|1|none before, right after, and 4 s later; real replace: 2|2|2; second no-op: 2|2|2. Accept applied 'Context section', reject left 'Second paragraph changed.', both resolves 200, no ERROR in the server log.",
-      "headSha": "bc5dcfe9a7a7d467e6a4b9f3ffb707bcc225cb74",
-      "negativeControl": "The real replace (a write that does change the document) appended an update and a version: 1|1|1 -> 2|2|2"
+      "criterion": "The asks already open on closed issues are withdrawn naming each closer; asks an older process reopened are restored; later passes write nothing",
+      "surface": "Main's build b4bea385, then the head on the same Postgres database, then api.RepairIssueAsks as the interval runs it",
+      "command": "Main's build seeds UP-1..4, adds an unindexed block 'late' to UP-1..3 and closes them (alice, old-agent-5, SetStatus); the head boots; the head closes UP-4; 3 repair passes with an md5 of versions, settlement marks, events and updates before and after; main's build reopens UP-3 and UP-4; the head boots again",
+      "observed": "First head boot: withdrawn=15 restored=0 swept=3, naming alice, old-agent-5 and legion-daemon:UP; blocks d1, late and the copy read resolved; the released dispatch CLI (pi-envoy 10.26.0) prints 'Kind: withdrawn' and 'Open asks: - none'. The 3 passes reported withdrawn=0 restored=0 swept=0 and left the md5 unchanged. Second boot after main's reopens: restored=10, and the asks are open in the Inbox with the blocks open.",
+      "headSha": "337c577d886069b322cefb3b9acc36304f47a89f",
+      "negativeControl": "On main's build the closed UP-1..3 kept 5 open asks each, the approval awaiting and the blocks open"
     },
     {
-      "criterion": "Close by a person, an agent session and the Legion daemon withdraws every open ask of every kind, naming the closer; answered, retracted and resolved asks stay; blocks and copies read resolved; no version is written; reopen restores exactly those asks",
-      "surface": "dispatch:local with the branch's CLI and the Legion daemon's own dispatch.HTTPClient.SetStatus",
-      "command": "seed.ts TT 3 (each issue: decision d1 copied into notes, answered d2, plain p1 waiting on a person, retracted p2, p3 waiting on the agent, resolved p4, alice's h1, an approval request, named versions); alice cookie PATCH TT-1, SID=tester-agent-9 dcli issue-update --issue TT-2 --status done, daemonclose TT-3 done; state.ts; reopen TT-1 by alice and TT-2 by the agent",
-      "observed": "Closes took 0.12-0.15 s. Each issue: open_asks 0, approval draft; d1, p1, p3, h1 and ap read resolved/withdrawn by alice | tester-agent-9 | legion-daemon:TT with 'Withdrawn by the close of TT-n.'; d2 answered, p2 retracted, p4 resolved; spec d1=resolved, notes d1=resolved; the latest spec version is the named one from before the close. Reopen: the same 5 ids are open again with the same waiting_on, in the Inbox, approval awaiting, blocks open.",
-      "headSha": "bc5dcfe9a7a7d467e6a4b9f3ffb707bcc225cb74",
-      "negativeControl": "The same closes on main's build 383b889d (UP-1..3) left open_asks 5, the approval awaiting and every block open"
+      "criterion": "Round-3 fixes: a close beside a document that cannot load, a close whose client hangs up, the editor credit across a close and reopen, typing after a read-only-then-writable reconnect",
+      "surface": "dispatch:local (server API, SQL corruption, curl --max-time) and Dispatch's Playwright harness (chromium and iphone) with a throwaway probe spec",
+      "command": "Corrupt notes.md's doc_updates of TT-4, restart the server, daemonclose TT-4 done, run repairpass twice; curl --max-time 0.02-0.05 PATCH close on TT-5..9 right after inserting a block; alice edit, then daemon close and agent reopen of TT-1 with version authors read; bun run e2e -- zz-tester-probe.e2e.ts --project chromium --project iphone --repeat-each 2 (deleted after)",
+      "observed": "TT-4: the notes read gives 409 DOCUMENT_UNLOADABLE; the close returns 200 and withdraws the ask, logging 'leave the ask blocks of a document whose history cannot load as they are'; both repair passes return no error. Each hung-up close (begin, document write, event insert) rolled back whole: the issue stayed in triage, ask and block open, and no room failed. Alice's edit settled as v5 authored by alice before the close, and the close and reopen wrote no version. Probes passed 4 of 4: typing after a writable reconnect was stored and named 'not sent yet', then reached the server; a tab's own unsent typing survived a close and a reopen, then reached the server.",
+      "headSha": "337c577d886069b322cefb3b9acc36304f47a89f",
+      "negativeControl": "Reading the corrupted document is refused 409 DOCUMENT_UNLOADABLE, so the close really ran beside a document that cannot load"
     },
     {
-      "criterion": "Concurrent close against resolve, answer, a second close, an unsettled block, a reopen, and a second server process leaves one consistent record",
-      "surface": "dispatch:local, one head process and then two on one database",
-      "command": "race.ts resolve 15, double 10, unsettled 10, flip 10; race2.ts 12 (room on process B, close on process A)",
-      "observed": "0 problems and no 5xx: the decision ended answered 10 times and withdrawn 5 times, and the plain ask ended retracted 10 times and withdrawn 5 times; a double close gave one 200 and one 409, with each ask withdrawn once; the unsettled block was withdrawn as an ask 10 of 10; flip stayed consistent; across two processes, both read d=resolved,u=resolved with every ask withdrawn, 12 of 12",
-      "headSha": "bc5dcfe9a7a7d467e6a4b9f3ffb707bcc225cb74",
-      "negativeControl": "Each race round asserts that the loser is refused or applied once: concurrent second closes answered 409 ISSUE_CLOSED (10 of 10), and a resolve or answer after the close answered 409"
-    },
-    {
-      "criterion": "The asks already open on closed issues are withdrawn naming each earlier closer, and later repairs write nothing",
-      "surface": "main's build 383b889d, then the head booted on the same Postgres database, then the repair pass (api.RepairIssueAsks) as the interval runs it",
-      "command": "Main's build seeds UP-1..3, inserts a decision block 'late' into each spec, and closes them (alice, old-agent-5, SetStatus); stop it and boot the head; snapshot; reboot the head; repairpass with markedSince nil, then with now-10min; snapshot; two more passes; snapshot",
-      "observed": "First head boot: 'withdrawn=15 restored=0 swept=3'; each issue has open_asks 0, approval draft, and its asks withdrawn by alice | old-agent-5 | legion-daemon:UP; the blocks d1, late and the copy read resolved. Second boot 'withdrawn=0 restored=0 swept=0'. Passes 'withdrawn=0 restored=0 swept=0'. artifact_versions 23, the six settlement marks and 85 events are unchanged across the reboot and the passes; doc_updates went from 15 to 6 at the reboot (compaction on load, with no update after it) and stayed identical across the later passes.",
-      "headSha": "bc5dcfe9a7a7d467e6a4b9f3ffb707bcc225cb74",
-      "negativeControl": "On main's build the same three closed issues kept 5 open asks each, the approval awaiting and the blocks open"
+      "criterion": "Earlier rounds' fixes still hold after round 4's settlement-outcome and pending-sync refactors: no unsent-edit message on a closed document; no-op writes write nothing; concurrent closes stay consistent",
+      "surface": "Dispatch's browser suite (chromium and iphone) on the head, and dispatch:local with SQL snapshots",
+      "command": "bun run e2e -- close-withdraws-asks.e2e.ts offline-edits.e2e.ts ask-blocks.e2e.ts doc.e2e.ts issue.e2e.ts live.e2e.ts --project chromium --project iphone; no-op and real dcli doc-edit on TT-10 with snapshots; race.ts resolve 12, double 8, unsettled 8, flip 8; race2.ts 10 across two processes",
+      "observed": "200 passed, 1 failed: ask-blocks.e2e.ts:334, which ran while the race script loaded the database, then passed 4 of 4 alone. The round-1 red test and offline-edits pass on both projects. No-op doc-edit: 1|1|none before, right after and 4 s later; the real edit gave 2|2. Races: 0 problems and no 5xx; the unsettled block was withdrawn 8 of 8; two processes, 10 of 10 blocks resolved.",
+      "headSha": "337c577d886069b322cefb3b9acc36304f47a89f",
+      "negativeControl": "The round-1 red test failed 6 of 6 at 39c12172 with 'connected · 1 edit saved in this browser can't be sent'; a real edit on TT-10 did add a version (1|1 -> 2|2)"
     }
   ],
-  "ci": "At bc5dcfe9: Docs 40333005248 success, PR Title 40334998057 success; Tests 40333005216 in progress; Worker Image 40333005429 in progress; Legion Envoy and Contracts 40333005172 queued.",
+  "notReached": [
+    "The census's 503 DOC_SERVICE_UNAVAILABLE needs a room caught in its failed-and-reloading window, and I did not produce one. A close beside a document outside the schema (test hook) returned 200 and withdrew the ask. The daemon's outbox retry for a failed status write is unchanged code."
+  ],
+  "incident": "At 20:15Z I removed /legion/scratch/tmp/pg/data/postmaster.pid while the implementer's Postgres, which my role's process namespace cannot see, was running. It stopped itself within a minute. I restarted it on the same data directory and its recovery was clean (last WAL activity at 20:06). I told the implementer.",
+  "ci": "At 337c577d: Tests 40393260948 success, Docs 40393261126 success, Worker Image 40393261054 success, PR Title 40393425384 success; Legion Envoy and Contracts 40393261140 queued.",
   "evidenceComments": [
-    "https://github.com/sjawhar/legion/pull/2233#issuecomment-6418774286",
-    "https://github.com/sjawhar/legion/pull/2233#issuecomment-6414899308"
+    "https://github.com/sjawhar/legion/pull/2233#issuecomment-6426995017"
   ]
 }
