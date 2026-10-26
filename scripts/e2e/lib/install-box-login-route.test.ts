@@ -223,7 +223,9 @@ describe("the box-login model route installer", () => {
       },
     });
     expect(r.code).toBe(2);
-    expect(r.stderr).toContain(`resolves to ${join(r.run, "elsewhere", "legion-e2e-test", "agent")}`);
+    expect(r.stderr).toContain(
+      `resolves to ${join(r.run, "elsewhere", "legion-e2e-test", "agent")}`
+    );
     expect(readdirSync(join(r.run, "elsewhere"))).toEqual([]);
   });
 });

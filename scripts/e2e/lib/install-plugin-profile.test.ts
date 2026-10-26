@@ -16,7 +16,10 @@ function install(extra: string[]) {
   const checkout = join(run, "checkout");
   const lib = join(checkout, "scripts", "e2e", "lib");
   mkdirSync(lib, { recursive: true });
-  copyFileSync(join(import.meta.dir, "install-plugin-profile.sh"), join(lib, "install-plugin-profile.sh"));
+  copyFileSync(
+    join(import.meta.dir, "install-plugin-profile.sh"),
+    join(lib, "install-plugin-profile.sh")
+  );
   writeFileSync(join(checkout, ".omp-pin"), `${repoPin}\n`);
   writeFileSync(
     join(lib, "pack-plugin.sh"),
