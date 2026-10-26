@@ -905,7 +905,7 @@ func mountsOf(c corev1.Container) []string {
 }
 
 // The feed lives on the issue's own volume, under the subPath feed: workspace-fetch mounts that
-// alone, read-write, and no other part of the volume; workspace-init and every role container
+// alone, read-write, and no other part of the volume; workspace-init and the roles container
 // mount the volume whole and the feed again, read-only, over it, so no agent can write the feed the
 // token-holding container reads. No emptyDir feed is left.
 func TestTheFeedIsOnTheIssueVolumeAndOnlyTheFetchWritesIt(t *testing.T) {
@@ -927,7 +927,7 @@ func TestTheFeedIsOnTheIssueVolumeAndOnlyTheFetchWritesIt(t *testing.T) {
 	}
 	for _, c := range spec.Containers {
 		if got := mountsOf(c); !slices.Contains(got, feed+" ro") || !slices.Contains(got, TreeRoot+"  rw") || slices.Contains(got, feed+" rw") {
-			t.Errorf("role container %s mounts the issue volume %q, want it whole and the feed read-only", c.Name, got)
+			t.Errorf("container %s mounts the issue volume %q, want it whole and the feed read-only", c.Name, got)
 		}
 	}
 	for _, v := range spec.Volumes {

@@ -2,7 +2,7 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { scriptFunctions } from "./script-functions";
+import { expectNoMissingHelpers, nameMissingHelpers, scriptFunctions } from "./script-functions";
 
 // clean_smoke_main's pull request and branch (lib/workflow.sh) through each stage's own teardown:
 // Stage 4b's cleanup and remove_run_branches, and Stage 3's cleanup and the lib's
@@ -126,6 +126,10 @@ const fn4b = scriptFunctions(stage4bScript);
 const fn3 = scriptFunctions(stage3Script);
 const shell4b = scriptShell(stage4bScript);
 const shell3 = scriptShell(stage3Script);
+const rig = join(e2e, "lib", "rig.sh");
+const workflowLib = join(e2e, "lib", "workflow.sh");
+const guard4b = nameMissingHelpers(stage4bScript, rig, workflowLib);
+const guard3 = nameMissingHelpers(stage3Script, rig, workflowLib);
 const libs = `. "$root/scripts/e2e/lib/rig.sh"
 . "$root/scripts/e2e/lib/workflow.sh"
 stop_tree() { :; }; stop_pid() { :; }; run_processes() { :; }
@@ -143,6 +147,7 @@ negative_config_pod= negative_config_workspace= block_tree=
 project=LEGSMOKE repo=sjawhar/legion-smoke
 mkdir -p "$work" "$evidence/model-gateway"
 exec 7>&1
+${guard4b}
 ${fn4b("begin")}
 ${fn4b("note")}
 ${fn4b("pass")}
@@ -153,6 +158,7 @@ ${libs}
 collect_transcripts() { :; }; record_pair() { :; }; op() { :; }
 teardown() { :; }; namespace_clean() { :; }; delete_consumers() { :; }
 ${fn4b("remove_run_branches")}
+${fn4b("remove_negative_config")}
 ${fn4b("cleanup")}
 ${shell4b.traps}
 ${tail}
@@ -166,11 +172,12 @@ pass`;
 
 // Stage 3's driver at its smoke-main-clean checkpoint, its first issue merged and signed off.
 const stage3 = (tail: string) => `${shell3.set}
-root=${JSON.stringify(root)} work="$RUN/work" evidence="$RUN/evidence" profile_agent="$RUN/no-profile"
+root=${JSON.stringify(root)} work="$RUN/work" evidence="$RUN/evidence" profile_agent="$RUN/no-profile" model_route=gateway
 check=setup check_started=2026-10-08T00:00:00Z
 ok= audited= prod_baseline= watcher_pid= daemon_pid= dispatch_pid= listener_pid= bridge_pid= pg_container=none nats_container=none
 project=S312345678 ptoken=s312345678 repo=sjawhar/legion-smoke
 mkdir -p "$work" "$evidence/model-gateway" "$evidence/transcripts"
+${guard3}
 ${fn3("begin")}
 ${fn3("note")}
 ${fn3("pass")}
@@ -243,6 +250,9 @@ function run(
   });
   const read = (f: string) => readFileSync(join(state, f), "utf8");
   const after: PullRequest[] = JSON.parse(read("prs.json"));
+  // A helper the teardown calls that this harness neither extracts nor stubs would otherwise be a
+  // bare exit 127 behind a `cleanup warning:` line; the guard in each template names it here.
+  expectNoMissingHelpers(result.stdout.toString(), result.stderr.toString());
   return {
     code: result.exitCode,
     stdout: result.stdout.toString(),
