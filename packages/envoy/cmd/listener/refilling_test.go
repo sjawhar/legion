@@ -18,6 +18,7 @@ import (
 	"unsafe"
 
 	natsgo "github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go/jetstream"
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/kvwatch"
@@ -77,19 +78,19 @@ func (c *listenerClock) Advance(d time.Duration) {
 	c.now = c.now.Add(d)
 }
 
-// heldScanKV is a bucket whose watch delivers every record but holds back the nil that ends its
-// scan until release is closed, so the read it begins stays under way.
+// heldScanKV is a bucket's jetstream handle whose watch delivers every record but holds back the
+// nil that ends its scan until release is closed, so the read it begins stays under way.
 type heldScanKV struct {
-	natsgo.KeyValue
+	jetstream.KeyValue
 	release <-chan struct{}
 }
 
-func (kv heldScanKV) WatchAll(opts ...natsgo.WatchOpt) (natsgo.KeyWatcher, error) {
-	watcher, err := kv.KeyValue.WatchAll(opts...)
+func (kv heldScanKV) Watch(ctx context.Context, keys string, opts ...jetstream.WatchOpt) (jetstream.KeyWatcher, error) {
+	watcher, err := kv.KeyValue.Watch(ctx, keys, opts...)
 	if err != nil {
 		return nil, err
 	}
-	held := &heldScanWatcher{KeyWatcher: watcher, updates: make(chan natsgo.KeyValueEntry)}
+	held := &heldScanWatcher{KeyWatcher: watcher, updates: make(chan jetstream.KeyValueEntry)}
 	go func() {
 		defer close(held.updates)
 		scanning := true
@@ -106,18 +107,19 @@ func (kv heldScanKV) WatchAll(opts ...natsgo.WatchOpt) (natsgo.KeyWatcher, error
 
 // heldScanWatcher is heldScanKV's watcher, whose updates its goroutine forwards from the real one.
 type heldScanWatcher struct {
-	natsgo.KeyWatcher
-	updates chan natsgo.KeyValueEntry
+	jetstream.KeyWatcher
+	updates chan jetstream.KeyValueEntry
 }
 
-func (w *heldScanWatcher) Updates() <-chan natsgo.KeyValueEntry { return w.updates }
+func (w *heldScanWatcher) Updates() <-chan jetstream.KeyValueEntry { return w.updates }
 
 // replaceWatcher ends the cache watcher of owner (a *session.SessionRegistry or *store.Registry)
-// and puts in its place a new one named name, on the bucket handle wrap makes of the old one's,
-// feeding the same cache, built with options, and started: its first read is the copy's first. It
-// runs before anything else reads owner. The stores take no clock or watch option for their
-// watchers, so this is how a test injects one, as stallSessionReads swaps the session handle.
-func replaceWatcher(t *testing.T, owner any, name string, wrap func(natsgo.KeyValue) natsgo.KeyValue, options ...kvwatch.Option) {
+// and puts in its place a new one named name, watching through the jetstream handle wrap makes of
+// the old one's, feeding the same cache, built with options, and started: its first read is the
+// copy's first. It runs before anything else reads owner. The stores take no clock or watch option
+// for their watchers, so this is how a test injects one, as stallSessionReads swaps the session
+// handle.
+func replaceWatcher(t *testing.T, owner any, name string, wrap func(jetstream.KeyValue) jetstream.KeyValue, options ...kvwatch.Option) {
 	t.Helper()
 	field := reflect.ValueOf(owner).Elem().FieldByName("watcher")
 	slot := reflect.NewAt(field.Type(), unsafe.Pointer(field.UnsafeAddr())).Elem()
@@ -127,7 +129,7 @@ func replaceWatcher(t *testing.T, owner any, name string, wrap func(natsgo.KeyVa
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	old.End(ctx)
-	replacement := kvwatch.New(name, bus.KeyValue{KeyValue: wrap(old.KV().KeyValue)}, cache, options...)
+	replacement := kvwatch.New(name, bus.NewKeyValue(old.KV().KeyValue, wrap(old.KV().WatchHandle()), old.KV().Streams()), cache, options...)
 	slot.Set(reflect.ValueOf(replacement))
 	replacement.Start()
 }
@@ -187,9 +189,9 @@ func newListRig(t *testing.T, options listRigOptions) *listRig {
 		if err := owner.WaitForCacheReady(ctx); err != nil {
 			t.Fatalf("warm the %s cache: %v", name, err)
 		}
-		wrap := func(kv natsgo.KeyValue) natsgo.KeyValue { return kv }
+		wrap := func(kv jetstream.KeyValue) jetstream.KeyValue { return kv }
 		if release, ok := options.release[name]; ok {
-			wrap = func(kv natsgo.KeyValue) natsgo.KeyValue { return heldScanKV{KeyValue: kv, release: release} }
+			wrap = func(kv jetstream.KeyValue) jetstream.KeyValue { return heldScanKV{KeyValue: kv, release: release} }
 		}
 		watcherName := map[string]string{"interest": "interest registry", "session": "session registry"}[name]
 		replaceWatcher(t, owner, watcherName, wrap, kvwatch.WithNow(rig.clock.Now))

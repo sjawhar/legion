@@ -1013,7 +1013,8 @@ func stallSessionReads(t *testing.T, sessions *session.SessionRegistry) {
 	t.Cleanup(func() { close(released) })
 	field := reflect.ValueOf(sessions).Elem().FieldByName("watcher")
 	watcher := reflect.NewAt(field.Type(), unsafe.Pointer(field.UnsafeAddr())).Elem()
-	stalled := bus.KeyValue{KeyValue: stalledReadKV{KeyValue: watcher.Interface().(*kvwatch.Watcher).KV().KeyValue, released: released}}
+	old := watcher.Interface().(*kvwatch.Watcher).KV()
+	stalled := bus.NewKeyValue(stalledReadKV{KeyValue: old.KeyValue, released: released}, old.WatchHandle(), old.Streams())
 	watcher.Set(reflect.ValueOf(kvwatch.New("session registry", stalled, discardingCache{})))
 }
 
@@ -1021,9 +1022,9 @@ func stallSessionReads(t *testing.T, sessions *session.SessionRegistry) {
 // and only its handle is read.
 type discardingCache struct{}
 
-func (discardingCache) Apply(nats.KeyValueEntry, kvwatch.Read) {}
-func (discardingCache) BeginRead(kvwatch.Read)                 {}
-func (discardingCache) CompleteRead(kvwatch.Read)              {}
+func (discardingCache) Apply(kvwatch.Entry, kvwatch.Read) {}
+func (discardingCache) BeginRead(kvwatch.Read)            {}
+func (discardingCache) CompleteRead(kvwatch.Read)         {}
 
 // When the session bucket cannot be read, every path that could take a role from its holder takes
 // nothing, and answers inside its bound (roleHolderReadTimeout, well under the 10 s HTTP write

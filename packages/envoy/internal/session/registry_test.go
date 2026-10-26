@@ -350,12 +350,14 @@ func TestSessionRegistryDeleteHistoryFailureSuppressesStaleWatcherUpdate(t *test
 	}
 }
 
-// useKV rebuilds the registry's watcher over kv, a wrapper of its bucket handle, so the registry writes
-// through kv from here on. The replaced watcher is stopped first.
+// useKV rebuilds the registry's watcher over kv, a wrapper of its bucket handle that watches
+// through the handle's own jetstream one, so the registry writes through kv from here on. The
+// replaced watcher is stopped first.
 func useKV(t *testing.T, r *SessionRegistry, kv natsgo.KeyValue) {
 	t.Helper()
+	base := r.watcher.KV()
 	r.watcher.Stop()
-	r.watcher = kvwatch.New("session registry", bus.KeyValue{KeyValue: kv}, sessionCache{r})
+	r.watcher = kvwatch.New("session registry", bus.NewKeyValue(kv, base.WatchHandle(), base.Streams()), sessionCache{r})
 	r.watcher.Start()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

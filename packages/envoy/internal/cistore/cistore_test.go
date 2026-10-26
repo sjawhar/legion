@@ -141,12 +141,14 @@ func getState(t *testing.T, s *Store, owner, repo, number, sha string) State {
 	return st
 }
 
-// useKV rebuilds the store's watcher over kv, a wrapper of its bucket handle, so the store writes
-// through kv from here on. The replaced watcher is stopped first.
+// useKV rebuilds the store's watcher over kv, a wrapper of its bucket handle that watches through
+// the handle's own jetstream one, so the store writes through kv from here on. The replaced watcher
+// is stopped first.
 func useKV(t testing.TB, s *Store, kv natsgo.KeyValue) {
 	t.Helper()
+	base := s.watcher.KV()
 	s.watcher.Stop()
-	s.watcher = kvwatch.New("cistore", bus.KeyValue{KeyValue: kv}, ciCache{s})
+	s.watcher = kvwatch.New("cistore", bus.NewKeyValue(kv, base.WatchHandle(), base.Streams()), ciCache{s})
 	s.watcher.Start()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

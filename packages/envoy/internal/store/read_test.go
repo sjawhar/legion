@@ -58,10 +58,10 @@ type holdingCache struct {
 	afterSweep func()
 }
 
-func (c *holdingCache) Apply(entry natsgo.KeyValueEntry, read kvwatch.Read) {
+func (c *holdingCache) Apply(entry kvwatch.Entry, read kvwatch.Read) {
 	c.mu.Lock()
-	g := c.applies[entry.Key()]
-	delete(c.applies, entry.Key())
+	g := c.applies[entry.Key]
+	delete(c.applies, entry.Key)
 	c.mu.Unlock()
 	if g == nil {
 		c.Cache.Apply(entry, read)
@@ -157,7 +157,7 @@ func rebuiltRegistry(t *testing.T, conn *natsgo.Conn) (*Registry, *holdingCache,
 	reg.watcher.End(ctx)
 	delayed := &delayingKV{KeyValue: reg.watcher.KV().KeyValue}
 	held := &holdingCache{Cache: interestCache{reg}}
-	reg.watcher = kvwatch.New("interest registry", bus.KeyValue{KeyValue: delayed}, held)
+	reg.watcher = kvwatch.New("interest registry", bus.NewKeyValue(delayed, reg.watcher.KV().WatchHandle(), reg.watcher.KV().Streams()), held)
 	t.Cleanup(reg.StopWatch)
 	return reg, held, delayed
 }

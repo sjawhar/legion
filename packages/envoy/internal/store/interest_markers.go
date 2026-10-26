@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go/jetstream"
 
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/kvwatch"
@@ -59,13 +60,16 @@ type interestMarkerCollector struct {
 	registry *Registry
 	interval time.Duration
 	log      *slog.Logger
+	// scanIdle is how long a pass's scan of the bucket waits for its next entry before it gives up
+	// (kvwatch.ScanExistingKeys): kvwatch.ScanIdleTimeout, or less in the package's own tests.
+	scanIdle time.Duration
 	// purgeRefused is set once a purge the server refused has been logged, so a NATS user without
 	// STREAM.PURGE on the interest bucket says so once per process rather than every pass. Passes
 	// run one at a time on the collector's goroutine, so it needs no lock.
 	purgeRefused bool
 }
 
-// interestPass is what one pass has read so far: read 1 and read 2 (bus.ReadStreamState, the
+// interestPass is what one pass has read so far: read 1 and read 2 (readInterestStream, the
 // STREAM.INFO the listener already sends on this bucket before every watcher and on every health
 // check, so a pass adds no new capability by reading it), the floor its scan computed, and what that
 // scan saw once it completed. A read or scan the pass has not taken is nil. Only the package's own
@@ -89,7 +93,7 @@ func (r *Registry) StartInterestMarkerCollector(ctx context.Context, js func() n
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		(&interestMarkerCollector{registry: r, interval: interval, log: r.logger()}).run(ctx, js)
+		(&interestMarkerCollector{registry: r, interval: interval, log: r.logger(), scanIdle: kvwatch.ScanIdleTimeout}).run(ctx, js)
 	}()
 	return done
 }
@@ -119,17 +123,18 @@ func (c *interestMarkerCollector) run(ctx context.Context, js func() nats.JetStr
 func (c *interestMarkerCollector) pass(js nats.JetStreamContext, afterScan func(*interestPass)) (uint64, error) {
 	kv := c.registry.interests()
 	var pass interestPass
-	read1, err := bus.ReadStreamState(kv)
+	read1, err := readInterestStream(kv)
 	if err != nil {
 		c.refuse(slog.LevelWarn, "its first read of the bucket's stream failed", &pass, slog.String("error", err.Error()))
 		return 0, fmt.Errorf("interest markers: read the bucket's stream: %w", err)
 	}
 	pass.read1 = &read1
-	scan, err := kvwatch.ScanExistingKeys(kv, "interest markers", c.log, func(entry nats.KeyValueEntry) {
-		if pass.floor == 0 || entry.Revision() < pass.floor {
-			pass.floor = entry.Revision()
+	scan, err := kvwatch.ScanExistingKeys(kv, jetstream.AllKeys, "interest markers", c.scanIdle, c.log, func(entry kvwatch.Entry) error {
+		if pass.floor == 0 || entry.Revision < pass.floor {
+			pass.floor = entry.Revision
 		}
-	})
+		return nil
+	}, jetstream.MetaOnly())
 	if err != nil {
 		// A scan short of the bucket is not a reading of it: the keys it never delivered are still
 		// there, and the lowest revision among those it did is no floor.
@@ -140,7 +145,7 @@ func (c *interestMarkerCollector) pass(js nats.JetStreamContext, afterScan func(
 	if afterScan != nil {
 		afterScan(&pass)
 	}
-	read2, err := bus.ReadStreamState(kv)
+	read2, err := readInterestStream(kv)
 	if err != nil {
 		c.refuse(slog.LevelWarn, "its second read of the bucket's stream failed", &pass, slog.String("error", err.Error()))
 		return 0, fmt.Errorf("interest markers: read the bucket's stream again: %w", err)
@@ -182,7 +187,7 @@ func (c *interestMarkerCollector) pass(js nats.JetStreamContext, afterScan func(
 	// ways: a put landing in between under-reports it, and a peer listener's purge landing in
 	// between is counted as this pass's too, so a sum of purged across the fleet overstates what
 	// was removed.
-	purgedStream, err := bus.ReadStreamState(kv)
+	purgedStream, err := readInterestStream(kv)
 	if err != nil {
 		// The purge is done; only its count is unknown.
 		c.logPass(slog.LevelWarn, "interest markers collected", &pass,
@@ -199,6 +204,15 @@ func (c *interestMarkerCollector) pass(js nats.JetStreamContext, afterScan func(
 		slog.Uint64("purged_msgs", purgedStream.Msgs),
 	)
 	return purged, nil
+}
+
+// readInterestStream reads the stream behind kv, the interest bucket, through its jetstream handle
+// within bus.RequestTimeout (bus.KeyValue.ReadStreamState): the collector bounds each read itself
+// rather than wait out whatever JetStream MaxWait the legacy handle was opened with.
+func readInterestStream(kv bus.KeyValue) (bus.StreamState, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), bus.RequestTimeout)
+	defer cancel()
+	return kv.ReadStreamState(ctx)
 }
 
 // refuse logs one pass that purged nothing, and why. A normal refusal (no live key, nothing below

@@ -1,12 +1,14 @@
 package kvwatch_test
 
 import (
+	"context"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	natsgo "github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go/jetstream"
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/kvwatch"
 	"github.com/sjawhar/envoy/internal/testnats"
@@ -79,28 +81,28 @@ func (p *pending) last(t *testing.T, d time.Duration) *pendingWait {
 	return armed[len(armed)-1]
 }
 
-// countingKV counts the reads of its bucket's stream (Status, the STREAM.INFO a watcher reads).
+// countingKV counts the reads of its bucket's stream (Stream, the STREAM.INFO a watcher reads).
 type countingKV struct {
-	natsgo.KeyValue
+	jetstream.JetStream
 	statuses atomic.Int32
 }
 
-func (k *countingKV) Status() (natsgo.KeyValueStatus, error) {
+func (k *countingKV) Stream(ctx context.Context, name string) (jetstream.Stream, error) {
 	k.statuses.Add(1)
-	return k.KeyValue.Status()
+	return k.JetStream.Stream(ctx, name)
 }
 
 func (k *countingKV) reads() int { return int(k.statuses.Load()) }
 
 // injecting is a watch whose watcher delivers the bucket's own records and, besides them, each
 // record the test sends on records, as the consumer nats.go moved onto a recreated bucket would.
-func injecting(records <-chan natsgo.KeyValueEntry) watchStep {
-	return func(kv natsgo.KeyValue) (natsgo.KeyWatcher, error) {
-		watcher, err := kv.WatchAll()
+func injecting(records <-chan jetstream.KeyValueEntry) watchStep {
+	return func(ctx context.Context, kv jetstream.KeyValue) (jetstream.KeyWatcher, error) {
+		watcher, err := kv.WatchAll(ctx)
 		if err != nil {
 			return nil, err
 		}
-		updates := make(chan natsgo.KeyValueEntry)
+		updates := make(chan jetstream.KeyValueEntry)
 		go func() {
 			defer close(updates)
 			for {
@@ -154,11 +156,11 @@ func readWholeInEpochOne(t *testing.T, w *kvwatch.Watcher, into *seen, kept, swe
 func TestAProbeOfTheSameStreamOnlyConfirmsIt(t *testing.T) {
 	uri := testnats.URL(t)
 	_, kv := bucket(t, uri)
-	counted := &countingKV{KeyValue: kv.KeyValue}
+	counted := &countingKV{JetStream: kv.Streams()}
 	into := newSeen()
 	now := newClock()
 	timers := &pending{}
-	w := kvwatch.New("test cache", bus.KeyValue{KeyValue: counted}, into,
+	w := kvwatch.New("test cache", bus.NewKeyValue(kv.KeyValue, kv.WatchHandle(), counted), into,
 		kvwatch.WithNow(now.Now), kvwatch.WithAfterFunc(timers.afterFunc()))
 	t.Cleanup(w.Stop)
 	w.Start()
@@ -193,7 +195,7 @@ func TestAProbeOfTheSameStreamOnlyConfirmsIt(t *testing.T) {
 func TestARecordOnAnOldConfirmationWaitsForAReadOfTheStream(t *testing.T) {
 	uri := testnats.URL(t)
 	_, kv := bucket(t, uri)
-	counted := &countingKV{KeyValue: kv.KeyValue}
+	counted := &countingKV{JetStream: kv.Streams()}
 	var mu sync.Mutex
 	readsAt := map[string]int{}
 	into := withApply{seen: newSeen(), before: func(entry natsgo.KeyValueEntry) {
@@ -207,7 +209,7 @@ func TestARecordOnAnOldConfirmationWaitsForAReadOfTheStream(t *testing.T) {
 		return readsAt[key]
 	}
 	now := newClock()
-	w := kvwatch.New("test cache", bus.KeyValue{KeyValue: counted}, into,
+	w := kvwatch.New("test cache", bus.NewKeyValue(kv.KeyValue, kv.WatchHandle(), counted), into,
 		kvwatch.WithNow(now.Now), kvwatch.WithAfterFunc((&pending{}).afterFunc()))
 	t.Cleanup(w.Stop)
 	w.Start()
@@ -246,7 +248,7 @@ func TestARecordFromARecreatedBucketIsAppliedOnlyOnceTheCopyStoppedFollowing(t *
 	if _, err := kv.Put("ghost", []byte("old")); err != nil {
 		t.Fatalf("put: %v", err)
 	}
-	records := make(chan natsgo.KeyValueEntry)
+	records := make(chan jetstream.KeyValueEntry)
 	var (
 		w           *kvwatch.Watcher
 		mu          sync.Mutex
@@ -261,17 +263,14 @@ func TestARecordFromARecreatedBucketIsAppliedOnlyOnceTheCopyStoppedFollowing(t *
 	}}
 	now := newClock()
 	timers := &pending{}
-	w = kvwatch.New("test cache", scripted(kv.KeyValue, injecting(records)).handle(), cache,
+	w = kvwatch.New("test cache", scripted(kv, injecting(records)).handle(), cache,
 		kvwatch.WithNow(now.Now), kvwatch.WithAfterFunc(timers.afterFunc()))
 	t.Cleanup(w.Stop)
 	w.Start()
 	eventually(t, "the first read's completion", w.Following)
 
 	recreated := recreate(t, conn, "fresh")
-	entry, err := recreated.Get("fresh")
-	if err != nil {
-		t.Fatalf("get fresh: %v", err)
-	}
+	entry := jetStreamEntry(t, wrap(t, conn, recreated), "fresh")
 	now.advance(staleConfirmation)
 	records <- entry
 	eventually(t, "the new bucket's record to be applied", func() bool { return into.has("fresh") })
@@ -372,15 +371,15 @@ func TestAProbeReadsABucketDeletedThenCreatedAgainOnceItIsBack(t *testing.T) {
 func TestStopAndANewerWatchDisarmTheProbe(t *testing.T) {
 	uri := testnats.URL(t)
 	_, kv := bucket(t, uri)
-	counted := &countingKV{KeyValue: kv.KeyValue}
+	counted := &countingKV{JetStream: kv.Streams()}
 	timers := &pending{}
-	w := kvwatch.New("test cache", bus.KeyValue{KeyValue: counted}, newSeen(), kvwatch.WithAfterFunc(timers.afterFunc()))
+	w := kvwatch.New("test cache", bus.NewKeyValue(kv.KeyValue, kv.WatchHandle(), counted), newSeen(), kvwatch.WithAfterFunc(timers.afterFunc()))
 	t.Cleanup(w.Stop)
 	w.Start()
 	eventually(t, "the first read's completion", w.Following)
 	replaced := timers.last(t, probeEvery)
 
-	if err := kvwatch.WatchOn(w, bus.KeyValue{KeyValue: counted}); err != nil {
+	if err := kvwatch.WatchOn(w, bus.NewKeyValue(kv.KeyValue, kv.WatchHandle(), counted)); err != nil {
 		t.Fatalf("the newer watch: %v", err)
 	}
 	eventually(t, "the newer read's completion", w.Following)
@@ -418,7 +417,7 @@ func TestACompletionWhoseStreamChangedUnderTheScanSweepsNothing(t *testing.T) {
 	into.hold("held-by-the-copy")
 	timers := &pending{}
 	held := newHeldEnd(t)
-	w := kvwatch.New("test cache", scripted(kv.KeyValue, held.step()).handle(), into, kvwatch.WithAfterFunc(timers.afterFunc()))
+	w := kvwatch.New("test cache", scripted(kv, held.step()).handle(), into, kvwatch.WithAfterFunc(timers.afterFunc()))
 	t.Cleanup(w.Stop)
 	w.Start()
 	wait(t, held.reached, "the first read to deliver every record")

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go/jetstream"
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/kvwatch"
@@ -110,15 +111,15 @@ func Open(conn *nats.Conn, options ...OpenOption) (*Registry, error) {
 	if err != nil {
 		return nil, err
 	}
-	kv, err := bus.EnsureKeyValue(js, &nats.KeyValueConfig{Bucket: bus.InterestBucket, Replicas: opts.replicas, Storage: nats.FileStorage})
+	kv, err := bus.EnsureKeyValue(conn, js, &nats.KeyValueConfig{Bucket: bus.InterestBucket, Replicas: opts.replicas, Storage: nats.FileStorage})
 	if err != nil {
 		return nil, err
 	}
-	roleKV, err := bus.EnsureKeyValue(js, &nats.KeyValueConfig{Bucket: bus.RoleClaimBucket, Replicas: opts.replicas, Storage: nats.FileStorage})
+	roleKV, err := bus.EnsureKeyValue(conn, js, &nats.KeyValueConfig{Bucket: bus.RoleClaimBucket, Replicas: opts.replicas, Storage: nats.FileStorage})
 	if err != nil {
 		return nil, err
 	}
-	restoredRoleRevisions, err := roleRevisions(roleKV, opts.log)
+	restoredRoleRevisions, err := roleRevisions(roleKV, kvwatch.ScanIdleTimeout, opts.log)
 	if err != nil {
 		return nil, err
 	}
@@ -219,17 +220,37 @@ func (r *Registry) roles() bus.KeyValue {
 //
 // A snapshot short of the bucket is missing claims that are in it, and each one it misses is a
 // restored holder that loses its grace and is released a session TTL early, so an incomplete scan
-// fails the caller, and only a complete one logs.
-func roleRevisions(kv bus.KeyValue, log *slog.Logger) (map[string]uint64, error) {
+// fails the caller, and only a complete one logs. A scan that delivers nothing for idle is one.
+func roleRevisions(kv bus.KeyValue, idle time.Duration, log *slog.Logger) (map[string]uint64, error) {
 	revisions := map[string]uint64{}
-	scan, err := kvwatch.ScanExistingKeys(kv, "role revisions", log, func(entry nats.KeyValueEntry) {
-		revisions[entry.Key()] = entry.Revision()
-	})
+	scan, err := kvwatch.ScanExistingKeys(kv, jetstream.AllKeys, "role revisions", idle, log, func(entry kvwatch.Entry) error {
+		revisions[entry.Key] = entry.Revision
+		return nil
+	}, jetstream.MetaOnly())
 	if err != nil {
 		return nil, err
 	}
 	log.Info("restored role claims", slog.Int("restored", len(revisions)), slog.Int("delete_markers", scan.Markers))
 	return revisions, nil
+}
+
+// roleKeys lists the key of every role claim the role bucket holds, sorted, from one scan of its
+// existing keys (kvwatch.ScanExistingKeys) with what nats.go's Keys watches with, values and delete
+// markers left out: nats.go's Keys runs its legacy watcher (bus.KeyValue says why none may run). An
+// empty bucket lists no key. A scan short of the bucket fails the caller rather than list part of
+// it, where nats.go's Keys would hand over what had arrived when its watcher gave up, so a sweep
+// never takes a partial list for every claim.
+func (r *Registry) roleKeys() ([]string, error) {
+	var keys []string
+	_, err := kvwatch.ScanExistingKeys(r.roles(), jetstream.AllKeys, "role claims", kvwatch.ScanIdleTimeout, r.logger(), func(entry kvwatch.Entry) error {
+		keys = append(keys, entry.Key)
+		return nil
+	}, jetstream.MetaOnly(), jetstream.IgnoreDeletes())
+	if err != nil {
+		return nil, err
+	}
+	slices.Sort(keys)
+	return keys, nil
 }
 
 func (r *Registry) cacheInterestLocked(sessionID string, item Interest, revision uint64) {
@@ -275,7 +296,9 @@ func (r *Registry) deleteInterest(sessionID string) error {
 	}
 	revision = max(revision, read)
 
-	entries, err := kv.History(sessionID)
+	ctx, cancel := context.WithTimeout(context.Background(), bus.RequestTimeout)
+	entries, err := kv.ReadHistory(ctx, sessionID)
+	cancel()
 	r.mu.Lock()
 	if !r.marks.MarkCurrent(r.watcher, epoch, sessionID) {
 		r.mu.Unlock()
@@ -289,13 +312,13 @@ func (r *Registry) deleteInterest(sessionID string) error {
 		r.mu.Unlock()
 		return nil
 	}
-	latest := entries[len(entries)-1]
+	latest := kvwatch.JetStreamEntry(entries[len(entries)-1])
 	malformed := r.applyEntryLocked(latest)
 	r.mu.Unlock()
 	if malformed != nil {
 		r.logger().Warn("registry cache evicted malformed value",
-			slog.String("key", latest.Key()),
-			slog.Uint64("revision", latest.Revision()),
+			slog.String("key", latest.Key),
+			slog.Uint64("revision", latest.Revision),
 			slog.String("error", malformed.Error()),
 		)
 	}
@@ -315,7 +338,7 @@ func (r *Registry) Rewatch(conn *nats.Conn) error {
 	if err != nil {
 		return fmt.Errorf("open role registry JetStream: %w", err)
 	}
-	roleKV, err := bus.OpenKeyValue(js, r.roles().Bucket())
+	roleKV, err := bus.OpenKeyValue(conn, js, r.roles().Bucket())
 	if err != nil {
 		return fmt.Errorf("open role KV bucket: %w", err)
 	}
@@ -349,16 +372,16 @@ func (c interestCache) BeginRead(read kvwatch.Read) {
 // compared, so a delivered value older than a local write still keeps the interest through the
 // sweep. The fence keeps a delayed local write-through and a watcher update from undoing each
 // other.
-func (c interestCache) Apply(entry nats.KeyValueEntry, _ kvwatch.Read) {
+func (c interestCache) Apply(entry kvwatch.Entry, _ kvwatch.Read) {
 	r := c.r
 	r.mu.Lock()
-	r.marks.Mark(entry.Key())
+	r.marks.Mark(entry.Key)
 	malformed := r.applyEntryLocked(entry)
 	r.mu.Unlock()
 	if malformed != nil {
 		r.logger().Warn("registry watcher evicted malformed value",
-			slog.String("key", entry.Key()),
-			slog.Uint64("revision", entry.Revision()),
+			slog.String("key", entry.Key),
+			slog.Uint64("revision", entry.Revision),
 			slog.String("error", malformed.Error()),
 		)
 	}
@@ -378,17 +401,17 @@ func (c interestCache) CompleteRead(kvwatch.Read) {
 // applyEntryLocked applies one record of the bucket, delivered or read, to the cache under r.mu.
 // A value it cannot decode evicts the interest, and is returned for the caller to log once it has
 // released r.mu.
-func (r *Registry) applyEntryLocked(entry nats.KeyValueEntry) error {
-	if entry.Operation() == nats.KeyValueDelete || entry.Operation() == nats.KeyValuePurge {
-		r.evictCachedInterestLocked(entry.Key(), entry.Revision())
+func (r *Registry) applyEntryLocked(entry kvwatch.Entry) error {
+	if entry.Op != kvwatch.OpPut {
+		r.evictCachedInterestLocked(entry.Key, entry.Revision)
 		return nil
 	}
 	var item Interest
-	if err := json.Unmarshal(entry.Value(), &item); err != nil {
-		r.evictCachedInterestLocked(entry.Key(), entry.Revision())
+	if err := json.Unmarshal(entry.Value, &item); err != nil {
+		r.evictCachedInterestLocked(entry.Key, entry.Revision)
 		return err
 	}
-	r.cacheInterestLocked(entry.Key(), item, entry.Revision())
+	r.cacheInterestLocked(entry.Key, item, entry.Revision)
 	return nil
 }
 
@@ -565,10 +588,7 @@ func (r *Registry) ReleaseExpiredRoleClaim(role, sessionID string, sessionTTL ti
 }
 
 func (r *Registry) releaseAllRoleClaims(sessionID string) error {
-	roles, err := r.roles().Keys()
-	if errors.Is(err, nats.ErrNoKeysFound) {
-		return nil
-	}
+	roles, err := r.roleKeys()
 	if err != nil {
 		return err
 	}
@@ -894,10 +914,7 @@ func (r *Registry) Reap(live func(sessionID string) (bool, error), graceWindow t
 // again, so it is deleted too; one it cannot delete either (a key outside the
 // alphabet) is skipped, and the sweep goes on.
 func (r *Registry) ReapRoleClaims(isAlive func(string) bool, sessionTTL time.Duration) (int, error) {
-	roles, err := r.roles().Keys()
-	if errors.Is(err, nats.ErrNoKeysFound) {
-		return 0, nil
-	}
+	roles, err := r.roleKeys()
 	if err != nil {
 		return 0, err
 	}

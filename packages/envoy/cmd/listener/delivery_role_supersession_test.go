@@ -47,7 +47,10 @@ func registryRoleKV(t *testing.T, registry *store.Registry) natsgo.KeyValue {
 func setRegistryRoleKV(t *testing.T, registry *store.Registry, kv natsgo.KeyValue) {
 	t.Helper()
 	field := reflect.ValueOf(registry).Elem().FieldByName("roleKV")
-	reflect.NewAt(field.Type(), unsafe.Pointer(field.UnsafeAddr())).Elem().Set(reflect.ValueOf(bus.KeyValue{KeyValue: kv}))
+	current := reflect.NewAt(field.Type(), unsafe.Pointer(field.UnsafeAddr())).Elem()
+	// The replacement keeps the bucket's jetstream handle, which every scan of it goes through.
+	base := current.Interface().(bus.KeyValue)
+	current.Set(reflect.ValueOf(bus.NewKeyValue(kv, base.WatchHandle(), base.Streams())))
 }
 
 // TestCoreRoleDeliveryReresolvesSupersededLapsedHolder covers the core

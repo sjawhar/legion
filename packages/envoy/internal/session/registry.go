@@ -149,7 +149,7 @@ func OpenSessionRegistry(conn *nats.Conn, options ...SessionRegistryOption) (*Se
 	if err != nil {
 		return nil, err
 	}
-	kv, err := bus.EnsureKeyValue(js, &nats.KeyValueConfig{
+	kv, err := bus.EnsureKeyValue(conn, js, &nats.KeyValueConfig{
 		Bucket:   bus.SessionBucket,
 		TTL:      opts.ttl,
 		Replicas: opts.replicas,
@@ -258,13 +258,13 @@ func (c sessionCache) BeginRead(read kvwatch.Read) {
 // Apply takes one record the read delivered. Its session is marked before the revision fence is
 // compared, so a delivered value older than a local heartbeat still keeps the session through the
 // sweep.
-func (c sessionCache) Apply(entry nats.KeyValueEntry, _ kvwatch.Read) {
+func (c sessionCache) Apply(entry kvwatch.Entry, _ kvwatch.Read) {
 	r := c.r
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.marks.Mark(entry.Key())
+	r.marks.Mark(entry.Key)
 	if err := r.applyEntryLocked(entry); err != nil {
-		r.logger().Warn("session registry watcher evicted malformed value", slog.String("key", entry.Key()), slog.Uint64("revision", entry.Revision()), slog.String("error", err.Error()))
+		r.logger().Warn("session registry watcher evicted malformed value", slog.String("key", entry.Key), slog.Uint64("revision", entry.Revision), slog.String("error", err.Error()))
 	}
 }
 
@@ -287,17 +287,17 @@ func (c sessionCache) CompleteRead(kvwatch.Read) {
 
 // applyEntryLocked applies one record of the bucket, delivered or read, to the cache under r.mu.
 // A value it cannot decode evicts the session, and is returned for the caller to log.
-func (r *SessionRegistry) applyEntryLocked(entry nats.KeyValueEntry) error {
-	if entry.Operation() == nats.KeyValueDelete || entry.Operation() == nats.KeyValuePurge {
-		r.evictCachedSessionLocked(entry.Key(), entry.Revision())
+func (r *SessionRegistry) applyEntryLocked(entry kvwatch.Entry) error {
+	if entry.Op != kvwatch.OpPut {
+		r.evictCachedSessionLocked(entry.Key, entry.Revision)
 		return nil
 	}
 	var item SessionEntry
-	if err := json.Unmarshal(entry.Value(), &item); err != nil {
-		r.evictCachedSessionLocked(entry.Key(), entry.Revision())
+	if err := json.Unmarshal(entry.Value, &item); err != nil {
+		r.evictCachedSessionLocked(entry.Key, entry.Revision)
 		return err
 	}
-	r.cacheSessionLocked(entry.Key(), item, r.expiryFor(entry.Created(), item.UpdatedAt), entry.Revision())
+	r.cacheSessionLocked(entry.Key, item, r.expiryFor(entry.Created, item.UpdatedAt), entry.Revision)
 	return nil
 }
 
@@ -441,8 +441,9 @@ func (r *SessionRegistry) Refresh(ctx context.Context, sessionID string) (Sessio
 	}
 	r.mu.Lock()
 	if r.marks.MarkCurrent(r.watcher, epoch, sessionID) {
-		if err := r.applyEntryLocked(got.entry); err != nil {
-			r.logger().Warn("session registry watcher evicted malformed value", slog.String("key", got.entry.Key()), slog.Uint64("revision", got.entry.Revision()), slog.String("error", err.Error()))
+		entry := kvwatch.LegacyEntry(got.entry)
+		if err := r.applyEntryLocked(entry); err != nil {
+			r.logger().Warn("session registry watcher evicted malformed value", slog.String("key", entry.Key), slog.Uint64("revision", entry.Revision), slog.String("error", err.Error()))
 		}
 	}
 	r.mu.Unlock()
@@ -483,7 +484,9 @@ func (r *SessionRegistry) Delete(sessionID string) error {
 		return err
 	}
 	revision = max(revision, read)
-	entries, err := kv.History(sessionID)
+	ctx, cancel := context.WithTimeout(context.Background(), bus.RequestTimeout)
+	entries, err := kv.ReadHistory(ctx, sessionID)
+	cancel()
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if !r.marks.MarkCurrent(r.watcher, epoch, sessionID) {
@@ -491,11 +494,11 @@ func (r *SessionRegistry) Delete(sessionID string) error {
 	}
 	r.pruneLastSeenLocked(r.now())
 	if err == nil && len(entries) > 0 {
-		latest := entries[len(entries)-1]
+		latest := kvwatch.JetStreamEntry(entries[len(entries)-1])
 		if err := r.applyEntryLocked(latest); err != nil {
 			r.logger().Warn("session registry cache evicted malformed value",
-				slog.String("key", latest.Key()),
-				slog.Uint64("revision", latest.Revision()),
+				slog.String("key", latest.Key),
+				slog.Uint64("revision", latest.Revision),
 				slog.String("error", err.Error()),
 			)
 		}

@@ -33,7 +33,7 @@ func webhookSweeper(natsClient *bus.Client, app *auth.AppConfig, apiBase string)
 	if err != nil || github == nil {
 		return nil, err
 	}
-	state, err := redeliver.OpenState(natsClient.JS())
+	state, err := redeliver.OpenState(natsClient.Conn, natsClient.JS())
 	if err != nil {
 		return nil, err
 	}

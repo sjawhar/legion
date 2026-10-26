@@ -59,10 +59,10 @@ type holdingCache struct {
 	afterSweep func()
 }
 
-func (c *holdingCache) Apply(entry natsgo.KeyValueEntry, read kvwatch.Read) {
+func (c *holdingCache) Apply(entry kvwatch.Entry, read kvwatch.Read) {
 	c.mu.Lock()
-	g := c.applies[entry.Key()]
-	delete(c.applies, entry.Key())
+	g := c.applies[entry.Key]
+	delete(c.applies, entry.Key)
 	c.mu.Unlock()
 	if g == nil {
 		c.Cache.Apply(entry, read)

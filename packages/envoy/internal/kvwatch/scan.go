@@ -1,13 +1,22 @@
 package kvwatch
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"log/slog"
+	"time"
 
-	"github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go/jetstream"
 
 	"github.com/sjawhar/envoy/internal/bus"
 )
+
+// ScanIdleTimeout is how long a scan of a bucket's existing keys waits for its next entry before it
+// gives up as timed out: a cache's read (Watcher), and ScanExistingKeys for the callers that pass
+// it. It is the JetStream MaxWait the listener's handles carry, the idle bound nats.go's legacy
+// watcher held a scan to before kvwatch moved to the jetstream watcher, which has none.
+const ScanIdleTimeout = 10 * time.Second
 
 // KeyScan counts what one pass over a bucket's existing keys delivered, as disjoint fields: Puts is
 // the live keys (entries whose operation is a PUT), Markers the delete markers the pass streamed
@@ -18,9 +27,10 @@ type KeyScan struct {
 	Markers int
 }
 
-// count adds entry to the scan and reports whether it is a live key.
-func (s *KeyScan) count(entry nats.KeyValueEntry) bool {
-	if entry.Operation() == nats.KeyValuePut {
+// count adds entry to the scan and reports whether it is a live key. A delete, a purge and a
+// record the server removed for its TTL (a purge, Entry) are markers.
+func (s *KeyScan) count(entry Entry) bool {
+	if entry.Op == OpPut {
 		s.Puts++
 		return true
 	}
@@ -28,64 +38,80 @@ func (s *KeyScan) count(entry nats.KeyValueEntry) bool {
 	return false
 }
 
-// ScanExistingKeys hands visitLive each live key one MetaOnly watch over kv's existing keys
-// delivers, and returns what the watch delivered. That is the watch nats.go's kv.Keys() runs --
-// MetaOnly over every key -- which discards each entry's revision; this keeps it, so a caller reads
-// a revision without a round trip per key. The watch names no key, so a key this build cannot read
+// ScanExistingKeys hands visitLive each live key one watch of kv's existing keys matching keys
+// (jetstream.AllKeys for every key) delivers, built with opts, and returns what the watch
+// delivered. The callers that need no value pass jetstream.MetaOnly(), the watch nats.go's Keys
+// runs, which discards each entry's revision; this keeps it, so a caller reads a revision without a
+// round trip per key. A watch of every key names no key, so a key this build cannot read
 // (bus.ErrRefused: too long, or outside nats.go's key alphabet) is delivered here like any other.
-// The markers are kept rather than dropped by nats.go's IgnoreDeletes, because they are on the wire
-// either way and their count is what a restart's log needs; visitLive never sees one.
+// The markers are kept rather than dropped by jetstream.IgnoreDeletes unless a caller asks for
+// that, because they are on the wire either way and their count is what a restart's log needs;
+// visitLive never sees one. An error visitLive returns ends the scan with that error.
 //
 // A snapshot short of the bucket is not a reading of it, so a scan that did not reach the end of
-// the bucket fails the caller instead of handing it what happened to arrive. nats.go ends a scan
-// three ways (kv.go in nats.go v1.50.0): it sends a nil entry once it has delivered every existing
-// key (:1096-1099, :1140-1142); its idle timer sends the same nil after putting
-// ErrKeyWatcherTimeout on Error() (idleTimeout); and it closes the updates channel with no nil at
-// all when the subscription ends first (:1170, which closes Error() at :1171 too), an ordered
-// consumer it could not recreate or a closed connection. Only the first is a complete scan. what
-// names the caller in the errors the other two produce, and log takes the one line a failed stop
-// of the watch writes.
-func ScanExistingKeys(kv bus.KeyValue, what string, log *slog.Logger, visitLive func(nats.KeyValueEntry)) (KeyScan, error) {
-	watcher, err := kv.Watch(nats.AllKeys, nats.MetaOnly())
+// the bucket fails the caller instead of handing it what happened to arrive. The jetstream watcher
+// (nats.go v1.50.0 jetstream/kv.go) ends a scan two ways: it sends a nil entry once it has
+// delivered every existing key, and it closes its updates with no nil at all when its subscription
+// ends first, an ordered consumer it could not recreate or a closed connection. It has no idle
+// timer, so the scan holds its own: a scan that delivers no entry for idle gives up as timed out.
+// Only the first is a complete scan; what names the caller in the errors the other two produce.
+//
+// The watch lives in a context of its own, cancelled on return, so the goroutine nats.go parks on
+// it ends with the scan. A scan that returns with its watcher still subscribed -- complete, timed
+// out, or ended by visitLive -- stops it and has it read until it closes: nats.go's delivery
+// callback blocks holding the watcher's lock on a full 256-entry buffer, so a watcher stopped and
+// left unread would park its subscription's goroutine for good. A stop that fails is logged
+// through log at WARN.
+func ScanExistingKeys(kv bus.KeyValue, keys, what string, idle time.Duration, log *slog.Logger, visitLive func(Entry) error, opts ...jetstream.WatchOpt) (KeyScan, error) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	watcher, err := kv.WatchKeys(ctx, keys, opts...)
 	if err != nil {
 		return KeyScan{}, err
 	}
-	defer func() {
+	done := func() {
 		if err := watcher.Stop(); err != nil {
 			log.Warn("could not stop the "+what+" watch of the bucket", slog.String("error", err.Error()))
 		}
-	}()
+		go drain(watcher)
+	}
+	timer := time.NewTimer(idle)
+	defer timer.Stop()
 	var scan KeyScan
-	for entry := range watcher.Updates() {
-		if entry == nil {
-			if err := idleTimeout(watcher); err != nil {
-				return KeyScan{}, fmt.Errorf("%s: the bucket's watch stopped after %d entries: %w", what, scan.Puts+scan.Markers, err)
+	updates := watcher.Updates()
+	for {
+		select {
+		case entry, open := <-updates:
+			if !open {
+				return KeyScan{}, fmt.Errorf("%s: the bucket's watch ended after %d entries, before it had delivered them all", what, scan.Puts+scan.Markers)
 			}
-			return scan, nil
-		}
-		if scan.count(entry) {
-			visitLive(entry)
+			if entry == nil {
+				done()
+				return scan, nil
+			}
+			timer.Reset(idle)
+			live := JetStreamEntry(entry)
+			if !scan.count(live) {
+				continue
+			}
+			if err := visitLive(live); err != nil {
+				done()
+				return KeyScan{}, err
+			}
+		case <-timer.C:
+			done()
+			return KeyScan{}, fmt.Errorf("%s: the bucket's watch delivered nothing for %s after %d entries: %w", what, idle, scan.Puts+scan.Markers, ErrScanTimedOut)
 		}
 	}
-	return KeyScan{}, fmt.Errorf("%s: the bucket's watch ended after %d entries, before it had delivered them all", what, scan.Puts+scan.Markers)
 }
 
-// idleTimeout is the ErrKeyWatcherTimeout nats.go's idle timer left on watcher's Error() channel
-// when it gave up on the initial scan, or nil when there is none. The timer puts it there under the
-// watcher's lock before it sends the nil marker a complete scan also ends with (nats.go v1.50.0
-// kv.go:1145-1156), so the error is there to read by the time that marker arrives. The timer is the
-// channel's only writer, the channel buffers that one error, and nats.go closes it when the
-// subscription ends (:1171), which reads as nil here. So this read consumes the error: whoever
-// reads it first is the only one who sees it.
-//
-// Each caller keeps its own policy on what it reads. A one-shot scan refuses a scan the timer ended
-// (ScanExistingKeys); a cache's warm-up logs it and keeps its watcher, which is still live (consume);
-// and a watcher that ended on its own reports it as its terminal error (terminalError).
-func idleTimeout(watcher nats.KeyWatcher) error {
-	select {
-	case err := <-watcher.Error():
-		return err
-	default:
-		return nil
+// ErrScanTimedOut is the error a scan that delivered no entry within its idle bound carries
+// (ScanExistingKeys).
+var ErrScanTimedOut = errors.New("the scan timed out")
+
+// drain reads watcher's updates until nats.go closes them, which it does once the subscription a
+// stop ended has delivered what it held.
+func drain(watcher jetstream.KeyWatcher) {
+	for range watcher.Updates() {
 	}
 }

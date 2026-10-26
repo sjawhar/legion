@@ -335,7 +335,7 @@ func Open(nc *nats.Conn, logger *logging.Logger, opts ...Option) (*Store, error)
 	if err != nil {
 		return nil, err
 	}
-	kv, err := bus.EnsureKeyValue(js, &nats.KeyValueConfig{
+	kv, err := bus.EnsureKeyValue(nc, js, &nats.KeyValueConfig{
 		Bucket:   bus.CIStateBucket,
 		Replicas: o.replicas,
 		Storage:  nats.FileStorage,
@@ -397,32 +397,32 @@ func (c ciCache) BeginRead(read kvwatch.Read) {
 // Apply takes one record the read delivered. Its key is marked before the revision fence is
 // compared, so a delivered value older than a local write still keeps the record through the
 // sweep.
-func (c ciCache) Apply(entry nats.KeyValueEntry, _ kvwatch.Read) {
+func (c ciCache) Apply(entry kvwatch.Entry, _ kvwatch.Read) {
 	s := c.s
-	key := entry.Key()
+	key := entry.Key
 	var malformed error
 	s.mu.Lock()
 	s.marks.Mark(key)
 	switch {
-	case entry.Operation() == nats.KeyValueDelete || entry.Operation() == nats.KeyValuePurge:
-		s.evictCachedLocked(key, entry.Revision())
+	case entry.Op != kvwatch.OpPut:
+		s.evictCachedLocked(key, entry.Revision)
 	default:
 		var marker struct {
 			Kind string `json:"kind"`
 		}
-		if err := json.Unmarshal(entry.Value(), &marker); err == nil && marker.Kind == retiredHeadKind {
-			s.evictCachedLocked(key, entry.Revision())
+		if err := json.Unmarshal(entry.Value, &marker); err == nil && marker.Kind == retiredHeadKind {
+			s.evictCachedLocked(key, entry.Revision)
 		} else {
 			var st State
-			if err := json.Unmarshal(entry.Value(), &st); err != nil {
-				s.evictCachedLocked(key, entry.Revision())
+			if err := json.Unmarshal(entry.Value, &st); err != nil {
+				s.evictCachedLocked(key, entry.Revision)
 				malformed = err
 			} else if key != Key(st.Owner, st.Repo, st.Number, st.SHA) {
 				// The summary loop addresses a record by the key its identity builds, so a record
 				// stored under any other key could never be claimed: it waits out its TTL uncached.
-				s.evictCachedLocked(key, entry.Revision())
+				s.evictCachedLocked(key, entry.Revision)
 			} else {
-				s.cacheStateLocked(key, st, entry.Revision())
+				s.cacheStateLocked(key, st, entry.Revision)
 			}
 		}
 	}
@@ -431,7 +431,7 @@ func (c ciCache) Apply(entry nats.KeyValueEntry, _ kvwatch.Read) {
 	if malformed != nil {
 		s.logger.Warn("cistore watch evicted malformed value",
 			slog.String("key", key),
-			slog.Uint64("revision", entry.Revision()),
+			slog.Uint64("revision", entry.Revision),
 			slog.String("error", malformed.Error()),
 		)
 	}

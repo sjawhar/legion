@@ -13,10 +13,10 @@ import (
 	"time"
 
 	natsgo "github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go/jetstream"
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/goroutinetest"
 	"github.com/sjawhar/envoy/internal/kvwatch"
-	"github.com/sjawhar/envoy/internal/kvwatch/kvwatchtest"
 	"github.com/sjawhar/envoy/internal/testnats"
 )
 
@@ -33,15 +33,15 @@ type seen struct {
 
 func newSeen() *seen { return &seen{keys: map[string]bool{}} }
 
-func (s *seen) Apply(entry natsgo.KeyValueEntry, _ kvwatch.Read) {
+func (s *seen) Apply(entry kvwatch.Entry, _ kvwatch.Read) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.marks.Mark(entry.Key())
-	if entry.Operation() == natsgo.KeyValuePut {
-		s.keys[entry.Key()] = true
+	s.marks.Mark(entry.Key)
+	if entry.Op == kvwatch.OpPut {
+		s.keys[entry.Key] = true
 		return
 	}
-	delete(s.keys, entry.Key())
+	delete(s.keys, entry.Key)
 }
 
 func (s *seen) BeginRead(read kvwatch.Read) {
@@ -86,15 +86,35 @@ func (s *seen) completions() []kvwatch.Read {
 }
 
 // withApply is a seen that runs before on each record before it takes it, so a test can hold an
-// apply open or count what was applied when.
+// apply open or count what was applied when. before reads the record as a nats.KeyValueEntry
+// (legacyView), the shape the tests' hooks were written against.
 type withApply struct {
 	*seen
 	before func(natsgo.KeyValueEntry)
 }
 
-func (c withApply) Apply(entry natsgo.KeyValueEntry, read kvwatch.Read) {
-	c.before(entry)
+func (c withApply) Apply(entry kvwatch.Entry, read kvwatch.Read) {
+	c.before(legacyView{entry})
 	c.seen.Apply(entry, read)
+}
+
+// legacyView is a record a watcher delivered, as the nats.KeyValueEntry a hook reads.
+type legacyView struct{ entry kvwatch.Entry }
+
+func (e legacyView) Bucket() string     { return testBucketName }
+func (e legacyView) Key() string        { return e.entry.Key }
+func (e legacyView) Value() []byte      { return e.entry.Value }
+func (e legacyView) Revision() uint64   { return e.entry.Revision }
+func (e legacyView) Created() time.Time { return e.entry.Created }
+func (e legacyView) Delta() uint64      { return 0 }
+func (e legacyView) Operation() natsgo.KeyValueOp {
+	switch e.entry.Op {
+	case kvwatch.OpDelete:
+		return natsgo.KeyValueDelete
+	case kvwatch.OpPurge:
+		return natsgo.KeyValuePurge
+	}
+	return natsgo.KeyValuePut
 }
 
 // clock is the injected clock a stale episode is measured on (kvwatch.WithNow).
@@ -117,23 +137,27 @@ func (c *clock) advance(d time.Duration) {
 	c.now = c.now.Add(d)
 }
 
-// scriptedKV hands out each WatchAll as the next step of its script says, and the bucket's own
-// watcher once the script has run out. It counts the watches it was asked for.
+// scriptedKV is a bucket's jetstream handle whose watches go as the steps of its script say, and
+// through the handle itself once the script has run out. It counts the watches it was asked for.
 type scriptedKV struct {
-	natsgo.KeyValue
+	jetstream.KeyValue
+	legacy  natsgo.KeyValue
+	streams jetstream.JetStream
 	mu      sync.Mutex
 	steps   []watchStep
 	watched int
 }
 
-// watchStep is one WatchAll of a scriptedKV, on the bucket kv.
-type watchStep func(kv natsgo.KeyValue) (natsgo.KeyWatcher, error)
+// watchStep is one watch of a scriptedKV, on the bucket's jetstream handle kv, in ctx, the
+// context the watcher's subscription lives in.
+type watchStep func(ctx context.Context, kv jetstream.KeyValue) (jetstream.KeyWatcher, error)
 
-func scripted(kv natsgo.KeyValue, steps ...watchStep) *scriptedKV {
-	return &scriptedKV{KeyValue: kv, steps: steps}
+// scripted is kv whose watches go as steps say.
+func scripted(kv bus.KeyValue, steps ...watchStep) *scriptedKV {
+	return &scriptedKV{KeyValue: kv.WatchHandle(), legacy: kv.KeyValue, streams: kv.Streams(), steps: steps}
 }
 
-func (k *scriptedKV) WatchAll(opts ...natsgo.WatchOpt) (natsgo.KeyWatcher, error) {
+func (k *scriptedKV) Watch(ctx context.Context, keys string, opts ...jetstream.WatchOpt) (jetstream.KeyWatcher, error) {
 	k.mu.Lock()
 	k.watched++
 	var step watchStep
@@ -142,9 +166,9 @@ func (k *scriptedKV) WatchAll(opts ...natsgo.WatchOpt) (natsgo.KeyWatcher, error
 	}
 	k.mu.Unlock()
 	if step == nil {
-		return k.KeyValue.WatchAll(opts...)
+		return k.KeyValue.Watch(ctx, keys, opts...)
 	}
-	return step(k.KeyValue)
+	return step(ctx, k.KeyValue)
 }
 
 func (k *scriptedKV) watches() int {
@@ -154,40 +178,62 @@ func (k *scriptedKV) watches() int {
 }
 
 // handle is k as the bus.KeyValue a watcher takes.
-func (k *scriptedKV) handle() bus.KeyValue { return bus.KeyValue{KeyValue: k} }
+func (k *scriptedKV) handle() bus.KeyValue { return bus.NewKeyValue(k.legacy, k, k.streams) }
 
-// timesOut is a watch whose scan nats.go's idle timer gives up on after `after` entries
-// (kvwatchtest.TimingOut).
-func timesOut(after int) watchStep {
-	return func(kv natsgo.KeyValue) (natsgo.KeyWatcher, error) {
-		return kvwatchtest.TimingOut(kv, after).WatchAll()
+// stallsAfter is a watch whose scan delivers `after` records and then nothing more: it drops the
+// rest of the scan and its nil, as a scan that stalls, so only the watcher's idle wait ends it. What
+// the bucket delivers after the scan is forwarded, as a live watcher's updates are.
+func stallsAfter(after int) watchStep {
+	return func(ctx context.Context, kv jetstream.KeyValue) (jetstream.KeyWatcher, error) {
+		watcher, err := kv.WatchAll(ctx)
+		if err != nil {
+			return nil, err
+		}
+		updates := make(chan jetstream.KeyValueEntry)
+		go func() {
+			defer close(updates)
+			scanning, forwarded := true, 0
+			for entry := range watcher.Updates() {
+				switch {
+				case entry == nil && scanning:
+					scanning = false
+				case scanning && forwarded == after:
+				default:
+					forwarded++
+					updates <- entry
+				}
+			}
+		}()
+		return &forwardedWatcher{KeyWatcher: watcher, updates: updates}, nil
 	}
 }
 
-// fails is a watch whose WatchAll is refused with err.
+// fails is a watch whose create is refused with err.
 func fails(err error) watchStep {
-	return func(natsgo.KeyValue) (natsgo.KeyWatcher, error) { return nil, err }
+	return func(context.Context, jetstream.KeyValue) (jetstream.KeyWatcher, error) { return nil, err }
 }
 
 // endsEarly is a watch whose subscription ends after `after` entries, before its scan's nil, as an
 // ordered consumer nats.go could not recreate ends it.
 func endsEarly(after int) watchStep {
-	return func(kv natsgo.KeyValue) (natsgo.KeyWatcher, error) {
-		watcher, err := kv.WatchAll()
+	return func(ctx context.Context, kv jetstream.KeyValue) (jetstream.KeyWatcher, error) {
+		watcher, err := kv.WatchAll(ctx)
 		if err != nil {
 			return nil, err
 		}
-		updates := make(chan natsgo.KeyValueEntry)
+		updates := make(chan jetstream.KeyValueEntry)
 		go func() {
 			defer close(updates)
 			for range after {
 				entry, ok := <-watcher.Updates()
 				if !ok || entry == nil {
-					return
+					break
 				}
 				updates <- entry
 			}
 			_ = watcher.Stop()
+			for range watcher.Updates() {
+			}
 		}()
 		return &forwardedWatcher{KeyWatcher: watcher, updates: updates}, nil
 	}
@@ -215,12 +261,12 @@ func (h *heldEnd) let() { h.once.Do(func() { close(h.release) }) }
 
 // step is the watch that holds its end on h.
 func (h *heldEnd) step() watchStep {
-	return func(kv natsgo.KeyValue) (natsgo.KeyWatcher, error) {
-		watcher, err := kv.WatchAll()
+	return func(ctx context.Context, kv jetstream.KeyValue) (jetstream.KeyWatcher, error) {
+		watcher, err := kv.WatchAll(ctx)
 		if err != nil {
 			return nil, err
 		}
-		updates := make(chan natsgo.KeyValueEntry)
+		updates := make(chan jetstream.KeyValueEntry)
 		go func() {
 			defer close(updates)
 			held := false
@@ -253,11 +299,11 @@ func wait(t *testing.T, ch <-chan struct{}, what string) {
 
 // forwardedWatcher is a watcher whose updates a step's goroutine forwards from the real one.
 type forwardedWatcher struct {
-	natsgo.KeyWatcher
-	updates chan natsgo.KeyValueEntry
+	jetstream.KeyWatcher
+	updates chan jetstream.KeyValueEntry
 }
 
-func (w *forwardedWatcher) Updates() <-chan natsgo.KeyValueEntry { return w.updates }
+func (w *forwardedWatcher) Updates() <-chan jetstream.KeyValueEntry { return w.updates }
 
 // bucket opens the test bucket on its own connection, which the test can close to end a watcher
 // the way a lost connection does.
@@ -269,11 +315,34 @@ func bucket(t *testing.T, uri string) (*natsgo.Conn, bus.KeyValue) {
 	if err != nil {
 		t.Fatalf("jetstream: %v", err)
 	}
-	kv, err := bus.EnsureKeyValue(js, &natsgo.KeyValueConfig{Bucket: "kvwatch-test"})
+	kv, err := bus.EnsureKeyValue(conn, js, &natsgo.KeyValueConfig{Bucket: "kvwatch-test"})
 	if err != nil {
 		t.Fatalf("bucket: %v", err)
 	}
 	return conn, kv
+}
+
+// wrap is kv, a legacy handle opened on conn (a recreated bucket), as the bus.KeyValue a watcher
+// takes.
+func wrap(t *testing.T, conn *natsgo.Conn, kv natsgo.KeyValue) bus.KeyValue {
+	t.Helper()
+	wrapped, err := bus.WrapKeyValue(conn, kv)
+	if err != nil {
+		t.Fatalf("wrap the bucket handle: %v", err)
+	}
+	return wrapped
+}
+
+// jetStreamEntry reads key through kv's jetstream handle, as a watcher would deliver it.
+func jetStreamEntry(t *testing.T, kv bus.KeyValue, key string) jetstream.KeyValueEntry {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	entry, err := kv.WatchHandle().Get(ctx, key)
+	if err != nil {
+		t.Fatalf("get %s: %v", key, err)
+	}
+	return entry
 }
 
 // lockedInWatch matches a sync.Mutex.Lock frame whose caller is watch itself. Inside watch that is
@@ -527,7 +596,7 @@ func TestARewatchOntoARecreatedBucketKeepsTheCopyUntilTheReadCompletes(t *testin
 		}
 	}
 	end := newHeldEnd(t)
-	if err := kvwatch.WatchOn(w, scripted(recreated, end.step()).handle()); err != nil {
+	if err := kvwatch.WatchOn(w, scripted(wrap(t, conn, recreated), end.step()).handle()); err != nil {
 		t.Fatalf("rewatch: %v", err)
 	}
 	wait(t, end.reached, "the new read to deliver every record")
@@ -686,7 +755,7 @@ func TestAHeldReadReleasedTooLateNeitherCompletesNorRestoresServing(t *testing.T
 	}{
 		{name: "a newer read", overtake: func(t *testing.T, w *kvwatch.Watcher, _ *natsgo.Conn, kv bus.KeyValue) *heldEnd {
 			newer := newHeldEnd(t)
-			if err := kvwatch.WatchOn(w, scripted(kv.KeyValue, newer.step()).handle()); err != nil {
+			if err := kvwatch.WatchOn(w, scripted(kv, newer.step()).handle()); err != nil {
 				t.Fatalf("the newer read: %v", err)
 			}
 			wait(t, newer.reached, "the newer read to deliver every record")
@@ -725,7 +794,7 @@ func TestAHeldReadReleasedTooLateNeitherCompletesNorRestoresServing(t *testing.T
 			eventually(t, "the first read's completion", w.Following)
 
 			held := newHeldEnd(t)
-			if err := kvwatch.WatchOn(w, scripted(kv.KeyValue, held.step()).handle()); err != nil {
+			if err := kvwatch.WatchOn(w, scripted(kv, held.step()).handle()); err != nil {
 				t.Fatalf("the held read: %v", err)
 			}
 			wait(t, held.reached, "the held read to deliver every record")
@@ -772,14 +841,16 @@ func TestAStaleEpisodeOutlastsFailedReadsUntilOneCompletes(t *testing.T) {
 	w.Start()
 	eventually(t, "the first read's completion", w.Following)
 
-	if err := kvwatch.WatchOn(w, scripted(kv.KeyValue, timesOut(0)).handle()); err != nil {
+	if err := kvwatch.WatchOn(w, scripted(kv, stallsAfter(0)).handle()); err != nil {
 		t.Fatalf("the read that times out: %v", err)
 	}
+	now.advance(kvwatch.ScanIdleTimeout)
+	arm.fireIdle(t)
 	eventually(t, "the timed-out read's re-read to be armed", func() bool { return arm.waits() == 1 })
-	now.advance(staleBound - 30*time.Second)
+	now.advance(staleBound - 30*time.Second - kvwatch.ScanIdleTimeout)
 	serves(t, w, "within the bound of the first failed read")
 
-	if err := kvwatch.WatchOn(w, scripted(kv.KeyValue, endsEarly(0)).handle()); err != nil {
+	if err := kvwatch.WatchOn(w, scripted(kv, endsEarly(0)).handle()); err != nil {
 		t.Fatalf("the read that ends early: %v", err)
 	}
 	eventually(t, "the early end's error", func() bool { return w.Err() != nil })
@@ -833,14 +904,14 @@ func TestAFailedRewatchLeavesAFollowingWatcherServing(t *testing.T) {
 	}
 }
 
-// A read whose scan nats.go's idle timer gave up on removes nothing, and the watcher reads the
-// bucket again itself after rereadDelay: the watcher still runs, so nothing else -- no terminal
+// A read whose scan delivers nothing for the idle timeout removes nothing, and the watcher reads
+// the bucket again itself after rereadDelay: the watcher still runs, so nothing else -- no terminal
 // error, no self-health rebuild -- would start that read. A re-read whose setup fails is armed
 // again; a newer read or a Stop makes the armed one read nothing.
 func TestATimedOutReadIsReadAgainByTheWatcher(t *testing.T) {
-	// timedOut starts a watcher whose first read times out after one record, its later watches
-	// as steps says, with the copy holding a key the bucket does not, and waits for the re-read to
-	// be armed.
+	// timedOut starts a watcher whose first read stalls after one record and times out at its
+	// idle wait, its later watches as steps says, with the copy holding a key the bucket does not,
+	// and waits for the re-read to be armed.
 	timedOut := func(t *testing.T, steps ...watchStep) (*kvwatch.Watcher, *seen, *armed, *scriptedKV, *natsgo.Conn) {
 		t.Helper()
 		uri := testnats.URL(t)
@@ -853,10 +924,15 @@ func TestATimedOutReadIsReadAgainByTheWatcher(t *testing.T) {
 		into := newSeen()
 		into.hold("gone-from-the-bucket")
 		arm := &armed{}
-		handle := scripted(kv.KeyValue, append([]watchStep{timesOut(1)}, steps...)...)
-		w := kvwatch.New("test cache", handle.handle(), into, kvwatch.WithAfterFunc(arm.afterFunc()), kvwatch.WithStreamProbeInterval(0))
+		now := newClock()
+		handle := scripted(kv, append([]watchStep{stallsAfter(1)}, steps...)...)
+		w := kvwatch.New("test cache", handle.handle(), into, kvwatch.WithAfterFunc(arm.afterFunc()),
+			kvwatch.WithNow(now.Now), kvwatch.WithStreamProbeInterval(0))
 		t.Cleanup(w.Stop)
 		w.Start()
+		eventually(t, "the scan's one record", func() bool { return into.has("one") })
+		now.advance(kvwatch.ScanIdleTimeout)
+		arm.fireIdle(t)
 		eventually(t, "the re-read to be armed", func() bool { return arm.waits() == 1 })
 		if got := arm.asked(); got != 5*time.Second {
 			t.Fatalf("the re-read waits %v, want 5s", got)
@@ -933,7 +1009,7 @@ func TestAReadThatEndsEarlyCompletesNothing(t *testing.T) {
 	}
 	into := newSeen()
 	into.hold("gone-from-the-bucket")
-	w := kvwatch.New("test cache", scripted(kv.KeyValue, endsEarly(1)).handle(), into,
+	w := kvwatch.New("test cache", scripted(kv, endsEarly(1)).handle(), into,
 		kvwatch.WithAfterFunc((&armed{}).afterFunc()))
 	t.Cleanup(w.Stop)
 	w.Start()
@@ -968,7 +1044,7 @@ func TestABucketRecreatedWithAShorterTTLShortensTheStaleBound(t *testing.T) {
 	eventually(t, "the first read's completion", w.Following)
 
 	held := newHeldEnd(t)
-	if err := kvwatch.WatchOn(w, scripted(kv.KeyValue, held.step()).handle()); err != nil {
+	if err := kvwatch.WatchOn(w, scripted(kv, held.step()).handle()); err != nil {
 		t.Fatalf("the held read: %v", err)
 	}
 	wait(t, held.reached, "the held read to deliver every record")
@@ -981,7 +1057,7 @@ func TestABucketRecreatedWithAShorterTTLShortensTheStaleBound(t *testing.T) {
 	deleteTestBucket(t, js)
 	recreated := testnats.RecreateKeyValue(t, js, &natsgo.KeyValueConfig{Bucket: testBucketName, TTL: time.Minute})
 	shorter := newHeldEnd(t)
-	if err := kvwatch.WatchOn(w, scripted(recreated, shorter.step()).handle()); err != nil {
+	if err := kvwatch.WatchOn(w, scripted(wrap(t, conn, recreated), shorter.step()).handle()); err != nil {
 		t.Fatalf("the read of the recreated bucket: %v", err)
 	}
 	wait(t, shorter.reached, "the recreated bucket's read to deliver every record")
@@ -1007,7 +1083,7 @@ func TestADisconnectStartsAStaleEpisodeThatTheReadAfterTheReconnectEnds(t *testi
 		t.Fatalf("connect: %v", err)
 	}
 	t.Cleanup(client.Close)
-	kv, err := bus.EnsureKeyValue(client.JS(), &natsgo.KeyValueConfig{Bucket: testBucketName})
+	kv, err := bus.EnsureKeyValue(client.Conn, client.JS(), &natsgo.KeyValueConfig{Bucket: testBucketName})
 	if err != nil {
 		t.Fatalf("bucket: %v", err)
 	}
@@ -1168,12 +1244,12 @@ func TestAReplacedWatchersBufferedEntryIsDropped(t *testing.T) {
 // slowStopKV hands out watchers whose Stop waits until released, standing in for the consumer
 // delete that nats.go's Unsubscribe sends for a library-created consumer.
 type slowStopKV struct {
-	natsgo.KeyValue
+	jetstream.KeyValue
 	entered, release chan struct{}
 }
 
-func (k *slowStopKV) WatchAll(opts ...natsgo.WatchOpt) (natsgo.KeyWatcher, error) {
-	w, err := k.KeyValue.WatchAll(opts...)
+func (k *slowStopKV) Watch(ctx context.Context, keys string, opts ...jetstream.WatchOpt) (jetstream.KeyWatcher, error) {
+	w, err := k.KeyValue.Watch(ctx, keys, opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -1181,7 +1257,7 @@ func (k *slowStopKV) WatchAll(opts ...natsgo.WatchOpt) (natsgo.KeyWatcher, error
 }
 
 type slowStopWatcher struct {
-	natsgo.KeyWatcher
+	jetstream.KeyWatcher
 	entered, release chan struct{}
 	once             sync.Once
 }
@@ -1204,13 +1280,13 @@ func TestConcurrentRewatchesOntoARecreatedBucketKeepTheNewKeys(t *testing.T) {
 	if _, err := kv.Put("ghost", []byte("1")); err != nil {
 		t.Fatalf("put: %v", err)
 	}
-	slow := &slowStopKV{KeyValue: kv, entered: make(chan struct{}), release: make(chan struct{})}
+	slow := &slowStopKV{KeyValue: kv.WatchHandle(), entered: make(chan struct{}), release: make(chan struct{})}
 	var releaseOnce sync.Once
 	release := func() { releaseOnce.Do(func() { close(slow.release) }) }
 	t.Cleanup(release)
 	into := newSeen()
 	// No periodic probe: the test's two Rewatches are the only reads of the recreated bucket.
-	w := kvwatch.New("test cache", bus.KeyValue{KeyValue: slow}, into, kvwatch.WithStreamProbeInterval(0))
+	w := kvwatch.New("test cache", bus.NewKeyValue(kv.KeyValue, slow, kv.Streams()), into, kvwatch.WithStreamProbeInterval(0))
 	t.Cleanup(w.Stop)
 	w.Start()
 	eventually(t, "the first read's completion", w.Following)
@@ -1256,22 +1332,45 @@ func TestConcurrentRewatchesOntoARecreatedBucketKeepTheNewKeys(t *testing.T) {
 	}
 }
 
-// heldWatchKV starts its WatchAll on the bucket, then holds it until released: the watch it
-// serves has read the stream and armed its watcher, and has not yet taken the locks.
+// heldWatchKV starts its watch on the bucket, then holds it until released: the watch it serves
+// has read the stream and armed its watcher, and has not yet taken the locks. Once released, the
+// watcher it hands out forwards the real one's updates, and ended closes once nats.go has closed
+// those.
 type heldWatchKV struct {
-	natsgo.KeyValue
-	watched chan struct{}
-	release chan struct{}
-	watcher natsgo.KeyWatcher
+	jetstream.KeyValue
+	legacy                  natsgo.KeyValue
+	streams                 jetstream.JetStream
+	watched, release, ended chan struct{}
+	// watcher is the real watcher, set before watched closes.
+	watcher jetstream.KeyWatcher
 }
 
-func (k *heldWatchKV) WatchAll(opts ...natsgo.WatchOpt) (natsgo.KeyWatcher, error) {
-	watcher, err := k.KeyValue.WatchAll(opts...)
+func holdWatch(kv bus.KeyValue) *heldWatchKV {
+	return &heldWatchKV{KeyValue: kv.WatchHandle(), legacy: kv.KeyValue, streams: kv.Streams(),
+		watched: make(chan struct{}), release: make(chan struct{}), ended: make(chan struct{})}
+}
+
+func (k *heldWatchKV) Watch(ctx context.Context, keys string, opts ...jetstream.WatchOpt) (jetstream.KeyWatcher, error) {
+	watcher, err := k.KeyValue.Watch(ctx, keys, opts...)
 	k.watcher = watcher
 	close(k.watched)
 	<-k.release
-	return watcher, err
+	if err != nil {
+		return nil, err
+	}
+	updates := make(chan jetstream.KeyValueEntry)
+	go func() {
+		defer close(k.ended)
+		defer close(updates)
+		for entry := range watcher.Updates() {
+			updates <- entry
+		}
+	}()
+	return &forwardedWatcher{KeyWatcher: watcher, updates: updates}, nil
 }
+
+// handle is k as the bus.KeyValue a watcher takes.
+func (k *heldWatchKV) handle() bus.KeyValue { return bus.NewKeyValue(k.legacy, k, k.streams) }
 
 // A watch reads its stream before it arms its watcher and takes the locks, so a slower watch can
 // arrive after a newer one has already switched to a recreated bucket. The slower watch read the
@@ -1283,7 +1382,7 @@ func TestAWatchOfTheOldStreamDoesNotReplaceANewerOne(t *testing.T) {
 	if _, err := first.Put("ghost", []byte("1")); err != nil {
 		t.Fatalf("put: %v", err)
 	}
-	held := &heldWatchKV{KeyValue: first, watched: make(chan struct{}), release: make(chan struct{})}
+	held := holdWatch(first)
 	released := false
 	t.Cleanup(func() {
 		if !released {
@@ -1291,7 +1390,7 @@ func TestAWatchOfTheOldStreamDoesNotReplaceANewerOne(t *testing.T) {
 		}
 	})
 	into := newSeen()
-	w := kvwatch.New("test cache", bus.KeyValue{KeyValue: held}, into)
+	w := kvwatch.New("test cache", held.handle(), into)
 	w.Start()
 	select {
 	case <-held.watched:
@@ -1333,9 +1432,9 @@ func TestAWatchOfTheOldStreamDoesNotReplaceANewerOne(t *testing.T) {
 }
 
 // A discarded watch's watcher is read until it ends. nats.go delivers into a watcher's 256-entry
-// Updates buffer and blocks when it is full, and Stop only unsubscribes, so a watcher of an old
-// bucket holding more keys than that, stopped with nothing reading it, keeps its delivery goroutine
-// parked for the life of the process.
+// Updates buffer and blocks when it is full, holding the watcher's lock, and Stop only
+// unsubscribes, so a watcher of an old bucket holding more keys than that, stopped with nothing
+// reading it, keeps its subscription's goroutine parked for the life of the process.
 func TestADiscardedWatchOfTheOldStreamIsDrainedUntilItEnds(t *testing.T) {
 	_, uri := testnats.Start(t)
 	conn, first := bucket(t, uri)
@@ -1344,7 +1443,7 @@ func TestADiscardedWatchOfTheOldStreamIsDrainedUntilItEnds(t *testing.T) {
 			t.Fatalf("put: %v", err)
 		}
 	}
-	held := &heldWatchKV{KeyValue: first, watched: make(chan struct{}), release: make(chan struct{})}
+	held := holdWatch(first)
 	released := false
 	t.Cleanup(func() {
 		if !released {
@@ -1352,7 +1451,7 @@ func TestADiscardedWatchOfTheOldStreamIsDrainedUntilItEnds(t *testing.T) {
 		}
 	})
 	into := newSeen()
-	w := kvwatch.New("test cache", bus.KeyValue{KeyValue: held}, into)
+	w := kvwatch.New("test cache", held.handle(), into)
 	w.Start()
 	select {
 	case <-held.watched:
@@ -1377,17 +1476,10 @@ func TestADiscardedWatchOfTheOldStreamIsDrainedUntilItEnds(t *testing.T) {
 	close(held.release)
 	released = true
 
-	ended := held.watcher.Error()
-	deadline := time.After(10 * time.Second)
-	for {
-		select {
-		case _, open := <-ended:
-			if !open {
-				return
-			}
-		case <-deadline:
-			t.Fatal("the discarded watcher never ended: it was left unread (its delivery goroutine parks on a full buffer) or never stopped")
-		}
+	select {
+	case <-held.ended:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the discarded watcher never ended: it was left unread (its delivery goroutine parks on a full buffer) or never stopped")
 	}
 }
 
@@ -1507,7 +1599,7 @@ func TestARewatchOntoABucketRestoredWithAnOlderStreamRefillsTheCache(t *testing.
 		t.Fatalf("put live-key: %v", err)
 	}
 	into := newSeen()
-	w := kvwatch.New("probe cache", bus.KeyValue{KeyValue: live}, into)
+	w := kvwatch.New("probe cache", wrap(t, conn, live), into)
 	t.Cleanup(w.Stop)
 	w.Start()
 	eventually(t, "the live bucket's key", func() bool { return into.has("live-key") })

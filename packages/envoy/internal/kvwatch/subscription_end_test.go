@@ -46,7 +46,7 @@ func TestASubscriptionEndingMidScanNeverPanics(t *testing.T) {
 		if err != nil {
 			t.Fatalf("jetstream: %v", err)
 		}
-		handle, err := js.KeyValue(testBucketName)
+		handle, err := bus.OpenKeyValue(conn, js, testBucketName)
 		if err != nil {
 			t.Fatalf("bucket: %v", err)
 		}
@@ -59,7 +59,7 @@ func TestASubscriptionEndingMidScanNeverPanics(t *testing.T) {
 				<-release
 			})
 		}}
-		w := kvwatch.New("test cache", bus.KeyValue{KeyValue: handle}, into, kvwatch.WithStreamProbeInterval(0))
+		w := kvwatch.New("test cache", handle, into, kvwatch.WithStreamProbeInterval(0))
 		w.Start()
 		var started time.Time
 		select {

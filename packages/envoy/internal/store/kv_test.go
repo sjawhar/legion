@@ -21,6 +21,7 @@ import (
 	"time"
 
 	natsgo "github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go/jetstream"
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/kvwatch"
 	"github.com/sjawhar/envoy/internal/testnats"
@@ -522,8 +523,16 @@ func coldRegistry(t *testing.T, conn *natsgo.Conn) (*Registry, natsgo.KeyValue) 
 	if err != nil {
 		t.Fatalf("failed to create role KV bucket: %v", err)
 	}
-	r := &Registry{roleKV: bus.KeyValue{KeyValue: roleKV}, now: time.Now, cache: map[string]Interest{}, cacheRevisions: map[string]uint64{}}
-	r.watcher = kvwatch.New("interest registry", bus.KeyValue{KeyValue: kv}, interestCache{r})
+	roles, err := bus.WrapKeyValue(conn, roleKV)
+	if err != nil {
+		t.Fatalf("wrap the role KV bucket: %v", err)
+	}
+	r := &Registry{roleKV: roles, now: time.Now, cache: map[string]Interest{}, cacheRevisions: map[string]uint64{}}
+	handle, err := bus.WrapKeyValue(conn, kv)
+	if err != nil {
+		t.Fatalf("wrap the KV bucket: %v", err)
+	}
+	r.watcher = kvwatch.New("interest registry", handle, interestCache{r})
 	return r, kv
 }
 
@@ -1035,7 +1044,7 @@ func TestReleaseExpiredRoleClaimDoesNotReportReleaseAfterConcurrentChange(t *tes
 		t.Fatalf("seed lapsed role claim: %v", err)
 	}
 	roleKV := registry.roleKV
-	registry.roleKV = bus.KeyValue{KeyValue: &racingDeleteKeyValue{
+	registry.roleKV = bus.NewKeyValue(&racingDeleteKeyValue{
 		KeyValue: roleKV,
 		beforeFirstDelete: func() {
 			entry, err := roleKV.Get(role)
@@ -1054,7 +1063,7 @@ func TestReleaseExpiredRoleClaimDoesNotReportReleaseAfterConcurrentChange(t *tes
 			}
 		},
 		err: natsgo.ErrKeyExists,
-	}}
+	}, registry.roleKV.WatchHandle(), registry.roleKV.Streams())
 
 	release, err := registry.ReleaseExpiredRoleClaim(role, "ses_lapsed", 0)
 	if err != nil {
@@ -1076,7 +1085,7 @@ func TestReleaseExpiredRoleClaimDoesNotReportReleaseAfterConcurrentRemoval(t *te
 		t.Fatalf("seed lapsed role claim: %v", err)
 	}
 	roleKV := registry.roleKV
-	registry.roleKV = bus.KeyValue{KeyValue: &racingDeleteKeyValue{
+	registry.roleKV = bus.NewKeyValue(&racingDeleteKeyValue{
 		KeyValue: roleKV,
 		beforeFirstDelete: func() {
 			entry, err := roleKV.Get(role)
@@ -1088,7 +1097,7 @@ func TestReleaseExpiredRoleClaimDoesNotReportReleaseAfterConcurrentRemoval(t *te
 			}
 		},
 		err: natsgo.ErrKeyNotFound,
-	}}
+	}, registry.roleKV.WatchHandle(), registry.roleKV.Streams())
 
 	release, err := registry.ReleaseExpiredRoleClaim(role, "ses_lapsed", 0)
 	if err != nil {
@@ -1111,11 +1120,11 @@ func TestReleaseExpiredRoleClaimReturnsErrorWithoutRelease(t *testing.T) {
 	}
 	releaseErr := errors.New("injected conditional delete failure")
 	roleKV := registry.roleKV
-	registry.roleKV = bus.KeyValue{KeyValue: &racingDeleteKeyValue{
+	registry.roleKV = bus.NewKeyValue(&racingDeleteKeyValue{
 		KeyValue:          roleKV,
 		beforeFirstDelete: func() {},
 		err:               releaseErr,
-	}}
+	}, registry.roleKV.WatchHandle(), registry.roleKV.Streams())
 
 	release, err := registry.ReleaseExpiredRoleClaim(role, "ses_lapsed", 0)
 	if !errors.Is(err, releaseErr) {
@@ -1404,11 +1413,11 @@ func TestSetRoleLeavesInterestWhenRoleWriteFails(t *testing.T) {
 		t.Fatalf("seed role claim: %v", err)
 	}
 
-	reg.roleKV = bus.KeyValue{KeyValue: &failingKeyValue{
+	reg.roleKV = bus.NewKeyValue(&failingKeyValue{
 		KeyValue:     reg.roleKV,
 		failUpdateAt: 1,
 		err:          errors.New("injected role update failure"),
-	}}
+	}, reg.roleKV.WatchHandle(), reg.roleKV.Streams())
 	if _, err := reg.SetRole(newSession, "example-host", role, false); err == nil {
 		t.Fatal("SetRole must return the failed role update")
 	}
@@ -1427,11 +1436,11 @@ func TestSetRoleRollsBackWhenRoleCreateFails(t *testing.T) {
 		sessionID = "ses_new"
 		role      = "legion-controller"
 	)
-	reg.roleKV = bus.KeyValue{KeyValue: &failingKeyValue{
+	reg.roleKV = bus.NewKeyValue(&failingKeyValue{
 		KeyValue:     reg.roleKV,
 		failCreateAt: 1,
 		err:          errors.New("injected role create failure"),
-	}}
+	}, reg.roleKV.WatchHandle(), reg.roleKV.Streams())
 	if _, err := reg.SetRole(sessionID, "example-host", role, false); err == nil {
 		t.Fatal("SetRole must return the failed role create")
 	}
@@ -1527,12 +1536,14 @@ func TestWatcherEvictsMalformedValue(t *testing.T) {
 	t.Logf("interest watcher malformed-value warning: %s", strings.TrimSpace(logs.String()))
 }
 
-// useKV rebuilds the registry's watcher over kv, a wrapper of its interest bucket handle, so the
-// registry writes interests through kv from here on. The replaced watcher is stopped first.
+// useKV rebuilds the registry's watcher over kv, a wrapper of its interest bucket handle that
+// watches through the handle's own jetstream one, so the registry writes interests through kv from
+// here on. The replaced watcher is stopped first.
 func useKV(t *testing.T, r *Registry, kv natsgo.KeyValue) {
 	t.Helper()
+	base := r.watcher.KV()
 	r.watcher.Stop()
-	r.watcher = kvwatch.New("interest registry", bus.KeyValue{KeyValue: kv}, interestCache{r})
+	r.watcher = kvwatch.New("interest registry", bus.NewKeyValue(kv, base.WatchHandle(), base.Streams()), interestCache{r})
 	r.watcher.Start()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -1657,7 +1668,7 @@ func TestSetRoleTreatsSameSessionCASConflictAsConcurrentSuccess(t *testing.T) {
 		roleTopic = "notifications.role.legion-controller"
 	)
 	racingKV := &racingCreateKeyValue{KeyValue: reg.roleKV}
-	reg.roleKV = bus.KeyValue{KeyValue: racingKV}
+	reg.roleKV = bus.NewKeyValue(racingKV, reg.roleKV.WatchHandle(), reg.roleKV.Streams())
 
 	var concurrent Interest
 	var concurrentErr error
@@ -1754,7 +1765,7 @@ func TestSetRoleOldHolderCleanupDoesNotDeleteNewerClaim(t *testing.T) {
 	// B's role-row Update is the CAS write; fire A's re-claim right after it
 	// succeeds and before B proceeds to old-holder cleanup.
 	racing := &afterUpdateKeyValue{KeyValue: reg.roleKV}
-	reg.roleKV = bus.KeyValue{KeyValue: racing}
+	reg.roleKV = bus.NewKeyValue(racing, reg.roleKV.WatchHandle(), reg.roleKV.Streams())
 	racing.after = func() {
 		racing.after = nil
 		if _, err := reg.SetRole("ses_a", "m1", role, false); err != nil {
@@ -2213,60 +2224,58 @@ func TestOpeningTheRegistryLogsHowManyRoleClaimsItRestored(t *testing.T) {
 	}
 }
 
-// earlyEndKV hands out a watcher over the real bucket that ends its scan early, the two ways
-// nats.go ends one early (nats.go v1.50.0 kv.go). With no fault it closes the updates channel
-// after `after` entries and never sends the nil marker, which is what a subscription that ends
-// mid-scan looks like (:1170). With one it sends the marker after `after` entries and puts the
-// fault on Error() first, which is what the idle timer does when no entry arrives within the
-// JetStream MaxWait (:1145-1156).
+// earlyEndKV hands out a watcher over the real bucket whose scan ends early, the two ways a scan of
+// the jetstream watcher can. With ended set, its subscription ends after `after` entries, before
+// the nil marker, and nats.go closes its updates (a closed connection, an ordered consumer it could
+// not recreate). Without, the scan delivers `after` entries and then nothing more, a stalled scan
+// only the scan's own idle bound ends.
 type earlyEndKV struct {
-	natsgo.KeyValue
+	jetstream.KeyValue
 
 	after int
-	fault error
+	ended bool
 }
 
-func (k earlyEndKV) Watch(keys string, opts ...natsgo.WatchOpt) (natsgo.KeyWatcher, error) {
-	watcher, err := k.KeyValue.Watch(keys, opts...)
+func (k earlyEndKV) Watch(ctx context.Context, keys string, opts ...jetstream.WatchOpt) (jetstream.KeyWatcher, error) {
+	watcher, err := k.KeyValue.Watch(ctx, keys, opts...)
 	if err != nil {
 		return nil, err
 	}
-	ended := &earlyEndWatcher{KeyWatcher: watcher, updates: make(chan natsgo.KeyValueEntry), faults: make(chan error, 1)}
+	updates := make(chan jetstream.KeyValueEntry)
 	go func() {
-		defer close(ended.updates)
-		for delivered := 0; delivered < k.after; delivered++ {
-			entry, ok := <-watcher.Updates()
-			if !ok || entry == nil {
+		defer close(updates)
+		forwarded := 0
+		for entry := range watcher.Updates() {
+			if forwarded < k.after {
+				forwarded++
+				updates <- entry
+				continue
+			}
+			if k.ended {
+				_ = watcher.Stop()
+				for range watcher.Updates() {
+				}
 				return
 			}
-			ended.updates <- entry
-		}
-		if k.fault != nil {
-			ended.faults <- k.fault
-			ended.updates <- nil
 		}
 	}()
-	return ended, nil
+	return &earlyEndWatcher{KeyWatcher: watcher, updates: updates}, nil
 }
 
 type earlyEndWatcher struct {
-	natsgo.KeyWatcher
+	jetstream.KeyWatcher
 
-	updates chan natsgo.KeyValueEntry
-	faults  chan error
+	updates chan jetstream.KeyValueEntry
 }
 
-func (w *earlyEndWatcher) Updates() <-chan natsgo.KeyValueEntry { return w.updates }
-
-func (w *earlyEndWatcher) Error() <-chan error { return w.faults }
+func (w *earlyEndWatcher) Updates() <-chan jetstream.KeyValueEntry { return w.updates }
 
 // A revision snapshot that ends before the bucket's keys are all delivered is not a snapshot: the
 // claims it missed are still in the bucket, and each one is a restored holder that would lose the
-// grace a restart owes it and be released a session TTL early. nats.go ends a scan early two ways
-// and they look different to the caller - a closed updates channel, and its own idle timeout,
-// which arrives as the same nil marker a complete scan ends with. Neither may return what the scan
-// managed to read; Open returns the error unchanged, failing the start as a failed read did when
-// this was one Get per key.
+// grace a restart owes it and be released a session TTL early. A scan ends early two ways and they
+// look different to the caller - a closed updates channel, and a scan that stops delivering, which
+// the scan's own idle bound ends. Neither may return what the scan managed to read; Open returns
+// the error unchanged, failing the start as a failed read did when this was one Get per key.
 func TestARoleRevisionScanThatEndsEarlyIsAnErrorNotAShortSnapshot(t *testing.T) {
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
@@ -2281,18 +2290,24 @@ func TestARoleRevisionScanThatEndsEarlyIsAnErrorNotAShortSnapshot(t *testing.T) 
 	for i := range 4 {
 		putRoleClaim(t, rawRoles, fmt.Sprintf("role-%d", i), fmt.Sprintf("ses_%d", i))
 	}
+	roles, err := bus.WrapKeyValue(conn, rawRoles)
+	if err != nil {
+		t.Fatalf("wrap the role bucket: %v", err)
+	}
+	const idle = 200 * time.Millisecond
 
 	for _, ending := range []struct {
 		name  string
-		fault error
+		ended bool
 		want  string
+		fault error
 	}{
-		{name: "the subscription ends mid-scan", want: "ended after 1 entries"},
-		{name: "the idle timer gives up mid-scan", fault: natsgo.ErrKeyWatcherTimeout, want: "stopped after 1 entries"},
+		{name: "the subscription ends mid-scan", ended: true, want: "ended after 1 entries"},
+		{name: "the scan stalls past its idle bound", want: "delivered nothing for 200ms after 1 entries", fault: kvwatch.ErrScanTimedOut},
 	} {
 		t.Run(ending.name, func(t *testing.T) {
-			handle := bus.KeyValue{KeyValue: earlyEndKV{KeyValue: rawRoles, after: 1, fault: ending.fault}}
-			revisions, err := roleRevisions(handle, slog.Default())
+			handle := bus.NewKeyValue(rawRoles, earlyEndKV{KeyValue: roles.WatchHandle(), after: 1, ended: ending.ended}, roles.Streams())
+			revisions, err := roleRevisions(handle, idle, slog.Default())
 			if err == nil {
 				t.Fatalf("a scan that ended after 1 of 4 claims returned %d revisions and no error", len(revisions))
 			}
@@ -2413,9 +2428,9 @@ func stallingProxy(t *testing.T, target, trigger string, budget int, hold time.D
 
 // The listener's own failure, through real nats.go: a link that goes quiet partway through the
 // revision scan and then comes back must fail Open, not open the registry on the claims that
-// happened to arrive. nats.go's idle timer reports the quiet as ErrKeyWatcherTimeout on Error()
-// and then sends the same nil entry a finished scan sends, so a reader that takes the nil for a
-// finished scan restores a snapshot missing most of the bucket, and every claim it misses is a
+// happened to arrive. The scan's idle timer (kvwatch.ScanExistingKeys) ends a quiet scan as
+// ErrScanTimedOut, where a reader that took whatever had arrived for a finished scan would restore
+// a snapshot missing most of the bucket, and every claim it misses is a
 // restored holder released a session TTL early. Which error Open reports depends on how it reads
 // the bucket; that it reports one is the contract. The deterministic halves of both endings,
 // including that the timeout is carried, are in

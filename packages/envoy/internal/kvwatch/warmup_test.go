@@ -128,12 +128,11 @@ func TestAWarmUpLogsWhatItStreamedAndThatItCompleted(t *testing.T) {
 
 // A warm-up whose initial scan timed out says so, at WARN, and is not the watcher's error: the
 // watcher is still running, so Err() stays nil and nothing - not the listener's self-health
-// rebuild, not /healthz - reads it as dead (row F2 of LEGION-374's plan). nats.go signals the
-// timeout by putting ErrKeyWatcherTimeout on the watcher's single buffered Error() channel before
-// it sends the same nil marker a complete scan ends with, so a reader that only watches the marker
-// cannot tell them apart (kvwatchtest.TimingOut stands in for the timer). The read is incomplete,
-// so it completes nothing and the copy is not served; the watcher reads the bucket again itself
-// after its re-read delay, and that read's warm-up line says it completed.
+// rebuild, not /healthz - reads it as dead (row F2 of LEGION-374's plan). The jetstream watcher
+// has no idle bound of its own, so the watcher's idle wait ends a scan that delivers nothing for
+// kvwatch.ScanIdleTimeout (stallsAfter stalls one; the test fires the wait on the injected clock).
+// The read is incomplete, so it completes nothing and the copy is not served; the watcher reads the
+// bucket again itself after its re-read delay, and that read's warm-up line says it completed.
 func TestATimedOutWarmUpSaysSoAndIsReadAgainByTheWatcher(t *testing.T) {
 	uri := testnats.URL(t)
 	_, kv := bucket(t, uri)
@@ -146,10 +145,18 @@ func TestATimedOutWarmUpSaysSoAndIsReadAgainByTheWatcher(t *testing.T) {
 	logger, records := jsonLogger(t)
 	into := newSeen()
 	arm := &armed{}
-	handle := scripted(kv.KeyValue, timesOut(1))
-	w := kvwatch.New("interest registry", handle.handle(), into, kvwatch.WithLogger(logger), kvwatch.WithAfterFunc(arm.afterFunc()), kvwatch.WithStreamProbeInterval(0))
+	now := newClock()
+	handle := scripted(kv, stallsAfter(1))
+	w := kvwatch.New("interest registry", handle.handle(), into, kvwatch.WithLogger(logger), kvwatch.WithAfterFunc(arm.afterFunc()),
+		kvwatch.WithNow(now.Now), kvwatch.WithStreamProbeInterval(0))
 	t.Cleanup(w.Stop)
 	w.Start()
+	eventually(t, "the scan's one record", func() bool { return into.has("one") })
+	if w.Ready() {
+		t.Fatal("ready while the scan was still under way")
+	}
+	now.advance(kvwatch.ScanIdleTimeout)
+	arm.fireIdle(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	if err := w.WaitReady(ctx); err != nil {

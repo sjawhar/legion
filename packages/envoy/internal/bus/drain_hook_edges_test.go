@@ -18,15 +18,15 @@ import (
 // not what it delivers.
 type discardingCache struct{}
 
-func (discardingCache) Apply(natsgo.KeyValueEntry, kvwatch.Read) {}
-func (discardingCache) BeginRead(kvwatch.Read)                   {}
-func (discardingCache) CompleteRead(kvwatch.Read)                {}
+func (discardingCache) Apply(kvwatch.Entry, kvwatch.Read) {}
+func (discardingCache) BeginRead(kvwatch.Read)            {}
+func (discardingCache) CompleteRead(kvwatch.Read)         {}
 
 // watchedBucket opens a bucket on client's connection and returns a watcher on it that has
 // finished its first scan, with the server's own view of the bucket's consumers through admin.
 func watchedBucket(t *testing.T, client *bus.Client, uri, bucket string) (*kvwatch.Watcher, func() []string) {
 	t.Helper()
-	kv, err := bus.EnsureKeyValue(client.JS(), &natsgo.KeyValueConfig{Bucket: bucket})
+	kv, err := bus.EnsureKeyValue(client.Conn, client.JS(), &natsgo.KeyValueConfig{Bucket: bucket})
 	if err != nil {
 		t.Fatalf("create bucket: %v", err)
 	}

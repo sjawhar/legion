@@ -1,12 +1,15 @@
 package bus
 
 import (
+	"context"
 	"errors"
 	"maps"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go/jetstream"
 
 	"github.com/sjawhar/envoy/internal/testnats"
 )
@@ -29,22 +32,22 @@ func TestAKeyValueHandleRefusesAKeyNATSWouldRefuse(t *testing.T) {
 	if err != nil {
 		t.Fatalf("jetstream: %v", err)
 	}
-	created, err := EnsureKeyValue(js, &nats.KeyValueConfig{Bucket: "kv_key_check", Storage: nats.MemoryStorage})
+	created, err := EnsureKeyValue(client.Conn, js, &nats.KeyValueConfig{Bucket: "kv_key_check", Storage: nats.MemoryStorage})
 	if err != nil {
 		t.Fatalf("create bucket: %v", err)
 	}
 	t.Cleanup(func() { _ = js.DeleteKeyValue("kv_key_check") })
-	found, err := EnsureKeyValue(js, &nats.KeyValueConfig{Bucket: "kv_key_check", Storage: nats.MemoryStorage})
+	found, err := EnsureKeyValue(client.Conn, js, &nats.KeyValueConfig{Bucket: "kv_key_check", Storage: nats.MemoryStorage})
 	if err != nil {
 		t.Fatalf("find bucket: %v", err)
 	}
-	opened, err := OpenKeyValue(js, "kv_key_check")
+	opened, err := OpenKeyValue(client.Conn, js, "kv_key_check")
 	if err != nil {
 		t.Fatalf("open bucket: %v", err)
 	}
 	for i, open := range []struct {
 		name string
-		kv   nats.KeyValue
+		kv   KeyValue
 	}{{"created", created}, {"found", found}, {"opened", opened}} {
 		t.Run(open.name, func(t *testing.T) { requireKeysChecked(t, client, open.kv, string(rune('a'+i))) })
 	}
@@ -52,7 +55,7 @@ func TestAKeyValueHandleRefusesAKeyNATSWouldRefuse(t *testing.T) {
 
 // requireKeysChecked fails the test unless kv refuses a key NATS would refuse on every call that
 // takes one and still takes the longest key that fits, the control keys spelled with letter.
-func requireKeysChecked(t *testing.T, client *Client, kv nats.KeyValue, letter string) {
+func requireKeysChecked(t *testing.T, client *Client, kv KeyValue, letter string) {
 	t.Helper()
 
 	calls := map[string]func(key string) error{
@@ -63,16 +66,14 @@ func requireKeysChecked(t *testing.T, client *Client, kv nats.KeyValue, letter s
 		"Update":    func(key string) error { _, err := kv.Update(key, []byte("v"), 1); return err },
 		"Delete":    func(key string) error { return kv.Delete(key) },
 		"Purge":     func(key string) error { return kv.Purge(key) },
-		"History":   func(key string) error { _, err := kv.History(key); return err },
-		"Watch": func(key string) error {
-			watcher, err := kv.Watch(key)
-			if err == nil {
-				_ = watcher.Stop()
-			}
+		"ReadHistory": func(key string) error {
+			_, err := kv.ReadHistory(context.Background(), key)
 			return err
 		},
-		"WatchFiltered": func(key string) error {
-			watcher, err := kv.WatchFiltered([]string{"fits", key})
+		"WatchKeys": func(key string) error {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			watcher, err := kv.WatchKeys(ctx, key)
 			if err == nil {
 				_ = watcher.Stop()
 			}
@@ -88,7 +89,9 @@ func requireKeysChecked(t *testing.T, client *Client, kv nats.KeyValue, letter s
 		key  string
 		want error
 		says string
-		// also is nats.go's own error, which a caller that asks for it still finds.
+		// also is nats.go's own error, which a caller that asks for it still finds: the jetstream
+		// package's own ErrInvalidKey on WatchKeys and ReadHistory, which go through the jetstream
+		// handle.
 		also error
 		// calls are the calls that refuse key.
 		calls map[string]func(key string) error
@@ -103,8 +106,12 @@ func requireKeysChecked(t *testing.T, client *Client, kv nats.KeyValue, letter s
 				if !errors.Is(err, tc.want) || !errors.Is(err, ErrRefused) {
 					t.Fatalf("%s error = %v, want %v, an ErrRefused", name, err, tc.want)
 				}
-				if tc.also != nil && !errors.Is(err, tc.also) {
-					t.Fatalf("%s error = %v, want it to match %v too", name, err, tc.also)
+				also := tc.also
+				if also != nil && (name == "WatchKeys" || name == "ReadHistory") {
+					also = jetstream.ErrInvalidKey
+				}
+				if also != nil && !errors.Is(err, also) {
+					t.Fatalf("%s error = %v, want it to match %v too", name, err, also)
 				}
 				if !strings.Contains(err.Error(), tc.says) {
 					t.Fatalf("%s error = %q, want it to say %q", name, err, tc.says)
@@ -115,7 +122,8 @@ func requireKeysChecked(t *testing.T, client *Client, kv nats.KeyValue, letter s
 			})
 		}
 	}
-	// The control: the same handle still takes a key that fits, the longest one included.
+	// The control: the same handle still takes a key that fits, the longest one included, and
+	// watches it through the jetstream handle.
 	longest := strings.Repeat(letter, maxSubjectBytes-watchOverhead("kv_key_check"))
 	for _, key := range []string{"fits-" + letter, longest} {
 		revision, err := kv.Put(key, []byte("v"))
@@ -128,10 +136,11 @@ func requireKeysChecked(t *testing.T, client *Client, kv nats.KeyValue, letter s
 		if entry, err := kv.GetRevision(key, revision); err != nil || entry.Revision() != revision {
 			t.Fatalf("get %d-byte key at revision %d = %v; want that revision", len(key), revision, err)
 		}
-		history, err := kv.History(key)
+		history, err := kv.ReadHistory(context.Background(), key)
 		if err != nil || len(history) != 1 {
 			t.Fatalf("history of %d-byte key = %d entries, %v; want one", len(key), len(history), err)
 		}
+		watchKey(t, kv, key)
 	}
 	if !client.Conn.IsConnected() {
 		t.Fatalf("the longest accepted key left the connection %v, want it connected", client.Conn.Status())
@@ -164,7 +173,7 @@ func TestAKeyAnEarlierListenerStoredStaysListableAndDeletable(t *testing.T) {
 			t.Fatalf("store the %d-byte key as an earlier listener did: %v", len(key), err)
 		}
 	}
-	kv, err := OpenKeyValue(js, "kv_legacy")
+	kv, err := OpenKeyValue(client.Conn, js, "kv_legacy")
 	if err != nil {
 		t.Fatalf("open bucket: %v", err)
 	}
@@ -195,5 +204,28 @@ func TestAKeyAnEarlierListenerStoredStaysListableAndDeletable(t *testing.T) {
 	}
 	if !client.Conn.IsConnected() {
 		t.Fatalf("the stored keys left the connection %v, want it connected", client.Conn.Status())
+	}
+}
+
+// watchKey watches key through kv's jetstream handle and fails the test unless the watch delivers
+// the key's value, then the nil that ends its scan.
+func watchKey(t *testing.T, kv KeyValue, key string) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	watcher, err := kv.WatchKeys(ctx, key)
+	if err != nil {
+		t.Fatalf("watch %d-byte key: %v", len(key), err)
+	}
+	defer func() { _ = watcher.Stop() }()
+	for _, want := range []bool{true, false} {
+		select {
+		case entry := <-watcher.Updates():
+			if (entry != nil) != want || (entry != nil && entry.Key() != key) {
+				t.Fatalf("watch of %d-byte key delivered %v, want the key and then the scan's end", len(key), entry)
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatalf("watch of %d-byte key delivered nothing within 10 s", len(key))
+		}
 	}
 }

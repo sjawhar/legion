@@ -98,7 +98,7 @@ func newHarness(t *testing.T) *harness {
 	if err != nil {
 		t.Fatalf("JetStream: %v", err)
 	}
-	state, err := redeliver.OpenState(js)
+	state, err := redeliver.OpenState(nc, js)
 	if err != nil {
 		t.Fatalf("open redelivery state: %v", err)
 	}
@@ -490,7 +490,7 @@ func TestASweepPausedBeforeItsRequestSendsNothingUnderANewLimit(t *testing.T) {
 
 	paused := &pausedClaim{KeyValue: h.state, entered: make(chan struct{}), release: make(chan struct{})}
 	second := h.sweeper()
-	second.State = bus.KeyValue{KeyValue: paused}
+	second.State = bus.NewKeyValue(paused, h.state.WatchHandle(), h.state.Streams())
 	reports := make(chan redeliver.Report, 1)
 	go func() {
 		report, err := second.Sweep(context.Background(), redeliver.Options{})

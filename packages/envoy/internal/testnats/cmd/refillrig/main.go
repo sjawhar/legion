@@ -364,7 +364,7 @@ func runSeed(args []string) error {
 			config.TTL = *ttl
 		}
 		if *create {
-			_, err = bus.EnsureKeyValue(js, config)
+			_, err = bus.EnsureKeyValue(conn, js, config)
 		} else {
 			_, err = js.KeyValue(config.Bucket)
 		}
