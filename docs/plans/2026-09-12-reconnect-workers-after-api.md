@@ -630,11 +630,11 @@ gates:
   design: root-issues
 github_apps:
   implement:
-    app_id: "3202636"
+    app_id: "<implement App id>"
     private_key_command: 'printf "%s" "\$GH_AGENT_APP_PRIVATE_KEY_B64" | base64 --ignore-garbage --decode'
   review:
-    app_id: "3202653"
-    private_key_command: 'printf "%s" "\$GH_REVIEW_APP_PRIVATE_KEY_B64" | base64 --ignore-garbage --decode'
+    app_id: "<review App id>"
+    private_key_command: 'printf "%s" "\$<review App key>" | base64 --ignore-garbage --decode'
 EOF
 
 # 1. A pane opened by hand on the scratch daemon's own private server. `keepalive` keeps the
@@ -673,7 +673,7 @@ mkdir -m 700 -p "$STATE/secrets" && (umask 077; printf 'stale-boot-token' >"$STA
 
 # 3. Kill the pane, then boot the scratch daemon from SRC.
 tmux -L legion-sjawhar11 kill-pane -t "$PANE"
-(cd "$SRC" && secrets DISPATCH_TOKEN GH_AGENT_APP_PRIVATE_KEY_B64 GH_REVIEW_APP_PRIVATE_KEY_B64 -- \
+(cd "$SRC" && secrets DISPATCH_TOKEN GH_AGENT_APP_PRIVATE_KEY_B64 <review App key> -- \
   env DISPATCH_URL="$DISPATCH_URL" LEGION_DAEMON_PORT=19371 \
   bun run packages/daemon/src/cli/index.ts start sjawhar/11 --config "$SMOKE/$R.yaml" >"$SMOKE/$R/daemon.log" 2>&1 &)
 until curl -sf http://127.0.0.1:19371/legion/v1/state >/dev/null; do sleep 1; done   # boot: OMP probes + App token, ~20-60s

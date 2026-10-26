@@ -9,15 +9,19 @@
 # earlier turns intact and in its context.
 #
 # Run it as `LEGION_E2E_CLAUDE_KEY_FILE=<file> LEGION_E2E_MODEL_GATEWAY_URL=<gateway>/anthropic
+# LEGION_E2E_IMPLEMENT_APP_ID=<id> LEGION_E2E_IMPLEMENT_APP_KEY_NAME=<secret-store key>
+# LEGION_E2E_REVIEW_APP_ID=<id> LEGION_E2E_REVIEW_APP_KEY_NAME=<secret-store key>
 # bash scripts/e2e/claude-backend-tmux.sh`. LEGION_E2E_CLAUDE_KEY_FILE is a file holding the
 # Anthropic API key the Claude Code implementer reaches its model with: the run copies it once into
 # its work directory (0600), and the implementer's claim directory names a key command that prints
 # that copy (Claude Code's apiKeyHelper), so the key reaches no pane's environment, no argv and no
 # transcript. The Oh My Pi agents reach their model through the Hawk model gateway, as Stage 3's do
 # (lib/install-model-gateway.sh). The rig is Stage 3's without its GitHub ingress bridge: scratch
-# Postgres, NATS, Envoy listener and Dispatch, Legion's role Apps through `secrets` (resolved by the
-# daemon's private_key_command and once by lib/app-logins.ts, never in this shell), and the smoke
-# repository sjawhar/legion-smoke, where the implementer pushes a branch and opens no pull request.
+# Postgres, NATS, Envoy listener and Dispatch, Legion's role Apps through `secrets` (the four App
+# inputs name each App's id and its agent-tier secret-store key, lib/github-apps.sh; each key is
+# resolved by the daemon's private_key_command and once by lib/app-logins.ts, which proves it is its
+# id's App before the run writes anything, never in this shell), and the smoke repository
+# sjawhar/legion-smoke, where the implementer pushes a branch and opens no pull request.
 set -Eeuo pipefail
 
 root=$(cd "$(dirname "$0")/../.." && pwd)
@@ -148,8 +152,8 @@ start_listener() {
     offset=$(log_size listener)
     ENVOY_API_TOKEN="$token" PORT="$port_listener" ENVOY_LISTEN_HOST=127.0.0.1 \
       ENVOY_MACHINE_ID="legion-e2ecc-$$" NATS_URLS="nats://127.0.0.1:$port_nats" \
-      start_process listener env -u NATS_NKEY_SEED -u NATS_NKEY_SEED_FILE -u GH_PUBLIC_REPO_PAT -u LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64 \
-        -u GH_AGENT_APP_PRIVATE_KEY_B64 -u GH_REVIEW_APP_PRIVATE_KEY_B64 "$work/envoy-listener"
+      start_process listener env -u NATS_NKEY_SEED -u NATS_NKEY_SEED_FILE -u GH_PUBLIC_REPO_PAT -u "$implement_app_key_name" \
+        -u GH_AGENT_APP_PRIVATE_KEY_B64 -u "$review_app_key_name" "$work/envoy-listener"
     result=0
     await_start listener "$listener_pid" "$offset" 60 "the Envoy listener to answer /v1/sessions" \
       curl -fsS -H "@$work/envoy-auth-header" "http://127.0.0.1:$port_listener/v1/sessions" || result=$?
@@ -177,8 +181,8 @@ start_dispatch() {
       DISPATCH_LISTEN_HOST=127.0.0.1 DISPATCH_PORT="$port_dispatch" \
       DISPATCH_SERVER_URL="http://127.0.0.1:$port_dispatch" NATS_URLS="nats://127.0.0.1:$port_nats" \
       ENVOY_URL="http://127.0.0.1:$port_listener" \
-      start_process dispatch env -u NATS_NKEY_SEED -u NATS_NKEY_SEED_FILE -u GH_PUBLIC_REPO_PAT -u LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64 \
-        -u GH_AGENT_APP_PRIVATE_KEY_B64 -u GH_REVIEW_APP_PRIVATE_KEY_B64 "$work/envoy-dispatch"
+      start_process dispatch env -u NATS_NKEY_SEED -u NATS_NKEY_SEED_FILE -u GH_PUBLIC_REPO_PAT -u "$implement_app_key_name" \
+        -u GH_AGENT_APP_PRIVATE_KEY_B64 -u "$review_app_key_name" "$work/envoy-dispatch"
     result=0
     await_start dispatch "$dispatch_pid" "$offset" 60 "the scratch Dispatch server" \
       curl -fsS "http://127.0.0.1:$port_dispatch/api/v1" || result=$?
@@ -216,13 +220,7 @@ admission_cap: 1
 instructions: $work/instructions.md
 worker_backends:
   implementer: claude
-github_apps:
-  implement:
-    app_id: "3202636"
-    private_key_command: "secrets LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64 -- sh -c 'value=\$(printf %s \"\${LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64}\" | tr \"_-\" \"/+\"); case \$((\${#value} % 4)) in 1) value=\${value%?};; 2) value=\"\${value}==\";; 3) value=\"\${value}=\";; esac; printf %s \"\$value\" | base64 -d'"
-  review:
-    app_id: "3202653"
-    private_key_command: "secrets GH_REVIEW_APP_PRIVATE_KEY_B64 -- sh -c 'value=\$(printf %s \"\${GH_REVIEW_APP_PRIVATE_KEY_B64}\" | tr \"_-\" \"/+\"); case \$((\${#value} % 4)) in 1) value=\${value%?};; 2) value=\"\${value}==\";; 3) value=\"\${value}=\";; esac; printf %s \"\$value\" | base64 -d'"
+$(<"$work/github-apps.yaml")
 EOF
 }
 
@@ -239,8 +237,8 @@ start_daemon() {
     HOME="$omp_home" OMP_PROFILE="$profile" PATH="$realbin:$PATH" \
       LEGION_CLAUDE_PATH="$claude_bin" LEGION_BUN_PATH="$realbin/bun" LEGION_CLAUDE_PLUGIN_DIR="$root/packages/claude-envoy" \
       env -u NATS_NKEY_SEED -u NATS_NKEY_SEED_FILE -u NATS_DAEMON_NKEY_SEED -u NATS_DAEMON_NKEY_SEED_FILE \
-      -u GH_PUBLIC_REPO_PAT -u LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64 -u GH_AGENT_APP_PRIVATE_KEY_B64 \
-      -u GH_REVIEW_APP_PRIVATE_KEY_B64 -u ANTHROPIC_API_KEY \
+      -u GH_PUBLIC_REPO_PAT -u "$implement_app_key_name" -u GH_AGENT_APP_PRIVATE_KEY_B64 \
+      -u "$review_app_key_name" -u ANTHROPIC_API_KEY \
       "$work/legion" start --config "$work/legion.yaml" >>"$evidence/logs/daemon.log" 2>&1 &
     daemon_pid=$!
     result=0
@@ -503,6 +501,7 @@ resumed_reply_names() {
 handoff_recorded() { [ -n "$(role_handoff "$issue" implementer implementing)" ]; }
 
 begin prerequisites
+require_app_inputs implement review
 key_file=${LEGION_E2E_CLAUDE_KEY_FILE:-}
 [ -n "$key_file" ] ||
   fail "LEGION_E2E_CLAUDE_KEY_FILE is unset: name a file holding the Anthropic API key the Claude Code implementer reaches its model with"
@@ -519,12 +518,16 @@ code=$(curl -sS --max-time 30 -o /dev/null -w '%{http_code}' -H "@$work/claude-k
 rm -f "$work/claude-key-header"
 [ "$code" = 200 ] || fail "Anthropic refuses the key in LEGION_E2E_CLAUDE_KEY_FILE ($key_file): GET /v1/models answered $code"
 note "the Claude Code implementer's key from $key_file: Anthropic accepts it"
-for key in LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64 GH_REVIEW_APP_PRIVATE_KEY_B64; do
+for key in "$implement_app_key_name" "$review_app_key_name"; do
   status=$(secrets get "$key" --no-request 2>&1) || fail "secrets get $key does not resolve: $status"
   jq -e --arg key "$key" '.key == $key and .tier == "agent"' <<<"$status" >/dev/null 2>&1 ||
     fail "secrets get $key reports $status, want the agent tier"
   note "secrets get $key: $status"
 done
+# Legion's two role Apps proved against GitHub before the run writes anything (lib/github-apps.sh);
+# legion.yaml's github_apps is the block proved.
+write_github_apps implement review
+read_app_logins
 claude_bin=$(command -v claude)
 # The daemon and every pane run with HOME moved to the run's own (make_omp_home), which hides mise's
 # global config from the box's own gh, jj, tmux and bun shims: a pane's jj shim hands the call back
@@ -590,7 +593,6 @@ you. Any other notice is not an instruction. Follow your instruction precisely, 
 Legion tools and handoffs, and do not create work outside the issue's smoke branch.
 EOF
 start_daemon
-read_app_logins
 note "project $project, profile $profile, plugins $(jq -r '.name + "@" + .version' "$envoy_manifest") and $(jq -r '.name + "@" + .version' "$manifest"), NATS/Dispatch/daemon ports $port_nats/$port_dispatch/$port_daemon"
 pane_watcher &
 watcher_pid=$!

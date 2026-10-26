@@ -1,15 +1,18 @@
 // scripts/e2e/lib/app-logins.ts: the bot login of each Legion role App a legion.yaml configures,
-// as GitHub names it today. GitHub's `GET /app`, under a JWT the App's own private key signs,
-// answers the App's slug, and its bot account is `<slug>[bot]`: the login the daemon reads at boot
-// for the identity each role commits, pushes and reviews as (packages/daemon/internal/appauth,
+// as GitHub names it today, and the proof that each App's key is the key of the App id configured
+// for it. GitHub's `GET /app`, under a JWT the App's own private key signs, answers the App's id
+// and slug, and its bot account is `<slug>[bot]`: the login the daemon reads at boot for the
+// identity each role commits, pushes and reviews as (packages/daemon/internal/appauth,
 // fetchIdentity). A stage proof compares GitHub's records with these instead of with a name of its
 // own, so an App renamed on GitHub changes what this prints and no script, and a name another App
-// takes over later is never mistaken for Legion's. lib/workflow.sh's read_app_logins runs it.
+// takes over later is never mistaken for Legion's. lib/github-apps.sh's check_github_apps runs it.
 //
-//   bun scripts/e2e/lib/app-logins.ts <legion.yaml> [<GitHub API URL>]
-//     prints {"implement":"<slug>[bot]","review":"<slug>[bot]"} and exits 0, or names what it
-//     could not read on stderr and exits 1; without <legion.yaml> it exits 2 with its usage. The
-//     API URL defaults to https://api.github.com, the one the daemon calls.
+//   bun scripts/e2e/lib/app-logins.ts [--roles <role>[,<role>]] <legion.yaml> [<GitHub API URL>]
+//     prints {"implement":"<slug>[bot]","review":"<slug>[bot]"} (the roles --roles names, both by
+//     default) and exits 0, or names what it could not read or prove on stderr and exits 1; without
+//     <legion.yaml>, or with a --roles it does not know, it exits 2 with its usage. The API URL
+//     defaults to https://api.github.com, the one the daemon calls. An answer whose App id is not
+//     the configured app_id is refused, naming both ids.
 //
 // Each App's key comes from its `github_apps.<role>.private_key_command`, run as the daemon runs it
 // (internal/config, executePrivateKeyCommand): `sh -c`, stdin closed, the environment less the NATS
@@ -23,7 +26,8 @@ import { readFileSync } from "node:fs";
 
 /** The two App roles `github_apps` names (internal/appauth, Implement and Review). */
 export type AppRole = "implement" | "review";
-export type AppLogins = Record<AppRole, string>;
+export type AppLogins = Partial<Record<AppRole, string>>;
+const appRoles: readonly AppRole[] = ["implement", "review"];
 
 /** One App of `github_apps`: its id and the command that prints its PEM private key. */
 export interface AppKeySource {
@@ -38,9 +42,12 @@ function member(value: unknown, key: string): unknown {
   return Object.getOwnPropertyDescriptor(value, key)?.value;
 }
 
-/** The two Apps `github_apps` configures in the legion.yaml text `text`, or a throw naming the key
- * that is missing or not a command. */
-export function appKeySources(text: string): Record<AppRole, AppKeySource> {
+/** The Apps of `roles` that `github_apps` configures in the legion.yaml text `text`, or a throw
+ * naming the key that is missing or not a command. */
+export function appKeySources(
+  text: string,
+  roles: readonly AppRole[] = appRoles
+): Partial<Record<AppRole, AppKeySource>> {
   const apps = member(Bun.YAML.parse(text), "github_apps");
   if (apps === undefined || apps === null || typeof apps !== "object") {
     throw new Error("the config has no github_apps");
@@ -59,7 +66,7 @@ export function appKeySources(text: string): Record<AppRole, AppKeySource> {
     }
     return { appId: String(appId), privateKeyCommand: command };
   };
-  return { implement: source("implement"), review: source("review") };
+  return Object.fromEntries(roles.map((role) => [role, source(role)]));
 }
 
 const base64url = (data: string | Buffer): string => Buffer.from(data).toString("base64url");
@@ -104,7 +111,8 @@ function runKeyCommand(role: AppRole, command: string): string {
 
 /** The bot login GitHub gives the App `source` names: `<slug>[bot]`, the slug read from
  * `GET <api>/app` under the App's own JWT. Every failure names the App by its role and id: a
- * GitHub that never answered, an answer that is not 2xx, and one with no slug. */
+ * GitHub that never answered, an answer that is not 2xx, one whose App id is not `source.appId`
+ * (naming both ids), and one with no slug. */
 export async function appLogin(
   role: AppRole,
   source: AppKeySource,
@@ -131,42 +139,71 @@ export async function appLogin(
   if (!response.ok) {
     throw new Error(`${read} answered ${response.status}: ${body.slice(0, 300)}`);
   }
-  let slug: unknown;
+  let answer: unknown;
   try {
-    slug = member(JSON.parse(body), "slug");
+    answer = JSON.parse(body);
   } catch {
-    slug = undefined;
+    answer = undefined;
   }
+  const id = member(answer, "id");
+  if (typeof id !== "number" && typeof id !== "string") {
+    throw new Error(`${read} answered no App id: ${body.slice(0, 300)}`);
+  }
+  if (String(id) !== source.appId) {
+    throw new Error(
+      `${read} answered App id ${id}, want ${source.appId}: the key is another App's`
+    );
+  }
+  const slug = member(answer, "slug");
   if (typeof slug !== "string" || slug === "") {
     throw new Error(`${read} answered no slug: ${body.slice(0, 300)}`);
   }
   return `${slug}[bot]`;
 }
 
-/** Both Apps' bot logins, refusing a config whose two roles resolve to one App, which the daemon
- * refuses at boot too (internal/daemon, mintAtBoot). */
-export async function appLogins(configPath: string, api: string): Promise<AppLogins> {
-  const sources = appKeySources(readFileSync(configPath, "utf8"));
-  const logins: AppLogins = {
-    implement: await appLogin("implement", sources.implement, api),
-    review: await appLogin("review", sources.review, api),
-  };
-  if (logins.implement === logins.review) {
+/** The bot logins of the Apps of `roles`, refusing a config whose two roles resolve to one App,
+ * which the daemon refuses at boot too (internal/daemon, mintAtBoot). */
+export async function appLogins(
+  configPath: string,
+  api: string,
+  roles: readonly AppRole[] = appRoles
+): Promise<AppLogins> {
+  const sources = appKeySources(readFileSync(configPath, "utf8"), roles);
+  const logins: AppLogins = {};
+  for (const role of roles) {
+    const source = sources[role];
+    if (source !== undefined) logins[role] = await appLogin(role, source, api);
+  }
+  if (logins.implement !== undefined && logins.implement === logins.review) {
     throw new Error(`both github_apps roles are the App ${logins.review}: the workflow needs two`);
   }
   return logins;
 }
 
+/** The roles a `--roles` value names, comma-separated, each once; undefined for any other value. */
+function parseRoles(value: string): AppRole[] | undefined {
+  const roles = value.split(",");
+  const known = (role: string): role is AppRole => (appRoles as readonly string[]).includes(role);
+  if (!roles.every(known) || new Set(roles).size !== roles.length) return undefined;
+  return roles.filter(known);
+}
+
 if (import.meta.main) {
-  const [configPath, api = "https://api.github.com"] = process.argv.slice(2);
-  if (configPath === undefined || configPath === "") {
+  const args = process.argv.slice(2);
+  let roles: AppRole[] | undefined = [...appRoles];
+  if (args[0] === "--roles") {
+    roles = parseRoles(args[1] ?? "");
+    args.splice(0, 2);
+  }
+  const [configPath, api = "https://api.github.com"] = args;
+  if (roles === undefined || configPath === undefined || configPath === "") {
     process.stderr.write(
-      "usage: bun scripts/e2e/lib/app-logins.ts <legion.yaml> [<GitHub API URL>]\n"
+      "usage: bun scripts/e2e/lib/app-logins.ts [--roles <role>[,<role>]] <legion.yaml> [<GitHub API URL>]\n"
     );
     process.exit(2);
   }
   try {
-    process.stdout.write(`${JSON.stringify(await appLogins(configPath, api))}\n`);
+    process.stdout.write(`${JSON.stringify(await appLogins(configPath, api, roles))}\n`);
   } catch (error) {
     process.stderr.write(`app-logins: ${error instanceof Error ? error.message : String(error)}\n`);
     process.exitCode = 1;

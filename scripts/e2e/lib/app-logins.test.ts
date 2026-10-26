@@ -1,13 +1,21 @@
 import { afterAll, describe, expect, test } from "bun:test";
 import { createVerify, generateKeyPairSync } from "node:crypto";
-import { copyFileSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { appJWT, appKeySources } from "./app-logins";
 
 // lib/app-logins.ts run as the stage proofs run it, against a stand-in GitHub that answers GET /app
-// with the slug of the App whose key signed the JWT (no slug for an App that has none), and refuses
-// any other request.
+// with the id and slug of the App whose key signed the JWT (no slug for an App that has none, and
+// another App's id for the one App whose answer names one), and refuses any other request.
 const dir = mkdtempSync(join(tmpdir(), "app-logins-test."));
 const script = join(import.meta.dir, "app-logins.ts");
 
@@ -18,10 +26,17 @@ function appKey(): { publicKey: string; privateKey: string } {
     privateKeyEncoding: { type: "pkcs1", format: "pem" },
   });
 }
-const apps: Record<string, { slug?: string; key: { publicKey: string; privateKey: string } }> = {
+interface StandInApp {
+  slug?: string;
+  /** The App id GET /app answers, when it is not the JWT's issuer. */
+  answers?: number;
+  key: { publicKey: string; privateKey: string };
+}
+const apps: Record<string, StandInApp> = {
   "101": { slug: "example-implement", key: appKey() },
   "202": { slug: "example-review", key: appKey() },
   "303": { key: appKey() },
+  "404": { slug: "example-other", answers: 405, key: appKey() },
 };
 for (const id of Object.keys(apps))
   writeFileSync(join(dir, `key-${id}.pem`), apps[id].key.privateKey);
@@ -44,7 +59,7 @@ const github = Bun.serve({
     if (path !== "/app" || !signed) {
       return Response.json({ message: "A JSON web token could not be decoded" }, { status: 401 });
     }
-    return Response.json({ id: Number(decoded.iss), slug: app.slug });
+    return Response.json({ id: app.answers ?? Number(decoded.iss), slug: app.slug });
   },
 });
 const standIn = `http://127.0.0.1:${github.port}/`;
@@ -89,11 +104,11 @@ async function run(path: string, env: Record<string, string> = {}, api = standIn
 
 // read_app_logins as a stage proof calls it: lib/workflow.sh sourced under the stage scripts' shell
 // options and check helpers (the lib reads repo as it is sourced), with the config as
-// $work/legion.yaml, then `then`. The one seam is bun, which is handed `api` after the helper's own
-// arguments, the GitHub API URL the helper takes.
+// $work/github-apps.yaml, the file write_github_apps writes, then `then`. The one seam is bun,
+// which is handed `api` after the helper's own arguments, the GitHub API URL the helper takes.
 async function readAppLogins(path: string, then: string, api = standIn) {
   const work = mkdtempSync(join(dir, "work."));
-  copyFileSync(path, join(work, "legion.yaml"));
+  copyFileSync(path, join(work, "github-apps.yaml"));
   const shell = `set -Eeuo pipefail
 check=boot repo=sjawhar/legion-smoke
 note() { printf '   %s\\n' "$*"; }
@@ -183,6 +198,37 @@ describe("app-logins.ts", () => {
     expect(stderr).toContain("both github_apps roles are the App example-review[bot]");
   });
 
+  test("an answer naming another App id is refused, naming both ids and never the key", async () => {
+    const { code, stdout, stderr } = await run(config(app("101"), app("404")));
+    expect(code).toBe(1);
+    expect(stdout).toBe("");
+    expect(stderr).toMatch(namesApp("review", "404"));
+    expect(stderr).toContain("answered App id 405, want 404");
+    expect(stderr).not.toContain("PRIVATE KEY");
+  });
+
+  test("--roles reads only the roles it names, and refuses one it does not know", async () => {
+    const path = join(dir, `legion-${++configs}.yaml`);
+    writeFileSync(path, `github_apps:\n  implement:\n${app("101")}\n`);
+    const one = Bun.spawn(["bun", script, "--roles", "implement", path, standIn], {
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [stdout, stderr, code] = await Promise.all([
+      new Response(one.stdout).text(),
+      new Response(one.stderr).text(),
+      one.exited,
+    ]);
+    expect(stderr).toBe("");
+    expect(code).toBe(0);
+    expect(JSON.parse(stdout)).toEqual({ implement: "example-implement[bot]" });
+    for (const roles of ["merger", "implement,implement", ""]) {
+      const bad = Bun.spawnSync(["bun", script, "--roles", roles, path], { stderr: "pipe" });
+      expect(bad.exitCode).toBe(2);
+      expect(bad.stderr.toString()).toContain("usage:");
+    }
+  });
+
   test("an App whose key is not a private_key_command is refused by name", () => {
     expect(() =>
       appKeySources(
@@ -243,5 +289,158 @@ describe("read_app_logins", () => {
     expect(stdout).not.toContain("after-read");
     expect(stderr).toMatch(namesApp("implement", "101"));
     expect(stderr).toMatch(/^FAIL boot: /m);
+  });
+});
+
+// lib/github-apps.sh as a stage proof uses it: sourced under the stage scripts' shell options with
+// their check helpers, the inputs in the environment, and `then` run after. The seams are bun,
+// handed the stand-in GitHub after the helper's own arguments, and a stand-in `secrets` first on
+// PATH, which puts the store's value for the key it names (the App's PEM in the store's Node-style
+// base64: URL-safe alphabet, unpadded) into the environment of the command after `--`, as the real
+// CLI does.
+const store = join(dir, "store");
+const fakeBin = join(dir, "bin");
+mkdirSync(store);
+mkdirSync(fakeBin);
+writeFileSync(
+  join(store, "IMPLEMENT_KEY"),
+  Buffer.from(apps["101"].key.privateKey).toString("base64url")
+);
+writeFileSync(
+  join(store, "REVIEW_KEY"),
+  Buffer.from(apps["202"].key.privateKey).toString("base64url")
+);
+writeFileSync(
+  join(store, "OTHER_KEY"),
+  Buffer.from(apps["404"].key.privateKey).toString("base64url")
+);
+writeFileSync(
+  join(fakeBin, "secrets"),
+  `#!/bin/sh\nname=$1\nshift\n[ "$1" = -- ] && shift\nexport "$name=$(cat "${store}/$name")"\nexec "$@"\n`,
+  { mode: 0o755 }
+);
+const appInputs = {
+  LEGION_E2E_IMPLEMENT_APP_ID: "101",
+  LEGION_E2E_IMPLEMENT_APP_KEY_NAME: "IMPLEMENT_KEY",
+  LEGION_E2E_REVIEW_APP_ID: "202",
+  LEGION_E2E_REVIEW_APP_KEY_NAME: "REVIEW_KEY",
+};
+
+async function githubApps(inputs: Record<string, string | undefined>, then: string) {
+  const work = mkdtempSync(join(dir, "apps."));
+  const env: Record<string, string | undefined> = {
+    ...process.env,
+    PATH: `${fakeBin}:${process.env.PATH}`,
+    LIB: join(import.meta.dir, "github-apps.sh"),
+    work,
+    API: standIn,
+    ...inputs,
+  };
+  for (const name of Object.keys(env)) if (env[name] === undefined) delete env[name];
+  const shell = `set -Eeuo pipefail
+check=prerequisites
+note() { printf '   %s\\n' "$*"; }
+fail() { printf 'FAIL %s: %s\\n' "$check" "$*" >&2; exit 1; }
+bun() { command bun "$@" "$API"; }
+. "$LIB"
+${then}`;
+  const child = Bun.spawn(["bash", "-c", shell], { env, stdout: "pipe", stderr: "pipe" });
+  const [stdout, stderr, code] = await Promise.all([
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+    child.exited,
+  ]);
+  return { code, stdout: stdout.trimEnd(), stderr: stderr.trim(), work };
+}
+
+describe("lib/github-apps.sh", () => {
+  const proveBoth = `require_app_inputs implement review
+write_github_apps implement review
+check_github_apps implement review
+echo "logins $github_app_logins"`;
+
+  test("each missing input is refused by name before anything is written or GitHub is asked", async () => {
+    for (const name of Object.keys(appInputs)) {
+      seen.length = 0;
+      const { code, stdout, stderr, work } = await githubApps(
+        { ...appInputs, [name]: undefined },
+        proveBoth
+      );
+      expect(code).toBe(1);
+      expect(stderr).toMatch(new RegExp(`^FAIL prerequisites: ${name} is unset`));
+      expect(stdout).not.toContain("logins");
+      expect(existsSync(join(work, "github-apps.yaml"))).toBe(false);
+      expect(seen).toEqual([]);
+    }
+  });
+
+  test("an id that is not a number, a key name unsafe in a shell, or one App for both is refused", async () => {
+    const cases: [Record<string, string>, string][] = [
+      [{ LEGION_E2E_IMPLEMENT_APP_ID: "12a" }, "LEGION_E2E_IMPLEMENT_APP_ID must be"],
+      [{ LEGION_E2E_REVIEW_APP_KEY_NAME: "KEY;true" }, "LEGION_E2E_REVIEW_APP_KEY_NAME must be"],
+      [{ LEGION_E2E_REVIEW_APP_ID: "101" }, "are both 101: the workflow needs two Apps"],
+      [{ LEGION_E2E_REVIEW_APP_KEY_NAME: "IMPLEMENT_KEY" }, "are both IMPLEMENT_KEY"],
+    ];
+    for (const [inputs, want] of cases) {
+      const { code, stderr } = await githubApps({ ...appInputs, ...inputs }, proveBoth);
+      expect(code).toBe(1);
+      expect(stderr).toContain(want);
+    }
+  });
+
+  test("a key GitHub answers for another App id fails the check, naming both ids and never the key", async () => {
+    const { code, stdout, stderr } = await githubApps(
+      {
+        ...appInputs,
+        LEGION_E2E_REVIEW_APP_ID: "404",
+        LEGION_E2E_REVIEW_APP_KEY_NAME: "OTHER_KEY",
+      },
+      proveBoth
+    );
+    expect(code).toBe(1);
+    expect(stdout).not.toContain("logins");
+    expect(stderr).toContain("answered App id 405, want 404");
+    expect(stderr).toMatch(/^FAIL prerequisites: lib\/app-logins.ts could not prove/m);
+    expect(stderr).not.toContain(readFileSync(join(store, "OTHER_KEY"), "utf8"));
+    expect(stderr).not.toContain("PRIVATE KEY");
+  });
+
+  test("a key of another App is refused by GitHub's 401, naming the App's role and id", async () => {
+    const { code, stderr } = await githubApps(
+      { ...appInputs, LEGION_E2E_IMPLEMENT_APP_KEY_NAME: "OTHER_KEY" },
+      proveBoth
+    );
+    expect(code).toBe(1);
+    expect(stderr).toMatch(namesApp("implement", "101"));
+    expect(stderr).toContain("401");
+  });
+
+  test("matching Apps pass, and the block written is the daemon's: each id and its secrets command", async () => {
+    const { code, stdout, stderr, work } = await githubApps(appInputs, proveBoth);
+    expect(stderr).toBe("");
+    expect(code).toBe(0);
+    const logins = stdout.split("\n").find((line) => line.startsWith("logins "));
+    expect(JSON.parse((logins ?? "").slice("logins ".length))).toEqual({
+      implement: "example-implement[bot]",
+      review: "example-review[bot]",
+    });
+    const sources = appKeySources(readFileSync(join(work, "github-apps.yaml"), "utf8"));
+    expect(sources.implement?.appId).toBe("101");
+    expect(sources.implement?.privateKeyCommand).toStartWith("secrets IMPLEMENT_KEY -- sh -c '");
+    expect(sources.review?.appId).toBe("202");
+    expect(sources.review?.privateKeyCommand).toStartWith("secrets REVIEW_KEY -- sh -c '");
+  });
+
+  test("one role proves that App alone, as Stage 4a runs it", async () => {
+    const { code, stdout, stderr } = await githubApps(
+      { LEGION_E2E_IMPLEMENT_APP_ID: "101", LEGION_E2E_IMPLEMENT_APP_KEY_NAME: "IMPLEMENT_KEY" },
+      `require_app_inputs implement
+write_github_apps implement
+check_github_apps implement
+echo "logins $github_app_logins"`
+    );
+    expect(stderr).toBe("");
+    expect(code).toBe(0);
+    expect(stdout).toContain('logins {"implement":"example-implement[bot]"}');
   });
 });

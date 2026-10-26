@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -76,16 +77,29 @@ func TestRealGitHubCredentialSurface(t *testing.T) {
 	t.Log("clone through gh auth git-credential: succeeded")
 }
 
-// realGitHubApps is Legion's real implement and review Apps, their private keys read from the
-// devbox's secrets store: the Apps the gated real-GitHub proofs drive.
+// realGitHubApps is Legion's real implement and review Apps, named by the operator's four inputs
+// (scripts/e2e/lib/github-apps.sh reads the same four for the stage proofs): each App's id and the
+// secrets-store key the devbox's `secrets` CLI resolves to its private key. A gated run without
+// one of them, or with a malformed one, fails naming it rather than guess an App.
 func realGitHubApps(t *testing.T) config.GitHubApps {
 	t.Helper()
+	input := func(name string, valid *regexp.Regexp) string {
+		value := os.Getenv(name)
+		if !valid.MatchString(value) {
+			t.Fatalf("%s is unset or malformed (%q, want %s): the real GitHub proofs name Legion's Apps only through it", name, value, valid)
+		}
+		return value
+	}
+	id := regexp.MustCompile(`^[1-9][0-9]*$`)
+	key := regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 	apps, err := config.ResolveGitHubApps(config.GitHubApps{
 		Implement: config.GitHubApp{
-			AppID: "3202636", PrivateKeyCommand: privateKeyCommand("LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64"),
+			AppID:             input("LEGION_E2E_IMPLEMENT_APP_ID", id),
+			PrivateKeyCommand: privateKeyCommand(input("LEGION_E2E_IMPLEMENT_APP_KEY_NAME", key)),
 		},
 		Review: config.GitHubApp{
-			AppID: "3202653", PrivateKeyCommand: privateKeyCommand("GH_REVIEW_APP_PRIVATE_KEY_B64"),
+			AppID:             input("LEGION_E2E_REVIEW_APP_ID", id),
+			PrivateKeyCommand: privateKeyCommand(input("LEGION_E2E_REVIEW_APP_KEY_NAME", key)),
 		},
 	})
 	if err != nil {

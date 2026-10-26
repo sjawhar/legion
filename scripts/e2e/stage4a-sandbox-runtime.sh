@@ -81,7 +81,11 @@
 # bridge, forwarded through the same tunnel); LEGION_E2E_REPO_SECOND_OWNER (required) `<owner>/<name>`,
 # a repository under an owner other than sjawhar on which both Legion Apps are installed, where
 # second-owner provisions an issue and proves its pod's gh and git read sjawhar/legion-smoke with
-# read-only tokens (nothing is pushed to it); STAGE4A_FROM a development entry point, which is
+# read-only tokens (nothing is pushed to it); LEGION_E2E_IMPLEMENT_APP_ID and
+# LEGION_E2E_IMPLEMENT_APP_KEY_NAME (both required) the implement App's numeric id and the
+# secret-store key the `secrets` CLI resolves to its private key (agent tier: no YubiKey touch), which
+# prerequisites proves is that id's App against GitHub's GET /app before the run writes anything
+# (lib/github-apps.sh; the run acts as no other App); STAGE4A_FROM a development entry point, which is
 # never the proof; STAGE4A_EVIDENCE_DIR where the transcript and the runtime's log go (default a
 # fresh /tmp directory, kept and printed).
 #
@@ -109,8 +113,6 @@ namespace=legion
 port=${LEGION_E2E_WORKER_STREAM_PORT:-13373}
 repo=sjawhar/legion-smoke
 second_owner_repo=${LEGION_E2E_REPO_SECOND_OWNER:-}
-app_id=3202636
-app_key=LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64
 # The scratch session database's image: the pinned Postgres the repository's CI tests against.
 session_db_image=pgvector/pgvector@sha256:7b822b0aac60967beb1ea5e576b8602c94c300a157d187f385ae3e0da199b90a
 session_db_port=${LEGION_E2E_SESSION_DB_PORT:-}
@@ -175,6 +177,8 @@ fail() {
 . "$root/scripts/e2e/lib/bridge-tunnel.sh"
 # shellcheck source-path=SCRIPTDIR source=lib/teardown.sh
 . "$root/scripts/e2e/lib/teardown.sh"
+# shellcheck source-path=SCRIPTDIR source=lib/github-apps.sh
+. "$root/scripts/e2e/lib/github-apps.sh"
 
 trap cleanup EXIT
 trap 'exit 129' HUP
@@ -239,6 +243,9 @@ esac
 [[ $second_owner_repo =~ ^[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9._-]+$ ]] || fail "LEGION_E2E_REPO_SECOND_OWNER must be <owner>/<name>, not '$second_owner_repo'"
 [ "$(tr '[:upper:]' '[:lower:]' <<<"${second_owner_repo%%/*}")" != "$(tr '[:upper:]' '[:lower:]' <<<"${repo%%/*}")" ] ||
   fail "LEGION_E2E_REPO_SECOND_OWNER $second_owner_repo is under ${repo%%/*}, $repo's owner: the check needs a repository of another owner"
+require_app_inputs implement
+write_github_apps implement
+check_github_apps implement
 for taken in "$port" "$session_db_port"; do
   if [ -n "$(ss -Hltn "sport = :$taken")" ]; then
     fail "port $taken is taken on the devbox: $(ss -Hltnp "sport = :$taken")"
@@ -436,8 +443,8 @@ env \
   LEGION_E2E_RUNTIME_IDENTITY_KIND="$runtime_identity_kind" \
   LEGION_E2E_PLATFORM="$platform" \
   LEGION_E2E_POD_REACHABILITY="$pod_reachability" \
-  LEGION_E2E_IMPLEMENT_APP_ID="$app_id" \
-  LEGION_E2E_IMPLEMENT_APP_KEY="$app_key" \
+  LEGION_E2E_IMPLEMENT_APP_ID="$implement_app_id" \
+  LEGION_E2E_IMPLEMENT_APP_KEY_NAME="$implement_app_key_name" \
   LEGION_E2E_RECORD="$record" \
   LEGION_E2E_WORK="$evidence" \
   LEGION_E2E_FROM="$from" \

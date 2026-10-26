@@ -5,7 +5,7 @@ and fails loudly on the first step that does not hold. Some are a stage's gate f
 coordinator — unit tests do not gate a stage, these do; others prove one capability end to end
 against the world it will run in. A later stage's script lands beside these; `lib/` holds what
 the stage scripts share: standalone helpers they run, and the files they source
-([`lib/rig.sh`](#librigsh), [`lib/workflow.sh`](#libworkflowsh),
+([`lib/rig.sh`](#librigsh), [`lib/workflow.sh`](#libworkflowsh), [`lib/github-apps.sh`](#libgithub-appssh),
 [`lib/namespace-rig.sh`](#libnamespace-rigsh), [`lib/kind-sandbox.sh`](#libkind-sandboxsh), [`lib/omp-home.sh`](#libomp-homesh)), which `shellcheck` follows from this directory
 through `scripts/e2e/.shellcheckrc`.
 
@@ -29,11 +29,15 @@ through `scripts/e2e/.shellcheckrc`.
 
 ```sh
 LEGION_REAL_GITHUB=1 LEGION_TEST_PG_DSN=postgres://… \
+LEGION_E2E_IMPLEMENT_APP_ID=<id> LEGION_E2E_IMPLEMENT_APP_KEY_NAME=<secret-store key> \
+LEGION_E2E_REVIEW_APP_ID=<id> LEGION_E2E_REVIEW_APP_KEY_NAME=<secret-store key> \
   go -C packages/daemon test -count=1 ./internal/api \
     -run '^TestRealGitHubCredentialSurface$' -v
 ```
 
-The test is intentionally gated because it calls GitHub as both installed Apps. It resolves each
+The test is intentionally gated because it calls GitHub as both installed Apps, which the four App
+inputs name ([`lib/github-apps.sh`](#libgithub-appssh)); a gated run without one fails naming it.
+It resolves each
 App key through its `private_key_command`, mints each App's lease through the real token source,
 writes the gh files the daemon would render for a pane, and drives the real `gh` and `git` against
 them. The test's temporary gh directories and clone directory are removed by Go's test cleanup;
@@ -43,6 +47,8 @@ the GitHub operations are read-only except for locally cloning the smoke reposit
 
 ```sh
 LEGION_REAL_GITHUB=1 LEGION_TEST_PG_DSN=postgres://… \
+LEGION_E2E_IMPLEMENT_APP_ID=<id> LEGION_E2E_IMPLEMENT_APP_KEY_NAME=<secret-store key> \
+LEGION_E2E_REVIEW_APP_ID=<id> LEGION_E2E_REVIEW_APP_KEY_NAME=<secret-store key> \
 LEGION_READY_SCOPE_REPO=<owner>/<repo> LEGION_READY_SCOPE_PR=<n> LEGION_READY_SCOPE_ISSUE=<KEY> \
 LEGION_READY_SCOPE_APPROVED=<approved sha> LEGION_READY_SCOPE_HEAD=<head sha> \
 [LEGION_READY_SCOPE_REFUSE=<path>] \
@@ -278,8 +284,12 @@ Three things the run had to learn about its surface:
 ## stage3-devbox-workflow.sh
 
 ```sh
+LEGION_E2E_IMPLEMENT_APP_ID=<id> LEGION_E2E_IMPLEMENT_APP_KEY_NAME=<secret-store key> \
+LEGION_E2E_REVIEW_APP_ID=<id> LEGION_E2E_REVIEW_APP_KEY_NAME=<secret-store key> \
 LEGION_E2E_MODEL_ROUTE=gateway LEGION_E2E_MODEL_GATEWAY_URL=<gateway>/anthropic SMOKE_UPSTREAM_NATS=nats://<host>.<tailnet>.ts.net:4222 \
   bash scripts/e2e/stage3-devbox-workflow.sh     # → "stage 3 e2e: PASS", exit 0
+LEGION_E2E_IMPLEMENT_APP_ID=<id> LEGION_E2E_IMPLEMENT_APP_KEY_NAME=<secret-store key> \
+LEGION_E2E_REVIEW_APP_ID=<id> LEGION_E2E_REVIEW_APP_KEY_NAME=<secret-store key> \
 LEGION_E2E_MODEL_ROUTE=key-file LEGION_E2E_ANTHROPIC_KEY_FILE=<0600 file> SMOKE_UPSTREAM_NATS=nats://<host>.<tailnet>.ts.net:4222 \
   bash scripts/e2e/stage3-devbox-workflow.sh     # the same, for a devbox with no Hawk gateway
 ```
@@ -290,7 +300,10 @@ submission on its accepted READY: the repository allows no auto-merge, so the da
 GitHub reports it mergeable, and the proof only reads it (`await_ready_merge`), never merging it by
 hand.
 The run needs `go`, `docker`, `jq`, `curl`, `ss`, `tmux`, `bun`, `mise`, `gh`, `shellcheck`, the
-`secrets` CLI, and `LEGION_E2E_MODEL_ROUTE` (required, `gateway` or `key-file`), which picks how
+`secrets` CLI, the four inputs that name Legion's two role Apps
+([`lib/github-apps.sh`](#libgithub-appssh): each App's id and the agent-tier secret-store key
+holding its private key, all required, never literals of this repository), and
+`LEGION_E2E_MODEL_ROUTE` (required, `gateway` or `key-file`), which picks how
 the agents reach Anthropic, independently of which devbox this runs on:
 - `gateway`: the operator's model gateway access — `LEGION_E2E_MODEL_GATEWAY_URL` naming the
   gateway's Anthropic endpoint (required in this mode;
@@ -328,10 +341,12 @@ anyway). The shim routes `gh` to that App only from the operator's own Oh My Pi 
 starts there: a plain shell's `gh`, a tmux window's included, is the user's own login, a Legion
 pane's is one of Legion's Apps, and a personal `GH_TOKEN` in the environment makes any session's
 `gh` that token's owner. `prerequisites` refuses to start, before the run's first write to GitHub,
-unless `gh` acts as `sjawhar-agent[bot]` ([`require_proof_human`](#libworkflowsh)). The daemon resolves `LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64` and
-`GH_REVIEW_APP_PRIVATE_KEY_B64` itself through `private_key_command`, both agent tier, and
-[`read_app_logins`](#libworkflowsh) runs the same two commands once, in `lib/app-logins.ts`, to
-read each App's bot login from GitHub, the login every check that names an App compares with. The agents'
+unless `gh` acts as `sjawhar-agent[bot]` ([`require_proof_human`](#libworkflowsh)). The daemon
+resolves the two App keys the inputs name itself through `private_key_command`, both agent tier,
+and `prerequisites` first runs [`read_app_logins`](#libworkflowsh), which runs the same two
+commands once, in `lib/app-logins.ts`, to prove each key is its id's App (GitHub's `GET /app` must
+answer that id) and read each App's bot login, the login every check that names an App compares
+with, before the run's first write anywhere. The agents'
 model is Anthropic through the configured route:
 [`lib/install-model-gateway.sh`](#libinstall-model-gatewaysh) (`gateway`) or
 [`lib/install-key-file-model-route.sh`](#libinstall-key-file-model-routesh) (`key-file`) routes the
@@ -640,6 +655,8 @@ so the script opens the transcript on fd 8 and calls `transcript_to /dev/fd/8`
 ## claude-backend-tmux.sh
 
 ```sh
+LEGION_E2E_IMPLEMENT_APP_ID=<id> LEGION_E2E_IMPLEMENT_APP_KEY_NAME=<secret-store key> \
+LEGION_E2E_REVIEW_APP_ID=<id> LEGION_E2E_REVIEW_APP_KEY_NAME=<secret-store key> \
 LEGION_E2E_CLAUDE_KEY_FILE=<file holding an Anthropic API key> LEGION_E2E_MODEL_GATEWAY_URL=<gateway>/anthropic \
   bash scripts/e2e/claude-backend-tmux.sh     # → "claude backend e2e: PASS", exit 0
 ```
@@ -674,9 +691,11 @@ pane. The checks:
   NUL-delimited; an environment it cannot read is not checked, never clean, and is recorded with
   why in the evidence's `pane-endpoints-unchecked.txt`, which this check's failure names.
 
-Inputs. `LEGION_E2E_CLAUDE_KEY_FILE` (required) names a file holding the Anthropic API key the
+Inputs. The four App inputs ([`lib/github-apps.sh`](#libgithub-appssh), all required) name Legion's
+two role Apps; `prerequisites` refuses a run without one, naming it, before anything else.
+`LEGION_E2E_CLAUDE_KEY_FILE` (required) names a file holding the Anthropic API key the
 Claude Code implementer reaches its model with. `prerequisites` refuses a run without it, naming
-the variable, before anything else, and refuses a key Anthropic's `GET /v1/models` does not accept
+the variable, before it writes anything, and refuses a key Anthropic's `GET /v1/models` does not accept
 (the key goes by a 0600 header file, never an argv). The run copies the key once into its work
 directory, 0600, and writes the implementer's claim directory (`<state>/claude/<claim token>`, which
 the daemon creates only when missing) before the claim exists: a `settings.json` whose
@@ -698,11 +717,12 @@ box's shims, where a pane's `jj` shim hands the call back to itself, exit 127), 
 pinned in mise. `LEGION_CLAUDE_PATH` is set to the `claude` on the operator's `PATH`,
 `LEGION_BUN_PATH` to that real `bun`, and `LEGION_CLAUDE_PLUGIN_DIR` to this checkout's
 `packages/claude-envoy`, whose `dist/envoy-channel.js` and generated `legion/` must be built.
-Legion's role Apps resolve as Stage 3's do: the daemon runs
-`secrets LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64 -- …` and `secrets
-GH_REVIEW_APP_PRIVATE_KEY_B64 -- …` as each App's `private_key_command`, and `prerequisites`
-checks each with `secrets get <KEY> --no-request`, which prints only the key and its tier, and
-refuses one that does not resolve to the agent tier. The proof human is the devbox's ordinary
+Legion's role Apps resolve as Stage 3's do: the daemon runs `secrets <implement App key> -- …` and
+`secrets <review App key> -- …` (the key names `LEGION_E2E_IMPLEMENT_APP_KEY_NAME` and
+`LEGION_E2E_REVIEW_APP_KEY_NAME` give) as each App's `private_key_command`, and `prerequisites`
+checks each with `secrets get <KEY> --no-request`, which prints only the key and its tier, refuses
+one that does not resolve to the agent tier, and then proves each key is its id's App
+([`read_app_logins`](#libworkflowsh)) before the run's first write. The proof human is the devbox's ordinary
 `gh` acting as `sjawhar-agent[bot]` ([`require_proof_human`](#libworkflowsh)), so the run starts
 from the operator's own Oh My Pi session. The `EXIT` trap stops every process and container,
 copies every Oh My Pi session and Claude Code transcript into the evidence directory's
@@ -747,6 +767,8 @@ LEGION_E2E_MODEL_GATEWAY_AUDIENCE=<gateway audience> \
 LEGION_E2E_STORAGE_CLASS=gp2 \
 LEGION_E2E_SESSION_DB_PORT=<port> \
 LEGION_E2E_REPO_SECOND_OWNER=<owner>/<name> \
+LEGION_E2E_IMPLEMENT_APP_ID=<id> \
+LEGION_E2E_IMPLEMENT_APP_KEY_NAME=<secret-store key> \
   bash scripts/e2e/stage4a-sandbox-runtime.sh     # → "stage 4a e2e: PASS", exit 0
 
 # A cluster whose pods cannot reach the devbox at all (GKE's shape), with no model gateway:
@@ -759,6 +781,8 @@ LEGION_E2E_MODEL_ROUTE=key-file \
 LEGION_E2E_STORAGE_CLASS=standard-rwo \
 LEGION_E2E_SESSION_DB_PORT=<port> \
 LEGION_E2E_REPO_SECOND_OWNER=<owner>/<name> \
+LEGION_E2E_IMPLEMENT_APP_ID=<id> \
+LEGION_E2E_IMPLEMENT_APP_KEY_NAME=<secret-store key> \
   bash scripts/e2e/stage4a-sandbox-runtime.sh     # → "stage 4a e2e: PASS", exit 0
 ```
 
@@ -776,8 +800,13 @@ all — GKE's shape; [below](#the-bridge-legion_e2e_pod_reachabilitybridge)) and
 gateway in front of Anthropic). The script needs `go`, `kubectl`, `curl`, `ss`,
 `diff`, `docker` (the scratch session database), `jq` and `bun` (the `plugins` step, below),
 `aws` only under `LEGION_E2E_RUNTIME_IDENTITY_KIND=aws-iam-role` (the runtime kubeconfig's `aws eks
-get-token`), and the `secrets` CLI holding `LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64` (agent tier: no
-YubiKey touch). The harness runs `secrets <KEY> -- sh -c 'printf %s "$<KEY>"'`: the `secrets` CLI
+get-token`), and the `secrets` CLI holding the implement App's key under the name
+`LEGION_E2E_IMPLEMENT_APP_KEY_NAME` gives (agent tier: no YubiKey touch), with
+`LEGION_E2E_IMPLEMENT_APP_ID` that App's id ([`lib/github-apps.sh`](#libgithub-appssh); both
+required, refused by name when unset). Stage 4a acts as the implement App alone, so it takes no
+review App inputs. `prerequisites` proves the key is that id's App (`check_github_apps implement`:
+GitHub's `GET /app` under the key's JWT must answer that id) before the run writes anything. The
+harness runs `secrets <KEY> -- sh -c 'printf %s "$<KEY>"'`: the `secrets` CLI
 decrypts the key and puts it in the environment of that one `sh` child, which prints it to a pipe
 the harness reads into memory. The harness decodes it there and mints the implement App's
 installation token in process. The key is written to no file, appears in no argv, and reaches no
@@ -1134,6 +1163,8 @@ LEGION_E2E_RUNTIME_CONTEXT=<restricted context> LEGION_E2E_IMAGE=ghcr.io/sjawhar
   LEGION_E2E_MODEL_GATEWAY_URL=<gateway>/anthropic LEGION_E2E_MODEL_GATEWAY_AUDIENCE=<gateway audience> \
   LEGION_E2E_DISPATCH_URL=https://<dispatch> LEGION_E2E_ENVOY_URL=http://<listener>:<port> LEGION_E2E_NATS_URL=nats://<nats>:4222 \
   LEGION_E2E_DISPATCH_TOKEN_FILE=<0600 file> LEGION_E2E_ENVOY_TOKEN_SECRET_ID=<secret id> \
+  LEGION_E2E_IMPLEMENT_APP_ID=<id> LEGION_E2E_IMPLEMENT_APP_KEY_NAME=<secret-store key> \
+  LEGION_E2E_REVIEW_APP_ID=<id> LEGION_E2E_REVIEW_APP_KEY_NAME=<secret-store key> \
   bash scripts/e2e/stage4b-sandbox-tree.sh        # → "stage 4b e2e: PASS", exit 0
 STAGE4B_UNTIL=<checkpoint> …                      # a development run: stops after that checkpoint, never PASS
 STAGE4B_DESIGN_GATE=root-issues STAGE4B_UNTIL=spec-posted …   # the design gate, armed, on tree 1 alone
@@ -1168,6 +1199,11 @@ unset or malformed (the audience through
 [`lib/model-gateway-audience.sh`](#libmodel-gateway-audiencesh)), naming the variable and never its
 value. `preflight` reads Dispatch's `whoami` with the run's bearer and requires an agent session;
 the same read with an invalid bearer, its negative control, must be refused 401.
+
+The four App inputs ([`lib/github-apps.sh`](#libgithub-appssh), all required) name Legion's two
+role Apps: `prerequisites` refuses a run without one, naming it, and proves each key is its id's App
+([`read_app_logins`](#libworkflowsh)) before `ensure_project`, the run's first write anywhere. The
+daemon's `github_apps` is the block it proved.
 
 `STAGE4B_UNTIL` must name a checkpoint below; any other value is refused. `STAGE4B_SKIP_CONTROLLER=1`,
 refused without `STAGE4B_UNTIL`, runs none of the checks of `controller`, `full-agent-negative` or `controller-walk` and only takes
@@ -2676,24 +2712,27 @@ Stage 4b's `remove_run_branches`) returns without a `gh` call unless the check p
 `lib/proof-human.test.ts` drives the check and Stage 3's teardown against a fake `gh`
 (`bun test scripts/e2e/lib`, which CI runs).
 
-`read_app_logins` reads the bot login of each Legion role App the run's `legion.yaml` configures, as
-GitHub names it today, and every check that names an App compares with it: no script carries an
-App's name, so an App renamed on GitHub changes what the run reads and no line of it, and a name
-another App takes over later is never mistaken for Legion's. It runs `lib/app-logins.ts`, which
-signs a JWT with each App's key from its `github_apps.<role>.private_key_command` (run with `sh -c`,
-as the daemon runs it, the key held in that process alone) and reads the App's slug from
-`GET /app`, so the login is `<slug>[bot]`, the one the daemon reads at boot for the identity each
-role commits, pushes and reviews as. The two Apps resolving to one login fail it, as the daemon
-refuses at boot, and so does a read of either App that does not give a slug, the run failing with
-the reason the helper names by the App's role and id: a GitHub that never answered, an answer that
-is not 2xx, or one with no slug. A stage proof calls it once, after its first `legion.yaml` is
-written and before any check needs a login (Stage 3 and 4b.13b right after the daemon's first
-start, Stage 4b after `--check-config`). `role_app ROLE` then prints the login of the App the role
+`read_app_logins` proves the run's two role Apps against GitHub and reads the bot login of each,
+as GitHub names it today, and every check that names an App compares with it: no script carries an
+App's name or id, so an App renamed on GitHub changes what the run reads and no line of it, and a
+name another App takes over later is never mistaken for Legion's. It runs
+[`check_github_apps`](#libgithub-appssh) over the run's `$work/github-apps.yaml`, whose
+`lib/app-logins.ts` signs a JWT with each App's key from its `github_apps.<role>.private_key_command`
+(run with `sh -c`, as the daemon runs it, the key held in that process alone) and reads the App's id
+and slug from `GET /app`, so the login is `<slug>[bot]`, the one the daemon reads at boot for the
+identity each role commits, pushes and reviews as. The two Apps resolving to one login fail it, as
+the daemon refuses at boot, and so does a read of either App whose answer names another App id or
+gives no slug, the run failing with the reason the helper names by the App's role and id: a GitHub
+that never answered, an answer that is not 2xx (GitHub's 401 for a key that is not the id's App),
+an answer naming another id (both ids named, never the key), or one with no slug. A stage proof
+calls it once in `prerequisites`, after `require_app_inputs` and `write_github_apps` and before its
+first write anywhere and any check that needs a login. `role_app ROLE` then prints the login of the App the role
 acts as (the implement App's for the implementer and the merger, the review App's for every other
 role, the controller's included), as REST and git name it, and `role_app_slug ROLE` the bare slug
 GraphQL names the bot by; either fails, saying so, when `read_app_logins` has not run.
-`lib/app-logins.test.ts` runs the helper, and `read_app_logins` over it, against a stand-in GitHub,
-and `lib/reviewer-thread.test.ts` drives `reviewer_thread` with the logins set.
+`lib/app-logins.test.ts` runs the helper, and `read_app_logins` and the input checks over it,
+against a stand-in GitHub, and `lib/reviewer-thread.test.ts` drives `reviewer_thread` with the
+logins set.
 
 `clean_smoke_main` is Stage 3's `smoke-main-clean` and the cleanup inside Stage 4b's `done`: one
 fixture pull request, on the branch `proof/clean-main-<project, lowercased>`, that removes the
@@ -2767,6 +2806,35 @@ claims to the implementer in one of the states `IMPLEMENTER` names and every oth
 `OTHERS` (live at a look, `suspended` between looks, `retired` once the check closed, beside five
 `suspended`), and `phase_change_logged ISSUE FROM TO TRIGGER` finds the daemon log's `workflow: phase
 changed` line for a move (`sign_off`, `pull_request_merged`).
+
+## lib/github-apps.sh
+
+Legion's two role Apps as a live proof takes them, sourced by `lib/workflow.sh` (so by every stage
+proof that sources it) and by Stage 4a directly. Each App is two required operator inputs, never a
+literal of this repository:
+
+| input | what it names |
+| :--- | :--- |
+| `LEGION_E2E_IMPLEMENT_APP_ID`, `LEGION_E2E_REVIEW_APP_ID` | the App's numeric id |
+| `LEGION_E2E_IMPLEMENT_APP_KEY_NAME`, `LEGION_E2E_REVIEW_APP_KEY_NAME` | the secret-store key the `secrets` CLI resolves to the App's private key (base64-encoded PEM) |
+
+`require_app_inputs ROLE...` reads them for each role and fails, naming the variable, when one is
+unset, an id is not a number, or a key name is not letters, digits and underscores (so it is safe
+in a shell command and as a variable name); with both roles read it also refuses one id or one key
+name for both Apps. `write_github_apps ROLE...` writes `$work/github-apps.yaml`, the `github_apps`
+block a run's `legion.yaml` includes as it is: each App's `app_id` and a `private_key_command` that
+runs `secrets <name> -- sh -c …` to decode the store's Node-style base64 into the PEM on stdout.
+`check_github_apps ROLE...` runs [`lib/app-logins.ts`](#libworkflowsh) `--roles` over that file and
+fails the check unless GitHub's `GET /app`, under a JWT each key signs with its id as issuer,
+answers that id: a key of another App is refused by GitHub's 401, and an answer naming another id
+is refused naming both ids. The key never enters the script's shell, an argv or a file. A run
+refuses before its first write anywhere: Stage 3, 4b.13b, the Claude Code backend and Stage 4b
+check both Apps (`read_app_logins`), Stage 4a, which acts as the implement App alone, checks that
+one. `TestRealGitHubCredentialSurface` and `TestRealGitHubReadyHoldsTheHeadToRetrosCommits` read the
+same four inputs and fail naming one that is unset. `lib/app-logins.test.ts` drives the three
+functions under a stage script's shell options against a stand-in GitHub: a missing input refused by
+name before anything is written, an answer naming another App id refused naming both ids, and a
+match accepted.
 
 ## lib/namespace-rig.sh
 

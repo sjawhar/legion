@@ -1382,11 +1382,11 @@ linger_hours: 0.3
 instructions: /tmp/stage4b/instructions.md
 github_apps:
   implement:
-    app_id: "3202636"
-    private_key_command: "secrets LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64 -- sh -c 'printf %s \"$LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64\" | base64 -d'"
+    app_id: "100001"
+    private_key_command: "secrets IMPLEMENT_APP_KEY -- sh -c 'printf %s \"$IMPLEMENT_APP_KEY\" | base64 -d'"
   review:
-    app_id: "3202653"
-    private_key_command: "secrets GH_REVIEW_APP_PRIVATE_KEY_B64 -- sh -c 'printf %s \"$GH_REVIEW_APP_PRIVATE_KEY_B64\" | base64 -d'"
+    app_id: "100002"
+    private_key_command: "secrets REVIEW_APP_KEY -- sh -c 'printf %s \"$REVIEW_APP_KEY\" | base64 -d'"
 runtime:
   kubernetes:
     namespace: legion

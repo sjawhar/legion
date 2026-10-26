@@ -70,6 +70,11 @@
 #   document websocket require.
 # - LEGION_E2E_ENVOY_TOKEN_SECRET_ID (required) is the Secrets Manager id of the production Envoy
 #   listener's API token. The repository carries neither credential.
+# - LEGION_E2E_IMPLEMENT_APP_ID, LEGION_E2E_IMPLEMENT_APP_KEY_NAME, LEGION_E2E_REVIEW_APP_ID and
+#   LEGION_E2E_REVIEW_APP_KEY_NAME (all required) name Legion's two role Apps: each App's numeric id
+#   and the secret-store key the `secrets` CLI resolves to its private key (lib/github-apps.sh).
+#   prerequisites proves each key is its id's App against GitHub's GET /app before the run's first
+#   write anywhere; the daemon's github_apps is the block proved.
 # - LEGION_E2E_PROJECT (default LEGSMOKE, a Dispatch project key: [A-Z][A-Z0-9]{1,9}, exactly
 #   Dispatch's own projectKeyPattern, checked in prerequisites) names a run's identity;
 #   everything else derives from it, so a second lane sets only this and the two ports below.
@@ -1149,13 +1154,7 @@ linger_hours: 0.5
 production_check_hours: 0.25
 controller_wake_interval_seconds: 60
 instructions: $work/instructions.md
-github_apps:
-  implement:
-    app_id: "3202636"
-    private_key_command: "secrets LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64 -- sh -c 'value=\$(printf %s \"\${LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64}\" | tr \"_-\" \"/+\"); case \$((\${#value} % 4)) in 1) value=\${value%?};; 2) value=\"\${value}==\";; 3) value=\"\${value}=\";; esac; printf %s \"\$value\" | base64 -d'"
-  review:
-    app_id: "3202653"
-    private_key_command: "secrets GH_REVIEW_APP_PRIVATE_KEY_B64 -- sh -c 'value=\$(printf %s \"\${GH_REVIEW_APP_PRIVATE_KEY_B64}\" | tr \"_-\" \"/+\"); case \$((\${#value} % 4)) in 1) value=\${value%?};; 2) value=\"\${value}==\";; 3) value=\"\${value}=\";; esac; printf %s \"\$value\" | base64 -d'"
+$(<"$work/github-apps.yaml")
 runtime:
   kubernetes:
     namespace: $namespace
@@ -1289,8 +1288,8 @@ start_daemon() {
   # would answer /healthz in the run's daemon's place.
   ports_free
   record_stream
-  env -u GH_PUBLIC_REPO_PAT -u LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64 -u GH_AGENT_APP_PRIVATE_KEY_B64 \
-    -u GH_REVIEW_APP_PRIVATE_KEY_B64 "$work/legion" start --config "$work/legion.yaml" >>"$daemon_log" 2>&1 9>&- 7>&- &
+  env -u GH_PUBLIC_REPO_PAT -u "$implement_app_key_name" -u GH_AGENT_APP_PRIVATE_KEY_B64 \
+    -u "$review_app_key_name" "$work/legion" start --config "$work/legion.yaml" >>"$daemon_log" 2>&1 9>&- 7>&- &
   daemon_pid=$!
   timeout_hook=report_boot
   # A daemon that exits (a refused image probe, a config it will not run) ends the wait at once.
@@ -2704,6 +2703,7 @@ audit_failure() { echo "the run wrote outside $project or subscribed outside it:
 
 begin prerequisites
 for tool in go docker jq curl ss kubectl aws gh bun jj mise shellcheck secrets setpriv pgrep npm; do command -v "$tool" >/dev/null || fail "$tool is required"; done
+require_app_inputs implement review
 # The host's jq compiles every lib/*.jq module this script includes, read from the script itself: a
 # jq that cannot parse one would otherwise fail the run at the first checkpoint to include it, hours
 # in. The two fails keep the loop from passing vacuously over a list read wrong.
@@ -2773,6 +2773,10 @@ esac
   fail "LEGION_E2E_DISPATCH_TOKEN_FILE names $dispatch_token_file, which holds no bearer"
 [[ $envoy_token_secret_id =~ ^[A-Za-z0-9/_+=.@:-]+$ ]] ||
   fail "LEGION_E2E_ENVOY_TOKEN_SECRET_ID is unset or not a Secrets Manager secret id or ARN"
+# Legion's two role Apps proved against GitHub before the run's first write anywhere
+# (lib/github-apps.sh); legion.yaml's github_apps is the block proved.
+write_github_apps implement review
+read_app_logins
 # The gateway's health endpoint is at its origin.
 gateway_origin=$(sed -E 's#^(https://[^/]+).*#\1#' <<<"$gateway")
 service_hosts=("${dispatch_base#https://}" "${envoy_url#*://}" "$nats_host" "${gateway_origin#https://}")
@@ -3051,7 +3055,6 @@ EOF
 write_legion_config
 out=$("$work/legion" start --check-config --config "$work/legion.yaml" 2>&1) || fail "legion start --check-config refused the proof's config: $out"
 note "$out"
-read_app_logins
 implement_app=$(role_app implementer)
 review_app=$(role_app reviewer)
 create_route_configmap
