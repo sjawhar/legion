@@ -43,7 +43,7 @@ at exactly that commit, the tmux proof first and then the sandbox proof, one at 
 
 ```sh
 cd <clean checkout at d053ee28>
-export LEGION_E2E_APP_KEY_RUNNER=$(mise which agent-secrets)   # a static binary; the mise shim fails in busybox
+export LEGION_E2E_APP_KEY_RUNNER=$(mise which agent-secrets)   # any runner the devbox runs; under bridge it runs on the devbox, never in the daemon's container, so it need not be static
 export LEGION_E2E_IMPLEMENT_APP_ID=5341240 LEGION_E2E_IMPLEMENT_APP_KEY_NAME=LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64
 export LEGION_E2E_REVIEW_APP_ID=5341243   LEGION_E2E_REVIEW_APP_KEY_NAME=GH_REVIEW_APP_PRIVATE_KEY_B64
 export LEGION_E2E_MODEL_ROUTE=key-file
@@ -89,9 +89,11 @@ CLAUDE_SANDBOX_E2E_EVIDENCE_DIR=<fresh dir> \
   bash scripts/e2e/claude-backend-sandbox.sh; echo exit=$?
 ```
 
-Check the six ports are free first (`ss -ltn`). If the auth plugin or the key runner needs a path
-beyond its binary and the variables passed by name, add `LEGION_E2E_DAEMON_CONTAINER_MOUNTS=<abs
-path>[:<abs path>…]`. The probe notes print what the daemon's container sees.
+Check the six ports are free first (`ss -ltn`). If the auth plugin needs a path beyond its binary
+and the variables passed by name, add `LEGION_E2E_DAEMON_CONTAINER_MOUNTS=<abs path>[:<abs path>…]`.
+The probe notes print what the daemon's container sees. Under bridge, prerequisites resolves both
+App keys on the devbox into owner-only files under `$XDG_RUNTIME_DIR` (set, the user's own, 0700,
+a tmpfs), so the review key's grant is asked for there; cleanup removes the files.
 
 Want `claude backend sandbox e2e: PASS`, exit 0 after cleanup; the planner's time printed beside its
 2700 s budget; the table row and the restored prefix asserted at the pod deletion; the architect's and

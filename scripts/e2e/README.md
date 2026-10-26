@@ -1007,7 +1007,8 @@ on a port the devbox's security group admits from the Legion nodes
 ([Port admission](#port-admission)), or its loopback under `bridge`, on a port that need only be
 free on the devbox. The daemon's and Dispatch's own Postgres is theirs alone and stays
 on loopback. Legion's role Apps resolve as the tmux proof's do, through each App's
-`private_key_command` and never this shell, and the proof human is the devbox's ordinary `gh`
+`private_key_command` and never this shell — under `bridge` with one difference, the App key files
+below ([Pod reachability](#pod-reachability)) — and the proof human is the devbox's ordinary `gh`
 acting as `sjawhar-agent[bot]` ([`require_proof_human`](#libworkflowsh)), so the run starts from the
 operator's own Oh My Pi session.
 
@@ -1015,10 +1016,10 @@ Everything the run creates in namespace `legion` carries its own `legion.dev/pro
 run's Dispatch project lowercased, which is the daemon's own claim token for it — and
 [`lib/namespace-rig.sh`](#libnamespace-rigsh) owns it: `prerequisites` refuses to start while the
 namespace holds anything under that label, `snapshot` records the run's own objects before it, and
-the `EXIT` trap copies the implementer's transcript out of the session table, stops the daemon and
-the scratch services, removes the containers, deletes everything under that label, closes any pull
-request of the run's project and deletes the issue's branch, and then compares the namespace with
-its snapshot.
+the `EXIT` trap copies the implementer's transcript out of the session table, stops the daemon,
+removes its container and then (under `bridge`) the App key files, stops the scratch services,
+removes the other containers, deletes everything under that label, closes any pull request of the run's
+project and deletes the issue's branch, and then compares the namespace with its snapshot.
 Under `bridge`, the bridge's own pod, Service and auth Secret carry the same label, and
 `bridge_stop` deletes them by their one exact name before that comparison runs. Nothing outside
 `legion` is touched.
@@ -1048,51 +1049,77 @@ the devbox cannot resolve. The daemon alone runs in a container on the devbox's 
 and the API and worker stream it binds are the devbox's, and that name maps to loopback in the
 container's `/etc/hosts` alone. Production runs this daemon in a pod, so a static binary in a
 container is close to how operators run it; the mode needs docker, which both modes need anyway,
-and no root. The container:
+and no root.
+
+The key runner cannot run in that container: a broker that checks a process's ancestry
+(`agent-secrets` refuses with `NOT_A_SESSION`) finds none across the container's pid namespace. So
+under `bridge` `prerequisites` resolves both App keys on the devbox, once, through the runner, into
+owner-only (0600) files of a directory of the run's own,
+`$XDG_RUNTIME_DIR/legion-e2eccs-app-keys.<pid>.<random>`
+([`resolve_app_keys`](#libgithub-appssh)), and each App's `private_key_command` in `legion.yaml` is
+`cat -- '<that directory>/<key name>.pem'`, the block `check_github_apps` proves against GitHub's
+`GET /app`. The two App keys exist as owner-only files on the devbox user's tmpfs for the run's
+lifetime alone: `prerequisites` refuses, by name and before the run reads a tool, an
+`XDG_RUNTIME_DIR` that is unset, not the devbox user's own, not of mode 0700, or not a tmpfs (by
+`stat -f -c %T`, tmpfs or ramfs); the `EXIT` trap removes the directory once the daemon's container
+is gone, on every exit it sees (a failure, a signal, a run stopped while the keys resolve), and when
+the directory is still there it prints `FAIL cleanup: the App key files remain in <dir>` and the run
+exits 1. A driver killed outright cannot clean up, so `prerequisites` also removes, naming each in a
+note, any such directory whose driver is gone: its pid is no live process that started no later
+than the directory last changed ([`lib/leftovers.sh`](#libleftoverssh)'s `leftover_owner`), so a
+later process given a dead driver's pid is not taken for it. A key whose store asks a person's
+approval (a human-tier key) waits there for the grant, with no bound; a denial or an expired request
+fails the run, and the `EXIT` trap removes what was resolved. The container:
 
 - runs the run's own `legion`, built static (`CGO_ENABLED=0`), in
   `mirror.gcr.io/library/busybox:1.37@sha256:bdf57e528e45e4433820e045b29b4597825a1c9e38353532d90a01445013f82e`,
-  pinned by digest: the daemon needs nothing of an image, and busybox carries the `sh`, `tr` and
-  `base64` each App's `private_key_command` runs ([`lib/github-apps.sh`](#libgithub-appssh));
+  pinned by digest: the daemon needs nothing of an image, and busybox carries the `sh` and `cat`
+  each App's `private_key_command` runs there ([`lib/github-apps.sh`](#libgithub-appssh));
 - runs as the devbox user (`--user <uid>:<gid>`), with `--init`, whose reaper at pid 1 hands the
   daemon the TERM docker delivers and reaps whatever a key command or auth plugin leaves orphaned;
 - mounts every path at its own path, so every path `legion.yaml` names works unchanged: the run's
   scratch directory read-write (the binary, `legion.yaml`, the state directory, the token files);
-  read-only, the runtime kubeconfig, the auth plugin its context's user execs (if it names one), the
-  App key runner (`secrets` unless `LEGION_E2E_APP_KEY_RUNNER` names another), each resolved on the
-  devbox as the daemon resolves it, the devbox's `/etc/ssl/certs`, the file
-  `GOOGLE_APPLICATION_CREDENTIALS` names (if it names one), each existing absolute path a passed
-  variable below names (the key runner's key directory, a gcloud configuration directory), and each
-  path of
+  read-only, the runtime kubeconfig, the auth plugin its context's user execs (if it names one),
+  resolved on the devbox as the daemon resolves it, the devbox's `/etc/ssl/certs`, the file
+  `GOOGLE_APPLICATION_CREDENTIALS` names (if it names one), the App key directory, each existing
+  absolute path a passed variable below names (a gcloud configuration directory), and each path of
   `LEGION_E2E_DAEMON_CONTAINER_MOUNTS` (optional), a colon-separated list of absolute host paths for
-  what the auth plugin or the key runner reads beyond its own binary (a gcloud configuration
-  directory, say), refused by name with the other inputs when an entry is not an existing absolute
-  path or holds a comma;
+  what the auth plugin reads beyond its own binary (a gcloud configuration directory, say), refused
+  by name with the other inputs when an entry is not an existing absolute path or holds a comma;
 - has `HOME` a directory of the scratch directory's (0700) and `PATH` the image's `/bin` followed by
-  the two binaries' directories, and takes from the caller's environment only the variables whose
-  names start with `AGENT_SECRETS_` or `CLOUDSDK_`, `GOOGLE_APPLICATION_CREDENTIALS` and
-  `KUBECACHEDIR`, each by name (`-e NAME`, never a value on an argv); nothing else of the caller's
-  enters it, so neither the App keys nor the NATS seeds nor `ANTHROPIC_API_KEY` can.
+  the auth plugin's directory, and takes from the caller's environment only the variables whose
+  names start with `CLOUDSDK_`, `GOOGLE_APPLICATION_CREDENTIALS` and `KUBECACHEDIR`, each by name
+  (`-e NAME`, never a value on an argv); nothing else of the caller's enters it, so neither the App
+  keys nor the key runner's settings nor the NATS seeds nor `ANTHROPIC_API_KEY` can. The key runner
+  is neither mounted nor run there, so `LEGION_E2E_APP_KEY_RUNNER` may name any runner the devbox
+  runs, a version manager's shim included.
 
 The docker client runs attached in the background, its output appended to the daemon's log, and is
 the pid the run stops: its default `--sig-proxy` hands the container the TERM, and the `EXIT` trap
 then removes the container by name (`legion-e2eccs-daemon-<pid>`, which `refuse_leftovers` reads
-like the run's other containers) before the bridge and the teardown. The bridge's watchdog stops
-the daemon with `docker kill --signal TERM` on that name.
+like the run's other containers) before the App key files, the bridge and the teardown. The
+bridge's watchdog stops the daemon with `docker kill --signal TERM` on that name.
 
-`prerequisites` proves the container before the run creates anything: `getent hosts <that name>`
-must resolve nothing on the devbox; the auth plugin and the key runner must each resolve to a
-regular executable; and a probe container run with exactly the daemon's `docker run` arguments,
-which one helper builds for both, must print the devbox user's own uid and gid, an `/etc/hosts` line
-mapping the name to `127.0.0.1`, and the key runner and the auth plugin, looked up by name, at the
-paths the devbox resolves them to, each of them also started once with `--help` inside it and refused
-when the container's shell cannot execute it (126 or 127): busybox holds no dynamic loader and no
-interpreter, so a dynamically linked binary or a script, such as a version manager's shim that
-`command -v` finds first, cannot run there. Name a static runner by its path in
-`LEGION_E2E_APP_KEY_RUNNER` in that case (`LEGION_E2E_APP_KEY_RUNNER=$(mise which agent-secrets)`,
-say). Each observed value is printed. `getent` is required beside the
-tools both modes need (`sha256sum` among them, which holds the session table's copy of the
-transcript to the pod's).
+`prerequisites` proves the container before the run creates anything, once the keys are resolved
+and proved: `getent hosts <that name>` must resolve nothing on the devbox; the auth plugin must
+resolve to a regular executable; and a probe container run with exactly the daemon's `docker run`
+arguments, which one helper builds for both, must print the devbox user's own uid and gid, an
+`/etc/hosts` line mapping the name to `127.0.0.1`, and the auth plugin, looked up by name, at the
+path the devbox resolves it to, started once with `--help` inside it and refused when the
+container's shell cannot execute it (126 or 127): busybox holds no dynamic loader and no
+interpreter, so a dynamically linked binary or a script cannot run there. The same probe runs each
+App's `private_key_command` from `github-apps.yaml` with its stdout, the key, sent to `/dev/null`,
+and refuses either one's non-zero exit, naming the command and its stderr. A second run of that
+container then runs the auth plugin as client-go runs it — the kubeconfig exec stanza's args and
+env (handed to docker in an owner-only env file, never on an argv) and `KUBERNETES_EXEC_INFO` set
+to `{"apiVersion":"<the stanza's apiVersion>","kind":"ExecCredential","spec":{"interactive":false}}`
+— and requires an `ExecCredential` of that apiVersion with a non-empty `status.token`, printing the
+token's length alone. When it refuses, the remedy is a runtime kubeconfig whose user runs
+`gke-gcloud-auth-plugin --use_application_default_credentials` with `GOOGLE_APPLICATION_CREDENTIALS`
+naming an application-default credentials file, which the container already mounts and is passed:
+by default the plugin shells out to `gcloud`, which busybox cannot run. Each observed value is
+printed. `getent` is required beside the tools both modes need (`sha256sum` among them, which holds
+the session table's copy of the transcript to the pod's).
 
 ### The runtime identity on GKE
 
@@ -3573,13 +3600,25 @@ name for both Apps. `write_github_apps ROLE...` writes `$work/github-apps.yaml`,
 block a run's `legion.yaml` includes as it is: each App's `app_id` and a `private_key_command` that
 runs `<runner> <name> -- sh -c …` to decode the store's Node-style base64 into the PEM on stdout. It
 refuses, writing nothing, a role the last `require_app_inputs` did not read.
-`check_github_apps ROLE...` runs [`lib/app-logins.ts`](#libworkflowsh) `--roles` over that file and
+`resolve_app_keys DIR ROLE...` is for a daemon that cannot run the key runner itself (the Claude
+Code sandbox proof's container under `bridge`): it runs each role's key command once, on the
+devbox, with its stdout going straight to `DIR/<key name>.pem`, created owner-only (0600), and then
+sets `app_key_dir`, after which `write_github_apps` writes each `private_key_command` as
+`cat -- '<DIR>/<key name>.pem'`, so `check_github_apps` proves exactly those files. A runner that
+fails or prints nothing leaves no file of that key and fails the run, naming the App by its role and
+id and never the key; a `DIR` holding anything but letters, digits and `_ . / -` is refused, since
+the key commands carry it in their shell text. With `app_key_dir` unset, as it is when the lib is
+sourced, every command the lib prints is the runner's.
+`check_github_apps ROLE...` runs [`lib/app-logins.ts`](#libworkflowsh) `--roles` over `$work/github-apps.yaml` and
 fails the check unless GitHub's `GET /app`, under a JWT each key signs with its id as issuer,
 answers that id and the write permission the role's work needs (the implement role's `contents`,
 the review role's `checks`): a key of another App is refused by GitHub's 401, an answer naming
 another id is refused naming both ids, and the two Apps configured the other way round are refused
 by the permission, since the implement App holds `checks: read` alone. The key never enters the
-script's shell, an argv or a file. A run
+script's shell or an argv, and never a file but through `resolve_app_keys`: under the sandbox
+proof's `bridge`, the two App keys exist as owner-only files on the devbox user's tmpfs
+(`XDG_RUNTIME_DIR`) for the run's lifetime, and its teardown removes them
+([Pod reachability](#pod-reachability)). A run
 refuses before its first write anywhere: Stage 3, 4b.13b, the Claude Code backend and Stage 4b
 check both Apps (`read_app_logins`), Stage 4a, which acts as the implement App alone, checks that
 one. `TestRealGitHubCredentialSurface` and `TestRealGitHubReadyHoldsTheHeadToRetrosCommits` source
@@ -3592,11 +3631,14 @@ The checks run in the C locale whatever the caller's, so a UTF-8 locale does not
 digits or accented letters. `require_app_inputs` also fills `app_key_unsets`, the
 `env` argument list (`-u NAME` …) every proof passes to a process it starts, which strips each
 role's key name, the default pair's two, and every exported variable whose name holds
-`PRIVATE_KEY`, the proof human's App key included. `lib/app-logins.test.ts` drives the three
+`PRIVATE_KEY`, the proof human's App key included. `lib/app-logins.test.ts` drives the
 functions under a stage script's shell options against a stand-in GitHub: an unset input taking its
 default, a malformed one refused by name with its value unprinted, `write_github_apps` refusing an
 unread role, `app_key_unsets` leaving no App key in a child's environment, an answer naming another
-App id refused naming both ids, a role's missing write permission refused, and a match accepted.
+App id refused naming both ids, a role's missing write permission refused, and a match accepted;
+and `resolve_app_keys` writing each key as a 0600 file holding the exact PEM, the block reading
+those files alone and proved with the runner broken after them, a runner that fails after printing
+the key or prints nothing leaving no file, and a key directory unsafe in shell text refused.
 
 ## lib/namespace-rig.sh
 

@@ -5,8 +5,10 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -576,5 +578,111 @@ echo "logins $github_app_logins"`
     expect(stderr).toBe("");
     expect(code).toBe(0);
     expect(stdout).toContain('logins {"implement":"example-implement[bot]"}');
+  });
+
+  // resolve_app_keys as the sandbox proof runs it under bridge: each key resolved once, here,
+  // through the runner, into an owner-only file of a directory the caller names, and the block's
+  // key commands then read those files alone.
+  const resolveBoth = `require_app_inputs implement review
+resolve_app_keys "$KEY_DIR" implement review
+write_github_apps implement review
+echo "wrote the block"`;
+  // A runner for the failure cases: `body` runs with the key's name in $name and the command after
+  // `--` in "$@", the key in the store as ${store}/$name.
+  function failingRunner(body: string): string {
+    const bin = mkdtempSync(join(dir, "failing-bin."));
+    writeFileSync(
+      join(bin, "failing-store"),
+      `#!/bin/sh\nname=$1\nshift\n[ "$1" = -- ] && shift\n${body}\n`,
+      { mode: 0o755 }
+    );
+    return join(bin, "failing-store");
+  }
+
+  test("resolve_app_keys writes each key to an owner-only file, and the block proved reads those files alone", async () => {
+    const keyDir = mkdtempSync(join(dir, "keys."));
+    // After the keys are resolved the runner fails, so only the files can have given GitHub the
+    // keys it accepted.
+    const brokenBin = mkdtempSync(join(dir, "broken-bin."));
+    writeFileSync(join(brokenBin, "secrets"), "#!/bin/sh\nexit 7\n", { mode: 0o755 });
+    const { code, stdout, stderr, work } = await githubApps(
+      { ...appInputs, KEY_DIR: keyDir, BROKEN_BIN: brokenBin },
+      `require_app_inputs implement review
+resolve_app_keys "$KEY_DIR" implement review
+PATH="$BROKEN_BIN:$PATH"
+write_github_apps implement review
+check_github_apps implement review
+echo "logins $github_app_logins"`
+    );
+    expect(stderr).toBe("");
+    expect(code).toBe(0);
+    const logins = stdout.split("\n").find((line) => line.startsWith("logins "));
+    expect(JSON.parse((logins ?? "").slice("logins ".length))).toEqual({
+      implement: "example-implement[bot]",
+      review: "example-review[bot]",
+    });
+    expect(readdirSync(keyDir).sort()).toEqual(["IMPLEMENT_KEY.pem", "REVIEW_KEY.pem"]);
+    const sources = appKeySources(readFileSync(join(work, "github-apps.yaml"), "utf8"));
+    for (const [role, name, id] of [
+      ["implement", "IMPLEMENT_KEY", "101"],
+      ["review", "REVIEW_KEY", "202"],
+    ] as const) {
+      const file = join(keyDir, `${name}.pem`);
+      expect(sources[role]?.appId).toBe(id);
+      expect(sources[role]?.privateKeyCommand).toBe(`cat -- '${file}'`);
+      expect(statSync(file).mode & 0o777).toBe(0o600);
+      expect(readFileSync(file, "utf8")).toBe(apps[id].key.privateKey);
+    }
+    expect(stdout).not.toContain("PRIVATE KEY");
+  });
+
+  test("a runner that fails leaves no file of the key, naming the App by role and id and never the key", async () => {
+    const keyDir = mkdtempSync(join(dir, "keys."));
+    // The worst failure: the runner's command printed the whole key into the file, then the runner
+    // failed. The file must not outlive it.
+    const runner = failingRunner(`export "$name=$(cat "${store}/$name")"\n"$@"\nexit 3`);
+    const { code, stdout, stderr, work } = await githubApps(
+      { ...appInputs, KEY_DIR: keyDir, LEGION_E2E_APP_KEY_RUNNER: runner },
+      resolveBoth
+    );
+    expect(code).toBe(1);
+    expect(stdout).not.toContain("wrote the block");
+    expect(stderr).toMatch(/^FAIL prerequisites: the implement App's key \(App 101, .*exited 3/m);
+    expect(stderr).not.toContain("PRIVATE KEY");
+    expect(stdout).not.toContain("PRIVATE KEY");
+    expect(readdirSync(keyDir)).toEqual([]);
+    expect(existsSync(join(work, "github-apps.yaml"))).toBe(false);
+  });
+
+  test("a runner that prints nothing is refused, leaving no file", async () => {
+    const keyDir = mkdtempSync(join(dir, "keys."));
+    const runner = failingRunner(`export "$name="\nexec "$@"`);
+    const { code, stdout, stderr, work } = await githubApps(
+      { ...appInputs, KEY_DIR: keyDir, LEGION_E2E_APP_KEY_RUNNER: runner },
+      resolveBoth
+    );
+    expect(code).toBe(1);
+    expect(stdout).not.toContain("wrote the block");
+    expect(stderr).toMatch(
+      /^FAIL prerequisites: the implement App's key \(App 101, .*printed nothing/m
+    );
+    expect(readdirSync(keyDir)).toEqual([]);
+    expect(existsSync(join(work, "github-apps.yaml"))).toBe(false);
+  });
+
+  test("a key directory the key commands could not carry in their shell text is refused, and nothing is written", async () => {
+    for (const name of ["keys 'x", "keys$x", "keys;x"]) {
+      const keyDir = join(mkdtempSync(join(dir, "keys.")), name);
+      mkdirSync(keyDir);
+      const { code, stdout, stderr, work } = await githubApps(
+        { ...appInputs, KEY_DIR: keyDir },
+        resolveBoth
+      );
+      expect(code).toBe(1);
+      expect(stdout).not.toContain("wrote the block");
+      expect(stderr).toContain("holds a character other than letters, digits and _ . / -");
+      expect(readdirSync(keyDir)).toEqual([]);
+      expect(existsSync(join(work, "github-apps.yaml"))).toBe(false);
+    }
   });
 });
