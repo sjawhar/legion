@@ -362,8 +362,13 @@ func main() {
 	}
 
 	if natsClient != nil {
+		outboxPool, err := database.Pool.Outbox()
+		if err != nil {
+			slog.Error("dispatch: open the events outbox's pool", "error", err)
+			os.Exit(1)
+		}
 		go outbox.Run(ctx, outbox.Deps{
-			Store:     database,
+			Store:     &store.Store{Pool: outboxPool},
 			Publisher: natsClient,
 			Broker:    broker,
 			Docs:      documentService,

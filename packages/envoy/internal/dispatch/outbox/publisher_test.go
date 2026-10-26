@@ -22,6 +22,23 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
 
+// answered is a channel already holding err, the outcome of a test publisher that answers each
+// publish before it returns: the outbox reads such an answer the moment it sends, as it reads one
+// bus.Client.PublishAsync decides before anything is sent.
+func answered(err error) <-chan error {
+	answer := make(chan error, 1)
+	answer <- err
+	return answer
+}
+
+// publish runs one attempt of event to its end, as scanBatch does for each event of a batch, and
+// returns why it failed.
+func publish(ctx context.Context, deps Deps, event model.Event, slug string, route *string, delivered map[string]struct{}) error {
+	a := send(ctx, deps, event, slug, route, delivered)
+	a.wait(ctx)
+	return a.err()
+}
+
 type recordingPublisher struct {
 	mu          sync.Mutex
 	items       []contracts.Envelope
@@ -48,6 +65,10 @@ func (p *recordingPublisher) Publish(item contracts.Envelope) error {
 	return nil
 }
 
+func (p *recordingPublisher) PublishAsync(item contracts.Envelope) <-chan error {
+	return answered(p.Publish(item))
+}
+
 func (p *recordingPublisher) all() []contracts.Envelope {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -72,6 +93,10 @@ func (p *blockingFailPublisher) Publish(contracts.Envelope) error {
 		<-p.release
 	}
 	return errors.New("publisher unavailable")
+}
+
+func (p *blockingFailPublisher) PublishAsync(item contracts.Envelope) <-chan error {
+	return answered(p.Publish(item))
 }
 
 func TestRunPublishesAskAnswerEnvelope(t *testing.T) {
@@ -374,7 +399,7 @@ func TestPublishPreviousClaimantTellsTheSessionThatLostTheClaim(t *testing.T) {
 			deps := Deps{Store: database, Publisher: publisher}
 			item := contracts.Envelope{EventID: "dispatch-1", Topic: "notifications.dispatch.issue.T-1." + tc.eventType}
 			event := model.Event{Type: tc.eventType, Actor: tc.actor, Payload: tc.payload}
-			if err := publishPreviousClaimant(context.Background(), deps, 0, item, event, &attempt{delivered: map[string]struct{}{}}); err != nil {
+			if err := publishPreviousClaimant(deps, 0, item, event, &attempt{delivered: map[string]struct{}{}}); err != nil {
 				t.Fatalf("publish previous claimant: %v", err)
 			}
 			if got := topicsOf(publisher.all()); !reflect.DeepEqual(got, tc.want) {
