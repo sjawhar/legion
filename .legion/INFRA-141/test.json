@@ -2,50 +2,49 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-141",
-  "completed": "2026-10-26T04:00:00Z",
+  "completed": "2026-10-26T05:45:00Z",
   "generation": 3,
-  "round": "red-test round: implementer head 57d8d3bb (code ef828fd6), answering the two failures recorded at 52dd9f17",
+  "round": "after review 5647344074: implementer head 2d63edbb (code dfe43f43)",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Drove the same surface independently: the real envoy-listener binary built at this head, NATS through a TCP relay frozen with the connection kept open (a python relay of my own, not the implementer's rig), curl for every request. The lookup, both sends and both publishes answer 503 with Retry-After: 1 inside 3.55 s, where the binary at e6372254 gave the lookup 500 and held the send 10 s. Re-ran both red tests (bodies unchanged), the implementer's TestTheSenderStampReadsAnInterestTheCacheMissedThroughToTheBucket and its flipped lookup/* subtests, the plan's A1-A6 tests, and scripts/e2e-local.sh with the A6' jq."
+    "how": "Drove both of its real-binary cases on my own rig (my own throwaway nats.go writer, a python relay frozen with the connection open, curl): the malformed claim answers 500 with no Retry-After on both role routes and is recorded role_claim_unreadable; the frozen send, publish and lookup answer 503 with Retry-After: 1 at 3.50 s. Its negative control re-run independently: the listener built from 57d8d3bb's code (go build -overlay of the nine non-test .go files that changed) answered the same record 503 'envoy: the message bus did not answer: role claim has no holder' with Retry-After: 1 and recorded bus_unavailable. Re-ran its new tests and the e2e script."
   },
   "failures": [],
   "failed": 0,
   "proof": [
     {
-      "criterion": "Failure 1 of 52dd9f17 fixed: GET /v1/roles/<role> answers a role store that did not answer as a bus that did not answer (503, Retry-After: 1, busUnansweredPrefix), inside the caller's 5 s",
-      "surface": "the real envoy-listener binary at this head against a real NATS server (internal/testnats/cmd/natsd) reached through a TCP relay that is frozen mid-run; curl",
-      "command": "start natsd, relay, listener; claim held-role for ses_target via POST /v1/roles/set; GET /v1/roles/held-role; freeze the relay (SIGUSR1); GET /v1/roles/held-role and /v1/roles/nobody-role; 20 concurrent GET /v1/roles/held-role",
-      "observed": "bus up: 200 with holder ses_target. Frozen: 503 in 3.505 s and 3.504 s, Retry-After: 1, body 'envoy: the message bus did not answer: read role held-role's claim: context deadline exceeded'; the 20 concurrent lookups all 503, slowest 3.522 s. Red test TestARoleLookupWhoseStoreDoesNotAnswerIsRefusedAsTheBusNotAnswering --- PASS (both subtests, ~4.07 s each)",
-      "headSha": "57d8d3bb67e3d1cea5bf7b3ee62495482bd939a1",
-      "negativeControl": "the identical lookup before the freeze answered 200; at e6372254, the code head of the previous round, the same frozen lookup answered 500 with no Retry-After"
+      "criterion": "Review item: a role claim record the store cannot read is answered on both role routes as a server error (500, no Retry-After, no bus-unavailable prefix) and recorded role_claim_unreadable; records that are readable still resolve",
+      "surface": "the real envoy-listener binary at this head against a real NATS (internal/testnats/cmd/natsd); raw records written into envoy_roles with a throwaway nats.go client; curl",
+      "command": "put envoy_roles empty-holder '{\"holder_session_id\":\"\"}', blank-holder '{\"holder_session_id\":\"   \"}', number-record '123', string-record '\"ses_x\"', legacy-bare 'ses_target', gone-holder '{\"holder_session_id\":\"ses_gone\"}'; for each and for a live claim held-role: GET /v1/roles/<role> and POST /v1/messages/publish to notifications.role.<role>; jq the listener publish records",
+      "observed": "empty-holder, blank-holder, number-record, string-record: 500 on both routes, no Retry-After, body 'envoy: the claim record of role <r> is unreadable: malformed role claim: <reason>' (it names no holder / cannot unmarshal number / cannot unmarshal string); 4 WARN listener publish role_claim_unreadable 500 records. legacy-bare: lookup 200 holder ses_target, publish 200. gone-holder: lookup 404 holder_lapsed claim_released true, then publish 404 unclaimed. held-role: 200 and 200",
+      "headSha": "2d63edbbc7cdc25ff8a685ab46a3e4b0d2c69c98",
+      "negativeControl": "the listener built from 57d8d3bb's code answered empty-holder on both routes 503 'envoy: the message bus did not answer: role claim has no holder', Retry-After: 1, and recorded the publish bus_unavailable"
     },
     {
-      "criterion": "Failure 2 of 52dd9f17 fixed: with the bus connection open but silent, a send and a non-role publish answer the named 503 inside the caller's 5 s, whether or not the sender's interest record is cached",
-      "surface": "the same real binary and frozen relay; ses_target and ses_sender registered in envoy_sessions and subscribed, ses_nobody with no interest record",
-      "command": "after the freeze: POST /v1/messages/send to ses_target from ses_sender and from ses_nobody; send to ses_never from ses_nobody; POST /v1/messages/publish to notifications.github.example.topic from both senders and to notifications.role.held-role; 20 concurrent sends from ses_nobody; jq over listener.log for listener send/publish records",
-      "observed": "sends to the cached target 503 in 3.503 s and 3.504 s; to the uncached target 503 in 1.005 s; topic publishes 503 in 3.503 s and 3.506 s; role-lane publish 503 in 3.504 s; every one with Retry-After: 1 and the busUnansweredPrefix body; 20 concurrent sends all 503, slowest 3.543 s. Records: 23 WARN listener send bus_unavailable 503 and 3 WARN listener publish bus_unavailable 503. Red test TestASendAndAPublishAnswerABusThatStoppedAnsweringInsideTheBudget --- PASS (send 3.58 s, publish 3.56 s, setup included)",
-      "headSha": "57d8d3bb67e3d1cea5bf7b3ee62495482bd939a1",
-      "negativeControl": "the identical sends answered 200 before the freeze; the binary at e6372254 held the frozen send to a cached target with no answer until the 10 s write timeout (EOF)"
+      "criterion": "The bound moved into store.Registry keeps the frozen-bus answers: send, publish and lookup answer 503 with Retry-After: 1 inside 3.5 s, and the sender stamp still enriches on a healthy bus",
+      "surface": "the same real binary, NATS reached through a TCP relay that is frozen mid-run (connection open, nothing forwarded)",
+      "command": "before the freeze: send to ses_target from ses_sender (subscribed) and ses_nobody, jq .sender; after: GET /v1/roles/held-role and /empty-holder, sends to cached and uncached targets, a topic publish, a role-lane publish, 20 concurrent sends and 20 concurrent lookups",
+      "observed": "before: 200 with sender {\"session_id\":\"ses_sender\",\"machine\":\"rig4\",\"cwd\":\"/work/ses_sender\",\"title\":\"t ses_sender\",\"roles\":[\"sender-role\"]} and 200 with {\"session_id\":\"ses_nobody\"}. Frozen: lookups 503 in 3.503 s and 3.506 s ('read role <r>'s claim: context deadline exceeded'); sends to the cached target 503 in 3.503 s from both senders; to the uncached target 503 in 1.003 s; topic publish 503 in 3.506 s; role-lane publish 503 in 3.503 s; 20+20 concurrent all 503, slowest 3.517 s / 3.513 s; every answer Retry-After: 1. 23 WARN listener send bus_unavailable 503 records",
+      "headSha": "2d63edbbc7cdc25ff8a685ab46a3e4b0d2c69c98",
+      "negativeControl": "the identical send and publish answered 200 before the freeze"
     },
     {
-      "criterion": "Bounding the stamp's read costs a healthy bus nothing: the sender stamp still carries machine, cwd and roles",
-      "surface": "the same real binary with the bus answering",
-      "command": "POST /v1/messages/send to ses_target from ses_sender (subscribed to notifications.role.sender-role, session entry registered) and from ses_nobody; jq .sender on each response",
-      "observed": "ses_sender: 200, sender {\"session_id\":\"ses_sender\",\"machine\":\"rig3\",\"cwd\":\"/work/ses_sender\",\"title\":\"t ses_sender\",\"roles\":[\"sender-role\"]}; ses_nobody: 200, sender {\"session_id\":\"ses_nobody\"}. TestTheSenderStampReadsAnInterestTheCacheMissedThroughToTheBucket (the cold interest cache read through to the bucket) --- PASS on both routes",
-      "headSha": "57d8d3bb67e3d1cea5bf7b3ee62495482bd939a1",
-      "negativeControl": "the sender with no interest record gets only its session id, so the full stamp above comes from the interest record and is not a constant"
+      "criterion": "unplaceableAgentDelivery finalizing both arms changes no outcome: retries within the window, a push failure retried once, a full cap gives up without stalling",
+      "surface": "the real binary against a real NATS; sessions written to envoy_sessions on the listener's machine id with port 0 (no_push_target) and port 1 (push_failed)",
+      "command": "send to ses_np and ses_pf, wait for both give-ups, count deferred lines per session, read /metrics; separately, 300 sends to unplaceable sessions at once",
+      "observed": "ses_np: 12 deferrals, given up at 60 s, unplaceable_no_push_target 1; ses_pf: 1 deferral, unplaceable_push_failed 1; naked_total 13; no attempt-dedupe skip. The 300-message run: 64 deferred (the cap) and 237 given up and counted on first delivery (unplaceable_no_push_target 237, naked_total 64), with later deliveries still processed. Cold-cache sends 300/300 200",
+      "headSha": "2d63edbbc7cdc25ff8a685ab46a3e4b0d2c69c98",
+      "negativeControl": "with the cap full from the 300-message run, ses_np and ses_pf were given up on their first delivery with no deferral; on a fresh listener they were deferred, so the deferral counts above come from the window and not from a rig that never defers"
     },
     {
-      "criterion": "The original acceptance still holds: absent destination 404, bus down 503 inside 3.5 s through the real client, one WARN record per refused request (A1, A3, A5, A6, A6')",
-      "surface": "scripts/e2e-local.sh (real binary, real NATS, @legion/envoy-client) and its out/e2e/ evidence; go test of the plan's named tests",
-      "command": "cd packages/envoy && bash scripts/e2e-local.sh; jq A6' filter over out/e2e/listener.log; go test ./cmd/listener -count=1 -v -run '<the two red tests, the implementer's touched tests and the plan's A1-A6 set>'",
-      "observed": "e2e exit 0, both PASS lines, absent 404 {\"error\":\"no live session ses_e2e_local_absent\"}, bus-down send HTTP 503 in 3.504553 s, client EnvoyApiError 503; A6' exactly three WARN bus_unavailable records at 03:48:51.527Z, 03:48:55.351Z and 03:48:59.113Z; go test: 12 tests --- PASS, ok 41.121 s",
-      "headSha": "57d8d3bb67e3d1cea5bf7b3ee62495482bd939a1",
-      "negativeControl": "the same script's send answered 200 before NATS was stopped; all three WARN records are later than nats.log's 'Initiating Shutdown...' at 03:48:47.950Z"
+      "criterion": "The original acceptance still holds (A1, A3, A5, A6, A6'), and both red tests pass unchanged",
+      "surface": "scripts/e2e-local.sh (real binary, real NATS, @legion/envoy-client) and out/e2e/; go test of the named tests",
+      "command": "cd packages/envoy && bash scripts/e2e-local.sh; A6' jq over out/e2e/listener.log; go test ./cmd/listener (16 named incl. both red tests and the two unreadable-claim tests), ./internal/store (2 new), ./internal/bus (4)",
+      "observed": "e2e exit 0, both PASS lines, absent 404 {\"error\":\"no live session ses_e2e_local_absent\"}, client EnvoyApiError 503; A6' exactly three WARN bus_unavailable records 05:24:32.537Z, 05:24:36.238Z, 05:24:39.994Z; go test ok 67.881 s / 0.375 s / 8.939 s, every named test --- PASS. send_route_acceptance_test.go untouched since 52dd9f17; TestARoleLookupWhoseStoreDoesNotAnswerIsRefusedAsTheBusNotAnswering untouched (the implementer removed its own duplicate lookup/* subtests instead)",
+      "headSha": "2d63edbbc7cdc25ff8a685ab46a3e4b0d2c69c98",
+      "negativeControl": "the e2e send answered 200 before NATS was stopped, and all three WARN records are later than nats.log's 'Initiating Shutdown...' at 05:24:29.003Z"
     }
   ],
-  "redTestsUnchanged": "jj diff --from 52dd9f17 --to ef828fd6: packages/envoy/cmd/listener/send_route_acceptance_test.go untouched; the one hunk in publish_refusal_answers_test.go is TestARoleResolutionWhoseStoreCallDoesNotAnswerAnswersInsideTheBudget's lookup/* subtests (implementer's), flipped from 500 to 503 with Retry-After and the prefix.",
-  "ci": "At 57d8d3bb: Docs 40265664436 success; Tests 40265664429 and Worker Image 40265664443 in progress, Legion Envoy and Contracts 40265664591 queued, cited unsettled and not waited for; PR Title one success, one cancelled (superseded).",
+  "ci": "At 2d63edbb: Tests 40273729403, Legion Envoy and Contracts 40273729467, Docs 40273729428 and Worker Image 40273729451 queued when read, cited unsettled and not waited for.",
   "regressionLocksAdded": []
 }
