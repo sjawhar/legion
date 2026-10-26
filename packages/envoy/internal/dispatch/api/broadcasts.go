@@ -57,8 +57,8 @@ const broadcastResolveConcurrency = 8
 const broadcastResolveTimeout = 5 * time.Second
 
 // broadcastResolveAllowance is the budget a send's recipient resolution runs under:
-// broadcastResolveTimeout on every server the deployment builds, since register builds
-// &server{deps: deps} and sets no broadcastResolveBudget, and whatever a test set otherwise.
+// broadcastResolveTimeout on every server the deployment builds, since register sets no
+// broadcastResolveBudget, and whatever a test set otherwise.
 func (s *server) broadcastResolveAllowance() time.Duration {
 	return cmp.Or(s.broadcastResolveBudget, broadcastResolveTimeout)
 }
