@@ -56,9 +56,9 @@ async function executeWrite(tool: string, args: Record<string, unknown>, advice?
         )
       );
     }
-    if (target.pathname === "/api/v1/projects/DSP/architecture-source" && method === "GET") {
-      // No source configured is the read's own answer, not a refusal.
-      return new Response("null", { headers: { "Content-Type": "application/json" } });
+    if (target.pathname === "/api/v1/projects/DSP/architecture-sources" && method === "GET") {
+      // No source configured is the list's own answer, not a refusal.
+      return new Response("[]", { headers: { "Content-Type": "application/json" } });
     }
     if (target.pathname === "/api/v1/issues/DSP-42/artifacts" && method === "POST") {
       return response(

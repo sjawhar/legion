@@ -14,6 +14,15 @@
   or `rank -> after KEY`. The bundled tool descriptions carry the two arguments, and the plugin's
   own copy of the `legion-controller` skill carries the corrected backlog rule, since `dist/` and
   `legion/` were regenerated (INFRA-188).
+- The `dispatch` command (`dist/dispatch.js`) imports every architecture source of a project, one
+  per repository: `dispatch architecture-sync --project <KEY>` prints a line for each source, and
+  `--repo <owner/name>` imports that one alone. Against a Dispatch older than this release,
+  `dispatch architecture-sync --project <KEY>` falls back to that server's single-source sync and
+  prints its one line, and `--repo` needs a Dispatch of this release. The `dispatch` skill says an
+  issue's component ids may come from any of its project's source repositories, and the plugin's
+  own copy of the `legion-architect` skill says a component file goes in the branch of the source
+  repository that holds it, with an id no other source of the project uses, since `dist/` and
+  `legion/` were regenerated (INFRA-391).
 
 ### Changed
 
@@ -26,6 +35,12 @@
   (INFRA-229): `GET /legion/v1/state` carries `state` on an issue's pull request, its `open`,
   `merged` or `closed`, always emitted, so the MCP server's strict state reader admits the field
   and nothing this plugin reads or writes moved; a session of it registers with a daemon at 36.
+- The bundled `envoy_publish` description (`dist/` regenerated) and the `envoy` skill say a team
+  topic, any `notifications.` topic the stream does not store, reaches a session on a serve port
+  through its machine's listener when that listener subscribes to every topic
+  (`ENVOY_SUBSCRIBE_ALL_TOPICS=1`; the shared hub's listener does not), where they said such a
+  session received none. A session of this plugin holds its own NATS connection and receives such
+  a topic as before (INFRA-122).
 
 ### Fixed
 
