@@ -2366,10 +2366,14 @@ architect, planner, implementer, tester, reviewer, merger), named for its role:
    the cache's Service, and `LEGION_REPOSITORY_CACHE_TOKEN_FILE`, the cache's own token), and a
    fresh feed comes from that cache alone: the fetch waits for it to be ready (`waiting for the
    repository cache <url> to be ready: <its answer>`, every 10 s, for at most the cache's own first
-   clone's 30 minutes and 10 more), unpacks its copy of the repository, checks each pack and its
-   index against the checksums git wrote into them and that every object the refs reach is there,
-   then fetches from GitHub the default branch GitHub names, the issue's recorded default while
-   GitHub has it, and the Legion issue branches: its log's last
+   clone's 2 hours and 10 more, `workspace.CacheWaitTimeout`; a pod waiting holds its node
+   reservation, and its launch the issue's lifecycle lane, all the while, both while a first clone
+   runs and when the cache never becomes ready — a crash loop, a cache pod that cannot be scheduled
+   or whose volume does not bind, a first clone past its 2 hours — so each such launch spends 130
+   minutes, not 40, before its fetch fails), unpacks its
+   copy of the repository, checks each pack and its index against the checksums git wrote into them
+   and that every object the refs reach is there, then fetches from GitHub the default branch GitHub
+   names, the issue's recorded default while GitHub has it, and the Legion issue branches: its log's last
    line is `workspace-init fetch: <n> bytes from the repository cache <url> in <d>, its history
    verified in <d>; <m> bytes from GitHub for the delta (<k> refs)`. A cache that is never ready,
    refuses the pod's token, names another repository, or streams history that does not verify
@@ -2407,8 +2411,8 @@ architect, planner, implementer, tester, reviewer, merger), named for its role:
    <ref> until a fetch brings it`). Once the fetch may start — at once, or once the cache is ready
    — the cache's stream and its verification share one 30-minute bound (`workspace.FetchTimeout`),
    each given what remains of it, and the delta from GitHub has a 30-minute bound of its own, so a
-   slow stream never leaves the delta minutes to run in. The fetch's waits, transfers and checks end within 100
-   minutes (`workspace.FetchBudget`) however long it waited, and the few local
+   slow stream never leaves the delta minutes to run in. The fetch's waits, transfers and checks end
+   within 190 minutes (`workspace.FetchBudget`) however long it waited, and the few local
    git commands around them take moments; a step with nothing left fails the fetch, naming the
    bound. Each transfer from GitHub is tried again up to four times after a transient failure,
    within that bound. It is the only process that holds the provisioning token
@@ -2819,11 +2823,23 @@ minute, and the cache's own bearer token, 32 random bytes made with the Secret a
 stands; the issue pods of that repository are given the same bearer token in their provisioning
 Secret, and no other pod has it.
 
-The process clones the repository once, through the same one-shot credential and bounds as an issue
-pod's fetch, then fetches every branch from GitHub every `refresh_minutes` (10 by default), pruning
-the branches GitHub deleted and keeping what each fetch brings as a pack, and repacks the clone
-once a day. Restarted after a fetch was killed, it removes the git lock files that fetch left
-before it fetches again. It serves, on port 8418:
+The process clones the repository once, through the same one-shot credential as an issue pod's
+fetch but, the first time, within `workspace.CacheFetchTimeout` (2 hours) rather than an issue pod's 30 minutes —
+its first clone is the repository's one full download, and on 2026-10-26 one deployment's cache with one CPU
+under gVisor was killed at 30 minutes 289 times running, never ready — then fetches every branch
+from GitHub every `refresh_minutes` (10 by default), pruning the branches GitHub deleted and keeping
+what each fetch brings as a pack. Once a day, after a fetch, it repacks the clone
+(`git repack -a -d`, within 2 hours, `repackTimeout`, and with git's memory bounded, `repackMemory`: a full repack of a 3.2 GB clone peaked at 4.35 GiB unbounded, past the cache's 4Gi limit, and at 1.78 GiB bounded), holding no lock a tar takes: a tar is
+served throughout and is taken again if the repack swaps the packs under it, and only the next
+fetch waits. A repack that fails is logged and tried again a day later, and the partial files it
+left in `objects/pack` (every `tmp_*` — a pack, its index, reverse index, bitmap, mtimes — and
+`.tmp-*`) are removed at once, each logged, as they are after a fetch that fails; a process
+starting on a volume where a killed one left any removes them before its first fetch. A fetch into
+the clone keeps an issue pod's 30-minute bound, since every tar waits for it; git's transfer sets no
+stall limit, so a stalled fetch holds every tar for up to those 30 minutes. Restarted after a fetch
+was killed, it also removes the git lock files that fetch left before it fetches again. As its
+container's PID 1 it reaps, after each refresh, the processes git's helpers leave it when a git
+dies (`git remote-https`, `git index-pack`). It serves, on port 8418:
 
 - `GET /readyz`: 503 until the first clone is whole, then 200, with nothing else; the pod's
   readiness probe, which carries no token.
@@ -2833,8 +2849,8 @@ before it fetches again. It serves, on port 8418:
   repository's content.
 - `GET /tar`: the clone's refs and packs as a tar stream — `HEAD`, `packed-refs`, `refs/`,
   `objects/pack/pack-<id>.pack` and the `objects/pack/pack-<id>.idx` git reads each pack through,
-  no loose object or configuration — which waits for a
-  fetch under way to finish, so it never streams a half-written ref or pack.
+  no loose object or configuration — which waits for a fetch under way to finish, so it never
+  streams a half-written ref or pack, and waits for no repack.
 
 `/tar` answers only a request whose `Authorization: Bearer` is the cache's own token; any other is
 401 and names nothing. `/healthz` and `/tar` name their repository in a `Legion-Repository` header
@@ -4052,7 +4068,7 @@ The daemon probes a pod by reading it and consulting the worker stream's live re
   containers have finished. Until it first sees an init container running it waits
   `worker_boot_timeout_seconds`, the image pull's bound; from then on, `worker_boot_timeout_seconds`
   counted from the last moment it saw one running, and never longer than that plus
-  `workspace.FetchBudget` and `workspace.CloneTimeout` together (130 min;
+  `workspace.FetchBudget` and `workspace.CloneTimeout` together (220 min;
   `sandbox.Runtime.ProvisionBound`) from the first (`awaitRoleLauncher`,
   `internal/runtime/sandbox/relaunch.go`): each term is the real bound of a distinct phase, run one
   after the other, `workspace-fetch`'s whole fetch and then `workspace-init`'s shared clone of the
@@ -4070,14 +4086,14 @@ The daemon probes a pod by reading it and consulting the worker stream's live re
   once and about 12½ minutes when every connect times out (127 s each), after which the fetch fails
   and the launch ends; each relaunch of the claim then holds the issue's lifecycle lane as long
   again, and the issue's later lifecycle rows wait on it. A repository cache that is slow to become
-  ready and a transfer that keeps making progress can hold the launch for the fetch's whole 100
+  ready and a transfer that keeps making progress can hold the launch for the fetch's whole 190
   minutes, and `workspace-init`'s shared clone of the feed, for a large repository, up to 30 more.
   Each launch try is bounded inside the runtime (`sandbox.Runtime.LaunchBound`,
   `internal/runtime/sandbox/relaunch.go`) at the sum of the try's waits and bounded calls — three
   boot timeouts; the repository cache's waits, five more boot timeouts and the calls of one other
   ensure of the cache that may hold its turn ahead of the try; the launcher wait's backstop of
   twice the boot timeout plus `sandbox.Runtime.ProvisionBound`; the termination grace; and the
-  try's client calls at their 30 s timeout — about 3 h 20 min at the defaults; a try that reaches
+  try's client calls at their 30 s timeout — about 4 h 50 min at the defaults; a try that reaches
   it is charged a launch failure and the next try runs, while a try the daemon's own stop ends is
   still charged nothing.
   Once the launch returns, the boot watchdog re-arms on the claim, bounded by its registration
@@ -4086,7 +4102,7 @@ The daemon probes a pod by reading it and consulting the worker stream's live re
   6 min): under Kubernetes, the deadline carries an added bound of `sandbox.Runtime.ProvisionBound`
   until the shim's first hello, and from there the daemon re-arms the base deadline alone, the same
   one a tmux pane runs under throughout. A pod that never says hello is retired at the launch's return
-  plus the base deadline plus the bound, armed as one (136 min at the defaults); one that says hello
+  plus the base deadline plus the bound, armed as one (226 min at the defaults); one that says hello
   and never registers is retired at hello plus the base deadline alone (6 min from the hello); and
   one whose agent registers and never says it is ready is retired at its registration plus the base
   deadline alone (6 min from the registration, again from a daemon restart that finds it
@@ -4196,10 +4212,11 @@ coordinator's pods (`packages/daemon`) keep to that with two init containers:
   fetch from running anything an agent of this pod planted. Every other provisioning command is
   bounded by `workspace.CommandTimeout` (5 minutes, fixed), but a transfer's duration follows the
   repository's size and the network's speed, not a fixed step in provisioning: once the fetch may
-  start — at once, or once the repository cache is ready, after a wait of at most 40 minutes — the
+  start — at once, or once the repository cache is ready, after a wait of at most 130 minutes, which
+  covers the cache's own first clone — the
   cache's stream and its verification run under one `workspace.FetchTimeout` (30 minutes), and every
   attempt of the transfer from GitHub and its reads of GitHub's `HEAD` under another, each given what
-  remains of its own, so the fetch's waits, transfers and checks end within `workspace.FetchBudget` (100
+  remains of its own, so the fetch's waits, transfers and checks end within `workspace.FetchBudget` (190
   minutes). A transfer
   that fails transiently is run again: git's fatal exit (128) with a cause line — `RPC failed; …` for
   a request of the transfer, `unable to access '…': …` for the first request — naming 408, 429 or a
@@ -4211,7 +4228,7 @@ coordinator's pods (`packages/daemon`) keep to that with two init containers:
   fails the fetch. No retry starts past the bound. Any other failure — a token refused, a repository not found or not
   granted, a certificate that does not verify, a curl error the list does not name — fails the
   fetch at once (`transientCloneFailure`, `internal/workspace/fetch.go`). The launch waits for the
-  pod's launchers while either init container runs, up to `sandbox.Runtime.ProvisionBound` (130
+  pod's launchers while either init container runs, up to `sandbox.Runtime.ProvisionBound` (220
   minutes) plus its boot timeout from when it first sees one running (above, "Liveness rules"), so
   the fetch, its wait and retries included, spends no launch failure, and `workspace-init` has its
   shared clone's 30 minutes and at least the boot timeout after a fetch that ran its whole budget.
