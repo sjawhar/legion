@@ -1,0 +1,76 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "INFRA-497",
+  "completed": "2026-10-26T20:34:36Z",
+  "planDocument": "dispatch://INFRA-497/artifact/plan-md",
+  "summary": "Carry PR sjawhar/legion#2266 (cards as asides while ctx.isIdle() is false, steers with triggerTurn when idle) onto legion/INFRA-497; change the isIdle-missing case to main's steer; add a pi-envoy wake for a card the host folds with no turn (late fold under the interrupt latch, or plan mode), decided by branch order plus isIdle and runSeq, sent as nextTurn+triggerTurn with LOCAL_ENVOY_NOTICE, skipped for a targeted Aside and after a user interrupt (aborted assistant 'Interrupted by user', auto_compaction_end.aborted, cleared at agent_start); prove it on the pinned Oh My Pi in RPC mode with a real nats-server (LEGION_TEST_NATS_URL) in a new packages/pi-envoy/extensions/card-delivery-omp.test.ts; CI pi-envoy job gets a nats:2.10 service container.",
+  "tasks": [
+    "1. Rebase PR #2266's commits b707146e and 67bc2ad9 onto main on legion/INFRA-497 with jj, keeping their author; resolve CHANGELOG/AGENTS.md conflicts keeping both; open the issue PR from legion/INFRA-497 (body 'Dispatch: INFRA-497', squash title 'fix(pi-envoy): ...'); comment on #2266 naming the new PR and close it, leaving its branch.",
+    "2. Unit tests red then green in packages/pi-envoy/extensions/envoy.test.ts: the PR's four tests (isIdle-missing case now expects a steer); wake once for a folded card with message_end before and after agent_end; one wake for three folded cards; no wake for a card with a later assistant entry, a targeted Aside, after an 'Interrupted by user' aborted assistant, after auto_compaction_end aborted, after an agent_start, isIdle false at the check, no isIdle, the identity notice, shutdown before the check; wake after a non-interrupt abort; flag cleared at agent_start.",
+    "3. Implement the wake and the isIdle-missing steer in packages/pi-envoy/extensions/envoy.ts inside the existing message_end/agent_start/agent_end handlers plus an auto_compaction_end handler; types in packages/pi-shared/src/pi-types.ts.",
+    "4. packages/pi-shared/test/omp-harness.ts: messageStream takes an optional input-token usage reported in message_start.",
+    "5. Real-binary test packages/pi-envoy/extensions/card-delivery-omp.test.ts: cases (a) 5 cards then a Send while a model request is held -> Send first in request k+1, ahead of all cards, no spurious later request; (b) RPC abort and abort_and_restore_queue, held model request and during a tool, 3 queued cards -> no new request, cards in the session file and in the probe prompt's request; (c) latch from RPC abort, idle card run, post-run auto-compaction held (compaction.thresholdTokens, asyncEnabled false, autoContinue false, keepRecentTokens 1, methodOrder [soft], midTurnEnabled false), card published while held -> non-terminal agent_end, then a request with the card and the wake; (d) idle card starts a turn; plan mode via '/plan' over RPC if the pinned build supports it. Negative controls: (a) red on main's envoy.ts, (c) red at 67bc2ad9.",
+    "6. .github/workflows/envoy-and-contracts.yaml pi-envoy job: services NATS container mirror.gcr.io/library/nats:2.10 and LEGION_TEST_NATS_URL on the Test pi-envoy step.",
+    "7. Docs: packages/pi-envoy/AGENTS.md, README.md, CHANGELOG.md (one Fixed entry), packages/pi-shared/src/interface.ts LOCAL_ENVOY_NOTICE comment, packages/pi-legion/src/phase-stall.ts:84-90 comment, packages/pi-legion/AGENTS.md phase-stall section if it lists notices.",
+    "8. Prove on the real binary; PR body E2E (implementer) line names that run."
+  ],
+  "acceptance": [
+    {"id": "A1", "criterion": "Cards queued while a turn runs, then a Send: the Send reaches the model at the first step after it was sent, ahead of the cards, however many came first.", "surface": "pinned omp RPC + pi-envoy + real nats-server via omp-harness", "check": "card-delivery-omp.test.ts case (a); red on main's envoy.ts"},
+    {"id": "A2", "criterion": "A card that reaches an idle session starts a turn.", "surface": "same", "check": "case (d); unit test"},
+    {"id": "A3", "criterion": "An interrupt (RPC abort; abort_and_restore_queue, the Esc path) keeps queued cards: folded, no turn, read at the next turn.", "surface": "same", "check": "case (b)"},
+    {"id": "A4", "criterion": "A card that lands as a turn ends, in a session interrupted earlier, gets a turn.", "surface": "same", "check": "case (c); red at PR head 67bc2ad9"},
+    {"id": "A5", "criterion": "A card read mid-run gets no extra turn.", "surface": "same", "check": "case (a) probe; unit tests"},
+    {"id": "A6", "criterion": "A targeted Aside stays an aside with no wake; a host without isIdle keeps main's steer.", "surface": "pi-envoy unit tests", "check": "envoy.test.ts"},
+    {"id": "A7", "criterion": "Plan mode: a folded card gets a wake.", "surface": "real binary if /plan works over RPC, else unit test plus case (c)'s shared path", "check": "stated in the proof"},
+    {"id": "A8", "criterion": "Spec item 2: no change to the fork or .omp-pin; dispatch://INFRA-498 linked.", "surface": "the PR diff and AGENTS.md", "check": "jj diff --stat shows no .omp-pin; AGENTS.md limit names INFRA-498"},
+    {"id": "A9", "criterion": "Spec item 3, in-tree part: the merge publishes pi-envoy and the worker image carries it.", "surface": "release.yaml and worker-image.yaml runs on the merge commit; npm", "check": "fix(pi-envoy) squash title; production check: npm view @sjawhar/pi-envoy version, both runs green; operator steps (deployment pin, controller update, dev-box installs) read and reported, not performed"},
+    {"id": "A10", "criterion": "Suites green.", "surface": "packages/pi-envoy, pi-shared, pi-legion", "check": "bun test (LEGION_TEST_OMP and LEGION_TEST_NATS_URL set), bunx biome check, bunx tsc --noEmit"}
+  ],
+  "commands": {
+    "natsLocal": "GOBIN=$TMPDIR/gobin go install github.com/nats-io/nats-server/v2@v2.10.29 && $TMPDIR/gobin/nats-server -a 127.0.0.1 -p <port>  (as a service)",
+    "ompLocal": "mise install $(cat .omp-pin); omp at $(mise where $(cat .omp-pin))/bin/omp",
+    "realBinaryTest": "cd packages/pi-envoy && LEGION_TEST_OMP=<omp> LEGION_TEST_NATS_URL=nats://127.0.0.1:<port> bun test extensions/card-delivery-omp.test.ts"
+  },
+  "decisions": [
+    "Wake decided by branch order (no assistant after the card) plus ctx.isIdle() and unchanged runSeq, not an inRun flag: the host does not order agent_end before a fold's message_end (agent-session.ts:5352-5363, runner.ts:1685-1700).",
+    "Wake sent as deliverAs nextTurn with triggerTurn (not the architect's suggested steer): it starts a turn on an idle host with no plan-mode or latch check (agent-session.ts:9299-9308) and, if the host turned busy, goes to the hidden next-turn queue rather than the steering queue, so it never waits ahead of a Send.",
+    "Interrupt flag: assistant message_end with stopReason aborted and errorMessage 'Interrupted by user', or auto_compaction_end aborted; cleared at agent_start.",
+    "ctx.isIdle missing -> steer (reverses PR #2266's aside) so no host loses a turn main gave it.",
+    "Test NATS via LEGION_TEST_NATS_URL (the daemon tests' variable); CI via a nats:2.10 service container (image envoy-client already uses); no new version pin.",
+    "PR #2266 is superseded by the issue branch's PR carrying its commits, then closed with a comment; its branch is kept. The architect may overrule before implementation."
+  ],
+  "requiredSkills": {
+    "implement": [
+      "legion-worker: phase rules, the push and skip-checks trailer, and its references pr-body.md (proof and E2E line, simplify pass), default-branch-check.md (App identity before push), conflicts-and-rewrites.md (rebasing #2266's commits onto main), tools.md (installing nats-server and the pinned omp under $TMPDIR)",
+      "ce-simplify-code: the simplify pass pr-body.md requires on the settled diff",
+      "dispatch: any Dispatch write (a comment on the issue, a findings ask)",
+      "asd-ste100: the comment that closes PR #2266 and any message to another agent"
+    ],
+    "test": [
+      "legion-worker: the tester's re-run of the real-binary proof and its E2E (tester) line per references/pr-body.md, tools.md for nats-server and omp in the pod"
+    ],
+    "review": [
+      "legion-worker: references/merge-gate.md (approval of the head) and references/review-threads.md (threads and bot findings)"
+    ]
+  },
+  "gapAnalysis": {
+    "findings": [
+      {"finding": "The late-fold wake depended on agent_end reaching pi-envoy before the fold's message_end, which the host does not guarantee (agent-session.ts:5352-5354; runner.ts:1685-1700).", "answer": "Design 2: the check uses branch order (no assistant after the card), ctx.isIdle() and unchanged runSeq; unit tests deliver the fold's message_end before and after agent_end, and a mid-run card handled late gets no wake; case (a) asserts no spurious request."},
+      {"finding": "'A fold after an interrupted run' was undefined; Esc over RPC is abort_and_restore_queue.", "answer": "Interrupt flag defined (aborted assistant 'Interrupted by user', auto_compaction_end aborted; cleared at agent_start); case (b) runs abort and abort_and_restore_queue, each with a held model request and during a tool."},
+      {"finding": "Plan mode must be inside the wake's scope; the PR's text lists it as a limit.", "answer": "Design 2 states the wake fires in plan mode; unit test; real binary via '/plan' if RPC supports it; AGENTS.md/CHANGELOG rewritten to drop the plan-mode and late-fold limits."},
+      {"finding": "Test (c) could pass without the wake if compaction schedules a continuation; no on-demand auto-compaction trigger existed.", "answer": "Case (c) gives the settings (asyncEnabled false, autoContinue false, thresholdTokens, keepRecentTokens, methodOrder, midTurnEnabled false), a usage parameter on messageStream, and asserts the non-terminal agent_end then a request carrying the card and the wake text; red at 67bc2ad9."},
+      {"finding": "Negative checks had no end point.", "answer": "Each ends with RPC get_state isSettled and a probe prompt that must be the next model request."},
+      {"finding": "The draft added a third way to provide NATS in tests and a second copy of the nats-server pin.", "answer": "The test reads LEGION_TEST_NATS_URL (the daemon tests' variable); CI uses a service container on mirror.gcr.io/library/nats:2.10; the local go install uses the version packages/envoy/go.mod pins; AGENTS.md gets the command."},
+      {"finding": "The wake's delivery mode, text and display were undecided; a steer in the busy race could wait ahead of a Send.", "answer": "nextTurn+triggerTurn, display false, short text naming how many Envoy messages arrived after the last turn, details LOCAL_ENVOY_NOTICE."},
+      {"finding": "Marking the wake as a local notice reaches pi-shared and pi-legion docs and may release pi-legion.", "answer": "Task 7 updates interface.ts, phase-stall.ts and pi-legion AGENTS.md; the pi-legion release from the pi-shared change is expected (the PR already touches pi-types.ts)."},
+      {"finding": "The unit-test mock keeps one handler per event; reuse runSeq.", "answer": "Design 2 puts the logic in the existing handlers and uses runSeq."},
+      {"finding": "A host without ctx.isIdle loses turns under PR #2266.", "answer": "Design 1: such a host keeps main's steer; unit test."},
+      {"finding": "Spec item 3 had no check, and the fate of PR #2266 was open.", "answer": "A9: squash title fix(pi-envoy), production check reads npm and the release and worker-image runs on the merge commit, operator steps reported not performed; #2266 superseded and closed with a comment, the architect may overrule."},
+      {"finding": "Esc had no real-binary coverage.", "answer": "Case (b) runs abort_and_restore_queue."},
+      {"finding": "facts.md's claim that pi-envoy sees a non-terminal agent_end was wrong for extensions; isStreaming during post-run compaction was inferred.", "answer": "Nothing in the design reads willContinue; case (c) observes the RPC frame's isTerminal false, and the oracle read the in-flight bracket around compaction (agent-session.ts:4775-4779, 9096-9101)."}
+    ]
+  },
+  "planReview": {"verdict": "approved", "rounds": 1},
+  "specDepartures": []
+}
