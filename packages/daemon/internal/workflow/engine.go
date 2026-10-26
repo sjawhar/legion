@@ -977,7 +977,9 @@ func (e *Engine) advanceAdmittedTree(ctx context.Context, tx pgx.Tx, root record
 func (e *Engine) StartUnblockedChildren(ctx context.Context, tx pgx.Tx, issues []record.Issue, rows map[string]blockers.Row) error {
 	starts := make(map[string]bool)
 	for _, issue := range issues {
-		if !blockers.Holdable(issue) || len(blockers.Holds(rows, issue)) > 0 {
+		// Startable: holdable, with nothing it waits on unfinished. blockers.Holds cannot gate
+		// this, since it is nil for an issue that is not holdable too.
+		if !blockers.Holdable(issue) || len(blockers.Unfinished(rows, issue.Key)) > 0 {
 			continue
 		}
 		open, read := starts[issue.Tree]

@@ -156,8 +156,10 @@ func Holdable(issue record.Issue) bool {
 // (Unfinished) when a blocker can hold it there (Holdable), and nothing otherwise. It exempts
 // nothing: a child held at phase.Admitted is held whatever its mark (Exempt). It is the one
 // statement of the child hold rule — what a held child waits on — which the workflow's hold
-// (workflow.Engine.enterChild, its advanceAdmittedTree and StartUnblockedChildren, and the
-// linger's hand-over in settleUnfinished) and the child half of Blocked all read.
+// (workflow.Engine.enterChild, its advanceAdmittedTree, and the linger's hand-over in
+// settleUnfinished) and the child half of Blocked all read. Its converse, a child nothing holds
+// any longer, is Holdable with nothing Unfinished, which StartUnblockedChildren asks directly:
+// an empty Holds cannot say that, since it is empty for an issue that is not holdable too.
 func Holds(rows map[string]Row, issue record.Issue) []string {
 	if !Holdable(issue) {
 		return nil
