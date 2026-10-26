@@ -200,8 +200,8 @@ type Notice struct {
 	// Blocked is every issue Legion is waiting to start because it waits on a Dispatch issue
 	// nobody has finished (INFRA-225), with what each still waits on. Only a tick controller
 	// notice carries it, as OpenCapabilities does: the tick is the turn that posts the day's
-	// report, and an issue nobody finishes is a person's call in Dispatch, so the controller
-	// names it there. A tick with nothing blocked carries none.
+	// report, so the controller names each there and takes nothing for it. A tick with nothing
+	// blocked carries none.
 	Blocked []BlockedIssue `json:"blocked,omitempty"`
 }
 

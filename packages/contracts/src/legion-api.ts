@@ -291,7 +291,7 @@ const legionBlockedIssue = z.strictObject({
  * is capped on issues, never on workers: there is no worker queue on this wire. `blocked` is
  * every root and every child Legion is waiting to start behind a Dispatch issue nobody has
  * finished, by issue key; `waiting` stays the roots' waiting line, so a blocked root is in both.
- * Only a person finishes a blocker, so the controller names them in the day's report. */
+ * The controller names them in the day's report and takes nothing for them. */
 const legionAdmission = z.strictObject({
   cap: z.number().int().nonnegative(),
   active: z.array(nonEmptyString),

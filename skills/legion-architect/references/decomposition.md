@@ -58,8 +58,10 @@ creation, because the daemon fixes it when it records the child.
 Release a child that depends on another repository's change only after that change's pull request
 merges, because the child's work must build on the merged change. Name the merged commit in its
 task (`gh api repos/<owner>/<repo>/pulls/<n> --jq .merge_commit_sha`); for a repository that pins the
-other one by commit (a lock file or dependency pin), the pin is that commit. Read the other
-repositories with your gh's read-only access (`-R owner/repo`).
+other one by commit (a lock file or dependency pin), the pin is that commit. Do not hold such a
+child with `--blocked-by` instead, because Legion would start it at the blocker's close, before you
+name the merged commit. Read the other repositories with your gh's read-only access
+(`-R owner/repo`).
 
 ## Architecture components
 
