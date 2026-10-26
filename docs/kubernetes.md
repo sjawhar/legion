@@ -5283,14 +5283,15 @@ issue's pod (every role of it alike) and the image probe's.
   `GET /legion/v1/state`'s `agentSecretsLogin` reads its `state`: `none` before the first login
   finishes, `issued` while a credential that has not expired is held (a renewal that failed beside
   it included), or `failed` (daemon API contract 22). Pod enrollment fails closed and retries until
-  a login succeeds. After a login the broker gave no HTTP answer to (it is down or out of reach),
-  the daemon waits 2 s before the next, doubling each time to at most 10 s, so after an outage it
-  logs in again within about 10 s of the broker serving. After a login the broker refused, or a
-  token file it could not read, it waits 30 s, doubling each time to at most 5 minutes. Either way
-  it waits whether or not it still holds a credential, and a successful login resets both
-  waits. Running the daemon off the cluster (the Stage 4a live proof), `token_file` holds a
-  token the operator mints, at most an hour long, for a ServiceAccount of the proof's own that
-  `BROKER_SERVICE_LOGINS` lists for `legion-daemon` and no running daemon uses, with
+  a login succeeds. After a login given no HTTP answer, or a 5xx answer from the broker or its
+  front door (the broker is down, out of reach, or cannot reach its database), the daemon waits
+  2 s before the next, doubling each time to at most 10 s, so after an outage it logs in again
+  within about 10 s of the broker serving. After a login the broker refused (a 4xx, 429
+  included), or a token file it could not read, it waits 30 s, doubling each time to at most 5
+  minutes. Either way it waits whether or not it still holds a credential, and a successful login
+  resets both waits. Running the daemon off the cluster (the Stage 4a live proof), `token_file`
+  holds a token the operator mints, at most an hour long, for a ServiceAccount of the proof's own
+  that `BROKER_SERVICE_LOGINS` lists for `legion-daemon` and no running daemon uses, with
   `kubectl create token <account> -n <namespace> --audience agent-secrets --duration 1h`: each
   account holds one credential, so a proof logging in as a running daemon's account would take
   that daemon's credential.

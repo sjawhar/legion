@@ -231,13 +231,13 @@ func withLoginRetry(t *testing.T, initial, most time.Duration) {
 	t.Cleanup(func() { loginRetryInitial, loginRetryMax = oldInitial, oldMax })
 }
 
-// withUnansweredRetry sets the wait after a login the broker gave no answer to, and the most it
-// doubles to, for one test.
+// withUnansweredRetry sets the wait after a login the broker was not there to decide (no HTTP
+// answer, or a 5xx), and the most it doubles to, for one test.
 func withUnansweredRetry(t *testing.T, initial, most time.Duration) {
 	t.Helper()
-	oldInitial, oldMax := unansweredRetryInitial, unansweredRetryMax
-	unansweredRetryInitial, unansweredRetryMax = initial, most
-	t.Cleanup(func() { unansweredRetryInitial, unansweredRetryMax = oldInitial, oldMax })
+	oldInitial, oldMax := unavailableRetryInitial, unavailableRetryMax
+	unavailableRetryInitial, unavailableRetryMax = initial, most
+	t.Cleanup(func() { unavailableRetryInitial, unavailableRetryMax = oldInitial, oldMax })
 }
 
 // tokenFile writes token to a fresh file, as the kubelet projects the daemon's ServiceAccount
@@ -441,7 +441,7 @@ func TestARefusedRenewalLeavesTheHeldCredentialIssued(t *testing.T) {
 		t.Fatal(err)
 	}
 	broker.mu.Lock()
-	broker.refuseLogins = []enrollAnswer{{http.StatusServiceUnavailable, `{"code":"DATABASE","error":"down"}`}}
+	broker.refuseLogins = []enrollAnswer{{http.StatusTooManyRequests, `{"code":"RATE_LIMITED","error":"slow down"}`}}
 	broker.mu.Unlock()
 	eventually(t, func() bool { return broker.loginCount() == 2 }, "the renewal to reach the broker")
 	eventually(t, func() bool { return c.failure.Load() != nil }, "the refused renewal to be recorded")
@@ -452,14 +452,14 @@ func TestARefusedRenewalLeavesTheHeldCredentialIssued(t *testing.T) {
 		t.Fatalf("Enroll under the still-live credential: %v", err)
 	}
 	eventually(t, func() bool { return c.LoginStatus().State == "failed" }, "the credential to expire")
-	if _, err := c.Enroll(ctx, podEnrollment); !isNoCredential(err, "DATABASE") {
+	if _, err := c.Enroll(ctx, podEnrollment); !isNoCredential(err, "RATE_LIMITED") {
 		t.Fatalf("Enroll once the credential expired = %v, want NO_MACHINE_CREDENTIAL naming the refusal", err)
 	}
 }
 
 // TestRefusedRenewalsKeepTheirWaitPastTheCredentialsExpiry: renewals the broker keeps refusing are
 // retried after loginRetryWait, before the held credential expires and after it, never in a loop
-// that waits for nothing: two seconds of a broker that answers every renewal 503 at once see a
+// that waits for nothing: two seconds of a broker that answers every renewal 429 at once see a
 // handful of logins, not thousands.
 func TestRefusedRenewalsKeepTheirWaitPastTheCredentialsExpiry(t *testing.T) {
 	withLoginRetry(t, 200*time.Millisecond, 400*time.Millisecond)
@@ -473,7 +473,7 @@ func TestRefusedRenewalsKeepTheirWaitPastTheCredentialsExpiry(t *testing.T) {
 	}
 	refusals := make([]enrollAnswer, 10000)
 	for i := range refusals {
-		refusals[i] = enrollAnswer{http.StatusServiceUnavailable, `{"code":"DATABASE","error":"down"}`}
+		refusals[i] = enrollAnswer{http.StatusTooManyRequests, `{"code":"RATE_LIMITED","error":"slow down"}`}
 	}
 	broker.mu.Lock()
 	broker.refuseLogins = refusals
@@ -544,8 +544,8 @@ func TestAFailedLoginIsRetriedAfterItsWait(t *testing.T) {
 	withLoginRetry(t, 50*time.Millisecond, 100*time.Millisecond)
 	broker, server := newFakeBroker(t)
 	broker.refuseLogins = []enrollAnswer{
-		{http.StatusServiceUnavailable, `{"code":"DATABASE","error":"down"}`},
-		{http.StatusServiceUnavailable, `{"code":"DATABASE","error":"down"}`},
+		{http.StatusTooManyRequests, `{"code":"RATE_LIMITED","error":"slow down"}`},
+		{http.StatusTooManyRequests, `{"code":"RATE_LIMITED","error":"slow down"}`},
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -576,8 +576,8 @@ func TestTokenLoginRetriesQuicklyWhileTheBrokerDoesNotAnswer(t *testing.T) {
 	t.Cleanup(cancel)
 	c := &Client{URL: server.URL, HTTP: server.Client(), TokenFile: tokenFile(t, "token"), Log: slog.New(slog.NewTextHandler(io.Discard, nil))}
 	err := c.Start(ctx)
-	var unanswered *unansweredError
-	if !errors.As(err, &unanswered) {
+	var unavailable *brokerUnavailableError
+	if !errors.As(err, &unavailable) {
 		t.Fatalf("the first login = %v, want it unanswered", err)
 	}
 	eventually(t, func() bool { return c.LoginStatus().State == "issued" }, "a login to succeed once the broker answers, well before a refusal's minute")
