@@ -79,7 +79,8 @@ test("every skill of the Legion plugin loads through Claude Code's Skill tool", 
   const skills = join(packageRoot, "legion", "skills")
   const hidden: string[] = []
   for (const name of (await readdir(skills)).sort()) {
-    const frontmatter = (await readFile(join(skills, name, "SKILL.md"), "utf8")).split("\n---")[0]
+    const frontmatter =
+      (await readFile(join(skills, name, "SKILL.md"), "utf8")).split("\n---")[0] ?? ""
     if (/^disable-model-invocation:\s*true\s*$/m.test(frontmatter)) hidden.push(name)
   }
   expect(hidden).toEqual([])
