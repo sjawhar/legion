@@ -5,7 +5,6 @@
 package api
 
 import (
-	"bytes"
 	"io"
 	"log/slog"
 	"net/http"
@@ -291,8 +290,8 @@ func TestCredentialRouteWithAnUnreadableAccountTokenNamesDispatchsOwnCredential(
 	missing := filepath.Join(t.TempDir(), "missing")
 	handler := newCredentialTestHandlerReading(t, rig.server.URL, missing)
 	previous := slog.Default()
-	var logs bytes.Buffer
-	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	logs := &storetest.LockedLog{}
+	slog.SetDefault(slog.New(slog.NewTextHandler(logs, nil)))
 	t.Cleanup(func() { slog.SetDefault(previous) })
 
 	response := dispatchRequest(t, handler, http.MethodGet, "/api/v1/credential-requests/rec1", nil, "alice")
