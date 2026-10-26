@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-138",
-  "completed": "2026-10-26T18:07:00Z",
+  "completed": "2026-10-26T18:09:00Z",
   "proof": [
     {
       "criterion": "RC4: GitHub squash-merges a pull request that has commits but changes no file.",
@@ -11,13 +11,28 @@
       "observed": "PR 805: commits 2, changed_files 0, mergeable true; merge answered {\"merged\":true,\"sha\":\"4b346f7fe975849352ee7141c68580d3c6120164\"}; merge commit 4b346f7f has 0 files and parent 6d843f28; sjawhar/legion-smoke main still 6d843f28 (untouched); no infra-138 branch remains",
       "headSha": "0b33835e1daa23d375750c1bad611ffcd0fb184b",
       "negativeControl": "gh pr create -R sjawhar/legion-smoke --base infra-138-empty-base --head infra-138-empty-head with both refs at 6d843f28 (no commits beyond base) -> 'GraphQL: No commits between infra-138-empty-base and infra-138-empty-head (createPullRequest)', exit 1"
+    },
+    {
+      "criterion": "RC1: until INFRA-177's cutover push, the pull request changes only paths under .legion/INFRA-138/.",
+      "surface": "GitHub on sjawhar/legion, pull request https://github.com/sjawhar/legion/pull/2265",
+      "command": "gh api repos/sjawhar/legion/pulls/2265/files --paginate --jq '[.[].filename] | all(startswith(\".legion/INFRA-138/\"))'",
+      "observed": "true; files [\".legion/INFRA-138/implement.json\",\".legion/INFRA-138/plan.json\"]",
+      "headSha": "db09d158f4e7",
+      "negativeControl": "the same filter over pull request 2239 -> false"
+    },
+    {
+      "criterion": "RC3: the PR body has 'Dispatch: INFRA-138', says no product code and merge only after every child and INFRA-480, and lists B1-B41 with delivering children.",
+      "surface": "GitHub on sjawhar/legion, pull request https://github.com/sjawhar/legion/pull/2265",
+      "command": "B=$(gh pr view 2265 -R sjawhar/legion --json body --jq .body); over $B: grep -cF 'Dispatch: INFRA-138'; grep -cF 'INFRA-480'; grep -cE '\\bB41\\b'",
+      "observed": "1, 8 and 2 (each at least 1); the body's table is plan.md section 5's B1-B41 rows verbatim",
+      "headSha": "db09d158f4e7",
+      "negativeControl": "gh pr view 2239 -R sjawhar/legion --json body --jq .body | grep -cF 'Dispatch: INFRA-138' -> 0"
     }
   ],
   "filesChanged": [
     ".legion/INFRA-138/implement.json"
   ],
   "deviations": [
-    "Pushed with no skip-checks trailer, as plan section 4 step 5 directs, so lint, typecheck, test and pr-title run on this head (RC2).",
-    "RC1 and RC3 proofs are added once the pull request exists; the daemon drain at 18:12Z parks the tree, so RC4's evidence is pushed first."
+    "Pushed with no skip-checks trailer, as plan section 4 step 5 directs, so lint, typecheck, test and pr-title run on the implementer's heads (RC2). The first trailerless push was db09d158; this handoff update is a second trailerless push, so H_impl is this push's head."
   ]
 }
