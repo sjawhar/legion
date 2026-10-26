@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-448",
-  "completed": "2026-10-26T13:05:00Z",
+  "completed": "2026-10-26T13:40:00Z",
   "proof": [
     {
       "criterion": "C1: on a closed issue a person's and an agent's new comment and message post; a new ask and a document edit stay 409 ISSUE_CLOSED; reopening works",
@@ -70,7 +70,8 @@
     "The plan's write routes and Agent/RoleAgents client methods are built here (planned spec departure).",
     "main merged forward once because GitHub reported the pull request CONFLICTING (fingerprint comment https://github.com/sjawhar/legion/pull/2234#issuecomment-6415546614); main's rewrite of the retro skill dropped the paragraph this branch had corrected, and main's moved architect and controller text in references/ was corrected instead.",
     "Margin comments on a closed issue's document needed a packages/proof-editor change (a comment-only selection action in read-only mode); a read-only view on an open issue (schema mismatch) still offers nothing.",
-    "Postgres-backed packages that cannot pass in this pod for environment reasons: internal/dispatch/files (needs Docker), the rank collation test (database initialised with C collation), pmdoc linearity timing; CI runs them."
+    "Postgres-backed packages that cannot pass in this pod for environment reasons: internal/dispatch/files (needs Docker), the rank collation test (database initialised with C collation), pmdoc linearity timing; CI runs them.",
+    "Second forward merge of main (bc307fb5, #2188) because GitHub reported the pull request CONFLICTING: rebase re-check 61a71207b9b3 \u2192 19e3dfb6ef31: fingerprint unchanged (39aaf690\u2026), bare gates only; the one conflict was a CHANGELOG entry (https://github.com/sjawhar/legion/pull/2234#issuecomment-6416064353). main touched no packages/envoy, packages/dispatch or packages/proof-editor file."
   ],
   "openQuestions": [],
   "discoveredComplexity": [
