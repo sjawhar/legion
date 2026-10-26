@@ -781,7 +781,7 @@ func TestProbeImageRefusesAProvidersSecretThePodCannotMount(t *testing.T) {
 			err := g.probe(p)
 
 			if testCase.refused {
-				wantContains(t, err, "cannot mount the providers Secret "+ProvidersSecretName(testProject), "(anthropic)", testCase.message)
+				wantContains(t, err, "cannot mount the providers Secret "+ProvidersSecretName(testProject), "(SESSION_DSN, anthropic)", testCase.message)
 				if n := g.creates.Load(); n != 1 {
 					t.Errorf("ran the probe %d times for a Secret the pod cannot mount, want once", n)
 				}
@@ -1489,14 +1489,17 @@ func TestProbeImagesCapacityStopNeedsTheBudgetToOutliveTheBootTimeout(t *testing
 }
 
 // The probe runs as a worker runs: it resolves the daemon's role prompts' references, always, and
-// with provider keys configured it exports the providers Secret's keys as the worker's shim does.
+// reads the providers Secret's keys as the worker's shim does, with or without a provider key —
+// under the postgres store goldenOptions configures, the probe's pod mounts that Secret for the
+// session database's URL key at least (mountsProviders). A pod that mounts none is told no
+// directory (TestTheProvidersDirectoryIsToldWhereThePodMountsIt).
 func TestTheProbeRunsAsAWorkerRuns(t *testing.T) {
 	for _, testCase := range []struct {
 		name string
 		keys map[string]string
 		want []string
 	}{
-		{"no provider keys", nil, []string{"--role-references", testRoleReferencesJSON}},
+		{"no provider keys", nil, []string{"--provider-env-dir", ProvidersDir, "--role-references", testRoleReferencesJSON}},
 		{"provider keys", map[string]string{"ANTHROPIC_API_KEY": "anthropic"}, []string{"--provider-env-dir", ProvidersDir, "--role-references", testRoleReferencesJSON}},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {

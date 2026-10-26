@@ -308,6 +308,12 @@ export const PROJECT_KEY_PATTERN = /^[A-Z][A-Z0-9]{1,9}$/;
 export const PROJECT_KEY_RULE =
   "an uppercase letter, then 1 to 9 uppercase letters or digits, such as CORE";
 
+/** A GitHub repository as `owner/name`, as `dispatch architecture-sync --repo` sends it in the
+ *  path of `/api/v1/projects/{key}/architecture-sources/{owner}/{repo}/sync`. A name of `.` or
+ *  `..` would resolve away as a path segment, so it is refused here rather than sent; the server
+ *  holds the rest of GitHub's rule (`parseSourceRepo`). */
+const ARCHITECTURE_SOURCE_REPO_PATTERN = /^[A-Za-z0-9-]+\/(?!\.\.?$)[A-Za-z0-9._-]+$/;
+
 /** Issue lifecycle statuses the Dispatch server accepts (`model.IssueStatuses`), in lifecycle order. */
 export const ISSUE_STATUSES = [
   "triage",
@@ -1324,15 +1330,32 @@ export const dispatchToolSpecs = [
   },
   {
     name: "dispatch_architecture_sync",
-    example: { project: "CORE" },
+    example: { project: "CORE", repo: "acme/infra" },
     description:
-      "Import a project's architecture model from its configured source repository now, instead of " +
-      "waiting for the server's five-minute schedule. Returns the imported commit and component " +
-      "count, or the recorded error when the model was rejected (the previous model stays up). " +
-      "The source itself is configured by a human in Settings; 404 SOURCE_NOT_FOUND without one.",
+      "Import a project's architecture model from its source repositories now, instead of waiting " +
+      "for the server's five-minute schedule. A project may have several sources, one per " +
+      "repository, and its model is every source's components together. Without repo every " +
+      "source imports and each answers on its own line; with repo only that source does. Each " +
+      "line names the imported commit, or the recorded error when that source's model was " +
+      "rejected (its previous components stay up, and every other source is untouched). Sources " +
+      "are saved in Settings or with PUT /api/v1/projects/{key}/architecture-sources/{owner}/{repo}; " +
+      "404 SOURCE_NOT_FOUND when the project has none, or none for that repository.",
     arguments: (z) => ({
-      project: z.string().describe("Project key whose architecture source to sync, such as CORE."),
+      project: z.string().describe("Project key whose architecture sources to sync, such as CORE."),
+      repo: z
+        .string()
+        .describe(
+          "One source repository of the project to sync alone, owner/name; omit it to sync every source."
+        )
+        .optional(),
     }),
+    validation: {
+      check: (value) => {
+        const { repo } = value as { readonly repo?: unknown };
+        return typeof repo !== "string" || ARCHITECTURE_SOURCE_REPO_PATTERN.test(repo);
+      },
+      message: "repo is not a repository: give it as owner/name, such as acme/infra.",
+    },
     strict: true,
   },
   {

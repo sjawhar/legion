@@ -14,9 +14,26 @@
   or `rank -> after KEY`. The bundled tool descriptions carry the two arguments, and the plugin's
   own copy of the `legion-controller` skill carries the corrected backlog rule, since `dist/` and
   `legion/` were regenerated (INFRA-188).
+- The `dispatch` command (`dist/dispatch.js`) imports every architecture source of a project, one
+  per repository: `dispatch architecture-sync --project <KEY>` prints a line for each source, and
+  `--repo <owner/name>` imports that one alone. Against a Dispatch older than this release,
+  `dispatch architecture-sync --project <KEY>` falls back to that server's single-source sync and
+  prints its one line, and `--repo` needs a Dispatch of this release. The `dispatch` skill says an
+  issue's component ids may come from any of its project's source repositories, and the plugin's
+  own copy of the `legion-architect` skill says a component file goes in the branch of the source
+  repository that holds it, with an id no other source of the project uses, since `dist/` and
+  `legion/` were regenerated (INFRA-391).
 
 ### Changed
 
+- The plugin declares daemon API contract 37 in `package.json`'s `legion.daemonApiVersion`
+  (INFRA-80): under the Kubernetes runtime an issue's disk is a generic ephemeral volume its pod
+  owns, created with the pod and deleted with it, so the `workspace-init provision` container is
+  no longer told `LEGION_EXPECT_ISSUE_VOLUME` and the lost-disk machinery it drove — the
+  provisioning exit code 3, the recovery marker and the probe for an issue's retained sessions,
+  with the `legion sessions mark-lost` command — is gone, and `runtime.kubernetes.session_store`
+  must name a store that keeps sessions in a database, `postgres` or `cloudsql-iam`. Nothing this
+  plugin reads or writes moved; a session of it registers with a daemon at 37.
 - The plugin's regenerated `legion/` copy of the `legion-worker` skill's tools reference no longer
   tells a role to add a new image package to the licence file by hand: the worker image lists every
   Debian package it carries in `/usr/share/doc/legion/THIRD_PARTY_NOTICES` from its own dpkg
@@ -26,6 +43,12 @@
   (INFRA-229): `GET /legion/v1/state` carries `state` on an issue's pull request, its `open`,
   `merged` or `closed`, always emitted, so the MCP server's strict state reader admits the field
   and nothing this plugin reads or writes moved; a session of it registers with a daemon at 36.
+- The bundled `envoy_publish` description (`dist/` regenerated) and the `envoy` skill say a team
+  topic, any `notifications.` topic the stream does not store, reaches a session on a serve port
+  through its machine's listener when that listener subscribes to every topic
+  (`ENVOY_SUBSCRIBE_ALL_TOPICS=1`; the shared hub's listener does not), where they said such a
+  session received none. A session of this plugin holds its own NATS connection and receives such
+  a topic as before (INFRA-122).
 
 ### Fixed
 
@@ -100,8 +123,8 @@
 - The `dispatch` command (`dist/dispatch.js`) waits for its stdout and stderr writes before it
   exits. Bun's `process.exit` dropped whatever a pipe had not yet taken, so a Bash tool lost the
   end of any output over the pipe's buffer (8 KB to 16 KB) with exit code 0.
-- The `dispatch` command (`dist/dispatch.js`), given a bare issue key where `--issue` belongs,
-  names the fix in its refusal: `use --issue <KEY>`, with the corrected command.
+- The `dispatch` command (`dist/dispatch.js`) takes a bare issue key where `--issue` belongs as
+  that `--issue` (`dispatch read ACME-12`), once and only when `--issue` is not also given.
 - The `dispatch` command (`dist/dispatch.js`) refuses an ask, comment or message link as `--ref`
   to `comment`, `suggest`, `doc-edit` and `doc-read`, which used to act on the link's owner and
   drop the item; the refusal names `reply_to_ask` (`--reply-to-ask`), `reply_to` (`--reply-to`) or
@@ -156,7 +179,7 @@
 - A Legion phase worker can run on Claude Code (sjawhar/legion#2032). When `legion claude-bridge`
   launches Claude Code, the MCP server sees `LEGION_BOOT_TOKEN_FILE`, `LEGION_DAEMON_URL` and
   `CLAUDE_CONFIG_DIR`: it waits for the session's transcript, registers with the daemon (daemon API
-  contract 35, pinned in `package.json`'s `legion.daemonApiVersion`), claims the issue's Envoy role
+  contract 37, pinned in `package.json`'s `legion.daemonApiVersion`), claims the issue's Envoy role
   soft and reports ready, and readies again whenever it regains the role. A registration the daemon
   refuses stops Claude Code so the daemon relaunches it.
 - The MCP tool `legion` (`read_record`, `handoff_complete`, `request_backward_move`) serves the

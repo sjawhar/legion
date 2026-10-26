@@ -1,10 +1,61 @@
 package config
 
 import (
+	"os"
 	"slices"
 	"strings"
 	"testing"
 )
+
+func TestLoadReadsSubscribeAllTopics(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		value *string
+		want  bool
+	}{
+		{"1 is on", new("1"), true},
+		{"unset is off", nil, false},
+		{"empty is off", new(""), false},
+		{"0 is off", new("0"), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("ENVOY_MACHINE_ID", "test-machine")
+			t.Setenv("NATS_URLS", "nats://127.0.0.1:4222")
+			// t.Setenv restores the variable after the test; Unsetenv then leaves it unset for this one.
+			t.Setenv("ENVOY_SUBSCRIBE_ALL_TOPICS", "")
+			if tc.value == nil {
+				if err := os.Unsetenv("ENVOY_SUBSCRIBE_ALL_TOPICS"); err != nil {
+					t.Fatalf("unset: %v", err)
+				}
+			} else {
+				t.Setenv("ENVOY_SUBSCRIBE_ALL_TOPICS", *tc.value)
+			}
+
+			service, err := Load(9020)
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if service.SubscribeAllTopics != tc.want {
+				t.Fatalf("SubscribeAllTopics = %t, want %t", service.SubscribeAllTopics, tc.want)
+			}
+		})
+	}
+}
+
+func TestLoadRefusesASubscribeAllTopicsValueOtherThan0Or1(t *testing.T) {
+	for _, value := range []string{"true", " 1"} {
+		t.Run(value, func(t *testing.T) {
+			t.Setenv("ENVOY_MACHINE_ID", "test-machine")
+			t.Setenv("NATS_URLS", "nats://127.0.0.1:4222")
+			t.Setenv("ENVOY_SUBSCRIBE_ALL_TOPICS", value)
+
+			_, err := Load(9020)
+			if err == nil || !strings.Contains(err.Error(), "ENVOY_SUBSCRIBE_ALL_TOPICS") {
+				t.Fatalf("Load error = %v, want a refusal naming ENVOY_SUBSCRIBE_ALL_TOPICS", err)
+			}
+		})
+	}
+}
 
 func TestLoadReadsAllowedHosts(t *testing.T) {
 	t.Setenv("ENVOY_MACHINE_ID", "test-machine")
