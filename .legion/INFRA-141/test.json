@@ -2,30 +2,42 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-141",
-  "completed": "2026-10-26T23:40:00Z",
+  "completed": "2026-10-27T00:10:00Z",
   "generation": 4,
-  "round": "review 5659336410's round: test hardening and WaitForCacheReady's cache name (3c79342b), head a9a44ddd",
+  "round": "race-fix round: 1e7885a9 (timeOutRoleClaimScan no longer writes Registry.holders; a 'Race-test the listener' step in envoy-go-race), head 5dfa7c20",
   "verdictProvenance": "provider not verified: written in my own session, no subagent ran; the model in my configuration is the one requested, not one read from the run's transcript",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran each mutant control myself with go test -overlay (workspace untouched), first finding that a naive deletion of the own-write fences does not compile (unused revision/epoch) and so replacing them with blank uses: setOwnRoleHolder removed -> TestRolesHeldByFollowsTheRoleClaims fails 30/30 at role_holders_test.go:123; both forgetRoleHolder calls removed -> 30/30 at :129; resetRoleHolders keeping holders -> store 10/10 (:329) and listener TestARecreatedRoleBucketIsNeverAnsweredAsAHolderWithoutItsRole 5/5 (:365); keeping holderRevisions -> store 10/10 (:332) and listener 5/5 (:378); Rewatch not clearing completeness (kvwatch.go:530) -> TestCompleteIsTheCurrentWatchersFirstScanDeliveringEveryKey 10/10 (warmup_test.go:224). Each passes at the head. The /healthz bodies the docs name were seen on the real binary."
+    "how": "Re-ran both of its commands myself (the test 30 times under -race, and the full ./cmd/listener suite under -race) and its mutant control (RolesHeldBy answering on Ready() in place of Complete(), by go test -overlay, workspace untouched); each matches its proof. Added -race runs of ./internal/store and ./internal/kvwatch/... as the architect asked."
   },
-  "failures": [
+  "failures": [],
+  "failed": 0,
+  "proof": [
     {
-      "criterion": "The tests this pull request adds are sound: TestARoleViewWhoseFirstScanTimedOutIsTheBusNotAnsweringOnTheSessionRoutes (packages/envoy/cmd/listener/roles_from_claims_test.go) has a data race under the race detector",
-      "evidence": "`cd packages/envoy && CGO_ENABLED=1 go test -race ./cmd/listener -count=1 -v -skip '<the four testpg tests>' -timeout 60m`: FAIL, exit 1, 238 --- PASS and 1 --- FAIL, the failing test TestARoleViewWhoseFirstScanTimedOutIsTheBusNotAnsweringOnTheSessionRoutes with one 'WARNING: DATA RACE'. Alone: `CGO_ENABLED=1 go test -race ./cmd/listener -count=30 -run '^TestARoleViewWhoseFirstScanTimedOutIsTheBusNotAnsweringOnTheSessionRoutes$'` -> 2 of 30 runs fail with a DATA RACE. Write: timeOutRoleClaimScan (roles_from_claims_test.go:209) replaces Registry.holders through reflect.Value.Set without holding holdersMu, called at :261. Previous read: store.(*Registry).setRoleHolderLocked (internal/store/kv.go:452) under holdersMu, from setRoleHolder (:433) <- applyRoleClaim (:425) <- kvwatch.(*Watcher).applyCurrent (kvwatch.go:731) <- consume (:582): the role watcher that the helper has just Stopped is still finishing a delivery (applyCurrent checks the generation under w.mu and applies under applyMu, and Stop takes neither applyMu nor waits). The race is in the test helper, not in shipped code; the fix is the helper's (take holdersMu, or empty the view through a store method, or wait for the stopped watcher's in-flight apply). CI's envoy-go-race job runs only ./internal/dispatch/... and ./internal/bus/ (envoy-and-contracts.yaml), so no CI lane catches it. Under the architect's ruling of 22:32Z (a failure in code this PR touches fails the round), this test file is this PR's, so this round fails."
+      "criterion": "The data race of the last round is gone, and the test still fails when the view answers while incomplete",
+      "surface": "go test -race of ./cmd/listener in this pod (CGO_ENABLED=1, gcc present)",
+      "command": "cd packages/envoy && CGO_ENABLED=1 go test -race ./cmd/listener -count=30 -run '^TestARoleViewWhoseFirstScanTimedOutIsTheBusNotAnsweringOnTheSessionRoutes$'; then the same test with go test -overlay replacing RolesHeldBy's 'if !complete' by 'if !r.roleWatcher.Ready()'",
+      "observed": "30 runs: ok 22.421s, exit 0, 0 'WARNING: DATA RACE'. Mutant: --- FAIL at roles_from_claims_test.go:274 'GET /v1/sessions with a role claim view whose first scan timed out: status 200', the same for GET /v1/registry/ses_timed_out_view_holder, and :279 'a send whose role claim view timed out stamps roles [reviewer], want none'",
+      "headSha": "5dfa7c20ceb704f93f5817a6902f44a53185cd24",
+      "negativeControl": "at a9a44ddd the same 30-run command failed 2 of 30 with a DATA RACE (write by reflect.Value.Set in timeOutRoleClaimScan, read by setRoleHolderLocked); the Ready() mutant shows the test still discriminates after the fix"
+    },
+    {
+      "criterion": "The listener suite, the role-holder store and the watcher package are race-free",
+      "surface": "go test -race in this pod",
+      "command": "CGO_ENABLED=1 go test -race ./internal/store ./internal/kvwatch/... -count=1; CGO_ENABLED=1 go test -race ./cmd/listener -count=1 -v -timeout 60m -skip '<the four testpg tests>'",
+      "observed": "store ok 36.602s, kvwatch ok 65.712s, 0 races; cmd/listener 239 --- PASS, 0 --- FAIL, 0 races, ok 435.445s",
+      "headSha": "5dfa7c20ceb704f93f5817a6902f44a53185cd24",
+      "negativeControl": "the last round's full -race run of ./cmd/listener at a9a44ddd found one race and failed, so the run detects races in this package"
+    },
+    {
+      "criterion": "No shipped code changed; the original acceptance still holds",
+      "surface": "the diff from bd9796df to 1e7885a9; scripts/e2e-local.sh",
+      "command": "jj diff --stat --from bd9796df3585 --to 5dfa7c20ceb7; bash scripts/e2e-local.sh and the A6' jq",
+      "observed": "changed: .github/workflows/envoy-and-contracts.yaml, cmd/listener/roles_from_claims_test.go, .legion/INFRA-141/implement.json; no non-test Go file, so the real-binary evidence of the previous rounds (6ea9f93b and bd9796df) carries. e2e-local exit 0, both PASS lines, three WARN bus_unavailable records",
+      "headSha": "5dfa7c20ceb704f93f5817a6902f44a53185cd24",
+      "negativeControl": "the e2e send answered 200 before NATS was stopped"
     }
   ],
-  "failed": 1,
-  "breakAttemptsThatHeld": [
-    "Five full `go test ./cmd/listener -count=1 -v -skip <the four testpg tests> -timeout 30m` runs at this head: each exit 0, 239 --- PASS and 0 --- FAIL, ok in 411.3, 440.0, 432.0, 439.5 and 420.4 s. The unnamed FAIL the implementer recorded once did not recur.",
-    "Real binary: across envoy_roles deleted and recreated under the running listener, /healthz answered 61 x 200 degraded 'interest KV unavailable: nats: stream not found' (bucket gone), 1 x 503 unhealthy 'interest KV unavailable: role claims bucket envoy_roles was recreated under its watcher', 483 x 503 unhealthy 'interest KV watcher unavailable: role claims bucket envoy_roles was recreated under its watcher', then 183 x 200 healthy: the bodies AGENTS.md and the CHANGELOG now name.",
-    "The warm-up timeout could not be made to fire from outside (a restart over 20,000 claims through a relay delaying every server chunk 20 ms still completed both scans); WaitForCacheReady wraps 'interest cache: ' and 'role claim cache: ' and main.go logs 'interest or role claim cache warm-up timed out', as read in the code.",
-    "scripts/e2e-local.sh exit 0, both PASS lines, client EnvoyApiError 503; A6' three WARN bus_unavailable records (23:28:38.250Z, 23:28:41.956Z, 23:28:45.714Z) after 'Initiating Shutdown...' at 23:28:34.704Z. go build, go vet and gofmt clean."
-  ],
-  "ci": "At a9a44ddd: Docs 40413047831 and Worker Image 40413047724 success; Tests 40413047745 and Legion Envoy and Contracts 40413047566 queued when read, cited unsettled and not waited for.",
-  "notesForTheImplementer": [
-    "No new red test: the failing test is the PR's own, and the command above, -race with -count=30 on that test, is the reproduction; it should show 0 races after the fix.",
-    "The full -race run of ./cmd/listener took 718 s here and found only this race."
-  ]
+  "ci": "Legion Envoy and Contracts run 40421693936 (which holds envoy-go-race and its new 'Race-test the listener' step) was queued with no job started when read twice, last after the runs above; cited unsettled and not waited for. Tests 40421693818, Docs 40421693892 and Worker Image 40421693838 queued too. The CI step runs ./cmd/listener whole, so it also runs the four testpg tests I skip here, against the job's Postgres service, which sets DISPATCH_TEST_DATABASE_URL, the variable internal/testpg reads.",
+  "regressionLocksAdded": []
 }
