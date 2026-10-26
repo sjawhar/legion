@@ -34,6 +34,18 @@
 
 ### Fixed
 
+- A person's Send from Dispatch's live view no longer waits behind Envoy notifications. Every card
+  (an Envoy notification, an issue message, a comment mention, a Dispatch Steer that was not
+  accepted as the person's own turn) went into the host's steering queue, which the host drains
+  one message per turn, so a session that received many cards took a person's Send minutes
+  later, and an interrupt dropped the queued cards. While a turn runs a card now goes as an aside,
+  which the host folds in at the next step, after the Send, without ending the running tool batch;
+  a stranded aside folds into the context after an interrupt. On an idle session a card is still a
+  steer with `triggerTurn`, so it starts a turn as before, also after an interrupt (an Esc, or a
+  Legion daemon's RPC `abort`), where an idle aside would start none. A targeted Aside stays an
+  aside. The session reads which state it is in from the host's `ctx.isIdle()`; a host context
+  without it gets every card as an aside.
+
 - A live view held open while its session is relaunched with `--resume` now shows the resumed
   process's model, thinking level and command changes. Two things stopped it. Every process
   numbered its agent-stream frames from 0, and the page keeps a `settings` or `commands` frame only

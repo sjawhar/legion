@@ -85,6 +85,8 @@ type SessionContext = {
     readonly ensureOnDisk: () => Promise<void>;
   };
   readonly setInterval: (callback: () => void, intervalMs: number) => void;
+  /** The host's `ctx.isIdle()`: false while a turn runs. */
+  readonly isIdle?: () => boolean;
   readonly ui: {
     readonly notify: (message: string, level: "info" | "warning") => void;
     readonly onTerminalInput: (handler: (input: unknown) => void) => () => void;
@@ -756,8 +758,9 @@ function acceptResponse(
  * message call. `entries` are what the session's file already holds, as a restarted session reads
  * them, and `branch` its active branch (the entries by default); every entry the session appends
  * is read back with them. `delivered(n)` resolves once the session has taken `n` deliveries, cards
- * and user turns together, and `recordedWhenDelivered` says how many entries the session had
- * appended when each went out.
+ * and user turns together, `recordedWhenDelivered` says how many entries the session had appended
+ * when each went out, and `sends` holds each of them, in the order the host was handed them.
+ * `idle` is the host's `ctx.isIdle()`, which a context without it lacks.
  */
 async function bootDirectSession(
   query: string,
@@ -776,6 +779,7 @@ async function bootDirectSession(
     readonly sendUserInput?: (text: string, options: unknown) => Promise<UserInputResult>;
     /** The host's `pi.getCommands`. */
     readonly getCommands?: () => readonly HostSlashCommand[];
+    readonly idle?: () => boolean;
   } = {}
 ) {
   process.env.DISPATCH_URL = "http://dispatch.test";
@@ -829,6 +833,7 @@ async function bootDirectSession(
   const waiters: { readonly count: number; readonly resolve: () => void }[] = [];
   const recordedWhenDelivered: number[] = [];
   const inputs: { readonly text: string; readonly options: unknown }[] = [];
+  const sends: { readonly content: unknown; readonly options: unknown }[] = [];
   const taken = () => {
     const count = fixture.deliveries.length + fixture.userMessages.length + inputs.length;
     for (const waiter of waiters.splice(0)) {
@@ -843,11 +848,13 @@ async function bootDirectSession(
       options.beforeSend?.();
       recordedWhenDelivered.push(fixture.entries.length);
       fixture.pi.sendMessage(message, sendOptions);
+      sends.push({ content: fixture.deliveries.at(-1)?.content, options: sendOptions });
       taken();
     },
     sendUserMessage: (content: string, sendOptions?: unknown) => {
       options.beforeSend?.();
       recordedWhenDelivered.push(fixture.entries.length);
+      sends.push({ content, options: sendOptions });
       fixture.pi.sendUserMessage(content, sendOptions);
       taken();
     },
@@ -856,6 +863,7 @@ async function bootDirectSession(
         options.beforeSend?.();
         recordedWhenDelivered.push(fixture.entries.length);
         inputs.push({ options: inputOptions, text });
+        sends.push({ content: text, options: inputOptions });
         taken();
         return run(text, inputOptions);
       },
@@ -866,6 +874,7 @@ async function bootDirectSession(
   const base = sessionContext("ses_delivery");
   const context: SessionContext = {
     ...base,
+    ...(options.idle !== undefined && { isIdle: options.idle }),
     sessionManager: {
       ...base.sessionManager,
       getBranch: () => options.branch ?? [...prior, ...fixture.entries],
@@ -898,6 +907,7 @@ async function bootDirectSession(
     recordedWhenDelivered,
     replied,
     replies,
+    sends,
   };
 }
 
@@ -9446,27 +9456,45 @@ describe("envoy OMP extension", () => {
     ]);
   });
 
-  test("delivers targeted aside and steer frames through their requested primary-turn modes", async () => {
+  test("delivers a targeted Steer card as an aside while a turn runs and an Aside always as one", async () => {
     globalThis.fetch = async (input, init) => responseWithRegistration(input, init, {});
     const { default: envoyExtension } = await import("./envoy.ts?targeted-modes");
     const fixture = createPi();
-    const delivered = Promise.withResolvers<void>();
+    const waiting: { readonly count: number; readonly resolve: () => void }[] = [];
+    const delivered = (count: number): Promise<void> => {
+      const waiter = Promise.withResolvers<void>();
+      if (fixture.deliveries.length >= count) waiter.resolve();
+      else waiting.push({ count, resolve: waiter.resolve });
+      return waiter.promise;
+    };
     envoyExtension({
       ...fixture.pi,
       sendMessage: (message, options) => {
         fixture.pi.sendMessage(message, options);
-        if (fixture.deliveries.length === 2) delivered.resolve();
+        for (const waiter of waiting) {
+          if (fixture.deliveries.length >= waiter.count) waiter.resolve();
+        }
       },
     });
-    await fixture.handlers.get("session_start")?.({}, sessionContext("ses_delivery"));
+    let idle = false;
+    await fixture.handlers.get("session_start")?.(
+      {},
+      { ...sessionContext("ses_delivery"), isIdle: () => idle }
+    );
     const agent = natsState.controls.get("notifications.agent.ses_delivery");
     if (agent === undefined) throw new Error("agent subject was not subscribed");
 
-    agent.push(targetedDispatchEnvelope("aside", "targeted-aside"));
-    agent.push(targetedDispatchEnvelope("steer", "targeted-steer"));
-    await delivered.promise;
+    agent.push(targetedDispatchEnvelope("aside", "targeted-aside-running"));
+    agent.push(targetedDispatchEnvelope("steer", "targeted-steer-running"));
+    await delivered(2);
+    idle = true;
+    agent.push(targetedDispatchEnvelope("aside", "targeted-aside-idle"));
+    agent.push(targetedDispatchEnvelope("steer", "targeted-steer-idle"));
+    await delivered(4);
 
     expect(fixture.deliveries.map((delivery) => delivery.options)).toEqual([
+      { deliverAs: "aside", triggerTurn: true },
+      { deliverAs: "aside", triggerTurn: true },
       { deliverAs: "aside", triggerTurn: true },
       { deliverAs: "steer", triggerTurn: true },
     ]);
@@ -9537,6 +9565,60 @@ describe("envoy OMP extension", () => {
         expect(fixture.userMessages).toEqual([{ content: DIRECT_MESSAGE_BODY, options }]);
       });
     }
+
+    // While a turn runs the host queues a steer, which is what a Send is (`sendUserInput` with no
+    // `deliverAs`), and drains that queue one message per turn, first in, first out; an aside it
+    // folds in at the next step instead. Cards that went as steers held a person's Send back one
+    // turn each, so the cards go as asides and the Send is the head of the steering queue.
+    test("is the head of the host's steering queue when cards arrived before it in a running turn", async () => {
+      const { agent, delivered, sends } = await bootDirectSession("direct-send-ahead-of-cards", {
+        accept: () => ({ accepted: true }),
+        idle: () => false,
+        sendUserInput: async () => ({ handled: "prompt" }),
+      });
+
+      for (const n of [1, 2, 3]) {
+        agent.push(forwardedRoleEnvelope("legion-controller", `notification ${n}`, `card-${n}`));
+      }
+      agent.push(directDispatchEnvelope("steer", "direct-send-ahead-of-cards"));
+      await delivered(4);
+
+      const deliverAs = (options: unknown): unknown =>
+        typeof options === "object" && options !== null && "deliverAs" in options
+          ? options.deliverAs
+          : undefined;
+      const queued = (mode: "aside" | "steer") =>
+        sends
+          .filter(({ options }) => (deliverAs(options) ?? "steer") === mode)
+          .map(({ content }) => String(content));
+      expect(queued("steer")).toEqual([DIRECT_MESSAGE_BODY]);
+      const asides = queued("aside");
+      expect(asides).toHaveLength(3);
+      for (const [index, card] of asides.entries()) {
+        expect(card).toContain(`notification ${index + 1}`);
+      }
+      // Each card still asks for a turn of its own, should the turn end before it is folded in.
+      expect(
+        sends.filter(({ options }) => deliverAs(options) === "aside").map(({ options }) => options)
+      ).toEqual(Array(3).fill({ deliverAs: "aside", triggerTurn: true }));
+    });
+
+    // An idle session has no steering queue to wait in. The host starts a turn for a steer with
+    // `triggerTurn` after an interrupt (an Esc, or the RPC `abort` a Legion daemon sends) and in
+    // plan mode too, where an idle aside folds into the context with no turn.
+    test("leaves a card that reaches an idle session a steer that starts a turn", async () => {
+      const { agent, delivered, sends } = await bootDirectSession("idle-card-starts-a-turn", {
+        idle: () => true,
+        sendUserInput: async () => ({ handled: "prompt" }),
+      });
+
+      agent.push(forwardedRoleEnvelope("legion-controller", "wake up", "idle-card"));
+      await delivered(1);
+
+      expect(sends).toHaveLength(1);
+      expect(String(sends[0]?.content)).toContain("wake up");
+      expect(sends[0]?.options).toEqual({ deliverAs: "steer", triggerTurn: true });
+    });
 
     // Only Dispatch's 200 makes a turn: whatever it refuses, and whatever keeps it from answering,
     // keeps the card, and the session posts nothing and injects nothing.
@@ -13351,9 +13433,11 @@ describe("envoy OMP extension", () => {
     ).toHaveLength(1);
   });
 
-  test("inbound envoy messages deliver as steering so they interrupt an in-flight turn", async () => {
+  // A context without `isIdle` cannot say no turn runs, so its cards go as asides, which an idle
+  // host still runs a turn for (outside an interrupt and plan mode).
+  test("delivers an inbound card as an aside on a host that reports no idle state", async () => {
     globalThis.fetch = async (input, init) => responseWithRegistration(input, init, []);
-    const { default: envoyExtension } = await import("./envoy.ts?deliver-as-steer");
+    const { default: envoyExtension } = await import("./envoy.ts?deliver-as-aside");
     const fixture = createPi();
 
     envoyExtension(fixture.pi);
@@ -13361,12 +13445,12 @@ describe("envoy OMP extension", () => {
     const controls = natsState.controls.get("notifications.agent.ses_steer");
     expect(controls).toBeDefined();
 
-    controls?.push(forwardedRoleEnvelope("legion-controller", "steer me mid-turn", "steer"));
+    controls?.push(forwardedRoleEnvelope("legion-controller", "fold me in mid-turn", "aside"));
     await new Promise((resolve) => setTimeout(resolve, 10));
 
     expect(fixture.deliveries.length).toBe(1);
-    expect(fixture.deliveries[0]?.content).toContain("steer me mid-turn");
-    expect(fixture.deliveries[0]?.options).toEqual({ deliverAs: "steer", triggerTurn: true });
+    expect(fixture.deliveries[0]?.content).toContain("fold me in mid-turn");
+    expect(fixture.deliveries[0]?.options).toEqual({ deliverAs: "aside", triggerTurn: true });
   });
 
   test("acknowledges an agent-subject request before any Dispatch call or the injection", async () => {
