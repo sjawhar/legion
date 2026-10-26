@@ -1,0 +1,37 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-253",
+  "completed": "2026-10-26T10:36:00Z",
+  "round": 1,
+  "reviewedCodeHead": "bd64de9846128dea7244472e02a6a91a36299424",
+  "decision": "changes_requested",
+  "critical": 0,
+  "important": 3,
+  "minor": 1,
+  "keyFindings": [
+    {
+      "severity": "important",
+      "file": ".github/workflows/envoy-and-contracts.yaml",
+      "description": "The workflow's own on.push.paths and on.pull_request.paths do not list scripts/e2e/lib/held-port.py, so the dispatch-filter entry the PR adds at :415 never fires on a pull request that changes only that file, and the Playwright suite that serves Dispatch through it does not run. The dispatch filter also lacks packages/envoy/listenfd/**, though `go list -deps ./cmd/dispatch` now lists it and the filter's comment (:383-385) says it follows that list."
+    },
+    {
+      "severity": "important",
+      "file": "packages/dispatch/e2e/playwright.config.ts",
+      "description": "Main's playwright.config.ts let a bare `playwright test --list` evaluate with no server and no port probe (isListMode). At the head it throws unless every port is set, and through e2e/run.ts it needs DATABASE_URL and a full Dispatch build and boot. packages/dispatch/AGENTS.md:1165's manual grep check now carries that cost. A listing needs no server: let it evaluate without the harness."
+    },
+    {
+      "severity": "important",
+      "file": "PR body",
+      "description": "No `## Contract change census`, though the PR adds refusals at process boundaries (DISPATCH_LISTEN_FD, ENVOY_LISTEN_FD, LEGION_LISTEN_FD; the Playwright config's bare-run refusal), changes daemon.Run's signature, removes cmdtest.FreeTCPPort and rig.sh's pick_port, changes await_start's arity, drops e2e-local.sh's default ports, and changes the wildcard `addr`/`address` log text to `[::]:p`."
+    },
+    {
+      "severity": "minor",
+      "file": "scripts/e2e/lib/held-port.py",
+      "description": "receive() requires SO_ACCEPTCONN == 1 and passes socket.MSG_CMSG_CLOEXEC; darwin answers the option's bit (0x2), as listenfd/inspect_unix.go:50-53 says, and CPython has no MSG_CMSG_CLOEXEC there, so `exec --from` (DISPATCH_E2E_LISTEN_FROM, documented in packages/dispatch/README.md:114-117) fails on macOS. Test != 0 as Go does and set close-on-exec after receipt where the flag is missing."
+    }
+  ],
+  "ci": "At 10:35Z every pull_request run at code head bd64de98 was still queued (Tests 40302789174, Legion Envoy and Contracts 40302789136, Docs 40302789101, Worker Image 40302789098, PR Title 40302906150). envoy-smoke, the first held-socket hand-over into a host-network container, has not run on any head; the next round reads it before any approval.",
+  "thermonuclear": "Pair run once at bd64de98. thermonuclear-deep-review: APPROVE at bd64de98, 2 Minor (path filters; held-port.py on darwin), mixed providers: 83 assistant turns anthropic/claude-opus-5-5, 1 openai/gpt-6.1-sol. thermonuclear-code-quality: APPROVE at bd64de98, 7 Minor cleanup items, mixed providers: 42 turns anthropic/claude-opus-5-5, 1 openai/gpt-6.1-sol. Counts read from each subagent's stored session transcript.",
+  "fastFollow": "Cleanup batch: daemon_test.go:217 heldSocket registers no t.Cleanup (cmd/legion/main_test.go:281 is a near-copy); overrides.inherited beside overrides.listen in daemon.go:138-142 could be one listener parameter; an empty DISPATCH_PORT with DISPATCH_LISTEN_FD is refused where the listener treats an empty PORT as unset; memory_harness_test.go:145-147 repeats cmdtest.Start's ExtraFiles close; startListenerConfig takes the port twice; search-smoke.sh/searchbench.sh repeat rig.sh's port-file wait."
+}
