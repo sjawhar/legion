@@ -581,7 +581,7 @@ func (rig *keyedRig) writes(t *testing.T) []int32 {
 func loseAnswer(t *testing.T, database *store.Store, key string) {
 	t.Helper()
 	tag, err := database.Pool.Exec(context.Background(), `
-		update request_keys set status = null, content_type = null, response = null,
+		update request_keys set status = null, headers = null, response = null,
 		       leased_at = now() - interval '2 minutes'
 		where idempotency_key = $1
 	`, key)
@@ -997,7 +997,8 @@ type heldKey struct {
 	recovery   any
 }
 
-// holdRequestKey writes held's row: in flight when status is nil, leased leasedAgo.
+// holdRequestKey writes held's row: in flight when status is nil, leased leasedAgo; answered, its
+// lease released, when status is set.
 func holdRequestKey(t *testing.T, database *store.Store, held heldKey) {
 	t.Helper()
 	var recovery []byte
@@ -1010,7 +1011,9 @@ func holdRequestKey(t *testing.T, database *store.Store, held heldKey) {
 	}
 	if _, err := database.Pool.Exec(context.Background(), `
 		insert into request_keys (login, idempotency_key, request_digest, method, path, leased_at, status, response, recovery)
-		values ($1, $2, $3, $4, $5, now() - make_interval(secs => $6), $7, case when $7::int is null then null else ''::bytea end, $8)
+		values ($1, $2, $3, $4, $5,
+		        case when $7::int is null then now() - make_interval(secs => $6) end,
+		        $7, case when $7::int is null then null else ''::bytea end, $8)
 	`, held.login, held.key, requestDigestOf(t, held.request, held.pattern), held.request.Method, held.request.URL.Path,
 		held.leasedAgo.Seconds(), held.status, recovery); err != nil {
 		t.Fatalf("hold the key %s: %v", held.key, err)

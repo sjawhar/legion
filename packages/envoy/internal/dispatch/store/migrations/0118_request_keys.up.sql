@@ -25,9 +25,11 @@
 -- answer was lost. Every write the holder makes to this row is scoped to its own attempt, so the
 -- one it no longer holds changes nothing, and a write it would commit after losing the key is
 -- refused. A null leased_at is a lease released at once (a 5xx after the request committed). status,
--- content_type and response are the stored answer: response null with a status set is an answer
--- larger than Dispatch keeps (1 MiB), replayed as ANSWER_NOT_KEPT. A 5xx, 401, 408 and 429 are never
--- stored.
+-- headers and response are the stored answer: the headers its handler set (a Content-Type among
+-- them) and its body, response null with a status set being an answer larger than Dispatch keeps
+-- (1 MiB), replayed as ANSWER_NOT_KEPT. A 5xx, 401, 408 and 429 are never stored. The checks hold
+-- the row to those states: an answered row holds no lease, and nothing of an answer is stored
+-- without its status.
 --
 -- recovery is the recovery point a write that also delivers to sessions commits with its own rows,
 -- in the same transaction (Brandur Leach's "Implementing Stripe-like Idempotency Keys in
@@ -52,12 +54,15 @@ create table request_keys (
   attempt integer not null default 1,
   leased_at timestamptz default now(),
   status integer,
-  content_type text,
+  headers jsonb,
   response bytea,
   recovery jsonb,
   committed_at timestamptz,
   created_at timestamptz not null default now(),
-  primary key (login, idempotency_key)
+  primary key (login, idempotency_key),
+  check (attempt >= 1),
+  check (status is null or leased_at is null),
+  check (status is not null or (headers is null and response is null))
 );
 
 create index request_keys_created_at on request_keys (created_at);

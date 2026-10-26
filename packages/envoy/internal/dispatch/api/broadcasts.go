@@ -274,13 +274,8 @@ type broadcastRecovery struct {
 // GET /api/v1/broadcasts/{id} reads it, every recipient's attempts as they stand, with the send's
 // own exclusions, under the send's own 201 - answered at once, as the send was, while
 // sendOwedBroadcastRecipients puts every recipient it still owes on its way behind the answer.
-func (s *server) replayBroadcast(w http.ResponseWriter, r *http.Request, recovery json.RawMessage, _ []byte) {
+func (s *server) replayBroadcast(w http.ResponseWriter, r *http.Request, point broadcastRecovery, _ []byte) {
 	ctx := r.Context()
-	var point broadcastRecovery
-	if err := json.Unmarshal(recovery, &point); err != nil {
-		s.writeHandlerError(w, fmt.Errorf("read a broadcast's recovery point: %w", err))
-		return
-	}
 	read, err := s.readBroadcast(ctx, point.BroadcastID)
 	if err != nil {
 		s.writeHandlerError(w, err)

@@ -367,7 +367,14 @@ func (s *server) recordCommentDeliveryResolution(
 	claim attemptClaim,
 	resolveError *string,
 ) (model.CommentDelivery, error) {
-	recorded, err := scanCommentDelivery(s.deps.Store.Pool.QueryRow(ctx, `
+	// In a transaction of its own, as every write a keyed request makes is, so the request's
+	// commit mark hooks it (markRequestKeyCommitted).
+	tx, err := s.begin(ctx)
+	if err != nil {
+		return model.CommentDelivery{}, err
+	}
+	defer tx.Rollback(ctx)
+	recorded, err := scanCommentDelivery(tx.QueryRow(ctx, `
 		update comment_deliveries
 		set delivery = $5, session_id = coalesce(session_id, $6), resolve_error = $7
 		where comment_id = $1 and target = $2 and attempt = $3
@@ -381,7 +388,10 @@ func (s *server) recordCommentDeliveryResolution(
 			Delivery: target.Delivery, SessionID: target.SessionID,
 		}, nil
 	}
-	return recorded, err
+	if err != nil {
+		return model.CommentDelivery{}, err
+	}
+	return recorded, tx.Commit(ctx)
 }
 
 // deliverResolvedCommentMention delivers one mention of a comment: it claims an attempt in one

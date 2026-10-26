@@ -2,9 +2,7 @@ package api
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
-	"fmt"
 	"maps"
 	"net/http"
 	"slices"
@@ -158,13 +156,8 @@ type commentRecovery struct {
 // first delivery (deliverResolvedCommentMention, initial), so an attempt a live sender holds is
 // left to it and no second attempt is opened. A mention someone retried from its card has more
 // than one attempt, and owes nothing here.
-func (s *server) replayComment(w http.ResponseWriter, r *http.Request, recovery json.RawMessage, stored []byte) {
+func (s *server) replayComment(w http.ResponseWriter, r *http.Request, point commentRecovery, stored []byte) {
 	ctx, pool := r.Context(), s.deps.Store.Pool
-	var point commentRecovery
-	if err := json.Unmarshal(recovery, &point); err != nil {
-		s.writeHandlerError(w, fmt.Errorf("read a comment's recovery point: %w", err))
-		return
-	}
 	comment, err := s.loadComment(ctx, pool, point.CommentID)
 	if err != nil {
 		s.writeHandlerError(w, err)

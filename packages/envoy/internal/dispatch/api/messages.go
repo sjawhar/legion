@@ -113,11 +113,7 @@ type messageRecovery struct {
 // recoveredMessage is the message a keyed write committed, read once sendHeldMessageOn has put a
 // targeted one on its way, with its deliveries as they stand. It is read from the database before
 // the listener is, so a repeat never fails because the listener is down.
-func (s *server) recoveredMessage(ctx context.Context, recovery json.RawMessage) (model.Message, error) {
-	var point messageRecovery
-	if err := json.Unmarshal(recovery, &point); err != nil {
-		return model.Message{}, fmt.Errorf("read a message's recovery point: %w", err)
-	}
+func (s *server) recoveredMessage(ctx context.Context, point messageRecovery) (model.Message, error) {
 	message, err := s.loadMessage(ctx, s.deps.Store.Pool, "", point.MessageID)
 	if err != nil {
 		return model.Message{}, err
@@ -138,8 +134,8 @@ func (s *server) recoveredMessage(ctx context.Context, recovery json.RawMessage)
 // replayAgentMessage answers a repeat of a keyed single-session send whose message committed: the
 // message as GET /api/v1/agents/{session_id}/messages reads it (recoveredMessage), under the send's
 // own 201.
-func (s *server) replayAgentMessage(w http.ResponseWriter, r *http.Request, recovery json.RawMessage, _ []byte) {
-	message, err := s.recoveredMessage(r.Context(), recovery)
+func (s *server) replayAgentMessage(w http.ResponseWriter, r *http.Request, point messageRecovery, _ []byte) {
+	message, err := s.recoveredMessage(r.Context(), point)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -150,8 +146,8 @@ func (s *server) replayAgentMessage(w http.ResponseWriter, r *http.Request, reco
 // replayIssueMessage answers a repeat of a keyed issue message whose message committed: the
 // message as it stands (recoveredMessage), a targeted one's owed delivery made first, in the first
 // answer's shape - its advice kept - under the post's own 201.
-func (s *server) replayIssueMessage(w http.ResponseWriter, r *http.Request, recovery json.RawMessage, stored []byte) {
-	message, err := s.recoveredMessage(r.Context(), recovery)
+func (s *server) replayIssueMessage(w http.ResponseWriter, r *http.Request, point messageRecovery, stored []byte) {
+	message, err := s.recoveredMessage(r.Context(), point)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return

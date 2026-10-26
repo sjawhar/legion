@@ -159,8 +159,11 @@ type lockFunction struct {
 }
 
 type lockGraph struct {
-	root      string
-	info      *types.Info
+	root string
+	info *types.Info
+	// constants is the module's string constants (stringConstants), which a statement's SQL is
+	// read through.
+	constants map[string]string
 	functions []*lockFunction
 	named     map[string]*lockFunction
 	declared  map[*types.Func]*lockFunction
@@ -295,6 +298,7 @@ func buildCopyLockGraph() (*lockGraph, error) {
 	graph := &lockGraph{
 		root:            root,
 		info:            modules.info,
+		constants:       constants,
 		named:           map[string]*lockFunction{},
 		declared:        map[*types.Func]*lockFunction{},
 		literals:        map[*ast.FuncLit]*lockFunction{},
