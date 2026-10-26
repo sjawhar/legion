@@ -139,6 +139,19 @@ type DispatchArtifact struct {
 
 func (DispatchArtifact) isFact() {}
 
+// GateAboveDispatch is the gate seed of a generation (Generation) finding the document at a version
+// below the one the seed was queued at (Above): Read is what the seed read of Dispatch, as the fact
+// it would otherwise apply, at Dispatch's latest version. Dispatch's versions only rise and the
+// seed reads after the daemon applied whatever moved the gate, so the gate stands above any version
+// Dispatch wrote, and is reset to Dispatch's.
+type GateAboveDispatch struct {
+	Generation uint64
+	Above      int
+	Read       DispatchArtifact
+}
+
+func (GateAboveDispatch) isFact() {}
+
 // DispatchConsumerPosition is one measurement of the Dispatch consumer's own position: its ack
 // floor as a stream sequence — the point before which every matching message is acknowledged,
 // redeliveries and naks included — and whether it is idle, nothing pending or unacknowledged at

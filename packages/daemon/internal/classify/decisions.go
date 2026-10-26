@@ -363,7 +363,9 @@ const (
 // closes, with its mark, as the version a human approved below the latest; a changes request
 // clears both. An approval and a newer version also clear the changes request the architect was
 // told of, which RecordChangesTold writes when it is told, so the approval and the told request
-// never stand together on the gate.
+// never stand together on the gate. An approval the gate already records at that version, read
+// again (record.EventMark.Same), keeps the fuller of the two marks (record.EventMark.Merged), so a
+// read that gave only its time never takes the sequence the live event gave.
 func ApplyDesignGateEvent(gate record.DesignGate, kind DesignGateEventKind, version int, mark record.EventMark) record.DesignGate {
 	if version > gate.LatestVersion {
 		gate.LatestVersion = version
@@ -371,6 +373,9 @@ func ApplyDesignGateEvent(gate record.DesignGate, kind DesignGateEventKind, vers
 	}
 	switch kind {
 	case DesignGateApproved:
+		if gate.ApprovedVersion != nil && *gate.ApprovedVersion == version && gate.ApprovedMark.Same(mark) {
+			mark = mark.Merged(gate.ApprovedMark)
+		}
 		approved := version
 		gate.ApprovedVersion, gate.ApprovedMark = &approved, mark
 		gate = clearChangesTold(gate)
@@ -431,23 +436,31 @@ func DesignGateChangesTold(gate record.DesignGate, version int, reason string, m
 		gate.ToldChangesMark.Same(mark)
 }
 
-// RecordChangesTold records on the gate the changes request the architect is being told of, so a
-// later read of the same review (a registration's or the gate seed's) tells it nothing again. A
-// review the gate already records keeps its record, completed with what this read adds of its
-// mark, so the review's live event and a read that showed only its time are one review.
+// RecordChangesTold records on the gate the changes request the architect is being told of, or has
+// been, so a later read of the same review (a registration's or the gate seed's) tells it nothing
+// again. A review the gate already records keeps its record, completed with what this read adds of
+// its mark (record.EventMark.Merged), so the review's live event and a read that showed only its
+// time are one review, recorded with both.
 func RecordChangesTold(gate record.DesignGate, version int, reason string, mark record.EventMark) record.DesignGate {
 	if DesignGateChangesTold(gate, version, reason, mark) {
-		if gate.ToldChangesMark.Seq == 0 {
-			gate.ToldChangesMark.Seq = mark.Seq
-		}
-		if gate.ToldChangesMark.At.IsZero() {
-			gate.ToldChangesMark.At = mark.At
-		}
+		gate.ToldChangesMark = gate.ToldChangesMark.Merged(mark)
 		return gate
 	}
 	told := version
 	gate.ToldChangesVersion, gate.ToldChangesReason, gate.ToldChangesMark = &told, reason, mark
 	return gate
+}
+
+// ApprovalFollows reports whether the gate records an approval given after a review of version at
+// mark: an approval of a later version, or one of that version the review does not come after
+// (record.EventMark.After). A changes request that such an approval followed was answered by the
+// person's own approval, so nothing of it is left to tell.
+func ApprovalFollows(gate record.DesignGate, version int, mark record.EventMark) bool {
+	if gate.ApprovedVersion == nil {
+		return false
+	}
+	approved := *gate.ApprovedVersion
+	return approved > version || approved == version && !mark.After(gate.ApprovedMark)
 }
 
 // DesignGateOpen reports whether a human approved the gate's current document version.

@@ -428,3 +428,210 @@ func TestAnArtifactEventChangesNoGateWhenTheDesignGateIsOff(t *testing.T) {
 		t.Fatalf("design-changes-requested notices with the design gate off = %#v, want none", told)
 	}
 }
+
+// changesOf is a changes request on the root's spec at version with reason, recorded at mark.
+func changesOf(version int, reason string, mark record.EventMark) intake.DispatchArtifact {
+	return intake.DispatchArtifact{Key: "LEGION-100", ArtifactID: "artifact-root", Kind: intake.DispatchArtifactChangesRequested, Version: version, Reason: reason, Mark: mark}
+}
+
+// approvalOf is an approval of the root's spec at version, recorded at mark.
+func approvalOf(version int, mark record.EventMark) intake.DispatchArtifact {
+	return intake.DispatchArtifact{Key: "LEGION-100", ArtifactID: "artifact-root", Kind: intake.DispatchArtifactApproved, Version: version, Mark: mark}
+}
+
+// A time-only read (from a Dispatch that does not give the sequence: one deployed after the daemon,
+// a rolling update, a rollback) and the review's live event are one review. The told record a
+// time-only read wrote is completed by the live event, so a later approval whose transaction began
+// first but committed after the changes request is ordered by its sequence and opens the gate.
+func TestTheLiveEventCompletesATimeOnlyToldRecord(t *testing.T) {
+	pool := migratedPool(t)
+	admission := newAdmission(t, 1, nil)
+	seedSlotted(t, pool, "LEGION-100", "A")
+	seedGate(t, pool, record.DesignGate{Issue: "LEGION-100", ArtifactID: "artifact-root", LatestVersion: 4})
+	applyFact(t, pool, admission, "seed-read", changesOf(4, "name the rollback path", record.EventMark{At: reviewedAt}))
+	applyFact(t, pool, admission, "live-changes", changesOf(4, "name the rollback path", record.EventMark{Seq: 9, At: reviewedAt}))
+	if gate := storedGate(t, pool, "LEGION-100"); gate.ToldChangesMark != (record.EventMark{Seq: 9, At: reviewedAt}) {
+		t.Fatalf("told record after the live event = %#v, want it completed with the event's sequence", gate.ToldChangesMark)
+	}
+	applyFact(t, pool, admission, "live-approval", approvalOf(4, record.EventMark{Seq: 12, At: reviewedAt.Add(-time.Millisecond)}))
+	if gate := storedGate(t, pool, "LEGION-100"); !classify.DesignGateOpen(*gate) {
+		t.Fatalf("gate after an approval committed after the changes request = %#v, want it open", gate)
+	}
+	if told := gateNotices(t, pool, "LEGION-100", "design-changes-requested"); len(told) != 1 {
+		t.Fatalf("design-changes-requested notices = %#v, want the request told once", told)
+	}
+}
+
+// An approval the gate holds, read again with only its time, keeps the sequence its live event
+// gave: a superseded changes request delivered late is then ordered by its sequence and changes
+// nothing, and a registration whose read began before the approval is the older reader.
+func TestAnApprovalReadAgainKeepsItsSequence(t *testing.T) {
+	t.Run("a superseded changes request delivered late", func(t *testing.T) {
+		pool := migratedPool(t)
+		admission := newAdmission(t, 1, nil)
+		seedSlotted(t, pool, "LEGION-100", "A")
+		seedGate(t, pool, record.DesignGate{Issue: "LEGION-100", ArtifactID: "artifact-root", LatestVersion: 4})
+		applyFact(t, pool, admission, "live-approval", approvalOf(4, record.EventMark{Seq: 12, At: reviewedAt}))
+		applyFact(t, pool, admission, "seed-read", approvalOf(4, record.EventMark{At: reviewedAt}))
+		applyFact(t, pool, admission, "late-changes", changesOf(4, "name the rollback path", record.EventMark{Seq: 11, At: reviewedAt.Add(time.Millisecond)}))
+		gate := storedGate(t, pool, "LEGION-100")
+		if !classify.DesignGateOpen(*gate) || gate.ApprovedMark != (record.EventMark{Seq: 12, At: reviewedAt}) {
+			t.Fatalf("gate after a late changes request the approval superseded = %#v, want it open with the approval's sequence", gate)
+		}
+		if told := gateNotices(t, pool, "LEGION-100", "design-changes-requested"); len(told) != 0 {
+			t.Fatalf("design-changes-requested notices = %#v, want none for a request the approval superseded", told)
+		}
+	})
+	t.Run("a registration whose read began before the approval", func(t *testing.T) {
+		pool := migratedPool(t)
+		admission := newAdmission(t, 1, nil)
+		seedSlotted(t, pool, "LEGION-100", "A")
+		seedGate(t, pool, record.DesignGate{Issue: "LEGION-100", ArtifactID: "artifact-root", LatestVersion: 4})
+		requested := record.EventMark{Seq: 5, At: reviewedAt.Add(-2 * time.Second)}
+		applyFact(t, pool, admission, "live-changes", changesOf(4, "name the rollback path", requested))
+		applyFact(t, pool, admission, "live-approval", approvalOf(4, record.EventMark{Seq: 9, At: reviewedAt}))
+		applyFact(t, pool, admission, "seed-read", approvalOf(4, record.EventMark{At: reviewedAt}))
+		applyFact(t, pool, admission, "register-v4", intake.GateRegistered{Issue: "LEGION-100", ArtifactID: "artifact-root", Version: 4, DispatchVersion: 4,
+			ChangesRequestedVersion: 4, ChangesReason: "name the rollback path", ChangesRequestedMark: requested, Since: record.EventMark{Seq: 7}})
+		if gate := storedGate(t, pool, "LEGION-100"); !classify.DesignGateOpen(*gate) {
+			t.Fatalf("gate after a registration older than the approval = %#v, want it still open", gate)
+		}
+		if told := gateNotices(t, pool, "LEGION-100", "design-changes-requested"); len(told) != 1 {
+			t.Fatalf("design-changes-requested notices = %#v, want the request told once", told)
+		}
+	})
+}
+
+// A registration that reads, with only its time, the approval the gate already holds at that
+// version keeps the sequence the live event gave, so a superseded changes request delivered late
+// changes nothing.
+func TestARegistrationRebuildKeepsTheApprovalsSequence(t *testing.T) {
+	pool := migratedPool(t)
+	admission := newAdmission(t, 1, nil)
+	seedSlotted(t, pool, "LEGION-100", "A")
+	approved := record.EventMark{Seq: 12, At: reviewedAt}
+	seedGate(t, pool, record.DesignGate{Issue: "LEGION-100", ArtifactID: "artifact-root", LatestVersion: 4, ApprovedVersion: new(4), ApprovedMark: approved})
+	applyFact(t, pool, admission, "register-v4", intake.GateRegistered{Issue: "LEGION-100", ArtifactID: "artifact-root", Version: 4, DispatchVersion: 4,
+		ApprovedVersion: 4, ApprovedMark: record.EventMark{At: reviewedAt}, Since: record.EventMark{Seq: 13}})
+	if gate := storedGate(t, pool, "LEGION-100"); gate.ApprovedMark != approved {
+		t.Fatalf("approval mark after a time-only registration read = %#v, want %#v", gate.ApprovedMark, approved)
+	}
+	applyFact(t, pool, admission, "late-changes", changesOf(4, "name the rollback path", record.EventMark{Seq: 11, At: reviewedAt.Add(time.Millisecond)}))
+	if gate := storedGate(t, pool, "LEGION-100"); !classify.DesignGateOpen(*gate) {
+		t.Fatalf("gate after a late changes request the approval superseded = %#v, want it open", gate)
+	}
+}
+
+// A gate seed's read with no sequence of an approval given after the changes request the gate
+// records (its live event lost) is ordered by its time, as before Dispatch kept the sequence, and
+// opens the gate.
+func TestATimeOnlyReadOfANewerApprovalOpensTheGate(t *testing.T) {
+	pool := migratedPool(t)
+	admission := newAdmission(t, 1, nil)
+	seedSlotted(t, pool, "LEGION-100", "A")
+	seedGate(t, pool, record.DesignGate{Issue: "LEGION-100", ArtifactID: "artifact-root", LatestVersion: 4})
+	applyFact(t, pool, admission, "live-changes", changesOf(4, "name the rollback path", record.EventMark{Seq: 9, At: reviewedAt}))
+	applyFact(t, pool, admission, "seed-read", approvalOf(4, record.EventMark{At: reviewedAt.Add(time.Minute)}))
+	if gate := storedGate(t, pool, "LEGION-100"); !classify.DesignGateOpen(*gate) {
+		t.Fatalf("gate after a time-only read of a later approval = %#v, want it open", gate)
+	}
+}
+
+// A changes request the gate's stale rule drops changes neither the gate nor its told record, and
+// is still told, with its own version and reason, unless an approval came after it: one of an
+// older version delivered after the version that followed it, and one a newer changes request at
+// that version superseded. A redelivery of its event is one notice.
+func TestAStaleChangesRequestIsToldWithoutChangingTheGate(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		gate   record.DesignGate
+		before []intake.Fact
+		late   intake.DispatchArtifact
+		told   []record.Notice
+	}{
+		{
+			name:   "an older version's request delivered after the next version",
+			gate:   record.DesignGate{Issue: "LEGION-100", ArtifactID: "artifact-root", LatestVersion: 4},
+			before: []intake.Fact{intake.DispatchArtifact{Key: "LEGION-100", ArtifactID: "artifact-root", Kind: intake.DispatchArtifactVersion, Version: 5, Mark: record.EventMark{Seq: 21}}},
+			late:   changesOf(4, "name the rollback path", record.EventMark{Seq: 20}),
+			told:   []record.Notice{{Kind: "design-changes-requested", Version: 4, Reason: "name the rollback path"}},
+		},
+		{
+			name: "a request a newer request at that version superseded",
+			gate: record.DesignGate{Issue: "LEGION-100", ArtifactID: "artifact-root", LatestVersion: 4,
+				ToldChangesVersion: new(4), ToldChangesReason: "and name who runs the restore", ToldChangesMark: record.EventMark{Seq: 12}},
+			late: changesOf(4, "name the rollback path", record.EventMark{Seq: 11}),
+			told: []record.Notice{{Kind: "design-changes-requested", Version: 4, Reason: "name the rollback path"}},
+		},
+		{
+			name: "an older version's request an approval followed",
+			gate: record.DesignGate{Issue: "LEGION-100", ArtifactID: "artifact-root", LatestVersion: 5, ApprovedVersion: new(4), ApprovedMark: record.EventMark{Seq: 15}},
+			late: changesOf(4, "name the rollback path", record.EventMark{Seq: 14}),
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := migratedPool(t)
+			admission := newAdmission(t, 1, nil)
+			seedSlotted(t, pool, "LEGION-100", "A")
+			seedGate(t, pool, tc.gate)
+			for i, fact := range tc.before {
+				applyFact(t, pool, admission, fmt.Sprintf("before-%d", i), fact)
+			}
+			before := storedGate(t, pool, "LEGION-100")
+			applyFact(t, pool, admission, "late-changes", tc.late)
+			applyFact(t, pool, admission, "late-changes", tc.late)
+			if gate := storedGate(t, pool, "LEGION-100"); !reflect.DeepEqual(gate, before) {
+				t.Fatalf("gate after a stale changes request = %#v, want it unchanged: %#v", gate, before)
+			}
+			if told := gateNotices(t, pool, "LEGION-100", "design-changes-requested"); !reflect.DeepEqual(told, tc.told) {
+				t.Fatalf("design-changes-requested notices = %#v, want %#v", told, tc.told)
+			}
+		})
+	}
+}
+
+// A registration that finds the gate of its document already open at the version it registers
+// (the person approved between request-approval and register_gate, and the live event opened the
+// gate first) tells the architect nothing again.
+func TestARegistrationOfAGateAlreadyOpenAtItsVersionTellsNoApprovalAgain(t *testing.T) {
+	pool := migratedPool(t)
+	admission := newAdmission(t, 1, nil)
+	seedSlotted(t, pool, "LEGION-100", "A")
+	seedGate(t, pool, record.DesignGate{Issue: "LEGION-100", ArtifactID: "artifact-root", LatestVersion: 3})
+	approved := record.EventMark{Seq: 9, At: reviewedAt}
+	applyFact(t, pool, admission, "live-approval", approvalOf(4, approved))
+	applyFact(t, pool, admission, "register-v4", intake.GateRegistered{Issue: "LEGION-100", ArtifactID: "artifact-root", Version: 4, DispatchVersion: 4,
+		ApprovedVersion: 4, ApprovedMark: approved, Since: record.EventMark{Seq: 10}})
+	if gate := storedGate(t, pool, "LEGION-100"); !classify.DesignGateOpen(*gate) {
+		t.Fatalf("gate after the registration = %#v, want it open", gate)
+	}
+	if opened := gateNotices(t, pool, "LEGION-100", "design-approved"); len(opened) != 1 || opened[0].Version != 4 {
+		t.Fatalf("design-approved notices = %#v, want one at version 4", opened)
+	}
+}
+
+// With the design gate off, a registration approves the gate whatever it held: a gate closed while
+// the gate was armed, whose review a read began before, or a gate at a version above the read's,
+// does not stay closed for the seed to keep closed, since no artifact event moves a gate under off.
+func TestARegistrationUnderTheGateOffApprovesWhateverTheGateHeld(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		gate record.DesignGate
+	}{
+		{name: "a changes request told after the read began", gate: record.DesignGate{Issue: "LEGION-100", ArtifactID: "artifact-root", LatestVersion: 4,
+			ToldChangesVersion: new(4), ToldChangesReason: "name the rollback path", ToldChangesMark: record.EventMark{Seq: 11}}},
+		{name: "a version above the read's", gate: record.DesignGate{Issue: "LEGION-100", ArtifactID: "artifact-root", LatestVersion: 5}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := migratedPool(t)
+			admission := newAdmissionWithGate(t, 1, config.DesignGateOff, nil)
+			seedSlotted(t, pool, "LEGION-100", "A")
+			seedGate(t, pool, tc.gate)
+			applyFact(t, pool, admission, "register-v4", intake.GateRegistered{Issue: "LEGION-100", ArtifactID: "artifact-root", Version: 4, DispatchVersion: 4,
+				Since: record.EventMark{Seq: 10}})
+			if gate := storedGate(t, pool, "LEGION-100"); !classify.DesignGateOpen(*gate) {
+				t.Fatalf("gate after a registration with the design gate off = %#v, want it open", gate)
+			}
+		})
+	}
+}

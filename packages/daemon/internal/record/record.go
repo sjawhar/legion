@@ -147,22 +147,24 @@ type EventMark struct {
 }
 
 // After says whether m comes after start: by sequence when both carry one, otherwise by time when
-// both carry one, strictly, so an event at start's own time is not after it. A start with a
-// sequence is never followed by an m without one: Dispatch has given every review a sequence since
-// its migration 0118 (a review written by any release, through the trigger that migration adds),
-// so a review Dispatch shows with no sequence was recorded before any sequenced event or read. The
-// time fallback is otherwise blind to two events whose transactions began at one instant, and to an
-// event whose transaction began before start's and committed after it. When neither is known on
-// both sides, which comes first cannot be told, and m counts as after start, as it did before marks
-// were recorded.
+// both carry one, strictly, so an event at start's own time is not after it. An m with no sequence
+// against a start with one is ordered by their times when both carry a time: such an m comes from a
+// read of a Dispatch that does not give the sequence (one older than its migration 0118, which a
+// daemon deployed first, a rolling update or a Dispatch rollback can meet), even for a review whose
+// row has one, so the times are what orders the two, as before Dispatch kept the sequence. That
+// fallback is as blind as it was then: to two transactions that began at one instant, and to one
+// that began before the other and committed after it. A start with a sequence and no time is a
+// registration's read (its Since), which has no time of its own to compare with, so an m without a
+// sequence is never after it. When neither is known on both sides, which comes first cannot be
+// told, and m counts as after start, as it did before marks were recorded.
 func (m EventMark) After(start EventMark) bool {
 	switch {
 	case m.Seq > 0 && start.Seq > 0:
 		return m.Seq > start.Seq
-	case start.Seq > 0:
-		return false
 	case !m.At.IsZero() && !start.At.IsZero():
 		return m.At.After(start.At)
+	case start.Seq > 0:
+		return false
 	}
 	return true
 }
@@ -179,6 +181,19 @@ func (m EventMark) Same(other EventMark) bool {
 		return m.At.Equal(other.At)
 	}
 	return true
+}
+
+// Merged is m with each part it lacks taken from other. Two reads of one review (Same), one of
+// which gave less of its mark, are kept as the fuller one, so a sequence the daemon once knew of a
+// review is never lost to a read that did not give it.
+func (m EventMark) Merged(other EventMark) EventMark {
+	if m.Seq == 0 {
+		m.Seq = other.Seq
+	}
+	if m.At.IsZero() {
+		m.At = other.At
+	}
+	return m
 }
 
 // ID is the mark as one number for a fact's event id: the sequence, else the time in Unix
