@@ -85,7 +85,9 @@ type Located struct {
 }
 
 // Extract parses Dispatch links from body. Links outside serverURL stay URL
-// references so a post never loses an ordinary external link.
+// references so a post never loses an ordinary external link. A reference whose target id is past
+// MaxTargetBytes (targetFits) names nothing: a `dispatch://` one is dropped, and a dashboard URL
+// is the URL it is, as one that names no page is.
 func Extract(body, serverURL string) []Ref {
 	located := ExtractAt(body, serverURL)
 	refs := make([]Ref, len(located))
@@ -107,7 +109,7 @@ func ExtractAt(body, serverURL string) []Located {
 			continue
 		}
 		if strings.HasPrefix(raw, "dispatch://") {
-			if ref, ok := parseDispatch(strings.TrimPrefix(raw, "dispatch://")); ok {
+			if ref, ok := parseDispatch(strings.TrimPrefix(raw, "dispatch://")); ok && targetFits(ref) {
 				refs = append(refs, Located{Ref: ref, Offset: span[0]})
 			}
 			continue
@@ -116,7 +118,7 @@ func ExtractAt(body, serverURL string) []Located {
 			base, _ = url.Parse(serverURL)
 			baseParsed = true
 		}
-		if ref, ok := parseServer(raw, base); ok {
+		if ref, ok := parseServer(raw, base); ok && targetFits(ref) {
 			refs = append(refs, Located{Ref: ref, Offset: span[0]})
 			continue
 		}
@@ -252,22 +254,41 @@ func parseArtifactSlug(value string) (string, bool) {
 // Its twin is MAX_BLOCK_ID_BYTES in @legion/contracts.
 const MaxBlockIDBytes = 256
 
-// MaxBlockTargetBytes bounds a block reference's target id, in bytes: the id refs.ToID writes for
-// it, `<issue key or project>/<document slug>#<block id>`, which refs.to_id and block_refs.to_id
-// store in B-tree keys (refs_pkey, refs_to, block_refs_pkey, block_refs_to) of at most 2704
-// bytes. MaxBlockIDBytes bounds the id, but a document's slug has no bound, so a block reference
-// past this names nothing (blockTargetFits): in text it is no reference, and a live document page
-// whose fragment names such a block names the document. At the bound the widest of those keys,
-// block_refs_pkey with an id of MaxBlockIDBytes, is about 2360 bytes. Its twin is
-// MAX_BLOCK_TARGET_BYTES in @legion/contracts.
-const MaxBlockTargetBytes = 2048
+// MaxTargetBytes bounds a reference's target id, in bytes: the id refs.ToID writes for it, which
+// refs.to_id and block_refs.to_id store in B-tree keys (refs_pkey, refs_to, block_refs_pkey,
+// block_refs_to) of at most 2704 bytes. That id is an issue's key, a document's
+// `<issue key or project>/<slug>` or `agent/<session id>/<slug>`, an ask's, a comment's or a
+// message's id, a component's `<project>/<id>` or a block's `<document's id>#<block id>`, and
+// the grammar bounds none of those parts but a block id (MaxBlockIDBytes) and a project key, so a
+// reference whose target id is past this names nothing (targetFits): in text it is no reference,
+// and a live document page whose fragment names a block past it names the document. Data stored
+// under a longer name - a document whose ref_key is longer - is read and written all the same;
+// only a reference to it names nothing. At the bound the widest of those keys, block_refs_pkey
+// with a citing block id of MaxBlockIDBytes, is about 2360 bytes, and refs_pkey with a uuid
+// source and a `component` target about 2120. Its twin is MAX_REFERENCE_TARGET_BYTES in
+// @legion/contracts.
+const MaxTargetBytes = 2048
 
-// blockTargetFits reports whether block id of document, a parsed reference to an issue's or a
-// project's document, makes a target id of at most MaxBlockTargetBytes. The length is the one
-// refs.ToID writes: the document's owner (an issue key or a project; a reference names one, never
-// both), `/`, its slug (`spec` for an issue's spec), `#` and the id.
-func blockTargetFits(document Ref, id string) bool {
-	return len(document.IssueKey)+len(document.Project)+len("/")+len(document.ID)+len("#")+len(id) <= MaxBlockTargetBytes
+// targetFits reports whether ref, a parsed reference, names a target id of at most
+// MaxTargetBytes. The length is the one refs.ToID writes, counted without writing it: a
+// document's owner (an issue key or a project, a reference names one, never both; or `agent/`, a
+// session id and `/`), `/` and its slug (`spec` for an issue's spec), and a block's `#` and id
+// after its document's; a component's project and `/` before its id; any other kind's id alone.
+func targetFits(ref Ref) bool {
+	bytes := len(ref.ID)
+	switch ref.Kind {
+	case "artifact", "block":
+		if ref.Session != "" {
+			bytes += len("agent/") + len(ref.Session)
+		}
+		bytes += len(ref.IssueKey) + len(ref.Project) + len("/")
+		if ref.Kind == "block" {
+			bytes += len("#") + len(ref.Block)
+		}
+	case "component":
+		bytes += len(ref.Project) + len("/")
+	}
+	return bytes <= MaxTargetBytes
 }
 
 // EncodeBlockID writes a block id as a reference's `#b-` fragment carries it: every UTF-8 byte
@@ -297,9 +318,9 @@ func EncodeBlockID(id string) string {
 // id is read with any valid percent-encoding (EncodeBlockID writes one), so `%40` is an `@` in the
 // id and a raw `@` is only ever the pin. Any other fragment, a raw `@` that does not start a
 // well-formed pin, a versioned document, an agent conversation's document, an item, or an id that
-// is empty, does not decode or is longer than MaxBlockIDBytes names nothing, as does a block whose
-// target id is past MaxBlockTargetBytes. A document version shows only as an `@` in the document
-// part: no key or slug holds one.
+// is empty, does not decode or is longer than MaxBlockIDBytes names nothing. (Extract holds the
+// block's whole target id to MaxTargetBytes, as every reference's.) A document version shows only
+// as an `@` in the document part: no key or slug holds one.
 func parseBlock(document, fragment string) (Ref, bool) {
 	encoded, ok := strings.CutPrefix(fragment, "b-")
 	if !ok || strings.Contains(document, "@") {
@@ -322,7 +343,7 @@ func parseBlock(document, fragment string) (Ref, bool) {
 		return Ref{}, false
 	}
 	ref, ok := parseDispatch(document)
-	if !ok || ref.Kind != "artifact" || ref.Session != "" || !blockTargetFits(ref, id) {
+	if !ok || ref.Kind != "artifact" || ref.Session != "" {
 		return Ref{}, false
 	}
 	ref.Kind, ref.Block, ref.Pin = "block", id, pin
@@ -433,18 +454,23 @@ func parseServer(raw string, base *url.URL) (Ref, bool) {
 }
 
 // documentPage reads a document page of an issue or a project: the item its query names, as
-// documentItem reads it, else the block its `#b-<block id>` fragment names (blockID and
-// blockTargetFits; a raw `@` is no pin here, since pins are written only as `dispatch://`
-// references), else the document. A version page (`versionParam` set) is the document whatever its
-// fragment: a version's stored markdown carries no block ids to land on.
+// documentItem reads it, else the block its `#b-<block id>` fragment names (blockID; a raw `@` is
+// no pin here, since pins are written only as `dispatch://` references) when its target id fits
+// (targetFits), else the document. A version page (`versionParam` set) is the document whatever
+// its fragment: a version's stored markdown carries no block ids to land on. Extract holds what
+// this names to MaxTargetBytes too, so a page whose document or item is past it names nothing.
 func documentPage(document Ref, query url.Values, versionParam string, page *url.URL) (Ref, bool) {
 	ref, ok := documentItem(document, query)
 	if !ok || ref.Kind != "artifact" || query.Get(versionParam) != "" {
 		return ref, ok
 	}
 	if encoded, found := strings.CutPrefix(page.EscapedFragment(), "b-"); found {
-		if id, ok := blockID(encoded); ok && blockTargetFits(ref, id) {
-			ref.Kind, ref.Block = "block", id
+		if id, ok := blockID(encoded); ok {
+			block := ref
+			block.Kind, block.Block = "block", id
+			if targetFits(block) {
+				return block, true
+			}
 		}
 	}
 	return ref, true

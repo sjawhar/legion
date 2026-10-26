@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { MAX_BLOCK_TARGET_BYTES } from "@legion/contracts";
+import { MAX_REFERENCE_TARGET_BYTES } from "@legion/contracts";
 
 import { parseDispatchRef } from "../dispatch-owner";
 
@@ -86,15 +86,16 @@ test.each([
 });
 
 // A block reference names its block only while the target id `<owner>/<slug>#<block id>`, the id
-// the server stores the edge under, holds at most MAX_BLOCK_TARGET_BYTES, the id counted in its
-// decoded UTF-8 bytes: one byte more names nothing, for an issue's document and a project's alike.
+// the server stores the edge under, holds at most MAX_REFERENCE_TARGET_BYTES, the id counted in
+// its decoded UTF-8 bytes: one byte more names nothing, for an issue's document and a project's
+// alike.
 test.each([
   ["CORE-1", { kind: "issue", issue: "CORE-1" }],
   ["CORE", { kind: "project", project: "CORE" }],
 ] as const)("a block of a %s document is bounded by its whole target id", (owner, parsedOwner) => {
   // `é` is two bytes, written %C3%A9.
   const atBound = "a".repeat(
-    MAX_BLOCK_TARGET_BYTES - new TextEncoder().encode(`${owner}/#é`).length
+    MAX_REFERENCE_TARGET_BYTES - new TextEncoder().encode(`${owner}/#é`).length
   );
   const document = `dispatch://${owner}/artifact/${atBound}`;
   expect(parseDispatchRef(`${document}#b-%C3%A9`)).toEqual({
@@ -106,4 +107,22 @@ test.each([
     ...(parsedOwner.kind === "project" ? { artifact: atBound } : {}),
   });
   expect(parseDispatchRef(`dispatch://${owner}/artifact/${atBound}a#b-%C3%A9`)).toBeNull();
+});
+
+// Every reference names its target only while the target id the server stores the edge under
+// holds at most MAX_REFERENCE_TARGET_BYTES: an issue's key, a document's `<owner>/<slug>`, and an
+// item's id counted decoded. One character more names nothing.
+test.each([
+  ["an issue", "dispatch://CORE-1", "0", "CORE-1".length],
+  ["an issue's document", "dispatch://CORE-1/artifact/", "a", "CORE-1/".length],
+  ["a project's document", "dispatch://CORE/artifact/", "a", "CORE/".length],
+  ["an issue's comment", "dispatch://CORE-1/comment/", "a", 0],
+  ["an issue's message", "dispatch://CORE-1/message/", "a", 0],
+  ["an ask on a project's document", "dispatch://CORE/artifact/plan-md/ask/", "a", 0],
+  ["an item id counted decoded", "dispatch://CORE-1/comment/", "%C3%A9", 0],
+] as const)("%s is bounded by its target id", (_name, prefix, character, overhead) => {
+  const width = new TextEncoder().encode(decodeURIComponent(character)).length;
+  const atBound = character.repeat((MAX_REFERENCE_TARGET_BYTES - overhead) / width);
+  expect(parseDispatchRef(`${prefix}${atBound}`)).not.toBeNull();
+  expect(parseDispatchRef(`${prefix}${atBound}${character}`)).toBeNull();
 });

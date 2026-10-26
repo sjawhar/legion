@@ -45,7 +45,6 @@ import {
   ASK_QUESTION_MAX,
   ASK_URGENCIES,
   actorLabel,
-  blockTargetFits,
   claimHolds,
   DEFAULT_ISSUE_PAGE_LIMIT,
   DISPATCH_BODY_MAX,
@@ -57,6 +56,7 @@ import {
   overCapMessage,
   PROJECT_KEY_PATTERN,
   PROJECT_KEY_RULE,
+  referenceTargetFits,
   serviceSubjectLabel,
   zodSchemaApi,
 } from "@legion/contracts";
@@ -998,12 +998,14 @@ export function dispatchRefFromUrl(value: string, serverUrl: string): string | u
   // The block a live document page lands on (`#b-<block id>`), written as `encodeBlockId` writes
   // it. A version page names the document whatever its fragment: a version's stored markdown
   // carries no block ids to land on, and a pin is written only as a dispatch:// reference. So does
-  // a page whose block's target id `<owner>/<slug>#<block id>` does not fit (`blockTargetFits`).
+  // a page whose block's target id `<owner>/<slug>#<block id>` does not fit
+  // (`referenceTargetFits`); one whose document's or item's does not names nothing, as
+  // `parseDispatchRef` reads the reference this returns.
   const blockOf = (versionName: string, owner: string, slug: string): string => {
     const id = url.hash.startsWith("#b-") ? decodeBlockId(url.hash.slice(3)) : undefined;
     return id === undefined ||
       url.searchParams.get(versionName) ||
-      !blockTargetFits(owner, slug, id)
+      !referenceTargetFits(`${owner}/${slug}#${id}`)
       ? ""
       : `#b-${encodeBlockId(id)}`;
   };

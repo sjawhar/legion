@@ -1,12 +1,10 @@
 import { expect, test } from "bun:test";
 
 import {
-  blockTargetFits,
   DISPATCH_BLOCK_ID_ENCODINGS,
   decodeBlockId,
   encodeBlockId,
   MAX_BLOCK_ID_BYTES,
-  MAX_BLOCK_TARGET_BYTES,
   parseBlockFragment,
 } from "./dispatch-block-ref";
 
@@ -71,24 +69,6 @@ test.each([
   [`${encodeBlockId(multiBytePastBound)}@v2`, undefined],
 ])("parses block fragment %p", (fragment, want) => {
   expect(parseBlockFragment(fragment)).toEqual(want);
-});
-
-// A block's target id `<owner>/<slug>#<block id>` fits at MAX_BLOCK_TARGET_BYTES UTF-8 bytes and
-// not one byte past, a multi-byte character counted in its bytes whether the id fills the target
-// or a long slug does and the id is one `é` (two bytes, one UTF-16 unit) or `📊` (four, two).
-test.each([
-  ["CORE-1", "spec", (room: number) => "é".repeat(Math.floor(room / 2)) + "x".repeat(room % 2)],
-  [
-    "CORE",
-    "handbook-md",
-    (room: number) => "é".repeat(Math.floor(room / 2)) + "x".repeat(room % 2),
-  ],
-  ["CORE-1", "a".repeat(2000), (room: number) => `${"x".repeat(room - 2)}é`],
-  ["CORE", "a".repeat(2000), (room: number) => `${"x".repeat(room - 4)}📊`],
-] as const)("bounds the target id of a block of %s/%s", (owner, slug, idOf) => {
-  const id = idOf(MAX_BLOCK_TARGET_BYTES - `${owner}/${slug}#`.length);
-  expect(blockTargetFits(owner, slug, id)).toBe(true);
-  expect(blockTargetFits(owner, slug, `${id}x`)).toBe(false);
 });
 
 test("the Go encoder's table is the same table", async () => {

@@ -56,33 +56,6 @@ export function decodeBlockId(encoded: string): string | undefined {
 }
 
 /**
- * The most bytes a block reference's target id may hold: `<issue key or project>/<document
- * slug>#<block id>`, the id the server's graph stores the edge to the block under (`refs.ToID`)
- * in Postgres B-tree keys of at most 2704 bytes. MAX_BLOCK_ID_BYTES bounds the id, but a
- * document's slug has no bound, so a block reference past this names nothing (`blockTargetFits`),
- * and a live document page whose fragment names such a block is its document. Go's twin is
- * `text.MaxBlockTargetBytes`.
- */
-export const MAX_BLOCK_TARGET_BYTES = 2048;
-
-/**
- * Whether `block`, a decoded block id, of the document `slug` (`spec` for an issue's spec) under
- * `owner`, its issue key or project, is one a reference can name: its target id
- * `<owner>/<slug>#<block>`, in UTF-8 bytes, holds at most MAX_BLOCK_TARGET_BYTES, as the server's
- * `text.blockTargetFits` counts it. The bytes are counted by code point (a lone surrogate is the
- * three of U+FFFD), not with TextEncoder: Bun 1.3's `encode` writes a non-ASCII Latin-1
- * character of a string this long as one byte, so 2000 `a`s and an `é` come to 2001.
- */
-export function blockTargetFits(owner: string, slug: string, block: string): boolean {
-  let bytes = 0;
-  for (const character of `${owner}/${slug}#${block}`) {
-    const code = character.codePointAt(0) ?? 0;
-    bytes += code < 0x80 ? 1 : code < 0x800 ? 2 : code < 0x10000 ? 3 : 4;
-  }
-  return bytes <= MAX_BLOCK_TARGET_BYTES;
-}
-
-/**
  * The largest version a block reference's pin (`@v<N>`) may name: Go's `int` on the 64-bit
  * platforms the server runs on, which `text.parseBlock` reads N into. A pin past it names nothing.
  */

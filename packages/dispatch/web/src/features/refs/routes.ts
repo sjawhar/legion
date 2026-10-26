@@ -3,6 +3,7 @@ import {
   hasControlCharacter,
   isSessionId,
   itemFromSearch,
+  referenceTargetFits,
   SESSION_ID_PATTERN,
 } from "@legion/contracts";
 import { matchPath } from "react-router-dom";
@@ -253,10 +254,41 @@ function parseIssueReference(key: string, target: string | undefined): IssueRout
   };
 }
 
+/** The target id the server's graph stores a reference to `route` under (`refs.ToID`), which a
+ *  reference names only while it fits (`referenceTargetFits`): an ask's, a comment's or a
+ *  message's id, a document's `<key or project>/<slug>` (`spec` for an issue's spec) or
+ *  `agent/<session id>/<slug>`, a block's `#<block id>` after its document's, and an issue's key
+ *  for the issue and each of its tabs. */
+function routeTarget(route: DispatchReferenceRoute): string {
+  const block = "block" in route && route.block !== undefined ? `#${route.block}` : "";
+  switch (route.kind) {
+    case "agent-artifact":
+      return `agent/${route.session}/${route.slug}`;
+    case "document":
+      return route.item?.id ?? `${route.project}/${route.slug}${block}`;
+    case "spec":
+      return `${route.key}/spec${block}`;
+    case "artifact":
+      return `${route.key}/${route.slug}${block}`;
+    case "ask":
+    case "comment":
+    case "message":
+      return route.id;
+    default:
+      return route.key;
+  }
+}
+
 /** A `dispatch://` reference's route. One holding a control character names nothing, as the
- * server's `text.Extract` reads it; a fragment names a block (`parseBlockReference`, `withBlock`)
- * or nothing. */
+ * server's `text.Extract` reads it, and so does one whose target id does not fit (`routeTarget`);
+ * a fragment names a block (`parseBlockReference`, `withBlock`) or nothing. */
 export function parseDispatchReference(value: string): DispatchReferenceRoute | undefined {
+  const route = parseDispatchRoute(value);
+  return route !== undefined && referenceTargetFits(routeTarget(route)) ? route : undefined;
+}
+
+/** `parseDispatchReference` before it bounds the target id. */
+function parseDispatchRoute(value: string): DispatchReferenceRoute | undefined {
   if (hasControlCharacter(value)) {
     return undefined;
   }
@@ -266,7 +298,7 @@ export function parseDispatchReference(value: string): DispatchReferenceRoute | 
     const target = parseBlockReference(document, value.slice(hash + 1));
     return target === undefined
       ? undefined
-      : withBlock(parseDispatchReference(document), target.block, target.pin);
+      : withBlock(parseDispatchRoute(document), target.block, target.pin);
   }
   const match = value.match(/^dispatch:\/\/([^/]+)(?:\/(.*))?$/);
   if (match === null) {
@@ -409,11 +441,12 @@ export function routeProjectOf(pathname: string): string | undefined {
 
 /** The reference a `dispatch://` URL or a same-origin dashboard path names; undefined for an
  * external link or a dashboard path that is not an issue/document reference. A reference holding a
- * control character, or naming a slug Dispatch never gives a document, names nothing, as the
- * server's `text.Extract` reads it. A `#b-<block id>` fragment on a document page names that
- * block, unless the page is a version (whose stored text holds no block ids) or names an item; a
- * raw `@` there is no pin, since pins are written only in `dispatch://` references. Any other
- * fragment leaves the page's reference as it is. */
+ * control character, naming a slug Dispatch never gives a document, or whose target id does not
+ * fit (`routeTarget`), names nothing, as the server's `text.Extract` reads it. A `#b-<block id>`
+ * fragment on a document page names that block, unless the page is a version (whose stored text
+ * holds no block ids) or names an item, or the block's target id does not fit; a raw `@` there is
+ * no pin, since pins are written only in `dispatch://` references. Any other fragment leaves the
+ * page's reference as it is. */
 export function referenceRouteFromHref(
   href: string,
   appOrigin: string = window.location.origin
@@ -446,17 +479,22 @@ export function referenceRouteFromHref(
   // An issue document path carrying `?comment=`/`?ask=` names that item, the same rule
   // `parseProjectPath` already applies to a project document. Without it a search hit's hover
   // card previewed the document instead of the comment the reader is about to open.
+  let named: DispatchReferenceRoute = route;
   if (!isProjectRoute(route) && (route.kind === "spec" || route.kind === "artifact")) {
     const item = itemFromSearch(url.search);
     if (item === null) {
       return undefined;
     }
     if (item !== undefined) {
-      return { id: item.id, key: route.key, kind: item.kind };
+      named = { id: item.id, key: route.key, kind: item.kind };
     }
   }
   const block = url.hash.startsWith("#b-") ? decodeBlockId(url.hash.slice(3)) : undefined;
-  return (block === undefined ? undefined : withBlock(route, block)) ?? route;
+  const blockRoute = block === undefined ? undefined : withBlock(named, block);
+  if (blockRoute !== undefined && referenceTargetFits(routeTarget(blockRoute))) {
+    return blockRoute;
+  }
+  return referenceTargetFits(routeTarget(named)) ? named : undefined;
 }
 
 export interface ReferenceSpan {

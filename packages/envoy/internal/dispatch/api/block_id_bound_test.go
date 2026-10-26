@@ -236,3 +236,62 @@ func TestTextCitingABlockOfALongNamedDocumentIsStillWritten(t *testing.T) {
 		t.Fatalf("upload a document citing a block of the long-named document: status=%d body=%.400s, want 201 as main answers", citer.Code, citer.Body.String())
 	}
 }
+
+// A comment citing a document by a 3200-character slug, or a comment by a 3200-character id - each
+// a target id past text.MaxTargetBytes, which main fails to write with a 500 because refs_pkey
+// cannot hold it - is posted: the citation names nothing, so it writes no edge, and the comment's
+// other, ordinary reference is recorded as ever.
+func TestACommentCitingATargetPastTheBoundPosts(t *testing.T) {
+	_, handler, database := browserDocumentService(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Cites long targets", "Context paragraph.\n")
+	for _, test := range []struct{ name, cited string }{
+		{"a document's slug", "dispatch://" + issue.Key + "/artifact/" + randomBlockID(t, 3200)},
+		{"a comment's id", "dispatch://" + issue.Key + "/comment/" + randomBlockID(t, 3200)},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			created := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
+				"body": "See " + test.cited + " and dispatch://" + issue.Key + ".",
+			}, "alice")
+			if created.Code != http.StatusCreated {
+				t.Fatalf("post a comment citing %s of 3200 characters: status=%d body=%.400s", test.name, created.Code, created.Body.String())
+			}
+			comment := decodeBody[model.Comment](t, created)
+			var targets []string
+			if err := database.Pool.QueryRow(context.Background(), `
+				select coalesce(array_agg(to_kind || ':' || to_id order by to_kind), '{}') from refs where from_kind = 'comment' and from_id = $1
+			`, comment.ID).Scan(&targets); err != nil {
+				t.Fatal(err)
+			}
+			if len(targets) != 1 || targets[0] != "issue:"+issue.Key {
+				t.Fatalf("the comment's references = %.200q, want only its issue", targets)
+			}
+		})
+	}
+}
+
+// The API reads a reference by the grammar text is indexed by, so one whose target id is past
+// text.MaxTargetBytes is 400 INVALID_REFERENCE wherever a route parses one - the graph's ?to= and
+// ?from= and block-links' documents - while one at the bound is read: a comment no one wrote is
+// 404 NOT_FOUND there.
+func TestAReferencePastTheTargetBoundIsAnInvalidReference(t *testing.T) {
+	_, handler, _ := browserDocumentService(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Reads long targets", "Context paragraph.\n")
+	atBound := "dispatch://" + issue.Key + "/comment/" + randomBlockID(t, text.MaxTargetBytes)
+	if read := graphRequest(t, handler, url.Values{"to": {atBound}}); read.Code != http.StatusNotFound || responseCode(t, read) != "NOT_FOUND" {
+		t.Fatalf("?to= a comment id at the bound: status=%d body=%.400s, want 404 NOT_FOUND", read.Code, read.Body.String())
+	}
+	longDocument := "dispatch://" + issue.Key + "/artifact/" + randomBlockID(t, text.MaxTargetBytes-len(issue.Key+"/")+1)
+	for _, reference := range []string{atBound + "a", longDocument, "dispatch://CORE/component/" + randomBlockID(t, text.MaxTargetBytes)} {
+		for _, direction := range []string{"to", "from"} {
+			if read := graphRequest(t, handler, url.Values{direction: {reference}}); read.Code != http.StatusBadRequest || responseCode(t, read) != "INVALID_REFERENCE" {
+				t.Fatalf("?%s= %.60s… one byte past the bound: status=%d body=%.400s, want 400 INVALID_REFERENCE", direction, reference, read.Code, read.Body.String())
+			}
+		}
+	}
+	spec := "dispatch://" + issue.Key + "/spec"
+	for _, query := range []url.Values{{"from": {longDocument}, "to": {spec}}, {"from": {spec}, "to": {longDocument}}} {
+		if read := blockLinksRequest(t, handler, query); read.Code != http.StatusBadRequest || responseCode(t, read) != "INVALID_REFERENCE" {
+			t.Fatalf("block-links %v naming a document past the bound: status=%d body=%.400s, want 400 INVALID_REFERENCE", query, read.Code, read.Body.String())
+		}
+	}
+}

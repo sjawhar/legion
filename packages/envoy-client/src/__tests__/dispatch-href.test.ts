@@ -1,7 +1,8 @@
 import { expect, test } from "bun:test";
-import { DISPATCH_HREF_REFERENCES, MAX_BLOCK_TARGET_BYTES } from "@legion/contracts";
+import { DISPATCH_HREF_REFERENCES, MAX_REFERENCE_TARGET_BYTES } from "@legion/contracts";
 
 import { dispatchRefFromUrl } from "../dispatch-execute";
+import { parseDispatchRef } from "../dispatch-owner";
 
 // The agent-side half of the shared golden table: `dispatch_search` prints these hrefs, and an
 // agent pastes one back as a ref, so every row has to resolve to the reference it names. The
@@ -58,15 +59,17 @@ test.each([
 });
 
 // A live document page names its block only while the block's target id `<owner>/<slug>#<block
-// id>` holds at most MAX_BLOCK_TARGET_BYTES, as the server reads the page; one byte more and the
-// page names its document, for an issue's document and a project's alike.
+// id>` holds at most MAX_REFERENCE_TARGET_BYTES, as the server reads the page; one byte more and
+// the page names its document, for an issue's document and a project's alike. A page whose
+// document's own target id `<owner>/<slug>` is past the bound names nothing: the reference it
+// resolves to is one `parseDispatchRef` refuses.
 test.each([
   ["CORE-1", "/issues/CORE-1/artifacts/", "dispatch://CORE-1/artifact/"],
   ["CORE", "/projects/CORE/documents/", "dispatch://CORE/artifact/"],
 ])("a %s document page is bounded by its block's whole target id", (owner, page, document) => {
   // `é` is two bytes, written %C3%A9.
   const atBound = "a".repeat(
-    MAX_BLOCK_TARGET_BYTES - new TextEncoder().encode(`${owner}/#é`).length
+    MAX_REFERENCE_TARGET_BYTES - new TextEncoder().encode(`${owner}/#é`).length
   );
   expect(dispatchRefFromUrl(`${server}${page}${atBound}#b-%C3%A9`, server)).toBe(
     `${document}${atBound}#b-%C3%A9`
@@ -74,4 +77,8 @@ test.each([
   expect(dispatchRefFromUrl(`${server}${page}${atBound}a#b-%C3%A9`, server)).toBe(
     `${document}${atBound}a`
   );
+  const longSlug = "a".repeat(MAX_REFERENCE_TARGET_BYTES - `${owner}/`.length + 1);
+  const longDocument = dispatchRefFromUrl(`${server}${page}${longSlug}#b-x`, server);
+  expect(longDocument).toBe(`${document}${longSlug}`);
+  expect(parseDispatchRef(longDocument ?? "")).toBeNull();
 });

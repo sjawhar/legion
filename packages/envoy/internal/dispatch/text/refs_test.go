@@ -211,7 +211,7 @@ func TestExtractReadsADashboardPageBlockFragment(t *testing.T) {
 }
 
 // A block reference names a block only while its target id, `<owner>/<slug>#<block id>` as
-// refs.ToID writes it, holds at most MaxBlockTargetBytes, the id counted in its decoded bytes: one
+// refs.ToID writes it, holds at most MaxTargetBytes, the id counted in its decoded bytes: one
 // byte more and the `dispatch://` text is no reference, and a dashboard page whose fragment names
 // that block is its document. The bound is the whole target's, for an issue's document and a
 // project's alike.
@@ -225,7 +225,7 @@ func TestABlockReferenceIsBoundedByItsWholeTargetID(t *testing.T) {
 		{"CORE-1", "dispatch://CORE-1/artifact/", server + "/issues/CORE-1/artifacts/", Ref{Kind: "artifact", IssueKey: "CORE-1"}},
 		{"CORE", "dispatch://CORE/artifact/", server + "/projects/CORE/documents/", Ref{Kind: "artifact", Project: "CORE"}},
 	} {
-		atBound := strings.Repeat("a", MaxBlockTargetBytes-len(document.owner+"/#"+id))
+		atBound := strings.Repeat("a", MaxTargetBytes-len(document.owner+"/#"+id))
 		for _, test := range []struct {
 			name, slug string
 			names      bool
@@ -250,6 +250,74 @@ func TestABlockReferenceIsBoundedByItsWholeTargetID(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// Every reference names its target only while the target id refs.ToID writes for it holds at most
+// MaxTargetBytes: an issue's key, a document's `<owner>/<slug>` or `agent/<session id>/<slug>`, an
+// item's id (counted decoded) and a component's `<project>/<id>`. One character more (a byte, or
+// the two of a decoded `é`) and the `dispatch://` text is no reference and the dashboard page is
+// only a URL, whatever part of it is long: the issue number, the slug, the session id or the item
+// id, in the page's path or query.
+func TestEveryReferenceIsBoundedByItsTargetID(t *testing.T) {
+	const server = "https://dispatch.test"
+	for _, test := range []struct {
+		name string
+		// The text before and after the long run in a `dispatch://` reference and on a dashboard
+		// page (none when page is empty), and the run's character.
+		reference, referenceTail, page, pageTail, char string
+		// The target id's bytes besides the run.
+		overhead int
+		ref      func(run string) Ref
+	}{
+		{"an issue", "dispatch://CORE-1", "", server + "/issues/CORE-1", "", "0", len("CORE-1"),
+			func(run string) Ref { return Ref{Kind: "issue", IssueKey: "CORE-1" + run, ID: "CORE-1" + run} }},
+		{"an issue's document", "dispatch://CORE-1/artifact/", "", server + "/issues/CORE-1/artifacts/", "", "a", len("CORE-1/"),
+			func(run string) Ref { return Ref{Kind: "artifact", IssueKey: "CORE-1", ID: run} }},
+		{"a project's document", "dispatch://CORE/artifact/", "", server + "/projects/CORE/documents/", "", "a", len("CORE/"),
+			func(run string) Ref { return Ref{Kind: "artifact", Project: "CORE", ID: run} }},
+		{"an agent's upload", "dispatch://agent/", "/artifact/x", server + "/agents/", "/artifacts/x", "a", len("agent//x"),
+			func(run string) Ref { return Ref{Kind: "artifact", Session: run, ID: "x"} }},
+		{"an issue's comment", "dispatch://CORE-1/comment/", "", server + "/issues/CORE-1/comments/", "", "a", 0,
+			func(run string) Ref { return Ref{Kind: "comment", IssueKey: "CORE-1", ID: run} }},
+		{"an issue's message", "dispatch://CORE-1/message/", "", server + "/issues/CORE-1/messages/", "", "a", 0,
+			func(run string) Ref { return Ref{Kind: "message", IssueKey: "CORE-1", ID: run} }},
+		{"an ask on an issue's spec", "dispatch://CORE-1/ask/", "", server + "/issues/CORE-1/spec?ask=", "", "a", 0,
+			func(run string) Ref { return Ref{Kind: "ask", IssueKey: "CORE-1", ID: run} }},
+		{"a comment on a project's document", "dispatch://CORE/artifact/plan-md/comment/", "", server + "/projects/CORE/documents/plan-md?comment=", "", "a", 0,
+			func(run string) Ref { return Ref{Kind: "comment", Project: "CORE", ID: run} }},
+		{"an item id counted decoded", "dispatch://CORE-1/comment/", "", server + "/issues/CORE-1/comments/", "", "%C3%A9", 0,
+			func(run string) Ref {
+				return Ref{Kind: "comment", IssueKey: "CORE-1", ID: strings.ReplaceAll(run, "%C3%A9", "é")}
+			}},
+		{"a component", "dispatch://CORE/component/", "", "", "", "a", len("CORE/"),
+			func(run string) Ref { return Ref{Kind: "component", Project: "CORE", ID: run} }},
+	} {
+		decoded, _ := decodeItemID(test.char)
+		decodedChar := len(decoded)
+		atBound := strings.Repeat(test.char, (MaxTargetBytes-test.overhead)/decodedChar)
+		if (MaxTargetBytes-test.overhead)%decodedChar != 0 {
+			t.Fatalf("%s: a run of %q cannot fill the bound exactly", test.name, test.char)
+		}
+		past := atBound + test.char
+		t.Run(test.name, func(t *testing.T) {
+			if got, want := Extract(test.reference+atBound+test.referenceTail, server), []Ref{test.ref(atBound)}; !reflect.DeepEqual(got, want) {
+				t.Errorf("the dispatch:// reference at the bound cites %.200v; want %.200v", got, want)
+			}
+			if got := Extract(test.reference+past+test.referenceTail, server); len(got) != 0 {
+				t.Errorf("the dispatch:// reference one byte past the bound cites %.200v; want nothing", got)
+			}
+			if test.page == "" {
+				return
+			}
+			if got, want := Extract(test.page+atBound+test.pageTail, server), []Ref{test.ref(atBound)}; !reflect.DeepEqual(got, want) {
+				t.Errorf("the dashboard page at the bound cites %.200v; want %.200v", got, want)
+			}
+			page := test.page + past + test.pageTail
+			if got, want := Extract(page, server), []Ref{{Kind: "url", ID: page}}; !reflect.DeepEqual(got, want) {
+				t.Errorf("the dashboard page one byte past the bound cites %.200v; want only its URL", got)
+			}
+		})
 	}
 }
 

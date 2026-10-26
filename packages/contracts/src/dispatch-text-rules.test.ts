@@ -1,6 +1,12 @@
 import { describe, expect, test } from "bun:test";
 
-import { isSessionId, pictureCaption, SESSION_ID_PATTERN } from "./dispatch-text-rules";
+import {
+  isSessionId,
+  MAX_REFERENCE_TARGET_BYTES,
+  pictureCaption,
+  referenceTargetFits,
+  SESSION_ID_PATTERN,
+} from "./dispatch-text-rules";
 
 describe("isSessionId", () => {
   test("accepts what the server's text.IsSessionID accepts", () => {
@@ -46,6 +52,20 @@ describe("isSessionId", () => {
     expect(reference.exec("agent/01a1-abc/artifact/shot-png")?.[1]).toBe("01a1-abc");
     expect(reference.test("agent/01a1[abc]/artifact/shot-png")).toBe(false);
   });
+});
+
+// A target id fits at MAX_REFERENCE_TARGET_BYTES UTF-8 bytes and not one byte past, a multi-byte
+// character counted in its bytes whether it fills the target or ends a long ASCII run: `é` (two
+// bytes, one UTF-16 unit), `日` (three, one) or `📊` (four, two).
+test.each([
+  ["CORE-1/", (room: number) => "é".repeat(Math.floor(room / 2)) + "x".repeat(room % 2)],
+  ["CORE/", (room: number) => "日".repeat(Math.floor(room / 3)) + "x".repeat(room % 3)],
+  ["CORE-1/spec#", (room: number) => `${"x".repeat(room - 2)}é`],
+  ["CORE/handbook-md#", (room: number) => `${"x".repeat(room - 4)}📊`],
+] as const)("bounds a target id starting %s", (prefix, runOf) => {
+  const target = prefix + runOf(MAX_REFERENCE_TARGET_BYTES - prefix.length);
+  expect(referenceTargetFits(target)).toBe(true);
+  expect(referenceTargetFits(`${target}x`)).toBe(false);
 });
 
 describe("pictureCaption", () => {
