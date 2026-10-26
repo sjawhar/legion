@@ -2,9 +2,9 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-248",
-  "completed": "2026-10-26T18:53:22Z",
+  "completed": "2026-10-26T19:48:31Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2219",
-  "codeHead": "efde11adb5a8dae6b837df51cc8f22e3139c496b",
+  "codeHead": "3264771a17196319d1b6d66ebb9928aa075e25aa",
   "proof": [
     {
       "criterion": "A1 The Legion skills guard passes with ce-dogfood in pi-legion",
@@ -29,6 +29,14 @@
       "observed": "13 pass 0 fail: each of ce-dogfood, thermonuclear-deep-review, thermonuclear-code-quality is found by Oh My Pi's loader with hide === true; the head's image carries hide: true in all three",
       "headSha": "efde11adb5a8dae6b837df51cc8f22e3139c496b",
       "negativeControl": "with hide: true removed from thermonuclear-code-quality: 'thermonuclear-code-quality is listed by Oh My Pi (hide: false)', 1 fail"
+    },
+    {
+      "criterion": "The real-Oh-My-Pi hide check, moved into the shared skills guard, behaves as before; the three Dispatch skills stay under INFRA-140's 2,000 words with the try-the-options step in dispatch-writing-specs",
+      "surface": "the pinned Oh My Pi (/opt/omp/bin/omp) loading the staged pi-legion partition through unhiddenSkills; the staged pi-envoy partition's word-total guard",
+      "command": "LEGION_TEST_OMP=/opt/omp/bin/omp bun test packages/pi-envoy/src/skills-guard.test.ts packages/pi-legion/src/skills-guard.test.ts packages/pi-legion/scripts/prepack.test.ts packages/pi-shared/test/",
+      "observed": "40 pass 0 fail at 3264771a; the word-total guard passes unmodified (1,996 words); cd packages/daemon && LEGION_TEST_OMP=/opt/omp/bin/omp go test ./internal/daemon -run 'TestTheRealPluginsOnTheRealOhMyPi|TestThePromptReferenceProbeOnTheRealOhMyPi' ok 85.002s; claude-envoy build --check clean",
+      "headSha": "3264771a17196319d1b6d66ebb9928aa075e25aa",
+      "negativeControl": "with hide: true removed from thermonuclear-deep-review (moved test, 9d01535e): 'thermonuclear-deep-review is listed by Oh My Pi (hide: false)', 1 fail; restored"
     },
     {
       "criterion": "A2 The worker image builds; in a worker pod (gVisor, uid 1000) agent-browser --version prints the pin and agent-browser open https://example.com loads the page with its title read back",
@@ -105,7 +113,7 @@
   ],
   "resultsArtifact": "dispatch://INFRA-248/artifact/experiment-results-md",
   "openQuestions": [],
-  "round": 6,
+  "round": 7,
   "round2": {
     "tester failure answered": "PR #2219 was CONFLICTING against main@origin 167e30b9 (INFRA-140's asd-ste100 in pi-envoy's partition). Forward merge 600bb549 (jj new legion/INFRA-248 main@origin), conflicts in .github/workflows/release.yaml, docs/kubernetes.md, packages/pi-legion/CHANGELOG.md and skills/AGENTS.md resolved keeping both sides; GitHub now MERGEABLE.",
     "fingerprint": "b145300cb0d6d344a260836a410d8d97da7ca13f0491a247aaea54a1e70b510c -> 9ae5ce5ebdbddf768bfac7529bcf547d59c1df57faad073b32a52d4d077a9bd7, changed only in the two skills/AGENTS.md lines where the branch's edit now applies to main's new text (asd-ste100 beside ce-dogfood; Envoy five, Legion nine); posted https://github.com/sjawhar/legion/pull/2219#issuecomment-6406793017"
@@ -129,5 +137,11 @@
     "review answered": "Review round 2 (changes_requested, 1 Important, 4 Minor) at aa9695a3, narrowed by the architect to those five. efde11ad: hide: true in place of disable-model-invocation in ce-dogfood, thermonuclear-deep-review and thermonuclear-code-quality (skills/AGENTS.md and changelogs say hidden from Oh My Pi's listing, loadable through Claude Code's Skill tool) with a real-Oh-My-Pi test in packages/pi-legion/src/skills-guard.test.ts; dogfood.md states the contradiction rule once, drops ce-setup and the history phrase; the claude-envoy CHANGELOG files the frontmatter change under Changed and logs the try-the-options step; the PR body's Size and Change lines corrected. Threads PRRT_kwDORFy7ds6wIKRO, …wXqn2, …wXqn7, …wXqoC answered 'Fixed in efde11adb5a8' and resolved one by one.",
     "relaunch": "The pod and its disk were replaced at the 18:12Z daemon upgrade; efde11ad was pushed before it. The image Job was re-run from a recreated script on the head's digest.",
     "ci": "Tests 40368294287, PR Title 40368369534, Docs 40368294263, Worker Image 40368294581 success at efde11ad; Legion Envoy and Contracts 40368294303 queued."
+  },
+  "round7": {
+    "task": "Acceptance held back for the reviewer's Fast-follow: move the real-Oh-My-Pi hide probe into packages/pi-shared/test/skills-guard.ts beside bundledAgents, name it in packages/pi-legion/AGENTS.md, set the PR body's Fast-follow to none.",
+    "done": "9d01535e: unhiddenSkills(omp, skillsDir, names) in packages/pi-shared/test/skills-guard.ts, sharing the scratch-HOME runner withScratchOmpHome with bundledAgents; pi-legion's test calls it with its name, skip rule, list and timeout unchanged; packages/pi-legion/AGENTS.md names it in the skills-guard row and the LEGION_TEST_OMP checks line. PR body Fast-follow: none.",
+    "merge": "GitHub then reported CONFLICTING: main's #2136 (INFRA-140) deleted skills/dispatch-brainstorming for skills/dispatch-writing-specs and capped the three Dispatch skills at 2,000 words (INFRA-140 spec acceptance, guard in packages/pi-envoy/src/skills-guard.test.ts), and added leading-a-work-stream to pi-legion. Architect decision A (Envoy 19:21Z): forward merge 3264771a keeps both sides of the mechanical conflicts (ten Legion skills); the approved try-the-options step is ported into dispatch-writing-specs 'Questions' in STE (88 tokens) with every element kept; 91 words of repetition removed across dispatch, dispatch-first, dispatch-writing-specs (listed in the PR body; #2160's three lines untouched); total 1,996, guard unmodified. Fingerprint ad955b5f… -> 15175da8…, https://github.com/sjawhar/legion/pull/2219#issuecomment-6425730454",
+    "image": "Not re-run: the merge changes no image input from this branch (the architect's task says the image Job does not need to run again)."
   }
 }
