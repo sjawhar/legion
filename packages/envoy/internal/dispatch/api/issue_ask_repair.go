@@ -67,9 +67,9 @@ func (r *IssueAskRepair) add(other IssueAskRepair) {
 //   - a closed issue one of whose documents owes a settlement marked after markedSince (any, when
 //     it is nil) - a write from another process's room, which SetIssueClosed never reached, leaves
 //     one, and no settlement runs while the issue is closed - gets the close's final sweep: its
-//     resolved block asks' blocks and copies are written again from their rows, and every
-//     readable ask block with no ask row and no source is marked resolved, each one logged,
-//     attributed to its latest closer.
+//     resolved block asks' blocks and copies, and its answered block asks' copies, the answer left
+//     out, are written again from their rows, and every readable ask block with no ask row and no
+//     source is marked resolved, each one logged, attributed to its latest closer.
 //
 // An issue with no event naming the closer or the reopener is logged and left as it is: no actor
 // is invented. Every record is dated when the pass writes it. Each issue is repaired in a
@@ -240,12 +240,13 @@ func (s *server) repairIssueAsksOf(ctx context.Context, issueKey string) (IssueA
 			return repair, nil
 		}
 		if owesSettlement {
-			// The close's final sweep (sweepClosedIssueAsks), from the resolved block asks' rows as
-			// they stand under the issue's row. Every document write comes before the first event.
+			// The close's final sweep (sweepClosedIssueAsks), from the resolved and answered block
+			// asks' rows as they stand under the issue's row. Every document write comes before the
+			// first event.
 			current, err := s.readIssueAsks(documentCtx, tx, `
 				select `+askRowColumns+`
 				`+askRowFrom+`
-				where a.issue_key = $1 and a.state = 'resolved' and a.block_id is not null
+				where a.issue_key = $1 and a.state in ('resolved', 'answered') and a.block_id is not null
 				order by a.id
 			`, issueKey)
 			if err != nil {

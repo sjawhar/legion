@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -51,6 +52,15 @@ func isLifecycleWrite(ctx context.Context) bool {
 // blocks of other asks, their copies, a block under one of asks' block ids that asks something
 // else - and so is a block settlement could not read. Classification reads the database as it
 // stands now: the caller writes the asks' rows after this for a close, and before it for a reopen.
+//
+// An answered ask, which the close's final sweep passes, is written into its copies alone, never
+// into its own block: the answer route writes that block itself (SetBlockAttributes), and a write
+// from the row could put back an answer it left out for size. Each copy gets the ask's state,
+// answerer and time with the answer left out, as settlement writes a block whose document has no
+// room for its answer (withholdAnswers): no write here is weighed for size, so none adds an
+// answer's bytes to a document. A copy that already holds the answer in full is left as it is
+// (answeredCopyAttributes), and the settlement an issue's reopen leaves owed writes the answer into
+// the rest.
 //
 // With markUnindexed it also writes state="resolved" into every readable ask block that neither
 // has an ask of its own on its document nor is a copy of another document's ask, and returns each
@@ -146,14 +156,18 @@ func (s *Service) writeDocumentAskStates(
 		var writes settlementReconciliation
 		for _, block := range blocks {
 			if row, indexed := rows[block.id]; indexed {
-				if ask, wanted := asks[row.ID]; wanted {
+				if ask, wanted := asks[row.ID]; wanted && ask.State != "answered" {
 					writes.repairs = append(writes.repairs, askRepair{blockID: block.id, set: askServerAttributes(ask, "", false)})
 				}
 				continue
 			}
 			if source, copied := sources[block.id]; copied {
 				if ask, wanted := asks[source.ask.ID]; wanted {
-					writes.repairs = append(writes.repairs, askRepair{blockID: block.id, set: askServerAttributes(ask, source.document, false)})
+					set := askServerAttributes(ask, source.document, false)
+					if ask.State == "answered" {
+						set = answeredCopyAttributes(ask, source.document)
+					}
+					writes.repairs = append(writes.repairs, askRepair{blockID: block.id, set: set})
 				}
 				continue
 			}
@@ -184,6 +198,24 @@ func (s *Service) writeDocumentAskStates(
 		return nil, err
 	}
 	return marked, nil
+}
+
+// answeredCopyAttributes is the write WriteIssueAskStates makes to a copy of ask, an answered ask,
+// whose source document's address is copied (copied_from_document): the copy's server attributes
+// are made to agree with ask with the answer left out (setAskServerAttributes with withholdAnswer).
+// A copy whose attributes already agree with ask, answer and all, as a settlement before the
+// issue's close wrote them, is left as it is: leaving its answer out would take from the closed
+// issue's document an answer its row still holds.
+func answeredCopyAttributes(ask model.Ask, copied string) func(*pmdoc.Node) bool {
+	return func(node *pmdoc.Node) bool {
+		clone := &pmdoc.Node{Type: node.Type, Attrs: make(pmdoc.Attrs, len(node.Attrs)+len(askServerAttributeNames))}
+		maps.Copy(clone.Attrs, node.Attrs)
+		if changed, _ := setAskServerAttributes(clone, ask, copied, false); !changed {
+			return false
+		}
+		changed, _ := setAskServerAttributes(node, ask, copied, true)
+		return changed
+	}
 }
 
 // readableAskBlocks is every ask block of tree settlement reads (parseAskBlock), each id's first

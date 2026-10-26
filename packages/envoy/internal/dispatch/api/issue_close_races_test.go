@@ -165,6 +165,145 @@ func TestTheRepairSweepLeavesTheCopyOfAResolvedDecisionResolved(t *testing.T) {
 	requireResolvedDecisionAndCopy(t, f.handler, f.database, issue.PrimaryArtifactID, decision, copied)
 }
 
+// A decision answered after the close's settlement ran and before the close took the issue's row
+// is the order an answer released beside a close commits in when it wins. The answer writes the
+// decision's own block and marks its copy in the issue's other document owed a settlement, which
+// never runs once the issue is closed, and the close withdraws nothing of an ask already answered.
+// The close's sweep writes the copy from its source's row instead, so it reads answered, naming
+// who answered and when, with the answer itself left out; the decision's own block is left as the
+// answer route wrote it. The settlement the reopen leaves owed writes the answer into the copy.
+func TestADecisionAnsweredJustBeforeTheCloseTakesTheIssueLeavesItsCopyAnswered(t *testing.T) {
+	var documents *docs.Service
+	wrapper := &afterCloseSettlementDocs{}
+	handler, database := newInteractionHandler(t, func(database *store.Store) docs.API {
+		// An hour, so the only settlements are the ones this test runs: the one the answer arms
+		// for the copy never fires while the test runs.
+		documents = docs.New(docs.Deps{Store: database, Settle: time.Hour})
+		t.Cleanup(func() { _ = documents.Shutdown(context.Background()) })
+		wrapper.API = documents
+		return wrapper
+	})
+	issue, decision, copied := decisionWithCopy(t, handler, documents)
+
+	var answered answeredDecision
+	wrapper.after = func() {
+		answered = answerDecision(t, handler, database, issue.PrimaryArtifactID, decision)
+	}
+	closed := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+issue.Key, map[string]string{"status": "done"}, "alice")
+	if closed.Code != http.StatusOK {
+		t.Fatalf("close: status=%d body=%s", closed.Code, closed.Body.String())
+	}
+	requireAnsweredDecisionAndCopy(t, handler, database, issue.PrimaryArtifactID, decision, copied, answered)
+
+	if reopened := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+issue.Key, map[string]string{"status": "todo"}, "alice"); reopened.Code != http.StatusOK {
+		t.Fatalf("reopen: status=%d body=%s", reopened.Code, reopened.Body.String())
+	}
+	if err := documents.SettleIssueDocuments(context.Background(), issue.Key); err != nil {
+		t.Fatalf("settle the reopened issue's documents: %v", err)
+	}
+	requireLiveText(t, handler, copied, `state="answered"`, `answered_by="alice"`, decisionSelected, `answer="`+decisionAnswer+`"`, `copied_from="`+decision+`"`)
+}
+
+// A decision answered within the settle delay before a release older than the withdrawal closed
+// its issue leaves its copy in the issue's other document owing the settlement that shows the
+// answer, which never runs once the issue is closed. The repair's sweep of that closed issue
+// writes the copy from its source's row, as the close's own sweep does, so it reads answered with
+// the answer left out, and leaves the decision's own block as the answer route wrote it.
+func TestTheRepairSweepLeavesTheCopyOfAnAnsweredDecisionAnswered(t *testing.T) {
+	// An hour, so the settlement the answer arms for the copy never fires while the test runs.
+	f := newRepairFixtureSettlingAfter(t, time.Hour)
+	issue, decision, copied := decisionWithCopy(t, f.handler, f.documents)
+	answered := answerDecision(t, f.handler, f.database, issue.PrimaryArtifactID, decision)
+	closer := repairActor("session-closer")
+	closeWithoutWithdrawing(t, f, issue.Key, &closer, time.Now())
+	requireLiveText(t, f.handler, copied, `#close-decision urgency="med" multiple="false" state="open" copied_from="`+decision+`"`)
+
+	if repair := repairNow(t, f); repair.Withdrawn != 0 || repair.Restored != 0 || repair.Swept != 0 {
+		t.Fatalf("repair = %+v, want no ask withdrawn or restored and no unindexed block swept", repair)
+	}
+	requireAnsweredDecisionAndCopy(t, f.handler, f.database, issue.PrimaryArtifactID, decision, copied, answered)
+}
+
+// A decision answered and settled before its issue's close has a copy holding the answer in full.
+// The close's sweep writes an answered decision's copies with the answer left out only where they
+// do not already hold it, so this copy keeps its answer.
+func TestClosingAnIssueLeavesTheSettledAnswerInADecisionsCopy(t *testing.T) {
+	var documents *docs.Service
+	handler, database := newInteractionHandler(t, func(database *store.Store) docs.API {
+		// An hour, so the only settlements are the ones this test runs.
+		documents = docs.New(docs.Deps{Store: database, Settle: time.Hour})
+		t.Cleanup(func() { _ = documents.Shutdown(context.Background()) })
+		return documents
+	})
+	issue, decision, copied := decisionWithCopy(t, handler, documents)
+	answerDecision(t, handler, database, issue.PrimaryArtifactID, decision)
+	if err := documents.SettleIssueDocuments(context.Background(), issue.Key); err != nil {
+		t.Fatalf("settle the answer's copy: %v", err)
+	}
+	settled, _ := documentTexts(t, handler, copied)
+	if !contains(`state="answered"`, decisionSelected, `answer="`+decisionAnswer+`"`)(settled) {
+		t.Fatalf("copy %s after the answer's settlement:\n%s\nwant it to hold the answer", copied, settled)
+	}
+
+	closed := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+issue.Key, map[string]string{"status": "done"}, "alice")
+	if closed.Code != http.StatusOK {
+		t.Fatalf("close: status=%d body=%s", closed.Code, closed.Body.String())
+	}
+	if live, _ := documentTexts(t, handler, copied); live != settled {
+		t.Fatalf("copy %s after the close:\n%s\nwant it as settled:\n%s", copied, live, settled)
+	}
+}
+
+// decisionAnswer is the text answerDecision answers closeDecision with, beside selecting Yes.
+const decisionAnswer = "Ship it this week."
+
+// decisionSelected is the selected attribute of a block answered as answerDecision answers, as a
+// document's markdown renders it: the selection's JSON, its quotes escaped.
+const decisionSelected = `selected="[&#x22;Yes&#x22;]"`
+
+// answeredDecision is what the answer route left of an answered decision: its ask's row as the
+// database stores it and the live text of the document its block is on.
+type answeredDecision struct {
+	row, spec string
+}
+
+// answerDecision answers decision, closeDecision's ask on spec, as alice, selecting Yes with
+// decisionAnswer, and reads what the answer route left of it.
+func answerDecision(t *testing.T, handler http.Handler, database *store.Store, spec, decision string) answeredDecision {
+	t.Helper()
+	read := readAskRecord(t, handler, decision)
+	answered := dispatchRequest(t, handler, http.MethodPost, "/api/v1/asks/"+decision+"/answer", map[string]any{
+		"selected": []string{"Yes"}, "text": decisionAnswer, "expected_edited_at": read.EditedAt,
+	}, "alice")
+	if answered.Code != http.StatusOK {
+		t.Fatalf("answer the decision: status=%d body=%s", answered.Code, answered.Body.String())
+	}
+	live, _ := documentTexts(t, handler, spec)
+	requireLiveText(t, handler, spec, `state="answered"`, `answered_by="alice"`, `answer="`+decisionAnswer+`"`)
+	return answeredDecision{row: askRowTexts(t, database, decision)[0], spec: live}
+}
+
+// requireAnsweredDecisionAndCopy fails t unless decision's row, and its block on spec, are as the
+// answer route left them (answered), with no ask.resolved event, and its copy on copied reads
+// answered, naming its answerer, with no selection and no answer.
+func requireAnsweredDecisionAndCopy(t *testing.T, handler http.Handler, database *store.Store, spec, decision, copied string, answered answeredDecision) {
+	t.Helper()
+	if row := askRowTexts(t, database, decision)[0]; row != answered.row {
+		t.Fatalf("decision row = %s, want it as the answer left it: %s", row, answered.row)
+	}
+	if count := askEventCount(t, database, decision, "ask.resolved"); count != 0 {
+		t.Fatalf("decision has %d ask.resolved events, want none", count)
+	}
+	if live, _ := documentTexts(t, handler, spec); live != answered.spec {
+		t.Fatalf("spec %s live text:\n%s\nwant it as the answer left it:\n%s", spec, live, answered.spec)
+	}
+	live, _ := documentTexts(t, handler, copied)
+	if !contains(`state="answered"`, `answered_by="alice"`, `answered_at="`, `copied_from="`+decision+`"`)(live) ||
+		strings.Contains(live, `selected=`) || strings.Contains(live, ` answer=`) {
+		t.Fatalf("copy %s live text:\n%s\nwant it answered by alice with no selection and no answer", copied, live)
+	}
+}
+
 // sessionResolution is the reason resolveAsSession resolves an ask with.
 const sessionResolution = "Settled in the meeting."
 
