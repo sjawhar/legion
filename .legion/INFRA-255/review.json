@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-255",
+  "completed": "2026-10-26T01:11:00Z",
+  "decision": "approved",
+  "reviewedCodeHead": "4d6d8cb31e6ab0899c3ac94be19459f5bbe4a5fe",
+  "critical": 0,
+  "important": 0,
+  "minor": 0,
+  "keyFindings": [],
+  "ci": "Required set (ruleset on main): lint, typecheck, test, pr-title. CI head 4d6d8cb31e6a (newest pull_request run): all four completed success; compare 4d6d8cb31e6a...04c61f69 changes only .legion/.",
+  "threads": "0 review threads, 0 reviews, 0 conversation comments before this round (gh api graphql).",
+  "thermonuclear": "At 4d6d8cb31e6a: thermonuclear-deep-review APPROVE, no findings; thermonuclear-code-quality APPROVE, no findings.",
+  "e2e": "E2E (implementer) and E2E (tester) both present in the PR body, each naming published worker images A/B/C, the crane + dpkg-query commands, observations, head 4d6d8cb31e6a (A at a924253140fb) and a negative control (14.6.0's empty Debian section).",
+  "security": "supply-chain: base image unchanged (mirror.gcr.io/library/debian:trixie-slim tag, worker.Dockerfile:340), no new package or dependency, workflow permissions unchanged; sandbox: set-id removal and root-owned /opt/legion inherited from runtime-base (worker.Dockerfile:404-410), final USER 1000:1000 unchanged (:580); agent-def: tools.md edit is guidance only and reaches roles only through a later image pin, so it cannot steer this review.",
+  "notProven": [
+    "Nothing checks that no stage after runtime-base installs a Debian package (human's no-guard ruling).",
+    "The ARG PI_CODEGRAPH_VERSION move rebuilt the apt layer once; package set identical to 14.6.0, versions may differ."
+  ]
+}
