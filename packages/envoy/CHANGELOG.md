@@ -1143,6 +1143,17 @@
 
 ### Fixed
 
+- A browser that opens a document while Dispatch closes that document's room now keeps getting the
+  document's edits. Dispatch closes a room when an issue closes, when it evicts a stale or failed
+  room, and at shutdown, and each close takes ygo a moment: it closes the browsers it found, waits
+  for them and makes the room's writes durable before it removes the room. A browser that connected
+  in that moment joined the room all the same, and ygo closed only the browsers it had found, so
+  that one stayed on a room the server no longer had: no later edit by anyone reached it, and
+  nobody saw its own edits, until it reconnected for some other reason. The ygo pin moves from
+  `v1.51.3-sami.1` to `v1.51.3-sami.3`, where a forced close also closes such a browser before it
+  returns, so the dashboard's usual reconnect takes it to the live room (reearth/ygo#331,
+  INFRA-403).
+
 - An agent woken by a Slack message now reads the words the message carries, wherever it carries
   them. A Slack delivery's `text` is the message's own text and then every display string its
   blocks and then its attachments hold — the strings under `pretext`, `author_name`,
@@ -1238,6 +1249,52 @@
   name the file), a machine's credentials it names are refused for a write rather than replaced,
   and a command printed for running again starts with `GOOGLE_APPLICATION_CREDENTIALS=…`, naming
   the file. The `--profile` refusal under the GCP store names the Google sign-in it uses instead.
+
+- With two `envoy-dispatch` processes on one database, a document whose room one process held
+  behind the durable head no longer answers every write with `503 DOC_SERVICE_UNAVAILABLE` for a
+  while, and a version named there no longer records text missing the other process's edit
+  (INFRA-218). A settlement the durable gate refused from such a room was retried on the same
+  room, which can never pass the gate, so its third refusal failed the room
+  (`document settlement failed 3 times`) and every transaction on the document was refused until
+  the eviction ran. The refusal now closes the room and settles it again from the reloaded one. A
+  named or snapshot version taken from a room behind the head rendered that room's text while
+  recording the stored head, so no later settlement versioned the other process's words, and it
+  listed the room's unstored browser edits, whose authors were listed again once the edit was
+  resent; it now renders the stored document and lists none of them, and neither does a version
+  that a write of its own renders over the stored document (an edit with a summary, an accepted
+  suggestion, an anchor's snapshot). The settlement's close and the stale-room evictor's both
+  reserve the room they checked, so a write that would open between the check and the close
+  answers 503, and the caller's retry lands on the reloaded room, instead of being forgotten with
+  the closed one; and neither closes a room that replaced the one it checked, including one ygo's
+  idle sweep retired and a load replaced before the close reached it. A write that opens while a
+  settlement is armed, fired or running takes the settlement over and arms it when it ends, so a
+  write that changed nothing no longer leaves the document's settlement to the one-minute
+  resumption.
+
+- A person who opens a Dispatch document while the service is force-closing that document's room
+  keeps the credit for what they type (INFRA-352). The service forces such a close when the room
+  fails, when another process's write leaves it behind the stored document, and when a test or the
+  browser-test harness asks, and it threw the room's in-memory record away once the close
+  returned. The browser registers before its room is loaded, the room that replaces the closed one
+  loads, and an edit typed in that room is credited, all while that record is still the one the
+  service holds, so the throw-away took the person's credit with it: the next version left them
+  off its author list. It also lost the issue's closed flag, credited the document's existing
+  decision blocks to whoever edited next, and left the settlement the new room had armed to run a
+  settle delay late. The close now keeps the record while anything holds it and forgets it when
+  nothing does, as every other end of a room does. Only a failed room's record still goes, since
+  it carries the failure, and the browsers that joined while it was evicted are handed to the
+  record registered in its place. A room that loads onto a kept record takes the latest edit
+  source the stored document names, none included, unless the record recorded a newer one, so
+  another process's edit that several browsers could have made is not credited to whoever edited
+  here before; the closed room's settlement failures end with its generation rather than once the
+  close returns, so they never wipe the failures of the room that replaced it, and an issue's
+  close ends them the same way; the close of a room behind the stored document carries the
+  service's own mark, so a closed issue no longer refuses it and such a room is closed rather than
+  left resident with text the store no longer holds until its idle minute runs out; and the
+  browser-test harness's quiesce drops the edit source of
+  the settlement it cancels, and once its closes have ended drops any source a reconnect or an
+  edit recorded meanwhile, so the record of a closed document it truncates away is not kept for
+  ever.
 
 - A burst of device logins no longer stalls the secrets broker's database pool. Each
   `POST /v1/oauth/device_authorization` held its provider transaction's pooled connection while

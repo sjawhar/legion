@@ -24,11 +24,12 @@ import (
 // so the reopened head's first settlement is judged by all of it (classify.HeadChecks). A reopen at
 // another head than the recorded one - commits pushed while the pull request was closed, which no
 // synchronize reports - is judged as a synchronize to that head would be
-// (classify.AdvancePullRequestHead): onto a red verdict it counts, onto a green one it leaves the
-// counted attempt. A new generation deletes a pull request that is not open, and all of them with
-// it. An issue that waits to close on its recorded merge (awaitsMerge) keeps that merge: GitHub
-// never sends the merge again, so a pull request opened from its branch is not recorded, while an
-// issue set back to todo reruns and its branch's new pull request replaces the merged one.
+// (classify.AdvancePullRequestHead): onto a red verdict it counts, onto a green one, or onto a
+// settled head whose base branch requires nothing, it leaves the counted attempt. A new generation
+// deletes a pull request that is not open, and all of them with it. An issue that waits to close on
+// its recorded merge (awaitsMerge) keeps that merge: GitHub never sends the merge again, so a pull
+// request opened from its branch is not recorded, while an issue set back to todo reruns and its
+// branch's new pull request replaces the merged one.
 func (e *Engine) pullRequestOpened(ctx context.Context, tx pgx.Tx, fact intake.PullRequestOpened) (intake.Result, error) {
 	issue, err := e.issueForBranch(ctx, tx, fact.Repo, fact.Branch)
 	if err != nil || issue == nil {

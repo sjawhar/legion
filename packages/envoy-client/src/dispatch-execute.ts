@@ -935,6 +935,20 @@ function argumentProblems(tool: string, args: ToolArguments): string[] {
       }
       break;
     }
+    case "dispatch_issues": {
+      if (optionalBoolean(args, "all") === true) {
+        const paging = [
+          ...(optionalNumber(args, "limit") === undefined ? [] : ["--limit"]),
+          ...(optionalNumber(args, "offset") === undefined ? [] : ["--offset"]),
+        ];
+        if (paging.length > 0) {
+          problems.push(
+            `--all takes every matching issue in one unpaged read, so it cannot be combined with ${paging.join(" or ")}: name --all on its own, or page with --limit and --offset`
+          );
+        }
+      }
+      break;
+    }
   }
   return problems;
 }
@@ -3258,23 +3272,31 @@ export async function executeDispatchTool(
       const updatedSince = optionalString(args, "updated_since");
       // The zod spec already refused anything but one of ISSUE_ROUTE_STATUSES.
       const routeStatus = optionalString(args, "route_status") as IssueRouteStatus | undefined;
-      const page = await client.listIssuePage(
-        {
-          project,
-          ...(status === undefined ? {} : { status }),
-          ...(parent === undefined ? {} : { parent }),
-          ...(label === undefined ? {} : { label }),
-          ...(priority === undefined ? {} : { priority }),
-          ...(updatedSince === undefined ? {} : { updated_since: updatedSince }),
-          ...(routeStatus === undefined ? {} : { route_status: routeStatus }),
-        },
-        // The tool's schema has already refused a limit outside 1..MAX_ISSUE_PAGE_LIMIT and a
-        // negative or fractional offset.
-        {
-          limit: optionalNumber(args, "limit") ?? DEFAULT_ISSUE_PAGE_LIMIT,
-          offset: optionalNumber(args, "offset") ?? 0,
-        }
-      );
+      const filters = {
+        project,
+        ...(status === undefined ? {} : { status }),
+        ...(parent === undefined ? {} : { parent }),
+        ...(label === undefined ? {} : { label }),
+        ...(priority === undefined ? {} : { priority }),
+        ...(updatedSince === undefined ? {} : { updated_since: updatedSince }),
+        ...(routeStatus === undefined ? {} : { route_status: routeStatus }),
+      };
+      // --all reads the whole filtered listing in one request, which Dispatch answers as a bare
+      // array; argumentProblems has already refused it beside --limit or --offset. Everything
+      // else pages exactly as before, the tool's schema having refused a limit outside
+      // 1..MAX_ISSUE_PAGE_LIMIT and a negative or fractional offset.
+      const page =
+        optionalBoolean(args, "all") === true
+          ? await client.listAllIssues(filters).then((issues) => ({
+              issues,
+              total: issues.length,
+              limit: issues.length,
+              offset: 0,
+            }))
+          : await client.listIssuePage(filters, {
+              limit: optionalNumber(args, "limit") ?? DEFAULT_ISSUE_PAGE_LIMIT,
+              offset: optionalNumber(args, "offset") ?? 0,
+            });
       const { total, limit, offset } = page;
       const rows = page.issues.map((row) => ({
         key: row.key,

@@ -143,6 +143,22 @@ describe("DispatchClient", () => {
     }
   });
 
+  // `--all` exists to read the exact set, so a page answered to the unpaged request is refused by
+  // name: read as the listing, its first rows would pass for every issue that matched.
+  test("refuses a page answered to the unpaged request, naming the request and the cause", async () => {
+    const { fetchImpl, requests } = fakeFetch([
+      jsonResponse({ issues: [issue("DSP-1")], total: 251, limit: 50, offset: 0 }),
+    ]);
+    const client = new DispatchClient("http://dispatch.test", "secret", fetchImpl);
+
+    await expect(client.listAllIssues({ project: "DSP", status: "needs_review" })).rejects.toThrow(
+      "GET http://dispatch.test/api/v1/issues?project=DSP&status=needs_review asked for the " +
+        "unpaged listing and got a page, so this Dispatch pages a request that carries no limit " +
+        "and no offset."
+    );
+    expect(requests).toHaveLength(1);
+  });
+
   test("search encodes q, project, limit, and offset and returns the response body", async () => {
     const body = fakeSearchResponse(
       [

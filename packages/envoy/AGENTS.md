@@ -91,11 +91,13 @@ A settlement that wrote into the room commits what it wrote even when the docume
 read, since the room and its browsers hold it; one that wrote nothing leaves a moved document to
 the settlement the move scheduled. A repair is written only into the document the settlement read
 (`applySuppressed`): one whose room was evicted and reloaded since is refused and retried. Every
-close of a room the service makes - a failed room's eviction, `Evict`
-and `Quiesce`, an issue's close, `Shutdown`'s close of a room with an editor - goes through its
-server's `CloseRoom` (`roomServer`, which shadows ygo's, so a call written against ygo's API is
-gated too). That close waits for a repair committing into the room and refuses new repairs while
-it closes; a repair never waits for a close and gives the write up as for a replaced room
+close of a room the service makes - a failed room's eviction, the close of a room behind the
+durable head (`closeRoomInstance`), `Evict` (tests) and `Quiesce`, an issue's close, `Shutdown`'s
+close of a room with an editor - goes through its server's close gate (`roomServer`: its
+`CloseRoom`, which shadows ygo's, so a call written against ygo's API is gated too, its
+`closeInstance` for the instance-only close, or its `closeOwned` for a failed room's eviction).
+That close waits for a repair committing into the room and refuses new repairs
+while it closes; a repair never waits for a close and gives the write up as for a replaced room
 (`holdOpen`). `roomServer` says why a close retiring the room's worker under a repair's commit
 hung (LEGION-498). A room's close gate lives only while a close or a repair holds or waits on it.
 A repair's suppression slot that its settlement discarded is consumed by that repair's own update
@@ -112,7 +114,7 @@ at issue creation, so ask blocks written by any of them become asks without wait
 change. The closer attributes a new ask and its `ask.opened` event to whoever introduced its
 block: a service write's or a committed transaction's own before/after trees name the ids it
 adds, staged on the write's own liveWrite and registered into the room's bookkeeping only once
-the write commits (`Ledger.credit`, `registerAskAuthors`), never before - discarding the
+the write commits (`Ledger.creditRooms`, `registerAskAuthors`), never before - discarding the
 transaction, or refusing the write for any other reason, leaves no trace, so a later, separately
 committed write of the same author-chosen literal id is never outranked by one that never reached
 the room. Registration happens before the update can reach any observer, rather than leaving
@@ -642,7 +644,8 @@ checks every load of a room against the writes its earlier instances took, and
 `TestARoomOnlyTheAPITouchesLeavesWithinTheIdleTimeout` that a room only the API touches is
 evicted and reads back what the API wrote. ygo's `CloseRoom` checks
 only the peers as well, and the service still calls it to close an issue's rooms (`SetIssueClosed`),
-for a room with an editor at `Shutdown`, and to evict one (`evictRoom`): a write that commits on a
+for a room with an editor at `Shutdown`, to evict one (`evictRoom`), and to close a room behind the
+durable head (`roomServer.closeInstance`): a write that commits on a
 room it has retired reaches the store through ygo's stranded persistence, on the committing goroutine
 (`provider/websocket/persistence.go`). A committed write's publish (`publishLiveUpdate`) is already
 durable and suppresses that append; the room's own update observer finishes its suppression slot
@@ -669,17 +672,62 @@ that gets the document lock next cannot restore an author the version listed. A 
 task sees and removes R but never that task's F. Thus a room can disappear or the process can
 restart after every pending author has reached R, without losing or duplicating a later version's
 authors; a service repair is credited to no one. An in-flight credit holds its state until its
-append lands (`unusedLocked`). A forced eviction (`evictRoom`) forgets the state anyway, and the
-append still reaches the credit through its `UpdateCredit`, so it writes or skips the author all
-the same.
+append lands (`unusedLocked`). A close the service forces - a failed room's eviction, `Evict`,
+`Quiesce`, and the close of a room behind the durable head (`closeReservedRoom`) - settles that
+state itself rather than leaving it to `OnUnloadDocument`, and ygo takes the closed room out of
+its map before the close returns, so a browser that opens the document meanwhile (`authorize`
+registers it before its room is loaded or joined), the room that browser's connect loads, and an
+edit typed in that room all reach the state the close has yet to settle. The close therefore keeps
+that state while anything holds it and forgets it when nothing does, as every other end of a room
+does (`releaseIfUnusedLocked`), so the browser, what the new room's load read - its issue's closed
+flag, its ask blocks, its latest edit source and the settlement it armed - and the new room's own
+credits and unstored updates stay where they were recorded, and so does what the closed room left
+for its own late callbacks to come back for (INFRA-352). Only a failed room's state has to go,
+since it carries the failure that its holders still read and no later access may
+(`handOverFailedRoomLocked`); a load refuses a failed room, so only a browser's connect can have
+reached it, and that browser is handed to the state registered in its place. A durable append of
+the state that went finishes on the state that counted it (`finishDurableAppend` takes the state
+`consumeUpdateClass` found the class on), so no count of it reaches that successor, where one
+below zero would hold it for good.
 
 Two `envoy-dispatch` processes do not share a live document session, and durable convergence does
 not depend on one: every edit is appended under the document's advisory lock, Yjs updates commute,
 and the stored history is their union, so no edit is lost whichever process took it. No process
 writes durable state for a document from a room that is not at the durable head: each resident
-instance carries the version it holds the document through, and an append, a settlement, a
-version, a fork of the live tree or a rebuild from a room behind the head is refused
-(`ErrRoomBehindHead`, `docs/pending_authors.go`), the live write taking the cold path instead.
+instance carries the version it holds the document through, and an append, a settlement, a fork
+of the live tree or a rebuild from a room behind the head is refused (`ErrRoomBehindHead`,
+`docs/pending_authors.go`), the live write taking the cold path instead. A settlement refused so
+closes the room rather than retrying on it (`reloadRoomBehindHead`), since no retry on that room
+can pass the gate and three would fail the room, refusing every transaction on the document until
+its eviction ran; the settlement re-arms on the reloaded room (INFRA-218). It leaves the room open
+while a write of this process is in flight on it (an open live write, which arms the settlement
+when it finishes, or an update its persistence has not stored, whose settlement is armed a settle
+delay later) and during a shutdown, which leaves the settlement to the next process. A write that
+opens while a settlement runs, or after its timer has fired, takes the settlement over and arms it
+when it ends, whether or not it changed anything (`openLiveWrite`). The stale-room evictor's close
+(`closeRoomBehindHead`) and this one both reserve the room under its state lock, in the same hold
+that found nothing there each must wait for (`reserveRoomCloseLocked`): an open live write for the
+evictor's (`openLiveWriteLocked`; its other writers take the document's lock, which already orders
+them with the evictor's confirmation, INFRA-396), any write of this process for the settlement's.
+Until the close has returned the room's writer slot is refused, `503 DOC_SERVICE_UNAVAILABLE` as
+on a failed room, rather than handed to a write the close would then retire the instance under:
+the case that check exists to rule out. The refused write's retry lands on the room that replaces
+the closed one. The close reaches only the instance that was checked, never a room that replaced
+it: ygo's `CloseRoom` closes whatever room the name holds, and ygo's idle sweep retires a room
+without the close gate, so the close checks the instance again inside a `Server.Apply` on the
+room, which the sweep never retires, with the close gate held (`closeRoomInstance`); a room the
+sweep or another close retired first is left to the room that holds the document now, the
+reservation is lifted, and a settlement the reservation ended is armed again on it. A
+reservation outlasts its instance when the room is replaced before the close returns
+(`reservedFor`); the evictor tries the replacement again once that close has returned. That
+`Server.Apply` is the service's own injection and carries its mark (`withOwnerVerified`), which
+`allowInject` admits on a closed issue: a room loaded while the issue was open and left behind the
+head by the other process's write is closed whenever its issue closed, rather than kept resident
+with text the store no longer holds until its idle minute runs out. A named or snapshot version whose
+room is behind the head, read under the document's advisory lock, is rendered from the stored
+document instead (`storedTree`), and neither it nor a version over a cold fork lists the room's
+in-flight credits (`withoutInflight`): the store holds none of those changes, and an append the
+gate refuses is credited again when its browser resends it.
 What is per-process is the room: while a room is resident in one process it receives none of the
 other's updates, so presence and cursors show only the peers on that process. Every durable
 change notifies `dispatch_doc_changed` from inside the transaction holding the room's advisory
