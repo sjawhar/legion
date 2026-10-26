@@ -428,7 +428,7 @@ func (r *Runtime) suspendFailedLaunch(ctx context.Context, token claim.Token, s 
 // kept, once no stored claim of the issue in another tree may still run a process there
 // (Store.IssueRunsElsewhere); the Running patch rewrites its pod template, labels included, before
 // any pod runs. None of the old tree's work comes with it: an issue pod's disk is the pod's own
-// ephemeral volume (issuePod.diskSource), which went with that pod, so the relabelled Sandbox's
+// ephemeral volume (issuePod.disk), which went with that pod, so the relabelled Sandbox's
 // first pod brings a disk of its own and provisions the issue's workspace afresh. One its old tree
 // left Running — the old tree's close suspended every role of it, but the issue's suspension never
 // ran, since the issue had moved — is suspended in the same patch, so the relaunch waits its pod
@@ -527,7 +527,7 @@ func (r *Runtime) ensureSandbox(ctx context.Context, l launch) (*sandbox, error)
 // supersededDisk reports whether s is an issue Sandbox of the release before the pod-owned disk:
 // one still owning a volume claim template, where the Sandbox this runtime now makes for an issue
 // owns none and its pod carries its disk as a generic ephemeral volume of its own
-// (issuePod.diskSource, sandboxManifest). The launch's kind is this Sandbox's: ensureSandbox finds
+// (issuePod.disk, sandboxManifest). The launch's kind is this Sandbox's: ensureSandbox finds
 // it by the claim's own name, and an issue's labels are what podKindOf reads an issue pod's kind
 // from. The project controller's Sandbox owns that template by design — the working root its
 // launcher runs in outlives its pods, so the claim holding it must — and is never replaced for

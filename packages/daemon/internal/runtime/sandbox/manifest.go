@@ -348,7 +348,7 @@ func (r *Runtime) diskSpec() corev1.PersistentVolumeClaimSpec {
 
 // sandboxManifest is the Sandbox a relaunch creates when none exists: Suspended, so no pod starts
 // before the claim's Secret is written, with whatever volume its kind has the Sandbox own
-// (podKind.claimTemplates). An issue's Sandbox owns none: its pod's disk is a generic ephemeral
+// (podKind.disk). An issue's Sandbox owns none: its pod's disk is a generic ephemeral
 // volume the pod itself owns, created with the pod and deleted with it (INFRA-80), so nothing of
 // an issue survives the pod that did it. The controller's Sandbox still owns its one `issue`
 // template, so the working root its launcher runs in outlives the pod that left it. Its pod
@@ -357,18 +357,19 @@ func (r *Runtime) diskSpec() corev1.PersistentVolumeClaimSpec {
 // launch's labels, and no annotation: the one a Sandbox is ever created carrying — the pod a
 // migrating launch displaced — is set on the object by that launch (replaceSupersededSandbox).
 func (r *Runtime) sandboxManifest(l launch) sandbox {
+	templates, _ := l.kind.disk(r, l)
 	return sandbox{
 		TypeMeta:   metav1.TypeMeta{APIVersion: sandboxGVR.GroupVersion().String(), Kind: "Sandbox"},
 		ObjectMeta: metav1.ObjectMeta{Name: l.name, Namespace: r.namespace, Labels: r.labels(l)},
 		Spec: sandboxSpec{
 			PodTemplate: r.podTemplate(l), OperatingMode: modeSuspended,
-			VolumeClaimTemplates: l.kind.claimTemplates(r, l),
+			VolumeClaimTemplates: templates,
 		},
 	}
 }
 
 // podTemplate is the pod a launch runs (decisions 7 and 10). Every pod mounts one disk at the same
-// volume name (issueVolume), from the source its kind gives it (podKind.diskSource): an issue
+// volume name (issueVolume), from the source its kind gives it (podKind.disk): an issue
 // pod's is its own ephemeral claim, made with the pod and deleted with it, the controller's the
 // claim its Sandbox owns and that outlives every pod it makes. The pod runs as the operator's
 // ServiceAccount (the namespace's default when the operator names none), and its launcher
@@ -513,7 +514,8 @@ func (r *Runtime) volumes(l launch) []corev1.Volume {
 		}
 		roleVolumes = append(roleVolumes, corev1.Volume{Name: roleVolume(ghVolume, role), VolumeSource: gh})
 	}
-	volume := corev1.Volume{Name: issueVolume, VolumeSource: l.kind.diskSource(r, l)}
+	_, disk := l.kind.disk(r, l)
+	volume := corev1.Volume{Name: issueVolume, VolumeSource: disk}
 	config := corev1.Volume{Name: configVolume, VolumeSource: memory}
 	return slices.Concat([]corev1.Volume{volume}, l.kind.initVolumes(l), []corev1.Volume{config}, roleVolumes,
 		r.agentSecretsVolumes(l.roles), providers, r.pod.Volumes)

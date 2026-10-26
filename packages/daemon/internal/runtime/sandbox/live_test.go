@@ -1138,7 +1138,7 @@ func (r *liveRig) exec(c *liveClaim, command ...string) (string, error) {
 }
 
 // liveDisk is one issue pod's disk as the operator reads it. Nothing is selected by a label here:
-// the disk is a generic ephemeral volume declared in the pod's own template (issuePod.diskSource),
+// the disk is a generic ephemeral volume declared in the pod's own template (issuePod.disk),
 // and the pinned Sandbox CRD declares that template's metadata a bare object, so the API server
 // prunes any label set there — an issue's disk carries none, and is found by its name alone. owner
 // is the claim's controlling owner as `<kind>/<name>`: a Pod, never the Sandbox that owned the

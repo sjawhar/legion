@@ -306,7 +306,7 @@ package api
 // request views carry the field, so the boot gate and `legion probe-image` refuse the mixed pair.
 //
 // 37: sjawhar/legion INFRA-80 -- an issue's disk dies with its pod: the pod's one volume is a
-// generic ephemeral volume the pod itself owns (issuePod.diskSource), which the kubelet creates
+// generic ephemeral volume the pod itself owns (issuePod.disk), which the kubelet creates
 // with the pod and deletes with it, so an issue's Sandbox owns no volume claim template and a
 // stopped issue's Sandbox is always deleted. Nothing carries a disk from one pod to the next, so
 // every provision is the first and the `workspace-init provision` container's environment loses

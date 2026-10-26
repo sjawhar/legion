@@ -22,7 +22,7 @@ const childIssue = "LEGION-209"
 
 // cleanupRig is a tree of two issues, LEGION-208 and its child LEGION-209, as the API holds them:
 // each issue's Sandbox, the pod it owns and the disk that pod owns, its own generic ephemeral
-// volume (issuePod.diskSource), and Sandboxes the tree's cleanup must leave alone, another tree's
+// volume (issuePod.disk), and Sandboxes the tree's cleanup must leave alone, another tree's
 // and the image probe's. Every Sandbox delete's options are recorded, and a Sandbox's foreground
 // delete removes its pod, and with the pod the pod's disk, as garbage collection would.
 type cleanupRig struct {

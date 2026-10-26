@@ -898,7 +898,7 @@ func (g *rig) sent(token claim.Token) []shimwire.Frame {
 
 // sandboxObject is a Sandbox as the API would hold it, for a test's starting state: an issue
 // Sandbox as this runtime makes it, owning no claim template, since its disk is its own pod's
-// generic ephemeral volume (issuePod.diskSource), and carrying a resourceVersion, as every object
+// generic ephemeral volume (issuePod.disk), and carrying a resourceVersion, as every object
 // the API serves does. The project controller's Sandbox, which this runtime does give the `issue`
 // template its working root is on, no test starts from: a test that needs one launches it
 // (controllerSpec). A test of the cutover from the release before the pod-owned disk opts into

@@ -158,9 +158,9 @@ func rejectLegacyIssueSandboxes(ctx context.Context, sandboxes dynamic.ResourceI
 // name in the census's refusal, and, when it is accepted, whether it is an issue Sandbox still
 // owning the `issue` claim template of the release before the pod-owned disk, which its next
 // launch replaces. An issue pod's disk is the pod's own generic ephemeral volume
-// (issuePod.diskSource), so the Sandbox this runtime now makes for an issue owns no claim template
+// (issuePod.disk), so the Sandbox this runtime now makes for an issue owns no claim template
 // at all, while the controller's owns the one named issueVolume, which outlives its pods because
-// the controller's working root is on it (controllerPod.claimTemplates). The tree-volume layout
+// the controller's working root is on it (controllerPod.disk). The tree-volume layout
 // before per-issue volumes gave only the tree root's Sandbox a template, named
 // `tree`, which every child of the tree mounted, and its controller's Sandbox a `tree` template of
 // its own; a controller owning no volume comes from that layout too. A root's volume holds every

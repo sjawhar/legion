@@ -185,7 +185,7 @@ func overlaps(a, b string) bool {
 
 // legionClaim reports whether claim is named as the volume claims Legion's pods and Sandboxes make
 // or made are: an issue pod's own disk, the generic ephemeral volume the kubelet names for its pod
-// and its volume (`legion-…-issue`, diskSource); the controller's, which its Sandbox still owns
+// and its volume (`legion-…-issue`, issuePod.disk); the controller's, which its Sandbox still owns
 // (IssueClaimName, `issue-legion-…`); a repository cache's (cacheClaimName, `cache-legion-…`); or a
 // tree's from the earlier layout legion-v10.0.0 kept (`tree-legion-…`, every clone, workspace and
 // session file of a tree). Every pod mounting such a claim would read and write that workspace or

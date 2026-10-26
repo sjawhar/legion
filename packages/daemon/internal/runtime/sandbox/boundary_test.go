@@ -148,7 +148,7 @@ type initRig struct {
 // rigPod is a pod the rig has started (start) and not yet deleted (delete). Its disk, the volume
 // mounted as issueVolume, is the one volume the pod's agents write: a directory of the pod's own
 // under dir when the manifest makes it a generic ephemeral volume, as it does an issue pod's
-// (issuePod.diskSource), which the pod keeps across a restart and loses when it is deleted; the
+// (issuePod.disk), which the pod keeps across a restart and loses when it is deleted; the
 // rig's tree when the manifest makes it a claim a Sandbox owns.
 type rigPod struct {
 	spec corev1.PodSpec
@@ -629,7 +629,7 @@ func (rig *initRig) plantHooks(dir string, hooks ...string) {
 //     (ensureRepoClone), the workspace brought up to date (update-stale) or added again where it is
 //     gone — with the plant in place. Whatever runs, nothing it runs reads the provisioning token,
 //     no host the plant named receives it, and no file on the disk holds it.
-//   - The issue's next pod, once the first is deleted: its disk is its own (issuePod.diskSource),
+//   - The issue's next pod, once the first is deleted: its disk is its own (issuePod.disk),
 //     so it starts empty and provisions afresh, and nothing of the plant reaches it — none of the
 //     first pod's files are on its disk, nothing planted runs, and no host the plant named hears
 //     from it. On a disk that outlived the first pod, as a claim a Sandbox owns does, the next pod
