@@ -705,12 +705,12 @@ dispatch_message() {
       delivery: {attempt: 1, mode: $delivery}}'
 }
 
-# replay_watermark: the stream's last sequence as the listener's /v1/replay reports it for this
-# session's subject (remote mode's way to find the publish in the stream afterwards).
+# replay_read [CURSOR]: reads this session's subject from the listener's /v1/replay, after cursor
+# CURSOR ($1) when given, otherwise starting a cursor at the stream's last sequence.
 replay_read() {
   local body
-  if [[ -n "${2:-}" ]]; then
-    body="$(jq -nc --arg s "$sid" --arg subj "$subject" --argjson after "$2" '{session_id: $s, subjects: [{subject: $subj, after: $after}]}')"
+  if [[ -n "${1:-}" ]]; then
+    body="$(jq -nc --arg s "$sid" --arg subj "$subject" --argjson after "$1" '{session_id: $s, subjects: [{subject: $subj, after: $after}]}')"
   else
     body="$(jq -nc --arg s "$sid" --arg subj "$subject" '{session_id: $s, subjects: [{subject: $subj}]}')"
   fi
