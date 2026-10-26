@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-391",
-  "completed": "2026-10-25T20:24:23Z",
+  "completed": "2026-10-26T01:09:41Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2209",
   "proof": [
     {
@@ -19,7 +19,7 @@
       "command": "dispatch.ts issue-update --issue CORE-1 --components-json '{\"mode\":\"explicit\",\"ids\":[\"daemon-api\",\"smoke-worker\"]}' then dispatch.ts read --issue CORE-1",
       "observed": "`CORE-1: components -> explicit [daemon-api, smoke-worker]`; read prints `Components: daemon-api, smoke-worker`",
       "headSha": "97ddf0a48fc4bed61f347de3327e18baaceaca07",
-      "negativeControl": "ids [daemon-api, not-a-component] \u2192 `COMPONENTS_INPUT: CORE has no component not-a-component in its current architecture model`, exit 1"
+      "negativeControl": "ids [daemon-api, not-a-component] → `COMPONENTS_INPUT: CORE has no component not-a-component in its current architecture model`, exit 1"
     },
     {
       "criterion": "Root A2: one source's failed import leaves the other's components and attachments",
@@ -35,7 +35,7 @@
       "command": "cd packages/dispatch && DATABASE_URL=<own db> bun run e2e -- e2e/architecture-sources.e2e.ts e2e/architecture.e2e.ts e2e/settings.e2e.ts e2e/live.e2e.ts e2e/keyboard-palette.e2e.ts --project=chromium --reporter=line",
       "observed": "57 passed, 1 skipped (iphone-only) at the merged head for architecture-sources, architecture, settings, live and keyboard-palette specs; the whole chromium project passed 734 (22 skipped) earlier on the same code before the docs and simplify commits",
       "headSha": "97ddf0a48fc4bed61f347de3327e18baaceaca07",
-      "negativeControl": "The same new spec copied alone into a tarball export of base 83f6320140ec007695a8c6415006392c2eeb7768, own database: 1 failed at architecture-sources.e2e.ts:89 `legion/arch is still a CORE source` (element not found) \u2014 the base's second save replaced the first"
+      "negativeControl": "The same new spec copied alone into a tarball export of base 83f6320140ec007695a8c6415006392c2eeb7768, own database: 1 failed at architecture-sources.e2e.ts:89 `legion/arch is still a CORE source` (element not found) — the base's second save replaced the first"
     },
     {
       "criterion": "Existing single-source projects keep working unchanged (migration keeps their row and model)",
@@ -44,6 +44,46 @@
       "observed": "Source reads id 0 with every bookkeeping column unchanged, components source_id 0, edge, snapshot and attachment unchanged, a new source gets id > 0; the legacy source re-syncs through the unchanged-head shortcut (importer test); single-source specs pass",
       "headSha": "97ddf0a48fc4bed61f347de3327e18baaceaca07",
       "negativeControl": "A component whose project has no source makes the census answer 1 and the migration refuse, leaving the schema at 116"
+    },
+    {
+      "criterion": "Review round 1, finding 1: this release's dispatch CLI against a Dispatch older than this release gives no false architecture advice on an issue create",
+      "surface": "Real processes in the issue pod: this head's Dispatch server (packages/dispatch/e2e/run-server.sh, port 18710) and the base server 83f6320140ec (its own run-server.sh, port 18711), each on its own database of a rootless Postgres 17+pgvector (micromamba under $TMPDIR, port 55491), both reading the harness's fake GitHub (e2e/fake-github.ts, 19012) and fake Envoy (19011); three dispatch CLIs: this head's packages/envoy-client/bin/dispatch.ts, the base's, and the pre-fix head 97ddf0a48fc4's (git archive into $TMPDIR); evidence https://github.com/sjawhar/legion/pull/2209#issuecomment-6405051940",
+      "command": "bash /legion/scratch/tmp/infra391/skew/skew.sh: `dispatch issue --project NOARCH|ARCH|NOPE --title ...` (no components) with the head CLI against the base server; NOARCH has no source, ARCH one source saved with the base's singular PUT and synced",
+      "observed": "NOARCH: no architecture advice, exit 0; ARCH: `Project ARCH has an architecture model, but this issue is not linked to any of its current components ...`; NOPE: `not found`, exit 1",
+      "headSha": "80d924329642a0d0c78e61710afcc59374adc2fe",
+      "negativeControl": "The pre-fix CLI 97ddf0a48fc4 on the same base server prints `Could not check whether project NOARCH has an architecture model: no route for GET /api/v1/projects/NOARCH/architecture-sources ...` (and the same for ARCH): the defect the reviewer reported"
+    },
+    {
+      "criterion": "Review round 1, finding 2: a dispatch CLI older than this release against this Dispatch gives no false advice, and its architecture-sync still works, each call logged at warn",
+      "surface": "Real processes in the issue pod: this head's Dispatch server (packages/dispatch/e2e/run-server.sh, port 18710) and the base server 83f6320140ec (its own run-server.sh, port 18711), each on its own database of a rootless Postgres 17+pgvector (micromamba under $TMPDIR, port 55491), both reading the harness's fake GitHub (e2e/fake-github.ts, 19012) and fake Envoy (19011); three dispatch CLIs: this head's packages/envoy-client/bin/dispatch.ts, the base's, and the pre-fix head 97ddf0a48fc4's (git archive into $TMPDIR); evidence https://github.com/sjawhar/legion/pull/2209#issuecomment-6405051940",
+      "command": "skew.sh: base CLI `dispatch issue --project NOARCH|ARCH|NOPE` and `dispatch architecture-sync --project ARCH` against the head server (ARCH with sources legion/arch and acme/infra), then acme/infra re-seeded with an id legion/arch holds and the base CLI's architecture-sync again",
+      "observed": "NOARCH no advice, ARCH `has an architecture model` advice, NOPE `not found`; sync printed `Synced ARCH architecture from legion/arch@main: commit ccd3a29b...`, then after the collision `Sync failed for ARCH (acme/infra@main): component id \"platform\" is already a component of ARCH from legion/arch` / `The previous model stays up (commit ca25bf89...)`; the head server logged one WARN `dispatch: GET|POST /api/v1/projects/{key}/architecture-source[/sync] called by a dispatch client older than this release; upgrade it, the route will be removed` with the project per call (5 lines)",
+      "headSha": "80d924329642a0d0c78e61710afcc59374adc2fe",
+      "negativeControl": "Base CLI architecture-sync for NOARCH (no source) against the head server: `no architecture source configured for NOARCH`, exit 1 (the kept route's 404 SOURCE_NOT_FOUND)"
+    },
+    {
+      "criterion": "This release's dispatch architecture-sync against a Dispatch older than this release falls back to its single-source sync",
+      "surface": "Real processes in the issue pod: this head's Dispatch server (packages/dispatch/e2e/run-server.sh, port 18710) and the base server 83f6320140ec (its own run-server.sh, port 18711), each on its own database of a rootless Postgres 17+pgvector (micromamba under $TMPDIR, port 55491), both reading the harness's fake GitHub (e2e/fake-github.ts, 19012) and fake Envoy (19011); three dispatch CLIs: this head's packages/envoy-client/bin/dispatch.ts, the base's, and the pre-fix head 97ddf0a48fc4's (git archive into $TMPDIR); evidence https://github.com/sjawhar/legion/pull/2209#issuecomment-6405051940",
+      "command": "bash /legion/scratch/tmp/infra391/skew/sync-fallback.sh: head CLI `dispatch architecture-sync --project ARCH`, `--project NOARCH`, `--project ARCH --repo legion/arch`, `--project NOPE` against the base server",
+      "observed": "ARCH: `Synced ARCH architecture from legion/arch@main: commit ccd3a29b7da4...`, exit 0; NOARCH and NOPE: `no architecture source configured for <KEY>`, exit 1; --repo: `no route for POST /api/v1/projects/ARCH/architecture-sources/legion/arch/sync`, exit 1 (documented: --repo needs a Dispatch of this release)",
+      "headSha": "80d924329642a0d0c78e61710afcc59374adc2fe",
+      "negativeControl": "The same command from head ea14bf19139a (before the fallback commit) against the base server: `no route for POST /api/v1/projects/ARCH/architecture-sources/sync`, exit 1"
+    },
+    {
+      "criterion": "Architect's ruling (round 1): a source save on a branch that does not exist answers 409 SOURCE_ACCESS naming the branch and repository and writes nothing; a re-save onto a missing branch leaves the old branch",
+      "surface": "The branch's real Dispatch server (packages/dispatch/e2e/run-server.sh, port 18710, Postgres 17 database realhead) and the base server 83f6320140ec (18711, realbase), both reading real GitHub through the implement App's gh behind the throwaway two-call shim (/legion/scratch/tmp/infra391/a2/shim.ts, port 19015); evidence https://github.com/sjawhar/legion/pull/2209#issuecomment-6405954806",
+      "command": "bash /legion/scratch/tmp/infra391/skew/branch.sh: PUT /api/v1/projects/BRANCH/architecture-sources/sjawhar/legion-smoke {branch:no-such-branch-infra-391}; then PUT on infra-391/architecture, `dispatch architecture-sync --project BRANCH`, PUT onto no-such-branch-infra-391 again; list sources and the project's settings.architecture_source.updated events",
+      "observed": "Both missing-branch saves: HTTP 409 {\"code\":\"SOURCE_ACCESS\",\"error\":\"the branch does not exist: no-such-branch-infra-391 on sjawhar/legion-smoke\"}; after the first, sources []; after the second, sources [{sjawhar/legion-smoke, infra-391/architecture, cc50e1512a12, 3 components}]; one settings.architecture_source.updated event (infra-391/architecture). GitHub itself answers that branch `Branch not found (HTTP 404)`",
+      "headSha": "02b464b10f9c9a5807941169678f689dd866fc04",
+      "negativeControl": "The base server's singular PUT /api/v1/projects/BRANCH/architecture-source {repo: sjawhar/legion-smoke, branch: no-such-branch-infra-391}: HTTP 200, the source stored on the missing branch"
+    },
+    {
+      "criterion": "Root A2 and A6 hold at the round-1 head (after the forward merge of main #2202 and the save's branch read)",
+      "surface": "Same real-GitHub rig on port 18710; Dispatch's browser suite (Playwright, Chromium) on its own Postgres 17 database e2ehead",
+      "command": "DISPATCH_E2E_PORT=18710 bash /legion/scratch/tmp/infra391/a2/real.sh; cd packages/dispatch && bun run e2e -- e2e/architecture-sources.e2e.ts e2e/architecture.e2e.ts e2e/settings.e2e.ts --project=chromium --reporter=line",
+      "observed": "Both saves 200; each architecture-sync printed two Synced lines at the heads GitHub reports (sjawhar/legion eaed0d352170 on the second run, sjawhar/legion-smoke cc50e1512a12); CORE-1 reads `Components: daemon-api, smoke-worker`; the collision branch fails sjawhar/legion-smoke alone and sjawhar/legion keeps 36 components; browser suite `17 passed (1.2m)`",
+      "headSha": "02b464b10f9c9a5807941169678f689dd866fc04",
+      "negativeControl": "ids [daemon-api, not-a-component] -> `COMPONENTS_INPUT: CORE has no component not-a-component in its current architecture model`, exit 1"
     }
   ],
   "filesChanged": [
@@ -123,7 +163,9 @@
     "packages/pi-legion/CHANGELOG.md",
     "skills/dispatch/SKILL.md",
     "skills/dispatch/references/issues.md",
-    "skills/legion-architect/SKILL.md"
+    "skills/legion-architect/SKILL.md",
+    "packages/dispatch/web/src/features/settings/ArchitectureSourcesSection.test.tsx",
+    "docs/solutions/testing/prove-a-size-dependent-github-read-on-a-scratch-branch-and-drive-dispatch-against-real-github-through-a-loopback-app-proxy-INFRA-390.md"
   ],
   "trickyParts": [
     "Harness for every later role: /legion/harness/setup.sh (idempotent) and /legion/harness/env.sh (source for harness commands only). Rootless Postgres 17 + pgvector on 127.0.0.1:55433 (template1 recreated with ICU en-US so rank_test's collation check runs), PLAYWRIGHT_BROWSERS_PATH=/legion/harness/ms-playwright, per-role lanes by LEGION_ROLE (implementer 18710/19011-19014, tester 18720/19021-19024, reviewer 18730/19031-19034), DISPATCH_TEST_DATABASE_URL=dispatch_test_<role>. createdb your own e2e database and `create extension vector` in it.",
@@ -132,12 +174,21 @@
     "A2 real-GitHub rig: /legion/scratch/tmp/infra391/a2/{shim.ts,real.sh,fake.sh,scratch-branches.sh}. Start the shim on FAKE_GITHUB_PORT, then run-server.sh with a fresh database; scratch branches infra-391/architecture and infra-391/architecture-collision live on sjawhar/legion-smoke and are deleted by the implementer after the production check.",
     "An earlier release over 0117 does not wipe components on a non-empty import: its insert names no source_id (no default), so it fails and rolls back, recording the error on every source row; only an empty model commits its delete of every source's components. The README section says this.",
     "envoy-client's envoy-config.test.ts 'still running after 10 s' timing test is flaky in this gVisor pod at base and head alike (failed 1 of 3 at base 83f63201, 2 of 3 at head); unrelated to this change.",
-    "GitHub reported the PR CONFLICTING against main f2c17ded5305 (one line of docs/site/src/content/docs/dispatch/for-agents.md); forward merge 97ddf0a48fc4, fingerprint ae5997ef5aa8ec567c0cd426d448bd0c88dfbc9c5a385604eccfc09939dc8fca before and after (unchanged), comment https://github.com/sjawhar/legion/pull/2209#issuecomment-6402718062."
+    "GitHub reported the PR CONFLICTING against main f2c17ded5305 (one line of docs/site/src/content/docs/dispatch/for-agents.md); forward merge 97ddf0a48fc4, fingerprint ae5997ef5aa8ec567c0cd426d448bd0c88dfbc9c5a385604eccfc09939dc8fca before and after (unchanged), comment https://github.com/sjawhar/legion/pull/2209#issuecomment-6402718062.",
+    "The no-route test (isNoRoute in dispatch-http.ts) keys on 404 NOT_FOUND with a message starting `no route for `, which the Go router answers for an unknown route; a 404 NOT_FOUND for an unknown project says `not found` and must stay an error, so the fallback never turns an unknown project into `no model`.",
+    "The dispatch CLI prints a dashboard link from its own configuration; logs posted on this public repository's pull request have the tailnet host replaced by example-tailnet (a first post that carried it was deleted at once)."
   ],
   "deviations": [
     "The CLI's failed-source line names the components a re-saved source still shows (`The previous model of <repo> stays up (N components).`) when the row has no commit but keeps components; the plan named only the commit and never-imported lines, and the never-imported line was false after a re-save (seen in the real-GitHub run).",
     "The simplify pass added `create index components_source on components (project_key, source_id)` to 0117.",
-    "packages/pi-legion/CHANGELOG.md gained an entry for the legion-architect skill edit (the plan listed five CHANGELOGs; that skill ships in pi-legion)."
+    "packages/pi-legion/CHANGELOG.md gained an entry for the legion-architect skill edit (the plan listed five CHANGELOGs; that skill ships in pi-legion).",
+    "Review round 1: beyond the read route the reviewer asked to keep, the singular POST /api/v1/projects/{key}/architecture-source/sync is kept (warn-first) so an earlier dispatch architecture-sync keeps working against this Dispatch, answering one row (the first failed source, else the first); an access failure it once answered 409 SOURCE_ACCESS is now recorded on its row and answered 200 with last_error, which those clients print as `Sync failed for ...`.",
+    "Review round 1: this release's syncArchitectureSources also falls back to an older Dispatch's singular sync on its no-route 404 (not asked by the reviewer; the same skew would have failed every architecture-sync between the plugin publish and the Dispatch deploy). --repo keeps no fallback: an older server cannot address a source by repository.",
+    "Round 1, by the architect's ruling relayed 2026-10-26 (dispatch://INFRA-49/ask/2d080aec-ce9a-4c7c-a235-ae998d2b0830): the source save now reads the branch head with the installation's token (githubapp Client.Ref) before any write and refuses a missing branch with 409 SOURCE_ACCESS; an immediate refusal in the census, since the save it replaces stored a source no sync can import.",
+    "Round 1: forward-merged main a9c9542fb738 (#2202) on a GitHub-reported conflict; fingerprint 2c8e63a1d606 -> 72772984d6d2 (changed: four test files adapted to #2202's 40-hex SHA, Accept: application/vnd.github.sha and 422 fakes; no production line of the branch changed).",
+    "Round 1: docs/solutions INFRA-390 learning (from main) named the removed singular PUT; updated to the per-repository routes in fa2dacfbb399."
   ],
-  "openQuestions": []
+  "openQuestions": [
+    "Local go test of the whole internal/dispatch tree is not a green signal in this pod: api (about 1055 s) and docs (about 748 s) pass the 10-minute default only with a longer -timeout; TestIssueRanksStayOrderedPastLowercaseDigitsAndProductionShapedMoves needs a database whose default collation is not byte order, the micromamba Postgres here is; pmdoc's linearity timings and files' S3 test (Docker) fail here. None of those files differs between base, branch and main; CI is the record for them."
+  ]
 }
