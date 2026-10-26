@@ -226,15 +226,15 @@ has no owning issue. A successful migration backfills `project_key` and generate
 Migration `0032_refs_provenance` gives every mention edge a `kind`, `created_at`, and
 `source_seq` (the global `events.id` that introduced it), creates the `graph_edges` view over
 `refs` and the structural columns, and refuses to run when any ask or comment anchor carries a
-non-uuid `artifact_id`, since the view casts it on every row. Migration `0120_block_graph` makes
+non-uuid `artifact_id`, since the view casts it on every row. Migration `0121_block_graph` makes
 each block of a document a node: its tables (`document_blocks`, `block_refs`,
 `document_block_versions`, `document_block_texts`, `document_indexed_versions`,
 `block_grammar_owed`) and two more `graph_edges` arms, a block's mentions and its `part_of` edge
-to its document. `0121`-`0124` add triggers that owe the block index what any build writes: a
+to its document. `0122`-`0125` add triggers that owe the block index what any build writes: a
 document version carrying markdown, and a comment, ask or issue message whose text holds `#b-`;
-`0125` owes it the comments, asks and issue messages already stored that hold `#b-`. `main` starts
+`0126` owes it the comments, asks and issue messages already stored that hold `#b-`. `main` starts
 `docs.Service.RunBlockIndexReconciliation` (lease `block-index`), which indexes what is owed with
-no command run (`packages/envoy/AGENTS.md`, "References form one graph"). `0126` and `0127`
+no command run (`packages/envoy/AGENTS.md`, "References form one graph"). `0127` and `0128`
 rebuild `asks_block_id_unique`, `asks_anchor_block_id_idx` and `comments_anchor_block_id_idx`
 over `block_id_key(id)`, the id's SHA-256, so an ask block or an anchor under a block id of any
 length is written.

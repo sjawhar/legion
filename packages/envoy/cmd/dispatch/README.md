@@ -728,13 +728,64 @@ read or wrote this one, only that person-run subcommand did, so the drop breaks 
 serving through the roll. Both censuses answer `0`: `0118`'s updates write only the columns it
 adds, and `0119` drops nothing a running build still reads.
 
-Migration `0120_block_graph` creates the tables behind a document's blocks as graph nodes
+Migration `0120_artifact_reviews_event_seq` adds `artifact_reviews.event_seq`, the sequence of the
+`artifact.*` event each review appended on its document's owner, which `docs.WriteReview` writes in
+the transaction that appends the event and the approval read returns as `seq`
+(`packages/envoy/AGENTS.md`). It is nullable, so a review recorded before it reads with no `seq`,
+and the release before it, which names no `event_seq` in its insert, rolls beside it. Adding a
+nullable column with no default writes the catalog alone, under `artifact_reviews`'
+`ACCESS EXCLUSIVE` lock for milliseconds; it refuses and rewrites no row, and its census answers `0`.
+Its `event_seq > 0` check is a second statement, added `not valid` as the rule below requires: an
+inline check would read every row of the table while it held that lock, and `not valid` still
+refuses every row written or updated after it. Nothing validates it later — every row below the
+migration carries no sequence at all — so the constraint stays `not valid` for good.
+
+`0120` also creates `artifact_reviews_by_artifact_event_seq` on `(artifact_id, event_seq desc nulls
+last, created_at desc, id desc)`, `docs.ReviewOrder` per document, so the newest-review reads
+(`docs.LatestApprovedReview`, `latestReviewBy`) take one index entry rather than sort every review
+of the document. It is a plain `create index`, not `concurrently`: the runner applies a migration
+inside one transaction (`internal/dispatch/store/store.go`, `pgmigrate.Exec`), where `concurrently`
+cannot run, and no migration of the set uses it. The build takes no lock the migration does not
+already hold — its `alter table` statements hold `artifact_reviews`' `ACCESS EXCLUSIVE` — and holds
+it while it reads the table's rows, which the census bounds by its 1 GiB limit; the census still
+answers `0`, since the build refuses and rewrites no row. `artifact_reviews_by_artifact` (`0014`,
+`created_at desc, id desc`) stays, because the release before `0120` orders by it while it serves.
+
+The release before `0120` keeps serving beside it while the app Deployment rolls (below), and again
+for as long as a rollback lasts, and it inserts every review naming no `event_seq`. Left null, such
+a review — newer than every sequenced one — would rank below them all in `docs.ReviewOrder`
+(`event_seq desc nulls last`): a person's approval an old pod wrote would read back as the changes
+requested before it, and a changes request an old pod wrote would be overridden by the approval
+before it. So `0120` also adds a trigger, which the rule below allows a migration to add:
+`artifact_reviews_event_seq`, a constraint trigger on `artifact_reviews` deferred to the commit, gives
+every review inserted without a sequence, by either release, the sequence of the `artifact.*` event
+its own transaction appended for it (its type, document and version, among the events on the
+owner that its transaction wrote, which the owner's row lock keeps the newest there until the
+commit). An event is the transaction's own when it carries the transaction's `now()` and its row's
+`xmin` is the transaction or one of its subtransactions (`artifact_reviews_own_row`, which reads it
+through `pg_xact_status`, so a savepoint's event counts and another transaction's does not, even
+one that started in the same microsecond and so shares `now()`). It is deferred because every
+release inserts a review before it appends the event.
+Every row that carries no sequence was therefore committed before `0120`, whose `ACCESS EXCLUSIVE`
+lock waits out every transaction that has inserted a review, and every sequenced row is newer.
+The trigger is on `artifact_reviews`, the table `0120` already locks, so the migration holds no
+second lock: a trigger on `events` would need that table's `SHARE ROW EXCLUSIVE` while holding
+`artifact_reviews`, against a transaction that appended an event and then waits to insert a
+review (a carried approval), and the census holds every table a migration names to its 1 GiB limit.
+
+`0120` is additive — a nullable column, a `not valid` check, an index and a trigger — so rolling Dispatch
+back past it is an image rollback alone, with no schema to restore and no backup to take for it:
+the release before it runs over the new schema unchanged, and the trigger gives every review that
+release writes its sequence. The auto-deployer is the exception, by its own rule above: once the
+schema has moved it refuses to start the previous tag, and recovery there is forward.
+
+Migration `0121_block_graph` creates the tables behind a document's blocks as graph nodes
 (`packages/envoy/AGENTS.md`, "References form one graph"): `document_blocks`, `block_refs`,
 `document_block_versions`, `document_block_texts` and `document_indexed_versions`, each with a
 foreign key to `artifacts`, and `block_grammar_owed`, with their indexes, among them the partial
 `document_block_versions_owed` and `block_grammar_owed_enqueued` through which the block-index
 reconciliation reads what is owed. It creates the trigger function `block_grammar_owe`, which no
-trigger calls until `0122`, and re-states the `graph_edges` view with two more arms: a block's
+trigger calls until `0123`, and re-states the `graph_edges` view with two more arms: a block's
 mentions and its `part_of` edge to its document. The five foreign keys take `SHARE ROW EXCLUSIVE`
 on `artifacts` for the migration's short transaction, so an artifact write waits behind it while a
 read does not, and re-stating the view holds `graph_edges` `ACCESS EXCLUSIVE`, so a reference read
@@ -742,7 +793,7 @@ waits too. Its one insert marks every document owed a block index in `document_b
 table it creates, and the server's reconciliation indexes them with no command run. It refuses and
 rewrites no existing row; its census answers `0`.
 
-Migration `0121_artifact_versions_block_index_trigger` creates `document_block_versions_owe` and
+Migration `0122_artifact_versions_block_index_trigger` creates `document_block_versions_owe` and
 an `after insert` trigger on `artifact_versions` that marks a document owed a block index whenever
 any build inserts a version carrying markdown. A version a build without the block index writes
 during the roll is then indexed by the reconciliation, and a block-aware build's own index of the
@@ -750,31 +801,31 @@ version, later in the same transaction, settles the mark. The trigger takes `SHA
 on `artifact_versions` alone, so a version write waits behind it while a read does not. It touches
 no row; its census answers `0`.
 
-Migration `0122_comments_block_grammar_trigger` attaches `block_grammar_owe` to `comments`,
+Migration `0123_comments_block_grammar_trigger` attaches `block_grammar_owe` to `comments`,
 `after insert or update of body`, for a body that holds `#b-`: a comment any build writes that may
 cite a block is owed an index with the block grammar, which a build that predates the grammar does
 not give it. The trigger takes `SHARE ROW EXCLUSIVE` on `comments` alone, so a comment write waits
 behind it while a read does not. It touches no row; its census answers `0`.
 
-Migration `0123_asks_block_grammar_trigger` does the same for `asks`, `after insert or update of
+Migration `0124_asks_block_grammar_trigger` does the same for `asks`, `after insert or update of
 question`, for a question that holds `#b-`. Its trigger takes `SHARE ROW EXCLUSIVE` on `asks` alone,
 so an ask write waits behind it while a read does not. It touches no row; its census answers `0`.
 
-Migration `0124_messages_block_grammar_trigger` does the same for `messages`, `after insert or
+Migration `0125_messages_block_grammar_trigger` does the same for `messages`, `after insert or
 update of body`, for an issue message (`issue_key` set) whose body holds `#b-`; a direct message is
 indexed by nothing, so it owes nothing. Its trigger takes `SHARE ROW EXCLUSIVE` on `messages`
 alone, so a message write waits behind it while a read does not. It touches no row; its census
 answers `0`.
 
-Migration `0125_block_grammar_seed` owes the same index to every comment, ask and issue message
+Migration `0126_block_grammar_seed` owes the same index to every comment, ask and issue message
 already stored whose text holds `#b-`, read with the three triggers' predicates. The triggers are
 live by then, so a write that lands while it runs is owed by its trigger, and a row a trigger has
 already written keeps its `enqueued_at`. It takes `ACCESS SHARE` on `comments`, `asks` and
 `messages`, which no write waits behind, and writes only `block_grammar_owed`. Its census answers
-`0`: the one table it writes is `0120`'s, which holds no row at deploy, and the rows it inserts are
+`0`: the one table it writes is `0121`'s, which holds no row at deploy, and the rows it inserts are
 new work owed, not a rewrite.
 
-Migration `0126_asks_block_id_key` creates `block_id_key(id)`, the SHA-256 of a block id's UTF-8
+Migration `0127_asks_block_id_key` creates `block_id_key(id)`, the SHA-256 of a block id's UTF-8
 bytes, written to be immutable so an index can use it, and rebuilds `asks_block_id_unique`
 (`0018`) and `asks_anchor_block_id_idx` (`0023`) under their names over it. A B-tree entry holds
 at most 2704 bytes, and both indexes keyed the id itself, so an ask block or an ask anchored in a
@@ -787,8 +838,8 @@ write of an ask waits while the two indexes build over its rows. It refuses and 
 rows the old unique index held apart differ in their id, so they differ in its SHA-256. Its census
 answers `0`.
 
-Migration `0127_comments_anchor_block_id_key` rebuilds `comments_anchor_block_id_idx` (`0023`)
-over `0126`'s `block_id_key` the same way, so a comment anchored in a block whose id is any length
+Migration `0128_comments_anchor_block_id_key` rebuilds `comments_anchor_block_id_idx` (`0023`)
+over `0127`'s `block_id_key` the same way, so a comment anchored in a block whose id is any length
 is written. Its own migration, so its transaction holds `comments` alone: the drop holds it
 `ACCESS EXCLUSIVE`, and every read and write of a comment waits while the one index builds. It
 refuses and rewrites no row; its census answers `0`.
@@ -983,7 +1034,7 @@ out of every list and every count that build serves (`nodeLoaders`, `refs/graph.
 kinds it knows). The migration refuses to run when an ask or comment anchor carries a non-uuid
 `artifact_id`.
 
-Each block of a document is a node of the graph too (migration `0120`; `packages/envoy/AGENTS.md`,
+Each block of a document is a node of the graph too (migration `0121`; `packages/envoy/AGENTS.md`,
 "References form one graph"). Its reference is the document's with `#b-` and the block's id,
 percent-encoded as `encodeBlockId` (`@legion/contracts`) writes it:
 `dispatch://KEY/spec#b-<id>`, `dispatch://KEY/artifact/<slug>#b-<id>` or
@@ -1000,7 +1051,7 @@ naming the document, the longest id's length and the bound, and writes the versi
 the reference it is given whatever its length (`text.ParseRef`): `?to=`, `?from=` and
 `GET /api/v1/block-links` read a node of any name, and a block whose id is past 256 bytes is
 `404 NOT_FOUND`, no node. An ask block and an anchor in a block are written under
-an id of any length (migrations `0126` and `0127`, Database migrations above). A mention written
+an id of any length (migrations `0127` and `0128`, Database migrations above). A mention written
 inside a block starts at the
 innermost block holding it, so `?to=` a cited node names that block, whose `document` is the
 citing document; a document's own read also lists the links at its blocks, each edge naming its
@@ -1142,6 +1193,50 @@ A ranking or latency change is measured on a restored copy of the production cor
 sees for a list of queries from any build, and `search-latency-compare.sh` runs
 `TestSearchLatencyOnCorpus` from a base checkout and this one alternately and gates on the
 difference (`packages/envoy/scripts/README.md`, "Measuring search on a copy of the corpus").
+
+## Access log
+
+Dispatch writes one line per served request, always, with no setting to turn it off. It is
+written at INFO when the request ends, through the process's own logger:
+
+```
+time=2026-10-25T05:55:15.446Z level=INFO msg="dispatch: request" method=POST route=/api/v1/issues path=/api/v1/issues caller_kind=session caller=session-0123456789abcdef address=203.0.113.9 user_agent=dispatch-cli/1.0 status=201 elapsed_ms=10 bytes=412 credential=shared-token
+```
+
+| Field | What it holds |
+| --- | --- |
+| `method` | The request's HTTP method. |
+| `route` | The route's own pattern (`/api/v1/issues/{key}`), so one route's requests group together whatever ids their paths carry; `unmatched` for a path under `/api`, `/v1`, `/auth`, `/ws` or `/healthz` that no route answers. |
+| `path` | The request path as it was sent, still escaped (`a%2Fb` stays `a%2Fb`), without its query string. |
+| `caller_kind` | How the caller authenticated: `user` (a signed-in person), `session` (the session a bearer named in its `actor`), `token` (a personal agent token with no session named), `service` (a verified service-account token), `shared-token` (`DISPATCH_AGENT_TOKEN` with no session named), or `anonymous` (a public route, a request whose credential was refused, or an `unmatched` path). |
+| `caller` | Who that is: the person's lowercase email, the session id, the personal token's owner, or the service-account subject. `shared-token` and `anonymous` name nobody. |
+| `address` | The rightmost `X-Forwarded-For` entry, the address the load balancer in front of Dispatch saw, or the connection's own address when there is none. |
+| `peer` | The connection's own address without its port: the hop that reached Dispatch. Unlike `address`, a caller cannot forge it, so a caller that reaches Dispatch directly is still named. |
+| `user_agent` | The request's `User-Agent`. With `address`, it tells apart callers that share one credential. |
+| `status` | The response status. A handler that panicked before writing is logged as `500`; the client gets a closed connection, not a status. |
+| `elapsed_ms` | How long the request took, in milliseconds. A websocket's line is written when its connection ends, so it carries the connection's whole life. |
+| `bytes` | The response body the handler wrote. A websocket upgrade is `101` with `0` bytes: its frames are written on the connection it took. |
+| `credential` | Only on a `session` line: the credential that named the session, since the session id is the caller's own text. `token:<owner>`, `service:<subject>` or `shared-token`. |
+| `aborted` | Only when the handler panicked (an artifact download whose store fails mid-stream aborts this way): `true`. The line is still written, and the panic still reaches the server. |
+
+The line never carries a token, a cookie, a query string, a request body or a response body. The
+text in it a caller wrote, `method`, `path`, a session's `caller`, `address` and `user_agent`, is
+each cut to 256 bytes.
+
+A websocket or event stream resolves its caller again on every heartbeat, and that resolution
+does not change the line: it names the caller the connection was admitted as.
+
+Every route the server answers writes one: every `/api/v1` route, the document and delivery
+websockets, `/auth/*`, the GitHub proxy `/api/github/rest/`, and the 404 an `unmatched` path gets
+(a known path called with a method its route does not serve is one too). The dashboard's own
+pages and assets write none, so a browser's page loads do not bury the callers. `/healthz`, which
+a load balancer calls every few seconds, writes none either. Three answers are given before any
+route runs and write none: the `403` a cookie request from another origin gets, the `421` a
+request for another host gets on a server with local sign-in, and the `307` redirect Go's router
+gives an unclean path (`/api/v1//issues`) or a prefix route called without its trailing slash
+(`/api/github/rest`). Match the line as `msg="dispatch: request"`: the previous-shared-token
+warning's message starts with the same words. The line is one synchronous write to stderr per
+request, so a log pipe that blocks stalls requests.
 
 ## Routes
 

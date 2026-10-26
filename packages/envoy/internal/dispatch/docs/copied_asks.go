@@ -191,7 +191,7 @@ func ownerDocuments(owner artifactOwner) (string, string) {
 // document settled being $2, oldest first, each followed by its document's issue key, project,
 // slug, kind and whether it is the issue's spec, and returns the value it binds as $3: the owner's
 // documents through their index, then each one's asks through asks_block_id_unique, whose second
-// column is block_id_key(block_id) (migration 0126), so the ids' keys are matched beside the ids.
+// column is block_id_key(block_id) (migration 0127), so the ids' keys are matched beside the ids.
 func copiedAskSourcesQuery(owner artifactOwner) (string, string) {
 	documents, ownerKey := ownerDocuments(owner)
 	return `

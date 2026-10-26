@@ -70,6 +70,8 @@
 
 ### Fixed
 
+- `dispatch-first` now says to open a `dispatch ask` the moment a person blocks your work, and to
+  record every request you accept in Dispatch and read that record back before a turn ends.
 - The plugin's `legion/` copy of the `legion-architect` skill is regenerated with the same
   reference: its Wake routing table moves unchanged to
   `skill://legion-architect/references/wake-routing.md` (INFRA-376).
@@ -150,6 +152,17 @@
   `dispatch read`.
 
 ### Changed
+
+- The plugin ships `claude-envoy:dispatch-writing-specs` in place of
+  `claude-envoy:dispatch-brainstorming`: `skills/dispatch-writing-specs` links the
+  repository's new skill, and the old link is gone. The three Dispatch skills are under 2,000 words
+  together, and `dispatch` no longer has a `references/` directory; `pi-envoy`'s changelog lists
+  what each skill holds and which rules are gone. The bundled `dispatch` command (`dist/dispatch.js`,
+  `dist/envoy-channel.js`, `dist/session-hook.js`) prints the new notice after a primary spec with
+  no ask block: a person does not watch the session's chat, and sees its need only through an open
+  ask or a spec that waits for approval. `dispatch issue --spec` and `dispatch doc-edit` point at
+  `skill://dispatch-writing-specs`. After approval, `dispatch-writing-specs` makes a new version only
+  for a change to scope, acceptance, cost, risk or a person's decision, all in one version.
 
 - The bundled Dispatch tools (`dist/dispatch.js`, `dist/envoy-channel.js`, `dist/session-hook.js`)
   carry the 32,000-character body limit, up from 2,000 (INFRA-45): the `comment`, `suggest` and
