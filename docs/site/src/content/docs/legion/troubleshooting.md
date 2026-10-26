@@ -273,8 +273,12 @@ restoring a decision block it retracted. The architect's resume task names what 
 root still `admitted` after its architect replied in an approval request's thread waits on a
 person only once the architect hands the request back (a reply leaving the turn with the human, or
 `dispatch request-approval`). A missing `legion` label or a foreign Dispatch claim instead produces
-`unslotted`; Legion deliberately does not resume work another owner took. The merger's `READY`
-still waits for the design gate's current approved version.
+`unslotted`; Legion deliberately does not resume work another owner took.
+
+`designGate` in the same output is what a wait on the gate stands on:
+`designGate.approvedVersion` is `null`, or lower than `currentVersion`, until someone approves the
+latest version from the document's header or the Inbox. An approval of an earlier version does not
+count: the spec changed since. The merger's `READY` waits on the same approval.
 
 ## An issue is held
 
