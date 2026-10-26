@@ -179,6 +179,14 @@ Anthropic, independently of which devbox this runs on:
   plaintext Anthropic key, for a devbox with no Hawk gateway at all
   ([`lib/install-key-file-model-route.sh`](#libinstall-key-file-model-routesh)).
 
+The `secrets` CLI named here and below is secretsd, shipped from `sjawhar/forward` (the old
+`sjawhar/secretsd` repository is archived): it reads its agent tier from local sops files and its
+human tier through the local secretsd daemon, which asks for a YubiKey touch, and it never reads
+the agent-secrets broker. `agent-secrets` is the other CLI, which reads that broker, backed by a
+cloud Secret Manager. One key name can hold different values in the two stores - the App keys
+these runs use are the `secrets` store's. `agent-secrets` names its store in output and every
+refusal; `secrets` names none today.
+
 CI runs the unit and integration tests, not this script; what only this
 run proves is OMP's real RPC frames, `--resume`'s same-agent behaviour, the one-word
 `--append-system-prompt`, the plugin's strict parse of the Go daemon's answers, the plugin gate

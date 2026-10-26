@@ -329,7 +329,20 @@ package api
 // released pi-legion declaring it, so this branch takes the number above it, as the collision
 // note says.)
 //
-// 38: INFRA-220 -- a worker's environment gains the four LEGION_STALL_* numbers under both
+// 38: sjawhar/legion INFRA-225 -- Legion starts no issue that waits on an unfinished Dispatch
+// issue, and says what it is waiting for. `api.Admission` gains `blocked`, required: every root
+// and every child Legion is waiting to start, by issue key, each `{issue, blockedBy}` with the
+// keys it waits on that are not done (`blockedBy` is never null, and a key the daemon has no
+// mirror row of counts as unfinished). `waiting` is unchanged, the roots' waiting line.
+// `api.WaveReleaseResponse` gains `started` and `held`, both required, `held` an array of the
+// same `{issue, blockedBy}` row: a release accepts the whole wave whatever its children's links
+// say, and these two say which children it started and which it left held. A 37 plugin's strict
+// reader refuses a state carrying `blocked` and a release answer carrying `started` or `held`,
+// so the boot gate and `legion probe-image` refuse the mixed pair. (This branch took 36, then 37;
+// main landed INFRA-229 at 36 and INFRA-80 at 37 while it was open, so this change takes the
+// number above them, as the collision note says.)
+//
+// 39: INFRA-220 -- a worker's environment gains the four LEGION_STALL_* numbers under both
 // runtimes (`internal/daemon/specs.go` merges each one the daemon holds into `spec.Env`, which a
 // pane's `-e` pairs and a pod container's `env` carry verbatim), and a Claude Code role's pod
 // worker container gains CLAUDE_CONFIG_DIR, CLAUDE_CODE_DISABLE_BACKGROUND_TASKS and
@@ -343,10 +356,11 @@ package api
 // their paths, restoring both before a resume's child starts, and writes
 // `<transcript>.legion-saved` once its first save of a fresh transcript has committed, which the
 // image's `@sjawhar/claude-envoy` waits for before it registers the transcript. A launcher before
-// 38 ignores the variable and keeps nothing, so the next pod's resume of that transcript is
-// refused, and a claude-envoy before 38 registers a transcript the table may not hold yet; an
-// image at 38 under a daemon before 38 is told no session, so its claude-envoy waits for no
+// 39 ignores the variable and keeps nothing, so the next pod's resume of that transcript is
+// refused, and a claude-envoy before 39 registers a transcript the table may not hold yet; an
+// image at 39 under a daemon before 39 is told no session, so its claude-envoy waits for no
 // marker and its launcher keeps nothing. The image probe refuses either pair. (This branch took
-// 36, then 37; main then landed INFRA-229 at 36 and sjawhar/legion INFRA-80 at 37 before it
-// merged, so this branch takes the number above them, as the collision note says.)
-const DaemonAPIVersion = 38
+// 36, then 37, then 38; main then landed INFRA-229 at 36, sjawhar/legion INFRA-80 at 37 and
+// INFRA-225 at 38 before it merged, so this branch takes the number above them, as the collision
+// note says.)
+const DaemonAPIVersion = 39

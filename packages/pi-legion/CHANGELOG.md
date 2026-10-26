@@ -7,6 +7,21 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 
 ### Added
 
+- Daemon API contract 38 (INFRA-225): Legion admits no root and starts no child while Dispatch
+  shows it blocked by an issue that is not `done`, and says what it is waiting for. `legion state`
+  and the controller's `read_state` carry `admission.blocked`, every root and child Legion is
+  waiting to start, each `{issue, blockedBy}` with the keys it waits on that are not done, and
+  `release_children` answers `started` and `held` beside `released`: the children it started,
+  and each child it left held with the issues it waits on. All three required, so a plugin built
+  before it refuses the state and the release answer. Install this release with a `legion` built
+  from the same commit.
+- The skills this plugin ships carry that rule (INFRA-225). The `legion-architect` skill links
+  children that depend on one another with `dispatch issue-update --blocked-by`, releases a child
+  Legion holds all the same, and says a never-started child that still waits is handed over from
+  a finished tree as a root carrying no run; its wake routing's `child-status` row says what
+  cleared a held child's hold. The `legion-controller` skill names the tick's `blocked` waits in
+  the day's report and counts the free slots without the waiting roots in `admission.blocked`,
+  which take none, and its admission reference reads a root both waiting and blocked.
 - Daemon API contract 37 (INFRA-80): under the Kubernetes runtime an issue's disk is a generic
   ephemeral volume its own pod owns, created with the pod and deleted with it, so an issue pod's
   `workspace-init provision` container is no longer told `LEGION_EXPECT_ISSUE_VOLUME`, and the
@@ -182,7 +197,7 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   reads. A session resumed on an
   entry this build does not know — `{"state":"quiet"}` or `{"state":"text-call"}`, what the build
   now in the pods wrote — reads as an open phase with no reminder yet, so it is reminded rather
-  than left alone. Daemon API contract 38 carries the four variables (and, in a pod, Claude Code's
+  than left alone. Daemon API contract 39 carries the four variables (and, in a pod, Claude Code's
   three): install this release's pair with a `legion` built from the same commit.
 
 - Retro's push never carries the `skip-checks: true` trailer line, whatever paths its commits

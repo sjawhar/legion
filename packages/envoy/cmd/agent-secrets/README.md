@@ -8,7 +8,12 @@ agent-secrets DEMO_API_KEY --reason "Deploy the example service" -- ./deploy.sh
 
 It asks the broker for the named secrets, waits while a person approves them in Dispatch if the
 secret's owner and tier require it, and runs the command with each granted value in its
-environment. People and launchers use its other forms to log a machine in (`agent-secrets machine
+environment, writing one line to standard error first: the names it injected and the broker and
+store they came from, never a value. Every form names that source the same way - `request`,
+`status` and `self` as a `source:` line, `secret show` as a `store:` line, and every refusal as
+`; asked the broker at <host> (<store>)` - so an answer of this CLI's is never taken for another
+secrets CLI's about the same name. People and launchers use its other forms to log a machine in
+(`agent-secrets machine
 login`), register an agent session (`agent-secrets register --exec -- <agent>`), and inspect a
 session's grants (`agent-secrets self`). People manage the agent secrets themselves with
 `agent-secrets secret list|show|create|set|retag|delete|restore`, which calls the broker's own

@@ -26,6 +26,17 @@
 
 ### Changed
 
+- The plugin declares daemon API contract 38 in `package.json`'s `legion.daemonApiVersion`
+  (INFRA-225): `GET /legion/v1/state` carries `admission.blocked`, every root and child Legion is
+  waiting to start behind an unfinished Dispatch issue, each `{issue, blockedBy}`, and
+  `release_children` answers `started` and `held` beside `released`, all required, so the MCP
+  server's strict readers admit the fields and a plugin built before it refuses them; a session of
+  it registers with a daemon at 38. Install it with a `legion` built from the same commit. Its
+  `legion/` copies of the `legion-architect` and `legion-controller` skills carry the blocked-by
+  rule, since `legion/` was regenerated: children linked with `--blocked-by`, a held child
+  released all the same, a never-started child that still waits handed over carrying no run, the
+  controller's free slots counted without the waiting roots in `admission.blocked`, and a root both
+  waiting and blocked read in its admission reference.
 - The plugin declares daemon API contract 37 in `package.json`'s `legion.daemonApiVersion`
   (INFRA-80): under the Kubernetes runtime an issue's disk is a generic ephemeral volume its pod
   owns, created with the pod and deleted with it, so the `workspace-init provision` container is
@@ -184,7 +195,7 @@
   `claude` process; a file the Go bridge wrote reads as an open phase with no reminder yet. The
   four `LEGION_STALL_*` numbers come from the worker's environment. The hook entries are the Legion
   plugin's alone: a plain `@sjawhar/claude-envoy` install registers no `legion` server, so
-  `hooks/hooks.json` carries none of them. `package.json`'s `legion.daemonApiVersion` is 38.
+  `hooks/hooks.json` carries none of them. `package.json`'s `legion.daemonApiVersion` is 39.
 - A Claude Code phase worker whose launcher recreated its workspace is told so, once per launch,
   over the same inbox the reminders use, as an Oh My Pi worker is
   (`LEGION_WORKSPACE_RECREATED`): it reconciles against its committed handoff before new work
