@@ -2,22 +2,46 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-439",
-  "completed": "2026-10-26T17:05:00Z",
-  "round": 9,
-  "headSha": "3f7f2fc7736610e32d5e0a774a5e78e8bda3228e",
-  "evidence": "https://github.com/sjawhar/legion/pull/2228#issuecomment-6422245882",
-  "answeringProvider": "anthropic/claude-haiku-4-5 answered every omp turn (read from the session file)",
+  "completed": "2026-10-26T17:42:00Z",
+  "round": 10,
+  "headSha": "cdc5696f34f2d1808cbe31aca29f80a13e8dddf2",
+  "evidence": "https://github.com/sjawhar/legion/pull/2228#issuecomment-6423085252",
+  "answeringProvider": "anthropic/claude-haiku-4-5 answered every omp turn (read from the session files)",
   "implementerProof": {
     "verdict": "verified",
-    "how": "The implementer's leg B2-killed-in-flight (a BTW whose answer's reply POST was held when omp was SIGKILLed) shows no card at 3f7f2fc7, and my red test f2828f31 passes there. The record-before-side-turn change closes that window."
+    "how": "Drove the BTW-in-replay class live myself (legs B5, B7, B6k) at cdc5696f; each replayed BTW is one card carrying the inert note, and no turn starts. Red test 8c4e89118e1b is unmodified and passes. Re-ran `bash packages/pi-envoy/scripts/smoke-replay.sh` at this head: SMOKE REPLAY PASS."
   },
-  "failed": 1,
-  "failures": [
+  "failed": 0,
+  "failures": [],
+  "proof": [
     {
-      "criterion": "Review finding 1, the class (architect): a BTW is never replayed as a steering card that starts a turn, on any path",
-      "evidence": "A BTW that reaches replay without a record is still shown through showReplayed -> showReplayCard -> handCard with deliverAs 'steer' and triggerTurn: true. This covers a BTW published while the session's NATS connection is down, one published while omp is stopped, and one whose process is killed between the frame's arrival and its record. Live leg B5 (r17, real omp, Dispatch, natsd and listener built from this head): the NATS proxy was killed and alice sent a BTW (4723d136-…). The heartbeat replay sweep, which runs over HTTP, fetched it. At 17:01:30.798 the session wrote a card with the BTW body and expects_reply: required; at 17:01:31 a turn started and the model answered 'ok'. Dispatch's attempt stays 'sent' with no reply. Red test: 8c4e89118e1b, `cd packages/pi-envoy && bun test extensions/envoy.test.ts -t \"a BTW refused live\"` -> fails 'one the session never received live reaches replay as at most one card that starts no turn' (the card was handed with triggerTurn: true). The architect's direction: make every replayed BTW one inert notice in both plugins."
+      "criterion": "Review finding 1, the class (architect): a BTW that reaches replay never starts a turn in Oh My Pi",
+      "surface": "real omp --mode rpc 18.8.9 with this checkout's pi-envoy, real Dispatch, natsd and listener built from this head",
+      "command": "/legion/scratch/tmp/adv/r18.sh (legs B5, B7) and r20.sh (leg B6k), comment 6423085252",
+      "observed": "B5, a BTW sent while NATS was down: one card with the inert note at 17:26:44 and no assistant message after it. B7, a BTW sent mid-turn while NATS was down, then the turn interrupted: the withdrawn card is handed back as one card and no turn starts. B6k, a BTW sent while omp was SIGKILLed: after the resume, one card and no turn",
+      "headSha": "cdc5696f34f2d1808cbe31aca29f80a13e8dddf2",
+      "negativeControl": "at 3f7f2fc7 (round 9, leg B5) the same BTW was a card followed by a turn and an assistant 'ok' at 17:01:31"
+    },
+    {
+      "criterion": "Architect's check: Dispatch never delivers a BTW to a Claude Code session, so its replay passing one over cannot lose a message",
+      "surface": "the real claude-envoy dist/envoy-channel.js over MCP stdio, registered with the listener (capabilities [aside]); Dispatch built from this head; alice's targeted sends over HTTP",
+      "command": "/legion/scratch/tmp/adv/r19.sh (legs C2, C3), comment 6423085252",
+      "observed": "a BTW to the Claude session, and its Retry, each recorded 'failed: session … does not advertise btw', with 0 messages stored on its agent subject and 0 channel notifications; an aside to it is 'sent' and shown as one channel notification. In code, every message send and Retry goes through resolveDeliveryTarget's capability check (envoy_resolve.go:113), and broadcasts check the same (broadcasts.go:448)",
+      "headSha": "cdc5696f34f2d1808cbe31aca29f80a13e8dddf2",
+      "negativeControl": "the same session's aside, which it advertises, is delivered"
+    },
+    {
+      "criterion": "Bare gates",
+      "surface": "real omp, natsd -js and listener built from this head; the listener's routes on testnats",
+      "command": "bash packages/pi-envoy/scripts/smoke-replay.sh; bun test extensions/envoy.test.ts -t \"a BTW refused live\"; go test ./cmd/listener -run 'TestReplayNeverReturnsAnotherSessions…'",
+      "observed": "SMOKE REPLAY PASS (legs 1 to 6, three controls); BTW describe 8 pass 0 fail; both listener red tests pass",
+      "headSha": "cdc5696f34f2d1808cbe31aca29f80a13e8dddf2",
+      "negativeControl": "the released plugin 10.17.7 loses its messages in the smoke's controls"
     }
   ],
-  "proof": [],
-  "notes": "At the architect's instruction this is not a full round: the issue is moved back to implementing with request_backward_move."
+  "notes": [
+    "A BTW sent after a clean stop is refused by Dispatch ('no live session'), so it never reaches replay.",
+    "My live broadcast attempt to the Claude session used a wrong field name and was refused as invalid JSON; the broadcast capability check rests on the code (broadcasts.go:448).",
+    "CI at cdc5696f when read: Tests, Legion Envoy and Contracts, Docs and Worker Image queued."
+  ]
 }
