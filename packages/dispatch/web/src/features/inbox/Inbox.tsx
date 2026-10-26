@@ -20,12 +20,11 @@ import {
   secondaryButtonText,
   textMutedOnCanvas,
 } from "../../theme/classes";
-import { useAgents } from "../conversation/useAgents";
 import { CredentialRequestsSection } from "../credentials/CredentialRequestsSection";
 import { type CredentialRequests, useCredentialRequests } from "../credentials/pending";
 import { PriorityControl } from "../issue/PriorityControl";
 import { useIssueAssignee } from "../issue/useIssueAssignee";
-import { actorLabel } from "../refs/actor";
+import { AgentName, useAgentText } from "../refs/AgentName";
 import { COPY_REF_SELECTOR } from "../refs/CopyRefButton";
 import { buildInboxPath, type InboxRoute, parseInboxSearch } from "../refs/routes";
 import { type KeymapScope, useKeymap, useKeymapScope } from "../shell/keymap";
@@ -65,7 +64,14 @@ function ReplyChip({ children }: { children: ReactNode }): ReactNode {
  *  <agent>") is the card's own status line. */
 function InboxRowChip({ ask }: { ask: InboxRow }): ReactNode {
   if (ask.waiting_on === "human" && ask.last_reply?.author.kind === "session") {
-    return <ReplyChip>{actorLabel(ask.last_reply.author)} replied</ReplyChip>;
+    // One span, so the pill's flex box keeps the space between the name and "replied".
+    return (
+      <ReplyChip>
+        <span>
+          <AgentName actor={ask.last_reply.author} inline /> replied
+        </span>
+      </ReplyChip>
+    );
   }
   return null;
 }
@@ -309,7 +315,8 @@ function refusalText(failed: readonly AskSnoozeFailure[], of: number): string | 
 }
 
 /** What the Inbox says when no band has a row. An agent filter's line is about that agent's asks
- *  alone. Otherwise the credential requests above the bands wait on the viewer as much as an ask
+ *  alone, naming it in plain text (`useAgentText`): the empty state is a message, not a byline.
+ *  Otherwise the credential requests above the bands wait on the viewer as much as an ask
  *  whose turn is theirs, so it says nothing until their list has come back empty: while the list
  *  loads, or after it fails, the Inbox cannot say that nothing needs them. The three filtered
  *  lines differ because only the reader's own list is about them: a cleared filter is about
@@ -382,7 +389,7 @@ export function Inbox({
       navigate(buildInboxPath({ ...filter, assignees: next }), { replace: true });
     }
   };
-  const { titles: agentTitles } = useAgents(filter.agent !== undefined);
+  const agentText = useAgentText();
   // Rows (by ask id) whose "Assign to me" write is in flight or failed: their control stays
   // mounted through the optimistic assignment and the rollback out of it (see `AssignToMe`).
   const [assigning, setAssigning] = useState<ReadonlySet<string>>(() => new Set());
@@ -704,26 +711,43 @@ export function Inbox({
       viewer={viewer}
     />
   );
-  // The live agent's title when Envoy still lists it; otherwise the author label its asks carry.
-  const liveTitle = agent === undefined ? undefined : agentTitles.get(agent)?.trim();
+  // The filtered agent as its asks wrote it (the title it stamped, its attribution), or only its
+  // id when none of its asks is listed; either way its registry title names it when listed.
+  // Without the filter, `fromAgent` is every row, so it names no agent.
+  const agentAuthor = agent === undefined ? undefined : fromAgent[0]?.author;
+  const agentSubject =
+    agent === undefined
+      ? undefined
+      : agentAuthor === undefined
+        ? { sessionId: agent, storedTitle: undefined }
+        : { actor: agentAuthor };
   const agentTitle =
-    liveTitle !== undefined && liveTitle !== ""
-      ? liveTitle
-      : fromAgent[0] === undefined
-        ? agent
-        : actorLabel(fromAgent[0].author);
+    agent === undefined
+      ? undefined
+      : agentAuthor === undefined
+        ? agentText.sessionText(agent, undefined)
+        : agentText.label(agentAuthor);
+  // The clear-filter link keeps its own text and name; the agent's live link sits beside it.
+  // `whitespace-pre` keeps the space before an attribution suffix, which a flex item would drop.
   const chip =
-    agent === undefined ? null : (
-      <Link
-        aria-label="Clear agent filter"
-        className="inline-flex min-h-11 items-center rounded-full"
-        to={buildInboxPath({ assignees: filter.assignees })}
-      >
-        <LabelPill selected>
-          Asks from {agentTitle}
-          {filter.section === "needs-you" ? " waiting on you" : ""} · clear
-        </LabelPill>
-      </Link>
+    agentSubject === undefined ? null : (
+      <AgentName
+        {...agentSubject}
+        className="flex items-center whitespace-pre"
+        control={(name) => (
+          <Link
+            aria-label="Clear agent filter"
+            className="inline-flex min-h-11 items-center rounded-full"
+            to={buildInboxPath({ assignees: filter.assignees })}
+          >
+            <LabelPill selected>
+              Asks from {name}
+              {filter.section === "needs-you" ? " waiting on you" : ""} · clear
+            </LabelPill>
+          </Link>
+        )}
+        kind="control"
+      />
     );
 
   // The bar outlives an empty list: a pick that empties this view leaves its write in the air, and

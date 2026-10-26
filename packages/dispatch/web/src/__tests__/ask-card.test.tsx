@@ -91,7 +91,12 @@ function renderCard(node: ReactNode) {
   const queryClient = new QueryClient({
     defaultOptions: { mutations: { retry: false }, queries: { retry: false } },
   });
-  const view = render(<QueryClientProvider client={queryClient}>{node}</QueryClientProvider>);
+  // The asker is an `AgentName`, whose live link needs a router.
+  const view = render(
+    <MemoryRouter>
+      <QueryClientProvider client={queryClient}>{node}</QueryClientProvider>
+    </MemoryRouter>
+  );
   return { queryClient, view };
 }
 
@@ -194,7 +199,10 @@ test("AskCard keeps a deleted anchor document's quote", () => {
 
   try {
     expect(view.getByText("The surviving passage.", { exact: true })).toBeTruthy();
-    expect(view.queryByRole("link")).toBeNull();
+    // The deleted document's quote links nowhere; the only link left is the asker's live link.
+    expect(view.getAllByRole("link").map((link) => link.getAttribute("href"))).toEqual([
+      "/agents/session-1/live",
+    ]);
   } finally {
     view.unmount();
   }
@@ -1636,13 +1644,9 @@ test("a resolved ask keeps its question and options and carries a resolution bad
     },
     state: "resolved",
   } as unknown as Ask;
-  // The resolution names its actor with a link to that agent's live conversation, so the card
-  // renders inside a router, as it always does in the app.
-  const { view } = renderCard(
-    <MemoryRouter>
-      <AskCard ask={input} getAskThread={emptyThread(input)} />
-    </MemoryRouter>
-  );
+  // The resolution names its actor with a link to that agent's live conversation; `renderCard`
+  // renders inside a router, as the app always does.
+  const { view } = renderCard(<AskCard ask={input} getAskThread={emptyThread(input)} />);
 
   try {
     expect(await view.findByText(input.question)).toBeTruthy();
