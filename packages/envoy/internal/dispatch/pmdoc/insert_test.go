@@ -114,9 +114,9 @@ func TestTableRowInsertRejectsRowsWiderThanContainingTable(t *testing.T) {
 // A table-row insert answers as a whole-document write of the same rows does, wherever in the
 // fragment a row stands: both drop a blank cell past the table's width, refuse a cell there
 // holding text, refuse a line the two parsers read as another block, and store an accepted row as
-// the same markdown. Both count the cells as goldmark splits them, so a `|` after an even run of
-// backslashes ends no cell on either path, and a line opening a block that interrupts a paragraph
-// is no table row to either.
+// the same markdown. Both count the cells as the browser editor's parser splits them, so a `|`
+// after an even run of backslashes ends a cell on either path, and a line opening a block that
+// interrupts a paragraph is no table row to either.
 func TestTableRowInsertAnswersAsTheDocumentWrite(t *testing.T) {
 	const table = "| Key | Value |\n| --- | --- |\n| A10 | old |\n"
 	for _, test := range []struct {
@@ -137,7 +137,7 @@ func TestTableRowInsertAnswersAsTheDocumentWrite(t *testing.T) {
 		{row: "| A11 | `x | y` |", refusal: ErrTableWidth},
 		{row: `| A11 | new | z \|`, refusal: ErrTableWidth},
 		{row: `| A11 | new \| extra |`, stored: `| A11 | new \| extra |`},
-		{row: `| A11 | new \\| extra |`, stored: `| A11 | new \\\| extra |`},
+		{row: `| A11 | new \\| extra |`, refusal: ErrTableWidth},
 		// A space outside ASCII at the fragment's first or last edge is a cell's text to goldmark and
 		// to the browser editor's parser, as it is on the fragment's other lines: the browser reads
 		// `| A11 | new |` then U+00A0 as three cells, and a U+00A0 before the row's first `|` moves

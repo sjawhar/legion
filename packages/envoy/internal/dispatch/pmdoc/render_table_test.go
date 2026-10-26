@@ -261,22 +261,40 @@ func TestRenderWritesASpanAsAPeersUpdateCarriesIt(t *testing.T) {
 	}
 }
 
-// The table-cell-pipes fixture's tree is what the browser editor's parser reads its markdown as, so
-// a renderer that writes the tree as that markdown writes cells the browser editor reads back as
-// they were: a `|` in a cell's text, code, link or image, and one after a backslash. A backslash
-// before a pipe ends the cell in that parser unless it is one of an odd run, so an image's alt
-// written `one\\|two`, which Parse reads back as `one\|two`, is two cells there.
+// The table-cell-pipes fixture's tree is what the browser editor's parser reads its markdown as, and
+// Parse reads it the same way: a `|` in a cell's text, code, link or image, one after a backslash,
+// and one after two backslashes, which ends the cell in both, since a pipe is the cell's text only
+// after an odd run of backslashes. So a renderer writes cells the browser editor reads back as they
+// were exactly when Parse reads its rendering back as the tree: an image's alt written `one\\|two`
+// is two cells to both. The renderer writes the fixture's markdown but for its last row, whose
+// first cell `even run \` it writes with the one backslash, before the space that ends the cell.
 func TestRenderWritesTableCellPipesAsTheBrowserEditorReadsThem(t *testing.T) {
 	fx := fixtureNamed(t, "table-cell-pipes")
 	tree, err := FromJSON(fx.PMJSON)
 	if err != nil {
 		t.Fatal(err)
 	}
+	parsed, err := Parse(fx.Markdown)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !parsed.Equal(tree) {
+		got, _ := parsed.JSON()
+		t.Fatalf("Parse() of the fixture = %s, want the browser editor's reading, %s", got, fx.PMJSON)
+	}
 	markdown, err := Render(tree)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if markdown != fx.Markdown {
-		t.Fatalf("Render() = %q, want the markdown the browser editor read the tree from, %q", markdown, fx.Markdown)
+	if want := strings.Replace(fx.Markdown, "| even run \\\\| ends the cell |", "| even run \\ | ends the cell |", 1); markdown != want {
+		t.Fatalf("Render() = %q, want %q", markdown, want)
+	}
+	back, err := Parse(markdown)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !back.Equal(tree) {
+		got, _ := back.JSON()
+		t.Fatalf("Parse(Render()) = %s, want the fixture's tree, %s", got, fx.PMJSON)
 	}
 }

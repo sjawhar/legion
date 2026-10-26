@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 
@@ -21,8 +22,10 @@ import (
 
 // The budget pays for the cells goldmark's table transformer will pad before it runs, so
 // findTableRows must read the table goldmark reads: whether one forms, where its header is, and how
-// many cells it writes and holds once padded. Each shape here, and every paragraph of the corpus
-// fixtures, is read by both, the transformer on a copy apart from any document.
+// many cells it writes, split where the browser editor's parser ends a cell goldmark does not, and
+// holds once padded. A header that parser reads wider than its delimiter row makes no table there,
+// so findTableRows finds none where goldmark would form one. Each shape here, and every paragraph
+// of the corpus fixtures, is read by both, the transformer on a copy apart from any document.
 func TestFindTableRowsReadsWhatGoldmarkReads(t *testing.T) {
 	shapes := []string{
 		"| a | b |\n| - | - |\n| 1 | 2 |\n",
@@ -33,6 +36,10 @@ func TestFindTableRowsReadsWhatGoldmarkReads(t *testing.T) {
 		"x\ny\n| a | b |\n| - | - |\n",
 		"| a | b |\n|:-|-:|\n| 1 |\n| 1 | 2 | 3 |\n",
 		"| a \\| b | c |\n| - | - |\n| `x \\| y` |\n",
+		"| a | b |\n| - | - |\n| x \\\\| y |\n| p \\\\| q \\\\| r |\n| `s \\\\| t` |\n| u \\\\\\| v |\n",
+		"| a \\\\| b |\n| - | - |\n| 1 |\n",
+		"| a \\\\| b |\n| - |\n| 1 |\n",
+		"\\\\| a |\n| - | - |\n",
 		"a\n:-\nb\n",
 		"a | b\n--- | ---\nc\n",
 		"| a |\n |  :---:  | \n| 1 |\n",
@@ -86,14 +93,30 @@ func assertTableModelMatchesGoldmark(t *testing.T, name string, lines *gmtext.Se
 	t.Helper()
 	rows, found, _ := findTableRows(lines, source, 1)
 	trial := ast.NewParagraph()
-	trial.SetLines(tabExpandedLines(lines, source))
+	trial.SetLines(lines)
 	holder := ast.NewDocument()
 	holder.AppendChild(holder, trial)
-	tableTransformer.Transform(trial, gmtext.NewReader(source), parser.NewContext())
+	// Goldmark's transformer, followed by the splits pmdoc makes in the table it forms
+	// (splitAtEvenEscapedPipes). It reads a copy of lines, which keep their segments.
+	lazyTableRows{table: tableTransformer}.transform(trial, gmtext.NewReader(source), parser.NewContext())
 	var table *extensionast.Table
 	for child := holder.FirstChild(); child != nil; child = child.NextSibling() {
 		if formed, ok := child.(*extensionast.Table); ok {
 			table = formed
+		}
+	}
+	header := 0
+	if table != nil {
+		if before, ok := table.PreviousSibling().(*ast.Paragraph); ok {
+			header = before.Lines().Len()
+		}
+		// The browser editor's parser splits the header as it splits a bare row (tableRowCells).
+		written := tabExpandedLine(lines.At(header), source)
+		if cells, _ := tableRowCells(string(written.Value(source))); len(cells) > len(table.Alignments) {
+			if found {
+				t.Errorf("%q: findTableRows found a table under a header of %d cells, which the browser editor's parser reads as no table over %d columns", name, len(cells), len(table.Alignments))
+			}
+			return
 		}
 	}
 	if found != (table != nil) {
@@ -102,10 +125,6 @@ func assertTableModelMatchesGoldmark(t *testing.T, name string, lines *gmtext.Se
 	}
 	if table == nil {
 		return
-	}
-	header := 0
-	if before, ok := table.PreviousSibling().(*ast.Paragraph); ok {
-		header = before.Lines().Len()
 	}
 	var written, implied int
 	for row := table.FirstChild(); row != nil; row = row.NextSibling() {
@@ -214,11 +233,12 @@ func TestSetextLookAheadReadsEachLineOnce(t *testing.T) {
 	}
 }
 
-// A cell ends at every `|` not written `\|`, inside code and links too, and goldmark drops the cells
-// a body row holds past its delimiter row's, which the browser editor's parser keeps: a row whose
-// code span holds a bare `|` lost the rest of its text when it was stored. Such a row is refused,
-// in a container and after text in its paragraph too, naming what it holds and both ways to write
-// it; written `\|`, the same row is read whole.
+// A cell ends at every `|` that no odd run of backslashes stands before, inside code and links too,
+// and goldmark drops the cells a body row holds past its delimiter row's, which the browser editor's
+// parser keeps: a row whose code span holds a bare `|` lost the rest of its text when it was stored.
+// Such a row is refused, in a container and after text in its paragraph too, naming what it holds
+// and both ways to write it, as is one a `|` after two backslashes widens; written `\|`, the same
+// row is read whole.
 func TestParseRefusesARowHoldingMoreCellsThanItsTable(t *testing.T) {
 	const row = "| `runtime.ts` | Hold `x: Promise<void> | undefined`; every caller waits. |\n"
 	for _, markdown := range []string{
@@ -234,6 +254,9 @@ func TestParseRefusesARowHoldingMoreCellsThanItsTable(t *testing.T) {
 	}
 	if _, err := ParseForWrite("| a | b |\n| - | - |\n| 1 | 2 | 3 |\n", nil); !errors.Is(err, ErrSchema) {
 		t.Errorf("a row of three plain cells under two = %v, want a schema refusal", err)
+	}
+	if _, err := ParseForWrite("| a | b |\n| - | - |\n| x | y \\\\| z |\n", nil); !errors.Is(err, ErrSchema) || !strings.Contains(err.Error(), "3 cells where its table has 2") {
+		t.Errorf("a row a | after two backslashes splits into three cells under two = %v, want a schema refusal naming its 3 cells", err)
 	}
 	// The refusal quotes the row as its author wrote it, so its backslashes are not doubled.
 	if _, err := ParseForWrite("| a | b |\n| - | - |\n| p | q | z \\|\n", nil); err == nil || !strings.Contains(err.Error(), `written "| p | q | z \|"`) {
@@ -278,10 +301,120 @@ func TestParseKeepsAnEscapedClosingPipeInTheLastCell(t *testing.T) {
 	}
 }
 
+// The browser editor's parser pairs backslashes before a `|` in a table row, so a `|` after an even
+// run of them, two or more, ends the cell and one after an odd run is the cell's text, where
+// goldmark ends a cell only at a `|` with no backslash right before it. Parse reads each row's
+// cells as that parser does: in a body row, in the header, where the row opens, and in a code
+// span, which a `|` ends a cell in as it does anywhere. A header that reads wider than its
+// delimiter row makes no table there, and the lines stay a paragraph. Each table renders as
+// markdown that reads back the same.
+func TestParseEndsACellAtAPipeAfterAnEvenRunOfBackslashes(t *testing.T) {
+	for _, test := range []struct {
+		name, markdown string
+		cells          [][]string
+	}{
+		{
+			name:     "two backslashes mid-row",
+			markdown: "| h | i |\n| --- | --- |\n| a \\\\| b |\n",
+			cells:    [][]string{{"h", "i"}, {"a \\", "b"}},
+		},
+		{
+			name:     "one backslash mid-row",
+			markdown: "| h |\n| --- |\n| a \\| b |\n",
+			cells:    [][]string{{"h"}, {"a | b"}},
+		},
+		{
+			name:     "three backslashes mid-row",
+			markdown: "| h | i |\n| --- | --- |\n| a \\\\\\| b |\n",
+			cells:    [][]string{{"h", "i"}, {"a \\| b", ""}},
+		},
+		{
+			name:     "two backslashes before the closing pipe",
+			markdown: "| h | i |\n| --- | --- |\n| a | b \\\\|\n",
+			cells:    [][]string{{"h", "i"}, {"a", "b \\"}},
+		},
+		{
+			name:     "two backslashes in a code span",
+			markdown: "| h | i |\n| --- | --- |\n| `a \\\\| b` |\n",
+			cells:    [][]string{{"h", "i"}, {"`a \\", "b`"}},
+		},
+		{
+			name:     "an escaped pipe in a code span in the cell a split opens",
+			markdown: "| h | i |\n| --- | --- |\n| a \\\\| `x \\| y` |\n",
+			cells:    [][]string{{"h", "i"}, {"a \\", "x | y"}},
+		},
+		{
+			name:     "two backslashes then an escaped pipe",
+			markdown: "| h | i |\n| --- | --- |\n| a \\\\| b \\| c |\n",
+			cells:    [][]string{{"h", "i"}, {"a \\", "b | c"}},
+		},
+		{
+			name:     "two backslashes then an escaped closing pipe",
+			markdown: "| h | i |\n| --- | --- |\n| a \\\\| b \\|\n",
+			cells:    [][]string{{"h", "i"}, {"a \\", "b |"}},
+		},
+		{
+			name:     "two backslashes in a header filling its delimiter row",
+			markdown: "| a \\\\| b |\n| --- | --- |\n| x | y |\n",
+			cells:    [][]string{{"a \\", "b"}, {"x", "y"}},
+		},
+		{
+			name:     "two backslashes opening a header without a pipe",
+			markdown: "\\\\| a |\n| --- | --- |\n| x | y |\n",
+			cells:    [][]string{{"\\", "a"}, {"x", "y"}},
+		},
+		{
+			name:     "two backslashes in a header wider than its delimiter row",
+			markdown: "| a \\\\| b |\n| --- |\n",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			doc, err := Parse(test.markdown)
+			if err != nil {
+				t.Fatalf("Parse(%q) = %v", test.markdown, err)
+			}
+			if test.cells == nil {
+				if len(doc.Children) != 1 || doc.Children[0].Type != "paragraph" {
+					written, _ := doc.JSON()
+					t.Fatalf("Parse(%q) = %s, want one paragraph", test.markdown, written)
+				}
+				return
+			}
+			var got [][]string
+			for _, row := range doc.Children[0].Children {
+				var cells []string
+				for _, cell := range row.Children {
+					cells = append(cells, TextContent(cell))
+				}
+				got = append(got, cells)
+			}
+			if !slices.EqualFunc(got, test.cells, slices.Equal[[]string]) {
+				t.Fatalf("Parse(%q) cells = %q, want %q", test.markdown, got, test.cells)
+			}
+			markdown, err := Render(doc)
+			if err != nil {
+				t.Fatal(err)
+			}
+			back, err := Parse(markdown)
+			if err != nil {
+				t.Fatalf("Parse(Render()) of %q = %v", markdown, err)
+			}
+			if !back.Equal(doc) {
+				t.Fatalf("Render() = %q, which reads back otherwise", markdown)
+			}
+		})
+	}
+}
+
 // unescapeTablePipes leaves the tree goldmark's table AST transformer, which pmdoc no longer
 // registers, leaves: on every corpus fixture, and on seeded random tables of code spans, escaped
 // and doubly escaped pipes, backslashes and marks, in a quote or a list or not, each followed by a
-// paragraph of the same, the two make the same nodes over the same bytes.
+// paragraph of the same, the two make the same nodes over the same bytes. Goldmark's transformer
+// walks only the cells goldmark's row reader made, so where pmdoc splits one at a `|` after an
+// even run of backslashes (splitAtEvenEscapedPipes) it leaves the escaped pipes of the cells split
+// off as written, where the browser editor's parser, as unescapeTablePipes does, takes their
+// backslash out; such an input is no comparison, and the split cells are tested against the
+// browser editor's reading (TestParseEndsACellAtAPipeAfterAnEvenRunOfBackslashes).
 func TestUnescapeTablePipesLeavesTheTreeGoldmarksTransformerDoes(t *testing.T) {
 	read := func(source []byte) (ast.Node, gmtext.Reader, parser.Context) {
 		reader := gmtext.NewReader(source)
@@ -289,9 +422,28 @@ func TestUnescapeTablePipesLeavesTheTreeGoldmarksTransformerDoes(t *testing.T) {
 		pc.Set(writeBudgetKey, NewWriteBudget())
 		return blockReader.md.Parser().Parse(reader, parser.WithContext(pc)), reader, pc
 	}
-	tables, unescaped := 0, 0
+	plain := goldmark.New(goldmark.WithExtensions(extension.Table))
+	// splits reports whether goldmark's own row reader makes a cell of source holding a `|` that
+	// pmdoc ends the cell at.
+	splits := func(source []byte) bool {
+		split := false
+		_ = ast.Walk(plain.Parser().Parse(gmtext.NewReader(source)), func(node ast.Node, entering bool) (ast.WalkStatus, error) {
+			if entering && node.Kind() == extensionast.KindTableCell && node.Lines().Len() > 0 {
+				line := node.Lines().At(0)
+				split = split || pipeAfterEvenBackslashes(string(line.Value(source)))
+			}
+			return ast.WalkContinue, nil
+		})
+		return split
+	}
+	tables, unescaped, compared, skipped := 0, 0, 0, 0
 	compare := func(name string, source []byte) {
 		t.Helper()
+		if splits(source) {
+			skipped++
+			return
+		}
+		compared++
 		ours, _, _ := read(source)
 		unescapeTablePipes(ours, source)
 		theirs, reader, pc := read(source)
@@ -327,7 +479,8 @@ func TestUnescapeTablePipesLeavesTheTreeGoldmarksTransformerDoes(t *testing.T) {
 		}
 		return text.String()
 	}
-	for index := range 5000 {
+	// 5,000 random inputs are compared, however many a split takes out.
+	for index, start := 0, compared; compared < start+5000; index++ {
 		prefix := []string{"", "> ", "- "}[random.IntN(3)]
 		var source strings.Builder
 		source.WriteString(prefix + "| h | h |\n")
@@ -350,7 +503,7 @@ func TestUnescapeTablePipesLeavesTheTreeGoldmarksTransformerDoes(t *testing.T) {
 	if tables == 0 || unescaped == 0 {
 		t.Fatalf("%d inputs read a table and %d had a pipe unescaped; want both", tables, unescaped)
 	}
-	t.Logf("%d inputs read a table, %d had a pipe unescaped", tables, unescaped)
+	t.Logf("%d inputs compared, %d read a table, %d had a pipe unescaped; %d split a cell and were not compared", compared, tables, unescaped, skipped)
 }
 
 // goldmarkTree is root's nodes, one a line, indented by depth: each node's kind, and a text's bytes

@@ -29,11 +29,13 @@ var tableTransformer = extension.NewTableParagraphTransformer()
 // register that transformer: goldmark runs it inside its parse, before parseSource checks the
 // nesting bounds, and it recurses through every cell holding a backtick before an escaped pipe and
 // checks each code span text it meets against every escaped pipe in the document, time quadratic
-// in a table of them. In a cell every `|` is one a backslash escapes, since any other ends the
-// cell, and a code span opens with a backtick, which goldmark's row reader needs before an escaped
-// pipe to record it (parseRow): so the escaped pipes it records inside a code span's text are
-// exactly the `\|` that text holds. Each text is split around the backslash of each one, which it
-// drops, as goldmark splits it. Run once the bounds hold, it walks the blocks and each cell once.
+// in a table of them. In a cell every `|` is one an odd run of backslashes escapes, since any other
+// ends the cell (splitAtEvenEscapedPipes), and a code span opens with a backtick, which goldmark's
+// row reader needs before an escaped pipe to record it (parseRow): so the escaped pipes it records
+// inside a code span's text are exactly the `\|` that text holds. Each text is split around the
+// backslash of each one, which it drops, as goldmark splits it; in a cell split off a goldmark cell,
+// which goldmark's transformer never walks, too, as the browser editor's parser drops it. Run once
+// the bounds hold, it walks the blocks and each cell once.
 func unescapeTablePipes(root ast.Node, source []byte) {
 	_ = ast.Walk(root, func(node ast.Node, entering bool) (ast.WalkStatus, error) {
 		switch {
@@ -203,6 +205,9 @@ type tableRows struct{ header, width int }
 // their indentation expanded where it holds a tab (tabExpandedLine), as transform hands them to it:
 // the first line after the first that reads as a delimiter row (tableDelimiterWidth) makes a table
 // under the line before it, its header, unless the header holds more cells than the delimiter row.
+// The header's cells are counted as the browser editor's parser counts them (rowCells), so a header
+// that holds more there, where goldmark reads a `|` after an even run of backslashes as text, makes
+// no table, as in that parser.
 // It reads lines for that delimiter row from from on, and stops there; next is where a read of
 // lines added after these resumes, or -1 once the delimiter row is read.
 func findTableRows(lines *gmtext.Segments, source []byte, from int) (rows tableRows, found bool, next int) {
@@ -217,9 +222,10 @@ func findTableRows(lines *gmtext.Segments, source []byte, from int) (rows tableR
 	return tableRows{}, false, lines.Len()
 }
 
-// padding is the cells goldmark's transformer writes for the table in lines and the cells it holds
-// once padded: every row from the header on, the delimiter row aside, holds as many cells as the
-// delimiter row, the cells it writes past that dropped and the ones short of it padded (parseRow).
+// padding is the cells the table in lines holds as goldmark's transformer writes it, its cells
+// split as rowCells splits them (splitAtEvenEscapedPipes), and the cells it holds once padded:
+// every row from the header on, the delimiter row aside, holds as many cells as the delimiter row,
+// the cells written past that dropped and the ones short of it padded (parseRow).
 func (r tableRows) padding(lines *gmtext.Segments, source []byte) tablePadding {
 	var padding tablePadding
 	for row := r.header; row < lines.Len(); row++ {
@@ -293,9 +299,11 @@ func tableRowWidth(segment gmtext.Segment, source []byte) int {
 	return width
 }
 
-// rowCells calls visit with each cell goldmark's transformer splits a table line into (parseRow):
-// its first `|` and its last dropped, whatever stands before either, and a cell ending at each
-// other `|` with no backslash right before it.
+// rowCells calls visit with each cell the browser editor's parser splits a table line into: its
+// first `|` and its last dropped, whatever stands before either, as goldmark's transformer drops
+// them (parseRow), and a cell ending at each other `|` that no odd run of backslashes stands
+// before (escapedByBackslashes). Goldmark ends a cell only at a `|` with no backslash right before
+// it; splitAtEvenEscapedPipes splits its cells where the two differ.
 func rowCells(segment gmtext.Segment, source []byte, visit func(index int, value []byte)) {
 	segment = segment.TrimLeftSpace(source)
 	segment = segment.TrimRightSpace(source)
@@ -309,7 +317,7 @@ func rowCells(segment gmtext.Segment, source []byte, visit func(index int, value
 	}
 	for index := 0; position < limit; index++ {
 		closure := position
-		for closure < limit && (line[closure] != '|' || closure > 0 && line[closure-1] == '\\') {
+		for closure < limit && (line[closure] != '|' || escapedByBackslashes(line, closure)) {
 			closure++
 		}
 		visit(index, line[position:closure])
@@ -373,13 +381,71 @@ func (t lazyTableRows) transform(node *ast.Paragraph, reader gmtext.Reader, pc p
 }
 
 // markRows marks table with what its rows hold that the browser editor's parser reads otherwise
-// (markLazyRows, markBlockRows, markWideRows) and puts back a closing pipe that parser reads as
+// (markLazyRows, markBlockRows, markWideRows), splits its cells where that parser ends a cell
+// goldmark does not (splitAtEvenEscapedPipes), and puts back a closing pipe that parser reads as
 // text (keepEscapedClosingPipes). starts and lines are the table's lines from its header row on.
 func markRows(table *extensionast.Table, starts, lazy []int, lines []gmtext.Segment, source []byte) {
 	markLazyRows(table, starts, lazy)
 	markBlockRows(table, lines, source)
 	markWideRows(table, lines, source)
+	splitAtEvenEscapedPipes(table, source)
 	keepEscapedClosingPipes(table, lines, source)
+}
+
+// splitAtEvenEscapedPipes splits a cell of table at each `|` an even run of backslashes stands
+// before, two or more. Goldmark's transformer reads any `|` with a backslash right before it as the
+// cell's text, where the browser editor's parser, which pairs backslashes before a pipe, ends the
+// cell there (escapedByBackslashes): `| a \\| b |` is the cells `a \\` and `b`, which read `a \`
+// and `b`, as rowCells splits the row. A row keeps its table's width: the cells past it are
+// dropped, the empty ones goldmark padded the row with first, since they follow the written ones,
+// then written ones, which markWideRows marks where they hold text, as goldmark drops them. A
+// row's closing `|` is in no cell, so it closes the row after an even run as before.
+func splitAtEvenEscapedPipes(table *extensionast.Table, source []byte) {
+	width := len(table.Alignments)
+	for row := table.FirstChild(); row != nil; row = row.NextSibling() {
+		split := false
+		for cell := row.FirstChild(); cell != nil; cell = cell.NextSibling() {
+			if cell.Lines().Len() == 0 {
+				continue
+			}
+			segment := cell.Lines().At(0)
+			value := source[segment.Start:segment.Stop]
+			start := segment.Start
+			for index, char := range value {
+				if char != '|' || escapedByBackslashes(value, index) {
+					continue
+				}
+				cell.Lines().Set(0, tableCellSegment(start, segment.Start+index, source))
+				next := extensionast.NewTableCell()
+				next.SetPos(segment.Start + index + 1)
+				next.Lines().Append(gmtext.Segment{})
+				row.InsertAfter(row, cell, next)
+				cell, start, split = next, segment.Start+index+1, true
+			}
+			cell.Lines().Set(0, tableCellSegment(start, segment.Stop, source))
+		}
+		if !split {
+			continue
+		}
+		column := 0
+		for cell := row.FirstChild(); cell != nil; column++ {
+			next := cell.NextSibling()
+			if column >= width {
+				row.RemoveChild(row, cell)
+			} else if cell.Lines().Len() > 0 {
+				cell.(*extensionast.TableCell).Alignment = table.Alignments[column]
+			}
+			cell = next
+		}
+	}
+}
+
+// tableCellSegment is a cell's text from start to stop in source, trimmed as goldmark's transformer
+// trims a cell (parseRow).
+func tableCellSegment(start, stop int, source []byte) gmtext.Segment {
+	segment := gmtext.NewSegment(start, stop)
+	segment = segment.TrimLeftSpace(source)
+	return segment.TrimRightSpace(source)
 }
 
 // lazyRowAttr marks a table a lazy continuation line is a body row of (markLazyRows): goldmark
@@ -514,8 +580,8 @@ func markBlockRows(table *extensionast.Table, lines []gmtext.Segment, source []b
 // wideRowAttr marks a table one of whose body rows holds text in a cell past its delimiter row,
 // with the first such row (markWideRows). Goldmark drops the cells past the table's width, where
 // the browser editor's parser keeps them, so the row would be stored without their text. A cell
-// ends at every `|` not written `\|`, inside code and links too, so a code span holding a bare `|`
-// in a row that already fills its table makes one.
+// ends at every `|` that no odd run of backslashes stands before, inside code and links too, so a
+// code span holding a bare `|`, or `\\|`, in a row that already fills its table makes one.
 var wideRowAttr = []byte("pmdoc-wide-row")
 
 // wideRow is the first body row markWideRows found holding text past its table's width: how many
@@ -535,9 +601,9 @@ func (row wideRow) Error() string {
 
 // markWideRows marks table (wideRowAttr) where one of its body rows - the lines past its header
 // and delimiter rows, the first two of lines - holds text in a cell past the table's delimiter
-// row, each row split as goldmark's transformer splits it (rowCells). A row whose cells past the
-// width are all blank loses no text where goldmark drops them, and is read at the table's width.
-// It is the one place a row's width is judged, for a whole document and for bare rows alike.
+// row, each row split as the browser editor's parser splits it (rowCells). A row whose cells past
+// the width are all blank loses no text where goldmark drops them, and is read at the table's
+// width. It is the one place a row's width is judged, for a whole document and for bare rows alike.
 func markWideRows(table *extensionast.Table, lines []gmtext.Segment, source []byte) {
 	width := len(table.Alignments)
 	for index := 2; index < len(lines); index++ {
