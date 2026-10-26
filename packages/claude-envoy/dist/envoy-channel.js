@@ -9819,8 +9819,8 @@ var require_objectstore = __commonJS((exports) => {
               yield Promise.all(proms);
               proms.length = 0;
               info.mtime = new Date().toISOString();
-              const digest = base64_1.Base64UrlPaddedCodec.encode(sha.digest());
-              info.digest = `${exports.digestType}${digest}`;
+              const digest2 = base64_1.Base64UrlPaddedCodec.encode(sha.digest());
+              info.digest = `${exports.digestType}${digest2}`;
               info.deleted = false;
               const h = (0, headers_1.headers)();
               if (typeof previousRevision === "number") {
@@ -9930,8 +9930,8 @@ var require_objectstore = __commonJS((exports) => {
         if (!info.digest.startsWith(exports.digestType)) {
           return Promise.reject(new Error(`unknown digest type: ${info.digest}`));
         }
-        const digest = (0, sha_digest_parser_1.parseSha256)(info.digest.substring(8));
-        if (digest === null) {
+        const digest2 = (0, sha_digest_parser_1.parseSha256)(info.digest.substring(8));
+        if (digest2 === null) {
           return Promise.reject(new Error(`unable to parse digest: ${info.digest}`));
         }
         const d = (0, util_1.deferred)();
@@ -9962,8 +9962,8 @@ var require_objectstore = __commonJS((exports) => {
                 controller.enqueue(jm.data);
               }
               if (jm.info.pending === 0) {
-                if (!(0, sha_digest_parser_1.checkSha256)(digest, sha.digest())) {
-                  controller.error(new Error(`received a corrupt object, digests do not match received: ${info.digest} calculated ${digest}`));
+                if (!(0, sha_digest_parser_1.checkSha256)(digest2, sha.digest())) {
+                  controller.error(new Error(`received a corrupt object, digests do not match received: ${info.digest} calculated ${digest2}`));
                 } else {
                   controller.close();
                 }
@@ -16487,11 +16487,11 @@ var require_codegen = __commonJS((exports) => {
       const rhs = this.rhs === undefined ? "" : ` = ${this.rhs}`;
       return `${varKind} ${this.name}${rhs};` + _n;
     }
-    optimizeNames(names, constants) {
+    optimizeNames(names, constants2) {
       if (!names[this.name.str])
         return;
       if (this.rhs)
-        this.rhs = optimizeExpr(this.rhs, names, constants);
+        this.rhs = optimizeExpr(this.rhs, names, constants2);
       return this;
     }
     get names() {
@@ -16509,10 +16509,10 @@ var require_codegen = __commonJS((exports) => {
     render({ _n }) {
       return `${this.lhs} = ${this.rhs};` + _n;
     }
-    optimizeNames(names, constants) {
+    optimizeNames(names, constants2) {
       if (this.lhs instanceof code_1.Name && !names[this.lhs.str] && !this.sideEffects)
         return;
-      this.rhs = optimizeExpr(this.rhs, names, constants);
+      this.rhs = optimizeExpr(this.rhs, names, constants2);
       return this;
     }
     get names() {
@@ -16578,8 +16578,8 @@ var require_codegen = __commonJS((exports) => {
     optimizeNodes() {
       return `${this.code}` ? this : undefined;
     }
-    optimizeNames(names, constants) {
-      this.code = optimizeExpr(this.code, names, constants);
+    optimizeNames(names, constants2) {
+      this.code = optimizeExpr(this.code, names, constants2);
       return this;
     }
     get names() {
@@ -16609,12 +16609,12 @@ var require_codegen = __commonJS((exports) => {
       }
       return nodes.length > 0 ? this : undefined;
     }
-    optimizeNames(names, constants) {
+    optimizeNames(names, constants2) {
       const { nodes } = this;
       let i = nodes.length;
       while (i--) {
         const n = nodes[i];
-        if (n.optimizeNames(names, constants))
+        if (n.optimizeNames(names, constants2))
           continue;
         subtractNames(names, n.names);
         nodes.splice(i, 1);
@@ -16671,12 +16671,12 @@ var require_codegen = __commonJS((exports) => {
         return;
       return this;
     }
-    optimizeNames(names, constants) {
+    optimizeNames(names, constants2) {
       var _a2;
-      this.else = (_a2 = this.else) === null || _a2 === undefined ? undefined : _a2.optimizeNames(names, constants);
-      if (!(super.optimizeNames(names, constants) || this.else))
+      this.else = (_a2 = this.else) === null || _a2 === undefined ? undefined : _a2.optimizeNames(names, constants2);
+      if (!(super.optimizeNames(names, constants2) || this.else))
         return;
-      this.condition = optimizeExpr(this.condition, names, constants);
+      this.condition = optimizeExpr(this.condition, names, constants2);
       return this;
     }
     get names() {
@@ -16701,10 +16701,10 @@ var require_codegen = __commonJS((exports) => {
     render(opts) {
       return `for(${this.iteration})` + super.render(opts);
     }
-    optimizeNames(names, constants) {
-      if (!super.optimizeNames(names, constants))
+    optimizeNames(names, constants2) {
+      if (!super.optimizeNames(names, constants2))
         return;
-      this.iteration = optimizeExpr(this.iteration, names, constants);
+      this.iteration = optimizeExpr(this.iteration, names, constants2);
       return this;
     }
     get names() {
@@ -16742,10 +16742,10 @@ var require_codegen = __commonJS((exports) => {
     render(opts) {
       return `for(${this.varKind} ${this.name} ${this.loop} ${this.iterable})` + super.render(opts);
     }
-    optimizeNames(names, constants) {
-      if (!super.optimizeNames(names, constants))
+    optimizeNames(names, constants2) {
+      if (!super.optimizeNames(names, constants2))
         return;
-      this.iterable = optimizeExpr(this.iterable, names, constants);
+      this.iterable = optimizeExpr(this.iterable, names, constants2);
       return this;
     }
     get names() {
@@ -16790,11 +16790,11 @@ var require_codegen = __commonJS((exports) => {
       (_b = this.finally) === null || _b === undefined || _b.optimizeNodes();
       return this;
     }
-    optimizeNames(names, constants) {
+    optimizeNames(names, constants2) {
       var _a2, _b;
-      super.optimizeNames(names, constants);
-      (_a2 = this.catch) === null || _a2 === undefined || _a2.optimizeNames(names, constants);
-      (_b = this.finally) === null || _b === undefined || _b.optimizeNames(names, constants);
+      super.optimizeNames(names, constants2);
+      (_a2 = this.catch) === null || _a2 === undefined || _a2.optimizeNames(names, constants2);
+      (_b = this.finally) === null || _b === undefined || _b.optimizeNames(names, constants2);
       return this;
     }
     get names() {
@@ -17068,7 +17068,7 @@ var require_codegen = __commonJS((exports) => {
   function addExprNames(names, from) {
     return from instanceof code_1._CodeOrName ? addNames(names, from.names) : names;
   }
-  function optimizeExpr(expr, names, constants) {
+  function optimizeExpr(expr, names, constants2) {
     if (expr instanceof code_1.Name)
       return replaceName(expr);
     if (!canOptimize(expr))
@@ -17083,14 +17083,14 @@ var require_codegen = __commonJS((exports) => {
       return items;
     }, []));
     function replaceName(n) {
-      const c = constants[n.str];
+      const c = constants2[n.str];
       if (c === undefined || names[n.str] !== 1)
         return n;
       delete names[n.str];
       return c;
     }
     function canOptimize(e) {
-      return e instanceof code_1._Code && e._items.some((c) => c instanceof code_1.Name && names[c.str] === 1 && constants[c.str] !== undefined);
+      return e instanceof code_1._Code && e._items.some((c) => c instanceof code_1.Name && names[c.str] === 1 && constants2[c.str] !== undefined);
     }
   }
   function subtractNames(names, from) {
@@ -39040,23 +39040,221 @@ function renderInbound(raw, sessionID, subject2) {
 }
 
 // ../envoy-client/src/dispatch-session-state.ts
-import { createHash } from "crypto";
+import { createHash as createHash2 } from "crypto";
 import {
   appendFileSync,
-  closeSync,
+  closeSync as closeSync2,
   fstatSync,
+  mkdirSync as mkdirSync2,
+  openSync as openSync2,
+  readdirSync as readdirSync2,
+  readFileSync as readFileSync2,
+  readSync,
+  renameSync as renameSync2,
+  rmSync as rmSync2,
+  statSync as statSync2,
+  writeFileSync as writeFileSync2
+} from "fs";
+import { homedir } from "os";
+import { join as join2 } from "path";
+
+// ../envoy-client/src/askgate-marker.ts
+import { createHash, randomBytes } from "crypto";
+import {
+  closeSync,
+  constants,
   mkdirSync,
   openSync,
   readdirSync,
   readFileSync,
-  readSync,
   renameSync,
   rmSync,
   statSync,
+  unlinkSync,
   writeFileSync
 } from "fs";
-import { homedir } from "os";
 import { join } from "path";
+var ASKGATE_RECORD = "askgate.json";
+var MARKER_MAX_AGE_MS = 10 * 60000;
+var MARKERS = "markers";
+var MODE_FILE = "mode";
+var ALWAYS_GATED = {
+  dispatch_ask: true,
+  dispatch_message: true,
+  dispatch_edit_ask: true,
+  dispatch_comment: true,
+  dispatch_doc_edit: true,
+  dispatch_request_approval: true
+};
+var MARKDOWN_NAME = /\.md$/i;
+var MARKDOWN_PATH = /\.(md|markdown)$/i;
+function uploadIsDocument(args) {
+  const { content, name, path } = args;
+  return typeof content === "string" || typeof name === "string" && MARKDOWN_NAME.test(name.trim()) || typeof path === "string" && MARKDOWN_PATH.test(path);
+}
+function gatedWrite(tool, args) {
+  if (ALWAYS_GATED[tool] === true)
+    return true;
+  const { spec } = args;
+  if (tool === "dispatch_issue")
+    return spec !== undefined;
+  if (tool === "dispatch_artifact")
+    return uploadIsDocument(args);
+  return false;
+}
+var digest = (value) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
+function argvDigest(argv) {
+  return digest(argv);
+}
+function argsDigest(args) {
+  return digest(args);
+}
+function processStart(pid) {
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, "utf-8");
+    return stat.slice(stat.lastIndexOf(")") + 2).split(" ")[19] ?? null;
+  } catch {
+    return null;
+  }
+}
+function ownerLive(owner) {
+  if (owner.start !== null)
+    return processStart(owner.pid) === owner.start;
+  try {
+    process.kill(owner.pid, 0);
+    return true;
+  } catch (error48) {
+    return !hasErrnoCode(error48, "ESRCH");
+  }
+}
+function isOwner(value) {
+  if (typeof value !== "object" || value === null)
+    return false;
+  const { pid, start, store } = value;
+  return typeof pid === "number" && Number.isSafeInteger(pid) && pid > 0 && (start === null || typeof start === "string") && typeof store === "string" && store.startsWith("/");
+}
+function parseRecord(text) {
+  let data;
+  try {
+    data = JSON.parse(text);
+  } catch {
+    return;
+  }
+  if (typeof data !== "object" || data === null)
+    return;
+  const { v, owners } = data;
+  if (v !== 1 || !Array.isArray(owners) || !owners.every(isOwner))
+    return;
+  return owners;
+}
+function storeMode(store) {
+  try {
+    return readFileSync(join(store, MODE_FILE), "utf-8") === "warn" ? "warn" : "block";
+  } catch {
+    return "block";
+  }
+}
+function askgateState(dir) {
+  const file2 = join(dir, ASKGATE_RECORD);
+  let text;
+  try {
+    text = readFileSync(file2, "utf-8");
+  } catch (error48) {
+    if (hasErrnoCode(error48, "ENOENT"))
+      return { kind: "off" };
+    return { kind: "broken", problem: `${file2}, could not be read: ${messageFor(error48)}` };
+  }
+  const owners = parseRecord(text);
+  if (owners === undefined)
+    return { kind: "broken", problem: `${file2}, is not an AskGate record` };
+  const live = owners.filter(ownerLive);
+  if (live.length === 0)
+    return { kind: "off" };
+  for (const { store } of live) {
+    try {
+      if (!statSync(join(store, MARKERS)).isDirectory())
+        throw new Error("not a directory");
+    } catch (error48) {
+      return {
+        kind: "broken",
+        problem: `${file2}, names the marker store ${store}, which cannot be read: ${messageFor(error48)}`
+      };
+    }
+  }
+  return {
+    kind: "on",
+    stores: live.map(({ store }) => store),
+    mode: live.every(({ store }) => storeMode(store) === "warn") ? "warn" : "block"
+  };
+}
+function readMarker(file2) {
+  let text;
+  try {
+    const fd = openSync(file2, constants.O_RDONLY | constants.O_NOFOLLOW);
+    try {
+      text = readFileSync(fd, "utf-8");
+    } finally {
+      closeSync(fd);
+    }
+  } catch {
+    return;
+  }
+  try {
+    const data = JSON.parse(text);
+    if (typeof data !== "object" || data === null)
+      return;
+    const { v, argv, args, createdAt } = data;
+    if (v !== 1 || typeof argv !== "string" || typeof createdAt !== "number")
+      return;
+    if (args !== null && typeof args !== "string")
+      return;
+    return { argv, args, createdAt };
+  } catch {
+    return;
+  }
+}
+function consumeMarker(stores, argv, args, now) {
+  const key = argvDigest(argv);
+  const reviewed = argsDigest(args);
+  let mismatched = false;
+  let expired = false;
+  const usable = [];
+  for (const store of stores) {
+    const dir = join(store, MARKERS);
+    for (const name of readdirSync(dir)) {
+      if (!name.startsWith(`${key}.`))
+        continue;
+      const file2 = join(dir, name);
+      const marker = readMarker(file2);
+      if (marker === undefined || marker.argv !== key)
+        continue;
+      if (now - marker.createdAt > MARKER_MAX_AGE_MS) {
+        expired = true;
+        rmSync(file2, { force: true });
+        continue;
+      }
+      if (marker.args !== null && marker.args !== reviewed) {
+        mismatched = true;
+        continue;
+      }
+      usable.push({ file: file2, bound: marker.args !== null });
+    }
+  }
+  usable.sort((a, b) => Number(b.bound) - Number(a.bound));
+  for (const { file: file2 } of usable) {
+    try {
+      unlinkSync(file2);
+      return { ok: true };
+    } catch (error48) {
+      if (!hasErrnoCode(error48, "ENOENT"))
+        throw error48;
+    }
+  }
+  return {
+    ok: false,
+    why: mismatched ? "its arguments differ from the ones AskGate reviewed" : expired ? "its AskGate marker expired before it ran" : "this call carries no AskGate marker"
+  };
+}
 
 // ../envoy-client/src/dispatch-execute.ts
 import { resolve as resolvePath2 } from "path";
@@ -42638,20 +42836,20 @@ function sessionStateRoot(env) {
   const stateDir = env["DISPATCH_STATE_DIR"];
   if (stateDir)
     return stateDir;
-  return join(env["XDG_STATE_HOME"] || join(homedir(), ".local", "state"), "dispatch");
+  return join2(env["XDG_STATE_HOME"] || join2(homedir(), ".local", "state"), "dispatch");
 }
 function sessionDirectory(env, sessionId) {
   if (!SESSION_ID.test(sessionId) || sessionId === "." || sessionId === "..") {
     throw new Error(`dispatch: the session id ${JSON.stringify(sessionId)} is not 1-128 letters, digits, ".", "_" or "-"`);
   }
-  return join(sessionStateRoot(env), "sessions", sessionId);
+  return join2(sessionStateRoot(env), "sessions", sessionId);
 }
 function ensureDirectory(dir) {
-  mkdirSync(dir, { recursive: true, mode: PRIVATE_DIR });
+  mkdirSync2(dir, { recursive: true, mode: PRIVATE_DIR });
 }
 function readIfPresent(path) {
   try {
-    return readFileSync(path, "utf-8");
+    return readFileSync2(path, "utf-8");
   } catch (error48) {
     if (hasErrnoCode(error48, "ENOENT"))
       return;
@@ -42660,14 +42858,14 @@ function readIfPresent(path) {
 }
 function writeAtomically(path, text) {
   const temporary = `${path}.${process.pid}.${Date.now()}.tmp`;
-  writeFileSync(temporary, text, { mode: PRIVATE_FILE });
-  renameSync(temporary, path);
+  writeFileSync2(temporary, text, { mode: PRIVATE_FILE });
+  renameSync2(temporary, path);
 }
 function stringList(value) {
   return Array.isArray(value) ? value.filter((item) => typeof item === "string") : [];
 }
 function loadSessionMemory(dir, sessionId) {
-  const path = join(dir, "state.json");
+  const path = join2(dir, "state.json");
   const text = readIfPresent(path);
   if (text === undefined)
     return new Set;
@@ -42691,7 +42889,7 @@ function writeMemory(dir, sessionId, follows) {
     pictures: [...shownPictures(sessionId)],
     follows: [...follows]
   };
-  writeAtomically(join(dir, "state.json"), `${JSON.stringify(state)}
+  writeAtomically(join2(dir, "state.json"), `${JSON.stringify(state)}
 `);
 }
 function appendResult(dir, entry) {
@@ -42700,7 +42898,7 @@ function appendResult(dir, entry) {
 }
 function writeResult(dir, entry) {
   const line = { at: new Date().toISOString(), ...entry };
-  appendFileSync(join(dir, "results.jsonl"), `${JSON.stringify(line)}
+  appendFileSync(join2(dir, "results.jsonl"), `${JSON.stringify(line)}
 `, { mode: PRIVATE_FILE });
 }
 function recordOutcome(dir, sessionId, follows, entry) {
@@ -42710,12 +42908,12 @@ function recordOutcome(dir, sessionId, follows, entry) {
 }
 function writePicture(dir, image) {
   const bytes = Buffer.from(image.data, "base64");
-  const name = createHash("sha256").update(bytes).digest("hex").slice(0, 16);
-  const pictures = join(dir, "pictures");
-  const path = join(pictures, `${name}.${PICTURE_EXTENSIONS[image.mimeType]}`);
+  const name = createHash2("sha256").update(bytes).digest("hex").slice(0, 16);
+  const pictures = join2(dir, "pictures");
+  const path = join2(pictures, `${name}.${PICTURE_EXTENSIONS[image.mimeType]}`);
   ensureDirectory(pictures);
   try {
-    writeFileSync(path, bytes, { mode: PRIVATE_FILE, flag: "wx" });
+    writeFileSync2(path, bytes, { mode: PRIVATE_FILE, flag: "wx" });
   } catch (error48) {
     if (!hasErrnoCode(error48, "EEXIST"))
       throw error48;
@@ -42723,32 +42921,32 @@ function writePicture(dir, image) {
   return { path, bytes: bytes.length };
 }
 function writeLongOutput(dir, text) {
-  const out = join(dir, "out");
+  const out = join2(dir, "out");
   ensureDirectory(out);
-  const path = join(out, `${new Date().toISOString().replaceAll(":", "-")}-${process.pid}.md`);
-  writeFileSync(path, text, { mode: PRIVATE_FILE });
+  const path = join2(out, `${new Date().toISOString().replaceAll(":", "-")}-${process.pid}.md`);
+  writeFileSync2(path, text, { mode: PRIVATE_FILE });
   return path;
 }
 function writeSessionTitle(dir, title) {
   ensureDirectory(dir);
-  writeAtomically(join(dir, "title"), title);
+  writeAtomically(join2(dir, "title"), title);
 }
 function readSessionTitle(dir) {
-  return readIfPresent(join(dir, "title")) || undefined;
+  return readIfPresent(join2(dir, "title")) || undefined;
 }
 function pruneSessions(root, now) {
-  const stamp = join(root, PRUNED_STAMP);
+  const stamp = join2(root, PRUNED_STAMP);
   try {
-    if (now - statSync(stamp).mtimeMs < PRUNE_INTERVAL_MS)
+    if (now - statSync2(stamp).mtimeMs < PRUNE_INTERVAL_MS)
       return;
   } catch (error48) {
     if (!hasErrnoCode(error48, "ENOENT"))
       throw error48;
   }
-  const sessions = join(root, "sessions");
+  const sessions = join2(root, "sessions");
   let entries = [];
   try {
-    entries = readdirSync(sessions, { withFileTypes: true });
+    entries = readdirSync2(sessions, { withFileTypes: true });
   } catch (error48) {
     if (!hasErrnoCode(error48, "ENOENT"))
       throw error48;
@@ -42756,10 +42954,10 @@ function pruneSessions(root, now) {
   for (const entry of entries) {
     if (!entry.isDirectory())
       continue;
-    const dir = join(sessions, entry.name);
+    const dir = join2(sessions, entry.name);
     try {
-      if (now - statSync(dir).mtimeMs > IDLE_SESSION_MS) {
-        rmSync(dir, { recursive: true, force: true });
+      if (now - statSync2(dir).mtimeMs > IDLE_SESSION_MS && askgateState(dir).kind === "off") {
+        rmSync2(dir, { recursive: true, force: true });
       }
     } catch (error48) {
       if (!hasErrnoCode(error48, "ENOENT"))
@@ -42767,7 +42965,7 @@ function pruneSessions(root, now) {
     }
   }
   ensureDirectory(root);
-  writeFileSync(stamp, "", { mode: PRIVATE_FILE });
+  writeFileSync2(stamp, "", { mode: PRIVATE_FILE });
 }
 
 // ../envoy-client/src/nats-auth.ts
@@ -42792,15 +42990,15 @@ function natsAuthOptions(seed) {
 // ../envoy-client/src/envoy-config.ts
 import {
   chmodSync,
-  closeSync as closeSync2,
+  closeSync as closeSync3,
   existsSync,
   lstatSync,
   mkdtempSync,
-  openSync as openSync2,
-  readFileSync as readFileSync3,
+  openSync as openSync3,
+  readFileSync as readFileSync4,
   readlinkSync,
-  rmSync as rmSync2,
-  statSync as statSync2
+  rmSync as rmSync3,
+  statSync as statSync3
 } from "fs";
 import { homedir as homedir2, tmpdir } from "os";
 import * as path from "path";
@@ -42892,14 +43090,14 @@ function jsonErrorPosition(text) {
 }
 
 // ../envoy-client/src/secret-file.ts
-import { readFileSync as readFileSync2 } from "fs";
+import { readFileSync as readFileSync3 } from "fs";
 function sendable(value) {
   return !/[\s\p{Cc}]/u.test(value);
 }
 function readSecretFile(variable, filePath) {
   let contents;
   try {
-    contents = readFileSync2(filePath, "utf8");
+    contents = readFileSync3(filePath, "utf8");
   } catch (error48) {
     throw new Error(`${variable} names ${filePath}, which could not be read: ${messageFor(error48)}`);
   }
@@ -43034,7 +43232,7 @@ function danglingLink(filePath) {
 function parseFile(filePath, schema, checkout) {
   let raw;
   try {
-    raw = readFileSync3(filePath, "utf-8");
+    raw = readFileSync4(filePath, "utf-8");
   } catch (error48) {
     if (hasErrnoCode(error48, "ENOENT") || hasErrnoCode(error48, "ENOTDIR")) {
       return { kind: "absent", link: danglingLink(filePath) };
@@ -43078,7 +43276,7 @@ function runCommand(command, env, cwd) {
   try {
     chmodSync(directory, 448);
     const output = path.join(directory, "stdout");
-    const fd = openSync2(output, "wx", 384);
+    const fd = openSync3(output, "wx", 384);
     let result;
     try {
       result = Bun.spawnSync(["/bin/sh", "-c", command], {
@@ -43093,7 +43291,7 @@ function runCommand(command, env, cwd) {
     } catch (error48) {
       return { failure: `could not start: ${messageFor(error48)}`, timedOut: false };
     } finally {
-      closeSync2(fd);
+      closeSync3(fd);
     }
     try {
       process.kill(-result.pid, "SIGKILL");
@@ -43110,7 +43308,7 @@ function runCommand(command, env, cwd) {
         timedOut: false
       };
     }
-    const value = readFileSync3(output, "utf-8").trim();
+    const value = readFileSync4(output, "utf-8").trim();
     if (value.length === 0)
       return { failure: "printed nothing", timedOut: false };
     if (!sendable(value)) {
@@ -43121,7 +43319,7 @@ function runCommand(command, env, cwd) {
     }
     return { value };
   } finally {
-    rmSync2(directory, { recursive: true, force: true });
+    rmSync3(directory, { recursive: true, force: true });
   }
 }
 function fileValue(value, field, filePath, env) {
@@ -43145,7 +43343,7 @@ function fileValue(value, field, filePath, env) {
 }
 function statDevice(directory) {
   try {
-    return statSync2(directory).dev;
+    return statSync3(directory).dev;
   } catch {
     return;
   }
@@ -47284,9 +47482,9 @@ function createChannelForwarder(connection, options) {
 
 // src/claude-channel.ts
 import { spawnSync } from "child_process";
-import { readdirSync as readdirSync2, readFileSync as readFileSync4, readlinkSync as readlinkSync2 } from "fs";
+import { readdirSync as readdirSync3, readFileSync as readFileSync5, readlinkSync as readlinkSync2 } from "fs";
 import { homedir as homedir3 } from "os";
-import { basename as basename2, join as join3, resolve as resolve2, sep } from "path";
+import { basename as basename2, join as join4, resolve as resolve2, sep } from "path";
 var PLUGIN_SERVER = "envoy";
 var CHANNEL_FLAGS = {
   "--channels": false,
@@ -47524,7 +47722,7 @@ function claudeChannelGate(input) {
     why: `${asked} is not on Claude Code's approved channels allowlist (allowedChannelPlugins in ${MANAGED_SETTINGS_HINT})`
   };
 }
-var MANAGED_SETTINGS_HINT = `${join3(managedSettingsDirectory(), "managed-settings.json")}, or in the server-managed settings when the account receives them`;
+var MANAGED_SETTINGS_HINT = `${join4(managedSettingsDirectory(), "managed-settings.json")}, or in the server-managed settings when the account receives them`;
 function cacheDirectoryName(marketplace) {
   return marketplace.replace(/[^a-zA-Z0-9\-_]/g, "-");
 }
@@ -47567,7 +47765,7 @@ function processCommandLine(pid, executable = processExecutable) {
   let commandLine2;
   if (process.platform === "linux") {
     try {
-      const pieces = readFileSync4(`/proc/${pid}/cmdline`, "utf8").split("\x00");
+      const pieces = readFileSync5(`/proc/${pid}/cmdline`, "utf8").split("\x00");
       let trailing = 0;
       while (pieces.length > 0 && pieces.at(-1) === "") {
         pieces.pop();
@@ -47604,7 +47802,7 @@ function processCommandLine(pid, executable = processExecutable) {
 function parentProcess(pid) {
   try {
     if (process.platform === "linux") {
-      const stat = readFileSync4(`/proc/${pid}/stat`, "utf8");
+      const stat = readFileSync5(`/proc/${pid}/stat`, "utf8");
       const parent2 = Number(stat.slice(stat.lastIndexOf(")") + 2).split(" ")[1]);
       return Number.isInteger(parent2) && parent2 > 0 ? parent2 : undefined;
     }
@@ -47694,7 +47892,7 @@ var COMPOSITION_KEYS = new Set([
 ]);
 function readChannelSettings(file2, asSource = false) {
   try {
-    const value = JSON.parse(readFileSync4(file2, "utf8"));
+    const value = JSON.parse(readFileSync5(file2, "utf8"));
     if (typeof value !== "object" || value === null || Array.isArray(value))
       return;
     if (asSource && Object.keys(value).every((key) => COMPOSITION_KEYS.has(key)))
@@ -47710,15 +47908,15 @@ function readChannelSettings(file2, asSource = false) {
   }
 }
 function channelAllowlist(directories) {
-  const remote = readChannelSettings(join3(directories.configDirectory, "remote-settings.json"), true);
-  const dropIns = join3(directories.managedDirectory, "managed-settings.d");
+  const remote = readChannelSettings(join4(directories.configDirectory, "remote-settings.json"), true);
+  const dropIns = join4(directories.managedDirectory, "managed-settings.d");
   let dropInFiles = [];
   try {
-    dropInFiles = readdirSync2(dropIns).filter((name) => name.endsWith(".json") && !name.startsWith(".")).sort().map((name) => join3(dropIns, name));
+    dropInFiles = readdirSync3(dropIns).filter((name) => name.endsWith(".json") && !name.startsWith(".")).sort().map((name) => join4(dropIns, name));
   } catch {
     dropInFiles = [];
   }
-  const files = [join3(directories.managedDirectory, "managed-settings.json"), ...dropInFiles].map((file2) => readChannelSettings(file2)).filter((settings) => settings !== undefined);
+  const files = [join4(directories.managedDirectory, "managed-settings.json"), ...dropInFiles].map((file2) => readChannelSettings(file2)).filter((settings) => settings !== undefined);
   const lists = files.map((settings) => settings.list).filter((list) => list !== undefined);
   const fileList = lists.length === 0 ? undefined : lists.flat();
   const behavior = remote?.behavior ?? files.find((settings) => settings.behavior)?.behavior;
@@ -47732,7 +47930,7 @@ function detectClaudeChannel(input) {
     return { loaded: true };
   if (override === "0")
     return { loaded: false, why: "ENVOY_CHANNEL_LOADED=0" };
-  const configDirectory = input.environment["CLAUDE_CONFIG_DIR"]?.trim() || join3(homedir3(), ".claude");
+  const configDirectory = input.environment["CLAUDE_CONFIG_DIR"]?.trim() || join4(homedir3(), ".claude");
   const commandLine2 = claudeCommandLine(input.claudePid);
   const pluginRoot = input.environment["CLAUDE_PLUGIN_ROOT"]?.trim();
   const plugin = pluginRoot ? {
@@ -47762,12 +47960,12 @@ function claudeProjectDirectory(environment, fallback) {
 
 // src/session-identity.ts
 import { readFile } from "fs/promises";
-import { basename as basename3, join as join5 } from "path";
+import { basename as basename3, join as join6 } from "path";
 
 // src/session-state.ts
-import { readFileSync as readFileSync5 } from "fs";
+import { readFileSync as readFileSync6 } from "fs";
 import { mkdir, readdir, rename, rm, stat, utimes, writeFile } from "fs/promises";
-import { dirname as dirname2, join as join4 } from "path";
+import { dirname as dirname2, join as join5 } from "path";
 async function writeAtomicStateFile(file2, contents) {
   await mkdir(dirname2(file2), { recursive: true, mode: 448 });
   const temporary = `${file2}.${process.pid}.${crypto.randomUUID()}.tmp`;
@@ -47785,7 +47983,7 @@ async function pruneStateDirectory(directory, isStale) {
     throw error48;
   });
   for (const entry of entries) {
-    const file2 = join4(directory, entry);
+    const file2 = join5(directory, entry);
     if (!await isStale(file2))
       continue;
     await rm(file2, { recursive: true, force: true });
@@ -47800,7 +47998,7 @@ async function writtenLongAgo(file2) {
 }
 var TITLES_DIRECTORY = "titles";
 function sessionTitleFile(stateDirectory, sessionId) {
-  return join4(stateDirectory, TITLES_DIRECTORY, `${encodeURIComponent(sessionId)}.txt`);
+  return join5(stateDirectory, TITLES_DIRECTORY, `${encodeURIComponent(sessionId)}.txt`);
 }
 async function writeChosenTitle(file2, title) {
   await writeAtomicStateFile(file2, `${title}
@@ -47811,7 +48009,7 @@ async function removeChosenTitle(file2) {
 }
 function readChosenTitleSync(file2) {
   try {
-    return readFileSync5(file2, "utf8");
+    return readFileSync6(file2, "utf8");
   } catch {
     return;
   }
@@ -47828,7 +48026,7 @@ async function recordChosenTitle(sessionId, title) {
     await writeChosenTitle(file2, chosen);
 }
 async function pruneStaleSessionTitles(stateDirectory) {
-  await pruneStateDirectory(join4(stateDirectory, TITLES_DIRECTORY), writtenLongAgo);
+  await pruneStateDirectory(join5(stateDirectory, TITLES_DIRECTORY), writtenLongAgo);
 }
 
 // src/session-identity.ts
@@ -47849,14 +48047,14 @@ class SessionIdentity {
   }
 }
 function sessionHandoffDirectory(stateDirectory, claudePid) {
-  return join5(stateDirectory, "sessions", String(claudePid));
+  return join6(stateDirectory, "sessions", String(claudePid));
 }
 function sessionHandoffFile(stateDirectory, claudePid) {
-  return join5(sessionHandoffDirectory(stateDirectory, claudePid), "session-id");
+  return join6(sessionHandoffDirectory(stateDirectory, claudePid), "session-id");
 }
 var ROLES_DIRECTORY = "roles";
 function roleStateFile(stateDirectory, sessionId) {
-  return join5(stateDirectory, ROLES_DIRECTORY, `${encodeURIComponent(sessionId)}.json`);
+  return join6(stateDirectory, ROLES_DIRECTORY, `${encodeURIComponent(sessionId)}.json`);
 }
 
 class UnparseableRoleRecordError extends Error {
@@ -47907,14 +48105,14 @@ function processExists(pid) {
   }
 }
 async function pruneStaleSessionHandoffs(stateDirectory) {
-  await pruneStateDirectory(join5(stateDirectory, "sessions"), (file2) => {
+  await pruneStateDirectory(join6(stateDirectory, "sessions"), (file2) => {
     const pid = basename3(file2);
     return /^\d+$/.test(pid) && !processExists(Number(pid));
   });
 }
 async function pruneStaleSessionRoles(stateDirectory, currentSessionId) {
   const own = roleStateFile(stateDirectory, currentSessionId);
-  await pruneStateDirectory(join5(stateDirectory, ROLES_DIRECTORY), async (file2) => file2 !== own && await writtenLongAgo(file2));
+  await pruneStateDirectory(join6(stateDirectory, ROLES_DIRECTORY), async (file2) => file2 !== own && await writtenLongAgo(file2));
 }
 
 // src/envoy-off.ts
@@ -47964,7 +48162,7 @@ async function serveEnvoyOff(serverInfo, refusal) {
 
 // src/legion-claim.ts
 import { readdir as readdir2, stat as stat2 } from "fs/promises";
-import { join as join6 } from "path";
+import { join as join7 } from "path";
 import { setTimeout as delay } from "timers/promises";
 
 // ../pi-shared/src/legion-claim-core.ts
@@ -48053,12 +48251,12 @@ function stopPane(why) {
   endPane();
 }
 async function waitForTranscript(configDir, sessionID, signal, pollMs = 100) {
-  const projects = join6(configDir, "projects");
+  const projects = join7(configDir, "projects");
   const name = `${sessionID}.jsonl`;
   for (;; ) {
     signal.throwIfAborted();
     for (const directory of await readdir2(projects).catch(() => [])) {
-      const file2 = join6(projects, directory, name);
+      const file2 = join7(projects, directory, name);
       if (await stat2(file2).then((info) => info.isFile(), () => false))
         return file2;
     }
@@ -48339,7 +48537,7 @@ async function executeLegionTool(runtime, input) {
 
 // src/session-title.ts
 import { execFileSync } from "child_process";
-import { readFileSync as readFileSync6 } from "fs";
+import { readFileSync as readFileSync7 } from "fs";
 import { basename as basename4 } from "path";
 var TMUX_PANE_FORMAT = [
   "#{session_name}",
@@ -48362,7 +48560,7 @@ function visible(value) {
 function parentPid(pid) {
   try {
     if (process.platform === "linux") {
-      const stat3 = readFileSync6(`/proc/${pid}/stat`, "utf8");
+      const stat3 = readFileSync7(`/proc/${pid}/stat`, "utf8");
       const parent2 = Number(stat3.slice(stat3.lastIndexOf(")") + 2).split(" ")[1]);
       return Number.isInteger(parent2) ? parent2 : undefined;
     }

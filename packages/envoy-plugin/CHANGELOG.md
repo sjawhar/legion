@@ -22,6 +22,9 @@
 
 ### Changed
 
+- The packaged `dispatch` command carries AskGate's marker check, which reads the session's
+  `askgate.json` record before a gated write posts. An OpenCode session's id is no Oh My Pi
+  process's record, so the check is inert under OpenCode.
 - The logged start notice names an `askgate` section in a checkout's `.envoy/envoy.json` as not
   read, and names the session's file to set it in.
 - The `envoy_unsubscribe` and `envoy_role_set` descriptions name the role-bound subscriptions an

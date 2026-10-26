@@ -13,6 +13,14 @@
 
 ### Changed
 
+- The bundled `dispatch` command (`dist/dispatch.js`, rebuilt) carries AskGate's marker check:
+  before a gated write posts it reads the session's `askgate.json` record and, under a live one,
+  needs a marker an Oh My Pi gate minted. A Claude Code session writes under host `claude`, whose
+  session id no Oh My Pi process records, so the check is inert here: nothing this plugin sends
+  needs a marker. The plugin has no Dispatch write tool over MCP. `dist/envoy-channel.js` is
+  rebuilt with the same shared state code, whose session pruning keeps a directory a live record
+  names.
+
 - The plugin's regenerated `legion/` copy of the `legion-worker` skill's tools reference no longer
   tells a role to add a new image package to the licence file by hand: the worker image lists every
   Debian package it carries in `/usr/share/doc/legion/THIRD_PARTY_NOTICES` from its own dpkg
