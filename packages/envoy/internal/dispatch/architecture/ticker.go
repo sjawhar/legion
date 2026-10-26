@@ -20,7 +20,7 @@ const SyncInterval = 5 * time.Minute
 const architectureImportLease = "architecture-import"
 
 // Run re-imports every enabled architecture source on SyncInterval, one
-// project at a time, until ctx is cancelled. The first tick is jittered so a
+// source at a time, until ctx is cancelled. The first tick is jittered so a
 // restart does not stampede GitHub, and a server without App credentials logs
 // once and stops: no sync can be signed. Shares its jittered-ticker loop with
 // delivery.Reconcile.Run via duty.RunJittered.
@@ -45,32 +45,34 @@ func syncAllLeased(ctx context.Context, importer *Importer, leases duty.Leases) 
 	duty.Exclusive(ctx, leases, architectureImportLease, SyncInterval, func(ctx context.Context) { syncAll(ctx, importer) })
 }
 
+// syncAll imports every enabled source, ordered by project and then id; a
+// source whose import fails leaves the rest to import.
 func syncAll(ctx context.Context, importer *Importer) {
-	projects, err := importer.ListEnabled(ctx)
+	sources, err := importer.ListEnabled(ctx)
 	if err != nil {
 		if !errors.Is(err, context.Canceled) {
 			slog.Error("dispatch architecture: list sources", "error", err)
 		}
 		return
 	}
-	for _, project := range projects {
+	for _, enabled := range sources {
 		if ctx.Err() != nil {
 			return
 		}
-		source, err := importer.Sync(ctx, project)
+		source, err := importer.Sync(ctx, enabled.Project, enabled.Repo)
 		switch {
 		case err == nil:
 			commit := ""
 			if source.LastCommit != nil {
 				commit = *source.LastCommit
 			}
-			slog.Debug("dispatch architecture: synced", "project", project, "commit", commit)
+			slog.Debug("dispatch architecture: synced", "project", enabled.Project, "repo", enabled.Repo, "commit", commit)
 		case errors.Is(err, context.Canceled):
 			return
 		default:
 			// The failure is already on the source row (and, on a change, in a
 			// sync_failed event); the log is for the operator watching stderr.
-			slog.Warn("dispatch architecture: sync failed", "project", project, "error", err)
+			slog.Warn("dispatch architecture: sync failed", "project", enabled.Project, "repo", enabled.Repo, "error", err)
 		}
 	}
 }

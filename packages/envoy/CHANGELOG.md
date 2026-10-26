@@ -30,6 +30,32 @@
   that inherited a stale address reads a stale address. Such a message carries no `asked the
   broker …` trailer: the broker refused nothing. A local helper refusal or dead helper socket names
   that socket instead, since no broker was asked.
+- A Dispatch project imports its component model from any number of architecture sources, one
+  per repository, each on its own branch, and its model is every source's components together
+  (INFRA-391). `GET /api/v1/projects/{key}/architecture-sources` lists a project's sources (`[]`
+  with none); `PUT /api/v1/projects/{key}/architecture-sources/{owner}/{repo}` `{branch}` adds a
+  source, or changes the branch of the one it already is, after proving the GitHub App can read
+  the repository and that `branch` is the name of a branch it has (an exact
+  `git/ref/heads/{branch}` read): a missing branch, a commit SHA, a relative ref such as
+  `main~1`, `HEAD` or a `refs/` path is `409 SOURCE_ACCESS` naming the value and the repository,
+  as a credential problem is, and nothing is written;
+  `DELETE` on the same path removes that source and its components, and no other source's;
+  `POST …/architecture-sources/{owner}/{repo}/sync` imports one source and
+  `POST /api/v1/projects/{key}/architecture-sources/sync` every source, each attempted whatever
+  another's import did and each answering on its own row. A source row carries `components`, how
+  many components it projects; `GET /api/v1/projects/{key}/architecture` carries `sources` and
+  each component's `source` repository; `architecture.synced` and `architecture.sync_failed`
+  name the source's `repo` and `branch`. One source's failed import keeps that source's previous
+  components and touches no other source's. Component ids stay project-wide: an import whose
+  model holds an id another source of the project already has fails for that source alone,
+  naming the id and the repository that holds it, and an issue may name components of any
+  source of its project. Settings lists one row per source with its component count and its own
+  Refresh and Delete; the architecture page has a header line per source with its own Refresh,
+  and hatches only the components of a source that failed or is stale; a component's details
+  name its repository; an issue's component picker offers every source's components. Migration
+  `0117` adds `architecture_sources.id` and `components.source_id`: every existing source and
+  component reads `0`, so a project with one source keeps it, its components and every issue
+  attachment, and nothing re-imports.
 - A project's default assignee, the last step of an issue create's assignee chain: an issue created
   with no assignee, by nobody (the shared token), under no parent or under a parent with nobody on
   it, goes to the person the project names; nothing already filed, and no create that names an
@@ -260,13 +286,70 @@
   runs, as its own plugin reported it (envoy-client's `machineID()`), rather than whichever
   listener happened to register it. Sessions on separate machines registering through one shared
   listener previously all showed that listener's own `machine_id` as their machine. `machine_id`
-  keeps its routing meaning unchanged (the listener that owns the session's delivery,
-  `store.Registry.Match`, `session.go`'s `hostFor`); `host` is carried on `POST
+  still names the listener that owns the session's delivery (`store.Registry.Match`), the only
+  listener that delivers to it (the next entry), and `host` is where that listener reaches a
+  session on a serving port, unless the session runs on that listener's machine and it has a host
+  bridge.
+  `host` is carried on `POST
   /v1/interests/subscribe` (`subscribeBody.Host`, every subscribe and heartbeat), stored on the
   session entry (`session.SessionEntry.Host`), and returned from `GET /v1/sessions` and `GET
   /v1/roles/<role>`, falling back to `machine_id` (`SessionEntry.HostOrMachine`) for a session
   whose plugin predates the field. `GET /api/v1/agents` carries it through unchanged, with its
   own defensive fallback to `machine_id` for a listener that predates the field too.
+- A session on a serving port (the OpenCode plugin's way of being reached) receives a topic the
+  stream does not store, such as a team topic, when its machine's listener runs with
+  `ENVOY_SUBSCRIBE_ALL_TOPICS=1` (INFRA-122). Such a listener opens a second NATS client holding
+  one core queue subscription on `notifications.>`, in the group
+  `envoy-listener-live-<machine id, spaces as hyphens>` (`bus.ListenerLiveQueue`, so two listeners
+  of one machine deliver each message once); it leaves a subject under `notifications.role.` to the
+  role lane and one the stream stores to the durable, and fans every other notification topic out
+  to the sessions on its machine subscribed to it, by the same `POST
+  /session/<id>/prompt_async`. Such a topic is live: it reaches whoever is subscribed when it is
+  published, once, and is never retained or retried. Unset, empty or `0` leaves it off, as before;
+  any other value refuses startup naming the variable. Only a NATS user whose grant allows a
+  `notifications.>` subscribe (`HostPermissions`, a host's own user) may opt in: under the hub's
+  or Dispatch's listener grant the start ends with exit 1 and an ERROR naming
+  `ENVOY_SUBSCRIBE_ALL_TOPICS`. Both compose files set it. `/healthz` gains `live_topics`,
+  `subscribed` or `not_applicable`, and answers `503 {"status":"unhealthy","error":"live
+  subscription inactive"}` when the opt-in is on and the live subscription is gone or the server
+  refuses it (one restarted without the grant refuses the subscription the client re-sends, which
+  nats.go keeps valid, so `bus.Client.CoreSubOK` reads the server's refusal until the subscription
+  is sent again). Shutdown
+  drains the live client for up to 3 s between the HTTP stop and the main client's drain: 10 s +
+  3 s + 13 s = 26 s, inside every runtime's 30 s. envoy-infra renders it from
+  `core.ListenerConfig.SubscribeAllTopics`, set by the optional input `subscribeAllTopics` on
+  `host:Listener` and `aws:WebhookListener` and by `envoy-infra render webhook-listener-env
+  --subscribe-all-topics`; left unset, every existing rendering is unchanged.
+
+  Only the owning listener delivers to a session on a serving port. Its owner is the listener its
+  stored subscription names (the interest's `machine_id`, the one `store.Registry.Match` fans its
+  topics out on, which a re-registration through another listener keeps), else, with no
+  subscription stored, the listener it registered through (the session entry's `machine_id`); a
+  session neither names is every listener's. The owner reaches a session on its own machine at
+  `ENVOY_HOST_BRIDGE` when the bridge is set: one registered through it, or one whose recorded
+  `host` equals the owner's `ENVOY_MACHINE_ID` (compared without letter case), which a session
+  that stayed on the owner's machine and re-registered through another listener records.
+  Otherwise it reaches the session at the registration's recorded `host` when it is not empty,
+  otherwise at `host.docker.internal` for one registered through it, else at that listener's
+  machine id; a session that re-registered through another listener and records another host
+  runs on that machine, so the owner never uses its own bridge for it
+  (`session.Deliverer.hostFor`, an IPv6 literal bracketed). A listener without a bridge used to
+  dial `host.docker.internal` for every
+  session on its machine, whatever host it recorded, so a serving port bound to loopback alone was
+  never reached and every delivery to it failed. Another listener's session is now that listener's
+  to deliver: this one requests nothing and leaves an inbox message to the owner silently
+  (`session.ErrWrongMachine`, `HandleAgentResult.OwnedElsewhere`: no delivery, no `no_holder`
+  exception, no NAK, one DEBUG line), where it used to dial the session at the owning listener's
+  machine id. Every listener on the bus reads each inbox message from its own durable, so a second
+  listener that could reach the session would deliver the same message again; the owner always
+  has the message. A session that re-registers through another listener stays with the one its
+  stored subscription names, which matches its topics and delivers them. A session owned by a
+  listener that cannot reach its port is reached by nobody.
+  Since the recorded host now goes into the delivery URL, `POST
+  /v1/interests/subscribe` with `port` above 0 refuses a non-empty `host` that is neither an IP
+  literal nor a plain host name (letters, digits, `_`, `.`, `-`; `session.ValidHost`) with
+  `400 {"error":"host is not a host name or address","expected":["host"]}` and writes nothing. A
+  registration with no `host` (an older plugin) or no port is accepted as before.
 - `deploy/compose/single-node.compose.yml` runs Envoy on one machine: a JetStream NATS of its own
   (its data on the `nats-data` volume) and the listener, both on `127.0.0.1` only, with
   `deploy/compose/single-node.env.example` as its settings template. The site's Envoy page ("Running
@@ -677,6 +760,34 @@
   image back. Only this release's API holds the depth limit, so an earlier release serving over
   `0113` can build a deeper chain again, and every read of that chain's issues fails (500) until an
   ancestor that still reads has its parent set to null.
+- **Breaking:** migration `0117` is a stop-the-world migration. Deploy it with no server of the
+  earlier release running, and never start a release older than `0117` over it again: stop the
+  earlier release, or scale it to zero, before this release boots (a Recreate rollout, never a
+  rolling one), and recover a failed deploy forward rather than by rolling the image back. Over
+  the new schema an earlier release's architecture-source save answers `500`, since no unique
+  index covers `project_key` alone; its import deletes every component of the project before
+  inserting one source's, so a model with components fails on the new `source_id` column and one
+  with none deletes every source's components; and its delete removes every source of the
+  project. Its census counts components whose project has no architecture source, which only
+  direct SQL writes; repair them on the release still serving with
+  `delete from components c where not exists (select 1 from architecture_sources s where s.project_key = c.project_key)`
+  and take the census again (`cmd/dispatch/README.md`, "Database migrations").
+- **Breaking:** the singular architecture source routes `PUT` and `DELETE
+  /api/v1/projects/{key}/architecture-source` are gone. A source is addressed by its repository
+  under `/api/v1/projects/{key}/architecture-sources/{owner}/{repo}`, and a project's sources are
+  listed at `/api/v1/projects/{key}/architecture-sources`; the `dispatch` CLI of this release uses
+  the new routes. Two singular routes are kept for `dispatch` clients older than this release,
+  each call logged at warn naming the route and the project:
+  `GET /api/v1/projects/{key}/architecture-source`, which those clients read on every issue
+  create, answers `200 null` when the project has no source, otherwise its first source's row,
+  `404` for an unknown project, and the list route replaces it;
+  `POST /api/v1/projects/{key}/architecture-source/sync`, which their `dispatch architecture-sync`
+  calls, imports every source as `POST …/architecture-sources/sync` does and answers one row: the
+  first source in the order they were added whose `last_error` is set, or the first source when
+  none failed. A project with no source is still `404 SOURCE_NOT_FOUND`, and a failure that could
+  not be recorded `500`; a credential or branch problem, once a `409 SOURCE_ACCESS`, is recorded
+  on its row and answers `200` with that `last_error`, which those clients print as
+  `Sync failed for …`. `POST …/architecture-sources/sync` replaces it.
 - **Breaking:** the Dispatch auto-deployer (`deploy/scripts/autodeploy.sh`) accepts `DATABASE_URL`
   in one form only, `postgres[ql]://<user>[:<password>]@<host>[:<port>]/<database>`, with an
   optional query of `sslmode`, `connect_timeout` and `application_name`.
@@ -1169,6 +1280,17 @@
 
 ### Fixed
 
+- A browser that opens a document while Dispatch closes that document's room now keeps getting the
+  document's edits. Dispatch closes a room when an issue closes, when it evicts a stale or failed
+  room, and at shutdown, and each close takes ygo a moment: it closes the browsers it found, waits
+  for them and makes the room's writes durable before it removes the room. A browser that connected
+  in that moment joined the room all the same, and ygo closed only the browsers it had found, so
+  that one stayed on a room the server no longer had: no later edit by anyone reached it, and
+  nobody saw its own edits, until it reconnected for some other reason. The ygo pin moves from
+  `v1.51.3-sami.1` to `v1.51.3-sami.3`, where a forced close also closes such a browser before it
+  returns, so the dashboard's usual reconnect takes it to the live room (reearth/ygo#331,
+  INFRA-403).
+
 - An agent woken by a Slack message now reads the words the message carries, wherever it carries
   them. A Slack delivery's `text` is the message's own text and then every display string its
   blocks and then its attachments hold — the strings under `pretext`, `author_name`,
@@ -1264,6 +1386,52 @@
   name the file), a machine's credentials it names are refused for a write rather than replaced,
   and a command printed for running again starts with `GOOGLE_APPLICATION_CREDENTIALS=…`, naming
   the file. The `--profile` refusal under the GCP store names the Google sign-in it uses instead.
+
+- With two `envoy-dispatch` processes on one database, a document whose room one process held
+  behind the durable head no longer answers every write with `503 DOC_SERVICE_UNAVAILABLE` for a
+  while, and a version named there no longer records text missing the other process's edit
+  (INFRA-218). A settlement the durable gate refused from such a room was retried on the same
+  room, which can never pass the gate, so its third refusal failed the room
+  (`document settlement failed 3 times`) and every transaction on the document was refused until
+  the eviction ran. The refusal now closes the room and settles it again from the reloaded one. A
+  named or snapshot version taken from a room behind the head rendered that room's text while
+  recording the stored head, so no later settlement versioned the other process's words, and it
+  listed the room's unstored browser edits, whose authors were listed again once the edit was
+  resent; it now renders the stored document and lists none of them, and neither does a version
+  that a write of its own renders over the stored document (an edit with a summary, an accepted
+  suggestion, an anchor's snapshot). The settlement's close and the stale-room evictor's both
+  reserve the room they checked, so a write that would open between the check and the close
+  answers 503, and the caller's retry lands on the reloaded room, instead of being forgotten with
+  the closed one; and neither closes a room that replaced the one it checked, including one ygo's
+  idle sweep retired and a load replaced before the close reached it. A write that opens while a
+  settlement is armed, fired or running takes the settlement over and arms it when it ends, so a
+  write that changed nothing no longer leaves the document's settlement to the one-minute
+  resumption.
+
+- A person who opens a Dispatch document while the service is force-closing that document's room
+  keeps the credit for what they type (INFRA-352). The service forces such a close when the room
+  fails, when another process's write leaves it behind the stored document, and when a test or the
+  browser-test harness asks, and it threw the room's in-memory record away once the close
+  returned. The browser registers before its room is loaded, the room that replaces the closed one
+  loads, and an edit typed in that room is credited, all while that record is still the one the
+  service holds, so the throw-away took the person's credit with it: the next version left them
+  off its author list. It also lost the issue's closed flag, credited the document's existing
+  decision blocks to whoever edited next, and left the settlement the new room had armed to run a
+  settle delay late. The close now keeps the record while anything holds it and forgets it when
+  nothing does, as every other end of a room does. Only a failed room's record still goes, since
+  it carries the failure, and the browsers that joined while it was evicted are handed to the
+  record registered in its place. A room that loads onto a kept record takes the latest edit
+  source the stored document names, none included, unless the record recorded a newer one, so
+  another process's edit that several browsers could have made is not credited to whoever edited
+  here before; the closed room's settlement failures end with its generation rather than once the
+  close returns, so they never wipe the failures of the room that replaced it, and an issue's
+  close ends them the same way; the close of a room behind the stored document carries the
+  service's own mark, so a closed issue no longer refuses it and such a room is closed rather than
+  left resident with text the store no longer holds until its idle minute runs out; and the
+  browser-test harness's quiesce drops the edit source of
+  the settlement it cancels, and once its closes have ended drops any source a reconnect or an
+  edit recorded meanwhile, so the record of a closed document it truncates away is not kept for
+  ever.
 
 - A burst of device logins no longer stalls the secrets broker's database pool. Each
   `POST /v1/oauth/device_authorization` held its provider transaction's pooled connection while
