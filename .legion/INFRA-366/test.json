@@ -2,45 +2,46 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-366",
-  "completed": "2026-10-26T15:51:48Z",
-  "headSha": "9b1586c546bac138cdf6e51ae3cd92d97901dc6b",
-  "round": 8,
-  "standard": "The architect's decision after review round 4 (2026-10-26T15:06Z): a bare dashboard URL GFM autolinks is read with the bounded parser, so the dashboard links exactly where the server records a reference, while an author-written link to the same long-named document still opens; and the PR body sentence on deleting an ask block is corrected. Both driven on builds of the head and of main.",
-  "provider": "328 assistant turns of this test run, all provider anthropic, model claude-opus-5-5, read from the run's own session transcript (omp_session_files, session 01a175a2-1036-71da-aaba-a9b28d0f2e1b) at 2026-10-26T15:51Z; no subagent was used.",
+  "completed": "2026-10-26T18:04:00Z",
+  "headSha": "f7eae6165aa443fac48994db7280a66be8fcafb3",
+  "round": 9,
+  "standard": "The architect's decision after review round 5 (2026-10-26T16:42Z): dispatch:// autolinks and links whose words are their target, past the bounds, read with the bounded parser as https:// forms are, while an author-written link still opens; main merged forward (never rebased) with this branch's migrations renumbered after main's 0119; both driven on builds of the merged head and of main, migrations on a fresh database and on one main eee16056 wrote.",
+  "provider": "349 assistant turns of this test run, all provider anthropic, model claude-opus-5-5, read from the run's own session transcript (omp_session_files, session 01a175a2-1036-71da-aaba-a9b28d0f2e1b) at 2026-10-26T18:03Z; no subagent was used.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Ran the implementer's updated pictures.e2e.ts test (bare page URL stays a plain link) at the head and in git archives of main 3f34ba12 and the previous head a50fe967, and drove the bare and author forms in my own throwaway browser test on all three, reading the server's references of the comment beside each drawn link."
+    "how": "Drove the link forms in my own throwaway browser test on trees of the merged head f7eae616 (code 44f6cfa2), main ad909178 (contains eee16056) and the previous head 9b1586c5; ran the implementer's updated pictures.e2e.ts test on the previous head as its control; ran the head's migrations on a fresh database and on a database main eee16056 wrote."
   },
   "failures": [],
   "failed": 0,
   "proof": [
     {
-      "criterion": "Item 1: a bare dashboard URL to a document whose key is 2,049-2,692 bytes stays a plain link, matching the server, and an author-written link to the same document still opens it",
-      "surface": "Dispatch's browser harness (Playwright, chromium and iphone) with a real server built from each tree: the head 9b1586c5 (code ea0496c2), git archives of main 3f34ba12 and of the previous head a50fe967",
-      "command": "bun run e2e -- e2e/tester-bare-url.e2e.ts e2e/pictures.e2e.ts -g 'bare vs author|long-named picture' in each tree (tester-bare-url.e2e.ts throwaway, deleted): one comment holding a bare URL, an angle-bracket URL, [url](url), [designurl](url) and [designref](dispatch://…) to a document named with 2,680 characters (key 2,710 bytes), and a bare URL of short.md; GET /api/v1/references?from=<comment>; each link's href, words and data-dispatch-ref; click of both author links",
-      "observed": "Head: server records only artifact short-md; BARE, ANGLE and SELF keep href = the URL, words = the URL, no data-dispatch-ref; AUTHURL and AUTHREF draw with href /issues/CORE-1/artifacts/<slug> and open the document ('The long-named design.' visible); SHORTBARE is a reference link (short.md). pictures.e2e.ts updated test passes on both projects (4 passed in this run)",
-      "headSha": "9b1586c546bac138cdf6e51ae3cd92d97901dc6b",
-      "negativeControl": "Previous head a50fe967: the server records the same single reference, but BARE, ANGLE and SELF draw as reference links to the long document (href the route, data-dispatch-ref set), and the pictures test fails 2/2 on the bare link's href. Main 3f34ba12 records the long document as a reference (artifact key 2,710) and draws it as one, so it agrees with itself; the updated pictures test fails there too, as it asserts the head's bound"
+      "criterion": "Item 1: <dispatch://…> and [dispatch://X](dispatch://X) to a document whose key is 2,049-2,692 bytes are not drawn as titled references (the server records none), the https:// forms stay plain links, and author-written links still open",
+      "surface": "Dispatch's browser harness (Playwright, chromium and iphone) with a real server built from each tree: the head f7eae616, git archives of main ad909178 and of the previous head 9b1586c5",
+      "command": "bun run e2e -- e2e/tester-text-urls.e2e.ts (throwaway, deleted): one comment on a document named with 2,680 characters (key 2,710 bytes) holding a bare URL, <URL>, [URL](URL), <dispatch://…>, [dispatch://…](dispatch://…), a bare dispatch://…, [designurl](URL), [designref](dispatch://…) and <dispatch://…/short-md>; GET /api/v1/references?from=<comment>; each link's href, data-dispatch-ref and words; click of both author links",
+      "observed": "Head: server records only short-md; the three https:// forms keep href = the URL and words = the URL with no data-dispatch-ref; <dispatch://…> and [dispatch://…](dispatch://…) show their dispatch:// words with no data-dispatch-ref and an empty href (not a titled reference); the bare dispatch:// text draws no link; both author links have href /issues/CORE-1/artifacts/<slug> and open the document ('The long-named design.' visible); the short <dispatch://…> is a reference link titled short.md",
+      "headSha": "f7eae6165aa443fac48994db7280a66be8fcafb3",
+      "negativeControl": "Previous head 9b1586c5: the server records the same single reference, but <dispatch://…> and [dispatch://…](dispatch://…) draw as titled reference links to the long document (the round-5 finding); the implementer's updated pictures.e2e.ts fails there 2/2 ('Angle:' link text is the document's name, not the dispatch:// URL). Main ad909178 records the long document (artifact key 2,710) and draws every form as a reference, so it agrees with itself"
     },
     {
-      "criterion": "Regression of the dashboard surfaces round 8 touched (reference links, Referenced by, pictures)",
-      "surface": "Dispatch's browser suite at the head, chromium and iphone",
-      "command": "cd packages/dispatch && bun run e2e -- e2e/block-references.e2e.ts e2e/references.e2e.ts e2e/pictures.e2e.ts",
-      "observed": "40 passed (2.7m). git diff 811b7261 ea0496c2 touches no server file, so round 7's driver (37 PASS) and A12 at 811b7261 still describe the server",
-      "headSha": "9b1586c546bac138cdf6e51ae3cd92d97901dc6b",
-      "negativeControl": "The same pictures test on main and a50fe967 fails (above)"
+      "criterion": "Item 2: the forward merge of main, migrations renumbered after main's 0119, run on a fresh database and on a database main eee16056 wrote",
+      "surface": "Head server built from f7eae616: on a fresh database (infra366_t9, port 8801) and on infra366_t9_roll after main eee16056 wrote it (port 8841)",
+      "command": "On eee16056: a spec with callout ship_it and a 3,200-byte callout id, a document named with 2,680 characters, a comment citing dispatch://CORE-1/spec#b-ship%5Fit and the long document's #b-x, an ask block with a 3,200-byte id; stop it; start the head on the same database; reads, doc-edit of the spec and the long document, ?to= reads; schema_migrations",
+      "observed": "schema_migrations 1-119 after eee16056, 1-127 after the head (0120-0127 this branch's); main's 0118 embeddings pending_since column present; reads 200, both edits 'Applied 1 ops (version 2)'; ?to=X lists eee16056's comment; the long document's #b-x is past the 2,048-byte target bound and records nothing; the owed settlement opens the ask under its 3,200-byte id; nothing owed afterwards; no SQLSTATE 54000 or level=ERROR in the head's log. Fresh database: the head migrates and serves; block-graph.sh exit 0, 37 PASS; block-coverage.sh documents=5 indexed=5 not_indexed=0",
+      "headSha": "f7eae6165aa443fac48994db7280a66be8fcafb3",
+      "negativeControl": "371d6c87 (no INFRA-364) on the A12 database: ?to=dispatch://ACME-1 → 500, log 'graph node kind \"block\" is not addressable'"
     },
     {
-      "criterion": "Item 2: the PR body no longer says deleting an ask block deletes its ask",
-      "surface": "The live PR body read with gh api repos/sjawhar/legion/pulls/2210",
-      "command": "gh api repos/sjawhar/legion/pulls/2210 --jq .body | grep -n -i 'ask block'",
-      "observed": "Line 14 now says 'One E2E (implementer) sentence says deleting an ask block deletes its ask; the settlement retracts it', and the round-7 E2E line says the settlement retracts the ask and search still finds it; this matches round 7's run, where the retracted ask of a deleted block stayed searchable as ?ask=<id>",
-      "headSha": "9b1586c546bac138cdf6e51ae3cd92d97901dc6b",
-      "negativeControl": "Round 7's run: the deleted block's ask stayed in asks, retracted, and dispatch read of its search hit printed its question"
+      "criterion": "Regression: A12 with eee16056 as the old build; the dashboard's reference, Referenced by and picture surfaces",
+      "surface": "Three builds on one database; Dispatch's browser suite at the head on both projects",
+      "command": "OLD=dispatch-eee NEW=dispatch-head9 NEG=dispatch-371d6c879565 bash $TMPDIR/t366/a12.sh; cd packages/dispatch && bun run e2e -- e2e/block-references.e2e.ts e2e/references.e2e.ts e2e/pictures.e2e.ts",
+      "observed": "A12 exit 0, 8 PASS lines, old build count 3 = list 3, no SQLSTATE 54000 in either build's log; browser 40 passed",
+      "headSha": "f7eae6165aa443fac48994db7280a66be8fcafb3",
+      "negativeControl": "The previous head's failure of the updated pictures test (above)"
     }
   ],
   "attempted": [
-    "Bare, angle-bracket, self-titled, author-URL and author-dispatch links to a long-named document and a bare short-document URL on the head, main and the previous head, with the server's references beside each; the implementer's updated pictures test on all three; the three browser files at the head; the body sentence."
+    "The merge is two forward merges (56d31191 onto df396380, 44f6cfa2 onto ad909178), each with two parents and no rebase; the implementer posted the fingerprints at https://github.com/sjawhar/legion/pull/2210#issuecomment-6423164429.",
+    "The PR body's CI and E2E (tester) lines were not updated this round: the contract-37 drain (architect, 18:00Z) required pushing before 18:10Z; this handoff carries the evidence."
   ],
-  "ci": "At ea0496c2: Tests 40350833191, Docs 40350833884 and Worker Image 40350834203 queued; Legion Envoy and Contracts 40350833276 pending; PR Title 40350953141 queued."
+  "ci": "At 44f6cfa2: Tests 40370981740, Legion Envoy and Contracts 40370981929, Docs 40370981766 and Worker Image 40370981725 queued; PR Title queued."
 }
