@@ -95,7 +95,8 @@ func TestACheckReportWhileTheRootLingersIsRecorded(t *testing.T) {
 }
 
 // A pending report ends the look with nothing to show and takes the pod: the implementer's claim
-// is suspended and the issue's Sandbox with it, volume kept, both rows written after the look's
+// is suspended, session kept, and the issue suspended (issue_suspend), whose Sandbox goes with its
+// pod and disk, both rows written after the look's
 // start row so the suspension's fences find no later start. The check stays open at look 1 with
 // its look closed.
 func TestAPendingReportSuspendsTheImplementerAfterTheLooksStart(t *testing.T) {
@@ -115,8 +116,8 @@ func TestAPendingReportSuspendsTheImplementerAfterTheLooksStart(t *testing.T) {
 		t.Fatalf("suspend rows = %+v, want the implementer's alone", suspends)
 	}
 	suspensions := issueSuspensions(t, rig.pool, "LEGION-209")
-	if len(suspensions) != 1 || suspensions[0].Release || suspensions[0].Generation != 7 || suspensions[0].TreeGeneration != 7 {
-		t.Fatalf("issue suspensions = %+v, want one keeping row", suspensions)
+	if len(suspensions) != 1 || suspensions[0].Generation != 7 || suspensions[0].TreeGeneration != 7 {
+		t.Fatalf("issue suspensions = %+v, want one row of the look's run", suspensions)
 	}
 	for _, kind := range []string{"supervise", "issue_suspend"} {
 		rows := issueOutboxOf(t, rig.pool, "LEGION-209", kind)
@@ -127,9 +128,9 @@ func TestAPendingReportSuspendsTheImplementerAfterTheLooksStart(t *testing.T) {
 }
 
 // A pass closes a child's check as recorded and ends the implementer's part in it: its claim is
-// closed (issue_close) and the child's Sandbox released with its volume (a releasing IssueSuspend),
+// closed (issue_close) and the child's Sandbox deleted with the pod it ran in (an IssueSuspend),
 // since its five other claims retired at the close. A fail closes it as a defect the same way.
-func TestAPassOrFailOfAChildsCheckClosesItAndReleasesItsSandbox(t *testing.T) {
+func TestAPassOrFailOfAChildsCheckClosesItAndDeletesItsSandbox(t *testing.T) {
 	for _, tc := range []struct {
 		verdict string
 		outcome record.CheckOutcome
@@ -147,25 +148,25 @@ func TestAPassOrFailOfAChildsCheckClosesItAndReleasesItsSandbox(t *testing.T) {
 					t.Fatalf("issue_close rows = %v, want every role's once, the implementer's by the check's close", closed)
 				}
 			}
-			if got := issueSuspensions(t, rig.pool, "LEGION-209"); len(got) != 1 || !got[0].Release || got[0].Generation != 7 || got[0].TreeGeneration != 7 {
-				t.Fatalf("issue suspensions = %+v, want one releasing row", got)
+			if got := issueSuspensions(t, rig.pool, "LEGION-209"); len(got) != 1 || got[0].Generation != 7 || got[0].TreeGeneration != 7 {
+				t.Fatalf("issue suspensions = %+v, want one row of the check's run", got)
 			}
 			assertOutboxCount(t, rig.pool, "linger_close", 0)
 		})
 	}
 }
 
-// A pass of a root's check closes the implementer's claim but keeps the Sandbox: the tree's close
-// deletes it with the volume, and a releasing row would wait on the suspended claims forever.
-func TestAPassOfARootsCheckKeepsItsSandboxForTheTreesClose(t *testing.T) {
+// A pass of a root's check closes the implementer's claim and writes the suspension that deletes
+// its Sandbox, as the linger's own row did: the tree's close then finds nothing of it left.
+func TestAPassOfARootsCheckClosesItsImplementerAndSuspendsTheIssue(t *testing.T) {
 	rig := rootCheckRig(t)
 	rig.apply("pass", intake.CheckReport{Issue: "LEGION-208", Look: 1, Verdict: "pass", Summary: "seen"})
 	if got := superviseRequests(t, rig.pool, "issue_close"); got["LEGION-208/implementer"] != 1 || len(got) != 1 {
 		t.Fatalf("issue_close rows = %v, want the implementer's alone", got)
 	}
 	got := issueSuspensions(t, rig.pool, "LEGION-208")
-	if len(got) != 2 || got[0].Release || got[1].Release {
-		t.Fatalf("the root's issue suspensions = %+v, want the linger's and the check's, both keeping", got)
+	if len(got) != 2 {
+		t.Fatalf("the root's issue suspensions = %+v, want the linger's and the check's", got)
 	}
 	// The root lingers until an hour from now, so the tree's close is not re-armed by the check.
 	assertOutboxCount(t, rig.pool, "linger_close", 1)
@@ -369,8 +370,8 @@ func TestCheckLookEndedEndsASilentLook(t *testing.T) {
 	if got := superviseRequests(t, rig.pool, "suspend"); got["LEGION-209/implementer"] != 1 || len(got) != 1 {
 		t.Fatalf("suspend rows = %v, want the implementer's", got)
 	}
-	if got := issueSuspensions(t, rig.pool, "LEGION-209"); len(got) != 1 || got[0].Release {
-		t.Fatalf("issue suspensions = %+v, want one keeping row", got)
+	if got := issueSuspensions(t, rig.pool, "LEGION-209"); len(got) != 1 {
+		t.Fatalf("issue suspensions = %+v, want one row", got)
 	}
 	rig.apply("look-bound-again", intake.CheckLookEnded{Issue: "LEGION-209", Look: 1, Cause: "look bound"})
 	if got := superviseRequests(t, rig.pool, "suspend"); got["LEGION-209/implementer"] != 1 {
@@ -440,8 +441,8 @@ func TestTheImplementersFailedClaimEndsItsLook(t *testing.T) {
 	if !check.Open() || check.Looks != 1 || check.LookOpen {
 		t.Fatalf("the check after the implementer's claim failed = %+v, want it open at look 1 with the look ended", check)
 	}
-	if got := issueSuspensions(t, rig.pool, "LEGION-209"); len(got) != 1 || got[0].Release {
-		t.Fatalf("issue suspensions = %+v, want one keeping row", got)
+	if got := issueSuspensions(t, rig.pool, "LEGION-209"); len(got) != 1 {
+		t.Fatalf("issue suspensions = %+v, want one row", got)
 	}
 	var childPhase phase.Phase
 	if err := rig.pool.QueryRow(context.Background(), "select phase from issues where key = 'LEGION-209'").Scan(&childPhase); err != nil || childPhase != phase.Done {
@@ -597,8 +598,8 @@ func TestTheBoundStartsTheLastLookWhoseNothingClosesTheCheckAsNotRun(t *testing.
 			if got := superviseRequests(t, rig.pool, "issue_close"); got["LEGION-209/implementer"] != 1 {
 				t.Fatalf("issue_close rows = %v, want the implementer's once at the close", got)
 			}
-			if got := issueSuspensions(t, rig.pool, "LEGION-209"); len(got) != 2 || got[0].Release || !got[1].Release {
-				t.Fatalf("issue suspensions = %+v, want look 1's keeping row and the close's releasing one", got)
+			if got := issueSuspensions(t, rig.pool, "LEGION-209"); len(got) != 2 {
+				t.Fatalf("issue suspensions = %+v, want look 1's row and the close's", got)
 			}
 			rig.apply("bound-after-close", intake.CheckBound{Issue: "LEGION-209"})
 			if bounds := issueOutboxOf(t, rig.pool, "LEGION-209", "check_bound"); len(bounds) != 3 {

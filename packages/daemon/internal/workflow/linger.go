@@ -22,16 +22,16 @@ import (
 // it leaves the table, its phase parked in done, so no transition or status write follows the
 // human's move; the tree's architect is told, and decides what the rest of its tree does, as the
 // shipped daemon routes a child's close to the architect. A later todo re-enters the child. What
-// becomes of the child's claims and its pod is the status's: a child parked in backlog, icebox or
-// triage has every claim suspended and its Sandbox kept, sessions and volume with it, until it runs
-// again or its tree closes; a child closed as done with no merged pull request (close_root, a
-// human's done) is finished, so each of its claims is closed (issue_close: retired, its session
-// dropped) and its Sandbox released with the volume it owns (record.IssueSuspend's Release), while
-// its parent keeps running on a volume of its own. A child closed as done at its merge still owes
-// its production check: five of its claims are closed, the implementer's is not, no IssueSuspend
-// is written, and the check opens in the implementer's live session; the check's close writes the
-// release (closeCheck). A done child set back to todo starts fresh. An issue leaving disarms its
-// open pull request (disarmOpen), as a root's linger disarms every member's.
+// becomes of the child's claims is the status's: a child parked in backlog, icebox or triage has
+// every claim suspended with its session, for a later todo to resume; a child closed as done with
+// no merged pull request (close_root, a human's done) is finished, so each of its claims is
+// closed (issue_close: retired, its session dropped). Its pod goes either way, and the disk it
+// ran on with it, so its Sandbox is deleted either way (record.IssueSuspend), while its parent
+// keeps running in a pod of its own. A child closed as done at its merge still owes its
+// production check: five of its claims are closed, the implementer's is not, no IssueSuspend is
+// written, and the check opens in the implementer's live session; the check's close writes the
+// suspension (closeCheck). A done child set back to todo starts fresh. An issue leaving disarms
+// its open pull request (disarmOpen), as a root's linger disarms every member's.
 //
 // A member's leave may be the last its root waited for: a merged root stands in awaiting_merge
 // while any other issue of its tree is in the workflow (closeMerged), and closes once the last of
@@ -75,9 +75,9 @@ func (e *Engine) leave(ctx context.Context, tx pgx.Tx, issue record.Issue, statu
 		return err
 	}
 	merged := status == "done" && pr != nil && pr.State == record.PullRequestMerged
-	op, release, except := record.SuperviseOp("suspend"), false, claim.Role("")
+	op, except := record.SuperviseOp("suspend"), claim.Role("")
 	if status == "done" {
-		op, release = "issue_close", true
+		op = "issue_close"
 	}
 	if merged {
 		except = claim.RoleImplementer
@@ -94,7 +94,7 @@ func (e *Engine) leave(ctx context.Context, tx pgx.Tx, issue record.Issue, statu
 	}
 	if !merged {
 		if err := e.enqueue(ctx, tx, issue.Key, record.IssueSuspend{
-			Tree: issue.Tree, Generation: issue.Generation, TreeGeneration: root.Generation, Release: release,
+			Tree: issue.Tree, Generation: issue.Generation, TreeGeneration: root.Generation,
 		}); err != nil {
 			return err
 		}

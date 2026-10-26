@@ -11,8 +11,12 @@ import (
 type HandleAgentResult struct {
 	Delivered bool
 	Skipped   bool
-	ShouldNAK bool
-	Err       error
+	// OwnedElsewhere reports a session another listener owns (see ErrWrongMachine). That listener
+	// reads the same inbox message from its own durable and delivers it, so this one acknowledges
+	// it with nothing to report: no delivery, no exception, no NAK.
+	OwnedElsewhere bool
+	ShouldNAK      bool
+	Err            error
 }
 
 // HandleAgentMessage handles delivery of an agent-to-agent message.
@@ -26,26 +30,31 @@ func HandleAgentMessage(
 	interest *store.Interest,
 	deliverer *Deliverer,
 ) HandleAgentResult {
-	// Interest path: direct delivery if interest matches this machine
+	// Interest path: the stored subscription names this listener, which owns the session.
 	if interest != nil && interest.MachineID == machineID {
 		delivery, err := deliverer.DeliverWithResult(item, *interest)
+		if errors.Is(err, ErrWrongMachine) {
+			return HandleAgentResult{OwnedElsewhere: true}
+		}
 		if err != nil {
-			if errors.Is(err, ErrWrongMachine) {
-				return HandleAgentResult{Delivered: false}
-			}
 			return HandleAgentResult{ShouldNAK: true, Err: err}
 		}
 		return HandleAgentResult{Delivered: true, Skipped: delivery.Skipped}
 	}
+	// A stored subscription naming another listener makes the session that listener's, whatever
+	// listener the session last registered through: the stored MachineID is the one its topics
+	// are fanned out on (store.Registry.Match), so ownership reads the same on both paths.
+	if interest != nil && interest.MachineID != "" {
+		return HandleAgentResult{OwnedElsewhere: true}
+	}
 
-	// No interest on this machine — try delivery via session registry directly.
-	// The session registry (KV) resolves the port/machine.
-	synth := store.Interest{SessionID: sessionID, MachineID: machineID}
-	delivery, err := deliverer.DeliverWithResult(item, synth)
+	// No stored subscription names an owner, so the session registry entry does: an interest
+	// naming no machine leaves the decision to the entry's MachineID.
+	delivery, err := deliverer.DeliverWithResult(item, store.Interest{SessionID: sessionID})
+	if errors.Is(err, ErrWrongMachine) {
+		return HandleAgentResult{OwnedElsewhere: true}
+	}
 	if err != nil {
-		if errors.Is(err, ErrWrongMachine) {
-			return HandleAgentResult{Delivered: false}
-		}
 		// Session not found or delivery failed without interest — don't NAK,
 		// another listener may own this session.
 		return HandleAgentResult{Delivered: false}

@@ -7,6 +7,16 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 
 ### Added
 
+- Daemon API contract 37 (INFRA-80): under the Kubernetes runtime an issue's disk is a generic
+  ephemeral volume its own pod owns, created with the pod and deleted with it, so an issue pod's
+  `workspace-init provision` container is no longer told `LEGION_EXPECT_ISSUE_VOLUME`, and the
+  lost-disk machinery that variable drove is gone with it: `workspace-init`'s exit code 3 for a
+  volume holding neither the clone nor a retained session, the recovery marker a relaunch after
+  that loss wrote, the probe for an issue's retained sessions, and `legion sessions mark-lost`.
+  `runtime.kubernetes.session_store` must name a store that keeps sessions in a database,
+  `postgres` or `cloudsql-iam` (`pvc` and an omitted key are refused), since a session kept as a
+  file on that disk would die with the pod. Install this release with a `legion` built from the
+  same commit.
 - The skill-scenarios rig (`scripts/skill-scenarios/`, not shipped in the package) measures how
   agents write Dispatch specs:
   - `label-comments.ts` labels the comments people wrote on Dispatch in a window with the eleven
@@ -25,6 +35,11 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 - `rig.sh judge-omp` runs each judge in a Docker container that sees only the judge's own
   directory. On the gateway route, the gateway's key command runs on the host once for each judge,
   and the container gets only its token, which is removed when the judge ends.
+- The `legion-architect` skill this plugin ships says a project may import its architecture
+  model from several source repositories: a root's `.dispatch/architecture/<id>.md` file goes in
+  the branch of the source whose repository holds it, `parent` and `depends_on` name components of
+  that same source, an id must be one no other source of the project uses, and
+  `dispatch architecture-sync --repo <owner/name>` imports one source alone (INFRA-391).
 - Daemon API contract 36 (INFRA-229): `legion state` and the controller's `read_state` carry
   `state` on an issue's pull request, its `open`, `merged` or `closed`. An architect's acceptance
   is refused while an issue beneath it is still in the workflow and a merged root's close waits
@@ -116,6 +131,17 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 
 ### Changed
 
+- The Legion skills this plugin ships are rewritten to the minimum text that carries their
+  instructions (INFRA-353): `legion-architect`, `legion-controller`, `legion-worker`,
+  `legion-retro`, `legion-oracle`, `thermonuclear-code-quality` and `thermonuclear-deep-review`,
+  from about 141,000 bytes of SKILL.md to 50,000. Every rule now carries its reason beside it,
+  detail that only some tasks need moved whole to `references/` files named at the step that
+  needs it, and each skill opens by saying the code and a command's `--help` win over its text.
+  `legion-controller` was 39,275 bytes and is now 7,975, so an agent that keeps only a skill's
+  first 8,000 bytes reads all of it. Each old instruction is kept, moved, or dropped with a
+  recorded reason (most drops repeat a rule the role prompt already gives); the per-skill counts
+  are in the pull request body. One rule is new in `legion-worker`: put back anything copied
+  into the workspace before completing a phase, checked with `jj status`.
 - The `legion-worker` skill's tools reference no longer tells a role to add a new image package to
   the licence file by hand: the worker image lists every Debian package it carries in
   `/usr/share/doc/legion/THIRD_PARTY_NOTICES` from its own dpkg database (INFRA-255). The
