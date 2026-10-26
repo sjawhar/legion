@@ -7,14 +7,13 @@ import type { ReferenceSource } from "../../api/client";
 import { collectPictureAnchors, DispatchPicture, type PictureAnchor } from "./DispatchPicture";
 import { linkableTexts, renderWithEngine, type SoftBreaks } from "./markdown-engine";
 import {
-  type BareReferences,
   collectReferenceAnchors,
   linkifyDispatchRefs,
   type ReferenceAnchor,
   RefLink,
 } from "./RefLink";
 import { issueQuery, referenceRetry, useQuestionMap } from "./reference-target";
-import { textReferences } from "./routes";
+import { type BareReferences, resolveTextReference, textReferences } from "./routes";
 
 /** The anchor list of a body with no references: one shared value, so re-rendering such a body
  *  leaves the state untouched instead of committing a fresh empty array each time. */
@@ -30,35 +29,40 @@ const NO_PICTURES: readonly PictureAnchor[] = [];
  * (`referenceQuestionsQuery`), which is asked only for a body that writes a `#id` and a surface
  * that names its source. Only what a renderer can link is asked about: a key or `#id` the
  * server's reading of the source finds (`textReferences`) that also stands in the text the parsed
- * document links in (`linkableTexts`, the engine's own parse), so one written only in code or in a
- * link's destination costs no request; without an engine or a parse, the whole source is that
- * text, as the element then shows it. A 404 is final (`referenceRetry`, and `issueQuery` asks no
- * second time on a remount or a refocus; `issue.created` refetches it). Until an answer lands, and
- * when it is a 404, the key or `#id` names nothing, and the body shows it as written. The unfurl
- * cards read a body through it too (`Unfurl`), from the same cached queries.
+ * document links in (`linkableTexts`, the engine's own parse), so one written only in code or in
+ * a link's destination costs no request; without an engine or a parse, the whole source is that
+ * text, as the element then shows it. Only what the server's reading finds names anything: a key
+ * it read, and a question one of the `#id`s it read names (`resolveTextReference`), so a `#id`
+ * that stands only in the rendered text (`\#q2`, `&#35;q2`, which the server indexes nowhere)
+ * names nothing. A 404 is final (`referenceRetry`, and `issueQuery` asks no second time on a
+ * remount, a refocus, a reconnect or another issue's update; `issue.created` and the event
+ * stream's reconnect refetch it). Until an answer lands, and when it is a 404, the key or `#id`
+ * names nothing, and the body shows it as written. The unfurl cards read a body through it too
+ * (`Unfurl`), from the same cached queries.
  */
 export function useBareReferences(
   markdown: string,
   source: ReferenceSource | undefined
 ): BareReferences {
+  // The keys the server's reading finds, and its `#id`s written as text (`#q2_ #q3`).
   const written = useMemo(() => {
     const keys = new Set<string>();
-    let question = false;
+    const questions: string[] = [];
     for (const reference of textReferences(markdown)) {
       if (reference.kind === "key") {
         keys.add(reference.key);
       } else if (reference.kind === "question") {
-        question = true;
+        questions.push(`#${reference.id}`);
       }
     }
-    return { keys, question };
+    return { keys, questions: questions.join(" ") };
   }, [markdown]);
   // The linkable keys, joined, and whether a linkable `#id` is written: primitives, so a scan that
   // finds what the last one found re-renders nothing.
   const [linkableKeys, setLinkableKeys] = useState("");
   const [writesQuestion, setWritesQuestion] = useState(false);
   useLayoutEffect(() => {
-    if (written.keys.size === 0 && !written.question) {
+    if (written.keys.size === 0 && written.questions === "") {
       setLinkableKeys("");
       setWritesQuestion(false);
       return;
@@ -71,7 +75,7 @@ export function useBareReferences(
         for (const reference of textReferences(text)) {
           if (reference.kind === "key" && written.keys.has(reference.key)) {
             keys.add(reference.key);
-          } else if (reference.kind === "question" && written.question) {
+          } else if (reference.kind === "question" && written.questions !== "") {
             question = true;
           }
         }
@@ -89,7 +93,19 @@ export function useBareReferences(
     combine: (results) =>
       keys.filter((_key, index) => results[index]?.data !== undefined).join(" "),
   });
-  const questions = useQuestionMap(source, source !== undefined && writesQuestion);
+  const map = useQuestionMap(source, source !== undefined && writesQuestion);
+  // The document's questions the server's `#id`s name, each by the one resolver.
+  const questions = useMemo(() => {
+    const named = new Map<string, string>();
+    const everyQuestion = { issues: new Set<string>(), questions: map };
+    for (const reference of textReferences(written.questions)) {
+      const resolved = resolveTextReference(reference, everyQuestion);
+      if (resolved !== undefined) {
+        named.set(written.questions.slice(reference.start + 1, resolved.end), resolved.href);
+      }
+    }
+    return named;
+  }, [map, written]);
   return useMemo(
     () => ({ issues: new Set(existing === "" ? [] : existing.split(" ")), questions }),
     [existing, questions]

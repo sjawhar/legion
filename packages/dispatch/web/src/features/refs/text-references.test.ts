@@ -1,40 +1,26 @@
 import { expect, test } from "bun:test";
 import { DISPATCH_TEXT_REFERENCES } from "@legion/contracts";
 
-import {
-  buildDispatchReference,
-  questionReference,
-  referenceRouteFromHref,
-  textReferences,
-} from "./routes";
+import { buildDispatchReference, resolveTextReference, textReferences } from "./routes";
 
 const origin = "https://dispatch.test";
 
-/** What a text cites by `textReferences`, read as the server's `text.Mentions` reads it with the
- *  row's resolver: each address that names a Dispatch item, each key whose issue exists and each
- *  `#id` the question map names, in order of first appearance. */
+/** What a text cites by `textReferences` and the readers' one resolver (`resolveTextReference`),
+ *  read as the server's `text.Mentions` reads it with the row's resolver: each address that names
+ *  a Dispatch item, each key whose issue exists and each `#id` the question map names, in order
+ *  of first appearance. */
 function cited(
   body: string,
   server: string,
   issues: readonly string[],
   questions: ReadonlyMap<string, string>
 ): string[] {
+  const bare = { issues: new Set(issues), questions };
   const references = new Set<string>();
   for (const reference of textReferences(body)) {
-    if (reference.kind === "address") {
-      const route = referenceRouteFromHref(reference.value, server);
-      if (route !== undefined) {
-        references.add(buildDispatchReference(route));
-      }
-    } else if (reference.kind === "key") {
-      if (issues.includes(reference.key)) {
-        references.add(`dispatch://${reference.key}`);
-      }
-    } else {
-      const question = questionReference(reference.id, questions);
-      if (question !== undefined) {
-        references.add(question.ask);
-      }
+    const resolved = resolveTextReference(reference, bare, server);
+    if (resolved !== undefined) {
+      references.add(buildDispatchReference(resolved.route));
     }
   }
   return [...references];
@@ -71,15 +57,30 @@ test("a key or #id is read only where it stands alone, and its span ends where t
     },
   ]);
   // The run without its trailing `_` is what names the question, and what a link covers.
-  expect(questionReference("q2_", new Map([["q2", "dispatch://CORE-1/ask/a2"]]))).toEqual({
-    ask: "dispatch://CORE-1/ask/a2",
-    id: "q2",
+  const question = { end: 4, id: "q2_", kind: "question", start: 0 } as const;
+  const nothing = new Set<string>();
+  expect(
+    resolveTextReference(question, {
+      issues: nothing,
+      questions: new Map([["q2", "dispatch://CORE-1/ask/a2"]]),
+    })
+  ).toEqual({
+    end: 3,
+    href: "dispatch://CORE-1/ask/a2",
+    route: { id: "a2", key: "CORE-1", kind: "ask" },
   });
-  expect(questionReference("q2_", new Map([["q2_", "dispatch://CORE-1/ask/a3"]]))).toEqual({
-    ask: "dispatch://CORE-1/ask/a3",
-    id: "q2_",
-  });
-  expect(questionReference("q9", new Map([["q2", "dispatch://CORE-1/ask/a2"]]))).toBeUndefined();
+  expect(
+    resolveTextReference(question, {
+      issues: nothing,
+      questions: new Map([["q2_", "dispatch://CORE-1/ask/a3"]]),
+    })?.end
+  ).toBe(4);
+  expect(
+    resolveTextReference(question, {
+      issues: nothing,
+      questions: new Map([["q9", "dispatch://CORE-1/ask/a2"]]),
+    })
+  ).toBeUndefined();
   // A key of more than ten characters before its hyphen, a zero, or a lowercase letter is none.
   expect(textReferences("ABCDEFGHIJK-1 CORE-0 Core-1 AB-1")).toEqual([
     { end: 32, key: "AB-1", kind: "key", start: 28 },

@@ -12,15 +12,16 @@ import {
 } from "../../theme/classes";
 
 import { MarkdownPreview } from "./MarkdownPreview";
-import { type BareReferences, ReferenceTitleWords } from "./RefLink";
+import { ReferenceTitleWords } from "./RefLink";
 import { useReferenceData, useReferenceTargetOf } from "./reference-target";
 import {
+  type BareReferences,
   buildDispatchReference,
   buildReferencePath,
   type DispatchReferenceRoute,
   parseDispatchReference,
-  questionReference,
-  referenceRouteFromHref,
+  resolveTextReference,
+  type TextReference,
   textReferences,
 } from "./routes";
 import { useBareReferences } from "./useRenderedMarkdown";
@@ -151,14 +152,39 @@ interface ReferenceCards {
 const whitespaceOnly = /^\s*$/;
 
 /**
- * The cards of body when, trimmed, it is nothing but references separated by whitespace, each
- * word of it one whole reference in a form Dispatch reads as one: a `dispatch://` or dashboard
- * address (`referenceRouteFromHref`), an issue key written bare whose issue exists, a `#id` that
- * names a question of the body's document (both as `resolved` holds them, `useBareReferences`), or
- * a GitHub issue or pull request URL. `undefined` for any other body: one with other text beside a
- * reference (punctuation and emphasis too), an address that names nothing, and a key or `#id` that
- * has not resolved, yet or ever. One scan of the body (`textReferences`), so a body at the size
- * cap is read in one pass.
+ * Whether body, trimmed, is nothing but the references `textReferences` reads in it, each
+ * separated from the next by whitespace. Each reference is handed to `take`, in order, which
+ * answers where in body it ends (its `end`, or short of it where the name it resolves to is), or
+ * `undefined` to refuse it, which refuses the body; the next gap is read from that end. One scan
+ * of the body, so a body at the size cap is read in one pass.
+ */
+function referencesOnly(
+  body: string,
+  take: (reference: TextReference) => number | undefined
+): boolean {
+  let covered = 0;
+  for (const reference of textReferences(body)) {
+    if (reference.start < covered || !whitespaceOnly.test(body.slice(covered, reference.start))) {
+      return false;
+    }
+    const end = take(reference);
+    if (end === undefined) {
+      return false;
+    }
+    covered = end;
+  }
+  return covered !== 0 && whitespaceOnly.test(body.slice(covered));
+}
+
+/**
+ * The cards of body when, trimmed, it is nothing but references separated by whitespace
+ * (`referencesOnly`), each word of it one whole reference in a form Dispatch reads as one and
+ * that names its target by the one resolver (`resolveTextReference`): a `dispatch://` or
+ * dashboard address, an issue key written bare whose issue exists, a `#id` that names a question
+ * of the body's document (both as `resolved` holds them, `useBareReferences`), or else a GitHub
+ * issue or pull request URL. `undefined` for any other body: one with other text beside a
+ * reference (punctuation and emphasis too, and a `#id`'s trailing `_` its question's id leaves
+ * out), an address that names nothing, and a key or `#id` that has not resolved, yet or ever.
  */
 function referenceCards(
   body: string,
@@ -168,71 +194,32 @@ function referenceCards(
   const dispatch: DispatchCard[] = [];
   const github: GitHubReference[] = [];
   const seen = new Set<string>();
-  let covered = 0;
-  for (const reference of textReferences(body)) {
-    if (reference.start < covered || !whitespaceOnly.test(body.slice(covered, reference.start))) {
-      return undefined;
-    }
-    let route: DispatchReferenceRoute | undefined;
-    let end = reference.end;
-    if (reference.kind === "address") {
-      route = referenceRouteFromHref(reference.value, appOrigin);
-      const path = route === undefined ? githubReference(reference.value) : undefined;
-      if (path !== undefined && !seen.has(reference.value)) {
-        seen.add(reference.value);
-        github.push({ href: reference.value, path });
-      }
-      if (route === undefined && path === undefined) {
+  const shaped = referencesOnly(body, (reference) => {
+    const target = resolveTextReference(reference, resolved, appOrigin);
+    if (target === undefined) {
+      const href = reference.kind === "address" ? reference.value : undefined;
+      const path = href === undefined ? undefined : githubReference(href);
+      if (href === undefined || path === undefined) {
         return undefined;
       }
-    } else if (reference.kind === "key") {
-      if (!resolved.issues.has(reference.key)) {
-        return undefined;
+      if (!seen.has(href)) {
+        seen.add(href);
+        github.push({ href, path });
       }
-      route = { key: reference.key, kind: "issue" };
-    } else {
-      const question = questionReference(reference.id, resolved.questions);
-      route = question === undefined ? undefined : parseDispatchReference(question.ask);
-      if (question === undefined || route === undefined) {
-        return undefined;
-      }
-      end = reference.start + 1 + question.id.length;
+      return reference.end;
     }
-    if (route !== undefined) {
-      const written = buildDispatchReference(route);
-      if (!seen.has(written)) {
-        seen.add(written);
-        dispatch.push({
-          href: buildReferencePath(route),
-          reference: written,
-          text: body.slice(reference.start, end),
-        });
-      }
+    const written = buildDispatchReference(target.route);
+    if (!seen.has(written)) {
+      seen.add(written);
+      dispatch.push({
+        href: buildReferencePath(target.route),
+        reference: written,
+        text: body.slice(reference.start, target.end),
+      });
     }
-    covered = end;
-  }
-  if (covered === 0 || !whitespaceOnly.test(body.slice(covered))) {
-    return undefined;
-  }
-  return { dispatch, github };
-}
-
-/**
- * Whether body has the shape of a reference-only body (`referenceCards`) at all: trimmed, nothing
- * but the references `textReferences` reads in it, each separated from the next by whitespace, by
- * the same gap test `referenceCards` makes. A body without that shape shows no card whatever its
- * keys and `#id`s name, since `referenceCards` covers no more of a reference than it spans, so
- * `Unfurl` asks about none of them.
- */
-function referenceOnlyShape(body: string): boolean {
-  let covered = 0;
-  for (const reference of textReferences(body)) {
-    if (reference.start < covered || !whitespaceOnly.test(body.slice(covered, reference.start))) {
-      return false;
-    }
-    covered = reference.end;
-  }
-  return covered !== 0 && whitespaceOnly.test(body.slice(covered));
+    return target.end;
+  });
+  return shaped ? { dispatch, github } : undefined;
 }
 
 /**
@@ -243,10 +230,12 @@ function referenceOnlyShape(body: string): boolean {
  * each reference inline with its title. The issue keys and `#id`s are read through the same
  * cached queries `MarkdownBody` reads them through (`useBareReferences`), the `#id`s against
  * `source`'s document, so a key or `#id` still loading shows no card until it resolves; a body
- * without the shape of one (`referenceOnlyShape`), which is most prose, asks about none.
+ * without the shape of one (the same walk, `referencesOnly`, taking each reference whole), which
+ * is most prose, asks about none: `referenceCards` covers no more of a reference than it spans, so
+ * such a body shows no card whatever its keys and `#id`s name.
  */
 export function Unfurl({ body, source }: UnfurlProps): ReactNode {
-  const shaped = useMemo(() => referenceOnlyShape(body), [body]);
+  const shaped = useMemo(() => referencesOnly(body, (reference) => reference.end), [body]);
   const resolved = useBareReferences(shaped ? body : "", source);
   const cards = useMemo(
     () => referenceCards(body, resolved, window.location.origin),

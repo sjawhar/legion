@@ -504,8 +504,9 @@ function trimReference(value: string): string {
  * Dispatch item or not), `value` its trimmed text; a `key` is an issue key written bare
  * (`CORE-12`), which names an issue only if that issue exists; a `question` is `#` and a question
  * block id (`#q2`, `id` without its `#`), which names a question only in the document the text
- * belongs to (`questionReference`). `start` is the first character's index and `end` one past the
- * last of what the reference's link covers.
+ * belongs to (`resolveTextReference`). `start` is the first character's index and `end` one past
+ * the last of what the reference's link covers, or may cover (a `#id`'s link may stop short of a
+ * trailing `_` or `-`).
  */
 export type TextReference =
   | {
@@ -534,7 +535,7 @@ export type TextReference =
  * text or before a character that is not a letter, a digit, `-`, `/`, `#` or `@`, where `.` `,` `:`
  * `;` `_` `*` `~` end it only when no letter or digit follows them (`CORE-1's` and `CORE-1.` are
  * CORE-1; `CORE-1.5`, `CORE-1/spec` and `CORE-1#q1` nothing). A `#id` is `#` and the longest run of
- * `[A-Za-z0-9_-]` (see `questionReference` for the run without its trailing `_` and `-`). Nothing
+ * `[A-Za-z0-9_-]` (see `resolveTextReference` for the run without its trailing `_` and `-`). Nothing
  * inside an address span is read, whether or not the address names anything. There is no markdown
  * parse, so a candidate in code is read: a renderer, which links nothing inside code, applies this
  * to its rendered text outside code.
@@ -554,23 +555,61 @@ export function textReferences(text: string): TextReference[] {
   return found;
 }
 
+/** What the references a text writes bare name, once its reader has asked: the issue keys whose
+ *  issue exists, and a question map of the document the text belongs to, each block id to its
+ *  ask's `dispatch://` reference. A renderer's holds only what the server read in the text's own
+ *  markdown (`useBareReferences`), so a key or `#id` that shows only once the markdown renders
+ *  (`\#q2`, `&#35;q2`) names nothing. */
+export interface BareReferences {
+  readonly issues: ReadonlySet<string>;
+  readonly questions: ReadonlyMap<string, string>;
+}
+
+/** What one reference written in text names: the `dispatch://` reference or address a link to it
+ *  carries (`href`: the address as written, `dispatch://` and the key, or the question's ask), the
+ *  route its title is read from, and `end`, one past the last character the link covers. */
+export interface ResolvedReference {
+  readonly href: string;
+  readonly route: DispatchReferenceRoute;
+  readonly end: number;
+}
+
 /**
- * What `#id` names in a document whose question map is `questions` (block id to its ask's
- * `dispatch://` reference): the question holding the whole run, else the one holding the run
- * without its trailing `_` and `-` (so `_see #q2_` names q2), as the server reads it. `id` is the
- * id it named, whose `#` and characters are what a link covers; undefined when it names none.
+ * What a reference `textReferences` read names, as the server's resolver reads it, for every
+ * reader that links or titles one (the renderers, the unfurl cards, the document editors): an
+ * address that names a Dispatch item (`referenceRouteFromHref`, against `appOrigin`); a key `bare`
+ * says names an issue that exists; and a `#id` whose whole run names a question of `bare`'s map,
+ * else the run without its trailing `_` and `-` (so `_see #q2_` names q2, and its link covers
+ * `#q2`). Undefined when it names nothing, and the text stays as written.
  */
-export function questionReference(
-  id: string,
-  questions: ReadonlyMap<string, string>
-): { readonly id: string; readonly ask: string } | undefined {
-  const whole = questions.get(id);
-  if (whole !== undefined) {
-    return { ask: whole, id };
+export function resolveTextReference(
+  reference: TextReference,
+  bare: BareReferences,
+  appOrigin: string = window.location.origin
+): ResolvedReference | undefined {
+  if (reference.kind === "address") {
+    const route = referenceRouteFromHref(reference.value, appOrigin);
+    return route === undefined ? undefined : { end: reference.end, href: reference.value, route };
   }
-  const trimmed = id.replace(/[_-]+$/, "");
-  const ask = trimmed === id || trimmed === "" ? undefined : questions.get(trimmed);
-  return ask === undefined ? undefined : { ask, id: trimmed };
+  if (reference.kind === "key") {
+    return bare.issues.has(reference.key)
+      ? {
+          end: reference.end,
+          href: `dispatch://${reference.key}`,
+          route: { key: reference.key, kind: "issue" },
+        }
+      : undefined;
+  }
+  let id = reference.id;
+  let ask = bare.questions.get(id);
+  if (ask === undefined) {
+    id = id.replace(/[_-]+$/, "");
+    ask = id === reference.id || id === "" ? undefined : bare.questions.get(id);
+  }
+  const route = ask === undefined ? undefined : parseDispatchReference(ask);
+  return ask === undefined || route === undefined
+    ? undefined
+    : { end: reference.start + 1 + id.length, href: ask, route };
 }
 
 /** An issue key and a `#id`'s run of block-id characters, read where the scan stands (sticky).

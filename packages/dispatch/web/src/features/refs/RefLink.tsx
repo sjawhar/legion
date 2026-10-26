@@ -3,11 +3,12 @@ import { type ReactNode, useState } from "react";
 import { borderDefault } from "../../theme/classes";
 import { useReferenceTarget } from "./reference-target";
 import {
+  type BareReferences,
   buildDispatchReference,
   buildReferencePath,
   type DispatchReferenceRoute,
-  questionReference,
   referenceRouteFromHref,
+  resolveTextReference,
   textReferences,
 } from "./routes";
 
@@ -21,14 +22,6 @@ export interface ReferenceAnchor {
    *  `dispatch://…`, a bare key's `CORE-12`, a `#id`'s `#q2`, or the text a Markdown link gave
    *  it. */
   readonly text: string;
-}
-
-/** What the references a body writes bare name, once `useRenderedMarkdown` has asked: the issue
- *  keys whose issue exists (its read answered 200), and the question map of the document the
- *  body's text belongs to, each block id to its ask's `dispatch://` reference. */
-export interface BareReferences {
-  readonly issues: ReadonlySet<string>;
-  readonly questions: ReadonlyMap<string, string>;
 }
 
 /** The 40 px square a picture shows as beside its title, wherever a line holds it: the Artifacts
@@ -114,29 +107,20 @@ function isInsideExcludedAncestor(node: Node, root: Node): boolean {
   return false;
 }
 
-/** The anchor a reference found in text becomes: its `href` the reference it names, its words
- *  the text written for it. */
-function referenceLink(href: string, words: string): HTMLAnchorElement {
-  const anchor = document.createElement("a");
-  anchor.href = href;
-  anchor.textContent = words;
-  return anchor;
-}
-
 /**
  * Wraps every reference root's text writes bare into a real `<a>`, so `collectReferenceAnchors`
  * can then resolve it like any other link: a `dispatch://…` reference or dashboard URL that names
  * a Dispatch item; an issue key (`CORE-12`) that `bare` says names an issue that exists, as
- * `dispatch://CORE-12`; and a `#id` that names a question of the document the text belongs to
- * (`questionReference`), as its ask's reference. A reference starts and ends where the server's
- * reader says (`textReferences`); a key or `#id` `bare` does not name stays the text it was
- * written as. Text already inside a link, inline code span, or code block is left alone (its
- * ancestor already parsed as a distinct node, so there is no need to re-tokenize raw Markdown to
- * find code/link boundaries by hand). Each text node is read on its own, so a reference starts
- * and ends at a formatting boundary as it does at the start and end of the text. remark-gfm
- * already autolinks most bare `http(s)://` URLs into real link marks during Markdown parsing,
- * before this runs; a dashboard URL it leaves as text (a server at an IPv6 literal) is wrapped
- * here.
+ * `dispatch://CORE-12`; and a `#id` that names a question of the document the text belongs to,
+ * as its ask's reference. A reference starts where the server's reader says (`textReferences`)
+ * and names what, and ends where, the one resolver says (`resolveTextReference`); a key or `#id`
+ * `bare` does not name stays the text it was written as. Text already inside a link, inline code
+ * span, or code block is left alone (its ancestor already parsed as a distinct node, so there is
+ * no need to re-tokenize raw Markdown to find code/link boundaries by hand). Each text node is
+ * read on its own, so a reference starts and ends at a formatting boundary as it does at the start
+ * and end of the text. remark-gfm already autolinks most bare `http(s)://` URLs into real link
+ * marks during Markdown parsing, before this runs; a dashboard URL it leaves as text (a server at
+ * an IPv6 literal) is wrapped here.
  */
 export function linkifyDispatchRefs(root: HTMLElement, bare: BareReferences): void {
   const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
@@ -158,29 +142,16 @@ export function linkifyDispatchRefs(root: HTMLElement, bare: BareReferences): vo
       if (reference.start < lastIndex) {
         continue;
       }
-      let anchor: HTMLAnchorElement | undefined;
-      let end = reference.end;
-      if (reference.kind === "address") {
-        if (referenceRouteFromHref(reference.value) !== undefined) {
-          anchor = referenceLink(reference.value, reference.value);
-        }
-      } else if (reference.kind === "key") {
-        if (bare.issues.has(reference.key)) {
-          anchor = referenceLink(`dispatch://${reference.key}`, reference.key);
-        }
-      } else {
-        const question = questionReference(reference.id, bare.questions);
-        if (question !== undefined) {
-          end = reference.start + 1 + question.id.length;
-          anchor = referenceLink(question.ask, `#${question.id}`);
-        }
-      }
-      if (anchor === undefined) {
+      const resolved = resolveTextReference(reference, bare);
+      if (resolved === undefined) {
         continue;
       }
+      const anchor = document.createElement("a");
+      anchor.href = resolved.href;
+      anchor.textContent = value.slice(reference.start, resolved.end);
       fragment.appendChild(document.createTextNode(value.slice(lastIndex, reference.start)));
       fragment.appendChild(anchor);
-      lastIndex = end;
+      lastIndex = resolved.end;
     }
     if (lastIndex === 0) {
       continue;

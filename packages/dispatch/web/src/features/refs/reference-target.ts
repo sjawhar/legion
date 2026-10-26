@@ -3,6 +3,7 @@ import { useMemo } from "react";
 
 import { ApiError, api, artifactVersionPath, type ReferenceSource } from "../../api/client";
 import { primarySpec } from "../../api/issue-cache";
+import { answeredNotFound } from "../../api/query-refresh";
 import type {
   Artifact,
   ArtifactText,
@@ -74,10 +75,11 @@ export function referenceRetry(
 }
 
 /** Whether an issue query asks again on a remount, a refocus or a reconnect, as the app's defaults
- *  have it: not once it answered 404, which only the event stream's `issue.created` (`api/sse.ts`,
- *  which refetches every issue query) can change. */
+ *  have it: not once it answered 404, which only a new issue can change. The event stream
+ *  (`api/sse.ts`) refetches it on `issue.created`, on its own reconnect's whole-cache refresh and
+ *  on an event that names that very issue, and on no other (`existingIssuesKey`). */
 function asksAgain(query: { state: { error: Error | null } }): boolean {
-  return !(query.state.error instanceof ApiError && query.state.error.status === 404);
+  return !answeredNotFound(query);
 }
 
 /** One issue with its documents, as the issue page reads it: a reference's title, and whether a

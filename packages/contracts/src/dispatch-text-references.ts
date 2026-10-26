@@ -1,11 +1,13 @@
 /**
  * Markdown bodies with the references each one cites, in order of first appearance, as read
  * against the server origin `https://dispatch.test`, or the row's `origin` where it names one.
- * Three readers are tested against it - the dashboard's `composerReferences` (its composer's
- * reference pills and its unfurl cards, which read `dispatch://` and dashboard addresses only), the
- * dashboard's markdown renderers (what they link), and the Go reader `text.Mentions`, which writes
- * the reference graph, through its JSON copy in `packages/envoy/internal/dispatch/text/testdata` -
- * so neither where a reference ends nor what it names can change on one side only.
+ * Four readers are tested against it - the dashboard's `composerReferences` (its composer's
+ * reference pills, which read `dispatch://` and dashboard addresses only), the dashboard's
+ * `textReferences` with `resolveTextReference` (the reader and resolver its markdown renderers,
+ * unfurl cards and document editors share), those markdown renderers (what they link), and the Go
+ * reader `text.Mentions`, which writes the reference graph, through its JSON copy in
+ * `packages/envoy/internal/dispatch/text/testdata` - so neither where a reference ends nor what it
+ * names can change on one side only.
  *
  * A reference ends at whitespace (Unicode space separators included, a vertical tab and U+FEFF
  * not), an angle or square bracket, a quote, a backtick or a pipe; the sentence punctuation,

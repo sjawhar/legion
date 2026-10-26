@@ -4,14 +4,17 @@ import type { EditorView } from "@milkdown/kit/prose/view";
 import type { EditorReferences, ReferenceCandidate, ReferenceTarget } from "../src/lib";
 import { withMarksEditor } from "./marks-editor";
 
-/** A stand-in for the host's grammar: a `dispatch://` address, an issue key or a `#id`, each
- *  keyed by its own text. */
+/** A stand-in for the host's grammar: a `dispatch://` address, an issue key or a `#id` (`#` and
+ *  its whole run of id characters), each keyed by its own text. */
 function scan(text: string): ReferenceCandidate[] {
-  return Array.from(text.matchAll(/dispatch:\/\/[^\s<`]+|\b[A-Z]+-\d+\b|#[a-z0-9]+/g), (match) => ({
-    end: match.index + match[0].length,
-    key: match[0],
-    start: match.index,
-  }));
+  return Array.from(
+    text.matchAll(/dispatch:\/\/[^\s<`]+|\b[A-Z]+-\d+\b|#[A-Za-z0-9_-]+/g),
+    (match) => ({
+      end: match.index + match[0].length,
+      key: match[0],
+      start: match.index,
+    })
+  );
 }
 
 const CORE_1: ReferenceTarget = {
@@ -81,6 +84,28 @@ test("a resolved candidate is drawn as its title and an unresolved one as its st
       expect(view.dom.querySelector("a.dispatch-reference strong")?.textContent).toBe("CORE-1");
     },
     { references }
+  );
+});
+
+test("a title that stands for fewer characters than its candidate hides only those", async () => {
+  await withMarksEditor(
+    "See #q2- now.",
+    ({ handle, view }) => {
+      // The host's question is q2, so its title stands for `#q2` and the `-` is the author's.
+      handle.setReferenceTargets(new Map([["#q2-", { ...Q2, length: 3 }]]));
+
+      expect(titles(view)).toEqual([{ href: "dispatch://CORE-1/ask/q2-uuid", text: "Which way?" }]);
+      expect(hidden(view)).toEqual(["#q2"]);
+
+      // "See #q2- now." opens its paragraph at 0: `#q2` is 5 to 8 and the `-` 8 to 9. A caret
+      // after the `-` touches no title; one at the title's end does.
+      setFocus(view, true);
+      select(view, 9);
+      expect(hidden(view)).toEqual(["#q2"]);
+      select(view, 8);
+      expect(titles(view)).toEqual([]);
+    },
+    { references: recordingReferences() }
   );
 });
 

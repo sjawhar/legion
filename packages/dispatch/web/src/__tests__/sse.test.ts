@@ -14,8 +14,9 @@ import type { Event, EventType } from "../api/types";
 /**
  * The pre-#1248 reference implementation, copied verbatim from `main`'s
  * `packages/dispatch/web/src/api/sse.ts`. It is the oracle this PR's behaviour is compared
- * against: every event must invalidate exactly what main invalidated, except the single
- * documented subtraction (the Inbox query for plain messages and non-ask comments).
+ * against: every event must invalidate exactly what main invalidated, except the documented
+ * subtractions (the Inbox query for plain messages and non-ask comments, and every issue query
+ * narrowed to the issues that exist for every event but `issue.created`).
  */
 function mainArtifactId(event: Event): string | undefined {
   return event.type === "artifact.version" ? event.payload.artifact_id : undefined;
@@ -621,7 +622,7 @@ const questionMapWrites: ReadonlySet<EventType> = new Set([
 /** The rows a changed target's backlink count sits on, written independently of `sse.ts`. */
 function countedRowKeys(incoming: Event): unknown[][] {
   if (truncatedTargets(incoming)) {
-    return [["issue"], ["asks"], ["ask-thread"], ["artifact"], ["inbox"]];
+    return [["issue", "existing"], ["asks"], ["ask-thread"], ["artifact"], ["inbox"]];
   }
   const keys: unknown[][] = [];
   for (const target of changedTargets(incoming)) {
@@ -647,8 +648,11 @@ function rollupAdditions(incoming: Event): unknown[][] {
   if (incoming.issue_key === null) {
     return [];
   }
-  if (incoming.type === "issue.created" || incoming.type === "issue.closed") {
+  if (incoming.type === "issue.created") {
     return [["issue"], [...projectsQuery().queryKey]];
+  }
+  if (incoming.type === "issue.closed") {
+    return [["issue", "existing"], [...projectsQuery().queryKey]];
   }
   if (incoming.type === "issue.updated") {
     return [[...projectsQuery().queryKey]];
@@ -658,7 +662,7 @@ function rollupAdditions(incoming: Event): unknown[][] {
     incoming.type === "child.added" ||
     incoming.type === "child.removed"
   ) {
-    return [["issue"]];
+    return [["issue", "existing"]];
   }
   // The conversation a reply belongs to is its thread root's, which main read only from the
   // reply's own `target` - absent on a session's reply to a message aimed at that session.
@@ -776,9 +780,17 @@ const corpus = representativeEvents.map(
 
 test.each(
   corpus
-)("%s maps to main's keys, minus the Inbox subtraction, plus the additions", (_name, incoming) => {
+)("%s maps to main's keys, minus the subtractions, plus the additions", (_name, incoming) => {
   const oracle = mainEventQueryKeys(incoming, "alice").map((key) => [...key]);
-  const kept = subtractsInbox(incoming) ? oracle.filter((key) => key[0] !== "inbox") : oracle;
+  // The second documented change: every event but `issue.created` refreshes the issue details
+  // that exist (`existingIssuesKey`) where main refreshed every issue query, since only a new
+  // issue can answer a key that answered 404 (a key-shaped word a body writes bare).
+  const narrows = incoming.type !== "issue.created";
+  const kept = oracle
+    .filter((key) => !(subtractsInbox(incoming) && key[0] === "inbox"))
+    .map((key) =>
+      narrows && key.length === 1 && key[0] === "issue" ? ["issue", "existing"] : key
+    );
   // The rows a cited node's count sits on are appended once: a key the baseline already
   // refreshes is not repeated, which is what puts the Inbox back after the subtraction.
   const base = [
@@ -834,6 +846,13 @@ test("a queued key keeps only the broadest of its family, and never a sibling's"
     ["ask"],
     ["ask-thread", "ask-1"],
   ]);
+  // The issues that exist stand for the issue family: a narrower issue key beside them is dropped,
+  // and every issue query beside them drops them.
+  expect(coalescePrefixKeys([["issue", "CORE-1"], ["issue", "existing"], ["issues"]])).toEqual([
+    ["issue", "existing"],
+    ["issues"],
+  ]);
+  expect(coalescePrefixKeys([["issue", "existing"], ["issue"]])).toEqual([["issue"]]);
 });
 
 // An Inbox row carries its ask's `referenced_by_count`, so the subtraction's premise — a plain
@@ -866,7 +885,7 @@ test("a write refreshes the rows of the nodes it cited, and a plain one refreshe
   const truncated = invalidatedKeys(
     event("message.created", { references_changed_truncated: true })
   );
-  expect(truncated).toContainEqual(["issue"]);
+  expect(truncated).toContainEqual(["issue", "existing"]);
   expect(truncated).toContainEqual(["asks"]);
   expect(truncated).toContainEqual(["inbox"]);
 
@@ -905,7 +924,7 @@ test("a repository mapping event refreshes every loaded issue detail", () => {
           { issue_key: null, project: "CORE" }
         )
       )
-    ).toContainEqual(["issue"]);
+    ).toContainEqual(["issue", "existing"]);
   }
 });
 

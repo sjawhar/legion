@@ -20,12 +20,15 @@ export interface ReferenceCandidate {
 
 /** What a candidate resolves to: `href` is the `dispatch://` reference the drawn link carries as
  *  `data-dispatch-href` (the host's click handler and hover card read it), `title` the words the
- *  editor shows in place of the stored text, and `titleKey` an issue key `title` starts with,
- *  drawn in semibold. */
+ *  editor shows in place of the stored text, `titleKey` an issue key `title` starts with, drawn
+ *  in semibold, and `length` how many of the candidate's characters, from its start, the title
+ *  stands for, when that is fewer than all of them: the rest stay drawn as stored text (a `#q2-`
+ *  whose question is q2 draws its title for `#q2` and keeps the `-`). */
 export interface ReferenceTarget {
   readonly href: string;
   readonly title: string;
   readonly titleKey?: string;
+  readonly length?: number;
 }
 
 /** The host's side of the editor's reference titles (`CreateProofEditorOptions.references`). */
@@ -225,8 +228,16 @@ function nextCandidates(
   return next;
 }
 
-/** The ranges of the resolved candidates the selection touches (a caret inside or at either end,
- *  or a range overlapping one), while the editor has focus; empty otherwise. */
+/** Where a resolved candidate's title ends: `length` characters into it, never past its end. */
+function drawnEnd(candidate: Decoration, target: ReferenceTarget): number {
+  return target.length === undefined
+    ? candidate.to
+    : Math.min(candidate.to, candidate.from + target.length);
+}
+
+/** The ranges each resolved candidate's title stands for that the selection touches (a caret
+ *  inside or at either end, or a range overlapping one), while the editor has focus; empty
+ *  otherwise. */
 function revealedRanges(
   state: EditorState,
   candidates: DecorationSet,
@@ -237,8 +248,11 @@ function revealedRanges(
   const ranges: string[] = [];
   for (const range of state.selection.ranges) {
     for (const candidate of candidates.find(range.$from.pos, range.$to.pos)) {
-      if (targets.get((candidate.spec as CandidateSpec).key)) {
-        ranges.push(`${candidate.from}:${candidate.to}`);
+      const target = targets.get((candidate.spec as CandidateSpec).key);
+      if (!target) continue;
+      const to = drawnEnd(candidate, target);
+      if (range.$from.pos <= to) {
+        ranges.push(`${candidate.from}:${to}`);
       }
     }
   }
@@ -279,9 +293,11 @@ function drawnDecorations(
   for (const candidate of candidates.find()) {
     const spec = candidate.spec as CandidateSpec;
     const target = targets.get(spec.key);
-    if (!target || shown.has(`${candidate.from}:${candidate.to}`)) continue;
+    if (!target) continue;
+    const to = drawnEnd(candidate, target);
+    if (shown.has(`${candidate.from}:${to}`)) continue;
     decorations.push(
-      Decoration.inline(candidate.from, candidate.to, { class: HIDDEN_TEXT_CLASS }),
+      Decoration.inline(candidate.from, to, { class: HIDDEN_TEXT_CLASS }),
       Decoration.widget(candidate.from, titleWidget(target), {
         ignoreSelection: true,
         // Widgets with the same key are interchangeable, so ProseMirror keeps the drawn one.
@@ -308,7 +324,8 @@ function sameTargets(
     } else if (
       target.href !== other.href ||
       target.title !== other.title ||
-      target.titleKey !== other.titleKey
+      target.titleKey !== other.titleKey ||
+      target.length !== other.length
     ) {
       return false;
     }

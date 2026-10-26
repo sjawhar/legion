@@ -8,8 +8,8 @@ import { commentDeliveryFields } from "../../__tests__/comment-fixture";
 import { ApiError, api, type ReferenceSource } from "../../api/client";
 import type { Artifact, AskRead, CommentRead, IssueDetails } from "../../api/types";
 import { warmMarkdownRenderer } from "./markdown-engine";
-import type { BareReferences } from "./RefLink";
 import { issueQuery, referenceQuestionsQuery } from "./reference-target";
+import type { BareReferences } from "./routes";
 import { Unfurl } from "./Unfurl";
 
 const origin = "https://dispatch.test";

@@ -5,8 +5,8 @@ import { composerReferences } from "./routes";
 
 const origin = "https://dispatch.test";
 
-// The dashboard's half of the shared text table: the composer's reference pills and unfurl cards
-// cite exactly what the server's `text.Mentions` indexes for the same body, so the dashboard and
+// The composer's half of the shared text table: the composer's reference pills cite exactly what
+// the server's `text.Mentions` indexes for the same body, so the dashboard and
 // the reference graph never disagree about what a text cites. The Go reader walks the same rows.
 // The composer reads `dispatch://` and dashboard addresses only, so a row that names issues or
 // questions, which is about bare keys and `#id`, holds it only to citing nothing the server does

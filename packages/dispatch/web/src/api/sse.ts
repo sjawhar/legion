@@ -22,7 +22,7 @@ import {
   userAgentStateQuery,
   userStateQuery,
 } from "./queries";
-import { coalescePrefixKeys, refreshQueries } from "./query-refresh";
+import { coalescePrefixKeys, existingIssuesKey, refreshQueries } from "./query-refresh";
 import type { ChangedReference, Event, EventType } from "./types";
 
 const knownEventTypes: Record<EventType, true> = {
@@ -325,10 +325,11 @@ function changedReferencesTruncated(event: Event): boolean {
 // The rows that carry a changed target's count: an issue's detail, and for an ask the list its
 // row lives in (its issue's asks, or its document's) plus the Inbox, which lists every open ask
 // whoever owns it. Every event is read the same way, so a document version that cites an ask
-// refreshes the same rows a message citing it does.
+// refreshes the same rows a message citing it does. An issue that does not exist carries no count
+// (`existingIssuesKey`).
 function changedReferenceKeys(event: Event): (readonly unknown[])[] {
   if (changedReferencesTruncated(event)) {
-    return [["issue"], ["asks"], ["ask-thread"], ["artifact"], inboxQuery().queryKey];
+    return [existingIssuesKey, ["asks"], ["ask-thread"], ["artifact"], inboxQuery().queryKey];
   }
   const keys: (readonly unknown[])[] = [];
   for (const target of changedReferences(event)) {
@@ -440,7 +441,7 @@ function ownerQueryKeys(event: Event, signedInLogin?: string): (readonly unknown
       // default, one removed or moved away), which the issue header reads from the issue's
       // detail. The detail's key names no project, so every loaded detail refreshes; mapping
       // writes are rare settings changes.
-      ...(event.type === "settings.repo_project.updated" ? [["issue"]] : []),
+      ...(event.type === "settings.repo_project.updated" ? [existingIssuesKey] : []),
     ];
   }
   // The default decides who a later create lands on; no issue already listed moves, so only
@@ -560,9 +561,15 @@ function ownerQueryKeys(event: Event, signedInLogin?: string): (readonly unknown
     }
     // Components, parents and subtree rollups are resolved on read up and down the parent
     // chain, so an issue's own event alters ancestors and descendants that get no event of
-    // their own: refetch every open issue. The sidebar's per-project open-ask badge moves
-    // with a close, a reopen and an assignment, so it refetches here too.
-    keys.push(["issue"], projectsQuery().queryKey);
+    // their own: refetch every open issue. Only a new issue can answer a key that answered 404
+    // (a key-shaped word a body writes bare, `UTF-8`), so an update or a close refetches the
+    // issues that exist (`existingIssuesKey`) and a create every issue query. The sidebar's
+    // per-project open-ask badge moves with a close, a reopen and an assignment, so it refetches
+    // here too.
+    keys.push(
+      event.type === "issue.created" ? ["issue"] : existingIssuesKey,
+      projectsQuery().queryKey
+    );
     return keys;
   }
   if (
@@ -680,8 +687,10 @@ function ownerQueryKeys(event: Event, signedInLogin?: string): (readonly unknown
     return keys;
   }
 
-  // A child's status or parentage changes the `N/M done` rollup in every loaded ancestor.
-  keys.push(["children", event.issue_key], ["issue"]);
+  // A child's status or parentage changes the `N/M done` rollup in every loaded ancestor; an
+  // issue that does not exist has none (`existingIssuesKey`), and a child's status moves with
+  // every status write of an issue that has a parent.
+  keys.push(["children", event.issue_key], existingIssuesKey);
   return keys;
 }
 

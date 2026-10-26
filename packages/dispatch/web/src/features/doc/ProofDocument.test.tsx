@@ -712,7 +712,7 @@ test("ProofDocument resolves the live editor's reference keys and follows a draw
     if (editor === undefined) throw new Error("no editor");
     expect(editor.options.references?.scan).toBe(scanEditorReferences);
     // The editor reports the keys its scanner found in the document.
-    act(() => editor.options.references?.onKeys(["#nope", "#q2", "CORE-2", "CORE-404"]));
+    act(() => editor.options.references?.onKeys(["#nope", "#q2", "#q2-", "CORE-2", "CORE-404"]));
 
     await waitFor(() =>
       expect(editor.referenceTargets.at(-1)).toEqual(
@@ -720,6 +720,17 @@ test("ProofDocument resolves the live editor's reference keys and follows a draw
           [
             "#q2",
             { href: "dispatch://CORE-1/ask/ask-2", title: "Which way?", titleKey: undefined },
+          ],
+          // A `#id` with a trailing `-` names q2 as the renderers link it: its title stands for
+          // `#q2`, and the `-` stays the author's text.
+          [
+            "#q2-",
+            {
+              href: "dispatch://CORE-1/ask/ask-2",
+              length: 3,
+              title: "Which way?",
+              titleKey: undefined,
+            },
           ],
           [
             "CORE-2",

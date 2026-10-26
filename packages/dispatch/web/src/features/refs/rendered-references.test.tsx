@@ -38,6 +38,23 @@ function issueNamed(key: string): IssueDetails {
   return { artifacts: [], key, status: "in_progress", title: `Title of ${key}` } as never;
 }
 
+/** An event of `issueKey` as the stream delivers it, and what the stream does with it
+ *  (`api/sse.ts`): its keys, coalesced, refreshed. */
+function deliver(queryClient: QueryClient, type: Event["type"], issueKey: string): void {
+  const event = {
+    actor: { id: "alice", kind: "user" },
+    created_at: "2026-10-26T00:00:00Z",
+    id: 12,
+    issue_key: issueKey,
+    notify: true,
+    payload: {},
+    project: "CORE",
+    seq: 1,
+    type,
+  } as Event;
+  refreshQueries(queryClient, coalescePrefixKeys(eventQueryKeys(event)));
+}
+
 /** The app's own query defaults (`main.tsx`), so a reference query's own retry rule is what runs
  *  and a second reader of a fresh answer asks no second time; retries wait no time here. */
 function appQueryClient(): QueryClient {
@@ -118,12 +135,23 @@ function answerAsTheRowsServer(
   };
 }
 
+const q2Ask = "dispatch://CORE-1/ask/22222222-2222-4222-8222-222222222222";
+const q3Ask = "dispatch://CORE-1/ask/33333333-3333-4333-8333-333333333333";
+
+/** The renderers' own rows: a `#id` whose `#` the markdown escapes (`\#q2`) or writes as a
+ *  character reference (`&#35;q2`) stands in the rendered text only. The server reads the raw
+ *  markdown, where it is no `#id`, and indexes it nowhere, so no renderer links it. */
+const renderedOnlyRows: (typeof DISPATCH_TEXT_REFERENCES)[number][] = [
+  { body: "See \\#q2 and #q3.", questions: { q2: q2Ask, q3: q3Ask }, refs: [q3Ask] },
+  { body: "See &#35;q2 and #q3.", questions: { q2: q2Ask, q3: q3Ask }, refs: [q3Ask] },
+];
+
 describe.each([
   ["MarkdownBody", "a[data-dispatch-ref], a[data-dispatch-picture]"],
   ["MarkdownPreview", "[data-dispatch-ref], [data-dispatch-picture]"],
 ] as const)("%s", (surface, selector) => {
   test.each(
-    DISPATCH_TEXT_REFERENCES.map((row) => [row.body, row] as const)
+    [...DISPATCH_TEXT_REFERENCES, ...renderedOnlyRows].map((row) => [row.body, row] as const)
   )("%s links what the table says a renderer links", async (_body, row) => {
     testWindow.happyDOM.setURL(`${row.origin ?? origin}/issues/CORE-1/conversation`);
     const issues = row.issues ?? [];
@@ -329,6 +357,28 @@ describe("bare references", () => {
     }
   });
 
+  test("a key whose issue does not exist is asked about again when an issue is created, and on no other issue event", async () => {
+    const getIssue = spyOn(api, "getIssue").mockRejectedValue(notFound());
+    const queryClient = appQueryClient();
+    const view = render(withClient(queryClient, <MarkdownBody markdown="Encode it as UTF-8." />));
+    try {
+      await waitFor(() => expect(getIssue).toHaveBeenCalledTimes(1));
+      await waitFor(() => expect(queryClient.isFetching()).toBe(0));
+      for (const type of ["issue.updated", "issue.closed", "child.status"] as const) {
+        deliver(queryClient, type, "CORE-1");
+        await Bun.sleep(50);
+        expect({ calls: getIssue.mock.calls.length, type }).toEqual({ calls: 1, type });
+      }
+      deliver(queryClient, "issue.created", "CORE-2");
+      await waitFor(() => expect(getIssue).toHaveBeenCalledTimes(2));
+      expect(getIssue.mock.calls.map(([key]) => key)).toEqual(["UTF-8", "UTF-8"]);
+      expect(view.container.querySelector("a")).toBeNull();
+    } finally {
+      view.unmount();
+      getIssue.mockRestore();
+    }
+  });
+
   test("a key written before its issue exists links once issue.created arrives", async () => {
     let created = false;
     const getIssue = spyOn(api, "getIssue").mockImplementation(async (key: string) => {
@@ -344,19 +394,7 @@ describe("bare references", () => {
       await waitFor(() => expect(queryClient.isFetching()).toBe(0));
       expect(view.container.querySelector("a")).toBeNull();
       created = true;
-      const event = {
-        actor: { id: "alice", kind: "user" },
-        created_at: "2026-10-26T00:00:00Z",
-        id: 12,
-        issue_key: "CORE-77",
-        notify: true,
-        payload: {},
-        project: "CORE",
-        seq: 1,
-        type: "issue.created",
-      } as Event;
-      // What the event stream does with an event (`api/sse.ts`).
-      refreshQueries(queryClient, coalescePrefixKeys(eventQueryKeys(event)));
+      deliver(queryClient, "issue.created", "CORE-77");
       const link = await within(view.container).findByRole("link", {
         name: "CORE-77 Title of CORE-77",
       });

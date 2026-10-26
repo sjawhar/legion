@@ -6,7 +6,7 @@ import {
   buildReferencePath,
   type DispatchReferenceRoute,
   parseDispatchReference,
-  questionReference,
+  resolveTextReference,
   textReferences,
 } from "../refs/routes";
 import type { EditorHandle } from "./editor";
@@ -72,10 +72,12 @@ export function useEditorReferences(): {
 }
 
 /** What a candidate key names before its title is known: the `dispatch://` reference its link
- *  carries and the route its title is read from. */
+ *  carries, the route its title is read from, and how many of the key's characters the title
+ *  stands for when that is fewer than all of them (a `#q2-` whose question is q2). */
 interface NamedReference {
   readonly href: string;
   readonly route: DispatchReferenceRoute;
+  readonly length: number | undefined;
 }
 
 /** The title one reference reads as (`useReferenceTarget`, the rule `RefLink` draws with), handed
@@ -83,6 +85,7 @@ interface NamedReference {
  *  exist. It draws nothing. */
 function ReferenceTitle({
   href,
+  length,
   name,
   onTarget,
   route,
@@ -92,18 +95,20 @@ function ReferenceTitle({
 }): ReactNode {
   const { title, titleKey } = useReferenceTarget(route);
   useEffect(() => {
-    onTarget(name, title === undefined ? null : { href, title, titleKey });
-  }, [href, name, onTarget, title, titleKey]);
+    onTarget(name, title === undefined ? null : { href, length, title, titleKey });
+  }, [href, length, name, onTarget, title, titleKey]);
   return null;
 }
 
 /**
  * Resolves the reference candidates `keys` names and hands the result to `onTargets` (for the
- * editor's `setReferenceTargets`), each by the rule the rendered bodies use: a key once its issue
- * answers (a 404 is final), a `#id` by the question map of `artifactId`'s document
+ * editor's `setReferenceTargets`), each by the one resolver the rendered bodies use
+ * (`resolveTextReference`): a key once its issue answers (a 404 is final; its title's own issue
+ * query is what says so), a `#id` by the question map of `artifactId`'s document
  * (`GET /api/v1/references/questions`, refetched with the document's asks, so a question block
- * links once settlement makes its ask), and a `dispatch://` address by its target's own queries.
- * The title is the target's (`useReferenceTarget`); an unresolved candidate is drawn as its stored
+ * links once settlement makes its ask), its title covering the `#id` the renderers link (`#q2` of
+ * a `#q2-` whose question is q2), and a `dispatch://` address by its target's own queries. The
+ * title is the target's (`useReferenceTarget`); an unresolved candidate is drawn as its stored
  * text. It draws nothing itself.
  */
 export function EditorReferenceTargets({
@@ -120,16 +125,20 @@ export function EditorReferenceTargets({
     keys.some((key) => key.startsWith("#"))
   );
   const named = useMemo(() => {
+    // Every candidate key counts as an issue that exists here: its title reads its own issue
+    // query, which draws it as its stored text on a 404.
+    const bare = { issues: new Set(keys), questions: blocks };
     const references = new Map<string, NamedReference>();
     for (const key of keys) {
-      const href = key.startsWith("#")
-        ? questionReference(key.slice(1), blocks)?.ask
-        : key.startsWith("dispatch://")
-          ? key
-          : `dispatch://${key}`;
-      const route = href === undefined ? undefined : parseDispatchReference(href);
-      if (href !== undefined && route !== undefined) {
-        references.set(key, { href, route });
+      // A candidate key is the text of the one reference `scanEditorReferences` read.
+      const [reference] = textReferences(key);
+      const resolved = reference === undefined ? undefined : resolveTextReference(reference, bare);
+      if (resolved !== undefined) {
+        references.set(key, {
+          href: resolved.href,
+          length: resolved.end < key.length ? resolved.end : undefined,
+          route: resolved.route,
+        });
       }
     }
     return references;
@@ -160,10 +169,12 @@ export function EditorReferenceTargets({
     onTargets(targets);
   }, [named, onTargets, titles]);
 
-  return [...named].map(([key, { href, route }]) => (
+  // A key and its href fix the length: one `#id` run names one question, by one id.
+  return [...named].map(([key, { href, length, route }]) => (
     <ReferenceTitle
       href={href}
       key={`${key}\n${href}`}
+      length={length}
       name={key}
       onTarget={onTarget}
       route={route}
