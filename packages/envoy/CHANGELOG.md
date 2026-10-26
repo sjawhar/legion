@@ -23,8 +23,10 @@
   a start that carries one, so against a Dispatch without `seq` a changes request answers no wait
   of a root waiting on a person; an approval that opens the design gate still answers, since an
   opening approval answers a wait whenever it was given. 0117 is additive (a nullable column, a
-  `not valid` check and a trigger), so rolling Dispatch back is an image rollback alone: the
-  release before it keeps writing reviews, and the trigger sequences each one. The daemon's 0051
+  `not valid` check, an index in the reads' order and a trigger), so rolling Dispatch back is an
+  image rollback alone: the release before it keeps writing reviews, and the trigger sequences each
+  one. The index (`artifact_reviews_by_artifact_event_seq`) is built in the migration's own
+  transaction under the table lock it already holds, reading every review once. The daemon's 0051
   is the migration to back up with `pg_dump` before it applies.
 - A project's default assignee, the last step of an issue create's assignee chain: an issue created
   with no assignee, by nobody (the shared token), under no parent or under a parent with nobody on

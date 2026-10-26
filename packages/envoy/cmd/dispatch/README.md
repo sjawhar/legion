@@ -675,6 +675,17 @@ inline check would read every row of the table while it held that lock, and `not
 refuses every row written or updated after it. Nothing validates it later — every row below the
 migration carries no sequence at all — so the constraint stays `not valid` for good.
 
+`0117` also creates `artifact_reviews_by_artifact_event_seq` on `(artifact_id, event_seq desc nulls
+last, created_at desc, id desc)`, `docs.ReviewOrder` per document, so the newest-review reads
+(`docs.LatestApprovedReview`, `latestReviewBy`) take one index entry rather than sort every review
+of the document. It is a plain `create index`, not `concurrently`: the runner applies a migration
+inside one transaction (`internal/dispatch/store/store.go`, `pgmigrate.Exec`), where `concurrently`
+cannot run, and no migration of the set uses it. The build takes no lock the migration does not
+already hold — its `alter table` statements hold `artifact_reviews`' `ACCESS EXCLUSIVE` — and holds
+it while it reads the table's rows, which the census bounds by its 1 GiB limit; the census still
+answers `0`, since the build refuses and rewrites no row. `artifact_reviews_by_artifact` (`0014`,
+`created_at desc, id desc`) stays, because the release before `0117` orders by it while it serves.
+
 The release before `0117` keeps serving beside it while the app Deployment rolls (below), and again
 for as long as a rollback lasts, and it inserts every review naming no `event_seq`. Left null, such
 a review — newer than every sequenced one — would rank below them all in `docs.ReviewOrder`
@@ -693,7 +704,7 @@ second lock: a trigger on `events` would need that table's `SHARE ROW EXCLUSIVE`
 `artifact_reviews`, against a transaction that appended an event and then waits to insert a
 review (a carried approval), and the census holds every table a migration names to its 1 GiB limit.
 
-`0117` is additive — a nullable column, a `not valid` check and a trigger — so rolling Dispatch
+`0117` is additive — a nullable column, a `not valid` check, an index and a trigger — so rolling Dispatch
 back past it is an image rollback alone, with no schema to restore and no backup to take for it:
 the release before it runs over the new schema unchanged, and the trigger gives every review that
 release writes its sequence. The auto-deployer is the exception, by its own rule above: once the

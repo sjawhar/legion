@@ -32,8 +32,11 @@ const ReviewColumns = `id::text, artifact_id::text, version, state, actor, reaso
 // the review's transaction start, so it places two reviews only when neither carries a sequence.
 // This holds only while WriteReview is the one writer of the table: the api package's
 // TestOnlyWriteReviewWritesReviews refuses an insert into or update of artifact_reviews anywhere
-// else in the module.
-const ReviewOrder = `event_seq desc nulls last, created_at desc, id desc`
+// else in the module. Its id is the table's column, artifact_reviews.id: a bare `id` in an order by
+// names the output column ReviewColumns selects, `id::text`, which orders the same and which no
+// index holds, so artifact_reviews_by_artifact_event_seq could not give the order whole. Every read
+// that orders by it selects from artifact_reviews under that name.
+const ReviewOrder = `event_seq desc nulls last, created_at desc, artifact_reviews.id desc`
 
 // ScanReview decodes one ReviewColumns row.
 func ScanReview(row pgx.Row) (model.ArtifactReview, error) {
@@ -98,28 +101,37 @@ func WriteReview(ctx context.Context, tx pgx.Tx, broker *events.Broker, artifact
 	return review, event, nil
 }
 
+// latestApprovedReviewQuery selects the newest approval of the document $1 names. Like
+// latestReviewByQuery it reads one row from artifact_reviews_by_artifact_event_seq (migration
+// 0117), the index in ReviewOrder's own order, rather than sorting every review of the document.
+const latestApprovedReviewQuery = `
+	select ` + ReviewColumns + `
+	from artifact_reviews
+	where artifact_id = $1 and state = 'approved'
+	order by ` + ReviewOrder + `
+	limit 1
+`
+
+// latestReviewByQuery selects the newest review of the document $1 names given by the person
+// whose canonical login $2 names.
+const latestReviewByQuery = `
+	select ` + ReviewColumns + `
+	from artifact_reviews
+	where artifact_id = $1 and actor->>'kind' = 'user' and lower(trim(actor->>'id')) = $2
+	order by ` + ReviewOrder + `
+	limit 1
+`
+
 // LatestApprovedReview is the newest approval of artifactID, whoever gave it, or nil when nobody
 // has approved the document at any version.
 func LatestApprovedReview(ctx context.Context, q Queryer, artifactID string) (*model.ArtifactReview, error) {
-	return newestReview(ctx, q, "latest approved review", `
-		select `+ReviewColumns+`
-		from artifact_reviews
-		where artifact_id = $1 and state = 'approved'
-		order by `+ReviewOrder+`
-		limit 1
-	`, artifactID)
+	return newestReview(ctx, q, "latest approved review", latestApprovedReviewQuery, artifactID)
 }
 
 // latestReviewBy is the newest review of artifactID a person gave, in any state, by his canonical
 // login (model.CanonicalLogin), or nil when he has reviewed the document at no version.
 func latestReviewBy(ctx context.Context, q Queryer, artifactID, login string) (*model.ArtifactReview, error) {
-	return newestReview(ctx, q, fmt.Sprintf("latest review by %q", login), `
-		select `+ReviewColumns+`
-		from artifact_reviews
-		where artifact_id = $1 and actor->>'kind' = 'user' and lower(trim(actor->>'id')) = $2
-		order by `+ReviewOrder+`
-		limit 1
-	`, artifactID, login)
+	return newestReview(ctx, q, fmt.Sprintf("latest review by %q", login), latestReviewByQuery, artifactID, login)
 }
 
 // changesRequestedSince reports whether anyone requested changes on review's document after

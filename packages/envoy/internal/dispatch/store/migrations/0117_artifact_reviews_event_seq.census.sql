@@ -1,3 +1,3 @@
--- One nullable column, one `not valid` check and an insert trigger with its function; no row read,
--- refused or rewritten.
+-- One nullable column, one `not valid` check, one index and an insert trigger with its function;
+-- the index build reads every row, and no row is refused or rewritten.
 select 0;

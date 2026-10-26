@@ -14,6 +14,16 @@
 alter table artifact_reviews add column event_seq bigint;
 alter table artifact_reviews add constraint artifact_reviews_event_seq_positive check (event_seq > 0) not valid;
 
+-- The index in docs.ReviewOrder's own order, per document, so a read of a document's newest review
+-- (docs.LatestApprovedReview, latestReviewBy) takes the first entry of the document's range rather
+-- than reading and sorting every review of it. It is a plain `create index`: the runner applies
+-- each migration inside one transaction, where `concurrently` cannot run, and this transaction
+-- already holds the table's ACCESS EXCLUSIVE lock from the statements above, so the build adds no
+-- lock and holds that one for as long as it reads the table's rows, which the census holds to its
+-- size limit. artifact_reviews_by_artifact (migration 0014) stays: the release before this one
+-- orders by created_at alone while it still serves.
+create index artifact_reviews_by_artifact_event_seq on artifact_reviews (artifact_id, event_seq desc nulls last, created_at desc, id desc);
+
 -- Every review written once this migration commits carries its event's sequence, whichever release
 -- wrote it. Dispatch's app rolls above one replica, so during a rollout, and for as long as a
 -- rollback lasts, pods of the release before this one write reviews too, naming no event_seq. Left
