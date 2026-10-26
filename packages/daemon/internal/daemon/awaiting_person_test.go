@@ -165,6 +165,8 @@ func TestCatchUpAwaitingAppliesAPersonsAnswerMissedAtBoot(t *testing.T) {
 			client: awaitingDispatch{events: []json.RawMessage{askReplied(9, "ask-root", "agent", alice)}}},
 		{name: "a person's reply under an ask a session resolved", awaiting: record.Awaiting{Ask: "ask-root"},
 			client: awaitingDispatch{events: []json.RawMessage{askClosed(9, "resolved", "ask-root", "question", architectSession), askReplied(10, "ask-root", "", alice)}}},
+		{name: "settlement's retraction of the ask", awaiting: record.Awaiting{Ask: "ask-root"},
+			client: awaitingDispatch{events: []json.RawMessage{askClosed(9, "resolved", "ask-root", "question", settler)}}},
 		{name: "a person's approval of the spec while the root waits on its question", awaiting: record.Awaiting{Ask: "ask-root"},
 			gate:   &record.DesignGate{ArtifactID: "artifact-root", LatestVersion: 3},
 			client: awaitingDispatch{approval: dispatch.Approval{State: "approved", LatestVersion: 3, Version: new(3), Seq: 9}}},
@@ -187,7 +189,7 @@ func TestCatchUpAwaitingAppliesAPersonsAnswerMissedAtBoot(t *testing.T) {
 }
 
 // What no person did leaves the root waiting at boot: an ask still waiting on the person, a
-// session's or settlement's resolution with no person's reply after it, a session's progress note
+// session's resolution with no person's reply after it, a session's progress note
 // handing the turn to the agent, an approval request a session's reply moved to the agent, the
 // changes request that answered an earlier wait, and a changes request Dispatch recorded before the
 // wait began.
@@ -205,8 +207,6 @@ func TestCatchUpAwaitingLeavesARootNoPersonAnswered(t *testing.T) {
 			client: awaitingDispatch{events: []json.RawMessage{askReplied(9, "ask-root", "human", architectSession)}}},
 		{name: "a session's resolution", awaiting: record.Awaiting{Ask: "ask-root"},
 			client: awaitingDispatch{events: []json.RawMessage{askClosed(9, "resolved", "ask-root", "question", architectSession)}}},
-		{name: "settlement's retraction", awaiting: record.Awaiting{Ask: "ask-root"},
-			client: awaitingDispatch{events: []json.RawMessage{askClosed(9, "resolved", "ask-root", "question", settler)}}},
 		{name: "a session's progress note", awaiting: record.Awaiting{Ask: "ask-root"},
 			client: awaitingDispatch{events: []json.RawMessage{askReplied(9, "ask-root", "agent", architectSession)}}},
 		{name: "an approval request a session's reply moved to the agent", awaiting: record.Awaiting{GateVersion: 3},

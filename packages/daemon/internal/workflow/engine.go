@@ -420,6 +420,9 @@ func resumeTask(key string, waiting record.Awaiting, gate *record.DesignGate) st
 	case waiting.AnsweredBy == record.AnsweredByReply:
 		return fmt.Sprintf("Your spec on %s is not approved at version %d: a person replied in a thread of one of its asks. Read the thread, and revise the spec as they ask. %s",
 			key, waiting.GateVersion, handBack)
+	case waiting.AnsweredBy == record.AnsweredByRetraction:
+		return fmt.Sprintf("Your ask %s on %s was retracted when its decision block left the spec, so no person will answer it. Read the spec as it stands and continue; "+
+			"if you still need the decision, ask again.", waiting.Ask, key)
 	case waiting.Ask != "":
 		return fmt.Sprintf("A person answered your ask %s on %s, or replied in its thread; read it and continue.", waiting.Ask, key)
 	case waiting.GateVersion != 0:

@@ -132,6 +132,10 @@ type Actor struct {
 // Person says whether the actor is a person: only a person's act answers a root waiting on one.
 func (a Actor) Person() bool { return a.Kind == "user" }
 
+// SettlementActor is Dispatch's document settlement, which retracts an ask whose decision block left
+// its document in its own name (Dispatch's docs.SettlementActor).
+var SettlementActor = Actor{Kind: "system", ID: "document-settlement"}
+
 // Approval is the current approval state Dispatch derives for a document, and the issue carrying
 // the document (empty for a project document). While an approval request is open (State
 // `awaiting`), AskID names it and WaitingOn is whose reply it needs next, `human` or `agent`.

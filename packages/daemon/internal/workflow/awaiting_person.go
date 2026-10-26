@@ -69,17 +69,23 @@ func (e *Engine) dispatchAskOpened(ctx context.Context, tx pgx.Tx, fact intake.D
 }
 
 // dispatchAskClosed applies a person's answer or resolution of an ask (personActed). A session's
-// or Dispatch's own resolution, a settlement retraction among them, answers nothing and is
-// recorded nowhere: only a person's act counts. A review (a person's answer to an approval
-// request) answers a wait on the design gate through its own artifact.approved or
+// or Dispatch's own resolution answers nothing and is recorded nowhere: only a person's act counts.
+// Settlement's retraction of an ask whose decision block left the spec is the one exception, and
+// only for the ask a root waits on: the question no longer exists, no person can answer it, and
+// the root would otherwise wait for good, so the retraction answers that wait, and the resume task
+// says the question was retracted. It answers no gate wait. A review (a person's answer to an
+// approval request) answers a wait on the design gate through its own artifact.approved or
 // artifact.changes_requested event (applyArtifact), which Dispatch appends after the answer:
 // woken by the answer, the root could resume before the review reached its gate.
 func (e *Engine) dispatchAskClosed(ctx context.Context, tx pgx.Tx, fact intake.DispatchAskClosed) (intake.Result, error) {
-	if !fact.Actor.Person() {
-		return intake.Result{}, nil
+	switch {
+	case fact.Actor.Person():
+		review := fact.Kind == "approval" && fact.State == "answered"
+		return intake.Result{}, e.personActed(ctx, tx, fact.Key, fact.Ask, !review, fact.Mark, record.AnsweredByAsk)
+	case fact.State == "resolved" && fact.Actor == dispatch.SettlementActor:
+		return intake.Result{}, e.personActed(ctx, tx, fact.Key, fact.Ask, false, fact.Mark, record.AnsweredByRetraction)
 	}
-	review := fact.Kind == "approval" && fact.State == "answered"
-	return intake.Result{}, e.personActed(ctx, tx, fact.Key, fact.Ask, !review, fact.Mark)
+	return intake.Result{}, nil
 }
 
 // dispatchAskReply applies a reply on an ask of the issue, or Dispatch's hand-back of an approval
@@ -92,7 +98,7 @@ func (e *Engine) dispatchAskClosed(ctx context.Context, tx pgx.Tx, fact intake.D
 func (e *Engine) dispatchAskReply(ctx context.Context, tx pgx.Tx, fact intake.DispatchAskReply) (intake.Result, error) {
 	switch {
 	case fact.Actor.Person() && fact.WaitingOn != "human":
-		return intake.Result{}, e.personActed(ctx, tx, fact.Key, fact.Ask, fact.WaitingOn == "agent", fact.Mark)
+		return intake.Result{}, e.personActed(ctx, tx, fact.Key, fact.Ask, fact.WaitingOn == "agent", fact.Mark, record.AnsweredByAsk)
 	case fact.Actor.Kind == "session" && fact.WaitingOn == "human":
 		return intake.Result{}, e.handedBack(ctx, tx, fact)
 	}
@@ -102,13 +108,13 @@ func (e *Engine) dispatchAskReply(ctx context.Context, tx pgx.Tx, fact intake.Di
 // personActed applies a person's act on ask, an ask of the issue key, at mark. On a root it is
 // recorded, whatever the root's phase (record.PersonAct), so a wait whose starting event reaches
 // the daemon after it starts none (awaitPerson). It answers the root's wait when the root waits on
-// that ask, or, when answersGate, on its design gate: the architect is the tree's only agent while
-// it waits, and the approval request's id is not recorded, so a person's act on any of the root's
-// asks counts. The act answers only a wait it follows: one Dispatch recorded at or before the
-// wait's start (record.EventMark.After against Awaiting.Since) is an answer the person gave before
-// the architect handed the work back to them, applied late, and the root waits on their next act,
-// as a changes request given before the wait does (answerAwaitedGate).
-func (e *Engine) personActed(ctx context.Context, tx pgx.Tx, key, ask string, answersGate bool, mark record.EventMark) error {
+// that ask, as onAsk, or, when answersGate, on its design gate: the architect is the tree's only
+// agent while it waits, and the approval request's id is not recorded, so a person's act on any of
+// the root's asks counts. The act answers only a wait it follows: one Dispatch recorded at or
+// before the wait's start (record.EventMark.After against Awaiting.Since) is an answer the person
+// gave before the architect handed the work back to them, applied late, and the root waits on
+// their next act, as a changes request given before the wait does (answerAwaitedGate).
+func (e *Engine) personActed(ctx context.Context, tx pgx.Tx, key, ask string, answersGate bool, mark record.EventMark, onAsk record.Answer) error {
 	issue, err := e.store.Issue(ctx, tx, key)
 	if err != nil || issue == nil {
 		return err
@@ -124,7 +130,7 @@ func (e *Engine) personActed(ctx context.Context, tx pgx.Tx, key, ask string, an
 	answer, by := "", record.Answer("")
 	switch {
 	case issue.Awaiting.Ask != "" && issue.Awaiting.Ask == ask:
-		answer, by = "workflow: a person answered an architect ask", record.AnsweredByAsk
+		answer, by = "workflow: an architect ask was answered", onAsk
 	case issue.Awaiting.GateVersion != 0 && answersGate:
 		answer, by = "workflow: a person replied on a root waiting on its design gate", record.AnsweredByReply
 	default:

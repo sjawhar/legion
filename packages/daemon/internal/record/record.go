@@ -188,6 +188,9 @@ type Answer string
 const (
 	// AnsweredByAsk is a person's answer, resolution or reply on the ask the root waits on.
 	AnsweredByAsk Answer = "ask"
+	// AnsweredByRetraction is Dispatch's settlement retracting the ask the root waits on, whose
+	// decision block left the spec: no person can answer it any more.
+	AnsweredByRetraction Answer = "retracted"
 	// AnsweredByReply is a person's act on another ask of a root waiting on its design gate.
 	AnsweredByReply Answer = "reply"
 	// AnsweredByApproval is a person's approval that opened the root's design gate.

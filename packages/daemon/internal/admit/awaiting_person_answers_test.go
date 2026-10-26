@@ -794,7 +794,9 @@ func TestAPersonsReplyOnTheRootWakesARootWaitingOnItsGate(t *testing.T) {
 
 // Only a person's act answers a root waiting on its question: a person's answer, resolution or
 // reply in its thread, the last whatever the ask's state. A session's reply, whatever turn it
-// leaves, and a session's or Dispatch's own resolution leave it waiting.
+// leaves, and a session's resolution leave it waiting. Settlement's retraction of that question,
+// whose decision block left the spec, answers it: no person can answer it any more, and the root
+// would wait for good. Settlement's retraction of another ask answers nothing.
 func TestOnlyAPersonsActAnswersARootWaitingOnItsQuestion(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -808,7 +810,8 @@ func TestOnlyAPersonsActAnswersARootWaitingOnItsQuestion(t *testing.T) {
 		{name: "a session's reply on a person's behalf", fact: intake.DispatchAskReply{Key: "LEGION-ROOT", Ask: "ask-root", WaitingOn: "agent", Actor: outsider}},
 		{name: "a session's reply that leaves the turn with the person", fact: intake.DispatchAskReply{Key: "LEGION-ROOT", Ask: "ask-root", WaitingOn: "human", Actor: outsider}},
 		{name: "a session's resolution", fact: intake.DispatchAskClosed{Key: "LEGION-ROOT", Ask: "ask-root", Kind: "question", State: "resolved", Actor: architect}},
-		{name: "settlement's retraction", fact: intake.DispatchAskClosed{Key: "LEGION-ROOT", Ask: "ask-root", Kind: "question", State: "resolved", Actor: settler}},
+		{name: "settlement's retraction", fact: intake.DispatchAskClosed{Key: "LEGION-ROOT", Ask: "ask-root", Kind: "question", State: "resolved", Actor: settler}, wakes: true},
+		{name: "settlement's retraction of another ask", fact: intake.DispatchAskClosed{Key: "LEGION-ROOT", Ask: "ask-other", Kind: "question", State: "resolved", Actor: settler}},
 		{name: "a person's reply on another ask", fact: intake.DispatchAskReply{Key: "LEGION-ROOT", Ask: "ask-other", WaitingOn: "agent", Actor: alice}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -820,6 +823,32 @@ func TestOnlyAPersonsActAnswersARootWaitingOnItsQuestion(t *testing.T) {
 				t.Fatalf("root after %s = %#v, want answered %t", tc.name, got, tc.wakes)
 			}
 		})
+	}
+}
+
+// A root whose question settlement retracted resumes told the question was retracted, and a
+// retraction delivered before the question it retracts starts no wait on it.
+func TestASettlementRetractionOfTheAwaitedQuestionResumesTheRoot(t *testing.T) {
+	pool := migratedPool(t)
+	admission := newAdmission(t, 1, nil)
+	awaitingRoot(t, pool, record.Awaiting{Ask: "ask-root", Since: handBack})
+	applyFact(t, pool, admission, "retracted", intake.DispatchAskClosed{Key: "LEGION-ROOT", Ask: "ask-root", Kind: "question", State: "resolved",
+		Actor: settler, Mark: record.EventMark{Seq: 11, At: handedBackAt.Add(time.Minute)}})
+	if task := resumedTask(t, pool, admission); !strings.Contains(task, "ask-root") || !strings.Contains(task, "retracted") {
+		t.Fatalf("resumed architect's task = %q, want it to say ask-root was retracted", task)
+	}
+
+	early := migratedPool(t)
+	admission = newAdmission(t, 1, nil)
+	seedSlotted(t, early, "LEGION-ROOT", "A")
+	seedWaiting(t, early, "LEGION-NEXT", "B")
+	seedArchitectClaim(t, early, "LEGION-ROOT", architect.ID)
+	applyFact(t, early, admission, "retracted-first", intake.DispatchAskClosed{Key: "LEGION-ROOT", Ask: "ask-question", Kind: "question", State: "resolved",
+		Actor: settler, Mark: record.EventMark{Seq: 11}})
+	applyFact(t, early, admission, "opened-later", intake.DispatchAskOpened{Key: "LEGION-ROOT", Ask: "ask-question", Kind: "question",
+		AuthorSession: architect.ID, Mark: handBack})
+	if got := issue(t, early, "LEGION-ROOT"); got.Phase != phase.Admitted || got.Awaiting != nil {
+		t.Fatalf("root after a retraction and the question it retracted = %#v, want it admitted with no wait", got)
 	}
 }
 

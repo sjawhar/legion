@@ -5,8 +5,9 @@
 -- architect is suspended. What it waits on is recorded beside the phase (awaiting_ask, the ask's
 -- id, or awaiting_gate_version, the registered spec version), awaiting_answered_at is when a
 -- person answered it, which puts it at the front of the waiting line, and awaiting_answered_by the
--- act that answered it (the person's act on the ask, a reply on another ask, an approval, a
--- changes request, a newer version), which the task resuming the architect names. awaiting_since_seq and
+-- act that answered it (the person's act on the ask, settlement's retraction of that ask, a reply
+-- on another ask, an approval, a changes request, a newer version), which the task resuming the
+-- architect names. awaiting_since_seq and
 -- awaiting_since are where the wait began on Dispatch: the issue's event sequence and Dispatch's
 -- time of the event that started it (a hand-back, a question opened), or, for a registration, the
 -- sequence its read began at, with no time. A person's act whose event sequence is not past that
@@ -36,7 +37,7 @@ alter table issues add column awaiting_ask text check (awaiting_ask <> '');
 alter table issues add column awaiting_gate_version integer check (awaiting_gate_version > 0);
 alter table issues add column awaiting_answered_at timestamptz;
 alter table issues add column awaiting_answered_by text check (
-  awaiting_answered_by in ('ask', 'reply', 'approved', 'changes_requested', 'version'));
+  awaiting_answered_by in ('ask', 'retracted', 'reply', 'approved', 'changes_requested', 'version'));
 alter table issues add column awaiting_since_seq bigint check (awaiting_since_seq > 0);
 alter table issues add column awaiting_since timestamptz;
 alter table issues add constraint issues_awaiting_shape check (
