@@ -20,6 +20,7 @@ dispatch claim --issue LEGION-234 --release   # I have stopped; it is free
 ```
 
 - A claim records your own session. Reads show it (`Claimed by:`). `· not running` means the holder is gone and you can take it. `· liveness unknown` says nothing. Find free work with `dispatch issues` and the dashboard's **Unclaimed** filter.
+- Never claim an issue with the `legion` label or under one unless you are a Legion role of that issue's tree, even one whose claim reads `· not running`. The Legion daemon suspends a root's architect while the root waits on a person, so its claim reads `not running` for hours while its tree is live, and a claim another session takes there takes the tree out of the workflow.
 - `409 ISSUE_CLAIMED` from a live session: never work it in parallel. Message that session (`envoy_send`) or take other work, and tell the human if you think it should be yours. From a human: ask them with `dispatch ask`. Never assume a human's claim lapsed. Only a human releases or forces it.
 - `409 CLAIM_CONTENDED`: nothing applied. Read the issue and decide again.
 - Release when you stop. The holder, any human, or any agent once the holder's session ended can release it.

@@ -323,7 +323,7 @@ func (m *Machine) confirm(ctx context.Context) error {
 		return err
 	}
 	if m.deps.TaskConfirmed != nil {
-		m.deps.TaskConfirmed(m.stored())
+		m.deps.TaskConfirmed(m.current())
 	}
 	return nil
 }

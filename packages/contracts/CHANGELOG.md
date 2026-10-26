@@ -4,6 +4,15 @@
 
 ### Added
 
+- Daemon API contract 40: `LEGION_WORKFLOW_PHASES` gains `awaiting_person`, after `admitted`, a
+  root that gave its admission slot up while its architect waits on a person's answer, and the
+  state issue view gains `waitingOn`, present only in that phase: `kind: "ask"` with the question's
+  `ask`, or `kind: "gate"` with `gateVersion` and `artifactId` (in the schema now so the gate waits
+  of a later daemon need no plugin bump; a contract-40 daemon writes only `ask`), `since`, when the
+  wait began, and `answeredAt` with `answeredBy` (`LEGION_WAIT_ANSWERS`, the act that answered it)
+  once a person answered, the two always together. `LEGION_PHASE_BACKWARD_TARGETS` is unchanged:
+  no backward move reaches the new phase. A contract-39 reader refuses a state carrying either
+  addition.
 - `AskEventPayload.restored`: `true` on the `ask.opened` or `ask.answered` Dispatch's settlement
   appends when an edit restores a decision block it retracted, which records no new answer. A
   restore the release before it writes (every one already in the event log, and one written during

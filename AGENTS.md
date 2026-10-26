@@ -239,6 +239,53 @@ tick notice's `blocked`), for the day's report. The mark is a label rather than 
 `route` because Dispatch publishes every event of a routed issue to the route's topic, where a
 label only marks the issue; it carries no workflow state.
 
+**Waiting on a person:** an admitted root whose architect asked a person a question and handed the
+turn to them gives its admission slot back while it waits, in its own `awaiting_person` phase. The
+daemon keeps a mirror of Dispatch's state of every ask of a root (`root_asks`: open or closed,
+whose turn, who closed it, the newest person's act on it), written from the ask events, and
+decides from the record alone on every admission pass (a live fact, a tick, the boot read), so
+the same events in any order give the same result. A root enters `awaiting_person` — gives up its
+slot, and its architect's session is suspended after its current turn, kept for the resume — when
+all of these hold: its architect handed something to the person since the daemon last gave it
+work (a question a session of its tree opened on the root, or a tree session's reply leaving an
+ask with the person; `declared_seq`, the newest such hand-back); a question of its tree is still
+open on the person's turn; no other issue of its tree is in a phase; it could resume (its label is
+on, and no person or session outside the tree holds its Dispatch claim); and its architect has
+taken the work it was last given (no start queued, its claim not still starting, its task
+confirmed), so a suspension never cancels a resume before its turn runs. The wait begins at that
+hand-back and names the oldest question still with the person. When a person already acted after
+that hand-back, the root keeps its slot and its architect is given the resume task where it
+stands. Every time the daemon gives the architect work — admission, re-admission, a resume
+(`handout_seq`, the highest sequence the record then holds) — what it handed back before is taken
+in, and a hand-back event at or below that point, delivered late, declares nothing. A root whose
+design gate's approval request waits on the person keeps its slot in this release: only a
+question starts a wait. The controller receives `awaiting-person`, which, like `slot-free`, is no
+reason to label or admit anything: a labelled root in `todo` takes the freed slot through the
+waiting line. `legion state` shows `waitingOn` (`kind` `ask` with the `ask` and `since`, then `answeredAt` with
+`answeredBy`),
+and its plain output a `roots waiting on a person:` line.
+A root waits on a person, not on one ask: a person's act recorded after the wait began on any ask
+of the root — an answer, a resolution, or a reply that hands an open ask to the agent — answers
+it, whichever ask the wait names, since the architect is the tree's only agent while it waits and
+may have superseded the question it asked. A person's review of the root's spec (an approval or a
+changes request, applied through the root's design gate) answers it too. A close of the awaited
+question by anyone who is not a person — Dispatch's settlement retracting it once its decision
+block has left the spec, or a session closing it — moves the wait to what is still with the
+person, and ends it only when nothing is; so does a session's reply that hands the last question
+still with the person back to the agent's turn. A session's answer or resolution of any other ask,
+and a person's act Dispatch recorded before the wait began, which the architect read before it
+handed the turn back, answer nothing. An answered root goes to the front of the waiting line,
+ahead of every root that never ran, oldest answer first, and the next free slot resumes the same
+architect session with a task naming what answered it, how the spec stands, what is still with
+the person and what waits on the architect. Its tree stays live while it waits, so its children
+do not become orphans. Taking the `legion` label off a waiting root, or a person or a session
+outside the tree claiming it, takes it out of the workflow with an `unslotted` notice; it is never
+resumed under another owner. A session outside the tree writing a lifecycle status on a waiting
+root is set back, as on a root holding its slot, and its architect is told when it resumes. A root
+whose Dispatch claim a person or outside session already holds keeps its slot at `admitted` while
+its architect asks that holder to release it, and so does an admitted root whose label was taken
+off, since only a labelled root is resumed.
+
 **Gate:** the design gate, when armed (`gates.design: root-issues` in `legion.yaml`, the default),
 is a human approving the root issue's spec document at a version in Dispatch: once the spec's
 decision blocks are settled and the human has agreed to every point in it, the architect requests

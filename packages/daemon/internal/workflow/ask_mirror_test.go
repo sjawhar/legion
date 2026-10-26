@@ -91,8 +91,9 @@ func recordedRoot(t *testing.T, pool *pgxpool.Pool) record.Issue {
 
 // An ask's events are mirrored whatever order they arrive in: its kind and whether the root's tree
 // opened it are kept from its opening, the person's act on it from every event that carries one,
-// and its state is the newest event's. The mirror decides nothing: the root's record and the
-// outbox are as they were.
+// and its state is the newest event's. The mirror starts nothing by itself: the only part of the
+// root's record it moves is the hand-back its architect made (DeclaredSeq, which admission decides
+// on), and the outbox is as it was.
 func TestAsksOfARootAreMirroredWhateverTheirOrder(t *testing.T) {
 	events := []intake.Fact{
 		intake.DispatchAskOpened{Key: "LEGION-208", Ask: "ask-q", Kind: record.AskQuestion, AuthorSession: askArchitect.ID, Mark: askSeq(5)},
@@ -119,8 +120,10 @@ func TestAsksOfARootAreMirroredWhateverTheirOrder(t *testing.T) {
 			if *got != want {
 				t.Fatalf("mirror row = %#v, want %#v", *got, want)
 			}
-			if after := recordedRoot(t, pool); !reflect.DeepEqual(after, before) {
-				t.Fatalf("the root's record moved on ask events: %#v, want %#v", after, before)
+			after := recordedRoot(t, pool)
+			after.DeclaredSeq = before.DeclaredSeq
+			if !reflect.DeepEqual(after, before) {
+				t.Fatalf("the root's record moved on ask events beyond its hand-back: %#v, want %#v", after, before)
 			}
 			if rows := outboxRows(t, pool); rows != 0 {
 				t.Fatalf("ask events queued %d outbox rows, want none", rows)

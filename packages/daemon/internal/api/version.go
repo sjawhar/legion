@@ -341,4 +341,14 @@ package api
 // so the boot gate and `legion probe-image` refuse the mixed pair. (This branch took 36, then 37;
 // main landed INFRA-229 at 36 and INFRA-80 at 37 while it was open, so this change takes the
 // number above them, as the collision note says.)
-const DaemonAPIVersion = 38
+//
+// 40: a root whose architect asked a person a question and handed the turn back gives its
+// admission slot up in the new phase `awaiting_person`, and its strict state issue view gains
+// `waitingOn`: `kind` `ask` with the question's `ask`, or `gate` with `gateVersion` and
+// `artifactId` (in the contract now, so the next release's gate waits need no plugin bump; no
+// daemon of this contract writes one), `since`, the hand-back the wait began at, and, once a
+// person answered, `answeredAt` and `answeredBy`. A 39 plugin's strict reader refuses the phase
+// and the field, so the boot gate and `legion probe-image` refuse the mixed pair. (39 is taken by
+// a change ahead of this one, so this change takes the number above it, as the collision note
+// says.)
+const DaemonAPIVersion = 40
