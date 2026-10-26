@@ -2,61 +2,48 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-278",
-  "completed": "2026-10-26T03:37:00Z",
-  "headSha": "41ff0ffc381c98cfac2b7571dc5d6adbe9110b0c",
-  "codeHeadSha": "15e414ed9b6bcda8eb0751074ad16e9f9bb06a4f",
+  "completed": "2026-10-26T05:42:00Z",
+  "round": 2,
+  "headSha": "e7fa88b07e0721b160ef6d61d94c06fd31324d8b",
+  "codeHeadSha": "5ab9e45980a5beaba06fa76edf53c1841bfa27b9",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran `DATABASE_URL=postgres://postgres@127.0.0.1:5433/tester_claimant?sslmode=disable bash scripts/e2e/dispatch-claimant-delivery.sh` at 41ff0ffc: summary 6 ok, 0 FAIL, PASS in 27s, the same topics as implement.json (dispatch-5 ask.answered on agent.claimant-e2e-c and agent.claimant-e2e-p; dispatch-7 on agent.claimant-e2e-p; the three controls none). Re-ran `bun run e2e -- recipients-claim.e2e.ts followers.e2e.ts --project chromium --retries 0`: 4 passed. Drove the checkout CLI's claim independently against a live e2e Dispatch."
+    "how": "Re-ran `DATABASE_URL=postgres://postgres@127.0.0.1:5433/tester_claimant?sslmode=disable bash scripts/e2e/dispatch-claimant-delivery.sh` at e7fa88b0: summary 9 ok, 0 FAIL, PASS in 68s. In mention-failed-claimant the row is failed and dispatch-16 is on agent.claimant-e2e-p. In mention-delivered-claimant the row is sent and no agent topic carries the event. In mention-failed-follower dispatch-20 is on agent.claimant-e2e-c. Re-ran the browser suite recipients-claim.e2e.ts followers.e2e.ts: 5 passed, plus the tester's spec."
   },
   "failures": [],
   "failed": 0,
   "proof": [
     {
-      "criterion": "A1/A2/A4: a person's answer, thread reply and untargeted message on a session-claimed issue reach the claimant; the targeted message, agent comment and unclaimed issue do not",
-      "surface": "real envoy-dispatch built from the head, natsd, Postgres 17 + pgvector, fake Envoy listener",
-      "command": ". /legion/harness/env.sh && DATABASE_URL='postgres://postgres@127.0.0.1:5433/tester_claimant?sslmode=disable' bash scripts/e2e/dispatch-claimant-delivery.sh",
-      "observed": "ok case3-ask-answer (dispatch-5 on notifications.agent.claimant-e2e-c notifications.agent.claimant-e2e-p), ok case2-thread-reply, ok untargeted-message, ok targeted-message, ok agent-comment, ok unclaimed-issue; summary: 6 ok, 0 FAIL",
-      "headSha": "41ff0ffc381c98cfac2b7571dc5d6adbe9110b0c",
-      "negativeControl": "The adversarial driver below with DISPATCH_BIN built from base 135d22e0f63b -> 11 ok, 12 FAIL; the implementer's base run is recorded in implement.json (3 FAIL)"
+      "criterion": "Review finding 1: a mention whose send failed leaves the claimant, follower and route copies in place; a delivered mention leaves them to the mention; a pending send defers the copy until the send is decided",
+      "surface": "real envoy-dispatch built from the head, natsd, Postgres 17 + pgvector, fake Envoy listener behind a throwaway delay proxy ($TMPDIR/infra278-test/delay-proxy.ts) that holds POST /v1/messages/send",
+      "command": "DATABASE_URL=... bash $TMPDIR/infra278-test/adv.sh (a copy of scripts/e2e/dispatch-claimant-delivery.sh with the driver path changed and the proxy added; throwaway driver adversarial.ts)",
+      "observed": "summary: 30 ok, 0 FAIL, counting over a 9 s window. A mention of P that gets a 404: {P:1}. A mention in a mode P does not advertise: {P:1}. An ask reply mentioning P, a follower whose send gets a 404: {C:1,P:1}. Route session:R with R's mention 404: {P:1,R:1}. R's mention delivered: {P:1} and 1 send to R. A send held 3 s then 200: outbox {} and 1 mention send. A send held 3 s then 404: {P:1}, with the issue topic at +24 ms and P's copy at +3055 ms. Every round 1 case passes again: edit, resolve and reopen; ask answer and resolution; spec approval; message.answered; the targeted thread; 8 comments at the same time; claim release, move and a person's claim; the unclaimed child",
+      "headSha": "e7fa88b07e0721b160ef6d61d94c06fd31324d8b",
+      "negativeControl": "The same 30 cases with DISPATCH_BIN built from the previous head 15e414ed -> 24 ok, 5 FAIL: mention-resolved-send-fails {}, mention-mode-not-advertised {}, ask-reply-mention-follower-claimant-send-fails {C:1}, route-mention-send-fails {P:1}, pending-then-failed with no P copy"
     },
     {
-      "criterion": "A3 live: every listed event from a person reaches the claimant once; a new comment that mentions the claimant goes to the mention only; edits, resolutions and reopenings are not suppressed; there is one copy where the claimant overlaps the route or a follower; the claim is read at publish time",
-      "surface": "the same rig, driven by a throwaway driver ($TMPDIR/infra278-test/adversarial.ts, not committed) that counts every copy per notifications.agent.* subject",
-      "command": "DATABASE_URL=... bash $TMPDIR/infra278-test/adv.sh (copy of the e2e script with the driver path swapped)",
-      "observed": "summary: 23 ok, 0 FAIL. A new comment mentioning live P: outbox {}, 1 mention send. Its edit, resolve and reopen: {P:1} each. A mention of P absent from the listener: {P:1}. An ask reply mentioning P, where P follows the ask: {C:1}, 1 mention send. An ask reply with no mention: {C:1,P:1}. An ask answer: {C:1,P:1}. A person resolves C's ask: {C:1,P:1}. A spec approval by review: ask.answered {C:1,P:1}, artifact.approved {}. Route session:P: {P:1}. Route session:R: {R:1,P:1}. message.answered: {P:1,Q:1}. A reply in a targeted thread: {}. 8 comments at the same time: each {P:1}. A comment on an unclaimed child: {}. After a release: {}. After Q claims: {Q:1}. Under a person's claim: {} and claimant=null on GET /api/v1/asks/{id}. ask.opened by a person: {}",
-      "headSha": "41ff0ffc381c98cfac2b7571dc5d6adbe9110b0c",
-      "negativeControl": "The same 23 cases against base 135d22e0f63b -> 11 ok, 12 FAIL: mention-edit/resolve/reopen {}, ask-resolved {C:1}, spec-approval ask.answered {C:1}, message-answered {Q:1}, concurrent each {}, claim-moved-to-q {}, ask-reply-mention-follower-claimant {C:1,P:1} plus the mention (2 copies to P), ask read claimant undefined"
+      "criterion": "Contract change census: GET /api/v1/asks/{id}, GET /api/v1/issues/{key}/asks?thread=1 and GET /api/v1/inbox carry claimant, route and route_holder; the CLI still reads an ask",
+      "surface": "the live rig's Dispatch, with the fake listener naming Q as the holder of role adv-reviewer; the checkout CLI (build-dispatch-cli.sh)",
+      "command": "In the driver: Q claims ADV-1, the route is set to role:adv-reviewer, C opens an ask, the three GETs follow, then `bun cli/dispatch.js read --ref dispatch://ADV-1/ask/<id>`",
+      "observed": "All three reads return {\"claimant\":\"adv-q\",\"route\":\"role:adv-reviewer\",\"route_holder\":\"adv-q\"}. The CLI exits 0 and prints 'Question: Census?'",
+      "headSha": "e7fa88b07e0721b160ef6d61d94c06fd31324d8b",
+      "negativeControl": "The 15e414ed and base binaries return no route_holder field (the implementer's run, and the base run in round 1 where claimant was absent)"
     },
     {
-      "criterion": "A3 regression lock: the implementer's tests catch the plausible ways R1 breaks",
-      "surface": "Go outbox suite on real Postgres, in a scratch copy of packages/envoy at the head",
-      "command": "GOWORK=off DISPATCH_TEST_DATABASE_URL='postgres://postgres@127.0.0.1:5433/tester_outbox?sslmode=disable' go test -count=1 -run Claimant ./internal/dispatch/outbox/ against each of 8 mutants of publisher.go",
-      "observed": "The unmutated copy passes; all 8 mutants are killed. Each mutant, with the rows that failed: (1) no actor check: 'an agent's comment that notifies'. (2) no claimant mention check: 4 mention rows. (3) no follower mention check: the follower-claimant overlap row. (4) mention suppression on every comment event: 'a person's edit of an ask reply mentioning the claimant'. (5) comment.reopened dropped: the reopening row. (6) a person's claim accepted: 'issue a person claimed'. (7) claimant route outside Notify && !targeted: the targeted-message row and the message reply row. (8) artifact.version and issue.updated added: the named-version and issue-update rows",
-      "headSha": "41ff0ffc381c98cfac2b7571dc5d6adbe9110b0c",
-      "negativeControl": "Each mutant is the deliberately broken input; every one fails the suite"
-    },
-    {
-      "criterion": "A5: the Reaches panel shows the claimant (via claim) and the route (via route), counts them, and updates without a reload",
+      "criterion": "Review finding 2: Reaches N counts each session once, names a role route's holder, and follows claim and route changes without a reload",
       "surface": "Dispatch browser suite: real Go server, production SPA bundle, Chromium",
-      "command": ". /legion/harness/e2e-env.sh && cd packages/dispatch && bun run e2e -- recipients-claim.e2e.ts followers.e2e.ts --project chromium --retries 0; then a throwaway spec (written, run and deleted) in which the claim moves P to Q, and the route is set to role:t-reviewer and then cleared, while the card is open",
-      "observed": "4 passed. The throwaway spec passed: the P row goes, the Q row comes and the count stays Reaches 2; the role:t-reviewer via route row joins (Reaches 3) and leaves (Reaches 2), all with no reload. Screenshot at $TMPDIR/infra278-test/reaches-role-route.png",
-      "headSha": "41ff0ffc381c98cfac2b7571dc5d6adbe9110b0c",
-      "negativeControl": "The implementer's base build run gave 2 failed (claimant/route [undefined, undefined]). The live driver against the base binary shows the ask read with no claimant field (claimant=undefined)"
-    },
-    {
-      "criterion": "A6/A7: ask reads carry claimant and route; agent-facing text says what a claim delivers",
-      "surface": "the checkout's dispatch CLI (build-dispatch-cli.sh) against a live e2e Dispatch (run-server.sh on 18797); the live rig's GET /api/v1/asks/{id}",
-      "command": "env -i PATH=... HOME=<scratch> DISPATCH_HOST=omp DISPATCH_SESSION_ID=tester-cli-session DISPATCH_URL=http://127.0.0.1:18797 DISPATCH_TOKEN=e2e-token bun $TMPDIR/infra278-test/cli/dispatch.js claim --issue TST-1",
-      "observed": "'TST-1: claimed by you since ... A person's answers, comments and messages on TST-1 now reach you directly.' claim --help carries the new sentence. Searching the repository for 'Claiming does not deliver' finds it only in .legion handoffs. The ask read with P as claimant gives claimant=\"claimant-e2e-p\" route=null; under a person's claim it gives claimant=null",
-      "headSha": "41ff0ffc381c98cfac2b7571dc5d6adbe9110b0c",
-      "negativeControl": "On base 135d22e0f63b, skills/dispatch/SKILL.md:90 says 'Claiming does not deliver the issue's comments to you', and the base claim result ends at the status sentence"
+      "command": ". /legion/harness/e2e-env.sh && cd packages/dispatch && bun run e2e -- recipients-claim.e2e.ts followers.e2e.ts zz-tester-tmp.e2e.ts --project chromium --retries 0 (the throwaway spec was copied in and deleted after the run)",
+      "observed": "6 passed. In the throwaway spec, the claim moves P to Q and the card follows with Reaches 2. Route role:t-reviewer, held by the claimant Q: the API returns route_holder t-q and the card stays at Reaches 2. Route role:t-other, held by R: the card shows Reaches 3 with the row 'R T via route (role:t-other)'. Route cleared: back to Reaches 2. All with no reload. Screenshots are in $TMPDIR/infra278-test/reaches-role-*.png",
+      "headSha": "e7fa88b07e0721b160ef6d61d94c06fd31324d8b",
+      "negativeControl": "In round 1, at 15e414ed, the same claimant-held role route showed Reaches 3 for 2 sessions (round 1 evidence comment)"
     }
   ],
-  "ci": "At code head 15e414ed: Tests 40262963136 success, Docs 40262963434 success, Worker Image 40262963102 success, PR Title 40262963116 success, Legion Envoy and Contracts 40262963105 in progress (cited as running, not waited for).",
-  "observations": [
-    "When a person's new comment mentions the claimant and the mention resolves to it, the claimant route is suppressed even when the mention send then fails. This happens when the listener answers 404 (the INFRA-141 cold-cache shape) and when the session does not advertise the delivery mode. In both cases the claimant gets no copy on its own topic. The plan (A3, trickyParts) accepts this, and base gives the claimant no copy in this case either, so it is no regression. Sent to the architect as a risk.",
-    "When the route is role:<r> and the claimant holds that role, the Reaches panel counts 3 recipients where 2 distinct sessions are reached, because the role row is the route text, as the plan says. This is display only and changes no delivery."
+  "notDriven": [
+    "Review finding 3, the issue.closed refresh and the refresh while an Inbox fetch is in flight, was not driven on a real surface. The implementer's web unit tests (sse.test.ts) are the only evidence."
   ],
-  "evidenceComment": "https://github.com/sjawhar/legion/pull/2225#issuecomment-6407646665"
+  "observations": [
+    "Receipt timeout: Dispatch's 5 s send window ends while the listener still delivers the mention. The row is 'failed' and says the message may already have been delivered, and the outbox then publishes the claimant copy, so P got 2 copies (the mention, and {P:1} at +9.7 s). This is the stated trade-off: a duplicate rather than a loss."
+  ],
+  "ci": "At code head 5ab9e459, read at 05:38Z. Tests 40272884546: lint and typecheck success; the test job failed at Initialize containers ('unknown blob', Docker pull failed, no test ran). Worker Image 40272884486: build failed at docker/setup-buildx-action ('unknown blob'). Docs 40272884501 success. Legion Envoy and Contracts 40272884567 queued. Both failures are image-pull failures, not code failures; the tester re-ran neither.",
+  "evidenceComment": "https://github.com/sjawhar/legion/pull/2225#issuecomment-6409070716"
 }
